@@ -11,6 +11,8 @@ const MAX_CACHED_RESPONSES: usize = 512;
 
 #[derive(Debug, Clone, Default)]
 struct CachedResponse {
+    prefix_items: Vec<Value>,
+    exchange_items: Vec<Value>,
     calls_by_id: HashMap<String, Value>,
     call_order: Vec<String>,
 }
@@ -46,6 +48,10 @@ pub struct CodexChatHistoryStore {
 
 impl CodexChatHistoryStore {
     pub async fn record_response(&self, response: &Value) -> usize {
+        self.record_exchange(&Value::Null, response).await
+    }
+
+    pub async fn record_exchange(&self, request: &Value, response: &Value) -> usize {
         let Some(response_id) = response
             .get("id")
             .and_then(|value| value.as_str())
@@ -54,23 +60,24 @@ impl CodexChatHistoryStore {
             return 0;
         };
 
-        let calls = response
+        let response_output_items = response
             .get("output")
             .and_then(|value| value.as_array())
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(cached_call_item)
-                    .collect::<Vec<_>>()
-            })
+            .cloned()
             .unwrap_or_default();
+        let calls = response_output_items
+            .iter()
+            .filter_map(cached_call_item)
+            .collect::<Vec<_>>();
+        let prefix_items = cached_prefix_items(request);
+        let exchange_items = cached_exchange_items(&prefix_items, &response_output_items);
 
-        if calls.is_empty() {
+        if calls.is_empty() && exchange_items.is_empty() {
             return 0;
         }
 
         let mut inner = self.inner.write().await;
-        inner.insert_calls(response_id, calls)
+        inner.insert_exchange(response_id, prefix_items, exchange_items, calls)
     }
 
     async fn record_call_item(&self, response_id: Option<&str>, item: &Value) -> bool {
@@ -129,11 +136,22 @@ impl CodexChatHistoryStore {
             .union(&existing_call_ids)
             .cloned()
             .collect::<HashSet<_>>();
+        let has_context_items = items.iter().any(|item| {
+            item.get("type")
+                .and_then(|value| value.as_str())
+                .is_none_or(|item_type| !is_call_output_item_type(item_type))
+        });
+        let has_tool_output = !output_call_ids.is_empty();
         let lookup = self
             .lookup(previous_response_id.as_deref(), &requested_call_ids)
             .await;
 
         let restore_group = lookup.restore_group(&output_call_ids, &existing_call_ids);
+        let restore_prefix = if has_context_items {
+            Vec::new()
+        } else {
+            lookup.restore_prefix()
+        };
 
         let restore_group_ids = restore_group
             .iter()
@@ -144,6 +162,14 @@ impl CodexChatHistoryStore {
         let mut restored = 0usize;
         let mut enriched = 0usize;
         let mut new_items = Vec::new();
+
+        if !has_tool_output {
+            let exchange_items = lookup.restore_exchange();
+            if !exchange_items.is_empty() {
+                restored += exchange_items.len();
+                new_items.extend(exchange_items);
+            }
+        }
 
         for mut item in items {
             match item.get("type").and_then(|value| value.as_str()) {
@@ -160,6 +186,9 @@ impl CodexChatHistoryStore {
                 }
                 Some(item_type) if is_call_output_item_type(item_type) => {
                     if let Some(group) = restore_group.take().filter(|group| !group.is_empty()) {
+                        if !restore_prefix.is_empty() {
+                            new_items.extend(restore_prefix.iter().cloned());
+                        }
                         for (call_id, cached_item) in group {
                             seen_call_ids.insert(call_id);
                             new_items.push(cached_item);
@@ -207,11 +236,27 @@ impl CodexChatHistoryStore {
 
 impl CodexChatHistoryInner {
     fn insert_calls(&mut self, response_id: &str, calls: Vec<(String, Value)>) -> usize {
+        self.insert_exchange(response_id, Vec::new(), Vec::new(), calls)
+    }
+
+    fn insert_exchange(
+        &mut self,
+        response_id: &str,
+        prefix_items: Vec<Value>,
+        exchange_items: Vec<Value>,
+        calls: Vec<(String, Value)>,
+    ) -> usize {
         if !self.responses.contains_key(response_id) {
             self.response_order.push_back(response_id.to_string());
         }
 
         let cached_response = self.responses.entry(response_id.to_string()).or_default();
+        if !prefix_items.is_empty() {
+            cached_response.prefix_items = prefix_items;
+        }
+        if !exchange_items.is_empty() {
+            cached_response.exchange_items = exchange_items;
+        }
         let mut inserted_or_updated = 0usize;
         let mut indexed_call_ids = Vec::new();
         for (call_id, item) in calls {
@@ -309,6 +354,20 @@ impl CodexChatHistoryInner {
 }
 
 impl CachedLookup {
+    fn restore_exchange(&self) -> Vec<Value> {
+        self.previous
+            .as_ref()
+            .map(|previous| previous.exchange_items.clone())
+            .unwrap_or_default()
+    }
+
+    fn restore_prefix(&self) -> Vec<Value> {
+        self.previous
+            .as_ref()
+            .map(|previous| previous.prefix_items.clone())
+            .unwrap_or_default()
+    }
+
     fn call(&self, call_id: &str) -> Option<&Value> {
         self.previous
             .as_ref()
@@ -343,6 +402,33 @@ impl CachedLookup {
     }
 }
 
+fn cached_prefix_items(request: &Value) -> Vec<Value> {
+    let Some(input) = request.get("input") else {
+        return Vec::new();
+    };
+    let items = match input {
+        Value::Array(items) => items.clone(),
+        Value::Object(_) => vec![input.clone()],
+        _ => Vec::new(),
+    };
+
+    items
+        .into_iter()
+        .filter(|item| {
+            item.get("type")
+                .and_then(|value| value.as_str())
+                .is_none_or(|item_type| !is_call_output_item_type(item_type))
+        })
+        .collect()
+}
+
+fn cached_exchange_items(prefix_items: &[Value], response_output_items: &[Value]) -> Vec<Value> {
+    let mut items = Vec::with_capacity(prefix_items.len() + response_output_items.len());
+    items.extend(prefix_items.iter().cloned());
+    items.extend(response_output_items.iter().cloned());
+    items
+}
+
 fn append_restore_group(
     response: &CachedResponse,
     output_call_ids: &HashSet<String>,
@@ -368,6 +454,14 @@ pub fn record_responses_sse_stream(
     stream: impl Stream<Item = Result<Bytes, std::io::Error>> + Send + 'static,
     history: Arc<CodexChatHistoryStore>,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
+    record_responses_sse_stream_with_request(stream, history, Value::Null)
+}
+
+pub fn record_responses_sse_stream_with_request(
+    stream: impl Stream<Item = Result<Bytes, std::io::Error>> + Send + 'static,
+    history: Arc<CodexChatHistoryStore>,
+    request: Value,
+) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
     async_stream::stream! {
         let mut buffer = String::new();
         let mut utf8_remainder = Vec::new();
@@ -380,7 +474,13 @@ pub fn record_responses_sse_stream(
                 Ok(bytes) => {
                     append_utf8_safe(&mut buffer, &mut utf8_remainder, &bytes);
                     while let Some(block) = take_sse_block(&mut buffer) {
-                        inspect_sse_block(&block, &mut current_response_id, history.as_ref()).await;
+                        inspect_sse_block(
+                            &block,
+                            &mut current_response_id,
+                            history.as_ref(),
+                            &request,
+                        )
+                        .await;
                     }
                     yield Ok(bytes);
                 }
@@ -394,6 +494,7 @@ async fn inspect_sse_block(
     block: &str,
     current_response_id: &mut Option<String>,
     history: &CodexChatHistoryStore,
+    request: &Value,
 ) {
     if block.trim().is_empty() {
         return;
@@ -433,7 +534,11 @@ async fn inspect_sse_block(
         }
         Some("response.completed") => {
             if let Some(response) = value.get("response") {
-                history.record_response(response).await;
+                if request.is_null() {
+                    history.record_response(response).await;
+                } else {
+                    history.record_exchange(request, response).await;
+                }
             }
         }
         _ => {}
@@ -859,5 +964,84 @@ mod tests {
 
         assert_eq!(history.enrich_request(&mut request).await, 1);
         assert_eq!(request["input"][0]["reasoning_content"], "Need a file.");
+    }
+
+    #[tokio::test]
+    async fn streamed_recorder_preserves_chunks_and_records_exchange_with_request() {
+        let history = Arc::new(CodexChatHistoryStore::default());
+        let request = json!({
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Need a streamed tool call."
+                        }
+                    ]
+                }
+            ]
+        });
+        let completed = format!(
+            "event: response.completed\ndata: {}\n\n",
+            json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_stream_request",
+                    "output": [
+                        {
+                            "type": "function_call",
+                            "call_id": "call_stream_request",
+                            "name": "read_file",
+                            "arguments": "{}",
+                            "reasoning_content": format!("Need {}", '\u{4f60}')
+                        }
+                    ]
+                }
+            })
+        );
+        let split_at = completed
+            .as_bytes()
+            .windows(3)
+            .position(|window| window == "\u{4f60}".as_bytes())
+            .expect("test fixture should contain a multibyte character")
+            + 1;
+        let first = Bytes::copy_from_slice(&completed.as_bytes()[..split_at]);
+        let second = Bytes::copy_from_slice(&completed.as_bytes()[split_at..]);
+        let expected_chunks = vec![first.clone(), second.clone()];
+        let stream = futures::stream::iter(vec![
+            Ok::<_, std::io::Error>(first),
+            Ok::<_, std::io::Error>(second),
+        ]);
+
+        let output = record_responses_sse_stream_with_request(stream, history.clone(), request)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .map(Result::unwrap)
+            .collect::<Vec<_>>();
+        assert_eq!(output, expected_chunks);
+
+        let mut follow_up = json!({
+            "previous_response_id": "resp_stream_request",
+            "input": [
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_stream_request",
+                    "output": "ok"
+                }
+            ]
+        });
+
+        assert_eq!(history.enrich_request(&mut follow_up).await, 1);
+        let input = follow_up["input"].as_array().unwrap();
+        assert_eq!(input[0]["type"], "message");
+        assert_eq!(input[1]["type"], "function_call");
+        assert_eq!(
+            input[1]["reasoning_content"],
+            format!("Need {}", '\u{4f60}')
+        );
+        assert_eq!(input[2]["type"], "function_call_output");
     }
 }

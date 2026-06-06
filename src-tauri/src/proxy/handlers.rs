@@ -20,12 +20,15 @@ use super::{
     handler_context::RequestContext,
     providers::{
         codex_chat_common::extract_reasoning_field_text,
-        codex_chat_history::record_responses_sse_stream, get_adapter, get_claude_api_format,
-        openai_compat, streaming::create_anthropic_sse_stream,
+        codex_chat_history::{
+            record_responses_sse_stream, record_responses_sse_stream_with_request,
+        },
+        get_adapter, get_claude_api_format, openai_compat,
+        streaming::create_anthropic_sse_stream,
         streaming_codex_chat::create_responses_sse_stream_from_chat_with_context,
         streaming_gemini::create_anthropic_sse_stream_from_gemini,
-        streaming_responses::create_anthropic_sse_stream_from_responses, transform,
-        transform_codex_chat, transform_gemini, transform_responses,
+        streaming_responses::create_anthropic_sse_stream_from_responses,
+        transform, transform_codex_chat, transform_gemini, transform_responses,
     },
     response_processor::{
         create_logged_passthrough_stream, process_response, read_decoded_body,
@@ -1651,6 +1654,7 @@ pub async fn handle_responses(
         .to_bytes();
     let body: Value = serde_json::from_slice(&body_bytes)
         .map_err(|e| ProxyError::Internal(format!("Failed to parse request body: {e}")))?;
+    let request_body_for_history = body.clone();
 
     let endpoint = endpoint_with_query(&uri, "/responses");
     let mut ctx = if !is_codex_model_catalog_client(&headers) {
@@ -1719,6 +1723,37 @@ pub async fn handle_responses(
     ctx.provider = result.provider;
     let response = result.response;
 
+    if super::providers::should_convert_codex_responses_to_messages(&ctx.provider, &endpoint) {
+        let rebuilt = if is_stream || response.is_sse() {
+            let status = response.status();
+            let response_headers = response.headers().clone();
+            let stream = record_responses_sse_stream_with_request(
+                response.bytes_stream(),
+                state.codex_chat_history.clone(),
+                request_body_for_history,
+            );
+            super::hyper_client::ProxyResponse::streamed(status, response_headers, stream)
+        } else {
+            let (response_headers, status, body_bytes) =
+                read_decoded_body(response, ctx.tag, std::time::Duration::ZERO).await?;
+            if let Ok(resp_json) = serde_json::from_slice::<Value>(&body_bytes) {
+                state
+                    .codex_chat_history
+                    .record_exchange(&request_body_for_history, &resp_json)
+                    .await;
+            }
+            super::hyper_client::ProxyResponse::buffered(status, response_headers, body_bytes)
+        };
+        return process_response(
+            rebuilt,
+            &ctx,
+            &state,
+            &CODEX_PARSER_CONFIG,
+            connection_guard,
+        )
+        .await;
+    }
+
     if super::providers::should_convert_codex_responses_to_chat(&ctx.provider, &endpoint) {
         return handle_codex_chat_to_responses_transform(
             response,
@@ -1766,6 +1801,7 @@ pub async fn handle_responses_compact(
         .to_bytes();
     let body: Value = serde_json::from_slice(&body_bytes)
         .map_err(|e| ProxyError::Internal(format!("Failed to parse request body: {e}")))?;
+    let request_body_for_history = body.clone();
 
     let mut ctx =
         RequestContext::new(&state, &body, &headers, AppType::Codex, "Codex", "codex").await?;
@@ -1804,6 +1840,37 @@ pub async fn handle_responses_compact(
     ctx.outbound_model = result.outbound_model.take();
     ctx.provider = result.provider;
     let response = result.response;
+
+    if super::providers::should_convert_codex_responses_to_messages(&ctx.provider, &endpoint) {
+        let rebuilt = if is_stream || response.is_sse() {
+            let status = response.status();
+            let response_headers = response.headers().clone();
+            let stream = record_responses_sse_stream_with_request(
+                response.bytes_stream(),
+                state.codex_chat_history.clone(),
+                request_body_for_history,
+            );
+            super::hyper_client::ProxyResponse::streamed(status, response_headers, stream)
+        } else {
+            let (response_headers, status, body_bytes) =
+                read_decoded_body(response, ctx.tag, std::time::Duration::ZERO).await?;
+            if let Ok(resp_json) = serde_json::from_slice::<Value>(&body_bytes) {
+                state
+                    .codex_chat_history
+                    .record_exchange(&request_body_for_history, &resp_json)
+                    .await;
+            }
+            super::hyper_client::ProxyResponse::buffered(status, response_headers, body_bytes)
+        };
+        return process_response(
+            rebuilt,
+            &ctx,
+            &state,
+            &CODEX_PARSER_CONFIG,
+            connection_guard,
+        )
+        .await;
+    }
 
     if super::providers::should_convert_codex_responses_to_chat(&ctx.provider, &endpoint) {
         return handle_codex_chat_to_responses_transform(

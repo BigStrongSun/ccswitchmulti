@@ -1359,6 +1359,13 @@ pub(crate) fn chat_completion_to_response_with_context(
         reasoning.as_deref(),
         tool_context,
     ));
+    if output
+        .iter()
+        .all(|item| item.get("type").and_then(|v| v.as_str()) == Some("reasoning"))
+        && finish_reason == Some("length")
+    {
+        output.push(empty_assistant_message_output_item(&response_id));
+    }
 
     let mut response = json!({
         "id": response_id,
@@ -1476,6 +1483,20 @@ fn chat_message_to_response_output_item(message: &Value, response_id: &str) -> O
         "role": "assistant",
         "content": content
     }))
+}
+
+fn empty_assistant_message_output_item(response_id: &str) -> Value {
+    json!({
+        "id": format!("{response_id}_msg"),
+        "type": "message",
+        "status": "incomplete",
+        "role": "assistant",
+        "content": [{
+            "type": "output_text",
+            "text": "",
+            "annotations": []
+        }]
+    })
 }
 
 fn chat_tool_calls_to_response_output_items(
@@ -3286,6 +3307,31 @@ mod tests {
 
         assert_eq!(result["status"], "incomplete");
         assert_eq!(result["incomplete_details"]["reason"], "max_output_tokens");
+    }
+
+    #[test]
+    fn chat_response_reasoning_only_length_keeps_message_slot() {
+        let input = json!({
+            "id": "chatcmpl_qwen_reasoning_only",
+            "model": "qwen3.6",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning": "Need more tokens before answer.",
+                    "tool_calls": ""
+                },
+                "finish_reason": "length"
+            }]
+        });
+
+        let result = chat_completion_to_response(input).unwrap();
+
+        assert_eq!(result["status"], "incomplete");
+        assert_eq!(result["output"][0]["type"], "reasoning");
+        assert_eq!(result["output"][1]["type"], "message");
+        assert_eq!(result["output"][1]["status"], "incomplete");
+        assert_eq!(result["output"][1]["content"][0]["text"], "");
     }
 
     #[test]
