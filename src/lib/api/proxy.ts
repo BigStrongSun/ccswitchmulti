@@ -30,6 +30,14 @@ export const proxyApi = {
     return invoke("get_proxy_status");
   },
 
+  async startExternalOpenAIAPIServer(): Promise<ProxyServerInfo> {
+    return invoke("start_external_openai_api_server");
+  },
+
+  async getExternalOpenAIAPIServerStatus(): Promise<ProxyStatus> {
+    return invoke("get_external_openai_api_server_status");
+  },
+
   // 检查代理服务器是否正在运行
   async isProxyRunning(): Promise<boolean> {
     return invoke("is_proxy_running");

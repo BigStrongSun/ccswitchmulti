@@ -72,6 +72,20 @@ pub async fn get_proxy_status(state: tauri::State<'_, AppState>) -> Result<Proxy
 
 /// 获取代理配置
 #[tauri::command]
+pub async fn start_external_openai_api_server(
+    state: tauri::State<'_, AppState>,
+) -> Result<ProxyServerInfo, String> {
+    state.proxy_service.start_external_openai_api().await
+}
+
+#[tauri::command]
+pub async fn get_external_openai_api_server_status(
+    state: tauri::State<'_, AppState>,
+) -> Result<ProxyStatus, String> {
+    Ok(state.proxy_service.get_external_openai_api_status().await)
+}
+
+#[tauri::command]
 pub async fn get_proxy_config(state: tauri::State<'_, AppState>) -> Result<ProxyConfig, String> {
     state.proxy_service.get_config().await
 }

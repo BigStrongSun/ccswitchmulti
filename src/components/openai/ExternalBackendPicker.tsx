@@ -79,7 +79,8 @@ function BackendSourceCard({
   const details = describeBackendTarget(option);
   const Icon = option.isManagedOAuth
     ? LockKeyhole
-    : option.backendType === "codex_router_route"
+    : option.backendType === "codex_router_route" ||
+        option.description === "Codex router provider"
       ? Route
       : option.available
         ? Server

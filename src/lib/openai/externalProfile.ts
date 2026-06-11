@@ -39,6 +39,7 @@ export function displayBackendDescription(description: string): string {
     "Managed OAuth provider": "OpenAI 官方登录 / 托管 OAuth",
     "OpenAI-compatible provider": "OpenAI-compatible 模型源",
     "Native provider": "原生协议模型源",
+    "Codex router provider": "Codex 多模型路由方案",
     "Codex router route": "Codex 多模型路由规则",
   };
   return translations[normalized] ?? normalized;
@@ -63,12 +64,12 @@ export function profileBackendKey(profile?: {
 /// 将代理监听地址转换为第三方 agent 需要填写的 OpenAI v1 base_url。
 export function buildBaseUrl(address?: string, port?: number): string {
   const host = address && address !== "0.0.0.0" ? address : "127.0.0.1";
-  return `http://${host}:${port && port > 0 ? port : 15721}/v1`;
+  return `http://${host}:${port && port > 0 ? port : 15722}/v1`;
 }
 
 /// 生成面向局域网或公网客户端展示的 base_url 模板。
 export function buildReachableBaseUrl(address?: string, port?: number): string {
-  const resolvedPort = port && port > 0 ? port : 15721;
+  const resolvedPort = port && port > 0 ? port : 15722;
   if (!address || address === "127.0.0.1" || address === "localhost") {
     return `http://127.0.0.1:${resolvedPort}/v1`;
   }
@@ -131,6 +132,7 @@ export function chooseDefaultBackendKey(
   const available = options.filter((option) => option.available);
   return (
     available.find((option) => option.isManagedOAuth)?.key ??
+    available.find(isCodexRouterProviderOption)?.key ??
     available.find((option) => option.backendType === "codex_router_route")?.key ??
     available[0]?.key ??
     options[0]?.key ??
@@ -172,10 +174,13 @@ export function groupBackendOptions(
   for (const option of options) {
     if (!option.available) {
       groups[3].options.push(option);
+    } else if (
+      isCodexRouterProviderOption(option) ||
+      option.backendType === "codex_router_route"
+    ) {
+      groups[1].options.push(option);
     } else if (option.isManagedOAuth) {
       groups[0].options.push(option);
-    } else if (option.backendType === "codex_router_route") {
-      groups[1].options.push(option);
     } else {
       groups[2].options.push(option);
     }
@@ -204,9 +209,18 @@ export function describeBackendTarget(
   }
 
   const isRoute = option.backendType === "codex_router_route";
+  const isRouterProvider = isCodexRouterProviderOption(option);
   return {
-    kind: isRoute ? "路由规则" : option.isManagedOAuth ? "OpenAI 官方登录" : "直连模型源",
-    protocol: isRoute
+    kind: isRouterProvider
+      ? "多模型路由方案"
+      : isRoute
+        ? "路由规则"
+        : option.isManagedOAuth
+          ? "OpenAI 官方登录"
+          : "直连模型源",
+    protocol: isRouterProvider
+      ? "按第三方请求里的 model 自动命中 Codex 路由"
+      : isRoute
       ? "先按 Codex 路由解析，再转成 OpenAI v1 响应"
       : option.isManagedOAuth
         ? "转接 ChatGPT Codex Responses 后端"
@@ -220,10 +234,21 @@ export function describeBackendTarget(
         : "使用保存的默认模型",
     compatibility: [
       "/v1/chat/completions",
-      isRoute || option.isManagedOAuth ? "/v1/responses" : "仅 Chat Completions",
+      isRouterProvider || isRoute || option.isManagedOAuth
+        ? "/v1/responses"
+        : "仅 Chat Completions",
       option.available ? "可接入" : "需要补配置",
     ],
   };
+}
+
+/// 判断一个后端选项是否代表整套 Codex 多模型路由，而不是某一条单独 route。
+function isCodexRouterProviderOption(option: ExternalOpenAIAPIBackendOption): boolean {
+  return (
+    option.backendType === "provider" &&
+    option.appType === "codex" &&
+    option.description === "Codex router provider"
+  );
 }
 
 /// 生成 profile 保存请求；保存 profile 不启动代理，也不切换任何 app provider。
@@ -231,6 +256,8 @@ export function buildProfileUpdate(
   selectedBackend: ExternalOpenAIAPIBackendOption,
   defaultModel: string,
   enabled: boolean,
+  listenAddress?: string,
+  listenPort?: number,
 ): ExternalOpenAIAPIProfileUpdate {
   return {
     enabled,
@@ -239,5 +266,7 @@ export function buildProfileUpdate(
     providerId: selectedBackend.providerId,
     routeId: selectedBackend.routeId ?? null,
     defaultModel,
+    listenAddress: listenAddress ?? null,
+    listenPort: listenPort ?? null,
   };
 }

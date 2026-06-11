@@ -41,13 +41,15 @@ use crate::app_config::AppType;
 use crate::database::PRICING_SOURCE_REQUEST;
 use axum::{
     extract::State,
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
     Json,
 };
 use bytes::Bytes;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
+
+const FORCE_EXTERNAL_OPENAI_API_HEADER: &str = "x-cc-switch-external-openai-api";
 
 // ============================================================================
 // 健康检查和状态查询（简单端点）
@@ -119,6 +121,14 @@ pub async fn handle_models(
 }
 
 /// 判断 `/v1/models` 调用方是否是 Codex 自身。
+pub async fn handle_external_models(
+    State(state): State<ProxyState>,
+    mut headers: HeaderMap,
+) -> Result<axum::response::Response, ProxyError> {
+    mark_external_openai_headers(&mut headers);
+    handle_models(State(state), headers).await
+}
+
 fn is_codex_model_catalog_client(headers: &HeaderMap) -> bool {
     headers
         .get(axum::http::header::USER_AGENT)
@@ -132,7 +142,16 @@ fn is_codex_model_catalog_client(headers: &HeaderMap) -> bool {
 /// External API key 优先级高于 User-Agent，避免第三方 agent 名称中包含
 /// `codex` 时绕过 External API profile。
 fn should_handle_as_codex_client(headers: &HeaderMap) -> bool {
-    is_codex_model_catalog_client(headers) && !external_openai_api::has_external_api_key(headers)
+    !headers.contains_key(FORCE_EXTERNAL_OPENAI_API_HEADER)
+        && is_codex_model_catalog_client(headers)
+        && !external_openai_api::has_external_api_key(headers)
+}
+
+fn mark_external_openai_headers(headers: &mut HeaderMap) {
+    headers.insert(
+        FORCE_EXTERNAL_OPENAI_API_HEADER,
+        HeaderValue::from_static("1"),
+    );
 }
 
 /// 告诉 Codex 客户端本地代理不支持 Responses WebSocket。
@@ -684,6 +703,14 @@ pub async fn handle_chat_completions(
 }
 
 /// 为第三方 Agent OpenAI-compatible API 解析本次请求的后端 provider。
+pub async fn handle_external_chat_completions(
+    State(state): State<ProxyState>,
+    mut request: axum::extract::Request,
+) -> Result<axum::response::Response, ProxyError> {
+    mark_external_openai_headers(request.headers_mut());
+    handle_chat_completions(State(state), request).await
+}
+
 fn resolve_external_openai_compatible_provider(
     state: &ProxyState,
     body: &Value,
@@ -1380,6 +1407,14 @@ pub async fn handle_responses(
 }
 
 /// 处理 /v1/responses/compact 请求（OpenAI Responses Compact API - Codex CLI 透传）
+pub async fn handle_external_responses(
+    State(state): State<ProxyState>,
+    mut request: axum::extract::Request,
+) -> Result<axum::response::Response, ProxyError> {
+    mark_external_openai_headers(request.headers_mut());
+    handle_responses(State(state), request).await
+}
+
 pub async fn handle_responses_compact(
     State(state): State<ProxyState>,
     request: axum::extract::Request,
@@ -2407,6 +2442,8 @@ data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n
                 provider_id: Some("selected".to_string()),
                 route_id: None,
                 default_model: Some("default-visible".to_string()),
+                listen_address: None,
+                listen_port: None,
             },
         )
         .expect("save profile");

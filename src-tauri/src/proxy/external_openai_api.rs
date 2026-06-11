@@ -16,6 +16,8 @@ use std::collections::BTreeSet;
 use std::str::FromStr;
 
 const PROFILE_SETTING_KEY: &str = "external_openai_api_profile_v1";
+pub const DEFAULT_EXTERNAL_OPENAI_API_ADDRESS: &str = "127.0.0.1";
+pub const DEFAULT_EXTERNAL_OPENAI_API_PORT: u16 = 15722;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -46,6 +48,10 @@ pub struct ExternalOpenAiApiProfile {
     #[serde(default)]
     pub default_model: Option<String>,
     #[serde(default)]
+    pub listen_address: Option<String>,
+    #[serde(default)]
+    pub listen_port: Option<u16>,
+    #[serde(default)]
     pub api_key_hash: Option<String>,
     #[serde(default)]
     pub api_key_prefix: Option<String>,
@@ -62,6 +68,8 @@ impl Default for ExternalOpenAiApiProfile {
             provider_id: None,
             route_id: None,
             default_model: None,
+            listen_address: Some(DEFAULT_EXTERNAL_OPENAI_API_ADDRESS.to_string()),
+            listen_port: Some(DEFAULT_EXTERNAL_OPENAI_API_PORT),
             api_key_hash: None,
             api_key_prefix: None,
             updated_at: None,
@@ -78,6 +86,8 @@ pub struct ExternalOpenAiApiProfileView {
     pub provider_id: Option<String>,
     pub route_id: Option<String>,
     pub default_model: Option<String>,
+    pub listen_address: String,
+    pub listen_port: u16,
     pub api_key_prefix: Option<String>,
     pub has_api_key: bool,
 }
@@ -91,6 +101,8 @@ pub struct ExternalOpenAiApiProfileUpdate {
     pub provider_id: Option<String>,
     pub route_id: Option<String>,
     pub default_model: Option<String>,
+    pub listen_address: Option<String>,
+    pub listen_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -179,6 +191,15 @@ pub fn update_profile(
     profile.provider_id = clean_optional(update.provider_id);
     profile.route_id = clean_optional(update.route_id);
     profile.default_model = clean_optional(update.default_model);
+    profile.listen_address = Some(
+        clean_optional(update.listen_address)
+            .unwrap_or_else(|| DEFAULT_EXTERNAL_OPENAI_API_ADDRESS.to_string()),
+    );
+    profile.listen_port = Some(
+        update
+            .listen_port
+            .unwrap_or(DEFAULT_EXTERNAL_OPENAI_API_PORT),
+    );
     profile.updated_at = Some(chrono::Utc::now().timestamp());
     save_profile(db, &profile)?;
     Ok(profile_view(&profile))
@@ -193,6 +214,8 @@ pub fn profile_view(profile: &ExternalOpenAiApiProfile) -> ExternalOpenAiApiProf
         provider_id: profile.provider_id.clone(),
         route_id: profile.route_id.clone(),
         default_model: profile.default_model.clone(),
+        listen_address: external_listen_address(profile),
+        listen_port: external_listen_port(profile),
         api_key_prefix: profile.api_key_prefix.clone(),
         has_api_key: profile.api_key_hash.is_some(),
     }
@@ -324,6 +347,12 @@ fn parse_profile(raw: &str) -> Result<ExternalOpenAiApiProfile, AppError> {
             profile.provider_id = Some(router_provider_id.to_string());
         }
     }
+    if profile.listen_address.is_none() {
+        profile.listen_address = Some(DEFAULT_EXTERNAL_OPENAI_API_ADDRESS.to_string());
+    }
+    if profile.listen_port.is_none() {
+        profile.listen_port = Some(DEFAULT_EXTERNAL_OPENAI_API_PORT);
+    }
 
     Ok(profile)
 }
@@ -346,7 +375,31 @@ fn validate_update(update: &ExternalOpenAiApiProfileUpdate) -> Result<(), AppErr
             "Codex router route backend must use appType=codex".to_string(),
         ));
     }
+    if let Some(port) = update.listen_port {
+        if port == 0 {
+            return Err(AppError::Config(
+                "External OpenAI API listenPort must be between 1 and 65535".to_string(),
+            ));
+        }
+    }
     Ok(())
+}
+
+pub fn external_listen_address(profile: &ExternalOpenAiApiProfile) -> String {
+    profile
+        .listen_address
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_EXTERNAL_OPENAI_API_ADDRESS)
+        .to_string()
+}
+
+pub fn external_listen_port(profile: &ExternalOpenAiApiProfile) -> u16 {
+    profile
+        .listen_port
+        .filter(|port| *port > 0)
+        .unwrap_or(DEFAULT_EXTERNAL_OPENAI_API_PORT)
 }
 
 /// 生成 profile 对应的稳定后端 key，用于前后端选项匹配。
@@ -381,6 +434,10 @@ fn provider_backend_option(
     app_type: AppType,
     provider: &Provider,
 ) -> ExternalOpenAiApiBackendOptionView {
+    if app_type == AppType::Codex && is_codex_router_provider(provider) {
+        return codex_router_provider_backend_option(provider);
+    }
+
     let is_managed_oauth = provider.uses_managed_account_auth()
         || is_codex_official_managed_oauth_provider(&app_type, provider);
     let mut models = collect_provider_models(provider);
@@ -430,18 +487,65 @@ fn provider_backend_option(
     }
 }
 
+/// 把 Codex 多模型 Router 本身展示为一个可选的聚合来源。
+///
+/// 第三方 Agent 选择这个来源时，profile 仍然保存为 provider target；真正请求进入
+/// Codex adapter 后会继续按请求里的 `model` 命中具体 route。这里单独计算可用性和模型
+/// 列表，避免把 Router 误判成缺少 Base URL/API Key 的普通 OpenAI provider。
+fn codex_router_provider_backend_option(provider: &Provider) -> ExternalOpenAiApiBackendOptionView {
+    let route_options = router_backend_options(provider);
+    let available_routes: Vec<&ExternalOpenAiApiBackendOptionView> = route_options
+        .iter()
+        .filter(|option| option.available)
+        .collect();
+    let mut models = BTreeSet::new();
+    for route in &available_routes {
+        for model in &route.models {
+            models.insert(model.clone());
+        }
+    }
+    if models.is_empty() {
+        for route in &route_options {
+            for model in &route.models {
+                models.insert(model.clone());
+            }
+        }
+    }
+
+    let available = !available_routes.is_empty();
+    ExternalOpenAiApiBackendOptionView {
+        key: build_backend_key(
+            ExternalOpenAiApiBackendType::Provider,
+            AppType::Codex.as_str(),
+            &provider.id,
+            None,
+        ),
+        backend_type: ExternalOpenAiApiBackendType::Provider,
+        app_type: AppType::Codex.as_str().to_string(),
+        provider_id: provider.id.clone(),
+        route_id: None,
+        label: format!("{} ({})", provider.name, AppType::Codex.as_str()),
+        description: "Codex router provider".to_string(),
+        models: models.into_iter().collect(),
+        is_managed_oauth: false,
+        available,
+        error: if available {
+            None
+        } else if route_options.is_empty() {
+            Some("router has no enabled routes".to_string())
+        } else {
+            Some(
+                "router has no available routes with managed OAuth or provider credentials"
+                    .to_string(),
+            )
+        },
+    }
+}
+
 /// 将 Codex router 的每条 route 展开成独立后端选项。
 fn router_backend_options(provider: &Provider) -> Vec<ExternalOpenAiApiBackendOptionView> {
     let mut options = Vec::new();
-    let Some(routes) = provider
-        .settings_config
-        .pointer("/codexRouting/routes")
-        .and_then(|routes| routes.as_array())
-    else {
-        return options;
-    };
-
-    for route in routes {
+    for route in codex_router_routes(provider) {
         if route.get("enabled").and_then(|value| value.as_bool()) == Some(false) {
             continue;
         }
@@ -545,12 +649,36 @@ fn route_backend_availability(provider: &Provider, route: &Value) -> (bool, Opti
 
 /// 判断 provider 是否是显式开启的 Codex router。
 fn is_codex_router_provider(provider: &Provider) -> bool {
+    if let Some(routing) = provider.settings_config.get("codexRouting") {
+        let disabled = routing
+            .get("enabled")
+            .and_then(|enabled| enabled.as_bool())
+            .is_some_and(|enabled| !enabled);
+        let has_routes = routing
+            .get("routes")
+            .and_then(|routes| routes.as_array())
+            .is_some_and(|routes| !routes.is_empty());
+        return !disabled && has_routes;
+    }
+
     provider
         .settings_config
-        .get("codexRouting")
-        .and_then(|routing| routing.get("enabled"))
-        .and_then(|enabled| enabled.as_bool())
-        .unwrap_or(false)
+        .get("codexModelRoutes")
+        .or_else(|| provider.settings_config.get("modelRoutes"))
+        .and_then(|routes| routes.as_array())
+        .is_some_and(|routes| !routes.is_empty())
+}
+
+/// 读取新旧 schema 下的 Codex route 数组，供外部 API 页面和运行时状态共用。
+fn codex_router_routes(provider: &Provider) -> Vec<&Value> {
+    provider
+        .settings_config
+        .pointer("/codexRouting/routes")
+        .or_else(|| provider.settings_config.get("codexModelRoutes"))
+        .or_else(|| provider.settings_config.get("modelRoutes"))
+        .and_then(|routes| routes.as_array())
+        .map(|routes| routes.iter().collect())
+        .unwrap_or_default()
 }
 
 /// 从 provider 配置中提取页面和 /v1/models 可展示的模型 id。
@@ -568,9 +696,12 @@ fn collect_provider_models(provider: &Provider) -> Vec<String> {
 fn collect_route_models(route: &Value) -> Vec<String> {
     let mut ids = BTreeSet::new();
     collect_model_array(&mut ids, route.pointer("/match/models"));
+    collect_model_array(&mut ids, route.get("models"));
     if ids.is_empty() {
         if let Some(prefixes) = route
             .pointer("/match/prefixes")
+            .or_else(|| route.get("modelPrefixes"))
+            .or_else(|| route.get("model_prefixes"))
             .and_then(|value| value.as_array())
         {
             for prefix in prefixes {
@@ -680,6 +811,8 @@ mod tests {
                 provider_id: Some("provider".to_string()),
                 route_id: None,
                 default_model: Some("gpt-5.4-mini".to_string()),
+                listen_address: None,
+                listen_port: None,
             },
         )
         .expect("enable profile");
@@ -716,6 +849,8 @@ mod tests {
                 provider_id: Some("provider".to_string()),
                 route_id: None,
                 default_model: None,
+                listen_address: None,
+                listen_port: None,
             },
         )
         .expect("enable profile");
@@ -742,6 +877,8 @@ mod tests {
                 provider_id: Some("provider".to_string()),
                 route_id: None,
                 default_model: None,
+                listen_address: None,
+                listen_port: None,
             },
         )
         .expect("enable profile");
@@ -808,6 +945,8 @@ mod tests {
                 provider_id: Some("hermes-openai".to_string()),
                 route_id: None,
                 default_model: Some("gpt-test".to_string()),
+                listen_address: None,
+                listen_port: None,
             },
         )
         .expect("enable profile");
@@ -846,6 +985,8 @@ mod tests {
                 provider_id: Some("empty-provider".to_string()),
                 route_id: None,
                 default_model: Some("gpt-test".to_string()),
+                listen_address: None,
+                listen_port: None,
             },
         )
         .expect("enable profile");
@@ -893,6 +1034,8 @@ mod tests {
                 provider_id: Some("claude-native".to_string()),
                 route_id: None,
                 default_model: Some("claude-sonnet".to_string()),
+                listen_address: None,
+                listen_port: None,
             },
         )
         .expect("enable profile");
@@ -961,6 +1104,98 @@ mod tests {
     }
 
     #[test]
+    fn runtime_status_marks_codex_router_provider_available_as_aggregate_source() {
+        let db = Database::memory().expect("memory db");
+        let provider = Provider::with_id(
+            "codex-router".to_string(),
+            "Codex Router".to_string(),
+            json!({
+                "codexRouting": {
+                    "enabled": true,
+                    "routes": [
+                        {
+                            "id": "official",
+                            "label": "OpenAI Official",
+                            "match": { "models": ["gpt-5.4-mini"] },
+                            "upstream": {
+                                "baseUrl": "https://chatgpt.com/backend-api/codex",
+                                "apiFormat": "openai_responses",
+                                "auth": { "source": "managed_codex_oauth" }
+                            }
+                        },
+                        {
+                            "id": "qwen",
+                            "label": "Qwen Local",
+                            "match": { "models": ["qwen3.6"] },
+                            "upstream": {
+                                "baseUrl": "https://example.com/v1",
+                                "apiFormat": "openai_chat",
+                                "apiKey": "sk-placeholder"
+                            }
+                        }
+                    ]
+                }
+            }),
+            None,
+        );
+        db.save_provider("codex", &provider).expect("save provider");
+
+        let options = list_backend_options(&db).expect("backend options");
+        let aggregate = options
+            .iter()
+            .find(|option| {
+                option.backend_type == ExternalOpenAiApiBackendType::Provider
+                    && option.provider_id == "codex-router"
+            })
+            .expect("router aggregate backend option");
+
+        assert!(aggregate.available);
+        assert_eq!(aggregate.description, "Codex router provider");
+        assert!(aggregate.models.iter().any(|model| model == "gpt-5.4-mini"));
+        assert!(aggregate.models.iter().any(|model| model == "qwen3.6"));
+        assert!(options.iter().any(|option| {
+            option.backend_type == ExternalOpenAiApiBackendType::CodexRouterRoute
+                && option.route_id.as_deref() == Some("official")
+        }));
+    }
+
+    #[test]
+    fn runtime_status_reads_legacy_codex_router_routes_as_backend_options() {
+        let db = Database::memory().expect("memory db");
+        let provider = Provider::with_id(
+            "legacy-router".to_string(),
+            "Legacy Router".to_string(),
+            json!({
+                "modelRoutes": [{
+                    "id": "legacy-qwen",
+                    "label": "Legacy Qwen",
+                    "models": ["qwen3.6"],
+                    "baseUrl": "https://example.com/v1",
+                    "apiKey": "sk-placeholder"
+                }]
+            }),
+            None,
+        );
+        db.save_provider("codex", &provider).expect("save provider");
+
+        let options = list_backend_options(&db).expect("backend options");
+        let aggregate = options
+            .iter()
+            .find(|option| {
+                option.backend_type == ExternalOpenAiApiBackendType::Provider
+                    && option.provider_id == "legacy-router"
+            })
+            .expect("legacy router aggregate backend option");
+
+        assert!(aggregate.available);
+        assert!(aggregate.models.iter().any(|model| model == "qwen3.6"));
+        assert!(options.iter().any(|option| {
+            option.backend_type == ExternalOpenAiApiBackendType::CodexRouterRoute
+                && option.route_id.as_deref() == Some("legacy-qwen")
+        }));
+    }
+
+    #[test]
     fn runtime_status_marks_router_route_without_credentials_unavailable() {
         let db = Database::memory().expect("memory db");
         let provider = Provider::with_id(
@@ -992,6 +1227,8 @@ mod tests {
                 provider_id: Some("codex-router".to_string()),
                 route_id: Some("empty-route".to_string()),
                 default_model: Some("gpt-empty".to_string()),
+                listen_address: None,
+                listen_port: None,
             },
         )
         .expect("enable profile");

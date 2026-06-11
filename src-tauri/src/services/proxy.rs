@@ -6,9 +6,9 @@ use crate::app_config::AppType;
 use crate::config::{get_claude_settings_path, read_json_file, write_json_file};
 use crate::database::Database;
 use crate::provider::Provider;
-use crate::proxy::server::ProxyServer;
 use crate::proxy::switch_lock::SwitchLockManager;
 use crate::proxy::types::*;
+use crate::proxy::{external_openai_api, server::ProxyServer};
 use crate::services::provider::{
     build_effective_settings_with_common_config, write_live_with_common_config,
 };
@@ -56,6 +56,7 @@ enum ClaudeTakeoverAuthPolicy {
 pub struct ProxyService {
     db: Arc<Database>,
     server: Arc<RwLock<Option<ProxyServer>>>,
+    external_openai_api_server: Arc<RwLock<Option<ProxyServer>>>,
     /// AppHandle，用于传递给 ProxyServer 以支持故障转移时的 UI 更新
     app_handle: Arc<RwLock<Option<tauri::AppHandle>>>,
     switch_locks: SwitchLockManager,
@@ -71,6 +72,7 @@ impl ProxyService {
         Self {
             db,
             server: Arc::new(RwLock::new(None)),
+            external_openai_api_server: Arc::new(RwLock::new(None)),
             app_handle: Arc::new(RwLock::new(None)),
             switch_locks: SwitchLockManager::new(),
         }
@@ -469,6 +471,53 @@ impl ProxyService {
             .update_proxy_config(resolved_config)
             .await
             .map_err(|e| format!("保存动态代理端口失败: {e}"))
+    }
+
+    pub async fn start_external_openai_api(&self) -> Result<ProxyServerInfo, String> {
+        if let Some(server) = self.external_openai_api_server.read().await.as_ref() {
+            let status = server.get_status().await;
+            return Ok(ProxyServerInfo {
+                address: status.address,
+                port: status.port,
+                started_at: chrono::Utc::now().to_rfc3339(),
+            });
+        }
+
+        let profile = external_openai_api::load_profile(&self.db)
+            .map_err(|e| format!("读取第三方 Agent API profile 失败: {e}"))?;
+        let config = ProxyConfig {
+            listen_address: external_openai_api::external_listen_address(&profile),
+            listen_port: external_openai_api::external_listen_port(&profile),
+            max_retries: 3,
+            request_timeout: 600,
+            enable_logging: true,
+            live_takeover_active: false,
+            streaming_first_byte_timeout: 60,
+            streaming_idle_timeout: 120,
+            non_streaming_timeout: 600,
+        };
+        let app_handle = self.app_handle.read().await.clone();
+        let server =
+            ProxyServer::new_external_openai_api(config.clone(), self.db.clone(), app_handle);
+        let info = server
+            .start()
+            .await
+            .map_err(|e| format!("启动第三方 Agent API 失败: {e}"))?;
+        *self.external_openai_api_server.write().await = Some(server);
+        log::info!("第三方 Agent API 已启动: {}:{}", info.address, info.port);
+        Ok(info)
+    }
+
+    pub async fn get_external_openai_api_status(&self) -> ProxyStatus {
+        if let Some(server) = self.external_openai_api_server.read().await.as_ref() {
+            return server.get_status().await;
+        }
+        let profile = external_openai_api::load_profile(&self.db).unwrap_or_default();
+        ProxyStatus {
+            address: external_openai_api::external_listen_address(&profile),
+            port: external_openai_api::external_listen_port(&profile),
+            ..ProxyStatus::default()
+        }
     }
 
     async fn start_before_takeover_if_ephemeral_port(&self) -> Result<bool, String> {

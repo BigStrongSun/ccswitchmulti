@@ -146,6 +146,8 @@ export interface ExternalOpenAIAPIProfile {
   providerId?: string | null;
   routeId?: string | null;
   defaultModel?: string | null;
+  listenAddress: string;
+  listenPort: number;
   apiKeyPrefix?: string | null;
   hasApiKey: boolean;
 }
@@ -157,6 +159,8 @@ export interface ExternalOpenAIAPIProfileUpdate {
   providerId?: string | null;
   routeId?: string | null;
   defaultModel?: string | null;
+  listenAddress?: string | null;
+  listenPort?: number | null;
 }
 
 export interface GeneratedExternalOpenAIAPIKey {

@@ -51,8 +51,15 @@ pub struct ProxyState {
 }
 
 /// 代理HTTP服务器
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProxyServerMode {
+    FullProxy,
+    ExternalOpenAiApiOnly,
+}
+
 pub struct ProxyServer {
     config: ProxyConfig,
+    mode: ProxyServerMode,
     state: ProxyState,
     shutdown_tx: Arc<RwLock<Option<oneshot::Sender<()>>>>,
     /// 服务器任务句柄，用于等待服务器实际关闭
@@ -64,6 +71,28 @@ impl ProxyServer {
         config: ProxyConfig,
         db: Arc<Database>,
         app_handle: Option<tauri::AppHandle>,
+    ) -> Self {
+        Self::new_with_mode(config, db, app_handle, ProxyServerMode::FullProxy)
+    }
+
+    pub fn new_external_openai_api(
+        config: ProxyConfig,
+        db: Arc<Database>,
+        app_handle: Option<tauri::AppHandle>,
+    ) -> Self {
+        Self::new_with_mode(
+            config,
+            db,
+            app_handle,
+            ProxyServerMode::ExternalOpenAiApiOnly,
+        )
+    }
+
+    fn new_with_mode(
+        config: ProxyConfig,
+        db: Arc<Database>,
+        app_handle: Option<tauri::AppHandle>,
+        mode: ProxyServerMode,
     ) -> Self {
         // 创建共享的 ProviderRouter（熔断器状态将跨所有请求保持）
         let provider_router = Arc::new(ProviderRouter::new(db.clone()));
@@ -85,6 +114,7 @@ impl ProxyServer {
 
         Self {
             config,
+            mode,
             state,
             shutdown_tx: Arc::new(RwLock::new(None)),
             server_handle: Arc::new(RwLock::new(None)),
@@ -289,6 +319,10 @@ impl ProxyServer {
     }
 
     fn build_router(&self) -> Router {
+        if self.mode == ProxyServerMode::ExternalOpenAiApiOnly {
+            return self.build_external_openai_api_router();
+        }
+
         Router::new()
             // 健康检查
             .route("/health", get(handlers::health_check))
@@ -371,6 +405,23 @@ impl ProxyServer {
             .with_state(self.state.clone())
     }
 
+    fn build_external_openai_api_router(&self) -> Router {
+        Router::new()
+            .route("/health", get(handlers::health_check))
+            .route("/v1/models", get(handlers::handle_external_models))
+            .route(
+                "/v1/chat/completions",
+                post(handlers::handle_external_chat_completions),
+            )
+            .route(
+                "/v1/responses",
+                get(handlers::handle_responses_websocket_fallback)
+                    .post(handlers::handle_external_responses),
+            )
+            .layer(DefaultBodyLimit::max(200 * 1024 * 1024))
+            .with_state(self.state.clone())
+    }
+
     /// 在不重启服务的情况下更新运行时配置
     pub async fn apply_runtime_config(&self, config: &ProxyConfig) {
         *self.state.config.write().await = config.clone();
@@ -432,6 +483,19 @@ mod tests {
         (ProxyServer::new(config, db.clone(), None), db)
     }
 
+    fn build_external_test_server() -> (ProxyServer, Arc<Database>) {
+        let db = Arc::new(Database::memory().expect("memory db"));
+        let config = ProxyConfig {
+            listen_address: "127.0.0.1".to_string(),
+            listen_port: 15722,
+            ..ProxyConfig::default()
+        };
+        (
+            ProxyServer::new_external_openai_api(config, db.clone(), None),
+            db,
+        )
+    }
+
     /// 读取 Axum 响应体为 JSON，方便断言 OpenAI-compatible 响应结构。
     async fn response_json(response: axum::response::Response) -> Value {
         let body = response
@@ -452,6 +516,28 @@ mod tests {
                 Request::builder()
                     .method(Method::GET)
                     .uri("/v1/models")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["type"], "authentication_error");
+        assert_eq!(body["error"]["code"], "external_openai_api_disabled");
+    }
+
+    #[tokio::test]
+    async fn external_only_v1_models_never_serves_codex_catalog_by_user_agent() {
+        let (server, _db) = build_external_test_server();
+        let response = server
+            .build_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/v1/models")
+                    .header(header::USER_AGENT, "codex-cli-test")
                     .body(Body::empty())
                     .expect("request"),
             )
@@ -491,6 +577,8 @@ mod tests {
                 provider_id: Some("selected".to_string()),
                 route_id: None,
                 default_model: Some("default-visible".to_string()),
+                listen_address: None,
+                listen_port: None,
             },
         )
         .expect("enable profile");
@@ -553,6 +641,8 @@ mod tests {
                 provider_id: Some("selected".to_string()),
                 route_id: None,
                 default_model: Some("visible-model".to_string()),
+                listen_address: None,
+                listen_port: None,
             },
         )
         .expect("enable profile");
@@ -615,6 +705,8 @@ mod tests {
                 provider_id: Some("selected".to_string()),
                 route_id: None,
                 default_model: Some("visible-model".to_string()),
+                listen_address: None,
+                listen_port: None,
             },
         )
         .expect("enable profile");
@@ -716,6 +808,8 @@ mod tests {
                 provider_id: Some("selected".to_string()),
                 route_id: None,
                 default_model: Some("visible-model".to_string()),
+                listen_address: None,
+                listen_port: None,
             },
         )
         .expect("enable profile");

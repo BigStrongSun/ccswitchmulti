@@ -1657,6 +1657,8 @@ fn infer_install_source(path: &Path) -> &'static str {
         "pnpm"
     } else if s.contains("/scoop/") {
         "scoop"
+    } else if is_codex_windows_app_path_str(&s) {
+        "codex-app"
     } else if s.contains("/library/python")
         || s.contains("/scripts/")
         || s.contains("/site-packages/")
@@ -1665,6 +1667,31 @@ fn infer_install_source(path: &Path) -> &'static str {
     } else {
         "system"
     }
+}
+
+/// 判断路径是否来自 OpenAI Codex Windows App/MSIX 运行时。
+///
+/// 这类路径由 Windows App 包或 AppData 下的 Codex launcher 提供，CLI 自身的
+/// `codex update` 不能识别安装方式；如果继续回退到 npm，会把 App 运行时和用户的
+/// Node/npm 混用，容易出现启动崩溃或安装卡住。
+fn is_codex_windows_app_path_str(normalized_lower: &str) -> bool {
+    normalized_lower.contains("/appdata/local/openai/codex/")
+        || normalized_lower.contains("/windowsapps/openai.codex_")
+        || normalized_lower.contains("/msix/openai.codex_")
+        || normalized_lower.contains("/microsoft/windowsapps/codex.exe")
+        || normalized_lower.ends_with("/microsoft/windowsapps/codex")
+}
+
+#[cfg(target_os = "windows")]
+fn is_codex_windows_app_install(bin_path: &str, real_target: &str) -> bool {
+    let bin = bin_path.replace('\\', "/").to_ascii_lowercase();
+    let real = real_target.replace('\\', "/").to_ascii_lowercase();
+    is_codex_windows_app_path_str(&bin) || is_codex_windows_app_path_str(&real)
+}
+
+#[cfg(target_os = "windows")]
+fn codex_windows_app_update_command() -> String {
+    r#""%LOCALAPPDATA%\Microsoft\WindowsApps\winget.exe" upgrade --id 9PLM9XGG6VKS --source msstore --accept-source-agreements --accept-package-agreements"#.to_string()
 }
 
 /// 从 shell 输出里挑出第一个绝对路径行（trim 后以 `/` 开头），跳过交互式登录 shell
@@ -2148,9 +2175,12 @@ fn package_manager_anchored_command_from_paths(tool: &str, bin_path: &str) -> Op
 /// 扩展名存在时,支持官方自升级的工具仍返回 `<bin_path> update/upgrade`,其余工具
 /// 才返 None 让上游兜回静态命令、`anchored=false`。
 #[cfg(target_os = "windows")]
-fn anchored_command_from_paths(tool: &str, bin_path: &str, _real_target: &str) -> Option<String> {
+fn anchored_command_from_paths(tool: &str, bin_path: &str, real_target: &str) -> Option<String> {
     if tool == "hermes" {
         return anchored_official_update_command(tool, bin_path);
+    }
+    if tool == "codex" && is_codex_windows_app_install(bin_path, real_target) {
+        return Some(codex_windows_app_update_command());
     }
     let package_command = package_manager_anchored_command_from_paths(tool, bin_path);
     if prefers_official_update(tool, LifecycleCommandShell::WindowsBatch) {
@@ -2188,6 +2218,20 @@ fn default_install(installs: &[ToolInstallation]) -> Option<&ToolInstallation> {
 /// 全平台共用——`anchored_command_from_paths` 自身是 cfg 二选一(POSIX 五分支 /
 /// Windows 三分支),这里只负责取默认那处 + 转发。
 fn installs_anchored_command(tool: &str, installs: &[ToolInstallation]) -> Option<String> {
+    #[cfg(target_os = "windows")]
+    {
+        // Codex Windows App/MSIX 可能同时暴露 AppData launcher 和 WindowsApps alias。
+        // 一旦 default_install 因多入口歧义返回 None,不要掉回 `codex update || npm ...`;
+        // 只要安装列表里出现 App/MSIX 痕迹,就走 Store 包更新通道。
+        if tool == "codex"
+            && installs.iter().any(|i| {
+                i.source == "codex-app"
+                    || is_codex_windows_app_install(&i.path, &i.real.to_string_lossy())
+            })
+        {
+            return Some(codex_windows_app_update_command());
+        }
+    }
     let inst = default_install(installs)?;
     let real = inst.real.to_string_lossy();
     anchored_command_from_paths(tool, &inst.path, &real)
@@ -3530,6 +3574,59 @@ mod tests {
         }
 
         #[test]
+        fn codex_windows_app_uses_ms_store_upgrade_without_npm_fallback() {
+            // OpenAI Codex Windows App/MSIX 自带的 `codex update` 无法识别安装方式。
+            // 继续接 `npm i -g` 会把 App 运行时和用户机器上的 Node/npm 混用；这里应改走
+            // Store/winget 包更新，并且绝不能附带 npm fallback。
+            let bin_path = r"C:\Users\me\AppData\Local\OpenAI\Codex\bin\codex.exe";
+            let real_target = r"C:\Program Files\WindowsApps\OpenAI.Codex_26.608.1337.0_x64__2p2nqsd0c76g0\app\resources\codex.exe";
+            let cmd = anchored_command_from_paths("codex", bin_path, real_target);
+            let expected = codex_windows_app_update_command();
+            assert_eq!(cmd.as_deref(), Some(expected.as_str()));
+            assert!(
+                !cmd.unwrap().contains("@openai/codex"),
+                "Codex App update must not fall back to npm"
+            );
+        }
+
+        #[test]
+        fn ambiguous_codex_app_install_uses_ms_store_upgrade() {
+            // 多个 Codex 入口并存且没有明确 PATH 默认项时,default_install 会返回 None。
+            // 只要其中一个入口属于 Codex App/MSIX,仍必须走 Store 更新,不能退到静态 npm 链。
+            let installs = vec![
+                ToolInstallation {
+                    path: r"C:\Users\me\AppData\Local\OpenAI\Codex\bin\codex.exe".to_string(),
+                    version: Some("0.137.0".to_string()),
+                    runnable: true,
+                    error: None,
+                    source: "codex-app".to_string(),
+                    is_path_default: false,
+                    real: std::path::PathBuf::from(
+                        r"C:\Users\me\AppData\Local\OpenAI\Codex\bin\codex.exe",
+                    ),
+                },
+                ToolInstallation {
+                    path: r"C:\Tools\node\codex.cmd".to_string(),
+                    version: Some("0.139.0".to_string()),
+                    runnable: true,
+                    error: None,
+                    source: "system".to_string(),
+                    is_path_default: false,
+                    real: std::path::PathBuf::from(r"C:\Tools\node\codex.cmd"),
+                },
+            ];
+            let cmd = installs_anchored_command("codex", &installs);
+            assert_eq!(
+                cmd.as_deref(),
+                Some(codex_windows_app_update_command().as_str())
+            );
+            assert!(
+                !cmd.unwrap().contains("@openai/codex"),
+                "ambiguous Codex App installs must not fall back to npm"
+            );
+        }
+
+        #[test]
         fn windows_no_sibling_uses_cli_update_without_package_fallback() {
             // sibling npm.cmd 不存在(纯独立二进制)时,仍可锚定到 CLI 自身跑官方 update。
             // 只是没有包管理器 fallback。
@@ -3920,6 +4017,30 @@ mod tests {
             assert_eq!(
                 infer_install_source(Path::new("C:\\Users\\me\\scoop\\shims\\codex.cmd")),
                 "scoop"
+            );
+        }
+
+        #[test]
+        fn windows_codex_app_is_identified() {
+            // Codex Windows App 会把 CLI launcher 放在 AppData,真身也可能落在 WindowsApps
+            // MSIX 包目录；两种路径都不是 npm 全局包,升级策略必须能单独识别。
+            assert_eq!(
+                infer_install_source(Path::new(
+                    "C:\\Users\\me\\AppData\\Local\\OpenAI\\Codex\\bin\\codex.exe"
+                )),
+                "codex-app"
+            );
+            assert_eq!(
+                infer_install_source(Path::new(
+                    "C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.608.1337.0_x64__2p2nqsd0c76g0\\app\\resources\\codex.exe"
+                )),
+                "codex-app"
+            );
+            assert_eq!(
+                infer_install_source(Path::new(
+                    "C:\\Users\\me\\AppData\\Local\\Microsoft\\WindowsApps\\codex.exe"
+                )),
+                "codex-app"
             );
         }
     }

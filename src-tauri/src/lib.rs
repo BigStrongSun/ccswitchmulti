@@ -1305,6 +1305,8 @@ pub fn run() {
             commands::get_proxy_takeover_status,
             commands::set_proxy_takeover_for_app,
             commands::get_proxy_status,
+            commands::start_external_openai_api_server,
+            commands::get_external_openai_api_server_status,
             commands::get_proxy_config,
             commands::update_proxy_config,
             commands::get_external_openai_api_profile,
@@ -1662,6 +1664,21 @@ fn remove_tray_icon_before_exit(app_handle: &tauri::AppHandle) {
 /// 检查 `proxy_config.enabled` 字段，如果有任一应用的状态为 `true`，
 /// 则自动启动代理服务并接管对应应用的 Live 配置。
 async fn restore_proxy_state_on_startup(state: &store::AppState) {
+    match crate::proxy::external_openai_api::load_profile(&state.db) {
+        Ok(profile) if profile.enabled => {
+            match state.proxy_service.start_external_openai_api().await {
+                Ok(info) => log::info!(
+                    "已恢复第三方 Agent API 独立监听服务: {}:{}",
+                    info.address,
+                    info.port
+                ),
+                Err(e) => log::error!("恢复第三方 Agent API 独立监听服务失败: {e}"),
+            }
+        }
+        Ok(_) => log::debug!("第三方 Agent API profile 未启用，跳过独立监听恢复"),
+        Err(e) => log::warn!("读取第三方 Agent API profile 失败，跳过独立监听恢复: {e}"),
+    }
+
     // 收集需要恢复接管的应用列表（从 proxy_config.enabled 读取）
     let mut apps_to_restore = Vec::new();
     for app_type in ["claude", "codex", "gemini"] {
@@ -1673,20 +1690,7 @@ async fn restore_proxy_state_on_startup(state: &store::AppState) {
     }
 
     if apps_to_restore.is_empty() {
-        // 第三方 Agent API 只需要本地代理服务运行，不应该伪装成任何 app takeover。
-        // 因此当全局 proxy_enabled 为 true 但没有 app enabled 时，仅恢复监听服务。
-        match state.db.get_global_proxy_config().await {
-            Ok(config) if config.proxy_enabled => match state.proxy_service.start().await {
-                Ok(info) => log::info!(
-                    "✓ 已恢复第三方 Agent API 本地监听服务: {}:{}",
-                    info.address,
-                    info.port
-                ),
-                Err(e) => log::error!("✗ 恢复第三方 Agent API 本地监听服务失败: {e}"),
-            },
-            Ok(_) => log::debug!("启动时无需恢复代理状态"),
-            Err(e) => log::warn!("读取全局代理开关失败，跳过第三方 Agent API 自动恢复: {e}"),
-        }
+        log::debug!("启动时没有需要恢复的 app takeover");
         return;
     }
 

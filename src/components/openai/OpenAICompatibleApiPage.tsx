@@ -30,7 +30,6 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { proxyApi } from "@/lib/api/proxy";
 import { copyText } from "@/lib/clipboard";
-import { useProxyStatus } from "@/hooks/useProxyStatus";
 import { cn } from "@/lib/utils";
 import {
   buildBaseUrl,
@@ -61,7 +60,6 @@ function getSavedBackendKey(): string {
 /// 第三方 Agent OpenAI-compatible API 顶层工具页。
 export function OpenAICompatibleApiPage() {
   const queryClient = useQueryClient();
-  const { status, isRunning, startProxyServer } = useProxyStatus();
   const [activeTab, setActiveTab] = useState<ApiTab>("source");
   const [visibleApiKey, setVisibleApiKey] = useState("");
   const [selectedBackendKey, setSelectedBackendKey] =
@@ -69,7 +67,7 @@ export function OpenAICompatibleApiPage() {
   const [selectedModel, setSelectedModel] = useState("");
   const [isPreparing, setIsPreparing] = useState(false);
   const [listenAddress, setListenAddress] = useState("127.0.0.1");
-  const [listenPort, setListenPort] = useState("15721");
+  const [listenPort, setListenPort] = useState("15722");
   const [isSavingListener, setIsSavingListener] = useState(false);
 
   const {
@@ -81,9 +79,10 @@ export function OpenAICompatibleApiPage() {
     queryFn: () => proxyApi.getExternalOpenAIAPIRuntimeStatus(),
   });
 
-  const { data: proxyConfig } = useQuery({
-    queryKey: ["proxyConfig"],
-    queryFn: () => proxyApi.getProxyConfig(),
+  const { data: externalApiStatus } = useQuery({
+    queryKey: ["externalOpenAIAPIServerStatus"],
+    queryFn: () => proxyApi.getExternalOpenAIAPIServerStatus(),
+    refetchInterval: (query) => (query.state.data?.running ? 2000 : false),
   });
 
   const profile = runtimeStatus?.profile;
@@ -108,10 +107,11 @@ export function OpenAICompatibleApiPage() {
     availableModels[0] ||
     profile?.defaultModel ||
     FALLBACK_MODEL;
+  const isRunning = externalApiStatus?.running === true;
   const effectiveAddress =
-    status?.address || proxyConfig?.listen_address || listenAddress;
+    externalApiStatus?.address || profile?.listenAddress || listenAddress;
   const effectivePort =
-    status?.port || proxyConfig?.listen_port || Number(listenPort) || 15721;
+    externalApiStatus?.port || profile?.listenPort || Number(listenPort) || 15722;
   const baseUrl = buildBaseUrl(effectiveAddress, effectivePort);
   const reachableBaseUrl = buildReachableBaseUrl(effectiveAddress, effectivePort);
   const agentBaseUrl = reachableBaseUrl;
@@ -137,10 +137,10 @@ export function OpenAICompatibleApiPage() {
   }, [selectedBackendKey, selectedKey]);
 
   useEffect(() => {
-    if (!proxyConfig) return;
-    setListenAddress(proxyConfig.listen_address || "127.0.0.1");
-    setListenPort(String(proxyConfig.listen_port || 15721));
-  }, [proxyConfig]);
+    if (!profile) return;
+    setListenAddress(profile.listenAddress || "127.0.0.1");
+    setListenPort(String(profile.listenPort || 15722));
+  }, [profile]);
 
   /// 复制普通配置文本并给出反馈。
   async function handleCopy(text: string, label: string) {
@@ -159,31 +159,33 @@ export function OpenAICompatibleApiPage() {
     setActiveTab("config");
   }
 
-  /// 保存本地 API 的监听地址和端口；该设置复用全局 proxy_config，不修改任何 app takeover。
+  /// 保存第三方 Agent API 的独立监听地址和端口；不修改全局 proxy_config 或 app takeover。
   async function handleSaveListenerConfig() {
-    if (!proxyConfig) {
-      toast.error("代理配置尚未加载完成");
-      return;
-    }
     const parsedPort = Number(listenPort);
     if (!Number.isInteger(parsedPort) || parsedPort < 1 || parsedPort > 65535) {
       toast.error("端口必须是 1-65535 之间的整数");
       return;
     }
+    if (!selectedBackend) {
+      toast.error("请先选择一个服务来源");
+      return;
+    }
 
     setIsSavingListener(true);
     try {
-      await proxyApi.updateProxyConfig({
-        ...proxyConfig,
-        listen_address: listenAddress.trim() || "127.0.0.1",
-        listen_port: parsedPort,
+      const update = buildProfileUpdate(
+        selectedBackend,
+        defaultModel,
+        profile?.enabled ?? false,
+        listenAddress.trim() || "127.0.0.1",
+        parsedPort,
+      );
+      await proxyApi.updateExternalOpenAIAPIProfile(update);
+      await queryClient.invalidateQueries({
+        queryKey: ["externalOpenAIAPIRuntimeStatus"],
       });
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["proxyConfig"] }),
-        queryClient.invalidateQueries({ queryKey: ["proxyStatus"] }),
-      ]);
       toast.success(
-        isRunning ? "监听配置已保存，重启本地 API 后生效" : "监听配置已保存",
+        isRunning ? "监听配置已保存，重启第三方 Agent API 后生效" : "监听配置已保存",
         { closeButton: true },
       );
     } catch (error) {
@@ -223,7 +225,14 @@ export function OpenAICompatibleApiPage() {
     }
 
     try {
-      const update = buildProfileUpdate(selectedBackend, defaultModel, enabled);
+      const parsedPort = Number(listenPort);
+      const update = buildProfileUpdate(
+        selectedBackend,
+        defaultModel,
+        enabled,
+        listenAddress.trim() || "127.0.0.1",
+        Number.isInteger(parsedPort) ? parsedPort : 15722,
+      );
       await proxyApi.updateExternalOpenAIAPIProfile(update);
       await queryClient.invalidateQueries({
         queryKey: ["externalOpenAIAPIRuntimeStatus"],
@@ -252,11 +261,18 @@ export function OpenAICompatibleApiPage() {
         const result = await proxyApi.regenerateExternalOpenAIAPIKey();
         setVisibleApiKey(result.apiKey);
       }
-      const update = buildProfileUpdate(selectedBackend, defaultModel, true);
+      const parsedPort = Number(listenPort);
+      const update = buildProfileUpdate(
+        selectedBackend,
+        defaultModel,
+        true,
+        listenAddress.trim() || "127.0.0.1",
+        Number.isInteger(parsedPort) ? parsedPort : 15722,
+      );
       await proxyApi.updateExternalOpenAIAPIProfile(update);
-      if (!isRunning) await startProxyServer();
+      if (!isRunning) await proxyApi.startExternalOpenAIAPIServer();
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["proxyStatus"] }),
+        queryClient.invalidateQueries({ queryKey: ["externalOpenAIAPIServerStatus"] }),
         queryClient.invalidateQueries({ queryKey: ["externalOpenAIAPIRuntimeStatus"] }),
       ]);
       toast.success("第三方 Agent API 已启用", { closeButton: true });
@@ -273,7 +289,7 @@ export function OpenAICompatibleApiPage() {
   async function handleRefresh() {
     await Promise.all([
       refetchRuntimeStatus(),
-      queryClient.invalidateQueries({ queryKey: ["proxyStatus"] }),
+      queryClient.invalidateQueries({ queryKey: ["externalOpenAIAPIServerStatus"] }),
     ]);
   }
 
@@ -658,7 +674,7 @@ function ListenerSettings({
           value={listenPort}
           onChange={(event) => onPortChange(event.target.value)}
           inputMode="numeric"
-          placeholder="15721"
+          placeholder="15722"
           className="border-cyan-700/40 bg-slate-950/60"
         />
         <Input
