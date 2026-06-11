@@ -893,13 +893,29 @@ fn external_provider_model_entries(
     profile: &ExternalOpenAiApiProfile,
 ) -> Vec<Value> {
     let mut ids = Vec::new();
+    if profile.app_type.as_deref() == Some(AppType::Codex.as_str())
+        && is_codex_official_managed_oauth_provider(provider)
+    {
+        ids.extend(default_codex_oauth_model_ids());
+    }
     collect_string_array(&mut ids, provider.settings_config.get("models"));
     collect_string_array(&mut ids, provider.settings_config.get("modelList"));
+    collect_string_array(&mut ids, provider.settings_config.get("modelCatalog"));
+    collect_string_array(
+        &mut ids,
+        provider.settings_config.pointer("/modelCatalog/models"),
+    );
     collect_model_objects(&mut ids, provider.settings_config.get("models"));
+    collect_model_objects(&mut ids, provider.settings_config.get("modelList"));
     collect_model_objects(&mut ids, provider.settings_config.get("modelCatalog"));
+    collect_model_objects(
+        &mut ids,
+        provider.settings_config.pointer("/modelCatalog/models"),
+    );
     if let Some(model) = provider
         .settings_config
         .get("model")
+        .or_else(|| provider.settings_config.get("defaultModel"))
         .and_then(|value| value.as_str())
     {
         ids.push(model.to_string());
@@ -946,6 +962,7 @@ fn external_codex_router_model_entries(
                 continue;
             }
             collect_string_array(&mut ids, route.pointer("/match/models"));
+            collect_string_array(&mut ids, route.get("models"));
             if ids.is_empty() {
                 collect_string_array(&mut ids, route.pointer("/match/prefixes"));
             }
@@ -964,6 +981,15 @@ fn external_codex_router_model_entries(
 }
 
 /// 收集字符串数组里的模型 id。
+fn default_codex_oauth_model_ids() -> Vec<String> {
+    vec![
+        "gpt-5.3-codex-spark".to_string(),
+        "gpt-5.4".to_string(),
+        "gpt-5.4-mini".to_string(),
+        "gpt-5.5".to_string(),
+    ]
+}
+
 fn collect_string_array(ids: &mut Vec<String>, value: Option<&Value>) {
     if let Some(values) = value.and_then(|value| value.as_array()) {
         for value in values {
@@ -2461,6 +2487,107 @@ data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n
         assert!(ids.contains(&"visible-model"));
         assert!(ids.contains(&"default-visible"));
         assert!(!ids.contains(&"hidden-model"));
+    }
+
+    #[test]
+    fn external_models_response_reads_provider_model_catalog_object() {
+        let db = Arc::new(Database::memory().expect("memory db"));
+        db.save_provider(
+            "codex",
+            &Provider::with_id(
+                "codex-openai-backup".to_string(),
+                "OpenAI Official Backup".to_string(),
+                json!({
+                    "base_url": "https://chatgpt.com/backend-api/codex",
+                    "defaultModel": "gpt-5.4-mini",
+                    "modelCatalog": {
+                        "models": [
+                            { "model": "gpt-5.5" },
+                            { "model": "gpt-5.4" },
+                            { "model": "gpt-5.4-mini" },
+                            { "model": "gpt-5.3-codex-spark" }
+                        ]
+                    }
+                }),
+                None,
+            ),
+        )
+        .expect("save provider");
+        external_openai_api::update_profile(
+            &db,
+            ExternalOpenAiApiProfileUpdate {
+                enabled: true,
+                backend_type: ExternalOpenAiApiBackendType::Provider,
+                app_type: Some("codex".to_string()),
+                provider_id: Some("codex-openai-backup".to_string()),
+                route_id: None,
+                default_model: Some("gpt-5.4-mini".to_string()),
+                listen_address: None,
+                listen_port: None,
+            },
+        )
+        .expect("save profile");
+        let profile = external_openai_api::load_profile(&db).expect("load profile");
+        let state = build_state(db);
+
+        let response = external_openai_api_models_response(&state, &profile).expect("models");
+        let ids: Vec<_> = response["data"]
+            .as_array()
+            .expect("data array")
+            .iter()
+            .filter_map(|model| model.get("id").and_then(|id| id.as_str()))
+            .collect();
+
+        assert!(ids.contains(&"gpt-5.5"));
+        assert!(ids.contains(&"gpt-5.4"));
+        assert!(ids.contains(&"gpt-5.4-mini"));
+        assert!(ids.contains(&"gpt-5.3-codex-spark"));
+    }
+
+    #[test]
+    fn external_models_response_exposes_all_managed_codex_oauth_defaults() {
+        let db = Arc::new(Database::memory().expect("memory db"));
+        db.save_provider(
+            "codex",
+            &Provider::with_id(
+                "codex-official".to_string(),
+                "OpenAI Official".to_string(),
+                json!({
+                    "defaultModel": "gpt-5.4-mini"
+                }),
+                None,
+            ),
+        )
+        .expect("save provider");
+        external_openai_api::update_profile(
+            &db,
+            ExternalOpenAiApiProfileUpdate {
+                enabled: true,
+                backend_type: ExternalOpenAiApiBackendType::Provider,
+                app_type: Some("codex".to_string()),
+                provider_id: Some("codex-official".to_string()),
+                route_id: None,
+                default_model: Some("gpt-5.4-mini".to_string()),
+                listen_address: None,
+                listen_port: None,
+            },
+        )
+        .expect("save profile");
+        let profile = external_openai_api::load_profile(&db).expect("load profile");
+        let state = build_state(db);
+
+        let response = external_openai_api_models_response(&state, &profile).expect("models");
+        let ids: Vec<_> = response["data"]
+            .as_array()
+            .expect("data array")
+            .iter()
+            .filter_map(|model| model.get("id").and_then(|id| id.as_str()))
+            .collect();
+
+        assert!(ids.contains(&"gpt-5.5"));
+        assert!(ids.contains(&"gpt-5.4"));
+        assert!(ids.contains(&"gpt-5.4-mini"));
+        assert!(ids.contains(&"gpt-5.3-codex-spark"));
     }
 
     #[tokio::test]

@@ -689,6 +689,10 @@ fn collect_provider_models(provider: &Provider) -> Vec<String> {
     collect_model_array(&mut ids, provider.settings_config.get("models"));
     collect_model_array(&mut ids, provider.settings_config.get("modelList"));
     collect_model_array(&mut ids, provider.settings_config.get("modelCatalog"));
+    collect_model_array(
+        &mut ids,
+        provider.settings_config.pointer("/modelCatalog/models"),
+    );
     ids.into_iter().collect()
 }
 
