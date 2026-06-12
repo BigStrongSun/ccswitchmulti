@@ -48,6 +48,8 @@ type WorkspaceTab =
   | "test"
   | "records";
 
+type StatusView = "link" | "debug" | "providers" | "traffic";
+
 type CodexRoute = {
   id?: string;
   label?: string;
@@ -1154,6 +1156,7 @@ function StatusTab({
     useState<CodexMultiRouterDiagnostics | null>(null);
   const [diagnoseError, setDiagnoseError] = useState<string | null>(null);
   const [isDiagnosing, setIsDiagnosing] = useState(false);
+  const [statusView, setStatusView] = useState<StatusView>("link");
   const logs = requestLogs?.data ?? [];
   const proxyLogs = logs.filter(
     (log) => (log.dataSource ?? "proxy") === "proxy",
@@ -1221,6 +1224,7 @@ function StatusTab({
 
   /// 一键诊断只读取本地现场和 router 日志，不向真实上游发起模型请求。
   async function runDiagnostics() {
+    setStatusView("debug");
     setIsDiagnosing(true);
     setDiagnoseError(null);
     try {
@@ -1237,219 +1241,241 @@ function StatusTab({
 
   return (
     <div className="space-y-4">
-      <section className="rounded-lg border border-slate-700 bg-slate-950/40 p-4">
-        <SectionHeader
-          icon={Activity}
-          title="链路状态"
-          detail="默认先看这里：只有监听、Codex 接管、路由入口和至少一条匹配规则都通过，Codex 请求才会进入 MultiRouter。"
-          action={
-            <div className="flex flex-wrap gap-2">
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={runDiagnostics}
-                disabled={isDiagnosing}
-                className="gap-2 border-amber-500/50 bg-amber-500/10 text-amber-100 hover:bg-amber-500/20"
-              >
-                {isDiagnosing ? (
-                  <RefreshCw className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Bug className="h-4 w-4" />
-                )}
-                Debug 检查
-              </Button>
-              {selectedPlan ? (
+      <StatusViewSwitcher
+        value={statusView}
+        diagnostics={diagnostics}
+        trafficCount={trafficRows.length}
+        providerCount={selectedRoutes.length}
+        onChange={setStatusView}
+      />
+
+      {statusView === "link" && (
+        <section className="rounded-lg border border-slate-700 bg-slate-950/40 p-4">
+          <SectionHeader
+            icon={Activity}
+            title="链路状态"
+            detail="默认先看这里：只有监听、Codex 接管、路由入口和至少一条匹配规则都通过，Codex 请求才会进入 MultiRouter。"
+            action={
+              <div className="flex flex-wrap gap-2">
                 <Button
                   size="sm"
-                  onClick={() => onEditPlan(selectedPlan, "打开多路路由配置")}
-                  className="gap-2 bg-blue-600 hover:bg-blue-500"
+                  variant="outline"
+                  onClick={runDiagnostics}
+                  disabled={isDiagnosing}
+                  className="gap-2 border-amber-500/50 bg-amber-500/10 text-amber-100 hover:bg-amber-500/20"
                 >
-                  <Pencil className="h-4 w-4" />
-                  编辑配置
+                  {isDiagnosing ? (
+                    <RefreshCw className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Bug className="h-4 w-4" />
+                  )}
+                  Debug 检查
                 </Button>
-              ) : null}
-            </div>
-          }
-        />
-        <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
-          <StatusCard
-            ok={linkOnline}
-            label="当前链路"
-            value={linkOnline ? "在线" : configReady ? "待请求验证" : "未就绪"}
-            detail={
-              linkOnline
-                ? "Codex 请求会进入本地代理并按 model 分流"
-                : configReady
-                  ? "配置和监听已就绪，但今天还没有真实代理转发日志"
-                  : readinessIssues.join("；") || "等待状态刷新"
+                {selectedPlan ? (
+                  <Button
+                    size="sm"
+                    onClick={() => onEditPlan(selectedPlan, "打开多路路由配置")}
+                    className="gap-2 bg-blue-600 hover:bg-blue-500"
+                  >
+                    <Pencil className="h-4 w-4" />
+                    编辑配置
+                  </Button>
+                ) : null}
+              </div>
             }
           />
-          <StatusCard
-            ok={isProxyRunning}
-            label="监听"
-            value={isProxyRunning ? "成功" : "未启动"}
-            detail={listenAddress}
-          />
-          <StatusCard
-            ok={isCodexTakeoverActive}
-            label="Codex 接管"
-            value={isCodexTakeoverActive ? "已接管" : "未接管"}
-            detail="Codex 请求需要指向本地代理才会进入路由"
-          />
-          <StatusCard
-            ok={Boolean(selectedPlan && routeEnabled)}
-            label="路由入口"
-            value={
-              selectedPlan ? (routeEnabled ? "已启用" : "已关闭") : "未选择"
-            }
-            detail={selectedPlan?.name ?? "暂无 MultiRouter provider"}
-          />
-          <StatusCard
-            ok={Boolean(latestLog && latestForwardOk)}
-            label="最近转发"
-            value={
-              latestLog
-                ? latestForwardOk
-                  ? `成功 ${latestLog.statusCode}`
-                  : `失败 ${latestLog.statusCode}`
-                : "暂无请求"
-            }
-            detail={
-              latestLog?.errorMessage ||
-              latestLog?.requestModel ||
-              latestLog?.model ||
-              "等待 Codex 请求"
-            }
-          />
-        </div>
-        <div className="mt-4 grid gap-3 text-sm md:grid-cols-3">
-          <DetailRow label="当前代理目标" value={activeTargetLabel} />
-          <DetailRow
-            label="启用匹配规则"
-            value={`${selectedRoutes.filter(({ route }) => route.enabled !== false).length} / ${selectedRoutes.length}`}
-          />
-          <DetailRow
-            label="代理累计请求"
-            value={`${proxyStatus?.total_requests ?? 0} 次，成功率 ${proxyStatus?.success_rate ?? 0}%`}
-          />
-        </div>
-        <div className="mt-3">
-          <DetailRow
-            label="最近错误"
-            value={proxyStatus?.last_error || latestLog?.errorMessage || "无"}
-          />
-        </div>
+          <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+            <StatusCard
+              ok={linkOnline}
+              label="当前链路"
+              value={
+                linkOnline ? "在线" : configReady ? "待请求验证" : "未就绪"
+              }
+              detail={
+                linkOnline
+                  ? "Codex 请求会进入本地代理并按 model 分流"
+                  : configReady
+                    ? "配置和监听已就绪，但今天还没有真实代理转发日志"
+                    : readinessIssues.join("；") || "等待状态刷新"
+              }
+            />
+            <StatusCard
+              ok={isProxyRunning}
+              label="监听"
+              value={isProxyRunning ? "成功" : "未启动"}
+              detail={listenAddress}
+            />
+            <StatusCard
+              ok={isCodexTakeoverActive}
+              label="Codex 接管"
+              value={isCodexTakeoverActive ? "已接管" : "未接管"}
+              detail="Codex 请求需要指向本地代理才会进入路由"
+            />
+            <StatusCard
+              ok={Boolean(selectedPlan && routeEnabled)}
+              label="路由入口"
+              value={
+                selectedPlan ? (routeEnabled ? "已启用" : "已关闭") : "未选择"
+              }
+              detail={selectedPlan?.name ?? "暂无 MultiRouter provider"}
+            />
+            <StatusCard
+              ok={Boolean(latestLog && latestForwardOk)}
+              label="最近转发"
+              value={
+                latestLog
+                  ? latestForwardOk
+                    ? `成功 ${latestLog.statusCode}`
+                    : `失败 ${latestLog.statusCode}`
+                  : "暂无请求"
+              }
+              detail={
+                latestLog?.errorMessage ||
+                latestLog?.requestModel ||
+                latestLog?.model ||
+                "等待 Codex 请求"
+              }
+            />
+          </div>
+          <div className="mt-4 grid gap-3 text-sm md:grid-cols-3">
+            <DetailRow label="当前代理目标" value={activeTargetLabel} />
+            <DetailRow
+              label="启用匹配规则"
+              value={`${selectedRoutes.filter(({ route }) => route.enabled !== false).length} / ${selectedRoutes.length}`}
+            />
+            <DetailRow
+              label="代理累计请求"
+              value={`${proxyStatus?.total_requests ?? 0} 次，成功率 ${proxyStatus?.success_rate ?? 0}%`}
+            />
+          </div>
+          <div className="mt-3">
+            <DetailRow
+              label="最近错误"
+              value={proxyStatus?.last_error || latestLog?.errorMessage || "无"}
+            />
+          </div>
+        </section>
+      )}
+
+      {statusView === "debug" && (
         <DiagnosticsPanel
           diagnostics={diagnostics}
           isLoading={isDiagnosing}
           error={diagnoseError}
           onRun={runDiagnostics}
         />
-      </section>
+      )}
 
-      <section className="rounded-lg border border-blue-700/40 bg-blue-950/15 p-4">
-        <SectionHeader
-          icon={GitFork}
-          title="分流子 Provider"
-          detail="这些子 Provider 来自当前 MultiRouter 的 route target，转换层跟随各自供应商配置。"
-        />
-        <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {selectedRoutes.map((entry) => {
-            const targetProviderId = routeTargetProviderId(entry.route);
-            const targetProvider = routeTargetProvider(
-              entry.route,
-              providersById,
-            );
-            return (
-              <div
-                key={`${entry.provider.id}-${entry.route.id ?? entry.index}`}
-                className="rounded-lg border border-slate-700 bg-slate-950/50 p-3"
-              >
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="min-w-0">
-                    <div className="truncate text-sm font-semibold text-slate-100">
-                      {targetProvider?.name ?? targetProviderId ?? "内联上游"}
+      {statusView === "providers" && (
+        <section className="rounded-lg border border-blue-700/40 bg-blue-950/15 p-4">
+          <SectionHeader
+            icon={GitFork}
+            title="分流子 Provider"
+            detail="这些子 Provider 来自当前 MultiRouter 的 route target，转换层跟随各自供应商配置。"
+          />
+          <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {selectedRoutes.map((entry) => {
+              const targetProviderId = routeTargetProviderId(entry.route);
+              const targetProvider = routeTargetProvider(
+                entry.route,
+                providersById,
+              );
+              return (
+                <div
+                  key={`${entry.provider.id}-${entry.route.id ?? entry.index}`}
+                  className="rounded-lg border border-slate-700 bg-slate-950/50 p-3"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-semibold text-slate-100">
+                        {targetProvider?.name ?? targetProviderId ?? "内联上游"}
+                      </div>
+                      <div className="mt-1 truncate text-xs text-slate-400">
+                        {entry.route.label || entry.route.id || "未命名规则"}
+                      </div>
                     </div>
-                    <div className="mt-1 truncate text-xs text-slate-400">
-                      {entry.route.label || entry.route.id || "未命名规则"}
-                    </div>
+                    <Badge
+                      className={cn(
+                        "border",
+                        entry.route.enabled === false
+                          ? "border-slate-500/50 bg-slate-500/10 text-slate-200"
+                          : "border-emerald-500/50 bg-emerald-500/15 text-emerald-100",
+                      )}
+                    >
+                      {entry.route.enabled === false
+                        ? "规则停用"
+                        : "规则已启用"}
+                    </Badge>
                   </div>
-                  <Badge
-                    className={cn(
-                      "border",
-                      entry.route.enabled === false
-                        ? "border-slate-500/50 bg-slate-500/10 text-slate-200"
-                        : "border-emerald-500/50 bg-emerald-500/15 text-emerald-100",
-                    )}
-                  >
-                    {entry.route.enabled === false ? "规则停用" : "规则已启用"}
-                  </Badge>
+                  <div className="mt-3 text-xs leading-5 text-slate-400">
+                    {routeMatchSummary(entry.route)}
+                  </div>
                 </div>
-                <div className="mt-3 text-xs leading-5 text-slate-400">
-                  {routeMatchSummary(entry.route)}
-                </div>
-              </div>
-            );
-          })}
-          {selectedRoutes.length === 0 && (
-            <EmptyState
-              icon={Route}
-              title="还没有分流规则"
-              detail="添加 route 后，这里会列出每个子 Provider 和它负责的模型。"
-              actionLabel="编辑多路路由"
-              onAction={() => selectedPlan && onEditPlan(selectedPlan)}
-            />
-          )}
-        </div>
-      </section>
-
-      <section className="rounded-lg border border-emerald-700/40 bg-emerald-950/10 p-4">
-        <SectionHeader
-          icon={Database}
-          title="今日子 Provider / Model 流量"
-          detail="基于 Codex 请求日志聚合；若后端只记录外层 MultiRouter，页面会按 requestModel 尝试回归属到 route target。"
-        />
-        <div className="mt-3 overflow-hidden rounded-lg border border-slate-700">
-          <div className="grid grid-cols-[1.2fr_1.2fr_0.7fr_0.7fr_0.8fr_0.8fr] gap-2 bg-slate-900/80 px-3 py-2 text-xs font-semibold text-slate-300">
-            <span>Provider</span>
-            <span>Model</span>
-            <span className="text-right">请求</span>
-            <span className="text-right">失败</span>
-            <span className="text-right">Tokens</span>
-            <span className="text-right">延迟</span>
+              );
+            })}
+            {selectedRoutes.length === 0 && (
+              <EmptyState
+                icon={Route}
+                title="还没有分流规则"
+                detail="添加 route 后，这里会列出每个子 Provider 和它负责的模型。"
+                actionLabel="编辑多路路由"
+                onAction={() => selectedPlan && onEditPlan(selectedPlan)}
+              />
+            )}
           </div>
-          {isLoading ? (
-            <div className="p-4 text-sm text-slate-400">正在读取统计...</div>
-          ) : trafficRows.length > 0 ? (
-            trafficRows.map((row) => (
-              <div
-                key={`${row.providerId}-${row.model}`}
-                className="grid grid-cols-[1.2fr_1.2fr_0.7fr_0.7fr_0.8fr_0.8fr] gap-2 border-t border-slate-800 px-3 py-2 text-xs text-slate-300"
-              >
-                <span className="truncate">{row.providerName}</span>
-                <span className="truncate font-mono">{row.model}</span>
-                <span className="text-right">{row.requestCount}</span>
-                <span className="text-right">{row.failedCount}</span>
-                <span className="text-right">
-                  {row.totalTokens.toLocaleString()}
-                </span>
-                <span className="text-right">{row.avgLatencyMs}ms</span>
-              </div>
-            ))
-          ) : (
-            <div className="p-4 text-sm leading-6 text-slate-400">
-              暂无可归属到子 Provider 的请求日志。今日 Codex 日志 {logs.length}{" "}
-              条，其中真实代理转发 {proxyLogs.length} 条，Codex 会话同步{" "}
-              {sessionLogs.length} 条，外层 MultiRouter 日志 {routerLogs.length}{" "}
-              条，目标 Provider 数 {targetProviderIds.size} 个。
+        </section>
+      )}
+
+      {statusView === "traffic" && (
+        <section className="rounded-lg border border-emerald-700/40 bg-emerald-950/10 p-4">
+          <SectionHeader
+            icon={Database}
+            title="今日子 Provider / Model 流量"
+            detail="基于 Codex 请求日志聚合；若后端只记录外层 MultiRouter，页面会按 requestModel 尝试回归属到 route target。"
+          />
+          <div className="mt-3 overflow-hidden rounded-lg border border-slate-700">
+            <div className="grid grid-cols-[1.2fr_1.2fr_0.7fr_0.7fr_0.8fr_0.8fr] gap-2 bg-slate-900/80 px-3 py-2 text-xs font-semibold text-slate-300">
+              <span>Provider</span>
+              <span>Model</span>
+              <span className="text-right">请求</span>
+              <span className="text-right">失败</span>
+              <span className="text-right">Tokens</span>
+              <span className="text-right">延迟</span>
             </div>
-          )}
-        </div>
-        <div className="mt-3 text-xs text-slate-500">
-          已尝试归属真实代理日志 {routedLogs.length} 条；这里不把
-          codex_session 历史同步当作转发。
-        </div>
-      </section>
+            {isLoading ? (
+              <div className="p-4 text-sm text-slate-400">正在读取统计...</div>
+            ) : trafficRows.length > 0 ? (
+              trafficRows.map((row) => (
+                <div
+                  key={`${row.providerId}-${row.model}`}
+                  className="grid grid-cols-[1.2fr_1.2fr_0.7fr_0.7fr_0.8fr_0.8fr] gap-2 border-t border-slate-800 px-3 py-2 text-xs text-slate-300"
+                >
+                  <span className="truncate">{row.providerName}</span>
+                  <span className="truncate font-mono">{row.model}</span>
+                  <span className="text-right">{row.requestCount}</span>
+                  <span className="text-right">{row.failedCount}</span>
+                  <span className="text-right">
+                    {row.totalTokens.toLocaleString()}
+                  </span>
+                  <span className="text-right">{row.avgLatencyMs}ms</span>
+                </div>
+              ))
+            ) : (
+              <div className="p-4 text-sm leading-6 text-slate-400">
+                暂无可归属到子 Provider 的请求日志。今日 Codex 日志{" "}
+                {logs.length} 条，其中真实代理转发 {proxyLogs.length} 条，Codex
+                会话同步 {sessionLogs.length} 条，外层 MultiRouter 日志{" "}
+                {routerLogs.length} 条，目标 Provider 数{" "}
+                {targetProviderIds.size} 个。
+              </div>
+            )}
+          </div>
+          <div className="mt-3 text-xs text-slate-500">
+            已尝试归属真实代理日志 {routedLogs.length} 条；这里不把
+            codex_session 历史同步当作转发。
+          </div>
+        </section>
+      )}
     </div>
   );
 }
@@ -1616,6 +1642,99 @@ function RecordsTab({
   );
 }
 
+/// 状态页内部的分段切换；一次只展开一个信息域，避免 Debug、Provider 和流量表挤在同一屏。
+function StatusViewSwitcher({
+  value,
+  diagnostics,
+  trafficCount,
+  providerCount,
+  onChange,
+}: {
+  value: StatusView;
+  diagnostics: CodexMultiRouterDiagnostics | null;
+  trafficCount: number;
+  providerCount: number;
+  onChange: (value: StatusView) => void;
+}) {
+  const failedCount =
+    diagnostics?.checks.filter((check) => check.status === "fail").length ?? 0;
+  const warnCount =
+    diagnostics?.checks.filter((check) => check.status === "warn").length ?? 0;
+  const debugBadge = diagnostics
+    ? failedCount > 0
+      ? `${failedCount} 阻塞`
+      : warnCount > 0
+        ? `${warnCount} 警告`
+        : "已检查"
+    : "未检查";
+
+  const items: Array<{
+    value: StatusView;
+    icon: React.ComponentType<{ className?: string }>;
+    label: string;
+    detail: string;
+  }> = [
+    {
+      value: "link",
+      icon: Activity,
+      label: "链路",
+      detail: "监听 / 接管 / 入口",
+    },
+    {
+      value: "debug",
+      icon: Bug,
+      label: "Debug",
+      detail: debugBadge,
+    },
+    {
+      value: "providers",
+      icon: GitFork,
+      label: "分流",
+      detail: `${providerCount} 个目标`,
+    },
+    {
+      value: "traffic",
+      icon: Database,
+      label: "流量",
+      detail: `${trafficCount} 组统计`,
+    },
+  ];
+
+  return (
+    <div className="rounded-lg border border-slate-700 bg-slate-950/40 p-2">
+      <div className="grid gap-2 md:grid-cols-4">
+        {items.map((item) => {
+          const Icon = item.icon;
+          const active = value === item.value;
+          return (
+            <button
+              key={item.value}
+              type="button"
+              onClick={() => onChange(item.value)}
+              className={cn(
+                "flex min-w-0 items-center gap-3 rounded-md border px-3 py-2 text-left transition",
+                active
+                  ? "border-blue-500/60 bg-blue-600/20 text-blue-100"
+                  : "border-slate-700 bg-slate-950/40 text-slate-300 hover:border-blue-500/50 hover:bg-blue-950/20",
+              )}
+            >
+              <Icon className="h-4 w-4 shrink-0" />
+              <span className="min-w-0">
+                <span className="block truncate text-sm font-semibold">
+                  {item.label}
+                </span>
+                <span className="block truncate text-xs opacity-70">
+                  {item.detail}
+                </span>
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 /// MultiRouter Debug 面板展示后端真实检查结果，重点区分“没进入本地路由”和“进入后上游失败”。
 function DiagnosticsPanel({
   diagnostics,
@@ -1634,7 +1753,7 @@ function DiagnosticsPanel({
     diagnostics?.checks.filter((check) => check.status === "warn") ?? [];
 
   return (
-    <div className="mt-4 rounded-lg border border-amber-600/40 bg-amber-950/10 p-4">
+    <div className="rounded-lg border border-amber-600/40 bg-amber-950/10 p-4">
       <SectionHeader
         icon={Bug}
         title="Debug 检查"
@@ -1773,9 +1892,7 @@ function DiagnosticsPanel({
                 />
                 <DetailRow
                   label="入口状态"
-                  value={
-                    diagnostics.routePlan.routingEnabled ? "启用" : "关闭"
-                  }
+                  value={diagnostics.routePlan.routingEnabled ? "启用" : "关闭"}
                 />
                 <DetailRow
                   label="启用规则"
@@ -1841,7 +1958,10 @@ function DiagnosticsPanel({
                   </span>
                   <span className="truncate">{route.apiFormat ?? "跟随"}</span>
                   <span className="truncate">
-                    {[...route.models, ...route.prefixes.map((prefix) => `${prefix}*`)]
+                    {[
+                      ...route.models,
+                      ...route.prefixes.map((prefix) => `${prefix}*`),
+                    ]
                       .slice(0, 3)
                       .join(", ") || "默认"}
                   </span>
