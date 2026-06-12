@@ -13,6 +13,9 @@ use toml_edit::{DocumentMut, Item, TableLike};
 
 pub const CC_SWITCH_CODEX_MODEL_PROVIDER_ID: &str = "custom";
 pub const CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME: &str = "cc-switch-model-catalog.json";
+const CODEX_MODELS_CACHE_FILENAME: &str = "models_cache.json";
+const CODEX_MODELS_CACHE_BACKUP_FILENAME: &str = "models_cache.cc-switch-backup.json";
+const CC_SWITCH_CODEX_MODELS_CACHE_ETAG: &str = "cc-switch-model-catalog";
 const CODEX_MODEL_CATALOG_TEMPLATE_SLUG: &str = "gpt-5.5";
 const CODEX_OPENAI_MODEL_PROVIDER_ID: &str = "openai";
 
@@ -553,7 +556,7 @@ fn find_codex_model_template(catalog: &Value) -> Option<Value> {
 }
 
 fn load_codex_model_template_from_cache() -> Result<Option<Value>, AppError> {
-    let path = get_codex_config_dir().join("models_cache.json");
+    let path = get_codex_config_dir().join(CODEX_MODELS_CACHE_FILENAME);
     if !path.exists() {
         return Ok(None);
     }
@@ -845,6 +848,106 @@ fn codex_model_catalog_path_is_cc_switch_owned(path: &str) -> bool {
         == Some(CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME)
 }
 
+/// 返回 Codex 官方模型缓存路径；custom provider 热切时会从这里读取候选模型。
+fn get_codex_models_cache_path() -> PathBuf {
+    get_codex_config_dir().join(CODEX_MODELS_CACHE_FILENAME)
+}
+
+/// 返回 CC Switch 接管前的模型缓存备份路径，用于退出 MultiRouter 时恢复官方缓存。
+fn get_codex_models_cache_backup_path() -> PathBuf {
+    get_codex_config_dir().join(CODEX_MODELS_CACHE_BACKUP_FILENAME)
+}
+
+/// 判断当前模型缓存是否由 CC Switch 写入，避免误删用户或 Codex 官方自己的缓存。
+fn codex_models_cache_is_cc_switch_owned(cache: &Value) -> bool {
+    cache.get("etag").and_then(|etag| etag.as_str()) == Some(CC_SWITCH_CODEX_MODELS_CACHE_ETAG)
+}
+
+/// 读取可选 JSON 文件；文件不存在不是错误，解析失败才向上返回。
+fn read_json_file_if_exists(path: &Path) -> Result<Option<Value>, AppError> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    read_json_file(path).map(Some)
+}
+
+/// 生成 Codex models_cache 需要的 UTC 时间戳，保留纳秒格式以匹配官方缓存结构。
+fn current_utc_rfc3339_nanos() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
+}
+
+/// 将 CC Switch 生成的完整模型目录同步到 Codex 官方缓存。
+///
+/// 这个函数解决运行中的 Codex 热切到 custom MultiRouter 后候选模型不刷新的问题：
+/// custom provider 不会主动请求 `/models`，但会接受 fresh `models_cache.json`。
+fn sync_codex_models_cache_with_cc_switch_catalog(catalog: &Value) -> Result<(), AppError> {
+    let Some(models) = catalog.get("models").and_then(|models| models.as_array()) else {
+        return Ok(());
+    };
+    if models.is_empty() {
+        return Ok(());
+    }
+
+    let cache_path = get_codex_models_cache_path();
+    let backup_path = get_codex_models_cache_backup_path();
+    let existing_cache = read_json_file_if_exists(&cache_path)?;
+    let client_version = existing_cache
+        .as_ref()
+        .and_then(|cache| cache.get("client_version"))
+        .and_then(|version| version.as_str())
+        .map(ToString::to_string);
+
+    // Codex 0.140 的 custom provider 不会主动请求 /models，只会读取新鲜 cache。
+    // 因此这里复用已有 client_version 写入同格式 cache，让模型菜单立刻看到
+    // cc-switch 生成的完整 catalog，同时用 etag 标记所有权便于恢复 official。
+    let Some(client_version) = client_version else {
+        log::warn!(
+            "skip Codex models_cache sync: existing cache has no client_version, path={}",
+            cache_path.display()
+        );
+        return Ok(());
+    };
+
+    if let Some(cache) = existing_cache.as_ref() {
+        if !codex_models_cache_is_cc_switch_owned(cache) && !backup_path.exists() {
+            if let Some(parent) = backup_path.parent() {
+                fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
+            }
+            fs::copy(&cache_path, &backup_path).map_err(|e| AppError::io(&backup_path, e))?;
+        }
+    }
+
+    let cache = json!({
+        "fetched_at": current_utc_rfc3339_nanos(),
+        "etag": CC_SWITCH_CODEX_MODELS_CACHE_ETAG,
+        "client_version": client_version,
+        "models": models,
+    });
+    write_json_file(&cache_path, &cache)
+}
+
+/// 在退出 MultiRouter 或清空模型目录时恢复 Codex 原始模型缓存。
+fn restore_codex_models_cache_if_cc_switch_owned() -> Result<(), AppError> {
+    let cache_path = get_codex_models_cache_path();
+    let backup_path = get_codex_models_cache_backup_path();
+    let Some(cache) = read_json_file_if_exists(&cache_path)? else {
+        return Ok(());
+    };
+    if !codex_models_cache_is_cc_switch_owned(&cache) {
+        return Ok(());
+    }
+
+    if backup_path.exists() {
+        let backup = fs::read(&backup_path).map_err(|e| AppError::io(&backup_path, e))?;
+        atomic_write(&cache_path, &backup)?;
+        delete_file(&backup_path).ok();
+    } else {
+        delete_file(&cache_path).ok();
+    }
+    Ok(())
+}
+
 /// Generate Codex `model_catalog_json` from provider settings and inject/remove
 /// the top-level TOML field that points Codex to the generated file.
 pub fn prepare_codex_config_text_with_model_catalog(
@@ -856,8 +959,10 @@ pub fn prepare_codex_config_text_with_model_catalog(
     if let Some(catalog) = codex_model_catalog_from_settings(settings, config_text)? {
         let config_text = set_codex_model_catalog_json_field(config_text, Some(&catalog_path))?;
         write_json_file(&catalog_path, &catalog)?;
+        sync_codex_models_cache_with_cc_switch_catalog(&catalog)?;
         Ok(config_text)
     } else {
+        restore_codex_models_cache_if_cc_switch_owned()?;
         set_codex_model_catalog_json_field(config_text, None)
     }
 }
@@ -1631,6 +1736,71 @@ pub fn remove_codex_toml_base_url_if(toml_str: &str, predicate: impl Fn(&str) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
+
+    /// 测试专用的临时 Codex home，避免读写用户真实 `~/.codex`。
+    struct TestHomeGuard {
+        _dir: tempfile::TempDir,
+        original_home: Option<String>,
+        original_userprofile: Option<String>,
+        original_test_home: Option<String>,
+    }
+
+    impl TestHomeGuard {
+        /// 创建隔离 home 并暂时覆盖环境变量，Drop 时自动恢复现场。
+        fn new() -> Self {
+            let dir = tempfile::tempdir().expect("create temp home");
+            let original_home = std::env::var("HOME").ok();
+            let original_userprofile = std::env::var("USERPROFILE").ok();
+            let original_test_home = std::env::var("CC_SWITCH_TEST_HOME").ok();
+
+            std::env::set_var("HOME", dir.path());
+            std::env::set_var("USERPROFILE", dir.path());
+            std::env::set_var("CC_SWITCH_TEST_HOME", dir.path());
+
+            Self {
+                _dir: dir,
+                original_home,
+                original_userprofile,
+                original_test_home,
+            }
+        }
+    }
+
+    impl Drop for TestHomeGuard {
+        /// 释放测试 home 时恢复环境变量，避免串扰后续串行或并行测试。
+        fn drop(&mut self) {
+            match &self.original_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+            match &self.original_userprofile {
+                Some(value) => std::env::set_var("USERPROFILE", value),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+            match &self.original_test_home {
+                Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+                None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+            }
+        }
+    }
+
+    /// 写入一份带官方 client_version 的模型缓存，模拟 Codex 已经启动过的环境。
+    fn seed_codex_models_cache(models: Value) {
+        let cache_path = get_codex_models_cache_path();
+        std::fs::create_dir_all(cache_path.parent().expect("cache parent"))
+            .expect("create cache parent");
+        write_json_file(
+            &cache_path,
+            &json!({
+                "fetched_at": "2026-06-01T00:00:00.000000000Z",
+                "etag": "official-cache",
+                "client_version": "0.140.0",
+                "models": models,
+            }),
+        )
+        .expect("seed models cache");
+    }
     use serde_json::json;
 
     #[test]
@@ -3098,5 +3268,113 @@ model_catalog_json = "cc-switch-model-catalog.json"
             parsed.get("model_catalog_json").is_none(),
             "None arm should remove relative cc-switch-owned field"
         );
+    }
+
+    #[test]
+    #[serial]
+    /// custom MultiRouter 应同步 models_cache，让运行中的 Codex 菜单能看到 Qwen/DeepSeek。
+    fn model_catalog_syncs_codex_models_cache_for_custom_provider_picker() {
+        let _home = TestHomeGuard::new();
+        seed_codex_models_cache(json!([{
+            "slug": "gpt-5.5",
+            "display_name": "GPT-5.5",
+            "model_messages": { "instructions_template": "template" },
+            "context_window": 128000
+        }]));
+        let settings = json!({
+            "modelCatalog": {
+                "models": [
+                    { "model": "gpt-5.5", "displayName": "GPT-5.5" },
+                    { "model": "qwen3.6", "displayName": "Qwen 3.6" },
+                    { "model": "deepseek-v4-flash", "displayName": "DeepSeek V4 Flash" }
+                ]
+            },
+            "codexRouting": {
+                "enabled": true,
+                "routes": [
+                    { "id": "qwen", "enabled": true, "match": { "models": ["qwen3.6"] } },
+                    { "id": "deepseek", "enabled": true, "match": { "models": ["deepseek-v4-flash"] } }
+                ]
+            }
+        });
+        let config = r#"model_provider = "custom"
+
+[model_providers.custom]
+base_url = "http://127.0.0.1:15721/v1"
+"#;
+
+        let prepared = prepare_codex_config_text_with_model_catalog(&settings, config)
+            .expect("prepare config");
+        assert!(prepared.contains("model_catalog_json"));
+
+        let cache: Value = read_json_file(&get_codex_models_cache_path()).expect("read cache");
+        let slugs = cache
+            .get("models")
+            .and_then(|models| models.as_array())
+            .expect("models array")
+            .iter()
+            .filter_map(|model| model.get("slug").and_then(|slug| slug.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            cache.get("etag").and_then(|etag| etag.as_str()),
+            Some(CC_SWITCH_CODEX_MODELS_CACHE_ETAG)
+        );
+        assert_eq!(
+            cache
+                .get("client_version")
+                .and_then(|version| version.as_str()),
+            Some("0.140.0")
+        );
+        assert!(slugs.contains(&"qwen3.6"));
+        assert!(slugs.contains(&"deepseek-v4-flash"));
+    }
+
+    #[test]
+    #[serial]
+    /// 退出 MultiRouter 后只恢复 CC Switch 接管过的缓存，避免污染 official backup。
+    fn removing_model_catalog_restores_previous_codex_models_cache() {
+        let _home = TestHomeGuard::new();
+        seed_codex_models_cache(json!([{
+            "slug": "gpt-5.5",
+            "display_name": "GPT-5.5",
+            "model_messages": { "instructions_template": "template" },
+            "context_window": 128000
+        }]));
+        let settings = json!({
+            "modelCatalog": {
+                "models": [
+                    { "model": "gpt-5.5", "displayName": "GPT-5.5" },
+                    { "model": "qwen3.6", "displayName": "Qwen 3.6" }
+                ]
+            }
+        });
+        let config = r#"model_provider = "custom"
+
+[model_providers.custom]
+base_url = "http://127.0.0.1:15721/v1"
+"#;
+        prepare_codex_config_text_with_model_catalog(&settings, config).expect("prepare config");
+
+        let official_config = r#"model_provider = "openai"
+model_catalog_json = "cc-switch-model-catalog.json"
+"#;
+        let restored =
+            prepare_codex_config_text_with_model_catalog(&json!({}), official_config).unwrap();
+        assert!(!restored.contains("model_catalog_json"));
+
+        let cache: Value =
+            read_json_file(&get_codex_models_cache_path()).expect("read restored cache");
+        assert_eq!(
+            cache.get("etag").and_then(|etag| etag.as_str()),
+            Some("official-cache")
+        );
+        let slugs = cache
+            .get("models")
+            .and_then(|models| models.as_array())
+            .expect("models array")
+            .iter()
+            .filter_map(|model| model.get("slug").and_then(|slug| slug.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(slugs, vec!["gpt-5.5"]);
     }
 }
