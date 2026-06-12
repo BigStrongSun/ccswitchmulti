@@ -267,6 +267,12 @@ function App() {
     );
     return target?.provider_id;
   }, [proxyStatus?.active_targets, activeApp]);
+  const codexActiveProviderId = useMemo(() => {
+    const target = proxyStatus?.active_targets?.find(
+      (t) => t.app_type === "codex",
+    );
+    return target?.provider_id;
+  }, [proxyStatus?.active_targets]);
 
   const { data, isLoading, refetch } = useProvidersQuery(activeApp, {
     isProxyRunning,
@@ -893,6 +899,10 @@ function App() {
           return (
             <CodexRouterWorkspacePage
               providers={Object.values(providers)}
+              proxyStatus={proxyStatus}
+              isProxyRunning={isProxyRunning}
+              isCodexTakeoverActive={Boolean(takeoverStatus?.codex)}
+              activeProviderId={codexActiveProviderId}
               onEditProvider={(provider) => {
                 setActiveApp("codex");
                 setEditingProvider(provider);

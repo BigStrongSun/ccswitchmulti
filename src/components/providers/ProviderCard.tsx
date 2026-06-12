@@ -102,7 +102,8 @@ function isOfficialProvider(provider: Provider, appId: AppId): boolean {
 
 // Codex router 的官方 OAuth 写在 route 里，外层 provider 仍然要通过本地代理接管。
 function hasCodexRoutingConfig(provider: Provider): boolean {
-  const routing = (provider.settingsConfig as Record<string, any>)?.codexRouting;
+  const routing = (provider.settingsConfig as Record<string, any>)
+    ?.codexRouting;
   if (!routing || typeof routing !== "object") return false;
   return (
     routing.enabled !== false ||
@@ -228,8 +229,7 @@ export function ProviderCard({
     appId === "hermes" && isHermesReadOnlyProvider(provider.settingsConfig);
   const isCodexOauth =
     provider.meta?.providerType === PROVIDER_TYPES.CODEX_OAUTH;
-  const codexHasRouting =
-    appId === "codex" && hasCodexRoutingConfig(provider);
+  const codexHasRouting = appId === "codex" && hasCodexRoutingConfig(provider);
   const codexNeedsRouting = useMemo(() => {
     if (appId !== "codex") return false;
     if (hasCodexRoutingConfig(provider)) return true;
@@ -401,13 +401,18 @@ export function ProviderCard({
                   </span>
                 )}
 
-              {codexNeedsRouting && (
-                <span className="inline-flex items-center rounded-md bg-sky-100 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700 dark:bg-sky-900/40 dark:text-sky-300">
-                  {t("codex.needsRouting", {
-                    defaultValue: "需要路由",
-                  })}
-                </span>
-              )}
+              {codexNeedsRouting &&
+                (codexHasRouting ? (
+                  <span className="inline-flex items-center rounded-md bg-blue-100 px-1.5 py-0.5 text-[10px] font-semibold text-blue-700 dark:bg-blue-900/40 dark:text-blue-300">
+                    MultiRouter
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center rounded-md bg-sky-100 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700 dark:bg-sky-900/40 dark:text-sky-300">
+                    {t("codex.needsRouting", {
+                      defaultValue: "需要路由转换",
+                    })}
+                  </span>
+                ))}
 
               {appId === "claude" && provider.category === "official" && (
                 <span className="inline-flex items-center rounded-md bg-slate-200 px-1.5 py-0.5 text-[10px] font-semibold text-slate-700 dark:bg-slate-700/60 dark:text-slate-200">
@@ -420,12 +425,12 @@ export function ProviderCard({
               {appId === "codex" &&
                 provider.category === "official" &&
                 !codexHasRouting && (
-                <span className="inline-flex items-center rounded-md bg-slate-200 px-1.5 py-0.5 text-[10px] font-semibold text-slate-700 dark:bg-slate-700/60 dark:text-slate-200">
-                  {t("codex.noRoutingSupport", {
-                    defaultValue: "不支持路由",
-                  })}
-                </span>
-              )}
+                  <span className="inline-flex items-center rounded-md bg-slate-200 px-1.5 py-0.5 text-[10px] font-semibold text-slate-700 dark:bg-slate-700/60 dark:text-slate-200">
+                    {t("codex.noRoutingSupport", {
+                      defaultValue: "不支持路由",
+                    })}
+                  </span>
+                )}
 
               {isProxyRunning && isInFailoverQueue && health && (
                 <ProviderHealthBadge

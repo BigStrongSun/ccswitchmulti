@@ -6,6 +6,7 @@ import {
   Clipboard,
   Database,
   FileClock,
+  GitFork,
   GitBranch,
   Layers3,
   Pencil,
@@ -22,10 +23,19 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useRequestLogs } from "@/lib/query/usage";
 import { cn } from "@/lib/utils";
 import type { Provider } from "@/types";
+import type { RequestLog } from "@/types/usage";
+import type { ProxyStatus } from "@/types/proxy";
 
-type WorkspaceTab = "overview" | "sources" | "routes" | "test" | "records";
+type WorkspaceTab =
+  | "overview"
+  | "sources"
+  | "routes"
+  | "status"
+  | "test"
+  | "records";
 
 type CodexRoute = {
   id?: string;
@@ -83,6 +93,17 @@ type RouteEntry = {
   provider: Provider;
   route: CodexRoute;
   index: number;
+};
+
+type RouteTrafficRow = {
+  providerId: string;
+  providerName: string;
+  model: string;
+  requestCount: number;
+  successCount: number;
+  failedCount: number;
+  totalTokens: number;
+  avgLatencyMs: number;
 };
 
 /// 从 Provider 私有配置里读取 Codex 多模型路由配置；没有配置时返回 null，避免把普通模型源误判成路由方案。
@@ -211,13 +232,122 @@ function collectRouteModels(routes: RouteEntry[]): string[] {
   return Array.from(new Set(modelNames.filter(Boolean)));
 }
 
+/// 判断请求模型是否命中某条 route；状态页用它把外层 router 日志重新归属到子 provider。
+function routeMatchesModel(route: CodexRoute, model: string): boolean {
+  const normalized = model.trim();
+  if (!normalized) return false;
+  const models = route.match?.models ?? [];
+  const prefixes = route.match?.prefixes ?? [];
+  return (
+    models.includes(normalized) ||
+    prefixes.some((prefix) => normalized.startsWith(prefix))
+  );
+}
+
+/// 收集当前多路方案引用到的子 provider，避免状态页把普通 Codex provider 和 route target 混在一起。
+function collectTargetProviderIds(
+  routes: RouteEntry[],
+  selectedPlan?: Provider | null,
+): Set<string> {
+  const ids = new Set<string>();
+  for (const entry of routes) {
+    if (selectedPlan && entry.provider.id !== selectedPlan.id) continue;
+    const targetProviderId = routeTargetProviderId(entry.route);
+    if (targetProviderId) ids.add(targetProviderId);
+  }
+  return ids;
+}
+
+/// 从请求日志聚合 MultiRouter 子 provider / model 流量；无法归属的日志留给状态页单独提示。
+function buildRouteTrafficRows({
+  logs,
+  routes,
+  selectedPlan,
+  providersById,
+}: {
+  logs: RequestLog[];
+  routes: RouteEntry[];
+  selectedPlan: Provider | null;
+  providersById: Map<string, Provider>;
+}): RouteTrafficRow[] {
+  const selectedRoutes = selectedPlan
+    ? routes.filter((entry) => entry.provider.id === selectedPlan.id)
+    : routes;
+  const targetProviderIds = collectTargetProviderIds(routes, selectedPlan);
+  const buckets = new Map<
+    string,
+    RouteTrafficRow & { latencyTotalMs: number }
+  >();
+
+  for (const log of logs) {
+    if (log.appType !== "codex") continue;
+    const requestedModel = log.requestModel || log.model;
+    const matchedRoute = selectedRoutes.find(({ route }) =>
+      routeMatchesModel(route, requestedModel),
+    );
+    const routeTargetId = matchedRoute
+      ? routeTargetProviderId(matchedRoute.route)
+      : undefined;
+    const providerId =
+      routeTargetId ||
+      (targetProviderIds.has(log.providerId) ? log.providerId : undefined);
+    if (!providerId) continue;
+
+    const provider = providersById.get(providerId);
+    const model = requestedModel || log.model || "unknown";
+    const key = `${providerId}::${model}`;
+    const current =
+      buckets.get(key) ??
+      ({
+        providerId,
+        providerName: provider?.name ?? log.providerName ?? providerId,
+        model,
+        requestCount: 0,
+        successCount: 0,
+        failedCount: 0,
+        totalTokens: 0,
+        avgLatencyMs: 0,
+        latencyTotalMs: 0,
+      } satisfies RouteTrafficRow & { latencyTotalMs: number });
+
+    current.requestCount += 1;
+    if (log.statusCode >= 200 && log.statusCode < 400) {
+      current.successCount += 1;
+    } else {
+      current.failedCount += 1;
+    }
+    current.totalTokens +=
+      log.inputTokens +
+      log.outputTokens +
+      log.cacheReadTokens +
+      log.cacheCreationTokens;
+    current.latencyTotalMs += log.latencyMs;
+    current.avgLatencyMs = Math.round(
+      current.latencyTotalMs / current.requestCount,
+    );
+    buckets.set(key, current);
+  }
+
+  return Array.from(buckets.values())
+    .map(({ latencyTotalMs: _latencyTotalMs, ...row }) => row)
+    .sort((a, b) => b.requestCount - a.requestCount);
+}
+
 /// 显示 Codex 多模型路由工作台；它只复用 Provider 配置，不创建第二套数据库或切换 current provider。
 export function CodexRouterWorkspacePage({
   providers,
+  proxyStatus,
+  isProxyRunning,
+  isCodexTakeoverActive,
+  activeProviderId,
   onEditProvider,
   onCreateProvider,
 }: {
   providers: Provider[];
+  proxyStatus?: ProxyStatus;
+  isProxyRunning: boolean;
+  isCodexTakeoverActive: boolean;
+  activeProviderId?: string;
   onEditProvider: (provider: Provider) => void;
   onCreateProvider: () => void;
 }) {
@@ -371,7 +501,7 @@ export function CodexRouterWorkspacePage({
           onValueChange={(value) => setActiveTab(value as WorkspaceTab)}
         >
           <div className="sticky top-0 z-10 -mx-1 bg-background/95 px-1 py-2 backdrop-blur">
-            <TabsList className="grid w-full grid-cols-5 bg-slate-950/40 p-1">
+            <TabsList className="grid w-full grid-cols-6 bg-slate-950/40 p-1">
               <WorkspaceTabTrigger
                 value="overview"
                 icon={Layers3}
@@ -386,6 +516,11 @@ export function CodexRouterWorkspacePage({
                 value="routes"
                 icon={Route}
                 label="路由规则"
+              />
+              <WorkspaceTabTrigger
+                value="status"
+                icon={Activity}
+                label="状态"
               />
               <WorkspaceTabTrigger value="test" icon={Play} label="测试发布" />
               <WorkspaceTabTrigger
@@ -430,6 +565,20 @@ export function CodexRouterWorkspacePage({
               onSelectPlan={handleSelectPlan}
               onSelectRoute={handleSelectRoute}
               providersById={providersById}
+            />
+          </TabsContent>
+
+          <TabsContent value="status" className="mt-3">
+            <StatusTab
+              selectedPlan={selectedPlan}
+              selectedRouting={selectedRouting}
+              routeEntries={routeEntries}
+              providersById={providersById}
+              proxyStatus={proxyStatus}
+              isProxyRunning={isProxyRunning}
+              isCodexTakeoverActive={isCodexTakeoverActive}
+              activeProviderId={activeProviderId}
+              onEditPlan={handleEditPlan}
             />
           </TabsContent>
 
@@ -939,6 +1088,260 @@ function RoutesTab({
   );
 }
 
+/// 状态页把代理运行态、Codex 接管态、路由配置态和最近流量放在同一视图里。
+function StatusTab({
+  selectedPlan,
+  selectedRouting,
+  routeEntries,
+  providersById,
+  proxyStatus,
+  isProxyRunning,
+  isCodexTakeoverActive,
+  activeProviderId,
+  onEditPlan,
+}: {
+  selectedPlan: Provider | null;
+  selectedRouting: CodexRouting | null;
+  routeEntries: RouteEntry[];
+  providersById: Map<string, Provider>;
+  proxyStatus?: ProxyStatus;
+  isProxyRunning: boolean;
+  isCodexTakeoverActive: boolean;
+  activeProviderId?: string;
+  onEditPlan: (provider: Provider, detail?: string) => void;
+}) {
+  const range = useMemo(() => ({ preset: "today" as const }), []);
+  const { data: requestLogs, isLoading } = useRequestLogs({
+    filters: { appType: "codex" },
+    range,
+    page: 0,
+    pageSize: 500,
+    options: { refetchInterval: 5000 },
+  });
+  const logs = requestLogs?.data ?? [];
+  const selectedRoutes = selectedPlan
+    ? routeEntries.filter(({ provider }) => provider.id === selectedPlan.id)
+    : routeEntries;
+  const targetProviderIds = collectTargetProviderIds(
+    routeEntries,
+    selectedPlan,
+  );
+  const trafficRows = buildRouteTrafficRows({
+    logs,
+    routes: routeEntries,
+    selectedPlan,
+    providersById,
+  });
+  const routerLogs = selectedPlan
+    ? logs.filter((log) => log.providerId === selectedPlan.id)
+    : [];
+  const routedLogs = logs.filter((log) =>
+    trafficRows.some(
+      (row) =>
+        row.providerId === log.providerId ||
+        row.model === (log.requestModel || log.model),
+    ),
+  );
+  const latestLog = logs[0];
+  const latestForwardOk = latestLog
+    ? latestLog.statusCode >= 200 && latestLog.statusCode < 400
+    : false;
+  const listenAddress = proxyStatus
+    ? `${proxyStatus.address}:${proxyStatus.port}`
+    : "未启动";
+  const activeTargetLabel =
+    activeProviderId && providersById.get(activeProviderId)
+      ? `${providersById.get(activeProviderId)?.name} (${activeProviderId})`
+      : activeProviderId || "未命中";
+  const routeEnabled = selectedRouting?.enabled !== false;
+  const linkOnline = Boolean(
+    isProxyRunning && isCodexTakeoverActive && selectedPlan && routeEnabled,
+  );
+
+  return (
+    <div className="space-y-4">
+      <section className="rounded-lg border border-slate-700 bg-slate-950/40 p-4">
+        <SectionHeader
+          icon={Activity}
+          title="链路状态"
+          detail="这里展示 Codex 到 CC Switch 再到各个子供应商的当前运行状态。"
+          action={
+            selectedPlan ? (
+              <Button
+                size="sm"
+                onClick={() => onEditPlan(selectedPlan, "打开多路路由配置")}
+                className="gap-2 bg-blue-600 hover:bg-blue-500"
+              >
+                <Pencil className="h-4 w-4" />
+                编辑配置
+              </Button>
+            ) : null
+          }
+        />
+        <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+          <StatusCard
+            ok={linkOnline}
+            label="当前链路"
+            value={linkOnline ? "在线" : "未就绪"}
+            detail="需要监听、Codex 接管和 MultiRouter 同时启用"
+          />
+          <StatusCard
+            ok={isProxyRunning}
+            label="监听"
+            value={isProxyRunning ? "成功" : "未启动"}
+            detail={listenAddress}
+          />
+          <StatusCard
+            ok={isCodexTakeoverActive}
+            label="Codex 接管"
+            value={isCodexTakeoverActive ? "已接管" : "未接管"}
+            detail="Codex 请求需要指向本地代理才会进入路由"
+          />
+          <StatusCard
+            ok={Boolean(selectedPlan && routeEnabled)}
+            label="多路路由"
+            value={
+              selectedPlan ? (routeEnabled ? "已启用" : "已关闭") : "未选择"
+            }
+            detail={selectedPlan?.name ?? "暂无 MultiRouter provider"}
+          />
+          <StatusCard
+            ok={Boolean(latestLog && latestForwardOk)}
+            label="最近转发"
+            value={
+              latestLog
+                ? latestForwardOk
+                  ? `成功 ${latestLog.statusCode}`
+                  : `失败 ${latestLog.statusCode}`
+                : "暂无请求"
+            }
+            detail={
+              latestLog?.errorMessage ||
+              latestLog?.requestModel ||
+              latestLog?.model ||
+              "等待 Codex 请求"
+            }
+          />
+        </div>
+        <div className="mt-4 grid gap-3 text-sm md:grid-cols-3">
+          <DetailRow label="当前代理目标" value={activeTargetLabel} />
+          <DetailRow
+            label="代理累计请求"
+            value={`${proxyStatus?.total_requests ?? 0} 次，成功率 ${proxyStatus?.success_rate ?? 0}%`}
+          />
+          <DetailRow
+            label="最近错误"
+            value={proxyStatus?.last_error || latestLog?.errorMessage || "无"}
+          />
+        </div>
+      </section>
+
+      <section className="rounded-lg border border-blue-700/40 bg-blue-950/15 p-4">
+        <SectionHeader
+          icon={GitFork}
+          title="分流子 Provider"
+          detail="这些子 Provider 来自当前 MultiRouter 的 route target，转换层跟随各自供应商配置。"
+        />
+        <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+          {selectedRoutes.map((entry) => {
+            const targetProviderId = routeTargetProviderId(entry.route);
+            const targetProvider = routeTargetProvider(
+              entry.route,
+              providersById,
+            );
+            return (
+              <div
+                key={`${entry.provider.id}-${entry.route.id ?? entry.index}`}
+                className="rounded-lg border border-slate-700 bg-slate-950/50 p-3"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-semibold text-slate-100">
+                      {targetProvider?.name ?? targetProviderId ?? "内联上游"}
+                    </div>
+                    <div className="mt-1 truncate text-xs text-slate-400">
+                      {entry.route.label || entry.route.id || "未命名规则"}
+                    </div>
+                  </div>
+                  <Badge
+                    className={cn(
+                      "border",
+                      entry.route.enabled === false
+                        ? "border-slate-500/50 bg-slate-500/10 text-slate-200"
+                        : "border-emerald-500/50 bg-emerald-500/15 text-emerald-100",
+                    )}
+                  >
+                    {entry.route.enabled === false ? "停用" : "启用"}
+                  </Badge>
+                </div>
+                <div className="mt-3 text-xs leading-5 text-slate-400">
+                  {routeMatchSummary(entry.route)}
+                </div>
+              </div>
+            );
+          })}
+          {selectedRoutes.length === 0 && (
+            <EmptyState
+              icon={Route}
+              title="还没有分流规则"
+              detail="添加 route 后，这里会列出每个子 Provider 和它负责的模型。"
+              actionLabel="编辑多路路由"
+              onAction={() => selectedPlan && onEditPlan(selectedPlan)}
+            />
+          )}
+        </div>
+      </section>
+
+      <section className="rounded-lg border border-emerald-700/40 bg-emerald-950/10 p-4">
+        <SectionHeader
+          icon={Database}
+          title="今日子 Provider / Model 流量"
+          detail="基于 Codex 请求日志聚合；若后端只记录外层 MultiRouter，页面会按 requestModel 尝试回归属到 route target。"
+        />
+        <div className="mt-3 overflow-hidden rounded-lg border border-slate-700">
+          <div className="grid grid-cols-[1.2fr_1.2fr_0.7fr_0.7fr_0.8fr_0.8fr] gap-2 bg-slate-900/80 px-3 py-2 text-xs font-semibold text-slate-300">
+            <span>Provider</span>
+            <span>Model</span>
+            <span className="text-right">请求</span>
+            <span className="text-right">失败</span>
+            <span className="text-right">Tokens</span>
+            <span className="text-right">延迟</span>
+          </div>
+          {isLoading ? (
+            <div className="p-4 text-sm text-slate-400">正在读取统计...</div>
+          ) : trafficRows.length > 0 ? (
+            trafficRows.map((row) => (
+              <div
+                key={`${row.providerId}-${row.model}`}
+                className="grid grid-cols-[1.2fr_1.2fr_0.7fr_0.7fr_0.8fr_0.8fr] gap-2 border-t border-slate-800 px-3 py-2 text-xs text-slate-300"
+              >
+                <span className="truncate">{row.providerName}</span>
+                <span className="truncate font-mono">{row.model}</span>
+                <span className="text-right">{row.requestCount}</span>
+                <span className="text-right">{row.failedCount}</span>
+                <span className="text-right">
+                  {row.totalTokens.toLocaleString()}
+                </span>
+                <span className="text-right">{row.avgLatencyMs}ms</span>
+              </div>
+            ))
+          ) : (
+            <div className="p-4 text-sm leading-6 text-slate-400">
+              暂无可归属到子 Provider 的请求日志。今日 Codex 日志 {logs.length}{" "}
+              条， 外层 MultiRouter 日志 {routerLogs.length} 条，目标 Provider
+              数 {targetProviderIds.size} 个。
+            </div>
+          )}
+        </div>
+        <div className="mt-3 text-xs text-slate-500">
+          已尝试归属日志 {routedLogs.length} 条；这里显示最近 500 条 Codex
+          请求的实时聚合。
+        </div>
+      </section>
+    </div>
+  );
+}
+
 /// 测试发布页只做本地匹配预览，并展示下一步如何发布到 Codex。
 function TestTab({
   selectedPlan,
@@ -1098,6 +1501,39 @@ function RecordsTab({
         ))}
       </div>
     </section>
+  );
+}
+
+/// 状态卡用于表达在线/离线这类二值信号，避免用户在长文本里找关键状态。
+function StatusCard({
+  ok,
+  label,
+  value,
+  detail,
+}: {
+  ok: boolean;
+  label: string;
+  value: string;
+  detail: string;
+}) {
+  return (
+    <div
+      className={cn(
+        "rounded-lg border p-3",
+        ok
+          ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-100"
+          : "border-amber-500/40 bg-amber-500/10 text-amber-100",
+      )}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs opacity-80">{label}</span>
+        <span className="h-2.5 w-2.5 rounded-full bg-current" />
+      </div>
+      <div className="mt-2 text-lg font-semibold text-white">{value}</div>
+      <div className="mt-1 truncate text-xs opacity-75" title={detail}>
+        {detail}
+      </div>
+    </div>
   );
 }
 
