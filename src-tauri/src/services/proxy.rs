@@ -970,7 +970,6 @@ impl ProxyService {
             let _ = self.restore_live_config_for_app_inner(app_type).await;
             return Err(e);
         }
-
         let provider = self
             .db
             .get_provider_by_id(provider_id, app_type_str)
@@ -995,6 +994,22 @@ impl ProxyService {
             server
                 .set_active_target(app_type_str, &provider.id, &provider.name)
                 .await;
+        }
+
+        if let Err(e) = self
+            .verify_takeover_activation_after_write(app_type, provider_id)
+            .await
+        {
+            if let Some(previous_id) = previous_current.as_deref() {
+                let _ = self.db.set_current_provider(app_type_str, previous_id);
+                let _ = crate::settings::set_current_provider(app_type, Some(previous_id));
+            }
+            if let Ok(mut config) = self.db.get_proxy_config_for_app(app_type_str).await {
+                config.enabled = false;
+                let _ = self.db.update_proxy_config_for_app(config).await;
+            }
+            let _ = self.restore_live_config_for_app_inner(app_type).await;
+            return Err(e);
         }
 
         Ok(())
@@ -1990,6 +2005,45 @@ impl ProxyService {
             }
             _ => Ok(false),
         }
+    }
+
+    /// 校验刚写入的接管配置是否真的能被客户端命中。
+    ///
+    /// 这里不信任 UI/DB 的“已启用”状态，而是同时检查本地代理进程和
+    /// 目标应用的 live 配置。Codex Desktop 场景里，若这里通过但请求仍未
+    /// 进入 15721，后续排障就可以明确落到 Desktop App 已加载会话未刷新配置。
+    async fn verify_takeover_activation_after_write(
+        &self,
+        app_type: &AppType,
+        provider_id: &str,
+    ) -> Result<(), String> {
+        let app_type_str = app_type.as_str();
+        let (proxy_url, proxy_codex_base_url) = self.build_proxy_urls().await?;
+        let proxy_running = self.is_running().await;
+        let live_matches = self.live_takeover_matches_current_proxy(app_type).await?;
+
+        log::info!(
+            "takeover_activation_check app={app_type_str} provider={provider_id} proxy_running={proxy_running} expected_proxy_url={proxy_url} expected_codex_base_url={proxy_codex_base_url} live_matches_current_proxy={live_matches}"
+        );
+
+        if !proxy_running || !live_matches {
+            let config_path = match app_type {
+                AppType::Codex => Some(crate::codex_config::get_codex_config_path()),
+                _ => None,
+            };
+            log::error!(
+                "takeover_activation_failed app={app_type_str} provider={provider_id} proxy_running={proxy_running} live_matches_current_proxy={live_matches} config_path={}",
+                config_path
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "<not-codex>".to_string())
+            );
+            return Err(format!(
+                "{app_type_str} takeover 没有真正生效：proxy_running={proxy_running}, live_matches_current_proxy={live_matches}"
+            ));
+        }
+
+        Ok(())
     }
 
     fn cleanup_claude_takeover_placeholders_in_live(&self) -> Result<(), String> {
