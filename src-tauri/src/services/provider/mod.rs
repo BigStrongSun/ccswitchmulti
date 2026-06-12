@@ -10,6 +10,7 @@ mod usage;
 use indexmap::IndexMap;
 use serde::Deserialize;
 use serde_json::Value;
+use std::future::Future;
 
 use crate::app_config::AppType;
 use crate::database::{validate_cost_multiplier, validate_pricing_source};
@@ -43,6 +44,23 @@ use usage::validate_usage_script;
 
 /// Provider business logic service
 pub struct ProviderService;
+
+/// 在同步的 provider 命令里安全等待异步代理任务。
+///
+/// Tauri 的同步 command 不一定处在 Tokio reactor 中；直接用
+/// `futures::executor::block_on` 启动本地代理时，`tokio::net::TcpListener`
+/// 会因为缺少 reactor 而 panic。测试或已有异步上下文中继续复用当前
+/// Tokio 上下文，桌面 UI 同步入口则进入 Tauri runtime。
+pub(crate) fn block_on_tauri_runtime<F>(future: F) -> F::Output
+where
+    F: Future,
+{
+    if tokio::runtime::Handle::try_current().is_ok() {
+        futures::executor::block_on(future)
+    } else {
+        tauri::async_runtime::block_on(future)
+    }
+}
 
 /// Result of a provider switch operation, including any non-fatal warnings
 #[derive(Debug, serde::Serialize, Default)]
@@ -442,10 +460,6 @@ wire_api = "responses"
             None,
         );
         deepseek.category = Some("custom".to_string());
-        deepseek.meta = Some(ProviderMeta {
-            api_format: Some("openai_chat".to_string()),
-            ..Default::default()
-        });
 
         db.save_provider("codex", &current)
             .expect("save current provider");
@@ -487,6 +501,91 @@ wire_api = "responses"
         );
 
         state.proxy_service.stop().await.expect("stop proxy");
+    }
+
+    #[test]
+    #[serial]
+    fn switching_codex_chat_provider_from_sync_command_has_tokio_reactor() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let state = AppState::new(db.clone());
+        tauri::async_runtime::block_on(async {
+            let mut proxy_config = db.get_proxy_config().await.expect("get proxy config");
+            proxy_config.listen_port = 0;
+            db.update_proxy_config(proxy_config)
+                .await
+                .expect("use ephemeral proxy port");
+        });
+
+        let current_config = r#"model_provider = "openai"
+model = "gpt-5.4-mini"
+
+[model_providers.openai]
+name = "OpenAI"
+base_url = "https://api.openai.com/v1"
+wire_api = "responses"
+"#;
+        crate::codex_config::write_codex_live_atomic(
+            &json!({ "OPENAI_API_KEY": "old-openai-key" }),
+            Some(current_config),
+        )
+        .expect("seed Codex live config");
+
+        let current = Provider::with_id(
+            "openai".to_string(),
+            "OpenAI".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "old-openai-key" },
+                "config": current_config,
+            }),
+            None,
+        );
+        let mut deepseek = Provider::with_id(
+            "deepseek".to_string(),
+            "DeepSeek".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "deepseek-key" },
+                "config": r#"model_provider = "deepseek"
+model = "deepseek-chat"
+
+[model_providers.deepseek]
+name = "DeepSeek"
+base_url = "https://api.deepseek.com"
+wire_api = "responses"
+"#,
+            }),
+            None,
+        );
+        deepseek.category = Some("custom".to_string());
+        deepseek.meta = Some(ProviderMeta {
+            api_format: Some("openai_chat".to_string()),
+            ..Default::default()
+        });
+
+        db.save_provider("codex", &current)
+            .expect("save current provider");
+        db.save_provider("codex", &deepseek)
+            .expect("save DeepSeek provider");
+        db.set_current_provider("codex", "openai")
+            .expect("set current provider");
+        crate::settings::set_current_provider(&AppType::Codex, Some("openai"))
+            .expect("set local current provider");
+
+        ProviderService::switch(&state, AppType::Codex, "deepseek")
+            .expect("sync command path should start local proxy without Tokio reactor panic");
+
+        let live_config = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
+            .expect("read Codex live config");
+        assert!(
+            live_config.contains("http://127.0.0.1:") && live_config.contains("/v1"),
+            "Codex live config should point to the local proxy, got:\n{live_config}"
+        );
+
+        tauri::async_runtime::block_on(async {
+            state.proxy_service.stop().await.expect("stop proxy");
+        });
     }
 
     #[tokio::test]
@@ -1514,7 +1613,7 @@ impl ProviderService {
             // - 不直接走普通 Live 写入逻辑
             // - 改为更新 Live 备份，并在 Claude 下同步代理安全的 Live 配置
             let has_live_backup =
-                futures::executor::block_on(state.db.get_live_backup(app_type.as_str()))
+                block_on_tauri_runtime(state.db.get_live_backup(app_type.as_str()))
                     .ok()
                     .flatten()
                     .is_some();
@@ -1530,7 +1629,7 @@ impl ProviderService {
                 if matches!(app_type, AppType::ClaudeDesktop) {
                     write_live_with_common_config(state.db.as_ref(), &app_type, &provider)?;
                 } else {
-                    futures::executor::block_on(
+                    block_on_tauri_runtime(
                         state
                             .proxy_service
                             .update_live_backup_from_provider(app_type.as_str(), &provider),
@@ -1539,9 +1638,9 @@ impl ProviderService {
                 }
 
                 if matches!(app_type, AppType::Claude)
-                    && futures::executor::block_on(state.proxy_service.is_running())
+                    && block_on_tauri_runtime(state.proxy_service.is_running())
                 {
-                    futures::executor::block_on(
+                    block_on_tauri_runtime(
                         state
                             .proxy_service
                             .sync_claude_live_from_provider_while_proxy_active(&provider),
@@ -1726,7 +1825,7 @@ impl ProviderService {
         // normal live write.
         let _switch_guard =
             if matches!(app_type, AppType::Claude | AppType::Codex | AppType::Gemini) {
-                Some(futures::executor::block_on(
+                Some(block_on_tauri_runtime(
                     state.proxy_service.lock_switch_for_app(app_type.as_str()),
                 ))
             } else {
@@ -1736,11 +1835,10 @@ impl ProviderService {
         // Backup or live placeholders mean the live file is owned by proxy
         // takeover, even if the proxy server is temporarily stopped or is in the
         // activation window before enabled=true is committed.
-        let is_app_taken_over =
-            futures::executor::block_on(state.db.get_live_backup(app_type.as_str()))
-                .ok()
-                .flatten()
-                .is_some();
+        let is_app_taken_over = block_on_tauri_runtime(state.db.get_live_backup(app_type.as_str()))
+            .ok()
+            .flatten()
+            .is_some();
         let live_taken_over = state
             .proxy_service
             .detect_takeover_in_live_config_for_app(&app_type);
@@ -1752,7 +1850,7 @@ impl ProviderService {
         if should_hot_switch && _provider.category.as_deref() == Some("official") {
             // 官方兜底 provider 不是走本地代理热切，而是退出当前 app 的接管态后
             // 写回干净 live 配置；否则 Codex 会继续命中旧的本地 router。
-            futures::executor::block_on(
+            block_on_tauri_runtime(
                 state
                     .proxy_service
                     .disable_takeover_for_app_after_switch_lock(&app_type),
@@ -1774,7 +1872,7 @@ impl ProviderService {
                 "Codex provider '{}' 需要本地路由映射，自动启用 Codex 接管并通过本地代理转换",
                 id
             );
-            futures::executor::block_on(
+            block_on_tauri_runtime(
                 state
                     .proxy_service
                     .takeover_app_and_switch_provider_after_switch_lock(&app_type, id),
@@ -1794,7 +1892,7 @@ impl ProviderService {
                 id
             );
 
-            futures::executor::block_on(
+            block_on_tauri_runtime(
                 state
                     .proxy_service
                     .hot_switch_provider_inner(app_type.as_str(), id),
@@ -1971,11 +2069,10 @@ impl ProviderService {
             return Ok(());
         };
 
-        let has_live_backup =
-            futures::executor::block_on(state.db.get_live_backup(app_type.as_str()))
-                .ok()
-                .flatten()
-                .is_some();
+        let has_live_backup = block_on_tauri_runtime(state.db.get_live_backup(app_type.as_str()))
+            .ok()
+            .flatten()
+            .is_some();
 
         let live_taken_over = state
             .proxy_service
@@ -1989,7 +2086,7 @@ impl ProviderService {
                 return Ok(());
             }
 
-            futures::executor::block_on(
+            block_on_tauri_runtime(
                 state
                     .proxy_service
                     .update_live_backup_from_provider(app_type.as_str(), provider),

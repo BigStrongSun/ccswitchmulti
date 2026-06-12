@@ -5738,6 +5738,135 @@ requires_openai_auth = true
         );
     }
 
+    /// 回归测试：DeepSeek 这类 Chat Completions-only Codex provider 不能直接写进
+    /// Codex live config，否则 Codex 会拼出 `https://api.deepseek.com/responses`
+    /// 并 404。同步 UI 切换入口必须自动启用本地接管，同时把 DeepSeek 的模型目录
+    /// 写入 `model_catalog_json`，避免 Codex 前端只显示“自定义”。
+    #[test]
+    #[serial]
+    fn switching_codex_deepseek_from_sync_command_keeps_catalog_and_proxy_mapping() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        seed_codex_model_template();
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let state = crate::store::AppState::new(db.clone());
+        tauri::async_runtime::block_on(use_ephemeral_proxy_port(&db));
+
+        let openai_config = r#"model_provider = "openai"
+model = "gpt-5.4-mini"
+
+[model_providers.openai]
+name = "OpenAI"
+base_url = "https://api.openai.com/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#;
+        let mut openai = Provider::with_id(
+            "codex-official".to_string(),
+            "OpenAI Official Backup".to_string(),
+            json!({
+                "auth": {},
+                "config": openai_config,
+                "modelCatalog": { "models": [{ "model": "gpt-5.4-mini" }] }
+            }),
+            None,
+        );
+        openai.category = Some("official".to_string());
+
+        let deepseek_config = r#"model_provider = "deepseek"
+model = "deepseek-v4-flash"
+model_context_window = 1000000
+
+[model_providers.deepseek]
+name = "DeepSeek"
+base_url = "https://api.deepseek.com"
+wire_api = "responses"
+requires_openai_auth = true
+supports_websockets = false
+"#;
+        let mut deepseek = Provider::with_id(
+            "codex-deepseek".to_string(),
+            "DeepSeek".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "deepseek-key" },
+                "config": deepseek_config,
+                "modelCatalog": {
+                    "models": [
+                        { "model": "deepseek-v4-flash", "displayName": "DeepSeek V4 Flash", "contextWindow": 1000000 },
+                        { "model": "deepseek-v4-pro", "displayName": "DeepSeek V4 Pro", "contextWindow": 1000000 }
+                    ]
+                }
+            }),
+            None,
+        );
+        deepseek.category = Some("custom".to_string());
+        deepseek.meta = Some(ProviderMeta {
+            api_format: Some("openai_chat".to_string()),
+            ..Default::default()
+        });
+
+        db.save_provider("codex", &openai).expect("save openai");
+        db.save_provider("codex", &deepseek).expect("save deepseek");
+        db.set_current_provider("codex", "codex-official")
+            .expect("set current openai");
+        crate::settings::set_current_provider(&AppType::Codex, Some("codex-official"))
+            .expect("set local current openai");
+        crate::codex_config::write_codex_live_config_atomic(Some(openai_config))
+            .expect("seed openai live config");
+
+        crate::services::provider::ProviderService::switch(
+            &state,
+            AppType::Codex,
+            "codex-deepseek",
+        )
+        .expect("sync provider switch should enable proxy takeover");
+
+        let live_config = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
+            .expect("read Codex live config");
+        assert!(
+            live_config.contains("openai_base_url")
+                && live_config.contains("http://127.0.0.1:")
+                && live_config.contains("/v1"),
+            "DeepSeek live config must point Codex at the local proxy, got:\n{live_config}"
+        );
+        assert!(
+            live_config.contains("model_provider = \"openai\""),
+            "Codex should keep the Responses-capable built-in provider facade, got:\n{live_config}"
+        );
+        assert!(
+            live_config.contains("model_catalog_json"),
+            "DeepSeek takeover must keep a model_catalog_json pointer, got:\n{live_config}"
+        );
+        assert!(
+            !live_config.contains("https://api.deepseek.com"),
+            "DeepSeek upstream URL must stay behind the proxy during takeover, got:\n{live_config}"
+        );
+
+        let catalog_text =
+            std::fs::read_to_string(crate::codex_config::get_codex_model_catalog_path())
+                .expect("read generated catalog");
+        let catalog: Value = serde_json::from_str(&catalog_text).expect("parse catalog");
+        let slugs: Vec<&str> = catalog
+            .get("models")
+            .and_then(Value::as_array)
+            .map(|models| {
+                models
+                    .iter()
+                    .filter_map(|model| model.get("slug").and_then(Value::as_str))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            slugs.contains(&"deepseek-v4-flash") && slugs.contains(&"deepseek-v4-pro"),
+            "generated catalog must expose all DeepSeek models, got: {slugs:?}"
+        );
+
+        tauri::async_runtime::block_on(async {
+            state.proxy_service.stop().await.expect("stop proxy server");
+        });
+    }
+
     #[tokio::test]
     #[serial]
     async fn provider_switch_with_restored_codex_backup_propagates_catalog_write_errors() {

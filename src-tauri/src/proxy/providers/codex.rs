@@ -28,6 +28,7 @@ pub struct CodexAdapter;
 /// OpenAI Chat Completions, even if the local Codex client is talking to CC
 /// Switch through the Responses API.
 pub fn codex_provider_uses_chat_completions(provider: &Provider) -> bool {
+    // 显式元数据是用户/新版 UI 的最高优先级；它可以覆盖 URL 推断。
     if let Some(api_format) = provider
         .meta
         .as_ref()
@@ -48,6 +49,30 @@ pub fn codex_provider_uses_chat_completions(provider: &Provider) -> bool {
         return is_chat_wire_api(api_format);
     }
 
+    let configured_base_url = provider
+        .settings_config
+        .get("base_url")
+        .or_else(|| provider.settings_config.get("baseURL"))
+        .and_then(|v| v.as_str())
+        .map(ToString::to_string)
+        .or_else(|| {
+            provider
+                .settings_config
+                .get("config")
+                .and_then(|v| v.as_str())
+                .and_then(extract_codex_base_url_from_toml)
+        });
+
+    // 历史数据里 DeepSeek/Qwen 等 Chat Completions provider 可能被误存成
+    // `wire_api = "responses"`。这些上游并不提供 OpenAI Responses API，
+    // 必须在读取旧配置时按 URL 自动修正为本地 responses->chat 转换。
+    if configured_base_url
+        .as_deref()
+        .is_some_and(is_known_chat_completions_only_url)
+    {
+        return true;
+    }
+
     if let Some(wire_api) = provider
         .settings_config
         .get("config")
@@ -57,22 +82,11 @@ pub fn codex_provider_uses_chat_completions(provider: &Provider) -> bool {
         return is_chat_wire_api(&wire_api);
     }
 
-    if let Some(base_url) = provider
-        .settings_config
-        .get("base_url")
-        .or_else(|| provider.settings_config.get("baseURL"))
-        .and_then(|v| v.as_str())
-    {
-        return is_chat_completions_url(base_url);
+    if let Some(base_url) = configured_base_url {
+        return is_chat_completions_url(&base_url);
     }
 
-    provider
-        .settings_config
-        .get("config")
-        .and_then(|v| v.as_str())
-        .and_then(extract_codex_base_url_from_toml)
-        .map(|url| is_chat_completions_url(&url))
-        .unwrap_or(false)
+    false
 }
 
 pub fn should_convert_codex_responses_to_chat(provider: &Provider, endpoint: &str) -> bool {
@@ -136,15 +150,100 @@ pub fn resolve_codex_model_routed_provider(
     provider: &Provider,
     body: &JsonValue,
 ) -> Option<Provider> {
+    resolve_codex_model_routed_providers(provider, body)
+        .into_iter()
+        .next()
+}
+
+/// 解析 Codex router 的候选 route 链。
+///
+/// 第一项始终是当前请求模型最匹配的 route；后续项是同一 router 内其它 enabled route，
+/// 用于 official 高负载、首包 `response.failed` 等可重试错误后的降级。降级 route 会使用
+/// 自己的默认上游模型，而不是把 `gpt-*` 原样发给 DeepSeek/Qwen 这类不认识该模型名的上游。
+pub fn resolve_codex_model_routed_providers(
+    provider: &Provider,
+    body: &JsonValue,
+) -> Vec<Provider> {
     let request_model = body
         .get("model")
         .and_then(|value| value.as_str())
         .map(str::trim)
-        .filter(|model| !model.is_empty())?;
+        .filter(|model| !model.is_empty());
+    let Some(request_model) = request_model else {
+        return Vec::new();
+    };
 
-    let route = resolve_codex_route(provider, request_model)?;
+    let routes = resolve_codex_route_candidates(provider, request_model);
+    routes
+        .into_iter()
+        .map(|route| build_codex_routed_provider(provider, route, request_model))
+        .collect()
+}
 
-    Some(build_codex_routed_provider(provider, route, request_model))
+/// 从新旧配置中挑出本次请求的 route 候选；匹配 route 在前，fallback route 在后。
+fn resolve_codex_route_candidates<'a>(
+    provider: &'a Provider,
+    request_model: &str,
+) -> Vec<&'a JsonValue> {
+    if let Some(routing) = provider.settings_config.get("codexRouting") {
+        if routing
+            .get("enabled")
+            .and_then(|value| value.as_bool())
+            .is_some_and(|enabled| !enabled)
+        {
+            return Vec::new();
+        }
+
+        let Some(routes) = routing.get("routes").and_then(|value| value.as_array()) else {
+            return Vec::new();
+        };
+
+        let mut selected = Vec::new();
+        if let Some(route) = routes.iter().find(|route| {
+            codex_route_is_enabled(route) && codex_route_matches_model(route, request_model)
+        }) {
+            selected.push(route);
+        } else if let Some(default_route) = routing
+            .get("defaultRouteId")
+            .or_else(|| routing.get("default_route_id"))
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .and_then(|default_route_id| {
+                routes.iter().find(|route| {
+                    codex_route_is_enabled(route)
+                        && route
+                            .get("id")
+                            .and_then(|value| value.as_str())
+                            .is_some_and(|id| id.eq_ignore_ascii_case(default_route_id))
+                })
+            })
+        {
+            selected.push(default_route);
+        }
+
+        let primary_id = selected
+            .first()
+            .and_then(|route| route.get("id"))
+            .and_then(|value| value.as_str())
+            .map(|id| id.to_ascii_lowercase());
+        selected.extend(routes.iter().filter(|route| {
+            if !codex_route_is_enabled(route) {
+                return false;
+            }
+            let route_id = route
+                .get("id")
+                .and_then(|value| value.as_str())
+                .map(|id| id.to_ascii_lowercase());
+            route_id != primary_id
+        }));
+
+        return selected;
+    }
+
+    resolve_codex_route(provider, request_model)
+        .into_iter()
+        .collect()
 }
 
 /// 判断当前 effective Codex provider 是否声明为 text-only 输入。
@@ -344,6 +443,7 @@ fn build_codex_routed_provider(
                 .map(str::trim)
                 .filter(|model| !model.is_empty())
         })
+        .or_else(|| first_codex_route_model(route))
         .unwrap_or(request_model);
     settings.insert(
         "model".to_string(),
@@ -370,6 +470,10 @@ fn build_codex_routed_provider(
     settings.insert(
         "codexResolvedRouteId".to_string(),
         JsonValue::String(route_id.to_string()),
+    );
+    settings.insert(
+        "codexResolvedRouteMatched".to_string(),
+        JsonValue::Bool(codex_route_matches_model(route, request_model)),
     );
 
     routed.settings_config = JsonValue::Object(settings);
@@ -408,6 +512,19 @@ fn build_codex_routed_provider(
     routed.meta = Some(meta);
 
     routed
+}
+
+/// 读取 route 自己声明的第一个模型，用于跨模型 fallback 时的默认上游模型。
+fn first_codex_route_model(route: &JsonValue) -> Option<&str> {
+    let match_config = route.get("match").unwrap_or(route);
+    match_config
+        .get("models")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|model| model.as_str())
+        .map(str::trim)
+        .find(|model| !model.is_empty())
 }
 
 /// 解析 route 的上游 API 格式，并归一化到 provider meta 使用的枚举字符串。
@@ -603,6 +720,17 @@ pub fn apply_codex_chat_upstream_model(
 ) -> Option<String> {
     if !codex_provider_uses_chat_completions(provider) {
         return None;
+    }
+
+    if provider
+        .settings_config
+        .get("codexResolvedRouteMatched")
+        .and_then(|value| value.as_bool())
+        == Some(false)
+    {
+        let upstream_model = codex_provider_upstream_model(provider)?;
+        body["model"] = JsonValue::String(upstream_model.clone());
+        return Some(upstream_model);
     }
 
     let catalog_model_ids = codex_provider_catalog_model_ids(provider);
@@ -861,6 +989,26 @@ fn is_chat_completions_url(value: &str) -> bool {
         .ends_with("/chat/completions")
 }
 
+/// 判断是否为已知的 OpenAI Chat Completions-only 兼容上游。
+///
+/// 用于兼容旧数据：一些 provider 曾经把 `wire_api` 误写成 `responses`，
+/// 但真实服务端只提供 `/chat/completions`。
+fn is_known_chat_completions_only_url(value: &str) -> bool {
+    let lower = value.trim().to_ascii_lowercase();
+    is_chat_completions_url(&lower)
+        || [
+            "api.deepseek.com",
+            "api.moonshot.cn",
+            "dashscope.aliyuncs.com",
+            "open.bigmodel.cn",
+            "api.siliconflow.cn",
+            "openrouter.ai",
+            "vllm",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle))
+}
+
 /// `scheme://host` 之后没有路径段的纯 origin 形式。`build_url` 在这种情况下
 /// 会自动补 `/v1`；Stream Check 等同步生产路径的代码也需要同一判定。
 pub fn is_origin_only_url(value: &str) -> bool {
@@ -1059,6 +1207,18 @@ impl ProviderAdapter for CodexAdapter {
     fn build_url(&self, base_url: &str, endpoint: &str) -> String {
         let base_trimmed = base_url.trim_end_matches('/');
         let endpoint_trimmed = endpoint.trim_start_matches('/');
+
+        // ChatGPT Codex 后端不是标准 OpenAI `/v1` 服务。Codex 客户端命中
+        // 本地代理时会请求 `/v1/responses`，但上游真实路径必须是
+        // `/backend-api/codex/responses`。这里在 CodexAdapter 层做归一化，
+        // 避免多模型路由到托管 OAuth 时拼成不可用的
+        // `/backend-api/codex/v1/responses`。
+        if base_trimmed == "https://chatgpt.com/backend-api/codex" {
+            let normalized_endpoint = endpoint_trimmed
+                .strip_prefix("v1/")
+                .unwrap_or(endpoint_trimmed);
+            return format!("{base_trimmed}/{normalized_endpoint}");
+        }
 
         // OpenAI/Codex 的 base_url 可能是：
         // - 纯 origin: https://api.openai.com  (需要自动补 /v1)
@@ -1371,6 +1531,53 @@ mod tests {
     }
 
     #[test]
+    fn test_codex_router_returns_fallback_route_candidates_after_primary() {
+        let provider = create_provider(json!({
+            "codexRouting": {
+                "routes": [
+                    {
+                        "id": "official",
+                        "label": "Official",
+                        "match": { "models": ["gpt-5.5"], "prefixes": ["gpt-"] },
+                        "upstream": {
+                            "baseUrl": "https://chatgpt.com/backend-api/codex",
+                            "apiFormat": "openai_responses",
+                            "auth": { "source": "managed_codex_oauth" },
+                            "modelMap": { "gpt-5.5": "gpt-5.5" }
+                        }
+                    },
+                    {
+                        "id": "deepseek",
+                        "label": "DeepSeek",
+                        "match": { "models": ["deepseek-v4-flash"], "prefixes": ["deepseek-"] },
+                        "upstream": {
+                            "baseUrl": "https://api.deepseek.com",
+                            "apiFormat": "openai_chat",
+                            "auth": { "source": "provider_config" },
+                            "modelMap": { "deepseek-v4-flash": "deepseek-v4-flash" }
+                        }
+                    }
+                ],
+                "enabled": true
+            }
+        }));
+
+        let routed =
+            resolve_codex_model_routed_providers(&provider, &json!({ "model": "gpt-5.5" }));
+
+        assert_eq!(routed.len(), 2);
+        assert_eq!(routed[0].id, "test::route::official");
+        assert_eq!(routed[0].settings_config["model"], "gpt-5.5");
+        assert_eq!(routed[0].settings_config["codexResolvedRouteMatched"], true);
+        assert_eq!(routed[1].id, "test::route::deepseek");
+        assert_eq!(routed[1].settings_config["model"], "deepseek-v4-flash");
+        assert_eq!(
+            routed[1].settings_config["codexResolvedRouteMatched"],
+            false
+        );
+    }
+
+    #[test]
     fn test_codex_route_skips_disabled_matches() {
         let provider = create_provider(json!({
             "codexRouting": {
@@ -1579,6 +1786,10 @@ mod tests {
             adapter.extract_base_url(&routed).unwrap(),
             "https://chatgpt.com/backend-api/codex"
         );
+        assert_eq!(
+            adapter.build_url(&adapter.extract_base_url(&routed).unwrap(), "/v1/responses"),
+            "https://chatgpt.com/backend-api/codex/responses"
+        );
         assert_eq!(auth.strategy, AuthStrategy::CodexOAuth);
         assert!(!should_convert_codex_responses_to_chat(
             &routed,
@@ -1715,6 +1926,23 @@ base_url = "http://127.0.0.1:9999/v1"
         assert_eq!(url, "https://www.packyapi.com/v1/responses");
     }
 
+    #[test]
+    fn test_build_url_chatgpt_codex_backend_strips_openai_v1_prefix() {
+        let adapter = CodexAdapter::new();
+
+        let url = adapter.build_url("https://chatgpt.com/backend-api/codex", "/v1/responses");
+        assert_eq!(url, "https://chatgpt.com/backend-api/codex/responses");
+
+        let compact_url = adapter.build_url(
+            "https://chatgpt.com/backend-api/codex",
+            "/v1/responses/compact?conversation=1",
+        );
+        assert_eq!(
+            compact_url,
+            "https://chatgpt.com/backend-api/codex/responses/compact?conversation=1"
+        );
+    }
+
     // 官方客户端检测测试
     #[test]
     fn test_is_official_client_vscode() {
@@ -1769,6 +1997,48 @@ wire_api = "chat"
         assert!(!should_convert_codex_responses_to_chat(
             &provider,
             "/chat/completions"
+        ));
+    }
+
+    #[test]
+    fn test_codex_provider_uses_chat_completions_for_legacy_deepseek_responses_wire_api() {
+        let provider = create_provider(json!({
+            "config": r#"
+model_provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[model_providers.deepseek]
+name = "DeepSeek"
+base_url = "https://api.deepseek.com"
+wire_api = "responses"
+"#
+        }));
+
+        assert!(codex_provider_uses_chat_completions(&provider));
+        assert!(should_convert_codex_responses_to_chat(
+            &provider,
+            "/v1/responses"
+        ));
+    }
+
+    #[test]
+    fn test_codex_provider_keeps_openai_responses_wire_api() {
+        let provider = create_provider(json!({
+            "config": r#"
+model_provider = "openai"
+model = "gpt-5.4-mini"
+
+[model_providers.openai]
+name = "OpenAI"
+base_url = "https://api.openai.com/v1"
+wire_api = "responses"
+"#
+        }));
+
+        assert!(!codex_provider_uses_chat_completions(&provider));
+        assert!(!should_convert_codex_responses_to_chat(
+            &provider,
+            "/v1/responses"
         ));
     }
 
@@ -1881,6 +2151,44 @@ wire_api = "responses"
 
         assert_eq!(upstream_model.as_deref(), Some("kimi-k2"));
         assert_eq!(body.get("model").and_then(|v| v.as_str()), Some("kimi-k2"));
+    }
+
+    #[test]
+    fn test_apply_codex_chat_upstream_model_forces_unmatched_fallback_route_model() {
+        let mut provider = create_provider(json!({
+            "config": r#"
+model_provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[model_providers.deepseek]
+name = "DeepSeek"
+base_url = "https://api.deepseek.com/v1"
+wire_api = "responses"
+"#,
+            "modelCatalog": {
+                "models": [
+                    { "model": "gpt-5.5" },
+                    { "model": "deepseek-v4-flash" }
+                ]
+            },
+            "codexResolvedRouteMatched": false
+        }));
+        provider.meta = Some(crate::provider::ProviderMeta {
+            api_format: Some("openai_chat".to_string()),
+            ..Default::default()
+        });
+        let mut body = json!({
+            "model": "gpt-5.5",
+            "input": "ping"
+        });
+
+        let upstream_model = apply_codex_chat_upstream_model(&provider, &mut body);
+
+        assert_eq!(upstream_model.as_deref(), Some("deepseek-v4-flash"));
+        assert_eq!(
+            body.get("model").and_then(|v| v.as_str()),
+            Some("deepseek-v4-flash")
+        );
     }
 
     #[test]

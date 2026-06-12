@@ -285,14 +285,22 @@ fn extract_claude_session(
 
 /// 提取 Codex Session ID
 fn extract_codex_session(headers: &HeaderMap, body: &serde_json::Value) -> Option<SessionIdResult> {
-    // 1. 从 headers 提取
-    for header_name in &["session_id", "x-session-id"] {
+    // 1. 优先读取 official Codex 实际发送的稳定会话头；这些值同时影响上游路由与缓存。
+    for header_name in &[
+        "session-id",
+        "thread-id",
+        "x-client-request-id",
+        "session_id",
+        "x-session-id",
+    ] {
         if let Some(value) = headers.get(*header_name) {
             if let Ok(session_id) = value.to_str() {
                 // Codex Session ID 通常较长（UUID 格式）
-                if session_id.len() > 20 {
+                let session_id = session_id.trim();
+                // Codex Session/Thread ID 通常是 UUID/ULID；过短值更可能是测试或无效占位。
+                if session_id.len() > 10 {
                     return Some(SessionIdResult {
-                        session_id: format!("codex_{session_id}"),
+                        session_id: session_id.to_string(),
                         source: SessionIdSource::Header,
                         client_provided: true,
                     });
@@ -301,15 +309,34 @@ fn extract_codex_session(headers: &HeaderMap, body: &serde_json::Value) -> Optio
         }
     }
 
-    // 2. 从 body.metadata.session_id 提取
+    // 2. 从 official 的 x-codex-window-id 提取 thread_id；格式是 `{thread_id}:{generation}`。
+    if let Some(value) = headers.get("x-codex-window-id") {
+        if let Ok(window_id) = value.to_str() {
+            let thread_id = window_id
+                .trim()
+                .rsplit_once(':')
+                .map(|(thread_id, _)| thread_id)
+                .unwrap_or_else(|| window_id.trim());
+            if thread_id.len() > 10 {
+                return Some(SessionIdResult {
+                    session_id: thread_id.to_string(),
+                    source: SessionIdSource::Header,
+                    client_provided: true,
+                });
+            }
+        }
+    }
+
+    // 3. 从 metadata.session_id 提取；保持原始值，避免污染上游官方会话身份。
     if let Some(session_id) = body
         .get("metadata")
         .and_then(|m| m.get("session_id"))
         .and_then(|v| v.as_str())
     {
+        let session_id = session_id.trim();
         if session_id.len() > 10 {
             return Some(SessionIdResult {
-                session_id: format!("codex_{session_id}"),
+                session_id: session_id.to_string(),
                 source: SessionIdSource::MetadataSessionId,
                 client_provided: true,
             });
@@ -587,6 +614,42 @@ mod tests {
         assert!(!result.session_id.is_empty());
         assert_eq!(result.source, SessionIdSource::Generated);
         assert!(!result.client_provided);
+    }
+
+    #[test]
+    fn test_codex_official_session_id_header_is_preserved() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "session-id",
+            "019cf82b-6a62-7700-bbbd-46909794ef89".parse().unwrap(),
+        );
+        let body = json!({
+            "input": "Write a function"
+        });
+
+        let result = extract_session_id(&headers, &body, "codex");
+
+        assert_eq!(result.session_id, "019cf82b-6a62-7700-bbbd-46909794ef89");
+        assert_eq!(result.source, SessionIdSource::Header);
+        assert!(result.client_provided);
+    }
+
+    #[test]
+    fn test_codex_window_id_header_extracts_thread_identity() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-codex-window-id",
+            "019cf82b-6a62-7700-bbbd-46909794ef89:3".parse().unwrap(),
+        );
+        let body = json!({
+            "input": "Write a function"
+        });
+
+        let result = extract_session_id(&headers, &body, "codex");
+
+        assert_eq!(result.session_id, "019cf82b-6a62-7700-bbbd-46909794ef89");
+        assert_eq!(result.source, SessionIdSource::Header);
+        assert!(result.client_provided);
     }
 
     #[test]

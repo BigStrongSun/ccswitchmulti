@@ -359,19 +359,19 @@ impl ProxyServer {
             // OpenAI Responses API (Codex CLI，支持带前缀和不带前缀)
             .route(
                 "/responses",
-                get(handlers::handle_responses_websocket_fallback).post(handlers::handle_responses),
+                get(handlers::handle_responses_websocket).post(handlers::handle_responses),
             )
             .route(
                 "/v1/responses",
-                get(handlers::handle_responses_websocket_fallback).post(handlers::handle_responses),
+                get(handlers::handle_responses_websocket).post(handlers::handle_responses),
             )
             .route(
                 "/v1/v1/responses",
-                get(handlers::handle_responses_websocket_fallback).post(handlers::handle_responses),
+                get(handlers::handle_responses_websocket).post(handlers::handle_responses),
             )
             .route(
                 "/codex/v1/responses",
-                get(handlers::handle_responses_websocket_fallback).post(handlers::handle_responses),
+                get(handlers::handle_responses_websocket).post(handlers::handle_responses),
             )
             // OpenAI Responses Compact API (Codex CLI 远程压缩，透传)
             .route(
@@ -415,8 +415,7 @@ impl ProxyServer {
             )
             .route(
                 "/v1/responses",
-                get(handlers::handle_responses_websocket_fallback)
-                    .post(handlers::handle_external_responses),
+                get(handlers::handle_responses_websocket).post(handlers::handle_external_responses),
             )
             .layer(DefaultBodyLimit::max(200 * 1024 * 1024))
             .with_state(self.state.clone())

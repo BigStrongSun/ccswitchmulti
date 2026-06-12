@@ -25,6 +25,7 @@ use crate::commands::{CodexOAuthState, CopilotAuthState};
 use crate::proxy::providers::codex_oauth_auth::CodexOAuthManager;
 use crate::proxy::providers::copilot_auth::CopilotAuthManager;
 use crate::{app_config::AppType, provider::Provider};
+use bytes::Bytes;
 use futures::StreamExt;
 use http::Extensions;
 use serde_json::Value;
@@ -378,15 +379,16 @@ impl RequestForwarder {
             });
         }
 
+        let attempt_providers = expand_codex_router_attempt_providers(app_type, &providers, &body);
         let mut last_error = None;
         let mut last_provider = None;
         let mut attempted_providers = 0usize;
 
         // 单 Provider 场景下跳过熔断器检查（故障转移关闭时）
-        let bypass_circuit_breaker = providers.len() == 1;
+        let bypass_circuit_breaker = attempt_providers.len() == 1;
 
         // 依次尝试每个供应商
-        for provider in providers.iter() {
+        for provider in attempt_providers.iter() {
             // 整流器重试标记：每个 provider 独立持有，避免标记跨 provider 短路故障转移
             // —— 首家 provider 整流后被 5xx/timeout 击落时，下家仍能用整流后的请求体走整流流程
             let mut rectifier_retried = false;
@@ -1000,7 +1002,7 @@ impl RequestForwarder {
                             let (log_code, log_message) = build_retryable_failure_log(
                                 &provider.name,
                                 attempted_providers,
-                                providers.len(),
+                                attempt_providers.len(),
                                 &e,
                             );
                             log::warn!("[{app_type_str}] [{log_code}] {log_message}");
@@ -1067,9 +1069,11 @@ impl RequestForwarder {
             }
         }
 
-        if let Some((log_code, log_message)) =
-            build_terminal_failure_log(attempted_providers, providers.len(), last_error.as_ref())
-        {
+        if let Some((log_code, log_message)) = build_terminal_failure_log(
+            attempted_providers,
+            attempt_providers.len(),
+            last_error.as_ref(),
+        ) {
             log::warn!("[{app_type_str}] [{log_code}] {log_message}");
         }
 
@@ -1106,10 +1110,17 @@ impl RequestForwarder {
         // Codex v2 是一个复合 provider：Codex 客户端只看到一个 provider bucket，
         // Rust proxy 根据请求模型临时解析真实上游 provider，后续 base_url/auth/转换逻辑
         // 都使用这个 effective provider。
-        let codex_router_configured =
-            matches!(app_type, AppType::Codex) && codex_provider_has_routing_config(provider);
+        let provider_is_resolved_codex_route = provider
+            .settings_config
+            .get("codexResolvedRouteId")
+            .is_some();
+        let codex_router_configured = matches!(app_type, AppType::Codex)
+            && !provider_is_resolved_codex_route
+            && codex_provider_has_routing_config(provider);
         let routed_provider = if matches!(app_type, AppType::Codex) {
-            super::providers::resolve_codex_model_routed_provider(provider, body)
+            (!provider_is_resolved_codex_route)
+                .then(|| super::providers::resolve_codex_model_routed_provider(provider, body))
+                .flatten()
         } else {
             None
         };
@@ -1897,7 +1908,9 @@ impl RequestForwarder {
         // Codex OAuth 反代尽量对齐官方 Codex CLI 的会话路由信号。
         // 只发送客户端提供的 session_id；生成的 UUID 每次不同，反而会破坏前缀缓存。
         for (name, value) in codex_oauth_session_headers {
-            ordered_headers.insert(name, value);
+            if !ordered_headers.contains_key(&name) {
+                ordered_headers.insert(name, value);
+            }
         }
 
         // 序列化请求体。GET/HEAD 是 idempotent/safe 方法，按 HTTP 语义不应携带 body；
@@ -2242,6 +2255,13 @@ impl RequestForwarder {
         let first =
             first.map_err(|e| ProxyError::ForwardFailed(format!("读取流式响应首包失败: {e}")))?;
 
+        if let Some(message) = retryable_error_from_primed_sse_chunk(&first) {
+            return Err(ProxyError::UpstreamError {
+                status: 503,
+                body: Some(message),
+            });
+        }
+
         let replay = futures::stream::once(async move { Ok(first) }).chain(stream);
         Ok(ProxyResponse::streamed(status, headers, replay))
     }
@@ -2481,6 +2501,78 @@ fn summarize_proxy_error(error: &ProxyError) -> String {
     }
 }
 
+/// 从已经预读到的首个 SSE 分块里识别“上游还没真正开始生成就失败”的错误。
+///
+/// 这类错误常见于 ChatGPT/Codex OAuth 在高负载时返回 HTTP 200 + `event: error`
+/// 或 `event: response.failed`。如果此时直接把响应头交给 Codex，后续已经无法在同一个
+/// HTTP 请求里切换到下一条路由；在首包阶段把它还原为 503，才能复用现有 failover/retry
+/// 机制。普通 `response.created` / delta 事件必须原样放行。
+fn retryable_error_from_primed_sse_chunk(first: &Bytes) -> Option<String> {
+    let text = std::str::from_utf8(first).ok()?;
+    for block in text.split("\n\n") {
+        let mut event_name: Option<&str> = None;
+        let mut data_lines = Vec::new();
+
+        for line in block.lines() {
+            if let Some(value) = line.strip_prefix("event:") {
+                event_name = Some(value.trim());
+            } else if let Some(value) = line.strip_prefix("data:") {
+                data_lines.push(value.trim());
+            }
+        }
+
+        if data_lines.is_empty() {
+            continue;
+        }
+
+        let data = data_lines.join("\n");
+        let parsed = serde_json::from_str::<Value>(&data).ok();
+        let event_is_error = matches!(
+            event_name,
+            Some("error" | "response.failed" | "response.error")
+        );
+        let payload_is_error = parsed.as_ref().is_some_and(|value| {
+            value.get("error").is_some()
+                || value
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| matches!(kind, "error" | "response.failed"))
+                || value
+                    .pointer("/response/status")
+                    .and_then(Value::as_str)
+                    .is_some_and(|status| status == "failed")
+        });
+
+        if event_is_error || payload_is_error {
+            return Some(extract_sse_error_message(parsed.as_ref()).unwrap_or(data));
+        }
+    }
+
+    None
+}
+
+/// 提取 SSE 错误体里最适合写入日志/返回给重试分类器的消息。
+fn extract_sse_error_message(value: Option<&Value>) -> Option<String> {
+    let value = value?;
+    for pointer in [
+        "/error/message",
+        "/message",
+        "/response/error/message",
+        "/response/incomplete_details/reason",
+    ] {
+        if let Some(message) = value
+            .pointer(pointer)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|message| !message.is_empty())
+        {
+            return Some(message.to_string());
+        }
+    }
+
+    Some(value.to_string())
+}
+
 fn summarize_upstream_body(body: &str) -> String {
     if let Ok(json_body) = serde_json::from_str::<Value>(body) {
         if let Some(message) = extract_json_error_message(&json_body) {
@@ -2666,7 +2758,8 @@ fn build_codex_oauth_session_headers(
 
     let mut headers = Vec::new();
     if let Ok(value) = http::HeaderValue::from_str(session_id) {
-        headers.push((http::HeaderName::from_static("session_id"), value.clone()));
+        headers.push((http::HeaderName::from_static("session-id"), value.clone()));
+        headers.push((http::HeaderName::from_static("thread-id"), value.clone()));
         headers.push((http::HeaderName::from_static("x-client-request-id"), value));
     }
 
@@ -2786,6 +2879,32 @@ fn summarize_text_for_log(text: &str, max_chars: usize) -> String {
 
 fn prepare_upstream_request_body(request_body: Value) -> Value {
     canonicalize_value(filter_private_params_with_whitelist(request_body, &[]))
+}
+
+/// 将 Codex router provider 展开成可逐个尝试的 route provider。
+///
+/// Router 在 UI/配置里是一个 provider，但运行时每个 route 才是真正的上游。展开后，
+/// official route 的高负载/首包失败可以复用外层 provider failover 逻辑继续尝试后备 route。
+fn expand_codex_router_attempt_providers(
+    app_type: &AppType,
+    providers: &[Provider],
+    body: &Value,
+) -> Vec<Provider> {
+    providers
+        .iter()
+        .flat_map(|provider| {
+            if !matches!(app_type, AppType::Codex) {
+                return vec![provider.clone()];
+            }
+
+            let routed = super::providers::resolve_codex_model_routed_providers(provider, body);
+            if routed.is_empty() {
+                vec![provider.clone()]
+            } else {
+                routed
+            }
+        })
+        .collect()
 }
 
 fn log_prompt_cache_trace(
@@ -3183,6 +3302,62 @@ mod tests {
         assert!(matches!(err, ProxyError::ForwardFailed(_)));
     }
 
+    #[tokio::test]
+    async fn streaming_first_sse_error_event_is_retryable_before_response_is_returned() {
+        let forwarder = test_forwarder(Duration::from_secs(1), Duration::from_secs(1));
+        let response = ProxyResponse::streamed(
+            StatusCode::OK,
+            HeaderMap::new(),
+            futures::stream::once(async {
+                Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                    b"event: error\ndata: {\"error\":{\"message\":\"We're currently experiencing high demand\",\"type\":\"server_error\"}}\n\n",
+                ))
+            }),
+        );
+
+        let err = match forwarder
+            .prepare_success_response_for_failover(response, true)
+            .await
+        {
+            Ok(_) => panic!("first SSE error event should fail the attempt before streaming"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(
+            err,
+            ProxyError::UpstreamError {
+                status: 503,
+                body: Some(message),
+            } if message.contains("high demand")
+        ));
+    }
+
+    #[tokio::test]
+    async fn streaming_first_normal_sse_event_is_replayed_to_client() {
+        let forwarder = test_forwarder(Duration::from_secs(1), Duration::from_secs(1));
+        let response = ProxyResponse::streamed(
+            StatusCode::OK,
+            HeaderMap::new(),
+            futures::stream::iter(vec![
+                Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                    b"event: response.created\ndata: {\"type\":\"response.created\"}\n\n",
+                )),
+                Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                    b"event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n",
+                )),
+            ]),
+        );
+
+        let prepared = forwarder
+            .prepare_success_response_for_failover(response, true)
+            .await
+            .expect("normal first SSE event should be replayed");
+
+        let body = prepared.bytes().await.unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("response.created"));
+        assert!(String::from_utf8_lossy(&body).contains("response.completed"));
+    }
+
     #[test]
     fn codex_oauth_session_headers_match_codex_cache_identity() {
         let headers = build_codex_oauth_session_headers("session-123");
@@ -3192,7 +3367,11 @@ mod tests {
         }
 
         assert_eq!(
-            map.get("session_id"),
+            map.get("session-id"),
+            Some(&HeaderValue::from_static("session-123"))
+        );
+        assert_eq!(
+            map.get("thread-id"),
             Some(&HeaderValue::from_static("session-123"))
         );
         assert_eq!(

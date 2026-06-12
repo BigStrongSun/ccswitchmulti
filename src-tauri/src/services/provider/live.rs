@@ -19,7 +19,7 @@ use crate::store::AppState;
 use super::gemini_auth::{
     detect_gemini_auth_type, ensure_google_oauth_security_flag, GeminiAuthType,
 };
-use super::normalize_claude_models_in_value;
+use super::{block_on_tauri_runtime, normalize_claude_models_in_value};
 
 pub(crate) fn sanitize_claude_settings_for_live(settings: &Value) -> Value {
     let mut v = settings.clone();
@@ -974,7 +974,7 @@ fn sync_current_provider_for_app_respecting_takeover(
         return Ok(());
     };
 
-    let has_live_backup = futures::executor::block_on(state.db.get_live_backup(app_type.as_str()))
+    let has_live_backup = block_on_tauri_runtime(state.db.get_live_backup(app_type.as_str()))
         .ok()
         .flatten()
         .is_some();
@@ -989,7 +989,7 @@ fn sync_current_provider_for_app_respecting_takeover(
         if matches!(app_type, AppType::ClaudeDesktop) {
             write_live_with_common_config(state.db.as_ref(), app_type, provider)?;
         } else {
-            futures::executor::block_on(
+            block_on_tauri_runtime(
                 state
                     .proxy_service
                     .update_live_backup_from_provider(app_type.as_str(), provider),

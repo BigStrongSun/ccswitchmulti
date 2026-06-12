@@ -40,7 +40,7 @@ use super::{
 use crate::app_config::AppType;
 use crate::database::PRICING_SOURCE_REQUEST;
 use axum::{
-    extract::State,
+    extract::{ws::WebSocketUpgrade, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
     Json,
@@ -152,6 +152,22 @@ fn mark_external_openai_headers(headers: &mut HeaderMap) {
         FORCE_EXTERNAL_OPENAI_API_HEADER,
         HeaderValue::from_static("1"),
     );
+}
+
+/// 处理 Codex Responses WebSocket 升级；非升级请求保持官方 426 fallback 语义。
+pub async fn handle_responses_websocket(
+    State(state): State<ProxyState>,
+    headers: HeaderMap,
+    ws: Option<WebSocketUpgrade>,
+) -> axum::response::Response {
+    match ws {
+        Some(ws) => ws
+            .on_upgrade(move |socket| {
+                crate::proxy::codex_ws::relay_responses_websocket(state, headers, socket)
+            })
+            .into_response(),
+        None => handle_responses_websocket_fallback().await,
+    }
 }
 
 /// 告诉 Codex 客户端本地代理不支持 Responses WebSocket。
