@@ -815,7 +815,8 @@ fn resolve_external_codex_router_target(
             if profile.route_id.is_some()
                 && resolved
                     .settings_config
-                    .get("routeId")
+                    .get("codexResolvedRouteId")
+                    .or_else(|| resolved.settings_config.get("routeId"))
                     .and_then(|value| value.as_str())
                     != profile.route_id.as_deref()
             {
@@ -2228,15 +2229,17 @@ async fn log_usage(
 mod tests {
     use super::{
         codex_proxy_error_json, external_openai_api_models_response,
-        external_openai_api_unsupported_response, responses_sse_to_response_value,
-        should_handle_as_codex_client, should_use_claude_transform_streaming,
+        external_openai_api_unsupported_response, resolve_external_codex_router_target,
+        responses_sse_to_response_value, should_handle_as_codex_client,
+        should_use_claude_transform_streaming,
     };
     use crate::{
         database::Database,
         provider::Provider,
         proxy::{
             external_openai_api::{
-                self, ExternalOpenAiApiBackendType, ExternalOpenAiApiProfileUpdate,
+                self, ExternalOpenAiApiBackendType, ExternalOpenAiApiProfile,
+                ExternalOpenAiApiProfileUpdate,
             },
             failover_switch::FailoverSwitchManager,
             provider_router::ProviderRouter,
@@ -2623,6 +2626,65 @@ data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n
             "external_openai_api_unsupported_backend"
         );
         assert_eq!(value["error"]["param"], "backend");
+    }
+
+    #[test]
+    fn external_codex_router_route_id_matches_resolved_route_metadata() {
+        let db = Arc::new(Database::memory().expect("memory db"));
+        db.save_provider(
+            "codex",
+            &Provider::with_id(
+                "codex-router".to_string(),
+                "Codex Router".to_string(),
+                json!({
+                    "codexRouting": {
+                        "enabled": true,
+                        "routes": [{
+                            "id": "deepseek",
+                            "label": "DeepSeek",
+                            "match": { "models": ["deepseek-v4-flash"] },
+                            "upstream": {
+                                "baseUrl": "https://api.deepseek.example",
+                                "apiFormat": "openai_chat",
+                                "auth": { "source": "provider_config" }
+                            }
+                        }]
+                    }
+                }),
+                None,
+            ),
+        )
+        .expect("save provider");
+        let state = build_state(db);
+        let profile = ExternalOpenAiApiProfile {
+            enabled: true,
+            backend_type: ExternalOpenAiApiBackendType::Provider,
+            app_type: Some("codex".to_string()),
+            provider_id: Some("codex-router".to_string()),
+            route_id: Some("deepseek".to_string()),
+            default_model: Some("deepseek-v4-flash".to_string()),
+            listen_address: None,
+            listen_port: None,
+            api_key_hash: None,
+            api_key_prefix: None,
+            updated_at: None,
+        };
+
+        let resolved = resolve_external_codex_router_target(
+            &state,
+            &json!({ "model": "deepseek-v4-flash" }),
+            &profile,
+        )
+        .expect("resolve")
+        .expect("route provider");
+
+        assert_eq!(
+            resolved
+                .settings_config
+                .get("codexResolvedRouteId")
+                .and_then(|value| value.as_str()),
+            Some("deepseek")
+        );
     }
 
     fn build_state(db: Arc<Database>) -> ProxyState {

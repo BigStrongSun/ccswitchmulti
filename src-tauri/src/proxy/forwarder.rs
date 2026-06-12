@@ -215,14 +215,23 @@ impl RequestForwarder {
 
     async fn record_success_result(
         &self,
-        provider_id: &str,
+        circuit_provider_id: &str,
+        health_provider_id: &str,
         app_type: &str,
         used_half_open_permit: bool,
     ) {
         if used_half_open_permit {
+            let provider_id = health_provider_id;
             if let Err(e) = self
                 .router
-                .record_result(provider_id, app_type, true, true, None)
+                .record_result_with_health_provider(
+                    circuit_provider_id,
+                    health_provider_id,
+                    app_type,
+                    true,
+                    true,
+                    None,
+                )
                 .await
             {
                 log::warn!(
@@ -233,11 +242,20 @@ impl RequestForwarder {
         }
 
         let router = self.router.clone();
-        let provider_id = provider_id.to_string();
+        let circuit_provider_id = circuit_provider_id.to_string();
+        let health_provider_id = health_provider_id.to_string();
         let app_type = app_type.to_string();
         tokio::spawn(async move {
+            let provider_id = health_provider_id.clone();
             if let Err(e) = router
-                .record_result(&provider_id, &app_type, false, true, None)
+                .record_result_with_health_provider(
+                    &circuit_provider_id,
+                    &health_provider_id,
+                    &app_type,
+                    false,
+                    true,
+                    None,
+                )
                 .await
             {
                 log::warn!(
@@ -273,10 +291,13 @@ impl RequestForwarder {
         };
 
         if is_provider_error {
+            let (persistent_provider_id, _) =
+                super::providers::codex_route_persistent_provider(provider);
             let _ = self
                 .router
-                .record_result(
+                .record_result_with_health_provider(
                     &provider.id,
+                    persistent_provider_id,
                     app_type_str,
                     used_half_open_permit,
                     false,
@@ -389,6 +410,12 @@ impl RequestForwarder {
 
         // 依次尝试每个供应商
         for provider in attempt_providers.iter() {
+            let attempt_provider_id = provider.id.clone();
+            let (persistent_provider_id, persistent_provider_name) =
+                super::providers::codex_route_persistent_provider(provider);
+            let persistent_provider_id = persistent_provider_id.to_string();
+            let persistent_provider_name = persistent_provider_name.to_string();
+
             // 整流器重试标记：每个 provider 独立持有，避免标记跨 provider 短路故障转移
             // —— 首家 provider 整流后被 5xx/timeout 击落时，下家仍能用整流后的请求体走整流流程
             let mut rectifier_retried = false;
@@ -447,8 +474,8 @@ impl RequestForwarder {
             // 新「正在尝试哪个 provider」的展示字段。
             {
                 let mut status = self.status.write().await;
-                status.current_provider = Some(provider.name.clone());
-                status.current_provider_id = Some(provider.id.clone());
+                status.current_provider = Some(persistent_provider_name.clone());
+                status.current_provider_id = Some(persistent_provider_id.clone());
             }
 
             // 转发请求（每个 Provider 只尝试一次，重试由客户端控制）
@@ -468,15 +495,23 @@ impl RequestForwarder {
                 Ok((response, claude_api_format, effective_provider)) => {
                     // 成功：普通闭合熔断状态异步记录，避免阻塞流式首包返回；
                     // HalfOpen 探测仍同步等待，保证 permit 与熔断状态及时释放。
-                    self.record_success_result(&provider.id, app_type_str, used_half_open_permit)
-                        .await;
+                    self.record_success_result(
+                        &attempt_provider_id,
+                        &persistent_provider_id,
+                        app_type_str,
+                        used_half_open_permit,
+                    )
+                    .await;
 
                     // 更新当前应用类型使用的 provider
                     {
                         let mut current_providers = self.current_providers.write().await;
                         current_providers.insert(
                             app_type_str.to_string(),
-                            (provider.id.clone(), provider.name.clone()),
+                            (
+                                persistent_provider_id.clone(),
+                                persistent_provider_name.clone(),
+                            ),
                         );
                     }
 
@@ -485,16 +520,16 @@ impl RequestForwarder {
                         let mut status = self.status.write().await;
                         status.success_requests += 1;
                         status.last_error = None;
-                        let should_switch =
-                            self.current_provider_id_at_start.as_str() != provider.id.as_str();
+                        let should_switch = self.current_provider_id_at_start.as_str()
+                            != persistent_provider_id.as_str();
                         if should_switch {
                             status.failover_count += 1;
 
                             // 异步触发供应商切换，更新 UI/托盘，并把“当前供应商”同步为实际使用的 provider
                             let fm = self.failover_manager.clone();
                             let ah = self.app_handle.clone();
-                            let pid = provider.id.clone();
-                            let pname = provider.name.clone();
+                            let pid = persistent_provider_id.clone();
+                            let pname = persistent_provider_name.clone();
                             let at = app_type_str.to_string();
 
                             tokio::spawn(async move {
@@ -568,7 +603,8 @@ impl RequestForwarder {
                                         "[{app_type_str}] [Media] Unsupported-image retry succeeded"
                                     );
                                     self.record_success_result(
-                                        &routed_provider.id,
+                                        &attempt_provider_id,
+                                        &persistent_provider_id,
                                         app_type_str,
                                         used_half_open_permit,
                                     )
@@ -580,8 +616,8 @@ impl RequestForwarder {
                                         current_providers.insert(
                                             app_type_str.to_string(),
                                             (
-                                                routed_provider.id.clone(),
-                                                routed_provider.name.clone(),
+                                                persistent_provider_id.clone(),
+                                                persistent_provider_name.clone(),
                                             ),
                                         );
                                     }
@@ -592,13 +628,13 @@ impl RequestForwarder {
                                         status.last_error = None;
                                         let should_switch =
                                             self.current_provider_id_at_start.as_str()
-                                                != routed_provider.id.as_str();
+                                                != persistent_provider_id.as_str();
                                         if should_switch {
                                             status.failover_count += 1;
                                             let fm = self.failover_manager.clone();
                                             let ah = self.app_handle.clone();
-                                            let pid = routed_provider.id.clone();
-                                            let pname = routed_provider.name.clone();
+                                            let pid = persistent_provider_id.clone();
+                                            let pname = persistent_provider_name.clone();
                                             let at = app_type_str.to_string();
 
                                             tokio::spawn(async move {
@@ -714,7 +750,8 @@ impl RequestForwarder {
                                     Ok((response, claude_api_format, effective_provider)) => {
                                         log::info!("[{app_type_str}] [RECT-002] 整流重试成功");
                                         self.record_success_result(
-                                            &provider.id,
+                                            &attempt_provider_id,
+                                            &persistent_provider_id,
                                             app_type_str,
                                             used_half_open_permit,
                                         )
@@ -726,7 +763,10 @@ impl RequestForwarder {
                                                 self.current_providers.write().await;
                                             current_providers.insert(
                                                 app_type_str.to_string(),
-                                                (provider.id.clone(), provider.name.clone()),
+                                                (
+                                                    persistent_provider_id.clone(),
+                                                    persistent_provider_name.clone(),
+                                                ),
                                             );
                                         }
 
@@ -737,15 +777,15 @@ impl RequestForwarder {
                                             status.last_error = None;
                                             let should_switch =
                                                 self.current_provider_id_at_start.as_str()
-                                                    != provider.id.as_str();
+                                                    != persistent_provider_id.as_str();
                                             if should_switch {
                                                 status.failover_count += 1;
 
                                                 // 异步触发供应商切换，更新 UI/托盘
                                                 let fm = self.failover_manager.clone();
                                                 let ah = self.app_handle.clone();
-                                                let pid = provider.id.clone();
-                                                let pname = provider.name.clone();
+                                                let pid = persistent_provider_id.clone();
+                                                let pname = persistent_provider_name.clone();
                                                 let at = app_type_str.to_string();
 
                                                 tokio::spawn(async move {
@@ -879,7 +919,8 @@ impl RequestForwarder {
                                 Ok((response, claude_api_format, effective_provider)) => {
                                     log::info!("[{app_type_str}] [RECT-011] budget 整流重试成功");
                                     self.record_success_result(
-                                        &provider.id,
+                                        &attempt_provider_id,
+                                        &persistent_provider_id,
                                         app_type_str,
                                         used_half_open_permit,
                                     )
@@ -890,7 +931,10 @@ impl RequestForwarder {
                                             self.current_providers.write().await;
                                         current_providers.insert(
                                             app_type_str.to_string(),
-                                            (provider.id.clone(), provider.name.clone()),
+                                            (
+                                                persistent_provider_id.clone(),
+                                                persistent_provider_name.clone(),
+                                            ),
                                         );
                                     }
 
@@ -900,13 +944,13 @@ impl RequestForwarder {
                                         status.last_error = None;
                                         let should_switch =
                                             self.current_provider_id_at_start.as_str()
-                                                != provider.id.as_str();
+                                                != persistent_provider_id.as_str();
                                         if should_switch {
                                             status.failover_count += 1;
                                             let fm = self.failover_manager.clone();
                                             let ah = self.app_handle.clone();
-                                            let pid = provider.id.clone();
-                                            let pname = provider.name.clone();
+                                            let pid = persistent_provider_id.clone();
+                                            let pname = persistent_provider_name.clone();
                                             let at = app_type_str.to_string();
                                             tokio::spawn(async move {
                                                 let _ = fm
@@ -984,8 +1028,9 @@ impl RequestForwarder {
                             // 可重试：真正的 provider 故障 → 记录失败并更新熔断器/DB 健康度
                             let _ = self
                                 .router
-                                .record_result(
+                                .record_result_with_health_provider(
                                     &provider.id,
+                                    &persistent_provider_id,
                                     app_type_str,
                                     used_half_open_permit,
                                     false,

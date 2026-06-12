@@ -123,9 +123,34 @@ impl ProviderRouter {
     }
 
     /// 记录供应商请求结果
+    #[allow(dead_code)]
     pub async fn record_result(
         &self,
         provider_id: &str,
+        app_type: &str,
+        used_half_open_permit: bool,
+        success: bool,
+        error_msg: Option<String>,
+    ) -> Result<(), AppError> {
+        self.record_result_with_health_provider(
+            provider_id,
+            provider_id,
+            app_type,
+            used_half_open_permit,
+            success,
+            error_msg,
+        )
+        .await
+    }
+
+    /// 记录一次请求结果，并允许熔断 key 与数据库健康 provider 分离。
+    ///
+    /// Codex router 的 route 是 request-local attempt target，不是数据库 provider。
+    /// 因此熔断器可以按 route id 细分，但 provider_health 必须写入真实父 provider。
+    pub async fn record_result_with_health_provider(
+        &self,
+        circuit_provider_id: &str,
+        health_provider_id: &str,
         app_type: &str,
         used_half_open_permit: bool,
         success: bool,
@@ -138,7 +163,7 @@ impl ProviderRouter {
         };
 
         // 2. 更新熔断器状态
-        let circuit_key = format!("{app_type}:{provider_id}");
+        let circuit_key = format!("{app_type}:{circuit_provider_id}");
         let breaker = self.get_or_create_circuit_breaker(&circuit_key).await;
 
         if success {
@@ -150,7 +175,7 @@ impl ProviderRouter {
         // 3. 更新数据库健康状态（使用配置的阈值）
         self.db
             .update_provider_health_with_threshold(
-                provider_id,
+                health_provider_id,
                 app_type,
                 success,
                 error_msg.clone(),

@@ -16,6 +16,9 @@ use std::collections::HashSet;
 use std::sync::LazyLock;
 use toml::Value as TomlValue;
 
+const CODEX_ROUTER_PARENT_PROVIDER_ID: &str = "codexRouterParentProviderId";
+const CODEX_ROUTER_PARENT_PROVIDER_NAME: &str = "codexRouterParentProviderName";
+
 /// 官方 Codex 客户端 User-Agent 正则
 #[allow(dead_code)]
 static CODEX_CLIENT_REGEX: LazyLock<Regex> =
@@ -178,6 +181,23 @@ pub fn resolve_codex_model_routed_providers(
         .into_iter()
         .map(|route| build_codex_routed_provider(provider, route, request_model))
         .collect()
+}
+
+/// 返回 routed Codex provider 对应的真实持久 provider 身份。
+pub fn codex_route_persistent_provider(provider: &Provider) -> (&str, &str) {
+    let id = provider
+        .settings_config
+        .get(CODEX_ROUTER_PARENT_PROVIDER_ID)
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(provider.id.as_str());
+    let name = provider
+        .settings_config
+        .get(CODEX_ROUTER_PARENT_PROVIDER_NAME)
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(provider.name.as_str());
+    (id, name)
 }
 
 /// 从新旧配置中挑出本次请求的 route 候选；匹配 route 在前，fallback route 在后。
@@ -470,6 +490,14 @@ fn build_codex_routed_provider(
     settings.insert(
         "codexResolvedRouteId".to_string(),
         JsonValue::String(route_id.to_string()),
+    );
+    settings.insert(
+        CODEX_ROUTER_PARENT_PROVIDER_ID.to_string(),
+        JsonValue::String(provider.id.clone()),
+    );
+    settings.insert(
+        CODEX_ROUTER_PARENT_PROVIDER_NAME.to_string(),
+        JsonValue::String(provider.name.clone()),
     );
     settings.insert(
         "codexResolvedRouteMatched".to_string(),
@@ -1326,6 +1354,10 @@ mod tests {
         assert_eq!(
             routed.settings_config["base_url"],
             "https://api.deepseek.com"
+        );
+        assert_eq!(
+            codex_route_persistent_provider(&routed),
+            ("test", "Test Codex")
         );
         assert_eq!(
             routed
