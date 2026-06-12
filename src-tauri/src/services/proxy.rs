@@ -17,7 +17,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tauri::Emitter;
 use tokio::sync::RwLock;
-use toml_edit::DocumentMut;
+use toml_edit::{DocumentMut, Item, TableLike};
 
 /// 用于接管 Live 配置时的占位符（避免客户端提示缺少 key，同时不泄露真实 Token）
 const PROXY_TOKEN_PLACEHOLDER: &str = "PROXY_MANAGED";
@@ -2450,14 +2450,75 @@ impl ProxyService {
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        let merged = crate::codex_config::merge_codex_provider_config_texts(
-            existing_config_text,
-            target_config,
-        )
-        .map_err(|e| format!("合并 Codex 用户配置失败: {e}"))?;
+        let merged =
+            Self::merge_codex_user_config_with_provider_config(existing_config_text, target_config)
+                .map_err(|e| format!("合并 Codex 用户配置失败: {e}"))?;
 
         target_obj.insert("config".to_string(), json!(merged));
         Ok(())
+    }
+
+    /// 合并 Codex 用户配置与目标 provider 配置，冲突时让目标 provider 获胜。
+    ///
+    /// 这条路径用于热切换时重建 live/backup：旧配置提供 approval、sandbox、
+    /// projects、缺失的 MCP 等用户状态；目标配置提供当前模型、代理地址、
+    /// model_providers 和同名 MCP/common-config 的最终定义。
+    fn merge_codex_user_config_with_provider_config(
+        existing_config_text: &str,
+        target_config_text: &str,
+    ) -> Result<String, String> {
+        if existing_config_text.trim().is_empty() {
+            return Ok(target_config_text.to_string());
+        }
+        if target_config_text.trim().is_empty() {
+            return Ok(existing_config_text.to_string());
+        }
+
+        let mut user_doc = existing_config_text
+            .parse::<DocumentMut>()
+            .map_err(|e| format!("解析 Codex 现有配置失败: {e}"))?;
+        let target_doc = target_config_text
+            .parse::<DocumentMut>()
+            .map_err(|e| format!("解析 Codex 目标配置失败: {e}"))?;
+
+        for key in [
+            "model",
+            "model_provider",
+            "model_context_window",
+            "model_catalog_json",
+            "openai_base_url",
+            "experimental_bearer_token",
+        ] {
+            user_doc.as_table_mut().remove(key);
+        }
+        user_doc.as_table_mut().remove("model_providers");
+
+        Self::merge_toml_table_like_prefer_source(user_doc.as_table_mut(), target_doc.as_table());
+        Ok(user_doc.to_string())
+    }
+
+    /// 递归合并 TOML 表，source 的值覆盖 target 的同名值。
+    fn merge_toml_table_like_prefer_source(target: &mut dyn TableLike, source: &dyn TableLike) {
+        for (key, source_item) in source.iter() {
+            match target.get_mut(key) {
+                Some(target_item) => Self::merge_toml_item_prefer_source(target_item, source_item),
+                None => {
+                    target.insert(key, source_item.clone());
+                }
+            }
+        }
+    }
+
+    /// 递归合并 TOML item，只有两边都是表时才深入合并，否则整体以 source 为准。
+    fn merge_toml_item_prefer_source(target: &mut Item, source: &Item) {
+        if let Some(source_table) = source.as_table_like() {
+            if let Some(target_table) = target.as_table_like_mut() {
+                Self::merge_toml_table_like_prefer_source(target_table, source_table);
+                return;
+            }
+        }
+
+        *target = source.clone();
     }
 
     fn preserve_codex_oauth_auth_in_backup(
@@ -5298,31 +5359,9 @@ requires_openai_auth = true
             .expect("set current provider");
         crate::settings::set_current_provider(&AppType::Codex, Some("a"))
             .expect("set local current provider");
-        let provider_a_backup = json!({
-            "auth": {
-                "OPENAI_API_KEY": "responses-key"
-            },
-            "config": r#"approval_policy = "on-request"
-sandbox_mode = "workspace-write"
-model_provider = "stable"
-model = "responses-model"
-
-[workspace_write]
-network_access = true
-
-[projects."C:/work"]
-trust_level = "trusted"
-
-[model_providers.stable]
-name = "Stable"
-base_url = "https://responses.example/v1"
-wire_api = "responses"
-requires_openai_auth = true
-"#
-        });
         db.save_live_backup(
             "codex",
-            &serde_json::to_string(&provider_a_backup).expect("serialize provider a backup"),
+            &serde_json::to_string(&provider_a.settings_config).expect("serialize provider a"),
         )
         .await
         .expect("seed live backup");
@@ -5486,9 +5525,31 @@ requires_openai_auth = true
             .expect("set current provider");
         crate::settings::set_current_provider(&AppType::Codex, Some("a"))
             .expect("set local current provider");
+        let provider_a_backup = json!({
+            "auth": {
+                "OPENAI_API_KEY": "responses-key"
+            },
+            "config": r#"approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+model_provider = "stable"
+model = "responses-model"
+
+[workspace_write]
+network_access = true
+
+[projects."C:/work"]
+trust_level = "trusted"
+
+[model_providers.stable]
+name = "Stable"
+base_url = "https://responses.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+        });
         db.save_live_backup(
             "codex",
-            &serde_json::to_string(&provider_a.settings_config).expect("serialize provider a"),
+            &serde_json::to_string(&provider_a_backup).expect("serialize provider a backup"),
         )
         .await
         .expect("seed live backup");
