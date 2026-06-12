@@ -31,6 +31,13 @@ type CodexRoute = {
   id?: string;
   label?: string;
   enabled?: boolean;
+  targetProviderId?: string;
+  target_provider_id?: string;
+  providerId?: string;
+  provider_id?: string;
+  upstreamProviderId?: string;
+  upstream_provider_id?: string;
+  provider?: string;
   match?: {
     models?: string[];
     prefixes?: string[];
@@ -41,6 +48,13 @@ type CodexRoute = {
     apiFormat?: string;
     wireApi?: string;
     wire_api?: string;
+    targetProviderId?: string;
+    target_provider_id?: string;
+    providerId?: string;
+    provider_id?: string;
+    upstreamProviderId?: string;
+    upstream_provider_id?: string;
+    provider?: string;
     auth?: {
       source?: string;
     };
@@ -82,8 +96,7 @@ function readCodexRouting(provider: Provider): CodexRouting | null {
 function isRoutingPlan(provider: Provider): boolean {
   const routing = readCodexRouting(provider);
   return Boolean(
-    routing &&
-      (routing.enabled !== false || (routing.routes?.length ?? 0) > 0),
+    routing && (routing.enabled !== false || (routing.routes?.length ?? 0) > 0),
   );
 }
 
@@ -97,9 +110,57 @@ function routeApiFormat(route: CodexRoute): string {
   );
 }
 
-/// 提取 route 的上游地址；缺省时说明会继承所在 Provider 的地址。
-function routeBaseUrl(route: CodexRoute): string {
-  return route.upstream?.baseUrl ?? route.upstream?.base_url ?? "继承模型源地址";
+/// 提取 route 引用的真实目标 Provider ID。
+function routeTargetProviderId(route: CodexRoute): string | undefined {
+  return [
+    route.targetProviderId,
+    route.target_provider_id,
+    route.providerId,
+    route.provider_id,
+    route.upstreamProviderId,
+    route.upstream_provider_id,
+    route.provider,
+    route.upstream?.targetProviderId,
+    route.upstream?.target_provider_id,
+    route.upstream?.providerId,
+    route.upstream?.provider_id,
+    route.upstream?.upstreamProviderId,
+    route.upstream?.upstream_provider_id,
+    route.upstream?.provider,
+  ]
+    .map((value) => value?.trim())
+    .find(Boolean);
+}
+
+/// 查找 route 引用的真实目标 Provider。
+function routeTargetProvider(
+  route: CodexRoute,
+  providersById: Map<string, Provider>,
+): Provider | undefined {
+  const targetProviderId = routeTargetProviderId(route);
+  return targetProviderId ? providersById.get(targetProviderId) : undefined;
+}
+
+/// 提取 route 的上游地址；引用真实 Provider 时展示目标 Provider 的配置。
+function routeBaseUrl(
+  route: CodexRoute,
+  providersById?: Map<string, Provider>,
+): string {
+  const target = providersById
+    ? routeTargetProvider(route, providersById)
+    : undefined;
+  if (target) {
+    const config = target.settingsConfig ?? {};
+    return (
+      config.base_url ??
+      config.baseURL ??
+      config.baseUrl ??
+      `复用供应商配置：${target.name}`
+    );
+  }
+  return (
+    route.upstream?.baseUrl ?? route.upstream?.base_url ?? "继承模型源地址"
+  );
 }
 
 /// 把内部认证枚举翻译成页面可理解的中文说明，避免把 provider_config 这类工程词直接丢给用户。
@@ -169,6 +230,10 @@ export function CodexRouterWorkspacePage({
 
   const routingPlans = providers.filter(isRoutingPlan);
   const modelSources = providers.filter((provider) => !isRoutingPlan(provider));
+  const providersById = useMemo(
+    () => new Map(providers.map((provider) => [provider.id, provider])),
+    [providers],
+  );
   const routeEntries = routingPlans.flatMap((provider) =>
     (readCodexRouting(provider)?.routes ?? []).map((route, index) => ({
       provider,
@@ -176,7 +241,9 @@ export function CodexRouterWorkspacePage({
       index,
     })),
   );
-  const enabledRoutes = routeEntries.filter(({ route }) => route.enabled !== false);
+  const enabledRoutes = routeEntries.filter(
+    ({ route }) => route.enabled !== false,
+  );
   const routeModels = collectRouteModels(routeEntries);
   const selectedPlan =
     routingPlans.find((provider) => provider.id === selectedPlanId) ??
@@ -243,16 +310,23 @@ export function CodexRouterWorkspacePage({
   /// 选择规则后跳转到规则页，让卡片产生明确的可操作反馈。
   function handleSelectRoute(entry: RouteEntry) {
     setSelectedPlanId(entry.provider.id);
-    setSelectedRouteKey(`${entry.provider.id}:${entry.route.id ?? entry.index}`);
+    setSelectedRouteKey(
+      `${entry.provider.id}:${entry.route.id ?? entry.index}`,
+    );
     setActiveTab("routes");
-    pushRecord("查看", `查看规则：${entry.route.label || entry.route.id || "未命名规则"}`);
+    pushRecord(
+      "查看",
+      `查看规则：${entry.route.label || entry.route.id || "未命名规则"}`,
+    );
   }
 
   /// 页面内测试只做规则匹配预览，不发真实上游请求，避免误触发计费或账号请求。
   function handlePreviewRoute() {
     const model = testModel.trim();
     if (!model) {
-      setTestResult("请输入一个 Codex 请求里的 model，例如 gpt-5.4-mini 或 qwen3.6。");
+      setTestResult(
+        "请输入一个 Codex 请求里的 model，例如 gpt-5.4-mini 或 qwen3.6。",
+      );
       pushRecord("测试", "未输入模型名，未执行匹配预览");
       return;
     }
@@ -260,11 +334,14 @@ export function CodexRouterWorkspacePage({
     const matched = enabledRoutes.find(({ route }) => {
       const models = route.match?.models ?? [];
       const prefixes = route.match?.prefixes ?? [];
-      return models.includes(model) || prefixes.some((prefix) => model.startsWith(prefix));
+      return (
+        models.includes(model) ||
+        prefixes.some((prefix) => model.startsWith(prefix))
+      );
     });
 
     if (matched) {
-      const result = `${model} 会命中「${matched.route.label || matched.route.id || "未命名规则"}」，上游为 ${routeBaseUrl(matched.route)}。`;
+      const result = `${model} 会命中「${matched.route.label || matched.route.id || "未命名规则"}」，上游为 ${routeBaseUrl(matched.route, providersById)}。`;
       setTestResult(result);
       pushRecord("测试", result);
       return;
@@ -289,14 +366,33 @@ export function CodexRouterWorkspacePage({
           onJump={(tab) => setActiveTab(tab)}
         />
 
-        <Tabs value={activeTab} onValueChange={(value) => setActiveTab(value as WorkspaceTab)}>
+        <Tabs
+          value={activeTab}
+          onValueChange={(value) => setActiveTab(value as WorkspaceTab)}
+        >
           <div className="sticky top-0 z-10 -mx-1 bg-background/95 px-1 py-2 backdrop-blur">
             <TabsList className="grid w-full grid-cols-5 bg-slate-950/40 p-1">
-              <WorkspaceTabTrigger value="overview" icon={Layers3} label="总览" />
-              <WorkspaceTabTrigger value="sources" icon={Server} label="模型源" />
-              <WorkspaceTabTrigger value="routes" icon={Route} label="路由规则" />
+              <WorkspaceTabTrigger
+                value="overview"
+                icon={Layers3}
+                label="总览"
+              />
+              <WorkspaceTabTrigger
+                value="sources"
+                icon={Server}
+                label="模型源"
+              />
+              <WorkspaceTabTrigger
+                value="routes"
+                icon={Route}
+                label="路由规则"
+              />
               <WorkspaceTabTrigger value="test" icon={Play} label="测试发布" />
-              <WorkspaceTabTrigger value="records" icon={FileClock} label="操作记录" />
+              <WorkspaceTabTrigger
+                value="records"
+                icon={FileClock}
+                label="操作记录"
+              />
             </TabsList>
           </div>
 
@@ -308,6 +404,7 @@ export function CodexRouterWorkspacePage({
               onCreatePlan={handleCreatePlan}
               onSelectPlan={handleSelectPlan}
               onSelectRoute={handleSelectRoute}
+              providersById={providersById}
               onJump={setActiveTab}
             />
           </TabsContent>
@@ -332,6 +429,7 @@ export function CodexRouterWorkspacePage({
               onEditPlan={handleEditPlan}
               onSelectPlan={handleSelectPlan}
               onSelectRoute={handleSelectRoute}
+              providersById={providersById}
             />
           </TabsContent>
 
@@ -389,19 +487,31 @@ function HeaderPanel({
             Codex 多模型路由工作台
           </div>
           <p className="max-w-4xl text-sm leading-6 text-slate-300">
-            这里配置的是“Codex 自己怎么按 model 选择多个上游模型”。Codex 仍然只连接一个
-            CC Switch 本地代理；路由规则负责把 gpt、qwen、deepseek 等模型名分流到不同上游。
+            这里配置的是“Codex 自己怎么按 model 选择多个上游模型”。Codex
+            仍然只连接一个 CC Switch 本地代理；路由规则负责把
+            gpt、qwen、deepseek 等模型名分流到不同上游。
           </p>
           <div className="flex flex-wrap gap-2">
-            <Button onClick={onCreatePlan} className="gap-2 bg-blue-600 hover:bg-blue-500">
+            <Button
+              onClick={onCreatePlan}
+              className="gap-2 bg-blue-600 hover:bg-blue-500"
+            >
               <Plus className="h-4 w-4" />
               创建多路路由
             </Button>
-            <Button variant="outline" onClick={() => onJump("routes")} className="gap-2">
+            <Button
+              variant="outline"
+              onClick={() => onJump("routes")}
+              className="gap-2"
+            >
               <Settings2 className="h-4 w-4" />
               管理路由规则
             </Button>
-            <Button variant="outline" onClick={() => onJump("test")} className="gap-2">
+            <Button
+              variant="outline"
+              onClick={() => onJump("test")}
+              className="gap-2"
+            >
               <Play className="h-4 w-4" />
               预览匹配结果
             </Button>
@@ -441,10 +551,22 @@ function HeaderPanel({
       </div>
 
       <div className="grid gap-3 p-4 md:grid-cols-4">
-        <FlowStep index="1" title="模型源" detail="准备 OpenAI、Qwen、DeepSeek 等上游" />
-        <FlowStep index="2" title="多路路由" detail="把多个上游收进一个 Codex 入口" />
+        <FlowStep
+          index="1"
+          title="模型源"
+          detail="准备 OpenAI、Qwen、DeepSeek 等上游"
+        />
+        <FlowStep
+          index="2"
+          title="多路路由"
+          detail="把多个上游收进一个 Codex 入口"
+        />
         <FlowStep index="3" title="匹配规则" detail="按精确模型名或前缀分流" />
-        <FlowStep index="4" title="测试发布" detail="预览 model 会命中哪条规则" />
+        <FlowStep
+          index="4"
+          title="测试发布"
+          detail="预览 model 会命中哪条规则"
+        />
       </div>
     </div>
   );
@@ -473,6 +595,7 @@ function OverviewTab({
   routingPlans,
   routeEntries,
   modelSources,
+  providersById,
   onCreatePlan,
   onSelectPlan,
   onSelectRoute,
@@ -481,6 +604,7 @@ function OverviewTab({
   routingPlans: Provider[];
   routeEntries: RouteEntry[];
   modelSources: Provider[];
+  providersById: Map<string, Provider>;
   onCreatePlan: () => void;
   onSelectPlan: (provider: Provider) => void;
   onSelectRoute: (entry: RouteEntry) => void;
@@ -494,7 +618,11 @@ function OverviewTab({
           title="多路路由"
           detail="每个多路路由都是一个 Codex 可连接的本地代理入口。"
           action={
-            <Button size="sm" onClick={onCreatePlan} className="gap-2 bg-blue-600 hover:bg-blue-500">
+            <Button
+              size="sm"
+              onClick={onCreatePlan}
+              className="gap-2 bg-blue-600 hover:bg-blue-500"
+            >
               <Plus className="h-4 w-4" />
               创建多路路由
             </Button>
@@ -530,7 +658,12 @@ function OverviewTab({
           title="最近路由规则"
           detail="点击规则可以进入详情和测试。"
           action={
-            <Button size="sm" variant="outline" onClick={() => onJump("routes")} className="gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => onJump("routes")}
+              className="gap-2"
+            >
               查看全部
               <ArrowRight className="h-4 w-4" />
             </Button>
@@ -541,6 +674,7 @@ function OverviewTab({
             <RouteListButton
               key={`${entry.provider.id}-${entry.route.id ?? entry.index}`}
               entry={entry}
+              providersById={providersById}
               onClick={() => onSelectRoute(entry)}
             />
           ))}
@@ -562,7 +696,11 @@ function OverviewTab({
           title="可接入模型源"
           detail="这些不是单独一类难懂的 Provider，而是可以被路由方案接入的上游模型源。"
           action={
-            <Button size="sm" variant="outline" onClick={() => onJump("sources")}>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => onJump("sources")}
+            >
               选择模型源
             </Button>
           }
@@ -599,7 +737,11 @@ function SourcesTab({
           title="多路路由方案"
           detail="这是 Codex 最终连接的路由入口；选择后到“路由规则”里挂接模型源。"
           action={
-            <Button size="sm" onClick={onCreatePlan} className="gap-2 bg-blue-600 hover:bg-blue-500">
+            <Button
+              size="sm"
+              onClick={onCreatePlan}
+              className="gap-2 bg-blue-600 hover:bg-blue-500"
+            >
               <Plus className="h-4 w-4" />
               创建多路路由
             </Button>
@@ -639,7 +781,9 @@ function SourcesTab({
             <button
               key={provider.id}
               type="button"
-              onClick={() => onEditPlan(provider, "选择并编辑模型源，准备接入多路路由")}
+              onClick={() =>
+                onEditPlan(provider, "选择并编辑模型源，准备接入多路路由")
+              }
               className="group rounded-lg border border-amber-700/40 bg-slate-950/40 p-4 text-left transition hover:border-amber-400 hover:bg-amber-950/20 hover:shadow-[0_0_0_1px_rgba(251,191,36,0.25)]"
             >
               <div className="flex items-start justify-between gap-3">
@@ -676,6 +820,7 @@ function RoutesTab({
   routeEntries,
   selectedPlan,
   selectedRoute,
+  providersById,
   onCreatePlan,
   onEditPlan,
   onSelectPlan,
@@ -685,6 +830,7 @@ function RoutesTab({
   routeEntries: RouteEntry[];
   selectedPlan: Provider | null;
   selectedRoute?: RouteEntry;
+  providersById: Map<string, Provider>;
   onCreatePlan: () => void;
   onEditPlan: (provider: Provider, detail?: string) => void;
   onSelectPlan: (provider: Provider) => void;
@@ -702,7 +848,11 @@ function RoutesTab({
           title="选择多路路由"
           detail="每个多路路由可包含多条分流规则。"
           action={
-            <Button size="sm" onClick={onCreatePlan} className="gap-2 bg-blue-600 hover:bg-blue-500">
+            <Button
+              size="sm"
+              onClick={onCreatePlan}
+              className="gap-2 bg-blue-600 hover:bg-blue-500"
+            >
               <Plus className="h-4 w-4" />
               创建多路路由
             </Button>
@@ -740,7 +890,9 @@ function RoutesTab({
               selectedPlan ? (
                 <Button
                   size="sm"
-                  onClick={() => onEditPlan(selectedPlan, "添加、修改或删除路由规则")}
+                  onClick={() =>
+                    onEditPlan(selectedPlan, "添加、修改或删除路由规则")
+                  }
                   className="gap-2 bg-emerald-600 hover:bg-emerald-500"
                 >
                   <Pencil className="h-4 w-4" />
@@ -754,7 +906,11 @@ function RoutesTab({
               <RouteListButton
                 key={`${entry.provider.id}-${entry.route.id ?? entry.index}`}
                 entry={entry}
-                active={selectedRoute?.provider.id === entry.provider.id && selectedRoute.index === entry.index}
+                providersById={providersById}
+                active={
+                  selectedRoute?.provider.id === entry.provider.id &&
+                  selectedRoute.index === entry.index
+                }
                 onClick={() => onSelectRoute(entry)}
               />
             ))}
@@ -762,9 +918,11 @@ function RoutesTab({
               <EmptyState
                 icon={Route}
                 title="这个方案还没有规则"
-              detail="点击编辑规则，在配置表单里添加精确模型或前缀匹配。"
+                detail="点击编辑规则，在配置表单里添加精确模型或前缀匹配。"
                 actionLabel="编辑多路路由"
-                onAction={() => (selectedPlan ? onEditPlan(selectedPlan) : onCreatePlan())}
+                onAction={() =>
+                  selectedPlan ? onEditPlan(selectedPlan) : onCreatePlan()
+                }
               />
             )}
           </div>
@@ -773,6 +931,7 @@ function RoutesTab({
         <RouteDetailPanel
           selectedRoute={selectedRoute}
           selectedPlan={selectedPlan}
+          providersById={providersById}
           onEditPlan={onEditPlan}
         />
       </section>
@@ -815,7 +974,10 @@ function TestTab({
             placeholder="例如：gpt-5.4-mini、qwen3.6、deepseek-v4-flash"
             className="h-10 rounded-md border border-purple-700/50 bg-slate-950/70 px-3 text-sm outline-none transition placeholder:text-slate-500 focus:border-purple-400 focus:ring-2 focus:ring-purple-500/30"
           />
-          <Button onClick={onPreviewRoute} className="gap-2 bg-purple-600 hover:bg-purple-500">
+          <Button
+            onClick={onPreviewRoute}
+            className="gap-2 bg-purple-600 hover:bg-purple-500"
+          >
             <Play className="h-4 w-4" />
             预览命中
           </Button>
@@ -840,7 +1002,8 @@ function TestTab({
             预览结果
           </div>
           <p className="text-sm leading-6 text-slate-300">
-            {testResult ?? "还没有执行预览。这里不会请求真实上游，也不会消耗额度。"}
+            {testResult ??
+              "还没有执行预览。这里不会请求真实上游，也不会消耗额度。"}
           </p>
         </div>
       </section>
@@ -865,9 +1028,18 @@ function TestTab({
         />
         <div className="mt-4 space-y-3">
           <ChecklistItem ok={Boolean(selectedPlan)} label="已选择多路路由" />
-          <ChecklistItem ok={selectedRouting?.enabled !== false} label="多路路由处于启用状态" />
-          <ChecklistItem ok={Boolean(selectedRouting?.defaultRouteId)} label="已设置默认路由" />
-          <ChecklistItem ok={(selectedRouting?.routes?.length ?? 0) > 0} label="至少有一条路由规则" />
+          <ChecklistItem
+            ok={selectedRouting?.enabled !== false}
+            label="多路路由处于启用状态"
+          />
+          <ChecklistItem
+            ok={Boolean(selectedRouting?.defaultRouteId)}
+            label="已设置默认路由"
+          />
+          <ChecklistItem
+            ok={(selectedRouting?.routes?.length ?? 0) > 0}
+            label="至少有一条路由规则"
+          />
           <ChecklistItem ok label="不会切换 Codex 当前 Provider" />
         </div>
       </section>
@@ -893,11 +1065,20 @@ function RecordsTab({
         detail="记录当前页面的查看、创建、编辑和测试动作；真实配置仍保存在模型源数据里。"
         action={
           <div className="flex gap-2">
-            <Button size="sm" variant="outline" onClick={onClear} className="gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={onClear}
+              className="gap-2"
+            >
               <Trash2 className="h-4 w-4" />
               清空临时记录
             </Button>
-            <Button size="sm" onClick={onCreatePlan} className="gap-2 bg-blue-600 hover:bg-blue-500">
+            <Button
+              size="sm"
+              onClick={onCreatePlan}
+              className="gap-2 bg-blue-600 hover:bg-blue-500"
+            >
               <Plus className="h-4 w-4" />
               创建多路路由
             </Button>
@@ -1016,7 +1197,9 @@ function PlanCardContent({
   return (
     <div className="min-w-0">
       <div className="flex flex-wrap items-center gap-2">
-        <span className="truncate font-semibold text-slate-100">{provider.name}</span>
+        <span className="truncate font-semibold text-slate-100">
+          {provider.name}
+        </span>
         <Badge
           className={cn(
             "border",
@@ -1040,14 +1223,17 @@ function PlanCardContent({
 /// 路由规则按钮，比普通卡片有更明显的 hover 和 active 态。
 function RouteListButton({
   entry,
+  providersById,
   active = false,
   onClick,
 }: {
   entry: RouteEntry;
+  providersById: Map<string, Provider>;
   active?: boolean;
   onClick: () => void;
 }) {
   const format = routeApiFormat(entry.route);
+  const targetProvider = routeTargetProvider(entry.route, providersById);
 
   return (
     <button
@@ -1082,10 +1268,12 @@ function RouteListButton({
       </div>
       <div className="mt-3 flex flex-wrap gap-2 text-xs">
         <span className="rounded-full border border-blue-500/40 bg-blue-500/10 px-2 py-0.5 text-blue-100">
-          {apiFormatLabel(format)}
+          {targetProvider ? "复用供应商配置" : apiFormatLabel(format)}
         </span>
         <span className="rounded-full border border-slate-600 bg-slate-900 px-2 py-0.5 text-slate-300">
-          {authSourceLabel(entry.route.upstream?.auth?.source)}
+          {targetProvider
+            ? `目标：${targetProvider.name}`
+            : authSourceLabel(entry.route.upstream?.auth?.source)}
         </span>
       </div>
       <div className="mt-2 truncate text-xs text-slate-400">
@@ -1099,10 +1287,12 @@ function RouteListButton({
 function RouteDetailPanel({
   selectedRoute,
   selectedPlan,
+  providersById,
   onEditPlan,
 }: {
   selectedRoute?: RouteEntry;
   selectedPlan: Provider | null;
+  providersById: Map<string, Provider>;
   onEditPlan: (provider: Provider, detail?: string) => void;
 }) {
   if (!selectedRoute) {
@@ -1121,6 +1311,8 @@ function RouteDetailPanel({
 
   const route = selectedRoute.route;
   const matchedModels = route.match?.models ?? [];
+  const targetProviderId = routeTargetProviderId(route);
+  const targetProvider = routeTargetProvider(route, providersById);
 
   return (
     <section className="rounded-lg border border-emerald-700/40 bg-slate-950/50 p-4">
@@ -1131,7 +1323,9 @@ function RouteDetailPanel({
         action={
           <Button
             size="sm"
-            onClick={() => onEditPlan(selectedRoute.provider, "编辑或删除当前路由规则")}
+            onClick={() =>
+              onEditPlan(selectedRoute.provider, "编辑或删除当前路由规则")
+            }
             className="gap-2 bg-emerald-600 hover:bg-emerald-500"
           >
             <Pencil className="h-4 w-4" />
@@ -1141,9 +1335,36 @@ function RouteDetailPanel({
       />
       <div className="mt-4 space-y-3 text-sm">
         <DetailRow label="匹配条件" value={routeMatchSummary(route)} />
-        <DetailRow label="上游地址" value={routeBaseUrl(route)} />
-        <DetailRow label="接口类型" value={apiFormatLabel(routeApiFormat(route))} />
-        <DetailRow label="认证方式" value={authSourceLabel(route.upstream?.auth?.source)} />
+        {targetProviderId ? (
+          <DetailRow
+            label="目标供应商"
+            value={
+              targetProvider
+                ? `${targetProvider.name} (${targetProvider.id})`
+                : `未找到目标供应商：${targetProviderId}`
+            }
+          />
+        ) : null}
+        <DetailRow
+          label="上游地址"
+          value={routeBaseUrl(route, providersById)}
+        />
+        <DetailRow
+          label="接口类型"
+          value={
+            targetProvider
+              ? "跟随目标供应商"
+              : apiFormatLabel(routeApiFormat(route))
+          }
+        />
+        <DetailRow
+          label="认证方式"
+          value={
+            targetProvider
+              ? "跟随目标供应商"
+              : authSourceLabel(route.upstream?.auth?.source)
+          }
+        />
         <DetailRow
           label="能力"
           value={[
@@ -1158,7 +1379,9 @@ function RouteDetailPanel({
         <Button
           variant="outline"
           className="justify-start gap-2"
-          onClick={() => navigator.clipboard?.writeText(matchedModels.join(", "))}
+          onClick={() =>
+            navigator.clipboard?.writeText(matchedModels.join(", "))
+          }
           disabled={matchedModels.length === 0}
         >
           <Clipboard className="h-4 w-4" />
@@ -1167,7 +1390,9 @@ function RouteDetailPanel({
         <Button
           variant="outline"
           className="justify-start gap-2 text-rose-200 hover:text-rose-100"
-          onClick={() => onEditPlan(selectedRoute.provider, "打开表单后可删除当前规则")}
+          onClick={() =>
+            onEditPlan(selectedRoute.provider, "打开表单后可删除当前规则")
+          }
         >
           <Trash2 className="h-4 w-4" />
           删除入口在编辑表单中
@@ -1191,7 +1416,9 @@ function DetailRow({ label, value }: { label: string; value?: string }) {
 function SourceMiniCard({ provider }: { provider: Provider }) {
   return (
     <div className="rounded-lg border border-amber-700/30 bg-slate-950/40 p-3">
-      <div className="truncate text-sm font-semibold text-slate-100">{provider.name}</div>
+      <div className="truncate text-sm font-semibold text-slate-100">
+        {provider.name}
+      </div>
       <div className="mt-1 truncate text-xs text-slate-400">{provider.id}</div>
     </div>
   );
@@ -1236,7 +1463,12 @@ function EmptyState({
           <div className="font-semibold text-slate-100">{title}</div>
           <p className="mt-1 text-sm leading-6 text-slate-400">{detail}</p>
           {onAction && (
-            <Button size="sm" variant="outline" onClick={onAction} className="mt-3">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={onAction}
+              className="mt-3"
+            >
               {actionLabel}
             </Button>
           )}
