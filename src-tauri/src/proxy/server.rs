@@ -781,6 +781,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn v1_responses_websocket_probe_returns_http_426() {
+        let (server, _db) = build_test_server();
+        let response = server
+            .build_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/v1/responses")
+                    .header(header::CONNECTION, "Upgrade")
+                    .header(header::UPGRADE, "websocket")
+                    .header(header::SEC_WEBSOCKET_VERSION, "13")
+                    .header(header::SEC_WEBSOCKET_KEY, "dGhlIHNhbXBsZSBub25jZQ==")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::UPGRADE_REQUIRED);
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], "responses_websocket_not_supported");
+    }
+
+    #[tokio::test]
     async fn v1_responses_converts_to_chat_only_backend() {
         let (upstream_base_url, _upstream_task) = spawn_openai_chat_mock().await;
         let (server, db) = build_test_server();

@@ -154,23 +154,22 @@ fn mark_external_openai_headers(headers: &mut HeaderMap) {
     );
 }
 
-/// 处理 Codex Responses WebSocket 升级；非升级请求保持官方 426 fallback 语义。
+/// 处理 Codex Responses WebSocket 探测请求。
+///
+/// Codex 在部分版本会优先尝试用 WebSocket 访问 `/responses`。多路由需要读取
+/// `response.create` 里的 model 后才能决定真实上游，但一旦 WebSocket 握手成功，
+/// 代理就不能再返回真正的 HTTP 426；此前在协议内伪造 426 事件再正常关闭，会被
+/// 当前 Codex 视为 `Connection closed normally`。因此这里无论是否带 Upgrade
+/// 头，都直接返回 HTTP 426，让客户端回退到已验证的 HTTP Responses 链路。
 pub async fn handle_responses_websocket(
-    State(state): State<ProxyState>,
-    headers: HeaderMap,
-    ws: Option<WebSocketUpgrade>,
+    State(_state): State<ProxyState>,
+    _headers: HeaderMap,
+    _ws: Option<WebSocketUpgrade>,
 ) -> axum::response::Response {
-    match ws {
-        Some(ws) => ws
-            .on_upgrade(move |socket| {
-                crate::proxy::codex_ws::relay_responses_websocket(state, headers, socket)
-            })
-            .into_response(),
-        None => handle_responses_websocket_fallback().await,
-    }
+    handle_responses_websocket_fallback().await
 }
 
-/// 告诉 Codex 客户端本地代理不支持 Responses WebSocket。
+/// 告诉 Codex 客户端本地代理不接管 Responses WebSocket，应该改走 HTTP Responses。
 pub async fn handle_responses_websocket_fallback() -> axum::response::Response {
     (
         StatusCode::UPGRADE_REQUIRED,
