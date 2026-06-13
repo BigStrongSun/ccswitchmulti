@@ -5,6 +5,7 @@
 
 use crate::codex_config::{
     get_codex_config_dir, read_codex_config_text, CC_SWITCH_CODEX_MODEL_PROVIDER_ID,
+    CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID,
 };
 use crate::config::{atomic_write, copy_file, get_app_config_dir};
 use crate::database::{is_official_seed_id, Database};
@@ -214,7 +215,7 @@ pub fn maybe_migrate_codex_openai_history_provider_bucket(
     })
 }
 
-/// 显式把 Codex 历史同步到 MultiRouter 运行时使用的 `custom` provider 桶。
+/// 显式把 Codex 历史同步到 MultiRouter 运行时使用的稳定 provider 桶。
 ///
 /// MultiRouter 不能再使用内置 `openai` provider，否则 Codex 会重新走官方
 /// OpenAI/WebSocket 语义；因此历史可见性只能通过用户主动触发的 provider 桶同步解决。
@@ -226,7 +227,7 @@ pub fn sync_codex_history_provider_bucket_to_multirouter(
     for provider_id in CC_SWITCH_OPENAI_HISTORY_SOURCE_PROVIDER_IDS {
         source_provider_ids.insert((*provider_id).to_string());
     }
-    source_provider_ids.remove(CC_SWITCH_CODEX_MODEL_PROVIDER_ID);
+    source_provider_ids.remove(CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID);
 
     if source_provider_ids.is_empty() {
         return Ok(CodexHistoryProviderBucketMigrationOutcome {
@@ -241,13 +242,13 @@ pub fn sync_codex_history_provider_bucket_to_multirouter(
         &codex_dir,
         &source_provider_ids,
         &backup_root,
-        CC_SWITCH_CODEX_MODEL_PROVIDER_ID,
+        CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID,
     )?;
     let migrated_state_rows = migrate_codex_state_dbs_to_target(
         &codex_dir,
         &source_provider_ids,
         &backup_root,
-        CC_SWITCH_CODEX_MODEL_PROVIDER_ID,
+        CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID,
     )?;
 
     Ok(CodexHistoryProviderBucketMigrationOutcome {
@@ -1285,13 +1286,13 @@ base_url = "https://proxy.example/v1"
     }
 
     #[test]
-    fn multirouter_custom_sync_rewrites_openai_and_router_history_buckets() {
+    fn multirouter_sync_rewrites_openai_custom_and_legacy_router_history_to_stable_router_bucket() {
         let dir = tempdir().expect("tempdir");
         let codex_dir = dir.path().join(".codex");
         let backup_root = dir.path().join("backup");
         fs::create_dir_all(&codex_dir).expect("create codex dir");
 
-        let source_provider_ids = source_ids(&["openai", "codex_model_router_v2"]);
+        let source_provider_ids = source_ids(&["openai", "custom", "cc_switch_codex_router"]);
         let session_dir = codex_dir.join("sessions/2026/06/13");
         fs::create_dir_all(&session_dir).expect("create session dir");
         let session_path = session_dir.join("router-sync.jsonl");
@@ -1299,7 +1300,7 @@ base_url = "https://proxy.example/v1"
             &session_path,
             concat!(
                 "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s-openai\",\"model_provider\":\"openai\"}}\n",
-                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s-router\",\"model_provider\":\"codex_model_router_v2\"}}\n",
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s-legacy-router\",\"model_provider\":\"cc_switch_codex_router\"}}\n",
                 "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s-custom\",\"model_provider\":\"custom\"}}\n",
             ),
         )
@@ -1309,17 +1310,17 @@ base_url = "https://proxy.example/v1"
             &codex_dir,
             &source_provider_ids,
             &backup_root,
-            CC_SWITCH_CODEX_MODEL_PROVIDER_ID,
+            CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID,
         )
-        .expect("migrate jsonl to custom");
+        .expect("migrate jsonl to stable router bucket");
         assert_eq!(migrated_jsonl, 1);
         let session_text = fs::read_to_string(&session_path).expect("read session");
         assert_eq!(
             session_text
-                .matches("\"model_provider\":\"custom\"")
+                .matches("\"model_provider\":\"codex_model_router_v2\"")
                 .count(),
             3,
-            "openai/router histories should be visible under the custom MultiRouter bucket"
+            "openai/custom/legacy router histories should be visible under the stable MultiRouter bucket"
         );
 
         let state_db_path = codex_dir.join(CODEX_STATE_DB_FILENAME);
@@ -1331,7 +1332,7 @@ base_url = "https://proxy.example/v1"
             );
             INSERT INTO threads (id, model_provider) VALUES
                 ('openai-thread', 'openai'),
-                ('router-thread', 'codex_model_router_v2'),
+                ('legacy-router-thread', 'cc_switch_codex_router'),
                 ('custom-thread', 'custom');",
         )
         .expect("seed state db");
@@ -1342,20 +1343,20 @@ base_url = "https://proxy.example/v1"
             &codex_dir,
             &source_provider_ids,
             &backup_root,
-            CC_SWITCH_CODEX_MODEL_PROVIDER_ID,
+            CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID,
         )
-        .expect("migrate state db to custom");
-        assert_eq!(migrated_rows, 2);
+        .expect("migrate state db to stable router bucket");
+        assert_eq!(migrated_rows, 3);
 
         let conn = Connection::open(&state_db_path).expect("reopen state db");
-        let custom_count: i64 = conn
+        let router_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM threads WHERE model_provider = 'custom'",
+                "SELECT COUNT(*) FROM threads WHERE model_provider = 'codex_model_router_v2'",
                 [],
                 |row| row.get(0),
             )
-            .expect("count custom rows");
-        assert_eq!(custom_count, 3);
+            .expect("count router rows");
+        assert_eq!(router_count, 3);
     }
 
     #[test]

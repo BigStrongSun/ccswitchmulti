@@ -321,22 +321,14 @@ pub async fn diagnose_codex_multirouter(
     checks.push(codex_check(
         "live_model_provider",
         "Codex provider 写法",
-        if live_config.model_provider.as_deref() == Some("custom") {
-            CodexDiagnosticStatus::Pass
-        } else if live_config.uses_builtin_openai_with_local_base {
-            CodexDiagnosticStatus::Fail
-        } else {
-            CodexDiagnosticStatus::Warn
-        },
-        if live_config.model_provider.as_deref() == Some("custom") {
-            "live config 使用 custom model_provider，符合本地 MultiRouter 接管要求。"
-        } else if live_config.uses_builtin_openai_with_local_base {
-            "live config 仍用内置 openai provider 指向本地地址，这会触发 Codex 官方 WebSocket/OpenAI 语义。"
-        } else {
-            "live config 当前不是 CC Switch MultiRouter custom provider。"
-        },
+        codex_live_model_provider_status(&live_config),
+        codex_live_model_provider_detail(&live_config),
         vec![
             format!("model_provider={:?}", live_config.model_provider),
+            format!(
+                "provider_bucket={}",
+                codex_live_model_provider_bucket(&live_config)
+            ),
             format!("openai_base_url={:?}", live_config.openai_base_url),
         ],
     ));
@@ -370,7 +362,7 @@ pub async fn diagnose_codex_multirouter(
         } else if live_config.supports_websockets == Some(true) {
             "live config 仍允许 Responses WebSocket，可能再次出现 WS 断开类错误。"
         } else {
-            "live config 未显式声明 supports_websockets=false；建议重新接管写入 custom provider。"
+            "live config 未显式声明 supports_websockets=false；建议重新接管写入 codex_model_router_v2 provider。"
         },
         vec![format!(
             "supports_websockets={:?}",
@@ -525,6 +517,60 @@ fn codex_check(
         status,
         detail: detail.into(),
         evidence,
+    }
+}
+
+/// 判断 live config 是否使用当前稳定的 Codex MultiRouter provider 桶。
+fn codex_live_model_provider_is_stable_router(live_config: &CodexLiveConfigDiagnostics) -> bool {
+    live_config.model_provider.as_deref()
+        == Some(crate::codex_config::CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID)
+}
+
+/// 判断 live config 是否仍在使用旧版 MultiRouter provider 桶。
+fn codex_live_model_provider_is_legacy_router(live_config: &CodexLiveConfigDiagnostics) -> bool {
+    live_config.model_provider.as_deref() == Some("cc_switch_codex_router")
+}
+
+/// MultiRouter provider 桶诊断：稳定桶通过，旧桶或 custom 给出警告，内置 openai 本地化失败。
+fn codex_live_model_provider_status(
+    live_config: &CodexLiveConfigDiagnostics,
+) -> CodexDiagnosticStatus {
+    if live_config.uses_builtin_openai_with_local_base {
+        CodexDiagnosticStatus::Fail
+    } else if codex_live_model_provider_is_stable_router(live_config) {
+        CodexDiagnosticStatus::Pass
+    } else {
+        CodexDiagnosticStatus::Warn
+    }
+}
+
+/// 生成 provider 桶诊断说明，避免把稳定 router 桶误写成 custom。
+fn codex_live_model_provider_detail(live_config: &CodexLiveConfigDiagnostics) -> &'static str {
+    if live_config.uses_builtin_openai_with_local_base {
+        "live config 仍用内置 openai provider 指向本地地址，这会触发 Codex 官方 WebSocket/OpenAI 语义。"
+    } else if codex_live_model_provider_is_stable_router(live_config) {
+        "live config 使用稳定的 codex_model_router_v2 MultiRouter provider 桶。"
+    } else if codex_live_model_provider_is_legacy_router(live_config) {
+        "live config 使用旧的 cc_switch_codex_router 桶；建议用当前构建重新接管以回到 codex_model_router_v2。"
+    } else if live_config.model_provider.as_deref() == Some("custom") {
+        "live config 使用 custom 桶；这可避免内置 OpenAI WebSocket，但不符合当前 MultiRouter 历史桶约定。"
+    } else {
+        "live config 当前不是 CC Switch MultiRouter provider 桶。"
+    }
+}
+
+/// 给诊断证据提供稳定的 provider 桶分类，方便对比运行 exe 与当前 HEAD。
+fn codex_live_model_provider_bucket(live_config: &CodexLiveConfigDiagnostics) -> &'static str {
+    if live_config.uses_builtin_openai_with_local_base {
+        "builtin_openai_local_base"
+    } else if codex_live_model_provider_is_stable_router(live_config) {
+        "stable_router"
+    } else if codex_live_model_provider_is_legacy_router(live_config) {
+        "legacy_router"
+    } else if live_config.model_provider.as_deref() == Some("custom") {
+        "custom"
+    } else {
+        "other"
     }
 }
 
@@ -1373,6 +1419,64 @@ mod codex_router_log_diagnostics_tests {
         );
         assert_eq!(diagnostics.latest_error, None);
     }
+
+    #[test]
+    fn live_model_provider_diagnostics_classify_stable_and_legacy_router_buckets() {
+        let stable = test_live_config_for_provider(Some(
+            crate::codex_config::CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID,
+        ));
+        assert_eq!(
+            codex_live_model_provider_status(&stable),
+            CodexDiagnosticStatus::Pass
+        );
+        assert_eq!(codex_live_model_provider_bucket(&stable), "stable_router");
+
+        let legacy = test_live_config_for_provider(Some("cc_switch_codex_router"));
+        assert_eq!(
+            codex_live_model_provider_status(&legacy),
+            CodexDiagnosticStatus::Warn
+        );
+        assert_eq!(codex_live_model_provider_bucket(&legacy), "legacy_router");
+
+        let custom = test_live_config_for_provider(Some("custom"));
+        assert_eq!(
+            codex_live_model_provider_status(&custom),
+            CodexDiagnosticStatus::Warn
+        );
+        assert_eq!(codex_live_model_provider_bucket(&custom), "custom");
+
+        let mut builtin_openai = test_live_config_for_provider(Some("openai"));
+        builtin_openai.uses_builtin_openai_with_local_base = true;
+        assert_eq!(
+            codex_live_model_provider_status(&builtin_openai),
+            CodexDiagnosticStatus::Fail
+        );
+        assert_eq!(
+            codex_live_model_provider_bucket(&builtin_openai),
+            "builtin_openai_local_base"
+        );
+    }
+
+    fn test_live_config_for_provider(provider: Option<&str>) -> CodexLiveConfigDiagnostics {
+        CodexLiveConfigDiagnostics {
+            path: "config.toml".to_string(),
+            exists: true,
+            config_modified_at: None,
+            parse_error: None,
+            model_provider: provider.map(ToString::to_string),
+            active_base_url: Some("http://127.0.0.1:15721/v1".to_string()),
+            openai_base_url: None,
+            provider_base_url: Some("http://127.0.0.1:15721/v1".to_string()),
+            supports_websockets: Some(false),
+            wire_api: Some("responses".to_string()),
+            model_catalog_json: Some("cc-switch-model-catalog.json".to_string()),
+            model_catalog_path: None,
+            model_catalog_modified_at: None,
+            model_catalog_model_count: Some(7),
+            uses_builtin_openai_with_local_base: false,
+            points_to_local_proxy: true,
+        }
+    }
 }
 
 /// 根据失败/告警项生成最短下一步动作。
@@ -1390,7 +1494,7 @@ fn codex_next_action(
             "codex_takeover" => "把 Codex 当前 provider 切回 MultiRouter 并重新启用 Codex 接管。"
                 .to_string(),
             "live_model_provider" | "live_base_url" | "live_websocket_disabled" => {
-                "重新启用 MultiRouter provider，让 CC Switch 写入 custom provider + supports_websockets=false。"
+                "重新启用 MultiRouter provider，让 CC Switch 写入 codex_model_router_v2 provider + supports_websockets=false。"
                     .to_string()
             }
             "route_plan" => "编辑 MultiRouter provider，启用入口并保留至少一条 route。".to_string(),

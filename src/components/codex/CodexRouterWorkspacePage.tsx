@@ -1381,10 +1381,10 @@ function StatusTab({
   }
 
   /// 历史同步会改写 Codex 本机索引，因此必须由用户显式确认；它只解决
-  /// custom MultiRouter 桶下看不到 openai 历史的问题，不参与请求路由。
+  /// 当前 MultiRouter 历史桶下看不到 openai/custom/旧 router 历史的问题，不参与请求路由。
   async function syncHistoryToMultiRouter() {
     const confirmed = window.confirm(
-      "这会把 Codex 的 openai/旧 router 历史同步到 MultiRouter 使用的 custom 历史桶，并先创建本地备份。继续吗？",
+      "这会把 Codex 的 openai/custom/旧 router 历史同步到当前 MultiRouter 历史桶，并先创建本地备份。继续吗？",
     );
     if (!confirmed) return;
     setIsSyncingHistory(true);
