@@ -13,6 +13,8 @@ import type {
   CodexMultiRouterDiagnostics,
   CodexModelPickerUnlockResult,
   CodexHistoryProviderBucketSyncOutcome,
+  CodexHistoryVisibilityRepairOptions,
+  CodexHistoryVisibilityRepairOutcome,
 } from "@/types/proxy";
 
 export const proxyApi = {
@@ -45,6 +47,12 @@ export const proxyApi = {
 
   async syncCodexHistoryToMultiRouter(): Promise<CodexHistoryProviderBucketSyncOutcome> {
     return invoke("sync_codex_history_to_multirouter");
+  },
+
+  async repairCodexHistoryVisibility(
+    options: CodexHistoryVisibilityRepairOptions,
+  ): Promise<CodexHistoryVisibilityRepairOutcome> {
+    return invoke("repair_codex_history_visibility", { options });
   },
 
   async startExternalOpenAIAPIServer(): Promise<ProxyServerInfo> {

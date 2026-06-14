@@ -36,7 +36,7 @@ import type { RequestLog } from "@/types/usage";
 import type {
   CodexDiagnosticCheck,
   CodexDiagnosticStatus,
-  CodexHistoryProviderBucketSyncOutcome,
+  CodexHistoryVisibilityRepairOutcome,
   CodexModelPickerUnlockResult,
   CodexMultiRouterDiagnostics,
   CodexRouterLogEvent,
@@ -1282,7 +1282,7 @@ function StatusTab({
   const [diagnoseError, setDiagnoseError] = useState<string | null>(null);
   const [isDiagnosing, setIsDiagnosing] = useState(false);
   const [historySyncResult, setHistorySyncResult] =
-    useState<CodexHistoryProviderBucketSyncOutcome | null>(null);
+    useState<CodexHistoryVisibilityRepairOutcome | null>(null);
   const [historySyncError, setHistorySyncError] = useState<string | null>(null);
   const [isSyncingHistory, setIsSyncingHistory] = useState(false);
   const [modelPickerUnlockResult, setModelPickerUnlockResult] =
@@ -1387,17 +1387,49 @@ function StatusTab({
     }
   }
 
-  /// 历史同步会改写 Codex 本机索引，因此必须由用户显式确认；它只解决
-  /// 当前 MultiRouter 历史桶下看不到 openai/custom/旧 router 历史的问题，不参与请求路由。
+  /// 历史显示修复会改写 Codex 本机索引，因此先 dry-run 预览，再由用户确认写入。
+  /// 它覆盖 active SQLite、provider 桶、has_user_event、session_index、workspace hints 和 rollout mtime。
   async function syncHistoryToMultiRouter() {
-    const confirmed = window.confirm(
-      "这会把 Codex 的 openai/custom/旧 router 历史同步到当前 MultiRouter 历史桶，并先创建本地备份。继续吗？",
+    const rawProjectPath = window.prompt(
+      "可选：输入要置顶显示的项目根目录。留空时只修复 active SQLite、provider、user-event、session_index 和 workspace hints。",
+      "",
     );
-    if (!confirmed) return;
+    if (rawProjectPath === null) return;
+    const projectPath = rawProjectPath.trim() || null;
     setIsSyncingHistory(true);
     setHistorySyncError(null);
     try {
-      const result = await proxyApi.syncCodexHistoryToMultiRouter();
+      const preview = await proxyApi.repairCodexHistoryVisibility({
+        dryRun: true,
+        projectPath,
+        count: 30,
+        windowLimit: 80,
+      });
+      setHistorySyncResult(preview);
+      const confirmed = window.confirm(
+        [
+          "将修复当前 Codex Desktop 历史显示，并在写入前创建本地备份。",
+          "",
+          `active DB: ${preview.stateDbPath ?? "未找到"}`,
+          `目标 provider: ${preview.targetProvider}`,
+          `provider rows: ${preview.providerRowsToUpdate}`,
+          `has_user_event rows: ${preview.userEventRowsToUpdate}`,
+          `session_index append: ${preview.sessionIndexMissingToAppend}`,
+          `workspace hints: ${preview.workspaceHintsToFix}`,
+          `projectless remove: ${preview.projectlessIdsToRemove}`,
+          `focus rows: ${preview.focusSelectedCount}`,
+          `rollout mtimes: ${preview.rolloutMtimesToTouch}`,
+          "",
+          "继续写入吗？",
+        ].join("\n"),
+      );
+      if (!confirmed) return;
+      const result = await proxyApi.repairCodexHistoryVisibility({
+        dryRun: false,
+        projectPath,
+        count: 30,
+        windowLimit: 80,
+      });
       setHistorySyncResult(result);
     } catch (error) {
       setHistorySyncError(
@@ -1468,7 +1500,7 @@ function StatusTab({
                   ) : (
                     <FileClock className="h-4 w-4" />
                   )}
-                  同步历史桶
+                  修复历史显示
                 </Button>
                 <Button
                   size="sm"
@@ -1552,17 +1584,51 @@ function StatusTab({
           </div>
           {historySyncError ? (
             <div className="mt-3 rounded-lg border border-rose-700/50 bg-rose-950/30 p-3 text-xs text-rose-100">
-              历史同步失败：{historySyncError}
+              历史修复失败：{historySyncError}
             </div>
           ) : null}
           {historySyncResult ? (
             <div className="mt-3 rounded-lg border border-sky-700/50 bg-sky-950/25 p-3 text-xs leading-5 text-sky-100">
-              历史同步完成：SQLite {historySyncResult.migratedStateRows}{" "}
-              行，JSONL {historySyncResult.migratedJsonlFiles} 个文件，来源{" "}
-              {historySyncResult.sourceProviderIds.join(", ") || "无"}
-              {historySyncResult.skippedReason
-                ? `，跳过原因：${historySyncResult.skippedReason}`
-                : ""}
+              <div className="font-semibold">
+                {historySyncResult.dryRun ? "历史修复预览" : "历史修复完成"}
+              </div>
+              <div className="mt-1">
+                active DB：{historySyncResult.stateDbPath ?? "未找到"}（
+                {historySyncResult.activeDbKind ?? "-"}）
+              </div>
+              <div className="mt-1">
+                provider {historySyncResult.providerRowsUpdated}/
+                {historySyncResult.providerRowsToUpdate}，user-event{" "}
+                {historySyncResult.userEventRowsUpdated}/
+                {historySyncResult.userEventRowsToUpdate}，index append{" "}
+                {historySyncResult.sessionIndexAppended}/
+                {historySyncResult.sessionIndexMissingToAppend}
+              </div>
+              <div>
+                hints {historySyncResult.workspaceHintsFixed}/
+                {historySyncResult.workspaceHintsToFix}，projectless{" "}
+                {historySyncResult.projectlessIdsRemoved}/
+                {historySyncResult.projectlessIdsToRemove}，focus{" "}
+                {historySyncResult.sqliteFocusRowsUpdated}/
+                {historySyncResult.sqliteFocusRowsToUpdate}，mtime{" "}
+                {historySyncResult.rolloutMtimesTouched}/
+                {historySyncResult.rolloutMtimesToTouch}
+              </div>
+              <div>
+                target={historySyncResult.targetProvider} visible=
+                {historySyncResult.visibleCandidateRows} source=
+                {historySyncResult.sourceProviderIds.join(", ") || "无"}
+              </div>
+              {historySyncResult.backupDir ? (
+                <div className="mt-1 font-mono text-[11px] opacity-80">
+                  backup={historySyncResult.backupDir}
+                </div>
+              ) : null}
+              {historySyncResult.skippedReason ? (
+                <div className="mt-1">
+                  跳过原因：{historySyncResult.skippedReason}
+                </div>
+              ) : null}
             </div>
           ) : null}
           {modelPickerUnlockError ? (

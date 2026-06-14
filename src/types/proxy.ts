@@ -188,6 +188,54 @@ export interface CodexHistoryProviderBucketSyncOutcome {
   skippedReason: string | null;
 }
 
+export interface CodexHistoryVisibilityRepairOptions {
+  dryRun: boolean;
+  projectPath?: string | null;
+  targetProvider?: string | null;
+  count?: number | null;
+  windowLimit?: number | null;
+  includeArchived?: boolean | null;
+  includeSubagents?: boolean | null;
+  skipProviderBucketSync?: boolean | null;
+}
+
+export interface CodexHistoryVisibilityRepairOutcome {
+  dryRun: boolean;
+  codexHome: string;
+  stateDbPath: string | null;
+  activeDbKind: string | null;
+  liveConfigModelProvider: string | null;
+  targetProvider: string;
+  sourceProviderIds: string[];
+  sqliteThreads: number;
+  providerRowsToUpdate: number;
+  providerRowsUpdated: number;
+  rolloutFirstLinesToUpdate: number;
+  rolloutFirstLinesUpdated: number;
+  userEventRowsToUpdate: number;
+  userEventRowsUpdated: number;
+  visibleCandidateRows: number;
+  sessionIndexMissingToAppend: number;
+  sessionIndexAppended: number;
+  projectRows: number;
+  focusSelectedCount: number;
+  sqliteFocusRowsToUpdate: number;
+  sqliteFocusRowsUpdated: number;
+  sessionIndexRowsToMove: number;
+  sessionIndexRowsMoved: number;
+  workspaceHintsToFix: number;
+  workspaceHintsFixed: number;
+  projectlessIdsToRemove: number;
+  projectlessIdsRemoved: number;
+  savedWorkspaceRootsToAdd: number;
+  savedWorkspaceRootsAdded: number;
+  rolloutMtimesToTouch: number;
+  rolloutMtimesTouched: number;
+  visibleProjectRowsInWindowBefore: number;
+  backupDir: string | null;
+  skippedReason: string | null;
+}
+
 export interface ProviderHealth {
   provider_id: string;
   app_type: string;

@@ -549,6 +549,19 @@ pub async fn sync_codex_history_to_multirouter(
     .map_err(|error| error.to_string())
 }
 
+/// 修复当前 Codex Desktop 历史侧边栏可见性；调用方应先 dry-run，再由用户确认 apply。
+#[tauri::command]
+pub async fn repair_codex_history_visibility(
+    state: tauri::State<'_, AppState>,
+    options: Option<crate::codex_history_migration::CodexHistoryVisibilityRepairOptions>,
+) -> Result<crate::codex_history_migration::CodexHistoryVisibilityRepairOutcome, String> {
+    crate::codex_history_migration::repair_codex_history_visibility_for_multirouter(
+        state.db.as_ref(),
+        options.unwrap_or_default(),
+    )
+    .map_err(|error| error.to_string())
+}
+
 /// 构造一个诊断检查项，统一字符串转换和证据字段。
 fn codex_check(
     id: &str,

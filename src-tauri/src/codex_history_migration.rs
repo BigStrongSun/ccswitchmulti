@@ -14,22 +14,24 @@ use crate::settings::{
     CodexOfficialHistoryUnifyMigration, CodexProviderTemplateMigration,
     CodexThirdPartyHistoryProviderBucketMigration,
 };
-use chrono::{Local, Utc};
+use chrono::{Local, SecondsFormat, TimeZone, Utc};
 use rusqlite::{backup::Backup, params_from_iter, Connection};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use toml_edit::DocumentMut;
 
 const MIGRATION_NAME: &str = "codex-history-provider-migration-v1";
 const OPENAI_HISTORY_MIGRATION_NAME: &str = "codex-history-openai-provider-migration-v2";
 const MULTIROUTER_CUSTOM_HISTORY_SYNC_NAME: &str =
     "codex-history-multirouter-custom-provider-sync-v1";
+const CURRENT_DESKTOP_HISTORY_REPAIR_NAME: &str =
+    "codex-history-current-desktop-visibility-repair-v1";
 const OFFICIAL_UNIFY_MIGRATION_NAME: &str = "codex-official-history-unify-v1";
 /// 还原操作自身的备份目录（与迁移备份分开，保持迁移账本目录纯净）。
 const OFFICIAL_UNIFY_RESTORE_BACKUP_NAME: &str = "codex-official-history-unify-restore-v1";
@@ -118,6 +120,80 @@ pub struct CodexHistoryProviderBucketMigrationOutcome {
     pub source_provider_ids: Vec<String>,
     pub migrated_jsonl_files: usize,
     pub migrated_state_rows: usize,
+    pub skipped_reason: Option<String>,
+}
+
+/// Codex Desktop 历史可见性修复的调用参数。
+///
+/// `dry_run=true` 时只统计会被修改的内容；真正写入必须由前端在用户确认后再次调用。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexHistoryVisibilityRepairOptions {
+    pub dry_run: bool,
+    pub project_path: Option<String>,
+    pub target_provider: Option<String>,
+    pub count: Option<usize>,
+    pub window_limit: Option<usize>,
+    pub include_archived: Option<bool>,
+    pub include_subagents: Option<bool>,
+    pub skip_provider_bucket_sync: Option<bool>,
+}
+
+impl Default for CodexHistoryVisibilityRepairOptions {
+    /// 构造保守默认值：预览模式、MultiRouter 稳定 provider、可选项目聚焦。
+    fn default() -> Self {
+        Self {
+            dry_run: true,
+            project_path: None,
+            target_provider: Some(CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID.to_string()),
+            count: Some(30),
+            window_limit: Some(80),
+            include_archived: Some(false),
+            include_subagents: Some(false),
+            skip_provider_bucket_sync: Some(false),
+        }
+    }
+}
+
+/// Codex Desktop 历史可见性修复的统计结果。
+///
+/// 字段同时用于 dry-run 预览和 apply 结果，便于前端先展示影响范围再确认写入。
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexHistoryVisibilityRepairOutcome {
+    pub dry_run: bool,
+    pub codex_home: String,
+    pub state_db_path: Option<String>,
+    pub active_db_kind: Option<String>,
+    pub live_config_model_provider: Option<String>,
+    pub target_provider: String,
+    pub source_provider_ids: Vec<String>,
+    pub sqlite_threads: usize,
+    pub provider_rows_to_update: usize,
+    pub provider_rows_updated: usize,
+    pub rollout_first_lines_to_update: usize,
+    pub rollout_first_lines_updated: usize,
+    pub user_event_rows_to_update: usize,
+    pub user_event_rows_updated: usize,
+    pub visible_candidate_rows: usize,
+    pub session_index_missing_to_append: usize,
+    pub session_index_appended: usize,
+    pub project_rows: usize,
+    pub focus_selected_count: usize,
+    pub sqlite_focus_rows_to_update: usize,
+    pub sqlite_focus_rows_updated: usize,
+    pub session_index_rows_to_move: usize,
+    pub session_index_rows_moved: usize,
+    pub workspace_hints_to_fix: usize,
+    pub workspace_hints_fixed: usize,
+    pub projectless_ids_to_remove: usize,
+    pub projectless_ids_removed: usize,
+    pub saved_workspace_roots_to_add: usize,
+    pub saved_workspace_roots_added: usize,
+    pub rollout_mtimes_to_touch: usize,
+    pub rollout_mtimes_touched: usize,
+    pub visible_project_rows_in_window_before: usize,
+    pub backup_dir: Option<String>,
     pub skipped_reason: Option<String>,
 }
 
@@ -275,6 +351,1126 @@ pub fn sync_codex_history_provider_bucket_to_multirouter(
         migrated_state_rows,
         skipped_reason: None,
     })
+}
+
+/// 修复当前 Codex Desktop 历史侧边栏可见性。
+///
+/// 该路径专门覆盖 Codex Desktop 26.609 以后读取 `~/.codex/sqlite/state_5.sqlite` 的实现，
+/// 同时处理 provider 桶、`has_user_event`、`session_index.jsonl`、全局工作区提示和项目聚焦。
+pub fn repair_codex_history_visibility_for_multirouter(
+    db: &Database,
+    options: CodexHistoryVisibilityRepairOptions,
+) -> Result<CodexHistoryVisibilityRepairOutcome, AppError> {
+    let codex_dir = get_codex_config_dir();
+    let config_text = read_codex_config_text().unwrap_or_default();
+    let live_config_model_provider = current_codex_model_provider_from_config_text(&config_text);
+    let target_provider = options
+        .target_provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID)
+        .to_string();
+    let dry_run = options.dry_run;
+    let count = options.count.unwrap_or(30);
+    let window_limit = options.window_limit.unwrap_or(80);
+    let include_archived = options.include_archived.unwrap_or(false);
+    let include_subagents = options.include_subagents.unwrap_or(false);
+    let skip_provider_bucket_sync = options.skip_provider_bucket_sync.unwrap_or(false);
+    let normalized_project_path = options
+        .project_path
+        .as_deref()
+        .and_then(normalize_history_path);
+
+    let Some(active_db) = resolve_active_codex_state_db(&codex_dir, &config_text) else {
+        return Ok(CodexHistoryVisibilityRepairOutcome {
+            dry_run,
+            codex_home: codex_dir.to_string_lossy().to_string(),
+            target_provider,
+            live_config_model_provider,
+            skipped_reason: Some("state_db_not_found".to_string()),
+            ..Default::default()
+        });
+    };
+
+    let mut source_provider_ids = collect_history_visibility_source_provider_ids(db)?;
+    source_provider_ids.remove(&target_provider);
+    if skip_provider_bucket_sync {
+        source_provider_ids.clear();
+    }
+
+    repair_codex_history_visibility_at(
+        &codex_dir,
+        active_db,
+        &target_provider,
+        live_config_model_provider,
+        source_provider_ids,
+        normalized_project_path,
+        HistoryVisibilityRepairRuntimeOptions {
+            dry_run,
+            count,
+            window_limit,
+            include_archived,
+            include_subagents,
+            backup_root_override: None,
+        },
+    )
+}
+
+#[derive(Debug, Clone)]
+/// 当前 Codex Desktop 实际读取的 state DB 路径和来源类别。
+struct ActiveCodexStateDb {
+    path: PathBuf,
+    kind: String,
+}
+
+#[derive(Debug, Clone)]
+/// 历史修复运行时参数；测试可覆盖备份目录，生产路径始终使用真实备份根。
+struct HistoryVisibilityRepairRuntimeOptions {
+    dry_run: bool,
+    count: usize,
+    window_limit: usize,
+    include_archived: bool,
+    include_subagents: bool,
+    backup_root_override: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+/// SQLite threads 表中参与历史可见性判断的字段快照。
+struct ThreadHistoryRow {
+    id: String,
+    rollout_path: Option<String>,
+    model_provider: Option<String>,
+    cwd: Option<String>,
+    has_user_event: Option<i64>,
+    archived: Option<i64>,
+    source: Option<String>,
+    thread_source: Option<String>,
+    title: Option<String>,
+    preview: Option<String>,
+    first_user_message: Option<String>,
+    updated_at_ms: Option<i64>,
+    updated_at: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+/// 被选中置顶的项目线程，以及即将写入的新时间戳。
+struct FocusThreadRow {
+    id: String,
+    title: String,
+    rollout_path: Option<String>,
+    new_updated_at: i64,
+    new_updated_at_ms: i64,
+    updated_iso: String,
+}
+
+#[derive(Debug, Clone)]
+/// rollout 第一行 session_meta 的延迟写入计划。
+struct RolloutFirstLineUpdate {
+    path: PathBuf,
+    rewritten: String,
+    rest: String,
+}
+
+/// 实际执行历史修复；测试可以直接传入临时 Codex 目录和 state DB。
+fn repair_codex_history_visibility_at(
+    codex_dir: &Path,
+    active_db: ActiveCodexStateDb,
+    target_provider: &str,
+    live_config_model_provider: Option<String>,
+    source_provider_ids: BTreeSet<String>,
+    normalized_project_path: Option<String>,
+    runtime: HistoryVisibilityRepairRuntimeOptions,
+) -> Result<CodexHistoryVisibilityRepairOutcome, AppError> {
+    let mut conn = Connection::open(&active_db.path)
+        .map_err(|e| AppError::Database(format!("打开 Codex active state DB 失败: {e}")))?;
+    conn.busy_timeout(Duration::from_secs(5))
+        .map_err(|e| AppError::Database(format!("设置 Codex state DB busy_timeout 失败: {e}")))?;
+    if !Database::table_exists(&conn, "threads")?
+        || !Database::has_column(&conn, "threads", "id")?
+        || !Database::has_column(&conn, "threads", "model_provider")?
+    {
+        return Ok(CodexHistoryVisibilityRepairOutcome {
+            dry_run: runtime.dry_run,
+            codex_home: codex_dir.to_string_lossy().to_string(),
+            state_db_path: Some(active_db.path.to_string_lossy().to_string()),
+            active_db_kind: Some(active_db.kind),
+            target_provider: target_provider.to_string(),
+            live_config_model_provider,
+            source_provider_ids: source_provider_ids.into_iter().collect(),
+            skipped_reason: Some("threads_schema_missing_required_columns".to_string()),
+            ..Default::default()
+        });
+    }
+
+    let rows = load_codex_thread_history_rows(&conn)?;
+    let source_provider_set: HashSet<String> = source_provider_ids.iter().cloned().collect();
+    let provider_update_ids: Vec<String> = rows
+        .iter()
+        .filter(|row| {
+            row.model_provider
+                .as_deref()
+                .map(|provider| source_provider_set.contains(provider))
+                .unwrap_or(false)
+        })
+        .map(|row| row.id.clone())
+        .collect();
+    let provider_update_id_set: HashSet<String> = provider_update_ids.iter().cloned().collect();
+
+    let mut rollout_first_line_updates = Vec::new();
+    for row in rows
+        .iter()
+        .filter(|row| provider_update_id_set.contains(&row.id))
+    {
+        if let Some(update) = prepare_rollout_provider_first_line_update(row, target_provider)? {
+            rollout_first_line_updates.push(update);
+        }
+    }
+
+    let mut user_event_update_ids = Vec::new();
+    let mut visible_rows = Vec::new();
+    for row in &rows {
+        let provider_after = if provider_update_id_set.contains(&row.id) {
+            Some(target_provider)
+        } else {
+            row.model_provider.as_deref()
+        };
+        if provider_after != Some(target_provider) {
+            continue;
+        }
+        if !runtime.include_archived && row.archived.unwrap_or(0) != 0 {
+            continue;
+        }
+        if !is_interactive_history_source(row.source.as_deref()) {
+            continue;
+        }
+        if !runtime.include_subagents && !is_user_thread_source(row.thread_source.as_deref()) {
+            continue;
+        }
+        let has_user_event_after = row.has_user_event.unwrap_or(0) == 1
+            || rollout_contains_user_event(resolve_history_path(row.rollout_path.as_deref()));
+        if row.has_user_event.unwrap_or(0) != 1 && has_user_event_after {
+            user_event_update_ids.push(row.id.clone());
+        }
+        if has_user_event_after && row_has_visible_text(row) {
+            visible_rows.push(row.clone());
+        }
+    }
+
+    let index_path = codex_dir.join("session_index.jsonl");
+    let global_state_path = codex_dir.join(".codex-global-state.json");
+    let session_index_lines = read_jsonl_lines(&index_path)?;
+    let session_index_ids = session_index_thread_ids(&session_index_lines);
+    let missing_index_rows: Vec<ThreadHistoryRow> = visible_rows
+        .iter()
+        .filter(|row| !session_index_ids.contains(&row.id))
+        .cloned()
+        .collect();
+
+    let mut project_rows = Vec::new();
+    if let Some(project_path) = normalized_project_path.as_deref() {
+        project_rows = visible_rows
+            .iter()
+            .filter(|row| {
+                row.cwd
+                    .as_deref()
+                    .and_then(normalize_history_path)
+                    .as_deref()
+                    == Some(project_path)
+            })
+            .cloned()
+            .collect();
+        project_rows.sort_by(|left, right| {
+            row_updated_ms(right)
+                .cmp(&row_updated_ms(left))
+                .then_with(|| right.id.cmp(&left.id))
+        });
+    }
+    let mut selected_focus_rows: Vec<FocusThreadRow> = project_rows
+        .iter()
+        .take(runtime.count)
+        .map(focus_row_from_thread)
+        .collect();
+    assign_focus_times(&mut selected_focus_rows);
+
+    let visible_project_rows_in_window_before =
+        if let Some(project_path) = normalized_project_path.as_deref() {
+            let mut recent_rows = visible_rows.clone();
+            recent_rows.sort_by(|left, right| {
+                row_updated_ms(right)
+                    .cmp(&row_updated_ms(left))
+                    .then_with(|| right.id.cmp(&left.id))
+            });
+            recent_rows
+                .into_iter()
+                .take(runtime.window_limit)
+                .filter(|row| {
+                    row.cwd
+                        .as_deref()
+                        .and_then(normalize_history_path)
+                        .as_deref()
+                        == Some(project_path)
+                })
+                .count()
+        } else {
+            0
+        };
+
+    let global_state_value = read_json_object(&global_state_path)?;
+    let global_plan = plan_global_state_repairs(
+        &global_state_value,
+        &visible_rows,
+        &selected_focus_rows,
+        normalized_project_path.as_deref(),
+    );
+    let rollout_mtimes_to_touch = selected_focus_rows
+        .iter()
+        .filter(|row| resolve_history_path(row.rollout_path.as_deref()).is_some())
+        .count();
+    let sqlite_focus_rows_to_update = selected_focus_rows.len();
+    let session_index_rows_to_move = selected_focus_rows.len();
+
+    let mut outcome = CodexHistoryVisibilityRepairOutcome {
+        dry_run: runtime.dry_run,
+        codex_home: codex_dir.to_string_lossy().to_string(),
+        state_db_path: Some(active_db.path.to_string_lossy().to_string()),
+        active_db_kind: Some(active_db.kind.clone()),
+        live_config_model_provider,
+        target_provider: target_provider.to_string(),
+        source_provider_ids: source_provider_ids.iter().cloned().collect(),
+        sqlite_threads: rows.len(),
+        provider_rows_to_update: provider_update_ids.len(),
+        rollout_first_lines_to_update: rollout_first_line_updates.len(),
+        user_event_rows_to_update: user_event_update_ids.len(),
+        visible_candidate_rows: visible_rows.len(),
+        session_index_missing_to_append: missing_index_rows.len(),
+        project_rows: project_rows.len(),
+        focus_selected_count: selected_focus_rows.len(),
+        sqlite_focus_rows_to_update,
+        session_index_rows_to_move,
+        workspace_hints_to_fix: global_plan.workspace_hints_to_fix,
+        projectless_ids_to_remove: global_plan.projectless_ids_to_remove,
+        saved_workspace_roots_to_add: global_plan.saved_workspace_roots_to_add,
+        rollout_mtimes_to_touch,
+        visible_project_rows_in_window_before,
+        ..Default::default()
+    };
+
+    if runtime.dry_run {
+        return Ok(outcome);
+    }
+
+    let has_changes = outcome.provider_rows_to_update > 0
+        || outcome.rollout_first_lines_to_update > 0
+        || outcome.user_event_rows_to_update > 0
+        || outcome.session_index_missing_to_append > 0
+        || outcome.sqlite_focus_rows_to_update > 0
+        || outcome.session_index_rows_to_move > 0
+        || outcome.workspace_hints_to_fix > 0
+        || outcome.projectless_ids_to_remove > 0
+        || outcome.saved_workspace_roots_to_add > 0
+        || outcome.rollout_mtimes_to_touch > 0;
+    if !has_changes {
+        outcome.skipped_reason = Some("already_repaired".to_string());
+        return Ok(outcome);
+    }
+
+    let backup_root = runtime
+        .backup_root_override
+        .clone()
+        .unwrap_or_else(|| migration_backup_root(CURRENT_DESKTOP_HISTORY_REPAIR_NAME));
+    fs::create_dir_all(&backup_root).map_err(|e| AppError::io(&backup_root, e))?;
+    backup_codex_state_db(&active_db.path, codex_dir, &backup_root, &conn)?;
+    backup_visibility_file_if_exists(&index_path, codex_dir, &backup_root)?;
+    backup_visibility_file_if_exists(&global_state_path, codex_dir, &backup_root)?;
+    for update in &rollout_first_line_updates {
+        backup_codex_jsonl_file(&update.path, codex_dir, &backup_root)?;
+    }
+
+    let tx = conn
+        .transaction()
+        .map_err(|e| AppError::Database(format!("开启 Codex 历史修复事务失败: {e}")))?;
+    outcome.provider_rows_updated =
+        update_thread_provider_rows(&tx, target_provider, &provider_update_ids)?;
+    outcome.user_event_rows_updated = update_thread_user_event_rows(&tx, &user_event_update_ids)?;
+    outcome.sqlite_focus_rows_updated = update_thread_focus_times(&tx, &selected_focus_rows)?;
+    tx.commit()
+        .map_err(|e| AppError::Database(format!("提交 Codex 历史修复事务失败: {e}")))?;
+
+    outcome.rollout_first_lines_updated =
+        apply_rollout_first_line_updates(rollout_first_line_updates)?;
+    outcome.session_index_appended =
+        append_missing_session_index_rows(&index_path, &missing_index_rows)?;
+    outcome.session_index_rows_moved =
+        move_focus_session_index_rows(&index_path, &selected_focus_rows)?;
+    let global_counts = apply_global_state_repairs(
+        &global_state_path,
+        global_state_value,
+        &visible_rows,
+        &selected_focus_rows,
+        normalized_project_path.as_deref(),
+    )?;
+    outcome.workspace_hints_fixed = global_counts.workspace_hints_to_fix;
+    outcome.projectless_ids_removed = global_counts.projectless_ids_to_remove;
+    outcome.saved_workspace_roots_added = global_counts.saved_workspace_roots_to_add;
+    outcome.rollout_mtimes_touched =
+        touch_focus_rollout_mtimes(&selected_focus_rows, &backup_root)?;
+    outcome.backup_dir = Some(backup_root.to_string_lossy().to_string());
+    Ok(outcome)
+}
+
+/// 收集历史修复时需要并入稳定 MultiRouter 桶的来源 provider。
+fn collect_history_visibility_source_provider_ids(
+    db: &Database,
+) -> Result<BTreeSet<String>, AppError> {
+    let mut ids = collect_source_model_provider_ids(db)?;
+    ids.insert(OFFICIAL_OPENAI_CODEX_MODEL_PROVIDER_ID.to_string());
+    ids.insert(CC_SWITCH_CODEX_MODEL_PROVIDER_ID.to_string());
+    ids.insert("custom".to_string());
+    ids.insert("cc_switch_codex_router".to_string());
+    ids.insert("codex_model_router".to_string());
+    Ok(ids)
+}
+
+/// 解析当前 Codex Desktop 真正使用的 state DB，优先新版 `sqlite/state_5.sqlite`。
+fn resolve_active_codex_state_db(
+    codex_dir: &Path,
+    config_text: &str,
+) -> Option<ActiveCodexStateDb> {
+    let sqlite_default = codex_dir.join("sqlite").join(CODEX_STATE_DB_FILENAME);
+    if sqlite_default.exists() {
+        return Some(ActiveCodexStateDb {
+            path: sqlite_default,
+            kind: "sqlite_subdir".to_string(),
+        });
+    }
+    if let Some(sqlite_home) = sqlite_home_from_codex_config(config_text) {
+        let configured = sqlite_home.join(CODEX_STATE_DB_FILENAME);
+        if configured.exists() {
+            return Some(ActiveCodexStateDb {
+                path: configured,
+                kind: "configured_sqlite_home".to_string(),
+            });
+        }
+    }
+    let legacy = codex_dir.join(CODEX_STATE_DB_FILENAME);
+    if legacy.exists() {
+        return Some(ActiveCodexStateDb {
+            path: legacy,
+            kind: "legacy_root".to_string(),
+        });
+    }
+    None
+}
+
+/// 读取 live config 顶层 model_provider，用于结果展示和误修排查。
+fn current_codex_model_provider_from_config_text(config_text: &str) -> Option<String> {
+    let doc = config_text.parse::<DocumentMut>().ok()?;
+    doc.get("model_provider")
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+/// 从 SQLite threads 表读取历史行，缺失的可选列会以 None 参与后续判断。
+fn load_codex_thread_history_rows(conn: &Connection) -> Result<Vec<ThreadHistoryRow>, AppError> {
+    let mut stmt = conn
+        .prepare("SELECT * FROM threads")
+        .map_err(|e| AppError::Database(format!("读取 Codex threads 表失败: {e}")))?;
+    let columns: Vec<String> = stmt
+        .column_names()
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect();
+    let rows = stmt
+        .query_map([], |row| thread_history_row_from_sql(row, &columns))
+        .map_err(|e| AppError::Database(format!("查询 Codex threads 表失败: {e}")))?;
+    let mut output = Vec::new();
+    for row in rows {
+        output
+            .push(row.map_err(|e| AppError::Database(format!("解析 Codex threads 行失败: {e}")))?);
+    }
+    Ok(output)
+}
+
+/// 把动态 SQLite row 转成当前修复逻辑需要的 owned 结构。
+fn thread_history_row_from_sql(
+    row: &rusqlite::Row<'_>,
+    columns: &[String],
+) -> rusqlite::Result<ThreadHistoryRow> {
+    Ok(ThreadHistoryRow {
+        id: sqlite_optional_string(row, columns, "id")?.unwrap_or_default(),
+        rollout_path: sqlite_optional_string(row, columns, "rollout_path")?,
+        model_provider: sqlite_optional_string(row, columns, "model_provider")?,
+        cwd: sqlite_optional_string(row, columns, "cwd")?,
+        has_user_event: sqlite_optional_i64(row, columns, "has_user_event")?,
+        archived: sqlite_optional_i64(row, columns, "archived")?,
+        source: sqlite_optional_string(row, columns, "source")?,
+        thread_source: sqlite_optional_string(row, columns, "thread_source")?,
+        title: sqlite_optional_string(row, columns, "title")?,
+        preview: sqlite_optional_string(row, columns, "preview")?,
+        first_user_message: sqlite_optional_string(row, columns, "first_user_message")?,
+        updated_at_ms: sqlite_optional_i64(row, columns, "updated_at_ms")?,
+        updated_at: sqlite_optional_i64(row, columns, "updated_at")?,
+    })
+}
+
+/// 按列名读取 SQLite 文本，兼容 NULL 和非文本类型。
+fn sqlite_optional_string(
+    row: &rusqlite::Row<'_>,
+    columns: &[String],
+    name: &str,
+) -> rusqlite::Result<Option<String>> {
+    let Some(index) = columns.iter().position(|column| column == name) else {
+        return Ok(None);
+    };
+    match row.get_ref(index)? {
+        rusqlite::types::ValueRef::Null => Ok(None),
+        rusqlite::types::ValueRef::Text(value) => {
+            Ok(Some(String::from_utf8_lossy(value).to_string()))
+        }
+        rusqlite::types::ValueRef::Integer(value) => Ok(Some(value.to_string())),
+        rusqlite::types::ValueRef::Real(value) => Ok(Some(value.to_string())),
+        rusqlite::types::ValueRef::Blob(value) => {
+            Ok(Some(String::from_utf8_lossy(value).to_string()))
+        }
+    }
+}
+
+/// 按列名读取 SQLite 整数，兼容布尔、时间戳和文本数字。
+fn sqlite_optional_i64(
+    row: &rusqlite::Row<'_>,
+    columns: &[String],
+    name: &str,
+) -> rusqlite::Result<Option<i64>> {
+    let Some(index) = columns.iter().position(|column| column == name) else {
+        return Ok(None);
+    };
+    match row.get_ref(index)? {
+        rusqlite::types::ValueRef::Null => Ok(None),
+        rusqlite::types::ValueRef::Integer(value) => Ok(Some(value)),
+        rusqlite::types::ValueRef::Real(value) => Ok(Some(value as i64)),
+        rusqlite::types::ValueRef::Text(value) => {
+            Ok(String::from_utf8_lossy(value).parse::<i64>().ok())
+        }
+        rusqlite::types::ValueRef::Blob(_) => Ok(None),
+    }
+}
+
+/// 判断 threads.source 是否属于正常用户可见历史来源。
+fn is_interactive_history_source(source: Option<&str>) -> bool {
+    matches!(source, Some("cli") | Some("vscode"))
+}
+
+/// 判断 thread_source 是否为用户主线程，避免默认把 subagent 历史顶上来。
+fn is_user_thread_source(thread_source: Option<&str>) -> bool {
+    matches!(thread_source, None | Some("") | Some("user"))
+}
+
+/// 判断一行历史是否有足够文本可在侧边栏展示。
+fn row_has_visible_text(row: &ThreadHistoryRow) -> bool {
+    [&row.preview, &row.first_user_message, &row.title]
+        .into_iter()
+        .flatten()
+        .any(|value| !value.trim().is_empty())
+}
+
+/// 读取一行历史的更新时间毫秒值，缺失时回退到秒级字段。
+fn row_updated_ms(row: &ThreadHistoryRow) -> i64 {
+    row.updated_at_ms
+        .or_else(|| row.updated_at.map(|value| value.saturating_mul(1000)))
+        .unwrap_or(0)
+}
+
+/// 提取历史标题，优先使用 title，再回退到 preview/first_user_message。
+fn row_title(row: &ThreadHistoryRow) -> String {
+    [&row.title, &row.preview, &row.first_user_message]
+        .into_iter()
+        .flatten()
+        .map(|value| value.trim())
+        .find(|value| !value.is_empty())
+        .unwrap_or("Untitled")
+        .to_string()
+}
+
+/// 构造一个项目聚焦行，时间戳稍后统一分配。
+fn focus_row_from_thread(row: &ThreadHistoryRow) -> FocusThreadRow {
+    FocusThreadRow {
+        id: row.id.clone(),
+        title: row_title(row),
+        rollout_path: row.rollout_path.clone(),
+        new_updated_at: row.updated_at.unwrap_or_default(),
+        new_updated_at_ms: row_updated_ms(row),
+        updated_iso: iso_from_epoch_millis(row_updated_ms(row)),
+    }
+}
+
+/// 给聚焦行分配新的递减时间戳，使当前项目会话进入侧边栏可见窗口。
+fn assign_focus_times(rows: &mut [FocusThreadRow]) {
+    if rows.is_empty() {
+        return;
+    }
+    let now_ms = Utc::now().timestamp_millis();
+    let max_existing = rows
+        .iter()
+        .map(|row| row.new_updated_at_ms)
+        .max()
+        .unwrap_or_default();
+    let base_ms = now_ms.max(max_existing).saturating_add(10_000);
+    let total = rows.len() as i64;
+    for (index, row) in rows.iter_mut().enumerate() {
+        let next_ms = base_ms.saturating_add((total - index as i64) * 250);
+        row.new_updated_at_ms = next_ms;
+        row.new_updated_at = next_ms / 1000;
+        row.updated_iso = iso_from_epoch_millis(next_ms);
+    }
+}
+
+/// 转成 Codex session_index.jsonl 使用的 UTC 毫秒 ISO 字符串。
+fn iso_from_epoch_millis(ms: i64) -> String {
+    Utc.timestamp_millis_opt(ms)
+        .single()
+        .unwrap_or_else(Utc::now)
+        .to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+/// 去掉 Windows 长路径前缀，便于 Path 访问和 cwd 比较。
+fn strip_long_path_prefix(value: &str) -> String {
+    if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = value.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+/// 规范化历史 cwd，只用于比较和写 workspace hint，不改变 SQLite 原始 cwd。
+fn normalize_history_path(value: &str) -> Option<String> {
+    let mut text = strip_long_path_prefix(value).trim().replace('/', r"\");
+    while text.len() > 3 && text.ends_with('\\') {
+        text.pop();
+    }
+    if text.is_empty() {
+        return None;
+    }
+    if text.len() >= 2 && text.as_bytes()[1] == b':' {
+        let drive = text[0..1].to_ascii_uppercase();
+        text.replace_range(0..1, &drive);
+    }
+    Some(text)
+}
+
+/// 把可能带长路径前缀的 rollout_path 转成可访问路径。
+fn resolve_history_path(value: Option<&str>) -> Option<PathBuf> {
+    let path = PathBuf::from(strip_long_path_prefix(value?.trim()));
+    path.exists().then_some(path)
+}
+
+/// 检查 rollout 文件是否包含真实用户消息，用于回填 has_user_event。
+fn rollout_contains_user_event(path: Option<PathBuf>) -> bool {
+    let Some(path) = path else {
+        return false;
+    };
+    let Ok(content) = fs::read_to_string(path) else {
+        return false;
+    };
+    content.contains("\"type\":\"user_message\"")
+        || content.contains("\"role\":\"user\"")
+        || content.contains("\"user_input\"")
+}
+
+/// 准备改写 rollout 第一行的 provider 元数据，并保留剩余内容。
+fn prepare_rollout_provider_first_line_update(
+    row: &ThreadHistoryRow,
+    target_provider: &str,
+) -> Result<Option<RolloutFirstLineUpdate>, AppError> {
+    let Some(path) = resolve_history_path(row.rollout_path.as_deref()) else {
+        return Ok(None);
+    };
+    let content = fs::read_to_string(&path).map_err(|e| AppError::io(&path, e))?;
+    let (first, rest) = split_first_jsonl_line(&content);
+    let Ok(mut value) = serde_json::from_str::<Value>(first) else {
+        return Ok(None);
+    };
+    let Some(payload) = value.get_mut("payload").and_then(Value::as_object_mut) else {
+        return Ok(None);
+    };
+    if payload.get("model_provider").and_then(Value::as_str) == Some(target_provider) {
+        return Ok(None);
+    }
+    payload.insert(
+        "model_provider".to_string(),
+        Value::String(target_provider.to_string()),
+    );
+    let rewritten =
+        serde_json::to_string(&value).map_err(|e| AppError::JsonSerialize { source: e })?;
+    Ok(Some(RolloutFirstLineUpdate {
+        path,
+        rewritten,
+        rest,
+    }))
+}
+
+/// 拆出 JSONL 第一行和保留换行符的剩余文本。
+fn split_first_jsonl_line(content: &str) -> (&str, String) {
+    if let Some(index) = content.find('\n') {
+        (&content[..index], content[index..].to_string())
+    } else {
+        (content, String::new())
+    }
+}
+
+/// 读取 JSONL 原始行，解析失败的行在写回时保持原样。
+fn read_jsonl_lines(path: &Path) -> Result<Vec<String>, AppError> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    Ok(fs::read_to_string(path)
+        .map_err(|e| AppError::io(path, e))?
+        .lines()
+        .map(str::to_string)
+        .collect())
+}
+
+/// 从 session_index 原始行里提取已有 thread id。
+fn session_index_thread_ids(lines: &[String]) -> HashSet<String> {
+    lines
+        .iter()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter_map(|value| value.get("id").and_then(Value::as_str).map(str::to_string))
+        .collect()
+}
+
+/// 把缺失的可见历史追加到 session_index.jsonl。
+fn append_missing_session_index_rows(
+    index_path: &Path,
+    rows: &[ThreadHistoryRow],
+) -> Result<usize, AppError> {
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    let mut lines = read_jsonl_lines(index_path)?;
+    let mut existing = session_index_thread_ids(&lines);
+    let mut appended = 0;
+    for row in rows {
+        if !existing.insert(row.id.clone()) {
+            continue;
+        }
+        let value = serde_json::json!({
+            "id": row.id,
+            "thread_name": row_title(row),
+            "updated_at": iso_from_epoch_millis(row_updated_ms(row)),
+        });
+        lines.push(
+            serde_json::to_string(&value).map_err(|e| AppError::JsonSerialize { source: e })?,
+        );
+        appended += 1;
+    }
+    write_jsonl_lines(index_path, &lines)?;
+    Ok(appended)
+}
+
+/// 把聚焦项目的 session_index 行移动到文件尾部，并同步 updated_at。
+fn move_focus_session_index_rows(
+    index_path: &Path,
+    selected: &[FocusThreadRow],
+) -> Result<usize, AppError> {
+    if selected.is_empty() {
+        return Ok(0);
+    }
+    let lines = read_jsonl_lines(index_path)?;
+    let selected_by_id: std::collections::HashMap<&str, &FocusThreadRow> =
+        selected.iter().map(|row| (row.id.as_str(), row)).collect();
+    let mut seen = HashSet::new();
+    let mut kept = Vec::new();
+    let mut moved = Vec::new();
+    for line in lines {
+        let mut maybe_value = serde_json::from_str::<Value>(&line).ok();
+        let thread_id = maybe_value
+            .as_ref()
+            .and_then(|value| value.get("id"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        if let Some(thread_id) = thread_id.as_deref() {
+            seen.insert(thread_id.to_string());
+        }
+        if let Some(selected_row) = thread_id
+            .as_deref()
+            .and_then(|thread_id| selected_by_id.get(thread_id))
+        {
+            if let Some(Value::Object(ref mut object)) = maybe_value {
+                object.insert(
+                    "updated_at".to_string(),
+                    Value::String(selected_row.updated_iso.clone()),
+                );
+                object
+                    .entry("thread_name".to_string())
+                    .or_insert_with(|| Value::String(selected_row.title.clone()));
+                moved.push(
+                    serde_json::to_string(&Value::Object(object.clone()))
+                        .map_err(|e| AppError::JsonSerialize { source: e })?,
+                );
+            }
+        } else {
+            kept.push(line);
+        }
+    }
+    for selected_row in selected {
+        if seen.contains(&selected_row.id) {
+            continue;
+        }
+        let value = serde_json::json!({
+            "id": selected_row.id,
+            "thread_name": selected_row.title,
+            "updated_at": selected_row.updated_iso,
+        });
+        moved.push(
+            serde_json::to_string(&value).map_err(|e| AppError::JsonSerialize { source: e })?,
+        );
+    }
+    let moved_count = moved.len();
+    kept.extend(moved);
+    write_jsonl_lines(index_path, &kept)?;
+    Ok(moved_count)
+}
+
+/// 原子写回 JSONL 行。
+fn write_jsonl_lines(path: &Path, lines: &[String]) -> Result<(), AppError> {
+    let mut content = lines.join("\n");
+    if !content.is_empty() {
+        content.push('\n');
+    }
+    atomic_write(path, content.as_bytes())
+}
+
+#[derive(Debug, Clone, Default)]
+/// `.codex-global-state.json` 修复项的预估或实际计数。
+struct GlobalStateRepairCounts {
+    workspace_hints_to_fix: usize,
+    projectless_ids_to_remove: usize,
+    saved_workspace_roots_to_add: usize,
+}
+
+/// 读取 Codex 全局状态；损坏或非对象时按空对象处理，避免阻断其他修复项。
+fn read_json_object(path: &Path) -> Result<Value, AppError> {
+    if !path.exists() {
+        return Ok(Value::Object(serde_json::Map::new()));
+    }
+    let text = fs::read_to_string(path).map_err(|e| AppError::io(path, e))?;
+    Ok(serde_json::from_str::<Value>(&text)
+        .unwrap_or_else(|_| Value::Object(serde_json::Map::new())))
+}
+
+/// 预估全局状态需要修复的 workspace hints、projectless ids 和 saved roots。
+fn plan_global_state_repairs(
+    state: &Value,
+    visible_rows: &[ThreadHistoryRow],
+    selected: &[FocusThreadRow],
+    project_path: Option<&str>,
+) -> GlobalStateRepairCounts {
+    let hints = state
+        .get("thread-workspace-root-hints")
+        .and_then(Value::as_object);
+    let expected_hints = expected_workspace_hints(visible_rows, selected, project_path);
+    let workspace_hints_to_fix = expected_hints
+        .iter()
+        .filter(|(thread_id, cwd)| {
+            hints
+                .and_then(|object| object.get(thread_id.as_str()))
+                .and_then(Value::as_str)
+                != Some(cwd.as_str())
+        })
+        .count();
+    let expected_ids = visible_thread_ids(visible_rows, selected);
+    let projectless_ids_to_remove = state
+        .get("projectless-thread-ids")
+        .and_then(Value::as_array)
+        .map(|ids| {
+            ids.iter()
+                .filter_map(Value::as_str)
+                .filter(|id| expected_ids.contains(*id))
+                .count()
+        })
+        .unwrap_or_default();
+    let saved_workspace_roots_to_add = project_path
+        .filter(|project_path| {
+            !state
+                .get("electron-saved-workspace-roots")
+                .and_then(Value::as_array)
+                .map(|roots| {
+                    roots
+                        .iter()
+                        .any(|root| root.as_str() == Some(*project_path))
+                })
+                .unwrap_or(false)
+        })
+        .map(|_| 1)
+        .unwrap_or_default();
+    GlobalStateRepairCounts {
+        workspace_hints_to_fix,
+        projectless_ids_to_remove,
+        saved_workspace_roots_to_add,
+    }
+}
+
+/// 应用全局状态修复并返回实际变更计数。
+fn apply_global_state_repairs(
+    global_state_path: &Path,
+    mut state: Value,
+    visible_rows: &[ThreadHistoryRow],
+    selected: &[FocusThreadRow],
+    project_path: Option<&str>,
+) -> Result<GlobalStateRepairCounts, AppError> {
+    if !state.is_object() {
+        state = Value::Object(serde_json::Map::new());
+    }
+    let object = state.as_object_mut().expect("state is object");
+    let hints_value = object
+        .entry("thread-workspace-root-hints".to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if !hints_value.is_object() {
+        *hints_value = Value::Object(serde_json::Map::new());
+    }
+    let hints = hints_value.as_object_mut().expect("hints is object");
+    let mut workspace_hints_to_fix = 0;
+    for (thread_id, cwd) in expected_workspace_hints(visible_rows, selected, project_path) {
+        if hints.get(&thread_id).and_then(Value::as_str) != Some(cwd.as_str()) {
+            hints.insert(thread_id, Value::String(cwd));
+            workspace_hints_to_fix += 1;
+        }
+    }
+
+    let expected_ids = visible_thread_ids(visible_rows, selected);
+    let mut projectless_ids_to_remove = 0;
+    if let Some(Value::Array(ids)) = object.get_mut("projectless-thread-ids") {
+        let mut retained = Vec::new();
+        for id in std::mem::take(ids) {
+            if id
+                .as_str()
+                .map(|text| expected_ids.contains(text))
+                .unwrap_or(false)
+            {
+                projectless_ids_to_remove += 1;
+            } else {
+                retained.push(id);
+            }
+        }
+        *ids = retained;
+    }
+
+    let mut saved_workspace_roots_to_add = 0;
+    if let Some(project_path) = project_path {
+        let roots_value = object
+            .entry("electron-saved-workspace-roots".to_string())
+            .or_insert_with(|| Value::Array(Vec::new()));
+        if !roots_value.is_array() {
+            *roots_value = Value::Array(Vec::new());
+        }
+        let roots = roots_value.as_array_mut().expect("roots is array");
+        if !roots.iter().any(|root| root.as_str() == Some(project_path)) {
+            roots.push(Value::String(project_path.to_string()));
+            saved_workspace_roots_to_add = 1;
+        }
+    }
+
+    if workspace_hints_to_fix > 0
+        || projectless_ids_to_remove > 0
+        || saved_workspace_roots_to_add > 0
+    {
+        let bytes =
+            serde_json::to_vec_pretty(&state).map_err(|e| AppError::JsonSerialize { source: e })?;
+        atomic_write(global_state_path, &bytes)?;
+    }
+    Ok(GlobalStateRepairCounts {
+        workspace_hints_to_fix,
+        projectless_ids_to_remove,
+        saved_workspace_roots_to_add,
+    })
+}
+
+/// 计算每个可见线程应写入的 workspace root hint。
+fn expected_workspace_hints(
+    visible_rows: &[ThreadHistoryRow],
+    selected: &[FocusThreadRow],
+    project_path: Option<&str>,
+) -> std::collections::BTreeMap<String, String> {
+    let mut hints = std::collections::BTreeMap::new();
+    for row in visible_rows {
+        if let Some(cwd) = row.cwd.as_deref().and_then(normalize_history_path) {
+            hints.insert(row.id.clone(), cwd);
+        }
+    }
+    if let Some(project_path) = project_path {
+        for row in selected {
+            hints.insert(row.id.clone(), project_path.to_string());
+        }
+    }
+    hints
+}
+
+/// 汇总可从 projectless-thread-ids 移出的线程 id。
+fn visible_thread_ids(
+    visible_rows: &[ThreadHistoryRow],
+    selected: &[FocusThreadRow],
+) -> HashSet<String> {
+    let mut ids: HashSet<String> = visible_rows.iter().map(|row| row.id.clone()).collect();
+    ids.extend(selected.iter().map(|row| row.id.clone()));
+    ids
+}
+
+/// 批量更新 provider 桶。
+fn update_thread_provider_rows(
+    tx: &rusqlite::Transaction<'_>,
+    target_provider: &str,
+    ids: &[String],
+) -> Result<usize, AppError> {
+    update_thread_rows_by_ids(
+        tx,
+        ids,
+        |placeholders| {
+            format!("UPDATE threads SET model_provider = ? WHERE id IN ({placeholders})")
+        },
+        |values| {
+            values.push(target_provider.to_string());
+        },
+    )
+}
+
+/// 批量回填 has_user_event。
+fn update_thread_user_event_rows(
+    tx: &rusqlite::Transaction<'_>,
+    ids: &[String],
+) -> Result<usize, AppError> {
+    update_thread_rows_by_ids(
+        tx,
+        ids,
+        |placeholders| {
+            format!("UPDATE threads SET has_user_event = 1 WHERE id IN ({placeholders})")
+        },
+        |_| {},
+    )
+}
+
+/// 更新项目聚焦行的 SQLite 时间戳。
+fn update_thread_focus_times(
+    tx: &rusqlite::Transaction<'_>,
+    selected: &[FocusThreadRow],
+) -> Result<usize, AppError> {
+    let mut changed = 0;
+    for row in selected {
+        changed += tx
+            .execute(
+                "UPDATE threads SET updated_at = ?1, updated_at_ms = ?2 WHERE id = ?3",
+                (&row.new_updated_at, &row.new_updated_at_ms, &row.id),
+            )
+            .map_err(|e| AppError::Database(format!("更新 Codex 历史聚焦时间失败: {e}")))?;
+    }
+    Ok(changed)
+}
+
+/// 按 id 分块执行更新，避免 SQLite 参数数量上限。
+fn update_thread_rows_by_ids(
+    tx: &rusqlite::Transaction<'_>,
+    ids: &[String],
+    sql_for_placeholders: impl Fn(&str) -> String,
+    seed_values: impl Fn(&mut Vec<String>),
+) -> Result<usize, AppError> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let mut changed = 0;
+    for chunk in ids.chunks(STATE_DB_ID_CHUNK) {
+        let placeholders = placeholders(chunk.len());
+        let sql = sql_for_placeholders(&placeholders);
+        let mut values = Vec::new();
+        seed_values(&mut values);
+        values.extend(chunk.iter().cloned());
+        changed += tx
+            .execute(&sql, params_from_iter(values.iter()))
+            .map_err(|e| AppError::Database(format!("更新 Codex threads 行失败: {e}")))?;
+    }
+    Ok(changed)
+}
+
+/// 应用 rollout 第一行 provider 元数据更新。
+fn apply_rollout_first_line_updates(
+    updates: Vec<RolloutFirstLineUpdate>,
+) -> Result<usize, AppError> {
+    let mut changed = 0;
+    for update in updates {
+        atomic_write(
+            &update.path,
+            format!("{}{}", update.rewritten, update.rest).as_bytes(),
+        )?;
+        changed += 1;
+    }
+    Ok(changed)
+}
+
+/// 备份全局状态、索引等辅助文件。
+fn backup_visibility_file_if_exists(
+    path: &Path,
+    codex_dir: &Path,
+    backup_root: &Path,
+) -> Result<(), AppError> {
+    if path.exists() {
+        let backup_path = backup_root
+            .join("support")
+            .join(relative_backup_path(path, codex_dir));
+        copy_existing_file(path, &backup_path)?;
+    }
+    Ok(())
+}
+
+/// 触碰聚焦 rollout 文件 mtime，并写入恢复用 manifest。
+fn touch_focus_rollout_mtimes(
+    selected: &[FocusThreadRow],
+    backup_root: &Path,
+) -> Result<usize, AppError> {
+    if selected.is_empty() {
+        return Ok(0);
+    }
+    let manifest_path = backup_root.join("rollout-mtime-before.jsonl");
+    let mut manifest_lines = Vec::new();
+    let mut touched = 0;
+    for row in selected {
+        let Some(path) = resolve_history_path(row.rollout_path.as_deref()) else {
+            continue;
+        };
+        let metadata = fs::metadata(&path).map_err(|e| AppError::io(&path, e))?;
+        let old_mtime_ms = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis() as i64)
+            .unwrap_or_default();
+        let manifest = serde_json::json!({
+            "id": row.id,
+            "path": path.to_string_lossy(),
+            "old_mtime_ms": old_mtime_ms,
+            "new_mtime_ms": row.new_updated_at_ms,
+        });
+        manifest_lines.push(
+            serde_json::to_string(&manifest).map_err(|e| AppError::JsonSerialize { source: e })?,
+        );
+        set_file_modified_time(&path, row.new_updated_at_ms)?;
+        touched += 1;
+    }
+    if !manifest_lines.is_empty() {
+        write_jsonl_lines(&manifest_path, &manifest_lines)?;
+    }
+    Ok(touched)
+}
+
+/// 设置文件 mtime；当前用户场景是 Windows，其他平台使用 filetime crate 同样可工作。
+fn set_file_modified_time(path: &Path, epoch_millis: i64) -> Result<(), AppError> {
+    let file_time = filetime::FileTime::from_unix_time(
+        epoch_millis / 1000,
+        ((epoch_millis % 1000) * 1_000_000) as u32,
+    );
+    filetime::set_file_mtime(path, file_time).map_err(|e| AppError::io(path, e))
 }
 
 pub fn maybe_migrate_codex_provider_template_bucket(
@@ -1493,6 +2689,222 @@ mod tests {
 
     fn source_ids(values: &[&str]) -> BTreeSet<String> {
         values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn active_state_db_prefers_current_sqlite_subdir() {
+        let dir = tempdir().expect("tempdir");
+        let codex_dir = dir.path().join(".codex");
+        let sqlite_dir = codex_dir.join("sqlite");
+        fs::create_dir_all(&sqlite_dir).expect("create sqlite dir");
+        fs::write(codex_dir.join(CODEX_STATE_DB_FILENAME), b"legacy").expect("legacy db");
+        fs::write(sqlite_dir.join(CODEX_STATE_DB_FILENAME), b"active").expect("active db");
+
+        let active = resolve_active_codex_state_db(&codex_dir, "").expect("active db");
+
+        assert_eq!(active.kind, "sqlite_subdir");
+        assert_eq!(active.path, sqlite_dir.join(CODEX_STATE_DB_FILENAME));
+    }
+
+    #[test]
+    fn repairs_current_desktop_history_visibility_end_to_end() {
+        let dir = tempdir().expect("tempdir");
+        let codex_dir = dir.path().join(".codex");
+        let sqlite_dir = codex_dir.join("sqlite");
+        let session_dir = codex_dir.join("sessions/2026/06/14");
+        fs::create_dir_all(&sqlite_dir).expect("create sqlite dir");
+        fs::create_dir_all(&session_dir).expect("create session dir");
+
+        let rollout_one = session_dir.join("rollout-one.jsonl");
+        let rollout_two = session_dir.join("rollout-two.jsonl");
+        fs::write(
+            &rollout_one,
+            concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"t1\",\"model_provider\":\"openai\"}}\n",
+                "{\"type\":\"user_message\",\"message\":\"hello\"}\n"
+            ),
+        )
+        .expect("write rollout one");
+        fs::write(
+            &rollout_two,
+            concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"t2\",\"model_provider\":\"custom\"}}\n",
+                "{\"role\":\"user\",\"content\":\"hi\"}\n"
+            ),
+        )
+        .expect("write rollout two");
+
+        let db_path = sqlite_dir.join(CODEX_STATE_DB_FILENAME);
+        let conn = Connection::open(&db_path).expect("open active db");
+        let project_with_long_prefix = r"\\?\C:\Users\sunda\Documents\LLMservice";
+        conn.execute_batch(
+            "CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                rollout_path TEXT,
+                model_provider TEXT,
+                cwd TEXT,
+                has_user_event INTEGER,
+                archived INTEGER,
+                source TEXT,
+                thread_source TEXT,
+                title TEXT,
+                preview TEXT,
+                first_user_message TEXT,
+                updated_at INTEGER,
+                updated_at_ms INTEGER
+            );",
+        )
+        .expect("create threads table");
+        conn.execute(
+            "INSERT INTO threads VALUES (?1, ?2, 'openai', ?3, 0, 0, 'vscode', 'user', '回复1234', '回复1234', NULL, 1000, 1000000)",
+            (&"t1", &rollout_one.to_string_lossy().to_string(), &project_with_long_prefix),
+        )
+        .expect("insert t1");
+        conn.execute(
+            "INSERT INTO threads VALUES (?1, ?2, 'custom', ?3, 0, 0, 'cli', 'user', '测试', '测试', NULL, 900, 900000)",
+            (&"t2", &rollout_two.to_string_lossy().to_string(), &project_with_long_prefix),
+        )
+        .expect("insert t2");
+        drop(conn);
+
+        fs::write(
+            codex_dir.join("session_index.jsonl"),
+            "{\"id\":\"old\",\"thread_name\":\"old\",\"updated_at\":\"2026-01-01T00:00:00.000Z\"}\n",
+        )
+        .expect("write session index");
+        fs::write(
+            codex_dir.join(".codex-global-state.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "thread-workspace-root-hints": {"t2": "C:\\wrong"},
+                "projectless-thread-ids": ["t1", "t2", "untouched"],
+                "electron-saved-workspace-roots": []
+            }))
+            .expect("global json"),
+        )
+        .expect("write global state");
+
+        let active = ActiveCodexStateDb {
+            path: db_path.clone(),
+            kind: "sqlite_subdir".to_string(),
+        };
+        let project_path = "C:\\Users\\sunda\\Documents\\LLMservice".to_string();
+        let source_providers = source_ids(&["openai", "custom", "cc_switch_codex_router"]);
+        let dry_run = repair_codex_history_visibility_at(
+            &codex_dir,
+            active.clone(),
+            CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID,
+            Some(CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID.to_string()),
+            source_providers.clone(),
+            Some(project_path.clone()),
+            HistoryVisibilityRepairRuntimeOptions {
+                dry_run: true,
+                count: 20,
+                window_limit: 50,
+                include_archived: false,
+                include_subagents: false,
+                backup_root_override: Some(dir.path().join("dry-run-backup")),
+            },
+        )
+        .expect("dry run repair");
+
+        assert_eq!(dry_run.provider_rows_to_update, 2);
+        assert_eq!(dry_run.user_event_rows_to_update, 2);
+        assert_eq!(dry_run.session_index_missing_to_append, 2);
+        assert_eq!(dry_run.workspace_hints_to_fix, 2);
+        assert_eq!(dry_run.projectless_ids_to_remove, 2);
+        assert_eq!(dry_run.saved_workspace_roots_to_add, 1);
+        assert_eq!(dry_run.focus_selected_count, 2);
+        assert_eq!(dry_run.rollout_mtimes_to_touch, 2);
+        assert!(dry_run.backup_dir.is_none());
+
+        let backup_root = dir.path().join("history-repair-backup");
+        let applied = repair_codex_history_visibility_at(
+            &codex_dir,
+            active,
+            CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID,
+            Some(CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID.to_string()),
+            source_providers,
+            Some(project_path.clone()),
+            HistoryVisibilityRepairRuntimeOptions {
+                dry_run: false,
+                count: 20,
+                window_limit: 50,
+                include_archived: false,
+                include_subagents: false,
+                backup_root_override: Some(backup_root.clone()),
+            },
+        )
+        .expect("apply repair");
+
+        assert_eq!(applied.provider_rows_updated, 2);
+        assert_eq!(applied.user_event_rows_updated, 2);
+        assert_eq!(applied.session_index_appended, 2);
+        assert_eq!(applied.workspace_hints_fixed, 2);
+        assert_eq!(applied.projectless_ids_removed, 2);
+        assert_eq!(applied.saved_workspace_roots_added, 1);
+        assert_eq!(applied.sqlite_focus_rows_updated, 2);
+        assert_eq!(applied.session_index_rows_moved, 2);
+        assert_eq!(applied.rollout_mtimes_touched, 2);
+        assert_eq!(
+            applied.backup_dir,
+            Some(backup_root.to_string_lossy().to_string())
+        );
+
+        let conn = Connection::open(&db_path).expect("reopen active db");
+        let fixed_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM threads WHERE model_provider = ?1 AND has_user_event = 1 AND updated_at_ms > 1000000",
+                [CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID],
+                |row| row.get(0),
+            )
+            .expect("count repaired rows");
+        assert_eq!(fixed_rows, 2);
+
+        let index_text = fs::read_to_string(codex_dir.join("session_index.jsonl")).expect("index");
+        assert!(index_text.contains("\"id\":\"t1\""));
+        assert!(index_text.contains("\"id\":\"t2\""));
+
+        let global_state: Value = serde_json::from_str(
+            &fs::read_to_string(codex_dir.join(".codex-global-state.json")).expect("global state"),
+        )
+        .expect("parse global state");
+        assert_eq!(
+            global_state
+                .get("thread-workspace-root-hints")
+                .and_then(|value| value.get("t1"))
+                .and_then(Value::as_str),
+            Some(project_path.as_str())
+        );
+        assert_eq!(
+            global_state
+                .get("thread-workspace-root-hints")
+                .and_then(|value| value.get("t2"))
+                .and_then(Value::as_str),
+            Some(project_path.as_str())
+        );
+        assert_eq!(
+            global_state
+                .get("projectless-thread-ids")
+                .and_then(Value::as_array)
+                .expect("projectless")
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>(),
+            vec!["untouched"]
+        );
+        assert!(global_state
+            .get("electron-saved-workspace-roots")
+            .and_then(Value::as_array)
+            .expect("roots")
+            .iter()
+            .any(|value| value.as_str() == Some(project_path.as_str())));
+
+        let rollout_text = fs::read_to_string(&rollout_one).expect("rollout one after");
+        assert!(rollout_text.contains("\"model_provider\":\"codex_model_router_v2\""));
+        assert!(backup_root
+            .join("state/sqlite")
+            .join(CODEX_STATE_DB_FILENAME)
+            .exists());
     }
 
     #[test]
