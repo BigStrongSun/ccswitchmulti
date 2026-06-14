@@ -1,5 +1,7 @@
 # Codex spawn_agent model candidates
 
+Tracking issue: https://github.com/BigStrongSun/cc-switch/issues/1
+
 ## Root cause
 
 Codex upstream limits the model list shown in the `spawn_agent` tool description to five picker-visible models.
@@ -10,6 +12,8 @@ The relevant upstream implementation is in `codex-rs/core/src/tools/handlers/mul
 - `spawn_agent_models_description()` filters `show_in_picker` and then calls `.take(5)`
 
 This is a prompt-description limit, not the runtime model override limit. The `model` parameter schema is a free string, and runtime validation in `multi_agents_common.rs` checks the full available model list. A model such as `deepseek-v4-flash` can work when passed explicitly, even if it is not listed in the first five visible suggestions.
+
+CCSwitchMulti cannot raise this visible count above five through catalog/config fields alone. Codex Desktop/app-server can list more models through other paths such as hidden-model APIs, but the `spawn_agent` tool description is generated in Codex core and applies the fixed `.take(5)` limit before the tool schema reaches the model.
 
 ## Why DeepSeek disappeared
 
@@ -29,11 +33,7 @@ CCSwitchMulti now supports a private catalog field:
       { "model": "qwen3.6", "displayName": "Qwen3.6 Local" },
       { "model": "deepseek-v4-flash", "displayName": "DeepSeek V4 Flash" }
     ],
-    "spawnAgentModels": [
-      "gpt-5.5",
-      "qwen3.6",
-      "deepseek-v4-flash"
-    ]
+    "spawnAgentModels": ["gpt-5.5", "qwen3.6", "deepseek-v4-flash"]
   }
 }
 ```
@@ -62,4 +62,3 @@ Relevant frontend checks:
 
 - `pnpm run typecheck`
 - `pnpm run build:renderer`
-

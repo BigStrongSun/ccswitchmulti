@@ -100,6 +100,17 @@ type CodexRouting = {
   routes?: CodexRoute[];
 };
 
+type CodexCatalogModel = {
+  model?: string;
+  displayName?: string;
+  display_name?: string;
+};
+
+type CodexModelCatalog = {
+  models: CodexCatalogModel[];
+  spawnAgentModels: string[];
+};
+
 type RouteRecord = {
   id: string;
   action: string;
@@ -142,6 +153,46 @@ function isRoutingPlan(provider: Provider): boolean {
   return Boolean(
     routing && (routing.enabled !== false || (routing.routes?.length ?? 0) > 0),
   );
+}
+
+/// 读取 MultiRouter provider 的模型 catalog 和子 Agent 候选配置。
+function readCodexModelCatalog(provider: Provider | null): CodexModelCatalog {
+  const catalog = provider?.settingsConfig?.modelCatalog;
+  if (!catalog || typeof catalog !== "object") {
+    return { models: [], spawnAgentModels: [] };
+  }
+
+  const catalogObject = catalog as Record<string, unknown>;
+  const rawModels: unknown[] = Array.isArray(catalogObject.models)
+    ? catalogObject.models
+    : [];
+  const models = rawModels
+    .filter(
+      (item: unknown): item is CodexCatalogModel =>
+        !!item && typeof item === "object",
+    )
+    .filter((item) => typeof item.model === "string" && item.model.trim());
+  const rawSpawnAgentModels: unknown[] = Array.isArray(
+    catalogObject.spawnAgentModels,
+  )
+    ? catalogObject.spawnAgentModels
+    : Array.isArray(catalogObject.spawn_agent_models)
+      ? catalogObject.spawn_agent_models
+      : [];
+  const spawnAgentModels = rawSpawnAgentModels
+    .filter((item: unknown): item is string => typeof item === "string")
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .slice(0, 5);
+
+  return { models, spawnAgentModels };
+}
+
+/// 给状态页展示模型名，优先使用 catalog 里的人类可读名称。
+function catalogModelLabel(model: CodexCatalogModel): string {
+  const id = model.model?.trim() ?? "";
+  const displayName = model.displayName ?? model.display_name;
+  return displayName?.trim() ? `${displayName.trim()} (${id})` : id;
 }
 
 /// 提取 route 的上游协议名，兼容历史字段和 UI 字段。
@@ -1325,6 +1376,12 @@ function StatusTab({
   const selectedRoutes = selectedPlan
     ? routeEntries.filter(({ provider }) => provider.id === selectedPlan.id)
     : routeEntries;
+  const selectedCatalog = readCodexModelCatalog(selectedPlan);
+  const selectedCatalogByModel = new Map(
+    selectedCatalog.models
+      .filter((model) => model.model?.trim())
+      .map((model) => [model.model!.trim(), model]),
+  );
   const routerEvents = diagnostics?.routerLog.recentEvents ?? [];
   const routerRequestEvents = routerEvents.filter((event) =>
     [
@@ -1349,6 +1406,23 @@ function StatusTab({
     providersById,
   });
   const routerLogs = routerEvents;
+  const spawnAgentVisibleLimit =
+    diagnostics?.liveConfig.spawnAgentVisibleModelLimit ?? 5;
+  const configuredSpawnAgentModels = selectedCatalog.spawnAgentModels
+    .map((model) => selectedCatalogByModel.get(model) ?? { model })
+    .slice(0, spawnAgentVisibleLimit);
+  const generatedVisibleModels =
+    diagnostics?.liveConfig.modelCatalogFirstModels
+      ?.slice(0, spawnAgentVisibleLimit)
+      .map((model) => selectedCatalogByModel.get(model) ?? { model }) ?? [];
+  const previewVisibleModels =
+    generatedVisibleModels.length > 0
+      ? generatedVisibleModels
+      : configuredSpawnAgentModels.length > 0
+        ? configuredSpawnAgentModels
+        : selectedCatalog.models.slice(0, spawnAgentVisibleLimit);
+  const spawnAgentMissingPriorityModels =
+    diagnostics?.liveConfig.spawnAgentMissingPriorityModels ?? [];
   const routedLogs = proxyLogs.filter((log) =>
     trafficRows.some(
       (row) =>
@@ -1546,6 +1620,76 @@ function StatusTab({
                 "等待 Codex 请求"
               }
             />
+          </div>
+          <div className="mt-4 rounded-lg border border-violet-700/40 bg-violet-950/15 p-3">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <div className="flex items-center gap-2 text-sm font-semibold text-violet-100">
+                  <GitBranch className="h-4 w-4" />子 Agent 候选模型
+                </div>
+                <p className="mt-1 text-xs leading-5 text-violet-200/80">
+                  Codex upstream 的 spawn_agent 工具说明只读取前{" "}
+                  {spawnAgentVisibleLimit} 个 picker-visible 模型；这里配置的是
+                  MultiRouter 要推入这个可见窗口的模型，不改变实际路由和统计。
+                </p>
+              </div>
+              {selectedPlan ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() =>
+                    onEditPlan(selectedPlan, "编辑子 Agent 候选模型")
+                  }
+                  className="gap-2 border-violet-500/50 bg-violet-500/10 text-violet-100 hover:bg-violet-500/20"
+                >
+                  <Pencil className="h-4 w-4" />
+                  编辑候选
+                </Button>
+              ) : null}
+            </div>
+            <div className="mt-3 grid gap-2 md:grid-cols-5">
+              {previewVisibleModels.length > 0 ? (
+                previewVisibleModels.map((model, index) => (
+                  <div
+                    key={`${model.model ?? index}-${index}`}
+                    className="min-w-0 rounded-md border border-violet-800/60 bg-slate-950/45 px-2 py-2"
+                  >
+                    <div className="text-[11px] text-violet-300">
+                      #{index + 1}
+                    </div>
+                    <div className="mt-1 truncate font-mono text-xs text-slate-100">
+                      {catalogModelLabel(model)}
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className="rounded-md border border-violet-800/60 bg-slate-950/45 px-3 py-2 text-xs text-violet-100 md:col-span-5">
+                  当前 MultiRouter provider 还没有
+                  modelCatalog；请先在模型映射里添加 OpenAI / Qwen / DeepSeek
+                  等候选模型。
+                </div>
+              )}
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2 text-[11px] text-violet-200/80">
+              <Badge className="border border-violet-500/40 bg-violet-500/10 text-violet-100">
+                catalog: {selectedCatalog.models.length}
+              </Badge>
+              <Badge className="border border-violet-500/40 bg-violet-500/10 text-violet-100">
+                已选择: {selectedCatalog.spawnAgentModels.length}
+              </Badge>
+              <Badge className="border border-violet-500/40 bg-violet-500/10 text-violet-100">
+                来源:{" "}
+                {generatedVisibleModels.length > 0 ? "诊断实测" : "配置预览"}
+              </Badge>
+            </div>
+            {spawnAgentMissingPriorityModels.length > 0 ? (
+              <div className="mt-3 rounded-md border border-amber-700/50 bg-amber-950/30 px-3 py-2 text-xs leading-5 text-amber-100">
+                仍有重点模型不在前 {spawnAgentVisibleLimit} 个可见候选中：
+                {spawnAgentMissingPriorityModels.join(", ")}
+                。请点“编辑候选”把它们加入子 Agent 候选列表并重启 Codex
+                Desktop/app-server。
+              </div>
+            ) : null}
           </div>
           {modelPickerUnlockError ? (
             <div className="mt-3 rounded-lg border border-rose-700/50 bg-rose-950/30 p-3 text-xs text-rose-100">

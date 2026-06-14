@@ -76,6 +76,9 @@ export interface CodexLiveConfigDiagnostics {
   modelCatalogPath: string | null;
   modelCatalogModifiedAt: string | null;
   modelCatalogModelCount: number | null;
+  modelCatalogFirstModels: string[] | null;
+  spawnAgentVisibleModelLimit: number;
+  spawnAgentMissingPriorityModels: string[];
   usesBuiltinOpenAIWithLocalBase: boolean;
   pointsToLocalProxy: boolean;
 }
