@@ -265,6 +265,11 @@ export interface CodexCatalogModel {
   contextWindow?: string | number;
 }
 
+export interface CodexModelCatalogConfig {
+  models: CodexCatalogModel[];
+  spawnAgentModels?: string[];
+}
+
 export type CodexRoutingAuthSource =
   | "provider_config"
   | "managed_account"

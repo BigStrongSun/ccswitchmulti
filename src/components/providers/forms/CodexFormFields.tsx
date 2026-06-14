@@ -28,6 +28,8 @@ import { toast } from "sonner";
 import {
   ChevronDown,
   ChevronRight,
+  ArrowDown,
+  ArrowUp,
   Download,
   Loader2,
   Pencil,
@@ -90,6 +92,8 @@ interface CodexFormFieldsProps {
   // Model Catalog
   catalogModels?: CodexCatalogModel[];
   onCatalogModelsChange?: (models: CodexCatalogModel[]) => void;
+  spawnAgentModels?: string[];
+  onSpawnAgentModelsChange?: (models: string[]) => void;
   codexRouting?: CodexRoutingConfig;
   onCodexRoutingChange?: (routing: CodexRoutingConfig) => void;
 
@@ -217,6 +221,8 @@ export function CodexFormFields({
   onCodexChatReasoningChange,
   catalogModels = [],
   onCatalogModelsChange,
+  spawnAgentModels = [],
+  onSpawnAgentModelsChange,
   codexRouting = { enabled: false, defaultRouteId: "", routes: [] },
   onCodexRoutingChange,
   speedTestEndpoints,
@@ -238,6 +244,7 @@ export function CodexFormFields({
     codexChatReasoning.supportsThinking === true ||
     codexChatReasoning.supportsEffort === true;
   const supportsEffort = codexChatReasoning.supportsEffort === true;
+  const selectedSpawnAgentModelSet = new Set(spawnAgentModels);
 
   // needsLocalRouting 非默认值说明预设/用户动过路由配置，需要让模型映射保持可见
   const hasAnyAdvancedValue = !!customUserAgent || needsLocalRouting;
@@ -399,6 +406,52 @@ export function CodexFormFields({
   const handleRemoveCatalogRow = useCallback((index: number) => {
     setCatalogRows((current) => current.filter((_, i) => i !== index));
   }, []);
+
+  const handleToggleSpawnAgentModel = useCallback(
+    (model: string, checked: boolean) => {
+      if (!onSpawnAgentModelsChange) return;
+      const normalized = model.trim();
+      if (!normalized) return;
+
+      if (!checked) {
+        onSpawnAgentModelsChange(
+          spawnAgentModels.filter((item) => item !== normalized),
+        );
+        return;
+      }
+
+      if (spawnAgentModels.includes(normalized)) return;
+      if (spawnAgentModels.length >= 5) {
+        toast.error(
+          t("codexConfig.spawnAgentModelsLimit", {
+            defaultValue: "子 Agent 候选最多只能选择 5 个模型",
+          }),
+        );
+        return;
+      }
+      onSpawnAgentModelsChange([...spawnAgentModels, normalized]);
+    },
+    [onSpawnAgentModelsChange, spawnAgentModels, t],
+  );
+
+  const handleMoveSpawnAgentModel = useCallback(
+    (model: string, direction: -1 | 1) => {
+      if (!onSpawnAgentModelsChange) return;
+      const index = spawnAgentModels.indexOf(model);
+      const targetIndex = index + direction;
+      if (
+        index < 0 ||
+        targetIndex < 0 ||
+        targetIndex >= spawnAgentModels.length
+      ) {
+        return;
+      }
+      const next = [...spawnAgentModels];
+      [next[index], next[targetIndex]] = [next[targetIndex], next[index]];
+      onSpawnAgentModelsChange(next);
+    },
+    [onSpawnAgentModelsChange, spawnAgentModels],
+  );
 
   const handleRoutingEnabledChange = useCallback(
     (checked: boolean) => {
@@ -1167,7 +1220,12 @@ export function CodexFormFields({
                 {catalogRows.length > 0 && (
                   <div className="space-y-2">
                     {/* 列头：md+ 显示 */}
-                    <div className="hidden grid-cols-[1fr_1fr_140px_36px] gap-2 px-1 text-xs font-medium text-muted-foreground md:grid">
+                    <div className="hidden grid-cols-[88px_1fr_1fr_140px_76px_36px] gap-2 px-1 text-xs font-medium text-muted-foreground md:grid">
+                      <span>
+                        {t("codexConfig.spawnAgentColumn", {
+                          defaultValue: "子 Agent",
+                        })}
+                      </span>
                       <span>
                         {t("codexConfig.catalogColumnDisplay", {
                           defaultValue: "菜单显示名",
@@ -1183,14 +1241,41 @@ export function CodexFormFields({
                           defaultValue: "上下文窗口",
                         })}
                       </span>
+                      <span>
+                        {t("codexConfig.spawnAgentOrderColumn", {
+                          defaultValue: "顺序",
+                        })}
+                      </span>
                       <span />
                     </div>
 
                     {catalogRows.map((row, index) => (
                       <div
                         key={row.rowId}
-                        className="grid grid-cols-1 gap-2 md:grid-cols-[1fr_1fr_140px_36px]"
+                        className="grid grid-cols-1 gap-2 md:grid-cols-[88px_1fr_1fr_140px_76px_36px]"
                       >
+                        <label className="flex h-9 items-center gap-2 text-xs text-muted-foreground">
+                          <input
+                            type="checkbox"
+                            className="h-4 w-4 rounded border-border-default"
+                            checked={selectedSpawnAgentModelSet.has(row.model)}
+                            disabled={!row.model.trim()}
+                            onChange={(event) =>
+                              handleToggleSpawnAgentModel(
+                                row.model,
+                                event.target.checked,
+                              )
+                            }
+                            aria-label={t("codexConfig.spawnAgentCheckbox", {
+                              defaultValue: "加入子 Agent 候选",
+                            })}
+                          />
+                          <span className="md:hidden">
+                            {t("codexConfig.spawnAgentColumn", {
+                              defaultValue: "子 Agent",
+                            })}
+                          </span>
+                        </label>
                         <Input
                           value={row.displayName ?? ""}
                           onChange={(event) =>
@@ -1264,6 +1349,42 @@ export function CodexFormFields({
                             defaultValue: "上下文窗口",
                           })}
                         />
+                        <div className="flex h-9 items-center gap-1">
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 text-muted-foreground"
+                            disabled={spawnAgentModels.indexOf(row.model) <= 0}
+                            onClick={() =>
+                              handleMoveSpawnAgentModel(row.model, -1)
+                            }
+                            title={t("common.moveUp", {
+                              defaultValue: "上移",
+                            })}
+                          >
+                            <ArrowUp className="h-4 w-4" />
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 text-muted-foreground"
+                            disabled={
+                              spawnAgentModels.indexOf(row.model) < 0 ||
+                              spawnAgentModels.indexOf(row.model) >=
+                                spawnAgentModels.length - 1
+                            }
+                            onClick={() =>
+                              handleMoveSpawnAgentModel(row.model, 1)
+                            }
+                            title={t("common.moveDown", {
+                              defaultValue: "下移",
+                            })}
+                          >
+                            <ArrowDown className="h-4 w-4" />
+                          </Button>
+                        </div>
                         <Button
                           type="button"
                           variant="ghost"

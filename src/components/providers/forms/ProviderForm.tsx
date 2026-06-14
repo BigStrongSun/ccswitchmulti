@@ -16,6 +16,7 @@ import type {
   ClaudeApiFormat,
   CodexApiFormat,
   CodexCatalogModel,
+  CodexModelCatalogConfig,
   CodexRoutingConfig,
   CodexChatReasoning,
   ClaudeApiKeyField,
@@ -187,6 +188,25 @@ export const normalizeCodexCatalogModelsForSave = (
       ...(displayName ? { displayName } : {}),
       ...(contextWindow && contextWindow > 0 ? { contextWindow } : {}),
     });
+  }
+
+  return normalized;
+};
+
+const normalizeCodexSpawnAgentModelsForSave = (
+  selectedModels: string[],
+  catalogModels: CodexCatalogModel[],
+): string[] => {
+  const availableModels = new Set(catalogModels.map((item) => item.model));
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+
+  for (const item of selectedModels) {
+    const model = item.trim();
+    if (!model || seen.has(model) || !availableModels.has(model)) continue;
+    seen.add(model);
+    normalized.push(model);
+    if (normalized.length >= 5) break;
   }
 
   return normalized;
@@ -476,7 +496,9 @@ function ProviderFormFull({
 
   const [localApiFormat, setLocalApiFormat] = useState<ClaudeApiFormat>(() => {
     if (appId !== "claude") return "anthropic";
-    return normalizeClaudeApiFormat(initialData?.meta?.apiFormat) ?? "anthropic";
+    return (
+      normalizeClaudeApiFormat(initialData?.meta?.apiFormat) ?? "anthropic"
+    );
   });
 
   const handleApiFormatChange = useCallback((format: ClaudeApiFormat) => {
@@ -539,11 +561,13 @@ function ProviderFormFull({
     codexApiKey,
     codexBaseUrl,
     codexCatalogModels,
+    codexSpawnAgentModels,
     codexRouting,
     codexAuthError,
     setCodexAuth,
     setCodexConfig,
     setCodexCatalogModels,
+    setCodexSpawnAgentModels,
     setCodexRouting,
     handleCodexApiKeyChange,
     handleCodexBaseUrlChange,
@@ -1222,6 +1246,13 @@ function ProviderFormFull({
           (localCodexApiFormat === "openai_chat" || hasCodexRouting)
             ? normalizeCodexCatalogModelsForSave(codexCatalogModels)
             : [];
+        const normalizedSpawnAgentModels =
+          normalizedCatalogModels.length > 0
+            ? normalizeCodexSpawnAgentModelsForSave(
+                codexSpawnAgentModels,
+                normalizedCatalogModels,
+              )
+            : [];
         // Sync first catalog row's model into config.toml so Codex uses it as default
         if (normalizedCatalogModels.length > 0) {
           normalizedCodexConfig = setCodexModelNameInConfig(
@@ -1235,11 +1266,16 @@ function ProviderFormFull({
         } as {
           auth: unknown;
           config: string;
-          modelCatalog?: { models: CodexCatalogModel[] };
+          modelCatalog?: CodexModelCatalogConfig;
           codexRouting?: CodexRoutingConfig;
         };
         if (normalizedCatalogModels.length > 0) {
-          configObj.modelCatalog = { models: normalizedCatalogModels };
+          configObj.modelCatalog = {
+            models: normalizedCatalogModels,
+            ...(normalizedSpawnAgentModels.length > 0
+              ? { spawnAgentModels: normalizedSpawnAgentModels }
+              : {}),
+          };
         }
         if (shouldPersistCodexLocalConfig && hasCodexRouting) {
           configObj.codexRouting = codexRouting;
@@ -1563,8 +1599,8 @@ function ProviderFormFull({
       if (appId === "codex") {
         const template = getCodexCustomTemplate();
         resetCodexConfig(template.auth, template.config);
-      setCodexChatReasoning({});
-      setCodexRouting({ enabled: false, defaultRouteId: "", routes: [] });
+        setCodexChatReasoning({});
+        setCodexRouting({ enabled: false, defaultRouteId: "", routes: [] });
         setLocalCodexApiFormat(
           codexApiFormatFromWireApi(extractCodexWireApi(template.config)) ??
             "openai_responses",
@@ -2086,6 +2122,8 @@ function ProviderFormFull({
               onCodexChatReasoningChange={setCodexChatReasoning}
               catalogModels={codexCatalogModels}
               onCatalogModelsChange={setCodexCatalogModels}
+              spawnAgentModels={codexSpawnAgentModels}
+              onSpawnAgentModelsChange={setCodexSpawnAgentModels}
               codexRouting={codexRouting}
               onCodexRoutingChange={setCodexRouting}
               speedTestEndpoints={speedTestEndpoints}

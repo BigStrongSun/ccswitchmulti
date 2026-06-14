@@ -646,16 +646,62 @@ fn codex_catalog_model_priority_key(
     (provider_rank, original_index)
 }
 
+/// 读取用户在 CCSwitchMulti 中选择的 Codex 子 Agent 候选模型顺序。
+fn codex_spawn_agent_model_priority(settings: &Value) -> Vec<String> {
+    let Some(items) = settings
+        .get("modelCatalog")
+        .and_then(|catalog| {
+            catalog
+                .get("spawnAgentModels")
+                .or_else(|| catalog.get("spawn_agent_models"))
+        })
+        .and_then(|value| value.as_array())
+    else {
+        return Vec::new();
+    };
+
+    let mut seen = HashSet::new();
+    items
+        .iter()
+        .filter_map(|value| value.as_str())
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .filter(|model| seen.insert(model.to_ascii_lowercase()))
+        .take(5)
+        .map(ToString::to_string)
+        .collect()
+}
+
+/// 查找模型在用户选择的子 Agent 候选列表中的位置，大小写差异不影响匹配。
+fn codex_spawn_agent_model_priority_index(priority: &[String], model: &str) -> Option<usize> {
+    priority
+        .iter()
+        .position(|candidate| candidate.eq_ignore_ascii_case(model))
+}
+
 /// 按 Codex 工具说明展示限制重排 catalog 条目。
 ///
 /// 返回值保留所有模型，只让跨 provider 的代表模型进入前 5，避免 DeepSeek 只因为
 /// priority 靠后而不出现在 `spawn_agent` 的 Available model overrides 文本里。
 fn sort_codex_catalog_specs_for_picker(
     specs: Vec<CodexCatalogModelSpec>,
+    spawn_agent_model_priority: &[String],
 ) -> Vec<CodexCatalogModelSpec> {
     let mut indexed_specs = specs.into_iter().enumerate().collect::<Vec<_>>();
     indexed_specs.sort_by_key(|(original_index, spec)| {
-        codex_catalog_model_priority_key(spec, *original_index)
+        if let Some(priority_index) =
+            codex_spawn_agent_model_priority_index(spawn_agent_model_priority, &spec.model)
+        {
+            return (0_u8, priority_index, *original_index);
+        }
+
+        let (provider_rank, fallback_index) =
+            codex_catalog_model_priority_key(spec, *original_index);
+        (
+            provider_rank.saturating_add(1),
+            fallback_index,
+            *original_index,
+        )
     });
     indexed_specs.into_iter().map(|(_, spec)| spec).collect()
 }
@@ -724,7 +770,8 @@ fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCa
         }
     }
 
-    sort_codex_catalog_specs_for_picker(specs)
+    let spawn_agent_model_priority = codex_spawn_agent_model_priority(settings);
+    sort_codex_catalog_specs_for_picker(specs, &spawn_agent_model_priority)
 }
 
 fn find_codex_model_template(catalog: &Value) -> Option<Value> {
@@ -3452,6 +3499,57 @@ openai_base_url = "http://127.0.0.1:15721/v1"
                 "gpt-5.4-mini"
             ],
             "DeepSeek must be inside Codex spawn_agent's first five model overrides"
+        );
+    }
+
+    #[test]
+    /// 用户显式选择子 Agent 候选模型时，选择顺序优先于默认跨 provider 启发式排序。
+    fn codex_model_catalog_uses_user_spawn_agent_model_priority() {
+        let settings = json!({
+            "modelCatalog": {
+                "spawnAgentModels": [
+                    "deepseek-v4-pro",
+                    "deepseek-v4-flash",
+                    "qwen3.6",
+                    "missing-model",
+                    "gpt-5.3-codex-spark",
+                    "gpt-5.4"
+                ],
+                "models": [
+                    { "model": "gpt-5.5", "displayName": "GPT-5.5" },
+                    { "model": "gpt-5.4", "displayName": "GPT-5.4" },
+                    { "model": "gpt-5.4-mini", "displayName": "GPT-5.4 Mini" },
+                    { "model": "gpt-5.3-codex-spark", "displayName": "Codex Spark" },
+                    { "model": "qwen3.6", "displayName": "Qwen3.6 Local" },
+                    { "model": "deepseek-v4-flash", "displayName": "DeepSeek V4 Flash" },
+                    { "model": "deepseek-v4-pro", "displayName": "DeepSeek V4 Pro" }
+                ]
+            }
+        });
+        let specs = codex_catalog_model_specs(&settings, r#"model = "gpt-5.5""#);
+        let ordered = specs
+            .iter()
+            .map(|spec| spec.model.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            &ordered[..4],
+            [
+                "deepseek-v4-pro",
+                "deepseek-v4-flash",
+                "qwen3.6",
+                "gpt-5.3-codex-spark"
+            ],
+            "selected spawn_agent candidates must be promoted in user order"
+        );
+        assert_eq!(
+            ordered.len(),
+            7,
+            "spawn_agent priority must not drop non-selected catalog models"
+        );
+        assert!(
+            !ordered.contains(&"missing-model"),
+            "unknown selected models should be ignored instead of written into catalog"
         );
     }
 
