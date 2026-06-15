@@ -2,7 +2,7 @@
 
 # CCSwitchMulti
 
-### A Codex MultiRouter branch of CC Switch
+### 基于官方 CC Switch 的 Codex MultiRouter 分支
 
 [![Version](https://img.shields.io/github/v/release/BigStrongSun/cc-switch?color=blue&label=version)](https://github.com/BigStrongSun/cc-switch/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/BigStrongSun/cc-switch/releases)
@@ -17,53 +17,53 @@ English | [中文](README_ZH.md) | [日本語](README_JA.md) | [Deutsch](README_
 
 </div>
 
-## CCSwitchMulti Branch Notice
+## CCSwitchMulti 分支说明
 
-CCSwitchMulti is a downstream branch of the official [CC Switch](https://github.com/farion1231/cc-switch). It keeps the upstream desktop manager, provider database, local proxy, MCP/Skills sync, session management, cloud sync, and cross-platform Tauri app structure, while adding a Codex-focused MultiRouter workflow for running several model sources behind one Codex provider.
+CCSwitchMulti 是基于官方 [CC Switch](https://github.com/farion1231/cc-switch) 继续维护的下游分支。它保留官方版本的桌面管理器、Provider 数据库、本地代理、MCP/Skills 同步、会话管理、云同步和 Tauri 跨平台结构，同时额外加入面向 Codex 的 MultiRouter 工作流，让多个模型来源可以合并到同一个 Codex Provider 后面使用。
 
-The rest of this README still contains the inherited upstream CC Switch documentation. Read this section first when you are using builds from the `BigStrongSun/cc-switch` fork, because the branch adds behavior that does not exist in stock CC Switch.
+后面的 README 仍然保留了上游 CC Switch 的原始说明。使用 `BigStrongSun/cc-switch` 发布版本时，请先阅读本节，因为这里记录的是 CCSwitchMulti 分支相对官方版本新增的能力、实现边界和使用注意事项。
 
-### Extra Capabilities In This Branch
+### 本分支额外提供的能力
 
-- **Codex MultiRouter provider**: exposes one Codex provider, usually named `OpenAI Multi-Model Router`, that can show and route multiple model families such as official OpenAI/Codex models, Codex Spark, Qwen, and DeepSeek from the same Codex model picker.
-- **Model catalog projection**: stores the router catalog in CC Switch provider settings, then writes Codex-readable `model_catalog_json`, `cc-switch-model-catalog.json`, and owned `models_cache.json` data so Codex can discover the merged candidate list.
-- **Per-model routing**: stores route rules in `settings_config.codexRouting`; the Rust local proxy reads each request model, selects the matching upstream, injects the right credentials, and bridges OpenAI Responses traffic to Chat Completions backends when needed.
-- **Stable Codex runtime bucket**: uses the router provider bucket `codex_model_router_v2` instead of the built-in `openai` provider or an unstable generic custom bucket, avoiding OpenAI WebSocket semantics and reducing Codex history split.
-- **Codex Desktop picker unlock**: includes runtime diagnostics and a CDP-based renderer unlock for Codex Desktop model-list filtering, including the Statsig model whitelist path that can otherwise hide local/router models.
-- **History visibility repair**: includes a dedicated Codex history repair workspace that can dry-run and apply fixes for provider buckets, session index entries, project hints, user-event markers, and active Desktop sqlite locations.
-- **External OpenAI-compatible API sidecar**: provides a separate local API surface for third-party OpenAI-compatible clients, distinct from the Codex takeover port.
+- **Codex MultiRouter Provider**：提供一个通常名为 `OpenAI Multi-Model Router` 的 Codex Provider，可在同一个 Codex 模型选择器里展示并路由官方 OpenAI/Codex、Codex Spark、Qwen、DeepSeek 等模型来源。
+- **模型目录投影**：在 CC Switch Provider 配置中维护路由模型目录，并写出 Codex 可读取的 `model_catalog_json`、`cc-switch-model-catalog.json` 和 CC Switch 接管的 `models_cache.json`，让 Codex 能发现合并后的候选模型。
+- **按模型分流**：通过 `settings_config.codexRouting` 保存路由规则；Rust 本地代理会读取每次请求里的 `model`，选择匹配的上游，注入对应凭据，并在需要时把 OpenAI Responses 请求桥接到 Chat Completions 后端。
+- **稳定的 Codex 运行桶**：MultiRouter 使用 `codex_model_router_v2` 作为运行时 provider bucket，而不是 Codex 内置 `openai` 或易漂移的通用 custom bucket，从而避免重新触发官方 OpenAI WebSocket 语义，并减少 Codex 历史记录分桶混乱。
+- **Codex Desktop 模型菜单解锁**：包含运行时诊断和基于 CDP 的 renderer 注入，用于处理 Codex Desktop 里 Statsig 模型白名单导致本地/路由模型被隐藏的问题。
+- **Codex 历史显示修复**：提供独立的历史修复工作区，可先 dry-run，再修复 provider bucket、session index、project hints、user-event 标记和当前 Desktop sqlite 位置等问题。
+- **外部 OpenAI-compatible API sidecar**：提供单独的本地 OpenAI-compatible API 表面，给第三方客户端使用；它和 Codex takeover 端口不是同一路。
 
-### How It Works
+### 实现方式
 
-For Codex MultiRouter, CCSwitchMulti does not simply switch Codex to a single third-party provider. It enables app-level takeover for Codex, starts the local Codex proxy on the takeover port, writes Codex live config to a local Responses-compatible provider, and keeps the real upstream routing plan inside CC Switch's database.
+Codex MultiRouter 不是简单地把 Codex 切到某一个第三方 Provider。CCSwitchMulti 会为 Codex 启用 app-level takeover，启动本地 Codex 代理端口，把 Codex live config 写成指向本地的 Responses-compatible Provider，并把真实上游、模型目录和路由计划保存在 CC Switch 数据库里。
 
-The important pieces are:
+关键实现点包括：
 
-- `model_provider = "codex_model_router_v2"` in Codex live config for the MultiRouter runtime bucket.
-- `model_catalog_json = "cc-switch-model-catalog.json"` at the top level of Codex config, plus generated catalog/cache files under the user's Codex config directory.
-- `settings_config.modelCatalog` as the CC Switch-side source of truth for visible models.
-- `settings_config.codexRouting` as the CC Switch-side source of truth for model-to-upstream route rules.
-- `supports_websockets = false` for the local router provider, so Codex uses the HTTP Responses path instead of falling back into built-in OpenAI WebSocket behavior.
-- `requires_openai_auth = true` for Desktop integration, so ChatGPT OAuth account/quota state remains visible while requests still go through the local router.
+- Codex live config 中的 MultiRouter 运行桶是 `model_provider = "codex_model_router_v2"`。
+- Codex config 顶层写入 `model_catalog_json = "cc-switch-model-catalog.json"`，同时在用户 Codex 配置目录下生成 catalog/cache 文件。
+- `settings_config.modelCatalog` 是 CC Switch 侧维护可见模型的事实来源。
+- `settings_config.codexRouting` 是 CC Switch 侧维护模型到上游路由规则的事实来源。
+- 本地 router provider 写入 `supports_websockets = false`，让 Codex 走 HTTP Responses 路径，避免回到内置 OpenAI WebSocket 行为。
+- Desktop 集成保留 `requires_openai_auth = true`，这样 ChatGPT OAuth 账号和额度状态仍可在 Codex Desktop 中显示，但实际请求仍由本地 MultiRouter 接管。
 
-### Usage Notes
+### 使用注意
 
-- Use this fork's releases from [BigStrongSun/cc-switch](https://github.com/BigStrongSun/cc-switch/releases), not the upstream release page, when you need CCSwitchMulti features.
-- Keep CCSwitchMulti running while Codex is using `OpenAI Multi-Model Router`; Codex traffic goes through the local takeover proxy.
-- Fully quit and reopen Codex Desktop after changing the router catalog, routes, or takeover state. A running Codex app-server can keep an older model manager in memory.
-- If the Codex Desktop picker still shows only the official models even though diagnostics show a full catalog, start Codex through the CCSwitchMulti unlock flow so the renderer can be launched with a remote debugging port and patched at runtime.
-- CCSwitchMulti does not patch Codex Desktop's `app.asar` on disk; picker unlock is a runtime renderer injection for the active Desktop session.
-- Do not put router TOML, `model_catalog_json`, or `127.0.0.1:<port>` entries into shared Codex common config. They are provider-owned takeover fields and should be written by CCSwitchMulti.
-- Do not route MultiRouter through the built-in Codex `openai` provider or `openai_base_url`. That path can re-enable official OpenAI/WebSocket semantics and break the router/fallback boundary.
-- Qwen, DeepSeek, and other non-OpenAI routes still depend on their upstream endpoints and keys. A model appearing in the picker only proves catalog visibility; request success still depends on route configuration and upstream availability.
-- The Codex takeover port and the external OpenAI-compatible API sidecar are different surfaces. Do not use the sidecar health check as proof that Codex MultiRouter takeover is active.
+- 需要 CCSwitchMulti 能力时，请使用 [BigStrongSun/cc-switch](https://github.com/BigStrongSun/cc-switch/releases) 的发布版本，不要下载上游官方 release。
+- Codex 使用 `OpenAI Multi-Model Router` 时必须保持 CCSwitchMulti 运行，因为 Codex 请求会经过本地 takeover 代理。
+- 修改 router 模型目录、路由规则或 takeover 状态后，需要完整退出并重新打开 Codex Desktop；已经运行的 Codex app-server 可能继续持有旧的模型管理器缓存。
+- 如果诊断显示 catalog 已完整，但 Codex Desktop 模型菜单仍只显示官方模型，请通过 CCSwitchMulti 的模型菜单解锁流程启动 Codex，让 renderer 带 remote debugging 端口运行并接受运行时补丁。
+- CCSwitchMulti 不会修改 Codex Desktop 磁盘上的 `app.asar`；模型菜单解锁是针对当前 Desktop 会话的运行时 renderer 注入。
+- 不要把 router TOML、`model_catalog_json` 或 `127.0.0.1:<port>` 写进共享的 Codex common config。这些是 Provider takeover 私有字段，应由 CCSwitchMulti 写入。
+- 不要让 MultiRouter 走 Codex 内置 `openai` Provider 或 `openai_base_url`。那条路径可能重新启用官方 OpenAI/WebSocket 语义，破坏路由和 fallback 边界。
+- Qwen、DeepSeek 等非 OpenAI 路由仍依赖对应上游 endpoint、API key 和网络可用性。模型出现在菜单里只说明 catalog 可见，不代表请求一定成功。
+- Codex takeover 端口和外部 OpenAI-compatible API sidecar 是两套不同入口；不要用 sidecar 的健康检查来判断 Codex MultiRouter 是否已经接管成功。
 
-### Build And Release Notes
+### 构建与发布说明
 
-- Current branch package/product identity is `cc-switch-multi` / `CCSwitchMulti`.
-- Windows release exports are produced by `pnpm release:export`; local packaging intentionally disables updater artifact signing when no signing key is available.
-- The portable build still uses the normal user app-data/config locations, so avoid running an upstream official CC Switch instance and a CCSwitchMulti instance at the same time unless you deliberately want them to share state.
-- macOS assets require a macOS build/signing environment; Windows/WSL builds do not produce notarized macOS artifacts.
+- 当前分支的包名/产品名是 `cc-switch-multi` / `CCSwitchMulti`。
+- Windows 发布导出使用 `pnpm release:export`；本地打包在没有签名私钥时会显式关闭 updater artifact 签名。
+- 免安装版仍使用系统默认用户数据和配置目录，因此除非明确要共享状态，否则不要同时运行上游官方 CC Switch 和 CCSwitchMulti。
+- macOS 产物需要 macOS 构建、签名和 notarization 环境；Windows/WSL 构建不会产出已签名公证的 macOS 包。
 
 ## ❤️Sponsor
 
