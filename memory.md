@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-06-17 Current Qwen Local vLLM upstream outage
+
+- User symptom in Codex Desktop: selecting `Qwen3.6 Local` under `OpenAI Multi-Model Router` failed after reconnect retries with `unexpected status 502 Bad Gateway`; the UI error named local URL `http://127.0.0.1:15721/v1/responses` and cause `<urlopen error [Errno 111] Connection refused>`.
+- Current local proxy was healthy during the failure: `cc-switch.exe` PID `82108` from `C:\Users\sunda\AppData\Local\CCSwitchMulti\cc-switch.exe` listened on `0.0.0.0:15721`, and `http://127.0.0.1:15721/health` returned 200. Live Codex config pointed at `model_provider = "codex_model_router_v2"` with base URL `http://127.0.0.1:15721/v1`.
+- `~\.cc-switch\logs\codex-router.log` proved routing was correct: `model=qwen3.6` resolved to `route_id=qwen-local`, effective endpoint `/chat/completions`, and upstream URL `https://www.matrixminecraft.cn:24443/vllm/v1/chat/completions`; GPT official and DeepSeek routes returned 200 in the same time window.
+- Direct upstream probe bypassing CC Switch confirmed the root boundary: `curl -i -H "Authorization: Bearer vllm-local" https://www.matrixminecraft.cn:24443/vllm/v1/models` returned `HTTP/1.1 502 Bad Gateway`, `Server: BaseHTTP/0.6 Python/3.12.3`, and body `{"error": "<urlopen error [Errno 111] Connection refused>"}`. DNS resolved `www.matrixminecraft.cn` through `50i26673p0.zicp.vip` to `117.133.82.137`.
+- Conclusion: this is the Qwen relay/vLLM backend behind `matrixminecraft.cn:24443` refusing the Python gateway connection, not a CC Switch route resolver, Codex catalog, local takeover, or request transform bug. Fix requires restarting/repairing the Qwen vLLM backend or changing the qwen-local route upstream to a healthy service.
+
 ## 2026-06-17 Unified and Desktop Codex history repair integration
 
 - Official `origin/main` after `v3.16.3` added `c548e7fc` trilingual `docs/guides/codex-unified-session-history-guide-*.md`, `69341db2` `CODEX_SQLITE_HOME` probing for Codex history migration, `36b557b2` cached tool-call field restoration, and `de0a149d` session detail source-file display. Matrix websearch still returned HTTP 521, so upstream verification used `git fetch origin main` and local Git objects.
@@ -881,3 +889,11 @@
 - Version bumped to `3.16.2-22` for the Session Manager history-repair layout release. Export root: `C:\Users\sunda\Documents\LLMservice\ccswitchmulti-release-v3.16.2-22`.
 - Release export verification: `latest.json` reports `3.16.2-22`, `SHA256SUMS.txt` contains only v22 Windows binaries, and the export includes setup exe/signature, portable zip, raw exe alias/versioned exe, platform build notes, README, and `tools/codex-history-tool`.
 - Verification before release: targeted Prettier check, `pnpm typecheck`, `pnpm history:tool:check`, `cargo check --manifest-path src-tauri\Cargo.toml --lib`, and `scripts\export-latest-ccswitchmulti.ps1 -ReleaseRoot ...3.16.2-22`. Rust still only reports the existing `commands/misc.rs` dead_code warnings.
+
+## 2026-06-18 Codex Desktop setting preservation during takeover restore
+
+- User reported Codex Desktop editor/notification settings being reset after CCSwitchMulti restart. Live `~/.codex/config.toml` confirmed `notifications-turn-mode = "always"` lives under `[desktop]`, while the old `proxy_live_backup` row for Codex did not contain `[desktop]`.
+- Root cause boundary: normal provider switching already uses `codex_config::merge_codex_provider_config_texts` and preserves user tables like `[desktop]`, `[features]`, `[memories]`, `[projects]`, `[mcp_servers]`, and plugins. The unsafe path was `ProxyService::write_codex_live_verbatim`, used by takeover backup restore; it prepared the backup config and wrote it directly, so an older backup could roll back newer live Codex Desktop settings.
+- Fix: `write_codex_live_verbatim` now runs the prepared backup config through `merge_codex_provider_config_with_live` before writing. Backup/provider-owned fields still replace takeover fields, but live user-owned TOML tables survive.
+- Regression coverage: `codex_restore_from_backup_preserves_live_desktop_settings` seeds a taken-over live config with `[desktop] notifications-turn-mode = "always"` and `reviewDelivery = "detached"`, then restores an older backup without `[desktop]`; the restored config keeps the desktop settings and removes the local proxy endpoint.
+- Verification passed: `cargo test --manifest-path src-tauri\Cargo.toml codex_restore_from_backup_preserves_live_desktop_settings --lib -- --nocapture`; `cargo test --manifest-path src-tauri\Cargo.toml codex_restore_from_backup --lib -- --nocapture`; `cargo test --manifest-path src-tauri\Cargo.toml codex_restore_empty_auth_backup_still_projects_inline_catalog --lib -- --nocapture`; `cargo fmt --manifest-path src-tauri\Cargo.toml --check`.
