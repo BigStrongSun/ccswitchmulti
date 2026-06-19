@@ -286,6 +286,9 @@ export function AddProviderDialog({
   const footer =
     !showUniversalTab || activeTab === "app-specific" ? (
       <>
+        <span className="mr-auto min-w-0 text-xs text-muted-foreground truncate">
+          {t("provider.addFooterHint")}
+        </span>
         <Button
           variant="outline"
           onClick={() => onOpenChange(false)}
@@ -338,6 +341,7 @@ export function AddProviderDialog({
       }
       onClose={() => onOpenChange(false)}
       footer={footer}
+      contentClassName="pt-3"
     >
       {isCodexRouterEntry && (
         <div className="rounded-lg border border-primary/20 bg-primary/5 p-4 text-sm text-muted-foreground">
