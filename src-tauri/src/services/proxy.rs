@@ -2659,6 +2659,8 @@ impl ProxyService {
         // 保留 OpenAI OAuth 语义只影响 Codex Desktop 的登录、额度和账户状态；
         // 实际请求仍用 PROXY_MANAGED bearer token 命中本地 MultiRouter。
         doc["model_providers"][proxy_provider_id]["requires_openai_auth"] = toml_edit::value(true);
+        doc["model_providers"][proxy_provider_id]["experimental_bearer_token"] =
+            toml_edit::value(PROXY_TOKEN_PLACEHOLDER);
         doc["model_providers"][proxy_provider_id]["supports_websockets"] = toml_edit::value(false);
 
         if let Some(upstream_model) =
@@ -4365,8 +4367,8 @@ wire_api = "responses"
         let live_config = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
             .expect("read live config");
         assert!(
-            !live_config.contains(PROXY_TOKEN_PLACEHOLDER),
-            "disabled preservation should not move the takeover placeholder into config.toml"
+            live_config.contains("experimental_bearer_token = \"PROXY_MANAGED\""),
+            "disabled preservation should keep legacy auth.json writes while also giving the requires_openai_auth proxy facade its local bearer token"
         );
 
         crate::settings::update_settings(crate::settings::AppSettings::default())
