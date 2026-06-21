@@ -1,6 +1,7 @@
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
   type Dispatch,
   type SetStateAction,
@@ -433,6 +434,54 @@ function buildRouteCandidates(
   }
 
   return candidates;
+}
+
+/// 初次打开候选选择器时，根据已保存规则和入口意图生成“是否加入”的本地草稿。
+function buildInitialRoutePickerSelectedIds(
+  candidates: RouteCandidate[],
+  selectAllByDefault?: boolean,
+): Set<string> {
+  return new Set(
+    candidates
+      .filter((candidate) => selectAllByDefault || candidate.isExisting)
+      .map((candidate) => candidate.id),
+  );
+}
+
+/// 初次打开候选选择器时，根据已保存规则和入口意图生成“是否启用”的本地草稿。
+function buildInitialRoutePickerEnabledIds(
+  candidates: RouteCandidate[],
+  selectAllByDefault?: boolean,
+): Set<string> {
+  return new Set(
+    candidates
+      .filter(
+        (candidate) => selectAllByDefault || candidate.route.enabled !== false,
+      )
+      .map((candidate) => candidate.id),
+  );
+}
+
+/// 候选列表刷新时只为新出现的 router 应用默认值，已有候选保留用户尚未保存的勾选/启用草稿。
+export function mergeRoutePickerDraftIds(
+  currentIds: Set<string>,
+  previousCandidateIds: string[],
+  nextCandidateIds: string[],
+  defaultIncludedIds: string[],
+): Set<string> {
+  const previousCandidateIdSet = new Set(previousCandidateIds);
+  const nextCandidateIdSet = new Set(nextCandidateIds);
+  const nextIds = new Set(
+    Array.from(currentIds).filter((id) => nextCandidateIdSet.has(id)),
+  );
+
+  for (const id of defaultIncludedIds) {
+    if (!previousCandidateIdSet.has(id) && nextCandidateIdSet.has(id)) {
+      nextIds.add(id);
+    }
+  }
+
+  return nextIds;
 }
 
 /// 把候选选择器里的宽松 route 规整成后端路由器可直接消费的稳定结构。
@@ -920,9 +969,13 @@ export function CodexRouterWorkspacePage({
       ? replaced
       : [...providers, optimisticRoutingPlan];
   }, [optimisticRoutingPlan, providers]);
-  const routingPlans = effectiveProviders.filter(isRoutingPlan);
-  const modelSources = effectiveProviders.filter(
-    (provider) => !isRoutingPlan(provider),
+  const routingPlans = useMemo(
+    () => effectiveProviders.filter(isRoutingPlan),
+    [effectiveProviders],
+  );
+  const modelSources = useMemo(
+    () => effectiveProviders.filter((provider) => !isRoutingPlan(provider)),
+    [effectiveProviders],
   );
   const providersById = useMemo(
     () =>
@@ -1751,45 +1804,56 @@ function RouteCandidatePicker({
     () => buildRouteCandidates(selectedPlan, modelSources),
     [selectedPlan, modelSources],
   );
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(
-    () =>
-      new Set(
-        candidates
-          .filter((candidate) => selectAllByDefault || candidate.isExisting)
-          .map((candidate) => candidate.id),
-      ),
+  const candidateIds = useMemo(
+    () => candidates.map((candidate) => candidate.id),
+    [candidates],
   );
-  const [enabledIds, setEnabledIds] = useState<Set<string>>(
-    () =>
-      new Set(
-        candidates
-          .filter(
-            (candidate) =>
-              selectAllByDefault || candidate.route.enabled !== false,
-          )
-          .map((candidate) => candidate.id),
-      ),
+  const candidateIdsKey = candidateIds.join("\n");
+  const draftPlanIdRef = useRef<string | null>(null);
+  const draftCandidateIdsRef = useRef<string[]>([]);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() =>
+    buildInitialRoutePickerSelectedIds(candidates, selectAllByDefault),
+  );
+  const [enabledIds, setEnabledIds] = useState<Set<string>>(() =>
+    buildInitialRoutePickerEnabledIds(candidates, selectAllByDefault),
   );
 
   useEffect(() => {
-    setSelectedIds(
-      new Set(
-        candidates
-          .filter((candidate) => selectAllByDefault || candidate.isExisting)
-          .map((candidate) => candidate.id),
-      ),
+    const currentPlanId = selectedPlan?.id ?? null;
+    const previousPlanId = draftPlanIdRef.current;
+    const previousCandidateIds = draftCandidateIdsRef.current;
+    const selectedDefaults = Array.from(
+      buildInitialRoutePickerSelectedIds(candidates, selectAllByDefault),
     );
-    setEnabledIds(
-      new Set(
-        candidates
-          .filter(
-            (candidate) =>
-              selectAllByDefault || candidate.route.enabled !== false,
-          )
-          .map((candidate) => candidate.id),
-      ),
+    const enabledDefaults = Array.from(
+      buildInitialRoutePickerEnabledIds(candidates, selectAllByDefault),
     );
-  }, [candidates, selectAllByDefault]);
+
+    if (previousPlanId !== currentPlanId) {
+      setSelectedIds(new Set(selectedDefaults));
+      setEnabledIds(new Set(enabledDefaults));
+    } else {
+      setSelectedIds((current) =>
+        mergeRoutePickerDraftIds(
+          current,
+          previousCandidateIds,
+          candidateIds,
+          selectedDefaults,
+        ),
+      );
+      setEnabledIds((current) =>
+        mergeRoutePickerDraftIds(
+          current,
+          previousCandidateIds,
+          candidateIds,
+          enabledDefaults,
+        ),
+      );
+    }
+
+    draftPlanIdRef.current = currentPlanId;
+    draftCandidateIdsRef.current = candidateIds;
+  }, [candidateIdsKey, candidates, selectedPlan?.id, selectAllByDefault]);
 
   /// 切换 Set 状态时始终返回新实例，避免 React 因引用未变而跳过刷新。
   function toggleSetValue(

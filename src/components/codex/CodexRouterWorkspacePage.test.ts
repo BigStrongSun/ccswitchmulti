@@ -4,6 +4,7 @@ import {
   buildModelCatalogForRoutes,
   createDraftRoutingPlan,
   isRoutingPlan,
+  mergeRoutePickerDraftIds,
   normalizeCodexRouteForSave,
   readCodexRouting,
 } from "./CodexRouterWorkspacePage";
@@ -149,5 +150,35 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       "gpt-5.4-mini",
       "gpt-5.3-codex-spark",
     ]);
+  });
+
+  it("keeps unsaved route picker enabled draft state across candidate refreshes", () => {
+    const currentEnabledIds = new Set(["openai-route"]);
+
+    expect(
+      Array.from(
+        mergeRoutePickerDraftIds(
+          currentEnabledIds,
+          ["openai-route", "qwen-route"],
+          ["openai-route", "qwen-route"],
+          ["qwen-route"],
+        ),
+      ),
+    ).toEqual(["openai-route"]);
+  });
+
+  it("applies route picker defaults only to newly discovered candidates", () => {
+    const currentEnabledIds = new Set(["openai-route"]);
+
+    expect(
+      Array.from(
+        mergeRoutePickerDraftIds(
+          currentEnabledIds,
+          ["openai-route", "qwen-route"],
+          ["openai-route", "qwen-route", "deepseek-route"],
+          ["qwen-route", "deepseek-route"],
+        ),
+      ),
+    ).toEqual(["openai-route", "deepseek-route"]);
   });
 });
