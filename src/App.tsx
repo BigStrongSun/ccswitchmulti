@@ -645,6 +645,43 @@ function App() {
     setEditingProvider(null);
   };
 
+  /**
+   * 删除当前 Codex MultiRouter 前先切到一个普通 Codex provider。
+   *
+   * 后端会保护当前 provider 不能被删除；MultiRouter 又经常正是当前 provider。
+   * 这里在用户确认删除后做一次最小 fallback 切换，释放 current provider 绑定，
+   * 再复用原有 delete_provider 路径，避免绕过后端保护。
+   */
+  const switchAwayFromCurrentCodexRouterBeforeDelete = async (
+    provider: Provider,
+  ) => {
+    if (activeApp !== "codex" || !isRoutingPlan(provider)) return;
+    if (provider.id !== currentProviderId) return;
+
+    const fallbackProvider = Object.values(providers)
+      .filter((candidate) => candidate.id !== provider.id)
+      .filter((candidate) => !isRoutingPlan(candidate))
+      .sort((a, b) => {
+        const officialA = a.category === "official" ? 0 : 1;
+        const officialB = b.category === "official" ? 0 : 1;
+        return officialA - officialB || a.name.localeCompare(b.name);
+      })[0];
+
+    if (!fallbackProvider) {
+      throw new Error(
+        "删除当前 MultiRouter 前需要至少保留一个普通 Codex provider 作为 fallback。",
+      );
+    }
+
+    await providersApi.switch(fallbackProvider.id, "codex");
+    await queryClient.invalidateQueries({ queryKey: ["providers", "codex"] });
+    await queryClient.invalidateQueries({ queryKey: ["proxyStatus"] });
+    toast.info(
+      `已先切换到 ${fallbackProvider.name}，正在删除当前 MultiRouter。`,
+      { closeButton: true },
+    );
+  };
+
   const handleConfirmAction = async () => {
     if (!confirmAction) return;
     const { provider, action } = confirmAction;
@@ -677,6 +714,7 @@ function App() {
         { closeButton: true },
       );
     } else {
+      await switchAwayFromCurrentCodexRouterBeforeDelete(provider);
       await deleteProvider(provider.id);
     }
     setConfirmAction(null);
@@ -938,6 +976,9 @@ function App() {
                 setActiveApp("codex");
                 setIsAddOpen(true);
               }}
+              onDeletePlan={(provider) =>
+                setConfirmAction({ provider, action: "delete" })
+              }
             />
           );
         case "skills":

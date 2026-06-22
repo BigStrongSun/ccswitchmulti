@@ -69,6 +69,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       initialProviderId: plan.id,
       initialTab: "routes" as const,
       onEditProvider: vi.fn(),
+      onDeletePlan: vi.fn(),
       onCreateProvider: vi.fn(),
     };
 
@@ -106,6 +107,39 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     await waitFor(() =>
       expect(statusTab).toHaveAttribute("data-state", "active"),
     );
+  });
+
+  it("exposes a delete action for routing plans inside the workspace", async () => {
+    const source: Provider = {
+      id: "codex-qwen",
+      name: "Qwen Local",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "qwen3.6" }] },
+      },
+    };
+    const plan = createDraftRoutingPlan([source], [source]);
+    const onDeletePlan = vi.fn();
+
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [source, plan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: plan.id,
+        initialProviderId: plan.id,
+        initialTab: "routes",
+        onEditProvider: vi.fn(),
+        onDeletePlan,
+        onCreateProvider: vi.fn(),
+      }),
+    );
+
+    await userEvent
+      .setup()
+      .click(screen.getAllByRole("button", { name: "删除" })[0]);
+
+    expect(onDeletePlan).toHaveBeenCalledWith(plan);
   });
 
   it("creates a real routing plan instead of a plain model source", () => {

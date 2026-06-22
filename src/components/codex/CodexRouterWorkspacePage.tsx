@@ -1313,6 +1313,7 @@ export function CodexRouterWorkspacePage({
   initialProviderId,
   initialTab = "status",
   onEditProvider,
+  onDeletePlan,
   onCreateProvider: _onCreateProvider,
 }: {
   providers: Provider[];
@@ -1323,6 +1324,7 @@ export function CodexRouterWorkspacePage({
   initialProviderId?: string | null;
   initialTab?: WorkspaceTab;
   onEditProvider: (provider: Provider) => void;
+  onDeletePlan: (provider: Provider) => void;
   onCreateProvider: () => void;
 }) {
   const [activeTab, setActiveTab] = useState<WorkspaceTab>(initialTab);
@@ -1851,6 +1853,7 @@ export function CodexRouterWorkspacePage({
               onCreatePlan={handleCreatePlan}
               onSelectPlan={handleSelectPlan}
               onEditPlan={handleEditPlan}
+              onDeletePlan={onDeletePlan}
               onSelectRoute={handleSelectRoute}
               providersById={providersById}
               onJump={setActiveTab}
@@ -1880,6 +1883,7 @@ export function CodexRouterWorkspacePage({
               onSelectPlan={handleSelectPlan}
               onSelectRoute={handleSelectRoute}
               onEditPlan={handleEditPlan}
+              onDeletePlan={onDeletePlan}
               providersById={providersById}
               proxyStatus={proxyStatus}
               isProxyRunning={isProxyRunning}
@@ -1910,6 +1914,7 @@ export function CodexRouterWorkspacePage({
               isCodexTakeoverActive={isCodexTakeoverActive}
               activeProviderId={activeProviderId}
               onEditPlan={handleEditPlan}
+              onDeletePlan={onDeletePlan}
             />
           </TabsContent>
 
@@ -2013,6 +2018,7 @@ function OverviewTab({
   onCreatePlan,
   onSelectPlan,
   onEditPlan,
+  onDeletePlan,
   onSelectRoute,
   onJump,
 }: {
@@ -2023,6 +2029,7 @@ function OverviewTab({
   onCreatePlan: () => void;
   onSelectPlan: (provider: Provider) => void;
   onEditPlan: (provider: Provider, detail?: string) => void;
+  onDeletePlan: (provider: Provider) => void;
   onSelectRoute: (entry: RouteEntry) => void;
   onJump: (tab: WorkspaceTab) => void;
 }) {
@@ -2080,6 +2087,16 @@ function OverviewTab({
                   >
                     <Pencil className="h-4 w-4" />
                     重命名/设置
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => onDeletePlan(provider)}
+                    className="gap-2 border-rose-500/50 bg-rose-500/10 text-rose-100 hover:bg-rose-500/20"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                    删除
                   </Button>
                 </div>
               </div>
@@ -2284,6 +2301,7 @@ function RoutesTab({
   onSelectPlan,
   onSelectRoute,
   onEditPlan,
+  onDeletePlan,
   proxyStatus,
   isProxyRunning,
   isCodexTakeoverActive,
@@ -2312,6 +2330,7 @@ function RoutesTab({
   onSelectPlan: (provider: Provider) => void;
   onSelectRoute: (entry: RouteEntry) => void;
   onEditPlan: (provider: Provider, detail?: string) => void;
+  onDeletePlan: (provider: Provider) => void;
   proxyStatus?: ProxyStatus;
   isProxyRunning: boolean;
   isCodexTakeoverActive: boolean;
@@ -2423,6 +2442,16 @@ function RoutesTab({
                     >
                       <Pencil className="h-4 w-4" />
                       改名
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={() => onDeletePlan(provider)}
+                      className="h-8 gap-1.5 border-rose-500/50 bg-rose-500/10 px-2.5 text-rose-100 hover:bg-rose-500/20"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                      删除
                     </Button>
                   </div>
                 </div>
@@ -3836,6 +3865,7 @@ function StatusTab({
   isCodexTakeoverActive,
   activeProviderId,
   onEditPlan,
+  onDeletePlan,
 }: {
   selectedPlan: Provider | null;
   selectedRouting: CodexRouting | null;
@@ -3846,6 +3876,7 @@ function StatusTab({
   isCodexTakeoverActive: boolean;
   activeProviderId?: string;
   onEditPlan: (provider: Provider, detail?: string) => void;
+  onDeletePlan: (provider: Provider) => void;
 }) {
   const range = useMemo(() => ({ preset: "today" as const }), []);
   const { data: requestLogs, isLoading } = useRequestLogs({
@@ -4024,14 +4055,27 @@ function StatusTab({
                   解锁模型菜单
                 </Button>
                 {selectedPlan ? (
-                  <Button
-                    size="sm"
-                    onClick={() => onEditPlan(selectedPlan, "打开多路路由配置")}
-                    className="gap-2 bg-blue-600 hover:bg-blue-500"
-                  >
-                    <Pencil className="h-4 w-4" />
-                    编辑配置
-                  </Button>
+                  <>
+                    <Button
+                      size="sm"
+                      onClick={() =>
+                        onEditPlan(selectedPlan, "打开多路路由配置")
+                      }
+                      className="gap-2 bg-blue-600 hover:bg-blue-500"
+                    >
+                      <Pencil className="h-4 w-4" />
+                      编辑配置
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => onDeletePlan(selectedPlan)}
+                      className="gap-2 border-rose-500/50 bg-rose-500/10 text-rose-100 hover:bg-rose-500/20"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                      删除
+                    </Button>
+                  </>
                 ) : null}
               </div>
             }
