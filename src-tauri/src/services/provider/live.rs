@@ -560,6 +560,31 @@ pub(crate) fn write_live_with_common_config(
     write_live_snapshot(app_type, &effective_provider)
 }
 
+/// 只刷新 Codex provider 的 live `config.toml`，不覆盖当前 `auth.json`。
+///
+/// 接管态切回 official 时，`disable_takeover` 已经先把接管前的 live 登录态恢复到
+/// `auth.json`。随后仍需要用目标 official provider 清理 router 字段、应用 common
+/// config 和统一会话设置，但不能再把 DB 中可能过期的 official OAuth 快照写回。
+pub(crate) fn write_codex_config_only_with_common_config(
+    db: &Database,
+    provider: &Provider,
+) -> Result<(), AppError> {
+    let mut effective_provider = provider.clone();
+    effective_provider.settings_config =
+        build_effective_settings_with_common_config(db, &AppType::Codex, provider)?;
+    let settings = effective_provider
+        .settings_config
+        .as_object()
+        .ok_or_else(|| AppError::Config("Codex 供应商配置必须是 JSON 对象".to_string()))?;
+    let config_text = settings.get("config").and_then(|value| value.as_str());
+
+    crate::codex_config::write_codex_provider_config_only_with_catalog(
+        &effective_provider.settings_config,
+        effective_provider.category.as_deref(),
+        config_text,
+    )
+}
+
 pub(crate) fn strip_common_config_from_live_settings(
     db: &Database,
     app_type: &AppType,

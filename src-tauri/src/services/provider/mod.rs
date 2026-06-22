@@ -32,7 +32,8 @@ pub(crate) use live::sanitize_claude_settings_for_live;
 pub(crate) use live::{
     build_effective_settings_with_common_config, normalize_provider_common_config_for_storage,
     provider_exists_in_live_config, strip_common_config_from_live_settings,
-    sync_current_provider_for_app_to_live, write_live_with_common_config,
+    sync_current_provider_for_app_to_live, write_codex_config_only_with_common_config,
+    write_live_with_common_config,
 };
 
 // Internal re-exports
@@ -532,7 +533,12 @@ wire_api = "responses"
             live_auth
                 .get("OPENAI_API_KEY")
                 .and_then(|value| value.as_str()),
-            Some("PROXY_MANAGED")
+            Some("old-openai-key"),
+            "Codex takeover must keep the existing auth.json login material"
+        );
+        assert!(
+            live_config.contains("experimental_bearer_token = \"PROXY_MANAGED\""),
+            "Codex takeover should carry the proxy placeholder in config.toml, got:\n{live_config}"
         );
         assert!(
             db.get_proxy_config_for_app("codex")
@@ -2338,7 +2344,11 @@ impl ProviderService {
 
             crate::settings::set_current_provider(&app_type, Some(id))?;
             state.db.set_current_provider(app_type.as_str(), id)?;
-            write_live_with_common_config(state.db.as_ref(), &app_type, _provider)?;
+            if matches!(app_type, AppType::Codex) {
+                write_codex_config_only_with_common_config(state.db.as_ref(), _provider)?;
+            } else {
+                write_live_with_common_config(state.db.as_ref(), &app_type, _provider)?;
+            }
             McpService::sync_all_enabled(state)?;
             return Ok(SwitchResult::default());
         }

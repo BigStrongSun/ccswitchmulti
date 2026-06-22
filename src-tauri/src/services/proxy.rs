@@ -2564,10 +2564,6 @@ impl ProxyService {
         target_settings: &mut Value,
         existing_backup: &Value,
     ) -> Result<(), String> {
-        if !crate::settings::preserve_codex_official_auth_on_switch() {
-            return Ok(());
-        }
-
         let Some(existing_auth) = existing_backup
             .get("auth")
             .filter(|auth| crate::codex_config::codex_auth_has_oauth_login_material(auth))
@@ -4028,6 +4024,77 @@ wire_api = "responses"
 
         crate::settings::update_settings(crate::settings::AppSettings::default())
             .expect("reset settings");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn codex_takeover_backup_preserves_oauth_auth_even_when_setting_disabled() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        use_ephemeral_proxy_port(&db).await;
+        let service = ProxyService::new(db.clone());
+        let oauth_auth = json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "access_token": "current-oauth-access",
+                "refresh_token": "current-oauth-refresh"
+            }
+        });
+        let existing_backup = json!({
+            "auth": oauth_auth,
+            "config": "model_provider = \"openai\"\n"
+        });
+        db.save_live_backup(
+            "codex",
+            &serde_json::to_string(&existing_backup).expect("serialize existing backup"),
+        )
+        .await
+        .expect("seed existing backup");
+
+        let mut provider = Provider::with_id(
+            "deepseek".to_string(),
+            "DeepSeek".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "deepseek-key" },
+                "config": r#"model_provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[model_providers.deepseek]
+name = "DeepSeek"
+base_url = "https://api.deepseek.com/v1"
+wire_api = "responses"
+"#
+            }),
+            None,
+        );
+        provider.category = Some("custom".to_string());
+
+        service
+            .update_live_backup_from_provider("codex", &provider)
+            .await
+            .expect("update backup from provider");
+
+        let backup = db
+            .get_live_backup("codex")
+            .await
+            .expect("read backup")
+            .expect("backup exists");
+        let backup_value: Value =
+            serde_json::from_str(&backup.original_config).expect("parse backup");
+        assert_eq!(
+            backup_value.get("auth"),
+            Some(&oauth_auth),
+            "hot-switch backup must preserve the current OAuth auth even when the old compatibility setting is disabled"
+        );
+        assert!(
+            backup_value
+                .get("config")
+                .and_then(|value| value.as_str())
+                .is_some_and(|config| config.contains("deepseek-key")),
+            "provider API key should move into config.toml while auth.json keeps OAuth login"
+        );
     }
 
     #[tokio::test]
@@ -6488,7 +6555,10 @@ requires_openai_auth = true
             "official-backup".to_string(),
             "OpenAI Official Backup".to_string(),
             json!({
-                "auth": {},
+                "auth": {
+                    "auth_mode": "chatgpt",
+                    "tokens": { "refresh_token": "stale-db-refresh-token" }
+                },
                 "config": ""
             }),
             None,
@@ -6517,7 +6587,10 @@ base_url = "http://127.0.0.1:15721/v1"
 wire_api = "responses"
 "#;
         let backup_json = serde_json::to_string(&json!({
-            "auth": { "OPENAI_API_KEY": "oauth-placeholder" },
+            "auth": {
+                "auth_mode": "chatgpt",
+                "tokens": { "refresh_token": "current-live-refresh-token" }
+            },
             "config": live_before_takeover,
         }))
         .expect("serialize live backup");
@@ -6568,6 +6641,17 @@ wire_api = "responses"
         assert!(!live.contains("model_provider"));
         assert!(!live.contains("model_catalog_json"));
         assert!(!live.contains("127.0.0.1:15721"));
+
+        let auth: Value =
+            crate::config::read_json_file(&crate::codex_config::get_codex_auth_path())
+                .expect("read restored auth.json");
+        assert_eq!(
+            auth.get("tokens")
+                .and_then(|tokens| tokens.get("refresh_token"))
+                .and_then(|token| token.as_str()),
+            Some("current-live-refresh-token"),
+            "official switch after takeover must preserve the restored live OAuth login instead of overwriting it with the stale DB provider snapshot"
+        );
     }
 
     /// Regression: turning proxy takeover off restores Live from the backup. The

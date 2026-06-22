@@ -1718,6 +1718,37 @@ pub fn write_codex_provider_live_with_catalog(
     write_codex_live_for_provider(category, auth, prepared_config.as_deref())
 }
 
+/// 只按 provider 配置刷新 Codex `config.toml`，显式保留当前 `auth.json`。
+///
+/// 这用于“退出本地接管并切回 official”的路径：接管恢复出来的 live `auth.json`
+/// 才是当前用户真实登录态，而 DB 里的 official provider 可能只是早期导入的旧
+/// OAuth 快照。该函数仍会走 model catalog 投影、统一会话路由注入和 live 配置
+/// 合并，但最终只写 `config.toml`，避免把旧快照覆盖到 `auth.json`。
+pub fn write_codex_provider_config_only_with_catalog(
+    settings: &Value,
+    category: Option<&str>,
+    config_text: Option<&str>,
+) -> Result<(), AppError> {
+    let prepared_config = config_text
+        .map(|text| prepare_codex_config_text_with_model_catalog(settings, text))
+        .transpose()?;
+    let unified_official_config =
+        if category == Some("official") && crate::settings::unify_codex_session_history() {
+            Some(inject_codex_unified_session_bucket(
+                prepared_config.as_deref().unwrap_or(""),
+            )?)
+        } else {
+            None
+        };
+    let config_text = unified_official_config
+        .as_deref()
+        .or(prepared_config.as_deref())
+        .unwrap_or("");
+    let merged_config = merge_codex_provider_config_with_live(config_text)?;
+
+    write_codex_live_config_atomic(Some(&merged_config))
+}
+
 /// Extract a provider-scoped `experimental_bearer_token` from Codex `config.toml`.
 ///
 /// Mobile compat: third-party providers may store the API key inside
