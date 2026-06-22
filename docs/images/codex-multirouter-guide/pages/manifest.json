@@ -1,62 +1,67 @@
 {
-  "generatedAt": "2026-06-22T15:41:35.555Z",
+  "generatedAt": "2026-06-22T16:27:38.061Z",
   "size": "1440x2400",
+  "maxImageHeight": 500,
   "pages": [
     {
-      "title": "总览",
+      "title": "入门准备",
       "png": "00-overview.png"
     },
     {
+      "title": "总流程速览",
+      "png": "01-flow.png"
+    },
+    {
       "title": "1. 先登录 Codex Desktop",
-      "png": "01-step-1.png"
+      "png": "02-step-1.png"
     },
     {
       "title": "2. 在 CCSwitchMulti 里完成 OAuth 授权",
-      "png": "02-step-2.png"
+      "png": "03-step-2.png"
     },
     {
       "title": "3. 添加额外模型源",
-      "png": "03-step-3.png"
+      "png": "04-step-3.png"
     },
     {
       "title": "4. 开启本地路由映射并获取模型列表",
-      "png": "04-step-4.png"
+      "png": "05-step-4.png"
     },
     {
       "title": "5. 创建 Codex 多模型路由",
-      "png": "05-step-5.png"
+      "png": "06-step-5.png"
     },
     {
       "title": "6. 添加并启用路由规则",
-      "png": "06-step-6.png"
+      "png": "07-step-6.png"
     },
     {
       "title": "7. 配置子 Agent 候选模型",
-      "png": "07-step-7.png"
+      "png": "08-step-7.png"
     },
     {
       "title": "8. 选中 MultiRouter 并启动路由",
-      "png": "08-step-8.png"
+      "png": "09-step-8.png"
     },
     {
       "title": "9. 使用状态 / Debug 检查链路",
-      "png": "09-step-9.png"
+      "png": "10-step-9.png"
     },
     {
       "title": "10. 完全退出并重启 Codex Desktop",
-      "png": "10-step-10.png"
+      "png": "11-step-10.png"
     },
     {
       "title": "11. 修复 Codex 历史记录显示",
-      "png": "11-step-11.png"
+      "png": "12-step-11.png"
     },
     {
       "title": "常见问题",
-      "png": "12-faq.png"
+      "png": "13-faq.png"
     },
     {
       "title": "相关文档",
-      "png": "13-related-docs.png"
+      "png": "14-related-docs.png"
     }
   ]
 }
