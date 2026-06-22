@@ -48,13 +48,15 @@ Codex Desktop 仍然只看到一个“当前模型提供方”，但这个提供
 
 找到 ChatGPT / Codex OAuth 认证区域，点击 `使用 ChatGPT 登录`，按页面提示完成授权。授权完成后，CCSwitchMulti 会托管这个 OAuth 登录，用于 MultiRouter 里的官方 GPT / Codex 路由。
 
-![设置里的 Codex 应用增强与认证入口](../images/codex-official-auth-preservation/01-codex-app-enhancement-setting.png)
+![设置认证页中的 ChatGPT / Codex OAuth 授权入口](../images/codex-multirouter/01-settings-auth-oauth.png)
 
 如果授权状态显示未认证、会话过期或无法刷新，请先在这里重新登录，再继续配置多路由。
 
 ## 3. 添加额外模型源
 
 回到 Codex 面板，点击右上角加号添加模型源。常见选择包括：
+
+![Codex 面板右上角添加供应商入口](../images/codex-multirouter/02-add-provider-entry.png)
 
 - DeepSeek
 - GLM / 智谱
@@ -67,7 +69,7 @@ Codex Desktop 仍然只看到一个“当前模型提供方”，但这个提供
 - `API Key`
 - 默认模型或模型映射
 
-![Codex 供应商列表中的官方与第三方模型源](../images/codex-deepseek-routing/01-codex-providers-require-routing.png)
+![供应商配置页中填写 API 请求地址、Key 并开启本地路由映射](../images/codex-multirouter/03-configure-provider-local-routing.png)
 
 ## 4. 开启本地路由映射并获取模型列表
 
@@ -79,8 +81,6 @@ Codex Desktop 仍然只看到一个“当前模型提供方”，但这个提供
 
 这一步很关键。Codex Desktop 和 Codex CLI 强绑定 Responses 风格请求，大多数第三方模型并不原生支持完整 Responses 行为。开启本地路由映射后，CCSwitchMulti 会在本地把 Codex 的 Responses 请求转换给第三方接口，再把返回结果转换回 Codex 能读的响应。
 
-![DeepSeek Codex 模型源表单](../images/codex-deepseek-routing/02-deepseek-codex-routing-form.png)
-
 继续向下展开 `高级选项`，找到 `模型映射`：
 
 1. 点击 `获取模型列表`。
@@ -88,6 +88,8 @@ Codex Desktop 仍然只看到一个“当前模型提供方”，但这个提供
 3. 检查每个模型的显示名。
 4. 为模型填写或确认 `上下文窗口`。
 5. 保存模型源。
+
+![模型映射区域中获取模型列表并填写上下文窗口](../images/codex-multirouter/04-fetch-models-context-window.png)
 
 如果 `获取模型列表` 失败，先检查 Base URL、API Key、网络和该服务是否真的暴露 `/models` 或兼容模型列表接口。模型列表失败不会自动证明模型不可用，但会影响 MultiRouter 候选模型和子 Agent 候选排序。
 
@@ -101,15 +103,21 @@ Codex 多模型路由
 
 进入工作台后，点击 `创建多路路由`。这里创建的不是普通上游模型源，而是一套 Codex MultiRouter 方案。它会引用你刚才配置好的 OpenAI 官方 OAuth、DeepSeek、GLM、本地模型等模型源。
 
+![右上角 Codex 多模型路由入口](../images/codex-multirouter/05-multirouter-entry.png)
+
 目前建议为每套方案起一个清晰名称，例如：
 
 - `Codex GPT + DeepSeek + GLM`
 - `Codex OpenAI + Local vLLM`
 - `Daily MultiRouter`
 
+![MultiRouter 工作台中的创建多路路由按钮](../images/codex-multirouter/06-create-multirouter.png)
+
 ## 6. 添加并启用路由规则
 
 在工作台进入 `路由规则` 页，点击 `编辑匹配规则` 或添加规则。选择你希望加入这套 MultiRouter 的模型源，并确认它们处于启用状态。
+
+![路由规则页中添加和启用模型源](../images/codex-multirouter/07-configure-route-rules.png)
 
 每条规则至少要确认：
 
@@ -120,6 +128,8 @@ Codex 多模型路由
 - 能力声明：文本、图文、是否支持推理等。
 
 规则配置完成后，保存路由方案。
+
+![路由规则配置完成后保存方案](../images/codex-multirouter/08-save-route-rules.png)
 
 ## 7. 配置子 Agent 候选模型
 
@@ -134,6 +144,8 @@ Codex 多模型路由
 3. 给长上下文任务放 `deepseek-v4-flash` 或你实际验证过的长上下文模型。
 4. 给本地 / 多模态任务放对应的本地模型或 Qwen 系模型。
 5. 点击 `保存排序`。
+
+![子 Agent 候选模型排序和保存排序](../images/codex-multirouter/09-subagent-model-order.png)
 
 保存后，MultiRouter 会把这个顺序写入模型目录。Codex Desktop 仍然需要重启后才会刷新模型候选。
 
@@ -158,13 +170,15 @@ Codex 多模型路由
 127.0.0.1:15721
 ```
 
-![本地路由页面中启用 Codex 接管](../images/codex-deepseek-routing/03-local-route-codex-takeover.png)
+![设置页中同时开启路由总开关和 Codex 路由](../images/codex-multirouter/10-enable-routing-settings.png)
 
 不要把这个端口和对外 OpenAI-compatible API 端口混淆。Codex Desktop takeover 使用的是本地 Codex 路由端口；外部 agent API 可能使用另一个端口。
 
 ## 9. 使用状态 / Debug 检查链路
 
 启动后，回到 `Codex 多模型路由` 工作台，进入 `状态` 页，运行 Debug 检查。
+
+![MultiRouter 状态页中的 Debug 检查入口](../images/codex-multirouter/11-debug-entry.png)
 
 重点看这些结果：
 
@@ -211,6 +225,8 @@ Codex 多模型路由
 
 在 `Codex 历史修复` 面板里：
 
+![会话管理中的 Codex 历史修复面板](../images/codex-multirouter/12-13-history-repair-panel.png)
+
 1. 点击 `加载历史`，让工具读取 active SQLite 历史。
 2. 如果要把当前页结果全部纳入修复，使用全选当前加载页。
 3. 其他选项不确定时保持默认。
@@ -243,23 +259,6 @@ Codex 创建 subagent 时只取前 5 个候选模型。`子 Agent 候选模型` 
 ### 如何判断请求真的走到了 MultiRouter？
 
 不要只看 Codex 左下角账号或模型显示。以 CCSwitchMulti 状态页、Debug 结果和 `codex-router.log` 为准。出现 `route_resolved` 和对应上游状态，才说明请求进入了 MultiRouter。
-
-## 截图待补清单
-
-现有仓库截图已经覆盖 OAuth 设置、第三方模型源和本地路由接管。下面这些新 UI 建议后续补真实截图，不要用伪造图替代：
-
-| 场景 | 建议保存路径 |
-|---|---|
-| `设置 → 认证 → ChatGPT / Codex OAuth` 授权页 | `docs/images/codex-multirouter/codex-oauth-auth.png` |
-| 添加 DeepSeek / GLM / 本地模型源表单 | `docs/images/codex-multirouter/add-model-source.png` |
-| 高级选项里的 `需要本地路由映射` 和 `获取模型列表` | `docs/images/codex-multirouter/advanced-model-mapping.png` |
-| 右上角 `Codex 多模型路由` 入口 | `docs/images/codex-multirouter/router-entry-icon.png` |
-| MultiRouter 工作台头部和 `创建多路路由` | `docs/images/codex-multirouter/workspace-header.png` |
-| 路由规则页添加 / 启用模型源 | `docs/images/codex-multirouter/routes-tab-editing.png` |
-| `子 Agent 候选模型` 排序和 `保存排序` | `docs/images/codex-multirouter/spawn-agent-ordering.png` |
-| `设置 → 路由` 总开关和 Codex 开关 | `docs/images/codex-multirouter/settings-router-toggle.png` |
-| 状态 / Debug 页诊断结果 | `docs/images/codex-multirouter/status-debug-page.png` |
-| 会话管理里的 `Codex 历史修复` 面板 | `docs/images/codex-multirouter/history-repair-panel.png` |
 
 ## 相关文档
 
