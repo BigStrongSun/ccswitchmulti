@@ -22,7 +22,7 @@ import {
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
   AlertTriangle,
@@ -260,14 +260,14 @@ export function validateProxyListenDraft(
 export function buildMultiRouterRuntimeStatus({
   selectedPlan,
   selectedRouting,
-  selectedRouteCount,
+  enabledRouteCount,
   isProxyRunning,
   isCodexTakeoverActive,
   activeProviderId,
 }: {
   selectedPlan: Provider | null;
   selectedRouting: CodexRouting | null;
-  selectedRouteCount: number;
+  enabledRouteCount: number;
   isProxyRunning: boolean;
   isCodexTakeoverActive: boolean;
   activeProviderId?: string;
@@ -312,11 +312,12 @@ export function buildMultiRouterRuntimeStatus({
       tone: "warn",
     };
   }
-  if (selectedRouteCount === 0) {
+  if (enabledRouteCount === 0) {
     return {
       running: false,
-      label: "无规则",
-      detail: "当前 MultiRouter 没有启用规则，无法按 model 分流。",
+      label: "无启用规则",
+      detail:
+        "当前 MultiRouter 没有启用中的路由规则，Codex 请求无法按 model 分流。",
       tone: "warn",
     };
   }
@@ -2032,13 +2033,23 @@ function RoutesTab({
   const selectedPlanRoutes = selectedPlan
     ? routeEntries.filter(({ provider }) => provider.id === selectedPlan.id)
     : routeEntries;
+  const enabledPlanRouteCount = selectedPlanRoutes.filter(
+    ({ route }) => route.enabled !== false,
+  ).length;
   const selectedRouting = selectedPlan ? readCodexRouting(selectedPlan) : null;
   const effectiveActiveProviderId =
     activeProviderId ?? proxyStatus?.current_provider_id ?? undefined;
+  const { data: globalProxyConfig } = useQuery({
+    queryKey: ["globalProxyConfig"],
+    queryFn: () => proxyApi.getGlobalProxyConfig(),
+  });
+  const configuredListenAddress = globalProxyConfig
+    ? `${globalProxyConfig.listenAddress}:${globalProxyConfig.listenPort}`
+    : `${DEFAULT_CODEX_PROXY_LISTEN_ADDRESS}:${DEFAULT_CODEX_PROXY_LISTEN_PORT}`;
   const runtimeStatus = buildMultiRouterRuntimeStatus({
     selectedPlan,
     selectedRouting,
-    selectedRouteCount: selectedPlanRoutes.length,
+    enabledRouteCount: enabledPlanRouteCount,
     isProxyRunning,
     isCodexTakeoverActive,
     activeProviderId: effectiveActiveProviderId,
@@ -2048,9 +2059,11 @@ function RoutesTab({
     <div className="space-y-4">
       <MultiRouterCurrentStatus
         selectedPlan={selectedPlan}
-        selectedRouteCount={selectedPlanRoutes.length}
+        totalRouteCount={selectedPlanRoutes.length}
+        enabledRouteCount={enabledPlanRouteCount}
         runtimeStatus={runtimeStatus}
         proxyStatus={proxyStatus}
+        configuredListenAddress={configuredListenAddress}
         isProxyRunning={isProxyRunning}
         isCodexTakeoverActive={isCodexTakeoverActive}
         activeProviderId={effectiveActiveProviderId}
@@ -2219,17 +2232,21 @@ function RoutesTab({
 /// 路由页顶部的当前 MultiRouter 状态带，明确区分“页面选中”和“已经作为 Codex provider 运行”。
 function MultiRouterCurrentStatus({
   selectedPlan,
-  selectedRouteCount,
+  totalRouteCount,
+  enabledRouteCount,
   runtimeStatus,
   proxyStatus,
+  configuredListenAddress,
   isProxyRunning,
   isCodexTakeoverActive,
   activeProviderId,
 }: {
   selectedPlan: Provider | null;
-  selectedRouteCount: number;
+  totalRouteCount: number;
+  enabledRouteCount: number;
   runtimeStatus: MultiRouterRuntimeStatus;
   proxyStatus?: ProxyStatus;
+  configuredListenAddress: string;
   isProxyRunning: boolean;
   isCodexTakeoverActive: boolean;
   activeProviderId?: string;
@@ -2273,8 +2290,13 @@ function MultiRouterCurrentStatus({
             ok={Boolean(selectedPlan && activeProviderId === selectedPlan.id)}
           />
           <StatusInlineItem
-            label="本地监听"
-            value={listenAddress}
+            label="监听配置"
+            value={configuredListenAddress}
+            ok={Boolean(configuredListenAddress)}
+          />
+          <StatusInlineItem
+            label="运行监听"
+            value={isProxyRunning ? listenAddress : "未运行"}
             ok={isProxyRunning}
           />
           <StatusInlineItem
@@ -2283,9 +2305,9 @@ function MultiRouterCurrentStatus({
             ok={isCodexTakeoverActive}
           />
           <StatusInlineItem
-            label="规则数量"
-            value={`${selectedRouteCount} 条`}
-            ok={selectedRouteCount > 0}
+            label="启用规则"
+            value={`${enabledRouteCount} / ${totalRouteCount} 条`}
+            ok={enabledRouteCount > 0}
           />
           <StatusInlineItem
             label="入口状态"
@@ -2346,8 +2368,13 @@ function MultiRouterSettingsPanel({
   const [defaultRouteId, setDefaultRouteId] = useState(
     selectedRouting.defaultRouteId ?? "",
   );
-  const [globalProxyConfig, setGlobalProxyConfig] =
-    useState<GlobalProxyConfig | null>(null);
+  const { data: globalProxyConfig, error: globalProxyConfigError } = useQuery<
+    GlobalProxyConfig,
+    Error
+  >({
+    queryKey: ["globalProxyConfig"],
+    queryFn: () => proxyApi.getGlobalProxyConfig(),
+  });
   const [listenAddress, setListenAddress] = useState(
     DEFAULT_CODEX_PROXY_LISTEN_ADDRESS,
   );
@@ -2366,32 +2393,20 @@ function MultiRouterSettingsPanel({
   }, [selectedPlan]);
 
   useEffect(() => {
-    let cancelled = false;
-    /// MultiRouter 设置页复用全局代理监听配置；读取失败时保留 127.0.0.1:15721 兜底，不阻塞方案改名。
-    async function loadGlobalProxyConfig() {
-      try {
-        const config = await proxyApi.getGlobalProxyConfig();
-        if (cancelled) return;
-        setGlobalProxyConfig(config);
-        setListenAddress(
-          config.listenAddress || DEFAULT_CODEX_PROXY_LISTEN_ADDRESS,
-        );
-        setListenPort(
-          String(config.listenPort || DEFAULT_CODEX_PROXY_LISTEN_PORT),
-        );
-        setListenerError(null);
-      } catch (error) {
-        if (cancelled) return;
-        setListenerError(
-          error instanceof Error ? error.message : String(error),
-        );
-      }
-    }
-    loadGlobalProxyConfig();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    if (!globalProxyConfig) return;
+    setListenAddress(
+      globalProxyConfig.listenAddress || DEFAULT_CODEX_PROXY_LISTEN_ADDRESS,
+    );
+    setListenPort(
+      String(globalProxyConfig.listenPort || DEFAULT_CODEX_PROXY_LISTEN_PORT),
+    );
+    setListenerError(null);
+  }, [globalProxyConfig]);
+
+  useEffect(() => {
+    if (!globalProxyConfigError) return;
+    setListenerError(globalProxyConfigError.message);
+  }, [globalProxyConfigError]);
 
   /// 保存前同时写回方案草稿和全局监听配置；API Key 仍不在 MultiRouter 页面直接编辑。
   async function handleSave() {
@@ -2416,7 +2431,7 @@ function MultiRouterSettingsPanel({
           listenPort: listener.listenPort,
         };
         await proxyApi.updateGlobalProxyConfig(nextConfig);
-        setGlobalProxyConfig(nextConfig);
+        queryClient.setQueryData(["globalProxyConfig"], nextConfig);
         queryClient.invalidateQueries({ queryKey: ["globalProxyConfig"] });
         queryClient.invalidateQueries({ queryKey: ["proxyConfig"] });
         queryClient.invalidateQueries({ queryKey: ["proxyStatus"] });

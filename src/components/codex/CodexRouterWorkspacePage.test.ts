@@ -292,7 +292,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       buildMultiRouterRuntimeStatus({
         selectedPlan: plan,
         selectedRouting: readCodexRouting(plan),
-        selectedRouteCount: 1,
+        enabledRouteCount: 1,
         isProxyRunning: true,
         isCodexTakeoverActive: true,
         activeProviderId: "other-router",
@@ -303,7 +303,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       buildMultiRouterRuntimeStatus({
         selectedPlan: plan,
         selectedRouting: readCodexRouting(plan),
-        selectedRouteCount: 1,
+        enabledRouteCount: 1,
         isProxyRunning: false,
         isCodexTakeoverActive: true,
         activeProviderId: plan.id,
@@ -314,7 +314,18 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       buildMultiRouterRuntimeStatus({
         selectedPlan: plan,
         selectedRouting: readCodexRouting(plan),
-        selectedRouteCount: 1,
+        enabledRouteCount: 0,
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: plan.id,
+      }).label,
+    ).toBe("无启用规则");
+
+    expect(
+      buildMultiRouterRuntimeStatus({
+        selectedPlan: plan,
+        selectedRouting: readCodexRouting(plan),
+        enabledRouteCount: 1,
         isProxyRunning: true,
         isCodexTakeoverActive: true,
         activeProviderId: plan.id,
