@@ -91,10 +91,18 @@ function normalizeLegacyCodexRoute(
 }
 
 // 读取新 schema；没有新 schema 时，把旧字段转换成新结构以便 UI 保存时写回 codexRouting。
-function extractCodexRoutingConfig(
+export function extractCodexRoutingConfig(
   config: Record<string, any>,
 ): CodexRoutingConfig {
   const routing = config.codexRouting;
+  if (Array.isArray(routing)) {
+    return {
+      enabled: true,
+      defaultRouteId: "",
+      routes: routing.map(normalizeLegacyCodexRoute),
+    };
+  }
+
   if (routing && typeof routing === "object") {
     return {
       enabled: routing.enabled !== false,

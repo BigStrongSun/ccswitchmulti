@@ -288,11 +288,13 @@ fn should_treat_target_as_managed_codex_oauth(
         return true;
     }
 
-    if provider_has_codex_base_url(target_provider) || provider_has_codex_base_url(materialized) {
+    let route_target = codex_route_target_provider_id(route_provider).unwrap_or_default();
+    if provider_has_non_proxy_codex_base_url(target_provider)
+        || provider_has_non_proxy_codex_base_url(materialized)
+    {
         return false;
     }
 
-    let route_target = codex_route_target_provider_id(route_provider).unwrap_or_default();
     if target_provider_looks_like_managed_codex_oauth(target_provider, route_target) {
         return true;
     }
@@ -303,6 +305,20 @@ fn should_treat_target_as_managed_codex_oauth(
 
 /// 检查 provider settings/config 中是否已经有可用于 Codex adapter 的 base_url。
 fn provider_has_codex_base_url(provider: &Provider) -> bool {
+    provider_codex_base_url(provider).is_some()
+}
+
+/// 检查 provider 是否有非本地接管代理的真实上游地址。
+///
+/// official provider 在切换/恢复异常后可能被污染成 `127.0.0.1:15721`；
+/// 这种地址不能阻止托管 OAuth 兜底，否则 OpenAI route 会递归打回本地代理。
+fn provider_has_non_proxy_codex_base_url(provider: &Provider) -> bool {
+    provider_codex_base_url(provider)
+        .as_deref()
+        .is_some_and(|url| !codex_base_url_points_to_local_proxy(url))
+}
+
+fn provider_codex_base_url(provider: &Provider) -> Option<String> {
     provider
         .settings_config
         .get("base_url")
@@ -310,13 +326,22 @@ fn provider_has_codex_base_url(provider: &Provider) -> bool {
         .or_else(|| provider.settings_config.get("baseUrl"))
         .and_then(|value| value.as_str())
         .map(str::trim)
-        .is_some_and(|url| !url.is_empty())
-        || provider
-            .settings_config
-            .get("config")
-            .and_then(|value| value.as_str())
-            .and_then(extract_codex_base_url_from_toml)
-            .is_some()
+        .filter(|url| !url.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| {
+            provider
+                .settings_config
+                .get("config")
+                .and_then(|value| value.as_str())
+                .and_then(extract_codex_base_url_from_toml)
+        })
+}
+
+fn codex_base_url_points_to_local_proxy(url: &str) -> bool {
+    let lower = url.trim().to_ascii_lowercase();
+    lower.contains("://127.0.0.1:15721")
+        || lower.contains("://localhost:15721")
+        || lower.contains("://[::1]:15721")
 }
 
 /// 识别旧版官方 Codex OAuth provider，不依赖新版 meta 字段是否已回填。
@@ -377,6 +402,10 @@ fn resolve_codex_route_candidates<'a>(
     request_model: &str,
 ) -> Vec<&'a JsonValue> {
     if let Some(routing) = provider.settings_config.get("codexRouting") {
+        if let Some(routes) = routing.as_array() {
+            return resolve_codex_legacy_route_candidates(routes, request_model);
+        }
+
         if routing
             .get("enabled")
             .and_then(|value| value.as_bool())
@@ -469,6 +498,12 @@ pub fn codex_provider_text_only_input(provider: &Provider) -> Option<bool> {
 /// 存在就按旧规则匹配，保证已有本地数据库不会在升级后突然失效。
 fn resolve_codex_route<'a>(provider: &'a Provider, request_model: &str) -> Option<&'a JsonValue> {
     if let Some(routing) = provider.settings_config.get("codexRouting") {
+        if let Some(routes) = routing.as_array() {
+            return routes.iter().find(|route| {
+                codex_route_is_enabled(route) && codex_route_matches_model(route, request_model)
+            });
+        }
+
         if routing
             .get("enabled")
             .and_then(|value| value.as_bool())
@@ -519,6 +554,39 @@ fn codex_route_is_enabled(route: &JsonValue) -> bool {
         .get("enabled")
         .and_then(|value| value.as_bool())
         .unwrap_or(true)
+}
+
+/// 兼容被旧版/损坏保存路径写成 `codexRouting: []` 的 MultiRouter 配置。
+///
+/// 这类数据没有 `enabled/defaultRouteId` 外壳，但数组里的 route 本身仍然完整；
+/// 请求链路必须直接消费它，否则升级后所有模型都会 `route_missed=true`。
+fn resolve_codex_legacy_route_candidates<'a>(
+    routes: &'a [JsonValue],
+    request_model: &str,
+) -> Vec<&'a JsonValue> {
+    let mut selected = Vec::new();
+    if let Some(route) = routes.iter().find(|route| {
+        codex_route_is_enabled(route) && codex_route_matches_model(route, request_model)
+    }) {
+        selected.push(route);
+    }
+
+    let primary_id = selected
+        .first()
+        .and_then(|route| route.get("id"))
+        .and_then(|value| value.as_str())
+        .map(|id| id.to_ascii_lowercase());
+    selected.extend(routes.iter().filter(|route| {
+        if !codex_route_is_enabled(route) {
+            return false;
+        }
+        let route_id = route
+            .get("id")
+            .and_then(|value| value.as_str())
+            .map(|id| id.to_ascii_lowercase());
+        route_id != primary_id
+    }));
+    selected
 }
 
 /// 判断单条 Codex route 是否匹配请求模型。
@@ -1842,6 +1910,67 @@ experimental_bearer_token = "PROXY_MANAGED"
     }
 
     #[test]
+    fn test_codex_route_target_provider_treats_local_proxy_official_as_managed_oauth() {
+        let adapter = CodexAdapter::new();
+        let router = create_provider(json!({
+            "auth": {
+                "auth_mode": "chatgpt",
+                "tokens": {
+                    "access_token": "router-managed-access-token"
+                }
+            },
+            "codexRouting": {
+                "enabled": true,
+                "routes": [{
+                    "id": "router-codex-official",
+                    "label": "OpenAI Official",
+                    "targetProviderId": "codex-official",
+                    "match": { "models": ["gpt-5.5"] },
+                    "upstream": {
+                        "apiFormat": "openai_responses",
+                        "auth": { "source": "managed_codex_oauth" }
+                    }
+                }]
+            }
+        }));
+        let target = Provider::with_id(
+            "codex-official".to_string(),
+            "OpenAI Official".to_string(),
+            json!({
+                "auth": {
+                    "auth_mode": "chatgpt",
+                    "tokens": {
+                        "access_token": "stale-access-token"
+                    }
+                },
+                "base_url": "http://127.0.0.1:15721/v1",
+                "config": "model_provider = \"codex_model_router_v2\"\n[model_providers.codex_model_router_v2]\nbase_url = \"http://127.0.0.1:15721/v1\"\nwire_api = \"responses\"\n"
+            }),
+            None,
+        );
+
+        let routed = resolve_codex_model_routed_provider(&router, &json!({ "model": "gpt-5.5" }))
+            .expect("official route");
+        let materialized = materialize_codex_routed_provider_from_target(&routed, &target);
+
+        assert_eq!(
+            materialized
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.provider_type.as_deref()),
+            Some("codex_oauth")
+        );
+        assert_eq!(
+            adapter.extract_base_url(&materialized).unwrap(),
+            "https://chatgpt.com/backend-api/codex"
+        );
+        assert_eq!(
+            adapter.extract_auth(&materialized).unwrap().strategy,
+            AuthStrategy::CodexOAuth
+        );
+    }
+
+    #[test]
     fn test_codex_model_route_supports_prefix_matching() {
         let provider = create_provider(json!({
             "modelRoutes": [
@@ -2028,6 +2157,54 @@ experimental_bearer_token = "PROXY_MANAGED"
         assert_eq!(
             routed.settings_config["base_url"],
             "https://fallback.example"
+        );
+    }
+
+    #[test]
+    fn test_codex_model_route_accepts_legacy_array_codex_routing() {
+        let provider = create_provider(json!({
+            "codexRouting": [
+                {
+                    "id": "router-codex-official",
+                    "label": "OpenAI Official",
+                    "providerId": "codex-official",
+                    "models": ["gpt-5.5"],
+                    "upstream": {
+                        "apiFormat": "openai_responses",
+                        "auth": { "source": "managed_codex_oauth" }
+                    }
+                },
+                {
+                    "id": "router-deepseek",
+                    "label": "DeepSeek",
+                    "providerId": "codex-deepseek",
+                    "modelPrefixes": ["deepseek-"],
+                    "upstream": {
+                        "apiFormat": "openai_chat",
+                        "auth": { "source": "provider_config" }
+                    }
+                }
+            ]
+        }));
+
+        let gpt_route =
+            resolve_codex_model_routed_provider(&provider, &json!({ "model": "gpt-5.5" }))
+                .expect("legacy array gpt route");
+        let deepseek_route = resolve_codex_model_routed_provider(
+            &provider,
+            &json!({ "model": "deepseek-v4-flash" }),
+        )
+        .expect("legacy array deepseek route");
+
+        assert_eq!(gpt_route.id, "test::route::router-codex-official");
+        assert_eq!(
+            codex_route_target_provider_id(&gpt_route),
+            Some("codex-official")
+        );
+        assert_eq!(deepseek_route.id, "test::route::router-deepseek");
+        assert_eq!(
+            codex_route_target_provider_id(&deepseek_route),
+            Some("codex-deepseek")
         );
     }
 

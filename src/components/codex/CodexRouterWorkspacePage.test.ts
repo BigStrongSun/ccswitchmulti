@@ -196,6 +196,40 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     ]);
   });
 
+  it("reads legacy array codexRouting without clearing routes", () => {
+    const plan: Provider = {
+      id: "codex-multirouter",
+      name: "Codex GPT + DeepSeek 自动路由",
+      category: "custom",
+      settingsConfig: {
+        codexRouting: [
+          {
+            id: "router-codex-official",
+            label: "OpenAI Official",
+            providerId: "codex-official",
+            models: ["gpt-5.5"],
+          },
+          {
+            id: "router-deepseek",
+            label: "DeepSeek",
+            providerId: "codex-deepseek",
+            modelPrefixes: ["deepseek-"],
+          },
+        ],
+      },
+    };
+
+    const routing = readCodexRouting(plan);
+
+    expect(isRoutingPlan(plan)).toBe(true);
+    expect(routing?.enabled).toBe(true);
+    expect(routing?.routes).toHaveLength(2);
+    expect(routing?.routes?.[0].id).toBe("router-codex-official");
+    expect(routing?.routes?.[0].targetProviderId).toBe("codex-official");
+    expect(routing?.routes?.[0].match?.models).toEqual(["gpt-5.5"]);
+    expect(routing?.routes?.[1].match?.prefixes).toEqual(["deepseek-"]);
+  });
+
   it("normalizes selected router candidates into visible routes and catalog models", () => {
     const qwen: Provider = {
       id: "codex-qwen",

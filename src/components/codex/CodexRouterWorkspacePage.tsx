@@ -126,6 +126,7 @@ type CodexRoute = {
     auth?: {
       source?: string;
     };
+    modelMap?: Record<string, string>;
   };
   capabilities?: {
     textOnly?: boolean;
@@ -482,7 +483,76 @@ export function buildMultiRouterRuntimeStatus({
 export function readCodexRouting(provider: Provider): CodexRouting | null {
   const routing = provider.settingsConfig?.codexRouting;
   if (!routing || typeof routing !== "object") return null;
+  if (Array.isArray(routing)) {
+    return {
+      enabled: true,
+      routes: routing.map(normalizeLegacyCodexRoutingRoute),
+    };
+  }
   return routing as CodexRouting;
+}
+
+/// 将旧版扁平 route 数组条目转换成新版 `codexRouting.routes[]` 条目，避免保存时清空历史路由。
+function normalizeLegacyCodexRoutingRoute(
+  route: any,
+  index: number,
+): CodexRoute {
+  const models = Array.isArray(route?.models)
+    ? route.models.filter(
+        (item: unknown): item is string => typeof item === "string",
+      )
+    : Array.isArray(route?.match?.models)
+      ? route.match.models.filter(
+          (item: unknown): item is string => typeof item === "string",
+        )
+      : [];
+  const prefixes = Array.isArray(route?.modelPrefixes)
+    ? route.modelPrefixes
+    : Array.isArray(route?.model_prefixes)
+      ? route.model_prefixes
+      : Array.isArray(route?.match?.prefixes)
+        ? route.match.prefixes
+        : [];
+  const upstream = route?.upstream ?? {};
+  return {
+    id: String(route?.id || `route-${index + 1}`),
+    label: typeof route?.label === "string" ? route.label : route?.name,
+    enabled: route?.enabled !== false,
+    targetProviderId:
+      route?.targetProviderId ??
+      route?.target_provider_id ??
+      route?.providerId ??
+      route?.provider_id ??
+      upstream?.targetProviderId ??
+      upstream?.target_provider_id ??
+      upstream?.providerId ??
+      upstream?.provider_id,
+    match: {
+      models,
+      prefixes: prefixes.filter(
+        (item: unknown): item is string => typeof item === "string",
+      ),
+    },
+    upstream: {
+      baseUrl:
+        upstream?.baseUrl ??
+        upstream?.baseURL ??
+        upstream?.base_url ??
+        route?.baseUrl ??
+        route?.baseURL ??
+        route?.base_url,
+      apiFormat:
+        upstream?.apiFormat ??
+        upstream?.wireApi ??
+        upstream?.wire_api ??
+        route?.apiFormat ??
+        route?.wireApi ??
+        route?.wire_api,
+      auth: upstream?.auth ?? route?.auth,
+      modelMap: upstream?.modelMap ?? route?.modelMap,
+    },
+    capabilities: route?.capabilities,
+  };
 }
 
 /// 判断一个 Provider 是否已经承载 Codex 多模型路由；即使暂时关闭，只要有规则也归为路由方案方便继续编辑。
@@ -666,10 +736,14 @@ function inferRouteCapabilitiesFromProvider(
   modelIds: string[],
 ): CodexRouteCapabilities | undefined {
   const catalogModels = readCodexModelCatalog(provider).models;
-  const modelSet = new Set(modelIds.map((model) => model.trim()).filter(Boolean));
+  const modelSet = new Set(
+    modelIds.map((model) => model.trim()).filter(Boolean),
+  );
   const relevantCatalogModels =
     modelSet.size > 0
-      ? catalogModels.filter((model) => model.model && modelSet.has(model.model))
+      ? catalogModels.filter(
+          (model) => model.model && modelSet.has(model.model),
+        )
       : catalogModels;
   const imageSupport = relevantCatalogModels
     .map(imageSupportFromCatalogModel)
@@ -719,7 +793,10 @@ function normalizeRouteCapabilitiesFromProvider(
     route.match?.models ?? collectProviderModelIds(provider),
   );
   if (!inferred) return route;
-  if (route.capabilities && !isLegacyDefaultRouteCapabilities(route.capabilities)) {
+  if (
+    route.capabilities &&
+    !isLegacyDefaultRouteCapabilities(route.capabilities)
+  ) {
     return route;
   }
   return { ...route, capabilities: inferred };
@@ -739,7 +816,9 @@ function catalogDraftFromSourceModel(
     model: id,
     ...(displayName ? { displayName } : {}),
     ...(contextWindow ? { contextWindow } : {}),
-    ...(source?.inputModalities ? { inputModalities: source.inputModalities } : {}),
+    ...(source?.inputModalities
+      ? { inputModalities: source.inputModalities }
+      : {}),
     ...(source?.input_modalities
       ? { input_modalities: source.input_modalities }
       : {}),
@@ -881,10 +960,8 @@ function buildRouteCandidates(
       normalizedRoute,
       provider,
     );
-    const routeWithInferredCapabilities = normalizeRouteCapabilitiesFromProvider(
-      routeWithInferredMatch,
-      provider,
-    );
+    const routeWithInferredCapabilities =
+      normalizeRouteCapabilitiesFromProvider(routeWithInferredMatch, provider);
     candidates.push({
       id,
       route: routeWithInferredCapabilities,
