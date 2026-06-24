@@ -409,7 +409,7 @@ fn codex_oauth_model_context_windows_from_live_auth() -> std::collections::HashM
     use crate::proxy::providers::codex_oauth_auth::CodexOAuthManager;
 
     #[cfg(test)]
-    if let Some(override_windows) = take_test_codex_oauth_context_window_override() {
+    if let Some(override_windows) = read_test_codex_oauth_context_window_override() {
         return override_windows;
     }
 
@@ -455,19 +455,25 @@ fn codex_oauth_model_context_windows_from_live_auth() -> std::collections::HashM
 }
 
 #[cfg(test)]
-static CODEX_TEST_OAUTH_CONTEXT_WINDOW_OVERRIDE: std::sync::OnceLock<
-    std::sync::Mutex<Option<std::collections::HashMap<String, u64>>>,
-> = std::sync::OnceLock::new();
-
-#[cfg(test)]
-/// 读取并清空测试专用的官方上下文窗口覆盖值，避免真实网络请求污染单测。
-fn take_test_codex_oauth_context_window_override() -> Option<std::collections::HashMap<String, u64>>
+/// 读取测试专用的官方上下文窗口覆盖文件，避免真实网络请求污染单测。
+fn read_test_codex_oauth_context_window_override() -> Option<std::collections::HashMap<String, u64>>
 {
-    CODEX_TEST_OAUTH_CONTEXT_WINDOW_OVERRIDE
-        .get_or_init(|| std::sync::Mutex::new(None))
-        .lock()
-        .expect("lock oauth context override")
-        .take()
+    let override_path = get_codex_config_dir().join("test-codex-oauth-context-windows.json");
+    let Ok(Some(value)) = read_json_file_if_exists(&override_path) else {
+        return None;
+    };
+    let Some(models) = value.as_object() else {
+        return None;
+    };
+
+    Some(
+        models
+            .iter()
+            .filter_map(|(model, context_window)| {
+                parse_codex_positive_u64(Some(context_window)).map(|window| (model.clone(), window))
+            })
+            .collect(),
+    )
 }
 
 fn extract_codex_top_level_u64(config_text: &str, field: &str) -> Option<u64> {
@@ -2546,15 +2552,21 @@ mod tests {
 
     /// 注入一次性的官方 OAuth 模型上下文覆盖值，供缺缓存场景的单测使用。
     fn seed_test_codex_oauth_context_windows(windows: &[(&str, u64)]) {
-        let override_windows = windows
-            .iter()
-            .map(|(model, context_window)| (model.to_string(), *context_window))
-            .collect::<std::collections::HashMap<_, _>>();
-
-        *CODEX_TEST_OAUTH_CONTEXT_WINDOW_OVERRIDE
-            .get_or_init(|| std::sync::Mutex::new(None))
-            .lock()
-            .expect("lock oauth context override") = Some(override_windows);
+        let override_path = get_codex_config_dir().join("test-codex-oauth-context-windows.json");
+        std::fs::create_dir_all(override_path.parent().expect("override parent"))
+            .expect("create override parent");
+        write_json_file(
+            &override_path,
+            &Value::Object(
+                windows
+                    .iter()
+                    .map(|(model, context_window)| {
+                        (model.to_string(), Value::Number((*context_window).into()))
+                    })
+                    .collect(),
+            ),
+        )
+        .expect("seed oauth context override");
     }
     use serde_json::json;
 
