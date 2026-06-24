@@ -1,0 +1,163 @@
+name: Supplemental macOS Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build and upload macOS assets for
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  macos-universal:
+    name: Build and upload macOS universal assets
+    runs-on: macos-14
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add macOS targets
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10.12.3
+          run_install: false
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify release inputs
+        shell: bash
+        run: |
+          set -euxo pipefail
+          expected="${{ inputs.tag }}"
+          expected="${expected#v}"
+          actual="$(node -p "require('./package.json').version")"
+          test "$actual" = "$expected"
+
+      - name: Prepare Tauri signing key
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}" ]; then
+            echo "❌ TAURI_SIGNING_PRIVATE_KEY Secret is missing" >&2
+            exit 1
+          fi
+
+          RAW="${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}"
+          KEY_PATH="$RUNNER_TEMP/tauri_signing.key"
+          if echo "$RAW" | head -n1 | grep -q '^untrusted comment:'; then
+            printf '%s\n' "$RAW" > "$KEY_PATH"
+          else
+            if DECODED=$(printf '%s' "$RAW" | (base64 --decode 2>/dev/null || base64 -D 2>/dev/null)) \
+              && echo "$DECODED" | head -n1 | grep -q '^untrusted comment:'; then
+              printf '%s\n' "$DECODED" > "$KEY_PATH"
+            else
+              if echo "$RAW" | grep -Eq '^[A-Za-z0-9+/=]+$'; then
+                ONE=$(printf '%s' "$RAW" | tr -d '\r\n')
+                printf '%s\n%s\n' "untrusted comment: tauri signing key" "$ONE" > "$KEY_PATH"
+              else
+                echo "❌ TAURI_SIGNING_PRIVATE_KEY format is not recognized" >&2
+                exit 1
+              fi
+            fi
+          fi
+
+          if command -v base64 >/dev/null 2>&1; then
+            KEY_B64=$(base64 < "$KEY_PATH" | tr -d '\r\n')
+          elif command -v openssl >/dev/null 2>&1; then
+            KEY_B64=$(openssl base64 -A -in "$KEY_PATH")
+          else
+            KEY_B64=$(KEY_PATH="$KEY_PATH" node -e "process.stdout.write(require('fs').readFileSync(process.env.KEY_PATH).toString('base64'))")
+          fi
+          if [ -z "$KEY_B64" ]; then
+            echo "❌ Failed to encode Tauri signing key" >&2
+            exit 1
+          fi
+
+          echo "TAURI_SIGNING_PRIVATE_KEY=$KEY_B64" >> "$GITHUB_ENV"
+          if [ -n "${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}" ]; then
+            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build unsigned macOS bundles
+        shell: bash
+        timeout-minutes: 60
+        run: |
+          set -euxo pipefail
+          pnpm tauri build --target universal-apple-darwin
+
+      - name: Stage macOS release assets
+        shell: bash
+        run: |
+          set -euxo pipefail
+          version="${{ inputs.tag }}"
+          version="${version#v}"
+          mkdir -p release-assets
+
+          TAR_GZ=""
+          APP_PATH=""
+          for path in \
+            "src-tauri/target/universal-apple-darwin/release/bundle/macos" \
+            "src-tauri/target/aarch64-apple-darwin/release/bundle/macos" \
+            "src-tauri/target/x86_64-apple-darwin/release/bundle/macos" \
+            "src-tauri/target/release/bundle/macos"; do
+            if [ -d "$path" ]; then
+              [ -z "$TAR_GZ" ] && TAR_GZ=$(find "$path" -maxdepth 1 -name "*.tar.gz" -type f | head -1 || true)
+              [ -z "$APP_PATH" ] && APP_PATH=$(find "$path" -maxdepth 1 -name "*.app" -type d | head -1 || true)
+            fi
+          done
+
+          if [ -z "$TAR_GZ" ]; then
+            echo "❌ No macOS updater tarball found" >&2
+            exit 1
+          fi
+          if [ -z "$APP_PATH" ]; then
+            echo "❌ No macOS .app bundle found" >&2
+            exit 1
+          fi
+
+          cp "$TAR_GZ" "release-assets/CCSwitchMulti_${version}_universal.tar.gz"
+          if [ -f "$TAR_GZ.sig" ]; then
+            cp "$TAR_GZ.sig" "release-assets/CCSwitchMulti_${version}_universal.tar.gz.sig"
+          fi
+          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "release-assets/CCSwitchMulti_${version}_universal.app.zip"
+          shasum -a 256 release-assets/*
+
+      - name: Upload macOS assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          gh release upload "${{ inputs.tag }}" release-assets/* --clobber --repo "$GITHUB_REPOSITORY"
+
+      - name: Refresh release checksums
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          gh release view "${{ inputs.tag }}" --repo "$GITHUB_REPOSITORY" --json assets \
+            --jq '.assets[] | select(.name != "SHA256SUMS.txt") | select(.digest != null and .digest != "") | "\(.digest | sub("^sha256:";"") | ascii_upcase)  \(.name)"' \
+            | sort > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          gh release upload "${{ inputs.tag }}" SHA256SUMS.txt --clobber --repo "$GITHUB_REPOSITORY"
