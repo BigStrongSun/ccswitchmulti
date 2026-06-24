@@ -117,6 +117,12 @@ export interface CodexRouterLogEvent {
   provider: string | null;
   outerProvider: string | null;
   effectiveProvider: string | null;
+  endpoint: string | null;
+  effectiveEndpoint: string | null;
+  upstreamUrl: string | null;
+  actualProtocol: string | null;
+  responsesToChat: boolean | null;
+  responsesToMessages: boolean | null;
   status: string | null;
   error: string | null;
   line: string;
@@ -156,6 +162,9 @@ export interface CodexRouteSummary {
   targetExists: boolean;
   apiFormat: string | null;
   baseUrl: string | null;
+  configuredProtocol: string | null;
+  configuredProtocolSource: string | null;
+  configuredProtocolDetail: string | null;
   models: string[];
   prefixes: string[];
 }

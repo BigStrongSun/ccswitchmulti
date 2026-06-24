@@ -29,121 +29,157 @@ static CODEX_CLIENT_REGEX: LazyLock<Regex> =
 /// Codex 适配器
 pub struct CodexAdapter;
 
-/// Whether this Codex provider's real upstream should be called through
-/// OpenAI Chat Completions, even if the local Codex client is talking to CC
-/// Switch through the Responses API.
-pub fn codex_provider_uses_chat_completions(provider: &Provider) -> bool {
-    // 显式元数据是用户/新版 UI 的最高优先级；它可以覆盖 URL 推断。
+/// Codex `/responses` 请求在真实上游侧应使用的协议。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodexResponsesUpstreamProtocol {
+    /// 直接透传 OpenAI Responses API。
+    Responses,
+    /// 在本地把 Responses 转成 OpenAI Chat Completions。
+    Chat,
+    /// 在本地把 Responses 转成 OpenAI Messages。
+    Messages,
+}
+
+impl CodexResponsesUpstreamProtocol {
+    /// 输出前后端共用的协议枚举字符串，避免状态页和运行态口径分叉。
+    pub fn api_format(self) -> &'static str {
+        match self {
+            Self::Responses => "openai_responses",
+            Self::Chat => "openai_chat",
+            Self::Messages => "openai_messages",
+        }
+    }
+}
+
+/// 解释 Codex `/responses` 请求为何会命中某种上游协议。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexResponsesUpstreamDecision {
+    pub protocol: CodexResponsesUpstreamProtocol,
+    pub source: &'static str,
+    pub detail: String,
+}
+
+impl CodexResponsesUpstreamDecision {
+    /// 构造协议决策，统一收口状态页与运行态共享字段。
+    fn new(
+        protocol: CodexResponsesUpstreamProtocol,
+        source: &'static str,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            protocol,
+            source,
+            detail: detail.into(),
+        }
+    }
+}
+
+/// 解释当前 provider 的 `/responses` 请求在真实上游会走哪种协议。
+///
+/// 这是 Codex MultiRouter 关于协议选择的单一真理来源：
+/// - forwarder 运行时通过它判断是否做 responses->chat/messages 转换；
+/// - 诊断/状态页也通过它解释“为什么这么走”。
+pub fn explain_codex_responses_upstream_protocol(
+    provider: &Provider,
+) -> CodexResponsesUpstreamDecision {
+    if provider_is_managed_codex_oauth(provider) {
+        return CodexResponsesUpstreamDecision::new(
+            CodexResponsesUpstreamProtocol::Responses,
+            "managed_codex_oauth",
+            "托管 Codex OAuth 固定直连 chatgpt.com/backend-api/codex/responses",
+        );
+    }
+
     if let Some(api_format) = provider
         .meta
         .as_ref()
         .and_then(|meta| meta.api_format.as_deref())
-        .or_else(|| {
-            provider
-                .settings_config
-                .get("api_format")
-                .and_then(|v| v.as_str())
-        })
-        .or_else(|| {
-            provider
-                .settings_config
-                .get("apiFormat")
-                .and_then(|v| v.as_str())
-        })
     {
-        return is_chat_wire_api(api_format);
+        return CodexResponsesUpstreamDecision::new(
+            codex_upstream_protocol_from_api_format(api_format),
+            "provider_meta_api_format",
+            format!("meta.apiFormat={api_format}"),
+        );
     }
 
-    let configured_base_url = provider
+    if let Some(api_format) = provider
         .settings_config
-        .get("base_url")
-        .or_else(|| provider.settings_config.get("baseURL"))
-        .and_then(|v| v.as_str())
-        .map(ToString::to_string)
-        .or_else(|| {
-            provider
-                .settings_config
-                .get("config")
-                .and_then(|v| v.as_str())
-                .and_then(extract_codex_base_url_from_toml)
-        });
-
-    // 历史数据里 DeepSeek/Qwen 等 Chat Completions provider 可能被误存成
-    // `wire_api = "responses"`。这些上游并不提供 OpenAI Responses API，
-    // 必须在读取旧配置时按 URL 自动修正为本地 responses->chat 转换。
-    if configured_base_url
-        .as_deref()
-        .is_some_and(is_known_chat_completions_only_url)
+        .get("api_format")
+        .and_then(|value| value.as_str())
     {
-        return true;
+        return CodexResponsesUpstreamDecision::new(
+            codex_upstream_protocol_from_api_format(api_format),
+            "settings_api_format",
+            format!("settings_config.api_format={api_format}"),
+        );
+    }
+
+    if let Some(api_format) = provider
+        .settings_config
+        .get("apiFormat")
+        .and_then(|value| value.as_str())
+    {
+        return CodexResponsesUpstreamDecision::new(
+            codex_upstream_protocol_from_api_format(api_format),
+            "settings_api_format",
+            format!("settings_config.apiFormat={api_format}"),
+        );
+    }
+
+    if let Some(base_url) = provider_codex_base_url(provider) {
+        if is_known_chat_completions_only_url(&base_url) {
+            return CodexResponsesUpstreamDecision::new(
+                CodexResponsesUpstreamProtocol::Chat,
+                "known_chat_completions_only_url",
+                format!("base_url={base_url} 命中已知 Chat Completions-only 上游"),
+            );
+        }
     }
 
     if let Some(wire_api) = provider
         .settings_config
         .get("config")
-        .and_then(|v| v.as_str())
+        .and_then(|value| value.as_str())
         .and_then(extract_codex_wire_api_from_toml)
     {
-        return is_chat_wire_api(&wire_api);
+        return CodexResponsesUpstreamDecision::new(
+            codex_upstream_protocol_from_api_format(&wire_api),
+            "config_wire_api",
+            format!("config.toml wire_api={wire_api}"),
+        );
     }
 
-    if let Some(base_url) = configured_base_url {
-        return is_chat_completions_url(&base_url);
-    }
+    CodexResponsesUpstreamDecision::new(
+        CodexResponsesUpstreamProtocol::Responses,
+        "default_responses",
+        "未发现 chat/messages 信号，保持原生 Responses 透传",
+    )
+}
 
-    false
+/// Whether this Codex provider's real upstream should be called through
+/// OpenAI Chat Completions, even if the local Codex client is talking to CC
+/// Switch through the Responses API.
+pub fn codex_provider_uses_chat_completions(provider: &Provider) -> bool {
+    matches!(
+        explain_codex_responses_upstream_protocol(provider).protocol,
+        CodexResponsesUpstreamProtocol::Chat
+    )
 }
 
 pub fn should_convert_codex_responses_to_chat(provider: &Provider, endpoint: &str) -> bool {
-    let path = endpoint
-        .split_once('?')
-        .map_or(endpoint, |(path, _query)| path);
-
-    matches!(
-        path,
-        "/responses" | "/v1/responses" | "/responses/compact" | "/v1/responses/compact"
-    ) && codex_provider_uses_chat_completions(provider)
+    is_codex_responses_endpoint(endpoint)
+        && matches!(
+            explain_codex_responses_upstream_protocol(provider).protocol,
+            CodexResponsesUpstreamProtocol::Chat
+        )
 }
 
 pub fn should_convert_codex_responses_to_messages(provider: &Provider, endpoint: &str) -> bool {
-    let path = endpoint
-        .split_once('?')
-        .map_or(endpoint, |(path, _query)| path);
-
-    if !matches!(
-        path,
-        "/responses" | "/v1/responses" | "/responses/compact" | "/v1/responses/compact"
-    ) {
-        return false;
-    }
-
-    let wire_api = provider
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.api_format.as_deref())
-        .or_else(|| {
-            provider
-                .settings_config
-                .get("api_format")
-                .and_then(|v| v.as_str())
-        })
-        .or_else(|| {
-            provider
-                .settings_config
-                .get("apiFormat")
-                .and_then(|v| v.as_str())
-        })
-        .map(str::to_string)
-        .or_else(|| {
-            provider
-                .settings_config
-                .get("config")
-                .and_then(|v| v.as_str())
-                .and_then(extract_codex_wire_api_from_toml)
-        })
-        .unwrap_or_else(|| "openai_responses".to_string());
-
-    is_openai_messages_wire_api(&wire_api)
+    is_codex_responses_endpoint(endpoint)
+        && matches!(
+            explain_codex_responses_upstream_protocol(provider).protocol,
+            CodexResponsesUpstreamProtocol::Messages
+        )
 }
 
 /// 根据 Codex 请求体里的 `model` 字段，把复合 provider 解析成本次真实上游 provider。
@@ -264,6 +300,24 @@ pub fn materialize_codex_routed_provider_from_target(
         meta.provider_type = Some("codex_oauth".to_string());
     }
     materialized
+}
+
+/// 为诊断/状态页构造某条 route 的真实 effective provider。
+///
+/// 这里复用运行态的 route 构造和 materialize 逻辑，让“配置判定”和真实转发链路
+/// 保持同一口径，避免状态页自己猜协议。
+pub fn build_codex_route_probe_provider(
+    provider: &Provider,
+    route: &JsonValue,
+    target_provider: Option<&Provider>,
+) -> Provider {
+    let request_model = first_codex_route_model(route).unwrap_or("route-probe");
+    let routed = build_codex_routed_provider(provider, route, request_model);
+    if let Some(target_provider) = target_provider {
+        materialize_codex_routed_provider_from_target(&routed, target_provider)
+    } else {
+        routed
+    }
 }
 
 /// 判断 route 引用的旧版官方 Codex provider 是否实际应走托管 ChatGPT OAuth。
@@ -1306,6 +1360,17 @@ fn is_chat_wire_api(value: &str) -> bool {
     )
 }
 
+/// 把各种历史/兼容写法归一化成 Codex 上游协议枚举。
+fn codex_upstream_protocol_from_api_format(value: &str) -> CodexResponsesUpstreamProtocol {
+    if is_openai_messages_wire_api(value) {
+        return CodexResponsesUpstreamProtocol::Messages;
+    }
+    if is_chat_wire_api(value) {
+        return CodexResponsesUpstreamProtocol::Chat;
+    }
+    CodexResponsesUpstreamProtocol::Responses
+}
+
 /// 判断是否为 OpenAI 的 Messages 风格 API：
 /// `messages`/`openai_messages` 需要把 Responses 转换为 Chat 请求中的 `messages`。
 fn is_openai_messages_wire_api(value: &str) -> bool {
@@ -1320,6 +1385,17 @@ fn is_chat_completions_url(value: &str) -> bool {
         .trim_end_matches('/')
         .to_ascii_lowercase()
         .ends_with("/chat/completions")
+}
+
+/// 统一判断当前入口是否是 Codex Responses 路径。
+fn is_codex_responses_endpoint(endpoint: &str) -> bool {
+    let path = endpoint
+        .split_once('?')
+        .map_or(endpoint, |(path, _query)| path);
+    matches!(
+        path,
+        "/responses" | "/v1/responses" | "/responses/compact" | "/v1/responses/compact"
+    )
 }
 
 /// 判断是否为已知的 OpenAI Chat Completions-only 兼容上游。
@@ -2772,6 +2848,33 @@ wire_api = "chat"
     }
 
     #[test]
+    fn test_managed_codex_oauth_stays_on_native_responses() {
+        let mut provider = create_provider(json!({
+            "auth": {
+                "auth_mode": "chatgpt"
+            }
+        }));
+        provider.meta = Some(crate::provider::ProviderMeta {
+            provider_type: Some("codex_oauth".to_string()),
+            api_format: Some("openai_chat".to_string()),
+            ..Default::default()
+        });
+
+        let decision = explain_codex_responses_upstream_protocol(&provider);
+
+        assert_eq!(decision.protocol, CodexResponsesUpstreamProtocol::Responses);
+        assert_eq!(decision.source, "managed_codex_oauth");
+        assert!(!should_convert_codex_responses_to_chat(
+            &provider,
+            "/v1/responses"
+        ));
+        assert!(!should_convert_codex_responses_to_messages(
+            &provider,
+            "/v1/responses"
+        ));
+    }
+
+    #[test]
     fn test_codex_provider_uses_chat_completions_for_legacy_deepseek_responses_wire_api() {
         let provider = create_provider(json!({
             "config": r#"
@@ -2854,6 +2957,27 @@ wire_api = "responses"
         });
 
         assert!(should_convert_codex_responses_to_chat(
+            &provider,
+            "/v1/responses"
+        ));
+    }
+
+    #[test]
+    fn test_codex_provider_uses_messages_from_explicit_api_format() {
+        let provider = create_provider(json!({
+            "apiFormat": "openai_messages",
+            "base_url": "https://api.anthropic-gateway.local/v1"
+        }));
+
+        let decision = explain_codex_responses_upstream_protocol(&provider);
+
+        assert_eq!(decision.protocol, CodexResponsesUpstreamProtocol::Messages);
+        assert_eq!(decision.source, "settings_api_format");
+        assert!(should_convert_codex_responses_to_messages(
+            &provider,
+            "/v1/responses"
+        ));
+        assert!(!should_convert_codex_responses_to_chat(
             &provider,
             "/v1/responses"
         ));

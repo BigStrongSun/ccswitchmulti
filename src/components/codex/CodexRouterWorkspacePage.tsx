@@ -80,6 +80,7 @@ import type {
   CodexDiagnosticStatus,
   CodexModelPickerUnlockResult,
   CodexMultiRouterDiagnostics,
+  CodexRouteSummary,
   CodexRouterLogEvent,
   GlobalProxyConfig,
   ProxyStatus,
@@ -92,7 +93,7 @@ export type WorkspaceTab =
   | "status"
   | "test";
 
-type StatusView = "link" | "debug" | "providers" | "traffic";
+type StatusView = "link" | "protocol" | "debug" | "providers" | "traffic";
 
 type SpawnAgentCandidateView = "selected" | "routed" | "priority" | "all";
 
@@ -154,6 +155,15 @@ type RouteTrafficRow = {
   providerId: string;
   providerName: string;
   model: string;
+  routeId: string | null;
+  routeLabel: string | null;
+  configuredProtocol: string | null;
+  configuredProtocolSource: string | null;
+  configuredProtocolDetail: string | null;
+  lastObservedProtocol: string | null;
+  lastObservedAt: string | null;
+  lastObservedUpstreamUrl: string | null;
+  lastObservedEndpoint: string | null;
   requestCount: number;
   successCount: number;
   failedCount: number;
@@ -1332,6 +1342,26 @@ function apiFormatLabel(format: string): string {
   }
 }
 
+/// 把后端协议判定来源翻译成用户能直接理解的说明。
+function protocolDecisionSourceLabel(source?: string | null): string {
+  switch (source) {
+    case "managed_codex_oauth":
+      return "官方 Codex OAuth";
+    case "provider_meta_api_format":
+      return "Provider meta.apiFormat";
+    case "settings_api_format":
+      return "Provider 配置 apiFormat";
+    case "known_chat_completions_only_url":
+      return "已知 Chat-only 地址";
+    case "config_wire_api":
+      return "config.toml wire_api";
+    case "default_responses":
+      return "默认 Responses";
+    default:
+      return source || "未探测";
+  }
+}
+
 /// 汇总 route 可匹配的模型名和前缀，用于列表和测试页展示。
 function routeMatchSummary(route: CodexRoute): string {
   const models = route.match?.models?.filter(Boolean) ?? [];
@@ -1455,6 +1485,35 @@ function routeIdFromRouterEvent(event: CodexRouterLogEvent): string | null {
     : null;
 }
 
+/// 为 route 生成和后端诊断 route summary 对齐的稳定 key。
+function routeEntryStatusKey(entry: RouteEntry): string {
+  return (
+    entry.route.id?.trim() ||
+    entry.route.label?.trim() ||
+    `route-${entry.index + 1}`
+  );
+}
+
+/// 为后端返回的 route summary 生成稳定 key，便于前端合并协议探测结果。
+function routeSummaryStatusKey(
+  route: CodexRouteSummary,
+  index: number,
+): string {
+  return route.id?.trim() || route.label?.trim() || `route-${index + 1}`;
+}
+
+/// 建立当前诊断 route summary 的查找表，避免状态页自己重复猜协议。
+function buildRouteSummaryMap(
+  diagnostics: CodexMultiRouterDiagnostics | null,
+): Map<string, CodexRouteSummary> {
+  return new Map(
+    (diagnostics?.routePlan.routeSummaries ?? []).map((route, index) => [
+      routeSummaryStatusKey(route, index),
+      route,
+    ]),
+  );
+}
+
 /// 根据 route_id 或 model 匹配 router 日志对应的 route。
 function routeEntryForRouterEvent(
   event: CodexRouterLogEvent,
@@ -1481,6 +1540,40 @@ function routerEventStatusCode(event: CodexRouterLogEvent): number {
   return event.event.includes("error") ? 500 : 0;
 }
 
+/// 把 route 的配置协议探测结果附着到统计行里。
+function applyRouteProtocolMetadata(
+  row: RouteTrafficRow,
+  entry: RouteEntry | undefined,
+  routeSummaries: Map<string, CodexRouteSummary>,
+) {
+  if (!entry) return;
+  row.routeId = entry.route.id?.trim() || null;
+  row.routeLabel = entry.route.label?.trim() || null;
+  const summary = routeSummaries.get(routeEntryStatusKey(entry));
+  if (!summary) return;
+  row.configuredProtocol ??= summary.configuredProtocol;
+  row.configuredProtocolSource ??= summary.configuredProtocolSource;
+  row.configuredProtocolDetail ??= summary.configuredProtocolDetail;
+}
+
+/// 用最近的 request_prepared 事件覆盖统计行的真实出站协议。
+function updateRouteObservedProtocol(
+  row: RouteTrafficRow,
+  event: CodexRouterLogEvent,
+) {
+  if (!event.actualProtocol) return;
+  if (
+    row.lastObservedAt &&
+    event.timestamp.localeCompare(row.lastObservedAt) <= 0
+  ) {
+    return;
+  }
+  row.lastObservedProtocol = event.actualProtocol;
+  row.lastObservedAt = event.timestamp;
+  row.lastObservedUpstreamUrl = event.upstreamUrl;
+  row.lastObservedEndpoint = event.effectiveEndpoint ?? event.endpoint;
+}
+
 /// 从请求日志聚合 MultiRouter 子 provider / model 流量；无法归属的日志留给状态页单独提示。
 function buildRouteTrafficRows({
   logs,
@@ -1488,12 +1581,14 @@ function buildRouteTrafficRows({
   routes,
   selectedPlan,
   providersById,
+  routeSummaries = new Map<string, CodexRouteSummary>(),
 }: {
   logs: RequestLog[];
   routerEvents?: CodexRouterLogEvent[];
   routes: RouteEntry[];
   selectedPlan: Provider | null;
   providersById: Map<string, Provider>;
+  routeSummaries?: Map<string, CodexRouteSummary>;
 }): RouteTrafficRow[] {
   const selectedRoutes = selectedPlan
     ? routes.filter((entry) => entry.provider.id === selectedPlan.id)
@@ -1510,6 +1605,7 @@ function buildRouteTrafficRows({
     statusCode: number,
     tokens: number,
     latencyMs: number,
+    matchedRoute?: RouteEntry,
   ) {
     const key = `${target.providerId}::${model}`;
     const current =
@@ -1518,6 +1614,15 @@ function buildRouteTrafficRows({
         providerId: target.providerId,
         providerName: target.providerName,
         model,
+        routeId: null,
+        routeLabel: null,
+        configuredProtocol: null,
+        configuredProtocolSource: null,
+        configuredProtocolDetail: null,
+        lastObservedProtocol: null,
+        lastObservedAt: null,
+        lastObservedUpstreamUrl: null,
+        lastObservedEndpoint: null,
         requestCount: 0,
         successCount: 0,
         failedCount: 0,
@@ -1526,6 +1631,7 @@ function buildRouteTrafficRows({
         latencyTotalMs: 0,
       } satisfies RouteTrafficRow & { latencyTotalMs: number });
 
+    applyRouteProtocolMetadata(current, matchedRoute, routeSummaries);
     current.requestCount += 1;
     if (statusCode >= 200 && statusCode < 400) {
       current.successCount += 1;
@@ -1570,6 +1676,7 @@ function buildRouteTrafficRows({
         log.cacheReadTokens +
         log.cacheCreationTokens,
       log.latencyMs,
+      matchedRoute,
     );
   }
 
@@ -1594,7 +1701,41 @@ function buildRouteTrafficRows({
       routerEventStatusCode(event),
       0,
       0,
+      matchedRoute,
     );
+  }
+
+  for (const event of routerEvents.filter((entry) => Boolean(entry.actualProtocol))) {
+    const matchedRoute = routeEntryForRouterEvent(event, selectedRoutes);
+    if (!matchedRoute) continue;
+    const target = routeTrafficTarget(matchedRoute, providersById);
+    const model = event.model || matchedRoute.route.match?.models?.[0] || "unknown";
+    const key = `${target.providerId}::${model}`;
+    const current =
+      buckets.get(key) ??
+      ({
+        providerId: target.providerId,
+        providerName: target.providerName,
+        model,
+        routeId: null,
+        routeLabel: null,
+        configuredProtocol: null,
+        configuredProtocolSource: null,
+        configuredProtocolDetail: null,
+        lastObservedProtocol: null,
+        lastObservedAt: null,
+        lastObservedUpstreamUrl: null,
+        lastObservedEndpoint: null,
+        requestCount: 0,
+        successCount: 0,
+        failedCount: 0,
+        totalTokens: 0,
+        avgLatencyMs: 0,
+        latencyTotalMs: 0,
+      } satisfies RouteTrafficRow & { latencyTotalMs: number });
+    applyRouteProtocolMetadata(current, matchedRoute, routeSummaries);
+    updateRouteObservedProtocol(current, event);
+    buckets.set(key, current);
   }
 
   return Array.from(buckets.values())
@@ -4223,13 +4364,24 @@ function StatusTab({
       (entry) => routeTrafficTarget(entry, providersById).providerId,
     ),
   ).size;
+  const routeSummaryMap = useMemo(
+    () => buildRouteSummaryMap(diagnostics),
+    [diagnostics],
+  );
   const trafficRows = buildRouteTrafficRows({
     logs: proxyLogs,
     routerEvents,
     routes: routeEntries,
     selectedPlan,
     providersById,
+    routeSummaries: routeSummaryMap,
   });
+  const protocolRows = trafficRows.filter(
+    (row) =>
+      row.configuredProtocol ||
+      row.lastObservedProtocol ||
+      row.requestCount > 0,
+  );
   const routerLogs = routerEvents;
   const routedLogs = proxyLogs.filter((log) =>
     trafficRows.some(
@@ -4276,8 +4428,8 @@ function StatusTab({
   ].filter(Boolean);
 
   /// 一键诊断只读取本地现场和 router 日志，不向真实上游发起模型请求。
-  async function runDiagnostics() {
-    setStatusView("debug");
+  async function runDiagnostics(nextView: StatusView = "debug") {
+    setStatusView(nextView);
     setIsDiagnosing(true);
     setDiagnoseError(null);
     try {
@@ -4313,6 +4465,7 @@ function StatusTab({
       <StatusViewSwitcher
         value={statusView}
         diagnostics={diagnostics}
+        protocolCount={protocolRows.length}
         trafficCount={trafficRows.length}
         providerCount={selectedRoutes.length}
         onChange={setStatusView}
@@ -4329,7 +4482,7 @@ function StatusTab({
                 <Button
                   size="sm"
                   variant="outline"
-                  onClick={runDiagnostics}
+                  onClick={() => runDiagnostics("debug")}
                   disabled={isDiagnosing}
                   className="gap-2 border-amber-500/50 bg-amber-500/10 text-amber-100 hover:bg-amber-500/20"
                 >
@@ -4339,6 +4492,20 @@ function StatusTab({
                     <Bug className="h-4 w-4" />
                   )}
                   Debug 检查
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => runDiagnostics("protocol")}
+                  disabled={isDiagnosing}
+                  className="gap-2 border-cyan-500/50 bg-cyan-500/10 text-cyan-100 hover:bg-cyan-500/20"
+                >
+                  {isDiagnosing ? (
+                    <RefreshCw className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <GitBranch className="h-4 w-4" />
+                  )}
+                  协议探测
                 </Button>
                 <Button
                   size="sm"
@@ -4485,8 +4652,114 @@ function StatusTab({
           diagnostics={diagnostics}
           isLoading={isDiagnosing}
           error={diagnoseError}
-          onRun={runDiagnostics}
+          onRun={() => runDiagnostics("debug")}
         />
+      )}
+
+      {statusView === "protocol" && (
+        <section className="rounded-lg border border-cyan-700/40 bg-cyan-950/10 p-4">
+          <SectionHeader
+            icon={GitBranch}
+            title="协议探测"
+            detail="配置判定来自后端共享协议决策；最近实测来自 request_prepared 日志，能直接看到某个模型最后真实出站走的是 Responses、Chat 还是 Messages。"
+            action={
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => runDiagnostics("protocol")}
+                disabled={isDiagnosing}
+                className="gap-2 border-cyan-500/50 bg-cyan-500/10 text-cyan-100 hover:bg-cyan-500/20"
+              >
+                {isDiagnosing ? (
+                  <RefreshCw className="h-4 w-4 animate-spin" />
+                ) : (
+                  <RefreshCw className="h-4 w-4" />
+                )}
+                重新探测
+              </Button>
+            }
+          />
+          {!diagnostics && !isDiagnosing ? (
+            <div className="mt-3 rounded-lg border border-slate-700 bg-slate-950/50 p-4 text-sm leading-6 text-slate-300">
+              尚未执行协议探测。点击右上角按钮后，会读取当前 MultiRouter route
+              规则并结合最近 router 日志，展示每个模型的配置协议和最近一次真实出站协议。
+            </div>
+          ) : null}
+          {protocolRows.length > 0 ? (
+            <div className="mt-3 overflow-hidden rounded-lg border border-slate-700">
+              <div className="grid grid-cols-[1.1fr_1fr_1fr_1fr_1.4fr] gap-2 bg-slate-900/80 px-3 py-2 text-xs font-semibold text-slate-300">
+                <span>Provider / Route</span>
+                <span>Model</span>
+                <span>配置判定</span>
+                <span>最近实测</span>
+                <span>来源</span>
+              </div>
+              {protocolRows.map((row) => (
+                <div
+                  key={`protocol-${row.providerId}-${row.model}`}
+                  className="grid grid-cols-[1.1fr_1fr_1fr_1fr_1.4fr] gap-2 border-t border-slate-800 px-3 py-2 text-xs text-slate-300"
+                >
+                  <div className="min-w-0">
+                    <div className="truncate">{row.providerName}</div>
+                    <div className="truncate text-[11px] text-slate-500">
+                      {row.routeLabel || row.routeId || "未命名规则"}
+                    </div>
+                  </div>
+                  <span className="truncate font-mono">{row.model}</span>
+                  <div className="min-w-0">
+                    <div className="truncate">
+                      {row.configuredProtocol
+                        ? apiFormatLabel(row.configuredProtocol)
+                        : "待探测"}
+                    </div>
+                    <div
+                      className="truncate text-[11px] text-slate-500"
+                      title={row.configuredProtocolDetail ?? undefined}
+                    >
+                      {protocolDecisionSourceLabel(
+                        row.configuredProtocolSource,
+                      )}
+                    </div>
+                  </div>
+                  <div className="min-w-0">
+                    <div className="truncate">
+                      {row.lastObservedProtocol
+                        ? apiFormatLabel(row.lastObservedProtocol)
+                        : "暂无实测"}
+                    </div>
+                    <div className="truncate text-[11px] text-slate-500">
+                      {row.lastObservedAt ?? "等待新请求"}
+                    </div>
+                  </div>
+                  <div className="min-w-0">
+                    <div
+                      className="truncate"
+                      title={
+                        row.lastObservedUpstreamUrl ??
+                        row.lastObservedEndpoint ??
+                        row.configuredProtocolDetail ??
+                        undefined
+                      }
+                    >
+                      {row.lastObservedUpstreamUrl ??
+                        row.lastObservedEndpoint ??
+                        row.configuredProtocolDetail ??
+                        "无"}
+                    </div>
+                    <div className="truncate text-[11px] text-slate-500">
+                      最近请求 {row.requestCount} 次，失败 {row.failedCount} 次
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : diagnostics ? (
+            <div className="mt-3 rounded-lg border border-slate-700 bg-slate-950/50 p-4 text-sm leading-6 text-slate-300">
+              当前没有可归属的协议探测结果。已加载 route {selectedRoutes.length} 条，
+              router 事件 {routerRequestEvents.length} 条；请先让 Codex 发起一次真实请求，再重新探测。
+            </div>
+          ) : null}
+        </section>
       )}
 
       {statusView === "providers" && (
@@ -4713,12 +4986,14 @@ function TestTab({
 function StatusViewSwitcher({
   value,
   diagnostics,
+  protocolCount,
   trafficCount,
   providerCount,
   onChange,
 }: {
   value: StatusView;
   diagnostics: CodexMultiRouterDiagnostics | null;
+  protocolCount: number;
   trafficCount: number;
   providerCount: number;
   onChange: (value: StatusView) => void;
@@ -4748,6 +5023,12 @@ function StatusViewSwitcher({
       detail: "监听 / 接管 / 入口",
     },
     {
+      value: "protocol",
+      icon: GitBranch,
+      label: "协议",
+      detail: `${protocolCount} 个模型`,
+    },
+    {
       value: "debug",
       icon: Bug,
       label: "Debug",
@@ -4769,7 +5050,7 @@ function StatusViewSwitcher({
 
   return (
     <div className="rounded-lg border border-slate-700 bg-slate-950/40 p-2">
-      <div className="grid gap-2 md:grid-cols-4">
+      <div className="grid gap-2 md:grid-cols-5">
         {items.map((item) => {
           const Icon = item.icon;
           const active = value === item.value;
@@ -5074,16 +5355,17 @@ function DiagnosticsPanel({
 
           {diagnostics.routePlan.routeSummaries.length > 0 && (
             <div className="overflow-hidden rounded-lg border border-slate-700">
-              <div className="grid grid-cols-[1fr_1fr_0.8fr_0.8fr] gap-2 bg-slate-900/80 px-3 py-2 text-xs font-semibold text-slate-300">
+              <div className="grid grid-cols-[1fr_1fr_1fr_1fr_0.8fr] gap-2 bg-slate-900/80 px-3 py-2 text-xs font-semibold text-slate-300">
                 <span>规则</span>
                 <span>目标 Provider</span>
-                <span>接口</span>
+                <span>配置协议</span>
+                <span>判定来源</span>
                 <span>模型</span>
               </div>
               {diagnostics.routePlan.routeSummaries.map((route, index) => (
                 <div
                   key={`${route.id ?? index}-${route.targetProviderId ?? "inline"}`}
-                  className="grid grid-cols-[1fr_1fr_0.8fr_0.8fr] gap-2 border-t border-slate-800 px-3 py-2 text-xs text-slate-300"
+                  className="grid grid-cols-[1fr_1fr_1fr_1fr_0.8fr] gap-2 border-t border-slate-800 px-3 py-2 text-xs text-slate-300"
                 >
                   <span className="truncate">
                     {route.label ?? route.id ?? `规则 ${index + 1}`}
@@ -5097,7 +5379,17 @@ function DiagnosticsPanel({
                       ? "（不存在）"
                       : ""}
                   </span>
-                  <span className="truncate">{route.apiFormat ?? "跟随"}</span>
+                  <span
+                    className="truncate"
+                    title={route.configuredProtocolDetail ?? undefined}
+                  >
+                    {route.configuredProtocol
+                      ? apiFormatLabel(route.configuredProtocol)
+                      : route.apiFormat ?? "跟随"}
+                  </span>
+                  <span className="truncate">
+                    {protocolDecisionSourceLabel(route.configuredProtocolSource)}
+                  </span>
                   <span className="truncate">
                     {[
                       ...route.models,
@@ -5113,9 +5405,10 @@ function DiagnosticsPanel({
 
           {diagnostics.routerLog.recentEvents.length > 0 && (
             <div className="overflow-hidden rounded-lg border border-slate-700">
-              <div className="grid grid-cols-[1fr_0.9fr_0.9fr_0.6fr_2fr] gap-2 bg-slate-900/80 px-3 py-2 text-xs font-semibold text-slate-300">
+              <div className="grid grid-cols-[1fr_0.9fr_0.8fr_0.9fr_0.6fr_1.6fr] gap-2 bg-slate-900/80 px-3 py-2 text-xs font-semibold text-slate-300">
                 <span>时间</span>
                 <span>事件</span>
+                <span>协议</span>
                 <span>Provider</span>
                 <span>状态</span>
                 <span>摘要</span>
@@ -5123,18 +5416,29 @@ function DiagnosticsPanel({
               {diagnostics.routerLog.recentEvents.slice(0, 12).map((event) => (
                 <div
                   key={`${event.timestamp}-${event.event}-${event.line}`}
-                  className="grid grid-cols-[1fr_0.9fr_0.9fr_0.6fr_2fr] gap-2 border-t border-slate-800 px-3 py-2 text-xs text-slate-300"
+                  className="grid grid-cols-[1fr_0.9fr_0.8fr_0.9fr_0.6fr_1.6fr] gap-2 border-t border-slate-800 px-3 py-2 text-xs text-slate-300"
                 >
                   <span className="truncate">{event.timestamp}</span>
                   <span className="truncate font-mono">{event.event}</span>
+                  <span className="truncate">
+                    {event.actualProtocol
+                      ? apiFormatLabel(event.actualProtocol)
+                      : "-"}
+                  </span>
                   <span className="truncate">
                     {event.outerProvider && event.effectiveProvider
                       ? `${event.outerProvider} -> ${event.effectiveProvider}`
                       : (event.provider ?? "-")}
                   </span>
                   <span className="truncate">{event.status ?? "-"}</span>
-                  <span className="truncate" title={event.line}>
-                    {event.error ?? event.model ?? event.line}
+                  <span
+                    className="truncate"
+                    title={event.upstreamUrl ?? event.line}
+                  >
+                    {event.error ??
+                      event.upstreamUrl ??
+                      event.model ??
+                      event.line}
                   </span>
                 </div>
               ))}

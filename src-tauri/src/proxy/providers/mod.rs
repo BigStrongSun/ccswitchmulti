@@ -48,11 +48,13 @@ pub use claude::{
 };
 pub use codex::CodexAdapter;
 pub use codex::{
-    apply_codex_chat_upstream_model, codex_provider_text_only_input, codex_provider_upstream_model,
+    apply_codex_chat_upstream_model, build_codex_route_probe_provider,
+    codex_provider_text_only_input, codex_provider_upstream_model,
     codex_provider_uses_chat_completions, codex_route_persistent_provider,
-    codex_route_target_provider_id, materialize_codex_routed_provider_from_target,
-    resolve_codex_chat_reasoning_config, resolve_codex_model_routed_provider,
-    should_convert_codex_responses_to_chat, should_convert_codex_responses_to_messages,
+    codex_route_target_provider_id, explain_codex_responses_upstream_protocol,
+    materialize_codex_routed_provider_from_target, resolve_codex_chat_reasoning_config,
+    resolve_codex_model_routed_provider, should_convert_codex_responses_to_chat,
+    should_convert_codex_responses_to_messages,
 };
 pub use gemini::GeminiAdapter;
 

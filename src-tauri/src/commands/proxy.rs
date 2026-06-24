@@ -8,12 +8,16 @@ use crate::proxy::external_openai_api::{
     self, ExternalOpenAiApiProfileUpdate, ExternalOpenAiApiProfileView,
     ExternalOpenAiApiRuntimeStatusView, GeneratedExternalOpenAiApiKey,
 };
+use crate::proxy::providers::{
+    build_codex_route_probe_provider, explain_codex_responses_upstream_protocol, CodexAdapter,
+    ProviderAdapter,
+};
 use crate::proxy::types::*;
 use crate::proxy::{CircuitBreakerConfig, CircuitBreakerStats};
 use crate::store::AppState;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 #[cfg(windows)]
 use std::process::Command;
@@ -108,6 +112,12 @@ pub struct CodexRouterLogEvent {
     pub provider: Option<String>,
     pub outer_provider: Option<String>,
     pub effective_provider: Option<String>,
+    pub endpoint: Option<String>,
+    pub effective_endpoint: Option<String>,
+    pub upstream_url: Option<String>,
+    pub actual_protocol: Option<String>,
+    pub responses_to_chat: Option<bool>,
+    pub responses_to_messages: Option<bool>,
     pub status: Option<String>,
     pub error: Option<String>,
     pub line: String,
@@ -141,6 +151,9 @@ pub struct CodexRouteSummary {
     pub target_exists: bool,
     pub api_format: Option<String>,
     pub base_url: Option<String>,
+    pub configured_protocol: Option<String>,
+    pub configured_protocol_source: Option<String>,
+    pub configured_protocol_detail: Option<String>,
     pub models: Vec<String>,
     pub prefixes: Vec<String>,
 }
@@ -1175,15 +1188,15 @@ fn codex_route_plan_diagnostics(
     };
 
     let routing = provider.settings_config.get("codexRouting");
-    let routing_enabled = routing
-        .and_then(|value| value.get("enabled"))
-        .and_then(|value| value.as_bool())
-        .unwrap_or(true);
-    let routes = routing
-        .and_then(|value| value.get("routes"))
-        .and_then(|value| value.as_array())
-        .cloned()
-        .unwrap_or_default();
+    let routing_enabled = if routing.and_then(|value| value.as_array()).is_some() {
+        true
+    } else {
+        routing
+            .and_then(|value| value.get("enabled"))
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true)
+    };
+    let routes = codex_routing_routes(routing);
     let default_route_id = routing
         .and_then(|value| {
             value
@@ -1194,7 +1207,7 @@ fn codex_route_plan_diagnostics(
         .map(ToString::to_string);
     let route_summaries = routes
         .iter()
-        .map(|route| codex_route_summary(state, route))
+        .map(|route| codex_route_summary(state, &provider, route))
         .collect::<Vec<_>>();
     let enabled_route_count = route_summaries.iter().filter(|route| route.enabled).count();
 
@@ -1211,24 +1224,20 @@ fn codex_route_plan_diagnostics(
 }
 
 /// 将一条 route JSON 摘要成前端状态页可展示的信息。
-fn codex_route_summary(state: &AppState, route: &Value) -> CodexRouteSummary {
+fn codex_route_summary(state: &AppState, provider: &Provider, route: &Value) -> CodexRouteSummary {
     let target_provider_id = codex_route_target_provider_id(route);
     let target_provider = target_provider_id
         .as_deref()
         .and_then(|id| state.db.get_provider_by_id(id, "codex").ok().flatten());
-    let upstream = route.get("upstream").unwrap_or(route);
-    let api_format = target_provider
-        .as_ref()
-        .and_then(provider_api_format)
-        .or_else(|| codex_first_json_string(upstream, &["wire_api", "wireApi", "apiFormat"]))
-        .or_else(|| codex_first_json_string(route, &["wire_api", "wireApi", "apiFormat"]));
-    let base_url = target_provider
-        .as_ref()
-        .and_then(provider_base_url)
-        .or_else(|| {
-            codex_first_json_string(upstream, &["baseUrl", "baseURL", "base_url"])
-                .or_else(|| codex_first_json_string(route, &["baseUrl", "baseURL", "base_url"]))
-        });
+    let effective_provider =
+        build_codex_route_probe_provider(provider, route, target_provider.as_ref());
+    let protocol_decision = explain_codex_responses_upstream_protocol(&effective_provider);
+    let api_format = provider_api_format(&effective_provider)
+        .or_else(|| Some(protocol_decision.protocol.api_format().to_string()));
+    let base_url = CodexAdapter::new()
+        .extract_base_url(&effective_provider)
+        .ok()
+        .or_else(|| provider_base_url(&effective_provider));
     let match_config = route.get("match").unwrap_or(route);
 
     CodexRouteSummary {
@@ -1245,9 +1254,27 @@ fn codex_route_summary(state: &AppState, route: &Value) -> CodexRouteSummary {
         target_provider_id,
         api_format,
         base_url,
+        configured_protocol: Some(protocol_decision.protocol.api_format().to_string()),
+        configured_protocol_source: Some(protocol_decision.source.to_string()),
+        configured_protocol_detail: Some(protocol_decision.detail),
         models: codex_json_string_array(match_config, "models"),
         prefixes: codex_json_string_array(match_config, "prefixes"),
     }
+}
+
+/// 读取 `codexRouting` 里的 route 数组，兼容新版对象 schema 和旧版数组 schema。
+fn codex_routing_routes(routing: Option<&Value>) -> Vec<Value> {
+    let Some(routing) = routing else {
+        return Vec::new();
+    };
+    if let Some(routes) = routing.as_array() {
+        return routes.clone();
+    }
+    routing
+        .get("routes")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// 读取 route 引用的真实目标 provider id，兼容历史字段名。
@@ -1537,13 +1564,21 @@ fn codex_parse_router_log_line(line: &str) -> Option<CodexRouterLogEvent> {
         .split_whitespace()
         .filter_map(|part| part.split_once('='))
         .map(|(key, value)| (key.to_string(), value.to_string()))
-        .collect::<std::collections::HashMap<_, _>>();
+        .collect::<HashMap<_, _>>();
     let event = fields.get("event")?.clone();
     let error = fields
         .get("error")
         .cloned()
         .or_else(|| fields.get("reason").cloned())
         .or_else(|| fields.get("body_summary").cloned());
+    let responses_to_chat = codex_router_log_bool_field(&fields, "responses_to_chat");
+    let responses_to_messages = codex_router_log_bool_field(&fields, "responses_to_messages");
+    let actual_protocol = codex_router_log_actual_protocol(
+        fields.get("effective_endpoint"),
+        fields.get("upstream_url"),
+        responses_to_chat,
+        responses_to_messages,
+    );
 
     Some(CodexRouterLogEvent {
         timestamp,
@@ -1556,10 +1591,67 @@ fn codex_parse_router_log_line(line: &str) -> Option<CodexRouterLogEvent> {
             .or_else(|| fields.get("effective_provider").cloned()),
         outer_provider: fields.get("outer_provider").cloned(),
         effective_provider: fields.get("effective_provider").cloned(),
+        endpoint: fields.get("endpoint").cloned(),
+        effective_endpoint: fields.get("effective_endpoint").cloned(),
+        upstream_url: fields.get("upstream_url").cloned(),
+        actual_protocol,
+        responses_to_chat,
+        responses_to_messages,
         status: fields.get("status").cloned(),
         error,
         line: line.to_string(),
     })
+}
+
+/// 解析 router 日志中的布尔字段；未知值返回 `None`，避免误判旧日志。
+fn codex_router_log_bool_field(fields: &HashMap<String, String>, key: &str) -> Option<bool> {
+    fields
+        .get(key)
+        .map(|value| value.trim())
+        .and_then(|value| match value {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        })
+}
+
+/// 从 request_prepared 事件的 endpoint / URL / 转换标记推导真实出站协议。
+fn codex_router_log_actual_protocol(
+    effective_endpoint: Option<&String>,
+    upstream_url: Option<&String>,
+    responses_to_chat: Option<bool>,
+    responses_to_messages: Option<bool>,
+) -> Option<String> {
+    if responses_to_chat == Some(true) {
+        return Some("openai_chat".to_string());
+    }
+    if responses_to_messages == Some(true) {
+        return Some("openai_messages".to_string());
+    }
+
+    upstream_url
+        .and_then(|value| codex_router_log_protocol_from_path(value))
+        .or_else(|| effective_endpoint.and_then(|value| codex_router_log_protocol_from_path(value)))
+        .map(ToString::to_string)
+}
+
+/// 从 URL 或 endpoint 路径识别协议类型，供日志解析和状态页共用。
+fn codex_router_log_protocol_from_path(value: &str) -> Option<&'static str> {
+    let lower = value.trim().trim_end_matches('/').to_ascii_lowercase();
+    if lower.ends_with("/chat/completions") {
+        return Some("openai_chat");
+    }
+    if lower.ends_with("/messages") || lower.ends_with("/v1/messages") {
+        return Some("openai_messages");
+    }
+    if lower.ends_with("/responses")
+        || lower.ends_with("/responses/compact")
+        || lower.ends_with("/v1/responses")
+        || lower.ends_with("/v1/responses/compact")
+    {
+        return Some("openai_responses");
+    }
+    None
 }
 
 #[cfg(test)]
@@ -1658,6 +1750,35 @@ mod codex_router_log_diagnostics_tests {
             diagnostics.latest_error.as_deref(),
             Some("qwen_gateway_error")
         );
+    }
+
+    #[test]
+    fn parses_request_prepared_protocol_for_chat_conversion() {
+        let event = codex_parse_router_log_line(
+            "2026-06-24 12:00:00.000 event=request_prepared model=qwen3.6 provider=codex-openai-router::route::qwen-local endpoint=/v1/responses effective_endpoint=/v1/chat/completions upstream_url=https://example.com/v1/chat/completions responses_to_chat=true responses_to_messages=false",
+        )
+        .expect("event should parse");
+
+        assert_eq!(event.actual_protocol.as_deref(), Some("openai_chat"));
+        assert_eq!(event.responses_to_chat, Some(true));
+        assert_eq!(event.responses_to_messages, Some(false));
+        assert_eq!(
+            event.upstream_url.as_deref(),
+            Some("https://example.com/v1/chat/completions")
+        );
+    }
+
+    #[test]
+    fn parses_request_prepared_protocol_for_native_responses_passthrough() {
+        let event = codex_parse_router_log_line(
+            "2026-06-24 12:00:00.000 event=request_prepared model=gpt-5.5 provider=codex-openai-router::route::openai-official endpoint=/v1/responses effective_endpoint=/v1/responses upstream_url=https://chatgpt.com/backend-api/codex/responses responses_to_chat=false responses_to_messages=false",
+        )
+        .expect("event should parse");
+
+        assert_eq!(event.actual_protocol.as_deref(), Some("openai_responses"));
+        assert_eq!(event.responses_to_chat, Some(false));
+        assert_eq!(event.responses_to_messages, Some(false));
+        assert_eq!(event.effective_endpoint.as_deref(), Some("/v1/responses"));
     }
 
     #[test]
