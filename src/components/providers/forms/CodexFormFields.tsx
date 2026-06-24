@@ -45,6 +45,7 @@ import {
 } from "@/lib/api/model-fetch";
 import { CustomUserAgentField } from "./CustomUserAgentField";
 import { cn } from "@/lib/utils";
+import { resolveFetchedCodexModelContextWindow } from "@/utils/codexModelContext";
 import type {
   CodexApiFormat,
   CodexCatalogModel,
@@ -200,6 +201,11 @@ function catalogRowsMatchModels(
 function mergeFetchedModelsIntoCatalogRows(
   rows: CodexCatalogRow[],
   fetchedModels: FetchedModel[],
+  source: {
+    providerId?: string;
+    baseUrl?: string;
+    websiteUrl?: string;
+  } = {},
 ): CodexCatalogRow[] {
   const next = [...rows];
   const rowByModel = new Map(
@@ -211,16 +217,17 @@ function mergeFetchedModelsIntoCatalogRows(
   for (const fetched of fetchedModels) {
     const model = fetched.id.trim();
     if (!model) continue;
-    const contextWindow =
-      typeof fetched.contextWindow === "number" && fetched.contextWindow > 0
-        ? String(fetched.contextWindow)
-        : undefined;
+    const contextWindow = resolveFetchedCodexModelContextWindow(fetched, {
+      ...source,
+      existingModels: rows,
+    });
+    const contextWindowText = contextWindow ? String(contextWindow) : undefined;
     const existing = rowByModel.get(model);
     if (existing) {
-      if (!existing.row.contextWindow && contextWindow) {
+      if (!existing.row.contextWindow && contextWindowText) {
         next[existing.index] = {
           ...existing.row,
-          contextWindow,
+          contextWindow: contextWindowText,
         };
       }
       continue;
@@ -228,7 +235,7 @@ function mergeFetchedModelsIntoCatalogRows(
     const row = createCatalogRow({
       model,
       displayName: model,
-      ...(contextWindow ? { contextWindow } : {}),
+      ...(contextWindowText ? { contextWindow: contextWindowText } : {}),
     });
     rowByModel.set(model, { row, index: next.length });
     next.push(row);
@@ -449,7 +456,11 @@ export function CodexFormFields({
         setFetchedModels(models);
         if (onCatalogModelsChange && models.length > 0) {
           setCatalogRows((current) =>
-            mergeFetchedModelsIntoCatalogRows(current, models),
+            mergeFetchedModelsIntoCatalogRows(current, models, {
+              providerId,
+              baseUrl: codexBaseUrl,
+              websiteUrl,
+            }),
           );
           const autoSelected = models
             .map((model) => model.id.trim())
@@ -477,6 +488,8 @@ export function CodexFormFields({
     codexApiKey,
     isFullUrl,
     customUserAgent,
+    providerId,
+    websiteUrl,
     onCatalogModelsChange,
     onSpawnAgentModelsChange,
     spawnAgentModels.length,
@@ -500,18 +513,29 @@ export function CodexFormFields({
   const handleSelectFetchedCatalogModel = useCallback(
     (index: number, modelId: string, currentDisplayName?: string) => {
       const fetched = fetchedModels.find((model) => model.id === modelId);
-      const contextWindow =
-        typeof fetched?.contextWindow === "number" && fetched.contextWindow > 0
-          ? String(fetched.contextWindow)
-          : undefined;
+      const contextWindow = fetched
+        ? resolveFetchedCodexModelContextWindow(fetched, {
+            providerId,
+            baseUrl: codexBaseUrl,
+            websiteUrl,
+            existingModels: catalogRows,
+          })
+        : undefined;
 
       handleUpdateCatalogRow(index, {
         model: modelId,
         displayName: currentDisplayName?.trim() ? currentDisplayName : modelId,
-        ...(contextWindow ? { contextWindow } : {}),
+        ...(contextWindow ? { contextWindow: String(contextWindow) } : {}),
       });
     },
-    [fetchedModels, handleUpdateCatalogRow],
+    [
+      catalogRows,
+      codexBaseUrl,
+      fetchedModels,
+      handleUpdateCatalogRow,
+      providerId,
+      websiteUrl,
+    ],
   );
 
   const handleRemoveCatalogRow = useCallback((index: number) => {

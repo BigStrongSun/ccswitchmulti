@@ -58,6 +58,7 @@ import { fetchModelsForConfig, type FetchedModel } from "@/lib/api/model-fetch";
 import { proxyApi } from "@/lib/api/proxy";
 import { useRequestLogs } from "@/lib/query/usage";
 import { cn } from "@/lib/utils";
+import { resolveFetchedCodexModelContextWindow } from "@/utils/codexModelContext";
 import {
   catalogModelLabel,
   CODEX_SPAWN_AGENT_PRIORITY_MODELS,
@@ -323,6 +324,7 @@ function providerWithFetchedModelCatalog(
   fetchedModels: FetchedModel[],
 ): Provider {
   const currentCatalog = readCodexModelCatalog(provider);
+  const fetchConfig = getProviderModelFetchConfig(provider);
   const byModel = new Map<string, CodexCatalogModelDraft>();
   for (const model of currentCatalog.models) {
     const id = model.model?.trim();
@@ -340,12 +342,16 @@ function providerWithFetchedModelCatalog(
     const id = fetched.id.trim();
     if (!id) continue;
     const existing = byModel.get(id);
+    const contextWindow = resolveFetchedCodexModelContextWindow(fetched, {
+      providerId: provider.id,
+      providerName: provider.name,
+      baseUrl: fetchConfig.baseUrl,
+      existingModels: currentCatalog.models,
+    });
     byModel.set(id, {
       ...(existing ?? { model: id, displayName: id }),
       model: id,
-      ...(fetched.contextWindow && fetched.contextWindow > 0
-        ? { contextWindow: fetched.contextWindow }
-        : {}),
+      ...(contextWindow ? { contextWindow } : {}),
     });
   }
 
