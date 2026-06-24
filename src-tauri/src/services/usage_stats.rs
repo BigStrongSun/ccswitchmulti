@@ -1699,6 +1699,38 @@ struct PricingInfo {
 }
 
 impl Database {
+    /// 清空本地使用统计明细和日汇总。
+    ///
+    /// 该操作只影响统计展示数据，不删除模型定价、provider 配置或任何登录材料。
+    pub fn clear_usage_logs(&self) -> Result<u64, AppError> {
+        let conn = lock_conn!(self.conn);
+        conn.execute("SAVEPOINT clear_usage_logs", [])
+            .map_err(|e| AppError::Database(format!("开始清空使用日志失败: {e}")))?;
+
+        let result = (|| -> Result<u64, AppError> {
+            let request_logs = conn
+                .execute("DELETE FROM proxy_request_logs", [])
+                .map_err(|e| AppError::Database(format!("清空请求日志失败: {e}")))?;
+            let rollups = conn
+                .execute("DELETE FROM usage_daily_rollups", [])
+                .map_err(|e| AppError::Database(format!("清空历史汇总失败: {e}")))?;
+            Ok((request_logs + rollups) as u64)
+        })();
+
+        match result {
+            Ok(deleted) => {
+                conn.execute("RELEASE clear_usage_logs", [])
+                    .map_err(|e| AppError::Database(format!("提交清空使用日志失败: {e}")))?;
+                Ok(deleted)
+            }
+            Err(error) => {
+                conn.execute("ROLLBACK TO clear_usage_logs", []).ok();
+                conn.execute("RELEASE clear_usage_logs", []).ok();
+                Err(error)
+            }
+        }
+    }
+
     /// Recalculate stored zero-cost usage rows once pricing becomes available.
     pub(crate) fn backfill_missing_usage_costs(&self) -> Result<u64, AppError> {
         let conn = lock_conn!(self.conn);
@@ -2312,6 +2344,70 @@ mod tests {
             )",
             [],
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_clear_usage_logs_removes_details_and_rollups_only() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        {
+            let conn = lock_conn!(db.conn);
+            insert_usage_log(
+                &conn,
+                "clear-detail",
+                "codex",
+                "provider-1",
+                "gpt-5.5",
+                "proxy",
+                local_ts(2026, 6, 23, 10, 0, 0),
+                100,
+                20,
+                10,
+                0,
+                200,
+                "0.001",
+            )?;
+            conn.execute(
+                "INSERT INTO usage_daily_rollups (
+                    date, app_type, provider_id, model, request_model, pricing_model,
+                    request_count, success_count, input_tokens, output_tokens,
+                    cache_read_tokens, cache_creation_tokens, total_cost_usd, avg_latency_ms
+                ) VALUES (
+                    '2026-06-22', 'codex', 'provider-1', 'gpt-5.5', 'gpt-5.5', 'gpt-5.5',
+                    1, 1, 100, 20, 10, 0, '0.001', 100
+                )",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO model_pricing (
+                    model_id, display_name, input_cost_per_million, output_cost_per_million,
+                    cache_read_cost_per_million, cache_creation_cost_per_million
+                ) VALUES ('custom-model', 'Custom Model', '1', '2', '0.1', '0.2')",
+                [],
+            )?;
+        }
+
+        let deleted = db.clear_usage_logs()?;
+
+        let conn = lock_conn!(db.conn);
+        let detail_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM proxy_request_logs", [], |row| {
+                row.get(0)
+            })?;
+        let rollup_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM usage_daily_rollups", [], |row| {
+                row.get(0)
+            })?;
+        let pricing_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM model_pricing WHERE model_id = 'custom-model'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(deleted, 2);
+        assert_eq!(detail_count, 0);
+        assert_eq!(rollup_count, 0);
+        assert_eq!(pricing_count, 1);
+
         Ok(())
     }
 

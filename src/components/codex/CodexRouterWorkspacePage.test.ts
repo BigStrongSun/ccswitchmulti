@@ -405,10 +405,10 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     const plan = createDraftRoutingPlan([officialBackup], [officialBackup]);
 
     expect(plan.settingsConfig.modelCatalog.models).toEqual([
-      { model: "gpt-5.5" },
-      { model: "gpt-5.4" },
-      { model: "gpt-5.4-mini" },
-      { model: "gpt-5.3-codex-spark" },
+      { model: "gpt-5.5", contextWindow: 272000 },
+      { model: "gpt-5.4", contextWindow: 272000 },
+      { model: "gpt-5.4-mini", contextWindow: 128000 },
+      { model: "gpt-5.3-codex-spark", contextWindow: 128000 },
     ]);
     expect(plan.settingsConfig.modelCatalog.spawnAgentModels).toEqual([
       "gpt-5.5",
@@ -416,6 +416,38 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       "gpt-5.4-mini",
       "gpt-5.3-codex-spark",
     ]);
+  });
+
+  it("rebuilds official fallback route catalog with full Codex context windows", () => {
+    const officialBackup: Provider = {
+      id: "codex-official-backup",
+      name: "OpenAI Official Backup",
+      category: "official",
+      settingsConfig: { auth: {}, config: "" },
+    };
+    const plan = createDraftRoutingPlan([officialBackup], [officialBackup]);
+    const routes = [
+      normalizeCodexRouteForSave(
+        {
+          label: officialBackup.name,
+          targetProviderId: officialBackup.id,
+          match: { models: ["gpt-5.5"], prefixes: ["gpt-"] },
+        },
+        0,
+        new Set<string>(),
+      ),
+    ];
+
+    const rebuilt = buildModelCatalogForRoutes(
+      plan,
+      routes,
+      new Map([[officialBackup.id, officialBackup]]),
+    );
+
+    expect(rebuilt.models).toContainEqual({
+      model: "gpt-5.5",
+      contextWindow: 272000,
+    });
   });
 
   it("keeps unsaved route picker enabled draft state across candidate refreshes", () => {

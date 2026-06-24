@@ -19,8 +19,11 @@ import {
   RefreshCw,
   Coins,
   LayoutGrid,
+  Trash2,
 } from "lucide-react";
 import { ProviderIcon } from "@/components/ProviderIcon";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { Button } from "@/components/ui/button";
 import {
   Select,
   SelectContent,
@@ -29,7 +32,12 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useQueryClient } from "@tanstack/react-query";
-import { usageKeys, useModelStats, useProviderStats } from "@/lib/query/usage";
+import {
+  usageKeys,
+  useClearUsageLogs,
+  useModelStats,
+  useProviderStats,
+} from "@/lib/query/usage";
 import { useUsageEventBridge } from "@/hooks/useUsageEventBridge";
 import {
   Accordion,
@@ -43,6 +51,7 @@ import { getLocaleFromLanguage } from "./format";
 import { getUsageRangePresetLabel, resolveUsageRange } from "@/lib/usageRange";
 import { UsageDateRangePicker } from "./UsageDateRangePicker";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { toast } from "sonner";
 
 const APP_FILTER_OPTIONS: AppTypeFilter[] = ["all", ...KNOWN_APP_TYPES];
 
@@ -74,6 +83,8 @@ export function UsageDashboard() {
   );
   const [model, setModel] = useState<string | undefined>(undefined);
   const [refreshIntervalMs, setRefreshIntervalMs] = useState(30000);
+  const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
+  const clearUsageLogs = useClearUsageLogs();
 
   // 切应用时清掉下游筛选，避免留下一个在新范围内查无数据的"幽灵"组合；
   // 切 Provider 同理清掉模型（模型选项随 Provider 级联）。
@@ -98,6 +109,28 @@ export function UsageDashboard() {
   const changeRefreshInterval = (next: number) => {
     setRefreshIntervalMs(next);
     queryClient.invalidateQueries({ queryKey: usageKeys.all });
+  };
+
+  // 清空统计日志是不可逆操作；只在用户确认后执行，并保留 provider/定价/登录态。
+  const confirmClearUsageLogs = () => {
+    clearUsageLogs.mutate(undefined, {
+      onSuccess: (deleted) => {
+        setClearConfirmOpen(false);
+        toast.success(
+          t("usage.clearLogsSuccess", {
+            defaultValue: "已清空使用日志",
+            count: deleted,
+          }),
+        );
+      },
+      onError: (error) => {
+        toast.error(
+          t("usage.clearLogsFailed", {
+            defaultValue: "清空使用日志失败",
+          }) + `: ${String(error)}`,
+        );
+      },
+    });
   };
 
   const language = i18n.resolvedLanguage || i18n.language || "en";
@@ -280,6 +313,21 @@ export function UsageDashboard() {
               triggerLabel={rangeLabel}
               onApply={(nextRange) => setRange(nextRange)}
             />
+
+            <Button
+              type="button"
+              variant="outline"
+              size="icon"
+              className="h-9 w-9 text-muted-foreground hover:text-destructive"
+              title={t("usage.clearLogs", { defaultValue: "清空使用日志" })}
+              aria-label={t("usage.clearLogs", {
+                defaultValue: "清空使用日志",
+              })}
+              disabled={clearUsageLogs.isPending}
+              onClick={() => setClearConfirmOpen(true)}
+            >
+              <Trash2 className="h-4 w-4" />
+            </Button>
           </div>
         </div>
       </div>
@@ -359,6 +407,22 @@ export function UsageDashboard() {
           </motion.div>
         </Tabs>
       </div>
+
+      <ConfirmDialog
+        isOpen={clearConfirmOpen}
+        title={t("usage.clearLogsConfirmTitle", {
+          defaultValue: "清空使用日志？",
+        })}
+        message={t("usage.clearLogsConfirmMessage", {
+          defaultValue:
+            "这会删除本地请求日志和历史日汇总。Provider、模型定价、登录态和配置不会被删除。",
+        })}
+        confirmText={t("usage.clearLogsConfirm", {
+          defaultValue: "清空",
+        })}
+        onConfirm={confirmClearUsageLogs}
+        onCancel={() => setClearConfirmOpen(false)}
+      />
 
       <Accordion type="multiple" defaultValue={[]} className="w-full space-y-4">
         <AccordionItem

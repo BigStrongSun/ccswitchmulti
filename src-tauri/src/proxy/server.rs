@@ -141,10 +141,10 @@ impl ProxyServer {
         // 绑定监听器
         let listener = tokio::net::TcpListener::bind(&addr)
             .await
-            .map_err(|e| ProxyError::BindFailed(e.to_string()))?;
+            .map_err(|e| ProxyError::BindFailed(format_bind_error(&addr, e)))?;
         let local_addr = listener
             .local_addr()
-            .map_err(|e| ProxyError::BindFailed(e.to_string()))?;
+            .map_err(|e| ProxyError::BindFailed(format_bind_error(&addr, e)))?;
         let actual_port = local_addr.port();
 
         log::info!("[{}] 代理服务器启动于 {local_addr}", log_srv::STARTED);
@@ -456,6 +456,20 @@ impl ProxyServer {
     }
 }
 
+/// 把底层 bind 错误转成用户可操作的诊断文案。
+///
+/// 端口被另一 CCSwitchMulti、旧进程或其它本地服务占用时，原始 OS 错误通常只说
+/// `Address already in use`，用户很容易误判为 provider 配置损坏。
+fn format_bind_error(addr: &SocketAddr, error: std::io::Error) -> String {
+    if error.kind() == std::io::ErrorKind::AddrInUse {
+        return format!(
+            "{} 已被占用（可能是另一个 CCSwitchMulti/CCSwitch 实例、旧进程残留或其它本地服务）。请结束占用该端口的进程，或在代理设置里改用其它监听端口。原始错误: {error}",
+            addr
+        );
+    }
+    error.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -542,6 +556,20 @@ mod tests {
             ProxyServer::new_external_openai_api(config, db.clone(), None),
             db,
         )
+    }
+
+    #[test]
+    fn bind_error_for_addr_in_use_includes_actionable_port_diagnostic() {
+        let addr: SocketAddr = "127.0.0.1:15721".parse().expect("socket addr");
+        let message = format_bind_error(
+            &addr,
+            std::io::Error::new(std::io::ErrorKind::AddrInUse, "Address already in use"),
+        );
+
+        assert!(message.contains("127.0.0.1:15721"));
+        assert!(message.contains("已被占用"));
+        assert!(message.contains("CCSwitchMulti"));
+        assert!(message.contains("改用其它监听端口"));
     }
 
     /// 读取 Axum 响应体为 JSON，方便断言 OpenAI-compatible 响应结构。

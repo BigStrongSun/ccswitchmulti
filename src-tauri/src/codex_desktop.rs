@@ -778,6 +778,12 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
 
 /// 启动 Codex Desktop，并传入 remote debugging 参数。
 fn launch_codex_with_debug_port(executable: &Path, debug_port: u16) -> Result<(), String> {
+    if let Some(running) = detect_running_codex_main_process() {
+        return Err(format!(
+            "Codex Desktop is already running at {}. Fully quit Codex, then launch it from CCSwitchMulti so the model picker patch can be installed.",
+            running.display()
+        ));
+    }
     let mut command = Command::new(executable);
     command
         .arg(format!("--remote-debugging-port={debug_port}"))
@@ -859,18 +865,58 @@ fn find_latest_windows_codex_executable() -> Option<PathBuf> {
             if !name.starts_with("OpenAI.Codex_") {
                 continue;
             }
-            let executable = path.join("app").join("Codex.exe");
-            if executable.exists() {
-                candidates.push((version_tuple_from_package_name(name), executable));
+            for executable in windows_codex_package_executable_candidates(&path) {
+                if executable.exists() {
+                    candidates.push((version_tuple_from_package_name(name), executable));
+                    break;
+                }
             }
         }
     }
     candidates.sort_by(|left, right| left.0.cmp(&right.0));
-    candidates.pop().map(|(_, executable)| executable)
+    candidates
+        .pop()
+        .map(|(_, executable)| executable)
+        .or_else(find_local_windows_codex_executable)
 }
 
 #[cfg(not(target_os = "windows"))]
 fn find_latest_windows_codex_executable() -> Option<PathBuf> {
+    None
+}
+
+/// WindowsApps 包内的 Codex Desktop 可执行文件候选路径。
+///
+/// MSIX 包布局随版本变化过：有的版本直接在 `app/Codex.exe`，有的把可执行文件
+/// 放到 `app/resources`。只接受大写 `Codex.exe`，避免把 CLI launcher 当 Desktop。
+fn windows_codex_package_executable_candidates(package_root: &Path) -> Vec<PathBuf> {
+    vec![
+        package_root.join("app").join("Codex.exe"),
+        package_root.join("app").join("resources").join("Codex.exe"),
+        package_root.join("Codex.exe"),
+    ]
+}
+
+#[cfg(target_os = "windows")]
+fn find_local_windows_codex_executable() -> Option<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        let root = PathBuf::from(local_app_data).join("OpenAI").join("Codex");
+        roots.push(root.clone());
+        roots.push(root.join("app"));
+    }
+
+    for root in roots {
+        let executable = root.join("Codex.exe");
+        if executable.exists() {
+            return Some(executable);
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "windows"))]
+fn find_local_windows_codex_executable() -> Option<PathBuf> {
     None
 }
 
@@ -936,6 +982,20 @@ mod tests {
         }];
 
         assert!(pick_codex_page_targets(&targets, 9222).is_err());
+    }
+
+    #[test]
+    fn windows_codex_package_candidates_cover_known_desktop_layouts() {
+        let root = PathBuf::from(r"C:\Program Files\WindowsApps\OpenAI.Codex_26.608.1.0_x64__id");
+        let candidates = windows_codex_package_executable_candidates(&root);
+
+        assert!(candidates.contains(&root.join("app").join("Codex.exe")));
+        assert!(candidates.contains(&root.join("app").join("resources").join("Codex.exe")));
+        assert!(!candidates.iter().any(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name == "codex.exe")
+        }));
     }
 
     #[test]

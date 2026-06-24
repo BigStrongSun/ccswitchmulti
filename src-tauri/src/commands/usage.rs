@@ -120,6 +120,14 @@ pub fn get_request_detail(
     state.db.get_request_detail(&request_id)
 }
 
+/// 清空本地使用统计日志和日汇总。
+///
+/// 只删除由代理和会话同步生成的统计数据，不触碰 provider、定价表、登录态或应用配置。
+#[tauri::command]
+pub fn clear_usage_logs(state: State<'_, AppState>) -> Result<u64, AppError> {
+    state.db.clear_usage_logs()
+}
+
 /// 获取模型定价列表
 #[tauri::command]
 pub fn get_model_pricing(state: State<'_, AppState>) -> Result<Vec<ModelPricingInfo>, AppError> {

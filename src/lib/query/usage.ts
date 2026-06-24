@@ -372,3 +372,14 @@ export function useDeleteModelPricing() {
     },
   });
 }
+
+export function useClearUsageLogs() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: () => usageApi.clearUsageLogs(),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: usageKeys.all });
+    },
+  });
+}

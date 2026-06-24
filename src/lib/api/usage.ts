@@ -142,6 +142,10 @@ export const usageApi = {
     return invoke("get_request_detail", { requestId });
   },
 
+  clearUsageLogs: async (): Promise<number> => {
+    return invoke("clear_usage_logs");
+  },
+
   getModelPricing: async (): Promise<ModelPricing[]> => {
     return invoke("get_model_pricing");
   },
