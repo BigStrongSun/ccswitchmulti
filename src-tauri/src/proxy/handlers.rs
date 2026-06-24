@@ -1308,8 +1308,12 @@ fn openai_model_entry_with_source(id: &str, owner: &str, source: &Value) -> Valu
     let mut entry = openai_model_entry(id, owner);
     if let Some(context_window) = extract_model_context_window(source) {
         if let Some(object) = entry.as_object_mut() {
+            // Codex Desktop 不同版本在 `/v1/models` 的 data[] 分支上读取的字段名不完全一致；
+            // 同时投 snake_case 与 camelCase，避免 renderer 忽略上下文后回退到默认 128k。
             object.insert("context_window".to_string(), json!(context_window));
             object.insert("max_context_window".to_string(), json!(context_window));
+            object.insert("contextWindow".to_string(), json!(context_window));
+            object.insert("maxContextWindow".to_string(), json!(context_window));
         }
     }
     entry
@@ -3199,6 +3203,20 @@ mod tests {
             .expect("qwen model entry");
         assert_eq!(
             qwen.get("context_window").and_then(|value| value.as_u64()),
+            Some(262_144)
+        );
+        assert_eq!(
+            qwen.get("max_context_window")
+                .and_then(|value| value.as_u64()),
+            Some(262_144)
+        );
+        assert_eq!(
+            qwen.get("contextWindow").and_then(|value| value.as_u64()),
+            Some(262_144)
+        );
+        assert_eq!(
+            qwen.get("maxContextWindow")
+                .and_then(|value| value.as_u64()),
             Some(262_144)
         );
     }
