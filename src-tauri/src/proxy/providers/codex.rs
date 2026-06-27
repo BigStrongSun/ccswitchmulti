@@ -490,9 +490,7 @@ fn resolve_codex_route_candidates<'a>(
         };
 
         let mut selected = Vec::new();
-        if let Some(route) = routes.iter().find(|route| {
-            codex_route_is_enabled(route) && codex_route_matches_model(route, request_model)
-        }) {
+        if let Some(route) = find_codex_route_by_match_priority(routes, request_model) {
             selected.push(route);
         } else if let Some(default_route) = routing
             .get("defaultRouteId")
@@ -570,9 +568,7 @@ pub fn codex_provider_text_only_input(provider: &Provider) -> Option<bool> {
 fn resolve_codex_route<'a>(provider: &'a Provider, request_model: &str) -> Option<&'a JsonValue> {
     if let Some(routing) = provider.settings_config.get("codexRouting") {
         if let Some(routes) = routing.as_array() {
-            return routes.iter().find(|route| {
-                codex_route_is_enabled(route) && codex_route_matches_model(route, request_model)
-            });
+            return find_codex_route_by_match_priority(routes, request_model);
         }
 
         if routing
@@ -584,9 +580,7 @@ fn resolve_codex_route<'a>(provider: &'a Provider, request_model: &str) -> Optio
         }
 
         let routes = routing.get("routes").and_then(|value| value.as_array())?;
-        if let Some(route) = routes.iter().find(|route| {
-            codex_route_is_enabled(route) && codex_route_matches_model(route, request_model)
-        }) {
+        if let Some(route) = find_codex_route_by_match_priority(routes, request_model) {
             return Some(route);
         }
 
@@ -615,7 +609,12 @@ fn resolve_codex_route<'a>(provider: &'a Provider, request_model: &str) -> Optio
         .and_then(|routes| {
             routes
                 .iter()
-                .find(|route| codex_route_matches_model(route, request_model))
+                .find(|route| codex_route_has_exact_model_match(route, request_model))
+                .or_else(|| {
+                    routes
+                        .iter()
+                        .find(|route| codex_route_has_prefix_model_match(route, request_model))
+                })
         })
 }
 
@@ -636,9 +635,7 @@ fn resolve_codex_legacy_route_candidates<'a>(
     request_model: &str,
 ) -> Vec<&'a JsonValue> {
     let mut selected = Vec::new();
-    if let Some(route) = routes.iter().find(|route| {
-        codex_route_is_enabled(route) && codex_route_matches_model(route, request_model)
-    }) {
+    if let Some(route) = find_codex_route_by_match_priority(routes, request_model) {
         selected.push(route);
     }
 
@@ -660,25 +657,54 @@ fn resolve_codex_legacy_route_candidates<'a>(
     selected
 }
 
+/// 按全局优先级查找 route：所有精确模型匹配优先于任何前缀匹配。
+///
+/// 这避免官方 `gpt-` 前缀 route 排在前面时，抢走后面聚合平台显式声明的
+/// `gpt-5.5-pro`、`gpt-5.5-relay` 等精确模型。
+fn find_codex_route_by_match_priority<'a>(
+    routes: &'a [JsonValue],
+    request_model: &str,
+) -> Option<&'a JsonValue> {
+    routes
+        .iter()
+        .find(|route| {
+            codex_route_is_enabled(route) && codex_route_has_exact_model_match(route, request_model)
+        })
+        .or_else(|| {
+            routes.iter().find(|route| {
+                codex_route_is_enabled(route)
+                    && codex_route_has_prefix_model_match(route, request_model)
+            })
+        })
+}
+
 /// 判断单条 Codex route 是否匹配请求模型。
 ///
 /// 新 schema 使用 `match.models` / `match.prefixes`；旧 schema 使用顶层 `models` /
 /// `modelPrefixes`。两套字段都按大小写不敏感处理，避免 UI 显示大小写差异导致误路由。
 pub(crate) fn codex_route_matches_model(route: &JsonValue, request_model: &str) -> bool {
-    let request_model_lower = request_model.to_ascii_lowercase();
+    codex_route_has_exact_model_match(route, request_model)
+        || codex_route_has_prefix_model_match(route, request_model)
+}
 
+/// 判断 route 是否精确声明了请求模型。
+fn codex_route_has_exact_model_match(route: &JsonValue, request_model: &str) -> bool {
     let match_config = route.get("match").unwrap_or(route);
 
-    let exact_match = match_config
+    match_config
         .get("models")
         .and_then(|value| value.as_array())
         .into_iter()
         .flatten()
         .filter_map(|model| model.as_str())
-        .any(|model| model.trim().eq_ignore_ascii_case(request_model));
-    if exact_match {
-        return true;
-    }
+        .any(|model| model.trim().eq_ignore_ascii_case(request_model))
+}
+
+/// 判断 route 是否通过模型前缀匹配请求模型。
+fn codex_route_has_prefix_model_match(route: &JsonValue, request_model: &str) -> bool {
+    let request_model_lower = request_model.to_ascii_lowercase();
+
+    let match_config = route.get("match").unwrap_or(route);
 
     match_config
         .get("prefixes")
@@ -2430,6 +2456,110 @@ experimental_bearer_token = "PROXY_MANAGED"
             routed[1].settings_config["codexResolvedRouteMatched"],
             false
         );
+    }
+
+    #[test]
+    fn test_codex_router_prefers_exact_route_over_earlier_prefix_route() {
+        let provider = create_provider(json!({
+            "codexRouting": {
+                "routes": [
+                    {
+                        "id": "official",
+                        "label": "OpenAI Official",
+                        "match": { "models": ["gpt-5.5"], "prefixes": ["gpt-"] },
+                        "upstream": {
+                            "baseUrl": "https://chatgpt.com/backend-api/codex",
+                            "apiFormat": "openai_responses",
+                            "auth": { "source": "managed_codex_oauth" }
+                        }
+                    },
+                    {
+                        "id": "aggregate",
+                        "label": "Aggregate Relay",
+                        "match": { "models": ["gpt-5.5-pro"], "prefixes": ["gpt-5.5-pro"] },
+                        "upstream": {
+                            "baseUrl": "https://relay.example/v1",
+                            "apiFormat": "openai_chat",
+                            "auth": { "source": "provider_config" },
+                            "modelMap": { "gpt-5.5-pro": "gpt-5.5-pro" }
+                        }
+                    }
+                ],
+                "enabled": true
+            }
+        }));
+
+        let routed =
+            resolve_codex_model_routed_providers(&provider, &json!({ "model": "gpt-5.5-pro" }));
+
+        assert_eq!(routed.len(), 2);
+        assert_eq!(routed[0].id, "test::route::aggregate");
+        assert_eq!(routed[0].settings_config["codexResolvedRouteMatched"], true);
+        assert_eq!(routed[1].id, "test::route::official");
+        assert_eq!(routed[1].settings_config["codexResolvedRouteMatched"], true);
+    }
+
+    #[test]
+    fn test_codex_route_resolver_prefers_exact_route_over_earlier_prefix_route() {
+        let provider = create_provider(json!({
+            "codexRouting": {
+                "routes": [
+                    {
+                        "id": "official",
+                        "match": { "models": ["gpt-5.5"], "prefixes": ["gpt-"] },
+                        "base_url": "https://chatgpt.com/backend-api/codex"
+                    },
+                    {
+                        "id": "aggregate",
+                        "match": { "models": ["gpt-5.5-pro"] },
+                        "base_url": "https://relay.example/v1"
+                    }
+                ],
+                "enabled": true
+            }
+        }));
+
+        let route = resolve_codex_route(&provider, "gpt-5.5-pro").expect("aggregate exact route");
+
+        assert_eq!(
+            route.get("id").and_then(|value| value.as_str()),
+            Some("aggregate")
+        );
+    }
+
+    #[test]
+    fn test_codex_legacy_route_candidates_prefer_exact_over_earlier_prefix_route() {
+        let provider = create_provider(json!({
+            "codexRouting": [
+                {
+                    "id": "official",
+                    "label": "OpenAI Official",
+                    "models": ["gpt-5.5"],
+                    "modelPrefixes": ["gpt-"],
+                    "upstream": {
+                        "apiFormat": "openai_responses",
+                        "auth": { "source": "managed_codex_oauth" }
+                    }
+                },
+                {
+                    "id": "aggregate",
+                    "label": "Aggregate Relay",
+                    "models": ["gpt-5.5-pro"],
+                    "upstream": {
+                        "baseUrl": "https://relay.example/v1",
+                        "apiFormat": "openai_chat",
+                        "auth": { "source": "provider_config" }
+                    }
+                }
+            ]
+        }));
+
+        let routed =
+            resolve_codex_model_routed_providers(&provider, &json!({ "model": "gpt-5.5-pro" }));
+
+        assert_eq!(routed.len(), 2);
+        assert_eq!(routed[0].id, "test::route::aggregate");
+        assert_eq!(routed[1].id, "test::route::official");
     }
 
     #[test]
