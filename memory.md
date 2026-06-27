@@ -1,5 +1,14 @@
 # CC Switch Repository Memory
 
+## 2026-06-27 Logging And Frequent Exit Diagnostics Inventory
+
+- 程序已有三类本地日志：通用运行日志由 `tauri-plugin-log` 写到 `<app_config_dir>/logs/cc-switch.log`（默认 `~/.cc-switch/logs/cc-switch.log`），panic hook 追加写 `<app_config_dir>/crash.log`，Codex MultiRouter 诊断事件写 `<app_config_dir>/logs/codex-router.log`。默认 app config 目录仍是用户家目录下 `.cc-switch`，但启动时会先读取 Store 里的 app_config_dir 覆盖。
+- `src-tauri/src/panic_hook.rs` 会在启动最早期安装 panic hook，并强制 `RUST_BACKTRACE=1`；崩溃日志包含时间戳、版本、OS/arch/family、工作目录、线程名/ID、panic message、文件/行/列和完整 backtrace。`src-tauri/Cargo.toml` 设置 `panic = "unwind"`，因此 Rust panic 能被 hook 捕获；但直接进程 abort、系统杀进程、WebView/前端 JS 崩溃不一定进入该 hook。
+- 通用日志初始化在 `src-tauri/src/lib.rs` 的 setup 阶段，目标包括 stdout 和日志目录文件 `cc-switch.log`，轮转策略是 `KeepSome(2)`、单文件 1GB。启动后会从 DB 的 `log_config` 读取开关和级别，通过 `log::set_max_level` 应用；前端入口是设置页高级里的 `LogConfigPanel`，只提供启用/禁用和 error/warn/info/debug/trace 级别选择。
+- Codex router 日志由 `src-tauri/src/proxy/codex_router_log.rs` 直接追加写入，记录 `route_resolved`、`request_prepared`、`upstream_send`、`upstream_status`、`response_ready` 等清洗后的排障事件；它不会记录 prompt、header 原文或 SSE 内容，并会遮盖 token/API key。MultiRouter 状态页的一键诊断会读取该文件判断近期请求、错误和真实出站协议。
+- 现有“异常退出恢复”只针对代理/Live 接管残留：启动时检查 DB live backup 和 live config 占位符，必要时调用 `recover_from_crash()` 恢复配置。这不是通用的频繁退出检测，也不会统计崩溃次数。
+- 当前没有现成的“频繁退出/崩溃频率”检测：没有启动 marker、正常退出 marker 清理、退出原因/退出码统一记录、时间窗口计数、watchdog、最近 crash 自动提示，也没有“打开日志目录”的设置页按钮。排查别人频繁退出时，先让对方收集 `~/.cc-switch/crash.log`、`~/.cc-switch/logs/cc-switch.log`，若涉及 Codex MultiRouter 再收集 `~/.cc-switch/logs/codex-router.log`；如果 `crash.log` 没有新条目，就要考虑非 Rust panic 路径（前端/WebView、系统杀进程、安装器重启、进程 abort）。
+
 ## 2026-06-26 CCSwitchMulti v3.16.3-22 Prerelease
 
 - `v3.16.3-22` 已作为 GitHub prerelease 发布：`https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.16.3-22`。Release 为非 draft、`prerelease=true`，发布时间为 `2026-06-26T04:16:52Z`，tag 指向 `d4260d1aeb89ade1859f4a341612a8453fc57cbb chore(release): prepare v3.16.3-22 prerelease`。
