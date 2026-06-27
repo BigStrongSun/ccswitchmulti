@@ -4,6 +4,8 @@
 
 - 休眠/唤醒后 Codex OAuth 认证页显示“已登录账号”的原版语义是“本地 `codex_oauth_auth.json` 里仍有账号和 refresh_token 记录”，不是在线验证结果。`get_status()` 不应主动 refresh，也不应因为打开认证页就清理账号；否则状态页会放大 refresh token 使用次数和临时网络误判。
 - 最终修复边界：保持原版凭据模型，`refresh_token` 持久化，`access_token` 只在内存缓存。只有真实请求、额度查询、模型查询等需要 Bearer token 的路径调用 `get_valid_token_for_account()`；当 OpenAI token 端点明确返回 401/403 并映射为 `RefreshTokenInvalid` 时，才移除对应账号并让下一次状态查询显示未认证。网络错误、解析错误等临时故障不清空账号。
+- 追加排查发现的隐藏边界：`src-tauri/src/codex_config.rs` 生成 Codex provider/model catalog 时不能因为官方 `models_cache.json` 缺失或无 `context_window` 就创建独立 `CodexOAuthManager` 去读取同一份 `codex_oauth_auth.json` 并在线 fetch models。该路径绕过 app 托管的 `CodexOAuthState`，若 refresh token 被官方轮换，主 manager 可能继续持旧 token，后续真实请求会误判 OAuth 失效并清账号。配置/catalog 生成只能读取离线 cache 或测试覆盖值，真实 OAuth refresh 必须通过托管状态发生在用户显式触发的请求/额度/模型查询路径。
+- 底层容错也要保留：`CodexOAuthManager::get_valid_token_for_account()` 在 access_token 缓存未命中并拿到账号刷新锁后，应在读取 refresh_token 前重新加载一次 `codex_oauth_auth.json`。这不是为了恢复隐式在线刷新，而是防止未来双进程、旧版本遗留独立 manager 或其他实例已经把 refresh_token 从 A 轮换到 B 后，当前实例继续用内存 A 刷新并触发 `RefreshTokenInvalid` 误删账号。
 - 前端 `useManagedAuth` 的 `hasAnyAccount` 不能只等于 `accounts.length > 0`，应受后端 `authenticated` 约束。Codex OAuth 本地账号记录和真实可用认证态必须分开看；以后不要再用“本地有账号”直接驱动绿色认证状态或保存校验。
 - 回归测试落点：`codex_oauth_auth.rs` 覆盖 `get_status_does_not_refresh_or_remove_invalid_account`、`token_request_removes_account_when_refresh_token_is_invalid`、`token_request_refreshes_expired_default_account_when_token_is_valid`。验证命令优先跑 `cargo test --manifest-path src-tauri\Cargo.toml token_request_ --lib` 和 `cargo test --manifest-path src-tauri\Cargo.toml get_status_does_not_refresh --lib`。
 

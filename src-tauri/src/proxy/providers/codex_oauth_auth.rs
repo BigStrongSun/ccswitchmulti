@@ -552,6 +552,13 @@ impl CodexOAuthManager {
             }
         }
 
+        // refresh_token 是持久化凭据，可能已被另一个进程或历史独立 manager
+        // 轮换并写回磁盘。真正刷新前先同步一次磁盘账号数据，避免拿内存旧
+        // refresh_token 触发 invalid_grant 后误删本地账号。
+        if let Err(e) = self.load_from_disk_sync() {
+            log::warn!("[CodexOAuth] 刷新前重新加载磁盘账号失败，将使用内存凭据: {e}");
+        }
+
         let refresh_token = self.persisted_refresh_token(account_id).await?;
 
         let new_tokens = match self.refresh_with_token(&refresh_token).await {
@@ -1212,6 +1219,54 @@ mod tests {
         format!("http://{addr}/oauth/token")
     }
 
+    /// 启动可验证 refresh token 轮换的假端点。
+    ///
+    /// 第一次请求必须使用 old-refresh 并返回 fresh-refresh；第二次请求只有使用
+    /// fresh-refresh 才返回成功，否则模拟官方 invalid_grant。这个端点用于复现
+    /// 多 manager 内存凭据落后于磁盘时的账号误删风险。
+    async fn spawn_rotating_refresh_endpoint() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind rotating oauth endpoint");
+        let addr = listener
+            .local_addr()
+            .expect("read rotating oauth endpoint addr");
+
+        tokio::spawn(async move {
+            for request_index in 0..2 {
+                let (mut socket, _) = listener.accept().await.expect("accept refresh request");
+                let mut buffer = [0_u8; 4096];
+                let n = socket
+                    .read(&mut buffer)
+                    .await
+                    .expect("read refresh request");
+                let request = String::from_utf8_lossy(&buffer[..n]);
+                let body = if request_index == 0 && request.contains("old-refresh") {
+                    r#"{"access_token":"access-one","refresh_token":"fresh-refresh","expires_in":3600}"#
+                } else if request_index == 1 && request.contains("fresh-refresh") {
+                    r#"{"access_token":"access-two","refresh_token":"fresh-refresh","expires_in":3600}"#
+                } else {
+                    r#"{"error":"invalid_grant"}"#
+                };
+                let status = if body.contains("invalid_grant") {
+                    "401 Unauthorized"
+                } else {
+                    "200 OK"
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write refresh response");
+            }
+        });
+
+        format!("http://{addr}/oauth/token")
+    }
+
     #[tokio::test]
     async fn get_status_does_not_refresh_or_remove_invalid_account() {
         let temp = tempfile::tempdir().unwrap();
@@ -1301,5 +1356,47 @@ mod tests {
                 .map(|account| account.refresh_token.as_str()),
             Some("fresh-refresh")
         );
+    }
+
+    #[tokio::test]
+    async fn token_request_reloads_rotated_refresh_token_from_disk_before_refresh() {
+        let temp = tempfile::tempdir().unwrap();
+        let token_url = spawn_rotating_refresh_endpoint().await;
+        let manager_one = CodexOAuthManager::new_with_oauth_token_url(
+            temp.path().to_path_buf(),
+            token_url.clone(),
+        );
+
+        manager_one
+            .add_account_internal(
+                "acc-valid".to_string(),
+                "old-refresh".to_string(),
+                Some("valid@example.com".to_string()),
+            )
+            .await
+            .unwrap();
+
+        let manager_two =
+            CodexOAuthManager::new_with_oauth_token_url(temp.path().to_path_buf(), token_url);
+
+        assert_eq!(
+            manager_one
+                .get_valid_token_for_account("acc-valid")
+                .await
+                .unwrap(),
+            "access-one"
+        );
+        assert_eq!(
+            manager_two
+                .get_valid_token_for_account("acc-valid")
+                .await
+                .unwrap(),
+            "access-two",
+            "second manager should reload the rotated refresh token from disk before refreshing"
+        );
+
+        let status = manager_two.get_status().await;
+        assert!(status.authenticated);
+        assert_eq!(status.accounts.len(), 1);
     }
 }
