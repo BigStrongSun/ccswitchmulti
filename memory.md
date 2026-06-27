@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-06-28 CCSwitchMulti v3.16.3-23 Prerelease
+
+- `v3.16.3-23` 已作为 GitHub prerelease 发布：`https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.16.3-23`。Release 为非 draft、`prerelease=true`，发布时间为 `2026-06-27T19:50:42Z`，target commit 为 `d8f254fbf9d7b687f385e12bd8df98125306d5f3 build(pnpm): approve release build dependencies`，tag 覆盖 `v3.16.3-22..main` 的 16 个未发布提交。
+- 本次发布包含 Codex OAuth 休眠/唤醒与 provider 切换稳定性修复：`get_status()` 保持离线状态语义、`access_token` 只在内存缓存、`RefreshTokenInvalid` 只在真实 token 请求明确 401/403 时清账号；同时移除 `codex_config.rs` 模型 catalog fallback 里的隐藏 live OAuth fetch，避免独立 `CodexOAuthManager` 轮换 refresh token 后主 manager 误删账号。
+- Windows 本地 post-commit release pipeline 构建成功，导出目录为 `C:\Users\sunda\Documents\LLMservice\最新版ccswitchmulti`，完成时间 `2026-06-28 03:49:04 +08:00`。raw exe `CCSwitchMulti_3.16.3-23_x64.exe` 的 FileVersion/ProductVersion 均验证为 `3.16.3-23`，`latest.json` 指向 `v3.16.3-23` 的 Windows setup 资产。
+- pnpm 11 在发布前阻止 `esbuild`/`msw` postinstall，修复方式是提交 `pnpm-workspace.yaml` 的 `allowBuilds` / `onlyBuiltDependencies` 白名单，并运行 `pnpm approve-builds --all`、`pnpm install --frozen-lockfile`、`pnpm typecheck` 验证。以后本地 release pipeline 遇到 `ERR_PNPM_IGNORED_BUILDS`，先检查该文件，不要交互式留 placeholder。
+- 发布资产当前包含 Windows setup、setup signature、portable zip、raw exe、`latest.json`、`SHA256SUMS.txt`、Linux/macOS build notes；Linux/macOS 二进制资产未在本地生成，需要后续 supplemental workflow 或对应平台构建补齐。发布后复核 `gh release view v3.16.3-23 --repo BigStrongSun/ccswitchmulti --json tagName,targetCommitish,isDraft,isPrerelease,publishedAt,url,assets` 返回 8 个资产。
+
 ## 2026-06-28 Codex OAuth Sleep Wake Refresh Invalid Status Fix
 
 - 休眠/唤醒后 Codex OAuth 认证页显示“已登录账号”的原版语义是“本地 `codex_oauth_auth.json` 里仍有账号和 refresh_token 记录”，不是在线验证结果。`get_status()` 不应主动 refresh，也不应因为打开认证页就清理账号；否则状态页会放大 refresh token 使用次数和临时网络误判。
