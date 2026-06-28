@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-06-28 Codex Responses-Lite Header Upstream Strip
+
+- `This model is not supported when using X-OpenAI-Internal-Codex-Responses-Lite` 的根因不是 MultiRouter 自身路由错误，而是 Codex Desktop 发给本地后端的内部协商头 `x-openai-internal-codex-responses-lite` 被 CC Switch / CCSwitchMulti 的 `forwarder.rs` 默认透传到了真实上游。OpenAI 在 2026-06-26 左右收紧 Lite 路径后，`gpt-5.5` 等模型会因此在 official ChatGPT Codex upstream 或第三方代理 upstream 返回 HTTP 400。
+- 正确修复边界在转发层 header policy：`src-tauri/src/proxy/forwarder.rs` 构建 `ordered_headers` 时，在默认透传前调用 `should_strip_codex_private_header_for_upstream()`，无条件移除 `x-openai-internal-codex-responses-lite`。不要把它修成 UI 开关、catalog schema、模型映射或 MultiRouter route 规则；也不要粗暴移除 OAuth/session/account headers，否则会破坏 Codex 官方登录态、前缀缓存和 CCSwitchMulti 之前的 OAuth login-preservation 修复。
+- 这次先在原版 `C:\Users\sunda\Documents\LLMservice\ccswitch official` 基于 `origin/main` 创建 `codex/strip-codex-responses-lite-header`，提交 `1e6a46b7 fix(proxy): strip Codex Responses-Lite header upstream`，并向 `farion1231/cc-switch` 提交 PR `#4727`，关联 issue `#4700`。随后把同一策略移植到 CCSwitchMulti `C:\Users\sunda\Documents\LLMservice\cc-switch` 的 `codex/merge-official-v3.16.4` 分支。
+- 回归测试落点：`proxy::forwarder::tests::codex_responses_lite_header_is_stripped_for_official_upstream`、`codex_responses_lite_header_is_stripped_for_third_party_upstream`、`ordinary_headers_are_preserved_for_upstream`。验证命令优先跑 `cargo fmt --manifest-path src-tauri\Cargo.toml --check`、`cargo test --manifest-path src-tauri\Cargo.toml codex_responses_lite_header --lib`、`cargo test --manifest-path src-tauri\Cargo.toml ordinary_headers_are_preserved_for_upstream --lib`、`git diff --check`。
+
 ## 2026-06-28 CCSwitchMulti v3.16.4-1 Prerelease
 
 - `v3.16.4-1` 已作为 BigStrongSun/ccswitchmulti 的 GitHub prerelease 发布：`https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.16.4-1`。Release 为非 draft、`prerelease=true`，发布时间为 `2026-06-27T20:52:24Z`，target commit 为 `e0228d531d1a7086a808d706e6ecb2618de44f4c`（`docs(memory): record completed v3.16.4-1 merge`）。
