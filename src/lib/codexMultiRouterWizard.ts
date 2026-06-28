@@ -27,6 +27,18 @@ export interface WizardPlanBuildResult {
   sourceProviders: Provider[];
 }
 
+export interface WizardConfigIssue {
+  providerId: string;
+  providerName: string;
+  reason: string;
+}
+
+export interface WizardModelNameCollision {
+  upstreamModel: string;
+  providerIds: string[];
+  canonicalProviderIds: string[];
+}
+
 const OPENAI_CODEX_FALLBACK_MODELS: CodexCatalogModel[] = [
   { model: "gpt-5.5", upstreamModel: "gpt-5.5", contextWindow: 272000 },
   { model: "gpt-5.4", upstreamModel: "gpt-5.4", contextWindow: 272000 },
@@ -111,6 +123,28 @@ export function getWizardModelFetchConfig(
   };
 }
 
+// 判断 provider 是否已有可用于路由的模型目录；官方 fallback 会在 readWizardModelCatalog 中统一补齐。
+export function hasWizardModelCatalog(provider: Provider): boolean {
+  return readWizardModelCatalog(provider).length > 0;
+}
+
+// 给状态机提供配置缺口列表；已有模型目录的 provider 可以继续进入路由预览，不强制要求 /models 可抓。
+export function getWizardConfigIssues(
+  providers: Provider[],
+): WizardConfigIssue[] {
+  return providers
+    .filter(
+      (provider) =>
+        !getWizardModelFetchConfig(provider) &&
+        !hasWizardModelCatalog(provider),
+    )
+    .map((provider) => ({
+      providerId: provider.id,
+      providerName: provider.name,
+      reason: "缺少 Base URL/API Key，且当前没有可用 modelCatalog。",
+    }));
+}
+
 // 把 /models 返回值合并进 provider modelCatalog；保留已有用户手写字段和 upstreamModel。
 export function mergeFetchedModelsIntoWizardProvider(
   provider: Provider,
@@ -151,6 +185,32 @@ export function mergeFetchedModelsIntoWizardProvider(
 // 判断某个模型源是否应该优先保留原始可见模型名；官方/订阅源是重名冲突的 canonical 侧。
 function isCanonicalModelSource(provider: Provider): boolean {
   return isOfficialCodexSource(provider);
+}
+
+// 收集重名模型冲突，供向导进入“重名确认”状态并展示需要用户理解的别名策略。
+export function collectWizardModelNameCollisions(
+  providers: Provider[],
+): WizardModelNameCollision[] {
+  const ownersByUpstream = new Map<string, Provider[]>();
+  for (const provider of providers) {
+    for (const model of readWizardModelCatalog(provider)) {
+      const upstream =
+        model.upstreamModel ?? model.upstream_model ?? model.model;
+      if (!upstream) continue;
+      const owners = ownersByUpstream.get(upstream) ?? [];
+      owners.push(provider);
+      ownersByUpstream.set(upstream, owners);
+    }
+  }
+  return Array.from(ownersByUpstream.entries())
+    .filter(([, owners]) => owners.length > 1)
+    .map(([upstreamModel, owners]) => ({
+      upstreamModel,
+      providerIds: owners.map((owner) => owner.id),
+      canonicalProviderIds: owners
+        .filter(isCanonicalModelSource)
+        .map((owner) => owner.id),
+    }));
 }
 
 // 为非官方重名模型生成稳定别名，保留 upstreamModel 指向真实上游模型名。

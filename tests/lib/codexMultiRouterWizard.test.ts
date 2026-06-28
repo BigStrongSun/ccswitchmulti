@@ -3,6 +3,8 @@ import type { Provider } from "@/types";
 import {
   buildCodexMultiRouterWizardPlan,
   buildWizardRoutesFromSources,
+  collectWizardModelNameCollisions,
+  getWizardConfigIssues,
   resolveWizardModelNameCollisions,
 } from "@/lib/codexMultiRouterWizard";
 
@@ -128,5 +130,60 @@ describe("codexMultiRouterWizard helpers", () => {
     expect(plan.settingsConfig.codexRouting.routes).toHaveLength(2);
     expect(routeModels).toEqual(catalogModels);
     expect(plan.settingsConfig.base_url).toBe("http://127.0.0.1:15721/v1");
+  });
+
+  it("reports config issues only for sources without fetch config or model catalog", () => {
+    const incomplete = provider({
+      id: "empty-relay",
+      name: "Empty Relay",
+      settingsConfig: {},
+    });
+    const catalogOnly = provider({
+      id: "manual-catalog",
+      name: "Manual Catalog",
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "manual-model" }] },
+      },
+    });
+
+    const issues = getWizardConfigIssues([incomplete, catalogOnly]);
+
+    expect(issues).toEqual([
+      {
+        providerId: "empty-relay",
+        providerName: "Empty Relay",
+        reason: "缺少 Base URL/API Key，且当前没有可用 modelCatalog。",
+      },
+    ]);
+  });
+
+  it("collects duplicate upstream model collisions for state machine review", () => {
+    const official = provider({
+      id: "openai-official",
+      name: "OpenAI Official",
+      category: "official",
+      settingsConfig: {
+        modelCatalog: {
+          models: [{ model: "gpt-5.5", upstreamModel: "gpt-5.5" }],
+        },
+      },
+    });
+    const relay = provider({
+      id: "relay",
+      name: "Relay",
+      settingsConfig: {
+        modelCatalog: {
+          models: [{ model: "relay-gpt-5.5", upstreamModel: "gpt-5.5" }],
+        },
+      },
+    });
+
+    expect(collectWizardModelNameCollisions([official, relay])).toEqual([
+      {
+        upstreamModel: "gpt-5.5",
+        providerIds: ["openai-official", "relay"],
+        canonicalProviderIds: ["openai-official"],
+      },
+    ]);
   });
 });

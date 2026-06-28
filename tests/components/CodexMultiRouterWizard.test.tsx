@@ -5,6 +5,7 @@ import type { ReactElement } from "react";
 import type { Provider } from "@/types";
 import { CodexMultiRouterWizard } from "@/components/codex/CodexMultiRouterWizard";
 import { CODEX_MULTI_ROUTER_WIZARD_DISMISSED_KEY } from "@/lib/codexMultiRouterWizard";
+import { providersApi } from "@/lib/api/providers";
 
 vi.mock("@/lib/api/providers", () => ({
   providersApi: {
@@ -43,6 +44,7 @@ function renderWithQueryClient(ui: ReactElement) {
 
 beforeEach(() => {
   localStorage.clear();
+  vi.clearAllMocks();
 });
 
 describe("CodexMultiRouterWizard", () => {
@@ -70,5 +72,47 @@ describe("CodexMultiRouterWizard", () => {
       "true",
     );
     expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("stays in needSources state when advancing without model sources", () => {
+    renderWithQueryClient(
+      <CodexMultiRouterWizard
+        open
+        providers={[]}
+        onOpenChange={vi.fn()}
+        onCreateProvider={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+        onEnablePlan={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+
+    expect(screen.getByText("状态机：needSources")).toBeInTheDocument();
+    expect(screen.getByText(/请先添加一个普通 Codex/)).toBeInTheDocument();
+  });
+
+  it("moves to saveFailed state when publishing the generated plan fails", async () => {
+    vi.mocked(providersApi.add).mockRejectedValueOnce(new Error("db locked"));
+
+    renderWithQueryClient(
+      <CodexMultiRouterWizard
+        open
+        providers={[provider()]}
+        onOpenChange={vi.fn()}
+        onCreateProvider={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+        onEnablePlan={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "保存并发布" }));
+    const publishButtons = screen.getAllByRole("button", {
+      name: "保存并发布",
+    });
+    fireEvent.click(publishButtons[publishButtons.length - 1]);
+
+    expect(await screen.findByText("状态机：saveFailed")).toBeInTheDocument();
+    expect(screen.getByText("db locked")).toBeInTheDocument();
   });
 });
