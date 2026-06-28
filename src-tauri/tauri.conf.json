@@ -45,6 +45,10 @@
       "icons/icon.ico"
     ],
     "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "installerHooks": "nsis/installer-hooks.nsh"
+      },
       "wix": {
         "template": "wix/per-user-main.wxs"
       }
