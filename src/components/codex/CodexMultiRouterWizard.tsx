@@ -138,7 +138,8 @@ const STEPS: WizardStep[] = [
   {
     key: "finish",
     title: "启用并测试",
-    description: "显式启用这个多路路由，然后打开工作台测试发布页验证命中。",
+    description:
+      "显式启用多路路由，进入状态页等待真实转发成功，再自动跳到历史修复。",
     icon: CheckCircle2,
   },
 ];
@@ -186,9 +187,10 @@ const STEP_RULES: Record<WizardStepKey, WizardStepRule> = {
   finish: {
     errors: [
       "本地代理未运行、端口冲突或切换 provider 失败会进入 enableFailed。",
+      "启用后如果 Codex 没有发出真实请求，状态页会停在待请求验证，不会提前跳历史修复。",
     ],
     canContinue:
-      "显式启用成功后，建议完整重启或新开 Codex 会话再测试模型命中。",
+      "显式启用成功后会自动打开状态页；最近一次转发成功后，App 会提示配置成功并进入历史修复。",
   },
 };
 
@@ -422,7 +424,7 @@ function wizardStatusText(state: WizardFlowState): string {
     case "enableFailed":
       return "启用失败，请重试或检查本地代理状态。";
     case "enabled":
-      return "已启用，建议重启或新开 Codex 会话。";
+      return "已启用，状态页会等待最近一次 Codex 请求转发成功。";
     case "completed":
       return "向导已完成。";
     case "dismissed":
@@ -846,12 +848,13 @@ export function CodexMultiRouterWizard({
       await onEnablePlan(savedPlan);
       dispatchFlow({ type: "ENABLE_SUCCESS" });
       toast.success(
-        "已启用多路模型。请完整重启或新开 Codex 会话验证模型选择器。",
+        "已启用多路模型，状态页已打开。请在 Codex 里发送一次请求，等待当前链路、监听、Codex 接管、路由入口和最近转发都成功后，会自动进入历史修复。",
         {
           closeButton: true,
-          duration: 8000,
+          duration: 12000,
         },
       );
+      closeWizard(false);
     } catch (error) {
       const message = formatWizardError(error);
       recordWizardIssue({
@@ -1272,9 +1275,11 @@ export function CodexMultiRouterWizard({
             {currentStep.key === "finish" && (
               <div className="space-y-4">
                 <div className="rounded-lg border p-4 text-sm leading-6 text-muted-foreground">
-                  保存完成后，请显式启用这个多路路由。启用后保持 CCSwitchMulti
-                  运行，并完整重启或新开 Codex 会话，让模型选择器读取新的
-                  modelCatalog。
+                  保存完成后，请显式启用这个多路路由。启用成功后向导会自动关闭，并露出
+                  MultiRouter 状态页；保持 CCSwitchMulti 运行，去 Codex
+                  里发送一次请求，状态页五项成功后会提示配置成功并跳到历史修复。
+                  历史修复会继续指导你按顺序加载历史、预览修复、确认写入、重启
+                  Codex，并打开 GitHub 仓库点 Star。
                 </div>
                 <div className="flex flex-wrap gap-3">
                   <Button
@@ -1290,11 +1295,11 @@ export function CodexMultiRouterWizard({
                     onClick={() => {
                       if (!savedPlan) return;
                       closeWizard(false);
-                      onOpenWorkspace(savedPlan, "test");
+                      onOpenWorkspace(savedPlan, "status");
                     }}
                   >
                     <Route className="mr-2 h-4 w-4" />
-                    完成后打开工作台
+                    打开状态页继续验证
                   </Button>
                 </div>
               </div>

@@ -217,4 +217,36 @@ describe("CodexMultiRouterWizard", () => {
     expect(screen.getByText("需处理后继续")).toBeInTheDocument();
     expect(screen.getByText("状态机：connectivityFailed")).toBeInTheDocument();
   });
+
+  it("closes the overlay after enabling so the status-page handoff can continue", async () => {
+    const onOpenChange = vi.fn();
+    const onEnablePlan = vi.fn().mockResolvedValue(undefined);
+
+    renderWithQueryClient(
+      <CodexMultiRouterWizard
+        open
+        providers={[provider()]}
+        onOpenChange={onOpenChange}
+        onCreateProvider={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+        onEnablePlan={onEnablePlan}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "保存并发布" }));
+    const publishButtons = screen.getAllByRole("button", {
+      name: "保存并发布",
+    });
+    fireEvent.click(publishButtons[publishButtons.length - 1]);
+
+    expect(
+      await screen.findByText(/启用成功后向导会自动关闭/),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "启用这个多路路由" }));
+
+    expect(onEnablePlan).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText("状态机：completed")).toBeInTheDocument();
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
 });
