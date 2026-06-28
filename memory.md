@@ -15,6 +15,7 @@
 - 连通性状态机新增 `probingConnectivity/connectivityPassed/connectivityPartial/connectivityFailed`。`openai_responses` provider 的 `/v1/responses` 探测失败是阻塞项，不能保存发布；`openai_chat` provider 的直接 Responses 失败只是 warning，因为运行时 MultiRouter 会转到 `/chat/completions`；缺 Base URL/API Key 且已有 `modelCatalog` 时允许继续但标为 skipped，缺配置且没有目录时阻塞。
 - 后端命令 `probe_codex_responses_for_config` 在 `src-tauri/src/commands/model_fetch.rs`，只做显式探测不缓存结果。URL 生成会把 provider 根地址、`/v1`、完整 `/v1/chat/completions` 或直接 `/v1/responses` 都收敛到 `/v1/responses`；HTTP 错误、网络错误和超时都结构化返回 `ok/status/url/model/detail`，错误体截断到 512 字符，避免 UI/日志被上游 HTML 或长 JSON 淹没。
 - 本轮为满足全局格式检查，额外对既有 `src/components/codex/CodexRouterWorkspacePage.tsx` 做了纯 Prettier 格式化，不改业务逻辑；`pnpm format:check` 现在通过。
+- 2026-06-29 继续补强异常可见性：`CodexMultiRouterWizard` 新增向导级 `wizardIssues` 列表，所有异步 catch 不能只发 toast，必须写入 UI 问题面板并标明 `错误/警告`、provider、异常详情和 `可继续/需处理后继续`。当前覆盖 `/models` 单 provider 失败、整体刷新中断、`/v1/responses` IPC/命令异常、保存失败、启用失败，以及用户尝试越过阻塞连通性结果的场景。
 
 ## 2026-06-28 Mixed Relay Responses Capability Boundary
 

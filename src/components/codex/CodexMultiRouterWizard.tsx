@@ -76,6 +76,16 @@ interface WizardStepRule {
   canContinue: string;
 }
 
+interface WizardIssue {
+  id: string;
+  stage: WizardStepKey;
+  severity: "error" | "warning";
+  title: string;
+  detail: string;
+  canContinue: boolean;
+  providerName?: string;
+}
+
 const STEPS: WizardStep[] = [
   {
     key: "intro",
@@ -429,6 +439,11 @@ function formatWizardError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+// 生成稳定但不依赖后端的异常 ID，方便 React 渲染和后续按阶段清理。
+function createWizardIssueId(stage: WizardStepKey, title: string): string {
+  return `${stage}:${title}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+}
+
 export function CodexMultiRouterWizard({
   open,
   providers,
@@ -447,6 +462,7 @@ export function CodexMultiRouterWizard({
   const [connectivityResults, setConnectivityResults] = useState<
     WizardConnectivityResult[]
   >([]);
+  const [wizardIssues, setWizardIssues] = useState<WizardIssue[]>([]);
 
   const existingPlan = useMemo(
     () => providers.find((provider) => isCodexMultiRouterPlan(provider)),
@@ -475,8 +491,27 @@ export function CodexMultiRouterWizard({
     const nextSources = defaultWizardModelSources(providers);
     setDraftSources(nextSources);
     setConnectivityResults([]);
+    setWizardIssues([]);
     dispatchFlow({ type: "INIT", hasSources: nextSources.length > 0 });
   }, [existingPlan, open, providers]);
+
+  // 所有异步 catch 都进入同一个问题列表，让 toast 之外的 UI 也能长期展示异常和继续策略。
+  const recordWizardIssue = (issue: Omit<WizardIssue, "id">) => {
+    setWizardIssues((current) => [
+      ...current,
+      {
+        ...issue,
+        id: createWizardIssueId(issue.stage, issue.title),
+      },
+    ]);
+  };
+
+  // 重新执行某个阶段时只清理该阶段旧问题，避免旧错误误导当前判断。
+  const clearWizardIssuesForStage = (stage: WizardStepKey) => {
+    setWizardIssues((current) =>
+      current.filter((issue) => issue.stage !== stage),
+    );
+  };
 
   // 关闭/跳过时记录 dismissed；首页按钮仍可再次显式打开。
   const closeWizard = (dismissed = true) => {
@@ -545,6 +580,14 @@ export function CodexMultiRouterWizard({
             nextStatus: "connectivityFailed",
             nextStepKey: "fetchModels",
           });
+          recordWizardIssue({
+            stage: "fetchModels",
+            severity: "error",
+            title: "Responses 连通性存在阻塞项",
+            detail:
+              "至少一个 Responses 直连 provider 的 /v1/responses 探测失败，继续保存会让 Codex 请求命中不可用上游。",
+            canContinue: false,
+          });
           toast.error(
             "连通性测试仍有阻塞项，请先修复失败的 Responses provider。",
             {
@@ -599,6 +642,7 @@ export function CodexMultiRouterWizard({
   // 顺序抓取所有可抓模型源；失败不阻塞其它 provider，最终由保存页继续使用已成功目录。
   const refreshModelSources = async () => {
     dispatchFlow({ type: "FETCH_START" });
+    clearWizardIssuesForStage("fetchModels");
     let successCount = 0;
     let skippedCount = 0;
     let failedCount = 0;
@@ -628,6 +672,15 @@ export function CodexMultiRouterWizard({
           successCount += 1;
         } catch (error) {
           console.error("[CodexMultiRouterWizard] fetch models failed", error);
+          const message = formatWizardError(error);
+          recordWizardIssue({
+            stage: "fetchModels",
+            severity: "warning",
+            title: "模型列表获取失败",
+            detail: message,
+            canContinue: true,
+            providerName: provider.name,
+          });
           failedCount += 1;
           nextSources.push(provider);
         }
@@ -645,12 +698,20 @@ export function CodexMultiRouterWizard({
         { closeButton: true },
       );
     } catch (error) {
+      const message = formatWizardError(error);
+      recordWizardIssue({
+        stage: "fetchModels",
+        severity: "error",
+        title: "模型列表刷新中断",
+        detail: message,
+        canContinue: false,
+      });
       dispatchFlow({
         type: "FETCH_DONE",
         partial: true,
         summary: { successCount, skippedCount, failedCount },
       });
-      toast.error(`模型列表刷新中断：${formatWizardError(error)}`, {
+      toast.error(`模型列表刷新中断：${message}`, {
         closeButton: true,
       });
     }
@@ -659,6 +720,7 @@ export function CodexMultiRouterWizard({
   // 对每个 provider 的每个可见模型发起最小 `/v1/responses` 探测；这是用户显式点击的真实上游请求。
   const probeResponsesConnectivity = async () => {
     dispatchFlow({ type: "PROBE_START" });
+    clearWizardIssuesForStage("fetchModels");
     const results: WizardConnectivityResult[] = [];
     for (const provider of draftSources) {
       const config = getWizardModelFetchConfig(provider);
@@ -701,14 +763,22 @@ export function CodexMultiRouterWizard({
             }),
           );
         } catch (error) {
-          results.push(
-            classifyWizardConnectivityResult({
-              provider,
-              model,
-              ok: false,
-              detail: formatWizardError(error),
-            }),
-          );
+          const message = formatWizardError(error);
+          const classified = classifyWizardConnectivityResult({
+            provider,
+            model,
+            ok: false,
+            detail: message,
+          });
+          recordWizardIssue({
+            stage: "fetchModels",
+            severity: classified.canContinue ? "warning" : "error",
+            title: "Responses 探测命令异常",
+            detail: message,
+            canContinue: classified.canContinue,
+            providerName: provider.name,
+          });
+          results.push(classified);
         }
       }
     }
@@ -736,6 +806,7 @@ export function CodexMultiRouterWizard({
   // 保存 MultiRouter provider；这里才真正写入 DB，不会静默切换当前 Codex provider。
   const saveMultiRouterPlan = async () => {
     dispatchFlow({ type: "SAVE_START" });
+    clearWizardIssuesForStage("publish");
     try {
       const result = buildCodexMultiRouterWizardPlan(
         providers,
@@ -754,6 +825,13 @@ export function CodexMultiRouterWizard({
       dispatchFlow({ type: "SAVE_SUCCESS" });
     } catch (error) {
       const message = formatWizardError(error);
+      recordWizardIssue({
+        stage: "publish",
+        severity: "error",
+        title: "MultiRouter 保存失败",
+        detail: message,
+        canContinue: false,
+      });
       dispatchFlow({ type: "SAVE_ERROR", error: message });
       toast.error(`MultiRouter 保存失败：${message}`, { closeButton: true });
     }
@@ -763,6 +841,7 @@ export function CodexMultiRouterWizard({
   const enableSavedPlan = async () => {
     if (!savedPlan) return;
     dispatchFlow({ type: "ENABLE_START" });
+    clearWizardIssuesForStage("finish");
     try {
       await onEnablePlan(savedPlan);
       dispatchFlow({ type: "ENABLE_SUCCESS" });
@@ -775,6 +854,13 @@ export function CodexMultiRouterWizard({
       );
     } catch (error) {
       const message = formatWizardError(error);
+      recordWizardIssue({
+        stage: "finish",
+        severity: "error",
+        title: "启用多路路由失败",
+        detail: message,
+        canContinue: false,
+      });
       dispatchFlow({ type: "ENABLE_ERROR", error: message });
       toast.error(`启用多路路由失败：${message}`, { closeButton: true });
     }
@@ -874,6 +960,45 @@ export function CodexMultiRouterWizard({
                 </div>
               )}
             </div>
+            {wizardIssues.length > 0 && (
+              <div className="mb-4 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm">
+                <div className="font-medium text-foreground">
+                  已捕获问题与处理状态
+                </div>
+                <div className="mt-2 space-y-2">
+                  {wizardIssues.map((issue) => (
+                    <div
+                      key={issue.id}
+                      className="rounded-md border bg-background/80 p-2"
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge
+                          variant={
+                            issue.severity === "error"
+                              ? "destructive"
+                              : "outline"
+                          }
+                        >
+                          {issue.severity === "error" ? "错误" : "警告"}
+                        </Badge>
+                        <span className="font-medium">{issue.title}</span>
+                        {issue.providerName && (
+                          <span className="text-xs text-muted-foreground">
+                            {issue.providerName}
+                          </span>
+                        )}
+                        <span className="text-xs text-muted-foreground">
+                          {issue.canContinue ? "可继续" : "需处理后继续"}
+                        </span>
+                      </div>
+                      <div className="mt-1 break-words text-xs text-muted-foreground">
+                        {issue.detail}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
             <div className="mb-4 rounded-lg border p-3 text-sm">
               <div className="font-medium">本步骤异常与继续条件</div>
               <ul className="mt-2 space-y-1 text-xs text-muted-foreground">

@@ -6,7 +6,10 @@ import type { Provider } from "@/types";
 import { CodexMultiRouterWizard } from "@/components/codex/CodexMultiRouterWizard";
 import { CODEX_MULTI_ROUTER_WIZARD_DISMISSED_KEY } from "@/lib/codexMultiRouterWizard";
 import { providersApi } from "@/lib/api/providers";
-import { probeCodexResponsesForConfig } from "@/lib/api/model-fetch";
+import {
+  fetchModelsForConfig,
+  probeCodexResponsesForConfig,
+} from "@/lib/api/model-fetch";
 
 vi.mock("@/lib/api/providers", () => ({
   providersApi: {
@@ -115,7 +118,8 @@ describe("CodexMultiRouterWizard", () => {
     fireEvent.click(publishButtons[publishButtons.length - 1]);
 
     expect(await screen.findByText("状态机：saveFailed")).toBeInTheDocument();
-    expect(screen.getByText("db locked")).toBeInTheDocument();
+    expect(screen.getByText("MultiRouter 保存失败")).toBeInTheDocument();
+    expect(screen.getAllByText("db locked").length).toBeGreaterThan(0);
   });
 
   it("probes /v1/responses connectivity and records pass state", async () => {
@@ -153,5 +157,64 @@ describe("CodexMultiRouterWizard", () => {
       false,
       undefined,
     );
+  });
+
+  it("shows fetched model exceptions in the wizard issue panel", async () => {
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    vi.mocked(fetchModelsForConfig).mockRejectedValueOnce(
+      new Error("upstream /models timeout"),
+    );
+
+    renderWithQueryClient(
+      <CodexMultiRouterWizard
+        open
+        providers={[provider()]}
+        onOpenChange={vi.fn()}
+        onCreateProvider={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+        onEnablePlan={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "自动获取并写入模型列表" }),
+    );
+
+    expect(await screen.findByText("模型列表获取失败")).toBeInTheDocument();
+    expect(screen.getByText("upstream /models timeout")).toBeInTheDocument();
+    expect(screen.getByText("可继续")).toBeInTheDocument();
+    consoleError.mockRestore();
+  });
+
+  it("shows responses probe command exceptions and blocks continuation", async () => {
+    vi.mocked(probeCodexResponsesForConfig).mockRejectedValueOnce(
+      new Error("ipc invoke failed"),
+    );
+
+    renderWithQueryClient(
+      <CodexMultiRouterWizard
+        open
+        providers={[provider({ meta: { apiFormat: "openai_responses" } })]}
+        onOpenChange={vi.fn()}
+        onCreateProvider={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+        onEnablePlan={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "测试 /v1/responses 连通性" }),
+    );
+
+    expect(
+      await screen.findByText("Responses 探测命令异常"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("ipc invoke failed")).toBeInTheDocument();
+    expect(screen.getByText("需处理后继续")).toBeInTheDocument();
+    expect(screen.getByText("状态机：connectivityFailed")).toBeInTheDocument();
   });
 });
