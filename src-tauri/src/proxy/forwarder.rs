@@ -40,7 +40,7 @@ use tauri::Manager;
 use tokio::sync::RwLock;
 
 const PROXY_AUTH_PLACEHOLDER: &str = "PROXY_MANAGED";
-const CODEX_RESPONSES_LITE_FALLBACK_TTL: Duration = Duration::from_secs(30 * 60);
+const CODEX_RESPONSES_LITE_FALLBACK_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 pub struct ForwardResult {
     pub response: ProxyResponse,

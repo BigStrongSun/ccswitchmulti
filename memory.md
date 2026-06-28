@@ -21,7 +21,7 @@
 
 - 用户指出“第三方一律剥 `x-openai-internal-codex-responses-lite`”仍然过宽，因为未来第三方上游可能支持 Responses-Lite，提前砍掉 header 可能影响它们自己的 Lite 路径、prompt cache 或其它能力协商。策略已改成 optimistic pass-through：默认保留该 header 发给上游，只有上游明确返回 `This model is not supported when using X-OpenAI-Internal-Codex-Responses-Lite.` 这类错误时，才剥离 header 并对同一个 provider 重发一次。
 - 实现落点仍在 `src-tauri/src/proxy/forwarder.rs`。发送前不再调用静态 strip helper；错误响应体读取并解压后调用 `should_retry_without_codex_responses_lite_header()` 判断，条件是 `AppType::Codex`、请求里确实有 Lite header、状态码为 `400/404/422/501` 之一、错误体包含精确 Lite 不支持文本。命中后记录 `upstream_retry_without_responses_lite`，移除该 header 后只重试一次；普通 400、非 Codex app、无 header 或错误体不匹配都不重试。
-- 2026-06-28 进一步改为带过期时间的短期能力负缓存，避免同一上游/模型在连续请求里每次都先失败一次。缓存是内存态，TTL 为 30 分钟，key 按 effective provider id、上游 URL 的 scheme/host/port/path、实际请求模型隔离，并忽略 query 以避免敏感参数进入缓存 key。命中缓存时直接去掉 Lite header 发送并记录 `responses_lite_fallback_cache_hit`；过期后自动删除并重新带 header 探测，防止未来第三方上游支持 Lite 后仍被永久去头。
+- 2026-06-28 进一步改为带过期时间的短期能力负缓存，避免同一上游/模型在连续请求里每次都先失败一次。缓存是内存态，TTL 为 24 小时，key 按 effective provider id、上游 URL 的 scheme/host/port/path、实际请求模型隔离，并忽略 query 以避免敏感参数进入缓存 key。命中缓存时直接去掉 Lite header 发送并记录 `responses_lite_fallback_cache_hit`；过期后自动删除并重新带 header 探测，防止未来第三方上游支持 Lite 后仍被永久去头。
 - 验证通过：`cargo fmt --manifest-path src-tauri\Cargo.toml --check`；`cargo test --manifest-path src-tauri\Cargo.toml responses_lite --lib`（6 passed）；`cargo test --manifest-path src-tauri\Cargo.toml codex_responses_lite_error_triggers_retry_without_header --lib`。
 
 ## 2026-06-28 Responses-Lite Header Source And Proxy Failure Mechanism
