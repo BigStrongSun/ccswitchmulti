@@ -1977,6 +1977,7 @@ export function CodexRouterWorkspacePage({
   onEditProvider,
   onDeletePlan,
   onCreateProvider: _onCreateProvider,
+  onRuntimeReady,
 }: {
   providers: Provider[];
   proxyStatus?: ProxyStatus;
@@ -1988,6 +1989,7 @@ export function CodexRouterWorkspacePage({
   onEditProvider: (provider: Provider) => void;
   onDeletePlan: (provider: Provider) => void;
   onCreateProvider: () => void;
+  onRuntimeReady?: (provider: Provider) => void;
 }) {
   const [activeTab, setActiveTab] = useState<WorkspaceTab>(initialTab);
   const [selectedPlanId, setSelectedPlanId] = useState<string | null>(null);
@@ -2663,6 +2665,7 @@ export function CodexRouterWorkspacePage({
               activeProviderId={activeProviderId}
               onEditPlan={handleEditPlan}
               onDeletePlan={onDeletePlan}
+              onRuntimeReady={onRuntimeReady}
             />
           </TabsContent>
 
@@ -4633,6 +4636,7 @@ function StatusTab({
   activeProviderId,
   onEditPlan,
   onDeletePlan,
+  onRuntimeReady,
 }: {
   selectedPlan: Provider | null;
   selectedRouting: CodexRouting | null;
@@ -4644,6 +4648,7 @@ function StatusTab({
   activeProviderId?: string;
   onEditPlan: (provider: Provider, detail?: string) => void;
   onDeletePlan: (provider: Provider) => void;
+  onRuntimeReady?: (provider: Provider) => void;
 }) {
   const queryClient = useQueryClient();
   const range = useMemo(() => ({ preset: "today" as const }), []);
@@ -4743,27 +4748,44 @@ function StatusTab({
   const hasEnabledRoutes = selectedRoutes.some(
     ({ route }) => route.enabled !== false,
   );
+  const runtimeStatus = buildMultiRouterRuntimeStatus({
+    selectedPlan,
+    selectedRouting,
+    enabledRouteCount: selectedRoutes.filter(
+      ({ route }) => route.enabled !== false,
+    ).length,
+    isProxyRunning,
+    isCodexTakeoverActive,
+    activeProviderId,
+  });
   const configReady = Boolean(
     isProxyRunning &&
       isCodexTakeoverActive &&
       selectedPlan &&
+      activeProviderId === selectedPlan.id &&
       routeEnabled &&
       hasEnabledRoutes,
   );
-  const trafficVerified =
-    proxyLogs.length > 0 ||
-    routerRequestEvents.length > 0 ||
-    (proxyStatus?.total_requests ?? 0) > 0;
-  const linkOnline = Boolean(configReady && trafficVerified);
+  const trafficVerified = latestForwardOk;
+  const linkOnline = Boolean(runtimeStatus.running && trafficVerified);
   const readinessIssues = [
     !isProxyRunning ? "本地代理未监听" : "",
     !isCodexTakeoverActive ? "Codex live 配置未接管" : "",
     !selectedPlan ? "未选择 MultiRouter provider" : "",
+    selectedPlan && activeProviderId !== selectedPlan.id
+      ? "当前 Codex provider 不是选中的 MultiRouter"
+      : "",
     selectedPlan && !routeEnabled ? "MultiRouter 入口已关闭" : "",
     selectedPlan && routeEnabled && !hasEnabledRoutes
       ? "没有启用的匹配规则"
       : "",
   ].filter(Boolean);
+
+  // 当状态页确认 MultiRouter 配置与真实转发都成功后，通知 App 进入“配置成功 -> 历史修复”收尾流程。
+  useEffect(() => {
+    if (!selectedPlan || !linkOnline || !latestForwardOk) return;
+    onRuntimeReady?.(selectedPlan);
+  }, [latestForwardOk, linkOnline, onRuntimeReady, selectedPlan]);
 
   /// 手动同步 Codex JSONL 会话用量，让子 Agent 统计立即看到最新 token_count。
   async function syncCodexSessionUsage() {
@@ -4919,7 +4941,7 @@ function StatusTab({
                 linkOnline
                   ? "Codex 请求会进入本地代理并按 model 分流"
                   : configReady
-                    ? "配置和监听已就绪，但今天还没有真实代理转发日志"
+                    ? "配置和监听已就绪，等待最近一次真实转发成功"
                     : readinessIssues.join("；") || "等待状态刷新"
               }
             />

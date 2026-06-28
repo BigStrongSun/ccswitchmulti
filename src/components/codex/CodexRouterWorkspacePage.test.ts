@@ -1359,4 +1359,74 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       tone: "ok",
     });
   });
+
+  // onRuntimeReady 测试：当本地代理运行、Codex 接管激活、当前 MultiRouter 已发布并启用路由、
+  // 且最新请求转发成功（statusCode 200-399）时，onRuntimeReady 回调应被调用。
+  it("calls onRuntimeReady when config is ready and latest request forward succeeds", async () => {
+    const source: Provider = {
+      id: "codex-online-source",
+      name: "Online Source",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: {
+          models: [{ model: "test-model" }],
+        },
+      },
+    };
+    const plan = createDraftRoutingPlan([source], [source]);
+    const routes = [
+      normalizeCodexRouteForSave(
+        {
+          label: source.name,
+          targetProviderId: source.id,
+          match: { models: ["test-model"] },
+        },
+        0,
+        new Set<string>(),
+      ),
+    ];
+    const routedPlan: Provider = {
+      ...plan,
+      settingsConfig: {
+        ...plan.settingsConfig,
+        codexRouting: {
+          enabled: true,
+          defaultRouteId: routes[0].id,
+          routes,
+        },
+      },
+    };
+    const onRuntimeReady = vi.fn();
+
+    // 直接修改 requestLogsFixture：返回一条 200 成功的请求日志，让 latestForwardOk=true
+    requestLogsFixture.value = {
+      data: [
+        createCodexProxyLog({
+          providerId: "codex-online-source",
+          model: "test-model",
+          requestModel: "test-model",
+        }),
+      ],
+      isLoading: false,
+    };
+
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [source, routedPlan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: routedPlan.id,
+        initialProviderId: routedPlan.id,
+        initialTab: "routes",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+        onRuntimeReady,
+      }),
+    );
+
+    await waitFor(() =>
+      expect(onRuntimeReady).toHaveBeenCalledWith(routedPlan),
+    );
+  });
 });

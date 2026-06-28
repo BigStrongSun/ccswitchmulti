@@ -71,7 +71,17 @@ type ProviderFilter =
   | "gemini"
   | "hermes";
 
-export function SessionManagerPage({ appId }: { appId: string }) {
+export function SessionManagerPage({
+  appId,
+  initialCodexHistoryRepair = false,
+  onInitialCodexHistoryRepairConsumed,
+  onCodexHistoryRepairCompleted,
+}: {
+  appId: string;
+  initialCodexHistoryRepair?: boolean;
+  onInitialCodexHistoryRepairConsumed?: () => void;
+  onCodexHistoryRepairCompleted?: () => void | Promise<void>;
+}) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const { data, isLoading, refetch } = useSessionsQuery();
@@ -129,6 +139,18 @@ export function SessionManagerPage({ appId }: { appId: string }) {
   useEffect(() => {
     setShowCodexHistoryRepair(false);
   }, [isCodexManager]);
+
+  // MultiRouter 向导完成后会把用户直接带到 Codex 历史修复页；消费一次后交回普通手动切换。
+  useEffect(() => {
+    if (!isCodexManager || !initialCodexHistoryRepair) return;
+    setProviderFilter("codex");
+    setShowCodexHistoryRepair(true);
+    onInitialCodexHistoryRepairConsumed?.();
+  }, [
+    initialCodexHistoryRepair,
+    isCodexManager,
+    onInitialCodexHistoryRepairConsumed,
+  ]);
 
   const selectedSession = useMemo(() => {
     if (!selectedKey) return null;
@@ -861,6 +883,7 @@ export function SessionManagerPage({ appId }: { appId: string }) {
                 <CodexHistoryRepairPanel
                   initialProjectPath={selectedSession?.projectDir}
                   onClose={() => setShowCodexHistoryRepair(false)}
+                  onRepairApplied={onCodexHistoryRepairCompleted}
                 />
               </div>
             ) : (

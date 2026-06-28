@@ -34,6 +34,7 @@ import type { EnvConflict } from "@/types/env";
 import { useProvidersQuery, useSettingsQuery } from "@/lib/query";
 import {
   providersApi,
+  proxyApi,
   settingsApi,
   type AppId,
   type ProviderSwitchEvent,
@@ -192,6 +193,15 @@ function App() {
     providerId?: string | null;
     tab: WorkspaceTab;
   }>({ tab: "status" });
+  const codexPostSetupGuideRef = useRef<{
+    planId: string;
+    successSeen: boolean;
+    historyRepairPrompted: boolean;
+  } | null>(null);
+  const [
+    openCodexHistoryRepairOnSessions,
+    setOpenCodexHistoryRepairOnSessions,
+  ] = useState(false);
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [isCodexMultiRouterWizardOpen, setIsCodexMultiRouterWizardOpen] =
     useState(false);
@@ -912,6 +922,68 @@ function App() {
     setIsCodexMultiRouterWizardOpen(true);
   };
 
+  // 用户在向导里选择启用 MultiRouter 时，必须把 CCSwitchMulti 本地代理和 Codex 接管一起打开。
+  const handleEnableCodexMultiRouterPlan = async (provider: Provider) => {
+    setActiveApp("codex");
+    if (!isProxyRunning) {
+      await proxyApi.startProxyServer();
+    }
+    if (!takeoverStatus?.codex) {
+      await proxyApi.setProxyTakeoverForApp("codex", true);
+    }
+    await switchProvider(provider);
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["proxyStatus"] }),
+      queryClient.invalidateQueries({ queryKey: ["proxyTakeoverStatus"] }),
+      queryClient.invalidateQueries({ queryKey: ["providers", "codex"] }),
+    ]);
+    codexPostSetupGuideRef.current = {
+      planId: provider.id,
+      successSeen: false,
+      historyRepairPrompted: false,
+    };
+    openCodexRouterWorkspace(provider, "status");
+  };
+
+  // MultiRouter 工作台确认运行态全绿后，进入历史修复，并给用户明确下一步。
+  const handleCodexMultiRouterReady = (provider: Provider) => {
+    const current = codexPostSetupGuideRef.current;
+    if (!current || current.planId !== provider.id || current.successSeen) {
+      return;
+    }
+    toast.success(
+      "Codex MultiRouter 配置成功：当前 provider、代理监听、Codex 接管、路由入口和最近请求转发都已成功。下一步请修复历史记录可见性。",
+      { closeButton: true, duration: 10000 },
+    );
+    setActiveApp("codex");
+    setOpenCodexHistoryRepairOnSessions(true);
+    setCurrentView("sessions");
+    codexPostSetupGuideRef.current = {
+      ...current,
+      successSeen: true,
+      historyRepairPrompted: true,
+    };
+  };
+
+  // 历史修复写入完成后，先提示重启 Codex，再征求点赞并用默认浏览器打开项目主页。
+  const handleCodexHistoryRepairCompleted = async () => {
+    toast.success("历史记录修复已完成。请完整重启 Codex 后再继续使用。", {
+      closeButton: true,
+      duration: 10000,
+    });
+    const shouldOpenHome = window.confirm(
+      [
+        "历史记录修复已完成，请完整重启 Codex，让侧边栏和模型状态重新加载。",
+        "",
+        "如果 CCSwitchMulti 这套 MultiRouter 配置帮到了你，可以帮我点个赞吗？",
+        "点击“确定”会用默认浏览器打开 CCSwitchMulti 主页。",
+      ].join("\n"),
+    );
+    if (shouldOpenHome) {
+      await settingsApi.openExternal("https://ccswitch.io");
+    }
+  };
+
   const notifyWindowControlError = (error: unknown) => {
     toast.error(
       t("notifications.windowControlFailed", {
@@ -1004,6 +1076,7 @@ function App() {
               onDeletePlan={(provider) =>
                 setConfirmAction({ provider, action: "delete" })
               }
+              onRuntimeReady={handleCodexMultiRouterReady}
             />
           );
         case "skills":
@@ -1049,6 +1122,15 @@ function App() {
             <SessionManagerPage
               key={sharedFeatureApp}
               appId={sharedFeatureApp}
+              initialCodexHistoryRepair={openCodexHistoryRepairOnSessions}
+              onInitialCodexHistoryRepairConsumed={() =>
+                setOpenCodexHistoryRepairOnSessions(false)
+              }
+              onCodexHistoryRepairCompleted={
+                sharedFeatureApp === "codex"
+                  ? handleCodexHistoryRepairCompleted
+                  : undefined
+              }
             />
           );
         case "workspace":
@@ -1715,7 +1797,7 @@ function App() {
         onOpenWorkspace={(provider, tab) =>
           openCodexRouterWorkspace(provider, tab)
         }
-        onEnablePlan={switchProvider}
+        onEnablePlan={handleEnableCodexMultiRouterPlan}
       />
 
       <EditProviderDialog

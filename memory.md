@@ -16,6 +16,8 @@
 - 后端命令 `probe_codex_responses_for_config` 在 `src-tauri/src/commands/model_fetch.rs`，只做显式探测不缓存结果。URL 生成会把 provider 根地址、`/v1`、完整 `/v1/chat/completions` 或直接 `/v1/responses` 都收敛到 `/v1/responses`；HTTP 错误、网络错误和超时都结构化返回 `ok/status/url/model/detail`，错误体截断到 512 字符，避免 UI/日志被上游 HTML 或长 JSON 淹没。
 - 本轮为满足全局格式检查，额外对既有 `src/components/codex/CodexRouterWorkspacePage.tsx` 做了纯 Prettier 格式化，不改业务逻辑；`pnpm format:check` 现在通过。
 - 2026-06-29 继续补强异常可见性：`CodexMultiRouterWizard` 新增向导级 `wizardIssues` 列表，所有异步 catch 不能只发 toast，必须写入 UI 问题面板并标明 `错误/警告`、provider、异常详情和 `可继续/需处理后继续`。当前覆盖 `/models` 单 provider 失败、整体刷新中断、`/v1/responses` IPC/命令异常、保存失败、启用失败，以及用户尝试越过阻塞连通性结果的场景。
+- 2026-06-29 补齐 MultiRouter 向导发布后的自动收尾：用户点击“启用这个多路路由”后，App 会先启动 CCSwitchMulti 本地代理，再打开 Codex live 接管，随后切换当前 Codex provider 到该 MultiRouter 方案并打开工作台 `status` 页。状态页不会只因配置态全绿就提示成功，必须同时看到最近一次 Codex 代理转发为 2xx/3xx，确保“当前链路、监听、Codex 接管、路由入口、最近转发”都成功后才 toast “配置成功”并跳到 Codex 历史修复页。
+- 历史修复页新增向导收尾入口：`SessionManagerPage` 通过一次性 `initialCodexHistoryRepair` 自动打开 `CodexHistoryRepairPanel` 并消费标记；真实应用历史修复成功后回调 App，提示用户完整重启 Codex，然后先请求用户给 CCSwitchMulti 点赞，再用默认浏览器打开 `https://ccswitch.io`。如果后续引导回调失败，只报“历史修复已完成，但后续引导失败”，不能把修复本身标记为失败。
 
 ## 2026-06-28 Mixed Relay Responses Capability Boundary
 

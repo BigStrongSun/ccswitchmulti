@@ -74,12 +74,14 @@ const SOURCE_OPTIONS = [
 interface CodexHistoryRepairPanelProps {
   initialProjectPath?: string | null;
   onClose?: () => void;
+  onRepairApplied?: () => void | Promise<void>;
 }
 
 /// 在会话管理页中承载 Codex Desktop 历史可见性修复、SQLite 列表和单条 JSONL 详情。
 export function CodexHistoryRepairPanel({
   initialProjectPath,
   onClose,
+  onRepairApplied,
 }: CodexHistoryRepairPanelProps) {
   const [codexHome, setCodexHome] = useState("");
   const [stateDbPath, setStateDbPath] = useState("");
@@ -254,6 +256,14 @@ export function CodexHistoryRepairPanel({
       setRepairResult(result);
       if (dryRun) {
         setLastPreviewKey(currentRepairKey);
+      } else {
+        try {
+          await onRepairApplied?.();
+        } catch (callbackError) {
+          toast.error(
+            `历史修复已完成，但后续引导失败：${extractErrorMessage(callbackError) || String(callbackError)}`,
+          );
+        }
       }
     } catch (error) {
       setRepairError(extractErrorMessage(error) || String(error));
