@@ -33,11 +33,14 @@ use bytes::Bytes;
 use futures::StreamExt;
 use http::Extensions;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tauri::Manager;
 use tokio::sync::RwLock;
 
 const PROXY_AUTH_PLACEHOLDER: &str = "PROXY_MANAGED";
+const CODEX_RESPONSES_LITE_FALLBACK_TTL: Duration = Duration::from_secs(30 * 60);
 
 pub struct ForwardResult {
     pub response: ProxyResponse,
@@ -119,6 +122,12 @@ pub struct RequestForwarder {
     optimizer_config: OptimizerConfig,
     /// Copilot 优化器配置
     copilot_optimizer_config: CopilotOptimizerConfig,
+    /// Codex Responses-Lite 上游能力负缓存。
+    ///
+    /// key 按 provider + 上游 URL path + 模型隔离；value 是过期时间。命中时直接
+    /// 去掉 `x-openai-internal-codex-responses-lite`，过期后重新带头探测，避免每次
+    /// 请求都先失败一次，也避免永久禁用未来可能支持 Lite 的上游。
+    codex_responses_lite_fallbacks: Arc<RwLock<HashMap<String, Instant>>>,
     /// 非流式请求超时（秒）
     non_streaming_timeout: std::time::Duration,
     /// 流式请求响应头等待超时（秒）
@@ -214,12 +223,39 @@ impl RequestForwarder {
             rectifier_config,
             optimizer_config,
             copilot_optimizer_config,
+            codex_responses_lite_fallbacks: Arc::new(RwLock::new(HashMap::new())),
             non_streaming_timeout: std::time::Duration::from_secs(non_streaming_timeout),
             streaming_first_byte_timeout: std::time::Duration::from_secs(
                 streaming_first_byte_timeout,
             ),
             max_attempts,
         }
+    }
+
+    /// 判断当前 Codex Responses-Lite fallback 负缓存是否仍然有效。
+    ///
+    /// 参数:
+    /// - `key`: 已按 provider、上游 URL 与模型归一化后的缓存 key。
+    /// 返回:
+    /// - `true` 表示本次请求应直接去掉 Lite 头；`false` 表示应带头重新探测。
+    /// 副作用:
+    /// - 如果缓存条目已经过期，会顺手删除，避免内存里长期保留无效能力结果。
+    async fn codex_responses_lite_fallback_active(&self, key: &str) -> bool {
+        let mut fallbacks = self.codex_responses_lite_fallbacks.write().await;
+        codex_responses_lite_fallback_active_at(&mut fallbacks, key, Instant::now())
+    }
+
+    /// 记录一个短期 Responses-Lite fallback 负缓存。
+    ///
+    /// 只有上游明确返回 Lite 不支持错误后才调用；缓存过期后下一次请求会重新带头
+    /// 探测，防止第三方上游未来支持该协议后仍被永久去头。
+    async fn mark_codex_responses_lite_fallback(&self, key: String) {
+        let now = Instant::now();
+        let mut fallbacks = self.codex_responses_lite_fallbacks.write().await;
+        if fallbacks.len() > 512 {
+            fallbacks.retain(|_, expires_at| *expires_at > now);
+        }
+        fallbacks.insert(key, now + CODEX_RESPONSES_LITE_FALLBACK_TTL);
     }
 
     async fn record_success_result(
@@ -2135,6 +2171,34 @@ impl RequestForwarder {
             .get("model")
             .and_then(|v| v.as_str())
             .unwrap_or("<none>");
+        let responses_lite_fallback_key =
+            codex_responses_lite_fallback_key(&provider.id, &url, request_model);
+        if matches!(app_type, AppType::Codex)
+            && ordered_headers.contains_key(http::HeaderName::from_static(
+                "x-openai-internal-codex-responses-lite",
+            ))
+            && self
+                .codex_responses_lite_fallback_active(&responses_lite_fallback_key)
+                .await
+        {
+            ordered_headers.remove(http::HeaderName::from_static(
+                "x-openai-internal-codex-responses-lite",
+            ));
+            log::info!(
+                "[{tag}] 命中 Codex Responses-Lite fallback 缓存，按 provider/url/model 直接去头发送 (model={request_model})"
+            );
+            if let Some(trace_id) = codex_trace_id.as_deref() {
+                super::codex_router_log::append_event(
+                    "responses_lite_fallback_cache_hit",
+                    &[
+                        ("trace", trace_id.to_string()),
+                        ("session", self.session_id.clone()),
+                        ("model", request_model.to_string()),
+                        ("provider", provider.id.clone()),
+                    ],
+                );
+            }
+        }
         log::info!("[{tag}] >>> 请求 URL: {url} (model={request_model})");
         if log::log_enabled!(log::Level::Debug) {
             log::debug!(
@@ -2285,6 +2349,8 @@ impl RequestForwarder {
                 status_code,
                 body_text.as_deref(),
             ) {
+                self.mark_codex_responses_lite_fallback(responses_lite_fallback_key.clone())
+                    .await;
                 let mut retry_headers = ordered_headers.clone();
                 retry_headers.remove(http::HeaderName::from_static(
                     "x-openai-internal-codex-responses-lite",
@@ -3050,6 +3116,55 @@ fn should_retry_without_codex_responses_lite_header(
             .unwrap_or(false)
 }
 
+/// 生成 Codex Responses-Lite fallback 的能力缓存 key。
+///
+/// 参数:
+/// - `provider_id`: 已解析后的 effective provider id，避免不同上游互相污染。
+/// - `url`: 实际请求 URL，只保留 scheme/host/port/path，忽略 query 中可能出现的敏感参数。
+/// - `model`: 实际请求模型；Lite 支持通常是模型维度能力，不能只按 provider 缓存。
+/// 返回:
+/// - 稳定字符串 key，用于短期负缓存。
+fn codex_responses_lite_fallback_key(provider_id: &str, url: &str, model: &str) -> String {
+    let upstream_scope = url
+        .parse::<http::Uri>()
+        .ok()
+        .and_then(|uri| {
+            let scheme = uri.scheme_str().unwrap_or("http").to_ascii_lowercase();
+            let host = uri.host()?.to_ascii_lowercase();
+            let port = uri
+                .port_u16()
+                .map(|port| format!(":{port}"))
+                .unwrap_or_default();
+            Some(format!("{scheme}://{host}{port}{}", uri.path()))
+        })
+        .unwrap_or_else(|| url.trim().to_ascii_lowercase());
+    format!(
+        "{}|{}|{}",
+        provider_id.trim(),
+        upstream_scope,
+        model.trim().to_ascii_lowercase()
+    )
+}
+
+/// 判断 fallback 负缓存条目在指定时间点是否有效。
+///
+/// 副作用:
+/// - 过期条目会被删除，避免缓存随着模型/上游组合不断增长。
+fn codex_responses_lite_fallback_active_at(
+    fallbacks: &mut HashMap<String, Instant>,
+    key: &str,
+    now: Instant,
+) -> bool {
+    match fallbacks.get(key).copied() {
+        Some(expires_at) if expires_at > now => true,
+        Some(_) => {
+            fallbacks.remove(key);
+            false
+        }
+        None => false,
+    }
+}
+
 /// 发送一次上游请求，不做业务级重试。
 ///
 /// 调用方负责决定是否根据错误体重放请求；这里只封装 reqwest/hyper 两条传输路径，
@@ -3554,8 +3669,6 @@ mod tests {
     use bytes::Bytes;
     use http::StatusCode;
     use serde_json::json;
-    use std::collections::HashMap;
-    use std::time::Duration;
 
     fn test_provider_with_type(provider_type: Option<&str>) -> Provider {
         Provider {
@@ -3597,6 +3710,7 @@ mod tests {
             rectifier_config: RectifierConfig::default(),
             optimizer_config: OptimizerConfig::default(),
             copilot_optimizer_config: CopilotOptimizerConfig::default(),
+            codex_responses_lite_fallbacks: Arc::new(RwLock::new(HashMap::new())),
             non_streaming_timeout,
             streaming_first_byte_timeout,
             max_attempts: 1,
@@ -3656,6 +3770,57 @@ mod tests {
 
         assert!(is_codex_responses_lite_header(&lite_header));
         assert!(!is_codex_responses_lite_header(&custom_header));
+    }
+
+    // 验证 fallback key 按 provider、上游 path 和模型隔离，避免一个模型失败后误伤其它模型。
+    #[test]
+    fn codex_responses_lite_fallback_key_scopes_provider_url_and_model() {
+        let key_a = codex_responses_lite_fallback_key(
+            "provider-a",
+            "https://api.example.com/v1/responses?token=secret",
+            "gpt-5.5",
+        );
+        let key_b = codex_responses_lite_fallback_key(
+            "provider-a",
+            "https://api.example.com/v1/responses?token=other",
+            "gpt-5.5",
+        );
+        let key_other_model = codex_responses_lite_fallback_key(
+            "provider-a",
+            "https://api.example.com/v1/responses",
+            "gpt-5.4",
+        );
+        let key_other_provider = codex_responses_lite_fallback_key(
+            "provider-b",
+            "https://api.example.com/v1/responses",
+            "gpt-5.5",
+        );
+
+        assert_eq!(key_a, key_b);
+        assert_ne!(key_a, key_other_model);
+        assert_ne!(key_a, key_other_provider);
+        assert!(!key_a.contains("secret"));
+    }
+
+    // 验证短期负缓存命中期间有效，过期后会自动删除并允许下一次重新带头探测。
+    #[test]
+    fn codex_responses_lite_fallback_cache_expires() {
+        let now = Instant::now();
+        let key = "provider|https://api.example.com/v1/responses|gpt-5.5".to_string();
+        let mut fallbacks = HashMap::new();
+        fallbacks.insert(key.clone(), now + CODEX_RESPONSES_LITE_FALLBACK_TTL);
+
+        assert!(codex_responses_lite_fallback_active_at(
+            &mut fallbacks,
+            &key,
+            now + Duration::from_secs(60)
+        ));
+        assert!(!codex_responses_lite_fallback_active_at(
+            &mut fallbacks,
+            &key,
+            now + CODEX_RESPONSES_LITE_FALLBACK_TTL + Duration::from_secs(1)
+        ));
+        assert!(!fallbacks.contains_key(&key));
     }
 
     #[test]
