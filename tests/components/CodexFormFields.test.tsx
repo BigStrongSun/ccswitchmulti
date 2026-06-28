@@ -276,7 +276,7 @@ describe("CodexFormFields local model routing", () => {
     });
   });
 
-  it("auto-generates split routing after fetching mixed relay models", async () => {
+  it("prompts before generating split routing after fetching mixed relay models", async () => {
     vi.mocked(fetchModelsForConfig).mockResolvedValueOnce([
       { id: "gpt-5.5", ownedBy: null, contextWindow: 272000 },
       { id: "qwen3.6", ownedBy: null, contextWindow: 128000 },
@@ -289,6 +289,14 @@ describe("CodexFormFields local model routing", () => {
     } = renderAutoSplitHarness();
 
     fireEvent.click(screen.getByRole("button", { name: "providerForm.fetchModels" }));
+
+    expect(await screen.findByText("检测到混合协议模型")).toBeInTheDocument();
+    expect(screen.getByText("Relay-responses")).toBeInTheDocument();
+    expect(screen.getByText("Relay-chat")).toBeInTheDocument();
+    expect(onRoutingChange).not.toHaveBeenCalled();
+    expect(latestRouting().routes).toHaveLength(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "确认生成路由" }));
 
     await waitFor(() => {
       expect(onRoutingChange).toHaveBeenCalledWith(
@@ -312,6 +320,32 @@ describe("CodexFormFields local model routing", () => {
     });
     expect(onTakeoverEnabledChange).toHaveBeenCalledWith(true);
     expect(onApiFormatChange).toHaveBeenCalledWith("openai_responses");
+  });
+
+  it("keeps routing untouched when mixed relay split prompt is cancelled", async () => {
+    vi.mocked(fetchModelsForConfig).mockResolvedValueOnce([
+      { id: "gpt-5.5", ownedBy: null, contextWindow: 272000 },
+      { id: "qwen3.6", ownedBy: null, contextWindow: 128000 },
+    ]);
+    const {
+      latestRouting,
+      onRoutingChange,
+      onTakeoverEnabledChange,
+      onApiFormatChange,
+    } = renderAutoSplitHarness();
+
+    fireEvent.click(screen.getByRole("button", { name: "providerForm.fetchModels" }));
+
+    expect(await screen.findByText("检测到混合协议模型")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "暂不拆分" }));
+
+    await waitFor(() => {
+      expect(screen.queryByText("检测到混合协议模型")).not.toBeInTheDocument();
+    });
+    expect(onRoutingChange).not.toHaveBeenCalled();
+    expect(latestRouting().routes).toHaveLength(0);
+    expect(onTakeoverEnabledChange).not.toHaveBeenCalled();
+    expect(onApiFormatChange).not.toHaveBeenCalled();
   });
 
   it("keeps the previous model as upstream when the visible catalog model is renamed", async () => {

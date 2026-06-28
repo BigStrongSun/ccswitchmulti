@@ -412,6 +412,8 @@ export function CodexFormFields({
 
   const [fetchedModels, setFetchedModels] = useState<FetchedModel[]>([]);
   const [isFetchingModels, setIsFetchingModels] = useState(false);
+  const [pendingSplitRouting, setPendingSplitRouting] =
+    useState<CodexRoutingConfig | null>(null);
   const [editingRouteIndex, setEditingRouteIndex] = useState<number | null>(
     null,
   );
@@ -630,15 +632,7 @@ export function CodexFormFields({
             models,
           });
           if (splitRouting) {
-            onTakeoverEnabledChange(true);
-            onApiFormatChange("openai_responses");
-            const rows = splitRouting.routes?.map((route) => createRoutingRow(route)) ?? [];
-            setRoutingRows(rows);
-            lastSentRoutingRef.current = splitRouting;
-            onCodexRoutingChange(splitRouting);
-            toast.info(
-              `检测到 GPT 与非 GPT 混合模型，已自动生成 ${providerName?.trim() || "provider"}-responses / ${providerName?.trim() || "provider"}-chat 两条路由。`,
-            );
+            setPendingSplitRouting(splitRouting);
           }
         }
         if (models.length === 0) {
@@ -665,8 +659,6 @@ export function CodexFormFields({
     onCatalogModelsChange,
     onSpawnAgentModelsChange,
     onCodexRoutingChange,
-    onTakeoverEnabledChange,
-    onApiFormatChange,
     codexRouting.routes,
     spawnAgentModels.length,
     t,
@@ -789,6 +781,27 @@ export function CodexFormFields({
     [onSpawnAgentModelsChange, spawnAgentModels],
   );
 
+  const handleConfirmSplitRouting = useCallback(() => {
+    if (!pendingSplitRouting || !onCodexRoutingChange) return;
+    onTakeoverEnabledChange(true);
+    onApiFormatChange("openai_responses");
+    const rows =
+      pendingSplitRouting.routes?.map((route) => createRoutingRow(route)) ?? [];
+    setRoutingRows(rows);
+    lastSentRoutingRef.current = pendingSplitRouting;
+    onCodexRoutingChange(pendingSplitRouting);
+    setPendingSplitRouting(null);
+    toast.info(
+      `已生成 ${providerName?.trim() || "provider"}-responses / ${providerName?.trim() || "provider"}-chat 两条路由。`,
+    );
+  }, [
+    onApiFormatChange,
+    onCodexRoutingChange,
+    onTakeoverEnabledChange,
+    pendingSplitRouting,
+    providerName,
+  ]);
+
   // 路由行的增删改必须同步写回父表单，避免用户切换开关后立即保存时仍提交上一帧旧值。
   const publishRoutingRows = useCallback(
     (
@@ -870,6 +883,13 @@ export function CodexFormFields({
   const editingRouteSupportsImage =
     editingRoute?.capabilities?.inputModalities?.includes("image") ??
     !editingRouteTextOnly;
+  const splitRoutingProviderName = providerName?.trim() || "provider";
+  const pendingResponsesRoute = pendingSplitRouting?.routes?.find(
+    (route) => route.id === "auto-responses",
+  );
+  const pendingChatRoute = pendingSplitRouting?.routes?.find(
+    (route) => route.id === "auto-chat",
+  );
 
   const renderCatalogActionButtons = (onAdd: () => void, addLabel: string) => (
     <div className="flex gap-1">
@@ -1099,6 +1119,69 @@ export function CodexFormFields({
           </div>
         </div>
       )}
+
+      <Dialog
+        open={Boolean(pendingSplitRouting)}
+        onOpenChange={(open) => {
+          if (!open) setPendingSplitRouting(null);
+        }}
+      >
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>检测到混合协议模型</DialogTitle>
+            <DialogDescription>
+              当前中转同时返回了 GPT-like 模型和非 GPT-like 模型。建议拆成
+              Responses 与 Chat 两条路由，避免不支持 Responses 的模型在 Codex
+              请求里失败。确认后才会写入路由配置；暂不拆分会保留已获取的模型列表。
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-3 px-6 pb-2">
+            <div className="rounded-md border border-emerald-500/40 bg-emerald-500/10 p-3">
+              <div className="flex flex-wrap items-center gap-2 text-sm font-medium">
+                <span>{`${splitRoutingProviderName}-responses`}</span>
+                <span className="rounded bg-background/70 px-1.5 py-0.5 text-[11px] text-muted-foreground">
+                  OpenAI Responses
+                </span>
+                <span className="rounded bg-background/70 px-1.5 py-0.5 text-[11px] text-muted-foreground">
+                  不做模型映射
+                </span>
+              </div>
+              <p className="mt-1 text-xs text-muted-foreground">
+                匹配模型：
+                {pendingResponsesRoute?.match.models?.join(", ") || "-"}
+              </p>
+            </div>
+            <div className="rounded-md border border-sky-500/40 bg-sky-500/10 p-3">
+              <div className="flex flex-wrap items-center gap-2 text-sm font-medium">
+                <span>{`${splitRoutingProviderName}-chat`}</span>
+                <span className="rounded bg-background/70 px-1.5 py-0.5 text-[11px] text-muted-foreground">
+                  OpenAI Chat Completions
+                </span>
+                <span className="rounded bg-background/70 px-1.5 py-0.5 text-[11px] text-muted-foreground">
+                  启用本地转换
+                </span>
+              </div>
+              <p className="mt-1 text-xs text-muted-foreground">
+                匹配模型：{pendingChatRoute?.match.models?.join(", ") || "-"}
+              </p>
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setPendingSplitRouting(null)}
+            >
+              暂不拆分
+            </Button>
+            <Button type="button" onClick={handleConfirmSplitRouting}>
+              确认生成路由
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog
         open={Boolean(editingRoute)}
