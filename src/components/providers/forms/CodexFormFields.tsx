@@ -63,6 +63,8 @@ interface EndpointCandidate {
 
 interface CodexFormFieldsProps {
   providerId?: string;
+  // 当前表单里的 provider 名称；自动生成混合协议 route 标签时使用。
+  providerName?: string;
   // API Key
   codexApiKey: string;
   onApiKeyChange: (key: string) => void;
@@ -284,8 +286,91 @@ function mergeFetchedModelsIntoCatalogRows(
   return next;
 }
 
+// 判断模型名是否大概率属于支持 Responses 的 OpenAI/GPT 系列。
+// 这里故意只做保守启发式，避免把 qwen/deepseek 等中转模型误归到 Responses route。
+export function isLikelyCodexResponsesModel(model: string): boolean {
+  const normalized = model.trim().toLowerCase();
+  if (!normalized) return false;
+  const lastSegment = normalized.split(/[/:]/).filter(Boolean).pop() ?? normalized;
+  return /^(gpt-|gpt\d|o[1345](?:-|$)|chatgpt-|codex-)/.test(lastSegment);
+}
+
+// 将 /models 结果按“原生 Responses 候选”和“需要 Chat 转换候选”分组。
+export function splitFetchedModelsByLikelyCodexProtocol(
+  models: FetchedModel[],
+): { responses: string[]; chat: string[] } {
+  const responses: string[] = [];
+  const chat: string[] = [];
+  const seen = new Set<string>();
+
+  for (const fetched of models) {
+    const id = fetched.id.trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    if (isLikelyCodexResponsesModel(id)) {
+      responses.push(id);
+    } else {
+      chat.push(id);
+    }
+  }
+
+  return { responses, chat };
+}
+
+// 为同一个中转 provider 自动生成二分协议 route：GPT-like 走 Responses，非 GPT-like 走 Chat 转换。
+export function buildSplitCodexRoutingForFetchedModels({
+  providerName,
+  baseUrl,
+  apiKey,
+  models,
+}: {
+  providerName?: string;
+  baseUrl: string;
+  apiKey: string;
+  models: FetchedModel[];
+}): CodexRoutingConfig | null {
+  const split = splitFetchedModelsByLikelyCodexProtocol(models);
+  if (split.responses.length === 0 || split.chat.length === 0) return null;
+
+  const labelBase = providerName?.trim() || "provider";
+  const chatModelMap = Object.fromEntries(split.chat.map((model) => [model, model]));
+
+  return {
+    enabled: true,
+    defaultRouteId: "auto-responses",
+    routes: [
+      {
+        id: "auto-responses",
+        label: `${labelBase}-responses`,
+        enabled: true,
+        match: { models: split.responses, prefixes: [] },
+        upstream: {
+          baseUrl,
+          apiFormat: "openai_responses",
+          auth: { source: "provider_config" },
+          apiKey,
+        },
+      },
+      {
+        id: "auto-chat",
+        label: `${labelBase}-chat`,
+        enabled: true,
+        match: { models: split.chat, prefixes: [] },
+        upstream: {
+          baseUrl,
+          apiFormat: "openai_chat",
+          auth: { source: "provider_config" },
+          apiKey,
+          modelMap: chatModelMap,
+        },
+      },
+    ],
+  };
+}
+
 export function CodexFormFields({
   providerId,
+  providerName,
   codexApiKey,
   onApiKeyChange,
   category,
@@ -533,6 +618,29 @@ export function CodexFormFields({
             onSpawnAgentModelsChange(autoSelected);
           }
         }
+        const shouldAutoSplitRouting =
+          models.length > 0 &&
+          onCodexRoutingChange &&
+          (codexRouting.routes?.length ?? 0) === 0;
+        if (shouldAutoSplitRouting) {
+          const splitRouting = buildSplitCodexRoutingForFetchedModels({
+            providerName,
+            baseUrl: codexBaseUrl,
+            apiKey: codexApiKey,
+            models,
+          });
+          if (splitRouting) {
+            onTakeoverEnabledChange(true);
+            onApiFormatChange("openai_responses");
+            const rows = splitRouting.routes?.map((route) => createRoutingRow(route)) ?? [];
+            setRoutingRows(rows);
+            lastSentRoutingRef.current = splitRouting;
+            onCodexRoutingChange(splitRouting);
+            toast.info(
+              `检测到 GPT 与非 GPT 混合模型，已自动生成 ${providerName?.trim() || "provider"}-responses / ${providerName?.trim() || "provider"}-chat 两条路由。`,
+            );
+          }
+        }
         if (models.length === 0) {
           toast.info(t("providerForm.fetchModelsEmpty"));
         } else {
@@ -552,9 +660,14 @@ export function CodexFormFields({
     isFullUrl,
     customUserAgent,
     providerId,
+    providerName,
     websiteUrl,
     onCatalogModelsChange,
     onSpawnAgentModelsChange,
+    onCodexRoutingChange,
+    onTakeoverEnabledChange,
+    onApiFormatChange,
+    codexRouting.routes,
     spawnAgentModels.length,
     t,
   ]);

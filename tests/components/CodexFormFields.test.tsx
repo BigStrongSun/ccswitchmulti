@@ -1,7 +1,11 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useState, type ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { CodexFormFields } from "@/components/providers/forms/CodexFormFields";
+import {
+  buildSplitCodexRoutingForFetchedModels,
+  CodexFormFields,
+  splitFetchedModelsByLikelyCodexProtocol,
+} from "@/components/providers/forms/CodexFormFields";
 import { fetchModelsForConfig } from "@/lib/api/model-fetch";
 import type { CodexCatalogModel, CodexRoutingConfig } from "@/types";
 
@@ -142,7 +146,174 @@ function renderCatalogHarness(initialCatalog: CodexCatalogModel[]) {
   };
 }
 
+function renderAutoSplitHarness() {
+  const onCatalogChange = vi.fn();
+  const onRoutingChange = vi.fn();
+  const onTakeoverEnabledChange = vi.fn();
+  const onApiFormatChange = vi.fn();
+  let latestRouting: CodexRoutingConfig = {
+    enabled: false,
+    defaultRouteId: "",
+    routes: [],
+  };
+
+  function Harness() {
+    const [catalog, setCatalog] = useState<CodexCatalogModel[]>([]);
+    const [routing, setRouting] = useState<CodexRoutingConfig>(latestRouting);
+
+    /// 测试壳同时接住 catalog 和 routing 回写，模拟第一次配置 provider 时的受控状态。
+    const handleCatalogChange = (next: CodexCatalogModel[]) => {
+      onCatalogChange(next);
+      setCatalog(next);
+    };
+    const handleRoutingChange = (next: CodexRoutingConfig) => {
+      latestRouting = next;
+      onRoutingChange(next);
+      setRouting(next);
+    };
+
+    return (
+      <CodexFormFields
+        providerId="relay-provider"
+        providerName="Relay"
+        codexApiKey="sk-relay"
+        onApiKeyChange={vi.fn()}
+        category="custom"
+        shouldShowApiKeyLink={false}
+        websiteUrl=""
+        shouldShowSpeedTest={false}
+        codexBaseUrl="https://relay.example/v1"
+        onBaseUrlChange={vi.fn()}
+        isFullUrl={false}
+        onFullUrlChange={vi.fn()}
+        isEndpointModalOpen={false}
+        onEndpointModalToggle={vi.fn()}
+        autoSelect={false}
+        onAutoSelectChange={vi.fn()}
+        takeoverEnabled={true}
+        onTakeoverEnabledChange={onTakeoverEnabledChange}
+        apiFormat="openai_chat"
+        onApiFormatChange={onApiFormatChange}
+        catalogModels={catalog}
+        onCatalogModelsChange={handleCatalogChange}
+        spawnAgentModels={[]}
+        onSpawnAgentModelsChange={vi.fn()}
+        codexRouting={routing}
+        onCodexRoutingChange={handleRoutingChange}
+        speedTestEndpoints={[]}
+        customUserAgent=""
+        onCustomUserAgentChange={vi.fn()}
+        localProxyHeadersOverride=""
+        onLocalProxyHeadersOverrideChange={vi.fn()}
+        localProxyBodyOverride=""
+        onLocalProxyBodyOverrideChange={vi.fn()}
+      />
+    );
+  }
+
+  return {
+    ...render(<Harness />),
+    latestRouting: () => latestRouting,
+    onCatalogChange,
+    onRoutingChange,
+    onTakeoverEnabledChange,
+    onApiFormatChange,
+  };
+}
+
 describe("CodexFormFields local model routing", () => {
+  it("classifies fetched relay models into Responses and Chat groups", () => {
+    expect(
+      splitFetchedModelsByLikelyCodexProtocol([
+        { id: "openai/gpt-5.5", ownedBy: null },
+        { id: "gpt-5.4-mini", ownedBy: null },
+        { id: "qwen3.6", ownedBy: null },
+        { id: "deepseek-v4-flash", ownedBy: null },
+      ]),
+    ).toEqual({
+      responses: ["openai/gpt-5.5", "gpt-5.4-mini"],
+      chat: ["qwen3.6", "deepseek-v4-flash"],
+    });
+  });
+
+  it("builds split routing with -responses and -chat labels", () => {
+    const routing = buildSplitCodexRoutingForFetchedModels({
+      providerName: "Relay",
+      baseUrl: "https://relay.example/v1",
+      apiKey: "sk-relay",
+      models: [
+        { id: "gpt-5.5", ownedBy: null },
+        { id: "qwen3.6", ownedBy: null },
+      ],
+    });
+
+    expect(routing).toMatchObject({
+      enabled: true,
+      defaultRouteId: "auto-responses",
+      routes: [
+        {
+          id: "auto-responses",
+          label: "Relay-responses",
+          match: { models: ["gpt-5.5"] },
+          upstream: {
+            baseUrl: "https://relay.example/v1",
+            apiFormat: "openai_responses",
+            apiKey: "sk-relay",
+          },
+        },
+        {
+          id: "auto-chat",
+          label: "Relay-chat",
+          match: { models: ["qwen3.6"] },
+          upstream: {
+            baseUrl: "https://relay.example/v1",
+            apiFormat: "openai_chat",
+            apiKey: "sk-relay",
+            modelMap: { "qwen3.6": "qwen3.6" },
+          },
+        },
+      ],
+    });
+  });
+
+  it("auto-generates split routing after fetching mixed relay models", async () => {
+    vi.mocked(fetchModelsForConfig).mockResolvedValueOnce([
+      { id: "gpt-5.5", ownedBy: null, contextWindow: 272000 },
+      { id: "qwen3.6", ownedBy: null, contextWindow: 128000 },
+    ]);
+    const {
+      latestRouting,
+      onRoutingChange,
+      onTakeoverEnabledChange,
+      onApiFormatChange,
+    } = renderAutoSplitHarness();
+
+    fireEvent.click(screen.getByRole("button", { name: "providerForm.fetchModels" }));
+
+    await waitFor(() => {
+      expect(onRoutingChange).toHaveBeenCalledWith(
+        expect.objectContaining({
+          enabled: true,
+          defaultRouteId: "auto-responses",
+        }),
+      );
+      expect(latestRouting().routes).toHaveLength(2);
+    });
+    expect(latestRouting().routes?.[0]).toMatchObject({
+      label: "Relay-responses",
+      upstream: { apiFormat: "openai_responses" },
+    });
+    expect(latestRouting().routes?.[1]).toMatchObject({
+      label: "Relay-chat",
+      upstream: {
+        apiFormat: "openai_chat",
+        modelMap: { "qwen3.6": "qwen3.6" },
+      },
+    });
+    expect(onTakeoverEnabledChange).toHaveBeenCalledWith(true);
+    expect(onApiFormatChange).toHaveBeenCalledWith("openai_responses");
+  });
+
   it("keeps the previous model as upstream when the visible catalog model is renamed", async () => {
     const { latestCatalog } = renderCatalogHarness([
       { model: "gpt-5.5", displayName: "Third-party GPT" },
