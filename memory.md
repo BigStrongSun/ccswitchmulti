@@ -1,5 +1,11 @@
 # CC Switch Repository Memory
 
+## 2026-06-28 Responses-Lite Header Source And Proxy Failure Mechanism
+
+- OpenAI Codex 源码确认 `x-openai-internal-codex-responses-lite` 不是普通透传 header，而是由模型元数据 `ModelInfo.use_responses_lite` 驱动的官方内部协商信号。`codex-rs/protocol/src/openai_models.rs` 定义 `use_responses_lite: bool`；`codex-rs/core/src/client.rs::add_responses_lite_header()` 在该值为 true 时给 HTTP Responses 请求加入 `x-openai-internal-codex-responses-lite: true`；WebSocket 路径则在 `build_ws_client_metadata()` 中写入 `ws_request_header_x_openai_internal_codex_responses_lite=true`。
+- Lite 模式还会改变请求结构，不只是多一个 header：`build_responses_request()` 用 `prompt.get_formatted_input_for_request(model_info.use_responses_lite)`；Lite 为 true 时会去掉图片 detail、把 tools 放进 `AdditionalTools`/instructions 前缀、关闭 `parallel_tool_calls`，并让部分 tool planning 走 Lite 分支。说明服务端会按这个信号选择不同 Responses 处理路径。
+- 中转遇到问题的根因是“协议能力错配”：Codex 官方客户端/后端之间的私有能力信号被 CCSwitchMulti 或其它代理原样转发给第三方 OpenAI-compatible 上游，或者转发给当时尚未支持该模型 Lite 路径的官方后端分支。上游看到 header 后按 Lite 路径校验模型，若该模型/账号/区域/后端版本不支持 Lite，就返回 `This model is not supported when using X-OpenAI-Internal-Codex-Responses-Lite.`。因此第三方上游应剥离，官方托管 `codex_oauth` 路径应保留给官方后端自行协商。
+
 ## 2026-06-28 Responses-Lite Header Strip Policy Narrowed
 
 - 上游作者关闭 `#4727` 后重新评估，原先 `should_strip_codex_private_header_for_upstream(_url, name)` 只看 header 名、无条件剥 `x-openai-internal-codex-responses-lite` 的策略过宽。这个 header 对第三方 OpenAI-compatible / MultiRouter 目标确实是官方私有信号，不应透传；但托管 ChatGPT Codex OAuth 目标属于官方协议路径，应该保留给官方后端自行协商，避免改变 Responses-Lite / prompt cache / 官方内部能力分支。
