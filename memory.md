@@ -1,10 +1,17 @@
 # CC Switch Repository Memory
 
+## 2026-06-28 Responses-Lite Header Strip Policy Narrowed
+
+- 上游作者关闭 `#4727` 后重新评估，原先 `should_strip_codex_private_header_for_upstream(_url, name)` 只看 header 名、无条件剥 `x-openai-internal-codex-responses-lite` 的策略过宽。这个 header 对第三方 OpenAI-compatible / MultiRouter 目标确实是官方私有信号，不应透传；但托管 ChatGPT Codex OAuth 目标属于官方协议路径，应该保留给官方后端自行协商，避免改变 Responses-Lite / prompt cache / 官方内部能力分支。
+- 修正后的边界在 `src-tauri/src/proxy/forwarder.rs`：`should_strip_codex_private_header_for_upstream(app_type, provider, url, name)` 只在 `AppType::Codex` 且 `!provider.is_codex_oauth()` 且 header 名为 `x-openai-internal-codex-responses-lite` 时剥离。非 Codex app 流量不套 Codex 私有 header 策略；托管官方 `codex_oauth` 上游保留该 header；第三方 Codex/OpenAI-compatible 上游继续剥离。
+- 这次验证时主工作区 `src-tauri/tauri.conf.json` 已有未归属脏改，新增 `bundle.windows.nsis.uninstallerIcon` 被当前 `tauri-build` 拒绝，导致主工作区 `cargo test --manifest-path src-tauri\Cargo.toml codex_responses_lite_header --lib` 卡在 build script。为不修改用户的 NSIS/icon 改动，使用临时 detached worktree `C:\Users\sunda\Documents\cc-switch-test-responses-lite` 套同一份 `forwarder.rs` 改动验证：`cargo fmt --manifest-path src-tauri\Cargo.toml --check` 通过；`cargo test --manifest-path src-tauri\Cargo.toml codex_responses_lite_header --lib` 通过 3 个用例：官方托管保留、第三方剥离、非 Codex app 保留。
+
 ## 2026-06-28 Windows Taskbar Icon Install Verification
 
 - 本地 release pipeline 导出的 raw exe `C:\Users\sunda\Documents\LLMservice\最新版ccswitchmulti\windows\raw-exe\CCSwitchMulti_3.16.4-2_x64.exe` 已经正确嵌入 `src-tauri/icons/icon.ico`；用 `System.Drawing.Icon.ExtractAssociatedIcon()` 抽取后和源 `icon.ico` 一致，都是新的白色云/青色底图标。
 - 用户看到 Windows 任务栏仍是旧图标时，优先检查启动路径。开始菜单和桌面快捷方式默认指向安装目录 `%LOCALAPPDATA%\CCSwitchMulti\cc-switch.exe`，而不是导出目录 raw exe。若只运行 raw exe 或只生成导出产物，固定任务栏/开始菜单仍可能从旧安装目录或 Windows 图标缓存读取旧图标。
 - 这次用 `CCSwitchMulti_3.16.4-2_x64-setup.exe /S` 静默安装后，`%LOCALAPPDATA%\CCSwitchMulti\cc-switch.exe` 被替换为 3.16.4-2，内嵌图标抽取结果也变成新图标；监听端口 `15721/15722` 由安装版 `cc-switch.exe` 接管。若任务栏视觉仍旧，剩余边界是 Windows Explorer / 任务栏固定项图标缓存，需要刷新快捷方式或重启 Explorer，而不是重新修 Tauri 图标配置。
+- 进一步固化在 `src-tauri/tauri.conf.json` 的 `bundle.windows.nsis`：显式设置 `installerIcon` / `uninstallerIcon` 为 `icons/icon.ico`，并通过 `src-tauri/nsis/installer-hooks.nsh` 的 `NSIS_HOOK_POSTINSTALL` 重写已存在的开始菜单和桌面快捷方式，把 `IconLocation` 固定为安装目录里的 `cc-switch.exe,0`。验证脚本为 `scripts/verify-windows-install-icon.ps1`，用于比对源 ico、安装目录 exe 内嵌图标和快捷方式图标目标。
 
 ## 2026-06-28 MultiRouter spawn_agent Model Override Visibility Fix
 
