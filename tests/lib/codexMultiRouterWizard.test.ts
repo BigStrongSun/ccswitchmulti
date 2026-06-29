@@ -7,6 +7,7 @@ import {
   classifyWizardConnectivityResult,
   collectWizardModelNameCollisions,
   getWizardConfigIssues,
+  inferWizardApiFormat,
   resolveWizardModelNameCollisions,
 } from "@/lib/codexMultiRouterWizard";
 
@@ -50,9 +51,95 @@ describe("codexMultiRouterWizard helpers", () => {
     ]);
 
     expect(resolvedRelay.settingsConfig.modelCatalog.models[0]).toMatchObject({
-      model: "relay-gpt-5.5",
+      model: "gpt-5.5-relay",
       upstreamModel: "gpt-5.5",
     });
+  });
+
+  it("adds provider-name suffixes to every third-party duplicate when no official source exists", () => {
+    const relayA = provider({
+      id: "3ecd52c8-random",
+      name: "Yansd666 GPT",
+      category: "aggregator",
+      settingsConfig: {
+        modelCatalog: {
+          models: [{ model: "gpt-5.5", upstreamModel: "gpt-5.5" }],
+        },
+      },
+    });
+    const relayB = provider({
+      id: "relay-b",
+      name: "Codex Relay",
+      category: "aggregator",
+      settingsConfig: {
+        modelCatalog: {
+          models: [{ model: "gpt-5.5", upstreamModel: "gpt-5.5" }],
+        },
+      },
+    });
+
+    const [resolvedA, resolvedB] = resolveWizardModelNameCollisions([
+      relayA,
+      relayB,
+    ]);
+
+    expect(resolvedA.settingsConfig.modelCatalog.models[0]).toMatchObject({
+      model: "gpt-5.5-yansd666-gpt",
+      upstreamModel: "gpt-5.5",
+    });
+    expect(resolvedB.settingsConfig.modelCatalog.models[0]).toMatchObject({
+      model: "gpt-5.5-codex-relay",
+      upstreamModel: "gpt-5.5",
+    });
+  });
+
+  it("does not treat OpenAI-compatible third-party relays as official sources", () => {
+    const official = provider({
+      id: "openai",
+      name: "OpenAI",
+      category: "official",
+      settingsConfig: {
+        modelCatalog: {
+          models: [{ model: "gpt-5.5", upstreamModel: "gpt-5.5" }],
+        },
+      },
+    });
+    const compatibleRelay = provider({
+      id: "openai-compatible-relay",
+      name: "OpenAI Compatible Relay",
+      category: "aggregator",
+      settingsConfig: {
+        modelCatalog: {
+          models: [{ model: "gpt-5.5", upstreamModel: "gpt-5.5" }],
+        },
+      },
+    });
+
+    const [, resolvedRelay] = resolveWizardModelNameCollisions([
+      official,
+      compatibleRelay,
+    ]);
+
+    expect(resolvedRelay.settingsConfig.modelCatalog.models[0]).toMatchObject({
+      model: "gpt-5.5-openai-compatible-relay",
+      upstreamModel: "gpt-5.5",
+    });
+  });
+
+  it("uses native Responses routes for official OpenAI GPT/O models even when legacy metadata says chat", () => {
+    const openaiBackup = provider({
+      id: "openai-official-backup",
+      name: "OpenAI Official Backup",
+      category: "official",
+      meta: { apiFormat: "openai_chat" },
+      settingsConfig: {
+        modelCatalog: {
+          models: [{ model: "gpt-5.5", upstreamModel: "gpt-5.5" }],
+        },
+      },
+    });
+
+    expect(inferWizardApiFormat(openaiBackup)).toBe("openai_responses");
   });
 
   it("groups generated routes by provider and infers common model prefixes", () => {

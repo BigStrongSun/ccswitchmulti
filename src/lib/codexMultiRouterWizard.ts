@@ -72,11 +72,14 @@ function isOfficialCodexSource(provider: Provider): boolean {
   const text = `${provider.id} ${provider.name} ${provider.category ?? ""} ${
     provider.meta?.providerType ?? ""
   }`.toLowerCase();
+  const providerType = String(provider.meta?.providerType ?? "").toLowerCase();
+  const idOrName = `${provider.id} ${provider.name}`.toLowerCase();
   return (
     provider.category === "official" ||
-    text.includes("official") ||
-    text.includes("openai") ||
-    text.includes("codex_oauth")
+    providerType.includes("codex_oauth") ||
+    text.includes("codex_oauth") ||
+    idOrName === "openai openai" ||
+    (idOrName.includes("openai") && idOrName.includes("official"))
   );
 }
 
@@ -226,17 +229,42 @@ export function collectWizardModelNameCollisions(
     }));
 }
 
-// 为非官方重名模型生成稳定别名，保留 upstreamModel 指向真实上游模型名。
-function aliasModelName(provider: Provider, modelName: string): string {
-  const providerPrefix =
+// 把 provider 展示名清理成可放进模型 ID 的稳定后缀；优先使用用户能看懂的名称，避免泄露自动生成 ID。
+function providerNameSuffix(provider: Provider): string {
+  const cleanedName = provider.name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  if (cleanedName) return cleanedName;
+  return (
     provider.id
       .trim()
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "")
-      .split("-")
-      .filter(Boolean)[0] || "relay";
-  return `${providerPrefix}-${modelName}`;
+      .replace(/^-+|-+$/g, "") || "provider"
+  );
+}
+
+// 为非官方重名模型生成稳定别名，保留 upstreamModel 指向真实上游模型名。
+function aliasModelName(provider: Provider, modelName: string): string {
+  return `${modelName}-${providerNameSuffix(provider)}`;
+}
+
+// 判断模型目录是否主要是 OpenAI 官方 GPT/O 系列；这些模型应优先保持 Responses 原生链路。
+function hasOpenAiResponsesNativeModels(provider: Provider): boolean {
+  if (!isOfficialCodexSource(provider)) return false;
+  return readWizardModelCatalog(provider).some((model) => {
+    const upstream = (
+      model.upstreamModel ??
+      model.upstream_model ??
+      model.model ??
+      ""
+    )
+      .trim()
+      .toLowerCase();
+    return upstream.startsWith("gpt-") || /^o\d/.test(upstream);
+  });
 }
 
 // 检测多个 provider 暴露的同名模型；官方保留原名，第三方/中转站自动生成可见别名。
@@ -304,9 +332,12 @@ export function inferWizardRoutePrefixes(provider: Provider): string[] {
   return Array.from(prefixes);
 }
 
-// 推断 route 上游协议；显式 meta/apiFormat 优先，未知第三方默认走 Chat Completions。
+// 推断 route 上游协议；官方 GPT/O 模型优先走 Responses，未知第三方默认走 Chat Completions。
 export function inferWizardApiFormat(provider: Provider): CodexApiFormat {
   const config = provider.settingsConfig ?? {};
+  if (hasOpenAiResponsesNativeModels(provider)) {
+    return "openai_responses";
+  }
   return (
     provider.meta?.apiFormat ??
     config.apiFormat ??

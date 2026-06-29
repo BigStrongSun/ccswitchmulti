@@ -119,7 +119,7 @@ const STEPS: WizardStep[] = [
     key: "collisions",
     title: "处理重名模型",
     description:
-      "官方模型保留原名，中转站或第三方同名模型生成可见别名并保留 upstreamModel。",
+      "官方模型保留原名，中转站或第三方同名模型会在模型名后追加 provider 名称并保留 upstreamModel。",
     icon: ShieldAlert,
   },
   {
@@ -1292,7 +1292,7 @@ export function CodexMultiRouterWizard({
                 </Button>
                 <div className="rounded-lg border p-4 text-sm text-muted-foreground">
                   同名策略：官方/订阅模型保留原名；中转站或第三方模型显示成
-                  relay-gpt-5.4-mini 这类别名，upstreamModel
+                  gpt-5.4-mini-relay 这类别名，upstreamModel
                   仍指向真实上游模型名。
                 </div>
                 {modelCollisions.length > 0 && (
