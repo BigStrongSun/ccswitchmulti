@@ -1977,6 +1977,7 @@ export function CodexRouterWorkspacePage({
   onEditProvider,
   onDeletePlan,
   onCreateProvider: _onCreateProvider,
+  onRuntimeReady,
 }: {
   providers: Provider[];
   proxyStatus?: ProxyStatus;
@@ -1988,6 +1989,7 @@ export function CodexRouterWorkspacePage({
   onEditProvider: (provider: Provider) => void;
   onDeletePlan: (provider: Provider) => void;
   onCreateProvider: () => void;
+  onRuntimeReady?: (provider: Provider) => void;
 }) {
   const [activeTab, setActiveTab] = useState<WorkspaceTab>(initialTab);
   const [selectedPlanId, setSelectedPlanId] = useState<string | null>(null);
@@ -2663,6 +2665,7 @@ export function CodexRouterWorkspacePage({
               activeProviderId={activeProviderId}
               onEditPlan={handleEditPlan}
               onDeletePlan={onDeletePlan}
+              onRuntimeReady={onRuntimeReady}
             />
           </TabsContent>
 
@@ -4633,6 +4636,7 @@ function StatusTab({
   activeProviderId,
   onEditPlan,
   onDeletePlan,
+  onRuntimeReady,
 }: {
   selectedPlan: Provider | null;
   selectedRouting: CodexRouting | null;
@@ -4644,6 +4648,7 @@ function StatusTab({
   activeProviderId?: string;
   onEditPlan: (provider: Provider, detail?: string) => void;
   onDeletePlan: (provider: Provider) => void;
+  onRuntimeReady?: (provider: Provider) => void;
 }) {
   const queryClient = useQueryClient();
   const range = useMemo(() => ({ preset: "today" as const }), []);
@@ -4732,6 +4737,8 @@ function StatusTab({
   const latestForwardOk = latestLog
     ? latestLog.statusCode >= 200 && latestLog.statusCode < 400
     : false;
+  // 配置成功不能只看“任意 Codex 请求成功”，必须看到当前 MultiRouter 方案的 route 有成功转发证据。
+  const currentRouteForwardOk = trafficRows.some((row) => row.successCount > 0);
   const listenAddress = proxyStatus
     ? `${proxyStatus.address}:${proxyStatus.port}`
     : "未启动";
@@ -4743,27 +4750,44 @@ function StatusTab({
   const hasEnabledRoutes = selectedRoutes.some(
     ({ route }) => route.enabled !== false,
   );
+  const runtimeStatus = buildMultiRouterRuntimeStatus({
+    selectedPlan,
+    selectedRouting,
+    enabledRouteCount: selectedRoutes.filter(
+      ({ route }) => route.enabled !== false,
+    ).length,
+    isProxyRunning,
+    isCodexTakeoverActive,
+    activeProviderId,
+  });
   const configReady = Boolean(
     isProxyRunning &&
       isCodexTakeoverActive &&
       selectedPlan &&
+      activeProviderId === selectedPlan.id &&
       routeEnabled &&
       hasEnabledRoutes,
   );
-  const trafficVerified =
-    proxyLogs.length > 0 ||
-    routerRequestEvents.length > 0 ||
-    (proxyStatus?.total_requests ?? 0) > 0;
-  const linkOnline = Boolean(configReady && trafficVerified);
+  const trafficVerified = currentRouteForwardOk;
+  const linkOnline = Boolean(runtimeStatus.running && trafficVerified);
   const readinessIssues = [
     !isProxyRunning ? "本地代理未监听" : "",
     !isCodexTakeoverActive ? "Codex live 配置未接管" : "",
     !selectedPlan ? "未选择 MultiRouter provider" : "",
+    selectedPlan && activeProviderId !== selectedPlan.id
+      ? "当前 Codex provider 不是选中的 MultiRouter"
+      : "",
     selectedPlan && !routeEnabled ? "MultiRouter 入口已关闭" : "",
     selectedPlan && routeEnabled && !hasEnabledRoutes
       ? "没有启用的匹配规则"
       : "",
   ].filter(Boolean);
+
+  // 当状态页确认 MultiRouter 配置与真实转发都成功后，通知 App 进入“配置成功 -> 历史修复”收尾流程。
+  useEffect(() => {
+    if (!selectedPlan || !linkOnline || !currentRouteForwardOk) return;
+    onRuntimeReady?.(selectedPlan);
+  }, [currentRouteForwardOk, linkOnline, onRuntimeReady, selectedPlan]);
 
   /// 手动同步 Codex JSONL 会话用量，让子 Agent 统计立即看到最新 token_count。
   async function syncCodexSessionUsage() {
@@ -4919,7 +4943,7 @@ function StatusTab({
                 linkOnline
                   ? "Codex 请求会进入本地代理并按 model 分流"
                   : configReady
-                    ? "配置和监听已就绪，但今天还没有真实代理转发日志"
+                    ? "配置和监听已就绪，等待当前方案的路由转发成功"
                     : readinessIssues.join("；") || "等待状态刷新"
               }
             />
@@ -4944,20 +4968,24 @@ function StatusTab({
               detail={selectedPlan?.name ?? "暂无 MultiRouter provider"}
             />
             <StatusCard
-              ok={Boolean(latestLog && latestForwardOk)}
+              ok={currentRouteForwardOk}
               label="最近转发"
               value={
-                latestLog
-                  ? latestForwardOk
-                    ? `成功 ${latestLog.statusCode}`
-                    : `失败 ${latestLog.statusCode}`
-                  : "暂无请求"
+                currentRouteForwardOk
+                  ? "当前方案成功"
+                  : latestLog
+                    ? latestForwardOk
+                      ? `成功 ${latestLog.statusCode}`
+                      : `失败 ${latestLog.statusCode}`
+                    : "暂无请求"
               }
               detail={
-                latestLog?.errorMessage ||
-                latestLog?.requestModel ||
-                latestLog?.model ||
-                "等待 Codex 请求"
+                currentRouteForwardOk
+                  ? "已确认当前 MultiRouter route 命中并完成上游转发"
+                  : latestLog?.errorMessage ||
+                    latestLog?.requestModel ||
+                    latestLog?.model ||
+                    "等待 Codex 请求"
               }
             />
           </div>
@@ -5318,7 +5346,8 @@ function StatusTab({
 
             <div className="mt-3 rounded-lg border border-border bg-background/70 px-3 py-2 text-xs leading-6 text-muted-foreground dark:border-slate-700 dark:bg-slate-950/20 dark:text-slate-300">
               已读取 {subagentUsage?.totalAgents ?? 0} 个本地子 Agent 会话，
-              归并为 {subagentUsage?.modelStats.length ?? 0} 个模型分组。状态库：
+              归并为 {subagentUsage?.modelStats.length ?? 0}{" "}
+              个模型分组。状态库：
               {subagentUsage?.stateDbPath ?? "未定位"}。
             </div>
           </section>

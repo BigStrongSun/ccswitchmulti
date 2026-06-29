@@ -74,6 +74,43 @@ const renderPage = () => {
   };
 };
 
+/// 渲染 SessionManagerPage 并传入 initialCodexHistoryRepair 等向导收尾相关属性；
+/// 用于验证启用 MultiRouter 后自动跳转历史修复页面的流程。
+function renderPageWithRepair({
+  appId = "codex",
+  initialCodexHistoryRepair = false,
+  onInitialCodexHistoryRepairConsumed,
+  onCodexHistoryRepairCompleted,
+}: {
+  appId?: string;
+  initialCodexHistoryRepair?: boolean;
+  onInitialCodexHistoryRepairConsumed?: () => void;
+  onCodexHistoryRepairCompleted?: () => void | Promise<void>;
+} = {}) {
+  const client = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false },
+      mutations: { retry: false },
+    },
+  });
+
+  return {
+    client,
+    ...render(
+      <QueryClientProvider client={client}>
+        <SessionManagerPage
+          appId={appId}
+          initialCodexHistoryRepair={initialCodexHistoryRepair}
+          onInitialCodexHistoryRepairConsumed={
+            onInitialCodexHistoryRepairConsumed
+          }
+          onCodexHistoryRepairCompleted={onCodexHistoryRepairCompleted}
+        />
+      </QueryClientProvider>,
+    ),
+  };
+}
+
 const openSearch = () => {
   const searchButton = Array.from(screen.getAllByRole("button")).find(
     (button) => button.querySelector(".lucide-search"),
@@ -87,8 +124,8 @@ const openSearch = () => {
 };
 
 const closeSearch = () => {
-  const closeButton = Array.from(screen.getAllByRole("button")).find(
-    (button) => button.querySelector(".lucide-x"),
+  const closeButton = Array.from(screen.getAllByRole("button")).find((button) =>
+    button.querySelector(".lucide-x"),
   );
 
   if (!closeButton) {
@@ -329,5 +366,56 @@ describe("SessionManagerPage", () => {
       resolveInvalidate();
     });
     invalidateSpy.mockRestore();
+  });
+
+  // initialCodexHistoryRepair=true 且 appId="codex" 时：自动打开 Codex 历史修复面板，并消费一次性标记。
+  it("opens CodexHistoryRepairPanel and consumes initialCodexHistoryRepair for codex app", async () => {
+    const onConsumed = vi.fn();
+    const onRepairCompleted = vi.fn();
+
+    renderPageWithRepair({
+      appId: "codex",
+      initialCodexHistoryRepair: true,
+      onInitialCodexHistoryRepairConsumed: onConsumed,
+      onCodexHistoryRepairCompleted: onRepairCompleted,
+    });
+
+    // 等待 SessionManagerPage 的 useEffect 渲染 CodexHistoryRepairPanel
+    await waitFor(() => {
+      expect(screen.getByText("Codex 历史修复")).toBeInTheDocument();
+    });
+
+    expect(
+      screen.getByText(
+        "MultiRouter 已配置成功，现在按顺序完成历史记录自动修复",
+      ),
+    ).toBeInTheDocument();
+
+    // 一次性标记应已被消费
+    expect(onConsumed).toHaveBeenCalledTimes(1);
+
+    // 回调已传递到面板（面板在此测试环境中不会真正触发 Tauri 调用，所以还未调用）
+    expect(onRepairCompleted).not.toHaveBeenCalled();
+  });
+
+  // 非 codex appId 即使 initialCodexHistoryRepair=true 也不应打开历史修复面板。
+  it("does not open CodexHistoryRepairPanel when appId is not codex", async () => {
+    const onConsumed = vi.fn();
+
+    renderPageWithRepair({
+      appId: "claude",
+      initialCodexHistoryRepair: true,
+      onInitialCodexHistoryRepairConsumed: onConsumed,
+    });
+
+    // 等待 SessionManagerPage 渲染；不应出现 Codex 历史修复 UI
+    await waitFor(() => {
+      expect(
+        screen.getByText("sessionManager.sessionList"),
+      ).toBeInTheDocument();
+    });
+
+    expect(screen.queryByText("Codex 历史修复")).not.toBeInTheDocument();
+    expect(onConsumed).not.toHaveBeenCalled();
   });
 });

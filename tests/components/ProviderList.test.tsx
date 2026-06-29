@@ -193,6 +193,64 @@ describe("ProviderList Component", () => {
     expect(handleCreate).toHaveBeenCalledTimes(1);
   });
 
+  it("shows Codex MultiRouter wizard entry even when provider list is empty", () => {
+    const handleStartWizard = vi.fn();
+    useDragSortMock.mockReturnValueOnce({
+      sortedProviders: [],
+      sensors: [],
+      handleDragEnd: vi.fn(),
+    });
+
+    renderWithQueryClient(
+      <ProviderList
+        providers={{}}
+        currentProviderId=""
+        appId="codex"
+        onSwitch={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onDuplicate={vi.fn()}
+        onOpenWebsite={vi.fn()}
+        onStartCodexMultiRouterWizard={handleStartWizard}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "配置多路模型" }));
+
+    expect(handleStartWizard).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows Codex MultiRouter wizard entry at the bottom of non-empty Codex lists", () => {
+    const provider = createProvider({ id: "codex-openai", name: "OpenAI" });
+    const handleStartWizard = vi.fn();
+    useDragSortMock.mockReturnValue({
+      sortedProviders: [provider],
+      sensors: [],
+      handleDragEnd: vi.fn(),
+    });
+
+    renderWithQueryClient(
+      <ProviderList
+        providers={{ "codex-openai": provider }}
+        currentProviderId=""
+        appId="codex"
+        onSwitch={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onDuplicate={vi.fn()}
+        onOpenWebsite={vi.fn()}
+        onStartCodexMultiRouterWizard={handleStartWizard}
+      />,
+    );
+
+    expect(
+      screen.getByTestId("provider-card-codex-openai"),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "配置多路模型" }));
+
+    expect(handleStartWizard).toHaveBeenCalledTimes(1);
+  });
+
   it("should render in order returned by useDragSort and pass through action callbacks", () => {
     const providerA = createProvider({ id: "a", name: "A" });
     const providerB = createProvider({ id: "b", name: "B" });
@@ -235,12 +293,12 @@ describe("ProviderList Component", () => {
     // Drag attributes from useSortable
     expect(
       providerCardRenderSpy.mock.calls[0][0].dragHandleProps?.attributes[
-      "data-dnd-id"
+        "data-dnd-id"
       ],
     ).toBe("b");
     expect(
       providerCardRenderSpy.mock.calls[1][0].dragHandleProps?.attributes[
-      "data-dnd-id"
+        "data-dnd-id"
       ],
     ).toBe("a");
 

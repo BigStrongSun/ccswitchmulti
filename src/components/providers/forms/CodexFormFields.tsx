@@ -34,12 +34,15 @@ import {
   Loader2,
   Pencil,
   Plus,
+  Route,
   Trash2,
 } from "lucide-react";
 import EndpointSpeedTest from "./EndpointSpeedTest";
 import { ApiKeySection, EndpointField, ModelDropdown } from "./shared";
 import {
   fetchModelsForConfig,
+  probeCodexChatForConfig,
+  probeCodexResponsesForConfig,
   showFetchModelsError,
   type FetchedModel,
 } from "@/lib/api/model-fetch";
@@ -63,6 +66,8 @@ interface EndpointCandidate {
 
 interface CodexFormFieldsProps {
   providerId?: string;
+  // 当前表单里的 provider 名称；自动生成混合协议 route 标签时使用。
+  providerName?: string;
   // API Key
   codexApiKey: string;
   onApiKeyChange: (key: string) => void;
@@ -105,6 +110,9 @@ interface CodexFormFieldsProps {
   onSpawnAgentModelsChange?: (models: string[]) => void;
   codexRouting?: CodexRoutingConfig;
   onCodexRoutingChange?: (routing: CodexRoutingConfig) => void;
+  onProviderSplitSuggestionChange?: (
+    suggestion: CodexProviderSplitSuggestion | null,
+  ) => void;
 
   // Speed Test Endpoints
   speedTestEndpoints: EndpointCandidate[];
@@ -121,6 +129,12 @@ interface CodexFormFieldsProps {
 type CodexCatalogRow = CodexCatalogModel & { rowId: string };
 
 type CodexRoutingRow = CodexRoutingRoute & { rowId: string };
+
+export interface CodexProviderSplitSuggestion {
+  providerName: string;
+  responsesModels: string[];
+  chatModels: string[];
+}
 
 function createCatalogRow(seed?: Partial<CodexCatalogModel>): CodexCatalogRow {
   return {
@@ -284,8 +298,60 @@ function mergeFetchedModelsIntoCatalogRows(
   return next;
 }
 
+// 判断模型名是否大概率属于支持 Responses 的 OpenAI/GPT 系列。
+// 这里故意只做保守启发式，避免把 qwen/deepseek 等中转模型误归到 Responses route。
+export function isLikelyCodexResponsesModel(model: string): boolean {
+  const normalized = model.trim().toLowerCase();
+  if (!normalized) return false;
+  const lastSegment =
+    normalized.split(/[/:]/).filter(Boolean).pop() ?? normalized;
+  return /^(gpt-|gpt\d|o[1345](?:-|$)|chatgpt-|codex-)/.test(lastSegment);
+}
+
+// 将 /models 结果按“原生 Responses 候选”和“需要 Chat 转换候选”分组。
+export function splitFetchedModelsByLikelyCodexProtocol(
+  models: FetchedModel[],
+): { responses: string[]; chat: string[] } {
+  const responses: string[] = [];
+  const chat: string[] = [];
+  const seen = new Set<string>();
+
+  for (const fetched of models) {
+    const id = fetched.id.trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    if (isLikelyCodexResponsesModel(id)) {
+      responses.push(id);
+    } else {
+      chat.push(id);
+    }
+  }
+
+  return { responses, chat };
+}
+
+// 为同一个中转 provider 生成“拆成两个 provider”的建议；GPT-like 走 Responses，非 GPT-like 走 Chat 转换。
+export function buildSplitCodexProviderSuggestionForFetchedModels({
+  providerName,
+  models,
+}: {
+  providerName?: string;
+  models: FetchedModel[];
+}): CodexProviderSplitSuggestion | null {
+  const split = splitFetchedModelsByLikelyCodexProtocol(models);
+  if (split.responses.length === 0 || split.chat.length === 0) return null;
+
+  const labelBase = providerName?.trim() || "provider";
+  return {
+    providerName: labelBase,
+    responsesModels: split.responses,
+    chatModels: split.chat,
+  };
+}
+
 export function CodexFormFields({
   providerId,
+  providerName,
   codexApiKey,
   onApiKeyChange,
   category,
@@ -315,6 +381,7 @@ export function CodexFormFields({
   onSpawnAgentModelsChange,
   codexRouting = { enabled: false, defaultRouteId: "", routes: [] },
   onCodexRoutingChange,
+  onProviderSplitSuggestionChange,
   speedTestEndpoints,
   customUserAgent,
   onCustomUserAgentChange,
@@ -327,6 +394,12 @@ export function CodexFormFields({
 
   const [fetchedModels, setFetchedModels] = useState<FetchedModel[]>([]);
   const [isFetchingModels, setIsFetchingModels] = useState(false);
+  const [isProtocolProbeConfirmOpen, setIsProtocolProbeConfirmOpen] =
+    useState(false);
+  const [isProbingProtocol, setIsProbingProtocol] = useState(false);
+  const [protocolProbeSummary, setProtocolProbeSummary] = useState("");
+  const [pendingSplitRouting, setPendingSplitRouting] =
+    useState<CodexProviderSplitSuggestion | null>(null);
   const [editingRouteIndex, setEditingRouteIndex] = useState<number | null>(
     null,
   );
@@ -533,6 +606,20 @@ export function CodexFormFields({
             onSpawnAgentModelsChange(autoSelected);
           }
         }
+        const shouldAutoSplitRouting =
+          models.length > 0 &&
+          onProviderSplitSuggestionChange &&
+          (codexRouting.routes?.length ?? 0) === 0;
+        if (shouldAutoSplitRouting) {
+          const splitRouting =
+            buildSplitCodexProviderSuggestionForFetchedModels({
+              providerName,
+              models,
+            });
+          if (splitRouting) {
+            setPendingSplitRouting(splitRouting);
+          }
+        }
         if (models.length === 0) {
           toast.info(t("providerForm.fetchModelsEmpty"));
         } else {
@@ -552,10 +639,112 @@ export function CodexFormFields({
     isFullUrl,
     customUserAgent,
     providerId,
+    providerName,
     websiteUrl,
     onCatalogModelsChange,
     onSpawnAgentModelsChange,
+    onProviderSplitSuggestionChange,
+    codexRouting.routes,
     spawnAgentModels.length,
+    t,
+  ]);
+
+  const handleProtocolProbe = useCallback(async () => {
+    if (!codexBaseUrl || !codexApiKey) {
+      showFetchModelsError(null, t, {
+        hasApiKey: !!codexApiKey,
+        hasBaseUrl: !!codexBaseUrl,
+      });
+      return;
+    }
+    const models = Array.from(
+      new Set(
+        [
+          ...catalogRowsRef.current.map((row) => catalogRowUpstreamModel(row)),
+          ...fetchedModels.map((model) => model.id.trim()),
+        ].filter(Boolean),
+      ),
+    );
+    if (models.length === 0) {
+      toast.warning("请先获取模型列表，或在模型目录里添加至少一个模型。");
+      return;
+    }
+
+    setIsProtocolProbeConfirmOpen(false);
+    setIsProbingProtocol(true);
+    setProtocolProbeSummary("");
+    let responsesPass = 0;
+    let chatPass = 0;
+    const failures: string[] = [];
+    try {
+      for (const model of models) {
+        const responses = await probeCodexResponsesForConfig(
+          codexBaseUrl,
+          codexApiKey,
+          model,
+          isFullUrl,
+          customUserAgent,
+        );
+        const chat = await probeCodexChatForConfig(
+          codexBaseUrl,
+          codexApiKey,
+          model,
+          isFullUrl,
+          customUserAgent,
+        );
+        if (responses.ok) responsesPass += 1;
+        if (chat.ok) chatPass += 1;
+        if (!responses.ok && !chat.ok) {
+          failures.push(
+            `${model}: Responses=${responses.detail}; Chat=${chat.detail}`,
+          );
+        }
+      }
+
+      const failureDetail =
+        failures.length > 0
+          ? ` 另有 ${failures.length} 个模型双协议都未通过：${failures
+              .slice(0, 3)
+              .join("；")}${failures.length > 3 ? "；..." : ""}`
+          : "";
+
+      if (responsesPass > 0) {
+        onApiFormatChange("openai_responses");
+        const summary =
+          chatPass > 0
+            ? `Responses 和 Chat 的基础请求都有模型可用，已优先切换为 Responses。Responses 通过 ${responsesPass}/${models.length}，Chat 通过 ${chatPass}/${models.length}。通过不等于完整 Codex 功能验证。${failureDetail}`
+            : `只有 Responses 基础请求可用，已切换为 Responses。Responses 通过 ${responsesPass}/${models.length}。通过不等于完整 Codex 功能验证。${failureDetail}`;
+        setProtocolProbeSummary(summary);
+        toast.success(summary, { closeButton: true });
+        return;
+      }
+      if (chatPass > 0) {
+        onApiFormatChange("openai_chat");
+        const summary = `Responses 不通但 Chat 可用，已切换为 Chat Completions。Chat 通过 ${chatPass}/${models.length}。${failureDetail}`;
+        setProtocolProbeSummary(summary);
+        toast.warning(summary, { closeButton: true });
+        return;
+      }
+
+      const summary =
+        failures[0] ??
+        "Responses 和 Chat Completions 都不通，请检查 API Key、Base URL、模型权限、额度、网络或上游状态。";
+      setProtocolProbeSummary(summary);
+      toast.error(summary, { closeButton: true });
+    } catch (error) {
+      const summary = `协议测试中断：${error instanceof Error ? error.message : String(error)}`;
+      setProtocolProbeSummary(summary);
+      toast.error(summary, { closeButton: true });
+    } finally {
+      setIsProbingProtocol(false);
+    }
+  }, [
+    codexBaseUrl,
+    codexApiKey,
+    customUserAgent,
+    fetchedModels,
+    isFullUrl,
+    onApiFormatChange,
     t,
   ]);
 
@@ -676,6 +865,25 @@ export function CodexFormFields({
     [onSpawnAgentModelsChange, spawnAgentModels],
   );
 
+  const handleConfirmSplitRouting = useCallback(() => {
+    if (!pendingSplitRouting || !onProviderSplitSuggestionChange) return;
+    onTakeoverEnabledChange(true);
+    onProviderSplitSuggestionChange(pendingSplitRouting);
+    setPendingSplitRouting(null);
+    toast.info(
+      `保存时将生成 ${pendingSplitRouting.providerName}-responses / ${pendingSplitRouting.providerName}-chat 两个 provider。`,
+    );
+  }, [
+    onTakeoverEnabledChange,
+    onProviderSplitSuggestionChange,
+    pendingSplitRouting,
+  ]);
+
+  const handleCancelSplitRouting = useCallback(() => {
+    setPendingSplitRouting(null);
+    onProviderSplitSuggestionChange?.(null);
+  }, [onProviderSplitSuggestionChange]);
+
   // 路由行的增删改必须同步写回父表单，避免用户切换开关后立即保存时仍提交上一帧旧值。
   const publishRoutingRows = useCallback(
     (
@@ -757,6 +965,9 @@ export function CodexFormFields({
   const editingRouteSupportsImage =
     editingRoute?.capabilities?.inputModalities?.includes("image") ??
     !editingRouteTextOnly;
+  const splitRoutingProviderName = providerName?.trim() || "provider";
+  const pendingResponsesModels = pendingSplitRouting?.responsesModels ?? [];
+  const pendingChatModels = pendingSplitRouting?.chatModels ?? [];
 
   const renderCatalogActionButtons = (onAdd: () => void, addLabel: string) => (
     <div className="flex gap-1">
@@ -790,6 +1001,46 @@ export function CodexFormFields({
 
   return (
     <>
+      <Dialog
+        open={isProtocolProbeConfirmOpen}
+        onOpenChange={setIsProtocolProbeConfirmOpen}
+      >
+        <DialogContent className="max-w-lg" zIndex="alert">
+          <DialogHeader>
+            <DialogTitle>确认测试 Chat / Responses</DialogTitle>
+            <DialogDescription className="space-y-2 text-left">
+              <span className="block">
+                这个测试会帮助判断当前 provider 应该选择 Responses 还是 Chat
+                Completions。它会对当前模型目录里的模型发送真实请求，可能产生少量额度或流量消耗，也可能触发限流。
+              </span>
+              <span className="block">
+                每个模型会分别测试 /v1/responses 和
+                /v1/chat/completions，输出上限为
+                1024。都不通时通常不是协议问题，而是 API Key、Base
+                URL、模型权限、额度、网络或上游故障。
+              </span>
+              <span className="block">
+                注意：Responses 通过只证明最小非流式请求能返回成功，不等于完整
+                Codex
+                功能验证；真实会话里的流式输出、工具调用、长上下文和限流稳定性仍要继续观察。
+              </span>
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setIsProtocolProbeConfirmOpen(false)}
+            >
+              取消
+            </Button>
+            <Button type="button" onClick={handleProtocolProbe}>
+              确认测试
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* Codex API Key 输入框 */}
       <ApiKeySection
         id="codexApiKey"
@@ -986,6 +1237,70 @@ export function CodexFormFields({
           </div>
         </div>
       )}
+
+      <Dialog
+        open={Boolean(pendingSplitRouting)}
+        onOpenChange={(open) => {
+          if (!open) handleCancelSplitRouting();
+        }}
+      >
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>检测到混合协议模型</DialogTitle>
+            <DialogDescription>
+              当前中转同时返回了 GPT-like 模型和非 GPT-like 模型。建议保存时拆成
+              Responses 与 Chat 两个
+              provider，避免把两种协议混在同一个配置里导致后续分不清。
+              确认后不会立即保存；点击新增时才会创建两个 provider。
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-3 px-6 pb-2">
+            <div className="rounded-md border border-emerald-500/40 bg-emerald-500/10 p-3">
+              <div className="flex flex-wrap items-center gap-2 text-sm font-medium">
+                <span>{`${splitRoutingProviderName}-responses`}</span>
+                <span className="rounded bg-background/70 px-1.5 py-0.5 text-[11px] text-muted-foreground">
+                  OpenAI Responses
+                </span>
+                <span className="rounded bg-background/70 px-1.5 py-0.5 text-[11px] text-muted-foreground">
+                  单独 provider
+                </span>
+              </div>
+              <p className="mt-1 text-xs text-muted-foreground">
+                匹配模型：
+                {pendingResponsesModels.join(", ") || "-"}
+              </p>
+            </div>
+            <div className="rounded-md border border-sky-500/40 bg-sky-500/10 p-3">
+              <div className="flex flex-wrap items-center gap-2 text-sm font-medium">
+                <span>{`${splitRoutingProviderName}-chat`}</span>
+                <span className="rounded bg-background/70 px-1.5 py-0.5 text-[11px] text-muted-foreground">
+                  OpenAI Chat Completions
+                </span>
+                <span className="rounded bg-background/70 px-1.5 py-0.5 text-[11px] text-muted-foreground">
+                  单独 provider
+                </span>
+              </div>
+              <p className="mt-1 text-xs text-muted-foreground">
+                匹配模型：{pendingChatModels.join(", ") || "-"}
+              </p>
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={handleCancelSplitRouting}
+            >
+              暂不拆分
+            </Button>
+            <Button type="button" onClick={handleConfirmSplitRouting}>
+              确认生成两个 provider
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog
         open={Boolean(editingRoute)}
@@ -1365,6 +1680,34 @@ export function CodexFormFields({
                         "供应商原生是 Responses API 就选 Responses（直连，不转换格式）；使用 Chat Completions 协议就选 Chat（转换为 Chat Completions）。",
                     })}
                   </p>
+                  <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-xs leading-relaxed text-amber-900 dark:text-amber-200">
+                    不确定该选哪个时，可以测试 Chat /
+                    Responses。测试会发送真实模型请求， 输出上限为
+                    1024，可能产生少量额度或流量消耗。通过只代表基础协议入口可用，不等于完整
+                    Codex 功能验证。
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="gap-1"
+                      disabled={isProbingProtocol}
+                      onClick={() => setIsProtocolProbeConfirmOpen(true)}
+                    >
+                      {isProbingProtocol ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Route className="h-3.5 w-3.5" />
+                      )}
+                      测试 Chat / Responses
+                    </Button>
+                    {protocolProbeSummary && (
+                      <span className="text-xs text-muted-foreground">
+                        {protocolProbeSummary}
+                      </span>
+                    )}
+                  </div>
                 </div>
 
                 {/* 需要本地路由映射 —— 纯模型映射门控，与上游格式无关 */}

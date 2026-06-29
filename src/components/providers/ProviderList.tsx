@@ -13,7 +13,7 @@ import {
   type CSSProperties,
 } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { AlertTriangle, Search, X } from "lucide-react";
+import { AlertTriangle, Search, Wand2, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -62,6 +62,7 @@ interface ProviderListProps {
   onOpenWebsite: (url: string) => void;
   onOpenTerminal?: (provider: Provider) => void;
   onCreate?: () => void;
+  onStartCodexMultiRouterWizard?: () => void;
   isLoading?: boolean;
   isProxyRunning?: boolean; // 代理服务运行状态
   isProxyTakeover?: boolean; // 代理接管模式（Live配置已被接管）
@@ -84,6 +85,7 @@ export function ProviderList({
   onOpenWebsite,
   onOpenTerminal,
   onCreate,
+  onStartCodexMultiRouterWizard,
   isLoading = false,
   isProxyRunning = false,
   isProxyTakeover = false,
@@ -345,6 +347,24 @@ export function ProviderList({
     return messages;
   }, [appId, claudeDesktopStatus, t]);
 
+  // Codex 首页底部的主入口用于把复杂 MultiRouter 配置收束到向导流程；空列表和普通列表共用同一 CTA。
+  const renderCodexMultiRouterWizardEntry = () => {
+    if (appId !== "codex" || !onStartCodexMultiRouterWizard) return null;
+    return (
+      <div className="flex justify-center pt-4">
+        <Button
+          type="button"
+          size="lg"
+          className="min-w-48 rounded-full shadow-sm"
+          onClick={onStartCodexMultiRouterWizard}
+        >
+          <Wand2 className="mr-2 h-4 w-4" />
+          配置多路模型
+        </Button>
+      </div>
+    );
+  };
+
   if (isLoading) {
     return (
       <div className="space-y-3">
@@ -360,11 +380,14 @@ export function ProviderList({
 
   if (sortedProviders.length === 0) {
     return (
-      <ProviderEmptyState
-        appId={appId}
-        onCreate={onCreate}
-        onImport={() => importMutation.mutate()}
-      />
+      <div className="space-y-4">
+        <ProviderEmptyState
+          appId={appId}
+          onCreate={onCreate}
+          onImport={() => importMutation.mutate()}
+        />
+        {renderCodexMultiRouterWizardEntry()}
+      </div>
     );
   }
 
@@ -532,6 +555,7 @@ export function ProviderList({
       ) : (
         renderProviderList()
       )}
+      {renderCodexMultiRouterWizardEntry()}
     </div>
   );
 }

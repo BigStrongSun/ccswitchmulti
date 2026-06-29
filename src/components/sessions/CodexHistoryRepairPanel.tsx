@@ -73,13 +73,17 @@ const SOURCE_OPTIONS = [
 
 interface CodexHistoryRepairPanelProps {
   initialProjectPath?: string | null;
+  showAutomationGuide?: boolean;
   onClose?: () => void;
+  onRepairApplied?: () => void | Promise<void>;
 }
 
 /// 在会话管理页中承载 Codex Desktop 历史可见性修复、SQLite 列表和单条 JSONL 详情。
 export function CodexHistoryRepairPanel({
   initialProjectPath,
+  showAutomationGuide = false,
   onClose,
+  onRepairApplied,
 }: CodexHistoryRepairPanelProps) {
   const [codexHome, setCodexHome] = useState("");
   const [stateDbPath, setStateDbPath] = useState("");
@@ -254,6 +258,14 @@ export function CodexHistoryRepairPanel({
       setRepairResult(result);
       if (dryRun) {
         setLastPreviewKey(currentRepairKey);
+      } else {
+        try {
+          await onRepairApplied?.();
+        } catch (callbackError) {
+          toast.error(
+            `历史修复已完成，但后续引导失败：${extractErrorMessage(callbackError) || String(callbackError)}`,
+          );
+        }
       }
     } catch (error) {
       setRepairError(extractErrorMessage(error) || String(error));
@@ -385,6 +397,39 @@ export function CodexHistoryRepairPanel({
             ) : null}
           </div>
         </div>
+
+        {showAutomationGuide ? (
+          <div className="mt-3 rounded-lg border border-blue-200 bg-blue-50 px-3 py-3 text-sm text-blue-950 dark:border-blue-500/40 dark:bg-blue-500/10 dark:text-blue-50">
+            <div className="flex items-start gap-2">
+              <ListChecks className="mt-0.5 size-4 shrink-0" />
+              <div className="min-w-0 space-y-2">
+                <div className="font-medium">
+                  MultiRouter 已配置成功，现在按顺序完成历史记录自动修复
+                </div>
+                <ol className="list-decimal space-y-1 pl-5 text-xs leading-5">
+                  <li>
+                    点击 <span className="font-medium">加载历史</span>
+                    ，确认 active DB 和待修复 session 已被读取。
+                  </li>
+                  <li>
+                    点击 <span className="font-medium">预览修复</span>
+                    ，先只读计算 provider 桶、session_index、workspace hints 和
+                    rollout 元数据会改多少。
+                  </li>
+                  <li>
+                    预览状态变为“预览已锁定，可确认写入”后，点击
+                    <span className="font-medium"> 确认写入</span>
+                    ，弹窗里再次核对计数后确认。
+                  </li>
+                  <li>
+                    写入完成后按弹窗提示完整重启 Codex；随后会打开 CCSwitchMulti
+                    GitHub 仓库，请帮忙点 Star。
+                  </li>
+                </ol>
+              </div>
+            </div>
+          </div>
+        ) : null}
 
         <div className="mt-3 grid gap-2 text-xs text-muted-foreground md:grid-cols-2">
           <div className="flex gap-2 rounded-md border border-border-default bg-muted/30 px-3 py-2">

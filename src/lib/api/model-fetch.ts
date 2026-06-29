@@ -8,6 +8,14 @@ export interface FetchedModel {
   contextWindow?: number | null;
 }
 
+export interface CodexResponsesProbeResult {
+  ok: boolean;
+  status?: number | null;
+  url: string;
+  model: string;
+  detail: string;
+}
+
 /**
  * 从供应商获取可用模型列表
  *
@@ -26,6 +34,48 @@ export async function fetchModelsForConfig(
     apiKey,
     isFullUrl,
     modelsUrl,
+    customUserAgent,
+  });
+}
+
+/**
+ * 对指定 Codex 模型执行 `/v1/responses` 连通性探测。
+ *
+ * 这个探测会真实请求上游，`max_output_tokens` 为 1024；调用方应只在用户显式确认后触发。
+ */
+export async function probeCodexResponsesForConfig(
+  baseUrl: string,
+  apiKey: string,
+  model: string,
+  isFullUrl?: boolean,
+  customUserAgent?: string,
+): Promise<CodexResponsesProbeResult> {
+  return invoke("probe_codex_responses_for_config", {
+    baseUrl,
+    apiKey,
+    model,
+    isFullUrl,
+    customUserAgent,
+  });
+}
+
+/**
+ * 对指定 Codex 模型执行 `/v1/chat/completions` 连通性探测。
+ *
+ * 与 Responses 探测配对使用，用来区分“协议不支持”和“凭据/网络/模型本身不可用”。
+ */
+export async function probeCodexChatForConfig(
+  baseUrl: string,
+  apiKey: string,
+  model: string,
+  isFullUrl?: boolean,
+  customUserAgent?: string,
+): Promise<CodexResponsesProbeResult> {
+  return invoke("probe_codex_chat_for_config", {
+    baseUrl,
+    apiKey,
+    model,
+    isFullUrl,
     customUserAgent,
   });
 }

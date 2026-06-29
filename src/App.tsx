@@ -34,6 +34,7 @@ import type { EnvConflict } from "@/types/env";
 import { useProvidersQuery, useSettingsQuery } from "@/lib/query";
 import {
   providersApi,
+  proxyApi,
   settingsApi,
   type AppId,
   type ProviderSwitchEvent,
@@ -85,6 +86,14 @@ import { AgentsPanel } from "@/components/agents/AgentsPanel";
 import { UniversalProviderPanel } from "@/components/universal";
 import { McpIcon } from "@/components/BrandIcons";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { SessionManagerPage } from "@/components/sessions/SessionManagerPage";
 import {
   useDisableCurrentOmo,
@@ -102,6 +111,7 @@ import {
   isRoutingPlan,
   type WorkspaceTab,
 } from "@/components/codex/CodexRouterWorkspacePage";
+import { CodexMultiRouterWizard } from "@/components/codex/CodexMultiRouterWizard";
 
 type View =
   | "providers"
@@ -191,7 +201,22 @@ function App() {
     providerId?: string | null;
     tab: WorkspaceTab;
   }>({ tab: "status" });
+  const codexPostSetupGuideRef = useRef<{
+    planId: string;
+    successSeen: boolean;
+    historyRepairPrompted: boolean;
+  } | null>(null);
+  const [
+    openCodexHistoryRepairOnSessions,
+    setOpenCodexHistoryRepairOnSessions,
+  ] = useState(false);
   const [isAddOpen, setIsAddOpen] = useState(false);
+  const [
+    isCodexMultiRouterEntryChoiceOpen,
+    setIsCodexMultiRouterEntryChoiceOpen,
+  ] = useState(false);
+  const [isCodexMultiRouterWizardOpen, setIsCodexMultiRouterWizardOpen] =
+    useState(false);
   const [isWindowMaximized, setIsWindowMaximized] = useState(false);
 
   useEffect(() => {
@@ -296,6 +321,10 @@ function App() {
     isProxyRunning,
   });
   const providers = useMemo(() => data?.providers ?? {}, [data]);
+  const codexWizardProviders = useMemo(
+    () => (activeApp === "codex" ? Object.values(providers) : []),
+    [activeApp, providers],
+  );
   const currentProviderId = data?.currentProviderId ?? "";
   const isOpenClawView =
     activeApp === "openclaw" &&
@@ -902,6 +931,93 @@ function App() {
     setCurrentView("codexRouter");
   };
 
+  // 从首页 CTA 进入入口选择面板；用户可以随时退出，也可以选择引导或直接进入工作台。
+  const handleStartCodexMultiRouterWizard = () => {
+    setActiveApp("codex");
+    setCurrentView("providers");
+    setIsCodexMultiRouterEntryChoiceOpen(true);
+  };
+
+  // 用户明确选择引导时才打开遮罩式向导，避免每次点击入口都被强制带入教程。
+  const handleOpenCodexMultiRouterGuide = () => {
+    setActiveApp("codex");
+    setIsCodexMultiRouterEntryChoiceOpen(false);
+    setIsCodexMultiRouterWizardOpen(true);
+  };
+
+  // 用户选择跳过引导时直接进入 MultiRouter 状态页；没有已保存方案时打开工作台空状态。
+  const handleOpenCodexMultiRouterWorkspaceDirectly = () => {
+    const existingPlan = Object.values(providers).find((provider) =>
+      isRoutingPlan(provider),
+    );
+    setIsCodexMultiRouterEntryChoiceOpen(false);
+    openCodexRouterWorkspace(existingPlan ?? null, "status");
+  };
+
+  // 用户在向导里选择启用 MultiRouter 时，必须把 CCSwitchMulti 本地代理和 Codex 接管一起打开。
+  const handleEnableCodexMultiRouterPlan = async (provider: Provider) => {
+    setActiveApp("codex");
+    if (!isProxyRunning) {
+      await proxyApi.startProxyServer();
+    }
+    if (!takeoverStatus?.codex) {
+      await proxyApi.setProxyTakeoverForApp("codex", true);
+    }
+    await switchProvider(provider);
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["proxyStatus"] }),
+      queryClient.invalidateQueries({ queryKey: ["proxyTakeoverStatus"] }),
+      queryClient.invalidateQueries({ queryKey: ["providers", "codex"] }),
+    ]);
+    codexPostSetupGuideRef.current = {
+      planId: provider.id,
+      successSeen: false,
+      historyRepairPrompted: false,
+    };
+    openCodexRouterWorkspace(provider, "status");
+  };
+
+  // MultiRouter 工作台确认运行态全绿后，进入历史修复，并给用户明确下一步。
+  const handleCodexMultiRouterReady = (provider: Provider) => {
+    const current = codexPostSetupGuideRef.current;
+    if (!current || current.planId !== provider.id || current.successSeen) {
+      return;
+    }
+    toast.success(
+      "Codex MultiRouter 配置成功：当前 provider、代理监听、Codex 接管、路由入口和最近请求转发都已成功。下一步请修复历史记录可见性。",
+      { closeButton: true, duration: 10000 },
+    );
+    setActiveApp("codex");
+    setOpenCodexHistoryRepairOnSessions(true);
+    setCurrentView("sessions");
+    codexPostSetupGuideRef.current = {
+      ...current,
+      successSeen: true,
+      historyRepairPrompted: true,
+    };
+  };
+
+  // 历史修复写入完成后，先提示重启 Codex，再征求点赞并用默认浏览器打开 CCSwitchMulti 仓库。
+  const handleCodexHistoryRepairCompleted = async () => {
+    toast.success("历史记录修复已完成。请完整重启 Codex 后再继续使用。", {
+      closeButton: true,
+      duration: 10000,
+    });
+    const shouldOpenHome = window.confirm(
+      [
+        "历史记录修复已完成，请完整重启 Codex，让侧边栏和模型状态重新加载。",
+        "",
+        "如果 CCSwitchMulti 这套 MultiRouter 配置帮到了你，可以帮我在 GitHub 仓库点个 Star 吗？",
+        "点击“确定”会用默认浏览器打开 CCSwitchMulti 的 GitHub 仓库页面。",
+      ].join("\n"),
+    );
+    if (shouldOpenHome) {
+      await settingsApi.openExternal(
+        "https://github.com/BigStrongSun/ccswitchmulti",
+      );
+    }
+  };
+
   const notifyWindowControlError = (error: unknown) => {
     toast.error(
       t("notifications.windowControlFailed", {
@@ -994,6 +1110,7 @@ function App() {
               onDeletePlan={(provider) =>
                 setConfirmAction({ provider, action: "delete" })
               }
+              onRuntimeReady={handleCodexMultiRouterReady}
             />
           );
         case "skills":
@@ -1039,6 +1156,15 @@ function App() {
             <SessionManagerPage
               key={sharedFeatureApp}
               appId={sharedFeatureApp}
+              initialCodexHistoryRepair={openCodexHistoryRepairOnSessions}
+              onInitialCodexHistoryRepairConsumed={() =>
+                setOpenCodexHistoryRepairOnSessions(false)
+              }
+              onCodexHistoryRepairCompleted={
+                sharedFeatureApp === "codex"
+                  ? handleCodexHistoryRepairCompleted
+                  : undefined
+              }
             />
           );
         case "workspace":
@@ -1106,6 +1232,11 @@ function App() {
                         activeApp === "claude" ? handleOpenTerminal : undefined
                       }
                       onCreate={() => setIsAddOpen(true)}
+                      onStartCodexMultiRouterWizard={
+                        activeApp === "codex"
+                          ? handleStartCodexMultiRouterWizard
+                          : undefined
+                      }
                       onSetAsDefault={
                         activeApp === "openclaw"
                           ? setAsDefaultModel
@@ -1686,7 +1817,83 @@ function App() {
         open={isAddOpen}
         onOpenChange={setIsAddOpen}
         appId={activeApp}
+        panelZIndexClassName={
+          isCodexMultiRouterWizardOpen ? "z-[140]" : undefined
+        }
         onSubmit={addProvider}
+      />
+
+      <Dialog
+        open={isCodexMultiRouterEntryChoiceOpen}
+        onOpenChange={setIsCodexMultiRouterEntryChoiceOpen}
+      >
+        <DialogContent className="max-w-lg" zIndex="alert">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <RouteIcon className="h-5 w-5 text-primary" />
+              配置多路模型
+            </DialogTitle>
+            <DialogDescription className="leading-6">
+              你可以开始完整引导，也可以随时退出并直接进入 MultiRouter
+              工作台。再次点击首页入口时仍会先回到这个选择面板。
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="grid gap-3 px-6 py-4">
+            <button
+              type="button"
+              onClick={handleOpenCodexMultiRouterGuide}
+              className="rounded-lg border border-primary/30 bg-primary/5 p-4 text-left transition-colors hover:bg-primary/10"
+            >
+              <div className="flex items-center gap-2 font-medium">
+                <Wrench className="h-4 w-4 text-primary" />
+                开始引导配置
+              </div>
+              <p className="mt-2 text-sm leading-6 text-muted-foreground">
+                按步骤创建 provider、获取模型、处理重名、生成路由、启用
+                MultiRouter，并接到状态页和历史修复流程。
+              </p>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleOpenCodexMultiRouterWorkspaceDirectly}
+              className="rounded-lg border bg-card p-4 text-left transition-colors hover:bg-muted/60"
+            >
+              <div className="flex items-center gap-2 font-medium">
+                <LayoutDashboard className="h-4 w-4 text-muted-foreground" />
+                直接打开工作台
+              </div>
+              <p className="mt-2 text-sm leading-6 text-muted-foreground">
+                跳过教程，直接进入 MultiRouter 状态页查看、编辑或测试现有路由。
+              </p>
+            </button>
+          </div>
+
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setIsCodexMultiRouterEntryChoiceOpen(false)}
+            >
+              暂不配置
+            </Button>
+            <Button onClick={handleOpenCodexMultiRouterGuide}>开始引导</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <CodexMultiRouterWizard
+        open={isCodexMultiRouterWizardOpen}
+        providers={codexWizardProviders}
+        onOpenChange={setIsCodexMultiRouterWizardOpen}
+        onCreateProvider={() => {
+          setActiveApp("codex");
+          setIsAddOpen(true);
+        }}
+        onOpenWorkspace={(provider, tab) =>
+          openCodexRouterWorkspace(provider, tab)
+        }
+        onEnablePlan={handleEnableCodexMultiRouterPlan}
       />
 
       <EditProviderDialog

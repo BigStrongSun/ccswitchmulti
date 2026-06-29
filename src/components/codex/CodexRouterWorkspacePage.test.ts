@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { providersApi } from "@/lib/api";
 import { fetchModelsForConfig, type FetchedModel } from "@/lib/api/model-fetch";
 import type { Provider } from "@/types";
+import type { PaginatedLogs, RequestLog } from "@/types/usage";
 import {
   applyMultiRouterSettingsDraft,
   buildMultiRouterRuntimeStatus,
@@ -20,6 +21,13 @@ import {
   readCodexRouting,
   validateProxyListenDraft,
 } from "./CodexRouterWorkspacePage";
+
+const requestLogsFixture = vi.hoisted(() => ({
+  value: { data: [], isLoading: false } as {
+    data: PaginatedLogs | [];
+    isLoading: boolean;
+  },
+}));
 
 vi.mock("@/lib/api/proxy", () => ({
   proxyApi: {
@@ -51,7 +59,7 @@ vi.mock("@/lib/query/usage", () => ({
     isLoading: false,
     error: null,
   }),
-  useRequestLogs: () => ({ data: [], isLoading: false }),
+  useRequestLogs: () => requestLogsFixture.value,
 }));
 
 vi.mock("@/lib/api", () => ({
@@ -91,7 +99,36 @@ function renderWorkspace(ui: React.ReactElement) {
   );
 }
 
+/// 构造状态页所需的最小代理日志；测试只关心 Codex 最近一次真实转发是否成功。
+function createCodexProxyLog(overrides: Partial<RequestLog> = {}): RequestLog {
+  return {
+    requestId: "req-1",
+    providerId: "codex-router",
+    providerName: "Codex MultiRouter",
+    appType: "codex",
+    model: "gpt-5.4-mini",
+    requestModel: "gpt-5.4-mini",
+    costMultiplier: "1",
+    inputTokens: 1,
+    outputTokens: 1,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+    inputCostUsd: "0",
+    outputCostUsd: "0",
+    cacheReadCostUsd: "0",
+    cacheCreationCostUsd: "0",
+    totalCostUsd: "0",
+    isStreaming: false,
+    latencyMs: 100,
+    statusCode: 200,
+    createdAt: Date.now(),
+    dataSource: "proxy",
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
+  requestLogsFixture.value = { data: [], isLoading: false };
   vi.mocked(fetchModelsForConfig).mockReset();
   vi.mocked(providersApi.add).mockResolvedValue(true);
   vi.mocked(providersApi.update).mockResolvedValue(true);
@@ -1358,5 +1395,167 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       label: "运行中",
       tone: "ok",
     });
+  });
+
+  // onRuntimeReady 测试：当本地代理运行、Codex 接管激活、当前 MultiRouter 已发布并启用路由、
+  // 且最新请求转发成功（statusCode 200-399）时，onRuntimeReady 回调应被调用。
+  it("calls onRuntimeReady when config is ready and latest request forward succeeds", async () => {
+    const source: Provider = {
+      id: "codex-online-source",
+      name: "Online Source",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: {
+          models: [{ model: "test-model" }],
+        },
+      },
+    };
+    const plan = createDraftRoutingPlan([source], [source]);
+    const routes = [
+      normalizeCodexRouteForSave(
+        {
+          label: source.name,
+          targetProviderId: source.id,
+          match: { models: ["test-model"] },
+        },
+        0,
+        new Set<string>(),
+      ),
+    ];
+    const routedPlan: Provider = {
+      ...plan,
+      settingsConfig: {
+        ...plan.settingsConfig,
+        codexRouting: {
+          enabled: true,
+          defaultRouteId: routes[0].id,
+          routes,
+        },
+      },
+    };
+    const onRuntimeReady = vi.fn();
+
+    requestLogsFixture.value = {
+      data: {
+        data: [
+          createCodexProxyLog({
+            providerId: "codex-online-source",
+            model: "test-model",
+            requestModel: "test-model",
+          }),
+        ],
+        total: 1,
+        page: 0,
+        pageSize: 500,
+      },
+      isLoading: false,
+    };
+
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [source, routedPlan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: routedPlan.id,
+        initialProviderId: routedPlan.id,
+        initialTab: "status",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+        onRuntimeReady,
+      }),
+    );
+
+    await waitFor(() =>
+      expect(onRuntimeReady).toHaveBeenCalledWith(routedPlan),
+    );
+  });
+
+  // onRuntimeReady 负向测试：即使最近一条 Codex 代理日志成功，只要它没有命中当前
+  // MultiRouter 方案的 route，就不能提前进入“配置成功 -> 历史修复”收尾流程。
+  it("does not call onRuntimeReady when latest successful request is outside the selected route", async () => {
+    const source: Provider = {
+      id: "codex-online-source",
+      name: "Online Source",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: {
+          models: [{ model: "test-model" }],
+        },
+      },
+    };
+    const unrelatedSource: Provider = {
+      id: "codex-unrelated-source",
+      name: "Unrelated Source",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: {
+          models: [{ model: "other-model" }],
+        },
+      },
+    };
+    const plan = createDraftRoutingPlan([source], [source]);
+    const routes = [
+      normalizeCodexRouteForSave(
+        {
+          label: source.name,
+          targetProviderId: source.id,
+          match: { models: ["test-model"] },
+        },
+        0,
+        new Set<string>(),
+      ),
+    ];
+    const routedPlan: Provider = {
+      ...plan,
+      settingsConfig: {
+        ...plan.settingsConfig,
+        codexRouting: {
+          enabled: true,
+          defaultRouteId: routes[0].id,
+          routes,
+        },
+      },
+    };
+    const onRuntimeReady = vi.fn();
+
+    requestLogsFixture.value = {
+      data: {
+        data: [
+          createCodexProxyLog({
+            providerId: unrelatedSource.id,
+            providerName: unrelatedSource.name,
+            model: "other-model",
+            requestModel: "other-model",
+            statusCode: 200,
+          }),
+        ],
+        total: 1,
+        page: 0,
+        pageSize: 500,
+      },
+      isLoading: false,
+    };
+
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [source, unrelatedSource, routedPlan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: routedPlan.id,
+        initialProviderId: routedPlan.id,
+        initialTab: "status",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+        onRuntimeReady,
+      }),
+    );
+
+    await waitFor(() =>
+      expect(screen.getByText("成功 200")).toBeInTheDocument(),
+    );
+    expect(screen.queryByText("当前方案成功")).not.toBeInTheDocument();
+    expect(onRuntimeReady).not.toHaveBeenCalled();
   });
 });
