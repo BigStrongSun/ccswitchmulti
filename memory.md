@@ -1,5 +1,11 @@
 # CC Switch Repository Memory
 
+## 2026-06-29 Merge Wizard Trial Branch Into Main
+
+- 用户纠正 `v3.16.4-4wizard` 不能只停留在 `codex/multirouter-wizard` 分支：需要把 wizard 试用线合入 `main`。合并前确认 `main...codex/multirouter-wizard` 为 `0 41`，即 `main` 没有独有提交、wizard 分支领先 41 个提交。
+- 合并策略：在 `main` 上执行非快进 merge `codex/multirouter-wizard`，保留一个明确 merge commit，避免 `main` 静默快进导致后续溯源不清。未跟踪的 `docs/release-notes/v3.16.4-4-zh.md` 和 `scripts/logs/` 仍保持未跟踪状态，不纳入合并或提交。
+- 合入内容包括 MultiRouter 向导、协议/缓存能力修复、Hermes/usage upstream bugfix、Windows 图标根修复、网站图标导出以及 `3.16.4-4wizard` 版本面。后续若刷新 `v3.16.4-4wizard` release，tag 应指向 `main` 上的 merge/memory 提交，而不是仅指向 wizard 分支提交。
+
 ## 2026-06-29 MultiRouter Wizard Provider Config Protocol Display Fix
 
 - 用户试用向导时反馈配置核心参数页误导：`OpenAI Official Backup` 显示“API 格式：未显式设置，向导保存路由时默认 Chat Completions”，同时“已有模型目录”provider 显示“未配置在线获取参数”。根因是 `CodexMultiRouterWizard` 配置页直接读 `meta.apiFormat/settingsConfig.apiFormat` 和本地 `/models` 抓取参数，没有复用 `inferWizardApiFormat()` 这条已经用于保存 route 的事实来源。
