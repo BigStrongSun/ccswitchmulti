@@ -34,12 +34,15 @@ import {
   Loader2,
   Pencil,
   Plus,
+  Route,
   Trash2,
 } from "lucide-react";
 import EndpointSpeedTest from "./EndpointSpeedTest";
 import { ApiKeySection, EndpointField, ModelDropdown } from "./shared";
 import {
   fetchModelsForConfig,
+  probeCodexChatForConfig,
+  probeCodexResponsesForConfig,
   showFetchModelsError,
   type FetchedModel,
 } from "@/lib/api/model-fetch";
@@ -391,6 +394,10 @@ export function CodexFormFields({
 
   const [fetchedModels, setFetchedModels] = useState<FetchedModel[]>([]);
   const [isFetchingModels, setIsFetchingModels] = useState(false);
+  const [isProtocolProbeConfirmOpen, setIsProtocolProbeConfirmOpen] =
+    useState(false);
+  const [isProbingProtocol, setIsProbingProtocol] = useState(false);
+  const [protocolProbeSummary, setProtocolProbeSummary] = useState("");
   const [pendingSplitRouting, setPendingSplitRouting] =
     useState<CodexProviderSplitSuggestion | null>(null);
   const [editingRouteIndex, setEditingRouteIndex] = useState<number | null>(
@@ -639,6 +646,105 @@ export function CodexFormFields({
     onProviderSplitSuggestionChange,
     codexRouting.routes,
     spawnAgentModels.length,
+    t,
+  ]);
+
+  const handleProtocolProbe = useCallback(async () => {
+    if (!codexBaseUrl || !codexApiKey) {
+      showFetchModelsError(null, t, {
+        hasApiKey: !!codexApiKey,
+        hasBaseUrl: !!codexBaseUrl,
+      });
+      return;
+    }
+    const models = Array.from(
+      new Set(
+        [
+          ...catalogRowsRef.current.map((row) => catalogRowUpstreamModel(row)),
+          ...fetchedModels.map((model) => model.id.trim()),
+        ].filter(Boolean),
+      ),
+    );
+    if (models.length === 0) {
+      toast.warning("请先获取模型列表，或在模型目录里添加至少一个模型。");
+      return;
+    }
+
+    setIsProtocolProbeConfirmOpen(false);
+    setIsProbingProtocol(true);
+    setProtocolProbeSummary("");
+    let responsesPass = 0;
+    let chatPass = 0;
+    const failures: string[] = [];
+    try {
+      for (const model of models) {
+        const responses = await probeCodexResponsesForConfig(
+          codexBaseUrl,
+          codexApiKey,
+          model,
+          isFullUrl,
+          customUserAgent,
+        );
+        const chat = await probeCodexChatForConfig(
+          codexBaseUrl,
+          codexApiKey,
+          model,
+          isFullUrl,
+          customUserAgent,
+        );
+        if (responses.ok) responsesPass += 1;
+        if (chat.ok) chatPass += 1;
+        if (!responses.ok && !chat.ok) {
+          failures.push(
+            `${model}: Responses=${responses.detail}; Chat=${chat.detail}`,
+          );
+        }
+      }
+
+      const failureDetail =
+        failures.length > 0
+          ? ` 另有 ${failures.length} 个模型双协议都未通过：${failures
+              .slice(0, 3)
+              .join("；")}${failures.length > 3 ? "；..." : ""}`
+          : "";
+
+      if (responsesPass > 0) {
+        onApiFormatChange("openai_responses");
+        const summary =
+          chatPass > 0
+            ? `Responses 和 Chat 都有模型可用，已优先切换为 Responses。Responses 通过 ${responsesPass}/${models.length}，Chat 通过 ${chatPass}/${models.length}。${failureDetail}`
+            : `只有 Responses 可用，已切换为 Responses。Responses 通过 ${responsesPass}/${models.length}。${failureDetail}`;
+        setProtocolProbeSummary(summary);
+        toast.success(summary, { closeButton: true });
+        return;
+      }
+      if (chatPass > 0) {
+        onApiFormatChange("openai_chat");
+        const summary = `Responses 不通但 Chat 可用，已切换为 Chat Completions。Chat 通过 ${chatPass}/${models.length}。${failureDetail}`;
+        setProtocolProbeSummary(summary);
+        toast.warning(summary, { closeButton: true });
+        return;
+      }
+
+      const summary =
+        failures[0] ??
+        "Responses 和 Chat Completions 都不通，请检查 API Key、Base URL、模型权限、额度、网络或上游状态。";
+      setProtocolProbeSummary(summary);
+      toast.error(summary, { closeButton: true });
+    } catch (error) {
+      const summary = `协议测试中断：${error instanceof Error ? error.message : String(error)}`;
+      setProtocolProbeSummary(summary);
+      toast.error(summary, { closeButton: true });
+    } finally {
+      setIsProbingProtocol(false);
+    }
+  }, [
+    codexBaseUrl,
+    codexApiKey,
+    customUserAgent,
+    fetchedModels,
+    isFullUrl,
+    onApiFormatChange,
     t,
   ]);
 
@@ -895,6 +1001,41 @@ export function CodexFormFields({
 
   return (
     <>
+      <Dialog
+        open={isProtocolProbeConfirmOpen}
+        onOpenChange={setIsProtocolProbeConfirmOpen}
+      >
+        <DialogContent className="max-w-lg" zIndex="alert">
+          <DialogHeader>
+            <DialogTitle>确认测试 Chat / Responses</DialogTitle>
+            <DialogDescription className="space-y-2 text-left">
+              <span className="block">
+                这个测试会帮助判断当前 provider 应该选择 Responses 还是 Chat
+                Completions。它会对当前模型目录里的模型发送真实请求，可能产生少量额度或流量消耗，也可能触发限流。
+              </span>
+              <span className="block">
+                每个模型会分别测试 /v1/responses 和
+                /v1/chat/completions，输出上限为
+                1024。都不通时通常不是协议问题，而是 API Key、Base
+                URL、模型权限、额度、网络或上游故障。
+              </span>
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setIsProtocolProbeConfirmOpen(false)}
+            >
+              取消
+            </Button>
+            <Button type="button" onClick={handleProtocolProbe}>
+              确认测试
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* Codex API Key 输入框 */}
       <ApiKeySection
         id="codexApiKey"
@@ -1534,6 +1675,33 @@ export function CodexFormFields({
                         "供应商原生是 Responses API 就选 Responses（直连，不转换格式）；使用 Chat Completions 协议就选 Chat（转换为 Chat Completions）。",
                     })}
                   </p>
+                  <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-xs leading-relaxed text-amber-900 dark:text-amber-200">
+                    不确定该选哪个时，可以测试 Chat /
+                    Responses。测试会发送真实模型请求， 输出上限为
+                    1024，可能产生少量额度或流量消耗。
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="gap-1"
+                      disabled={isProbingProtocol}
+                      onClick={() => setIsProtocolProbeConfirmOpen(true)}
+                    >
+                      {isProbingProtocol ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Route className="h-3.5 w-3.5" />
+                      )}
+                      测试 Chat / Responses
+                    </Button>
+                    {protocolProbeSummary && (
+                      <span className="text-xs text-muted-foreground">
+                        {protocolProbeSummary}
+                      </span>
+                    )}
+                  </div>
                 </div>
 
                 {/* 需要本地路由映射 —— 纯模型映射门控，与上游格式无关 */}

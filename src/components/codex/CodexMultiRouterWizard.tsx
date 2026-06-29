@@ -20,9 +20,18 @@ import type { Provider } from "@/types";
 import type { CodexCatalogModel, CodexRoutingRoute } from "@/types";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { providersApi } from "@/lib/api/providers";
 import {
   fetchModelsForConfig,
+  probeCodexChatForConfig,
   probeCodexResponsesForConfig,
 } from "@/lib/api/model-fetch";
 import {
@@ -30,6 +39,7 @@ import {
   applyWizardConnectivityApiFormatOverrides,
   buildCodexMultiRouterWizardPlan,
   canContinueAfterConnectivity,
+  classifyWizardDualProtocolConnectivityResult,
   classifyWizardConnectivityResult,
   collectWizardModelNameCollisions,
   defaultWizardModelSources,
@@ -494,6 +504,8 @@ export function CodexMultiRouterWizard({
   const [connectivityResults, setConnectivityResults] = useState<
     WizardConnectivityResult[]
   >([]);
+  const [isConnectivityConfirmOpen, setIsConnectivityConfirmOpen] =
+    useState(false);
   const [wizardIssues, setWizardIssues] = useState<WizardIssue[]>([]);
   const initializedOpenRef = useRef(false);
 
@@ -789,8 +801,9 @@ export function CodexMultiRouterWizard({
     }
   };
 
-  // 对每个 provider 的每个可见模型发起最小 `/v1/responses` 探测；这是用户显式点击的真实上游请求。
+  // 对每个 provider 的每个可见模型发起 Responses + Chat 双协议探测；这是用户确认后的真实上游请求。
   const probeResponsesConnectivity = async () => {
+    setIsConnectivityConfirmOpen(false);
     dispatchFlow({ type: "PROBE_START" });
     clearWizardIssuesForStage("fetchModels");
     const results: WizardConnectivityResult[] = [];
@@ -801,7 +814,7 @@ export function CodexMultiRouterWizard({
         results.push(
           skippedWizardConnectivityResult(
             provider,
-            "缺少 Base URL 或 API Key，跳过 /v1/responses 探测",
+            "缺少 Base URL 或 API Key，跳过 Chat / Responses 双协议探测",
           ),
         );
         continue;
@@ -810,14 +823,21 @@ export function CodexMultiRouterWizard({
         results.push(
           skippedWizardConnectivityResult(
             provider,
-            "没有可探测模型，跳过 /v1/responses 探测",
+            "没有可探测模型，跳过 Chat / Responses 双协议探测",
           ),
         );
         continue;
       }
       for (const model of models) {
         try {
-          const probe = await probeCodexResponsesForConfig(
+          const responsesProbe = await probeCodexResponsesForConfig(
+            config.baseUrl,
+            config.apiKey,
+            model,
+            config.isFullUrl,
+            config.customUserAgent,
+          );
+          const chatProbe = await probeCodexChatForConfig(
             config.baseUrl,
             config.apiKey,
             model,
@@ -825,13 +845,21 @@ export function CodexMultiRouterWizard({
             config.customUserAgent,
           );
           results.push(
-            classifyWizardConnectivityResult({
+            classifyWizardDualProtocolConnectivityResult({
               provider,
               model,
-              ok: probe.ok,
-              detail: probe.detail,
-              url: probe.url,
-              httpStatus: probe.status,
+              responses: {
+                ok: responsesProbe.ok,
+                detail: responsesProbe.detail,
+                url: responsesProbe.url,
+                httpStatus: responsesProbe.status,
+              },
+              chat: {
+                ok: chatProbe.ok,
+                detail: chatProbe.detail,
+                url: chatProbe.url,
+                httpStatus: chatProbe.status,
+              },
             }),
           );
         } catch (error) {
@@ -845,7 +873,7 @@ export function CodexMultiRouterWizard({
           recordWizardIssue({
             stage: "fetchModels",
             severity: classified.canContinue ? "warning" : "error",
-            title: "Responses 探测命令异常",
+            title: "连通性探测命令异常",
             detail: message,
             canContinue: classified.canContinue,
             providerName: provider.name,
@@ -1225,7 +1253,7 @@ export function CodexMultiRouterWizard({
                   </Button>
                   <Button
                     variant="outline"
-                    onClick={probeResponsesConnectivity}
+                    onClick={() => setIsConnectivityConfirmOpen(true)}
                     disabled={
                       isRefreshingModels ||
                       isProbingConnectivity ||
@@ -1237,14 +1265,14 @@ export function CodexMultiRouterWizard({
                         isProbingConnectivity ? "animate-pulse" : ""
                       }`}
                     />
-                    测试 /v1/responses 连通性
+                    测试 Chat / Responses 连通性
                   </Button>
                 </div>
                 <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-900 dark:text-amber-200">
-                  连通性测试会对每个 provider 的每个可见模型发送一次最小
-                  /v1/responses 请求，可能产生极少量额度消耗。Chat Completions
-                  provider 的直接 Responses
-                  失败会标为“可继续警告”，因为运行时会由 MultiRouter 转换协议。
+                  连通性测试会对每个 provider 的每个可见模型分别发送
+                  /v1/responses 与 /v1/chat/completions 真实请求，输出上限为
+                  1024。测试结果会用来判断该 provider 应走 Responses 还是 Chat
+                  转换路径。
                 </div>
                 <div className="grid gap-3 md:grid-cols-2">
                   {draftSources.map((provider) => (
@@ -1404,6 +1432,42 @@ export function CodexMultiRouterWizard({
             )}
           </div>
         </div>
+
+        <Dialog
+          open={isConnectivityConfirmOpen}
+          onOpenChange={setIsConnectivityConfirmOpen}
+        >
+          <DialogContent className="max-w-lg" zIndex="alert">
+            <DialogHeader>
+              <DialogTitle>确认开始连通性测试</DialogTitle>
+              <DialogDescription className="space-y-2 text-left">
+                <span className="block">
+                  这个流程需要确认每个 provider/model 到底应该使用 Responses
+                  还是 Chat
+                  Completions。测试会向上游发送真实请求，可能产生少量额度或流量消耗，也可能触发限流。
+                </span>
+                <span className="block">
+                  每个模型会分别测试 /v1/responses 和
+                  /v1/chat/completions，输出上限为
+                  1024。都不通时通常不是协议问题，而是 API Key、Base
+                  URL、模型权限、额度、网络或上游故障。
+                </span>
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setIsConnectivityConfirmOpen(false)}
+              >
+                取消
+              </Button>
+              <Button type="button" onClick={probeResponsesConnectivity}>
+                确认测试
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
 
         <div className="flex items-center justify-between border-t px-5 py-4">
           <Button variant="ghost" onClick={() => closeWizard(true)}>

@@ -8,6 +8,7 @@ import { CODEX_MULTI_ROUTER_WIZARD_DISMISSED_KEY } from "@/lib/codexMultiRouterW
 import { providersApi } from "@/lib/api/providers";
 import {
   fetchModelsForConfig,
+  probeCodexChatForConfig,
   probeCodexResponsesForConfig,
 } from "@/lib/api/model-fetch";
 
@@ -20,6 +21,7 @@ vi.mock("@/lib/api/providers", () => ({
 
 vi.mock("@/lib/api/model-fetch", () => ({
   fetchModelsForConfig: vi.fn(),
+  probeCodexChatForConfig: vi.fn(),
   probeCodexResponsesForConfig: vi.fn(),
 }));
 
@@ -212,11 +214,18 @@ describe("CodexMultiRouterWizard", () => {
     expect(screen.getAllByText("db locked").length).toBeGreaterThan(0);
   });
 
-  it("probes /v1/responses connectivity and records pass state", async () => {
+  it("confirms and probes both Chat and Responses connectivity before recording pass state", async () => {
     vi.mocked(probeCodexResponsesForConfig).mockResolvedValueOnce({
       ok: true,
       status: 200,
       url: "https://api.deepseek.com/v1/responses",
+      model: "deepseek-chat",
+      detail: "ok",
+    });
+    vi.mocked(probeCodexChatForConfig).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      url: "https://api.deepseek.com/v1/chat/completions",
       model: "deepseek-chat",
       detail: "ok",
     });
@@ -234,13 +243,22 @@ describe("CodexMultiRouterWizard", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
     fireEvent.click(
-      screen.getByRole("button", { name: "测试 /v1/responses 连通性" }),
+      screen.getByRole("button", { name: "测试 Chat / Responses 连通性" }),
     );
+    expect(screen.getByText("确认开始连通性测试")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
 
     expect(
       await screen.findByText("状态机：connectivityPassed"),
     ).toBeInTheDocument();
     expect(probeCodexResponsesForConfig).toHaveBeenCalledWith(
+      "https://api.deepseek.com/v1",
+      "sk-test",
+      "deepseek-chat",
+      false,
+      undefined,
+    );
+    expect(probeCodexChatForConfig).toHaveBeenCalledWith(
       "https://api.deepseek.com/v1",
       "sk-test",
       "deepseek-chat",
@@ -297,12 +315,11 @@ describe("CodexMultiRouterWizard", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
     fireEvent.click(
-      screen.getByRole("button", { name: "测试 /v1/responses 连通性" }),
+      screen.getByRole("button", { name: "测试 Chat / Responses 连通性" }),
     );
+    fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
 
-    expect(
-      await screen.findByText("Responses 探测命令异常"),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("连通性探测命令异常")).toBeInTheDocument();
     expect(screen.getByText("ipc invoke failed")).toBeInTheDocument();
     expect(screen.getByText("需处理后继续")).toBeInTheDocument();
     expect(screen.getByText("状态机：connectivityFailed")).toBeInTheDocument();

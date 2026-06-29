@@ -48,6 +48,14 @@ export interface WizardConnectivityResult {
   status: WizardConnectivityStatus;
   canContinue: boolean;
   detail: string;
+  recommendedApiFormat?: CodexApiFormat;
+  url?: string;
+  httpStatus?: number | null;
+}
+
+export interface WizardProtocolProbe {
+  ok: boolean;
+  detail: string;
   url?: string;
   httpStatus?: number | null;
 }
@@ -395,6 +403,56 @@ export function classifyWizardConnectivityResult(args: {
   };
 }
 
+// 结合 Responses 与 Chat 两条真实探测结果，判断 provider 应该用哪个上游协议。
+export function classifyWizardDualProtocolConnectivityResult(args: {
+  provider: Provider;
+  model: string;
+  responses: WizardProtocolProbe;
+  chat: WizardProtocolProbe;
+}): WizardConnectivityResult {
+  const base = {
+    providerId: args.provider.id,
+    providerName: args.provider.name,
+    model: args.model,
+    url: args.responses.url ?? args.chat.url,
+    httpStatus: args.responses.httpStatus ?? args.chat.httpStatus,
+  };
+  if (args.responses.ok && args.chat.ok) {
+    return {
+      ...base,
+      status: "pass",
+      canContinue: true,
+      recommendedApiFormat: "openai_responses",
+      detail:
+        "Responses 和 Chat Completions 都可用；Codex 原生工具链优先使用 Responses。",
+    };
+  }
+  if (args.responses.ok) {
+    return {
+      ...base,
+      status: "pass",
+      canContinue: true,
+      recommendedApiFormat: "openai_responses",
+      detail: `Responses 可用，Chat Completions 不通；将使用 Responses。Chat 返回：${args.chat.detail}`,
+    };
+  }
+  if (args.chat.ok) {
+    return {
+      ...base,
+      status: "warn",
+      canContinue: true,
+      recommendedApiFormat: "openai_chat",
+      detail: `Responses 不通但 Chat Completions 可用；将保留 Chat 转换路径。Responses 返回：${args.responses.detail}`,
+    };
+  }
+  return {
+    ...base,
+    status: "fail",
+    canContinue: false,
+    detail: `Responses 和 Chat Completions 都不通，更可能是 API Key、Base URL、模型权限、额度、网络或上游可用性问题。Responses 返回：${args.responses.detail}；Chat 返回：${args.chat.detail}`,
+  };
+}
+
 // 没有可探测配置时生成跳过结果；有模型目录则可继续但有风险，没有目录则阻塞。
 export function skippedWizardConnectivityResult(
   provider: Provider,
@@ -420,7 +478,7 @@ export function canContinueAfterConnectivity(
   return results.length > 0 && results.every((result) => result.canContinue);
 }
 
-// 将显式 `/v1/responses` 探测结果反写到向导草稿；实测通过的 provider 不再沿用旧的 openai_chat 元数据。
+// 将显式 Chat / Responses 双协议探测结果反写到向导草稿；实测结果优先于旧的 openai_chat 元数据。
 export function applyWizardConnectivityApiFormatOverrides(
   providers: Provider[],
   results: WizardConnectivityResult[],
@@ -435,13 +493,35 @@ export function applyWizardConnectivityApiFormatOverrides(
 
   return providers.map((provider) => {
     const providerResults = resultsByProvider.get(provider.id) ?? [];
+    const recommendedFormats = providerResults
+      .map((result) => result.recommendedApiFormat)
+      .filter((format): format is CodexApiFormat => Boolean(format));
+    const hasResponsesRecommendation =
+      recommendedFormats.includes("openai_responses");
+    const hasChatRecommendation = recommendedFormats.includes("openai_chat");
     const hasResponsesPass = providerResults.some(
-      (result) => result.status === "pass",
+      (result) =>
+        result.status === "pass" ||
+        result.recommendedApiFormat === "openai_responses",
     );
     const hasBlockingFailure = providerResults.some(
       (result) => result.status === "fail",
     );
-    if (!hasResponsesPass || hasBlockingFailure) return provider;
+    if (hasBlockingFailure) return provider;
+    if (hasChatRecommendation && !hasResponsesRecommendation) {
+      return {
+        ...provider,
+        meta: {
+          ...(provider.meta ?? {}),
+          apiFormat: "openai_chat",
+        },
+        settingsConfig: {
+          ...(provider.settingsConfig ?? {}),
+          apiFormat: "openai_chat",
+        },
+      };
+    }
+    if (!hasResponsesPass) return provider;
     return {
       ...provider,
       meta: {
