@@ -1101,7 +1101,7 @@ fn codex_chat_model_is_text_only(model: &str) -> bool {
 
     normalized == "gpt53codexspark"
         || normalized.starts_with("deepseekv4")
-        || normalized.starts_with("glm5")
+        || matches!(normalized.as_str(), "glm51" | "glm52" | "glm5turbo")
 }
 
 fn responses_reasoning_item_text(item: &Value) -> Option<String> {
@@ -2319,6 +2319,40 @@ mod tests {
         assert!(content.contains("Describe this."));
         assert!(content.contains("text-only"));
         assert!(!content.contains("image_url"));
+    }
+
+    #[test]
+    fn responses_request_to_chat_keeps_images_for_glm_5v_vision_models() {
+        // GLM-5V 属于视觉模型，不能被 GLM-5.x 文本模型兜底规则误伤。
+        let input = json!({
+            "model": "glm-5v-turbo",
+            "input": [{
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "Describe this."},
+                    {"type": "input_image", "image_url": "data:image/png;base64,abc"}
+                ]
+            }]
+        });
+
+        let reasoning = None;
+        let result = responses_to_chat_completions_with_reasoning_and_text_only(
+            input,
+            reasoning.as_ref(),
+            Some(false),
+        )
+        .unwrap();
+        let message_content = result["messages"][0]["content"]
+            .as_array()
+            .expect("message content");
+
+        assert_eq!(message_content[1]["type"], "image_url");
+        assert_eq!(
+            message_content[1]["image_url"]["url"]
+                .as_str()
+                .expect("image url"),
+            "data:image/png;base64,abc"
+        );
     }
 
     #[test]
