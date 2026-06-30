@@ -1,5 +1,11 @@
 # CC Switch Repository Memory
 
+## 2026-06-30 Codex Provider Chat / Responses Probe Visibility Fix
+
+- 用户截图反馈“创建多路路由 -> 单独接入模型源 -> 高级选项 -> 测试 Chat / Responses”点击后像页面卡死。该按钮属于 `ProviderForm(appId="codex") -> CodexFormFields`，不是 `CodexMultiRouterWizard`。根因之一是 AddProviderDialog 使用 `FullScreenPanel`，默认层级 `z-[60]`，而协议测试确认 Dialog 也使用 `zIndex="alert"` 即 `z-[60]`；同层级 portal/动画 stacking context 下，确认框可能被全屏面板压住，用户看不到任何反馈。
+- 修复边界：只改 Codex provider 的协议探测交互。`CodexFormFields` 的确认 Dialog 改为 `zIndex="top"`，点击“测试 Chat / Responses”立即在按钮旁显示“已打开测试确认框”；确认后先显示正在测试的模型数量和当前进度；成功/警告/错误分别使用不同文本颜色；catch 到后端 invoke/网络异常时保留内联 `role="alert"` 错误，并恢复按钮可点，避免只靠 toast 或控制台导致用户误判卡死。
+- 回归测试落点：`tests/components/CodexFormFields.test.tsx` 覆盖确认 Dialog 顶层 `z-[110]`、点击后即时状态提示、后端异常时内联 alert 和按钮恢复。相关验证：`pnpm vitest run tests/components/CodexFormFields.test.tsx tests/components/ProviderForm.codexPreset.test.tsx`、`pnpm typecheck`、`pnpm build:renderer`、`git diff --check`。
+
 ## 2026-06-30 Codex MultiRouter Wizard Small Window Layout Fix
 
 - 用户截图显示 Codex MultiRouter 向导在较小窗口、尤其接近 Tauri 默认 `1000x650` / 最小 `900x600` 时底部按钮区被裁掉。根因不是向导状态机或步骤跳转，而是 `CodexMultiRouterWizard` 中间 grid 使用 `max-h-[82vh]`，但外层没有整体高度约束，最终高度约等于 header + `82vh` + footer，默认高度下会超过视口。

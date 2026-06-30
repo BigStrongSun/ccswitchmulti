@@ -408,6 +408,43 @@ describe("CodexFormFields local model routing", () => {
     );
   });
 
+  it("opens the protocol probe confirmation above the full screen provider panel", () => {
+    renderCatalogHarness([{ model: "gpt-5.5", upstreamModel: "gpt-5.5" }], {
+      shouldShowSpeedTest: true,
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "测试 Chat / Responses" }),
+    );
+
+    expect(
+      screen.getByText("已打开测试确认框；如果没有看到弹窗，请按 Esc 后重试。"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("dialog")).toHaveClass("z-[110]");
+    expect(screen.getByText("确认测试 Chat / Responses")).toBeInTheDocument();
+  });
+
+  it("surfaces protocol probe exceptions inline instead of looking frozen", async () => {
+    vi.mocked(probeCodexResponsesForConfig).mockRejectedValueOnce(
+      new Error("backend timeout"),
+    );
+    renderCatalogHarness([{ model: "gpt-5.5", upstreamModel: "gpt-5.5" }], {
+      shouldShowSpeedTest: true,
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "测试 Chat / Responses" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "协议测试中断：backend timeout",
+    );
+    expect(
+      screen.getByRole("button", { name: "测试 Chat / Responses" }),
+    ).toBeEnabled();
+  });
+
   it("merges fetched models by upstream model without overwriting a visible alias", async () => {
     vi.mocked(fetchModelsForConfig).mockResolvedValueOnce([
       { id: "gpt-5.5", ownedBy: null, contextWindow: 272000 },

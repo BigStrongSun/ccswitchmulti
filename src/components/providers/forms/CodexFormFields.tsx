@@ -398,6 +398,9 @@ export function CodexFormFields({
     useState(false);
   const [isProbingProtocol, setIsProbingProtocol] = useState(false);
   const [protocolProbeSummary, setProtocolProbeSummary] = useState("");
+  const [protocolProbeTone, setProtocolProbeTone] = useState<
+    "muted" | "success" | "warning" | "error"
+  >("muted");
   const [pendingSplitRouting, setPendingSplitRouting] =
     useState<CodexProviderSplitSuggestion | null>(null);
   const [editingRouteIndex, setEditingRouteIndex] = useState<number | null>(
@@ -672,12 +675,18 @@ export function CodexFormFields({
 
     setIsProtocolProbeConfirmOpen(false);
     setIsProbingProtocol(true);
-    setProtocolProbeSummary("");
+    setProtocolProbeTone("muted");
+    setProtocolProbeSummary(
+      `正在测试 ${models.length} 个模型的 Chat / Responses 基础连通性...`,
+    );
     let responsesPass = 0;
     let chatPass = 0;
     const failures: string[] = [];
     try {
-      for (const model of models) {
+      for (const [index, model] of models.entries()) {
+        setProtocolProbeSummary(
+          `正在测试 ${index + 1}/${models.length}：${model}。请稍等，失败会在这里显示。`,
+        );
         const responses = await probeCodexResponsesForConfig(
           codexBaseUrl,
           codexApiKey,
@@ -714,6 +723,7 @@ export function CodexFormFields({
           chatPass > 0
             ? `Responses 和 Chat 的基础请求都有模型可用，已优先切换为 Responses。Responses 通过 ${responsesPass}/${models.length}，Chat 通过 ${chatPass}/${models.length}。通过不等于完整 Codex 功能验证。${failureDetail}`
             : `只有 Responses 基础请求可用，已切换为 Responses。Responses 通过 ${responsesPass}/${models.length}。通过不等于完整 Codex 功能验证。${failureDetail}`;
+        setProtocolProbeTone(failures.length > 0 ? "warning" : "success");
         setProtocolProbeSummary(summary);
         toast.success(summary, { closeButton: true });
         return;
@@ -721,6 +731,7 @@ export function CodexFormFields({
       if (chatPass > 0) {
         onApiFormatChange("openai_chat");
         const summary = `Responses 不通但 Chat 可用，已切换为 Chat Completions。Chat 通过 ${chatPass}/${models.length}。${failureDetail}`;
+        setProtocolProbeTone("warning");
         setProtocolProbeSummary(summary);
         toast.warning(summary, { closeButton: true });
         return;
@@ -729,10 +740,12 @@ export function CodexFormFields({
       const summary =
         failures[0] ??
         "Responses 和 Chat Completions 都不通，请检查 API Key、Base URL、模型权限、额度、网络或上游状态。";
+      setProtocolProbeTone("error");
       setProtocolProbeSummary(summary);
       toast.error(summary, { closeButton: true });
     } catch (error) {
       const summary = `协议测试中断：${error instanceof Error ? error.message : String(error)}`;
+      setProtocolProbeTone("error");
       setProtocolProbeSummary(summary);
       toast.error(summary, { closeButton: true });
     } finally {
@@ -1005,7 +1018,7 @@ export function CodexFormFields({
         open={isProtocolProbeConfirmOpen}
         onOpenChange={setIsProtocolProbeConfirmOpen}
       >
-        <DialogContent className="max-w-lg" zIndex="alert">
+        <DialogContent className="max-w-lg" zIndex="top">
           <DialogHeader>
             <DialogTitle>确认测试 Chat / Responses</DialogTitle>
             <DialogDescription className="space-y-2 text-left">
@@ -1693,7 +1706,13 @@ export function CodexFormFields({
                       size="sm"
                       className="gap-1"
                       disabled={isProbingProtocol}
-                      onClick={() => setIsProtocolProbeConfirmOpen(true)}
+                      onClick={() => {
+                        setProtocolProbeTone("muted");
+                        setProtocolProbeSummary(
+                          "已打开测试确认框；如果没有看到弹窗，请按 Esc 后重试。",
+                        );
+                        setIsProtocolProbeConfirmOpen(true);
+                      }}
                     >
                       {isProbingProtocol ? (
                         <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -1703,7 +1722,20 @@ export function CodexFormFields({
                       测试 Chat / Responses
                     </Button>
                     {protocolProbeSummary && (
-                      <span className="text-xs text-muted-foreground">
+                      <span
+                        role={protocolProbeTone === "error" ? "alert" : "status"}
+                        className={cn(
+                          "text-xs leading-relaxed",
+                          protocolProbeTone === "success" &&
+                            "text-emerald-700 dark:text-emerald-300",
+                          protocolProbeTone === "warning" &&
+                            "text-amber-700 dark:text-amber-300",
+                          protocolProbeTone === "error" &&
+                            "text-destructive",
+                          protocolProbeTone === "muted" &&
+                            "text-muted-foreground",
+                        )}
+                      >
                         {protocolProbeSummary}
                       </span>
                     )}
