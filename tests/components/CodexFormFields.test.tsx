@@ -40,6 +40,26 @@ beforeEach(() => {
   Element.prototype.scrollIntoView = vi.fn();
 });
 
+// 构造协议探测的成功返回，供并发池测试精确控制每个模型的完成顺序。
+function createProbeResult(
+  model: string,
+  detail = "ok",
+): {
+  ok: true;
+  status: number;
+  url: string;
+  model: string;
+  detail: string;
+} {
+  return {
+    ok: true,
+    status: 200,
+    url: "https://api.thirdparty.example/v1/probe",
+    model,
+    detail,
+  };
+}
+
 function renderRoutingHarness(
   initialRouting?: CodexRoutingConfig,
   options: { shouldShowSpeedTest?: boolean } = {},
@@ -506,6 +526,74 @@ describe("CodexFormFields local model routing", () => {
       responsesModels: ["gpt-5.5"],
       chatModels: ["qwen3.6"],
     });
+  });
+
+  it("runs protocol probing with a bounded model concurrency pool", async () => {
+    const responseResolvers = new Map<
+      string,
+      (value: ReturnType<typeof createProbeResult>) => void
+    >();
+    const chatResolvers = new Map<
+      string,
+      (value: ReturnType<typeof createProbeResult>) => void
+    >();
+
+    vi.mocked(probeCodexResponsesForConfig).mockImplementation(
+      async (_baseUrl, _apiKey, model) =>
+        new Promise((resolve) => {
+          responseResolvers.set(model, resolve);
+        }),
+    );
+    vi.mocked(probeCodexChatForConfig).mockImplementation(
+      async (_baseUrl, _apiKey, model) =>
+        new Promise((resolve) => {
+          chatResolvers.set(model, resolve);
+        }),
+    );
+    const { onApiFormatChange } = renderCatalogHarness(
+      [
+        { model: "model-a", upstreamModel: "model-a" },
+        { model: "model-b", upstreamModel: "model-b" },
+        { model: "model-c", upstreamModel: "model-c" },
+        { model: "model-d", upstreamModel: "model-d" },
+      ],
+      { shouldShowSpeedTest: true },
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "测试 Chat / Responses" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
+
+    await waitFor(() => {
+      expect(probeCodexResponsesForConfig).toHaveBeenCalledTimes(3);
+      expect(probeCodexChatForConfig).toHaveBeenCalledTimes(3);
+    });
+    expect(probeCodexResponsesForConfig).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      "model-d",
+      expect.anything(),
+      expect.anything(),
+    );
+
+    responseResolvers.get("model-a")?.(createProbeResult("model-a"));
+    chatResolvers.get("model-a")?.(createProbeResult("model-a"));
+
+    await waitFor(() => {
+      expect(probeCodexResponsesForConfig).toHaveBeenCalledTimes(4);
+      expect(probeCodexChatForConfig).toHaveBeenCalledTimes(4);
+    });
+
+    for (const model of ["model-b", "model-c", "model-d"]) {
+      responseResolvers.get(model)?.(createProbeResult(model));
+      chatResolvers.get(model)?.(createProbeResult(model));
+    }
+
+    await waitFor(() => {
+      expect(onApiFormatChange).toHaveBeenCalledWith("openai_responses");
+    });
+    expect(await screen.findAllByText("双协议")).toHaveLength(4);
   });
 
   it("opens the protocol probe confirmation above the full screen provider panel", () => {

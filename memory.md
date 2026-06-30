@@ -1,5 +1,11 @@
 # CC Switch Repository Memory
 
+## 2026-07-01 Codex Provider Protocol Probe Concurrency
+
+- Codex provider 表单的“测试 Chat / Responses”可以并发，但不要改成无界并发：`src/components/providers/forms/CodexFormFields.tsx` 使用 `CODEX_PROTOCOL_PROBE_MODEL_CONCURRENCY = 3` 的模型级并发池，避免大模型目录串行太慢，也避免一次性打爆真实供应商限流。
+- 每个模型内部 Responses 和 Chat 两个协议用 `Promise.all` 同时探测；每完成一个模型就更新“模型映射”行级协议 tag，最终汇总仍按原 catalog 顺序输出，避免并发完成顺序影响用户看到的模型列表。
+- 回归测试落点是 `tests/components/CodexFormFields.test.tsx` 的 bounded model concurrency case：初始只允许前三个模型同时发起 Responses/Chat 探测，任一模型完成后才开始下一个模型。
+
 ## 2026-06-30 Codex GLM Model Context and Probe Guidance
 
 - 2026-07-01 用户用智谱 GLM key 实测“测试 Chat / Responses 全不通”时，真实网络和 key 都正常：`https://open.bigmodel.cn/api/paas/v4/chat/completions` 与 `https://open.bigmodel.cn/api/coding/paas/v4/chat/completions` 能返回 200，`/api/paas/v4/models` 和 `/api/coding/paas/v4/models` 也能返回模型列表；失败的 UI 报错路径是 `.../api/coding/paas/v4/v1/chat/completions` / `.../v4/v1/responses`，根因是新加的协议探测 URL 构造没有复用 `/models` 的版本段规则。修复边界：`probe_codex_responses_for_config` / `probe_codex_chat_for_config` 对已以 `/vN` 收尾的 Base URL 直接拼 `/responses` / `/chat/completions`，避免再追加 `/v1`；智谱仍只有 Chat Completions 路径可用，Responses 路径按官方当前接口返回 404，应由 UI 标为 Chat 可用而不是“全不通”。

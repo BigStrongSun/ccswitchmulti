@@ -71,6 +71,34 @@ interface CodexProtocolProbeOutcome {
   chat: CodexResponsesProbeResult;
 }
 
+const CODEX_PROTOCOL_PROBE_MODEL_CONCURRENCY = 3;
+
+// 用小并发池执行真实上游探测，避免串行太慢，也避免一次性打爆供应商限流。
+async function runCodexProtocolProbePool(
+  models: string[],
+  concurrency: number,
+  probeModel: (
+    model: string,
+    index: number,
+  ) => Promise<CodexProtocolProbeOutcome>,
+): Promise<CodexProtocolProbeOutcome[]> {
+  const outcomes = new Array<CodexProtocolProbeOutcome>(models.length);
+  let nextIndex = 0;
+
+  // 每个 worker 领取下一个模型；Promise.all 保证全部 worker 结束后再汇总。
+  async function worker() {
+    while (nextIndex < models.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      outcomes[index] = await probeModel(models[index], index);
+    }
+  }
+
+  const workerCount = Math.min(Math.max(1, concurrency), models.length);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return outcomes;
+}
+
 // 把单模型双协议探测结果归类，供汇总文案和协议自动选择复用。
 function classifyProtocolProbeOutcome(outcome: CodexProtocolProbeOutcome) {
   if (outcome.responses.ok && outcome.chat.ok) return "both";
@@ -839,30 +867,42 @@ export function CodexFormFields({
     setProtocolProbeTone("muted");
     setProtocolProbeOutcomesByModel({});
     setProtocolProbeSummary(
-      `正在测试 ${models.length} 个模型的 Chat / Responses 基础连通性...`,
+      `正在并发测试 ${models.length} 个模型的 Chat / Responses 基础连通性，最多同时测试 ${CODEX_PROTOCOL_PROBE_MODEL_CONCURRENCY} 个模型...`,
     );
-    const outcomes: CodexProtocolProbeOutcome[] = [];
     try {
-      for (const [index, model] of models.entries()) {
-        setProtocolProbeSummary(
-          `正在测试 ${index + 1}/${models.length}：${model}。请稍等，失败会在这里显示。`,
-        );
-        const responses = await probeCodexResponsesForConfig(
-          codexBaseUrl,
-          codexApiKey,
-          model,
-          isFullUrl,
-          customUserAgent,
-        );
-        const chat = await probeCodexChatForConfig(
-          codexBaseUrl,
-          codexApiKey,
-          model,
-          isFullUrl,
-          customUserAgent,
-        );
-        outcomes.push({ model, responses, chat });
-      }
+      let completedCount = 0;
+      const outcomes = await runCodexProtocolProbePool(
+        models,
+        CODEX_PROTOCOL_PROBE_MODEL_CONCURRENCY,
+        async (model) => {
+          const [responses, chat] = await Promise.all([
+            probeCodexResponsesForConfig(
+              codexBaseUrl,
+              codexApiKey,
+              model,
+              isFullUrl,
+              customUserAgent,
+            ),
+            probeCodexChatForConfig(
+              codexBaseUrl,
+              codexApiKey,
+              model,
+              isFullUrl,
+              customUserAgent,
+            ),
+          ]);
+          completedCount += 1;
+          const outcome = { model, responses, chat };
+          setProtocolProbeSummary(
+            `正在并发测试 ${completedCount}/${models.length}：刚完成 ${model}。失败会在这里显示。`,
+          );
+          setProtocolProbeOutcomesByModel((current) => ({
+            ...current,
+            [model]: outcome,
+          }));
+          return outcome;
+        },
+      );
 
       const { responsesPass, chatPass, failedCount, detail } =
         summarizeCodexProtocolProbeOutcomes(outcomes);
@@ -1216,9 +1256,8 @@ export function CodexFormFields({
               </span>
               <span className="block">
                 每个模型会分别测试对应的 Responses 和 Chat Completions
-                endpoint，输出上限为
-                1024。都不通时通常不是协议问题，而是 API Key、Base
-                URL、模型权限、额度、网络或上游故障。
+                endpoint，输出上限为 1024。都不通时通常不是协议问题，而是 API
+                Key、Base URL、模型权限、额度、网络或上游故障。
               </span>
               <span className="block">
                 注意：Responses 通过只证明最小非流式请求能返回成功，不等于完整
