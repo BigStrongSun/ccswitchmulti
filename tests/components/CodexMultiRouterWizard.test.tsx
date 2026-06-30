@@ -376,6 +376,7 @@ describe("CodexMultiRouterWizard", () => {
       screen.getByRole("button", { name: "测试 Chat / Responses 连通性" }),
     );
     expect(screen.getByText("确认开始连通性测试")).toBeInTheDocument();
+    expect(screen.getByRole("dialog")).toHaveClass("z-[200]");
     fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
 
     expect(
