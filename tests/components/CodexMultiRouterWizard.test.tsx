@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import type { ReactElement } from "react";
@@ -67,7 +67,7 @@ describe("CodexMultiRouterWizard", () => {
       />,
     );
 
-    expect(screen.getByText("这套向导会帮你完成 4 件事")).toBeInTheDocument();
+    expect(screen.getByText("这套向导会帮你完成 7 件事")).toBeInTheDocument();
     expect(screen.getByText(/你不用手动改配置文件/)).toBeInTheDocument();
     expect(
       screen.getByText(/技术备注：Codex 最后仍只连接本机/),
@@ -88,8 +88,8 @@ describe("CodexMultiRouterWizard", () => {
 
     const shell = screen.getByTestId("codex-multirouter-wizard-shell");
     const body = screen.getByTestId("codex-multirouter-wizard-body");
-    const footer = screen.getByRole("button", { name: "下一步" })
-      .parentElement?.parentElement;
+    const footer = screen.getByRole("button", { name: "下一步" }).parentElement
+      ?.parentElement;
 
     expect(shell).toHaveClass("flex", "max-h-full", "flex-col");
     expect(body).toHaveClass("min-h-0", "flex-1", "overflow-hidden");
@@ -163,7 +163,7 @@ describe("CodexMultiRouterWizard", () => {
       screen.getByText(/当前识别到 1 个普通 Codex provider/),
     ).toBeInTheDocument();
     expect(
-      screen.queryByText("这套向导会帮你完成 4 件事"),
+      screen.queryByText("这套向导会帮你完成 7 件事"),
     ).not.toBeInTheDocument();
   });
 
@@ -272,6 +272,76 @@ describe("CodexMultiRouterWizard", () => {
     expect(await screen.findByText("状态机：saveFailed")).toBeInTheDocument();
     expect(screen.getByText("MultiRouter 保存失败")).toBeInTheDocument();
     expect(screen.getAllByText("db locked").length).toBeGreaterThan(0);
+  });
+
+  it("saves renamed plan with curated catalog and ordered spawn agent models", async () => {
+    const onOpenChange = vi.fn();
+    const source = provider({
+      id: "relay",
+      name: "Relay",
+      settingsConfig: {
+        base_url: "https://relay.example/v1",
+        auth: { OPENAI_API_KEY: "sk-test" },
+        modelCatalog: {
+          models: [
+            { model: "model-a", upstreamModel: "model-a" },
+            { model: "model-b", upstreamModel: "model-b" },
+            { model: "model-c", upstreamModel: "model-c" },
+          ],
+        },
+      },
+    });
+
+    renderWithQueryClient(
+      <CodexMultiRouterWizard
+        open
+        providers={[source]}
+        onOpenChange={onOpenChange}
+        onCreateProvider={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+        onEnablePlan={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "命名方案" }));
+    fireEvent.change(screen.getByLabelText("MultiRouter 名称"), {
+      target: { value: "Work MultiRouter" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "整理模型" }));
+    fireEvent.click(screen.getByLabelText("保留 model-b"));
+    fireEvent.click(screen.getAllByTitle("上移")[1]);
+
+    fireEvent.click(screen.getByRole("button", { name: "子 Agent 候选" }));
+    fireEvent.click(screen.getByLabelText("model-c"));
+    fireEvent.click(screen.getByLabelText("model-a"));
+    const enabledMoveUp = screen
+      .getAllByTitle("上移")
+      .find((button) => !(button as HTMLButtonElement).disabled);
+    fireEvent.click(enabledMoveUp!);
+
+    fireEvent.click(screen.getByRole("button", { name: "保存并发布" }));
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "保存并发布" }).at(-1)!,
+    );
+
+    await waitFor(() => {
+      expect(providersApi.add).toHaveBeenCalledTimes(1);
+    });
+    const savedProvider = vi.mocked(providersApi.add).mock.calls[0][0];
+    expect(savedProvider.name).toBe("Work MultiRouter");
+    expect(
+      savedProvider.settingsConfig.modelCatalog.models.map(
+        (model: { model: string }) => model.model,
+      ),
+    ).toEqual(["model-c", "model-a"]);
+    expect(savedProvider.settingsConfig.modelCatalog.spawnAgentModels).toEqual([
+      "model-a",
+      "model-c",
+    ]);
+    expect(
+      savedProvider.settingsConfig.codexRouting.routes[0].match.models,
+    ).toEqual(["model-c", "model-a"]);
   });
 
   it("confirms and probes both Chat and Responses connectivity before recording pass state", async () => {

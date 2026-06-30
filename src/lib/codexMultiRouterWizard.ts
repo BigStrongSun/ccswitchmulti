@@ -28,6 +28,12 @@ export interface WizardPlanBuildResult {
   sourceProviders: Provider[];
 }
 
+export interface WizardPlanBuildOptions {
+  planName?: string;
+  catalogModelOrder?: string[];
+  spawnAgentModels?: string[];
+}
+
 export interface WizardConfigIssue {
   providerId: string;
   providerName: string;
@@ -619,6 +625,39 @@ export function applyWizardConnectivityApiFormatOverrides(
   });
 }
 
+// 按用户最终保留的模型顺序过滤每个 provider 的目录；路由和最终 catalog 必须共享这份过滤结果。
+export function filterWizardProvidersByModelOrder(
+  providers: Provider[],
+  modelOrder?: string[],
+): Provider[] {
+  if (!modelOrder) return providers;
+  const enabledModels = new Set(
+    modelOrder.map((model) => model.trim()).filter(Boolean),
+  );
+  const orderIndex = new Map(modelOrder.map((model, index) => [model, index]));
+  return providers
+    .map((provider) => {
+      const models = readWizardModelCatalog(provider)
+        .filter((model) => enabledModels.has(model.model))
+        .sort(
+          (left, right) =>
+            (orderIndex.get(left.model) ?? Number.MAX_SAFE_INTEGER) -
+            (orderIndex.get(right.model) ?? Number.MAX_SAFE_INTEGER),
+        );
+      return {
+        ...provider,
+        settingsConfig: {
+          ...provider.settingsConfig,
+          modelCatalog: {
+            ...(provider.settingsConfig?.modelCatalog ?? {}),
+            models,
+          },
+        },
+      };
+    })
+    .filter((provider) => readWizardModelCatalog(provider).length > 0);
+}
+
 // 为模型源生成 provider 分组 route；只引用 targetProviderId，不复制第三方 bearer 密钥。
 export function buildWizardRoutesFromSources(
   providers: Provider[],
@@ -650,6 +689,10 @@ export function buildWizardRoutesFromSources(
 // 从已处理重名的模型源生成 MultiRouter catalog；保留 upstreamModel 供运行时把别名映射回真实模型。
 export function buildWizardModelCatalog(
   providers: Provider[],
+  options: Pick<
+    WizardPlanBuildOptions,
+    "catalogModelOrder" | "spawnAgentModels"
+  > = {},
 ): CodexModelCatalogConfig {
   const byModel = new Map<string, CodexCatalogModel>();
   for (const provider of providers) {
@@ -659,10 +702,23 @@ export function buildWizardModelCatalog(
       }
     }
   }
-  const models = Array.from(byModel.values());
+  const baseModels = Array.from(byModel.values());
+  const models = options.catalogModelOrder
+    ? options.catalogModelOrder
+        .map((model) => byModel.get(model))
+        .filter((model): model is CodexCatalogModel => Boolean(model))
+    : baseModels;
+  const modelSet = new Set(models.map((model) => model.model));
+  const spawnAgentModels = (options.spawnAgentModels ?? [])
+    .map((model) => model.trim())
+    .filter((model) => modelSet.has(model))
+    .slice(0, 5);
   return {
     models,
-    spawnAgentModels: models.map((model) => model.model).slice(0, 5),
+    spawnAgentModels:
+      spawnAgentModels.length > 0
+        ? spawnAgentModels
+        : models.map((model) => model.model).slice(0, 5),
   };
 }
 
@@ -676,8 +732,12 @@ export function buildCodexMultiRouterWizardPlan(
   allProviders: Provider[],
   sourceProviders: Provider[],
   existingPlan?: Provider | null,
+  options: WizardPlanBuildOptions = {},
 ): WizardPlanBuildResult {
-  const resolvedSources = resolveWizardModelNameCollisions(sourceProviders);
+  const resolvedSources = filterWizardProvidersByModelOrder(
+    resolveWizardModelNameCollisions(sourceProviders),
+    options.catalogModelOrder,
+  );
   const routes = buildWizardRoutesFromSources(resolvedSources);
   const routing: CodexRoutingConfig = {
     enabled: true,
@@ -698,7 +758,10 @@ export function buildCodexMultiRouterWizardPlan(
       createdAt: Date.now(),
     }),
     id: planId,
-    name: existingPlan?.name ?? CODEX_MULTI_ROUTER_DEFAULT_NAME,
+    name:
+      options.planName?.trim() ||
+      existingPlan?.name ||
+      CODEX_MULTI_ROUTER_DEFAULT_NAME,
     category: existingPlan?.category ?? "custom",
     settingsConfig: {
       ...(existingPlan?.settingsConfig ?? {}),
@@ -706,7 +769,7 @@ export function buildCodexMultiRouterWizardPlan(
       base_url: CODEX_MULTI_ROUTER_PROXY_BASE_URL,
       baseUrl: CODEX_MULTI_ROUTER_PROXY_BASE_URL,
       config: existingPlan?.settingsConfig?.config ?? null,
-      modelCatalog: buildWizardModelCatalog(resolvedSources),
+      modelCatalog: buildWizardModelCatalog(resolvedSources, options),
       codexRouting: routing,
     },
   };

@@ -173,11 +173,11 @@ describe("codexMultiRouterWizard helpers", () => {
     );
 
     expect(inferWizardApiFormat(resolvedRelay)).toBe("openai_responses");
-    expect(buildWizardRoutesFromSources([resolvedRelay])[0].upstream).toMatchObject(
-      {
-        apiFormat: "openai_responses",
-      },
-    );
+    expect(
+      buildWizardRoutesFromSources([resolvedRelay])[0].upstream,
+    ).toMatchObject({
+      apiFormat: "openai_responses",
+    });
   });
 
   it("keeps stale chat metadata when Responses probes warn or fail", () => {
@@ -321,6 +321,43 @@ describe("codexMultiRouterWizard helpers", () => {
     expect(plan.settingsConfig.codexRouting.routes).toHaveLength(2);
     expect(routeModels).toEqual(catalogModels);
     expect(plan.settingsConfig.base_url).toBe("http://127.0.0.1:15721/v1");
+  });
+
+  it("applies wizard plan name, final catalog order, and spawn agent order", () => {
+    const relay = provider({
+      id: "relay",
+      name: "Relay",
+      settingsConfig: {
+        modelCatalog: {
+          models: [
+            { model: "model-a", upstreamModel: "model-a" },
+            { model: "model-b", upstreamModel: "model-b" },
+            { model: "model-c", upstreamModel: "model-c" },
+          ],
+        },
+      },
+    });
+
+    const { plan } = buildCodexMultiRouterWizardPlan([relay], [relay], null, {
+      planName: "Work MultiRouter",
+      catalogModelOrder: ["model-c", "model-a"],
+      spawnAgentModels: ["model-a", "model-c", "model-b"],
+    });
+
+    expect(plan.name).toBe("Work MultiRouter");
+    expect(
+      plan.settingsConfig.modelCatalog.models.map(
+        (model: { model: string }) => model.model,
+      ),
+    ).toEqual(["model-c", "model-a"]);
+    expect(plan.settingsConfig.modelCatalog.spawnAgentModels).toEqual([
+      "model-a",
+      "model-c",
+    ]);
+    expect(plan.settingsConfig.codexRouting.routes[0].match.models).toEqual([
+      "model-c",
+      "model-a",
+    ]);
   });
 
   it("reports config issues only for sources without fetch config or model catalog", () => {

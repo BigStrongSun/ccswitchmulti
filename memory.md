@@ -1,5 +1,11 @@
 # CC Switch Repository Memory
 
+## 2026-07-01 Codex MultiRouter Wizard Catalog Curation Flow
+
+- Codex 单 provider 表单 `CodexFormFields` 的模型映射表第一列语义是“保留这个模型进入该 provider 的 modelCatalog”，不是子 Agent 候选。取消勾选会删除该模型行；上下箭头移动的是 catalog 行顺序。不要再在单 provider 获取 `/models` 后自动写 `spawnAgentModels` 前 5 个。
+- MultiRouter 设置向导的正确顺序是：模型源 -> MultiRouter 命名 -> 配置检查 -> 获取/测试模型 -> 重名别名 -> 汇总模型排序/剔除 -> 路由预览 -> 子 Agent 候选排序 -> 保存发布。最终汇总页决定 `modelCatalog.models` 和 route `match.models` 保留哪些模型；子 Agent 页只从最终保留模型中选择最多 5 个并写入 `modelCatalog.spawnAgentModels`。
+- `buildCodexMultiRouterWizardPlan` 支持可选 `planName`、`catalogModelOrder`、`spawnAgentModels`。传入 `catalogModelOrder` 时必须同时过滤 routes 和 final catalog，避免 UI 剔除模型但路由仍命中；传入 `spawnAgentModels` 时要过滤掉已剔除模型并限制最多 5 个。
+
 ## 2026-07-01 Codex Provider Protocol Probe Concurrency
 
 - Codex provider 表单的“测试 Chat / Responses”可以并发，但不要改成无界并发：`src/components/providers/forms/CodexFormFields.tsx` 使用 `CODEX_PROTOCOL_PROBE_MODEL_CONCURRENCY = 3` 的模型级并发池，避免大模型目录串行太慢，也避免一次性打爆真实供应商限流。

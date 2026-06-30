@@ -2,8 +2,10 @@ import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import {
+  ArrowDown,
   ArrowLeft,
   ArrowRight,
+  ArrowUp,
   CheckCircle2,
   Database,
   GitBranch,
@@ -12,6 +14,7 @@ import {
   Route,
   Server,
   ShieldAlert,
+  Trash2,
   Wand2,
   X,
 } from "lucide-react";
@@ -25,6 +28,7 @@ import type {
 } from "@/types";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
 import {
   Dialog,
   DialogContent,
@@ -40,9 +44,11 @@ import {
   probeCodexResponsesForConfig,
 } from "@/lib/api/model-fetch";
 import {
+  CODEX_MULTI_ROUTER_DEFAULT_NAME,
   CODEX_MULTI_ROUTER_WIZARD_DISMISSED_KEY,
   applyWizardConnectivityApiFormatOverrides,
   buildCodexMultiRouterWizardPlan,
+  buildWizardModelCatalog,
   canContinueAfterConnectivity,
   classifyWizardDualProtocolConnectivityResult,
   classifyWizardConnectivityResult,
@@ -75,10 +81,13 @@ interface CodexMultiRouterWizardProps {
 type WizardStepKey =
   | "intro"
   | "sources"
+  | "rename"
   | "providerConfig"
   | "fetchModels"
   | "collisions"
+  | "selectModels"
   | "routes"
+  | "spawnAgent"
   | "publish"
   | "finish";
 
@@ -120,6 +129,13 @@ const STEPS: WizardStep[] = [
     icon: Server,
   },
   {
+    key: "rename",
+    title: "命名方案",
+    description:
+      "给这次新配置的 MultiRouter 起一个清晰名称，后续状态页和 provider 列表都会使用它。",
+    icon: Wand2,
+  },
+  {
     key: "providerConfig",
     title: "配置核心参数",
     description:
@@ -140,11 +156,23 @@ const STEPS: WizardStep[] = [
     icon: ShieldAlert,
   },
   {
+    key: "selectModels",
+    title: "整理模型",
+    description: "汇总所有模型后，排序并剔除旧模型或不想暴露给 Codex 的模型。",
+    icon: Database,
+  },
+  {
     key: "routes",
     title: "生成路由规则",
     description:
       "按 provider 分组生成规则，gpt/o、deepseek、qwen 等前缀自动命中对应上游。",
     icon: GitBranch,
+  },
+  {
+    key: "spawnAgent",
+    title: "子 Agent 候选",
+    description: "从最终模型列表里选择并排序最多 5 个子 Agent 候选模型。",
+    icon: Route,
   },
   {
     key: "publish",
@@ -171,6 +199,10 @@ const STEP_RULES: Record<WizardStepKey, WizardStepRule> = {
     errors: ["没有普通 Codex provider 时，不能生成任何路由。"],
     canContinue: "至少识别到一个普通 Codex provider 后可以继续。",
   },
+  rename: {
+    errors: ["名称为空会让后续 provider 列表和状态页难以区分。"],
+    canContinue: "填写 MultiRouter 名称后可以继续。",
+  },
   providerConfig: {
     errors: [
       "缺少 Base URL/API Key 时无法自动获取模型，也无法做真实连通性测试。",
@@ -194,9 +226,17 @@ const STEP_RULES: Record<WizardStepKey, WizardStepRule> = {
     ],
     canContinue: "接受自动别名策略后可以继续，upstreamModel 会保留真实模型名。",
   },
+  selectModels: {
+    errors: ["未保留任何模型时，MultiRouter 不会有可路由模型。"],
+    canContinue: "至少保留一个模型后可以继续生成路由。",
+  },
   routes: {
     errors: ["没有 match.models/prefixes 的 route 不会稳定命中模型请求。"],
     canContinue: "至少生成一条 route 且没有连通性阻塞项时可以继续保存。",
+  },
+  spawnAgent: {
+    errors: ["子 Agent 候选最多 5 个；不选择时会默认使用最终模型列表前 5 个。"],
+    canContinue: "候选为空或不超过 5 个都可以继续；保存时会过滤掉已剔除模型。",
   },
   publish: {
     errors: ["数据库写入失败或 provider id 冲突会进入 saveFailed。"],
@@ -290,13 +330,19 @@ function statusForStep(stepKey: WizardStepKey): WizardFlowStatus {
   switch (stepKey) {
     case "sources":
       return "reviewProviderConfig";
+    case "rename":
+      return "reviewProviderConfig";
     case "providerConfig":
       return "reviewProviderConfig";
     case "fetchModels":
       return "readyToFetchModels";
     case "collisions":
       return "collisionReviewRequired";
+    case "selectModels":
+      return "routePreview";
     case "routes":
+      return "routePreview";
+    case "spawnAgent":
       return "routePreview";
     case "publish":
       return "published";
@@ -541,6 +587,38 @@ function createWizardIssueId(stage: WizardStepKey, title: string): string {
   return `${stage}:${title}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
 }
 
+// 在有序列表中移动一项，供模型汇总列表和子 Agent 候选列表复用。
+function moveOrderedItem(items: string[], item: string, direction: -1 | 1) {
+  const index = items.indexOf(item);
+  const targetIndex = index + direction;
+  if (index < 0 || targetIndex < 0 || targetIndex >= items.length) {
+    return items;
+  }
+  const next = [...items];
+  [next[index], next[targetIndex]] = [next[targetIndex], next[index]];
+  return next;
+}
+
+// 用最新可用模型校正用户草稿顺序；未显式编辑时保留完整模型列表，显式编辑后不自动加回已剔除模型。
+function resolveActiveCatalogModelOrder(
+  availableModels: CodexCatalogModel[],
+  draftOrder: string[] | null,
+) {
+  const availableNames = availableModels.map((model) => model.model);
+  if (draftOrder === null) return availableNames;
+  const availableSet = new Set(availableNames);
+  return draftOrder.filter((model) => availableSet.has(model));
+}
+
+// 保存子 Agent 候选时必须先按最终模型池过滤，避免引用已经剔除的模型。
+function resolveActiveSpawnAgentModels(
+  draftModels: string[],
+  catalogModelOrder: string[],
+) {
+  const catalogModelSet = new Set(catalogModelOrder);
+  return draftModels.filter((model) => catalogModelSet.has(model)).slice(0, 5);
+}
+
 export function CodexMultiRouterWizard({
   open,
   providers,
@@ -555,6 +633,15 @@ export function CodexMultiRouterWizard({
     INITIAL_FLOW_STATE,
   );
   const [draftSources, setDraftSources] = useState<Provider[]>([]);
+  const [draftPlanName, setDraftPlanName] = useState(
+    CODEX_MULTI_ROUTER_DEFAULT_NAME,
+  );
+  const [catalogModelOrder, setCatalogModelOrder] = useState<string[] | null>(
+    null,
+  );
+  const [draftSpawnAgentModels, setDraftSpawnAgentModels] = useState<string[]>(
+    [],
+  );
   const [savedPlan, setSavedPlan] = useState<Provider | null>(null);
   const [connectivityResults, setConnectivityResults] = useState<
     WizardConnectivityResult[]
@@ -583,6 +670,21 @@ export function CodexMultiRouterWizard({
     () => collectWizardModelNameCollisions(draftSources),
     [draftSources],
   );
+  const routeReadySources = applyWizardConnectivityApiFormatOverrides(
+    draftSources,
+    connectivityResults,
+  );
+  const availableCatalogModels = buildWizardModelCatalog(
+    resolveWizardModelNameCollisions(routeReadySources),
+  ).models;
+  const activeCatalogModelOrder = resolveActiveCatalogModelOrder(
+    availableCatalogModels,
+    catalogModelOrder,
+  );
+  const activeSpawnAgentModels = resolveActiveSpawnAgentModels(
+    draftSpawnAgentModels,
+    activeCatalogModelOrder,
+  );
   const isRefreshingModels = flowState.status === "fetchingModels";
   const isProbingConnectivity = flowState.status === "probingConnectivity";
   const isSavingPlan = flowState.status === "savingPlan";
@@ -599,6 +701,18 @@ export function CodexMultiRouterWizard({
     initializedOpenRef.current = true;
     setSavedPlan(existingPlan ?? null);
     setDraftSources(providerModelSources);
+    setDraftPlanName(existingPlan?.name ?? CODEX_MULTI_ROUTER_DEFAULT_NAME);
+    setCatalogModelOrder(
+      existingPlan?.settingsConfig?.modelCatalog?.models?.map(
+        (model: CodexCatalogModel) => model.model,
+      ) ?? null,
+    );
+    setDraftSpawnAgentModels(
+      existingPlan?.settingsConfig?.modelCatalog?.spawnAgentModels?.slice(
+        0,
+        5,
+      ) ?? [],
+    );
     setConnectivityResults([]);
     setWizardIssues([]);
     dispatchFlow({
@@ -652,6 +766,58 @@ export function CodexMultiRouterWizard({
     );
   };
 
+  // 切换最终模型池里的保留状态；第一次编辑时从当前完整列表复制一份显式顺序。
+  const toggleCatalogModel = (model: string, checked: boolean) => {
+    setCatalogModelOrder((current) => {
+      const base = current ?? availableCatalogModels.map((item) => item.model);
+      if (checked) {
+        return base.includes(model) ? base : [...base, model];
+      }
+      setDraftSpawnAgentModels((spawnModels) =>
+        spawnModels.filter((item) => item !== model),
+      );
+      return base.filter((item) => item !== model);
+    });
+  };
+
+  // 调整最终模型列表顺序；这个顺序会写入 MultiRouter modelCatalog。
+  const moveCatalogModel = (model: string, direction: -1 | 1) => {
+    setCatalogModelOrder((current) =>
+      moveOrderedItem(
+        current ?? availableCatalogModels.map((item) => item.model),
+        model,
+        direction,
+      ),
+    );
+  };
+
+  // 添加或移除子 Agent 候选；候选只从最终保留模型中选择，最多 5 个。
+  const toggleSpawnAgentModel = (model: string, checked: boolean) => {
+    if (!checked) {
+      setDraftSpawnAgentModels((current) =>
+        current.filter((item) => item !== model),
+      );
+      return;
+    }
+    setDraftSpawnAgentModels((current) => {
+      if (current.includes(model)) return current;
+      if (current.length >= 5) {
+        toast.error("子 Agent 候选最多只能选择 5 个模型。", {
+          closeButton: true,
+        });
+        return current;
+      }
+      return [...current, model];
+    });
+  };
+
+  // 调整子 Agent 候选顺序；这个顺序会写入 modelCatalog.spawnAgentModels。
+  const moveSpawnAgentModel = (model: string, direction: -1 | 1) => {
+    setDraftSpawnAgentModels((current) =>
+      moveOrderedItem(current, model, direction),
+    );
+  };
+
   // 关闭/跳过时记录 dismissed；首页按钮仍可再次显式打开。
   const closeWizard = (dismissed = true) => {
     if (dismissed) {
@@ -684,6 +850,17 @@ export function CodexMultiRouterWizard({
           toast.info("请先添加至少一个 Codex provider 作为模型源。", {
             closeButton: true,
           });
+          return;
+        }
+        dispatchFlow({
+          type: "NEXT",
+          nextStatus: "reviewProviderConfig",
+          nextStepKey: "rename",
+        });
+        return;
+      case "rename":
+        if (!draftPlanName.trim()) {
+          toast.error("请先填写 MultiRouter 名称。", { closeButton: true });
           return;
         }
         dispatchFlow({
@@ -749,10 +926,28 @@ export function CodexMultiRouterWizard({
         dispatchFlow({
           type: "NEXT",
           nextStatus: "routePreview",
+          nextStepKey: "selectModels",
+        });
+        return;
+      case "selectModels":
+        if (activeCatalogModelOrder.length === 0) {
+          toast.error("请至少保留一个模型。", { closeButton: true });
+          return;
+        }
+        dispatchFlow({
+          type: "NEXT",
+          nextStatus: "routePreview",
           nextStepKey: "routes",
         });
         return;
       case "routes":
+        dispatchFlow({
+          type: "NEXT",
+          nextStatus: "routePreview",
+          nextStepKey: "spawnAgent",
+        });
+        return;
+      case "spawnAgent":
         dispatchFlow({
           type: "NEXT",
           nextStatus: "published",
@@ -824,7 +1019,9 @@ export function CodexMultiRouterWizard({
           nextSources.push(provider);
         }
       }
-      setDraftSources(resolveWizardModelNameCollisions(nextSources));
+      setDraftSources(nextSources);
+      setCatalogModelOrder(null);
+      setDraftSpawnAgentModels([]);
       setConnectivityResults([]);
       await queryClient.invalidateQueries({ queryKey: ["providers", "codex"] });
       dispatchFlow({
@@ -971,6 +1168,11 @@ export function CodexMultiRouterWizard({
         providers,
         routeReadySources,
         existingPlan,
+        {
+          planName: draftPlanName,
+          catalogModelOrder: activeCatalogModelOrder,
+          spawnAgentModels: activeSpawnAgentModels,
+        },
       );
       if (existingPlan) {
         await providersApi.update(result.plan, "codex");
@@ -1028,19 +1230,31 @@ export function CodexMultiRouterWizard({
 
   if (!open) return null;
 
-  const routeReadySources = applyWizardConnectivityApiFormatOverrides(
-    draftSources,
-    connectivityResults,
-  );
   const planPreview = buildCodexMultiRouterWizardPlan(
     providers,
     routeReadySources,
     existingPlan,
+    {
+      planName: draftPlanName,
+      catalogModelOrder: activeCatalogModelOrder,
+      spawnAgentModels: activeSpawnAgentModels,
+    },
   ).plan;
   const previewRoutes = (planPreview.settingsConfig.codexRouting?.routes ??
     []) as CodexRoutingRoute[];
   const previewModels = (planPreview.settingsConfig.modelCatalog?.models ??
     []) as CodexCatalogModel[];
+  const availableModelByName = new Map(
+    availableCatalogModels.map((model) => [model.model, model]),
+  );
+  const selectModelRows = [
+    ...activeCatalogModelOrder
+      .map((model) => availableModelByName.get(model))
+      .filter((model): model is CodexCatalogModel => Boolean(model)),
+    ...availableCatalogModels.filter(
+      (model) => !activeCatalogModelOrder.includes(model.model),
+    ),
+  ];
 
   return createPortal(
     <div className="fixed inset-0 z-[120] flex items-center justify-center overflow-hidden bg-black/70 p-3 text-foreground backdrop-blur-sm sm:p-4">
@@ -1194,12 +1408,15 @@ export function CodexMultiRouterWizard({
                 <div className="rounded-lg border p-4">
                   <div className="flex items-center gap-2 font-medium">
                     <Wand2 className="h-4 w-4" />
-                    这套向导会帮你完成 4 件事
+                    这套向导会帮你完成 7 件事
                   </div>
                   <div className="mt-4 grid gap-3 md:grid-cols-2">
                     {[
                       "把 OpenAI、中转站、DeepSeek、Qwen、本地模型接进来",
+                      "给新的 MultiRouter 方案命名，方便后续识别",
                       "自动读取模型列表，并处理官方模型和中转模型重名",
+                      "汇总所有模型后排序，并剔除旧模型或不想暴露的模型",
+                      "从最终模型池里选择并排序 5 个子 Agent 候选",
                       "按模型名称生成分流规则，让 Codex 自动选上游",
                       "启用后等待真实请求成功，再带你修复历史记录",
                     ].map((item, index) => (
@@ -1259,6 +1476,28 @@ export function CodexMultiRouterWizard({
                     provider，或关闭向导后从已有配置导入。
                   </div>
                 )}
+              </div>
+            )}
+
+            {currentStep.key === "rename" && (
+              <div className="space-y-4">
+                <div className="rounded-lg border p-4">
+                  <label className="text-sm font-medium" htmlFor="plan-name">
+                    MultiRouter 名称
+                  </label>
+                  <Input
+                    id="plan-name"
+                    className="mt-2"
+                    value={draftPlanName}
+                    onChange={(event) => setDraftPlanName(event.target.value)}
+                    placeholder="例如：Codex MultiRouter - 工作主路由"
+                  />
+                  <p className="mt-2 text-xs leading-5 text-muted-foreground">
+                    这个名称会保存到 provider
+                    列表、状态页和后续启用提示里。重命名只影响 MultiRouter
+                    方案本身，不会改动单个上游 provider 的名称。
+                  </p>
+                </div>
               </div>
             )}
 
@@ -1423,6 +1662,114 @@ export function CodexMultiRouterWizard({
               </div>
             )}
 
+            {currentStep.key === "selectModels" && (
+              <div className="space-y-4">
+                <div className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
+                  这里决定最终写入 MultiRouter modelCatalog 和各 route
+                  的模型。取消勾选会把旧模型或不想暴露的模型从最终路由里剔除；子
+                  Agent 候选会在下一步单独选择。
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() =>
+                      setCatalogModelOrder(
+                        availableCatalogModels.map((model) => model.model),
+                      )
+                    }
+                  >
+                    全部保留
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => {
+                      setCatalogModelOrder([]);
+                      setDraftSpawnAgentModels([]);
+                    }}
+                  >
+                    全部取消
+                  </Button>
+                  <Badge variant="outline">
+                    已保留 {activeCatalogModelOrder.length} /{" "}
+                    {availableCatalogModels.length}
+                  </Badge>
+                </div>
+                <div className="max-h-[min(50vh,34rem)] overflow-auto rounded-lg border">
+                  {selectModelRows.map((model) => {
+                    const kept = activeCatalogModelOrder.includes(model.model);
+                    const orderIndex = activeCatalogModelOrder.indexOf(
+                      model.model,
+                    );
+                    return (
+                      <div
+                        key={`${model.model}:${model.upstreamModel ?? ""}`}
+                        className="grid grid-cols-[2rem_minmax(0,1fr)_8rem_5rem] items-center gap-3 border-b px-3 py-2 text-sm last:border-b-0"
+                      >
+                        <input
+                          type="checkbox"
+                          className="h-4 w-4"
+                          checked={kept}
+                          onChange={(event) =>
+                            toggleCatalogModel(
+                              model.model,
+                              event.target.checked,
+                            )
+                          }
+                          aria-label={`保留 ${model.model}`}
+                        />
+                        <div className="min-w-0">
+                          <div className="truncate font-medium">
+                            {model.model}
+                          </div>
+                          <div className="truncate text-xs text-muted-foreground">
+                            {model.upstreamModel &&
+                            model.upstreamModel !== model.model
+                              ? `上游 ${model.upstreamModel}`
+                              : model.displayName || "原名"}
+                          </div>
+                        </div>
+                        <div className="text-xs text-muted-foreground">
+                          {model.contextWindow
+                            ? `${model.contextWindow} ctx`
+                            : "未标注上下文"}
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8"
+                            disabled={!kept || orderIndex <= 0}
+                            onClick={() => moveCatalogModel(model.model, -1)}
+                            title="上移"
+                          >
+                            <ArrowUp className="h-4 w-4" />
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8"
+                            disabled={
+                              !kept ||
+                              orderIndex < 0 ||
+                              orderIndex >= activeCatalogModelOrder.length - 1
+                            }
+                            onClick={() => moveCatalogModel(model.model, 1)}
+                            title="下移"
+                          >
+                            <ArrowDown className="h-4 w-4" />
+                          </Button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {currentStep.key === "routes" && (
               <div className="space-y-3">
                 {previewRoutes.map((route) => (
@@ -1442,6 +1789,106 @@ export function CodexMultiRouterWizard({
                     </div>
                   </div>
                 ))}
+              </div>
+            )}
+
+            {currentStep.key === "spawnAgent" && (
+              <div className="space-y-4">
+                <div className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
+                  子 Agent 候选只从上一步保留的模型里选，最多 5
+                  个。顺序越靠前，越适合放常用或稳定的模型；如果不选，保存时会默认取最终模型列表前
+                  5 个。
+                </div>
+                <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)]">
+                  <div className="rounded-lg border">
+                    <div className="border-b px-3 py-2 text-sm font-medium">
+                      已选候选 {activeSpawnAgentModels.length} / 5
+                    </div>
+                    <div className="max-h-80 overflow-auto">
+                      {activeSpawnAgentModels.length === 0 && (
+                        <div className="p-3 text-sm text-muted-foreground">
+                          暂未选择，保存时会使用最终模型列表前 5 个。
+                        </div>
+                      )}
+                      {activeSpawnAgentModels.map((model, index) => (
+                        <div
+                          key={model}
+                          className="grid grid-cols-[2rem_minmax(0,1fr)_5rem_2rem] items-center gap-2 border-b px-3 py-2 text-sm last:border-b-0"
+                        >
+                          <Badge variant="outline">#{index + 1}</Badge>
+                          <span className="truncate font-medium">{model}</span>
+                          <div className="flex gap-1">
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8"
+                              disabled={index === 0}
+                              onClick={() => moveSpawnAgentModel(model, -1)}
+                              title="上移"
+                            >
+                              <ArrowUp className="h-4 w-4" />
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8"
+                              disabled={
+                                index === activeSpawnAgentModels.length - 1
+                              }
+                              onClick={() => moveSpawnAgentModel(model, 1)}
+                              title="下移"
+                            >
+                              <ArrowDown className="h-4 w-4" />
+                            </Button>
+                          </div>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                            onClick={() => toggleSpawnAgentModel(model, false)}
+                            title="移除"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="rounded-lg border">
+                    <div className="border-b px-3 py-2 text-sm font-medium">
+                      最终模型池
+                    </div>
+                    <div className="max-h-80 overflow-auto">
+                      {previewModels.map((model) => {
+                        const selected = activeSpawnAgentModels.includes(
+                          model.model,
+                        );
+                        return (
+                          <label
+                            key={model.model}
+                            className="grid grid-cols-[2rem_minmax(0,1fr)] items-center gap-2 border-b px-3 py-2 text-sm last:border-b-0"
+                          >
+                            <input
+                              type="checkbox"
+                              className="h-4 w-4"
+                              checked={selected}
+                              onChange={(event) =>
+                                toggleSpawnAgentModel(
+                                  model.model,
+                                  event.target.checked,
+                                )
+                              }
+                            />
+                            <span className="truncate">{model.model}</span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
               </div>
             )}
 

@@ -540,8 +540,6 @@ export function CodexFormFields({
   onCodexChatReasoningChange,
   catalogModels = [],
   onCatalogModelsChange,
-  spawnAgentModels = [],
-  onSpawnAgentModelsChange,
   codexRouting = { enabled: false, defaultRouteId: "", routes: [] },
   onCodexRoutingChange,
   onProviderSplitSuggestionChange,
@@ -583,8 +581,6 @@ export function CodexFormFields({
     codexChatReasoning.supportsThinking === true ||
     codexChatReasoning.supportsEffort === true;
   const supportsEffort = codexChatReasoning.supportsEffort === true;
-  const selectedSpawnAgentModelSet = new Set(spawnAgentModels);
-
   // takeoverEnabled 取代了旧的 needsLocalRouting：上游格式已与路由解耦。
   // takeoverEnabled 为真说明预设/用户启用了本地路由；请求头/请求体覆盖也算高级值。
   const hasRequestOverrides = Boolean(
@@ -781,20 +777,6 @@ export function CodexFormFields({
           );
           catalogRowsRef.current = mergedRows;
           setCatalogRows(mergedRows);
-          const autoSelected = models
-            .map((model) => {
-              const upstreamModel = model.id.trim();
-              return (
-                mergedRows
-                  .find((row) => catalogRowUpstreamModel(row) === upstreamModel)
-                  ?.model.trim() ?? upstreamModel
-              );
-            })
-            .filter((model): model is string => Boolean(model))
-            .slice(0, 5);
-          if (onSpawnAgentModelsChange && spawnAgentModels.length === 0) {
-            onSpawnAgentModelsChange(autoSelected);
-          }
         }
         const shouldAutoSplitRouting =
           models.length > 0 &&
@@ -832,10 +814,8 @@ export function CodexFormFields({
     providerName,
     websiteUrl,
     onCatalogModelsChange,
-    onSpawnAgentModelsChange,
     onProviderSplitSuggestionChange,
     codexRouting.routes,
-    spawnAgentModels.length,
     t,
   ]);
 
@@ -1052,50 +1032,20 @@ export function CodexFormFields({
     setCatalogRows((current) => current.filter((_, i) => i !== index));
   }, []);
 
-  const handleToggleSpawnAgentModel = useCallback(
-    (model: string, checked: boolean) => {
-      if (!onSpawnAgentModelsChange) return;
-      const normalized = model.trim();
-      if (!normalized) return;
-
-      if (!checked) {
-        onSpawnAgentModelsChange(
-          spawnAgentModels.filter((item) => item !== normalized),
-        );
-        return;
-      }
-
-      if (spawnAgentModels.includes(normalized)) return;
-      if (spawnAgentModels.length >= 5) {
-        toast.error(
-          t("codexConfig.spawnAgentModelsLimit", {
-            defaultValue: "子 Agent 候选最多只能选择 5 个模型",
-          }),
-        );
-        return;
-      }
-      onSpawnAgentModelsChange([...spawnAgentModels, normalized]);
+  // 移动模型目录行本身；单 provider 表格里的顺序代表保留下来的模型展示/路由顺序，不再混用子 Agent 候选顺序。
+  const handleMoveCatalogRow = useCallback(
+    (index: number, direction: -1 | 1) => {
+      setCatalogRows((current) => {
+        const targetIndex = index + direction;
+        if (index < 0 || targetIndex < 0 || targetIndex >= current.length) {
+          return current;
+        }
+        const next = [...current];
+        [next[index], next[targetIndex]] = [next[targetIndex], next[index]];
+        return next;
+      });
     },
-    [onSpawnAgentModelsChange, spawnAgentModels, t],
-  );
-
-  const handleMoveSpawnAgentModel = useCallback(
-    (model: string, direction: -1 | 1) => {
-      if (!onSpawnAgentModelsChange) return;
-      const index = spawnAgentModels.indexOf(model);
-      const targetIndex = index + direction;
-      if (
-        index < 0 ||
-        targetIndex < 0 ||
-        targetIndex >= spawnAgentModels.length
-      ) {
-        return;
-      }
-      const next = [...spawnAgentModels];
-      [next[index], next[targetIndex]] = [next[targetIndex], next[index]];
-      onSpawnAgentModelsChange(next);
-    },
-    [onSpawnAgentModelsChange, spawnAgentModels],
+    [],
   );
 
   const handleConfirmSplitRouting = useCallback(() => {
@@ -2128,8 +2078,8 @@ export function CodexFormFields({
                     {/* 列头：md+ 显示 */}
                     <div className="hidden grid-cols-[88px_1fr_1fr_1fr_132px_76px_36px] gap-2 px-1 text-xs font-medium text-muted-foreground md:grid">
                       <span>
-                        {t("codexConfig.spawnAgentColumn", {
-                          defaultValue: "子 Agent",
+                        {t("codexConfig.keepCatalogModelColumn", {
+                          defaultValue: "保留",
                         })}
                       </span>
                       <span>
@@ -2153,7 +2103,7 @@ export function CodexFormFields({
                         })}
                       </span>
                       <span>
-                        {t("codexConfig.spawnAgentOrderColumn", {
+                        {t("codexConfig.catalogOrderColumn", {
                           defaultValue: "顺序",
                         })}
                       </span>
@@ -2176,23 +2126,20 @@ export function CodexFormFields({
                             <input
                               type="checkbox"
                               className="h-4 w-4 rounded border-border-default"
-                              checked={selectedSpawnAgentModelSet.has(
-                                row.model,
-                              )}
-                              disabled={!row.model.trim()}
-                              onChange={(event) =>
-                                handleToggleSpawnAgentModel(
-                                  row.model,
-                                  event.target.checked,
-                                )
-                              }
-                              aria-label={t("codexConfig.spawnAgentCheckbox", {
-                                defaultValue: "加入子 Agent 候选",
+                              checked
+                              onChange={(event) => {
+                                if (!event.target.checked) {
+                                  handleRemoveCatalogRow(index);
+                                }
+                              }}
+                              aria-label={t("codexConfig.keepCatalogModel", {
+                                model: row.model || row.displayName || "",
+                                defaultValue: `保留 ${row.model || row.displayName || "这个模型"}`,
                               })}
                             />
                             <span className="md:hidden">
-                              {t("codexConfig.spawnAgentColumn", {
-                                defaultValue: "子 Agent",
+                              {t("codexConfig.keepCatalogModelColumn", {
+                                defaultValue: "保留",
                               })}
                             </span>
                           </label>
@@ -2310,12 +2257,8 @@ export function CodexFormFields({
                               variant="ghost"
                               size="icon"
                               className="h-8 w-8 text-muted-foreground"
-                              disabled={
-                                spawnAgentModels.indexOf(row.model) <= 0
-                              }
-                              onClick={() =>
-                                handleMoveSpawnAgentModel(row.model, -1)
-                              }
+                              disabled={index <= 0}
+                              onClick={() => handleMoveCatalogRow(index, -1)}
                               title={t("common.moveUp", {
                                 defaultValue: "上移",
                               })}
@@ -2327,14 +2270,8 @@ export function CodexFormFields({
                               variant="ghost"
                               size="icon"
                               className="h-8 w-8 text-muted-foreground"
-                              disabled={
-                                spawnAgentModels.indexOf(row.model) < 0 ||
-                                spawnAgentModels.indexOf(row.model) >=
-                                  spawnAgentModels.length - 1
-                              }
-                              onClick={() =>
-                                handleMoveSpawnAgentModel(row.model, 1)
-                              }
+                              disabled={index >= catalogRows.length - 1}
+                              onClick={() => handleMoveCatalogRow(index, 1)}
                               title={t("common.moveDown", {
                                 defaultValue: "下移",
                               })}
