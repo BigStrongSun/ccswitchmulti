@@ -42,6 +42,12 @@ const FETCH_TIMEOUT_SECS: u64 = 15;
 const ZHIPU_MODEL_OVERVIEW_MD_URL: &str =
     "https://docs.bigmodel.cn/cn/guide/start/model-overview.md";
 
+/// models.dev 公共模型目录。
+///
+/// 原版只把它用于定价导入，但该 API 也包含 `limit.context`。这里作为通用兜底：
+/// 仅当 provider 的 `api` 前缀能匹配当前成功的 `/models` endpoint 时才使用。
+const MODELS_DEV_API_URL: &str = "https://models.dev/api.json";
+
 /// 404/405 响应体截断长度：避免把几十 KB HTML 404 页整页保留到错误串里。
 const ERROR_BODY_MAX_CHARS: usize = 512;
 
@@ -114,7 +120,7 @@ pub async fn fetch_models(
                 })
                 .collect();
 
-            enrich_zhipu_context_windows(&client, url, &mut models).await;
+            enrich_missing_context_windows(&client, url, &mut models).await;
             models.sort_by(|a, b| a.id.cmp(&b.id));
             return Ok(models);
         }
@@ -183,6 +189,23 @@ fn extract_context_window(obj: &serde_json::Map<String, serde_json::Value>) -> O
         .find_map(extract_context_window)
 }
 
+/// 为缺失上下文窗口的模型执行分层补齐。
+///
+/// 顺序保持保守：`/models` 显式 metadata 已在调用前解析完成；这里仅对仍为空的模型
+/// 先尝试 provider 官方来源，再尝试能按 API 前缀匹配的公共目录。
+async fn enrich_missing_context_windows(
+    client: &reqwest::Client,
+    endpoint_url: &str,
+    models: &mut [FetchedModel],
+) {
+    if !models.iter().any(|model| model.context_window.is_none()) {
+        return;
+    }
+
+    enrich_zhipu_context_windows(client, endpoint_url, models).await;
+    enrich_models_dev_context_windows(client, endpoint_url, models).await;
+}
+
 /// 为智谱模型补齐官方文档里的上下文窗口。
 ///
 /// 智谱 Coding Plan 的 `/models` 响应只证明账号可用模型集合，模型规格需要从官方文档取。
@@ -209,6 +232,164 @@ async fn enrich_zhipu_context_windows(
             model.context_window = contexts.get(&key).copied();
         }
     }
+}
+
+/// 通过 models.dev 的 `limit.context` 补齐上下文窗口。
+///
+/// 只在 endpoint 与 provider.api 前缀匹配时使用，避免跨供应商同名模型误配。该来源是
+/// 公共目录，因此优先级低于上游 `/models` 显式字段和 provider 官方文档。
+async fn enrich_models_dev_context_windows(
+    client: &reqwest::Client,
+    endpoint_url: &str,
+    models: &mut [FetchedModel],
+) {
+    if !models.iter().any(|model| model.context_window.is_none()) {
+        return;
+    }
+
+    let Some(catalog) = fetch_models_dev_catalog(client).await else {
+        return;
+    };
+    let Some(provider_models) = find_models_dev_provider_models(&catalog, endpoint_url) else {
+        return;
+    };
+
+    for model in models.iter_mut() {
+        if model.context_window.is_none() {
+            model.context_window = lookup_models_dev_context(provider_models, &model.id);
+        }
+    }
+}
+
+/// 拉取 models.dev 目录；失败时返回 `None`，不影响 `/models` 主流程。
+async fn fetch_models_dev_catalog(client: &reqwest::Client) -> Option<serde_json::Value> {
+    let response = client
+        .get(MODELS_DEV_API_URL)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    response.json::<serde_json::Value>().await.ok()
+}
+
+/// 从 models.dev 目录中找到与当前 endpoint 匹配的 provider models 对象。
+fn find_models_dev_provider_models<'a>(
+    catalog: &'a serde_json::Value,
+    endpoint_url: &str,
+) -> Option<&'a serde_json::Map<String, serde_json::Value>> {
+    catalog
+        .as_object()?
+        .values()
+        .filter_map(|provider| provider.as_object())
+        .find(|provider| {
+            provider
+                .get("api")
+                .and_then(|value| value.as_str())
+                .is_some_and(|api| endpoint_matches_provider_api(endpoint_url, api))
+        })
+        .and_then(|provider| provider.get("models"))
+        .and_then(|models| models.as_object())
+}
+
+/// 判断 `/models` endpoint 是否属于 models.dev provider.api。
+fn endpoint_matches_provider_api(endpoint_url: &str, provider_api: &str) -> bool {
+    let endpoint = normalize_url_prefix(endpoint_url);
+    let api = normalize_url_prefix(provider_api);
+    !endpoint.is_empty() && !api.is_empty() && endpoint.starts_with(&api)
+}
+
+/// 归一化 URL 前缀：大小写、尾斜杠和最终 `/models` 不影响 provider 匹配。
+fn normalize_url_prefix(value: &str) -> String {
+    let mut normalized = value.trim().trim_end_matches('/').to_ascii_lowercase();
+    if let Some(stripped) = normalized.strip_suffix("/models") {
+        normalized = stripped.to_string();
+    }
+    normalized
+}
+
+/// 在已匹配 provider 的 models.dev 模型表里查找 context window。
+fn lookup_models_dev_context(
+    provider_models: &serde_json::Map<String, serde_json::Value>,
+    model_id: &str,
+) -> Option<u64> {
+    let fetched = normalize_models_dev_model_id(model_id);
+    let mut suffix_matches = Vec::new();
+
+    for (key, value) in provider_models {
+        let Some(model_obj) = value.as_object() else {
+            continue;
+        };
+        let catalog_id = model_obj.get("id").and_then(|id| id.as_str());
+        let Some(context) = extract_models_dev_entry_context(model_obj) else {
+            continue;
+        };
+        if models_dev_model_id_matches_exact(&fetched, key, catalog_id) {
+            return Some(context);
+        }
+        if models_dev_model_id_matches_suffix(&fetched, key, catalog_id) {
+            suffix_matches.push(context);
+        }
+    }
+
+    if suffix_matches.len() == 1 {
+        suffix_matches.into_iter().next()
+    } else {
+        None
+    }
+}
+
+/// 从 models.dev 单个模型条目中提取正数 `limit.context`。
+fn extract_models_dev_entry_context(
+    model_obj: &serde_json::Map<String, serde_json::Value>,
+) -> Option<u64> {
+    model_obj
+        .get("limit")
+        .and_then(|limit| limit.as_object())
+        .and_then(|limit| limit.get("context"))
+        .and_then(parse_positive_u64)
+        .filter(|context| *context > 0)
+}
+
+/// 判断 `/models` 返回的模型 id 是否精确匹配 models.dev 的 key 或 `id` 字段。
+fn models_dev_model_id_matches_exact(
+    fetched_model_id: &str,
+    catalog_key: &str,
+    catalog_id: Option<&str>,
+) -> bool {
+    let key = normalize_models_dev_model_id(catalog_key);
+    let id = catalog_id.map(normalize_models_dev_model_id);
+
+    fetched_model_id == key || id.as_deref() == Some(fetched_model_id)
+}
+
+/// 判断 `/models` 返回的模型 id 是否唯一后缀匹配 models.dev 的 key 或 `id` 字段。
+fn models_dev_model_id_matches_suffix(
+    fetched_model_id: &str,
+    catalog_key: &str,
+    catalog_id: Option<&str>,
+) -> bool {
+    let key = normalize_models_dev_model_id(catalog_key);
+    let id = catalog_id.map(normalize_models_dev_model_id);
+
+    key.rsplit('/').next() == Some(fetched_model_id)
+        || id.as_deref().and_then(|value| value.rsplit('/').next()) == Some(fetched_model_id)
+}
+
+/// 归一化 models.dev 模型 id，去掉大小写、`:free` 等后缀和 `[1m]` 标记差异。
+fn normalize_models_dev_model_id(value: &str) -> String {
+    let mut normalized = value.trim().to_ascii_lowercase();
+    if let Some(before_colon) = normalized.split(':').next() {
+        normalized = before_colon.to_string();
+    }
+    if normalized.ends_with("[1m]") {
+        normalized = normalized[..normalized.len() - "[1m]".len()]
+            .trim()
+            .to_string();
+    }
+    normalized
 }
 
 /// 判断当前成功的 `/models` endpoint 是否属于智谱/Z.AI。
@@ -422,6 +603,15 @@ fn parse_positive_u64(value: &serde_json::Value) -> Option<u64> {
     }
 }
 
+/// 构造「模型列表端点」的候选 URL 列表。
+///
+/// 候选顺序：
+/// 1. `models_url_override` 非空 → 只返回它
+/// 2. baseURL 拼 `/v1/models`；若已以版本段 `/v{N}` 结尾（`/v1`、智谱
+///    `/api/coding/paas/v4` 等），版本号已在路径里，改拼 `/models`
+/// 3. 版本段非 `/v1`（如 `/v4`）时再追加 `/v1/models` 作为兜底次候选
+/// 4. 若 baseURL 命中 [`KNOWN_COMPAT_SUFFIXES`]，剥离后缀再拼 `/v1/models`、`/models`
+///
 /// 结果已去重且保持首次出现顺序。
 pub fn build_models_url_candidates(
     base_url: &str,
@@ -813,6 +1003,99 @@ Coding 能力开源 SOTA，从代码生成走向工程交付 | 1M | 128K |
 "#;
 
         assert_eq!(parse_zhipu_detail_context(markdown), Some(128_000));
+    }
+
+    #[test]
+    fn test_models_dev_endpoint_matches_provider_api() {
+        assert!(endpoint_matches_provider_api(
+            "https://router.requesty.ai/v1/models",
+            "https://router.requesty.ai/v1"
+        ));
+        assert!(endpoint_matches_provider_api(
+            "https://openrouter.ai/api/v1/models",
+            "https://openrouter.ai/api/v1/"
+        ));
+        assert!(!endpoint_matches_provider_api(
+            "https://api.other.example/v1/models",
+            "https://openrouter.ai/api/v1"
+        ));
+    }
+
+    #[test]
+    fn test_lookup_models_dev_context_matches_exact_and_suffix_ids() {
+        let provider_models = serde_json::json!({
+            "openai/gpt-5.2-chat": {
+                "id": "openai/gpt-5.2-chat",
+                "limit": { "context": 128000 }
+            },
+            "xai/grok-4-fast": {
+                "id": "xai/grok-4-fast",
+                "limit": { "context": 2000000 }
+            },
+            "image-model": {
+                "id": "image-model",
+                "limit": { "context": 0 }
+            }
+        });
+        let models = provider_models.as_object().unwrap();
+
+        assert_eq!(
+            lookup_models_dev_context(models, "gpt-5.2-chat"),
+            Some(128_000)
+        );
+        assert_eq!(
+            lookup_models_dev_context(models, "xai/grok-4-fast:free"),
+            Some(2_000_000)
+        );
+        assert_eq!(lookup_models_dev_context(models, "image-model"), None);
+        assert_eq!(lookup_models_dev_context(models, "missing-model"), None);
+    }
+
+    #[test]
+    fn test_lookup_models_dev_context_rejects_ambiguous_suffix_ids() {
+        let provider_models = serde_json::json!({
+            "provider-a/shared-model": {
+                "id": "provider-a/shared-model",
+                "limit": { "context": 100000 }
+            },
+            "provider-b/shared-model": {
+                "id": "provider-b/shared-model",
+                "limit": { "context": 200000 }
+            }
+        });
+        let models = provider_models.as_object().unwrap();
+
+        assert_eq!(lookup_models_dev_context(models, "shared-model"), None);
+        assert_eq!(
+            lookup_models_dev_context(models, "provider-b/shared-model"),
+            Some(200_000)
+        );
+    }
+
+    #[test]
+    fn test_find_models_dev_provider_models_uses_api_prefix() {
+        let catalog = serde_json::json!({
+            "requesty": {
+                "api": "https://router.requesty.ai/v1",
+                "models": {
+                    "xai/grok-4-fast": { "limit": { "context": 2000000 } }
+                }
+            },
+            "other": {
+                "api": "https://api.other.example/v1",
+                "models": {
+                    "xai/grok-4-fast": { "limit": { "context": 1 } }
+                }
+            }
+        });
+
+        let models =
+            find_models_dev_provider_models(&catalog, "https://router.requesty.ai/v1/models")
+                .unwrap();
+        assert_eq!(
+            lookup_models_dev_context(models, "xai/grok-4-fast"),
+            Some(2_000_000)
+        );
     }
 
     #[test]
