@@ -37,6 +37,7 @@ beforeEach(() => {
   vi.mocked(fetchModelsForConfig).mockReset();
   vi.mocked(probeCodexChatForConfig).mockReset();
   vi.mocked(probeCodexResponsesForConfig).mockReset();
+  Element.prototype.scrollIntoView = vi.fn();
 });
 
 function renderRoutingHarness(
@@ -422,6 +423,26 @@ describe("CodexFormFields local model routing", () => {
     ).toBeInTheDocument();
     expect(screen.getByRole("dialog")).toHaveClass("z-[200]");
     expect(screen.getByText("确认测试 Chat / Responses")).toBeInTheDocument();
+  });
+
+  it("points users to fetch models when protocol probing has no catalog", async () => {
+    renderCatalogHarness([], { shouldShowSpeedTest: true });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "测试 Chat / Responses" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "请先在下方“模型映射”右上角点击“获取模型列表”，或手动添加模型后再测试。",
+    );
+    const fetchButton = screen.getByRole("button", {
+      name: "providerForm.fetchModels",
+    });
+    expect(fetchButton).toHaveClass("border-blue-500");
+    expect(Element.prototype.scrollIntoView).toHaveBeenCalled();
+    expect(probeCodexResponsesForConfig).not.toHaveBeenCalled();
+    expect(probeCodexChatForConfig).not.toHaveBeenCalled();
   });
 
   it("surfaces protocol probe exceptions inline instead of looking frozen", async () => {

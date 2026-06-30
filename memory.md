@@ -1,5 +1,11 @@
 # CC Switch Repository Memory
 
+## 2026-06-30 Codex GLM Model Context and Probe Guidance
+
+- 智谱 `/models` 端点可能只返回模型 id，不返回每个模型的上下文窗口；Codex provider 自动获取模型列表时必须通过 `resolveFetchedCodexModelContextWindow` 用本地 provider-aware 知识补上下文，而不是要求用户手填。
+- GLM 上下文补全只应在来源明显是 Zhipu / GLM / BigModel / Z.ai provider 时生效，避免不相关第三方刚好有 `glm-*` 同名模型就被套用官方上下文。当前已知档位：`glm-4.5*` 128K，`glm-4.6` / `glm-4.7*` / `glm-5` / `glm-5-turbo` / `glm-5.1` 200K，`glm-5.2` 1M。
+- Codex 表单的“测试 Chat / Responses”依赖模型目录；如果 catalog 为空，不能只 toast “请先获取模型列表”。正确交互是展开高级选项，滚到“模型映射”，聚焦并高亮右上角“获取模型列表”按钮，同时在确认框和提示文案里明确测试前需要先获取/添加模型。
+
 ## 2026-06-30 UI Portal Layer Ordering Audit
 
 - Codex MultiRouter 向导相关的“点击后像卡死”不只来自单个 Dialog：全屏 provider panel 可到 `z-[140]`，但共享 Radix `SelectContent`/`PopoverContent`/`TooltipContent` 之前停在 `z-[100]`，`DropdownMenuContent` 甚至是 `z-50`，都会在向导上方打开 provider 表单时被面板遮住。

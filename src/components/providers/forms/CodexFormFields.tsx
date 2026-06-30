@@ -247,6 +247,7 @@ function mergeFetchedModelsIntoCatalogRows(
   fetchedModels: FetchedModel[],
   source: {
     providerId?: string;
+    providerName?: string;
     baseUrl?: string;
     websiteUrl?: string;
   } = {},
@@ -401,6 +402,8 @@ export function CodexFormFields({
   const [protocolProbeTone, setProtocolProbeTone] = useState<
     "muted" | "success" | "warning" | "error"
   >("muted");
+  const [shouldHighlightFetchModels, setShouldHighlightFetchModels] =
+    useState(false);
   const [pendingSplitRouting, setPendingSplitRouting] =
     useState<CodexProviderSplitSuggestion | null>(null);
   const [editingRouteIndex, setEditingRouteIndex] = useState<number | null>(
@@ -438,6 +441,8 @@ export function CodexFormFields({
     catalogModels.map((m) => createCatalogRow(m)),
   );
   const catalogRowsRef = useRef<CodexCatalogRow[]>(catalogRows);
+  const modelMappingSectionRef = useRef<HTMLDivElement | null>(null);
+  const fetchModelsButtonRef = useRef<HTMLButtonElement | null>(null);
   const [routingRows, setRoutingRows] = useState<CodexRoutingRow[]>(() =>
     (codexRouting.routes ?? []).map((route) => createRoutingRow(route)),
   );
@@ -454,6 +459,23 @@ export function CodexFormFields({
   useEffect(() => {
     catalogRowsRef.current = catalogRows;
   }, [catalogRows]);
+
+  const revealModelCatalogFetchAction = useCallback(() => {
+    setAdvancedExpanded(true);
+    setProtocolProbeTone("warning");
+    setProtocolProbeSummary(
+      "请先在下方“模型映射”右上角点击“获取模型列表”，或手动添加模型后再测试。",
+    );
+    setShouldHighlightFetchModels(true);
+    window.setTimeout(() => {
+      modelMappingSectionRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "center",
+      });
+      fetchModelsButtonRef.current?.focus({ preventScroll: true });
+    }, 0);
+    window.setTimeout(() => setShouldHighlightFetchModels(false), 3000);
+  }, []);
 
   // 父 → 子：仅当 prop 数据真的变化（预设切换 / 编辑加载）时才重建 rowId；
   // 同 shape 时保留现有 rowId，避免编辑过程中焦点丢失。
@@ -588,6 +610,7 @@ export function CodexFormFields({
             models,
             {
               providerId,
+              providerName,
               baseUrl: codexBaseUrl,
               websiteUrl,
             },
@@ -669,7 +692,9 @@ export function CodexFormFields({
       ),
     );
     if (models.length === 0) {
-      toast.warning("请先获取模型列表，或在模型目录里添加至少一个模型。");
+      setIsProtocolProbeConfirmOpen(false);
+      toast.warning("请先点击“获取模型列表”，或手动添加至少一个模型。");
+      revealModelCatalogFetchAction();
       return;
     }
 
@@ -758,6 +783,7 @@ export function CodexFormFields({
     fetchedModels,
     isFullUrl,
     onApiFormatChange,
+    revealModelCatalogFetchAction,
     t,
   ]);
 
@@ -985,12 +1011,17 @@ export function CodexFormFields({
   const renderCatalogActionButtons = (onAdd: () => void, addLabel: string) => (
     <div className="flex gap-1">
       <Button
+        ref={fetchModelsButtonRef}
         type="button"
         variant="outline"
         size="sm"
         onClick={handleFetchModels}
         disabled={isFetchingModels}
-        className="h-7 gap-1"
+        className={cn(
+          "h-7 gap-1",
+          shouldHighlightFetchModels &&
+            "border-blue-500 bg-blue-50 text-blue-700 shadow-[0_0_0_3px_rgba(59,130,246,0.18)] dark:bg-blue-950/40 dark:text-blue-200",
+        )}
       >
         {isFetchingModels ? (
           <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -1025,6 +1056,9 @@ export function CodexFormFields({
               <span className="block">
                 这个测试会帮助判断当前 provider 应该选择 Responses 还是 Chat
                 Completions。它会对当前模型目录里的模型发送真实请求，可能产生少量额度或流量消耗，也可能触发限流。
+              </span>
+              <span className="block">
+                如果还没有模型目录，请先到下方“模型映射”右上角点击“获取模型列表”，或手动添加至少一个模型。
               </span>
               <span className="block">
                 每个模型会分别测试 /v1/responses 和
@@ -1695,7 +1729,8 @@ export function CodexFormFields({
                   </p>
                   <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-xs leading-relaxed text-amber-900 dark:text-amber-200">
                     不确定该选哪个时，可以测试 Chat /
-                    Responses。测试会发送真实模型请求， 输出上限为
+                    Responses。测试前需要先在“模型映射”里获取模型列表或手动添加模型；测试会发送真实模型请求，
+                    输出上限为
                     1024，可能产生少量额度或流量消耗。通过只代表基础协议入口可用，不等于完整
                     Codex 功能验证。
                   </div>
@@ -1723,15 +1758,16 @@ export function CodexFormFields({
                     </Button>
                     {protocolProbeSummary && (
                       <span
-                        role={protocolProbeTone === "error" ? "alert" : "status"}
+                        role={
+                          protocolProbeTone === "error" ? "alert" : "status"
+                        }
                         className={cn(
                           "text-xs leading-relaxed",
                           protocolProbeTone === "success" &&
                             "text-emerald-700 dark:text-emerald-300",
                           protocolProbeTone === "warning" &&
                             "text-amber-700 dark:text-amber-300",
-                          protocolProbeTone === "error" &&
-                            "text-destructive",
+                          protocolProbeTone === "error" && "text-destructive",
                           protocolProbeTone === "muted" &&
                             "text-muted-foreground",
                         )}
@@ -1868,7 +1904,10 @@ export function CodexFormFields({
             {/* 模型映射 —— 仅在本地路由开启 + 可编辑时显示（与上游格式解耦，
                 Responses 原生供应商同样可配置）；上方恒有 UA 字段，分隔线无需条件 */}
             {takeoverEnabled && canEditCatalog && (
-              <div className="space-y-4 border-t border-border-default pt-3">
+              <div
+                ref={modelMappingSectionRef}
+                className="space-y-4 border-t border-border-default pt-3"
+              >
                 <div className="space-y-1">
                   <div className="flex items-center justify-between gap-3">
                     <FormLabel>
