@@ -1215,8 +1215,8 @@ export function CodexFormFields({
                 如果还没有模型目录，请先到下方“模型映射”右上角点击“获取模型列表”，或手动添加至少一个模型。
               </span>
               <span className="block">
-                每个模型会分别测试 /v1/responses 和
-                /v1/chat/completions，输出上限为
+                每个模型会分别测试对应的 Responses 和 Chat Completions
+                endpoint，输出上限为
                 1024。都不通时通常不是协议问题，而是 API Key、Base
                 URL、模型权限、额度、网络或上游故障。
               </span>

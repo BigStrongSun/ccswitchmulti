@@ -98,29 +98,36 @@ pub async fn probe_codex_chat_for_config(
 
 /// 构造 Responses 探测 URL。
 ///
-/// 用户可能填写 provider 根地址、`/v1` 地址，也可能把完整 endpoint 当作 Base URL；
-/// 这里统一收敛到同一 host/prefix 下的 `/v1/responses`，避免探测请求打到错误路径。
+/// 用户可能填写 provider 根地址、`/v1` 地址、智谱这类 `/v4` 版本化根地址，
+/// 也可能把完整 endpoint 当作 Base URL；这里会保留已有版本段，避免把
+/// `.../api/coding/paas/v4` 错拼成 `.../v4/v1/responses`。
 fn build_responses_probe_url(base_url: &str, is_full_url: bool) -> Result<String, String> {
     let trimmed = base_url.trim().trim_end_matches('/');
     if trimmed.is_empty() {
         return Err("Base URL is empty".to_string());
     }
-    if trimmed.ends_with("/v1/responses") {
+    if trimmed.ends_with("/responses") {
         return Ok(trimmed.to_string());
     }
     if is_full_url {
         if let Some(index) = trimmed.find("/v1/") {
             return Ok(format!("{}/v1/responses", &trimmed[..index]));
         }
+        if trimmed.ends_with("/chat/completions") {
+            return Ok(format!(
+                "{}/responses",
+                trim_chat_completions_suffix(trimmed)
+            ));
+        }
         if let Some(index) = trimmed.rfind('/') {
             let root = &trimmed[..index];
             if root.contains("://") {
-                return Ok(format!("{root}/v1/responses"));
+                return Ok(format!("{root}/responses"));
             }
         }
         return Err("Cannot derive /v1/responses endpoint from full URL".to_string());
     }
-    if trimmed.ends_with("/v1") {
+    if ends_with_version_segment(trimmed) {
         Ok(format!("{trimmed}/responses"))
     } else {
         Ok(format!("{trimmed}/v1/responses"))
@@ -129,32 +136,63 @@ fn build_responses_probe_url(base_url: &str, is_full_url: bool) -> Result<String
 
 /// 构造 Chat Completions 探测 URL。
 ///
-/// 与 Responses URL 生成规则保持同源，避免用户填写完整 endpoint 时两个探测打到不同前缀。
+/// 与 Responses URL 生成规则保持同源；对已经包含 `/v4` 等版本段的供应商，
+/// 直接拼 `/chat/completions`，避免智谱 Coding Plan 被错拼成 `/v4/v1/...`。
 fn build_chat_probe_url(base_url: &str, is_full_url: bool) -> Result<String, String> {
     let trimmed = base_url.trim().trim_end_matches('/');
     if trimmed.is_empty() {
         return Err("Base URL is empty".to_string());
     }
-    if trimmed.ends_with("/v1/chat/completions") {
+    if trimmed.ends_with("/chat/completions") {
         return Ok(trimmed.to_string());
     }
     if is_full_url {
         if let Some(index) = trimmed.find("/v1/") {
             return Ok(format!("{}/v1/chat/completions", &trimmed[..index]));
         }
+        if trimmed.ends_with("/responses") {
+            return Ok(format!(
+                "{}/chat/completions",
+                trim_endpoint_suffix(trimmed, "/responses")
+            ));
+        }
         if let Some(index) = trimmed.rfind('/') {
             let root = &trimmed[..index];
             if root.contains("://") {
-                return Ok(format!("{root}/v1/chat/completions"));
+                return Ok(format!("{root}/chat/completions"));
             }
         }
         return Err("Cannot derive /v1/chat/completions endpoint from full URL".to_string());
     }
-    if trimmed.ends_with("/v1") {
+    if ends_with_version_segment(trimmed) {
         Ok(format!("{trimmed}/chat/completions"))
     } else {
         Ok(format!("{trimmed}/v1/chat/completions"))
     }
+}
+
+/// 判断 URL 是否已经以 API 版本段收尾。
+///
+/// 供应商不总是使用 OpenAI 的 `/v1`；智谱 Coding Plan 的根地址是
+/// `/api/coding/paas/v4`，这类地址后面应直接追加 endpoint。
+fn ends_with_version_segment(url: &str) -> bool {
+    let Some(segment) = url.rsplit('/').next() else {
+        return false;
+    };
+    let Some(version) = segment.strip_prefix('v') else {
+        return false;
+    };
+    !version.is_empty() && version.chars().all(|ch| ch.is_ascii_digit())
+}
+
+/// 去掉 Chat Completions endpoint 后缀，返回同源 API 根路径。
+fn trim_chat_completions_suffix(url: &str) -> &str {
+    trim_endpoint_suffix(url, "/chat/completions")
+}
+
+/// 去掉指定 endpoint 后缀，调用方保证后缀已经匹配。
+fn trim_endpoint_suffix<'a>(url: &'a str, suffix: &str) -> &'a str {
+    url.strip_suffix(suffix).unwrap_or(url)
 }
 
 /// 发送真正的最小 Responses 请求。
@@ -329,6 +367,43 @@ mod tests {
         assert_eq!(
             build_chat_probe_url("https://example.com/v1/responses", true).unwrap(),
             "https://example.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn responses_probe_url_respects_versioned_base_url() {
+        assert_eq!(
+            build_responses_probe_url("https://open.bigmodel.cn/api/coding/paas/v4", false)
+                .unwrap(),
+            "https://open.bigmodel.cn/api/coding/paas/v4/responses"
+        );
+    }
+
+    #[test]
+    fn chat_probe_url_respects_versioned_base_url() {
+        assert_eq!(
+            build_chat_probe_url("https://open.bigmodel.cn/api/coding/paas/v4", false).unwrap(),
+            "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
+        );
+    }
+
+    #[test]
+    fn probe_urls_preserve_non_v1_full_endpoints() {
+        assert_eq!(
+            build_responses_probe_url(
+                "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions",
+                true
+            )
+            .unwrap(),
+            "https://open.bigmodel.cn/api/coding/paas/v4/responses"
+        );
+        assert_eq!(
+            build_chat_probe_url(
+                "https://open.bigmodel.cn/api/coding/paas/v4/responses",
+                true
+            )
+            .unwrap(),
+            "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
         );
     }
 }
