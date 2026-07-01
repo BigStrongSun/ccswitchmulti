@@ -100,6 +100,7 @@ pub fn chat_completions_request_to_codex_responses(body: Value) -> Result<Value,
 /// - 调用方必须先确认这是 official managed Codex OAuth 透传路径；普通 OpenAI Responses、
 ///   Qwen/DeepSeek Chat 转换路径不应该调用该函数。
 pub(crate) fn normalize_codex_oauth_responses_request(request_body: Value) -> Value {
+    let request_body = normalize_codex_responses_passthrough_request(request_body);
     let mut body = match request_body {
         Value::Object(body) => body,
         other => return other,
@@ -129,6 +130,27 @@ pub(crate) fn normalize_codex_oauth_responses_request(request_body: Value) -> Va
     Value::Object(body)
 }
 
+/// 归一化 Codex Responses 透传请求中的内部控制消息。
+///
+/// 参数:
+/// - `request_body`: Codex Desktop/CLI 发出的 Responses 请求体。
+///   返回:
+/// - 将 `input` 中的 system/developer message 提升到顶层 `instructions` 后的请求体。
+///   副作用:
+/// - 无。函数只转换传入 JSON 值。
+///   边界:
+/// - 用于 Codex 原生 Responses 透传路径；Chat 转换路径已有自己的 role 合并逻辑。
+pub(crate) fn normalize_codex_responses_passthrough_request(request_body: Value) -> Value {
+    let mut body = match request_body {
+        Value::Object(body) => body,
+        other => return other,
+    };
+
+    normalize_codex_responses_control_messages(&mut body);
+
+    Value::Object(body)
+}
+
 /// 归一化 Responses `input` 字段，避免 ChatGPT Codex backend 拒绝字符串输入。
 ///
 /// 参数:
@@ -152,6 +174,64 @@ fn normalize_codex_oauth_responses_input(body: &mut Map<String, Value>) {
     );
 }
 
+/// 将 Codex Responses input 中的 system/developer 控制消息提升到 instructions。
+///
+/// 参数:
+/// - `body`: 正在构建的请求体对象。
+///   返回:
+/// - 无，直接修改 `body.input` 与 `body.instructions`。
+///   副作用:
+/// - 无外部副作用；只修改内存中的 JSON 对象。
+fn normalize_codex_responses_control_messages(body: &mut Map<String, Value>) {
+    let Some(input) = body.remove("input") else {
+        return;
+    };
+
+    let (input, control_instructions) = lift_codex_responses_control_messages(input);
+    append_codex_responses_control_instructions(body, control_instructions);
+    body.insert("input".to_string(), input);
+}
+
+/// 提升 Codex Responses input 中的 system/developer 控制消息。
+///
+/// 参数:
+/// - `input`: Responses `input` 字段。
+///   返回:
+/// - 删除控制消息后的 input 与被提升的 instruction 文本。
+///   副作用:
+/// - 无。该函数只转换传入 JSON 值。
+fn lift_codex_responses_control_messages(input: Value) -> (Value, Vec<String>) {
+    let Value::Array(items) = input else {
+        return (input, Vec::new());
+    };
+
+    let mut control_instructions = Vec::new();
+    let mut retained_items = Vec::with_capacity(items.len());
+
+    for item in items {
+        let Value::Object(object) = item else {
+            retained_items.push(item);
+            continue;
+        };
+
+        let item_type = object
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if codex_responses_input_item_is_control_message(item_type, &object) {
+            let text = codex_responses_input_item_text(&object);
+            let text = text.trim();
+            if !text.is_empty() {
+                control_instructions.push(text.to_string());
+            }
+        } else {
+            retained_items.push(Value::Object(object));
+        }
+    }
+
+    (Value::Array(retained_items), control_instructions)
+}
+
 /// 清理 Codex OAuth backend 不接受的 input item 冗余字段。
 ///
 /// 参数:
@@ -167,12 +247,13 @@ fn normalize_codex_oauth_input_items(input: Value) -> Value {
         return input;
     };
 
-    Value::Array(
-        items
-            .into_iter()
-            .map(normalize_codex_oauth_input_item)
-            .collect(),
-    )
+    let mut normalized_items = Vec::with_capacity(items.len());
+
+    for item in items {
+        normalized_items.push(normalize_codex_oauth_input_item(item));
+    }
+
+    Value::Array(normalized_items)
 }
 
 /// 清理单个 Codex Responses input item 的私有 backend 不兼容字段。
@@ -199,6 +280,44 @@ fn normalize_codex_oauth_input_item(item: Value) -> Value {
     Value::Object(object)
 }
 
+/// 判断 input item 是否是 Codex 内部控制消息。
+///
+/// 参数:
+/// - `item_type`: Responses item 的 `type`。
+/// - `object`: item 的 JSON object。
+///   返回:
+/// - `true` 表示该消息应进入顶层 instructions，而不是作为对话 input 发给 backend。
+///   副作用:
+/// - 无。
+fn codex_responses_input_item_is_control_message(
+    item_type: &str,
+    object: &Map<String, Value>,
+) -> bool {
+    matches!(item_type, "" | "message")
+        && matches!(
+            object.get("role").and_then(Value::as_str),
+            Some("system" | "developer")
+        )
+}
+
+/// 提取 Codex input item 中可合并进 instructions 的文本。
+///
+/// 参数:
+/// - `object`: system/developer message item。
+///   返回:
+/// - 拼接后的纯文本；无法提取时返回空字符串。
+///   副作用:
+/// - 无。
+fn codex_responses_input_item_text(object: &Map<String, Value>) -> String {
+    chat_message_text(object.get("content")).unwrap_or_else(|| {
+        object
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    })
+}
+
 /// 判断 Codex OAuth backend 的 input item 是否允许携带 `content`。
 ///
 /// 参数:
@@ -209,6 +328,37 @@ fn normalize_codex_oauth_input_item(item: Value) -> Value {
 /// - 无。
 fn codex_oauth_input_item_allows_content(item_type: &str) -> bool {
     matches!(item_type, "message" | "reasoning")
+}
+
+/// 把从 input 中提升出来的 Codex 控制消息追加到顶层 instructions。
+///
+/// 参数:
+/// - `body`: 正在构建的请求体对象。
+/// - `control_instructions`: 从 system/developer input item 提取的文本片段。
+///   返回:
+/// - 无，直接修改 `body.instructions`。
+///   副作用:
+/// - 无外部副作用。
+fn append_codex_responses_control_instructions(
+    body: &mut Map<String, Value>,
+    control_instructions: Vec<String>,
+) {
+    if control_instructions.is_empty() {
+        return;
+    }
+
+    let promoted = control_instructions.join("\n\n");
+    match body.get("instructions").and_then(Value::as_str) {
+        Some(existing) if !existing.trim().is_empty() => {
+            body.insert(
+                "instructions".to_string(),
+                Value::String(format!("{existing}\n\n{promoted}")),
+            );
+        }
+        _ => {
+            body.insert("instructions".to_string(), Value::String(promoted));
+        }
+    }
 }
 
 /// 构造 Codex Responses 兼容的单条 user text message。
@@ -1331,6 +1481,80 @@ mod tests {
         assert_eq!(input[1]["output"], "done");
         assert_eq!(input[2]["output"]["body"], "patched");
         assert_eq!(input[3]["tools"], json!([]));
+    }
+
+    #[test]
+    fn codex_responses_passthrough_promotes_control_messages_to_instructions() {
+        // Codex Desktop 在同一 session 内切换模型时会把 developer/system 控制消息
+        // 放入 input；第三方 Responses API 更严格，不能把这些内部角色当对话消息透传。
+        let body = json!({
+            "model": "gpt-5.4",
+            "instructions": "Existing instructions.",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": [{ "type": "input_text", "text": "Model switch notice." }]
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "continue" }]
+                },
+                {
+                    "type": "message",
+                    "role": "system",
+                    "content": "Session policy."
+                }
+            ]
+        });
+
+        let normalized = normalize_codex_responses_passthrough_request(body);
+        let input = normalized["input"].as_array().expect("input array");
+
+        assert_eq!(
+            normalized["instructions"],
+            "Existing instructions.\n\nModel switch notice.\n\nSession policy."
+        );
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["role"], "user");
+        assert_eq!(input[0]["content"][0]["text"], "continue");
+    }
+
+    #[test]
+    fn codex_oauth_responses_normalizer_promotes_control_messages_and_strips_tool_content() {
+        // official OAuth passthrough 复用通用控制消息提升，同时仍执行 ChatGPT backend
+        // 专属的 tool output content 清理。
+        let body = json!({
+            "model": "gpt-5.4",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": [{ "type": "input_text", "text": "Model switch notice." }]
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "run tool" }]
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_fn",
+                    "output": "done",
+                    "content": [{ "type": "output_text", "text": "done" }]
+                }
+            ]
+        });
+
+        let normalized = normalize_codex_oauth_responses_request(body);
+        let input = normalized["input"].as_array().expect("input array");
+
+        assert_eq!(normalized["instructions"], "Model switch notice.");
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[0]["role"], "user");
+        assert!(input[1].get("content").is_none());
+        assert_eq!(input[1]["output"], "done");
     }
 
     #[test]

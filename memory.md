@@ -9,6 +9,13 @@
 - Annotated tag `v3.16.4-6` 的 tag 对象为 `8e57b291468f3068189cd0725a6440170ee0527e`，解引用到版本提交 `e0614deb263f7b2dbcbb3b1cbe46162294d8a353`（`chore(release): bump CCSwitchMulti to v3.16.4-6`）。发布资产共 10 个：Windows setup、setup signature、portable zip、raw exe、`latest.json`、Linux/macOS build notes、README、`RELEASE-METADATA.md`、`SHA256SUMS.txt`。
 - 发布后校验：`latest.json` 版本为 `3.16.4-6` 且指向 `v3.16.4-6` setup URL；raw exe 的 `FileVersion/ProductVersion` 为 `3.16.4-6`；GitHub asset digest 与本地 `SHA256SUMS.txt` 对齐，主资产 SHA256 为 setup `B0D69BA5610B3B3600F9E38B255A47AB444DFDEE8FF7469BDE0C906DE094C7DD`、portable `65B8EAB4F573199FFB212B89CF32D7679BA00740CD357D826AB924665CF2A3B0`、raw exe `F2E3941DBFD932E2B32A35B64168816FBF68806BEAD3EFCDBBFAD4D1F68757B4`。
 
+## 2026-07-01 Codex Cross-Provider Model Switch Control Messages
+
+- 跨 provider 继续同一个 Codex session 时，Codex Desktop 可能把 `/model` 切换产生的 system/developer 控制消息放进 Responses `input`。如果先前会话在 MiniMax-M3，之后切到 gpt-5.4 这类更严格的 Responses 上游，直接透传这些内部角色可能触发 HTTP 400；这不是 MiniMax 单独问题，而是同一会话历史跨协议/跨 provider 复用时的 input 形态问题。
+- 已有 Chat 转换路径 `transform_codex_chat.rs` 会把 developer 映射为 system，并通过 `collapse_system_messages_to_head` 合并到首位，避免 MiniMax 对中途 system role 的严格校验失败；但原生 Responses 透传路径之前没有同等规整。
+- 修复边界：`openai_compat.rs::normalize_codex_responses_passthrough_request` 会把 `input` 中 `type=message` 或缺省 type 且 `role=system/developer` 的控制消息提升到顶层 `instructions`，并从 `input` 删除这些内部控制消息。第三方原生 Responses 透传在 `forwarder.rs::should_normalize_codex_responses_passthrough_control_messages` 命中时调用；official OAuth normalizer 也先复用该逻辑，再执行 ChatGPT backend 专属的 tool output `content` 清理。
+- 回归测试：`codex_responses_passthrough_promotes_control_messages_to_instructions`、`codex_oauth_responses_normalizer_promotes_control_messages_and_strips_tool_content`、`codex_responses_passthrough_control_message_normalizer_is_scoped`，并复跑 `responses_request_to_chat_normalizes_codex_internal_roles` 与 `responses_request_to_chat_merges_mid_stream_system_into_head` 确认 Chat 转换老路径未回退。
+
 ## 2026-07-01 Codex OAuth Responses Passthrough Content Shape
 
 - 用户截图里的 `Invalid 'input[3].content': array too long. Expected an array with maximum length 0, but got an array with length 1 instead.` 发生在 Codex `/responses` 直透 ChatGPT Codex OAuth backend，日志特征是 `responses_to_chat=false`、`responses_to_messages=false`、`upstream_url=https://chatgpt.com/backend-api/codex/responses`。这不是第三方 Chat 转换问题，也不是模型容量问题。

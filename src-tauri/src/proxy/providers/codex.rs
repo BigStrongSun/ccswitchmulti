@@ -1637,7 +1637,14 @@ fn is_chat_completions_url(value: &str) -> bool {
 }
 
 /// 统一判断当前入口是否是 Codex Responses 路径。
-fn is_codex_responses_endpoint(endpoint: &str) -> bool {
+///
+/// 参数:
+/// - `endpoint`: 本地代理收到或改写后的 endpoint，可带 query。
+///   返回:
+/// - `true` 表示该请求是 Codex `/responses` 或 `/responses/compact`。
+///   副作用:
+/// - 无。
+pub(crate) fn is_codex_responses_endpoint(endpoint: &str) -> bool {
     let path = endpoint
         .split_once('?')
         .map_or(endpoint, |(path, _query)| path);

@@ -1640,6 +1640,17 @@ impl RequestForwarder {
             codex_responses_to_messages,
         ) {
             super::providers::openai_compat::normalize_codex_oauth_responses_request(request_body)
+        } else if should_normalize_codex_responses_passthrough_control_messages(
+            app_type,
+            provider,
+            endpoint,
+            needs_transform,
+            codex_responses_to_chat,
+            codex_responses_to_messages,
+        ) {
+            super::providers::openai_compat::normalize_codex_responses_passthrough_request(
+                request_body,
+            )
         } else {
             request_body
         };
@@ -3347,6 +3358,36 @@ fn should_normalize_codex_oauth_responses_passthrough_body(
         && is_chatgpt_codex_responses_upstream_url(url)
 }
 
+/// 判断是否需要规整第三方 Responses 透传请求中的 Codex 控制消息。
+///
+/// 参数:
+/// - `app_type`: 当前客户端应用类型，只有 Codex 的 Responses 历史会携带这类角色。
+/// - `provider`: 已经由 MultiRouter 解析后的 effective provider。
+/// - `endpoint`: 本地代理收到的 endpoint。
+/// - `needs_transform`: 是否已进入其它格式转换管线。
+/// - `codex_responses_to_chat`: 是否已转成 Chat Completions。
+/// - `codex_responses_to_messages`: 是否已转成 Messages。
+///   返回:
+/// - `true` 表示该请求会原生透传到第三方 Responses API，需要把 developer/system
+///   input item 提升到 instructions。
+///   副作用:
+/// - 无。
+fn should_normalize_codex_responses_passthrough_control_messages(
+    app_type: &AppType,
+    provider: &Provider,
+    endpoint: &str,
+    needs_transform: bool,
+    codex_responses_to_chat: bool,
+    codex_responses_to_messages: bool,
+) -> bool {
+    matches!(app_type, AppType::Codex)
+        && !provider.is_codex_oauth()
+        && !needs_transform
+        && !codex_responses_to_chat
+        && !codex_responses_to_messages
+        && super::providers::is_codex_responses_endpoint(endpoint)
+}
+
 /// 判断 URL 是否指向 ChatGPT 的 Codex Responses backend。
 ///
 /// 参数:
@@ -4203,6 +4244,83 @@ mod tests {
             true,
             false
         ));
+    }
+
+    #[test]
+    fn codex_responses_passthrough_control_message_normalizer_is_scoped() {
+        let codex_oauth = test_provider_with_type(Some("codex_oauth"));
+        let regular = test_provider_with_type(None);
+
+        assert!(
+            should_normalize_codex_responses_passthrough_control_messages(
+                &AppType::Codex,
+                &regular,
+                "/v1/responses",
+                false,
+                false,
+                false
+            )
+        );
+        assert!(
+            should_normalize_codex_responses_passthrough_control_messages(
+                &AppType::Codex,
+                &regular,
+                "/responses/compact?conversation=1",
+                false,
+                false,
+                false
+            )
+        );
+        assert!(
+            !should_normalize_codex_responses_passthrough_control_messages(
+                &AppType::Codex,
+                &codex_oauth,
+                "/v1/responses",
+                false,
+                false,
+                false
+            )
+        );
+        assert!(
+            !should_normalize_codex_responses_passthrough_control_messages(
+                &AppType::Claude,
+                &regular,
+                "/v1/responses",
+                false,
+                false,
+                false
+            )
+        );
+        assert!(
+            !should_normalize_codex_responses_passthrough_control_messages(
+                &AppType::Codex,
+                &regular,
+                "/v1/chat/completions",
+                false,
+                false,
+                false
+            )
+        );
+        assert!(
+            !should_normalize_codex_responses_passthrough_control_messages(
+                &AppType::Codex,
+                &regular,
+                "/v1/responses",
+                true,
+                false,
+                false
+            )
+        );
+        assert!(
+            !should_normalize_codex_responses_passthrough_control_messages(
+                &AppType::Codex,
+                &regular,
+                "/v1/responses",
+                false,
+                true,
+                false
+            )
+        );
     }
 
     #[test]
