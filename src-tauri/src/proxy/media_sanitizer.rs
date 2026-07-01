@@ -48,12 +48,16 @@ pub fn replace_image_blocks_with_marker(body: &mut Value) -> usize {
     replace_images_in_body(body)
 }
 
-pub fn is_unsupported_image_error(error: &ProxyError) -> bool {
+/// 判断上游图片相关错误是否适合通过“去图后重试一次”恢复。
+///
+/// 调用方仍必须先确认原请求体包含图片块；这里同时覆盖“模型不支持图片”
+/// 和“上游图片安全/审核策略拒绝”两类只靠移除图片即可恢复的错误。
+pub fn is_retriable_image_error(error: &ProxyError) -> bool {
     let ProxyError::UpstreamError { status, body } = error else {
         return false;
     };
 
-    if !matches!(*status, 400 | 415 | 422 | 501) {
+    if !matches!(*status, 400 | 403 | 415 | 422 | 501) {
         return false;
     }
 
@@ -76,7 +80,7 @@ pub fn is_unsupported_image_error(error: &ProxyError) -> bool {
         return false;
     }
 
-    const UNSUPPORTED_HINTS: &[&str] = &[
+    const RETRIABLE_IMAGE_HINTS: &[&str] = &[
         "unsupported",
         "not supported",
         "does not support",
@@ -96,9 +100,20 @@ pub fn is_unsupported_image_error(error: &ProxyError) -> bool {
         "can't process",
         "can't handle",
         "unable to process",
+        "new_sensitive",
+        "sensitive",
+        "moderation",
+        "safety",
+        "policy",
+        "violate",
+        "violates",
+        "forbidden",
+        "blocked",
     ];
 
-    UNSUPPORTED_HINTS.iter().any(|hint| message.contains(hint))
+    RETRIABLE_IMAGE_HINTS
+        .iter()
+        .any(|hint| message.contains(hint))
 }
 
 fn content_has_image_blocks(content: &Value) -> bool {
@@ -322,6 +337,9 @@ fn extract_error_text(body: &str) -> String {
             value.pointer("/error/message"),
             value.pointer("/message"),
             value.pointer("/detail"),
+            value.pointer("/base_resp/status_msg"),
+            value.pointer("/base_resp/message"),
+            value.pointer("/base_resp/status_message"),
             value.pointer("/error"),
         ];
         if let Some(message) = candidates
@@ -742,7 +760,22 @@ mod tests {
             ),
         };
 
-        assert!(is_unsupported_image_error(&error));
+        assert!(is_retriable_image_error(&error));
+    }
+
+    #[test]
+    fn detects_minimax_sensitive_image_errors() {
+        // MiniMax 把图片审核失败放在 base_resp.status_msg 中；这类错误可通过
+        // 调用方确认“原请求确实含图片”后去图重试一次恢复。
+        let error = ProxyError::UpstreamError {
+            status: 400,
+            body: Some(
+                r#"{"base_resp":{"status_code":1026,"status_msg":"input new_sensitive, messages[61]'s content[0] image is sensitive, please check your input"}}"#
+                    .to_string(),
+            ),
+        };
+
+        assert!(is_retriable_image_error(&error));
     }
 
     #[test]
@@ -752,7 +785,7 @@ mod tests {
             body: Some(r#"{"error":{"message":"Invalid API key"}}"#.to_string()),
         };
 
-        assert!(!is_unsupported_image_error(&error));
+        assert!(!is_retriable_image_error(&error));
     }
 
     #[test]
@@ -788,13 +821,13 @@ mod tests {
                 r#"{"error":{"message":"This model cannot process media inputs"}}"#.to_string(),
             ),
         };
-        assert!(is_unsupported_image_error(&media_error));
+        assert!(is_retriable_image_error(&media_error));
 
         let attachment_error = ProxyError::UpstreamError {
             status: 422,
             body: Some(r#"{"message":"attachments are not supported by this model"}"#.to_string()),
         };
-        assert!(is_unsupported_image_error(&attachment_error));
+        assert!(is_retriable_image_error(&attachment_error));
     }
 
     #[test]
@@ -807,7 +840,7 @@ mod tests {
             ),
         };
 
-        assert!(is_unsupported_image_error(&error));
+        assert!(is_retriable_image_error(&error));
     }
 
     #[test]

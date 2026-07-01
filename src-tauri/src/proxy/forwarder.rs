@@ -183,7 +183,7 @@ impl RequestForwarder {
             && self.rectifier_config.request_media_fallback
             && !already_retried
             && super::media_sanitizer::contains_image_blocks(provider_body)
-            && super::media_sanitizer::is_unsupported_image_error(error)
+            && super::media_sanitizer::is_retriable_image_error(error)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -652,9 +652,7 @@ impl RequestForwarder {
                                     routed_provider,
                                     outbound_model,
                                 )) => {
-                                    log::info!(
-                                        "[{app_type_str}] [Media] Unsupported-image retry succeeded"
-                                    );
+                                    log::info!("[{app_type_str}] [Media] Image retry succeeded");
                                     self.record_success_result(
                                         &attempt_provider_id,
                                         &persistent_provider_id,
@@ -713,7 +711,7 @@ impl RequestForwarder {
                                 }
                                 Err(retry_err) => {
                                     log::warn!(
-                                        "[{app_type_str}] [Media] Unsupported-image retry still failed: {retry_err}"
+                                        "[{app_type_str}] [Media] Image retry still failed: {retry_err}"
                                     );
                                     if let Some(err) = self
                                         .handle_rectifier_retry_failure(
@@ -5070,6 +5068,16 @@ mod tests {
             ),
         }
     }
+
+    fn minimax_sensitive_image_error() -> ProxyError {
+        ProxyError::UpstreamError {
+            status: 400,
+            body: Some(
+                r#"{"base_resp":{"status_code":1026,"status_msg":"input new_sensitive, messages[61]'s content[0] image is sensitive, please check your input"}}"#
+                    .to_string(),
+            ),
+        }
+    }
     #[test]
     fn prevention_replaces_when_all_switches_on_and_model_in_heuristic_list() {
         let fwd = forwarder_with_rectifier(RectifierConfig::default());
@@ -5162,6 +5170,38 @@ mod tests {
         };
 
         assert!(fwd.media_retry_should_trigger("Codex", false, &body, &error));
+    }
+
+    #[test]
+    fn reactive_triggers_for_codex_sensitive_image_errors() {
+        let fwd = forwarder_with_rectifier(RectifierConfig::default());
+        let body = body_with_codex_input_image("MiniMax-M3");
+
+        assert!(fwd.media_retry_should_trigger(
+            "Codex",
+            false,
+            &body,
+            &minimax_sensitive_image_error()
+        ));
+    }
+
+    #[test]
+    fn reactive_sensitive_image_error_still_requires_image_body() {
+        let fwd = forwarder_with_rectifier(RectifierConfig::default());
+        let body = json!({
+            "model": "MiniMax-M3",
+            "input": [{
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "hello" }]
+            }]
+        });
+
+        assert!(!fwd.media_retry_should_trigger(
+            "Codex",
+            false,
+            &body,
+            &minimax_sensitive_image_error()
+        ));
     }
 
     #[test]

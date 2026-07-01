@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-07-01 Codex MiniMax Sensitive Image Media Retry
+
+- 用户截图里的 `Provider: MiniMax; model: MiniMax-M3; upstream_status: HTTP 400; cause: input new_sensitive, messages[61]'s content[0] image is sensitive` 不是 MultiRouter route 物化丢能力；它说明 Codex 同一 session 历史里仍有图片块，上游 MiniMax 对某张图片做安全审核后拒绝。
+- 不要把 `MiniMax-M3` 直接加入 text-only 预防名单，除非有供应商文档或实测确认它完全不支持图片。该错误措辞是图片安全拒绝，不是能力不支持；直接标 text-only 会永久关闭可能合法的图片输入。
+- 修复边界在反应式 media retry：`forwarder.rs::media_retry_should_trigger` 已要求 adapter 是 Codex/Claude、整流开关开启、未重试过、原 provider body 确实含图片块；`media_sanitizer.rs::is_retriable_image_error` 再识别 unsupported image 与 MiniMax `base_resp.status_msg` / `new_sensitive` / `image is sensitive` 等图片审核错误，随后把图片块替换为 `[Unsupported Image]` 并对同一 provider 重试一次。
+- 回归测试：`detects_minimax_sensitive_image_errors`、`reactive_triggers_for_codex_sensitive_image_errors`、`reactive_sensitive_image_error_still_requires_image_body`。后续排查类似 `messages[n].content[m] image is sensitive`，先看同 trace 是否有 `[Media] Image retry succeeded/still failed`，不要先猜 OAuth 或 MultiRouter catalog。
+
 ## 2026-07-01 CCSwitchMulti v3.16.4-6 Release
 
 - v3.16.4-6 是 v3.16.4-5 后的热修正式发布，核心变更是 `fix(codex): strip invalid content from oauth response items`：Codex OAuth `/responses` 直透 ChatGPT backend 前会删除非 message/reasoning input item 上的冗余 `content`，避免 `Invalid input[3].content: array too long`。
