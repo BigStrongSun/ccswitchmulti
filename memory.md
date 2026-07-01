@@ -5,6 +5,9 @@
 - v3.16.4-6 是 v3.16.4-5 后的热修正式发布，核心变更是 `fix(codex): strip invalid content from oauth response items`：Codex OAuth `/responses` 直透 ChatGPT backend 前会删除非 message/reasoning input item 上的冗余 `content`，避免 `Invalid input[3].content: array too long`。
 - 版本面必须同步更新 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock`、`src-tauri/tauri.conf.json`，release note 是 `docs/release-notes/v3.16.4-6-zh.md`。
 - 发布输出目录使用独立路径 `C:\Users\sunda\Documents\LLMservice\ccswitchmulti-release-v3.16.4-6`，不要复用默认“最新版ccswitchmulti”目录或清理旧 `output/release-*` / `scripts/logs/` 未跟踪目录。
+- `v3.16.4-6` 已作为 BigStrongSun/ccswitchmulti 的 GitHub 正式 release 发布：`https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.16.4-6`。Release 为非 draft、`prerelease=false`，并通过 `gh api repos/BigStrongSun/ccswitchmulti/releases/latest` 确认是 latest。
+- Annotated tag `v3.16.4-6` 的 tag 对象为 `8e57b291468f3068189cd0725a6440170ee0527e`，解引用到版本提交 `e0614deb263f7b2dbcbb3b1cbe46162294d8a353`（`chore(release): bump CCSwitchMulti to v3.16.4-6`）。发布资产共 10 个：Windows setup、setup signature、portable zip、raw exe、`latest.json`、Linux/macOS build notes、README、`RELEASE-METADATA.md`、`SHA256SUMS.txt`。
+- 发布后校验：`latest.json` 版本为 `3.16.4-6` 且指向 `v3.16.4-6` setup URL；raw exe 的 `FileVersion/ProductVersion` 为 `3.16.4-6`；GitHub asset digest 与本地 `SHA256SUMS.txt` 对齐，主资产 SHA256 为 setup `B0D69BA5610B3B3600F9E38B255A47AB444DFDEE8FF7469BDE0C906DE094C7DD`、portable `65B8EAB4F573199FFB212B89CF32D7679BA00740CD357D826AB924665CF2A3B0`、raw exe `F2E3941DBFD932E2B32A35B64168816FBF68806BEAD3EFCDBBFAD4D1F68757B4`。
 
 ## 2026-07-01 Codex OAuth Responses Passthrough Content Shape
 
