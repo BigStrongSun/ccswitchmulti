@@ -391,16 +391,32 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "release-assets/$NEW_ZIP"
           echo "macOS zip ready: $NEW_ZIP"
 
-          # 3) Create styled DMG only when signing identity is available.
-          # Fork repos often lack Apple signing secrets; in that case still ship
-          # the updater tarball and zip instead of failing the whole release.
+          # 3) 收集 DMG。没有 Apple 签名时，发布 Tauri 已生成的未签名 DMG，
+          # 避免工作流成功但 Release 静默缺少 macOS DMG。
+          NEW_DMG="CC-Switch-${VERSION}-macOS.dmg"
           if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
-            echo "⚠️ APPLE_SIGNING_IDENTITY is missing; skipping macOS DMG packaging and notarization"
+            DMG_PATH=""
+            for path in \
+              "src-tauri/target/universal-apple-darwin/release/bundle/dmg" \
+              "src-tauri/target/aarch64-apple-darwin/release/bundle/dmg" \
+              "src-tauri/target/x86_64-apple-darwin/release/bundle/dmg" \
+              "src-tauri/target/release/bundle/dmg"; do
+              if [ -d "$path" ]; then
+                [ -z "$DMG_PATH" ] && DMG_PATH=$(find "$path" -maxdepth 1 -name "*.dmg" -type f | head -1 || true)
+              fi
+            done
+
+            if [ -z "$DMG_PATH" ]; then
+              echo "❌ APPLE_SIGNING_IDENTITY is missing and no unsigned macOS .dmg artifact was found" >&2
+              exit 1
+            fi
+
+            cp "$DMG_PATH" "release-assets/$NEW_DMG"
+            echo "⚠️ APPLE_SIGNING_IDENTITY is missing; publishing unsigned macOS DMG: $NEW_DMG"
             exit 0
           fi
 
           HOMEBREW_NO_AUTO_UPDATE=1 brew install create-dmg
-          NEW_DMG="CC-Switch-${VERSION}-macOS.dmg"
           DMG_STAGE_DIR="$RUNNER_TEMP/dmg-stage"
           rm -rf "$DMG_STAGE_DIR"
           mkdir -p "$DMG_STAGE_DIR"
@@ -720,7 +736,7 @@ jobs:
 
             ### 下载
 
-            - **macOS**: `CC-Switch-${{ github.ref_name }}-macOS.dmg`（推荐）或 `CC-Switch-${{ github.ref_name }}-macOS.zip`（解压即用）
+            - **macOS**: `CC-Switch-${{ github.ref_name }}-macOS.dmg`（未配置 Apple 签名时为未签名版）或 `CC-Switch-${{ github.ref_name }}-macOS.zip`（解压即用）
             - **Windows (x86_64)**: `CC-Switch-${{ github.ref_name }}-Windows-Setup.exe`（安装版）或 `CC-Switch-${{ github.ref_name }}-Windows-Portable.zip`（绿色版）
             - **Windows (ARM64)**: `CC-Switch-${{ github.ref_name }}-Windows-arm64-Setup.exe`（安装版）或 `CC-Switch-${{ github.ref_name }}-Windows-arm64-Portable.zip`（绿色版）
             - **Linux (x86_64)**: `CC-Switch-${{ github.ref_name }}-Linux-x86_64.AppImage` / `.deb` / `.rpm`
@@ -729,7 +745,7 @@ jobs:
             > `.tar.gz` 为 Tauri updater 自动更新专用，无需手动下载。
 
             ---
-            macOS DMG 仅在仓库配置 Apple 签名和公证密钥时生成；未配置时发布 updater tarball 和 app zip。
+            macOS DMG 在仓库配置 Apple 签名和公证密钥时会签名并公证；未配置时发布 Tauri 生成的未签名 DMG、updater tarball 和 app zip。
           files: release-assets/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

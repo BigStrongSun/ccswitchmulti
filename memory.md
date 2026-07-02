@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-07-03 macOS Unsigned DMG Release Fallback
+
+- `v3.16.4-9` 的 GitHub macOS job 已证明 Tauri 会在 `pnpm tauri build --target universal-apple-darwin` 阶段生成 `src-tauri/target/universal-apple-darwin/release/bundle/dmg/CCSwitchMulti_*_universal.dmg`，即使仓库缺少 Apple 签名和公证 secrets。
+- 真实缺口在 `Prepare macOS Assets`：旧逻辑在 `APPLE_SIGNING_IDENTITY` 为空时只上传 updater tarball 和 app zip，然后 `exit 0`，导致 Release 成功但没有 macOS DMG。
+- 修复边界：无 Apple 签名时也必须把 Tauri 生成的 unsigned DMG 复制为 `CC-Switch-${tag}-macOS.dmg` 并上传；如果无签名且找不到 `.dmg`，macOS job 应失败而不是静默缺资产。Apple secrets 齐全时仍走 `create-dmg` 的签名/公证路径。
+- Release 文案必须明确：缺 Apple 签名配置时 macOS DMG 是未签名版本；补齐 Apple Developer ID 证书和 notarization secrets 后，同一 workflow 会自动发布签名并公证的 DMG。
+
 ## 2026-07-03 CCSwitchMulti v3.16.4-9 GitHub Release Verification
 
 - `v3.16.4-9` 已推到 `BigStrongSun/ccswitchmulti` 并通过 GitHub Actions release run `28610511658`，head sha 为 `0e8b25cdd0cbfe8e2bff054b46850ce1c5215c0e`。该 run 覆盖 Linux x64、Linux ARM64、Windows x64、Windows ARM64、macOS universal、Publish GitHub Release 和 Assemble `latest.json`，全部成功。
