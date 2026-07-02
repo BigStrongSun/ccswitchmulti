@@ -128,6 +128,7 @@ function renderCatalogHarness(
     providerName?: string;
     partnerPromotionKey?: string;
     baseUrl?: string;
+    apiKey?: string;
     planAccessKeyId?: string;
     planSecretAccessKey?: string;
     onProviderSplitSuggestionChange?: ReturnType<typeof vi.fn>;
@@ -151,7 +152,7 @@ function renderCatalogHarness(
       <CodexFormFields
         providerId="codex-thirdparty"
         providerName={options.providerName}
-        codexApiKey="sk-test"
+        codexApiKey={options.apiKey ?? "sk-test"}
         onApiKeyChange={vi.fn()}
         category="custom"
         shouldShowApiKeyLink={false}
@@ -688,13 +689,48 @@ describe("CodexFormFields local model routing", () => {
     });
   });
 
-  it("keeps AgentPlan catalog when Volcengine AK/SK credentials are missing", () => {
+  it("falls back to data-plane models when AgentPlan AK/SK is missing but API Key exists", async () => {
+    vi.mocked(fetchModelsForConfig).mockResolvedValueOnce([
+      { id: "ark-code-latest", ownedBy: "volcengine" },
+      { id: "doubao-seed-1.6", ownedBy: "volcengine" },
+    ]);
     const { latestCatalog } = renderCatalogHarness(
       [{ model: "ark-code-latest", upstreamModel: "ark-code-latest" }],
       {
         providerName: "火山Agentplan",
         partnerPromotionKey: "volcengine_agentplan",
         baseUrl: "https://ark.cn-beijing.volces.com/api/coding/v3",
+      },
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "providerForm.fetchModels" }),
+    );
+
+    await waitFor(() => {
+      expect(fetchModelsForConfig).toHaveBeenCalledWith(
+        "https://ark.cn-beijing.volces.com/api/coding/v3",
+        "sk-test",
+        false,
+        undefined,
+        "",
+        undefined,
+      );
+      expect(latestCatalog().map((model) => model.model)).toEqual([
+        "ark-code-latest",
+        "doubao-seed-1.6",
+      ]);
+    });
+  });
+
+  it("keeps AgentPlan catalog when both inference key and AK/SK are missing", () => {
+    const { latestCatalog } = renderCatalogHarness(
+      [{ model: "ark-code-latest", upstreamModel: "ark-code-latest" }],
+      {
+        providerName: "火山Agentplan",
+        partnerPromotionKey: "volcengine_agentplan",
+        baseUrl: "https://ark.cn-beijing.volces.com/api/coding/v3",
+        apiKey: "",
       },
     );
 

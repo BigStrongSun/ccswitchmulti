@@ -136,26 +136,33 @@ export function isCodexMultiRouterPlan(provider: Provider): boolean {
   );
 }
 
-// 从 provider 配置里提取可调用 /models 的参数；官方 OAuth provider 没有普通 Base URL 时会被跳过。
-export function getWizardModelFetchConfig(
-  provider: Provider,
-): WizardModelFetchConfig | null {
+// 从 Codex provider 配置里读取模型列表/连通性探测可用的推理 API Key。
+function readWizardProviderApiKey(provider: Provider): string {
   const config = provider.settingsConfig ?? {};
   const auth = config.auth ?? {};
-  const baseUrl = readWizardProviderBaseUrl(provider);
-  const accessKeyId = provider.meta?.usage_script?.accessKeyId;
-  const secretAccessKey = provider.meta?.usage_script?.secretAccessKey;
-  const apiKey = String(
+  return String(
     auth.OPENAI_API_KEY ??
       config.apiKey ??
       config.api_key ??
       config.experimental_bearer_token ??
       "",
   ).trim();
+}
+
+// 从 provider 配置里提取可调用 /models 的参数；官方 OAuth provider 没有普通 Base URL 时会被跳过。
+export function getWizardModelFetchConfig(
+  provider: Provider,
+): WizardModelFetchConfig | null {
+  const config = provider.settingsConfig ?? {};
+  const baseUrl = readWizardProviderBaseUrl(provider);
+  const accessKeyId = provider.meta?.usage_script?.accessKeyId;
+  const secretAccessKey = provider.meta?.usage_script?.secretAccessKey;
+  const apiKey = readWizardProviderApiKey(provider);
   const volcengineModelListAction = codexPlanModelListAction({
     baseUrl,
     partnerPromotionKey: provider.meta?.partnerPromotionKey,
     providerName: provider.name,
+    apiKey,
     accessKeyId,
     secretAccessKey,
   });
@@ -200,6 +207,7 @@ export function isWizardCatalogOnlyModelSource(provider: Provider): boolean {
     baseUrl: readWizardProviderBaseUrl(provider),
     partnerPromotionKey: provider.meta?.partnerPromotionKey,
     providerName: provider.name,
+    apiKey: readWizardProviderApiKey(provider),
     accessKeyId: provider.meta?.usage_script?.accessKeyId,
     secretAccessKey: provider.meta?.usage_script?.secretAccessKey,
   });
@@ -230,7 +238,7 @@ export function getWizardConfigIssues(
       providerId: provider.id,
       providerName: provider.name,
       reason: isWizardCatalogOnlyModelSource(provider)
-        ? "当前 Plan 不能使用 OpenAI /models，且没有可用 modelCatalog 或专用模型列表凭据。"
+        ? "当前 Plan 缺少推理 API Key 或专用模型列表凭据，且没有可用 modelCatalog。"
         : "缺少 Base URL/API Key，且当前没有可用 modelCatalog。",
     }));
 }

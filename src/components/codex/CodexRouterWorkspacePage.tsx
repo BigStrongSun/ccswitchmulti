@@ -457,15 +457,6 @@ function getProviderModelFetchConfig(
       getCodexBaseUrl(provider) ??
       "",
   ).trim();
-  const planFetchSource = {
-    baseUrl,
-    partnerPromotionKey: provider.meta?.partnerPromotionKey,
-    providerName: provider.name,
-    accessKeyId: provider.meta?.usage_script?.accessKeyId,
-    secretAccessKey: provider.meta?.usage_script?.secretAccessKey,
-  };
-  const planModelListAction = codexPlanModelListAction(planFetchSource);
-  const isCatalogOnlyPlan = isCodexCatalogOnlyPlanModelFetch(planFetchSource);
   const apiKey = String(
     auth.OPENAI_API_KEY ??
       settings.apiKey ??
@@ -473,6 +464,16 @@ function getProviderModelFetchConfig(
       extractCodexExperimentalBearerToken(configText) ??
       "",
   ).trim();
+  const planFetchSource = {
+    baseUrl,
+    partnerPromotionKey: provider.meta?.partnerPromotionKey,
+    providerName: provider.name,
+    apiKey,
+    accessKeyId: provider.meta?.usage_script?.accessKeyId,
+    secretAccessKey: provider.meta?.usage_script?.secretAccessKey,
+  };
+  const planModelListAction = codexPlanModelListAction(planFetchSource);
+  const isCatalogOnlyPlan = isCodexCatalogOnlyPlanModelFetch(planFetchSource);
   const providerType = String(
     provider.meta?.providerType ?? settings.providerType ?? "",
   ).toLowerCase();

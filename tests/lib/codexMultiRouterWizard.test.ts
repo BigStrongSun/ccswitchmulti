@@ -387,7 +387,7 @@ describe("codexMultiRouterWizard helpers", () => {
     ]);
   });
 
-  it("detects AgentPlan without AK/SK as catalog-only but still keeps call config for probes", () => {
+  it("uses the inference API Key as AgentPlan model-fetch fallback when AK/SK is missing", () => {
     const agentPlan = provider({
       id: "ark-agentplan",
       name: "火山Agentplan",
@@ -400,7 +400,7 @@ describe("codexMultiRouterWizard helpers", () => {
       meta: { partnerPromotionKey: "volcengine_agentplan" },
     });
 
-    expect(isWizardCatalogOnlyModelSource(agentPlan)).toBe(true);
+    expect(isWizardCatalogOnlyModelSource(agentPlan)).toBe(false);
     expect(getWizardModelFetchConfig(agentPlan)).toMatchObject({
       baseUrl: "https://ark.cn-beijing.volces.com/api/coding/v3",
       apiKey: "sk-volc",
@@ -440,13 +440,13 @@ describe("codexMultiRouterWizard helpers", () => {
     expect(getWizardConfigIssues([agentPlan])).toEqual([]);
   });
 
-  it("requires a model catalog or AK/SK for AgentPlan sources because OpenAI /models is unavailable", () => {
+  it("requires a model catalog or online credential for AgentPlan sources", () => {
     const agentPlan = provider({
       id: "ark-agentplan",
       name: "火山Agentplan",
       settingsConfig: {
         base_url: "https://ark.cn-beijing.volces.com/api/coding/v3",
-        auth: { OPENAI_API_KEY: "sk-volc" },
+        auth: { OPENAI_API_KEY: "" },
       },
       meta: { partnerPromotionKey: "volcengine_agentplan" },
     });
@@ -456,7 +456,7 @@ describe("codexMultiRouterWizard helpers", () => {
         providerId: "ark-agentplan",
         providerName: "火山Agentplan",
         reason:
-          "当前 Plan 不能使用 OpenAI /models，且没有可用 modelCatalog 或专用模型列表凭据。",
+          "当前 Plan 缺少推理 API Key 或专用模型列表凭据，且没有可用 modelCatalog。",
       },
     ]);
   });

@@ -760,6 +760,7 @@ export function CodexFormFields({
       baseUrl: codexBaseUrl,
       partnerPromotionKey,
       providerName,
+      apiKey: codexApiKey,
       accessKeyId: planAccessKeyId,
       secretAccessKey: planSecretAccessKey,
     };

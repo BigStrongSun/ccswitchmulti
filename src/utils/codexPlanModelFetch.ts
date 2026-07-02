@@ -2,6 +2,7 @@ export interface CodexPlanModelFetchSource {
   baseUrl?: string | null;
   partnerPromotionKey?: string | null;
   providerName?: string | null;
+  apiKey?: string | null;
   accessKeyId?: string | null;
   secretAccessKey?: string | null;
 }
@@ -27,7 +28,7 @@ function normalizePlanFetchText(value?: string | null): string {
     .toLowerCase();
 }
 
-// 判断当前 Codex provider 是否是火山 AgentPlan；它不能走 OpenAI `/models`，但有 AK/SK 时可走火山管控面 OpenAPI。
+// 判断当前 Codex provider 是否是火山 AgentPlan；优先走 AK/SK 管控面模型列表，缺 AK/SK 但有推理 key 时允许尝试数据面 `/models`。
 export function isCodexVolcengineAgentPlanModelFetch(
   source: CodexPlanModelFetchSource,
 ): boolean {
@@ -76,7 +77,14 @@ export function hasCodexPlanModelFetchCredentials(
   return Boolean(source.accessKeyId?.trim() && source.secretAccessKey?.trim());
 }
 
-// 返回需要后端走火山管控面 OpenAPI 的模型列表 Action；没有凭据时返回 undefined 让调用方走 catalog 回退。
+// 判断是否已有可用于数据面 `/models` 兜底的推理 API Key。
+export function hasCodexPlanInferenceApiKey(
+  source: CodexPlanModelFetchSource,
+): boolean {
+  return Boolean(source.apiKey?.trim());
+}
+
+// 返回需要后端走火山管控面 OpenAPI 的模型列表 Action；没有 AK/SK 时返回 undefined，让调用方用推理 key 兜底尝试 `/models`。
 export function codexPlanModelListAction(
   source: CodexPlanModelFetchSource,
 ): string | undefined {
@@ -89,7 +97,7 @@ export function codexPlanModelListAction(
   return undefined;
 }
 
-// 判断当前 Codex provider 是否只能使用内置 modelCatalog，而不能在线刷新模型目录。
+// 判断当前 Codex provider 是否只能使用内置 modelCatalog；火山 AgentPlan 缺 AK/SK 但有推理 key 时仍允许在线尝试 `/models`。
 export function isCodexCatalogOnlyPlanModelFetch(
   source: CodexPlanModelFetchSource,
 ): boolean {
@@ -98,19 +106,20 @@ export function isCodexCatalogOnlyPlanModelFetch(
   }
   return (
     isCodexVolcengineAgentPlanModelFetch(source) &&
-    !hasCodexPlanModelFetchCredentials(source)
+    !hasCodexPlanModelFetchCredentials(source) &&
+    !hasCodexPlanInferenceApiKey(source)
   );
 }
 
-// 生成 catalog-only Plan 的用户提示；火山 AgentPlan 缺 AK/SK 时提示补管控面凭据。
+// 生成 catalog-only Plan 的用户提示；火山 AgentPlan 完全缺在线凭据时提示至少补一种 key。
 export function codexCatalogOnlyPlanModelFetchMessage(
   hasModelCatalog: boolean,
   source: CodexPlanModelFetchSource = {},
 ): string {
   if (isCodexVolcengineAgentPlanModelFetch(source)) {
     return hasModelCatalog
-      ? "火山 AgentPlan 模型列表需要火山 AK/SK 管控面 OpenAPI，当前缺少 AK/SK，已保留内置 modelCatalog。"
-      : "火山 AgentPlan 模型列表需要火山 AK/SK 管控面 OpenAPI，请在用量查询里配置 AccessKey ID / SecretAccessKey，或重新选择预设恢复 modelCatalog。";
+      ? "火山 AgentPlan 当前缺少可用于在线获取模型列表的推理 API Key 或火山 AK/SK，已保留内置 modelCatalog。"
+      : "火山 AgentPlan 当前缺少推理 API Key 和火山 AK/SK；请先填写 API Key，或在用量查询里配置 AccessKey ID / SecretAccessKey。";
   }
   return hasModelCatalog
     ? "当前 Plan 的模型枚举不开放 OpenAI /models，已保留内置 modelCatalog。"

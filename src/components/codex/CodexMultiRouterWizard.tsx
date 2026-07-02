@@ -648,11 +648,11 @@ function providerConfigStatus(provider: Provider): {
   if (isCatalogOnlyPlan && hasWizardModelCatalog(provider)) {
     return {
       badge: isVolcengineAgentPlan
-        ? "缺 AK/SK，使用内置目录"
+        ? "缺在线凭据，使用内置目录"
         : "使用内置模型目录",
       badgeVariant: "secondary",
       summary: isVolcengineAgentPlan
-        ? "火山 AgentPlan 需要 AK/SK 调用管控面模型列表；当前缺少 AK/SK，向导会保留已有 modelCatalog 继续生成路由。"
+        ? "火山 AgentPlan 当前没有推理 API Key 或 AK/SK，向导会保留已有 modelCatalog 继续生成路由。"
         : "当前 Plan 的模型枚举不走 OpenAI /models，向导会保留已有 modelCatalog 继续生成路由。",
     };
   }
@@ -677,7 +677,7 @@ function providerConfigStatus(provider: Provider): {
     badge: "需补全配置",
     badgeVariant: "destructive",
     summary: isCatalogOnlyPlan
-      ? "当前 Plan 不能使用 OpenAI /models，且没有可用 modelCatalog 或专用模型列表凭据"
+      ? "当前 Plan 缺少推理 API Key 或专用模型列表凭据，且没有可用 modelCatalog"
       : "缺少 Base URL/API Key，且没有可用 modelCatalog",
   };
 }
