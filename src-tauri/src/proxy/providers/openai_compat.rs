@@ -1558,6 +1558,62 @@ mod tests {
     }
 
     #[test]
+    fn codex_oauth_responses_normalizer_promotes_multi_part_developer_message() {
+        // Codex Desktop 的宿主提示会把多个 instructions 段落放进同一条
+        // developer message；official /responses 直透必须整体提升到顶层
+        // instructions，不能把这些段落作为 input[n].content 继续发给上游。
+        let body = json!({
+            "model": "gpt-5.4",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": [
+                        { "type": "input_text", "text": "<permissions instructions>" },
+                        { "type": "input_text", "text": "<app-context>" },
+                        { "type": "input_text", "text": "<collaboration_mode>" },
+                        { "type": "input_text", "text": "<apps_instructions>" },
+                        { "type": "input_text", "text": "<skills_instructions>" },
+                        { "type": "input_text", "text": "<plugins_instructions>" }
+                    ]
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "continue" }]
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_fn",
+                    "output": "done",
+                    "content": [{ "type": "output_text", "text": "done" }]
+                }
+            ]
+        });
+
+        let normalized = normalize_codex_oauth_responses_request(body);
+        let input = normalized["input"].as_array().expect("input array");
+
+        assert_eq!(
+            normalized["instructions"],
+            [
+                "<permissions instructions>",
+                "<app-context>",
+                "<collaboration_mode>",
+                "<apps_instructions>",
+                "<skills_instructions>",
+                "<plugins_instructions>",
+            ]
+            .join("\n")
+        );
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[0]["role"], "user");
+        assert_eq!(input[0]["content"][0]["text"], "continue");
+        assert_eq!(input[1]["type"], "function_call_output");
+        assert!(input[1].get("content").is_none());
+    }
+
+    #[test]
     fn responses_json_maps_to_chat_completion() {
         let response = json!({
             "id": "resp_123",
