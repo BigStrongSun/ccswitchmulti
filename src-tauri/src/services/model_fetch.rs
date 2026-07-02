@@ -65,6 +65,70 @@ const KNOWN_COMPAT_SUFFIXES: &[&str] = &[
     "/claude",
 ];
 
+const VOLCENGINE_AGENT_PLAN_MODEL_LIST_ACTION: &str = "ListArkAgentPlanModel";
+const VOLCENGINE_CODING_PLAN_MODEL_LIST_ACTION: &str = "ListArkCodingPlanModel";
+
+/// 归一化前端传入的火山模型列表 Action，只允许官方已确认的 Plan 模型枚举接口。
+fn normalize_volcengine_model_list_action(
+    action: Option<&str>,
+) -> Result<Option<&'static str>, String> {
+    let Some(action) = action.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    match action {
+        VOLCENGINE_AGENT_PLAN_MODEL_LIST_ACTION => {
+            Ok(Some(VOLCENGINE_AGENT_PLAN_MODEL_LIST_ACTION))
+        }
+        VOLCENGINE_CODING_PLAN_MODEL_LIST_ACTION => {
+            Ok(Some(VOLCENGINE_CODING_PLAN_MODEL_LIST_ACTION))
+        }
+        other => Err(format!("Unsupported Volcengine model list action: {other}")),
+    }
+}
+
+/// 通过火山方舟管控面 OpenAPI 获取 Agent/Coding Plan 支持的模型列表。
+///
+/// 这里不使用数据面推理 API Key，也不猜 `/models`；火山官方模型枚举走
+/// `open.volcengineapi.com` + AK/SK 签名，base_url 只用于提取 Region。
+async fn fetch_volcengine_plan_models(
+    base_url: &str,
+    action: &str,
+    access_key_id: Option<&str>,
+    secret_access_key: Option<&str>,
+) -> Result<Vec<FetchedModel>, String> {
+    let access_key_id = access_key_id.unwrap_or("").trim();
+    let secret_access_key = secret_access_key.unwrap_or("").trim();
+    if base_url.trim().is_empty() {
+        return Err("Base URL is required to derive Volcengine region".to_string());
+    }
+    if access_key_id.is_empty() || secret_access_key.is_empty() {
+        return Err(
+            "Volcengine AgentPlan model list requires AccessKey ID and SecretAccessKey".to_string(),
+        );
+    }
+
+    let region = crate::services::coding_plan::volcengine_region(base_url);
+    match crate::services::coding_plan::volcengine_openapi_call(
+        &region,
+        access_key_id,
+        secret_access_key,
+        action,
+    )
+    .await
+    {
+        crate::services::coding_plan::VolcCall::Body(body) => {
+            let models = parse_volcengine_plan_models(&body);
+            if models.is_empty() {
+                Err(format!("{action} returned no models"))
+            } else {
+                Ok(models)
+            }
+        }
+        crate::services::coding_plan::VolcCall::Auth(detail) => Err(detail),
+        crate::services::coding_plan::VolcCall::Soft(detail) => Err(detail),
+    }
+}
+
 /// 获取供应商的可用模型列表
 ///
 /// 使用 OpenAI 兼容的 GET /v1/models 端点，按候选列表顺序尝试。
@@ -74,7 +138,20 @@ pub async fn fetch_models(
     is_full_url: bool,
     models_url_override: Option<&str>,
     user_agent: Option<HeaderValue>,
+    volcengine_model_list_action: Option<&str>,
+    volcengine_access_key_id: Option<&str>,
+    volcengine_secret_access_key: Option<&str>,
 ) -> Result<Vec<FetchedModel>, String> {
+    if let Some(action) = normalize_volcengine_model_list_action(volcengine_model_list_action)? {
+        return fetch_volcengine_plan_models(
+            base_url,
+            action,
+            volcengine_access_key_id,
+            volcengine_secret_access_key,
+        )
+        .await;
+    }
+
     if api_key.is_empty() {
         return Err("API Key is required to fetch models".to_string());
     }
@@ -160,6 +237,8 @@ fn extract_context_window(obj: &serde_json::Map<String, serde_json::Value>) -> O
         "context_window",
         "context_length",
         "contextLength",
+        "ContextWindow",
+        "ContextLength",
         "max_context_window",
         "max_context_length",
         "contextWindow",
@@ -187,6 +266,74 @@ fn extract_context_window(obj: &serde_json::Map<String, serde_json::Value>) -> O
         .iter()
         .filter_map(|key| obj.get(*key).and_then(|value| value.as_object()))
         .find_map(extract_context_window)
+}
+
+/// 解析火山 `ListArkAgentPlanModel` / `ListArkCodingPlanModel` 的模型列表。
+///
+/// 官方文档示例是 `Result.Datas[].ModelID`；这里额外兼容少量常见字段名，
+/// 以便 OpenAPI 后续扩展字段时不破坏已有模型列表刷新。
+fn parse_volcengine_plan_models(body: &serde_json::Value) -> Vec<FetchedModel> {
+    let candidates = [
+        body.pointer("/Result/Datas"),
+        body.pointer("/Result/Models"),
+        body.pointer("/Result/ModelList"),
+        body.pointer("/Result/Items"),
+        body.get("Result"),
+        body.get("Datas"),
+        Some(body),
+    ];
+    let Some(entries) = candidates
+        .into_iter()
+        .flatten()
+        .find_map(|value| value.as_array())
+    else {
+        return Vec::new();
+    };
+
+    let mut models = entries
+        .iter()
+        .filter_map(parse_volcengine_plan_model_entry)
+        .collect::<Vec<_>>();
+    models.sort_by(|left, right| left.id.cmp(&right.id));
+    models.dedup_by(|left, right| left.id == right.id);
+    models
+}
+
+/// 解析火山模型列表中的单个模型条目。
+fn parse_volcengine_plan_model_entry(entry: &serde_json::Value) -> Option<FetchedModel> {
+    if let Some(model_id) = entry
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(FetchedModel {
+            id: model_id.to_string(),
+            owned_by: Some("volcengine".to_string()),
+            context_window: None,
+        });
+    }
+
+    let obj = entry.as_object()?;
+    let id = [
+        "ModelID",
+        "ModelId",
+        "modelID",
+        "modelId",
+        "ModelName",
+        "Model",
+        "Id",
+        "id",
+    ]
+    .iter()
+    .filter_map(|key| obj.get(*key).and_then(|value| value.as_str()))
+    .map(str::trim)
+    .find(|value| !value.is_empty())?;
+
+    Some(FetchedModel {
+        id: id.to_string(),
+        owned_by: Some("volcengine".to_string()),
+        context_window: extract_context_window(obj),
+    })
 }
 
 /// 为缺失上下文窗口的模型执行分层补齐。
@@ -985,6 +1132,69 @@ mod tests {
         assert_eq!(data[8].context_window, Some(262_144));
         assert_eq!(data[9].context_window, Some(32_768));
         assert_eq!(data[10].context_window, Some(65_536));
+    }
+
+    #[test]
+    fn test_parse_volcengine_plan_models_from_official_agentplan_shape() {
+        let body = serde_json::json!({
+            "ResponseMetadata": {
+                "Action": "ListArkAgentPlanModel",
+                "Version": "2024-01-01",
+                "Service": "ark",
+                "Region": "cn-beijing"
+            },
+            "Result": {
+                "Datas": [
+                    { "ModelID": "doubao-seed-1.6" },
+                    { "ModelID": "ark-code-latest", "ContextWindow": 262144 }
+                ]
+            }
+        });
+
+        let models = parse_volcengine_plan_models(&body);
+
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "ark-code-latest");
+        assert_eq!(models[0].owned_by.as_deref(), Some("volcengine"));
+        assert_eq!(models[0].context_window, Some(262_144));
+        assert_eq!(models[1].id, "doubao-seed-1.6");
+    }
+
+    #[test]
+    fn test_parse_volcengine_plan_models_accepts_string_entries_and_deduplicates() {
+        let body = serde_json::json!({
+            "Result": {
+                "Datas": [
+                    "ark-code-latest",
+                    { "ModelId": "ark-code-latest" },
+                    { "modelId": "doubao-seed-1.6" }
+                ]
+            }
+        });
+
+        let models = parse_volcengine_plan_models(&body);
+
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ark-code-latest", "doubao-seed-1.6"]
+        );
+    }
+
+    #[test]
+    fn test_normalize_volcengine_model_list_action_accepts_only_plan_actions() {
+        assert_eq!(
+            normalize_volcengine_model_list_action(Some("ListArkAgentPlanModel")).unwrap(),
+            Some("ListArkAgentPlanModel")
+        );
+        assert_eq!(
+            normalize_volcengine_model_list_action(Some("ListArkCodingPlanModel")).unwrap(),
+            Some("ListArkCodingPlanModel")
+        );
+        assert!(normalize_volcengine_model_list_action(Some("GetAFPUsage")).is_err());
+        assert_eq!(normalize_volcengine_model_list_action(None).unwrap(), None);
     }
 
     #[test]

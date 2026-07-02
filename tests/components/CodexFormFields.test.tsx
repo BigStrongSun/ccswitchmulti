@@ -128,6 +128,8 @@ function renderCatalogHarness(
     providerName?: string;
     partnerPromotionKey?: string;
     baseUrl?: string;
+    planAccessKeyId?: string;
+    planSecretAccessKey?: string;
     onProviderSplitSuggestionChange?: ReturnType<typeof vi.fn>;
   } = {},
 ) {
@@ -155,6 +157,8 @@ function renderCatalogHarness(
         shouldShowApiKeyLink={false}
         websiteUrl=""
         partnerPromotionKey={options.partnerPromotionKey}
+        planAccessKeyId={options.planAccessKeyId}
+        planSecretAccessKey={options.planSecretAccessKey}
         shouldShowSpeedTest={options.shouldShowSpeedTest ?? false}
         codexBaseUrl={options.baseUrl ?? "https://api.thirdparty.example/v1"}
         onBaseUrlChange={vi.fn()}
@@ -684,7 +688,7 @@ describe("CodexFormFields local model routing", () => {
     });
   });
 
-  it("keeps catalog-only AgentPlan models without calling /models", () => {
+  it("keeps AgentPlan catalog when Volcengine AK/SK credentials are missing", () => {
     const { latestCatalog } = renderCatalogHarness(
       [{ model: "ark-code-latest", upstreamModel: "ark-code-latest" }],
       {
@@ -702,6 +706,45 @@ describe("CodexFormFields local model routing", () => {
     expect(latestCatalog()).toEqual([
       { model: "ark-code-latest", upstreamModel: "ark-code-latest" },
     ]);
+  });
+
+  it("fetches AgentPlan models through Volcengine OpenAPI when AK/SK credentials exist", async () => {
+    vi.mocked(fetchModelsForConfig).mockResolvedValueOnce([
+      { id: "doubao-seed-1.6", ownedBy: "volcengine" },
+    ]);
+    const { latestCatalog } = renderCatalogHarness(
+      [{ model: "ark-code-latest", upstreamModel: "ark-code-latest" }],
+      {
+        providerName: "火山Agentplan",
+        partnerPromotionKey: "volcengine_agentplan",
+        baseUrl: "https://ark.cn-beijing.volces.com/api/coding/v3",
+        planAccessKeyId: "AKLTtest",
+        planSecretAccessKey: "secret",
+      },
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "providerForm.fetchModels" }),
+    );
+
+    await waitFor(() => {
+      expect(fetchModelsForConfig).toHaveBeenCalledWith(
+        "https://ark.cn-beijing.volces.com/api/coding/v3",
+        "sk-test",
+        false,
+        undefined,
+        "",
+        {
+          action: "ListArkAgentPlanModel",
+          accessKeyId: "AKLTtest",
+          secretAccessKey: "secret",
+        },
+      );
+      expect(latestCatalog().map((model) => model.model)).toEqual([
+        "ark-code-latest",
+        "doubao-seed-1.6",
+      ]);
+    });
   });
 
   it("uses model mapping checkboxes and arrows for catalog retention and order", async () => {

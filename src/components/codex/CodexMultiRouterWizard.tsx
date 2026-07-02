@@ -59,10 +59,12 @@ import {
   getWizardModelFetchConfig,
   hasWizardModelCatalog,
   isWizardCatalogOnlyModelSource,
+  isWizardVolcengineAgentPlanModelSource,
   inferWizardApiFormat,
   isCodexMultiRouterPlan,
   mergeFetchedModelsIntoWizardProvider,
   readWizardModelCatalog,
+  readWizardProviderBaseUrl,
   resolveWizardModelNameCollisions,
   skippedWizardConnectivityResult,
   type WizardConnectivityResult,
@@ -576,9 +578,12 @@ function modelFetchBadgeVariant(
   return "outline";
 }
 
-// 把 /models 抓取参数格式化成安全摘要，不展示真实 API Key。
+// 把模型列表抓取参数格式化成安全摘要，不展示真实 API Key 或 AK/SK。
 function fetchConfigSummary(config: WizardModelFetchConfig | null): string {
   if (!config) return "缺少 Base URL 或 API Key";
+  if (config.volcengineModelListAction) {
+    return `火山 OpenAPI ${config.volcengineModelListAction} (${config.baseUrl})`;
+  }
   return `${config.baseUrl}${config.isFullUrl ? " (完整 URL)" : ""}`;
 }
 
@@ -638,17 +643,24 @@ function providerConfigStatus(provider: Provider): {
 } {
   const config = getWizardModelFetchConfig(provider);
   const isCatalogOnlyPlan = isWizardCatalogOnlyModelSource(provider);
+  const isVolcengineAgentPlan =
+    isWizardVolcengineAgentPlanModelSource(provider);
   if (isCatalogOnlyPlan && hasWizardModelCatalog(provider)) {
     return {
-      badge: "使用内置模型目录",
+      badge: isVolcengineAgentPlan
+        ? "缺 AK/SK，使用内置目录"
+        : "使用内置模型目录",
       badgeVariant: "secondary",
-      summary:
-        "当前 Plan 的模型枚举不走 OpenAI /models，向导会保留已有 modelCatalog 继续生成路由。",
+      summary: isVolcengineAgentPlan
+        ? "火山 AgentPlan 需要 AK/SK 调用管控面模型列表；当前缺少 AK/SK，向导会保留已有 modelCatalog 继续生成路由。"
+        : "当前 Plan 的模型枚举不走 OpenAI /models，向导会保留已有 modelCatalog 继续生成路由。",
     };
   }
   if (config) {
     return {
-      badge: "可自动获取模型",
+      badge: config.volcengineModelListAction
+        ? "可通过火山 OpenAPI 获取模型"
+        : "可自动获取模型",
       badgeVariant: "outline",
       summary: fetchConfigSummary(config),
     };
@@ -665,9 +677,20 @@ function providerConfigStatus(provider: Provider): {
     badge: "需补全配置",
     badgeVariant: "destructive",
     summary: isCatalogOnlyPlan
-      ? "当前 Plan 不开放 OpenAI /models，且没有可用 modelCatalog"
+      ? "当前 Plan 不能使用 OpenAI /models，且没有可用 modelCatalog 或专用模型列表凭据"
       : "缺少 Base URL/API Key，且没有可用 modelCatalog",
   };
+}
+
+// 生成 Plan provider 在线模型列表不可用时的回退文案，避免把火山缺 AK/SK 误写成永久不支持。
+function catalogOnlyPlanMessage(provider: Provider, hasModelCatalog: boolean) {
+  return codexCatalogOnlyPlanModelFetchMessage(hasModelCatalog, {
+    baseUrl: readWizardProviderBaseUrl(provider),
+    partnerPromotionKey: provider.meta?.partnerPromotionKey,
+    providerName: provider.name,
+    accessKeyId: provider.meta?.usage_script?.accessKeyId,
+    secretAccessKey: provider.meta?.usage_script?.secretAccessKey,
+  });
 }
 
 // 将内部状态机状态转换为用户能理解的短句，便于在向导顶部持续暴露当前进度。
@@ -1173,13 +1196,15 @@ export function CodexMultiRouterWizard({
             config && !isCatalogOnlyPlan
               ? {
                   status: "loading",
-                  message: "正在读取 /models 并准备写回 modelCatalog",
+                  message: config.volcengineModelListAction
+                    ? "正在读取火山 OpenAPI 模型列表并准备写回 modelCatalog"
+                    : "正在读取 /models 并准备写回 modelCatalog",
                   modelCount: existingCount,
                 }
               : {
                   status: "skipped",
                   message: isCatalogOnlyPlan
-                    ? codexCatalogOnlyPlanModelFetchMessage(existingCount > 0)
+                    ? catalogOnlyPlanMessage(provider, existingCount > 0)
                     : "缺少 Base URL 或 API Key，无法在线读取；已保留现有模型目录。",
                   modelCount: existingCount,
                 },
@@ -1200,7 +1225,8 @@ export function CodexMultiRouterWizard({
             ...current,
             [provider.id]: {
               status: "skipped",
-              message: codexCatalogOnlyPlanModelFetchMessage(
+              message: catalogOnlyPlanMessage(
+                provider,
                 beforeModels.length > 0,
               ),
               modelCount: beforeModels.length,
@@ -1237,6 +1263,13 @@ export function CodexMultiRouterWizard({
             config.isFullUrl,
             config.modelsUrl,
             config.customUserAgent,
+            config.volcengineModelListAction
+              ? {
+                  action: config.volcengineModelListAction,
+                  accessKeyId: config.volcengineAccessKeyId ?? "",
+                  secretAccessKey: config.volcengineSecretAccessKey ?? "",
+                }
+              : undefined,
           );
           const nextProvider = mergeFetchedModelsIntoWizardProvider(
             provider,
@@ -1339,7 +1372,7 @@ export function CodexMultiRouterWizard({
     for (const provider of draftSources) {
       const config = getWizardModelFetchConfig(provider);
       const models = getWizardConnectivityProbeModels(provider);
-      if (!config) {
+      if (!config || !config.apiKey) {
         results.push(
           skippedWizardConnectivityResult(
             provider,

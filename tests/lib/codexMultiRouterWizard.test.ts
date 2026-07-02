@@ -387,7 +387,7 @@ describe("codexMultiRouterWizard helpers", () => {
     ]);
   });
 
-  it("detects AgentPlan catalog-only sources but still keeps call config for probes", () => {
+  it("detects AgentPlan without AK/SK as catalog-only but still keeps call config for probes", () => {
     const agentPlan = provider({
       id: "ark-agentplan",
       name: "火山Agentplan",
@@ -408,7 +408,39 @@ describe("codexMultiRouterWizard helpers", () => {
     expect(getWizardConfigIssues([agentPlan])).toEqual([]);
   });
 
-  it("requires a model catalog for AgentPlan sources because /models is unavailable", () => {
+  it("adds Volcengine OpenAPI model list action when AgentPlan AK/SK exists", () => {
+    const agentPlan = provider({
+      id: "ark-agentplan",
+      name: "火山Agentplan",
+      settingsConfig: {
+        auth: { OPENAI_API_KEY: "sk-volc" },
+        config:
+          'model_provider = "custom"\n[model_providers.custom]\nbase_url = "https://ark.cn-beijing.volces.com/api/coding/v3"\n',
+      },
+      meta: {
+        partnerPromotionKey: "volcengine_agentplan",
+        usage_script: {
+          enabled: true,
+          language: "javascript",
+          code: "",
+          accessKeyId: "AKLTtest",
+          secretAccessKey: "secret",
+        },
+      },
+    });
+
+    expect(isWizardCatalogOnlyModelSource(agentPlan)).toBe(false);
+    expect(getWizardModelFetchConfig(agentPlan)).toMatchObject({
+      baseUrl: "https://ark.cn-beijing.volces.com/api/coding/v3",
+      apiKey: "sk-volc",
+      volcengineModelListAction: "ListArkAgentPlanModel",
+      volcengineAccessKeyId: "AKLTtest",
+      volcengineSecretAccessKey: "secret",
+    });
+    expect(getWizardConfigIssues([agentPlan])).toEqual([]);
+  });
+
+  it("requires a model catalog or AK/SK for AgentPlan sources because OpenAI /models is unavailable", () => {
     const agentPlan = provider({
       id: "ark-agentplan",
       name: "火山Agentplan",
@@ -423,7 +455,8 @@ describe("codexMultiRouterWizard helpers", () => {
       {
         providerId: "ark-agentplan",
         providerName: "火山Agentplan",
-        reason: "当前 Plan 不开放 OpenAI /models，且没有可用 modelCatalog。",
+        reason:
+          "当前 Plan 不能使用 OpenAI /models，且没有可用 modelCatalog 或专用模型列表凭据。",
       },
     ]);
   });

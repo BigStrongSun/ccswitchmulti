@@ -52,6 +52,7 @@ import { LocalProxyRequestOverridesField } from "./LocalProxyRequestOverridesFie
 import { cn } from "@/lib/utils";
 import { resolveFetchedCodexModelContextWindow } from "@/utils/codexModelContext";
 import {
+  codexPlanModelListAction,
   codexCatalogOnlyPlanModelFetchMessage,
   isCodexCatalogOnlyPlanModelFetch,
 } from "@/utils/codexPlanModelFetch";
@@ -242,6 +243,8 @@ interface CodexFormFieldsProps {
   websiteUrl: string;
   isPartner?: boolean;
   partnerPromotionKey?: string;
+  planAccessKeyId?: string;
+  planSecretAccessKey?: string;
 
   // Base URL
   shouldShowSpeedTest: boolean;
@@ -526,6 +529,8 @@ export function CodexFormFields({
   websiteUrl,
   isPartner,
   partnerPromotionKey,
+  planAccessKeyId,
+  planSecretAccessKey,
   shouldShowSpeedTest,
   codexBaseUrl,
   onBaseUrlChange,
@@ -751,16 +756,23 @@ export function CodexFormFields({
   );
 
   const handleFetchModels = useCallback(() => {
-    const isCatalogOnlyPlan = isCodexCatalogOnlyPlanModelFetch({
+    const planFetchSource = {
       baseUrl: codexBaseUrl,
       partnerPromotionKey,
       providerName,
-    });
+      accessKeyId: planAccessKeyId,
+      secretAccessKey: planSecretAccessKey,
+    };
+    const planModelListAction = codexPlanModelListAction(planFetchSource);
+    const isCatalogOnlyPlan = isCodexCatalogOnlyPlanModelFetch(planFetchSource);
     if (isCatalogOnlyPlan) {
       const hasModelCatalog = catalogRowsRef.current.some((row) =>
         row.model.trim(),
       );
-      const message = codexCatalogOnlyPlanModelFetchMessage(hasModelCatalog);
+      const message = codexCatalogOnlyPlanModelFetchMessage(
+        hasModelCatalog,
+        planFetchSource,
+      );
       if (hasModelCatalog) {
         toast.info(message);
       } else {
@@ -769,7 +781,7 @@ export function CodexFormFields({
       return;
     }
 
-    if (!codexBaseUrl || !codexApiKey) {
+    if (!codexBaseUrl || (!codexApiKey && !planModelListAction)) {
       showFetchModelsError(null, t, {
         hasApiKey: !!codexApiKey,
         hasBaseUrl: !!codexBaseUrl,
@@ -783,6 +795,13 @@ export function CodexFormFields({
       isFullUrl,
       undefined,
       customUserAgent,
+      planModelListAction
+        ? {
+            action: planModelListAction,
+            accessKeyId: planAccessKeyId ?? "",
+            secretAccessKey: planSecretAccessKey ?? "",
+          }
+        : undefined,
     )
       .then((models) => {
         setFetchedModels(models);
@@ -835,6 +854,8 @@ export function CodexFormFields({
     providerId,
     providerName,
     partnerPromotionKey,
+    planAccessKeyId,
+    planSecretAccessKey,
     websiteUrl,
     onCatalogModelsChange,
     onProviderSplitSuggestionChange,

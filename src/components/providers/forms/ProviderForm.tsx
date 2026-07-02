@@ -2274,6 +2274,10 @@ function ProviderFormFull({
                 websiteUrl={codexWebsiteUrl}
                 isPartner={isCodexPartner}
                 partnerPromotionKey={codexPartnerPromotionKey}
+                planAccessKeyId={initialData?.meta?.usage_script?.accessKeyId}
+                planSecretAccessKey={
+                  initialData?.meta?.usage_script?.secretAccessKey
+                }
                 shouldShowSpeedTest={shouldShowSpeedTest}
                 codexBaseUrl={codexBaseUrl}
                 onBaseUrlChange={handleCodexBaseUrlChange}

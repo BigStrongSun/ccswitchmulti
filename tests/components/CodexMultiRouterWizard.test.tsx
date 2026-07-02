@@ -222,7 +222,7 @@ describe("CodexMultiRouterWizard", () => {
     expect(providersApi.update).toHaveBeenCalledTimes(1);
   });
 
-  it("skips catalog-only AgentPlan model fetch and keeps its built-in catalog", async () => {
+  it("skips AgentPlan model fetch without Volcengine AK/SK and keeps its built-in catalog", async () => {
     renderWithQueryClient(
       <CodexMultiRouterWizard
         open
@@ -248,18 +248,81 @@ describe("CodexMultiRouterWizard", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "配置核心参数" }));
-    expect(screen.getByText("使用内置模型目录")).toBeInTheDocument();
+    expect(screen.getByText("缺 AK/SK，使用内置目录")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
     fireEvent.click(
       screen.getByRole("button", { name: "自动获取并写入模型列表" }),
     );
 
-    expect(
-      await screen.findByText(/不开放 OpenAI \/models/),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/需要火山 AK\/SK/)).toBeInTheDocument();
     expect(fetchModelsForConfig).not.toHaveBeenCalled();
     expect(providersApi.update).not.toHaveBeenCalled();
+  });
+
+  it("refreshes AgentPlan models through Volcengine OpenAPI when AK/SK exists", async () => {
+    vi.mocked(fetchModelsForConfig).mockResolvedValueOnce([
+      { id: "doubao-seed-1.6", ownedBy: "volcengine" },
+    ]);
+    vi.mocked(providersApi.update).mockResolvedValueOnce(true);
+
+    renderWithQueryClient(
+      <CodexMultiRouterWizard
+        open
+        providers={[
+          provider({
+            id: "ark-agentplan",
+            name: "火山Agentplan",
+            settingsConfig: {
+              base_url: "https://ark.cn-beijing.volces.com/api/coding/v3",
+              auth: { OPENAI_API_KEY: "sk-volc" },
+              modelCatalog: {
+                models: [{ model: "ark-code-latest" }],
+              },
+            },
+            meta: {
+              partnerPromotionKey: "volcengine_agentplan",
+              usage_script: {
+                enabled: true,
+                language: "javascript",
+                code: "",
+                accessKeyId: "AKLTtest",
+                secretAccessKey: "secret",
+              },
+            },
+          }),
+        ]}
+        onOpenChange={vi.fn()}
+        onCreateProvider={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+        onEnablePlan={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "配置核心参数" }));
+    expect(screen.getByText("可通过火山 OpenAPI 获取模型")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "自动获取并写入模型列表" }),
+    );
+
+    await waitFor(() => {
+      expect(fetchModelsForConfig).toHaveBeenCalledWith(
+        "https://ark.cn-beijing.volces.com/api/coding/v3",
+        "sk-volc",
+        false,
+        undefined,
+        undefined,
+        {
+          action: "ListArkAgentPlanModel",
+          accessKeyId: "AKLTtest",
+          secretAccessKey: "secret",
+        },
+      );
+      expect(providersApi.update).toHaveBeenCalledTimes(1);
+    });
+    expect(await screen.findByText(/已写入 2 个模型/)).toBeInTheDocument();
   });
 
   it("keeps previous model selections while appending newly fetched models", async () => {

@@ -9,7 +9,11 @@ import type {
 } from "@/types";
 import type { FetchedModel } from "@/lib/api/model-fetch";
 import { extractCodexBaseUrl } from "@/utils/providerConfigUtils";
-import { isCodexCatalogOnlyPlanModelFetch } from "@/utils/codexPlanModelFetch";
+import {
+  codexPlanModelListAction,
+  isCodexCatalogOnlyPlanModelFetch,
+  isCodexVolcengineAgentPlanModelFetch,
+} from "@/utils/codexPlanModelFetch";
 
 export const CODEX_MULTI_ROUTER_WIZARD_DISMISSED_KEY =
   "ccswitchmulti.codexMultiRouterWizard.dismissed";
@@ -23,6 +27,9 @@ export interface WizardModelFetchConfig {
   isFullUrl?: boolean;
   modelsUrl?: string;
   customUserAgent?: string;
+  volcengineModelListAction?: string;
+  volcengineAccessKeyId?: string;
+  volcengineSecretAccessKey?: string;
 }
 
 export interface WizardPlanBuildResult {
@@ -136,6 +143,8 @@ export function getWizardModelFetchConfig(
   const config = provider.settingsConfig ?? {};
   const auth = config.auth ?? {};
   const baseUrl = readWizardProviderBaseUrl(provider);
+  const accessKeyId = provider.meta?.usage_script?.accessKeyId;
+  const secretAccessKey = provider.meta?.usage_script?.secretAccessKey;
   const apiKey = String(
     auth.OPENAI_API_KEY ??
       config.apiKey ??
@@ -143,7 +152,14 @@ export function getWizardModelFetchConfig(
       config.experimental_bearer_token ??
       "",
   ).trim();
-  if (!baseUrl || !apiKey) return null;
+  const volcengineModelListAction = codexPlanModelListAction({
+    baseUrl,
+    partnerPromotionKey: provider.meta?.partnerPromotionKey,
+    providerName: provider.name,
+    accessKeyId,
+    secretAccessKey,
+  });
+  if (!baseUrl || (!apiKey && !volcengineModelListAction)) return null;
   return {
     baseUrl,
     apiKey,
@@ -151,6 +167,13 @@ export function getWizardModelFetchConfig(
     modelsUrl:
       typeof config.modelsUrl === "string" ? config.modelsUrl : undefined,
     customUserAgent: provider.meta?.customUserAgent,
+    ...(volcengineModelListAction
+      ? {
+          volcengineModelListAction,
+          volcengineAccessKeyId: accessKeyId,
+          volcengineSecretAccessKey: secretAccessKey,
+        }
+      : {}),
   };
 }
 
@@ -177,6 +200,19 @@ export function isWizardCatalogOnlyModelSource(provider: Provider): boolean {
     baseUrl: readWizardProviderBaseUrl(provider),
     partnerPromotionKey: provider.meta?.partnerPromotionKey,
     providerName: provider.name,
+    accessKeyId: provider.meta?.usage_script?.accessKeyId,
+    secretAccessKey: provider.meta?.usage_script?.secretAccessKey,
+  });
+}
+
+// 判断向导中的模型源是否是火山 AgentPlan，供 UI 展示专用 OpenAPI 路径。
+export function isWizardVolcengineAgentPlanModelSource(
+  provider: Provider,
+): boolean {
+  return isCodexVolcengineAgentPlanModelFetch({
+    baseUrl: readWizardProviderBaseUrl(provider),
+    partnerPromotionKey: provider.meta?.partnerPromotionKey,
+    providerName: provider.name,
   });
 }
 
@@ -194,7 +230,7 @@ export function getWizardConfigIssues(
       providerId: provider.id,
       providerName: provider.name,
       reason: isWizardCatalogOnlyModelSource(provider)
-        ? "当前 Plan 不开放 OpenAI /models，且没有可用 modelCatalog。"
+        ? "当前 Plan 不能使用 OpenAI /models，且没有可用 modelCatalog 或专用模型列表凭据。"
         : "缺少 Base URL/API Key，且当前没有可用 modelCatalog。",
     }));
 }

@@ -1,10 +1,11 @@
 # CC Switch Repository Memory
 
-## 2026-07-02 Volcengine AgentPlan Catalog-Only Model Fetch
+## 2026-07-02 Volcengine AgentPlan OpenAPI Model Fetch
 
 - 用户截图里的“目前火山引擎 Agentplan 获取不到模型”不是 API Key、网络或 `/models` 候选顺序的单点问题。火山 Agent Plan 的模型枚举文档是 `ListArkAgentPlanModel - 查询 Agent Plan 支持的模型列表`，在 `Agent Plan API` 管控面下；同页导航还有独立的 `ListArkCodingPlanModel - 查询 Coding Plan 支持的模型列表`。这类接口不是数据面 `https://ark.cn-beijing.volces.com/api/coding/v3/models` 或 OpenAI `/v1/models`。
 - `origin/main`（2026-07-02 fetch 后为 `8d1b3306d09a27b9d8fc29694791d8421aba5f93`）没有修复 AgentPlan 专用模型枚举：全树无 `ListArkAgentPlanModel` / `ListArkCodingPlanModel`，只有通用 `/models` URL 候选和 UA 透传修正。不要把原版的通用 `model_fetch` 修复误判成火山 AgentPlan 支持。
-- 修复边界：火山 AgentPlan 与 BytePlus 预设已带静态 `modelCatalog`（`ark-code-latest`，256k context），模型获取 UI/向导应把它们作为 catalog-only Plan 处理：点击“获取模型列表”时跳过 OpenAI `/models`，保留内置目录继续生成 MultiRouter route；如果用户把目录删空，则提示重新选择预设或手动添加模型。Chat/Responses 连通性仍应使用真实 Base URL/API Key 测，不要因为模型枚举跳过而跳过调用测试。
+- 纠偏：不要把“不能走 OpenAI `/models`”等价成“只能 catalog-only”。火山 AgentPlan 有火山 AK/SK（存在 `meta.usage_script.accessKeyId` / `secretAccessKey`）时，应通过 `open.volcengineapi.com` 的 `ListArkAgentPlanModel` 管控面 OpenAPI 获取模型列表，并解析 `Result.Datas[].ModelID`。缺 AK/SK、鉴权失败、网络/解析失败时才保留内置 `modelCatalog` 作为回退。
+- BytePlus 仍保持 catalog 回退，直到找到可验证的 BytePlus 专用模型列表接口契约；不要把 BytePlus 未证实地并入火山 CN OpenAPI。
 - 不要通过把 `/api/coding/v3` 剥离成 `https://ark.cn-beijing.volces.com/v1/models` 之类猜测端点来“修复”。那只是换一个未证实的 OpenAI-compatible URL，和官方 `ListArkAgentPlanModel` 管控面边界不一致，容易把真实根因掩盖成另一个 404。
 
 ## 2026-07-01 Codex MiniMax Sensitive Image Media Retry

@@ -29,6 +29,9 @@ pub async fn fetch_models_for_config(
     is_full_url: Option<bool>,
     models_url: Option<String>,
     custom_user_agent: Option<String>,
+    volcengine_model_list_action: Option<String>,
+    volcengine_access_key_id: Option<String>,
+    volcengine_secret_access_key: Option<String>,
 ) -> Result<Vec<FetchedModel>, String> {
     // 与转发 / 检测路径共用 parse_custom_user_agent：非法 UA 静默忽略（不阻断取模型）。
     let user_agent = crate::provider::parse_custom_user_agent(custom_user_agent.as_deref())
@@ -40,6 +43,9 @@ pub async fn fetch_models_for_config(
         is_full_url.unwrap_or(false),
         models_url.as_deref(),
         user_agent,
+        volcengine_model_list_action.as_deref(),
+        volcengine_access_key_id.as_deref(),
+        volcengine_secret_access_key.as_deref(),
     )
     .await
 }

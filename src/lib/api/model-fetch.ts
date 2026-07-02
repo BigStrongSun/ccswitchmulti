@@ -8,6 +8,12 @@ export interface FetchedModel {
   contextWindow?: number | null;
 }
 
+export interface VolcengineModelListOptions {
+  action: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+}
+
 export interface CodexResponsesProbeResult {
   ok: boolean;
   status?: number | null;
@@ -28,6 +34,7 @@ export async function fetchModelsForConfig(
   isFullUrl?: boolean,
   modelsUrl?: string,
   customUserAgent?: string,
+  volcengineModelList?: VolcengineModelListOptions,
 ): Promise<FetchedModel[]> {
   return invoke("fetch_models_for_config", {
     baseUrl,
@@ -35,6 +42,9 @@ export async function fetchModelsForConfig(
     isFullUrl,
     modelsUrl,
     customUserAgent,
+    volcengineModelListAction: volcengineModelList?.action,
+    volcengineAccessKeyId: volcengineModelList?.accessKeyId,
+    volcengineSecretAccessKey: volcengineModelList?.secretAccessKey,
   });
 }
 

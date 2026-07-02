@@ -684,7 +684,7 @@ const VOLCENGINE_API_VERSION: &str = "2024-01-01";
 const VOLCENGINE_DEFAULT_REGION: &str = "cn-beijing";
 
 /// 单次 OpenAPI 调用的归类结果。
-enum VolcCall {
+pub(crate) enum VolcCall {
     /// 2xx 且 JSON 可解析、无 OpenAPI 级错误（业务 Result 仍可能为空=未订阅）。
     Body(serde_json::Value),
     /// 硬鉴权失败（HTTP 401/403 或 AccessDenied/Signature 等错误码）——两个 plan
@@ -697,7 +697,7 @@ enum VolcCall {
 /// 从数据面 base_url 提取控制面 OpenAPI 所需的 Region（如
 /// `ark.cn-beijing.volces.com` → `cn-beijing`）；无法识别时回落 cn-beijing。
 /// 控制面 Host 是固定网关（`VOLCENGINE_OPENAPI_HOST`），不随 base_url 变化。
-fn volcengine_region(base_url: &str) -> String {
+pub(crate) fn volcengine_region(base_url: &str) -> String {
     let host = base_url
         .split_once("://")
         .map(|(_, rest)| rest)
@@ -856,7 +856,7 @@ fn volcengine_sign(
     (authorization, x_date, x_content_sha256)
 }
 
-async fn volcengine_openapi_call(
+pub(crate) async fn volcengine_openapi_call(
     region: &str,
     access_key_id: &str,
     secret_access_key: &str,
@@ -1744,6 +1744,10 @@ mod tests {
         assert_eq!(
             volcengine_canonical_query("GetAFPUsage", "cn-beijing"),
             "Action=GetAFPUsage&Region=cn-beijing&Version=2024-01-01"
+        );
+        assert_eq!(
+            volcengine_canonical_query("ListArkAgentPlanModel", "cn-beijing"),
+            "Action=ListArkAgentPlanModel&Region=cn-beijing&Version=2024-01-01"
         );
     }
 
