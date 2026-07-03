@@ -1,5 +1,14 @@
 # CC Switch Repository Memory
 
+## 2026-07-03 Codex Cross-Provider Model Switch Type Boundary
+
+- 原版 Codex 的 `/model` 切换不重写历史 item：TUI 通过 `AppEvent::UpdateModel` / `Op::OverrideTurnContext` 更新当前 thread settings，core 侧把 `model/effort` 合进 `SessionConfiguration.collaboration_mode`，下一轮再用新的 `TurnContext.model_info` 构造请求；历史仍来自 `clone_history().for_prompt(...)` 并作为 `Prompt.input` 进入 `ResponsesApiRequest.input`。
+- 因此 CCSwitchMulti 的正确边界不是在 route runtime 猜“上一轮来自哪个 provider”，也不是把历史全局改成某个上游的 schema；应把 Codex 历史视为 canonical Responses-like item，进入 provider 之前按目标 provider 的 wire schema 做 request-local normalization。
+- Chat 桥接路径专属字段如 `reasoning_content` 只属于 Responses->Chat / Chat->Responses 适配层和 `CodexChatHistoryStore` 缓存，用来给 DeepSeek/Kimi/MiMo 等 Chat 上游恢复 assistant tool-call reasoning；它不应作为 native Responses 或 official OAuth 的通用字段。官方 Codex 协议的 FunctionCall/ToolSearchCall 类型本身不声明 `reasoning_content`，Codex 反序列化后也不会把该字段自然持久化为正式历史字段。
+- Official ChatGPT Codex OAuth 私有 `/backend-api/codex/responses` 比公开 Responses 更严格：出站前必须提升 system/developer input 到顶层 `instructions`，保留 `message.content`，reasoning item 只保留 `summary/encrypted_content` 并把缺失 summary 的 raw content 转为 `summary_text` 后移除 raw `content`，tool/call output 上的冗余 `content` 也要移除，同时确保 `include` 带 `reasoning.encrypted_content`。
+- 第三方 native Responses 直透目前只做 system/developer 控制消息提升；不要无证据套用 official OAuth 私有 cleanup。若某个第三方 Responses 也拒绝 `reasoning.content` 或工具 output `content`，应按 provider/API-format 增加局部 compatibility normalizer 和回归测试，而不是全局删字段影响其它公开 Responses 兼容实现。
+- 这次 raw `reasoning.content` 问题的引入链路是：`15e712e7` 打开第三方 native Responses 直连后，同一 session 更容易产生/保留 Responses-shaped 历史；`77781164` 的 official OAuth cleanup 只处理 tool/output `content`，当时错误地允许 `reasoning.content` 保留；`6524fe2d` 补了切模型 control-message 提升但没有改变 reasoning 边界。最终修复应落在 official OAuth 出站 normalizer，而不是改变原版 `/model` 语义。
+
 ## 2026-07-03 Codex Official OAuth Reasoning Content Boundary
 
 - 更新 2026-07-01 的 Responses input 清理边界：official managed Codex OAuth 不能再原样保留 `type=reasoning` item 上的 raw `content`。真实上游错误 `Invalid input[n].content: array too long. Expected an array with maximum length 0` 同样会发生在 reasoning item；这说明 ChatGPT Codex 私有 `/responses` input schema 不接受 reasoning.content。
