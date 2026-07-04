@@ -66,6 +66,7 @@ import {
   getWizardModelFetchConfig,
   hasWizardModelCatalog,
   isWizardCatalogOnlyModelSource,
+  isWizardCodexOAuthSource,
   isWizardVolcengineAgentPlanModelSource,
   inferWizardApiFormat,
   isCodexMultiRouterPlan,
@@ -79,6 +80,8 @@ import {
 } from "@/lib/codexMultiRouterWizard";
 import type { WorkspaceTab } from "@/components/codex/CodexRouterWorkspacePage";
 import { codexCatalogOnlyPlanModelFetchMessage } from "@/utils/codexPlanModelFetch";
+import { CodexOAuthSection } from "@/components/providers/forms/CodexOAuthSection";
+import { useCodexOauth } from "@/components/providers/forms/hooks/useCodexOauth";
 
 interface CodexMultiRouterWizardProps {
   open: boolean;
@@ -144,6 +147,12 @@ interface ModelFetchCardState {
   message: string;
   modelCount: number;
   diff?: ModelFetchDiff;
+}
+
+interface CodexOAuthWizardStatus {
+  isLoading: boolean;
+  hasAnyAccount: boolean;
+  accountCount: number;
 }
 
 const STEPS: WizardStep[] = [
@@ -659,12 +668,38 @@ function cacheCapabilitySummary(cache?: CodexCacheConfig): string {
   }
 }
 
-// 给配置页提供三态说明：能在线读取、已有目录可继续、确实需要补全。
-function providerConfigStatus(provider: Provider): {
+// 给配置页提供三态说明：能在线读取、官方 OAuth 需登录、已有目录可继续或确实需要补全。
+function providerConfigStatus(
+  provider: Provider,
+  codexOAuthStatus: CodexOAuthWizardStatus,
+): {
   badge: string;
   badgeVariant: "outline" | "secondary" | "destructive";
   summary: string;
 } {
+  if (isWizardCodexOAuthSource(provider)) {
+    if (codexOAuthStatus.isLoading) {
+      return {
+        badge: "正在检查 OAuth",
+        badgeVariant: "outline",
+        summary:
+          "官方 Codex 使用 ChatGPT OAuth，不需要 API Key/Base URL；正在读取本机已托管的 ChatGPT 账号状态。",
+      };
+    }
+    if (codexOAuthStatus.hasAnyAccount) {
+      return {
+        badge: "OAuth 已配置",
+        badgeVariant: "secondary",
+        summary: `已检测到 ${codexOAuthStatus.accountCount} 个可用 ChatGPT 账号；向导会使用官方 Codex 内置模型目录，启用后由 CCSwitchMulti 托管 OAuth 转发。`,
+      };
+    }
+    return {
+      badge: "需要 ChatGPT OAuth",
+      badgeVariant: "destructive",
+      summary:
+        "官方 Codex 不使用 API Key/Base URL。请先在这里登录 ChatGPT 账号，否则保存后官方 GPT/O 路由会因为缺少 OAuth token 而无法真实转发。",
+    };
+  }
   const config = getWizardModelFetchConfig(provider);
   const isCatalogOnlyPlan = isWizardCatalogOnlyModelSource(provider);
   const isVolcengineAgentPlan =
@@ -704,6 +739,20 @@ function providerConfigStatus(provider: Provider): {
       ? "当前 Plan 缺少推理 API Key 或专用模型列表凭据，且没有可用 modelCatalog"
       : "缺少 Base URL/API Key，且没有可用 modelCatalog",
   };
+}
+
+// 生成官方 Codex OAuth 跳过普通 /models 的文案；登录状态只影响可用性提示，不改变内置目录。
+function codexOAuthModelFetchMessage(
+  hasModelCatalog: boolean,
+  hasCodexOauthAccount: boolean,
+) {
+  const catalogText = hasModelCatalog
+    ? "已保留官方 Codex 内置模型目录"
+    : "当前没有可用模型目录";
+  const authText = hasCodexOauthAccount
+    ? "已检测到 ChatGPT OAuth 账号"
+    : "尚未检测到 ChatGPT OAuth 账号，请先在配置步骤登录";
+  return `官方 Codex OAuth 不调用普通 /models；${catalogText}，${authText}。`;
 }
 
 // 生成 Plan provider 在线模型列表不可用时的回退文案，避免把火山缺 AK/SK 误写成永久不支持。
@@ -854,6 +903,11 @@ export function CodexMultiRouterWizard({
   onEnablePlan,
 }: CodexMultiRouterWizardProps) {
   const queryClient = useQueryClient();
+  const {
+    accounts: codexOauthAccounts,
+    hasAnyAccount: hasCodexOauthAccount,
+    isLoadingStatus: isCodexOauthStatusLoading,
+  } = useCodexOauth();
   const [flowState, dispatchFlow] = useReducer(
     wizardFlowReducer,
     INITIAL_FLOW_STATE,
@@ -888,6 +942,24 @@ export function CodexMultiRouterWizard({
     () => defaultWizardModelSources(providers),
     [providers],
   );
+  const codexOAuthStatus = useMemo(
+    () => ({
+      isLoading: isCodexOauthStatusLoading,
+      hasAnyAccount: hasCodexOauthAccount,
+      accountCount: codexOauthAccounts.length,
+    }),
+    [
+      codexOauthAccounts.length,
+      hasCodexOauthAccount,
+      isCodexOauthStatusLoading,
+    ],
+  );
+  const hasCodexOAuthSources = useMemo(
+    () => draftSources.some((provider) => isWizardCodexOAuthSource(provider)),
+    [draftSources],
+  );
+  const hasUnauthenticatedCodexOAuthSources =
+    hasCodexOAuthSources && !isCodexOauthStatusLoading && !hasCodexOauthAccount;
   const stepIndex = STEPS.findIndex((step) => step.key === flowState.stepKey);
   const currentStep = STEPS[stepIndex];
   const CurrentStepIcon = currentStep.icon;
@@ -1137,6 +1209,14 @@ export function CodexMultiRouterWizard({
             configIssues.length > 0 ? "configIncomplete" : "readyToFetchModels",
           nextStepKey: "fetchModels",
         });
+        if (hasUnauthenticatedCodexOAuthSources) {
+          toast.warning(
+            "检测到官方 Codex OAuth 源尚未登录 ChatGPT。你可以继续整理第三方模型，但官方 GPT/O 路由需要先完成 OAuth 才能真实转发。",
+            {
+              closeButton: true,
+            },
+          );
+        }
         if (configIssues.length > 0) {
           toast.warning(
             "部分 provider 不能自动获取模型，将使用已有 modelCatalog 或等待你补全配置。",
@@ -1249,9 +1329,10 @@ export function CodexMultiRouterWizard({
           const config = getWizardModelFetchConfig(provider);
           const existingCount = readWizardModelCatalog(provider).length;
           const isCatalogOnlyPlan = isWizardCatalogOnlyModelSource(provider);
+          const isCodexOAuth = isWizardCodexOAuthSource(provider);
           return [
             provider.id,
-            config && !isCatalogOnlyPlan
+            config && !isCatalogOnlyPlan && !isCodexOAuth
               ? {
                   status: "loading",
                   message: config.volcengineModelListAction
@@ -1261,9 +1342,14 @@ export function CodexMultiRouterWizard({
                 }
               : {
                   status: "skipped",
-                  message: isCatalogOnlyPlan
-                    ? catalogOnlyPlanMessage(provider, existingCount > 0)
-                    : "缺少 Base URL 或 API Key，无法在线读取；已保留现有模型目录。",
+                  message: isCodexOAuth
+                    ? codexOAuthModelFetchMessage(
+                        existingCount > 0,
+                        hasCodexOauthAccount,
+                      )
+                    : isCatalogOnlyPlan
+                      ? catalogOnlyPlanMessage(provider, existingCount > 0)
+                      : "缺少 Base URL 或 API Key，无法在线读取；已保留现有模型目录。",
                   modelCount: existingCount,
                 },
           ];
@@ -1276,6 +1362,23 @@ export function CodexMultiRouterWizard({
         const config = getWizardModelFetchConfig(provider);
         const beforeModels = readWizardModelCatalog(provider);
         const isCatalogOnlyPlan = isWizardCatalogOnlyModelSource(provider);
+        const isCodexOAuth = isWizardCodexOAuthSource(provider);
+        if (isCodexOAuth) {
+          skippedCount += 1;
+          nextSources.push(provider);
+          setModelFetchCards((current) => ({
+            ...current,
+            [provider.id]: {
+              status: "skipped",
+              message: codexOAuthModelFetchMessage(
+                beforeModels.length > 0,
+                hasCodexOauthAccount,
+              ),
+              modelCount: beforeModels.length,
+            },
+          }));
+          continue;
+        }
         if (isCatalogOnlyPlan) {
           skippedCount += 1;
           nextSources.push(provider);
@@ -1431,6 +1534,17 @@ export function CodexMultiRouterWizard({
     for (const provider of draftSources) {
       const config = getWizardModelFetchConfig(provider);
       const models = getWizardConnectivityProbeModels(provider);
+      if (isWizardCodexOAuthSource(provider)) {
+        results.push(
+          skippedWizardConnectivityResult(
+            provider,
+            hasCodexOauthAccount
+              ? "官方 Codex OAuth 使用 ChatGPT 托管 token，不走普通 API Key；跳过 Chat / Responses 双协议探测，启用后到状态页用真实 Codex 请求验证"
+              : "官方 Codex OAuth 尚未登录 ChatGPT，跳过普通 API Key 探测；请先在配置步骤完成 OAuth 后再验证官方路由",
+          ),
+        );
+        continue;
+      }
       if (!config || !config.apiKey) {
         results.push(
           skippedWizardConnectivityResult(
@@ -1872,6 +1986,14 @@ export function CodexMultiRouterWizard({
 
             {currentStep.key === "providerConfig" && (
               <div className="space-y-3">
+                {hasCodexOAuthSources && (
+                  <div className="rounded-lg border border-blue-500/30 bg-blue-500/10 p-3 text-sm leading-6 text-blue-950 dark:text-blue-100">
+                    官方 Codex / OpenAI Official 源必须先完成 ChatGPT OAuth
+                    登录。它不需要 API Key，也不会调用普通
+                    /models；向导会使用内置官方模型目录，
+                    登录状态决定启用后能否真实转发官方 GPT/O 请求。
+                  </div>
+                )}
                 {configIssues.length > 0 && (
                   <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-900 dark:text-amber-200">
                     {configIssues.length} 个 provider
@@ -1881,7 +2003,11 @@ export function CodexMultiRouterWizard({
                 )}
                 <div className="max-h-[min(46vh,32rem)] space-y-3 overflow-y-auto pr-2">
                   {draftSources.map((provider) => {
-                    const status = providerConfigStatus(provider);
+                    const status = providerConfigStatus(
+                      provider,
+                      codexOAuthStatus,
+                    );
+                    const isCodexOAuth = isWizardCodexOAuthSource(provider);
                     return (
                       <div
                         key={provider.id}
@@ -1899,35 +2025,46 @@ export function CodexMultiRouterWizard({
                         <div className="mt-2 text-xs text-muted-foreground">
                           API 格式：{providerApiFormatSummary(provider)}
                         </div>
-                        <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                          <div className="text-xs text-muted-foreground">
-                            协议选择：{providerApiFormatSourceLabel(provider)}
+                        {isCodexOAuth ? (
+                          <div className="mt-4 rounded-lg border bg-muted/30 p-3">
+                            <div className="mb-3 text-xs leading-5 text-muted-foreground">
+                              此 provider 将固定使用 CCSwitchMulti 托管的 Codex
+                              OAuth。登录后可继续使用默认账号；需要指定账号时，请先在
+                              Provider 配置页绑定账号。
+                            </div>
+                            <CodexOAuthSection />
                           </div>
-                          <Select
-                            value={selectableApiFormat(provider)}
-                            onValueChange={(value) =>
-                              handleProviderApiFormatChange(
-                                provider.id,
-                                value as CodexApiFormat,
-                              )
-                            }
-                          >
-                            <SelectTrigger
-                              aria-label={`${provider.name} API 格式`}
-                              className="w-full sm:w-[220px]"
+                        ) : (
+                          <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                            <div className="text-xs text-muted-foreground">
+                              协议选择：{providerApiFormatSourceLabel(provider)}
+                            </div>
+                            <Select
+                              value={selectableApiFormat(provider)}
+                              onValueChange={(value) =>
+                                handleProviderApiFormatChange(
+                                  provider.id,
+                                  value as CodexApiFormat,
+                                )
+                              }
                             >
-                              <SelectValue />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="openai_responses">
-                                Responses API
-                              </SelectItem>
-                              <SelectItem value="openai_chat">
-                                Chat Completions
-                              </SelectItem>
-                            </SelectContent>
-                          </Select>
-                        </div>
+                              <SelectTrigger
+                                aria-label={`${provider.name} API 格式`}
+                                className="w-full sm:w-[220px]"
+                              >
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="openai_responses">
+                                  Responses API
+                                </SelectItem>
+                                <SelectItem value="openai_chat">
+                                  Chat Completions
+                                </SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+                        )}
                       </div>
                     );
                   })}

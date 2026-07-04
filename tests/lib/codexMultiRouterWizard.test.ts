@@ -12,6 +12,7 @@ import {
   inferWizardApiFormat,
   inferWizardCacheConfig,
   isWizardCatalogOnlyModelSource,
+  isWizardCodexOAuthSource,
   mergeFetchedModelsIntoWizardProvider,
   resolveWizardModelNameCollisions,
 } from "@/lib/codexMultiRouterWizard";
@@ -488,6 +489,37 @@ describe("codexMultiRouterWizard helpers", () => {
         reason: "缺少 Base URL/API Key，且当前没有可用 modelCatalog。",
       },
     ]);
+  });
+
+  it("treats official Codex sources as managed OAuth instead of API-key model fetch sources", () => {
+    const official = provider({
+      id: "codex-official",
+      name: "OpenAI Official",
+      category: "official",
+      settingsConfig: {
+        base_url: "https://relay.example.com/v1",
+        auth: { OPENAI_API_KEY: "sk-polluted" },
+      },
+      meta: {
+        authBinding: {
+          source: "managed_codex_oauth",
+          authProvider: "codex_oauth",
+          accountId: "acct_123",
+        },
+      },
+    });
+
+    expect(isWizardCodexOAuthSource(official)).toBe(true);
+    expect(getWizardModelFetchConfig(official)).toBeNull();
+    expect(getWizardConfigIssues([official])).toEqual([]);
+
+    const [route] = buildWizardRoutesFromSources([official]);
+    expect(route.match.models).toContain("gpt-5.5");
+    expect(route.upstream.auth).toEqual({
+      source: "managed_codex_oauth",
+      authProvider: "codex_oauth",
+      accountId: "acct_123",
+    });
   });
 
   it("uses the inference API Key as AgentPlan model-fetch fallback when AK/SK is missing", () => {

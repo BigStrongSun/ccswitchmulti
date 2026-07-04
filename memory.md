@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-07-04 Codex MultiRouter Wizard OAuth Guidance
+
+- 用户指出 MultiRouter 设置向导少了关键步骤：没有引导用户配置官方 Codex OAuth。根因是向导按普通 `API Key + Base URL + /models` 范式处理所有模型源，虽然后端能把 official target 物化为 `codex_oauth`，但前端配置步骤只显示“已有模型目录/缺 Base URL”，没有展示 ChatGPT 登录入口。
+- 修复边界：`isWizardCodexOAuthSource()` 统一识别 `category=official`、`providerType=codex_oauth`、`authBinding/source=managed_codex_oauth`、`auth_mode=chatgpt`、ChatGPT backend base URL 和 OpenAI Official 名称。OAuth 源不参与普通 `/models` 获取，也不参与 API Key 的 Chat/Responses 双协议探测；向导使用官方内置 fallback catalog，并在 providerConfig 步骤嵌入 `CodexOAuthSection`。
+- 保存语义：向导生成 official/OAuth route 时显式写 `upstream.auth.source = managed_codex_oauth` 和 `authProvider = codex_oauth`，已有绑定账号则保留 `accountId`。这不是替代后端兜底，而是让保存后的 MultiRouter plan 自描述，便于工作台和日志排查。
+- 回归覆盖：`tests/lib/codexMultiRouterWizard.test.ts` 固定 official provider 即使被旧 `base_url/apiKey` 污染也不作为模型抓取源，且 route auth 写 managed OAuth；`tests/components/CodexMultiRouterWizard.test.tsx` 固定配置步骤必须展示 ChatGPT OAuth 引导和登录区，不再给 official provider 显示普通 API 格式下拉。
+
 ## 2026-07-04 Codex Local Routing Active Notice
 
 - App 顶层用 `useCodexLocalRoutingNotice(Boolean(isProxyRunning && takeoverStatus?.codex))` 监听 Codex 本地路由真实启用状态；触发条件是 CCSwitchMulti 本地代理正在运行且 Codex 接管已开启，而不是当前页面是否停留在 Codex。

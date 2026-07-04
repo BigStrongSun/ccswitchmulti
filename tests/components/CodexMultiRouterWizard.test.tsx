@@ -25,6 +25,20 @@ vi.mock("@/lib/api/model-fetch", () => ({
   probeCodexResponsesForConfig: vi.fn(),
 }));
 
+vi.mock("@/components/providers/forms/hooks/useCodexOauth", () => ({
+  useCodexOauth: vi.fn(() => ({
+    accounts: [],
+    hasAnyAccount: false,
+    isLoadingStatus: false,
+  })),
+}));
+
+vi.mock("@/components/providers/forms/CodexOAuthSection", () => ({
+  CodexOAuthSection: () => (
+    <div data-testid="wizard-codex-oauth-section">使用 ChatGPT 登录</div>
+  ),
+}));
+
 // 构造最小 Codex provider，避免 UI 测试依赖真实数据库返回结构。
 function provider(overrides: Partial<Provider> = {}): Provider {
   return {
@@ -120,6 +134,39 @@ describe("CodexMultiRouterWizard", () => {
       "true",
     );
     expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("guides official Codex sources to configure ChatGPT OAuth in provider config step", () => {
+    renderWithQueryClient(
+      <CodexMultiRouterWizard
+        open
+        providers={[
+          provider({
+            id: "codex-official",
+            name: "OpenAI Official",
+            category: "official",
+            settingsConfig: {},
+          }),
+        ]}
+        onOpenChange={vi.fn()}
+        onCreateProvider={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+        onEnablePlan={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+    fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+    fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+
+    expect(screen.getByText(/必须先完成 ChatGPT OAuth/)).toBeInTheDocument();
+    expect(screen.getByText("需要 ChatGPT OAuth")).toBeInTheDocument();
+    expect(
+      screen.getByTestId("wizard-codex-oauth-section"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("OpenAI Official API 格式"),
+    ).not.toBeInTheDocument();
   });
 
   it("does not reset to the intro step when parent rerenders with a new providers array", () => {
