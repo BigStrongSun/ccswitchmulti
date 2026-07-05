@@ -181,7 +181,7 @@ const STEPS: WizardStep[] = [
     key: "providerConfig",
     title: "配置核心参数",
     description:
-      "检查 API Key、Base URL、Responses / Chat Completions 以及是否需要本地路由映射。",
+      "检查 API Key、Base URL、Responses / Chat Completions、Codex 菜单映射和多模型路由。",
     icon: KeyRound,
   },
   {

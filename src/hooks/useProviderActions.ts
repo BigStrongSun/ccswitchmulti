@@ -192,7 +192,7 @@ export function useProviderActions(
           });
         } else if (isCodexRouterProvider) {
           proxyRequiredReason = t("notifications.proxyReasonCodexRouter", {
-            defaultValue: "使用 Codex 本地模型路由",
+            defaultValue: "使用 Codex 多模型路由",
           });
         } else if (
           provider.meta?.apiFormat === "openai_chat" &&

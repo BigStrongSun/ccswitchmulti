@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import type { ComponentProps } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ProviderForm } from "@/components/providers/forms/ProviderForm";
@@ -66,11 +67,15 @@ vi.mock("@/components/providers/forms/CodexFormFields", () => ({
     codexBaseUrl,
     catalogModels,
     takeoverEnabled,
+    onCatalogModelsChange,
   }: {
     codexApiKey: string;
     codexBaseUrl: string;
-    catalogModels?: Array<{ model: string }>;
+    catalogModels?: Array<{ model: string; contextWindow?: number | string }>;
     takeoverEnabled: boolean;
+    onCatalogModelsChange?: (
+      models: Array<{ model: string; contextWindow?: number | string }>,
+    ) => void;
   }) => (
     <section aria-label="codex-provider-details">
       <div data-testid="codex-api-key">{codexApiKey}</div>
@@ -81,12 +86,22 @@ vi.mock("@/components/providers/forms/CodexFormFields", () => ({
       <div data-testid="codex-catalog">
         {(catalogModels ?? []).map((model) => model.model).join(",")}
       </div>
+      <button
+        type="button"
+        onClick={() =>
+          onCatalogModelsChange?.([{ model: "gpt-5.5", contextWindow: 272000 }])
+        }
+      >
+        mock-set-catalog
+      </button>
     </section>
   ),
   buildSplitCodexProviderSuggestionForFetchedModels: vi.fn(),
 }));
 
-function renderProviderForm() {
+function renderProviderForm(
+  props: Partial<ComponentProps<typeof ProviderForm>> = {},
+) {
   const queryClient = new QueryClient({
     defaultOptions: {
       queries: { retry: false },
@@ -102,6 +117,7 @@ function renderProviderForm() {
         onSubmit={vi.fn()}
         onCancel={vi.fn()}
         showButtons={false}
+        {...props}
       />
     </QueryClientProvider>,
   );
@@ -162,5 +178,43 @@ describe("ProviderForm Codex preset selection", () => {
         block: "start",
       });
     });
+  });
+
+  it("persists catalog metadata without enabling Codex menu mapping", async () => {
+    const onSubmit = vi.fn();
+    renderProviderForm({
+      showButtons: true,
+      submitLabel: "保存",
+      onSubmit,
+      initialData: {
+        name: "Native Responses",
+        category: "custom",
+        settingsConfig: {
+          auth: { OPENAI_API_KEY: "sk-test" },
+          config:
+            'model_provider = "native"\nmodel = "gpt-5.5"\n[model_providers.native]\nbase_url = "https://api.example.com/v1"\nwire_api = "responses"\n',
+        },
+        meta: {
+          apiFormat: "openai_responses",
+          codexLocalModelMapping: false,
+        },
+      },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "mock-set-catalog" }));
+    await waitFor(() => {
+      expect(screen.getByTestId("codex-catalog")).toHaveTextContent("gpt-5.5");
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalled();
+    });
+    const payload = onSubmit.mock.calls[0][0];
+    const savedSettings = JSON.parse(payload.settingsConfig);
+    expect(payload.meta.codexLocalModelMapping).toBe(false);
+    expect(savedSettings.modelCatalog.models).toEqual([
+      { model: "gpt-5.5", contextWindow: 272000 },
+    ]);
   });
 });

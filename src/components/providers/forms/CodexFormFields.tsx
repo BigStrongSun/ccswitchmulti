@@ -258,10 +258,7 @@ interface CodexFormFieldsProps {
   autoSelect: boolean;
   onAutoSelectChange: (checked: boolean) => void;
 
-  // Local routing / takeover
-  // takeoverEnabled gates model mapping + reasoning visibility; it is decoupled
-  // from the wire format so a native Responses provider can use model mapping
-  // without Chat Completions conversion.
+  // Codex 菜单映射开关；仅控制是否把目录投射到 /model 菜单，不再控制目录/上下文的编辑和保存。
   takeoverEnabled: boolean;
   onTakeoverEnabledChange: (enabled: boolean) => void;
 
@@ -580,8 +577,8 @@ export function CodexFormFields({
   const [editingRouteIndex, setEditingRouteIndex] = useState<number | null>(
     null,
   );
-  // takeoverEnabled 控制模型映射/思考能力的显示；isChatFormat 仅在选了
-  // Chat Completions 上游格式时为真（思考能力是 Chat 专属）。
+  // takeoverEnabled 现在只表示“Codex 菜单映射”开关；模型目录和上下文元数据可独立编辑。
+  // isChatFormat 仅在选了 Chat Completions 上游格式时为真（思考能力是 Chat 专属）。
   const isChatFormat = apiFormat === "openai_chat";
   const canEditCatalog = Boolean(onCatalogModelsChange);
   const canEditRouting = Boolean(onCodexRoutingChange);
@@ -590,13 +587,17 @@ export function CodexFormFields({
     codexChatReasoning.supportsThinking === true ||
     codexChatReasoning.supportsEffort === true;
   const supportsEffort = codexChatReasoning.supportsEffort === true;
-  // takeoverEnabled 取代了旧的 needsLocalRouting：上游格式已与路由解耦。
-  // takeoverEnabled 为真说明预设/用户启用了本地路由；请求头/请求体覆盖也算高级值。
+  // 高级区只要存在目录元数据、映射、路由或本地代理覆盖就展开，避免编辑旧 provider 时看不到关键状态。
   const hasRequestOverrides = Boolean(
     localProxyHeadersOverride.trim() || localProxyBodyOverride.trim(),
   );
   const hasAnyAdvancedValue =
-    !!customUserAgent || hasRequestOverrides || takeoverEnabled;
+    !!customUserAgent ||
+    hasRequestOverrides ||
+    takeoverEnabled ||
+    catalogModels.length > 0 ||
+    codexRouting.enabled ||
+    (codexRouting.routes?.length ?? 0) > 0;
   const [advancedExpanded, setAdvancedExpanded] = useState(hasAnyAdvancedValue);
 
   // 预设/编辑加载填充高级值后自动展开（仅从折叠→展开，不会自动折叠）
@@ -633,7 +634,7 @@ export function CodexFormFields({
     setAdvancedExpanded(true);
     setProtocolProbeTone("warning");
     setProtocolProbeSummary(
-      "请先在上方“模型列表”点击“获取模型列表”，或手动添加模型后再测试。",
+      "请先在上方“模型目录与上下文”点击“获取模型列表”，或手动添加模型后再测试。",
     );
     setShouldHighlightFetchModels(true);
     window.setTimeout(() => {
@@ -1211,12 +1212,12 @@ export function CodexFormFields({
     <Button
       ref={fetchModelsButtonRef}
       type="button"
-      variant="outline"
+      variant="default"
       size="sm"
       onClick={handleFetchModels}
       disabled={isFetchingModels}
       className={cn(
-        "h-7 gap-1",
+        "h-8 gap-1 border border-blue-700 bg-blue-600 px-3 text-white shadow-sm hover:bg-blue-700 dark:border-blue-400 dark:bg-blue-500 dark:hover:bg-blue-600",
         shouldHighlightFetchModels &&
           "border-blue-500 bg-blue-50 text-blue-700 shadow-[0_0_0_3px_rgba(59,130,246,0.18)] dark:bg-blue-950/40 dark:text-blue-200",
       )}
@@ -1260,7 +1261,7 @@ export function CodexFormFields({
                 Completions。它会对当前模型目录里的模型发送真实请求，可能产生少量额度或流量消耗，也可能触发限流。
               </span>
               <span className="block">
-                如果还没有模型目录，请先到上方“模型列表”点击“获取模型列表”，或手动添加至少一个模型。
+                如果还没有模型目录，请先到上方“模型目录与上下文”点击“获取模型列表”，或手动添加至少一个模型。
               </span>
               <span className="block">
                 每个模型会分别测试对应的 Responses 和 Chat Completions
@@ -1338,7 +1339,7 @@ export function CodexFormFields({
               <p className="text-xs leading-relaxed text-muted-foreground">
                 {t("codexConfig.localModelRoutingHint", {
                   defaultValue:
-                    "Codex 仍然连接一个本地 CC Switch 代理端点，但可按请求里的 body.model 分流到不同上游模型。",
+                    "只在一个 provider 内配置多条 route 时使用：Codex 仍进入 CC Switch，本地再按 body.model 分流到不同上游；它不同于下方的 Codex 菜单映射。",
                 })}
               </p>
             </div>
@@ -1852,7 +1853,7 @@ export function CodexFormFields({
         </DialogContent>
       </Dialog>
 
-      {/* 高级选项 —— 本地路由映射/模型映射/思考能力/自定义 UA；预设供应商通常无需展开 */}
+      {/* 高级选项 —— 模型目录、Codex 菜单映射、协议检测、思考能力、自定义 UA；预设供应商通常无需展开 */}
       {category !== "official" && (
         <Collapsible
           open={advancedExpanded}
@@ -1880,7 +1881,7 @@ export function CodexFormFields({
             <p className="mt-1 ml-1 text-xs text-muted-foreground">
               {t("codexConfig.advancedSectionHint", {
                 defaultValue:
-                  "包含模型映射、思考能力与自定义 User-Agent。供应商使用 Chat Completions 协议或非 GPT 模型时，请在上方开启本地路由映射。",
+                  "包含模型目录、协议检测、Codex 菜单映射、思考能力与自定义 User-Agent。",
               })}
             </p>
           )}
@@ -1894,13 +1895,13 @@ export function CodexFormFields({
                   <div className="space-y-1">
                     <FormLabel>
                       {t("codexConfig.modelListPrepareTitle", {
-                        defaultValue: "模型列表",
+                        defaultValue: "模型目录与上下文",
                       })}
                     </FormLabel>
                     <p className="text-xs leading-relaxed text-muted-foreground">
                       {t("codexConfig.modelListPrepareHint", {
                         defaultValue:
-                          "先读取 /models 或手动补充模型，再测试 Chat / Responses；这个步骤不依赖“需要本地路由映射”开关。",
+                          "先获取或手动添加模型，再维护上下文窗口和测试 Chat / Responses；此步骤与“在 Codex /model 菜单中显示”开关无关。",
                       })}
                     </p>
                   </div>
@@ -1916,7 +1917,7 @@ export function CodexFormFields({
               </div>
             )}
 
-            {/* 上游格式 + 本地路由映射 —— 两个平级、相互独立的控件。
+            {/* 上游格式 + Codex 菜单映射 —— 两个平级、相互独立的控件。
                 格式不依赖路由：Responses 原生供应商无需开启路由即可直连；
                 沿用 shouldShowSpeedTest 门控，cloud_provider 保持不可切换。 */}
             {shouldShowSpeedTest && (
@@ -1961,7 +1962,7 @@ export function CodexFormFields({
                   </p>
                   <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-xs leading-relaxed text-amber-900 dark:text-amber-200">
                     不确定该选哪个时，可以测试 Chat /
-                    Responses。测试前需要先在“模型映射”里获取模型列表或手动添加模型；测试会发送真实模型请求，
+                    Responses。测试前需要先在“模型目录与上下文”里获取模型列表或手动添加模型；测试会发送真实模型请求，
                     输出上限为
                     1024，可能产生少量额度或流量消耗。通过只代表基础协议入口可用，不等于完整
                     Codex 功能验证。
@@ -1969,9 +1970,9 @@ export function CodexFormFields({
                   <div className="flex flex-wrap items-center gap-2">
                     <Button
                       type="button"
-                      variant="outline"
+                      variant="default"
                       size="sm"
-                      className="gap-1"
+                      className="gap-1 border border-amber-700 bg-amber-500 text-white shadow-sm hover:bg-amber-600 dark:border-amber-300 dark:bg-amber-500 dark:hover:bg-amber-600"
                       disabled={isProbingProtocol}
                       onClick={() => {
                         setProtocolProbeTone("muted");
@@ -2010,23 +2011,23 @@ export function CodexFormFields({
                   </div>
                 </div>
 
-                {/* 需要本地路由映射 —— 纯模型映射门控，与上游格式无关 */}
-                <div className="flex items-center justify-between gap-4 border-t border-border-default pt-3">
+                {/* Codex 菜单映射 —— 只决定是否把模型目录投射到 /model 菜单，与模型目录保存、协议选择无关。 */}
+                <div className="flex items-center justify-between gap-4 rounded-md border border-blue-200 bg-blue-50/60 p-3 dark:border-blue-900/60 dark:bg-blue-950/20">
                   <div className="space-y-1">
                     <FormLabel>
                       {t("codexConfig.localRoutingToggle", {
-                        defaultValue: "需要本地路由映射",
+                        defaultValue: "在 Codex /model 菜单中显示",
                       })}
                     </FormLabel>
                     <p className="text-xs leading-relaxed text-muted-foreground">
                       {takeoverEnabled
                         ? t("codexConfig.localRoutingOnHint", {
                             defaultValue:
-                              "打开后可在下方配置模型映射：让 Codex 的 /model 菜单显示自定义模型名，并把请求映射到真实上游模型。",
+                              "开启后会把“模型目录与上下文”投射到 Codex /model 菜单，并让可见模型名映射到真实上游模型。",
                           })
                         : t("codexConfig.localRoutingOffHint", {
                             defaultValue:
-                              "供应商模型名无需改写、也无需在 /model 菜单展示自定义名称时，可保持关闭；需要模型映射时打开。",
+                              "关闭时仍会保存 /models 列表和上下文窗口，但不改写 Codex /model 菜单；适合 Responses 原生、直接使用真实模型名的 provider。",
                           })}
                     </p>
                   </div>
@@ -2034,7 +2035,7 @@ export function CodexFormFields({
                     checked={takeoverEnabled}
                     onCheckedChange={onTakeoverEnabledChange}
                     aria-label={t("codexConfig.localRoutingToggle", {
-                      defaultValue: "需要本地路由映射",
+                      defaultValue: "在 Codex /model 菜单中显示",
                     })}
                   />
                 </div>
@@ -2133,15 +2134,14 @@ export function CodexFormFields({
               </div>
             </div>
 
-            {/* 模型映射 —— 仅在本地路由开启 + 可编辑时显示（与上游格式解耦，
-                Responses 原生供应商同样可配置）；上方恒有 UA 字段，分隔线无需条件 */}
-            {takeoverEnabled && canEditCatalog && (
+            {/* 模型目录明细 —— 无论是否投射到 Codex /model 菜单，都必须允许编辑上下文窗口和保留列表。 */}
+            {canEditCatalog && (
               <div className="space-y-4 border-t border-border-default pt-3">
                 <div className="space-y-1">
                   <div className="flex items-center justify-between gap-3">
                     <FormLabel>
                       {t("codexConfig.modelMappingTitle", {
-                        defaultValue: "模型映射",
+                        defaultValue: "模型目录明细",
                       })}
                     </FormLabel>
                     {renderCatalogActionButtons(
@@ -2154,7 +2154,7 @@ export function CodexFormFields({
                   <p className="text-xs leading-relaxed text-muted-foreground">
                     {t("codexConfig.modelMappingHint", {
                       defaultValue:
-                        "选择模型角色后，CC Switch 会自动生成 Codex 兼容路由；菜单显示名可以填 DeepSeek、Kimi 等品牌模型，实际请求模型按右侧填写内容发送。",
+                        "这里保存候选模型、真实上游模型和上下文窗口。开启“在 Codex /model 菜单中显示”后，菜单显示名和上游模型名才会参与 Codex 菜单映射；关闭时仍会作为目录元数据保存。",
                     })}
                   </p>
                 </div>

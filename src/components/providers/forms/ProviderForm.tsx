@@ -171,7 +171,7 @@ const normalizeClaudeApiFormat = (
     : undefined;
 };
 
-// 从已保存的 settingsConfig 推断 Codex 模型映射条目数（用于决定本地路由初始开关）。
+// 从已保存的 settingsConfig 推断 Codex 模型目录条目数；旧版没有独立映射开关时用它做兼容推断。
 const codexCatalogCountFromSettings = (settingsConfig: unknown): number => {
   if (settingsConfig && typeof settingsConfig === "object") {
     const models = (settingsConfig as { modelCatalog?: { models?: unknown } })
@@ -179,6 +179,16 @@ const codexCatalogCountFromSettings = (settingsConfig: unknown): number => {
     return Array.isArray(models) ? models.length : 0;
   }
   return 0;
+};
+
+// 读取 Codex 菜单映射开关。新配置优先读取 meta；旧配置没有 meta 时继续按 modelCatalog 存在与否启用。
+const codexLocalModelMappingFromInitialData = (
+  initialData: ProviderFormProps["initialData"] | undefined,
+): boolean => {
+  if (typeof initialData?.meta?.codexLocalModelMapping === "boolean") {
+    return initialData.meta.codexLocalModelMapping;
+  }
+  return codexCatalogCountFromSettings(initialData?.settingsConfig) > 0;
 };
 
 export const normalizeCodexCatalogModelsForSave = (
@@ -665,13 +675,19 @@ function ProviderFormFull({
   const [localCodexApiFormat, setLocalCodexApiFormat] =
     useState<CodexApiFormat>(initialCodexApiFormat);
 
-  // 本地路由（接管）开关 —— 纯模型映射门控，与上游格式完全独立。
-  // 没有独立持久化字段，初值仅按「是否已配置模型映射」推断（有 catalog 即视为
-  // 接管已开）。只在 useState 初始化与预设重置点设置，跟 localCodexApiFormat
-  // 对称，避免漂移。
+  // Codex 菜单映射开关 —— 只控制 modelCatalog 是否投射到 /model 菜单和本地映射。
+  // modelCatalog 现在也承担目录/上下文元数据职责，保存和获取模型列表不再依赖此开关。
   const [codexTakeoverEnabled, setCodexTakeoverEnabled] = useState<boolean>(
-    () => codexCatalogCountFromSettings(initialData?.settingsConfig) > 0,
+    () => codexLocalModelMappingFromInitialData(initialData),
   );
+
+  useEffect(() => {
+    if (appId !== "codex") {
+      setCodexTakeoverEnabled(false);
+      return;
+    }
+    setCodexTakeoverEnabled(codexLocalModelMappingFromInitialData(initialData));
+  }, [appId, initialData]);
 
   const { configError: codexConfigError, debouncedValidate } =
     useCodexTomlValidation();
@@ -1354,9 +1370,7 @@ function ProviderFormFull({
           shouldPersistCodexLocalConfig && (codexConfig ?? "").trim()
             ? setCodexWireApi(codexConfig ?? "", "responses")
             : (codexConfig ?? "");
-        const shouldPersistCodexCatalog =
-          shouldPersistCodexLocalConfig &&
-          (codexTakeoverEnabled || hasCodexRouting);
+        const shouldPersistCodexCatalog = shouldPersistCodexLocalConfig;
         const normalizedCatalogModels = shouldPersistCodexCatalog
           ? normalizeCodexCatalogModelsForSave(codexCatalogModels)
           : [];
@@ -1576,6 +1590,10 @@ function ProviderFormFull({
         codexTakeoverEnabled &&
         localCodexApiFormat === "openai_chat"
           ? normalizeCodexChatReasoningForSave(codexChatReasoning)
+          : undefined,
+      codexLocalModelMapping:
+        appId === "codex" && category !== "official"
+          ? codexTakeoverEnabled
           : undefined,
       customUserAgent:
         (appId === "claude" || appId === "codex") && category !== "official"

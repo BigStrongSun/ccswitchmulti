@@ -235,6 +235,8 @@ export interface ProviderMeta {
   codexFastMode?: boolean;
   // Codex Responses -> Chat Completions reasoning capability metadata
   codexChatReasoning?: CodexChatReasoning;
+  // Codex 单供应商模型目录是否投射为 /model 菜单映射；关闭时 modelCatalog 只作为目录/上下文元数据保存。
+  codexLocalModelMapping?: boolean;
   // Custom User-Agent for local proxy routing. Only applied by the local proxy.
   customUserAgent?: string;
   // Local proxy request overrides. Only applied by the local proxy after route transforms.

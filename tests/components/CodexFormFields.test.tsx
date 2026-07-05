@@ -625,7 +625,7 @@ describe("CodexFormFields local model routing", () => {
     expect(screen.getByText("确认测试 Chat / Responses")).toBeInTheDocument();
   });
 
-  it("keeps fetch models visible above protocol probing when local routing is off", () => {
+  it("keeps catalog fetch and edit controls available when Codex menu mapping is off", async () => {
     renderCatalogHarness([], {
       shouldShowSpeedTest: true,
       takeoverEnabled: false,
@@ -645,7 +645,41 @@ describe("CodexFormFields local model routing", () => {
     expect(fetchButton.compareDocumentPosition(probeButton)).toBe(
       Node.DOCUMENT_POSITION_FOLLOWING,
     );
-    expect(screen.getByText("需要本地路由映射")).toBeInTheDocument();
+    expect(screen.getByText("在 Codex /model 菜单中显示")).toBeInTheDocument();
+    expect(screen.getByText("模型目录明细")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "添加模型" }));
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("候选模型名")).toBeInTheDocument();
+      expect(screen.getByLabelText("上下文窗口")).toBeInTheDocument();
+    });
+  });
+
+  it("fetches and saves catalog context while Codex menu mapping is off", async () => {
+    vi.mocked(fetchModelsForConfig).mockResolvedValueOnce([
+      { id: "gpt-5.5", ownedBy: null, contextWindow: 272000 },
+    ]);
+    const { latestCatalog } = renderCatalogHarness([], {
+      shouldShowSpeedTest: true,
+      takeoverEnabled: false,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "高级选项" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "providerForm.fetchModels" }),
+    );
+
+    await waitFor(() => {
+      expect(latestCatalog()).toEqual([
+        {
+          model: "gpt-5.5",
+          displayName: "gpt-5.5",
+          upstreamModel: "gpt-5.5",
+          contextWindow: "272000",
+        },
+      ]);
+    });
   });
 
   it("points users to fetch models when protocol probing has no catalog", async () => {
@@ -657,7 +691,7 @@ describe("CodexFormFields local model routing", () => {
     fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
 
     expect(await screen.findByRole("status")).toHaveTextContent(
-      "请先在上方“模型列表”点击“获取模型列表”，或手动添加模型后再测试。",
+      "请先在上方“模型目录与上下文”点击“获取模型列表”，或手动添加模型后再测试。",
     );
     const fetchButton = screen.getByRole("button", {
       name: "providerForm.fetchModels",

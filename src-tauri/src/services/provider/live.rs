@@ -560,6 +560,25 @@ pub(crate) fn write_live_with_common_config(
     write_live_snapshot(app_type, &effective_provider)
 }
 
+/// 为 Codex live 写入构造配置：保留 DB 中的 `modelCatalog` 元数据，但只有菜单映射开启时才投射到 live。
+fn codex_settings_for_live_projection(provider: &Provider) -> Value {
+    let should_project = provider
+        .meta
+        .as_ref()
+        .map(|meta| meta.codex_model_catalog_projection_enabled(&provider.settings_config))
+        .unwrap_or_else(|| provider.settings_config.get("modelCatalog").is_some());
+
+    if should_project {
+        return provider.settings_config.clone();
+    }
+
+    let mut settings = provider.settings_config.clone();
+    if let Some(obj) = settings.as_object_mut() {
+        obj.remove("modelCatalog");
+    }
+    settings
+}
+
 /// 只刷新 Codex provider 的 live `config.toml`，不覆盖当前 `auth.json`。
 ///
 /// 接管态切回 official 时，`disable_takeover` 已经先把接管前的 live 登录态恢复到
@@ -572,14 +591,14 @@ pub(crate) fn write_codex_config_only_with_common_config(
     let mut effective_provider = provider.clone();
     effective_provider.settings_config =
         build_effective_settings_with_common_config(db, &AppType::Codex, provider)?;
-    let settings = effective_provider
-        .settings_config
+    let settings_for_live = codex_settings_for_live_projection(&effective_provider);
+    let settings = settings_for_live
         .as_object()
         .ok_or_else(|| AppError::Config("Codex 供应商配置必须是 JSON 对象".to_string()))?;
     let config_text = settings.get("config").and_then(|value| value.as_str());
 
     crate::codex_config::write_codex_provider_config_only_with_catalog(
-        &effective_provider.settings_config,
+        &settings_for_live,
         effective_provider.category.as_deref(),
         config_text,
     )
@@ -827,8 +846,8 @@ pub(crate) fn write_live_snapshot(app_type: &AppType, provider: &Provider) -> Re
             ));
         }
         AppType::Codex => {
-            let obj = provider
-                .settings_config
+            let settings_for_live = codex_settings_for_live_projection(provider);
+            let obj = settings_for_live
                 .as_object()
                 .ok_or_else(|| AppError::Config("Codex 供应商配置必须是 JSON 对象".to_string()))?;
             let auth = obj
@@ -837,7 +856,7 @@ pub(crate) fn write_live_snapshot(app_type: &AppType, provider: &Provider) -> Re
             let config_str = obj.get("config").and_then(|v| v.as_str());
 
             crate::codex_config::write_codex_provider_live_with_catalog(
-                &provider.settings_config,
+                &settings_for_live,
                 provider.category.as_deref(),
                 auth,
                 config_str,
@@ -1925,6 +1944,61 @@ web_search = true
         assert!(!applied_config.contains("experimental_bearer_token"));
         assert!(!applied_config.contains("127.0.0.1:15721"));
         assert!(!applied_config.contains("[model_providers.router]"));
+    }
+
+    #[test]
+    fn codex_live_projection_removes_catalog_when_menu_mapping_is_disabled() {
+        let mut provider = Provider::with_id(
+            "codex-native".to_string(),
+            "Native Responses".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "sk-test" },
+                "config": "model_provider = \"native\"\n",
+                "modelCatalog": {
+                    "models": [{ "model": "gpt-5.5", "contextWindow": 272000 }]
+                }
+            }),
+            None,
+        );
+        provider.meta = Some(crate::provider::ProviderMeta {
+            codex_local_model_mapping: Some(false),
+            ..Default::default()
+        });
+
+        let projected = codex_settings_for_live_projection(&provider);
+
+        assert!(
+            projected.get("modelCatalog").is_none(),
+            "live projection must hide catalog when the Codex menu mapping flag is off"
+        );
+        assert!(
+            provider.settings_config.get("modelCatalog").is_some(),
+            "DB-side provider settings keep catalog metadata for /models and context windows"
+        );
+    }
+
+    #[test]
+    fn codex_live_projection_keeps_legacy_catalog_without_new_flag() {
+        let mut provider = Provider::with_id(
+            "codex-legacy".to_string(),
+            "Legacy Mapping".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "sk-test" },
+                "config": "model_provider = \"legacy\"\n",
+                "modelCatalog": {
+                    "models": [{ "model": "deepseek-v4-flash" }]
+                }
+            }),
+            None,
+        );
+        provider.meta = Some(crate::provider::ProviderMeta::default());
+
+        let projected = codex_settings_for_live_projection(&provider);
+
+        assert!(
+            projected.get("modelCatalog").is_some(),
+            "old providers without codexLocalModelMapping must keep the previous catalog projection behavior"
+        );
     }
 
     #[test]

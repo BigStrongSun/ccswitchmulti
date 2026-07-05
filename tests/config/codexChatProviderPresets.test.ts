@@ -232,7 +232,7 @@ describe("Codex Chat provider presets", () => {
 
       expect(preset, `${name} preset`).toBeDefined();
       expect(preset?.apiFormat).toBe("openai_responses");
-      // 原生 Responses 预设必须不带 modelCatalog，否则“本地路由映射”开关会默认勾选
+      // 原生 Responses 预设默认无需投射到 Codex /model 菜单，避免新建时误导用户必须映射。
       expect(preset?.modelCatalog ?? []).toHaveLength(0);
       expect(preset?.codexChatReasoning).toBeUndefined();
     }

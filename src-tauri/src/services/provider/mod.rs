@@ -2751,7 +2751,7 @@ impl ProviderService {
             && Self::codex_provider_requires_local_proxy(_provider)
         {
             log::info!(
-                "Codex provider '{}' 需要本地路由映射，自动启用 Codex 接管并通过本地代理转换",
+                "Codex provider '{}' 需要 Chat 转换或多模型路由，自动启用 Codex 接管并通过本地代理处理",
                 id
             );
             block_on_tauri_runtime(

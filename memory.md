@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-07-05 Codex Provider Catalog vs Menu Mapping Boundary
+
+- 用户反馈新版 Codex provider 配置里，只有打开“需要本地路由映射”才展开模型列表；但 Responses 原生 provider 也应该能获取 `/models`、保存模型目录和上下文窗口。根因是前端把 `takeoverEnabled` 同时当成“目录/上下文编辑开关”和“Codex /model 菜单映射开关”，后端旧语义又把 `modelCatalog` 的存在直接解释成要写 `model_catalog_json`。
+- 新不变量：`settingsConfig.modelCatalog` 是 cc-switch 的模型目录、上下文窗口、MultiRouter/子 Agent 候选元数据 SSOT；`meta.codexLocalModelMapping` 只控制单 provider 是否把该目录投射到 Codex `/model` 菜单和本地模型名映射。关闭菜单映射时仍要保存 catalog；开启 MultiRouter routes 时仍强制投射聚合 catalog。
+- UI 文案边界：把“需要本地路由映射”改成“在 Codex /model 菜单中显示”，把顶部“本地模型路由”改成“Codex 多模型路由”，明确前者是菜单显示/单 provider 模型名映射，后者是一个 provider 内按 `body.model` 分流到多上游。`获取模型列表` 和 `测试 Chat / Responses` 是配置主操作，不能被菜单映射开关隐藏。
+- 兼容边界：旧 provider 没有 `codexLocalModelMapping` 字段但已有 `modelCatalog` 时继续沿用旧行为投射，避免老用户升级后 `/model` 菜单消失；新 provider 显式保存 `false` 后，live 写入前会移除投射用的 `modelCatalog`，但 DB 里的目录元数据保持不变。
+
 ## 2026-07-05 MultiRouter Wizard Nested Provider Dialog Layering
 
 - 用户反馈 MultiRouter 配置向导里保存/新增 provider 时弹窗像没到最前或卡死。根因不是 provider 保存 API 卡住，而是向导内再打开新增 provider 后，新增面板内部的二级弹层仍按默认层级 portal 到 `document.body`：`CodexFormFields` 的混合协议拆分/route 编辑确认、`UniversalProviderFormModal`、`ConfirmDialog` 等可能被 `FullScreenPanel z-[140]` 或向导壳遮住。
