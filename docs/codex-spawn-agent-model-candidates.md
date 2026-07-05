@@ -1,6 +1,6 @@
 # Codex spawn_agent model candidates
 
-Tracking issue: https://github.com/BigStrongSun/cc-switch/issues/1
+Tracking issue: https://github.com/BigStrongSun/ccswitchmulti/issues/1
 
 ## Root cause
 

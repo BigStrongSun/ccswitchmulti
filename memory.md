@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-07-06 GitHub Discoverability Low-Risk Optimization
+
+- 在不改变 fork network 的前提下，已把 `BigStrongSun/ccswitchmulti` 的 GitHub description 改成同时包含 `CCSwitchMulti`、`Codex`、`OpenAI-compatible`、`DeepSeek`、`Qwen`、`CC Switch` 等中英文关键词；homepage 保持 `https://ccswitch.io`。
+- 已补齐仓库 topics：`ccswitchmulti`、`cc-switch`、`codex`、`codex-multirouter`、`multi-model-router`、`openai`、`openai-compatible`、`deepseek`、`qwen`、`local-llm`、`desktop-app`、`tauri`、`provider-management`、`local-proxy`、`ai-tools`。
+- README 顶部 version/download/release badge、分支说明和使用注意里的旧 `BigStrongSun/cc-switch` 链接已改为 `BigStrongSun/ccswitchmulti`；`docs/codex-spawn-agent-model-candidates.md` 的 tracking issue 也改到当前 slug。`rg` 验证目标文件中旧 slug 不再出现。
+- 这些优化有助于外部搜索、GitHub topic 浏览和用户识别当前仓库，但不会改变 GitHub repository/code search 默认隐藏 fork 的规则；默认搜索可见性仍需要脱离 fork network 或要求用户加 `fork:true`。
+
 ## 2026-07-06 GitHub Repository Search Fork Visibility
 
 - `BigStrongSun/ccswitchmulti` 直链可访问且 GitHub API 显示 `private=false`、`visibility=public`、`archived=false`、`disabled=false`，默认分支是 `main`，父仓库是 `farion1231/cc-switch`。因此“搜不到”不是私有、归档、禁用或远端地址错误。
