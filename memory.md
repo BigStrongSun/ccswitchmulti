@@ -1,5 +1,14 @@
 # CC Switch Repository Memory
 
+## 2026-07-06 GitHub Repository Search Fork Visibility
+
+- `BigStrongSun/ccswitchmulti` 直链可访问且 GitHub API 显示 `private=false`、`visibility=public`、`archived=false`、`disabled=false`，默认分支是 `main`，父仓库是 `farion1231/cc-switch`。因此“搜不到”不是私有、归档、禁用或远端地址错误。
+- 根因边界是 GitHub 普通 repository search 默认不显示 fork。实测 `gh api 'search/repositories?q=ccswitchmulti&per_page=10'` 和 `q=ccswitchmulti user:BigStrongSun` 都返回 `total_count=0`；加 `fork:true` 或 `fork:only` 后返回 6 个 fork，第一项就是 `BigStrongSun/ccswitchmulti`。
+- 代码搜索同样受 fork 过滤影响：`gh api 'search/code?q=repo:BigStrongSun/ccswitchmulti CCSwitchMulti'` 返回 0；加 `fork:true` 后能搜到仓库内 56 个结果。GitHub connector 的安装仓库查询显示 `is_code_search_indexed=true`，说明不是代码索引缺失。
+- 外部搜索并非完全未收录：matrix-websearch 能搜到 GitHub 仓库页、releases 页和相关文章；GitHub 页面没有发现 `X-Robots-Tag` 或 `<meta name="robots">` 禁止索引信号。用户体感上的主要问题是 GitHub 站内默认搜索不带 fork 过滤。
+- 改善建议：如果希望普通用户不加 `fork:true` 也能在 GitHub repository search 更稳定地找到，需要考虑脱离 fork network 变成独立仓库；但 GitHub 官方 `Leave fork network` 要求 public、少于 1GB、且没有 child forks，当前 API 显示本仓库已有 6 个 forks，直接脱离可能被限制。手动重建独立仓库会丢失 issues、PR、stars、watchers、child forks 等仓库元数据，只保留 git commit metadata。
+- 低风险改善是给仓库加 topics、确保 description/README 使用 `ccswitchmulti`，并把 README 中旧 `BigStrongSun/cc-switch` badge/release 链接更新为 `BigStrongSun/ccswitchmulti`，但这些不会改变 fork 默认过滤规则。
+
 ## 2026-07-05 Codex Provider Catalog vs Menu Mapping Boundary
 
 - 用户反馈新版 Codex provider 配置里，只有打开“需要本地路由映射”才展开模型列表；但 Responses 原生 provider 也应该能获取 `/models`、保存模型目录和上下文窗口。根因是前端把 `takeoverEnabled` 同时当成“目录/上下文编辑开关”和“Codex /model 菜单映射开关”，后端旧语义又把 `modelCatalog` 的存在直接解释成要写 `model_catalog_json`。
