@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { AlertTriangle, Info } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { useOverlayLayerContext } from "@/components/ui/layer-context";
 
 interface ConfirmDialogProps {
   isOpen: boolean;
@@ -27,6 +28,10 @@ interface ConfirmDialogProps {
   onCancel: () => void;
 }
 
+/**
+ * 通用确认弹窗。
+ * 默认使用普通 alert 层级；位于 FullScreenPanel 内时会跟随面板上下文提升到顶层。
+ */
 export function ConfirmDialog({
   isOpen,
   title,
@@ -34,13 +39,15 @@ export function ConfirmDialog({
   confirmText,
   cancelText,
   variant = "destructive",
-  zIndex = "alert",
+  zIndex,
   checkboxLabel,
   checkboxDefaultChecked = false,
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
   const { t } = useTranslation();
+  const layerContext = useOverlayLayerContext();
+  const effectiveZIndex = zIndex ?? layerContext.dialogLayer ?? "alert";
   const [checkboxChecked, setCheckboxChecked] = useState(
     checkboxDefaultChecked,
   );
@@ -64,7 +71,7 @@ export function ConfirmDialog({
         }
       }}
     >
-      <DialogContent className="max-w-sm" zIndex={zIndex}>
+      <DialogContent className="max-w-sm" zIndex={effectiveZIndex}>
         <DialogHeader className="space-y-3 border-b-0 bg-transparent pb-0">
           <DialogTitle className="flex items-center gap-2 text-lg font-semibold">
             <IconComponent className={iconClass} />

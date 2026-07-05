@@ -11,6 +11,10 @@ import {
 } from "@/lib/platform";
 import { isTextEditableTarget } from "@/utils/domUtils";
 import { cn } from "@/lib/utils";
+import {
+  OverlayLayerContext,
+  useOverlayLayerContext,
+} from "@/components/ui/layer-context";
 
 interface FullScreenPanelProps {
   isOpen: boolean;
@@ -23,6 +27,10 @@ interface FullScreenPanelProps {
    */
   zIndexClassName?: string;
   /**
+   * 子树再次打开全屏面板时的层级。未传时根据当前面板层级给出保守的下一层。
+   */
+  childPanelZIndexClassName?: string;
+  /**
    * 覆盖内容区滚动容器的内边距/间距类。默认 `px-6 py-6 space-y-6`。
    * 通过 `cn`(twMerge) 合并，传入如 `pt-3` 只覆盖顶部内边距，其余保持默认。
    */
@@ -31,11 +39,45 @@ interface FullScreenPanelProps {
 
 const DRAG_BAR_HEIGHT = isWindows() || isLinux() ? 0 : 28; // px - match App.tsx
 const HEADER_HEIGHT = 64; // px - match App.tsx
+const DEFAULT_PANEL_Z_INDEX_CLASS = "z-[60]";
+const DEFAULT_CHILD_PANEL_Z_INDEX_CLASS = "z-[80]";
+const ELEVATED_CHILD_PANEL_Z_INDEX_CLASS = "z-[160]";
+let bodyOverflowLockCount = 0;
+let bodyOverflowBeforePanelOpen = "";
 
 /**
- * Reusable full-screen panel component
- * Handles portal rendering, header with back button, and footer
- * Uses solid theme colors without transparency
+ * 根据父面板层级推导下一层全屏面板层级。
+ * 目前 MultiRouter 向导会把新增 provider 面板提升到 z-[140]，子面板必须继续高于它。
+ */
+function resolveChildPanelZIndexClassName(panelZIndexClassName: string) {
+  return panelZIndexClassName === "z-[140]"
+    ? ELEVATED_CHILD_PANEL_Z_INDEX_CLASS
+    : DEFAULT_CHILD_PANEL_Z_INDEX_CLASS;
+}
+
+/**
+ * 用引用计数锁住 body 滚动。
+ * 多个 FullScreenPanel 嵌套时，子面板关闭不能提前解除父面板的滚动锁。
+ */
+function lockBodyOverflow() {
+  if (bodyOverflowLockCount === 0) {
+    bodyOverflowBeforePanelOpen = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+  }
+  bodyOverflowLockCount += 1;
+
+  return () => {
+    bodyOverflowLockCount = Math.max(0, bodyOverflowLockCount - 1);
+    if (bodyOverflowLockCount === 0) {
+      document.body.style.overflow = bodyOverflowBeforePanelOpen;
+      bodyOverflowBeforePanelOpen = "";
+    }
+  };
+}
+
+/**
+ * 复用的全屏面板组件。
+ * 负责 portal 渲染、标题栏、底部按钮、ESC 关闭和子弹层默认层级。
  */
 export const FullScreenPanel: React.FC<FullScreenPanelProps> = ({
   isOpen,
@@ -43,16 +85,29 @@ export const FullScreenPanel: React.FC<FullScreenPanelProps> = ({
   onClose,
   children,
   footer,
-  zIndexClassName = "z-[60]",
+  zIndexClassName,
+  childPanelZIndexClassName,
   contentClassName,
 }) => {
+  const parentLayer = useOverlayLayerContext();
+  const effectiveZIndexClassName =
+    zIndexClassName ??
+    parentLayer.childPanelZIndexClassName ??
+    DEFAULT_PANEL_Z_INDEX_CLASS;
+  const nextChildPanelZIndexClassName =
+    childPanelZIndexClassName ??
+    resolveChildPanelZIndexClassName(effectiveZIndexClassName);
+  const childLayer = React.useMemo(
+    () => ({
+      dialogLayer: "top" as const,
+      childPanelZIndexClassName: nextChildPanelZIndexClassName,
+    }),
+    [nextChildPanelZIndexClassName],
+  );
+
   React.useEffect(() => {
-    if (isOpen) {
-      document.body.style.overflow = "hidden";
-    }
-    return () => {
-      document.body.style.overflow = "";
-    };
+    if (!isOpen) return;
+    return lockBodyOverflow();
   }, [isOpen]);
 
   // ESC 键关闭面板
@@ -96,74 +151,81 @@ export const FullScreenPanel: React.FC<FullScreenPanelProps> = ({
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.2 }}
-          className={cn("fixed inset-0 flex flex-col", zIndexClassName)}
+          className={cn(
+            "fixed inset-0 flex flex-col",
+            effectiveZIndexClassName,
+          )}
           style={{ backgroundColor: "hsl(var(--background))" }}
         >
-          {/* Drag region - match App.tsx. Linux 上 DRAG_BAR_HEIGHT=0，
-              直接跳过整个元素；macOS 保留 28px 拖拽占位。 */}
-          {DRAG_BAR_HEIGHT > 0 && (
+          <OverlayLayerContext.Provider value={childLayer}>
+            {/* Drag region - match App.tsx. Linux 上 DRAG_BAR_HEIGHT=0，
+                直接跳过整个元素；macOS 保留 28px 拖拽占位。 */}
+            {DRAG_BAR_HEIGHT > 0 && (
+              <div
+                data-tauri-drag-region
+                style={
+                  {
+                    WebkitAppRegion: "drag",
+                    height: DRAG_BAR_HEIGHT,
+                  } as React.CSSProperties
+                }
+              />
+            )}
+
+            {/* Header - match App.tsx */}
             <div
-              data-tauri-drag-region
+              className="flex-shrink-0 flex items-center"
+              {...DRAG_REGION_ATTR}
               style={
                 {
-                  WebkitAppRegion: "drag",
-                  height: DRAG_BAR_HEIGHT,
+                  ...DRAG_REGION_STYLE,
+                  backgroundColor: "hsl(var(--background))",
+                  height: HEADER_HEIGHT,
                 } as React.CSSProperties
               }
-            />
-          )}
-
-          {/* Header - match App.tsx */}
-          <div
-            className="flex-shrink-0 flex items-center"
-            {...DRAG_REGION_ATTR}
-            style={
-              {
-                ...DRAG_REGION_STYLE,
-                backgroundColor: "hsl(var(--background))",
-                height: HEADER_HEIGHT,
-              } as React.CSSProperties
-            }
-          >
-            <div
-              className="px-6 w-full flex items-center gap-4"
-              {...DRAG_REGION_ATTR}
-              style={{ ...DRAG_REGION_STYLE } as React.CSSProperties}
             >
-              <Button
-                type="button"
-                variant="outline"
-                size="icon"
-                onClick={onClose}
-                className="rounded-lg select-none"
-                style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
+              <div
+                className="px-6 w-full flex items-center gap-4"
+                {...DRAG_REGION_ATTR}
+                style={{ ...DRAG_REGION_STYLE } as React.CSSProperties}
               >
-                <ArrowLeft className="h-4 w-4" />
-              </Button>
-              <h2 className="text-lg font-semibold text-foreground select-none">
-                {title}
-              </h2>
-            </div>
-          </div>
-
-          {/* Content */}
-          <div className="flex-1 overflow-y-auto scroll-overlay">
-            <div className={cn("px-6 py-6 space-y-6 w-full", contentClassName)}>
-              {children}
-            </div>
-          </div>
-
-          {/* Footer */}
-          {footer && (
-            <div
-              className="flex-shrink-0 py-4 border-t border-border-default"
-              style={{ backgroundColor: "hsl(var(--background))" }}
-            >
-              <div className="px-6 flex items-center justify-end gap-3">
-                {footer}
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon"
+                  onClick={onClose}
+                  className="rounded-lg select-none"
+                  style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
+                >
+                  <ArrowLeft className="h-4 w-4" />
+                </Button>
+                <h2 className="text-lg font-semibold text-foreground select-none">
+                  {title}
+                </h2>
               </div>
             </div>
-          )}
+
+            {/* Content */}
+            <div className="flex-1 overflow-y-auto scroll-overlay">
+              <div
+                className={cn("px-6 py-6 space-y-6 w-full", contentClassName)}
+              >
+                {children}
+              </div>
+            </div>
+
+            {/* Footer */}
+            {footer && (
+              <div
+                className="flex-shrink-0 py-4 border-t border-border-default"
+                style={{ backgroundColor: "hsl(var(--background))" }}
+              >
+                <div className="px-6 flex items-center justify-end gap-3">
+                  {footer}
+                </div>
+              </div>
+            )}
+          </OverlayLayerContext.Provider>
         </motion.div>
       )}
     </AnimatePresence>,

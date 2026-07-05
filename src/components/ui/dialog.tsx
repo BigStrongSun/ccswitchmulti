@@ -2,6 +2,7 @@ import * as React from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { cn } from "@/lib/utils";
 import { DIALOG_LAYER_CLASS, type DialogLayer } from "./layers";
+import { useOverlayLayerContext } from "./layer-context";
 
 const Dialog = DialogPrimitive.Root;
 
@@ -31,6 +32,10 @@ const DialogOverlay = React.forwardRef<
 });
 DialogOverlay.displayName = DialogPrimitive.Overlay.displayName;
 
+/**
+ * Radix Dialog 内容层。
+ * 未显式传 zIndex 时会读取 FullScreenPanel 提供的默认弹层，防止 portal 后被父面板遮住。
+ */
 const DialogContent = React.forwardRef<
   React.ElementRef<typeof DialogPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content> & {
@@ -43,13 +48,15 @@ const DialogContent = React.forwardRef<
     {
       className,
       children,
-      zIndex = "base",
+      zIndex,
       variant = "default",
       overlayClassName,
       ...props
     },
     ref,
   ) => {
+    const layerContext = useOverlayLayerContext();
+    const effectiveZIndex = zIndex ?? layerContext.dialogLayer ?? "base";
     const variantClass = {
       default:
         "fixed left-1/2 top-1/2 flex flex-col w-full max-w-lg max-h-[90vh] translate-x-[-50%] translate-y-[-50%] border border-border-default bg-background text-foreground shadow-lg duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[state=closed]:slide-out-to-left-1/2 data-[state=closed]:slide-out-to-top-[48%] data-[state=open]:slide-in-from-left-1/2 data-[state=open]:slide-in-from-top-[48%] sm:rounded-lg",
@@ -59,10 +66,14 @@ const DialogContent = React.forwardRef<
 
     return (
       <DialogPortal>
-        <DialogOverlay zIndex={zIndex} className={overlayClassName} />
+        <DialogOverlay zIndex={effectiveZIndex} className={overlayClassName} />
         <DialogPrimitive.Content
           ref={ref}
-          className={cn(variantClass, DIALOG_LAYER_CLASS[zIndex], className)}
+          className={cn(
+            variantClass,
+            DIALOG_LAYER_CLASS[effectiveZIndex],
+            className,
+          )}
           onInteractOutside={(e) => {
             // 防止点击遮罩层关闭对话框
             e.preventDefault();

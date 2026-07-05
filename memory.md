@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-07-05 MultiRouter Wizard Nested Provider Dialog Layering
+
+- 用户反馈 MultiRouter 配置向导里保存/新增 provider 时弹窗像没到最前或卡死。根因不是 provider 保存 API 卡住，而是向导内再打开新增 provider 后，新增面板内部的二级弹层仍按默认层级 portal 到 `document.body`：`CodexFormFields` 的混合协议拆分/route 编辑确认、`UniversalProviderFormModal`、`ConfirmDialog` 等可能被 `FullScreenPanel z-[140]` 或向导壳遮住。
+- 修复边界：不要只把某一个弹窗硬编码到更高 z-index。`FullScreenPanel` 现在提供弹层上下文，面板内未显式指定层级的 `DialogContent` 默认使用 `top`；`ConfirmDialog` 默认遵循上下文再退回 `alert`；嵌套 `FullScreenPanel` 自动使用下一层，向导新增 provider 面板 `z-[140]` 内的子面板提升为 `z-[160]`。
+- 同轮修复了 `FullScreenPanel` 对 `document.body.style.overflow` 的竞争：多个全屏面板嵌套时用引用计数锁滚动，避免子面板关闭时提前解除父面板仍需要的滚动锁。
+- 回归测试：`tests/components/FullScreenPanelLayering.test.tsx` 固定全屏面板内部普通 Dialog、ConfirmDialog 均在 `z-[200]`，并固定 `z-[140]` 父面板内的子 FullScreenPanel 为 `z-[160]`。
+
 ## 2026-07-04 Codex MultiRouter Wizard OAuth Guidance
 
 - 用户指出 MultiRouter 设置向导少了关键步骤：没有引导用户配置官方 Codex OAuth。根因是向导按普通 `API Key + Base URL + /models` 范式处理所有模型源，虽然后端能把 official target 物化为 `codex_oauth`，但前端配置步骤只显示“已有模型目录/缺 Base URL”，没有展示 ChatGPT 登录入口。
