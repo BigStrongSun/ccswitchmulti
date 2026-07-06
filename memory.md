@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-07-06 CCSwitchMulti v3.16.4-15 Release Preparation
+
+- 本轮用户要求“发一个新版本，发新的 release”。实际检查 `git log v3.16.4-14..HEAD` 后确认 `v3.16.4-14` 之后已有 5 个本地提交：新增 Codex 用量与重置额度工具页、补 temperature 默认边界测试、补 usage page 引导和主题颜色拆分、以及上一轮 release 验证 memory，因此不是空发。
+- 版本号继续沿用 `v3.16.4-N` fork 递增规则，目标为 `3.16.4-15` / `v3.16.4-15`；同步更新 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.lock`，新增 `docs/release-notes/v3.16.4-15-zh.md`。
+- 发布说明重点：Codex 专属用量与 reset credits 页面、banked reset credits/窗口状态展示、浅色/深色主题 token 拆分、temperature 缺省不补 0 的回归护栏。发布前需要跑页面相关 vitest、temperature Rust 单测、typecheck、prettier、cargo fmt 和 `git diff --check`。
+- 注意边界：未跟踪 `output/release-v3.16.4-4-upload/`、`output/release-v3.16.4-5wizard/` 和 `scripts/logs/` 是旧输出/日志，不应加入 release commit；GitHub release 仍通过推送 annotated tag 触发 `.github/workflows/release.yml` 自动跨平台构建和上传资产。
+
 ## 2026-07-06 Codex Temperature Default Boundary
 
 - 本轮排查的结论是不要在 CCSwitchMulti 收到 Codex `/v1/responses` 请求缺省 `temperature` 时全局补 `temperature=0`。外部检索和代码链路都显示：OpenAI Chat/Responses 的 `temperature` 是可选参数；GPT-5/o3 等 reasoning 模型公开反馈更多是“传了非默认 temperature 会 400”；Kimi/Roo-Code 反馈则是 `kimi-for-coding` 需要固定 `temperature=0.6`，默认补 0 反而会失败。因此“缺省补 0”不是通用修复。
