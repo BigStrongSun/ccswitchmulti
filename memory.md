@@ -1,5 +1,14 @@
 # CC Switch Repository Memory
 
+## 2026-07-06 CCSwitchMulti v3.16.4-14 GitHub Release Verification
+
+- `v3.16.4-14` 已作为 `BigStrongSun/ccswitchmulti` 正式 release 发布：`https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.16.4-14`。Release 为 `draft=false`、`prerelease=false`，GitHub latest API 返回 `tag_name=v3.16.4-14`，发布时间为 `2026-07-06T03:04:19Z`。
+- 版本提交为 `564829493183a577e3b5760126d83d9d860ef605`（`chore(release): bump CCSwitchMulti to v3.16.4-14`），annotated tag `v3.16.4-14` 指向该提交。`main` 和 tag 均已推送到 fork remote，`origin/upstream` 仍是原项目远端。
+- GitHub Actions：Release run `28764056425` 成功，5 个平台构建、`Publish GitHub Release`、`Assemble latest.json` 全部成功；main CI run `28764054886` 成功，Frontend Checks 和 Backend Checks 均通过。
+- 发布资产共 19 个：Windows x64/ARM64 setup、portable 和签名，macOS unsigned DMG、updater tarball/signature、zip，Linux x64/ARM64 AppImage/signature/deb/rpm，以及 `latest.json`。本次 macOS DMG 已上传，但因 Apple signing/cert 步骤跳过，仍按未签名版说明处理。
+- `latest.json` 已下载验证：`version=3.16.4-14`，6 个 updater 平台的 URL 均指向 `v3.16.4-14`，签名字段均存在。Release 正文未命中 `ccswitch.io`、`farion1231/cc-switch`、`BigStrongSun/cc-switch` 等旧链接。
+- 发布前本地验证覆盖：两组 Codex/MultiRouter/Provider vitest、`pnpm typecheck`、`cargo test --manifest-path src-tauri/Cargo.toml codex_responses_passthrough --lib -- --nocapture`、`cargo test --manifest-path src-tauri/Cargo.toml codex_reset --lib -- --nocapture`、`cargo fmt --manifest-path src-tauri/Cargo.toml --check`、release note prettier check、`git diff --check`（仅 Cargo.lock CRLF 提示）。
+
 ## 2026-07-06 Codex Usage Reset Credits Page Entry
 
 - 参考 `jordan-edai/codex-reset-watcher` 时，真正可复用的产品边界不是 macOS 菜单栏，而是跨平台的只读 Codex 用量面板：5 小时窗口、每周窗口、banked reset credits、到期紧迫度、部分明细失败提示和手动刷新。CCSwitchMulti 里不要把这类信息只藏在 provider footer。
