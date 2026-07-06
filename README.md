@@ -96,7 +96,7 @@ Codex MultiRouter 不是简单地把 Codex 切到某一个第三方 Provider。C
 
 ### 使用注意
 
-- 需要 CCSwitchMulti 能力时，请使用 [BigStrongSun/ccswitchmulti](https://github.com/BigStrongSun/ccswitchmulti/releases) 的发布版本，不要下载上游官方 release。
+- 需要 CCSwitchMulti 能力时，请使用 [BigStrongSun/ccswitchmulti](https://github.com/BigStrongSun/ccswitchmulti/releases) 的发布版本。
 - Codex 使用 `OpenAI Multi-Model Router` 时必须保持 CCSwitchMulti 运行，因为 Codex 请求会经过本地 takeover 代理。
 - 修改 router 模型目录、路由规则或 takeover 状态后，需要完整退出并重新打开 Codex Desktop；已经运行的 Codex app-server 可能继续持有旧的模型管理器缓存。
 - 如果诊断显示 catalog 已完整，但 Codex Desktop 模型菜单仍只显示官方模型，请通过 CCSwitchMulti 的模型菜单解锁流程启动 Codex，让 renderer 带 remote debugging 端口运行并接受运行时补丁。
@@ -110,7 +110,7 @@ Codex MultiRouter 不是简单地把 Codex 切到某一个第三方 Provider。C
 
 - 当前分支的包名/产品名是 `ccswitchmulti` / `CCSwitchMulti`。
 - Windows 发布导出使用 `pnpm release:export`；本地打包在没有签名私钥时会显式关闭 updater artifact 签名。
-- 免安装版仍使用系统默认用户数据和配置目录，因此除非明确要共享状态，否则不要同时运行上游官方 CC Switch 和 CCSwitchMulti。
+- 免安装版仍使用系统默认用户数据和配置目录，因此除非明确要共享状态，否则不要同时运行多个安装版或便携版实例。
 - macOS 产物需要 macOS 构建、签名和 notarization 环境；Windows/WSL 构建不会产出已签名公证的 macOS 包。
 
 ## ❤️Sponsor
