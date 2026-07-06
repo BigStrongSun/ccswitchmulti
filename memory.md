@@ -1,5 +1,14 @@
 # CC Switch Repository Memory
 
+## 2026-07-06 CCSwitchMulti v3.16.4-15 GitHub Release Verification
+
+- `v3.16.4-15` 已作为 `BigStrongSun/ccswitchmulti` 正式 release 发布：`https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.16.4-15`。Release 为 `draft=false`、`prerelease=false`，发布时间为 `2026-07-06T14:24:42Z`。
+- 版本提交为 `2b13e2d4731f89a0bf820d038d94611b741d2500`（`chore(release): bump CCSwitchMulti to v3.16.4-15`），annotated tag `v3.16.4-15` 指向该提交。`main` 和 tag 均已推送到 fork remote。
+- GitHub Actions：main CI run `28796644943` 成功，Release run `28796647894` 成功；Release run 覆盖 `ubuntu-22.04`、`ubuntu-22.04-arm`、`windows-2022`、`windows-2022 arm64`、`macos-14`，`Publish GitHub Release` 和 `Assemble latest.json` 均成功。
+- 发布资产共 19 个：Windows x64/ARM64 setup、portable 和签名，macOS dmg、tar.gz/signature、zip，Linux x64/ARM64 AppImage/signature/deb/rpm，以及 `latest.json`。远端 `latest.json` 已下载验证：`version=3.16.4-15`，包含 macOS、Windows x86_64/arm64、Linux x86_64/arm64 6 个 updater 平台条目。
+- 本地固定交付目录 `C:\Users\sunda\Documents\LLMservice\最新版ccswitchmulti` 已由 post-commit release pipeline 刷新到 `Version: 3.16.4-15`、`Commit: 2b13e2d4731f89a0bf820d038d94611b741d2500`；Windows x64 NSIS setup、portable zip、raw exe 和 setup `.sig` 均已生成。
+- 发布前本地验证覆盖：`CodexUsagePage` 单测、Codex 用量入口集成用例（当前环境需 `--testTimeout=20000`）、两个 temperature 缺省/显式 Rust 单测、`pnpm typecheck`、release note prettier check、`cargo fmt --check`、`git diff --check`。整文件 `tests/integration/App.test.tsx` 在默认 5 秒/10 秒阈值下仍会受既有 App/MSW 启动慢和测试隔离问题影响，不作为本轮 release 阻塞。
+
 ## 2026-07-06 CCSwitchMulti v3.16.4-15 Release Preparation
 
 - 本轮用户要求“发一个新版本，发新的 release”。实际检查 `git log v3.16.4-14..HEAD` 后确认 `v3.16.4-14` 之后已有 5 个本地提交：新增 Codex 用量与重置额度工具页、补 temperature 默认边界测试、补 usage page 引导和主题颜色拆分、以及上一轮 release 验证 memory，因此不是空发。
