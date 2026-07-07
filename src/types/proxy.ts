@@ -53,6 +53,8 @@ export interface ProxyTakeoverStatus {
   hermes: boolean;
 }
 
+export type InteractionMode = "Code" | "Ask" | "Chat";
+
 export type CodexDiagnosticStatus = "pass" | "warn" | "fail" | "info";
 
 export interface CodexDiagnosticCheck {

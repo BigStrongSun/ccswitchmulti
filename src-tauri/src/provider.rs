@@ -507,6 +507,9 @@ pub struct ProviderMeta {
     /// - "openai_responses": OpenAI Responses API 格式，需要转换
     #[serde(rename = "apiFormat", skip_serializing_if = "Option::is_none")]
     pub api_format: Option<String>,
+    /// Codex 上游为 Claude 时，将 claude-sonnet-5 清洗为普通聊天请求
+    #[serde(rename = "claudeChatMode", skip_serializing_if = "Option::is_none")]
+    pub claude_chat_mode: Option<bool>,
     /// 通用认证绑定（provider_config / managed_account）
     ///
     /// 新代码应只写入该字段；githubAccountId 仅保留兼容读取。

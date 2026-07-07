@@ -1,5 +1,4 @@
 [package]
-default-run = "cc-switch"
 name = "cc-switch"
 version = "3.16.4-13"
 description = "All-in-One Assistant for Claude Code, Codex & Gemini CLI"
@@ -25,10 +24,6 @@ path = "src/main.rs"
 name = "codex-history-repairer"
 path = "src/bin/codex-history-repairer.rs"
 required-features = ["history-repairer"]
-
-[[bin]]
-name = "ccswitch-readonly-mcp"
-path = "src/bin/ccswitch_readonly_mcp.rs"
 
 [features]
 default = []
@@ -99,7 +94,6 @@ sha2 = "0.10"
 hmac = "0.12"
 json5 = "0.4"
 json-five = "0.3.1"
-rmcp = { version = "2.1.0", features = ["server", "transport-io"] }
 
 [target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
 tauri-plugin-single-instance = "2"

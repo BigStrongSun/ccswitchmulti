@@ -249,6 +249,22 @@ pub async fn get_proxy_status(state: tauri::State<'_, AppState>) -> Result<Proxy
     state.proxy_service.get_status().await
 }
 
+#[tauri::command]
+pub async fn get_interaction_mode(
+    state: tauri::State<'_, AppState>,
+) -> Result<InteractionMode, String> {
+    Ok(state.proxy_service.get_interaction_mode().await)
+}
+
+#[tauri::command]
+pub async fn set_interaction_mode(
+    state: tauri::State<'_, AppState>,
+    mode: InteractionMode,
+) -> Result<(), String> {
+    state.proxy_service.set_interaction_mode(mode).await;
+    Ok(())
+}
+
 /// 运行 Codex MultiRouter 一键诊断。
 ///
 /// 该命令只读取本机配置、探测本地代理端口和读取本地 router 日志；不会向真实上游发送

@@ -217,6 +217,8 @@ export interface ProviderMeta {
     | "openai_responses"
     | "openai_messages"
     | "gemini_native";
+  // Codex Claude provider: treat claude-sonnet-5 as normal chat instead of coding agent
+  claudeChatMode?: boolean;
   // Codex MultiRouter 向导里的协议选择来源；manual 表示用户已显式锁定，不再被探测推荐覆盖。
   apiFormatSource?: "manual" | "probe" | "inferred" | string;
   // 通用认证绑定

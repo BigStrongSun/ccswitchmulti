@@ -1395,6 +1395,8 @@ pub fn run() {
             commands::get_proxy_takeover_status,
             commands::set_proxy_takeover_for_app,
             commands::get_proxy_status,
+            commands::get_interaction_mode,
+            commands::set_interaction_mode,
             commands::diagnose_codex_multirouter,
             commands::unlock_codex_model_picker,
             commands::sync_codex_history_to_multirouter,

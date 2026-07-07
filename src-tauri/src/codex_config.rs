@@ -1344,8 +1344,10 @@ fn codex_provider_models_toml_array(specs: &[CodexCatalogModelSpec]) -> Item {
 
 /// 将模型目录同步到活动 provider 的 `models` 字段。
 ///
-/// Codex Desktop 的 app-server 会把 custom provider 标为“自定义”，但候选菜单仍需要
-/// provider 内部能枚举模型；只写顶层 `model_catalog_json` 对部分 Desktop 版本不够。
+/// Codex Desktop 的 app-server 会把 custom/reserved local provider 标为“自定义”，
+/// 但候选菜单仍需要 provider 内部能枚举模型；只写顶层 `model_catalog_json`
+/// 对部分 Desktop 版本不够。这里以 CCSwitchMulti 的 `modelCatalog` 为显式信号，
+/// 不再因为 `lmstudio` 这类 Codex 保留 provider id 跳过投影。
 fn set_active_codex_provider_models(doc: &mut DocumentMut, specs: &[CodexCatalogModelSpec]) {
     if specs.is_empty() {
         return;
@@ -1353,9 +1355,6 @@ fn set_active_codex_provider_models(doc: &mut DocumentMut, specs: &[CodexCatalog
     let Some(provider_id) = active_codex_model_provider_id(doc) else {
         return;
     };
-    if !is_custom_codex_model_provider_id(&provider_id) {
-        return;
-    }
 
     if doc.get("model_providers").is_none() {
         doc["model_providers"] = toml_edit::table();
@@ -1382,9 +1381,6 @@ fn remove_active_codex_provider_models(doc: &mut DocumentMut) {
     let Some(provider_id) = active_codex_model_provider_id(doc) else {
         return;
     };
-    if !is_custom_codex_model_provider_id(&provider_id) {
-        return;
-    }
     if let Some(provider_table) = doc
         .get_mut("model_providers")
         .and_then(|item| item.as_table_mut())
@@ -5504,6 +5500,58 @@ base_url = "http://127.0.0.1:15721/v1"
         assert!(slugs.contains(&"deepseek-v4-flash"));
         assert!(model_fields.contains(&"qwen3.6"));
         assert!(model_fields.contains(&"deepseek-v4-flash"));
+    }
+
+    #[test]
+    #[serial]
+    /// LM Studio 是 Codex 保留 provider id，但用户在 CCSwitchMulti 配置的
+    /// modelCatalog 仍必须投影到 picker 可见模型，否则源码版同步后菜单为空。
+    fn model_catalog_projects_models_for_lmstudio_provider_picker() {
+        let _home = TestHomeGuard::new();
+        seed_codex_models_cache(json!([{
+            "slug": "gpt-5.5",
+            "display_name": "GPT-5.5",
+            "model_messages": { "instructions_template": "template" },
+            "context_window": 128000
+        }]));
+        let settings = json!({
+            "modelCatalog": {
+                "models": [
+                    { "model": "qwen2.5-coder-14b-instruct", "displayName": "Qwen Coder 14B" }
+                ]
+            }
+        });
+        let config = r#"model_provider = "lmstudio"
+
+[model_providers.lmstudio]
+name = "LM Studio"
+"#;
+
+        let prepared = prepare_codex_config_text_with_model_catalog(&settings, config)
+            .expect("prepare config");
+        assert!(prepared.contains("model_catalog_json"));
+        let prepared_toml: toml::Value = toml::from_str(&prepared).expect("parse prepared config");
+        let provider_models = prepared_toml
+            .get("model_providers")
+            .and_then(|providers| providers.get("lmstudio"))
+            .and_then(|provider| provider.get("models"))
+            .and_then(|models| models.as_array())
+            .expect("lmstudio provider should expose inline models for Codex Desktop");
+        let provider_model_ids: Vec<_> = provider_models
+            .iter()
+            .filter_map(|model| model.get("model").and_then(|value| value.as_str()))
+            .collect();
+        assert!(provider_model_ids.contains(&"qwen2.5-coder-14b-instruct"));
+
+        let cache: Value = read_json_file(&get_codex_models_cache_path()).expect("read cache");
+        let slugs = cache
+            .get("models")
+            .and_then(|models| models.as_array())
+            .expect("models array")
+            .iter()
+            .filter_map(|model| model.get("slug").and_then(|slug| slug.as_str()))
+            .collect::<Vec<_>>();
+        assert!(slugs.contains(&"qwen2.5-coder-14b-instruct"));
     }
 
     #[test]
