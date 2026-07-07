@@ -1,5 +1,14 @@
 # CC Switch Repository Memory
 
+## 2026-07-07 Codex Hosted Web Search Bridge MVP
+
+- 本轮在隔离 worktree `C:\Users\sunda\.codex\worktrees\aec9\LLMservice\cc-switch` 的 `codex/hosted-tool-bridge` 分支实现 Phase 1 MVP：Codex `/v1/responses` 入站的 hosted `{ "type": "web_search" }` 不再原样交给第三方 Chat 上游，而是在 `transform_codex_chat.rs` 中映射成普通 function tool `web_search(query,count)`；`tool_search` 仍保持 Codex client-side tool 语义，二者不能混淆。
+- 新模块 `src-tauri/src/proxy/providers/hosted_tools/` 拆为 `web_search.rs`、`openai_client.rs`、`bridge.rs`：`web_search.rs` 负责 hosted tool 配置安全子集、参数解析和 OpenAI Responses 结果规整；`openai_client.rs` 只读取独立环境变量 `CCSWITCH_HOSTED_TOOLS_OPENAI_API_KEY`（可回退 `OPENAI_API_KEY`）、`CCSWITCH_HOSTED_TOOLS_OPENAI_MODEL`、`CCSWITCH_HOSTED_TOOLS_OPENAI_BASE_URL`、`CCSWITCH_HOSTED_TOOLS_TIMEOUT_MS`；`bridge.rs` 扫描第三方 Chat response 里的 `web_search` tool call，并把执行结果作为 `role=tool` 回灌。
+- 真实生产接入点在 `src-tauri/src/proxy/forwarder.rs`，不是只改 `handlers.rs` 的转换 handler。原因是 Codex takeover 流量先经过 `forwarder.forward_with_retry()`，请求在这里完成 route/provider 解析、auth、headers、proxy、Responses->Chat 转换和发送；因此 hosted tool loop 复用 forwarder 已配置好的发送闭包，最多 3 轮，只执行白名单 `web_search`，遇到其它 tool call 会退回既有 Codex tool flow。
+- 因 hosted tool loop 需要读取完整 Chat response 才能决定是否执行工具，含 hosted `web_search` 的 Chat 上游请求会强制 `stream=false` 并移除 `stream_options`。若客户端原始请求是 stream，forwarder 会给最终 Chat response 打内部头 `x-cc-switch-hosted-tool-loop: web_search`，`handlers.rs` 看到该头后按非流式 Chat JSON 转 Responses，再包装成最小 `response.completed` SSE，避免把 JSON 当 SSE 解析。
+- OpenAI hosted web_search 调用只记录 `trace/tool/query_hash/status/elapsed_ms/error` 这类脱敏字段；不会记录 API key、完整 query、网页正文或完整 prompt。OpenAI 调用失败或未配置 key 时，不中断主请求，而是把裁剪后的错误 JSON 作为 tool output 回给第三方模型，让模型能解释“搜索不可用”并继续生成最终回答。
+- 回归测试重点：`cargo test --manifest-path src-tauri/Cargo.toml web_search -- --nocapture` 覆盖 hosted tool function 映射、Chat/stream 恢复、forwarder tool loop、OpenAI request 构造和 result 规整；`cargo test --manifest-path src-tauri/Cargo.toml completed_sse_wrapper_contains_final_responses_payload -- --nocapture` 覆盖原始 stream 请求被 hosted loop 强制非流后的最小 `response.completed` SSE 包装；`cargo test --manifest-path src-tauri/Cargo.toml tool_search -- --nocapture` 固定既有 `tool_search` client-side 工具不回归；`cargo fmt --manifest-path src-tauri/Cargo.toml --check` 固定 Rust 格式。
+
 ## 2026-07-06 CCSwitchMulti v3.16.4-15 GitHub Release Verification
 
 - `v3.16.4-15` 已作为 `BigStrongSun/ccswitchmulti` 正式 release 发布：`https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.16.4-15`。Release 为 `draft=false`、`prerelease=false`，发布时间为 `2026-07-06T14:24:42Z`。

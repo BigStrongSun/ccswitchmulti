@@ -3,6 +3,17 @@
 //! 负责将请求转发到上游Provider，支持故障转移
 
 use super::hyper_client::ProxyResponse;
+use super::providers::{
+    hosted_tools::{
+        bridge::{
+            append_tool_outputs_to_chat_request, execute_web_search_tool_calls,
+            scan_web_search_tool_calls, WebSearchCallScan, HOSTED_TOOL_LOOP_HEADER,
+            MAX_HOSTED_TOOL_ITERATIONS,
+        },
+        web_search::HostedWebSearchConfig,
+    },
+    transform_codex_chat::CodexToolContext,
+};
 use super::{
     body_filter::filter_private_params_with_whitelist,
     content_encoding::{decompress_body, get_content_encoding},
@@ -1577,6 +1588,7 @@ impl RequestForwarder {
 
         // 转换请求体（如果需要）
         let request_prepare_started_at = std::time::Instant::now();
+        let mut codex_chat_tool_context: Option<CodexToolContext> = None;
         let mut request_body = if codex_responses_to_chat || codex_responses_to_messages {
             let mut mapped_body = mapped_body;
             let restored = self
@@ -1593,6 +1605,13 @@ impl RequestForwarder {
                 super::providers::resolve_codex_chat_reasoning_config(provider, &mapped_body);
             let text_only_override = super::providers::codex_provider_text_only_input(provider);
             let cache_config = super::providers::resolve_codex_cache_config(provider, &mapped_body);
+            if codex_responses_to_chat {
+                codex_chat_tool_context = Some(
+                    super::providers::transform_codex_chat::build_codex_tool_context_from_request(
+                        &mapped_body,
+                    ),
+                );
+            }
             super::providers::transform_codex_chat::responses_to_chat_completions_with_reasoning_text_only_and_cache(
                 mapped_body,
                 reasoning_config.as_ref(),
@@ -1662,6 +1681,20 @@ impl RequestForwarder {
                 if apply_local_proxy_body_overrides(&mut filtered_body, overrides) {
                     filtered_body = prepare_upstream_request_body(filtered_body);
                 }
+            }
+        }
+        let hosted_web_search_config = codex_chat_tool_context
+            .as_ref()
+            .and_then(CodexToolContext::hosted_web_search_config)
+            .cloned();
+        let hosted_web_search_forced_non_stream = codex_responses_to_chat
+            && codex_chat_tool_context
+                .as_ref()
+                .is_some_and(CodexToolContext::has_hosted_web_search);
+        if hosted_web_search_forced_non_stream {
+            if let Some(obj) = filtered_body.as_object_mut() {
+                obj.insert("stream".to_string(), serde_json::json!(false));
+                obj.remove("stream_options");
             }
         }
         // 出站 body 定稿后刷新真值（覆盖 Codex chat 上游模型覆写、转换层模型改写）
@@ -2449,6 +2482,48 @@ impl RequestForwarder {
             let response = self
                 .prepare_success_response_for_failover(response, request_is_streaming)
                 .await?;
+            let response = if let Some(config) = hosted_web_search_config.as_ref() {
+                run_hosted_web_search_chat_loop(
+                    response,
+                    &mut filtered_body,
+                    config,
+                    |body| {
+                        let headers = ordered_headers.clone();
+                        let body_bytes = serde_json::to_vec(body).map_err(|e| {
+                            ProxyError::Internal(format!(
+                                "Failed to serialize hosted tool loop request body: {e}"
+                            ))
+                        });
+                        let trace_id = codex_trace_id.clone();
+                        let session_id = self.session_id.clone();
+                        let model = request_model_for_log.clone();
+                        let provider_id = provider.id.clone();
+                        async move {
+                            let body_bytes = body_bytes?;
+                            let body_len = body_bytes.len();
+                            if let Some(trace_id) = trace_id.as_deref() {
+                                super::codex_router_log::append_event(
+                                    "hosted_tool_loop_upstream_send",
+                                    &[
+                                        ("trace", trace_id.to_string()),
+                                        ("session", session_id.clone()),
+                                        ("model", model.clone()),
+                                        ("provider", provider_id.clone()),
+                                        ("request_bytes", body_len.to_string()),
+                                    ],
+                                );
+                            }
+                            let send = send_upstream_request(headers, body_bytes);
+                            send.await
+                        }
+                    },
+                    codex_trace_id.as_deref(),
+                    hosted_web_search_forced_non_stream,
+                )
+                .await?
+            } else {
+                response
+            };
             if let Some(trace_id) = codex_trace_id.as_deref() {
                 super::codex_router_log::append_event(
                     "response_ready",
@@ -3102,6 +3177,129 @@ fn is_managed_account_upstream_url(url: &str) -> bool {
     host == "githubcopilot.com"
         || host.ends_with(".githubcopilot.com")
         || (host == "chatgpt.com" && uri.path().starts_with("/backend-api/codex"))
+}
+
+/// 运行 Chat 上游上的 hosted `web_search` 本地工具循环。
+///
+/// 参数:
+/// - `response`: 第一轮 Chat 上游响应，调用方已完成成功响应预处理。
+/// - `chat_request`: 本轮 Chat 请求体；函数会追加 assistant/tool messages。
+/// - `config`: Codex 原始 hosted `web_search` 的安全配置子集。
+/// - `send_chat_request`: 复用 forwarder 已完成认证/代理/超时配置的发送闭包。
+/// - `trace_id`: 可选 Codex 路由 trace id，只写脱敏诊断日志。
+/// - `force_response_header`: 原始请求可能是流式，强制非流式上游时需要标记给 handler。
+/// 返回:
+/// - 最终 Chat response，仍交给现有 Chat→Responses 转换器处理。
+/// 副作用:
+/// - 可能调用 OpenAI hosted web_search，并可能向同一第三方 Chat 上游追加多轮请求。
+async fn run_hosted_web_search_chat_loop<F, Fut>(
+    mut response: ProxyResponse,
+    chat_request: &mut Value,
+    config: &HostedWebSearchConfig,
+    mut send_chat_request: F,
+    trace_id: Option<&str>,
+    force_response_header: bool,
+) -> Result<ProxyResponse, ProxyError>
+where
+    F: FnMut(&Value) -> Fut,
+    Fut: std::future::Future<Output = Result<ProxyResponse, ProxyError>>,
+{
+    let mut loop_executed = false;
+
+    for iteration in 0..=MAX_HOSTED_TOOL_ITERATIONS {
+        let (status, mut headers, body_bytes) = read_decoded_proxy_response(response).await?;
+        if force_response_header || loop_executed {
+            mark_hosted_tool_loop_response(&mut headers);
+        }
+        if !status.is_success() {
+            return Ok(ProxyResponse::buffered(status, headers, body_bytes));
+        }
+
+        let chat_response: Value = match serde_json::from_slice(&body_bytes) {
+            Ok(value) => value,
+            Err(_) => {
+                log::warn!(
+                    "[Codex] Hosted web_search loop skipped because Chat response is not JSON"
+                );
+                return Ok(ProxyResponse::buffered(status, headers, body_bytes));
+            }
+        };
+
+        let calls = match scan_web_search_tool_calls(&chat_response) {
+            WebSearchCallScan::NoToolCalls => {
+                return Ok(ProxyResponse::buffered(status, headers, body_bytes));
+            }
+            WebSearchCallScan::ContainsUnsupportedToolCalls => {
+                return Ok(ProxyResponse::buffered(status, headers, body_bytes));
+            }
+            WebSearchCallScan::OnlyWebSearch(calls) if calls.is_empty() => {
+                return Ok(ProxyResponse::buffered(status, headers, body_bytes));
+            }
+            WebSearchCallScan::OnlyWebSearch(calls) => calls,
+        };
+
+        if iteration >= MAX_HOSTED_TOOL_ITERATIONS {
+            log::warn!(
+                "[Codex] Hosted web_search loop reached max iterations ({MAX_HOSTED_TOOL_ITERATIONS})"
+            );
+            return Ok(ProxyResponse::buffered(status, headers, body_bytes));
+        }
+
+        let tool_messages = execute_web_search_tool_calls(&calls, config, trace_id).await;
+        if !append_tool_outputs_to_chat_request(chat_request, &chat_response, tool_messages) {
+            log::warn!("[Codex] Hosted web_search loop skipped because Chat messages are missing");
+            return Ok(ProxyResponse::buffered(status, headers, body_bytes));
+        }
+
+        loop_executed = true;
+        response = send_chat_request(chat_request).await?;
+    }
+
+    unreachable!("hosted web_search loop always returns inside bounded iteration")
+}
+
+/// 读取并按 content-encoding 解压一个 ProxyResponse。
+///
+/// 参数:
+/// - `response`: 待消费的上游响应。
+/// 返回:
+/// - HTTP 状态、已清理实体头的 headers，以及明文字节。
+/// 副作用:
+/// - 消费 response body；如果执行了解压，会移除 content-encoding/content-length。
+async fn read_decoded_proxy_response(
+    response: ProxyResponse,
+) -> Result<(http::StatusCode, http::HeaderMap, Bytes), ProxyError> {
+    let status = response.status();
+    let mut headers = response.headers().clone();
+    let encoding = get_content_encoding(&headers);
+    let raw = response.bytes().await?;
+    let decoded = match encoding {
+        Some(encoding) => match decompress_body(&encoding, &raw) {
+            Ok(Some(decompressed)) => {
+                strip_proxy_response_entity_headers(&mut headers);
+                Bytes::from(decompressed)
+            }
+            _ => raw,
+        },
+        None => raw,
+    };
+
+    Ok((status, headers, decoded))
+}
+
+/// 给经过 hosted tool loop 的响应打内部标记，供 handler 修正原始流式语义。
+fn mark_hosted_tool_loop_response(headers: &mut http::HeaderMap) {
+    headers.insert(
+        http::HeaderName::from_static(HOSTED_TOOL_LOOP_HEADER),
+        http::HeaderValue::from_static("web_search"),
+    );
+}
+
+/// 移除已经不再可信的实体头。
+fn strip_proxy_response_entity_headers(headers: &mut http::HeaderMap) {
+    headers.remove(http::header::CONTENT_ENCODING);
+    headers.remove(http::header::CONTENT_LENGTH);
+    headers.remove(http::header::TRANSFER_ENCODING);
 }
 
 /// 判断某个 Codex 客户端私有头是否应该在转发到上游前移除。
@@ -4656,6 +4854,112 @@ mod tests {
             &headers,
         )
         .expect("guard is scoped to managed-account upstreams");
+    }
+
+    /// 验证 hosted web_search loop 会消费第一轮工具调用、回灌 tool output 并返回最终 Chat 响应。
+    #[tokio::test]
+    async fn hosted_web_search_loop_appends_tool_output_and_marks_response() {
+        let initial_response = ProxyResponse::buffered(
+            StatusCode::OK,
+            HeaderMap::new(),
+            Bytes::from(
+                json!({
+                    "id": "chatcmpl_search",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "deepseek-v4-flash",
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "tool_calls": [{
+                                "id": "call_search",
+                                "type": "function",
+                                "function": {
+                                    "name": "web_search",
+                                    "arguments": "{\"query\":\"\"}"
+                                }
+                            }]
+                        },
+                        "finish_reason": "tool_calls"
+                    }]
+                })
+                .to_string(),
+            ),
+        );
+        let mut chat_request = json!({
+            "model": "deepseek-v4-flash",
+            "messages": [{ "role": "user", "content": "Search." }],
+            "stream": true,
+            "stream_options": { "include_usage": true }
+        });
+        let sent_bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sent_bodies_for_closure = sent_bodies.clone();
+
+        let final_response = run_hosted_web_search_chat_loop(
+            initial_response,
+            &mut chat_request,
+            &HostedWebSearchConfig::default(),
+            move |body| {
+                let sent_bodies = sent_bodies_for_closure.clone();
+                let body = body.clone();
+                async move {
+                    sent_bodies.lock().unwrap().push(body);
+                    Ok(ProxyResponse::buffered(
+                        StatusCode::OK,
+                        HeaderMap::new(),
+                        Bytes::from(
+                            json!({
+                                "id": "chatcmpl_final",
+                                "object": "chat.completion",
+                                "created": 2,
+                                "model": "deepseek-v4-flash",
+                                "choices": [{
+                                    "message": {
+                                        "role": "assistant",
+                                        "content": "Search was unavailable."
+                                    },
+                                    "finish_reason": "stop"
+                                }]
+                            })
+                            .to_string(),
+                        ),
+                    ))
+                }
+            },
+            None,
+            true,
+        )
+        .await
+        .expect("hosted web_search loop should finish");
+
+        assert_eq!(final_response.status(), StatusCode::OK);
+        assert!(final_response
+            .headers()
+            .contains_key(HOSTED_TOOL_LOOP_HEADER));
+        let final_body = serde_json::from_slice::<Value>(&final_response.bytes().await.unwrap())
+            .expect("final chat response json");
+        assert_eq!(
+            final_body["choices"][0]["message"]["content"],
+            "Search was unavailable."
+        );
+
+        let sent = sent_bodies.lock().unwrap();
+        assert_eq!(sent.len(), 1, "loop should resend Chat request once");
+        assert_eq!(sent[0]["stream"], false);
+        assert!(sent[0].get("stream_options").is_none());
+        let messages = sent[0]["messages"].as_array().expect("messages");
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[2]["role"], "tool");
+        assert_eq!(messages[2]["tool_call_id"], "call_search");
+        let tool_content: Value = serde_json::from_str(
+            messages[2]["content"]
+                .as_str()
+                .expect("tool content should be JSON string"),
+        )
+        .expect("tool content json");
+        assert!(tool_content.get("error").is_some());
+        assert_eq!(tool_content["sources"], json!([]));
     }
 
     #[test]
