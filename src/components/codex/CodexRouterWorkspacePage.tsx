@@ -32,7 +32,6 @@ import {
   Clipboard,
   Database,
   FileClock,
-  FolderOpen,
   GitFork,
   GitBranch,
   GripVertical,
@@ -51,7 +50,6 @@ import {
   Wand2,
   XCircle,
 } from "lucide-react";
-import { open } from "@tauri-apps/plugin-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -124,9 +122,6 @@ const MODEL_PICKER_UNLOCK_TOOLTIP =
 // 链路页需要给出明确下一步，避免用户只看到诊断异常却不知道要触发解锁。
 const MODEL_PICKER_UNLOCK_HINT =
   "模型菜单仍只显示“自定义”时，先完全退出 Codex Desktop，再点击“解锁模型菜单”。";
-
-const CODEX_DESKTOP_EXECUTABLE_STORAGE_KEY =
-  "ccswitch.codexDesktopExecutablePath";
 
 type CodexRoute = {
   id?: string;
@@ -5000,16 +4995,6 @@ function StatusTab({
     string | null
   >(null);
   const [isUnlockingModelPicker, setIsUnlockingModelPicker] = useState(false);
-  const [isSelectingCodexExecutable, setIsSelectingCodexExecutable] =
-    useState(false);
-  const [rememberedCodexExecutable, setRememberedCodexExecutable] = useState<
-    string | null
-  >(() => {
-    if (typeof window === "undefined") {
-      return null;
-    }
-    return window.localStorage.getItem(CODEX_DESKTOP_EXECUTABLE_STORAGE_KEY);
-  });
   const [statusView, setStatusView] = useState<StatusView>("link");
   const [isRefreshingValidation, setIsRefreshingValidation] = useState(false);
   const [validationRefreshMessage, setValidationRefreshMessage] = useState<
@@ -5203,30 +5188,12 @@ function StatusTab({
     }
   }
 
-  /// 只持久化后端确认过的 Codex Desktop 主程序路径，供 portable zip 下次带 CDP 参数启动。
-  function rememberCodexExecutable(path?: string | null) {
-    const nextPath = path?.trim();
-    if (!nextPath) {
-      return;
-    }
-    setRememberedCodexExecutable(nextPath);
-    if (typeof window !== "undefined") {
-      window.localStorage.setItem(
-        CODEX_DESKTOP_EXECUTABLE_STORAGE_KEY,
-        nextPath,
-      );
-    }
-  }
-
   /// Codex Desktop 模型菜单还会被 renderer 白名单二次过滤；这里显式触发 CDP 注入/启动修复。
-  async function unlockModelPicker(codexExecutableOverride?: string | null) {
+  async function unlockModelPicker() {
     setIsUnlockingModelPicker(true);
     setModelPickerUnlockError(null);
     try {
-      const codexExecutable =
-        codexExecutableOverride ?? rememberedCodexExecutable ?? undefined;
-      const result = await proxyApi.unlockCodexModelPicker(codexExecutable);
-      rememberCodexExecutable(result.codexExecutable);
+      const result = await proxyApi.unlockCodexModelPicker();
       setModelPickerUnlockResult(result);
     } catch (error) {
       setModelPickerUnlockError(
@@ -5234,30 +5201,6 @@ function StatusTab({
       );
     } finally {
       setIsUnlockingModelPicker(false);
-    }
-  }
-
-  /// 让用户手动选择 portable `Codex.exe`，再交给后端校验大小写和可执行文件语义。
-  async function chooseCodexExecutableAndUnlock() {
-    setIsSelectingCodexExecutable(true);
-    setModelPickerUnlockError(null);
-    try {
-      const selected = await open({
-        multiple: false,
-        directory: false,
-        filters: [{ name: "Codex Desktop", extensions: ["exe"] }],
-      });
-      const selectedPath = Array.isArray(selected) ? selected[0] : selected;
-      if (typeof selectedPath !== "string" || !selectedPath.trim()) {
-        return;
-      }
-      await unlockModelPicker(selectedPath);
-    } catch (error) {
-      setModelPickerUnlockError(
-        error instanceof Error ? error.message : String(error),
-      );
-    } finally {
-      setIsSelectingCodexExecutable(false);
     }
   }
 
@@ -5335,10 +5278,8 @@ function StatusTab({
                         <Button
                           size="sm"
                           variant="outline"
-                          onClick={() => unlockModelPicker()}
-                          disabled={
-                            isUnlockingModelPicker || isSelectingCodexExecutable
-                          }
+                          onClick={unlockModelPicker}
+                          disabled={isUnlockingModelPicker}
                           className="gap-2 border-indigo-300 bg-background/70 text-indigo-700 hover:bg-indigo-50 dark:border-indigo-500/50 dark:bg-indigo-500/10 dark:text-indigo-100 dark:hover:bg-indigo-500/20"
                         >
                           {isUnlockingModelPicker ? (
@@ -5454,19 +5395,7 @@ function StatusTab({
           ) : null}
           {modelPickerUnlockError ? (
             <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 p-3 text-xs leading-5 text-rose-700 dark:border-rose-700/50 dark:bg-rose-950/30 dark:text-rose-100">
-              <div>模型菜单解锁失败：{modelPickerUnlockError}</div>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={chooseCodexExecutableAndUnlock}
-                disabled={isSelectingCodexExecutable || isUnlockingModelPicker}
-                className="mt-2 gap-2 border-rose-300 bg-white/70 text-rose-700 hover:bg-rose-100 dark:border-rose-600/60 dark:bg-rose-500/10 dark:text-rose-100 dark:hover:bg-rose-500/20"
-              >
-                <FolderOpen className="h-4 w-4" />
-                {isSelectingCodexExecutable
-                  ? "选择中"
-                  : "选择 Codex.exe 后解锁"}
-              </Button>
+              模型菜单解锁失败：{modelPickerUnlockError}
             </div>
           ) : null}
           {modelPickerUnlockResult ? (
@@ -5491,31 +5420,14 @@ function StatusTab({
               </div>
               {modelPickerUnlockResult.codexExecutable ? (
                 <div className="mt-2 rounded-md border border-current/20 bg-white/40 p-2 text-[11px] leading-5 dark:bg-black/10">
-                  已记住 Codex.exe 路径：
+                  Codex Desktop 主程序：
                   <span className="font-mono break-all">
                     {modelPickerUnlockResult.codexExecutable}
                   </span>
                   {!modelPickerUnlockResult.injected
-                    ? "。请完全退出 Codex Desktop 后再次点击“解锁模型菜单”，下一次会用这个路径带 remote debugging 启动。"
+                    ? "。请完全退出 Codex Desktop 后再次点击“解锁模型菜单”，让 CCSwitchMulti 用 remote debugging 重新启动 Desktop。"
                     : ""}
                 </div>
-              ) : null}
-              {!modelPickerUnlockResult.injected &&
-              !modelPickerUnlockResult.codexExecutable ? (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={chooseCodexExecutableAndUnlock}
-                  disabled={
-                    isSelectingCodexExecutable || isUnlockingModelPicker
-                  }
-                  className="mt-2 gap-2 border-amber-300 bg-white/70 text-amber-800 hover:bg-amber-100 dark:border-amber-600/60 dark:bg-amber-500/10 dark:text-amber-100 dark:hover:bg-amber-500/20"
-                >
-                  <FolderOpen className="h-4 w-4" />
-                  {isSelectingCodexExecutable
-                    ? "选择中"
-                    : "选择 Codex.exe 后解锁"}
-                </Button>
               ) : null}
             </div>
           ) : null}

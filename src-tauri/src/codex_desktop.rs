@@ -61,24 +61,6 @@ struct CdpTarget {
 /// - 若发现已开放 CDP 的 Codex renderer，会注入本地脚本；
 /// - 若未发现 CDP 且 Codex 未运行，会以 remote debugging 参数启动 Codex。
 pub async fn unlock_codex_model_picker() -> Result<CodexModelPickerUnlockResult, String> {
-    unlock_codex_model_picker_with_executable(None).await
-}
-
-/// 使用调用方提供的 Codex Desktop 可执行文件路径尝试解锁模型菜单。
-///
-/// 便携版 zip 不一定在 WindowsApps 或 `%LOCALAPPDATA%\OpenAI\Codex` 下；前端可以先
-/// 从普通运行中的 Codex 进程记住 `Codex.exe`，或让用户手动选择该路径，再走这里启动。
-pub async fn unlock_codex_model_picker_with_executable_path(
-    executable: PathBuf,
-) -> Result<CodexModelPickerUnlockResult, String> {
-    let executable = validate_codex_desktop_executable_path(executable)?;
-    unlock_codex_model_picker_with_executable(Some(executable)).await
-}
-
-/// 共用模型菜单解锁流程；显式路径只替换 Desktop 启动位置，CDP 探测与注入逻辑保持一致。
-async fn unlock_codex_model_picker_with_executable(
-    explicit_executable: Option<PathBuf>,
-) -> Result<CodexModelPickerUnlockResult, String> {
     let catalog = load_cc_switch_model_catalog_projection()?;
     let attempted_ports = candidate_debug_ports(DEFAULT_CODEX_DEBUG_PORT);
 
@@ -103,9 +85,8 @@ async fn unlock_codex_model_picker_with_executable(
         });
     }
 
-    let executable = explicit_executable
-        .or_else(resolve_codex_executable)
-        .ok_or_else(|| "Codex Desktop executable was not found".to_string())?;
+    let executable =
+        resolve_codex_executable().ok_or_else(|| "Codex Desktop executable was not found. Install the Codex Windows app from Microsoft Store or start Codex once so CCSwitchMulti can detect the Desktop shell; the CLI/app-server codex.exe cannot unlock the Desktop renderer model picker.".to_string())?;
     launch_codex_with_debug_port(&executable, DEFAULT_CODEX_DEBUG_PORT)?;
 
     let mut last_result = None;
@@ -855,35 +836,23 @@ fn resolve_codex_executable() -> Option<PathBuf> {
         .or_else(find_latest_windows_codex_executable)
 }
 
-/// 校验用户选择或前端记住的 Desktop 可执行文件，避免把 CLI/app-server `codex.exe` 当成 Electron 主程序。
-fn validate_codex_desktop_executable_path(path: PathBuf) -> Result<PathBuf, String> {
-    if !path.exists() {
-        return Err(format!(
-            "Selected Codex Desktop executable does not exist: {}",
-            path.display()
-        ));
-    }
-    if !path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name == "Codex.exe")
-    {
-        return Err(format!(
-            "Selected file is not Codex Desktop's Codex.exe: {}",
-            path.display()
-        ));
-    }
-    path.canonicalize().map_err(|error| {
-        format!(
-            "Failed to resolve selected Codex Desktop executable {}: {error}",
-            path.display()
-        )
-    })
-}
-
 /// 在 WindowsApps 中选择版本最新的 Codex Desktop。
 #[cfg(target_os = "windows")]
 fn find_latest_windows_codex_executable() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    collect_windowsapps_codex_executable_candidates(&mut candidates);
+    collect_appx_codex_executable_candidates(&mut candidates);
+
+    candidates.sort_by(|left, right| left.0.cmp(&right.0));
+    candidates
+        .pop()
+        .map(|(_, executable)| executable)
+        .or_else(find_local_windows_codex_executable)
+}
+
+/// 扫描 WindowsApps 包目录，收集可启动 Desktop renderer 的大写 `Codex.exe` 候选。
+#[cfg(target_os = "windows")]
+fn collect_windowsapps_codex_executable_candidates(candidates: &mut Vec<(Vec<u32>, PathBuf)>) {
     let mut roots = Vec::new();
     if let Some(program_files) = std::env::var_os("ProgramFiles") {
         roots.push(PathBuf::from(program_files).join("WindowsApps"));
@@ -895,7 +864,6 @@ fn find_latest_windows_codex_executable() -> Option<PathBuf> {
     roots.sort();
     roots.dedup();
 
-    let mut candidates = Vec::new();
     for root in roots {
         let Ok(entries) = std::fs::read_dir(root) else {
             continue;
@@ -916,16 +884,78 @@ fn find_latest_windows_codex_executable() -> Option<PathBuf> {
             }
         }
     }
-    candidates.sort_by(|left, right| left.0.cmp(&right.0));
-    candidates
-        .pop()
-        .map(|(_, executable)| executable)
-        .or_else(find_local_windows_codex_executable)
 }
 
 #[cfg(not(target_os = "windows"))]
 fn find_latest_windows_codex_executable() -> Option<PathBuf> {
     None
+}
+
+/// `Get-AppxPackage` 返回的 Codex Windows App 安装摘要。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct WindowsCodexAppxPackage {
+    version: Option<String>,
+    install_location: Option<String>,
+}
+
+/// 通过 MSIX 安装元数据寻找 Codex Desktop，覆盖 WindowsApps 目录不可枚举的场景。
+#[cfg(target_os = "windows")]
+fn collect_appx_codex_executable_candidates(candidates: &mut Vec<(Vec<u32>, PathBuf)>) {
+    let script = r#"
+Get-AppxPackage -Name OpenAI.Codex |
+  Select-Object Version,InstallLocation |
+  ConvertTo-Json -Compress
+"#;
+    let Ok(output) = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .output()
+    else {
+        return;
+    };
+    if !output.status.success() {
+        return;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if stdout.is_empty() {
+        return;
+    }
+    let Ok(value) = serde_json::from_str::<Value>(&stdout) else {
+        return;
+    };
+    let packages = if value.is_array() {
+        serde_json::from_value::<Vec<WindowsCodexAppxPackage>>(value)
+    } else {
+        serde_json::from_value::<WindowsCodexAppxPackage>(value).map(|package| vec![package])
+    };
+    let Ok(packages) = packages else {
+        return;
+    };
+    for package in packages {
+        let Some(root) = package
+            .install_location
+            .as_deref()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+        else {
+            continue;
+        };
+        for executable in windows_codex_package_executable_candidates(&root) {
+            if executable.exists() {
+                candidates.push((
+                    package
+                        .version
+                        .as_deref()
+                        .map(version_tuple_from_text)
+                        .unwrap_or_default(),
+                    executable,
+                ));
+                break;
+            }
+        }
+    }
 }
 
 /// WindowsApps 包内的 Codex Desktop 可执行文件候选路径。
@@ -959,17 +989,21 @@ fn find_local_windows_codex_executable() -> Option<PathBuf> {
     None
 }
 
+/// 从版本号文本解析排序 key，兼容 MSIX 包名和 `Get-AppxPackage Version` 字段。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn version_tuple_from_text(version: &str) -> Vec<u32> {
+    version
+        .split('.')
+        .filter_map(|part| part.parse::<u32>().ok())
+        .collect::<Vec<_>>()
+}
+
 /// 从 WindowsApps 包目录名解析版本号，供排序使用。
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn version_tuple_from_package_name(name: &str) -> Vec<u32> {
     name.strip_prefix("OpenAI.Codex_")
         .and_then(|rest| rest.split_once('_').map(|(version, _)| version))
-        .map(|version| {
-            version
-                .split('.')
-                .filter_map(|part| part.parse::<u32>().ok())
-                .collect::<Vec<_>>()
-        })
+        .map(version_tuple_from_text)
         .unwrap_or_default()
 }
 
@@ -1039,20 +1073,16 @@ mod tests {
     }
 
     #[test]
-    fn selected_codex_desktop_executable_must_be_desktop_binary() {
-        let desktop_dir = tempfile::tempdir().expect("create desktop temp dir");
-        let desktop = desktop_dir.path().join("Codex.exe");
-        std::fs::write(&desktop, "").expect("write desktop exe");
-        let resolved = validate_codex_desktop_executable_path(desktop.clone())
-            .expect("uppercase Desktop Codex.exe should be accepted");
-        assert!(resolved.ends_with("Codex.exe"));
-
-        let cli_dir = tempfile::tempdir().expect("create cli temp dir");
-        let cli = cli_dir.path().join("codex.exe");
-        std::fs::write(&cli, "").expect("write cli exe");
-        let error = validate_codex_desktop_executable_path(cli)
-            .expect_err("lowercase CLI codex.exe should be rejected");
-        assert!(error.contains("not Codex Desktop"));
+    fn codex_desktop_version_sort_keys_parse_package_and_appx_versions() {
+        assert_eq!(
+            version_tuple_from_package_name("OpenAI.Codex_26.623.141536.0_x64__2p2nqsd0c76g0"),
+            vec![26, 623, 141536, 0]
+        );
+        assert_eq!(
+            version_tuple_from_text("26.623.141536.0"),
+            vec![26, 623, 141536, 0]
+        );
+        assert!(version_tuple_from_package_name("Other.Package_1.2.3_x64").is_empty());
     }
 
     #[test]

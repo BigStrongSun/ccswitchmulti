@@ -45,15 +45,8 @@ export const proxyApi = {
     return invoke("diagnose_codex_multirouter", { providerId });
   },
 
-  // 解锁 Codex Desktop 模型菜单；portable 版本可传入已确认的 Desktop `Codex.exe` 路径。
-  async unlockCodexModelPicker(
-    codexExecutable?: string | null,
-  ): Promise<CodexModelPickerUnlockResult> {
-    if (codexExecutable) {
-      return invoke("unlock_codex_model_picker_with_executable", {
-        codexExecutable,
-      });
-    }
+  // 解锁 Codex Desktop 模型菜单；该动作只处理 Desktop renderer 白名单，不改变 CLI 配置。
+  async unlockCodexModelPicker(): Promise<CodexModelPickerUnlockResult> {
     return invoke("unlock_codex_model_picker");
   },
 

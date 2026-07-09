@@ -31,14 +31,6 @@ const requestLogsFixture = vi.hoisted(() => ({
   },
 }));
 
-const dialogFixture = vi.hoisted(() => ({
-  open: vi.fn(),
-}));
-
-vi.mock("@tauri-apps/plugin-dialog", () => ({
-  open: dialogFixture.open,
-}));
-
 vi.mock("@/lib/api/proxy", () => ({
   proxyApi: {
     getGlobalProxyConfig: vi.fn().mockResolvedValue({
@@ -139,9 +131,7 @@ function createCodexProxyLog(overrides: Partial<RequestLog> = {}): RequestLog {
 
 beforeEach(() => {
   requestLogsFixture.value = { data: [], isLoading: false };
-  window.localStorage.removeItem("ccswitch.codexDesktopExecutablePath");
   vi.mocked(fetchModelsForConfig).mockReset();
-  dialogFixture.open.mockReset();
   vi.mocked(proxyApi.unlockCodexModelPicker).mockReset();
   vi.mocked(providersApi.add).mockResolvedValue(true);
   vi.mocked(providersApi.update).mockResolvedValue(true);
@@ -2143,6 +2133,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     await waitFor(() =>
       expect(proxyApi.unlockCodexModelPicker).toHaveBeenCalledTimes(1),
     );
+    expect(proxyApi.unlockCodexModelPicker).toHaveBeenCalledWith();
     expect(screen.getByText("模型菜单白名单已注入")).toBeInTheDocument();
     expect(
       screen.queryByText(
@@ -2151,19 +2142,21 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("remembers the detected portable Codex.exe path for the next unlock attempt", async () => {
+  // Desktop 主程序发现属于后端自动探测；前端只展示诊断路径，不记忆也不回传 exe。
+  it("keeps Codex Desktop executable discovery owned by the backend", async () => {
     const source: Provider = {
-      id: "codex-portable-unlock-source",
-      name: "Portable Unlock Source",
+      id: "codex-desktop-retry-source",
+      name: "Desktop Retry Source",
       category: "custom",
       settingsConfig: {
         modelCatalog: {
-          models: [{ model: "portable-model" }],
+          models: [{ model: "desktop-model" }],
         },
       },
     };
     const plan = createDraftRoutingPlan([source], [source]);
-    const codexExecutable = "C:\\Tools\\CodexPortable\\Codex.exe";
+    const codexExecutable =
+      "C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.623.141536.0_x64__2p2nqsd0c76g0\\app\\Codex.exe";
     vi.mocked(proxyApi.unlockCodexModelPicker)
       .mockResolvedValueOnce({
         attemptedPorts: [9229],
@@ -2172,7 +2165,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
         targetTitle: null,
         targetUrl: null,
         modelCount: 1,
-        modelNames: ["portable-model"],
+        modelNames: ["desktop-model"],
         injected: false,
         launched: false,
         codexExecutable,
@@ -2182,11 +2175,11 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       .mockResolvedValueOnce({
         attemptedPorts: [9229],
         debugPort: 9229,
-        targetId: "portable-target",
+        targetId: "desktop-target",
         targetTitle: "Codex",
         targetUrl: "app://codex",
         modelCount: 1,
-        modelNames: ["portable-model"],
+        modelNames: ["desktop-model"],
         injected: true,
         launched: true,
         codexExecutable,
@@ -2213,53 +2206,39 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     await waitFor(() =>
       expect(screen.getByText("模型菜单白名单尚未注入")).toBeInTheDocument(),
     );
-    expect(screen.getByText(/已记住 Codex\.exe 路径/)).toBeInTheDocument();
+    expect(screen.getByText(/Codex Desktop 主程序/)).toBeInTheDocument();
     expect(
-      window.localStorage.getItem("ccswitch.codexDesktopExecutablePath"),
-    ).toBe(codexExecutable);
+      screen.getByText(/让 CCSwitchMulti 用 remote debugging 重新启动 Desktop/),
+    ).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "解锁模型菜单" }));
 
     await waitFor(() =>
-      expect(proxyApi.unlockCodexModelPicker).toHaveBeenNthCalledWith(
-        2,
-        codexExecutable,
-      ),
+      expect(proxyApi.unlockCodexModelPicker).toHaveBeenCalledTimes(2),
     );
+    expect(proxyApi.unlockCodexModelPicker).toHaveBeenNthCalledWith(1);
+    expect(proxyApi.unlockCodexModelPicker).toHaveBeenNthCalledWith(2);
     expect(screen.getByText("模型菜单白名单已注入")).toBeInTheDocument();
   });
 
-  it("lets users select a portable Codex.exe after unlock cannot auto-locate Desktop", async () => {
+  // 找不到 Desktop 时只展示失败原因，避免把 CCSwitchMulti portable 误解成 Codex Desktop portable。
+  it("shows unlock failures without offering a manual Codex.exe picker", async () => {
     const source: Provider = {
-      id: "codex-portable-select-source",
-      name: "Portable Select Source",
+      id: "codex-desktop-missing-source",
+      name: "Desktop Missing Source",
       category: "custom",
       settingsConfig: {
         modelCatalog: {
-          models: [{ model: "selected-portable-model" }],
+          models: [{ model: "missing-desktop-model" }],
         },
       },
     };
     const plan = createDraftRoutingPlan([source], [source]);
-    const selectedExecutable = "C:\\PortableApps\\Codex\\Codex.exe";
-    vi.mocked(proxyApi.unlockCodexModelPicker)
-      .mockRejectedValueOnce(
-        new Error("Codex Desktop executable was not found"),
-      )
-      .mockResolvedValueOnce({
-        attemptedPorts: [9229],
-        debugPort: 9229,
-        targetId: "selected-portable-target",
-        targetTitle: "Codex",
-        targetUrl: "app://codex",
-        modelCount: 1,
-        modelNames: ["selected-portable-model"],
-        injected: true,
-        launched: true,
-        codexExecutable: selectedExecutable,
-        message: "Codex Desktop model picker whitelist patch was injected.",
-      });
-    dialogFixture.open.mockResolvedValueOnce(selectedExecutable);
+    vi.mocked(proxyApi.unlockCodexModelPicker).mockRejectedValueOnce(
+      new Error(
+        "Codex Desktop executable was not found. Install the Codex Windows app from Microsoft Store.",
+      ),
+    );
 
     renderWorkspace(
       React.createElement(CodexRouterWorkspacePage, {
@@ -2281,29 +2260,13 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     await waitFor(() =>
       expect(screen.getByText(/模型菜单解锁失败/)).toBeInTheDocument(),
     );
+    expect(proxyApi.unlockCodexModelPicker).toHaveBeenCalledWith();
     expect(
-      window.localStorage.getItem("ccswitch.codexDesktopExecutablePath"),
-    ).toBeNull();
-
-    await user.click(
-      screen.getByRole("button", { name: "选择 Codex.exe 后解锁" }),
-    );
-
-    await waitFor(() =>
-      expect(proxyApi.unlockCodexModelPicker).toHaveBeenNthCalledWith(
-        2,
-        selectedExecutable,
-      ),
-    );
-    expect(dialogFixture.open).toHaveBeenCalledWith({
-      multiple: false,
-      directory: false,
-      filters: [{ name: "Codex Desktop", extensions: ["exe"] }],
-    });
+      screen.queryByRole("button", { name: "选择 Codex.exe 后解锁" }),
+    ).not.toBeInTheDocument();
     expect(
-      window.localStorage.getItem("ccswitch.codexDesktopExecutablePath"),
-    ).toBe(selectedExecutable);
-    expect(screen.getByText("模型菜单白名单已注入")).toBeInTheDocument();
+      screen.queryByText(/ccswitch\.codexDesktopExecutablePath/),
+    ).not.toBeInTheDocument();
   });
 
   // onRuntimeReady 负向测试：即使最近一条 Codex 代理日志成功，只要它没有命中当前

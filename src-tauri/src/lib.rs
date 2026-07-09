@@ -1397,7 +1397,6 @@ pub fn run() {
             commands::get_proxy_status,
             commands::diagnose_codex_multirouter,
             commands::unlock_codex_model_picker,
-            commands::unlock_codex_model_picker_with_executable,
             commands::sync_codex_history_to_multirouter,
             commands::repair_codex_history_visibility,
             commands::list_codex_history_sessions,

@@ -582,19 +582,6 @@ pub async fn unlock_codex_model_picker() -> Result<CodexModelPickerUnlockResult,
     crate::codex_desktop::unlock_codex_model_picker().await
 }
 
-/// 通过用户选择或前端记住的 Desktop `Codex.exe` 路径启动 Codex 并注入模型菜单补丁。
-///
-/// 用于便携版 zip：这类安装不一定能从 WindowsApps/固定 LocalAppData 位置自动发现。
-#[tauri::command]
-pub async fn unlock_codex_model_picker_with_executable(
-    codex_executable: String,
-) -> Result<CodexModelPickerUnlockResult, String> {
-    crate::codex_desktop::unlock_codex_model_picker_with_executable_path(std::path::PathBuf::from(
-        codex_executable,
-    ))
-    .await
-}
-
 /// 显式把 Codex 历史 provider 桶同步到 MultiRouter 的 `custom` 运行桶。
 ///
 /// 该命令会备份并重写本机 Codex session/jsonl 与 state sqlite；前端必须由用户主动触发，
