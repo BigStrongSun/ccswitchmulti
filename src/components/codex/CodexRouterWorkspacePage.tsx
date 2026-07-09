@@ -117,11 +117,11 @@ type SpawnAgentCandidateView = "selected" | "routed" | "priority" | "all";
 
 // 模型菜单解锁只处理 Codex Desktop renderer 白名单，不改变 MultiRouter 路由或凭据。
 const MODEL_PICKER_UNLOCK_TOOLTIP =
-  "开启或确认 Codex 接管后，CCSwitchMulti 会自动尝试一次；如果 Codex Desktop 模型菜单仍只显示“自定义”，请完全退出 Codex 后点击这里。它会用 remote debugging 启动或连接 Codex Desktop，并注入 renderer 模型白名单补丁；不会改变路由规则、API Key 或模型目录。";
+  "开启或确认 Codex 接管后，CCSwitchMulti 会自动尝试一次。只有当前 Codex Desktop 已普通启动且没有 remote debugging 时，才需要完全退出后点击这里；成功带 CDP 启动后，切换第三方 API Key 不需要重复解锁。它只注入 renderer 模型白名单补丁，不改变路由规则、API Key 或模型目录。";
 
 // 链路页需要给出明确下一步，避免用户只看到诊断异常却不知道要触发解锁。
 const MODEL_PICKER_UNLOCK_HINT =
-  "开启或确认 Codex 接管后会自动尝试一次；若模型菜单仍只显示“自定义”，请完全退出 Codex Desktop，再点击“解锁模型菜单”。";
+  "开启或确认 Codex 接管后会自动尝试一次；若当前 Desktop 已普通启动且菜单仍只显示“自定义”，请完全退出 Codex Desktop 后点击“解锁模型菜单”。";
 
 type CodexRoute = {
   id?: string;
@@ -5425,7 +5425,7 @@ function StatusTab({
                     {modelPickerUnlockResult.codexExecutable}
                   </span>
                   {!modelPickerUnlockResult.injected
-                    ? "。请完全退出 Codex Desktop 后再次点击“解锁模型菜单”，让 CCSwitchMulti 用 remote debugging 重新启动 Desktop。"
+                    ? "。已捕获该 Desktop 路径；请完全退出 Codex Desktop 后再次点击“解锁模型菜单”，让 CCSwitchMulti 用 remote debugging 启动同一个 Desktop。成功注入后，切换第三方 API Key 不需要重复解锁。"
                     : ""}
                 </div>
               ) : null}

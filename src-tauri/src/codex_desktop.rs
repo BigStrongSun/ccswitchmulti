@@ -14,6 +14,7 @@ const CDP_HTTP_TIMEOUT: Duration = Duration::from_secs(2);
 const CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
 const CDP_COMMAND_TIMEOUT: Duration = Duration::from_secs(4);
 const MODEL_PICKER_PATCH_KEY: &str = "__ccSwitchCodexModelPickerUnlockV3";
+const REMEMBERED_CODEX_DESKTOP_EXECUTABLE_FILENAME: &str = "codex-desktop-executable.json";
 
 /// Codex Desktop 模型菜单解锁命令的执行结果。
 #[derive(Debug, Clone, Serialize)]
@@ -69,7 +70,8 @@ pub async fn unlock_codex_model_picker() -> Result<CodexModelPickerUnlockResult,
     }
 
     let running_main = detect_running_codex_main_process();
-    if running_main.is_some() {
+    if let Some(running_main) = running_main {
+        let remembered = remember_codex_desktop_executable(&running_main).ok();
         return Ok(CodexModelPickerUnlockResult {
             attempted_ports,
             debug_port: None,
@@ -80,13 +82,19 @@ pub async fn unlock_codex_model_picker() -> Result<CodexModelPickerUnlockResult,
             model_names: catalog.model_names,
             injected: false,
             launched: false,
-            codex_executable: running_main.map(|path| path.display().to_string()),
+            codex_executable: Some(
+                remembered
+                    .as_ref()
+                    .unwrap_or(&running_main)
+                    .display()
+                    .to_string(),
+            ),
             message: "Codex Desktop is already running without an injectable CDP port. Fully quit Codex, then launch it from CCSwitchMulti so the model picker patch can be installed.".to_string(),
         });
     }
 
     let executable =
-        resolve_codex_executable().ok_or_else(|| "Codex Desktop executable was not found. Install the Codex Windows app from Microsoft Store or start Codex once so CCSwitchMulti can detect the Desktop shell; the CLI/app-server codex.exe cannot unlock the Desktop renderer model picker.".to_string())?;
+        resolve_codex_executable().ok_or_else(|| "Codex Desktop executable was not found. CCSwitchMulti checked the running Desktop process, remembered Desktop path, MSIX/Appx package metadata and manifest, App Paths registry entries, PATH commands, and common local install folders. Install or start the Codex Windows app once; the CLI/app-server codex.exe cannot unlock the Desktop renderer model picker.".to_string())?;
     launch_codex_with_debug_port(&executable, DEFAULT_CODEX_DEBUG_PORT)?;
 
     let mut last_result = None;
@@ -805,7 +813,7 @@ fn detect_running_codex_main_process() -> Option<PathBuf> {
     {
         let script = r#"
 Get-CimInstance Win32_Process -Filter "Name = 'Codex.exe'" |
-  Where-Object { $_.CommandLine -and $_.CommandLine -notmatch ' --type=' } |
+  Where-Object { $_.ExecutablePath -and ($_.CommandLine -notmatch ' --type=') } |
   Select-Object -First 1 -ExpandProperty ExecutablePath
 "#;
         let output = Command::new("powershell")
@@ -833,21 +841,136 @@ Get-CimInstance Win32_Process -Filter "Name = 'Codex.exe'" |
 fn resolve_codex_executable() -> Option<PathBuf> {
     detect_running_codex_main_process()
         .filter(|path| path.exists())
+        .and_then(|path| remember_codex_desktop_executable(&path).ok().or(Some(path)))
+        .or_else(read_remembered_codex_desktop_executable)
         .or_else(find_latest_windows_codex_executable)
+}
+
+/// 存储最近确认过的大写 `Codex.exe` 路径，支持 portable Codex Desktop 不在系统安装目录的场景。
+fn remembered_codex_desktop_executable_path() -> PathBuf {
+    crate::config::get_app_config_dir().join(REMEMBERED_CODEX_DESKTOP_EXECUTABLE_FILENAME)
+}
+
+/// 校验 Desktop 主程序路径，避免把小写 CLI/app-server `codex.exe` 当成 Electron shell。
+fn canonical_codex_desktop_executable_path(path: &Path) -> Result<PathBuf, String> {
+    if !path.exists() {
+        return Err(format!(
+            "Codex Desktop executable does not exist: {}",
+            path.display()
+        ));
+    }
+    if !path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == "Codex.exe")
+    {
+        return Err(format!(
+            "Detected file is not Codex Desktop's Codex.exe: {}",
+            path.display()
+        ));
+    }
+    path.canonicalize().map_err(|error| {
+        format!(
+            "Failed to resolve Codex Desktop executable {}: {error}",
+            path.display()
+        )
+    })
+}
+
+/// 读取上次从运行中 Desktop 捕获到的 portable `Codex.exe` 路径。
+fn read_remembered_codex_desktop_executable() -> Option<PathBuf> {
+    read_remembered_codex_desktop_executable_from(&remembered_codex_desktop_executable_path())
+}
+
+/// 从指定状态文件读取记住的 Desktop 主程序路径，便于测试隔离。
+fn read_remembered_codex_desktop_executable_from(state_path: &Path) -> Option<PathBuf> {
+    let value = crate::config::read_json_file::<Value>(state_path).ok()?;
+    let executable = value
+        .get("codex_executable")
+        .or_else(|| value.get("codexExecutable"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)?;
+    canonical_codex_desktop_executable_path(&executable).ok()
+}
+
+/// 记住已运行的 Desktop shell 路径；失败只影响下一次自动启动，不影响本次诊断返回。
+fn remember_codex_desktop_executable(path: &Path) -> Result<PathBuf, String> {
+    let executable = canonical_codex_desktop_executable_path(path)?;
+    remember_codex_desktop_executable_at(&remembered_codex_desktop_executable_path(), &executable)
+}
+
+/// 将已校验的 Desktop 主程序路径写入指定状态文件，便于测试隔离。
+fn remember_codex_desktop_executable_at(
+    state_path: &Path,
+    executable: &Path,
+) -> Result<PathBuf, String> {
+    let executable = canonical_codex_desktop_executable_path(executable)?;
+    crate::config::write_json_file(
+        state_path,
+        &json!({
+            "codex_executable": executable.display().to_string(),
+        }),
+    )
+    .map_err(|error| {
+        format!(
+            "Failed to remember Codex Desktop executable at {}: {error}",
+            state_path.display()
+        )
+    })?;
+    Ok(executable)
 }
 
 /// 在 WindowsApps 中选择版本最新的 Codex Desktop。
 #[cfg(target_os = "windows")]
 fn find_latest_windows_codex_executable() -> Option<PathBuf> {
     let mut candidates = Vec::new();
+    collect_registry_codex_executable_candidates(&mut candidates);
+    collect_path_codex_executable_candidates(&mut candidates);
     collect_windowsapps_codex_executable_candidates(&mut candidates);
     collect_appx_codex_executable_candidates(&mut candidates);
+    collect_local_windows_codex_executable_candidates(&mut candidates);
 
     candidates.sort_by(|left, right| left.0.cmp(&right.0));
-    candidates
-        .pop()
-        .map(|(_, executable)| executable)
-        .or_else(find_local_windows_codex_executable)
+    candidates.pop().map(|(_, executable)| executable)
+}
+
+/// 从 Windows App Paths 注册表读取显式应用路径，覆盖独立安装器注册的 Desktop。
+#[cfg(target_os = "windows")]
+fn collect_registry_codex_executable_candidates(candidates: &mut Vec<(Vec<u32>, PathBuf)>) {
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+    use winreg::RegKey;
+
+    for hive in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
+        let root = RegKey::predef(hive);
+        for subkey in [
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\Codex.exe",
+            r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\Codex.exe",
+        ] {
+            let Ok(key) = root.open_subkey(subkey) else {
+                continue;
+            };
+            let Ok(path) = key.get_value::<String, _>("") else {
+                continue;
+            };
+            push_codex_desktop_executable_candidate(candidates, Vec::new(), PathBuf::from(path));
+        }
+    }
+}
+
+/// 从 PATH 中查找大写 Desktop `Codex.exe`，兼容用户手动加入 PATH 的独立安装。
+#[cfg(target_os = "windows")]
+fn collect_path_codex_executable_candidates(candidates: &mut Vec<(Vec<u32>, PathBuf)>) {
+    let script = r#"
+Get-Command Codex.exe -All -ErrorAction SilentlyContinue |
+  Where-Object { $_.Name -ceq 'Codex.exe' -and $_.Source } |
+  Select-Object -ExpandProperty Source |
+  ConvertTo-Json -Compress
+"#;
+    for path in powershell_json_string_list(script) {
+        push_codex_desktop_executable_candidate(candidates, Vec::new(), PathBuf::from(path));
+    }
 }
 
 /// 扫描 WindowsApps 包目录，收集可启动 Desktop renderer 的大写 `Codex.exe` 候选。
@@ -873,12 +996,15 @@ fn collect_windowsapps_codex_executable_candidates(candidates: &mut Vec<(Vec<u32
             let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
                 continue;
             };
-            if !name.starts_with("OpenAI.Codex_") {
+            if !name.contains("Codex") {
                 continue;
             }
             for executable in windows_codex_package_executable_candidates(&path) {
-                if executable.exists() {
-                    candidates.push((version_tuple_from_package_name(name), executable));
+                if push_codex_desktop_executable_candidate(
+                    candidates,
+                    version_tuple_from_package_name(name),
+                    executable,
+                ) {
                     break;
                 }
             }
@@ -896,6 +1022,7 @@ fn find_latest_windows_codex_executable() -> Option<PathBuf> {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct WindowsCodexAppxPackage {
+    package_full_name: Option<String>,
     version: Option<String>,
     install_location: Option<String>,
 }
@@ -904,24 +1031,17 @@ struct WindowsCodexAppxPackage {
 #[cfg(target_os = "windows")]
 fn collect_appx_codex_executable_candidates(candidates: &mut Vec<(Vec<u32>, PathBuf)>) {
     let script = r#"
-Get-AppxPackage -Name OpenAI.Codex |
-  Select-Object Version,InstallLocation |
+$packages = @()
+$packages += Get-AppxPackage -Name OpenAI.Codex -ErrorAction SilentlyContinue
+$packages += Get-AppxPackage -Name *Codex* -ErrorAction SilentlyContinue
+try { $packages += Get-AppxPackage -AllUsers -Name *Codex* -ErrorAction SilentlyContinue } catch {}
+$packages |
+  Where-Object { $_.InstallLocation -and ($_.Name -like '*Codex*' -or $_.PackageFullName -like '*Codex*' -or $_.PackageFamilyName -like '*Codex*') } |
+  Sort-Object PackageFullName -Unique |
+  Select-Object Name,PackageFullName,PackageFamilyName,Version,InstallLocation |
   ConvertTo-Json -Compress
 "#;
-    let Ok(output) = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .output()
-    else {
-        return;
-    };
-    if !output.status.success() {
-        return;
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if stdout.is_empty() {
-        return;
-    }
-    let Ok(value) = serde_json::from_str::<Value>(&stdout) else {
+    let Some(value) = powershell_json_value(script) else {
         return;
     };
     let packages = if value.is_array() {
@@ -942,16 +1062,20 @@ Get-AppxPackage -Name OpenAI.Codex |
         else {
             continue;
         };
+        let sort_key = package
+            .version
+            .as_deref()
+            .map(version_tuple_from_text)
+            .or_else(|| {
+                package
+                    .package_full_name
+                    .as_deref()
+                    .map(version_tuple_from_package_name)
+                    .filter(|version| !version.is_empty())
+            })
+            .unwrap_or_default();
         for executable in windows_codex_package_executable_candidates(&root) {
-            if executable.exists() {
-                candidates.push((
-                    package
-                        .version
-                        .as_deref()
-                        .map(version_tuple_from_text)
-                        .unwrap_or_default(),
-                    executable,
-                ));
+            if push_codex_desktop_executable_candidate(candidates, sort_key.clone(), executable) {
                 break;
             }
         }
@@ -964,29 +1088,158 @@ Get-AppxPackage -Name OpenAI.Codex |
 /// 放到 `app/resources`。只接受大写 `Codex.exe`，避免把 CLI launcher 当 Desktop。
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn windows_codex_package_executable_candidates(package_root: &Path) -> Vec<PathBuf> {
-    vec![
+    let mut candidates = appx_manifest_codex_executable_candidates(package_root);
+    candidates.extend([
         package_root.join("app").join("Codex.exe"),
         package_root.join("app").join("resources").join("Codex.exe"),
         package_root.join("Codex.exe"),
-    ]
+    ]);
+    dedupe_paths(candidates)
 }
 
 #[cfg(target_os = "windows")]
-fn find_local_windows_codex_executable() -> Option<PathBuf> {
+fn collect_local_windows_codex_executable_candidates(candidates: &mut Vec<(Vec<u32>, PathBuf)>) {
     let mut roots = Vec::new();
     if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
-        let root = PathBuf::from(local_app_data).join("OpenAI").join("Codex");
+        let local_app_data = PathBuf::from(local_app_data);
+        let root = local_app_data.join("OpenAI").join("Codex");
         roots.push(root.clone());
         roots.push(root.join("app"));
+        roots.push(local_app_data.join("Programs").join("OpenAI").join("Codex"));
+        roots.push(local_app_data.join("Programs").join("Codex"));
+    }
+    if let Some(program_files) = std::env::var_os("ProgramFiles") {
+        let program_files = PathBuf::from(program_files);
+        roots.push(program_files.join("OpenAI").join("Codex"));
+        roots.push(program_files.join("Codex"));
+    }
+    if let Some(program_w6432) = std::env::var_os("ProgramW6432") {
+        roots.push(PathBuf::from(program_w6432).join("OpenAI").join("Codex"));
+    }
+    if let Some(program_files_x86) = std::env::var_os("ProgramFiles(x86)") {
+        roots.push(
+            PathBuf::from(program_files_x86)
+                .join("OpenAI")
+                .join("Codex"),
+        );
+    }
+    if let Some(user_profile) = std::env::var_os("USERPROFILE") {
+        roots.push(
+            PathBuf::from(user_profile)
+                .join("scoop")
+                .join("apps")
+                .join("codex")
+                .join("current"),
+        );
     }
 
     for root in roots {
-        let executable = root.join("Codex.exe");
-        if executable.exists() {
-            return Some(executable);
+        push_codex_desktop_executable_candidate(candidates, Vec::new(), root.join("Codex.exe"));
+    }
+}
+
+/// 从 AppxManifest.xml 读取 Desktop 应用声明的 Executable，减少对包内部目录结构的猜测。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn appx_manifest_codex_executable_candidates(package_root: &Path) -> Vec<PathBuf> {
+    let manifest_path = package_root.join("AppxManifest.xml");
+    let Ok(text) = std::fs::read_to_string(manifest_path) else {
+        return Vec::new();
+    };
+    appx_manifest_codex_executable_values(&text)
+        .into_iter()
+        .map(|relative| package_root.join(relative.replace('/', "\\")))
+        .collect()
+}
+
+/// 提取 manifest 中大写 `Codex.exe` 的相对路径；小写 CLI/app-server `codex.exe` 不参与。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn appx_manifest_codex_executable_values(text: &str) -> Vec<String> {
+    let Ok(regex) = regex::Regex::new(r#"Executable\s*=\s*"([^"]+)""#) else {
+        return Vec::new();
+    };
+    regex
+        .captures_iter(text)
+        .filter_map(|captures| captures.get(1).map(|value| value.as_str().trim()))
+        .filter(|value| {
+            Path::new(value)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name == "Codex.exe")
+        })
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+/// 校验并加入候选，统一过滤小写 CLI/app-server 路径和不存在的路径。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn push_codex_desktop_executable_candidate(
+    candidates: &mut Vec<(Vec<u32>, PathBuf)>,
+    version: Vec<u32>,
+    path: PathBuf,
+) -> bool {
+    let Ok(path) = canonical_codex_desktop_executable_path(&path) else {
+        return false;
+    };
+    if !candidates
+        .iter()
+        .any(|(_, existing)| paths_equal_ignore_ascii_case(existing, &path))
+    {
+        candidates.push((version, path));
+    }
+    true
+}
+
+/// 去重候选路径，保留原始优先级顺序。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut deduped = Vec::new();
+    for path in paths {
+        if !deduped
+            .iter()
+            .any(|existing: &PathBuf| paths_equal_ignore_ascii_case(existing, &path))
+        {
+            deduped.push(path);
         }
     }
-    None
+    deduped
+}
+
+/// 执行 PowerShell 并解析 JSON 输出，统一处理空输出和脚本失败。
+#[cfg(target_os = "windows")]
+fn powershell_json_value(script: &str) -> Option<Value> {
+    let output = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if stdout.is_empty() {
+        return None;
+    }
+    serde_json::from_str::<Value>(&stdout).ok()
+}
+
+/// 解析 PowerShell 输出的字符串或字符串数组 JSON。
+#[cfg(target_os = "windows")]
+fn powershell_json_string_list(script: &str) -> Vec<String> {
+    match powershell_json_value(script) {
+        Some(Value::String(value)) => vec![value],
+        Some(Value::Array(values)) => values
+            .into_iter()
+            .filter_map(|value| value.as_str().map(str::to_string))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Windows 路径比较需要忽略大小写；非 Windows 测试也复用该规则验证候选去重。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn paths_equal_ignore_ascii_case(left: &Path, right: &Path) -> bool {
+    left.as_os_str()
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&right.as_os_str().to_string_lossy())
 }
 
 /// 从版本号文本解析排序 key，兼容 MSIX 包名和 `Get-AppxPackage Version` 字段。
@@ -1001,8 +1254,8 @@ fn version_tuple_from_text(version: &str) -> Vec<u32> {
 /// 从 WindowsApps 包目录名解析版本号，供排序使用。
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn version_tuple_from_package_name(name: &str) -> Vec<u32> {
-    name.strip_prefix("OpenAI.Codex_")
-        .and_then(|rest| rest.split_once('_').map(|(version, _)| version))
+    name.split('_')
+        .nth(1)
         .map(version_tuple_from_text)
         .unwrap_or_default()
 }
@@ -1072,6 +1325,34 @@ mod tests {
         }));
     }
 
+    /// 验证 Appx manifest 里的 Desktop `Codex.exe` 会优先进入候选，且不会误收小写 CLI。
+    #[test]
+    fn appx_manifest_candidates_use_declared_desktop_executable() {
+        let package_dir = tempfile::tempdir().expect("create appx package temp dir");
+        std::fs::write(
+            package_dir.path().join("AppxManifest.xml"),
+            r#"
+<Package>
+  <Applications>
+    <Application Id="App" Executable="app/bin/Codex.exe" EntryPoint="Windows.FullTrustApplication" />
+    <Application Id="Cli" Executable="app/resources/codex.exe" EntryPoint="Windows.FullTrustApplication" />
+  </Applications>
+</Package>
+"#,
+        )
+        .expect("write appx manifest");
+
+        let candidates = windows_codex_package_executable_candidates(package_dir.path());
+
+        assert_eq!(candidates[0], package_dir.path().join(r"app\bin\Codex.exe"));
+        assert!(!candidates.iter().any(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name == "codex.exe")
+        }));
+    }
+
+    /// 验证 MSIX/Appx 包名版本解析兼容稳定版和预览版包名。
     #[test]
     fn codex_desktop_version_sort_keys_parse_package_and_appx_versions() {
         assert_eq!(
@@ -1079,10 +1360,52 @@ mod tests {
             vec![26, 623, 141536, 0]
         );
         assert_eq!(
+            version_tuple_from_package_name("OpenAI.Codex.Preview_27.1.2.3_x64__2p2nqsd0c76g0"),
+            vec![27, 1, 2, 3]
+        );
+        assert_eq!(
             version_tuple_from_text("26.623.141536.0"),
             vec![26, 623, 141536, 0]
         );
-        assert!(version_tuple_from_package_name("Other.Package_1.2.3_x64").is_empty());
+        assert!(version_tuple_from_package_name("Other.Package.Without.Version").is_empty());
+    }
+
+    /// 验证只接受大写 Desktop shell，避免把 CLI/app-server `codex.exe` 用于 renderer 解锁。
+    #[test]
+    fn codex_desktop_executable_validation_rejects_cli_launcher() {
+        let desktop_dir = tempfile::tempdir().expect("create desktop temp dir");
+        let desktop = desktop_dir.path().join("Codex.exe");
+        std::fs::write(&desktop, "").expect("write desktop exe");
+        let resolved = canonical_codex_desktop_executable_path(&desktop)
+            .expect("uppercase Desktop Codex.exe should be accepted");
+        assert!(resolved.ends_with("Codex.exe"));
+
+        let cli_dir = tempfile::tempdir().expect("create cli temp dir");
+        let cli = cli_dir.path().join("codex.exe");
+        std::fs::write(&cli, "").expect("write cli exe");
+        let error = canonical_codex_desktop_executable_path(&cli)
+            .expect_err("lowercase CLI codex.exe should be rejected");
+        assert!(error.contains("not Codex Desktop"));
+    }
+
+    /// 验证便携版 Desktop 路径能写入状态文件并再次读回。
+    #[test]
+    fn remembered_codex_desktop_executable_round_trips_portable_path() {
+        let desktop_dir = tempfile::tempdir().expect("create portable desktop temp dir");
+        let desktop = desktop_dir.path().join("Codex.exe");
+        std::fs::write(&desktop, "").expect("write desktop exe");
+        let state_dir = tempfile::tempdir().expect("create state temp dir");
+        let state_path = state_dir
+            .path()
+            .join(REMEMBERED_CODEX_DESKTOP_EXECUTABLE_FILENAME);
+
+        let remembered = remember_codex_desktop_executable_at(&state_path, &desktop)
+            .expect("remember portable desktop path");
+        let loaded = read_remembered_codex_desktop_executable_from(&state_path)
+            .expect("read remembered portable desktop path");
+
+        assert_eq!(loaded, remembered);
+        assert!(loaded.ends_with("Codex.exe"));
     }
 
     #[test]

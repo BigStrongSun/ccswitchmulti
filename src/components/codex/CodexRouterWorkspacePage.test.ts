@@ -2117,12 +2117,12 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
 
     expect(
       screen.getByText(
-        "开启或确认 Codex 接管后会自动尝试一次；若模型菜单仍只显示“自定义”，请完全退出 Codex Desktop，再点击“解锁模型菜单”。",
+        "开启或确认 Codex 接管后会自动尝试一次；若当前 Desktop 已普通启动且菜单仍只显示“自定义”，请完全退出 Codex Desktop 后点击“解锁模型菜单”。",
       ),
     ).toBeInTheDocument();
     expect(
       screen.getByTitle(
-        /开启或确认 Codex 接管后，CCSwitchMulti 会自动尝试一次；如果 Codex Desktop 模型菜单仍只显示“自定义”/,
+        /只有当前 Codex Desktop 已普通启动且没有 remote debugging 时，才需要完全退出后点击这里/,
       ),
     ).toBeInTheDocument();
 
@@ -2137,7 +2137,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     expect(screen.getByText("模型菜单白名单已注入")).toBeInTheDocument();
     expect(
       screen.queryByText(
-        "开启或确认 Codex 接管后会自动尝试一次；若模型菜单仍只显示“自定义”，请完全退出 Codex Desktop，再点击“解锁模型菜单”。",
+        "开启或确认 Codex 接管后会自动尝试一次；若当前 Desktop 已普通启动且菜单仍只显示“自定义”，请完全退出 Codex Desktop 后点击“解锁模型菜单”。",
       ),
     ).not.toBeInTheDocument();
   });
@@ -2208,7 +2208,12 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     );
     expect(screen.getByText(/Codex Desktop 主程序/)).toBeInTheDocument();
     expect(
-      screen.getByText(/让 CCSwitchMulti 用 remote debugging 重新启动 Desktop/),
+      screen.getByText(
+        /已捕获该 Desktop 路径；请完全退出 Codex Desktop 后再次点击“解锁模型菜单”/,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/切换第三方 API Key 不需要重复解锁/),
     ).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "解锁模型菜单" }));

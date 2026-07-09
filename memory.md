@@ -16,11 +16,13 @@
 - 不要把 `service_tiers=[]` 直接当成自定义模型不可见的根因。Codex core 和 TUI 测试里空 `service_tiers` 是合法模型路径；如果要补 `available_in_plans`、`minimal_client_version` 等新字段，必须先用当前 Codex Desktop/app-server 版本验证字段过滤逻辑，不能仅根据 issue 评论猜测写模板。
 - 链路状态页的“解锁模型菜单”是用户处理 renderer 白名单门控的显式下一步：按钮 hover/`title` 必须说明它会通过 remote debugging 启动或连接 Codex Desktop 并注入 renderer 模型白名单，不会改路由、API Key 或模型目录；页面也要短提示“先完全退出 Codex Desktop，再点击解锁”，避免用户只看到“自定义”菜单却不知道要触发该动作。
 - 模型菜单解锁会在 Codex 接管开启或确认已接管后 best-effort 自动尝试一次；它不是常驻守护修复。若 Codex Desktop 已经以普通方式运行且没有 CDP 端口，CCSwitchMulti 不会静默杀进程或重启用户窗口，必须提示用户完全退出 Codex Desktop 后再点“解锁模型菜单”。
-- `#10` 的 portable 前提指 CCSwitchMulti 自身的 portable 版本，不是 Codex Desktop portable。Codex Desktop 仍按官方 Windows App / MSIX 安装边界处理；前端不要提供“手动选择 Codex.exe”主流程，也不要把路径写进 `ccswitch.codexDesktopExecutablePath`。
+- `#10` 的 portable 前提同时可能指 CCSwitchMulti 和 Codex Desktop 都来自 zip。不要恢复前端“手动选择 Codex.exe”主流程，也不要把路径写进 `ccswitch.codexDesktopExecutablePath`；正确边界是后端在用户点“解锁模型菜单”且发现正在运行的大写 `Codex.exe` 时，把该 Desktop shell 路径记到 `.cc-switch/codex-desktop-executable.json`。用户退出 portable Desktop 后再次点击时，后端用这个已校验路径带 remote debugging 启动同一个 Desktop。
 - Codex Desktop、Codex CLI 和 app-server 要分层处理：大写 `Codex.exe` 是 Desktop/Electron shell，用于 renderer/CDP 模型菜单解锁；小写 `codex.exe` 是 CLI/app-server，`codex app-server` 是 JSON-RPC 协议服务，不能当成 Desktop renderer 可执行文件。
 - CLI catalog 验证和 Desktop 模型菜单解锁是两条路径：`codex debug models` / `/v1/models` 用来证明 CLI 或 app-server 能看到原始模型目录；Desktop 菜单仍可能被 renderer/Statsig/React cache 过滤，需要 CDP 注入白名单。修 issue #10 时两边都要看，但不要把 CLI 成功等同于 Desktop 菜单已解锁。
 - Codex Desktop 自动发现应由后端完成：优先复用正在运行的大写 `Codex.exe`，再通过 WindowsApps 包目录和 `Get-AppxPackage -Name OpenAI.Codex` 的 `InstallLocation` 查找 MSIX 安装位置；错误文案必须明确提示安装/启动 Codex Windows app，并说明 CLI/app-server `codex.exe` 不能解锁 Desktop renderer。
+- 多用户报 `Codex Desktop executable was not found` 时，根因通常在路径发现覆盖面而不是模型目录：非管理员进程可能不能枚举 `C:\Program Files\WindowsApps`，包名也可能不只是 `OpenAI.Codex`。自动发现必须依次覆盖运行中进程 `ExecutablePath`、记住的后端路径、App Paths 注册表、PATH 中大写 `Codex.exe`、`Get-AppxPackage -Name *Codex*` / best-effort `-AllUsers`、AppxManifest.xml 的 `Application Executable`、常见 `%LOCALAPPDATA%\Programs` / `%ProgramFiles%` / scoop 路径，并继续严格排除小写 `codex.exe`。
 - API Key 登录不会让 MultiRouter 路由或 CDP 注入本身失效：第三方 key 应放在 provider-scoped `config.toml` token/本地代理占位符里，`auth.json` 的 ChatGPT OAuth 登录态应被保留；接管生成的本地 provider 继续带 `requires_openai_auth=true`，注入脚本还会把 renderer auth context 临时修成 `chatgpt`。但如果用户从未有官方 ChatGPT/OAuth 登录态，或 Codex Desktop 后续登录/刷新重建 renderer 状态，原生模型菜单仍可能重新回到“自定义”，需要完全退出 Desktop 后再次点“解锁模型菜单”。不要把这种展示层回退误判成上游 API Key 不能中转。
+- “完全退出再点”不是第三方 API Key 登录后的常规动作，只针对当前 Desktop 已经普通启动且无 CDP 的状态。成功由 CCSwitchMulti 带 CDP 启动并注入后，切换 DeepSeek/中转站 API Key provider 不应重复解锁；只有 Desktop 进程被用户关闭、普通方式重开、或 renderer 重建导致注入脚本丢失时才需要再次触发。遇到“解锁模型菜单报错”先看是否找不到 arbitrary zip 版 `Codex.exe`，再看 CDP 端口/renderer target，不要直接归因于 OAuth 或 API Key。
 
 ## 2026-07-09 OpenClaw Default Model Catalog Canonicalization
 
@@ -1890,4 +1892,3 @@
 - 这个桥接模式可以扩展到 `image_generation`：对第三方模型暴露 `generate_image(prompt, size, quality, format)`，CCSwitchMulti 内部调用 OpenAI Responses `tools: [{ "type": "image_generation" }]`，解析 `image_generation_call.result`，把 base64 解码成 artifact 文件，返回路径、MIME、尺寸和可选缩略图；不要把完整 base64 直接塞回模型上下文或普通日志。
 - `file_search` 也可桥接，但必须显式配置允许的 vector store、文件权限和日志脱敏；`computer_use` 不应作为普通 provider proxy tool-loop 的 MVP，因为它需要独立的交互会话、安全确认、屏幕状态和动作权限设计。
 - 实现建议新增 `src-tauri/src/proxy/providers/hosted_tools/` 模块，拆出 `bridge.rs`、`openai_client.rs`、`web_search.rs`、`image_generation.rs`、`file_search.rs`。默认只开启 `web_search`，`image_generation` 和 `file_search` 需要显式 allowlist，日志只记录 trace id、tool name、query hash、耗时和状态，不记录完整网页正文、完整 prompt、base64 图片或 API key。
-
