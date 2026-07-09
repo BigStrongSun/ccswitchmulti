@@ -577,6 +577,9 @@ pub async fn diagnose_codex_multirouter(
 /// 该命令不会修改 auth.json，也不会改变 MultiRouter 路由；它只在 Codex Desktop
 /// renderer 内修正模型候选列表过滤。若 Codex 已经以普通方式启动，需要先完全退出
 /// Codex，再由该命令启动带 remote debugging 参数的新实例。
+///
+/// CLI/app-server 不是这个 CDP 入口的启动目标；它们通过 live `config.toml`、
+/// `model_catalog_json`、本地 `/v1/models` 和 MultiRouter 转发链路继续受支持。
 #[tauri::command]
 pub async fn unlock_codex_model_picker() -> Result<CodexModelPickerUnlockResult, String> {
     crate::codex_desktop::unlock_codex_model_picker().await

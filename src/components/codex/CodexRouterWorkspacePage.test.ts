@@ -2117,12 +2117,12 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
 
     expect(
       screen.getByText(
-        "开启或确认 Codex 接管后会自动尝试一次；若当前 Desktop 已普通启动且菜单仍只显示“自定义”，请完全退出 Codex Desktop 后点击“解锁模型菜单”。",
+        "开启或确认 Codex 接管后会自动尝试一次；若当前 Desktop 已普通启动且菜单仍只显示“自定义”，请完全退出 Codex Desktop 后点击“解锁模型菜单”。CLI/app-server 的模型目录修复走 live config、model_catalog_json 和本地 /v1/models，不需要把小写 codex.exe 当 Desktop 启动。",
       ),
     ).toBeInTheDocument();
     expect(
       screen.getByTitle(
-        /只有当前 Codex Desktop 已普通启动且没有 remote debugging 时，才需要完全退出后点击这里/,
+        /CLI\/app-server 仍由 config\.toml、model_catalog_json、本地 \/v1\/models 和 MultiRouter 路由支持/,
       ),
     ).toBeInTheDocument();
 
@@ -2137,7 +2137,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     expect(screen.getByText("模型菜单白名单已注入")).toBeInTheDocument();
     expect(
       screen.queryByText(
-        "开启或确认 Codex 接管后会自动尝试一次；若当前 Desktop 已普通启动且菜单仍只显示“自定义”，请完全退出 Codex Desktop 后点击“解锁模型菜单”。",
+        "开启或确认 Codex 接管后会自动尝试一次；若当前 Desktop 已普通启动且菜单仍只显示“自定义”，请完全退出 Codex Desktop 后点击“解锁模型菜单”。CLI/app-server 的模型目录修复走 live config、model_catalog_json 和本地 /v1/models，不需要把小写 codex.exe 当 Desktop 启动。",
       ),
     ).not.toBeInTheDocument();
   });
@@ -2214,6 +2214,9 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     ).toBeInTheDocument();
     expect(
       screen.getByText(/切换第三方 API Key 不需要重复解锁/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/CLI\/app-server 继续使用 live config/),
     ).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "解锁模型菜单" }));

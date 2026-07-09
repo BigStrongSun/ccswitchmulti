@@ -15,6 +15,7 @@ const CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
 const CDP_COMMAND_TIMEOUT: Duration = Duration::from_secs(4);
 const MODEL_PICKER_PATCH_KEY: &str = "__ccSwitchCodexModelPickerUnlockV3";
 const REMEMBERED_CODEX_DESKTOP_EXECUTABLE_FILENAME: &str = "codex-desktop-executable.json";
+const CODEX_DESKTOP_EXECUTABLE_NOT_FOUND_MESSAGE: &str = "Codex Desktop executable was not found. CCSwitchMulti checked the running Desktop process, remembered Desktop path, MSIX/Appx package metadata and manifest, App Paths registry entries, PATH commands, and common local install folders. Install or start the Codex Windows app once. The Desktop menu unlock flow will not launch CLI/app-server codex.exe as an Electron shell; Codex CLI/app-server is still supported through live config.toml, model_catalog_json, the local /v1/models endpoint, and MultiRouter request routing.";
 
 /// Codex Desktop 模型菜单解锁命令的执行结果。
 #[derive(Debug, Clone, Serialize)]
@@ -93,8 +94,8 @@ pub async fn unlock_codex_model_picker() -> Result<CodexModelPickerUnlockResult,
         });
     }
 
-    let executable =
-        resolve_codex_executable().ok_or_else(|| "Codex Desktop executable was not found. CCSwitchMulti checked the running Desktop process, remembered Desktop path, MSIX/Appx package metadata and manifest, App Paths registry entries, PATH commands, and common local install folders. Install or start the Codex Windows app once; the CLI/app-server codex.exe cannot unlock the Desktop renderer model picker.".to_string())?;
+    let executable = resolve_codex_executable()
+        .ok_or_else(|| CODEX_DESKTOP_EXECUTABLE_NOT_FOUND_MESSAGE.to_string())?;
     launch_codex_with_debug_port(&executable, DEFAULT_CODEX_DEBUG_PORT)?;
 
     let mut last_result = None;
@@ -807,7 +808,10 @@ fn launch_codex_with_debug_port(executable: &Path, debug_port: u16) -> Result<()
         .map_err(|error| format!("failed to launch {}: {error}", executable.display()))
 }
 
-/// Windows 下查找 Codex Desktop 主进程的脚本；必须排除小写 app-server。
+/// Windows 下查找 Codex Desktop 主进程的脚本。
+///
+/// 注意：这里只排除“把小写 CLI/app-server 当成 Desktop shell 启动”的误用；
+/// CLI/app-server 本身仍由 live config、catalog 投影和本地代理路径支持。
 #[cfg(target_os = "windows")]
 const DETECT_CODEX_MAIN_PROCESS_SCRIPT: &str = r#"
 Get-CimInstance Win32_Process -Filter "Name = 'Codex.exe'" |
@@ -856,6 +860,9 @@ fn remembered_codex_desktop_executable_path() -> PathBuf {
 }
 
 /// 校验 Desktop 主程序路径，避免把小写 CLI/app-server `codex.exe` 当成 Electron shell。
+///
+/// 这不是禁用 CLI 支持；CLI/app-server 修复走 `config.toml`、`model_catalog_json`
+/// 和 `/v1/models`，而不是 Desktop renderer 的 CDP 注入入口。
 fn canonical_codex_desktop_executable_path(path: &Path) -> Result<PathBuf, String> {
     if !path.exists() {
         return Err(format!(
@@ -1089,7 +1096,8 @@ $packages |
 /// WindowsApps 包内的 Codex Desktop 可执行文件候选路径。
 ///
 /// MSIX 包布局随版本变化过：有的版本直接在 `app/Codex.exe`，有的把可执行文件
-/// 放到 `app/resources`。只接受大写 `Codex.exe`，避免把 CLI launcher 当 Desktop。
+/// 放到 `app/resources`。只接受大写 `Codex.exe`，避免在 Desktop/CDP 解锁流程里
+/// 把 CLI launcher 当 Desktop；CLI/app-server 支持由 Codex 配置投影链路负责。
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn windows_codex_package_executable_candidates(package_root: &Path) -> Vec<PathBuf> {
     let mut candidates = appx_manifest_codex_executable_candidates(package_root);
@@ -1300,6 +1308,18 @@ mod tests {
         assert!(script.contains("model/list"));
         assert!(script.contains("__ccSwitchCodexModelPickerUnlockV3"));
         assert!(script.contains("auth.setAuthMethod(\"chatgpt\")"));
+    }
+
+    /// 验证 Desktop 可执行文件缺失时，错误信息不会被误读成不支持 CLI/app-server。
+    #[test]
+    fn desktop_executable_missing_message_preserves_cli_support_boundary() {
+        assert!(CODEX_DESKTOP_EXECUTABLE_NOT_FOUND_MESSAGE.contains("Desktop menu unlock flow"));
+        assert!(CODEX_DESKTOP_EXECUTABLE_NOT_FOUND_MESSAGE
+            .contains("will not launch CLI/app-server codex.exe as an Electron shell"));
+        assert!(CODEX_DESKTOP_EXECUTABLE_NOT_FOUND_MESSAGE
+            .contains("Codex CLI/app-server is still supported"));
+        assert!(CODEX_DESKTOP_EXECUTABLE_NOT_FOUND_MESSAGE.contains("model_catalog_json"));
+        assert!(CODEX_DESKTOP_EXECUTABLE_NOT_FOUND_MESSAGE.contains("/v1/models"));
     }
 
     #[test]
