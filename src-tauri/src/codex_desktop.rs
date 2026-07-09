@@ -807,15 +807,19 @@ fn launch_codex_with_debug_port(executable: &Path, debug_port: u16) -> Result<()
         .map_err(|error| format!("failed to launch {}: {error}", executable.display()))
 }
 
+/// Windows 下查找 Codex Desktop 主进程的脚本；必须排除小写 app-server。
+#[cfg(target_os = "windows")]
+const DETECT_CODEX_MAIN_PROCESS_SCRIPT: &str = r#"
+Get-CimInstance Win32_Process -Filter "Name = 'Codex.exe'" |
+  Where-Object { $_.ExecutablePath -and (Split-Path -Leaf $_.ExecutablePath) -ceq 'Codex.exe' -and ($_.CommandLine -notmatch ' --type=') } |
+  Select-Object -First 1 -ExpandProperty ExecutablePath
+"#;
+
 /// 查找 Codex Desktop 主进程路径；已运行但未开放 CDP 时不能原地注入。
 fn detect_running_codex_main_process() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     {
-        let script = r#"
-Get-CimInstance Win32_Process -Filter "Name = 'Codex.exe'" |
-  Where-Object { $_.ExecutablePath -and ($_.CommandLine -notmatch ' --type=') } |
-  Select-Object -First 1 -ExpandProperty ExecutablePath
-"#;
+        let script = DETECT_CODEX_MAIN_PROCESS_SCRIPT;
         let output = Command::new("powershell")
             .args(["-NoProfile", "-NonInteractive", "-Command", script])
             .output()
@@ -1386,6 +1390,15 @@ mod tests {
         let error = canonical_codex_desktop_executable_path(&cli)
             .expect_err("lowercase CLI codex.exe should be rejected");
         assert!(error.contains("not Codex Desktop"));
+    }
+
+    /// 验证运行中进程探测也按可执行文件名精确区分 Desktop 和小写 app-server。
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn codex_main_process_probe_filters_cli_launcher_name_case() {
+        assert!(DETECT_CODEX_MAIN_PROCESS_SCRIPT
+            .contains("(Split-Path -Leaf $_.ExecutablePath) -ceq 'Codex.exe'"));
+        assert!(!DETECT_CODEX_MAIN_PROCESS_SCRIPT.contains(" -ieq 'Codex.exe'"));
     }
 
     /// 验证便携版 Desktop 路径能写入状态文件并再次读回。
