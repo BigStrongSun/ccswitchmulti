@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-07-09 CCSwitchMulti v3.16.4-16 Release
+
+- `v3.16.4-16` 已作为 `BigStrongSun/ccswitchmulti` 正式 release 发布：`https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.16.4-16`。Release 为 `draft=false`、`prerelease=false`，GitHub latest API 返回 `tag_name=v3.16.4-16`，发布时间为 `2026-07-09T13:06:57Z`。
+- Release 提交为 `413b2699b90f459b888858b230ffd7d63526727d`（`chore(release): bump CCSwitchMulti to v3.16.4-16`），annotated tag `v3.16.4-16` 解引用到同一提交；`fork/main` 已 fast-forward 到该提交。Tag 推送后第一次 Actions run `29016634597` attempt 1 只有 Linux x64 成功，其余 matrix job 在未执行 step 前被 GitHub 标记 cancelled，直接 rerun 同一 run 后 attempt 2 全部成功。
+- GitHub Actions release run `29016634597` attempt 2 覆盖 macOS universal、Linux x64/ARM64、Windows x64/ARM64、Publish GitHub Release 和 Assemble `latest.json`，所有 job 均为 success。Release 资产共 19 个，外显命名均为 `CCSwitchMulti-v3.16.4-16-*`，包含 Windows x64/ARM64 setup 与 portable、macOS dmg/tar.gz/signature/zip、Linux x64/ARM64 AppImage/signature/deb/rpm，以及 `latest.json`。
+- 远端 `latest.json` 已下载验证：`version=3.16.4-16`，包含 `darwin-aarch64`、`darwin-x86_64`、`windows-x86_64`、`windows-aarch64`、`linux-x86_64`、`linux-aarch64` 6 个 updater 平台，且每个平台 signature 字段都存在。
+- 本地固定交付目录 `C:\Users\sunda\Documents\LLMservice\最新版ccswitchmulti` 已由 release pipeline 刷新到 `Version: 3.16.4-16`、`Commit: 413b2699b90f459b888858b230ffd7d63526727d`，包含 Windows x64 NSIS setup、setup `.sig`、portable zip、raw exe、`latest.json` 和 `SHA256SUMS.txt`。发布前本地验证覆盖 Qwen/vLLM Rust 单测、Responses->Chat Rust 单测、ProviderForm vitest、Prettier、`pnpm typecheck`、`cargo fmt --check`、`git diff --check` 和 `pnpm release:local`；仅有既有 browserslist/baseline/chunk/Tauri `__TAURI_BUNDLE_TYPE` 警告。
+
 ## 2026-07-09 Codex Responses Missing Output Budget Semantics
 
 - 最新纠偏：这不是 Qwen/vLLM 专用问题，而是 Codex Responses -> Chat Completions 转换必须保留“未声明输出上限”的通用语义。Codex 原生 Responses 请求当前通常不写 `max_output_tokens/max_tokens/max_completion_tokens`；CCSwitchMulti 只有在原请求显式携带这些字段、provider 显式配置 `defaultOutputTokens`、或 Anthropic thinking-budget 错误重试整流时，才应让上游 Chat 请求出现 max token 字段。
