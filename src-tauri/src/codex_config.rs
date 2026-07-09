@@ -1659,6 +1659,7 @@ fn sync_codex_managed_agent_files(specs: &[CodexCatalogModelSpec]) -> Result<(),
     fs::create_dir_all(&agents_dir).map_err(|e| AppError::io(&agents_dir, e))?;
 
     let mut seen_roles = HashSet::new();
+    let mut desired_paths = HashSet::new();
     for spec in specs.iter().take(5) {
         let base_role = codex_agent_role_name_for_model(&spec.model);
         if base_role.is_empty() {
@@ -1676,9 +1677,36 @@ fn sync_codex_managed_agent_files(specs: &[CodexCatalogModelSpec]) -> Result<(),
         {
             continue;
         }
+        desired_paths.insert(path.clone());
         write_text_file(&path, &render_codex_managed_agent_toml(&role, spec))?;
     }
 
+    prune_stale_codex_managed_agent_files(&agents_dir, &desired_paths)?;
+
+    Ok(())
+}
+
+/// 删除已经不属于当前前五候选窗口的 CCSwitchMulti 托管 agent 文件。
+///
+/// 只清理带托管标记的文件，用户手写 role、旧版未标记文件和其它扩展 agent 都保留。
+fn prune_stale_codex_managed_agent_files(
+    agents_dir: &Path,
+    desired_paths: &HashSet<PathBuf>,
+) -> Result<(), AppError> {
+    if !agents_dir.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(agents_dir).map_err(|e| AppError::io(agents_dir, e))? {
+        let entry = entry.map_err(|e| AppError::io(agents_dir, e))?;
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("toml") {
+            continue;
+        }
+        if desired_paths.contains(&path) || !codex_agent_file_is_cc_switch_managed(&path) {
+            continue;
+        }
+        delete_file(&path)?;
+    }
     Ok(())
 }
 
@@ -1810,6 +1838,7 @@ pub fn prepare_codex_config_text_with_model_catalog(
         Ok(config_text)
     } else {
         restore_codex_models_cache_if_cc_switch_owned()?;
+        prune_stale_codex_managed_agent_files(&get_codex_agents_dir(), &HashSet::new())?;
         set_codex_model_catalog_projection_fields(config_text, None, None)
     }
 }
@@ -4825,6 +4854,87 @@ model_provider = "custom"
         assert!(managed.contains(CC_SWITCH_MANAGED_AGENT_MARKER));
         assert!(managed.contains(r#"name = "ccswitch-qwen-local""#));
         assert!(managed.contains(r#"model_provider = "codex_model_router_v2""#));
+    }
+
+    #[test]
+    #[serial]
+    fn managed_agent_files_prune_stale_cc_switch_roles() {
+        let _guard = TestHomeGuard::new();
+        let agents_dir = get_codex_agents_dir();
+        std::fs::create_dir_all(&agents_dir).expect("create agents dir");
+        let stale_path = agents_dir.join("deepseek-flash.toml");
+        let user_path = agents_dir.join("user-agent.toml");
+        std::fs::write(
+            &stale_path,
+            format!(
+                r#"{CC_SWITCH_MANAGED_AGENT_MARKER}
+name = "deepseek-flash"
+model = "deepseek-v4-flash"
+"#
+            ),
+        )
+        .expect("seed stale managed role");
+        std::fs::write(
+            &user_path,
+            r#"name = "user-agent"
+model = "handwritten"
+"#,
+        )
+        .expect("seed user role");
+        let specs = vec![CodexCatalogModelSpec {
+            model: "qwen3.6".to_string(),
+            upstream_model: None,
+            display_name: "Qwen 3.6".to_string(),
+            context_window: 262_144,
+            text_only: false,
+            is_default: false,
+        }];
+
+        sync_codex_managed_agent_files(&specs).expect("sync managed agents");
+
+        assert!(
+            !stale_path.exists(),
+            "CCSwitchMulti-managed roles outside the current first-five window should be removed"
+        );
+        assert!(
+            agents_dir.join("qwen-local.toml").exists(),
+            "current managed role should be written"
+        );
+        assert!(
+            user_path.exists(),
+            "user-authored agent files without the managed marker must be preserved"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn removing_model_catalog_prunes_managed_agents() {
+        let _guard = TestHomeGuard::new();
+        let agents_dir = get_codex_agents_dir();
+        std::fs::create_dir_all(&agents_dir).expect("create agents dir");
+        let managed_path = agents_dir.join("qwen-local.toml");
+        std::fs::write(
+            &managed_path,
+            format!(
+                r#"{CC_SWITCH_MANAGED_AGENT_MARKER}
+name = "qwen-local"
+model = "qwen3.6"
+"#
+            ),
+        )
+        .expect("seed managed role");
+
+        let prepared = prepare_codex_config_text_with_model_catalog(
+            &json!({}),
+            r#"model_provider = "custom""#,
+        )
+        .expect("prepare empty catalog config");
+
+        assert!(!prepared.contains("model_catalog_json"));
+        assert!(
+            !managed_path.exists(),
+            "clearing the model catalog should remove old CCSwitchMulti-managed agents"
+        );
     }
 
     #[test]

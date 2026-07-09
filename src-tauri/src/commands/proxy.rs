@@ -481,6 +481,11 @@ pub async fn diagnose_codex_multirouter(
         },
         if desktop_runtime.remote_debugging_enabled {
             "Codex Desktop 已带 CDP 端口启动，CCSwitchMulti 可以向 renderer 注入 Statsig 107580212 模型白名单补丁。".to_string()
+        } else if desktop_runtime.running && live_config.model_catalog_model_count.unwrap_or(0) > 0 {
+            format!(
+                "已生成 {} 个 catalog 模型，但 Codex Desktop 正在以普通方式运行且没有 CDP 端口；renderer 仍可能把模型菜单压回“自定义”或少数官方模型。请完全退出 Codex 后用“解锁模型菜单”启动，让 CCSwitchMulti 注入模型白名单补丁。",
+                live_config.model_catalog_model_count.unwrap_or(0)
+            )
         } else if desktop_runtime.running {
             "Codex Desktop 正在以普通方式运行；即使 config/catalog/cache 有完整模型，renderer 仍可能被 Statsig 107580212 的 available_models 白名单压回 3 个官方模型。请完全退出 Codex 后用“解锁模型菜单”启动。".to_string()
         } else {
@@ -504,7 +509,7 @@ pub async fn diagnose_codex_multirouter(
         "Codex spawn_agent model overrides",
         CodexDiagnosticStatus::Pass,
         format!(
-            "Codex spawn_agent 只展示前 {} 个 picker-visible 模型；当前以用户保存的子 Agent 候选排序为准，不再强制要求未选择的推荐模型进入前五。",
+            "Codex spawn_agent 的模型 override 说明仍按前 {} 个 picker-visible 模型排序；新版 Codex 还会读取 custom agent role，CCSwitchMulti 会把托管 role 收敛到当前前五候选，避免旧模型继续出现在智能体列表。",
             live_config.spawn_agent_visible_model_limit
         ),
         vec![
