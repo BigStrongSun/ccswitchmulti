@@ -3294,7 +3294,7 @@ mod tests {
                 should_convert_codex_responses_to_chat,
             },
             server::ProxyState,
-            types::{ProxyConfig, ProxyStatus},
+            types::{InteractionMode, ProxyConfig, ProxyStatus},
             ProxyError,
         },
     };
@@ -4572,6 +4572,7 @@ data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n
             provider_router: Arc::new(ProviderRouter::new(db.clone())),
             gemini_shadow: Arc::new(GeminiShadowStore::default()),
             codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
+            interaction_mode: Arc::new(RwLock::new(InteractionMode::Code)),
             app_handle: None,
             failover_manager: Arc::new(FailoverSwitchManager::new(db)),
         }

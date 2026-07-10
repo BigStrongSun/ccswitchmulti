@@ -6,6 +6,7 @@
  */
 
 import { Radio, Loader2 } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { useProxyStatus } from "@/hooks/useProxyStatus";
 import { cn } from "@/lib/utils";
@@ -19,8 +20,15 @@ interface ProxyToggleProps {
 
 export function ProxyToggle({ className, activeApp }: ProxyToggleProps) {
   const { t } = useTranslation();
-  const { isRunning, takeoverStatus, setTakeoverForApp, isPending, status } =
-    useProxyStatus();
+  const {
+    isRunning,
+    takeoverStatus,
+    setTakeoverForApp,
+    interactionMode,
+    setInteractionMode,
+    isPending,
+    status,
+  } = useProxyStatus();
 
   const handleToggle = async (checked: boolean) => {
     try {
@@ -59,30 +67,78 @@ export function ProxyToggle({ className, activeApp }: ProxyToggleProps) {
       });
 
   return (
-    <div
-      className={cn(
-        "flex items-center gap-1 px-1.5 h-8 rounded-lg bg-muted/50 transition-all",
-        className,
+    <div className={cn("flex items-center gap-1", className)}>
+      {activeApp === "codex" && (
+        <div className="flex h-8 items-center rounded-lg border bg-background p-0.5">
+          <Button
+            type="button"
+            size="sm"
+            variant={interactionMode === "Chat" ? "default" : "ghost"}
+            className={cn(
+              "h-7 px-2 text-xs",
+              interactionMode === "Chat" &&
+                "bg-primary text-primary-foreground shadow-sm",
+            )}
+            aria-pressed={interactionMode === "Chat"}
+            disabled={isPending}
+            onClick={() => setInteractionMode("Chat")}
+          >
+            Chat
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant={interactionMode === "Ask" ? "default" : "ghost"}
+            className={cn(
+              "h-7 px-2 text-xs",
+              interactionMode === "Ask" &&
+                "bg-primary text-primary-foreground shadow-sm",
+            )}
+            aria-pressed={interactionMode === "Ask"}
+            disabled={isPending}
+            onClick={() => setInteractionMode("Ask")}
+          >
+            Ask
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant={interactionMode === "Code" ? "default" : "ghost"}
+            className={cn(
+              "h-7 px-2 text-xs",
+              interactionMode === "Code" &&
+                "bg-primary text-primary-foreground shadow-sm",
+            )}
+            aria-pressed={interactionMode === "Code"}
+            disabled={isPending}
+            onClick={() => setInteractionMode("Code")}
+          >
+            Code
+          </Button>
+        </div>
       )}
-      title={tooltipText}
-    >
-      {isPending ? (
-        <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-      ) : (
-        <Radio
-          className={cn(
-            "h-4 w-4 transition-colors",
-            takeoverEnabled
-              ? "text-emerald-500 animate-pulse"
-              : "text-muted-foreground",
-          )}
+      <div
+        className="flex h-8 items-center gap-1 rounded-lg bg-muted/50 px-1.5 transition-all"
+        title={tooltipText}
+      >
+        {isPending ? (
+          <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+        ) : (
+          <Radio
+            className={cn(
+              "h-4 w-4 transition-colors",
+              takeoverEnabled
+                ? "text-emerald-500 animate-pulse"
+                : "text-muted-foreground",
+            )}
+          />
+        )}
+        <Switch
+          checked={takeoverEnabled}
+          onCheckedChange={handleToggle}
+          disabled={isPending}
         />
-      )}
-      <Switch
-        checked={takeoverEnabled}
-        onCheckedChange={handleToggle}
-        disabled={isPending}
-      />
+      </div>
     </div>
   );
 }

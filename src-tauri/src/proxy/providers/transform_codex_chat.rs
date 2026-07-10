@@ -289,6 +289,7 @@ pub fn responses_to_chat_completions_with_reasoning_text_only_and_cache(
 ) -> Result<Value, ProxyError> {
     let mut result = json!({});
     let tool_context = build_codex_tool_context_from_request(&body);
+    let preserve_reasoning_content = codex_chat_preserve_reasoning_content(reasoning_config);
     let text_only_model = text_only_override.unwrap_or(false)
         || body
             .get("model")
@@ -315,6 +316,7 @@ pub fn responses_to_chat_completions_with_reasoning_text_only_and_cache(
             input,
             &mut messages,
             &tool_context,
+            preserve_reasoning_content,
             text_only_model,
         )?;
     }
@@ -383,6 +385,12 @@ pub fn responses_to_chat_completions_with_reasoning_text_only_and_cache(
     super::transform::inject_openai_stream_include_usage(&mut result);
 
     Ok(result)
+}
+
+fn codex_chat_preserve_reasoning_content(config: Option<&CodexChatReasoningConfig>) -> bool {
+    config
+        .and_then(|config| config.output_format.as_deref())
+        .is_some_and(|format| format.eq_ignore_ascii_case("reasoning_content"))
 }
 
 /// 按 provider/route 明确声明的能力透传 OpenAI prompt cache 参数。
@@ -725,6 +733,7 @@ fn append_responses_input_as_chat_messages(
     input: &Value,
     messages: &mut Vec<Value>,
     tool_context: &CodexToolContext,
+    preserve_reasoning_content: bool,
     text_only_model: bool,
 ) -> Result<(), ProxyError> {
     let mut pending_tool_calls = Vec::new();
@@ -747,6 +756,7 @@ fn append_responses_input_as_chat_messages(
                     &mut pending_reasoning,
                     &mut last_assistant_index,
                     tool_context,
+                    preserve_reasoning_content,
                     text_only_model,
                 )?;
             }
@@ -759,6 +769,7 @@ fn append_responses_input_as_chat_messages(
                 &mut pending_reasoning,
                 &mut last_assistant_index,
                 tool_context,
+                preserve_reasoning_content,
                 text_only_model,
             )?;
         }
@@ -770,8 +781,11 @@ fn append_responses_input_as_chat_messages(
         &mut pending_tool_calls,
         &mut pending_reasoning,
         &mut last_assistant_index,
+        preserve_reasoning_content,
     );
-    backfill_tool_call_reasoning_placeholders(messages);
+    if preserve_reasoning_content {
+        backfill_tool_call_reasoning_placeholders(messages);
+    }
     Ok(())
 }
 
@@ -782,6 +796,7 @@ fn append_responses_item_as_chat_message(
     pending_reasoning: &mut Option<String>,
     last_assistant_index: &mut Option<usize>,
     tool_context: &CodexToolContext,
+    preserve_reasoning_content: bool,
     text_only_model: bool,
 ) -> Result<(), ProxyError> {
     let item_type = item.get("type").and_then(|v| v.as_str());
@@ -807,6 +822,7 @@ fn append_responses_item_as_chat_message(
                 pending_tool_calls,
                 pending_reasoning,
                 last_assistant_index,
+                preserve_reasoning_content,
             );
             let call_id = item.get("call_id").and_then(|v| v.as_str()).unwrap_or("");
             let output = match item.get("output") {
@@ -826,6 +842,7 @@ fn append_responses_item_as_chat_message(
                 pending_tool_calls,
                 pending_reasoning,
                 last_assistant_index,
+                preserve_reasoning_content,
             );
             let call_id = item.get("call_id").and_then(|v| v.as_str()).unwrap_or("");
             let output = canonical_json_string(item);
@@ -837,7 +854,8 @@ fn append_responses_item_as_chat_message(
         }
         Some("reasoning") => {
             let reasoning = responses_reasoning_item_text(item);
-            let attached_to_previous = pending_tool_calls.is_empty()
+            let attached_to_previous = preserve_reasoning_content
+                && pending_tool_calls.is_empty()
                 && attach_reasoning_to_last_assistant(messages, *last_assistant_index, &reasoning);
             if !attached_to_previous {
                 append_pending_reasoning(pending_reasoning, reasoning);
@@ -849,6 +867,7 @@ fn append_responses_item_as_chat_message(
                 pending_tool_calls,
                 pending_reasoning,
                 last_assistant_index,
+                preserve_reasoning_content,
             );
             let role = item
                 .get("role")
@@ -865,7 +884,11 @@ fn append_responses_item_as_chat_message(
             });
             if role == "assistant" {
                 let mut message = message;
-                attach_pending_reasoning_to_assistant(&mut message, pending_reasoning);
+                attach_pending_reasoning_to_assistant(
+                    &mut message,
+                    pending_reasoning,
+                    preserve_reasoning_content,
+                );
                 update_last_assistant_index(messages, &message, last_assistant_index);
                 messages.push(message);
                 return Ok(());
@@ -881,11 +904,13 @@ fn append_responses_item_as_chat_message(
                 pending_tool_calls,
                 pending_reasoning,
                 last_assistant_index,
+                preserve_reasoning_content,
             );
             if item.get("role").is_some() || item.get("content").is_some() {
                 let message = responses_message_item_to_chat_message(
                     item,
                     pending_reasoning,
+                    preserve_reasoning_content,
                     text_only_model,
                 );
                 update_last_assistant_index(messages, &message, last_assistant_index);
@@ -898,11 +923,13 @@ fn append_responses_item_as_chat_message(
                 pending_tool_calls,
                 pending_reasoning,
                 last_assistant_index,
+                preserve_reasoning_content,
             );
             if item.get("role").is_some() || item.get("content").is_some() {
                 let message = responses_message_item_to_chat_message(
                     item,
                     pending_reasoning,
+                    preserve_reasoning_content,
                     text_only_model,
                 );
                 update_last_assistant_index(messages, &message, last_assistant_index);
@@ -919,6 +946,7 @@ fn flush_pending_tool_calls(
     pending_tool_calls: &mut Vec<Value>,
     pending_reasoning: &mut Option<String>,
     last_assistant_index: &mut Option<usize>,
+    preserve_reasoning_content: bool,
 ) {
     if pending_tool_calls.is_empty() {
         return;
@@ -929,7 +957,11 @@ fn flush_pending_tool_calls(
         "content": null,
         "tool_calls": std::mem::take(pending_tool_calls)
     });
-    attach_pending_reasoning_to_assistant(&mut message, pending_reasoning);
+    attach_pending_reasoning_to_assistant(
+        &mut message,
+        pending_reasoning,
+        preserve_reasoning_content,
+    );
     *last_assistant_index = Some(messages.len());
     messages.push(message);
 }
@@ -937,6 +969,7 @@ fn flush_pending_tool_calls(
 fn responses_message_item_to_chat_message(
     item: &Value,
     pending_reasoning: &mut Option<String>,
+    preserve_reasoning_content: bool,
     text_only_model: bool,
 ) -> Value {
     let role = item.get("role").and_then(|v| v.as_str()).unwrap_or("user");
@@ -953,7 +986,11 @@ fn responses_message_item_to_chat_message(
 
     if chat_role == "assistant" {
         append_pending_reasoning(pending_reasoning, responses_message_reasoning_text(item));
-        attach_pending_reasoning_to_assistant(&mut message, pending_reasoning);
+        attach_pending_reasoning_to_assistant(
+            &mut message,
+            pending_reasoning,
+            preserve_reasoning_content,
+        );
     } else if pending_reasoning.is_some() {
         pending_reasoning.take();
     }
@@ -1034,7 +1071,13 @@ fn append_unique_pending_reasoning(
 fn attach_pending_reasoning_to_assistant(
     message: &mut Value,
     pending_reasoning: &mut Option<String>,
+    preserve_reasoning_content: bool,
 ) {
+    if !preserve_reasoning_content {
+        pending_reasoning.take();
+        return;
+    }
+
     let Some(reasoning) = pending_reasoning.take() else {
         return;
     };
@@ -3105,6 +3148,42 @@ mod tests {
         assert_eq!(out[3]["content"], "U2");
     }
 
+    fn reasoning_content_config() -> CodexChatReasoningConfig {
+        CodexChatReasoningConfig {
+            output_format: Some("reasoning_content".to_string()),
+            ..CodexChatReasoningConfig::default()
+        }
+    }
+
+    #[test]
+    fn responses_request_to_chat_drops_reasoning_content_by_default() {
+        let input = json!({
+            "model": "claude-sonnet-5",
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "read_file",
+                    "arguments": "{\"path\":\"README.md\"}",
+                    "reasoning_content": "Do not send this to generic chat upstreams."
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "Readme content"
+                }
+            ]
+        });
+
+        let result = responses_to_chat_completions(input).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+
+        assert_eq!(messages[0]["role"], "assistant");
+        assert_eq!(messages[0]["tool_calls"][0]["id"], "call_1");
+        assert!(messages[0].get("reasoning_content").is_none());
+        assert_eq!(messages[1]["role"], "tool");
+    }
+
     #[test]
     fn responses_request_to_chat_passes_reasoning_content_back_to_assistant_message() {
         let input = json!({
@@ -3131,7 +3210,8 @@ mod tests {
             ]
         });
 
-        let result = responses_to_chat_completions(input).unwrap();
+        let config = reasoning_content_config();
+        let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
         let messages = result["messages"].as_array().unwrap();
 
         assert_eq!(messages[0]["role"], "assistant");
@@ -3168,7 +3248,8 @@ mod tests {
             ]
         });
 
-        let result = responses_to_chat_completions(input).unwrap();
+        let config = reasoning_content_config();
+        let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
         let messages = result["messages"].as_array().unwrap();
 
         assert_eq!(messages[0]["role"], "assistant");
@@ -3195,7 +3276,8 @@ mod tests {
             ]
         });
 
-        let result = responses_to_chat_completions(input).unwrap();
+        let config = reasoning_content_config();
+        let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
         let messages = result["messages"].as_array().unwrap();
 
         assert_eq!(messages[0]["role"], "assistant");
@@ -3229,7 +3311,8 @@ mod tests {
             ]
         });
 
-        let result = responses_to_chat_completions(input).unwrap();
+        let config = reasoning_content_config();
+        let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
         let messages = result["messages"].as_array().unwrap();
 
         assert_eq!(messages[0]["role"], "assistant");
@@ -3258,7 +3341,8 @@ mod tests {
             ]
         });
 
-        let result = responses_to_chat_completions(input).unwrap();
+        let config = reasoning_content_config();
+        let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
         let messages = result["messages"].as_array().unwrap();
 
         assert_eq!(messages[0]["role"], "assistant");
@@ -3288,7 +3372,8 @@ mod tests {
             ]
         });
 
-        let result = responses_to_chat_completions(input).unwrap();
+        let config = reasoning_content_config();
+        let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
         let messages = result["messages"].as_array().unwrap();
 
         assert_eq!(messages[0]["role"], "assistant");
@@ -3320,7 +3405,8 @@ mod tests {
             ]
         });
 
-        let result = responses_to_chat_completions(input).unwrap();
+        let config = reasoning_content_config();
+        let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
         let messages = result["messages"].as_array().unwrap();
 
         assert_eq!(messages[0]["role"], "assistant");

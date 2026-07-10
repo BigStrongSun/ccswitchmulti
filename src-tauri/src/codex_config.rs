@@ -769,6 +769,11 @@ fn project_codex_desktop_model_fields(
     entry_obj.insert("supported_in_api".to_string(), json!(true));
     entry_obj.insert("hidden".to_string(), json!(false));
     entry_obj.insert("isDefault".to_string(), json!(spec.is_default));
+    // `tool_mode = null` keeps routed models visible in Chat.
+    entry_obj.insert("tool_mode".to_string(), Value::Null);
+    entry_obj.insert("toolMode".to_string(), Value::Null);
+    entry_obj.insert("output_modalities".to_string(), json!(["text"]));
+    entry_obj.insert("outputModalities".to_string(), json!(["text"]));
 
     if let Some(value) = entry_obj.get("additional_speed_tiers").cloned() {
         entry_obj.insert("additionalSpeedTiers".to_string(), value);
@@ -1281,6 +1286,12 @@ fn codex_provider_reasoning_efforts_toml_array(key: &str) -> toml_edit::Value {
     toml_edit::Value::Array(array)
 }
 
+fn codex_provider_text_modalities_toml_array() -> toml_edit::Value {
+    let mut array = Array::default();
+    array.push("text");
+    toml_edit::Value::Array(array)
+}
+
 /// 为当前活动 custom provider 生成 Codex Desktop 可枚举的内联模型数组。
 fn codex_provider_models_toml_array(specs: &[CodexCatalogModelSpec]) -> Item {
     let mut array = Array::default();
@@ -1337,6 +1348,14 @@ fn codex_provider_models_toml_array(specs: &[CodexCatalogModelSpec]) -> Item {
         model.insert("supported_in_api", true.into());
         model.insert("hidden", false.into());
         model.insert("isDefault", spec.is_default.into());
+        model.insert(
+            "output_modalities",
+            codex_provider_text_modalities_toml_array(),
+        );
+        model.insert(
+            "outputModalities",
+            codex_provider_text_modalities_toml_array(),
+        );
         array.push(toml_edit::Value::InlineTable(model));
     }
     Item::Value(toml_edit::Value::Array(array))
@@ -1344,8 +1363,7 @@ fn codex_provider_models_toml_array(specs: &[CodexCatalogModelSpec]) -> Item {
 
 /// 将模型目录同步到活动 provider 的 `models` 字段。
 ///
-/// Codex Desktop 的 app-server 会把 custom provider 标为“自定义”，但候选菜单仍需要
-/// provider 内部能枚举模型；只写顶层 `model_catalog_json` 对部分 Desktop 版本不够。
+/// `modelCatalog` 中的模型始终投影到活动 provider，包括 Codex 保留的 provider id。
 fn set_active_codex_provider_models(doc: &mut DocumentMut, specs: &[CodexCatalogModelSpec]) {
     if specs.is_empty() {
         return;
@@ -1353,9 +1371,6 @@ fn set_active_codex_provider_models(doc: &mut DocumentMut, specs: &[CodexCatalog
     let Some(provider_id) = active_codex_model_provider_id(doc) else {
         return;
     };
-    if !is_custom_codex_model_provider_id(&provider_id) {
-        return;
-    }
 
     if doc.get("model_providers").is_none() {
         doc["model_providers"] = toml_edit::table();
@@ -1382,9 +1397,6 @@ fn remove_active_codex_provider_models(doc: &mut DocumentMut) {
     let Some(provider_id) = active_codex_model_provider_id(doc) else {
         return;
     };
-    if !is_custom_codex_model_provider_id(&provider_id) {
-        return;
-    }
     if let Some(provider_table) = doc
         .get_mut("model_providers")
         .and_then(|item| item.as_table_mut())
@@ -2959,6 +2971,56 @@ pub fn remove_codex_toml_base_url_if(toml_str: &str, predicate: impl Fn(&str) ->
     doc.to_string()
 }
 
+/// Remove CC Switch local takeover fields from a Codex config while preserving
+/// user-owned tables such as desktop, projects, MCP servers, and feature flags.
+///
+/// This is intentionally narrower than provider restore: it is used as the
+/// last-resort cleanup path when proxy takeover is stopped or recovered without
+/// a trustworthy backup. If the active provider is one of CC Switch's local
+/// proxy buckets, Codex must fall back to its built-in OpenAI provider instead
+/// of continuing to target 127.0.0.1 after CC Switch exits.
+pub fn cleanup_codex_local_proxy_takeover_fields(config_text: &str) -> Result<String, AppError> {
+    if config_text.trim().is_empty() {
+        return Ok(config_text.to_string());
+    }
+
+    let mut doc = config_text
+        .parse::<DocumentMut>()
+        .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
+
+    let active_provider = active_codex_model_provider_id(&doc);
+    let active_is_cc_switch_provider = active_provider.as_deref().is_some_and(|provider_id| {
+        provider_id.eq_ignore_ascii_case(CC_SWITCH_CODEX_MODEL_PROVIDER_ID)
+            || provider_id.eq_ignore_ascii_case(CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID)
+    });
+
+    if active_is_cc_switch_provider {
+        remove_active_custom_codex_model_provider_section(&mut doc);
+        for key in [
+            "model",
+            "model_provider",
+            "base_url",
+            "openai_base_url",
+            "wire_api",
+            "experimental_bearer_token",
+        ] {
+            doc.as_table_mut().remove(key);
+        }
+        remove_cc_switch_model_catalog_json_if_stale(&mut doc);
+    } else {
+        doc = remove_codex_toml_base_url_if(&doc.to_string(), codex_base_url_is_local_proxy)
+            .parse::<DocumentMut>()
+            .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
+        doc = remove_codex_experimental_bearer_token_if(&doc.to_string(), |token| {
+            token == CODEX_PROXY_AUTH_PLACEHOLDER
+        })?
+        .parse::<DocumentMut>()
+        .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
+    }
+
+    Ok(doc.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3747,6 +3809,74 @@ wire_api = "responses"
     }
 
     #[test]
+    fn cleanup_local_proxy_takeover_fields_restores_builtin_codex_defaults() {
+        let live_config = r#"model = "claude-sonnet-5"
+model_provider = "codex_model_router_v2"
+model_context_window = 262144
+model_catalog_json = "cc-switch-model-catalog.json"
+experimental_bearer_token = "PROXY_MANAGED"
+approval_policy = "on-request"
+
+[desktop]
+notifications-turn-mode = "always"
+
+[projects."C:\\work"]
+trust_level = "trusted"
+
+[mcp_servers.readonly]
+command = "readonly-mcp"
+
+[model_providers.codex_model_router_v2]
+name = "CCSwitch MultiRouter"
+base_url = "http://127.0.0.1:15721/v1"
+wire_api = "responses"
+requires_openai_auth = true
+supports_websockets = false
+experimental_bearer_token = "PROXY_MANAGED"
+"#;
+
+        let cleaned = cleanup_codex_local_proxy_takeover_fields(live_config)
+            .expect("cleanup local takeover fields");
+        let parsed: toml::Value = toml::from_str(&cleaned).expect("parse cleaned config");
+
+        assert!(parsed.get("model").is_none());
+        assert!(parsed.get("model_provider").is_none());
+        assert!(parsed.get("model_catalog_json").is_none());
+        assert!(parsed.get("experimental_bearer_token").is_none());
+        assert!(
+            parsed
+                .get("model_providers")
+                .and_then(|providers| providers.get("codex_model_router_v2"))
+                .is_none(),
+            "cleanup must remove the local router provider table"
+        );
+        assert_eq!(
+            parsed
+                .get("model_context_window")
+                .and_then(|value| value.as_integer()),
+            Some(262_144),
+            "cleanup should keep user-owned context display settings"
+        );
+        assert_eq!(
+            parsed
+                .get("desktop")
+                .and_then(|value| value.get("notifications-turn-mode"))
+                .and_then(|value| value.as_str()),
+            Some("always")
+        );
+        assert!(parsed
+            .get("projects")
+            .and_then(|value| value.get(r"C:\work"))
+            .is_some());
+        assert!(parsed
+            .get("mcp_servers")
+            .and_then(|value| value.get("readonly"))
+            .is_some());
+        assert!(!cleaned.contains("127.0.0.1:15721"));
+        assert!(!cleaned.contains("PROXY_MANAGED"));
+    }
+
+    #[test]
     fn merge_openai_router_config_uses_builtin_openai_history_bucket() {
         let live_config = r#"model = "gpt-5.5"
 approval_policy = "on-request"
@@ -4313,6 +4443,17 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             models[0].get("input_modalities"),
             Some(&json!(["text"])),
             "DeepSeek V4 must stay text-only so Codex does not inject image_generation"
+        );
+        assert!(
+            models[0]
+                .get("tool_mode")
+                .is_some_and(|value| value.is_null()),
+            "routed custom models should be visible to the new Chat picker, not code-mode-only"
+        );
+        assert_eq!(
+            models[0].get("output_modalities"),
+            Some(&json!(["text"])),
+            "routed custom models should advertise text output for Chat mode"
         );
         assert_eq!(
             models[0]
@@ -5600,6 +5741,20 @@ base_url = "http://127.0.0.1:15721/v1"
             "inline provider models must include Qwen so the Desktop menu is not just 自定义"
         );
         assert!(
+            provider_models
+                .iter()
+                .filter(
+                    |model| model.get("model").and_then(|value| value.as_str()) == Some("qwen3.6")
+                )
+                .all(|model| model
+                    .get("output_modalities")
+                    .and_then(|value| value.as_array())
+                    .is_some_and(|modalities| modalities
+                        .iter()
+                        .any(|value| value.as_str() == Some("text")))),
+            "inline provider models should advertise text output for Chat-capable pickers"
+        );
+        assert!(
             provider_model_ids.contains(&"deepseek-v4-flash"),
             "inline provider models must include DeepSeek so the Desktop menu can enumerate it"
         );
@@ -5633,6 +5788,58 @@ base_url = "http://127.0.0.1:15721/v1"
         assert!(slugs.contains(&"deepseek-v4-flash"));
         assert!(model_fields.contains(&"qwen3.6"));
         assert!(model_fields.contains(&"deepseek-v4-flash"));
+    }
+
+    #[test]
+    #[serial]
+    /// LM Studio 是 Codex 保留 provider id，但用户在 CCSwitchMulti 配置的
+    /// modelCatalog 仍必须投影到 picker 可见模型，否则源码版同步后菜单为空。
+    fn model_catalog_projects_models_for_lmstudio_provider_picker() {
+        let _home = TestHomeGuard::new();
+        seed_codex_models_cache(json!([{
+            "slug": "gpt-5.5",
+            "display_name": "GPT-5.5",
+            "model_messages": { "instructions_template": "template" },
+            "context_window": 128000
+        }]));
+        let settings = json!({
+            "modelCatalog": {
+                "models": [
+                    { "model": "qwen2.5-coder-14b-instruct", "displayName": "Qwen Coder 14B" }
+                ]
+            }
+        });
+        let config = r#"model_provider = "lmstudio"
+
+[model_providers.lmstudio]
+name = "LM Studio"
+"#;
+
+        let prepared = prepare_codex_config_text_with_model_catalog(&settings, config)
+            .expect("prepare config");
+        assert!(prepared.contains("model_catalog_json"));
+        let prepared_toml: toml::Value = toml::from_str(&prepared).expect("parse prepared config");
+        let provider_models = prepared_toml
+            .get("model_providers")
+            .and_then(|providers| providers.get("lmstudio"))
+            .and_then(|provider| provider.get("models"))
+            .and_then(|models| models.as_array())
+            .expect("lmstudio provider should expose inline models for Codex Desktop");
+        let provider_model_ids: Vec<_> = provider_models
+            .iter()
+            .filter_map(|model| model.get("model").and_then(|value| value.as_str()))
+            .collect();
+        assert!(provider_model_ids.contains(&"qwen2.5-coder-14b-instruct"));
+
+        let cache: Value = read_json_file(&get_codex_models_cache_path()).expect("read cache");
+        let slugs = cache
+            .get("models")
+            .and_then(|models| models.as_array())
+            .expect("models array")
+            .iter()
+            .filter_map(|model| model.get("slug").and_then(|slug| slug.as_str()))
+            .collect::<Vec<_>>();
+        assert!(slugs.contains(&"qwen2.5-coder-14b-instruct"));
     }
 
     #[test]

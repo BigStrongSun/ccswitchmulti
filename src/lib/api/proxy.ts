@@ -4,6 +4,7 @@ import type {
   ProxyStatus,
   ProxyServerInfo,
   ProxyTakeoverStatus,
+  InteractionMode,
   GlobalProxyConfig,
   AppProxyConfig,
   ExternalOpenAIAPIProfile,
@@ -37,6 +38,14 @@ export const proxyApi = {
   // 获取代理服务器状态
   async getProxyStatus(): Promise<ProxyStatus> {
     return invoke("get_proxy_status");
+  },
+
+  async getInteractionMode(): Promise<InteractionMode> {
+    return invoke("get_interaction_mode");
+  },
+
+  async setInteractionMode(mode: InteractionMode): Promise<void> {
+    return invoke("set_interaction_mode", { mode });
   },
 
   async diagnoseCodexMultiRouter(

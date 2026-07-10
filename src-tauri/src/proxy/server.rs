@@ -44,6 +44,8 @@ pub struct ProxyState {
     pub gemini_shadow: Arc<GeminiShadowStore>,
     /// Codex Chat bridge history，用于恢复 previous_response_id 指向的 tool call
     pub codex_chat_history: Arc<CodexChatHistoryStore>,
+    /// Codex 交互模式：运行时内存态，不写入 provider 配置
+    pub interaction_mode: Arc<RwLock<InteractionMode>>,
     /// AppHandle，用于发射事件和更新托盘菜单
     pub app_handle: Option<tauri::AppHandle>,
     /// 故障转移切换管理器
@@ -72,7 +74,23 @@ impl ProxyServer {
         db: Arc<Database>,
         app_handle: Option<tauri::AppHandle>,
     ) -> Self {
-        Self::new_with_mode(config, db, app_handle, ProxyServerMode::FullProxy)
+        Self::new_with_interaction_mode(
+            config,
+            db,
+            app_handle,
+            ProxyServerMode::FullProxy,
+            Arc::new(RwLock::new(InteractionMode::Code)),
+        )
+    }
+
+    pub fn new_with_interaction_mode(
+        config: ProxyConfig,
+        db: Arc<Database>,
+        app_handle: Option<tauri::AppHandle>,
+        mode: ProxyServerMode,
+        interaction_mode: Arc<RwLock<InteractionMode>>,
+    ) -> Self {
+        Self::new_with_mode(config, db, app_handle, mode, interaction_mode)
     }
 
     pub fn new_external_openai_api(
@@ -85,6 +103,7 @@ impl ProxyServer {
             db,
             app_handle,
             ProxyServerMode::ExternalOpenAiApiOnly,
+            Arc::new(RwLock::new(InteractionMode::Code)),
         )
     }
 
@@ -93,6 +112,7 @@ impl ProxyServer {
         db: Arc<Database>,
         app_handle: Option<tauri::AppHandle>,
         mode: ProxyServerMode,
+        interaction_mode: Arc<RwLock<InteractionMode>>,
     ) -> Self {
         // 创建共享的 ProviderRouter（熔断器状态将跨所有请求保持）
         let provider_router = Arc::new(ProviderRouter::new(db.clone()));
@@ -108,6 +128,7 @@ impl ProxyServer {
             provider_router,
             gemini_shadow: Arc::new(GeminiShadowStore::default()),
             codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
+            interaction_mode,
             app_handle,
             failover_manager,
         };

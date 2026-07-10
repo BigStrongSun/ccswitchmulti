@@ -8,7 +8,7 @@ use super::{
     content_encoding::{decompress_body, get_content_encoding},
     error::*,
     failover_switch::FailoverSwitchManager,
-    json_canonical::{canonicalize_value, short_value_hash},
+    json_canonical::{canonical_json_string, canonicalize_value, short_value_hash},
     log_codes::fwd as log_fwd,
     provider_router::ProviderRouter,
     providers::{
@@ -19,7 +19,9 @@ use super::{
     thinking_rectifier::{
         normalize_thinking_type, rectify_anthropic_request, should_rectify_thinking_signature,
     },
-    types::{CopilotOptimizerConfig, OptimizerConfig, ProxyStatus, RectifierConfig},
+    types::{
+        CopilotOptimizerConfig, InteractionMode, OptimizerConfig, ProxyStatus, RectifierConfig,
+    },
     ProxyError,
 };
 use crate::commands::{CodexOAuthState, CopilotAuthState};
@@ -41,6 +43,486 @@ use tokio::sync::RwLock;
 
 const PROXY_AUTH_PLACEHOLDER: &str = "PROXY_MANAGED";
 const CODEX_RESPONSES_LITE_FALLBACK_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+const CLAUDE_CHAT_MODEL: &str = "claude-sonnet-5";
+
+const CLAUDE_ASK_ALLOWED_TOOLS: &[&str] = &[
+    "list_mcp_resources",
+    "list_mcp_resource_templates",
+    "read_mcp_resource",
+];
+const CLAUDE_ASK_PROJECT_MCP_SERVER: &str = "ccswitch_readonly";
+
+fn provider_supports_chat_ask_profiles(provider: &Provider) -> bool {
+    if provider.uses_managed_account_auth() {
+        return false;
+    }
+
+    provider
+        .settings_config
+        .get("codexResolvedRouteMatched")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || provider
+            .settings_config
+            .get("codexResolvedRouteId")
+            .and_then(Value::as_str)
+            .is_some_and(|route_id| !route_id.trim().is_empty())
+}
+
+fn apply_claude_chat_profile_for_provider(
+    body: &mut Value,
+    provider_supports_profiles: bool,
+) -> bool {
+    if !provider_supports_profiles {
+        return false;
+    }
+
+    let Some(obj) = body.as_object_mut() else {
+        return false;
+    };
+
+    obj.remove("instructions");
+
+    obj.remove("tools");
+    obj.remove("tool_choice");
+    obj.remove("parallel_tool_calls");
+
+    if let Some(input) = obj.get_mut("input").and_then(Value::as_array_mut) {
+        input.retain_mut(should_keep_claude_chat_item);
+    }
+
+    true
+}
+
+fn should_keep_claude_chat_item(item: &mut Value) -> bool {
+    let item_type = item.get("type").and_then(Value::as_str).unwrap_or("");
+
+    if item_type == "reasoning"
+        || item_type.ends_with("_call")
+        || item_type.ends_with("_call_output")
+        || item_type.contains("tool")
+    {
+        return false;
+    }
+
+    if matches!(
+        item.get("role").and_then(Value::as_str),
+        Some("system") | Some("developer") | Some("tool")
+    ) {
+        return false;
+    }
+
+    remove_chat_contextual_content_items(item)
+}
+
+fn remove_chat_contextual_content_items(item: &mut Value) -> bool {
+    if item
+        .get("text")
+        .and_then(Value::as_str)
+        .is_some_and(is_chat_contextual_fragment)
+    {
+        return false;
+    }
+
+    if let Some(content) = item.get_mut("content").and_then(Value::as_array_mut) {
+        content.retain(|content_item| {
+            !content_item
+                .get("text")
+                .and_then(Value::as_str)
+                .is_some_and(is_chat_contextual_fragment)
+        });
+        return !content.is_empty();
+    }
+
+    true
+}
+
+fn is_chat_contextual_fragment(text: &str) -> bool {
+    let trimmed = text.trim();
+    is_wrapped_fragment(trimmed, "<environment_context>", "</environment_context>")
+        || is_agents_instructions_fragment(trimmed)
+        || is_wrapped_fragment(
+            trimmed,
+            "<codex_internal_context",
+            "</codex_internal_context>",
+        )
+        || is_wrapped_fragment(trimmed, "<goal_context", "</goal_context>")
+        || is_wrapped_fragment(trimmed, "<recommended_plugins", "</recommended_plugins>")
+}
+
+fn is_wrapped_fragment(trimmed: &str, open_prefix: &str, close: &str) -> bool {
+    trimmed.starts_with(open_prefix) && trimmed.ends_with(close)
+}
+
+fn is_agents_instructions_fragment(trimmed: &str) -> bool {
+    trimmed.starts_with("# AGENTS.md instructions")
+        && trimmed.contains("<INSTRUCTIONS>")
+        && trimmed.ends_with("</INSTRUCTIONS>")
+}
+
+fn apply_claude_ask_profile_for_provider(
+    body: &mut Value,
+    provider_supports_profiles: bool,
+) -> bool {
+    if !provider_supports_profiles {
+        return false;
+    }
+
+    let Some(obj) = body.as_object_mut() else {
+        return false;
+    };
+
+    obj.remove("instructions");
+    let filter_result = filter_claude_ask_tools(obj);
+    log::info!(
+        "[CodexAsk] filtered_tools kept={} original={}",
+        filter_result.kept_count,
+        filter_result.original_count
+    );
+
+    if let Some(input) = obj.get_mut("input") {
+        let original_input = std::mem::take(input);
+        *input = filter_responses_input_for_claude_ask(original_input);
+    }
+
+    true
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AskToolFilterResult {
+    original_count: usize,
+    kept_count: usize,
+}
+
+fn filter_claude_ask_tools(obj: &mut serde_json::Map<String, Value>) -> AskToolFilterResult {
+    let Some(tools_value) = obj.get("tools") else {
+        return AskToolFilterResult {
+            original_count: 0,
+            kept_count: 0,
+        };
+    };
+
+    let Some(tools) = tools_value.as_array() else {
+        obj.remove("tools");
+        return AskToolFilterResult {
+            original_count: 0,
+            kept_count: 0,
+        };
+    };
+
+    let available_tools = tools
+        .iter()
+        .filter_map(response_tool_name_for_ask_log)
+        .collect::<Vec<_>>();
+    log::info!("[CodexAsk] available_tools=[{}]", available_tools.join(","));
+
+    let allowed_tools = tools
+        .iter()
+        .filter(|tool| response_tool_name(tool).is_some_and(is_claude_ask_readonly_tool))
+        .cloned()
+        .collect::<Vec<_>>();
+    let original_count = tools.len();
+    let kept_count = allowed_tools.len();
+
+    let kept_tool_names = allowed_tools
+        .iter()
+        .filter_map(response_tool_name_for_ask_log)
+        .collect::<Vec<_>>();
+
+    if kept_count == 0 {
+        obj.remove("tools");
+    } else {
+        obj.insert("tools".to_string(), Value::Array(allowed_tools));
+    }
+
+    if tool_choice_points_to_removed_tool(obj.get("tool_choice"), &kept_tool_names) {
+        obj.remove("tool_choice");
+    }
+
+    AskToolFilterResult {
+        original_count,
+        kept_count,
+    }
+}
+
+fn response_tool_name_for_ask_log(tool: &Value) -> Option<String> {
+    response_tool_name(tool).map(ToString::to_string)
+}
+
+fn response_tool_name(tool: &Value) -> Option<&str> {
+    tool.get("name")
+        .and_then(Value::as_str)
+        .or_else(|| tool.pointer("/function/name").and_then(Value::as_str))
+}
+
+fn is_claude_ask_readonly_tool(name: &str) -> bool {
+    CLAUDE_ASK_ALLOWED_TOOLS.contains(&name)
+}
+
+fn tool_choice_points_to_removed_tool(
+    tool_choice: Option<&Value>,
+    kept_tool_names: &[String],
+) -> bool {
+    let Some(name) = tool_choice.and_then(tool_choice_tool_name) else {
+        return false;
+    };
+    !kept_tool_names.iter().any(|kept| kept == name)
+}
+
+fn tool_choice_tool_name(tool_choice: &Value) -> Option<&str> {
+    match tool_choice {
+        Value::String(value) => match value.as_str() {
+            "auto" | "none" | "required" => None,
+            other => Some(other),
+        },
+        Value::Object(object) => object.get("name").and_then(Value::as_str).or_else(|| {
+            tool_choice
+                .pointer("/function/name")
+                .and_then(Value::as_str)
+        }),
+        _ => None,
+    }
+}
+
+fn filter_responses_input_for_claude_ask(input: Value) -> Value {
+    match input {
+        Value::Array(items) => Value::Array(filter_response_items_for_claude_ask(items)),
+        Value::Object(object) => {
+            Value::Array(filter_response_items_for_claude_ask(vec![Value::Object(
+                object,
+            )]))
+        }
+        other => other,
+    }
+}
+
+fn filter_response_items_for_claude_ask(items: Vec<Value>) -> Vec<Value> {
+    let mut allowed_calls = HashMap::new();
+
+    for item in &items {
+        if is_ask_allowed_tool_call_item(item) {
+            if let Some(call_id) = item.get("call_id").and_then(Value::as_str) {
+                let name = ask_tool_name(item);
+                allowed_calls.insert(call_id.to_string(), name);
+            }
+        }
+    }
+
+    let mut filtered = Vec::with_capacity(items.len());
+    for mut item in items {
+        if item.get("type").and_then(Value::as_str) == Some("reasoning") {
+            continue;
+        }
+
+        if is_ask_tool_output_item(&item) {
+            if let Some(tool_name) = item
+                .get("call_id")
+                .and_then(Value::as_str)
+                .and_then(|call_id| allowed_calls.get(call_id))
+            {
+                sanitize_ask_mcp_tool_output(tool_name, &mut item);
+                filtered.push(item);
+            }
+            continue;
+        }
+
+        if is_ask_tool_call_item(&item) {
+            if item
+                .get("call_id")
+                .and_then(Value::as_str)
+                .is_some_and(|call_id| allowed_calls.contains_key(call_id))
+            {
+                filtered.push(item);
+            }
+            continue;
+        }
+
+        if should_keep_ask_conversation_item(&item) {
+            sanitize_ask_environment_context_item(&mut item);
+            filtered.push(item);
+        }
+    }
+
+    filtered
+}
+
+fn sanitize_ask_mcp_tool_output(tool_name: &str, item: &mut Value) {
+    if !matches!(
+        tool_name,
+        "list_mcp_resources" | "list_mcp_resource_templates"
+    ) {
+        return;
+    }
+
+    let output = item.get_mut("output");
+    let Some(output) = output else {
+        return;
+    };
+
+    if let Value::String(text) = output {
+        let fallback_key = if tool_name == "list_mcp_resources" {
+            "resources"
+        } else {
+            "resource_templates"
+        };
+        let mut parsed = serde_json::from_str::<Value>(text)
+            .unwrap_or_else(|_| serde_json::json!({ fallback_key: [] }));
+        filter_mcp_server_results(&mut parsed);
+        *text = canonical_json_string(&parsed);
+        return;
+    }
+
+    filter_mcp_server_results(output);
+}
+
+fn filter_mcp_server_results(value: &mut Value) {
+    match value {
+        Value::Array(items) => {
+            if items.iter().any(|item| item.get("server").is_some()) {
+                items.retain(|item| {
+                    item.get("server").and_then(Value::as_str)
+                        == Some(CLAUDE_ASK_PROJECT_MCP_SERVER)
+                });
+            }
+            for item in items {
+                filter_mcp_server_results(item);
+            }
+        }
+        Value::Object(object) => {
+            for value in object.values_mut() {
+                filter_mcp_server_results(value);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_ask_allowed_tool_call_item(item: &Value) -> bool {
+    is_ask_tool_call_item(item) && is_claude_ask_readonly_tool(&ask_tool_name(item))
+}
+
+fn is_ask_tool_call_item(item: &Value) -> bool {
+    matches!(
+        item.get("type").and_then(Value::as_str),
+        Some("function_call" | "custom_tool_call" | "tool_search_call")
+    )
+}
+
+fn is_ask_tool_output_item(item: &Value) -> bool {
+    matches!(
+        item.get("type").and_then(Value::as_str),
+        Some("function_call_output" | "custom_tool_call_output" | "tool_search_output")
+    )
+}
+
+fn should_keep_ask_conversation_item(item: &Value) -> bool {
+    let item_type = item.get("type").and_then(Value::as_str);
+    if item_type.is_some_and(|value| {
+        value.ends_with("_call") || value.ends_with("_call_output") || value.contains("tool")
+    }) {
+        return false;
+    }
+
+    match item.get("role").and_then(Value::as_str) {
+        Some("user") | Some("assistant") | Some("latest_reminder") => true,
+        Some("system") | Some("developer") | Some("tool") => false,
+        Some(_) => false,
+        None => matches!(
+            item_type,
+            Some("input_text" | "input_image" | "input_file" | "input_audio" | "message")
+        ),
+    }
+}
+
+fn sanitize_ask_environment_context_item(item: &mut Value) {
+    if let Some(text) = item.get("text").and_then(Value::as_str) {
+        if let Some(sanitized) = sanitize_environment_context_fragment(text) {
+            *item.get_mut("text").expect("text exists") = Value::String(sanitized);
+        }
+    }
+
+    if let Some(content) = item.get_mut("content") {
+        match content {
+            Value::String(text) => {
+                if let Some(sanitized) = sanitize_environment_context_fragment(text) {
+                    *content = Value::String(sanitized);
+                }
+            }
+            Value::Array(content_items) => {
+                for content_item in content_items {
+                    let Some(text) = content_item.get("text").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let Some(sanitized) = sanitize_environment_context_fragment(text) else {
+                        continue;
+                    };
+                    *content_item.get_mut("text").expect("text exists") = Value::String(sanitized);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn sanitize_environment_context_fragment(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if !trimmed.starts_with("<environment_context>") || !trimmed.ends_with("</environment_context>")
+    {
+        return None;
+    }
+
+    let mut entries = Vec::new();
+    let mut current_environment: Option<String> = None;
+
+    for raw_line in trimmed.lines() {
+        let line = raw_line.trim();
+        if line.starts_with("<environment ") {
+            current_environment = Some(line.to_string());
+            continue;
+        }
+        if line.starts_with("</environment") {
+            current_environment = None;
+            continue;
+        }
+        if line.starts_with("<cwd>") && line.ends_with("</cwd>") {
+            entries.push((current_environment.clone(), line.to_string()));
+        }
+    }
+
+    if entries.is_empty() {
+        return Some("<environment_context>\n</environment_context>".to_string());
+    }
+
+    let has_environment_ids = entries.iter().any(|(environment, _)| environment.is_some());
+    let mut out = String::from("<environment_context>\n");
+    for (environment, cwd) in entries {
+        if has_environment_ids {
+            if let Some(environment) = environment {
+                out.push_str(&environment);
+                out.push('\n');
+                out.push_str(&cwd);
+                out.push('\n');
+                out.push_str("</environment>\n");
+            } else {
+                out.push_str(&cwd);
+                out.push('\n');
+            }
+        } else {
+            out.push_str(&cwd);
+            out.push('\n');
+        }
+    }
+    out.push_str("</environment_context>");
+    Some(out)
+}
+
+fn ask_tool_name(item: &Value) -> String {
+    item.get("name")
+        .and_then(Value::as_str)
+        .or_else(|| item.get("tool_name").and_then(Value::as_str))
+        .unwrap_or("unknown")
+        .to_string()
+}
 
 pub struct ForwardResult {
     pub response: ProxyResponse,
@@ -106,6 +588,7 @@ pub struct RequestForwarder {
     current_providers: Arc<RwLock<std::collections::HashMap<String, (String, String)>>>,
     gemini_shadow: Arc<GeminiShadowStore>,
     codex_chat_history: Arc<CodexChatHistoryStore>,
+    interaction_mode: Arc<RwLock<InteractionMode>>,
     /// 故障转移切换管理器
     failover_manager: Arc<FailoverSwitchManager>,
     /// AppHandle，用于发射事件和更新托盘
@@ -194,6 +677,7 @@ impl RequestForwarder {
         current_providers: Arc<RwLock<std::collections::HashMap<String, (String, String)>>>,
         gemini_shadow: Arc<GeminiShadowStore>,
         codex_chat_history: Arc<CodexChatHistoryStore>,
+        interaction_mode: Arc<RwLock<InteractionMode>>,
         failover_manager: Arc<FailoverSwitchManager>,
         app_handle: Option<tauri::AppHandle>,
         current_provider_id_at_start: String,
@@ -215,6 +699,7 @@ impl RequestForwarder {
             current_providers,
             gemini_shadow,
             codex_chat_history,
+            interaction_mode,
             failover_manager,
             app_handle,
             current_provider_id_at_start,
@@ -1267,6 +1752,27 @@ impl RequestForwarder {
         };
         let codex_route_missed = codex_router_configured && routed_provider.is_none();
         let provider = routed_provider.as_ref().unwrap_or(provider);
+        let mut effective_body = body.clone();
+        let claude_chat_profile_applied =
+            if matches!(*self.interaction_mode.read().await, InteractionMode::Chat) {
+                apply_claude_chat_profile_for_provider(
+                    &mut effective_body,
+                    provider_supports_chat_ask_profiles(provider),
+                )
+            } else {
+                false
+            };
+        if claude_chat_profile_applied {
+            let model = effective_body
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or(CLAUDE_CHAT_MODEL);
+            log::info!(
+                "[CodexChat] applied chat profile to model={} effective_provider={}",
+                model,
+                provider.id
+            );
+        }
 
         if let Some(trace_id) = codex_trace_id.as_deref() {
             let route_id = provider
@@ -1352,11 +1858,11 @@ impl RequestForwarder {
         // Claude Desktop proxy 模式必须先把 Desktop 可见的 claude-* route
         // 映射成真实上游模型名，并且未知 route 要直接报错，不能使用默认模型兜底。
         let mapped_body = if matches!(app_type, AppType::ClaudeDesktop) {
-            crate::claude_desktop_config::map_proxy_request_model(body.clone(), provider)
+            crate::claude_desktop_config::map_proxy_request_model(effective_body.clone(), provider)
                 .map_err(|e| ProxyError::InvalidRequest(e.to_string()))?
         } else {
             let (mapped_body, _original_model, _mapped_model) =
-                super::model_mapper::apply_model_mapping(body.clone(), provider);
+                super::model_mapper::apply_model_mapping(effective_body.clone(), provider);
             mapped_body
         };
 
@@ -1586,6 +2092,46 @@ impl RequestForwarder {
             if restored > 0 {
                 log::debug!(
                     "[Codex] Restored or enriched {restored} cached function call item(s) for Chat upstream"
+                );
+            }
+            let claude_chat_profile_reapplied =
+                if matches!(*self.interaction_mode.read().await, InteractionMode::Chat) {
+                    apply_claude_chat_profile_for_provider(
+                        &mut mapped_body,
+                        provider_supports_chat_ask_profiles(provider),
+                    )
+                } else {
+                    false
+                };
+            if claude_chat_profile_reapplied {
+                let model = mapped_body
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .unwrap_or(CLAUDE_CHAT_MODEL);
+                log::info!(
+                    "[CodexChat] reapplied chat profile after history enrich to model={} effective_provider={}",
+                    model,
+                    provider.id
+                );
+            }
+            let claude_ask_profile_applied =
+                if matches!(*self.interaction_mode.read().await, InteractionMode::Ask) {
+                    apply_claude_ask_profile_for_provider(
+                        &mut mapped_body,
+                        provider_supports_chat_ask_profiles(provider),
+                    )
+                } else {
+                    false
+                };
+            if claude_ask_profile_applied {
+                let model = mapped_body
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .unwrap_or(CLAUDE_CHAT_MODEL);
+                log::info!(
+                    "[CodexAsk] applied ask profile to model={} effective_provider={}",
+                    model,
+                    provider.id
                 );
             }
             super::providers::apply_codex_chat_upstream_model(provider, &mut mapped_body);
@@ -2185,6 +2731,13 @@ impl RequestForwarder {
             .get("model")
             .and_then(|v| v.as_str())
             .unwrap_or("<none>");
+        log_gpt_5_4_mini_request_classification(
+            request_model,
+            provider,
+            &effective_endpoint,
+            request_bytes_len,
+            &filtered_body,
+        );
         let responses_lite_fallback_key =
             codex_responses_lite_fallback_key(&provider.id, &url, request_model);
         if matches!(app_type, AppType::Codex)
@@ -3616,6 +4169,124 @@ fn prepare_upstream_request_body(request_body: Value) -> Value {
     canonicalize_value(filter_private_params_with_whitelist(request_body, &[]))
 }
 
+fn log_gpt_5_4_mini_request_classification(
+    request_model: &str,
+    provider: &Provider,
+    endpoint: &str,
+    request_bytes: usize,
+    body: &Value,
+) {
+    if request_model != "gpt-5.4-mini" {
+        return;
+    }
+
+    log::debug!(
+        "[Gpt54MiniClassify] timestamp={} provider={} endpoint={} request_bytes={} input_count={} messages_count={} tools_count={} tool_names=[{}] output_schema_keys=[{}] response_format_keys=[{}] preview={}",
+        chrono::Local::now().to_rfc3339(),
+        provider.id,
+        endpoint,
+        request_bytes,
+        json_array_count(body.get("input")),
+        json_array_count(body.get("messages")),
+        json_array_count(body.get("tools")),
+        gpt_5_4_mini_tool_names(body).join(","),
+        json_object_keys(body.get("output_schema")).join(","),
+        json_object_keys(body.get("response_format")).join(","),
+        gpt_5_4_mini_prompt_preview(body, 160),
+    );
+}
+
+fn json_array_count(value: Option<&Value>) -> String {
+    value
+        .and_then(Value::as_array)
+        .map(|values| values.len().to_string())
+        .unwrap_or_else(|| "absent".to_string())
+}
+
+fn json_object_keys(value: Option<&Value>) -> Vec<String> {
+    let Some(object) = value.and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let mut keys = object.keys().cloned().collect::<Vec<_>>();
+    keys.sort_unstable();
+    keys
+}
+
+fn gpt_5_4_mini_tool_names(body: &Value) -> Vec<String> {
+    let Some(tools) = body.get("tools").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+
+    let mut names = tools
+        .iter()
+        .filter_map(response_tool_name)
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
+fn gpt_5_4_mini_prompt_preview(body: &Value, max_chars: usize) -> String {
+    let text = body
+        .get("instructions")
+        .and_then(Value::as_str)
+        .or_else(|| first_input_text(body))
+        .unwrap_or("");
+    compact_log_preview(text, max_chars)
+}
+
+fn first_input_text(body: &Value) -> Option<&str> {
+    if let Some(value) = body.get("input") {
+        if let Some(text) = value.as_str() {
+            return Some(text);
+        }
+        if let Some(items) = value.as_array() {
+            for item in items {
+                if let Some(text) = item.as_str() {
+                    return Some(text);
+                }
+                if let Some(text) = item.get("text").and_then(Value::as_str) {
+                    return Some(text);
+                }
+                if let Some(content) = item.get("content").and_then(Value::as_array) {
+                    for content_item in content {
+                        if let Some(text) = content_item.get("text").and_then(Value::as_str) {
+                            return Some(text);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(messages) = body.get("messages").and_then(Value::as_array) {
+        for message in messages {
+            if let Some(text) = message.get("content").and_then(Value::as_str) {
+                return Some(text);
+            }
+            if let Some(content) = message.get("content").and_then(Value::as_array) {
+                for content_item in content {
+                    if let Some(text) = content_item.get("text").and_then(Value::as_str) {
+                        return Some(text);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn compact_log_preview(text: &str, max_chars: usize) -> String {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut preview = compact.chars().take(max_chars).collect::<String>();
+    if compact.chars().count() > max_chars {
+        preview.push_str("...");
+    }
+    preview
+}
+
 /// 生成 Codex Responses->Chat 出站请求的脱敏形态摘要。
 ///
 /// 该摘要只记录顶层字段名、对象/数组形态和工具计数，不记录消息正文、工具参数、
@@ -3650,6 +4321,15 @@ fn summarize_codex_chat_request_shape(body: &Value) -> String {
     } else {
         parts.push("tools=absent".to_string());
     }
+    parts.push(format!(
+        "assistant_tool_calls={}",
+        if chat_messages_have_assistant_tool_calls(body) {
+            "present"
+        } else {
+            "absent"
+        }
+    ));
+    parts.push(format!("tool_messages={}", chat_tool_message_count(body)));
 
     for key in [
         "tool_choice",
@@ -3681,6 +4361,32 @@ fn summarize_codex_chat_request_shape(body: &Value) -> String {
     ));
 
     parts.join(";")
+}
+
+fn chat_messages_have_assistant_tool_calls(body: &Value) -> bool {
+    body.get("messages")
+        .and_then(Value::as_array)
+        .is_some_and(|messages| {
+            messages.iter().any(|message| {
+                message.get("role").and_then(Value::as_str) == Some("assistant")
+                    && message
+                        .get("tool_calls")
+                        .and_then(Value::as_array)
+                        .is_some_and(|tool_calls| !tool_calls.is_empty())
+            })
+        })
+}
+
+fn chat_tool_message_count(body: &Value) -> usize {
+    body.get("messages")
+        .and_then(Value::as_array)
+        .map(|messages| {
+            messages
+                .iter()
+                .filter(|message| message.get("role").and_then(Value::as_str) == Some("tool"))
+                .count()
+        })
+        .unwrap_or(0)
 }
 
 /// 把 JSON 值压缩成不含正文内容的形态描述。
@@ -3833,6 +4539,7 @@ mod tests {
             current_providers: Arc::new(RwLock::new(HashMap::new())),
             gemini_shadow: Arc::new(GeminiShadowStore::new()),
             codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
+            interaction_mode: Arc::new(RwLock::new(InteractionMode::Code)),
             failover_manager: Arc::new(FailoverSwitchManager::new(db)),
             app_handle: None,
             current_provider_id_at_start: String::new(),
@@ -3846,6 +4553,970 @@ mod tests {
             streaming_first_byte_timeout,
             max_attempts: 1,
         }
+    }
+
+    #[test]
+    fn claude_chat_profile_removes_agent_instructions_and_tools_without_prompt() {
+        let mut body = json!({
+            "model": "claude-sonnet-5",
+            "instructions": "You are Codex, an autonomous coding agent.",
+            "tools": [{"type": "function", "name": "shell_command"}],
+            "tool_choice": "auto",
+            "parallel_tool_calls": true,
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "随便聊聊"}]
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "shell_command",
+                    "arguments": "Get-ChildItem"
+                },
+                {
+                    "type": "reasoning",
+                    "summary": [{"text": "Need shell"}]
+                }
+            ]
+        });
+
+        assert!(apply_claude_chat_profile_for_provider(&mut body, true));
+        assert!(body.get("instructions").is_none());
+        assert!(body.get("tools").is_none());
+        assert!(body.get("tool_choice").is_none());
+        assert!(body.get("parallel_tool_calls").is_none());
+
+        let serialized = body["input"].to_string();
+        assert!(serialized.contains("随便聊聊"));
+        assert!(!serialized.contains("shell_command"));
+        assert!(!serialized.contains("Get-ChildItem"));
+        assert!(!serialized.contains("reasoning"));
+        assert!(!serialized.contains("autonomous coding agent"));
+    }
+
+    #[test]
+    fn claude_chat_profile_removes_environment_context_fragment() {
+        let mut body = json!({
+            "model": "claude-sonnet-5",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "<environment_context>\n<cwd>E:\\repo</cwd>\n<shell>powershell</shell>\n</environment_context>"
+                    },
+                    {
+                        "type": "input_text",
+                        "text": "真实用户问题"
+                    }
+                ]
+            }]
+        });
+
+        assert!(apply_claude_chat_profile_for_provider(&mut body, true));
+        let serialized = body["input"].to_string();
+        assert!(serialized.contains("真实用户问题"));
+        assert!(!serialized.contains("environment_context"));
+        assert!(!serialized.contains("powershell"));
+    }
+
+    #[test]
+    fn claude_chat_profile_removes_agents_fragment() {
+        let mut body = json!({
+            "model": "claude-sonnet-5",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "# AGENTS.md instructions\n\n<INSTRUCTIONS>\nRead AGENTS.md before editing.\n</INSTRUCTIONS>"
+                }]
+            }]
+        });
+
+        assert!(apply_claude_chat_profile_for_provider(&mut body, true));
+        assert_eq!(body["input"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn claude_chat_profile_removes_codex_internal_context_fragment() {
+        let mut body = json!({
+            "model": "claude-sonnet-5",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "<codex_internal_context source=\"codex\">\nworkspace metadata\n</codex_internal_context>"
+                    },
+                    {
+                        "type": "input_text",
+                        "text": "聊聊设计"
+                    }
+                ]
+            }]
+        });
+
+        assert!(apply_claude_chat_profile_for_provider(&mut body, true));
+        let serialized = body["input"].to_string();
+        assert!(serialized.contains("聊聊设计"));
+        assert!(!serialized.contains("codex_internal_context"));
+        assert!(!serialized.contains("workspace metadata"));
+    }
+
+    #[test]
+    fn claude_chat_profile_removes_goal_context_fragment() {
+        let mut body = json!({
+            "model": "claude-sonnet-5",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "<goal_context>\nactive objective\n</goal_context>"
+                }]
+            }]
+        });
+
+        assert!(apply_claude_chat_profile_for_provider(&mut body, true));
+        assert_eq!(body["input"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn claude_chat_profile_removes_recommended_plugins_fragment() {
+        let mut body = json!({
+            "model": "claude-sonnet-5",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "<recommended_plugins>\nplugin candidates\n</recommended_plugins>"
+                }]
+            }]
+        });
+
+        assert!(apply_claude_chat_profile_for_provider(&mut body, true));
+        assert_eq!(body["input"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn claude_chat_profile_preserves_normal_text_mentioning_agents() {
+        let text = "普通用户问题：AGENTS.md 是什么？里面的 <INSTRUCTIONS> 标签怎么理解？";
+        let mut body = json!({
+            "model": "claude-sonnet-5",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": text
+                }]
+            }]
+        });
+
+        assert!(apply_claude_chat_profile_for_provider(&mut body, true));
+        assert_eq!(body["input"][0]["content"][0]["text"], text);
+    }
+
+    #[test]
+    fn claude_chat_profile_preserves_normal_text_mentioning_environment_context() {
+        let text = "普通用户问题：如果文档里出现 <environment_context>，应该怎么解释？";
+        let mut body = json!({
+            "model": "claude-sonnet-5",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": text
+                }]
+            }]
+        });
+
+        assert!(apply_claude_chat_profile_for_provider(&mut body, true));
+        assert_eq!(body["input"][0]["content"][0]["text"], text);
+    }
+
+    #[test]
+    fn deepseek_chat_profile_removes_agent_context_and_tools() {
+        let mut body = json!({
+            "model": "deepseek-v4-flash",
+            "instructions": "You are Codex, an autonomous coding agent.",
+            "tools": [{"type": "function", "name": "shell_command"}],
+            "tool_choice": "auto",
+            "parallel_tool_calls": true,
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "<environment_context>\n<cwd>E:\\repo</cwd>\n<shell>powershell</shell>\n</environment_context>"
+                    },
+                    {
+                        "type": "input_text",
+                        "text": "只聊天"
+                    }
+                ]
+            }]
+        });
+
+        assert!(apply_claude_chat_profile_for_provider(&mut body, true));
+        assert!(body.get("instructions").is_none());
+        assert!(body.get("tools").is_none());
+        assert!(body.get("tool_choice").is_none());
+        assert!(body.get("parallel_tool_calls").is_none());
+
+        let serialized = body["input"].to_string();
+        assert!(serialized.contains("只聊天"));
+        assert!(!serialized.contains("environment_context"));
+        assert!(!serialized.contains("shell_command"));
+        assert!(!serialized.contains("autonomous coding agent"));
+    }
+
+    #[test]
+    fn custom_routed_chat_profile_applies_to_unknown_model() {
+        let mut body = json!({
+            "model": "kimi-k2-local",
+            "instructions": "You are Codex, an autonomous coding agent.",
+            "tools": [{"type": "function", "name": "shell_command"}],
+            "tool_choice": "auto",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "纯聊天"}]
+            }]
+        });
+
+        assert!(apply_claude_chat_profile_for_provider(&mut body, true));
+        assert!(body.get("instructions").is_none());
+        assert!(body.get("tools").is_none());
+        assert!(body.get("tool_choice").is_none());
+        assert!(body["input"].to_string().contains("纯聊天"));
+    }
+
+    #[test]
+    fn chat_profile_removes_tool_history_restored_after_enrich() {
+        let mut body = json!({
+            "model": "kimi-k2-local",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "只聊天"}]
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "read_mcp_resource",
+                    "arguments": "{\"uri\":\"ccswitch://project/file/src-tauri/src/proxy/forwarder.rs\"}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "fn secret_project_code() {}"
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "之前看过代码"}]
+                }
+            ]
+        });
+
+        assert!(apply_claude_chat_profile_for_provider(&mut body, true));
+        let serialized = body["input"].to_string();
+        assert!(serialized.contains("只聊天"));
+        assert!(serialized.contains("之前看过代码"));
+        assert!(!serialized.contains("read_mcp_resource"));
+        assert!(!serialized.contains("secret_project_code"));
+        assert!(!serialized.contains("function_call"));
+        assert!(!serialized.contains("function_call_output"));
+    }
+
+    #[test]
+    fn chat_profile_does_not_apply_to_unknown_model_without_custom_route() {
+        let mut body = json!({
+            "model": "unknown-built-in",
+            "instructions": "keep me",
+            "tools": [{"type": "function", "name": "shell_command"}],
+            "input": "hello"
+        });
+
+        assert!(!apply_claude_chat_profile_for_provider(&mut body, false));
+        assert_eq!(body["instructions"], "keep me");
+        assert!(body.get("tools").is_some());
+    }
+
+    #[test]
+    fn named_profile_model_does_not_apply_without_custom_route() {
+        let mut body = json!({
+            "model": "deepseek-v4-flash",
+            "instructions": "keep me",
+            "tools": [{"type": "function", "name": "shell_command"}],
+            "input": "hello"
+        });
+
+        assert!(!apply_claude_chat_profile_for_provider(&mut body, false));
+        assert_eq!(body["instructions"], "keep me");
+        assert!(body.get("tools").is_some());
+    }
+
+    #[test]
+    fn claude_ask_profile_keeps_allowed_mcp_call_and_output_only() {
+        let mut body = json!({
+            "model": "claude-sonnet-5",
+            "instructions": "agent instructions",
+            "tools": [
+                {"type": "function", "name": "read_mcp_resource"},
+                {"type": "function", "name": "shell"},
+                {"type": "function", "name": "apply_patch"}
+            ],
+            "tool_choice": "auto",
+            "parallel_tool_calls": true,
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Inspect structure"}]
+                },
+                {
+                    "type": "reasoning",
+                    "summary": [{"text": "Need shell"}]
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "shell_1",
+                    "name": "shell",
+                    "arguments": "Get-ChildItem"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "shell_1",
+                    "output": "tools/\ndownloads/"
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "mcp_1",
+                    "name": "read_mcp_resource",
+                    "arguments": "{\"server\":\"ccswitch_readonly\",\"uri\":\"ccswitch://project/tree\"}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "mcp_1",
+                    "output": "src/\nsrc-tauri/"
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "patch_1",
+                    "name": "apply_patch",
+                    "arguments": "*** Begin Patch"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "patch_1",
+                    "output": "patched"
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "I saw tools and downloads."}]
+                }
+            ]
+        });
+
+        assert!(apply_claude_ask_profile_for_provider(&mut body, true));
+        assert!(body.get("instructions").is_none());
+        let tools = body["tools"].as_array().expect("allowed tools");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["name"], "read_mcp_resource");
+        assert_eq!(body["tool_choice"], "auto");
+        assert_eq!(body["parallel_tool_calls"], true);
+
+        let serialized = body["input"].to_string();
+        assert!(serialized.contains("read_mcp_resource"));
+        assert!(serialized.contains("ccswitch://project/tree"));
+        assert!(serialized.contains("src-tauri/"));
+        assert!(!serialized.contains("shell"));
+        assert!(!serialized.contains("Get-ChildItem"));
+        assert!(!serialized.contains("tools/"));
+        assert!(!serialized.contains("apply_patch"));
+        assert!(!serialized.contains("patched"));
+        assert!(!serialized.contains("agent instructions"));
+        assert!(!serialized.contains(r#""type":"reasoning""#));
+    }
+
+    #[test]
+    fn claude_ask_profile_sanitizes_single_environment_context_to_cwd_only() {
+        let mut body = json!({
+            "model": "claude-sonnet-5",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "<environment_context>\n  <cwd>E:\\文档备份\\New project 333\\downloads\\ccswitchmulti-src</cwd>\n  <shell>powershell</shell>\n  <current_date>2026-07-07</current_date>\n  <timezone>Asia/Shanghai</timezone>\n  <network>enabled</network>\n  <filesystem><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n  <subagents>enabled</subagents>\n</environment_context>"
+                }]
+            }]
+        });
+
+        assert!(apply_claude_ask_profile_for_provider(&mut body, true));
+        let text = body["input"][0]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains(r#"<cwd>E:\文档备份\New project 333\downloads\ccswitchmulti-src</cwd>"#)
+        );
+        assert!(!text.contains("powershell"));
+        assert!(!text.contains("current_date"));
+        assert!(!text.contains("timezone"));
+        assert!(!text.contains("network"));
+        assert!(!text.contains("filesystem"));
+        assert!(!text.contains("permission_profile"));
+        assert!(!text.contains("unrestricted"));
+        assert!(!text.contains("restricted"));
+        assert!(!text.contains("subagents"));
+    }
+
+    #[test]
+    fn claude_ask_profile_sanitizes_multi_environment_context_to_ids_and_cwd() {
+        let mut body = json!({
+            "model": "claude-sonnet-5",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "<environment_context>\n  <environment id=\"main\">\n    <cwd>E:\\repo</cwd>\n    <shell>powershell</shell>\n    <filesystem>unrestricted</filesystem>\n  </environment>\n  <environment id=\"other\">\n    <cwd>F:\\other</cwd>\n    <network>enabled</network>\n  </environment>\n</environment_context>"
+                }]
+            }]
+        });
+
+        assert!(apply_claude_ask_profile_for_provider(&mut body, true));
+        let text = body["input"][0]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains(r#"<environment id="main">"#));
+        assert!(text.contains(r#"<cwd>E:\repo</cwd>"#));
+        assert!(text.contains(r#"<environment id="other">"#));
+        assert!(text.contains(r#"<cwd>F:\other</cwd>"#));
+        assert!(!text.contains("powershell"));
+        assert!(!text.contains("filesystem"));
+        assert!(!text.contains("unrestricted"));
+        assert!(!text.contains("network"));
+    }
+
+    #[test]
+    fn claude_ask_profile_sanitizes_top_level_environment_text() {
+        let mut body = json!({
+            "model": "claude-sonnet-5",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "text": "<environment_context>\n<cwd>E:\\repo</cwd>\n<shell>powershell</shell>\n<filesystem>unrestricted</filesystem>\n</environment_context>"
+            }]
+        });
+
+        assert!(apply_claude_ask_profile_for_provider(&mut body, true));
+        let text = body["input"][0]["text"].as_str().unwrap();
+        assert!(text.contains(r#"<cwd>E:\repo</cwd>"#));
+        assert!(!text.contains("powershell"));
+        assert!(!text.contains("filesystem"));
+        assert!(!text.contains("unrestricted"));
+    }
+
+    #[test]
+    fn claude_ask_profile_sanitizes_string_content_environment_context() {
+        let mut body = json!({
+            "model": "claude-sonnet-5",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": "<environment_context>\n<cwd>E:\\repo</cwd>\n<shell>powershell</shell>\n<network>enabled</network>\n</environment_context>"
+            }]
+        });
+
+        assert!(apply_claude_ask_profile_for_provider(&mut body, true));
+        let text = body["input"][0]["content"].as_str().unwrap();
+        assert!(text.contains(r#"<cwd>E:\repo</cwd>"#));
+        assert!(!text.contains("powershell"));
+        assert!(!text.contains("network"));
+    }
+
+    #[test]
+    fn claude_ask_profile_leaves_agents_fragment_unchanged() {
+        let agents = "# AGENTS.md instructions\n\n<INSTRUCTIONS>\n- Read files first.\n- Do not weaken safety gates.\n</INSTRUCTIONS>";
+        let mut body = json!({
+            "model": "claude-sonnet-5",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": agents
+                }]
+            }]
+        });
+
+        assert!(apply_claude_ask_profile_for_provider(&mut body, true));
+        assert_eq!(body["input"][0]["content"][0]["text"], agents);
+    }
+
+    #[test]
+    fn claude_ask_profile_leaves_normal_user_environment_text_unchanged() {
+        let text = "普通说明：这里提到 <environment_context> 但不是机器生成的完整环境片段。";
+        let mut body = json!({
+            "model": "claude-sonnet-5",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": text
+                }]
+            }]
+        });
+
+        assert!(apply_claude_ask_profile_for_provider(&mut body, true));
+        assert_eq!(body["input"][0]["content"][0]["text"], text);
+    }
+
+    #[test]
+    fn claude_ask_profile_keeps_allowed_mcp_call_output_while_sanitizing_environment() {
+        let mut body = json!({
+            "model": "claude-sonnet-5",
+            "tools": [
+                {"type": "function", "name": "read_mcp_resource"},
+                {"type": "function", "name": "shell_command"}
+            ],
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{
+                        "type": "input_text",
+                        "text": "<environment_context>\n<cwd>E:\\repo</cwd>\n<shell>powershell</shell>\n<filesystem>unrestricted</filesystem>\n</environment_context>"
+                    }]
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "mcp_1",
+                    "name": "read_mcp_resource",
+                    "arguments": "{\"server\":\"ccswitch_readonly\",\"uri\":\"ccswitch://project/tree\"}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "mcp_1",
+                    "output": "src/\nsrc-tauri/"
+                }
+            ]
+        });
+
+        assert!(apply_claude_ask_profile_for_provider(&mut body, true));
+        let serialized = body["input"].to_string();
+        let env_text = body["input"][0]["content"][0]["text"].as_str().unwrap();
+        assert!(serialized.contains("read_mcp_resource"));
+        assert!(serialized.contains("ccswitch://project/tree"));
+        assert!(serialized.contains("src-tauri/"));
+        assert!(env_text.contains(r#"<cwd>E:\repo</cwd>"#));
+        assert!(!env_text.contains("powershell"));
+        assert!(!env_text.contains("unrestricted"));
+    }
+
+    #[test]
+    fn claude_ask_profile_preserves_allowed_readonly_tool() {
+        let mut body = json!({
+            "model": "claude-sonnet-5",
+            "tools": [
+                {"type": "function", "name": "list_mcp_resources"},
+                {"type": "function", "name": "list_mcp_resource_templates"},
+                {
+                    "type": "function",
+                    "name": "read_mcp_resource",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "server": {"type": "string"},
+                            "uri": {"type": "string"}
+                        },
+                        "required": ["uri"]
+                    }
+                },
+                {"type": "function", "name": "shell"},
+                {"type": "function", "name": "apply_patch"}
+            ],
+            "tool_choice": "required",
+            "parallel_tool_calls": true,
+            "input": "Inspect only."
+        });
+
+        assert!(apply_claude_ask_profile_for_provider(&mut body, true));
+        let tools = body["tools"].as_array().expect("allowed tools");
+        assert_eq!(tools.len(), 3);
+        assert_eq!(tools[0]["name"], "list_mcp_resources");
+        assert_eq!(tools[1]["name"], "list_mcp_resource_templates");
+        assert_eq!(tools[2]["name"], "read_mcp_resource");
+        assert!(tools[2]["parameters"]["properties"]["server"]
+            .get("enum")
+            .is_none());
+        assert!(!tools[2]["parameters"]["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value.as_str() == Some("server")));
+        assert_eq!(body["tool_choice"], "required");
+        assert_eq!(body["parallel_tool_calls"], true);
+    }
+
+    #[test]
+    fn claude_ask_profile_filters_mcp_list_outputs_to_readonly_server() {
+        let mut body = json!({
+            "model": "claude-sonnet-5",
+            "tools": [
+                {"type": "function", "name": "list_mcp_resources"},
+                {"type": "function", "name": "list_mcp_resource_templates"},
+                {"type": "function", "name": "read_mcp_resource"}
+            ],
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "resources_1",
+                    "name": "list_mcp_resources",
+                    "arguments": "{}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "resources_1",
+                    "output": {
+                        "resources": [
+                            {"server": "ccswitch_readonly", "uri": "ccswitch://project/tree"},
+                            {"server": "codex_apps", "uri": "gmail://labels"},
+                            {"server": "Canva", "uri": "canva://designs"}
+                        ]
+                    }
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "templates_1",
+                    "name": "list_mcp_resource_templates",
+                    "arguments": "{}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "templates_1",
+                    "output": "{\"resource_templates\":[{\"server\":\"ccswitch_readonly\",\"uriTemplate\":\"ccswitch://project/file/{path}\"},{\"server\":\"Figma\",\"uriTemplate\":\"figma://file/{id}\"}]}"
+                }
+            ]
+        });
+
+        assert!(apply_claude_ask_profile_for_provider(&mut body, true));
+        let serialized = body["input"].to_string();
+        assert!(serialized.contains("ccswitch_readonly"));
+        assert!(serialized.contains("ccswitch://project/tree"));
+        assert!(serialized.contains("ccswitch://project/file/{path}"));
+        assert!(!serialized.contains("codex_apps"));
+        assert!(!serialized.contains("gmail://labels"));
+        assert!(!serialized.contains("Canva"));
+        assert!(!serialized.contains("Figma"));
+    }
+
+    #[test]
+    fn claude_ask_profile_preserves_read_resource_call_for_other_server() {
+        let mut body = json!({
+            "model": "claude-sonnet-5",
+            "tools": [
+                {"type": "function", "name": "read_mcp_resource"}
+            ],
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "read_1",
+                    "name": "read_mcp_resource",
+                    "arguments": "{\"server\":\"codex_apps\",\"uri\":\"gmail://labels\"}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "read_1",
+                    "output": "global mail data"
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "read_2",
+                    "name": "read_mcp_resource",
+                    "arguments": "{\"server\":\"ccswitch_readonly\",\"uri\":\"ccswitch://project/tree\"}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "read_2",
+                    "output": "src-tauri/"
+                }
+            ]
+        });
+
+        assert!(apply_claude_ask_profile_for_provider(&mut body, true));
+        let serialized = body["input"].to_string();
+        assert!(serialized.contains("codex_apps"));
+        assert!(serialized.contains("global mail data"));
+        assert!(serialized.contains("ccswitch_readonly"));
+        assert!(serialized.contains("src-tauri/"));
+    }
+
+    #[test]
+    fn claude_ask_profile_removes_shell_write_and_patch_tools() {
+        let mut body = json!({
+            "model": "claude-sonnet-5",
+            "tools": [
+                {"type": "function", "name": "shell"},
+                {"type": "function", "name": "powershell"},
+                {"type": "function", "name": "write_file"},
+                {"type": "function", "name": "edit_file"},
+                {"type": "function", "name": "apply_patch"}
+            ],
+            "tool_choice": "auto",
+            "parallel_tool_calls": true,
+            "input": "Inspect only."
+        });
+
+        assert!(apply_claude_ask_profile_for_provider(&mut body, true));
+        assert!(body.get("tools").is_none());
+        assert_eq!(body["tool_choice"], "auto");
+        assert_eq!(body["parallel_tool_calls"], true);
+    }
+
+    #[test]
+    fn claude_ask_profile_removes_tool_choice_for_filtered_tool() {
+        let mut body = json!({
+            "model": "claude-sonnet-5",
+            "tools": [
+                {"type": "function", "name": "read_mcp_resource"},
+                {"type": "function", "name": "shell_command"}
+            ],
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": "shell_command"}
+            },
+            "parallel_tool_calls": true,
+            "input": "Inspect only."
+        });
+
+        assert!(apply_claude_ask_profile_for_provider(&mut body, true));
+        let tools = body["tools"].as_array().expect("allowed tools");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["name"], "read_mcp_resource");
+        assert!(body.get("tool_choice").is_none());
+        assert_eq!(body["parallel_tool_calls"], true);
+    }
+
+    #[test]
+    fn claude_ask_profile_removes_unpaired_tool_output() {
+        let mut body = json!({
+            "model": "claude-sonnet-5",
+            "input": [{
+                "type": "function_call_output",
+                "call_id": "missing_call",
+                "output": "orphan result"
+            }]
+        });
+
+        assert!(apply_claude_ask_profile_for_provider(&mut body, true));
+        let serialized = body["input"].to_string();
+        assert!(!serialized.contains("orphan result"));
+    }
+
+    #[test]
+    fn deepseek_ask_profile_keeps_readonly_mcp_and_removes_shell_protocol() {
+        let mut body = json!({
+            "model": "deepseek-v4-pro",
+            "instructions": "agent instructions",
+            "tools": [
+                {"type": "function", "name": "list_mcp_resources"},
+                {"type": "function", "name": "read_mcp_resource"},
+                {"type": "function", "name": "shell_command"}
+            ],
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": "shell_command"}
+            },
+            "parallel_tool_calls": true,
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Inspect only"}]
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "shell_1",
+                    "name": "shell_command",
+                    "arguments": "Get-ChildItem"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "shell_1",
+                    "output": "private shell result"
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "mcp_1",
+                    "name": "read_mcp_resource",
+                    "arguments": "{\"server\":\"ccswitch_readonly\",\"uri\":\"ccswitch://project/tree\"}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "mcp_1",
+                    "output": "src-tauri/"
+                }
+            ]
+        });
+
+        assert!(apply_claude_ask_profile_for_provider(&mut body, true));
+        assert!(body.get("instructions").is_none());
+        assert!(body.get("tool_choice").is_none());
+        assert_eq!(body["parallel_tool_calls"], true);
+
+        let tools = body["tools"].as_array().expect("allowed tools");
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0]["name"], "list_mcp_resources");
+        assert_eq!(tools[1]["name"], "read_mcp_resource");
+
+        let serialized = body["input"].to_string();
+        assert!(serialized.contains("read_mcp_resource"));
+        assert!(serialized.contains("ccswitch://project/tree"));
+        assert!(serialized.contains("src-tauri/"));
+        assert!(!serialized.contains("shell_command"));
+        assert!(!serialized.contains("Get-ChildItem"));
+        assert!(!serialized.contains("private shell result"));
+        assert!(!serialized.contains("agent instructions"));
+    }
+
+    #[test]
+    fn custom_routed_ask_profile_applies_to_unknown_model() {
+        let mut body = json!({
+            "model": "qwen-local-custom",
+            "instructions": "agent instructions",
+            "tools": [
+                {"type": "function", "name": "read_mcp_resource"},
+                {"type": "function", "name": "shell_command"}
+            ],
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "mcp_1",
+                    "name": "read_mcp_resource",
+                    "arguments": "{\"server\":\"ccswitch_readonly\",\"uri\":\"ccswitch://project/tree\"}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "mcp_1",
+                    "output": "src-tauri/"
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "shell_1",
+                    "name": "shell_command",
+                    "arguments": "Get-ChildItem"
+                }
+            ]
+        });
+
+        assert!(apply_claude_ask_profile_for_provider(&mut body, true));
+        assert!(body.get("instructions").is_none());
+        let tools = body["tools"].as_array().expect("allowed tools");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["name"], "read_mcp_resource");
+
+        let serialized = body["input"].to_string();
+        assert!(serialized.contains("read_mcp_resource"));
+        assert!(serialized.contains("src-tauri/"));
+        assert!(!serialized.contains("shell_command"));
+        assert!(!serialized.contains("Get-ChildItem"));
+    }
+
+    #[test]
+    fn provider_profile_detection_uses_routed_non_managed_providers_only() {
+        let mut routed = test_provider_with_type(None);
+        routed.settings_config = json!({
+            "codexResolvedRouteId": "qwen-local",
+            "codexResolvedRouteMatched": true
+        });
+        assert!(provider_supports_chat_ask_profiles(&routed));
+
+        let mut codex_oauth = test_provider_with_type(Some("codex_oauth"));
+        codex_oauth.settings_config = json!({
+            "codexResolvedRouteId": "official",
+            "codexResolvedRouteMatched": true
+        });
+        assert!(!provider_supports_chat_ask_profiles(&codex_oauth));
+    }
+
+    #[test]
+    fn gpt_5_4_mini_classification_helpers_are_shape_only() {
+        let body = json!({
+            "model": "gpt-5.4-mini",
+            "instructions": "  classify   this request without leaking the full body  ",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "secret user text"}]
+                }
+            ],
+            "messages": [
+                {"role": "user", "content": "message text"}
+            ],
+            "tools": [
+                {"type": "function", "name": "beta_tool"},
+                {"type": "function", "function": {"name": "alpha_tool"}},
+                {"type": "function", "name": "beta_tool"}
+            ],
+            "output_schema": {
+                "schema": {},
+                "name": "result"
+            },
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {}
+            }
+        });
+
+        assert_eq!(json_array_count(body.get("input")), "1");
+        assert_eq!(json_array_count(body.get("messages")), "1");
+        assert_eq!(json_array_count(body.get("tools")), "3");
+        assert_eq!(
+            gpt_5_4_mini_tool_names(&body),
+            vec!["alpha_tool".to_string(), "beta_tool".to_string()]
+        );
+        assert_eq!(
+            json_object_keys(body.get("output_schema")),
+            vec!["name".to_string(), "schema".to_string()]
+        );
+        assert_eq!(
+            json_object_keys(body.get("response_format")),
+            vec!["json_schema".to_string(), "type".to_string()]
+        );
+        assert_eq!(
+            gpt_5_4_mini_prompt_preview(&body, 160),
+            "classify this request without leaking the full body"
+        );
+    }
+
+    #[test]
+    fn gpt_5_4_mini_prompt_preview_falls_back_to_first_input_and_truncates() {
+        let long_text = format!("{}{}", "a".repeat(170), " tail should not appear");
+        let body = json!({
+            "model": "gpt-5.4-mini",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": long_text}]
+            }]
+        });
+
+        let preview = gpt_5_4_mini_prompt_preview(&body, 160);
+        assert_eq!(preview.chars().count(), 163);
+        assert!(preview.ends_with("..."));
+        assert!(!preview.contains("tail should not appear"));
     }
 
     // 验证只有上游明确返回 Responses-Lite 不支持时，才触发剥头重试。

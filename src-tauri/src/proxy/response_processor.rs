@@ -820,7 +820,7 @@ mod tests {
     use crate::proxy::providers::{
         codex_chat_history::CodexChatHistoryStore, gemini_shadow::GeminiShadowStore,
     };
-    use crate::proxy::types::{ProxyConfig, ProxyStatus};
+    use crate::proxy::types::{InteractionMode, ProxyConfig, ProxyStatus};
     use rust_decimal::Decimal;
     use std::collections::HashMap;
     use std::str::FromStr;
@@ -942,6 +942,7 @@ mod tests {
             provider_router: Arc::new(ProviderRouter::new(db.clone())),
             gemini_shadow: Arc::new(GeminiShadowStore::default()),
             codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
+            interaction_mode: Arc::new(RwLock::new(InteractionMode::Code)),
             app_handle: None,
             failover_manager: Arc::new(FailoverSwitchManager::new(db)),
         }

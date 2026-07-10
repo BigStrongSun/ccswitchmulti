@@ -1,5 +1,15 @@
 use serde::{Deserialize, Serialize};
 
+/// Runtime interaction mode for Codex MultiRouter requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+pub enum InteractionMode {
+    #[default]
+    Code,
+    Ask,
+    Chat,
+}
+
 /// 代理服务器配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProxyConfig {

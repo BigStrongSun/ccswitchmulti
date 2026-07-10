@@ -7,6 +7,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
 import type {
+  InteractionMode,
   ProxyStatus,
   ProxyServerInfo,
   ProxyTakeoverStatus,
@@ -34,6 +35,12 @@ export function useProxyStatus() {
   const { data: takeoverStatus } = useQuery({
     queryKey: ["proxyTakeoverStatus"],
     queryFn: () => invoke<ProxyTakeoverStatus>("get_proxy_takeover_status"),
+    placeholderData: (previousData) => previousData,
+  });
+
+  const { data: interactionMode = "Code" } = useQuery({
+    queryKey: ["interactionMode"],
+    queryFn: () => invoke<InteractionMode>("get_interaction_mode"),
     placeholderData: (previousData) => previousData,
   });
 
@@ -188,6 +195,25 @@ export function useProxyStatus() {
     },
   });
 
+  const setInteractionModeMutation = useMutation({
+    mutationFn: (mode: InteractionMode) =>
+      invoke("set_interaction_mode", { mode }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["interactionMode"] });
+    },
+    onError: (error: Error) => {
+      const detail =
+        extractErrorMessage(error) ||
+        t("common.unknown", { defaultValue: "未知错误" });
+      toast.error(
+        t("proxy.interactionMode.failed", {
+          detail,
+          defaultValue: `切换交互模式失败: ${detail}`,
+        }),
+      );
+    },
+  });
+
   // 检查是否运行中
   const checkRunning = async () => {
     try {
@@ -211,6 +237,7 @@ export function useProxyStatus() {
     isLoading,
     isRunning: status?.running || false,
     takeoverStatus,
+    interactionMode,
     isTakeoverActive:
       takeoverStatus?.claude ||
       takeoverStatus?.codex ||
@@ -227,6 +254,7 @@ export function useProxyStatus() {
 
     // 代理模式下切换供应商
     switchProxyProvider: switchProxyProviderMutation.mutateAsync,
+    setInteractionMode: setInteractionModeMutation.mutateAsync,
 
     // 状态检查
     checkRunning,
@@ -240,6 +268,7 @@ export function useProxyStatus() {
       startProxyServerMutation.isPending ||
       stopProxyServerMutation.isPending ||
       stopWithRestoreMutation.isPending ||
-      setTakeoverForAppMutation.isPending,
+      setTakeoverForAppMutation.isPending ||
+      setInteractionModeMutation.isPending,
   };
 }

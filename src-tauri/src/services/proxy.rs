@@ -59,6 +59,7 @@ pub struct ProxyService {
     db: Arc<Database>,
     server: Arc<RwLock<Option<ProxyServer>>>,
     external_openai_api_server: Arc<RwLock<Option<ProxyServer>>>,
+    interaction_mode: Arc<RwLock<InteractionMode>>,
     /// AppHandle，用于传递给 ProxyServer 以支持故障转移时的 UI 更新
     app_handle: Arc<RwLock<Option<tauri::AppHandle>>>,
     switch_locks: SwitchLockManager,
@@ -75,6 +76,7 @@ impl ProxyService {
             db,
             server: Arc::new(RwLock::new(None)),
             external_openai_api_server: Arc::new(RwLock::new(None)),
+            interaction_mode: Arc::new(RwLock::new(InteractionMode::Code)),
             app_handle: Arc::new(RwLock::new(None)),
             switch_locks: SwitchLockManager::new(),
         }
@@ -340,11 +342,17 @@ impl ProxyService {
         &self,
         provider: &Provider,
     ) -> Result<(), String> {
+        let projected_provider = self
+            .db
+            .get_provider_by_id(&provider.id, AppType::Codex.as_str())
+            .map_err(|e| format!("读取 Codex provider '{}' 失败: {e}", provider.id))?
+            .filter(|db_provider| db_provider.settings_config.get("codexRouting").is_some());
+        let provider_for_projection = projected_provider.as_ref().unwrap_or(provider);
         let existing_live = self.read_codex_live().ok();
         let mut effective_settings = build_effective_settings_with_common_config(
             self.db.as_ref(),
             &AppType::Codex,
-            provider,
+            provider_for_projection,
         )
         .map_err(|e| format!("构建 codex 有效配置失败: {e}"))?;
         if let Some(existing_live) = existing_live.as_ref() {
@@ -374,12 +382,18 @@ impl ProxyService {
         let updated_config = Self::apply_codex_proxy_toml_config_for_provider(
             config_str,
             &proxy_codex_base_url,
-            Some(provider),
+            Some(provider_for_projection),
         );
         effective_settings["config"] = json!(updated_config);
-        Self::sync_codex_model_catalog_projection_flag(&mut effective_settings, Some(provider));
+        Self::sync_codex_model_catalog_projection_flag(
+            &mut effective_settings,
+            Some(provider_for_projection),
+        );
 
-        self.write_codex_takeover_live_for_provider(&effective_settings, Some(provider))?;
+        self.write_codex_takeover_live_for_provider(
+            &effective_settings,
+            Some(provider_for_projection),
+        )?;
         Ok(())
     }
 
@@ -412,6 +426,15 @@ impl ProxyService {
         app_type: &str,
     ) -> tokio::sync::OwnedMutexGuard<()> {
         self.switch_locks.lock_for_app(app_type).await
+    }
+
+    pub async fn get_interaction_mode(&self) -> InteractionMode {
+        *self.interaction_mode.read().await
+    }
+
+    pub async fn set_interaction_mode(&self, mode: InteractionMode) {
+        *self.interaction_mode.write().await = mode;
+        log::info!("[InteractionMode] switched to {mode:?}");
     }
 
     /// 启动代理服务器
@@ -451,7 +474,13 @@ impl ProxyService {
 
         // 4. 创建并启动服务器
         let app_handle = self.app_handle.read().await.clone();
-        let server = ProxyServer::new(config.clone(), self.db.clone(), app_handle);
+        let server = ProxyServer::new_with_interaction_mode(
+            config.clone(),
+            self.db.clone(),
+            app_handle,
+            crate::proxy::server::ProxyServerMode::FullProxy,
+            self.interaction_mode.clone(),
+        );
         let info = server
             .start()
             .await
@@ -2120,11 +2149,7 @@ impl ProxyService {
         }
 
         if let Some(cfg_str) = config.get("config").and_then(|v| v.as_str()) {
-            let updated = Self::remove_local_toml_base_url(cfg_str);
-            let updated =
-                crate::codex_config::remove_codex_experimental_bearer_token_if(&updated, |token| {
-                    token == PROXY_TOKEN_PLACEHOLDER
-                })
+            let updated = crate::codex_config::cleanup_codex_local_proxy_takeover_fields(cfg_str)
                 .map_err(|e| format!("清理 Codex 接管占位符失败: {e}"))?;
             config["config"] = json!(updated);
         }
@@ -2134,6 +2159,7 @@ impl ProxyService {
     }
 
     /// Remove local proxy base_url from TOML（委托给 codex_config 共享实现）
+    #[cfg(test)]
     fn remove_local_toml_base_url(toml_str: &str) -> String {
         crate::codex_config::remove_codex_toml_base_url_if(toml_str, Self::is_local_proxy_url)
     }
@@ -2722,6 +2748,9 @@ impl ProxyService {
 
         if let Some(root) = live_config.as_object_mut() {
             root.insert("modelCatalog".to_string(), model_catalog);
+            if let Some(codex_routing) = provider.settings_config.get("codexRouting").cloned() {
+                root.insert("codexRouting".to_string(), codex_routing);
+            }
         }
     }
 
@@ -3072,7 +3101,13 @@ impl ProxyService {
             }
 
             let app_handle = self.app_handle.read().await.clone();
-            let new_server = ProxyServer::new(new_config.clone(), self.db.clone(), app_handle);
+            let new_server = ProxyServer::new_with_interaction_mode(
+                new_config.clone(),
+                self.db.clone(),
+                app_handle,
+                crate::proxy::server::ProxyServerMode::FullProxy,
+                self.interaction_mode.clone(),
+            );
             let info = new_server
                 .start()
                 .await
