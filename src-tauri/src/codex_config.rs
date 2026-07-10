@@ -2546,6 +2546,32 @@ fn strip_codex_provider_owned_fields_from_live(live_config_text: &str) -> Result
     Ok(live_doc.to_string())
 }
 
+/// 把 live Codex 配置恢复到内建 `openai` provider，同时保留用户全局配置。
+///
+/// 该转换只删除 CCSwitchMulti/provider 拥有的模型、端点、令牌与目录字段，
+/// 不触碰 OAuth `auth.json`，也不覆盖 MCP、memories、projects 或插件配置。
+fn force_builtin_openai_provider_in_config_text(
+    live_config_text: &str,
+) -> Result<String, AppError> {
+    let stripped = strip_codex_provider_owned_fields_from_live(live_config_text)?;
+    let mut doc = if stripped.trim().is_empty() {
+        DocumentMut::new()
+    } else {
+        stripped
+            .parse::<DocumentMut>()
+            .map_err(|e| AppError::Message(format!("Invalid live Codex config.toml: {e}")))?
+    };
+    doc["model_provider"] = toml_edit::value(CODEX_OPENAI_MODEL_PROVIDER_ID);
+    Ok(doc.to_string())
+}
+
+/// 将当前 `config.toml` 原子切回 Codex 内建 `openai` provider。
+pub fn force_codex_builtin_openai_live_provider() -> Result<(), AppError> {
+    let live = read_codex_config_text()?;
+    let config = force_builtin_openai_provider_in_config_text(&live)?;
+    write_codex_live_config_atomic(Some(&config))
+}
+
 /// 将待切换 provider 的 Codex 配置叠加到当前 live `config.toml`。
 ///
 /// CC Switch 的 provider 记录只应该负责 provider 相关的字段；如果直接把
@@ -3249,6 +3275,43 @@ pub fn remove_codex_toml_base_url_if(toml_str: &str, predicate: impl Fn(&str) ->
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    fn force_builtin_openai_preserves_global_config_and_removes_provider_fields() {
+        let live = r#"model = "third-party-model"
+model_provider = "custom"
+openai_base_url = "http://127.0.0.1:15721/v1"
+experimental_bearer_token = "PROXY_MANAGED"
+model_catalog_json = "cc-switch-model-catalog.json"
+
+[model_providers.custom]
+name = "CCSwitchMulti"
+base_url = "http://127.0.0.1:15721/v1"
+
+[mcp_servers.memory]
+command = "memory-server"
+
+[projects.'C:\repo']
+trust_level = "trusted"
+"#;
+
+        let restored = force_builtin_openai_provider_in_config_text(live).expect("restore openai");
+        let restored_doc = restored
+            .parse::<DocumentMut>()
+            .expect("parse restored config");
+
+        assert!(restored.contains("model_provider = \"openai\""));
+        assert!(restored.contains("[mcp_servers.memory]"));
+        assert!(restored_doc
+            .get("projects")
+            .and_then(|projects| projects.get(r"C:\repo"))
+            .is_some());
+        assert!(!restored.contains("third-party-model"));
+        assert!(!restored.contains("127.0.0.1:15721"));
+        assert!(!restored.contains("experimental_bearer_token"));
+        assert!(!restored.contains("model_catalog_json"));
+        assert!(!restored.contains("[model_providers.custom]"));
+    }
 
     /// 测试专用的临时 Codex home，避免读写用户真实 `~/.codex`。
     struct TestHomeGuard {

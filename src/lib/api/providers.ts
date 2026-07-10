@@ -21,6 +21,18 @@ export interface SwitchResult {
   warnings: string[];
 }
 
+export interface CodexOfficialRestoreOutcome {
+  officialProviderId: string;
+  switchWarnings: string[];
+  history: {
+    sourceProviderIds: string[];
+    migratedJsonlFiles: number;
+    migratedStateRows: number;
+    skippedReason?: string | null;
+    backupDir?: string | null;
+  };
+}
+
 export interface OpenTerminalOptions {
   cwd?: string;
 }
@@ -89,6 +101,11 @@ export const providersApi = {
 
   async switch(id: string, appId: AppId): Promise<SwitchResult> {
     return await invoke("switch_provider", { id, app: appId });
+  },
+
+  /** 退出 Codex 接管、切回 OpenAI 官方，并把全部历史归并到 openai 桶。 */
+  async switchCodexToOfficialAndRepairHistory(): Promise<CodexOfficialRestoreOutcome> {
+    return await invoke("switch_codex_to_official_and_repair_history");
   },
 
   async importDefault(appId: AppId): Promise<boolean> {

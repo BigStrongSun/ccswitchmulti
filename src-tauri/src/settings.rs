@@ -949,6 +949,20 @@ pub fn unify_codex_session_history() -> bool {
         .unify_codex_session_history
 }
 
+/// 关闭 Codex 统一历史模式，并清除尚未执行的迁移意愿与完成标记。
+///
+/// 一键切回官方时必须一次性更新这三个字段；否则后续写官方配置时仍可能把
+/// `model_provider` 重新注入为 `custom`，让刚归并到 `openai` 的历史再次不可见。
+pub fn disable_codex_session_history_unify() -> Result<(), AppError> {
+    mutate_settings(|settings| {
+        settings.unify_codex_session_history = false;
+        settings.unify_codex_migrate_existing = None;
+        if let Some(migrations) = settings.local_migrations.as_mut() {
+            migrations.codex_official_history_unify_v1 = None;
+        }
+    })
+}
+
 // ===== 当前供应商管理函数 =====
 
 /// 获取指定应用类型的当前供应商 ID（从本地 settings 读取）

@@ -11,6 +11,17 @@ use crate::services::{
 use crate::store::AppState;
 use std::str::FromStr;
 
+const CODEX_OFFICIAL_PROVIDER_ID: &str = "codex-official";
+
+/// 一键切回 Codex 官方链路后的结构化结果。
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexOfficialRestoreOutcome {
+    pub official_provider_id: String,
+    pub switch_warnings: Vec<String>,
+    pub history: crate::codex_history_migration::CodexHistoryProviderBucketMigrationOutcome,
+}
+
 // 常量定义
 const TEMPLATE_TYPE_GITHUB_COPILOT: &str = "github_copilot";
 const TEMPLATE_TYPE_TOKEN_PLAN: &str = "token_plan";
@@ -107,6 +118,48 @@ pub fn switch_provider(
 ) -> Result<SwitchResult, String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
     switch_provider_internal(&state, app_type, &id).map_err(|e| e.to_string())
+}
+
+/// 一键退出 Codex 接管、切回内建 OpenAI，并把全部历史归并到 `openai` 桶。
+///
+/// 操作前先确认 Codex/ChatGPT App 已完全退出，因此进程仍运行时不会产生任何写入。
+/// 官方切换复用既有链路以保留 OAuth `auth.json`，随后只迁移历史 provider 字段。
+#[tauri::command]
+pub fn switch_codex_to_official_and_repair_history(
+    state: State<'_, AppState>,
+) -> Result<CodexOfficialRestoreOutcome, String> {
+    crate::codex_history_migration::ensure_codex_history_write_is_offline()
+        .map_err(|e| e.to_string())?;
+    state
+        .db
+        .ensure_official_seed_by_id(CODEX_OFFICIAL_PROVIDER_ID, AppType::Codex)
+        .map_err(|e| e.to_string())?;
+    let previous_settings = crate::settings::get_settings();
+    crate::settings::disable_codex_session_history_unify().map_err(|e| e.to_string())?;
+
+    let switch_result =
+        match switch_provider_internal(&state, AppType::Codex, CODEX_OFFICIAL_PROVIDER_ID) {
+            Ok(result) => result,
+            Err(error) => {
+                // provider 尚未切换成功时恢复统一历史开关，避免一次失败点击永久改变用户设置。
+                if let Err(restore_error) = crate::settings::update_settings(previous_settings) {
+                    return Err(format!(
+                        "切回 OpenAI 官方失败: {error}; 恢复原设置也失败: {restore_error}"
+                    ));
+                }
+                return Err(error.to_string());
+            }
+        };
+    crate::codex_config::force_codex_builtin_openai_live_provider().map_err(|e| e.to_string())?;
+    let history =
+        crate::codex_history_migration::sync_all_codex_history_provider_buckets_to_openai()
+            .map_err(|e| e.to_string())?;
+
+    Ok(CodexOfficialRestoreOutcome {
+        official_provider_id: CODEX_OFFICIAL_PROVIDER_ID.to_string(),
+        switch_warnings: switch_result.warnings,
+        history,
+    })
 }
 
 fn import_default_config_internal(state: &AppState, app_type: AppType) -> Result<bool, AppError> {

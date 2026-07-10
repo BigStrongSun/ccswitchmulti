@@ -39,6 +39,8 @@ const MIGRATION_NAME: &str = "codex-history-provider-migration-v1";
 const OPENAI_HISTORY_MIGRATION_NAME: &str = "codex-history-openai-provider-migration-v2";
 const MULTIROUTER_CUSTOM_HISTORY_SYNC_NAME: &str =
     "codex-history-multirouter-custom-provider-sync-v1";
+const OFFICIAL_OPENAI_HISTORY_RESTORE_NAME: &str =
+    "codex-history-official-openai-provider-restore-v1";
 const CURRENT_DESKTOP_HISTORY_REPAIR_NAME: &str =
     "codex-history-current-desktop-visibility-repair-v1";
 const OFFICIAL_UNIFY_MIGRATION_NAME: &str = "codex-official-history-unify-v1";
@@ -131,6 +133,7 @@ pub struct CodexHistoryProviderBucketMigrationOutcome {
     pub migrated_jsonl_files: usize,
     pub migrated_state_rows: usize,
     pub skipped_reason: Option<String>,
+    pub backup_dir: Option<String>,
 }
 
 /// Codex Desktop 历史可见性修复的调用参数。
@@ -434,6 +437,7 @@ pub fn maybe_migrate_codex_third_party_history_provider_bucket(
         migrated_jsonl_files,
         migrated_state_rows,
         skipped_reason: None,
+        ..Default::default()
     })
 }
 
@@ -485,6 +489,7 @@ pub fn maybe_migrate_codex_openai_history_provider_bucket(
         migrated_jsonl_files,
         migrated_state_rows,
         skipped_reason: None,
+        ..Default::default()
     })
 }
 
@@ -529,6 +534,54 @@ pub fn sync_codex_history_provider_bucket_to_multirouter(
         migrated_jsonl_files,
         migrated_state_rows,
         skipped_reason: None,
+        ..Default::default()
+    })
+}
+
+/// 确认 Codex Desktop/app-server 已完全退出，避免 WAL 或目录同步覆盖离线修复。
+///
+/// 此检查必须放在一键切官方的任何状态变更之前；检测到进程时不会写配置、
+/// settings 或历史文件。
+pub fn ensure_codex_history_write_is_offline() -> Result<(), AppError> {
+    let running = running_codex_desktop_process_descriptions();
+    if running.is_empty() {
+        return Ok(());
+    }
+    Err(AppError::Message(format!(
+        "Codex/ChatGPT App 或 app-server 仍在运行，请完全退出后再一键切回官方。检测到: {}",
+        running.join("; ")
+    )))
+}
+
+/// 把所有非 `openai` 的 Codex 会话精确归并到官方历史桶。
+///
+/// 这里只改 rollout `session_meta.model_provider` 与 SQLite
+/// `threads.model_provider`；不会改标题、时间、聚焦、索引或全局工作区状态。
+pub fn sync_all_codex_history_provider_buckets_to_openai(
+) -> Result<CodexHistoryProviderBucketMigrationOutcome, AppError> {
+    ensure_codex_history_write_is_offline()?;
+    let codex_dir = get_codex_config_dir();
+    let backup_root = migration_backup_root(OFFICIAL_OPENAI_HISTORY_RESTORE_NAME);
+    let (source_provider_ids, migrated_jsonl_files) = migrate_all_non_target_codex_jsonl_files(
+        &codex_dir,
+        &backup_root,
+        OFFICIAL_OPENAI_CODEX_MODEL_PROVIDER_ID,
+    )?;
+    let (state_source_provider_ids, migrated_state_rows) = migrate_all_non_target_codex_state_dbs(
+        &codex_dir,
+        &backup_root,
+        OFFICIAL_OPENAI_CODEX_MODEL_PROVIDER_ID,
+    )?;
+    let mut all_source_provider_ids = source_provider_ids;
+    all_source_provider_ids.extend(state_source_provider_ids);
+    let changed = migrated_jsonl_files > 0 || migrated_state_rows > 0;
+
+    Ok(CodexHistoryProviderBucketMigrationOutcome {
+        source_provider_ids: all_source_provider_ids.into_iter().collect(),
+        migrated_jsonl_files,
+        migrated_state_rows,
+        skipped_reason: (!changed).then(|| "already_openai_or_no_history".to_string()),
+        backup_dir: changed.then(|| backup_root.to_string_lossy().to_string()),
     })
 }
 
@@ -565,13 +618,7 @@ pub fn repair_codex_history_visibility_for_multirouter(
     // 内建面板的旧版恢复会改写 state DB、rollout 和全局状态。新版 App 运行时必须拒绝
     // 写入，避免 app-server 的 WAL 或目录同步把结果覆盖；dry-run 仍保持只读可用。
     if !dry_run {
-        let running = running_codex_desktop_process_descriptions();
-        if !running.is_empty() {
-            return Err(AppError::Message(format!(
-                "Codex Desktop/app-server 仍在运行。新版 App 请先使用原生历史目录修复；如需旧版离线恢复，请完全退出 Codex 后再写入。检测到: {}",
-                running.join("; ")
-            )));
-        }
+        ensure_codex_history_write_is_offline()?;
     }
     let count = options.count.unwrap_or(30);
     let window_limit = options.window_limit.unwrap_or(80);
@@ -2485,6 +2532,7 @@ pub fn maybe_migrate_codex_official_history_to_unified_bucket(
         migrated_jsonl_files,
         migrated_state_rows,
         skipped_reason: None,
+        ..Default::default()
     };
 
     // 条件写入在 settings 写锁内原子完成："迁移期间开关被关掉"时不写完成标记，
@@ -3234,6 +3282,36 @@ fn migrate_codex_jsonl_files_to_target(
     Ok(migrated)
 }
 
+/// 扫描全部 rollout，把任意非目标 provider 归并到目标桶，并返回实际来源集合。
+fn migrate_all_non_target_codex_jsonl_files(
+    codex_dir: &Path,
+    backup_root: &Path,
+    target_provider_id: &str,
+) -> Result<(BTreeSet<String>, usize), AppError> {
+    let mut files = Vec::new();
+    collect_jsonl_files(&codex_dir.join("sessions"), &mut files, 0, 8);
+    collect_jsonl_files(&codex_dir.join("archived_sessions"), &mut files, 0, 4);
+
+    let mut source_provider_ids = BTreeSet::new();
+    let mut migrated = 0;
+    for file_path in files {
+        let mut file_source_provider_ids = BTreeSet::new();
+        let changed =
+            rewrite_codex_session_file_lines(&file_path, codex_dir, backup_root, |line| {
+                rewrite_non_target_codex_session_meta_line(
+                    line,
+                    target_provider_id,
+                    &mut file_source_provider_ids,
+                )
+            })?;
+        if changed {
+            migrated += 1;
+            source_provider_ids.extend(file_source_provider_ids);
+        }
+    }
+    Ok((source_provider_ids, migrated))
+}
+
 fn collect_jsonl_files(dir: &Path, files: &mut Vec<PathBuf>, depth: u8, max_depth: u8) {
     if depth > max_depth || !dir.is_dir() {
         return;
@@ -3292,7 +3370,7 @@ fn rewrite_codex_session_file_lines(
     path: &Path,
     codex_dir: &Path,
     backup_root: &Path,
-    rewrite_line: impl Fn(&str) -> Option<String>,
+    mut rewrite_line: impl FnMut(&str) -> Option<String>,
 ) -> Result<bool, AppError> {
     let metadata_before = fs::metadata(path).map_err(|e| AppError::io(path, e))?;
     let modified_before = metadata_before.modified().ok();
@@ -3368,6 +3446,39 @@ fn rewrite_codex_session_meta_line_to_target(
     serde_json::to_string(&value).ok()
 }
 
+/// 把单条 session_meta 中任意非目标 provider 改为目标，并记录真实来源。
+fn rewrite_non_target_codex_session_meta_line(
+    line: &str,
+    target_provider_id: &str,
+    source_provider_ids: &mut BTreeSet<String>,
+) -> Option<String> {
+    if !line.contains("\"session_meta\"") {
+        return None;
+    }
+    let mut value: Value = serde_json::from_str(line).ok()?;
+    if value.get("type").and_then(Value::as_str) != Some("session_meta") {
+        return None;
+    }
+    let payload = value.get_mut("payload")?.as_object_mut()?;
+    let current_provider = payload
+        .get("model_provider")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string();
+    if current_provider == target_provider_id {
+        return None;
+    }
+    if !current_provider.is_empty() {
+        source_provider_ids.insert(current_provider);
+    }
+    payload.insert(
+        "model_provider".to_string(),
+        Value::String(target_provider_id.to_string()),
+    );
+    serde_json::to_string(&value).ok()
+}
+
 fn migrate_codex_state_dbs(
     codex_dir: &Path,
     source_provider_ids: &BTreeSet<String>,
@@ -3399,6 +3510,29 @@ fn migrate_codex_state_dbs_to_target(
         )?;
     }
     Ok(migrated)
+}
+
+/// 扫描全部 Codex state DB，把任意非目标 provider 归并到目标桶。
+fn migrate_all_non_target_codex_state_dbs(
+    codex_dir: &Path,
+    backup_root: &Path,
+    target_provider_id: &str,
+) -> Result<(BTreeSet<String>, usize), AppError> {
+    let config_text = read_codex_config_text().unwrap_or_default();
+    let mut source_provider_ids = BTreeSet::new();
+    let mut migrated = 0;
+    for db_path in codex_state_db_paths(codex_dir, &config_text) {
+        let (db_source_provider_ids, changed) =
+            migrate_all_non_target_codex_state_db_provider_buckets(
+                &db_path,
+                codex_dir,
+                backup_root,
+                target_provider_id,
+            )?;
+        source_provider_ids.extend(db_source_provider_ids);
+        migrated += changed;
+    }
+    Ok((source_provider_ids, migrated))
 }
 
 fn find_state_db_files_in(dir: &Path) -> Vec<PathBuf> {
@@ -3545,6 +3679,69 @@ fn migrate_codex_state_db_provider_bucket_to_target(
     tx.commit()
         .map_err(|e| AppError::Database(format!("提交 Codex state DB 迁移事务失败: {e}")))?;
     Ok(changed)
+}
+
+/// 在单个 state DB 内归并全部非目标桶；写入前使用 SQLite 在线备份保留快照。
+fn migrate_all_non_target_codex_state_db_provider_buckets(
+    db_path: &Path,
+    codex_dir: &Path,
+    backup_root: &Path,
+    target_provider_id: &str,
+) -> Result<(BTreeSet<String>, usize), AppError> {
+    if !db_path.exists() {
+        return Ok(Default::default());
+    }
+    let mut conn = Connection::open(db_path)
+        .map_err(|e| AppError::Database(format!("打开 Codex state DB 失败: {e}")))?;
+    conn.busy_timeout(Duration::from_secs(5))
+        .map_err(|e| AppError::Database(format!("设置 Codex state DB busy_timeout 失败: {e}")))?;
+    if !Database::table_exists(&conn, "threads")?
+        || !Database::has_column(&conn, "threads", "model_provider")?
+    {
+        return Ok(Default::default());
+    }
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT model_provider FROM threads \
+             WHERE model_provider IS NOT NULL AND TRIM(model_provider) <> '' \
+             AND model_provider <> ?",
+        )
+        .map_err(|e| AppError::Database(format!("读取 Codex state DB provider 失败: {e}")))?;
+    let source_provider_ids = stmt
+        .query_map([target_provider_id], |row| row.get::<_, String>(0))
+        .map_err(|e| AppError::Database(format!("查询 Codex state DB provider 失败: {e}")))?
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map_err(|e| AppError::Database(format!("解析 Codex state DB provider 失败: {e}")))?;
+    drop(stmt);
+    let matching_rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM threads \
+             WHERE model_provider IS NULL OR TRIM(model_provider) = '' \
+             OR model_provider <> ?",
+            [target_provider_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| AppError::Database(format!("统计 Codex state DB 待归并行失败: {e}")))?;
+    if matching_rows == 0 {
+        return Ok((source_provider_ids, 0));
+    }
+
+    backup_codex_state_db(db_path, codex_dir, backup_root, &conn)?;
+    let tx = conn
+        .transaction()
+        .map_err(|e| AppError::Database(format!("开启 Codex state DB 迁移事务失败: {e}")))?;
+    let changed = tx
+        .execute(
+            "UPDATE threads SET model_provider = ? \
+             WHERE model_provider IS NULL OR TRIM(model_provider) = '' \
+             OR model_provider <> ?",
+            [target_provider_id, target_provider_id],
+        )
+        .map_err(|e| AppError::Database(format!("迁移 Codex state DB provider 失败: {e}")))?;
+    tx.commit()
+        .map_err(|e| AppError::Database(format!("提交 Codex state DB 迁移事务失败: {e}")))?;
+    Ok((source_provider_ids, changed))
 }
 
 fn placeholders(count: usize) -> String {
@@ -3718,6 +3915,97 @@ mod tests {
             );",
         )
         .expect("create threads table");
+    }
+
+    #[test]
+    fn official_restore_migrates_unknown_provider_buckets_and_is_idempotent() {
+        let dir = tempdir().expect("tempdir");
+        let codex_dir = dir.path().join(".codex");
+        let sessions_dir = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+        let rollout = sessions_dir.join("unknown-provider.jsonl");
+        fs::write(
+            &rollout,
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"one\",\"model_provider\":\"future-provider\"}}\n{\"type\":\"user_message\",\"message\":\"hello\"}\n",
+        )
+        .expect("write rollout");
+        let missing_provider_rollout = sessions_dir.join("missing-provider.jsonl");
+        fs::write(
+            &missing_provider_rollout,
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"two\"}}\n",
+        )
+        .expect("write rollout without provider");
+
+        let db_path = codex_dir.join("state_5.sqlite");
+        let conn = Connection::open(&db_path).expect("open state db");
+        create_history_test_threads_table(&conn);
+        conn.execute(
+            "INSERT INTO threads (id, rollout_path, model_provider) VALUES (?1, ?2, ?3)",
+            (
+                "one",
+                rollout.to_string_lossy().to_string(),
+                "another-unknown-provider",
+            ),
+        )
+        .expect("insert thread");
+        conn.execute(
+            "INSERT INTO threads (id, rollout_path, model_provider) VALUES (?1, ?2, NULL)",
+            (
+                "two",
+                missing_provider_rollout.to_string_lossy().to_string(),
+            ),
+        )
+        .expect("insert thread without provider");
+        drop(conn);
+
+        let backup_root = dir.path().join("backup");
+        let (jsonl_sources, jsonl_changed) = migrate_all_non_target_codex_jsonl_files(
+            &codex_dir,
+            &backup_root,
+            OFFICIAL_OPENAI_CODEX_MODEL_PROVIDER_ID,
+        )
+        .expect("migrate jsonl");
+        let (db_sources, rows_changed) = migrate_all_non_target_codex_state_dbs(
+            &codex_dir,
+            &backup_root,
+            OFFICIAL_OPENAI_CODEX_MODEL_PROVIDER_ID,
+        )
+        .expect("migrate state db");
+
+        assert_eq!(jsonl_changed, 2);
+        assert!(jsonl_sources.contains("future-provider"));
+        assert_eq!(rows_changed, 2);
+        assert!(db_sources.contains("another-unknown-provider"));
+        assert!(fs::read_to_string(&rollout)
+            .expect("read rollout")
+            .contains("\"model_provider\":\"openai\""));
+        assert!(fs::read_to_string(&missing_provider_rollout)
+            .expect("read rollout without provider")
+            .contains("\"model_provider\":\"openai\""));
+        let conn = Connection::open(&db_path).expect("reopen state db");
+        let provider: String = conn
+            .query_row(
+                "SELECT model_provider FROM threads WHERE id = 'one'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read provider");
+        assert_eq!(provider, OFFICIAL_OPENAI_CODEX_MODEL_PROVIDER_ID);
+        drop(conn);
+
+        let (_, second_jsonl_changed) = migrate_all_non_target_codex_jsonl_files(
+            &codex_dir,
+            &backup_root,
+            OFFICIAL_OPENAI_CODEX_MODEL_PROVIDER_ID,
+        )
+        .expect("rerun jsonl");
+        let (_, second_rows_changed) = migrate_all_non_target_codex_state_dbs(
+            &codex_dir,
+            &backup_root,
+            OFFICIAL_OPENAI_CODEX_MODEL_PROVIDER_ID,
+        )
+        .expect("rerun state db");
+        assert_eq!((second_jsonl_changed, second_rows_changed), (0, 0));
     }
 
     #[test]

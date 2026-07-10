@@ -13,7 +13,14 @@ import {
   type CSSProperties,
 } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { AlertTriangle, Search, Wand2, X } from "lucide-react";
+import {
+  AlertTriangle,
+  Loader2,
+  RotateCcw,
+  Search,
+  Wand2,
+  X,
+} from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -246,6 +253,25 @@ export function ProviderList({
     },
   });
 
+  // 一键切官方走专用后端事务入口，避免普通 provider 切换在接管状态下被安全门拦截。
+  const restoreCodexOfficialMutation = useMutation({
+    mutationFn: () => providersApi.switchCodexToOfficialAndRepairHistory(),
+    onSuccess: (outcome) => {
+      void queryClient.invalidateQueries({ queryKey: ["providers", "codex"] });
+      void queryClient.invalidateQueries({ queryKey: ["proxyStatus"] });
+      void queryClient.invalidateQueries({ queryKey: ["proxyTakeoverStatus"] });
+      void queryClient.invalidateQueries({ queryKey: ["settings"] });
+      const { migratedJsonlFiles, migratedStateRows } = outcome.history;
+      toast.success(
+        `已切回 OpenAI 官方，修复 ${migratedJsonlFiles} 个会话文件、${migratedStateRows} 条历史记录`,
+      );
+      outcome.switchWarnings.forEach((warning) => toast.warning(warning));
+    },
+    onError: (error: Error) => {
+      toast.error(error.message);
+    },
+  });
+
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.defaultPrevented) return;
@@ -351,16 +377,37 @@ export function ProviderList({
   const renderCodexMultiRouterWizardEntry = () => {
     if (appId !== "codex" || !onStartCodexMultiRouterWizard) return null;
     return (
-      <div className="flex justify-center pt-4">
-        <Button
-          type="button"
-          size="lg"
-          className="min-w-48 rounded-full shadow-sm"
-          onClick={onStartCodexMultiRouterWizard}
-        >
-          <Wand2 className="mr-2 h-4 w-4" />
-          配置多路模型
-        </Button>
+      <div className="space-y-2 pt-4">
+        <div className="flex flex-wrap justify-center gap-2">
+          <Button
+            type="button"
+            size="lg"
+            className="min-w-48 rounded-full shadow-sm"
+            onClick={onStartCodexMultiRouterWizard}
+          >
+            <Wand2 className="mr-2 h-4 w-4" />
+            配置多路模型
+          </Button>
+          <Button
+            type="button"
+            size="lg"
+            variant="outline"
+            className="min-w-48 rounded-full shadow-sm"
+            disabled={restoreCodexOfficialMutation.isPending}
+            onClick={() => restoreCodexOfficialMutation.mutate()}
+          >
+            {restoreCodexOfficialMutation.isPending ? (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            ) : (
+              <RotateCcw className="mr-2 h-4 w-4" />
+            )}
+            切回 OpenAI 官方
+          </Button>
+        </div>
+        <p className="text-center text-xs text-muted-foreground">
+          切回官方前请完全退出 Codex/ChatGPT App；历史会先备份，再归并到
+          openai。
+        </p>
       </div>
     );
   };

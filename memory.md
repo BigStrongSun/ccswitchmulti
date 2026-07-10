@@ -1,5 +1,14 @@
 # CC Switch Repository Memory
 
+## 2026-07-10 Codex 一键切回 OpenAI 官方与全量历史归桶
+
+- Codex 首页的官方恢复入口放在 `ProviderList.tsx` 底部 CTA 区，与“配置多路模型”并排。它不能复用普通前端 provider switch：接管态下普通路径有官方供应商安全门，专用命令 `switch_codex_to_official_and_repair_history` 才能把“退出接管、保留 OAuth、切官方、修历史”收束为一次操作。
+- 数据库官方 seed id 是 `codex-official`，Codex live `config.toml` 和会话历史使用的官方 provider id 是 `openai`，二者不能混用。专用命令会确保 seed 存在，调用现有 `ProviderService::switch` 保留 `auth.json`，再显式把 live `model_provider` 设为 `openai`；provider 字段清理必须保留 MCP、memories、projects、插件等全局配置。
+- “统一 Codex 会话历史”开启时，官方配置仍可能被注入 `model_provider=custom`。一键切官方必须同步关闭 `unify_codex_session_history`、清空 `unify_codex_migrate_existing` 和 `codex_official_history_unify_v1` marker；如果 provider 切换失败，应恢复操作前 settings。
+- 官方历史修复只改 rollout `session_meta.model_provider` 与 SQLite `threads.model_provider`，把所有非 `openai`（包括未知、空值和缺失值）归并到 `openai`；不要复用完整 visibility repair 去改标题、时间、聚焦、session index 或全局工作区状态。JSONL 与 state DB 写入前分别备份，重复执行必须为零改动。
+- 新版 Windows App 的主进程名是 `ChatGPT.exe`，安装路径/命令行包含 `OpenAI.Codex_*`，并启动 `codex.exe ... app-server`。任何配置或历史写入之前必须用现有进程探测拒绝运行中的 App；本机验证该过滤器能同时命中 `ChatGPT.exe` 与 app-server。新版 App 的 `local_thread_catalog` 是派生数据，不要直接改，下一次启动交给现有 native sync 重建。
+- 验证覆盖：配置转换单测通过；`codex_history_migration::tests` 40 项通过（含未知 provider 全量归桶和幂等）；`ProviderList` 6 项通过并覆盖空/非空列表按钮；`cargo check` 与 `pnpm typecheck` 通过。真实用户数据迁移未在本轮执行，因为新版 ChatGPT App 正在运行，离线保护应先拒绝而不是自动关闭用户进程。
+
 ## 2026-07-10 MultiRouter OAuth GPT-5.6 Catalog Boundary
 
 - 当前官方 ChatGPT/Codex OAuth 模型端点已经能返回 `gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna`。本机使用现有 OAuth 登录态只在内存中发起 `GET https://chatgpt.com/backend-api/codex/models?client_version=3.16.5-1`，返回 HTTP 200 和 8 个模型；凭据未输出。`~/.codex/models_cache.json` 也已有三个 5.6 模型，但 `~/.codex/cc-switch-model-catalog.json` 与数据库里两套 MultiRouter plan 仍只有 `gpt-5.5`、`gpt-5.4`、`gpt-5.4-mini`、`gpt-5.3-codex-spark` 四个官方模型。

@@ -218,6 +218,9 @@ describe("ProviderList Component", () => {
     fireEvent.click(screen.getByRole("button", { name: "配置多路模型" }));
 
     expect(handleStartWizard).toHaveBeenCalledTimes(1);
+    expect(
+      screen.getByRole("button", { name: "切回 OpenAI 官方" }),
+    ).toBeInTheDocument();
   });
 
   it("shows Codex MultiRouter wizard entry at the bottom of non-empty Codex lists", () => {
@@ -249,6 +252,9 @@ describe("ProviderList Component", () => {
     fireEvent.click(screen.getByRole("button", { name: "配置多路模型" }));
 
     expect(handleStartWizard).toHaveBeenCalledTimes(1);
+    expect(
+      screen.getByRole("button", { name: "切回 OpenAI 官方" }),
+    ).toBeInTheDocument();
   });
 
   it("should render in order returned by useDragSort and pass through action callbacks", () => {
