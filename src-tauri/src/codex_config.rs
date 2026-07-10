@@ -1588,7 +1588,7 @@ fn set_codex_model_catalog_projection_fields(
             doc["model_catalog_json"] = toml_edit::value(CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME);
             set_active_codex_provider_models(&mut doc, specs);
             ensure_codex_agents_defaults(&mut doc);
-            ensure_codex_multi_agent_model_overrides_visible(&mut doc);
+            ensure_codex_multi_agent_reserved_schema_compatible(&mut doc);
         }
         _ => {
             let should_remove = doc
@@ -1627,14 +1627,17 @@ fn set_codex_native_web_search_field(config_text: &str, disable: bool) -> Result
     Ok(doc.to_string())
 }
 
-/// 让 Codex multi_agent_v2 的 `spawn_agent` 保留模型覆盖参数。
+/// 让 Codex multi_agent_v2 使用新版模型认可的保留工具 schema。
 ///
-/// 新版 Codex 的 `MultiAgentV2Config::default()` 会把
-/// `hide_spawn_agent_metadata` 设为 `true`，工具 schema 因此删除
-/// `model` / `reasoning_effort` / `service_tier`。MultiRouter 的核心能力是
-/// 在子 Agent 创建时显式选择 Qwen、DeepSeek、Spark 等模型，所以接管时必须
-/// 写入表格形态的 `[features.multi_agent_v2]` 并关闭隐藏 metadata。
-fn ensure_codex_multi_agent_model_overrides_visible(doc: &mut DocumentMut) {
+/// 新版 GPT/Codex 后端把 `collaboration.spawn_agent` 视为保留函数工具，
+/// 并要求客户端提交的 schema 与后端配置完全一致。旧版 CCSwitchMulti 曾通过
+/// `hide_spawn_agent_metadata=false` 暴露 `model` / `reasoning_effort` /
+/// `service_tier` 参数；这些额外字段会让新模型直接拒绝请求。
+///
+/// CCSwitchMulti 现在通过 `~/.codex/agents/*.toml` 托管 role 文件固定子 Agent
+/// 模型，因此这里只保留用户原本的启用状态，并强制隐藏 metadata，让工具 schema
+/// 回到 Codex 官方保留形态。
+fn ensure_codex_multi_agent_reserved_schema_compatible(doc: &mut DocumentMut) {
     if doc.get("features").is_none() {
         doc["features"] = toml_edit::table();
     }
@@ -1660,7 +1663,7 @@ fn ensure_codex_multi_agent_model_overrides_visible(doc: &mut DocumentMut) {
         if let Some(enabled) = existing_enabled {
             multi_agent_v2["enabled"] = enabled;
         }
-        multi_agent_v2["hide_spawn_agent_metadata"] = toml_edit::value(false);
+        multi_agent_v2["hide_spawn_agent_metadata"] = toml_edit::value(true);
     }
 }
 
@@ -4942,7 +4945,7 @@ base_url = "http://127.0.0.1:15721/v1"
     }
 
     #[test]
-    fn codex_multi_agent_v2_keeps_spawn_agent_model_override_visible() {
+    fn codex_multi_agent_v2_keeps_spawn_agent_reserved_schema_compatible() {
         let specs = vec![CodexCatalogModelSpec {
             model: "qwen3.6".to_string(),
             upstream_model: None,
@@ -4984,8 +4987,8 @@ base_url = "http://127.0.0.1:15721/v1"
             multi_agent_v2
                 .get("hide_spawn_agent_metadata")
                 .and_then(|v| v.as_bool()),
-            Some(false),
-            "Codex v2 removes the spawn_agent model field when this remains true"
+            Some(true),
+            "new Codex models reject reserved collaboration.spawn_agent when CCSwitchMulti adds extra schema fields"
         );
     }
 

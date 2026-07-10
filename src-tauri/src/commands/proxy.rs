@@ -506,10 +506,10 @@ pub async fn diagnose_codex_multirouter(
     ));
     checks.push(codex_check(
         "codex_spawn_agent_model_overrides",
-        "Codex spawn_agent model overrides",
+        "Codex custom agent roles",
         CodexDiagnosticStatus::Pass,
         format!(
-            "Codex spawn_agent 的模型 override 说明仍按前 {} 个 picker-visible 模型排序；新版 Codex 还会读取 custom agent role，CCSwitchMulti 会把托管 role 收敛到当前前五候选，避免旧模型继续出现在智能体列表。",
+            "Codex spawn_agent 的保留工具 schema 保持官方兼容形态；新版 Codex 会读取 custom agent role，CCSwitchMulti 会把托管 role 收敛到当前前 {} 个 picker-visible 候选，避免旧模型继续出现在智能体列表。",
             live_config.spawn_agent_visible_model_limit
         ),
         vec![

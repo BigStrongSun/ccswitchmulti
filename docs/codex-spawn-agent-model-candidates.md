@@ -16,7 +16,9 @@ The relevant upstream implementation is in `codex-rs/core/src/tools/handlers/mul
 - `MAX_MODEL_OVERRIDES_IN_SPAWN_AGENT_DESCRIPTION: usize = 5`
 - `spawn_agent_models_description()` filters `show_in_picker` and then calls `.take(5)`
 
-This is a prompt-description limit, not the runtime model override limit. The `model` parameter schema is a free string, and runtime validation in `multi_agents_common.rs` checks the full available model list. A model such as `deepseek-v4-flash` can work when passed explicitly, even if it is not listed in the first five visible suggestions.
+This was originally a prompt-description limit, not the runtime model override limit. Older Codex builds accepted a visible `model` parameter on the `spawn_agent` tool and validated it against the full available model list.
+
+Newer GPT/Codex builds treat `collaboration.spawn_agent` as a reserved function tool whose schema must match the configured backend schema exactly. CCSwitchMulti therefore keeps `hide_spawn_agent_metadata = true` so the reserved tool does not receive extra `model`, `reasoning_effort`, or `service_tier` fields. Model-specific subagents are now selected through custom agent roles under `~/.codex/agents/*.toml`.
 
 CCSwitchMulti cannot raise this visible count above five through catalog/config fields alone. Codex Desktop/app-server can list more models through other paths such as hidden-model APIs, but the `spawn_agent` tool description is generated in Codex core and applies the fixed `.take(5)` limit before the tool schema reaches the model.
 
@@ -48,6 +50,8 @@ CCSwitchMulti now supports a private catalog field:
 The field is edited from the Codex provider model mapping UI. Users can select up to five catalog models and adjust their order. Those models are promoted to the front of the generated Codex catalog, so they enter Codex upstream's five-model `spawn_agent` description window.
 
 The same first-five list is used to synchronize CCSwitchMulti-managed custom agent files. Files with the managed marker are rewritten for current candidates and pruned when a model leaves the first-five window, so old generated roles do not keep appearing in Codex's agent list. User-authored role files without the marker are preserved.
+
+CCSwitchMulti also writes `[features.multi_agent_v2] hide_spawn_agent_metadata = true` during Codex config projection. This keeps the reserved `collaboration.spawn_agent` schema compatible with newer GPT models while preserving model routing through the generated role files.
 
 If `spawnAgentModels` is absent, CCSwitchMulti keeps the fallback heuristic that promotes representative Qwen and DeepSeek models into the first five.
 

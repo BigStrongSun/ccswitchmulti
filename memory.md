@@ -644,13 +644,13 @@
 - 这次用 `CCSwitchMulti_3.16.4-2_x64-setup.exe /S` 静默安装后，`%LOCALAPPDATA%\CCSwitchMulti\cc-switch.exe` 被替换为 3.16.4-2，内嵌图标抽取结果也变成新图标；监听端口 `15721/15722` 由安装版 `cc-switch.exe` 接管。若任务栏视觉仍旧，剩余边界是 Windows Explorer / 任务栏固定项图标缓存，需要刷新快捷方式或重启 Explorer，而不是重新修 Tauri 图标配置。
 - 进一步固化在 `src-tauri/tauri.conf.json` 的 `bundle.windows.nsis`：当前项目使用的 `tauri-build` 只接受 `installerIcon`，不能写 `uninstallerIcon`；安装包图标显式设置为 `icons/icon.ico`，并通过 `src-tauri/nsis/installer-hooks.nsh` 的 `NSIS_HOOK_POSTINSTALL` 重写已存在的开始菜单和桌面快捷方式，把 `IconLocation` 固定为安装目录里的 `cc-switch.exe,0`。验证脚本为 `scripts/verify-windows-install-icon.ps1`，用于比对源 ico、安装目录 exe 内嵌图标和快捷方式图标目标。
 
-## 2026-06-28 MultiRouter spawn_agent Model Override Visibility Fix
+## 2026-06-28 MultiRouter spawn_agent Model Override Visibility Fix（2026-07-10 已被新版保留 schema 修复取代）
 
 - 用户截图里 `spawn_agent` 工具提示“没有显式 model 选择字段”的根因不是提示词没写模型名，也不是单纯 catalog 前五候选排序问题；对照 `openai/codex` 最新源码确认，`multi_agent_v2` 的 `create_spawn_agent_tool_v2()` 在 `hide_spawn_agent_metadata=true` 时会调用 `hide_spawn_agent_metadata_options()`，直接从工具 schema 删除 `agent_type`、`model`、`reasoning_effort`、`service_tier`。新版 Codex 的 `MultiAgentV2Config::default()` 默认 `hide_spawn_agent_metadata=true`，所以只把 `qwen3.6` 写进 message 会继承父模型。
-- CCSwitchMulti 的修复边界在 `src-tauri/src/codex_config.rs` 的 MultiRouter Codex config 投影：接管写入 `model_catalog_json` 和 provider inline models 时，同时确保 `[features.multi_agent_v2] hide_spawn_agent_metadata = false`。如果用户已有 `multi_agent_v2 = true`，转换成 table 并保留 `enabled = true`；如果已有 table，只覆盖隐藏 metadata 开关；不要无条件强行启用 v2，避免和旧 `[agents].max_threads` 语义制造新冲突。
+- 2026-07-10 更正：`hide_spawn_agent_metadata=false` 会让新版 GPT/Codex 把 `collaboration.spawn_agent` 判定为保留工具 schema 不匹配；当前正确边界是保持/写入 `hide_spawn_agent_metadata=true`，并通过 `~/.codex/agents/*.toml` custom agent role 文件固定子 Agent 的模型、provider 和 reasoning 配置。
 - Codex 源码还确认 `spawn_agent_models_description()` 只展示 `ModelPreset.show_in_picker` 的前 5 个，而 `ModelPreset.show_in_picker` 来自 `ModelInfo.visibility == list`。因此 catalog 条目必须同时保留新版 `ModelInfo` snake_case 字段（`slug`、`visibility=list`、`supported_in_api=true`、`default_reasoning_level`、`supported_reasoning_levels`）和旧 renderer / 旧 direct preset 路径字段（`id`、`show_in_picker=true`、`hidden=false`、`defaultReasoningEffort`、`supportedReasoningEfforts`）。
 - Provider inline `models` 也要同步补齐 `slug`、`description`、`visibility=list`、`show_in_picker=true`、`supported_in_api=true`、`default_reasoning_level`、`supported_reasoning_levels`，避免只写顶层 `model_catalog_json` 时某些 Desktop 热切路径看到不完整模型元数据。
-- 回归测试落点：`cargo test --manifest-path src-tauri/Cargo.toml codex_model_catalog_projects_spawn_agent_model_info_fields --lib`、`cargo test --manifest-path src-tauri/Cargo.toml codex_multi_agent_v2_keeps_spawn_agent_model_override_visible --lib`、`cargo test --manifest-path src-tauri/Cargo.toml codex_model_catalog_ --lib`，并配合 `cargo fmt --manifest-path src-tauri/Cargo.toml --check`、`git diff --check`。
+- 回归测试落点：`cargo test --manifest-path src-tauri/Cargo.toml codex_model_catalog_projects_spawn_agent_model_info_fields --lib`、`cargo test --manifest-path src-tauri/Cargo.toml codex_multi_agent_v2_keeps_spawn_agent_reserved_schema_compatible --lib`、`cargo test --manifest-path src-tauri/Cargo.toml codex_model_catalog_ --lib`，并配合 `cargo fmt --manifest-path src-tauri/Cargo.toml --check`、`git diff --check`。
 
 ## 2026-06-28 MultiRouter Subagent Usage Model Aggregation Fix
 
@@ -1951,3 +1951,10 @@
 - 已修 `scripts/codex-history-tool/codex_history_tool.py`：无显式 `--state-db` 时先尊重 `sqlite_home` / `CODEX_SQLITE_HOME`，再选当前根库 `~/.codex/state_5.sqlite`，最后兜底旧 `~/.codex/sqlite/state_5.sqlite`；`scripts/codex-history-tool/README.md` 同步说明该优先级。
 - 验证基线：`python -m py_compile scripts\codex-history-tool\codex_history_tool.py` 通过；默认 dry-run 已命中 `activeDbKind=codex_root` 和 `stateDbPath=C:\Users\sunda\.codex\state_5.sqlite`，预览会把 1842 条旧 provider 行同步到当前 `custom` 桶，并发现 240 条可见候选；`cargo test --manifest-path src-tauri\Cargo.toml active_state_db --lib` 3 个 Rust active DB 选择测试通过。
 - 操作边界：真正写入历史前必须让用户完全退出 Codex/GPT app 或使用内置修复器的并发保护；不要在 app-server 仍运行时强制写入 live SQLite。若目标是恢复 MultiRouter 稳定形态，还要另外排查为什么 live config 从 `codex_model_router_v2` 变成了 `custom`，这不是历史工具本身造成的。
+
+## 2026-07-10 新版 GPT/Codex 保留 spawn_agent schema
+
+- 用户截图中的错误 `Invalid Value: 'tools'. Function 'collaboration.spawn_agent' is reserved for use by this model and must match the configured schema.` 指向新版 GPT/Codex 后端对保留工具名的 schema 校验变严格；本机 live `~/.codex/config.toml` 当时存在 `[features.multi_agent_v2] hide_spawn_agent_metadata = false`，会让 Codex 给 `collaboration.spawn_agent` 追加 `model`、`reasoning_effort`、`service_tier` 等 metadata 字段，从而和新版模型的保留 schema 不一致。
+- 旧修复思路是为了让 `spawn_agent` 参数里可直接覆盖模型；新版路径已经有 `~/.codex/agents/*.toml` custom agent role 文件承载子 Agent 的 `model`、`model_provider`、`model_reasoning_effort`，因此不应再通过扩展保留函数 schema 选择模型。
+- `src-tauri/src/codex_config.rs` 的 Codex catalog/config 投影改为 `ensure_codex_multi_agent_reserved_schema_compatible`：保留用户原本 `multi_agent_v2` 启用状态，但写入 `hide_spawn_agent_metadata = true`，让 `collaboration.spawn_agent` 回到官方保留工具形态；文档 `docs/codex-spawn-agent-model-candidates.md` 同步说明子模型选择走 managed role 文件。
+- 现场快速恢复可以把 `~/.codex/config.toml` 里的 `[features.multi_agent_v2] hide_spawn_agent_metadata = false` 改为 `true` 后重启 Codex/GPT app；长期修复依赖新版 CCSwitchMulti 重新投影配置。
