@@ -168,17 +168,13 @@ def resolve_active_state_db(
     config_text: str,
     explicit_state_db: str | None,
 ) -> ActiveStateDb:
-    """解析 active state_5.sqlite，优先使用 Codex Desktop 26.609 的 sqlite 子目录。"""
+    """解析 active state_5.sqlite，优先选择新版 Codex/GPT 应用仍在写入的根目录库。"""
 
     explicit = resolve_user_path(explicit_state_db)
     if explicit is not None:
         if not explicit.exists():
             raise FileNotFoundError(f"state DB not found: {explicit}")
         return ActiveStateDb(explicit, "explicit")
-
-    sqlite_default = codex_home / "sqlite" / "state_5.sqlite"
-    if sqlite_default.exists():
-        return ActiveStateDb(sqlite_default, "sqlite_subdir")
 
     sqlite_home = parse_sqlite_home(config_text)
     if sqlite_home is not None and (sqlite_home / "state_5.sqlite").exists():
@@ -188,9 +184,13 @@ def resolve_active_state_db(
         if env_sqlite_home is not None and (env_sqlite_home / "state_5.sqlite").exists():
             return ActiveStateDb(env_sqlite_home / "state_5.sqlite", "env_sqlite_home")
 
-    legacy = codex_home / "state_5.sqlite"
-    if legacy.exists():
-        return ActiveStateDb(legacy, "legacy_root")
+    codex_root = codex_home / "state_5.sqlite"
+    if codex_root.exists():
+        return ActiveStateDb(codex_root, "codex_root")
+
+    sqlite_default = codex_home / "sqlite" / "state_5.sqlite"
+    if sqlite_default.exists():
+        return ActiveStateDb(sqlite_default, "sqlite_subdir")
 
     raise FileNotFoundError(f"state_5.sqlite not found under {codex_home}")
 

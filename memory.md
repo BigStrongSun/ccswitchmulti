@@ -1943,3 +1943,11 @@
 - 这个桥接模式可以扩展到 `image_generation`：对第三方模型暴露 `generate_image(prompt, size, quality, format)`，CCSwitchMulti 内部调用 OpenAI Responses `tools: [{ "type": "image_generation" }]`，解析 `image_generation_call.result`，把 base64 解码成 artifact 文件，返回路径、MIME、尺寸和可选缩略图；不要把完整 base64 直接塞回模型上下文或普通日志。
 - `file_search` 也可桥接，但必须显式配置允许的 vector store、文件权限和日志脱敏；`computer_use` 不应作为普通 provider proxy tool-loop 的 MVP，因为它需要独立的交互会话、安全确认、屏幕状态和动作权限设计。
 - 实现建议新增 `src-tauri/src/proxy/providers/hosted_tools/` 模块，拆出 `bridge.rs`、`openai_client.rs`、`web_search.rs`、`image_generation.rs`、`file_search.rs`。默认只开启 `web_search`，`image_generation` 和 `file_search` 需要显式 allowlist，日志只记录 trace id、tool name、query hash、耗时和状态，不记录完整网页正文、完整 prompt、base64 图片或 API key。
+
+## 2026-07-10 新版 GPT/Codex 应用历史不可见与 standalone 修复器路径
+
+- 现场根因不是历史数据丢失：当前 `~/.codex/config.toml` 的 live provider 是 `model_provider = "custom"`、模型是 `gpt-5.6-sol`，而 `~/.codex/state_5.sqlite` 中 1845 条 threads 里有 1839 条仍在旧 `codex_model_router_v2` 桶，只有 3 条在 `custom`。Codex 按当前 provider 桶过滤时会只显示极少新线程，看起来像“历史没了”。
+- 同时存在两个 state DB：`~/.codex/state_5.sqlite` 今天仍在写入且有 1845 条；`~/.codex/sqlite/state_5.sqlite` 停在旧时间且只有 935 条。Rust/Tauri 内置修复器当前已经按 `sqlite_home` / `CODEX_SQLITE_HOME` / 根库 / `sqlite/` 旧库顺序选择 active DB，但 standalone Python 工具仍旧优先 `sqlite/`，会在离线修复流程里误修过期库。
+- 已修 `scripts/codex-history-tool/codex_history_tool.py`：无显式 `--state-db` 时先尊重 `sqlite_home` / `CODEX_SQLITE_HOME`，再选当前根库 `~/.codex/state_5.sqlite`，最后兜底旧 `~/.codex/sqlite/state_5.sqlite`；`scripts/codex-history-tool/README.md` 同步说明该优先级。
+- 验证基线：`python -m py_compile scripts\codex-history-tool\codex_history_tool.py` 通过；默认 dry-run 已命中 `activeDbKind=codex_root` 和 `stateDbPath=C:\Users\sunda\.codex\state_5.sqlite`，预览会把 1842 条旧 provider 行同步到当前 `custom` 桶，并发现 240 条可见候选；`cargo test --manifest-path src-tauri\Cargo.toml active_state_db --lib` 3 个 Rust active DB 选择测试通过。
+- 操作边界：真正写入历史前必须让用户完全退出 Codex/GPT app 或使用内置修复器的并发保护；不要在 app-server 仍运行时强制写入 live SQLite。若目标是恢复 MultiRouter 稳定形态，还要另外排查为什么 live config 从 `codex_model_router_v2` 变成了 `custom`，这不是历史工具本身造成的。

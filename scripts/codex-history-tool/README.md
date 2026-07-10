@@ -63,6 +63,6 @@ python .\codex_history_tool.py repair --session-id "<session-id>" --apply
 Useful overrides:
 
 - `--codex-home <path>`: choose another Codex directory.
-- `--state-db <path>`: force a specific state SQLite file for `list`/`repair`. `reconcile` scans all discovered `state_*.sqlite` files under the Codex root, `sqlite/`, `sqlite_home` from `config.toml`, or `CODEX_SQLITE_HOME`.
+- `--state-db <path>`: force a specific state SQLite file for `list`/`repair`. Without an explicit path, the tool follows `sqlite_home` from `config.toml` or `CODEX_SQLITE_HOME`, then prefers the current root `~/.codex/state_5.sqlite`, and only falls back to the legacy `~/.codex/sqlite/state_5.sqlite`. `reconcile` scans all discovered `state_*.sqlite` files under every known location.
 - `--target-provider <id>`: default is the live `config.toml` provider, falling back to `codex_model_router_v2`.
 - `--max-per-project 10 --max-total 300`: balanced recent-window caps.
