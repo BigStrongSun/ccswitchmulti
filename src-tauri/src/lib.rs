@@ -1742,12 +1742,11 @@ pub async fn cleanup_before_exit(app_handle: &tauri::AppHandle) {
         let needs_restore = has_backups || live_taken_over;
 
         if needs_restore {
-            log::info!("检测到接管残留，开始恢复 Live 配置（保留代理状态）...");
-            // 使用 keep_state 版本，保留 settings 表中的代理状态
-            if let Err(e) = proxy_service.stop_with_restore_keep_state().await {
+            log::info!("检测到接管残留，开始恢复 Live 配置并关闭接管状态...");
+            if let Err(e) = proxy_service.stop_with_restore().await {
                 log::error!("退出时恢复 Live 配置失败: {e}");
             } else {
-                log::info!("已恢复 Live 配置（代理状态已保留，下次启动将自动恢复）");
+                log::info!("已恢复 Live 配置（接管状态已关闭，Codex 不再依赖本地代理）");
             }
             return;
         }

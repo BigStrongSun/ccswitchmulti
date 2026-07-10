@@ -4025,6 +4025,98 @@ wire_api = "responses"
 
     #[tokio::test]
     #[serial]
+    async fn user_exit_stop_with_restore_disables_codex_takeover() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        use_ephemeral_proxy_port(&db).await;
+        let service = ProxyService::new(db.clone());
+
+        let official_config = r#"model_provider = "openai"
+model = "gpt-5.5"
+"#;
+        crate::codex_config::write_codex_live_atomic(
+            &json!({ "OPENAI_API_KEY": "old-openai-key" }),
+            Some(official_config),
+        )
+        .expect("seed Codex live config");
+
+        let mut router = Provider::with_id(
+            "codex-router".to_string(),
+            "Codex Router".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "PROXY_MANAGED" },
+                "config": r#"model = "gpt-5.5"
+model_provider = "openai"
+openai_base_url = "http://127.0.0.1:15721/v1"
+"#,
+                "modelCatalog": {
+                    "models": [
+                        { "model": "gpt-5.5", "displayName": "GPT-5.5", "contextWindow": 272000 }
+                    ]
+                },
+                "codexRouting": {
+                    "enabled": true,
+                    "routes": [
+                        {
+                            "id": "openai-official",
+                            "enabled": true,
+                            "match": { "models": ["gpt-5.5"] },
+                            "upstream": {
+                                "baseUrl": "https://chatgpt.com/backend-api/codex",
+                                "apiFormat": "openai_responses",
+                                "auth": { "source": "managed_codex_oauth" },
+                                "modelMap": { "gpt-5.5": "gpt-5.5" }
+                            }
+                        }
+                    ]
+                }
+            }),
+            None,
+        );
+        router.category = Some("custom".to_string());
+
+        db.save_provider("codex", &router)
+            .expect("save router provider");
+        db.set_current_provider("codex", "codex-router")
+            .expect("set router provider");
+        crate::settings::set_current_provider(&AppType::Codex, Some("codex-router"))
+            .expect("set local current provider");
+
+        service
+            .set_takeover_for_app("codex", true)
+            .await
+            .expect("enable Codex takeover");
+        assert!(
+            db.get_proxy_config_for_app("codex")
+                .await
+                .expect("read codex config")
+                .enabled
+        );
+
+        service
+            .stop_with_restore()
+            .await
+            .expect("user exit cleanup should restore and disable takeover");
+
+        assert!(
+            !db.get_proxy_config_for_app("codex")
+                .await
+                .expect("read codex config")
+                .enabled,
+            "user exit cleanup must disable Codex takeover so Codex does not depend on a stopped local proxy"
+        );
+        let restored_config = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
+            .expect("read restored config");
+        assert!(
+            !restored_config.contains("127.0.0.1"),
+            "restored Codex config must not point at the local proxy after user exit"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn codex_sync_current_to_live_during_takeover_preserves_oauth_auth_json() {
         let _home = TempHome::new();
         crate::settings::reload_settings().expect("reload settings");
