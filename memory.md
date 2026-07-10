@@ -1,5 +1,11 @@
 # CC Switch Repository Memory
 
+## 2026-07-10 CCSwitchMulti v3.16.5-1 Release Boundary
+
+- `v3.16.5-1` 是 CCSwitchMulti 对原版 `cc-switch v3.16.5` 的跟进发布版本；正式 tag 应使用 fork tag `v3.16.5-1`，不要复用上游 `v3.16.5` tag。`release.yml` 会读取 `docs/release-notes/v3.16.5-1-zh.md` 生成 GitHub Release 正文，资产外显命名继续使用 `CCSwitchMulti-${TAG}-...`。
+- 本版必须在 release note 顶部注明：**尚未适配 OpenAI 新版 ChatGPT 应用**。当前合并只覆盖原版 `cc-switch v3.16.5` 与 CCSwitchMulti 既有 Codex Desktop / CLI 接管路径；如果新版 ChatGPT 应用改变桌面端协议、模型菜单、渲染器门控或登录态结构，需要后续单独适配。
+- 发布前不要提交未跟踪的本地输出目录：`output/release-v3.16.4-4-upload/`、`output/release-v3.16.4-5wizard/`、`scripts/logs/`。发布流程仍是先把当前分支 fast-forward 推到 `fork/main`，再推 annotated tag 触发 `.github/workflows/release.yml`。
+
 ## 2026-07-10 Upstream v3.16.5 Merge Into CCSwitchMulti
 
 - 本次上游跟进合并原版 `farion1231/cc-switch` 的 `v3.16.5` 功能到 CCSwitchMulti，版本面统一推进为 `3.16.5-1`：`package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json` 都必须保持一致；Tauri `productName` 仍是 `CCSwitchMulti`，identifier 仍是 `com.ccswitchmulti.desktop`，不要被原版品牌回退覆盖。
