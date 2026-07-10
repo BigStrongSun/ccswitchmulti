@@ -242,6 +242,83 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     expect(fetchModelsForConfig).not.toHaveBeenCalled();
   });
 
+  it("refreshes and migrates a legacy inline OAuth route without targetProviderId", async () => {
+    vi.mocked(fetchCodexOauthModels).mockResolvedValue([
+      { id: "gpt-5.5", ownedBy: "openai", contextWindow: 272000 },
+      { id: "gpt-5.6-luna", ownedBy: "openai", contextWindow: 272000 },
+      { id: "gpt-5.6-sol", ownedBy: "openai", contextWindow: 272000 },
+      { id: "gpt-5.6-terra", ownedBy: "openai", contextWindow: 272000 },
+    ]);
+    const official: Provider = {
+      id: "codex-official",
+      name: "OpenAI Official",
+      category: "official",
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "gpt-5.5" }] },
+      },
+    };
+    const planDraft = createDraftRoutingPlan([], []);
+    const legacyRoute = normalizeCodexRouteForSave(
+      {
+        label: official.name,
+        match: { models: ["gpt-5.5"], prefixes: ["gpt-"] },
+      },
+      0,
+      new Set<string>(),
+    );
+    delete legacyRoute.targetProviderId;
+    legacyRoute.upstream!.auth = { source: "managed_codex_oauth" };
+    const legacyPlan: Provider = {
+      ...planDraft,
+      id: "codex-openai-router",
+      name: "OpenAI Multi-Model Router",
+      settingsConfig: {
+        ...planDraft.settingsConfig,
+        modelCatalog: {
+          models: [{ model: "gpt-5.5" }],
+          spawnAgentModels: ["gpt-5.5"],
+        },
+        codexRouting: {
+          enabled: true,
+          defaultRouteId: legacyRoute.id,
+          routes: [legacyRoute],
+        },
+      },
+    };
+
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [official, legacyPlan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: legacyPlan.id,
+        initialProviderId: legacyPlan.id,
+        initialTab: "routes",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+
+    await waitFor(() => {
+      const savedPlan = vi
+        .mocked(providersApi.update)
+        .mock.calls.map(([updated]) => updated)
+        .find((updated) => updated.id === legacyPlan.id);
+      expect(
+        savedPlan?.settingsConfig?.codexRouting?.routes[0].targetProviderId,
+      ).toBe(official.id);
+      expect(
+        savedPlan?.settingsConfig?.codexRouting?.routes[0].match.models,
+      ).toEqual(["gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"]);
+      expect(
+        savedPlan?.settingsConfig?.modelCatalog?.models.map(
+          (model: { model: string }) => model.model,
+        ),
+      ).toEqual(["gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"]);
+    });
+  });
+
   it("finishes later provider refreshes after an earlier refresh rerenders the routes page", async () => {
     const firstRefresh = createDeferred<FetchedModel[]>();
     const secondRefresh = createDeferred<FetchedModel[]>();

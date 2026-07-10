@@ -2336,14 +2336,9 @@ export function CodexRouterWorkspacePage({
         }
         const affectedPlans: Provider[] = [];
         for (const plan of routingPlans) {
-          const routes = readCodexRouting(plan)?.routes ?? [];
-          if (
-            !routes.some(
-              (route) => routeTargetProviderId(route) === nextProvider.id,
-            )
-          ) {
-            continue;
-          }
+          // 每个 plan 都交给同步层判定是否变化：旧版内联 OAuth route 没有
+          // targetProviderId，若在页面层提前过滤，就会出现 provider 已刷新而旧
+          // MultiRouter 永远停在旧模型目录的断层。同步层返回 null 时不会写库。
           const syncResult = syncCodexMultiRouterPlanWithProviders(
             plan,
             updatedRoutableProvidersById,

@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-07-10 Legacy MultiRouter OAuth 5.6 Migration
+
+- `a3e4622f` 等动态 OAuth catalog 修复只覆盖带 `targetProviderId` 的新式 route；现场数据库里两个 OpenAI Official provider 和新 `codex-multirouter` 已有三个 GPT-5.6，但截图选中的旧 `codex-openai-router` 仍是无 `targetProviderId` 的内联 `managed_codex_oauth` route，因此 Workspace 的 provider-id 预过滤和同步 helper 都会跳过它。
+- 根修位于 `src/lib/codexMultiRouterSync.ts`：同步前迁移 legacy OAuth route。有 `accountId` 时只允许匹配同账号 provider；默认账号优先稳定 id `codex-official`，不存在 canonical 时只有唯一的无账号 OAuth provider 才可迁移，避免多账号静默串号。迁移后复用既有 route/modelMap/聚合 catalog SSOT 同步，重复执行必须幂等。
+- `CodexRouterWorkspacePage` 刷新 provider 后不再提前按 `targetProviderId` 排除 plan，而是让同步层逐个返回 changed/null；这是旧 route 能在首次官方 catalog 刷新时被持久化迁移的必要条件。
+- 子 Agent `spawnAgentModels` 仍按原设计保留用户前五排序；GPT-5.6 会进入 route 和聚合 catalog，并出现在“路由/全部”候选池，但不会自动挤掉用户手工候选。回归覆盖 canonical 默认账号、精确多账号匹配、账号无匹配保护、幂等和 Workspace 实际持久化；同步 9 项、Workspace 40 项及 `pnpm typecheck` 通过。
+- 本地测试包版本推进到 `3.16.5-2`，四个版本面为 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock`、`src-tauri/tauri.conf.json`，用于与已安装的 `3.16.5-1` 明确区分。
+
 ## 2026-07-10 Codex 一键切回 OpenAI 官方与全量历史归桶
 
 - Codex 首页的官方恢复入口放在 `ProviderList.tsx` 底部 CTA 区，与“配置多路模型”并排。它不能复用普通前端 provider switch：接管态下普通路径有官方供应商安全门，专用命令 `switch_codex_to_official_and_repair_history` 才能把“退出接管、保留 OAuth、切官方、修历史”收束为一次操作。

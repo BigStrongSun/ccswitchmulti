@@ -7,6 +7,8 @@ import type {
 } from "@/types";
 import {
   isCodexMultiRouterPlan,
+  isWizardCodexOAuthSource,
+  readWizardCodexOAuthAccountId,
   resolveWizardModelNameCollisions,
 } from "@/lib/codexMultiRouterWizard";
 import { readCodexModelCatalog } from "@/utils/codexSpawnAgentCandidates";
@@ -40,6 +42,77 @@ function routeTargetProviderId(route: CodexRoutingRoute): string | undefined {
     upstream?.upstream_provider_id ??
     upstream?.provider
   );
+}
+
+// 读取旧版内联 Codex OAuth route 绑定的账号；空值表示沿用 Codex 默认账号。
+function routeManagedCodexOAuthAccountId(
+  route: CodexRoutingRoute,
+): string | undefined {
+  if (route.upstream.auth?.source !== "managed_codex_oauth") return undefined;
+  const accountId = route.upstream.auth.accountId;
+  return typeof accountId === "string" && accountId.trim()
+    ? accountId.trim()
+    : undefined;
+}
+
+// 为没有 targetProviderId 的旧版内联 OAuth route 选择唯一、稳定的官方模型源。
+// 有账号绑定时只能精确匹配同一账号；默认账号旧配置优先迁移到 canonical
+// `codex-official`，否则仅在候选唯一时迁移，避免多账号环境发生静默串号。
+function resolveLegacyManagedCodexOAuthProvider(
+  route: CodexRoutingRoute,
+  providersById: Map<string, Provider>,
+): Provider | undefined {
+  if (
+    routeTargetProviderId(route) ||
+    route.upstream.auth?.source !== "managed_codex_oauth"
+  ) {
+    return undefined;
+  }
+
+  const routeAccountId = routeManagedCodexOAuthAccountId(route);
+  const oauthProviders = Array.from(providersById.values()).filter(
+    (provider) =>
+      !isCodexMultiRouterPlan(provider) && isWizardCodexOAuthSource(provider),
+  );
+  const accountMatchedProviders = routeAccountId
+    ? oauthProviders.filter(
+        (provider) =>
+          readWizardCodexOAuthAccountId(provider) === routeAccountId,
+      )
+    : oauthProviders.filter(
+        (provider) => !readWizardCodexOAuthAccountId(provider),
+      );
+
+  const canonicalProvider = accountMatchedProviders.find(
+    (provider) => provider.id === "codex-official",
+  );
+  if (canonicalProvider) return canonicalProvider;
+  if (accountMatchedProviders.length === 1) return accountMatchedProviders[0];
+
+  // 旧默认账号 route 可能早于 provider 账号元数据出现；仅 canonical provider
+  // 能提供稳定迁移目标，不能在多个命名不确定的 OAuth provider 之间猜测。
+  if (!routeAccountId) {
+    return oauthProviders.find((provider) => provider.id === "codex-official");
+  }
+  return undefined;
+}
+
+// 把旧版内联 OAuth route 升级为 provider 绑定形式；新式 route 原样返回。
+function migrateLegacyManagedCodexOAuthRoutes(
+  routes: CodexRoutingRoute[],
+  providersById: Map<string, Provider>,
+): { routes: CodexRoutingRoute[]; changed: boolean } {
+  let changed = false;
+  const migratedRoutes = routes.map((route) => {
+    const targetProvider = resolveLegacyManagedCodexOAuthProvider(
+      route,
+      providersById,
+    );
+    if (!targetProvider) return route;
+    changed = true;
+    return { ...route, targetProviderId: targetProvider.id };
+  });
+  return { routes: migratedRoutes, changed };
 }
 
 // 读取模型真实上游名；MultiRouter 可见模型可能是为解决重名而生成的别名。
@@ -307,8 +380,14 @@ export function syncCodexMultiRouterPlanWithProviders(
   const routes = routing?.routes ?? [];
   if (!isCodexMultiRouterPlan(plan) || routes.length === 0) return null;
 
-  const routableProvidersById = buildRoutableProvidersByRoute(
+  const legacyMigration = migrateLegacyManagedCodexOAuthRoutes(
     routes,
+    providersById,
+  );
+  const resolvedRoutes = legacyMigration.routes;
+
+  const routableProvidersById = buildRoutableProvidersByRoute(
+    resolvedRoutes,
     providersById,
   );
   const syncedProvidersById = new Map(providersById);
@@ -316,8 +395,8 @@ export function syncCodexMultiRouterPlanWithProviders(
     syncedProvidersById.set(providerId, provider);
   }
 
-  let changed = false;
-  const nextRoutes = routes.map((route) => {
+  let changed = legacyMigration.changed;
+  const nextRoutes = resolvedRoutes.map((route) => {
     const targetId = routeTargetProviderId(route);
     const targetProvider = targetId
       ? syncedProvidersById.get(targetId)

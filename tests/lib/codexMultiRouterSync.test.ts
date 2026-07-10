@@ -17,6 +17,200 @@ function provider(overrides: Partial<Provider>): Provider {
 }
 
 describe("codexMultiRouterSync", () => {
+  it("把旧版内联默认 OAuth route 迁移到 canonical provider 并同步 5.6", () => {
+    const official = provider({
+      id: "codex-official",
+      name: "OpenAI Official",
+      category: "official",
+      settingsConfig: {
+        modelCatalog: {
+          models: [
+            { model: "gpt-5.5" },
+            { model: "gpt-5.6-luna" },
+            { model: "gpt-5.6-sol" },
+            { model: "gpt-5.6-terra" },
+          ],
+        },
+      },
+    });
+    const backup = provider({
+      id: "codex-official-backup",
+      name: "OpenAI Official Backup",
+      category: "official",
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "gpt-5.5" }] },
+      },
+    });
+    const plan = provider({
+      id: "legacy-router",
+      settingsConfig: {
+        modelCatalog: {
+          models: [{ model: "gpt-5.5" }],
+          spawnAgentModels: ["gpt-5.5"],
+        },
+        codexRouting: {
+          enabled: true,
+          routes: [
+            {
+              id: "legacy-official",
+              match: { models: ["gpt-5.5"], prefixes: ["gpt-"] },
+              upstream: {
+                apiFormat: "openai_responses",
+                auth: { source: "managed_codex_oauth" },
+              },
+            },
+          ],
+        },
+      },
+    });
+    const providersById = new Map([
+      [official.id, official],
+      [backup.id, backup],
+      [plan.id, plan],
+    ]);
+
+    const synced = syncCodexMultiRouterPlanWithProviders(plan, providersById);
+
+    expect(
+      synced?.plan.settingsConfig.codexRouting.routes[0].targetProviderId,
+    ).toBe("codex-official");
+    expect(
+      synced?.plan.settingsConfig.codexRouting.routes[0].match.models,
+    ).toEqual(["gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"]);
+    expect(
+      synced?.plan.settingsConfig.modelCatalog.models.map(
+        (model: { model: string }) => model.model,
+      ),
+    ).toEqual(["gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"]);
+    expect(
+      syncCodexMultiRouterPlanWithProviders(synced!.plan, providersById),
+    ).toBeNull();
+  });
+
+  it("旧版内联 OAuth route 有账号时只迁移到同账号 provider", () => {
+    const accountA = provider({
+      id: "codex-official",
+      name: "OpenAI Account A",
+      category: "official",
+      meta: {
+        authBinding: {
+          source: "managed_codex_oauth",
+          accountId: "account-a",
+        },
+      },
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "gpt-5.5" }] },
+      },
+    });
+    const accountB = provider({
+      id: "codex-official-account-b",
+      name: "OpenAI Account B",
+      category: "official",
+      meta: {
+        authBinding: {
+          source: "managed_codex_oauth",
+          accountId: "account-b",
+        },
+      },
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "gpt-5.6-sol" }] },
+      },
+    });
+    const plan = provider({
+      id: "legacy-router",
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "gpt-5.5" }] },
+        codexRouting: {
+          enabled: true,
+          routes: [
+            {
+              id: "legacy-official",
+              match: { models: ["gpt-5.5"] },
+              upstream: {
+                apiFormat: "openai_responses",
+                auth: {
+                  source: "managed_codex_oauth",
+                  accountId: "account-b",
+                },
+              },
+            },
+          ],
+        },
+      },
+    });
+
+    const synced = syncCodexMultiRouterPlanWithProviders(
+      plan,
+      new Map([
+        [accountA.id, accountA],
+        [accountB.id, accountB],
+        [plan.id, plan],
+      ]),
+    );
+
+    expect(
+      synced?.plan.settingsConfig.codexRouting.routes[0].targetProviderId,
+    ).toBe(accountB.id);
+    expect(
+      synced?.plan.settingsConfig.codexRouting.routes[0].match.models,
+    ).toEqual(["gpt-5.6-sol"]);
+  });
+
+  it("旧版内联 OAuth route 的账号没有匹配 provider 时保持原配置", () => {
+    const official = provider({
+      id: "codex-official",
+      name: "OpenAI Account A",
+      category: "official",
+      meta: {
+        authBinding: {
+          source: "managed_codex_oauth",
+          accountId: "account-a",
+        },
+      },
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "gpt-5.6-sol" }] },
+      },
+    });
+    const plan = provider({
+      id: "legacy-router",
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "gpt-5.5" }] },
+        codexRouting: {
+          enabled: true,
+          routes: [
+            {
+              id: "legacy-official",
+              match: { models: ["gpt-5.5"] },
+              upstream: {
+                apiFormat: "openai_responses",
+                auth: {
+                  source: "managed_codex_oauth",
+                  accountId: "account-missing",
+                },
+              },
+            },
+          ],
+        },
+      },
+    });
+
+    const synced = syncCodexMultiRouterPlanWithProviders(
+      plan,
+      new Map([
+        [official.id, official],
+        [plan.id, plan],
+      ]),
+    );
+
+    const nextPlan = synced?.plan ?? plan;
+    expect(
+      nextPlan.settingsConfig.codexRouting.routes[0].targetProviderId,
+    ).toBe(undefined);
+    expect(nextPlan.settingsConfig.codexRouting.routes[0].match.models).toEqual(
+      ["gpt-5.5"],
+    );
+  });
+
   it("同步 provider 保留模型变更到 route、总 catalog，并只剪枝子 Agent 候选", () => {
     const deepseek = provider({
       id: "deepseek",
