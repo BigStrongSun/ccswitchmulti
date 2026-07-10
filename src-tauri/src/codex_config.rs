@@ -769,9 +769,7 @@ fn project_codex_desktop_model_fields(
     entry_obj.insert("supported_in_api".to_string(), json!(true));
     entry_obj.insert("hidden".to_string(), json!(false));
     entry_obj.insert("isDefault".to_string(), json!(spec.is_default));
-    // Newer Codex Desktop builds distinguish Chat-visible models from
-    // code-mode-only models via `tool_mode`. A JSON null matches official
-    // chat-capable entries and avoids marking routed models as code-only.
+    // `tool_mode = null` keeps routed models visible in Chat.
     entry_obj.insert("tool_mode".to_string(), Value::Null);
     entry_obj.insert("toolMode".to_string(), Value::Null);
     entry_obj.insert("output_modalities".to_string(), json!(["text"]));
@@ -1365,10 +1363,7 @@ fn codex_provider_models_toml_array(specs: &[CodexCatalogModelSpec]) -> Item {
 
 /// 将模型目录同步到活动 provider 的 `models` 字段。
 ///
-/// Codex Desktop 的 app-server 会把 custom/reserved local provider 标为“自定义”，
-/// 但候选菜单仍需要 provider 内部能枚举模型；只写顶层 `model_catalog_json`
-/// 对部分 Desktop 版本不够。这里以 CCSwitchMulti 的 `modelCatalog` 为显式信号，
-/// 不再因为 `lmstudio` 这类 Codex 保留 provider id 跳过投影。
+/// `modelCatalog` 中的模型始终投影到活动 provider，包括 Codex 保留的 provider id。
 fn set_active_codex_provider_models(doc: &mut DocumentMut, specs: &[CodexCatalogModelSpec]) {
     if specs.is_empty() {
         return;

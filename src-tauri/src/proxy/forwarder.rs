@@ -524,59 +524,6 @@ fn ask_tool_name(item: &Value) -> String {
         .to_string()
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-struct AskToolCall {
-    name: String,
-    arguments: String,
-}
-
-#[allow(dead_code)]
-fn ask_tool_arguments(item: &Value) -> String {
-    item.get("arguments")
-        .or_else(|| item.get("input"))
-        .map(ask_value_to_text)
-        .unwrap_or_default()
-}
-
-#[allow(dead_code)]
-fn ask_tool_output(item: &Value) -> String {
-    item.get("output")
-        .map(ask_value_to_text)
-        .unwrap_or_else(|| ask_value_to_text(item))
-}
-
-#[allow(dead_code)]
-fn ask_value_to_text(value: &Value) -> String {
-    match value {
-        Value::String(value) => value.clone(),
-        other => canonical_json_string(other),
-    }
-}
-
-#[allow(dead_code)]
-fn ask_execution_evidence_item(item: &Value, calls: &HashMap<String, AskToolCall>) -> Value {
-    let call_id = item.get("call_id").and_then(Value::as_str).unwrap_or("");
-    let output = ask_tool_output(item);
-    let (status_attr, tool, arguments) = if let Some(call) = calls.get(call_id) {
-        ("", call.name.as_str(), call.arguments.as_str())
-    } else {
-        (" status=\"unpaired\"", "unknown", "")
-    };
-    let evidence = format!(
-        "<execution_evidence{status_attr}>\nsource: prior Codex execution\ntool: {tool}\narguments:\n{arguments}\n\nresult:\n{output}\n</execution_evidence>"
-    );
-
-    serde_json::json!({
-        "type": "message",
-        "role": "user",
-        "content": [{
-            "type": "input_text",
-            "text": evidence
-        }]
-    })
-}
-
 pub struct ForwardResult {
     pub response: ProxyResponse,
     pub provider: Provider,
