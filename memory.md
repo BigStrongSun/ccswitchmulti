@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-07-10 MultiRouter OAuth GPT-5.6 Catalog Boundary
+
+- 当前官方 ChatGPT/Codex OAuth 模型端点已经能返回 `gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna`。本机使用现有 OAuth 登录态只在内存中发起 `GET https://chatgpt.com/backend-api/codex/models?client_version=3.16.5-1`，返回 HTTP 200 和 8 个模型；凭据未输出。`~/.codex/models_cache.json` 也已有三个 5.6 模型，但 `~/.codex/cc-switch-model-catalog.json` 与数据库里两套 MultiRouter plan 仍只有 `gpt-5.5`、`gpt-5.4`、`gpt-5.4-mini`、`gpt-5.3-codex-spark` 四个官方模型。
+- 根因是 MultiRouter 接线缺失，不是 OAuth 上游缺模型。后端 `src-tauri/src/services/codex_oauth_models.rs`、`src-tauri/src/commands/codex_oauth.rs` 和前端 `src/lib/api/model-fetch.ts` 已实现 `get_codex_oauth_models` / `fetchCodexOauthModels`；但 `src/lib/codexMultiRouterWizard.ts` 和 `src/components/codex/CodexRouterWorkspacePage.tsx` 各自写死旧四模型 fallback，`CodexMultiRouterWizard.tsx` 刷新时又明确把 OAuth 标成 `skipped` 并 `continue`，因此真实 OAuth 目录从未写入 provider、route match 或聚合 catalog。
+- 转发层没有把模型限制到 5.5：官方 route 使用 `gpt` 前缀匹配，Rust resolver 按 exact/prefix 路由。只要 5.6 被写入 MultiRouter catalog/route，路由可以进入托管 OAuth；最终准入仍由账号和官方后端决定。另有旧默认目录散落在 `src-tauri/src/proxy/handlers.rs` 与 `src-tauri/src/proxy/external_openai_api.rs`，会影响本地/对外 `/v1/models` fallback。
+- 正确根修应让 MultiRouter 向导和 Routes 页对 OAuth 源调用现有 `fetchCodexOauthModels(accountId)`，成功后持久化并同步 provider catalog、route match、聚合 catalog；网络/认证失败时才保留旧目录作为 fallback。同时收敛重复的前后端默认模型常量，避免下一次新模型发布再次漂移。远端 `fork/main`、`origin/main` 与当前 `codex/merge-upstream-v3.16.5`（`d9658086`）均尚无这项修复。
+- 运行态附带发现：当前安装运行的是 `3.16.4-15`，不是仓库/构建目录的 `3.16.5-1`；`15721` 当前未监听且 Codex proxy/takeover 关闭，只有 external API `15722` 在监听。因此“当前界面拿不到 5.6”既有静态目录根因，也不能用当前 15721 做真实路由验证。
+
 ## 2026-07-10 CCSwitchMulti v3.16.5-1 Release Boundary
 
 - `v3.16.5-1` 是 CCSwitchMulti 对原版 `cc-switch v3.16.5` 的跟进发布版本；正式 tag 应使用 fork tag `v3.16.5-1`，不要复用上游 `v3.16.5` tag。`release.yml` 会读取 `docs/release-notes/v3.16.5-1-zh.md` 生成 GitHub Release 正文，资产外显命名继续使用 `CCSwitchMulti-${TAG}-...`。
