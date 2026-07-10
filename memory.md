@@ -7,6 +7,8 @@
 - 转发层没有把模型限制到 5.5：官方 route 使用 `gpt` 前缀匹配，Rust resolver 按 exact/prefix 路由。只要 5.6 被写入 MultiRouter catalog/route，路由可以进入托管 OAuth；最终准入仍由账号和官方后端决定。另有旧默认目录散落在 `src-tauri/src/proxy/handlers.rs` 与 `src-tauri/src/proxy/external_openai_api.rs`，会影响本地/对外 `/v1/models` fallback。
 - 正确根修应让 MultiRouter 向导和 Routes 页对 OAuth 源调用现有 `fetchCodexOauthModels(accountId)`，成功后持久化并同步 provider catalog、route match、聚合 catalog；网络/认证失败时才保留旧目录作为 fallback。同时收敛重复的前后端默认模型常量，避免下一次新模型发布再次漂移。远端 `fork/main`、`origin/main` 与当前 `codex/merge-upstream-v3.16.5`（`d9658086`）均尚无这项修复。
 - 运行态附带发现：当前安装运行的是 `3.16.4-15`，不是仓库/构建目录的 `3.16.5-1`；`15721` 当前未监听且 Codex proxy/takeover 关闭，只有 external API `15722` 在监听。因此“当前界面拿不到 5.6”既有静态目录根因，也不能用当前 15721 做真实路由验证。
+- 修复已在同一分支完成：`a3e4622f` 将向导和 Routes 工作台接到 `fetchCodexOauthModels(accountId)`，成功后追加并持久化官方新模型，再复用 `syncCodexMultiRouterPlanWithProviders` 同步 route match 与聚合 catalog；空列表、认证或网络失败保留最后一次可用目录。`04c52606` 删除后端 External API 的旧四模型运行时注入，并让临时 `codex-official` provider 只增加 `provider_type=codex_oauth`、不再覆盖动态 `settings_config`。旧四模型前端常量只作为从未成功联网时的离线 UI fallback，不再参与成功路径或后端 `/v1/models`。
+- 回归验证：MultiRouter 向导/Workspace/同步 helper 共 84 项前端测试通过，覆盖绑定 OAuth accountId、`gpt-5.6-sol` 写入 provider/route/catalog、失败保留旧目录；`pnpm typecheck`、Prettier、Rustfmt、`cargo check` 通过；Rust External models 4 项、动态 catalog 保留 1 项、空 OAuth seed 1 项、OAuth 模型解析 5 项通过。工作树中另有未提交的 `codex_config.rs`、`codex_desktop.rs`、`codex_history_migration.rs`、`CodexHistoryRepairPanel.tsx` 修改，本次均未纳入提交。
 
 ## 2026-07-10 CCSwitchMulti v3.16.5-1 Release Boundary
 
