@@ -1,6 +1,6 @@
 # 新版 GPT App（ChatGPT Codex）线程与多 Agent 机制实测报告
 
-> 核验日期：2026-07-10  
+> 核验日期：2026-07-10<br>
 > 范围：Windows `OpenAI.Codex 26.707.3748.0`、本机 `~/.codex` 运行数据、当前 CCSwitchMulti 代码和 OpenAI 公开文档。这里的“GPT App”特指用户正在使用的 ChatGPT Codex Windows 桌面端，不泛指所有 ChatGPT 网页会话。
 
 ## 先给结论
