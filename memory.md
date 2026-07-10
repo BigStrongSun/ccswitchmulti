@@ -1,5 +1,11 @@
 # CC Switch Repository Memory
 
+## 2026-07-10 MultiRouter 长模型摘要换行
+
+- 规则列表的模型摘要位于 `src/components/codex/CodexRouterWorkspacePage.tsx` 的 `RouteListButton`。此前卡片没有 `min-w-0/w-full` 约束，摘要还使用 `truncate`；官方 OAuth 同步到多个 GPT-5.6 模型后，左侧规则列无法收缩，文本会覆盖右侧详情面板。
+- 根修是让卡片收缩到父级 grid 单元，并将摘要改为 `whitespace-normal break-words leading-5`，保留完整模型名并在卡片内换行。该改动不改变路由匹配或模型目录数据。
+- UI 修复后 `pnpm exec prettier --check src/components/codex/CodexRouterWorkspacePage.tsx`、`pnpm typecheck` 和 `src/components/codex/CodexRouterWorkspacePage.test.ts`（40 项）通过。
+
 ## 2026-07-10 Legacy MultiRouter OAuth 5.6 Migration
 
 - `a3e4622f` 等动态 OAuth catalog 修复只覆盖带 `targetProviderId` 的新式 route；现场数据库里两个 OpenAI Official provider 和新 `codex-multirouter` 已有三个 GPT-5.6，但截图选中的旧 `codex-openai-router` 仍是无 `targetProviderId` 的内联 `managed_codex_oauth` route，因此 Workspace 的 provider-id 预过滤和同步 helper 都会跳过它。
