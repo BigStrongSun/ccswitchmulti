@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-07-10 新版 GPT App 线程与多 Agent 机制取证
+
+- 完整实测报告见 `docs/guides/gpt-app-thread-subagent-mechanism-2026-07-10.md`。Windows 新桌面包为 `OpenAI.Codex`，实际运行链是 `ChatGPT.exe -> resources/codex.exe app-server -> code-mode/tool runtimes`；历史的原始事件在 `~/.codex/sessions/**/rollout-*.jsonl`，`state_5.sqlite` 提供 thread 元数据和 `thread_spawn_edges` 父子关系。修复历史必须离线备份并把 JSONL、SQLite 与子线程 edge 当成整体，不能只改轻量 `session_index.jsonl` 或伪造 `local_thread_catalog`。
+- 新版 multi-agent 的当前 live 保留工具契约为 `collaboration.spawn_agent(task_name, message, fork_turns)`；历史 v1 的 `model/reasoning_effort/service_tier` 与历史 v2 的可选 `agent_type` 绝不可重新硬编码。截图的 `reserved for use by this model and must match configured schema` 根因是旧 CCSwitchMulti 扩展了保留 schema；`ensure_codex_multi_agent_reserved_schema_compatible` 必须保持 `hide_spawn_agent_metadata=true`，子 Agent 模型改由 `~/.codex/agents/*.toml` role 选择。
+- 角色、模型、推理强度、provider 路由和 `spawnAgentModels` 前五候选是不同层。当前 Codex 内置角色为 `default/worker/explorer`；custom role 可 pin `model`/`model_reasoning_effort`，缺省继承父会话。前五候选仅影响 picker/CCSwitchMulti role 投影，不改实际路由或服务端最终调度。本机 5.6 已进总目录且有历史子线程使用；没有出现在特定候选卡片是旧人工前五被保留，需手动排进前五保存。
+- 官方依据：`https://learn.chatgpt.com/docs/agent-configuration/subagents`、`https://learn.chatgpt.com/docs/app-server`。本机当前 config 为 `agents.max_threads=10`、`max_depth=1`；实际运行并发还需取产品会话资源上限与该配置的最小值。写密集任务仍需串行或 worktree 隔离，独立 Agent thread 不等于自动独立文件系统。
+
 ## 2026-07-10 MultiRouter 长模型摘要换行
 
 - 规则列表的模型摘要位于 `src/components/codex/CodexRouterWorkspacePage.tsx` 的 `RouteListButton`。此前卡片没有 `min-w-0/w-full` 约束，摘要还使用 `truncate`；官方 OAuth 同步到多个 GPT-5.6 模型后，左侧规则列无法收缩，文本会覆盖右侧详情面板。
