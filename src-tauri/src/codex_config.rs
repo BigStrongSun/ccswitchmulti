@@ -2511,6 +2511,12 @@ fn remove_codex_provider_owned_fields_missing_from_provider(
     if provider_doc.get("openai_base_url").is_none() {
         live_doc.as_table_mut().remove("openai_base_url");
     }
+    if provider_doc.get("base_url").is_none() {
+        live_doc.as_table_mut().remove("base_url");
+    }
+    if provider_doc.get("wire_api").is_none() {
+        live_doc.as_table_mut().remove("wire_api");
+    }
     if provider_doc.get("model_catalog_json").is_none() {
         remove_cc_switch_model_catalog_json_if_stale(live_doc);
     }
@@ -2537,6 +2543,8 @@ fn strip_codex_provider_owned_fields_from_live(live_config_text: &str) -> Result
         "model",
         "model_provider",
         "openai_base_url",
+        "base_url",
+        "wire_api",
         "experimental_bearer_token",
     ] {
         live_doc.as_table_mut().remove(key);
@@ -3281,6 +3289,8 @@ mod tests {
         let live = r#"model = "third-party-model"
 model_provider = "custom"
 openai_base_url = "http://127.0.0.1:15721/v1"
+base_url = "http://127.0.0.1:15721/v1"
+wire_api = "responses"
 experimental_bearer_token = "PROXY_MANAGED"
 model_catalog_json = "cc-switch-model-catalog.json"
 
@@ -3308,6 +3318,8 @@ trust_level = "trusted"
             .is_some());
         assert!(!restored.contains("third-party-model"));
         assert!(!restored.contains("127.0.0.1:15721"));
+        assert!(restored_doc.get("base_url").is_none());
+        assert!(restored_doc.get("wire_api").is_none());
         assert!(!restored.contains("experimental_bearer_token"));
         assert!(!restored.contains("model_catalog_json"));
         assert!(!restored.contains("[model_providers.custom]"));
@@ -4035,6 +4047,8 @@ model_provider = "codex_model_router_v2"
 model_context_window = 262144
 model_catalog_json = "cc-switch-model-catalog.json"
 openai_base_url = "http://127.0.0.1:15721/v1"
+base_url = "http://127.0.0.1:15721/v1"
+wire_api = "responses"
 experimental_bearer_token = "stale-token"
 approval_policy = "on-request"
 
@@ -4065,6 +4079,8 @@ wire_api = "responses"
         );
         assert!(parsed.get("model_catalog_json").is_none());
         assert!(parsed.get("openai_base_url").is_none());
+        assert!(parsed.get("base_url").is_none());
+        assert!(parsed.get("wire_api").is_none());
         assert!(parsed.get("experimental_bearer_token").is_none());
         assert!(
             parsed

@@ -120,16 +120,15 @@ pub fn switch_provider(
     switch_provider_internal(&state, app_type, &id).map_err(|e| e.to_string())
 }
 
-/// 一键退出 Codex 接管、切回内建 OpenAI，并把全部历史归并到 `openai` 桶。
+/// 一键退出 Codex 接管、切回内建 OpenAI，并尽量把全部历史归并到 `openai` 桶。
 ///
-/// 操作前先确认 Codex/ChatGPT App 已完全退出，因此进程仍运行时不会产生任何写入。
-/// 官方切换复用既有链路以保留 OAuth `auth.json`，随后只迁移历史 provider 字段。
+/// 官方切换复用既有链路以保留 OAuth `auth.json`。历史归桶仍要求
+/// Codex/ChatGPT App 完全退出；如果 App 还在运行，命令会先完成官方切换，
+/// 再用 warning 告知历史修复被跳过，避免用户被留在本地 15721 代理上。
 #[tauri::command]
 pub fn switch_codex_to_official_and_repair_history(
     state: State<'_, AppState>,
 ) -> Result<CodexOfficialRestoreOutcome, String> {
-    crate::codex_history_migration::ensure_codex_history_write_is_offline()
-        .map_err(|e| e.to_string())?;
     state
         .db
         .ensure_official_seed_by_id(CODEX_OFFICIAL_PROVIDER_ID, AppType::Codex)
@@ -151,13 +150,27 @@ pub fn switch_codex_to_official_and_repair_history(
             }
         };
     crate::codex_config::force_codex_builtin_openai_live_provider().map_err(|e| e.to_string())?;
+    let mut switch_warnings = switch_result.warnings;
     let history =
-        crate::codex_history_migration::sync_all_codex_history_provider_buckets_to_openai()
-            .map_err(|e| e.to_string())?;
+        match crate::codex_history_migration::sync_all_codex_history_provider_buckets_to_openai() {
+            Ok(history) => history,
+            Err(error) => {
+                let message = error.to_string();
+                switch_warnings.push(format!(
+                "已切回 OpenAI 官方；历史修复未完成，请完全退出 Codex/ChatGPT App 后再执行历史修复。原因: {message}"
+            ));
+                crate::codex_history_migration::CodexHistoryProviderBucketMigrationOutcome {
+                    skipped_reason: Some(
+                        "history_repair_skipped_after_official_switch".to_string(),
+                    ),
+                    ..Default::default()
+                }
+            }
+        };
 
     Ok(CodexOfficialRestoreOutcome {
         official_provider_id: CODEX_OFFICIAL_PROVIDER_ID.to_string(),
-        switch_warnings: switch_result.warnings,
+        switch_warnings,
         history,
     })
 }

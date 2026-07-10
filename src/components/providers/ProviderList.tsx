@@ -261,10 +261,15 @@ export function ProviderList({
       void queryClient.invalidateQueries({ queryKey: ["proxyStatus"] });
       void queryClient.invalidateQueries({ queryKey: ["proxyTakeoverStatus"] });
       void queryClient.invalidateQueries({ queryKey: ["settings"] });
-      const { migratedJsonlFiles, migratedStateRows } = outcome.history;
-      toast.success(
-        `已切回 OpenAI 官方，修复 ${migratedJsonlFiles} 个会话文件、${migratedStateRows} 条历史记录`,
-      );
+      const { migratedJsonlFiles, migratedStateRows, skippedReason } =
+        outcome.history;
+      if (skippedReason) {
+        toast.success("已切回 OpenAI 官方；历史修复暂未执行。");
+      } else {
+        toast.success(
+          `已切回 OpenAI 官方，修复 ${migratedJsonlFiles} 个会话文件、${migratedStateRows} 条历史记录`,
+        );
+      }
       outcome.switchWarnings.forEach((warning) => toast.warning(warning));
     },
     onError: (error: Error) => {
@@ -405,8 +410,8 @@ export function ProviderList({
           </Button>
         </div>
         <p className="text-center text-xs text-muted-foreground">
-          切回官方前请完全退出 Codex/ChatGPT App；历史会先备份，再归并到
-          openai。
+          会先退出本地代理并切回官方；历史修复需要 Codex/ChatGPT App
+          已完全退出。
         </p>
       </div>
     );

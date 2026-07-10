@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-07-10 Codex 官方回退残留本地代理与不可用 OAuth 模型过滤
+
+- 现场截图里的 `gpt-5.6-luna` 404 不是 MultiRouter 路由漏匹配：`codex-router.log` 显示请求已命中 OpenAI Official route 并转到 `https://chatgpt.com/backend-api/codex/responses`，最终由官方后端返回 `Model not found`。OAuth 模型目录同步不能把官方返回但显式标记 `supported_in_api=false`、`available=false`、`enabled=false`、`disabled=true` 或 `visibility/status/availability=hidden|disabled|unavailable|unsupported|denied` 的条目写进 provider catalog。
+- 一键切回 OpenAI 官方必须清掉 live `~/.codex/config.toml` 顶层 provider-owned 字段：`base_url`、`wire_api`、`openai_base_url`、`experimental_bearer_token`、`model_catalog_json`、`model`、`model_provider` 及活动自定义 `[model_providers.*]`。只清 `openai_base_url` 不够；新 Codex Responses 会读顶层 `base_url = "http://127.0.0.1:15721/v1"`，导致 UI 显示 official 但请求仍走 CCSwitchMulti 本地代理。
+- `switch_codex_to_official_and_repair_history` 不能在最前面用历史离线检查阻断官方回退。Codex/ChatGPT App 运行时，应先退出本地代理并把 live provider 强制设为 `openai`，然后把历史修复作为可跳过 warning 返回；否则用户点击“一键切回”会因为历史锁定失败而继续滞留在本地代理。
+- common config/provider live merge 也要把 `base_url`、`wire_api` 视为 provider-owned 本地代理字段，避免后续导入配置片段又把 15721 代理注入 official live config。`model_context_window` 仍属于用户偏好，应继续保留。
+
 ## 2026-07-10 新版 GPT App 线程与多 Agent 机制取证
 
 - 完整实测报告见 `docs/guides/gpt-app-thread-subagent-mechanism-2026-07-10.md`。Windows 新桌面包为 `OpenAI.Codex`，实际运行链是 `ChatGPT.exe -> resources/codex.exe app-server -> code-mode/tool runtimes`；历史的原始事件在 `~/.codex/sessions/**/rollout-*.jsonl`，`state_5.sqlite` 提供 thread 元数据和 `thread_spawn_edges` 父子关系。修复历史必须离线备份并把 JSONL、SQLite 与子线程 edge 当成整体，不能只改轻量 `session_index.jsonl` 或伪造 `local_thread_catalog`。

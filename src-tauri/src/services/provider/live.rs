@@ -314,6 +314,8 @@ fn strip_codex_common_config_provider_fields(doc: &mut DocumentMut) {
         "model_provider",
         "model_catalog_json",
         "openai_base_url",
+        "base_url",
+        "wire_api",
         "experimental_bearer_token",
     ] {
         doc.as_table_mut().remove(key);
@@ -1933,6 +1935,8 @@ mod tests {
 model_context_window = 262144
 model_catalog_json = "cc-switch-model-catalog.json"
 openai_base_url = "http://127.0.0.1:15721/v1"
+base_url = "http://127.0.0.1:15721/v1"
+wire_api = "responses"
 experimental_bearer_token = "sk-router"
 
 [model_providers.router]
@@ -1955,6 +1959,8 @@ web_search = true
         );
         assert!(!applied_config.contains("model_catalog_json"));
         assert!(!applied_config.contains("openai_base_url"));
+        assert!(!applied_config.contains("base_url = \"http://127.0.0.1:15721/v1\""));
+        assert!(!applied_config.contains("wire_api = \"responses\""));
         assert!(!applied_config.contains("experimental_bearer_token"));
         assert!(!applied_config.contains("127.0.0.1:15721"));
         assert!(!applied_config.contains("[model_providers.router]"));

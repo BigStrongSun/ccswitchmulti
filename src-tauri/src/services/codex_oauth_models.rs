@@ -90,6 +90,10 @@ fn push_model_entry(models: &mut Vec<FetchedModel>, entry: &Value, fallback_id: 
         return;
     };
 
+    if model_entry_is_explicitly_unavailable(obj) {
+        return;
+    }
+
     let Some(id) = string_field(obj, &["slug", "id", "model", "name"]).or_else(|| {
         fallback_id
             .map(str::trim)
@@ -113,6 +117,42 @@ fn push_model_entry(models: &mut Vec<FetchedModel>, entry: &Value, fallback_id: 
         id,
         owned_by,
     });
+}
+
+/// 判断官方 Codex 模型条目是否显式标为不可调用。
+///
+/// ChatGPT 后端有时会返回“存在但当前账号/API 不可用”的模型元数据；这类模型
+/// 不能写进 MultiRouter catalog，否则 Codex 选择器会展示它，但 `/responses`
+/// 随后返回 `Model not found`。缺少可用性字段时保守保留，只过滤明确否定值。
+fn model_entry_is_explicitly_unavailable(obj: &serde_json::Map<String, Value>) -> bool {
+    let false_flags = [
+        "supported_in_api",
+        "supportedInApi",
+        "available",
+        "is_available",
+        "isAvailable",
+        "enabled",
+    ];
+    if false_flags
+        .iter()
+        .any(|key| obj.get(*key).and_then(Value::as_bool) == Some(false))
+    {
+        return true;
+    }
+
+    if obj.get("disabled").and_then(Value::as_bool) == Some(true) {
+        return true;
+    }
+
+    let hidden_visibility = string_field(obj, &["visibility", "status", "availability"])
+        .map(|value| value.to_ascii_lowercase())
+        .is_some_and(|value| {
+            matches!(
+                value.as_str(),
+                "hide" | "hidden" | "disabled" | "unavailable" | "unsupported" | "denied"
+            )
+        });
+    hidden_visibility
 }
 
 fn string_field(obj: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<String> {
@@ -238,5 +278,23 @@ mod tests {
         assert_eq!(models[0].context_window, None);
         assert_eq!(models[1].context_window, Some(272_000));
         assert_eq!(models[2].context_window, Some(1_000_000));
+    }
+
+    #[test]
+    fn parse_codex_oauth_models_filters_explicitly_unavailable_entries() {
+        let models = parse_models(json!({
+            "models": [
+                { "slug": "gpt-5.6-luna", "supported_in_api": false },
+                { "slug": "gpt-5.6-hidden", "visibility": "hide" },
+                { "slug": "gpt-5.6-disabled", "disabled": true },
+                { "slug": "gpt-5.5", "supportedInApi": true },
+                { "slug": "gpt-5.4" }
+            ]
+        }));
+
+        assert_eq!(
+            models.into_iter().map(|model| model.id).collect::<Vec<_>>(),
+            vec!["gpt-5.4".to_string(), "gpt-5.5".to_string()]
+        );
     }
 }
