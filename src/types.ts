@@ -287,6 +287,9 @@ export interface CodexCatalogModel {
   supportsImage?: boolean;
   supports_image?: boolean;
   vision?: boolean;
+  // Native Responses profile overrides for generated Codex model catalogs.
+  supportsParallelToolCalls?: boolean;
+  baseInstructions?: string;
 }
 
 export type CodexCacheMode =

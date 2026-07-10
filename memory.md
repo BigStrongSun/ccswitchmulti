@@ -1,5 +1,14 @@
 # CC Switch Repository Memory
 
+## 2026-07-10 Upstream v3.16.5 Merge Into CCSwitchMulti
+
+- 本次上游跟进合并原版 `farion1231/cc-switch` 的 `v3.16.5` 功能到 CCSwitchMulti，版本面统一推进为 `3.16.5-1`：`package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json` 都必须保持一致；Tauri `productName` 仍是 `CCSwitchMulti`，identifier 仍是 `com.ccswitchmulti.desktop`，不要被原版品牌回退覆盖。
+- Codex 原生 Responses 预设现在可以带 `modelCatalog` 作为模型能力/上下文窗口目录，但这不等于强制开启 Codex `/model` 菜单映射；单 provider 菜单投射仍由 `meta.codexLocalModelMapping` 控制，MultiRouter routes 开启时才走聚合投射。Chat Completions provider 仍需要本地路由/接管转换，不能把 native Responses 直连语义套到 Chat 桥接路径。
+- 上游新增的 native Responses catalog profile 字段要在前端编辑往返中保留：`supportsParallelToolCalls`、`inputModalities`、`baseInstructions` 属于隐藏能力字段；`useCodexConfigState.extractCodexCatalogModels` 不能在字段缺失时写入空字符串形式的 `upstreamModel`、`displayName`、`contextWindow`，否则保存后会污染原生 catalog 行并破坏测试里的隐藏字段往返。
+- `CodexCatalogToolProfile` 这类 catalog 能力配置应从 provider 的 `apiFormat` 推导：`openai_responses` 走原生 Responses profile，`openai_chat` 走 Chat 转换 profile。不要用 `modelCatalog` 是否存在来推断 wire API，也不要让 catalog 元数据反向改变 provider 的实际协议。
+- 官方 OAuth/auth 边界继续保持：CCSwitchMulti 的接管和路由配置不应覆盖用户 `auth.json` 的 ChatGPT OAuth 登录态；official/OAuth route 仍由 managed auth path 物化，第三方 API Key 放 provider-scoped config 或本地代理占位，不要写进官方登录态。
+- 本轮验证覆盖前端 catalog/session/preset 目标测试、JSON locale parse、Prettier、`pnpm typecheck`、Rust `cargo fmt --check`、Codex/provider Rust 单测、`cargo check` 和 `git diff --cached --check`；未跟踪的 `output/release-v3.16.4-4-upload/`、`output/release-v3.16.4-5wizard/`、`scripts/logs/` 属于既有本地输出，合并提交不纳入。
+
 ## 2026-07-09 CCSwitchMulti v3.16.4-16 Release
 
 - `v3.16.4-16` 已作为 `BigStrongSun/ccswitchmulti` 正式 release 发布：`https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.16.4-16`。Release 为 `draft=false`、`prerelease=false`，GitHub latest API 返回 `tag_name=v3.16.4-16`，发布时间为 `2026-07-09T13:06:57Z`。

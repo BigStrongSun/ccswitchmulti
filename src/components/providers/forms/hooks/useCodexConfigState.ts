@@ -145,29 +145,59 @@ function extractCodexCatalogModels(modelCatalog: any): CodexCatalogModel[] {
     : [];
 
   return rawCatalogModels
-    .map((item: any) => ({
-      model: typeof item?.model === "string" ? item.model : "",
-      upstreamModel:
+    .map((item: any) => {
+      // 原生 Responses profile 的隐藏字段不在行 UI 暴露，但必须 load -> save
+      // 原样保留，避免编辑 MiniMax/MiMo 等 preset 后丢失官方 catalog 能力。
+      const supportsParallelToolCalls =
+        typeof item?.supportsParallelToolCalls === "boolean"
+          ? item.supportsParallelToolCalls
+          : typeof item?.supports_parallel_tool_calls === "boolean"
+            ? item.supports_parallel_tool_calls
+            : undefined;
+      const inputModalities = Array.isArray(item?.inputModalities)
+        ? item.inputModalities
+        : Array.isArray(item?.input_modalities)
+          ? item.input_modalities
+          : undefined;
+      const baseInstructions =
+        typeof item?.baseInstructions === "string"
+          ? item.baseInstructions
+          : typeof item?.base_instructions === "string"
+            ? item.base_instructions
+            : undefined;
+      const upstreamModel =
         typeof item?.upstreamModel === "string"
           ? item.upstreamModel
           : typeof item?.upstream_model === "string"
             ? item.upstream_model
-            : "",
-      displayName:
+            : undefined;
+      const displayName =
         typeof item?.displayName === "string"
           ? item.displayName
           : typeof item?.display_name === "string"
             ? item.display_name
-            : "",
-      contextWindow:
+            : undefined;
+      const contextWindow =
         typeof item?.contextWindow === "string" ||
         typeof item?.contextWindow === "number"
           ? item.contextWindow
           : typeof item?.context_window === "string" ||
               typeof item?.context_window === "number"
             ? item.context_window
-            : "",
-    }))
+            : undefined;
+
+      return {
+        model: typeof item?.model === "string" ? item.model : "",
+        ...(upstreamModel ? { upstreamModel } : {}),
+        ...(displayName ? { displayName } : {}),
+        ...(contextWindow ? { contextWindow } : {}),
+        ...(supportsParallelToolCalls !== undefined
+          ? { supportsParallelToolCalls }
+          : {}),
+        ...(inputModalities ? { inputModalities } : {}),
+        ...(baseInstructions ? { baseInstructions } : {}),
+      };
+    })
     .filter((item: CodexCatalogModel) => item.model.trim());
 }
 

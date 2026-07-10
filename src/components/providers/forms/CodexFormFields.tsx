@@ -309,6 +309,15 @@ function createCatalogRow(seed?: Partial<CodexCatalogModel>): CodexCatalogRow {
     upstreamModel: seed?.upstreamModel ?? seed?.upstream_model ?? "",
     displayName: seed?.displayName ?? "",
     contextWindow: seed?.contextWindow ?? "",
+    // Carry native-profile overrides verbatim (not user-editable in the row UI,
+    // but must survive load->save so the official catalog fidelity is kept).
+    ...(seed?.supportsParallelToolCalls !== undefined
+      ? { supportsParallelToolCalls: seed.supportsParallelToolCalls }
+      : {}),
+    ...(seed?.inputModalities ? { inputModalities: seed.inputModalities } : {}),
+    ...(seed?.baseInstructions
+      ? { baseInstructions: seed.baseInstructions }
+      : {}),
   };
 }
 
@@ -381,7 +390,9 @@ function routingRowsMatchConfig(
 }
 
 // Compares rows (with rowId) to incoming models (without) by data fields only,
-// so both sync effects can use the same equality definition.
+// so both sync effects can use the same equality definition. Hidden native-profile
+// fields are included so switching between providers with identical visible fields
+// but different base_instructions / tools / modalities still rebuilds the rows.
 function catalogRowsMatchModels(
   rows: Array<
     Pick<
@@ -391,6 +402,9 @@ function catalogRowsMatchModels(
       | "upstream_model"
       | "displayName"
       | "contextWindow"
+      | "supportsParallelToolCalls"
+      | "baseInstructions"
+      | "inputModalities"
     >
   >,
   models: CodexCatalogModel[],
@@ -402,7 +416,13 @@ function catalogRowsMatchModels(
       row.model === (incoming.model ?? "") &&
       catalogRowUpstreamModel(row) === catalogRowUpstreamModel(incoming) &&
       (row.displayName ?? "") === (incoming.displayName ?? "") &&
-      String(row.contextWindow ?? "") === String(incoming.contextWindow ?? "")
+      String(row.contextWindow ?? "") ===
+        String(incoming.contextWindow ?? "") &&
+      (row.supportsParallelToolCalls ?? null) ===
+        (incoming.supportsParallelToolCalls ?? null) &&
+      (row.baseInstructions ?? "") === (incoming.baseInstructions ?? "") &&
+      JSON.stringify(row.inputModalities ?? []) ===
+        JSON.stringify(incoming.inputModalities ?? [])
     );
   });
 }
@@ -587,7 +607,7 @@ export function CodexFormFields({
     codexChatReasoning.supportsThinking === true ||
     codexChatReasoning.supportsEffort === true;
   const supportsEffort = codexChatReasoning.supportsEffort === true;
-  // 高级区只要存在目录元数据、映射、路由或本地代理覆盖就展开，避免编辑旧 provider 时看不到关键状态。
+  // 高级区在有任何可见配置时自动展开；只做折叠到展开，避免编辑旧 provider 时藏起关键状态。
   const hasRequestOverrides = Boolean(
     localProxyHeadersOverride.trim() || localProxyBodyOverride.trim(),
   );
@@ -597,7 +617,10 @@ export function CodexFormFields({
     takeoverEnabled ||
     catalogModels.length > 0 ||
     codexRouting.enabled ||
-    (codexRouting.routes?.length ?? 0) > 0;
+    (codexRouting.routes?.length ?? 0) > 0 ||
+    apiFormat === "openai_responses" ||
+    supportsThinking ||
+    supportsEffort;
   const [advancedExpanded, setAdvancedExpanded] = useState(hasAnyAdvancedValue);
 
   // 预设/编辑加载填充高级值后自动展开（仅从折叠→展开，不会自动折叠）
@@ -1881,7 +1904,7 @@ export function CodexFormFields({
             <p className="mt-1 ml-1 text-xs text-muted-foreground">
               {t("codexConfig.advancedSectionHint", {
                 defaultValue:
-                  "包含模型目录、协议检测、Codex 菜单映射、思考能力与自定义 User-Agent。",
+                  "包含模型目录、协议检测、上游格式、Codex 菜单映射、思考能力与自定义 User-Agent；Chat Completions 供应商需走本地代理转换。",
               })}
             </p>
           )}
@@ -1944,7 +1967,7 @@ export function CodexFormFields({
                     <SelectContent>
                       <SelectItem value="openai_chat">
                         {t("codexConfig.upstreamFormatChat", {
-                          defaultValue: "Chat Completions（转换）",
+                          defaultValue: "Chat Completions（需本地代理转换）",
                         })}
                       </SelectItem>
                       <SelectItem value="openai_responses">
@@ -1957,7 +1980,7 @@ export function CodexFormFields({
                   <p className="text-xs leading-relaxed text-muted-foreground">
                     {t("codexConfig.upstreamFormatHint", {
                       defaultValue:
-                        "供应商原生是 Responses API 就选 Responses（直连，不转换格式）；使用 Chat Completions 协议就选 Chat（转换为 Chat Completions）。",
+                        "供应商原生是 Responses API 就选 Responses（直连，不转换格式）；使用 Chat Completions 协议就选 Chat，并通过 CCSwitchMulti 本地代理转换为 Chat Completions。",
                     })}
                   </p>
                   <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-xs leading-relaxed text-amber-900 dark:text-amber-200">
@@ -2111,32 +2134,18 @@ export function CodexFormFields({
               </div>
             )}
 
-            <div
-              className={cn(
-                "space-y-3",
-                (shouldShowSpeedTest ||
-                  (takeoverEnabled && isChatFormat && canEditReasoning)) &&
-                  "border-t border-border-default pt-3",
-              )}
-            >
-              <CustomUserAgentField
-                id="codex-custom-user-agent"
-                value={customUserAgent}
-                onChange={onCustomUserAgentChange}
-              />
-              <div className="border-t border-border-default pt-3">
-                <LocalProxyRequestOverridesField
-                  headersJson={localProxyHeadersOverride}
-                  bodyJson={localProxyBodyOverride}
-                  onHeadersJsonChange={onLocalProxyHeadersOverrideChange}
-                  onBodyJsonChange={onLocalProxyBodyOverrideChange}
-                />
-              </div>
-            </div>
-
-            {/* 模型目录明细 —— 无论是否投射到 Codex /model 菜单，都必须允许编辑上下文窗口和保留列表。 */}
+            {/* 模型映射 / 模型目录 —— 与「路由接管」解耦，常驻显示（可编辑即渲染）。
+                填了才生成 catalog：Chat 模式生成兼容路由、原生 Responses 生成
+                model-catalogs.json；留空则不生成。排在自定义 UA 之前。 */}
             {canEditCatalog && (
-              <div className="space-y-4 border-t border-border-default pt-3">
+              <div
+                className={cn(
+                  "space-y-4",
+                  (shouldShowSpeedTest ||
+                    (takeoverEnabled && isChatFormat && canEditReasoning)) &&
+                    "border-t border-border-default pt-3",
+                )}
+              >
                 <div className="space-y-1">
                   <div className="flex items-center justify-between gap-3">
                     <FormLabel>
@@ -2382,6 +2391,30 @@ export function CodexFormFields({
                 )}
               </div>
             )}
+
+            <div
+              className={cn(
+                "space-y-3",
+                (shouldShowSpeedTest ||
+                  (isChatFormat && canEditReasoning) ||
+                  canEditCatalog) &&
+                  "border-t border-border-default pt-3",
+              )}
+            >
+              <CustomUserAgentField
+                id="codex-custom-user-agent"
+                value={customUserAgent}
+                onChange={onCustomUserAgentChange}
+              />
+              <div className="border-t border-border-default pt-3">
+                <LocalProxyRequestOverridesField
+                  headersJson={localProxyHeadersOverride}
+                  bodyJson={localProxyBodyOverride}
+                  onHeadersJsonChange={onLocalProxyHeadersOverrideChange}
+                  onBodyJsonChange={onLocalProxyBodyOverrideChange}
+                />
+              </div>
+            </div>
           </CollapsibleContent>
         </Collapsible>
       )}

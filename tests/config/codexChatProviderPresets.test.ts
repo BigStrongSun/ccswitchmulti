@@ -42,14 +42,14 @@ const expectedChatPresets = new Map<
     "Zhipu GLM",
     {
       baseUrl: "https://open.bigmodel.cn/api/coding/paas/v4",
-      contextWindows: { "glm-5.2": 1000000 },
+      contextWindows: { "glm-5.2": 200000 },
     },
   ],
   [
     "Zhipu GLM en",
     {
       baseUrl: "https://api.z.ai/api/coding/paas/v4",
-      contextWindows: { "glm-5.2": 1000000 },
+      contextWindows: { "glm-5.2": 200000 },
     },
   ],
   [
@@ -217,23 +217,56 @@ describe("Codex Chat provider presets", () => {
   });
 
   it("uses native Responses API for migrated CN providers without local route mapping", () => {
-    const nativeResponsesPresets = [
-      "DouBaoSeed",
-      "Bailian",
-      "Longcat",
-      "MiniMax",
-      "MiniMax en",
-      "Xiaomi MiMo",
-      "Xiaomi MiMo Token Plan (China)",
-    ];
+    const nativeResponsesPresets = new Map<
+      string,
+      { contextWindows: Record<string, number> }
+    >([
+      [
+        "DouBaoSeed",
+        { contextWindows: { "doubao-seed-2-1-pro-260628": 262144 } },
+      ],
+      ["Bailian", { contextWindows: { "qwen3-coder-plus": 1048576 } }],
+      ["Longcat", { contextWindows: { "LongCat-2.0-Preview": 1048576 } }],
+      ["MiniMax", { contextWindows: { "MiniMax-M3": 1000000 } }],
+      ["MiniMax en", { contextWindows: { "MiniMax-M3": 1000000 } }],
+      [
+        "Xiaomi MiMo",
+        {
+          contextWindows: {
+            "mimo-v2.5-pro": 1048576,
+            "mimo-v2.5": 1048576,
+          },
+        },
+      ],
+      [
+        "Xiaomi MiMo Token Plan (China)",
+        {
+          contextWindows: {
+            "mimo-v2.5-pro": 1048576,
+            "mimo-v2.5": 1048576,
+          },
+        },
+      ],
+    ]);
 
-    for (const name of nativeResponsesPresets) {
+    for (const [name, expected] of nativeResponsesPresets) {
       const preset = codexProviderPresets.find((item) => item.name === name);
 
       expect(preset, `${name} preset`).toBeDefined();
       expect(preset?.apiFormat).toBe("openai_responses");
-      // 原生 Responses 预设默认无需投射到 Codex /model 菜单，避免新建时误导用户必须映射。
-      expect(preset?.modelCatalog ?? []).toHaveLength(0);
+      // 原生 Responses 预设现在带 modelCatalog，供直连路径生成
+      // ~/.codex 的 model-catalogs.json；前端已按 apiFormat 解耦，带 catalog
+      // 不再等同于强制开启本地路由映射。
+      expect((preset?.modelCatalog ?? []).length).toBeGreaterThan(0);
+      expect(
+        Object.fromEntries(
+          (preset?.modelCatalog ?? []).map((model) => [
+            model.model,
+            model.contextWindow,
+          ]),
+        ),
+      ).toEqual(expected.contextWindows);
+      // 原生（直连）不走 Chat 转换，因此不需要 codexChatReasoning。
       expect(preset?.codexChatReasoning).toBeUndefined();
     }
   });
@@ -251,7 +284,6 @@ describe("Codex Chat provider presets", () => {
       const preset = codexProviderPresets.find((item) => item.name === name);
 
       expect(preset, `${name} preset`).toBeDefined();
-      expect(preset?.apiFormat).toBe("openai_responses");
       expect(extractCodexBaseUrl(preset?.config)).toBe(baseUrl);
       expect(extractCodexWireApi(preset?.config)).toBe("responses");
       expect(extractCodexModelName(preset?.config)).toBe("mimo-v2.5-pro");
@@ -263,7 +295,19 @@ describe("Codex Chat provider presets", () => {
       );
       expect(preset?.config).toContain('model_reasoning_summary = "none"');
       expect(preset?.config).toContain('web_search = "disabled"');
-      expect(preset?.modelCatalog ?? []).toHaveLength(0);
+      expect(preset?.apiFormat).toBe("openai_responses");
+      expect(preset?.modelCatalog ?? []).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            model: "mimo-v2.5-pro",
+            contextWindow: 1048576,
+          }),
+          expect.objectContaining({
+            model: "mimo-v2.5",
+            contextWindow: 1048576,
+          }),
+        ]),
+      );
     }
   });
 });

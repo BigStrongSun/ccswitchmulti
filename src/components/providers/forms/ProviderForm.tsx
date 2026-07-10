@@ -216,11 +216,25 @@ export const normalizeCodexCatalogModelsForSave = (
       ? Number.parseInt(rawContextWindow, 10)
       : undefined;
 
+    const inputModalities = item.inputModalities?.filter(
+      (m) => typeof m === "string" && m.trim(),
+    );
+
+    const baseInstructions = item.baseInstructions?.trim();
+
     normalized.push({
       model,
       ...(upstreamModel && upstreamModel !== model ? { upstreamModel } : {}),
       ...(displayName ? { displayName } : {}),
       ...(contextWindow && contextWindow > 0 ? { contextWindow } : {}),
+      // Native Responses profile overrides (ignored by the chat/proxy profile).
+      ...(typeof item.supportsParallelToolCalls === "boolean"
+        ? { supportsParallelToolCalls: item.supportsParallelToolCalls }
+        : {}),
+      ...(inputModalities && inputModalities.length > 0
+        ? { inputModalities }
+        : {}),
+      ...(baseInstructions ? { baseInstructions } : {}),
     });
   }
 

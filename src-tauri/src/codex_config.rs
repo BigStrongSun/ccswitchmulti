@@ -22,6 +22,20 @@ pub const CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME: &str = "cc-switch-model-catalo
 const CODEX_MODELS_CACHE_FILENAME: &str = "models_cache.json";
 const CODEX_MODELS_CACHE_BACKUP_FILENAME: &str = "models_cache.cc-switch-backup.json";
 const CC_SWITCH_CODEX_MODELS_CACHE_ETAG: &str = "cc-switch-model-catalog";
+/// 顶层 `config.toml` 里控制 Codex 内置 web_search 的字段。
+const CODEX_WEB_SEARCH_FIELD: &str = "web_search";
+/// CC Switch 写入的 web_search 禁用哨兵值，只移除自己写入的值。
+const CODEX_WEB_SEARCH_DISABLED: &str = "disabled";
+/// 已确认原生 `/responses` 网关不接受 OpenAI hosted web_search 的主机片段。
+const CODEX_WEB_SEARCH_REJECT_HOSTS: &[&str] = &[
+    "xiaomimimo.com",
+    "longcat.chat",
+    "minimax.io",
+    "minimaxi.com",
+];
+/// 已确认原生 `/responses` 网关不接受 OpenAI hosted web_search 的模型品牌前缀。
+const CODEX_WEB_SEARCH_REJECT_MODEL_PREFIXES: &[&str] =
+    &["mimo", "longcat", "minimax", "qwen3-coder"];
 const CODEX_MODEL_CATALOG_TEMPLATE_SLUG: &str = "gpt-5.5";
 const CODEX_OPENAI_MODEL_PROVIDER_ID: &str = "openai";
 const CODEX_PROXY_AUTH_PLACEHOLDER: &str = "PROXY_MANAGED";
@@ -39,6 +53,25 @@ const CODEX_REASONING_EFFORTS: &[(&str, &str)] = &[
     ("xhigh", "Extra high reasoning depth for complex problems"),
 ];
 const CODEX_DEFAULT_REASONING_EFFORT: &str = "medium";
+
+/// Codex model catalog 的工具配置画像。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodexCatalogToolProfile {
+    /// 走本地代理的 Chat/Responses 转换路径，保留 GPT 模板里的工具能力。
+    ProxyChat,
+    /// 直连原生 `/responses` 网关，避免 Codex 发出部分国产网关不接受的 hosted/freeform 工具。
+    NativeResponses,
+}
+
+impl CodexCatalogToolProfile {
+    /// 从 provider `apiFormat` 解析 catalog 画像。
+    pub fn from_api_format(api_format: Option<&str>) -> Self {
+        match api_format {
+            Some("openai_responses") => Self::NativeResponses,
+            _ => Self::ProxyChat,
+        }
+    }
+}
 
 /// Reserved built-in provider IDs from OpenAI Codex's config/model-provider
 /// catalog. Keep in sync with Codex `RESERVED_MODEL_PROVIDER_IDS` and legacy
@@ -73,6 +106,42 @@ pub fn get_codex_config_path() -> PathBuf {
 
 pub fn get_codex_model_catalog_path() -> PathBuf {
     get_codex_config_dir().join(CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME)
+}
+
+/// 读取 Codex `config.toml` 顶层模型名。
+fn codex_top_level_model(config_text: &str) -> Option<String> {
+    let doc = config_text.parse::<toml::Value>().ok()?;
+    doc.get("model")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+/// 判断原生 `/responses` 网关是否应禁用 Codex hosted web_search。
+fn codex_native_gateway_rejects_web_search(config_text: &str) -> bool {
+    if let Some(base_url) = extract_codex_base_url(config_text) {
+        let base_url = base_url.to_ascii_lowercase();
+        if CODEX_WEB_SEARCH_REJECT_HOSTS
+            .iter()
+            .any(|host| base_url.contains(host))
+        {
+            return true;
+        }
+    }
+
+    if let Some(model) = codex_top_level_model(config_text) {
+        let model = model.to_ascii_lowercase();
+        let model = model.rsplit('/').next().unwrap_or(model.as_str());
+        if CODEX_WEB_SEARCH_REJECT_MODEL_PREFIXES
+            .iter()
+            .any(|prefix| model.starts_with(prefix))
+        {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// 获取 Codex 官方自定义 Agent 目录路径。
@@ -791,6 +860,7 @@ fn codex_catalog_model_entry(
     template: &Value,
     spec: &CodexCatalogModelSpec,
     priority: usize,
+    profile: CodexCatalogToolProfile,
 ) -> Value {
     let mut entry = template.clone();
     let Some(entry_obj) = entry.as_object_mut() else {
@@ -824,6 +894,38 @@ fn codex_catalog_model_entry(
     }
     project_codex_desktop_model_fields(entry_obj, spec);
 
+    if profile == CodexCatalogToolProfile::NativeResponses {
+        // 原生 `/responses` 网关通常不支持 OpenAI freeform `apply_patch`
+        // 与 hosted web_search。这里使用 shell_command 编辑，并保留 Codex
+        // 必需的 base_instructions。
+        for key in [
+            "apply_patch_tool_type",
+            "web_search_tool_type",
+            "webSearchToolType",
+            "tools",
+            "model_messages",
+        ] {
+            entry_obj.remove(key);
+        }
+        entry_obj.insert("shell_type".to_string(), json!("shell_command"));
+
+        if let Some(base_instructions) = spec
+            .base_instructions
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            entry_obj.insert("base_instructions".to_string(), json!(base_instructions));
+        }
+        if let Some(parallel) = spec.supports_parallel_tool_calls {
+            entry_obj.insert("supports_parallel_tool_calls".to_string(), json!(parallel));
+        }
+        if let Some(modalities) = &spec.input_modalities {
+            entry_obj.insert("input_modalities".to_string(), json!(modalities));
+            entry_obj.insert("inputModalities".to_string(), json!(modalities));
+        }
+    }
+
     entry
 }
 
@@ -835,6 +937,9 @@ struct CodexCatalogModelSpec {
     context_window: u64,
     text_only: bool,
     is_default: bool,
+    supports_parallel_tool_calls: Option<bool>,
+    input_modalities: Option<Vec<String>>,
+    base_instructions: Option<String>,
 }
 
 /// 为 Codex 多 Agent 工具的模型说明生成稳定排序键。
@@ -981,6 +1086,31 @@ fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCa
                     .and_then(codex_catalog_capabilities_are_text_only)
             })
             .unwrap_or_else(|| codex_catalog_model_name_is_text_only(model));
+        let supports_parallel_tool_calls = model_config
+            .get("supportsParallelToolCalls")
+            .or_else(|| model_config.get("supports_parallel_tool_calls"))
+            .and_then(|value| value.as_bool());
+        let input_modalities = model_config
+            .get("inputModalities")
+            .or_else(|| model_config.get("input_modalities"))
+            .and_then(|value| value.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str())
+                    .map(str::trim)
+                    .filter(|item| !item.is_empty())
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|items| !items.is_empty());
+        let base_instructions = model_config
+            .get("baseInstructions")
+            .or_else(|| model_config.get("base_instructions"))
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(ToString::to_string);
 
         specs.push(CodexCatalogModelSpec {
             model: model.to_string(),
@@ -991,6 +1121,9 @@ fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCa
             is_default: default_model
                 .as_deref()
                 .is_some_and(|default_model| default_model.eq_ignore_ascii_case(model)),
+            supports_parallel_tool_calls,
+            input_modalities,
+            base_instructions,
         });
     }
 
@@ -1236,6 +1369,19 @@ fn load_codex_model_template_static() -> Option<Value> {
     }
 }
 
+fn load_codex_native_responses_template() -> Value {
+    let text = include_str!("resources/codex_native_responses_template.json");
+    serde_json::from_str(text).unwrap_or_else(|e| {
+        log::warn!("Failed to parse bundled native Responses Codex template: {e}");
+        json!({
+            "slug": CODEX_MODEL_CATALOG_TEMPLATE_SLUG,
+            "display_name": CODEX_MODEL_CATALOG_TEMPLATE_SLUG,
+            "base_instructions": "You are Codex, a coding agent.",
+            "shell_type": "shell_command"
+        })
+    })
+}
+
 fn load_codex_model_catalog_template() -> Result<Value, AppError> {
     // ① models_cache.json (created by Codex when it connects to OpenAI)
     if let Some(template) = load_codex_model_template_from_cache()? {
@@ -1255,11 +1401,15 @@ fn load_codex_model_catalog_template() -> Result<Value, AppError> {
     )))
 }
 
-fn codex_model_catalog_from_specs(specs: &[CodexCatalogModelSpec], template: &Value) -> Value {
+fn codex_model_catalog_from_specs(
+    specs: &[CodexCatalogModelSpec],
+    template: &Value,
+    profile: CodexCatalogToolProfile,
+) -> Value {
     let entries: Vec<Value> = specs
         .iter()
         .enumerate()
-        .map(|(index, spec)| codex_catalog_model_entry(template, spec, index))
+        .map(|(index, spec)| codex_catalog_model_entry(template, spec, index, profile))
         .collect();
 
     json!({ "models": entries })
@@ -1450,6 +1600,27 @@ fn set_codex_model_catalog_projection_fields(
                 doc.as_table_mut().remove("model_catalog_json");
                 remove_active_codex_provider_models(&mut doc);
             }
+        }
+    }
+
+    Ok(doc.to_string())
+}
+
+/// 设置或清理由 CC Switch 管理的顶层 `web_search` 禁用项。
+fn set_codex_native_web_search_field(config_text: &str, disable: bool) -> Result<String, AppError> {
+    let mut doc = config_text
+        .parse::<DocumentMut>()
+        .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
+
+    if disable {
+        doc[CODEX_WEB_SEARCH_FIELD] = toml_edit::value(CODEX_WEB_SEARCH_DISABLED);
+    } else {
+        let is_own_disabled = doc
+            .get(CODEX_WEB_SEARCH_FIELD)
+            .and_then(|item| item.as_str())
+            == Some(CODEX_WEB_SEARCH_DISABLED);
+        if is_own_disabled {
+            doc.as_table_mut().remove(CODEX_WEB_SEARCH_FIELD);
         }
     }
 
@@ -1829,18 +2000,25 @@ fn restore_codex_models_cache_if_cc_switch_owned() -> Result<(), AppError> {
 pub fn prepare_codex_config_text_with_model_catalog(
     settings: &Value,
     config_text: &str,
+    profile: CodexCatalogToolProfile,
 ) -> Result<String, AppError> {
     let catalog_path = get_codex_model_catalog_path();
     let specs = codex_catalog_model_specs(settings, config_text);
 
     if !specs.is_empty() {
-        let template = load_codex_model_catalog_template()?;
-        let catalog = codex_model_catalog_from_specs(&specs, &template);
+        let template = match profile {
+            CodexCatalogToolProfile::ProxyChat => load_codex_model_catalog_template()?,
+            CodexCatalogToolProfile::NativeResponses => load_codex_native_responses_template(),
+        };
+        let catalog = codex_model_catalog_from_specs(&specs, &template, profile);
         let config_text = set_codex_model_catalog_projection_fields(
             config_text,
             Some(&catalog_path),
             Some(&specs),
         )?;
+        let disable_web_search = profile == CodexCatalogToolProfile::NativeResponses
+            && codex_native_gateway_rejects_web_search(&config_text);
+        let config_text = set_codex_native_web_search_field(&config_text, disable_web_search)?;
         write_json_file(&catalog_path, &catalog)?;
         sync_codex_models_cache_with_cc_switch_catalog(&catalog)?;
         sync_codex_managed_agent_files(&specs)?;
@@ -1848,7 +2026,8 @@ pub fn prepare_codex_config_text_with_model_catalog(
     } else {
         restore_codex_models_cache_if_cc_switch_owned()?;
         prune_stale_codex_managed_agent_files(&get_codex_agents_dir(), &HashSet::new())?;
-        set_codex_model_catalog_projection_fields(config_text, None, None)
+        let config_text = set_codex_model_catalog_projection_fields(config_text, None, None)?;
+        set_codex_native_web_search_field(&config_text, false)
     }
 }
 
@@ -2003,9 +2182,10 @@ fn build_simplified_catalog_from_texts(config_text: &str, catalog_text: &str) ->
 pub fn prepare_codex_live_config_text_with_optional_catalog(
     settings: &Value,
     config_text: &str,
+    profile: CodexCatalogToolProfile,
 ) -> Result<String, AppError> {
     if settings.get("modelCatalog").is_some() {
-        prepare_codex_config_text_with_model_catalog(settings, config_text)
+        prepare_codex_config_text_with_model_catalog(settings, config_text, profile)
     } else {
         Ok(config_text.to_string())
     }
@@ -2355,9 +2535,10 @@ pub fn write_codex_provider_live_with_catalog(
     category: Option<&str>,
     auth: &Value,
     config_text: Option<&str>,
+    profile: CodexCatalogToolProfile,
 ) -> Result<(), AppError> {
     let prepared_config = config_text
-        .map(|text| prepare_codex_config_text_with_model_catalog(settings, text))
+        .map(|text| prepare_codex_config_text_with_model_catalog(settings, text, profile))
         .transpose()?;
     write_codex_live_for_provider(category, auth, prepared_config.as_deref())
 }
@@ -2372,9 +2553,10 @@ pub fn write_codex_provider_config_only_with_catalog(
     settings: &Value,
     category: Option<&str>,
     config_text: Option<&str>,
+    profile: CodexCatalogToolProfile,
 ) -> Result<(), AppError> {
     let prepared_config = config_text
-        .map(|text| prepare_codex_config_text_with_model_catalog(settings, text))
+        .map(|text| prepare_codex_config_text_with_model_catalog(settings, text, profile))
         .transpose()?;
     let unified_official_config =
         if category == Some("official") && crate::settings::unify_codex_session_history() {
@@ -4287,7 +4469,8 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             }
         });
         let specs = codex_catalog_model_specs(&settings, r#"model_context_window = 128000"#);
-        let catalog = codex_model_catalog_from_specs(&specs, &template);
+        let catalog =
+            codex_model_catalog_from_specs(&specs, &template, CodexCatalogToolProfile::ProxyChat);
         let models = catalog
             .get("models")
             .and_then(|value| value.as_array())
@@ -4539,8 +4722,12 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             context_window: 128_000,
             text_only: true,
             is_default: false,
+            supports_parallel_tool_calls: None,
+            input_modalities: None,
+            base_instructions: None,
         };
-        let entry = codex_catalog_model_entry(&template, &spec, 0);
+        let entry =
+            codex_catalog_model_entry(&template, &spec, 0, CodexCatalogToolProfile::ProxyChat);
 
         assert_eq!(
             entry.get("input_modalities"),
@@ -4673,8 +4860,12 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             context_window: 262_144,
             text_only: false,
             is_default: true,
+            supports_parallel_tool_calls: None,
+            input_modalities: None,
+            base_instructions: None,
         };
-        let entry = codex_catalog_model_entry(&template, &spec, 0);
+        let entry =
+            codex_catalog_model_entry(&template, &spec, 0, CodexCatalogToolProfile::ProxyChat);
 
         assert_eq!(entry.get("slug").and_then(|v| v.as_str()), Some("qwen3.6"));
         assert_eq!(
@@ -4718,6 +4909,9 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             context_window: 262_144,
             text_only: false,
             is_default: false,
+            supports_parallel_tool_calls: None,
+            input_modalities: None,
+            base_instructions: None,
         }];
         let config = r#"model_provider = "codex_model_router_v2"
 
@@ -4756,6 +4950,9 @@ base_url = "http://127.0.0.1:15721/v1"
             context_window: 262_144,
             text_only: false,
             is_default: false,
+            supports_parallel_tool_calls: None,
+            input_modalities: None,
+            base_instructions: None,
         }];
         let config = r#"model_provider = "codex_model_router_v2"
 
@@ -4814,6 +5011,9 @@ model_provider = "codex_model_router"
             context_window: 262_144,
             text_only: false,
             is_default: false,
+            supports_parallel_tool_calls: None,
+            input_modalities: None,
+            base_instructions: None,
         }];
 
         sync_codex_managed_agent_files(&specs).expect("sync managed agents");
@@ -4856,6 +5056,9 @@ model_provider = "custom"
             context_window: 262_144,
             text_only: false,
             is_default: false,
+            supports_parallel_tool_calls: None,
+            input_modalities: None,
+            base_instructions: None,
         }];
 
         sync_codex_managed_agent_files(&specs).expect("sync managed agents");
@@ -4907,6 +5110,9 @@ model = "handwritten"
             context_window: 262_144,
             text_only: false,
             is_default: false,
+            supports_parallel_tool_calls: None,
+            input_modalities: None,
+            base_instructions: None,
         }];
 
         sync_codex_managed_agent_files(&specs).expect("sync managed agents");
@@ -4946,6 +5152,7 @@ model = "qwen3.6"
         let prepared = prepare_codex_config_text_with_model_catalog(
             &json!({}),
             r#"model_provider = "custom""#,
+            CodexCatalogToolProfile::ProxyChat,
         )
         .expect("prepare empty catalog config");
 
@@ -4982,7 +5189,8 @@ model = "qwen3.6"
             "context_window": 272000,
             "max_context_window": 272000
         });
-        let entry = codex_catalog_model_entry(&template, &specs[0], 0);
+        let entry =
+            codex_catalog_model_entry(&template, &specs[0], 0, CodexCatalogToolProfile::ProxyChat);
 
         assert_eq!(
             entry.get("slug").and_then(|value| value.as_str()),
@@ -5039,8 +5247,12 @@ model = "qwen3.6"
             context_window: 272_000,
             text_only: false,
             is_default: false,
+            supports_parallel_tool_calls: None,
+            input_modalities: None,
+            base_instructions: None,
         };
-        let entry = codex_catalog_model_entry(&template, &spec, 0);
+        let entry =
+            codex_catalog_model_entry(&template, &spec, 0, CodexCatalogToolProfile::ProxyChat);
 
         assert_eq!(
             entry.get("additional_speed_tiers"),
@@ -5083,8 +5295,12 @@ model = "qwen3.6"
             context_window: 128_000,
             text_only: false,
             is_default: false,
+            supports_parallel_tool_calls: None,
+            input_modalities: None,
+            base_instructions: None,
         };
-        let entry = codex_catalog_model_entry(&template, &spec, 0);
+        let entry =
+            codex_catalog_model_entry(&template, &spec, 0, CodexCatalogToolProfile::ProxyChat);
 
         assert_eq!(
             entry.get("additional_speed_tiers"),
@@ -5134,7 +5350,8 @@ model = "qwen3.6"
         assert_eq!(specs[0].model, "deepseek-v4-flash");
         assert!(specs[0].text_only);
 
-        let catalog = codex_model_catalog_from_specs(&specs, &template);
+        let catalog =
+            codex_model_catalog_from_specs(&specs, &template, CodexCatalogToolProfile::ProxyChat);
         let models = catalog
             .get("models")
             .and_then(|value| value.as_array())
@@ -5581,8 +5798,12 @@ model_catalog_json = "cc-switch-model-catalog.json"
 base_url = "http://127.0.0.1:15721/v1"
 "#;
 
-        let prepared = prepare_codex_config_text_with_model_catalog(&settings, config)
-            .expect("prepare config");
+        let prepared = prepare_codex_config_text_with_model_catalog(
+            &settings,
+            config,
+            CodexCatalogToolProfile::ProxyChat,
+        )
+        .expect("prepare config");
         assert!(prepared.contains("model_catalog_json"));
         let prepared_toml: toml::Value = toml::from_str(&prepared).expect("parse prepared config");
         let provider_models = prepared_toml
@@ -5659,13 +5880,22 @@ base_url = "http://127.0.0.1:15721/v1"
 [model_providers.custom]
 base_url = "http://127.0.0.1:15721/v1"
 "#;
-        prepare_codex_config_text_with_model_catalog(&settings, config).expect("prepare config");
+        prepare_codex_config_text_with_model_catalog(
+            &settings,
+            config,
+            CodexCatalogToolProfile::ProxyChat,
+        )
+        .expect("prepare config");
 
         let official_config = r#"model_provider = "openai"
 model_catalog_json = "cc-switch-model-catalog.json"
 "#;
-        let restored =
-            prepare_codex_config_text_with_model_catalog(&json!({}), official_config).unwrap();
+        let restored = prepare_codex_config_text_with_model_catalog(
+            &json!({}),
+            official_config,
+            CodexCatalogToolProfile::ProxyChat,
+        )
+        .unwrap();
         assert!(!restored.contains("model_catalog_json"));
 
         let cache: Value =
