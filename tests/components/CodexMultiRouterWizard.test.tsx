@@ -7,6 +7,7 @@ import { CodexMultiRouterWizard } from "@/components/codex/CodexMultiRouterWizar
 import { CODEX_MULTI_ROUTER_WIZARD_DISMISSED_KEY } from "@/lib/codexMultiRouterWizard";
 import { providersApi } from "@/lib/api/providers";
 import {
+  fetchCodexOauthModels,
   fetchModelsForConfig,
   probeCodexChatForConfig,
   probeCodexResponsesForConfig,
@@ -20,6 +21,7 @@ vi.mock("@/lib/api/providers", () => ({
 }));
 
 vi.mock("@/lib/api/model-fetch", () => ({
+  fetchCodexOauthModels: vi.fn(),
   fetchModelsForConfig: vi.fn(),
   probeCodexChatForConfig: vi.fn(),
   probeCodexResponsesForConfig: vi.fn(),
@@ -267,6 +269,94 @@ describe("CodexMultiRouterWizard", () => {
     expect(await screen.findByText("无模型列表更新")).toBeInTheDocument();
     expect(fetchModelsForConfig).toHaveBeenCalledTimes(1);
     expect(providersApi.update).toHaveBeenCalledTimes(1);
+  });
+
+  it("refreshes an official OAuth catalog with its bound account and appends new models", async () => {
+    vi.mocked(fetchCodexOauthModels).mockResolvedValueOnce([
+      { id: "gpt-5.5", ownedBy: "openai", contextWindow: 272000 },
+      { id: "gpt-5.6-sol", ownedBy: "openai", contextWindow: 372000 },
+    ]);
+    vi.mocked(providersApi.update).mockResolvedValueOnce(true);
+    const officialProvider = provider({
+      id: "codex-official",
+      name: "OpenAI Official",
+      category: "official",
+      meta: {
+        providerType: "codex_oauth",
+        authBinding: {
+          source: "managed_codex_oauth",
+          accountId: "account-56",
+        },
+      },
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "gpt-5.5" }] },
+      },
+    });
+
+    renderWithQueryClient(
+      <CodexMultiRouterWizard
+        open
+        providers={[officialProvider]}
+        onOpenChange={vi.fn()}
+        onCreateProvider={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+        onEnablePlan={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "自动获取并写入模型列表" }),
+    );
+
+    await waitFor(() =>
+      expect(fetchCodexOauthModels).toHaveBeenCalledWith("account-56"),
+    );
+    await waitFor(() => expect(providersApi.update).toHaveBeenCalledTimes(1));
+    const savedProvider = vi.mocked(providersApi.update).mock.calls[0][0];
+    expect(
+      savedProvider.settingsConfig.modelCatalog.models.map(
+        (model: { model: string }) => model.model,
+      ),
+    ).toEqual(["gpt-5.5", "gpt-5.6-sol"]);
+    expect(fetchModelsForConfig).not.toHaveBeenCalled();
+  });
+
+  it("keeps the last OAuth catalog when the dynamic model request fails", async () => {
+    vi.mocked(fetchCodexOauthModels).mockRejectedValueOnce(
+      new Error("temporary OAuth endpoint failure"),
+    );
+    const officialProvider = provider({
+      id: "codex-official",
+      name: "OpenAI Official",
+      category: "official",
+      meta: { providerType: "codex_oauth" },
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "gpt-5.5" }] },
+      },
+    });
+
+    renderWithQueryClient(
+      <CodexMultiRouterWizard
+        open
+        providers={[officialProvider]}
+        onOpenChange={vi.fn()}
+        onCreateProvider={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+        onEnablePlan={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "自动获取并写入模型列表" }),
+    );
+
+    expect(
+      await screen.findByText(/OAuth 模型列表获取失败，已保留现有目录/),
+    ).toBeInTheDocument();
+    expect(providersApi.update).not.toHaveBeenCalled();
+    expect(fetchModelsForConfig).not.toHaveBeenCalled();
   });
 
   it("keeps provider curated models when wizard refresh sees extra upstream models", async () => {

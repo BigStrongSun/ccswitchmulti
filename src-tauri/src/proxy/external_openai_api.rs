@@ -523,10 +523,9 @@ fn provider_backend_option(
 
     let is_managed_oauth = provider.uses_managed_account_auth()
         || is_codex_official_managed_oauth_provider(&app_type, provider);
-    let mut models = collect_provider_models(provider);
-    if is_managed_oauth && models.is_empty() && app_type == AppType::Codex {
-        models = default_codex_oauth_models();
-    }
+    // OAuth 模型必须来自已经动态刷新的 provider catalog；这里不能再注入静态名单，
+    // 否则新模型发布后后端选项会继续展示一份与账号实际权限不一致的旧快照。
+    let models = collect_provider_models(provider);
     let (base_url, api_key) = provider.resolve_usage_credentials(&app_type);
     let is_openai_compatible = provider_can_be_openai_compatible(&app_type, provider);
     let has_credentials =
@@ -681,14 +680,6 @@ fn provider_can_be_openai_compatible(app_type: &AppType, provider: &Provider) ->
 /// 因此第三方 Agent API 不能按普通 OpenAI-compatible provider 的 base_url/key 规则拦截它。
 fn is_codex_official_managed_oauth_provider(app_type: &AppType, provider: &Provider) -> bool {
     app_type == &AppType::Codex && provider.id == "codex-official"
-}
-
-/// 给空配置的 Codex 官方 OAuth 源提供可选模型，避免 UI 只能手填模型名。
-fn default_codex_oauth_models() -> Vec<String> {
-    ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"]
-        .into_iter()
-        .map(ToOwned::to_owned)
-        .collect()
 }
 
 /// 判断 Codex router route 是否有足够信息解析到真实上游。
@@ -1248,7 +1239,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_status_marks_empty_codex_official_seed_as_managed_oauth() {
+    fn runtime_status_keeps_empty_codex_official_seed_managed_without_static_models() {
         let db = Database::memory().expect("memory db");
         let provider = Provider::with_id(
             "codex-official".to_string(),
@@ -1266,7 +1257,10 @@ mod tests {
 
         assert!(backend.available);
         assert!(backend.is_managed_oauth);
-        assert!(backend.models.iter().any(|model| model == "gpt-5.4-mini"));
+        assert!(
+            backend.models.is_empty(),
+            "empty OAuth providers must wait for the dynamic account catalog"
+        );
         assert_eq!(backend.description, "Managed OAuth provider");
     }
 

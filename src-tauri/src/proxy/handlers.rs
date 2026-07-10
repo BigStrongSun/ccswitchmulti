@@ -1183,11 +1183,8 @@ fn external_provider_model_entries(
 ) -> Vec<Value> {
     let mut ids = Vec::new();
     let mut entries = Vec::new();
-    if profile.app_type.as_deref() == Some(AppType::Codex.as_str())
-        && is_codex_official_managed_oauth_provider(provider)
-    {
-        ids.extend(default_codex_oauth_model_ids());
-    }
+    // 官方 OAuth provider 的目录由前端通过专用 Codex 模型接口持久化；这里只读取
+    // provider/profile 的真实数据，避免无条件混入与账号权限无关的旧静态模型。
     collect_string_array(&mut ids, provider.settings_config.get("models"));
     collect_string_array(&mut ids, provider.settings_config.get("modelList"));
     collect_string_array(&mut ids, provider.settings_config.get("modelCatalog"));
@@ -1284,15 +1281,6 @@ fn external_codex_router_model_entries(
 }
 
 /// 收集字符串数组里的模型 id。
-fn default_codex_oauth_model_ids() -> Vec<String> {
-    vec![
-        "gpt-5.3-codex-spark".to_string(),
-        "gpt-5.4".to_string(),
-        "gpt-5.4-mini".to_string(),
-        "gpt-5.5".to_string(),
-    ]
-}
-
 fn collect_string_array(ids: &mut Vec<String>, value: Option<&Value>) {
     if let Some(values) = value.and_then(|value| value.as_array()) {
         for value in values {
@@ -1442,11 +1430,8 @@ fn build_external_codex_official_oauth_provider(
     let mut meta = synthetic.meta.unwrap_or_default();
     meta.provider_type = Some("codex_oauth".to_string());
     synthetic.meta = Some(meta);
-    synthetic.settings_config = json!({
-        "config": "model_provider = \"openai\"\nmodel = \"gpt-5.4-mini\"\n",
-        "auth": {},
-        "models": ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"]
-    });
+    // 保留动态刷新的 modelCatalog、默认模型和其它 provider 设置。Codex adapter 会根据
+    // provider_type 注入官方端点与托管 token，无需再用旧静态配置覆盖整份 settings。
     synthetic
 }
 
@@ -3271,12 +3256,12 @@ async fn log_usage(
 #[cfg(test)]
 mod tests {
     use super::{
-        body_looks_like_sse, body_snippet, chat_sse_to_response_value,
-        codex_catalog_models_response, codex_proxy_error_json, external_openai_api_models_response,
-        external_openai_api_unsupported_response, resolve_external_codex_router_target,
-        resolve_forward_error_provider_for_logging, responses_sse_to_response_value,
-        should_handle_as_codex_client, should_use_claude_transform_streaming, transform,
-        upstream_body_parse_error,
+        body_looks_like_sse, body_snippet, build_external_codex_official_oauth_provider,
+        chat_sse_to_response_value, codex_catalog_models_response, codex_proxy_error_json,
+        external_openai_api_models_response, external_openai_api_unsupported_response,
+        resolve_external_codex_router_target, resolve_forward_error_provider_for_logging,
+        responses_sse_to_response_value, should_handle_as_codex_client,
+        should_use_claude_transform_streaming, transform, upstream_body_parse_error,
     };
     use crate::{
         app_config::AppType,
@@ -4359,7 +4344,7 @@ data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n
     }
 
     #[test]
-    fn external_models_response_exposes_all_managed_codex_oauth_defaults() {
+    fn external_models_response_uses_dynamic_managed_codex_oauth_catalog() {
         let db = Arc::new(Database::memory().expect("memory db"));
         db.save_provider(
             "codex",
@@ -4367,7 +4352,13 @@ data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n
                 "codex-official".to_string(),
                 "OpenAI Official".to_string(),
                 json!({
-                    "defaultModel": "gpt-5.4-mini"
+                    "defaultModel": "gpt-5.6-sol",
+                    "modelCatalog": {
+                        "models": [
+                            { "model": "gpt-5.6-sol", "contextWindow": 372000 },
+                            { "model": "gpt-5.6-terra", "contextWindow": 372000 }
+                        ]
+                    }
                 }),
                 None,
             ),
@@ -4381,7 +4372,7 @@ data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n
                 app_type: Some("codex".to_string()),
                 provider_id: Some("codex-official".to_string()),
                 route_id: None,
-                default_model: Some("gpt-5.4-mini".to_string()),
+                default_model: Some("gpt-5.6-sol".to_string()),
                 listen_address: None,
                 listen_port: None,
             },
@@ -4398,10 +4389,38 @@ data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n
             .filter_map(|model| model.get("id").and_then(|id| id.as_str()))
             .collect();
 
-        assert!(ids.contains(&"gpt-5.5"));
-        assert!(ids.contains(&"gpt-5.4"));
-        assert!(ids.contains(&"gpt-5.4-mini"));
-        assert!(ids.contains(&"gpt-5.3-codex-spark"));
+        assert!(ids.contains(&"gpt-5.6-sol"));
+        assert!(ids.contains(&"gpt-5.6-terra"));
+        assert!(!ids.contains(&"gpt-5.5"));
+        assert!(!ids.contains(&"gpt-5.3-codex-spark"));
+    }
+
+    #[test]
+    /// External API 临时物化官方 OAuth provider 时必须保留动态目录，不能覆盖回旧模型名单。
+    fn external_codex_official_oauth_provider_preserves_dynamic_catalog() {
+        let provider = Provider::with_id(
+            "codex-official".to_string(),
+            "OpenAI Official".to_string(),
+            json!({
+                "defaultModel": "gpt-5.6-sol",
+                "modelCatalog": {
+                    "models": [{ "model": "gpt-5.6-sol", "contextWindow": 372000 }]
+                }
+            }),
+            None,
+        );
+        let expected_settings = provider.settings_config.clone();
+
+        let synthetic = build_external_codex_official_oauth_provider(provider);
+
+        assert_eq!(synthetic.settings_config, expected_settings);
+        assert_eq!(
+            synthetic
+                .meta
+                .and_then(|meta| meta.provider_type)
+                .as_deref(),
+            Some("codex_oauth")
+        );
     }
 
     #[tokio::test]
