@@ -46,6 +46,7 @@ import {
 } from "@/components/ui/dialog";
 import { providersApi } from "@/lib/api/providers";
 import {
+  fetchCodexOauthModels,
   fetchModelsForConfig,
   probeCodexChatForConfig,
   probeCodexResponsesForConfig,
@@ -71,6 +72,7 @@ import {
   inferWizardApiFormat,
   isCodexMultiRouterPlan,
   mergeFetchedModelsIntoWizardProvider,
+  readWizardCodexOAuthAccountId,
   readWizardModelCatalog,
   readWizardProviderBaseUrl,
   resolveWizardModelNameCollisions,
@@ -741,7 +743,7 @@ function providerConfigStatus(
   };
 }
 
-// 生成官方 Codex OAuth 跳过普通 /models 的文案；登录状态只影响可用性提示，不改变内置目录。
+// 生成官方 Codex OAuth 动态目录读取文案；失败时保留最后一次成功目录，不清空用户配置。
 function codexOAuthModelFetchMessage(
   hasModelCatalog: boolean,
   hasCodexOauthAccount: boolean,
@@ -752,7 +754,7 @@ function codexOAuthModelFetchMessage(
   const authText = hasCodexOauthAccount
     ? "已检测到 ChatGPT OAuth 账号"
     : "尚未检测到 ChatGPT OAuth 账号，请先在配置步骤登录";
-  return `官方 Codex OAuth 不调用普通 /models；${catalogText}，${authText}。`;
+  return `官方 Codex OAuth 将通过 ChatGPT 专用模型接口在线刷新；${catalogText}，${authText}。`;
 }
 
 // 生成 Plan provider 在线模型列表不可用时的回退文案，避免把火山缺 AK/SK 误写成永久不支持。
@@ -1332,12 +1334,14 @@ export function CodexMultiRouterWizard({
           const isCodexOAuth = isWizardCodexOAuthSource(provider);
           return [
             provider.id,
-            config && !isCatalogOnlyPlan && !isCodexOAuth
+            (config && !isCatalogOnlyPlan) || isCodexOAuth
               ? {
                   status: "loading",
-                  message: config.volcengineModelListAction
-                    ? "正在读取火山 OpenAPI 模型列表并刷新保留目录"
-                    : "正在读取 /models 并刷新保留目录",
+                  message: isCodexOAuth
+                    ? "正在读取 ChatGPT OAuth 模型列表并刷新本地目录"
+                    : config?.volcengineModelListAction
+                      ? "正在读取火山 OpenAPI 模型列表并刷新保留目录"
+                      : "正在读取 /models 并刷新保留目录",
                   modelCount: existingCount,
                 }
               : {
@@ -1364,19 +1368,64 @@ export function CodexMultiRouterWizard({
         const isCatalogOnlyPlan = isWizardCatalogOnlyModelSource(provider);
         const isCodexOAuth = isWizardCodexOAuthSource(provider);
         if (isCodexOAuth) {
-          skippedCount += 1;
-          nextSources.push(provider);
           setModelFetchCards((current) => ({
             ...current,
             [provider.id]: {
-              status: "skipped",
-              message: codexOAuthModelFetchMessage(
-                beforeModels.length > 0,
-                hasCodexOauthAccount,
-              ),
+              status: "loading",
+              message: "正在读取 ChatGPT OAuth 专用模型列表...",
               modelCount: beforeModels.length,
             },
           }));
+          try {
+            const fetchedModels = await fetchCodexOauthModels(
+              readWizardCodexOAuthAccountId(provider),
+            );
+            if (fetchedModels.length === 0) {
+              throw new Error("ChatGPT OAuth 模型接口返回空列表");
+            }
+            // OAuth 上游会持续发布新模型，因此成功响应必须追加新条目；已有别名、能力和子 Agent 选择仍由合并函数保留。
+            const nextProvider = mergeFetchedModelsIntoWizardProvider(
+              provider,
+              fetchedModels,
+            );
+            const afterModels = readWizardModelCatalog(nextProvider);
+            const diff = diffWizardModelCatalog(beforeModels, afterModels);
+            const hasDiff = hasModelFetchDiff(diff);
+            await providersApi.update(nextProvider, "codex");
+            nextSources.push(nextProvider);
+            successCount += 1;
+            setModelFetchCards((current) => ({
+              ...current,
+              [provider.id]: {
+                status: hasDiff ? "updated" : "unchanged",
+                message: hasDiff
+                  ? `OAuth 目录读取成功，已写入 ${afterModels.length} 个模型。`
+                  : `OAuth 目录读取成功，无模型列表更新，仍为 ${afterModels.length} 个模型。`,
+                modelCount: afterModels.length,
+                diff,
+              },
+            }));
+          } catch (error) {
+            const message = formatWizardError(error);
+            failedCount += 1;
+            nextSources.push(provider);
+            recordWizardIssue({
+              stage: "fetchModels",
+              severity: "warning",
+              title: "OAuth 模型列表获取失败",
+              detail: `获取 ChatGPT OAuth 模型列表失败，已保留现有目录：${message}`,
+              canContinue: true,
+              providerName: provider.name,
+            });
+            setModelFetchCards((current) => ({
+              ...current,
+              [provider.id]: {
+                status: "error",
+                message: `OAuth 模型列表获取失败，已保留现有目录：${message}`,
+                modelCount: beforeModels.length,
+              },
+            }));
+          }
           continue;
         }
         if (isCatalogOnlyPlan) {

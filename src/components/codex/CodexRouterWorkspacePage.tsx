@@ -60,9 +60,17 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { providersApi } from "@/lib/api";
-import { fetchModelsForConfig, type FetchedModel } from "@/lib/api/model-fetch";
+import {
+  fetchCodexOauthModels,
+  fetchModelsForConfig,
+  type FetchedModel,
+} from "@/lib/api/model-fetch";
 import { proxyApi } from "@/lib/api/proxy";
-import { resolveWizardModelNameCollisions } from "@/lib/codexMultiRouterWizard";
+import {
+  isWizardCodexOAuthSource,
+  readWizardCodexOAuthAccountId,
+  resolveWizardModelNameCollisions,
+} from "@/lib/codexMultiRouterWizard";
 import { syncCodexMultiRouterPlanWithProviders } from "@/lib/codexMultiRouterSync";
 import { usageApi } from "@/lib/api/usage";
 import {
@@ -345,6 +353,8 @@ type ProviderModelFetchConfig = {
   volcengineModelListAction?: string;
   volcengineAccessKeyId?: string;
   volcengineSecretAccessKey?: string;
+  codexOAuthAccountId?: string;
+  useCodexOAuth?: boolean;
   skipReason?: string;
 };
 
@@ -424,6 +434,8 @@ function buildProviderModelRefreshAttemptKey(
     fetchConfig.volcengineModelListAction ?? "",
     hashSensitiveAttemptPart(fetchConfig.volcengineAccessKeyId ?? ""),
     hashSensitiveAttemptPart(fetchConfig.volcengineSecretAccessKey ?? ""),
+    fetchConfig.useCodexOAuth ?? false,
+    hashSensitiveAttemptPart(fetchConfig.codexOAuthAccountId ?? ""),
   ].join("|");
 }
 
@@ -493,18 +505,15 @@ function getProviderModelFetchConfig(
   };
   const planModelListAction = codexPlanModelListAction(planFetchSource);
   const isCatalogOnlyPlan = isCodexCatalogOnlyPlanModelFetch(planFetchSource);
-  const providerType = String(
-    provider.meta?.providerType ?? settings.providerType ?? "",
-  ).toLowerCase();
-  const isOfficialLike =
-    provider.category === "official" || providerType.includes("codex_oauth");
+  const isOfficialLike = isWizardCodexOAuthSource(provider);
 
-  if (isOfficialLike && (!baseUrl || !apiKey)) {
+  if (isOfficialLike) {
     return {
       baseUrl,
       apiKey,
       isFullUrl: false,
-      skipReason: "官方/OAuth provider 不使用普通 /models 端点。",
+      useCodexOAuth: true,
+      codexOAuthAccountId: readWizardCodexOAuthAccountId(provider),
     };
   }
   if (!baseUrl) {
@@ -558,7 +567,7 @@ function getProviderModelFetchConfig(
   };
 }
 
-/// 将远端 /models 结果写回普通 provider 的 modelCatalog；已有目录视为用户保留列表，只刷新元数据，空目录才初始化。
+/// 将远端模型结果写回 provider 的 modelCatalog；普通源保留用户筛选，OAuth 源则追加官方新发布模型。
 function providerWithFetchedModelCatalog(
   provider: Provider,
   fetchedModels: FetchedModel[],
@@ -605,7 +614,8 @@ function providerWithFetchedModelCatalog(
       byFetchedModel.set(upstreamModel, index);
     }
   }
-  const shouldAppendFetchedModels = currentCatalog.models.length === 0;
+  const shouldAppendFetchedModels =
+    currentCatalog.models.length === 0 || isWizardCodexOAuthSource(provider);
 
   for (const fetched of fetchedModels) {
     const id = fetched.id.trim();
@@ -2302,7 +2312,7 @@ export function CodexRouterWorkspacePage({
     return byId;
   }, [effectiveProviders, routableModelSources]);
 
-  // 进入 MultiRouter 路由规则页时自动刷新所有候选普通 provider 的 /models 目录。
+  // 进入 MultiRouter 路由规则页时并发刷新所有候选源；OAuth 与普通 /models 共用后续写回事务。
   useEffect(() => {
     if (activeTab !== "routes") return;
     if (modelSources.length === 0) return;
@@ -2341,23 +2351,26 @@ export function CodexRouterWorkspacePage({
         modelRefreshActiveAttemptKeysRef.current[provider.id] === attemptKey &&
         !modelRefreshTimedOutAttemptKeysRef.current.has(attemptKey);
 
-      // 将 /models 读取、provider catalog 写回、受影响路由方案重建视为一个事务；
+      // 将模型目录读取、provider catalog 写回、受影响路由方案重建视为一个事务；
       // 任何阶段卡住都必须让刷新卡片落到终态，不能只保护最前面的网络请求。
       const refreshTask = (async (): Promise<ProviderModelRefreshResult> => {
-        const models = await fetchModelsForConfig(
-          fetchConfig.baseUrl,
-          fetchConfig.apiKey,
-          fetchConfig.isFullUrl,
-          undefined,
-          fetchConfig.customUserAgent,
-          fetchConfig.volcengineModelListAction
-            ? {
-                action: fetchConfig.volcengineModelListAction,
-                accessKeyId: fetchConfig.volcengineAccessKeyId ?? "",
-                secretAccessKey: fetchConfig.volcengineSecretAccessKey ?? "",
-              }
-            : undefined,
-        );
+        const models = fetchConfig.useCodexOAuth
+          ? await fetchCodexOauthModels(fetchConfig.codexOAuthAccountId)
+          : await fetchModelsForConfig(
+              fetchConfig.baseUrl,
+              fetchConfig.apiKey,
+              fetchConfig.isFullUrl,
+              undefined,
+              fetchConfig.customUserAgent,
+              fetchConfig.volcengineModelListAction
+                ? {
+                    action: fetchConfig.volcengineModelListAction,
+                    accessKeyId: fetchConfig.volcengineAccessKeyId ?? "",
+                    secretAccessKey:
+                      fetchConfig.volcengineSecretAccessKey ?? "",
+                  }
+                : undefined,
+            );
         if (!isCurrentAttempt()) {
           return { status: "stale" };
         }

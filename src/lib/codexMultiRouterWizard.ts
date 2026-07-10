@@ -92,7 +92,9 @@ const OPENAI_CODEX_FALLBACK_MODELS: CodexCatalogModel[] = [
 ];
 
 // 读取 provider 上绑定的托管 Codex OAuth 账号；未绑定时交给后端使用默认账号。
-function readWizardCodexOAuthAccountId(provider: Provider): string | undefined {
+export function readWizardCodexOAuthAccountId(
+  provider: Provider,
+): string | undefined {
   const meta = provider.meta as
     | (Provider["meta"] & {
         auth_binding?: { accountId?: string; account_id?: string };

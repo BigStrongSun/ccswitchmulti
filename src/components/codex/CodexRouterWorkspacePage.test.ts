@@ -4,7 +4,11 @@ import userEvent from "@testing-library/user-event";
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { providersApi } from "@/lib/api";
-import { fetchModelsForConfig, type FetchedModel } from "@/lib/api/model-fetch";
+import {
+  fetchCodexOauthModels,
+  fetchModelsForConfig,
+  type FetchedModel,
+} from "@/lib/api/model-fetch";
 import { proxyApi } from "@/lib/api/proxy";
 import type { Provider } from "@/types";
 import type { PaginatedLogs, RequestLog } from "@/types/usage";
@@ -72,6 +76,7 @@ vi.mock("@/lib/api", () => ({
 }));
 
 vi.mock("@/lib/api/model-fetch", () => ({
+  fetchCodexOauthModels: vi.fn(),
   fetchModelsForConfig: vi.fn(),
 }));
 
@@ -131,6 +136,7 @@ function createCodexProxyLog(overrides: Partial<RequestLog> = {}): RequestLog {
 
 beforeEach(() => {
   requestLogsFixture.value = { data: [], isLoading: false };
+  vi.mocked(fetchCodexOauthModels).mockReset();
   vi.mocked(fetchModelsForConfig).mockReset();
   vi.mocked(proxyApi.unlockCodexModelPicker).mockReset();
   vi.mocked(providersApi.add).mockResolvedValue(true);
@@ -142,6 +148,100 @@ afterEach(() => {
 });
 
 describe("Codex MultiRouter workspace route persistence helpers", () => {
+  it("refreshes an official OAuth catalog with the bound account and syncs new models into its route", async () => {
+    vi.mocked(fetchCodexOauthModels).mockResolvedValue([
+      { id: "gpt-5.5", ownedBy: "openai", contextWindow: 272000 },
+      { id: "gpt-5.6-sol", ownedBy: "openai", contextWindow: 272000 },
+    ]);
+    const provider: Provider = {
+      id: "openai-official",
+      name: "OpenAI Official",
+      category: "official",
+      meta: {
+        providerType: "codex_oauth",
+        authBinding: {
+          source: "managed_codex_oauth",
+          accountId: "account-56",
+        },
+      },
+      settingsConfig: {
+        modelCatalog: {
+          models: [
+            {
+              model: "gpt-5.5",
+              upstreamModel: "gpt-5.5",
+              contextWindow: 272000,
+            },
+          ],
+        },
+      },
+    };
+    const planDraft = createDraftRoutingPlan([provider], [provider]);
+    const route = normalizeCodexRouteForSave(
+      {
+        label: provider.name,
+        targetProviderId: provider.id,
+        match: { models: ["gpt-5.5"] },
+      },
+      0,
+      new Set<string>(),
+    );
+    const plan: Provider = {
+      ...planDraft,
+      settingsConfig: {
+        ...planDraft.settingsConfig,
+        codexRouting: {
+          enabled: true,
+          defaultRouteId: route.id,
+          routes: [route],
+        },
+      },
+    };
+
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [provider, plan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: plan.id,
+        initialProviderId: plan.id,
+        initialTab: "routes",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+
+    await waitFor(() =>
+      expect(fetchCodexOauthModels).toHaveBeenCalledWith("account-56"),
+    );
+    await waitFor(() => {
+      const savedProvider = vi
+        .mocked(providersApi.update)
+        .mock.calls.map(([updated]) => updated)
+        .find((updated) => updated.id === provider.id);
+      expect(
+        savedProvider?.settingsConfig?.modelCatalog?.models.map(
+          (model: { model: string }) => model.model,
+        ),
+      ).toEqual(["gpt-5.5", "gpt-5.6-sol"]);
+
+      const savedPlan = vi
+        .mocked(providersApi.update)
+        .mock.calls.map(([updated]) => updated)
+        .find((updated) => updated.id === plan.id);
+      expect(
+        savedPlan?.settingsConfig?.codexRouting?.routes[0].match.models,
+      ).toEqual(["gpt-5.5", "gpt-5.6-sol"]);
+      expect(
+        savedPlan?.settingsConfig?.modelCatalog?.models.map(
+          (model: { model: string }) => model.model,
+        ),
+      ).toEqual(["gpt-5.5", "gpt-5.6-sol"]);
+    });
+    expect(fetchModelsForConfig).not.toHaveBeenCalled();
+  });
+
   it("finishes later provider refreshes after an earlier refresh rerenders the routes page", async () => {
     const firstRefresh = createDeferred<FetchedModel[]>();
     const secondRefresh = createDeferred<FetchedModel[]>();
