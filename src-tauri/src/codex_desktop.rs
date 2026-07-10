@@ -13,9 +13,9 @@ const DEFAULT_CODEX_DEBUG_PORT: u16 = 9229;
 const CDP_HTTP_TIMEOUT: Duration = Duration::from_secs(2);
 const CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
 const CDP_COMMAND_TIMEOUT: Duration = Duration::from_secs(4);
-const MODEL_PICKER_PATCH_KEY: &str = "__ccSwitchCodexModelPickerUnlockV3";
+const MODEL_PICKER_PATCH_KEY: &str = "__ccSwitchCodexAppCompatibilityV4";
 const REMEMBERED_CODEX_DESKTOP_EXECUTABLE_FILENAME: &str = "codex-desktop-executable.json";
-/// Codex Desktop 模型菜单解锁命令的执行结果。
+/// Codex App 历史目录与模型兼容层安装命令的执行结果。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexModelPickerUnlockResult {
@@ -29,7 +29,18 @@ pub struct CodexModelPickerUnlockResult {
     pub injected: bool,
     pub launched: bool,
     pub codex_executable: Option<String>,
+    pub history_sync_requested: bool,
+    pub history_catalog_complete: Option<bool>,
+    pub history_catalog_count: Option<usize>,
     pub message: String,
+}
+
+/// renderer 脚本返回的新版历史目录同步证据。
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct CodexAppCompatibilityEvidence {
+    history_sync_requested: bool,
+    history_catalog_complete: Option<bool>,
+    history_catalog_count: Option<usize>,
 }
 
 /// 注入脚本需要的模型目录投影，避免把整个 catalog 私有字段泄漏到 renderer。
@@ -39,6 +50,17 @@ struct CodexModelCatalogProjection {
     default_model: Option<String>,
     model_names: Vec<String>,
     models: Vec<Value>,
+}
+
+impl CodexModelCatalogProjection {
+    /// 构造不含路由模型的兼容投影，使历史目录修复不依赖 CCSM 模型目录是否已生成。
+    fn empty() -> Self {
+        Self {
+            default_model: None,
+            model_names: Vec::new(),
+            models: Vec::new(),
+        }
+    }
 }
 
 /// Chrome DevTools Protocol `/json` 返回的页面 target 摘要。
@@ -55,13 +77,14 @@ struct CdpTarget {
     web_socket_debugger_url: Option<String>,
 }
 
-/// 尝试解锁当前或新启动的 Codex Desktop 模型菜单。
+/// 尝试为当前或新启动的 Codex App 安装 renderer 兼容层。
 ///
 /// 副作用：
-/// - 若发现已开放 CDP 的 Codex renderer，会注入本地脚本；
+/// - 若发现已开放 CDP 的 Codex renderer，会触发新版历史目录同步并修复模型菜单；
 /// - 若未发现 CDP 且 Codex 未运行，会以 remote debugging 参数启动 Codex。
 pub async fn unlock_codex_model_picker() -> Result<CodexModelPickerUnlockResult, String> {
-    let catalog = load_cc_switch_model_catalog_projection()?;
+    let catalog = load_cc_switch_model_catalog_projection()
+        .unwrap_or_else(|_| CodexModelCatalogProjection::empty());
     let attempted_ports = candidate_debug_ports(DEFAULT_CODEX_DEBUG_PORT);
 
     if let Some(result) = try_inject_on_candidate_ports(&catalog, &attempted_ports).await {
@@ -88,7 +111,10 @@ pub async fn unlock_codex_model_picker() -> Result<CodexModelPickerUnlockResult,
                     .display()
                     .to_string(),
             ),
-            message: "Codex Desktop is already running without an injectable CDP port. Fully quit Codex, then launch it from CCSwitchMulti so the model picker patch can be installed.".to_string(),
+            history_sync_requested: false,
+            history_catalog_complete: None,
+            history_catalog_count: None,
+            message: "Codex App is already running without an injectable CDP port. Fully quit Codex, then launch it from CCSwitchMulti so the history catalog and model compatibility layer can be installed.".to_string(),
         });
     }
 
@@ -118,6 +144,9 @@ pub async fn unlock_codex_model_picker() -> Result<CodexModelPickerUnlockResult,
             injected: false,
             launched: true,
             codex_executable: Some(executable.display().to_string()),
+            history_sync_requested: false,
+            history_catalog_complete: None,
+            history_catalog_count: None,
             message: "Codex was launched with remote debugging; waiting for the renderer target."
                 .to_string(),
         });
@@ -135,6 +164,9 @@ pub async fn unlock_codex_model_picker() -> Result<CodexModelPickerUnlockResult,
         injected: false,
         launched: true,
         codex_executable: Some(executable.display().to_string()),
+        history_sync_requested: false,
+        history_catalog_complete: None,
+        history_catalog_count: None,
         message: "Codex was launched, but no injectable renderer target appeared before timeout."
             .to_string(),
     }))
@@ -277,11 +309,15 @@ async fn try_inject_on_candidate_ports(
         };
         let script = build_model_picker_unlock_script(catalog);
         let mut injected_target = None;
+        let mut compatibility_evidence = CodexAppCompatibilityEvidence::default();
         for target in targets {
             let Some(websocket_url) = target.web_socket_debugger_url.as_deref() else {
                 continue;
             };
-            if install_script(websocket_url, &script).await.is_ok() {
+            if let Ok(evidence) = install_script(websocket_url, &script).await {
+                if evidence.history_sync_requested {
+                    compatibility_evidence = evidence;
+                }
                 injected_target.get_or_insert(target);
             }
         }
@@ -300,7 +336,14 @@ async fn try_inject_on_candidate_ports(
             launched: false,
             codex_executable: detect_running_codex_main_process()
                 .map(|path| path.display().to_string()),
-            message: "Codex Desktop model picker whitelist patch was injected.".to_string(),
+            history_sync_requested: compatibility_evidence.history_sync_requested,
+            history_catalog_complete: compatibility_evidence.history_catalog_complete,
+            history_catalog_count: compatibility_evidence.history_catalog_count,
+            message: if compatibility_evidence.history_sync_requested {
+                "Codex App compatibility layer was injected; the native history catalog sync was requested and model visibility was refreshed.".to_string()
+            } else {
+                "Codex App compatibility layer was injected, but the native localThreadCatalog service was not available in this renderer; model visibility was refreshed without rewriting history metadata.".to_string()
+            },
         });
     }
     None
@@ -381,7 +424,10 @@ fn target_matches_codex_desktop(target: &CdpTarget) -> bool {
 }
 
 /// 使用 CDP 同时安装新文档脚本并立即 patch 当前页面。
-async fn install_script(websocket_url: &str, script: &str) -> Result<(), String> {
+async fn install_script(
+    websocket_url: &str,
+    script: &str,
+) -> Result<CodexAppCompatibilityEvidence, String> {
     let (socket, _) = tokio::time::timeout(CDP_CONNECT_TIMEOUT, connect_async(websocket_url))
         .await
         .map_err(|_| "timed out connecting CDP websocket".to_string())?
@@ -389,7 +435,7 @@ async fn install_script(websocket_url: &str, script: &str) -> Result<(), String>
     let mut session = CdpSession::new(socket);
     session.send_command(1, "Runtime.enable", json!({})).await?;
     session.send_command(2, "Page.enable", json!({})).await?;
-    session
+    let evaluation = session
         .send_command(
             3,
             "Page.addScriptToEvaluateOnNewDocument",
@@ -403,11 +449,41 @@ async fn install_script(websocket_url: &str, script: &str) -> Result<(), String>
             json!({
                 "expression": script,
                 "awaitPromise": true,
+                "returnByValue": true,
                 "allowUnsafeEvalBlockedByCSP": true
             }),
         )
         .await?;
-    Ok(())
+    codex_app_compatibility_evidence_from_evaluation(&evaluation)
+}
+
+/// 从 CDP `Runtime.evaluate` 结果中提取原生历史同步状态，并把脚本异常转为明确错误。
+fn codex_app_compatibility_evidence_from_evaluation(
+    evaluation: &Value,
+) -> Result<CodexAppCompatibilityEvidence, String> {
+    if let Some(exception) = evaluation
+        .get("result")
+        .and_then(|result| result.get("exceptionDetails"))
+    {
+        return Err(format!(
+            "Codex App compatibility script failed: {exception}"
+        ));
+    }
+    let value = evaluation
+        .pointer("/result/result/value")
+        .ok_or_else(|| "Codex App compatibility script returned no value".to_string())?;
+    let history_sync = value.get("historySync").unwrap_or(&Value::Null);
+    Ok(CodexAppCompatibilityEvidence {
+        history_sync_requested: history_sync
+            .get("requested")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        history_catalog_complete: history_sync.get("complete").and_then(Value::as_bool),
+        history_catalog_count: history_sync
+            .get("afterCount")
+            .and_then(Value::as_u64)
+            .and_then(|count| usize::try_from(count).ok()),
+    })
 }
 
 /// 轻量 CDP websocket 会话，只处理 request/response。
@@ -483,7 +559,7 @@ fn cdp_command_result(response: Value, method: &str) -> Result<Value, String> {
     }
 }
 
-/// 构造 renderer 注入脚本：修 Statsig 白名单、app-server model/list 和 React 缓存。
+/// 构造 renderer 注入脚本：触发新版本地历史目录同步，并修复模型白名单和缓存。
 fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> String {
     let payload = serde_json::to_string(catalog).unwrap_or_else(|_| "{}".to_string());
     format!(
@@ -675,6 +751,43 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
     }}
     return await state.modulePromises.get(namePart);
   }};
+  // 新版 Codex/ChatGPT App 用 localThreadCatalog 保存统一侧边栏目录。这里只调用
+  // App 自己的 RPC 同步服务，不直接改 codex-dev.db 或历史 provider 元数据。
+  const triggerLocalThreadCatalogSync = async () => {{
+    if (state.historySyncPromise) return await state.historySyncPromise;
+    state.historySyncPromise = Promise.resolve().then(async () => {{
+      const module = await loadAppModule("rpc-");
+      const roots = Object.values(module).filter((item) => item && (typeof item === "object" || typeof item === "function"));
+      for (const root of roots) {{
+        try {{
+          const catalog = root.localThreadCatalog;
+          if (!catalog || typeof catalog.requestStartupSync !== "function") continue;
+          const before = typeof catalog.readSnapshot === "function" ? await catalog.readSnapshot() : null;
+          await catalog.requestStartupSync();
+          const after = typeof catalog.readSnapshot === "function" ? await catalog.readSnapshot() : null;
+          state.historySync = {{
+            requested: true,
+            beforeCount: Array.isArray(before?.entries) ? before.entries.length : null,
+            afterCount: Array.isArray(after?.entries) ? after.entries.length : null,
+            complete: after?.isComplete ?? null,
+          }};
+          if (after?.isComplete !== true) {{
+            setTimeout(() => {{ state.historySyncPromise = null; }}, 10000);
+          }}
+          return state.historySync;
+        }} catch (error) {{
+          state.failures.push(String(error?.message || error));
+        }}
+      }}
+      throw new Error("Codex App localThreadCatalog RPC service was not found");
+    }}).catch((error) => {{
+      state.historySync = {{ requested: false, error: String(error?.message || error) }};
+      state.failures.push(state.historySync.error);
+      state.historySyncPromise = null;
+      return state.historySync;
+    }});
+    return await state.historySyncPromise;
+  }};
   const appServerMethod = (method, params) => method === "send-cli-request-for-host" && params?.method ? String(params.method) : String(method || "");
   const patchAppServerResult = (method, result) => {{
     if (method !== "list-models-for-host") return result;
@@ -786,12 +899,14 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
     installResponsePatch();
     installMessagePatch();
     void installAppServerPatch();
+    void triggerLocalThreadCatalogSync();
     patchStatsig();
     patchReactState();
   }};
   run();
   if (!state.interval) state.interval = setInterval(run, 1500);
-  return {{ status: "ok", modelCount: modelNames().length, available_models: modelNames(), patchKey }};
+  const historySync = await triggerLocalThreadCatalogSync();
+  return {{ status: "ok", modelCount: modelNames().length, available_models: modelNames(), historySync, patchKey }};
 }})()
 "#
     )
@@ -839,14 +954,20 @@ fn append_codex_debug_args(command: &mut Command, debug_port: u16) {
         ));
 }
 
-/// Windows 下查找 Codex Desktop 主进程的脚本。
+/// Windows 下查找 Codex App 主进程的脚本。
 ///
-/// 注意：这里只排除“把小写 CLI/app-server 当成 Desktop shell 启动”的误用；
-/// CLI/app-server 本身仍由 live config、catalog 投影和本地代理路径支持。
+/// 新版 MSIX 将统一应用壳改名为 `ChatGPT.exe`，但只允许来自 `OpenAI.Codex`
+/// 包目录的同名进程，避免误把独立 ChatGPT 应用接入 Codex 的 CDP 修复链路。
 #[cfg(target_os = "windows")]
 const DETECT_CODEX_MAIN_PROCESS_SCRIPT: &str = r#"
-Get-CimInstance Win32_Process -Filter "Name = 'Codex.exe'" |
-  Where-Object { $_.ExecutablePath -and (Split-Path -Leaf $_.ExecutablePath) -ceq 'Codex.exe' -and ($_.CommandLine -notmatch ' --type=') } |
+Get-CimInstance Win32_Process -Filter "Name = 'Codex.exe' OR Name = 'ChatGPT.exe'" |
+  Where-Object {
+    if (-not $_.ExecutablePath -or $_.CommandLine -match ' --type=') { return $false }
+    $leaf = Split-Path -Leaf $_.ExecutablePath
+    $legacyCodex = $leaf -ceq 'Codex.exe'
+    $unifiedCodex = $leaf -ceq 'ChatGPT.exe' -and $_.ExecutablePath -match '\\WindowsApps\\OpenAI\.Codex(?:\.Preview)?_'
+    return $legacyCodex -or $unifiedCodex
+  } |
   Select-Object -First 1 -ExpandProperty ExecutablePath
 "#;
 
@@ -918,7 +1039,7 @@ fn find_platform_codex_executable() -> Option<PathBuf> {
     }
 }
 
-/// 存储最近确认过的大写 `Codex.exe` 路径，支持 Desktop 不在常见安装目录的场景。
+/// 存储最近确认过的 Codex App shell 路径，支持 Desktop 不在常见安装目录的场景。
 fn remembered_codex_desktop_executable_path() -> PathBuf {
     crate::config::get_app_config_dir().join(REMEMBERED_CODEX_DESKTOP_EXECUTABLE_FILENAME)
 }
@@ -926,7 +1047,40 @@ fn remembered_codex_desktop_executable_path() -> PathBuf {
 /// 判断路径文件名是否是当前平台的 Desktop shell，而不是小写 CLI/app-server。
 #[cfg(target_os = "windows")]
 fn is_codex_desktop_executable_name(name: &str) -> bool {
-    name == "Codex.exe"
+    name == "Codex.exe" || name == "ChatGPT.exe"
+}
+
+/// Windows 下进一步约束统一 `ChatGPT.exe` 必须来自 `OpenAI.Codex` MSIX 包目录。
+///
+/// 旧版 `Codex.exe` 仍兼容独立安装目录；新版壳使用了通用文件名，若不校验祖先目录，
+/// 会把用户安装的独立 ChatGPT 应用错误地当成 Codex App。
+#[cfg(target_os = "windows")]
+fn is_codex_desktop_executable_path(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    if !is_codex_desktop_executable_name(name) {
+        return false;
+    }
+    if name == "Codex.exe" {
+        return true;
+    }
+    path.ancestors().any(|ancestor| {
+        ancestor
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                name.starts_with("OpenAI.Codex_") || name.starts_with("OpenAI.Codex.Preview_")
+            })
+    })
+}
+
+/// 非 Windows 平台沿用文件名级别的 Desktop shell 校验。
+#[cfg(not(target_os = "windows"))]
+fn is_codex_desktop_executable_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(is_codex_desktop_executable_name)
 }
 
 /// 判断路径文件名是否是当前平台的 Desktop shell，而不是小写 CLI/app-server。
@@ -958,11 +1112,7 @@ fn canonical_codex_desktop_executable_path(path: &Path) -> Result<PathBuf, Strin
             path.display()
         ));
     }
-    if !path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(is_codex_desktop_executable_name)
-    {
+    if !is_codex_desktop_executable_path(path) {
         return Err(format!(
             "Detected file is not Codex Desktop's platform shell executable: {}",
             path.display()
@@ -1314,7 +1464,7 @@ Get-Command Codex.exe -All -ErrorAction SilentlyContinue |
     }
 }
 
-/// 扫描 WindowsApps 包目录，收集可启动 Desktop renderer 的大写 `Codex.exe` 候选。
+/// 扫描 WindowsApps 包目录，收集可启动 Codex App renderer 的 shell 候选。
 #[cfg(target_os = "windows")]
 fn collect_windowsapps_codex_executable_candidates(candidates: &mut Vec<(Vec<u32>, PathBuf)>) {
     let mut roots = Vec::new();
@@ -1425,15 +1575,17 @@ $packages |
 
 /// WindowsApps 包内的 Codex Desktop 可执行文件候选路径。
 ///
-/// MSIX 包布局随版本变化过：有的版本直接在 `app/Codex.exe`，有的把可执行文件
-/// 放到 `app/resources`。只接受大写 `Codex.exe`，避免在 Desktop/CDP 解锁流程里
-/// 把 CLI launcher 当 Desktop；CLI/app-server 支持由 Codex 配置投影链路负责。
+/// MSIX 包布局随版本变化过：新版统一应用壳是 `app/ChatGPT.exe`，旧版则可能在
+/// `app/Codex.exe` 或 `app/resources/Codex.exe`。小写 `codex.exe` 仍是 CLI/app-server，
+/// 不参与 renderer/CDP 修复链路。
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn windows_codex_package_executable_candidates(package_root: &Path) -> Vec<PathBuf> {
     let mut candidates = appx_manifest_codex_executable_candidates(package_root);
     candidates.extend([
+        package_root.join("app").join("ChatGPT.exe"),
         package_root.join("app").join("Codex.exe"),
         package_root.join("app").join("resources").join("Codex.exe"),
+        package_root.join("ChatGPT.exe"),
         package_root.join("Codex.exe"),
     ]);
     dedupe_paths(candidates)
@@ -1493,7 +1645,7 @@ fn appx_manifest_codex_executable_candidates(package_root: &Path) -> Vec<PathBuf
         .collect()
 }
 
-/// 提取 manifest 中大写 `Codex.exe` 的相对路径；小写 CLI/app-server `codex.exe` 不参与。
+/// 提取 manifest 中 Codex App shell 的相对路径；小写 CLI/app-server `codex.exe` 不参与。
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn appx_manifest_codex_executable_values(text: &str) -> Vec<String> {
     let Ok(regex) = regex::Regex::new(r#"Executable\s*=\s*"([^"]+)""#) else {
@@ -1506,7 +1658,7 @@ fn appx_manifest_codex_executable_values(text: &str) -> Vec<String> {
             Path::new(value)
                 .file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| name == "Codex.exe")
+                .is_some_and(|name| name == "Codex.exe" || name == "ChatGPT.exe")
         })
         .map(ToOwned::to_owned)
         .collect()
@@ -1654,8 +1806,44 @@ mod tests {
         assert!(script.contains("107580212"));
         assert!(script.contains("list-models-for-host"));
         assert!(script.contains("model/list"));
-        assert!(script.contains("__ccSwitchCodexModelPickerUnlockV3"));
+        assert!(script.contains("__ccSwitchCodexAppCompatibilityV4"));
         assert!(script.contains("auth.setAuthMethod(\"chatgpt\")"));
+    }
+
+    /// 验证新版历史修复只调用 App 官方目录同步，不改写 thread/list 的查询语义。
+    #[test]
+    fn codex_app_compatibility_script_repairs_native_history_catalog() {
+        let script = build_model_picker_unlock_script(&CodexModelCatalogProjection::empty());
+
+        assert!(script.contains("localThreadCatalog"));
+        assert!(script.contains("requestStartupSync"));
+        assert!(script.contains("readSnapshot"));
+        assert!(script.contains("const historySync = await triggerLocalThreadCatalogSync()"));
+        assert!(!script.contains("modelProviders: []"));
+    }
+
+    /// 验证 CDP 返回值能准确区分“脚本已安装”和“原生历史同步已请求”。
+    #[test]
+    fn compatibility_evidence_reads_native_history_sync_result() {
+        let evaluation = json!({
+            "result": {
+                "result": {
+                    "value": {
+                        "historySync": {
+                            "requested": true,
+                            "complete": false,
+                            "afterCount": 17
+                        }
+                    }
+                }
+            }
+        });
+
+        let evidence = codex_app_compatibility_evidence_from_evaluation(&evaluation)
+            .expect("compatibility evidence");
+        assert!(evidence.history_sync_requested);
+        assert_eq!(evidence.history_catalog_complete, Some(false));
+        assert_eq!(evidence.history_catalog_count, Some(17));
     }
 
     /// 验证 Desktop 可执行文件缺失时，错误信息不会被误读成不支持 CLI/app-server。
@@ -1687,6 +1875,7 @@ mod tests {
         let root = PathBuf::from(r"C:\Program Files\WindowsApps\OpenAI.Codex_26.608.1.0_x64__id");
         let candidates = windows_codex_package_executable_candidates(&root);
 
+        assert!(candidates.contains(&root.join("app").join("ChatGPT.exe")));
         assert!(candidates.contains(&root.join("app").join("Codex.exe")));
         assert!(candidates.contains(&root.join("app").join("resources").join("Codex.exe")));
         assert!(!candidates.iter().any(|path| {
@@ -1696,7 +1885,7 @@ mod tests {
         }));
     }
 
-    /// 验证 Appx manifest 里的 Desktop `Codex.exe` 会优先进入候选，且不会误收小写 CLI。
+    /// 验证 Appx manifest 里的新版 `ChatGPT.exe` 与旧版 `Codex.exe` 都会进入候选。
     #[test]
     fn appx_manifest_candidates_use_declared_desktop_executable() {
         let package_dir = tempfile::tempdir().expect("create appx package temp dir");
@@ -1705,6 +1894,7 @@ mod tests {
             r#"
 <Package>
   <Applications>
+    <Application Id="UnifiedApp" Executable="app/ChatGPT.exe" EntryPoint="Windows.FullTrustApplication" />
     <Application Id="App" Executable="app/bin/Codex.exe" EntryPoint="Windows.FullTrustApplication" />
     <Application Id="Cli" Executable="app/resources/codex.exe" EntryPoint="Windows.FullTrustApplication" />
   </Applications>
@@ -1715,7 +1905,8 @@ mod tests {
 
         let candidates = windows_codex_package_executable_candidates(package_dir.path());
 
-        assert_eq!(candidates[0], package_dir.path().join(r"app\bin\Codex.exe"));
+        assert_eq!(candidates[0], package_dir.path().join(r"app\ChatGPT.exe"));
+        assert!(candidates.contains(&package_dir.path().join(r"app\bin\Codex.exe")));
         assert!(!candidates.iter().any(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
@@ -1759,12 +1950,35 @@ mod tests {
         assert!(error.contains("not Codex Desktop"));
     }
 
+    /// 验证新版通用壳只有位于 OpenAI.Codex 包目录时才会被接入 Codex 修复链路。
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn unified_chatgpt_shell_requires_codex_msix_ancestor() {
+        let package_dir = tempfile::tempdir().expect("create windows apps temp dir");
+        let package_root = package_dir
+            .path()
+            .join("OpenAI.Codex_26.707.3748.0_x64__2p2nqsd0c76g0");
+        let shell = package_root.join("app").join("ChatGPT.exe");
+        std::fs::create_dir_all(shell.parent().expect("unified shell parent"))
+            .expect("create unified shell parent");
+        std::fs::write(&shell, "").expect("write unified shell");
+
+        let resolved = canonical_codex_desktop_executable_path(&shell)
+            .expect("OpenAI.Codex unified shell should be accepted");
+        assert!(resolved.ends_with(Path::new("app").join("ChatGPT.exe")));
+
+        let unrelated = package_dir.path().join("ChatGPT.exe");
+        std::fs::write(&unrelated, "").expect("write unrelated ChatGPT shell");
+        assert!(canonical_codex_desktop_executable_path(&unrelated).is_err());
+    }
+
     /// 验证运行中进程探测也按可执行文件名精确区分 Desktop 和小写 app-server。
     #[cfg(target_os = "windows")]
     #[test]
     fn codex_main_process_probe_filters_cli_launcher_name_case() {
-        assert!(DETECT_CODEX_MAIN_PROCESS_SCRIPT
-            .contains("(Split-Path -Leaf $_.ExecutablePath) -ceq 'Codex.exe'"));
+        assert!(DETECT_CODEX_MAIN_PROCESS_SCRIPT.contains("$legacyCodex = $leaf -ceq 'Codex.exe'"));
+        assert!(DETECT_CODEX_MAIN_PROCESS_SCRIPT.contains("Name = 'ChatGPT.exe'"));
+        assert!(DETECT_CODEX_MAIN_PROCESS_SCRIPT.contains("OpenAI\\.Codex"));
         assert!(!DETECT_CODEX_MAIN_PROCESS_SCRIPT.contains(" -ieq 'Codex.exe'"));
     }
 

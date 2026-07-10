@@ -1968,3 +1968,13 @@
 - 旧修复思路是为了让 `spawn_agent` 参数里可直接覆盖模型；新版路径已经有 `~/.codex/agents/*.toml` custom agent role 文件承载子 Agent 的 `model`、`model_provider`、`model_reasoning_effort`，因此不应再通过扩展保留函数 schema 选择模型。
 - `src-tauri/src/codex_config.rs` 的 Codex catalog/config 投影改为 `ensure_codex_multi_agent_reserved_schema_compatible`：保留用户原本 `multi_agent_v2` 启用状态，但写入 `hide_spawn_agent_metadata = true`，让 `collaboration.spawn_agent` 回到官方保留工具形态；文档 `docs/codex-spawn-agent-model-candidates.md` 同步说明子模型选择走 managed role 文件。
 - 现场快速恢复可以把 `~/.codex/config.toml` 里的 `[features.multi_agent_v2] hide_spawn_agent_metadata = false` 改为 `true` 后重启 Codex/GPT app；长期修复依赖新版 CCSwitchMulti 重新投影配置。
+
+## 2026-07-10 统一 Codex App 历史目录与原生模型目录适配（纠正）
+
+- 前一节“按 provider 桶过滤导致历史不可见”不适用于当前统一 Codex App，不能再作为新版历史修复根因。用 MSIX 内置 `codex 0.144.0-alpha.4` 按 App 官方同步参数只读实测，canonical `~/.codex/state_5.sqlite` 可稳定分页返回 `100 + 100 + 46 = 246` 条可见顶层 vscode 线程；`modelProviders` 省略、`null` 或空数组在当前数据上结果一致。两个数据库 `PRAGMA integrity_check` 都是 `ok`，历史正文和 canonical 索引没有丢失或损坏。
+- 新版 `OpenAI.Codex_26.707.3748.0` 的桌面壳已经改为 `app/ChatGPT.exe`，子进程才是 `resources/codex.exe ... app-server`。新版侧边栏不直接展示 canonical `threads`，而是读取派生库 `~/.codex/sqlite/codex-dev.db` 的 `local_thread_catalog`。现场该目录只有 17 行，且 `local_thread_catalog_sync_state(local)` 为 `initial_build_complete=0`、`watermark_updated_at=NULL`，这才是“历史都没了”的真实断点。
+- 新版主修复必须调用 App 自己的 `localThreadCatalog.requestStartupSync()`，由原生 manager 按 `useStateDbOnly=true`、source/parent/subagent/ephemeral 规则完成 cold sweep；不要批量重写 `state_5.sqlite` 的 `model_provider`、source/history 字段，不要改 rollout JSONL，也不要手工把 canonical rows 灌入 `local_thread_catalog`，否则会绕过 revision、missing-candidate、watermark 和 read-repair 语义。
+- CCSM 的 renderer 兼容层现在通过新版 `rpc-*` 模块寻找 `localThreadCatalog`，调用 `readSnapshot()` / `requestStartupSync()`，并把“脚本已注入”和“原生同步确已请求”分开返回。Windows 宿主发现同时兼容旧 `Codex.exe` 与 `OpenAI.Codex_*` MSIX 内受路径约束的 `ChatGPT.exe`；普通独立 ChatGPT 程序不能进入 Codex CDP 链路。
+- 旧版 SQLite/rollout 历史修复工具保留为离线兜底，但真实写入时只要检测到 Codex Desktop/app-server 仍运行就必须拒绝。它不是统一 App 的默认修复路径；dry-run 仍可作为只读诊断。
+- `修复过程.zip` 的截图主要证明新版模型目录和路由适配，不是历史修复方案：官方 native cache 已含 `gpt-5.6-sol/terra/luna`，而 CCSM 路由 catalog 尚未包含。正确实现是按 `slug -> model -> id` 动态合并官方缓存与 CCSM 路由模型（路由字段优先、官方独有元数据与模型保留），并在当前缓存已被 CCSM 接管时从接管前 backup 恢复 native 基线；不要硬编码某一批 GPT-5.6 名称，也不要继续整份覆盖 `models_cache.json`。
+- 验证基线：`cargo test codex_desktop::tests:: --lib` 17/17、`cargo test codex_history_migration::tests:: --lib` 39/39、`cargo test codex_config::tests:: --lib` 84/84、`pnpm typecheck`、`pnpm vitest run src/components/codex/CodexRouterWorkspacePage.test.ts` 39/39 均通过。

@@ -150,6 +150,9 @@ export interface CodexModelPickerUnlockResult {
   injected: boolean;
   launched: boolean;
   codexExecutable: string | null;
+  historySyncRequested?: boolean;
+  historyCatalogComplete?: boolean | null;
+  historyCatalogCount?: number | null;
   message: string;
 }
 

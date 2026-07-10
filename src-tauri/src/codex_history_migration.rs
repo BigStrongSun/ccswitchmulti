@@ -562,6 +562,17 @@ pub fn repair_codex_history_visibility_for_multirouter(
         .or_else(|| live_config_model_provider.clone())
         .unwrap_or_else(|| CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID.to_string());
     let dry_run = options.dry_run;
+    // 内建面板的旧版恢复会改写 state DB、rollout 和全局状态。新版 App 运行时必须拒绝
+    // 写入，避免 app-server 的 WAL 或目录同步把结果覆盖；dry-run 仍保持只读可用。
+    if !dry_run {
+        let running = running_codex_desktop_process_descriptions();
+        if !running.is_empty() {
+            return Err(AppError::Message(format!(
+                "Codex Desktop/app-server 仍在运行。新版 App 请先使用原生历史目录修复；如需旧版离线恢复，请完全退出 Codex 后再写入。检测到: {}",
+                running.join("; ")
+            )));
+        }
+    }
     let count = options.count.unwrap_or(30);
     let window_limit = options.window_limit.unwrap_or(80);
     let balance_recent_window = options.balance_recent_window.unwrap_or(true);

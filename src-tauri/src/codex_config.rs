@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::config::{
@@ -1927,7 +1927,78 @@ fn current_utc_rfc3339_nanos() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
 }
 
-/// 将 CC Switch 生成的完整模型目录同步到 Codex 官方缓存。
+/// 提取 Codex 模型条目的稳定标识，兼容官方缓存和 CCSM 目录使用的不同字段名。
+///
+/// 字段优先级遵循 Codex 官方缓存最常见的 `slug`，再回退到路由目录常见的
+/// `model` 和兼容性字段 `id`。仅对比较键做小写归一化，不改写最终输出中的原值。
+fn codex_model_stable_id(model: &Value) -> Option<String> {
+    ["slug", "model", "id"].iter().find_map(|field| {
+        model
+            .get(*field)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_ascii_lowercase)
+    })
+}
+
+/// 合并同一模型的官方元数据和 CCSM 路由表示。
+///
+/// 先复制官方对象，再覆盖 CCSM 提供的字段：这样路由所需的 slug、展示名和能力声明
+/// 具有更高优先级，同时保留新版 Codex 新增而 CCSM 尚不认识的元数据字段。
+fn merge_codex_model_entry(official: Option<&Value>, routed: &Value) -> Value {
+    let (Some(official_object), Some(routed_object)) =
+        (official.and_then(Value::as_object), routed.as_object())
+    else {
+        return routed.clone();
+    };
+
+    let mut merged = official_object.clone();
+    for (field, value) in routed_object {
+        merged.insert(field.clone(), value.clone());
+    }
+    Value::Object(merged)
+}
+
+/// 合并官方原生模型和 CCSM 路由模型，并以稳定标识去重。
+///
+/// 输出顺序固定为 CCSM 目录顺序优先、官方独有模型随后追加。相同标识的模型只输出
+/// 一次；同标识条目以 CCSM 字段为准，但通过 `merge_codex_model_entry` 保留官方扩展字段。
+fn merge_codex_models(official_models: &[Value], routed_models: &[Value]) -> Vec<Value> {
+    let mut official_by_id = HashMap::new();
+    for model in official_models {
+        if let Some(model_id) = codex_model_stable_id(model) {
+            official_by_id.entry(model_id).or_insert(model);
+        }
+    }
+
+    let mut seen_ids = HashSet::new();
+    let mut merged_models = Vec::with_capacity(official_models.len() + routed_models.len());
+    for routed_model in routed_models {
+        let routed_id = codex_model_stable_id(routed_model);
+        if routed_id
+            .as_ref()
+            .is_some_and(|model_id| !seen_ids.insert(model_id.clone()))
+        {
+            continue;
+        }
+        let official_model = routed_id
+            .as_ref()
+            .and_then(|model_id| official_by_id.get(model_id).copied());
+        merged_models.push(merge_codex_model_entry(official_model, routed_model));
+    }
+
+    for official_model in official_models {
+        if codex_model_stable_id(official_model).is_some_and(|model_id| !seen_ids.insert(model_id))
+        {
+            continue;
+        }
+        merged_models.push(official_model.clone());
+    }
+    merged_models
+}
+
+/// 将 CC Switch 生成的路由模型目录与 Codex 官方缓存合并后同步。
 ///
 /// 这个函数解决运行中的 Codex 热切到 custom MultiRouter 后候选模型不刷新的问题：
 /// custom provider 不会主动请求 `/models`，但会接受 fresh `models_cache.json`。
@@ -1942,13 +2013,22 @@ fn sync_codex_models_cache_with_cc_switch_catalog(catalog: &Value) -> Result<(),
     let cache_path = get_codex_models_cache_path();
     let backup_path = get_codex_models_cache_backup_path();
     let existing_cache = read_json_file_if_exists(&cache_path)?;
+    // 当前缓存若已被 CCSM 接管，必须从接管前备份读取原生目录；否则重启同步会把
+    // 上一轮已丢失的新版模型继续固化。官方缓存未被接管时则以当前内容为准。
+    let official_cache = match existing_cache.as_ref() {
+        Some(cache) if codex_models_cache_is_cc_switch_owned(cache) => {
+            read_json_file_if_exists(&backup_path)?.or_else(|| existing_cache.clone())
+        }
+        _ => existing_cache.clone(),
+    };
     let client_version = existing_cache
         .as_ref()
+        .or(official_cache.as_ref())
         .and_then(|cache| cache.get("client_version"))
         .and_then(|version| version.as_str())
         .map(ToString::to_string);
 
-    // Codex 0.140 的 custom provider 不会主动请求 /models，只会读取新鲜 cache。
+    // Codex 0.140+ 的 custom provider 不会主动请求 /models，只会读取新鲜 cache。
     // 因此这里复用已有 client_version 写入同格式 cache，让模型菜单立刻看到
     // cc-switch 生成的完整 catalog，同时用 etag 标记所有权便于恢复 official。
     let Some(client_version) = client_version else {
@@ -1968,12 +2048,33 @@ fn sync_codex_models_cache_with_cc_switch_catalog(catalog: &Value) -> Result<(),
         }
     }
 
-    let cache = json!({
-        "fetched_at": current_utc_rfc3339_nanos(),
-        "etag": CC_SWITCH_CODEX_MODELS_CACHE_ETAG,
-        "client_version": client_version,
-        "models": models,
-    });
+    let official_models = official_cache
+        .as_ref()
+        .and_then(|cache| cache.get("models"))
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let merged_models = merge_codex_models(official_models, models);
+
+    // 以官方缓存对象为底稿还能保留新版 App 可能新增的顶层元数据；这里只覆盖
+    // CCSM 必须维护的刷新时间、所有权标记、客户端版本和合并后的模型数组。
+    let mut cache = official_cache.unwrap_or_else(|| json!({}));
+    if !cache.is_object() {
+        cache = json!({});
+    }
+    let cache_object = cache
+        .as_object_mut()
+        .expect("cache was normalized to a JSON object");
+    cache_object.insert(
+        "fetched_at".to_string(),
+        Value::String(current_utc_rfc3339_nanos()),
+    );
+    cache_object.insert(
+        "etag".to_string(),
+        Value::String(CC_SWITCH_CODEX_MODELS_CACHE_ETAG.to_string()),
+    );
+    cache_object.insert("client_version".to_string(), Value::String(client_version));
+    cache_object.insert("models".to_string(), Value::Array(merged_models));
     write_json_file(&cache_path, &cache)
 }
 
@@ -5769,6 +5870,47 @@ model_catalog_json = "cc-switch-model-catalog.json"
     }
 
     #[test]
+    /// 模型合并应保持 CCSM 路由顺序和字段优先级，同时保留官方独有元数据与模型。
+    fn merge_codex_models_preserves_official_metadata_and_native_only_models() {
+        let official_models = json!([
+            {
+                "slug": "gpt-5.5",
+                "display_name": "Official GPT-5.5",
+                "native_capability": { "app_personality": true }
+            },
+            {
+                "slug": "gpt-5.6-sol",
+                "display_name": "GPT-5.6 Sol",
+                "native_capability": { "app_personality": true }
+            }
+        ]);
+        let routed_models = json!([
+            { "model": "qwen3.6", "display_name": "Qwen 3.6" },
+            { "model": "gpt-5.5", "display_name": "Routed GPT-5.5" }
+        ]);
+
+        let merged = merge_codex_models(
+            official_models.as_array().expect("official models"),
+            routed_models.as_array().expect("routed models"),
+        );
+        let ids = merged
+            .iter()
+            .filter_map(codex_model_stable_id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["qwen3.6", "gpt-5.5", "gpt-5.6-sol"]);
+        assert_eq!(
+            merged[1].get("display_name").and_then(Value::as_str),
+            Some("Routed GPT-5.5"),
+            "CCSM routing fields should override the official representation"
+        );
+        assert_eq!(
+            merged[1].get("native_capability"),
+            Some(&json!({ "app_personality": true })),
+            "official-only metadata must survive a same-slug merge"
+        );
+    }
+
+    #[test]
     #[serial]
     /// custom MultiRouter 应同步 models_cache，让运行中的 Codex 菜单能看到 Qwen/DeepSeek。
     fn model_catalog_syncs_codex_models_cache_for_custom_provider_picker() {
@@ -5857,6 +5999,74 @@ base_url = "http://127.0.0.1:15721/v1"
         assert!(slugs.contains(&"deepseek-v4-flash"));
         assert!(model_fields.contains(&"qwen3.6"));
         assert!(model_fields.contains(&"deepseek-v4-flash"));
+    }
+
+    #[test]
+    #[serial]
+    /// 重复同步应始终从接管前备份恢复原生基线，不能永久丢失新版 App 独有模型。
+    fn repeated_model_catalog_sync_keeps_native_models_from_backup() {
+        let _home = TestHomeGuard::new();
+        seed_codex_models_cache(json!([
+            {
+                "slug": "gpt-5.5",
+                "display_name": "GPT-5.5",
+                "model_messages": { "instructions_template": "template" },
+                "context_window": 128000
+            },
+            {
+                "slug": "gpt-5.6-sol",
+                "display_name": "GPT-5.6 Sol",
+                "native_capability": { "personality": "sol" },
+                "context_window": 256000
+            }
+        ]));
+        let settings = json!({
+            "modelCatalog": {
+                "models": [
+                    { "model": "gpt-5.5", "displayName": "GPT-5.5" },
+                    { "model": "qwen3.6", "displayName": "Qwen 3.6" }
+                ]
+            }
+        });
+        let config = r#"model_provider = "custom"
+
+[model_providers.custom]
+base_url = "http://127.0.0.1:15721/v1"
+"#;
+
+        prepare_codex_config_text_with_model_catalog(
+            &settings,
+            config,
+            CodexCatalogToolProfile::ProxyChat,
+        )
+        .expect("first cache sync");
+
+        // 模拟旧版本 CCSM 已把当前接管缓存中的原生 5.6 条目覆盖掉；原始备份仍完整。
+        let cache_path = get_codex_models_cache_path();
+        let mut owned_cache: Value = read_json_file(&cache_path).expect("read owned cache");
+        owned_cache
+            .get_mut("models")
+            .and_then(Value::as_array_mut)
+            .expect("owned models")
+            .retain(|model| codex_model_stable_id(model).as_deref() != Some("gpt-5.6-sol"));
+        write_json_file(&cache_path, &owned_cache).expect("simulate stale owned cache");
+
+        let catalog = read_json_file(&get_codex_model_catalog_path()).expect("read catalog");
+        sync_codex_models_cache_with_cc_switch_catalog(&catalog).expect("repeat cache sync");
+
+        let resynced_cache: Value = read_json_file(&cache_path).expect("read resynced cache");
+        let native_model = resynced_cache
+            .get("models")
+            .and_then(Value::as_array)
+            .expect("resynced models")
+            .iter()
+            .find(|model| codex_model_stable_id(model).as_deref() == Some("gpt-5.6-sol"))
+            .expect("native GPT-5.6 model should be recovered from backup");
+        assert_eq!(
+            native_model.get("native_capability"),
+            Some(&json!({ "personality": "sol" })),
+            "the full native metadata should survive repeated synchronization"
+        );
     }
 
     #[test]

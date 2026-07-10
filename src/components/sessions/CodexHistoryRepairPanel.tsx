@@ -31,6 +31,7 @@ import { ProviderIcon } from "@/components/ProviderIcon";
 import { proxyApi } from "@/lib/api/proxy";
 import { cn } from "@/lib/utils";
 import type {
+  CodexModelPickerUnlockResult,
   CodexHistorySessionDetailOutcome,
   CodexHistorySessionListOutcome,
   CodexHistorySessionSummary,
@@ -111,6 +112,10 @@ export function CodexHistoryRepairPanel({
   const [repairError, setRepairError] = useState<string | null>(null);
   const [isPreviewingRepair, setIsPreviewingRepair] = useState(false);
   const [isApplyingRepair, setIsApplyingRepair] = useState(false);
+  const [appRepairResult, setAppRepairResult] =
+    useState<CodexModelPickerUnlockResult | null>(null);
+  const [appRepairError, setAppRepairError] = useState<string | null>(null);
+  const [isRepairingAppHistory, setIsRepairingAppHistory] = useState(false);
   const didAutoLoadRef = useRef(false);
 
   const normalizedCodexHome = codexHome.trim();
@@ -162,6 +167,27 @@ export function CodexHistoryRepairPanel({
   function invalidatePreview() {
     setLastPreviewKey(null);
     setRepairError(null);
+  }
+
+  /// 安装新版 Codex App 兼容层，并调用 App 自己的本地线程目录同步服务。
+  async function repairNewCodexAppHistory() {
+    setIsRepairingAppHistory(true);
+    setAppRepairError(null);
+    try {
+      const result = await proxyApi.unlockCodexModelPicker();
+      setAppRepairResult(result);
+      if (result.historySyncRequested) {
+        toast.success("已触发新版 Codex App 原生历史目录重建");
+      } else {
+        toast.info(result.message);
+      }
+    } catch (error) {
+      const message = extractErrorMessage(error) || String(error);
+      setAppRepairError(message);
+      toast.error(message);
+    } finally {
+      setIsRepairingAppHistory(false);
+    }
   }
 
   /// 从后端 active SQLite 加载可修复会话摘要和 source/provider 分布。
@@ -350,7 +376,20 @@ export function CodexHistoryRepairPanel({
           <div className="flex flex-wrap gap-2">
             <Button
               size="sm"
-              variant={historyList ? "outline" : "default"}
+              onClick={repairNewCodexAppHistory}
+              disabled={isRepairingAppHistory}
+              className="gap-2"
+            >
+              {isRepairingAppHistory ? (
+                <RefreshCw className="size-4 animate-spin" />
+              ) : (
+                <Eye className="size-4" />
+              )}
+              修复新版 App 历史
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
               onClick={loadHistorySessions}
               disabled={isLoadingHistory}
               className="gap-2"
@@ -374,7 +413,7 @@ export function CodexHistoryRepairPanel({
               ) : (
                 <FileClock className="size-4" />
               )}
-              预览修复
+              预览旧版恢复
             </Button>
             <Button
               size="sm"
@@ -387,7 +426,7 @@ export function CodexHistoryRepairPanel({
               ) : (
                 <ShieldCheck className="size-4" />
               )}
-              确认写入
+              写入旧版索引
             </Button>
             {onClose ? (
               <Button size="sm" variant="ghost" onClick={onClose}>
@@ -404,30 +443,40 @@ export function CodexHistoryRepairPanel({
               <ListChecks className="mt-0.5 size-4 shrink-0" />
               <div className="min-w-0 space-y-2">
                 <div className="font-medium">
-                  MultiRouter 已配置成功，现在按顺序完成历史记录自动修复
+                  MultiRouter 已配置成功，先恢复新版 App 的原生历史目录
                 </div>
                 <ol className="list-decimal space-y-1 pl-5 text-xs leading-5">
                   <li>
-                    点击 <span className="font-medium">加载历史</span>
-                    ，确认 active DB 和待修复 session 已被读取。
+                    点击 <span className="font-medium">修复新版 App 历史</span>
+                    ，CCSM 会调用 App 自己的目录同步服务，不改 provider、时间或
+                    rollout。
                   </li>
                   <li>
-                    点击 <span className="font-medium">预览修复</span>
-                    ，先只读计算 provider 桶、session_index、workspace hints 和
-                    rollout 元数据会改多少。
+                    如果 App 已经在运行但没有调试端口，请完整退出 Codex，再从
+                    CCSwitchMulti 重新启动后重试。
                   </li>
                   <li>
-                    预览状态变为“预览已锁定，可确认写入”后，点击
-                    <span className="font-medium"> 确认写入</span>
-                    ，弹窗里再次核对计数后确认。
-                  </li>
-                  <li>
-                    写入完成后按弹窗提示完整重启 Codex；随后会打开 CCSwitchMulti
-                    GitHub 仓库，请帮忙点 Star。
+                    下方 SQLite 工具仅用于旧版离线恢复；先加载并预览，确认 App
+                    已完全退出后才写入。
                   </li>
                 </ol>
               </div>
             </div>
+          </div>
+        ) : null}
+
+        {appRepairResult || appRepairError ? (
+          <div
+            className={cn(
+              "mt-3 rounded-md border px-3 py-2 text-xs",
+              appRepairError
+                ? "border-destructive/40 bg-destructive/10 text-destructive"
+                : appRepairResult?.historySyncRequested
+                  ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-800 dark:text-emerald-200"
+                  : "border-amber-500/40 bg-amber-500/10 text-amber-800 dark:text-amber-200",
+            )}
+          >
+            {appRepairError ?? appRepairResult?.message}
           </div>
         ) : null}
 
@@ -436,11 +485,11 @@ export function CodexHistoryRepairPanel({
             <Info className="mt-0.5 size-4 shrink-0 text-blue-500" />
             <div>
               <div className="font-medium text-foreground">
-                统一历史负责合并抽屉
+                新版 App 使用独立线程目录
               </div>
               <div>
-                设置里的官方开关只迁移 `openai` / `custom` resume
-                桶，并按备份账本精确还原。
+                主修复调用 `localThreadCatalog.requestStartupSync()`，让 App 从
+                active state DB 自行重建统一侧边栏。
               </div>
             </div>
           </div>
@@ -448,11 +497,11 @@ export function CodexHistoryRepairPanel({
             <ShieldCheck className="mt-0.5 size-4 shrink-0 text-emerald-500" />
             <div>
               <div className="font-medium text-foreground">
-                本工具负责找回可见性
+                旧版恢复仅作离线兜底
               </div>
               <div>
-                只在预览确认后修复 active DB、session_index、workspace hints 和
-                rollout 元数据；自动识别 `sqlite_home` 与 `CODEX_SQLITE_HOME`。
+                下方工具会改 active DB、session_index、workspace hints 和
+                rollout 元数据；新版 App 不应默认使用它。
               </div>
             </div>
           </div>
