@@ -5,6 +5,9 @@
 - `v3.16.5-1` 是 CCSwitchMulti 对原版 `cc-switch v3.16.5` 的跟进发布版本；正式 tag 应使用 fork tag `v3.16.5-1`，不要复用上游 `v3.16.5` tag。`release.yml` 会读取 `docs/release-notes/v3.16.5-1-zh.md` 生成 GitHub Release 正文，资产外显命名继续使用 `CCSwitchMulti-${TAG}-...`。
 - 本版必须在 release note 顶部注明：**尚未适配 OpenAI 新版 ChatGPT 应用**。当前合并只覆盖原版 `cc-switch v3.16.5` 与 CCSwitchMulti 既有 Codex Desktop / CLI 接管路径；如果新版 ChatGPT 应用改变桌面端协议、模型菜单、渲染器门控或登录态结构，需要后续单独适配。
 - 发布前不要提交未跟踪的本地输出目录：`output/release-v3.16.4-4-upload/`、`output/release-v3.16.4-5wizard/`、`scripts/logs/`。发布流程仍是先把当前分支 fast-forward 推到 `fork/main`，再推 annotated tag 触发 `.github/workflows/release.yml`。
+- `v3.16.5-1` 已作为 BigStrongSun/ccswitchmulti 正式 release 发布：`https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.16.5-1`。Release 为 `draft=false`、`prerelease=false`，发布时间 `2026-07-10T05:41:45Z`，正文确认包含“尚未适配 OpenAI 新版 ChatGPT 应用”提示。
+- GitHub Actions release run `29070736037` 全部成功：Windows x64/ARM64、macOS universal、Linux x64/ARM64、Publish GitHub Release、Assemble `latest.json` 均为 success。Release 资产共 19 个，外显命名为 `CCSwitchMulti-v3.16.5-1-*`，包含 `latest.json`。
+- 下载验证 `latest.json`：`version=3.16.5-1`，`pub_date=2026-07-10T05:41:56Z`，updater 平台包含 `darwin-aarch64`、`darwin-x86_64`、`windows-x86_64`、`windows-aarch64`、`linux-x86_64`、`linux-aarch64`。
 
 ## 2026-07-10 Upstream v3.16.5 Merge Into CCSwitchMulti
 
