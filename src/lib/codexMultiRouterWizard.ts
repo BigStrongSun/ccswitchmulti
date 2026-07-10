@@ -76,21 +76,6 @@ export interface WizardProtocolProbe {
   httpStatus?: number | null;
 }
 
-const OPENAI_CODEX_FALLBACK_MODELS: CodexCatalogModel[] = [
-  { model: "gpt-5.5", upstreamModel: "gpt-5.5", contextWindow: 272000 },
-  { model: "gpt-5.4", upstreamModel: "gpt-5.4", contextWindow: 272000 },
-  {
-    model: "gpt-5.4-mini",
-    upstreamModel: "gpt-5.4-mini",
-    contextWindow: 128000,
-  },
-  {
-    model: "gpt-5.3-codex-spark",
-    upstreamModel: "gpt-5.3-codex-spark",
-    contextWindow: 128000,
-  },
-];
-
 // 读取 provider 上绑定的托管 Codex OAuth 账号；未绑定时交给后端使用默认账号。
 export function readWizardCodexOAuthAccountId(
   provider: Provider,
@@ -156,28 +141,22 @@ export function isWizardCodexOAuthSource(provider: Provider): boolean {
   );
 }
 
-// 判断模型源是否是官方/OAuth 路径；这些 provider 常常不能通过普通 /models 获取目录。
+// 判断模型源是否是官方/OAuth 路径；这些 provider 必须通过 ChatGPT 专用接口获取目录。
 function isOfficialCodexSource(provider: Provider): boolean {
   return isWizardCodexOAuthSource(provider);
 }
 
-// 读取 Codex provider 的模型目录；旧数据缺失或结构异常时返回空目录，避免向导崩溃。
+// 读取 Codex provider 的真实持久化模型目录；缺失或结构异常时返回空目录，不能伪造 OAuth 模型权限。
 export function readWizardModelCatalog(
   provider: Provider,
 ): CodexCatalogModel[] {
   const models = provider.settingsConfig?.modelCatalog?.models;
   if (!Array.isArray(models)) {
-    return isOfficialCodexSource(provider)
-      ? OPENAI_CODEX_FALLBACK_MODELS.map((model) => ({ ...model }))
-      : [];
+    return [];
   }
-  const normalizedModels = models
+  return models
     .map((model) => model as CodexCatalogModel)
     .filter((model) => typeof model.model === "string" && model.model.trim());
-  if (normalizedModels.length === 0 && isOfficialCodexSource(provider)) {
-    return OPENAI_CODEX_FALLBACK_MODELS.map((model) => ({ ...model }));
-  }
-  return normalizedModels;
 }
 
 // 判断 provider 是否是 MultiRouter 方案；向导只把普通 provider 当作上游模型源。
@@ -239,7 +218,7 @@ export function getWizardModelFetchConfig(
   };
 }
 
-// 判断 provider 是否已有可用于路由的模型目录；官方 fallback 会在 readWizardModelCatalog 中统一补齐。
+// 判断 provider 是否已有可用于路由的真实模型目录。
 export function hasWizardModelCatalog(provider: Provider): boolean {
   return readWizardModelCatalog(provider).length > 0;
 }

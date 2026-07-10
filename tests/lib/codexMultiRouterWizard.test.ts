@@ -499,6 +499,9 @@ describe("codexMultiRouterWizard helpers", () => {
       settingsConfig: {
         base_url: "https://relay.example.com/v1",
         auth: { OPENAI_API_KEY: "sk-polluted" },
+        modelCatalog: {
+          models: [{ model: "gpt-5.6-sol", contextWindow: 372000 }],
+        },
       },
       meta: {
         authBinding: {
@@ -514,7 +517,7 @@ describe("codexMultiRouterWizard helpers", () => {
     expect(getWizardConfigIssues([official])).toEqual([]);
 
     const [route] = buildWizardRoutesFromSources([official]);
-    expect(route.match.models).toContain("gpt-5.5");
+    expect(route.match.models).toEqual(["gpt-5.6-sol"]);
     expect(route.upstream.auth).toEqual({
       source: "managed_codex_oauth",
       authProvider: "codex_oauth",

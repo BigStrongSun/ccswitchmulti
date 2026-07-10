@@ -1849,7 +1849,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     expect(rebuilt.spawnAgentModels).toEqual(["qwen3.6"]);
   });
 
-  it("seeds OpenAI/Codex providers without a model catalog with fallback models", () => {
+  it("keeps OpenAI/Codex providers empty until their OAuth catalog is fetched", () => {
     const officialBackup: Provider = {
       id: "codex-official-backup",
       name: "OpenAI Official Backup",
@@ -1859,26 +1859,22 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
 
     const plan = createDraftRoutingPlan([officialBackup], [officialBackup]);
 
-    expect(plan.settingsConfig.modelCatalog.models).toEqual([
-      { model: "gpt-5.5", contextWindow: 272000 },
-      { model: "gpt-5.4", contextWindow: 272000 },
-      { model: "gpt-5.4-mini", contextWindow: 128000 },
-      { model: "gpt-5.3-codex-spark", contextWindow: 128000 },
-    ]);
-    expect(plan.settingsConfig.modelCatalog.spawnAgentModels).toEqual([
-      "gpt-5.5",
-      "gpt-5.4",
-      "gpt-5.4-mini",
-      "gpt-5.3-codex-spark",
-    ]);
+    expect(plan.settingsConfig.modelCatalog.models).toEqual([]);
+    expect(plan.settingsConfig.modelCatalog.spawnAgentModels ?? []).toEqual([]);
   });
 
-  it("rebuilds official fallback route catalog with full Codex context windows", () => {
+  it("rebuilds an official route from the dynamically persisted OAuth catalog", () => {
     const officialBackup: Provider = {
       id: "codex-official-backup",
       name: "OpenAI Official Backup",
       category: "official",
-      settingsConfig: { auth: {}, config: "" },
+      settingsConfig: {
+        auth: {},
+        config: "",
+        modelCatalog: {
+          models: [{ model: "gpt-5.6-sol", contextWindow: 372000 }],
+        },
+      },
     };
     const plan = createDraftRoutingPlan([officialBackup], [officialBackup]);
     const routes = [
@@ -1886,7 +1882,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
         {
           label: officialBackup.name,
           targetProviderId: officialBackup.id,
-          match: { models: ["gpt-5.5"], prefixes: ["gpt-"] },
+          match: { models: ["gpt-5.6-sol"], prefixes: ["gpt-"] },
         },
         0,
         new Set<string>(),
@@ -1900,8 +1896,8 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     );
 
     expect(rebuilt.models).toContainEqual({
-      model: "gpt-5.5",
-      contextWindow: 272000,
+      model: "gpt-5.6-sol",
+      contextWindow: 372000,
     });
   });
 

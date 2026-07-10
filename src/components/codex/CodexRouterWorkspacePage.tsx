@@ -240,7 +240,6 @@ function providerRouteModelIdentitySet(provider: Provider): Set<string> {
     [
       ...readCodexModelCatalog(provider).models.map((model) => model.model),
       ...collectProviderModelIds(provider),
-      ...fallbackCatalogDraftForProvider(provider).map((model) => model.model),
       ...inferProviderPrefixes(provider, collectProviderModelIds(provider)),
     ]
       .map(normalizedRouteIdentityText)
@@ -407,15 +406,6 @@ type CodexModelCatalogDraft = {
   spawnAgentModels?: string[];
 };
 
-const OPENAI_CODEX_FALLBACK_CATALOG_MODELS: CodexCatalogModelDraft[] = [
-  { model: "gpt-5.5", contextWindow: 272000 },
-  { model: "gpt-5.4", contextWindow: 272000 },
-  { model: "gpt-5.4-mini", contextWindow: 128000 },
-  { model: "gpt-5.3-codex-spark", contextWindow: 128000 },
-];
-const OPENAI_CODEX_FALLBACK_MODELS = OPENAI_CODEX_FALLBACK_CATALOG_MODELS.map(
-  (model) => model.model,
-);
 const DEFAULT_CODEX_PROXY_LISTEN_ADDRESS = "127.0.0.1";
 const DEFAULT_CODEX_PROXY_LISTEN_PORT = 15721;
 const MODEL_REFRESH_TIMEOUT_MS = 30_000;
@@ -930,7 +920,7 @@ function uniqueRouteId(preferredId: string, usedIds: Set<string>): string {
   return nextId;
 }
 
-/// 从模型目录里推断精确模型名；没有目录时再读取常见单模型字段，保证新候选也有可解释的匹配条件。
+/// 从真实模型目录里推断精确模型名；没有目录时只读取显式单模型字段，不能伪造 OAuth 模型权限。
 function collectProviderModelIds(provider: Provider): string[] {
   const catalogModels = readCodexModelCatalog(provider)
     .models.map((model) => model.model?.trim())
@@ -942,32 +932,7 @@ function collectProviderModelIds(provider: Provider): string[] {
   ].filter(
     (model): model is string => typeof model === "string" && !!model.trim(),
   );
-  const providerText =
-    `${provider.id} ${provider.name} ${provider.category ?? ""}`
-      .toLowerCase()
-      .trim();
-  const providerType = String(
-    provider.meta?.providerType ?? provider.settingsConfig?.providerType ?? "",
-  ).toLowerCase();
-  const baseUrlText = String(
-    provider.settingsConfig?.base_url ??
-      provider.settingsConfig?.baseURL ??
-      provider.settingsConfig?.baseUrl ??
-      "",
-  ).toLowerCase();
-  const looksLikeOpenAiSource =
-    providerText.includes("openai") ||
-    providerType.includes("codex_oauth") ||
-    baseUrlText.includes("chatgpt.com/backend-api/codex");
-  const fallbackModels =
-    looksLikeOpenAiSource &&
-    catalogModels.length === 0 &&
-    singleModelFields.length === 0
-      ? OPENAI_CODEX_FALLBACK_MODELS
-      : [];
-  return Array.from(
-    new Set([...catalogModels, ...singleModelFields, ...fallbackModels]),
-  );
+  return Array.from(new Set([...catalogModels, ...singleModelFields]));
 }
 
 /// 从 provider 的 catalog 生成 route 级别模型映射；MultiRouter 后端只物化目标 provider，
@@ -990,24 +955,6 @@ function buildRouteModelMapFromProvider(
     })
     .filter((entry): entry is [string, string] => Boolean(entry));
   return entries.length > 0 ? Object.fromEntries(entries) : undefined;
-}
-
-/// 官方/OAuth provider 经常没有可读 /models catalog；这里提供带上下文窗口的兜底目录，
-/// 避免 MultiRouter 只保存裸模型名后让 Codex Desktop 回退到 128k 级默认窗口。
-function fallbackCatalogDraftForProvider(
-  provider: Provider,
-): CodexCatalogModelDraft[] {
-  const settings = provider.settingsConfig ?? {};
-  const providerType = String(
-    provider.meta?.providerType ?? settings.providerType ?? "",
-  ).toLowerCase();
-  if (
-    provider.category === "official" ||
-    providerType.includes("codex_oauth")
-  ) {
-    return OPENAI_CODEX_FALLBACK_CATALOG_MODELS.map((model) => ({ ...model }));
-  }
-  return [];
 }
 
 /// 归一化模型名尾段，用于保守识别已知纯文本模型，避免 provider 名称大小写或平台前缀影响判断。
@@ -1188,16 +1135,6 @@ function buildModelCatalogDraftFromSources(
     const sourceCatalogModels = readCodexModelCatalog(provider).models;
     for (const catalogModel of sourceCatalogModels) {
       const id = catalogModel.model?.trim();
-      if (!id || byModel.has(id)) continue;
-      byModel.set(id, catalogDraftFromSourceModel(id, catalogModel));
-    }
-
-    const fallbackCatalogModels =
-      sourceCatalogModels.length === 0
-        ? fallbackCatalogDraftForProvider(provider)
-        : [];
-    for (const catalogModel of fallbackCatalogModels) {
-      const id = catalogModel.model.trim();
       if (!id || byModel.has(id)) continue;
       byModel.set(id, catalogDraftFromSourceModel(id, catalogModel));
     }
@@ -1613,14 +1550,7 @@ export function buildModelCatalogForRoutes(
     const targetCatalogModels = targetProvider
       ? readCodexModelCatalog(targetProvider).models
       : [];
-    const fallbackCatalogModels =
-      targetProvider && targetCatalogModels.length === 0
-        ? fallbackCatalogDraftForProvider(targetProvider)
-        : [];
-    const routableCatalogModels = [
-      ...targetCatalogModels,
-      ...fallbackCatalogModels,
-    ].filter((catalogModel) =>
+    const routableCatalogModels = targetCatalogModels.filter((catalogModel) =>
       routeCanMatchVisibleCatalogModel(route, catalogModel.model ?? ""),
     );
     for (const catalogModel of routableCatalogModels) {
