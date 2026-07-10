@@ -6570,7 +6570,8 @@ function RouteListButton({
       type="button"
       onClick={onClick}
       className={cn(
-        "group rounded-lg border px-3 py-2 text-left transition",
+        // 路由卡片必须允许收缩到父级网格宽度，否则长模型名会把右侧详情栏挤出并遮挡。
+        "group min-w-0 w-full rounded-lg border px-3 py-2 text-left transition",
         active
           ? "border-emerald-400 bg-emerald-50 shadow-[0_0_0_1px_rgba(52,211,153,0.20)] dark:bg-emerald-600/20 dark:shadow-[0_0_0_1px_rgba(52,211,153,0.3)]"
           : "border-border bg-card hover:border-emerald-400 hover:bg-emerald-50 dark:border-slate-700 dark:bg-slate-950/40 dark:hover:bg-emerald-950/20",
@@ -6606,7 +6607,7 @@ function RouteListButton({
             : authSourceLabel(entry.route.upstream?.auth?.source)}
         </span>
       </div>
-      <div className="mt-1.5 truncate text-xs text-muted-foreground dark:text-slate-400">
+      <div className="mt-1.5 min-w-0 break-words whitespace-normal text-xs leading-5 text-muted-foreground dark:text-slate-400">
         {routeMatchSummary(entry.route)}
       </div>
     </button>
