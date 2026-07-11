@@ -435,14 +435,16 @@ async fn install_script(
     let mut session = CdpSession::new(socket);
     session.send_command(1, "Runtime.enable", json!({})).await?;
     session.send_command(2, "Page.enable", json!({})).await?;
-    let evaluation = session
+    session
         .send_command(
             3,
             "Page.addScriptToEvaluateOnNewDocument",
             json!({ "source": script }),
         )
         .await?;
-    session
+    // 只有 Runtime.evaluate 会返回当前 renderer 的执行结果；新文档脚本注册命令只返回
+    // identifier，不能用来判断 localThreadCatalog 是否真正触发。
+    let evaluation = session
         .send_command(
             4,
             "Runtime.evaluate",

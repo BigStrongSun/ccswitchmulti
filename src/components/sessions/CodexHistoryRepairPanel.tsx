@@ -88,7 +88,7 @@ export function CodexHistoryRepairPanel({
 }: CodexHistoryRepairPanelProps) {
   const [codexHome, setCodexHome] = useState("");
   const [stateDbPath, setStateDbPath] = useState("");
-  const [projectPath, setProjectPath] = useState(initialProjectPath ?? "");
+  const [projectPath, setProjectPath] = useState("");
   const [targetProvider, setTargetProvider] = useState(AUTO_TARGET);
   const [sourceFilter, setSourceFilter] = useState(DEFAULT_SOURCE_FILTER);
   const [includeArchived, setIncludeArchived] = useState(false);
@@ -121,6 +121,7 @@ export function CodexHistoryRepairPanel({
   const normalizedCodexHome = codexHome.trim();
   const normalizedStateDbPath = stateDbPath.trim();
   const normalizedProjectPath = projectPath.trim();
+  const suggestedProjectPath = (initialProjectPath ?? "").trim();
   const selectedSessionKey = useMemo(
     () => [...selectedSessionIds].sort().join("|"),
     [selectedSessionIds],
@@ -247,6 +248,13 @@ export function CodexHistoryRepairPanel({
         ? current.filter((id) => id !== sessionId)
         : [...current, sessionId],
     );
+    invalidatePreview();
+  }
+
+  /// 手动把当前会话项目带入范围；默认保持空值，代表跨项目读取和修复。
+  function applySuggestedProjectPath() {
+    if (!suggestedProjectPath) return;
+    setProjectPath(suggestedProjectPath);
     invalidatePreview();
   }
 
@@ -537,6 +545,7 @@ export function CodexHistoryRepairPanel({
           codexHome={codexHome}
           stateDbPath={stateDbPath}
           projectPath={projectPath}
+          suggestedProjectPath={suggestedProjectPath}
           targetProvider={targetProvider}
           targetProviderOptions={targetProviderOptions}
           sourceFilter={sourceFilter}
@@ -555,6 +564,7 @@ export function CodexHistoryRepairPanel({
             setProjectPath(value);
             invalidatePreview();
           }}
+          onUseSuggestedProjectPath={applySuggestedProjectPath}
           onTargetProviderChange={(value) => {
             setTargetProvider(value);
             invalidatePreview();
@@ -689,6 +699,7 @@ interface RepairSettingsProps {
   codexHome: string;
   stateDbPath: string;
   projectPath: string;
+  suggestedProjectPath: string;
   targetProvider: string;
   targetProviderOptions: string[];
   sourceFilter: string;
@@ -698,6 +709,7 @@ interface RepairSettingsProps {
   onCodexHomeChange: (value: string) => void;
   onStateDbPathChange: (value: string) => void;
   onProjectPathChange: (value: string) => void;
+  onUseSuggestedProjectPath: () => void;
   onTargetProviderChange: (value: string) => void;
   onSourceFilterChange: (value: string) => void;
   onIncludeArchivedChange: (checked: boolean) => void;
@@ -733,6 +745,7 @@ function RepairSettings({
   codexHome,
   stateDbPath,
   projectPath,
+  suggestedProjectPath,
   targetProvider,
   targetProviderOptions,
   sourceFilter,
@@ -742,11 +755,22 @@ function RepairSettings({
   onCodexHomeChange,
   onStateDbPathChange,
   onProjectPathChange,
+  onUseSuggestedProjectPath,
   onTargetProviderChange,
   onSourceFilterChange,
   onIncludeArchivedChange,
   onIncludeSubagentsChange,
 }: RepairSettingsProps) {
+  const providerCountsByValue = useMemo(
+    () =>
+      new Map(
+        (historyList?.providerCounts ?? [])
+          .filter((row) => row.value)
+          .map((row) => [row.value as string, row.count]),
+      ),
+    [historyList?.providerCounts],
+  );
+
   return (
     <div className="grid gap-3">
       <div className="flex items-center gap-2 text-sm font-semibold">
@@ -774,8 +798,18 @@ function RepairSettings({
         <LabeledInput
           label="项目路径"
           value={projectPath}
-          placeholder="可空；为空时不限制项目"
-          hint={projectPath.trim() || "balanced recent-window 会跨项目轮询"}
+          placeholder="默认空；为空时修复所有项目"
+          hint={
+            projectPath.trim()
+              ? "当前只读取和修复这个项目路径"
+              : suggestedProjectPath
+                ? `未限制项目；可手动带入 ${suggestedProjectPath}`
+                : "未限制项目；balanced recent-window 会跨项目轮询"
+          }
+          actionLabel={suggestedProjectPath ? "带入当前项目" : undefined}
+          onAction={
+            suggestedProjectPath ? onUseSuggestedProjectPath : undefined
+          }
           onChange={onProjectPathChange}
         />
         <label className="text-xs font-medium">
@@ -786,11 +820,15 @@ function RepairSettings({
             </SelectTrigger>
             <SelectContent>
               <SelectItem value={AUTO_TARGET}>
-                自动：live config 或 codex_model_router_v2
+                {autoTargetProviderLabel(historyList)}
               </SelectItem>
               {targetProviderOptions.map((provider) => (
                 <SelectItem key={provider} value={provider}>
-                  {provider}
+                  {targetProviderOptionLabel(
+                    provider,
+                    historyList,
+                    providerCountsByValue,
+                  )}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -842,6 +880,8 @@ interface LabeledInputProps {
   value: string;
   placeholder: string;
   hint: string;
+  actionLabel?: string;
+  onAction?: () => void;
   onChange: (value: string) => void;
 }
 
@@ -851,11 +891,27 @@ function LabeledInput({
   value,
   placeholder,
   hint,
+  actionLabel,
+  onAction,
   onChange,
 }: LabeledInputProps) {
   return (
     <label className="text-xs font-medium">
-      {label}
+      <span className="flex items-center justify-between gap-2">
+        <span>{label}</span>
+        {actionLabel && onAction ? (
+          <button
+            type="button"
+            className="text-[11px] font-medium text-primary hover:underline"
+            onClick={(event) => {
+              event.preventDefault();
+              onAction();
+            }}
+          >
+            {actionLabel}
+          </button>
+        ) : null}
+      </span>
       <Input
         value={value}
         onChange={(event) => onChange(event.target.value)}
@@ -1152,15 +1208,46 @@ function buildTargetProviderOptions(
   historyList: CodexHistorySessionListOutcome | null,
 ): string[] {
   const values = [
+    historyList?.liveConfigModelProvider,
     ...(historyList?.targetProviderCandidates ?? []),
+    ...(historyList?.providerCounts ?? []).map((row) => row.value),
+    "openai",
+    "custom",
     "codex_model_router_v2",
   ];
-  return values.filter(
-    (value, index) =>
-      value.trim() &&
-      value !== AUTO_TARGET &&
-      values.findIndex((item) => item === value) === index,
-  );
+  const output: string[] = [];
+  for (const value of values) {
+    const normalized = value?.trim();
+    if (!normalized || normalized === AUTO_TARGET) continue;
+    if (!output.includes(normalized)) output.push(normalized);
+  }
+  return output;
+}
+
+/// 生成自动目标项文案，说明 apply 时会把 null 交给后端按 live config 解析。
+function autoTargetProviderLabel(
+  historyList: CodexHistorySessionListOutcome | null,
+): string {
+  const live = historyList?.liveConfigModelProvider?.trim();
+  return live
+    ? `自动：live config 当前为 ${live}`
+    : "自动：live config 或 codex_model_router_v2";
+}
+
+/// 为 provider 候选追加来源和计数，避免用户误以为下拉只读了当前项目。
+function targetProviderOptionLabel(
+  provider: string,
+  historyList: CodexHistorySessionListOutcome | null,
+  providerCountsByValue: Map<string, number>,
+): string {
+  const badges = [];
+  const count = providerCountsByValue.get(provider);
+  if (provider === historyList?.liveConfigModelProvider) badges.push("live");
+  if (typeof count === "number") badges.push(`${count} 条`);
+  if (provider === "codex_model_router_v2" && typeof count !== "number") {
+    badges.push("稳定 MultiRouter 桶");
+  }
+  return badges.length ? `${provider} (${badges.join(" / ")})` : provider;
 }
 
 /// 检测当前是否运行在 Tauri 环境，避免浏览器预览时自动触发后端 invoke 错误。

@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-07-11 Codex 新版历史修复路径与旧版索引兜底边界
+
+- 新版 Codex/ChatGPT App 历史修复主路径不是改 `state_5.sqlite`：`CodexHistoryRepairPanel` 的“修复新版 App 历史”只调用 `unlock_codex_model_picker`，通过 CDP 注入 renderer 后执行 App 自己的 `localThreadCatalog.requestStartupSync()`。它不依赖“加载历史/预览旧版恢复”，也不应写 `threads.model_provider`、rollout、`session_index.jsonl` 或 `.codex-global-state.json`。
+- 旧版“预览/写入旧版索引”是离线兜底：会读取 active DB、枚举所有非目标 provider 桶，必要时改 `threads.model_provider`、`has_user_event`、聚焦时间、rollout 首行、`session_index.jsonl`、workspace hints 和 rollout mtime。写入前必须确认 Codex/GPT App 退出，避免 app-server/WAL 或新版目录同步覆盖结果。
+- 历史修复面板默认不应从当前会话详情继承项目路径；空项目路径才代表跨项目读取/修复。`initialProjectPath` 只适合作为“带入当前项目”的手动快捷项，否则会让用户误以为 SQLite 历史只限当前项目。
+- provider 桶候选应来自 live config、active DB 全量 `threads.model_provider` 分布、常见 `openai/custom/codex_model_router_v2` 兜底，并在 UI 里显示计数/来源。下拉关闭时只显示当前目标项，不代表只读到了这个桶。
+- `codex_desktop::install_script` 必须用 `Runtime.evaluate` 返回值提取 `historySync`；`Page.addScriptToEvaluateOnNewDocument` 只返回脚本 identifier。若解析错对象，新版历史同步会显示未请求或一直等待 renderer target，即使当前页面脚本实际已执行。
+
 ## 2026-07-10 Codex 官方回退残留本地代理与不可用 OAuth 模型过滤
 
 - 现场截图里的 `gpt-5.6-luna` 404 不是 MultiRouter 路由漏匹配：`codex-router.log` 显示请求已命中 OpenAI Official route 并转到 `https://chatgpt.com/backend-api/codex/responses`，最终由官方后端返回 `Model not found`。OAuth 模型目录同步不能把官方返回但显式标记 `supported_in_api=false`、`available=false`、`enabled=false`、`disabled=true` 或 `visibility/status/availability=hidden|disabled|unavailable|unsupported|denied` 的条目写进 provider catalog。

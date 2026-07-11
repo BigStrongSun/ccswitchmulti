@@ -467,9 +467,7 @@ describe("SessionManagerPage", () => {
     });
 
     expect(
-      screen.getByText(
-        "MultiRouter 已配置成功，现在按顺序完成历史记录自动修复",
-      ),
+      screen.getByText("MultiRouter 已配置成功，先恢复新版 App 的原生历史目录"),
     ).toBeInTheDocument();
 
     // 一次性标记应已被消费
