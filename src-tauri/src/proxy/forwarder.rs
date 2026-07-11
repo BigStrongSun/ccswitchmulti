@@ -4404,9 +4404,10 @@ fn codex_base_url_points_to_local_proxy(base_url: &str) -> bool {
 
 /// 为未知 `/v1/*` raw passthrough 解析 Codex MultiRouter route。
 ///
-/// 规则和常规 Responses 转换路径不同：显式模型命中的 route 仍然优先；如果模型没有
-/// 命中任何 route，则优先选择 official/Codex OAuth route，而不是把图片、音频、文件
-/// 等 OpenAI 原生 endpoint 交给 defaultRouteId 指向的文本第三方 provider。
+/// 规则和常规 Responses 转换路径不同：显式模型命中的 route 仍然优先；除此之外
+/// 一律选择 official/Codex OAuth route，把未知 endpoint 当作 GPT App 的原生官方请求。
+/// 这里故意不使用 defaultRouteId，避免图片、音频、文件等 OpenAI 原生 endpoint 被
+/// defaultRouteId 指向的 DeepSeek/Qwen 文本 provider 吞掉。
 fn resolve_codex_raw_passthrough_route_provider(
     provider: &Provider,
     route_body: &Value,
@@ -4426,8 +4427,6 @@ fn resolve_codex_raw_passthrough_route_provider(
     }
 
     resolve_codex_raw_official_route_by_identity(provider)
-        .or(model_routed)
-        .or_else(|| resolve_codex_raw_default_or_first_route(provider))
 }
 
 /// 判断 route provider 是否由请求模型显式命中，而不是 defaultRouteId 兜底。
@@ -4445,28 +4444,6 @@ fn resolve_codex_raw_official_route_by_identity(provider: &Provider) -> Option<P
         .into_iter()
         .filter(|route| codex_raw_route_is_enabled(route))
         .find(|route| codex_raw_route_is_official(route))
-        .map(|route| build_codex_raw_endpoint_fallback_provider(provider, route))
-}
-
-/// 当没有 official route 时，才退回 MultiRouter 明确配置的 default route 或首个 route。
-fn resolve_codex_raw_default_or_first_route(provider: &Provider) -> Option<Provider> {
-    let routes = codex_raw_passthrough_routes(provider);
-    if routes.is_empty() {
-        return None;
-    }
-
-    if let Some(default_route_id) = codex_raw_default_route_id(provider) {
-        if let Some(route) = routes.iter().copied().find(|route| {
-            codex_raw_route_is_enabled(route)
-                && codex_raw_route_id(route).is_some_and(|id| id == default_route_id)
-        }) {
-            return Some(build_codex_raw_endpoint_fallback_provider(provider, route));
-        }
-    }
-
-    routes
-        .into_iter()
-        .find(|route| codex_raw_route_is_enabled(route))
         .map(|route| build_codex_raw_endpoint_fallback_provider(provider, route))
 }
 
@@ -4509,40 +4486,12 @@ fn codex_raw_passthrough_routes(provider: &Provider) -> Vec<&Value> {
         .unwrap_or_default()
 }
 
-/// 读取新 schema 的 defaultRouteId；旧 schema 没有该字段，返回 None。
-fn codex_raw_default_route_id(provider: &Provider) -> Option<&str> {
-    provider
-        .settings_config
-        .get("codexRouting")
-        .and_then(|routing| routing.get("defaultRouteId"))
-        .or_else(|| {
-            provider
-                .settings_config
-                .get("codexRouting")
-                .and_then(|routing| routing.get("default_route_id"))
-        })
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-}
-
 /// 判断 route 是否启用；旧配置缺省按启用处理。
 fn codex_raw_route_is_enabled(route: &Value) -> bool {
     route
         .get("enabled")
         .and_then(Value::as_bool)
         .unwrap_or(true)
-}
-
-/// 提取 route id。
-fn codex_raw_route_id(route: &Value) -> Option<&str> {
-    route
-        .get("id")
-        .or_else(|| route.get("routeId"))
-        .or_else(|| route.get("route_id"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
 }
 
 /// 识别 official/Codex OAuth route 身份，而不是依赖模型名。
@@ -6088,6 +6037,37 @@ mod tests {
         assert_eq!(
             resolved.settings_config["codexResolvedRouteMatched"], true,
             "显式匹配第三方模型时不能被 raw official fallback 抢走"
+        );
+    }
+
+    #[test]
+    fn raw_passthrough_unknown_model_does_not_use_nonofficial_default_route() {
+        let provider = provider_with_settings(json!({
+            "codexRouting": {
+                "enabled": true,
+                "defaultRouteId": "deepseek",
+                "routes": [
+                    {
+                        "id": "deepseek",
+                        "label": "DeepSeek",
+                        "match": { "models": ["deepseek-v4-flash"] },
+                        "upstream": {
+                            "baseUrl": "https://api.deepseek.com",
+                            "apiKey": "sk-deepseek"
+                        }
+                    }
+                ]
+            }
+        }));
+
+        let resolved = resolve_codex_raw_passthrough_route_provider(
+            &provider,
+            &json!({ "model": "gpt-image-1" }),
+        );
+
+        assert!(
+            resolved.is_none(),
+            "raw passthrough 未知 GPT App 原生请求不能退到非 official defaultRouteId"
         );
     }
 
