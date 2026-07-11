@@ -467,7 +467,9 @@ describe("SessionManagerPage", () => {
     });
 
     expect(
-      screen.getByText("MultiRouter 已配置成功，先恢复新版 App 的原生历史目录"),
+      screen.getByText(
+        "MultiRouter 已配置成功，修复前先完全退出 Codex / ChatGPT App",
+      ),
     ).toBeInTheDocument();
 
     // 一次性标记应已被消费

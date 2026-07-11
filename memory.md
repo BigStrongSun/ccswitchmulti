@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-07-11 Codex 历史修复面板单确认流
+
+- `CodexHistoryRepairPanel` 的用户主流程应保持为“刷新记录 -> 选择 session/项目范围 -> 选择目标 provider -> 确认修复”。不要再把“修复新版 App 历史 / 加载历史 / 预览旧版恢复 / 写入旧版索引”四个并列按钮暴露给用户，否则会把新版目录同步和旧版离线索引兜底混成两套互相竞争的修复逻辑。
+- 项目路径默认必须为空且不参与查询/写入，代表跨项目读取和修复所有匹配记录；只有用户勾选“只修复单个项目”后，项目路径才会传给 `list_codex_history_sessions` / `repair_codex_history_visibility`。打开面板时传入的 `initialProjectPath` 只能作为“带入当前项目”的快捷值。
+- “确认修复”必须每次先 dry-run，再弹出明确的离线写入确认：要求用户完全退出 Codex / ChatGPT App，说明运行中的 app-server 会覆盖修复结果；用户确认后才执行真实写入。后端的进程保护错误也要改写成同样的可执行提示。
+- 目标 provider 下拉应包含“当前 provider”（前端传 `targetProvider: null`，由后端按 live config/codex_model_router_v2 解析）、`openai`、`custom` 和 active DB 扫到的所有 provider 桶，并在选项中展示 live/config/db 计数线索。
+- `unlock_codex_model_picker` / “启动并刷新新版目录”只是写入成功后新版侧边栏仍未重建时的高级兜底，不应放在主操作区。Codex 目录、Active DB、archived/subagent 开关也属于高级设置，默认界面只保留范围和 provider 选择。
+
 ## 2026-07-11 Codex 新版历史修复路径与旧版索引兜底边界
 
 - 新版 Codex/ChatGPT App 历史修复主路径不是改 `state_5.sqlite`：`CodexHistoryRepairPanel` 的“修复新版 App 历史”只调用 `unlock_codex_model_picker`，通过 CDP 注入 renderer 后执行 App 自己的 `localThreadCatalog.requestStartupSync()`。它不依赖“加载历史/预览旧版恢复”，也不应写 `threads.model_provider`、rollout、`session_index.jsonl` 或 `.codex-global-state.json`。
