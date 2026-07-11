@@ -414,6 +414,222 @@ impl RequestForwarder {
         })
     }
 
+    /// 转发未知 OpenAI-compatible endpoint 的原始请求体。
+    ///
+    /// 该入口用于 `/v1/*` 兜底：只用 `route_body` 做模型路由判断，真正发往
+    /// 上游的是客户端原始 `raw_body`，因此 multipart、音频、文件上传或未来
+    /// OpenAI endpoint 不会被本地 JSON 化。已知 `/responses` 等 endpoint 仍应
+    /// 走专用 handler，本函数不做格式转换或 body 改写。
+    #[allow(clippy::too_many_arguments)]
+    pub async fn forward_raw_with_retry(
+        &self,
+        app_type: &AppType,
+        method: http::Method,
+        endpoint: &str,
+        route_body: Value,
+        raw_body: Bytes,
+        headers: axum::http::HeaderMap,
+        extensions: Extensions,
+        providers: Vec<Provider>,
+    ) -> Result<ForwardResult, ForwardError> {
+        let guard = ActiveConnectionGuard::acquire(self.status.clone()).await;
+        {
+            let mut s = self.status.write().await;
+            s.total_requests = s.total_requests.saturating_add(1);
+            s.last_request_at = Some(chrono::Utc::now().to_rfc3339());
+        }
+        let result = self
+            .forward_raw_with_retry_inner(
+                app_type, method, endpoint, route_body, raw_body, headers, extensions, providers,
+            )
+            .await;
+        result.map(|mut fr| {
+            fr.connection_guard = Some(guard);
+            fr
+        })
+    }
+
+    /// 原始请求体转发的故障转移循环。
+    ///
+    /// 与 JSON 转换路径相比，这里刻意不触发 thinking/media rectifier：未知
+    /// OpenAI-compatible endpoint 的 body 可能不是 JSON，强行整流会破坏载荷。
+    #[allow(clippy::too_many_arguments)]
+    async fn forward_raw_with_retry_inner(
+        &self,
+        app_type: &AppType,
+        method: http::Method,
+        endpoint: &str,
+        route_body: Value,
+        raw_body: Bytes,
+        headers: axum::http::HeaderMap,
+        extensions: Extensions,
+        providers: Vec<Provider>,
+    ) -> Result<ForwardResult, ForwardError> {
+        let adapter = get_adapter(app_type);
+        let app_type_str = app_type.as_str();
+
+        if providers.is_empty() {
+            return Err(ForwardError {
+                error: ProxyError::NoAvailableProvider,
+                provider: None,
+            });
+        }
+
+        let attempt_providers = build_forward_attempt_providers_preserving_codex_router_context(
+            app_type,
+            &providers,
+            &route_body,
+        );
+        let bypass_circuit_breaker = attempt_providers.len() == 1;
+        let mut last_error = None;
+        let mut last_provider = None;
+        let mut attempted_providers = 0usize;
+
+        for provider in attempt_providers.iter() {
+            if attempted_providers >= self.max_attempts {
+                break;
+            }
+
+            let attempt_provider_id = provider.id.clone();
+            let (persistent_provider_id, persistent_provider_name) =
+                super::providers::codex_route_persistent_provider(provider);
+            let persistent_provider_id = persistent_provider_id.to_string();
+            let persistent_provider_name = persistent_provider_name.to_string();
+            let (allowed, used_half_open_permit) = if bypass_circuit_breaker {
+                (true, false)
+            } else {
+                let permit = self
+                    .router
+                    .allow_provider_request(&provider.id, app_type_str)
+                    .await;
+                (permit.allowed, permit.used_half_open_permit)
+            };
+            if !allowed {
+                continue;
+            }
+            attempted_providers += 1;
+
+            {
+                let mut status = self.status.write().await;
+                status.current_provider = Some(persistent_provider_name.clone());
+                status.current_provider_id = Some(persistent_provider_id.clone());
+            }
+
+            match self
+                .forward_raw(
+                    app_type,
+                    &method,
+                    provider,
+                    endpoint,
+                    &route_body,
+                    raw_body.clone(),
+                    &headers,
+                    &extensions,
+                    adapter.as_ref(),
+                )
+                .await
+            {
+                Ok((response, effective_provider, outbound_model)) => {
+                    self.record_success_result(
+                        &attempt_provider_id,
+                        &persistent_provider_id,
+                        app_type_str,
+                        used_half_open_permit,
+                    )
+                    .await;
+                    {
+                        let mut current_providers = self.current_providers.write().await;
+                        current_providers.insert(
+                            app_type_str.to_string(),
+                            (
+                                persistent_provider_id.clone(),
+                                persistent_provider_name.clone(),
+                            ),
+                        );
+                    }
+                    {
+                        let mut status = self.status.write().await;
+                        status.success_requests += 1;
+                        status.last_error = None;
+                        if self.current_provider_id_at_start.as_str()
+                            != persistent_provider_id.as_str()
+                        {
+                            status.failover_count += 1;
+                            let fm = self.failover_manager.clone();
+                            let ah = self.app_handle.clone();
+                            let pid = persistent_provider_id.clone();
+                            let pname = persistent_provider_name.clone();
+                            let at = app_type_str.to_string();
+                            tokio::spawn(async move {
+                                let _ = fm.try_switch(ah.as_ref(), &at, &pid, &pname).await;
+                            });
+                        }
+                        if status.total_requests > 0 {
+                            status.success_rate = (status.success_requests as f32
+                                / status.total_requests as f32)
+                                * 100.0;
+                        }
+                    }
+
+                    return Ok(ForwardResult {
+                        response,
+                        provider: effective_provider,
+                        claude_api_format: None,
+                        outbound_model,
+                        connection_guard: None,
+                    });
+                }
+                Err(error) => {
+                    let category = self.categorize_proxy_error(&error);
+                    if matches!(category, ErrorCategory::NonRetryable) {
+                        self.router
+                            .release_permit_neutral(
+                                &provider.id,
+                                app_type_str,
+                                used_half_open_permit,
+                            )
+                            .await;
+                        let mut status = self.status.write().await;
+                        status.failed_requests += 1;
+                        status.last_error = Some(error.to_string());
+                        if status.total_requests > 0 {
+                            status.success_rate = (status.success_requests as f32
+                                / status.total_requests as f32)
+                                * 100.0;
+                        }
+                        return Err(ForwardError {
+                            error,
+                            provider: Some(provider.clone()),
+                        });
+                    }
+
+                    let _ = self
+                        .router
+                        .record_result_with_health_provider(
+                            &provider.id,
+                            &persistent_provider_id,
+                            app_type_str,
+                            used_half_open_permit,
+                            false,
+                            Some(error.to_string()),
+                        )
+                        .await;
+                    {
+                        let mut status = self.status.write().await;
+                        status.last_error = Some(error.to_string());
+                    }
+                    last_error = Some(error);
+                    last_provider = Some(provider.clone());
+                }
+            }
+        }
+
+        Err(ForwardError {
+            error: last_error.unwrap_or(ProxyError::MaxRetriesExceeded),
+            provider: last_provider,
+        })
+    }
+
     /// 实际转发逻辑（不包含客户端维度的入口/出口计数）
     ///
     /// # Arguments
@@ -2497,6 +2713,402 @@ impl RequestForwarder {
         }
     }
 
+    /// 转发单个未知 OpenAI-compatible 请求，保持原始请求体不变。
+    ///
+    /// `route_body` 只参与日志和 MultiRouter 路由；`raw_body` 是最终上游载荷。
+    /// 该函数不做 JSON 序列化、不注入默认 content-type，也不执行 Responses/Chat
+    /// 转换，专门用于未来 `/v1/*` endpoint 的通用兜底。
+    #[allow(clippy::too_many_arguments)]
+    async fn forward_raw(
+        &self,
+        app_type: &AppType,
+        method: &http::Method,
+        provider: &Provider,
+        endpoint: &str,
+        route_body: &Value,
+        raw_body: Bytes,
+        headers: &axum::http::HeaderMap,
+        extensions: &Extensions,
+        adapter: &dyn ProviderAdapter,
+    ) -> Result<(ProxyResponse, Provider, Option<String>), ProxyError> {
+        let codex_trace_id =
+            matches!(app_type, AppType::Codex).then(|| uuid::Uuid::new_v4().to_string());
+        let route_started_at = std::time::Instant::now();
+        let request_model_for_log = route_body
+            .get("model")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let outer_provider_id = provider.id.clone();
+        let outer_provider_name = provider.name.clone();
+
+        let provider_is_resolved_codex_route = provider
+            .settings_config
+            .get("codexResolvedRouteId")
+            .is_some();
+        let codex_router_configured = matches!(app_type, AppType::Codex)
+            && !provider_is_resolved_codex_route
+            && codex_provider_has_routing_config(provider);
+        let routed_provider =
+            if matches!(app_type, AppType::Codex) && !provider_is_resolved_codex_route {
+                resolve_codex_raw_passthrough_route_provider(provider, route_body)
+            } else {
+                None
+            };
+        let routed_provider = if let Some(route_provider) = routed_provider {
+            if let Some(target_provider_id) =
+                super::providers::codex_route_target_provider_id(&route_provider)
+            {
+                let Some(target_provider) = self
+                    .router
+                    .get_provider_by_id(target_provider_id, app_type.as_str())
+                    .map_err(|err| {
+                        ProxyError::ConfigError(format!(
+                            "读取 Codex raw route 目标供应商 '{target_provider_id}' 失败: {err}"
+                        ))
+                    })?
+                else {
+                    return Err(ProxyError::ConfigError(format!(
+                        "Codex raw route 引用了不存在的目标供应商 '{target_provider_id}'"
+                    )));
+                };
+                Some(
+                    super::providers::materialize_codex_routed_provider_from_target(
+                        &route_provider,
+                        &target_provider,
+                    ),
+                )
+            } else {
+                Some(route_provider)
+            }
+        } else {
+            None
+        };
+        let codex_route_missed = codex_router_configured && routed_provider.is_none();
+        let provider = routed_provider.as_ref().unwrap_or(provider);
+
+        if let Some(trace_id) = codex_trace_id.as_deref() {
+            let route_id = provider
+                .settings_config
+                .get("codexResolvedRouteId")
+                .and_then(|value| value.as_str())
+                .unwrap_or("<none>");
+            super::codex_router_log::append_event(
+                "raw_route_resolved",
+                &[
+                    ("trace", trace_id.to_string()),
+                    ("session", self.session_id.clone()),
+                    ("endpoint", endpoint.to_string()),
+                    ("model", request_model_for_log.clone()),
+                    ("outer_provider", outer_provider_id.clone()),
+                    ("outer_name", outer_provider_name.clone()),
+                    ("effective_provider", provider.id.clone()),
+                    ("effective_name", provider.name.clone()),
+                    ("route_id", route_id.to_string()),
+                    ("routing_configured", codex_router_configured.to_string()),
+                    ("route_missed", codex_route_missed.to_string()),
+                    (
+                        "elapsed_ms",
+                        route_started_at.elapsed().as_millis().to_string(),
+                    ),
+                ],
+            );
+        }
+
+        let base_url = adapter.extract_base_url(provider)?;
+        if codex_route_missed && codex_base_url_points_to_local_proxy(&base_url) {
+            if let Some(trace_id) = codex_trace_id.as_deref() {
+                super::codex_router_log::append_event(
+                    "raw_route_error",
+                    &[
+                        ("trace", trace_id.to_string()),
+                        ("session", self.session_id.clone()),
+                        ("endpoint", endpoint.to_string()),
+                        ("model", request_model_for_log.clone()),
+                        ("outer_provider", outer_provider_id.clone()),
+                        ("fallback_base_url", base_url.clone()),
+                        ("reason", "route_miss_local_proxy_fallback".to_string()),
+                    ],
+                );
+            }
+            return Err(ProxyError::InvalidRequest(format!(
+                "Codex router provider did not resolve raw endpoint '{endpoint}', and its fallback base_url points to the local proxy. Refusing to forward recursively."
+            )));
+        }
+
+        let is_full_url = provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.is_full_url)
+            .unwrap_or(false);
+        let (endpoint_path, passthrough_query) = split_endpoint_and_query(endpoint);
+        let effective_endpoint = match passthrough_query {
+            Some(query) if !query.is_empty() => format!("{endpoint_path}?{query}"),
+            _ => endpoint_path.to_string(),
+        };
+        let url = if is_full_url {
+            append_query_to_full_url(&base_url, passthrough_query)
+        } else {
+            adapter.build_url(&base_url, &effective_endpoint)
+        };
+
+        let auth_started_at = std::time::Instant::now();
+        let mut auth_strategy_for_log = "none".to_string();
+        let mut codex_oauth_account_id: Option<String> = None;
+        let mut should_send_codex_oauth_session_headers = false;
+        let mut auth_headers = if let Some(mut auth) = adapter.extract_auth(provider) {
+            if auth.strategy == AuthStrategy::CodexOAuth {
+                if let Some(app_handle) = &self.app_handle {
+                    let codex_state = app_handle.state::<CodexOAuthState>();
+                    let codex_auth: tokio::sync::RwLockReadGuard<'_, CodexOAuthManager> =
+                        codex_state.0.read().await;
+                    let account_id = provider
+                        .meta
+                        .as_ref()
+                        .and_then(|m| m.managed_account_id_for("codex_oauth"));
+                    let token_result = match &account_id {
+                        Some(id) => codex_auth.get_valid_token_for_account(id).await,
+                        None => codex_auth.get_valid_token().await,
+                    };
+                    match token_result {
+                        Ok(token) => {
+                            auth = AuthInfo::new(token, AuthStrategy::CodexOAuth);
+                            should_send_codex_oauth_session_headers = true;
+                            codex_oauth_account_id = match account_id {
+                                Some(id) => Some(id),
+                                None => codex_auth.default_account_id().await,
+                            };
+                        }
+                        Err(err) => {
+                            return Err(ProxyError::AuthError(format!(
+                                "Codex OAuth 认证失败: {err}"
+                            )));
+                        }
+                    }
+                } else {
+                    return Err(ProxyError::AuthError(
+                        "Codex OAuth 认证不可用（无 AppHandle）".to_string(),
+                    ));
+                }
+            }
+            auth_strategy_for_log = format!("{:?}", auth.strategy);
+            adapter.get_auth_headers(&auth)?
+        } else {
+            Vec::new()
+        };
+
+        if let Some(ref account_id) = codex_oauth_account_id {
+            if let Ok(hv) = http::HeaderValue::from_str(account_id) {
+                auth_headers.push((http::HeaderName::from_static("chatgpt-account-id"), hv));
+            }
+        }
+        let codex_oauth_session_headers =
+            if should_send_codex_oauth_session_headers && self.session_client_provided {
+                build_codex_oauth_session_headers(&self.session_id)
+            } else {
+                Vec::new()
+            };
+
+        if let Some(trace_id) = codex_trace_id.as_deref() {
+            super::codex_router_log::append_event(
+                "raw_auth_prepared",
+                &[
+                    ("trace", trace_id.to_string()),
+                    ("session", self.session_id.clone()),
+                    ("model", request_model_for_log.clone()),
+                    ("provider", provider.id.clone()),
+                    ("auth_strategy", auth_strategy_for_log.clone()),
+                    ("auth_header_count", auth_headers.len().to_string()),
+                    (
+                        "oauth_session_header_count",
+                        codex_oauth_session_headers.len().to_string(),
+                    ),
+                    (
+                        "elapsed_ms",
+                        auth_started_at.elapsed().as_millis().to_string(),
+                    ),
+                ],
+            );
+        }
+
+        let upstream_host = url
+            .parse::<http::Uri>()
+            .ok()
+            .and_then(|uri| uri.authority().map(|authority| authority.to_string()));
+        let custom_user_agent = provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.custom_user_agent_header().ok().flatten());
+        let mut ordered_headers = build_raw_passthrough_headers(
+            headers,
+            &auth_headers,
+            upstream_host.as_deref(),
+            custom_user_agent.as_ref(),
+        );
+        for (name, value) in codex_oauth_session_headers {
+            if !ordered_headers.contains_key(&name) {
+                ordered_headers.insert(name, value);
+            }
+        }
+        apply_local_proxy_header_overrides(
+            &mut ordered_headers,
+            provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.local_proxy_request_overrides.as_ref()),
+            false,
+        );
+        reject_proxy_placeholder_for_managed_account_upstream(&url, &ordered_headers)?;
+
+        let request_is_streaming = raw_passthrough_request_is_streaming(route_body, headers);
+        let timeout = if self.non_streaming_timeout.is_zero() {
+            std::time::Duration::from_secs(600)
+        } else {
+            self.non_streaming_timeout
+        };
+        let upstream_proxy_url = super::http_client::get_current_proxy_url();
+        let is_socks_proxy = upstream_proxy_url
+            .as_deref()
+            .map(|url| url.starts_with("socks5"))
+            .unwrap_or(false);
+        let preserve_exact_header_case =
+            should_preserve_exact_header_case(adapter.name(), provider, None, false);
+        let transport_for_log = if is_socks_proxy || !preserve_exact_header_case {
+            "reqwest"
+        } else {
+            "hyper"
+        };
+        let body_bytes = raw_body.to_vec();
+        let request_bytes_len = body_bytes.len();
+        let upstream_started_at = std::time::Instant::now();
+
+        if let Some(trace_id) = codex_trace_id.as_deref() {
+            super::codex_router_log::append_event(
+                "raw_request_prepared",
+                &[
+                    ("trace", trace_id.to_string()),
+                    ("session", self.session_id.clone()),
+                    ("endpoint", endpoint.to_string()),
+                    ("effective_endpoint", effective_endpoint.clone()),
+                    ("model", request_model_for_log.clone()),
+                    ("provider", provider.id.clone()),
+                    ("upstream_url", url.clone()),
+                    ("streaming", request_is_streaming.to_string()),
+                    ("request_bytes", request_bytes_len.to_string()),
+                    ("header_count", ordered_headers.len().to_string()),
+                    ("transport", transport_for_log.to_string()),
+                ],
+            );
+        }
+
+        log::info!(
+            "[{}] >>> raw passthrough URL: {} (endpoint={}, model={})",
+            adapter.name(),
+            url,
+            endpoint,
+            request_model_for_log
+        );
+        let response = send_forwarder_upstream_request(
+            method.clone(),
+            url.clone(),
+            ordered_headers,
+            extensions.clone(),
+            body_bytes,
+            timeout,
+            request_is_streaming,
+            self.non_streaming_timeout,
+            self.streaming_first_byte_timeout,
+            is_socks_proxy,
+            preserve_exact_header_case,
+            upstream_proxy_url.as_deref(),
+        )
+        .await
+        .inspect_err(|err| {
+            if let Some(trace_id) = codex_trace_id.as_deref() {
+                super::codex_router_log::append_event(
+                    "raw_upstream_send_error",
+                    &[
+                        ("trace", trace_id.to_string()),
+                        ("session", self.session_id.clone()),
+                        ("model", request_model_for_log.clone()),
+                        ("provider", provider.id.clone()),
+                        ("transport", transport_for_log.to_string()),
+                        (
+                            "elapsed_ms",
+                            upstream_started_at.elapsed().as_millis().to_string(),
+                        ),
+                        ("error", err.to_string()),
+                    ],
+                );
+            }
+        })?;
+
+        let status = response.status();
+        if let Some(trace_id) = codex_trace_id.as_deref() {
+            super::codex_router_log::append_event(
+                "raw_upstream_status",
+                &[
+                    ("trace", trace_id.to_string()),
+                    ("session", self.session_id.clone()),
+                    ("model", request_model_for_log.clone()),
+                    ("provider", provider.id.clone()),
+                    ("status", status.as_u16().to_string()),
+                    ("streaming", request_is_streaming.to_string()),
+                    (
+                        "elapsed_ms",
+                        upstream_started_at.elapsed().as_millis().to_string(),
+                    ),
+                ],
+            );
+        }
+
+        if !status.is_success() {
+            let status_code = status.as_u16();
+            let body_text = read_decoded_error_body(response).await?;
+            if let Some(trace_id) = codex_trace_id.as_deref() {
+                append_upstream_error_event(
+                    trace_id,
+                    &self.session_id,
+                    &request_model_for_log,
+                    &provider.id,
+                    status_code,
+                    body_text.as_deref(),
+                    None,
+                );
+            }
+            return Err(ProxyError::UpstreamError {
+                status: status_code,
+                body: body_text,
+            });
+        }
+
+        let response = self
+            .prepare_success_response_for_failover(response, request_is_streaming)
+            .await?;
+        if let Some(trace_id) = codex_trace_id.as_deref() {
+            super::codex_router_log::append_event(
+                "raw_response_ready",
+                &[
+                    ("trace", trace_id.to_string()),
+                    ("session", self.session_id.clone()),
+                    ("model", request_model_for_log.clone()),
+                    ("provider", provider.id.clone()),
+                    ("status", status.as_u16().to_string()),
+                    ("streaming", request_is_streaming.to_string()),
+                ],
+            );
+        }
+
+        Ok((
+            response,
+            provider.clone(),
+            route_body
+                .get("model")
+                .and_then(|value| value.as_str())
+                .map(ToString::to_string),
+        ))
+    }
+
     /// 故障转移开启时，成功不能只看上游响应头。
     ///
     /// - 非流式：先把完整 body 读到内存，读超时/连接中断会回到 retry loop 尝试下一家。
@@ -3790,6 +4402,336 @@ fn codex_base_url_points_to_local_proxy(base_url: &str) -> bool {
         || normalized.contains("://[::1]")
 }
 
+/// 为未知 `/v1/*` raw passthrough 解析 Codex MultiRouter route。
+///
+/// 规则和常规 Responses 转换路径不同：显式模型命中的 route 仍然优先；如果模型没有
+/// 命中任何 route，则优先选择 official/Codex OAuth route，而不是把图片、音频、文件
+/// 等 OpenAI 原生 endpoint 交给 defaultRouteId 指向的文本第三方 provider。
+fn resolve_codex_raw_passthrough_route_provider(
+    provider: &Provider,
+    route_body: &Value,
+) -> Option<Provider> {
+    let model_routed = route_body
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .and_then(|_| super::providers::resolve_codex_model_routed_provider(provider, route_body));
+
+    if model_routed
+        .as_ref()
+        .is_some_and(codex_raw_route_provider_matched_request_model)
+    {
+        return model_routed;
+    }
+
+    resolve_codex_raw_official_route_by_identity(provider)
+        .or(model_routed)
+        .or_else(|| resolve_codex_raw_default_or_first_route(provider))
+}
+
+/// 判断 route provider 是否由请求模型显式命中，而不是 defaultRouteId 兜底。
+fn codex_raw_route_provider_matched_request_model(provider: &Provider) -> bool {
+    provider
+        .settings_config
+        .get("codexResolvedRouteMatched")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+}
+
+/// 按 route 身份扫描 official/Codex OAuth route，用作未知 OpenAI endpoint 的原生兜底。
+fn resolve_codex_raw_official_route_by_identity(provider: &Provider) -> Option<Provider> {
+    codex_raw_passthrough_routes(provider)
+        .into_iter()
+        .filter(|route| codex_raw_route_is_enabled(route))
+        .find(|route| codex_raw_route_is_official(route))
+        .map(|route| build_codex_raw_endpoint_fallback_provider(provider, route))
+}
+
+/// 当没有 official route 时，才退回 MultiRouter 明确配置的 default route 或首个 route。
+fn resolve_codex_raw_default_or_first_route(provider: &Provider) -> Option<Provider> {
+    let routes = codex_raw_passthrough_routes(provider);
+    if routes.is_empty() {
+        return None;
+    }
+
+    if let Some(default_route_id) = codex_raw_default_route_id(provider) {
+        if let Some(route) = routes.iter().copied().find(|route| {
+            codex_raw_route_is_enabled(route)
+                && codex_raw_route_id(route).is_some_and(|id| id == default_route_id)
+        }) {
+            return Some(build_codex_raw_endpoint_fallback_provider(provider, route));
+        }
+    }
+
+    routes
+        .into_iter()
+        .find(|route| codex_raw_route_is_enabled(route))
+        .map(|route| build_codex_raw_endpoint_fallback_provider(provider, route))
+}
+
+/// 构造 endpoint 级兜底 provider，并标记它不是请求模型真实匹配。
+fn build_codex_raw_endpoint_fallback_provider(provider: &Provider, route: &Value) -> Provider {
+    let mut route_provider =
+        super::providers::build_codex_route_probe_provider(provider, route, None);
+    if let Some(settings) = route_provider.settings_config.as_object_mut() {
+        settings.insert("codexResolvedRouteMatched".to_string(), Value::Bool(false));
+    }
+    route_provider
+}
+
+/// 提取新旧 schema 下可参与 raw passthrough 的 route 列表。
+fn codex_raw_passthrough_routes(provider: &Provider) -> Vec<&Value> {
+    if let Some(routing) = provider.settings_config.get("codexRouting") {
+        if let Some(routes) = routing.as_array() {
+            return routes.iter().collect();
+        }
+        if routing
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .is_some_and(|enabled| !enabled)
+        {
+            return Vec::new();
+        }
+        return routing
+            .get("routes")
+            .and_then(Value::as_array)
+            .map(|routes| routes.iter().collect())
+            .unwrap_or_default();
+    }
+
+    provider
+        .settings_config
+        .get("codexModelRoutes")
+        .or_else(|| provider.settings_config.get("modelRoutes"))
+        .and_then(Value::as_array)
+        .map(|routes| routes.iter().collect())
+        .unwrap_or_default()
+}
+
+/// 读取新 schema 的 defaultRouteId；旧 schema 没有该字段，返回 None。
+fn codex_raw_default_route_id(provider: &Provider) -> Option<&str> {
+    provider
+        .settings_config
+        .get("codexRouting")
+        .and_then(|routing| routing.get("defaultRouteId"))
+        .or_else(|| {
+            provider
+                .settings_config
+                .get("codexRouting")
+                .and_then(|routing| routing.get("default_route_id"))
+        })
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+}
+
+/// 判断 route 是否启用；旧配置缺省按启用处理。
+fn codex_raw_route_is_enabled(route: &Value) -> bool {
+    route
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+}
+
+/// 提取 route id。
+fn codex_raw_route_id(route: &Value) -> Option<&str> {
+    route
+        .get("id")
+        .or_else(|| route.get("routeId"))
+        .or_else(|| route.get("route_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+}
+
+/// 识别 official/Codex OAuth route 身份，而不是依赖模型名。
+fn codex_raw_route_is_official(route: &Value) -> bool {
+    let target_provider = codex_raw_route_string(
+        route,
+        &[
+            "targetProviderId",
+            "target_provider_id",
+            "providerId",
+            "provider_id",
+            "provider",
+        ],
+    )
+    .map(|value| value.to_ascii_lowercase());
+    if target_provider.as_deref().is_some_and(|id| {
+        matches!(
+            id,
+            "codex-official" | "openai" | "openai-official" | "openai official"
+        )
+    }) {
+        return true;
+    }
+
+    if codex_raw_route_auth_source(route).is_some_and(|source| {
+        matches!(
+            source,
+            "managed_codex_oauth" | "managed_account" | "chatgpt"
+        )
+    }) {
+        return true;
+    }
+
+    if codex_raw_route_string(route, &["providerType", "provider_type"])
+        .is_some_and(|value| value.eq_ignore_ascii_case("codex_oauth"))
+    {
+        return true;
+    }
+
+    if codex_raw_route_string(route, &["auth_mode", "authMode"])
+        .is_some_and(|value| value.eq_ignore_ascii_case("chatgpt"))
+    {
+        return true;
+    }
+
+    codex_raw_route_string(route, &["baseUrl", "baseURL", "base_url"]).is_some_and(|value| {
+        value
+            .to_ascii_lowercase()
+            .contains("chatgpt.com/backend-api/codex")
+    })
+}
+
+/// 从 route/upstream 两层读取字符串字段。
+fn codex_raw_route_string<'a>(route: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    let upstream = route.get("upstream").unwrap_or(route);
+    keys.iter()
+        .find_map(|key| upstream.get(*key).or_else(|| route.get(*key)))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+/// 读取 route 的 auth.source，并兼容 managed account 的 authProvider。
+fn codex_raw_route_auth_source(route: &Value) -> Option<&str> {
+    let upstream = route.get("upstream").unwrap_or(route);
+    let auth = upstream.get("auth").or_else(|| route.get("auth"))?;
+    if auth
+        .get("authProvider")
+        .or_else(|| auth.get("auth_provider"))
+        .and_then(Value::as_str)
+        .is_some_and(|provider| provider.eq_ignore_ascii_case("codex_oauth"))
+    {
+        return Some("managed_codex_oauth");
+    }
+    auth.get("source")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|source| !source.is_empty())
+}
+
+/// 重建 raw passthrough 的上游请求头。
+///
+/// 客户端原始 body 可以透传，但认证、Host、Content-Length 和转发链路头必须由
+/// CCSwitchMulti 重建，避免把本地 external API key、旧 host 或代理 hop-by-hop 头发到上游。
+fn build_raw_passthrough_headers(
+    source_headers: &http::HeaderMap,
+    auth_headers: &[(http::HeaderName, http::HeaderValue)],
+    upstream_host: Option<&str>,
+    custom_user_agent: Option<&http::HeaderValue>,
+) -> http::HeaderMap {
+    let mut headers = http::HeaderMap::new();
+    let mut saw_user_agent = false;
+
+    for (name, value) in source_headers.iter() {
+        if raw_passthrough_header_should_skip(name) {
+            continue;
+        }
+        if *name == http::header::USER_AGENT {
+            saw_user_agent = true;
+            if custom_user_agent.is_some() {
+                continue;
+            }
+        }
+        headers.append(name.clone(), value.clone());
+    }
+
+    for (name, value) in auth_headers {
+        headers.append(name.clone(), value.clone());
+    }
+
+    if custom_user_agent.is_some() || !saw_user_agent {
+        if let Some(user_agent) = custom_user_agent {
+            headers.insert(http::header::USER_AGENT, user_agent.clone());
+        }
+    }
+
+    if let Some(host) = upstream_host {
+        if let Ok(host) = http::HeaderValue::from_str(host) {
+            headers.insert(http::header::HOST, host);
+        }
+    }
+
+    headers
+}
+
+/// 判断 raw passthrough 是否需要丢弃客户端入站头。
+fn raw_passthrough_header_should_skip(name: &http::HeaderName) -> bool {
+    let lower = name.as_str().to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "host"
+            | "content-length"
+            | "transfer-encoding"
+            | "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "trailers"
+            | "upgrade"
+            | "authorization"
+            | "x-api-key"
+            | "api-key"
+            | "x-goog-api-key"
+            | "chatgpt-account-id"
+            | "x-cc-switch-external-openai-api"
+            | "x-forwarded-host"
+            | "x-forwarded-port"
+            | "x-forwarded-proto"
+            | "forwarded"
+            | "cf-connecting-ip"
+            | "cf-ipcountry"
+            | "cf-ray"
+            | "cf-visitor"
+            | "true-client-ip"
+            | "fastly-client-ip"
+            | "x-azure-clientip"
+            | "x-azure-fdid"
+            | "x-azure-ref"
+            | "akamai-origin-hop"
+            | "x-akamai-config-log-detail"
+            | "x-request-id"
+            | "x-correlation-id"
+            | "x-trace-id"
+            | "x-amzn-trace-id"
+            | "x-b3-traceid"
+            | "x-b3-spanid"
+            | "x-b3-parentspanid"
+            | "x-b3-sampled"
+            | "traceparent"
+            | "tracestate"
+    ) || lower.starts_with("x-forwarded-")
+        || lower.starts_with("cf-")
+}
+
+/// 判断 raw passthrough 是否应按流式响应处理。
+fn raw_passthrough_request_is_streaming(route_body: &Value, headers: &http::HeaderMap) -> bool {
+    route_body
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || headers
+            .get(http::header::ACCEPT)
+            .and_then(|value| value.to_str().ok())
+            .map(|accept| accept.to_ascii_lowercase().contains("text/event-stream"))
+            .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5063,6 +6005,90 @@ mod tests {
                 ]
             }]
         })
+    }
+
+    #[test]
+    fn raw_passthrough_prefers_official_route_over_nonofficial_default_route() {
+        let provider = provider_with_settings(json!({
+            "codexRouting": {
+                "enabled": true,
+                "defaultRouteId": "deepseek",
+                "routes": [
+                    {
+                        "id": "official",
+                        "label": "OpenAI Official",
+                        "match": { "models": ["gpt-5.5"] },
+                        "upstream": {
+                            "targetProviderId": "codex-official",
+                            "auth": { "source": "managed_codex_oauth" }
+                        }
+                    },
+                    {
+                        "id": "deepseek",
+                        "label": "DeepSeek",
+                        "match": { "models": ["deepseek-v4-flash"] },
+                        "upstream": {
+                            "baseUrl": "https://api.deepseek.com",
+                            "apiKey": "sk-deepseek"
+                        }
+                    }
+                ]
+            }
+        }));
+
+        let resolved = resolve_codex_raw_passthrough_route_provider(
+            &provider,
+            &json!({ "model": "gpt-image-1" }),
+        )
+        .expect("raw route should resolve");
+
+        assert_eq!(resolved.settings_config["codexResolvedRouteId"], "official");
+        assert_eq!(
+            resolved.settings_config["codexResolvedRouteMatched"], false,
+            "OpenAI 原生 endpoint 的 fallback 不是模型显式命中"
+        );
+    }
+
+    #[test]
+    fn raw_passthrough_keeps_explicit_nonofficial_model_match() {
+        let provider = provider_with_settings(json!({
+            "codexRouting": {
+                "enabled": true,
+                "defaultRouteId": "official",
+                "routes": [
+                    {
+                        "id": "official",
+                        "label": "OpenAI Official",
+                        "match": { "models": ["gpt-5.5"] },
+                        "upstream": {
+                            "targetProviderId": "codex-official",
+                            "auth": { "source": "managed_codex_oauth" }
+                        }
+                    },
+                    {
+                        "id": "deepseek",
+                        "label": "DeepSeek",
+                        "match": { "models": ["deepseek-v4-flash"] },
+                        "upstream": {
+                            "baseUrl": "https://api.deepseek.com",
+                            "apiKey": "sk-deepseek"
+                        }
+                    }
+                ]
+            }
+        }));
+
+        let resolved = resolve_codex_raw_passthrough_route_provider(
+            &provider,
+            &json!({ "model": "deepseek-v4-flash" }),
+        )
+        .expect("raw route should resolve");
+
+        assert_eq!(resolved.settings_config["codexResolvedRouteId"], "deepseek");
+        assert_eq!(
+            resolved.settings_config["codexResolvedRouteMatched"], true,
+            "显式匹配第三方模型时不能被 raw official fallback 抢走"
+        );
     }
 
     fn image_unsupported_error() -> ProxyError {

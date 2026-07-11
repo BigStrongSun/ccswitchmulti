@@ -80,14 +80,14 @@ pub async fn get_status(State(state): State<ProxyState>) -> Result<Json<ProxySta
 
 /// 处理未显式注册的本地代理路径。
 ///
-/// 这里不能把 `/v1/*` 直接通配转发：OpenAI-compatible 不同 endpoint 的 body
-/// 形态差异很大，`files`/`images/edits`/`audio` 可能是 multipart 或二进制流；
-/// official Codex OAuth 也不是通用 OpenAI base_url。未知路径先给结构化错误和
-/// 诊断日志，避免再次出现 Axum 裸 404 且没有排障线索。
+/// `/v1/*` 属于 OpenAI-compatible endpoint 面：已注册的 `/responses`、
+/// `/chat/completions` 和 `/images/generations` 仍走专用 handler；其余未知路径
+/// 进入 raw passthrough，保持原始 body/path/query 不变，避免每新增一个 OpenAI
+/// endpoint 都要单独补 Axum 路由。非 `/v1/*` 路径继续返回结构化 404。
 pub async fn handle_unregistered_proxy_endpoint(
-    State(_state): State<ProxyState>,
+    State(state): State<ProxyState>,
     request: axum::extract::Request,
-) -> axum::response::Response {
+) -> Result<axum::response::Response, ProxyError> {
     let method = request.method().as_str().to_string();
     let endpoint = request
         .uri()
@@ -97,48 +97,33 @@ pub async fn handle_unregistered_proxy_endpoint(
         .to_string();
     let path = request.uri().path();
     let openai_compatible = looks_like_unregistered_openai_compatible_endpoint(path);
-    let status = if openai_compatible {
-        StatusCode::NOT_IMPLEMENTED
-    } else {
-        StatusCode::NOT_FOUND
-    };
-    let code = if openai_compatible {
-        "ccswitch_unregistered_endpoint"
-    } else {
-        "ccswitch_route_not_found"
-    };
-    let message = if openai_compatible {
-        format!(
-            "CCSwitchMulti local proxy has no handler for {method} {endpoint}; the request was not forwarded. Add an explicit endpoint handler before enabling passthrough."
-        )
-    } else {
-        format!("CCSwitchMulti local proxy has no route for {method} {endpoint}.")
-    };
 
-    log::warn!("[proxy] {code}: method={method} endpoint={endpoint}");
     if openai_compatible {
+        log::info!("[proxy] raw_passthrough_endpoint: method={method} endpoint={endpoint}");
         super::codex_router_log::append_event(
-            "unregistered_endpoint",
+            "raw_passthrough_endpoint",
             &[
                 ("method", method.clone()),
                 ("endpoint", endpoint.clone()),
-                ("forwarded", "false".to_string()),
+                ("forwarded", "true".to_string()),
             ],
         );
+        return handle_raw_openai_passthrough(State(state), request).await;
     }
 
-    (
-        status,
+    log::warn!("[proxy] ccswitch_route_not_found: method={method} endpoint={endpoint}");
+    Ok((
+        StatusCode::NOT_FOUND,
         Json(json!({
             "error": {
-                "message": message,
+                "message": format!("CCSwitchMulti local proxy has no route for {method} {endpoint}."),
                 "type": "invalid_request_error",
-                "code": code,
+                "code": "ccswitch_route_not_found",
                 "param": "endpoint"
             }
         })),
     )
-        .into_response()
+        .into_response())
 }
 
 /// 判断未知路径是否属于需要重点诊断的 OpenAI-compatible `/v1/...` 族。
@@ -149,6 +134,157 @@ fn looks_like_unregistered_openai_compatible_endpoint(path: &str) -> bool {
         || path.starts_with("/v1/v1/")
         || path == "/codex/v1"
         || path.starts_with("/codex/v1/")
+}
+
+/// 透明转发未显式实现的 OpenAI-compatible `/v1/*` endpoint。
+///
+/// 该 handler 只把请求体解析副本用于 MultiRouter 选路；上游请求仍使用原始 bytes、
+/// 原始 path/query 和原始内容类型。这样 multipart、音频、文件上传以及未来 OpenAI
+/// endpoint 不会被 CCSwitchMulti 的 JSON handler 破坏。
+pub async fn handle_raw_openai_passthrough(
+    State(state): State<ProxyState>,
+    request: axum::extract::Request,
+) -> Result<axum::response::Response, ProxyError> {
+    let (parts, req_body) = request.into_parts();
+    let method = parts.method.clone();
+    let uri = parts.uri;
+    let headers = parts.headers;
+    let extensions = parts.extensions;
+    let body_bytes = req_body
+        .collect()
+        .await
+        .map_err(|e| ProxyError::Internal(format!("Failed to read request body: {e}")))?
+        .to_bytes();
+    let route_body = parse_raw_openai_passthrough_route_body(&headers, body_bytes.clone());
+    let endpoint = raw_openai_passthrough_endpoint_with_query(&uri);
+    let is_external_openai_client = !should_handle_as_codex_client(&headers);
+
+    let mut ctx = if is_external_openai_client {
+        let external_api_profile = match external_openai_api::validate_request(&state.db, &headers)
+        {
+            Ok(profile) => profile,
+            Err(err) => return Ok(external_openai_api_auth_error_response(err)),
+        };
+        let provider = match resolve_external_openai_compatible_provider_for_raw(
+            &state,
+            &route_body,
+            &external_api_profile,
+        )? {
+            Some(provider) => provider,
+            None => {
+                return Ok(external_openai_api_route_error_response(
+                    &request_model_from_body(&route_body),
+                ))
+            }
+        };
+        RequestContext::new_with_provider(
+            &state,
+            &route_body,
+            &headers,
+            AppType::Codex,
+            "Codex",
+            "codex",
+            provider,
+        )
+        .await?
+    } else {
+        RequestContext::new(
+            &state,
+            &route_body,
+            &headers,
+            AppType::Codex,
+            "Codex",
+            "codex",
+        )
+        .await?
+    };
+
+    let is_stream = raw_openai_passthrough_request_is_streaming(&route_body, &headers);
+    let forwarder = ctx.create_forwarder(&state);
+    let mut result = match forwarder
+        .forward_raw_with_retry(
+            &AppType::Codex,
+            method,
+            &endpoint,
+            route_body,
+            body_bytes,
+            headers,
+            extensions,
+            ctx.get_providers(),
+        )
+        .await
+    {
+        Ok(result) => result,
+        Err(mut err) => {
+            update_context_provider_for_forward_error(&state, &mut ctx, err.provider.take());
+            log_forward_error(&state, &ctx, is_stream, &err.error);
+            return build_codex_proxy_error_response(&ctx, &endpoint, &err.error);
+        }
+    };
+
+    let connection_guard = result.connection_guard.take();
+    ctx.outbound_model = result.outbound_model.take();
+    ctx.provider = result.provider;
+    process_response(
+        result.response,
+        &ctx,
+        &state,
+        &OPENAI_PARSER_CONFIG,
+        connection_guard,
+    )
+    .await
+}
+
+/// 从 raw passthrough 请求体中尽力解析 JSON 选路副本。
+///
+/// 解析失败不会阻断转发：multipart、音频或二进制 endpoint 本来就没有 JSON route body，
+/// 此时返回空对象，让 MultiRouter 使用 official/default route 兜底。
+fn parse_raw_openai_passthrough_route_body(headers: &HeaderMap, body_bytes: Bytes) -> Value {
+    if body_bytes.is_empty() {
+        return json!({});
+    }
+
+    let mut route_headers = headers.clone();
+    match decode_codex_request_body(&mut route_headers, body_bytes) {
+        Ok(decoded) => serde_json::from_slice::<Value>(&decoded).unwrap_or_else(|err| {
+            log::debug!("[Codex] raw passthrough route body is not JSON: {err}");
+            json!({})
+        }),
+        Err(err) => {
+            log::debug!("[Codex] raw passthrough route body decode skipped: {err}");
+            json!({})
+        }
+    }
+}
+
+/// 判断 raw passthrough 是否请求 SSE 流式响应。
+fn raw_openai_passthrough_request_is_streaming(route_body: &Value, headers: &HeaderMap) -> bool {
+    route_body
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || headers
+            .get(axum::http::header::ACCEPT)
+            .and_then(|value| value.to_str().ok())
+            .map(|accept| accept.to_ascii_lowercase().contains("text/event-stream"))
+            .unwrap_or(false)
+}
+
+/// 将本地兼容别名还原为标准 OpenAI `/v1/*` endpoint。
+///
+/// `/codex/v1/*` 是 CCSwitchMulti 为 Codex 接管保留的入口别名，上游 OpenAI-compatible
+/// provider 并不认识 `/codex` 前缀；raw passthrough 必须在发送前去掉该本地前缀。
+fn raw_openai_passthrough_endpoint_with_query(uri: &axum::http::Uri) -> String {
+    let path = uri.path();
+    let normalized_path = path
+        .strip_prefix("/codex/v1/")
+        .map(|suffix| format!("/v1/{suffix}"))
+        .or_else(|| (path == "/codex/v1").then(|| "/v1".to_string()))
+        .unwrap_or_else(|| path.to_string());
+    match uri.query() {
+        Some(query) => format!("{normalized_path}?{query}"),
+        None => normalized_path,
+    }
 }
 
 /// GET /v1/models — Codex model list (reachability check)
@@ -1433,6 +1569,24 @@ fn resolve_external_openai_compatible_provider(
     }
 }
 
+/// 为 raw passthrough 解析第三方 OpenAI-compatible API 后端。
+///
+/// 普通 provider profile 仍直接固定到该 provider；Codex Router profile 若绑定了
+/// route_id，则使用该 route；若只绑定 router，本次请求交给 forwarder 的 raw
+/// resolver 统一处理，避免在 handler 层走旧的 defaultRouteId 模型兜底。
+fn resolve_external_openai_compatible_provider_for_raw(
+    state: &ProxyState,
+    body: &Value,
+    profile: &ExternalOpenAiApiProfile,
+) -> Result<Option<crate::provider::Provider>, ProxyError> {
+    match profile.backend_type {
+        ExternalOpenAiApiBackendType::Provider => resolve_external_provider_target(state, profile),
+        ExternalOpenAiApiBackendType::CodexRouterRoute => {
+            resolve_external_codex_router_raw_target(state, body, profile)
+        }
+    }
+}
+
 /// 从请求体中提取模型名，仅用于尚未创建 RequestContext 时构造错误响应。
 fn request_model_from_body(body: &Value) -> String {
     body.get("model")
@@ -1539,6 +1693,66 @@ fn resolve_external_codex_router_target(
     Ok(None)
 }
 
+/// 为 raw passthrough 解析外部 API 绑定的 Codex router。
+///
+/// 这里不强制要求请求体有 `model`。没有具体 route_id 时返回 router provider 本身，
+/// 让 forwarder 的 raw resolver 负责“显式模型命中 -> official -> default”的统一策略。
+fn resolve_external_codex_router_raw_target(
+    state: &ProxyState,
+    _body: &Value,
+    profile: &ExternalOpenAiApiProfile,
+) -> Result<Option<crate::provider::Provider>, ProxyError> {
+    let providers = state
+        .db
+        .get_all_providers("codex")
+        .map_err(|e| ProxyError::DatabaseError(e.to_string()))?;
+    for provider in providers.values() {
+        if !is_codex_router_provider(provider) {
+            continue;
+        }
+        if profile
+            .provider_id
+            .as_deref()
+            .is_some_and(|id| id != provider.id)
+        {
+            continue;
+        }
+        if !codex_router_contains_route(provider, profile.route_id.as_deref()) {
+            continue;
+        }
+
+        let Some(route_id) = profile.route_id.as_deref() else {
+            return Ok(Some(provider.clone()));
+        };
+        let Some(route) = codex_router_route_by_id(provider, route_id) else {
+            continue;
+        };
+        let route_provider =
+            super::providers::build_codex_route_probe_provider(provider, route, None);
+        if let Some(target_provider_id) =
+            super::providers::codex_route_target_provider_id(&route_provider)
+        {
+            let target = state
+                .db
+                .get_provider_by_id(target_provider_id, "codex")
+                .map_err(|e| ProxyError::DatabaseError(e.to_string()))?
+                .ok_or_else(|| {
+                    ProxyError::InvalidRequest(format!(
+                        "Codex router route target provider not found: {target_provider_id}"
+                    ))
+                })?;
+            return Ok(Some(
+                super::providers::materialize_codex_routed_provider_from_target(
+                    &route_provider,
+                    &target,
+                ),
+            ));
+        }
+        return Ok(Some(route_provider));
+    }
+    Ok(None)
+}
+
 /// 判断 provider 是否是显式开启的 Codex router。
 fn is_codex_router_provider(provider: &crate::provider::Provider) -> bool {
     provider
@@ -1547,6 +1761,23 @@ fn is_codex_router_provider(provider: &crate::provider::Provider) -> bool {
         .and_then(|routing| routing.get("enabled"))
         .and_then(|enabled| enabled.as_bool())
         .unwrap_or(false)
+}
+
+/// 按 id 查找 Codex router route。
+fn codex_router_route_by_id<'a>(
+    provider: &'a crate::provider::Provider,
+    route_id: &str,
+) -> Option<&'a Value> {
+    provider
+        .settings_config
+        .pointer("/codexRouting/routes")
+        .and_then(Value::as_array)
+        .and_then(|routes| {
+            routes.iter().find(|route| {
+                route.get("enabled").and_then(Value::as_bool) != Some(false)
+                    && route.get("id").and_then(Value::as_str) == Some(route_id)
+            })
+        })
 }
 
 /// 判断 Codex router 是否包含指定 route。

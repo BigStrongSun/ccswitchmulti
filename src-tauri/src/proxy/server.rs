@@ -503,7 +503,8 @@ mod tests {
         },
     };
     use axum::{body::Body, response::IntoResponse, Json};
-    use http::{header, Method, Request, StatusCode};
+    use bytes::Bytes;
+    use http::{header, HeaderMap, Method, Request, StatusCode};
     use http_body_util::BodyExt;
     use serde_json::{json, Value};
     use serial_test::serial;
@@ -654,14 +655,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unknown_v1_endpoint_returns_structured_not_implemented() {
-        let (server, _db) = build_test_server();
+    async fn unknown_v1_endpoint_raw_passthrough_forwards_to_profile_backend() {
+        let captured_request = Arc::new(Mutex::new(None));
+        let (upstream_base_url, _upstream_task) =
+            spawn_openai_raw_passthrough_mock(captured_request.clone()).await;
+        let (server, db) = build_test_server();
+        db.save_provider(
+            "hermes",
+            &Provider::with_id(
+                "selected".to_string(),
+                "Selected".to_string(),
+                json!({
+                    "base_url": upstream_base_url,
+                    "api_key": "sk-selected",
+                    "models": ["text-embedding-3-small"]
+                }),
+                None,
+            ),
+        )
+        .expect("save provider");
+        let generated = external_openai_api::regenerate_api_key(&db).expect("generate key");
+        external_openai_api::update_profile(
+            &db,
+            ExternalOpenAiApiProfileUpdate {
+                enabled: true,
+                backend_type: ExternalOpenAiApiBackendType::Provider,
+                app_type: Some("hermes".to_string()),
+                provider_id: Some("selected".to_string()),
+                route_id: None,
+                default_model: Some("text-embedding-3-small".to_string()),
+                listen_address: None,
+                listen_port: None,
+            },
+        )
+        .expect("enable profile");
+
         let response = server
             .build_router()
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
-                    .uri("/v1/embeddings")
+                    .uri("/v1/embeddings?encoding_format=float")
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("Bearer {}", generated.api_key),
+                    )
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         r#"{"model":"text-embedding-3-small","input":"ping"}"#,
@@ -671,19 +709,91 @@ mod tests {
             .await
             .expect("response");
 
-        assert_eq!(
-            response.status(),
-            StatusCode::NOT_IMPLEMENTED,
-            "unknown OpenAI-compatible endpoints should produce a diagnostic response, not Axum's bare 404"
-        );
+        assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
-        assert_eq!(body["error"]["type"], "invalid_request_error");
-        assert_eq!(body["error"]["code"], "ccswitch_unregistered_endpoint");
-        assert_eq!(body["error"]["param"], "endpoint");
-        assert!(body["error"]["message"]
-            .as_str()
-            .expect("message")
-            .contains("POST /v1/embeddings"));
+        assert_eq!(body["object"], "list");
+        assert_eq!(body["model"], "text-embedding-3-small");
+
+        let captured = captured_request
+            .lock()
+            .expect("captured raw request lock")
+            .clone()
+            .expect("captured raw request");
+        assert_eq!(
+            captured["path_and_query"],
+            "/v1/embeddings?encoding_format=float"
+        );
+        assert_eq!(captured["authorization"], "Bearer sk-selected");
+        assert_eq!(captured["content_type"], "application/json");
+        assert_eq!(captured["body"]["model"], "text-embedding-3-small");
+        assert_eq!(captured["body"]["input"], "ping");
+    }
+
+    #[tokio::test]
+    async fn unknown_codex_v1_alias_raw_passthrough_normalizes_upstream_path() {
+        let captured_request = Arc::new(Mutex::new(None));
+        let (upstream_base_url, _upstream_task) =
+            spawn_openai_raw_passthrough_mock(captured_request.clone()).await;
+        let (server, db) = build_test_server();
+        db.save_provider(
+            "hermes",
+            &Provider::with_id(
+                "selected".to_string(),
+                "Selected".to_string(),
+                json!({
+                    "base_url": upstream_base_url,
+                    "api_key": "sk-selected",
+                    "models": ["text-embedding-3-small"]
+                }),
+                None,
+            ),
+        )
+        .expect("save provider");
+        let generated = external_openai_api::regenerate_api_key(&db).expect("generate key");
+        external_openai_api::update_profile(
+            &db,
+            ExternalOpenAiApiProfileUpdate {
+                enabled: true,
+                backend_type: ExternalOpenAiApiBackendType::Provider,
+                app_type: Some("hermes".to_string()),
+                provider_id: Some("selected".to_string()),
+                route_id: None,
+                default_model: Some("text-embedding-3-small".to_string()),
+                listen_address: None,
+                listen_port: None,
+            },
+        )
+        .expect("enable profile");
+
+        let response = server
+            .build_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/codex/v1/embeddings?encoding_format=float")
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("Bearer {}", generated.api_key),
+                    )
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"model":"text-embedding-3-small","input":"ping"}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let captured = captured_request
+            .lock()
+            .expect("captured raw alias request lock")
+            .clone()
+            .expect("captured raw alias request");
+        assert_eq!(
+            captured["path_and_query"],
+            "/v1/embeddings?encoding_format=float"
+        );
     }
 
     #[tokio::test]
@@ -1238,6 +1348,66 @@ base_url = "http://127.0.0.1:15721/v1"
             axum::serve(listener, app)
                 .await
                 .expect("mock upstream serve");
+        });
+        (format!("http://{addr}/v1"), task)
+    }
+
+    /// 启动一个 raw OpenAI-compatible mock，用于验证 fallback 真实转发未知 `/v1/*`。
+    async fn spawn_openai_raw_passthrough_mock(
+        captured_request: Arc<Mutex<Option<Value>>>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new().route(
+            "/v1/embeddings",
+            post(
+                move |uri: axum::http::Uri, headers: HeaderMap, body: Bytes| {
+                    let captured_request = captured_request.clone();
+                    async move {
+                        let parsed_body =
+                            serde_json::from_slice::<Value>(&body).unwrap_or_else(|_| json!(null));
+                        let authorization = headers
+                            .get(header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or("")
+                            .to_string();
+                        let content_type = headers
+                            .get(header::CONTENT_TYPE)
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or("")
+                            .to_string();
+                        *captured_request.lock().expect("capture raw request") = Some(json!({
+                            "path_and_query": uri
+                                .path_and_query()
+                                .map(|value| value.as_str())
+                                .unwrap_or_else(|| uri.path()),
+                            "authorization": authorization,
+                            "content_type": content_type,
+                            "body": parsed_body
+                        }));
+                        Json(json!({
+                            "object": "list",
+                            "model": "text-embedding-3-small",
+                            "data": [{
+                                "object": "embedding",
+                                "embedding": [0.0, 1.0],
+                                "index": 0
+                            }],
+                            "usage": {
+                                "prompt_tokens": 1,
+                                "total_tokens": 1
+                            }
+                        }))
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind raw mock upstream");
+        let addr = listener.local_addr().expect("raw mock upstream addr");
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("raw mock upstream serve");
         });
         (format!("http://{addr}/v1"), task)
     }

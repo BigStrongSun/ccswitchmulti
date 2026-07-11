@@ -7,8 +7,8 @@
 - Images API 的修复必须是 endpoint 专用：如果用户显式把 `gpt-image-*` route 到第三方 Images provider，就让通用 router 继续处理；如果没有显式图片 route，则按 route 身份扫描 enabled routes，物化 official OAuth route，避免 `defaultRouteId` 把图片请求发给 DeepSeek/Qwen 等文本 provider。
 - 按身份兜底命中的 official route 要清理 `codexResolvedUpstreamModelOverride`，不能把图片模型改成 `gpt-5.5` 这类文本模型；同时把 `codexResolvedRouteMatched=false` 写进 request-local provider，日志和后续转换才能区分“图片原生能力回官方”和普通模型命中。
 - 回归测试固定三条边界：旧 router 中 official route 只匹配 `gpt-5.x` 仍可承接 `gpt-image-*`；`defaultRouteId` 指向 DeepSeek/Qwen 时图片不应落到非官方默认路由；显式第三方图片 route 不能被强制改回 official。
-- 不要把 FullProxy 改成无差别 `/v1/*` 透明转发。OpenAI-compatible 的 `files`、`audio`、`images/edits` 等 endpoint 可能是 multipart/二进制，Responses 子资源、vector store、batch、admin 类接口又有状态和隐私边界；unknown `/v1/*` 应先返回结构化 `ccswitch_unregistered_endpoint` 并写 `codex-router.log`，等有真实调用证据或明确产品目标后再按 allowlist 增加专用 handler。
-- 2026-07-11 本机日志只证明 CCSwitch 入站高频路径是 `/responses`，上游转换路径是 `/v1/chat/completions`，没有真实进入本地代理的 `/v1/embeddings`、`/v1/audio/*`、`/v1/files` 或 `/v1/batches`。官方 OpenAI API 的公开 endpoint 面远大于 CCSwitchMulti 当前承诺面，下一批高风险候选是 Responses 子端点（如 `/v1/responses/input_tokens`、`/v1/responses/{id}`）和 Images `edits/variations`，但不能直接复用 JSON-only `handle_image_generations`。
+- 2026-07-11 后续修正：unknown `/v1/*` 不能再返回本地 404/501 或依赖逐个 endpoint allowlist。Axum fallback 应进入 raw passthrough：只解析请求体副本用于 MultiRouter 选路，上游仍使用原始 method/path/query/body/content-type，并由 forwarder 重建 Host、Content-Length、Authorization、API key、external API key 等敏感/链路头。已注册的 `/v1/responses`、`/v1/chat/completions`、`/v1/images/generations` 仍走专用 handler。
+- raw passthrough 的 MultiRouter 选路和 Responses 不同：显式模型 route 命中优先；没有显式命中时优先找 official/Codex OAuth route 身份，再退到 defaultRouteId/首个 enabled route。这样 `gpt-image-*`、未来 Images edits/audio/files/vector store 等 OpenAI 原生 endpoint 不会被 defaultRouteId 错发给 DeepSeek/Qwen；显式配置到第三方的模型仍保留第三方 route。
 
 ## 2026-07-11 Codex 历史修复面板单确认流
 
