@@ -920,9 +920,14 @@ fn codex_catalog_model_entry(
         if let Some(parallel) = spec.supports_parallel_tool_calls {
             entry_obj.insert("supports_parallel_tool_calls".to_string(), json!(parallel));
         }
-        if let Some(modalities) = &spec.input_modalities {
-            entry_obj.insert("input_modalities".to_string(), json!(modalities));
-            entry_obj.insert("inputModalities".to_string(), json!(modalities));
+        // text-only 判定优先级最高：即便 catalog/template 后续提供了
+        // inputModalities，也不能把 `image` 重新写回去，否则 Codex Desktop 会误
+        // 暴露内置 Image Gen / 多模态入口。
+        if !spec.text_only {
+            if let Some(modalities) = &spec.input_modalities {
+                entry_obj.insert("input_modalities".to_string(), json!(modalities));
+                entry_obj.insert("inputModalities".to_string(), json!(modalities));
+            }
         }
     }
 
@@ -4929,6 +4934,45 @@ openai_base_url = "http://127.0.0.1:15721/v1"
                 .and_then(|value| value.as_str()),
             Some("text")
         );
+    }
+
+    #[test]
+    fn codex_model_catalog_text_only_native_responses_never_reenables_image_modality() {
+        let template = json!({
+            "slug": "gpt-5.5",
+            "display_name": "GPT-5.5",
+            "context_window": 272000,
+            "max_context_window": 272000,
+            "supports_image_detail_original": true,
+            "input_modalities": ["text", "image"],
+            "web_search_tool_type": "text_and_image",
+            "model_messages": []
+        });
+        let spec = CodexCatalogModelSpec {
+            model: "deepseek-v4-flash".to_string(),
+            upstream_model: None,
+            display_name: "DeepSeek V4 Flash".to_string(),
+            context_window: 128_000,
+            text_only: true,
+            is_default: false,
+            supports_parallel_tool_calls: Some(false),
+            input_modalities: Some(vec!["text".to_string(), "image".to_string()]),
+            base_instructions: Some("base".to_string()),
+        };
+
+        let entry = codex_catalog_model_entry(
+            &template,
+            &spec,
+            0,
+            CodexCatalogToolProfile::NativeResponses,
+        );
+
+        assert_eq!(
+            entry.get("input_modalities"),
+            Some(&json!(["text"])),
+            "NativeResponses model-specific modalities must not override text-only safeguards"
+        );
+        assert_eq!(entry.get("inputModalities"), Some(&json!(["text"])));
     }
 
     #[test]

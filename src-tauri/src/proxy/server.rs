@@ -356,6 +356,23 @@ impl ProxyServer {
             // OpenAI Models API (Codex CLI reachability check)
             .route("/models", get(handlers::handle_models))
             .route("/v1/models", get(handlers::handle_models))
+            // OpenAI Images API (Codex Desktop 内置 Image Gen)
+            .route(
+                "/images/generations",
+                post(handlers::handle_image_generations),
+            )
+            .route(
+                "/v1/images/generations",
+                post(handlers::handle_image_generations),
+            )
+            .route(
+                "/v1/v1/images/generations",
+                post(handlers::handle_image_generations),
+            )
+            .route(
+                "/codex/v1/images/generations",
+                post(handlers::handle_image_generations),
+            )
             // OpenAI Responses API (Codex CLI，支持带前缀和不带前缀)
             .route(
                 "/responses",
@@ -416,6 +433,10 @@ impl ProxyServer {
             .route(
                 "/v1/responses",
                 get(handlers::handle_responses_websocket).post(handlers::handle_external_responses),
+            )
+            .route(
+                "/v1/images/generations",
+                post(handlers::handle_external_image_generations),
             )
             .layer(DefaultBodyLimit::max(200 * 1024 * 1024))
             .with_state(self.state.clone())
@@ -599,6 +620,32 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["type"], "authentication_error");
+        assert_eq!(body["error"]["code"], "external_openai_api_disabled");
+    }
+
+    #[tokio::test]
+    async fn v1_image_generations_is_routed_before_external_auth() {
+        let (server, _db) = build_test_server();
+        let response = server
+            .build_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/images/generations")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"model":"gpt-image-1","prompt":"ping"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "Images API must enter the handler instead of falling through to Axum 404"
+        );
         let body = response_json(response).await;
         assert_eq!(body["error"]["type"], "authentication_error");
         assert_eq!(body["error"]["code"], "external_openai_api_disabled");

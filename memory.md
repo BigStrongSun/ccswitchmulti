@@ -2031,3 +2031,11 @@
 - 旧版 SQLite/rollout 历史修复工具保留为离线兜底，但真实写入时只要检测到 Codex Desktop/app-server 仍运行就必须拒绝。它不是统一 App 的默认修复路径；dry-run 仍可作为只读诊断。
 - `修复过程.zip` 的截图主要证明新版模型目录和路由适配，不是历史修复方案：官方 native cache 已含 `gpt-5.6-sol/terra/luna`，而 CCSM 路由 catalog 尚未包含。正确实现是按 `slug -> model -> id` 动态合并官方缓存与 CCSM 路由模型（路由字段优先、官方独有元数据与模型保留），并在当前缓存已被 CCSM 接管时从接管前 backup 恢复 native 基线；不要硬编码某一批 GPT-5.6 名称，也不要继续整份覆盖 `models_cache.json`。
 - 验证基线：`cargo test codex_desktop::tests:: --lib` 17/17、`cargo test codex_history_migration::tests:: --lib` 39/39、`cargo test codex_config::tests:: --lib` 84/84、`pnpm typecheck`、`pnpm vitest run src/components/codex/CodexRouterWorkspacePage.test.ts` 39/39 均通过。
+
+## 2026-07-11 Codex 内置 Image Gen 与 MultiRouter 边界
+
+- 用户上传的“内置 Image Gen 调用失败”截图证明 Codex Desktop 内置图片生成不是走 `/v1/responses`，而是直接请求本地 provider base URL 下的 `POST /v1/images/generations`。因此 MultiRouter official `/responses` route 正常并不等于 Image Gen 会正常；如果本地代理没有注册 Images API 路由，请求会在 Axum 路由层直接 404，根本进不到 official route 解析。
+- 修复入口是 `src-tauri/src/proxy/server.rs` 和 `src-tauri/src/proxy/handlers.rs`：FullProxy 与 External OpenAI API 模式都要注册 `/v1/images/generations`。普通 OpenAI-compatible provider 应按 Images API 原样透传；当前 provider 是 official OAuth 或 MultiRouter 能物化出 official OAuth route 时，图片请求优先走 ChatGPT/Codex 官方 OAuth 目标。
+- 图片请求的 `model` 往往是 `gpt-image-*`，旧 MultiRouter official route 可能只匹配 `gpt-5.x` 文本模型。探测 official route 时可以用真实图片模型、catalog 里的 `gpt-*` 模型和稳定 GPT/Codex 名称做只读 probe，但发送 Images API 时必须保留请求体里的 `gpt-image-*`，并移除 request-local route 上的 `codexResolvedUpstreamModelOverride`，否则会把图片模型误写成 `gpt-5.5`。
+- text-only 能力仍要优先于模板/模型配置的 `input_modalities`：`src-tauri/src/codex_config.rs::codex_catalog_model_entry` 在 NativeResponses 分支不能把已判定 text-only 的模型重新写回 `["text","image"]`，否则 Codex Desktop 会误显示内置 Image Gen 或多模态入口。
+- 回归覆盖：`cargo test --manifest-path src-tauri\Cargo.toml image_generation --lib` 覆盖 Images 路由进入 handler 与 MultiRouter official route 选择；`cargo test --manifest-path src-tauri\Cargo.toml codex_model_catalog_text_only_native_responses_never_reenables_image_modality --lib` 覆盖 text-only 不被 NativeResponses 模态覆盖。

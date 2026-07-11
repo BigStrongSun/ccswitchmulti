@@ -882,6 +882,281 @@ pub async fn handle_external_chat_completions(
     handle_chat_completions(State(state), request).await
 }
 
+/// 处理 `/v1/images/generations` 请求。
+///
+/// Codex Desktop 的内置 Image Gen 不走 `/v1/responses` hosted tool 链路，而是
+/// 直接调用 OpenAI Images API。这里补齐本地代理入口：普通 OpenAI-compatible
+/// 上游按原样透传；当当前 Codex provider 是 MultiRouter 且能解析到官方 OAuth
+/// route 时，优先把图片请求送到官方 ChatGPT/Codex 图像端点，避免被文本 route
+/// 的模型映射误写成 `gpt-5.5` 这类非图像模型。
+pub async fn handle_image_generations(
+    State(state): State<ProxyState>,
+    request: axum::extract::Request,
+) -> Result<axum::response::Response, ProxyError> {
+    let (parts, req_body) = request.into_parts();
+    let method = parts.method.clone();
+    let uri = parts.uri;
+    let mut headers = parts.headers;
+    let extensions = parts.extensions;
+    let body_bytes = req_body
+        .collect()
+        .await
+        .map_err(|e| ProxyError::Internal(format!("Failed to read request body: {e}")))?
+        .to_bytes();
+    let body_bytes = decode_codex_request_body(&mut headers, body_bytes)?;
+    let body: Value = serde_json::from_slice(&body_bytes)
+        .map_err(|e| ProxyError::Internal(format!("Failed to parse request body: {e}")))?;
+
+    let is_external_openai_client = !should_handle_as_codex_client(&headers);
+    let mut ctx = if is_external_openai_client {
+        let external_api_profile = match external_openai_api::validate_request(&state.db, &headers)
+        {
+            Ok(profile) => profile,
+            Err(err) => return Ok(external_openai_api_auth_error_response(err)),
+        };
+        let provider = match resolve_external_openai_compatible_provider(
+            &state,
+            &body,
+            &external_api_profile,
+        )? {
+            Some(provider) => provider,
+            None => {
+                return Ok(external_openai_api_route_error_response(
+                    &request_model_from_body(&body),
+                ))
+            }
+        };
+        RequestContext::new_with_provider(
+            &state,
+            &body,
+            &headers,
+            AppType::Codex,
+            "Codex",
+            "codex",
+            provider,
+        )
+        .await?
+    } else {
+        RequestContext::new(&state, &body, &headers, AppType::Codex, "Codex", "codex").await?
+    };
+
+    let endpoint = endpoint_with_query(&uri, "/images/generations");
+    let providers = resolve_codex_image_generation_provider(&state, &ctx.provider, &body)?
+        .map(|provider| vec![provider])
+        .unwrap_or_else(|| ctx.get_providers());
+
+    let forwarder = ctx.create_forwarder(&state);
+    let mut result = match forwarder
+        .forward_with_retry(
+            &AppType::Codex,
+            method,
+            &endpoint,
+            body,
+            headers,
+            extensions,
+            providers,
+        )
+        .await
+    {
+        Ok(result) => result,
+        Err(mut err) => {
+            update_context_provider_for_forward_error(&state, &mut ctx, err.provider.take());
+            log_forward_error(&state, &ctx, false, &err.error);
+            return build_codex_proxy_error_response(&ctx, &endpoint, &err.error);
+        }
+    };
+
+    let connection_guard = result.connection_guard.take();
+    ctx.outbound_model = result.outbound_model.take();
+    ctx.provider = result.provider;
+    process_response(
+        result.response,
+        &ctx,
+        &state,
+        &OPENAI_PARSER_CONFIG,
+        connection_guard,
+    )
+    .await
+}
+
+/// 处理第三方 OpenAI-compatible API 的图片生成请求。
+///
+/// 该入口只负责把请求标记为外部 API 调用，鉴权、后端选择和实际转发统一复用
+/// `handle_image_generations`，保证内置 Codex 与第三方 Agent 的行为一致。
+pub async fn handle_external_image_generations(
+    State(state): State<ProxyState>,
+    mut request: axum::extract::Request,
+) -> Result<axum::response::Response, ProxyError> {
+    mark_external_openai_headers(request.headers_mut());
+    handle_image_generations(State(state), request).await
+}
+
+/// 为 Codex 图片生成请求选择更合适的官方 OAuth provider。
+///
+/// 返回 `None` 表示沿用正常 provider 链。只有当前 provider 自身就是 official
+/// OAuth，或 MultiRouter 中能明确物化出 official OAuth route 时，才覆盖本次
+/// 请求的 provider 列表；这样不会把普通第三方 Images API 请求硬改到官方。
+fn resolve_codex_image_generation_provider(
+    state: &ProxyState,
+    provider: &crate::provider::Provider,
+    body: &Value,
+) -> Result<Option<crate::provider::Provider>, ProxyError> {
+    if provider_is_codex_image_generation_oauth_target(provider) {
+        return Ok(Some(sanitize_codex_image_generation_provider(
+            provider.clone(),
+        )));
+    }
+
+    if !codex_provider_has_routing_config(provider) {
+        return Ok(None);
+    }
+
+    for model in codex_image_generation_route_probe_models(provider, body) {
+        let mut probe_body = body.clone();
+        probe_body["model"] = json!(model);
+        let Some(route_provider) =
+            super::providers::resolve_codex_model_routed_provider(provider, &probe_body)
+        else {
+            continue;
+        };
+        let candidate = materialize_codex_image_generation_route_provider(state, route_provider)?;
+        if provider_is_codex_image_generation_oauth_target(&candidate) {
+            return Ok(Some(sanitize_codex_image_generation_provider(candidate)));
+        }
+    }
+
+    Ok(None)
+}
+
+/// 判断 provider 是否显式包含 Codex router 配置。
+///
+/// 兼容 `codexRouting` 新 schema 以及旧版 `codexModelRoutes` / `modelRoutes`，
+/// 只用于决定图片请求是否需要额外探测官方 route。
+fn codex_provider_has_routing_config(provider: &crate::provider::Provider) -> bool {
+    provider
+        .settings_config
+        .get("codexRouting")
+        .or_else(|| provider.settings_config.get("codexModelRoutes"))
+        .or_else(|| provider.settings_config.get("modelRoutes"))
+        .is_some()
+}
+
+/// 生成用于探测 official route 的模型列表。
+///
+/// 图片请求的模型通常是 `gpt-image-*`，旧 MultiRouter 可能只在 official route
+/// 里匹配 `gpt-5.5` / `gpt-5.4` 等文本模型；因此先尝试真实请求模型，再从
+/// catalog 和一组稳定 OpenAI/Codex 模型名里探测 official route。
+fn codex_image_generation_route_probe_models(
+    provider: &crate::provider::Provider,
+    body: &Value,
+) -> Vec<String> {
+    let mut models = Vec::new();
+    if let Some(model) = body.get("model").and_then(|value| value.as_str()) {
+        push_unique_probe_model(&mut models, model);
+    }
+
+    if let Some(entries) = provider
+        .settings_config
+        .pointer("/modelCatalog/models")
+        .and_then(|value| value.as_array())
+    {
+        for entry in entries {
+            let Some(model) = codex_catalog_model_id(entry) else {
+                continue;
+            };
+            if model_looks_like_openai_codex_route(&model) {
+                push_unique_probe_model(&mut models, &model);
+            }
+        }
+    }
+
+    for model in [
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-5.5",
+        "gpt-5.4",
+        "gpt-5.4-mini",
+        "gpt-5.3-codex-spark",
+    ] {
+        push_unique_probe_model(&mut models, model);
+    }
+
+    models
+}
+
+/// 向探测列表追加非空且不重复的模型名。
+fn push_unique_probe_model(models: &mut Vec<String>, model: &str) {
+    let model = model.trim();
+    if model.is_empty() || models.iter().any(|item| item.eq_ignore_ascii_case(model)) {
+        return;
+    }
+    models.push(model.to_string());
+}
+
+/// 粗略识别 OpenAI/Codex 文本 route 名称，避免用 Qwen/DeepSeek route 误探测 official。
+fn model_looks_like_openai_codex_route(model: &str) -> bool {
+    let lower = model.trim().to_ascii_lowercase();
+    lower.starts_with("gpt-") || lower.starts_with('o')
+}
+
+/// 物化图片请求探测命中的 route。
+///
+/// route 引用真实 target provider 时复用已有 materialize 逻辑，让 official seed、
+/// 污染过的本地代理 base_url 和托管 OAuth meta 的判断保持与 Responses 转发一致。
+fn materialize_codex_image_generation_route_provider(
+    state: &ProxyState,
+    route_provider: crate::provider::Provider,
+) -> Result<crate::provider::Provider, ProxyError> {
+    let Some(target_provider_id) =
+        super::providers::codex_route_target_provider_id(&route_provider)
+    else {
+        return Ok(route_provider);
+    };
+
+    match state
+        .provider_router
+        .get_provider_by_id(target_provider_id, "codex")
+    {
+        Ok(Some(target_provider)) => Ok(
+            super::providers::materialize_codex_routed_provider_from_target(
+                &route_provider,
+                &target_provider,
+            ),
+        ),
+        Ok(None) => {
+            log::warn!(
+                "[codex] Image Gen route 引用了不存在的目标 provider {}，跳过本次 official 探测",
+                target_provider_id
+            );
+            Ok(route_provider)
+        }
+        Err(err) => Err(ProxyError::DatabaseError(err.to_string())),
+    }
+}
+
+/// 判断 provider 是否能代表 ChatGPT/Codex 官方 OAuth 图片通道。
+fn provider_is_codex_image_generation_oauth_target(provider: &crate::provider::Provider) -> bool {
+    provider.is_codex_oauth()
+        || provider.uses_managed_account_auth()
+        || is_codex_official_managed_oauth_provider(provider)
+}
+
+/// 清理图片请求不应继承的文本 route 模型覆盖。
+///
+/// Images API 的 `model` 是图像模型名，不能被 MultiRouter 文本 route 的
+/// `codexResolvedUpstreamModelOverride` 覆盖成 `gpt-5.5`。该清理只作用于本次
+/// request-local provider，不写回用户配置。
+fn sanitize_codex_image_generation_provider(
+    mut provider: crate::provider::Provider,
+) -> crate::provider::Provider {
+    if let Some(mut settings) = provider.settings_config.as_object().cloned() {
+        settings.remove("codexResolvedUpstreamModelOverride");
+        provider.settings_config = Value::Object(settings);
+    }
+    provider
+}
+
 /// 记录第三方 Agent API 转发到 Codex OAuth 前的 Unicode 摘要，避免把用户 prompt 原文写入日志。
 ///
 /// 该诊断只在 `/v1/chat/completions` 转 Codex Responses 时触发，用于区分“本地出站前已是问号”
@@ -3259,9 +3534,10 @@ mod tests {
         body_looks_like_sse, body_snippet, build_external_codex_official_oauth_provider,
         chat_sse_to_response_value, codex_catalog_models_response, codex_proxy_error_json,
         external_openai_api_models_response, external_openai_api_unsupported_response,
-        resolve_external_codex_router_target, resolve_forward_error_provider_for_logging,
-        responses_sse_to_response_value, should_handle_as_codex_client,
-        should_use_claude_transform_streaming, transform, upstream_body_parse_error,
+        resolve_codex_image_generation_provider, resolve_external_codex_router_target,
+        resolve_forward_error_provider_for_logging, responses_sse_to_response_value,
+        should_handle_as_codex_client, should_use_claude_transform_streaming, transform,
+        upstream_body_parse_error,
     };
     use crate::{
         app_config::AppType,
@@ -4420,6 +4696,90 @@ data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n
                 .and_then(|meta| meta.provider_type)
                 .as_deref(),
             Some("codex_oauth")
+        );
+    }
+
+    #[test]
+    /// 内置 Image Gen 的模型名是 `gpt-image-*`，旧 router 可能只把 official route
+    /// 写成 `gpt-5.x` 文本匹配；图片请求仍应能找到 official OAuth route，且不能继承
+    /// 文本 route 的 upstreamModel 覆盖。
+    fn image_generation_resolves_managed_official_route_without_text_model_override() {
+        let db = Arc::new(Database::memory().expect("memory db"));
+        let router = Provider::with_id(
+            "codex-router".to_string(),
+            "OpenAI Multi-Model Router".to_string(),
+            json!({
+                "modelCatalog": {
+                    "models": [
+                        { "model": "gpt-5.5" },
+                        { "model": "deepseek-v4-flash" }
+                    ]
+                },
+                "codexRouting": {
+                    "enabled": true,
+                    "routes": [
+                        {
+                            "id": "deepseek",
+                            "label": "DeepSeek",
+                            "match": { "models": ["deepseek-v4-flash"] },
+                            "upstream": {
+                                "baseUrl": "https://api.deepseek.example/v1",
+                                "apiFormat": "openai_chat",
+                                "auth": { "source": "provider_config" },
+                                "upstreamModel": "deepseek-chat"
+                            }
+                        },
+                        {
+                            "id": "official",
+                            "label": "OpenAI Official",
+                            "targetProviderId": "codex-official",
+                            "match": { "models": ["gpt-5.5"] },
+                            "upstream": {
+                                "auth": { "source": "managed_codex_oauth" },
+                                "upstreamModel": "gpt-5.5"
+                            }
+                        }
+                    ]
+                }
+            }),
+            None,
+        );
+        let mut official = Provider::with_id(
+            "codex-official".to_string(),
+            "OpenAI Official".to_string(),
+            json!({}),
+            None,
+        );
+        official.category = Some("official".to_string());
+        db.save_provider("codex", &router).expect("save router");
+        db.save_provider("codex", &official).expect("save official");
+        let state = build_state(db);
+
+        let resolved = resolve_codex_image_generation_provider(
+            &state,
+            &router,
+            &json!({ "model": "gpt-image-1", "prompt": "draw a blue square" }),
+        )
+        .expect("resolve image provider")
+        .expect("managed official route");
+
+        assert_eq!(
+            resolved
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.provider_type.as_deref()),
+            Some("codex_oauth")
+        );
+        assert_eq!(
+            crate::proxy::providers::codex_route_persistent_provider(&resolved),
+            ("codex-router", "OpenAI Multi-Model Router")
+        );
+        assert!(
+            resolved
+                .settings_config
+                .get("codexResolvedUpstreamModelOverride")
+                .is_none(),
+            "Images API must keep its gpt-image model instead of inheriting the text route model"
         );
     }
 
