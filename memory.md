@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-07-11 CCSwitchMulti v3.16.5-2 Release
+
+- `v3.16.5-2` 已作为 `BigStrongSun/ccswitchmulti` 正式 release 发布：`https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.16.5-2`。Release 为 `draft=false`、`prerelease=false`，发布工作流 run `29158855394` 全部成功。
+- 本次 tag `v3.16.5-2` 指向 annotated tag object `a0e8bf94381952848e6d24ff7549febf82da99fe`，解引用提交为 `61e025999942e356f080cc80fd7512ab9570f4b7`；`fork/main` 也已推进到同一提交。
+- Release 资产共 19 个，包含 Windows x64/ARM64 setup 与 portable、macOS dmg/tar.gz/signature/zip、Linux x64/ARM64 AppImage/signature/deb/rpm，以及 `latest.json`。
+- `latest.json` 下载验证通过：`version=3.16.5-2`，updater 平台包含 `darwin-aarch64`、`darwin-x86_64`、`windows-x86_64`、`windows-aarch64`、`linux-x86_64`、`linux-aarch64`，每个平台都有 signature 和 release asset URL。
+- 发布前本地固定交付目录 `C:\Users\sunda\Documents\LLMservice\最新版ccswitchmulti` 已导出 Windows 测试包，metadata 指向二进制修复提交 `08b58d81707a9458cd2f4c99f06f9aafcc60b416`；随后只追加了 release note 提交 `61e02599`，不影响二进制内容。
+
 ## 2026-07-11 Codex Image Gen MultiRouter 官方兜底边界
 
 - “内置 Image Gen 在 MultiRouter 下 404”的第一层根因是旧版本没有注册 `POST /images/generations` / `/v1/images/generations` 等 Images API 路由；请求一旦打到 `127.0.0.1:15721/v1/images/generations`，会先在 Axum 层 404，还没进入 MultiRouter route resolver。
