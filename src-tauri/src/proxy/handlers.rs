@@ -1011,6 +1011,12 @@ fn resolve_codex_image_generation_provider(
         return Ok(None);
     }
 
+    let request_model = body
+        .get("model")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(ToString::to_string);
     for model in codex_image_generation_route_probe_models(provider, body) {
         let mut probe_body = body.clone();
         probe_body["model"] = json!(model);
@@ -1023,9 +1029,18 @@ fn resolve_codex_image_generation_provider(
         if provider_is_codex_image_generation_oauth_target(&candidate) {
             return Ok(Some(sanitize_codex_image_generation_provider(candidate)));
         }
+        if request_model
+            .as_deref()
+            .is_some_and(|request_model| request_model.eq_ignore_ascii_case(&model))
+            && codex_route_provider_matched_request_model(&candidate)
+        {
+            // 用户显式把 gpt-image-* 这类图片模型路由到非官方 Images API 时，保留
+            // 该选择；只有没有显式图片 route 时才执行 official 原生能力兜底。
+            return Ok(None);
+        }
     }
 
-    Ok(None)
+    resolve_codex_image_generation_official_route_by_identity(state, provider)
 }
 
 /// 判断 provider 是否显式包含 Codex router 配置。
@@ -1133,6 +1148,82 @@ fn materialize_codex_image_generation_route_provider(
         }
         Err(err) => Err(ProxyError::DatabaseError(err.to_string())),
     }
+}
+
+/// 按 route 身份兜底查找 official OAuth 图片通道。
+///
+/// 旧路由可能只为 official route 写了文本模型匹配，导致 `gpt-image-*` 请求先落到
+/// `defaultRouteId`。图片生成属于 Codex/OpenAI 原生能力；当没有显式图片 route 时，
+/// 应扫描 MultiRouter 中的 official OAuth route，而不是把图片请求发给 DeepSeek/Qwen。
+fn resolve_codex_image_generation_official_route_by_identity(
+    state: &ProxyState,
+    provider: &crate::provider::Provider,
+) -> Result<Option<crate::provider::Provider>, ProxyError> {
+    for route in codex_image_generation_routes(provider) {
+        if !codex_image_generation_route_is_enabled(route) {
+            continue;
+        }
+
+        let mut route_provider =
+            super::providers::build_codex_route_probe_provider(provider, route, None);
+        if let Some(settings) = route_provider.settings_config.as_object_mut() {
+            // 这里是 endpoint 专属兜底，不是请求模型真实命中该 route。把 matched
+            // 标成 false，便于日志和后续转换区分“图片原生能力回官方”和普通模型匹配。
+            settings.insert("codexResolvedRouteMatched".to_string(), json!(false));
+        }
+        let candidate = materialize_codex_image_generation_route_provider(state, route_provider)?;
+        if provider_is_codex_image_generation_oauth_target(&candidate) {
+            return Ok(Some(sanitize_codex_image_generation_provider(candidate)));
+        }
+    }
+
+    Ok(None)
+}
+
+/// 提取 MultiRouter 里可参与图片生成兜底扫描的 route 列表。
+fn codex_image_generation_routes(provider: &crate::provider::Provider) -> Vec<&Value> {
+    if let Some(routing) = provider.settings_config.get("codexRouting") {
+        if let Some(routes) = routing.as_array() {
+            return routes.iter().collect();
+        }
+        if routing
+            .get("enabled")
+            .and_then(|value| value.as_bool())
+            .is_some_and(|enabled| !enabled)
+        {
+            return Vec::new();
+        }
+        return routing
+            .get("routes")
+            .and_then(|value| value.as_array())
+            .map(|routes| routes.iter().collect())
+            .unwrap_or_default();
+    }
+
+    provider
+        .settings_config
+        .get("codexModelRoutes")
+        .or_else(|| provider.settings_config.get("modelRoutes"))
+        .and_then(|value| value.as_array())
+        .map(|routes| routes.iter().collect())
+        .unwrap_or_default()
+}
+
+/// 判断 route 是否启用，缺省按启用处理以兼容旧配置。
+fn codex_image_generation_route_is_enabled(route: &Value) -> bool {
+    route
+        .get("enabled")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true)
+}
+
+/// 判断 route provider 是否由请求原模型显式命中，而不是 defaultRouteId 兜底命中。
+fn codex_route_provider_matched_request_model(provider: &crate::provider::Provider) -> bool {
+    provider
+        .settings_config
+        .get("codexResolvedRouteMatched")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true)
 }
 
 /// 判断 provider 是否能代表 ChatGPT/Codex 官方 OAuth 图片通道。
@@ -4780,6 +4871,151 @@ data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n
                 .get("codexResolvedUpstreamModelOverride")
                 .is_none(),
             "Images API must keep its gpt-image model instead of inheriting the text route model"
+        );
+    }
+
+    #[test]
+    /// 当图片模型没有命中任何显式 route 时，不能让 defaultRouteId 把图片请求发到
+    /// DeepSeek/Qwen 这类文本 provider；应继续按 route 身份寻找 official OAuth 通道。
+    fn image_generation_uses_official_identity_instead_of_nonofficial_default_route() {
+        let db = Arc::new(Database::memory().expect("memory db"));
+        let router = Provider::with_id(
+            "codex-router".to_string(),
+            "OpenAI Multi-Model Router".to_string(),
+            json!({
+                "modelCatalog": {
+                    "models": [
+                        { "model": "deepseek-v4-flash" },
+                        { "model": "codex-auto-review" }
+                    ]
+                },
+                "codexRouting": {
+                    "enabled": true,
+                    "defaultRouteId": "deepseek",
+                    "routes": [
+                        {
+                            "id": "deepseek",
+                            "label": "DeepSeek",
+                            "match": { "models": ["deepseek-v4-flash"] },
+                            "upstream": {
+                                "baseUrl": "https://api.deepseek.example/v1",
+                                "apiFormat": "openai_chat",
+                                "auth": { "source": "provider_config" },
+                                "upstreamModel": "deepseek-chat"
+                            }
+                        },
+                        {
+                            "id": "official",
+                            "label": "OpenAI Official",
+                            "targetProviderId": "codex-official",
+                            "match": { "models": ["codex-auto-review"] },
+                            "upstream": {
+                                "auth": { "source": "managed_codex_oauth" },
+                                "upstreamModel": "codex-auto-review"
+                            }
+                        }
+                    ]
+                }
+            }),
+            None,
+        );
+        let mut official = Provider::with_id(
+            "codex-official".to_string(),
+            "OpenAI Official".to_string(),
+            json!({}),
+            None,
+        );
+        official.category = Some("official".to_string());
+        db.save_provider("codex", &router).expect("save router");
+        db.save_provider("codex", &official).expect("save official");
+        let state = build_state(db);
+
+        let resolved = resolve_codex_image_generation_provider(
+            &state,
+            &router,
+            &json!({ "model": "gpt-image-1", "prompt": "draw a blue square" }),
+        )
+        .expect("resolve image provider")
+        .expect("official identity route");
+
+        assert_eq!(
+            resolved
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.provider_type.as_deref()),
+            Some("codex_oauth")
+        );
+        assert_eq!(
+            resolved
+                .settings_config
+                .get("codexResolvedRouteId")
+                .and_then(|value| value.as_str()),
+            Some("official")
+        );
+        assert!(!resolved.settings_config["codexResolvedRouteMatched"]
+            .as_bool()
+            .unwrap_or(true));
+    }
+
+    #[test]
+    /// 用户明确把某个图片模型路由到第三方 Images API 时，这属于显式配置，
+    /// 图片兜底逻辑必须退出并让通用 forwarder 按该 route 正常转发。
+    fn image_generation_preserves_explicit_nonofficial_image_route() {
+        let db = Arc::new(Database::memory().expect("memory db"));
+        let router = Provider::with_id(
+            "codex-router".to_string(),
+            "OpenAI Multi-Model Router".to_string(),
+            json!({
+                "codexRouting": {
+                    "enabled": true,
+                    "defaultRouteId": "official",
+                    "routes": [
+                        {
+                            "id": "image-api",
+                            "label": "Image API",
+                            "match": { "models": ["gpt-image-1"] },
+                            "upstream": {
+                                "baseUrl": "https://images.example/v1",
+                                "apiFormat": "openai_responses",
+                                "auth": { "source": "provider_config" }
+                            }
+                        },
+                        {
+                            "id": "official",
+                            "label": "OpenAI Official",
+                            "targetProviderId": "codex-official",
+                            "match": { "models": ["gpt-5.5"] },
+                            "upstream": {
+                                "auth": { "source": "managed_codex_oauth" },
+                                "upstreamModel": "gpt-5.5"
+                            }
+                        }
+                    ]
+                }
+            }),
+            None,
+        );
+        let mut official = Provider::with_id(
+            "codex-official".to_string(),
+            "OpenAI Official".to_string(),
+            json!({}),
+            None,
+        );
+        official.category = Some("official".to_string());
+        db.save_provider("codex", &router).expect("save router");
+        db.save_provider("codex", &official).expect("save official");
+        let state = build_state(db);
+
+        let resolved = resolve_codex_image_generation_provider(
+            &state,
+            &router,
+            &json!({ "model": "gpt-image-1", "prompt": "draw a blue square" }),
+        )
+        .expect("resolve image provider");
+
+        assert!(
+            resolved.is_none(),
+            "explicit non-official image routes must remain owned by the normal router"
         );
     }
 

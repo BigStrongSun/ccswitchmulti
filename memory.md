@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-07-11 Codex Image Gen MultiRouter 官方兜底边界
+
+- “内置 Image Gen 在 MultiRouter 下 404”的第一层根因是旧版本没有注册 `POST /images/generations` / `/v1/images/generations` 等 Images API 路由；请求一旦打到 `127.0.0.1:15721/v1/images/generations`，会先在 Axum 层 404，还没进入 MultiRouter route resolver。
+- “之前不影响”不能理解成 proxy 里曾经有隐藏的图片绕过逻辑。现场更合理的边界是当时 Codex/ChatGPT App 没把 Image Gen 走本地 base_url，或已经切回 official 直连官方；通用 `forwarder` 一直会对所有 Codex endpoint 按 `body.model` 解析 MultiRouter。
+- Images API 的修复必须是 endpoint 专用：如果用户显式把 `gpt-image-*` route 到第三方 Images provider，就让通用 router 继续处理；如果没有显式图片 route，则按 route 身份扫描 enabled routes，物化 official OAuth route，避免 `defaultRouteId` 把图片请求发给 DeepSeek/Qwen 等文本 provider。
+- 按身份兜底命中的 official route 要清理 `codexResolvedUpstreamModelOverride`，不能把图片模型改成 `gpt-5.5` 这类文本模型；同时把 `codexResolvedRouteMatched=false` 写进 request-local provider，日志和后续转换才能区分“图片原生能力回官方”和普通模型命中。
+- 回归测试固定三条边界：旧 router 中 official route 只匹配 `gpt-5.x` 仍可承接 `gpt-image-*`；`defaultRouteId` 指向 DeepSeek/Qwen 时图片不应落到非官方默认路由；显式第三方图片 route 不能被强制改回 official。
+
 ## 2026-07-11 Codex 历史修复面板单确认流
 
 - `CodexHistoryRepairPanel` 的用户主流程应保持为“刷新记录 -> 选择 session/项目范围 -> 选择目标 provider -> 确认修复”。不要再把“修复新版 App 历史 / 加载历史 / 预览旧版恢复 / 写入旧版索引”四个并列按钮暴露给用户，否则会把新版目录同步和旧版离线索引兜底混成两套互相竞争的修复逻辑。
