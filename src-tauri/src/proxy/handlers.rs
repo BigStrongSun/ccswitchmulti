@@ -78,6 +78,79 @@ pub async fn get_status(State(state): State<ProxyState>) -> Result<Json<ProxySta
     Ok(Json(status))
 }
 
+/// 处理未显式注册的本地代理路径。
+///
+/// 这里不能把 `/v1/*` 直接通配转发：OpenAI-compatible 不同 endpoint 的 body
+/// 形态差异很大，`files`/`images/edits`/`audio` 可能是 multipart 或二进制流；
+/// official Codex OAuth 也不是通用 OpenAI base_url。未知路径先给结构化错误和
+/// 诊断日志，避免再次出现 Axum 裸 404 且没有排障线索。
+pub async fn handle_unregistered_proxy_endpoint(
+    State(_state): State<ProxyState>,
+    request: axum::extract::Request,
+) -> axum::response::Response {
+    let method = request.method().as_str().to_string();
+    let endpoint = request
+        .uri()
+        .path_and_query()
+        .map(|path_and_query| path_and_query.as_str())
+        .unwrap_or_else(|| request.uri().path())
+        .to_string();
+    let path = request.uri().path();
+    let openai_compatible = looks_like_unregistered_openai_compatible_endpoint(path);
+    let status = if openai_compatible {
+        StatusCode::NOT_IMPLEMENTED
+    } else {
+        StatusCode::NOT_FOUND
+    };
+    let code = if openai_compatible {
+        "ccswitch_unregistered_endpoint"
+    } else {
+        "ccswitch_route_not_found"
+    };
+    let message = if openai_compatible {
+        format!(
+            "CCSwitchMulti local proxy has no handler for {method} {endpoint}; the request was not forwarded. Add an explicit endpoint handler before enabling passthrough."
+        )
+    } else {
+        format!("CCSwitchMulti local proxy has no route for {method} {endpoint}.")
+    };
+
+    log::warn!("[proxy] {code}: method={method} endpoint={endpoint}");
+    if openai_compatible {
+        super::codex_router_log::append_event(
+            "unregistered_endpoint",
+            &[
+                ("method", method.clone()),
+                ("endpoint", endpoint.clone()),
+                ("forwarded", "false".to_string()),
+            ],
+        );
+    }
+
+    (
+        status,
+        Json(json!({
+            "error": {
+                "message": message,
+                "type": "invalid_request_error",
+                "code": code,
+                "param": "endpoint"
+            }
+        })),
+    )
+        .into_response()
+}
+
+/// 判断未知路径是否属于需要重点诊断的 OpenAI-compatible `/v1/...` 族。
+fn looks_like_unregistered_openai_compatible_endpoint(path: &str) -> bool {
+    path == "/v1"
+        || path.starts_with("/v1/")
+        || path == "/v1/v1"
+        || path.starts_with("/v1/v1/")
+        || path == "/codex/v1"
+        || path.starts_with("/codex/v1/")
+}
+
 /// GET /v1/models — Codex model list (reachability check)
 ///
 /// Codex CLI probes this endpoint at startup and deserializes the response as a

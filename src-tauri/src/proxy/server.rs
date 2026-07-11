@@ -419,6 +419,7 @@ impl ProxyServer {
             .route("/gemini/v1/*path", any(handlers::handle_gemini))
             // 提高默认请求体大小限制（避免 413 Payload Too Large）
             .layer(DefaultBodyLimit::max(200 * 1024 * 1024))
+            .fallback(handlers::handle_unregistered_proxy_endpoint)
             .with_state(self.state.clone())
     }
 
@@ -439,6 +440,7 @@ impl ProxyServer {
                 post(handlers::handle_external_image_generations),
             )
             .layer(DefaultBodyLimit::max(200 * 1024 * 1024))
+            .fallback(handlers::handle_unregistered_proxy_endpoint)
             .with_state(self.state.clone())
     }
 
@@ -649,6 +651,60 @@ mod tests {
         let body = response_json(response).await;
         assert_eq!(body["error"]["type"], "authentication_error");
         assert_eq!(body["error"]["code"], "external_openai_api_disabled");
+    }
+
+    #[tokio::test]
+    async fn unknown_v1_endpoint_returns_structured_not_implemented() {
+        let (server, _db) = build_test_server();
+        let response = server
+            .build_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/embeddings")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"model":"text-embedding-3-small","input":"ping"}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_IMPLEMENTED,
+            "unknown OpenAI-compatible endpoints should produce a diagnostic response, not Axum's bare 404"
+        );
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert_eq!(body["error"]["code"], "ccswitch_unregistered_endpoint");
+        assert_eq!(body["error"]["param"], "endpoint");
+        assert!(body["error"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("POST /v1/embeddings"));
+    }
+
+    #[tokio::test]
+    async fn unknown_non_v1_endpoint_returns_structured_not_found() {
+        let (server, _db) = build_test_server();
+        let response = server
+            .build_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/not-a-proxy-endpoint")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert_eq!(body["error"]["code"], "ccswitch_route_not_found");
     }
 
     #[tokio::test]
