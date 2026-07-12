@@ -1098,6 +1098,36 @@ fn sync_current_provider_for_app_respecting_takeover(
         return Ok(());
     }
 
+    // 当 Codex 提供者启用了 MultiRouter 路由（codexRouting enabled + routes 非空），
+    // 但 takeover 未激活且没有 live backup 时，主动启用接管而不是走
+    // write_live_with_common_config 的普通 common config 路径。
+    // 否则只覆盖 openai/openai_base_url + catalog，不写 codex_model_router_v2
+    // provider section，Codex 仍按内置 openai provider 语义处理 WebSocket/
+    // compact/模型上下文，导致"live 显示 openai"和 compaction 失败。
+    if matches!(app_type, AppType::Codex) {
+        let has_enabled_routing = provider
+            .settings_config
+            .get("codexRouting")
+            .and_then(|r| r.get("enabled"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+            && provider
+                .settings_config
+                .get("codexRouting")
+                .and_then(|r| r.get("routes"))
+                .and_then(|v| v.as_array())
+                .is_some_and(|routes| !routes.is_empty());
+        if has_enabled_routing {
+            block_on_tauri_runtime(
+                state
+                    .proxy_service
+                    .set_takeover_for_app(app_type.as_str(), true),
+            )
+            .map_err(|e| AppError::Message(format!("启用 MultiRouter 接管失败: {e}")))?;
+            return Ok(());
+        }
+    }
+
     write_live_with_common_config(state.db.as_ref(), app_type, provider)
 }
 
