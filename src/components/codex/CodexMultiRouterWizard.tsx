@@ -46,6 +46,7 @@ import {
 } from "@/components/ui/dialog";
 import { providersApi } from "@/lib/api/providers";
 import {
+  fetchCodexOauthCachedModels,
   fetchCodexOauthModels,
   fetchModelsForConfig,
   probeCodexChatForConfig,
@@ -1407,13 +1408,56 @@ export function CodexMultiRouterWizard({
             }));
           } catch (error) {
             const message = formatWizardError(error);
+            let cacheFailureMessage: string | null = null;
+            try {
+              const cachedModels = await fetchCodexOauthCachedModels();
+              if (cachedModels.length > 0) {
+                // 在线 OAuth 目录失败时使用 Codex 本地官方缓存兜底，避免新建 official 源被写成 0 模型。
+                const nextProvider = mergeFetchedModelsIntoWizardProvider(
+                  provider,
+                  cachedModels,
+                );
+                const afterModels = readWizardModelCatalog(nextProvider);
+                const diff = diffWizardModelCatalog(beforeModels, afterModels);
+                const hasDiff = hasModelFetchDiff(diff);
+                await providersApi.update(nextProvider, "codex");
+                nextSources.push(nextProvider);
+                successCount += 1;
+                recordWizardIssue({
+                  stage: "fetchModels",
+                  severity: "warning",
+                  title: "OAuth 在线模型列表获取失败，已使用本地缓存",
+                  detail: `ChatGPT OAuth 在线模型列表暂时不可用，已用本地 Codex 模型缓存恢复 ${afterModels.length} 个模型。在线错误：${message}`,
+                  canContinue: true,
+                  providerName: provider.name,
+                });
+                setModelFetchCards((current) => ({
+                  ...current,
+                  [provider.id]: {
+                    status: hasDiff ? "updated" : "unchanged",
+                    message: hasDiff
+                      ? `OAuth 在线读取失败，已使用本地 Codex 模型缓存写入 ${afterModels.length} 个模型。`
+                      : `OAuth 在线读取失败，已使用本地 Codex 模型缓存；无模型列表更新，仍为 ${afterModels.length} 个模型。`,
+                    modelCount: afterModels.length,
+                    diff,
+                  },
+                }));
+                continue;
+              }
+            } catch (cacheError) {
+              cacheFailureMessage = formatWizardError(cacheError);
+            }
             failedCount += 1;
             nextSources.push(provider);
             recordWizardIssue({
               stage: "fetchModels",
               severity: "warning",
               title: "OAuth 模型列表获取失败",
-              detail: `获取 ChatGPT OAuth 模型列表失败，已保留现有目录：${message}`,
+              detail: `获取 ChatGPT OAuth 模型列表失败，已保留现有目录：${message}${
+                cacheFailureMessage
+                  ? `；本地缓存读取也失败：${cacheFailureMessage}`
+                  : "；本地缓存没有可恢复的官方模型目录"
+              }`,
               canContinue: true,
               providerName: provider.name,
             });
@@ -1421,7 +1465,11 @@ export function CodexMultiRouterWizard({
               ...current,
               [provider.id]: {
                 status: "error",
-                message: `OAuth 模型列表获取失败，已保留现有目录：${message}`,
+                message: `OAuth 模型列表获取失败，已保留现有目录：${message}${
+                  beforeModels.length === 0
+                    ? "；本地缓存也没有可恢复的官方模型目录，请检查 CCSwitchMulti 全局代理或先启动 Codex 官方连接生成缓存。"
+                    : ""
+                }`,
                 modelCount: beforeModels.length,
               },
             }));

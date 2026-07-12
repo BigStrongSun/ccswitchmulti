@@ -61,6 +61,7 @@ import {
 } from "@/components/ui/tooltip";
 import { providersApi } from "@/lib/api";
 import {
+  fetchCodexOauthCachedModels,
   fetchCodexOauthModels,
   fetchModelsForConfig,
   type FetchedModel,
@@ -336,12 +337,14 @@ type ProviderModelRefreshState = {
 // 自动刷新事务的内部结果；读取和写回分开返回，便于统一控制 loading 终态。
 type ProviderModelRefreshResult =
   | { status: "stale" }
-  | { status: "empty" }
+  | { status: "empty"; message?: string }
   | {
       status: "updated";
       models: FetchedModel[];
       nextProvider: Provider;
       affectedPlans: Provider[];
+      usedCodexCache?: boolean;
+      onlineErrorMessage?: string;
     };
 
 type ProviderModelFetchConfig = {
@@ -457,6 +460,55 @@ function withModelRefreshTimeout<T>(
 
     promise.then(resolve, reject).finally(() => window.clearTimeout(timeoutId));
   });
+}
+
+/// 将未知异常转成 UI 可展示文本，避免每个 catch 重复 `instanceof Error`。
+function workspaceErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/// 读取 provider 模型列表；官方 OAuth 在线失败时回退到本地 Codex 模型缓存。
+async function fetchProviderModelsWithFallback(
+  fetchConfig: ProviderModelFetchConfig,
+): Promise<{
+  models: FetchedModel[];
+  usedCodexCache: boolean;
+  onlineErrorMessage?: string;
+}> {
+  if (!fetchConfig.useCodexOAuth) {
+    return {
+      models: await fetchModelsForConfig(
+        fetchConfig.baseUrl,
+        fetchConfig.apiKey,
+        fetchConfig.isFullUrl,
+        undefined,
+        fetchConfig.customUserAgent,
+        fetchConfig.volcengineModelListAction
+          ? {
+              action: fetchConfig.volcengineModelListAction,
+              accessKeyId: fetchConfig.volcengineAccessKeyId ?? "",
+              secretAccessKey: fetchConfig.volcengineSecretAccessKey ?? "",
+            }
+          : undefined,
+      ),
+      usedCodexCache: false,
+    };
+  }
+
+  try {
+    return {
+      models: await fetchCodexOauthModels(fetchConfig.codexOAuthAccountId),
+      usedCodexCache: false,
+    };
+  } catch (error) {
+    const onlineErrorMessage = workspaceErrorMessage(error);
+    const cachedModels = await fetchCodexOauthCachedModels();
+    return {
+      models: cachedModels,
+      usedCodexCache: cachedModels.length > 0,
+      onlineErrorMessage,
+    };
+  }
 }
 
 /// 提取普通 Codex provider 的 /models 读取配置；官方 OAuth/缺少普通端点的 provider 不走这里。
@@ -2284,28 +2336,18 @@ export function CodexRouterWorkspacePage({
       // 将模型目录读取、provider catalog 写回、受影响路由方案重建视为一个事务；
       // 任何阶段卡住都必须让刷新卡片落到终态，不能只保护最前面的网络请求。
       const refreshTask = (async (): Promise<ProviderModelRefreshResult> => {
-        const models = fetchConfig.useCodexOAuth
-          ? await fetchCodexOauthModels(fetchConfig.codexOAuthAccountId)
-          : await fetchModelsForConfig(
-              fetchConfig.baseUrl,
-              fetchConfig.apiKey,
-              fetchConfig.isFullUrl,
-              undefined,
-              fetchConfig.customUserAgent,
-              fetchConfig.volcengineModelListAction
-                ? {
-                    action: fetchConfig.volcengineModelListAction,
-                    accessKeyId: fetchConfig.volcengineAccessKeyId ?? "",
-                    secretAccessKey:
-                      fetchConfig.volcengineSecretAccessKey ?? "",
-                  }
-                : undefined,
-            );
+        const { models, usedCodexCache, onlineErrorMessage } =
+          await fetchProviderModelsWithFallback(fetchConfig);
         if (!isCurrentAttempt()) {
           return { status: "stale" };
         }
         if (models.length === 0) {
-          return { status: "empty" };
+          return {
+            status: "empty",
+            message: onlineErrorMessage
+              ? `OAuth 在线模型列表获取失败：${onlineErrorMessage}；本地缓存没有可恢复的官方模型目录。`
+              : "获取模型列表失败：远端返回空列表，请检查当前 provider 配置。",
+          };
         }
 
         const nextProvider = providerWithFetchedModelCatalog(provider, models);
@@ -2313,7 +2355,9 @@ export function CodexRouterWorkspacePage({
           ...current,
           [provider.id]: {
             status: "loading",
-            message: `已读取 ${models.length} 个模型，正在写回本地配置...`,
+            message: usedCodexCache
+              ? `OAuth 在线读取失败，已从本地 Codex 模型缓存读取 ${models.length} 个模型，正在写回本地配置...`
+              : `已读取 ${models.length} 个模型，正在写回本地配置...`,
             modelCount: models.length,
           },
         }));
@@ -2352,7 +2396,14 @@ export function CodexRouterWorkspacePage({
           affectedPlans.push(nextPlan);
         }
 
-        return { status: "updated", models, nextProvider, affectedPlans };
+        return {
+          status: "updated",
+          models,
+          nextProvider,
+          affectedPlans,
+          usedCodexCache,
+          onlineErrorMessage,
+        };
       })();
 
       withModelRefreshTimeout(refreshTask, MODEL_REFRESH_TIMEOUT_MS, () =>
@@ -2366,6 +2417,7 @@ export function CodexRouterWorkspacePage({
               [provider.id]: {
                 status: "error",
                 message:
+                  result.message ??
                   "获取模型列表失败：远端返回空列表，请检查当前 provider 配置。",
                 modelCount: 0,
               },
@@ -2398,9 +2450,13 @@ export function CodexRouterWorkspacePage({
             ...current,
             [provider.id]: {
               status: "success",
-              message: `已读取并更新 ${
-                readCodexModelCatalog(result.nextProvider).models.length
-              } 个模型。`,
+              message: result.usedCodexCache
+                ? `OAuth 在线读取失败，已使用本地 Codex 模型缓存更新 ${
+                    readCodexModelCatalog(result.nextProvider).models.length
+                  } 个模型。在线错误：${result.onlineErrorMessage}`
+                : `已读取并更新 ${
+                    readCodexModelCatalog(result.nextProvider).models.length
+                  } 个模型。`,
               modelCount: readCodexModelCatalog(result.nextProvider).models
                 .length,
             },
@@ -2419,9 +2475,7 @@ export function CodexRouterWorkspacePage({
             ...current,
             [provider.id]: {
               status: "error",
-              message: `获取模型列表失败，请检查当前 provider 配置：${
-                error instanceof Error ? error.message : String(error)
-              }`,
+              message: `获取模型列表失败，请检查当前 provider 配置：${workspaceErrorMessage(error)}`,
             },
           }));
         });

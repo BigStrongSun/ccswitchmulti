@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-07-12 MultiRouter OAuth 模型列表网络失败兜底
+
+- 截图里的 `Request failed: error sending request for url (https://chatgpt.com/backend-api/codex/models?client_version=...)` 来自 `src-tauri/src/services/codex_oauth_models.rs` 的 `reqwest.send()` 阶段，说明请求还没拿到 HTTP 响应；这不是模型名格式、401/403、HTTP 404 或接口返回空列表，而是 DNS/TLS/代理/超时等网络层问题。
+- 修复边界：OAuth 在线模型列表失败时，MultiRouter 向导和 Routes 工作台会读取本地 Codex 官方模型缓存兜底，优先 `~/.codex/models_cache.cc-switch-backup.json`，再读 `~/.codex/models_cache.json`；缓存解析只保留 `gpt-*`、`codex-*`、`chatgpt-*`、`o*` 这类官方模型，避免把 CCSM 合并进 cache 的 Qwen/DeepSeek 写进 official route。
+- 向导默认模型源会收敛等价 OAuth provider：未绑定账号的 `default` 与 `codex-official` 代表同一个默认 ChatGPT 账号，只保留已有真实 catalog 或稳定 seed 中更合适的一个；不同 `accountId` 的 OAuth provider 不合并。
+- 后端 OAuth 模型请求错误现在会展开 reqwest 错误分类、底层 source 链和 CCSwitchMulti 全局代理状态，便于根据用户截图判断是 timeout/connect/TLS/proxy，而不是只看到模糊的 `error sending request`。
+
 ## 2026-07-11 CCSwitchMulti v3.16.5-2 Release
 
 - `v3.16.5-2` 已作为 `BigStrongSun/ccswitchmulti` 正式 release 发布：`https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.16.5-2`。Release 为 `draft=false`、`prerelease=false`，发布工作流 run `29158855394` 全部成功。

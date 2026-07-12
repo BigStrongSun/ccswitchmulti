@@ -106,6 +106,15 @@ export async function fetchCodexOauthModels(
 }
 
 /**
+ * 读取本地 Codex 官方模型缓存
+ *
+ * 只作为 ChatGPT OAuth 在线模型接口失败后的离线兜底，不触发登录态刷新或网络请求。
+ */
+export async function fetchCodexOauthCachedModels(): Promise<FetchedModel[]> {
+  return invoke("get_codex_oauth_cached_models");
+}
+
+/**
  * 根据错误类型显示对应的 toast 提示
  */
 export function showFetchModelsError(

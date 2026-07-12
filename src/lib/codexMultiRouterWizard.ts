@@ -873,9 +873,63 @@ export function buildWizardModelCatalog(
   };
 }
 
+// 生成官方 OAuth 源的去重键；未绑定账号时都代表后端默认 ChatGPT 账号。
+function wizardCodexOAuthDedupKey(provider: Provider): string {
+  return `codex-oauth:${readWizardCodexOAuthAccountId(provider) ?? "default"}`;
+}
+
+// 为等价官方 OAuth 源打分；优先保留已有真实目录，其次保留稳定官方 seed。
+function wizardCodexOAuthSourceScore(provider: Provider): number {
+  let score = readWizardModelCatalog(provider).length * 1000;
+  if (provider.id === "codex-official") score += 100;
+  if (provider.category === "official") score += 50;
+  if (readWizardCodexOAuthAccountId(provider)) score += 10;
+  return score;
+}
+
+// 收敛等价官方 OAuth 源，避免 `default` 和 `codex-official` 对同一默认账号重复取模和重复报错。
+function dedupeWizardCodexOAuthSources(providers: Provider[]): Provider[] {
+  const result: Provider[] = [];
+  const selectedByKey = new Map<string, Provider>();
+  const indexByKey = new Map<string, number>();
+
+  for (const provider of providers) {
+    if (!isWizardCodexOAuthSource(provider)) {
+      result.push(provider);
+      continue;
+    }
+
+    const key = wizardCodexOAuthDedupKey(provider);
+    const current = selectedByKey.get(key);
+    if (!current) {
+      selectedByKey.set(key, provider);
+      indexByKey.set(key, result.length);
+      result.push(provider);
+      continue;
+    }
+
+    if (
+      wizardCodexOAuthSourceScore(provider) <=
+      wizardCodexOAuthSourceScore(current)
+    ) {
+      continue;
+    }
+
+    const index = indexByKey.get(key);
+    if (index !== undefined) {
+      result[index] = provider;
+      selectedByKey.set(key, provider);
+    }
+  }
+
+  return result;
+}
+
 // 过滤出向导默认可用的普通 Codex provider；空目录 provider 仍保留，便于引导用户先刷新模型。
 export function defaultWizardModelSources(providers: Provider[]): Provider[] {
-  return providers.filter((provider) => !isCodexMultiRouterPlan(provider));
+  return dedupeWizardCodexOAuthSources(
+    providers.filter((provider) => !isCodexMultiRouterPlan(provider)),
+  );
 }
 
 // 创建或更新 MultiRouter provider；草稿只在用户点击保存发布时写入数据库。

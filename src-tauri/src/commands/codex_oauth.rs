@@ -88,3 +88,12 @@ pub async fn get_codex_oauth_models(
 
     crate::services::codex_oauth_models::fetch_models_with_token(&token, &id).await
 }
+
+/// 读取本地 Codex 官方模型缓存。
+///
+/// 该命令不触发 OAuth refresh，也不访问网络，只用于 MultiRouter 向导在
+/// `chatgpt.com/backend-api/codex/models` 网络层失败时保留最近一次官方模型目录。
+#[tauri::command]
+pub fn get_codex_oauth_cached_models() -> Result<Vec<FetchedModel>, String> {
+    crate::services::codex_oauth_models::fetch_cached_models_from_disk()
+}

@@ -7,6 +7,7 @@ import { CodexMultiRouterWizard } from "@/components/codex/CodexMultiRouterWizar
 import { CODEX_MULTI_ROUTER_WIZARD_DISMISSED_KEY } from "@/lib/codexMultiRouterWizard";
 import { providersApi } from "@/lib/api/providers";
 import {
+  fetchCodexOauthCachedModels,
   fetchCodexOauthModels,
   fetchModelsForConfig,
   probeCodexChatForConfig,
@@ -21,6 +22,7 @@ vi.mock("@/lib/api/providers", () => ({
 }));
 
 vi.mock("@/lib/api/model-fetch", () => ({
+  fetchCodexOauthCachedModels: vi.fn(),
   fetchCodexOauthModels: vi.fn(),
   fetchModelsForConfig: vi.fn(),
   probeCodexChatForConfig: vi.fn(),
@@ -68,6 +70,7 @@ function renderWithQueryClient(ui: ReactElement) {
 beforeEach(() => {
   localStorage.clear();
   vi.clearAllMocks();
+  vi.mocked(fetchCodexOauthCachedModels).mockResolvedValue([]);
 });
 
 describe("CodexMultiRouterWizard", () => {
@@ -357,6 +360,53 @@ describe("CodexMultiRouterWizard", () => {
     ).toBeInTheDocument();
     expect(providersApi.update).not.toHaveBeenCalled();
     expect(fetchModelsForConfig).not.toHaveBeenCalled();
+  });
+
+  it("uses local Codex cache when OAuth model request fails for an empty official source", async () => {
+    vi.mocked(fetchCodexOauthModels).mockRejectedValueOnce(
+      new Error("error sending request for url"),
+    );
+    vi.mocked(fetchCodexOauthCachedModels).mockResolvedValueOnce([
+      { id: "gpt-5.5", ownedBy: "Codex", contextWindow: 256000 },
+      { id: "gpt-5.6-luna", ownedBy: "Codex", contextWindow: 256000 },
+    ]);
+    vi.mocked(providersApi.update).mockResolvedValueOnce(true);
+    const officialProvider = provider({
+      id: "codex-official",
+      name: "OpenAI Official",
+      category: "official",
+      meta: { providerType: "codex_oauth" },
+      settingsConfig: { modelCatalog: { models: [] } },
+    });
+
+    renderWithQueryClient(
+      <CodexMultiRouterWizard
+        open
+        providers={[officialProvider]}
+        onOpenChange={vi.fn()}
+        onCreateProvider={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+        onEnablePlan={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "自动获取并写入模型列表" }),
+    );
+
+    expect(
+      await screen.findByText(/已使用本地 Codex 模型缓存写入 2 个模型/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/OAuth 在线模型列表获取失败，已使用本地缓存/),
+    ).toBeInTheDocument();
+    const savedProvider = vi.mocked(providersApi.update).mock.calls[0][0];
+    expect(
+      savedProvider.settingsConfig.modelCatalog.models.map(
+        (model: { model: string }) => model.model,
+      ),
+    ).toEqual(["gpt-5.5", "gpt-5.6-luna"]);
   });
 
   it("keeps provider curated models when wizard refresh sees extra upstream models", async () => {

@@ -7,6 +7,7 @@ import {
   canContinueAfterConnectivity,
   classifyWizardConnectivityResult,
   collectWizardModelNameCollisions,
+  defaultWizardModelSources,
   getWizardConfigIssues,
   getWizardModelFetchConfig,
   inferWizardApiFormat,
@@ -29,6 +30,67 @@ function provider(overrides: Partial<Provider>): Provider {
 }
 
 describe("codexMultiRouterWizard helpers", () => {
+  it("deduplicates default Codex OAuth sources while keeping the best catalog source", () => {
+    const sources = defaultWizardModelSources([
+      provider({
+        id: "default",
+        name: "default",
+        category: "official",
+        meta: { providerType: "codex_oauth" },
+      }),
+      provider({
+        id: "codex-official",
+        name: "OpenAI Official",
+        category: "official",
+        meta: { providerType: "codex_oauth" },
+        settingsConfig: {
+          modelCatalog: { models: [{ model: "gpt-5.5" }] },
+        },
+      }),
+      provider({
+        id: "deepseek",
+        name: "DeepSeek",
+        settingsConfig: {
+          base_url: "https://api.deepseek.com",
+          auth: { OPENAI_API_KEY: "sk-test" },
+        },
+      }),
+    ]);
+
+    expect(sources.map((source) => source.id)).toEqual([
+      "codex-official",
+      "deepseek",
+    ]);
+  });
+
+  it("keeps Codex OAuth sources for different bound accounts", () => {
+    const sources = defaultWizardModelSources([
+      provider({
+        id: "codex-official-a",
+        name: "OpenAI Official A",
+        category: "official",
+        meta: {
+          providerType: "codex_oauth",
+          authBinding: { source: "managed_codex_oauth", accountId: "acct-a" },
+        },
+      }),
+      provider({
+        id: "codex-official-b",
+        name: "OpenAI Official B",
+        category: "official",
+        meta: {
+          providerType: "codex_oauth",
+          authBinding: { source: "managed_codex_oauth", accountId: "acct-b" },
+        },
+      }),
+    ]);
+
+    expect(sources.map((source) => source.id)).toEqual([
+      "codex-official-a",
+      "codex-official-b",
+    ]);
+  });
+
   it("preserves curated provider models when wizard refreshes fetched metadata", () => {
     const source = provider({
       id: "curated-source",

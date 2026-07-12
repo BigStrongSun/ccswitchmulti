@@ -5,13 +5,22 @@
 
 use crate::services::model_fetch::FetchedModel;
 use serde_json::Value;
+use std::error::Error;
+use std::fs;
+use std::path::PathBuf;
 use std::time::Duration;
 
 const CODEX_OAUTH_MODELS_URL: &str = "https://chatgpt.com/backend-api/codex/models";
 const CODEX_OAUTH_FETCH_TIMEOUT_SECS: u64 = 15;
 const ERROR_BODY_MAX_CHARS: usize = 512;
 const CODEX_OAUTH_CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+const CODEX_MODELS_CACHE_FILENAME: &str = "models_cache.json";
+const CODEX_MODELS_CACHE_BACKUP_FILENAME: &str = "models_cache.cc-switch-backup.json";
 
+/// 使用 ChatGPT OAuth access token 在线读取官方 Codex 模型列表。
+///
+/// 这里的失败分两层：HTTP 状态码失败说明请求已经到达 ChatGPT 后端；`send`
+/// 失败则是 DNS、TLS、代理、超时或本机网络层问题，调用方可以再尝试本地缓存兜底。
 pub async fn fetch_models_with_token(
     token: &str,
     account_id: &str,
@@ -26,7 +35,7 @@ pub async fn fetch_models_with_token(
         .timeout(Duration::from_secs(CODEX_OAUTH_FETCH_TIMEOUT_SECS))
         .send()
         .await
-        .map_err(|e| format!("Request failed: {e}"))?;
+        .map_err(format_codex_oauth_request_error)?;
 
     let status = response.status();
     if !status.is_success() {
@@ -42,6 +51,131 @@ pub async fn fetch_models_with_token(
     Ok(parse_models(value))
 }
 
+/// 格式化 OAuth 模型列表请求的网络层错误。
+///
+/// `reqwest::Error` 的默认文本经常只显示 `error sending request for url`，
+/// 不足以区分超时、连接、TLS 或代理问题。这里展开错误链和 CCSM 全局代理状态，
+/// 但不包含任何 token、账号明文或请求头。
+fn format_codex_oauth_request_error(error: reqwest::Error) -> String {
+    let mut hints = Vec::new();
+    if error.is_timeout() {
+        hints.push("timeout");
+    }
+    if error.is_connect() {
+        hints.push("connect");
+    }
+    if error.is_builder() {
+        hints.push("request_builder");
+    }
+    if error.is_decode() {
+        hints.push("decode");
+    }
+
+    let proxy_hint = crate::proxy::http_client::get_current_proxy_url()
+        .map(|_| "CCSwitchMulti 全局代理已配置".to_string())
+        .unwrap_or_else(|| {
+            "CCSwitchMulti 全局代理未配置；Windows/浏览器系统代理不一定会被后端 reqwest 使用"
+                .to_string()
+        });
+
+    let mut source_parts = Vec::new();
+    let mut source = error.source();
+    while let Some(current) = source {
+        source_parts.push(current.to_string());
+        if source_parts.len() >= 4 {
+            break;
+        }
+        source = current.source();
+    }
+
+    let kind = if hints.is_empty() {
+        "unknown".to_string()
+    } else {
+        hints.join(",")
+    };
+    let source_chain = if source_parts.is_empty() {
+        "无底层错误链".to_string()
+    } else {
+        source_parts.join(" -> ")
+    };
+
+    format!("Request failed: {error}; kind={kind}; {proxy_hint}; source={source_chain}")
+}
+
+/// 读取 Codex 本地模型缓存，作为 OAuth 在线获取失败时的离线兜底。
+///
+/// CCSwitchMulti 接管时会把原始 `models_cache.json` 备份到
+/// `models_cache.cc-switch-backup.json`，因此这里优先读取备份，避免把
+/// MultiRouter 合并进去的第三方模型误当作官方 Codex 模型。若没有任何可用缓存，
+/// 返回空列表而不是伪造静态模型。
+pub fn fetch_cached_models_from_disk() -> Result<Vec<FetchedModel>, String> {
+    let mut parse_errors = Vec::new();
+    for path in codex_oauth_model_cache_candidates() {
+        if !path.exists() {
+            continue;
+        }
+        let raw = match fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(error) => {
+                parse_errors.push(format!("Failed to read {}: {error}", path.display()));
+                continue;
+            }
+        };
+        let value: Value = match serde_json::from_str(&raw) {
+            Ok(value) => value,
+            Err(error) => {
+                parse_errors.push(format!("Failed to parse {}: {error}", path.display()));
+                continue;
+            }
+        };
+        let models = parse_cached_models(value);
+        if !models.is_empty() {
+            return Ok(models);
+        }
+    }
+
+    if parse_errors.is_empty() {
+        Ok(Vec::new())
+    } else {
+        Err(parse_errors.join("; "))
+    }
+}
+
+/// 返回本地官方模型缓存候选路径；备份优先，当前缓存作为兜底。
+fn codex_oauth_model_cache_candidates() -> Vec<PathBuf> {
+    let codex_dir = crate::codex_config::get_codex_config_dir();
+    vec![
+        codex_dir.join(CODEX_MODELS_CACHE_BACKUP_FILENAME),
+        codex_dir.join(CODEX_MODELS_CACHE_FILENAME),
+    ]
+}
+
+/// 从 Codex 缓存结构里解析官方模型，并剔除 MultiRouter 合并进去的第三方模型。
+fn parse_cached_models(value: Value) -> Vec<FetchedModel> {
+    parse_models(value)
+        .into_iter()
+        .filter(|model| is_likely_codex_oauth_model_id(&model.id))
+        .collect()
+}
+
+/// 判断缓存条目是否像官方 Codex/ChatGPT 模型。
+///
+/// 该函数只用于离线 fallback，宁可漏掉不认识的新第三方条目，也不能把 Qwen、
+/// DeepSeek 等用户自定义模型灌进 official route。在线接口成功时不走这层过滤。
+fn is_likely_codex_oauth_model_id(model_id: &str) -> bool {
+    let id = model_id.trim().to_ascii_lowercase();
+    if id.starts_with("gpt-") || id.starts_with("codex-") || id.starts_with("chatgpt-") {
+        return true;
+    }
+    ["o1", "o3", "o4", "o5"].iter().any(|prefix| {
+        id == *prefix
+            || id
+                .strip_prefix(prefix)
+                .is_some_and(|suffix| suffix.starts_with('-'))
+    })
+}
+
+/// 解析 ChatGPT Codex 模型列表响应，兼容数组、`data`、`items` 和 map 形态。
 fn parse_models(value: Value) -> Vec<FetchedModel> {
     let entries = value
         .get("data")
@@ -69,6 +203,10 @@ fn parse_models(value: Value) -> Vec<FetchedModel> {
     models
 }
 
+/// 将单个响应条目追加到模型列表。
+///
+/// 条目可能只是字符串模型名，也可能是包含 `slug/id/model/name` 的对象；
+/// `fallback_id` 仅用于 map 形态，避免对象里没有显式 id 时丢失 key。
 fn push_model_entry(models: &mut Vec<FetchedModel>, entry: &Value, fallback_id: Option<&str>) {
     if let Some(id) = entry.as_str().map(str::trim).filter(|id| !id.is_empty()) {
         models.push(FetchedModel {
@@ -295,6 +433,30 @@ mod tests {
         assert_eq!(
             models.into_iter().map(|model| model.id).collect::<Vec<_>>(),
             vec!["gpt-5.4".to_string(), "gpt-5.5".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_cached_models_keeps_official_codex_models_only() {
+        let models = parse_cached_models(json!({
+            "models": [
+                { "slug": "gpt-5.5", "owned_by": "openai" },
+                { "slug": "gpt-5.6-luna", "provider": "Codex" },
+                { "slug": "codex-auto-review", "provider": "Codex" },
+                { "slug": "o4-mini", "provider": "OpenAI" },
+                { "slug": "deepseek-chat", "provider": "deepseek" },
+                { "slug": "qwen3-coder", "provider": "qwen" }
+            ]
+        }));
+
+        assert_eq!(
+            models.into_iter().map(|model| model.id).collect::<Vec<_>>(),
+            vec![
+                "codex-auto-review".to_string(),
+                "gpt-5.5".to_string(),
+                "gpt-5.6-luna".to_string(),
+                "o4-mini".to_string()
+            ]
         );
     }
 }
