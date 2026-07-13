@@ -276,6 +276,8 @@ pub fn materialize_codex_routed_provider_from_target(
         CODEX_ROUTER_PARENT_PROVIDER_ID,
         CODEX_ROUTER_PARENT_PROVIDER_NAME,
         CODEX_RESOLVED_TARGET_PROVIDER_ID,
+        "apiFormat",
+        "api_format",
     ] {
         if let Some(value) = route_settings
             .and_then(|settings| settings.get(key))
@@ -316,6 +318,14 @@ pub fn materialize_codex_routed_provider_from_target(
     if managed_codex_oauth {
         let meta = materialized.meta.get_or_insert_with(ProviderMeta::default);
         meta.provider_type = Some("codex_oauth".to_string());
+    } else if let Some(api_format) = route_provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.api_format.as_deref())
+    {
+        // route 是本次请求的显式协议来源，必须覆盖目标 provider 的陈旧元数据。
+        let meta = materialized.meta.get_or_insert_with(ProviderMeta::default);
+        meta.api_format = Some(api_format.to_string());
     }
     materialized
 }
@@ -520,6 +530,8 @@ fn resolve_codex_route_candidates<'a>(
         let mut selected = Vec::new();
         if let Some(route) = find_codex_route_by_match_priority(routes, request_model) {
             selected.push(route);
+        } else if codex_model_is_declared_only_by_disabled_route(routes, request_model) {
+            return Vec::new();
         } else if let Some(default_route) = routing
             .get("defaultRouteId")
             .or_else(|| routing.get("default_route_id"))
@@ -611,6 +623,9 @@ fn resolve_codex_route<'a>(provider: &'a Provider, request_model: &str) -> Optio
         if let Some(route) = find_codex_route_by_match_priority(routes, request_model) {
             return Some(route);
         }
+        if codex_model_is_declared_only_by_disabled_route(routes, request_model) {
+            return None;
+        }
 
         return routing
             .get("defaultRouteId")
@@ -665,6 +680,8 @@ fn resolve_codex_legacy_route_candidates<'a>(
     let mut selected = Vec::new();
     if let Some(route) = find_codex_route_by_match_priority(routes, request_model) {
         selected.push(route);
+    } else if codex_model_is_declared_only_by_disabled_route(routes, request_model) {
+        return Vec::new();
     }
 
     let primary_id = selected
@@ -683,6 +700,20 @@ fn resolve_codex_legacy_route_candidates<'a>(
         route_id != primary_id
     }));
     selected
+}
+
+/// 判断请求模型是否只存在于已停用 route 的精确模型列表中。
+///
+/// Codex Desktop 可能暂存旧 catalog；此时旧 alias 不能被当成未知模型再落到
+/// defaultRouteId，否则第三方模型切换会静默回到已耗尽的官方 route。
+fn codex_model_is_declared_only_by_disabled_route(
+    routes: &[JsonValue],
+    request_model: &str,
+) -> bool {
+    routes.iter().any(|route| {
+        !codex_route_is_enabled(route)
+            && codex_route_has_exact_model_match(route, request_model)
+    })
 }
 
 /// 按全局优先级查找 route：所有精确模型匹配优先于任何前缀匹配。
@@ -1786,6 +1817,7 @@ fn is_known_chat_completions_only_url(value: &str) -> bool {
             "dashscope.aliyuncs.com",
             "open.bigmodel.cn",
             "api.siliconflow.cn",
+            "sensenova.cn",
             "openrouter.ai",
             "vllm",
         ]
@@ -3172,6 +3204,96 @@ wire_api = "chat"
         );
     }
 
+    /// 验证旧 catalog 中已停用 route 的 alias 不会静默回退到官方默认 route。
+    #[test]
+    fn test_codex_disabled_stale_alias_does_not_fall_back_to_official_default() {
+        let provider = create_provider(json!({
+            "codexRouting": {
+                "defaultRouteId": "official",
+                "routes": [
+                    {
+                        "id": "official",
+                        "enabled": true,
+                        "match": { "models": ["gpt-5.5"] },
+                        "upstream": {
+                            "apiFormat": "openai_responses",
+                            "auth": { "source": "managed_codex_oauth" }
+                        }
+                    },
+                    {
+                        "id": "relay",
+                        "enabled": false,
+                        "match": { "models": ["deepseek-v4-flash-relay"] },
+                        "upstream": {
+                            "apiFormat": "openai_chat",
+                            "auth": { "source": "provider_config" }
+                        }
+                    }
+                ],
+                "enabled": true
+            }
+        }));
+
+        let routed = resolve_codex_model_routed_provider(
+            &provider,
+            &json!({ "model": "deepseek-v4-flash-relay" }),
+        );
+
+        assert!(
+            routed.is_none(),
+            "stale alias from a disabled route must fail closed instead of using official quota"
+        );
+    }
+
+    /// 验证同一 router 在连续请求中始终按当前 body.model 重新选路。
+    #[test]
+    fn test_codex_same_session_model_switch_re_resolves_route_per_request() {
+        let provider = create_provider(json!({
+            "codexRouting": {
+                "routes": [
+                    {
+                        "id": "official",
+                        "targetProviderId": "codex-official",
+                        "match": { "models": ["gpt-5.5"] },
+                        "upstream": {
+                            "apiFormat": "openai_responses",
+                            "auth": { "source": "managed_codex_oauth" }
+                        }
+                    },
+                    {
+                        "id": "relay",
+                        "targetProviderId": "relay-provider",
+                        "match": { "models": ["deepseek-v4-flash-relay"] },
+                        "upstream": {
+                            "apiFormat": "openai_chat",
+                            "auth": { "source": "provider_config" },
+                            "modelMap": {
+                                "deepseek-v4-flash-relay": "deepseek-v4-flash"
+                            }
+                        }
+                    }
+                ],
+                "enabled": true
+            }
+        }));
+
+        let official =
+            resolve_codex_model_routed_provider(&provider, &json!({ "model": "gpt-5.5" }))
+                .expect("official request should resolve");
+        let relay = resolve_codex_model_routed_provider(
+            &provider,
+            &json!({ "model": "deepseek-v4-flash-relay" }),
+        )
+        .expect("relay request should resolve");
+
+        assert_eq!(codex_route_target_provider_id(&official), Some("codex-official"));
+        assert_eq!(codex_route_target_provider_id(&relay), Some("relay-provider"));
+        assert_eq!(
+            relay.settings_config["codexResolvedUpstreamModelOverride"],
+            "deepseek-v4-flash"
+        );
+    }
+
     #[test]
     fn test_codex_route_managed_codex_oauth_keeps_auth_in_meta() {
         let mut provider = create_provider(json!({
@@ -3667,6 +3789,29 @@ wire_api = "responses"
         ));
     }
 
+    /// 验证 sense nova ShangTang 上游被识别为 Chat Completions-only。
+    ///
+    /// ShangTang 的 token.sensenova.cn 只有 Chat Completions 端点，
+    /// 没有可用的 Responses 实现。如果协议检测返回 Responses（native），
+    /// Codex 的 Response API 请求会直接发给 Chat-only 端点，导致
+    /// HTTP 400 invalid_tool_call_id（Issue #12 / upstream #4973）。
+    /// 检查 should_convert_codex_responses_to_chat 必须返回 true。
+    #[test]
+    fn test_codex_provider_uses_chat_completions_for_sensenova_url() {
+        let provider = create_provider(json!({
+            "base_url": "https://token.sensenova.cn/v1"
+        }));
+
+        assert!(
+            codex_provider_uses_chat_completions(&provider),
+            "ShangTang SenseNova (sensenova.cn) must be detected as Chat Completions-only"
+        );
+        assert!(
+            should_convert_codex_responses_to_chat(&provider, "/v1/responses"),
+            "Responses for ShangTang must be converted to Chat only"
+        );
+    }
+
     #[test]
     fn test_codex_provider_uses_chat_completions_from_meta_api_format_for_compact() {
         let mut provider = create_provider(json!({
@@ -4156,5 +4301,98 @@ wire_api = "chat"
         let result_b = apply_codex_request_upstream_model(&materialized, &mut body_b);
         assert_eq!(result_b.as_deref(), Some("deepseek-v4-flash"),
             "aliased visible name 'deepseek-v4-flash-provider-b' should map to upstream 'deepseek-v4-flash'");
+    }
+
+    /// 验证 materialize_codex_routed_provider_from_target 保留 route 的 apiFormat。
+    ///
+    /// 当 route 声明 upstream.apiFormat = "openai_chat"，build_codex_routed_provider
+    /// 会将其写入 settings_config.apiFormat。但 materialize_codex_routed_provider_from_target
+    /// 以 target provider 的 settings 为基底，如果不显式复制 apiFormat 字段，
+    /// explain_codex_responses_upstream_protocol 就无法识别 Chat 协议，
+    /// 导致 Responses API 请求被原生透传给 Chat-only 上游（Issue #12 / upstream #4973）。
+    /// 回归确认：materialize 后 should_convert_codex_responses_to_chat 必须返回 true。
+    #[test]
+    fn test_materialize_routed_provider_preserves_api_format() {
+        let router = create_provider(json!({
+            "codexRouting": {
+                "enabled": true,
+                "routes": [{
+                    "id": "shangtang",
+                    "label": "ShangTang",
+                    "targetProviderId": "shangtang-provider",
+                    "match": { "models": ["deepseek-v4-flash-shangtang"] },
+                    "upstream": {
+                        "baseUrl": "https://token.sensenova.cn/v1",
+                        "apiFormat": "openai_chat",
+                        "auth": { "source": "provider_config" }
+                    }
+                }]
+            }
+        }));
+
+        let mut target = Provider::with_id(
+            "shangtang-provider".to_string(),
+            "ShangTang SenseNova".to_string(),
+            json!({
+                "base_url": "https://token.sensenova.cn/v1",
+                "auth": { "OPENAI_API_KEY": "sk-test" }
+            }),
+            None,
+        );
+        target.meta = Some(ProviderMeta {
+            api_format: Some("openai_responses".to_string()),
+            ..Default::default()
+        });
+
+        // 构建 routed provider 再 materialize
+        let routed = resolve_codex_model_routed_provider(
+            &router,
+            &json!({ "model": "deepseek-v4-flash-shangtang" }),
+        )
+        .expect("route should match ShangTang");
+
+        assert_eq!(
+            codex_route_target_provider_id(&routed),
+            Some("shangtang-provider")
+        );
+
+        // 验证 materialize 前 route provider 有 apiFormat
+        let route_api_format = routed
+            .settings_config
+            .get("apiFormat")
+            .and_then(|v| v.as_str());
+        assert_eq!(
+            route_api_format,
+            Some("openai_chat"),
+            "route provider must preserve apiFormat before materialization"
+        );
+
+        // materialize
+        let materialized = materialize_codex_routed_provider_from_target(&routed, &target);
+
+        // 验证 materialize 后 apiFormat 被保留
+        let mat_api_format = materialized
+            .settings_config
+            .get("apiFormat")
+            .and_then(|v| v.as_str());
+        assert_eq!(
+            mat_api_format,
+            Some("openai_chat"),
+            "materialized provider must preserve apiFormat from route (fix: materialize丢失apiFormat)"
+        );
+        assert_eq!(
+            materialized
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.api_format.as_deref()),
+            Some("openai_chat"),
+            "route apiFormat must override stale target provider metadata"
+        );
+
+        // 验证 materialize 后的协议检测正确
+        assert!(
+            should_convert_codex_responses_to_chat(&materialized, "/v1/responses"),
+            "materialized ShangTang provider must be detected as Chat Completions"
+        );
     }
 }

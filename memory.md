@@ -2105,3 +2105,14 @@
 - `observe` 只看数据。`enforce` 使用最近 10 分钟内、所有已同步设备中每个官方窗口的最高 utilization；窗口剩余不高于阈值时，`RequestForwarder` 只拒绝经过本机 CCSwitchMulti 的 Codex 请求（HTTP 429）。未通过 CCSwitchMulti 的旁路请求无法被控制，任何 UI 或文档不得承诺全账号强制控制。
 - 用户文档位于 `docs/guides/codex-multi-device-quota-collaboration-zh.md`。首次接入必须在每台设备刷新官方额度、设置独立设备名并同步；不要复制 settings/配置目录，否则相同 `deviceId` 会使设备报告互相覆盖。
 - 验证覆盖：`quota_collaboration` 有 29 项 Rust 测试，包含内存 DB 的设备持久化/隔离、observe 和 stale 不拦截、最高官方 utilization 触发约束，以及本地 mock WebDAV 的 MKCOL/PUT/PROPFIND/GET 两设备发现路径；前端 `CodexUsagePage.test.tsx` 覆盖未配置引导、约束确认和设置保存 payload。不要让测试读取真实 `auth.json` 或写入真实 settings。
+## 2026-07-14 Issue #12 商汤 Chat Provider 协议误判根修
+
+- 真实根因：`explain_codex_responses_upstream_protocol` 的已知 Chat-only URL 列表缺少 `sensenova.cn`，导致 `token.sensenova.cn/v1` 在协议信号缺失时退回 Native Responses；MultiRouter 物化目标 Provider 时也会丢失 route 的 `apiFormat`，并可能被目标 Provider 的陈旧 meta 再次覆盖。
+- 修复：`materialize_codex_routed_provider_from_target` 同步 route 的 `apiFormat` / `api_format`，并让 route 的显式协议覆盖目标 Provider 的陈旧 `meta.apiFormat`；`is_known_chat_completions_only_url` 增加 `sensenova.cn` 作为旧配置兜底。
+- 回归测试覆盖 SenseNova URL 推断，以及“目标 meta 为 `openai_responses`、route 显式为 `openai_chat`”的冲突场景。协议修正后继续复用现有 Responses -> Chat 工具调用映射，不做厂商专用 tool call ID 改写。
+
+## 2026-07-14 Issue #15 同会话切换模型仍落回官方额度
+
+- MultiRouter 不按 session 固定 route；每次请求都读取当前 `body.model`。`v3.16.5-5` 已收紧 catalog，只注入启用 route 的模型，但 Codex Desktop 仍可能暂存旧 alias。
+- 旧 alias 若只属于已停用 route，原 resolver 会把它当成普通未匹配模型并使用 `defaultRouteId=official`，从而把“中转模型已失效”表现成“官方额度耗尽”。
+- 根修是在 enabled route 无匹配时检查 disabled route 的精确模型声明；命中旧 alias 就 fail closed，不再静默回官方。回归同时覆盖同一 router 连续从 official 模型切到 relay alias 时，第二个请求按新 `body.model` 重新解析到 relay。
