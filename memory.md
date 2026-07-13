@@ -2116,3 +2116,10 @@
 - MultiRouter 不按 session 固定 route；每次请求都读取当前 `body.model`。`v3.16.5-5` 已收紧 catalog，只注入启用 route 的模型，但 Codex Desktop 仍可能暂存旧 alias。
 - 旧 alias 若只属于已停用 route，原 resolver 会把它当成普通未匹配模型并使用 `defaultRouteId=official`，从而把“中转模型已失效”表现成“官方额度耗尽”。
 - 根修是在 enabled route 无匹配时检查 disabled route 的精确模型声明；命中旧 alias 就 fail closed，不再静默回官方。回归同时覆盖同一 router 连续从 official 模型切到 relay alias 时，第二个请求按新 `body.model` 重新解析到 relay。
+
+## 2026-07-14 CCSwitchMulti v3.16.5-8 发布准备
+
+- fork 最新正式 Release 是 `v3.16.5-7`；本地 `v3.17.0` tag 来自 upstream，fork 不存在该 tag，因此本次继续使用 fork 补丁版本 `v3.16.5-8`。
+- 发布范围以 `v3.16.5-7..main` 的真实 diff 为准：多设备额度协作、可信 Codex originator 白名单保留与缺失回退、SenseNova Chat 协议根修、停用 route 旧 alias 禁止回官方，以及相关教程和回归测试。
+- `.github/workflows/release.yml` 由 `v*` tag 触发，必须先让 main CI 的 Prettier/rustfmt 门槛通过，再推 annotated tag 到 `fork`；完成后核验 Release 为正式版、矩阵任务成功、跨平台资产和 `latest.json` 齐全。
+- CI 后端测试曾在 UTC runner 上失败：`range_starts_midnight_boundary` 用固定 `UTC+8` 构造样本，但被测函数按运行机器 `Local` 时区分日，导致同一 `UTC+8` 日期在 UTC 下跨日。测试已改为用 `Local` 构造边界样本，保持生产统计按设备本地日历日计算的语义。

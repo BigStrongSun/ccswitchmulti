@@ -868,13 +868,13 @@ mod tests {
 
     #[test]
     fn range_starts_midnight_boundary() {
-        use chrono::TimeZone;
-        let tz = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
-        let late = tz
+        use chrono::{Local, TimeZone};
+        // range_starts 按运行机器的本地时区分日，测试样本必须使用同一时区。
+        let late = Local
             .with_ymd_and_hms(2026, 7, 14, 23, 59, 59)
             .unwrap()
             .timestamp();
-        let early = tz
+        let early = Local
             .with_ymd_and_hms(2026, 7, 14, 0, 0, 1)
             .unwrap()
             .timestamp();
