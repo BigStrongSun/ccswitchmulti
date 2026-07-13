@@ -1596,6 +1596,7 @@ export function buildModelCatalogForRoutes(
 
   const byModel = new Map<string, CodexCatalogModelDraft>();
   for (const route of routes) {
+    if (route.enabled === false) continue;
     const targetProvider = routeTargetProviderId(route)
       ? providersById.get(routeTargetProviderId(route)!)
       : undefined;
@@ -2293,13 +2294,35 @@ export function CodexRouterWorkspacePage({
     }
     return byId;
   }, [effectiveProviders, routableModelSources]);
+  // 模型刷新目标必须来自当前方案的启用 route；旧 inline route 仅做语义定位，
+  // 不能因缺少 targetProviderId 退回到刷新全部候选 Provider。
+  const selectedPlanForModelRefresh =
+    routingPlans.find((provider) => provider.id === selectedPlanId) ??
+    routingPlans[0] ??
+    null;
+  const enabledModelSourceIdsForRefresh = useMemo(() => {
+    const ids = new Set<string>();
+    const routes = dedupeCodexRoutesBySemanticProvider(
+      readCodexRouting(selectedPlanForModelRefresh)?.routes ?? [],
+      modelSources,
+    );
+    for (const route of routes) {
+      if (route.enabled === false) continue;
+      const providerId = routeSemanticProviderId(route, modelSources);
+      if (providerId) ids.add(providerId);
+    }
+    return ids;
+  }, [modelSources, selectedPlanForModelRefresh]);
 
-  // 进入 MultiRouter 路由规则页时并发刷新所有候选源；OAuth 与普通 /models 共用后续写回事务。
+  // 进入路由页时只刷新当前方案已启用的模型源；停用候选不能借刷新副作用
+  // 重新进入聚合 catalog，OAuth 与普通 /models 仍共用后续写回事务。
   useEffect(() => {
     if (activeTab !== "routes") return;
-    if (modelSources.length === 0) return;
+    if (enabledModelSourceIdsForRefresh.size === 0) return;
 
-    for (const provider of modelSources) {
+    for (const provider of modelSources.filter((source) =>
+      enabledModelSourceIdsForRefresh.has(source.id),
+    )) {
       const fetchConfig = getProviderModelFetchConfig(provider);
       const attemptKey = buildProviderModelRefreshAttemptKey(
         provider.id,
@@ -2482,6 +2505,7 @@ export function CodexRouterWorkspacePage({
     }
   }, [
     activeTab,
+    enabledModelSourceIdsForRefresh,
     modelSources,
     providersById,
     queryClient,

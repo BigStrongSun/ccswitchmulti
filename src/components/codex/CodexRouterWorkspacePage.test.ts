@@ -97,6 +97,39 @@ function createDeferred<T>(): Deferred<T> {
   return { promise, resolve, reject };
 }
 
+/// 为刷新类测试补齐真实的启用 route，避免把 provider 存在误当成已在当前方案中勾选。
+function withEnabledProviderRoute(
+  plan: Provider,
+  provider: Provider,
+): Provider {
+  const models = provider.settingsConfig?.modelCatalog?.models ?? [];
+  const route = normalizeCodexRouteForSave(
+    {
+      label: provider.name,
+      enabled: true,
+      targetProviderId: provider.id,
+      match: {
+        models: models.map((model: { model: string }) => model.model),
+        prefixes: [],
+      },
+      upstream: { auth: { source: "provider_config" } },
+    },
+    0,
+    new Set<string>(),
+  );
+  return {
+    ...plan,
+    settingsConfig: {
+      ...plan.settingsConfig,
+      codexRouting: {
+        enabled: true,
+        defaultRouteId: route.id,
+        routes: [route],
+      },
+    },
+  };
+}
+
 function renderWorkspace(ui: React.ReactElement) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
@@ -240,6 +273,90 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       ).toEqual(["gpt-5.5", "gpt-5.6-sol"]);
     });
     expect(fetchModelsForConfig).not.toHaveBeenCalled();
+  });
+
+  it("refreshes only providers referenced by enabled routes", async () => {
+    vi.mocked(fetchCodexOauthModels).mockResolvedValue([
+      { id: "gpt-5.6-sol", ownedBy: "openai", contextWindow: 272000 },
+    ]);
+    const enabledProvider: Provider = {
+      id: "openai-enabled",
+      name: "OpenAI Enabled",
+      category: "official",
+      meta: {
+        providerType: "codex_oauth",
+        authBinding: {
+          source: "managed_codex_oauth",
+          accountId: "account-enabled",
+        },
+      },
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "gpt-5.5" }] },
+      },
+    };
+    const disabledProvider: Provider = {
+      id: "openai-disabled",
+      name: "OpenAI Disabled",
+      category: "official",
+      meta: {
+        providerType: "codex_oauth",
+        authBinding: {
+          source: "managed_codex_oauth",
+          accountId: "account-disabled",
+        },
+      },
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "gpt-5.4" }] },
+      },
+    };
+    const planDraft = createDraftRoutingPlan(
+      [enabledProvider, disabledProvider],
+      [enabledProvider, disabledProvider],
+    );
+    const plan: Provider = {
+      ...planDraft,
+      settingsConfig: {
+        ...planDraft.settingsConfig,
+        codexRouting: {
+          enabled: true,
+          routes: [
+            {
+              id: "enabled-route",
+              enabled: true,
+              targetProviderId: enabledProvider.id,
+              match: { models: ["gpt-5.5"], prefixes: [] },
+              upstream: {},
+            },
+            {
+              id: "disabled-route",
+              enabled: false,
+              targetProviderId: disabledProvider.id,
+              match: { models: ["gpt-5.4"], prefixes: [] },
+              upstream: {},
+            },
+          ],
+        },
+      },
+    };
+
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [enabledProvider, disabledProvider, plan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: plan.id,
+        initialProviderId: plan.id,
+        initialTab: "routes",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+
+    await waitFor(() =>
+      expect(fetchCodexOauthModels).toHaveBeenCalledWith("account-enabled"),
+    );
+    expect(fetchCodexOauthModels).not.toHaveBeenCalledWith("account-disabled");
   });
 
   it("refreshes and migrates a legacy inline OAuth route without targetProviderId", async () => {
@@ -642,7 +759,10 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
         modelCatalog: { models: [{ model: "old-timeout" }] },
       },
     };
-    const plan = createDraftRoutingPlan([provider], [provider]);
+    const plan = withEnabledProviderRoute(
+      createDraftRoutingPlan([provider], [provider]),
+      provider,
+    );
 
     renderWorkspace(
       React.createElement(CodexRouterWorkspacePage, {
@@ -690,7 +810,10 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
         modelCatalog: { models: [{ model: "old-save-timeout" }] },
       },
     };
-    const plan = createDraftRoutingPlan([provider], [provider]);
+    const plan = withEnabledProviderRoute(
+      createDraftRoutingPlan([provider], [provider]),
+      provider,
+    );
 
     renderWorkspace(
       React.createElement(CodexRouterWorkspacePage, {
@@ -747,7 +870,10 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
         modelCatalog: { models: [] },
       },
     };
-    const plan = createDraftRoutingPlan([provider], [provider]);
+    const plan = withEnabledProviderRoute(
+      createDraftRoutingPlan([provider], [provider]),
+      provider,
+    );
 
     renderWorkspace(
       React.createElement(CodexRouterWorkspacePage, {
@@ -1011,7 +1137,10 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
         },
       },
     };
-    const plan = createDraftRoutingPlan([provider], [provider]);
+    const plan = withEnabledProviderRoute(
+      createDraftRoutingPlan([provider], [provider]),
+      provider,
+    );
 
     renderWorkspace(
       React.createElement(CodexRouterWorkspacePage, {
@@ -1071,7 +1200,10 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
         modelCatalog: { models: [] },
       },
     };
-    const plan = createDraftRoutingPlan([provider], [provider]);
+    const plan = withEnabledProviderRoute(
+      createDraftRoutingPlan([provider], [provider]),
+      provider,
+    );
 
     renderWorkspace(
       React.createElement(CodexRouterWorkspacePage, {
@@ -1129,7 +1261,10 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
         modelCatalog: { models: [] },
       },
     };
-    const plan = createDraftRoutingPlan([provider], [provider]);
+    const plan = withEnabledProviderRoute(
+      createDraftRoutingPlan([provider], [provider]),
+      provider,
+    );
 
     renderWorkspace(
       React.createElement(CodexRouterWorkspacePage, {
@@ -1976,6 +2111,55 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       model: "gpt-5.6-sol",
       contextWindow: 372000,
     });
+  });
+
+  it("excludes disabled routes from the injected model catalog", () => {
+    const enabled: Provider = {
+      id: "qwen-enabled",
+      name: "Qwen Enabled",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "qwen3.6" }] },
+      },
+    };
+    const disabled: Provider = {
+      id: "openai-disabled",
+      name: "OpenAI Disabled",
+      category: "official",
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "gpt-5.5" }] },
+      },
+    };
+    const plan = createDraftRoutingPlan(
+      [enabled, disabled],
+      [enabled, disabled],
+    );
+
+    const rebuilt = buildModelCatalogForRoutes(
+      plan,
+      [
+        {
+          id: "qwen-route",
+          enabled: true,
+          targetProviderId: enabled.id,
+          match: { models: ["qwen3.6"], prefixes: [] },
+          upstream: { apiFormat: "openai_responses" },
+        },
+        {
+          id: "openai-route",
+          enabled: false,
+          targetProviderId: disabled.id,
+          match: { models: ["gpt-5.5"], prefixes: ["gpt-"] },
+          upstream: { apiFormat: "openai_responses" },
+        },
+      ],
+      new Map([
+        [enabled.id, enabled],
+        [disabled.id, disabled],
+      ]),
+    );
+
+    expect(rebuilt.models.map((model) => model.model)).toEqual(["qwen3.6"]);
   });
 
   it("keeps unsaved route picker enabled draft state across candidate refreshes", () => {

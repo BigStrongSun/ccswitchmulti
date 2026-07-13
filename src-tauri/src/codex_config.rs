@@ -1425,21 +1425,85 @@ fn codex_model_catalog_from_specs(
 /// Codex Desktop 的不同读取路径对 TOML provider model 的字段兼容度不同；
 /// 因此 inline model 同时写 snake_case 和 camelCase 两组字段，后续 app-server
 /// 无论是按 config schema 解析还是直接转成前端对象，都能保留 reasoning 菜单。
-fn codex_provider_reasoning_efforts_toml_array(key: &str) -> toml_edit::Value {
+fn codex_provider_reasoning_efforts_toml_array(
+    levels: Option<&Value>,
+    key: &str,
+) -> toml_edit::Value {
     let mut array = Array::default();
-    for (effort, description) in CODEX_REASONING_EFFORTS {
+    let normalized_levels = levels
+        .and_then(Value::as_array)
+        .map(|levels| {
+            levels
+                .iter()
+                .filter_map(|level| {
+                    let effort = level
+                        .get("effort")
+                        .or_else(|| level.get("reasoningEffort"))
+                        .and_then(Value::as_str)?
+                        .trim();
+                    if effort.is_empty() {
+                        return None;
+                    }
+                    let description = level
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|description| !description.is_empty())
+                        .unwrap_or(effort);
+                    Some((effort.to_string(), description.to_string()))
+                })
+                .collect::<Vec<_>>()
+        })
+        .filter(|levels| !levels.is_empty())
+        .unwrap_or_else(|| {
+            CODEX_REASONING_EFFORTS
+                .iter()
+                .map(|(effort, description)| (effort.to_string(), description.to_string()))
+                .collect()
+        });
+    for (effort, description) in normalized_levels {
         let mut level = InlineTable::new();
-        level.insert(key, (*effort).into());
-        level.insert("description", (*description).into());
+        level.insert(key, effort.into());
+        level.insert("description", description.into());
         array.push(toml_edit::Value::InlineTable(level));
     }
     toml_edit::Value::Array(array)
 }
 
 /// 为当前活动 custom provider 生成 Codex Desktop 可枚举的内联模型数组。
-fn codex_provider_models_toml_array(specs: &[CodexCatalogModelSpec]) -> Item {
+fn codex_provider_models_toml_array(
+    specs: &[CodexCatalogModelSpec],
+    catalog: Option<&Value>,
+) -> Item {
     let mut array = Array::default();
     for spec in specs {
+        let model_id = spec.model.to_ascii_lowercase();
+        let catalog_entry = catalog
+            .and_then(|catalog| catalog.get("models"))
+            .and_then(Value::as_array)
+            .and_then(|models| {
+                models.iter().find(|model| {
+                    codex_model_stable_id(model).as_deref() == Some(model_id.as_str())
+                })
+            });
+        let display_name = catalog_entry
+            .and_then(|entry| {
+                entry
+                    .get("display_name")
+                    .or_else(|| entry.get("displayName"))
+            })
+            .and_then(Value::as_str)
+            .unwrap_or(&spec.display_name);
+        let default_reasoning_effort = catalog_entry
+            .and_then(|entry| {
+                entry
+                    .get("default_reasoning_level")
+                    .or_else(|| entry.get("defaultReasoningEffort"))
+            })
+            .and_then(Value::as_str)
+            .unwrap_or(CODEX_DEFAULT_REASONING_EFFORT);
+        let supported_reasoning_levels =
+            catalog_entry.and_then(|entry| entry.get("supported_reasoning_levels"));
         let mut model = InlineTable::new();
         model.insert("model", spec.model.as_str().into());
         model.insert("slug", spec.model.as_str().into());
@@ -1448,9 +1512,9 @@ fn codex_provider_models_toml_array(specs: &[CodexCatalogModelSpec]) -> Item {
             model.insert("upstreamModel", upstream_model.as_str().into());
             model.insert("upstream_model", upstream_model.as_str().into());
         }
-        model.insert("display_name", spec.display_name.as_str().into());
-        model.insert("displayName", spec.display_name.as_str().into());
-        model.insert("description", spec.display_name.as_str().into());
+        model.insert("display_name", display_name.into());
+        model.insert("displayName", display_name.into());
+        model.insert("description", display_name.into());
         model.insert(
             "context_window",
             i64::try_from(spec.context_window)
@@ -1463,29 +1527,26 @@ fn codex_provider_models_toml_array(specs: &[CodexCatalogModelSpec]) -> Item {
                 .unwrap_or(i64::MAX)
                 .into(),
         );
-        model.insert(
-            "default_reasoning_effort",
-            CODEX_DEFAULT_REASONING_EFFORT.into(),
-        );
-        model.insert(
-            "default_reasoning_level",
-            CODEX_DEFAULT_REASONING_EFFORT.into(),
-        );
-        model.insert(
-            "defaultReasoningEffort",
-            CODEX_DEFAULT_REASONING_EFFORT.into(),
-        );
+        model.insert("default_reasoning_effort", default_reasoning_effort.into());
+        model.insert("default_reasoning_level", default_reasoning_effort.into());
+        model.insert("defaultReasoningEffort", default_reasoning_effort.into());
         model.insert(
             "supported_reasoning_levels",
-            codex_provider_reasoning_efforts_toml_array("effort"),
+            codex_provider_reasoning_efforts_toml_array(supported_reasoning_levels, "effort"),
         );
         model.insert(
             "supported_reasoning_efforts",
-            codex_provider_reasoning_efforts_toml_array("reasoning_effort"),
+            codex_provider_reasoning_efforts_toml_array(
+                supported_reasoning_levels,
+                "reasoning_effort",
+            ),
         );
         model.insert(
             "supportedReasoningEfforts",
-            codex_provider_reasoning_efforts_toml_array("reasoningEffort"),
+            codex_provider_reasoning_efforts_toml_array(
+                supported_reasoning_levels,
+                "reasoningEffort",
+            ),
         );
         model.insert("visibility", "list".into());
         model.insert("show_in_picker", true.into());
@@ -1501,7 +1562,11 @@ fn codex_provider_models_toml_array(specs: &[CodexCatalogModelSpec]) -> Item {
 ///
 /// Codex Desktop 的 app-server 会把 custom provider 标为“自定义”，但候选菜单仍需要
 /// provider 内部能枚举模型；只写顶层 `model_catalog_json` 对部分 Desktop 版本不够。
-fn set_active_codex_provider_models(doc: &mut DocumentMut, specs: &[CodexCatalogModelSpec]) {
+fn set_active_codex_provider_models(
+    doc: &mut DocumentMut,
+    specs: &[CodexCatalogModelSpec],
+    catalog: Option<&Value>,
+) {
     if specs.is_empty() {
         return;
     }
@@ -1528,7 +1593,7 @@ fn set_active_codex_provider_models(doc: &mut DocumentMut, specs: &[CodexCatalog
         .get_mut(provider_id.as_str())
         .and_then(|item| item.as_table_mut())
     {
-        provider_table["models"] = codex_provider_models_toml_array(specs);
+        provider_table["models"] = codex_provider_models_toml_array(specs, catalog);
     }
 }
 
@@ -1583,6 +1648,7 @@ fn set_codex_model_catalog_projection_fields(
     config_text: &str,
     catalog_path: Option<&Path>,
     specs: Option<&[CodexCatalogModelSpec]>,
+    catalog: Option<&Value>,
 ) -> Result<String, AppError> {
     let mut doc = config_text
         .parse::<DocumentMut>()
@@ -1591,7 +1657,7 @@ fn set_codex_model_catalog_projection_fields(
     match (catalog_path, specs) {
         (Some(_), Some(specs)) => {
             doc["model_catalog_json"] = toml_edit::value(CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME);
-            set_active_codex_provider_models(&mut doc, specs);
+            set_active_codex_provider_models(&mut doc, specs, catalog);
             ensure_codex_agents_defaults(&mut doc);
             ensure_codex_multi_agent_reserved_schema_compatible(&mut doc);
         }
@@ -1962,8 +2028,8 @@ fn codex_model_prefers_websockets(model: &Value) -> bool {
 
 /// 合并同一模型的官方元数据和 CCSM 路由表示。
 ///
-/// 先复制官方对象，再覆盖 CCSM 提供的字段：这样路由所需的 slug、展示名和能力声明
-/// 具有更高优先级，同时保留新版 Codex 新增而 CCSM 尚不认识的元数据字段。
+/// 路由字段继续覆盖模型标识、别名和路由能力；官方模型的展示名、推理档位和
+/// 服务速度档保持权威，避免通用模板把 GPT-5.6 的 max/ultra/fast 降级成旧版四档。
 fn merge_codex_model_entry(official: Option<&Value>, routed: &Value) -> Value {
     let (Some(official_object), Some(routed_object)) =
         (official.and_then(Value::as_object), routed.as_object())
@@ -1973,15 +2039,99 @@ fn merge_codex_model_entry(official: Option<&Value>, routed: &Value) -> Value {
 
     let mut merged = official_object.clone();
     for (field, value) in routed_object {
+        if codex_official_picker_metadata_field(official_object, field) {
+            continue;
+        }
         merged.insert(field.clone(), value.clone());
     }
+    project_official_picker_metadata_aliases(&mut merged, official_object);
     Value::Object(merged)
 }
 
-/// 合并官方原生模型和 CCSM 路由模型，并以稳定标识去重。
+/// 判断同 slug 官方模型中已经存在、必须保持权威的选择器元数据字段。
+fn codex_official_picker_metadata_field(
+    official: &serde_json::Map<String, Value>,
+    field: &str,
+) -> bool {
+    let official_has_any =
+        |fields: &[&str]| fields.iter().any(|field| official.contains_key(*field));
+    match field {
+        "display_name" | "displayName" | "description" => {
+            official_has_any(&["display_name", "displayName"])
+        }
+        "default_reasoning_level" | "default_reasoning_effort" | "defaultReasoningEffort" => {
+            official_has_any(&[
+                "default_reasoning_level",
+                "default_reasoning_effort",
+                "defaultReasoningEffort",
+            ])
+        }
+        "supported_reasoning_levels"
+        | "supported_reasoning_efforts"
+        | "supportedReasoningEfforts" => official_has_any(&[
+            "supported_reasoning_levels",
+            "supported_reasoning_efforts",
+            "supportedReasoningEfforts",
+        ]),
+        "additional_speed_tiers" | "additionalSpeedTiers" => {
+            official_has_any(&["additional_speed_tiers", "additionalSpeedTiers"])
+        }
+        "service_tiers" | "serviceTiers" => official_has_any(&["service_tiers", "serviceTiers"]),
+        "default_service_tier" | "defaultServiceTier" => {
+            official_has_any(&["default_service_tier", "defaultServiceTier"])
+        }
+        "supports_reasoning_summaries" | "supportsReasoningSummaries" => {
+            official_has_any(&["supports_reasoning_summaries", "supportsReasoningSummaries"])
+        }
+        "default_reasoning_summary" | "defaultReasoningSummary" => {
+            official_has_any(&["default_reasoning_summary", "defaultReasoningSummary"])
+        }
+        "support_verbosity" | "supportVerbosity" => {
+            official_has_any(&["support_verbosity", "supportVerbosity"])
+        }
+        "default_verbosity" | "defaultVerbosity" => {
+            official_has_any(&["default_verbosity", "defaultVerbosity"])
+        }
+        _ => false,
+    }
+}
+
+/// 把官方 snake_case picker 元数据同步成 Desktop renderer 使用的 camelCase 别名。
+fn project_official_picker_metadata_aliases(
+    merged: &mut serde_json::Map<String, Value>,
+    official: &serde_json::Map<String, Value>,
+) {
+    if let Some(value) = official.get("display_name").cloned() {
+        merged.insert("displayName".to_string(), value);
+    }
+    if let Some(value) = official.get("default_reasoning_level").cloned() {
+        merged.insert("defaultReasoningEffort".to_string(), value);
+    }
+    if let Some(levels) = official.get("supported_reasoning_levels") {
+        merged.insert(
+            "supportedReasoningEfforts".to_string(),
+            codex_desktop_reasoning_efforts_from_levels(Some(levels)),
+        );
+    }
+    for (snake_case, camel_case) in [
+        ("additional_speed_tiers", "additionalSpeedTiers"),
+        ("service_tiers", "serviceTiers"),
+        ("default_service_tier", "defaultServiceTier"),
+        ("supports_reasoning_summaries", "supportsReasoningSummaries"),
+        ("default_reasoning_summary", "defaultReasoningSummary"),
+        ("support_verbosity", "supportVerbosity"),
+        ("default_verbosity", "defaultVerbosity"),
+    ] {
+        if let Some(value) = official.get(snake_case).cloned() {
+            merged.insert(camel_case.to_string(), value);
+        }
+    }
+}
+
+/// 合并 CCSM 路由模型和同 slug 官方元数据，并以稳定标识去重。
 ///
-/// 输出顺序固定为 CCSM 目录顺序优先、官方独有模型随后追加。相同标识的模型只输出
-/// 一次；同标识条目以 CCSM 字段为准，但通过 `merge_codex_model_entry` 保留官方扩展字段。
+/// 输出严格以已路由模型为边界；官方缓存只提供同 slug 元数据，不能把未勾选的
+/// 官方独有模型重新追加到 MultiRouter 目录。
 fn merge_codex_models(official_models: &[Value], routed_models: &[Value]) -> Vec<Value> {
     let mut official_by_id = HashMap::new();
     for model in official_models {
@@ -1991,7 +2141,7 @@ fn merge_codex_models(official_models: &[Value], routed_models: &[Value]) -> Vec
     }
 
     let mut seen_ids = HashSet::new();
-    let mut merged_models = Vec::with_capacity(official_models.len() + routed_models.len());
+    let mut merged_models = Vec::with_capacity(routed_models.len());
     for routed_model in routed_models {
         let routed_id = codex_model_stable_id(routed_model);
         if routed_id
@@ -2012,18 +2162,38 @@ fn merge_codex_models(official_models: &[Value], routed_models: &[Value]) -> Vec
         }
         merged_models.push(merge_codex_model_entry(official_model, routed_model));
     }
-
-    for official_model in official_models {
-        if codex_model_prefers_websockets(official_model) {
-            continue;
-        }
-        if codex_model_stable_id(official_model).is_some_and(|model_id| !seen_ids.insert(model_id))
-        {
-            continue;
-        }
-        merged_models.push(official_model.clone());
-    }
     merged_models
+}
+
+/// 用接管前官方缓存补齐生成 catalog 的同 slug 模型元数据。
+fn enrich_codex_catalog_with_official_metadata(catalog: &Value) -> Result<Value, AppError> {
+    let Some(routed_models) = catalog.get("models").and_then(Value::as_array) else {
+        return Ok(catalog.clone());
+    };
+    let cache_path = get_codex_models_cache_path();
+    let backup_path = get_codex_models_cache_backup_path();
+    let existing_cache = read_json_file_if_exists(&cache_path)?;
+    let official_cache = match existing_cache.as_ref() {
+        Some(cache) if codex_models_cache_is_cc_switch_owned(cache) => {
+            read_json_file_if_exists(&backup_path)?.or_else(|| existing_cache.clone())
+        }
+        _ => existing_cache,
+    };
+    let official_models = official_cache
+        .as_ref()
+        .and_then(|cache| cache.get("models"))
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+
+    let mut enriched = catalog.clone();
+    if let Some(object) = enriched.as_object_mut() {
+        object.insert(
+            "models".to_string(),
+            Value::Array(merge_codex_models(official_models, routed_models)),
+        );
+    }
+    Ok(enriched)
 }
 
 /// 将 CC Switch 生成的路由模型目录与 Codex 官方缓存合并后同步。
@@ -2041,8 +2211,8 @@ fn sync_codex_models_cache_with_cc_switch_catalog(catalog: &Value) -> Result<(),
     let cache_path = get_codex_models_cache_path();
     let backup_path = get_codex_models_cache_backup_path();
     let existing_cache = read_json_file_if_exists(&cache_path)?;
-    // 当前缓存若已被 CCSM 接管，必须从接管前备份读取原生目录；否则重启同步会把
-    // 上一轮已丢失的新版模型继续固化。官方缓存未被接管时则以当前内容为准。
+    // 当前缓存若已被 CCSM 接管，必须从接管前备份读取官方同 slug 元数据；
+    // official-only 模型仍不能越过 routed catalog 边界重新进入选择器。
     let official_cache = match existing_cache.as_ref() {
         Some(cache) if codex_models_cache_is_cc_switch_owned(cache) => {
             read_json_file_if_exists(&backup_path)?.or_else(|| existing_cache.clone())
@@ -2142,11 +2312,13 @@ pub fn prepare_codex_config_text_with_model_catalog(
             CodexCatalogToolProfile::ProxyChat => load_codex_model_catalog_template()?,
             CodexCatalogToolProfile::NativeResponses => load_codex_native_responses_template(),
         };
-        let catalog = codex_model_catalog_from_specs(&specs, &template, profile);
+        let generated_catalog = codex_model_catalog_from_specs(&specs, &template, profile);
+        let catalog = enrich_codex_catalog_with_official_metadata(&generated_catalog)?;
         let config_text = set_codex_model_catalog_projection_fields(
             config_text,
             Some(&catalog_path),
             Some(&specs),
+            Some(&catalog),
         )?;
         let disable_web_search = profile == CodexCatalogToolProfile::NativeResponses
             && codex_native_gateway_rejects_web_search(&config_text);
@@ -2158,7 +2330,7 @@ pub fn prepare_codex_config_text_with_model_catalog(
     } else {
         restore_codex_models_cache_if_cc_switch_owned()?;
         prune_stale_codex_managed_agent_files(&get_codex_agents_dir(), &HashSet::new())?;
-        let config_text = set_codex_model_catalog_projection_fields(config_text, None, None)?;
+        let config_text = set_codex_model_catalog_projection_fields(config_text, None, None, None)?;
         set_codex_native_web_search_field(&config_text, false)
     }
 }
@@ -5176,6 +5348,7 @@ base_url = "http://127.0.0.1:15721/v1"
             config,
             Some(Path::new("catalog")),
             Some(&specs),
+            None,
         )
         .expect("project catalog fields");
         let parsed: toml::Value = toml::from_str(&projected).expect("parse projected config");
@@ -5188,6 +5361,74 @@ base_url = "http://127.0.0.1:15721/v1"
         assert_eq!(
             agents.get("max_depth").and_then(|v| v.as_integer()),
             Some(1)
+        );
+    }
+
+    #[test]
+    /// 活动 custom provider 的内联模型也必须使用 enriched catalog 的官方推理档位。
+    fn codex_provider_inline_models_use_enriched_reasoning_levels() {
+        let specs = vec![CodexCatalogModelSpec {
+            model: "gpt-5.6-sol".to_string(),
+            upstream_model: None,
+            display_name: "gpt-5.6-sol".to_string(),
+            context_window: 272_000,
+            text_only: false,
+            is_default: true,
+            supports_parallel_tool_calls: None,
+            input_modalities: None,
+            base_instructions: None,
+        }];
+        let catalog = json!({
+            "models": [{
+                "slug": "gpt-5.6-sol",
+                "display_name": "GPT-5.6-Sol",
+                "default_reasoning_level": "medium",
+                "supported_reasoning_levels": [
+                    { "effort": "low", "description": "Low" },
+                    { "effort": "medium", "description": "Medium" },
+                    { "effort": "high", "description": "High" },
+                    { "effort": "xhigh", "description": "Extra High" },
+                    { "effort": "max", "description": "Max" },
+                    { "effort": "ultra", "description": "Ultra" }
+                ]
+            }]
+        });
+        let config = r#"model_provider = "codex_model_router_v2"
+
+[model_providers.codex_model_router_v2]
+base_url = "http://127.0.0.1:15721/v1"
+"#;
+
+        let projected = set_codex_model_catalog_projection_fields(
+            config,
+            Some(Path::new("catalog")),
+            Some(&specs),
+            Some(&catalog),
+        )
+        .expect("project catalog fields");
+        let parsed: toml::Value = toml::from_str(&projected).expect("parse projected config");
+        let model = parsed
+            .get("model_providers")
+            .and_then(|providers| providers.get("codex_model_router_v2"))
+            .and_then(|provider| provider.get("models"))
+            .and_then(|models| models.as_array())
+            .and_then(|models| models.first())
+            .expect("inline model");
+        let efforts = model
+            .get("supported_reasoning_levels")
+            .and_then(|levels| levels.as_array())
+            .expect("inline reasoning levels")
+            .iter()
+            .filter_map(|level| level.get("effort").and_then(|effort| effort.as_str()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            model.get("display_name").and_then(|value| value.as_str()),
+            Some("GPT-5.6-Sol")
+        );
+        assert_eq!(
+            efforts,
+            vec!["low", "medium", "high", "xhigh", "max", "ultra"]
         );
     }
 
@@ -5217,6 +5458,7 @@ base_url = "http://127.0.0.1:15721/v1"
             config,
             Some(Path::new("catalog")),
             Some(&specs),
+            None,
         )
         .expect("project catalog fields");
         let parsed: toml::Value = toml::from_str(&projected).expect("parse projected config");
@@ -6016,8 +6258,8 @@ model_catalog_json = "cc-switch-model-catalog.json"
     }
 
     #[test]
-    /// 模型合并应保持 CCSM 路由顺序和字段优先级，同时保留官方独有元数据与模型。
-    fn merge_codex_models_preserves_official_metadata_and_native_only_models() {
+    /// 模型合并应保持 CCSM 路由边界，并为同 slug 模型保留官方扩展元数据。
+    fn merge_codex_models_preserves_official_metadata_without_native_only_models() {
         let official_models = json!([
             {
                 "slug": "gpt-5.5",
@@ -6043,16 +6285,79 @@ model_catalog_json = "cc-switch-model-catalog.json"
             .iter()
             .filter_map(codex_model_stable_id)
             .collect::<Vec<_>>();
-        assert_eq!(ids, vec!["qwen3.6", "gpt-5.5", "gpt-5.6-sol"]);
+        assert_eq!(ids, vec!["qwen3.6", "gpt-5.5"]);
         assert_eq!(
             merged[1].get("display_name").and_then(Value::as_str),
-            Some("Routed GPT-5.5"),
-            "CCSM routing fields should override the official representation"
+            Some("Official GPT-5.5"),
+            "official picker metadata should override the routed representation"
         );
         assert_eq!(
             merged[1].get("native_capability"),
             Some(&json!({ "app_personality": true })),
             "official-only metadata must survive a same-slug merge"
+        );
+    }
+
+    #[test]
+    /// GPT-5.6 同 slug 合并必须保留官方 max/ultra 推理档、速度档和展示名。
+    fn merge_codex_models_preserves_official_gpt56_picker_metadata() {
+        let official_models = json!([{
+            "slug": "gpt-5.6-sol",
+            "display_name": "GPT-5.6-Sol",
+            "default_reasoning_level": "medium",
+            "supported_reasoning_levels": [
+                { "effort": "low", "description": "Low" },
+                { "effort": "medium", "description": "Medium" },
+                { "effort": "high", "description": "High" },
+                { "effort": "xhigh", "description": "Extra High" },
+                { "effort": "max", "description": "Max" },
+                { "effort": "ultra", "description": "Ultra" }
+            ],
+            "additional_speed_tiers": ["fast"],
+            "service_tiers": [{ "id": "priority", "name": "Fast" }]
+        }]);
+        let routed_models = json!([{
+            "model": "gpt-5.6-sol",
+            "display_name": "gpt-5.6-sol",
+            "default_reasoning_level": "medium",
+            "supported_reasoning_levels": [
+                { "effort": "low" },
+                { "effort": "medium" },
+                { "effort": "high" },
+                { "effort": "xhigh" }
+            ],
+            "additional_speed_tiers": [],
+            "service_tiers": []
+        }]);
+
+        let merged = merge_codex_models(
+            official_models.as_array().expect("official models"),
+            routed_models.as_array().expect("routed models"),
+        );
+        let model = merged.first().expect("merged model");
+        let efforts = model
+            .get("supported_reasoning_levels")
+            .and_then(Value::as_array)
+            .expect("official reasoning levels")
+            .iter()
+            .filter_map(|level| level.get("effort").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            model.get("display_name").and_then(Value::as_str),
+            Some("GPT-5.6-Sol")
+        );
+        assert_eq!(
+            efforts,
+            vec!["low", "medium", "high", "xhigh", "max", "ultra"]
+        );
+        assert_eq!(model.get("additional_speed_tiers"), Some(&json!(["fast"])));
+        assert_eq!(
+            model
+                .get("supportedReasoningEfforts")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(6)
         );
     }
 
@@ -6173,14 +6478,15 @@ base_url = "http://127.0.0.1:15721/v1"
 
     #[test]
     #[serial]
-    /// 重复同步应始终从接管前备份恢复原生基线，不能永久丢失新版 App 独有模型。
-    fn repeated_model_catalog_sync_keeps_native_models_from_backup() {
+    /// 重复同步只从接管前备份恢复同 slug 元数据，不能恢复未路由的官方独有模型。
+    fn repeated_model_catalog_sync_keeps_same_slug_metadata_from_backup() {
         let _home = TestHomeGuard::new();
         seed_codex_models_cache(json!([
             {
                 "slug": "gpt-5.5",
                 "display_name": "GPT-5.5",
                 "model_messages": { "instructions_template": "template" },
+                "native_capability": { "personality": "default" },
                 "context_window": 128000
             },
             {
@@ -6211,7 +6517,7 @@ base_url = "http://127.0.0.1:15721/v1"
         )
         .expect("first cache sync");
 
-        // 模拟旧版本 CCSM 已把当前接管缓存中的原生 5.6 条目覆盖掉；原始备份仍完整。
+        // 模拟当前接管缓存和 catalog 丢失部分官方扩展字段；原始备份仍完整。
         let cache_path = get_codex_models_cache_path();
         let mut owned_cache: Value = read_json_file(&cache_path).expect("read owned cache");
         owned_cache
@@ -6221,21 +6527,41 @@ base_url = "http://127.0.0.1:15721/v1"
             .retain(|model| codex_model_stable_id(model).as_deref() != Some("gpt-5.6-sol"));
         write_json_file(&cache_path, &owned_cache).expect("simulate stale owned cache");
 
-        let catalog = read_json_file(&get_codex_model_catalog_path()).expect("read catalog");
+        let mut catalog: Value =
+            read_json_file(&get_codex_model_catalog_path()).expect("read catalog");
+        if let Some(routed_model) = catalog
+            .get_mut("models")
+            .and_then(Value::as_array_mut)
+            .and_then(|models| {
+                models
+                    .iter_mut()
+                    .find(|model| codex_model_stable_id(model).as_deref() == Some("gpt-5.5"))
+            })
+            .and_then(Value::as_object_mut)
+        {
+            routed_model.remove("native_capability");
+        }
         sync_codex_models_cache_with_cc_switch_catalog(&catalog).expect("repeat cache sync");
 
         let resynced_cache: Value = read_json_file(&cache_path).expect("read resynced cache");
-        let native_model = resynced_cache
+        let resynced_models = resynced_cache
             .get("models")
             .and_then(Value::as_array)
-            .expect("resynced models")
+            .expect("resynced models");
+        let routed_model = resynced_models
             .iter()
-            .find(|model| codex_model_stable_id(model).as_deref() == Some("gpt-5.6-sol"))
-            .expect("native GPT-5.6 model should be recovered from backup");
+            .find(|model| codex_model_stable_id(model).as_deref() == Some("gpt-5.5"))
+            .expect("routed GPT-5.5 model");
         assert_eq!(
-            native_model.get("native_capability"),
-            Some(&json!({ "personality": "sol" })),
-            "the full native metadata should survive repeated synchronization"
+            routed_model.get("native_capability"),
+            Some(&json!({ "personality": "default" })),
+            "same-slug official metadata should survive repeated synchronization"
+        );
+        assert!(
+            !resynced_models
+                .iter()
+                .any(|model| codex_model_stable_id(model).as_deref() == Some("gpt-5.6-sol")),
+            "official-only models must not cross the routed catalog boundary"
         );
     }
 

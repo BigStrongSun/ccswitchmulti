@@ -17,6 +17,66 @@ function provider(overrides: Partial<Provider>): Provider {
 }
 
 describe("codexMultiRouterSync", () => {
+  it("重建 catalog 时排除停用 route 的模型", () => {
+    const enabled = provider({
+      id: "qwen-enabled",
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "qwen3.6" }] },
+      },
+    });
+    const disabled = provider({
+      id: "openai-disabled",
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "gpt-5.5" }] },
+      },
+    });
+    const plan = provider({
+      id: "router",
+      settingsConfig: {
+        modelCatalog: {
+          models: [{ model: "qwen3.6" }, { model: "gpt-5.5" }],
+          spawnAgentModels: ["qwen3.6", "gpt-5.5"],
+        },
+        codexRouting: {
+          enabled: true,
+          routes: [
+            {
+              id: "qwen-route",
+              enabled: true,
+              targetProviderId: enabled.id,
+              match: { models: ["qwen3.6"], prefixes: [] },
+              upstream: {},
+            },
+            {
+              id: "openai-route",
+              enabled: false,
+              targetProviderId: disabled.id,
+              match: { models: ["gpt-5.5"], prefixes: ["gpt-"] },
+              upstream: {},
+            },
+          ],
+        },
+      },
+    });
+
+    const synced = syncCodexMultiRouterPlanWithProviders(
+      plan,
+      new Map([
+        [enabled.id, enabled],
+        [disabled.id, disabled],
+      ]),
+    );
+
+    expect(
+      synced?.plan.settingsConfig.modelCatalog.models.map(
+        (model: { model: string }) => model.model,
+      ),
+    ).toEqual(["qwen3.6"]);
+    expect(synced?.plan.settingsConfig.modelCatalog.spawnAgentModels).toEqual([
+      "qwen3.6",
+    ]);
+  });
+
   it("把旧版内联默认 OAuth route 迁移到 canonical provider 并同步 5.6", () => {
     const official = provider({
       id: "codex-official",

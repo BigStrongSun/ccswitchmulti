@@ -298,6 +298,7 @@ function rebuildPlanModelCatalog(
   const byModel = new Map<string, CodexCatalogModel>();
   const planCatalogByModel = buildPlanCatalogByModel(plan);
   for (const route of routes) {
+    if (route.enabled === false) continue;
     const targetId = routeTargetProviderId(route);
     const targetProvider = targetId ? providersById.get(targetId) : undefined;
     const targetModels = targetProvider
@@ -354,6 +355,7 @@ function buildRoutableProvidersByRoute(
   const targetProviders: Provider[] = [];
   const seenProviderIds = new Set<string>();
   for (const route of routes) {
+    if (route.enabled === false) continue;
     const targetId = routeTargetProviderId(route);
     if (!targetId || seenProviderIds.has(targetId)) continue;
     const provider = providersById.get(targetId);
