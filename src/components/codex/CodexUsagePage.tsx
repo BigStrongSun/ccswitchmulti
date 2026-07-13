@@ -2,23 +2,37 @@ import React from "react";
 import {
   AlertCircle,
   ArrowRight,
+  BarChart3,
   CheckCircle2,
   Clock,
+  Database,
   Gauge,
   Info,
+  LineChart,
+  LoaderCircle,
   RefreshCw,
   RotateCcw,
+  ShieldAlert,
+  Sparkles,
   TimerReset,
+  TrendingDown,
+  TrendingUp,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useSubscriptionQuota } from "@/lib/query/subscription";
+import { useModelStats, useUsageSummary } from "@/lib/query/usage";
 import type {
   QuotaTier,
   ResetCreditInfo,
   SubscriptionQuota,
 } from "@/types/subscription";
+import type { ModelStats, UsageSummary } from "@/types/usage";
 
 const TRACKED_TIERS = new Set(["five_hour", "seven_day"]);
+const FIVE_HOUR_WINDOW_MS = 5 * 60 * 60 * 1000;
+const SEVEN_DAY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+const TODAY_RANGE = { preset: "today" } as const;
+const SEVEN_DAY_RANGE = { preset: "7d" } as const;
 
 const TIER_LABELS: Record<string, string> = {
   five_hour: "5 小时窗口",
@@ -47,6 +61,17 @@ interface UsageReadingHintProps {
   tone: "ok" | "warn" | "info";
 }
 
+interface WindowForecast {
+  /** 已过周期的平均官方窗口消耗速度，单位为百分点/小时。 */
+  percentPerHour: number;
+  /** 在当前平均速度不变时的预计耗尽时刻；无法计算时为 null。 */
+  depletionAt: Date | null;
+  /** 预计耗尽是否发生在本次官方重置前。 */
+  depletesBeforeReset: boolean;
+  /** 预测的可解释性等级，固定为近似估算。 */
+  confidence: "low" | "medium";
+}
+
 /** 页面级配色：每个 surface 都显式维护 light 与 dark 两套颜色，避免主题切换时只继承单套颜色。 */
 const USAGE_PAGE_COLORS = {
   shell:
@@ -67,6 +92,10 @@ const USAGE_PAGE_COLORS = {
   warningButton:
     "border-amber-300 bg-white text-amber-950 hover:bg-amber-100 dark:border-amber-700 dark:bg-slate-950/40 dark:text-amber-100 dark:hover:bg-amber-900/40",
   resetSummary: "bg-sky-100 text-sky-800 dark:bg-sky-500/10 dark:text-sky-300",
+  analytics:
+    "border-violet-200 bg-violet-50/60 text-slate-950 dark:border-violet-800/50 dark:bg-violet-950/15 dark:text-slate-100",
+  analyticsInset:
+    "border-slate-200 bg-white/85 text-slate-950 dark:border-slate-700/70 dark:bg-slate-950/35 dark:text-slate-100",
 };
 
 /** 读数提示卡配色：ok/warn/info 各自维护浅色和深色配色。 */
@@ -128,6 +157,116 @@ function formatCheckedAt(value: number | null | undefined): string {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+/** 将 token 数量压缩成适合仪表盘阅读的本地化格式。 */
+function formatTokens(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "0";
+  return new Intl.NumberFormat(undefined, {
+    notation: "compact",
+    maximumFractionDigits: value >= 1000000 ? 1 : 0,
+  }).format(value);
+}
+
+/** 将官方窗口的重置时间换算为剩余小时数；无法解析时返回 null。 */
+function getHoursUntil(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const resetMs = new Date(value).getTime();
+  if (!Number.isFinite(resetMs)) return null;
+  return Math.max(0, (resetMs - Date.now()) / (60 * 60 * 1000));
+}
+
+/** 根据窗口类型返回可用于推算平均速率的理论周期长度。 */
+function getWindowDurationMs(tierName: string): number | null {
+  if (tierName === "five_hour") return FIVE_HOUR_WINDOW_MS;
+  if (tierName === "seven_day" || tierName === "weekly_limit") {
+    return SEVEN_DAY_WINDOW_MS;
+  }
+  return null;
+}
+
+/**
+ * 根据当前官方百分比与已过周期时间估算窗口耗尽点。
+ *
+ * 官方接口不会返回窗口总 token 数，因此这里严格只在“官方百分比”维度做
+ * 线性外推，不能把本地 token 日志换算为官方配额。
+ */
+function buildWindowForecast(tier: QuotaTier): WindowForecast | null {
+  const durationMs = getWindowDurationMs(tier.name);
+  const resetsAtMs = tier.resetsAt ? new Date(tier.resetsAt).getTime() : NaN;
+  const used = clampPercent(tier.utilization);
+  if (!durationMs || !Number.isFinite(resetsAtMs) || used <= 0) return null;
+
+  const windowStartMs = resetsAtMs - durationMs;
+  const elapsedHours = Math.max(
+    (Date.now() - windowStartMs) / (60 * 60 * 1000),
+    1 / 60,
+  );
+  const percentPerHour = used / elapsedHours;
+  const remaining = Math.max(0, 100 - used);
+  const hoursUntilFull = remaining / percentPerHour;
+  const depletionAt = new Date(Date.now() + hoursUntilFull * 60 * 60 * 1000);
+
+  return {
+    percentPerHour,
+    depletionAt,
+    depletesBeforeReset: depletionAt.getTime() < resetsAtMs,
+    confidence: elapsedHours >= 1 ? "medium" : "low",
+  };
+}
+
+/** 根据窗口预测生成一条明确但不过度承诺的行动建议。 */
+function getWindowRecommendation(
+  tier: QuotaTier,
+  forecast: WindowForecast | null,
+): { title: string; detail: string; tone: "ok" | "warn" | "risk" } {
+  const hoursUntilReset = getHoursUntil(tier.resetsAt);
+  if (!forecast || hoursUntilReset === null) {
+    return {
+      title: "等待更多窗口数据",
+      detail: "官方尚未提供足够的有效窗口读数，暂不显示耗尽预测。",
+      tone: "warn",
+    };
+  }
+  if (forecast.depletesBeforeReset) {
+    return {
+      title: "按当前节奏可能提前耗尽",
+      detail: `预计 ${formatDateTime(forecast.depletionAt?.toISOString())} 用尽，建议降低并发或把轻量任务切到其它模型。`,
+      tone: "risk",
+    };
+  }
+  if (forecast.percentPerHour >= 15) {
+    return {
+      title: "消耗节奏偏快",
+      detail: `重置前约剩 ${Math.ceil(hoursUntilReset)} 小时；优先避免大上下文重复提交。`,
+      tone: "warn",
+    };
+  }
+  return {
+    title: "当前节奏可覆盖至重置",
+    detail: `按已过周期平均速度估算，仍会在 ${formatDateTime(tier.resetsAt)} 前保有余量。`,
+    tone: "ok",
+  };
+}
+
+/** 计算今天已过去的小时数，保证新的一天不会除以零。 */
+function getElapsedTodayHours(nowMs: number = Date.now()): number {
+  const now = new Date(nowMs);
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  return Math.max((nowMs - start.getTime()) / (60 * 60 * 1000), 1 / 60);
+}
+
+/** 选出 token 消耗最高的若干模型，并稳定处理同值排序。 */
+function getTopModels(stats: ModelStats[] | undefined): ModelStats[] {
+  return [...(stats ?? [])]
+    .filter((item) => item.totalTokens > 0)
+    .sort(
+      (left, right) =>
+        right.totalTokens - left.totalTokens ||
+        right.requestCount - left.requestCount ||
+        left.model.localeCompare(right.model),
+    )
+    .slice(0, 4);
 }
 
 /** 计算 reset credit 到期紧迫度，用于提示即将过期的额度。 */
@@ -266,11 +405,32 @@ const UsageGuidePanel: React.FC = () => (
   </section>
 );
 
+/** 预测提示使用的单一图标和语义配色，避免分散在调用位置判断。 */
+function ForecastStatusIcon({
+  tone,
+}: {
+  tone: "ok" | "warn" | "risk";
+}): React.ReactNode {
+  if (tone === "risk") {
+    return <ShieldAlert className="h-4 w-4 text-red-600 dark:text-red-400" />;
+  }
+  if (tone === "warn") {
+    return (
+      <TrendingUp className="h-4 w-4 text-amber-600 dark:text-amber-400" />
+    );
+  }
+  return (
+    <TrendingDown className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
+  );
+}
+
 /** 渲染单个 5 小时/每周用量窗口。 */
 const UsageWindowCard: React.FC<UsageWindowCardProps> = ({ tier }) => {
   const used = clampPercent(tier.utilization);
   const remaining = Math.max(0, 100 - used);
   const label = TIER_LABELS[tier.name] ?? tier.name;
+  const forecast = buildWindowForecast(tier);
+  const recommendation = getWindowRecommendation(tier, forecast);
 
   return (
     <section className={`rounded-lg border p-4 ${USAGE_PAGE_COLORS.card}`}>
@@ -304,6 +464,219 @@ const UsageWindowCard: React.FC<UsageWindowCardProps> = ({ tier }) => {
           已用 {Math.round(used)}%
         </span>
       </div>
+
+      <div
+        className={`mt-4 rounded-md border px-3 py-2.5 ${
+          recommendation.tone === "risk"
+            ? USAGE_PAGE_COLORS.warning
+            : USAGE_PAGE_COLORS.inset
+        }`}
+      >
+        <div className="flex items-start gap-2">
+          <ForecastStatusIcon tone={recommendation.tone} />
+          <div className="min-w-0">
+            <div className="text-xs font-semibold">{recommendation.title}</div>
+            <div className="mt-1 text-xs leading-5 text-muted-foreground">
+              {recommendation.detail}
+            </div>
+          </div>
+        </div>
+        {forecast && (
+          <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-current/10 pt-2 text-[11px] text-muted-foreground">
+            <span className="tabular-nums">
+              平均 {forecast.percentPerHour.toFixed(1)}% / 小时
+            </span>
+            <span>
+              置信度：{forecast.confidence === "medium" ? "中" : "低"}
+            </span>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+};
+
+/**
+ * 本地日志分析区：把 token、模型和缓存数据独立于官方窗口展示。
+ *
+ * 该区域只描述本机已同步的 Codex 会话/代理日志，避免与官方百分比混用。
+ */
+const LocalUsageAnalytics: React.FC<{
+  summary: UsageSummary | undefined;
+  modelStats: ModelStats[] | undefined;
+  isLoading: boolean;
+}> = ({ summary, modelStats, isLoading }) => {
+  const topModels = getTopModels(modelStats);
+  const tokensPerHour = summary
+    ? summary.realTotalTokens / getElapsedTodayHours()
+    : 0;
+  const cachePercent = summary
+    ? Math.round(Math.max(0, Math.min(summary.cacheHitRate, 1)) * 100)
+    : 0;
+  const heavyModel = topModels[0];
+  const highBurn =
+    tokensPerHour >= 200000 || (summary?.totalRequests ?? 0) >= 50;
+  const topModelsTotalTokens = topModels.reduce(
+    (total, item) => total + item.totalTokens,
+    0,
+  );
+
+  return (
+    <section className={`rounded-lg border p-5 ${USAGE_PAGE_COLORS.analytics}`}>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="flex items-start gap-2">
+          <LineChart className="mt-0.5 h-4 w-4 text-violet-700 dark:text-violet-300" />
+          <div>
+            <h3 className="text-base font-semibold text-foreground">
+              本地消耗节奏
+            </h3>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              来自本机已同步的 Codex 会话与代理日志，仅用于识别 token
+              和模型消耗趋势，不换算官方窗口额度。
+            </p>
+          </div>
+        </div>
+        <span className="inline-flex w-fit items-center gap-1 rounded-md border border-violet-200 bg-white/80 px-2 py-1 text-xs text-violet-800 dark:border-violet-800/70 dark:bg-slate-950/35 dark:text-violet-200">
+          <Database className="h-3.5 w-3.5" />
+          本地日志口径
+        </span>
+      </div>
+
+      {isLoading && !summary ? (
+        <div className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
+          <LoaderCircle className="h-4 w-4 animate-spin" />
+          正在汇总本地 Codex 使用记录...
+        </div>
+      ) : !summary || summary.totalRequests === 0 ? (
+        <div
+          className={`mt-4 rounded-md border border-dashed px-3 py-4 text-sm text-muted-foreground ${USAGE_PAGE_COLORS.analyticsInset}`}
+        >
+          暂无可分析的本地 Codex 使用记录。完成一次 Codex
+          会话同步或通过本机代理发起请求后，这里会显示 token 速度和模型分布。
+        </div>
+      ) : (
+        <>
+          <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <div
+              className={`rounded-md border p-3 ${USAGE_PAGE_COLORS.analyticsInset}`}
+            >
+              <div className="text-xs text-muted-foreground">今日 token</div>
+              <div className="mt-1 text-xl font-semibold tabular-nums">
+                {formatTokens(summary.realTotalTokens)}
+              </div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                {summary.totalRequests} 次请求
+              </div>
+            </div>
+            <div
+              className={`rounded-md border p-3 ${USAGE_PAGE_COLORS.analyticsInset}`}
+            >
+              <div className="text-xs text-muted-foreground">当前消耗速度</div>
+              <div className="mt-1 text-xl font-semibold tabular-nums">
+                {formatTokens(tokensPerHour)}
+                <span className="ml-1 text-xs font-medium text-muted-foreground">
+                  token / 小时
+                </span>
+              </div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                按今日已过时间平均
+              </div>
+            </div>
+            <div
+              className={`rounded-md border p-3 ${USAGE_PAGE_COLORS.analyticsInset}`}
+            >
+              <div className="text-xs text-muted-foreground">缓存命中率</div>
+              <div className="mt-1 text-xl font-semibold tabular-nums">
+                {cachePercent}%
+              </div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                {cachePercent < 30 ? "重复上下文可优先复用" : "上下文复用正常"}
+              </div>
+            </div>
+            <div
+              className={`rounded-md border p-3 ${USAGE_PAGE_COLORS.analyticsInset}`}
+            >
+              <div className="text-xs text-muted-foreground">请求成功率</div>
+              <div className="mt-1 text-xl font-semibold tabular-nums">
+                {Math.round(summary.successRate)}%
+              </div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                已计入成功请求
+              </div>
+            </div>
+          </div>
+
+          <div
+            className={`mt-4 rounded-md border p-3 ${USAGE_PAGE_COLORS.analyticsInset}`}
+          >
+            <div className="flex items-start gap-2">
+              <Sparkles className="mt-0.5 h-4 w-4 text-violet-700 dark:text-violet-300" />
+              <div className="min-w-0 text-sm">
+                <div className="font-semibold text-foreground">
+                  {highBurn
+                    ? "建议先降低高上下文任务密度"
+                    : "本地 token 节奏处于可观察范围"}
+                </div>
+                <p className="mt-1 leading-5 text-muted-foreground">
+                  {highBurn
+                    ? `当前约 ${formatTokens(tokensPerHour)} token / 小时。将大任务拆分、避免重复粘贴长上下文，并把轻量任务分配到低成本模型可降低消耗。`
+                    : heavyModel
+                      ? `${heavyModel.model} 是近 7 天 token 消耗最多的模型，占展示模型总量约 ${Math.round((heavyModel.totalTokens / Math.max(topModelsTotalTokens, 1)) * 100)}%。`
+                      : "继续积累本地会话记录后，可获得模型级别的消耗建议。"}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-4">
+            <div className="mb-2 flex items-center gap-2 text-sm font-semibold">
+              <BarChart3 className="h-4 w-4 text-violet-700 dark:text-violet-300" />
+              近 7 天模型分布
+            </div>
+            {topModels.length > 0 ? (
+              <div className="divide-y rounded-md border bg-white/70 dark:divide-slate-700/70 dark:bg-slate-950/20">
+                {topModels.map((item) => {
+                  const share = Math.min(
+                    100,
+                    Math.round(
+                      (item.totalTokens / Math.max(topModelsTotalTokens, 1)) *
+                        100,
+                    ),
+                  );
+                  return (
+                    <div
+                      key={item.model}
+                      className="grid grid-cols-[minmax(0,1fr)_auto] gap-3 px-3 py-2.5 text-sm sm:grid-cols-[minmax(0,1fr)_110px_90px]"
+                    >
+                      <div className="min-w-0">
+                        <div className="truncate font-medium text-foreground">
+                          {item.model}
+                        </div>
+                        <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-violet-100 dark:bg-violet-950/60">
+                          <div
+                            className="h-full rounded-full bg-violet-500"
+                            style={{ width: `${share}%` }}
+                          />
+                        </div>
+                      </div>
+                      <div className="text-right text-xs text-muted-foreground tabular-nums">
+                        {formatTokens(item.totalTokens)} token
+                      </div>
+                      <div className="text-right text-xs text-muted-foreground tabular-nums">
+                        {item.requestCount} 次请求
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="text-sm text-muted-foreground">
+                本地日志没有返回可展示的模型级 token 记录。
+              </div>
+            )}
+          </div>
+        </>
+      )}
     </section>
   );
 };
@@ -396,6 +769,15 @@ export const CodexUsagePage: React.FC = () => {
     isFetching,
     refetch,
   } = useSubscriptionQuota("codex", true, true, 5);
+  const {
+    data: todayUsage,
+    isFetching: isTodayUsageFetching,
+    refetch: refetchTodayUsage,
+  } = useUsageSummary(TODAY_RANGE, { appType: "codex" });
+  const { data: modelStats, refetch: refetchModelStats } = useModelStats(
+    SEVEN_DAY_RANGE,
+    { appType: "codex" },
+  );
   const visibleTiers = getVisibleTiers(quota);
   const availableCredits = (quota?.resetCredits?.credits ?? []).filter(
     isAvailableCredit,
@@ -455,7 +837,11 @@ export const CodexUsagePage: React.FC = () => {
             </div>
             <Button
               type="button"
-              onClick={() => void refetch()}
+              onClick={() => {
+                void refetch();
+                void refetchTodayUsage();
+                void refetchModelStats();
+              }}
               disabled={isFetching}
               size="sm"
               className="gap-2 bg-sky-600 hover:bg-sky-500 dark:bg-blue-600 dark:hover:bg-blue-500"
@@ -487,6 +873,12 @@ export const CodexUsagePage: React.FC = () => {
               </section>
             )}
           </div>
+
+          <LocalUsageAnalytics
+            summary={todayUsage}
+            modelStats={modelStats}
+            isLoading={isTodayUsageFetching}
+          />
 
           <section
             className={`rounded-lg border p-5 ${USAGE_PAGE_COLORS.card}`}

@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-07-13 Codex 用量页：官方窗口预测与本地 token 分析分离
+
+- `src/components/codex/CodexUsagePage.tsx` 的官方 `SubscriptionQuota` 仅提供窗口已用百分比 `utilization` 与 `resetsAt`，不会提供绝对 token 上限或模型级官方额度账本。因此绝不能把本地 token 直接换算成“官方还剩多少 token”。
+- 页面现在以当前窗口的已过时间和官方百分比计算“百分点/小时”的平均速度，并仅在该假设下预测耗尽时刻。预测会显示中/低置信度及“按当前节奏可能提前耗尽”建议；窗口刚开始或数据异常时降级为等待更多读数，不伪造精确性。
+- `useUsageSummary({ preset: "today" }, { appType: "codex" })` 与 `useModelStats({ preset: "7d" }, { appType: "codex" })` 是独立的本地日志口径：显示今日 token、token/小时、缓存命中率、成功率和前四模型分布。其数据来自本机代理/会话同步日志，仅用于分析节奏和模型结构。
+- 顶部刷新同时刷新官方订阅窗口、本地今日汇总和七日模型统计；页面仍保持只读，不兑换 reset、不修改账号或 Codex 配置。
+- 验证基线：`pnpm vitest run src/components/codex/CodexUsagePage.test.tsx`、`pnpm typecheck`、`pnpm build:renderer`、Prettier 检查和 `git diff --check` 都应通过。单独 Vite 预览没有 Tauri `invoke` 桥接，不能作为真实数据页的端到端验证；需在 `pnpm tauri dev` 或桌面壳中继续做 live QA。
+
 ## 2026-07-12 MultiRouter OAuth 模型列表网络失败兜底
 
 - 截图里的 `Request failed: error sending request for url (https://chatgpt.com/backend-api/codex/models?client_version=...)` 来自 `src-tauri/src/services/codex_oauth_models.rs` 的 `reqwest.send()` 阶段，说明请求还没拿到 HTTP 响应；这不是模型名格式、401/403、HTTP 404 或接口返回空列表，而是 DNS/TLS/代理/超时等网络层问题。
