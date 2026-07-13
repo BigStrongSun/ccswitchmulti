@@ -2379,7 +2379,7 @@ pub async fn handle_responses(
     let request_body_for_history = body.clone();
 
     let endpoint = endpoint_with_query(&uri, "/responses");
-    let mut ctx = if !is_codex_model_catalog_client(&headers) {
+    let mut ctx = if !should_handle_as_codex_client(&headers) {
         let external_api_profile = match external_openai_api::validate_request(&state.db, &headers)
         {
             Ok(profile) => profile,
@@ -3929,10 +3929,10 @@ mod tests {
         body_looks_like_sse, body_snippet, build_external_codex_official_oauth_provider,
         chat_sse_to_response_value, codex_catalog_models_response, codex_proxy_error_json,
         external_openai_api_models_response, external_openai_api_unsupported_response,
-        resolve_codex_image_generation_provider, resolve_external_codex_router_target,
-        resolve_forward_error_provider_for_logging, responses_sse_to_response_value,
-        should_handle_as_codex_client, should_use_claude_transform_streaming, transform,
-        upstream_body_parse_error,
+        mark_external_openai_headers, resolve_codex_image_generation_provider,
+        resolve_external_codex_router_target, resolve_forward_error_provider_for_logging,
+        responses_sse_to_response_value, should_handle_as_codex_client,
+        should_use_claude_transform_streaming, transform, upstream_body_parse_error,
     };
     use crate::{
         app_config::AppType,
@@ -4582,6 +4582,31 @@ data: [DONE]\n\n";
         );
 
         assert!(!should_handle_as_codex_client(&headers));
+    }
+
+    #[test]
+    /// External API 专用入口的内部标记必须压过伪装成 Codex 的 User-Agent。
+    fn external_api_marker_takes_precedence_over_codex_user_agent() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::USER_AGENT,
+            HeaderValue::from_static("codex_cli_rs/0.144.2"),
+        );
+        mark_external_openai_headers(&mut headers);
+
+        assert!(!should_handle_as_codex_client(&headers));
+    }
+
+    #[test]
+    /// 没有 External API 标记或 key 的官方 Codex User-Agent 应继续走本地应用入口。
+    fn official_codex_user_agent_uses_local_client_context() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::USER_AGENT,
+            HeaderValue::from_static("codex_vscode/0.144.2"),
+        );
+
+        assert!(should_handle_as_codex_client(&headers));
     }
 
     #[test]

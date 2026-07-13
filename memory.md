@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-07-13 Codex OAuth originator：白名单保留与缺失回退
+
+- `originator=codex_cli_rs` 能修复 Luna 相对 `cc-switch` 的模型准入差异，但不能因此把所有真实 Desktop/VS Code 请求都改报为 CLI。官方 Codex 的 first-party 分类包含 `codex_cli_rs`、`codex-tui`、`codex_vscode`、`Codex ` 前缀，以及独立 chat 分类中的 `codex_atlas`、`codex_chatgpt_desktop`；`codex_exec` 不在该分类中。
+- 根修位于 `src-tauri/src/proxy/forwarder.rs`：可信本地 Codex 请求只有在恰好携带一个白名单值时保留；缺失、未知、重复值统一回退 `codex_cli_rs`。External API 和 Claude/协议转换不能保留调用方 originator，避免外部请求伪造 first-party 身份。
+- 可信来源不靠可伪造的 header 猜测：`RequestContext::new` 仅为本地应用入口设置 `preserve_codex_client_originator=true`，`new_with_provider` 的 External API 临时 provider 固定为 false，再由 `RequestForwarder` 执行最终 header 规则。`handle_responses` 同步改用 `should_handle_as_codex_client()`，确保 External API 标记/API key 优先于伪装成 Codex 的 User-Agent。
+- 回归测试必须覆盖 CLI、VS Code、TUI、Desktop/chat first-party 保留，`cc-switch`、`codex_exec`、未知值、重复值和 External API 回退，以及非 OAuth 请求完全不改写。
+
 ## 2026-07-13 CCSwitchMulti v3.16.5-7：所有官方 Codex OAuth 模型请求统一原生 CLI originator
 
 - 真实根因：Luna 的 `prefer_websockets=true` 只是传输偏好，不是 WebSocket 硬要求。原生 Codex CLI `0.144.2` 在 `supports_websockets=false` 下可通过 HTTP Responses 正常运行 Luna。

@@ -116,6 +116,8 @@ pub struct RequestForwarder {
     session_id: String,
     /// Session ID 是否由客户端提供；生成值不能作为上游缓存身份。
     session_client_provided: bool,
+    /// 是否允许保留可信本地 Codex 客户端提供的 first-party originator。
+    preserve_codex_client_originator: bool,
     /// 整流器配置
     rectifier_config: RectifierConfig,
     /// 优化器配置
@@ -199,6 +201,7 @@ impl RequestForwarder {
         current_provider_id_at_start: String,
         session_id: String,
         session_client_provided: bool,
+        preserve_codex_client_originator: bool,
         streaming_first_byte_timeout: u64,
         _streaming_idle_timeout: u64,
         rectifier_config: RectifierConfig,
@@ -220,6 +223,7 @@ impl RequestForwarder {
             current_provider_id_at_start,
             session_id,
             session_client_provided,
+            preserve_codex_client_originator,
             rectifier_config,
             optimizer_config,
             copilot_optimizer_config,
@@ -2391,7 +2395,11 @@ impl RequestForwarder {
                 .and_then(|meta| meta.local_proxy_request_overrides.as_ref()),
             is_copilot,
         );
-        enforce_codex_oauth_originator(&mut ordered_headers, is_codex_oauth);
+        enforce_codex_oauth_originator(
+            &mut ordered_headers,
+            is_codex_oauth,
+            self.preserve_codex_client_originator,
+        );
 
         reject_proxy_placeholder_for_managed_account_upstream(&url, &ordered_headers)?;
 
@@ -2957,7 +2965,11 @@ impl RequestForwarder {
                 .and_then(|meta| meta.local_proxy_request_overrides.as_ref()),
             false,
         );
-        enforce_codex_oauth_originator(&mut ordered_headers, is_codex_oauth);
+        enforce_codex_oauth_originator(
+            &mut ordered_headers,
+            is_codex_oauth,
+            self.preserve_codex_client_originator,
+        );
         reject_proxy_placeholder_for_managed_account_upstream(&url, &ordered_headers)?;
 
         let request_is_streaming = raw_passthrough_request_is_streaming(route_body, headers);
@@ -3688,18 +3700,55 @@ fn build_codex_oauth_session_headers(
     headers
 }
 
-/// 为所有托管 Codex OAuth 官方请求固定官方 CLI 来源标识。
+/// 判断 originator 是否属于官方 Codex 已声明的 first-party 客户端集合。
 ///
-/// OpenAI Codex 后端会按 `originator` 做模型和能力准入；使用代理自定义值会让已授权
-/// 模型被隐藏为 `Model not found`。这里在完整 header 合并和用户 override 之后覆盖为
-/// 单一官方值，既移除重复来源头，也不影响普通 Bearer/API Key 第三方路由。
-fn enforce_codex_oauth_originator(headers: &mut http::HeaderMap, is_codex_oauth: bool) {
+/// 该集合与官方 Codex `is_first_party_originator` 和
+/// `is_first_party_chat_originator` 保持一致。`codex_exec` 虽是官方命令入口，但不在
+/// 官方 first-party 分类中，因此不作为可保留值。
+fn is_first_party_codex_originator(value: &str) -> bool {
+    value == super::providers::CODEX_OAUTH_ORIGINATOR
+        || value == "codex-tui"
+        || value == "codex_vscode"
+        || value.starts_with("Codex ")
+        || value == "codex_atlas"
+        || value == "codex_chatgpt_desktop"
+}
+
+/// 规范托管 Codex OAuth 请求的来源标识。
+///
+/// 可信本地 Codex 请求只有在恰好携带一个官方 first-party 值时才保留原值；缺失、
+/// 重复、未知值以及 External API/协议转换请求统一回退到官方 CLI 默认值。这样既避免
+/// `originator=cc-switch` 触发模型准入差异，也不会把 Desktop/VS Code 误报成 CLI。
+fn enforce_codex_oauth_originator(
+    headers: &mut http::HeaderMap,
+    is_codex_oauth: bool,
+    preserve_client_originator: bool,
+) {
     if !is_codex_oauth {
         return;
     }
 
+    let originator_name = http::HeaderName::from_static("originator");
+    if preserve_client_originator {
+        let preserved_value = {
+            let mut values = headers.get_all(&originator_name).iter();
+            match (values.next(), values.next()) {
+                (Some(value), None)
+                    if value.to_str().is_ok_and(is_first_party_codex_originator) =>
+                {
+                    Some(value.clone())
+                }
+                _ => None,
+            }
+        };
+        if let Some(value) = preserved_value {
+            headers.insert(originator_name, value);
+            return;
+        }
+    }
+
     headers.insert(
-        http::HeaderName::from_static("originator"),
+        originator_name,
         http::HeaderValue::from_static(super::providers::CODEX_OAUTH_ORIGINATOR),
     );
 }
@@ -4745,6 +4794,7 @@ mod tests {
             current_provider_id_at_start: String::new(),
             session_id: String::new(),
             session_client_provided: false,
+            preserve_codex_client_originator: false,
             rectifier_config: RectifierConfig::default(),
             optimizer_config: OptimizerConfig::default(),
             copilot_optimizer_config: CopilotOptimizerConfig::default(),
@@ -5516,20 +5566,92 @@ mod tests {
     }
 
     #[test]
-    /// OAuth 请求必须覆盖重复或错误来源头，并最终只保留官方 CLI 标识。
-    fn codex_oauth_originator_uses_official_cli_identity() {
+    /// 可信本地 Codex OAuth 请求应保留唯一的官方 first-party 来源。
+    fn codex_oauth_originator_preserves_trusted_first_party_identity() {
         let mut headers = HeaderMap::new();
-        headers.append("originator", HeaderValue::from_static("cc-switch"));
-        headers.append("originator", HeaderValue::from_static("Codex Desktop"));
+        headers.insert("originator", HeaderValue::from_static("Codex Desktop"));
 
-        enforce_codex_oauth_originator(&mut headers, true);
+        enforce_codex_oauth_originator(&mut headers, true, true);
 
         let values = headers
             .get_all("originator")
             .iter()
             .map(|value| value.to_str().expect("valid originator"))
             .collect::<Vec<_>>();
-        assert_eq!(values, vec!["codex_cli_rs"]);
+        assert_eq!(values, vec!["Codex Desktop"]);
+    }
+
+    #[test]
+    /// 官方 CLI、VS Code、TUI 和 ChatGPT Desktop 身份都属于可保留白名单。
+    fn codex_oauth_originator_accepts_official_first_party_values() {
+        for originator in [
+            "codex_cli_rs",
+            "codex_vscode",
+            "codex-tui",
+            "Codex Desktop",
+            "codex_atlas",
+            "codex_chatgpt_desktop",
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "originator",
+                HeaderValue::from_str(originator).expect("valid originator"),
+            );
+
+            enforce_codex_oauth_originator(&mut headers, true, true);
+
+            assert_eq!(
+                headers
+                    .get("originator")
+                    .and_then(|value| value.to_str().ok()),
+                Some(originator)
+            );
+        }
+    }
+
+    #[test]
+    /// 缺失、未知、重复或不在官方 first-party 分类中的来源必须回退到 CLI 默认值。
+    fn codex_oauth_originator_falls_back_for_untrusted_values() {
+        let mut cases = vec![HeaderMap::new()];
+
+        for originator in ["cc-switch", "third-party-client", "codex_exec"] {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "originator",
+                HeaderValue::from_str(originator).expect("valid originator"),
+            );
+            cases.push(headers);
+        }
+
+        let mut duplicate_headers = HeaderMap::new();
+        duplicate_headers.append("originator", HeaderValue::from_static("codex_vscode"));
+        duplicate_headers.append("originator", HeaderValue::from_static("Codex Desktop"));
+        cases.push(duplicate_headers);
+
+        for mut headers in cases {
+            enforce_codex_oauth_originator(&mut headers, true, true);
+
+            let values = headers
+                .get_all("originator")
+                .iter()
+                .map(|value| value.to_str().expect("valid originator"))
+                .collect::<Vec<_>>();
+            assert_eq!(values, vec!["codex_cli_rs"]);
+        }
+    }
+
+    #[test]
+    /// External API 和协议转换请求即使伪造官方来源，也只能使用受控 CLI 回退值。
+    fn codex_oauth_originator_does_not_preserve_external_identity() {
+        let mut headers = HeaderMap::new();
+        headers.insert("originator", HeaderValue::from_static("Codex Desktop"));
+
+        enforce_codex_oauth_originator(&mut headers, true, false);
+
+        assert_eq!(
+            headers.get("originator"),
+            Some(&HeaderValue::from_static("codex_cli_rs"))
+        );
     }
 
     #[test]
@@ -5538,7 +5660,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("originator", HeaderValue::from_static("third-party-client"));
 
-        enforce_codex_oauth_originator(&mut headers, false);
+        enforce_codex_oauth_originator(&mut headers, false, true);
 
         assert_eq!(
             headers.get("originator"),

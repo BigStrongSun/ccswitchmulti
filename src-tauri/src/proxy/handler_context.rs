@@ -64,6 +64,11 @@ pub struct RequestContext {
     pub session_id: String,
     /// Session ID 是否由客户端提供。生成的 UUID 不能作为上游缓存 key，否则每个请求都会换 key。
     pub session_client_provided: bool,
+    /// 是否允许保留客户端提供的官方 Codex originator。
+    ///
+    /// 只有本地 Codex 应用入口可以保留；External API 临时 provider 和其他协议转换
+    /// 必须由 forwarder 回退到统一 CLI 标识，避免外部调用方伪造 first-party 身份。
+    pub preserve_codex_client_originator: bool,
     /// 整流器配置
     pub rectifier_config: RectifierConfig,
     /// 优化器配置
@@ -157,6 +162,7 @@ impl RequestContext {
             session_id
         );
 
+        let preserve_codex_client_originator = matches!(app_type, AppType::Codex);
         Ok(Self {
             start_time,
             app_config,
@@ -170,6 +176,7 @@ impl RequestContext {
             app_type,
             session_id,
             session_client_provided: session_result.client_provided,
+            preserve_codex_client_originator,
             rectifier_config,
             optimizer_config,
             copilot_optimizer_config,
@@ -230,6 +237,7 @@ impl RequestContext {
             app_type,
             session_id,
             session_client_provided: session_result.client_provided,
+            preserve_codex_client_originator: false,
             rectifier_config,
             optimizer_config,
             copilot_optimizer_config,
@@ -295,6 +303,7 @@ impl RequestContext {
             self.current_provider_id.clone(),
             self.session_id.clone(),
             self.session_client_provided,
+            self.preserve_codex_client_originator,
             first_byte_timeout,
             idle_timeout,
             self.rectifier_config.clone(),
