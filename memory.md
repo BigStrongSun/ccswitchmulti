@@ -2123,3 +2123,6 @@
 - 发布范围以 `v3.16.5-7..main` 的真实 diff 为准：多设备额度协作、可信 Codex originator 白名单保留与缺失回退、SenseNova Chat 协议根修、停用 route 旧 alias 禁止回官方，以及相关教程和回归测试。
 - `.github/workflows/release.yml` 由 `v*` tag 触发，必须先让 main CI 的 Prettier/rustfmt 门槛通过，再推 annotated tag 到 `fork`；完成后核验 Release 为正式版、矩阵任务成功、跨平台资产和 `latest.json` 齐全。
 - CI 后端测试曾在 UTC runner 上失败：`range_starts_midnight_boundary` 用固定 `UTC+8` 构造样本，但被测函数按运行机器 `Local` 时区分日，导致同一 `UTC+8` 日期在 UTC 下跨日。测试已改为用 `Local` 构造边界样本，保持生产统计按设备本地日历日计算的语义。
+- `v3.16.5-8` 已于 2026-07-14 发布到 `BigStrongSun/ccswitchmulti`：tag 解引用提交为 `27bdcdfa5e3733c0f9cd3fa37bb5192606ba8e23`，Release workflow run `29276721016` 成功，Release 为 `draft=false`、`prerelease=false`。
+- Release 共 19 个资产，覆盖 Windows x64/ARM64 setup 与 portable、macOS dmg/tar.gz/zip、Linux x64/ARM64 AppImage/deb/rpm、5 个 updater 签名文件和 `latest.json`。
+- `latest.json` 验证为 `version=3.16.5-8`，平台键包含 `darwin-aarch64`、`darwin-x86_64`、`windows-x86_64`、`windows-aarch64`、`linux-x86_64`、`linux-aarch64`，每个平台都有下载 URL 和 signature。
