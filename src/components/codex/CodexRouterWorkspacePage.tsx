@@ -2246,6 +2246,30 @@ export function CodexRouterWorkspacePage({
   const modelRefreshTimedOutAttemptKeysRef = useRef<Set<string>>(new Set());
   const queryClient = useQueryClient();
 
+  /// 按下一版启用 Provider 集合同步失效旧刷新，避免路由保存窗口内迟到结果写回旧 catalog。
+  function invalidateModelRefreshesOutside(
+    enabledProviderIds: ReadonlySet<string>,
+  ) {
+    setProviderModelRefreshStates((current) => {
+      const next = Object.fromEntries(
+        Object.entries(current).filter(([providerId]) =>
+          enabledProviderIds.has(providerId),
+        ),
+      );
+      return Object.keys(next).length === Object.keys(current).length
+        ? current
+        : next;
+    });
+    for (const [providerId, attemptKey] of Object.entries(
+      modelRefreshActiveAttemptKeysRef.current,
+    )) {
+      if (enabledProviderIds.has(providerId)) continue;
+      delete modelRefreshActiveAttemptKeysRef.current[providerId];
+      modelRefreshAttemptedKeysRef.current.delete(attemptKey);
+      modelRefreshTimedOutAttemptKeysRef.current.delete(attemptKey);
+    }
+  }
+
   const effectiveProviders = useMemo(() => {
     const optimisticSourceEntries = Object.entries(optimisticModelSourcesById);
     const hasOptimisticSources = optimisticSourceEntries.length > 0;
@@ -2313,6 +2337,12 @@ export function CodexRouterWorkspacePage({
     }
     return ids;
   }, [modelSources, selectedPlanForModelRefresh]);
+
+  // route 停用后立即移除旧刷新卡片，并让进行中的结果失效；同时释放最新去重键，
+  // 保证用户重新启用该 route 时可以重新读取模型，而不是被历史 attempt 永久拦截。
+  useEffect(() => {
+    invalidateModelRefreshesOutside(enabledModelSourceIdsForRefresh);
+  }, [enabledModelSourceIdsForRefresh]);
 
   // 进入路由页时只刷新当前方案已启用的模型源；停用候选不能借刷新副作用
   // 重新进入聚合 catalog，OAuth 与普通 /models 仍共用后续写回事务。
@@ -2747,7 +2777,18 @@ export function CodexRouterWorkspacePage({
         codexRouting: nextRouting,
       },
     };
+    const nextEnabledProviderIds = new Set<string>();
+    for (const route of normalizedRoutes) {
+      if (route.enabled === false) continue;
+      const providerId = routeSemanticProviderId(route, modelSources);
+      if (providerId) nextEnabledProviderIds.add(providerId);
+    }
 
+    // 必须在持久化前同步失效旧 attempt；否则保存等待期间迟到的 /models
+    // 结果仍会按旧 routingPlans 写回 provider 和 plan catalog。
+    invalidateModelRefreshesOutside(nextEnabledProviderIds);
+    setOptimisticRoutingPlan(nextProvider);
+    setSelectedPlanId(plan.id);
     setIsSavingRoutes(true);
     setRoutePickerError(null);
     setRoutePickerMessage(null);
@@ -2769,8 +2810,6 @@ export function CodexRouterWorkspacePage({
         queryKey: ["providers", "codex"],
         type: "active",
       });
-      setOptimisticRoutingPlan(nextProvider);
-      setSelectedPlanId(plan.id);
       setSelectedRouteKey(
         normalizedRoutes[0]?.id ? `${plan.id}:${normalizedRoutes[0].id}` : null,
       );
@@ -2780,6 +2819,8 @@ export function CodexRouterWorkspacePage({
       setRoutePickerSelectAll(false);
       setIsRoutePickerOpen(false);
     } catch (error) {
+      // 保存失败时回滚原方案；启用集合恢复后刷新 effect 会重新读取被失效的 Provider。
+      setOptimisticRoutingPlan(plan);
       setRoutePickerError(
         error instanceof Error ? error.message : String(error),
       );

@@ -359,6 +359,147 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     expect(fetchCodexOauthModels).not.toHaveBeenCalledWith("account-disabled");
   });
 
+  it("clears disabled provider refresh state and refreshes again after re-enabling", async () => {
+    vi.mocked(fetchModelsForConfig).mockImplementation(
+      () => new Promise(() => {}),
+    );
+    const provider: Provider = {
+      id: "toggle-refresh-provider",
+      name: "Toggle Refresh Provider",
+      category: "custom",
+      settingsConfig: {
+        baseUrl: "https://toggle-refresh.example/v1",
+        auth: { OPENAI_API_KEY: "toggle-key" },
+        modelCatalog: { models: [{ model: "toggle-model" }] },
+      },
+    };
+    const basePlan = withEnabledProviderRoute(
+      createDraftRoutingPlan([provider], [provider]),
+      provider,
+    );
+
+    /// 在同一工作台实例中切换 route，覆盖停用状态清理和重新启用刷新。
+    function RefreshToggleHarness() {
+      const [enabled, setEnabled] = React.useState(true);
+      const routes = readCodexRouting(basePlan)?.routes ?? [];
+      const plan: Provider = {
+        ...basePlan,
+        settingsConfig: {
+          ...basePlan.settingsConfig,
+          codexRouting: {
+            ...readCodexRouting(basePlan),
+            enabled: true,
+            routes: routes.map((route) => ({ ...route, enabled })),
+          },
+        },
+      };
+      return React.createElement(
+        React.Fragment,
+        null,
+        React.createElement(
+          "button",
+          { type: "button", onClick: () => setEnabled((value) => !value) },
+          "切换测试路由",
+        ),
+        React.createElement(CodexRouterWorkspacePage, {
+          providers: [provider, plan],
+          isProxyRunning: true,
+          isCodexTakeoverActive: true,
+          activeProviderId: plan.id,
+          initialProviderId: plan.id,
+          initialTab: "routes",
+          onEditProvider: vi.fn(),
+          onDeletePlan: vi.fn(),
+          onCreateProvider: vi.fn(),
+        }),
+      );
+    }
+
+    renderWorkspace(React.createElement(RefreshToggleHarness));
+    await waitFor(() => expect(fetchModelsForConfig).toHaveBeenCalledTimes(1));
+    expect(screen.getByText("正在读取模型列表...")).toBeInTheDocument();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "切换测试路由" }));
+    await waitFor(() =>
+      expect(screen.queryByText("正在读取模型列表...")).not.toBeInTheDocument(),
+    );
+
+    await user.click(screen.getByRole("button", { name: "切换测试路由" }));
+    await waitFor(() => expect(fetchModelsForConfig).toHaveBeenCalledTimes(2));
+  });
+
+  it("invalidates an in-flight refresh before saving a disabled route", async () => {
+    const modelRefresh = createDeferred<FetchedModel[]>();
+    const routeSave = createDeferred<boolean>();
+    vi.mocked(fetchModelsForConfig).mockReturnValue(modelRefresh.promise);
+    const provider: Provider = {
+      id: "save-race-provider",
+      name: "Save Race Provider",
+      category: "custom",
+      settingsConfig: {
+        baseUrl: "https://save-race.example/v1",
+        auth: { OPENAI_API_KEY: "save-race-key" },
+        modelCatalog: { models: [{ model: "old-model" }] },
+      },
+    };
+    const plan = withEnabledProviderRoute(
+      createDraftRoutingPlan([provider], [provider]),
+      provider,
+    );
+    vi.mocked(providersApi.update).mockImplementation((updated) =>
+      updated.id === plan.id ? routeSave.promise : Promise.resolve(true),
+    );
+
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [provider, plan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: plan.id,
+        initialProviderId: plan.id,
+        initialTab: "routes",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+
+    await waitFor(() => expect(fetchModelsForConfig).toHaveBeenCalledTimes(1));
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "编辑匹配规则" }));
+    await user.click(screen.getByRole("button", { name: "已启用" }));
+    await user.click(screen.getByRole("button", { name: "保存规则" }));
+
+    await waitFor(() => {
+      const savedPlan = vi
+        .mocked(providersApi.update)
+        .mock.calls.map(([updated]) => updated)
+        .find((updated) => updated.id === plan.id);
+      expect(savedPlan).toBeDefined();
+      if (!savedPlan) throw new Error("未捕获到停用 route 的保存请求");
+      expect(readCodexRouting(savedPlan)?.routes?.[0]?.enabled).toBe(false);
+      expect(savedPlan.settingsConfig?.modelCatalog?.models).toEqual([]);
+    });
+
+    await act(async () => {
+      modelRefresh.resolve([
+        { id: "late-model", ownedBy: "save-race", contextWindow: 128000 },
+      ]);
+      await Promise.resolve();
+    });
+    expect(
+      vi
+        .mocked(providersApi.update)
+        .mock.calls.some(([updated]) => updated.id === provider.id),
+    ).toBe(false);
+
+    await act(async () => {
+      routeSave.resolve(true);
+      await Promise.resolve();
+    });
+  });
+
   it("refreshes and migrates a legacy inline OAuth route without targetProviderId", async () => {
     vi.mocked(fetchCodexOauthModels).mockResolvedValue([
       { id: "gpt-5.5", ownedBy: "openai", contextWindow: 272000 },

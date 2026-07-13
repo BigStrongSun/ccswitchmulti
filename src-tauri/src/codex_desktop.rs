@@ -1505,11 +1505,6 @@ fn collect_windowsapps_codex_executable_candidates(candidates: &mut Vec<(Vec<u32
     }
 }
 
-#[cfg(not(target_os = "windows"))]
-fn find_latest_windows_codex_executable() -> Option<PathBuf> {
-    None
-}
-
 /// `Get-AppxPackage` 返回的 Codex Windows App 安装摘要。
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 #[derive(Debug, Deserialize)]
