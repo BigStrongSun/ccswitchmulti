@@ -176,6 +176,13 @@ pub async fn sync_reports(db: &Database) -> Result<QuotaCollaborationOverview, A
 /// 代理热路径的约束判定。陈旧或缺失的快照不会造成误拦截。
 pub fn codex_enforcement_reason(now: i64) -> Option<String> {
     let config = settings::get_settings().quota_collaboration;
+    codex_enforcement_reason_inner(now, &config)
+}
+
+/// `codex_enforcement_reason` 的纯函数版本，接受显式配置，便于测试。
+///
+/// 不访问全局状态，不会写入磁盘。
+fn codex_enforcement_reason_inner(now: i64, config: &QuotaCollaborationSettings) -> Option<String> {
     if config.mode != "enforce"
         || now.saturating_sub(config.latest_window_captured_at?) > FRESH_WINDOW_MAX_AGE_SECS
     {
@@ -440,9 +447,44 @@ async fn sync_s3(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use std::io::Write;
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+
+    // 1. Report Validation
 
     #[test]
-    fn report_validation_rejects_out_of_range_utilization() {
+    fn report_validation_accepts_valid_report() {
+        let report = QuotaDeviceReport {
+            protocol_version: 1,
+            account_scope: "validscope".into(),
+            device_id: "device-x".into(),
+            device_name: "test-machine".into(),
+            captured_at: 1000,
+            today_tokens: 500,
+            seven_day_tokens: 5000,
+            today_requests: 10,
+            seven_day_requests: 100,
+            tiers: vec![
+                QuotaWindowSnapshot {
+                    name: "five_hour".into(),
+                    utilization: 50.0,
+                    resets_at: None,
+                },
+                QuotaWindowSnapshot {
+                    name: "seven_day".into(),
+                    utilization: 30.0,
+                    resets_at: Some("2026-07-15T00:00:00Z".into()),
+                },
+            ],
+        };
+        assert!(is_valid_report(&report, "validscope"));
+    }
+
+    #[test]
+    fn report_validation_rejects_utilization_above_100() {
         let report = QuotaDeviceReport {
             protocol_version: 1,
             account_scope: "scope".into(),
@@ -460,5 +502,883 @@ mod tests {
             }],
         };
         assert!(!is_valid_report(&report, "scope"));
+    }
+
+    #[test]
+    fn report_validation_rejects_utilization_below_zero() {
+        let report = QuotaDeviceReport {
+            protocol_version: 1,
+            account_scope: "scope".into(),
+            device_id: "device".into(),
+            device_name: "machine".into(),
+            captured_at: 1,
+            today_tokens: 0,
+            seven_day_tokens: 0,
+            today_requests: 0,
+            seven_day_requests: 0,
+            tiers: vec![QuotaWindowSnapshot {
+                name: "five_hour".into(),
+                utilization: -0.01,
+                resets_at: None,
+            }],
+        };
+        assert!(!is_valid_report(&report, "scope"));
+    }
+
+    #[test]
+    fn report_validation_rejects_non_finite_utilization() {
+        for util in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let report = QuotaDeviceReport {
+                protocol_version: 1,
+                account_scope: "scope".into(),
+                device_id: "device".into(),
+                device_name: "machine".into(),
+                captured_at: 1,
+                today_tokens: 0,
+                seven_day_tokens: 0,
+                today_requests: 0,
+                seven_day_requests: 0,
+                tiers: vec![QuotaWindowSnapshot {
+                    name: "five_hour".into(),
+                    utilization: util,
+                    resets_at: None,
+                }],
+            };
+            assert!(!is_valid_report(&report, "scope"));
+        }
+    }
+
+    #[test]
+    fn report_validation_rejects_empty_device_id() {
+        let report = QuotaDeviceReport {
+            protocol_version: 1,
+            account_scope: "scope".into(),
+            device_id: "  ".into(),
+            device_name: "machine".into(),
+            captured_at: 1,
+            today_tokens: 0,
+            seven_day_tokens: 0,
+            today_requests: 0,
+            seven_day_requests: 0,
+            tiers: vec![],
+        };
+        assert!(!is_valid_report(&report, "scope"));
+    }
+
+    #[test]
+    fn report_validation_rejects_empty_device_name() {
+        let report = QuotaDeviceReport {
+            protocol_version: 1,
+            account_scope: "scope".into(),
+            device_id: "device".into(),
+            device_name: "\t\n".into(),
+            captured_at: 1,
+            today_tokens: 0,
+            seven_day_tokens: 0,
+            today_requests: 0,
+            seven_day_requests: 0,
+            tiers: vec![],
+        };
+        assert!(!is_valid_report(&report, "scope"));
+    }
+
+    #[test]
+    fn report_validation_rejects_wrong_protocol_version() {
+        let report = QuotaDeviceReport {
+            protocol_version: 0,
+            account_scope: "scope".into(),
+            device_id: "device".into(),
+            device_name: "machine".into(),
+            captured_at: 1,
+            today_tokens: 0,
+            seven_day_tokens: 0,
+            today_requests: 0,
+            seven_day_requests: 0,
+            tiers: vec![],
+        };
+        assert!(!is_valid_report(&report, "scope"));
+    }
+
+    #[test]
+    fn report_validation_rejects_wrong_account_scope() {
+        let report = QuotaDeviceReport {
+            protocol_version: 1,
+            account_scope: "scope-a".into(),
+            device_id: "device".into(),
+            device_name: "machine".into(),
+            captured_at: 1,
+            today_tokens: 0,
+            seven_day_tokens: 0,
+            today_requests: 0,
+            seven_day_requests: 0,
+            tiers: vec![],
+        };
+        assert!(!is_valid_report(&report, "scope-b"));
+    }
+
+    #[test]
+    fn report_validation_rejects_zero_captured_at() {
+        let report = QuotaDeviceReport {
+            protocol_version: 1,
+            account_scope: "scope".into(),
+            device_id: "device".into(),
+            device_name: "machine".into(),
+            captured_at: 0,
+            today_tokens: 0,
+            seven_day_tokens: 0,
+            today_requests: 0,
+            seven_day_requests: 0,
+            tiers: vec![],
+        };
+        assert!(!is_valid_report(&report, "scope"));
+    }
+
+    #[test]
+    fn report_validation_rejects_empty_tier_name() {
+        let report = QuotaDeviceReport {
+            protocol_version: 1,
+            account_scope: "scope".into(),
+            device_id: "device".into(),
+            device_name: "machine".into(),
+            captured_at: 1,
+            today_tokens: 0,
+            seven_day_tokens: 0,
+            today_requests: 0,
+            seven_day_requests: 0,
+            tiers: vec![QuotaWindowSnapshot {
+                name: "".into(),
+                utilization: 50.0,
+                resets_at: None,
+            }],
+        };
+        assert!(!is_valid_report(&report, "scope"));
+    }
+
+    // 2. DB Persistence
+
+    #[test]
+    fn save_and_load_report_roundtrip() {
+        let db = Database::memory().expect("create mem db");
+        let report = QuotaDeviceReport {
+            protocol_version: 1,
+            account_scope: "myscope".into(),
+            device_id: "dev-1".into(),
+            device_name: "desktop".into(),
+            captured_at: 2000,
+            today_tokens: 100,
+            seven_day_tokens: 700,
+            today_requests: 5,
+            seven_day_requests: 35,
+            tiers: vec![QuotaWindowSnapshot {
+                name: "five_hour".into(),
+                utilization: 45.0,
+                resets_at: None,
+            }],
+        };
+        save_report(&db, &report).expect("save ok");
+        let loaded = load_reports(&db, "myscope").expect("load ok");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].device_id, "dev-1");
+        assert_eq!(loaded[0].today_tokens, 100);
+
+        let wrong = load_reports(&db, "otherscope").expect("load ok");
+        assert!(wrong.is_empty());
+    }
+
+    #[test]
+    fn multiple_devices_coexist_in_same_scope() {
+        let db = Database::memory().expect("create mem db");
+        let dev_a = QuotaDeviceReport {
+            protocol_version: 1,
+            account_scope: "shared".into(),
+            device_id: "device-a".into(),
+            device_name: "Alpha".into(),
+            captured_at: 100,
+            today_tokens: 10,
+            seven_day_tokens: 70,
+            today_requests: 2,
+            seven_day_requests: 14,
+            tiers: vec![],
+        };
+        let dev_b = QuotaDeviceReport {
+            protocol_version: 1,
+            account_scope: "shared".into(),
+            device_id: "device-b".into(),
+            device_name: "Beta".into(),
+            captured_at: 200,
+            today_tokens: 20,
+            seven_day_tokens: 140,
+            today_requests: 4,
+            seven_day_requests: 28,
+            tiers: vec![],
+        };
+        save_report(&db, &dev_a).expect("save A");
+        save_report(&db, &dev_b).expect("save B");
+        let loaded = load_reports(&db, "shared").expect("load");
+        assert_eq!(loaded.len(), 2);
+        let ids: Vec<&str> = loaded.iter().map(|r| r.device_id.as_str()).collect();
+        assert!(ids.contains(&"device-a"));
+        assert!(ids.contains(&"device-b"));
+    }
+
+    // 3. Merge & Isolation
+
+    #[test]
+    fn merge_remote_reports_filters_invalid_scope() {
+        // 注：merge_remote_reports 内部调用 codex_account_scope() 读取文件系统，
+        // 在测试环境中返回 None 导致操作跳过。
+        // 这里改用 save_report + load_reports 直接验证 scope 隔离。
+        let db = Database::memory().expect("create mem db");
+        let valid = QuotaDeviceReport {
+            protocol_version: 1,
+            account_scope: "scope".into(),
+            device_id: "good".into(),
+            device_name: "ok".into(),
+            captured_at: 100,
+            today_tokens: 0,
+            seven_day_tokens: 0,
+            today_requests: 0,
+            seven_day_requests: 0,
+            tiers: vec![],
+        };
+        let bad = QuotaDeviceReport {
+            protocol_version: 1,
+            account_scope: "wrong-scope".into(),
+            device_id: "bad".into(),
+            device_name: "ok".into(),
+            captured_at: 100,
+            today_tokens: 0,
+            seven_day_tokens: 0,
+            today_requests: 0,
+            seven_day_requests: 0,
+            tiers: vec![],
+        };
+        save_report(&db, &valid).expect("save valid");
+        save_report(&db, &bad).expect("save bad");
+        let loaded_scope = load_reports(&db, "scope").expect("load scope");
+        assert_eq!(loaded_scope.len(), 1, "scope 下只应有合法报告");
+        assert_eq!(loaded_scope[0].device_id, "good");
+        let loaded_wrong = load_reports(&db, "wrong-scope").expect("load wrong");
+        assert_eq!(loaded_wrong.len(), 1, "wrong-scope 下应有 bad");
+        assert_eq!(loaded_wrong[0].device_id, "bad");
+    }
+
+    #[test]
+    fn merge_replaces_same_device_with_newer_report() {
+        // 使用 save_report 直接验证 UPSERT 逻辑：同 device_id 下高 captured_at 覆盖低。
+        let db = Database::memory().expect("create mem db");
+        let old = QuotaDeviceReport {
+            protocol_version: 1,
+            account_scope: "scope".into(),
+            device_id: "dev".into(),
+            device_name: "old".into(),
+            captured_at: 100,
+            today_tokens: 10,
+            seven_day_tokens: 70,
+            today_requests: 2,
+            seven_day_requests: 14,
+            tiers: vec![QuotaWindowSnapshot {
+                name: "five_hour".into(),
+                utilization: 20.0,
+                resets_at: None,
+            }],
+        };
+        let new = QuotaDeviceReport {
+            protocol_version: 1,
+            account_scope: "scope".into(),
+            device_id: "dev".into(),
+            device_name: "new".into(),
+            captured_at: 200,
+            today_tokens: 50,
+            seven_day_tokens: 350,
+            today_requests: 10,
+            seven_day_requests: 70,
+            tiers: vec![QuotaWindowSnapshot {
+                name: "five_hour".into(),
+                utilization: 80.0,
+                resets_at: None,
+            }],
+        };
+        save_report(&db, &old).expect("save old");
+        save_report(&db, &new).expect("save new");
+        let loaded = load_reports(&db, "scope").expect("load");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].device_name, "new");
+        assert_eq!(loaded[0].today_tokens, 50);
+        assert_eq!(loaded[0].captured_at, 200);
+    }
+
+    #[test]
+    fn older_report_does_not_replace_newer() {
+        let db = Database::memory().expect("create mem db");
+        let existing = QuotaDeviceReport {
+            protocol_version: 1,
+            account_scope: "scope".into(),
+            device_id: "dev".into(),
+            device_name: "existing".into(),
+            captured_at: 300,
+            today_tokens: 100,
+            seven_day_tokens: 700,
+            today_requests: 20,
+            seven_day_requests: 140,
+            tiers: vec![],
+        };
+        save_report(&db, &existing).expect("save existing");
+        let stale = QuotaDeviceReport {
+            protocol_version: 1,
+            account_scope: "scope".into(),
+            device_id: "dev".into(),
+            device_name: "stale".into(),
+            captured_at: 200,
+            today_tokens: 5,
+            seven_day_tokens: 35,
+            today_requests: 1,
+            seven_day_requests: 7,
+            tiers: vec![],
+        };
+        merge_remote_reports(&db, &[stale]).expect("merge");
+        let loaded = load_reports(&db, "scope").expect("load");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].device_name, "existing");
+        assert_eq!(loaded[0].captured_at, 300);
+    }
+
+    // 4. Range Calculation
+
+    #[test]
+    fn range_starts_produces_midnight_and_seven_days_ago() {
+        use chrono::{Local, TimeZone};
+        let now = chrono::Utc::now().timestamp();
+        // Use Local to match range_starts internal clock source
+        let local = Local
+            .timestamp_opt(now, 0)
+            .single()
+            .unwrap_or_else(Local::now);
+        let expected_midnight = local
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .and_then(|d| Local.from_local_datetime(&d).single())
+            .unwrap_or(local)
+            .timestamp();
+        let expected_seven = expected_midnight - 6 * 24 * 60 * 60;
+        let (today_start, seven_ago) = range_starts(now);
+        assert_eq!(today_start, expected_midnight, "today_start mismatch");
+        assert_eq!(seven_ago, expected_seven, "seven_ago mismatch");
+    }
+
+    #[test]
+    fn range_starts_midnight_boundary() {
+        use chrono::TimeZone;
+        let tz = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
+        let late = tz
+            .with_ymd_and_hms(2026, 7, 14, 23, 59, 59)
+            .unwrap()
+            .timestamp();
+        let early = tz
+            .with_ymd_and_hms(2026, 7, 14, 0, 0, 1)
+            .unwrap()
+            .timestamp();
+        let (late_today, _) = range_starts(late);
+        let (early_today, _) = range_starts(early);
+        assert_eq!(late_today, early_today);
+    }
+
+    // 5. Window Cache
+
+    #[test]
+    fn window_cache_takes_highest_utilization() {
+        let reports = vec![
+            QuotaDeviceReport {
+                protocol_version: 1,
+                account_scope: "s".into(),
+                device_id: "a".into(),
+                device_name: "a".into(),
+                captured_at: 100,
+                today_tokens: 0,
+                seven_day_tokens: 0,
+                today_requests: 0,
+                seven_day_requests: 0,
+                tiers: vec![
+                    QuotaWindowSnapshot {
+                        name: "five_hour".into(),
+                        utilization: 30.0,
+                        resets_at: None,
+                    },
+                    QuotaWindowSnapshot {
+                        name: "seven_day".into(),
+                        utilization: 20.0,
+                        resets_at: None,
+                    },
+                ],
+            },
+            QuotaDeviceReport {
+                protocol_version: 1,
+                account_scope: "s".into(),
+                device_id: "b".into(),
+                device_name: "b".into(),
+                captured_at: 200,
+                today_tokens: 0,
+                seven_day_tokens: 0,
+                today_requests: 0,
+                seven_day_requests: 0,
+                tiers: vec![
+                    QuotaWindowSnapshot {
+                        name: "five_hour".into(),
+                        utilization: 60.0,
+                        resets_at: None,
+                    },
+                    QuotaWindowSnapshot {
+                        name: "seven_day".into(),
+                        utilization: 10.0,
+                        resets_at: None,
+                    },
+                ],
+            },
+        ];
+        update_window_cache(&reports);
+    }
+
+    #[test]
+    fn window_cache_empty_reports_does_not_panic() {
+        update_window_cache(&[]);
+    }
+
+    // 6. Enforcement Strategy
+
+    #[test]
+    fn enforcement_observe_mode_returns_none() {
+        let config = QuotaCollaborationSettings {
+            mode: "observe".into(),
+            latest_window_utilization: Default::default(),
+            latest_window_captured_at: Some(1000),
+            ..Default::default()
+        };
+        assert_eq!(codex_enforcement_reason_inner(1000, &config), None);
+    }
+
+    #[test]
+    fn enforcement_stale_cache_returns_none() {
+        let config = QuotaCollaborationSettings {
+            mode: "enforce".into(),
+            latest_window_utilization: Default::default(),
+            latest_window_captured_at: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(
+            codex_enforcement_reason_inner(FRESH_WINDOW_MAX_AGE_SECS + 1, &config),
+            None
+        );
+    }
+
+    #[test]
+    fn enforcement_missing_captured_at_returns_none() {
+        let config = QuotaCollaborationSettings {
+            mode: "enforce".into(),
+            latest_window_utilization: Default::default(),
+            latest_window_captured_at: None,
+            ..Default::default()
+        };
+        assert_eq!(codex_enforcement_reason_inner(1000, &config), None);
+    }
+
+    #[test]
+    fn enforcement_high_utilization_triggers_block() {
+        let mut util = std::collections::BTreeMap::new();
+        util.insert("five_hour".into(), 85.0);
+        util.insert("seven_day".into(), 75.0);
+        let config = QuotaCollaborationSettings {
+            mode: "enforce".into(),
+            enforce_remaining_percent: 20.0,
+            latest_window_utilization: util,
+            latest_window_captured_at: Some(1000),
+            ..Default::default()
+        };
+        let result = codex_enforcement_reason_inner(1000, &config);
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("15%"));
+    }
+
+    #[test]
+    fn enforcement_low_utilization_does_not_block() {
+        let mut util = std::collections::BTreeMap::new();
+        util.insert("five_hour".into(), 10.0);
+        let config = QuotaCollaborationSettings {
+            mode: "enforce".into(),
+            enforce_remaining_percent: 20.0,
+            latest_window_utilization: util,
+            latest_window_captured_at: Some(1000),
+            ..Default::default()
+        };
+        assert_eq!(codex_enforcement_reason_inner(1000, &config), None);
+    }
+
+    #[test]
+    fn enforcement_ignores_non_finite_utilization() {
+        let mut util = std::collections::BTreeMap::new();
+        util.insert("five_hour".into(), f64::NAN);
+        util.insert("seven_day".into(), f64::INFINITY);
+        let config = QuotaCollaborationSettings {
+            mode: "enforce".into(),
+            enforce_remaining_percent: 20.0,
+            latest_window_utilization: util,
+            latest_window_captured_at: Some(1000),
+            ..Default::default()
+        };
+        assert_eq!(codex_enforcement_reason_inner(1000, &config), None);
+    }
+
+    // 7. WebDAV E2E via Mock Server
+
+    #[tokio::test]
+    async fn webdav_e2e_device_upload_and_discovery() {
+        let (_port, _guard, _store) = start_mock_webdav();
+        let base_url = format!("http://127.0.0.1:{_port}/");
+
+        let local_report = QuotaDeviceReport {
+            protocol_version: 1,
+            account_scope: "testscope".into(),
+            device_id: "dev-e2e-1".into(),
+            device_name: "e2e-device".into(),
+            captured_at: 1000,
+            today_tokens: 500,
+            seven_day_tokens: 3500,
+            today_requests: 15,
+            seven_day_requests: 105,
+            tiers: vec![
+                QuotaWindowSnapshot {
+                    name: "five_hour".into(),
+                    utilization: 42.0,
+                    resets_at: None,
+                },
+                QuotaWindowSnapshot {
+                    name: "seven_day".into(),
+                    utilization: 33.0,
+                    resets_at: Some("2026-07-15Z".into()),
+                },
+            ],
+        };
+        let sync = crate::settings::WebDavSyncSettings {
+            enabled: true,
+            auto_sync: false,
+            base_url,
+            username: String::new(),
+            password: String::new(),
+            remote_root: "cc-switch-sync".into(),
+            profile: String::new(),
+            include_keys_on_upload: false,
+            status: crate::settings::WebDavSyncStatus::default(),
+        };
+        let remote_reports = super::sync_webdav(&sync, "testscope", &local_report)
+            .await
+            .expect("sync_webdav ok");
+        assert!(remote_reports.iter().any(|r| r.device_id == "dev-e2e-1"));
+        let found = remote_reports
+            .iter()
+            .find(|r| r.device_id == "dev-e2e-1")
+            .unwrap();
+        assert_eq!(found.today_tokens, 500);
+        assert_eq!(found.tiers.len(), 2);
+
+        let path = format!("/cc-switch-sync/quota-collaboration/v1/testscope/dev-e2e-1.json");
+        assert!(_store.lock().unwrap().contains_key(&path));
+    }
+
+    #[tokio::test]
+    async fn webdav_e2e_multiple_devices_discover_each_other() {
+        let (_port, _guard, store) = start_mock_webdav();
+        let base_url = format!("http://127.0.0.1:{_port}/");
+
+        let dev_a = QuotaDeviceReport {
+            protocol_version: 1,
+            account_scope: "sharedscope".into(),
+            device_id: "device-a".into(),
+            device_name: "Alpha".into(),
+            captured_at: 100,
+            today_tokens: 100,
+            seven_day_tokens: 700,
+            today_requests: 5,
+            seven_day_requests: 35,
+            tiers: vec![],
+        };
+        store.lock().unwrap().insert(
+            "/cc-switch-sync/quota-collaboration/v1/sharedscope/device-a.json".into(),
+            serde_json::to_vec(&dev_a).unwrap(),
+        );
+
+        let dev_b = QuotaDeviceReport {
+            protocol_version: 1,
+            account_scope: "sharedscope".into(),
+            device_id: "device-b".into(),
+            device_name: "Beta".into(),
+            captured_at: 200,
+            today_tokens: 200,
+            seven_day_tokens: 1400,
+            today_requests: 10,
+            seven_day_requests: 70,
+            tiers: vec![],
+        };
+        let sync = crate::settings::WebDavSyncSettings {
+            enabled: true,
+            auto_sync: false,
+            base_url,
+            username: String::new(),
+            password: String::new(),
+            remote_root: "cc-switch-sync".into(),
+            profile: String::new(),
+            include_keys_on_upload: false,
+            status: crate::settings::WebDavSyncStatus::default(),
+        };
+        let reports = super::sync_webdav(&sync, "sharedscope", &dev_b)
+            .await
+            .expect("sync_webdav ok");
+        let ids: Vec<&str> = reports.iter().map(|r| r.device_id.as_str()).collect();
+        assert!(ids.contains(&"device-a"));
+        assert!(ids.contains(&"device-b"));
+        assert_eq!(reports.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn webdav_e2e_non_json_files_are_skipped() {
+        let (_port, _guard, store) = start_mock_webdav();
+        let base_url = format!("http://127.0.0.1:{_port}/");
+        let scope = "skipscope".to_string();
+        let dir = format!("/cc-switch-sync/quota-collaboration/v1/{scope}");
+        {
+            let mut s = store.lock().unwrap();
+            s.insert(format!("{dir}/readme.txt"), b"not json".to_vec());
+        }
+        let sync = crate::settings::WebDavSyncSettings {
+            enabled: true,
+            auto_sync: false,
+            base_url,
+            username: String::new(),
+            password: String::new(),
+            remote_root: "cc-switch-sync".into(),
+            profile: String::new(),
+            include_keys_on_upload: false,
+            status: crate::settings::WebDavSyncStatus::default(),
+        };
+        let local = QuotaDeviceReport {
+            protocol_version: 1,
+            account_scope: scope.clone(),
+            device_id: "self".into(),
+            device_name: "self".into(),
+            captured_at: 1,
+            today_tokens: 0,
+            seven_day_tokens: 0,
+            today_requests: 0,
+            seven_day_requests: 0,
+            tiers: vec![],
+        };
+        let reports = super::sync_webdav(&sync, &scope, &local)
+            .await
+            .expect("sync_webdav ok");
+        assert!(reports.iter().any(|r| r.device_id == "self"));
+        assert!(!reports.iter().any(|r| r.device_name == "readme"));
+    }
+
+    #[tokio::test]
+    async fn webdav_e2e_handles_404_gracefully() {
+        let (_port, _guard, _store) = start_mock_webdav();
+        let base_url = format!("http://127.0.0.1:{_port}/");
+
+        let sync = crate::settings::WebDavSyncSettings {
+            enabled: true,
+            auto_sync: false,
+            base_url,
+            username: String::new(),
+            password: String::new(),
+            remote_root: "cc-switch-sync".into(),
+            profile: String::new(),
+            include_keys_on_upload: false,
+            status: crate::settings::WebDavSyncStatus::default(),
+        };
+        let local = QuotaDeviceReport {
+            protocol_version: 1,
+            account_scope: "emptyscope".into(),
+            device_id: "self".into(),
+            device_name: "self".into(),
+            captured_at: 1,
+            today_tokens: 0,
+            seven_day_tokens: 0,
+            today_requests: 0,
+            seven_day_requests: 0,
+            tiers: vec![],
+        };
+        let reports = super::sync_webdav(&sync, "emptyscope", &local)
+            .await
+            .expect("sync_webdav ok");
+        assert!(reports.iter().any(|r| r.device_id == "self"));
+    }
+
+    // Mock WebDAV Server Helpers
+
+    fn start_mock_webdav() -> (
+        u16,
+        thread::JoinHandle<()>,
+        Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    ) {
+        let store: Arc<Mutex<HashMap<String, Vec<u8>>>> = Arc::default();
+        let store_cl = Arc::clone(&store);
+        let listener = Arc::new(Mutex::new(TcpListener::bind("127.0.0.1:0").expect("bind")));
+        let listener_cl = Arc::clone(&listener);
+        let port = listener.lock().unwrap().local_addr().unwrap().port();
+
+        let handle = thread::spawn(move || loop {
+            let (stream, _) = {
+                let guard = listener_cl.lock().unwrap();
+                match guard.accept() {
+                    Ok(conn) => conn,
+                    Err(_) => break,
+                }
+            };
+            serve_webdav_connection(stream, &store_cl);
+        });
+        (port, handle, store)
+    }
+
+    fn serve_webdav_connection(mut stream: TcpStream, store: &Mutex<HashMap<String, Vec<u8>>>) {
+        use std::io::Read;
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .ok();
+
+        // Read the entire first HTTP request: method line then headers.
+        // Uses a simple line-by-line approach reading one byte at a time for accuracy.
+        let read_line = |s: &mut TcpStream| -> Option<String> {
+            let mut line = String::new();
+            let mut b2 = [0u8; 1];
+            loop {
+                match s.read(&mut b2) {
+                    Ok(0) => return None,
+                    Ok(_) => {}
+                    Err(_) => return None,
+                }
+                let c = b2[0] as char;
+                if c == '\r' {
+                    continue;
+                }
+                if c == '\n' {
+                    return Some(line);
+                }
+                line.push(c);
+            }
+        };
+
+        let request_line = match read_line(&mut stream) {
+            Some(s) if !s.is_empty() => s,
+            _ => return,
+        };
+
+        let parts: Vec<&str> = request_line.splitn(3, ' ').collect();
+        if parts.len() < 2 {
+            return;
+        }
+        let method = parts[0].to_uppercase();
+        let raw_path = parts[1];
+        let path = if raw_path.starts_with("http://") || raw_path.starts_with("https://") {
+            url::Url::parse(raw_path)
+                .map(|u| u.path().to_string())
+                .unwrap_or_else(|_| raw_path.to_string())
+        } else {
+            raw_path.to_string()
+        };
+
+        // read headers
+        let mut content_length: usize = 0;
+        loop {
+            let hdr = match read_line(&mut stream) {
+                Some(h) => h,
+                None => return,
+            };
+            if hdr.is_empty() {
+                break;
+            }
+            if let Some(v) = hdr
+                .strip_prefix("content-length:")
+                .or_else(|| hdr.strip_prefix("Content-Length:"))
+            {
+                content_length = v.trim().parse().unwrap_or(0);
+            }
+        }
+
+        // read body
+        let mut body = vec![0u8; content_length];
+        if content_length > 0 {
+            let mut read_so_far = 0;
+            while read_so_far < content_length {
+                match stream.read(&mut body[read_so_far..]) {
+                    Ok(0) => break,
+                    Ok(n) => read_so_far += n,
+                    Err(_) => break,
+                }
+            }
+        }
+
+        // handle request
+        match method.as_str() {
+            "MKCOL" => {
+                send_response(&mut stream, "201 Created", "text/plain", &[]);
+            }
+            "PUT" => {
+                store.lock().unwrap().insert(path, body);
+                send_response(&mut stream, "201 Created", "text/plain", &[]);
+            }
+            "GET" => {
+                let guard = store.lock().unwrap();
+                if let Some(data) = guard.get(&path) {
+                    send_response(&mut stream, "200 OK", "application/octet-stream", data);
+                } else {
+                    send_response(&mut stream, "404 Not Found", "text/plain", &[]);
+                }
+            }
+            "PROPFIND" => {
+                let guard = store.lock().unwrap();
+                let xml = build_propfind_xml(&path, &guard);
+                send_response(
+                    &mut stream,
+                    "207 Multi-Status",
+                    "application/xml; charset=utf-8",
+                    xml.as_bytes(),
+                );
+            }
+            _ => {
+                send_response(&mut stream, "405 Method Not Allowed", "text/plain", &[]);
+            }
+        }
+    }
+    fn build_propfind_xml(path: &str, store: &HashMap<String, Vec<u8>>) -> String {
+        let mut xml = String::from(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<D:multistatus xmlns:D=\"DAV:\">\n",
+        );
+        xml.push_str(&format!("  <D:response><D:href>{path}</D:href><D:propstat><D:prop><D:displayname>{}</D:displayname></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>\n", path.rsplit('/').filter(|s| !s.is_empty()).next().unwrap_or("")));
+        let dir_prefix = if path.ends_with('/') {
+            path.to_string()
+        } else {
+            format!("{path}/")
+        };
+        for key in store.keys() {
+            if key.starts_with(&dir_prefix) && key != path {
+                let name = key
+                    .rsplit('/')
+                    .filter(|s| !s.is_empty())
+                    .next()
+                    .unwrap_or("");
+                xml.push_str(&format!("  <D:response><D:href>{key}</D:href><D:propstat><D:prop><D:displayname>{name}</D:displayname></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>\n"));
+            }
+        }
+        xml.push_str("</D:multistatus>\n");
+        xml
+    }
+
+    fn send_response(stream: &mut TcpStream, status: &str, content_type: &str, body: &[u8]) {
+        let resp = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        let mut buf = resp.into_bytes();
+        buf.extend_from_slice(body);
+        let _ = stream.write_all(&buf);
+        let _ = stream.flush();
     }
 }

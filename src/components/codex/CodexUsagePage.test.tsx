@@ -1,8 +1,34 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CodexUsagePage } from "./CodexUsagePage";
 import { useSubscriptionQuota } from "@/lib/query/subscription";
-import { useModelStats, useUsageSummary } from "@/lib/query/usage";
+import {
+  useModelStats,
+  useQuotaCollaborationOverview,
+  useSyncQuotaCollaboration,
+  useUsageSummary,
+} from "@/lib/query/usage";
+import { useSettingsQuery } from "@/lib/query";
+import { settingsApi } from "@/lib/api";
+
+const invalidateQueries = vi.fn();
+
+vi.mock("@tanstack/react-query", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@tanstack/react-query")>()),
+  useQueryClient: () => ({ invalidateQueries }),
+}));
+
+vi.mock("@/lib/query", () => ({
+  useSettingsQuery: vi.fn(),
+}));
+
+vi.mock("@/lib/api", () => ({
+  settingsApi: {
+    save: vi.fn(),
+    openExternal: vi.fn(),
+  },
+}));
 
 vi.mock("@/lib/query/subscription", () => ({
   useSubscriptionQuota: vi.fn(),
@@ -11,11 +37,19 @@ vi.mock("@/lib/query/subscription", () => ({
 vi.mock("@/lib/query/usage", () => ({
   useUsageSummary: vi.fn(),
   useModelStats: vi.fn(),
+  useQuotaCollaborationOverview: vi.fn(),
+  useSyncQuotaCollaboration: vi.fn(),
 }));
 
 const mockedUseSubscriptionQuota = vi.mocked(useSubscriptionQuota);
 const mockedUseUsageSummary = vi.mocked(useUsageSummary);
 const mockedUseModelStats = vi.mocked(useModelStats);
+const mockedUseQuotaCollaborationOverview = vi.mocked(
+  useQuotaCollaborationOverview,
+);
+const mockedUseSyncQuotaCollaboration = vi.mocked(useSyncQuotaCollaboration);
+const mockedUseSettingsQuery = vi.mocked(useSettingsQuery);
+const mockedSettingsApi = vi.mocked(settingsApi);
 
 /** 生成测试用的 quota query 返回值，避免每条用例重复声明 React Query 字段。 */
 function mockQuotaResult(data: unknown, isFetching = false) {
@@ -23,6 +57,44 @@ function mockQuotaResult(data: unknown, isFetching = false) {
     data,
     isFetching,
     refetch: vi.fn(),
+  } as any);
+}
+
+/** 提供空的多设备协作数据，保证额度页测试只聚焦声明的场景。 */
+function mockEmptyQuotaCollaboration() {
+  mockedUseQuotaCollaborationOverview.mockReturnValue({
+    data: {
+      configured: false,
+      mode: "observe",
+      enforceRemainingPercent: 20,
+      deviceId: "test-device",
+      reports: [],
+      latestWindowUtilization: {},
+      latestWindowCapturedAt: null,
+      warning: null,
+    },
+    isFetching: false,
+    refetch: vi.fn(),
+  } as any);
+  mockedUseSyncQuotaCollaboration.mockReturnValue({
+    mutateAsync: vi.fn(),
+    isPending: false,
+  } as any);
+}
+
+/** 提供可保存的最小设置，覆盖协作配置的读写路径。 */
+function mockSettings() {
+  mockedUseSettingsQuery.mockReturnValue({
+    data: {
+      quotaCollaboration: {
+        deviceId: "test-device",
+        deviceName: "测试设备",
+        mode: "observe",
+        enforceRemainingPercent: 20,
+        latestWindowUtilization: {},
+        latestWindowCapturedAt: null,
+      },
+    },
   } as any);
 }
 
@@ -54,7 +126,15 @@ describe("CodexUsagePage", () => {
     mockedUseSubscriptionQuota.mockReset();
     mockedUseUsageSummary.mockReset();
     mockedUseModelStats.mockReset();
+    mockedUseQuotaCollaborationOverview.mockReset();
+    mockedUseSyncQuotaCollaboration.mockReset();
+    mockedUseSettingsQuery.mockReset();
+    mockedSettingsApi.save.mockReset();
+    mockedSettingsApi.openExternal.mockReset();
+    invalidateQueries.mockReset();
     mockEmptyLocalUsage();
+    mockEmptyQuotaCollaboration();
+    mockSettings();
   });
 
   it("renders Codex usage windows and banked reset credits", () => {
@@ -184,5 +264,51 @@ describe("CodexUsagePage", () => {
     expect(screen.getByText("gpt-5.6-terra")).toBeInTheDocument();
     expect(screen.getByText("本地日志口径")).toBeInTheDocument();
     expect(screen.getByText(/按当前节奏可能提前耗尽/)).toBeInTheDocument();
+  });
+
+  it("guides an unconfigured device and saves enforce only after acknowledgement", async () => {
+    const user = userEvent.setup();
+    mockedSettingsApi.save.mockResolvedValue(true);
+    mockQuotaResult({
+      tool: "codex",
+      credentialStatus: "valid",
+      credentialMessage: null,
+      success: true,
+      tiers: [],
+      extraUsage: null,
+      resetCredits: null,
+      resetCreditsError: null,
+      error: null,
+      queriedAt: Date.now(),
+    });
+
+    render(<CodexUsagePage />);
+
+    expect(
+      screen.getByText("先在设置中启用 WebDAV 或 S3，才能同步其它设备。"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("1. 每台设备启用相同的 WebDAV 或 S3"),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "约束" }));
+    expect(screen.getByText("启用约束模式？")).toBeInTheDocument();
+    expect(
+      screen.getByText(/未经过 CCSwitchMulti 网关的请求不受此策略控制/),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "我了解，启用约束" }));
+
+    await waitFor(() => {
+      expect(mockedSettingsApi.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          quotaCollaboration: expect.objectContaining({
+            deviceName: "测试设备",
+            mode: "enforce",
+            enforceRemainingPercent: 20,
+          }),
+        }),
+      );
+    });
+    expect(invalidateQueries).toHaveBeenCalledTimes(2);
   });
 });

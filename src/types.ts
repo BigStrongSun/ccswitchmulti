@@ -512,6 +512,9 @@ export interface Settings {
   // ===== S3 同步设置 =====
   s3Sync?: S3SyncSettings;
 
+  // ===== Codex 多设备额度协作设置 =====
+  quotaCollaboration?: QuotaCollaborationSettings;
+
   // ===== 备份策略设置 =====
   // Auto-backup interval in hours (0=disabled, default 24)
   backupIntervalHours?: number;
@@ -535,6 +538,22 @@ export interface Settings {
       migratedStateRows?: number;
     };
   };
+}
+
+/** 多设备额度协作的本机配置，不包含任何 Codex 登录凭据。 */
+export interface QuotaCollaborationSettings {
+  /** 稳定设备标识，由后端生成，不能通过展示页覆盖。 */
+  deviceId: string;
+  /** 用户可识别的设备展示名称。 */
+  deviceName: string;
+  /** observe 仅展示；enforce 只约束经过本机网关的 Codex 请求。 */
+  mode: "observe" | "enforce";
+  /** 官方窗口剩余不高于此百分比时触发本机约束。 */
+  enforceRemainingPercent: number;
+  /** 最近同步的最高官方窗口利用率缓存，仅供后端热路径读取。 */
+  latestWindowUtilization?: Record<string, number>;
+  /** 最近同步官方窗口的 Unix 秒时间戳。 */
+  latestWindowCapturedAt?: number | null;
 }
 
 export interface SessionMeta {

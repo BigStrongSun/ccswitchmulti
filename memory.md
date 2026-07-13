@@ -2104,3 +2104,4 @@
 - `quota_collaboration_reports` 只保存每设备最新脱敏聚合报告。刷新官方 Codex 额度时写入本机报告；“同步设备报告”上传本机文件并合并其它设备。损坏、scope 不匹配或百分比越界的报告必须跳过。
 - `observe` 只看数据。`enforce` 使用最近 10 分钟内、所有已同步设备中每个官方窗口的最高 utilization；窗口剩余不高于阈值时，`RequestForwarder` 只拒绝经过本机 CCSwitchMulti 的 Codex 请求（HTTP 429）。未通过 CCSwitchMulti 的旁路请求无法被控制，任何 UI 或文档不得承诺全账号强制控制。
 - 用户文档位于 `docs/guides/codex-multi-device-quota-collaboration-zh.md`。首次接入必须在每台设备刷新官方额度、设置独立设备名并同步；不要复制 settings/配置目录，否则相同 `deviceId` 会使设备报告互相覆盖。
+- 验证覆盖：`quota_collaboration` 有 29 项 Rust 测试，包含内存 DB 的设备持久化/隔离、observe 和 stale 不拦截、最高官方 utilization 触发约束，以及本地 mock WebDAV 的 MKCOL/PUT/PROPFIND/GET 两设备发现路径；前端 `CodexUsagePage.test.tsx` 覆盖未配置引导、约束确认和设置保存 payload。不要让测试读取真实 `auth.json` 或写入真实 settings。

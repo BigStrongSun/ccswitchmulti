@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import {
   AlertCircle,
   ArrowRight,
@@ -19,8 +19,16 @@ import {
   TrendingUp,
   MonitorSmartphone,
   ShieldCheck,
+  ExternalLink,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { settingsApi } from "@/lib/api";
+import { useSettingsQuery } from "@/lib/query";
+import { useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { useSubscriptionQuota } from "@/lib/query/subscription";
 import {
   useModelStats,
@@ -696,6 +704,70 @@ const QuotaCollaborationPanel: React.FC<{
   onSync: () => void;
   isSyncing: boolean;
 }> = ({ overview, isLoading, onSync, isSyncing }) => {
+  const queryClient = useQueryClient();
+  const { data: settings } = useSettingsQuery();
+  const [deviceName, setDeviceName] = useState("");
+  const [mode, setMode] = useState<"observe" | "enforce">("observe");
+  const [threshold, setThreshold] = useState(20);
+  const [confirmEnforceOpen, setConfirmEnforceOpen] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+
+  /** 以持久化配置为准同步编辑控件，避免概览缓存短暂落后时覆盖用户输入。 */
+  useEffect(() => {
+    if (!settings?.quotaCollaboration) return;
+    const config = settings.quotaCollaboration;
+    setDeviceName(config.deviceName ?? "");
+    setMode(config.mode ?? "observe");
+    setThreshold(
+      Math.min(90, Math.max(1, config.enforceRemainingPercent ?? 20)),
+    );
+  }, [settings?.quotaCollaboration]);
+
+  /** 保存本机协作配置，并让页面同时刷新设置和远端报告缓存。 */
+  const saveCollaborationSettings = async (
+    nextMode: "observe" | "enforce" = mode,
+  ) => {
+    if (!settings) {
+      toast.error("设置尚未加载完成，请稍后重试。");
+      return;
+    }
+    setIsSaving(true);
+    try {
+      const current = settings.quotaCollaboration;
+      await settingsApi.save({
+        ...settings,
+        quotaCollaboration: {
+          deviceId: current?.deviceId ?? overview?.deviceId ?? "",
+          deviceName: deviceName.trim(),
+          mode: nextMode,
+          enforceRemainingPercent: Math.min(90, Math.max(1, threshold)),
+          latestWindowUtilization: current?.latestWindowUtilization ?? {},
+          latestWindowCapturedAt: current?.latestWindowCapturedAt ?? null,
+        },
+      });
+      setMode(nextMode);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["settings"] }),
+        queryClient.invalidateQueries({
+          queryKey: ["usage", "quota-collaboration"],
+        }),
+      ]);
+      toast.success("多设备协作设置已保存。");
+    } catch (error) {
+      toast.error(
+        `保存多设备协作设置失败：${error instanceof Error ? error.message : "未知错误"}`,
+      );
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  /** 在用户确认边界后才写入 enforce，防止误以为它能控制旁路流量。 */
+  const confirmEnforce = () => {
+    setConfirmEnforceOpen(false);
+    void saveCollaborationSettings("enforce");
+  };
+
   if (isLoading && !overview) {
     return (
       <section className={`rounded-lg border p-5 ${USAGE_PAGE_COLORS.card}`}>
@@ -758,6 +830,134 @@ const QuotaCollaborationPanel: React.FC<{
           同步设备报告
         </Button>
       </div>
+
+      <div className={`mt-4 rounded-md border p-3 ${USAGE_PAGE_COLORS.inset}`}>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h4 className="text-sm font-semibold text-foreground">协作设置</h4>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              每台设备都使用同一 WebDAV 或 S3 目录；设备名称只影响列表显示。
+            </p>
+          </div>
+          <Button
+            type="button"
+            size="icon"
+            variant="ghost"
+            aria-label="打开多设备协作教程"
+            title="打开多设备协作教程"
+            onClick={() =>
+              void settingsApi.openExternal(
+                "https://github.com/BigStrongSun/ccswitchmulti/blob/main/docs/guides/codex-multi-device-quota-collaboration-zh.md",
+              )
+            }
+          >
+            <ExternalLink className="h-4 w-4" />
+          </Button>
+        </div>
+        <div className="mt-3 grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]">
+          <div className="space-y-1.5">
+            <Label htmlFor="quota-collaboration-device-name">设备名称</Label>
+            <Input
+              id="quota-collaboration-device-name"
+              value={deviceName}
+              maxLength={64}
+              placeholder="例如：办公室 Windows"
+              onChange={(event) => setDeviceName(event.target.value)}
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label>协作模式</Label>
+            <div className="flex rounded-md border p-1">
+              <Button
+                type="button"
+                size="sm"
+                variant={mode === "observe" ? "default" : "ghost"}
+                onClick={() => setMode("observe")}
+              >
+                观测
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant={mode === "enforce" ? "default" : "ghost"}
+                onClick={() => {
+                  if (mode !== "enforce") setConfirmEnforceOpen(true);
+                }}
+              >
+                约束
+              </Button>
+            </div>
+          </div>
+        </div>
+        {mode === "enforce" ? (
+          <div className="mt-3 grid gap-2 md:grid-cols-[minmax(0,1fr)_96px] md:items-end">
+            <div className="space-y-1.5">
+              <Label htmlFor="quota-collaboration-threshold">
+                窗口剩余阈值
+              </Label>
+              <input
+                id="quota-collaboration-threshold"
+                className="h-2 w-full cursor-pointer accent-amber-600"
+                type="range"
+                min="1"
+                max="90"
+                value={threshold}
+                onChange={(event) => setThreshold(Number(event.target.value))}
+              />
+            </div>
+            <Input
+              aria-label="窗口剩余阈值百分比"
+              type="number"
+              min="1"
+              max="90"
+              value={threshold}
+              onChange={(event) =>
+                setThreshold(
+                  Math.min(90, Math.max(1, Number(event.target.value) || 1)),
+                )
+              }
+            />
+          </div>
+        ) : null}
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <Button
+            type="button"
+            size="sm"
+            onClick={() => void saveCollaborationSettings()}
+            disabled={!settings || isSaving}
+          >
+            {isSaving ? "保存中..." : "保存协作设置"}
+          </Button>
+          {!overview?.configured ? (
+            <span className="text-xs text-amber-700 dark:text-amber-300">
+              先在设置中启用 WebDAV 或 S3，才能同步其它设备。
+            </span>
+          ) : null}
+        </div>
+      </div>
+
+      <ol className="mt-4 grid gap-2 text-xs text-muted-foreground sm:grid-cols-2">
+        <li
+          className={`rounded-md border px-3 py-2 ${USAGE_PAGE_COLORS.inset}`}
+        >
+          1. 每台设备启用相同的 WebDAV 或 S3
+        </li>
+        <li
+          className={`rounded-md border px-3 py-2 ${USAGE_PAGE_COLORS.inset}`}
+        >
+          2. 每台设备刷新一次官方额度
+        </li>
+        <li
+          className={`rounded-md border px-3 py-2 ${USAGE_PAGE_COLORS.inset}`}
+        >
+          3. 分别点击同步设备报告
+        </li>
+        <li
+          className={`rounded-md border px-3 py-2 ${USAGE_PAGE_COLORS.inset}`}
+        >
+          4. 返回任意设备确认列表已汇总
+        </li>
+      </ol>
 
       {overview?.warning ? (
         <div
@@ -823,6 +1023,18 @@ const QuotaCollaborationPanel: React.FC<{
           ? `窗口剩余不高于 ${Math.round(overview?.enforceRemainingPercent ?? 20)}% 时，本机网关会拒绝继续转发 Codex 请求。未经过 CCSwitchMulti 的原生 Codex App 仍不受此策略控制。`
           : "观测模式不会拦截请求。约束模式只对经过 CCSwitchMulti 网关的实例生效。"}
       </div>
+      <ConfirmDialog
+        isOpen={confirmEnforceOpen}
+        title="启用约束模式？"
+        message={
+          "当官方窗口剩余不高于阈值时，本机 CCSwitchMulti 网关会拒绝继续转发 Codex 请求。\n\n直接使用原生 Codex App、CLI 或其它未经过 CCSwitchMulti 网关的请求不受此策略控制，仍会消耗同一账号额度。"
+        }
+        confirmText="我了解，启用约束"
+        cancelText="保持观测"
+        variant="info"
+        onConfirm={confirmEnforce}
+        onCancel={() => setConfirmEnforceOpen(false)}
+      />
     </section>
   );
 };
@@ -1038,7 +1250,11 @@ export const CodexUsagePage: React.FC = () => {
             isLoading={isQuotaCollaborationFetching}
             isSyncing={syncQuotaCollaboration.isPending}
             onSync={() => {
-              void syncQuotaCollaboration.mutateAsync();
+              void syncQuotaCollaboration.mutateAsync().catch((error) => {
+                toast.error(
+                  `同步设备报告失败：${error instanceof Error ? error.message : "请检查 WebDAV 或 S3 配置。"}`,
+                );
+              });
             }}
           />
 
