@@ -711,8 +711,7 @@ fn codex_model_is_declared_only_by_disabled_route(
     request_model: &str,
 ) -> bool {
     routes.iter().any(|route| {
-        !codex_route_is_enabled(route)
-            && codex_route_has_exact_model_match(route, request_model)
+        !codex_route_is_enabled(route) && codex_route_has_exact_model_match(route, request_model)
     })
 }
 
@@ -3286,8 +3285,14 @@ wire_api = "chat"
         )
         .expect("relay request should resolve");
 
-        assert_eq!(codex_route_target_provider_id(&official), Some("codex-official"));
-        assert_eq!(codex_route_target_provider_id(&relay), Some("relay-provider"));
+        assert_eq!(
+            codex_route_target_provider_id(&official),
+            Some("codex-official")
+        );
+        assert_eq!(
+            codex_route_target_provider_id(&relay),
+            Some("relay-provider")
+        );
         assert_eq!(
             relay.settings_config["codexResolvedUpstreamModelOverride"],
             "deepseek-v4-flash"

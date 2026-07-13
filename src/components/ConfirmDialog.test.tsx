@@ -54,7 +54,7 @@ describe("ConfirmDialog 层级行为回归测试", () => {
   });
 
   /** 显式 zIndex 应当覆盖上下文提供的默认层级 */
-  it("显式传递 zIndex=\"base\" 时覆盖 FullScreenPanel 上下文，使用 base 层(z-40)", () => {
+  it('显式传递 zIndex="base" 时覆盖 FullScreenPanel 上下文，使用 base 层(z-40)', () => {
     render(
       <FullScreenPanel isOpen title="父面板" onClose={vi.fn()}>
         <ConfirmDialog
