@@ -1,5 +1,14 @@
 # CC Switch Repository Memory
 
+## 2026-07-13 CCSwitchMulti v3.16.5-7：所有官方 Codex OAuth 模型请求统一原生 CLI originator
+
+- 真实根因：Luna 的 `prefer_websockets=true` 只是传输偏好，不是 WebSocket 硬要求。原生 Codex CLI `0.144.2` 在 `supports_websockets=false` 下可通过 HTTP Responses 正常运行 Luna。
+- 受控实测：使用相同 OAuth token、ChatGPT account、`/backend-api/codex/responses` endpoint、请求体和其余 headers，仅切换 `originator`。`gpt-5.6-luna` 使用 `codex_cli_rs` 返回 HTTP 200 和 `OK`，使用 `cc-switch` 返回 HTTP 404 `Model not found`；`gpt-5.6-sol` 使用 `codex_cli_rs` 同样返回 HTTP 200。因此问题是官方后端按客户端来源做模型准入，不是临时网络错误或 HTTP 不支持 Luna。
+- 修复边界：所有由 CCSwitchMulti 解析为 `AuthStrategy::CodexOAuth` 的模型推理请求都在最终 header 合并与 Provider override 之后强制写成单一 `originator: codex_cli_rs`。普通 Responses、raw passthrough、Claude 转 Codex OAuth 都覆盖；第三方 Bearer/API Key 请求不改写。
+- 目录修复：删除 `merge_codex_models()` 对 `prefer_websockets` 的过滤，Luna 可继续出现在已路由 catalog 中，不映射到 Terra/Sol。真正不可用模型仍由官方模型列表的 `supported_in_api: false` 过滤。
+- 共享规则：`CODEX_OAUTH_ORIGINATOR` 是托管 OAuth 模型请求唯一来源常量；Codex/Claude adapter 只生成 Authorization，避免先追加错误来源头再形成多值。官方 OAuth 模型列表请求同步使用该常量，订阅/额度接口仍保留独立的 `Codex Desktop` 身份。
+- 发布约束：只修改仓库源码、测试、文档和版本，不原子替换、不构建安装包、不停止或覆盖当前 `3.16.5-6` live 程序。版本统一提升为 `3.16.5-7` 后提交并通过 GitHub release workflow 发布。
+
 ## 2026-07-13 Codex 用量页：官方窗口预测与本地 token 分析分离
 
 - `src/components/codex/CodexUsagePage.tsx` 的官方 `SubscriptionQuota` 仅提供窗口已用百分比 `utilization` 与 `resetsAt`，不会提供绝对 token 上限或模型级官方额度账本。因此绝不能把本地 token 直接换算成“官方还剩多少 token”。

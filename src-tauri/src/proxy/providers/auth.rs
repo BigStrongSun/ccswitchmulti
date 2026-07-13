@@ -2,6 +2,12 @@
 //!
 //! 定义认证信息和认证策略，支持多种上游供应商的认证方式。
 
+/// 官方 Codex Rust CLI 对 ChatGPT Codex 后端使用的来源标识。
+///
+/// 所有由 CCSwitchMulti 托管的 Codex OAuth 模型请求都必须使用这一值，避免代理自定义
+/// 标识触发官方后端不同的模型准入策略。
+pub const CODEX_OAUTH_ORIGINATOR: &str = "codex_cli_rs";
+
 /// 认证信息
 ///
 /// 包含 API Key 和对应的认证策略
@@ -124,7 +130,7 @@ pub enum AuthStrategy {
     ///
     /// - Header: `Authorization: Bearer <access_token>`
     /// - Header: `ChatGPT-Account-Id: <account_id>` (来自 forwarder 注入)
-    /// - Header: `originator: cc-switch`
+    /// - Header: `originator: codex_cli_rs` (由 forwarder 对官方上游统一注入)
     ///
     /// 使用动态获取的 OpenAI access_token（通过 Device Code 流程获取）
     CodexOAuth,

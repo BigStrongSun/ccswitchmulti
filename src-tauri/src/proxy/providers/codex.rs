@@ -2028,22 +2028,11 @@ impl ProviderAdapter for CodexAdapter {
     ) -> Result<Vec<(http::HeaderName, http::HeaderValue)>, ProxyError> {
         use super::adapter::auth_header_value;
         let bearer = format!("Bearer {}", auth.api_key);
-        match auth.strategy {
-            AuthStrategy::CodexOAuth => Ok(vec![
-                (
-                    http::HeaderName::from_static("authorization"),
-                    auth_header_value(&bearer)?,
-                ),
-                (
-                    http::HeaderName::from_static("originator"),
-                    http::HeaderValue::from_static("cc-switch"),
-                ),
-            ]),
-            _ => Ok(vec![(
-                http::HeaderName::from_static("authorization"),
-                auth_header_value(&bearer)?,
-            )]),
-        }
+        // OAuth 的 originator 必须在完整 header 合并后由 forwarder 统一覆盖，避免重复值。
+        Ok(vec![(
+            http::HeaderName::from_static("authorization"),
+            auth_header_value(&bearer)?,
+        )])
     }
 }
 
@@ -2086,6 +2075,19 @@ mod tests {
             icon_color: None,
             in_failover_queue: false,
         }
+    }
+
+    #[test]
+    /// Codex OAuth adapter 只提供认证头，来源身份由 forwarder 在最终出站阶段统一写入。
+    fn test_codex_oauth_auth_headers_defer_originator_to_forwarder() {
+        let adapter = CodexAdapter::new();
+        let auth = AuthInfo::new("oauth-token".to_string(), AuthStrategy::CodexOAuth);
+
+        let headers = adapter.get_auth_headers(&auth).expect("OAuth headers");
+
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].0.as_str(), "authorization");
+        assert_eq!(headers[0].1.to_str().unwrap(), "Bearer oauth-token");
     }
 
     #[test]

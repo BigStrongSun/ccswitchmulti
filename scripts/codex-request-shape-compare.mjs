@@ -245,6 +245,7 @@ async function runServeSelfTestRequests(env) {
     headers: {
       "content-type": "application/json",
       authorization: "Bearer native-token",
+      originator: "codex_cli_rs",
     },
     body: JSON.stringify({
       model: "gpt-5.5",
@@ -258,7 +259,7 @@ async function runServeSelfTestRequests(env) {
     headers: {
       "content-type": "application/json",
       authorization: "Bearer proxy-token",
-      originator: "cc-switch",
+      originator: "codex_cli_rs",
     },
     body: JSON.stringify({
       model: "gpt-5.5",
@@ -286,13 +287,14 @@ function splitCapturedRequests(captures) {
   return { native, proxy };
 }
 
-// 生成内置样例，覆盖 service_tier、prompt_cache_key、metadata 和 originator 差异。
+// 生成内置样例，覆盖 service_tier、prompt_cache_key 和 metadata 差异。
 function buildSelfTestRequests() {
   const native = {
     method: "POST",
     path: "/backend-api/codex/responses",
     headers: {
       authorization: "Bearer native-token",
+      originator: "codex_cli_rs",
       "chatgpt-account-id": "acct_123",
       "session-id": "thread-a",
       "thread-id": "thread-a",
@@ -309,7 +311,7 @@ function buildSelfTestRequests() {
   };
   const proxy = {
     ...native,
-    headers: { ...native.headers, originator: "cc-switch" },
+    headers: { ...native.headers },
     body: { ...native.body, service_tier: "priority" },
   };
   return { native, proxy };

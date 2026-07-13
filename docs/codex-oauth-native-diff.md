@@ -13,7 +13,7 @@
 - 原生 Codex `ResponsesApiRequest` 会发送 `store`、`stream`、`include`、`prompt_cache_key`、可选 `service_tier` 和 `client_metadata`。
 - 原生 Codex 会过滤 `service_tier = "default"`，只有模型 catalog 支持且配置为非默认值时才发送。
 - 原生 Codex 会把 `prompt_cache_key` 默认设为 thread id，并在 `client_metadata` 中写入 `x-codex-installation-id`。
-- CCSwitchMulti Codex OAuth adapter 会把本地 `/v1/responses` 归一化到官方 `/backend-api/codex/responses`，并添加 `originator: cc-switch`。
+- CCSwitchMulti Codex OAuth adapter 会把本地 `/v1/responses` 归一化到官方 `/backend-api/codex/responses`；forwarder 在最终发送前统一覆盖为 `originator: codex_cli_rs`，与官方 Rust CLI 的模型准入身份一致。
 - CCSwitchMulti 对 Responses-Lite 采用负缓存 fallback：只有上游明确返回不支持 Lite header 的错误时，才去头重试。
 
 ## 工具

@@ -1933,7 +1933,7 @@ impl RequestForwarder {
 
         // Codex OAuth 需要注入的 ChatGPT-Account-Id（在动态 token 获取期间填充）
         let mut codex_oauth_account_id: Option<String> = None;
-        let mut should_send_codex_oauth_session_headers = false;
+        let mut is_codex_oauth = false;
 
         // 获取认证头（提前准备，用于内联替换）
         let auth_started_at = std::time::Instant::now();
@@ -2017,7 +2017,7 @@ impl RequestForwarder {
                     match token_result {
                         Ok(token) => {
                             auth = AuthInfo::new(token, AuthStrategy::CodexOAuth);
-                            should_send_codex_oauth_session_headers = true;
+                            is_codex_oauth = true;
                             // 解析使用的 account_id（用于注入 ChatGPT-Account-Id header）
                             codex_oauth_account_id = match account_id {
                                 Some(id) => Some(id),
@@ -2056,12 +2056,11 @@ impl RequestForwarder {
             }
         }
 
-        let codex_oauth_session_headers =
-            if should_send_codex_oauth_session_headers && self.session_client_provided {
-                build_codex_oauth_session_headers(&self.session_id)
-            } else {
-                Vec::new()
-            };
+        let codex_oauth_session_headers = if is_codex_oauth && self.session_client_provided {
+            build_codex_oauth_session_headers(&self.session_id)
+        } else {
+            Vec::new()
+        };
 
         if let Some(trace_id) = codex_trace_id.as_deref() {
             super::codex_router_log::append_event(
@@ -2392,6 +2391,7 @@ impl RequestForwarder {
                 .and_then(|meta| meta.local_proxy_request_overrides.as_ref()),
             is_copilot,
         );
+        enforce_codex_oauth_originator(&mut ordered_headers, is_codex_oauth);
 
         reject_proxy_placeholder_for_managed_account_upstream(&url, &ordered_headers)?;
 
@@ -2855,7 +2855,7 @@ impl RequestForwarder {
         let auth_started_at = std::time::Instant::now();
         let mut auth_strategy_for_log = "none".to_string();
         let mut codex_oauth_account_id: Option<String> = None;
-        let mut should_send_codex_oauth_session_headers = false;
+        let mut is_codex_oauth = false;
         let mut auth_headers = if let Some(mut auth) = adapter.extract_auth(provider) {
             if auth.strategy == AuthStrategy::CodexOAuth {
                 if let Some(app_handle) = &self.app_handle {
@@ -2873,7 +2873,7 @@ impl RequestForwarder {
                     match token_result {
                         Ok(token) => {
                             auth = AuthInfo::new(token, AuthStrategy::CodexOAuth);
-                            should_send_codex_oauth_session_headers = true;
+                            is_codex_oauth = true;
                             codex_oauth_account_id = match account_id {
                                 Some(id) => Some(id),
                                 None => codex_auth.default_account_id().await,
@@ -2902,12 +2902,11 @@ impl RequestForwarder {
                 auth_headers.push((http::HeaderName::from_static("chatgpt-account-id"), hv));
             }
         }
-        let codex_oauth_session_headers =
-            if should_send_codex_oauth_session_headers && self.session_client_provided {
-                build_codex_oauth_session_headers(&self.session_id)
-            } else {
-                Vec::new()
-            };
+        let codex_oauth_session_headers = if is_codex_oauth && self.session_client_provided {
+            build_codex_oauth_session_headers(&self.session_id)
+        } else {
+            Vec::new()
+        };
 
         if let Some(trace_id) = codex_trace_id.as_deref() {
             super::codex_router_log::append_event(
@@ -2958,6 +2957,7 @@ impl RequestForwarder {
                 .and_then(|meta| meta.local_proxy_request_overrides.as_ref()),
             false,
         );
+        enforce_codex_oauth_originator(&mut ordered_headers, is_codex_oauth);
         reject_proxy_placeholder_for_managed_account_upstream(&url, &ordered_headers)?;
 
         let request_is_streaming = raw_passthrough_request_is_streaming(route_body, headers);
@@ -3686,6 +3686,22 @@ fn build_codex_oauth_session_headers(
     }
 
     headers
+}
+
+/// 为所有托管 Codex OAuth 官方请求固定官方 CLI 来源标识。
+///
+/// OpenAI Codex 后端会按 `originator` 做模型和能力准入；使用代理自定义值会让已授权
+/// 模型被隐藏为 `Model not found`。这里在完整 header 合并和用户 override 之后覆盖为
+/// 单一官方值，既移除重复来源头，也不影响普通 Bearer/API Key 第三方路由。
+fn enforce_codex_oauth_originator(headers: &mut http::HeaderMap, is_codex_oauth: bool) {
+    if !is_codex_oauth {
+        return;
+    }
+
+    headers.insert(
+        http::HeaderName::from_static("originator"),
+        http::HeaderValue::from_static(super::providers::CODEX_OAUTH_ORIGINATOR),
+    );
 }
 
 fn reject_proxy_placeholder_for_managed_account_upstream(
@@ -5496,6 +5512,37 @@ mod tests {
         assert_eq!(
             map.get("x-codex-window-id"),
             Some(&HeaderValue::from_static("session-123:0"))
+        );
+    }
+
+    #[test]
+    /// OAuth 请求必须覆盖重复或错误来源头，并最终只保留官方 CLI 标识。
+    fn codex_oauth_originator_uses_official_cli_identity() {
+        let mut headers = HeaderMap::new();
+        headers.append("originator", HeaderValue::from_static("cc-switch"));
+        headers.append("originator", HeaderValue::from_static("Codex Desktop"));
+
+        enforce_codex_oauth_originator(&mut headers, true);
+
+        let values = headers
+            .get_all("originator")
+            .iter()
+            .map(|value| value.to_str().expect("valid originator"))
+            .collect::<Vec<_>>();
+        assert_eq!(values, vec!["codex_cli_rs"]);
+    }
+
+    #[test]
+    /// 非 OAuth 第三方请求的来源头属于调用方，不能被 CCSwitchMulti 改写。
+    fn non_codex_oauth_originator_is_not_rewritten() {
+        let mut headers = HeaderMap::new();
+        headers.insert("originator", HeaderValue::from_static("third-party-client"));
+
+        enforce_codex_oauth_originator(&mut headers, false);
+
+        assert_eq!(
+            headers.get("originator"),
+            Some(&HeaderValue::from_static("third-party-client"))
         );
     }
 

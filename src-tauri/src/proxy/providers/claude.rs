@@ -843,14 +843,8 @@ impl ProviderAdapter for ClaudeAdapter {
             }
             AuthStrategy::CodexOAuth => {
                 // 注意：bearer token 由 forwarder 动态注入到 auth.api_key
-                // ChatGPT-Account-Id 由 forwarder 注入额外 header
-                vec![
-                    (HeaderName::from_static("authorization"), hv(&bearer)?),
-                    (
-                        HeaderName::from_static("originator"),
-                        HeaderValue::from_static("cc-switch"),
-                    ),
-                ]
+                // ChatGPT-Account-Id 与 originator 由 forwarder 统一注入
+                vec![(HeaderName::from_static("authorization"), hv(&bearer)?)]
             }
             AuthStrategy::GitHubCopilot => {
                 // 生成请求追踪 ID
@@ -1103,6 +1097,19 @@ mod tests {
         assert_eq!(headers.len(), 1);
         assert_eq!(headers[0].0.as_str(), "authorization");
         assert_eq!(headers[0].1.to_str().unwrap(), "Bearer sk-or-test");
+    }
+
+    #[test]
+    /// Claude 入口转到官方 Codex OAuth 时也必须把来源身份交给 forwarder 统一写入。
+    fn test_get_auth_headers_codex_oauth_defers_originator_to_forwarder() {
+        let adapter = ClaudeAdapter::new();
+        let auth = AuthInfo::new("oauth-token".to_string(), AuthStrategy::CodexOAuth);
+
+        let headers = adapter.get_auth_headers(&auth).expect("OAuth headers");
+
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].0.as_str(), "authorization");
+        assert_eq!(headers[0].1.to_str().unwrap(), "Bearer oauth-token");
     }
 
     #[test]

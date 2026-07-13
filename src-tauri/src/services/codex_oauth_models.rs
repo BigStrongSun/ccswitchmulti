@@ -3,6 +3,7 @@
 //! ChatGPT Codex exposes models through `chatgpt.com/backend-api/codex/models`,
 //! which is not an OpenAI-compatible `/v1/models` endpoint.
 
+use crate::proxy::providers::CODEX_OAUTH_ORIGINATOR;
 use crate::services::model_fetch::FetchedModel;
 use serde_json::Value;
 use std::error::Error;
@@ -30,7 +31,7 @@ pub async fn fetch_models_with_token(
         .get(CODEX_OAUTH_MODELS_URL)
         .query(&[("client_version", CODEX_OAUTH_CLIENT_VERSION)])
         .header("Authorization", format!("Bearer {token}"))
-        .header("originator", "cc-switch")
+        .header("originator", CODEX_OAUTH_ORIGINATOR)
         .header("chatgpt-account-id", account_id)
         .timeout(Duration::from_secs(CODEX_OAUTH_FETCH_TIMEOUT_SECS))
         .send()
