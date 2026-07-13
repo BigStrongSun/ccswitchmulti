@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-07-14 GitHub Issue #12/#15/#16 triage
+
+- Issue #15 报告版本为 `v3.16.5-2`。MultiRouter 不按会话固定 Provider；每次请求都会根据当前 body 中的 `model` 重新解析 route。`v3.16.5-5` 已修复模型目录重复、未选 Provider 注入和新模型元数据同步，因此先要求升级 `v3.16.5-7`、完整重启 Codex Desktop，并提供同一 trace 的 `route_resolved`、`upstream_status`、`upstream_error` 和切换前后模型名。没有这组证据时，不删除跨 route fallback，也不把客户端缓存猜测当成根因。
+- Issue #16 的 OMP 是 Oh My Pi，主要使用 `~/.omp/agent/config.yml` 和项目 `.omp/config.yml`；Pi 使用 `~/.pi/agent/settings.json`，但自定义 Provider 的正式扩展点是 TypeScript extension `pi.registerProvider()`。两者不能共用普通 JSON 写入器；正式支持应拆成 OMP YAML/JSONC adapter 与 Pi extension generator/manager，上层再抽象 provider projection target。
+- Issue #12 截图中的真实错误是商汤上游 `HTTP 400: invalid_tool_call_id`，不是泛化的“DeepSeek 不会调用工具”。上游同源问题为 `farion1231/cc-switch#4056`，且已有报告称商汤直连也失败。修复前必须拿到同一 trace 中“上游返回 tool call id”和“下一轮回传 tool_call_id”的脱敏对照，才能判断长度/字符集限制、上游自相矛盾还是 Responses 与 Chat 转换改写；不能盲目重写 ID 破坏多轮映射。
+- 本轮已回复并保持打开：`BigStrongSun/ccswitchmulti#15`、`#16`、`#12`。#15/#12 等待最新版复测证据，#16 作为 enhancement 等待正式双 adapter 实现。
+
 ## 2026-07-13 Codex OAuth originator：白名单保留与缺失回退
 
 - `originator=codex_cli_rs` 能修复 Luna 相对 `cc-switch` 的模型准入差异，但不能因此把所有真实 Desktop/VS Code 请求都改报为 CLI。官方 Codex 的 first-party 分类包含 `codex_cli_rs`、`codex-tui`、`codex_vscode`、`Codex ` 前缀，以及独立 chat 分类中的 `codex_atlas`、`codex_chatgpt_desktop`；`codex_exec` 不在该分类中。
