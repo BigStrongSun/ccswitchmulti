@@ -2088,3 +2088,11 @@
 - 图片请求的 `model` 往往是 `gpt-image-*`，旧 MultiRouter official route 可能只匹配 `gpt-5.x` 文本模型。探测 official route 时可以用真实图片模型、catalog 里的 `gpt-*` 模型和稳定 GPT/Codex 名称做只读 probe，但发送 Images API 时必须保留请求体里的 `gpt-image-*`，并移除 request-local route 上的 `codexResolvedUpstreamModelOverride`，否则会把图片模型误写成 `gpt-5.5`。
 - text-only 能力仍要优先于模板/模型配置的 `input_modalities`：`src-tauri/src/codex_config.rs::codex_catalog_model_entry` 在 NativeResponses 分支不能把已判定 text-only 的模型重新写回 `["text","image"]`，否则 Codex Desktop 会误显示内置 Image Gen 或多模态入口。
 - 回归覆盖：`cargo test --manifest-path src-tauri\Cargo.toml image_generation --lib` 覆盖 Images 路由进入 handler 与 MultiRouter official route 选择；`cargo test --manifest-path src-tauri\Cargo.toml codex_model_catalog_text_only_native_responses_never_reenables_image_modality --lib` 覆盖 text-only 不被 NativeResponses 模态覆盖。
+
+## 2026-07-13 Codex 多设备额度协作
+
+- 官方 `utilization` 是账号总窗口百分比，本地 token 只是单设备代理/会话日志口径，禁止相互换算；协作页必须将“账号总窗口”和“已接入设备 token”拆开呈现。
+- 协作账号命名空间由 `~/.codex/auth.json` 的 `tokens.account_id` 加固定域分隔后 SHA-256 得到；真实账号 ID、OAuth token、prompt、原始 JSONL、cwd 都不写入远端或本地协作报告。
+- 远端协议：`{remote_root}/quota-collaboration/v1/{account_scope}/{device_id}.json`。每台设备只覆盖自己的文件；WebDAV 通过 `PROPFIND Depth=1`、S3 通过 `ListObjectsV2` 发现同 scope 下其它设备，避免共享 manifest 的多机覆盖竞态。
+- `quota_collaboration_reports` 只保存每设备最新脱敏聚合报告。刷新官方 Codex 额度时写入本机报告；“同步设备报告”上传本机文件并合并其它设备。损坏、scope 不匹配或百分比越界的报告必须跳过。
+- `observe` 只看数据。`enforce` 使用最近 10 分钟内、所有已同步设备中每个官方窗口的最高 utilization；窗口剩余不高于阈值时，`RequestForwarder` 只拒绝经过本机 CCSwitchMulti 的 Codex 请求（HTTP 429）。未通过 CCSwitchMulti 的旁路请求无法被控制，任何 UI 或文档不得承诺全账号强制控制。
