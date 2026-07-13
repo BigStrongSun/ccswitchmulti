@@ -13,6 +13,7 @@ import type {
   SessionSyncResult,
   DataSourceSummary,
   CodexSubagentUsageStats,
+  QuotaCollaborationOverview,
 } from "@/types/usage";
 import type { UsageResult } from "@/types";
 import type { AppId } from "./types";
@@ -153,6 +154,15 @@ export const usageApi = {
       endDate,
       limit,
     });
+  },
+
+  getQuotaCollaborationOverview:
+    async (): Promise<QuotaCollaborationOverview> => {
+      return invoke("get_quota_collaboration_overview");
+    },
+
+  syncQuotaCollaboration: async (): Promise<QuotaCollaborationOverview> => {
+    return invoke("sync_quota_collaboration");
   },
 
   clearUsageLogs: async (): Promise<number> => {

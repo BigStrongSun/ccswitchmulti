@@ -325,6 +325,72 @@ pub async fn head_etag(url: &str, auth: &WebDavAuth) -> Result<Option<String>, A
         .map(|s| s.to_string()))
 }
 
+/// 列出一个目录下的直接子资源 URL。
+///
+/// 多设备额度协作使用 Depth=1 发现各设备独立写入的报告文件；该函数不解析
+/// 业务数据，也不会返回认证信息。
+pub async fn list_child_urls(
+    url: &str,
+    auth: &WebDavAuth,
+    max_entries: usize,
+) -> Result<Vec<String>, AppError> {
+    let client = http_client::get();
+    let response = apply_auth(
+        client
+            .request(method_propfind(), url)
+            .header("Depth", "1")
+            .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS)),
+        auth,
+    )
+    .send()
+    .await
+    .map_err(|error| {
+        webdav_transport_error(
+            "webdav.list_failed",
+            "列目录",
+            "list directory",
+            url,
+            &error,
+        )
+    })?;
+    if !(response.status().is_success() || response.status() == StatusCode::MULTI_STATUS) {
+        return Err(webdav_status_error("PROPFIND", response.status(), url));
+    }
+    let body = response.text().await.map_err(|error| {
+        AppError::localized(
+            "webdav.list_read_failed",
+            format!("读取 WebDAV 目录失败: {error}"),
+            format!("Failed to read WebDAV directory: {error}"),
+        )
+    })?;
+    let matcher = regex::Regex::new(
+        r"(?is)<(?:[a-z0-9_-]+:)?href[^>]*>\s*([^<]+?)\s*</(?:[a-z0-9_-]+:)?href>",
+    )
+    .expect("static WebDAV href regex must compile");
+    let mut urls = Vec::new();
+    for captures in matcher.captures_iter(&body) {
+        let Some(raw) = captures.get(1).map(|value| value.as_str().trim()) else {
+            continue;
+        };
+        let decoded = raw.replace("&amp;", "&");
+        let child = match Url::parse(&decoded) {
+            Ok(value) => value.to_string(),
+            Err(_) => Url::parse(url)
+                .ok()
+                .and_then(|base| base.join(&decoded).ok())
+                .map(|value| value.to_string())
+                .unwrap_or(decoded),
+        };
+        if child != url && !urls.contains(&child) {
+            urls.push(child);
+        }
+        if urls.len() >= max_entries {
+            break;
+        }
+    }
+    Ok(urls)
+}
+
 // ─── Internal helpers ────────────────────────────────────────
 
 /// PROPFIND Depth=0 to check if a remote resource exists.

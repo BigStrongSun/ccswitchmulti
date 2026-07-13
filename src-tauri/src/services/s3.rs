@@ -518,6 +518,67 @@ pub(crate) async fn head_object(
         .map(|s| s.to_string()))
 }
 
+/// 通过 ListObjectsV2 列举 prefix 下有限数量的对象 key。
+pub(crate) async fn list_object_keys(
+    creds: &S3Credentials,
+    prefix: &str,
+    max_keys: usize,
+) -> Result<Vec<String>, AppError> {
+    let mut url = Url::parse(&build_bucket_url(creds)).map_err(|error| {
+        AppError::localized(
+            "s3.url.invalid",
+            format!("S3 URL 无效: {error}"),
+            format!("Invalid S3 URL: {error}"),
+        )
+    })?;
+    url.query_pairs_mut()
+        .append_pair("list-type", "2")
+        .append_pair("prefix", prefix)
+        .append_pair("max-keys", &max_keys.min(200).to_string());
+    let body_hash = sha256_hex(b"");
+    let mut headers = reqwest::header::HeaderMap::new();
+    sign_request(
+        "GET",
+        &url,
+        &mut headers,
+        &body_hash,
+        creds,
+        chrono::Utc::now(),
+    );
+    let response = http_client::get()
+        .get(url.as_str())
+        .headers(headers)
+        .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
+        .send()
+        .await
+        .map_err(|error| s3_transport_error("s3.list_failed", "列目录", "list objects", &error))?;
+    if !response.status().is_success() {
+        return Err(s3_status_error(
+            "ListObjectsV2",
+            response.status(),
+            url.as_str(),
+        ));
+    }
+    let body = response.text().await.map_err(|error| {
+        AppError::localized(
+            "s3.list_read_failed",
+            format!("读取 S3 目录失败: {error}"),
+            format!("Failed to read S3 directory: {error}"),
+        )
+    })?;
+    let matcher =
+        regex::Regex::new(r"(?is)<Key>([^<]+)</Key>").expect("static S3 key regex must compile");
+    Ok(matcher
+        .captures_iter(&body)
+        .filter_map(|captures| {
+            captures
+                .get(1)
+                .map(|value| value.as_str().replace("&amp;", "&"))
+        })
+        .take(max_keys)
+        .collect())
+}
+
 // ─── Tests ───────────────────────────────────────────────────
 
 #[cfg(test)]

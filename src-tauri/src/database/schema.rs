@@ -295,6 +295,20 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
+        // 19. 多设备额度协作只缓存每设备最新的脱敏聚合报告。
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS quota_collaboration_reports (
+                account_scope TEXT NOT NULL,
+                device_id TEXT NOT NULL,
+                device_name TEXT NOT NULL,
+                captured_at INTEGER NOT NULL,
+                payload TEXT NOT NULL,
+                PRIMARY KEY (account_scope, device_id)
+            )",
+            [],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+
         // 尝试添加 live_takeover_active 列到 proxy_config 表
         let _ = conn.execute(
             "ALTER TABLE proxy_config ADD COLUMN live_takeover_active INTEGER NOT NULL DEFAULT 0",
@@ -443,6 +457,11 @@ impl Database {
                         log::info!("迁移数据库从 v10 到 v11（usage_daily_rollups 保留 request_model 维度）");
                         Self::migrate_v10_to_v11(conn)?;
                         Self::set_user_version(conn, 11)?;
+                    }
+                    11 => {
+                        log::info!("迁移数据库从 v11 到 v12（添加多设备额度协作报告缓存）");
+                        Self::migrate_v11_to_v12(conn)?;
+                        Self::set_user_version(conn, 12)?;
                     }
                     _ => {
                         return Err(AppError::Database(format!(
@@ -1267,6 +1286,23 @@ impl Database {
         log::info!(
             "v10 -> v11 迁移完成：usage_daily_rollups 已保留 request_model/pricing_model 维度"
         );
+        Ok(())
+    }
+
+    /// v11 -> v12：创建仅保存脱敏聚合报告的本机协作缓存表。
+    fn migrate_v11_to_v12(conn: &Connection) -> Result<(), AppError> {
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS quota_collaboration_reports (
+                account_scope TEXT NOT NULL,
+                device_id TEXT NOT NULL,
+                device_name TEXT NOT NULL,
+                captured_at INTEGER NOT NULL,
+                payload TEXT NOT NULL,
+                PRIMARY KEY (account_scope, device_id)
+            )",
+            [],
+        )
+        .map_err(|error| AppError::Database(format!("v11 -> v12 创建协作表失败: {error}")))?;
         Ok(())
     }
 

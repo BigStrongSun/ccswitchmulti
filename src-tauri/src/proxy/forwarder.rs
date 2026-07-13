@@ -1428,6 +1428,26 @@ impl RequestForwarder {
         extensions: &Extensions,
         adapter: &dyn ProviderAdapter,
     ) -> Result<(ProxyResponse, Option<String>, Provider, Option<String>), ProxyError> {
+        // enforce 只约束经过本机代理的 Codex 请求；未接入 CCSwitchMulti 的原生
+        // 客户端无法被本地进程拦截，不能把该策略误描述为账号级强制控制。
+        if matches!(app_type, AppType::Codex) {
+            if let Some(reason) = crate::services::quota_collaboration::codex_enforcement_reason(
+                chrono::Utc::now().timestamp(),
+            ) {
+                return Err(ProxyError::UpstreamError {
+                    status: 429,
+                    body: Some(
+                        serde_json::json!({
+                            "error": {
+                                "message": reason,
+                                "type": "quota_collaboration_enforced"
+                            }
+                        })
+                        .to_string(),
+                    ),
+                });
+            }
+        }
         let codex_trace_id =
             matches!(app_type, AppType::Codex).then(|| uuid::Uuid::new_v4().to_string());
         let route_started_at = std::time::Instant::now();

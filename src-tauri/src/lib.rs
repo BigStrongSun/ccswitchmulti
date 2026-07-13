@@ -1291,6 +1291,8 @@ pub fn run() {
             commands::testUsageScript,
             // subscription quota
             commands::get_subscription_quota,
+            commands::get_quota_collaboration_overview,
+            commands::sync_quota_collaboration,
             commands::get_codex_oauth_quota,
             commands::get_codex_oauth_models,
             commands::get_codex_oauth_cached_models,

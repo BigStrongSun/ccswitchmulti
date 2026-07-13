@@ -154,6 +154,7 @@ export const usageKeys = {
       customEndDate ?? 0,
       limit,
     ] as const,
+  quotaCollaboration: () => [...usageKeys.all, "quota-collaboration"] as const,
   detail: (requestId: string) =>
     [...usageKeys.all, "detail", requestId] as const,
   pricing: () => [...usageKeys.all, "pricing"] as const,
@@ -364,6 +365,29 @@ export function useCodexSubagentUsageStats(
     },
     refetchInterval: options?.refetchInterval ?? DEFAULT_REFETCH_INTERVAL_MS,
     refetchIntervalInBackground: options?.refetchIntervalInBackground ?? false,
+  });
+}
+
+/** 读取多设备额度协作的本机缓存，和官方额度查询并行执行。 */
+export function useQuotaCollaborationOverview(options?: UsageQueryOptions) {
+  return useQuery({
+    queryKey: usageKeys.quotaCollaboration(),
+    queryFn: usageApi.getQuotaCollaborationOverview,
+    refetchInterval: options?.refetchInterval ?? 5 * 60 * 1000,
+    refetchIntervalInBackground: options?.refetchIntervalInBackground ?? false,
+  });
+}
+
+/** 主动上传本机报告并合并其它设备报告。 */
+export function useSyncQuotaCollaboration() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: usageApi.syncQuotaCollaboration,
+    onSuccess: () => {
+      queryClient.invalidateQueries({
+        queryKey: usageKeys.quotaCollaboration(),
+      });
+    },
   });
 }
 

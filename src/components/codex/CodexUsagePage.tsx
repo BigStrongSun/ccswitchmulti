@@ -17,16 +17,24 @@ import {
   TimerReset,
   TrendingDown,
   TrendingUp,
+  MonitorSmartphone,
+  ShieldCheck,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useSubscriptionQuota } from "@/lib/query/subscription";
-import { useModelStats, useUsageSummary } from "@/lib/query/usage";
+import {
+  useModelStats,
+  useQuotaCollaborationOverview,
+  useSyncQuotaCollaboration,
+  useUsageSummary,
+} from "@/lib/query/usage";
 import type {
   QuotaTier,
   ResetCreditInfo,
   SubscriptionQuota,
 } from "@/types/subscription";
 import type { ModelStats, UsageSummary } from "@/types/usage";
+import type { QuotaCollaborationOverview } from "@/types/usage";
 
 const TRACKED_TIERS = new Set(["five_hour", "seven_day"]);
 const FIVE_HOUR_WINDOW_MS = 5 * 60 * 60 * 1000;
@@ -681,6 +689,144 @@ const LocalUsageAnalytics: React.FC<{
   );
 };
 
+/** 渲染已接入 CCSwitchMulti 的设备汇总，避免将 token 错当官方窗口额度。 */
+const QuotaCollaborationPanel: React.FC<{
+  overview: QuotaCollaborationOverview | undefined;
+  isLoading: boolean;
+  onSync: () => void;
+  isSyncing: boolean;
+}> = ({ overview, isLoading, onSync, isSyncing }) => {
+  if (isLoading && !overview) {
+    return (
+      <section className={`rounded-lg border p-5 ${USAGE_PAGE_COLORS.card}`}>
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <LoaderCircle className="h-4 w-4 animate-spin" />
+          正在读取多设备协作缓存...
+        </div>
+      </section>
+    );
+  }
+
+  const reports = overview?.reports ?? [];
+  const todayTokens = reports.reduce(
+    (sum, report) => sum + report.todayTokens,
+    0,
+  );
+  const weekTokens = reports.reduce(
+    (sum, report) => sum + report.sevenDayTokens,
+    0,
+  );
+  const isEnforcing = overview?.mode === "enforce";
+  return (
+    <section className={`rounded-lg border p-5 ${USAGE_PAGE_COLORS.card}`}>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="flex items-start gap-2">
+          <MonitorSmartphone className="mt-0.5 h-4 w-4 text-emerald-700 dark:text-emerald-300" />
+          <div>
+            <h3 className="text-base font-semibold text-foreground">
+              多设备额度协作
+            </h3>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              官方窗口是同一 Codex 账号的总量；下表只汇总已接入 CCSwitchMulti
+              的设备 token，不把两种口径相互换算。
+            </p>
+          </div>
+        </div>
+        <span
+          className={`inline-flex w-fit items-center gap-1 rounded-md border px-2 py-1 text-xs ${
+            isEnforcing
+              ? "border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-700 dark:bg-amber-950/30 dark:text-amber-200"
+              : "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-200"
+          }`}
+        >
+          <ShieldCheck className="h-3.5 w-3.5" />
+          {isEnforcing ? "约束模式" : "观测模式"}
+        </span>
+      </div>
+      <div className="mt-3">
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          className="gap-2"
+          onClick={onSync}
+          disabled={isSyncing}
+        >
+          <RefreshCw
+            className={`h-3.5 w-3.5 ${isSyncing ? "animate-spin" : ""}`}
+          />
+          同步设备报告
+        </Button>
+      </div>
+
+      {overview?.warning ? (
+        <div
+          className={`mt-4 rounded-md border px-3 py-3 text-sm ${USAGE_PAGE_COLORS.warning}`}
+        >
+          {overview.warning}
+        </div>
+      ) : reports.length === 0 ? (
+        <div
+          className={`mt-4 rounded-md border border-dashed px-3 py-4 text-sm text-muted-foreground ${USAGE_PAGE_COLORS.inset}`}
+        >
+          当前只有本机缓存。完成一次官方额度刷新后会生成本机报告；配置协作同步后，其他设备会出现在这里。
+        </div>
+      ) : (
+        <>
+          <div className="mt-4 overflow-x-auto rounded-md border">
+            <div className="min-w-[620px] divide-y">
+              <div className="grid grid-cols-[minmax(150px,1fr)_110px_110px_80px_130px] gap-3 bg-slate-50 px-3 py-2 text-xs font-medium text-muted-foreground dark:bg-slate-900/50">
+                <span>设备</span>
+                <span className="text-right">今日 token</span>
+                <span className="text-right">7 天 token</span>
+                <span className="text-right">请求</span>
+                <span className="text-right">最后上报</span>
+              </div>
+              {reports.map((report) => (
+                <div
+                  key={report.deviceId}
+                  className="grid grid-cols-[minmax(150px,1fr)_110px_110px_80px_130px] gap-3 px-3 py-2.5 text-sm"
+                >
+                  <div className="min-w-0 truncate font-medium">
+                    {report.deviceName}
+                    {report.deviceId === overview?.deviceId ? "（本机）" : ""}
+                  </div>
+                  <span className="text-right tabular-nums">
+                    {formatTokens(report.todayTokens)}
+                  </span>
+                  <span className="text-right tabular-nums">
+                    {formatTokens(report.sevenDayTokens)}
+                  </span>
+                  <span className="text-right tabular-nums">
+                    {report.sevenDayRequests}
+                  </span>
+                  <span className="text-right text-xs text-muted-foreground">
+                    {formatDateTime(
+                      new Date(report.capturedAt * 1000).toISOString(),
+                    )}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+            <span>已覆盖 {reports.length} 台设备</span>
+            <span>今日合计 {formatTokens(todayTokens)} token</span>
+            <span>7 天合计 {formatTokens(weekTokens)} token</span>
+          </div>
+        </>
+      )}
+      <div
+        className={`mt-4 rounded-md border px-3 py-2.5 text-xs leading-5 ${isEnforcing ? USAGE_PAGE_COLORS.warning : USAGE_PAGE_COLORS.inset}`}
+      >
+        {isEnforcing
+          ? `窗口剩余不高于 ${Math.round(overview?.enforceRemainingPercent ?? 20)}% 时，本机网关会拒绝继续转发 Codex 请求。未经过 CCSwitchMulti 的原生 Codex App 仍不受此策略控制。`
+          : "观测模式不会拦截请求。约束模式只对经过 CCSwitchMulti 网关的实例生效。"}
+      </div>
+    </section>
+  );
+};
+
 /** 渲染单条 banked reset credit 到期记录。 */
 const ResetCreditRow: React.FC<ResetCreditRowProps> = ({ credit, index }) => {
   const urgency = resetCreditUrgency(credit.expiresAt);
@@ -778,6 +924,12 @@ export const CodexUsagePage: React.FC = () => {
     SEVEN_DAY_RANGE,
     { appType: "codex" },
   );
+  const {
+    data: quotaCollaboration,
+    isFetching: isQuotaCollaborationFetching,
+    refetch: refetchQuotaCollaboration,
+  } = useQuotaCollaborationOverview();
+  const syncQuotaCollaboration = useSyncQuotaCollaboration();
   const visibleTiers = getVisibleTiers(quota);
   const availableCredits = (quota?.resetCredits?.credits ?? []).filter(
     isAvailableCredit,
@@ -841,6 +993,7 @@ export const CodexUsagePage: React.FC = () => {
                 void refetch();
                 void refetchTodayUsage();
                 void refetchModelStats();
+                void refetchQuotaCollaboration();
               }}
               disabled={isFetching}
               size="sm"
@@ -878,6 +1031,15 @@ export const CodexUsagePage: React.FC = () => {
             summary={todayUsage}
             modelStats={modelStats}
             isLoading={isTodayUsageFetching}
+          />
+
+          <QuotaCollaborationPanel
+            overview={quotaCollaboration}
+            isLoading={isQuotaCollaborationFetching}
+            isSyncing={syncQuotaCollaboration.isPending}
+            onSync={() => {
+              void syncQuotaCollaboration.mutateAsync();
+            }}
           />
 
           <section

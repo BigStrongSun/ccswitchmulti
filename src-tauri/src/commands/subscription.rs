@@ -37,5 +37,12 @@ pub async fn get_subscription_quota(
         state.usage_cache.put_subscription(app_type, snapshot);
         crate::tray::schedule_tray_refresh(&app);
     }
+    if let Ok(quota) = &inner {
+        if let Err(error) =
+            crate::services::quota_collaboration::record_codex_quota_snapshot(&state.db, quota)
+        {
+            log::warn!("记录 Codex 多设备额度协作快照失败: {error}");
+        }
+    }
     inner
 }

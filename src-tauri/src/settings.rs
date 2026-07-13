@@ -303,6 +303,69 @@ pub struct LocalMigrations {
     pub codex_official_history_unify_v1: Option<CodexOfficialHistoryUnifyMigration>,
 }
 
+/// 多设备额度协作的本机策略与网关约束缓存。
+///
+/// 该结构保留在每台设备自己的 settings 文件中；远端只交换脱敏聚合报告，
+/// 不会同步登录凭据、提示词、原始会话或本机目录。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuotaCollaborationSettings {
+    #[serde(default = "default_quota_collaboration_device_id")]
+    pub device_id: String,
+    #[serde(default)]
+    pub device_name: String,
+    #[serde(default = "default_quota_collaboration_mode")]
+    pub mode: String,
+    #[serde(default = "default_quota_collaboration_threshold")]
+    pub enforce_remaining_percent: f64,
+    #[serde(default)]
+    pub latest_window_utilization: std::collections::BTreeMap<String, f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_window_captured_at: Option<i64>,
+}
+
+fn default_quota_collaboration_device_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+fn default_quota_collaboration_mode() -> String {
+    "observe".to_string()
+}
+
+fn default_quota_collaboration_threshold() -> f64 {
+    20.0
+}
+
+impl Default for QuotaCollaborationSettings {
+    fn default() -> Self {
+        Self {
+            device_id: default_quota_collaboration_device_id(),
+            device_name: String::new(),
+            mode: default_quota_collaboration_mode(),
+            enforce_remaining_percent: default_quota_collaboration_threshold(),
+            latest_window_utilization: std::collections::BTreeMap::new(),
+            latest_window_captured_at: None,
+        }
+    }
+}
+
+impl QuotaCollaborationSettings {
+    /// 规范化手工编辑或旧版本遗留的字段，避免异常设置阻断网关。
+    fn normalize(&mut self) {
+        self.device_id = self.device_id.trim().to_string();
+        if self.device_id.is_empty() {
+            self.device_id = default_quota_collaboration_device_id();
+        }
+        self.device_name = self.device_name.trim().to_string();
+        if self.mode != "enforce" {
+            self.mode = default_quota_collaboration_mode();
+        }
+        self.enforce_remaining_percent = self.enforce_remaining_percent.clamp(1.0, 90.0);
+        self.latest_window_utilization
+            .retain(|_, value| value.is_finite() && (0.0..=100.0).contains(value));
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexThirdPartyHistoryProviderBucketMigration {
@@ -485,6 +548,10 @@ pub struct AppSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preferred_terminal: Option<String>,
 
+    /// 多设备额度协作配置与最近一次同步的官方窗口快照。
+    #[serde(default)]
+    pub quota_collaboration: QuotaCollaborationSettings,
+
     // ===== 本机自动迁移状态 =====
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_migrations: Option<LocalMigrations>,
@@ -542,6 +609,7 @@ impl Default for AppSettings {
             backup_interval_hours: None,
             backup_retain_count: None,
             preferred_terminal: None,
+            quota_collaboration: QuotaCollaborationSettings::default(),
             local_migrations: None,
         }
     }
@@ -620,6 +688,7 @@ impl AppSettings {
                 self.s3_sync = None;
             }
         }
+        self.quota_collaboration.normalize();
     }
 
     fn load_from_file() -> Self {
@@ -1148,6 +1217,16 @@ pub fn update_s3_sync_status(status: WebDavSyncStatus) -> Result<(), AppError> {
         if let Some(s3) = current.s3_sync.as_mut() {
             s3.status = status;
         }
+    })
+}
+
+/// 原子更新多设备额度协作状态，供代理热路径读取最近一次同步的官方窗口。
+pub fn mutate_quota_collaboration<F>(mutator: F) -> Result<(), AppError>
+where
+    F: FnOnce(&mut QuotaCollaborationSettings),
+{
+    mutate_settings(|settings| {
+        mutator(&mut settings.quota_collaboration);
     })
 }
 

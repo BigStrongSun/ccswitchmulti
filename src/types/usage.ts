@@ -161,6 +161,36 @@ export interface CodexSubagentUsageStats {
   skippedReason?: string;
 }
 
+/** 单台 CCSwitchMulti 上报的脱敏 Codex 用量聚合。 */
+export interface QuotaDeviceReport {
+  protocolVersion: number;
+  accountScope: string;
+  deviceId: string;
+  deviceName: string;
+  capturedAt: number;
+  todayTokens: number;
+  sevenDayTokens: number;
+  todayRequests: number;
+  sevenDayRequests: number;
+  tiers: Array<{
+    name: string;
+    utilization: number;
+    resetsAt: string | null;
+  }>;
+}
+
+/** 多设备额度协作页面的缓存汇总。 */
+export interface QuotaCollaborationOverview {
+  configured: boolean;
+  mode: "observe" | "enforce";
+  enforceRemainingPercent: number;
+  deviceId: string;
+  reports: QuotaDeviceReport[];
+  latestWindowUtilization: Record<string, number>;
+  latestWindowCapturedAt: number | null;
+  warning: string | null;
+}
+
 export interface LogFilters {
   appType?: string;
   providerName?: string;

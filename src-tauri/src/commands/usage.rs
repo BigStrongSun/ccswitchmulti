@@ -135,6 +135,24 @@ pub fn get_codex_subagent_usage_stats(
         .get_codex_subagent_usage_stats(start_date, end_date, limit)
 }
 
+/// 读取本机已缓存的 Codex 多设备额度协作报告。
+///
+/// 该命令不主动发网络请求；远端同步失败时，页面仍能安全展示最后一次成功缓存。
+#[tauri::command]
+pub fn get_quota_collaboration_overview(
+    state: State<'_, AppState>,
+) -> Result<crate::services::quota_collaboration::QuotaCollaborationOverview, AppError> {
+    crate::services::quota_collaboration::get_overview(&state.db)
+}
+
+/// 上传本机额度报告并拉取同账号下其它 CCSwitchMulti 设备的报告。
+#[tauri::command]
+pub async fn sync_quota_collaboration(
+    state: State<'_, AppState>,
+) -> Result<crate::services::quota_collaboration::QuotaCollaborationOverview, AppError> {
+    crate::services::quota_collaboration::sync_reports(&state.db).await
+}
+
 /// 清空本地使用统计日志和日汇总。
 ///
 /// 只删除由代理和会话同步生成的统计数据，不触碰 provider、定价表、登录态或应用配置。
