@@ -392,14 +392,30 @@ impl TokenUsage {
     pub fn from_codex_stream_events_auto(events: &[Value]) -> Option<Self> {
         log::debug!("[Codex] 智能解析流式事件，共 {} 个事件", events.len());
 
-        // 先尝试 Codex Responses API 格式 (response.completed 事件)
+        // 先尝试 Codex Responses API 格式。
+        //
+        // 标准事件会把完整响应放进 `response.completed.response`，但 ChatGPT Codex
+        // OAuth 的不同模型版本还可能在 `response.done.response` 或 SSE 事件顶层
+        // 回传 usage。后两种格式若只走 OpenAI Chat 解析，会因字段是
+        // input_tokens/output_tokens 而被误判为“没有 usage”，导致新模型统计为 0。
         for event in events {
             if let Some(event_type) = event.get("type").and_then(|v| v.as_str()) {
-                if event_type == "response.completed" {
+                if matches!(event_type, "response.completed" | "response.done") {
                     if let Some(response) = event.get("response") {
-                        log::debug!("[Codex] 找到 response.completed 事件");
-                        return Self::from_codex_response_auto(response);
+                        log::debug!("[Codex] 找到 {event_type} 响应事件");
+                        if let Some(usage) = Self::from_codex_response_auto(response) {
+                            return Some(usage);
+                        }
                     }
+                }
+            }
+
+            // 有些官方/兼容 Responses SSE 在终止事件顶层携带 usage，而不再包一层
+            // response。复用非流式 Codex 解析器，兼容 input_tokens 和
+            // prompt_tokens 两种命名。
+            if event.get("usage").is_some() {
+                if let Some(usage) = Self::from_codex_response_auto(event) {
+                    return Some(usage);
                 }
             }
         }
@@ -1207,5 +1223,30 @@ mod tests {
         assert_eq!(usage.input_tokens, 100);
         assert_eq!(usage.output_tokens, 50);
         assert_eq!(usage.model, Some("gpt-4o".to_string()));
+    }
+
+    #[test]
+    fn test_codex_stream_events_auto_accepts_top_level_responses_usage() {
+        // ChatGPT Codex OAuth 的部分模型把 Responses usage 放在 SSE 终止事件顶层，
+        // 不包进 `response.completed.response`。这条回归锁定该形状，避免模型请求
+        // 成功但 Provider / Model 流量页把 token 记成 0。
+        let events = vec![json!({
+            "type": "response.done",
+            "model": "gpt-5.6-sol",
+            "usage": {
+                "input_tokens": 1000,
+                "output_tokens": 500,
+                "input_tokens_details": {
+                    "cached_tokens": 200
+                }
+            }
+        })];
+
+        let usage =
+            TokenUsage::from_codex_stream_events_auto(&events).expect("顶层 Codex usage 应被解析");
+        assert_eq!(usage.input_tokens, 1000);
+        assert_eq!(usage.output_tokens, 500);
+        assert_eq!(usage.cache_read_tokens, 200);
+        assert_eq!(usage.model, Some("gpt-5.6-sol".to_string()));
     }
 }

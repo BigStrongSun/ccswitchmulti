@@ -189,7 +189,7 @@ describe("CodexMultiRouterWizard", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "下一步" }));
     expect(
-      screen.getByText(/当前识别到 1 个普通 Codex provider/),
+      screen.getByText(/已选择 1 \/ 1 个 Codex provider/),
     ).toBeInTheDocument();
 
     rerender(
@@ -212,7 +212,7 @@ describe("CodexMultiRouterWizard", () => {
     );
 
     expect(
-      screen.getByText(/当前识别到 1 个普通 Codex provider/),
+      screen.getByText(/已选择 1 \/ 1 个 Codex provider/),
     ).toBeInTheDocument();
     expect(
       screen.queryByText("这套向导会帮你完成 7 件事"),
@@ -407,6 +407,49 @@ describe("CodexMultiRouterWizard", () => {
         (model: { model: string }) => model.model,
       ),
     ).toEqual(["gpt-5.5", "gpt-5.6-luna"]);
+  });
+
+  it("excludes an unchecked provider from the generated MultiRouter plan", async () => {
+    const secondSource = provider({
+      id: "qwen-local",
+      name: "Qwen Local",
+      settingsConfig: {
+        base_url: "https://qwen.example/v1",
+        auth: { OPENAI_API_KEY: "sk-qwen" },
+        modelCatalog: { models: [{ model: "qwen3.6" }] },
+      },
+    });
+
+    renderWithQueryClient(
+      <CodexMultiRouterWizard
+        open
+        providers={[provider(), secondSource]}
+        onOpenChange={vi.fn()}
+        onCreateProvider={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+        onEnablePlan={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+    fireEvent.click(screen.getByLabelText("使用 Qwen Local 作为模型源"));
+    fireEvent.click(screen.getByRole("button", { name: "保存并发布" }));
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "保存并发布" }).at(-1)!,
+    );
+
+    await waitFor(() => expect(providersApi.add).toHaveBeenCalledTimes(1));
+    const savedProvider = vi.mocked(providersApi.add).mock.calls[0][0];
+    expect(
+      savedProvider.settingsConfig.codexRouting.routes.map(
+        (route: { id: string }) => route.id,
+      ),
+    ).not.toContain("qwen-local");
+    expect(
+      savedProvider.settingsConfig.modelCatalog.models.map(
+        (model: { model: string }) => model.model,
+      ),
+    ).not.toContain("qwen3.6");
   });
 
   it("keeps provider curated models when wizard refresh sees extra upstream models", async () => {

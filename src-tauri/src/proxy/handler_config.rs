@@ -48,7 +48,12 @@ fn openai_stream_usage_event_filter(data: &str) -> bool {
 }
 
 pub fn codex_stream_usage_event_filter(data: &str) -> bool {
-    data.contains("\"response.completed\"") || data.contains("\"usage\"")
+    // 官方 Codex Responses 流在版本演进中既出现过 `response.completed`，
+    // 也会以 `response.done` 或事件顶层 `usage` 回传账单字段。这里仅决定
+    // 是否进入 JSON 解析，不改变下游协议内容。
+    data.contains("\"response.completed\"")
+        || data.contains("\"response.done\"")
+        || data.contains("\"usage\"")
 }
 
 fn gemini_stream_usage_event_filter(data: &str) -> bool {

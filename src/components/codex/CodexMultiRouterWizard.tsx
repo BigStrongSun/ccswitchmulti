@@ -916,6 +916,7 @@ export function CodexMultiRouterWizard({
     INITIAL_FLOW_STATE,
   );
   const [draftSources, setDraftSources] = useState<Provider[]>([]);
+  const [selectedSourceIds, setSelectedSourceIds] = useState<string[]>([]);
   const [draftPlanName, setDraftPlanName] = useState(
     CODEX_MULTI_ROUTER_DEFAULT_NAME,
   );
@@ -960,6 +961,10 @@ export function CodexMultiRouterWizard({
   const hasCodexOAuthSources = useMemo(
     () => draftSources.some((provider) => isWizardCodexOAuthSource(provider)),
     [draftSources],
+  );
+  const selectedSourceIdSet = useMemo(
+    () => new Set(selectedSourceIds),
+    [selectedSourceIds],
   );
   const hasUnauthenticatedCodexOAuthSources =
     hasCodexOAuthSources && !isCodexOauthStatusLoading && !hasCodexOauthAccount;
@@ -1020,6 +1025,7 @@ export function CodexMultiRouterWizard({
     initializedOpenRef.current = true;
     setSavedPlan(existingPlan ?? null);
     setDraftSources(providerModelSources);
+    setSelectedSourceIds(providerModelSources.map((provider) => provider.id));
     setDraftPlanName(existingPlan?.name ?? CODEX_MULTI_ROUTER_DEFAULT_NAME);
     setCatalogModelOrder(
       existingPlan?.settingsConfig?.modelCatalog?.models?.map(
@@ -1048,7 +1054,7 @@ export function CodexMultiRouterWizard({
     });
   }, [existingPlan, open, providerModelSources]);
 
-  // 向导打开后仍要吸收用户新建/删除的普通 Codex provider，但不能重新派发 INIT。
+  // 向导打开后只同步已选 source 的最新配置；取消选择不能因父组件重新渲染而被重新加入。
   useEffect(() => {
     if (!open || !initializedOpenRef.current) return;
     setSavedPlan(existingPlan ?? null);
@@ -1056,22 +1062,21 @@ export function CodexMultiRouterWizard({
       const nextSourceById = new Map(
         providerModelSources.map((provider) => [provider.id, provider]),
       );
-      const retainedSources = currentSources.filter((provider) =>
-        nextSourceById.has(provider.id),
+      const currentById = new Map(
+        currentSources.map((provider) => [provider.id, provider]),
       );
-      const retainedIds = new Set(
-        retainedSources.map((provider) => provider.id),
+      return selectedSourceIds
+        .map(
+          (providerId) =>
+            nextSourceById.get(providerId) ?? currentById.get(providerId),
+        )
+        .filter((provider): provider is Provider => Boolean(provider));
+    });
+    setSelectedSourceIds((currentIds) => {
+      const nextIds = currentIds.filter((providerId) =>
+        providerModelSources.some((provider) => provider.id === providerId),
       );
-      const appendedSources = providerModelSources.filter(
-        (provider) => !retainedIds.has(provider.id),
-      );
-      if (
-        retainedSources.length === currentSources.length &&
-        appendedSources.length === 0
-      ) {
-        return currentSources;
-      }
-      return [...retainedSources, ...appendedSources];
+      return nextIds.length === currentIds.length ? currentIds : nextIds;
     });
     setModelFetchCards((currentCards) =>
       Object.fromEntries(
@@ -1081,7 +1086,28 @@ export function CodexMultiRouterWizard({
         ]),
       ),
     );
-  }, [existingPlan, open, providerModelSources]);
+  }, [existingPlan, open, providerModelSources, selectedSourceIds]);
+
+  // 选择只影响本次 MultiRouter 草稿，不修改 provider 数据库或其它已有路由方案。
+  const toggleSourceProvider = (provider: Provider, checked: boolean) => {
+    setSelectedSourceIds((currentIds) => {
+      if (checked) {
+        return currentIds.includes(provider.id)
+          ? currentIds
+          : [...currentIds, provider.id];
+      }
+      return currentIds.filter((providerId) => providerId !== provider.id);
+    });
+    setDraftSources((currentSources) => {
+      if (checked) {
+        return currentSources.some((source) => source.id === provider.id)
+          ? currentSources
+          : [...currentSources, provider];
+      }
+      return currentSources.filter((source) => source.id !== provider.id);
+    });
+    setConnectivityResults([]);
+  };
 
   // 所有异步 catch 都进入同一个问题列表，让 toast 之外的 UI 也能长期展示异常和继续策略。
   const recordWizardIssue = (issue: Omit<WizardIssue, "id">) => {
@@ -2027,8 +2053,9 @@ export function CodexMultiRouterWizard({
               <div className="space-y-4">
                 <div className="flex items-center justify-between gap-3">
                   <p className="text-sm text-muted-foreground">
-                    当前识别到 {draftSources.length} 个普通 Codex provider
-                    可作为模型源。
+                    已选择 {draftSources.length} / {providerModelSources.length}{" "}
+                    个 Codex provider 作为本次模型源；取消选择不会删除
+                    provider。
                   </p>
                   <Button onClick={onCreateProvider}>
                     <Server className="mr-2 h-4 w-4" />
@@ -2037,15 +2064,35 @@ export function CodexMultiRouterWizard({
                 </div>
                 <div className="max-h-[min(42vh,28rem)] overflow-y-auto pr-2">
                   <div className="grid gap-3 md:grid-cols-2">
-                    {draftSources.map((provider) => (
+                    {providerModelSources.map((provider) => (
                       <div key={provider.id} className="rounded-lg border p-3">
-                        <div className="font-medium">{provider.name}</div>
-                        <div className="mt-1 text-xs text-muted-foreground">
-                          {provider.id}
+                        <label className="flex cursor-pointer items-start gap-3">
+                          <input
+                            type="checkbox"
+                            className="mt-1 h-4 w-4"
+                            checked={selectedSourceIdSet.has(provider.id)}
+                            onChange={(event) =>
+                              toggleSourceProvider(
+                                provider,
+                                event.target.checked,
+                              )
+                            }
+                            aria-label={`使用 ${provider.name} 作为模型源`}
+                          />
+                          <span className="min-w-0">
+                            <span className="block font-medium">
+                              {provider.name}
+                            </span>
+                            <span className="mt-1 block text-xs text-muted-foreground">
+                              {provider.id}
+                            </span>
+                          </span>
+                        </label>
+                        <div className="mt-3">
+                          <Badge variant="outline">
+                            {modelSourceSummary(provider)}
+                          </Badge>
                         </div>
-                        <Badge variant="outline" className="mt-3">
-                          {modelSourceSummary(provider)}
-                        </Badge>
                       </div>
                     ))}
                   </div>

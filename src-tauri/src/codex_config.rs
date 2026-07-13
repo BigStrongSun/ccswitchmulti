@@ -1947,6 +1947,19 @@ fn codex_model_stable_id(model: &Value) -> Option<String> {
     })
 }
 
+/// 判断官方模型是否要求 Responses WebSocket。
+///
+/// CCSwitchMulti 当前只代理 HTTP `/responses`，本地 WebSocket 升级会明确返回
+/// `responses_websocket_not_supported`。这类模型即使出现在官方 models endpoint，
+/// 也不能暴露在接管后的 MultiRouter 目录中，否则用户选择后只能得到上游 404。
+fn codex_model_prefers_websockets(model: &Value) -> bool {
+    model
+        .get("prefer_websockets")
+        .or_else(|| model.get("preferWebsockets"))
+        .and_then(Value::as_bool)
+        == Some(true)
+}
+
 /// 合并同一模型的官方元数据和 CCSM 路由表示。
 ///
 /// 先复制官方对象，再覆盖 CCSM 提供的字段：这样路由所需的 slug、展示名和能力声明
@@ -1990,10 +2003,20 @@ fn merge_codex_models(official_models: &[Value], routed_models: &[Value]) -> Vec
         let official_model = routed_id
             .as_ref()
             .and_then(|model_id| official_by_id.get(model_id).copied());
+        if official_model.is_some_and(codex_model_prefers_websockets) {
+            log::info!(
+                "skip WebSocket-required Codex model from HTTP-only CCSwitchMulti catalog: {}",
+                routed_id.as_deref().unwrap_or("<unknown>")
+            );
+            continue;
+        }
         merged_models.push(merge_codex_model_entry(official_model, routed_model));
     }
 
     for official_model in official_models {
+        if codex_model_prefers_websockets(official_model) {
+            continue;
+        }
         if codex_model_stable_id(official_model).is_some_and(|model_id| !seen_ids.insert(model_id))
         {
             continue;
@@ -6031,6 +6054,30 @@ model_catalog_json = "cc-switch-model-catalog.json"
             Some(&json!({ "app_personality": true })),
             "official-only metadata must survive a same-slug merge"
         );
+    }
+
+    #[test]
+    /// HTTP-only MultiRouter 不能把要求 Responses WebSocket 的官方模型暴露给 Codex。
+    fn merge_codex_models_hides_websocket_required_official_models() {
+        let official_models = json!([
+            { "slug": "gpt-5.6-luna", "prefer_websockets": true },
+            { "slug": "gpt-5.6-terra", "prefer_websockets": false }
+        ]);
+        let routed_models = json!([
+            { "model": "gpt-5.6-luna" },
+            { "model": "gpt-5.6-terra" }
+        ]);
+
+        let merged = merge_codex_models(
+            official_models.as_array().expect("official models"),
+            routed_models.as_array().expect("routed models"),
+        );
+        let ids = merged
+            .iter()
+            .filter_map(codex_model_stable_id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, vec!["gpt-5.6-terra"]);
     }
 
     #[test]

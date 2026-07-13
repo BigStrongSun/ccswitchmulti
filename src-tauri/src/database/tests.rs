@@ -804,6 +804,43 @@ fn model_pricing_seed_repairs_known_outdated_builtin_prices() {
 }
 
 #[test]
+fn schema_model_pricing_includes_new_codex_and_qwen_models() {
+    // 新模型必须在首次初始化时即可计费，不能等用户手工导入价格表。
+    let db = Database::memory().expect("create memory db");
+    let conn = db.conn.lock().expect("lock conn");
+
+    let expected = [
+        ("gpt-5.6-sol", "5", "30", "0.50", "6.25"),
+        ("gpt-5.6-terra", "2.50", "15", "0.25", "3.125"),
+        ("gpt-5.6-luna", "1", "6", "0.10", "1.25"),
+        ("gpt-5.3-codex-spark", "1.75", "14", "0.175", "0"),
+        ("qwen3.6", "0.285", "2.40", "0.15", "0"),
+    ];
+
+    for (model_id, input, output, cache_read, cache_creation) in expected {
+        let actual: (String, String, String, String) = conn
+            .query_row(
+                "SELECT input_cost_per_million, output_cost_per_million,
+                        cache_read_cost_per_million, cache_creation_cost_per_million
+                 FROM model_pricing WHERE model_id = ?1",
+                [model_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("new model pricing should be seeded");
+        assert_eq!(
+            actual,
+            (
+                input.to_string(),
+                output.to_string(),
+                cache_read.to_string(),
+                cache_creation.to_string()
+            ),
+            "{model_id} pricing mismatch"
+        );
+    }
+}
+
+#[test]
 fn ensure_incremental_auto_vacuum_rebuilds_existing_file_db() {
     let temp = NamedTempFile::new().expect("create temp db file");
     let path = temp.path().to_path_buf();
