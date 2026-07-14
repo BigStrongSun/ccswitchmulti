@@ -2185,3 +2185,9 @@
 - 官方 Codex 当前 `models-manager/src/model_info.rs::with_config_overrides` 会把顶层 `model_context_window` 和 `model_auto_compact_token_limit` 无条件覆写每个 `ModelInfo`。官方 `core/src/session/turn.rs::maybe_run_previous_model_inline_compact` 则每个 turn 使用当前 `ModelInfo` 的窗口，并在长窗口切短窗口且历史已超过新窗口时，先使用旧模型执行 `ModelDownshift` 压缩，再运行短模型。不要把全局窗口写成最大值，这会再次破坏下行切换保护。
 - CCSwitchMulti 修复位于 `src-tauri/src/codex_config.rs`：启用 `codexRouting` 或实际 config 已指向 `codex_model_router_v2` 时，目录投影会移除顶层 `model_context_window` 和 `model_auto_compact_token_limit`；live config 合并也会再次移除它们，避免旧配置在首次接管、热切换或恢复时回灌。普通单模型 provider 不受影响，仍保留用户的显式全局覆盖。
 - 验证：`cargo fmt --manifest-path src-tauri/Cargo.toml --check`、两条定向回归、`cargo check --manifest-path src-tauri/Cargo.toml --lib` 和 `cargo test --manifest-path src-tauri/Cargo.toml codex_config::tests:: --lib`（89/89）均通过。回归固定 MultiRouter 删除全局窗口/固定压缩阈值且保留逐模型目录，并固定单模型 provider 保留用户覆盖。
+
+## 2026-07-15 CCSwitchMulti v3.16.5-11 发布结果
+
+- `v3.16.5-11` 已发布到 `BigStrongSun/ccswitchmulti`。annotated tag 解引用到发布源码提交 `667de3dc3c9ecf1fe355a34f56d3dd8296d87102`；正式 Release 为 `draft=false`、`prerelease=false`，地址为 `https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.16.5-11`。
+- 发布内容为 MultiRouter 同一 Codex session 的按当前模型上下文窗口切换根修：短模型切长模型恢复目标模型窗口，长模型切短模型维持官方发送前压缩保护；单模型 provider 的全局覆盖保持不变。
+- Release workflow run `29362697306` 成功，Windows x64、Windows ARM64、Linux x64、Linux ARM64、macOS 五个构建矩阵，以及 Publish GitHub Release、Assemble latest.json 全部通过。Release 共 19 个资产；`latest.json` 已验证为 `version=3.16.5-11`，六个平台键均有下载 URL 和 signature。
