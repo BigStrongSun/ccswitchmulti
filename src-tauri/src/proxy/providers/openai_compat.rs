@@ -90,39 +90,50 @@ pub fn chat_completions_request_to_codex_responses(body: Value) -> Result<Value,
     Ok(result)
 }
 
-/// 将最小 OpenAI Responses 请求归一化为 ChatGPT Codex backend 接受的请求体。
+/// 按 Codex transport 模式归一化 official OAuth Responses 请求。
 ///
 /// 参数:
-/// - `request_body`: 本地代理收到或上游转换得到的 Responses JSON。
+/// - `request_body`: Codex Desktop/CLI 发出的 Responses 请求体。
+/// - `use_responses_lite`: 是否携带 Responses-Lite 内部协商头。
 ///   返回:
-/// - 补齐 `instructions/input/store/stream/tools/parallel_tool_calls/include` 后的 JSON。
+/// - 可转发到 ChatGPT Codex backend 的请求体。
 ///   副作用:
-/// - 无。函数只转换传入的 JSON 值，不访问配置、网络或数据库。
+/// - 无。函数只转换传入 JSON 值。
 ///   边界:
-/// - 调用方必须先确认这是 official managed Codex OAuth 透传路径；普通 OpenAI Responses、
-///   Qwen/DeepSeek Chat 转换路径不应该调用该函数。
-pub(crate) fn normalize_codex_oauth_responses_request(request_body: Value) -> Value {
-    let request_body = normalize_codex_responses_passthrough_request(request_body);
+/// - Lite 模式把 instructions/tools 编码为 input item，不能提升 developer message，
+///   也不能补顶层 instructions/tools；标准模式继续执行原有兼容归一化。
+pub(crate) fn normalize_codex_oauth_responses_request(
+    request_body: Value,
+    use_responses_lite: bool,
+) -> Value {
+    let request_body = normalize_codex_responses_passthrough_request_for_transport(
+        request_body,
+        use_responses_lite,
+    );
     let mut body = match request_body {
         Value::Object(body) => body,
         other => return other,
     };
 
     normalize_codex_oauth_responses_input(&mut body);
-    ensure_codex_oauth_responses_instructions(&mut body);
+    if !use_responses_lite {
+        ensure_codex_oauth_responses_instructions(&mut body);
+    }
     ensure_codex_oauth_reasoning_include(&mut body);
 
     body.insert("store".to_string(), Value::Bool(false));
     body.insert("stream".to_string(), Value::Bool(true));
-    if !body.get("tools").is_some_and(Value::is_array) {
-        body.insert("tools".to_string(), Value::Array(Vec::new()));
-    }
-    if body
-        .get("parallel_tool_calls")
-        .and_then(Value::as_bool)
-        .is_none()
-    {
-        body.insert("parallel_tool_calls".to_string(), Value::Bool(false));
+    if !use_responses_lite {
+        if !body.get("tools").is_some_and(Value::is_array) {
+            body.insert("tools".to_string(), Value::Array(Vec::new()));
+        }
+        if body
+            .get("parallel_tool_calls")
+            .and_then(Value::as_bool)
+            .is_none()
+        {
+            body.insert("parallel_tool_calls".to_string(), Value::Bool(false));
+        }
     }
 
     body.remove("max_output_tokens");
@@ -143,15 +154,115 @@ pub(crate) fn normalize_codex_oauth_responses_request(request_body: Value) -> Va
 ///   边界:
 /// - 用于 Codex 原生 Responses 透传路径；Chat 转换路径已有自己的 role 合并逻辑。
 pub(crate) fn normalize_codex_responses_passthrough_request(request_body: Value) -> Value {
+    normalize_codex_responses_passthrough_request_for_transport(request_body, false)
+}
+
+/// 按 transport 模式归一化 Codex Responses 透传请求。
+///
+/// 参数:
+/// - `request_body`: Codex Desktop/CLI 发出的 Responses 请求体。
+/// - `use_responses_lite`: 是否使用 input 编码 instructions/tools 的 Lite 模式。
+///   返回:
+/// - 标准模式提升控制消息；Lite 模式只处理所有 transport 都安全的 item 字段。
+///   副作用:
+/// - 无。函数只转换传入 JSON 值。
+pub(crate) fn normalize_codex_responses_passthrough_request_for_transport(
+    request_body: Value,
+    use_responses_lite: bool,
+) -> Value {
+    let request_body = normalize_codex_responses_passthrough_items(request_body);
+    if use_responses_lite {
+        return request_body;
+    }
     let mut body = match request_body {
         Value::Object(body) => body,
         other => return other,
     };
 
     normalize_codex_responses_control_messages(&mut body);
+
+    Value::Object(body)
+}
+
+/// 归一化所有 Responses transport 都可安全处理的 input item 字段。
+///
+/// 参数:
+/// - `request_body`: Codex Responses 请求体。
+///   返回:
+/// - function_call arguments 已规整、其余结构保持不变的请求体。
+///   副作用:
+/// - 无。函数只转换传入 JSON 值。
+///   边界:
+/// - 该层不能移动 developer/system message；Responses-Lite 依赖这些 input item
+///   表示 instructions，只有标准 Responses 路径才允许后续提升到顶层。
+fn normalize_codex_responses_passthrough_items(request_body: Value) -> Value {
+    let mut body = match request_body {
+        Value::Object(body) => body,
+        other => return other,
+    };
+
     normalize_codex_responses_function_call_arguments(&mut body);
 
     Value::Object(body)
+}
+
+/// 把 Responses-Lite 请求体降级为标准 Responses 请求体。
+///
+/// 参数:
+/// - `request_body`: 已按 Lite 规则归一化的请求体。
+///   返回:
+/// - `additional_tools` 已恢复到顶层 tools、developer/system message 已提升到
+///   instructions 的标准 Responses 请求体。
+///   副作用:
+/// - 无。函数只转换传入 JSON 值。
+///   边界:
+/// - 只用于上游明确拒绝 Lite header 或命中 Lite fallback 负缓存的重试路径；
+///   同时适用于 official OAuth 和第三方 native Responses，不能套用 OAuth 专属字段清理。
+pub(crate) fn normalize_codex_responses_lite_fallback_request(request_body: Value) -> Value {
+    let mut body = match request_body {
+        Value::Object(body) => body,
+        other => return other,
+    };
+
+    restore_codex_responses_lite_tools(&mut body);
+    normalize_codex_responses_passthrough_request(Value::Object(body))
+}
+
+/// 从 Lite input 中提取 additional_tools 并恢复到标准 Responses 顶层 tools。
+///
+/// 参数:
+/// - `body`: 正在降级的 Lite 请求体。
+///   返回:
+/// - 无，直接修改 input 和 tools。
+///   副作用:
+/// - 无外部副作用。
+fn restore_codex_responses_lite_tools(body: &mut Map<String, Value>) {
+    let Some(Value::Array(items)) = body.remove("input") else {
+        return;
+    };
+
+    let mut retained_items = Vec::with_capacity(items.len());
+    let mut restored_tools = body
+        .remove("tools")
+        .and_then(|tools| tools.as_array().cloned())
+        .unwrap_or_default();
+
+    for item in items {
+        let Value::Object(mut object) = item else {
+            retained_items.push(item);
+            continue;
+        };
+        if object.get("type").and_then(Value::as_str) == Some("additional_tools") {
+            if let Some(Value::Array(tools)) = object.remove("tools") {
+                restored_tools.extend(tools);
+            }
+        } else {
+            retained_items.push(Value::Object(object));
+        }
+    }
+
+    body.insert("input".to_string(), Value::Array(retained_items));
+    body.insert("tools".to_string(), Value::Array(restored_tools));
 }
 
 /// 归一化 Responses `input` 字段，避免 ChatGPT Codex backend 拒绝字符串输入。
@@ -382,7 +493,9 @@ fn codex_responses_input_item_text(object: &Map<String, Value>) -> String {
 fn codex_oauth_input_item_forbids_content(item_type: &str) -> bool {
     matches!(
         item_type,
-        "function_call"
+        "additional_tools"
+            | "item_reference"
+            | "function_call"
             | "function_call_output"
             | "custom_tool_call"
             | "custom_tool_call_output"
@@ -391,6 +504,10 @@ fn codex_oauth_input_item_forbids_content(item_type: &str) -> bool {
             | "tool_search_call"
             | "tool_search_output"
             | "local_shell_call"
+            | "computer_call"
+            | "computer_call_output"
+            | "file_search_call"
+            | "code_interpreter_call"
             | "web_search_call"
             | "image_generation_call"
             | "compaction"
@@ -1563,7 +1680,7 @@ mod tests {
             "max_output_tokens": 32
         });
 
-        let normalized = normalize_codex_oauth_responses_request(body);
+        let normalized = normalize_codex_oauth_responses_request(body, false);
 
         assert_eq!(normalized["instructions"], "You are a helpful assistant.");
         assert_eq!(normalized["store"], false);
@@ -1604,7 +1721,7 @@ mod tests {
             "stream": true
         });
 
-        let normalized = normalize_codex_oauth_responses_request(body);
+        let normalized = normalize_codex_oauth_responses_request(body, false);
 
         assert_eq!(normalized["model"], "gpt-5.5");
         assert_eq!(normalized["instructions"], "existing instructions");
@@ -1659,7 +1776,7 @@ mod tests {
             ]
         });
 
-        let normalized = normalize_codex_oauth_responses_request(body);
+        let normalized = normalize_codex_oauth_responses_request(body, false);
         let input = normalized["input"].as_array().expect("input array");
 
         assert!(input[0].get("content").is_some());
@@ -1704,10 +1821,13 @@ mod tests {
             ]
         }));
 
-        let normalized = normalize_codex_oauth_responses_request(json!({
-            "model": "gpt-5.6-sol",
-            "input": input
-        }));
+        let normalized = normalize_codex_oauth_responses_request(
+            json!({
+                "model": "gpt-5.6-sol",
+                "input": input
+            }),
+            false,
+        );
         let input = normalized["input"].as_array().expect("input array");
 
         assert_eq!(input[20]["type"], "agent_message");
@@ -1721,18 +1841,179 @@ mod tests {
     fn codex_oauth_responses_normalizer_preserves_unknown_item_content() {
         // 新版 Codex 可能先于 CCSwitchMulti 增加 Responses item。未知类型应原样保留，
         // 只有已知禁止 content 的类型才清理，避免再次出现前向兼容性回归。
-        let normalized = normalize_codex_oauth_responses_request(json!({
-            "model": "gpt-5.6-sol",
-            "input": [{
-                "type": "future_agent_event",
-                "content": [{ "type": "input_text", "text": "future payload" }]
-            }]
-        }));
+        let normalized = normalize_codex_oauth_responses_request(
+            json!({
+                "model": "gpt-5.6-sol",
+                "input": [{
+                    "type": "future_agent_event",
+                    "content": [{ "type": "input_text", "text": "future payload" }]
+                }]
+            }),
+            false,
+        );
 
         assert_eq!(
             normalized["input"][0]["content"],
             json!([{ "type": "input_text", "text": "future payload" }])
         );
+    }
+
+    #[test]
+    fn codex_oauth_responses_lite_preserves_input_encoded_instructions_and_tools() {
+        // Responses-Lite 把 tools 和 instructions 编码进 input。代理必须保持该结构，
+        // 不能按标准 Responses 规则提升 developer message 或补顶层空 tools。
+        let normalized = normalize_codex_oauth_responses_request(
+            json!({
+                "model": "gpt-5.6-sol",
+                "input": [
+                    {
+                        "type": "additional_tools",
+                        "role": "developer",
+                        "tools": [{
+                            "type": "namespace",
+                            "name": "collaboration",
+                            "tools": [{ "type": "function", "name": "spawn_agent" }]
+                        }]
+                    },
+                    {
+                        "type": "message",
+                        "role": "developer",
+                        "content": [{
+                            "type": "input_text",
+                            "text": "Use the supplied collaboration tools."
+                        }]
+                    },
+                    {
+                        "type": "agent_message",
+                        "author": "/root/worker",
+                        "recipient": "/root",
+                        "content": [{
+                            "type": "input_text",
+                            "text": "Message Type: FINAL_ANSWER\nPayload:\nDone."
+                        }]
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call-1",
+                        "output": "done",
+                        "content": [{ "type": "output_text", "text": "redundant" }]
+                    }
+                ]
+            }),
+            true,
+        );
+        let input = normalized["input"].as_array().expect("input array");
+
+        assert!(normalized.get("instructions").is_none());
+        assert!(normalized.get("tools").is_none());
+        assert_eq!(input[0]["type"], "additional_tools");
+        assert_eq!(input[0]["tools"][0]["name"], "collaboration");
+        assert_eq!(input[1]["role"], "developer");
+        assert_eq!(
+            input[1]["content"][0]["text"],
+            "Use the supplied collaboration tools."
+        );
+        assert_eq!(input[2]["type"], "agent_message");
+        assert!(input[2].get("content").is_some());
+        assert!(input[3].get("content").is_none());
+    }
+
+    #[test]
+    fn codex_oauth_responses_lite_fallback_restores_standard_request_shape() {
+        // 上游拒绝 Lite header 后不能只去头重发；additional_tools 和 developer
+        // instructions 也必须恢复成标准 Responses 顶层字段。
+        let fallback = normalize_codex_responses_lite_fallback_request(json!({
+            "model": "gpt-5.6-sol",
+            "input": [
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [
+                        { "type": "function", "name": "lookup" },
+                        { "type": "function", "name": "update_plan" }
+                    ]
+                },
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": [{
+                        "type": "input_text",
+                        "text": "Use tools when necessary."
+                    }]
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "continue" }]
+                }
+            ]
+        }));
+        let input = fallback["input"].as_array().expect("input array");
+
+        assert_eq!(fallback["instructions"], "Use tools when necessary.");
+        assert_eq!(fallback["tools"].as_array().map(Vec::len), Some(2));
+        assert_eq!(fallback["tools"][0]["name"], "lookup");
+        assert_eq!(fallback["tools"][1]["name"], "update_plan");
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["role"], "user");
+        assert!(input
+            .iter()
+            .all(|item| item.get("type").and_then(Value::as_str) != Some("additional_tools")));
+    }
+
+    #[test]
+    fn codex_oauth_responses_normalizer_strips_content_from_all_known_non_content_items() {
+        // 这组矩阵固定当前 Codex/OpenAI 已知的非 content item；新增协议类型时必须明确
+        // 选择加入该列表或走未知类型保守保留，不能再依赖隐式 catch-all。
+        let item_types = [
+            "additional_tools",
+            "item_reference",
+            "function_call",
+            "function_call_output",
+            "custom_tool_call",
+            "custom_tool_call_output",
+            "mcp_tool_call",
+            "mcp_tool_call_output",
+            "tool_search_call",
+            "tool_search_output",
+            "local_shell_call",
+            "computer_call",
+            "computer_call_output",
+            "file_search_call",
+            "code_interpreter_call",
+            "web_search_call",
+            "image_generation_call",
+            "compaction",
+            "compaction_trigger",
+            "context_compaction",
+        ];
+        let input = item_types
+            .iter()
+            .map(|item_type| {
+                json!({
+                    "type": item_type,
+                    "call_id": format!("call-{item_type}"),
+                    "content": [{ "type": "output_text", "text": "redundant" }]
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let normalized = normalize_codex_oauth_responses_request(
+            json!({
+                "model": "gpt-5.6-sol",
+                "input": input
+            }),
+            false,
+        );
+        let input = normalized["input"].as_array().expect("input array");
+
+        for (index, item_type) in item_types.iter().enumerate() {
+            assert_eq!(input[index]["type"], *item_type);
+            assert!(
+                input[index].get("content").is_none(),
+                "{item_type} must not keep content"
+            );
+        }
     }
 
     #[test]
@@ -1757,7 +2038,7 @@ mod tests {
             ]
         });
 
-        let normalized = normalize_codex_oauth_responses_request(body);
+        let normalized = normalize_codex_oauth_responses_request(body, false);
         let input = normalized["input"].as_array().expect("input array");
 
         assert!(input[1].get("content").is_none());
@@ -1787,7 +2068,7 @@ mod tests {
             ]
         });
 
-        let normalized = normalize_codex_oauth_responses_request(body);
+        let normalized = normalize_codex_oauth_responses_request(body, false);
         let input = normalized["input"].as_array().expect("input array");
 
         assert!(input[1].get("content").is_none());
@@ -1904,7 +2185,7 @@ mod tests {
             ]
         });
 
-        let normalized = normalize_codex_oauth_responses_request(body);
+        let normalized = normalize_codex_oauth_responses_request(body, false);
         let input = normalized["input"].as_array().expect("input array");
 
         assert_eq!(normalized["instructions"], "Model switch notice.");
@@ -1948,7 +2229,7 @@ mod tests {
             ]
         });
 
-        let normalized = normalize_codex_oauth_responses_request(body);
+        let normalized = normalize_codex_oauth_responses_request(body, false);
         let input = normalized["input"].as_array().expect("input array");
 
         assert_eq!(

@@ -1869,6 +1869,10 @@ impl RequestForwarder {
 
         // 过滤私有参数（以 `_` 开头的字段），防止内部信息泄露到上游
         // 默认使用空白名单，过滤所有 _ 前缀字段
+        let codex_responses_lite_requested = matches!(app_type, AppType::Codex)
+            && headers.contains_key(http::HeaderName::from_static(
+                "x-openai-internal-codex-responses-lite",
+            ));
         let request_body = if should_normalize_codex_oauth_responses_passthrough_body(
             app_type,
             provider,
@@ -1877,7 +1881,10 @@ impl RequestForwarder {
             codex_responses_to_chat,
             codex_responses_to_messages,
         ) {
-            super::providers::openai_compat::normalize_codex_oauth_responses_request(request_body)
+            super::providers::openai_compat::normalize_codex_oauth_responses_request(
+                request_body,
+                codex_responses_lite_requested,
+            )
         } else if should_normalize_codex_responses_passthrough_control_messages(
             app_type,
             provider,
@@ -1886,8 +1893,9 @@ impl RequestForwarder {
             codex_responses_to_chat,
             codex_responses_to_messages,
         ) {
-            super::providers::openai_compat::normalize_codex_responses_passthrough_request(
+            super::providers::openai_compat::normalize_codex_responses_passthrough_request_for_transport(
                 request_body,
+                codex_responses_lite_requested,
             )
         } else {
             request_body
@@ -2390,14 +2398,14 @@ impl RequestForwarder {
 
         // 序列化请求体。GET/HEAD 是 idempotent/safe 方法，按 HTTP 语义不应携带 body；
         // 强行附带 JSON body 会让某些上游（如 Google Gemini 的 models.list）拒绝请求。
-        let body_bytes = if matches!(method, &http::Method::GET | &http::Method::HEAD) {
+        let mut body_bytes = if matches!(method, &http::Method::GET | &http::Method::HEAD) {
             Vec::new()
         } else {
             serde_json::to_vec(&filtered_body).map_err(|e| {
                 ProxyError::Internal(format!("Failed to serialize request body: {e}"))
             })?
         };
-        let request_bytes_len = body_bytes.len();
+        let mut request_bytes_len = body_bytes.len();
 
         // 确保 content-type 存在
         if !ordered_headers.contains_key(http::header::CONTENT_TYPE) {
@@ -2423,22 +2431,37 @@ impl RequestForwarder {
 
         reject_proxy_placeholder_for_managed_account_upstream(&url, &ordered_headers)?;
 
+        let responses_lite_request_model = filtered_body
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or("<none>")
+            .to_string();
+        let responses_lite_fallback_key =
+            codex_responses_lite_fallback_key(&provider.id, &url, &responses_lite_request_model);
+        let responses_lite_fallback_cached = codex_responses_lite_requested
+            && self
+                .codex_responses_lite_fallback_active(&responses_lite_fallback_key)
+                .await;
+        if responses_lite_fallback_cached {
+            filtered_body =
+                super::providers::openai_compat::normalize_codex_responses_lite_fallback_request(
+                    filtered_body,
+                );
+            body_bytes = serde_json::to_vec(&filtered_body).map_err(|error| {
+                ProxyError::Internal(format!(
+                    "Failed to serialize cached Responses-Lite fallback body: {error}"
+                ))
+            })?;
+            request_bytes_len = body_bytes.len();
+        }
+
         // 输出请求信息日志
         let tag = adapter.name();
         let request_model = filtered_body
             .get("model")
             .and_then(|v| v.as_str())
             .unwrap_or("<none>");
-        let responses_lite_fallback_key =
-            codex_responses_lite_fallback_key(&provider.id, &url, request_model);
-        if matches!(app_type, AppType::Codex)
-            && ordered_headers.contains_key(http::HeaderName::from_static(
-                "x-openai-internal-codex-responses-lite",
-            ))
-            && self
-                .codex_responses_lite_fallback_active(&responses_lite_fallback_key)
-                .await
-        {
+        if responses_lite_fallback_cached {
             ordered_headers.remove(http::HeaderName::from_static(
                 "x-openai-internal-codex-responses-lite",
             ));
@@ -2635,7 +2658,16 @@ impl RequestForwarder {
                         ],
                     );
                 }
-                response = send_upstream_request(retry_headers, body_bytes.clone())
+                let retry_body =
+                    super::providers::openai_compat::normalize_codex_responses_lite_fallback_request(
+                        filtered_body.clone(),
+                    );
+                let retry_body_bytes = serde_json::to_vec(&retry_body).map_err(|error| {
+                    ProxyError::Internal(format!(
+                        "Failed to serialize Responses-Lite fallback body: {error}"
+                    ))
+                })?;
+                response = send_upstream_request(retry_headers, retry_body_bytes)
                     .await
                     .inspect_err(|err| {
                         if let Some(trace_id) = codex_trace_id.as_deref() {
