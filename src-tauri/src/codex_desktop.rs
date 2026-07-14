@@ -13,7 +13,7 @@ const DEFAULT_CODEX_DEBUG_PORT: u16 = 9229;
 const CDP_HTTP_TIMEOUT: Duration = Duration::from_secs(2);
 const CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
 const CDP_COMMAND_TIMEOUT: Duration = Duration::from_secs(4);
-const MODEL_PICKER_PATCH_KEY: &str = "__ccSwitchCodexAppCompatibilityV4";
+const MODEL_PICKER_PATCH_KEY: &str = "__ccSwitchCodexAppCompatibilityV5";
 const REMEMBERED_CODEX_DESKTOP_EXECUTABLE_FILENAME: &str = "codex-desktop-executable.json";
 /// Codex App 历史目录与模型兼容层安装命令的执行结果。
 #[derive(Debug, Clone, Serialize)]
@@ -191,21 +191,72 @@ fn codex_desktop_executable_not_found_message() -> String {
 /// 从 cc-switch 生成的 catalog 中读取模型名和 renderer 需要的最小描述。
 fn load_cc_switch_model_catalog_projection() -> Result<CodexModelCatalogProjection, String> {
     let catalog_path = crate::codex_config::get_codex_model_catalog_path();
-    let catalog = crate::config::read_json_file(&catalog_path)
-        .map_err(|error| format!("Failed to read {}: {error}", catalog_path.display()))?;
     let default_model = read_current_codex_default_model();
-    let (model_names, models) = codex_model_entries_from_catalog_value(&catalog);
-    if model_names.is_empty() {
-        return Err(format!(
-            "No models were found in {}",
-            catalog_path.display()
-        ));
+    let mut candidates = Vec::new();
+
+    if let Ok(catalog) = crate::config::read_json_file::<Value>(&catalog_path) {
+        candidates.push(catalog);
     }
-    Ok(CodexModelCatalogProjection {
+
+    let cache_path = crate::codex_config::get_codex_config_dir().join("models_cache.json");
+    if let Ok(cache) = crate::config::read_json_file::<Value>(&cache_path) {
+        if cache.get("etag").and_then(Value::as_str) == Some("cc-switch-model-catalog") {
+            candidates.push(cache);
+        }
+    }
+
+    if let Some(inline_catalog) = read_active_codex_provider_inline_model_catalog() {
+        candidates.push(inline_catalog);
+    }
+
+    for candidate in &candidates {
+        if let Some(projection) =
+            codex_model_catalog_projection_from_value(candidate, default_model.clone())
+        {
+            return Ok(projection);
+        }
+    }
+
+    Err(format!(
+        "No routed models were found in {}, the CCSwitchMulti models cache, or the active provider inline catalog",
+        catalog_path.display()
+    ))
+}
+
+/// 从单个目录值构造 renderer 投影；空目录返回 `None` 以便调用方继续尝试回退源。
+fn codex_model_catalog_projection_from_value(
+    catalog: &Value,
+    default_model: Option<String>,
+) -> Option<CodexModelCatalogProjection> {
+    let (model_names, models) = codex_model_entries_from_catalog_value(catalog);
+    if model_names.is_empty() {
+        return None;
+    }
+    Some(CodexModelCatalogProjection {
         default_model: default_model.or_else(|| model_names.first().cloned()),
         model_names,
         models,
     })
+}
+
+/// 从当前活动 provider 的 TOML 内联 `models` 读取最后一道模型菜单回退。
+///
+/// 生成 live config 时，CCSM 会把同一份路由目录同时投射到 JSON catalog、models cache
+/// 和活动 provider 内联数组。任一 JSON 文件短暂不可读时，内联数组仍能避免整次 Desktop
+/// 会话安装空白名单；这里仅读取活动 provider，不能把未启用 provider 的模型重新注入。
+fn read_active_codex_provider_inline_model_catalog() -> Option<Value> {
+    let text = crate::codex_config::read_codex_config_text().ok()?;
+    let parsed = text.parse::<toml::Value>().ok()?;
+    let provider_id = parsed.get("model_provider").and_then(toml::Value::as_str)?;
+    let models = parsed
+        .get("model_providers")
+        .and_then(|providers| providers.get(provider_id))
+        .and_then(|provider| provider.get("models"))
+        .and_then(toml::Value::as_array)?
+        .clone();
+    serde_json::to_value(models)
+        .ok()
+        .map(|models| json!({ "models": models }))
 }
 
 /// 提取 catalog 内所有 Codex Desktop 可识别的模型条目。
@@ -791,25 +842,32 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
     return await state.historySyncPromise;
   }};
   const appServerMethod = (method, params) => method === "send-cli-request-for-host" && params?.method ? String(params.method) : String(method || "");
+  const isModelListMethod = (method) => method === "list-models-for-host" || method === "model/list";
+  const patchModelListResult = (result) => {{
+    if (result == null) return false;
+    let changed = false;
+    if (Array.isArray(result) && patchModelArray(result, true)) changed = true;
+    if (Array.isArray(result?.data) && patchModelArray(result.data, true)) changed = true;
+    if (Array.isArray(result?.models) && patchModelArray(result.models, true)) changed = true;
+    if (patchModelContainer(result)) changed = true;
+    if (patchObjectGraph(result)) changed = true;
+    return changed;
+  }};
   const patchAppServerResult = (method, result) => {{
-    if (method !== "list-models-for-host") return result;
-    if (Array.isArray(result)) patchModelArray(result, true);
-    if (Array.isArray(result?.data)) patchModelArray(result.data, true);
-    if (Array.isArray(result?.models)) patchModelArray(result.models, true);
-    patchModelContainer(result);
-    patchObjectGraph(result);
+    if (!isModelListMethod(method)) return result;
+    patchModelListResult(result);
     return result;
   }};
   const patchRequestClient = (client) => {{
     if (!client || typeof client.sendRequest !== "function") return false;
-    if (client.__ccSwitchModelRequestPatch === "1") return true;
+    if (client.__ccSwitchModelRequestPatch === "2") return true;
     const original = client.__ccSwitchOriginalSendRequest || client.sendRequest.bind(client);
     client.__ccSwitchOriginalSendRequest = original;
     client.sendRequest = async function ccSwitchPatchedSendRequest(method, params, options) {{
       const result = await original(method, params, options);
       return patchAppServerResult(appServerMethod(method, params), result);
     }};
-    client.__ccSwitchModelRequestPatch = "1";
+    client.__ccSwitchModelRequestPatch = "2";
     return true;
   }};
   const installAppServerPatch = async () => {{
@@ -829,9 +887,9 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
     if (data?.type !== "mcp-response") return false;
     const message = data.message || data.response;
     const requestId = message?.id != null ? String(message.id) : "";
-    if (state.requestIds.size > 0 && !state.requestIds.has(requestId)) return false;
+    if (!requestId || !state.requestIds.has(requestId)) return false;
     state.requestIds.delete(requestId);
-    return patchModelContainer(data) || patchModelContainer(message) || patchModelContainer(message?.result) || patchModelContainer(message?.result?.data);
+    return patchModelListResult(message?.result) || patchModelListResult(message?.result?.data);
   }};
   const installMessagePatch = () => {{
     if (state.messagePatchInstalled) return;
@@ -897,16 +955,16 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
       for (const key of reactFiberKeys(node)) patchObjectGraph(node[key], visited);
     }}
   }};
-  const run = () => {{
+  const run = async () => {{
     installResponsePatch();
     installMessagePatch();
-    void installAppServerPatch();
+    await installAppServerPatch();
     void triggerLocalThreadCatalogSync();
     patchStatsig();
     patchReactState();
   }};
-  run();
-  if (!state.interval) state.interval = setInterval(run, 1500);
+  await run();
+  if (!state.interval) state.interval = setInterval(() => {{ void run(); }}, 1500);
   const historySync = await triggerLocalThreadCatalogSync();
   return {{ status: "ok", modelCount: modelNames().length, available_models: modelNames(), historySync, patchKey }};
 }})()
@@ -1789,6 +1847,32 @@ mod tests {
     }
 
     #[test]
+    /// 主目录为空时，投影 helper 应允许调用方继续使用 models cache 或内联目录回退。
+    fn catalog_projection_skips_empty_source_and_accepts_fallback_source() {
+        let empty = json!({ "models": [] });
+        assert!(
+            codex_model_catalog_projection_from_value(&empty, None).is_none(),
+            "empty primary catalog must not freeze an empty renderer payload"
+        );
+
+        let fallback = json!({
+            "models": [
+                { "model": "gpt-5.6-sol", "display_name": "GPT-5.6-Sol" },
+                { "model": "qwen3.6", "display_name": "Qwen3.6 Local" }
+            ]
+        });
+        let projection =
+            codex_model_catalog_projection_from_value(&fallback, Some("qwen3.6".to_string()))
+                .expect("fallback catalog projection");
+
+        assert_eq!(
+            projection.model_names,
+            vec!["gpt-5.6-sol".to_string(), "qwen3.6".to_string()]
+        );
+        assert_eq!(projection.default_model.as_deref(), Some("qwen3.6"));
+    }
+
+    #[test]
     fn model_picker_unlock_script_patches_renderer_whitelists() {
         let catalog = CodexModelCatalogProjection {
             default_model: Some("qwen3.6".to_string()),
@@ -1803,7 +1887,12 @@ mod tests {
         assert!(script.contains("107580212"));
         assert!(script.contains("list-models-for-host"));
         assert!(script.contains("model/list"));
-        assert!(script.contains("__ccSwitchCodexAppCompatibilityV4"));
+        assert!(script.contains("patchModelArray(result.data, true)"));
+        assert!(script.contains("isModelListMethod(method)"));
+        assert!(script.contains("await installAppServerPatch()"));
+        assert!(script.contains("!state.requestIds.has(requestId)"));
+        assert!(script.contains("__ccSwitchCodexAppCompatibilityV5"));
+        assert!(script.contains("__ccSwitchModelRequestPatch === \"2\""));
         assert!(script.contains("auth.setAuthMethod(\"chatgpt\")"));
     }
 

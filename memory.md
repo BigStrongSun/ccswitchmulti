@@ -2140,3 +2140,11 @@
 - 同一审计发现 Responses-Lite 也被旧 normalizer 改坏：上游 Codex `33cc928d`（2026-06-23）开始让 Lite 请求用 `input[0].type=additional_tools` 携带 tools，并用 developer message item 携带 instructions，顶层 `tools/instructions` 应保持缺失。旧路径无视 Lite header，仍提升 developer message 并补顶层空 tools，破坏官方请求形态。
 - Lite fallback 旧实现只剥 `x-openai-internal-codex-responses-lite` header 后重发原 body；这会形成“标准 header + Lite body”的协议错配。修复后，正常 Lite 转发只做 function arguments 和 OAuth item content 的安全清理，不移动 input instructions/tools；命中 fallback 缓存或上游明确拒绝 Lite 时，同时提取 `additional_tools` 到顶层 tools、提升 developer/system message 到 instructions，再用标准 Responses body 重试。
 - content 规则增加参数化类型矩阵，覆盖 additional_tools/item_reference/function/custom/MCP/tool-search/local-shell/computer/file-search/code-interpreter/web-search/image-generation/compaction 等已知非 content item；message、agent_message 和未知类型继续保守保留。以后新增 item 类型时必须显式选择“已知禁止”或“未知保留”，并同步测试，不能恢复 catch-all allow-list。
+
+## 2026-07-14 Codex 新 Session 模型菜单空列表竞态
+
+- 官方 app-server `model/list` 响应固定为 `{ data, nextCursor }`，并允许合法返回 `data=[]`。Desktop 兼容脚本旧实现只对非空 `data` 调用 `patchModelArray`；首次空响应因此原样进入 renderer 查询缓存，新建 session 会表现为模型选择入口缺失或一直未加载。
+- renderer 修复必须同时覆盖 `list-models-for-host` 和原生 `model/list` 两种方法名，并只处理已记录 request id 的 `mcp-response`。对已确认的模型列表响应，`data=[]`、`models=[]` 和直接数组都允许从 CCSM payload 回填；不能继续用通用 object graph patch 猜测其它 MCP 响应。
+- Desktop 解锁目录投影不能只读取一次 `cc-switch-model-catalog.json` 后失败即安装空 payload。读取顺序改为生成 catalog、带 `etag=cc-switch-model-catalog` 的当前 models cache、活动 `model_provider` 的内联 `models`；回退仍严格限定活动路由目录，不能重新引入未启用 provider。
+- 修改 renderer 兼容脚本行为时必须同步升级 patch key 和 request-client patch 版本；否则已运行 renderer 会因旧 installed 标记跳过新版拦截器，导致“代码已更新但重新解锁仍无效”。
+- 官方 Codex 当前 `model/list` 使用 `RefreshStrategy::OnlineIfUncached`，标准响应类型见 `ModelListResponse { data, next_cursor }`。CCSM 的兼容层应把空列表视为可恢复的目录初始化竞态，而不是永久有效的“没有模型”结果。
