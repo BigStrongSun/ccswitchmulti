@@ -2172,3 +2172,9 @@
 - Release workflow run `29308202757` 成功，Windows x64、Windows ARM64、Linux x64、Linux ARM64、macOS 五个构建矩阵，以及 Publish GitHub Release、Assemble latest.json 全部通过。
 - Release 共 19 个资产，包含 Windows x64/ARM64 setup 与 portable、macOS dmg/tar.gz/zip、Linux x64/ARM64 AppImage/deb/rpm、5 个 updater 签名文件和 `latest.json`。
 - `latest.json` 验证为 `version=3.16.5-9`，平台键包含 `darwin-aarch64`、`darwin-x86_64`、`windows-x86_64`、`windows-aarch64`、`linux-x86_64`、`linux-aarch64`，每个平台都有下载 URL 和 signature。
+
+## 2026-07-15 CCSwitchMulti v3.16.5-10 白屏与数据库兼容发布结果
+
+- `v3.16.5-10` 已发布到 `BigStrongSun/ccswitchmulti`。annotated tag 解引用到发布源码提交 `212c512f0962e6e12e7ccc9ef2e16d8937eab9e3`；正式 Release 为 `draft=false`、`prerelease=false`，地址为 `https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.16.5-10`。
+- 发布内容同时覆盖两条白屏故障链：多路路由向导对历史异常模型目录项的未捕获渲染异常，以及应用根树的未捕获渲染异常恢复页；另将 SQLite schema 从 v12 迁移至 v13，并为旧数据库补齐 `input_token_semantics` 字段，兼容上游 v3.17.0 已写入 v13 的使用统计库。
+- Release workflow run `29354860819` 成功，Windows x64、Windows ARM64、Linux x64、Linux ARM64、macOS 五个构建矩阵，以及 Publish GitHub Release、Assemble latest.json 全部通过。Release 共 19 个资产；`latest.json` 已验证为 `version=3.16.5-10`，六个平台键均有下载 URL 和 signature。
