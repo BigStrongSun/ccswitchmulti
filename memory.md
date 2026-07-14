@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-07-15 CCSwitchMulti v3.16.5-10：数据库 v13 兼容与白屏恢复
+
+- 已发布 `v3.16.5-9` 只支持 schema v12；上游 `f991726f`（2026-07-11）首次把数据库升至 v13。用户曾运行上游 v3.17.0 后再回到 v3.16.5-9，会在启动预检中进入“数据库版本过新”恢复页。
+- 正式兼容修复只回移 schema 子集，不整包 cherry-pick `f991726f` 的 usage/proxy 统计逻辑：`SCHEMA_VERSION=13`、新库两张 usage 表增加 `input_token_semantics`、v12 -> v13 用幂等 `add_column_if_missing` 补列。现有 v13 多出的列不会破坏旧查询；默认值 0 保留旧或未知语义。严禁通过手改 `PRAGMA user_version` 伪造降级。
+- v3.16.5-10 同时包含 `2990291e` 的异常 MultiRouter 目录过滤和 `31a541d5` 的根错误边界。前者修复打开旧方案时 `modelCatalog.models` 的 null/字符串条目导致的 TypeError；后者把未捕获 React 渲染异常转为可见恢复页，而不是纯白。
+- 发布前必须运行 v12 -> v13 迁移单测、MultiRouter/错误边界 Vitest、TypeScript、Prettier、rustfmt、`cargo check --lib`、生产 renderer 构建与 `git diff --check`；不要纳入历史 `output/`、`scripts/logs/` 或用户未归属的本地输出。
+
 ## 2026-07-15 CCSwitchMulti 数据库恢复页与纯白窗口的分流排查
 
 - 必须区分两条故障链：截图中的 `v13 > v12` 是数据库恢复页，不是前端白屏；恢复页由 2026-06-24 的 `e93f7cab` 引入，`v3.16.5-9` 已包含它。因此同版本若窗口纯白且没有恢复页，不能再笼统归因数据库版本过新。

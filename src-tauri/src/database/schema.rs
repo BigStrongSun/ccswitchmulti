@@ -189,6 +189,7 @@ impl Database {
             pricing_model TEXT,
             input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
             cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+            input_token_semantics INTEGER NOT NULL DEFAULT 0,
             input_cost_usd TEXT NOT NULL DEFAULT '0', output_cost_usd TEXT NOT NULL DEFAULT '0',
             cache_read_cost_usd TEXT NOT NULL DEFAULT '0', cache_creation_cost_usd TEXT NOT NULL DEFAULT '0',
             total_cost_usd TEXT NOT NULL DEFAULT '0', latency_ms INTEGER NOT NULL, first_token_ms INTEGER,
@@ -275,6 +276,7 @@ impl Database {
                 output_tokens INTEGER NOT NULL DEFAULT 0,
                 cache_read_tokens INTEGER NOT NULL DEFAULT 0,
                 cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+                input_token_semantics INTEGER NOT NULL DEFAULT 0,
                 total_cost_usd TEXT NOT NULL DEFAULT '0',
                 avg_latency_ms INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (date, app_type, provider_id, model, request_model, pricing_model)
@@ -463,6 +465,11 @@ impl Database {
                         Self::migrate_v11_to_v12(conn)?;
                         Self::set_user_version(conn, 12)?;
                     }
+                    12 => {
+                        log::info!("迁移数据库从 v12 到 v13（记录输入 token 缓存语义）");
+                        Self::migrate_v12_to_v13(conn)?;
+                        Self::set_user_version(conn, 13)?;
+                    }
                     _ => {
                         return Err(AppError::Database(format!(
                             "未知的数据库版本 {version}，无法迁移到 {SCHEMA_VERSION}"
@@ -635,6 +642,7 @@ impl Database {
             request_model TEXT,
             input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
             cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+            input_token_semantics INTEGER NOT NULL DEFAULT 0,
             input_cost_usd TEXT NOT NULL DEFAULT '0', output_cost_usd TEXT NOT NULL DEFAULT '0',
             cache_read_cost_usd TEXT NOT NULL DEFAULT '0', cache_creation_cost_usd TEXT NOT NULL DEFAULT '0',
             total_cost_usd TEXT NOT NULL DEFAULT '0', latency_ms INTEGER NOT NULL, first_token_ms INTEGER,
@@ -1303,6 +1311,30 @@ impl Database {
             [],
         )
         .map_err(|error| AppError::Database(format!("v11 -> v12 创建协作表失败: {error}")))?;
+        Ok(())
+    }
+
+    /// v12 -> v13：记录 input_tokens 是否包含缓存写入。
+    ///
+    /// 默认 0 表示旧版或未知语义。该迁移保持字段兼容，使曾被上游 v3.17.0
+    /// 升级为 v13 的数据库可由 CCSwitchMulti 安全打开。
+    fn migrate_v12_to_v13(conn: &Connection) -> Result<(), AppError> {
+        if Self::table_exists(conn, "proxy_request_logs")? {
+            Self::add_column_if_missing(
+                conn,
+                "proxy_request_logs",
+                "input_token_semantics",
+                "INTEGER NOT NULL DEFAULT 0",
+            )?;
+        }
+        if Self::table_exists(conn, "usage_daily_rollups")? {
+            Self::add_column_if_missing(
+                conn,
+                "usage_daily_rollups",
+                "input_token_semantics",
+                "INTEGER NOT NULL DEFAULT 0",
+            )?;
+        }
         Ok(())
     }
 
@@ -2665,5 +2697,42 @@ impl Database {
             .map_err(|e| AppError::Database(format!("为表 {table} 添加列 {column} 失败: {e}")))?;
         log::info!("已为表 {table} 添加缺失列 {column}");
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 验证 v12 数据库升级后具备完整 v13 列，并且重复执行保持幂等。
+    #[test]
+    fn migrate_v12_to_v13_adds_input_token_semantics_columns() -> Result<(), AppError> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute(
+            "CREATE TABLE proxy_request_logs (request_id TEXT PRIMARY KEY)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE TABLE usage_daily_rollups (date TEXT PRIMARY KEY)",
+            [],
+        )?;
+        Database::set_user_version(&conn, 12)?;
+
+        Database::apply_schema_migrations_on_conn(&conn)?;
+        Database::apply_schema_migrations_on_conn(&conn)?;
+
+        assert_eq!(Database::get_user_version(&conn)?, 13);
+        assert!(Database::has_column(
+            &conn,
+            "proxy_request_logs",
+            "input_token_semantics"
+        )?);
+        assert!(Database::has_column(
+            &conn,
+            "usage_daily_rollups",
+            "input_token_semantics"
+        )?);
+
+        Ok(())
     }
 }
