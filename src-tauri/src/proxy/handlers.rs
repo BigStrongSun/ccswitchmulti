@@ -2093,7 +2093,14 @@ fn resolve_external_openai_compatible_provider(
     profile: &ExternalOpenAiApiProfile,
 ) -> Result<Option<crate::provider::Provider>, ProxyError> {
     match profile.backend_type {
-        ExternalOpenAiApiBackendType::Provider => resolve_external_provider_target(state, profile),
+        ExternalOpenAiApiBackendType::Provider => {
+            let provider = resolve_external_provider_target(state, profile)?;
+            if provider.as_ref().is_some_and(is_codex_router_provider) {
+                resolve_external_codex_router_target(state, body, profile)
+            } else {
+                Ok(provider)
+            }
+        }
         ExternalOpenAiApiBackendType::CodexRouterRoute => {
             resolve_external_codex_router_target(state, body, profile)
         }
@@ -6201,6 +6208,8 @@ mod tests {
         responses_sse_to_response_value, should_handle_as_codex_client,
         should_use_claude_transform_streaming, should_wrap_native_codex_responses_stream,
         transform, upstream_body_parse_error,
+            body_snippet, resolve_external_openai_compatible_provider,
+        };
     };
     use crate::{
         app_config::AppType,
@@ -8827,6 +8836,113 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_deepseek\",\"
             &resolved,
             "/v1/responses"
         ));
+    }
+
+    #[test]
+    fn external_provider_backend_resolves_codex_router_before_protocol_selection() {
+        let db = Arc::new(Database::memory().expect("memory db"));
+        db.save_provider(
+            "codex",
+            &Provider::with_id(
+                "codex-router".to_string(),
+                "Codex Router".to_string(),
+                json!({
+                    "codexRouting": {
+                        "enabled": true,
+                        "defaultRouteId": "official",
+                        "routes": [
+                            {
+                                "id": "official",
+                                "label": "OpenAI Official",
+                                "targetProviderId": "codex-official",
+                                "match": { "prefixes": ["gpt-"] },
+                                "upstream": {
+                                    "apiFormat": "openai_responses",
+                                    "auth": { "source": "managed_codex_oauth" }
+                                }
+                            },
+                            {
+                                "id": "local-chat",
+                                "label": "Local Chat",
+                                "targetProviderId": "codex-local-chat",
+                                "match": { "models": ["qwen3.6"] },
+                                "upstream": {
+                                    "apiFormat": "openai_chat",
+                                    "auth": { "source": "provider_config" }
+                                }
+                            }
+                        ]
+                    }
+                }),
+                None,
+            ),
+        )
+        .expect("save router");
+        let mut official_target = Provider::with_id(
+            "codex-official".to_string(),
+            "OpenAI Official".to_string(),
+            json!({ "auth": {} }),
+            None,
+        );
+        official_target.category = Some("official".to_string());
+        db.save_provider("codex", &official_target)
+            .expect("save official target");
+        db.save_provider(
+            "codex",
+            &Provider::with_id(
+                "codex-local-chat".to_string(),
+                "Local Chat".to_string(),
+                json!({
+                    "base_url": "http://127.0.0.1:5000/v1",
+                    "auth": { "OPENAI_API_KEY": "local" }
+                }),
+                None,
+            ),
+        )
+        .expect("save chat target");
+
+        let state = build_state(db);
+        let profile = ExternalOpenAiApiProfile {
+            enabled: true,
+            backend_type: ExternalOpenAiApiBackendType::Provider,
+            app_type: Some("codex".to_string()),
+            provider_id: Some("codex-router".to_string()),
+            route_id: None,
+            default_model: Some("gpt-5.5".to_string()),
+            listen_address: None,
+            listen_port: None,
+            api_key_hash: None,
+            api_key_prefix: None,
+            api_keys: Vec::new(),
+            updated_at: None,
+        };
+
+        let official = resolve_external_openai_compatible_provider(
+            &state,
+            &json!({ "model": "gpt-5.5" }),
+            &profile,
+        )
+        .expect("resolve official")
+        .expect("official provider");
+        assert!(official.is_codex_oauth());
+        assert_eq!(official.settings_config["codexResolvedRouteId"], "official");
+
+        let local_chat = resolve_external_openai_compatible_provider(
+            &state,
+            &json!({ "model": "qwen3.6" }),
+            &profile,
+        )
+        .expect("resolve local chat")
+        .expect("local chat provider");
+        assert!(!local_chat.is_codex_oauth());
+        assert_eq!(
+            local_chat.settings_config["codexResolvedRouteId"],
+            "local-chat"
+        );
+        assert_eq!(
+            local_chat.meta.and_then(|meta| meta.api_format),
+            Some("openai_chat".to_string())
+        );
     }
 
     fn build_state(db: Arc<Database>) -> ProxyState {
