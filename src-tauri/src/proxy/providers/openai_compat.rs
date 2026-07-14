@@ -307,8 +307,8 @@ fn normalize_codex_oauth_input_items(input: Value) -> Value {
 /// 参数:
 /// - `item`: 一条 Responses input item。
 ///   返回:
-/// - 若是 message item，则保留 content；reasoning item 会把 raw content 归并进 summary；
-///   其它 item 删除多余 `content`，其他字段原样保留。
+/// - message / agent_message 及未知新类型保留 content；reasoning item 会把 raw content
+///   归并进 summary；只有已确认不接受 content 的调用/输出类型才删除该字段。
 ///   副作用:
 /// - 无。
 fn normalize_codex_oauth_input_item(item: Value) -> Value {
@@ -322,7 +322,7 @@ fn normalize_codex_oauth_input_item(item: Value) -> Value {
         .unwrap_or_default();
     if item_type == "reasoning" {
         normalize_codex_oauth_reasoning_item(&mut object);
-    } else if !codex_oauth_input_item_allows_content(item_type) {
+    } else if codex_oauth_input_item_forbids_content(item_type) {
         object.remove("content");
     }
 
@@ -367,16 +367,36 @@ fn codex_responses_input_item_text(object: &Map<String, Value>) -> String {
     })
 }
 
-/// 判断 Codex OAuth backend 的 input item 是否允许原样携带 `content`。
+/// 判断 Codex OAuth backend 的 input item 是否明确禁止携带 `content`。
 ///
 /// 参数:
 /// - `item_type`: Responses input item 的 `type` 字段。
 ///   返回:
-/// - `true` 表示该 item 可以原样保留 content；`false` 表示 content 是冗余字段，应移除。
+/// - `true` 表示该调用/输出类型使用自己的结构化字段，冗余 content 应移除。
 ///   副作用:
 /// - 无。
-fn codex_oauth_input_item_allows_content(item_type: &str) -> bool {
-    item_type == "message"
+///   边界:
+/// - 这里使用“禁止列表”而不是“允许列表”。Codex 会持续增加 Responses item 类型；
+///   例如 Multi-Agent V2 的 `agent_message.content` 是必填字段。未知类型必须保守保留，
+///   否则代理会把未来协议字段静默删掉并制造缺失参数错误。
+fn codex_oauth_input_item_forbids_content(item_type: &str) -> bool {
+    matches!(
+        item_type,
+        "function_call"
+            | "function_call_output"
+            | "custom_tool_call"
+            | "custom_tool_call_output"
+            | "mcp_tool_call"
+            | "mcp_tool_call_output"
+            | "tool_search_call"
+            | "tool_search_output"
+            | "local_shell_call"
+            | "web_search_call"
+            | "image_generation_call"
+            | "compaction"
+            | "compaction_trigger"
+            | "context_compaction"
+    )
 }
 
 /// 规整 official OAuth reasoning input item 的 raw content。
@@ -1649,6 +1669,70 @@ mod tests {
         assert_eq!(input[1]["output"], "done");
         assert_eq!(input[2]["output"]["body"], "patched");
         assert_eq!(input[3]["tools"], json!([]));
+    }
+
+    #[test]
+    fn codex_oauth_responses_normalizer_preserves_agent_message_content() {
+        // Codex Multi-Agent V2 会把任务投递和子 Agent 结果作为 agent_message 写入历史，
+        // 其 content 是 official backend 的必填字段。旧的“非 message 全删 content”
+        // 规则会把第 21 条历史变成 input[20].content 缺失。
+        let mut input = (0..20)
+            .map(|index| {
+                json!({
+                    "type": "message",
+                    "role": "user",
+                    "content": [{
+                        "type": "input_text",
+                        "text": format!("history-{index}")
+                    }]
+                })
+            })
+            .collect::<Vec<_>>();
+        input.push(json!({
+            "type": "agent_message",
+            "author": "/root/worker",
+            "recipient": "/root",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": "Message Type: FINAL_ANSWER\nPayload:\nDone."
+                },
+                {
+                    "type": "encrypted_content",
+                    "encrypted_content": "encrypted-payload"
+                }
+            ]
+        }));
+
+        let normalized = normalize_codex_oauth_responses_request(json!({
+            "model": "gpt-5.6-sol",
+            "input": input
+        }));
+        let input = normalized["input"].as_array().expect("input array");
+
+        assert_eq!(input[20]["type"], "agent_message");
+        assert_eq!(input[20]["author"], "/root/worker");
+        assert_eq!(input[20]["recipient"], "/root");
+        assert_eq!(input[20]["content"][0]["type"], "input_text");
+        assert_eq!(input[20]["content"][1]["type"], "encrypted_content");
+    }
+
+    #[test]
+    fn codex_oauth_responses_normalizer_preserves_unknown_item_content() {
+        // 新版 Codex 可能先于 CCSwitchMulti 增加 Responses item。未知类型应原样保留，
+        // 只有已知禁止 content 的类型才清理，避免再次出现前向兼容性回归。
+        let normalized = normalize_codex_oauth_responses_request(json!({
+            "model": "gpt-5.6-sol",
+            "input": [{
+                "type": "future_agent_event",
+                "content": [{ "type": "input_text", "text": "future payload" }]
+            }]
+        }));
+
+        assert_eq!(
+            normalized["input"][0]["content"],
+            json!([{ "type": "input_text", "text": "future payload" }])
+        );
     }
 
     #[test]

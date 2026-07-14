@@ -2126,3 +2126,10 @@
 - `v3.16.5-8` 已于 2026-07-14 发布到 `BigStrongSun/ccswitchmulti`：tag 解引用提交为 `27bdcdfa5e3733c0f9cd3fa37bb5192606ba8e23`，Release workflow run `29276721016` 成功，Release 为 `draft=false`、`prerelease=false`。
 - Release 共 19 个资产，覆盖 Windows x64/ARM64 setup 与 portable、macOS dmg/tar.gz/zip、Linux x64/ARM64 AppImage/deb/rpm、5 个 updater 签名文件和 `latest.json`。
 - `latest.json` 验证为 `version=3.16.5-8`，平台键包含 `darwin-aarch64`、`darwin-x86_64`、`windows-x86_64`、`windows-aarch64`、`linux-x86_64`、`linux-aarch64`，每个平台都有下载 URL 和 signature。
+
+## 2026-07-14 Codex Multi-Agent Agent Message Content Boundary
+
+- CCSwitchMulti `v3.16.5-7` / `v3.16.5-8` 在 official OpenAI OAuth `/responses` 路径可能返回 `Missing required parameter: 'input[20].content'`。该错误不依赖本机日志即可从请求归一化链路复现：`normalize_codex_oauth_input_item` 过去只允许 `type=message` 保留 `content`，其余未知类型一律删除。
+- OpenAI Codex 在 2026-06-12 起把 Multi-Agent V2 投递表示为 `type=agent_message`，字段包括必填的 `author`、`recipient`、`content`；`content` 可同时包含 `input_text` 和 `encrypted_content`。`gpt-5.6-sol` 使用多 Agent 后，历史中的第 21 条恰好可能是这种 item，旧 normalizer 会把合法请求改坏后再转发。
+- 根修复不是给缺失字段补空数组，也不是停止清理所有 tool content。official OAuth normalizer 改为明确的“禁止 content 类型列表”：function/custom/MCP/tool-search/local-shell/web-search/image-generation/compaction 等调用或输出类型继续删除冗余 `content`；`reasoning` 继续转换到 `summary`；`message`、`agent_message` 和未来未知类型保守保留原始 `content`。
+- 回归测试 `codex_oauth_responses_normalizer_preserves_agent_message_content` 构造 21 条历史并断言 `input[20]` 的明文和加密 content 均保留；`codex_oauth_responses_normalizer_preserves_unknown_item_content` 固定未知类型的前向兼容回退。原有 tool output 和 reasoning content 清理测试继续约束私有 backend 的严格边界。
