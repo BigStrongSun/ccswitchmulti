@@ -154,9 +154,13 @@ export function readWizardModelCatalog(
   if (!Array.isArray(models)) {
     return [];
   }
-  return models
-    .map((model) => model as CodexCatalogModel)
-    .filter((model) => typeof model.model === "string" && model.model.trim());
+  return models.filter(
+    (model): model is CodexCatalogModel =>
+      typeof model === "object" &&
+      model !== null &&
+      typeof (model as CodexCatalogModel).model === "string" &&
+      Boolean((model as CodexCatalogModel).model.trim()),
+  );
 }
 
 // 判断 provider 是否是 MultiRouter 方案；向导只把普通 provider 当作上游模型源。

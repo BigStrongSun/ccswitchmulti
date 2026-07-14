@@ -969,7 +969,8 @@ export function CodexMultiRouterWizard({
   const hasUnauthenticatedCodexOAuthSources =
     hasCodexOAuthSources && !isCodexOauthStatusLoading && !hasCodexOauthAccount;
   const stepIndex = STEPS.findIndex((step) => step.key === flowState.stepKey);
-  const currentStep = STEPS[stepIndex];
+  // 防御旧状态或异常跳转写入未知步骤，确保向导始终有可渲染的首步。
+  const currentStep = STEPS[stepIndex] ?? STEPS[0];
   const CurrentStepIcon = currentStep.icon;
   const configIssues = useMemo(
     () => getWizardConfigIssues(draftSources),
@@ -1027,10 +1028,11 @@ export function CodexMultiRouterWizard({
     setDraftSources(providerModelSources);
     setSelectedSourceIds(providerModelSources.map((provider) => provider.id));
     setDraftPlanName(existingPlan?.name ?? CODEX_MULTI_ROUTER_DEFAULT_NAME);
+    // 复用统一的安全目录读取，历史方案中混入 null/原始值时不能让整个窗口白屏。
     setCatalogModelOrder(
-      existingPlan?.settingsConfig?.modelCatalog?.models?.map(
-        (model: CodexCatalogModel) => model.model,
-      ) ?? null,
+      existingPlan
+        ? readWizardModelCatalog(existingPlan).map((model) => model.model)
+        : null,
     );
     setDraftSpawnAgentModels(
       existingPlan?.settingsConfig?.modelCatalog?.spawnAgentModels?.slice(

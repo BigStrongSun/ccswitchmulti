@@ -1946,25 +1946,27 @@ function App() {
         </DialogContent>
       </Dialog>
 
-      <CodexMultiRouterWizard
-        open={isCodexMultiRouterWizardOpen}
-        providers={codexWizardProviders}
-        onOpenChange={setIsCodexMultiRouterWizardOpen}
-        onCreateProvider={() => {
-          setActiveApp("codex");
-          setIsAddOpen(true);
-        }}
-        onOpenProviderConfig={(provider) => {
-          setIsCodexMultiRouterWizardOpen(false);
-          setActiveApp("codex");
-          setCurrentView("providers");
-          setEditingProvider(provider);
-        }}
-        onOpenWorkspace={(provider, tab) =>
-          openCodexRouterWorkspace(provider, tab)
-        }
-        onEnablePlan={handleEnableCodexMultiRouterPlan}
-      />
+      {isCodexMultiRouterWizardOpen && (
+        <CodexMultiRouterWizard
+          open
+          providers={codexWizardProviders}
+          onOpenChange={setIsCodexMultiRouterWizardOpen}
+          onCreateProvider={() => {
+            setActiveApp("codex");
+            setIsAddOpen(true);
+          }}
+          onOpenProviderConfig={(provider) => {
+            setIsCodexMultiRouterWizardOpen(false);
+            setActiveApp("codex");
+            setCurrentView("providers");
+            setEditingProvider(provider);
+          }}
+          onOpenWorkspace={(provider, tab) =>
+            openCodexRouterWorkspace(provider, tab)
+          }
+          onEnablePlan={handleEnableCodexMultiRouterPlan}
+        />
+      )}
 
       <EditProviderDialog
         open={Boolean(editingProvider)}

@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-07-15 CCSwitchMulti 首次启动与 MultiRouter 向导白屏修复
+
+- 现象：群友反馈全新安装首次打开白屏，以及进入“创建多路路由”后白屏。
+- 根因链：`App.tsx` 无条件挂载关闭状态的 `CodexMultiRouterWizard`，首次启动也会执行向导的 OAuth 查询和模型目录投影；向导的 `readWizardModelCatalog()` 与已有方案初始化直接访问 `model.model`，历史/异常 `modelCatalog.models` 只要混入 `null` 或原始值即可在 React render 阶段抛出。项目没有 ErrorBoundary，因此异常表现为整个窗口白屏。
+- 修复规则：关闭时不挂载向导；所有目录读取统一过滤非对象、null、空模型名；已有方案初始化只使用安全读取入口；未知步骤回退到首步。这样空/坏历史目录只丢弃坏条目，不会阻断首次主界面或向导。
+- 回归：`tests/lib/codexMultiRouterWizard.test.ts` 覆盖 null、字符串、空 model 条目；`tests/components/CodexMultiRouterWizard.test.tsx` 覆盖已有 MultiRouter 方案目录含无效条目时仍可渲染。验证命令与提交信息以本轮完成记录为准。
+
 ## 2026-07-14 GitHub Issue #12/#15/#16 triage
 
 - Issue #15 报告版本为 `v3.16.5-2`。MultiRouter 不按会话固定 Provider；每次请求都会根据当前 body 中的 `model` 重新解析 route。`v3.16.5-5` 已修复模型目录重复、未选 Provider 注入和新模型元数据同步，因此先要求升级 `v3.16.5-7`、完整重启 Codex Desktop，并提供同一 trace 的 `route_resolved`、`upstream_status`、`upstream_error` 和切换前后模型名。没有这组证据时，不删除跨 route fallback，也不把客户端缓存猜测当成根因。
@@ -2105,6 +2112,7 @@
 - `observe` 只看数据。`enforce` 使用最近 10 分钟内、所有已同步设备中每个官方窗口的最高 utilization；窗口剩余不高于阈值时，`RequestForwarder` 只拒绝经过本机 CCSwitchMulti 的 Codex 请求（HTTP 429）。未通过 CCSwitchMulti 的旁路请求无法被控制，任何 UI 或文档不得承诺全账号强制控制。
 - 用户文档位于 `docs/guides/codex-multi-device-quota-collaboration-zh.md`。首次接入必须在每台设备刷新官方额度、设置独立设备名并同步；不要复制 settings/配置目录，否则相同 `deviceId` 会使设备报告互相覆盖。
 - 验证覆盖：`quota_collaboration` 有 29 项 Rust 测试，包含内存 DB 的设备持久化/隔离、observe 和 stale 不拦截、最高官方 utilization 触发约束，以及本地 mock WebDAV 的 MKCOL/PUT/PROPFIND/GET 两设备发现路径；前端 `CodexUsagePage.test.tsx` 覆盖未配置引导、约束确认和设置保存 payload。不要让测试读取真实 `auth.json` 或写入真实 settings。
+
 ## 2026-07-14 Issue #12 商汤 Chat Provider 协议误判根修
 
 - 真实根因：`explain_codex_responses_upstream_protocol` 的已知 Chat-only URL 列表缺少 `sensenova.cn`，导致 `token.sensenova.cn/v1` 在协议信号缺失时退回 Native Responses；MultiRouter 物化目标 Provider 时也会丢失 route 的 `apiFormat`，并可能被目标 Provider 的陈旧 meta 再次覆盖。

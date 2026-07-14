@@ -15,6 +15,7 @@ import {
   isWizardCatalogOnlyModelSource,
   isWizardCodexOAuthSource,
   mergeFetchedModelsIntoWizardProvider,
+  readWizardModelCatalog,
   resolveWizardModelNameCollisions,
 } from "@/lib/codexMultiRouterWizard";
 
@@ -30,6 +31,20 @@ function provider(overrides: Partial<Provider>): Provider {
 }
 
 describe("codexMultiRouterWizard helpers", () => {
+  it("忽略历史目录中的空值和非对象条目，保留有效模型", () => {
+    const source = provider({
+      settingsConfig: {
+        modelCatalog: {
+          models: [null, "stale", { model: "  " }, { model: "deepseek-chat" }],
+        },
+      } as Provider["settingsConfig"],
+    });
+
+    expect(readWizardModelCatalog(source)).toEqual([
+      { model: "deepseek-chat" },
+    ]);
+  });
+
   it("deduplicates default Codex OAuth sources while keeping the best catalog source", () => {
     const sources = defaultWizardModelSources([
       provider({

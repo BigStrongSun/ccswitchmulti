@@ -141,6 +141,35 @@ describe("CodexMultiRouterWizard", () => {
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 
+  it("renders an existing plan when its historical model catalog contains invalid entries", () => {
+    renderWithQueryClient(
+      <CodexMultiRouterWizard
+        open
+        providers={[
+          provider({
+            id: "existing-plan",
+            name: "Existing Plan",
+            settingsConfig: {
+              codexRouting: { enabled: true, routes: [] },
+              modelCatalog: {
+                models: [null, "stale", { model: "deepseek-chat" }],
+              },
+            } as Provider["settingsConfig"],
+          }),
+          provider(),
+        ]}
+        onOpenChange={vi.fn()}
+        onCreateProvider={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+        onEnablePlan={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByRole("heading", { name: "理解 MultiRouter" }),
+    ).toBeInTheDocument();
+  });
+
   it("guides official Codex sources to configure ChatGPT OAuth in provider config step", () => {
     renderWithQueryClient(
       <CodexMultiRouterWizard
