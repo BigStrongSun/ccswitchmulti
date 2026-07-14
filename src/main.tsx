@@ -1,6 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
+import { AppErrorBoundary } from "./components/AppErrorBoundary";
 import { DatabaseUpgrade } from "./components/DatabaseUpgrade";
 import { UpdateProvider } from "./contexts/UpdateContext";
 import "./index.css";
@@ -106,8 +107,10 @@ async function bootstrap() {
       <QueryClientProvider client={queryClient}>
         <ThemeProvider defaultTheme="system" storageKey="cc-switch-theme">
           <UpdateProvider>
-            <App />
-            <Toaster />
+            <AppErrorBoundary>
+              <App />
+              <Toaster />
+            </AppErrorBoundary>
           </UpdateProvider>
         </ThemeProvider>
       </QueryClientProvider>

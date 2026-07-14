@@ -1,11 +1,12 @@
 # CC Switch Repository Memory
 
-## 2026-07-15 CCSwitchMulti 首次启动与 MultiRouter 向导白屏修复
+## 2026-07-15 CCSwitchMulti 数据库恢复页与纯白窗口的分流排查
 
-- 现象：群友反馈全新安装首次打开白屏，以及进入“创建多路路由”后白屏。
-- 根因链：`App.tsx` 无条件挂载关闭状态的 `CodexMultiRouterWizard`，首次启动也会执行向导的 OAuth 查询和模型目录投影；向导的 `readWizardModelCatalog()` 与已有方案初始化直接访问 `model.model`，历史/异常 `modelCatalog.models` 只要混入 `null` 或原始值即可在 React render 阶段抛出。项目没有 ErrorBoundary，因此异常表现为整个窗口白屏。
-- 修复规则：关闭时不挂载向导；所有目录读取统一过滤非对象、null、空模型名；已有方案初始化只使用安全读取入口；未知步骤回退到首步。这样空/坏历史目录只丢弃坏条目，不会阻断首次主界面或向导。
-- 回归：`tests/lib/codexMultiRouterWizard.test.ts` 覆盖 null、字符串、空 model 条目；`tests/components/CodexMultiRouterWizard.test.tsx` 覆盖已有 MultiRouter 方案目录含无效条目时仍可渲染。验证命令与提交信息以本轮完成记录为准。
+- 必须区分两条故障链：截图中的 `v13 > v12` 是数据库恢复页，不是前端白屏；恢复页由 2026-06-24 的 `e93f7cab` 引入，`v3.16.5-9` 已包含它。因此同版本若窗口纯白且没有恢复页，不能再笼统归因数据库版本过新。
+- 已发布 `v3.16.5-9` 中可确认的 MultiRouter 纯白根因来自 `8afa3fb2093c57710b6b63d433a29b8d327fc817`（2026-07-01，`fix(codex): separate multirouter catalog and subagent ordering`）：向导初始化直接执行 `existingPlan.settingsConfig.modelCatalog.models.map(model => model.model)`。历史方案若含 `null`、字符串等非对象条目会抛 `TypeError`；根组件此前没有 React ErrorBoundary，最终只显示纯白。
+- `2990291e` 修复该已确认路径：向导仅在打开时挂载，`readWizardModelCatalog()` 过滤非对象、null、空模型名，已有方案初始化复用安全读取，未知状态机步骤回退首步。该修复解释“打开/创建 MultiRouter 或复用旧方案后白”，但不能证明真正空数据目录的首次启动白屏由此引起；空目录没有异常 `modelCatalog`，仍须按该用户的日志和数据定向复现。
+- 新增 `AppErrorBoundary` 并在 `main.tsx` 包裹正常 App 根树。后续渲染/React 提交阶段异常不再退化成空白，而显示可重新加载、可提供错误详情的恢复页，并在控制台记录组件栈。异步网络/事件错误仍应由各调用点处理。
+- 回归：`tests/lib/codexMultiRouterWizard.test.ts` 覆盖 null、字符串、空 model 条目；`tests/components/CodexMultiRouterWizard.test.tsx` 覆盖异常历史目录；`tests/components/AppErrorBoundary.test.tsx` 覆盖子树渲染异常显示恢复页。首次启动仍白的用户需要收集 `%USERPROFILE%\\.cc-switch\\logs\\cc-switch.log`、应用版本与脱敏 provider 数据后再归因，不能混同为 v13 数据库问题。
 
 ## 2026-07-14 GitHub Issue #12/#15/#16 triage
 
