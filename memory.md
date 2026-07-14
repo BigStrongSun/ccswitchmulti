@@ -2148,3 +2148,11 @@
 - Desktop 解锁目录投影不能只读取一次 `cc-switch-model-catalog.json` 后失败即安装空 payload。读取顺序改为生成 catalog、带 `etag=cc-switch-model-catalog` 的当前 models cache、活动 `model_provider` 的内联 `models`；回退仍严格限定活动路由目录，不能重新引入未启用 provider。
 - 修改 renderer 兼容脚本行为时必须同步升级 patch key 和 request-client patch 版本；否则已运行 renderer 会因旧 installed 标记跳过新版拦截器，导致“代码已更新但重新解锁仍无效”。
 - 官方 Codex 当前 `model/list` 使用 `RefreshStrategy::OnlineIfUncached`，标准响应类型见 `ModelListResponse { data, next_cursor }`。CCSM 的兼容层应把空列表视为可恢复的目录初始化竞态，而不是永久有效的“没有模型”结果。
+
+## 2026-07-14 CCSwitchMulti v3.16.5-9 发布结果
+
+- `v3.16.5-9` 已发布到 `BigStrongSun/ccswitchmulti`，tag 解引用的发布构建源码提交为 `c26237a1ad09cd6c21b7d3fd899786d99014b7f8`；正式 Release 为 `draft=false`、`prerelease=false`。
+- 发布前 main CI run `29307562657` 成功，覆盖前端 typecheck、format、unit tests，以及后端 rustfmt、Clippy 和完整 Rust tests。
+- Release workflow run `29308202757` 成功，Windows x64、Windows ARM64、Linux x64、Linux ARM64、macOS 五个构建矩阵，以及 Publish GitHub Release、Assemble latest.json 全部通过。
+- Release 共 19 个资产，包含 Windows x64/ARM64 setup 与 portable、macOS dmg/tar.gz/zip、Linux x64/ARM64 AppImage/deb/rpm、5 个 updater 签名文件和 `latest.json`。
+- `latest.json` 验证为 `version=3.16.5-9`，平台键包含 `darwin-aarch64`、`darwin-x86_64`、`windows-x86_64`、`windows-aarch64`、`linux-x86_64`、`linux-aarch64`，每个平台都有下载 URL 和 signature。
