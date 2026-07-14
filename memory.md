@@ -2178,3 +2178,10 @@
 - `v3.16.5-10` 已发布到 `BigStrongSun/ccswitchmulti`。annotated tag 解引用到发布源码提交 `212c512f0962e6e12e7ccc9ef2e16d8937eab9e3`；正式 Release 为 `draft=false`、`prerelease=false`，地址为 `https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.16.5-10`。
 - 发布内容同时覆盖两条白屏故障链：多路路由向导对历史异常模型目录项的未捕获渲染异常，以及应用根树的未捕获渲染异常恢复页；另将 SQLite schema 从 v12 迁移至 v13，并为旧数据库补齐 `input_token_semantics` 字段，兼容上游 v3.17.0 已写入 v13 的使用统计库。
 - Release workflow run `29354860819` 成功，Windows x64、Windows ARM64、Linux x64、Linux ARM64、macOS 五个构建矩阵，以及 Publish GitHub Release、Assemble latest.json 全部通过。Release 共 19 个资产；`latest.json` 已验证为 `version=3.16.5-10`，六个平台键均有下载 URL 和 signature。
+
+## 2026-07-15 MultiRouter 同 Session 模型上下文窗口切换根修
+
+- 用户报告的“短上下文模型切到长上下文模型仍是短窗口，反向切换又可能向短模型注入超长历史”根因是 CCSwitchMulti 旧提交 `3748fe8a7be113b01965c7e46cbe3e6b9688dfd6` 把顶层 `model_context_window` 当作跨 provider 的用户设置保留。对单模型 provider 合理，但 MultiRouter 将多个模型放入同一 `codex_model_router_v2` provider 后，该顶层值会覆盖 catalog 中所有模型的 `context_window`。
+- 官方 Codex 当前 `models-manager/src/model_info.rs::with_config_overrides` 会把顶层 `model_context_window` 和 `model_auto_compact_token_limit` 无条件覆写每个 `ModelInfo`。官方 `core/src/session/turn.rs::maybe_run_previous_model_inline_compact` 则每个 turn 使用当前 `ModelInfo` 的窗口，并在长窗口切短窗口且历史已超过新窗口时，先使用旧模型执行 `ModelDownshift` 压缩，再运行短模型。不要把全局窗口写成最大值，这会再次破坏下行切换保护。
+- CCSwitchMulti 修复位于 `src-tauri/src/codex_config.rs`：启用 `codexRouting` 或实际 config 已指向 `codex_model_router_v2` 时，目录投影会移除顶层 `model_context_window` 和 `model_auto_compact_token_limit`；live config 合并也会再次移除它们，避免旧配置在首次接管、热切换或恢复时回灌。普通单模型 provider 不受影响，仍保留用户的显式全局覆盖。
+- 验证：`cargo fmt --manifest-path src-tauri/Cargo.toml --check`、两条定向回归、`cargo check --manifest-path src-tauri/Cargo.toml --lib` 和 `cargo test --manifest-path src-tauri/Cargo.toml codex_config::tests:: --lib`（89/89）均通过。回归固定 MultiRouter 删除全局窗口/固定压缩阈值且保留逐模型目录，并固定单模型 provider 保留用户覆盖。

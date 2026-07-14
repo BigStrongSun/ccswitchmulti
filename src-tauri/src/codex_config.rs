@@ -1677,6 +1677,46 @@ fn set_codex_model_catalog_projection_fields(
     Ok(doc.to_string())
 }
 
+/// 判断当前配置是否启用了至少一条 MultiRouter 路由。
+///
+/// 多路路由把不同模型放在同一个 Codex provider 下。此时顶层窗口或压缩阈值会被
+/// Codex 无条件套用到每个模型，必须让每个 catalog 模型自己的元数据生效。
+fn codex_multi_router_is_enabled(settings: &Value) -> bool {
+    let Some(routing) = settings.get("codexRouting") else {
+        return false;
+    };
+    if routing
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .is_some_and(|enabled| !enabled)
+    {
+        return false;
+    }
+    routing
+        .get("routes")
+        .and_then(Value::as_array)
+        .is_some_and(|routes| !routes.is_empty())
+}
+
+/// 移除会覆盖逐模型目录元数据的 MultiRouter 顶层字段。
+///
+/// 这只用于 CCSwitchMulti 托管的多模型路由。普通单模型 provider 仍可使用用户手写的
+/// 顶层覆盖；不能把窗口改成最大值，否则长窗口切短窗口时会失去官方的预压缩保护。
+fn remove_multi_router_context_overrides(doc: &mut DocumentMut) {
+    doc.as_table_mut().remove("model_context_window");
+    doc.as_table_mut().remove("model_auto_compact_token_limit");
+}
+
+/// 判断已解析的 Codex TOML 是否实际指向 CCSwitchMulti 的多模型路由 provider。
+///
+/// 接管写入会先改写 `model_provider`，因此不能只依赖 settings 中是否还保留
+/// `codexRouting`；首次接管或热切换也必须清除全局覆盖。
+fn codex_document_uses_multi_router(doc: &DocumentMut) -> bool {
+    active_codex_model_provider_id(doc)
+        .as_deref()
+        .is_some_and(|id| id.eq_ignore_ascii_case(CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID))
+}
+
 /// 设置或清理由 CC Switch 管理的顶层 `web_search` 禁用项。
 fn set_codex_native_web_search_field(config_text: &str, disable: bool) -> Result<String, AppError> {
     let mut doc = config_text
@@ -2300,6 +2340,16 @@ pub fn prepare_codex_config_text_with_model_catalog(
             Some(&specs),
             Some(&catalog),
         )?;
+        let mut doc = config_text
+            .parse::<DocumentMut>()
+            .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
+        let config_text =
+            if codex_multi_router_is_enabled(settings) || codex_document_uses_multi_router(&doc) {
+                remove_multi_router_context_overrides(&mut doc);
+                doc.to_string()
+            } else {
+                config_text
+            };
         let disable_web_search = profile == CodexCatalogToolProfile::NativeResponses
             && codex_native_gateway_rejects_web_search(&config_text);
         let config_text = set_codex_native_web_search_field(&config_text, disable_web_search)?;
@@ -2706,6 +2756,12 @@ fn remove_codex_provider_owned_fields_missing_from_provider(
     }
 
     remove_stale_cc_switch_model_provider_sections(live_doc, provider_doc);
+
+    // `codex_model_router_v2` 的模型会在同一 session 内切换。顶层覆盖会掩盖
+    // catalog 的逐模型窗口，进而阻止 Codex 在长窗口切短窗口时按旧模型预压缩。
+    if codex_document_uses_multi_router(provider_doc) {
+        remove_multi_router_context_overrides(live_doc);
+    }
 }
 
 // 空 official provider 配置表示回到 Codex 默认 provider，同时保留用户全局配置。
@@ -3953,6 +4009,7 @@ model = "gpt-5"
         let live_config = r#"model = "gpt-5.5"
 model_provider = "openai"
 model_context_window = 262144
+model_auto_compact_token_limit = 240000
 approval_policy = "on-request"
 experimental_bearer_token = "old-top-level-token"
 
@@ -4017,12 +4074,13 @@ experimental_bearer_token = "provider-token"
                 .and_then(|value| value.as_str()),
             Some("cc-switch-model-catalog.json")
         );
-        assert_eq!(
-            parsed
-                .get("model_context_window")
-                .and_then(|value| value.as_integer()),
-            Some(262_144),
-            "provider switches should preserve user-owned context display when the provider omits it"
+        assert!(
+            parsed.get("model_context_window").is_none(),
+            "MultiRouter must not retain a global window that overrides every routed model"
+        );
+        assert!(
+            parsed.get("model_auto_compact_token_limit").is_none(),
+            "MultiRouter must not retain a fixed compaction threshold across differently sized models"
         );
         assert!(
             parsed.get("experimental_bearer_token").is_none(),
@@ -4096,6 +4154,34 @@ experimental_bearer_token = "provider-token"
                 .and_then(|value| value.get("experimental_bearer_token"))
                 .and_then(|value| value.as_str()),
             Some("provider-token")
+        );
+
+        let single_provider_config = r#"model = "gpt-5.4"
+model_provider = "custom"
+
+[model_providers.custom]
+name = "Single Provider"
+base_url = "https://single.example/v1"
+wire_api = "responses"
+"#;
+        let single_provider =
+            merge_codex_provider_config_texts(live_config, single_provider_config)
+                .expect("merge single provider config");
+        let single_provider: toml::Value =
+            toml::from_str(&single_provider).expect("parse single provider config");
+        assert_eq!(
+            single_provider
+                .get("model_context_window")
+                .and_then(|value| value.as_integer()),
+            Some(262_144),
+            "single-model providers must keep an explicit user window override"
+        );
+        assert_eq!(
+            single_provider
+                .get("model_auto_compact_token_limit")
+                .and_then(|value| value.as_integer()),
+            Some(240_000),
+            "single-model providers must keep an explicit user compaction override"
         );
     }
 
@@ -6393,6 +6479,8 @@ model_catalog_json = "cc-switch-model-catalog.json"
             }
         });
         let config = r#"model_provider = "custom"
+model_context_window = 128000
+model_auto_compact_token_limit = 96000
 
 [model_providers.custom]
 base_url = "http://127.0.0.1:15721/v1"
@@ -6406,6 +6494,16 @@ base_url = "http://127.0.0.1:15721/v1"
         .expect("prepare config");
         assert!(prepared.contains("model_catalog_json"));
         let prepared_toml: toml::Value = toml::from_str(&prepared).expect("parse prepared config");
+        assert!(
+            prepared_toml.get("model_context_window").is_none(),
+            "MultiRouter must expose each catalog model window instead of one global override"
+        );
+        assert!(
+            prepared_toml
+                .get("model_auto_compact_token_limit")
+                .is_none(),
+            "a fixed compact limit would mask the selected model's own budget"
+        );
         let provider_models = prepared_toml
             .get("model_providers")
             .and_then(|providers| providers.get("custom"))
