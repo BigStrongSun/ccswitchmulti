@@ -2220,6 +2220,12 @@
 - Release 共 19 个资产。`latest.json` 验证为 `version=3.16.5-14`，包含 `darwin-aarch64`、`darwin-x86_64`、`windows-x86_64`、`windows-aarch64`、`linux-x86_64`、`linux-aarch64`，每个平台都有非空下载 URL 和 signature。
 - 发布快照的干净工作树验证通过：Provider payload 与 AppErrorBoundary 共 4 项测试、TypeScript typecheck、renderer 生产构建、app_exit_monitor 2 项测试及 `cargo check --lib`。本地未提交的 `/responses/compact` 代理改动未进入发布提交或 tag。
 
+## 2026-07-16 MultiRouter 手动 Chat 协议被旧 Provider 快照回滚
+
+- 用户在“配置核心参数”里把 Qwen 明确选成 Chat Completions，但“生成路由规则”仍显示 `openai_responses`；有时连续点击几次又会成功。这种非确定性不是协议探测结果本身，而是父层 provider query refetch 与向导草稿写入之间的竞态。
+- `CodexMultiRouterWizard` 打开后的同步 effect 原本用 `nextSourceById.get(id) ?? currentById.get(id)` 合并 provider，导致任何父层 refetch 都优先采用数据库旧快照，覆盖用户刚写入草稿的 `apiFormat/apiFormatSource=manual`，也可能覆盖刚刷新的模型目录或别名处理结果。
+- 根修边界：向导打开期间，已选 source 以 `currentById` 草稿为事实来源，父层快照只补充草稿中尚不存在的 source，并继续同步删除项；从 Provider 配置页返回时向导会关闭再打开，由初始化 effect 读取最新数据库配置，不需要在打开期间破坏草稿。
+
 ## 2026-07-15 v3.16.5-11 远端白屏报告复盘与前端 IPC 防线
 
 - 用户回传的 `cc-switch.log` 显示 v3.16.5-11 后端完成数据库、provider、代理和 Codex 历史初始化；`codex-router.log` 中大多数请求正常得到上游 200。React/WebView 的 `Cannot read properties of null (reading 'settingsConfig')` 不会自动写入 Rust 日志，因此“后端日志无报错”不能推翻前端白屏报告，也不能据此归因网络或本机配置。

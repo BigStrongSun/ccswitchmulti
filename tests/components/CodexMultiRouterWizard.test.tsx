@@ -248,6 +248,57 @@ describe("CodexMultiRouterWizard", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("keeps a manually selected Chat draft and route when a stale provider refetch arrives", async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const staleQwen = provider({
+      id: "qwen-local",
+      name: "Qwen Local",
+      meta: { apiFormat: "openai_responses" },
+      settingsConfig: {
+        base_url: "https://qwen.example/v1",
+        auth: { OPENAI_API_KEY: "sk-qwen" },
+        apiFormat: "openai_responses",
+        modelCatalog: { models: [{ model: "qwen3.6" }] },
+      },
+    });
+    const renderWizard = (source: Provider) => (
+      <QueryClientProvider client={queryClient}>
+        <CodexMultiRouterWizard
+          open
+          providers={[source]}
+          onOpenChange={vi.fn()}
+          onCreateProvider={vi.fn()}
+          onOpenProviderConfig={vi.fn()}
+          onOpenWorkspace={vi.fn()}
+          onEnablePlan={vi.fn()}
+        />
+      </QueryClientProvider>
+    );
+    const { rerender } = render(renderWizard(staleQwen));
+
+    fireEvent.click(screen.getByRole("button", { name: "配置核心参数" }));
+    fireEvent.click(screen.getByLabelText("Qwen Local API 格式"));
+    fireEvent.click(screen.getByRole("option", { name: "Chat Completions" }));
+
+    expect(screen.getByLabelText("Qwen Local API 格式")).toHaveTextContent(
+      "Chat Completions",
+    );
+    expect(screen.getByText(/协议选择：用户已锁定/)).toBeInTheDocument();
+
+    // 模拟后台 provider query 在用户选择之后返回数据库里的旧 Responses 快照。
+    rerender(renderWizard({ ...staleQwen }));
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Qwen Local API 格式")).toHaveTextContent(
+        "Chat Completions",
+      );
+    });
+    fireEvent.click(screen.getByRole("button", { name: "生成路由规则" }));
+    expect(screen.getByText("openai_chat")).toBeInTheDocument();
+  });
+
   it("marks catalog-only providers as continuable instead of requiring full config", () => {
     renderWithQueryClient(
       <CodexMultiRouterWizard

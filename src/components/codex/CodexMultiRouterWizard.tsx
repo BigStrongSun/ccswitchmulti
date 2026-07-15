@@ -1056,7 +1056,11 @@ export function CodexMultiRouterWizard({
     });
   }, [existingPlan, open, providerModelSources]);
 
-  // 向导打开后只同步已选 source 的最新配置；取消选择不能因父组件重新渲染而被重新加入。
+  // 向导打开后只同步 source 的增删；已存在 source 必须保留向导草稿。
+  // 父层 provider 查询可能在用户手动选择协议、刷新模型或处理别名后完成 refetch，
+  // 如果优先采用 refetch 快照，就会把这些尚未发布的草稿改动还原成数据库旧值。
+  // provider 配置页会先关闭向导，重新打开时由初始化 effect 读取最新数据库配置，
+  // 因此打开期间不需要用父层快照覆盖当前草稿。
   useEffect(() => {
     if (!open || !initializedOpenRef.current) return;
     setSavedPlan(existingPlan ?? null);
@@ -1070,7 +1074,7 @@ export function CodexMultiRouterWizard({
       return selectedSourceIds
         .map(
           (providerId) =>
-            nextSourceById.get(providerId) ?? currentById.get(providerId),
+            currentById.get(providerId) ?? nextSourceById.get(providerId),
         )
         .filter((provider): provider is Provider => Boolean(provider));
     });
