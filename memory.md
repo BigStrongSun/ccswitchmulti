@@ -2253,3 +2253,12 @@
 - 当前 `~/.codex/config.toml` 已由 Codex CLI 成功解析，活动 provider 为内置 `openai`，没有 CCSM 本地 URL、`PROXY_MANAGED` 或自定义 catalog 残留；本次现场不能归因为当前 TOML 损坏。
 - 当前 Codex 现场约 17 个已加载任务产生 16 组 MCP/plugin runtime，约 84 个 MCP 后代进程、约 3 GB RSS。失效远程 Docs MCP 是单点启动延迟，但任务级 MCP 重复实例化是当前资源放大的主因；这是 Codex runtime 生命周期问题，CCSM 不应通过改写历史制造更多“最近活跃”任务来进一步放大。
 - CCSM 仍需后续处理：Codex 使用量同步器对每个已修改 rollout 从首行重放；代理接管会临时删除整个 `[model_providers]` 后只创建 CCSM provider，恢复过度依赖备份；代理只覆盖模型 API，MCP、OAuth、插件和 Desktop 服务仍直连，UI 与文档必须明确该边界。
+
+## 2026-07-16 CCSwitchMulti v3.16.5-15 MultiRouter 协议竞态修复发布结果
+
+- `v3.16.5-15` 已发布到 `BigStrongSun/ccswitchmulti`。annotated tag 的本地与远端解引用均为发布源码提交 `c800c546ae662d3d01004c6532c75c95b267f59b`；正式 Release 为 `draft=false`、`prerelease=false`，地址为 `https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.16.5-15`。
+- 本版修复 MultiRouter 向导中手动选择 Chat Completions 后偶尔又显示 Responses 的竞态：向导打开期间以当前草稿为事实来源，父层 Provider query refetch 只补充尚未进入草稿的 source，不再用旧数据库快照覆盖用户刚选的 `apiFormat/apiFormatSource=manual`。
+- 发布前独立干净快照通过定向 UI/lib 回归 52/52、TypeScript typecheck、renderer 生产构建、Rust `cargo check --lib`、Prettier、rustfmt 与 `git diff --check`。main CI run `29434619832` 的 Frontend Checks、Backend Checks、Clippy 和完整测试全部成功。
+- Release workflow run `29435226376` 成功；Windows x64、Windows ARM64、Linux x64、Linux ARM64、macOS 构建矩阵，以及 Publish GitHub Release、Assemble latest.json 全部通过。macOS DMG 的公证与代码签名校验成功。
+- Release 共 19 个资产。`latest.json` 验证为 `version=3.16.5-15`，包含 `darwin-aarch64`、`darwin-x86_64`、`windows-x86_64`、`windows-aarch64`、`linux-x86_64`、`linux-aarch64`，每个平台都有非空下载 URL 和 signature。
+- 本地未提交的 `/responses/compact` 代理改动及旧输出目录没有进入发布提交、tag 或本次发布结果记录提交。
