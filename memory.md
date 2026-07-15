@@ -2270,3 +2270,11 @@
 - 根修后，预检按运行时相同的字段优先级解析新旧 route schema，并从同一应用的 Provider map 查找目标；目标存在时优先按目标 Provider 判断托管 OAuth 或 Codex adapter 可提取的真实 Base URL/认证。显式引用缺失目标时必须不可用，不能被 route 上残留的 managed OAuth 标记误判为可用；没有目标引用的旧 route 继续兼容内联凭据和 Router 外壳凭据。
 - Codex Provider 的运行时能力不能用只服务于额度查询的 `resolve_usage_credentials()` 代替：后者主要解析 config TOML，真实 Codex adapter 还支持顶层 `base_url/baseURL`、auth/env/direct key。第三方 API 的可用性检查已改为复用 adapter 提取规则，同时将托管 OAuth 与静态凭据视为并列认证路径，空配置的官方 seed 仍保持可用。
 - 回归覆盖：整个 Router 可聚合官方 OAuth 与 `targetProviderId` 指向的 Qwen 静态 Provider；两条 route 均可用并贡献模型；缺失目标 Provider 时 Router 和 route 均不可用且返回可诊断错误。验证通过 External API 16/16、Codex 目标物化 6/6、外部 Router 解析 2/2、TypeScript typecheck、Prettier、rustfmt 和 `cargo check --lib`。
+
+## 2026-07-16 CCSM 重启后 Codex 托管 OAuth 账号消失诊断（未修复）
+
+- 用户反馈从 v3.16.5-13 连续升级并频繁重启 CCSM/Codex 后，连接测试可能先报 401，随后认证中心直接显示未认证。`v3.16.5-13..v3.16.5-15` 在 `codex_oauth_auth.rs`、统一 auth commands、Codex OAuth commands 和 manager 初始化处没有差异，因此不是 -14/-15 升级脚本新引入的认证库迁移或清理。
+- 当前 `CodexOAuthManager` 只把 access token 放在内存，重启后的新 manager 必然没有 access token；第一次模型目录、额度或真实代理请求会调用 `get_valid_token_for_account()` 并立即使用磁盘 refresh token。连接测试/页面自动模型查询因此可以成为重启后的首次刷新触发器。
+- `refresh_with_token()` 当前把 token 端点任意 HTTP 401/403 都折叠成 `RefreshTokenInvalid`，不检查 OAuth error body；调用方随后立即执行 `remove_invalid_account_after_refresh_failure()` -> `remove_account()` -> `save_to_disk()`，把账号从 `codex_oauth_auth.json` 永久删除。认证页的离线状态只看本地账号集合，所以删除后直接显示未认证；这解释了“先 401，随后认证页账号消失”，不是单纯 UI 状态错误。
+- 本机日志也显示每次进程启动后均出现“从磁盘加载 1 个账号”后紧跟“access_token 需要刷新”，且同一启动时刻可能有多个调用同时到达刷新入口；每账号锁能合并网络刷新，但不能消除重启必刷。现场是否为 refresh token 真正轮换/撤销、并行旧进程竞争，还是 token 端点/WAF/代理的暂时 401/403，需要用户机器的 `cc-switch.log` 中 `[CodexOAuth]` 邻近日志确认；不要索取或导出含 refresh token 的 `codex_oauth_auth.json`。
+- 根修方向不能只延迟刷新或给 UI 加提示：认证存储不得因一次未解析的 401/403 做破坏性删除；应按 OAuth error 语义识别确定的 `invalid_grant`，保留暂时失败账号并暴露可重试状态，同时解决重启后的短期 token 恢复/refresh token 轮换及多进程单写者问题。修复后需回归“重启复用有效短期 token”“暂时 401/403 不删账号”“明确 invalid_grant 才进入失效态”“并发刷新只提交最新轮换 token”。
