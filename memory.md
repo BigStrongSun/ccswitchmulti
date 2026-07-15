@@ -2191,3 +2191,9 @@
 - `v3.16.5-11` 已发布到 `BigStrongSun/ccswitchmulti`。annotated tag 解引用到发布源码提交 `667de3dc3c9ecf1fe355a34f56d3dd8296d87102`；正式 Release 为 `draft=false`、`prerelease=false`，地址为 `https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.16.5-11`。
 - 发布内容为 MultiRouter 同一 Codex session 的按当前模型上下文窗口切换根修：短模型切长模型恢复目标模型窗口，长模型切短模型维持官方发送前压缩保护；单模型 provider 的全局覆盖保持不变。
 - Release workflow run `29362697306` 成功，Windows x64、Windows ARM64、Linux x64、Linux ARM64、macOS 五个构建矩阵，以及 Publish GitHub Release、Assemble latest.json 全部通过。Release 共 19 个资产；`latest.json` 已验证为 `version=3.16.5-11`，六个平台键均有下载 URL 和 signature。
+
+## 2026-07-15 Provider settingsConfig 为 null 的启动崩溃根修
+
+- 截图中的错误 `Cannot read properties of null (reading 'settingsConfig')` 不是 v3.16.5-10 已处理的 MultiRouter 目录渲染异常，而是另一条数据契约破坏链。前端 `Provider` 类型声明 `settingsConfig: Record<string, any>` 并在多个启动路径按对象读取；SQLite DAO `get_all_providers` / `get_provider_by_id` 过去对损坏 JSON 用 `Value::Null` 兜底，也会把合法字符串 `"null"` 原样返回，从而将不合法的 `settingsConfig=null` 送入首屏。
+- 根修在 `src-tauri/src/database/dao/providers.rs`：所有 provider 配置解析、列表读取、按 ID 读取、OMO 当前 provider 读取、保存和局部更新都统一规范化为 JSON object。`null`、数组、标量、空/损坏 JSON 一律成为 `{}`，有效对象不变；因此旧库无需手改，也不会再被新写入重新污染。
+- 回归：DAO parser 覆盖 `null`、数组、标量、损坏文本和有效对象；内存 SQLite 覆盖列表读取、按 ID 读取及写回 `null` 后实际持久化为 `{}`。`cargo fmt --check`、`cargo test --manifest-path src-tauri/Cargo.toml database::dao::providers::tests --lib`（2/2）和 `cargo check --manifest-path src-tauri/Cargo.toml --lib` 通过。本机 `~/.cc-switch/cc-switch.db` 只读扫描未发现当前坏记录，说明需修的是跨用户历史数据入口而非本机现存库。

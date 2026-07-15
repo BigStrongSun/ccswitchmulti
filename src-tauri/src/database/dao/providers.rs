@@ -5,6 +5,24 @@ use indexmap::IndexMap;
 use rusqlite::params;
 use std::collections::{HashMap, HashSet};
 
+/// 将持久化的供应商配置规范化为 JSON 对象。
+///
+/// Provider 的前端契约要求 `settingsConfig` 始终可按对象读取。旧版导入、
+/// 手工数据库编辑或历史写入可能留下 JSON `null`、标量、数组或损坏文本；
+/// 它们不能越过 DAO 边界，否则首屏渲染会在读取配置字段时崩溃。
+fn normalize_provider_settings_config(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(_) => value,
+        _ => serde_json::Value::Object(serde_json::Map::new()),
+    }
+}
+
+/// 解析 SQLite 中的供应商配置，并保证返回值符合 Provider 的对象契约。
+fn parse_provider_settings_config(settings_config_str: &str) -> serde_json::Value {
+    let parsed = serde_json::from_str(settings_config_str).unwrap_or(serde_json::Value::Null);
+    normalize_provider_settings_config(parsed)
+}
+
 type OmoProviderRow = (
     String,
     String,
@@ -43,8 +61,7 @@ impl Database {
                 let meta_str: String = row.get(10)?;
                 let in_failover_queue: bool = row.get(11)?;
 
-                let settings_config =
-                    serde_json::from_str(&settings_config_str).unwrap_or(serde_json::Value::Null);
+                let settings_config = parse_provider_settings_config(&settings_config_str);
                 let meta: ProviderMeta = serde_json::from_str(&meta_str).unwrap_or_default();
 
                 Ok((
@@ -150,7 +167,7 @@ impl Database {
                 let meta_str: String = row.get(9)?;
                 let in_failover_queue: bool = row.get(10)?;
 
-                let settings_config = serde_json::from_str(&settings_config_str).unwrap_or(serde_json::Value::Null);
+                let settings_config = parse_provider_settings_config(&settings_config_str);
                 let meta: ProviderMeta = serde_json::from_str(&meta_str).unwrap_or_default();
 
                 Ok(Provider {
@@ -197,6 +214,7 @@ impl Database {
         let is_update = existing.is_some();
         let (is_current, in_failover_queue) =
             existing.unwrap_or((false, provider.in_failover_queue));
+        let settings_config = normalize_provider_settings_config(provider.settings_config.clone());
 
         if is_update {
             tx.execute(
@@ -216,7 +234,7 @@ impl Database {
                 WHERE id = ?13 AND app_type = ?14",
                 params![
                     provider.name,
-                    serde_json::to_string(&provider.settings_config).map_err(|e| {
+                    serde_json::to_string(&settings_config).map_err(|e| {
                         AppError::Database(format!("Failed to serialize settings_config: {e}"))
                     })?,
                     provider.website_url,
@@ -246,7 +264,7 @@ impl Database {
                     provider.id,
                     app_type,
                     provider.name,
-                    serde_json::to_string(&provider.settings_config)
+                    serde_json::to_string(&settings_config)
                         .map_err(|e| AppError::Database(format!("Failed to serialize settings_config: {e}")))?,
                     provider.website_url,
                     provider.category,
@@ -319,9 +337,10 @@ impl Database {
         conn.execute(
             "UPDATE providers SET settings_config = ?1 WHERE id = ?2 AND app_type = ?3",
             params![
-                serde_json::to_string(settings_config).map_err(|e| AppError::Database(format!(
-                    "Failed to serialize settings_config: {e}"
-                )))?,
+                serde_json::to_string(&normalize_provider_settings_config(settings_config.clone()))
+                    .map_err(|e| AppError::Database(format!(
+                        "Failed to serialize settings_config: {e}"
+                    )))?,
                 provider_id,
                 app_type
             ],
@@ -471,11 +490,7 @@ impl Database {
                 Err(e) => return Err(AppError::Database(e.to_string())),
             };
 
-        let settings_config = serde_json::from_str(&settings_config_str).map_err(|e| {
-            AppError::Database(format!(
-                "Failed to parse {category} provider settings_config (provider_id={id}): {e}"
-            ))
-        })?;
+        let settings_config = parse_provider_settings_config(&settings_config_str);
         let meta: crate::provider::ProviderMeta = if meta_str.trim().is_empty() {
             crate::provider::ProviderMeta::default()
         } else {
@@ -704,6 +719,80 @@ impl Database {
         self.save_provider(app_type_str, &provider)?;
 
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// 回归旧数据库中合法 JSON `null`、标量、数组或损坏文本，读取时不能把非对象配置暴露给前端。
+    #[test]
+    fn provider_settings_config_parser_only_returns_objects() {
+        for raw_config in ["null", "[]", "\"legacy\"", "not-json"] {
+            assert_eq!(
+                parse_provider_settings_config(raw_config),
+                json!({}),
+                "non-object config {raw_config:?} should normalize to an empty object"
+            );
+        }
+
+        assert_eq!(
+            parse_provider_settings_config(r#"{"env":{"ANTHROPIC_API_KEY":"sk-test"}}"#),
+            json!({"env":{"ANTHROPIC_API_KEY":"sk-test"}})
+        );
+    }
+
+    /// 验证列表读取、按 ID 读取和局部更新共享同一对象契约，避免首屏再次收到 `settingsConfig: null`。
+    #[test]
+    fn provider_dao_normalizes_non_object_settings_config_on_read_and_write() {
+        let db = Database::memory().expect("create in-memory database");
+        {
+            let conn = db.conn.lock().expect("lock database");
+            conn.execute(
+                "INSERT INTO providers (id, app_type, name, settings_config, meta, in_failover_queue)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    "legacy-null-config",
+                    "codex",
+                    "Legacy null config",
+                    "null",
+                    "{}",
+                    false
+                ],
+            )
+            .expect("insert legacy provider");
+        }
+
+        let providers = db
+            .get_all_providers("codex")
+            .expect("list providers with legacy config");
+        assert_eq!(
+            providers
+                .get("legacy-null-config")
+                .expect("legacy provider should be listed")
+                .settings_config,
+            json!({})
+        );
+
+        let provider = db
+            .get_provider_by_id("legacy-null-config", "codex")
+            .expect("load provider by id")
+            .expect("legacy provider should exist");
+        assert_eq!(provider.settings_config, json!({}));
+
+        db.update_provider_settings_config("codex", "legacy-null-config", &serde_json::Value::Null)
+            .expect("normalize null config on update");
+        let conn = db.conn.lock().expect("lock database");
+        let stored_config: String = conn
+            .query_row(
+                "SELECT settings_config FROM providers WHERE id = ?1 AND app_type = ?2",
+                params!["legacy-null-config", "codex"],
+                |row| row.get(0),
+            )
+            .expect("read normalized stored config");
+        assert_eq!(stored_config, "{}");
     }
 }
 
