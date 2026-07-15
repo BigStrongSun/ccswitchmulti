@@ -2194,9 +2194,16 @@
 
 ## 2026-07-15 Provider settingsConfig 为 null 的启动崩溃根修
 
-- 截图中的错误 `Cannot read properties of null (reading 'settingsConfig')` 不是 v3.16.5-10 已处理的 MultiRouter 目录渲染异常，而是另一条数据契约破坏链。前端 `Provider` 类型声明 `settingsConfig: Record<string, any>` 并在多个启动路径按对象读取；SQLite DAO `get_all_providers` / `get_provider_by_id` 过去对损坏 JSON 用 `Value::Null` 兜底，也会把合法字符串 `"null"` 原样返回，从而将不合法的 `settingsConfig=null` 送入首屏。
+- 截图中的错误 `Cannot read properties of null (reading 'settingsConfig')` 不是 v3.16.5-10 已处理的 MultiRouter 目录渲染异常，而是另一条 Provider 运行时契约破坏链。仅凭这条 JavaScript 文案不能区分“provider 条目本身为 null”和“上游先返回了 settingsConfig=null、随后某处派生出空 provider”；前端 `Provider` 类型声明不会校验真实 IPC payload，因此两层边界都必须收紧，不能只在两个报错组件旁加空值判断。
 - 根修在 `src-tauri/src/database/dao/providers.rs`：所有 provider 配置解析、列表读取、按 ID 读取、OMO 当前 provider 读取、保存和局部更新都统一规范化为 JSON object。`null`、数组、标量、空/损坏 JSON 一律成为 `{}`，有效对象不变；因此旧库无需手改，也不会再被新写入重新污染。
 - 回归：DAO parser 覆盖 `null`、数组、标量、损坏文本和有效对象；内存 SQLite 覆盖列表读取、按 ID 读取及写回 `null` 后实际持久化为 `{}`。`cargo fmt --check`、`cargo test --manifest-path src-tauri/Cargo.toml database::dao::providers::tests --lib`（2/2）和 `cargo check --manifest-path src-tauri/Cargo.toml --lib` 通过。本机 `~/.cc-switch/cc-switch.db` 只读扫描未发现当前坏记录，说明需修的是跨用户历史数据入口而非本机现存库。
+
+## 2026-07-15 v3.16.5-11 远端白屏报告复盘与前端 IPC 防线
+
+- 用户回传的 `cc-switch.log` 显示 v3.16.5-11 后端完成数据库、provider、代理和 Codex 历史初始化；`codex-router.log` 中大多数请求正常得到上游 200。React/WebView 的 `Cannot read properties of null (reading 'settingsConfig')` 不会自动写入 Rust 日志，因此“后端日志无报错”不能推翻前端白屏报告，也不能据此归因网络或本机配置。
+- `app-exit-events.jsonl` 中 2026-07-15 11:18:55 的 `cannot move state from Destroyed` 是 tao 0.34.6 Windows 事件循环 panic；随后 11:19:58 重启并可正常主动退出。这是独立的窗口生命周期异常，不是 `settingsConfig` React 空引用的证据，后续应另案复现，不能混入本次 Provider 数据契约修复。
+- `7b7d9679` 已提交且随 v3.16.5-12 发布，负责数据库 DAO 的 `settings_config` 对象化；此前工作区中另有未提交的前端防线。正式收口应放在 `providersApi.getAll()` 统一 IPC 边界，而不是只放首页 `useProvidersQuery`：根 payload 非对象、provider 条目为 null/缺 id/缺 name 时隔离，`settingsConfig` 非对象时归一 `{}`，从而覆盖 query、mutation、设置页等所有直接调用者。
+- `AppErrorBoundary` 继续作为最后一道恢复与取证边界：未捕获渲染异常显示恢复页，并把错误消息、组件栈和发生时间保存到带版本的本地诊断键 `ccswitchmulti.lastRenderError.v1`。它不替代数据边界修复，也不捕获异步事件或原生窗口 panic。
 
 ## 2026-07-15 CCSwitchMulti v3.16.5-12 发布结果
 

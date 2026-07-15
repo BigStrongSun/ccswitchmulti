@@ -12,7 +12,12 @@ interface AppErrorBoundaryProps {
 interface AppErrorBoundaryState {
   /** 捕获到的渲染异常；为空代表子树可正常显示。 */
   error: Error | null;
+  /** React 提供的组件调用栈，用于定位实际崩溃组件。 */
+  componentStack: string;
 }
+
+/** 根渲染异常诊断在本机浏览器存储中的键名。 */
+const APP_RENDER_ERROR_DIAGNOSTIC_KEY = "ccswitchmulti.lastRenderError.v1";
 
 /**
  * 把未捕获的 React 渲染异常转换为可恢复页面，避免整个 WebView 只剩白屏。
@@ -24,7 +29,7 @@ export class AppErrorBoundary extends Component<
   AppErrorBoundaryState
 > {
   /** 初始化错误状态，首次渲染默认透传子组件。 */
-  public state: AppErrorBoundaryState = { error: null };
+  public state: AppErrorBoundaryState = { error: null, componentStack: "" };
 
   /**
    * 从子树错误派生降级状态，让下一次渲染展示恢复界面。
@@ -33,7 +38,7 @@ export class AppErrorBoundary extends Component<
    * @returns 用于替换当前状态的错误对象。
    */
   public static getDerivedStateFromError(error: Error): AppErrorBoundaryState {
-    return { error };
+    return { error, componentStack: "" };
   }
 
   /**
@@ -43,10 +48,26 @@ export class AppErrorBoundary extends Component<
    * @param errorInfo React 提供的组件栈信息。
    */
   public componentDidCatch(error: Error, errorInfo: ErrorInfo): void {
-    console.error("[AppErrorBoundary] 未捕获的 React 渲染错误", {
+    const componentStack = errorInfo.componentStack ?? "";
+    const diagnostic = {
       error,
-      componentStack: errorInfo.componentStack,
-    });
+      componentStack,
+      occurredAt: new Date().toISOString(),
+    };
+    console.error("[AppErrorBoundary] 未捕获的 React 渲染错误", diagnostic);
+    this.setState({ componentStack });
+    try {
+      localStorage.setItem(
+        APP_RENDER_ERROR_DIAGNOSTIC_KEY,
+        JSON.stringify({
+          message: error.message,
+          componentStack,
+          occurredAt: diagnostic.occurredAt,
+        }),
+      );
+    } catch (storageError) {
+      console.error("[AppErrorBoundary] 保存本地渲染诊断失败", storageError);
+    }
   }
 
   /**
@@ -60,6 +81,7 @@ export class AppErrorBoundary extends Component<
     }
 
     const detail = this.state.error.message || "未提供错误详情";
+    const componentStack = this.state.componentStack.trim();
     return (
       <main className="flex min-h-screen items-center justify-center bg-background p-6 text-foreground">
         <section className="w-full max-w-lg border border-destructive/40 bg-card p-6 shadow-sm">
@@ -75,6 +97,11 @@ export class AppErrorBoundary extends Component<
               <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words border bg-muted/40 p-3 text-xs text-muted-foreground">
                 {detail}
               </pre>
+              {componentStack && (
+                <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words border bg-muted/40 p-3 text-xs text-muted-foreground">
+                  {componentStack}
+                </pre>
+              )}
               <Button type="button" onClick={() => window.location.reload()}>
                 <RefreshCw className="h-4 w-4" />
                 重新加载

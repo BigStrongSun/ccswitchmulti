@@ -26,5 +26,9 @@ describe("AppErrorBoundary", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("测试渲染异常")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "重新加载" })).toBeEnabled();
+    expect(screen.getByText(/ThrowDuringRender/)).toBeInTheDocument();
+    expect(localStorage.getItem("ccswitchmulti.lastRenderError.v1")).toContain(
+      "测试渲染异常",
+    );
   });
 });

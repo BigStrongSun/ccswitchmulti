@@ -58,9 +58,71 @@ export interface ClaudeDesktopDefaultRoute {
   supports1m: boolean;
 }
 
+/** 判断未知值是否为可作为 Provider 配置使用的普通对象。 */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * 校验 `get_providers` 的运行时返回值，并收敛到前端 Provider 契约。
+ *
+ * Tauri IPC 是前后端信任边界，TypeScript 返回类型不会校验实际 payload。异常条目
+ * 不能进入任一 React 调用路径；非对象配置统一归一为空对象，缺少稳定标识或名称的
+ * provider 则在 API 边界隔离。该函数位于共享 API 层，避免 query、mutation 和设置页
+ * 各自遗漏防护。
+ */
+export function normalizeProvidersPayload(
+  payload: unknown,
+): Record<string, Provider> {
+  if (!isRecord(payload)) {
+    console.error("[providers] get_providers 返回了非对象 payload", {
+      payload,
+    });
+    return {};
+  }
+
+  const providers: Record<string, Provider> = {};
+  for (const [entryKey, candidate] of Object.entries(payload)) {
+    if (
+      !isRecord(candidate) ||
+      typeof candidate.id !== "string" ||
+      !candidate.id.trim() ||
+      typeof candidate.name !== "string"
+    ) {
+      console.error("[providers] 已隔离无效 provider 条目", {
+        entryKey,
+        candidate,
+      });
+      continue;
+    }
+
+    const settingsConfig = isRecord(candidate.settingsConfig)
+      ? candidate.settingsConfig
+      : {};
+    if (!isRecord(candidate.settingsConfig)) {
+      console.error("[providers] 已归一化非对象 settingsConfig", {
+        entryKey,
+        providerId: candidate.id,
+        settingsConfig: candidate.settingsConfig,
+      });
+    }
+
+    providers[candidate.id] = {
+      ...candidate,
+      id: candidate.id,
+      name: candidate.name,
+      settingsConfig,
+    } as Provider;
+  }
+
+  return providers;
+}
+
 export const providersApi = {
   async getAll(appId: AppId): Promise<Record<string, Provider>> {
-    return await invoke("get_providers", { app: appId });
+    return normalizeProvidersPayload(
+      await invoke<unknown>("get_providers", { app: appId }),
+    );
   },
 
   async getCurrent(appId: AppId): Promise<string> {
