@@ -2203,3 +2203,10 @@
 - `v3.16.5-12` 已发布到 `BigStrongSun/ccswitchmulti`。annotated tag 解引用到发布源码提交 `063a6d59bf74893e021efd3fe75045b47e14baa2`；正式 Release 为 `draft=false`、`prerelease=false`，地址为 `https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.16.5-12`。
 - 本版发布 Provider `settingsConfig` 非对象配置兼容根修，消除截图中的应用启动错误边界；用户无需手工编辑 SQLite，旧记录会在读取时恢复为安全空对象。
 - Release workflow run `29384516268` 成功，Windows x64、Windows ARM64、Linux x64、Linux ARM64、macOS 五个构建矩阵，以及 Publish GitHub Release、Assemble latest.json 全部通过。Release 共 19 个资产；`latest.json` 已验证为 `version=3.16.5-12`，六个平台键均有下载 URL 和 signature。
+
+## 2026-07-15 GPT-5.6 偶发 `collaboration.spawn_agent` HTTP 400 复核
+
+- `gpt-5.6-sol` 和 `gpt-5.6-terra` 都返回 `Function 'collaboration.spawn_agent' is reserved for use by this model and must match the configured schema`，证明失败发生在上游校验 Responses `tools` 数组时，尚未进入模型推理；不是 Sol/Terra 子型稳定性差异，切换 5.6 子型不是根修。
+- 所谓“有时好用”只能说明不同请求构造了不同的工具集，或 Codex app-server 进程/会话仍持有旧配置；一旦同一请求携带了被扩展的保留 schema，上游会在推理前确定性返回 400，不是随机网络错误。
+- 截图分析里的 `spawn_agent_visible_model_limit` 只控制候选模型展示窗口，`src/services/quota_collaboration.rs` 只处理额度协作，都不参与 `collaboration.spawn_agent` 的函数 schema 生成，不应作为本错误的根因线索。
+- 本机当时安装 CCSwitchMulti `3.16.5-12`，active `~/.codex/config.toml` 已是 `[features.multi_agent_v2] hide_spawn_agent_metadata = true`，当前 Codex app-server 进程也晚于该配置启动；本机近期 session 未找到新的同类上游错误。对外部报错机器应直接核对其 active config 和 app-server 启动时间，不能用本机健康状态代替现场证据。
