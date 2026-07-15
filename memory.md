@@ -2212,6 +2212,14 @@
 - 旧工作流的 Linux 系统依赖阶段对每条 `apt-get` 只尝试一次，任一 Ubuntu 软件源瞬断就会让发布步骤整体跳过。根修是在统一 `apt_get` helper 中强制 IPv4、启用 APT 下载重试和连接超时，并对完整事务做三次退避重试；`update`、核心依赖、GTK、WebKit 与 libsoup fallback 全部必须经过该 helper。
 - 已推送且失败的发布 tag 不应改写。`v3.16.5-13` 保留为失败构建证据，包含工作流根修的新源码应使用后续补丁版本重新打 tag。
 
+## 2026-07-16 CCSwitchMulti v3.16.5-14 白屏根修发布结果
+
+- 用户再次提供 `Cannot read properties of null (reading 'settingsConfig')` 恢复页截图时，`v3.16.5-13` 尚未生成 GitHub Release：其两次 Release attempt 均因 Linux ARM64 无法连接 `ports.ubuntu.com` 而失败，Publish Release 被跳过。因此该截图只能证明旧安装包仍会触发问题，不能证明 `cfb4804d` 的 Provider IPC 隔离已经在用户机器运行。
+- `v3.16.5-14` 已发布到 `BigStrongSun/ccswitchmulti`，annotated tag 解引用与远端 main 均为 `13e16af9f12299161f1bd2ce5d86a5f0438235a0`。正式 Release 为 `draft=false`、`prerelease=false`：`https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.16.5-14`。
+- 主 CI run `29430225565` 成功；Release workflow run `29430899551` 的 Windows x64、Windows ARM64、Linux x64、Linux ARM64、macOS、Publish GitHub Release 与 Assemble latest.json 全部成功。Linux ARM64 在强制 IPv4和重试后越过依赖安装，验证 `4a6858a3` 的发布网络容错有效。
+- Release 共 19 个资产。`latest.json` 验证为 `version=3.16.5-14`，包含 `darwin-aarch64`、`darwin-x86_64`、`windows-x86_64`、`windows-aarch64`、`linux-x86_64`、`linux-aarch64`，每个平台都有非空下载 URL 和 signature。
+- 发布快照的干净工作树验证通过：Provider payload 与 AppErrorBoundary 共 4 项测试、TypeScript typecheck、renderer 生产构建、app_exit_monitor 2 项测试及 `cargo check --lib`。本地未提交的 `/responses/compact` 代理改动未进入发布提交或 tag。
+
 ## 2026-07-15 v3.16.5-11 远端白屏报告复盘与前端 IPC 防线
 
 - 用户回传的 `cc-switch.log` 显示 v3.16.5-11 后端完成数据库、provider、代理和 Codex 历史初始化；`codex-router.log` 中大多数请求正常得到上游 200。React/WebView 的 `Cannot read properties of null (reading 'settingsConfig')` 不会自动写入 Rust 日志，因此“后端日志无报错”不能推翻前端白屏报告，也不能据此归因网络或本机配置。
