@@ -2271,10 +2271,14 @@
 - Codex Provider 的运行时能力不能用只服务于额度查询的 `resolve_usage_credentials()` 代替：后者主要解析 config TOML，真实 Codex adapter 还支持顶层 `base_url/baseURL`、auth/env/direct key。第三方 API 的可用性检查已改为复用 adapter 提取规则，同时将托管 OAuth 与静态凭据视为并列认证路径，空配置的官方 seed 仍保持可用。
 - 回归覆盖：整个 Router 可聚合官方 OAuth 与 `targetProviderId` 指向的 Qwen 静态 Provider；两条 route 均可用并贡献模型；缺失目标 Provider 时 Router 和 route 均不可用且返回可诊断错误。验证通过 External API 16/16、Codex 目标物化 6/6、外部 Router 解析 2/2、TypeScript typecheck、Prettier、rustfmt 和 `cargo check --lib`。
 
-## 2026-07-16 CCSM 重启后 Codex 托管 OAuth 账号消失诊断（未修复）
+## 2026-07-16 CCSM 重启后 Codex 托管 OAuth 账号消失根修
 
 - 用户反馈从 v3.16.5-13 连续升级并频繁重启 CCSM/Codex 后，连接测试可能先报 401，随后认证中心直接显示未认证。`v3.16.5-13..v3.16.5-15` 在 `codex_oauth_auth.rs`、统一 auth commands、Codex OAuth commands 和 manager 初始化处没有差异，因此不是 -14/-15 升级脚本新引入的认证库迁移或清理。
 - 当前 `CodexOAuthManager` 只把 access token 放在内存，重启后的新 manager 必然没有 access token；第一次模型目录、额度或真实代理请求会调用 `get_valid_token_for_account()` 并立即使用磁盘 refresh token。连接测试/页面自动模型查询因此可以成为重启后的首次刷新触发器。
 - `refresh_with_token()` 当前把 token 端点任意 HTTP 401/403 都折叠成 `RefreshTokenInvalid`，不检查 OAuth error body；调用方随后立即执行 `remove_invalid_account_after_refresh_failure()` -> `remove_account()` -> `save_to_disk()`，把账号从 `codex_oauth_auth.json` 永久删除。认证页的离线状态只看本地账号集合，所以删除后直接显示未认证；这解释了“先 401，随后认证页账号消失”，不是单纯 UI 状态错误。
 - 本机日志也显示每次进程启动后均出现“从磁盘加载 1 个账号”后紧跟“access_token 需要刷新”，且同一启动时刻可能有多个调用同时到达刷新入口；每账号锁能合并网络刷新，但不能消除重启必刷。现场是否为 refresh token 真正轮换/撤销、并行旧进程竞争，还是 token 端点/WAF/代理的暂时 401/403，需要用户机器的 `cc-switch.log` 中 `[CodexOAuth]` 邻近日志确认；不要索取或导出含 refresh token 的 `codex_oauth_auth.json`。
-- 根修方向不能只延迟刷新或给 UI 加提示：认证存储不得因一次未解析的 401/403 做破坏性删除；应按 OAuth error 语义识别确定的 `invalid_grant`，保留暂时失败账号并暴露可重试状态，同时解决重启后的短期 token 恢复/refresh token 轮换及多进程单写者问题。修复后需回归“重启复用有效短期 token”“暂时 401/403 不删账号”“明确 invalid_grant 才进入失效态”“并发刷新只提交最新轮换 token”。
+- 根修不能只延迟刷新或给 UI 加提示：`refresh_with_token()` 现只按结构化 OAuth error code 识别 `invalid_grant`、`invalid_refresh_token`、`refresh_token_invalid`；普通 401/403 作为可重试失败保留账号。错误只提取经过字符约束的结构化 code，原始 body 不进入日志/UI，避免上游意外回显敏感内容。
+- 明确失效的账号不再物理删除，而是在 `codex_oauth_auth.json` 中持久化 `invalidated_at/auth_error` 隔离；默认账号、账号列表和代理只选择可用账号，认证页显示“记录已保留，请重新登录”，同账号重新授权会原位覆盖并清除失效态，只有用户显式移除/注销才删除记录。
+- 短期 access token 与过期时间现在和 refresh token 保存在同一凭据文件中，进程重启优先恢复未临期 token，不再每次启动都强制刷新。刷新成功会把 access token、过期时间及轮换后的 refresh token 作为同一串行快照落盘。
+- refresh 返回明确 invalid_grant 后会在隔离账号前再次加载磁盘；若另一个进程刚写入不同 refresh token 或仍有效 access token，则采用最新凭据再试一次。这样旧进程的飞行中请求不能用旧 token 的失败覆盖新进程刚完成的轮换。
+- 验证覆盖 24 项 Codex OAuth 定向回归，包括重启复用短期 token、临时 401 保留账号、明确 invalid_grant 隔离但不删除、同账号重新登录原位恢复、跨 manager 读取轮换 token、飞行中跨进程轮换恢复；TypeScript typecheck、`cargo check --lib`、Clippy `-D warnings`、rustfmt 与 Prettier 通过。

@@ -224,6 +224,7 @@ export function useManagedAuth(
     isAuthenticated: authStatus?.authenticated ?? false,
     defaultAccountId: authStatus?.default_account_id ?? null,
     migrationError: authStatus?.migration_error ?? null,
+    authError: authStatus?.auth_error ?? null,
     pollingState,
     deviceCode,
     error,

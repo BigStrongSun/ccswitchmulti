@@ -60,6 +60,7 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
     pollingState,
     deviceCode,
     error,
+    authError,
     isPolling,
     isAddingAccount,
     isRemovingAccount,
@@ -109,6 +110,17 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
             : t("codexOauth.notAuthenticated", "未认证")}
         </Badge>
       </div>
+
+      {authError && (
+        <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-200">
+          {authError === "refresh_token_invalid"
+            ? t(
+                "codexOauth.refreshTokenInvalid",
+                "ChatGPT 登录凭据已失效，但账号记录已保留。请重新登录以恢复认证。",
+              )
+            : authError}
+        </div>
+      )}
 
       {/* 账号选择器 */}
       {hasAnyAccount && onAccountSelect && (

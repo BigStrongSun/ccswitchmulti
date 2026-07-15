@@ -1281,6 +1281,7 @@
   "codexOauth": {
     "authStatus": "认证状态",
     "notAuthenticated": "未认证",
+    "refreshTokenInvalid": "ChatGPT 登录凭据已失效，但账号记录已保留。请重新登录以恢复认证。",
     "loginWithChatGPT": "使用 ChatGPT 登录",
     "loginRequired": "请先登录 ChatGPT 账号",
     "waitingForAuth": "等待授权中...",

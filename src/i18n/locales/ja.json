@@ -1278,6 +1278,7 @@
   "codexOauth": {
     "authStatus": "認証状態",
     "notAuthenticated": "未認証",
+    "refreshTokenInvalid": "ChatGPT の認証情報は無効になりましたが、アカウント記録は保持されています。再度ログインして認証を復元してください。",
     "loginWithChatGPT": "ChatGPT でログイン",
     "loginRequired": "先に ChatGPT にログインしてください",
     "waitingForAuth": "認証を待機中...",

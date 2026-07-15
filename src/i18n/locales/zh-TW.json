@@ -1250,6 +1250,7 @@
   "codexOauth": {
     "authStatus": "驗證狀態",
     "notAuthenticated": "未驗證",
+    "refreshTokenInvalid": "ChatGPT 登入憑證已失效，但帳號記錄已保留。請重新登入以恢復驗證。",
     "loginWithChatGPT": "使用 ChatGPT 登入",
     "loginRequired": "請先登入 ChatGPT 帳號",
     "waitingForAuth": "等待授權中...",

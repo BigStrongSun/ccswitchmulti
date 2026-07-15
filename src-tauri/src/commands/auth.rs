@@ -27,6 +27,7 @@ pub struct ManagedAuthStatus {
     pub authenticated: bool,
     pub default_account_id: Option<String>,
     pub migration_error: Option<String>,
+    pub auth_error: Option<String>,
     pub accounts: Vec<ManagedAuthAccount>,
 }
 
@@ -199,6 +200,7 @@ pub async fn auth_get_status(
                 authenticated: status.authenticated,
                 default_account_id: default_account_id.clone(),
                 migration_error: status.migration_error,
+                auth_error: None,
                 accounts: status
                     .accounts
                     .into_iter()
@@ -217,6 +219,7 @@ pub async fn auth_get_status(
                 authenticated: status.authenticated,
                 default_account_id: default_account_id.clone(),
                 migration_error: None,
+                auth_error: status.auth_error,
                 accounts: status
                     .accounts
                     .into_iter()

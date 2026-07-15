@@ -1281,6 +1281,7 @@
   "codexOauth": {
     "authStatus": "Auth status",
     "notAuthenticated": "Not authenticated",
+    "refreshTokenInvalid": "Your ChatGPT credential is no longer valid, but the account record was preserved. Sign in again to restore authentication.",
     "loginWithChatGPT": "Sign in with ChatGPT",
     "loginRequired": "Please sign in to ChatGPT first",
     "waitingForAuth": "Waiting for authorization...",

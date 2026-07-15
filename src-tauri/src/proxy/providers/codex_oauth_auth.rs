@@ -187,8 +187,27 @@ struct CodexAccountData {
     pub email: Option<String>,
     /// Refresh Token（持久化）
     pub refresh_token: String,
+    /// 最近一次仍有效的短期 access token。
+    ///
+    /// refresh token 已经保存在同一凭据文件中；一并保存短期 token 可以避免
+    /// CCSM 每次重启都立刻消耗 refresh token，并降低轮换竞争概率。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access_token_expires_at_ms: Option<i64>,
+    /// 明确收到 OAuth `invalid_grant` 后保留账号记录，但不再把它当作可用认证。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invalidated_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_error: Option<String>,
     /// 认证时间戳（秒）
     pub authenticated_at: i64,
+}
+
+impl CodexAccountData {
+    fn is_usable(&self) -> bool {
+        self.invalidated_at.is_none()
+    }
 }
 
 /// 公开的账号信息（返回给前端，复用 GitHubAccount 结构）
@@ -227,6 +246,9 @@ pub struct CodexOAuthManager {
     access_tokens: Arc<RwLock<HashMap<String, CachedAccessToken>>>,
     /// 每个账号的刷新锁
     refresh_locks: Arc<RwLock<HashMap<String, Arc<Mutex<()>>>>>,
+    /// 账号、默认账号与 token 的组合快照必须串行持久化，避免并发 mutation
+    /// 用旧内存快照覆盖刚轮换的新 refresh token。
+    persistence_lock: Arc<Mutex<()>>,
     /// 进行中的 Device Code 流程：device_auth_id -> {user_code, expires_at_ms}
     /// 过期条目会在 start_device_flow 时被清理，防止放弃的登录流程导致无界增长
     pending_device_codes: Arc<RwLock<HashMap<String, PendingDeviceCode>>>,
@@ -252,6 +274,7 @@ impl CodexOAuthManager {
             default_account_id: Arc::new(RwLock::new(None)),
             access_tokens: Arc::new(RwLock::new(HashMap::new())),
             refresh_locks: Arc::new(RwLock::new(HashMap::new())),
+            persistence_lock: Arc::new(Mutex::new(())),
             pending_device_codes: Arc::new(RwLock::new(HashMap::new())),
             oauth_token_url,
             storage_path,
@@ -425,8 +448,15 @@ impl CodexOAuthManager {
             );
         }
 
+        let expires_at_ms = compute_expires_at_ms(tokens.expires_in);
         let account = self
-            .add_account_internal(account_id, refresh_token, email)
+            .add_account_internal(
+                account_id,
+                refresh_token,
+                email,
+                Some(tokens.access_token),
+                Some(expires_at_ms),
+            )
             .await?;
 
         Ok(Some(account))
@@ -485,14 +515,17 @@ impl CodexOAuthManager {
             .await?;
 
         let status = response.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            return Err(CodexOAuthError::RefreshTokenInvalid);
-        }
-
         if !status.is_success() {
             let text = response.text().await.unwrap_or_default();
+            // HTTP 状态本身不能证明 refresh token 已永久失效。代理、WAF、账号风控
+            // 和上游临时认证故障都可能返回 401/403；只有 OAuth body 明确给出
+            // invalid_grant/等价错误时才允许进入不可用状态。
+            if oauth_error_definitively_invalidates_refresh_token(&text) {
+                return Err(CodexOAuthError::RefreshTokenInvalid);
+            }
             return Err(CodexOAuthError::TokenFetchFailed(format!(
-                "Refresh 失败: {status} - {text}"
+                "Refresh 失败: {status} - {}",
+                summarize_oauth_error(&text)
             )));
         }
 
@@ -510,8 +543,40 @@ impl CodexOAuthManager {
         let accounts = self.accounts.read().await;
         accounts
             .get(account_id)
+            .filter(|account| account.is_usable())
             .map(|a| a.refresh_token.clone())
-            .ok_or_else(|| CodexOAuthError::AccountNotFound(account_id.to_string()))
+            .ok_or_else(|| {
+                if accounts.contains_key(account_id) {
+                    CodexOAuthError::RefreshTokenInvalid
+                } else {
+                    CodexOAuthError::AccountNotFound(account_id.to_string())
+                }
+            })
+    }
+
+    /// 从持久化账号记录恢复仍有效的短期 access token。
+    async fn load_persisted_access_token(&self, account_id: &str) -> Option<String> {
+        let cached = {
+            let accounts = self.accounts.read().await;
+            let account = accounts.get(account_id)?;
+            if !account.is_usable() {
+                return None;
+            }
+            CachedAccessToken {
+                token: account.access_token.clone()?,
+                expires_at_ms: account.access_token_expires_at_ms?,
+            }
+        };
+
+        if cached.is_expiring_soon() {
+            return None;
+        }
+
+        self.access_tokens
+            .write()
+            .await
+            .insert(account_id.to_string(), cached.clone());
+        Some(cached.token)
     }
 
     // ==================== Token 获取（含自动刷新） ====================
@@ -531,6 +596,10 @@ impl CodexOAuthManager {
             }
         }
 
+        if let Some(token) = self.load_persisted_access_token(account_id).await {
+            return Ok(token);
+        }
+
         log::info!("[CodexOAuth] 账号 {account_id} 的 access_token 需要刷新");
 
         let refresh_lock = self.get_refresh_lock(account_id).await;
@@ -546,6 +615,10 @@ impl CodexOAuthManager {
             }
         }
 
+        if let Some(token) = self.load_persisted_access_token(account_id).await {
+            return Ok(token);
+        }
+
         // refresh_token 是持久化凭据，可能已被另一个进程或历史独立 manager
         // 轮换并写回磁盘。真正刷新前先同步一次磁盘账号数据，避免拿内存旧
         // refresh_token 触发 invalid_grant 后误删本地账号。
@@ -553,38 +626,61 @@ impl CodexOAuthManager {
             log::warn!("[CodexOAuth] 刷新前重新加载磁盘账号失败，将使用内存凭据: {e}");
         }
 
-        let refresh_token = self.persisted_refresh_token(account_id).await?;
+        let mut refresh_token = self.persisted_refresh_token(account_id).await?;
 
         let new_tokens = match self.refresh_with_token(&refresh_token).await {
             Ok(tokens) => tokens,
             Err(CodexOAuthError::RefreshTokenInvalid) => {
-                self.remove_invalid_account_after_refresh_failure(account_id)
-                    .await?;
-                return Err(CodexOAuthError::RefreshTokenInvalid);
+                // 另一个仍在退出/启动的进程可能恰好轮换了 refresh token。
+                // 失效前重新读取磁盘；若 token 已变化，只用最新 token 再试一次，
+                // 避免用旧请求的 invalid_grant 覆盖刚写入的新凭据。
+                if let Err(error) = self.load_from_disk_sync() {
+                    log::warn!("[CodexOAuth] invalid_grant 后重新加载磁盘账号失败: {error}");
+                }
+                if let Some(token) = self.load_persisted_access_token(account_id).await {
+                    return Ok(token);
+                }
+                let latest_refresh_token = self.persisted_refresh_token(account_id).await?;
+                if latest_refresh_token != refresh_token {
+                    refresh_token = latest_refresh_token;
+                    match self.refresh_with_token(&refresh_token).await {
+                        Ok(tokens) => tokens,
+                        Err(CodexOAuthError::RefreshTokenInvalid) => {
+                            self.mark_account_invalid_after_refresh_failure(account_id)
+                                .await?;
+                            return Err(CodexOAuthError::RefreshTokenInvalid);
+                        }
+                        Err(error) => return Err(error),
+                    }
+                } else {
+                    self.mark_account_invalid_after_refresh_failure(account_id)
+                        .await?;
+                    return Err(CodexOAuthError::RefreshTokenInvalid);
+                }
             }
-            Err(e) => return Err(e),
+            Err(error) => return Err(error),
         };
 
         let access_token = new_tokens.access_token.clone();
         let expires_at_ms = compute_expires_at_ms(new_tokens.expires_in);
 
-        // refresh 成功后只持久化服务端轮换的新 refresh_token；
-        // access_token 仍只放内存，保持与原版 cc-switch 的凭据边界一致。
-        let mut should_save = false;
+        // refresh 成功后把轮换后的 refresh token 与仍有效的短期 access token
+        // 作为同一个快照落盘。这样重启不会立即再次刷新，也不会把轮换结果拆开。
         {
             let mut accounts = self.accounts.write().await;
             if let Some(account) = accounts.get_mut(account_id) {
                 if let Some(new_refresh) = new_tokens.refresh_token.clone() {
                     if new_refresh != refresh_token {
                         account.refresh_token = new_refresh;
-                        should_save = true;
                     }
                 }
+                account.access_token = Some(access_token.clone());
+                account.access_token_expires_at_ms = Some(expires_at_ms);
+                account.invalidated_at = None;
+                account.auth_error = None;
             }
         }
-        if should_save {
-            self.save_to_disk().await?;
-        }
+        self.save_to_disk().await?;
 
         {
             let mut tokens = self.access_tokens.write().await;
@@ -657,7 +753,10 @@ impl CodexOAuthManager {
     pub async fn set_default_account(&self, account_id: &str) -> Result<(), CodexOAuthError> {
         {
             let accounts = self.accounts.read().await;
-            if !accounts.contains_key(account_id) {
+            if !accounts
+                .get(account_id)
+                .is_some_and(CodexAccountData::is_usable)
+            {
                 return Err(CodexOAuthError::AccountNotFound(account_id.to_string()));
             }
         }
@@ -704,7 +803,7 @@ impl CodexOAuthManager {
 
     pub async fn is_authenticated(&self) -> bool {
         let accounts = self.accounts.read().await;
-        !accounts.is_empty()
+        accounts.values().any(CodexAccountData::is_usable)
     }
 
     /// 获取认证状态摘要（与 Copilot 的格式保持一致，便于复用前端）
@@ -713,6 +812,11 @@ impl CodexOAuthManager {
         let default_id = self.resolve_default_account_id().await;
         let account_list = Self::sorted_accounts(&accounts_map, default_id.as_deref());
         let authenticated = !account_list.is_empty();
+        let auth_error = accounts_map
+            .values()
+            .filter(|account| !account.is_usable())
+            .filter_map(|account| account.auth_error.clone())
+            .next();
         let username = default_id
             .as_ref()
             .and_then(|id| accounts_map.get(id))
@@ -724,21 +828,33 @@ impl CodexOAuthManager {
             default_account_id: default_id,
             authenticated,
             username,
+            auth_error,
         }
     }
 
     // ==================== 内部方法 ====================
 
-    /// 在刷新明确失败时清理对应账号和内存 token。
-    ///
-    /// 这个路径只处理 `RefreshTokenInvalid`，用于把“本地有账号记录”
-    /// 与“服务端仍接受 refresh token”拆开，避免后续状态查询继续误报已登录。
-    async fn remove_invalid_account_after_refresh_failure(
+    /// 明确收到 OAuth invalid_grant 时把账号置为不可用，但保留凭据记录。
+    /// 用户重新登录同一账号会原位覆盖并恢复；只有显式注销才物理删除。
+    async fn mark_account_invalid_after_refresh_failure(
         &self,
         account_id: &str,
     ) -> Result<(), CodexOAuthError> {
-        log::warn!("[CodexOAuth] refresh_token 已失效，移除账号: {account_id}");
-        self.remove_account(account_id).await
+        log::warn!(
+            "[CodexOAuth] OAuth 明确返回 invalid_grant，账号进入待重新认证状态: {account_id}"
+        );
+        {
+            let mut accounts = self.accounts.write().await;
+            let account = accounts
+                .get_mut(account_id)
+                .ok_or_else(|| CodexOAuthError::AccountNotFound(account_id.to_string()))?;
+            account.invalidated_at = Some(chrono::Utc::now().timestamp());
+            account.auth_error = Some("refresh_token_invalid".to_string());
+            account.access_token = None;
+            account.access_token_expires_at_ms = None;
+        }
+        self.access_tokens.write().await.remove(account_id);
+        self.save_to_disk().await
     }
 
     async fn add_account_internal(
@@ -746,6 +862,8 @@ impl CodexOAuthManager {
         account_id: String,
         refresh_token: String,
         email: Option<String>,
+        access_token: Option<String>,
+        access_token_expires_at_ms: Option<i64>,
     ) -> Result<GitHubAccount, CodexOAuthError> {
         let now = chrono::Utc::now().timestamp();
 
@@ -753,6 +871,10 @@ impl CodexOAuthManager {
             account_id: account_id.clone(),
             email,
             refresh_token,
+            access_token,
+            access_token_expires_at_ms,
+            invalidated_at: None,
+            auth_error: None,
             authenticated_at: now,
         };
 
@@ -777,6 +899,7 @@ impl CodexOAuthManager {
     fn fallback_default_account_id(accounts: &HashMap<String, CodexAccountData>) -> Option<String> {
         accounts
             .iter()
+            .filter(|(_, account)| account.is_usable())
             .max_by(|(id_a, a), (id_b, b)| {
                 a.authenticated_at
                     .cmp(&b.authenticated_at)
@@ -789,7 +912,11 @@ impl CodexOAuthManager {
         accounts: &HashMap<String, CodexAccountData>,
         default_account_id: Option<&str>,
     ) -> Vec<GitHubAccount> {
-        let mut list: Vec<GitHubAccount> = accounts.values().map(GitHubAccount::from).collect();
+        let mut list: Vec<GitHubAccount> = accounts
+            .values()
+            .filter(|account| account.is_usable())
+            .map(GitHubAccount::from)
+            .collect();
         list.sort_by(|a, b| {
             let a_default = default_account_id == Some(a.id.as_str());
             let b_default = default_account_id == Some(b.id.as_str());
@@ -806,7 +933,7 @@ impl CodexOAuthManager {
         let accounts = self.accounts.read().await;
 
         if let Some(id) = stored {
-            if accounts.contains_key(&id) {
+            if accounts.get(&id).is_some_and(CodexAccountData::is_usable) {
                 return Some(id);
             }
         }
@@ -911,6 +1038,7 @@ impl CodexOAuthManager {
     }
 
     async fn save_to_disk(&self) -> Result<(), CodexOAuthError> {
+        let _persist_guard = self.persistence_lock.lock().await;
         let accounts = self.accounts.read().await.clone();
         let default = self.resolve_default_account_id().await;
 
@@ -941,6 +1069,8 @@ pub struct CodexOAuthStatus {
     pub default_account_id: Option<String>,
     pub authenticated: bool,
     pub username: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_error: Option<String>,
 }
 
 // ==================== 工具函数 ====================
@@ -962,6 +1092,71 @@ fn compute_expires_at_ms(expires_in: Option<i64>) -> i64 {
     let now_ms = chrono::Utc::now().timestamp_millis();
     let secs = expires_in.unwrap_or(3600);
     now_ms + secs * 1000
+}
+
+/// 仅依据 OAuth 结构化错误码判断 refresh token 是否确定失效。
+/// HTTP 401/403 不能单独作为删除或失效凭据的证据。
+fn oauth_error_definitively_invalidates_refresh_token(body: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return false;
+    };
+
+    let error = value.get("error");
+    let candidates = [
+        error.and_then(serde_json::Value::as_str),
+        error
+            .and_then(serde_json::Value::as_object)
+            .and_then(|error| error.get("code"))
+            .and_then(serde_json::Value::as_str),
+        error
+            .and_then(serde_json::Value::as_object)
+            .and_then(|error| error.get("type"))
+            .and_then(serde_json::Value::as_str),
+        value.get("code").and_then(serde_json::Value::as_str),
+    ];
+
+    let invalid = candidates.into_iter().flatten().any(|code| {
+        matches!(
+            code.trim().to_ascii_lowercase().as_str(),
+            "invalid_grant" | "invalid_refresh_token" | "refresh_token_invalid"
+        )
+    });
+    invalid
+}
+
+/// OAuth 错误只保留结构化 error code，绝不回显原始 body。
+fn summarize_oauth_error(body: &str) -> String {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return if body.trim().is_empty() {
+            "empty response".to_string()
+        } else {
+            "non-JSON error response".to_string()
+        };
+    };
+    let error = value.get("error");
+    let code = error
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            error
+                .and_then(serde_json::Value::as_object)
+                .and_then(|error| error.get("code"))
+                .and_then(serde_json::Value::as_str)
+        })
+        .or_else(|| value.get("code").and_then(serde_json::Value::as_str));
+
+    code.map(|code| {
+        let safe = code
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+            .take(80)
+            .collect::<String>();
+        if safe.is_empty() {
+            "unknown OAuth error".to_string()
+        } else {
+            format!("oauth_error={safe}")
+        }
+    })
+    .unwrap_or_else(|| "unknown OAuth error".to_string())
 }
 
 /// 解析 JWT 中的 claims
@@ -1020,6 +1215,30 @@ fn extract_identity_from_tokens(tokens: &OAuthTokenResponse) -> (Option<String>,
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn oauth_error_classification_requires_explicit_invalid_grant_semantics() {
+        assert!(oauth_error_definitively_invalidates_refresh_token(
+            r#"{"error":"invalid_grant"}"#
+        ));
+        assert!(oauth_error_definitively_invalidates_refresh_token(
+            r#"{"error":{"code":"refresh_token_invalid"}}"#
+        ));
+        assert!(!oauth_error_definitively_invalidates_refresh_token(
+            r#"{"error":"temporarily_unavailable"}"#
+        ));
+        assert!(!oauth_error_definitively_invalidates_refresh_token(
+            "Unauthorized"
+        ));
+        assert_eq!(
+            summarize_oauth_error(r#"{"error":"temporarily_unavailable","token":"must-not-leak"}"#),
+            "oauth_error=temporarily_unavailable"
+        );
+        assert_eq!(
+            summarize_oauth_error("secret non-json body"),
+            "non-JSON error response"
+        );
+    }
 
     #[test]
     fn test_parse_interval_number() {
@@ -1136,6 +1355,8 @@ mod tests {
                     "acc-123".to_string(),
                     "rt-secret".to_string(),
                     Some("user@example.com".to_string()),
+                    None,
+                    None,
                 )
                 .await
                 .unwrap();
@@ -1158,6 +1379,8 @@ mod tests {
                 "acc-123".to_string(),
                 "rt".to_string(),
                 Some("a@example.com".to_string()),
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -1166,6 +1389,8 @@ mod tests {
                 "acc-456".to_string(),
                 "rt2".to_string(),
                 Some("b@example.com".to_string()),
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -1236,7 +1461,7 @@ mod tests {
                     .expect("read refresh request");
                 let request = String::from_utf8_lossy(&buffer[..n]);
                 let body = if request_index == 0 && request.contains("old-refresh") {
-                    r#"{"access_token":"access-one","refresh_token":"fresh-refresh","expires_in":3600}"#
+                    r#"{"access_token":"access-one","refresh_token":"fresh-refresh","expires_in":0}"#
                 } else if request_index == 1 && request.contains("fresh-refresh") {
                     r#"{"access_token":"access-two","refresh_token":"fresh-refresh","expires_in":3600}"#
                 } else {
@@ -1246,6 +1471,64 @@ mod tests {
                     "401 Unauthorized"
                 } else {
                     "200 OK"
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write refresh response");
+            }
+        });
+
+        format!("http://{addr}/oauth/token")
+    }
+
+    /// 模拟另一个进程在本进程 refresh 请求飞行期间完成 token 轮换并写盘。
+    async fn spawn_cross_process_rotation_endpoint(storage_path: PathBuf) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind racing oauth endpoint");
+        let addr = listener.local_addr().expect("read racing endpoint addr");
+
+        tokio::spawn(async move {
+            for request_index in 0..2 {
+                let (mut socket, _) = listener.accept().await.expect("accept refresh request");
+                let mut buffer = [0_u8; 4096];
+                let n = socket
+                    .read(&mut buffer)
+                    .await
+                    .expect("read refresh request");
+                let request = String::from_utf8_lossy(&buffer[..n]);
+
+                let (status, body) = if request_index == 0 && request.contains("old-refresh") {
+                    let rotated_store = serde_json::json!({
+                        "version": 1,
+                        "default_account_id": "acc-race",
+                        "accounts": {
+                            "acc-race": {
+                                "account_id": "acc-race",
+                                "email": "race@example.com",
+                                "refresh_token": "rotated-refresh",
+                                "authenticated_at": 1
+                            }
+                        }
+                    });
+                    std::fs::write(
+                        &storage_path,
+                        serde_json::to_string_pretty(&rotated_store).unwrap(),
+                    )
+                    .expect("persist cross-process rotation");
+                    ("401 Unauthorized", r#"{"error":"invalid_grant"}"#)
+                } else if request_index == 1 && request.contains("rotated-refresh") {
+                    (
+                        "200 OK",
+                        r#"{"access_token":"race-access","refresh_token":"rotated-refresh","expires_in":3600}"#,
+                    )
+                } else {
+                    ("401 Unauthorized", r#"{"error":"invalid_grant"}"#)
                 };
                 let response = format!(
                     "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -1274,6 +1557,8 @@ mod tests {
                 "acc-expired".to_string(),
                 "rt-expired".to_string(),
                 Some("expired@example.com".to_string()),
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -1286,7 +1571,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn token_request_removes_account_when_refresh_token_is_invalid() {
+    async fn token_request_quarantines_account_when_refresh_token_is_invalid() {
         let temp = tempfile::tempdir().unwrap();
         let token_url = spawn_single_refresh_endpoint(401, r#"{"error":"invalid_grant"}"#).await;
         let manager =
@@ -1297,6 +1582,8 @@ mod tests {
                 "acc-expired".to_string(),
                 "rt-expired".to_string(),
                 Some("expired@example.com".to_string()),
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -1308,9 +1595,124 @@ mod tests {
         assert!(!status.authenticated);
         assert!(status.accounts.is_empty());
         assert!(status.default_account_id.is_none());
+        assert_eq!(status.auth_error.as_deref(), Some("refresh_token_invalid"));
         let persisted = std::fs::read_to_string(&manager.storage_path)
-            .expect("empty store should be persisted after removing invalid account");
-        assert!(persisted.contains(r#""accounts": {}"#));
+            .expect("invalid account state should remain persisted for recovery");
+        assert!(persisted.contains(r#""acc-expired""#));
+        assert!(persisted.contains(r#""invalidated_at""#));
+        assert!(persisted.contains(r#""auth_error": "refresh_token_invalid""#));
+    }
+
+    #[tokio::test]
+    async fn transient_refresh_401_does_not_delete_or_invalidate_account() {
+        let temp = tempfile::tempdir().unwrap();
+        let token_url = spawn_single_refresh_endpoint(
+            401,
+            r#"{"error":"temporarily_unavailable","error_description":"upstream auth edge unavailable"}"#,
+        )
+        .await;
+        let manager =
+            CodexOAuthManager::new_with_oauth_token_url(temp.path().to_path_buf(), token_url);
+
+        manager
+            .add_account_internal(
+                "acc-retry".to_string(),
+                "rt-retry".to_string(),
+                Some("retry@example.com".to_string()),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let result = manager.get_valid_token_for_account("acc-retry").await;
+        let status = manager.get_status().await;
+
+        assert!(matches!(result, Err(CodexOAuthError::TokenFetchFailed(_))));
+        assert!(status.authenticated);
+        assert_eq!(status.accounts.len(), 1);
+        assert!(status.auth_error.is_none());
+        let persisted = std::fs::read_to_string(&manager.storage_path)
+            .expect("transient refresh failure must keep the account store");
+        assert!(persisted.contains(r#""acc-retry""#));
+        assert!(!persisted.contains("invalidated_at"));
+    }
+
+    #[tokio::test]
+    async fn relogin_same_account_clears_quarantined_state_in_place() {
+        let temp = tempfile::tempdir().unwrap();
+        let token_url = spawn_single_refresh_endpoint(400, r#"{"error":"invalid_grant"}"#).await;
+        let manager =
+            CodexOAuthManager::new_with_oauth_token_url(temp.path().to_path_buf(), token_url);
+        manager
+            .add_account_internal(
+                "acc-relogin".to_string(),
+                "expired-refresh".to_string(),
+                Some("relogin@example.com".to_string()),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            manager.get_valid_token_for_account("acc-relogin").await,
+            Err(CodexOAuthError::RefreshTokenInvalid)
+        ));
+
+        manager
+            .add_account_internal(
+                "acc-relogin".to_string(),
+                "new-refresh".to_string(),
+                Some("relogin@example.com".to_string()),
+                Some("new-access".to_string()),
+                Some(chrono::Utc::now().timestamp_millis() + 3_600_000),
+            )
+            .await
+            .unwrap();
+        let status = manager.get_status().await;
+
+        assert!(status.authenticated);
+        assert_eq!(status.accounts.len(), 1);
+        assert!(status.auth_error.is_none());
+        assert_eq!(
+            manager
+                .get_valid_token_for_account("acc-relogin")
+                .await
+                .unwrap(),
+            "new-access"
+        );
+    }
+
+    #[tokio::test]
+    async fn persisted_access_token_survives_restart_without_refresh() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().to_path_buf();
+        let expires_at_ms = chrono::Utc::now().timestamp_millis() + 3_600_000;
+
+        {
+            let manager = CodexOAuthManager::new(path.clone());
+            manager
+                .add_account_internal(
+                    "acc-cached".to_string(),
+                    "refresh-should-not-be-used".to_string(),
+                    Some("cached@example.com".to_string()),
+                    Some("persisted-access".to_string()),
+                    Some(expires_at_ms),
+                )
+                .await
+                .unwrap();
+        }
+
+        let manager = CodexOAuthManager::new_with_oauth_token_url(
+            path,
+            "http://127.0.0.1:9/oauth/token".to_string(),
+        );
+        let token = manager
+            .get_valid_token_for_account("acc-cached")
+            .await
+            .unwrap();
+
+        assert_eq!(token, "persisted-access");
     }
 
     #[tokio::test]
@@ -1329,6 +1731,8 @@ mod tests {
                 "acc-valid".to_string(),
                 "old-refresh".to_string(),
                 Some("valid@example.com".to_string()),
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -1366,6 +1770,8 @@ mod tests {
                 "acc-valid".to_string(),
                 "old-refresh".to_string(),
                 Some("valid@example.com".to_string()),
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -1392,5 +1798,34 @@ mod tests {
         let status = manager_two.get_status().await;
         assert!(status.authenticated);
         assert_eq!(status.accounts.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn invalid_grant_retries_new_token_rotated_by_another_process() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage_path = temp.path().join("codex_oauth_auth.json");
+        let token_url = spawn_cross_process_rotation_endpoint(storage_path).await;
+        let manager =
+            CodexOAuthManager::new_with_oauth_token_url(temp.path().to_path_buf(), token_url);
+        manager
+            .add_account_internal(
+                "acc-race".to_string(),
+                "old-refresh".to_string(),
+                Some("race@example.com".to_string()),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let token = manager
+            .get_valid_token_for_account("acc-race")
+            .await
+            .expect("rotated token should recover the refresh race");
+        let status = manager.get_status().await;
+
+        assert_eq!(token, "race-access");
+        assert!(status.authenticated);
+        assert!(status.auth_error.is_none());
     }
 }
