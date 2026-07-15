@@ -8,7 +8,9 @@ use crate::app_config::AppType;
 use crate::database::Database;
 use crate::error::AppError;
 use crate::provider::Provider;
+use crate::proxy::providers::{CodexAdapter, ProviderAdapter};
 use axum::http::HeaderMap;
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -361,9 +363,13 @@ pub fn list_backend_options(
     for app_type in AppType::all() {
         let providers = db.get_all_providers(app_type.as_str())?;
         for provider in providers.values() {
-            options.push(provider_backend_option(app_type.clone(), provider));
+            options.push(provider_backend_option(
+                app_type.clone(),
+                provider,
+                &providers,
+            ));
             if app_type == AppType::Codex && is_codex_router_provider(provider) {
-                options.extend(router_backend_options(provider));
+                options.extend(router_backend_options(provider, &providers));
             }
         }
     }
@@ -516,9 +522,10 @@ fn build_backend_key(
 fn provider_backend_option(
     app_type: AppType,
     provider: &Provider,
+    providers: &IndexMap<String, Provider>,
 ) -> ExternalOpenAiApiBackendOptionView {
     if app_type == AppType::Codex && is_codex_router_provider(provider) {
-        return codex_router_provider_backend_option(provider);
+        return codex_router_provider_backend_option(provider, providers);
     }
 
     let is_managed_oauth = provider.uses_managed_account_auth()
@@ -526,11 +533,16 @@ fn provider_backend_option(
     // OAuth 模型必须来自已经动态刷新的 provider catalog；这里不能再注入静态名单，
     // 否则新模型发布后后端选项会继续展示一份与账号实际权限不一致的旧快照。
     let models = collect_provider_models(provider);
-    let (base_url, api_key) = provider.resolve_usage_credentials(&app_type);
     let is_openai_compatible = provider_can_be_openai_compatible(&app_type, provider);
-    let has_credentials =
-        is_managed_oauth || (!base_url.trim().is_empty() && !api_key.trim().is_empty());
-    let available = is_openai_compatible && has_credentials;
+    let has_credentials = if app_type == AppType::Codex {
+        codex_provider_has_runtime_credentials(provider)
+    } else {
+        let (base_url, api_key) = provider.resolve_usage_credentials(&app_type);
+        !base_url.trim().is_empty() && !api_key.trim().is_empty()
+    };
+    // 托管 OAuth provider 的凭据来自 CC Switch 的账号态，不会写入 provider 的
+    // base_url/api_key。它与静态凭据是两种并列的运行时认证来源，不能要求同时存在。
+    let available = is_openai_compatible && (is_managed_oauth || has_credentials);
     ExternalOpenAiApiBackendOptionView {
         key: build_backend_key(
             ExternalOpenAiApiBackendType::Provider,
@@ -574,8 +586,11 @@ fn provider_backend_option(
 /// 第三方 Agent 选择这个来源时，profile 仍然保存为 provider target；真正请求进入
 /// Codex adapter 后会继续按请求里的 `model` 命中具体 route。这里单独计算可用性和模型
 /// 列表，避免把 Router 误判成缺少 Base URL/API Key 的普通 OpenAI provider。
-fn codex_router_provider_backend_option(provider: &Provider) -> ExternalOpenAiApiBackendOptionView {
-    let route_options = router_backend_options(provider);
+fn codex_router_provider_backend_option(
+    provider: &Provider,
+    providers: &IndexMap<String, Provider>,
+) -> ExternalOpenAiApiBackendOptionView {
+    let route_options = router_backend_options(provider, providers);
     let available_routes: Vec<&ExternalOpenAiApiBackendOptionView> = route_options
         .iter()
         .filter(|option| option.available)
@@ -625,7 +640,10 @@ fn codex_router_provider_backend_option(provider: &Provider) -> ExternalOpenAiAp
 }
 
 /// 将 Codex router 的每条 route 展开成独立后端选项。
-fn router_backend_options(provider: &Provider) -> Vec<ExternalOpenAiApiBackendOptionView> {
+fn router_backend_options(
+    provider: &Provider,
+    providers: &IndexMap<String, Provider>,
+) -> Vec<ExternalOpenAiApiBackendOptionView> {
     let mut options = Vec::new();
     for route in codex_router_routes(provider) {
         if route.get("enabled").and_then(|value| value.as_bool()) == Some(false) {
@@ -638,7 +656,7 @@ fn router_backend_options(provider: &Provider) -> Vec<ExternalOpenAiApiBackendOp
             .get("label")
             .and_then(|value| value.as_str())
             .unwrap_or(route_id);
-        let availability = route_backend_availability(provider, route);
+        let availability = route_backend_availability(provider, route, providers);
         options.push(ExternalOpenAiApiBackendOptionView {
             key: build_backend_key(
                 ExternalOpenAiApiBackendType::CodexRouterRoute,
@@ -683,7 +701,40 @@ fn is_codex_official_managed_oauth_provider(app_type: &AppType, provider: &Provi
 }
 
 /// 判断 Codex router route 是否有足够信息解析到真实上游。
-fn route_backend_availability(provider: &Provider, route: &Value) -> (bool, Option<String>) {
+fn route_backend_availability(
+    provider: &Provider,
+    route: &Value,
+    providers: &IndexMap<String, Provider>,
+) -> (bool, Option<String>) {
+    // 新式 MultiRouter route 只保存 targetProviderId，不复制目标 provider 的
+    // Base URL、API key 或 OAuth 登录态。运行时也会优先物化这个目标，因此预检
+    // 必须先沿相同引用读取真实凭据，不能继续拿无凭据的 Router 外壳做判断。
+    if let Some(target_provider_id) = route_target_provider_id(route) {
+        let Some(target_provider) = providers.get(target_provider_id) else {
+            return (
+                false,
+                Some(format!(
+                    "route target provider not found: {target_provider_id}"
+                )),
+            );
+        };
+        if target_provider.uses_managed_account_auth()
+            || is_codex_official_managed_oauth_provider(&AppType::Codex, target_provider)
+        {
+            return (true, None);
+        }
+
+        if codex_provider_has_runtime_credentials(target_provider) {
+            return (true, None);
+        }
+        return (
+            false,
+            Some(format!(
+                "route target provider has no usable base URL or credential: {target_provider_id}"
+            )),
+        );
+    }
+
     if route_uses_managed_oauth(route) {
         return (true, None);
     }
@@ -705,9 +756,9 @@ fn route_backend_availability(provider: &Provider, route: &Value) -> (bool, Opti
         .and_then(|value| value.as_str())
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    let (provider_base_url, provider_api_key) = provider.resolve_usage_credentials(&AppType::Codex);
-    let has_base_url = route_base_url.is_some() || !provider_base_url.trim().is_empty();
-    let has_api_key = route_api_key.is_some() || !provider_api_key.trim().is_empty();
+    let adapter = CodexAdapter::new();
+    let has_base_url = route_base_url.is_some() || adapter.extract_base_url(provider).is_ok();
+    let has_api_key = route_api_key.is_some() || adapter.extract_auth(provider).is_some();
 
     if has_base_url && has_api_key {
         (true, None)
@@ -719,6 +770,43 @@ fn route_backend_availability(provider: &Provider, route: &Value) -> (bool, Opti
             ),
         )
     }
+}
+
+/// 按 Codex 实际转发适配器的规则检查目标 Provider，而不是复用只服务于额度查询的
+/// `resolve_usage_credentials()`。后者只解析 config TOML，真实请求还兼容顶层
+/// base_url/baseURL、auth/env/direct key 和托管 OAuth。
+fn codex_provider_has_runtime_credentials(provider: &Provider) -> bool {
+    let adapter = CodexAdapter::new();
+    adapter.extract_base_url(provider).is_ok() && adapter.extract_auth(provider).is_some()
+}
+
+/// 从新旧 MultiRouter route schema 中读取目标 provider id。
+///
+/// 字段优先级与 Codex 运行时 route builder 保持一致，避免 External API 的可用性
+/// 预检和真实请求物化到不同的目标。
+fn route_target_provider_id(route: &Value) -> Option<&str> {
+    let upstream = route.get("upstream").unwrap_or(route);
+    [
+        upstream.get("targetProviderId"),
+        upstream.get("target_provider_id"),
+        upstream.get("providerId"),
+        upstream.get("provider_id"),
+        upstream.get("upstreamProviderId"),
+        upstream.get("upstream_provider_id"),
+        upstream.get("provider"),
+        route.get("targetProviderId"),
+        route.get("target_provider_id"),
+        route.get("providerId"),
+        route.get("provider_id"),
+        route.get("upstreamProviderId"),
+        route.get("upstream_provider_id"),
+        route.get("provider"),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(Value::as_str)
+    .map(str::trim)
+    .find(|value| !value.is_empty())
 }
 
 /// 判断 provider 是否是显式开启的 Codex router。
@@ -1277,9 +1365,9 @@ mod tests {
                         {
                             "id": "official",
                             "label": "OpenAI Official",
+                            "targetProviderId": "codex-official",
                             "match": { "models": ["gpt-5.4-mini"] },
                             "upstream": {
-                                "baseUrl": "https://chatgpt.com/backend-api/codex",
                                 "apiFormat": "openai_responses",
                                 "auth": { "source": "managed_codex_oauth" }
                             }
@@ -1287,11 +1375,10 @@ mod tests {
                         {
                             "id": "qwen",
                             "label": "Qwen Local",
+                            "targetProviderId": "codex-qwen",
                             "match": { "models": ["qwen3.6"] },
                             "upstream": {
-                                "baseUrl": "https://example.com/v1",
-                                "apiFormat": "openai_chat",
-                                "apiKey": "sk-placeholder"
+                                "apiFormat": "openai_chat"
                             }
                         }
                     ]
@@ -1300,6 +1387,29 @@ mod tests {
             None,
         );
         db.save_provider("codex", &provider).expect("save provider");
+        db.save_provider(
+            "codex",
+            &Provider::with_id(
+                "codex-official".to_string(),
+                "OpenAI Official".to_string(),
+                json!({ "auth": {}, "config": "" }),
+                None,
+            ),
+        )
+        .expect("save official target");
+        db.save_provider(
+            "codex",
+            &Provider::with_id(
+                "codex-qwen".to_string(),
+                "Qwen Local".to_string(),
+                json!({
+                    "base_url": "https://example.com/v1",
+                    "auth": { "OPENAI_API_KEY": "sk-target" }
+                }),
+                None,
+            ),
+        )
+        .expect("save qwen target");
 
         let options = list_backend_options(&db).expect("backend options");
         let aggregate = options
@@ -1317,7 +1427,61 @@ mod tests {
         assert!(options.iter().any(|option| {
             option.backend_type == ExternalOpenAiApiBackendType::CodexRouterRoute
                 && option.route_id.as_deref() == Some("official")
+                && option.available
+                && option.is_managed_oauth
         }));
+        assert!(options.iter().any(|option| {
+            option.backend_type == ExternalOpenAiApiBackendType::CodexRouterRoute
+                && option.route_id.as_deref() == Some("qwen")
+                && option.available
+        }));
+    }
+
+    #[test]
+    fn runtime_status_rejects_router_route_with_missing_target_provider() {
+        let db = Database::memory().expect("memory db");
+        let provider = Provider::with_id(
+            "codex-router".to_string(),
+            "Codex Router".to_string(),
+            json!({
+                "codexRouting": {
+                    "enabled": true,
+                    "routes": [{
+                        "id": "missing-official",
+                        "targetProviderId": "missing-provider",
+                        "match": { "models": ["gpt-5.4-mini"] },
+                        "upstream": {
+                            "auth": { "source": "managed_codex_oauth" }
+                        }
+                    }]
+                }
+            }),
+            None,
+        );
+        db.save_provider("codex", &provider).expect("save provider");
+
+        let options = list_backend_options(&db).expect("backend options");
+        let aggregate = options
+            .iter()
+            .find(|option| {
+                option.backend_type == ExternalOpenAiApiBackendType::Provider
+                    && option.provider_id == "codex-router"
+            })
+            .expect("router aggregate backend option");
+        let route = options
+            .iter()
+            .find(|option| {
+                option.backend_type == ExternalOpenAiApiBackendType::CodexRouterRoute
+                    && option.route_id.as_deref() == Some("missing-official")
+            })
+            .expect("router route backend option");
+
+        assert!(!aggregate.available);
+        assert!(!route.available);
+        assert!(route
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("target provider not found")));
     }
 
     #[test]

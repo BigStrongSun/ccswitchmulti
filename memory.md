@@ -2262,3 +2262,11 @@
 - Release workflow run `29435226376` 成功；Windows x64、Windows ARM64、Linux x64、Linux ARM64、macOS 构建矩阵，以及 Publish GitHub Release、Assemble latest.json 全部通过。macOS DMG 的公证与代码签名校验成功。
 - Release 共 19 个资产。`latest.json` 验证为 `version=3.16.5-15`，包含 `darwin-aarch64`、`darwin-x86_64`、`windows-x86_64`、`windows-aarch64`、`linux-x86_64`、`linux-aarch64`，每个平台都有非空下载 URL 和 signature。
 - 本地未提交的 `/responses/compact` 代理改动及旧输出目录没有进入发布提交、tag 或本次发布结果记录提交。
+
+## 2026-07-16 第三方 Agent API 的 MultiRouter 聚合来源可用性根修
+
+- 第三方 Agent API 已支持把整个 Codex MultiRouter 选为聚合模型源，也保留单条 route 的高级直连入口；不需要再增加一套独立的“多 Provider 多选”配置，否则会与 MultiRouter 的匹配、默认路由和故障转移规则形成两个事实来源。
+- 截图中 Router 与其所有 route 都显示“需补配置”的根因是 External API 预检只读取 route 内联凭据或 Router 外壳凭据，而新版 route 只保存 `targetProviderId`，真实 Base URL、API key、协议及 OAuth 状态位于被引用的目标 Provider。实际请求会物化目标 Provider，因此旧预检与运行时语义不一致。
+- 根修后，预检按运行时相同的字段优先级解析新旧 route schema，并从同一应用的 Provider map 查找目标；目标存在时优先按目标 Provider 判断托管 OAuth 或 Codex adapter 可提取的真实 Base URL/认证。显式引用缺失目标时必须不可用，不能被 route 上残留的 managed OAuth 标记误判为可用；没有目标引用的旧 route 继续兼容内联凭据和 Router 外壳凭据。
+- Codex Provider 的运行时能力不能用只服务于额度查询的 `resolve_usage_credentials()` 代替：后者主要解析 config TOML，真实 Codex adapter 还支持顶层 `base_url/baseURL`、auth/env/direct key。第三方 API 的可用性检查已改为复用 adapter 提取规则，同时将托管 OAuth 与静态凭据视为并列认证路径，空配置的官方 seed 仍保持可用。
+- 回归覆盖：整个 Router 可聚合官方 OAuth 与 `targetProviderId` 指向的 Qwen 静态 Provider；两条 route 均可用并贡献模型；缺失目标 Provider 时 Router 和 route 均不可用且返回可诊断错误。验证通过 External API 16/16、Codex 目标物化 6/6、外部 Router 解析 2/2、TypeScript typecheck、Prettier、rustfmt 和 `cargo check --lib`。

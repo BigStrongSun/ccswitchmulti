@@ -256,5 +256,13 @@ function translateBackendError(error: string): string {
   if (error.includes("route needs managed OAuth")) {
     return "这条路由缺少托管 OAuth、路由 API Key 或可继承的模型源凭据。";
   }
+  if (error.includes("route target provider not found")) {
+    return "这条路由引用的目标 Provider 已不存在，请回到 MultiRouter 修复或删除该路由。";
+  }
+  if (
+    error.includes("route target provider has no usable base URL or credential")
+  ) {
+    return "这条路由引用的目标 Provider 缺少可用的 Base URL 或凭据。";
+  }
   return error;
 }
