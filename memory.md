@@ -2206,6 +2206,12 @@
 - 根修在 `src-tauri/src/database/dao/providers.rs`：所有 provider 配置解析、列表读取、按 ID 读取、OMO 当前 provider 读取、保存和局部更新都统一规范化为 JSON object。`null`、数组、标量、空/损坏 JSON 一律成为 `{}`，有效对象不变；因此旧库无需手改，也不会再被新写入重新污染。
 - 回归：DAO parser 覆盖 `null`、数组、标量、损坏文本和有效对象；内存 SQLite 覆盖列表读取、按 ID 读取及写回 `null` 后实际持久化为 `{}`。`cargo fmt --check`、`cargo test --manifest-path src-tauri/Cargo.toml database::dao::providers::tests --lib`（2/2）和 `cargo check --manifest-path src-tauri/Cargo.toml --lib` 通过。本机 `~/.cc-switch/cc-switch.db` 只读扫描未发现当前坏记录，说明需修的是跨用户历史数据入口而非本机现存库。
 
+## 2026-07-15 GitHub ARM64 Release 依赖安装网络容错
+
+- `v3.16.5-13` 的 Release workflow 连续两次只有 Linux ARM64 失败；两次日志都显示 `ports.ubuntu.com` 的 IPv6 路由不可达，随后 IPv4 端口 80 超时。Windows x64/ARM64、macOS 与 Linux x64 均成功，因此失败与白屏源码或 Rust/前端构建无关。
+- 旧工作流的 Linux 系统依赖阶段对每条 `apt-get` 只尝试一次，任一 Ubuntu 软件源瞬断就会让发布步骤整体跳过。根修是在统一 `apt_get` helper 中强制 IPv4、启用 APT 下载重试和连接超时，并对完整事务做三次退避重试；`update`、核心依赖、GTK、WebKit 与 libsoup fallback 全部必须经过该 helper。
+- 已推送且失败的发布 tag 不应改写。`v3.16.5-13` 保留为失败构建证据，包含工作流根修的新源码应使用后续补丁版本重新打 tag。
+
 ## 2026-07-15 v3.16.5-11 远端白屏报告复盘与前端 IPC 防线
 
 - 用户回传的 `cc-switch.log` 显示 v3.16.5-11 后端完成数据库、provider、代理和 Codex 历史初始化；`codex-router.log` 中大多数请求正常得到上游 200。React/WebView 的 `Cannot read properties of null (reading 'settingsConfig')` 不会自动写入 Rust 日志，因此“后端日志无报错”不能推翻前端白屏报告，也不能据此归因网络或本机配置。

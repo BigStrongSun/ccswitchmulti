@@ -70,9 +70,32 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          sudo apt-get update
+          # GitHub hosted ARM runners occasionally expose IPv6 DNS records while
+          # having no usable IPv6 route. Keep package installation deterministic:
+          # force IPv4, let APT retry individual downloads, and retry the full
+          # transaction so a transient ports.ubuntu.com outage does not abort a
+          # multi-platform release after every other artifact has built.
+          apt_get() {
+            local attempt
+            for attempt in 1 2 3; do
+              if sudo apt-get \
+                -o Acquire::ForceIPv4=true \
+                -o Acquire::Retries=5 \
+                -o Acquire::http::Timeout=30 \
+                -o Acquire::https::Timeout=30 \
+                "$@"; then
+                return 0
+              fi
+              if [ "$attempt" -lt 3 ]; then
+                sleep $((attempt * 15))
+              fi
+            done
+            return 1
+          }
+
+          apt_get update
           # Core build tools and pkg-config
-          sudo apt-get install -y --no-install-recommends \
+          apt_get install -y --no-install-recommends \
             build-essential \
             pkg-config \
             curl \
@@ -86,16 +109,16 @@ jobs:
             elfutils \
             xdg-utils
           # GTK/GLib stack for gdk-3.0, glib-2.0, gio-2.0
-          sudo apt-get install -y --no-install-recommends \
+          apt_get install -y --no-install-recommends \
             libgtk-3-dev \
             librsvg2-dev \
             libayatana-appindicator3-dev
           # WebKit2GTK (version differs across Ubuntu images; try 4.1 then 4.0)
-          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
-            || sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.0-dev
+          apt_get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
+            || apt_get install -y --no-install-recommends libwebkit2gtk-4.0-dev
           # libsoup also changed major version; prefer 3.0 with fallback to 2.4
-          sudo apt-get install -y --no-install-recommends libsoup-3.0-dev \
-            || sudo apt-get install -y --no-install-recommends libsoup2.4-dev
+          apt_get install -y --no-install-recommends libsoup-3.0-dev \
+            || apt_get install -y --no-install-recommends libsoup2.4-dev
 
       - name: Setup pnpm
         if: runner.os != 'Windows' || runner.arch != 'ARM64'
