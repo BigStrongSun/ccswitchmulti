@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-07-15 Windows WM_ENDSESSION tao Destroyed panic 根修
+
+- 用户报告的 `app-exit-events.jsonl` 在 2026-07-15 11:18:55 记录主线程 panic：`tao-0.34.6/src/platform_impl/windows/event_loop/runner.rs:371 cannot move state from Destroyed`。同一次运行在 11:18:44 托盘 `show_main` 后发生，但 `show_main` 只会增加重绘消息，不能产生 `Destroyed`；没有 `ExitRequested` 日志也排除了 CCSwitchMulti 主动退出路径。
+- 根因来自 tao 0.34.3 引入的 Windows `WM_ENDSESSION(TRUE)` 处理：它在 `DispatchMessageW` 回调内部直接调用 `loop_destroyed()`，而外层 `GetMessageW` 循环仍存活；随后已排队的 `WM_PAINT`、内部 `PROCESS_NEW_EVENTS` 或 user event 会再次调用 `poll/send_event/redraw`，从终态 `Destroyed` 迁移并 panic。该逻辑在 tao 0.34.6、0.34.8、0.35.0 和当时 dev 分支仍存在，单纯升级不能修复。
+- 根修保留 tao 0.34.6 其余上游修复，并通过 `src-tauri/Cargo.toml [patch.crates-io]` 固定仓库内 `src-tauri/vendor/tao`：`WM_ENDSESSION(TRUE)` 改为 `PostQuitMessage(0)`，让下一次 `GetMessageW` 返回 0，之后只由 `run_return` 的正常尾部发送一次 `LoopDestroyed`；`WM_ENDSESSION(FALSE)` 继续运行。严禁用 catch panic、忽略 Destroyed 状态迁移或仅把 panic 改成 return，这些做法会留下半销毁事件循环。
+- CCSwitchMulti 在最终 `RunEvent::Exit` 调用 `app_exit_monitor::record_clean_exit("event_loop_exit", 0)`，使系统关机、重启、注销或 Restart Manager 关闭后的下一次启动不再误报残留 marker；用户主动退出仍走原有 `ExitRequested` 清理路径。
+- 回归基线：vendored tao 的 `confirmed_end_session_quits_the_message_loop` / `cancelled_end_session_keeps_the_message_loop_alive` 两个单测、完整 `cargo check --manifest-path src-tauri/Cargo.toml --lib`，并确认构建输出明确解析 `tao v0.34.6 (.../src-tauri/vendor/tao)`。上游发布等价修复前不得删除 vendor override。
+
 ## 2026-07-15 CCSwitchMulti v3.16.5-10：数据库 v13 兼容与白屏恢复
 
 - 已发布 `v3.16.5-9` 只支持 schema v12；上游 `f991726f`（2026-07-11）首次把数据库升至 v13。用户曾运行上游 v3.17.0 后再回到 v3.16.5-9，会在启动预检中进入“数据库版本过新”恢复页。

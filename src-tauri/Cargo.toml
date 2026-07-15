@@ -124,3 +124,9 @@ strip = "symbols"
 [dev-dependencies]
 serial_test = "3"
 tempfile = "3"
+
+[patch.crates-io]
+# tao 0.34.3+ emits LoopDestroyed from inside the WM_ENDSESSION window callback,
+# leaving the Win32 message loop alive with an already-Destroyed runner. Keep the
+# 0.34.6 fixes while routing session shutdown through WM_QUIT in our audited copy.
+tao = { path = "vendor/tao" }

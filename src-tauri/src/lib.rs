@@ -1627,6 +1627,14 @@ pub fn run() {
             return;
         }
 
+        // Windows WM_ENDSESSION is delivered below ExitRequested. The tao event
+        // loop now terminates through its normal LoopDestroyed -> RunEvent::Exit
+        // path, so mark that terminal path clean before Windows ends the session.
+        if let RunEvent::Exit = &event {
+            app_exit_monitor::record_clean_exit("event_loop_exit", 0);
+            log::info!("事件循环已正常结束，退出标记已清理");
+        }
+
         #[cfg(target_os = "macos")]
         {
             match event {
