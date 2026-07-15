@@ -2197,3 +2197,9 @@
 - 截图中的错误 `Cannot read properties of null (reading 'settingsConfig')` 不是 v3.16.5-10 已处理的 MultiRouter 目录渲染异常，而是另一条数据契约破坏链。前端 `Provider` 类型声明 `settingsConfig: Record<string, any>` 并在多个启动路径按对象读取；SQLite DAO `get_all_providers` / `get_provider_by_id` 过去对损坏 JSON 用 `Value::Null` 兜底，也会把合法字符串 `"null"` 原样返回，从而将不合法的 `settingsConfig=null` 送入首屏。
 - 根修在 `src-tauri/src/database/dao/providers.rs`：所有 provider 配置解析、列表读取、按 ID 读取、OMO 当前 provider 读取、保存和局部更新都统一规范化为 JSON object。`null`、数组、标量、空/损坏 JSON 一律成为 `{}`，有效对象不变；因此旧库无需手改，也不会再被新写入重新污染。
 - 回归：DAO parser 覆盖 `null`、数组、标量、损坏文本和有效对象；内存 SQLite 覆盖列表读取、按 ID 读取及写回 `null` 后实际持久化为 `{}`。`cargo fmt --check`、`cargo test --manifest-path src-tauri/Cargo.toml database::dao::providers::tests --lib`（2/2）和 `cargo check --manifest-path src-tauri/Cargo.toml --lib` 通过。本机 `~/.cc-switch/cc-switch.db` 只读扫描未发现当前坏记录，说明需修的是跨用户历史数据入口而非本机现存库。
+
+## 2026-07-15 CCSwitchMulti v3.16.5-12 发布结果
+
+- `v3.16.5-12` 已发布到 `BigStrongSun/ccswitchmulti`。annotated tag 解引用到发布源码提交 `063a6d59bf74893e021efd3fe75045b47e14baa2`；正式 Release 为 `draft=false`、`prerelease=false`，地址为 `https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.16.5-12`。
+- 本版发布 Provider `settingsConfig` 非对象配置兼容根修，消除截图中的应用启动错误边界；用户无需手工编辑 SQLite，旧记录会在读取时恢复为安全空对象。
+- Release workflow run `29384516268` 成功，Windows x64、Windows ARM64、Linux x64、Linux ARM64、macOS 五个构建矩阵，以及 Publish GitHub Release、Assemble latest.json 全部通过。Release 共 19 个资产；`latest.json` 已验证为 `version=3.16.5-12`，六个平台键均有下载 URL 和 signature。
