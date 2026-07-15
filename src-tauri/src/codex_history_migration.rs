@@ -2493,6 +2493,15 @@ pub fn maybe_migrate_codex_official_history_to_unified_bucket(
             ..Default::default()
         });
     }
+    // Never rewrite Codex-owned rollout files or its active SQLite database while
+    // Desktop/app-server is running. Besides WAL contention, replacing every JSONL
+    // invalidates Desktop's history cache and can stall its startup/session UI.
+    if !running_codex_desktop_process_descriptions().is_empty() {
+        return Ok(CodexHistoryProviderBucketMigrationOutcome {
+            skipped_reason: Some("codex_running".to_string()),
+            ..Default::default()
+        });
+    }
     let _op_guard = lock_codex_official_history_op();
     let codex_dir = get_codex_config_dir();
     // marker 绑定迁移时的 Codex 目录：切换 codex_config_dir 后旧 marker 不再
@@ -3401,6 +3410,13 @@ fn rewrite_codex_session_file_lines(
     backup_codex_jsonl_file(path, codex_dir, backup_root)?;
     ensure_codex_session_file_unchanged(path, modified_before, len_before)?;
     atomic_write(path, rewritten.as_bytes())?;
+    // Provider-bucket migration changes metadata, not session recency. Preserve
+    // the original mtime so Codex Desktop and CC Switch's usage synchronizer do
+    // not treat every migrated rollout as newly active and rescan all history.
+    if let Some(modified_before) = modified_before {
+        filetime::set_file_mtime(path, filetime::FileTime::from_system_time(modified_before))
+            .map_err(|e| AppError::io(path, e))?;
+    }
     Ok(true)
 }
 

@@ -2217,3 +2217,11 @@
 - 所谓“有时好用”只能说明不同请求构造了不同的工具集，或 Codex app-server 进程/会话仍持有旧配置；一旦同一请求携带了被扩展的保留 schema，上游会在推理前确定性返回 400，不是随机网络错误。
 - 截图分析里的 `spawn_agent_visible_model_limit` 只控制候选模型展示窗口，`src/services/quota_collaboration.rs` 只处理额度协作，都不参与 `collaboration.spawn_agent` 的函数 schema 生成，不应作为本错误的根因线索。
 - 本机当时安装 CCSwitchMulti `3.16.5-12`，active `~/.codex/config.toml` 已是 `[features.multi_agent_v2] hide_spawn_agent_metadata = true`，当前 Codex app-server 进程也晚于该配置启动；本机近期 session 未找到新的同类上游错误。对外部报错机器应直接核对其 active config 和 app-server 启动时间，不能用本机健康状态代替现场证据。
+
+## 2026-07-15 Codex 历史迁移后 Desktop 全局卡顿根因
+
+- CCSM 旧的 provider bucket 迁移会在 Codex Desktop/app-server 运行时批量替换 rollout JSONL，并让文件获得新的 mtime；这会同时使 Codex 原生历史缓存失效、触发 SQLite/WAL 竞争，并让 CCSM 的使用量同步器把旧历史当作活跃文件重新扫描。根修是在任何真实写入前检测 Codex 进程并返回 `codex_running`，只保留 dry-run 诊断能力。
+- provider bucket 改写只改变元数据，不代表会话最近活跃。原子替换 JSONL 后必须恢复原始 mtime，避免 Codex Desktop 和 CCSM 周期同步器重新索引全部迁移历史。
+- 当前 `~/.codex/config.toml` 已由 Codex CLI 成功解析，活动 provider 为内置 `openai`，没有 CCSM 本地 URL、`PROXY_MANAGED` 或自定义 catalog 残留；本次现场不能归因为当前 TOML 损坏。
+- 当前 Codex 现场约 17 个已加载任务产生 16 组 MCP/plugin runtime，约 84 个 MCP 后代进程、约 3 GB RSS。失效远程 Docs MCP 是单点启动延迟，但任务级 MCP 重复实例化是当前资源放大的主因；这是 Codex runtime 生命周期问题，CCSM 不应通过改写历史制造更多“最近活跃”任务来进一步放大。
+- CCSM 仍需后续处理：Codex 使用量同步器对每个已修改 rollout 从首行重放；代理接管会临时删除整个 `[model_providers]` 后只创建 CCSM provider，恢复过度依赖备份；代理只覆盖模型 API，MCP、OAuth、插件和 Desktop 服务仍直连，UI 与文档必须明确该边界。
