@@ -1,3 +1,4 @@
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use rmcp::{
     model::{
         ErrorData, ListResourceTemplatesResult, ListResourcesResult, PaginatedRequestParams,
@@ -116,7 +117,7 @@ impl ReadonlyProjectServer {
         Ok(out)
     }
 
-    fn read_file_text(&self, uri: &str) -> Result<String, ErrorData> {
+    fn read_file_contents(&self, uri: &str) -> Result<ResourceContents, ErrorData> {
         let rel = uri
             .strip_prefix(FILE_URI_PREFIX)
             .ok_or_else(|| invalid_params("unsupported resource uri"))?;
@@ -131,11 +132,29 @@ impl ReadonlyProjectServer {
         }
 
         let bytes = fs::read(&path).map_err(|err| invalid_params(format!("read file: {err}")))?;
+        let mime_type = mime_type_for_path(&path);
         if bytes.contains(&0) {
-            return Err(invalid_params("binary file rejected"));
+            return Ok(ResourceContents::BlobResourceContents {
+                uri: uri.to_string(),
+                mime_type: Some(mime_type.to_string()),
+                blob: STANDARD.encode(bytes),
+                meta: None,
+            });
         }
-
-        String::from_utf8(bytes).map_err(|_| invalid_params("file is not valid UTF-8 text"))
+        match String::from_utf8(bytes) {
+            Ok(text) => Ok(ResourceContents::TextResourceContents {
+                uri: uri.to_string(),
+                mime_type: Some(mime_type.to_string()),
+                text,
+                meta: None,
+            }),
+            Err(error) => Ok(ResourceContents::BlobResourceContents {
+                uri: uri.to_string(),
+                mime_type: Some(mime_type.to_string()),
+                blob: STANDARD.encode(error.into_bytes()),
+                meta: None,
+            }),
+        }
     }
 }
 
@@ -169,8 +188,8 @@ impl ServerHandler for ReadonlyProjectServer {
                     .with_description("Read a shallow project subtree")
                     .with_mime_type("text/plain"),
                 ResourceTemplate::new("ccswitch://project/file/{path}", "project-file")
-                    .with_description("Read a UTF-8 project file")
-                    .with_mime_type("text/plain"),
+                    .with_description("Read any project file")
+                    .with_mime_type("application/octet-stream"),
             ],
             next_cursor: None,
             meta: None,
@@ -182,25 +201,45 @@ impl ServerHandler for ReadonlyProjectServer {
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, ErrorData> {
-        let (uri, text) = if request.uri == TREE_URI || request.uri.starts_with(TREE_URI_PREFIX) {
+        let contents = if request.uri == TREE_URI || request.uri.starts_with(TREE_URI_PREFIX) {
             let uri = request.uri;
             let text = self.tree_text(&uri)?;
-            (uri, text)
-        } else if request.uri.starts_with(FILE_URI_PREFIX) {
-            let text = self.read_file_text(&request.uri)?;
-            (request.uri, text)
-        } else {
-            return Err(ErrorData::resource_not_found("resource not found", None));
-        };
-
-        Ok(ReadResourceResult::new(vec![
             ResourceContents::TextResourceContents {
                 uri,
                 mime_type: Some("text/plain".to_string()),
                 text,
                 meta: None,
-            },
-        ]))
+            }
+        } else if request.uri.starts_with(FILE_URI_PREFIX) {
+            self.read_file_contents(&request.uri)?
+        } else {
+            return Err(ErrorData::resource_not_found("resource not found", None));
+        };
+
+        Ok(ReadResourceResult::new(vec![contents]))
+    }
+}
+
+fn mime_type_for_path(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some(
+            "txt" | "md" | "rs" | "ts" | "tsx" | "js" | "jsx" | "json" | "toml" | "yaml" | "yml"
+            | "xml" | "html" | "css" | "csv" | "py" | "ps1" | "sh" | "bat" | "cmd",
+        ) => "text/plain",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("png") => "image/png",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("bmp") => "image/bmp",
+        Some("svg") => "image/svg+xml",
+        Some("pdf") => "application/pdf",
+        Some("zip") => "application/zip",
+        _ => "application/octet-stream",
     }
 }
 
@@ -290,6 +329,77 @@ mod tests {
         assert_eq!(
             server.root,
             fs::canonicalize(temp.path()).expect("canonical")
+        );
+    }
+
+    #[test]
+    fn readonly_server_returns_text_for_utf8_files() {
+        let temp = TempDir::new().expect("tempdir");
+        fs::write(temp.path().join("notes.md"), "# Notes\n").expect("write text");
+        let server = ReadonlyProjectServer {
+            root: fs::canonicalize(temp.path()).expect("canonical"),
+        };
+
+        let contents = server
+            .read_file_contents("ccswitch://project/file/notes.md")
+            .expect("read text");
+
+        assert_eq!(
+            contents,
+            ResourceContents::TextResourceContents {
+                uri: "ccswitch://project/file/notes.md".to_string(),
+                mime_type: Some("text/plain".to_string()),
+                text: "# Notes\n".to_string(),
+                meta: None,
+            }
+        );
+    }
+
+    #[test]
+    fn readonly_server_returns_jpeg_as_blob() {
+        let temp = TempDir::new().expect("tempdir");
+        let bytes = [0xff, 0xd8, 0xff, 0x00, 0x10];
+        fs::write(temp.path().join("front.jpg"), bytes).expect("write jpeg");
+        let server = ReadonlyProjectServer {
+            root: fs::canonicalize(temp.path()).expect("canonical"),
+        };
+
+        let contents = server
+            .read_file_contents("ccswitch://project/file/front.jpg")
+            .expect("read jpeg");
+
+        assert_eq!(
+            contents,
+            ResourceContents::BlobResourceContents {
+                uri: "ccswitch://project/file/front.jpg".to_string(),
+                mime_type: Some("image/jpeg".to_string()),
+                blob: STANDARD.encode(bytes),
+                meta: None,
+            }
+        );
+    }
+
+    #[test]
+    fn readonly_server_returns_unknown_binary_as_blob() {
+        let temp = TempDir::new().expect("tempdir");
+        let bytes = [0, 1, 2, 3];
+        fs::write(temp.path().join("payload.bin"), bytes).expect("write binary");
+        let server = ReadonlyProjectServer {
+            root: fs::canonicalize(temp.path()).expect("canonical"),
+        };
+
+        let contents = server
+            .read_file_contents("ccswitch://project/file/payload.bin")
+            .expect("read binary");
+
+        assert_eq!(
+            contents,
+            ResourceContents::BlobResourceContents {
+                uri: "ccswitch://project/file/payload.bin".to_string(),
+                mime_type: Some("application/octet-stream".to_string()),
+                blob: STANDARD.encode(bytes),
+                meta: None,
+            }
         );
     }
 }
