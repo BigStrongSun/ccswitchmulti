@@ -2106,6 +2106,7 @@
 - v3.16.5-15 仍出现 `Function 'collaboration.spawn_agent' is reserved ... must match the configured schema` 时，`hide_spawn_agent_metadata=true` 已经正确，真正根因在模型目录合并：CCSM 用通用模板生成路由条目后覆盖了同 slug 官方模型的协议字段，把官方 `gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna` 的 `use_responses_lite=true` 写成 `false`。现场 `models_cache.json` 与 `cc-switch-model-catalog.json` 对照可直接证明该差异。
 - `use_responses_lite=false` 会让 Codex 不再使用 input 内的 `additional_tools` namespace transport，`collaboration.spawn_agent` 因而以不符合新版后端保留定义的工具结构发送；仅调整 `hide_spawn_agent_metadata` 无法修复这类 transport 级 schema 不匹配。
 - `merge_codex_model_entry` 的正确所有权边界是：同 slug 官方缓存已经给出的协议、工具、推理和展示字段保持官方权威；CCSM 只覆盖模型标识、显式上下文、可见性、输入模态、用户明确声明的并行工具能力和基础指令等路由字段。回归测试 `codex_model_catalog_keeps_official_transport_and_reserved_tool_metadata` 必须覆盖 `use_responses_lite`、`multi_agent_version`、`tool_mode` 和 `apply_patch_tool_type`。
+- 上述 transport 修复与 MultiRouter 空方案白屏修复一起发布为 v3.16.5-16；发布说明位于 `docs/release-notes/v3.16.5-16-zh.md`。
 
 ## 2026-07-10 统一 Codex App 历史目录与原生模型目录适配（纠正）
 
