@@ -2282,3 +2282,10 @@
 - 短期 access token 与过期时间现在和 refresh token 保存在同一凭据文件中，进程重启优先恢复未临期 token，不再每次启动都强制刷新。刷新成功会把 access token、过期时间及轮换后的 refresh token 作为同一串行快照落盘。
 - refresh 返回明确 invalid_grant 后会在隔离账号前再次加载磁盘；若另一个进程刚写入不同 refresh token 或仍有效 access token，则采用最新凭据再试一次。这样旧进程的飞行中请求不能用旧 token 的失败覆盖新进程刚完成的轮换。
 - 验证覆盖 24 项 Codex OAuth 定向回归，包括重启复用短期 token、临时 401 保留账号、明确 invalid_grant 隔离但不删除、同账号重新登录原位恢复、跨 manager 读取轮换 token、飞行中跨进程轮换恢复；TypeScript typecheck、`cargo check --lib`、Clippy `-D warnings`、rustfmt 与 Prettier 通过。
+
+## 2026-07-17 v3.16.5-15 保留工具报错与 MultiRouter 白屏重新定界
+
+- 用户明确故障机器运行 `3.16.5-15`。截图中的 macOS 资源名 `index-D-I7smwQ.js` 已在 GitHub Release `v3.16.5-15` 的正式 `CCSwitchMulti-v3.16.5-15-macOS.zip` 二进制中命中，`Info.plist` 也为 `3.16.5-15`；因此不能再把两张截图归因为旧安装包、错误版本号或未升级。
+- `null is not an object (evaluating 'e.settingsConfig')` 的堆栈落在该发布包的 Codex MultiRouter 工作台主 chunk。`v3.16.5-15` 虽然在数据库 DAO 和 `providersApi.getAll()` 的 `get_providers` IPC 边界规范化了 provider，但工作台仍有 React Query 缓存、乐观更新、组件 props 和派生集合等内存入口直接信任 `Provider` 非空。之前“数据库与单一 IPC 双边界已经完整封闭白屏”的结论过宽；后续根修必须给共享 query/cache 写入和工作台组件入口建立同一运行时规范化契约，并用 null provider 注入回归覆盖真实工作台渲染链。
+- `collaboration.spawn_agent` 保留 schema 报错也不能只凭 `hide_spawn_agent_metadata=true` 判定已修。当前 Codex 工具规划还受 multi-agent 版本、tool namespace、动态 feature config 和 Codex 运行时版本共同影响；新源码已出现 `multi_agent_v1` namespace，而截图现场仍是 `collaboration.spawn_agent`。必须从故障机采集报错请求的实际 `tools`/namespace/schema 与 Codex 版本，再与同版本官方直连请求做结构差异，不能继续猜测或只重写配置开关。
+- 本轮仅完成发布产物指纹、tag 源码和当前 Codex 工具规划的只读核验，没有修改业务实现。第一类错误在缺少真实请求 payload 时不应贸然改 schema；第二类错误已确认需要扩大运行时数据边界，但应先补能复现工作台 null 注入的测试再实现根修。
