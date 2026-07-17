@@ -821,7 +821,10 @@ export function buildMultiRouterRuntimeStatus({
 }
 
 /// 从 Provider 私有配置里读取 Codex 多模型路由配置；没有配置时返回 null，避免把普通模型源误判成路由方案。
-export function readCodexRouting(provider: Provider): CodexRouting | null {
+export function readCodexRouting(
+  provider: Provider | null | undefined,
+): CodexRouting | null {
+  if (!provider) return null;
   const routing = provider.settingsConfig?.codexRouting;
   if (!routing || typeof routing !== "object") return null;
   if (Array.isArray(routing)) {

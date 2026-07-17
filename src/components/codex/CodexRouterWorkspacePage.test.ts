@@ -180,6 +180,28 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+it("没有 MultiRouter 方案时打开工作台不会读取 null settingsConfig", () => {
+  const provider: Provider = {
+    id: "valid-provider",
+    name: "Valid Provider",
+    settingsConfig: {},
+  };
+
+  expect(() =>
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [provider],
+        isProxyRunning: false,
+        isCodexTakeoverActive: false,
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    ),
+  ).not.toThrow();
+  expect(screen.getByText("Codex 多模型路由工作台")).toBeInTheDocument();
+});
+
 describe("Codex MultiRouter workspace route persistence helpers", () => {
   it("refreshes an official OAuth catalog with the bound account and syncs new models into its route", async () => {
     vi.mocked(fetchCodexOauthModels).mockResolvedValue([

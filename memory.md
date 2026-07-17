@@ -2289,3 +2289,10 @@
 - `null is not an object (evaluating 'e.settingsConfig')` 的堆栈落在该发布包的 Codex MultiRouter 工作台主 chunk。`v3.16.5-15` 虽然在数据库 DAO 和 `providersApi.getAll()` 的 `get_providers` IPC 边界规范化了 provider，但工作台仍有 React Query 缓存、乐观更新、组件 props 和派生集合等内存入口直接信任 `Provider` 非空。之前“数据库与单一 IPC 双边界已经完整封闭白屏”的结论过宽；后续根修必须给共享 query/cache 写入和工作台组件入口建立同一运行时规范化契约，并用 null provider 注入回归覆盖真实工作台渲染链。
 - `collaboration.spawn_agent` 保留 schema 报错也不能只凭 `hide_spawn_agent_metadata=true` 判定已修。当前 Codex 工具规划还受 multi-agent 版本、tool namespace、动态 feature config 和 Codex 运行时版本共同影响；新源码已出现 `multi_agent_v1` namespace，而截图现场仍是 `collaboration.spawn_agent`。必须从故障机采集报错请求的实际 `tools`/namespace/schema 与 Codex 版本，再与同版本官方直连请求做结构差异，不能继续猜测或只重写配置开关。
 - 本轮仅完成发布产物指纹、tag 源码和当前 Codex 工具规划的只读核验，没有修改业务实现。第一类错误在缺少真实请求 payload 时不应贸然改 schema；第二类错误已确认需要扩大运行时数据边界，但应先补能复现工作台 null 注入的测试再实现根修。
+
+## 2026-07-17 v3.16.5-15 打开 MultiRouter 面板立即白屏根修
+
+- 用户补充了决定性触发条件：Provider 主界面正常，只要打开 Codex 多路面板就立即进入错误边界，Safari 报 `null is not an object (evaluating 'e.settingsConfig')`。定向组件测试证明根因不是数据库中的 `settings_config=null`，也不是 React Query 中混入 null provider。
+- `CodexRouterWorkspacePage` 在没有有效 MultiRouter 方案时会把 `selectedPlanForModelRefresh` 设为 `null`，随后调用 `readCodexRouting(selectedPlanForModelRefresh)?.routes`。可选链只保护了函数返回值，没有保护传入参数；`readCodexRouting` 内部第一步读取 `provider.settingsConfig`，因此空方案现场必然白屏。
+- 根修是让 `readCodexRouting` 的真实契约接受 `Provider | null | undefined` 并在入口返回 `null`。这不是组件旁的临时兜底：该读取函数本来就是“没有路由配置时返回 null”的统一边界，而调用方已经明确允许当前方案为空。
+- 新增组件回归：只有普通 Codex provider、没有任何 MultiRouter 方案时渲染工作台，必须正常显示而不能访问 null 的 `settingsConfig`。验证通过工作台 45/45、`pnpm typecheck`、Prettier 和 `git diff --check`。
