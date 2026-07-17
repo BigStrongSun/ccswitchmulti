@@ -2055,8 +2055,8 @@ fn codex_model_stable_id(model: &Value) -> Option<String> {
 
 /// 合并同一模型的官方元数据和 CCSM 路由表示。
 ///
-/// 路由字段继续覆盖模型标识、别名和路由能力；官方模型的展示名、推理档位和
-/// 服务速度档保持权威，避免通用模板把 GPT-5.6 的 max/ultra/fast 降级成旧版四档。
+/// 路由字段继续覆盖模型标识、显式上下文和路由能力；官方模型已有的协议、工具、
+/// 展示和推理元数据保持权威，避免通用模板把新版模型降级成旧 transport。
 fn merge_codex_model_entry(official: Option<&Value>, routed: &Value) -> Value {
     let (Some(official_object), Some(routed_object)) =
         (official.and_then(Value::as_object), routed.as_object())
@@ -2075,7 +2075,12 @@ fn merge_codex_model_entry(official: Option<&Value>, routed: &Value) -> Value {
     Value::Object(merged)
 }
 
-/// 判断同 slug 官方模型中已经存在、必须保持权威的选择器元数据字段。
+/// 判断同 slug 官方模型中已经存在、必须保持权威的元数据字段。
+///
+/// 目录模板来自某一个参考模型，不能覆盖同 slug 官方条目里已经存在的字段。
+/// `use_responses_lite`、`multi_agent_version`、`tool_mode` 这类字段会直接改变
+/// Codex 发给后端的工具结构；把 GPT-5.6 的 Lite 能力覆盖成旧模板的 `false`
+/// 会使 `collaboration.spawn_agent` 以错误 schema 发出并被后端拒绝。
 fn codex_official_picker_metadata_field(
     official: &serde_json::Map<String, Value>,
     field: &str,
@@ -2083,6 +2088,30 @@ fn codex_official_picker_metadata_field(
     let official_has_any =
         |fields: &[&str]| fields.iter().any(|field| official.contains_key(*field));
     match field {
+        // CCSM 路由目录拥有这些字段：模型别名、显式窗口、路由可见性及用户声明的
+        // 输入/工具能力仍需覆盖模板或官方默认值。
+        "slug"
+        | "model"
+        | "id"
+        | "context_window"
+        | "max_context_window"
+        | "contextWindow"
+        | "is_default"
+        | "isDefault"
+        | "visibility"
+        | "show_in_picker"
+        | "showInPicker"
+        | "hidden"
+        | "input_modalities"
+        | "inputModalities"
+        | "supports_image_detail_original"
+        | "supportsImageDetailOriginal"
+        | "web_search_tool_type"
+        | "webSearchToolType"
+        | "supports_parallel_tool_calls"
+        | "supportsParallelToolCalls"
+        | "base_instructions"
+        | "baseInstructions" => false,
         "display_name" | "displayName" | "description" => {
             official_has_any(&["display_name", "displayName"])
         }
@@ -2119,7 +2148,9 @@ fn codex_official_picker_metadata_field(
         "default_verbosity" | "defaultVerbosity" => {
             official_has_any(&["default_verbosity", "defaultVerbosity"])
         }
-        _ => false,
+        // Any other field already supplied for this exact official slug is
+        // protocol/model metadata owned by Codex, not by the routing template.
+        _ => official.contains_key(field),
     }
 }
 
@@ -5049,6 +5080,41 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             specs[0].context_window, 272_000,
             "user/provider explicit catalog context should still override cached official metadata"
         );
+    }
+
+    #[test]
+    fn codex_model_catalog_keeps_official_transport_and_reserved_tool_metadata() {
+        let official_models = json!([{
+            "slug": "gpt-5.6-sol",
+            "display_name": "GPT-5.6 Sol",
+            "context_window": 512000,
+            "use_responses_lite": true,
+            "multi_agent_version": "v2",
+            "tool_mode": "direct",
+            "apply_patch_tool_type": "freeform"
+        }]);
+        let routed_models = json!([{
+            "slug": "gpt-5.6-sol",
+            "model": "gpt-5.6-sol",
+            "display_name": "gpt-5.6-sol",
+            "context_window": 400000,
+            "use_responses_lite": false,
+            "multi_agent_version": "v1",
+            "tool_mode": "code_mode_only",
+            "apply_patch_tool_type": "custom"
+        }]);
+
+        let merged = merge_codex_models(
+            official_models.as_array().expect("official models"),
+            routed_models.as_array().expect("routed models"),
+        );
+        let model = merged.first().expect("merged model");
+
+        assert_eq!(model["context_window"], 400000);
+        assert_eq!(model["use_responses_lite"], true);
+        assert_eq!(model["multi_agent_version"], "v2");
+        assert_eq!(model["tool_mode"], "direct");
+        assert_eq!(model["apply_patch_tool_type"], "freeform");
     }
 
     #[test]

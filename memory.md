@@ -2101,6 +2101,12 @@
 - `src-tauri/src/codex_config.rs` 的 Codex catalog/config 投影改为 `ensure_codex_multi_agent_reserved_schema_compatible`：保留用户原本 `multi_agent_v2` 启用状态，但写入 `hide_spawn_agent_metadata = true`，让 `collaboration.spawn_agent` 回到官方保留工具形态；文档 `docs/codex-spawn-agent-model-candidates.md` 同步说明子模型选择走 managed role 文件。
 - 现场快速恢复可以把 `~/.codex/config.toml` 里的 `[features.multi_agent_v2] hide_spawn_agent_metadata = false` 改为 `true` 后重启 Codex/GPT app；长期修复依赖新版 CCSwitchMulti 重新投影配置。
 
+## 2026-07-17 MultiRouter spawn_agent 保留 schema 二次根因
+
+- v3.16.5-15 仍出现 `Function 'collaboration.spawn_agent' is reserved ... must match the configured schema` 时，`hide_spawn_agent_metadata=true` 已经正确，真正根因在模型目录合并：CCSM 用通用模板生成路由条目后覆盖了同 slug 官方模型的协议字段，把官方 `gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna` 的 `use_responses_lite=true` 写成 `false`。现场 `models_cache.json` 与 `cc-switch-model-catalog.json` 对照可直接证明该差异。
+- `use_responses_lite=false` 会让 Codex 不再使用 input 内的 `additional_tools` namespace transport，`collaboration.spawn_agent` 因而以不符合新版后端保留定义的工具结构发送；仅调整 `hide_spawn_agent_metadata` 无法修复这类 transport 级 schema 不匹配。
+- `merge_codex_model_entry` 的正确所有权边界是：同 slug 官方缓存已经给出的协议、工具、推理和展示字段保持官方权威；CCSM 只覆盖模型标识、显式上下文、可见性、输入模态、用户明确声明的并行工具能力和基础指令等路由字段。回归测试 `codex_model_catalog_keeps_official_transport_and_reserved_tool_metadata` 必须覆盖 `use_responses_lite`、`multi_agent_version`、`tool_mode` 和 `apply_patch_tool_type`。
+
 ## 2026-07-10 统一 Codex App 历史目录与原生模型目录适配（纠正）
 
 - 前一节“按 provider 桶过滤导致历史不可见”不适用于当前统一 Codex App，不能再作为新版历史修复根因。用 MSIX 内置 `codex 0.144.0-alpha.4` 按 App 官方同步参数只读实测，canonical `~/.codex/state_5.sqlite` 可稳定分页返回 `100 + 100 + 46 = 246` 条可见顶层 vscode 线程；`modelProviders` 省略、`null` 或空数组在当前数据上结果一致。两个数据库 `PRAGMA integrity_check` 都是 `ok`，历史正文和 canonical 索引没有丢失或损坏。
