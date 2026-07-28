@@ -5,7 +5,7 @@
 - reset credit 兑换继续由 OpenAI 官方在周额度耗尽时处理；CCSM 只读取额度与 reset credit 状态，不实现兑换、保留 credit id 或自动消费动作。
 - ChatGPT 账号池配置属于 OAuth manager 的持久化状态，不是前端 local state：稳定项 `native_codex_auth` 表示 Codex Desktop 当前登录账号，其余项按 CCSM OAuth account id 标识。每项包含真实优先级顺序、enabled 和 `reservePercent`，新增/删除账号时通过规范化策略自动补入/清理。
 - UI 放在设置的 Codex OAuth 区域，顺序展示必须与后端调度顺序一致；使用图标上下按钮调整，逐账号设置保留额度阈值。策略总开关默认关闭，升级后不能静默改变既有认证选路。
-- 第一阶段 `f82dfcda` 落持久化策略和 UI；运行时阶段把启用的 official route 按同一顺序展开为账号候选，成功后按 proxy session 粘住账号，429 将账号冷却 60 秒并允许未开始输出的请求尝试下一账号。额度页面启用池时立即刷新，之后每 5 分钟刷新；转发层也按同一 TTL 用只读 `/wham/usage` 轻量探测，正确性不依赖设置页保持打开。成功快照按所有窗口最高 utilization 计算剩余比例，低于逐账号 `reservePercent` 的账号不进入新候选，查询失败不覆盖上次可信值。External Agent API 不参与池扩展，不能借用 Desktop 或托管 OAuth 账号。
+- 第一阶段 `f82dfcda` 落持久化策略和 UI；运行时阶段把启用的 official route 按同一顺序展开为账号候选，成功后按 proxy session 粘住账号，429 将账号冷却 60 秒并允许未开始输出的请求尝试下一账号。额度页面启用池时立即刷新，之后每 5 分钟刷新；转发层也按同一 TTL 用只读 `/wham/usage` 轻量探测，正确性不依赖设置页保持打开。多个到期账号必须并发探测，使总等待上限约等于单次 15 秒 timeout，不能串行放大为账号数乘以 timeout。成功快照按所有窗口最高 utilization 计算剩余比例，低于逐账号 `reservePercent` 的账号不进入新候选，查询失败不覆盖上次可信值。External Agent API 不参与池扩展，不能借用 Desktop 或托管 OAuth 账号。
 
 ## 2026-07-28 Codex 当前登录账号路由与 Profile 接管恢复
 

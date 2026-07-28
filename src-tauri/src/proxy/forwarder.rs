@@ -190,47 +190,61 @@ impl RequestForwarder {
         if !policy.enabled {
             return providers;
         }
-        for entry in policy.entries.iter().filter(|entry| entry.enabled) {
-            if !manager.pool_quota_refresh_due(&entry.account_id).await {
-                continue;
-            }
-            let token = if entry.account_id == NATIVE_CODEX_ACCOUNT_ID {
-                headers
-                    .get(http::header::AUTHORIZATION)
-                    .and_then(|value| value.to_str().ok())
-                    .and_then(|value| value.strip_prefix("Bearer "))
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(ToString::to_string)
-            } else {
-                manager
-                    .get_valid_token_for_account(&entry.account_id)
-                    .await
-                    .ok()
-            };
-            if let Some(token) = token {
-                match crate::services::subscription::query_codex_remaining_percent(
-                    &token,
-                    (entry.account_id != NATIVE_CODEX_ACCOUNT_ID)
-                        .then_some(entry.account_id.as_str()),
-                )
-                .await
-                {
-                    Ok(remaining) => {
+        let native_token = headers
+            .get(http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string);
+        let probes = policy
+            .entries
+            .iter()
+            .filter(|entry| entry.enabled)
+            .map(|entry| {
+                let manager = &manager;
+                let native_token = native_token.clone();
+                async move {
+                    if !manager.pool_quota_refresh_due(&entry.account_id).await {
+                        return None;
+                    }
+                    let token = if entry.account_id == NATIVE_CODEX_ACCOUNT_ID {
+                        native_token
+                    } else {
                         manager
-                            .record_pool_remaining_percent(&entry.account_id, remaining)
-                            .await;
-                    }
-                    Err(error) => {
-                        log::warn!(
-                            "[CodexOAuthPool] 额度刷新失败 account={}: {error}",
-                            entry.account_id
-                        );
-                        manager.mark_pool_quota_checked(&entry.account_id).await;
-                    }
+                            .get_valid_token_for_account(&entry.account_id)
+                            .await
+                            .ok()
+                    };
+                    let result = match token {
+                        Some(token) => {
+                            crate::services::subscription::query_codex_remaining_percent(
+                                &token,
+                                (entry.account_id != NATIVE_CODEX_ACCOUNT_ID)
+                                    .then_some(entry.account_id.as_str()),
+                            )
+                            .await
+                        }
+                        None => Err("account token unavailable".to_string()),
+                    };
+                    Some((entry.account_id.clone(), result))
                 }
-            } else {
-                manager.mark_pool_quota_checked(&entry.account_id).await;
+            });
+        for (account_id, result) in futures::future::join_all(probes)
+            .await
+            .into_iter()
+            .flatten()
+        {
+            match result {
+                Ok(remaining) => {
+                    manager
+                        .record_pool_remaining_percent(&account_id, remaining)
+                        .await;
+                }
+                Err(error) => {
+                    log::warn!("[CodexOAuthPool] 额度刷新失败 account={account_id}: {error}");
+                    manager.mark_pool_quota_checked(&account_id).await;
+                }
             }
         }
         let entries = state
