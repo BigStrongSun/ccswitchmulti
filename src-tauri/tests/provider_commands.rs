@@ -357,11 +357,11 @@ command = "say"
         .get("config")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    // 供应商配置应该包含在 live 文件中
-    // 注意：live 文件还会包含 MCP 同步后的内容
+    // Provider 快照保留原始导入内容，但 MCP live 投影只认统一数据库 SSOT。
+    // 快照里的 stale `latest` 不得绕过启用状态重新进入 config.toml。
     assert!(
-        config_text.contains("mcp_servers.latest"),
-        "live file should contain provider's original config"
+        !config_text.contains("mcp_servers.latest"),
+        "live file must replace stale provider MCP entries with the DB projection"
     );
     assert!(
         new_config_text.contains("mcp_servers.latest"),

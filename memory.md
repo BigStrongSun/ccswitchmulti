@@ -2366,3 +2366,10 @@
 - `CodexRouterWorkspacePage` 在没有有效 MultiRouter 方案时会把 `selectedPlanForModelRefresh` 设为 `null`，随后调用 `readCodexRouting(selectedPlanForModelRefresh)?.routes`。可选链只保护了函数返回值，没有保护传入参数；`readCodexRouting` 内部第一步读取 `provider.settingsConfig`，因此空方案现场必然白屏。
 - 根修是让 `readCodexRouting` 的真实契约接受 `Provider | null | undefined` 并在入口返回 `null`。这不是组件旁的临时兜底：该读取函数本来就是“没有路由配置时返回 null”的统一边界，而调用方已经明确允许当前方案为空。
 - 新增组件回归：只有普通 Codex provider、没有任何 MultiRouter 方案时渲染工作台，必须正常显示而不能访问 null 的 `settingsConfig`。验证通过工作台 45/45、`pnpm typecheck`、Prettier 和 `git diff --check`。
+
+## 2026-07-28 合并原版 v3.17.0 后的完整集成测试收口
+
+- CCSwitchMulti `3.17.0-1` 已合并原版 `farion1231/cc-switch v3.17.0`，merge commit 为 `b0471ee0`，且 `upstream/main` 是当前分支祖先。只跑 `cargo test --lib` 不足以验收合并：外部 `tests/*.rs` 依赖 crate 根公开 `Database`、`Profile`、`Prompt`、Profiles service payload/scope 以及 official Codex 重应用入口；这些兼容导出已在 `src-tauri/src/lib.rs` 恢复。
+- 完整测试发现 Codex MCP 投影的零集合漏洞：`McpService::project_servers_to_app` 原先逐条遍历数据库记录，数据库没有 MCP 时循环不执行，导致 Provider 切换前 live 中的 `[mcp_servers.*]` 和历史错误 `[mcp.servers.*]` 被继续保留。根修是 Codex 分支始终从统一数据库构造完整启用快照，并复用 `sync_enabled_to_codex` 整表替换；空集合也会删除标准表和 legacy 表，其他 TOML 键保持不变。
+- 旧 `provider_commands` 用例曾要求目标 Provider 快照内的 stale MCP 与 DB 启用 MCP 同时进入 live，这与数据库 SSOT 冲突。修正后的契约是：Provider 快照保留原始导入文本，避免静默破坏存档；live 只投影数据库中对 Codex 启用的 MCP，快照内陈旧条目不得复活。
+- 最终验证：`cargo test --manifest-path src-tauri/Cargo.toml` 全部通过（库测试 2342 passed / 2 ignored，所有集成测试通过）；`provider_service` 33/33；`pnpm typecheck` 和全量单线程 Vitest 通过；`cargo fmt --check` 与 `git diff --check` 通过。构建产物必须在本次提交后重新生成，旧 `CCSwitchMulti_3.17.0-1_x64-setup.exe` 不代表最终源码。

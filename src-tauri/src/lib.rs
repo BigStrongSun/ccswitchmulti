@@ -45,7 +45,7 @@ pub use codex_config::{get_codex_auth_path, get_codex_config_path, write_codex_l
 pub use commands::open_provider_terminal;
 pub use commands::*;
 pub use config::{get_claude_mcp_path, get_claude_settings_path, read_json_file};
-pub use database::Database;
+pub use database::{Database, Profile};
 pub use deeplink::{import_provider_from_deeplink, parse_deeplink_url, DeepLinkImportRequest};
 pub use error::AppError;
 pub use mcp::{
@@ -54,8 +54,11 @@ pub use mcp::{
     sync_enabled_to_codex, sync_enabled_to_gemini, sync_single_server_to_claude,
     sync_single_server_to_codex, sync_single_server_to_gemini,
 };
+pub use prompt::Prompt;
 pub use provider::{Provider, ProviderMeta};
 pub use services::{
+    profile::{ProfilePayload, ProfileScope, ProfileService},
+    provider::reapply_current_codex_official_live,
     skill::{migrate_skills_to_ssot, ImportSkillSelection},
     ConfigService, EndpointLatency, McpService, PromptService, ProviderService, ProxyService,
     SkillService, SpeedtestService,

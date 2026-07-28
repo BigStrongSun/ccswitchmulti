@@ -220,6 +220,24 @@ impl McpService {
             return Ok(());
         }
 
+        // Codex keeps every MCP entry in one managed TOML table. Project the
+        // complete DB snapshot so an empty enabled set also removes stale live
+        // entries, including the legacy [mcp.servers] form. Per-entry updates
+        // cannot do that when the DB itself contains no rows to iterate.
+        if matches!(app, AppType::Codex) {
+            let mut config = crate::app_config::MultiAppConfig::default();
+            for server in servers.values().filter(|server| server.apps.codex) {
+                config.mcp.codex.servers.insert(
+                    server.id.clone(),
+                    serde_json::json!({
+                        "enabled": true,
+                        "server": server.server,
+                    }),
+                );
+            }
+            return mcp::sync_enabled_to_codex(&config);
+        }
+
         for server in servers.values() {
             if server.apps.is_enabled_for(app) {
                 Self::sync_server_to_app(state, server, app)?;
