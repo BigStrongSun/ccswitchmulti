@@ -57,12 +57,14 @@ import {
   isCodexCatalogOnlyPlanModelFetch,
 } from "@/utils/codexPlanModelFetch";
 import type {
+  ClaudeApiKeyField,
   CodexApiFormat,
   CodexCatalogModel,
   CodexChatReasoning,
   CodexRoutingConfig,
   CodexRoutingRoute,
   CodexRoutingAuthSource,
+  PromptCacheRoutingMode,
   ProviderCategory,
 } from "@/types";
 
@@ -262,12 +264,23 @@ interface CodexFormFieldsProps {
   takeoverEnabled: boolean;
   onTakeoverEnabledChange: (enabled: boolean) => void;
 
+  codexModel?: string;
+  onModelChange?: (model: string) => void;
+
   // API Format
   // Note: wire_api is always "responses" for Codex; apiFormat controls proxy-layer conversion
   apiFormat: CodexApiFormat;
   onApiFormatChange: (format: CodexApiFormat) => void;
+  anthropicAuthField?: ClaudeApiKeyField;
+  onAnthropicAuthFieldChange?: (value: ClaudeApiKeyField) => void;
+  impersonateClaudeCode?: boolean;
+  onImpersonateClaudeCodeChange?: (value: boolean) => void;
+  maxOutputTokens?: string;
+  onMaxOutputTokensChange?: (value: string) => void;
   codexChatReasoning?: CodexChatReasoning;
   onCodexChatReasoningChange?: (value: CodexChatReasoning) => void;
+  promptCacheRouting?: PromptCacheRoutingMode;
+  onPromptCacheRoutingChange?: (value: PromptCacheRoutingMode) => void;
 
   // Model Catalog
   catalogModels?: CodexCatalogModel[];
@@ -560,10 +573,20 @@ export function CodexFormFields({
   onAutoSelectChange,
   takeoverEnabled,
   onTakeoverEnabledChange,
+  codexModel = "",
+  onModelChange,
   apiFormat,
   onApiFormatChange,
+  anthropicAuthField = "ANTHROPIC_AUTH_TOKEN",
+  onAnthropicAuthFieldChange = () => undefined,
+  impersonateClaudeCode = false,
+  onImpersonateClaudeCodeChange = () => undefined,
+  maxOutputTokens = "",
+  onMaxOutputTokensChange = () => undefined,
   codexChatReasoning = {},
   onCodexChatReasoningChange,
+  promptCacheRouting = "auto",
+  onPromptCacheRoutingChange = () => undefined,
   catalogModels = [],
   onCatalogModelsChange,
   codexRouting = { enabled: false, defaultRouteId: "", routes: [] },
@@ -600,6 +623,7 @@ export function CodexFormFields({
   // takeoverEnabled 现在只表示“Codex 菜单映射”开关；模型目录和上下文元数据可独立编辑。
   // isChatFormat 仅在选了 Chat Completions 上游格式时为真（思考能力是 Chat 专属）。
   const isChatFormat = apiFormat === "openai_chat";
+  const isAnthropicFormat = apiFormat === "anthropic";
   const canEditCatalog = Boolean(onCatalogModelsChange);
   const canEditRouting = Boolean(onCodexRoutingChange);
   const canEditReasoning = Boolean(onCodexChatReasoningChange);
@@ -619,8 +643,11 @@ export function CodexFormFields({
     codexRouting.enabled ||
     (codexRouting.routes?.length ?? 0) > 0 ||
     apiFormat === "openai_responses" ||
+    isAnthropicFormat ||
     supportsThinking ||
-    supportsEffort;
+    supportsEffort ||
+    promptCacheRouting !== "auto" ||
+    !!maxOutputTokens;
   const [advancedExpanded, setAdvancedExpanded] = useState(hasAnyAdvancedValue);
 
   // 预设/编辑加载填充高级值后自动展开（仅从折叠→展开，不会自动折叠）
@@ -1350,6 +1377,36 @@ export function CodexFormFields({
         />
       )}
 
+      {category !== "official" && onModelChange && (
+        <div className="space-y-1.5">
+          <FormLabel htmlFor="codexDefaultModel">
+            {t("codexConfig.defaultModelLabel", { defaultValue: "默认模型" })}
+          </FormLabel>
+          <div className="flex gap-1">
+            <Input
+              id="codexDefaultModel"
+              value={codexModel}
+              onChange={(event) => onModelChange(event.target.value)}
+              placeholder={t("codexConfig.defaultModelPlaceholder", {
+                defaultValue: "例如: gpt-5.6",
+              })}
+            />
+            {fetchedModels.length > 0 && (
+              <ModelDropdown
+                models={fetchedModels}
+                onSelect={(id) => onModelChange(id)}
+              />
+            )}
+          </div>
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            {t("codexConfig.defaultModelHint", {
+              defaultValue:
+                "Codex 默认请求的模型，随时可改，无需等待预设更新。",
+            })}
+          </p>
+        </div>
+      )}
+
       {canEditRouting && (
         <div className="space-y-4 rounded-lg border border-border-default p-4">
           <div className="flex items-center justify-between gap-4">
@@ -1975,14 +2032,101 @@ export function CodexFormFields({
                           defaultValue: "Responses（原生）",
                         })}
                       </SelectItem>
+                      <SelectItem value="anthropic">
+                        {t("codexConfig.upstreamFormatAnthropic", {
+                          defaultValue: "Anthropic Messages（需开启路由）",
+                        })}
+                      </SelectItem>
                     </SelectContent>
                   </Select>
                   <p className="text-xs leading-relaxed text-muted-foreground">
                     {t("codexConfig.upstreamFormatHint", {
                       defaultValue:
-                        "供应商原生是 Responses API 就选 Responses（直连，不转换格式）；使用 Chat Completions 协议就选 Chat，并通过 CCSwitchMulti 本地代理转换为 Chat Completions。",
+                        "供应商原生是 Responses API 就选 Responses；使用 Chat Completions 协议就选 Chat；只提供 Anthropic Messages 时选择 Anthropic。后两者均需本地代理转换。",
                     })}
                   </p>
+                  {isAnthropicFormat && (
+                    <div className="space-y-3 rounded-md border border-border-default p-3">
+                      <div className="space-y-1.5">
+                        <FormLabel>
+                          {t("codexConfig.anthropicAuthFieldLabel")}
+                        </FormLabel>
+                        <Select
+                          value={anthropicAuthField}
+                          onValueChange={(value) =>
+                            onAnthropicAuthFieldChange(
+                              value as ClaudeApiKeyField,
+                            )
+                          }
+                        >
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="ANTHROPIC_AUTH_TOKEN">
+                              {t("codexConfig.anthropicAuthFieldAuthToken")}
+                            </SelectItem>
+                            <SelectItem value="ANTHROPIC_API_KEY">
+                              {t("codexConfig.anthropicAuthFieldApiKey")}
+                            </SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <label className="flex items-center justify-between gap-3 text-sm">
+                        {t("codexConfig.impersonateClaudeCodeLabel")}
+                        <Switch
+                          checked={impersonateClaudeCode}
+                          onCheckedChange={onImpersonateClaudeCodeChange}
+                        />
+                      </label>
+                      <div className="space-y-1.5">
+                        <FormLabel htmlFor="codexMaxOutputTokens">
+                          {t("codexConfig.maxOutputTokensLabel")}
+                        </FormLabel>
+                        <Input
+                          id="codexMaxOutputTokens"
+                          inputMode="numeric"
+                          value={maxOutputTokens}
+                          onChange={(event) =>
+                            onMaxOutputTokensChange(
+                              event.target.value.replace(/\D/g, ""),
+                            )
+                          }
+                          placeholder="8192"
+                        />
+                      </div>
+                    </div>
+                  )}
+                  {(isChatFormat || isAnthropicFormat) && (
+                    <div className="space-y-1.5">
+                      <FormLabel>
+                        {t("codexConfig.promptCacheRoutingLabel")}
+                      </FormLabel>
+                      <Select
+                        value={promptCacheRouting}
+                        onValueChange={(value) =>
+                          onPromptCacheRoutingChange(
+                            value as PromptCacheRoutingMode,
+                          )
+                        }
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="auto">
+                            {t("codexConfig.promptCacheRoutingAuto")}
+                          </SelectItem>
+                          <SelectItem value="enabled">
+                            {t("codexConfig.promptCacheRoutingEnabled")}
+                          </SelectItem>
+                          <SelectItem value="disabled">
+                            {t("codexConfig.promptCacheRoutingDisabled")}
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  )}
                   <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-xs leading-relaxed text-amber-900 dark:text-amber-200">
                     不确定该选哪个时，可以测试 Chat /
                     Responses。测试前需要先在“模型目录与上下文”里获取模型列表或手动添加模型；测试会发送真实模型请求，

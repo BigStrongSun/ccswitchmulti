@@ -152,7 +152,8 @@ async fn fetch_volcengine_plan_models(
             }
         }
         crate::services::coding_plan::VolcCall::Auth(detail) => Err(detail),
-        crate::services::coding_plan::VolcCall::Soft(detail) => Err(detail),
+        crate::services::coding_plan::VolcCall::Soft(detail)
+        | crate::services::coding_plan::VolcCall::Transient(detail) => Err(detail),
     }
 }
 

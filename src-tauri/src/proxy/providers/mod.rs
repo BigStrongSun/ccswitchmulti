@@ -18,6 +18,7 @@ mod codex;
 pub(crate) mod codex_chat_common;
 pub mod codex_chat_history;
 pub mod codex_oauth_auth;
+pub(crate) mod codex_responses_sse;
 pub mod copilot_auth;
 pub mod copilot_model_map;
 mod gemini;
@@ -25,11 +26,14 @@ pub(crate) mod gemini_schema;
 pub mod gemini_shadow;
 pub mod models;
 pub mod openai_compat;
+pub(crate) mod reasoning_bridge;
 pub mod streaming;
+pub mod streaming_codex_anthropic;
 pub mod streaming_codex_chat;
 pub mod streaming_gemini;
 pub mod streaming_responses;
 pub mod transform;
+pub mod transform_codex_anthropic;
 pub mod transform_codex_chat;
 pub mod transform_gemini;
 pub mod transform_responses;
@@ -37,6 +41,8 @@ pub mod transform_responses;
 use crate::app_config::AppType;
 use crate::provider::Provider;
 use serde::{Deserialize, Serialize};
+
+pub const CHATGPT_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 
 // 公开导出
 pub use adapter::ProviderAdapter;
@@ -49,12 +55,14 @@ pub use claude::{
 pub use codex::CodexAdapter;
 pub use codex::{
     apply_codex_chat_upstream_model, apply_codex_request_upstream_model,
-    build_codex_route_probe_provider, codex_provider_text_only_input,
+    apply_codex_upstream_model, build_codex_route_probe_provider, codex_provider_text_only_input,
     codex_provider_upstream_model, codex_provider_uses_chat_completions,
     codex_route_persistent_provider, codex_route_target_provider_id,
-    explain_codex_responses_upstream_protocol, materialize_codex_routed_provider_from_target,
-    resolve_codex_cache_config, resolve_codex_chat_reasoning_config,
-    resolve_codex_model_routed_provider, should_convert_codex_responses_to_chat,
+    explain_codex_responses_upstream_protocol, inject_codex_chat_prompt_cache_key,
+    is_codex_official_provider, materialize_codex_routed_provider_from_target,
+    resolve_codex_cache_config, resolve_codex_catalog_tool_profile,
+    resolve_codex_chat_reasoning_config, resolve_codex_model_routed_provider,
+    should_convert_codex_responses_to_anthropic, should_convert_codex_responses_to_chat,
     should_convert_codex_responses_to_messages,
 };
 pub(crate) use codex::{is_codex_remote_compact_endpoint, is_codex_responses_endpoint};
@@ -112,7 +120,7 @@ impl ProviderType {
             }
             ProviderType::OpenRouter => "https://openrouter.ai/api",
             ProviderType::GitHubCopilot => "https://api.githubcopilot.com",
-            ProviderType::CodexOAuth => "https://chatgpt.com/backend-api/codex",
+            ProviderType::CodexOAuth => CHATGPT_CODEX_BASE_URL,
         }
     }
 

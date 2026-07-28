@@ -28,7 +28,6 @@ flatpak-repo/
 copilot-api
 .history
 CODEBUDDY.md
-.github
 mainWindow.js
 /scripts/codex-history-tool/.venv/
 /scripts/codex-history-tool/build/

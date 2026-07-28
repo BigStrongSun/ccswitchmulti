@@ -7,6 +7,7 @@ use crate::codex_config::{
     get_codex_config_dir, read_codex_config_text, CC_SWITCH_CODEX_MODEL_PROVIDER_ID,
     CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID,
 };
+use crate::codex_state_db::CODEX_STATE_DB_FILENAME;
 use crate::config::{atomic_write, copy_file, get_app_config_dir};
 use crate::database::{is_official_seed_id, Database};
 use crate::error::AppError;
@@ -47,7 +48,6 @@ const CURRENT_DESKTOP_HISTORY_REPAIR_NAME: &str =
 const OFFICIAL_UNIFY_MIGRATION_NAME: &str = "codex-official-history-unify-v1";
 /// 还原操作自身的备份目录（与迁移备份分开，保持迁移账本目录纯净）。
 const OFFICIAL_UNIFY_RESTORE_BACKUP_NAME: &str = "codex-official-history-unify-restore-v1";
-const CODEX_STATE_DB_FILENAME: &str = "state_5.sqlite";
 /// SQLite 变量上限保守值，IN 列表按此分块。
 const STATE_DB_ID_CHUNK: usize = 500;
 
@@ -4641,6 +4641,7 @@ fn relative_backup_path(path: &Path, root: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codex_state_db::CODEX_STATE_DB_FILENAME;
     use crate::provider::Provider;
     use serial_test::serial;
     use std::ffi::OsString;

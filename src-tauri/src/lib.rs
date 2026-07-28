@@ -8,6 +8,7 @@ mod claude_plugin;
 mod codex_config;
 mod codex_desktop;
 pub mod codex_history_migration;
+mod codex_state_db;
 mod commands;
 mod config;
 mod database;
@@ -21,6 +22,7 @@ mod lightweight;
 #[cfg(target_os = "linux")]
 mod linux_fix;
 mod mcp;
+mod model_capabilities;
 mod openclaw_config;
 mod opencode_config;
 mod panic_hook;
@@ -1316,6 +1318,12 @@ pub fn run() {
             commands::enable_prompt,
             commands::import_prompt_from_file,
             commands::get_current_prompt_file_content,
+            commands::list_profiles,
+            commands::create_profile,
+            commands::update_profile,
+            commands::delete_profile,
+            commands::clear_current_profile,
+            commands::apply_profile,
             // model list fetch (OpenAI-compatible /v1/models)
             commands::fetch_models_for_config,
             commands::probe_codex_chat_for_config,

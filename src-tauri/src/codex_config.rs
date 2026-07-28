@@ -6,6 +6,7 @@ use crate::config::{
     write_json_file, write_text_file,
 };
 use crate::error::AppError;
+use crate::model_capabilities::{image_input_capability_from_modalities, ImageInputCapability};
 use serde_json::{json, Value};
 use std::fs;
 use std::process::Command;
@@ -23,10 +24,11 @@ const CODEX_MODELS_CACHE_FILENAME: &str = "models_cache.json";
 const CODEX_MODELS_CACHE_BACKUP_FILENAME: &str = "models_cache.cc-switch-backup.json";
 const CC_SWITCH_CODEX_MODELS_CACHE_ETAG: &str = "cc-switch-model-catalog";
 /// 顶层 `config.toml` 里控制 Codex 内置 web_search 的字段。
-const CODEX_WEB_SEARCH_FIELD: &str = "web_search";
+pub(crate) const CODEX_WEB_SEARCH_FIELD: &str = "web_search";
 /// CC Switch 写入的 web_search 禁用哨兵值，只移除自己写入的值。
-const CODEX_WEB_SEARCH_DISABLED: &str = "disabled";
+pub(crate) const CODEX_WEB_SEARCH_DISABLED: &str = "disabled";
 /// 已确认原生 `/responses` 网关不接受 OpenAI hosted web_search 的主机片段。
+pub const CC_SWITCH_CODEX_OFFICIAL_PROXY_PROVIDER_ID: &str = "cc-switch-official";
 const CODEX_WEB_SEARCH_REJECT_HOSTS: &[&str] = &[
     "xiaomimimo.com",
     "longcat.chat",
@@ -61,12 +63,20 @@ pub enum CodexCatalogToolProfile {
     ProxyChat,
     /// 直连原生 `/responses` 网关，避免 Codex 发出部分国产网关不接受的 hosted/freeform 工具。
     NativeResponses,
+    /// Codex talks (through cc-switch's proxy) to a native Anthropic Messages
+    /// gateway. Like `NativeResponses` it must suppress Codex's freeform custom
+    /// tools — the Responses→Anthropic transform keeps only `function` tools.
+    /// Additionally the Codex `web_search` hosted tool is unusable on this path
+    /// (the transform drops it), so it is always disabled — see
+    /// `prepare_codex_config_text_with_model_catalog`.
+    Anthropic,
 }
 
 impl CodexCatalogToolProfile {
     /// 从 provider `apiFormat` 解析 catalog 画像。
     pub fn from_api_format(api_format: Option<&str>) -> Self {
         match api_format {
+            Some("anthropic") => Self::Anthropic,
             Some("openai_responses") => Self::NativeResponses,
             _ => Self::ProxyChat,
         }
@@ -867,6 +877,17 @@ fn project_codex_desktop_model_fields(
     }
 }
 
+fn codex_catalog_input_modalities(
+    model: &str,
+    declared_modalities: Option<&[String]>,
+) -> Vec<String> {
+    let modalities = match image_input_capability_from_modalities(model, declared_modalities) {
+        ImageInputCapability::Unsupported => &["text"][..],
+        ImageInputCapability::Supported | ImageInputCapability::Unknown => &["text", "image"][..],
+    };
+    modalities.iter().map(|item| (*item).to_string()).collect()
+}
+
 fn codex_catalog_model_entry(
     template: &Value,
     spec: &CodexCatalogModelSpec,
@@ -895,9 +916,14 @@ fn codex_catalog_model_entry(
     }
     entry_obj.insert("availability_nux".to_string(), Value::Null);
     entry_obj.insert("upgrade".to_string(), Value::Null);
+    let input_modalities = if spec.text_only {
+        vec!["text".to_string()]
+    } else {
+        codex_catalog_input_modalities(&spec.model, spec.input_modalities.as_deref())
+    };
+    entry_obj.insert("input_modalities".to_string(), json!(input_modalities));
+    entry_obj.insert("inputModalities".to_string(), json!(input_modalities));
     if spec.text_only {
-        entry_obj.insert("input_modalities".to_string(), json!(["text"]));
-        entry_obj.insert("inputModalities".to_string(), json!(["text"]));
         entry_obj.insert("supports_image_detail_original".to_string(), json!(false));
         entry_obj.insert("supportsImageDetailOriginal".to_string(), json!(false));
         entry_obj.insert("web_search_tool_type".to_string(), json!("text"));
@@ -905,7 +931,7 @@ fn codex_catalog_model_entry(
     }
     project_codex_desktop_model_fields(entry_obj, spec);
 
-    if profile == CodexCatalogToolProfile::NativeResponses {
+    if profile != CodexCatalogToolProfile::ProxyChat {
         // 原生 `/responses` 网关通常不支持 OpenAI freeform `apply_patch`
         // 与 hosted web_search。这里使用 shell_command 编辑，并保留 Codex
         // 必需的 base_instructions。
@@ -930,15 +956,6 @@ fn codex_catalog_model_entry(
         }
         if let Some(parallel) = spec.supports_parallel_tool_calls {
             entry_obj.insert("supports_parallel_tool_calls".to_string(), json!(parallel));
-        }
-        // text-only 判定优先级最高：即便 catalog/template 后续提供了
-        // inputModalities，也不能把 `image` 重新写回去，否则 Codex Desktop 会误
-        // 暴露内置 Image Gen / 多模态入口。
-        if !spec.text_only {
-            if let Some(modalities) = &spec.input_modalities {
-                entry_obj.insert("input_modalities".to_string(), json!(modalities));
-                entry_obj.insert("inputModalities".to_string(), json!(modalities));
-            }
         }
     }
 
@@ -2389,7 +2406,9 @@ pub fn prepare_codex_config_text_with_model_catalog(
     if !specs.is_empty() {
         let template = match profile {
             CodexCatalogToolProfile::ProxyChat => load_codex_model_catalog_template()?,
-            CodexCatalogToolProfile::NativeResponses => load_codex_native_responses_template(),
+            CodexCatalogToolProfile::NativeResponses | CodexCatalogToolProfile::Anthropic => {
+                load_codex_native_responses_template()
+            }
         };
         let generated_catalog = codex_model_catalog_from_specs(&specs, &template, profile);
         let catalog = enrich_codex_catalog_with_official_metadata(&generated_catalog)?;
@@ -2409,8 +2428,13 @@ pub fn prepare_codex_config_text_with_model_catalog(
             } else {
                 config_text
             };
-        let disable_web_search = profile == CodexCatalogToolProfile::NativeResponses
-            && codex_native_gateway_rejects_web_search(&config_text);
+        let disable_web_search = match profile {
+            CodexCatalogToolProfile::Anthropic => true,
+            CodexCatalogToolProfile::NativeResponses => {
+                codex_native_gateway_rejects_web_search(&config_text)
+            }
+            CodexCatalogToolProfile::ProxyChat => false,
+        };
         let config_text = set_codex_native_web_search_field(&config_text, disable_web_search)?;
         write_json_file(&catalog_path, &catalog)?;
         sync_codex_models_cache_with_cc_switch_catalog(&catalog)?;
@@ -2420,14 +2444,17 @@ pub fn prepare_codex_config_text_with_model_catalog(
         restore_codex_models_cache_if_cc_switch_owned()?;
         prune_stale_codex_managed_agent_files(&get_codex_agents_dir(), &HashSet::new())?;
         let config_text = set_codex_model_catalog_projection_fields(config_text, None, None, None)?;
-        set_codex_native_web_search_field(&config_text, false)
+        set_codex_native_web_search_field(
+            &config_text,
+            profile == CodexCatalogToolProfile::Anthropic,
+        )
     }
 }
 
 /// Reverse of `prepare_codex_config_text_with_model_catalog`: read the
 /// cc-switch–maintained catalog file referenced by `~/.codex/config.toml` and
 /// convert it back into the simplified shape the frontend table uses:
-/// `{ "models": [{ "model", "displayName"?, "contextWindow"? }, ...] }`.
+/// `{ "models": [{ "model", "displayName"?, "contextWindow"?, hidden overrides... }, ...] }`.
 ///
 /// We only reverse-parse catalogs whose `model_catalog_json` path is the
 /// cc-switch–generated file (identified by filename
@@ -2496,9 +2523,8 @@ pub(crate) fn resolve_cc_switch_catalog_path(
 }
 
 /// Pure reverse-parsing core: convert Codex catalog JSON text back into the
-/// frontend's simplified `{ models: [{ model, displayName?, contextWindow? }] }`
-/// shape. Returns `None` when the catalog is unparseable, has no `models`
-/// array, or yields zero valid entries.
+/// frontend's simplified model-mapping shape. Returns `None` when the catalog
+/// is unparseable, has no `models` array, or yields zero valid entries.
 fn build_simplified_catalog_from_texts(config_text: &str, catalog_text: &str) -> Option<Value> {
     let catalog: Value = serde_json::from_str(catalog_text).ok()?;
     let models = catalog.get("models").and_then(|m| m.as_array())?;
@@ -2536,6 +2562,24 @@ fn build_simplified_catalog_from_texts(config_text: &str, catalog_text: &str) ->
             .filter(|v| *v > 0 && *v != default_context_window)
         {
             obj.insert("contextWindow".to_string(), json!(context_window));
+        }
+
+        if let Some(parallel) = entry
+            .get("supports_parallel_tool_calls")
+            .and_then(|v| v.as_bool())
+        {
+            obj.insert("supportsParallelToolCalls".to_string(), json!(parallel));
+        }
+        if let Some(modalities) = entry.get("input_modalities").and_then(|v| v.as_array()) {
+            let modalities = modalities
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            let inferred = codex_catalog_input_modalities(model, None);
+            if !modalities.is_empty() && modalities != inferred {
+                obj.insert("inputModalities".to_string(), json!(modalities));
+            }
         }
 
         entries.push(Value::Object(obj));
@@ -3161,13 +3205,137 @@ pub fn read_codex_live_settings() -> Result<Value, AppError> {
 /// backend), `name = "OpenAI"` keeps Codex's `is_openai()` feature gates
 /// (web search, remote compaction), and `supports_websockets` restores the
 /// built-in default that custom entries otherwise lose.
-fn codex_unified_official_provider_table() -> toml_edit::Table {
+fn codex_official_provider_table(
+    base_url: Option<&str>,
+    supports_websockets: bool,
+) -> toml_edit::Table {
     let mut table = toml_edit::Table::new();
     table["name"] = toml_edit::value("OpenAI");
     table["requires_openai_auth"] = toml_edit::value(true);
-    table["supports_websockets"] = toml_edit::value(true);
+    table["supports_websockets"] = toml_edit::value(supports_websockets);
     table["wire_api"] = toml_edit::value("responses");
+    if let Some(base_url) = base_url {
+        table["base_url"] = toml_edit::value(base_url.trim_end_matches('/'));
+    }
     table
+}
+
+fn codex_unified_official_provider_table() -> toml_edit::Table {
+    codex_official_provider_table(None, true)
+}
+
+fn remove_codex_proxy_placeholders_from_providers(providers: &mut toml_edit::Table) {
+    for (_, item) in providers.iter_mut() {
+        if let Some(table) = item.as_table_mut() {
+            let should_remove = table
+                .get("experimental_bearer_token")
+                .and_then(|item| item.as_str())
+                == Some(CODEX_PROXY_AUTH_PLACEHOLDER);
+            if should_remove {
+                table.remove("experimental_bearer_token");
+            }
+        } else if let Some(table) = item.as_inline_table_mut() {
+            let should_remove = table
+                .get("experimental_bearer_token")
+                .and_then(|value| value.as_str())
+                == Some(CODEX_PROXY_AUTH_PLACEHOLDER);
+            if should_remove {
+                table.remove("experimental_bearer_token");
+            }
+        }
+    }
+}
+
+/// Project the built-in Codex official provider through the local proxy while
+/// keeping authentication owned by Codex itself.
+///
+/// The resulting custom provider explicitly opts into OpenAI authentication,
+/// so Codex forwards its existing ChatGPT login to the local `/responses`
+/// endpoint.  No API key or bearer placeholder is written to `auth.json`.
+pub fn apply_codex_official_proxy_route(
+    config_text: &str,
+    proxy_base_url: &str,
+) -> Result<String, AppError> {
+    let mut doc = config_text
+        .parse::<DocumentMut>()
+        .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
+
+    // A third-party takeover may have left the proxy placeholder in config.toml.
+    // The official route must use Codex's native OpenAI login instead.
+    doc.as_table_mut().remove("experimental_bearer_token");
+    doc["model_provider"] = toml_edit::value(CC_SWITCH_CODEX_OFFICIAL_PROXY_PROVIDER_ID);
+
+    let mut providers = match doc.as_table_mut().remove("model_providers") {
+        Some(item) => item.into_table().map_err(|_| {
+            AppError::Message(
+                "Invalid Codex config.toml: model_providers must be a table".to_string(),
+            )
+        })?,
+        None => {
+            let mut table = toml_edit::Table::new();
+            table.set_implicit(true);
+            table
+        }
+    };
+
+    // Clean only CC Switch's placeholder from every stale provider table. Real
+    // user bearer tokens are preserved, as are all unrelated provider fields.
+    remove_codex_proxy_placeholders_from_providers(&mut providers);
+
+    // The local proxy currently exposes HTTP/SSE, not Codex websocket routes.
+    let table = codex_official_provider_table(Some(proxy_base_url), false);
+
+    providers.insert(
+        CC_SWITCH_CODEX_OFFICIAL_PROXY_PROVIDER_ID,
+        toml_edit::Item::Table(table),
+    );
+    doc["model_providers"] = toml_edit::Item::Table(providers);
+    Ok(doc.to_string())
+}
+
+/// Whether a live Codex config is the official route projected by CC Switch.
+pub fn codex_config_has_official_proxy_route(config_text: &str) -> bool {
+    if !config_text.contains(CC_SWITCH_CODEX_OFFICIAL_PROXY_PROVIDER_ID) {
+        return false;
+    }
+    config_text
+        .parse::<DocumentMut>()
+        .ok()
+        .and_then(|doc| {
+            doc.get("model_provider")
+                .and_then(|item| item.as_str())
+                .map(str::to_string)
+        })
+        .as_deref()
+        == Some(CC_SWITCH_CODEX_OFFICIAL_PROXY_PROVIDER_ID)
+}
+
+/// Remove only the official takeover route owned by CC Switch. This is a
+/// last-resort crash cleanup when no live backup or provider SSOT is usable.
+pub fn remove_codex_official_proxy_route(config_text: &str) -> Result<String, AppError> {
+    let mut doc = config_text
+        .parse::<DocumentMut>()
+        .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
+    if doc.get("model_provider").and_then(|item| item.as_str())
+        != Some(CC_SWITCH_CODEX_OFFICIAL_PROXY_PROVIDER_ID)
+    {
+        return Ok(config_text.to_string());
+    }
+
+    doc.as_table_mut().remove("model_provider");
+    if let Some(item) = doc.as_table_mut().remove("model_providers") {
+        let mut providers = item.into_table().map_err(|_| {
+            AppError::Message(
+                "Invalid Codex config.toml: model_providers must be a table".to_string(),
+            )
+        })?;
+        providers.remove(CC_SWITCH_CODEX_OFFICIAL_PROXY_PROVIDER_ID);
+        remove_codex_proxy_placeholders_from_providers(&mut providers);
+        if !providers.is_empty() {
+            doc["model_providers"] = toml_edit::Item::Table(providers);
+        }
+    }
+    Ok(doc.to_string())
 }
 
 fn table_matches_codex_unified_official_provider(table: &toml_edit::Table) -> bool {
@@ -3317,6 +3485,45 @@ pub fn strip_codex_unified_session_bucket_from_settings(
     if stripped != config_text {
         if let Some(obj) = settings.as_object_mut() {
             obj.insert("config".to_string(), Value::String(stripped));
+        }
+    }
+    Ok(())
+}
+
+/// Backfill helper: strip `[mcp_servers]` from a live `{ auth, config }`
+/// settings object before it is stored back to the DB.
+///
+/// MCP 服务器的 SSOT 是 DB 的 mcp_servers 表，live `config.toml` 里的
+/// `[mcp_servers]` 只是每次写 live 之后由 MCP 同步重新投影的产物。若回填时
+/// 烙进供应商存储配置，已在应用里删除的服务器会随下次激活该供应商被写回
+/// live，而逐条 reconcile 只认识 DB 现存条目、永远清不掉这种孤儿。
+pub fn strip_codex_mcp_servers_from_settings(settings: &mut Value) -> Result<(), AppError> {
+    let Some(config_text) = settings
+        .get("config")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+    else {
+        return Ok(());
+    };
+    if !config_text.contains("mcp") {
+        return Ok(());
+    }
+    let mut doc = config_text
+        .parse::<DocumentMut>()
+        .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
+    let mut changed = doc.as_table_mut().remove("mcp_servers").is_some();
+    // 历史错误格式 [mcp.servers] 一并清理（live 侧 MCP 同步也做同样迁移）
+    if let Some(mcp_tbl) = doc.get_mut("mcp").and_then(|item| item.as_table_like_mut()) {
+        if mcp_tbl.remove("servers").is_some() {
+            changed = true;
+        }
+        if mcp_tbl.is_empty() {
+            doc.as_table_mut().remove("mcp");
+        }
+    }
+    if changed {
+        if let Some(obj) = settings.as_object_mut() {
+            obj.insert("config".to_string(), Value::String(doc.to_string()));
         }
     }
     Ok(())
@@ -3705,6 +3912,26 @@ trust_level = "trusted"
     use serde_json::json;
 
     #[test]
+    fn catalog_tool_profile_from_api_format() {
+        assert_eq!(
+            CodexCatalogToolProfile::from_api_format(Some("anthropic")),
+            CodexCatalogToolProfile::Anthropic
+        );
+        assert_eq!(
+            CodexCatalogToolProfile::from_api_format(Some("openai_responses")),
+            CodexCatalogToolProfile::NativeResponses
+        );
+        assert_eq!(
+            CodexCatalogToolProfile::from_api_format(Some("openai_chat")),
+            CodexCatalogToolProfile::ProxyChat
+        );
+        assert_eq!(
+            CodexCatalogToolProfile::from_api_format(None),
+            CodexCatalogToolProfile::ProxyChat
+        );
+    }
+
+    #[test]
     fn unified_session_bucket_injects_for_empty_official_config() {
         let injected = inject_codex_unified_session_bucket("").expect("inject");
         let doc: toml::Table = toml::from_str(&injected).expect("parse injected config");
@@ -3729,6 +3956,98 @@ trust_level = "trusted"
             custom.get("wire_api").and_then(|v| v.as_str()),
             Some("responses")
         );
+    }
+
+    #[test]
+    fn official_proxy_route_uses_native_auth_and_local_responses_provider() {
+        let input = r#"model = "gpt-5.4"
+experimental_bearer_token = "PROXY_MANAGED"
+
+[mcp_servers.example]
+command = "example"
+"#;
+        let output = apply_codex_official_proxy_route(input, "http://127.0.0.1:15721/v1")
+            .expect("apply official proxy route");
+        let doc: toml::Value = toml::from_str(&output).expect("parse output");
+
+        assert_eq!(
+            doc.get("model_provider").and_then(toml::Value::as_str),
+            Some(CC_SWITCH_CODEX_OFFICIAL_PROXY_PROVIDER_ID)
+        );
+        assert!(doc.get("experimental_bearer_token").is_none());
+        assert!(
+            doc.get("mcp_servers").is_some(),
+            "unrelated config survives"
+        );
+
+        let provider = &doc["model_providers"][CC_SWITCH_CODEX_OFFICIAL_PROXY_PROVIDER_ID];
+        assert_eq!(
+            provider.get("base_url").and_then(toml::Value::as_str),
+            Some("http://127.0.0.1:15721/v1")
+        );
+        assert_eq!(
+            provider
+                .get("requires_openai_auth")
+                .and_then(toml::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            provider
+                .get("supports_websockets")
+                .and_then(toml::Value::as_bool),
+            Some(false)
+        );
+        assert!(codex_config_has_official_proxy_route(&output));
+    }
+
+    #[test]
+    fn official_proxy_route_cleanup_only_removes_owned_provider() {
+        let projected =
+            apply_codex_official_proxy_route("model = \"gpt-5.4\"\n", "http://127.0.0.1:15721/v1")
+                .expect("project");
+        let cleaned = remove_codex_official_proxy_route(&projected).expect("clean");
+        let doc: toml::Value = toml::from_str(&cleaned).expect("parse cleaned");
+        assert!(doc.get("model_provider").is_none());
+        assert!(doc.get("model_providers").is_none());
+        assert_eq!(
+            doc.get("model").and_then(toml::Value::as_str),
+            Some("gpt-5.4")
+        );
+    }
+
+    #[test]
+    fn official_proxy_route_rejects_non_table_model_providers_without_panicking() {
+        for input in [
+            "model_providers = 3\n",
+            "[[model_providers]]\nname = \"broken\"\n",
+        ] {
+            let result = apply_codex_official_proxy_route(input, "http://127.0.0.1:15721/v1");
+            assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    fn official_proxy_route_normalizes_inline_tables_and_cleans_stale_placeholder() {
+        let input = r#"model_provider = "rightcode"
+model_providers = { rightcode = { name = "RightCode", experimental_bearer_token = "PROXY_MANAGED" } }
+"#;
+        let projected = apply_codex_official_proxy_route(input, "http://127.0.0.1:15721/v1")
+            .expect("project inline provider table");
+        let projected_doc: toml::Value = toml::from_str(&projected).expect("parse projected");
+        assert!(projected_doc["model_providers"]["rightcode"]
+            .get("experimental_bearer_token")
+            .is_none());
+        assert!(projected_doc["model_providers"]
+            .get(CC_SWITCH_CODEX_OFFICIAL_PROXY_PROVIDER_ID)
+            .is_some());
+
+        let cleaned = remove_codex_official_proxy_route(&projected).expect("clean projected");
+        let cleaned_doc: toml::Value = toml::from_str(&cleaned).expect("parse cleaned");
+        assert!(cleaned_doc.get("model_provider").is_none());
+        assert!(cleaned_doc["model_providers"].get("rightcode").is_some());
+        assert!(cleaned_doc["model_providers"]
+            .get(CC_SWITCH_CODEX_OFFICIAL_PROXY_PROVIDER_ID)
+            .is_none());
     }
 
     #[test]
@@ -3805,6 +4124,41 @@ requires_openai_auth = true
             Some("")
         );
         assert!(settings.pointer("/auth/tokens/access_token").is_some());
+    }
+
+    #[test]
+    fn strip_mcp_servers_from_settings_removes_table_and_legacy_form() {
+        let mut settings = json!({
+            "auth": { "OPENAI_API_KEY": "sk-test" },
+            "config": "# user comment\nmodel = \"gpt-5.5\"\n\n[mcp_servers.echo]\ntype = \"stdio\"\ncommand = \"echo\"\n\n[mcp.servers.legacy]\ncommand = \"noop\"\n",
+        });
+        strip_codex_mcp_servers_from_settings(&mut settings).expect("strip mcp");
+        let config = settings
+            .get("config")
+            .and_then(|v| v.as_str())
+            .expect("config text");
+        assert!(!config.contains("mcp_servers"), "got: {config}");
+        assert!(
+            !config.contains("[mcp"),
+            "legacy [mcp.servers] gone: {config}"
+        );
+        assert!(config.contains("# user comment"), "comments preserved");
+        assert!(config.contains("model = \"gpt-5.5\""));
+    }
+
+    #[test]
+    fn strip_mcp_servers_from_settings_is_noop_without_mcp() {
+        let original = "# comment\nmodel = \"gpt-5.5\"\n";
+        let mut settings = json!({
+            "auth": {},
+            "config": original,
+        });
+        strip_codex_mcp_servers_from_settings(&mut settings).expect("strip mcp");
+        assert_eq!(
+            settings.get("config").and_then(|v| v.as_str()),
+            Some(original),
+            "config text must be byte-identical when nothing is stripped"
+        );
     }
 
     #[test]
@@ -6273,6 +6627,40 @@ name = "any"
         assert_eq!(
             models[1].get("contextWindow").and_then(|v| v.as_u64()),
             Some(500_000)
+        );
+    }
+
+    #[test]
+    fn build_simplified_catalog_squashes_inferred_modalities_and_keeps_overrides() {
+        let catalog = r#"{
+            "models": [
+                { "slug": "gpt-5.4", "input_modalities": ["text", "image"] },
+                { "slug": "deepseek-v4-pro", "input_modalities": ["text"] },
+                { "slug": "gpt-text-override", "input_modalities": ["text"] },
+                { "slug": "deepseek-v4-flash", "input_modalities": ["text", "image"] }
+            ]
+        }"#;
+
+        let result = build_simplified_catalog_from_texts("", catalog).expect("entries");
+        let models = result.get("models").unwrap().as_array().unwrap();
+
+        assert!(
+            models[0].get("inputModalities").is_none(),
+            "GPT text+image is inferred and must not become a sticky hidden override"
+        );
+        assert!(
+            models[1].get("inputModalities").is_none(),
+            "confirmed text-only capability is inferred and must remain registry-driven"
+        );
+        assert_eq!(
+            models[2].get("inputModalities"),
+            Some(&json!(["text"])),
+            "an unknown model explicitly forced to text-only must round-trip"
+        );
+        assert_eq!(
+            models[3].get("inputModalities"),
+            Some(&json!(["text", "image"])),
+            "an explicit image override for a registered text-only model must round-trip"
         );
     }
 

@@ -1,5 +1,14 @@
 # CC Switch Repository Memory
 
+## 2026-07-28 Upstream v3.17.0 Merge Into CCSwitchMulti
+
+- CCSwitchMulti 从 `2bbe8d20` 合并上游 `farion1231/cc-switch` 的 `3d176b98`（tag `v3.17.0`），版本统一为 `3.17.0-1`，保留 `cc-switch-multi`、`CCSwitchMulti` 和 `com.ccswitchmulti.desktop` 品牌标识。
+- schema v12 两条独立演进必须共存：CCSM 的 `quota_collaboration_reports` 与上游 `profiles` 都在新库和 v11->v12 迁移中创建；不能只选任一分支。Profiles 的同步关闭接管路径需要 `disable_takeover_for_app_sync`，按恢复 live、删备份、清 enabled/健康状态的顺序执行。
+- Codex 请求协议现在同时保留 native Responses、CCSM Messages、OpenAI Chat 和上游 Anthropic Messages。Chat 继续使用 CCSM 的结构化图片/音频/文件及 text-only/cache-aware 转换，再注入 prompt-cache key；Anthropic 保留 max output、1M beta、可选 Claude Code impersonation、cache injection 和 2xx 语义错误 failover。compact 必须按 effective route 逐请求选择 `responses_compact/chat_completions/messages/anthropic_messages`。
+- 接管根因：上游官方 OAuth 必须走 `apply_codex_official_proxy_route`；第三方/MultiRouter 继续写 `custom`/`codex_model_router_v2`。新的 takeover TOML 不能再经过 restore/provider merge 清理器，否则新写入的 `PROXY_MANAGED` 会被当作旧接管残留删除，造成 `live_matches_current_proxy=false`。严格接管统一走 `apply_codex_takeover_fields_for_provider`，写入时直接原子落已投影 TOML，保留真实 `auth.json`。
+- 历史修复继续采用 CCSM 严格规则：只恢复受信任 thread/index，过滤 developer、工具、子 agent 和内部恢复转录，按真实用户事件判断分叉；扫描所有 `state_N.sqlite`，标题读取兼容上游 state DB。多模态保持 function/custom tool output 的 image/audio/file 结构化转换，URL-only 文件显式产生有界占位而非静默丢失。
+- Rust 全量 lib 测试：2342 passed、2 ignored、0 failed（2344 total）；前端 `pnpm typecheck` 和 `pnpm test:unit -- --maxWorkers=1 --minWorkers=1` 通过。Windows `sqlite_home` 测试必须使用 TOML literal string，避免反斜杠被当转义；Codex usage 同时解析 `cache_write_tokens` 与 `cache_creation_input_tokens`。
+
 ## 2026-07-27 Codex 跨模型上下文压缩路由根修
 
 - 官方 Codex `95637f7056835fea66bdd0044414af480fc0fd74` 的 compact 选择只看 Codex 侧 `ModelProviderInfo::supports_remote_compaction()`；Responses provider 会发送 unary `POST /responses/compact`，请求继续携带当前 compact turn 的 `model/input/instructions/tools/reasoning` 以及 `x-codex-turn-metadata`。元数据 `request_kind=compaction`，并含 trigger/reason/implementation/phase；模型降档或上下文切换时 compact body 的 model 可能是前一模型或当前模型，CCSM 必须逐请求重新解析 route。

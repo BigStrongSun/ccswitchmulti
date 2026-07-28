@@ -9,6 +9,24 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+fn openai_cache_read_tokens(usage: &Value) -> u32 {
+    usage
+        .get("cache_read_input_tokens")
+        .or_else(|| usage.pointer("/input_tokens_details/cached_tokens"))
+        .or_else(|| usage.pointer("/prompt_tokens_details/cached_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as u32
+}
+
+fn openai_cache_write_tokens(usage: &Value) -> u32 {
+    usage
+        .get("cache_creation_input_tokens")
+        .or_else(|| usage.pointer("/input_tokens_details/cache_write_tokens"))
+        .or_else(|| usage.pointer("/prompt_tokens_details/cache_write_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as u32
+}
+
 /// Session 日志 request_id 前缀，与 `session_usage.rs` 中的格式保持一致
 pub const SESSION_REQUEST_ID_PREFIX: &str = "session:";
 
@@ -302,12 +320,14 @@ impl TokenUsage {
             .map(|s| s.to_string());
 
         let cached_tokens = Self::cache_read_tokens_from_openai_compatible_usage(usage);
+        let cache_write_tokens = Self::cache_creation_tokens_from_openai_compatible_usage(usage)
+            .max(openai_cache_write_tokens(usage));
 
         Some(Self {
             input_tokens: input_tokens? as u32,
             output_tokens: output_tokens? as u32,
             cache_read_tokens: cached_tokens,
-            cache_creation_tokens: Self::cache_creation_tokens_from_openai_compatible_usage(usage),
+            cache_creation_tokens: cache_write_tokens,
             model,
             message_id: None,
         })
@@ -325,9 +345,13 @@ impl TokenUsage {
 
         // 获取 cached_tokens (可能在 cache_read_input_tokens 或 input_tokens_details 中)
         let cached_tokens = Self::cache_read_tokens_from_openai_compatible_usage(usage);
+        let cache_write_tokens = Self::cache_creation_tokens_from_openai_compatible_usage(usage)
+            .max(openai_cache_write_tokens(usage));
 
-        // 调整 input_tokens: 减去 cached_tokens
-        let adjusted_input = input_tokens.saturating_sub(cached_tokens);
+        // 调整 input_tokens: OpenAI total input 同时包含 cache read/write 两桶。
+        let adjusted_input = input_tokens
+            .saturating_sub(cached_tokens)
+            .saturating_sub(cache_write_tokens);
 
         // 提取响应中的模型名称
         let model = body
@@ -339,7 +363,7 @@ impl TokenUsage {
             input_tokens: adjusted_input,
             output_tokens,
             cache_read_tokens: cached_tokens,
-            cache_creation_tokens: Self::cache_creation_tokens_from_openai_compatible_usage(usage),
+            cache_creation_tokens: cache_write_tokens,
             model,
             message_id: None,
         })
@@ -435,6 +459,7 @@ impl TokenUsage {
 
         // 获取 cached_tokens (可能在 prompt_tokens_details 中)
         let cached_tokens = Self::cache_read_tokens_from_openai_compatible_usage(usage);
+        let cache_write_tokens = Self::cache_creation_tokens_from_openai_compatible_usage(usage);
 
         // 提取响应中的模型名称
         let model = body
@@ -446,7 +471,7 @@ impl TokenUsage {
             input_tokens: prompt_tokens as u32,
             output_tokens: completion_tokens as u32,
             cache_read_tokens: cached_tokens,
-            cache_creation_tokens: Self::cache_creation_tokens_from_openai_compatible_usage(usage),
+            cache_creation_tokens: cache_write_tokens,
             model,
             message_id: None,
         })
@@ -875,6 +900,30 @@ mod tests {
         assert_eq!(usage.output_tokens, 50);
         assert_eq!(usage.cache_read_tokens, 1200);
         assert_eq!(usage.cache_creation_tokens, 405);
+    }
+
+    #[test]
+    fn test_codex_response_parsing_cache_write_tokens_in_details() {
+        let response = json!({
+            "usage": {
+                "input_tokens": 1000,
+                "output_tokens": 500,
+                "input_tokens_details": {
+                    "cached_tokens": 300,
+                    "cache_write_tokens": 200
+                }
+            }
+        });
+
+        let usage = TokenUsage::from_codex_response(&response).unwrap();
+        assert_eq!(usage.input_tokens, 1000);
+        assert_eq!(usage.cache_read_tokens, 300);
+        assert_eq!(usage.cache_creation_tokens, 200);
+
+        let adjusted = TokenUsage::from_codex_response_adjusted(&response).unwrap();
+        assert_eq!(adjusted.input_tokens, 500);
+        assert_eq!(adjusted.cache_read_tokens, 300);
+        assert_eq!(adjusted.cache_creation_tokens, 200);
     }
 
     #[test]

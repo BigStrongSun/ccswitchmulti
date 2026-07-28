@@ -269,6 +269,10 @@ pub struct UsageScript {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "secretAccessKey")]
     pub secret_access_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "teamOrganizationId")]
+    pub team_organization_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "teamProjectId")]
+    pub team_project_id: Option<String>,
 }
 
 /// 用量数据
@@ -433,6 +437,9 @@ pub struct CodexCacheConfig {
     /// 显式缓存 key；只有在 supportsPromptCacheKey 为 true 时才会被透传。
     #[serde(rename = "promptCacheKey", skip_serializing_if = "Option::is_none")]
     pub prompt_cache_key: Option<String>,
+    /// Session-based prompt-cache routing for Codex Responses -> Chat conversions.
+    #[serde(rename = "promptCacheRouting", skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_routing: Option<String>,
     /// OpenAI prompt cache retention，例如 in_memory 或 24h。
     #[serde(
         rename = "promptCacheRetention",
@@ -534,6 +541,9 @@ pub struct ProviderMeta {
     /// identity when available; generated session IDs are not sent upstream.
     #[serde(rename = "promptCacheKey", skip_serializing_if = "Option::is_none")]
     pub prompt_cache_key: Option<String>,
+    /// Session-based prompt-cache routing for Codex Responses -> Chat conversions.
+    #[serde(rename = "promptCacheRouting", skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_routing: Option<String>,
     /// OpenAI prompt cache retention policy for endpoints that explicitly support it.
     #[serde(
         rename = "promptCacheRetention",
@@ -558,6 +568,15 @@ pub struct ProviderMeta {
         skip_serializing_if = "Option::is_none"
     )]
     pub codex_local_model_mapping: Option<bool>,
+    /// Codex -> Anthropic path: optionally emulate the Claude Code client.
+    #[serde(
+        rename = "impersonateClaudeCode",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub impersonate_claude_code: Option<bool>,
+    /// Codex -> Anthropic path output ceiling override.
+    #[serde(rename = "maxOutputTokens", skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
     /// Custom User-Agent for local proxy routing.
     #[serde(rename = "customUserAgent", skip_serializing_if = "Option::is_none")]
     pub custom_user_agent: Option<String>,

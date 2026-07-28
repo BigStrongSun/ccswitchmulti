@@ -64,6 +64,8 @@ export interface UsageScript {
   userId?: string; // 用户ID（NewAPI 模板使用）
   accessKeyId?: string; // 火山方舟 AccessKey ID（用量查询签名用，与推理 Key 分离）
   secretAccessKey?: string; // 火山方舟 SecretAccessKey
+  teamOrganizationId?: string; // 智谱团队套餐组织 ID
+  teamProjectId?: string; // 智谱团队套餐项目 ID
   codingPlanProvider?: string; // Coding Plan 供应商标识（如 "kimi", "zhipu", "minimax"）
   autoQueryInterval?: number; // 自动查询间隔（单位：分钟，0 表示禁用）
   autoIntervalMinutes?: number; // 自动查询间隔（分钟）- 别名字段
@@ -125,6 +127,8 @@ export type AuthBindingSource =
   | "provider_config"
   | "managed_account"
   | "managed_codex_oauth";
+
+export type PromptCacheRoutingMode = "auto" | "enabled" | "disabled";
 
 export interface AuthBinding {
   source: AuthBindingSource;
@@ -229,6 +233,8 @@ export interface ProviderMeta {
   isFullUrl?: boolean;
   // Prompt cache key for OpenAI Responses-compatible endpoints (improves cache hit rate)
   promptCacheKey?: string;
+  // Session-based prompt-cache routing for Codex Responses -> Chat conversions.
+  promptCacheRouting?: PromptCacheRoutingMode;
   // OpenAI prompt cache retention policy; only used when codexCache declares support.
   promptCacheRetention?: "in_memory" | "24h" | string;
   // Codex route/provider cache capability metadata.
@@ -239,6 +245,9 @@ export interface ProviderMeta {
   codexChatReasoning?: CodexChatReasoning;
   // Codex 单供应商模型目录是否投射为 /model 菜单映射；关闭时 modelCatalog 只作为目录/上下文元数据保存。
   codexLocalModelMapping?: boolean;
+  // Codex -> Anthropic provider options.
+  impersonateClaudeCode?: boolean;
+  maxOutputTokens?: number;
   // Custom User-Agent for local proxy routing. Only applied by the local proxy.
   customUserAgent?: string;
   // Local proxy request overrides. Only applied by the local proxy after route transforms.
@@ -272,7 +281,8 @@ export type ClaudeApiFormat =
 export type CodexApiFormat =
   | "openai_responses"
   | "openai_chat"
-  | "openai_messages";
+  | "openai_messages"
+  | "anthropic";
 
 export interface CodexCatalogModel {
   model: string;
@@ -451,10 +461,12 @@ export interface Settings {
   proxyConfirmed?: boolean;
   // User has confirmed the usage query first-run notice
   usageConfirmed?: boolean;
+  usageDashboardRefreshIntervalMs?: number;
   // User has confirmed the stream check first-run notice
   streamCheckConfirmed?: boolean;
   // Whether to show the failover toggle independently on the main page
   enableFailoverToggle?: boolean;
+  showProfileSwitcher?: boolean;
   // Preserve Codex ChatGPT login in auth.json when switching third-party providers
   preserveCodexOfficialAuthOnSwitch?: boolean;
   // Run official Codex under the shared "custom" provider id so future
@@ -756,6 +768,9 @@ export interface OpenClawModel {
   };
   contextWindow?: number;
   maxTokens?: number; // 最大输出 token 数
+  compat?: {
+    maxTokensField?: string;
+  };
 }
 
 // OpenClaw 默认模型配置（agents.defaults.model）

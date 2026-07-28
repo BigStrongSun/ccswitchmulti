@@ -338,7 +338,6 @@ export interface OptimizerConfig {
   enabled: boolean;
   thinkingOptimizer: boolean;
   cacheInjection: boolean;
-  cacheTtl: string;
 }
 
 export interface LogConfig {
