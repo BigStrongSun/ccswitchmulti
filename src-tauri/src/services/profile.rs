@@ -380,7 +380,19 @@ impl ProfileService {
                     ));
                 } else {
                     let current = crate::settings::get_effective_current_provider(&state.db, app)?;
-                    if current.as_deref() != Some(target_pid.as_str()) {
+                    // Applying a profile always disables takeover first. A Codex
+                    // MultiRouter/Chat provider still needs the local proxy even
+                    // when its provider id did not change, so run the switch
+                    // primitive again to restore its required runtime state.
+                    let must_restore_codex_takeover = matches!(app, AppType::Codex)
+                        && ProviderService::codex_provider_requires_local_proxy(
+                            providers
+                                .get(target_pid)
+                                .expect("target provider checked above"),
+                        );
+                    if current.as_deref() != Some(target_pid.as_str())
+                        || must_restore_codex_takeover
+                    {
                         match ProviderService::switch(state, app.clone(), target_pid) {
                             Ok(result) => warnings.extend(result.warnings),
                             Err(e) => warnings.push(format!(

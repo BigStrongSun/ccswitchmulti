@@ -2700,7 +2700,7 @@ impl ProviderService {
     /// Chat Completions 后端和多模型路由都需要由 CC Switch 把 Codex 的 `/responses`
     /// 请求转换/分流后再访问真实上游。若这里漏判，Codex 会直接请求上游 `/responses`，
     /// 例如 DeepSeek 官方 API 会返回 404。
-    fn codex_provider_requires_local_proxy(provider: &Provider) -> bool {
+    pub(crate) fn codex_provider_requires_local_proxy(provider: &Provider) -> bool {
         if crate::proxy::providers::codex_provider_uses_chat_completions(provider) {
             return true;
         }

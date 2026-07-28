@@ -7,8 +7,9 @@ use std::fs;
 use serde_json::json;
 
 use cc_switch_lib::{
-    AppType, InstalledSkill, McpServer, McpService, ProfilePayload, ProfileScope, ProfileService,
-    Prompt, PromptService, Provider, ProviderService, SkillApps, SkillService,
+    get_codex_config_path, write_codex_live_atomic, AppType, InstalledSkill, McpServer, McpService,
+    ProfilePayload, ProfileScope, ProfileService, Prompt, PromptService, Provider, ProviderService,
+    SkillApps, SkillService,
 };
 
 #[path = "support.rs"]
@@ -746,6 +747,77 @@ fn profile_switch_auto_disables_takeover_before_apply() {
         Some("https://api.test"),
         "live config should point to real endpoint after auto-disable"
     );
+}
+
+#[tokio::test]
+async fn codex_profile_reapplies_same_multirouter_after_takeover_cleanup() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let _home = ensure_test_home();
+    let state = create_test_state().expect("create test state");
+
+    let mut proxy_config = state.db.get_proxy_config().await.expect("get proxy config");
+    proxy_config.listen_port = 0;
+    state
+        .db
+        .update_proxy_config(proxy_config)
+        .await
+        .expect("set ephemeral proxy port");
+
+    let mut router = Provider::with_id(
+        "router".to_string(),
+        "Router".to_string(),
+        json!({
+            "auth": { "OPENAI_API_KEY": "router-key" },
+            "config": "model = \"gpt-visible\"\n",
+            "codexRouting": {
+                "enabled": true,
+                "routes": [{
+                    "id": "route-a",
+                    "enabled": true,
+                    "match": { "models": ["gpt-visible"] },
+                    "upstream": {
+                        "baseUrl": "https://example.test/v1",
+                        "apiFormat": "openai_responses",
+                        "apiKey": "route-key"
+                    }
+                }]
+            }
+        }),
+        None,
+    );
+    router.category = Some("custom".to_string());
+    state
+        .db
+        .save_provider(AppType::Codex.as_str(), &router)
+        .expect("save router");
+    write_codex_live_atomic(
+        &json!({ "OPENAI_API_KEY": "native-key" }),
+        Some("model = \"gpt-visible\"\n"),
+    )
+    .expect("seed Codex live");
+
+    ProviderService::switch(&state, AppType::Codex, "router")
+        .expect("switch to router and enable initial takeover");
+    let profile = ProfileService::create(&state, "Router Project", ProfileScope::Codex)
+        .expect("create router profile");
+
+    let (warnings, _) = ProfileService::apply(&state, &profile.id, ProfileScope::Codex)
+        .expect("reapply router profile");
+    assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+
+    let (takeover_enabled, _) = state.db.get_proxy_flags_sync("codex");
+    assert!(
+        takeover_enabled,
+        "same-provider profile apply must restore required Codex takeover"
+    );
+    let live = fs::read_to_string(get_codex_config_path()).expect("read Codex live config");
+    assert!(
+        live.contains("http://127.0.0.1:"),
+        "Codex live config should point back to the local router: {live}"
+    );
+
+    state.proxy_service.stop().await.expect("stop proxy");
 }
 
 #[cfg(any(target_os = "macos", windows))]
