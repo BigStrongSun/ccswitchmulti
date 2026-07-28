@@ -24,6 +24,7 @@ use super::{
 };
 use crate::commands::{CodexOAuthState, CopilotAuthState};
 use crate::proxy::providers::codex_oauth_auth::CodexOAuthManager;
+use crate::proxy::providers::codex_oauth_auth::NATIVE_CODEX_ACCOUNT_ID;
 use crate::proxy::providers::copilot_auth::CopilotAuthManager;
 use crate::{
     app_config::AppType,
@@ -169,6 +170,136 @@ pub struct RequestForwarder {
 }
 
 impl RequestForwarder {
+    async fn expand_codex_account_pool(
+        &self,
+        app_type: &AppType,
+        headers: &http::HeaderMap,
+        providers: Vec<Provider>,
+    ) -> Vec<Provider> {
+        if !matches!(app_type, AppType::Codex)
+            || headers.contains_key("x-cc-switch-external-openai-api")
+        {
+            return providers;
+        }
+        let Some(app_handle) = &self.app_handle else {
+            return providers;
+        };
+        let state = app_handle.state::<CodexOAuthState>();
+        let manager = state.0.read().await;
+        let policy = manager.account_pool_policy().await;
+        if !policy.enabled {
+            return providers;
+        }
+        for entry in policy.entries.iter().filter(|entry| entry.enabled) {
+            if !manager.pool_quota_refresh_due(&entry.account_id).await {
+                continue;
+            }
+            let token = if entry.account_id == NATIVE_CODEX_ACCOUNT_ID {
+                headers
+                    .get(http::header::AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.strip_prefix("Bearer "))
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToString::to_string)
+            } else {
+                manager
+                    .get_valid_token_for_account(&entry.account_id)
+                    .await
+                    .ok()
+            };
+            if let Some(token) = token {
+                match crate::services::subscription::query_codex_remaining_percent(
+                    &token,
+                    (entry.account_id != NATIVE_CODEX_ACCOUNT_ID)
+                        .then_some(entry.account_id.as_str()),
+                )
+                .await
+                {
+                    Ok(remaining) => {
+                        manager
+                            .record_pool_remaining_percent(&entry.account_id, remaining)
+                            .await;
+                    }
+                    Err(error) => {
+                        log::warn!(
+                            "[CodexOAuthPool] 额度刷新失败 account={}: {error}",
+                            entry.account_id
+                        );
+                        manager.mark_pool_quota_checked(&entry.account_id).await;
+                    }
+                }
+            } else {
+                manager.mark_pool_quota_checked(&entry.account_id).await;
+            }
+        }
+        let entries = state
+            .0
+            .read()
+            .await
+            .ordered_pool_entries(&self.session_id)
+            .await;
+        let mut expanded = Vec::new();
+        for provider in providers {
+            if !super::providers::is_codex_official_provider(&provider) {
+                expanded.push(provider);
+                continue;
+            }
+            for entry in &entries {
+                let mut candidate = provider.clone();
+                if entry.account_id == NATIVE_CODEX_ACCOUNT_ID {
+                    candidate.settings_config["codexPoolAccountId"] =
+                        Value::String(NATIVE_CODEX_ACCOUNT_ID.to_string());
+                } else {
+                    candidate.settings_config["codexNativeAuthPassthrough"] = Value::Bool(false);
+                    candidate.settings_config["codexPoolAccountId"] =
+                        Value::String(entry.account_id.clone());
+                    let meta = candidate.meta.get_or_insert_with(Default::default);
+                    meta.provider_type = Some("codex_oauth".to_string());
+                    meta.api_format = Some("openai_responses".to_string());
+                    meta.auth_binding = Some(crate::provider::AuthBinding {
+                        source: crate::provider::AuthBindingSource::ManagedAccount,
+                        auth_provider: Some("codex_oauth".to_string()),
+                        account_id: Some(entry.account_id.clone()),
+                    });
+                }
+                candidate.id = format!("{}::account::{}", candidate.id, entry.account_id);
+                candidate.name = format!("{} [{}]", candidate.name, entry.account_id);
+                expanded.push(candidate);
+            }
+        }
+        expanded
+    }
+
+    async fn record_codex_pool_attempt(
+        &self,
+        provider: &Provider,
+        success: bool,
+        status: Option<u16>,
+    ) {
+        let Some(account_id) = provider
+            .settings_config
+            .get("codexPoolAccountId")
+            .and_then(Value::as_str)
+        else {
+            return;
+        };
+        let Some(app_handle) = &self.app_handle else {
+            return;
+        };
+        let state = app_handle.state::<CodexOAuthState>();
+        let manager = state.0.read().await;
+        if success {
+            manager
+                .bind_pool_session(&self.session_id, account_id)
+                .await;
+        } else if status == Some(429) {
+            manager
+                .cool_down_pool_account(account_id, Duration::from_secs(60))
+                .await;
+        }
+    }
+
     /// 预防式 media 降级：发送前对 text-only 模型把图片块替换为标记。
     ///
     /// 受 `enabled && request_media_fallback` 管辖；其中"启发式模型名单预测"
@@ -510,6 +641,9 @@ impl RequestForwarder {
             &providers,
             &route_body,
         );
+        let attempt_providers = self
+            .expand_codex_account_pool(app_type, &headers, attempt_providers)
+            .await;
         let bypass_circuit_breaker = attempt_providers.len() == 1;
         let mut last_error = None;
         let mut last_provider = None;
@@ -560,6 +694,7 @@ impl RequestForwarder {
                 .await
             {
                 Ok((response, effective_provider, outbound_model)) => {
+                    self.record_codex_pool_attempt(provider, true, None).await;
                     self.record_success_result(
                         &attempt_provider_id,
                         &persistent_provider_id,
@@ -610,6 +745,12 @@ impl RequestForwarder {
                     });
                 }
                 Err(error) => {
+                    let status = match &error {
+                        ProxyError::UpstreamError { status, .. } => Some(*status),
+                        _ => None,
+                    };
+                    self.record_codex_pool_attempt(provider, false, status)
+                        .await;
                     let category = self.categorize_proxy_error(&error, &provider);
                     if matches!(category, ErrorCategory::NonRetryable) {
                         self.router
@@ -694,6 +835,9 @@ impl RequestForwarder {
         let attempt_providers = build_forward_attempt_providers_preserving_codex_router_context(
             app_type, &providers, &body,
         );
+        let attempt_providers = self
+            .expand_codex_account_pool(app_type, &headers, attempt_providers)
+            .await;
         let mut last_error = None;
         let mut last_provider = None;
         let mut attempted_providers = 0usize;
@@ -786,6 +930,7 @@ impl RequestForwarder {
                 .await
             {
                 Ok((response, claude_api_format, effective_provider, outbound_model)) => {
+                    self.record_codex_pool_attempt(provider, true, None).await;
                     // 成功：普通闭合熔断状态异步记录，避免阻塞流式首包返回；
                     // HalfOpen 探测仍同步等待，保证 permit 与熔断状态及时释放。
                     self.record_success_result(
@@ -846,6 +991,12 @@ impl RequestForwarder {
                     });
                 }
                 Err(e) => {
+                    let pool_status = match &e {
+                        ProxyError::UpstreamError { status, .. } => Some(*status),
+                        _ => None,
+                    };
+                    self.record_codex_pool_attempt(provider, false, pool_status)
+                        .await;
                     // 检测是否需要触发整流器（仅 Claude/ClaudeAuth 供应商）
                     let provider_type = ProviderType::from_app_type_and_config(app_type, provider);
                     let is_anthropic_provider = matches!(

@@ -1301,6 +1301,7 @@ pub fn run() {
             commands::get_codex_oauth_quota,
             commands::get_codex_account_pool_policy,
             commands::set_codex_account_pool_policy,
+            commands::refresh_codex_account_pool_quota,
             commands::get_codex_oauth_models,
             commands::get_codex_oauth_cached_models,
             commands::get_coding_plan_quota,

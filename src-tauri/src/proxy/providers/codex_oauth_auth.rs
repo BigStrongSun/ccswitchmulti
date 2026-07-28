@@ -275,6 +275,10 @@ pub struct CodexOAuthManager {
     accounts: Arc<RwLock<HashMap<String, CodexAccountData>>>,
     default_account_id: Arc<RwLock<Option<String>>>,
     pool_policy: Arc<RwLock<CodexAccountPoolPolicy>>,
+    pool_cooldowns: Arc<RwLock<HashMap<String, i64>>>,
+    pool_session_bindings: Arc<RwLock<HashMap<String, String>>>,
+    pool_remaining_percent: Arc<RwLock<HashMap<String, f64>>>,
+    pool_quota_checked_at: Arc<RwLock<HashMap<String, i64>>>,
     /// 内存缓存的 access_token（不持久化）
     access_tokens: Arc<RwLock<HashMap<String, CachedAccessToken>>>,
     /// 每个账号的刷新锁
@@ -306,6 +310,10 @@ impl CodexOAuthManager {
             accounts: Arc::new(RwLock::new(HashMap::new())),
             default_account_id: Arc::new(RwLock::new(None)),
             pool_policy: Arc::new(RwLock::new(CodexAccountPoolPolicy::default())),
+            pool_cooldowns: Arc::new(RwLock::new(HashMap::new())),
+            pool_session_bindings: Arc::new(RwLock::new(HashMap::new())),
+            pool_remaining_percent: Arc::new(RwLock::new(HashMap::new())),
+            pool_quota_checked_at: Arc::new(RwLock::new(HashMap::new())),
             access_tokens: Arc::new(RwLock::new(HashMap::new())),
             refresh_locks: Arc::new(RwLock::new(HashMap::new())),
             persistence_lock: Arc::new(Mutex::new(())),
@@ -747,6 +755,92 @@ impl CodexOAuthManager {
 
     pub async fn account_pool_policy(&self) -> CodexAccountPoolPolicy {
         self.normalized_pool_policy().await
+    }
+
+    pub async fn ordered_pool_entries(&self, session_id: &str) -> Vec<CodexAccountPoolEntry> {
+        let policy = self.normalized_pool_policy().await;
+        if !policy.enabled {
+            return Vec::new();
+        }
+        let now = chrono::Utc::now().timestamp_millis();
+        let cooldowns = self.pool_cooldowns.read().await;
+        let remaining = self.pool_remaining_percent.read().await;
+        let mut entries: Vec<_> = policy
+            .entries
+            .into_iter()
+            .filter(|entry| {
+                entry.enabled
+                    && remaining
+                        .get(&entry.account_id)
+                        .is_none_or(|value| *value > entry.reserve_percent)
+                    && cooldowns
+                        .get(&entry.account_id)
+                        .is_none_or(|until| *until <= now)
+            })
+            .collect();
+        drop(cooldowns);
+        if let Some(bound) = self
+            .pool_session_bindings
+            .read()
+            .await
+            .get(session_id)
+            .cloned()
+        {
+            if let Some(index) = entries.iter().position(|entry| entry.account_id == bound) {
+                let entry = entries.remove(index);
+                entries.insert(0, entry);
+            }
+        }
+        entries
+    }
+
+    pub async fn record_pool_remaining_percent(&self, account_id: &str, remaining: f64) {
+        self.pool_remaining_percent
+            .write()
+            .await
+            .insert(account_id.to_string(), remaining.clamp(0.0, 100.0));
+        self.pool_quota_checked_at.write().await.insert(
+            account_id.to_string(),
+            chrono::Utc::now().timestamp_millis(),
+        );
+    }
+
+    pub async fn pool_quota_refresh_due(&self, account_id: &str) -> bool {
+        const QUOTA_TTL_MS: i64 = 5 * 60 * 1000;
+        let now = chrono::Utc::now().timestamp_millis();
+        self.pool_quota_checked_at
+            .read()
+            .await
+            .get(account_id)
+            .is_none_or(|checked| now.saturating_sub(*checked) >= QUOTA_TTL_MS)
+    }
+
+    pub async fn mark_pool_quota_checked(&self, account_id: &str) {
+        self.pool_quota_checked_at.write().await.insert(
+            account_id.to_string(),
+            chrono::Utc::now().timestamp_millis(),
+        );
+    }
+
+    pub async fn bind_pool_session(&self, session_id: &str, account_id: &str) {
+        if !session_id.trim().is_empty() {
+            self.pool_session_bindings
+                .write()
+                .await
+                .insert(session_id.to_string(), account_id.to_string());
+        }
+    }
+
+    pub async fn cool_down_pool_account(&self, account_id: &str, duration: std::time::Duration) {
+        let until = chrono::Utc::now().timestamp_millis() + duration.as_millis() as i64;
+        self.pool_cooldowns
+            .write()
+            .await
+            .insert(account_id.to_string(), until);
+        self.pool_session_bindings
+            .write()
+            .await
+            .retain(|_, bound| bound != account_id);
     }
 
     pub async fn set_account_pool_policy(
@@ -1499,6 +1593,58 @@ mod tests {
         let accounts = manager.list_accounts().await;
         assert_eq!(accounts.len(), 1);
         assert_eq!(accounts[0].id, "acc-456");
+    }
+
+    #[tokio::test]
+    async fn account_pool_honors_order_reserve_cooldown_and_session_binding() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = CodexOAuthManager::new(temp.path().to_path_buf());
+        manager
+            .add_account_internal(
+                "acc-a".to_string(),
+                "rt-a".to_string(),
+                Some("a@example.com".to_string()),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        manager
+            .set_account_pool_policy(CodexAccountPoolPolicy {
+                enabled: true,
+                entries: vec![
+                    CodexAccountPoolEntry {
+                        account_id: "acc-a".to_string(),
+                        enabled: true,
+                        reserve_percent: 5.0,
+                    },
+                    CodexAccountPoolEntry {
+                        account_id: NATIVE_CODEX_ACCOUNT_ID.to_string(),
+                        enabled: true,
+                        reserve_percent: 10.0,
+                    },
+                ],
+            })
+            .await
+            .unwrap();
+
+        manager
+            .bind_pool_session("thread-1", NATIVE_CODEX_ACCOUNT_ID)
+            .await;
+        let entries = manager.ordered_pool_entries("thread-1").await;
+        assert_eq!(entries[0].account_id, NATIVE_CODEX_ACCOUNT_ID);
+
+        manager
+            .record_pool_remaining_percent(NATIVE_CODEX_ACCOUNT_ID, 9.0)
+            .await;
+        let entries = manager.ordered_pool_entries("thread-1").await;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].account_id, "acc-a");
+
+        manager
+            .cool_down_pool_account("acc-a", std::time::Duration::from_secs(60))
+            .await;
+        assert!(manager.ordered_pool_entries("thread-1").await.is_empty());
     }
 
     /// 启动一次性 OAuth token 假端点。

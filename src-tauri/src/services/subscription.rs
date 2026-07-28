@@ -947,6 +947,47 @@ pub(crate) async fn query_codex_quota(
     })
 }
 
+/// Lightweight account-pool probe. Unlike the full quota view this does not
+/// query reset-credit details, so routing refreshes need only one read-only call.
+pub(crate) async fn query_codex_remaining_percent(
+    access_token: &str,
+    account_id: Option<&str>,
+) -> Result<f64, String> {
+    let client = crate::proxy::http_client::get();
+    let mut req = client
+        .get("https://chatgpt.com/backend-api/wham/usage")
+        .header("Authorization", format!("Bearer {access_token}"))
+        .header("User-Agent", "codex-cli")
+        .header("originator", "Codex Desktop")
+        .header("OAI-Product-Sku", "CODEX")
+        .header("Accept", "application/json");
+    if let Some(id) = account_id {
+        req = req.header("ChatGPT-Account-Id", id);
+    }
+    let response = req
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|error| format!("Network error: {error}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("Usage API error (HTTP {status})"));
+    }
+    let body: CodexUsageResponse = response
+        .json()
+        .await
+        .map_err(|error| format!("Failed to parse usage response: {error}"))?;
+    let max_used = body
+        .rate_limit
+        .into_iter()
+        .flat_map(|rate_limit| [rate_limit.primary_window, rate_limit.secondary_window])
+        .flatten()
+        .filter_map(|window| window.used_percent)
+        .reduce(f64::max)
+        .ok_or_else(|| "Usage response has no rate-limit windows".to_string())?;
+    Ok((100.0 - max_used).clamp(0.0, 100.0))
+}
+
 // ── Gemini 凭据读取 ──────────────────────────────────────
 
 /// Gemini OAuth 凭据文件格式（~/.gemini/oauth_creds.json）

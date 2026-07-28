@@ -41,6 +41,13 @@ export interface CodexAccountPoolPolicy {
   entries: CodexAccountPoolEntry[];
 }
 
+export interface CodexAccountPoolQuotaStatus {
+  accountId: string;
+  remainingPercent: number | null;
+  queriedAt: number | null;
+  error: string | null;
+}
+
 export async function authStartLogin(
   authProvider: ManagedAuthProvider,
   githubDomain?: string,
@@ -117,6 +124,10 @@ export async function setCodexAccountPoolPolicy(
   return invoke("set_codex_account_pool_policy", { policy });
 }
 
+export async function refreshCodexAccountPoolQuota(): Promise<CodexAccountPoolQuotaStatus[]> {
+  return invoke("refresh_codex_account_pool_quota");
+}
+
 export const authApi = {
   authStartLogin,
   authPollForAccount,
@@ -127,4 +138,5 @@ export const authApi = {
   authLogout,
   getCodexAccountPoolPolicy,
   setCodexAccountPoolPolicy,
+  refreshCodexAccountPoolQuota,
 };

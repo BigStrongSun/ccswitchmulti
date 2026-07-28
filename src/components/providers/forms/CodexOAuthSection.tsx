@@ -85,6 +85,13 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
     queryKey: poolQueryKey,
     queryFn: authApi.getCodexAccountPoolPolicy,
   });
+  const { data: poolQuota = [], isFetching: isRefreshingPoolQuota } = useQuery({
+    queryKey: ["codex-account-pool-quota"],
+    queryFn: authApi.refreshCodexAccountPoolQuota,
+    enabled: poolPolicy?.enabled === true,
+    refetchInterval: 5 * 60 * 1000,
+    staleTime: 60 * 1000,
+  });
   const poolMutation = useMutation({
     mutationFn: authApi.setCodexAccountPoolPolicy,
     onMutate: async (policy) => {
@@ -179,6 +186,7 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
             {poolPolicy.entries.map((entry, index) => {
               const account = accounts.find((item) => item.id === entry.accountId);
               const native = entry.accountId === NATIVE_CODEX_ACCOUNT_ID;
+              const quota = poolQuota.find((item) => item.accountId === entry.accountId);
               return (
                 <div key={entry.accountId} className="flex items-center gap-2 border-b py-2 last:border-b-0">
                   <span className="w-7 text-center text-xs font-medium text-muted-foreground">P{index + 1}</span>
@@ -188,7 +196,9 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
                       {native ? "Codex Desktop 当前登录账号" : account?.login ?? entry.accountId}
                     </div>
                     <div className="text-xs text-muted-foreground">
-                      剩余低于 {entry.reservePercent}% 时保留
+                      {quota?.remainingPercent != null
+                        ? `剩余 ${quota.remainingPercent.toFixed(1)}%，低于 ${entry.reservePercent}% 时保留`
+                        : `剩余低于 ${entry.reservePercent}% 时保留`}
                     </div>
                   </div>
                   <input
@@ -232,6 +242,11 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
               );
             })}
           </div>
+          {poolPolicy.enabled && (
+            <p className="text-xs text-muted-foreground">
+              {isRefreshingPoolQuota ? "正在刷新账号额度…" : "额度每 5 分钟刷新；查询失败时保留上次可信状态。"}
+            </p>
+          )}
           {poolMutation.isError && <p className="text-xs text-red-500">账号切换策略保存失败：{String(poolMutation.error)}</p>}
         </div>
       )}

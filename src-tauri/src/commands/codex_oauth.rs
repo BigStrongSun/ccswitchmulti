@@ -13,6 +13,29 @@ use std::sync::Arc;
 use tauri::State;
 use tokio::sync::RwLock;
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexAccountPoolQuotaStatus {
+    account_id: String,
+    remaining_percent: Option<f64>,
+    queried_at: Option<i64>,
+    error: Option<String>,
+}
+
+fn quota_remaining_percent(quota: &SubscriptionQuota) -> Option<f64> {
+    quota
+        .success
+        .then(|| {
+            quota
+                .tiers
+                .iter()
+                .map(|tier| tier.utilization)
+                .reduce(f64::max)
+                .map(|used| (100.0 - used).clamp(0.0, 100.0))
+        })
+        .flatten()
+}
+
 /// Codex OAuth 认证状态
 pub struct CodexOAuthState(pub Arc<RwLock<CodexOAuthManager>>);
 
@@ -79,6 +102,66 @@ pub async fn set_codex_account_pool_policy(
         .set_account_pool_policy(policy)
         .await
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn refresh_codex_account_pool_quota(
+    state: State<'_, CodexOAuthState>,
+) -> Result<Vec<CodexAccountPoolQuotaStatus>, String> {
+    use crate::proxy::providers::codex_oauth_auth::NATIVE_CODEX_ACCOUNT_ID;
+
+    let manager = state.0.read().await;
+    let policy = manager.account_pool_policy().await;
+    let mut result = Vec::new();
+    for entry in policy.entries.into_iter().filter(|entry| entry.enabled) {
+        let quota = if entry.account_id == NATIVE_CODEX_ACCOUNT_ID {
+            crate::services::subscription::get_subscription_quota("codex").await
+        } else {
+            match manager.get_valid_token_for_account(&entry.account_id).await {
+                Ok(token) => {
+                    query_codex_quota(
+                        &token,
+                        Some(&entry.account_id),
+                        "codex_oauth",
+                        "Codex OAuth access token expired or rejected.",
+                    )
+                    .await
+                }
+                Err(error) => {
+                    result.push(CodexAccountPoolQuotaStatus {
+                        account_id: entry.account_id,
+                        remaining_percent: None,
+                        queried_at: None,
+                        error: Some(error.to_string()),
+                    });
+                    continue;
+                }
+            }
+        };
+        match quota {
+            Ok(quota) => {
+                let remaining = quota_remaining_percent(&quota);
+                if let Some(value) = remaining {
+                    manager
+                        .record_pool_remaining_percent(&entry.account_id, value)
+                        .await;
+                }
+                result.push(CodexAccountPoolQuotaStatus {
+                    account_id: entry.account_id,
+                    remaining_percent: remaining,
+                    queried_at: quota.queried_at,
+                    error: quota.error,
+                });
+            }
+            Err(error) => result.push(CodexAccountPoolQuotaStatus {
+                account_id: entry.account_id,
+                remaining_percent: None,
+                queried_at: None,
+                error: Some(error),
+            }),
+        }
+    }
+    Ok(result)
 }
 
 /// 获取 Codex OAuth (ChatGPT Plus/Pro) 可用模型列表
