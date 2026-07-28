@@ -5,6 +5,7 @@
 //! 大部分认证命令通过通用 `auth_*` 命令（参见 `commands::auth`）暴露给前端，
 //! 此处定义 State wrapper 以及 Codex OAuth 专属的订阅额度和模型列表查询命令。
 
+use crate::proxy::providers::codex_oauth_auth::CodexAccountPoolPolicy;
 use crate::proxy::providers::codex_oauth_auth::CodexOAuthManager;
 use crate::services::model_fetch::FetchedModel;
 use crate::services::subscription::{query_codex_quota, CredentialStatus, SubscriptionQuota};
@@ -57,6 +58,27 @@ pub async fn get_codex_oauth_quota(
         "Codex OAuth access token expired or rejected. Please re-login via cc-switch.",
     )
     .await
+}
+
+#[tauri::command]
+pub async fn get_codex_account_pool_policy(
+    state: State<'_, CodexOAuthState>,
+) -> Result<CodexAccountPoolPolicy, String> {
+    Ok(state.0.read().await.account_pool_policy().await)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn set_codex_account_pool_policy(
+    policy: CodexAccountPoolPolicy,
+    state: State<'_, CodexOAuthState>,
+) -> Result<(), String> {
+    state
+        .0
+        .read()
+        .await
+        .set_account_pool_policy(policy)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// 获取 Codex OAuth (ChatGPT Plus/Pro) 可用模型列表

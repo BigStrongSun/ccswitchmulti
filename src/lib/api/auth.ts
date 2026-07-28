@@ -30,6 +30,17 @@ export interface ManagedAuthDeviceCodeResponse {
   interval: number;
 }
 
+export interface CodexAccountPoolEntry {
+  accountId: string;
+  enabled: boolean;
+  reservePercent: number;
+}
+
+export interface CodexAccountPoolPolicy {
+  enabled: boolean;
+  entries: CodexAccountPoolEntry[];
+}
+
 export async function authStartLogin(
   authProvider: ManagedAuthProvider,
   githubDomain?: string,
@@ -96,6 +107,16 @@ export async function authLogout(
   });
 }
 
+export async function getCodexAccountPoolPolicy(): Promise<CodexAccountPoolPolicy> {
+  return invoke("get_codex_account_pool_policy");
+}
+
+export async function setCodexAccountPoolPolicy(
+  policy: CodexAccountPoolPolicy,
+): Promise<void> {
+  return invoke("set_codex_account_pool_policy", { policy });
+}
+
 export const authApi = {
   authStartLogin,
   authPollForAccount,
@@ -104,4 +125,6 @@ export const authApi = {
   authRemoveAccount,
   authSetDefaultAccount,
   authLogout,
+  getCodexAccountPoolPolicy,
+  setCodexAccountPoolPolicy,
 };

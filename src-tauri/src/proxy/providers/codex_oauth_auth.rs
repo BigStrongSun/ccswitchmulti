@@ -236,12 +236,45 @@ struct CodexOAuthStore {
     accounts: HashMap<String, CodexAccountData>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     default_account_id: Option<String>,
+    #[serde(default)]
+    pool_policy: CodexAccountPoolPolicy,
+}
+
+pub const NATIVE_CODEX_ACCOUNT_ID: &str = "native_codex_auth";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexAccountPoolEntry {
+    pub account_id: String,
+    pub enabled: bool,
+    pub reserve_percent: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexAccountPoolPolicy {
+    pub enabled: bool,
+    pub entries: Vec<CodexAccountPoolEntry>,
+}
+
+impl Default for CodexAccountPoolPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            entries: vec![CodexAccountPoolEntry {
+                account_id: NATIVE_CODEX_ACCOUNT_ID.to_string(),
+                enabled: true,
+                reserve_percent: 5.0,
+            }],
+        }
+    }
 }
 
 /// Codex OAuth 认证管理器（多账号）
 pub struct CodexOAuthManager {
     accounts: Arc<RwLock<HashMap<String, CodexAccountData>>>,
     default_account_id: Arc<RwLock<Option<String>>>,
+    pool_policy: Arc<RwLock<CodexAccountPoolPolicy>>,
     /// 内存缓存的 access_token（不持久化）
     access_tokens: Arc<RwLock<HashMap<String, CachedAccessToken>>>,
     /// 每个账号的刷新锁
@@ -272,6 +305,7 @@ impl CodexOAuthManager {
         let manager = Self {
             accounts: Arc::new(RwLock::new(HashMap::new())),
             default_account_id: Arc::new(RwLock::new(None)),
+            pool_policy: Arc::new(RwLock::new(CodexAccountPoolPolicy::default())),
             access_tokens: Arc::new(RwLock::new(HashMap::new())),
             refresh_locks: Arc::new(RwLock::new(HashMap::new())),
             persistence_lock: Arc::new(Mutex::new(())),
@@ -711,6 +745,67 @@ impl CodexOAuthManager {
         self.resolve_default_account_id().await
     }
 
+    pub async fn account_pool_policy(&self) -> CodexAccountPoolPolicy {
+        self.normalized_pool_policy().await
+    }
+
+    pub async fn set_account_pool_policy(
+        &self,
+        mut policy: CodexAccountPoolPolicy,
+    ) -> Result<(), CodexOAuthError> {
+        let accounts = self.accounts.read().await;
+        let mut seen = std::collections::HashSet::new();
+        policy.entries.retain_mut(|entry| {
+            entry.account_id = entry.account_id.trim().to_string();
+            entry.reserve_percent = entry.reserve_percent.clamp(0.0, 100.0);
+            !entry.account_id.is_empty()
+                && (entry.account_id == NATIVE_CODEX_ACCOUNT_ID
+                    || accounts.contains_key(&entry.account_id))
+                && seen.insert(entry.account_id.clone())
+        });
+        drop(accounts);
+        *self.pool_policy.write().await = policy;
+        self.save_to_disk().await
+    }
+
+    async fn normalized_pool_policy(&self) -> CodexAccountPoolPolicy {
+        let mut policy = self.pool_policy.read().await.clone();
+        let accounts = self.accounts.read().await;
+        let mut known: std::collections::HashSet<String> = policy
+            .entries
+            .iter()
+            .map(|entry| entry.account_id.clone())
+            .collect();
+        if !known.contains(NATIVE_CODEX_ACCOUNT_ID) {
+            policy.entries.insert(
+                0,
+                CodexAccountPoolEntry {
+                    account_id: NATIVE_CODEX_ACCOUNT_ID.to_string(),
+                    enabled: true,
+                    reserve_percent: 5.0,
+                },
+            );
+            known.insert(NATIVE_CODEX_ACCOUNT_ID.to_string());
+        }
+        let mut missing: Vec<_> = accounts
+            .keys()
+            .filter(|id| !known.contains(*id))
+            .cloned()
+            .collect();
+        missing.sort();
+        policy
+            .entries
+            .extend(missing.into_iter().map(|account_id| CodexAccountPoolEntry {
+                account_id,
+                enabled: true,
+                reserve_percent: 5.0,
+            }));
+        policy.entries.retain(|entry| {
+            entry.account_id == NATIVE_CODEX_ACCOUNT_ID || accounts.contains_key(&entry.account_id)
+        });
+        policy
+    }
+
     // ==================== 多账号管理 ====================
 
     pub async fn list_accounts(&self) -> Vec<GitHubAccount> {
@@ -1033,6 +1128,9 @@ impl CodexOAuthManager {
                 }
             }
         }
+        if let Ok(mut policy) = self.pool_policy.try_write() {
+            *policy = store.pool_policy;
+        }
 
         Ok(())
     }
@@ -1041,11 +1139,13 @@ impl CodexOAuthManager {
         let _persist_guard = self.persistence_lock.lock().await;
         let accounts = self.accounts.read().await.clone();
         let default = self.resolve_default_account_id().await;
+        let pool_policy = self.normalized_pool_policy().await;
 
         let store = CodexOAuthStore {
             version: 1,
             accounts,
             default_account_id: default,
+            pool_policy,
         };
 
         let content = serde_json::to_string_pretty(&store)

@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-07-28 ChatGPT OAuth 账号池配置边界
+
+- reset credit 兑换继续由 OpenAI 官方在周额度耗尽时处理；CCSM 只读取额度与 reset credit 状态，不实现兑换、保留 credit id 或自动消费动作。
+- ChatGPT 账号池配置属于 OAuth manager 的持久化状态，不是前端 local state：稳定项 `native_codex_auth` 表示 Codex Desktop 当前登录账号，其余项按 CCSM OAuth account id 标识。每项包含真实优先级顺序、enabled 和 `reservePercent`，新增/删除账号时通过规范化策略自动补入/清理。
+- UI 放在设置的 Codex OAuth 区域，顺序展示必须与后端调度顺序一致；使用图标上下按钮调整，逐账号设置保留额度阈值。策略总开关默认关闭，升级后不能静默改变既有认证选路。
+- 分阶段提交：第一阶段只落持久化策略和 UI，不得宣称已经自动切换；第二阶段接账号额度快照、任务粘性和转发层真实选路后才能启用。
+
 ## 2026-07-28 Codex 当前登录账号路由与 Profile 接管恢复
 
 - 内置 `codex-official` 空 seed 在 MultiRouter 新建 route 时使用 `native_codex_auth`：请求继续经过 CCSM 本地路由，但 Authorization 来自当前 Codex 客户端的登录态，普通 Responses 与 `/responses/compact` 都直达 `chatgpt.com/backend-api/codex`。这等价于 OpenCodex Direct 的账号边界，不是 CCSM 账号池；显式 `accountId` / `managed_codex_oauth` 绑定继续使用 CCSM OAuth manager，已有持久化 route 不自动迁移。

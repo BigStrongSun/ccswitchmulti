@@ -1,4 +1,5 @@
 import React from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -21,9 +22,15 @@ import {
   X,
   Sparkles,
   User,
+  Monitor,
+  ArrowUp,
+  ArrowDown,
 } from "lucide-react";
 import { useCodexOauth } from "./hooks/useCodexOauth";
 import { copyText } from "@/lib/clipboard";
+import { authApi, type CodexAccountPoolPolicy } from "@/lib/api/auth";
+
+const NATIVE_CODEX_ACCOUNT_ID = "native_codex_auth";
 
 interface CodexOAuthSectionProps {
   className?: string;
@@ -52,6 +59,8 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
 }) => {
   const { t } = useTranslation();
   const [copied, setCopied] = React.useState(false);
+  const queryClient = useQueryClient();
+  const poolQueryKey = ["codex-account-pool-policy"];
 
   const {
     accounts,
@@ -71,6 +80,33 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
     cancelAuth,
     logout,
   } = useCodexOauth();
+
+  const { data: poolPolicy } = useQuery({
+    queryKey: poolQueryKey,
+    queryFn: authApi.getCodexAccountPoolPolicy,
+  });
+  const poolMutation = useMutation({
+    mutationFn: authApi.setCodexAccountPoolPolicy,
+    onMutate: async (policy) => {
+      await queryClient.cancelQueries({ queryKey: poolQueryKey });
+      queryClient.setQueryData(poolQueryKey, policy);
+    },
+    onSettled: () => queryClient.invalidateQueries({ queryKey: poolQueryKey }),
+  });
+
+  const updatePool = (transform: (policy: CodexAccountPoolPolicy) => CodexAccountPoolPolicy) => {
+    if (poolPolicy) poolMutation.mutate(transform(poolPolicy));
+  };
+
+  const movePoolEntry = (index: number, delta: number) => {
+    updatePool((policy) => {
+      const target = index + delta;
+      if (target < 0 || target >= policy.entries.length) return policy;
+      const entries = [...policy.entries];
+      [entries[index], entries[target]] = [entries[target], entries[index]];
+      return { ...policy, entries };
+    });
+  };
 
   const copyUserCode = async () => {
     if (deviceCode?.user_code) {
@@ -119,6 +155,84 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
                 "ChatGPT 登录凭据已失效，但账号记录已保留。请重新登录以恢复认证。",
               )
             : authError}
+        </div>
+      )}
+
+      {poolPolicy && (
+        <div className="space-y-3 border-t pt-4">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <Label>ChatGPT 账号自动切换</Label>
+              <p className="mt-1 text-xs text-muted-foreground">
+                按列表顺序选择账号；达到保留额度后停止分配新任务。
+              </p>
+            </div>
+            <Switch
+              checked={poolPolicy.enabled}
+              onCheckedChange={(enabled) =>
+                updatePool((policy) => ({ ...policy, enabled }))
+              }
+              aria-label="ChatGPT 账号自动切换"
+            />
+          </div>
+          <div className="space-y-1">
+            {poolPolicy.entries.map((entry, index) => {
+              const account = accounts.find((item) => item.id === entry.accountId);
+              const native = entry.accountId === NATIVE_CODEX_ACCOUNT_ID;
+              return (
+                <div key={entry.accountId} className="flex items-center gap-2 border-b py-2 last:border-b-0">
+                  <span className="w-7 text-center text-xs font-medium text-muted-foreground">P{index + 1}</span>
+                  {native ? <Monitor className="h-4 w-4" /> : <User className="h-4 w-4" />}
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm font-medium">
+                      {native ? "Codex Desktop 当前登录账号" : account?.login ?? entry.accountId}
+                    </div>
+                    <div className="text-xs text-muted-foreground">
+                      剩余低于 {entry.reservePercent}% 时保留
+                    </div>
+                  </div>
+                  <input
+                    type="number"
+                    min={0}
+                    max={100}
+                    step={1}
+                    value={entry.reservePercent}
+                    onChange={(event) => {
+                      const reservePercent = Math.min(100, Math.max(0, Number(event.target.value) || 0));
+                      updatePool((policy) => ({
+                        ...policy,
+                        entries: policy.entries.map((item) =>
+                          item.accountId === entry.accountId ? { ...item, reservePercent } : item,
+                        ),
+                      }));
+                    }}
+                    className="h-8 w-16 rounded-md border bg-background px-2 text-right text-sm"
+                    aria-label={`${native ? "Codex Desktop 当前登录账号" : account?.login ?? entry.accountId} 保留额度`}
+                  />
+                  <span className="text-xs text-muted-foreground">%</span>
+                  <Switch
+                    checked={entry.enabled}
+                    onCheckedChange={(enabled) =>
+                      updatePool((policy) => ({
+                        ...policy,
+                        entries: policy.entries.map((item) =>
+                          item.accountId === entry.accountId ? { ...item, enabled } : item,
+                        ),
+                      }))
+                    }
+                    aria-label={`启用 ${native ? "Codex Desktop 当前登录账号" : account?.login ?? entry.accountId}`}
+                  />
+                  <Button type="button" variant="ghost" size="icon" className="h-7 w-7" disabled={index === 0} onClick={() => movePoolEntry(index, -1)} title="上移">
+                    <ArrowUp className="h-4 w-4" />
+                  </Button>
+                  <Button type="button" variant="ghost" size="icon" className="h-7 w-7" disabled={index === poolPolicy.entries.length - 1} onClick={() => movePoolEntry(index, 1)} title="下移">
+                    <ArrowDown className="h-4 w-4" />
+                  </Button>
+                </div>
+              );
+            })}
+          </div>
+          {poolMutation.isError && <p className="text-xs text-red-500">账号切换策略保存失败：{String(poolMutation.error)}</p>}
         </div>
       )}
 
