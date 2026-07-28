@@ -126,7 +126,8 @@ export interface ProviderTestConfig {
 export type AuthBindingSource =
   | "provider_config"
   | "managed_account"
-  | "managed_codex_oauth";
+  | "managed_codex_oauth"
+  | "native_codex_auth";
 
 export type PromptCacheRoutingMode = "auto" | "enabled" | "disabled";
 
@@ -329,7 +330,8 @@ export interface CodexModelCatalogConfig {
 export type CodexRoutingAuthSource =
   | "provider_config"
   | "managed_account"
-  | "managed_codex_oauth";
+  | "managed_codex_oauth"
+  | "native_codex_auth";
 
 export interface CodexRoutingAuth {
   source: CodexRoutingAuthSource;

@@ -58,6 +58,16 @@ fn validate_codex_official_authorization(headers: &http::HeaderMap) -> Result<()
     }
 }
 
+fn should_passthrough_codex_official_auth(
+    app_type: &AppType,
+    provider: &Provider,
+    headers: &http::HeaderMap,
+) -> bool {
+    matches!(app_type, AppType::Codex)
+        && super::providers::is_codex_official_provider(provider)
+        && !headers.contains_key("x-cc-switch-external-openai-api")
+}
+
 pub struct ForwardResult {
     pub response: ProxyResponse,
     pub provider: Provider,
@@ -1619,8 +1629,8 @@ impl RequestForwarder {
             && super::providers::should_convert_codex_responses_to_messages(provider, endpoint);
         let codex_responses_to_anthropic = matches!(app_type, AppType::Codex)
             && super::providers::should_convert_codex_responses_to_anthropic(provider, endpoint);
-        let codex_official_auth_passthrough = matches!(app_type, AppType::Codex)
-            && super::providers::is_codex_official_provider(provider);
+        let codex_official_auth_passthrough =
+            should_passthrough_codex_official_auth(app_type, provider, headers);
 
         if codex_official_auth_passthrough {
             validate_codex_official_authorization(headers)?;
@@ -5603,6 +5613,40 @@ mod tests {
             icon_color: None,
             in_failover_queue: false,
         }
+    }
+
+    fn test_codex_official_provider() -> Provider {
+        let mut provider = test_provider_with_type(None);
+        provider.id = crate::database::CODEX_OFFICIAL_PROVIDER_ID.to_string();
+        provider.category = Some("official".to_string());
+        provider
+    }
+
+    #[test]
+    fn native_codex_auth_passthrough_is_limited_to_local_codex_requests() {
+        let provider = test_codex_official_provider();
+        let local_headers = HeaderMap::new();
+        assert!(should_passthrough_codex_official_auth(
+            &AppType::Codex,
+            &provider,
+            &local_headers,
+        ));
+
+        let mut external_headers = HeaderMap::new();
+        external_headers.insert(
+            "x-cc-switch-external-openai-api",
+            HeaderValue::from_static("1"),
+        );
+        assert!(!should_passthrough_codex_official_auth(
+            &AppType::Codex,
+            &provider,
+            &external_headers,
+        ));
+        assert!(!should_passthrough_codex_official_auth(
+            &AppType::Claude,
+            &provider,
+            &local_headers,
+        ));
     }
 
     fn test_forwarder(

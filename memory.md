@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-07-28 Codex 当前登录账号路由与 Profile 接管恢复
+
+- 内置 `codex-official` 空 seed 在 MultiRouter 新建 route 时使用 `native_codex_auth`：请求继续经过 CCSM 本地路由，但 Authorization 来自当前 Codex 客户端的登录态，普通 Responses 与 `/responses/compact` 都直达 `chatgpt.com/backend-api/codex`。这等价于 OpenCodex Direct 的账号边界，不是 CCSM 账号池；显式 `accountId` / `managed_codex_oauth` 绑定继续使用 CCSM OAuth manager，已有持久化 route 不自动迁移。
+- `native_codex_auth` 只在 `AppType::Codex` 的本地请求中允许透传。带 `x-cc-switch-external-openai-api` 的 External Agent API 请求不得借用本机 Codex 登录，也不得把外部 Bearer token 当 ChatGPT Codex token 转发；该边界由 `should_passthrough_codex_official_auth` 集中判断并有单测。
+- Profile 同 Provider ID 切换的根因是 apply 先无条件关闭 takeover，随后因 `current_provider_id == target_provider_id` 跳过 Provider switch，导致同一 MultiRouter 的新 Profile 永久失去接管。`80a124fa` 在目标 Codex Provider 需要本地代理时，即使 ID 相同也重新执行 switch，恢复 takeover；`codex_profile_reapplies_same_multirouter_after_takeover_cleanup` 覆盖该路径。
+- 验证基线：MultiRouter 向导同时覆盖内置 official seed 的 `native_codex_auth` 与显式账号的 `managed_codex_oauth`；Rust 覆盖 native official compact URL、无 CCSM OAuth 凭据读取、External API 隔离；Codex provider 119 tests 与 Profile 8 tests 通过。
+
 ## 2026-07-28 Upstream v3.17.0 Merge Into CCSwitchMulti
 
 - CCSwitchMulti 从 `2bbe8d20` 合并上游 `farion1231/cc-switch` 的 `3d176b98`（tag `v3.17.0`），版本统一为 `3.17.0-1`，保留 `cc-switch-multi`、`CCSwitchMulti` 和 `com.ccswitchmulti.desktop` 品牌标识。

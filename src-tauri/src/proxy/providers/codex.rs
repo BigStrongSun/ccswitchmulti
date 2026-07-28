@@ -20,6 +20,7 @@ const CODEX_ROUTER_PARENT_PROVIDER_ID: &str = "codexRouterParentProviderId";
 const CODEX_ROUTER_PARENT_PROVIDER_NAME: &str = "codexRouterParentProviderName";
 const CODEX_RESOLVED_TARGET_PROVIDER_ID: &str = "codexResolvedTargetProviderId";
 const CODEX_RESOLVED_UPSTREAM_MODEL_OVERRIDE: &str = "codexResolvedUpstreamModelOverride";
+const CODEX_NATIVE_AUTH_PASSTHROUGH: &str = "codexNativeAuthPassthrough";
 const QWEN_VLLM_MIN_OUTPUT_TOKENS: u64 = 2_048;
 const RETIRED_QWEN_VLLM_DEFAULT_OUTPUT_TOKENS: u64 = 32_768;
 
@@ -311,16 +312,36 @@ pub fn materialize_codex_routed_provider_from_target(
         );
     }
 
-    let managed_codex_oauth =
-        should_treat_target_as_managed_codex_oauth(route_provider, target_provider, &materialized);
-    if managed_codex_oauth {
+    let native_codex_auth = route_provider
+        .settings_config
+        .get(CODEX_NATIVE_AUTH_PASSTHROUGH)
+        .and_then(JsonValue::as_bool)
+        .unwrap_or(false);
+    let managed_codex_oauth = !native_codex_auth
+        && should_treat_target_as_managed_codex_oauth(
+            route_provider,
+            target_provider,
+            &materialized,
+        );
+    if managed_codex_oauth || native_codex_auth {
         sanitize_materialized_managed_codex_oauth_settings(&mut settings);
+    }
+    if native_codex_auth {
+        settings.insert(
+            CODEX_NATIVE_AUTH_PASSTHROUGH.to_string(),
+            JsonValue::Bool(true),
+        );
+        settings.remove("auth");
     }
 
     materialized.settings_config = JsonValue::Object(settings);
     if managed_codex_oauth {
         let meta = materialized.meta.get_or_insert_with(ProviderMeta::default);
         meta.provider_type = Some("codex_oauth".to_string());
+    } else if native_codex_auth {
+        let meta = materialized.meta.get_or_insert_with(ProviderMeta::default);
+        meta.provider_type = None;
+        meta.api_format = Some("openai_responses".to_string());
     } else if let Some(api_format) = route_provider
         .meta
         .as_ref()
@@ -1051,6 +1072,17 @@ fn apply_codex_route_auth(
         .and_then(|value| value.as_str())
         .map(str::trim);
 
+    if auth_source == Some("native_codex_auth") {
+        settings.remove("auth");
+        settings.remove("apiKey");
+        settings.remove("api_key");
+        settings.insert(
+            CODEX_NATIVE_AUTH_PASSTHROUGH.to_string(),
+            JsonValue::Bool(true),
+        );
+        return;
+    }
+
     if let Some(auth) = upstream.get("auth").or_else(|| route.get("auth")) {
         let mut should_insert_auth = true;
         if let Some(source) = auth_source {
@@ -1315,8 +1347,13 @@ pub fn should_convert_codex_responses_to_anthropic(provider: &Provider, endpoint
 /// providers used by Claude, this route receives authentication from the
 /// calling Codex client (`requires_openai_auth = true`).
 pub fn is_codex_official_provider(provider: &Provider) -> bool {
-    provider.id == crate::database::CODEX_OFFICIAL_PROVIDER_ID
-        && provider.category.as_deref() == Some("official")
+    provider.category.as_deref() == Some("official")
+        && (provider.id == crate::database::CODEX_OFFICIAL_PROVIDER_ID
+            || provider
+                .settings_config
+                .get(CODEX_NATIVE_AUTH_PASSTHROUGH)
+                .and_then(JsonValue::as_bool)
+                .unwrap_or(false))
 }
 
 /// Resolve the model-catalog tool profile for a Codex provider using the SAME
@@ -4048,6 +4085,74 @@ wire_api = "anthropic"
         assert_eq!(
             compact_url,
             "https://chatgpt.com/backend-api/codex/responses/compact?conversation=1"
+        );
+    }
+
+    #[test]
+    fn multirouter_native_official_route_uses_codex_current_login_for_compact() {
+        let router = Provider::with_id(
+            "router".to_string(),
+            "Router".to_string(),
+            json!({
+                "codexRouting": {
+                    "enabled": true,
+                    "routes": [{
+                        "id": "official",
+                        "enabled": true,
+                        "targetProviderId": "codex-official",
+                        "match": { "models": ["gpt-5.6"] },
+                        "upstream": {
+                            "apiFormat": "openai_responses",
+                            "auth": { "source": "native_codex_auth" }
+                        }
+                    }]
+                }
+            }),
+            None,
+        );
+        let route = &router.settings_config["codexRouting"]["routes"][0];
+        let routed = build_codex_route_probe_provider(&router, route, None);
+        let mut official = Provider::with_id(
+            "codex-official".to_string(),
+            "OpenAI Official".to_string(),
+            json!({ "auth": {}, "config": "" }),
+            None,
+        );
+        official.category = Some("official".to_string());
+
+        let effective = materialize_codex_routed_provider_from_target(&routed, &official);
+        assert!(is_codex_official_provider(&effective));
+        assert_eq!(
+            effective
+                .settings_config
+                .get(CODEX_NATIVE_AUTH_PASSTHROUGH)
+                .and_then(JsonValue::as_bool),
+            Some(true)
+        );
+        assert_ne!(
+            effective
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.provider_type.as_deref()),
+            Some("codex_oauth")
+        );
+        assert_eq!(
+            explain_codex_responses_upstream_protocol(&effective).protocol,
+            CodexResponsesUpstreamProtocol::Responses
+        );
+        let adapter = CodexAdapter::new();
+        assert_eq!(
+            adapter.build_url(
+                &adapter
+                    .extract_base_url(&effective)
+                    .expect("official base URL"),
+                "/v1/responses/compact?conversation=1",
+            ),
+            "https://chatgpt.com/backend-api/codex/responses/compact?conversation=1"
+        );
+        assert!(
+            adapter.extract_auth(&effective).is_none(),
+            "native route must not ask the CCSM OAuth manager for credentials"
         );
     }
 

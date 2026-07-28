@@ -146,6 +146,34 @@ function isOfficialCodexSource(provider: Provider): boolean {
   return isWizardCodexOAuthSource(provider);
 }
 
+// The built-in official seed represents Codex's currently signed-in account.
+// Explicit managed-account metadata keeps using CCSM's OAuth manager instead.
+function isWizardNativeCodexAuthSource(provider: Provider): boolean {
+  if (provider.id !== "codex-official" || provider.category !== "official") {
+    return false;
+  }
+  const config = provider.settingsConfig ?? {};
+  const meta = provider.meta ?? {};
+  const legacyMeta = meta as typeof meta & {
+    auth_binding?: { source?: string; accountId?: string; account_id?: string };
+  };
+  const binding = (meta.authBinding ?? legacyMeta.auth_binding) as
+    | { source?: string; accountId?: string; account_id?: string }
+    | undefined;
+  const source = String(binding?.source ?? config.auth?.source ?? "").toLowerCase();
+  const accountId =
+    binding?.accountId ?? binding?.account_id ?? readWizardCodexOAuthAccountId(provider);
+  const authMode = String(config.auth?.auth_mode ?? "").toLowerCase();
+  const providerType = String(meta.providerType ?? config.providerType ?? "").toLowerCase();
+  return (
+    !accountId &&
+    authMode !== "chatgpt" &&
+    !providerType.includes("codex_oauth") &&
+    source !== "managed_account" &&
+    source !== "managed_codex_oauth"
+  );
+}
+
 // 读取 Codex provider 的真实持久化模型目录；缺失或结构异常时返回空目录，不能伪造 OAuth 模型权限。
 export function readWizardModelCatalog(
   provider: Provider,
@@ -841,7 +869,9 @@ export function buildWizardRoutesFromSources(
       },
       upstream: {
         apiFormat: inferWizardApiFormat(provider),
-        auth: isWizardCodexOAuthSource(provider)
+        auth: isWizardNativeCodexAuthSource(provider)
+          ? { source: "native_codex_auth" }
+          : isWizardCodexOAuthSource(provider)
           ? {
               source: "managed_codex_oauth",
               authProvider: "codex_oauth",

@@ -1789,6 +1789,8 @@ function authSourceLabel(source?: string): string {
   switch (source) {
     case "managed_codex_oauth":
       return "托管 Codex OAuth";
+    case "native_codex_auth":
+      return "Codex 当前登录账号";
     case "managed_account":
       return "托管账号";
     case "provider_config":

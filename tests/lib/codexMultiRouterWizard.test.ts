@@ -640,6 +640,22 @@ describe("codexMultiRouterWizard helpers", () => {
     });
   });
 
+  it("uses the current Codex login for the built-in official seed", () => {
+    const official = provider({
+      id: "codex-official",
+      name: "OpenAI Official",
+      category: "official",
+      settingsConfig: {
+        auth: {},
+        config: "",
+        modelCatalog: { models: [{ model: "gpt-5.6" }] },
+      },
+    });
+
+    const [route] = buildWizardRoutesFromSources([official]);
+    expect(route.upstream.auth).toEqual({ source: "native_codex_auth" });
+  });
+
   it("uses the inference API Key as AgentPlan model-fetch fallback when AK/SK is missing", () => {
     const agentPlan = provider({
       id: "ark-agentplan",
