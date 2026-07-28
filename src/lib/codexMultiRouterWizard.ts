@@ -3,7 +3,9 @@ import type {
   CodexCacheConfig,
   CodexCatalogModel,
   CodexModelCatalogConfig,
+  CodexOfficialAuthConfig,
   CodexRoutingConfig,
+  CodexRoutingAuth,
   CodexRoutingRoute,
   Provider,
 } from "@/types";
@@ -41,6 +43,7 @@ export interface WizardPlanBuildOptions {
   planName?: string;
   catalogModelOrder?: string[];
   spawnAgentModels?: string[];
+  officialAuth?: CodexOfficialAuthConfig;
 }
 
 export interface WizardConfigIssue {
@@ -160,11 +163,17 @@ function isWizardNativeCodexAuthSource(provider: Provider): boolean {
   const binding = (meta.authBinding ?? legacyMeta.auth_binding) as
     | { source?: string; accountId?: string; account_id?: string }
     | undefined;
-  const source = String(binding?.source ?? config.auth?.source ?? "").toLowerCase();
+  const source = String(
+    binding?.source ?? config.auth?.source ?? "",
+  ).toLowerCase();
   const accountId =
-    binding?.accountId ?? binding?.account_id ?? readWizardCodexOAuthAccountId(provider);
+    binding?.accountId ??
+    binding?.account_id ??
+    readWizardCodexOAuthAccountId(provider);
   const authMode = String(config.auth?.auth_mode ?? "").toLowerCase();
-  const providerType = String(meta.providerType ?? config.providerType ?? "").toLowerCase();
+  const providerType = String(
+    meta.providerType ?? config.providerType ?? "",
+  ).toLowerCase();
   return (
     !accountId &&
     authMode !== "chatgpt" &&
@@ -199,6 +208,65 @@ export function isCodexMultiRouterPlan(provider: Provider): boolean {
       typeof routing === "object" &&
       (routing.enabled !== false || Array.isArray(routing.routes)),
   );
+}
+
+export const DEFAULT_CODEX_OFFICIAL_AUTH: CodexOfficialAuthConfig = {
+  mode: "desktop_current_login",
+};
+
+export function codexOfficialAuthRouteBinding(
+  officialAuth: CodexOfficialAuthConfig,
+): CodexRoutingAuth {
+  switch (officialAuth.mode) {
+    case "managed_oauth":
+      return {
+        source: "managed_codex_oauth",
+        authProvider: "codex_oauth",
+        ...(officialAuth.accountId
+          ? { accountId: officialAuth.accountId }
+          : {}),
+      };
+    case "account_pool":
+      return { source: "account_pool" };
+    case "desktop_current_login":
+    default:
+      return { source: "native_codex_auth" };
+  }
+}
+
+function officialAuthFromRoute(
+  route: CodexRoutingRoute,
+): CodexOfficialAuthConfig | undefined {
+  switch (route.upstream?.auth?.source) {
+    case "native_codex_auth":
+      return { mode: "desktop_current_login" };
+    case "managed_account":
+    case "managed_codex_oauth":
+      return {
+        mode: "managed_oauth",
+        ...(route.upstream.auth.accountId
+          ? { accountId: route.upstream.auth.accountId }
+          : {}),
+      };
+    case "account_pool":
+      return { mode: "account_pool" };
+    default:
+      return undefined;
+  }
+}
+
+export function inferCodexOfficialAuth(
+  routing?: CodexRoutingConfig | null,
+): CodexOfficialAuthConfig | undefined {
+  if (routing?.officialAuth) return routing.officialAuth;
+  const inferred = (routing?.routes ?? [])
+    .map(officialAuthFromRoute)
+    .filter((auth): auth is CodexOfficialAuthConfig => Boolean(auth));
+  if (inferred.length === 0) return undefined;
+  const first = JSON.stringify(inferred[0]);
+  return inferred.every((auth) => JSON.stringify(auth) === first)
+    ? inferred[0]
+    : undefined;
 }
 
 // 从 Codex provider 配置里读取模型列表/连通性探测可用的推理 API Key。
@@ -357,9 +425,7 @@ export function mergeFetchedModelsIntoWizardProvider(
         : {}),
       ...(fetched.inputModalities && fetched.inputModalities.length > 0
         ? {
-            inputModalities: fetched.inputModalities as Array<
-              "text" | "image"
-            >,
+            inputModalities: fetched.inputModalities as Array<"text" | "image">,
             input_modalities: fetched.inputModalities as Array<
               "text" | "image"
             >,
@@ -851,6 +917,7 @@ export function filterWizardProvidersByModelOrder(
 // 为模型源生成 provider 分组 route；只引用 targetProviderId，不复制第三方 bearer 密钥。
 export function buildWizardRoutesFromSources(
   providers: Provider[],
+  officialAuth?: CodexOfficialAuthConfig,
 ): CodexRoutingRoute[] {
   return providers.map((provider) => {
     const models = readWizardModelCatalog(provider).map((model) => model.model);
@@ -869,15 +936,18 @@ export function buildWizardRoutesFromSources(
       },
       upstream: {
         apiFormat: inferWizardApiFormat(provider),
-        auth: isWizardNativeCodexAuthSource(provider)
-          ? { source: "native_codex_auth" }
-          : isWizardCodexOAuthSource(provider)
-          ? {
-              source: "managed_codex_oauth",
-              authProvider: "codex_oauth",
-              ...(oauthAccountId ? { accountId: oauthAccountId } : {}),
-            }
-          : { source: "provider_config" },
+        auth:
+          officialAuth && isWizardCodexOAuthSource(provider)
+            ? codexOfficialAuthRouteBinding(officialAuth)
+            : isWizardNativeCodexAuthSource(provider)
+              ? { source: "native_codex_auth" }
+              : isWizardCodexOAuthSource(provider)
+                ? {
+                    source: "managed_codex_oauth",
+                    authProvider: "codex_oauth",
+                    ...(oauthAccountId ? { accountId: oauthAccountId } : {}),
+                  }
+                : { source: "provider_config" },
         ...(modelMap ? { modelMap } : {}),
       },
       capabilities: {
@@ -993,10 +1063,18 @@ export function buildCodexMultiRouterWizardPlan(
     resolveWizardModelNameCollisions(sourceProviders),
     options.catalogModelOrder,
   );
-  const routes = buildWizardRoutesFromSources(resolvedSources);
+  const existingRouting = existingPlan?.settingsConfig?.codexRouting as
+    | CodexRoutingConfig
+    | undefined;
+  const officialAuth =
+    options.officialAuth ??
+    inferCodexOfficialAuth(existingRouting) ??
+    DEFAULT_CODEX_OFFICIAL_AUTH;
+  const routes = buildWizardRoutesFromSources(resolvedSources, officialAuth);
   const routing: CodexRoutingConfig = {
     enabled: true,
     defaultRouteId: routes[0]?.id,
+    officialAuth,
     routes,
   };
   const existingIds = new Set(allProviders.map((provider) => provider.id));

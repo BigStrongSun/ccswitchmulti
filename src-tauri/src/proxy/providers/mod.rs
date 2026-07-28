@@ -65,7 +65,9 @@ pub use codex::{
     should_convert_codex_responses_to_anthropic, should_convert_codex_responses_to_chat,
     should_convert_codex_responses_to_messages,
 };
-pub(crate) use codex::{is_codex_remote_compact_endpoint, is_codex_responses_endpoint};
+pub(crate) use codex::{
+    is_codex_remote_compact_endpoint, is_codex_responses_endpoint, CODEX_ACCOUNT_POOL_ENABLED,
+};
 pub use gemini::GeminiAdapter;
 
 /// 供应商类型枚举

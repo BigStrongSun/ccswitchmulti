@@ -26,6 +26,7 @@ use crate::commands::{CodexOAuthState, CopilotAuthState};
 use crate::proxy::providers::codex_oauth_auth::CodexOAuthManager;
 use crate::proxy::providers::codex_oauth_auth::NATIVE_CODEX_ACCOUNT_ID;
 use crate::proxy::providers::copilot_auth::CopilotAuthManager;
+use crate::proxy::providers::CODEX_ACCOUNT_POOL_ENABLED;
 use crate::{
     app_config::AppType,
     provider::{LocalProxyRequestOverrides, Provider},
@@ -169,6 +170,14 @@ pub struct RequestForwarder {
     max_attempts: usize,
 }
 
+fn provider_requests_codex_account_pool(provider: &Provider) -> bool {
+    provider
+        .settings_config
+        .get(CODEX_ACCOUNT_POOL_ENABLED)
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 impl RequestForwarder {
     async fn expand_codex_account_pool(
         &self,
@@ -178,6 +187,7 @@ impl RequestForwarder {
     ) -> Vec<Provider> {
         if !matches!(app_type, AppType::Codex)
             || headers.contains_key("x-cc-switch-external-openai-api")
+            || !providers.iter().any(provider_requests_codex_account_pool)
         {
             return providers;
         }
@@ -188,6 +198,7 @@ impl RequestForwarder {
         let manager = state.0.read().await;
         let policy = manager.account_pool_policy().await;
         if !policy.enabled {
+            log::warn!("[CodexOAuthPool] 当前 Router 选择了 OAuth 账号池，但全局账号池未启用");
             return providers;
         }
         let native_token = headers
@@ -255,15 +266,21 @@ impl RequestForwarder {
             .await;
         let mut expanded = Vec::new();
         for provider in providers {
-            if !super::providers::is_codex_official_provider(&provider) {
+            if !provider_requests_codex_account_pool(&provider) {
                 expanded.push(provider);
                 continue;
             }
             for entry in &entries {
                 let mut candidate = provider.clone();
                 if entry.account_id == NATIVE_CODEX_ACCOUNT_ID {
+                    candidate.settings_config["codexNativeAuthPassthrough"] = Value::Bool(true);
                     candidate.settings_config["codexPoolAccountId"] =
                         Value::String(NATIVE_CODEX_ACCOUNT_ID.to_string());
+                    if let Some(meta) = candidate.meta.as_mut() {
+                        meta.provider_type = None;
+                        meta.auth_binding = None;
+                        meta.api_format = Some("openai_responses".to_string());
+                    }
                 } else {
                     candidate.settings_config["codexNativeAuthPassthrough"] = Value::Bool(false);
                     candidate.settings_config["codexPoolAccountId"] =
@@ -5785,6 +5802,16 @@ mod tests {
         provider.id = crate::database::CODEX_OFFICIAL_PROVIDER_ID.to_string();
         provider.category = Some("official".to_string());
         provider
+    }
+
+    #[test]
+    fn codex_account_pool_requires_an_explicit_router_marker() {
+        let native = test_codex_official_provider();
+        assert!(!provider_requests_codex_account_pool(&native));
+
+        let mut pooled = test_codex_official_provider();
+        pooled.settings_config[CODEX_ACCOUNT_POOL_ENABLED] = Value::Bool(true);
+        assert!(provider_requests_codex_account_pool(&pooled));
     }
 
     #[test]

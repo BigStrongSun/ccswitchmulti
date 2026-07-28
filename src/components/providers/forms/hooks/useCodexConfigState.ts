@@ -112,6 +112,10 @@ export function extractCodexRoutingConfig(
         typeof routing.defaultRouteId === "string"
           ? routing.defaultRouteId
           : "",
+      officialAuth:
+        routing.officialAuth && typeof routing.officialAuth === "object"
+          ? routing.officialAuth
+          : undefined,
       routes: Array.isArray(routing.routes) ? routing.routes : [],
     };
   }

@@ -27,4 +27,22 @@ describe("extractCodexRoutingConfig", () => {
     expect(routes[0].match.models).toEqual(["gpt-5.5"]);
     expect(routes[1].match.prefixes).toEqual(["deepseek-"]);
   });
+
+  it("preserves the Router-level official authentication policy", () => {
+    const routing = extractCodexRoutingConfig({
+      codexRouting: {
+        enabled: true,
+        officialAuth: {
+          mode: "managed_oauth",
+          accountId: "acct-1",
+        },
+        routes: [],
+      },
+    });
+
+    expect(routing.officialAuth).toEqual({
+      mode: "managed_oauth",
+      accountId: "acct-1",
+    });
+  });
 });

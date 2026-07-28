@@ -331,11 +331,22 @@ export type CodexRoutingAuthSource =
   | "provider_config"
   | "managed_account"
   | "managed_codex_oauth"
-  | "native_codex_auth";
+  | "native_codex_auth"
+  | "account_pool";
 
 export interface CodexRoutingAuth {
   source: CodexRoutingAuthSource;
   authProvider?: "codex_oauth";
+  accountId?: string;
+}
+
+export type CodexOfficialAuthMode =
+  | "desktop_current_login"
+  | "managed_oauth"
+  | "account_pool";
+
+export interface CodexOfficialAuthConfig {
+  mode: CodexOfficialAuthMode;
   accountId?: string;
 }
 
@@ -368,6 +379,7 @@ export interface CodexRoutingRoute {
 export interface CodexRoutingConfig {
   enabled?: boolean;
   defaultRouteId?: string;
+  officialAuth?: CodexOfficialAuthConfig;
   routes?: CodexRoutingRoute[];
 }
 

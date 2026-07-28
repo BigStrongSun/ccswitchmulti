@@ -24,6 +24,8 @@ import type {
   CodexApiFormat,
   CodexCacheConfig,
   CodexCatalogModel,
+  CodexOfficialAuthConfig,
+  CodexOfficialAuthMode,
   CodexRoutingRoute,
 } from "@/types";
 import { Button } from "@/components/ui/button";
@@ -55,6 +57,7 @@ import {
 import {
   CODEX_MULTI_ROUTER_DEFAULT_NAME,
   CODEX_MULTI_ROUTER_WIZARD_DISMISSED_KEY,
+  DEFAULT_CODEX_OFFICIAL_AUTH,
   applyWizardConnectivityApiFormatOverrides,
   buildCodexMultiRouterWizardPlan,
   buildWizardModelCatalog,
@@ -71,6 +74,7 @@ import {
   isWizardCodexOAuthSource,
   isWizardVolcengineAgentPlanModelSource,
   inferWizardApiFormat,
+  inferCodexOfficialAuth,
   isCodexMultiRouterPlan,
   mergeFetchedModelsIntoWizardProvider,
   readWizardCodexOAuthAccountId,
@@ -920,6 +924,8 @@ export function CodexMultiRouterWizard({
   const [draftPlanName, setDraftPlanName] = useState(
     CODEX_MULTI_ROUTER_DEFAULT_NAME,
   );
+  const [draftOfficialAuth, setDraftOfficialAuth] =
+    useState<CodexOfficialAuthConfig>(DEFAULT_CODEX_OFFICIAL_AUTH);
   const [catalogModelOrder, setCatalogModelOrder] = useState<string[] | null>(
     null,
   );
@@ -1028,6 +1034,10 @@ export function CodexMultiRouterWizard({
     setDraftSources(providerModelSources);
     setSelectedSourceIds(providerModelSources.map((provider) => provider.id));
     setDraftPlanName(existingPlan?.name ?? CODEX_MULTI_ROUTER_DEFAULT_NAME);
+    setDraftOfficialAuth(
+      inferCodexOfficialAuth(existingPlan?.settingsConfig?.codexRouting) ??
+        DEFAULT_CODEX_OFFICIAL_AUTH,
+    );
     // 复用统一的安全目录读取，历史方案中混入 null/原始值时不能让整个窗口白屏。
     setCatalogModelOrder(
       existingPlan
@@ -1784,6 +1794,7 @@ export function CodexMultiRouterWizard({
           planName: draftPlanName,
           catalogModelOrder: activeCatalogModelOrder,
           spawnAgentModels: activeSpawnAgentModels,
+          officialAuth: draftOfficialAuth,
         },
       );
       if (existingPlan) {
@@ -1850,6 +1861,7 @@ export function CodexMultiRouterWizard({
       planName: draftPlanName,
       catalogModelOrder: activeCatalogModelOrder,
       spawnAgentModels: activeSpawnAgentModels,
+      officialAuth: draftOfficialAuth,
     },
   ).plan;
   const previewRoutes = (planPreview.settingsConfig.codexRouting?.routes ??
@@ -2495,6 +2507,92 @@ export function CodexMultiRouterWizard({
 
             {currentStep.key === "routes" && (
               <div className="space-y-3">
+                <div className="grid gap-3 rounded-lg border bg-muted/30 p-4 md:grid-cols-2">
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">
+                      官方 ChatGPT 认证方式
+                    </label>
+                    <Select
+                      value={draftOfficialAuth.mode}
+                      onValueChange={(value) =>
+                        setDraftOfficialAuth({
+                          mode: value as CodexOfficialAuthMode,
+                        })
+                      }
+                    >
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="desktop_current_login">
+                          Codex Desktop 当前登录
+                        </SelectItem>
+                        <SelectItem value="managed_oauth">
+                          CCSM OAuth
+                        </SelectItem>
+                        <SelectItem value="account_pool">
+                          OAuth 账号池
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  {draftOfficialAuth.mode === "managed_oauth" ? (
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">
+                        CCSM OAuth 账号
+                      </label>
+                      <Select
+                        value={draftOfficialAuth.accountId ?? "__default__"}
+                        onValueChange={(value) =>
+                          setDraftOfficialAuth({
+                            mode: "managed_oauth",
+                            ...(value !== "__default__"
+                              ? { accountId: value }
+                              : {}),
+                          })
+                        }
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="__default__">
+                            CCSM 默认账号
+                          </SelectItem>
+                          {draftOfficialAuth.accountId &&
+                          !codexOauthAccounts.some(
+                            (account) =>
+                              account.id === draftOfficialAuth.accountId,
+                          ) ? (
+                            <SelectItem value={draftOfficialAuth.accountId}>
+                              已保存账号 ({draftOfficialAuth.accountId})
+                            </SelectItem>
+                          ) : null}
+                          {codexOauthAccounts.map((account) => (
+                            <SelectItem key={account.id} value={account.id}>
+                              {account.login}
+                              {account.is_default ? "（默认）" : ""}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  ) : null}
+                  <div className="text-xs leading-5 text-muted-foreground md:col-span-2">
+                    {draftOfficialAuth.mode === "account_pool"
+                      ? "这个 MultiRouter 会按设置 > OAuth 中已启用账号池的顺序、保留额度和冷却状态选择账号。"
+                      : draftOfficialAuth.mode === "managed_oauth"
+                        ? "官方 route 使用 CCSM 保存的 OAuth 账号。"
+                        : "官方 route 复用 Codex Desktop 当前登录。三种方式都通过 CCSM 的 HTTP Responses 接管链路，WebSocket 不参与选路。"}
+                  </div>
+                  {existingPlan &&
+                  !existingPlan.settingsConfig?.codexRouting?.officialAuth ? (
+                    <div className="rounded-md border border-amber-300 bg-amber-50 p-2 text-xs leading-5 text-amber-900 dark:border-amber-700/60 dark:bg-amber-950/30 dark:text-amber-100 md:col-span-2">
+                      这是升级前的方案，当前选择由原 route
+                      绑定推断。只有点击“保存并发布”后才会写入 Router 级策略。
+                    </div>
+                  ) : null}
+                </div>
                 {previewRoutes.map((route) => (
                   <div key={route.id} className="rounded-lg border p-4">
                     <div className="flex items-center justify-between gap-3">
@@ -2506,6 +2604,17 @@ export function CodexMultiRouterWizard({
                     <div className="mt-2 text-sm text-muted-foreground">
                       模型 {route.match.models?.length ?? 0} 个；前缀{" "}
                       {(route.match.prefixes ?? []).join(", ") || "无"}
+                    </div>
+                    <div className="mt-2 text-xs leading-5 text-muted-foreground">
+                      认证：
+                      {route.upstream.auth.source === "native_codex_auth"
+                        ? "Codex Desktop 当前登录"
+                        : route.upstream.auth.source === "account_pool"
+                          ? "OAuth 账号池"
+                          : route.upstream.auth.source === "managed_codex_oauth"
+                            ? "CCSM OAuth"
+                            : "模型源凭据"}
+                      ；客户端传输：HTTP Responses
                     </div>
                     <div className="mt-2 rounded-md bg-muted px-3 py-2 text-xs leading-5 text-muted-foreground">
                       {cacheCapabilitySummary(route.capabilities?.codexCache)}

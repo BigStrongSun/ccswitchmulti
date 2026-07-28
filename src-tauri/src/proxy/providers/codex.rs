@@ -21,6 +21,7 @@ const CODEX_ROUTER_PARENT_PROVIDER_NAME: &str = "codexRouterParentProviderName";
 const CODEX_RESOLVED_TARGET_PROVIDER_ID: &str = "codexResolvedTargetProviderId";
 const CODEX_RESOLVED_UPSTREAM_MODEL_OVERRIDE: &str = "codexResolvedUpstreamModelOverride";
 const CODEX_NATIVE_AUTH_PASSTHROUGH: &str = "codexNativeAuthPassthrough";
+pub(crate) const CODEX_ACCOUNT_POOL_ENABLED: &str = "codexAccountPoolEnabled";
 const QWEN_VLLM_MIN_OUTPUT_TOKENS: u64 = 2_048;
 const RETIRED_QWEN_VLLM_DEFAULT_OUTPUT_TOKENS: u64 = 32_768;
 
@@ -280,6 +281,7 @@ pub fn materialize_codex_routed_provider_from_target(
         CODEX_ROUTER_PARENT_PROVIDER_ID,
         CODEX_ROUTER_PARENT_PROVIDER_NAME,
         CODEX_RESOLVED_TARGET_PROVIDER_ID,
+        CODEX_ACCOUNT_POOL_ENABLED,
         "apiFormat",
         "api_format",
     ] {
@@ -317,14 +319,25 @@ pub fn materialize_codex_routed_provider_from_target(
         .get(CODEX_NATIVE_AUTH_PASSTHROUGH)
         .and_then(JsonValue::as_bool)
         .unwrap_or(false);
+    let account_pool = route_provider
+        .settings_config
+        .get(CODEX_ACCOUNT_POOL_ENABLED)
+        .and_then(JsonValue::as_bool)
+        .unwrap_or(false);
     let managed_codex_oauth = !native_codex_auth
+        && !account_pool
         && should_treat_target_as_managed_codex_oauth(
             route_provider,
             target_provider,
             &materialized,
         );
-    if managed_codex_oauth || native_codex_auth {
+    if managed_codex_oauth || native_codex_auth || account_pool {
         sanitize_materialized_managed_codex_oauth_settings(&mut settings);
+    }
+    if account_pool {
+        settings.remove("auth");
+        settings.remove("apiKey");
+        settings.remove("api_key");
     }
     if native_codex_auth {
         settings.insert(
@@ -335,7 +348,12 @@ pub fn materialize_codex_routed_provider_from_target(
     }
 
     materialized.settings_config = JsonValue::Object(settings);
-    if managed_codex_oauth {
+    if account_pool {
+        let meta = materialized.meta.get_or_insert_with(ProviderMeta::default);
+        meta.provider_type = None;
+        meta.api_format = Some("openai_responses".to_string());
+        meta.auth_binding = None;
+    } else if managed_codex_oauth {
         let meta = materialized.meta.get_or_insert_with(ProviderMeta::default);
         meta.provider_type = Some("codex_oauth".to_string());
     } else if native_codex_auth {
@@ -882,7 +900,9 @@ fn build_codex_routed_provider(
         );
     }
 
-    if codex_route_uses_managed_codex_oauth(upstream, route) {
+    if codex_route_uses_managed_codex_oauth(upstream, route)
+        || codex_route_uses_account_pool(upstream, route)
+    {
         // 托管 Codex OAuth route 不能继承外层 provider 的 Bearer key，否则会覆盖 managed account 注入链路。
         settings.remove("auth");
         settings.remove("apiKey");
@@ -930,6 +950,10 @@ fn build_codex_routed_provider(
     }
     if codex_route_uses_managed_codex_oauth(upstream, route) {
         meta.provider_type = Some("codex_oauth".to_string());
+    } else if codex_route_uses_account_pool(upstream, route) {
+        meta.provider_type = None;
+        meta.api_format = Some("openai_responses".to_string());
+        meta.auth_binding = None;
     } else if let Some(provider_type) = upstream
         .get("providerType")
         .or_else(|| upstream.get("provider_type"))
@@ -1083,6 +1107,21 @@ fn apply_codex_route_auth(
         return;
     }
 
+    if auth_source == Some("account_pool") {
+        settings.remove("auth");
+        settings.remove("apiKey");
+        settings.remove("api_key");
+        settings.insert(
+            CODEX_ACCOUNT_POOL_ENABLED.to_string(),
+            JsonValue::Bool(true),
+        );
+        settings.insert(
+            CODEX_NATIVE_AUTH_PASSTHROUGH.to_string(),
+            JsonValue::Bool(false),
+        );
+        return;
+    }
+
     if let Some(auth) = upstream.get("auth").or_else(|| route.get("auth")) {
         let mut should_insert_auth = true;
         if let Some(source) = auth_source {
@@ -1146,6 +1185,16 @@ fn codex_route_uses_managed_codex_oauth(upstream: &JsonValue, route: &JsonValue)
         .and_then(|value| value.as_str())
         .map(str::trim)
         .is_some_and(|source| matches!(source, "managed_account" | "managed_codex_oauth"))
+}
+
+fn codex_route_uses_account_pool(upstream: &JsonValue, route: &JsonValue) -> bool {
+    upstream
+        .get("auth")
+        .or_else(|| route.get("auth"))
+        .and_then(|auth| auth.get("source"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        == Some("account_pool")
 }
 
 /// 把 route 内联 auth 声明转换成 ProviderMeta 的托管账号绑定。
@@ -1347,13 +1396,18 @@ pub fn should_convert_codex_responses_to_anthropic(provider: &Provider, endpoint
 /// providers used by Claude, this route receives authentication from the
 /// calling Codex client (`requires_openai_auth = true`).
 pub fn is_codex_official_provider(provider: &Provider) -> bool {
-    provider.category.as_deref() == Some("official")
-        && (provider.id == crate::database::CODEX_OFFICIAL_PROVIDER_ID
-            || provider
-                .settings_config
-                .get(CODEX_NATIVE_AUTH_PASSTHROUGH)
-                .and_then(JsonValue::as_bool)
-                .unwrap_or(false))
+    provider
+        .settings_config
+        .get(CODEX_ACCOUNT_POOL_ENABLED)
+        .and_then(JsonValue::as_bool)
+        .unwrap_or(false)
+        || (provider.category.as_deref() == Some("official")
+            && (provider.id == crate::database::CODEX_OFFICIAL_PROVIDER_ID
+                || provider
+                    .settings_config
+                    .get(CODEX_NATIVE_AUTH_PASSTHROUGH)
+                    .and_then(JsonValue::as_bool)
+                    .unwrap_or(false)))
 }
 
 /// Resolve the model-catalog tool profile for a Codex provider using the SAME
@@ -4153,6 +4207,69 @@ wire_api = "anthropic"
         assert!(
             adapter.extract_auth(&effective).is_none(),
             "native route must not ask the CCSM OAuth manager for credentials"
+        );
+    }
+
+    #[test]
+    fn multirouter_account_pool_route_is_explicit_and_has_no_fixed_auth() {
+        let router = Provider::with_id(
+            "router".to_string(),
+            "Router".to_string(),
+            json!({
+                "codexRouting": {
+                    "enabled": true,
+                    "officialAuth": { "mode": "account_pool" },
+                    "routes": [{
+                        "id": "official",
+                        "enabled": true,
+                        "targetProviderId": "codex-official",
+                        "match": { "models": ["gpt-5.6"] },
+                        "upstream": {
+                            "apiFormat": "openai_responses",
+                            "auth": { "source": "account_pool" }
+                        }
+                    }]
+                }
+            }),
+            None,
+        );
+        let route = &router.settings_config["codexRouting"]["routes"][0];
+        let routed = build_codex_route_probe_provider(&router, route, None);
+        assert_eq!(
+            routed.settings_config[CODEX_ACCOUNT_POOL_ENABLED],
+            JsonValue::Bool(true)
+        );
+        assert_ne!(
+            routed
+                .settings_config
+                .get(CODEX_NATIVE_AUTH_PASSTHROUGH)
+                .and_then(JsonValue::as_bool),
+            Some(true)
+        );
+
+        let mut official = Provider::with_id(
+            "codex-official".to_string(),
+            "OpenAI Official".to_string(),
+            json!({ "auth": {}, "config": "" }),
+            None,
+        );
+        official.category = Some("official".to_string());
+        let effective = materialize_codex_routed_provider_from_target(&routed, &official);
+
+        assert!(is_codex_official_provider(&effective));
+        assert_eq!(
+            effective.settings_config[CODEX_ACCOUNT_POOL_ENABLED],
+            JsonValue::Bool(true)
+        );
+        assert!(effective.settings_config.get("auth").is_none());
+        assert!(effective
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.auth_binding.as_ref())
+            .is_none());
+        assert_eq!(
+            explain_codex_responses_upstream_protocol(&effective).protocol,
+            CodexResponsesUpstreamProtocol::Responses
         );
     }
 

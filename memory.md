@@ -1,11 +1,20 @@
 # CC Switch Repository Memory
 
+## 2026-07-28 MultiRouter 官方认证策略与 HTTP Responses 边界
+
+- 根因：账号池第一版只有 OAuth manager 的全局 `enabled/order/reservePercent`，forwarder 会把任意 official effective provider 展开成账号候选；Router 本身没有声明“Desktop 当前登录 / 固定 CCSM OAuth / OAuth 账号池”，因此全局开关可能改变原本显式使用 `native_codex_auth` 的 Router，旧方案升级后也没有可见迁移入口。
+- 新契约：`codexRouting.officialAuth` 是每个 MultiRouter 的官方认证默认策略，`mode` 取 `desktop_current_login | managed_oauth | account_pool`，固定 CCSM OAuth 可带 `accountId`。单 route 的 `upstream.auth` 仍是最终执行事实；新向导明确展示选择，工作台设置可调整，通用 route 编辑器也支持三种来源。
+- 迁移必须保守：没有 `officialAuth` 的旧 Router 先从 route 显式 `native_codex_auth`、`managed_codex_oauth/managed_account + accountId` 或 `account_pool` 推断展示，未保存前不改数据库；用户保存 Router 设置或向导发布后才写入 Router 策略并只重写官方 route，第三方 `provider_config` route 不受影响。旧固定账号不能静默迁移成 Desktop 当前登录或账号池。
+- 运行时账号池必须双重显式：route 选择 `account_pool` 后物化为 `codexAccountPoolEnabled=true`，forwarder 只展开带这个 request-local 标记的 provider；仅开启全局账号池不再劫持 native/fixed OAuth Router。全局账号池仍负责总开关、顺序、enabled、reserve、额度缓存、session affinity 与 429 cooldown；Router 选择账号池时全局策略也必须启用。
+- 认证和传输是两层：`native_codex_auth` 只表示复用进入 CCSM 的 Codex Desktop Authorization，不表示上游 WebSocket 或绕过 MultiRouter。接管配置固定 `wire_api="responses"`、`supports_websockets=false`，本地 GET `/responses` WebSocket upgrade 返回 426，客户端使用 HTTP Responses；这样 CCSM 能先读取 `response.create.model` 再选 route，也避开国内网络下长连接不稳定。固定 CCSM OAuth 和账号池同样使用这条 HTTP Responses 客户端链路。
+- 回归基线：前端覆盖 Router 策略持久化、旧精确账号推断、账号池 route 生成、只改官方 route 和表单提取；Rust 覆盖 account-pool effective provider 无固定 auth/native passthrough、全局池仅识别显式 marker。`cargo test` 2347 passed / 2 ignored，Vitest 87 files / 648 tests 通过。
+
 ## 2026-07-28 ChatGPT OAuth 账号池配置边界
 
 - reset credit 兑换继续由 OpenAI 官方在周额度耗尽时处理；CCSM 只读取额度与 reset credit 状态，不实现兑换、保留 credit id 或自动消费动作。
 - ChatGPT 账号池配置属于 OAuth manager 的持久化状态，不是前端 local state：稳定项 `native_codex_auth` 表示 Codex Desktop 当前登录账号，其余项按 CCSM OAuth account id 标识。每项包含真实优先级顺序、enabled 和 `reservePercent`，新增/删除账号时通过规范化策略自动补入/清理。
 - UI 放在设置的 Codex OAuth 区域，顺序展示必须与后端调度顺序一致；使用图标上下按钮调整，逐账号设置保留额度阈值。策略总开关默认关闭，升级后不能静默改变既有认证选路。
-- 第一阶段 `f82dfcda` 落持久化策略和 UI；运行时阶段把启用的 official route 按同一顺序展开为账号候选，成功后按 proxy session 粘住账号，429 将账号冷却 60 秒并允许未开始输出的请求尝试下一账号。额度页面启用池时立即刷新，之后每 5 分钟刷新；转发层也按同一 TTL 用只读 `/wham/usage` 轻量探测，正确性不依赖设置页保持打开。多个到期账号必须并发探测，使总等待上限约等于单次 15 秒 timeout，不能串行放大为账号数乘以 timeout。成功快照按所有窗口最高 utilization 计算剩余比例，低于逐账号 `reservePercent` 的账号不进入新候选，查询失败不覆盖上次可信值。External Agent API 不参与池扩展，不能借用 Desktop 或托管 OAuth 账号。
+- 第一阶段 `f82dfcda` 落持久化策略和 UI；后续根修要求只有 Router route 显式选择 `account_pool` 才按同一顺序展开账号候选，普通 official/native/fixed OAuth route 不得受全局开关影响。成功后按 proxy session 粘住账号，429 将账号冷却 60 秒并允许未开始输出的请求尝试下一账号。额度页面启用池时立即刷新，之后每 5 分钟刷新；转发层也按同一 TTL 用只读 `/wham/usage` 轻量探测，正确性不依赖设置页保持打开。多个到期账号必须并发探测，使总等待上限约等于单次 15 秒 timeout，不能串行放大为账号数乘以 timeout。成功快照按所有窗口最高 utilization 计算剩余比例，低于逐账号 `reservePercent` 的账号不进入新候选，查询失败不覆盖上次可信值。External Agent API 不参与池扩展，不能借用 Desktop 或托管 OAuth 账号。
 
 ## 2026-07-28 Codex 当前登录账号路由与 Profile 接管恢复
 

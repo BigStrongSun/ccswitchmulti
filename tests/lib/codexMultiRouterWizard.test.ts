@@ -10,6 +10,7 @@ import {
   defaultWizardModelSources,
   getWizardConfigIssues,
   getWizardModelFetchConfig,
+  inferCodexOfficialAuth,
   inferWizardApiFormat,
   inferWizardCacheConfig,
   isWizardCatalogOnlyModelSource,
@@ -654,6 +655,86 @@ describe("codexMultiRouterWizard helpers", () => {
 
     const [route] = buildWizardRoutesFromSources([official]);
     expect(route.upstream.auth).toEqual({ source: "native_codex_auth" });
+  });
+
+  it("persists an explicit account-pool choice on the Router and official route", () => {
+    const official = provider({
+      id: "codex-official",
+      name: "OpenAI Official",
+      category: "official",
+      settingsConfig: {
+        auth: {},
+        modelCatalog: { models: [{ model: "gpt-5.6" }] },
+      },
+    });
+
+    const { plan } = buildCodexMultiRouterWizardPlan(
+      [official],
+      [official],
+      null,
+      { officialAuth: { mode: "account_pool" } },
+    );
+
+    expect(plan.settingsConfig.codexRouting.officialAuth).toEqual({
+      mode: "account_pool",
+    });
+    expect(plan.settingsConfig.codexRouting.routes[0].upstream.auth).toEqual({
+      source: "account_pool",
+    });
+  });
+
+  it("infers and preserves a legacy Router's exact CCSM OAuth account", () => {
+    const official = provider({
+      id: "codex-official",
+      name: "OpenAI Official",
+      category: "official",
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "gpt-5.6" }] },
+      },
+    });
+    const legacyPlan = provider({
+      id: "legacy-router",
+      name: "Legacy Router",
+      settingsConfig: {
+        codexRouting: {
+          enabled: true,
+          routes: [
+            {
+              id: "official",
+              targetProviderId: "codex-official",
+              match: { models: ["gpt-5.6"] },
+              upstream: {
+                apiFormat: "openai_responses",
+                auth: {
+                  source: "managed_codex_oauth",
+                  authProvider: "codex_oauth",
+                  accountId: "acct-legacy",
+                },
+              },
+            },
+          ],
+        },
+      },
+    });
+
+    expect(
+      inferCodexOfficialAuth(legacyPlan.settingsConfig.codexRouting),
+    ).toEqual({ mode: "managed_oauth", accountId: "acct-legacy" });
+
+    const { plan } = buildCodexMultiRouterWizardPlan(
+      [official, legacyPlan],
+      [official],
+      legacyPlan,
+    );
+    expect(plan.settingsConfig.codexRouting.officialAuth).toEqual({
+      mode: "managed_oauth",
+      accountId: "acct-legacy",
+    });
+    expect(plan.settingsConfig.codexRouting.routes[0].upstream.auth).toEqual({
+      source: "managed_codex_oauth",
+      authProvider: "codex_oauth",
+      accountId: "acct-legacy",
+    });
   });
 
   it("uses the inference API Key as AgentPlan model-fetch fallback when AK/SK is missing", () => {

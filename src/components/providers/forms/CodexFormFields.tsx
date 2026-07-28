@@ -747,6 +747,7 @@ export function CodexFormFields({
     const next: CodexRoutingConfig = {
       enabled: codexRouting.enabled ?? false,
       defaultRouteId: codexRouting.defaultRouteId ?? "",
+      officialAuth: codexRouting.officialAuth,
       routes: routingRows.map(({ rowId: _rowId, ...route }) => route),
     };
     if (JSON.stringify(next) === JSON.stringify(lastSentRoutingRef.current))
@@ -1183,13 +1184,19 @@ export function CodexFormFields({
       const next: CodexRoutingConfig = {
         enabled: codexRouting.enabled ?? false,
         defaultRouteId: codexRouting.defaultRouteId ?? "",
+        officialAuth: codexRouting.officialAuth,
         ...patch,
         routes: rows.map(({ rowId: _rowId, ...route }) => route),
       };
       lastSentRoutingRef.current = next;
       onCodexRoutingChange(next);
     },
-    [codexRouting.defaultRouteId, codexRouting.enabled, onCodexRoutingChange],
+    [
+      codexRouting.defaultRouteId,
+      codexRouting.enabled,
+      codexRouting.officialAuth,
+      onCodexRoutingChange,
+    ],
   );
 
   const handleRoutingEnabledChange = useCallback(
@@ -1808,6 +1815,10 @@ export function CodexFormFields({
                     <SelectItem value="managed_codex_oauth">
                       托管 Codex OAuth
                     </SelectItem>
+                    <SelectItem value="native_codex_auth">
+                      Codex Desktop 当前登录
+                    </SelectItem>
+                    <SelectItem value="account_pool">OAuth 账号池</SelectItem>
                     <SelectItem value="managed_account">托管账号</SelectItem>
                   </SelectContent>
                 </Select>

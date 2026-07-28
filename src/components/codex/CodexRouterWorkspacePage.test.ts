@@ -2396,6 +2396,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       notes: "primary plan",
       enabled: false,
       defaultRouteId: "missing-route",
+      officialAuth: { mode: "desktop_current_login" },
     });
 
     expect(updated.name).toBe("Daily MultiRouter");
@@ -2427,6 +2428,58 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     expect(validateProxyListenDraft("127.0.0.1", "abc")).toEqual({
       ok: false,
       error: "监听端口必须是 1024-65535 之间的数字。",
+    });
+  });
+
+  it("changes only official routes when a legacy Router adopts an auth policy", () => {
+    const plan: Provider = {
+      id: "legacy-router",
+      name: "Legacy Router",
+      category: "custom",
+      settingsConfig: {
+        codexRouting: {
+          enabled: true,
+          routes: [
+            {
+              id: "official",
+              targetProviderId: "codex-official",
+              match: { models: ["gpt-5.6"] },
+              upstream: {
+                apiFormat: "openai_responses",
+                auth: {
+                  source: "managed_codex_oauth",
+                  authProvider: "codex_oauth",
+                  accountId: "acct-old",
+                },
+              },
+            },
+            {
+              id: "qwen",
+              targetProviderId: "qwen",
+              match: { models: ["qwen3.6"] },
+              upstream: {
+                apiFormat: "openai_chat",
+                auth: { source: "provider_config" },
+              },
+            },
+          ],
+        },
+      },
+    };
+
+    const updated = applyMultiRouterSettingsDraft(plan, {
+      name: plan.name,
+      enabled: true,
+      officialAuth: { mode: "account_pool" },
+    });
+    const routing = readCodexRouting(updated)!;
+
+    expect(routing.officialAuth).toEqual({ mode: "account_pool" });
+    expect(routing.routes?.[0].upstream?.auth).toEqual({
+      source: "account_pool",
+    });
+    expect(routing.routes?.[1].upstream?.auth).toEqual({
+      source: "provider_config",
     });
   });
 
