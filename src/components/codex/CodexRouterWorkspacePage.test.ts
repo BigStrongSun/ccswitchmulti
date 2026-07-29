@@ -217,9 +217,9 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     expect(
       resolveCodexRouterAuthFacadeLabel({ mode: "desktop_current_login" }),
     ).toBe("Desktop / 混合认证");
-    expect(
-      resolveCodexRouterAuthFacadeLabel({ mode: "managed_oauth" }),
-    ).toBe("CCSM 托管认证");
+    expect(resolveCodexRouterAuthFacadeLabel({ mode: "managed_oauth" })).toBe(
+      "CCSM 托管认证",
+    );
     expect(
       resolveCodexRouterAuthFacadeLabel(
         { mode: "account_pool" },
@@ -250,9 +250,9 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
         },
       ),
     ).toBe("CCSM 托管认证");
-    expect(
-      resolveCodexRouterAuthFacadeLabel({ mode: "account_pool" }),
-    ).toBe("待确认");
+    expect(resolveCodexRouterAuthFacadeLabel({ mode: "account_pool" })).toBe(
+      "待确认",
+    );
   });
 
   it("refreshes an official OAuth catalog with the bound account and syncs new models into its route", async () => {

@@ -60,10 +60,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { providersApi } from "@/lib/api";
-import {
-  authApi,
-  type CodexAccountPoolPolicy,
-} from "@/lib/api/auth";
+import { authApi, type CodexAccountPoolPolicy } from "@/lib/api/auth";
 import {
   fetchCodexOauthCachedModels,
   fetchCodexOauthModels,

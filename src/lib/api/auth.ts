@@ -131,7 +131,9 @@ export async function setCodexAccountPoolPolicy(
   return invoke("set_codex_account_pool_policy", { policy });
 }
 
-export async function refreshCodexAccountPoolQuota(): Promise<CodexAccountPoolQuotaStatus[]> {
+export async function refreshCodexAccountPoolQuota(): Promise<
+  CodexAccountPoolQuotaStatus[]
+> {
   return invoke("refresh_codex_account_pool_quota");
 }
 

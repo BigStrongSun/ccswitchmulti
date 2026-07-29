@@ -42,8 +42,7 @@ export function codexAccountPoolFacadeLabel(
   const canUseDesktop =
     policy.enabled &&
     policy.entries.some(
-      (entry) =>
-        entry.accountId === NATIVE_CODEX_ACCOUNT_ID && entry.enabled,
+      (entry) => entry.accountId === NATIVE_CODEX_ACCOUNT_ID && entry.enabled,
     );
   return canUseDesktop ? "Desktop / 混合认证" : "CCSM 托管认证";
 }
@@ -53,9 +52,7 @@ export function codexPoolFacadeRestartMessage(
 ): string | null {
   if (!outcome.codexRestartRequired) return null;
   const facade =
-    outcome.facade === "native_mixed"
-      ? "Desktop / 混合认证"
-      : "CCSM 托管认证";
+    outcome.facade === "native_mixed" ? "Desktop / 混合认证" : "CCSM 托管认证";
   return `当前 MultiRouter 已切换为${facade}。请完全退出并重启 Codex；已有任务不会热加载新的认证门面。`;
 }
 
@@ -134,7 +131,9 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
     onSettled: () => queryClient.invalidateQueries({ queryKey: poolQueryKey }),
   });
 
-  const updatePool = (transform: (policy: CodexAccountPoolPolicy) => CodexAccountPoolPolicy) => {
+  const updatePool = (
+    transform: (policy: CodexAccountPoolPolicy) => CodexAccountPoolPolicy,
+  ) => {
     if (poolPolicy) poolMutation.mutate(transform(poolPolicy));
   };
 
@@ -217,16 +216,31 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
           </div>
           <div className="space-y-1">
             {poolPolicy.entries.map((entry, index) => {
-              const account = accounts.find((item) => item.id === entry.accountId);
+              const account = accounts.find(
+                (item) => item.id === entry.accountId,
+              );
               const native = entry.accountId === NATIVE_CODEX_ACCOUNT_ID;
-              const quota = poolQuota.find((item) => item.accountId === entry.accountId);
+              const quota = poolQuota.find(
+                (item) => item.accountId === entry.accountId,
+              );
               return (
-                <div key={entry.accountId} className="flex items-center gap-2 border-b py-2 last:border-b-0">
-                  <span className="w-7 text-center text-xs font-medium text-muted-foreground">P{index + 1}</span>
-                  {native ? <Monitor className="h-4 w-4" /> : <User className="h-4 w-4" />}
+                <div
+                  key={entry.accountId}
+                  className="flex items-center gap-2 border-b py-2 last:border-b-0"
+                >
+                  <span className="w-7 text-center text-xs font-medium text-muted-foreground">
+                    P{index + 1}
+                  </span>
+                  {native ? (
+                    <Monitor className="h-4 w-4" />
+                  ) : (
+                    <User className="h-4 w-4" />
+                  )}
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-sm font-medium">
-                      {native ? "Codex Desktop 当前登录账号" : account?.login ?? entry.accountId}
+                      {native
+                        ? "Codex Desktop 当前登录账号"
+                        : (account?.login ?? entry.accountId)}
                     </div>
                     <div className="text-xs text-muted-foreground">
                       {quota?.remainingPercent != null
@@ -241,16 +255,21 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
                     step={1}
                     value={entry.reservePercent}
                     onChange={(event) => {
-                      const reservePercent = Math.min(100, Math.max(0, Number(event.target.value) || 0));
+                      const reservePercent = Math.min(
+                        100,
+                        Math.max(0, Number(event.target.value) || 0),
+                      );
                       updatePool((policy) => ({
                         ...policy,
                         entries: policy.entries.map((item) =>
-                          item.accountId === entry.accountId ? { ...item, reservePercent } : item,
+                          item.accountId === entry.accountId
+                            ? { ...item, reservePercent }
+                            : item,
                         ),
                       }));
                     }}
                     className="h-8 w-16 rounded-md border bg-background px-2 text-right text-sm"
-                    aria-label={`${native ? "Codex Desktop 当前登录账号" : account?.login ?? entry.accountId} 保留额度`}
+                    aria-label={`${native ? "Codex Desktop 当前登录账号" : (account?.login ?? entry.accountId)} 保留额度`}
                   />
                   <span className="text-xs text-muted-foreground">%</span>
                   <Switch
@@ -259,16 +278,34 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
                       updatePool((policy) => ({
                         ...policy,
                         entries: policy.entries.map((item) =>
-                          item.accountId === entry.accountId ? { ...item, enabled } : item,
+                          item.accountId === entry.accountId
+                            ? { ...item, enabled }
+                            : item,
                         ),
                       }))
                     }
-                    aria-label={`启用 ${native ? "Codex Desktop 当前登录账号" : account?.login ?? entry.accountId}`}
+                    aria-label={`启用 ${native ? "Codex Desktop 当前登录账号" : (account?.login ?? entry.accountId)}`}
                   />
-                  <Button type="button" variant="ghost" size="icon" className="h-7 w-7" disabled={index === 0} onClick={() => movePoolEntry(index, -1)} title="上移">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7"
+                    disabled={index === 0}
+                    onClick={() => movePoolEntry(index, -1)}
+                    title="上移"
+                  >
                     <ArrowUp className="h-4 w-4" />
                   </Button>
-                  <Button type="button" variant="ghost" size="icon" className="h-7 w-7" disabled={index === poolPolicy.entries.length - 1} onClick={() => movePoolEntry(index, 1)} title="下移">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7"
+                    disabled={index === poolPolicy.entries.length - 1}
+                    onClick={() => movePoolEntry(index, 1)}
+                    title="下移"
+                  >
                     <ArrowDown className="h-4 w-4" />
                   </Button>
                 </div>
@@ -277,7 +314,9 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
           </div>
           {poolPolicy.enabled && (
             <p className="text-xs text-muted-foreground">
-              {isRefreshingPoolQuota ? "正在刷新账号额度…" : "额度每 5 分钟刷新；查询失败时保留上次可信状态。"}
+              {isRefreshingPoolQuota
+                ? "正在刷新账号额度…"
+                : "额度每 5 分钟刷新；查询失败时保留上次可信状态。"}
             </p>
           )}
           <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs leading-5 text-muted-foreground">
@@ -292,7 +331,11 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
               {poolFacadeNotice}
             </div>
           )}
-          {poolMutation.isError && <p className="text-xs text-red-500">账号切换策略保存失败：{String(poolMutation.error)}</p>}
+          {poolMutation.isError && (
+            <p className="text-xs text-red-500">
+              账号切换策略保存失败：{String(poolMutation.error)}
+            </p>
+          )}
         </div>
       )}
 
