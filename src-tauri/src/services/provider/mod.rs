@@ -1409,12 +1409,31 @@ experimental_bearer_token = "PROXY_MANAGED"
                 !live_config.contains("openai_base_url"),
                 "{label}: live config must not use built-in OpenAI base URL, got:\n{live_config}"
             );
-            assert!(
-                live_config.contains("requires_openai_auth = true"),
-                "{label}: live config must keep Codex OAuth account state visible, got:\n{live_config}"
-            );
             let live_toml: toml::Value =
                 toml::from_str(&live_config).expect("parse refreshed Codex live config");
+            let router_facade = live_toml
+                .get("model_providers")
+                .and_then(|providers| providers.get("codex_model_router_v2"))
+                .expect("router facade");
+            assert_eq!(
+                router_facade.get("name").and_then(|value| value.as_str()),
+                Some("OpenAI"),
+                "{label}: managed OAuth must retain OpenAI capabilities"
+            );
+            assert_eq!(
+                router_facade
+                    .get("requires_openai_auth")
+                    .and_then(|value| value.as_bool()),
+                Some(false),
+                "{label}: fixed managed OAuth must not request Desktop credentials"
+            );
+            assert_eq!(
+                router_facade
+                    .get("experimental_bearer_token")
+                    .and_then(|value| value.as_str()),
+                Some("PROXY_MANAGED"),
+                "{label}: CCSM-managed routes must use the local placeholder"
+            );
             let provider_models = live_toml
                 .get("model_providers")
                 .and_then(|providers| providers.get("codex_model_router_v2"))
