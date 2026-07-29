@@ -11,6 +11,7 @@ use crate::provider::{
     ProviderMeta,
 };
 use crate::proxy::error::ProxyError;
+use crate::proxy::providers::codex_oauth_auth::{CodexAccountPoolPolicy, NATIVE_CODEX_ACCOUNT_ID};
 use regex::Regex;
 use serde_json::{Map, Value as JsonValue};
 use std::sync::LazyLock;
@@ -24,6 +25,83 @@ const CODEX_NATIVE_AUTH_PASSTHROUGH: &str = "codexNativeAuthPassthrough";
 pub(crate) const CODEX_ACCOUNT_POOL_ENABLED: &str = "codexAccountPoolEnabled";
 const QWEN_VLLM_MIN_OUTPUT_TOKENS: u64 = 2_048;
 const RETIRED_QWEN_VLLM_DEFAULT_OUTPUT_TOKENS: u64 = 32_768;
+
+/// Codex Desktop 看到的 MultiRouter 认证门面。
+///
+/// 该枚举只描述 Codex 到 CCSM 本地代理这一跳如何携带认证，不描述最终上游
+/// 使用哪个账号。最终凭据所有权仍由每次请求解析出的 route 决定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodexMultiRouterAuthFacade {
+    /// 至少一条启用 route 可能复用 Codex Desktop 当前登录。
+    NativeMixed,
+    /// 所有启用 route 的凭据都由 CCSM 或目标 provider 管理。
+    FullyManaged,
+    /// 旧配置缺少足够信息，投影层必须保留现有 live 认证门面。
+    LegacyPreserved,
+}
+
+/// 根据持久化 Router 配置和账号池策略判断本地认证门面。
+///
+/// route 是运行时认证所有权的最终事实；`officialAuth` 由保存流程物化到 route，
+/// 这里只用它区分新配置和缺少 auth source 的旧歧义配置，不用它覆盖 route。
+pub fn classify_codex_multirouter_auth_facade(
+    provider: &Provider,
+    pool_policy: Option<&CodexAccountPoolPolicy>,
+) -> CodexMultiRouterAuthFacade {
+    let Some(routing) = provider.settings_config.get("codexRouting") else {
+        return CodexMultiRouterAuthFacade::LegacyPreserved;
+    };
+    if routing
+        .get("enabled")
+        .and_then(JsonValue::as_bool)
+        .is_some_and(|enabled| !enabled)
+    {
+        return CodexMultiRouterAuthFacade::LegacyPreserved;
+    }
+    let Some(routes) = routing.get("routes").and_then(JsonValue::as_array) else {
+        return CodexMultiRouterAuthFacade::LegacyPreserved;
+    };
+
+    let mut has_enabled_route = false;
+    let mut needs_native_auth = false;
+    let mut has_ambiguous_auth = false;
+
+    for route in routes {
+        if route
+            .get("enabled")
+            .and_then(JsonValue::as_bool)
+            .is_some_and(|enabled| !enabled)
+        {
+            continue;
+        }
+        has_enabled_route = true;
+        let source = route
+            .pointer("/upstream/auth/source")
+            .and_then(JsonValue::as_str);
+        match source {
+            Some("native_codex_auth") => needs_native_auth = true,
+            Some("account_pool") => match pool_policy {
+                Some(policy) => {
+                    needs_native_auth |= policy.enabled
+                        && policy.entries.iter().any(|entry| {
+                            entry.enabled && entry.account_id == NATIVE_CODEX_ACCOUNT_ID
+                        });
+                }
+                None => has_ambiguous_auth = true,
+            },
+            Some("provider_config" | "managed_account" | "managed_codex_oauth") => {}
+            Some(_) | None => has_ambiguous_auth = true,
+        }
+    }
+
+    if needs_native_auth {
+        CodexMultiRouterAuthFacade::NativeMixed
+    } else if !has_enabled_route || has_ambiguous_auth {
+        CodexMultiRouterAuthFacade::LegacyPreserved
+    } else {
+        CodexMultiRouterAuthFacade::FullyManaged
+    }
+}
 
 /// 官方 Codex 客户端 User-Agent 正则
 #[allow(dead_code)]
@@ -2385,6 +2463,9 @@ fn provider_is_managed_codex_oauth(provider: &Provider) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proxy::providers::codex_oauth_auth::{
+        CodexAccountPoolEntry, CodexAccountPoolPolicy, NATIVE_CODEX_ACCOUNT_ID,
+    };
     use serde_json::json;
 
     fn create_provider(config: serde_json::Value) -> Provider {
@@ -2402,6 +2483,147 @@ mod tests {
             icon_color: None,
             in_failover_queue: false,
         }
+    }
+
+    fn multirouter_with_routes(
+        routes: serde_json::Value,
+        official_auth: Option<serde_json::Value>,
+    ) -> Provider {
+        let mut routing = json!({
+            "enabled": true,
+            "routes": routes,
+        });
+        if let Some(official_auth) = official_auth {
+            routing["officialAuth"] = official_auth;
+        }
+        create_provider(json!({ "codexRouting": routing }))
+    }
+
+    fn pool_policy(enabled: bool, native_enabled: bool) -> CodexAccountPoolPolicy {
+        CodexAccountPoolPolicy {
+            enabled,
+            entries: vec![
+                CodexAccountPoolEntry {
+                    account_id: NATIVE_CODEX_ACCOUNT_ID.to_string(),
+                    enabled: native_enabled,
+                    reserve_percent: 5.0,
+                },
+                CodexAccountPoolEntry {
+                    account_id: "managed-account".to_string(),
+                    enabled: true,
+                    reserve_percent: 5.0,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn codex_multirouter_auth_facade_classifies_explicit_route_sources() {
+        let native = multirouter_with_routes(
+            json!([{
+                "id": "official",
+                "enabled": true,
+                "upstream": { "auth": { "source": "native_codex_auth" } }
+            }]),
+            Some(json!({ "mode": "desktop_current_login" })),
+        );
+        assert_eq!(
+            classify_codex_multirouter_auth_facade(&native, None),
+            CodexMultiRouterAuthFacade::NativeMixed
+        );
+
+        let managed = multirouter_with_routes(
+            json!([{
+                "id": "official",
+                "enabled": true,
+                "upstream": { "auth": { "source": "managed_codex_oauth", "accountId": "managed-account" } }
+            }]),
+            Some(json!({ "mode": "managed_oauth", "accountId": "managed-account" })),
+        );
+        assert_eq!(
+            classify_codex_multirouter_auth_facade(&managed, None),
+            CodexMultiRouterAuthFacade::FullyManaged
+        );
+
+        let provider_config = multirouter_with_routes(
+            json!([{
+                "id": "third-party",
+                "enabled": true,
+                "upstream": { "auth": { "source": "provider_config" } }
+            }]),
+            None,
+        );
+        assert_eq!(
+            classify_codex_multirouter_auth_facade(&provider_config, None),
+            CodexMultiRouterAuthFacade::FullyManaged
+        );
+    }
+
+    #[test]
+    fn codex_multirouter_auth_facade_uses_enabled_account_pool_entries() {
+        let router = multirouter_with_routes(
+            json!([{
+                "id": "official-pool",
+                "enabled": true,
+                "upstream": { "auth": { "source": "account_pool" } }
+            }]),
+            Some(json!({ "mode": "account_pool" })),
+        );
+
+        assert_eq!(
+            classify_codex_multirouter_auth_facade(&router, Some(&pool_policy(true, true))),
+            CodexMultiRouterAuthFacade::NativeMixed
+        );
+        assert_eq!(
+            classify_codex_multirouter_auth_facade(&router, Some(&pool_policy(true, false))),
+            CodexMultiRouterAuthFacade::FullyManaged
+        );
+        assert_eq!(
+            classify_codex_multirouter_auth_facade(&router, Some(&pool_policy(false, true))),
+            CodexMultiRouterAuthFacade::FullyManaged,
+            "a globally disabled pool cannot currently select Desktop auth"
+        );
+        assert_eq!(
+            classify_codex_multirouter_auth_facade(&router, None),
+            CodexMultiRouterAuthFacade::LegacyPreserved,
+            "without a pool snapshot the backend must not guess credential ownership"
+        );
+    }
+
+    #[test]
+    fn codex_multirouter_auth_facade_ignores_disabled_routes_and_preserves_ambiguity() {
+        let router = multirouter_with_routes(
+            json!([
+                {
+                    "id": "disabled-native",
+                    "enabled": false,
+                    "upstream": { "auth": { "source": "native_codex_auth" } }
+                },
+                {
+                    "id": "managed",
+                    "enabled": true,
+                    "upstream": { "auth": { "source": "managed_account" } }
+                }
+            ]),
+            None,
+        );
+        assert_eq!(
+            classify_codex_multirouter_auth_facade(&router, None),
+            CodexMultiRouterAuthFacade::FullyManaged
+        );
+
+        let ambiguous = multirouter_with_routes(
+            json!([{
+                "id": "legacy",
+                "enabled": true,
+                "upstream": { "apiFormat": "openai_responses" }
+            }]),
+            None,
+        );
+        assert_eq!(
+            classify_codex_multirouter_auth_facade(&ambiguous, None),
+            CodexMultiRouterAuthFacade::LegacyPreserved
+        );
     }
 
     #[test]

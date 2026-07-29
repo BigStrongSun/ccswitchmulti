@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
@@ -268,6 +268,62 @@ impl Default for CodexAccountPoolPolicy {
             }],
         }
     }
+}
+
+/// 只读取持久化账号池策略快照，不创建 OAuth manager，也不触发 token 刷新。
+///
+/// live 配置投影只需要知道账号池是否可能选中 Desktop 当前登录。返回值刻意
+/// 不包含账号凭据，并复用 manager 的规范化语义补齐 Desktop 和新增托管账号。
+pub fn read_persisted_account_pool_policy(
+    data_dir: &Path,
+) -> Result<Option<CodexAccountPoolPolicy>, CodexOAuthError> {
+    let storage_path = data_dir.join("codex_oauth_auth.json");
+    if !storage_path.exists() {
+        return Ok(None);
+    }
+
+    let content = fs::read_to_string(storage_path)?;
+    let store: CodexOAuthStore = serde_json::from_str(&content)
+        .map_err(|error| CodexOAuthError::ParseError(error.to_string()))?;
+    let mut policy = store.pool_policy;
+    let mut known: std::collections::HashSet<String> = policy
+        .entries
+        .iter()
+        .map(|entry| entry.account_id.clone())
+        .collect();
+
+    if !known.contains(NATIVE_CODEX_ACCOUNT_ID) {
+        policy.entries.insert(
+            0,
+            CodexAccountPoolEntry {
+                account_id: NATIVE_CODEX_ACCOUNT_ID.to_string(),
+                enabled: true,
+                reserve_percent: 5.0,
+            },
+        );
+        known.insert(NATIVE_CODEX_ACCOUNT_ID.to_string());
+    }
+
+    let mut missing: Vec<_> = store
+        .accounts
+        .keys()
+        .filter(|account_id| !known.contains(*account_id))
+        .cloned()
+        .collect();
+    missing.sort();
+    policy
+        .entries
+        .extend(missing.into_iter().map(|account_id| CodexAccountPoolEntry {
+            account_id,
+            enabled: true,
+            reserve_percent: 5.0,
+        }));
+    policy.entries.retain(|entry| {
+        entry.account_id == NATIVE_CODEX_ACCOUNT_ID
+            || store.accounts.contains_key(&entry.account_id)
+    });
+
+    Ok(Some(policy))
 }
 
 /// Codex OAuth 认证管理器（多账号）
@@ -1561,6 +1617,45 @@ mod tests {
         let accounts = manager2.list_accounts().await;
         assert_eq!(accounts.len(), 1);
         assert_eq!(accounts[0].id, "acc-123");
+    }
+
+    #[test]
+    fn codex_multirouter_auth_facade_reads_normalized_pool_policy_without_loading_tokens() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("codex_oauth_auth.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "version": 1,
+                "accounts": {
+                    "managed-account": {
+                        "account_id": "managed-account",
+                        "refresh_token": "must-not-be-returned",
+                        "authenticated_at": 1
+                    }
+                },
+                "pool_policy": {
+                    "enabled": true,
+                    "entries": [{
+                        "accountId": "managed-account",
+                        "enabled": true,
+                        "reservePercent": 7.5
+                    }]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let policy = read_persisted_account_pool_policy(temp.path())
+            .expect("read policy")
+            .expect("policy exists");
+        assert!(policy.enabled);
+        assert_eq!(policy.entries.len(), 2);
+        assert_eq!(policy.entries[0].account_id, NATIVE_CODEX_ACCOUNT_ID);
+        assert!(policy.entries[0].enabled);
+        assert_eq!(policy.entries[1].account_id, "managed-account");
+        assert_eq!(policy.entries[1].reserve_percent, 7.5);
+        assert!(!format!("{policy:?}").contains("must-not-be-returned"));
     }
 
     #[tokio::test]

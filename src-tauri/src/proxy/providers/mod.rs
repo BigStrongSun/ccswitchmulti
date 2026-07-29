@@ -55,7 +55,8 @@ pub use claude::{
 pub use codex::CodexAdapter;
 pub use codex::{
     apply_codex_chat_upstream_model, apply_codex_request_upstream_model,
-    apply_codex_upstream_model, build_codex_route_probe_provider, codex_provider_text_only_input,
+    apply_codex_upstream_model, build_codex_route_probe_provider,
+    classify_codex_multirouter_auth_facade, codex_provider_text_only_input,
     codex_provider_upstream_model, codex_provider_uses_chat_completions,
     codex_route_persistent_provider, codex_route_target_provider_id,
     explain_codex_responses_upstream_protocol, inject_codex_chat_prompt_cache_key,
@@ -63,7 +64,7 @@ pub use codex::{
     resolve_codex_cache_config, resolve_codex_catalog_tool_profile,
     resolve_codex_chat_reasoning_config, resolve_codex_model_routed_provider,
     should_convert_codex_responses_to_anthropic, should_convert_codex_responses_to_chat,
-    should_convert_codex_responses_to_messages,
+    should_convert_codex_responses_to_messages, CodexMultiRouterAuthFacade,
 };
 pub(crate) use codex::{
     is_codex_remote_compact_endpoint, is_codex_responses_endpoint, CODEX_ACCOUNT_POOL_ENABLED,
