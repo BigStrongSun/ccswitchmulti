@@ -66,7 +66,7 @@ fn should_passthrough_codex_official_auth(
     headers: &http::HeaderMap,
 ) -> bool {
     matches!(app_type, AppType::Codex)
-        && super::providers::is_codex_official_provider(provider)
+        && super::providers::provider_uses_native_codex_auth(provider)
         && !headers.contains_key("x-cc-switch-external-openai-api")
 }
 
@@ -2605,6 +2605,10 @@ impl RequestForwarder {
 
         for (key, value) in headers {
             let key_str = key.as_str();
+
+            if outbound_header_is_local_only(key) {
+                continue;
+            }
 
             // --- host — 原位替换为上游 host（保持客户端原始位置） ---
             if key_str.eq_ignore_ascii_case("host") {
@@ -5704,6 +5708,9 @@ fn build_raw_passthrough_headers(
 
 /// 判断 raw passthrough 是否需要丢弃客户端入站头。
 fn raw_passthrough_header_should_skip(name: &http::HeaderName) -> bool {
+    if outbound_header_is_local_only(name) {
+        return true;
+    }
     let lower = name.as_str().to_ascii_lowercase();
     matches!(
         lower.as_str(),
@@ -5751,6 +5758,13 @@ fn raw_passthrough_header_should_skip(name: &http::HeaderName) -> bool {
             | "tracestate"
     ) || lower.starts_with("x-forwarded-")
         || lower.starts_with("cf-")
+}
+
+/// CCSM 自己的控制头只允许存在于客户端到本地代理这一跳。
+fn outbound_header_is_local_only(name: &http::HeaderName) -> bool {
+    name.as_str()
+        .to_ascii_lowercase()
+        .starts_with("x-cc-switch-")
 }
 
 /// 判断 raw passthrough 是否应按流式响应处理。
@@ -5839,6 +5853,53 @@ mod tests {
             &provider,
             &local_headers,
         ));
+    }
+
+    #[test]
+    fn codex_auth_ownership_pool_managed_candidate_does_not_reuse_desktop_bearer() {
+        let headers = HeaderMap::new();
+        let mut managed = test_codex_official_provider();
+        managed.settings_config[CODEX_ACCOUNT_POOL_ENABLED] = Value::Bool(true);
+        managed.settings_config["codexNativeAuthPassthrough"] = Value::Bool(false);
+        managed.meta = Some(crate::provider::ProviderMeta {
+            provider_type: Some("codex_oauth".to_string()),
+            ..Default::default()
+        });
+        assert!(crate::proxy::providers::is_codex_official_provider(
+            &managed
+        ));
+        assert!(
+            !should_passthrough_codex_official_auth(&AppType::Codex, &managed, &headers),
+            "managed pool candidates must replace the incoming Desktop bearer"
+        );
+
+        let mut native = managed.clone();
+        native.settings_config["codexNativeAuthPassthrough"] = Value::Bool(true);
+        native.meta = Some(crate::provider::ProviderMeta::default());
+        assert!(should_passthrough_codex_official_auth(
+            &AppType::Codex,
+            &native,
+            &headers,
+        ));
+    }
+
+    #[test]
+    fn codex_auth_ownership_proxy_mode_header_is_local_only_for_all_transports() {
+        let name = http::HeaderName::from_static("x-cc-switch-proxy-mode");
+        assert!(outbound_header_is_local_only(&name));
+        assert!(raw_passthrough_header_should_skip(&name));
+
+        let mut source = HeaderMap::new();
+        source.insert(name.clone(), HeaderValue::from_static("router"));
+        source.insert("x-user-header", HeaderValue::from_static("kept"));
+        let rebuilt = build_raw_passthrough_headers(&source, &[], None, None);
+        assert!(!rebuilt.contains_key(name));
+        assert_eq!(
+            rebuilt
+                .get("x-user-header")
+                .and_then(|value| value.to_str().ok()),
+            Some("kept")
+        );
     }
 
     fn test_forwarder(

@@ -67,7 +67,8 @@ pub use codex::{
     should_convert_codex_responses_to_messages, CodexMultiRouterAuthFacade,
 };
 pub(crate) use codex::{
-    is_codex_remote_compact_endpoint, is_codex_responses_endpoint, CODEX_ACCOUNT_POOL_ENABLED,
+    is_codex_remote_compact_endpoint, is_codex_responses_endpoint, provider_uses_native_codex_auth,
+    CODEX_ACCOUNT_POOL_ENABLED,
 };
 pub use gemini::GeminiAdapter;
 

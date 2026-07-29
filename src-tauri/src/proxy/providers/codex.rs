@@ -1488,6 +1488,45 @@ pub fn is_codex_official_provider(provider: &Provider) -> bool {
                     .unwrap_or(false)))
 }
 
+/// 判断 effective provider 是否明确由来向 Codex Desktop 登录态提供凭据。
+///
+/// `is_codex_official_provider` 还承担协议/目录识别，账号池 managed candidate 也会
+/// 被它识别为 official Responses，因此不能用它单独决定 Authorization 透传。
+pub(crate) fn provider_uses_native_codex_auth(provider: &Provider) -> bool {
+    if let Some(native) = provider
+        .settings_config
+        .get(CODEX_NATIVE_AUTH_PASSTHROUGH)
+        .and_then(JsonValue::as_bool)
+    {
+        return native;
+    }
+    if provider
+        .settings_config
+        .get(CODEX_ACCOUNT_POOL_ENABLED)
+        .and_then(JsonValue::as_bool)
+        .unwrap_or(false)
+    {
+        return false;
+    }
+
+    if provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.provider_type.as_deref())
+        == Some("codex_oauth")
+    {
+        return false;
+    }
+
+    if provider.category.as_deref() == Some("official")
+        && provider.id == crate::database::CODEX_OFFICIAL_PROVIDER_ID
+    {
+        return true;
+    }
+
+    false
+}
+
 /// Resolve the model-catalog tool profile for a Codex provider using the SAME
 /// Anthropic detection as the proxy router ([`codex_provider_uses_anthropic`]), so the
 /// generated catalog never disagrees with the routed transform. A provider whose
