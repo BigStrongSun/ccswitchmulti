@@ -72,6 +72,16 @@ pub struct HotSwitchOutcome {
     pub logical_target_changed: bool,
 }
 
+#[derive(Debug, Clone, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexAuthFacadeReprojectionOutcome {
+    pub applied: bool,
+    pub facade_changed: bool,
+    pub codex_restart_required: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub facade: Option<String>,
+}
+
 impl ProxyService {
     pub fn new(db: Arc<Database>) -> Self {
         Self {
@@ -2354,7 +2364,37 @@ impl ProxyService {
             || config
                 .get("config")
                 .and_then(|v| v.as_str())
-                .is_some_and(crate::codex_config::codex_config_has_official_proxy_route)
+                .is_some_and(|config_text| {
+                    crate::codex_config::codex_config_has_official_proxy_route(config_text)
+                        || Self::codex_config_has_native_multirouter_proxy_route(config_text)
+                })
+    }
+
+    fn codex_config_has_native_multirouter_proxy_route(config_text: &str) -> bool {
+        let Ok(doc) = toml::from_str::<toml::Value>(config_text) else {
+            return false;
+        };
+        let provider_id = crate::codex_config::CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID;
+        if doc.get("model_provider").and_then(toml::Value::as_str) != Some(provider_id) {
+            return false;
+        }
+        let Some(provider) = doc
+            .get("model_providers")
+            .and_then(|providers| providers.get(provider_id))
+        else {
+            return false;
+        };
+        let local_base_url = provider
+            .get("base_url")
+            .and_then(toml::Value::as_str)
+            .is_some_and(Self::is_local_proxy_url);
+        let router_marker = provider
+            .get("http_headers")
+            .and_then(|headers| headers.get("x-cc-switch-proxy-mode"))
+            .and_then(toml::Value::as_str)
+            == Some("router");
+
+        local_base_url && router_marker
     }
 
     fn is_gemini_live_taken_over(config: &Value) -> bool {
@@ -2725,6 +2765,77 @@ impl ProxyService {
             log::debug!("代理模式：{app_type} 已对齐到目标供应商 {provider_id}");
         }
         Ok(())
+    }
+
+    /// 账号池策略保存后，按新策略重建当前接管中的 MultiRouter 门面。
+    ///
+    /// 只处理当前明确选择 account_pool 的 Codex Router；不启动代理、不改
+    /// `auth.json`、不结束 Codex 进程。门面变化由调用方提示用户重启 Codex。
+    pub fn reproject_current_codex_multirouter_for_pool_policy(
+        &self,
+        pool_policy: &crate::proxy::providers::codex_oauth_auth::CodexAccountPoolPolicy,
+    ) -> Result<CodexAuthFacadeReprojectionOutcome, String> {
+        let Some(provider) = self.get_current_provider_for_app(&AppType::Codex)? else {
+            return Ok(CodexAuthFacadeReprojectionOutcome::default());
+        };
+        if !Self::codex_provider_has_enabled_routing(Some(&provider))
+            || !Self::codex_provider_uses_account_pool(&provider)
+        {
+            return Ok(CodexAuthFacadeReprojectionOutcome::default());
+        }
+
+        let target = crate::proxy::providers::classify_codex_multirouter_auth_facade(
+            &provider,
+            Some(pool_policy),
+        );
+        let facade = match target {
+            crate::proxy::providers::CodexMultiRouterAuthFacade::NativeMixed => {
+                Some("native_mixed".to_string())
+            }
+            crate::proxy::providers::CodexMultiRouterAuthFacade::FullyManaged => {
+                Some("fully_managed".to_string())
+            }
+            crate::proxy::providers::CodexMultiRouterAuthFacade::LegacyPreserved => None,
+        };
+        if !self.detect_takeover_in_live_config_for_app(&AppType::Codex) || facade.is_none() {
+            return Ok(CodexAuthFacadeReprojectionOutcome {
+                facade,
+                ..Default::default()
+            });
+        }
+
+        let mut live = self.read_codex_live()?;
+        let config_text = live.get("config").and_then(Value::as_str).unwrap_or("");
+        let current_doc = config_text
+            .parse::<DocumentMut>()
+            .map_err(|error| format!("解析当前 Codex config.toml 失败: {error}"))?;
+        let provider_id = crate::codex_config::CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID;
+        let current = Self::legacy_codex_multirouter_auth_facade(&current_doc, provider_id);
+        let base_url = crate::codex_config::extract_codex_base_url(config_text)
+            .ok_or_else(|| "当前 MultiRouter 接管配置缺少本地 base_url".to_string())?;
+        let updated = Self::apply_codex_proxy_toml_config_with_pool_policy(
+            config_text,
+            &base_url,
+            Some(&provider),
+            Some(pool_policy),
+        )?;
+        live["config"] = json!(updated);
+        self.write_codex_takeover_live_for_provider(&live, Some(&provider))?;
+
+        let facade_changed = current != target;
+        if facade_changed {
+            log::info!(
+                "Codex MultiRouter 认证门面已随账号池策略变化: {:?} -> {:?}; 需要重启 Codex",
+                current,
+                target
+            );
+        }
+        Ok(CodexAuthFacadeReprojectionOutcome {
+            applied: true,
+            facade_changed,
+            codex_restart_required: facade_changed,
+            facade,
+        })
     }
 
     // ==================== Live 配置读写辅助方法 ====================
@@ -4070,7 +4181,7 @@ wire_api = "responses"
             .expect("write provider-driven Codex live config");
 
         let live_auth: Value =
-            crate::config::read_json_file(&crate::codex_config::get_codex_auth_path())
+            crate::config::read_json_file::<Value>(&crate::codex_config::get_codex_auth_path())
                 .expect("read live auth");
         assert_eq!(
             live_auth, oauth_auth,
@@ -4156,7 +4267,7 @@ wire_api = "responses"
             .expect("take over Codex live config");
 
         let live_auth: Value =
-            crate::config::read_json_file(&crate::codex_config::get_codex_auth_path())
+            crate::config::read_json_file::<Value>(&crate::codex_config::get_codex_auth_path())
                 .expect("read live auth");
         assert_eq!(
             live_auth, oauth_auth,
@@ -5553,6 +5664,95 @@ experimental_bearer_token = "PROXY_MANAGED"
         assert_eq!(
             route["experimental_bearer_token"].as_str(),
             Some(PROXY_TOKEN_PLACEHOLDER)
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn codex_pool_policy_reprojects_current_router_and_preserves_auth_json() {
+        use crate::proxy::providers::codex_oauth_auth::{
+            CodexAccountPoolEntry, CodexAccountPoolPolicy, NATIVE_CODEX_ACCOUNT_ID,
+        };
+
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        let db = Arc::new(Database::memory().expect("memory db"));
+        let service = ProxyService::new(db.clone());
+        let provider = codex_multirouter_provider("account_pool");
+        db.save_provider("codex", &provider).expect("save router");
+        db.set_current_provider("codex", &provider.id)
+            .expect("select router");
+        crate::settings::set_current_provider(&AppType::Codex, Some(&provider.id))
+            .expect("select local router");
+
+        let codex_dir = crate::codex_config::get_codex_config_dir();
+        std::fs::create_dir_all(&codex_dir).expect("create codex dir");
+        let original_auth = json!({
+            "auth_mode": "chatgpt",
+            "tokens": { "access_token": "desktop-token", "account_id": "desktop-account" }
+        });
+        crate::config::write_json_file(&crate::codex_config::get_codex_auth_path(), &original_auth)
+            .expect("seed auth json");
+        crate::codex_config::write_codex_live_config_atomic(Some(
+            r#"model_provider = "codex_model_router_v2"
+
+[model_providers.codex_model_router_v2]
+name = "OpenAI"
+base_url = "http://127.0.0.1:15721/v1"
+wire_api = "responses"
+requires_openai_auth = false
+experimental_bearer_token = "PROXY_MANAGED"
+supports_websockets = false
+"#,
+        ))
+        .expect("seed managed live config");
+
+        let native_policy = CodexAccountPoolPolicy {
+            enabled: true,
+            entries: vec![CodexAccountPoolEntry {
+                account_id: NATIVE_CODEX_ACCOUNT_ID.to_string(),
+                enabled: true,
+                reserve_percent: 5.0,
+            }],
+        };
+        let native = service
+            .reproject_current_codex_multirouter_for_pool_policy(&native_policy)
+            .expect("reproject native facade");
+        assert!(native.facade_changed);
+        assert!(native.codex_restart_required);
+        assert_eq!(native.facade.as_deref(), Some("native_mixed"));
+        let native_live = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
+            .expect("read native live");
+        assert!(native_live.contains("requires_openai_auth = true"));
+        assert!(!native_live.contains("experimental_bearer_token"));
+        assert_eq!(
+            crate::config::read_json_file::<Value>(&crate::codex_config::get_codex_auth_path())
+                .expect("read auth after native"),
+            original_auth
+        );
+
+        let managed_policy = CodexAccountPoolPolicy {
+            enabled: true,
+            entries: vec![CodexAccountPoolEntry {
+                account_id: NATIVE_CODEX_ACCOUNT_ID.to_string(),
+                enabled: false,
+                reserve_percent: 5.0,
+            }],
+        };
+        let managed = service
+            .reproject_current_codex_multirouter_for_pool_policy(&managed_policy)
+            .expect("reproject managed facade");
+        assert!(managed.facade_changed);
+        assert!(managed.codex_restart_required);
+        assert_eq!(managed.facade.as_deref(), Some("fully_managed"));
+        let managed_live = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
+            .expect("read managed live");
+        assert!(managed_live.contains("requires_openai_auth = false"));
+        assert!(managed_live.contains("experimental_bearer_token = \"PROXY_MANAGED\""));
+        assert_eq!(
+            crate::config::read_json_file::<Value>(&crate::codex_config::get_codex_auth_path())
+                .expect("read auth after managed"),
+            original_auth
         );
     }
 

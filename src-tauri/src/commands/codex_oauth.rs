@@ -9,6 +9,7 @@ use crate::proxy::providers::codex_oauth_auth::CodexAccountPoolPolicy;
 use crate::proxy::providers::codex_oauth_auth::CodexOAuthManager;
 use crate::services::model_fetch::FetchedModel;
 use crate::services::subscription::{query_codex_quota, CredentialStatus, SubscriptionQuota};
+use crate::store::AppState;
 use std::sync::Arc;
 use tauri::State;
 use tokio::sync::RwLock;
@@ -94,14 +95,20 @@ pub async fn get_codex_account_pool_policy(
 pub async fn set_codex_account_pool_policy(
     policy: CodexAccountPoolPolicy,
     state: State<'_, CodexOAuthState>,
-) -> Result<(), String> {
-    state
-        .0
-        .read()
-        .await
+    app_state: State<'_, AppState>,
+) -> Result<crate::services::proxy::CodexAuthFacadeReprojectionOutcome, String> {
+    let manager = state.0.read().await;
+    manager
         .set_account_pool_policy(policy)
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    let normalized = manager.account_pool_policy().await;
+    drop(manager);
+
+    app_state
+        .proxy_service
+        .reproject_current_codex_multirouter_for_pool_policy(&normalized)
+        .map_err(|error| format!("账号池策略已保存，但当前 Codex Router 门面更新失败: {error}"))
 }
 
 #[tauri::command]
