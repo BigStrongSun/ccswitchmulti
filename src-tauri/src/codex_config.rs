@@ -2912,6 +2912,21 @@ fn force_builtin_openai_provider_in_config_text(
     Ok(doc.to_string())
 }
 
+/// Remove an active CCSwitchMulti Router projection during last-resort takeover cleanup.
+///
+/// A Router table is one unit: its local endpoint, auth facade, model/catalog selection and
+/// local-only headers cannot remain independently after takeover is detached. Non-Router
+/// configurations are returned unchanged so this recovery path cannot erase user providers.
+pub fn remove_codex_multirouter_proxy_route(config_text: &str) -> Result<String, AppError> {
+    let doc = config_text
+        .parse::<DocumentMut>()
+        .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
+    if !codex_document_uses_multi_router(&doc) {
+        return Ok(config_text.to_string());
+    }
+    force_builtin_openai_provider_in_config_text(config_text)
+}
+
 /// 将当前 `config.toml` 原子切回 Codex 内建 `openai` provider。
 pub fn force_codex_builtin_openai_live_provider() -> Result<(), AppError> {
     let live = read_codex_config_text()?;

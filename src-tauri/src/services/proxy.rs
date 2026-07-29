@@ -2226,6 +2226,8 @@ impl ProxyService {
                     token == PROXY_TOKEN_PLACEHOLDER
                 })
                 .map_err(|e| format!("清理 Codex 接管占位符失败: {e}"))?;
+            let updated = crate::codex_config::remove_codex_multirouter_proxy_route(&updated)
+                .map_err(|e| format!("清理 Codex MultiRouter 接管路由失败: {e}"))?;
             let updated = crate::codex_config::remove_codex_official_proxy_route(&updated)
                 .map_err(|e| format!("清理 Codex 官方接管路由失败: {e}"))?;
             config["config"] = json!(updated);
@@ -5252,6 +5254,94 @@ experimental_bearer_token = "PROXY_MANAGED"
         assert!(
             !live_config.contains("http://127.0.0.1:15721"),
             "cleanup should remove local proxy base_url"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn codex_takeover_cleanup_restores_native_router_to_builtin_openai() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db);
+        let oauth_auth = json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "id_token": "oauth-id",
+                "access_token": "oauth-access"
+            }
+        });
+        crate::codex_config::write_codex_live_atomic(
+            &oauth_auth,
+            Some(
+                r#"model = "gpt-5.6-sol"
+model_provider = "codex_model_router_v2"
+model_catalog_json = "cc-switch-model-catalog.json"
+
+[model_providers.codex_model_router_v2]
+name = "OpenAI"
+base_url = "http://127.0.0.1:15721/v1"
+wire_api = "responses"
+requires_openai_auth = true
+supports_websockets = false
+http_headers = { x-cc-switch-proxy-mode = "router" }
+
+[mcp_servers.memory]
+command = "memory-server"
+
+[projects.'C:\repo']
+trust_level = "trusted"
+"#,
+            ),
+        )
+        .expect("seed native Router takeover config");
+
+        assert!(
+            service.detect_takeover_in_live_config_for_app(&AppType::Codex),
+            "native Router local endpoint should be detected before cleanup"
+        );
+
+        service
+            .cleanup_codex_takeover_placeholders_in_live()
+            .expect("cleanup native Router takeover");
+
+        let live_auth: Value =
+            crate::config::read_json_file(&crate::codex_config::get_codex_auth_path())
+                .expect("read live auth");
+        assert_eq!(live_auth, oauth_auth, "cleanup must preserve Desktop OAuth");
+
+        let live_config = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
+            .expect("read live config");
+        let parsed: toml::Value = toml::from_str(&live_config).expect("parse cleaned config");
+        assert_eq!(
+            parsed.get("model_provider").and_then(toml::Value::as_str),
+            Some("openai"),
+            "a detached CCSM Router must fall back to Codex built-in OpenAI"
+        );
+        assert!(parsed.get("model").is_none());
+        assert!(parsed.get("model_catalog_json").is_none());
+        assert!(
+            parsed
+                .get("model_providers")
+                .and_then(|providers| providers.get("codex_model_router_v2"))
+                .is_none(),
+            "the detached Router table and its local-only headers must be removed together"
+        );
+        assert_eq!(
+            parsed
+                .get("mcp_servers")
+                .and_then(|servers| servers.get("memory"))
+                .and_then(|memory| memory.get("command"))
+                .and_then(toml::Value::as_str),
+            Some("memory-server")
+        );
+        assert!(
+            parsed
+                .get("projects")
+                .and_then(|projects| projects.get(r"C:\repo"))
+                .is_some(),
+            "user-owned global config must survive last-resort cleanup"
         );
     }
 
