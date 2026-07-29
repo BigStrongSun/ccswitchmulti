@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-07-29 Codex MultiRouter 动态认证门面设计
+
+- `model_provider` 是任务和配置身份，provider `name` 是 Codex 能力声明；当前 Codex 以精确 `name == "OpenAI"` 开启远程压缩、Web Search、图片和部分 OpenAI 元数据路径。MultiRouter 固定使用 `codex_model_router_v2`，Codex 侧 `name` 固定为 `OpenAI`，用户可见 Router 名只保存在 CCSM UI/数据库。CCSM managed OAuth 同样使用 `name = "OpenAI"`，认证所有权不由 name 决定。
+- facade 按 route 认证所有权分两类：存在 `native_codex_auth` 或账号池启用 Desktop 账号时使用 Native/Mixed，写 `requires_openai_auth=true`、删除 `experimental_bearer_token`，让 Codex 发送真实 Desktop OAuth；完全由固定 CCSM OAuth、无 Desktop 的账号池或第三方 provider 管理时使用 Fully Managed，写 `requires_openai_auth=false` 与 `PROXY_MANAGED`。
+- Native/Mixed 使用独立的 `x-cc-switch-proxy-mode=router` 标识本地 Router 流量，不能再占用 Authorization；native route 透传来向 OAuth，托管 OAuth/第三方 route 必须先删除来向 Authorization 再注入自己的凭据，且标识头不得出站。External Agent API 继续禁止借用 Desktop OAuth。
+- 两种 facade 都固定 `wire_api="responses"`、`supports_websockets=false`，即 Responses over HTTP/SSE。provider ID 不变，迁移不修改 `auth.json`；facade 类型变化明确要求重启 Codex，不承诺现有 session 热加载认证。
+- 完整设计见 `docs/superpowers/specs/2026-07-29-codex-multirouter-auth-facade-design.md`；实现验收必须补 config -> Codex auth -> route -> upstream 的端到端矩阵，不能只依赖分段单测。
+
 ## 2026-07-28 MultiRouter 官方认证策略与 HTTP Responses 边界
 
 - 根因：账号池第一版只有 OAuth manager 的全局 `enabled/order/reservePercent`，forwarder 会把任意 official effective provider 展开成账号候选；Router 本身没有声明“Desktop 当前登录 / 固定 CCSM OAuth / OAuth 账号池”，因此全局开关可能改变原本显式使用 `native_codex_auth` 的 Router，旧方案升级后也没有可见迁移入口。
