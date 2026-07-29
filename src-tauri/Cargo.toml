@@ -136,6 +136,7 @@ strip = "symbols"
 [dev-dependencies]
 serial_test = "3"
 tempfile = "3"
+tokio = { version = "1", features = ["test-util"] }
 
 [patch.crates-io]
 # tao 0.34.3+ emits LoopDestroyed from inside the WM_ENDSESSION window callback,
