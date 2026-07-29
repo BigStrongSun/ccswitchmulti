@@ -61,6 +61,10 @@ import {
 } from "@/components/ui/tooltip";
 import { providersApi } from "@/lib/api";
 import {
+  authApi,
+  type CodexAccountPoolPolicy,
+} from "@/lib/api/auth";
+import {
   fetchCodexOauthCachedModels,
   fetchCodexOauthModels,
   fetchModelsForConfig,
@@ -340,6 +344,25 @@ type MultiRouterSettingsDraft = {
   defaultRouteId?: string;
   officialAuth: CodexOfficialAuthConfig;
 };
+
+export function resolveCodexRouterAuthFacadeLabel(
+  officialAuth: CodexOfficialAuthConfig,
+  poolPolicy?: CodexAccountPoolPolicy,
+): "Desktop / 混合认证" | "CCSM 托管认证" | "待确认" {
+  if (officialAuth.mode === "desktop_current_login") {
+    return "Desktop / 混合认证";
+  }
+  if (officialAuth.mode === "managed_oauth") {
+    return "CCSM 托管认证";
+  }
+  if (!poolPolicy) return "待确认";
+  return poolPolicy.enabled &&
+    poolPolicy.entries.some(
+      (entry) => entry.accountId === "native_codex_auth" && entry.enabled,
+    )
+    ? "Desktop / 混合认证"
+    : "CCSM 托管认证";
+}
 
 type ProviderModelRefreshState = {
   status: "loading" | "success" | "error" | "skipped";
@@ -3934,6 +3957,11 @@ function MultiRouterSettingsPanel({
   const [officialAccountId, setOfficialAccountId] = useState(
     initialOfficialAuth.accountId ?? "",
   );
+  const [restartNotice, setRestartNotice] = useState<string | null>(null);
+  const { data: accountPoolPolicy } = useQuery({
+    queryKey: ["codex-account-pool-policy"],
+    queryFn: authApi.getCodexAccountPoolPolicy,
+  });
   const { data: globalProxyConfig, error: globalProxyConfigError } = useQuery<
     GlobalProxyConfig,
     Error
@@ -4011,18 +4039,32 @@ function MultiRouterSettingsPanel({
       return;
     }
 
+    const nextOfficialAuth: CodexOfficialAuthConfig = {
+      mode: officialAuthMode,
+      ...(officialAuthMode === "managed_oauth" && officialAccountId
+        ? { accountId: officialAccountId }
+        : {}),
+    };
+    const previousFacade = resolveCodexRouterAuthFacadeLabel(
+      initialOfficialAuth,
+      accountPoolPolicy,
+    );
+    const nextFacade = resolveCodexRouterAuthFacadeLabel(
+      nextOfficialAuth,
+      accountPoolPolicy,
+    );
     await onSave(selectedPlan, {
       name,
       notes,
       enabled,
       defaultRouteId,
-      officialAuth: {
-        mode: officialAuthMode,
-        ...(officialAuthMode === "managed_oauth" && officialAccountId
-          ? { accountId: officialAccountId }
-          : {}),
-      },
+      officialAuth: nextOfficialAuth,
     });
+    setRestartNotice(
+      previousFacade !== nextFacade && nextFacade !== "待确认"
+        ? `当前 MultiRouter 已切换为${nextFacade}。请完全退出并重启 Codex；已有任务不会热加载新的认证门面。`
+        : null,
+    );
     setIsSavingListener(false);
   }
 
@@ -4230,6 +4272,26 @@ function MultiRouterSettingsPanel({
                   ? "官方模型使用 CCSM 保存的 OAuth 登录，不读取 Desktop 当前登录令牌。"
                   : "官方模型复用 Codex Desktop 当前登录；请求仍经过 CCSM，并使用 HTTP Responses。"}
             </p>
+            <div className="rounded-md border border-blue-200 bg-background/80 px-3 py-2 text-xs leading-5 text-muted-foreground dark:border-blue-700/40 dark:bg-slate-950/50 dark:text-slate-300">
+              生成的认证门面：
+              <span className="font-semibold text-foreground dark:text-slate-100">
+                {resolveCodexRouterAuthFacadeLabel(
+                  {
+                    mode: officialAuthMode,
+                    ...(officialAuthMode === "managed_oauth" &&
+                    officialAccountId
+                      ? { accountId: officialAccountId }
+                      : {}),
+                  },
+                  accountPoolPolicy,
+                )}
+              </span>
+            </div>
+            {restartNotice ? (
+              <div className="rounded-md border border-amber-300 bg-amber-50 p-2 text-xs leading-5 text-amber-900 dark:border-amber-700/60 dark:bg-amber-950/30 dark:text-amber-100">
+                {restartNotice}
+              </div>
+            ) : null}
             {!selectedRouting.officialAuth &&
             (selectedRouting.routes ?? []).some(
               codexRouteUsesOfficialAuthentication,

@@ -41,6 +41,13 @@ export interface CodexAccountPoolPolicy {
   entries: CodexAccountPoolEntry[];
 }
 
+export interface CodexAuthFacadeReprojectionOutcome {
+  applied: boolean;
+  facadeChanged: boolean;
+  codexRestartRequired: boolean;
+  facade?: "native_mixed" | "fully_managed";
+}
+
 export interface CodexAccountPoolQuotaStatus {
   accountId: string;
   remainingPercent: number | null;
@@ -120,7 +127,7 @@ export async function getCodexAccountPoolPolicy(): Promise<CodexAccountPoolPolic
 
 export async function setCodexAccountPoolPolicy(
   policy: CodexAccountPoolPolicy,
-): Promise<void> {
+): Promise<CodexAuthFacadeReprojectionOutcome> {
   return invoke("set_codex_account_pool_policy", { policy });
 }
 

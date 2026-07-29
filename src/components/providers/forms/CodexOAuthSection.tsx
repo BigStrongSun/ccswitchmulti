@@ -28,9 +28,36 @@ import {
 } from "lucide-react";
 import { useCodexOauth } from "./hooks/useCodexOauth";
 import { copyText } from "@/lib/clipboard";
-import { authApi, type CodexAccountPoolPolicy } from "@/lib/api/auth";
+import {
+  authApi,
+  type CodexAccountPoolPolicy,
+  type CodexAuthFacadeReprojectionOutcome,
+} from "@/lib/api/auth";
 
 const NATIVE_CODEX_ACCOUNT_ID = "native_codex_auth";
+
+export function codexAccountPoolFacadeLabel(
+  policy: CodexAccountPoolPolicy,
+): string {
+  const canUseDesktop =
+    policy.enabled &&
+    policy.entries.some(
+      (entry) =>
+        entry.accountId === NATIVE_CODEX_ACCOUNT_ID && entry.enabled,
+    );
+  return canUseDesktop ? "Desktop / 混合认证" : "CCSM 托管认证";
+}
+
+export function codexPoolFacadeRestartMessage(
+  outcome: CodexAuthFacadeReprojectionOutcome,
+): string | null {
+  if (!outcome.codexRestartRequired) return null;
+  const facade =
+    outcome.facade === "native_mixed"
+      ? "Desktop / 混合认证"
+      : "CCSM 托管认证";
+  return `当前 MultiRouter 已切换为${facade}。请完全退出并重启 Codex；已有任务不会热加载新的认证门面。`;
+}
 
 interface CodexOAuthSectionProps {
   className?: string;
@@ -59,6 +86,9 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
 }) => {
   const { t } = useTranslation();
   const [copied, setCopied] = React.useState(false);
+  const [poolFacadeNotice, setPoolFacadeNotice] = React.useState<string | null>(
+    null,
+  );
   const queryClient = useQueryClient();
   const poolQueryKey = ["codex-account-pool-policy"];
 
@@ -97,6 +127,9 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
     onMutate: async (policy) => {
       await queryClient.cancelQueries({ queryKey: poolQueryKey });
       queryClient.setQueryData(poolQueryKey, policy);
+    },
+    onSuccess: (outcome) => {
+      setPoolFacadeNotice(codexPoolFacadeRestartMessage(outcome));
     },
     onSettled: () => queryClient.invalidateQueries({ queryKey: poolQueryKey }),
   });
@@ -246,6 +279,18 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
             <p className="text-xs text-muted-foreground">
               {isRefreshingPoolQuota ? "正在刷新账号额度…" : "额度每 5 分钟刷新；查询失败时保留上次可信状态。"}
             </p>
+          )}
+          <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs leading-5 text-muted-foreground">
+            账号池门面预览：
+            <span className="font-medium text-foreground">
+              {codexAccountPoolFacadeLabel(poolPolicy)}
+            </span>
+            。仅影响明确选择“OAuth 账号池”的 MultiRouter。
+          </div>
+          {poolFacadeNotice && (
+            <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-xs leading-5 text-amber-900 dark:border-amber-700/60 dark:bg-amber-950/30 dark:text-amber-100">
+              {poolFacadeNotice}
+            </div>
           )}
           {poolMutation.isError && <p className="text-xs text-red-500">账号切换策略保存失败：{String(poolMutation.error)}</p>}
         </div>

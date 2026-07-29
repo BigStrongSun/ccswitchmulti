@@ -25,6 +25,7 @@ import {
   normalizeCodexRouteForSave,
   normalizeCodexRoutesForVisibleModelAliases,
   readCodexRouting,
+  resolveCodexRouterAuthFacadeLabel,
   validateProxyListenDraft,
 } from "./CodexRouterWorkspacePage";
 
@@ -72,6 +73,15 @@ vi.mock("@/lib/api", () => ({
   providersApi: {
     add: vi.fn(),
     update: vi.fn(),
+  },
+}));
+
+vi.mock("@/lib/api/auth", () => ({
+  authApi: {
+    getCodexAccountPoolPolicy: vi.fn().mockResolvedValue({
+      enabled: false,
+      entries: [],
+    }),
   },
 }));
 
@@ -203,6 +213,48 @@ it("没有 MultiRouter 方案时打开工作台不会读取 null settingsConfig"
 });
 
 describe("Codex MultiRouter workspace route persistence helpers", () => {
+  it("按 Router 官方认证与账号池 Desktop 成员展示生成门面", () => {
+    expect(
+      resolveCodexRouterAuthFacadeLabel({ mode: "desktop_current_login" }),
+    ).toBe("Desktop / 混合认证");
+    expect(
+      resolveCodexRouterAuthFacadeLabel({ mode: "managed_oauth" }),
+    ).toBe("CCSM 托管认证");
+    expect(
+      resolveCodexRouterAuthFacadeLabel(
+        { mode: "account_pool" },
+        {
+          enabled: true,
+          entries: [
+            {
+              accountId: "native_codex_auth",
+              enabled: true,
+              reservePercent: 5,
+            },
+          ],
+        },
+      ),
+    ).toBe("Desktop / 混合认证");
+    expect(
+      resolveCodexRouterAuthFacadeLabel(
+        { mode: "account_pool" },
+        {
+          enabled: true,
+          entries: [
+            {
+              accountId: "native_codex_auth",
+              enabled: false,
+              reservePercent: 5,
+            },
+          ],
+        },
+      ),
+    ).toBe("CCSM 托管认证");
+    expect(
+      resolveCodexRouterAuthFacadeLabel({ mode: "account_pool" }),
+    ).toBe("待确认");
+  });
+
   it("refreshes an official OAuth catalog with the bound account and syncs new models into its route", async () => {
     vi.mocked(fetchCodexOauthModels).mockResolvedValue([
       { id: "gpt-5.5", ownedBy: "openai", contextWindow: 272000 },
