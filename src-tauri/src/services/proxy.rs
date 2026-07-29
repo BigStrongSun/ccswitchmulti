@@ -2747,6 +2747,33 @@ impl ProxyService {
         proxy_url: &str,
         provider: Option<&Provider>,
     ) -> Result<String, String> {
+        let pool_policy = if provider.is_some_and(Self::codex_provider_uses_account_pool) {
+            match crate::proxy::providers::codex_oauth_auth::read_persisted_account_pool_policy(
+                &crate::config::get_app_config_dir(),
+            ) {
+                Ok(policy) => policy,
+                Err(error) => {
+                    log::warn!("读取 Codex OAuth 账号池策略失败，保留旧 Router 认证门面: {error}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        Self::apply_codex_proxy_toml_config_with_pool_policy(
+            toml_str,
+            proxy_url,
+            provider,
+            pool_policy.as_ref(),
+        )
+    }
+
+    fn apply_codex_proxy_toml_config_with_pool_policy(
+        toml_str: &str,
+        proxy_url: &str,
+        provider: Option<&Provider>,
+        pool_policy: Option<&crate::proxy::providers::codex_oauth_auth::CodexAccountPoolPolicy>,
+    ) -> Result<String, String> {
         if provider.is_some_and(crate::proxy::providers::is_codex_official_provider) {
             return crate::codex_config::apply_codex_official_proxy_route(toml_str, proxy_url)
                 .map_err(|error| format!("生成 Codex 官方接管配置失败: {error}"));
@@ -2756,15 +2783,22 @@ impl ProxyService {
             .parse::<DocumentMut>()
             .map_err(|error| format!("解析 Codex config.toml 失败: {error}"))?;
 
-        let proxy_provider_id = if Self::codex_provider_has_enabled_routing(provider) {
+        let is_multirouter = Self::codex_provider_has_enabled_routing(provider);
+        let proxy_provider_id = if is_multirouter {
             crate::codex_config::CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID
         } else {
             crate::codex_config::CC_SWITCH_CODEX_MODEL_PROVIDER_ID
         };
-        let proxy_provider_name = provider
-            .map(|provider| provider.name.as_str())
-            .filter(|name| !name.trim().is_empty())
-            .unwrap_or(CODEX_LOCAL_PROXY_PROVIDER_NAME);
+        let legacy_facade = is_multirouter
+            .then(|| Self::legacy_codex_multirouter_auth_facade(&doc, proxy_provider_id));
+        let proxy_provider_name = if is_multirouter {
+            "OpenAI"
+        } else {
+            provider
+                .map(|provider| provider.name.as_str())
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or(CODEX_LOCAL_PROXY_PROVIDER_NAME)
+        };
 
         doc["model_provider"] = toml_edit::value(proxy_provider_id);
         doc.as_table_mut().remove("base_url");
@@ -2777,12 +2811,33 @@ impl ProxyService {
         doc["model_providers"][proxy_provider_id]["name"] = toml_edit::value(proxy_provider_name);
         doc["model_providers"][proxy_provider_id]["base_url"] = toml_edit::value(proxy_url.trim());
         doc["model_providers"][proxy_provider_id]["wire_api"] = toml_edit::value("responses");
-        // 保留 OpenAI OAuth 语义只影响 Codex Desktop 的登录、额度和账户状态；
-        // 实际请求仍用 PROXY_MANAGED bearer token 命中本地 MultiRouter。
-        doc["model_providers"][proxy_provider_id]["requires_openai_auth"] = toml_edit::value(true);
-        doc["model_providers"][proxy_provider_id]["experimental_bearer_token"] =
-            toml_edit::value(PROXY_TOKEN_PLACEHOLDER);
         doc["model_providers"][proxy_provider_id]["supports_websockets"] = toml_edit::value(false);
+
+        if is_multirouter {
+            let classified = provider
+                .map(|provider| {
+                    crate::proxy::providers::classify_codex_multirouter_auth_facade(
+                        provider,
+                        pool_policy,
+                    )
+                })
+                .unwrap_or(crate::proxy::providers::CodexMultiRouterAuthFacade::LegacyPreserved);
+            let facade = match classified {
+                crate::proxy::providers::CodexMultiRouterAuthFacade::LegacyPreserved => {
+                    legacy_facade.unwrap_or(
+                        crate::proxy::providers::CodexMultiRouterAuthFacade::FullyManaged,
+                    )
+                }
+                facade => facade,
+            };
+            Self::apply_codex_multirouter_auth_facade_to_doc(&mut doc, proxy_provider_id, facade);
+        } else {
+            // 普通第三方 provider 没有 route 级凭据所有权，继续让 CCSM 统一注入。
+            doc["model_providers"][proxy_provider_id]["requires_openai_auth"] =
+                toml_edit::value(true);
+            doc["model_providers"][proxy_provider_id]["experimental_bearer_token"] =
+                toml_edit::value(PROXY_TOKEN_PLACEHOLDER);
+        }
 
         if let Some(upstream_model) =
             provider.and_then(crate::proxy::providers::codex_provider_upstream_model)
@@ -2791,6 +2846,84 @@ impl ProxyService {
         }
 
         Ok(doc.to_string())
+    }
+
+    fn codex_provider_uses_account_pool(provider: &Provider) -> bool {
+        provider
+            .settings_config
+            .pointer("/codexRouting/routes")
+            .and_then(Value::as_array)
+            .is_some_and(|routes| {
+                routes.iter().any(|route| {
+                    route
+                        .get("enabled")
+                        .and_then(Value::as_bool)
+                        .is_none_or(|enabled| enabled)
+                        && route
+                            .pointer("/upstream/auth/source")
+                            .and_then(Value::as_str)
+                            == Some("account_pool")
+                })
+            })
+    }
+
+    fn legacy_codex_multirouter_auth_facade(
+        doc: &DocumentMut,
+        provider_id: &str,
+    ) -> crate::proxy::providers::CodexMultiRouterAuthFacade {
+        let provider = doc
+            .get("model_providers")
+            .and_then(|providers| providers.get(provider_id));
+        let has_proxy_token = provider
+            .and_then(|provider| provider.get("experimental_bearer_token"))
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| !value.trim().is_empty())
+            || doc
+                .get("experimental_bearer_token")
+                .and_then(|value| value.as_str())
+                .is_some_and(|value| !value.trim().is_empty());
+        let requires_openai_auth = provider
+            .and_then(|provider| provider.get("requires_openai_auth"))
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+
+        if requires_openai_auth && !has_proxy_token {
+            crate::proxy::providers::CodexMultiRouterAuthFacade::NativeMixed
+        } else {
+            // 旧 CCSM 同时写 requires_openai_auth 和 PROXY_MANAGED；Codex 的 token
+            // 优先级使它在效果上属于 Fully Managed，重建时改成无歧义表达。
+            crate::proxy::providers::CodexMultiRouterAuthFacade::FullyManaged
+        }
+    }
+
+    fn apply_codex_multirouter_auth_facade_to_doc(
+        doc: &mut DocumentMut,
+        provider_id: &str,
+        facade: crate::proxy::providers::CodexMultiRouterAuthFacade,
+    ) {
+        let provider = &mut doc["model_providers"][provider_id];
+        match facade {
+            crate::proxy::providers::CodexMultiRouterAuthFacade::NativeMixed => {
+                provider["requires_openai_auth"] = toml_edit::value(true);
+                provider
+                    .as_table_like_mut()
+                    .expect("new provider is a TOML table")
+                    .remove("experimental_bearer_token");
+                let mut headers = toml_edit::InlineTable::new();
+                headers.insert("x-cc-switch-proxy-mode", toml_edit::Value::from("router"));
+                provider["http_headers"] =
+                    toml_edit::Item::Value(toml_edit::Value::InlineTable(headers));
+            }
+            crate::proxy::providers::CodexMultiRouterAuthFacade::FullyManaged
+            | crate::proxy::providers::CodexMultiRouterAuthFacade::LegacyPreserved => {
+                provider["requires_openai_auth"] = toml_edit::value(false);
+                provider["experimental_bearer_token"] = toml_edit::value(PROXY_TOKEN_PLACEHOLDER);
+                provider
+                    .as_table_like_mut()
+                    .expect("new provider is a TOML table")
+                    .remove("http_headers");
+            }
+        }
     }
 
     /// 判断当前 Codex provider 是否是启用中的 MultiRouter。
@@ -5267,6 +5400,159 @@ wire_api = "chat"
         assert!(
             parsed.get("openai_base_url").is_none(),
             "takeover live config must not use the reserved built-in OpenAI base URL override"
+        );
+    }
+
+    fn codex_multirouter_provider(auth_source: &str) -> Provider {
+        Provider::with_id(
+            "router".to_string(),
+            "用户自定义 Router 名称".to_string(),
+            json!({
+                "codexRouting": {
+                    "enabled": true,
+                    "officialAuth": {
+                        "mode": match auth_source {
+                            "native_codex_auth" => "desktop_current_login",
+                            "account_pool" => "account_pool",
+                            _ => "managed_oauth",
+                        }
+                    },
+                    "routes": [{
+                        "id": "route",
+                        "enabled": true,
+                        "upstream": {
+                            "auth": { "source": auth_source }
+                        }
+                    }]
+                }
+            }),
+            None,
+        )
+    }
+
+    #[test]
+    fn codex_multirouter_takeover_facade_projects_native_mixed_toml() {
+        let provider = codex_multirouter_provider("native_codex_auth");
+        let output = ProxyService::apply_codex_proxy_toml_config_with_pool_policy(
+            r#"experimental_bearer_token = "stale-top-level"
+
+[model_providers.codex_model_router_v2]
+name = "旧 Router 名"
+experimental_bearer_token = "PROXY_MANAGED"
+supports_websockets = true
+"#,
+            "http://127.0.0.1:5000/v1",
+            Some(&provider),
+            None,
+        )
+        .expect("project native facade");
+        let parsed: toml::Value = toml::from_str(&output).expect("valid TOML");
+        let route = &parsed["model_providers"]
+            [crate::codex_config::CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID];
+
+        assert_eq!(
+            parsed["model_provider"].as_str(),
+            Some(crate::codex_config::CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID)
+        );
+        assert_eq!(route["name"].as_str(), Some("OpenAI"));
+        assert_eq!(route["requires_openai_auth"].as_bool(), Some(true));
+        assert_eq!(route["wire_api"].as_str(), Some("responses"));
+        assert_eq!(route["supports_websockets"].as_bool(), Some(false));
+        assert_eq!(
+            route["http_headers"]["x-cc-switch-proxy-mode"].as_str(),
+            Some("router")
+        );
+        assert!(route.get("experimental_bearer_token").is_none());
+        assert!(parsed.get("experimental_bearer_token").is_none());
+        assert!(!output.contains("用户自定义 Router 名称"));
+    }
+
+    #[test]
+    fn codex_multirouter_takeover_facade_projects_fully_managed_toml() {
+        let provider = codex_multirouter_provider("managed_codex_oauth");
+        let output = ProxyService::apply_codex_proxy_toml_config_with_pool_policy(
+            r#"[model_providers.codex_model_router_v2]
+name = "OpenAI"
+requires_openai_auth = true
+http_headers = { x-cc-switch-proxy-mode = "router", x-user-header = "drop-with-old-table" }
+"#,
+            "http://127.0.0.1:5000/v1",
+            Some(&provider),
+            None,
+        )
+        .expect("project managed facade");
+        let parsed: toml::Value = toml::from_str(&output).expect("valid TOML");
+        let route = &parsed["model_providers"]
+            [crate::codex_config::CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID];
+
+        assert_eq!(route["name"].as_str(), Some("OpenAI"));
+        assert_eq!(route["requires_openai_auth"].as_bool(), Some(false));
+        assert_eq!(
+            route["experimental_bearer_token"].as_str(),
+            Some(PROXY_TOKEN_PLACEHOLDER)
+        );
+        assert!(route.get("http_headers").is_none());
+    }
+
+    #[test]
+    fn codex_multirouter_takeover_facade_uses_account_pool_desktop_membership() {
+        use crate::proxy::providers::codex_oauth_auth::{
+            CodexAccountPoolEntry, CodexAccountPoolPolicy, NATIVE_CODEX_ACCOUNT_ID,
+        };
+
+        let provider = codex_multirouter_provider("account_pool");
+        let policy = CodexAccountPoolPolicy {
+            enabled: true,
+            entries: vec![CodexAccountPoolEntry {
+                account_id: NATIVE_CODEX_ACCOUNT_ID.to_string(),
+                enabled: true,
+                reserve_percent: 5.0,
+            }],
+        };
+        let output = ProxyService::apply_codex_proxy_toml_config_with_pool_policy(
+            "",
+            "http://127.0.0.1:5000/v1",
+            Some(&provider),
+            Some(&policy),
+        )
+        .expect("project pool facade");
+        let parsed: toml::Value = toml::from_str(&output).expect("valid TOML");
+        let route = &parsed["model_providers"]
+            [crate::codex_config::CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID];
+        assert_eq!(route["requires_openai_auth"].as_bool(), Some(true));
+        assert!(route.get("experimental_bearer_token").is_none());
+    }
+
+    #[test]
+    fn codex_multirouter_takeover_facade_preserves_legacy_effective_auth_mode() {
+        let mut provider = codex_multirouter_provider("provider_config");
+        provider.settings_config["codexRouting"]["routes"][0]["upstream"]
+            .as_object_mut()
+            .expect("upstream object")
+            .remove("auth");
+
+        let output = ProxyService::apply_codex_proxy_toml_config_with_pool_policy(
+            r#"model_provider = "codex_model_router_v2"
+
+[model_providers.codex_model_router_v2]
+name = "Legacy Router"
+requires_openai_auth = true
+experimental_bearer_token = "PROXY_MANAGED"
+"#,
+            "http://127.0.0.1:5000/v1",
+            Some(&provider),
+            None,
+        )
+        .expect("preserve legacy facade");
+        let parsed: toml::Value = toml::from_str(&output).expect("valid TOML");
+        let route = &parsed["model_providers"]
+            [crate::codex_config::CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID];
+
+        assert_eq!(route["name"].as_str(), Some("OpenAI"));
+        assert_eq!(route["requires_openai_auth"].as_bool(), Some(false));
+        assert_eq!(
+            route["experimental_bearer_token"].as_str(),
+            Some(PROXY_TOKEN_PLACEHOLDER)
         );
     }
 
