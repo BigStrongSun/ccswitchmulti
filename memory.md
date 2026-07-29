@@ -1,5 +1,15 @@
 # CC Switch Repository Memory
 
+## 2026-07-30 Codex MultiRouter 动态认证门面实现与接管清理根修
+
+- 本轮按 `docs/superpowers/specs/2026-07-29-codex-multirouter-auth-facade-design.md` 完成动态门面。MultiRouter 的稳定身份始终为 `model_provider = "codex_model_router_v2"`，能力名始终为 `name = "OpenAI"`，传输固定 `wire_api = "responses"`、`supports_websockets = false`；`name` 只声明 OpenAI 能力，不决定凭据归属，CCSM managed OAuth 同样可以使用 `name = "OpenAI"`。
+- Native/Mixed 门面用于任一启用 route 可能使用 Desktop 当前登录态的情况：`requires_openai_auth = true`、不写 `experimental_bearer_token`，用本地控制头 `x-cc-switch-proxy-mode = "router"` 识别进入 Router 的请求。Fully Managed 门面用于全部 route 由 CCSM/目标 provider 管理凭据的情况：`requires_openai_auth = false`、`experimental_bearer_token = "PROXY_MANAGED"`。旧 Router 缺少 auth source 时保留其原有生效语义，不能静默迁移认证所有权。
+- 根因链：Codex 凭据优先级会让 `PROXY_MANAGED` 遮蔽 Desktop OAuth；旧固定投影因此无法让 native route 收到真实登录态。修复后 route 是最终认证事实：native route 才透传来向 Authorization；固定 OAuth、账号池 managed candidate 和第三方 route 必须删除来向 Authorization 后注入自己的凭据；所有 `x-cc-switch-*` 控制头在每种出站 transport 前统一剥离，External Agent API 仍不能借用 Desktop OAuth。
+- 账号池策略保存后立即重投影当前启用的 MultiRouter，并返回 `facadeChanged`、`codexRestartRequired` 和最终 facade。UI 在 Router Workspace 与 Codex OAuth 设置区用中文显示“Desktop / 混合认证”“CCSM 托管认证”及重启提示。认证门面改变不承诺热修复：用户必须完全退出并重启 Codex，已有任务不会热加载新的认证所有权。
+- 最后兜底根因：无备份且 SSOT 不可恢复时，旧清理逻辑只删除回环 URL 和 `PROXY_MANAGED`，Native/Mixed Router 本来就没有 placeholder，导致 `codex_model_router_v2`、模型目录和 `x-cc-switch-proxy-mode` 残留在 live TOML。`49d0095a` 将 CCSM Router 投影视为一个配置单元，兜底时完整恢复到内建 `openai`，同时保留真实 `auth.json`、MCP、projects 等用户全局配置；红绿测试证明旧逻辑失败、新逻辑通过。
+- 实现提交依次为 `e2c8e845`（门面分类）、`bb62fbfc`（动态 TOML 投影）、`70c4716b`（凭据所有权隔离）、`909a61e1`（账号池重投影）、`a15d83e0`（中文 UI/重启提示）、`a6558bd7`（接管识别回归）、`49d0095a`（Router 完整解绑）、`c11781ff`（Prettier 规范化）。`auth.json` 全程保持真实 Desktop OAuth，不写 placeholder。
+- 最终验证：`cargo test --manifest-path src-tauri/Cargo.toml --lib` 为 2359 passed / 2 ignored / 0 failed；`pnpm test:unit -- --maxWorkers=1 --minWorkers=1` 为 88 files / 651 tests 全通过；`pnpm typecheck`、`pnpm format:check`、`cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` 全通过。仓库没有 `pnpm lint` 脚本，不能把该命令不存在误判为 lint 失败。
+
 ## 2026-07-29 Codex MultiRouter 动态认证门面设计
 
 - `model_provider` 是任务和配置身份，provider `name` 是 Codex 能力声明；当前 Codex 以精确 `name == "OpenAI"` 开启远程压缩、Web Search、图片和部分 OpenAI 元数据路径。MultiRouter 固定使用 `codex_model_router_v2`，Codex 侧 `name` 固定为 `OpenAI`，用户可见 Router 名只保存在 CCSM UI/数据库。CCSM managed OAuth 同样使用 `name = "OpenAI"`，认证所有权不由 name 决定。
