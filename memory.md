@@ -6,6 +6,7 @@
 - Codex、GitHub Copilot 和 xAI 三个 OAuth 区域统一使用 `OAuthDeleteConfirmDialog`。单账号删除和移除全部账号都先展示目标与不可撤销提示，只有确认后才调用 `removeAccount/logout`；取消不改变账号或当前选择。
 - 定向组件回归覆盖连续输入只保存一次、pending 锁定、单账号确认删除和全部账号取消。后续认证 UI 必须继续复用统一确认契约，不能在按钮 `onClick` 中直接调用删除 API。
 - Grok Build 新建表单的预设列表此前无首屏预算，约 40 个按钮会把名称、认证和 API 地址全部推到窗口下方。`ProviderPresetSelector` 现在提供默认关闭的可选折叠模式；Grok Build 单独启用前 8 个预设与“展开全部”，搜索仍展示全部匹配结果，选择预设后平滑滚动到主表单。其他应用的预设列表行为不变。
+- Grok 既有组件回归必须先展开列表再选择首屏之外的预设。jsdom 不实现真实 WebView 已有的 `Element.scrollIntoView`，统一测试环境提供 no-op polyfill，避免 `requestAnimationFrame` 中的滚动回调成为未捕获异常并污染后续测试。
 - Codex 账号池、OAuth 删除确认和 Router 官方认证设置已补齐 `zh/en/ja/zh-TW`。运行时门面名称也必须通过当前 locale 生成，不能只翻译重启提示模板后插入中文门面；默认账号有 ID 与无 ID 使用不同 key，避免空 ID 显示成空括号。
 
 ## 2026-07-30 合并上游 v3.19.0 到 CCSwitchMulti 3.19.0-1

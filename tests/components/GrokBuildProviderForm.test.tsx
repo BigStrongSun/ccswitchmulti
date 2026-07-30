@@ -33,9 +33,7 @@ describe("GrokBuildProviderForm", () => {
       />,
     );
 
-    expect(
-      screen.queryByLabelText(/(?:Show in|在) Codex \/model/i),
-    ).toBeNull();
+    expect(screen.queryByLabelText(/(?:Show in|在) Codex \/model/i)).toBeNull();
   });
 
   it("offers curated Grok Build presets and applies one", async () => {
@@ -124,6 +122,7 @@ describe("GrokBuildProviderForm", () => {
       />,
     );
 
+    await user.click(screen.getByRole("button", { name: /展开全部/ }));
     await user.click(screen.getByRole("button", { name: /APIKEY\.FUN/ }));
     await user.type(screen.getByLabelText("API Key"), "secret-key");
     await user.click(screen.getByRole("button", { name: "Save" }));
