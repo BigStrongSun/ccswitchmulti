@@ -23,6 +23,7 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
 import {
   Activity,
   AlertTriangle,
@@ -345,20 +346,43 @@ type MultiRouterSettingsDraft = {
 export function resolveCodexRouterAuthFacadeLabel(
   officialAuth: CodexOfficialAuthConfig,
   poolPolicy?: CodexAccountPoolPolicy,
-): "Desktop / 混合认证" | "CCSM 托管认证" | "待确认" {
+  translate?: (
+    key: string,
+    options: { defaultValue: string; [key: string]: unknown },
+  ) => string,
+): string {
   if (officialAuth.mode === "desktop_current_login") {
-    return "Desktop / 混合认证";
+    return (
+      translate?.("codexRouterAuth.facadeNativeMixed", {
+        defaultValue: "Desktop / 混合认证",
+      }) ?? "Desktop / 混合认证"
+    );
   }
   if (officialAuth.mode === "managed_oauth") {
-    return "CCSM 托管认证";
+    return (
+      translate?.("codexRouterAuth.facadeManaged", {
+        defaultValue: "CCSM 托管认证",
+      }) ?? "CCSM 托管认证"
+    );
   }
-  if (!poolPolicy) return "待确认";
-  return poolPolicy.enabled &&
+  if (!poolPolicy)
+    return (
+      translate?.("codexRouterAuth.facadePending", {
+        defaultValue: "待确认",
+      }) ?? "待确认"
+    );
+  const nativeMixed =
+    poolPolicy.enabled &&
     poolPolicy.entries.some(
       (entry) => entry.accountId === "native_codex_auth" && entry.enabled,
-    )
-    ? "Desktop / 混合认证"
-    : "CCSM 托管认证";
+    );
+  return nativeMixed
+    ? (translate?.("codexRouterAuth.facadeNativeMixed", {
+        defaultValue: "Desktop / 混合认证",
+      }) ?? "Desktop / 混合认证")
+    : (translate?.("codexRouterAuth.facadeManaged", {
+        defaultValue: "CCSM 托管认证",
+      }) ?? "CCSM 托管认证");
 }
 
 type ProviderModelRefreshState = {
@@ -3939,6 +3963,7 @@ function MultiRouterSettingsPanel({
   onClose: () => void;
   isSaving: boolean;
 }) {
+  const { t } = useTranslation();
   const queryClient = useQueryClient();
   const selectedRouting = readCodexRouting(selectedPlan) ?? {};
   const { accounts: codexOauthAccounts, defaultAccountId } = useCodexOauth();
@@ -4045,10 +4070,12 @@ function MultiRouterSettingsPanel({
     const previousFacade = resolveCodexRouterAuthFacadeLabel(
       initialOfficialAuth,
       accountPoolPolicy,
+      t,
     );
     const nextFacade = resolveCodexRouterAuthFacadeLabel(
       nextOfficialAuth,
       accountPoolPolicy,
+      t,
     );
     await onSave(selectedPlan, {
       name,
@@ -4058,8 +4085,14 @@ function MultiRouterSettingsPanel({
       officialAuth: nextOfficialAuth,
     });
     setRestartNotice(
-      previousFacade !== nextFacade && nextFacade !== "待确认"
-        ? `当前 MultiRouter 已切换为${nextFacade}。请完全退出并重启 Codex；已有任务不会热加载新的认证门面。`
+      previousFacade !== nextFacade &&
+        nextFacade !==
+          t("codexRouterAuth.facadePending", { defaultValue: "待确认" })
+        ? t("codexRouterAuth.restartNotice", {
+            facade: nextFacade,
+            defaultValue:
+              "当前 MultiRouter 已切换为{{facade}}。请完全退出并重启 Codex；已有任务不会热加载新的认证门面。",
+          })
         : null,
     );
     setIsSavingListener(false);
@@ -4211,7 +4244,9 @@ function MultiRouterSettingsPanel({
           <div className="grid gap-3 rounded-lg border border-blue-200 bg-blue-50/70 p-3 dark:border-blue-700/40 dark:bg-blue-950/10">
             <div>
               <label className="text-xs font-semibold text-muted-foreground dark:text-slate-300">
-                官方 ChatGPT 认证方式
+                {t("codexRouterAuth.label", {
+                  defaultValue: "官方 ChatGPT 认证方式",
+                })}
               </label>
               <select
                 value={officialAuthMode}
@@ -4224,16 +4259,28 @@ function MultiRouterSettingsPanel({
                 disabled={isSaving || isSavingListener}
               >
                 <option value="desktop_current_login">
-                  Codex Desktop 当前登录
+                  {t("codexRouterAuth.desktopOption", {
+                    defaultValue: "Codex Desktop 当前登录",
+                  })}
                 </option>
-                <option value="managed_oauth">CCSM OAuth</option>
-                <option value="account_pool">OAuth 账号池</option>
+                <option value="managed_oauth">
+                  {t("codexRouterAuth.managedOption", {
+                    defaultValue: "CCSM OAuth",
+                  })}
+                </option>
+                <option value="account_pool">
+                  {t("codexRouterAuth.poolOption", {
+                    defaultValue: "OAuth 账号池",
+                  })}
+                </option>
               </select>
             </div>
             {officialAuthMode === "managed_oauth" ? (
               <div>
                 <label className="text-xs font-semibold text-muted-foreground dark:text-slate-300">
-                  CCSM OAuth 账号
+                  {t("codexRouterAuth.managedAccountLabel", {
+                    defaultValue: "CCSM OAuth 账号",
+                  })}
                 </label>
                 <select
                   value={officialAccountId}
@@ -4242,21 +4289,34 @@ function MultiRouterSettingsPanel({
                   disabled={isSaving || isSavingListener}
                 >
                   <option value="">
-                    默认账号
-                    {defaultAccountId ? ` (${defaultAccountId})` : ""}
+                    {defaultAccountId
+                      ? t("codexRouterAuth.defaultAccountWithId", {
+                          accountId: defaultAccountId,
+                          defaultValue: "默认账号 ({{accountId}})",
+                        })
+                      : t("codexRouterAuth.defaultAccount", {
+                          defaultValue: "默认账号",
+                        })}
                   </option>
                   {officialAccountId &&
                   !codexOauthAccounts.some(
                     (account) => account.id === officialAccountId,
                   ) ? (
                     <option value={officialAccountId}>
-                      已保存账号 ({officialAccountId})
+                      {t("codexRouterAuth.savedAccount", {
+                        accountId: officialAccountId,
+                        defaultValue: "已保存账号 ({{accountId}})",
+                      })}
                     </option>
                   ) : null}
                   {codexOauthAccounts.map((account) => (
                     <option key={account.id} value={account.id}>
                       {account.login}
-                      {account.is_default ? "（默认）" : ""}
+                      {account.is_default
+                        ? t("codexRouterAuth.defaultMarker", {
+                            defaultValue: "（默认）",
+                          })
+                        : ""}
                     </option>
                   ))}
                 </select>
@@ -4264,13 +4324,24 @@ function MultiRouterSettingsPanel({
             ) : null}
             <p className="text-xs leading-5 text-muted-foreground dark:text-slate-500">
               {officialAuthMode === "account_pool"
-                ? "只对这个 MultiRouter 使用账号池；请在设置 > OAuth 中启用账号池并维护顺序、保留额度和可用账号。"
+                ? t("codexRouterAuth.poolHint", {
+                    defaultValue:
+                      "只对这个 MultiRouter 使用账号池；请在设置 > OAuth 中启用账号池并维护顺序、保留额度和可用账号。",
+                  })
                 : officialAuthMode === "managed_oauth"
-                  ? "官方模型使用 CCSM 保存的 OAuth 登录，不读取 Desktop 当前登录令牌。"
-                  : "官方模型复用 Codex Desktop 当前登录；请求仍经过 CCSM，并使用 HTTP Responses。"}
+                  ? t("codexRouterAuth.managedHint", {
+                      defaultValue:
+                        "官方模型使用 CCSM 保存的 OAuth 登录，不读取 Desktop 当前登录令牌。",
+                    })
+                  : t("codexRouterAuth.desktopHint", {
+                      defaultValue:
+                        "官方模型复用 Codex Desktop 当前登录；请求仍经过 CCSM，并使用 HTTP Responses。",
+                    })}
             </p>
             <div className="rounded-md border border-blue-200 bg-background/80 px-3 py-2 text-xs leading-5 text-muted-foreground dark:border-blue-700/40 dark:bg-slate-950/50 dark:text-slate-300">
-              生成的认证门面：
+              {t("codexRouterAuth.facadePreview", {
+                defaultValue: "生成的认证门面：",
+              })}
               <span className="font-semibold text-foreground dark:text-slate-100">
                 {resolveCodexRouterAuthFacadeLabel(
                   {
@@ -4281,6 +4352,7 @@ function MultiRouterSettingsPanel({
                       : {}),
                   },
                   accountPoolPolicy,
+                  t,
                 )}
               </span>
             </div>
@@ -4294,8 +4366,10 @@ function MultiRouterSettingsPanel({
               codexRouteUsesOfficialAuthentication,
             ) ? (
               <div className="rounded-md border border-amber-300 bg-amber-50 p-2 text-xs leading-5 text-amber-900 dark:border-amber-700/60 dark:bg-amber-950/30 dark:text-amber-100">
-                这是升级前创建的方案。当前仍按原 route
-                认证绑定运行；保存本页后才会把上面的选择写成 Router 级策略。
+                {t("codexRouterAuth.legacyNotice", {
+                  defaultValue:
+                    "这是升级前创建的方案。当前仍按原 route 认证绑定运行；保存本页后才会把上面的选择写成 Router 级策略。",
+                })}
               </div>
             ) : null}
           </div>

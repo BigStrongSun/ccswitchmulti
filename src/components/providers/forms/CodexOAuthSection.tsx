@@ -40,24 +40,50 @@ import {
 
 const NATIVE_CODEX_ACCOUNT_ID = "native_codex_auth";
 
+type UiTranslator = (
+  key: string,
+  options: { defaultValue: string; [key: string]: unknown },
+) => string;
+
 export function codexAccountPoolFacadeLabel(
   policy: CodexAccountPoolPolicy,
+  translate?: UiTranslator,
 ): string {
   const canUseDesktop =
     policy.enabled &&
     policy.entries.some(
       (entry) => entry.accountId === NATIVE_CODEX_ACCOUNT_ID && entry.enabled,
     );
-  return canUseDesktop ? "Desktop / 混合认证" : "CCSM 托管认证";
+  return canUseDesktop
+    ? (translate?.("codexOauth.facadeNativeMixed", {
+        defaultValue: "Desktop / 混合认证",
+      }) ?? "Desktop / 混合认证")
+    : (translate?.("codexOauth.facadeManaged", {
+        defaultValue: "CCSM 托管认证",
+      }) ?? "CCSM 托管认证");
 }
 
 export function codexPoolFacadeRestartMessage(
   outcome: CodexAuthFacadeReprojectionOutcome,
+  translate?: UiTranslator,
 ): string | null {
   if (!outcome.codexRestartRequired) return null;
   const facade =
-    outcome.facade === "native_mixed" ? "Desktop / 混合认证" : "CCSM 托管认证";
-  return `当前 MultiRouter 已切换为${facade}。请完全退出并重启 Codex；已有任务不会热加载新的认证门面。`;
+    outcome.facade === "native_mixed"
+      ? (translate?.("codexOauth.facadeNativeMixed", {
+          defaultValue: "Desktop / 混合认证",
+        }) ?? "Desktop / 混合认证")
+      : (translate?.("codexOauth.facadeManaged", {
+          defaultValue: "CCSM 托管认证",
+        }) ?? "CCSM 托管认证");
+  return (
+    translate?.("codexOauth.facadeRestartNotice", {
+      facade,
+      defaultValue:
+        "当前 MultiRouter 已切换为{{facade}}。请完全退出并重启 Codex；已有任务不会热加载新的认证门面。",
+    }) ??
+    `当前 MultiRouter 已切换为${facade}。请完全退出并重启 Codex；已有任务不会热加载新的认证门面。`
+  );
 }
 
 interface CodexOAuthSectionProps {
@@ -134,7 +160,7 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
       queryClient.setQueryData(poolQueryKey, policy);
     },
     onSuccess: (outcome) => {
-      setPoolFacadeNotice(codexPoolFacadeRestartMessage(outcome));
+      setPoolFacadeNotice(codexPoolFacadeRestartMessage(outcome, t));
     },
     onSettled: () => queryClient.invalidateQueries({ queryKey: poolQueryKey }),
   });
@@ -238,9 +264,14 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
         <div className="space-y-3 border-t pt-4">
           <div className="flex items-center justify-between gap-4">
             <div>
-              <Label>ChatGPT 账号自动切换</Label>
+              <Label>
+                {t("codexOauth.poolAutoSwitch", "ChatGPT 账号自动切换")}
+              </Label>
               <p className="mt-1 text-xs text-muted-foreground">
-                按列表顺序选择账号；达到保留额度后停止分配新任务。
+                {t(
+                  "codexOauth.poolDescription",
+                  "按列表顺序选择账号；达到保留额度后停止分配新任务。",
+                )}
               </p>
             </div>
             <Switch
@@ -249,7 +280,10 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
               onCheckedChange={(enabled) =>
                 updatePool((policy) => ({ ...policy, enabled }))
               }
-              aria-label="ChatGPT 账号自动切换"
+              aria-label={t(
+                "codexOauth.poolAutoSwitch",
+                "ChatGPT 账号自动切换",
+              )}
             />
           </div>
           <div className="space-y-1">
@@ -261,6 +295,12 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
               const quota = poolQuota.find(
                 (item) => item.accountId === entry.accountId,
               );
+              const accountLabel = native
+                ? t(
+                    "codexOauth.desktopCurrentAccount",
+                    "Codex Desktop 当前登录账号",
+                  )
+                : (account?.login ?? entry.accountId);
               return (
                 <div
                   key={entry.accountId}
@@ -276,14 +316,20 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
                   )}
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-sm font-medium">
-                      {native
-                        ? "Codex Desktop 当前登录账号"
-                        : (account?.login ?? entry.accountId)}
+                      {accountLabel}
                     </div>
                     <div className="text-xs text-muted-foreground">
                       {quota?.remainingPercent != null
-                        ? `剩余 ${quota.remainingPercent.toFixed(1)}%，低于 ${entry.reservePercent}% 时保留`
-                        : `剩余低于 ${entry.reservePercent}% 时保留`}
+                        ? t("codexOauth.poolRemaining", {
+                            remaining: quota.remainingPercent.toFixed(1),
+                            reserve: entry.reservePercent,
+                            defaultValue:
+                              "剩余 {{remaining}}%，低于 {{reserve}}% 时保留",
+                          })
+                        : t("codexOauth.poolRemainingUnknown", {
+                            reserve: entry.reservePercent,
+                            defaultValue: "剩余低于 {{reserve}}% 时保留",
+                          })}
                     </div>
                   </div>
                   <input
@@ -308,7 +354,10 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
                       }));
                     }}
                     className="h-8 w-16 rounded-md border bg-background px-2 text-right text-sm"
-                    aria-label={`${native ? "Codex Desktop 当前登录账号" : (account?.login ?? entry.accountId)} 保留额度`}
+                    aria-label={t("codexOauth.poolReserveAria", {
+                      account: accountLabel,
+                      defaultValue: "{{account}} 保留额度",
+                    })}
                   />
                   <span className="text-xs text-muted-foreground">%</span>
                   <Switch
@@ -324,7 +373,10 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
                         ),
                       }))
                     }
-                    aria-label={`启用 ${native ? "Codex Desktop 当前登录账号" : (account?.login ?? entry.accountId)}`}
+                    aria-label={t("codexOauth.poolEnableAria", {
+                      account: accountLabel,
+                      defaultValue: "启用 {{account}}",
+                    })}
                   />
                   <Button
                     type="button"
@@ -333,7 +385,7 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
                     className="h-7 w-7"
                     disabled={poolMutation.isPending || index === 0}
                     onClick={() => movePoolEntry(index, -1)}
-                    title="上移"
+                    title={t("codexOauth.poolMoveUp", "上移")}
                   >
                     <ArrowUp className="h-4 w-4" />
                   </Button>
@@ -347,7 +399,7 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
                       index === poolDraft.entries.length - 1
                     }
                     onClick={() => movePoolEntry(index, 1)}
-                    title="下移"
+                    title={t("codexOauth.poolMoveDown", "下移")}
                   >
                     <ArrowDown className="h-4 w-4" />
                   </Button>
@@ -358,16 +410,22 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
           {poolDraft.enabled && (
             <p className="text-xs text-muted-foreground">
               {isRefreshingPoolQuota
-                ? "正在刷新账号额度…"
-                : "额度每 5 分钟刷新；查询失败时保留上次可信状态。"}
+                ? t("codexOauth.poolRefreshing", "正在刷新账号额度…")
+                : t(
+                    "codexOauth.poolRefreshHint",
+                    "额度每 5 分钟刷新；查询失败时保留上次可信状态。",
+                  )}
             </p>
           )}
           <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs leading-5 text-muted-foreground">
-            账号池门面预览：
+            {t("codexOauth.poolFacadePreview", "账号池门面预览：")}
             <span className="font-medium text-foreground">
-              {codexAccountPoolFacadeLabel(poolDraft)}
+              {codexAccountPoolFacadeLabel(poolDraft, t)}
             </span>
-            。仅影响明确选择“OAuth 账号池”的 MultiRouter。
+            {t(
+              "codexOauth.poolScope",
+              "。仅影响明确选择“OAuth 账号池”的 MultiRouter。",
+            )}
           </div>
           {poolFacadeNotice && (
             <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-xs leading-5 text-amber-900 dark:border-amber-700/60 dark:bg-amber-950/30 dark:text-amber-100">
@@ -376,7 +434,10 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
           )}
           {poolMutation.isError && (
             <p className="text-xs text-red-500">
-              账号切换策略保存失败：{String(poolMutation.error)}
+              {t("codexOauth.poolSaveFailed", {
+                error: String(poolMutation.error),
+                defaultValue: "账号切换策略保存失败：{{error}}",
+              })}
             </p>
           )}
           <div className="flex justify-end gap-2">

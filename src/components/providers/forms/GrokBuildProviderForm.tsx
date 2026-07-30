@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useTranslation } from "react-i18next";
@@ -84,6 +84,7 @@ export function GrokBuildProviderForm({
 }: GrokBuildProviderFormProps) {
   const { t } = useTranslation();
   const isDarkMode = useDarkMode();
+  const primaryFieldsRef = useRef<HTMLDivElement>(null);
   const initialConfigText =
     typeof initialData?.settingsConfig?.config === "string"
       ? initialData.settingsConfig.config
@@ -444,10 +445,22 @@ export function GrokBuildProviderForm({
             presetCategoryLabels={presetCategoryLabels}
             onPresetChange={handlePresetChange}
             category={category}
+            collapsible
+            initialVisibleCount={8}
+            onPresetSelected={() => {
+              requestAnimationFrame(() =>
+                primaryFieldsRef.current?.scrollIntoView({
+                  behavior: "smooth",
+                  block: "start",
+                }),
+              );
+            }}
           />
         )}
 
-        <BasicFormFields form={form} />
+        <div ref={primaryFieldsRef} className="scroll-mt-4">
+          <BasicFormFields form={form} />
+        </div>
 
         {category !== "official" && (
           <>

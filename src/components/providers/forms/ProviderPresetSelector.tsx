@@ -12,6 +12,8 @@ import {
   Heart,
   Layers,
   Settings2,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 import type { ProviderPreset } from "@/config/claudeProviderPresets";
 import type { CodexProviderPreset } from "@/config/codexProviderPresets";
@@ -148,6 +150,9 @@ interface ProviderPresetSelectorProps {
   onManageUniversalProviders?: () => void;
   selectionMode?: "provider" | "codex-router-source";
   category?: ProviderCategory; // 当前选中的分类
+  collapsible?: boolean;
+  initialVisibleCount?: number;
+  onPresetSelected?: () => void;
 }
 
 export function ProviderPresetSelector({
@@ -159,6 +164,9 @@ export function ProviderPresetSelector({
   onManageUniversalProviders,
   selectionMode = "provider",
   category,
+  collapsible = false,
+  initialVisibleCount = 8,
+  onPresetSelected,
 }: Readonly<ProviderPresetSelectorProps>) {
   const { t } = useTranslation();
   const isCodexRouterSourceMode = selectionMode === "codex-router-source";
@@ -167,6 +175,7 @@ export function ProviderPresetSelector({
   const [sortMode, setSortMode] = useState<PresetSortMode>(
     PresetSortMode.Original,
   );
+  const [expanded, setExpanded] = useState(false);
   const searchContainerRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
 
@@ -216,6 +225,21 @@ export function ProviderPresetSelector({
       }),
     [presetEntries, searchQuery, sortMode, t],
   );
+  const normalizedVisibleCount = Math.max(1, initialVisibleCount);
+  const isFiltering = searchQuery.trim().length > 0;
+  const shouldLimitPresets =
+    collapsible &&
+    !expanded &&
+    !isFiltering &&
+    visiblePresetEntries.length > normalizedVisibleCount;
+  const displayedPresetEntries = shouldLimitPresets
+    ? visiblePresetEntries.slice(0, normalizedVisibleCount)
+    : visiblePresetEntries;
+
+  const selectPreset = (presetId: string) => {
+    onPresetChange(presetId);
+    onPresetSelected?.();
+  };
 
   const getCategoryHint = (): ReactNode => {
     // Codex 多路路由创建入口强调“选择模型源”，避免用户误进手写完整供应商配置。
@@ -409,7 +433,7 @@ export function ProviderPresetSelector({
       <div className="grid grid-cols-[repeat(auto-fill,minmax(150px,1fr))] gap-2">
         <button
           type="button"
-          onClick={() => onPresetChange("custom")}
+          onClick={() => selectPreset("custom")}
           className={`inline-flex items-center justify-start gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors w-full ${
             selectedPresetId === "custom"
               ? "bg-blue-500 text-white dark:bg-blue-600"
@@ -434,7 +458,7 @@ export function ProviderPresetSelector({
           </div>
         )}
 
-        {visiblePresetEntries.map((entry) => {
+        {displayedPresetEntries.map((entry) => {
           const isSelected = selectedPresetId === entry.id;
           const isPartner = entry.preset.isPartner;
           const isPrimePartner = entry.preset.primePartner;
@@ -443,7 +467,7 @@ export function ProviderPresetSelector({
             <button
               key={entry.id}
               type="button"
-              onClick={() => onPresetChange(entry.id)}
+              onClick={() => selectPreset(entry.id)}
               className={`${getPresetButtonClass(isSelected, entry.preset)} relative`}
               style={getPresetButtonStyle(isSelected, entry.preset)}
               title={
@@ -473,13 +497,41 @@ export function ProviderPresetSelector({
         })}
       </div>
 
+      {collapsible &&
+        !isFiltering &&
+        visiblePresetEntries.length > normalizedVisibleCount && (
+          <div className="flex justify-center">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => setExpanded((current) => !current)}
+            >
+              {expanded ? (
+                <ChevronUp className="mr-2 h-4 w-4" />
+              ) : (
+                <ChevronDown className="mr-2 h-4 w-4" />
+              )}
+              {expanded
+                ? t("providerPreset.collapse", { defaultValue: "收起预设" })
+                : t("providerPreset.expandAll", {
+                    count: visiblePresetEntries.length,
+                    defaultValue: "展开全部（{{count}} 个）",
+                  })}
+            </Button>
+          </div>
+        )}
+
       {onUniversalPresetSelect && universalProviderPresets.length > 0 && (
         <div className="grid grid-cols-[repeat(auto-fill,minmax(150px,1fr))] gap-2">
           {universalProviderPresets.map((preset) => (
             <button
               key={`universal-${preset.providerType}`}
               type="button"
-              onClick={() => onUniversalPresetSelect(preset)}
+              onClick={() => {
+                onUniversalPresetSelect(preset);
+                onPresetSelected?.();
+              }}
               className="inline-flex items-center justify-start gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors bg-accent text-muted-foreground hover:bg-accent/80 relative w-full"
               title={t("universalProvider.hint", {
                 defaultValue: "跨应用统一配置，自动同步到 Claude/Codex/Gemini",
