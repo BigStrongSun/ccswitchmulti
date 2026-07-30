@@ -6707,6 +6707,27 @@ mod tests {
     }
 
     #[test]
+    /// 自定义 OpenAI provider 不继承内建 provider 的 version 头；最终出站前必须从
+    /// 同一可信 Codex 客户端的 User-Agent 恢复真实版本，不能继续使用 CCSM 硬编码版本。
+    fn codex_oauth_identity_restores_version_from_matching_native_user_agent() {
+        let mut headers = HeaderMap::new();
+        headers.insert("originator", HeaderValue::from_static("Codex Desktop"));
+        headers.insert(
+            http::header::USER_AGENT,
+            HeaderValue::from_static(
+                "Codex Desktop/0.151.0 (Windows 11; x86_64) codex-terminal/1.0",
+            ),
+        );
+
+        enforce_codex_oauth_originator(&mut headers, true, true);
+
+        assert_eq!(
+            headers.get("version"),
+            Some(&HeaderValue::from_static("0.151.0"))
+        );
+    }
+
+    #[test]
     /// 官方 CLI、VS Code、TUI 和 ChatGPT Desktop 身份都属于可保留白名单。
     fn codex_oauth_originator_accepts_official_first_party_values() {
         for originator in [

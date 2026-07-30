@@ -5660,6 +5660,10 @@ supports_websockets = true
         assert_eq!(route["wire_api"].as_str(), Some("responses"));
         assert_eq!(route["supports_websockets"].as_bool(), Some(false));
         assert_eq!(
+            route["supports_standalone_web_search"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
             route["http_headers"]["x-cc-switch-proxy-mode"].as_str(),
             Some("router")
         );
@@ -5688,6 +5692,10 @@ http_headers = { x-cc-switch-proxy-mode = "router", x-user-header = "drop-with-o
 
         assert_eq!(route["name"].as_str(), Some("OpenAI"));
         assert_eq!(route["requires_openai_auth"].as_bool(), Some(false));
+        assert_eq!(
+            route["supports_standalone_web_search"].as_bool(),
+            Some(true)
+        );
         assert_eq!(
             route["experimental_bearer_token"].as_str(),
             Some(PROXY_TOKEN_PLACEHOLDER)
