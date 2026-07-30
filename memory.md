@@ -1,5 +1,11 @@
 # CC Switch Repository Memory
 
+## 2026-07-30 v3.19.0-1 OAuth 交互审查修复
+
+- Codex 账号池不能在数值输入的 `onChange` 中直接持久化。连续输入会产生多个并发 mutation，响应乱序后服务端最终值可能回退。现在开关、排序、启用状态和保留额度统一编辑本地草稿，只有点击“保存账号池设置”才提交一次最终 policy；保存期间整组冲突控件禁用，可在提交前放弃更改。
+- Codex、GitHub Copilot 和 xAI 三个 OAuth 区域统一使用 `OAuthDeleteConfirmDialog`。单账号删除和移除全部账号都先展示目标与不可撤销提示，只有确认后才调用 `removeAccount/logout`；取消不改变账号或当前选择。
+- 定向组件回归覆盖连续输入只保存一次、pending 锁定、单账号确认删除和全部账号取消。后续认证 UI 必须继续复用统一确认契约，不能在按钮 `onClick` 中直接调用删除 API。
+
 ## 2026-07-30 合并上游 v3.19.0 到 CCSwitchMulti 3.19.0-1
 
 - 分支 `bigstrongsun/merge-upstream-v3.19.0` 将上游 tag `v3.19.0`（`09ccf328`）合入 CCSwitchMulti，版本统一为 `3.19.0-1`。合并保留上游 schema v16、安全修复、Grok Build/xAI OAuth、models.dev 同步、使用日志清理与 Codex 用量重建，同时保留 CCSM MultiRouter、OAuth 账号池、Native/Mixed 接管、Codex 历史恢复/fork timeline 去重、媒体桥接和 Responses-Lite fallback。

@@ -25,6 +25,10 @@ import {
 import { useCopilotAuth } from "./hooks/useCopilotAuth";
 import { copyText } from "@/lib/clipboard";
 import type { GitHubAccount } from "@/lib/api";
+import {
+  OAuthDeleteConfirmDialog,
+  type OAuthDeleteTarget,
+} from "./OAuthDeleteConfirmDialog";
 
 interface CopilotAuthSectionProps {
   className?: string;
@@ -50,6 +54,8 @@ export const CopilotAuthSection: React.FC<CopilotAuthSectionProps> = ({
     "github.com" | "enterprise"
   >("github.com");
   const [enterpriseDomain, setEnterpriseDomain] = React.useState("");
+  const [deleteTarget, setDeleteTarget] =
+    React.useState<OAuthDeleteTarget | null>(null);
 
   // 根据部署类型计算实际的 GitHub 域名
   const effectiveGithubDomain =
@@ -97,11 +103,23 @@ export const CopilotAuthSection: React.FC<CopilotAuthSectionProps> = ({
   const handleRemoveAccount = (accountId: string, e: React.MouseEvent) => {
     e.stopPropagation();
     e.preventDefault();
-    removeAccount(accountId);
-    // 如果移除的是当前选中的账号，清除选择
-    if (selectedAccountId === accountId) {
+    const account = accounts.find((item) => item.id === accountId);
+    setDeleteTarget({
+      kind: "account",
+      accountId,
+      label: account?.login ?? accountId,
+    });
+  };
+
+  const confirmDelete = () => {
+    if (deleteTarget?.kind === "account") {
+      removeAccount(deleteTarget.accountId);
+      if (selectedAccountId === deleteTarget.accountId) onAccountSelect?.(null);
+    } else if (deleteTarget?.kind === "all") {
+      logout();
       onAccountSelect?.(null);
     }
+    setDeleteTarget(null);
   };
 
   // 渲染账号头像
@@ -392,13 +410,19 @@ export const CopilotAuthSection: React.FC<CopilotAuthSectionProps> = ({
         <Button
           type="button"
           variant="outline"
-          onClick={logout}
+          onClick={() => setDeleteTarget({ kind: "all" })}
           className="w-full text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950"
         >
           <LogOut className="mr-2 h-4 w-4" />
           {t("copilot.logoutAll", "注销所有账号")}
         </Button>
       )}
+      <OAuthDeleteConfirmDialog
+        target={deleteTarget}
+        providerLabel="GitHub Copilot"
+        onConfirm={confirmDelete}
+        onCancel={() => setDeleteTarget(null)}
+      />
     </div>
   );
 };

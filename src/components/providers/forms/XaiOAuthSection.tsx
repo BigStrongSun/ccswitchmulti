@@ -24,6 +24,10 @@ import {
 } from "@/components/ui/select";
 import { copyText } from "@/lib/clipboard";
 import { useXaiOauth } from "./hooks/useXaiOauth";
+import {
+  OAuthDeleteConfirmDialog,
+  type OAuthDeleteTarget,
+} from "./OAuthDeleteConfirmDialog";
 
 interface XaiOAuthSectionProps {
   className?: string;
@@ -38,6 +42,8 @@ export const XaiOAuthSection: React.FC<XaiOAuthSectionProps> = ({
 }) => {
   const { t } = useTranslation();
   const [copied, setCopied] = React.useState(false);
+  const [deleteTarget, setDeleteTarget] =
+    React.useState<OAuthDeleteTarget | null>(null);
   const {
     accounts,
     defaultAccountId,
@@ -69,8 +75,23 @@ export const XaiOAuthSection: React.FC<XaiOAuthSectionProps> = ({
   const remove = (accountId: string, event: React.MouseEvent) => {
     event.preventDefault();
     event.stopPropagation();
-    removeAccount(accountId);
-    if (selectedAccountId === accountId) onAccountSelect?.(null);
+    const account = accounts.find((item) => item.id === accountId);
+    setDeleteTarget({
+      kind: "account",
+      accountId,
+      label: account?.login ?? accountId,
+    });
+  };
+
+  const confirmDelete = () => {
+    if (deleteTarget?.kind === "account") {
+      removeAccount(deleteTarget.accountId);
+      if (selectedAccountId === deleteTarget.accountId) onAccountSelect?.(null);
+    } else if (deleteTarget?.kind === "all") {
+      logout();
+      onAccountSelect?.(null);
+    }
+    setDeleteTarget(null);
   };
 
   return (
@@ -313,12 +334,18 @@ export const XaiOAuthSection: React.FC<XaiOAuthSectionProps> = ({
           type="button"
           variant="outline"
           className="w-full text-red-500 hover:text-red-600"
-          onClick={logout}
+          onClick={() => setDeleteTarget({ kind: "all" })}
         >
           <LogOut className="mr-2 h-4 w-4" />
           {t("xaiOauth.logoutAll", "移除所有 xAI 账号")}
         </Button>
       )}
+      <OAuthDeleteConfirmDialog
+        target={deleteTarget}
+        providerLabel="xAI"
+        onConfirm={confirmDelete}
+        onCancel={() => setDeleteTarget(null)}
+      />
     </div>
   );
 };

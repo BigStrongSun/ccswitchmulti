@@ -33,6 +33,10 @@ import {
   type CodexAccountPoolPolicy,
   type CodexAuthFacadeReprojectionOutcome,
 } from "@/lib/api/auth";
+import {
+  OAuthDeleteConfirmDialog,
+  type OAuthDeleteTarget,
+} from "./OAuthDeleteConfirmDialog";
 
 const NATIVE_CODEX_ACCOUNT_ID = "native_codex_auth";
 
@@ -86,6 +90,10 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
   const [poolFacadeNotice, setPoolFacadeNotice] = React.useState<string | null>(
     null,
   );
+  const [poolDraft, setPoolDraft] =
+    React.useState<CodexAccountPoolPolicy | null>(null);
+  const [deleteTarget, setDeleteTarget] =
+    React.useState<OAuthDeleteTarget | null>(null);
   const queryClient = useQueryClient();
   const poolQueryKey = ["codex-account-pool-policy"];
 
@@ -131,10 +139,26 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
     onSettled: () => queryClient.invalidateQueries({ queryKey: poolQueryKey }),
   });
 
+  React.useEffect(() => {
+    if (poolPolicy && !poolMutation.isPending) {
+      setPoolDraft({
+        ...poolPolicy,
+        entries: poolPolicy.entries.map((entry) => ({ ...entry })),
+      });
+    }
+  }, [poolPolicy, poolMutation.isPending]);
+
+  const poolDraftDirty =
+    poolPolicy !== undefined &&
+    poolDraft !== null &&
+    JSON.stringify(poolPolicy) !== JSON.stringify(poolDraft);
+
   const updatePool = (
     transform: (policy: CodexAccountPoolPolicy) => CodexAccountPoolPolicy,
   ) => {
-    if (poolPolicy) poolMutation.mutate(transform(poolPolicy));
+    if (!poolMutation.isPending) {
+      setPoolDraft((current) => (current ? transform(current) : current));
+    }
   };
 
   const movePoolEntry = (index: number, delta: number) => {
@@ -162,10 +186,23 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
   const handleRemoveAccount = (accountId: string, e: React.MouseEvent) => {
     e.stopPropagation();
     e.preventDefault();
-    removeAccount(accountId);
-    if (selectedAccountId === accountId) {
+    const account = accounts.find((item) => item.id === accountId);
+    setDeleteTarget({
+      kind: "account",
+      accountId,
+      label: account?.login ?? accountId,
+    });
+  };
+
+  const confirmDelete = () => {
+    if (deleteTarget?.kind === "account") {
+      removeAccount(deleteTarget.accountId);
+      if (selectedAccountId === deleteTarget.accountId) onAccountSelect?.(null);
+    } else if (deleteTarget?.kind === "all") {
+      logout();
       onAccountSelect?.(null);
     }
+    setDeleteTarget(null);
   };
 
   return (
@@ -197,7 +234,7 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
         </div>
       )}
 
-      {poolPolicy && (
+      {poolDraft && (
         <div className="space-y-3 border-t pt-4">
           <div className="flex items-center justify-between gap-4">
             <div>
@@ -207,7 +244,8 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
               </p>
             </div>
             <Switch
-              checked={poolPolicy.enabled}
+              checked={poolDraft.enabled}
+              disabled={poolMutation.isPending}
               onCheckedChange={(enabled) =>
                 updatePool((policy) => ({ ...policy, enabled }))
               }
@@ -215,7 +253,7 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
             />
           </div>
           <div className="space-y-1">
-            {poolPolicy.entries.map((entry, index) => {
+            {poolDraft.entries.map((entry, index) => {
               const account = accounts.find(
                 (item) => item.id === entry.accountId,
               );
@@ -254,6 +292,7 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
                     max={100}
                     step={1}
                     value={entry.reservePercent}
+                    disabled={poolMutation.isPending}
                     onChange={(event) => {
                       const reservePercent = Math.min(
                         100,
@@ -274,6 +313,7 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
                   <span className="text-xs text-muted-foreground">%</span>
                   <Switch
                     checked={entry.enabled}
+                    disabled={poolMutation.isPending}
                     onCheckedChange={(enabled) =>
                       updatePool((policy) => ({
                         ...policy,
@@ -291,7 +331,7 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
                     variant="ghost"
                     size="icon"
                     className="h-7 w-7"
-                    disabled={index === 0}
+                    disabled={poolMutation.isPending || index === 0}
                     onClick={() => movePoolEntry(index, -1)}
                     title="上移"
                   >
@@ -302,7 +342,10 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
                     variant="ghost"
                     size="icon"
                     className="h-7 w-7"
-                    disabled={index === poolPolicy.entries.length - 1}
+                    disabled={
+                      poolMutation.isPending ||
+                      index === poolDraft.entries.length - 1
+                    }
                     onClick={() => movePoolEntry(index, 1)}
                     title="下移"
                   >
@@ -312,7 +355,7 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
               );
             })}
           </div>
-          {poolPolicy.enabled && (
+          {poolDraft.enabled && (
             <p className="text-xs text-muted-foreground">
               {isRefreshingPoolQuota
                 ? "正在刷新账号额度…"
@@ -322,7 +365,7 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
           <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs leading-5 text-muted-foreground">
             账号池门面预览：
             <span className="font-medium text-foreground">
-              {codexAccountPoolFacadeLabel(poolPolicy)}
+              {codexAccountPoolFacadeLabel(poolDraft)}
             </span>
             。仅影响明确选择“OAuth 账号池”的 MultiRouter。
           </div>
@@ -336,6 +379,33 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
               账号切换策略保存失败：{String(poolMutation.error)}
             </p>
           )}
+          <div className="flex justify-end gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              disabled={!poolDraftDirty || poolMutation.isPending}
+              onClick={() => {
+                if (poolPolicy) {
+                  setPoolDraft({
+                    ...poolPolicy,
+                    entries: poolPolicy.entries.map((entry) => ({ ...entry })),
+                  });
+                }
+              }}
+            >
+              {t("codexOauth.poolDiscard", "放弃更改")}
+            </Button>
+            <Button
+              type="button"
+              disabled={!poolDraftDirty || poolMutation.isPending}
+              onClick={() => poolMutation.mutate(poolDraft)}
+            >
+              {poolMutation.isPending && (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              )}
+              {t("codexOauth.poolSave", "保存账号池设置")}
+            </Button>
+          </div>
         </div>
       )}
 
@@ -568,13 +638,19 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
         <Button
           type="button"
           variant="outline"
-          onClick={logout}
+          onClick={() => setDeleteTarget({ kind: "all" })}
           className="w-full text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950"
         >
           <LogOut className="mr-2 h-4 w-4" />
           {t("codexOauth.logoutAll", "注销所有账号")}
         </Button>
       )}
+      <OAuthDeleteConfirmDialog
+        target={deleteTarget}
+        providerLabel="ChatGPT"
+        onConfirm={confirmDelete}
+        onCancel={() => setDeleteTarget(null)}
+      />
     </div>
   );
 };
