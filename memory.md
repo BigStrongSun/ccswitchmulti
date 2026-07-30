@@ -2436,3 +2436,12 @@
 - 网络身份边界：本机 Codex 的 User-Agent 和 host integration 提供的 `x-oai-attestation` 透传，External API 的 attestation 删除；CCSM 不生成或伪造 attestation。所有 `x-cc-switch-*` 控制头在普通和 raw transport 前剥离；经过代理后的 TLS/HTTP 实现不能声称与 Desktop 直连字节级不可区分。
 - 官方 `6219b7c4` 的普通 `ContentItem` 是 `input_text/input_image/input_audio/output_text`，没有 `input_file`；`encrypted_function_args` 是 `Option<Vec<String>>`。回归覆盖官方图片、音频、client metadata、内部消息 metadata、加密参数数组，以及 raw 文件 endpoint 的原始字节/认证边界，不能把兼容 API 的 `input_file` 误写成 Desktop 当前已发送。
 - 最终验证：Rust 全量库测试 `2369 passed / 2 ignored`；Vitest 单 worker 为 `88 files / 651 tests`；TypeScript typecheck、rustfmt 和 `git diff --check` 全部通过。Vitest 默认并发曾让既有 `tests/integration/App.test.tsx` 两项异步断言超时，单独重跑该文件 8/8 通过，随后单 worker 全量稳定通过，确认是测试共享状态/时序波动而非本次后端改动。
+
+## 2026-07-30 v3.19.0-1 新功能真实 UI 审查（待修）
+
+- 为避免与本机正在运行的 `3.16.5-21` 单实例混淆，使用临时 Tauri identifier `com.ccswitchmulti.ui-review` 从提交 `63f408d4ec58704ac66b1fc73eca65865dbe5757` 构建独立 release 可执行文件，并通过 `CC_SWITCH_TEST_HOME` 隔离用户数据。真实窗口验证覆盖：Grok Build 新建表单、Codex MultiRouter 工作台、Router 级 ChatGPT 认证方式、设置 > 认证账号池、使用统计、models.dev 自动同步和 Codex 用量维护。
+- 已确认 MultiRouter UI 能显示 `Codex Desktop 当前登录`、`CCSM OAuth`、`OAuth 账号池` 三种模式，显示认证门面预览、HTTP Responses、`supports_websockets=false`；账号池 UI 有 Desktop 当前登录账号、优先级、保留额度、启用开关、上下移动和五分钟额度刷新状态；models.dev 有开关、状态、本地文件、模型选择和立即同步，5121 条目录只显示最近 80 条并支持全量搜索；Codex 用量维护有警告和确认入口。
+- 待修交互正确性：`CodexOAuthSection` 的保留额度 `input` 在每次 `onChange` 都立即调用 `setCodexAccountPoolPolicy`，没有 debounce、显式保存、mutation 序列化或 pending 禁用。多位数字输入会产生并发持久化，响应乱序时最终阈值可能不是用户看到的值；排序、启用开关也可在 pending 时继续并发操作。
+- 待修删除保护：新增 `XaiOAuthSection` 的单账号移除和“移除所有 xAI 账号”均直接执行，没有确认对话框；Codex/Copilot 旧组件也存在同类问题。本次至少应在新 xAI OAuth 发布前补确认，并统一三个 OAuth 组件的删除契约。
+- 待修可发现性：Grok Build 新建页一次展示约 40 个预设且没有折叠/限高；在 903x631 的真实窗口中，供应商名称、认证和地址等主表单全部落在首屏下方，用户只看到预设矩阵和底部操作按钮。应限制预设区域高度、默认折叠非核心预设或选择后自动滚动到表单。
+- 本轮没有修改业务实现，也没有把单元测试当作 UI 验收。Windows UI 工具在最后检查 Codex 用量重建确认框时返回了错误窗口捕获，已立即停止 UI 输入并终止隔离审查进程；该确认逻辑随后只以 `UsageDashboard.tsx` 的 `ConfirmDialog` 源码确认，不能记为完成了可见确认框验收。
