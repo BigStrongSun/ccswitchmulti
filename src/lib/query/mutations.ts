@@ -20,7 +20,10 @@ export interface UpdateProviderMutationResult {
   provider: Provider;
   codexMultiRouterSyncResults?: CodexMultiRouterPlanSyncResult[];
 }
-import { CODEX_OFFICIAL_PROVIDER_ID } from "@/utils/providerCapabilities";
+import {
+  CODEX_OFFICIAL_PROVIDER_ID,
+  GROKBUILD_OFFICIAL_PROVIDER_ID,
+} from "@/utils/providerCapabilities";
 
 export const useAddProviderMutation = (appId: AppId) => {
   const queryClient = useQueryClient();
@@ -33,6 +36,7 @@ export const useAddProviderMutation = (appId: AppId) => {
         addToLive?: boolean;
         ensureClaudeDesktopOfficialSeed?: boolean;
         ensureCodexOfficialSeed?: boolean;
+        ensureGrokBuildOfficialSeed?: boolean;
       },
     ) => {
       const {
@@ -40,6 +44,7 @@ export const useAddProviderMutation = (appId: AppId) => {
         addToLive,
         ensureClaudeDesktopOfficialSeed,
         ensureCodexOfficialSeed,
+        ensureGrokBuildOfficialSeed,
         ...rest
       } = providerInput;
 
@@ -59,6 +64,16 @@ export const useAddProviderMutation = (appId: AppId) => {
         const officialProvider = providers[CODEX_OFFICIAL_PROVIDER_ID];
         if (!officialProvider) {
           throw new Error("Codex official provider was not created");
+        }
+        return officialProvider;
+      }
+
+      if (appId === "grokbuild" && ensureGrokBuildOfficialSeed) {
+        await providersApi.ensureGrokBuildOfficialProvider();
+        const providers = await providersApi.getAll(appId);
+        const officialProvider = providers[GROKBUILD_OFFICIAL_PROVIDER_ID];
+        if (!officialProvider) {
+          throw new Error("Grok Build official provider was not created");
         }
         return officialProvider;
       }

@@ -107,6 +107,15 @@ export async function fetchCodexOauthModels(
   });
 }
 
+/** 获取当前 xAI OAuth 账号可访问的模型列表。 */
+export async function fetchXaiOauthModels(
+  accountId?: string | null,
+): Promise<FetchedModel[]> {
+  return invoke("get_xai_oauth_models", {
+    accountId: accountId || null,
+  });
+}
+
 /**
  * 读取本地 Codex 官方模型缓存
  *

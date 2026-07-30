@@ -447,6 +447,7 @@ async fn sync_s3(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::collections::HashMap;
     use std::io::Write;
     use std::net::{TcpListener, TcpStream};
@@ -1030,6 +1031,7 @@ mod tests {
     // 7. WebDAV E2E via Mock Server
 
     #[tokio::test]
+    #[serial]
     async fn webdav_e2e_device_upload_and_discovery() {
         let (_port, _guard, _store) = start_mock_webdav();
         let base_url = format!("http://127.0.0.1:{_port}/");
@@ -1084,6 +1086,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn webdav_e2e_multiple_devices_discover_each_other() {
         let (_port, _guard, store) = start_mock_webdav();
         let base_url = format!("http://127.0.0.1:{_port}/");
@@ -1138,6 +1141,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn webdav_e2e_non_json_files_are_skipped() {
         let (_port, _guard, store) = start_mock_webdav();
         let base_url = format!("http://127.0.0.1:{_port}/");
@@ -1178,6 +1182,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn webdav_e2e_handles_404_gracefully() {
         let (_port, _guard, _store) = start_mock_webdav();
         let base_url = format!("http://127.0.0.1:{_port}/");

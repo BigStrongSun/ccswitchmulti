@@ -182,9 +182,13 @@ pub async fn fetch_models(options: FetchModelsRequest<'_>) -> Result<Vec<Fetched
     )?;
     let client = crate::proxy::http_client::get();
     let mut last_err: Option<String> = None;
+    let log_secrets = vec![options.api_key.to_string()];
 
     for url in &candidates {
-        log::debug!("[ModelFetch] Trying endpoint: {url}");
+        log::debug!(
+            "[ModelFetch] Trying endpoint: {}",
+            crate::url_for_log_with_secrets(url, &log_secrets)
+        );
         let mut request_builder = client
             .get(url)
             .header("Authorization", format!("Bearer {}", options.api_key))

@@ -14,6 +14,7 @@ import UsageFooter from "@/components/UsageFooter";
 import SubscriptionQuotaFooter from "@/components/SubscriptionQuotaFooter";
 import CopilotQuotaFooter from "@/components/CopilotQuotaFooter";
 import CodexOauthQuotaFooter from "@/components/CodexOauthQuotaFooter";
+import XaiOauthQuotaFooter from "@/components/XaiOauthQuotaFooter";
 import { PROVIDER_TYPES, TEMPLATE_TYPES } from "@/config/constants";
 import { isHermesReadOnlyProvider } from "@/config/hermesProviderPresets";
 import { ProviderHealthBadge } from "@/components/providers/ProviderHealthBadge";
@@ -21,13 +22,14 @@ import { FailoverPriorityBadge } from "@/components/providers/FailoverPriorityBa
 import {
   extractCodexBaseUrl,
   extractCodexExperimentalBearerToken,
-  extractCodexWireApi,
-  isCodexAnthropicWireApi,
-  isCodexChatWireApi,
 } from "@/utils/providerConfigUtils";
-import { supportsOfficialProxyTakeover } from "@/utils/providerCapabilities";
+import {
+  supportsOfficialProxyTakeover,
+  providerNeedsRouting,
+} from "@/utils/providerCapabilities";
 import { useProviderHealth } from "@/lib/query/failover";
 import { useUsageQuery } from "@/lib/query/queries";
+import { resolveProviderIcon } from "@/utils/providerIcon";
 
 interface DragHandleProps {
   attributes: DraggableAttributes;
@@ -261,7 +263,7 @@ export function ProviderCard({
   const usageEnabled = provider.meta?.usage_script?.enabled ?? false;
   const isOfficial = isOfficialProvider(provider, appId);
   const supportsOfficialSubscription =
-    isOfficial && ["claude", "codex", "gemini"].includes(appId);
+    isOfficial && ["claude", "codex", "gemini", "grokbuild"].includes(appId);
   const isOfficialSubscriptionUsage =
     provider.meta?.usage_script?.templateType ===
     TEMPLATE_TYPES.OFFICIAL_SUBSCRIPTION;
@@ -303,28 +305,11 @@ export function ProviderCard({
     ? provider.meta
     : codexRouteOauthMeta;
   const codexHasRouting = appId === "codex" && hasCodexRoutingConfig(provider);
-  const codexNeedsRouting = useMemo(() => {
-    if (appId !== "codex") return false;
-    if (hasCodexRoutingConfig(provider)) return true;
-    if (provider.category === "official") return false;
-    if (
-      provider.meta?.apiFormat === "openai_chat" ||
-      provider.meta?.apiFormat === "anthropic"
-    )
-      return true;
-    const config = (provider.settingsConfig as Record<string, any>)?.config;
-    return (
-      typeof config === "string" &&
-      (isCodexChatWireApi(extractCodexWireApi(config)) ||
-        isCodexAnthropicWireApi(extractCodexWireApi(config)))
-    );
-  }, [
-    appId,
-    provider.category,
-    provider.meta?.apiFormat,
-    (provider.settingsConfig as Record<string, any>)?.config,
-    (provider.settingsConfig as Record<string, any>)?.codexRouting,
-  ]);
+  // xAI OAuth (SuperGrok 反代)：额度经自管 OAuth token 自动显示，与 codex_oauth 同构
+  const isXaiOauth = provider.meta?.providerType === PROVIDER_TYPES.XAI_OAUTH;
+  // 统一权威谓词覆盖 MultiRouter、托管 OAuth 与协议转换。
+  const codexNeedsRouting =
+    appId === "codex" && providerNeedsRouting(appId, provider);
   // 获取用量数据以判断是否有多套餐
   // 累加模式应用（OpenCode/OpenClaw/Hermes）：使用 isInConfig 代替 isCurrent
   const shouldAutoQuery =
@@ -430,7 +415,11 @@ export function ProviderCard({
 
           <div className="h-8 w-8 flex-shrink-0 rounded-lg bg-muted flex items-center justify-center border border-border group-hover:scale-105 transition-transform duration-300">
             <ProviderIcon
-              icon={provider.icon}
+              icon={resolveProviderIcon(
+                appId,
+                provider.icon,
+                provider.iconColor,
+              )}
               name={provider.name}
               color={provider.iconColor}
               size={20}
@@ -456,8 +445,7 @@ export function ProviderCard({
               )}
 
               {appId === "claude-desktop" &&
-                provider.category !== "official" &&
-                provider.meta?.claudeDesktopMode === "proxy" && (
+                providerNeedsRouting(appId, provider) && (
                   <span className="inline-flex items-center rounded-md bg-sky-100 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700 dark:bg-sky-900/40 dark:text-sky-300">
                     {t("claudeDesktop.modeProxy", {
                       defaultValue: "需要路由",
@@ -465,16 +453,13 @@ export function ProviderCard({
                   </span>
                 )}
 
-              {appId === "claude" &&
-                provider.category !== "official" &&
-                provider.meta?.apiFormat &&
-                provider.meta.apiFormat !== "anthropic" && (
-                  <span className="inline-flex items-center rounded-md bg-sky-100 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700 dark:bg-sky-900/40 dark:text-sky-300">
-                    {t("claudeCode.needsRouting", {
-                      defaultValue: "需要路由",
-                    })}
-                  </span>
-                )}
+              {appId === "claude" && providerNeedsRouting(appId, provider) && (
+                <span className="inline-flex items-center rounded-md bg-sky-100 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700 dark:bg-sky-900/40 dark:text-sky-300">
+                  {t("claudeCode.needsRouting", {
+                    defaultValue: "需要路由",
+                  })}
+                </span>
+              )}
 
               {codexNeedsRouting &&
                 (codexHasRouting ? (
@@ -592,6 +577,12 @@ export function ProviderCard({
                   inline={true}
                   isCurrent={isCurrent}
                 />
+              ) : isXaiOauth ? (
+                <XaiOauthQuotaFooter
+                  meta={provider.meta}
+                  inline={true}
+                  isCurrent={isCurrent}
+                />
               ) : isOfficial ? (
                 officialSubscriptionEnabled ? (
                   <SubscriptionQuotaFooter
@@ -672,7 +663,8 @@ export function ProviderCard({
               onConfigureUsage={
                 (isOfficial && !supportsOfficialSubscription) ||
                 isCopilot ||
-                isCodexOauth
+                isCodexOauth ||
+                isXaiOauth
                   ? undefined
                   : () => onConfigureUsage(provider)
               }

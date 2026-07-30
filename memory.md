@@ -1,5 +1,15 @@
 # CC Switch Repository Memory
 
+## 2026-07-30 合并上游 v3.19.0 到 CCSwitchMulti 3.19.0-1
+
+- 分支 `bigstrongsun/merge-upstream-v3.19.0` 将上游 tag `v3.19.0`（`09ccf328`）合入 CCSwitchMulti，版本统一为 `3.19.0-1`。合并保留上游 schema v16、安全修复、Grok Build/xAI OAuth、models.dev 同步、使用日志清理与 Codex 用量重建，同时保留 CCSM MultiRouter、OAuth 账号池、Native/Mixed 接管、Codex 历史恢复/fork timeline 去重、媒体桥接和 Responses-Lite fallback。
+- Codex 认证合并边界：内置 `codex-official` 是 Desktop 当前登录态，adapter 不生成 managed OAuth placeholder；旧版非内置 empty-official backup 仍兼容推断为 CCSM managed OAuth。判断必须先看 `provider_uses_native_codex_auth()`，再走 legacy managed inference，不能仅凭 `category=official` 决定凭据所有权。
+- 媒体桥接边界：Responses/Chat 工具结果统一支持图片、`input_file`、Chat-style/`audio_url` 音频；`encrypted_content` 和未知二进制结构只在 `ToolMediaScope::AllSupported` 中替换为有界占位。`ImagesOnly`/`InlineImagesOnly` 仍严格只处理图片，已知 `image`/`video` 的普通 `data` 字段继续交给统一 base64 限幅，不能被敏感结构兜底提前删除。
+- Codex 直接切换失败回滚必须调用 `write_codex_live_snapshot(previous_live, false)` 原样恢复切换前 snapshot；普通 provider restore 才用 `merge_existing_config=true`。否则目标 provider table 已写入 live 后，回滚再次 merge 会把污染表保留下来。
+- Grok Build 复用 `CodexFormFields` 时不显示 Codex 专属 `/model` 菜单投影开关；`/models` 异步探测使用请求身份序号，账号、Key 或 URL 切换后旧响应不能覆盖新状态；官方类别 MultiRouter 也必须进入 routing-aware UI。
+- 测试隔离根因：`proxy::http_client::test_system_proxy_points_to_loopback` 曾改写 6 个进程级代理环境变量但不恢复，也没有进入 `serial_test` 全局锁，导致并发 WebDAV 回环 E2E 偶发用污染环境构建 reqwest client。修复后该测试保存/恢复环境，四个 WebDAV E2E 与其共享 `#[serial]`，默认并发全量 Rust 测试稳定通过。
+- 最终验证：`cargo test --manifest-path src-tauri/Cargo.toml --quiet` 为 2782 passed / 2 ignored / 0 failed；`pnpm test:unit -- --maxWorkers=1 --minWorkers=1 --reporter=dot` 为 102 files / 774 tests 全通过；`pnpm typecheck`、`pnpm format:check`、`cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`、双父版本 locale leaf-key 并集校验和 `git diff --check` 均通过。Windows installer 只构建交付，不在本机安装；真机验证后再 push/tag/Release。
+
 ## 2026-07-30 Codex MultiRouter 动态认证门面实现与接管清理根修
 
 - 本轮按 `docs/superpowers/specs/2026-07-29-codex-multirouter-auth-facade-design.md` 完成动态门面。MultiRouter 的稳定身份始终为 `model_provider = "codex_model_router_v2"`，能力名始终为 `name = "OpenAI"`，传输固定 `wire_api = "responses"`、`supports_websockets = false`；`name` 只声明 OpenAI 能力，不决定凭据归属，CCSM managed OAuth 同样可以使用 `name = "OpenAI"`。

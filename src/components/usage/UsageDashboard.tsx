@@ -20,6 +20,8 @@ import {
   Coins,
   LayoutGrid,
   Trash2,
+  DatabaseBackup,
+  Loader2,
 } from "lucide-react";
 import { ProviderIcon } from "@/components/ProviderIcon";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -51,6 +53,7 @@ import { getLocaleFromLanguage } from "./format";
 import { getUsageRangePresetLabel, resolveUsageRange } from "@/lib/usageRange";
 import { UsageDateRangePicker } from "./UsageDateRangePicker";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { usageApi } from "@/lib/api/usage";
 import { toast } from "sonner";
 
 const APP_FILTER_OPTIONS: AppTypeFilter[] = ["all", ...KNOWN_APP_TYPES];
@@ -72,6 +75,7 @@ const APP_FILTER_ICON: Record<AppType, string> = {
   claude: "claude",
   codex: "openai",
   gemini: "gemini",
+  grokbuild: "grok",
   opencode: "opencode",
 };
 
@@ -104,6 +108,8 @@ export function UsageDashboard({
   );
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
   const clearUsageLogs = useClearUsageLogs();
+  const [showRebuildConfirm, setShowRebuildConfirm] = useState(false);
+  const [rebuildingCodex, setRebuildingCodex] = useState(false);
 
   useEffect(() => {
     setRefreshIntervalMs(normalizeRefreshInterval(savedRefreshIntervalMs));
@@ -168,6 +174,34 @@ export function UsageDashboard({
         );
       },
     });
+  };
+
+  const rebuildCodexUsage = async () => {
+    setShowRebuildConfirm(false);
+    setRebuildingCodex(true);
+    try {
+      const result = await usageApi.rebuildCodexUsage();
+      await queryClient.invalidateQueries({ queryKey: usageKeys.all });
+      const message = t("usage.rebuildCodex.completed", {
+        imported: result.imported,
+        errors: result.errors.length,
+        suspected: result.suspectedDuplicates,
+        deferred: result.deferredFiles,
+      });
+      if (result.errors.length > 0 || result.deferredFiles > 0) {
+        toast.warning(message);
+      } else {
+        toast.success(message);
+      }
+    } catch (error) {
+      toast.error(
+        t("usage.rebuildCodex.failed", {
+          error: String(error),
+        }),
+      );
+    } finally {
+      setRebuildingCodex(false);
+    }
   };
 
   const language = i18n.resolvedLanguage || i18n.language || "en";
@@ -492,7 +526,55 @@ export function UsageDashboard({
             <PricingConfigPanel />
           </AccordionContent>
         </AccordionItem>
+        <AccordionItem
+          value="maintenance"
+          className="rounded-xl glass-card overflow-hidden"
+        >
+          <AccordionTrigger className="px-6 py-4 hover:no-underline hover:bg-muted/50 data-[state=open]:bg-muted/50">
+            <div className="flex items-center gap-3">
+              <DatabaseBackup className="h-5 w-5 text-orange-500" />
+              <div className="text-left">
+                <h3 className="text-base font-semibold">
+                  {t("usage.rebuildCodex.title")}
+                </h3>
+                <p className="text-sm text-muted-foreground font-normal">
+                  {t("usage.rebuildCodex.description")}
+                </p>
+              </div>
+            </div>
+          </AccordionTrigger>
+          <AccordionContent className="px-6 pb-6 pt-4 border-t border-border/50">
+            <div className="flex items-center justify-between gap-4 rounded-lg border border-destructive/20 bg-destructive/5 p-4">
+              <p className="text-sm text-muted-foreground">
+                {t("usage.rebuildCodex.warning")}
+              </p>
+              <Button
+                variant="destructive"
+                disabled={rebuildingCodex}
+                onClick={() => setShowRebuildConfirm(true)}
+                className="shrink-0"
+              >
+                {rebuildingCodex ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                ) : (
+                  <DatabaseBackup className="mr-2 h-4 w-4" />
+                )}
+                {t("usage.rebuildCodex.action")}
+              </Button>
+            </div>
+          </AccordionContent>
+        </AccordionItem>
       </Accordion>
+
+      <ConfirmDialog
+        isOpen={showRebuildConfirm}
+        title={t("usage.rebuildCodex.confirmTitle")}
+        message={t("usage.rebuildCodex.confirmMessage")}
+        confirmText={t("usage.rebuildCodex.confirmAction")}
+        variant="destructive"
+        onConfirm={() => void rebuildCodexUsage()}
+        onCancel={() => setShowRebuildConfirm(false)}
+      />
     </motion.div>
   );
 }

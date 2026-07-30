@@ -2,7 +2,7 @@
 
 # CCSwitchMulti
 
-### 面向 Codex 的多模型路由与 Provider 管理工具
+### 面向八类 Agent 工具的 Provider 管理与 Codex 多模型路由工具
 
 [![Version](https://img.shields.io/github/v/release/BigStrongSun/ccswitchmulti?color=blue&label=version)](https://github.com/BigStrongSun/ccswitchmulti/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/BigStrongSun/ccswitchmulti/releases)

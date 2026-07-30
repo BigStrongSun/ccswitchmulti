@@ -337,6 +337,7 @@ pub fn mask_url(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::sync::{Mutex, OnceLock};
 
     fn env_lock() -> &'static Mutex<()> {
@@ -412,6 +413,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_system_proxy_points_to_loopback() {
         let _guard = env_lock().lock().unwrap();
 
@@ -426,6 +428,10 @@ mod tests {
             "ALL_PROXY",
             "all_proxy",
         ];
+        let original_values: Vec<_> = keys
+            .iter()
+            .map(|key| (*key, std::env::var_os(key)))
+            .collect();
 
         for key in &keys {
             std::env::remove_var(key);
@@ -443,8 +449,11 @@ mod tests {
         std::env::set_var("HTTP_PROXY", "http://10.0.0.2:7890");
         assert!(!system_proxy_points_to_loopback());
 
-        for key in &keys {
-            std::env::remove_var(key);
+        for (key, value) in original_values {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
         }
     }
 }

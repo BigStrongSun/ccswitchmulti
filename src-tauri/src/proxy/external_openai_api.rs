@@ -687,7 +687,11 @@ fn provider_can_be_openai_compatible(app_type: &AppType, provider: &Provider) ->
         return true;
     }
     match app_type {
-        AppType::Codex | AppType::OpenCode | AppType::OpenClaw | AppType::Hermes => true,
+        AppType::Codex
+        | AppType::GrokBuild
+        | AppType::OpenCode
+        | AppType::OpenClaw
+        | AppType::Hermes => true,
         AppType::Claude | AppType::ClaudeDesktop | AppType::Gemini => false,
     }
 }

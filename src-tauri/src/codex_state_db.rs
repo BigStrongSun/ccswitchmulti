@@ -83,6 +83,7 @@ mod tests {
     fn includes_config_sqlite_home() {
         let temp = tempdir().expect("tempdir");
         let sqlite_home = temp.path().join("sqlite-home");
+        // TOML literal strings preserve Windows backslashes without escape parsing.
         let config_text = format!("sqlite_home = '''{}'''\n", sqlite_home.display());
 
         let paths = codex_state_db_paths(temp.path(), &config_text);
