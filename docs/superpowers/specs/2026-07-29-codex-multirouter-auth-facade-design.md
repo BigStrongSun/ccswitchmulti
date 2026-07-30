@@ -1,7 +1,7 @@
 # Codex MultiRouter 动态认证门面设计
 
 日期：2026-07-29
-状态：设计方向已批准，等待实施计划
+状态：已实施并完成源码、定向与全量自动回归
 
 ## 问题
 
@@ -50,6 +50,7 @@ name = "OpenAI"
 base_url = "http://127.0.0.1:<port>/v1"
 wire_api = "responses"
 supports_websockets = false
+supports_standalone_web_search = true
 ```
 
 Desktop OAuth 和 CCSM managed OAuth 都使用 `name = "OpenAI"`。`name` 不表示凭据由 OpenAI 或 Codex 持有，而是要求 Codex 保留 OpenAI Responses 能力路径，包括远程压缩和 OpenAI 工具元数据。真正的认证所有权由门面认证模式和选中的 route 决定。
@@ -71,6 +72,7 @@ base_url = "http://127.0.0.1:<port>/v1"
 requires_openai_auth = true
 wire_api = "responses"
 supports_websockets = false
+supports_standalone_web_search = true
 http_headers = { "x-cc-switch-proxy-mode" = "router" }
 ```
 
@@ -100,6 +102,7 @@ requires_openai_auth = false
 experimental_bearer_token = "PROXY_MANAGED"
 wire_api = "responses"
 supports_websockets = false
+supports_standalone_web_search = true
 ```
 
 Codex 只发送本地占位符。CCSM 必须在所有 managed OAuth 或第三方上游请求前替换该占位符。占位符到达 managed upstream 前仍然必须硬失败。
@@ -128,6 +131,7 @@ base_url = "http://127.0.0.1:<port>/v1"
 requires_openai_auth = true
 wire_api = "responses"
 supports_websockets = false
+supports_standalone_web_search = true
 ```
 
 它始终使用 Codex 当前登录，不参与 CCSM 账号调度。
@@ -142,6 +146,24 @@ Codex 侧门面统一声明原生 OpenAI Responses 能力，真实上游协议�
 - `/responses/compact` 必须按 compact 请求自身的 model 重新选 route，并按 effective route 转换。
 
 对于非 OpenAI route，CCSM 必须在出站前删除上游不支持的 OpenAI 专属元数据、工具、认证和指纹 header。Route catalog capability 继续作为图片、工具、reasoning 和模态能力的真值。
+
+## 内部能力与网络身份是两层
+
+`model_provider = "codex_model_router_v2"` 只是在本地选择 `[model_providers.codex_model_router_v2]`，并用于 Codex 的配置、任务归属和本地路由。官方 Responses 请求构造链不会把这个配置键作为 provider 字段发给 OpenAI。
+
+`name = "OpenAI"` 会命中 Codex 的 `is_openai()` 能力分支，使自定义门面继续保留 OpenAI 专属的请求构造和功能，包括远程压缩、请求压缩、内部聊天元数据、加密函数参数、Web Search、Image Generation 和并发 reasoning summary。它不会自动继承内建 `openai` provider 的字段默认值，因此 CCSM 必须显式写入 `requires_openai_auth` 和 `supports_websockets`。`supports_standalone_web_search = true` 也显式对齐内建表，但当前 Web Search 判定已因 `name = "OpenAI"` 成立，该字段是冗余保险而非单独解锁能力。
+
+网络出站还要单独保持以下关键字段：
+
+- `User-Agent`：透传 Codex 客户端生成的官方值，CCSM 不用自己的版本替换。
+- `originator`：可信本地 Codex 的 first-party 线程来源原样保留；异常来源回退为 `codex_cli_rs`。
+- `version`：自定义 provider 不会像内建 `openai` 自动添加。CCSM 从 first-party Codex User-Agent 动态恢复真实构建版本，并覆盖独立头中可能陈旧或伪造的值；External API 的 version 被删除，不再硬编码 CCSM 发布时的 Codex 版本。
+- `x-oai-attestation`：由 Codex host integration 决定是否即时生成。来自本机 Codex 的值在官方 route 透传；External API 的值删除；CCSM 不生成、不伪造。
+- `x-cc-switch-*`：只用于 Codex 到本地代理这一跳，所有普通和 raw 出站 transport 都必须剥离。
+
+因此推荐方案可以做到 OpenAI 请求语义、模态内容和关键客户端身份字段对齐，但不能宣称经过本地代理后与直连在网络层完全不可区分：上游看到的 TLS 连接、HTTP 客户端实现和源网络来自 CCSM；某个 host 是否提供 attestation 也不是 CCSM 能保证的。服务端对缺失 attestation 的真实行为必须通过授权账号在线 A/B 验证，不能从客户端源码推断。
+
+图片、音频和文件内容不由 Provider ID 决定。当前官方 Codex 普通消息原生包含 `input_image`、`input_audio`，并携带 `client_metadata`、`internal_chat_message_metadata_passthrough`；`encrypted_function_args` 是字符串数组，这些结构在 OpenAI route 原样保留。当前官方普通消息 `ContentItem` 没有 `input_file`，因此不宣称 Desktop 已发送该项；文件上传等未知 OpenAI endpoint 走 raw passthrough，保持原始请求体、Content-Type 与正确认证。只有路由到非 OpenAI 协议时才按目标 route 能力进入既有转换或降级逻辑。
 
 ## WebSocket 边界
 
@@ -199,7 +221,9 @@ UI 只读展示生成的门面类型：`Desktop/Mixed` 或 `Fully managed`。不
 5. 覆盖官方、Chat、Messages、Anthropic route 的 HTTP/SSE 和 `/responses/compact` 路由测试。
 6. 覆盖显式 native、固定账号、含/不含 Desktop 的账号池、旧版歧义 Router 的迁移测试。
 7. 覆盖策略持久化、门面状态、账号顺序、保留额度、重启提示的前端测试。
-8. 重建 CCSM 后，使用实际 Codex 0.146 系列发起真实请求；代理日志必须证明 route、auth strategy、transport 和上游状态，且不能记录凭据。
+8. 重建 CCSM 后，使用实际 Codex 发起真实请求；代理日志必须证明 route、auth strategy、transport 和上游状态，且不能记录凭据。
+
+当前自动回归已经覆盖两种 MultiRouter 门面、独立官方接管、first-party `originator/version` 恢复、线程来源与进程 User-Agent 不同、异常 originator 回退、旧/外部 version 清理、External attestation 清理、图片/音频与 OpenAI 内部元数据结构保持，以及 raw endpoint 的 Desktop Bearer/账号头重建。真实账号在线 A/B 仍属于发布前运行态验证，不能用自动测试替代。
 
 ## 放弃的方案
 

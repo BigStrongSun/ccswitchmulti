@@ -2866,7 +2866,7 @@ impl RequestForwarder {
         );
         enforce_codex_oauth_originator(
             &mut ordered_headers,
-            is_codex_oauth,
+            is_codex_oauth || codex_official_auth_passthrough,
             self.preserve_codex_client_originator,
         );
 
@@ -3371,6 +3371,11 @@ impl RequestForwarder {
         let mut auth_strategy_for_log = "none".to_string();
         let mut codex_oauth_account_id: Option<String> = None;
         let mut is_codex_oauth = false;
+        let codex_official_auth_passthrough =
+            should_passthrough_codex_official_auth(app_type, provider, headers);
+        if codex_official_auth_passthrough {
+            validate_codex_official_authorization(headers)?;
+        }
         let mut auth_headers = if let Some(mut auth) = adapter.extract_auth(provider) {
             if auth.strategy == AuthStrategy::CodexOAuth {
                 if let Some(app_handle) = &self.app_handle {
@@ -3411,6 +3416,10 @@ impl RequestForwarder {
         } else {
             Vec::new()
         };
+
+        if codex_official_auth_passthrough {
+            replace_with_native_codex_auth_headers(&mut auth_headers, headers);
+        }
 
         if let Some(ref account_id) = codex_oauth_account_id {
             if let Ok(hv) = http::HeaderValue::from_str(account_id) {
@@ -3474,7 +3483,7 @@ impl RequestForwarder {
         );
         enforce_codex_oauth_originator(
             &mut ordered_headers,
-            is_codex_oauth,
+            is_codex_oauth || codex_official_auth_passthrough,
             self.preserve_codex_client_originator,
         );
         reject_proxy_placeholder_for_managed_account_upstream(&url, &ordered_headers)?;
@@ -4696,22 +4705,57 @@ fn is_first_party_codex_originator(value: &str) -> bool {
         || value == "codex_chatgpt_desktop"
 }
 
-/// 规范托管 Codex OAuth 请求的来源标识。
+/// 从官方 Codex User-Agent 中提取真实构建版本。
+///
+/// 官方格式为 `<process-originator>/<cargo-version> (<os...>) ...`。线程级 originator
+/// 可以覆盖进程 originator，因此这里分别校验 User-Agent 自带的进程身份和版本，不能
+/// 要求它与请求头中的线程来源相同。
+fn codex_client_version_from_user_agent(user_agent: &str) -> Option<&str> {
+    let (process_originator, remainder) = user_agent.split_once('/')?;
+    if !is_first_party_codex_originator(process_originator) {
+        return None;
+    }
+    let version = remainder.split_whitespace().next()?;
+    (!version.is_empty()
+        && version.len() <= 64
+        && version.as_bytes()[0].is_ascii_digit()
+        && version
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+')))
+    .then_some(version)
+}
+
+/// 规范发往官方 ChatGPT Codex 后端的客户端身份。
 ///
 /// 可信本地 Codex 请求只有在恰好携带一个官方 first-party 值时才保留原值；缺失、
 /// 重复、未知值以及 External API/协议转换请求统一回退到官方 CLI 默认值。这样既避免
 /// `originator=cc-switch` 触发模型准入差异，也不会把 Desktop/VS Code 误报成 CLI。
+/// `version` 只信任 first-party User-Agent 中的进程构建版本：旧配置、外部 API 或
+/// 客户端自报的独立 version 都先移除，再按可信 UA 重建。
 fn enforce_codex_oauth_originator(
     headers: &mut http::HeaderMap,
-    is_codex_oauth: bool,
+    is_codex_official_upstream: bool,
     preserve_client_originator: bool,
 ) {
-    if !is_codex_oauth {
+    if !is_codex_official_upstream {
         return;
     }
 
     let originator_name = http::HeaderName::from_static("originator");
+    headers.remove("version");
+    if !preserve_client_originator {
+        headers.remove("x-oai-attestation");
+    }
     if preserve_client_originator {
+        let user_agent = headers
+            .get(http::header::USER_AGENT)
+            .and_then(|value| value.to_str().ok());
+        if let Some(version) = user_agent.and_then(codex_client_version_from_user_agent) {
+            if let Ok(version) = http::HeaderValue::from_str(version) {
+                headers.insert(http::HeaderName::from_static("version"), version);
+            }
+        }
+
         let preserved_value = {
             let mut values = headers.get_all(&originator_name).iter();
             match (values.next(), values.next()) {
@@ -4733,6 +4777,24 @@ fn enforce_codex_oauth_originator(
         originator_name,
         http::HeaderValue::from_static(super::providers::CODEX_OAUTH_ORIGINATOR),
     );
+}
+
+/// Native/Mixed route 的凭据真值来自进入 CCSM 的 Codex Desktop 请求。
+/// raw endpoint 会统一丢弃来向认证头，因此必须在重建阶段显式放回官方 Bearer
+/// 与账号头；External API 不会进入这个分支。
+fn replace_with_native_codex_auth_headers(
+    auth_headers: &mut Vec<(http::HeaderName, http::HeaderValue)>,
+    source_headers: &http::HeaderMap,
+) {
+    auth_headers.clear();
+    for name in [
+        http::header::AUTHORIZATION,
+        http::HeaderName::from_static("chatgpt-account-id"),
+    ] {
+        for value in source_headers.get_all(&name).iter() {
+            auth_headers.push((name.clone(), value.clone()));
+        }
+    }
 }
 
 fn reject_proxy_placeholder_for_managed_account_upstream(
@@ -6276,6 +6338,40 @@ mod tests {
     }
 
     #[test]
+    fn prepare_upstream_request_body_preserves_codex_native_multimodal_and_internal_items() {
+        let body = json!({
+            "model": "gpt-5.6-sol",
+            "client_metadata": {
+                "x-codex-installation-id": "install-1",
+                "x-codex-turn-metadata": "{\"request_kind\":\"turn\"}"
+            },
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        { "type": "input_text", "text": "inspect" },
+                        { "type": "input_image", "image_url": "data:image/png;base64,abc", "detail": "original" },
+                        { "type": "input_audio", "audio_url": "data:audio/wav;base64,def" }
+                    ],
+                    "internal_chat_message_metadata_passthrough": { "kind": "desktop" }
+                },
+                {
+                    "type": "function_call",
+                    "name": "lookup",
+                    "call_id": "call-1",
+                    "arguments": "{}",
+                    "encrypted_function_args": ["encrypted-args"]
+                }
+            ]
+        });
+
+        let prepared = prepare_upstream_request_body(body.clone());
+
+        assert_eq!(prepared, body);
+    }
+
+    #[test]
     fn codex_oauth_responses_passthrough_normalizer_is_scoped() {
         let codex_oauth = test_provider_with_type(Some("codex_oauth"));
         let regular = test_provider_with_type(None);
@@ -6724,6 +6820,161 @@ mod tests {
         assert_eq!(
             headers.get("version"),
             Some(&HeaderValue::from_static("0.151.0"))
+        );
+    }
+
+    #[test]
+    /// 官方 Codex 的 User-Agent 描述进程身份，originator 允许被线程级来源覆盖；
+    /// 两者不相同时仍应恢复进程携带的真实版本。
+    fn codex_oauth_identity_restores_version_when_thread_originator_differs_from_process() {
+        let mut headers = HeaderMap::new();
+        headers.insert("originator", HeaderValue::from_static("codex_vscode"));
+        headers.insert(
+            http::header::USER_AGENT,
+            HeaderValue::from_static(
+                "codex_cli_rs/0.151.0 (Windows 11; x86_64) codex-terminal/1.0",
+            ),
+        );
+
+        enforce_codex_oauth_originator(&mut headers, true, true);
+
+        assert_eq!(
+            headers.get("version"),
+            Some(&HeaderValue::from_static("0.151.0"))
+        );
+        assert_eq!(
+            headers.get("originator"),
+            Some(&HeaderValue::from_static("codex_vscode"))
+        );
+    }
+
+    #[test]
+    /// 本地 Codex 的线程来源头即使损坏并回退到 CLI，可信 User-Agent 中的真实版本
+    /// 仍应保留，避免再次形成只有 originator 没有 version 的半套身份。
+    fn codex_oauth_identity_restores_version_before_invalid_originator_fallback() {
+        let mut headers = HeaderMap::new();
+        headers.insert("originator", HeaderValue::from_static("unknown-client"));
+        headers.insert(
+            http::header::USER_AGENT,
+            HeaderValue::from_static(
+                "codex_cli_rs/0.151.0 (Windows 11; x86_64) codex-terminal/1.0",
+            ),
+        );
+
+        enforce_codex_oauth_originator(&mut headers, true, true);
+
+        assert_eq!(
+            headers.get("version"),
+            Some(&HeaderValue::from_static("0.151.0"))
+        );
+        assert_eq!(
+            headers.get("originator"),
+            Some(&HeaderValue::from_static("codex_cli_rs"))
+        );
+    }
+
+    #[test]
+    fn codex_oauth_identity_does_not_invent_version_for_mismatched_user_agent() {
+        let mut headers = HeaderMap::new();
+        headers.insert("originator", HeaderValue::from_static("Codex Desktop"));
+        headers.insert(
+            http::header::USER_AGENT,
+            HeaderValue::from_static("cc-switch/3.17.0"),
+        );
+
+        enforce_codex_oauth_originator(&mut headers, true, true);
+
+        assert!(headers.get("version").is_none());
+    }
+
+    #[test]
+    fn codex_official_identity_overwrites_stale_version_from_trusted_user_agent() {
+        let mut headers = HeaderMap::new();
+        headers.insert("originator", HeaderValue::from_static("codex_cli_rs"));
+        headers.insert(
+            http::header::USER_AGENT,
+            HeaderValue::from_static("codex_cli_rs/0.151.0 (Windows 11; x86_64) terminal/1.0"),
+        );
+        headers.insert("version", HeaderValue::from_static("0.150.2"));
+
+        enforce_codex_oauth_originator(&mut headers, true, true);
+
+        assert_eq!(
+            headers.get("version"),
+            Some(&HeaderValue::from_static("0.151.0"))
+        );
+    }
+
+    #[test]
+    fn codex_official_identity_strips_external_api_version_claim() {
+        let mut headers = HeaderMap::new();
+        headers.insert("originator", HeaderValue::from_static("Codex Desktop"));
+        headers.insert(
+            http::header::USER_AGENT,
+            HeaderValue::from_static("external-agent/1.0"),
+        );
+        headers.insert("version", HeaderValue::from_static("999.0.0"));
+        headers.insert(
+            "x-oai-attestation",
+            HeaderValue::from_static("untrusted-external-attestation"),
+        );
+
+        enforce_codex_oauth_originator(&mut headers, true, false);
+
+        assert_eq!(
+            headers.get("originator"),
+            Some(&HeaderValue::from_static("codex_cli_rs"))
+        );
+        assert!(headers.get("version").is_none());
+        assert!(headers.get("x-oai-attestation").is_none());
+    }
+
+    #[test]
+    fn codex_native_auth_passthrough_identity_restores_version() {
+        let mut headers = HeaderMap::new();
+        headers.insert("originator", HeaderValue::from_static("Codex Desktop"));
+        headers.insert(
+            http::header::USER_AGENT,
+            HeaderValue::from_static("Codex Desktop/0.151.0 (Windows 11; x86_64)"),
+        );
+
+        let is_managed_oauth = false;
+        let is_native_auth_passthrough = true;
+        enforce_codex_oauth_originator(
+            &mut headers,
+            is_managed_oauth || is_native_auth_passthrough,
+            true,
+        );
+
+        assert_eq!(
+            headers.get("version"),
+            Some(&HeaderValue::from_static("0.151.0"))
+        );
+    }
+
+    #[test]
+    fn raw_native_codex_auth_rebuild_preserves_desktop_bearer_and_account() {
+        let mut source = HeaderMap::new();
+        source.insert(
+            http::header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer desktop-oauth"),
+        );
+        source.insert("chatgpt-account-id", HeaderValue::from_static("account-1"));
+        let mut auth_headers = vec![(
+            http::header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer stale-managed"),
+        )];
+
+        replace_with_native_codex_auth_headers(&mut auth_headers, &source);
+        let rebuilt = build_raw_passthrough_headers(&source, &auth_headers, None, None);
+
+        assert_eq!(
+            rebuilt.get(http::header::AUTHORIZATION),
+            Some(&HeaderValue::from_static("Bearer desktop-oauth"))
+        );
+        assert_eq!(
+            rebuilt.get("chatgpt-account-id"),
+            Some(&HeaderValue::from_static("account-1"))
         );
     }
 

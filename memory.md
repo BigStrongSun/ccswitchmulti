@@ -2414,3 +2414,15 @@
 - 完整测试发现 Codex MCP 投影的零集合漏洞：`McpService::project_servers_to_app` 原先逐条遍历数据库记录，数据库没有 MCP 时循环不执行，导致 Provider 切换前 live 中的 `[mcp_servers.*]` 和历史错误 `[mcp.servers.*]` 被继续保留。根修是 Codex 分支始终从统一数据库构造完整启用快照，并复用 `sync_enabled_to_codex` 整表替换；空集合也会删除标准表和 legacy 表，其他 TOML 键保持不变。
 - 旧 `provider_commands` 用例曾要求目标 Provider 快照内的 stale MCP 与 DB 启用 MCP 同时进入 live，这与数据库 SSOT 冲突。修正后的契约是：Provider 快照保留原始导入文本，避免静默破坏存档；live 只投影数据库中对 Codex 启用的 MCP，快照内陈旧条目不得复活。
 - 最终验证：`cargo test --manifest-path src-tauri/Cargo.toml` 全部通过（库测试 2342 passed / 2 ignored，所有集成测试通过）；`provider_service` 33/33；`pnpm typecheck` 和全量单线程 Vitest 通过；`cargo fmt --check` 与 `git diff --check` 通过。构建产物必须在本次提交后重新生成，旧 `CCSwitchMulti_3.17.0-1_x64-setup.exe` 不代表最终源码。
+
+## 2026-07-30 Codex 自定义 OpenAI 门面的能力与网络身份根修
+
+- 官方 Codex `refs/remotes/live/main` 提交 `6219b7c40fc9c702c0aef9964e72b492558f60e4` 复核：`model_provider = "codex_model_router_v2"` 的配置键只用于本地选择、任务归属和路由，不作为 Responses provider 身份字段发送；`ModelProviderInfo::is_openai()` 精确按 `name == "OpenAI"` 判断 OpenAI 专属能力。
+- `name = "OpenAI"` 能保留远程压缩、请求压缩、内部聊天元数据、加密函数参数、Web Search、Image Generation 和并发 reasoning summary 等 OpenAI 分支，但自定义 provider 不继承内建 `openai` 的 `version`、`requires_openai_auth=true`、`supports_websockets=true` 和 `supports_standalone_web_search=true` 字段默认值。当前 Web Search 判断是 `is_openai() || uses_openai_actor_authorization() || supports_standalone_web_search`，所以最后一个字段对 OpenAI name 是配置对齐与冗余保险，不是单独解锁开关。
+- 明确回归链：`af58740b` 原本成对硬编码 `originator=codex_cli_rs` 和 `version=0.144.1`；`cd8d6bc6` 把 originator 统一迁到 forwarder 时漏迁 version，旧常量留在 `claude.rs` 成为死代码。固定 0.144.1 也会随官方最小客户端版本抬升而再次失效。
+- 根修：可信本地 Codex 的官方 User-Agent 按 `<process-originator>/<cargo-version>` 动态恢复真实 version，并覆盖独立头中可能陈旧的值；线程级 originator 可以与进程 User-Agent 身份不同，异常/重复线程来源回退为 `codex_cli_rs` 时仍保留可信进程版本。External API 的任意 version 删除，第三方 User-Agent 不伪造 Codex version。
+- Native/Mixed 直通和 CCSM managed OAuth 都进入同一官方身份规范化，不能只按 `is_codex_oauth` 处理；普通 Responses 与 raw passthrough 两条链均覆盖。raw Native route 还必须在重建头时放回 Desktop Bearer 与 `chatgpt-account-id`，否则文件/音频等未知 endpoint 会在丢弃本地认证头后变成未认证请求。
+- MultiRouter Native/Mixed 与 Fully Managed 均显式写 `supports_standalone_web_search=true`；共享 `codex_official_provider_table` 同步补齐。旧版统一会话桶只有四字段，新 matcher 必须同时严格接受旧四字段与新五字段并拒绝未知字段，避免升级后无法清理自有配置。MultiRouter 继续显式关闭 WebSocket，使用 HTTP Responses + SSE。
+- 网络身份边界：本机 Codex 的 User-Agent 和 host integration 提供的 `x-oai-attestation` 透传，External API 的 attestation 删除；CCSM 不生成或伪造 attestation。所有 `x-cc-switch-*` 控制头在普通和 raw transport 前剥离；经过代理后的 TLS/HTTP 实现不能声称与 Desktop 直连字节级不可区分。
+- 官方 `6219b7c4` 的普通 `ContentItem` 是 `input_text/input_image/input_audio/output_text`，没有 `input_file`；`encrypted_function_args` 是 `Option<Vec<String>>`。回归覆盖官方图片、音频、client metadata、内部消息 metadata、加密参数数组，以及 raw 文件 endpoint 的原始字节/认证边界，不能把兼容 API 的 `input_file` 误写成 Desktop 当前已发送。
+- 最终验证：Rust 全量库测试 `2369 passed / 2 ignored`；Vitest 单 worker 为 `88 files / 651 tests`；TypeScript typecheck、rustfmt 和 `git diff --check` 全部通过。Vitest 默认并发曾让既有 `tests/integration/App.test.tsx` 两项异步断言超时，单独重跑该文件 8/8 通过，随后单 worker 全量稳定通过，确认是测试共享状态/时序波动而非本次后端改动。

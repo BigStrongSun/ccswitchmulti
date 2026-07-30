@@ -2927,6 +2927,9 @@ impl ProxyService {
         doc["model_providers"][proxy_provider_id]["supports_websockets"] = toml_edit::value(false);
 
         if is_multirouter {
+            // 自定义 provider 不继承 Codex 内建 openai 的 capability defaults。
+            doc["model_providers"][proxy_provider_id]["supports_standalone_web_search"] =
+                toml_edit::value(true);
             let classified = provider
                 .map(|provider| {
                     crate::proxy::providers::classify_codex_multirouter_auth_facade(

@@ -3218,8 +3218,8 @@ pub fn read_codex_live_settings() -> Result<Value, AppError> {
 /// the shared custom id: `requires_openai_auth` routes auth to the ChatGPT
 /// login in `auth.json` (base_url then defaults to the official Codex
 /// backend), `name = "OpenAI"` keeps Codex's `is_openai()` feature gates
-/// (web search, remote compaction), and `supports_websockets` restores the
-/// built-in default that custom entries otherwise lose.
+/// (web search, remote compaction), while the explicit capability flags restore
+/// built-in defaults that custom entries otherwise lose.
 fn codex_official_provider_table(
     base_url: Option<&str>,
     supports_websockets: bool,
@@ -3228,6 +3228,7 @@ fn codex_official_provider_table(
     table["name"] = toml_edit::value("OpenAI");
     table["requires_openai_auth"] = toml_edit::value(true);
     table["supports_websockets"] = toml_edit::value(supports_websockets);
+    table["supports_standalone_web_search"] = toml_edit::value(true);
     table["wire_api"] = toml_edit::value("responses");
     if let Some(base_url) = base_url {
         table["base_url"] = toml_edit::value(base_url.trim_end_matches('/'));
@@ -3354,7 +3355,18 @@ pub fn remove_codex_official_proxy_route(config_text: &str) -> Result<String, Ap
 }
 
 fn table_matches_codex_unified_official_provider(table: &toml_edit::Table) -> bool {
-    table.len() == 4
+    let field_count_matches_owned_shape = match table.len() {
+        4 => table.get("supports_standalone_web_search").is_none(),
+        5 => {
+            table
+                .get("supports_standalone_web_search")
+                .and_then(|item| item.as_bool())
+                == Some(true)
+        }
+        _ => false,
+    };
+
+    field_count_matches_owned_shape
         && table.get("name").and_then(|item| item.as_str()) == Some("OpenAI")
         && table
             .get("requires_openai_auth")
@@ -4012,6 +4024,12 @@ command = "example"
                 .and_then(toml::Value::as_bool),
             Some(false)
         );
+        assert_eq!(
+            provider
+                .get("supports_standalone_web_search")
+                .and_then(toml::Value::as_bool),
+            Some(true)
+        );
         assert!(codex_config_has_official_proxy_route(&output));
     }
 
@@ -4105,6 +4123,24 @@ base_url = "https://relay.example/v1"
         let injected = inject_codex_unified_session_bucket(with_catalog).expect("inject");
         let stripped = strip_codex_unified_session_bucket(&injected).expect("strip");
         assert_eq!(stripped, with_catalog);
+    }
+
+    #[test]
+    fn unified_session_bucket_accepts_and_strips_legacy_four_field_table() {
+        let legacy = r#"model_provider = "custom"
+
+[model_providers.custom]
+name = "OpenAI"
+requires_openai_auth = true
+supports_websockets = true
+wire_api = "responses"
+"#;
+
+        let reinjected = inject_codex_unified_session_bucket(legacy).expect("re-inject legacy");
+        assert_eq!(reinjected, legacy);
+
+        let stripped = strip_codex_unified_session_bucket(legacy).expect("strip legacy");
+        assert_eq!(stripped.trim(), "");
     }
 
     #[test]
