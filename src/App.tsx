@@ -50,6 +50,7 @@ import { useUsageCacheBridge } from "@/hooks/useUsageCacheBridge";
 import { useTauriEvent } from "@/hooks/useTauriEvent";
 import { useLastValidValue } from "@/hooks/useLastValidValue";
 import { useCodexLocalRoutingNotice } from "@/hooks/useCodexLocalRoutingNotice";
+import { useAdaptiveUiZoom } from "@/hooks/useAdaptiveUiZoom";
 import { useScanUnmanagedSkills } from "@/hooks/useSkills";
 import { extractErrorMessage } from "@/utils/errorUtils";
 import { isTextEditableTarget } from "@/utils/domUtils";
@@ -194,6 +195,7 @@ const getInitialView = (): View => {
 };
 
 function App() {
+  useAdaptiveUiZoom();
   const { t } = useTranslation();
   const queryClient = useQueryClient();
 

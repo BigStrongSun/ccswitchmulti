@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-07-30 全应用自适应缩放与默认窗口尺寸
+
+- 默认窗口原为 `1000x650`，最小 `900x600`；设置页、Radix Portal 和 `FullScreenPanel` 分别管理高度与滚动，无法靠逐页 CSS 得到一致密度。更关键的是 `tauri-plugin-window-state` 持久化 `POSITION | SIZE | MAXIMIZED`，老用户会继续恢复旧的小窗口，所以只放大 `tauri.conf.json` 默认值不能解决升级用户的问题。
+- 根修在 App 根部使用 Tauri WebView 原生 `setZoom`，让普通页面、Portal 弹窗和全屏面板共享同一缩放坐标系。缩放按 `innerSize / scaleFactor` 的逻辑视口计算，避免 Windows 125%/150% DPI 误判；设计视口 `1180x760` 为 100%，`1100x700` 为 90%，`1000x650` 为 85%，最小 `900x600` 保底 80%。长设置页仍保留正常滚动，不把所有内容强压进一屏。
+- `setZoom` 不是 `core:default` 权限：Tauri 2.10 要求显式 `core:webview:allow-set-webview-zoom`。缺少该 capability 时布局测试可能通过，但原生缩放调用会被 ACL 拒绝；配置回归必须同时锁定默认尺寸和该权限。Hook 在无 Tauri internals 的 jsdom/浏览器预览中静默退出，并处理 resize/scale 事件异步乱序和监听注册失败。
+- 实机使用临时 identifier `com.ccswitchmulti.ui-review` 和 `CC_SWITCH_TEST_HOME`，正式 CCSM 未操作。已在恢复的 `903x631` 最小窗口中验证主导航、设置页、Grok 新建 Portal、MultiRouter 全屏工作台统一为 80% 且无横向裁切/重叠，设置页可滚动、表单底部操作可达；最大化恢复 100%。定向回归、全量 Vitest、`pnpm typecheck`、`pnpm format:check`、renderer build 和隔离 Tauri release build 均通过。
+
 ## 2026-07-30 v3.19.0-1 OAuth 交互审查修复
 
 - Codex 账号池不能在数值输入的 `onChange` 中直接持久化。连续输入会产生多个并发 mutation，响应乱序后服务端最终值可能回退。现在开关、排序、启用状态和保留额度统一编辑本地草稿，只有点击“保存账号池设置”才提交一次最终 policy；保存期间整组冲突控件禁用，可在提交前放弃更改。
