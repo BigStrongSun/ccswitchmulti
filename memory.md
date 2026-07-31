@@ -11,6 +11,12 @@
 - 验证：定向 Rust 覆盖空 body official 选择、未知 model 错误归因、multipart 解析、本地路径别名/call_id、WebSocket 连接、HTTP call-create 不落到 DeepSeek。全量 `cargo test --lib -- --skip update_current_claude_desktop_provider_syncs_profile_when_proxy_takeover_is_active` 为 2674 passed / 2 ignored / 1 filtered；`cargo fmt --check`、`git diff --check` 通过。提交 `fc54a430`。
 - 边界：CCSM 修复的是代理路由、body 形态、WebSocket 传输和错误归因；GPT-Live 仍需要上游账号/API 对 `/v1/live` 或 ChatGPT Codex backend 的授权。OAuth-only 账号若无 API key/backend 实时权限，仍可能在上游 401/403。
 
+## 2026-08-01 3.16.5-22 分支同样需要并已完成语音修复移植
+
+- 定位：`v3.16.5-22` 已经包含 `16110f4e`、`5a3693f1`、`08b58d81`，即 raw 透传未知 `/v1/*` 和 raw 默认回 official，因此同样会错误转发 `/v1/live`；`032cb5a5` 的错误归因会用 `model=unknown` 命中 defaultRouteId。引入边界是 `v3.16.5-10`，不是 3.16.5-22 独有；更早版本会在未知 endpoint 上直接结构化 404，不会把错误显示成第二位 provider。
+- 已按 3.19.0-2 的修复移植到 `fix/3.16.5-22-gpt-live`（commit `83b116f7`）：显式 `/v1/live` 路由、multipart -> backend JSON、WebSocket 中继、错误归因 official。分支已推送到 `BigStrongSun/ccswitchmulti`。
+- 3.16.5-22 全量 Rust：2115 passed / 1 failed / 2 ignored / 1 filtered；失败 `responses_request_does_not_emit_chat_file_for_url_only_input_file` 是既有 `transform_codex_chat` 用例，与本次移植无关。若需要旧版用户可用，下一步可做 `3.16.5-23` 构建和 prerelease。
+
 ## 2026-08-01 CCSM Agent Mesh 后端路线分支
 
 - 已创建新分支 `bigstrongsun/ccsm-agent-mesh`，用于后续 CCSM 统一模型聚合网关和 Agent 适配层开发。
