@@ -390,6 +390,48 @@ impl ProxyServer {
                 "/codex/v1/responses",
                 get(handlers::handle_responses_websocket).post(handlers::handle_responses),
             )
+            // Codex GPT-Live / Realtime Voice：call-create 是 HTTP POST，会话是
+            // WebSocket Upgrade。必须显式接管，不能落到普通 raw passthrough。
+            .route(
+                "/live",
+                get(handlers::handle_codex_realtime_websocket)
+                    .post(handlers::handle_codex_realtime_http),
+            )
+            .route(
+                "/v1/live",
+                get(handlers::handle_codex_realtime_websocket)
+                    .post(handlers::handle_codex_realtime_http),
+            )
+            .route(
+                "/v1/v1/live",
+                get(handlers::handle_codex_realtime_websocket)
+                    .post(handlers::handle_codex_realtime_http),
+            )
+            .route(
+                "/codex/v1/live",
+                get(handlers::handle_codex_realtime_websocket)
+                    .post(handlers::handle_codex_realtime_http),
+            )
+            .route(
+                "/live/*call_id",
+                get(handlers::handle_codex_realtime_websocket)
+                    .post(handlers::handle_codex_realtime_http),
+            )
+            .route(
+                "/v1/live/*call_id",
+                get(handlers::handle_codex_realtime_websocket)
+                    .post(handlers::handle_codex_realtime_http),
+            )
+            .route(
+                "/v1/v1/live/*call_id",
+                get(handlers::handle_codex_realtime_websocket)
+                    .post(handlers::handle_codex_realtime_http),
+            )
+            .route(
+                "/codex/v1/live/*call_id",
+                get(handlers::handle_codex_realtime_websocket)
+                    .post(handlers::handle_codex_realtime_http),
+            )
             // Grok Build uses the Responses protocol but has an independent
             // provider namespace and failover queue.
             .route(
@@ -804,6 +846,130 @@ mod tests {
             captured["path_and_query"],
             "/v1/embeddings?encoding_format=float"
         );
+    }
+
+    #[tokio::test]
+    async fn codex_realtime_live_call_routes_to_official_backend_not_nonofficial_route() {
+        let captured_request = Arc::new(Mutex::new(None));
+        let (upstream_base_url, _upstream_task) =
+            spawn_codex_realtime_backend_mock(captured_request.clone()).await;
+        let (server, db) = build_test_server();
+        db.save_provider(
+            "codex",
+            &Provider::with_id(
+                "codex-official".to_string(),
+                "OpenAI Official".to_string(),
+                json!({
+                    "base_url": format!("{upstream_base_url}/backend-api/codex"),
+                    "api_key": "sk-official"
+                }),
+                None,
+            ),
+        )
+        .expect("save official provider");
+        db.save_provider(
+            "codex",
+            &Provider::with_id(
+                "router".to_string(),
+                "Codex Router".to_string(),
+                json!({
+                    "codexRouting": {
+                        "enabled": true,
+                        "defaultRouteId": "deepseek",
+                        "routes": [
+                            {
+                                "id": "official",
+                                "label": "OpenAI Official",
+                                "enabled": true,
+                                "targetProviderId": "codex-official",
+                                "match": { "models": ["gpt-5.6-sol"] },
+                                "upstream": { "apiFormat": "openai_responses" }
+                            },
+                            {
+                                "id": "deepseek",
+                                "label": "DeepSeek",
+                                "enabled": true,
+                                "match": { "models": ["deepseek-v4-flash"] },
+                                "upstream": {
+                                    "baseUrl": "https://api.deepseek.com",
+                                    "apiKey": "sk-deepseek"
+                                }
+                            }
+                        ]
+                    }
+                }),
+                None,
+            ),
+        )
+        .expect("save router provider");
+        let mut proxy_config = db
+            .get_proxy_config_for_app("codex")
+            .await
+            .expect("read codex proxy config");
+        proxy_config.enabled = true;
+        proxy_config.auto_failover_enabled = true;
+        db.update_proxy_config_for_app(proxy_config)
+            .await
+            .expect("enable codex failover queue");
+        db.add_to_failover_queue("codex", "router")
+            .expect("add router to failover queue");
+
+        let boundary = "codex-realtime-call-boundary";
+        let body = format!(
+            "--{boundary}\r\n\
+             Content-Disposition: form-data; name=\"sdp\"\r\n\
+             Content-Type: application/sdp\r\n\
+             \r\n\
+             v=offer\r\n\
+             o=- 1 1 IN IP4 127.0.0.1\r\n\
+             s=codex\r\n\
+             \r\n\
+             --{boundary}\r\n\
+             Content-Disposition: form-data; name=\"session\"\r\n\
+             Content-Type: application/json\r\n\
+             \r\n\
+             {{\"model\":\"gpt-live-1-codex\",\"delegation\":{{\"type\":\"client\"}}}}\r\n\
+             --{boundary}--\r\n"
+        );
+        let response = server
+            .build_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/live")
+                    .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+                    .header(header::USER_AGENT, "codex/0.146.0-test")
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::LOCATION).unwrap(),
+            "/v1/live/rtc_123"
+        );
+        let captured = captured_request
+            .lock()
+            .expect("captured realtime request lock")
+            .clone()
+            .expect("captured realtime request");
+        assert_eq!(
+            captured["path_and_query"],
+            "/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas"
+        );
+        assert_eq!(captured["authorization"], "Bearer sk-official");
+        assert_eq!(captured["content_type"], "application/json");
+        assert!(captured["body"]["sdp"]
+            .as_str()
+            .unwrap()
+            .starts_with("v=offer"));
+        assert_eq!(captured["body"]["session"]["model"], "gpt-live-1-codex");
     }
 
     #[tokio::test]
@@ -1360,6 +1526,57 @@ base_url = "http://127.0.0.1:15721/v1"
                 .expect("mock upstream serve");
         });
         (format!("http://{addr}/v1"), task)
+    }
+
+    /// 启动 Codex GPT-Live backend call-create mock，捕获真实 JSON 形态。
+    async fn spawn_codex_realtime_backend_mock(
+        captured_request: Arc<Mutex<Option<Value>>>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new().fallback(post(
+            move |uri: axum::http::Uri, headers: HeaderMap, body: Bytes| {
+                let captured_request = captured_request.clone();
+                async move {
+                    let parsed_body =
+                        serde_json::from_slice::<Value>(&body).unwrap_or_else(|_| json!(null));
+                    let authorization = headers
+                        .get(header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or("")
+                        .to_string();
+                    let content_type = headers
+                        .get(header::CONTENT_TYPE)
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or("")
+                        .to_string();
+                    *captured_request.lock().expect("capture realtime request") = Some(json!({
+                        "path_and_query": uri
+                            .path_and_query()
+                            .map(|value| value.as_str())
+                            .unwrap_or_else(|| uri.path()),
+                        "authorization": authorization,
+                        "content_type": content_type,
+                        "body": parsed_body
+                    }));
+                    (
+                        [
+                            (header::LOCATION, "/v1/live/rtc_123"),
+                            (header::CONTENT_TYPE, "application/sdp"),
+                        ],
+                        "v=answer\r\n",
+                    )
+                }
+            },
+        ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind realtime backend mock upstream");
+        let addr = listener.local_addr().expect("realtime mock upstream addr");
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("realtime backend mock serve");
+        });
+        (format!("http://{addr}"), task)
     }
 
     /// 启动一个 raw OpenAI-compatible mock，用于验证 fallback 真实转发未知 `/v1/*`。

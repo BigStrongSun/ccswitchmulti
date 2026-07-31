@@ -41,6 +41,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::Manager;
 use tokio::sync::RwLock;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 const PROXY_AUTH_PLACEHOLDER: &str = "PROXY_MANAGED";
 const CODEX_RESPONSES_LITE_FALLBACK_TTL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -127,6 +128,11 @@ impl Drop for ActiveConnectionGuard {
         // 没有 runtime 时静默丢失计数（仅 UI 展示用，可接受最终一致性）
     }
 }
+
+/// 已连接的 Codex GPT-Live WebSocket 上游流。
+pub struct CodexRealtimeWebSocketStream(
+    pub tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+);
 
 pub struct RequestForwarder {
     /// 共享的 ProviderRouter（持有熔断器状态）
@@ -3500,11 +3506,52 @@ impl RequestForwarder {
             Some(query) if !query.is_empty() => format!("{endpoint_path}?{query}"),
             _ => endpoint_path.to_string(),
         };
-        let url = if is_full_url {
+        let mut url = if is_full_url {
             append_query_to_full_url(&base_url, passthrough_query)
         } else {
             adapter.build_url(&base_url, &effective_endpoint)
         };
+        let mut request_body = raw_body.clone();
+        let mut realtime_content_type: Option<&'static str> = None;
+        if method == http::Method::POST
+            && codex_realtime_live_call_path(endpoint_path)
+            && base_url.contains("/backend-api")
+        {
+            let content_type = headers
+                .get(http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            let (sdp, session) = codex_realtime_multipart_payload(&raw_body, &content_type)?;
+            let mut backend_url = adapter.build_url(&base_url, "/realtime/calls");
+            let separator = if backend_url.contains('?') { '&' } else { '?' };
+            backend_url.push(separator);
+            backend_url.push_str("intent=quicksilver&architecture=avas");
+            url = backend_url.clone();
+            let backend_body = serde_json::to_vec(&serde_json::json!({
+                "sdp": sdp,
+                "session": session,
+            }))
+            .map_err(|err| {
+                ProxyError::Internal(format!("failed to encode Codex realtime call: {err}"))
+            })?;
+            request_body = Bytes::from(backend_body);
+            realtime_content_type = Some("application/json");
+            if let Some(trace_id) = codex_trace_id.as_deref() {
+                super::codex_router_log::append_event(
+                    "realtime_call_backend_translated",
+                    &[
+                        ("trace", trace_id.to_string()),
+                        ("session", self.session_id.clone()),
+                        ("provider", provider.id.clone()),
+                        (
+                            "upstream_url",
+                            crate::redact_url_origin_for_log(&backend_url),
+                        ),
+                    ],
+                );
+            }
+        }
 
         let auth_started_at = std::time::Instant::now();
         let mut auth_strategy_for_log = "none".to_string();
@@ -3618,6 +3665,12 @@ impl RequestForwarder {
                 ordered_headers.insert(name, value);
             }
         }
+        if let Some(content_type) = realtime_content_type {
+            ordered_headers.insert(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_static(content_type),
+            );
+        }
         apply_local_proxy_header_overrides(
             &mut ordered_headers,
             provider
@@ -3657,7 +3710,7 @@ impl RequestForwarder {
         } else {
             "hyper"
         };
-        let body_bytes = raw_body.to_vec();
+        let body_bytes = request_body.to_vec();
         let request_bytes_len = body_bytes.len();
         let upstream_started_at = std::time::Instant::now();
 
@@ -3787,6 +3840,291 @@ impl RequestForwarder {
                 .and_then(|value| value.as_str())
                 .map(ToString::to_string),
         ))
+    }
+
+    /// 连接 Codex GPT-Live `/v1/live` 的上游 WebSocket。
+    ///
+    /// 与普通 raw HTTP 转发不同，这里必须先完成上游 WebSocket 握手，再返回 101
+    /// 给 Codex；否则 WebSocket Upgrade 会被 Axum/HTTP body 处理吞掉。
+    pub async fn open_codex_realtime_websocket(
+        &self,
+        app_type: &AppType,
+        endpoint: &str,
+        route_body: &Value,
+        headers: &http::HeaderMap,
+    ) -> Result<CodexRealtimeWebSocketStream, ProxyError> {
+        let adapter = get_adapter(app_type);
+        let canonical_path = codex_realtime_live_path(endpoint).ok_or_else(|| {
+            ProxyError::InvalidRequest(format!(
+                "endpoint '{endpoint}' is not a Codex GPT-Live websocket path"
+            ))
+        })?;
+        let codex_trace_id = uuid::Uuid::new_v4().to_string();
+        let request_model_for_log = route_body
+            .get("model")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let provider = self
+            .resolve_codex_raw_endpoint_provider(app_type, endpoint, route_body)
+            .await?;
+        let base_url = adapter.extract_base_url(&provider)?;
+        let backend_shape = base_url.contains("/backend-api");
+        let (endpoint_path, passthrough_query) = split_endpoint_and_query(endpoint);
+        let effective_endpoint = match passthrough_query {
+            Some(query) if !query.is_empty() => format!("{endpoint_path}?{query}"),
+            _ => endpoint_path.to_string(),
+        };
+        let upstream_url = if backend_shape {
+            let call_suffix = canonical_path
+                .strip_prefix("/v1/live/")
+                .map(|call_id| format!("/{call_id}"))
+                .unwrap_or_default();
+            let mut url = adapter.build_url(&base_url, &format!("/realtime/calls{call_suffix}"));
+            if let Some(query) = passthrough_query {
+                if !query.is_empty() {
+                    url.push(if url.contains('?') { '&' } else { '?' });
+                    url.push_str(query);
+                }
+            }
+            url
+        } else {
+            adapter.build_url(&base_url, &effective_endpoint)
+        };
+
+        let mut auth_strategy_for_log = "none".to_string();
+        let mut log_secrets: Vec<String> = Vec::new();
+        let mut codex_oauth_account_id: Option<String> = None;
+        let mut is_codex_oauth = false;
+        let codex_official_auth_passthrough =
+            should_passthrough_codex_official_auth(app_type, &provider, headers);
+        if codex_official_auth_passthrough {
+            validate_codex_official_authorization(headers)?;
+        }
+        let mut auth_headers = if let Some(mut auth) = adapter.extract_auth(&provider) {
+            if auth.strategy == AuthStrategy::CodexOAuth {
+                if let Some(app_handle) = &self.app_handle {
+                    let codex_state = app_handle.state::<CodexOAuthState>();
+                    let codex_auth: tokio::sync::RwLockReadGuard<'_, CodexOAuthManager> =
+                        codex_state.0.read().await;
+                    let account_id = provider
+                        .meta
+                        .as_ref()
+                        .and_then(|m| m.managed_account_id_for("codex_oauth"));
+                    let token_result = match &account_id {
+                        Some(id) => codex_auth.get_valid_token_for_account(id).await,
+                        None => codex_auth.get_valid_token().await,
+                    };
+                    match token_result {
+                        Ok(token) => {
+                            auth = AuthInfo::new(token, AuthStrategy::CodexOAuth);
+                            is_codex_oauth = true;
+                            codex_oauth_account_id = match account_id {
+                                Some(id) => Some(id),
+                                None => codex_auth.default_account_id().await,
+                            };
+                        }
+                        Err(err) => {
+                            return Err(ProxyError::AuthError(format!(
+                                "Codex OAuth 认证失败: {err}"
+                            )));
+                        }
+                    }
+                } else {
+                    return Err(ProxyError::AuthError(
+                        "Codex OAuth 认证不可用（无 AppHandle）".to_string(),
+                    ));
+                }
+            }
+            auth_strategy_for_log = format!("{:?}", auth.strategy);
+            for secret in std::iter::once(&auth.api_key).chain(auth.access_token.iter()) {
+                if !secret.is_empty() && !log_secrets.contains(secret) {
+                    log_secrets.push(secret.clone());
+                }
+            }
+            adapter.get_auth_headers(&auth)?
+        } else {
+            Vec::new()
+        };
+        if codex_official_auth_passthrough {
+            replace_with_native_codex_auth_headers(&mut auth_headers, headers);
+        }
+        if let Some(account_id) = codex_oauth_account_id {
+            if let Ok(value) = http::HeaderValue::from_str(&account_id) {
+                auth_headers.push((http::HeaderName::from_static("chatgpt-account-id"), value));
+            }
+        }
+        let codex_oauth_session_headers = if is_codex_oauth && self.session_client_provided {
+            build_codex_oauth_session_headers(&self.session_id)
+        } else {
+            Vec::new()
+        };
+
+        let upstream_host = upstream_url
+            .parse::<http::Uri>()
+            .ok()
+            .and_then(|uri| uri.authority().map(|authority| authority.to_string()));
+        let custom_user_agent = provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.custom_user_agent_header().ok().flatten());
+        let mut ordered_headers = build_raw_passthrough_headers(
+            headers,
+            &auth_headers,
+            upstream_host.as_deref(),
+            custom_user_agent.as_ref(),
+        );
+        for (name, value) in codex_oauth_session_headers {
+            if !ordered_headers.contains_key(&name) {
+                ordered_headers.insert(name, value);
+            }
+        }
+        for name in [
+            http::header::SEC_WEBSOCKET_KEY,
+            http::header::SEC_WEBSOCKET_VERSION,
+            http::header::SEC_WEBSOCKET_EXTENSIONS,
+            http::header::SEC_WEBSOCKET_PROTOCOL,
+        ] {
+            ordered_headers.remove(name);
+        }
+        apply_local_proxy_header_overrides(
+            &mut ordered_headers,
+            provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.local_proxy_request_overrides.as_ref()),
+            false,
+        );
+        enforce_codex_oauth_originator(
+            &mut ordered_headers,
+            is_codex_oauth || codex_official_auth_passthrough,
+            self.preserve_codex_client_originator,
+        );
+        reject_proxy_placeholder_for_managed_account_upstream(&upstream_url, &ordered_headers)?;
+
+        let target_for_log = if log_secrets.is_empty() {
+            crate::redact_url_origin_for_log(&upstream_url)
+        } else {
+            crate::redact_url_for_log_with_secrets(&upstream_url, &log_secrets)
+        };
+        super::codex_router_log::append_event(
+            "realtime_websocket_connecting",
+            &[
+                ("trace", codex_trace_id.clone()),
+                ("session", self.session_id.clone()),
+                ("endpoint", endpoint.to_string()),
+                ("model", request_model_for_log.clone()),
+                ("provider", provider.id.clone()),
+                ("upstream_url", target_for_log.clone()),
+                ("auth_strategy", auth_strategy_for_log),
+            ],
+        );
+
+        let mut request = upstream_url.as_str().into_client_request().map_err(|err| {
+            ProxyError::ForwardFailed(format!(
+                "failed to build Codex realtime websocket request: {err}"
+            ))
+        })?;
+        request.headers_mut().extend(ordered_headers);
+        let (stream, response) =
+            tokio_tungstenite::connect_async(request)
+                .await
+                .map_err(|err| {
+                    ProxyError::ForwardFailed(format!(
+                        "failed to connect Codex realtime websocket: {err}"
+                    ))
+                })?;
+        let status = response.status();
+        if status.as_u16() != 101 {
+            return Err(ProxyError::UpstreamError {
+                status: status.as_u16(),
+                body: None,
+            });
+        }
+        super::codex_router_log::append_event(
+            "realtime_websocket_connected",
+            &[
+                ("trace", codex_trace_id),
+                ("session", self.session_id.clone()),
+                ("provider", provider.id),
+                ("status", status.as_u16().to_string()),
+            ],
+        );
+        Ok(CodexRealtimeWebSocketStream(stream))
+    }
+
+    /// 解析 Codex raw endpoint 的真实 route provider。
+    ///
+    /// 与 `forward_raw` 共用同一套规则：显式模型命中优先，未知官方原生 endpoint
+    /// 固定落到 official/Codex OAuth route，绝不交给 DeepSeek/Qwen 文本路由。
+    async fn resolve_codex_raw_endpoint_provider(
+        &self,
+        app_type: &AppType,
+        endpoint: &str,
+        route_body: &Value,
+    ) -> Result<Provider, ProxyError> {
+        let providers = self
+            .router
+            .select_providers(app_type.as_str())
+            .await
+            .map_err(|err| ProxyError::DatabaseError(err.to_string()))?;
+        let provider = providers
+            .first()
+            .cloned()
+            .ok_or(ProxyError::NoAvailableProvider)?;
+        let provider_is_resolved_codex_route = provider
+            .settings_config
+            .get("codexResolvedRouteId")
+            .is_some();
+        let codex_router_configured =
+            matches!(app_type, AppType::Codex) && codex_provider_has_routing_config(&provider);
+        let routed_provider =
+            if matches!(app_type, AppType::Codex) && !provider_is_resolved_codex_route {
+                resolve_codex_raw_passthrough_route_provider(&provider, route_body)
+            } else {
+                None
+            };
+        let routed_provider = if let Some(route_provider) = routed_provider {
+            if let Some(target_provider_id) =
+                super::providers::codex_route_target_provider_id(&route_provider)
+            {
+                let Some(target_provider) = self
+                    .router
+                    .get_provider_by_id(target_provider_id, app_type.as_str())
+                    .map_err(|err| {
+                        ProxyError::ConfigError(format!(
+                            "读取 Codex raw route 目标供应商 '{target_provider_id}' 失败: {err}"
+                        ))
+                    })?
+                else {
+                    return Err(ProxyError::ConfigError(format!(
+                        "Codex raw route 引用了不存在的目标供应商 '{target_provider_id}'"
+                    )));
+                };
+                Some(
+                    super::providers::materialize_codex_routed_provider_from_target(
+                        &route_provider,
+                        &target_provider,
+                    ),
+                )
+            } else {
+                Some(route_provider)
+            }
+        } else {
+            None
+        };
+        let codex_route_missed = codex_router_configured
+            && !provider_is_resolved_codex_route
+            && routed_provider.is_none();
+        let provider = routed_provider.unwrap_or(provider);
+        let adapter = get_adapter(app_type);
+        let base_url = adapter.extract_base_url(&provider)?;
+        if codex_route_missed && codex_base_url_points_to_local_proxy(&base_url) {
+            return Err(ProxyError::InvalidRequest(format!(
+                "Codex router provider did not resolve raw endpoint '{endpoint}', and its fallback base_url points to the local proxy. Refusing to forward recursively."
+            )));
+        }
+        Ok(provider)
     }
 
     /// 故障转移开启时，成功不能只看上游响应头。
@@ -5766,7 +6104,7 @@ fn codex_base_url_points_to_local_proxy(base_url: &str) -> bool {
 /// 一律选择 official/Codex OAuth route，把未知 endpoint 当作 GPT App 的原生官方请求。
 /// 这里故意不使用 defaultRouteId，避免图片、音频、文件等 OpenAI 原生 endpoint 被
 /// defaultRouteId 指向的 DeepSeek/Qwen 文本 provider 吞掉。
-fn resolve_codex_raw_passthrough_route_provider(
+pub(crate) fn resolve_codex_raw_passthrough_route_provider(
     provider: &Provider,
     route_body: &Value,
 ) -> Option<Provider> {
@@ -6049,6 +6387,110 @@ fn raw_passthrough_request_is_streaming(route_body: &Value, headers: &http::Head
             .unwrap_or(false)
 }
 
+/// 归一化 Codex GPT-Live 本地入口，返回 `/v1/live` 或 `/v1/live/{call_id}`。
+fn codex_realtime_live_path(endpoint: &str) -> Option<String> {
+    let (path, _query) = split_endpoint_and_query(endpoint);
+    let path = path.trim_end_matches('/');
+    let canonical = if matches!(
+        path,
+        "/live" | "/v1/live" | "/v1/v1/live" | "/codex/v1/live"
+    ) {
+        Some("/v1/live".to_string())
+    } else if let Some(rest) = path.strip_prefix("/live/") {
+        Some(format!("/v1/live/{rest}"))
+    } else if let Some(rest) = path.strip_prefix("/v1/v1/live/") {
+        Some(format!("/v1/live/{rest}"))
+    } else if let Some(rest) = path.strip_prefix("/codex/v1/live/") {
+        Some(format!("/v1/live/{rest}"))
+    } else if path.starts_with("/v1/live/") {
+        Some(path.to_string())
+    } else {
+        None
+    };
+    canonical.filter(|path| path == "/v1/live" || path.starts_with("/v1/live/"))
+}
+
+/// 只有 GPT-Live call-create 的精确入口需要转换 HTTP 请求形态。
+fn codex_realtime_live_call_path(path: &str) -> bool {
+    codex_realtime_live_path(path).as_deref() == Some("/v1/live")
+}
+
+/// 从 Codex 本地 `/v1/live` multipart 请求中提取 `sdp` 与 `session`。
+///
+/// Codex 以 `api.openai.com/v1` 形态向本地代理发起 call-create 时，body 是
+/// `codex-realtime-call-boundary` multipart；官方 ChatGPT Codex backend 形态要求
+/// JSON `{ sdp, session }`，因此这里只在进入 backend 上游前做转换。
+fn codex_realtime_multipart_payload(
+    body: &[u8],
+    content_type: &str,
+) -> Result<(String, Value), ProxyError> {
+    let boundary = content_type
+        .split(';')
+        .find_map(|part| {
+            let part = part.trim();
+            part.strip_prefix("boundary=")
+        })
+        .map(|boundary| boundary.trim_matches('"').to_string())
+        .filter(|boundary| !boundary.is_empty())
+        .ok_or_else(|| {
+            ProxyError::InvalidRequest(
+                "Codex realtime call requires multipart/form-data with a boundary".to_string(),
+            )
+        })?;
+    let text = std::str::from_utf8(body).map_err(|_| {
+        ProxyError::InvalidRequest(
+            "Codex realtime call body must be UTF-8 multipart data".to_string(),
+        )
+    })?;
+    let delimiter = format!("--{boundary}");
+    let mut sdp = None;
+    let mut session = None;
+    for raw_part in text.split(&delimiter).skip(1) {
+        let part = raw_part
+            .strip_prefix("\r\n")
+            .or_else(|| raw_part.strip_prefix('\n'))
+            .unwrap_or(raw_part);
+        let part = part.strip_suffix("--").unwrap_or(part);
+        let Some((header_block, value)) = part.split_once("\r\n\r\n") else {
+            continue;
+        };
+        let value = value.strip_suffix("\r\n").unwrap_or(value);
+        match codex_realtime_multipart_field_name(header_block).as_deref() {
+            Some("sdp") => sdp = Some(value.to_string()),
+            Some("session") => {
+                session = Some(serde_json::from_str(value).map_err(|err| {
+                    ProxyError::InvalidRequest(format!(
+                        "Codex realtime session part is not valid JSON: {err}"
+                    ))
+                })?);
+            }
+            _ => {}
+        }
+    }
+    let sdp = sdp.ok_or_else(|| {
+        ProxyError::InvalidRequest("Codex realtime call is missing the sdp part".to_string())
+    })?;
+    let session = session.ok_or_else(|| {
+        ProxyError::InvalidRequest("Codex realtime call is missing the session part".to_string())
+    })?;
+    Ok((sdp, session))
+}
+
+fn codex_realtime_multipart_field_name(headers: &str) -> Option<String> {
+    headers.lines().find_map(|line| {
+        if !line
+            .to_ascii_lowercase()
+            .starts_with("content-disposition:")
+        {
+            return None;
+        }
+        let needle = "name=\"";
+        let start = line.to_ascii_lowercase().find(needle)? + needle.len();
+        let end = line[start..].find('"')? + start;
+        Some(line[start..end].to_string())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6057,6 +6499,7 @@ mod tests {
     use axum::http::header::{HeaderValue, ACCEPT};
     use axum::http::HeaderMap;
     use bytes::Bytes;
+    use futures::SinkExt;
     use http::StatusCode;
     use serde_json::json;
 
@@ -8269,6 +8712,45 @@ mod tests {
     }
 
     #[test]
+    fn raw_passthrough_empty_body_uses_official_route_not_default_route() {
+        let provider = provider_with_settings(json!({
+            "codexRouting": {
+                "enabled": true,
+                "defaultRouteId": "deepseek",
+                "routes": [
+                    {
+                        "id": "official",
+                        "label": "OpenAI Official",
+                        "match": { "models": ["gpt-5.5"] },
+                        "upstream": {
+                            "targetProviderId": "codex-official",
+                            "auth": { "source": "managed_codex_oauth" }
+                        }
+                    },
+                    {
+                        "id": "deepseek",
+                        "label": "DeepSeek",
+                        "match": { "models": ["deepseek-v4-flash"] },
+                        "upstream": {
+                            "baseUrl": "https://api.deepseek.com",
+                            "apiKey": "sk-deepseek"
+                        }
+                    }
+                ]
+            }
+        }));
+
+        let resolved = resolve_codex_raw_passthrough_route_provider(&provider, &json!({}))
+            .expect("empty realtime body should still resolve official");
+
+        assert_eq!(resolved.settings_config["codexResolvedRouteId"], "official");
+        assert_eq!(
+            resolved.settings_config["codexResolvedRouteMatched"], false,
+            "空 body 的 GPT-Live 端点不是模型显式命中"
+        );
+    }
+
+    #[test]
     fn raw_passthrough_keeps_explicit_nonofficial_model_match() {
         let provider = provider_with_settings(json!({
             "codexRouting": {
@@ -8339,6 +8821,175 @@ mod tests {
             resolved.is_none(),
             "raw passthrough 未知 GPT App 原生请求不能退到非 official defaultRouteId"
         );
+    }
+
+    #[test]
+    fn codex_realtime_live_path_normalizes_local_aliases_and_call_ids() {
+        assert_eq!(
+            codex_realtime_live_path("/v1/live").as_deref(),
+            Some("/v1/live")
+        );
+        assert_eq!(
+            codex_realtime_live_path("/codex/v1/live").as_deref(),
+            Some("/v1/live")
+        );
+        assert_eq!(
+            codex_realtime_live_path("/v1/v1/live/rtc_123").as_deref(),
+            Some("/v1/live/rtc_123")
+        );
+        assert_eq!(
+            codex_realtime_live_path("/live/rtc_123").as_deref(),
+            Some("/v1/live/rtc_123")
+        );
+        assert_eq!(codex_realtime_live_path("/v1/responses").as_deref(), None);
+        assert!(!codex_realtime_live_call_path("/v1/live/rtc_123"));
+        assert!(codex_realtime_live_call_path("/codex/v1/live"));
+    }
+
+    #[test]
+    fn codex_realtime_multipart_parses_sdp_and_session() {
+        let boundary = "codex-realtime-call-boundary";
+        let body = format!(
+            "--{boundary}\r\n\
+             Content-Disposition: form-data; name=\"sdp\"\r\n\
+             Content-Type: application/sdp\r\n\
+             \r\n\
+             v=offer\r\n\
+             o=- 1 1 IN IP4 127.0.0.1\r\n\
+             s=codex\r\n\
+             \r\n\
+             --{boundary}\r\n\
+             Content-Disposition: form-data; name=\"session\"\r\n\
+             Content-Type: application/json\r\n\
+             \r\n\
+             {{\"model\":\"gpt-live-1-codex\",\"delegation\":{{\"type\":\"client\"}}}}\r\n\
+             --{boundary}--\r\n"
+        );
+        let (sdp, session) = codex_realtime_multipart_payload(
+            body.as_bytes(),
+            &format!("multipart/form-data; boundary={boundary}"),
+        )
+        .expect("parse realtime multipart");
+        assert!(sdp.starts_with("v=offer"));
+        assert_eq!(session["model"], "gpt-live-1-codex");
+        assert_eq!(session["delegation"]["type"], "client");
+    }
+
+    #[tokio::test]
+    async fn codex_realtime_websocket_connects_to_official_backend() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind realtime ws mock");
+        let addr = listener.local_addr().expect("realtime ws mock addr");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept realtime ws mock");
+            let mut ws = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("accept realtime websocket");
+            ws.send(tokio_tungstenite::tungstenite::Message::Text(
+                "hello".to_string(),
+            ))
+            .await
+            .expect("send realtime ws message");
+        });
+        let db = Arc::new(Database::memory().expect("memory db"));
+        db.save_provider(
+            "codex",
+            &Provider::with_id(
+                "codex-official".to_string(),
+                "OpenAI Official".to_string(),
+                json!({
+                    "base_url": format!("ws://{addr}/backend-api/codex"),
+                    "api_key": "sk-official"
+                }),
+                None,
+            ),
+        )
+        .expect("save official provider");
+        db.save_provider(
+            "codex",
+            &Provider::with_id(
+                "router".to_string(),
+                "Codex Router".to_string(),
+                json!({
+                    "codexRouting": {
+                        "enabled": true,
+                        "defaultRouteId": "deepseek",
+                        "routes": [
+                            {
+                                "id": "official",
+                                "label": "OpenAI Official",
+                                "enabled": true,
+                                "targetProviderId": "codex-official",
+                                "match": { "models": ["gpt-5.6-sol"] },
+                                "upstream": { "apiFormat": "openai_responses" }
+                            },
+                            {
+                                "id": "deepseek",
+                                "label": "DeepSeek",
+                                "enabled": true,
+                                "match": { "models": ["deepseek-v4-flash"] },
+                                "upstream": {
+                                    "baseUrl": "https://api.deepseek.com",
+                                    "apiKey": "sk-deepseek"
+                                }
+                            }
+                        ]
+                    }
+                }),
+                None,
+            ),
+        )
+        .expect("save router provider");
+        let mut proxy_config = db
+            .get_proxy_config_for_app("codex")
+            .await
+            .expect("read codex proxy config");
+        proxy_config.enabled = true;
+        proxy_config.auto_failover_enabled = true;
+        db.update_proxy_config_for_app(proxy_config)
+            .await
+            .expect("enable codex failover queue");
+        db.add_to_failover_queue("codex", "router")
+            .expect("add router to failover queue");
+        let forwarder = RequestForwarder {
+            router: Arc::new(ProviderRouter::new(db.clone())),
+            status: Arc::new(RwLock::new(ProxyStatus::default())),
+            current_providers: Arc::new(RwLock::new(HashMap::new())),
+            gemini_shadow: Arc::new(GeminiShadowStore::new()),
+            codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
+            failover_manager: Arc::new(FailoverSwitchManager::new(db)),
+            app_handle: None,
+            current_provider_id_at_start: String::new(),
+            session_id: String::new(),
+            session_client_provided: false,
+            preserve_codex_client_originator: false,
+            rectifier_config: RectifierConfig::default(),
+            optimizer_config: OptimizerConfig::default(),
+            copilot_optimizer_config: CopilotOptimizerConfig::default(),
+            codex_responses_lite_fallbacks: Arc::new(RwLock::new(HashMap::new())),
+            non_streaming_timeout: Duration::ZERO,
+            streaming_first_byte_timeout: Duration::ZERO,
+            max_attempts: 1,
+        };
+
+        let mut stream = forwarder
+            .open_codex_realtime_websocket(
+                &AppType::Codex,
+                "/v1/live",
+                &json!({}),
+                &HeaderMap::new(),
+            )
+            .await
+            .expect("connect realtime websocket");
+        let message = stream
+            .0
+            .next()
+            .await
+            .expect("realtime ws message")
+            .expect("realtime ws message ok");
+        assert_eq!(message.into_text().expect("text message"), "hello");
+        server.await.expect("realtime ws mock task");
     }
 
     fn body_with_codex_tool_output_image(stringified: bool) -> Value {
