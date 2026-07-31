@@ -67,9 +67,9 @@ pub use codex::{
     is_codex_official_provider, materialize_codex_routed_provider_from_target,
     provider_needs_responses_namespace_flatten, resolve_codex_cache_config,
     resolve_codex_catalog_tool_profile, resolve_codex_chat_reasoning_config,
-    resolve_codex_model_routed_provider, should_convert_codex_responses_to_anthropic,
-    should_convert_codex_responses_to_chat, should_convert_codex_responses_to_messages,
-    CodexMultiRouterAuthFacade,
+    resolve_codex_model_routed_provider, resolve_codex_model_routed_providers,
+    should_convert_codex_responses_to_anthropic, should_convert_codex_responses_to_chat,
+    should_convert_codex_responses_to_messages, CodexMultiRouterAuthFacade,
 };
 pub(crate) use codex::{
     is_codex_remote_compact_endpoint, is_codex_responses_endpoint, provider_uses_native_codex_auth,

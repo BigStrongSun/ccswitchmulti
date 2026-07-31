@@ -668,11 +668,11 @@ impl RequestForwarder {
             });
         }
 
-        let attempt_providers = build_forward_attempt_providers_preserving_codex_router_context(
-            app_type,
-            &providers,
-            &route_body,
-        );
+        // Unknown OpenAI-compatible endpoints keep the router provider and let
+        // `forward_raw` resolve only the explicitly matched route or official
+        // Codex OAuth. Expanding the whole route chain here would let native
+        // image/audio/file requests fail over to text-only DeepSeek/Qwen routes.
+        let attempt_providers = providers.to_vec();
         let attempt_providers = self
             .expand_codex_account_pool(app_type, &headers, attempt_providers)
             .await;
@@ -1667,8 +1667,10 @@ impl RequestForwarder {
             .to_string();
         let codex_request_metadata =
             CodexRequestMetadataSummary::from_request(app_type, endpoint, body, headers);
-        let outer_provider_id = provider.id.clone();
-        let outer_provider_name = provider.name.clone();
+        let (outer_provider_id, outer_provider_name) = {
+            let (id, name) = super::providers::codex_route_persistent_provider(provider);
+            (id.to_string(), name.to_string())
+        };
 
         // Codex v2 是一个复合 provider：Codex 客户端只看到一个 provider bucket，
         // Rust proxy 根据请求模型临时解析真实上游 provider，后续 base_url/auth/转换逻辑
@@ -1677,9 +1679,8 @@ impl RequestForwarder {
             .settings_config
             .get("codexResolvedRouteId")
             .is_some();
-        let codex_router_configured = matches!(app_type, AppType::Codex)
-            && !provider_is_resolved_codex_route
-            && codex_provider_has_routing_config(provider);
+        let codex_router_configured =
+            matches!(app_type, AppType::Codex) && codex_provider_has_routing_config(provider);
         let routed_provider = if matches!(app_type, AppType::Codex) {
             (!provider_is_resolved_codex_route)
                 .then(|| super::providers::resolve_codex_model_routed_provider(provider, body))
@@ -1716,7 +1717,9 @@ impl RequestForwarder {
         } else {
             None
         };
-        let codex_route_missed = codex_router_configured && routed_provider.is_none();
+        let codex_route_missed = codex_router_configured
+            && !provider_is_resolved_codex_route
+            && routed_provider.is_none();
         let provider = routed_provider.as_ref().unwrap_or(provider);
 
         if let Some(trace_id) = codex_trace_id.as_deref() {
@@ -3363,16 +3366,17 @@ impl RequestForwarder {
             .and_then(|value| value.as_str())
             .unwrap_or("unknown")
             .to_string();
-        let outer_provider_id = provider.id.clone();
-        let outer_provider_name = provider.name.clone();
+        let (outer_provider_id, outer_provider_name) = {
+            let (id, name) = super::providers::codex_route_persistent_provider(provider);
+            (id.to_string(), name.to_string())
+        };
 
         let provider_is_resolved_codex_route = provider
             .settings_config
             .get("codexResolvedRouteId")
             .is_some();
-        let codex_router_configured = matches!(app_type, AppType::Codex)
-            && !provider_is_resolved_codex_route
-            && codex_provider_has_routing_config(provider);
+        let codex_router_configured =
+            matches!(app_type, AppType::Codex) && codex_provider_has_routing_config(provider);
         let routed_provider =
             if matches!(app_type, AppType::Codex) && !provider_is_resolved_codex_route {
                 resolve_codex_raw_passthrough_route_provider(provider, route_body)
@@ -3408,7 +3412,9 @@ impl RequestForwarder {
         } else {
             None
         };
-        let codex_route_missed = codex_router_configured && routed_provider.is_none();
+        let codex_route_missed = codex_router_configured
+            && !provider_is_resolved_codex_route
+            && routed_provider.is_none();
         let provider = routed_provider.as_ref().unwrap_or(provider);
 
         if let Some(trace_id) = codex_trace_id.as_deref() {
@@ -5555,16 +5561,37 @@ fn value_for_shape_log(value: &Value) -> String {
 
 /// 构建本次转发要尝试的 provider 列表。
 ///
-/// Codex MultiRouter 必须保留父 provider 进入 `forward()`，再由 `forward()` 在请求上下文内解析
-/// 具体 route。提前展开成 `parent::route::*` 会让状态页、健康记录、日志 outer_provider 和后续
-/// 转换器判定丢掉父 router 身份，表现为“监听正常但没有命中当前 MultiRouter”。
+/// Codex MultiRouter 在这里展开成 route provider 候选链，转发重试才能在同一请求上
+/// 从主 route 故障转移到其它启用 route。每个 route provider 已携带父 router 的
+/// id/name，`forward()` 仍能用它保持日志、状态页和用量归因的外层身份。
 fn build_forward_attempt_providers_preserving_codex_router_context(
     app_type: &AppType,
     providers: &[Provider],
     body: &Value,
 ) -> Vec<Provider> {
-    let _ = (app_type, body);
-    providers.to_vec()
+    if !matches!(app_type, AppType::Codex) {
+        return providers.to_vec();
+    }
+
+    let mut expanded = Vec::new();
+    for provider in providers {
+        if codex_provider_has_routing_config(provider)
+            && provider
+                .settings_config
+                .get("codexResolvedRouteId")
+                .is_none()
+        {
+            let routes = super::providers::resolve_codex_model_routed_providers(provider, body);
+            if routes.is_empty() {
+                expanded.push(provider.clone());
+            } else {
+                expanded.extend(routes);
+            }
+        } else {
+            expanded.push(provider.clone());
+        }
+    }
+    expanded
 }
 
 fn log_prompt_cache_trace(
@@ -6344,7 +6371,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_multirouter_attempts_keep_parent_provider_context() {
+    fn codex_multirouter_attempts_expand_route_chain_while_retaining_parent_context() {
         let mut provider = test_provider_with_type(None);
         provider.id = "codex-openai-router".to_string();
         provider.name = "OpenAI Multi-Model Router".to_string();
@@ -6359,6 +6386,14 @@ mod tests {
                         "models": ["qwen3.6"],
                         "base_url": "https://example.test/v1",
                         "wireApi": "chat"
+                    },
+                    {
+                        "id": "deepseek",
+                        "name": "DeepSeek",
+                        "enabled": true,
+                        "models": ["deepseek-v4-flash"],
+                        "base_url": "https://api.deepseek.com/v1",
+                        "wireApi": "chat"
                     }
                 ]
             }
@@ -6367,15 +6402,42 @@ mod tests {
         let attempts = build_forward_attempt_providers_preserving_codex_router_context(
             &AppType::Codex,
             &[provider.clone()],
-            &json!({ "model": "qwen3.6" }),
+            &json!({ "model": "deepseek-v4-flash" }),
         );
 
-        assert_eq!(attempts.len(), 1);
-        assert_eq!(attempts[0].id, "codex-openai-router");
-        assert!(attempts[0]
-            .settings_config
-            .get("codexResolvedRouteId")
-            .is_none());
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0].id, "codex-openai-router::route::deepseek");
+        assert_eq!(
+            attempts[0]
+                .settings_config
+                .get("codexResolvedRouteId")
+                .and_then(serde_json::Value::as_str),
+            Some("deepseek")
+        );
+        assert_eq!(attempts[1].id, "codex-openai-router::route::qwen-local");
+        assert_eq!(
+            attempts[1]
+                .settings_config
+                .get("codexResolvedRouteId")
+                .and_then(serde_json::Value::as_str),
+            Some("qwen-local")
+        );
+        for attempt in &attempts {
+            assert_eq!(
+                attempt
+                    .settings_config
+                    .get("codexRouterParentProviderId")
+                    .and_then(serde_json::Value::as_str),
+                Some("codex-openai-router")
+            );
+            assert_eq!(
+                attempt
+                    .settings_config
+                    .get("codexRouterParentProviderName")
+                    .and_then(serde_json::Value::as_str),
+                Some("OpenAI Multi-Model Router")
+            );
+        }
     }
 
     #[test]
