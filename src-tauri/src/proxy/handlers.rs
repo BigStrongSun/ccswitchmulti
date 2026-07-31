@@ -13,7 +13,7 @@ use super::{
     external_openai_api::{
         self, ExternalOpenAiApiAuthError, ExternalOpenAiApiBackendType, ExternalOpenAiApiProfile,
     },
-    forwarder::ActiveConnectionGuard,
+    forwarder::{ActiveConnectionGuard, CodexRealtimeWebSocketStream},
     handler_config::{
         claude_stream_usage_event_filter, codex_stream_usage_event_filter, CLAUDE_PARSER_CONFIG,
         CODEX_PARSER_CONFIG, GEMINI_PARSER_CONFIG, OPENAI_PARSER_CONFIG,
@@ -46,12 +46,16 @@ use crate::app_config::AppType;
 use crate::database::PRICING_SOURCE_REQUEST;
 use crate::proxy::json_canonical::short_sha256_hex;
 use axum::{
-    extract::{ws::WebSocketUpgrade, State},
-    http::{HeaderMap, HeaderValue, StatusCode},
+    extract::{
+        ws::{Message as WsClientMessage, WebSocket, WebSocketUpgrade},
+        State,
+    },
+    http::{HeaderMap, HeaderValue, StatusCode, Uri},
     response::IntoResponse,
     Json,
 };
 use bytes::Bytes;
+use futures::{SinkExt, StreamExt};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 
@@ -233,6 +237,137 @@ pub async fn handle_raw_openai_passthrough(
         connection_guard,
     )
     .await
+}
+
+/// Codex GPT-Live 的 HTTP call-create 仍走 raw passthrough，但 `forward_raw` 已
+/// 对 `/v1/live` 做官方 backend 形态转换。
+pub async fn handle_codex_realtime_http(
+    State(state): State<ProxyState>,
+    request: axum::extract::Request,
+) -> Result<axum::response::Response, ProxyError> {
+    handle_raw_openai_passthrough(State(state), request).await
+}
+
+/// 处理 Codex GPT-Live WebSocket Upgrade。
+pub async fn handle_codex_realtime_websocket(
+    State(state): State<ProxyState>,
+    headers: HeaderMap,
+    uri: Uri,
+    ws: WebSocketUpgrade,
+) -> axum::response::Response {
+    let route_body = json!({});
+    let endpoint = raw_openai_passthrough_endpoint_with_query(&uri);
+    let ctx = match RequestContext::new(
+        &state,
+        &route_body,
+        &headers,
+        AppType::Codex,
+        "Codex",
+        "codex",
+    )
+    .await
+    {
+        Ok(ctx) => ctx,
+        Err(err) => return err.into_response(),
+    };
+    let forwarder = ctx.create_forwarder(&state);
+    let upstream = match forwarder
+        .open_codex_realtime_websocket(&AppType::Codex, &endpoint, &route_body, &headers)
+        .await
+    {
+        Ok(upstream) => upstream,
+        Err(err) => {
+            log_forward_error(&state, &ctx, false, &err);
+            return build_codex_proxy_error_response(&ctx, &endpoint, &err)
+                .unwrap_or_else(|err| err.into_response());
+        }
+    };
+    let session_id = ctx.session_id.clone();
+    ws.on_upgrade(move |socket| async move {
+        relay_codex_realtime_websocket(socket, upstream, session_id).await
+    })
+}
+
+/// 双向透传 Codex GPT-Live WebSocket 消息。
+async fn relay_codex_realtime_websocket(
+    client: WebSocket,
+    upstream_stream: CodexRealtimeWebSocketStream,
+    _session_id: String,
+) {
+    let CodexRealtimeWebSocketStream(upstream) = upstream_stream;
+    let (mut client_tx, mut client_rx) = client.split();
+    let (mut upstream_tx, mut upstream_rx) = upstream.split();
+    let client_to_upstream = async move {
+        while let Some(Ok(message)) = client_rx.next().await {
+            let is_close = matches!(message, WsClientMessage::Close(_));
+            let Some(message) = ws_client_message_to_upstream(message) else {
+                continue;
+            };
+            if upstream_tx.send(message).await.is_err() {
+                break;
+            }
+            if is_close {
+                break;
+            }
+        }
+        let _ = upstream_tx.close().await;
+    };
+    let upstream_to_client = async move {
+        while let Some(Ok(message)) = upstream_rx.next().await {
+            let is_close = matches!(message, tokio_tungstenite::tungstenite::Message::Close(_));
+            let Some(message) = ws_upstream_message_to_client(message) else {
+                continue;
+            };
+            if client_tx.send(message).await.is_err() {
+                break;
+            }
+            if is_close {
+                break;
+            }
+        }
+        let _ = client_tx.close().await;
+    };
+    tokio::join!(client_to_upstream, upstream_to_client);
+}
+
+fn ws_client_message_to_upstream(
+    message: WsClientMessage,
+) -> Option<tokio_tungstenite::tungstenite::Message> {
+    use tokio_tungstenite::tungstenite::Message as UpstreamMessage;
+    match message {
+        WsClientMessage::Text(text) => Some(UpstreamMessage::Text(text)),
+        WsClientMessage::Binary(binary) => Some(UpstreamMessage::Binary(binary)),
+        WsClientMessage::Ping(ping) => Some(UpstreamMessage::Ping(ping)),
+        WsClientMessage::Pong(pong) => Some(UpstreamMessage::Pong(pong)),
+        WsClientMessage::Close(Some(frame)) => Some(UpstreamMessage::Close(Some(
+            tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::from(
+                    frame.code,
+                ),
+                reason: frame.reason.into_owned().into(),
+            },
+        ))),
+        WsClientMessage::Close(None) => Some(UpstreamMessage::Close(None)),
+    }
+}
+
+fn ws_upstream_message_to_client(
+    message: tokio_tungstenite::tungstenite::Message,
+) -> Option<WsClientMessage> {
+    use axum::extract::ws::CloseFrame;
+    use tokio_tungstenite::tungstenite::Message as UpstreamMessage;
+    match message {
+        UpstreamMessage::Text(text) => Some(WsClientMessage::Text(text)),
+        UpstreamMessage::Binary(binary) => Some(WsClientMessage::Binary(binary)),
+        UpstreamMessage::Ping(ping) => Some(WsClientMessage::Ping(ping)),
+        UpstreamMessage::Pong(pong) => Some(WsClientMessage::Pong(pong)),
+        UpstreamMessage::Close(Some(frame)) => Some(WsClientMessage::Close(Some(CloseFrame {
+            code: frame.code.into(),
+            reason: frame.reason.into_owned().into(),
+        }))),
+        UpstreamMessage::Close(None) => Some(WsClientMessage::Close(None)),
+        UpstreamMessage::Frame(_) => None,
+    }
 }
 
 /// 从 raw passthrough 请求体中尽力解析 JSON 选路副本。
@@ -3795,10 +3930,7 @@ fn resolve_forward_error_provider_for_logging(
         return provider.clone();
     }
 
-    let probe_body = json!({ "model": request_model });
-    let Some(route_provider) =
-        super::providers::resolve_codex_model_routed_provider(provider, &probe_body)
-    else {
+    let Some(route_provider) = resolve_forward_error_route_provider(provider, request_model) else {
         return provider.clone();
     };
 
@@ -3834,6 +3966,22 @@ fn resolve_forward_error_provider_for_logging(
             );
             route_provider
         }
+    }
+}
+
+fn resolve_forward_error_route_provider(
+    provider: &crate::provider::Provider,
+    request_model: &str,
+) -> Option<crate::provider::Provider> {
+    let probe_body = if request_model.is_empty() || request_model.eq_ignore_ascii_case("unknown") {
+        json!({})
+    } else {
+        json!({ "model": request_model })
+    };
+    if probe_body.get("model").is_some() {
+        super::providers::resolve_codex_model_routed_provider(provider, &probe_body)
+    } else {
+        super::forwarder::resolve_codex_raw_passthrough_route_provider(provider, &probe_body)
     }
 }
 
@@ -3931,8 +4079,9 @@ mod tests {
         external_openai_api_models_response, external_openai_api_unsupported_response,
         mark_external_openai_headers, resolve_codex_image_generation_provider,
         resolve_external_codex_router_target, resolve_forward_error_provider_for_logging,
-        responses_sse_to_response_value, should_handle_as_codex_client,
-        should_use_claude_transform_streaming, transform, upstream_body_parse_error,
+        resolve_forward_error_route_provider, responses_sse_to_response_value,
+        should_handle_as_codex_client, should_use_claude_transform_streaming, transform,
+        upstream_body_parse_error,
     };
     use crate::{
         app_config::AppType,
@@ -4014,6 +4163,49 @@ mod tests {
             qwen.get("upstream_model").is_none(),
             "OpenAI-compatible data[] entries must not expose private upstream model aliases"
         );
+    }
+
+    #[test]
+    fn unknown_model_error_attribution_uses_official_raw_route_not_default_route() {
+        let provider = Provider::with_id(
+            "router".to_string(),
+            "Codex Router".to_string(),
+            json!({
+                "codexRouting": {
+                    "enabled": true,
+                    "defaultRouteId": "deepseek",
+                    "routes": [
+                        {
+                            "id": "official",
+                            "label": "OpenAI Official",
+                            "match": { "models": ["gpt-5.6-sol"] },
+                            "upstream": {
+                                "targetProviderId": "codex-official",
+                                "auth": { "source": "managed_codex_oauth" }
+                            }
+                        },
+                        {
+                            "id": "deepseek",
+                            "label": "DeepSeek",
+                            "match": { "models": ["deepseek-v4-flash"] },
+                            "upstream": {
+                                "baseUrl": "https://api.deepseek.com",
+                                "apiKey": "sk-deepseek"
+                            }
+                        }
+                    ]
+                }
+            }),
+            None,
+        );
+
+        let official = resolve_forward_error_route_provider(&provider, "unknown")
+            .expect("unknown GPT-Live endpoint should attribute to official");
+        assert_eq!(official.settings_config["codexResolvedRouteId"], "official");
+
+        let deepseek = resolve_forward_error_route_provider(&provider, "deepseek-v4-flash")
+            .expect("explicit third-party model should keep model attribution");
+        assert_eq!(deepseek.settings_config["codexResolvedRouteId"], "deepseek");
     }
 
     #[test]
