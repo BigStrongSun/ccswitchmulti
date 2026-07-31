@@ -1,12 +1,13 @@
 # CC Switch Repository Memory
 
-## 2026-07-31 MultiRouter 官方 429 未故障转移到 DeepSeek 的根修
+## 2026-07-31 MultiRouter 同会话切模型后压缩请求回到当前模型的根修
 
 - 现象：多路路由开启后，同一 Codex 会话从 GPT-5.6 Sol 切到 DeepSeek V4 Flash，官方额度已用尽时仍提示 `You've hit your usage limit`。`codex-router.log` 显示该 session 的 DeepSeek 普通 turn 已 200，但后续 `compaction_reason=comp_hash_changed/model_downshift`、`compaction_phase=pre_turn` 的请求仍带 `model=gpt-5.6-sol` 并持续命中官方 route 429。
 - 上游原因：官方 Codex `core/src/session/turn.rs::maybe_run_previous_model_inline_compact()` 在切到更小上下文模型时故意用 `previous_turn_settings.model` 发起预采样压缩；这不是线程残留，CCSM 不能把“压缩请求带旧模型”当成普通路由 bug。
 - CCSM 根因：`resolve_codex_model_routed_providers()` 已经生成“主 route + 其它启用 route”的候选链，但 `build_forward_attempt_providers_preserving_codex_router_context()` 仍原样保留外层 router，`forward()` 又只取 `.next()`。因此 429（`categorize_proxy_error` 本身归为 Retryable）永远不会尝试 DeepSeek 后备 route。
 - 修复：JSON 转发入口现在把 MultiRouter 展开成 route provider 候选链，主 route 失败后由现有 retry/failover 循环按序尝试其它启用 route；route provider 保留 `codexRouterParentProviderId/Name`，`forward()` 的 `outer_provider/outer_name` 日志继续显示父 router。未知 `/v1/*` raw passthrough 仍保持原边界：只由 `forward_raw` 解析显式命中 route 或 official Codex OAuth，不把图片/音频/文件 endpoint 展开给文本 fallback。
-- 回归：`codex_multirouter_attempts_expand_route_chain_while_retaining_parent_context` 固定 deepseek 主路由优先、qwen fallback 随后且父身份不丢；`proxy::forwarder::tests` 110 项、`proxy::providers::codex::tests` 92 项、全量 lib 2663 passed / 2 ignored / 0 failed，`cargo fmt --check` 通过。
+- 关键修正：任意启用 route 不能代替“切过去的新模型”。compaction 请求进入转发前，`forward_with_retry_inner` 用 session id 查询 active `state_5.sqlite` 的 `threads.model`，若与请求体 model 不同，就把压缩请求体 model 改写成 session 当前模型，再按当前模型生成主 route；这样切到 Qwen/本地 vLLM/其它模型时压缩也会回到该模型，而不是碰运气走 DeepSeek。state DB 缺失/锁住/未写入时静默退回请求体 model 路由。
+- 回归：`codex_multirouter_attempts_expand_route_chain_while_retaining_parent_context` 固定 deepseek 主路由优先、qwen fallback 随后且父身份不丢；`compaction_routes_to_current_session_model_not_arbitrary_fallback` 固定 body 是旧 `gpt-5.6-sol`、当前 session 模型是 `qwen3.6` 时压缩请求改写并路由到 qwen；`codex_state_db` 覆盖 active DB 解析与 `threads.model` 读取。全量 `cargo test --manifest-path src-tauri/Cargo.toml --quiet` 为 2666 passed / 2 ignored / 0 failed，`cargo fmt --check` 通过。
 
 ## 2026-07-30 全应用自适应缩放与默认窗口尺寸
 

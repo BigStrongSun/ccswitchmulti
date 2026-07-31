@@ -74,6 +74,68 @@ fn resolve_user_path(raw: &str) -> PathBuf {
     PathBuf::from(raw)
 }
 
+/// Resolve the state DB currently used by Codex.
+///
+/// Configured `sqlite_home` and `CODEX_SQLITE_HOME` take precedence, then the
+/// normal Codex root DB, with the legacy `sqlite/state_5.sqlite` subdirectory as
+/// the final compatibility fallback.
+pub(crate) fn resolve_active_codex_state_db_path(
+    config_dir: &Path,
+    config_text: &str,
+) -> Option<PathBuf> {
+    if let Some(sqlite_home) = sqlite_home_from_codex_config(config_text) {
+        let configured = sqlite_home.join(CODEX_STATE_DB_FILENAME);
+        if configured.exists() {
+            return Some(configured);
+        }
+    } else if let Some(sqlite_home) = sqlite_home_from_env() {
+        let configured = sqlite_home.join(CODEX_STATE_DB_FILENAME);
+        if configured.exists() {
+            return Some(configured);
+        }
+    }
+
+    let codex_root = config_dir.join(CODEX_STATE_DB_FILENAME);
+    if codex_root.exists() {
+        return Some(codex_root);
+    }
+
+    let sqlite_default = config_dir.join("sqlite").join(CODEX_STATE_DB_FILENAME);
+    if sqlite_default.exists() {
+        return Some(sqlite_default);
+    }
+
+    None
+}
+
+/// Read the current model for a Codex thread from its active state DB.
+///
+/// The proxy only consults this for compaction requests, where Codex may carry
+/// the previous model in the request body even though the thread's current model
+/// has already switched. Returning `None` keeps the existing body-based routing.
+pub(crate) fn codex_thread_model(session_id: &str) -> Option<String> {
+    let config_dir = crate::codex_config::get_codex_config_dir();
+    let config_path = crate::codex_config::get_codex_config_path();
+    let config_text = std::fs::read_to_string(config_path).unwrap_or_default();
+    let db_path = resolve_active_codex_state_db_path(&config_dir, &config_text)?;
+    codex_thread_model_from_db(session_id, &db_path)
+}
+
+fn codex_thread_model_from_db(session_id: &str, db_path: &Path) -> Option<String> {
+    let conn = rusqlite::Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    let _ = conn.busy_timeout(std::time::Duration::from_millis(250));
+    conn.query_row(
+        "SELECT model FROM threads WHERE id = ?1",
+        [session_id],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,5 +157,40 @@ mod tests {
                 sqlite_home.join(CODEX_STATE_DB_FILENAME),
             ]
         );
+    }
+
+    #[test]
+    fn active_state_db_prefers_configured_home_and_query_reads_thread_model() {
+        let temp = tempdir().expect("tempdir");
+        let sqlite_home = temp.path().join("sqlite-home");
+        std::fs::create_dir_all(&sqlite_home).expect("create sqlite home");
+        let db_path = sqlite_home.join(CODEX_STATE_DB_FILENAME);
+        let conn = rusqlite::Connection::open(&db_path).expect("open state db");
+        conn.execute_batch(
+            "CREATE TABLE threads (id TEXT PRIMARY KEY, model TEXT); \
+             INSERT INTO threads (id, model) VALUES ('t1', 'deepseek-v4-flash');",
+        )
+        .expect("seed state db");
+        drop(conn);
+
+        let config_text = format!("sqlite_home = '''{}'''\n", sqlite_home.display());
+        let active =
+            resolve_active_codex_state_db_path(temp.path(), &config_text).expect("active state db");
+        assert_eq!(active, db_path);
+        assert_eq!(
+            codex_thread_model_from_db("t1", &db_path).as_deref(),
+            Some("deepseek-v4-flash")
+        );
+        assert_eq!(codex_thread_model_from_db("missing", &db_path), None);
+    }
+
+    #[test]
+    fn active_state_db_prefers_codex_root_when_no_override() {
+        let temp = tempdir().expect("tempdir");
+        let db_path = temp.path().join(CODEX_STATE_DB_FILENAME);
+        std::fs::write(&db_path, b"root").expect("write root state db");
+
+        let active = resolve_active_codex_state_db_path(temp.path(), "").expect("active state db");
+        assert_eq!(active, db_path);
     }
 }

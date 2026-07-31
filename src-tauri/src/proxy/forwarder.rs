@@ -848,7 +848,7 @@ impl RequestForwarder {
         app_type: &AppType,
         method: http::Method,
         endpoint: &str,
-        body: Value,
+        mut body: Value,
         headers: axum::http::HeaderMap,
         extensions: Extensions,
         providers: Vec<Provider>,
@@ -862,6 +862,30 @@ impl RequestForwarder {
                 error: ProxyError::NoAvailableProvider,
                 provider: None,
             });
+        }
+
+        if matches!(app_type, AppType::Codex)
+            && CodexRequestMetadataSummary::from_request(app_type, endpoint, &body, &headers)
+                .request_kind
+                == "compaction"
+        {
+            let current_model = crate::codex_state_db::codex_thread_model(&self.session_id);
+            let original_model = body
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string();
+            if apply_codex_compaction_current_model(&mut body, current_model.as_deref()) {
+                let routed_model = body
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                log::debug!(
+                    "[CodexRouter] compaction model {} -> current session model {}",
+                    original_model,
+                    routed_model
+                );
+            }
         }
 
         let attempt_providers = build_forward_attempt_providers_preserving_codex_router_context(
@@ -5594,6 +5618,28 @@ fn build_forward_attempt_providers_preserving_codex_router_context(
     expanded
 }
 
+/// Replace a compaction request's previous model with the thread's current model.
+///
+/// Codex may run pre-turn compaction against the model used before the switch;
+/// when the state DB knows the new model, use it as the routing truth so the
+/// compaction follows the model the user actually switched to.
+fn apply_codex_compaction_current_model(body: &mut Value, current_model: Option<&str>) -> bool {
+    let Some(current_model) = current_model.filter(|model| !model.is_empty()) else {
+        return false;
+    };
+    let request_model = body
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|model| !model.is_empty());
+    if request_model.is_none_or(|model| !model.eq_ignore_ascii_case(current_model)) {
+        body["model"] = Value::String(current_model.to_string());
+        true
+    } else {
+        false
+    }
+}
+
 fn log_prompt_cache_trace(
     app_type: &AppType,
     provider: &Provider,
@@ -6438,6 +6484,84 @@ mod tests {
                 Some("OpenAI Multi-Model Router")
             );
         }
+    }
+
+    #[test]
+    fn compaction_routes_to_current_session_model_not_arbitrary_fallback() {
+        let mut provider = test_provider_with_type(None);
+        provider.id = "codex-openai-router".to_string();
+        provider.name = "OpenAI Multi-Model Router".to_string();
+        provider.settings_config = json!({
+            "codexRouting": {
+                "enabled": true,
+                "routes": [
+                    {
+                        "id": "official",
+                        "name": "OpenAI Official Backup",
+                        "enabled": true,
+                        "models": ["gpt-5.6-sol"],
+                        "base_url": "https://chatgpt.com/backend-api/codex",
+                        "wireApi": "responses"
+                    },
+                    {
+                        "id": "deepseek",
+                        "name": "DeepSeek",
+                        "enabled": true,
+                        "models": ["deepseek-v4-flash"],
+                        "base_url": "https://api.deepseek.com/v1",
+                        "wireApi": "chat"
+                    },
+                    {
+                        "id": "qwen-local",
+                        "name": "Qwen Local vLLM",
+                        "enabled": true,
+                        "models": ["qwen3.6"],
+                        "base_url": "https://example.test/v1",
+                        "wireApi": "chat"
+                    }
+                ]
+            }
+        });
+
+        let mut body = json!({ "model": "gpt-5.6-sol" });
+        assert!(apply_codex_compaction_current_model(
+            &mut body,
+            Some("qwen3.6")
+        ));
+        assert_eq!(body["model"], "qwen3.6");
+        let attempts = build_forward_attempt_providers_preserving_codex_router_context(
+            &AppType::Codex,
+            &[provider.clone()],
+            &body,
+        );
+
+        assert_eq!(attempts.len(), 3);
+        assert_eq!(attempts[0].id, "codex-openai-router::route::qwen-local");
+        assert_eq!(
+            attempts[0]
+                .settings_config
+                .get("codexResolvedRouteId")
+                .and_then(serde_json::Value::as_str),
+            Some("qwen-local")
+        );
+        assert_eq!(
+            attempts[0]
+                .settings_config
+                .get("model")
+                .and_then(serde_json::Value::as_str),
+            Some("qwen3.6")
+        );
+        let fallback_route_ids = attempts[1..]
+            .iter()
+            .filter_map(|attempt| {
+                attempt
+                    .settings_config
+                    .get("codexResolvedRouteId")
+                    .and_then(serde_json::Value::as_str)
+            })
+            .collect::<Vec<_>>();
+        assert!(fallback_route_ids.contains(&"deepseek"));
+        assert!(fallback_route_ids.contains(&"official"));
     }
 
     #[test]
