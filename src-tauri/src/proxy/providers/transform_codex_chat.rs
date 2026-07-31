@@ -2311,7 +2311,10 @@ mod tests {
 
         let result = responses_to_chat_completions(input).unwrap();
 
-        assert_eq!(result["messages"][0]["content"], "Summarize this URL file.");
+        assert_eq!(
+            result["messages"][0]["content"],
+            "Summarize this URL file.\n[file omitted: unsupported file URL]"
+        );
     }
 
     #[test]
