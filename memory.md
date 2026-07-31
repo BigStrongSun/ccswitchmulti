@@ -1,5 +1,16 @@
 # CC Switch Repository Memory
 
+## 2026-08-01 Codex GPT-Live `/v1/live` 实时语音路由修复
+
+- 现象：用户反馈实时语音不可用，报 `CC Switch local proxy failed while handling Codex endpoint /v1/live. Provider: OpenAI Official; model: unknown; upstream_status: HTTP 404; url: http://127.0.0.1:15721/v1/live`。另一个关键现场是：MultiRouter 顺序里第二位是 DeepSeek 就显示 DeepSeek，第二位是 Qwen 就显示 Qwen，`codex multirouter` 放哪都不影响。
+- 上游事实：当前 Codex Desktop 26.721 的 GPT-Live（Frameless Bidi）走 `/v1/live`。WebRTC call-create 是 HTTP POST `/v1/live`（body 为 `codex-realtime-call-boundary` multipart，字段 `sdp` + `session`），会话侧边是 WebSocket Upgrade `/v1/live` 或 `/v1/live/{call_id}`。官方源码 `codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs` 对 Frameless 会把 `/v1` 归一成 `/v1/live`，并把 call_id 拼成 path 后缀；WebRTC sideband 默认固定到 `api.openai.com/v1/live/{call_id}`，backend 形态是 `chatgpt.com/backend-api/codex/realtime/calls`。
+- 根因一：CCSM 把 `/v1/live` 当普通 raw HTTP 转发。官方 backend target 的 `CodexAdapter.build_url` 把 `/v1/live` 归一成 `.../backend-api/codex/live`，而不是 `.../backend-api/codex/realtime/calls`；WebSocket Upgrade 也不会被 HTTP 转发正确处理。
+- 根因二：失败归因用 `model=unknown` 再次走普通 MultiRouter model resolver，`resolve_forward_error_provider_for_logging` 命中了 `defaultRouteId`，所以错误显示第二位 provider，即使实际请求已经解析到 official。
+- 修复：新增 `/live`、`/v1/live`、`/v1/v1/live`、`/codex/v1/live` 及 call_id 通配路由；`forward_raw` 对精确 call-create 做 multipart -> backend JSON `{sdp, session}` 转换并发送到 `/realtime/calls?intent=quicksilver&architecture=avas`；`RequestForwarder::open_codex_realtime_websocket` 复用 raw official route 解析与 OAuth/native auth，先完成上游 101 握手再返回 Axum Upgrade；handlers 增加双向 WebSocket relay。
+- 错误归因修复：unknown/empty model 的 raw endpoint 改用 `resolve_codex_raw_passthrough_route_provider` 的 official fallback，不再回落到 `defaultRouteId`。
+- 验证：定向 Rust 覆盖空 body official 选择、未知 model 错误归因、multipart 解析、本地路径别名/call_id、WebSocket 连接、HTTP call-create 不落到 DeepSeek。全量 `cargo test --lib -- --skip update_current_claude_desktop_provider_syncs_profile_when_proxy_takeover_is_active` 为 2674 passed / 2 ignored / 1 filtered；`cargo fmt --check`、`git diff --check` 通过。提交 `fc54a430`。
+- 边界：CCSM 修复的是代理路由、body 形态、WebSocket 传输和错误归因；GPT-Live 仍需要上游账号/API 对 `/v1/live` 或 ChatGPT Codex backend 的授权。OAuth-only 账号若无 API key/backend 实时权限，仍可能在上游 401/403。
+
 ## 2026-08-01 CCSM Agent Mesh 后端路线分支
 
 - 已创建新分支 `bigstrongsun/ccsm-agent-mesh`，用于后续 CCSM 统一模型聚合网关和 Agent 适配层开发。
