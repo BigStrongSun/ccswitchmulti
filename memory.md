@@ -15,7 +15,7 @@
 
 - 定位：`v3.16.5-22` 已经包含 `16110f4e`、`5a3693f1`、`08b58d81`，即 raw 透传未知 `/v1/*` 和 raw 默认回 official，因此同样会错误转发 `/v1/live`；`032cb5a5` 的错误归因会用 `model=unknown` 命中 defaultRouteId。引入边界是 `v3.16.5-10`，不是 3.16.5-22 独有；更早版本会在未知 endpoint 上直接结构化 404，不会把错误显示成第二位 provider。
 - 已按 3.19.0-2 的修复移植到 `fix/3.16.5-22-gpt-live`（commit `83b116f7`）：显式 `/v1/live` 路由、multipart -> backend JSON、WebSocket 中继、错误归因 official。分支已推送到 `BigStrongSun/ccswitchmulti`。
-- 3.16.5-22 全量 Rust：2115 passed / 1 failed / 2 ignored / 1 filtered；失败 `responses_request_does_not_emit_chat_file_for_url_only_input_file` 是既有 `transform_codex_chat` 用例，与本次移植无关。已继续 bump 到 `3.16.5-23`（commit `83319fed`）并发布 prerelease `v3.16.5-23`；Windows installer 远程下载 SHA256 与本地一致。
+- 3.16.5-22 全量 Rust 初跑为 2115 passed / 1 failed；失败 `responses_request_does_not_emit_chat_file_for_url_only_input_file` 是既有测试断言过期：`424a04f9` 已把 URL-only file 改为生成 `[file omitted: unsupported file URL]` 文本占位，但该测试仍断言旧行为。commit `1c82f569` 已同步为当前分支/上游 v3.17.0 的预期，随后 3.16.5-23 分支全量 Rust 为 2116 passed / 0 failed / 2 ignored / 1 filtered。已 bump 到 `3.16.5-23`（commit `83319fed`）并发布 prerelease `v3.16.5-23`；Windows installer 远程下载 SHA256 与本地一致。
 
 ## 2026-08-01 CCSM Agent Mesh 后端路线分支
 
