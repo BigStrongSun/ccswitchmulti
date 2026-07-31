@@ -1233,6 +1233,8 @@
     "poolAutoSwitch": "ChatGPT 账号自动切换",
     "poolDescription": "按列表顺序选择账号；达到保留额度后停止分配新任务。",
     "desktopCurrentAccount": "Codex Desktop 当前登录账号",
+    "desktopAccountWithLogin": "{{login}}（Codex Desktop 当前登录）",
+    "desktopAccountSameAsManaged": "与已登录账号 {{email}} 相同，已合并",
     "poolRemaining": "剩余 {{remaining}}%，低于 {{reserve}}% 时保留",
     "poolRemainingUnknown": "剩余低于 {{reserve}}% 时保留",
     "poolReserveAria": "{{account}} 保留额度",

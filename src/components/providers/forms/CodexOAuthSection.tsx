@@ -292,14 +292,24 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
                 (item) => item.id === entry.accountId,
               );
               const native = entry.accountId === NATIVE_CODEX_ACCOUNT_ID;
+              const desktopAccount = poolDraft?.desktopAccountId
+                ? accounts.find(
+                    (item) => item.id === poolDraft.desktopAccountId,
+                  )
+                : undefined;
               const quota = poolQuota.find(
                 (item) => item.accountId === entry.accountId,
               );
               const accountLabel = native
-                ? t(
-                    "codexOauth.desktopCurrentAccount",
-                    "Codex Desktop 当前登录账号",
-                  )
+                ? desktopAccount
+                  ? t("codexOauth.desktopAccountWithLogin", {
+                      login: desktopAccount.login,
+                      defaultValue: "{{login}}（Codex Desktop 当前登录）",
+                    })
+                  : t(
+                      "codexOauth.desktopCurrentAccount",
+                      "Codex Desktop 当前登录账号",
+                    )
                 : (account?.login ?? entry.accountId);
               return (
                 <div
@@ -319,6 +329,14 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
                       {accountLabel}
                     </div>
                     <div className="text-xs text-muted-foreground">
+                      {native && entry.enabled && desktopAccount && (
+                        <span className="mr-2">
+                          {t("codexOauth.desktopAccountSameAsManaged", {
+                            email: desktopAccount.login,
+                            defaultValue: "与已登录账号 {{email}} 相同，已合并",
+                          })}
+                        </span>
+                      )}
                       {quota?.remainingPercent != null
                         ? t("codexOauth.poolRemaining", {
                             remaining: quota.remainingPercent.toFixed(1),

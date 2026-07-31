@@ -415,11 +415,17 @@ pub fn codex_auth_has_oauth_login_material(auth: &Value) -> bool {
 }
 
 /// 读取 Codex OAuth auth.json 里的账号 id，用于区分同账号保留和跨账号切换。
-fn codex_oauth_account_id(auth: &Value) -> Option<&str> {
+pub(crate) fn codex_oauth_account_id(auth: &Value) -> Option<&str> {
     auth.pointer("/tokens/account_id")
         .and_then(|value| value.as_str())
         .map(str::trim)
         .filter(|value| !value.is_empty())
+}
+
+/// 读取当前 Codex Desktop auth.json 的 ChatGPT account id。
+pub(crate) fn get_live_codex_oauth_account_id() -> Option<String> {
+    let auth: Value = read_json_file(&get_codex_auth_path()).ok()?;
+    codex_oauth_account_id(&auth).map(ToString::to_string)
 }
 
 /// 判断 official provider 切换时是否应该保留当前 live OAuth 登录态。

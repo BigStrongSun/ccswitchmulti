@@ -1233,6 +1233,8 @@
     "poolAutoSwitch": "Automatic ChatGPT account switching",
     "poolDescription": "Accounts are selected in list order; new tasks stop using an account when it reaches its reserve threshold.",
     "desktopCurrentAccount": "Current Codex Desktop account",
+    "desktopAccountWithLogin": "{{login}} (current Codex Desktop login)",
+    "desktopAccountSameAsManaged": "Same as logged-in account {{email}}; merged",
     "poolRemaining": "{{remaining}}% remaining; reserve below {{reserve}}%",
     "poolRemainingUnknown": "Reserve when remaining quota is below {{reserve}}%",
     "poolReserveAria": "Reserve quota for {{account}}",

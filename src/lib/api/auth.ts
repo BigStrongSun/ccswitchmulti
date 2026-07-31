@@ -43,6 +43,7 @@ export interface CodexAccountPoolEntry {
 export interface CodexAccountPoolPolicy {
   enabled: boolean;
   entries: CodexAccountPoolEntry[];
+  desktopAccountId?: string | null;
 }
 
 export interface CodexAuthFacadeReprojectionOutcome {

@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-07-31 OAuth 账号池 Desktop 当前登录与托管同账号合并
+
+- 现象：账号池 UI 同时出现 `Codex Desktop 当前登录账号` 和 `bigstrongsun0403@gmail.com` 两个条目，即使它们底层是同一个 ChatGPT account id。Desktop `~/.codex/auth.json` 的 `tokens.account_id` 与 CCSM `codex_oauth_auth.json` 的 managed account key 一致，但代码此前没有探测关联。
+- 根因：`native_codex_auth` 是固定 sentinel，`normalized_pool_policy` 永远把 Desktop 条目和所有 managed account 分开补全，没有比较 Desktop auth.json 的 account id 与托管账号 key。
+- 修复：`CodexAccountPoolPolicy` 新增可选 `desktopAccountId`；后端从 `auth.json /tokens/account_id` 探测 Desktop 当前登录。Desktop 条目启用且托管账号 key 相同时，规范化策略删除重复托管条目；Desktop 条目禁用时保留托管账号，避免用户明确只走 CCSM OAuth 时被误删。`set_account_pool_policy` 先保存用户提交策略，再规范化去重并持久化。
+- 前端：账号池中 Desktop 条目能解析到同名托管账号并显示 `邮箱（Codex Desktop 当前登录）`，启用时显示“与已登录账号相同，已合并”；不把同一账号计成两个候选。英文/日文/繁中 locale 同步补齐。
+- 验证：`codex_oauth_auth` 26 项通过，新增同账号去重和 Desktop 禁用保留测试；`CodexOAuthSection` 8 项、`CodexRouterWorkspacePage` 47 项通过；`pnpm typecheck`、Prettier、`cargo fmt --check` 通过；全量 Rust 跳过本机 15721 端口占用测试后 2668 passed / 2 ignored / 1 filtered。
+
 ## 2026-07-31 DeepSeek V4 Flash 原生 Responses 与 CCSM 路由优化
 
 - DeepSeek 官方文档（`https://api-docs.deepseek.com/zh-cn/guides/responses_api/` 与 `/quick_start/agent_integrations/codex/`）确认：`deepseek-v4-flash` 原生支持 Responses API，`base_url=https://api.deepseek.com`；`deepseek-v4-pro` 暂不支持 Codex，官方预计 2026-08 初支持。官方 Codex 配置会写 `wire_api = "responses"` 和 `model_catalog_json`，并要求 `experimental_bearer_token` 放 DeepSeek API key。

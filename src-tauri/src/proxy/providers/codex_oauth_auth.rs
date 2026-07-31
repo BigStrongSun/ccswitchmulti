@@ -255,6 +255,8 @@ pub struct CodexAccountPoolEntry {
 pub struct CodexAccountPoolPolicy {
     pub enabled: bool,
     pub entries: Vec<CodexAccountPoolEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop_account_id: Option<String>,
 }
 
 impl Default for CodexAccountPoolPolicy {
@@ -266,7 +268,38 @@ impl Default for CodexAccountPoolPolicy {
                 enabled: true,
                 reserve_percent: 5.0,
             }],
+            desktop_account_id: None,
         }
+    }
+}
+
+/// 当 Desktop 当前登录与某个 CCSM OAuth 托管账号相同时，合并重复的池条目。
+///
+/// Desktop 和托管 OAuth 是两套凭据存储，但底层 ChatGPT account id 相同；如果
+/// Desktop 条目启用，账号池不应把同一个账号拆成两个候选，否则会出现重复额度、
+/// 重复会话绑定和同账号内空转切换。
+fn apply_desktop_account_dedupe(
+    policy: &mut CodexAccountPoolPolicy,
+    managed_account_ids: &std::collections::HashSet<String>,
+    desktop_account_id: Option<&str>,
+) {
+    let Some(desktop_account_id) = desktop_account_id
+        .map(str::trim)
+        .filter(|account_id| !account_id.is_empty())
+    else {
+        return;
+    };
+    if !managed_account_ids.contains(desktop_account_id) {
+        return;
+    }
+    let native_enabled = policy
+        .entries
+        .iter()
+        .any(|entry| entry.account_id == NATIVE_CODEX_ACCOUNT_ID && entry.enabled);
+    if native_enabled {
+        policy
+            .entries
+            .retain(|entry| entry.account_id != desktop_account_id);
     }
 }
 
@@ -322,6 +355,14 @@ pub fn read_persisted_account_pool_policy(
         entry.account_id == NATIVE_CODEX_ACCOUNT_ID
             || store.accounts.contains_key(&entry.account_id)
     });
+
+    let desktop_account_id = crate::codex_config::get_live_codex_oauth_account_id();
+    policy.desktop_account_id = desktop_account_id.clone();
+    apply_desktop_account_dedupe(
+        &mut policy,
+        &store.accounts.keys().cloned().collect(),
+        desktop_account_id.as_deref(),
+    );
 
     Ok(Some(policy))
 }
@@ -915,6 +956,8 @@ impl CodexOAuthManager {
         });
         drop(accounts);
         *self.pool_policy.write().await = policy;
+        let normalized = self.normalized_pool_policy().await;
+        *self.pool_policy.write().await = normalized;
         self.save_to_disk().await
     }
 
@@ -953,6 +996,13 @@ impl CodexOAuthManager {
         policy.entries.retain(|entry| {
             entry.account_id == NATIVE_CODEX_ACCOUNT_ID || accounts.contains_key(&entry.account_id)
         });
+        let desktop_account_id = crate::codex_config::get_live_codex_oauth_account_id();
+        policy.desktop_account_id = desktop_account_id.clone();
+        apply_desktop_account_dedupe(
+            &mut policy,
+            &accounts.keys().cloned().collect(),
+            desktop_account_id.as_deref(),
+        );
         policy
     }
 
@@ -1569,6 +1619,69 @@ mod tests {
     }
 
     #[test]
+    fn pool_policy_deduplicates_managed_account_when_desktop_same_and_native_enabled() {
+        let mut policy = CodexAccountPoolPolicy {
+            enabled: true,
+            entries: vec![
+                CodexAccountPoolEntry {
+                    account_id: NATIVE_CODEX_ACCOUNT_ID.to_string(),
+                    enabled: true,
+                    reserve_percent: 5.0,
+                },
+                CodexAccountPoolEntry {
+                    account_id: "acc-desktop".to_string(),
+                    enabled: true,
+                    reserve_percent: 9.0,
+                },
+                CodexAccountPoolEntry {
+                    account_id: "acc-other".to_string(),
+                    enabled: true,
+                    reserve_percent: 5.0,
+                },
+            ],
+            desktop_account_id: None,
+        };
+        let managed_ids =
+            std::collections::HashSet::from(["acc-desktop".to_string(), "acc-other".to_string()]);
+
+        apply_desktop_account_dedupe(&mut policy, &managed_ids, Some("acc-desktop"));
+
+        assert_eq!(policy.entries.len(), 2);
+        assert!(policy
+            .entries
+            .iter()
+            .all(|entry| entry.account_id != "acc-desktop"));
+        assert_eq!(policy.entries[0].account_id, NATIVE_CODEX_ACCOUNT_ID);
+        assert_eq!(policy.entries[1].account_id, "acc-other");
+    }
+
+    #[test]
+    fn pool_policy_keeps_managed_account_when_desktop_native_entry_is_disabled() {
+        let mut policy = CodexAccountPoolPolicy {
+            enabled: true,
+            entries: vec![
+                CodexAccountPoolEntry {
+                    account_id: NATIVE_CODEX_ACCOUNT_ID.to_string(),
+                    enabled: false,
+                    reserve_percent: 5.0,
+                },
+                CodexAccountPoolEntry {
+                    account_id: "acc-desktop".to_string(),
+                    enabled: true,
+                    reserve_percent: 9.0,
+                },
+            ],
+            desktop_account_id: None,
+        };
+        let managed_ids = std::collections::HashSet::from(["acc-desktop".to_string()]);
+
+        apply_desktop_account_dedupe(&mut policy, &managed_ids, Some("acc-desktop"));
+
+        assert_eq!(policy.entries.len(), 2);
+        assert_eq!(policy.entries[1].account_id, "acc-desktop");
+    }
+
+    #[test]
     fn test_parse_jwt_claims_organizations_fallback() {
         let header = URL_SAFE_NO_PAD.encode(b"{\"alg\":\"none\"}");
         let payload = URL_SAFE_NO_PAD.encode(b"{\"organizations\":[{\"id\":\"org-456\"}]}");
@@ -1719,6 +1832,7 @@ mod tests {
                         reserve_percent: 10.0,
                     },
                 ],
+                desktop_account_id: None,
             })
             .await
             .unwrap();

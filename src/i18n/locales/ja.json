@@ -1230,6 +1230,8 @@
     "poolAutoSwitch": "ChatGPT アカウントの自動切り替え",
     "poolDescription": "リスト順にアカウントを選択し、予約しきい値に達したアカウントには新しいタスクを割り当てません。",
     "desktopCurrentAccount": "現在の Codex Desktop アカウント",
+    "desktopAccountWithLogin": "{{login}}（現在の Codex Desktop ログイン）",
+    "desktopAccountSameAsManaged": "ログイン済みアカウント {{email}} と同じため統合済み",
     "poolRemaining": "残り {{remaining}}%、{{reserve}}% 未満を予約",
     "poolRemainingUnknown": "残量が {{reserve}}% 未満になったら予約",
     "poolReserveAria": "{{account}} の予約クォータ",

@@ -73,13 +73,14 @@ function renderSection() {
 beforeEach(() => {
   mocks.getPolicy.mockResolvedValue({
     enabled: true,
+    desktopAccountId: "managed",
     entries: [
       {
         accountId: "native_codex_auth",
         enabled: true,
         reservePercent: 5,
       },
-      { accountId: "managed", enabled: true, reservePercent: 5 },
+      { accountId: "managed-2", enabled: true, reservePercent: 5 },
     ],
   });
   mocks.refreshQuota.mockResolvedValue([]);
@@ -156,7 +157,7 @@ describe("Codex OAuth 账号池认证门面", () => {
       expect.objectContaining({
         entries: expect.arrayContaining([
           expect.objectContaining({
-            accountId: "managed",
+            accountId: "native_codex_auth",
             reservePercent: 10,
           }),
         ]),
@@ -201,6 +202,41 @@ describe("Codex OAuth 账号池认证门面", () => {
       codexRestartRequired: false,
       facade: "native_mixed",
     });
+  });
+
+  it("Desktop 与已登录 OAuth 同账号时展示合并条目且不重复计为两个账号", async () => {
+    renderSection();
+
+    expect(
+      await screen.findByText(/与已登录账号 managed@example.com 相同，已合并/),
+    ).toBeVisible();
+    expect(
+      screen.getAllByRole("spinbutton", {
+        name: /managed@example.com.*保留额度/,
+      }),
+    ).toHaveLength(1);
+  });
+
+  it("Desktop 条目禁用时保留同名托管账号而不是静默删掉", async () => {
+    mocks.getPolicy.mockResolvedValue({
+      enabled: true,
+      desktopAccountId: "managed",
+      entries: [
+        {
+          accountId: "native_codex_auth",
+          enabled: false,
+          reservePercent: 5,
+        },
+        { accountId: "managed", enabled: true, reservePercent: 5 },
+      ],
+    });
+
+    renderSection();
+
+    expect(await screen.findAllByText("managed@example.com")).not.toHaveLength(
+      0,
+    );
+    expect(screen.queryByText(/相同，已合并/)).not.toBeInTheDocument();
   });
 
   it("点击移除账号时先确认，确认后才调用删除", async () => {

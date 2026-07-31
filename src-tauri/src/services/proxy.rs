@@ -6253,6 +6253,7 @@ http_headers = { x-cc-switch-proxy-mode = "router", x-user-header = "drop-with-o
                 enabled: true,
                 reserve_percent: 5.0,
             }],
+            desktop_account_id: None,
         };
         let output = ProxyService::apply_codex_proxy_toml_config_with_pool_policy(
             "",
@@ -6348,6 +6349,7 @@ supports_websockets = false
                 enabled: true,
                 reserve_percent: 5.0,
             }],
+            desktop_account_id: None,
         };
         let native = service
             .reproject_current_codex_multirouter_for_pool_policy(&native_policy)
@@ -6372,6 +6374,7 @@ supports_websockets = false
                 enabled: false,
                 reserve_percent: 5.0,
             }],
+            desktop_account_id: None,
         };
         let managed = service
             .reproject_current_codex_multirouter_for_pool_policy(&managed_policy)

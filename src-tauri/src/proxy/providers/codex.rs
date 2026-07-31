@@ -2658,6 +2658,7 @@ context_window = 500000
                     reserve_percent: 5.0,
                 },
             ],
+            desktop_account_id: None,
         }
     }
 
