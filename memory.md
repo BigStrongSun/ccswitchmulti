@@ -1,5 +1,14 @@
 # CC Switch Repository Memory
 
+## 2026-08-01 CCSM Agent Mesh 后端路线分支
+
+- 已创建新分支 `bigstrongsun/ccsm-agent-mesh`，用于后续 CCSM 统一模型聚合网关和 Agent 适配层开发。
+- 总体方向：把 Codex MultiRouter 升级为统一本地模型聚合网关，对外提供 `/v1/models`、`/v1/responses`、`/v1/chat/completions`，按模型路由上游；每个 Agent 只做薄适配层。
+- 不重写现有协议转换器，而是封装成协议适配层；Codex MultiRouter 先作为第一个 Agent 适配器。
+- 后端主要缺口：统一模型服务、统一网关、能力证据、CredentialRef/Secret Broker、共享路由与 Agent 投影、控制面/数据面分离、部署快照与回滚、端到端 canary、compact 能力约束。
+- AgentMesh 原型未定稿，本分支当前只写开发文档，不开始实现；ACPs Adapter / Token Exchange 不在本路线范围。
+- 开发文档：`docs/ccsm-agent-mesh-backend-roadmap.md`
+
 ## 2026-07-31 新版 MultiRouter 门面导致 Codex Desktop 登录状态消失
 
 - 现象：从 CCSwitchMulti 3.16.5 升到 3.19.0-1 后，Codex Desktop 账号菜单只剩 `OpenAI / 隐藏宠物 / 设置`，不显示 `BigstrongSun`、剩余用量和 `退出登录`，设置里的个人资料也消失；回退到 3.16.5 后恢复。
