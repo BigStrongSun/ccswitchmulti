@@ -5,6 +5,7 @@
 - 3.16.5-22 包含 `16110f4e`（未知 OpenAI endpoint 结构化错误）、`5a3693f1`（raw 透传未知 `/v1/*`）和 `08b58d81`（raw 默认回官方），因此同样会把 Codex GPT-Live `/v1/live` 当普通 raw HTTP 转发，并在失败归因时用 `model=unknown` 命中 defaultRouteId，错误显示第二位 DeepSeek/Qwen。该问题从 `v3.16.5-10` 开始引入，不是 3.16.5-22 独有。
 - 本分支按 3.19.0-2 修复移植：新增 `/live`、`/v1/live`、`/v1/v1/live`、`/codex/v1/live` 及 call_id 通配路由；`forward_raw` 对 call-create 做 multipart -> backend JSON 转换并发送到 `/realtime/calls?intent=quicksilver&architecture=avas`；新增 `RequestForwarder::open_codex_realtime_websocket` 和双向 WebSocket relay；未知 model 错误归因改用 raw official fallback。
 - 定向回归：path 归一化、multipart、空 body official 选择、WebSocket 连接、HTTP call-create 不落到 DeepSeek、错误归因。全量 Rust 为 2115 passed / 1 failed / 2 ignored / 1 filtered；唯一失败 `responses_request_does_not_emit_chat_file_for_url_only_input_file` 是 3.16.5-22 既有 `transform_codex_chat` 用例，未触碰相关代码。
+- 已 bump 到 `3.16.5-23`（commit `83319fed`）并发布 prerelease `v3.16.5-23`；Windows installer 远程下载 SHA256 与本地一致。
 
 ## 2026-07-27 Codex 跨模型上下文压缩路由根修
 
