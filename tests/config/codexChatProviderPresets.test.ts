@@ -29,16 +29,6 @@ const expectedChatPresets = new Map<
     },
   ],
   [
-    "DeepSeek",
-    {
-      baseUrl: "https://api.deepseek.com",
-      contextWindows: {
-        "deepseek-v4-flash": 1000000,
-        "deepseek-v4-pro": 1000000,
-      },
-    },
-  ],
-  [
     "Zhipu GLM",
     {
       baseUrl: "https://open.bigmodel.cn/api/coding/paas/v4",
@@ -234,6 +224,15 @@ describe("Codex Chat provider presets", () => {
         { contextWindows: { "doubao-seed-2-1-pro-260628": 262144 } },
       ],
       ["Bailian", { contextWindows: { "qwen3-coder-plus": 1048576 } }],
+      [
+        "DeepSeek",
+        {
+          contextWindows: {
+            "deepseek-v4-flash": 1000000,
+            "deepseek-v4-pro": 1000000,
+          },
+        },
+      ],
       ["Longcat", { contextWindows: { "LongCat-2.0": 1048576 } }],
       ["MiniMax", { contextWindows: { "MiniMax-M3": 1000000 } }],
       ["MiniMax en", { contextWindows: { "MiniMax-M3": 1000000 } }],

@@ -878,4 +878,40 @@ describe("codexMultiRouterWizard helpers", () => {
     expect(result.canContinue).toBe(true);
     expect(canContinueAfterConnectivity([result])).toBe(true);
   });
+
+  it("splits DeepSeek V4 Flash native Responses from V4 Pro Chat routes", () => {
+    const deepseek = provider({
+      id: "codex-deepseek",
+      name: "DeepSeek",
+      meta: { apiFormat: "openai_responses" },
+      settingsConfig: {
+        modelCatalog: {
+          models: [
+            { model: "deepseek-v4-flash" },
+            { model: "deepseek-v4-pro" },
+          ],
+        },
+      },
+    });
+
+    const routes = buildWizardRoutesFromSources([deepseek]);
+
+    expect(routes).toHaveLength(2);
+    expect(routes[0]).toMatchObject({
+      id: "router-codex-deepseek",
+      match: {
+        models: ["deepseek-v4-flash"],
+        prefixes: ["deepseek-v4-flash"],
+      },
+      upstream: { apiFormat: "openai_responses" },
+    });
+    expect(routes[1]).toMatchObject({
+      id: "router-codex-deepseek-chat",
+      match: {
+        models: ["deepseek-v4-pro"],
+        prefixes: ["deepseek-v4-pro"],
+      },
+      upstream: { apiFormat: "openai_chat" },
+    });
+  });
 });

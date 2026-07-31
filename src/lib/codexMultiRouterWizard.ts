@@ -919,23 +919,30 @@ export function buildWizardRoutesFromSources(
   providers: Provider[],
   officialAuth?: CodexOfficialAuthConfig,
 ): CodexRoutingRoute[] {
-  return providers.map((provider) => {
+  return providers.flatMap((provider) => {
     const models = readWizardModelCatalog(provider).map((model) => model.model);
     const modelMap = buildWizardRouteModelMap(provider);
     const oauthAccountId = isWizardCodexOAuthSource(provider)
       ? readWizardCodexOAuthAccountId(provider)
       : undefined;
-    return {
-      id: `router-${provider.id}`,
-      label: provider.name,
+    const apiFormat = inferWizardApiFormat(provider);
+    const buildRoute = (
+      routeModels: string[],
+      routeApiFormat: CodexApiFormat,
+      routeId: string,
+      label: string,
+      prefixes: string[] = inferWizardRoutePrefixes(provider),
+    ): CodexRoutingRoute => ({
+      id: routeId,
+      label,
       enabled: true,
       targetProviderId: provider.id,
       match: {
-        models,
-        prefixes: inferWizardRoutePrefixes(provider),
+        models: routeModels,
+        prefixes,
       },
       upstream: {
-        apiFormat: inferWizardApiFormat(provider),
+        apiFormat: routeApiFormat,
         auth:
           officialAuth && isWizardCodexOAuthSource(provider)
             ? codexOfficialAuthRouteBinding(officialAuth)
@@ -948,12 +955,55 @@ export function buildWizardRoutesFromSources(
                     ...(oauthAccountId ? { accountId: oauthAccountId } : {}),
                   }
                 : { source: "provider_config" },
-        ...(modelMap ? { modelMap } : {}),
+        ...(modelMap
+          ? {
+              modelMap: Object.fromEntries(
+                Object.entries(modelMap).filter(([model]) =>
+                  routeModels.includes(model),
+                ),
+              ),
+            }
+          : {}),
       },
       capabilities: {
         codexCache: inferWizardCacheConfig(provider),
       },
-    };
+    });
+
+    const providerText = `${provider.id} ${provider.name} ${
+      provider.category ?? ""
+    }`.toLowerCase();
+    const isDeepSeekSource =
+      providerText.includes("deepseek") ||
+      models.some((model) => model.toLowerCase().includes("deepseek"));
+    const flashModels = models.filter((model) => model === "deepseek-v4-flash");
+    const otherModels = models.filter((model) => model !== "deepseek-v4-flash");
+    if (
+      isDeepSeekSource &&
+      apiFormat === "openai_responses" &&
+      flashModels.length > 0 &&
+      otherModels.length > 0
+    ) {
+      return [
+        buildRoute(
+          flashModels,
+          "openai_responses",
+          `router-${provider.id}`,
+          provider.name,
+          ["deepseek-v4-flash"],
+        ),
+        buildRoute(
+          otherModels,
+          "openai_chat",
+          `router-${provider.id}-chat`,
+          `${provider.name} Chat`,
+          ["deepseek-v4-pro"],
+        ),
+      ];
+    }
+    return [
+      buildRoute(models, apiFormat, `router-${provider.id}`, provider.name),
+    ];
   });
 }
 

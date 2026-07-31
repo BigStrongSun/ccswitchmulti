@@ -1009,7 +1009,9 @@ wire_api = "responses"`,
       "deepseek-v4-flash",
     ),
     endpointCandidates: ["https://api.deepseek.com"],
-    apiFormat: "openai_chat",
+    // DeepSeek 官方 Responses API 文档明确 base_url=https://api.deepseek.com，
+    // 当前仅 deepseek-v4-flash 支持 Codex；pro 仍由 MultiRouter 拆到 Chat 兼容路由。
+    apiFormat: "openai_responses",
     modelCatalog: modelCatalog([
       {
         model: "deepseek-v4-flash",
@@ -1028,14 +1030,6 @@ wire_api = "responses"`,
         supportsImage: false,
       },
     ]),
-    codexChatReasoning: {
-      supportsThinking: true,
-      supportsEffort: true,
-      thinkingParam: "thinking",
-      effortParam: "reasoning_effort",
-      effortValueMode: "deepseek",
-      outputFormat: "reasoning_content",
-    },
     category: "cn_official",
     icon: "deepseek",
     iconColor: "#1E88E5",

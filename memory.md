@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-07-31 DeepSeek V4 Flash 原生 Responses 与 CCSM 路由优化
+
+- DeepSeek 官方文档（`https://api-docs.deepseek.com/zh-cn/guides/responses_api/` 与 `/quick_start/agent_integrations/codex/`）确认：`deepseek-v4-flash` 原生支持 Responses API，`base_url=https://api.deepseek.com`；`deepseek-v4-pro` 暂不支持 Codex，官方预计 2026-08 初支持。官方 Codex 配置会写 `wire_api = "responses"` 和 `model_catalog_json`，并要求 `experimental_bearer_token` 放 DeepSeek API key。
+- 本机实测：直接用 `https://api.deepseek.com/responses` 和 `/v1/responses` 对 `deepseek-v4-flash` 都返回 200，响应体是标准 Responses 结构（`input_tokens_details`、`reasoning`、`message`）。通过 CCSM 时，原配置的 DeepSeek route 仍写 `openai_chat`，日志显示 `/responses -> /chat/completions`；只把 route `upstream.apiFormat` 临时改成 `openai_responses` 后，`codex-router.log` 出现 `effective_endpoint=/responses upstream_url=https://api.deepseek.com/v1/responses responses_to_chat=false status=200`，随后已恢复原 DB。
+- 根修不是“把 api.deepseek.com 从 Chat-only URL 列表删掉”这么简单。当前判断里显式 `apiFormat` 优先于已知 URL 列表，真正要改的是预设和已存 route：DeepSeek preset 从 `openai_chat` 切到 `openai_responses`；向导生成路由时把 Flash 拆成原生 Responses、把 Pro 拆成 Chat 兼容路由；同步 provider catalog 时保持拆分窗口，避免 Pro 被并回 Flash 原生路由；启动期幂等 repair 会迁移旧 DB 的 `codex-deepseek`/MultiRouter route。
+- 原版 `farion1231/cc-switch` 最新 release 仍是 `v3.19.0`，本地合并分支已包含该版本，没有发现更新；`BigStrongSun/ccswitchmulti` 远端最新 release 是 `v3.16.5-22`，本地 `3.19.0-1` 源码/导出超前于远端 release。
+- 验证：`cargo test --manifest-path src-tauri/Cargo.toml --lib --quiet` 为 2667 passed / 2 ignored；`pnpm typecheck`、`pnpm exec prettier --check`、定向 Vitest 均通过。全量 Vitest 为 798 passed / 1 failed，失败的是既有 `tests/integration/App.test.tsx` 10s 超时，单独 rerun 同一用例 5.2s 通过，与 DeepSeek 修改无关联。
+
 ## 2026-07-31 MultiRouter 同会话切模型后压缩请求回到当前模型的根修
 
 - 现象：多路路由开启后，同一 Codex 会话从 GPT-5.6 Sol 切到 DeepSeek V4 Flash，官方额度已用尽时仍提示 `You've hit your usage limit`。`codex-router.log` 显示该 session 的 DeepSeek 普通 turn 已 200，但后续 `compaction_reason=comp_hash_changed/model_downshift`、`compaction_phase=pre_turn` 的请求仍带 `model=gpt-5.6-sol` 并持续命中官方 route 429。

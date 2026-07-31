@@ -358,6 +358,71 @@ describe("codexMultiRouterSync", () => {
     expect(synced?.removedSpawnAgentModels).toEqual(["old-removed-model"]);
   });
 
+  it("同步时保留 DeepSeek V4 Flash/Pro 拆分路由各自的模型窗口", () => {
+    const deepseek = provider({
+      id: "codex-deepseek",
+      name: "DeepSeek",
+      settingsConfig: {
+        modelCatalog: {
+          models: [
+            { model: "deepseek-v4-flash" },
+            { model: "deepseek-v4-pro" },
+          ],
+        },
+      },
+    });
+    const plan = provider({
+      id: "router",
+      settingsConfig: {
+        modelCatalog: {
+          models: [
+            { model: "deepseek-v4-flash" },
+            { model: "deepseek-v4-pro" },
+          ],
+        },
+        codexRouting: {
+          enabled: true,
+          routes: [
+            {
+              id: "router-codex-deepseek",
+              targetProviderId: "codex-deepseek",
+              match: { models: ["deepseek-v4-flash"] },
+              upstream: {
+                apiFormat: "openai_responses",
+                auth: { source: "provider_config" },
+              },
+            },
+            {
+              id: "router-codex-deepseek-pro-chat",
+              targetProviderId: "codex-deepseek",
+              match: { models: ["deepseek-v4-pro"] },
+              upstream: {
+                apiFormat: "openai_chat",
+                auth: { source: "provider_config" },
+              },
+            },
+          ],
+        },
+      },
+    });
+
+    const synced = syncCodexMultiRouterPlanWithProviders(
+      plan,
+      new Map([
+        [deepseek.id, deepseek],
+        [plan.id, plan],
+      ]),
+    );
+
+    expect(synced).not.toBeNull();
+    expect(
+      synced?.plan.settingsConfig.codexRouting.routes[0].match.models,
+    ).toEqual(["deepseek-v4-flash"]);
+    expect(
+      synced?.plan.settingsConfig.codexRouting.routes[1].match.models,
+    ).toEqual(["deepseek-v4-pro"]);
+  });
+
   it("同步 provider 模型变更时保留已保存 route 的别名 modelMap", () => {
     const relay = provider({
       id: "relay",

@@ -140,6 +140,10 @@ impl Database {
         }
 
         db.apply_schema_migrations()?;
+        {
+            let conn = lock_conn!(db.conn);
+            Database::repair_deepseek_native_responses_on_conn(&conn)?;
+        }
         if let Err(e) = db.ensure_incremental_auto_vacuum() {
             log::warn!("Failed to ensure incremental auto-vacuum: {e}");
         }

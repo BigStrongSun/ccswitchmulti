@@ -255,6 +255,19 @@ function buildSyncedRouteModels(
     .filter((model) => model.model.trim());
 }
 
+// DeepSeek V4 路由按协议拆分后，同步不能把 Pro 重新并回 Flash 原生 Responses 路由。
+function isDeepSeekSplitRoute(route: CodexRoutingRoute): boolean {
+  const text = `${route.id} ${route.label ?? ""} ${
+    route.match.models?.join(" ") ?? ""
+  }`.toLowerCase();
+  return (
+    text.includes("deepseek") &&
+    (route.upstream.apiFormat === "openai_responses" ||
+      route.id.includes("-pro-chat") ||
+      route.id.includes("-chat"))
+  );
+}
+
 // route 能力是 MultiRouter 规则侧的覆盖项，重建 catalog 时继续投影到对应模型上。
 function applyRouteCapabilities(
   model: CodexCatalogModel,
@@ -413,14 +426,23 @@ export function syncCodexMultiRouterPlanWithProviders(
       return route;
     }
     const nextRouteModels = buildSyncedRouteModels(plan, route, targetModels);
-    const nextModelIds = nextRouteModels
+    const syncedRouteModels = isDeepSeekSplitRoute(route)
+      ? nextRouteModels.filter((model) =>
+          route.match.models?.some(
+            (visible) =>
+              visible === model.model ||
+              visible === catalogModelUpstreamId(model),
+          ),
+        )
+      : nextRouteModels;
+    const nextSyncedModelIds = syncedRouteModels
       .map((model) => model.model?.trim())
       .filter((model): model is string => Boolean(model));
     const previousModelIds = route.match.models ?? [];
-    const nextModelMap = buildRouteModelMap(nextRouteModels);
+    const nextModelMap = buildRouteModelMap(syncedRouteModels);
     const previousModelMap = route.upstream.modelMap;
     const routeChanged =
-      previousModelIds.join("\n") !== nextModelIds.join("\n") ||
+      previousModelIds.join("\n") !== nextSyncedModelIds.join("\n") ||
       JSON.stringify(previousModelMap ?? null) !==
         JSON.stringify(nextModelMap ?? null);
     if (!routeChanged) return route;
@@ -432,7 +454,7 @@ export function syncCodexMultiRouterPlanWithProviders(
       targetProviderId: targetId,
       match: {
         ...route.match,
-        models: nextModelIds,
+        models: nextSyncedModelIds,
       },
       upstream: {
         ...upstreamWithoutModelMap,

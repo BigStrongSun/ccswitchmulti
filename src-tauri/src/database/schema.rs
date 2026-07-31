@@ -2787,6 +2787,218 @@ impl Database {
         Self::repair_current_model_pricing(conn)
     }
 
+    /// 将旧版 DeepSeek Codex 配置升级为 V4 Flash 原生 Responses，同时保留 Pro 的 Chat 兼容路由。
+    ///
+    /// DeepSeek 官方 Responses API 当前仅支持 `deepseek-v4-flash`；`deepseek-v4-pro`
+    /// 要到 2026-08 才支持 Codex，因此不能把包含 Pro 的整条 legacy route 直接改成
+    /// `openai_responses`。这里只处理官方 `api.deepseek.com`，幂等且不触碰其它供应商。
+    pub(crate) fn repair_deepseek_native_responses_on_conn(
+        conn: &Connection,
+    ) -> Result<(), AppError> {
+        let mut stmt = conn
+            .prepare("SELECT id, name, meta, settings_config FROM providers WHERE app_type='codex'")
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(|e| AppError::Database(e.to_string()))?;
+
+        let mut providers = Vec::new();
+        for row in rows {
+            let (id, name, meta, settings_config) =
+                row.map_err(|e| AppError::Database(e.to_string()))?;
+            providers.push((id, name, meta, settings_config));
+        }
+
+        let official_deepseek_ids: Vec<String> = providers
+            .iter()
+            .filter_map(|(id, name, _, settings)| {
+                let haystack = format!("{id} {name} {settings}").to_lowercase();
+                (haystack.contains("deepseek") && haystack.contains("api.deepseek.com"))
+                    .then(|| id.clone())
+            })
+            .collect();
+
+        let mut updates = Vec::new();
+        for (id, name, meta_str, settings_str) in providers {
+            let haystack = format!("{id} {name} {settings_str}").to_lowercase();
+            let references_official_target = official_deepseek_ids
+                .iter()
+                .any(|target_id| settings_str.contains(target_id));
+            if !haystack.contains("deepseek")
+                || (!haystack.contains("api.deepseek.com") && !references_official_target)
+            {
+                continue;
+            }
+
+            let mut meta = serde_json::from_str::<serde_json::Value>(&meta_str)
+                .unwrap_or_else(|_| serde_json::json!({}));
+            let mut settings = serde_json::from_str::<serde_json::Value>(&settings_str)
+                .unwrap_or_else(|_| serde_json::json!({}));
+            let mut changed = false;
+            let has_flash = settings_str.to_lowercase().contains("deepseek-v4-flash");
+
+            if has_flash {
+                for key in ["apiFormat", "api_format"] {
+                    if meta.get(key).and_then(serde_json::Value::as_str) == Some("openai_chat") {
+                        meta[key] = serde_json::json!("openai_responses");
+                        changed = true;
+                    }
+                    if settings.get(key).and_then(serde_json::Value::as_str) == Some("openai_chat")
+                    {
+                        settings[key] = serde_json::json!("openai_responses");
+                        changed = true;
+                    }
+                }
+            }
+
+            if let Some(routes) = settings
+                .pointer_mut("/codexRouting/routes")
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                let mut additions = Vec::new();
+                let mut has_pro_chat_route = routes.iter().any(|existing| {
+                    existing
+                        .get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|id| id.contains("-pro-chat"))
+                });
+                for route in routes.iter_mut() {
+                    let route_text = route.to_string().to_lowercase();
+                    if !route_text.contains("deepseek") {
+                        continue;
+                    }
+                    let old_api = route
+                        .pointer("/upstream/apiFormat")
+                        .and_then(serde_json::Value::as_str)
+                        .or_else(|| route.get("apiFormat").and_then(serde_json::Value::as_str));
+                    if old_api != Some("openai_chat") {
+                        continue;
+                    }
+
+                    let covers_pro = route_text.contains("deepseek-v4-pro")
+                        || route_text.contains("\"deepseek\"")
+                        || route_text.contains("\"deepseek-\"");
+                    if has_flash {
+                        if let Some(upstream) = route.get_mut("upstream") {
+                            upstream["apiFormat"] = serde_json::json!("openai_responses");
+                        } else {
+                            route["apiFormat"] = serde_json::json!("openai_responses");
+                        }
+                        if route.get("match").is_none() {
+                            route["match"] = serde_json::json!({});
+                        }
+                        if let Some(models) = route
+                            .get_mut("match")
+                            .and_then(|match_obj| match_obj.get_mut("models"))
+                            .and_then(serde_json::Value::as_array_mut)
+                        {
+                            models.clear();
+                            models.push(serde_json::json!("deepseek-v4-flash"));
+                        } else if let Some(match_obj) = route
+                            .get_mut("match")
+                            .and_then(serde_json::Value::as_object_mut)
+                        {
+                            match_obj.insert(
+                                "models".to_string(),
+                                serde_json::json!(["deepseek-v4-flash"]),
+                            );
+                        }
+                        if let Some(prefixes) = route
+                            .get_mut("match")
+                            .and_then(|match_obj| match_obj.get_mut("prefixes"))
+                            .and_then(serde_json::Value::as_array_mut)
+                        {
+                            prefixes.clear();
+                            prefixes.push(serde_json::json!("deepseek-v4-flash"));
+                        } else if let Some(match_obj) = route
+                            .get_mut("match")
+                            .and_then(serde_json::Value::as_object_mut)
+                        {
+                            match_obj.insert(
+                                "prefixes".to_string(),
+                                serde_json::json!(["deepseek-v4-flash"]),
+                            );
+                        }
+                        changed = true;
+                    }
+
+                    if covers_pro && has_flash && !has_pro_chat_route {
+                        let route_id = route
+                            .get("id")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("router-codex-deepseek");
+                        let label = route
+                            .get("label")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("DeepSeek");
+                        let mut pro_route = route.clone();
+                        pro_route["id"] = serde_json::json!(format!("{route_id}-pro-chat"));
+                        pro_route["label"] = serde_json::json!(format!("{label} V4 Pro Chat"));
+                        if pro_route.get("match").is_none() {
+                            pro_route["match"] = serde_json::json!({});
+                        }
+                        if let Some(match_obj) = pro_route
+                            .get_mut("match")
+                            .and_then(serde_json::Value::as_object_mut)
+                        {
+                            match_obj.insert(
+                                "models".to_string(),
+                                serde_json::json!(["deepseek-v4-pro"]),
+                            );
+                            match_obj.insert(
+                                "prefixes".to_string(),
+                                serde_json::json!(["deepseek-v4-pro"]),
+                            );
+                        }
+                        if let Some(upstream) = pro_route.get_mut("upstream") {
+                            upstream["apiFormat"] = serde_json::json!("openai_chat");
+                            if let Some(model_map) = upstream
+                                .get_mut("modelMap")
+                                .and_then(serde_json::Value::as_object_mut)
+                            {
+                                model_map.retain(|key, _| key == "deepseek-v4-pro");
+                            }
+                        } else {
+                            pro_route["apiFormat"] = serde_json::json!("openai_chat");
+                        }
+                        additions.push(pro_route);
+                        has_pro_chat_route = true;
+                    }
+                }
+                if !additions.is_empty() {
+                    routes.extend(additions);
+                    changed = true;
+                }
+            }
+
+            if changed {
+                updates.push((
+                    id,
+                    serde_json::to_string(&meta).map_err(|e| AppError::Database(e.to_string()))?,
+                    serde_json::to_string(&settings)
+                        .map_err(|e| AppError::Database(e.to_string()))?,
+                ));
+            }
+        }
+
+        for (id, new_meta, new_settings) in updates {
+            conn.execute(
+                "UPDATE providers SET meta = ?1, settings_config = ?2 WHERE id = ?3 AND app_type = 'codex'",
+                params![new_meta, new_settings, id],
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        }
+
+        Ok(())
+    }
+
     // --- 辅助方法 ---
 
     pub(crate) fn get_user_version(conn: &Connection) -> Result<i32, AppError> {
@@ -2939,6 +3151,7 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     /// 验证 v12 数据库升级后具备完整 v13 列，并且重复执行保持幂等。
     #[test]
@@ -3086,6 +3299,137 @@ mod tests {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )?;
         assert_eq!(counts, (0, 1, 0, 1));
+        Ok(())
+    }
+
+    #[test]
+    fn repair_deepseek_native_responses_splits_legacy_router_idempotently() -> Result<(), AppError>
+    {
+        let conn = Connection::open_in_memory()?;
+        Database::create_tables_on_conn(&conn)?;
+
+        let deepseek_settings = json!({
+            "auth": {"OPENAI_API_KEY": "sk-test"},
+            "modelCatalog": {
+                "models": [
+                    {"model": "deepseek-v4-flash"},
+                    {"model": "deepseek-v4-pro"}
+                ]
+            },
+            "config": "model = \"deepseek-v4-flash\"\n[model_providers.custom]\nbase_url = \"https://api.deepseek.com\"\nwire_api = \"responses\""
+        });
+        let router_settings = json!({
+            "codexRouting": {
+                "enabled": true,
+                "routes": [{
+                    "id": "router-codex-deepseek",
+                    "label": "DeepSeek",
+                    "enabled": true,
+                    "targetProviderId": "codex-deepseek",
+                    "match": {
+                        "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
+                        "prefixes": ["deepseek"]
+                    },
+                    "upstream": {
+                        "apiFormat": "openai_chat",
+                        "auth": {"source": "provider_config"}
+                    },
+                    "capabilities": {
+                        "codexCache": {
+                            "cacheMode": "deepseek_context_cache",
+                            "usageFields": [
+                                "usage.prompt_cache_hit_tokens",
+                                "usage.prompt_cache_miss_tokens"
+                            ]
+                        }
+                    }
+                }]
+            }
+        });
+
+        conn.execute(
+            "INSERT INTO providers (id, app_type, name, settings_config, meta) VALUES ('codex-deepseek', 'codex', 'DeepSeek', ?1, ?2)",
+            params![
+                deepseek_settings.to_string(),
+                json!({"apiFormat": "openai_chat"}).to_string()
+            ],
+        )?;
+        conn.execute(
+            "INSERT INTO providers (id, app_type, name, settings_config, meta) VALUES ('codex-multirouter', 'codex', 'GPT Router', ?1, ?2)",
+            params![router_settings.to_string(), "{}".to_string()],
+        )?;
+
+        Database::repair_deepseek_native_responses_on_conn(&conn)?;
+
+        let (settings_text,): (String,) = conn.query_row(
+            "SELECT settings_config FROM providers WHERE id='codex-multirouter'",
+            [],
+            |row| Ok((row.get(0)?,)),
+        )?;
+        let settings: serde_json::Value =
+            serde_json::from_str(&settings_text).map_err(|e| AppError::Database(e.to_string()))?;
+        let routes = settings
+            .pointer("/codexRouting/routes")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| AppError::Config("missing routes".to_string()))?;
+
+        assert_eq!(routes.len(), 2);
+        assert_eq!(
+            routes[0]
+                .pointer("/upstream/apiFormat")
+                .and_then(serde_json::Value::as_str),
+            Some("openai_responses")
+        );
+        assert_eq!(
+            routes[0].pointer("/match/models"),
+            Some(&json!(["deepseek-v4-flash"]))
+        );
+        assert_eq!(
+            routes[0].pointer("/match/prefixes"),
+            Some(&json!(["deepseek-v4-flash"]))
+        );
+        assert_eq!(
+            routes[1]
+                .pointer("/upstream/apiFormat")
+                .and_then(serde_json::Value::as_str),
+            Some("openai_chat")
+        );
+        assert_eq!(
+            routes[1].pointer("/match/models"),
+            Some(&json!(["deepseek-v4-pro"]))
+        );
+        assert_eq!(
+            routes[1].pointer("/match/prefixes"),
+            Some(&json!(["deepseek-v4-pro"]))
+        );
+        let (deepseek_meta_text,): (String,) = conn.query_row(
+            "SELECT meta FROM providers WHERE id='codex-deepseek'",
+            [],
+            |row| Ok((row.get(0)?,)),
+        )?;
+        let deepseek_meta: serde_json::Value = serde_json::from_str(&deepseek_meta_text)
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        assert_eq!(
+            deepseek_meta
+                .get("apiFormat")
+                .and_then(serde_json::Value::as_str),
+            Some("openai_responses")
+        );
+
+        Database::repair_deepseek_native_responses_on_conn(&conn)?;
+        let (settings_text_after,): (String,) = conn.query_row(
+            "SELECT settings_config FROM providers WHERE id='codex-multirouter'",
+            [],
+            |row| Ok((row.get(0)?,)),
+        )?;
+        let settings_after: serde_json::Value = serde_json::from_str(&settings_text_after)
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        let routes_after = settings_after
+            .pointer("/codexRouting/routes")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| AppError::Config("missing routes".to_string()))?;
+        assert_eq!(routes_after.len(), 2);
+
         Ok(())
     }
 }
