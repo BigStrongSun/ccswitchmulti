@@ -1887,8 +1887,8 @@ experimental_bearer_token = "PROXY_MANAGED"
                 router_facade
                     .get("requires_openai_auth")
                     .and_then(|value| value.as_bool()),
-                Some(false),
-                "{label}: fixed managed OAuth must not request Desktop credentials"
+                Some(true),
+                "{label}: managed OAuth must keep the Desktop login facade"
             );
             assert_eq!(
                 router_facade

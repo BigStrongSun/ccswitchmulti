@@ -3474,8 +3474,9 @@ impl ProxyService {
         if requires_openai_auth && !has_proxy_token {
             crate::proxy::providers::CodexMultiRouterAuthFacade::NativeMixed
         } else {
-            // 旧 CCSM 同时写 requires_openai_auth 和 PROXY_MANAGED；Codex 的 token
-            // 优先级使它在效果上属于 Fully Managed，重建时改成无歧义表达。
+            // 旧 CCSM 同时写 requires_openai_auth 和 PROXY_MANAGED；分类器按
+            // FullyManaged 识别。投影时仍保留这两个字段，以维持 Desktop 登录
+            // 表面并让本地代理继续收到占位凭据。
             crate::proxy::providers::CodexMultiRouterAuthFacade::FullyManaged
         }
     }
@@ -6390,7 +6391,10 @@ supports_websockets = false
         assert_eq!(managed.facade.as_deref(), Some("fully_managed"));
         let managed_live = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
             .expect("read managed live");
-        assert!(managed_live.contains("requires_openai_auth = false"));
+        assert!(
+            managed_live.contains("requires_openai_auth = true"),
+            "fully managed routes still need the Desktop login facade"
+        );
         assert!(managed_live.contains("experimental_bearer_token = \"PROXY_MANAGED\""));
         assert_eq!(
             crate::config::read_json_file::<Value>(&crate::codex_config::get_codex_auth_path())

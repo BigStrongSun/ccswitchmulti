@@ -5,7 +5,8 @@
 - 现象：从 CCSwitchMulti 3.16.5 升到 3.19.0-1 后，Codex Desktop 账号菜单只剩 `OpenAI / 隐藏宠物 / 设置`，不显示 `BigstrongSun`、剩余用量和 `退出登录`，设置里的个人资料也消失；回退到 3.16.5 后恢复。
 - 根因：不是 `~/.codex/auth.json` 被删除，而是 3.16.5 之后的 `e2c8e845 feat(codex): classify multirouter auth facades` + `bb62fbfc fix(codex): project dynamic multirouter auth facade` 把 `managed_codex_oauth` 判定为 FullyManaged，并在 live `config.toml` 的 `[model_providers.codex_model_router_v2]` 里写成 `requires_openai_auth = false`。Codex Desktop 的账号/用量/退出入口由该字段驱动，因此即使 `auth.json` 仍有完整登录材料，UI 也认为当前不是 OpenAI 账号。3.16.5 一直写 `requires_openai_auth = true` + `experimental_bearer_token = "PROXY_MANAGED"`，既保留 Desktop 登录表面，又让真实请求命中本地代理。
 - 修复：`apply_codex_multirouter_auth_facade_to_doc` 的 FullyManaged/LegacyPreserved 分支恢复为 `requires_openai_auth = true` + `PROXY_MANAGED`；NativeMixed 分支保持 `requires_openai_auth = true` 且不带 bearer。分类枚举仅用于诊断/调度，不再把 live 门面降级成隐藏登录态。
-- 验证：`cargo test --manifest-path src-tauri/Cargo.toml codex_multirouter_takeover_facade --lib` 4 passed；`cargo test --manifest-path src-tauri/Cargo.toml codex_multirouter_auth_facade --lib` 4 passed。
+- 同源补漏：完整 Rust 回归还发现 `codex_pool_policy_reprojects_current_router_and_preserves_auth_json` 与 `switching_codex_router_provider_auto_enables_dedicated_local_takeover` 仍断言 `requires_openai_auth=false`，已统一改为 `true`。`rg` 全仓库确认不再有 MultiRouter 投影写 `requires_openai_auth=false` 的生效代码或断言。
+- 验证：`cargo test --manifest-path src-tauri/Cargo.toml --lib -- --skip update_current_claude_desktop_provider_syncs_profile_when_proxy_takeover_is_active` 为 2668 passed / 2 ignored / 1 filtered；被过滤的是本机正在运行的 CCSM 占用 `127.0.0.1:15721`，不是代码回归。
 
 ## 2026-07-31 OAuth 账号池 Desktop 当前登录与托管同账号合并
 
@@ -62,7 +63,7 @@
 ## 2026-07-30 Codex MultiRouter 动态认证门面实现与接管清理根修
 
 - 本轮按 `docs/superpowers/specs/2026-07-29-codex-multirouter-auth-facade-design.md` 完成动态门面。MultiRouter 的稳定身份始终为 `model_provider = "codex_model_router_v2"`，能力名始终为 `name = "OpenAI"`，传输固定 `wire_api = "responses"`、`supports_websockets = false`；`name` 只声明 OpenAI 能力，不决定凭据归属，CCSM managed OAuth 同样可以使用 `name = "OpenAI"`。
-- Native/Mixed 门面用于任一启用 route 可能使用 Desktop 当前登录态的情况：`requires_openai_auth = true`、不写 `experimental_bearer_token`，用本地控制头 `x-cc-switch-proxy-mode = "router"` 识别进入 Router 的请求。Fully Managed 门面用于全部 route 由 CCSM/目标 provider 管理凭据的情况：`requires_openai_auth = false`、`experimental_bearer_token = "PROXY_MANAGED"`。旧 Router 缺少 auth source 时保留其原有生效语义，不能静默迁移认证所有权。
+- Native/Mixed 门面用于任一启用 route 可能使用 Desktop 当前登录态的情况：`requires_openai_auth = true`、不写 `experimental_bearer_token`，用本地控制头 `x-cc-switch-proxy-mode = "router"` 识别进入 Router 的请求。Fully Managed 门面用于全部 route 由 CCSM/目标 provider 管理凭据的情况，但 live 配置仍写 `requires_openai_auth = true` + `experimental_bearer_token = "PROXY_MANAGED"`，只切换出站凭据所有权、不隐藏 Desktop 登录表面。旧 Router 缺少 auth source 时保留其原有生效语义，不能静默迁移认证所有权。
 - 根因链：Codex 凭据优先级会让 `PROXY_MANAGED` 遮蔽 Desktop OAuth；旧固定投影因此无法让 native route 收到真实登录态。修复后 route 是最终认证事实：native route 才透传来向 Authorization；固定 OAuth、账号池 managed candidate 和第三方 route 必须删除来向 Authorization 后注入自己的凭据；所有 `x-cc-switch-*` 控制头在每种出站 transport 前统一剥离，External Agent API 仍不能借用 Desktop OAuth。
 - 账号池策略保存后立即重投影当前启用的 MultiRouter，并返回 `facadeChanged`、`codexRestartRequired` 和最终 facade。UI 在 Router Workspace 与 Codex OAuth 设置区用中文显示“Desktop / 混合认证”“CCSM 托管认证”及重启提示。认证门面改变不承诺热修复：用户必须完全退出并重启 Codex，已有任务不会热加载新的认证所有权。
 - 最后兜底根因：无备份且 SSOT 不可恢复时，旧清理逻辑只删除回环 URL 和 `PROXY_MANAGED`，Native/Mixed Router 本来就没有 placeholder，导致 `codex_model_router_v2`、模型目录和 `x-cc-switch-proxy-mode` 残留在 live TOML。`49d0095a` 将 CCSM Router 投影视为一个配置单元，兜底时完整恢复到内建 `openai`，同时保留真实 `auth.json`、MCP、projects 等用户全局配置；红绿测试证明旧逻辑失败、新逻辑通过。
@@ -72,7 +73,7 @@
 ## 2026-07-29 Codex MultiRouter 动态认证门面设计
 
 - `model_provider` 是任务和配置身份，provider `name` 是 Codex 能力声明；当前 Codex 以精确 `name == "OpenAI"` 开启远程压缩、Web Search、图片和部分 OpenAI 元数据路径。MultiRouter 固定使用 `codex_model_router_v2`，Codex 侧 `name` 固定为 `OpenAI`，用户可见 Router 名只保存在 CCSM UI/数据库。CCSM managed OAuth 同样使用 `name = "OpenAI"`，认证所有权不由 name 决定。
-- facade 按 route 认证所有权分两类：存在 `native_codex_auth` 或账号池启用 Desktop 账号时使用 Native/Mixed，写 `requires_openai_auth=true`、删除 `experimental_bearer_token`，让 Codex 发送真实 Desktop OAuth；完全由固定 CCSM OAuth、无 Desktop 的账号池或第三方 provider 管理时使用 Fully Managed，写 `requires_openai_auth=false` 与 `PROXY_MANAGED`。
+- facade 按 route 认证所有权分两类：存在 `native_codex_auth` 或账号池启用 Desktop 账号时使用 Native/Mixed，写 `requires_openai_auth=true`、删除 `experimental_bearer_token`，让 Codex 发送真实 Desktop OAuth；完全由固定 CCSM OAuth、无 Desktop 的账号池或第三方 provider 管理时使用 Fully Managed，写 `requires_openai_auth=true` 与 `PROXY_MANAGED`。`requires_openai_auth=false` 会让 Codex Desktop 隐藏账号/用量/退出入口，因此不能再用于 MultiRouter live 门面。
 - Native/Mixed 使用独立的 `x-cc-switch-proxy-mode=router` 标识本地 Router 流量，不能再占用 Authorization；native route 透传来向 OAuth，托管 OAuth/第三方 route 必须先删除来向 Authorization 再注入自己的凭据，且标识头不得出站。External Agent API 继续禁止借用 Desktop OAuth。
 - 两种 facade 都固定 `wire_api="responses"`、`supports_websockets=false`，即 Responses over HTTP/SSE。provider ID 不变，迁移不修改 `auth.json`；facade 类型变化明确要求重启 Codex，不承诺现有 session 热加载认证。
 - 完整设计见 `docs/superpowers/specs/2026-07-29-codex-multirouter-auth-facade-design.md`；实现验收必须补 config -> Codex auth -> route -> upstream 的端到端矩阵，不能只依赖分段单测。
