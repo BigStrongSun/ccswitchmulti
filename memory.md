@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-07-31 新版 MultiRouter 门面导致 Codex Desktop 登录状态消失
+
+- 现象：从 CCSwitchMulti 3.16.5 升到 3.19.0-1 后，Codex Desktop 账号菜单只剩 `OpenAI / 隐藏宠物 / 设置`，不显示 `BigstrongSun`、剩余用量和 `退出登录`，设置里的个人资料也消失；回退到 3.16.5 后恢复。
+- 根因：不是 `~/.codex/auth.json` 被删除，而是 3.16.5 之后的 `e2c8e845 feat(codex): classify multirouter auth facades` + `bb62fbfc fix(codex): project dynamic multirouter auth facade` 把 `managed_codex_oauth` 判定为 FullyManaged，并在 live `config.toml` 的 `[model_providers.codex_model_router_v2]` 里写成 `requires_openai_auth = false`。Codex Desktop 的账号/用量/退出入口由该字段驱动，因此即使 `auth.json` 仍有完整登录材料，UI 也认为当前不是 OpenAI 账号。3.16.5 一直写 `requires_openai_auth = true` + `experimental_bearer_token = "PROXY_MANAGED"`，既保留 Desktop 登录表面，又让真实请求命中本地代理。
+- 修复：`apply_codex_multirouter_auth_facade_to_doc` 的 FullyManaged/LegacyPreserved 分支恢复为 `requires_openai_auth = true` + `PROXY_MANAGED`；NativeMixed 分支保持 `requires_openai_auth = true` 且不带 bearer。分类枚举仅用于诊断/调度，不再把 live 门面降级成隐藏登录态。
+- 验证：`cargo test --manifest-path src-tauri/Cargo.toml codex_multirouter_takeover_facade --lib` 4 passed；`cargo test --manifest-path src-tauri/Cargo.toml codex_multirouter_auth_facade --lib` 4 passed。
+
 ## 2026-07-31 OAuth 账号池 Desktop 当前登录与托管同账号合并
 
 - 现象：账号池 UI 同时出现 `Codex Desktop 当前登录账号` 和 `bigstrongsun0403@gmail.com` 两个条目，即使它们底层是同一个 ChatGPT account id。Desktop `~/.codex/auth.json` 的 `tokens.account_id` 与 CCSM `codex_oauth_auth.json` 的 managed account key 一致，但代码此前没有探测关联。

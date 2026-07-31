@@ -35,6 +35,9 @@ pub enum CodexMultiRouterAuthFacade {
     /// 至少一条启用 route 可能复用 Codex Desktop 当前登录。
     NativeMixed,
     /// 所有启用 route 的凭据都由 CCSM 或目标 provider 管理。
+    ///
+    /// live 门面仍保留 `requires_openai_auth = true` 和 `PROXY_MANAGED`，让
+    /// Codex Desktop 继续显示账号/用量/退出登录，同时实际出站凭据仍由 CCSM 接管。
     FullyManaged,
     /// 旧配置缺少足够信息，投影层必须保留现有 live 认证门面。
     LegacyPreserved,

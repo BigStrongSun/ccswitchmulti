@@ -3500,7 +3500,11 @@ impl ProxyService {
             }
             crate::proxy::providers::CodexMultiRouterAuthFacade::FullyManaged
             | crate::proxy::providers::CodexMultiRouterAuthFacade::LegacyPreserved => {
-                provider["requires_openai_auth"] = toml_edit::value(false);
+                // Codex Desktop 的账号、用量与退出登录入口由 `requires_openai_auth`
+                // 驱动。即使真实上游凭据由 CCSM/目标 provider 托管，也必须保留这个
+                // 门面，同时继续用 PROXY_MANAGED 占位符命中本地代理；否则升级后用户
+                // 会看不到登录账号且无法退出或重新登录。
+                provider["requires_openai_auth"] = toml_edit::value(true);
                 provider["experimental_bearer_token"] = toml_edit::value(PROXY_TOKEN_PLACEHOLDER);
                 provider
                     .as_table_like_mut()
@@ -6210,6 +6214,8 @@ supports_websockets = true
 
     #[test]
     fn codex_multirouter_takeover_facade_projects_fully_managed_toml() {
+        // 回归：managed_codex_oauth 的 MultiRouter 也必须保留 OpenAI 登录门面，
+        // 否则 Codex Desktop 会丢失账号、用量和退出/重新登录入口。
         let provider = codex_multirouter_provider("managed_codex_oauth");
         let output = ProxyService::apply_codex_proxy_toml_config_with_pool_policy(
             r#"[model_providers.codex_model_router_v2]
@@ -6227,7 +6233,7 @@ http_headers = { x-cc-switch-proxy-mode = "router", x-user-header = "drop-with-o
             [crate::codex_config::CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID];
 
         assert_eq!(route["name"].as_str(), Some("OpenAI"));
-        assert_eq!(route["requires_openai_auth"].as_bool(), Some(false));
+        assert_eq!(route["requires_openai_auth"].as_bool(), Some(true));
         assert_eq!(
             route["supports_standalone_web_search"].as_bool(),
             Some(true)
@@ -6295,7 +6301,7 @@ experimental_bearer_token = "PROXY_MANAGED"
             [crate::codex_config::CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID];
 
         assert_eq!(route["name"].as_str(), Some("OpenAI"));
-        assert_eq!(route["requires_openai_auth"].as_bool(), Some(false));
+        assert_eq!(route["requires_openai_auth"].as_bool(), Some(true));
         assert_eq!(
             route["experimental_bearer_token"].as_str(),
             Some(PROXY_TOKEN_PLACEHOLDER)
