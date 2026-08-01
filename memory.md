@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-08-01 Codex 账号池有界 affinity 与凭据代际 Task 2
+
+- `CodexPoolRuntimeState` 的 session affinity 现在使用 24 小时空闲 TTL 和 2048 项硬上限；每次有效复用都会刷新 `last_used_at_ms`，溢出时按真实最近使用时间淘汰。账号 runtime 的 `credential_generation` 变化会原子重建该账号运行态并清除全部旧 binding，旧请求携带的 generation 无法重新绑定。
+- managed OAuth 的 `credential_generation` 持久化在既有 version 1 文件中：旧文件缺失时为 `0`，首次新登录为 `1`，同 ID 重新登录饱和递增，普通 access/refresh token 刷新不变。请求期 `CodexPoolCandidate` 把选择时 generation 写入私有 `codexPoolCredentialGeneration`，成功回写不再临时查询当前代际。
+- Desktop Authorization 只在 manager 内存中保存 SHA-256 `[u8; 32]` 摘要和单调 generation；原文、摘要均不落盘、不展示、不写日志。forwarder 在 quota 探测前先让 manager 观察 Authorization，避免把新身份的首个 quota 快照写入旧代际后立即清掉。
+- 构造后磁盘同步改用可等待的 `reload_from_disk().await`，完整替换账号/default/policy 后再按可用账号与 generation reconcile 统一运行态；不再用同步 `try_lock` 做 best-effort 清理。quota 读写入口会先按当前 generation 准备 runtime，修复“重启恢复 policy 后首个低额度快照被静默丢弃、随后新 session 仍选中该账号”的根因。
+- TDD 证据：TTL/LRU/旧 generation 三个纯状态测试和 managed generation/重启首快照、Desktop 换身份、外部删除 reload 回归均先按缺失行为失败再通过；Task 2 完成时 `codex_oauth_auth` 相关筛选为 38/38，通过原 reserve/cooldown、四个 Task 1 生命周期测试和跨进程 refresh-token 轮换回归。书面计划原 TTL 样例在边界命中后又按旧时间要求 1ms 后过期，与“命中刷新空闲时间”冲突，测试已拆为两个独立状态实例。
+
 ## 2026-08-01 Codex 账号池运行态统一 Task 1
 
 - 账号池原有 `pool_cooldowns`、`pool_session_bindings`、`pool_remaining_percent`、`pool_quota_checked_at` 四张独立表已迁入 `src-tauri/src/proxy/providers/codex_oauth_pool.rs` 的单一 `CodexPoolRuntimeState`，manager 只保留一把 `Arc<tokio::sync::Mutex<_>>`。候选读取、quota 快照、固定 cooldown、binding 和 lifecycle purge 现在在同一临界区完成，不再由调用方分别操作四把锁。

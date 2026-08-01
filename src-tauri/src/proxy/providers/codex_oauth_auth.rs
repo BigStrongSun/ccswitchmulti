@@ -18,6 +18,7 @@
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
@@ -178,6 +179,12 @@ struct PendingDeviceCode {
     expires_at_ms: i64,
 }
 
+#[derive(Debug, Default)]
+struct NativeCredentialRuntime {
+    authorization_digest: Option<[u8; 32]>,
+    credential_generation: u64,
+}
+
 /// 持久化的账号数据
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CodexAccountData {
@@ -201,6 +208,9 @@ struct CodexAccountData {
     pub invalidated_at: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_error: Option<String>,
+    /// 用户重新建立同一账号身份时递增；普通 token 刷新不改变。
+    #[serde(default)]
+    pub credential_generation: u64,
     /// 认证时间戳（秒）
     pub authenticated_at: i64,
 }
@@ -243,12 +253,18 @@ struct CodexOAuthStore {
 
 pub const NATIVE_CODEX_ACCOUNT_ID: &str = "native_codex_auth";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexAccountPoolEntry {
     pub account_id: String,
     pub enabled: bool,
     pub reserve_percent: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CodexPoolCandidate {
+    pub(crate) entry: CodexAccountPoolEntry,
+    pub(crate) credential_generation: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -382,6 +398,7 @@ pub struct CodexOAuthManager {
     default_account_id: Arc<RwLock<Option<String>>>,
     pool_policy: Arc<RwLock<CodexAccountPoolPolicy>>,
     pool_runtime: Arc<Mutex<CodexPoolRuntimeState>>,
+    native_credential_runtime: Arc<Mutex<NativeCredentialRuntime>>,
     /// 内存缓存的 access_token（不持久化）
     access_tokens: Arc<RwLock<HashMap<String, CachedAccessToken>>>,
     /// 每个账号的刷新锁
@@ -414,6 +431,7 @@ impl CodexOAuthManager {
             default_account_id: Arc::new(RwLock::new(None)),
             pool_policy: Arc::new(RwLock::new(CodexAccountPoolPolicy::default())),
             pool_runtime: Arc::new(Mutex::new(CodexPoolRuntimeState::default())),
+            native_credential_runtime: Arc::new(Mutex::new(NativeCredentialRuntime::default())),
             access_tokens: Arc::new(RwLock::new(HashMap::new())),
             refresh_locks: Arc::new(RwLock::new(HashMap::new())),
             persistence_lock: Arc::new(Mutex::new(())),
@@ -764,7 +782,7 @@ impl CodexOAuthManager {
         // refresh_token 是持久化凭据，可能已被另一个进程或历史独立 manager
         // 轮换并写回磁盘。真正刷新前先同步一次磁盘账号数据，避免拿内存旧
         // refresh_token 触发 invalid_grant 后误删本地账号。
-        if let Err(e) = self.load_from_disk_sync() {
+        if let Err(e) = self.reload_from_disk().await {
             log::warn!("[CodexOAuth] 刷新前重新加载磁盘账号失败，将使用内存凭据: {e}");
         }
 
@@ -776,7 +794,7 @@ impl CodexOAuthManager {
                 // 另一个仍在退出/启动的进程可能恰好轮换了 refresh token。
                 // 失效前重新读取磁盘；若 token 已变化，只用最新 token 再试一次，
                 // 避免用旧请求的 invalid_grant 覆盖刚写入的新凭据。
-                if let Err(error) = self.load_from_disk_sync() {
+                if let Err(error) = self.reload_from_disk().await {
                     log::warn!("[CodexOAuth] invalid_grant 后重新加载磁盘账号失败: {error}");
                 }
                 if let Some(token) = self.load_persisted_access_token(account_id).await {
@@ -857,23 +875,109 @@ impl CodexOAuthManager {
         self.normalized_pool_policy().await
     }
 
-    pub async fn ordered_pool_entries(&self, session_id: &str) -> Vec<CodexAccountPoolEntry> {
+    fn observe_native_authorization(
+        native_runtime: &mut NativeCredentialRuntime,
+        native_authorization: Option<&str>,
+    ) {
+        let Some(authorization) = native_authorization
+            .map(str::trim)
+            .filter(|authorization| !authorization.is_empty())
+        else {
+            return;
+        };
+        let digest: [u8; 32] = Sha256::digest(authorization.as_bytes()).into();
+        match native_runtime.authorization_digest {
+            None => {
+                native_runtime.authorization_digest = Some(digest);
+                native_runtime.credential_generation = 1;
+            }
+            Some(previous) if previous != digest => {
+                native_runtime.authorization_digest = Some(digest);
+                native_runtime.credential_generation = native_runtime
+                    .credential_generation
+                    .saturating_add(1)
+                    .max(1);
+            }
+            Some(_) => {}
+        }
+    }
+
+    async fn with_prepared_pool_account_runtime<R>(
+        &self,
+        account_id: &str,
+        update: impl FnOnce(&mut CodexPoolRuntimeState) -> R,
+    ) -> Option<R> {
+        if account_id == NATIVE_CODEX_ACCOUNT_ID {
+            let native_runtime = self.native_credential_runtime.lock().await;
+            let mut runtime = self.pool_runtime.lock().await;
+            runtime.prepare_account(account_id, native_runtime.credential_generation);
+            return Some(update(&mut runtime));
+        }
+
+        let accounts = self.accounts.read().await;
+        let credential_generation = accounts
+            .get(account_id)
+            .filter(|account| account.is_usable())?
+            .credential_generation;
+        let mut runtime = self.pool_runtime.lock().await;
+        runtime.prepare_account(account_id, credential_generation);
+        Some(update(&mut runtime))
+    }
+
+    pub(crate) async fn ordered_pool_entries(
+        &self,
+        session_id: &str,
+        native_authorization: Option<&str>,
+    ) -> Vec<CodexPoolCandidate> {
         let policy = self.normalized_pool_policy().await;
-        let enabled_account_ids: HashSet<String> = if policy.enabled {
-            policy
+        let accounts = self.accounts.read().await;
+        let native_enabled = policy.enabled
+            && policy
                 .entries
                 .iter()
-                .filter(|entry| entry.enabled)
-                .map(|entry| entry.account_id.clone())
-                .collect()
+                .any(|entry| entry.enabled && entry.account_id == NATIVE_CODEX_ACCOUNT_ID);
+        let mut native_runtime = if native_enabled {
+            Some(self.native_credential_runtime.lock().await)
         } else {
-            HashSet::new()
+            None
         };
+        if let Some(native_runtime) = native_runtime.as_mut() {
+            Self::observe_native_authorization(native_runtime, native_authorization);
+        }
+        let enabled_account_generations: HashMap<String, u64> = policy
+            .enabled
+            .then(|| {
+                policy
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.enabled)
+                    .filter_map(|entry| {
+                        if entry.account_id == NATIVE_CODEX_ACCOUNT_ID {
+                            native_runtime.as_ref().map(|native_runtime| {
+                                (
+                                    entry.account_id.clone(),
+                                    native_runtime.credential_generation,
+                                )
+                            })
+                        } else {
+                            accounts
+                                .get(&entry.account_id)
+                                .filter(|account| account.is_usable())
+                                .map(|account| {
+                                    (entry.account_id.clone(), account.credential_generation)
+                                })
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let enabled_account_ids: HashSet<String> =
+            enabled_account_generations.keys().cloned().collect();
         let now = chrono::Utc::now().timestamp_millis();
         let mut runtime = self.pool_runtime.lock().await;
         runtime.retain_enabled_accounts(&enabled_account_ids);
-        for account_id in &enabled_account_ids {
-            runtime.prepare_account(account_id, 0);
+        for (account_id, credential_generation) in &enabled_account_generations {
+            runtime.prepare_account(account_id, *credential_generation);
         }
         if !policy.enabled {
             return Vec::new();
@@ -884,17 +988,25 @@ impl CodexOAuthManager {
         let mut entries: Vec<_> = policy
             .entries
             .into_iter()
-            .filter(|entry| {
-                entry.enabled
+            .filter_map(|entry| {
+                let credential_generation = enabled_account_generations.get(&entry.account_id)?;
+                (entry.enabled
                     && runtime.is_account_selectable(&entry.account_id, now)
                     && (bound.as_deref() == Some(entry.account_id.as_str())
                         || runtime
                             .remaining_percent(&entry.account_id)
-                            .is_none_or(|value| value > entry.reserve_percent))
+                            .is_none_or(|value| value > entry.reserve_percent)))
+                .then(|| CodexPoolCandidate {
+                    entry,
+                    credential_generation: *credential_generation,
+                })
             })
             .collect();
         if let Some(bound) = bound {
-            if let Some(index) = entries.iter().position(|entry| entry.account_id == bound) {
+            if let Some(index) = entries
+                .iter()
+                .position(|candidate| candidate.entry.account_id == bound)
+            {
                 let entry = entries.remove(index);
                 entries.insert(0, entry);
             }
@@ -903,32 +1015,40 @@ impl CodexOAuthManager {
     }
 
     pub async fn record_pool_remaining_percent(&self, account_id: &str, remaining: f64) {
-        self.pool_runtime.lock().await.record_remaining_percent(
-            account_id,
-            remaining,
-            chrono::Utc::now().timestamp_millis(),
-        );
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        self.with_prepared_pool_account_runtime(account_id, |runtime| {
+            runtime.record_remaining_percent(account_id, remaining, now_ms)
+        })
+        .await;
     }
 
     pub async fn pool_quota_refresh_due(&self, account_id: &str) -> bool {
-        self.pool_runtime
-            .lock()
-            .await
-            .quota_refresh_due(account_id, chrono::Utc::now().timestamp_millis())
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        self.with_prepared_pool_account_runtime(account_id, |runtime| {
+            runtime.quota_refresh_due(account_id, now_ms)
+        })
+        .await
+        .unwrap_or(false)
     }
 
     pub async fn mark_pool_quota_checked(&self, account_id: &str) {
-        self.pool_runtime
-            .lock()
-            .await
-            .mark_quota_checked(account_id, chrono::Utc::now().timestamp_millis());
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        self.with_prepared_pool_account_runtime(account_id, |runtime| {
+            runtime.mark_quota_checked(account_id, now_ms)
+        })
+        .await;
     }
 
-    pub async fn bind_pool_session(&self, session_id: &str, account_id: &str) {
+    pub async fn bind_pool_session(
+        &self,
+        session_id: &str,
+        account_id: &str,
+        credential_generation: u64,
+    ) {
         self.pool_runtime.lock().await.bind_session(
             session_id,
             account_id,
-            0,
+            credential_generation,
             chrono::Utc::now().timestamp_millis(),
         );
     }
@@ -939,6 +1059,42 @@ impl CodexOAuthManager {
             i64::try_from(duration.as_millis()).unwrap_or(i64::MAX),
             chrono::Utc::now().timestamp_millis(),
         );
+    }
+
+    async fn reconcile_pool_runtime(&self, policy: &CodexAccountPoolPolicy) {
+        let accounts = self.accounts.read().await;
+        let native_runtime = self.native_credential_runtime.lock().await;
+        let enabled_account_generations: HashMap<String, u64> = if policy.enabled {
+            policy
+                .entries
+                .iter()
+                .filter(|entry| entry.enabled)
+                .filter_map(|entry| {
+                    if entry.account_id == NATIVE_CODEX_ACCOUNT_ID {
+                        Some((
+                            entry.account_id.clone(),
+                            native_runtime.credential_generation,
+                        ))
+                    } else {
+                        accounts
+                            .get(&entry.account_id)
+                            .filter(|account| account.is_usable())
+                            .map(|account| {
+                                (entry.account_id.clone(), account.credential_generation)
+                            })
+                    }
+                })
+                .collect()
+        } else {
+            HashMap::new()
+        };
+        let enabled_account_ids: HashSet<String> =
+            enabled_account_generations.keys().cloned().collect();
+        let mut runtime = self.pool_runtime.lock().await;
+        runtime.retain_enabled_accounts(&enabled_account_ids);
+        for (account_id, credential_generation) in enabled_account_generations {
+            runtime.prepare_account(&account_id, credential_generation);
+        }
     }
 
     pub async fn set_account_pool_policy(
@@ -961,23 +1117,7 @@ impl CodexOAuthManager {
         *self.pool_policy.write().await = policy;
         let normalized = self.normalized_pool_policy().await;
         *self.pool_policy.write().await = normalized.clone();
-        let enabled_account_ids: HashSet<String> = if normalized.enabled {
-            normalized
-                .entries
-                .iter()
-                .filter(|entry| entry.enabled)
-                .map(|entry| entry.account_id.clone())
-                .collect()
-        } else {
-            HashSet::new()
-        };
-        {
-            let mut runtime = self.pool_runtime.lock().await;
-            runtime.retain_enabled_accounts(&enabled_account_ids);
-            for account_id in &enabled_account_ids {
-                runtime.prepare_account(account_id, 0);
-            }
-        }
+        self.reconcile_pool_runtime(&normalized).await;
         self.save_to_disk().await
     }
 
@@ -1191,24 +1331,27 @@ impl CodexOAuthManager {
         access_token_expires_at_ms: Option<i64>,
     ) -> Result<GitHubAccount, CodexOAuthError> {
         let now = chrono::Utc::now().timestamp();
-
-        let data = CodexAccountData {
-            account_id: account_id.clone(),
-            email,
-            refresh_token,
-            access_token,
-            access_token_expires_at_ms,
-            invalidated_at: None,
-            auth_error: None,
-            authenticated_at: now,
-        };
-
-        let account = GitHubAccount::from(&data);
-
-        {
+        let account = {
             let mut accounts = self.accounts.write().await;
+            let credential_generation = accounts
+                .get(&account_id)
+                .map(|account| account.credential_generation.saturating_add(1).max(1))
+                .unwrap_or(1);
+            let data = CodexAccountData {
+                account_id: account_id.clone(),
+                email,
+                refresh_token,
+                access_token,
+                access_token_expires_at_ms,
+                invalidated_at: None,
+                auth_error: None,
+                credential_generation,
+                authenticated_at: now,
+            };
+            let account = GitHubAccount::from(&data);
             accounts.insert(account_id.clone(), data);
-        }
+            account
+        };
         self.pool_runtime.lock().await.purge_account(&account_id);
 
         {
@@ -1363,6 +1506,30 @@ impl CodexOAuthManager {
             *policy = store.pool_policy;
         }
 
+        Ok(())
+    }
+
+    async fn reload_from_disk(&self) -> Result<(), CodexOAuthError> {
+        if !self.storage_path.exists() {
+            return Ok(());
+        }
+
+        let content = std::fs::read_to_string(&self.storage_path)?;
+        let store: CodexOAuthStore = serde_json::from_str(&content)
+            .map_err(|error| CodexOAuthError::ParseError(error.to_string()))?;
+        let fallback_default = Self::fallback_default_account_id(&store.accounts);
+        let default_account_id = store.default_account_id.or(fallback_default);
+
+        {
+            let mut accounts = self.accounts.write().await;
+            *accounts = store.accounts;
+            log::info!("[CodexOAuth] 从磁盘重新加载 {} 个账号", accounts.len());
+        }
+        *self.default_account_id.write().await = default_account_id;
+        *self.pool_policy.write().await = store.pool_policy;
+
+        let normalized = self.normalized_pool_policy().await;
+        self.reconcile_pool_runtime(&normalized).await;
         Ok(())
     }
 
@@ -1892,7 +2059,7 @@ mod tests {
         let manager = CodexOAuthManager::new(temp.path().to_path_buf());
         add_pool_test_account(&manager, "acc-a", "refresh-a").await;
         enable_single_managed_pool(&manager, "acc-a", 10.0).await;
-        manager.bind_pool_session("thread-old", "acc-a").await;
+        manager.bind_pool_session("thread-old", "acc-a", 1).await;
         manager.record_pool_remaining_percent("acc-a", 9.0).await;
 
         manager.remove_account("acc-a").await.unwrap();
@@ -1900,7 +2067,10 @@ mod tests {
         enable_single_managed_pool(&manager, "acc-a", 10.0).await;
         manager.record_pool_remaining_percent("acc-a", 9.0).await;
 
-        assert!(manager.ordered_pool_entries("thread-old").await.is_empty());
+        assert!(manager
+            .ordered_pool_entries("thread-old", None)
+            .await
+            .is_empty());
     }
 
     #[tokio::test]
@@ -1915,7 +2085,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(manager.ordered_pool_entries("thread-new").await.is_empty());
+        assert!(manager
+            .ordered_pool_entries("thread-new", None)
+            .await
+            .is_empty());
     }
 
     #[tokio::test]
@@ -1924,14 +2097,17 @@ mod tests {
         let manager = CodexOAuthManager::new(temp.path().to_path_buf());
         add_pool_test_account(&manager, "acc-a", "refresh-a").await;
         enable_single_managed_pool(&manager, "acc-a", 10.0).await;
-        manager.bind_pool_session("thread-old", "acc-a").await;
+        manager.bind_pool_session("thread-old", "acc-a", 1).await;
         manager.record_pool_remaining_percent("acc-a", 9.0).await;
 
         set_single_managed_pool_enabled(&manager, "acc-a", false, 10.0).await;
         set_single_managed_pool_enabled(&manager, "acc-a", true, 10.0).await;
         manager.record_pool_remaining_percent("acc-a", 9.0).await;
 
-        assert!(manager.ordered_pool_entries("thread-old").await.is_empty());
+        assert!(manager
+            .ordered_pool_entries("thread-old", None)
+            .await
+            .is_empty());
     }
 
     #[tokio::test]
@@ -1940,7 +2116,7 @@ mod tests {
         let manager = CodexOAuthManager::new(temp.path().to_path_buf());
         add_pool_test_account(&manager, "acc-a", "refresh-a").await;
         enable_single_managed_pool(&manager, "acc-a", 10.0).await;
-        manager.bind_pool_session("thread-old", "acc-a").await;
+        manager.bind_pool_session("thread-old", "acc-a", 1).await;
         manager.record_pool_remaining_percent("acc-a", 9.0).await;
 
         manager.clear_auth().await.unwrap();
@@ -1948,7 +2124,248 @@ mod tests {
         enable_single_managed_pool(&manager, "acc-a", 10.0).await;
         manager.record_pool_remaining_percent("acc-a", 9.0).await;
 
-        assert!(manager.ordered_pool_entries("thread-old").await.is_empty());
+        assert!(manager
+            .ordered_pool_entries("thread-old", None)
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn legacy_generation_relogin_persists_first_credential_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("codex_oauth_auth.json"),
+            r#"{
+              "version": 1,
+              "accounts": {
+                "acc-a": {
+                  "account_id": "acc-a",
+                  "email": "a@example.test",
+                  "refresh_token": "refresh-old",
+                  "authenticated_at": 1
+                }
+              },
+              "default_account_id": "acc-a",
+              "pool_policy": { "enabled": false, "entries": [] }
+            }"#,
+        )
+        .unwrap();
+        let manager = CodexOAuthManager::new(temp.path().to_path_buf());
+
+        add_pool_test_account(&manager, "acc-a", "refresh-new").await;
+
+        let persisted: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&manager.storage_path).unwrap()).unwrap();
+        assert_eq!(
+            persisted["accounts"]["acc-a"]["credential_generation"].as_u64(),
+            Some(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_managed_candidate_cannot_rebind_after_relogin() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = CodexOAuthManager::new(temp.path().to_path_buf());
+        add_pool_test_account(&manager, "acc-a", "refresh-a").await;
+        enable_single_managed_pool(&manager, "acc-a", 10.0).await;
+        let stale_candidate = manager
+            .ordered_pool_entries("thread-old", None)
+            .await
+            .pop()
+            .unwrap();
+        assert_eq!(stale_candidate.credential_generation, 1);
+
+        add_pool_test_account(&manager, "acc-a", "refresh-b").await;
+        enable_single_managed_pool(&manager, "acc-a", 10.0).await;
+        assert_eq!(
+            manager.accounts.read().await["acc-a"].credential_generation,
+            2
+        );
+        manager.record_pool_remaining_percent("acc-a", 9.0).await;
+        manager
+            .bind_pool_session(
+                "thread-late",
+                "acc-a",
+                stale_candidate.credential_generation,
+            )
+            .await;
+
+        assert!(manager
+            .ordered_pool_entries("thread-late", None)
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn first_quota_snapshot_after_restart_respects_reserve_percent() {
+        let temp = tempfile::tempdir().unwrap();
+        {
+            let manager = CodexOAuthManager::new(temp.path().to_path_buf());
+            add_pool_test_account(&manager, "acc-a", "refresh-a").await;
+            enable_single_managed_pool(&manager, "acc-a", 10.0).await;
+        }
+
+        let manager = CodexOAuthManager::new(temp.path().to_path_buf());
+        manager.record_pool_remaining_percent("acc-a", 9.0).await;
+
+        assert!(manager
+            .ordered_pool_entries("thread-new", None)
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn native_authorization_change_invalidates_old_binding_without_storing_token() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = CodexOAuthManager::new(temp.path().to_path_buf());
+        manager
+            .set_account_pool_policy(CodexAccountPoolPolicy {
+                enabled: true,
+                entries: vec![CodexAccountPoolEntry {
+                    account_id: NATIVE_CODEX_ACCOUNT_ID.to_string(),
+                    enabled: true,
+                    reserve_percent: 10.0,
+                }],
+                desktop_account_id: None,
+            })
+            .await
+            .unwrap();
+        let first = manager
+            .ordered_pool_entries("native-thread", Some("Bearer native-a"))
+            .await
+            .pop()
+            .unwrap();
+        manager
+            .bind_pool_session(
+                "native-thread",
+                NATIVE_CODEX_ACCOUNT_ID,
+                first.credential_generation,
+            )
+            .await;
+        manager
+            .record_pool_remaining_percent(NATIVE_CODEX_ACCOUNT_ID, 9.0)
+            .await;
+        assert_eq!(
+            manager
+                .ordered_pool_entries("native-thread", Some("Bearer native-a"))
+                .await
+                .len(),
+            1
+        );
+
+        let changed = manager
+            .ordered_pool_entries("native-thread", Some("Bearer native-b"))
+            .await;
+        assert_eq!(changed.len(), 1);
+        assert_ne!(
+            changed[0].credential_generation,
+            first.credential_generation
+        );
+        manager
+            .record_pool_remaining_percent(NATIVE_CODEX_ACCOUNT_ID, 9.0)
+            .await;
+        assert!(manager
+            .ordered_pool_entries("native-thread", Some("Bearer native-b"))
+            .await
+            .is_empty());
+        assert!(
+            !manager.storage_path.exists()
+                || !std::fs::read_to_string(&manager.storage_path)
+                    .unwrap()
+                    .contains("native-a")
+        );
+    }
+
+    #[tokio::test]
+    async fn external_account_removal_purges_runtime_before_same_id_returns() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = CodexOAuthManager::new(temp.path().to_path_buf());
+        add_pool_test_account(&manager, "acc-a", "refresh-a").await;
+        enable_single_managed_pool(&manager, "acc-a", 10.0).await;
+        manager.bind_pool_session("old-thread", "acc-a", 1).await;
+        manager.record_pool_remaining_percent("acc-a", 9.0).await;
+
+        std::fs::write(
+            &manager.storage_path,
+            r#"{ "version": 1, "accounts": {}, "pool_policy": { "enabled": false, "entries": [] } }"#,
+        )
+        .unwrap();
+        manager.reload_from_disk().await.unwrap();
+        std::fs::write(
+            &manager.storage_path,
+            r#"{
+              "version": 1,
+              "accounts": {
+                "acc-a": {
+                  "account_id": "acc-a",
+                  "refresh_token": "refresh-b",
+                  "credential_generation": 1,
+                  "authenticated_at": 2
+                }
+              },
+              "default_account_id": "acc-a",
+              "pool_policy": {
+                "enabled": true,
+                "entries": [
+                  { "accountId": "native_codex_auth", "enabled": false, "reservePercent": 0.0 },
+                  { "accountId": "acc-a", "enabled": true, "reservePercent": 10.0 }
+                ]
+              }
+            }"#,
+        )
+        .unwrap();
+        manager.reload_from_disk().await.unwrap();
+        manager.record_pool_remaining_percent("acc-a", 9.0).await;
+
+        assert!(manager
+            .ordered_pool_entries("old-thread", None)
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn external_generation_change_invalidates_old_binding() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = CodexOAuthManager::new(temp.path().to_path_buf());
+        add_pool_test_account(&manager, "acc-a", "refresh-a").await;
+        enable_single_managed_pool(&manager, "acc-a", 10.0).await;
+        manager.bind_pool_session("old-thread", "acc-a", 1).await;
+        manager.record_pool_remaining_percent("acc-a", 9.0).await;
+
+        std::fs::write(
+            &manager.storage_path,
+            r#"{
+              "version": 1,
+              "accounts": {
+                "acc-a": {
+                  "account_id": "acc-a",
+                  "refresh_token": "refresh-b",
+                  "credential_generation": 2,
+                  "authenticated_at": 2
+                }
+              },
+              "default_account_id": "acc-a",
+              "pool_policy": {
+                "enabled": true,
+                "entries": [
+                  { "accountId": "native_codex_auth", "enabled": false, "reservePercent": 0.0 },
+                  { "accountId": "acc-a", "enabled": true, "reservePercent": 10.0 }
+                ]
+              }
+            }"#,
+        )
+        .unwrap();
+        manager.reload_from_disk().await.unwrap();
+        manager.record_pool_remaining_percent("acc-a", 9.0).await;
+
+        assert_eq!(
+            manager.accounts.read().await["acc-a"].credential_generation,
+            2
+        );
+        assert!(manager
+            .ordered_pool_entries("old-thread", None)
+            .await
+            .is_empty());
     }
 
     #[tokio::test]
@@ -1986,28 +2403,28 @@ mod tests {
             .unwrap();
 
         manager
-            .bind_pool_session("thread-1", NATIVE_CODEX_ACCOUNT_ID)
+            .bind_pool_session("thread-1", NATIVE_CODEX_ACCOUNT_ID, 0)
             .await;
-        let entries = manager.ordered_pool_entries("thread-1").await;
-        assert_eq!(entries[0].account_id, NATIVE_CODEX_ACCOUNT_ID);
+        let entries = manager.ordered_pool_entries("thread-1", None).await;
+        assert_eq!(entries[0].entry.account_id, NATIVE_CODEX_ACCOUNT_ID);
 
         manager
             .record_pool_remaining_percent(NATIVE_CODEX_ACCOUNT_ID, 9.0)
             .await;
-        let entries = manager.ordered_pool_entries("thread-1").await;
+        let entries = manager.ordered_pool_entries("thread-1", None).await;
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].account_id, NATIVE_CODEX_ACCOUNT_ID);
+        assert_eq!(entries[0].entry.account_id, NATIVE_CODEX_ACCOUNT_ID);
 
-        let entries = manager.ordered_pool_entries("thread-2").await;
+        let entries = manager.ordered_pool_entries("thread-2", None).await;
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].account_id, "acc-a");
+        assert_eq!(entries[0].entry.account_id, "acc-a");
 
         manager
             .cool_down_pool_account(NATIVE_CODEX_ACCOUNT_ID, std::time::Duration::from_secs(60))
             .await;
-        let entries = manager.ordered_pool_entries("thread-1").await;
+        let entries = manager.ordered_pool_entries("thread-1", None).await;
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].account_id, "acc-a");
+        assert_eq!(entries[0].entry.account_id, "acc-a");
     }
 
     /// 启动一次性 OAuth token 假端点。
@@ -2325,7 +2742,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn token_request_refreshes_expired_default_account_when_token_is_valid() {
+    async fn token_refresh_preserves_credential_generation_for_valid_default_account() {
         let temp = tempfile::tempdir().unwrap();
         let token_url = spawn_single_refresh_endpoint(
             200,
@@ -2345,11 +2762,17 @@ mod tests {
             )
             .await
             .unwrap();
+        let generation_before = manager.accounts.read().await["acc-valid"].credential_generation;
+        assert_eq!(generation_before, 1);
 
         let token = manager
             .get_valid_token_for_account("acc-valid")
             .await
             .unwrap();
+        assert_eq!(
+            manager.accounts.read().await["acc-valid"].credential_generation,
+            generation_before
+        );
         let status = manager.get_status().await;
 
         assert!(status.authenticated);

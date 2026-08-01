@@ -208,13 +208,21 @@ impl RequestForwarder {
             log::warn!("[CodexOAuthPool] 当前 Router 选择了 OAuth 账号池，但全局账号池未启用");
             return providers;
         }
-        let native_token = headers
+        let native_authorization = headers
             .get(http::header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let native_token = native_authorization
             .and_then(|value| value.strip_prefix("Bearer "))
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(ToString::to_string);
+        // 先让 manager 观察 Desktop Authorization 代际，再发 quota 探测。
+        // 否则新凭据的首个 quota 快照会先写入旧代际，随后被身份切换清掉。
+        let _ = manager
+            .ordered_pool_entries(&self.session_id, native_authorization)
+            .await;
         let probes = policy
             .entries
             .iter()
@@ -269,7 +277,7 @@ impl RequestForwarder {
             .0
             .read()
             .await
-            .ordered_pool_entries(&self.session_id)
+            .ordered_pool_entries(&self.session_id, native_authorization)
             .await;
         let mut expanded = Vec::new();
         for provider in providers {
@@ -277,8 +285,11 @@ impl RequestForwarder {
                 expanded.push(provider);
                 continue;
             }
-            for entry in &entries {
+            for pool_candidate in &entries {
+                let entry = &pool_candidate.entry;
                 let mut candidate = provider.clone();
+                candidate.settings_config["codexPoolCredentialGeneration"] =
+                    Value::from(pool_candidate.credential_generation);
                 if entry.account_id == NATIVE_CODEX_ACCOUNT_ID {
                     candidate.settings_config["codexNativeAuthPassthrough"] = Value::Bool(true);
                     candidate.settings_config["codexPoolAccountId"] =
@@ -322,6 +333,13 @@ impl RequestForwarder {
         else {
             return;
         };
+        let Some(credential_generation) = provider
+            .settings_config
+            .get("codexPoolCredentialGeneration")
+            .and_then(Value::as_u64)
+        else {
+            return;
+        };
         let Some(app_handle) = &self.app_handle else {
             return;
         };
@@ -329,7 +347,7 @@ impl RequestForwarder {
         let manager = state.0.read().await;
         if success {
             manager
-                .bind_pool_session(&self.session_id, account_id)
+                .bind_pool_session(&self.session_id, account_id, credential_generation)
                 .await;
         } else if status == Some(429) {
             manager
