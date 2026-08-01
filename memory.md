@@ -1,5 +1,11 @@
 # CC Switch Repository Memory
 
+## 2026-08-01 本地发布流水线锁所有权缺陷（待修）
+
+- `scripts/local-release-pipeline.ps1` 把 `Enter-PipelineLock` 放在 `try` 内，但 `finally` 无条件删除 `scripts/logs/local-release.lock`。当一次并发调用发现六小时内的现有锁并在尚未取得锁时抛错，它仍会进入 `finally`，误删另一个仍在运行的流水线所持有的锁；第三次调用随后可能并发进入构建。
+- 本次账号池修复的 post-commit 构建现场验证了该竞态：被锁拒绝的调用删除了在建流水线的锁。已按进程树和启动时间只终止 14:58 的旧构建树，保留并完成 15:02 从 `ecac81ad` 启动的最终构建，不能仅凭锁文件存在与否判断流水线是否在运行。
+- 本轮不把无关的 hook 改造混入 OAuth 账号池根修。后续应让调用方仅在成功取得自己创建的锁后释放（例如显式 `lockAcquired`/所有权令牌或持有独占句柄），并增加“第二个调用获取失败不得删除第一个调用的锁”的并发回归；修复前处理构建冲突必须同时核对 PowerShell、export、pnpm、cargo、rustc/NSIS 的完整父子进程树。
+
 ## 2026-08-01 v3.19 OAuth 账号池保留额度中断已绑定任务根因
 
 - 现场：Codex 任务已运行约 2 分 36 秒后连续重连，最终收到本地 `/v1/responses` 503：`Provider: OpenAI Official; model: gpt-5.6-sol; cause: 无可用 Provider`。认证页仍显示一个已登录且与 Desktop 当前登录合并的账号，因此不是账号记录丢失。
