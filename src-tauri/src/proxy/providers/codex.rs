@@ -2775,6 +2775,69 @@ context_window = 500000
     }
 
     #[test]
+    fn codex_multirouter_plaintext_v2_delivery_depends_on_enabled_route_ownership() {
+        let mixed = multirouter_with_routes(
+            json!([
+                {
+                    "id": "official",
+                    "enabled": true,
+                    "upstream": { "auth": { "source": "managed_codex_oauth" } }
+                },
+                {
+                    "id": "third-party",
+                    "enabled": true,
+                    "upstream": { "auth": { "source": "provider_config" } }
+                }
+            ]),
+            None,
+        );
+        assert!(codex_multirouter_needs_plaintext_v2_collaboration(&mixed));
+
+        let official_only = multirouter_with_routes(
+            json!([{
+                "id": "official",
+                "enabled": true,
+                "upstream": { "auth": { "source": "account_pool" } }
+            }]),
+            None,
+        );
+        assert!(!codex_multirouter_needs_plaintext_v2_collaboration(
+            &official_only
+        ));
+
+        let disabled_third_party = multirouter_with_routes(
+            json!([
+                {
+                    "id": "official",
+                    "enabled": true,
+                    "upstream": { "auth": { "source": "native_codex_auth" } }
+                },
+                {
+                    "id": "third-party",
+                    "enabled": false,
+                    "upstream": { "auth": { "source": "provider_config" } }
+                }
+            ]),
+            None,
+        );
+        assert!(!codex_multirouter_needs_plaintext_v2_collaboration(
+            &disabled_third_party
+        ));
+
+        let ambiguous = multirouter_with_routes(
+            json!([{
+                "id": "legacy",
+                "enabled": true,
+                "upstream": { "apiFormat": "openai_responses" }
+            }]),
+            None,
+        );
+        assert!(codex_multirouter_needs_plaintext_v2_collaboration(
+            &ambiguous
+        ));
+    }
+
+    #[test]
     /// Codex OAuth adapter 只提供认证头，来源身份由 forwarder 在最终出站阶段统一写入。
     fn test_codex_oauth_auth_headers_defer_originator_to_forwarder() {
         let adapter = CodexAdapter::new();

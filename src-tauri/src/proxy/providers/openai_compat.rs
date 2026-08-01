@@ -1610,6 +1610,16 @@ mod tests {
     #[test]
     fn mixed_router_keeps_v2_but_makes_collaboration_messages_plaintext() {
         let mut request = json!({
+            "input": [{
+                "type": "additional_tools",
+                "tools": [{
+                    "type": "function",
+                    "name": "send_message",
+                    "parameters": {
+                        "properties": {"message": {"type": "string", "encrypted": true}}
+                    }
+                }]
+            }],
             "tools": [
                 {
                     "type": "function",
@@ -1658,7 +1668,7 @@ mod tests {
 
         let changed = make_codex_v2_collaboration_messages_plaintext(&mut request);
 
-        assert_eq!(changed, 3);
+        assert_eq!(changed, 4);
         for index in 0..3 {
             assert!(request["tools"][index]["parameters"]["properties"]["message"]
                 .get("encrypted")
@@ -1676,6 +1686,9 @@ mod tests {
             request["tools"][4]["parameters"]["properties"]["message"]["encrypted"],
             true
         );
+        assert!(request["input"][0]["tools"][0]["parameters"]["properties"]["message"]
+            .get("encrypted")
+            .is_none());
     }
 
     #[test]
