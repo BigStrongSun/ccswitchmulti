@@ -1872,10 +1872,7 @@ fn codex_route_uses_official_backend_agent_delivery(route: &Value) -> bool {
         .is_some_and(|source| {
             matches!(
                 source.to_ascii_lowercase().as_str(),
-                "native_codex_auth"
-                    | "managed_codex_oauth"
-                    | "managed_account"
-                    | "account_pool"
+                "native_codex_auth" | "managed_codex_oauth" | "managed_account" | "account_pool"
             )
         })
         || auth
