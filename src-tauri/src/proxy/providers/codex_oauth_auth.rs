@@ -859,6 +859,14 @@ impl CodexOAuthManager {
         if !policy.enabled {
             return Vec::new();
         }
+        // reservePercent 只阻止新 session 分配账号；已成功绑定的任务必须继续使用
+        // 原账号完成/重连。429 cooldown 会主动删除 binding，仍能强制切走耗尽账号。
+        let bound = self
+            .pool_session_bindings
+            .read()
+            .await
+            .get(session_id)
+            .cloned();
         let now = chrono::Utc::now().timestamp_millis();
         let cooldowns = self.pool_cooldowns.read().await;
         let remaining = self.pool_remaining_percent.read().await;
@@ -867,22 +875,17 @@ impl CodexOAuthManager {
             .into_iter()
             .filter(|entry| {
                 entry.enabled
-                    && remaining
-                        .get(&entry.account_id)
-                        .is_none_or(|value| *value > entry.reserve_percent)
+                    && (bound.as_deref() == Some(entry.account_id.as_str())
+                        || remaining
+                            .get(&entry.account_id)
+                            .is_none_or(|value| *value > entry.reserve_percent))
                     && cooldowns
                         .get(&entry.account_id)
                         .is_none_or(|until| *until <= now)
             })
             .collect();
         drop(cooldowns);
-        if let Some(bound) = self
-            .pool_session_bindings
-            .read()
-            .await
-            .get(session_id)
-            .cloned()
-        {
+        if let Some(bound) = bound {
             if let Some(index) = entries.iter().position(|entry| entry.account_id == bound) {
                 let entry = entries.remove(index);
                 entries.insert(0, entry);
@@ -1855,10 +1858,7 @@ mod tests {
         assert_eq!(entries[0].account_id, "acc-a");
 
         manager
-            .cool_down_pool_account(
-                NATIVE_CODEX_ACCOUNT_ID,
-                std::time::Duration::from_secs(60),
-            )
+            .cool_down_pool_account(NATIVE_CODEX_ACCOUNT_ID, std::time::Duration::from_secs(60))
             .await;
         let entries = manager.ordered_pool_entries("thread-1").await;
         assert_eq!(entries.len(), 1);

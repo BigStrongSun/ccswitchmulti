@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-08-01 v3.19 OAuth 账号池保留额度中断已绑定任务根因
+
+- 现场：Codex 任务已运行约 2 分 36 秒后连续重连，最终收到本地 `/v1/responses` 503：`Provider: OpenAI Official; model: gpt-5.6-sol; cause: 无可用 Provider`。认证页仍显示一个已登录且与 Desktop 当前登录合并的账号，因此不是账号记录丢失。
+- 根因：账号池的产品契约是 `reservePercent` 只阻止分配新任务，并在成功请求后按 proxy session 保持账号粘性；但 `ordered_pool_entries` 先按剩余额度过滤候选，再读取 `pool_session_bindings`。长任务已经绑定的账号在执行或重连时降到保留阈值后仍会被删除，唯一账号场景最终生成空 attempt chain，并被 forwarder 折叠成 `NoAvailableProvider`。
+- 根修：先读取当前 session 绑定；启用且未处于 429 cooldown 的已绑定账号绕过 reserve 过滤并保持第一优先级。未绑定的新 session 仍严格排除低于保留额度的账号；HTTP 429 继续通过 `cool_down_pool_account` 删除绑定并冷却账号，不允许真实额度耗尽后死粘。
+- TDD：先把 `account_pool_honors_order_reserve_cooldown_and_session_binding` 改为要求“已绑定 thread 保留、全新 thread 排除、cooldown 后原 thread 切到下一候选”，旧实现稳定失败（期望 2 个候选、实际 1 个）；实现调度顺序修正后定向测试通过。
+
 ## 2026-08-01 Codex GPT-Live `/v1/live` 实时语音路由修复
 
 - 现象：用户反馈实时语音不可用，报 `CC Switch local proxy failed while handling Codex endpoint /v1/live. Provider: OpenAI Official; model: unknown; upstream_status: HTTP 404; url: http://127.0.0.1:15721/v1/live`。另一个关键现场是：MultiRouter 顺序里第二位是 DeepSeek 就显示 DeepSeek，第二位是 Qwen 就显示 Qwen，`codex multirouter` 放哪都不影响。
