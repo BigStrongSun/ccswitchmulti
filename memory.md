@@ -42,13 +42,13 @@
 
 ## 2026-08-01 Codex 官方主 Agent 向第三方子 Agent 投递空正文根修
 
-- 最新 Codex Multi-Agent V2 会把 `spawn_agent`、`send_message`、`followup_task` 的 `message` 参数作为密文返回给客户端；子 Agent 请求使用 `type=agent_message`，正文由明文 `Message Type/Task name/Sender/Payload` 信封头和 `encrypted_content` 组成。只有 ChatGPT Codex Responses backend 能解密密文，DeepSeek、Qwen、Kimi、GLM 等第三方上游经 Responses -> Chat/Messages 转换后只能看到空的 `Payload:`，所以 Agent 能创建、能调用工具，但没有任务正文和可靠最终回复。
-- 方向性现象是协议证据：官方 GPT 主 Agent 会生成后端密文，官方默认子 Agent 正常、第三方子 Agent 空正文；第三方主 Agent 调用同一工具时上游返回的是普通明文参数，因此其子 Agent 不受影响。此问题不能通过给空正文补提示、猜模型名或修改 SSE 返回解决，代理没有官方密文解密能力。
-- 引入边界是 `8221be2b`，从 `v3.16.5-16` 起包含。该提交正确保留了 GPT-5.6 的 `use_responses_lite/multi_agent_version=v2/tool_mode`，修复官方保留工具 schema，但遗漏了混合路由不具备 V2 解密能力的边界；`v3.16.5-15` 仍会被通用模板降为 V1，因此恰好没有空正文问题。`v3.16.5-16` 至已发布的 `v3.16.5-24` 都可能复现。
-- 根修按 route 认证语义选择任务级协议：只要任一启用 route 不是明确指向 ChatGPT Codex backend，就在官方同 slug 元数据合并完成后把整个投影 catalog 的 `multi_agent_version` 统一改为 `v1`。Codex 新任务首轮锁定 V1 后，单发、并发、send/follow-up 都走明文投递；全官方 router 继续保留 V2，禁用的第三方 route 不触发降级，缺少认证来源的旧 route 保守按第三方处理。不能只把第三方模型条目标为 V1，因为 Codex V2 会过滤非 V2 候选且子任务继承父任务已经锁定的协议版本。
-- 主线官方来源覆盖 `native_codex_auth`、`managed_codex_oauth`、`managed_account`、`account_pool` 和 `authProvider=codex_oauth`；Desktop 当前登录、CCSM 托管 OAuth、托管账号和 OAuth 账号池单独使用时均保留可解密的 V2。`provider_config` 及未知来源强制任务级 V1。失败回归提交为 `71f11edc`、`fdca5f13`，生产修复提交为 `c310d93e`、`39462361`。
-- 3.16.5 发布线因旧认证结构只把显式 `managed_codex_oauth`/`authProvider=codex_oauth` 视为官方，失败回归为 `261ba3ea`，生产根修为 `c70876b1`。两条线都覆盖混合 route 全模型 V1、全官方 route 保留 V2、禁用第三方 route 不降级；主线额外逐项覆盖所有官方认证门面。
-- 生效边界：已存在的 V2 task 会从 rollout/session metadata 继续锁定 V2，无法在代理侧解密已经生成的密文。安装新构建并让 CCSM 重建模型目录后，必须完全重启 Codex app-server 并新建 task；旧 task 不能作为修复验收。全官方 V2 的原生三个默认角色仍保留，混合路由使用 V1 时角色/工具表面会回到 Codex V1 语义，这是跨第三方投递可用性所必需的协议降级。
+- 上游 Codex V2 的加密不是协议必选项，而是 `spawn_agent`、`send_message`、`followup_task` 工具 schema 对 `message` 调用 `JsonSchema::with_encrypted()` 后产生的 Responses 私有 `encrypted: true`。官方 backend 据此把该参数替换为密文并返回 `encrypted_function_args=["message"]`；Codex 再生成只有 `Payload:` 信封头和 `encrypted_content` 的 `agent_message`，第三方子 Agent 无法解密。
+- Codex 客户端原生支持 V2 明文：同一 V2 function call 的 message schema 不带 `encrypted` 时，backend 返回普通参数，客户端走 `DirectPlaintextMessage` 并生成完整明文 `agent_message`。因此正确目标是保留 V2，只控制三个协作参数是否加密，不是把混合任务降为 V1。
+- 2026-08-01 对 `gpt-5.6-sol` 官方 `/backend-api/codex/responses` 做了真实 A/B：带 `encrypted:true` 时 HTTP 200 且 message 为 164 字符密文；去掉该标记时仍 HTTP 200，message 原样等于 22 字符 `PLAINTEXT_BRIDGE_PROBE`。这证明不需要代理解密、官方桥接 Agent 或修改 Codex 客户端。
+- 主线根修：混合 Router 的全部 catalog model 保持 `multi_agent_version=v2`；仅当请求来自 Codex、Router 含启用的第三方/歧义 route、且本次实际出站为 official OAuth 时，移除标准 `tools` 和 Responses-Lite `input[].type=additional_tools` 中三个协作工具的 `message.encrypted`。全官方 Router、禁用第三方、第三方上游、其它 app、普通工具、其它加密参数均不改。
+- 主线官方 route 来源覆盖 `native_codex_auth`、`managed_codex_oauth`、`managed_account`、`account_pool` 和 `authProvider=codex_oauth`。RED 提交为 `db1358d3`、`c5c7dcf1`、`f940592e`、`3f3b44d5`，生产提交为 `e31f8a6a`。
+- 3.16.5 线按旧认证结构只把 `managed_codex_oauth`/`authProvider=codex_oauth` 视为官方；对应生产提交为 `9b47dde8`。两条线均覆盖 V2 catalog、标准/Lite 三工具改写、route 所有权和 official-only forwarder 边界。
+- 引入边界仍是 `8221be2b`，从 `v3.16.5-16` 起保留官方 V2 后开始暴露；`v3.16.5-15` 因降成 V1 偶然不复现。新实现不改变 task 的 V2 锁定版本；重启 CCSM/Codex app-server 后，现有 V2 task 后续新 spawn/send/follow-up 可使用明文。已经以空正文启动的旧 child 不会自动补回此前丢失的任务，应重新派发。
 
 ## 2026-08-01 Codex OAuth 账号池 P0 运行态设计（待书面评审）
 
