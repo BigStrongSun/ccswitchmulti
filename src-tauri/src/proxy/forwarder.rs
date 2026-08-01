@@ -6531,6 +6531,51 @@ mod tests {
     }
 
     #[test]
+    fn plaintext_v2_collaboration_rewrite_requires_mixed_router_and_official_parent() {
+        let mut mixed = test_provider_with_type(None);
+        mixed.settings_config = json!({
+            "codexRouting": {
+                "enabled": true,
+                "routes": [
+                    {"enabled": true, "upstream": {"auth": {"source": "managed_codex_oauth"}}},
+                    {"enabled": true, "upstream": {"auth": {"source": "provider_config"}}}
+                ]
+            }
+        });
+        assert!(should_make_codex_v2_collaboration_plaintext(
+            &AppType::Codex,
+            &mixed,
+            true
+        ));
+        assert!(!should_make_codex_v2_collaboration_plaintext(
+            &AppType::Codex,
+            &mixed,
+            false
+        ));
+        assert!(!should_make_codex_v2_collaboration_plaintext(
+            &AppType::Claude,
+            &mixed,
+            true
+        ));
+
+        let mut official_only = test_provider_with_type(None);
+        official_only.settings_config = json!({
+            "codexRouting": {
+                "enabled": true,
+                "routes": [{
+                    "enabled": true,
+                    "upstream": {"auth": {"source": "native_codex_auth"}}
+                }]
+            }
+        });
+        assert!(!should_make_codex_v2_collaboration_plaintext(
+            &AppType::Codex,
+            &official_only,
+            true
+        ));
+    }
+
+    #[test]
     fn codex_account_pool_requires_an_explicit_router_marker() {
         let native = test_codex_official_provider();
         assert!(!provider_requests_codex_account_pool(&native));
