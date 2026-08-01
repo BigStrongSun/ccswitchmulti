@@ -1608,6 +1608,77 @@ mod tests {
     use futures::{stream, StreamExt};
 
     #[test]
+    fn mixed_router_keeps_v2_but_makes_collaboration_messages_plaintext() {
+        let mut request = json!({
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "spawn_agent",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "task_name": {"type": "string"},
+                            "message": {"type": "string", "encrypted": true},
+                            "private_note": {"type": "string", "encrypted": true}
+                        }
+                    }
+                },
+                {
+                    "type": "function",
+                    "namespace": "collaboration",
+                    "name": "send_message",
+                    "parameters": {
+                        "properties": {"message": {"type": "string", "encrypted": true}}
+                    }
+                },
+                {
+                    "type": "function",
+                    "name": "followup_task",
+                    "parameters": {
+                        "properties": {"message": {"type": "string", "encrypted": true}}
+                    }
+                },
+                {
+                    "type": "function",
+                    "name": "lookup",
+                    "parameters": {
+                        "properties": {"message": {"type": "string", "encrypted": true}}
+                    }
+                },
+                {
+                    "type": "function",
+                    "namespace": "other",
+                    "name": "spawn_agent",
+                    "parameters": {
+                        "properties": {"message": {"type": "string", "encrypted": true}}
+                    }
+                }
+            ]
+        });
+
+        let changed = make_codex_v2_collaboration_messages_plaintext(&mut request);
+
+        assert_eq!(changed, 3);
+        for index in 0..3 {
+            assert!(request["tools"][index]["parameters"]["properties"]["message"]
+                .get("encrypted")
+                .is_none());
+        }
+        assert_eq!(
+            request["tools"][0]["parameters"]["properties"]["private_note"]["encrypted"],
+            true
+        );
+        assert_eq!(
+            request["tools"][3]["parameters"]["properties"]["message"]["encrypted"],
+            true
+        );
+        assert_eq!(
+            request["tools"][4]["parameters"]["properties"]["message"]["encrypted"],
+            true
+        );
+    }
+
+    #[test]
     fn chat_request_maps_to_codex_responses_contract() {
         let input = json!({
             "model": "gpt-5.4-mini",
