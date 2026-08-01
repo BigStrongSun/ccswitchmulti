@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-08-01 Codex OAuth 账号池 P0 运行态设计（待书面评审）
+
+- 用户已认可继续完善账号池，第一阶段刻意收敛为“运行态生命周期 + 请求发出前/首包阶段失败分类”；自适应冷却探测、完整 SSE terminal、重试预算和多策略分别留到后续阶段，避免一次提交同时改变多个状态机。
+- 推荐新建 `src-tauri/src/proxy/providers/codex_oauth_pool.rs`，用单一 `CodexPoolRuntimeState` 与一把异步 Mutex 取代 session binding、cooldown、remaining percent、quota checked time 四张独立表。OAuth 文件只负责凭据持久化，forwarder 只提交分类后的结果。
+- affinity 契约：24 小时空闲 TTL、2048 项 LRU、凭据 generation；managed generation 只在重新建立登录身份时递增，普通 token 刷新不变。Desktop bearer 只计算进程内 SHA-256 摘要以识别凭据变化，摘要不落盘、不展示、不记录日志。
+- 结果分类统一为 success/credential/quota/transient/neutral。账号池 candidate 的 401/403 或本地 AuthError 标记运行时 reauth、清 binding 并允许备用账号；直接 official route 仍不可重试。402/429 本阶段先保留固定 60 秒冷却；connect/timeout/stream idle/5xx 在五分钟窗口累计三次后按 30 秒、2 分钟、10 分钟、30 分钟 soft-avoid。
+- 完整设计位于 `docs/superpowers/specs/2026-08-01-codex-account-pool-runtime-state-design.md`。必须先完成用户书面评审，再写实施计划并逐项 TDD；本阶段不发版。
+
 ## 2026-08-01 v3.19 OAuth 账号池与 opencodex v2.8.0 源码对照审计
 
 - 审计基线：CCSwitchMulti 分支 `bigstrongsun/fix-v3.19-codex-pool-session-affinity` 的账号池根修为 `ecac81ad`；opencodex `main` 已现场复核为 `1adad35731ff3586d3d8dfaf531d5b64e0bb1092`（v2.8.0，2026-07-31）。本轮是源码与测试代码审计；本机没有 Bun，未执行 opencodex 测试，不能把对照结果表述为 opencodex 运行时验收。
