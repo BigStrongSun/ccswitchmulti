@@ -1847,13 +1847,22 @@ mod tests {
             .record_pool_remaining_percent(NATIVE_CODEX_ACCOUNT_ID, 9.0)
             .await;
         let entries = manager.ordered_pool_entries("thread-1").await;
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].account_id, NATIVE_CODEX_ACCOUNT_ID);
+
+        let entries = manager.ordered_pool_entries("thread-2").await;
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].account_id, "acc-a");
 
         manager
-            .cool_down_pool_account("acc-a", std::time::Duration::from_secs(60))
+            .cool_down_pool_account(
+                NATIVE_CODEX_ACCOUNT_ID,
+                std::time::Duration::from_secs(60),
+            )
             .await;
-        assert!(manager.ordered_pool_entries("thread-1").await.is_empty());
+        let entries = manager.ordered_pool_entries("thread-1").await;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].account_id, "acc-a");
     }
 
     /// 启动一次性 OAuth token 假端点。
