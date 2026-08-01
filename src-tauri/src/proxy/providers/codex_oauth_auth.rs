@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
-use super::codex_oauth_pool::CodexPoolRuntimeState;
+use super::codex_oauth_pool::{CodexPoolAttemptOutcome, CodexPoolRuntimeState};
 use super::copilot_auth::{GitHubAccount, GitHubDeviceCodeResponse};
 
 /// OpenAI OAuth 客户端 ID（OpenCode 使用，与官方 Codex CLI 相同）
@@ -991,7 +991,11 @@ impl CodexOAuthManager {
             .filter_map(|entry| {
                 let credential_generation = enabled_account_generations.get(&entry.account_id)?;
                 (entry.enabled
-                    && runtime.is_account_selectable(&entry.account_id, now)
+                    && runtime.is_account_selectable(
+                        &entry.account_id,
+                        *credential_generation,
+                        now,
+                    )
                     && (bound.as_deref() == Some(entry.account_id.as_str())
                         || runtime
                             .remaining_percent(&entry.account_id)
@@ -1051,6 +1055,22 @@ impl CodexOAuthManager {
             credential_generation,
             chrono::Utc::now().timestamp_millis(),
         );
+    }
+
+    pub(crate) async fn record_pool_attempt(
+        &self,
+        account_id: &str,
+        credential_generation: u64,
+        session_id: &str,
+        outcome: CodexPoolAttemptOutcome,
+    ) -> bool {
+        self.pool_runtime.lock().await.record_outcome_at(
+            account_id,
+            credential_generation,
+            session_id,
+            outcome,
+            chrono::Utc::now().timestamp_millis(),
+        )
     }
 
     pub async fn cool_down_pool_account(&self, account_id: &str, duration: std::time::Duration) {
@@ -2194,6 +2214,60 @@ mod tests {
             .ordered_pool_entries("thread-late", None)
             .await
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn manager_pool_attempt_outcomes_respect_selected_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = CodexOAuthManager::new(temp.path().to_path_buf());
+        add_pool_test_account(&manager, "acc-a", "refresh-a").await;
+        enable_single_managed_pool(&manager, "acc-a", 0.0).await;
+        let candidate = manager
+            .ordered_pool_entries("thread", None)
+            .await
+            .pop()
+            .unwrap();
+        manager
+            .bind_pool_session("thread", "acc-a", candidate.credential_generation)
+            .await;
+
+        assert!(
+            manager
+                .record_pool_attempt(
+                    "acc-a",
+                    candidate.credential_generation,
+                    "thread",
+                    CodexPoolAttemptOutcome::Credential { status: Some(401) },
+                )
+                .await
+        );
+        assert!(manager
+            .ordered_pool_entries("thread", None)
+            .await
+            .is_empty());
+        assert!(
+            !manager
+                .record_pool_attempt(
+                    "acc-a",
+                    candidate.credential_generation.saturating_sub(1),
+                    "late",
+                    CodexPoolAttemptOutcome::Success,
+                )
+                .await
+        );
+        assert!(
+            manager
+                .record_pool_attempt(
+                    "acc-a",
+                    candidate.credential_generation,
+                    "recovered",
+                    CodexPoolAttemptOutcome::Success,
+                )
+                .await
+        );
+        let recovered = manager.ordered_pool_entries("recovered", None).await;
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].entry.account_id, "acc-a");
     }
 
     #[tokio::test]

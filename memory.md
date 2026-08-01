@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-08-01 Codex 账号池 typed outcome 与 transient soft-avoid Task 3
+
+- `CodexPoolAttemptOutcome` 统一定义 `Success`、`Credential`、`Quota`、`Transient`、`Neutral`，所有结果必须携带选择时的 `credential_generation` 进入 `record_outcome_at`；未知账号或旧代际直接返回 false，不得清理、恢复或污染当前身份状态。
+- `Credential` 只写运行时 `reauth_required`，清 quota/cooldown/transient 和该账号全部 affinity；`Quota` 保持本阶段固定 60 秒硬冷却并解绑；`Success` 清 reauth/transient/soft-avoid 并在代际仍匹配时绑定；`Neutral` 不改任何账号健康。候选读取同时校验 generation、reauth、硬冷却与 soft-avoid，计时状态到期后惰性清理。
+- transient 以相邻两次失败间隔不超过五分钟为连续窗口，第三次起按 30 秒、2 分钟、10 分钟、30 分钟升级，六次达到封顶，七次及以后继续 30 分钟；达到阈值立即删除该账号全部 binding，成功会清零计数。`CodexOAuthManager::record_pool_attempt` 是唯一 typed wrapper。
+- TDD 证据：credential/quota、第三次 transient、neutral/旧 generation、五分钟窗口重置、3-7 次升级封顶四组缺失行为先失败后通过；Task 3 完成时纯状态 8/8、`codex_oauth_auth` 39/39。forwarder 仍暂时保留旧 success/429 调用以维持提交可编译，真实 `ProxyError` 分类、401/403 池内接管和持久 Provider 健康隔离属于紧随其后的 Task 4。
+
 ## 2026-08-01 Codex 账号池有界 affinity 与凭据代际 Task 2
 
 - `CodexPoolRuntimeState` 的 session affinity 现在使用 24 小时空闲 TTL 和 2048 项硬上限；每次有效复用都会刷新 `last_used_at_ms`，溢出时按真实最近使用时间淘汰。账号 runtime 的 `credential_generation` 变化会原子重建该账号运行态并清除全部旧 binding，旧请求携带的 generation 无法重新绑定。
