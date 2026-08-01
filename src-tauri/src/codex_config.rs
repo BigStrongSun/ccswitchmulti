@@ -6334,6 +6334,122 @@ base_url = "http://127.0.0.1:15721/v1"
         );
     }
 
+    fn prepared_router_catalog_models(settings: &Value) -> Vec<Value> {
+        seed_codex_models_cache(json!([{
+            "slug": "gpt-5.5",
+            "display_name": "GPT-5.5",
+            "context_window": 272000,
+            "multi_agent_version": "v2",
+            "use_responses_lite": true,
+            "model_messages": { "instructions_template": "template" }
+        }]));
+        let config = r#"model_provider = "codex_model_router_v2"
+
+[features]
+multi_agent_v2 = true
+
+[model_providers.codex_model_router_v2]
+base_url = "http://127.0.0.1:15721/v1"
+"#;
+
+        prepare_codex_config_text_with_model_catalog(
+            settings,
+            config,
+            CodexCatalogToolProfile::ProxyChat,
+        )
+        .expect("prepare router catalog");
+        read_json_file::<Value>(&get_codex_model_catalog_path())
+            .expect("read generated catalog")
+            .get("models")
+            .and_then(Value::as_array)
+            .expect("generated models")
+            .clone()
+    }
+
+    #[test]
+    #[serial]
+    fn mixed_router_uses_plaintext_multi_agent_v1_for_every_model() {
+        let _guard = TestHomeGuard::new();
+        let models = prepared_router_catalog_models(&json!({
+            "modelCatalog": {
+                "models": [
+                    { "model": "gpt-5.5", "displayName": "GPT-5.5" },
+                    { "model": "qwen3.6", "displayName": "Qwen 3.6" }
+                ]
+            },
+            "codexRouting": {
+                "enabled": true,
+                "routes": [
+                    {
+                        "id": "official",
+                        "match": { "models": ["gpt-5.5"] },
+                        "upstream": { "auth": { "source": "managed_codex_oauth" } }
+                    },
+                    {
+                        "id": "qwen",
+                        "match": { "models": ["qwen3.6"] },
+                        "upstream": { "auth": { "source": "provider_config" } }
+                    }
+                ]
+            }
+        }));
+
+        assert_eq!(models.len(), 2);
+        assert!(models.iter().all(|model| {
+            model.get("multi_agent_version").and_then(Value::as_str) == Some("v1")
+        }));
+    }
+
+    #[test]
+    #[serial]
+    fn managed_oauth_only_router_preserves_multi_agent_v2() {
+        let _guard = TestHomeGuard::new();
+        let models = prepared_router_catalog_models(&json!({
+            "modelCatalog": {
+                "models": [{ "model": "gpt-5.5", "displayName": "GPT-5.5" }]
+            },
+            "codexRouting": {
+                "enabled": true,
+                "routes": [{
+                    "id": "official",
+                    "match": { "models": ["gpt-5.5"] },
+                    "upstream": { "auth": { "source": "managed_codex_oauth" } }
+                }]
+            }
+        }));
+
+        assert_eq!(models[0]["multi_agent_version"], "v2");
+    }
+
+    #[test]
+    #[serial]
+    fn disabled_third_party_route_does_not_downgrade_managed_oauth_router() {
+        let _guard = TestHomeGuard::new();
+        let models = prepared_router_catalog_models(&json!({
+            "modelCatalog": {
+                "models": [{ "model": "gpt-5.5", "displayName": "GPT-5.5" }]
+            },
+            "codexRouting": {
+                "enabled": true,
+                "routes": [
+                    {
+                        "id": "official",
+                        "match": { "models": ["gpt-5.5"] },
+                        "upstream": { "auth": { "source": "managed_codex_oauth" } }
+                    },
+                    {
+                        "id": "qwen-disabled",
+                        "enabled": false,
+                        "match": { "models": ["qwen3.6"] },
+                        "upstream": { "auth": { "source": "provider_config" } }
+                    }
+                ]
+            }
+        }));
+
+        assert_eq!(models[0]["multi_agent_version"], "v2");
+    }
+
     #[test]
     #[serial]
     fn managed_agent_files_migrate_legacy_cc_switch_roles() {
