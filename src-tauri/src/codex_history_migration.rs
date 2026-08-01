@@ -6164,6 +6164,90 @@ mod tests {
     }
 
     #[test]
+    fn history_repair_preserves_user_renamed_thread_title() {
+        let dir = tempdir().expect("tempdir");
+        let codex_dir = dir.path().join(".codex");
+        let session_dir = codex_dir.join("sessions/2026/08/01");
+        fs::create_dir_all(&session_dir).expect("create session dir");
+
+        let session_id = "renamed-session";
+        let original_title = "Explain the partner agent SDK and user agent SDK";
+        let renamed_title = "TEE SDK boundary";
+        let rollout = session_dir.join("rollout-renamed-session.jsonl");
+        fs::write(
+            &rollout,
+            format!(
+                "{{\"timestamp\":\"2026-08-01T01:20:19Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"{session_id}\",\"model_provider\":\"openai\",\"cwd\":\"C:\\\\work\",\"source\":\"vscode\"}}}}\n{{\"timestamp\":\"2026-08-01T01:20:20Z\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"message\":\"{original_title}\"}}}}\n"
+            ),
+        )
+        .expect("write rollout");
+
+        let db_path = codex_dir.join(CODEX_STATE_DB_FILENAME);
+        let conn = Connection::open(&db_path).expect("open state db");
+        create_history_test_threads_table(&conn);
+        conn.execute(
+            "INSERT INTO threads (id, rollout_path, model_provider, cwd, has_user_event, archived, source, thread_source, title, preview, first_user_message, updated_at, updated_at_ms) VALUES (?1, ?2, 'openai', 'C:\\work', 1, 0, 'vscode', 'user', ?3, ?4, ?4, 1785556820, 1785556820000)",
+            (
+                session_id,
+                rollout.to_string_lossy().to_string(),
+                renamed_title,
+                original_title,
+            ),
+        )
+        .expect("insert renamed thread");
+        drop(conn);
+        fs::write(
+            codex_dir.join("session_index.jsonl"),
+            format!(
+                "{{\"id\":\"{session_id}\",\"thread_name\":\"{renamed_title}\",\"updated_at\":\"2026-08-01T01:20:20Z\"}}\n"
+            ),
+        )
+        .expect("write session index");
+
+        let result = repair_codex_history_visibility_at(
+            &codex_dir,
+            ActiveCodexStateDb {
+                path: db_path.clone(),
+                kind: "codex_root".to_string(),
+            },
+            CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID,
+            Some(CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID.to_string()),
+            source_ids(&["openai"]),
+            None,
+            HistoryVisibilityRepairRuntimeOptions {
+                dry_run: false,
+                count: 1,
+                window_limit: 10,
+                balance_recent_window: false,
+                max_per_project: 1,
+                max_total: 1,
+                source_filter: Some("all".to_string()),
+                include_archived: false,
+                include_subagents: false,
+                selected_session_ids: BTreeSet::from([session_id.to_string()]),
+                provider_bucket_sync_enabled: true,
+                backup_root_override: Some(dir.path().join("backup")),
+            },
+        )
+        .expect("repair history");
+
+        let conn = Connection::open(db_path).expect("read repaired state db");
+        let repaired_title: String = conn
+            .query_row(
+                "SELECT title FROM threads WHERE id = ?1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .expect("read repaired title");
+        assert_eq!(repaired_title, renamed_title);
+        assert_eq!(result.session_index_titles_updated, 0);
+        let index_text = fs::read_to_string(codex_dir.join("session_index.jsonl"))
+            .expect("read repaired session index");
+        assert!(index_text.contains(&format!("\"thread_name\":\"{renamed_title}\"")));
+        assert!(!index_text.contains(&format!("\"thread_name\":\"{original_title}\"")));
+    }
+
+    #[test]
     fn detects_custom_routed_codex_config_for_unify_gate() {
         // 注入产物（官方 + 统一开关）
         assert!(codex_config_text_routes_custom(
