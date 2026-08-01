@@ -1,5 +1,17 @@
 # CC Switch Repository Memory
 
+## 2026-08-01 v3.19 OAuth 账号池与 opencodex v2.8.0 源码对照审计
+
+- 审计基线：CCSwitchMulti 分支 `bigstrongsun/fix-v3.19-codex-pool-session-affinity` 的账号池根修为 `ecac81ad`；opencodex `main` 已现场复核为 `1adad35731ff3586d3d8dfaf531d5b64e0bb1092`（v2.8.0，2026-07-31）。本轮是源码与测试代码审计；本机没有 Bun，未执行 opencodex 测试，不能把对照结果表述为 opencodex 运行时验收。
+- 已完成边界：`reservePercent` 只拦截新 session，已绑定 session 可继续使用低于保留阈值的账号；429 冷却仍会删除绑定并切走。Router 必须显式选择账号池才展开候选，External Agent API 不借用本机 OAuth，额度按 5 分钟 TTL 并行探测。这次修复正确，但只覆盖了保留额度与 affinity 的一个冲突，不能代表号池整体完善。
+- P0 生命周期缺口：`pool_session_bindings`、`pool_cooldowns`、`pool_remaining_percent`、`pool_quota_checked_at` 都没有容量或过期清理；`remove_account`、账号失效、重新登录覆盖同一 id、策略禁用/移除条目都没有统一清理这些运行态。`normalized_pool_policy` 只检查账号 key 是否存在，不排除 `invalidated_at` 账号；该账号仍可进入候选，随后认证失败。opencodex 用 24 小时 affinity 空闲 TTL、2048 项 LRU、凭据 generation 校验和统一 `purgeCodexAccountRuntimeState` 解决同类生命周期问题。
+- P0 失败分类缺口：CCSM 只在 429 上更新账号池状态。账号池 candidate 被视为 official，401/403 会被 `categorize_proxy_error` 判为不可重试，却不会标记需重新认证、清 affinity 或尝试池内下一个账号；connect error、timeout、5xx 也没有账号级连续失败、soft-avoid 与升级退避。opencodex 明确区分 success/credential/quota/transient/caller，401/403 隔离账号，transient 达阈值后解除 affinity 并临时避让。
+- P1 冷却缺口：CCSM 的 `ProxyError::UpstreamError` 不保留响应头，`record_codex_pool_attempt` 对 429 固定冷却 60 秒；没有解析 `Retry-After` 或额度 reset，没有 account/model quota scope，没有冷却 generation、单探测租约或手动清除入口。opencodex 优先使用 `Retry-After`，其次使用 reset-derived cooldown，最后才默认 60 秒；只允许当前 generation 的探测结果解除冷却，并将 Spark 与 shared native quota 分开。
+- P1 请求结果缺口：CCSM 在上游成功响应完成首包/首个语义事件验证后立即绑定并记成功，后续 SSE `response.failed`、中途断流或 429 不再反馈账号健康；opencodex 持续检查流式 terminal，并按最终语义状态记成功、429/402、5xx 或中途失败。CCSM 的 Codex media 降级二次重试成功分支也没有再次调用 `record_codex_pool_attempt(..., true, ...)`，新 session 可能漏建绑定。
+- P1 大池重试缺口：账号池展开后仍与普通 provider 共用全局 `max_attempts=max_retries+1`，Codex 默认最多尝试 4 家；固定顺序下，超过上限的尾部账号在 connect/timeout/5xx 等不会触发 60 秒池冷却的失败中可能持续没有单请求故障转移机会。需要把“路由级重试预算”和“同一路由的账号候选预算”显式分层，并保持有界重试。
+- 策略借鉴边界：opencodex 支持 `quota`、`round-robin`、`fill-first`，quota 会周期重评长任务，RR/fill-first 对运行中线程保持 affinity。CCSM 现有“固定优先级 + reserve”是已发布产品契约，后续应保留为显式 `priority` 策略和默认兼容值，再按用户选择增加 quota/RR/fill-first；不能把 opencodex 默认策略静默套到现有用户配置。
+- 推荐实施顺序：第一批先建立统一账号运行态与失败分类（TTL/LRU、generation、删除/禁用/身份变化清理、401/403 reauth、transient health、流式 terminal）；第二批实现自适应冷却、generation 与单探测租约；第三批才增加多策略与大池公平性。每批必须先做失败回归，不能把多项状态机改造揉成一个不可定位的大补丁。
+
 ## 2026-08-01 本地发布流水线锁所有权缺陷（待修）
 
 - `scripts/local-release-pipeline.ps1` 把 `Enter-PipelineLock` 放在 `try` 内，但 `finally` 无条件删除 `scripts/logs/local-release.lock`。当一次并发调用发现六小时内的现有锁并在尚未取得锁时抛错，它仍会进入 `finally`，误删另一个仍在运行的流水线所持有的锁；第三次调用随后可能并发进入构建。
