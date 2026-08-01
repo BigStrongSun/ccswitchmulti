@@ -587,10 +587,10 @@ pub async fn unlock_codex_model_picker() -> Result<CodexModelPickerUnlockResult,
     crate::codex_desktop::unlock_codex_model_picker().await
 }
 
-/// 显式把 Codex 历史 provider 桶同步到 MultiRouter 的 `custom` 运行桶。
+/// 显式把 Codex 历史 provider 桶同步到当前 live 使用的稳定 MultiRouter 桶。
 ///
-/// 该命令会备份并重写本机 Codex session/jsonl 与 state sqlite；前端必须由用户主动触发，
-/// 不能在启动或诊断时自动执行。
+/// 该命令会备份并重写本机 Codex session/jsonl 与 state sqlite；自动入口也会复用同一条
+/// 离线检查与备份路径。
 #[tauri::command]
 pub async fn sync_codex_history_to_multirouter(
     state: tauri::State<'_, AppState>,
