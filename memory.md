@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-08-01 Codex 账号池真实 forwarder 失败接管 Task 4
+
+- `provider_codex_pool_account` 只把同时携带 `codexPoolAccountId` 与选择时 `codexPoolCredentialGeneration` 的 request-local Provider 识别为池化候选；非池化 Provider 的错误分类、重试和持久健康记录保持原路径。真实候选还会继承 `codexAccountPoolEnabled=true`，因此属于 official Codex。最初书面测试夹具漏掉该 marker，没有复现生产中的 official 401/403 不可重试分支；补齐真实 marker 后旧实现稳定失败，新分支稳定通过。
+- `classify_codex_pool_attempt` 把本地 `AuthError` 与上游 401/403 归为 credential，402/429 归为 quota，connect/timeout/stream idle/`ProviderUnhealthy`/其他 5xx 归为 transient，400/405/406/413/414/415/422/501 及未知错误归为 neutral。只有显式池候选的 credential/quota/transient 覆盖为可重试；直接 official 401/403 仍不可重试。
+- raw 与 normal 主重试循环都会先将 typed outcome 连同选择时 generation 交给 `CodexOAuthManager::record_pool_attempt`。池候选的账号级 credential/quota/transient 失败只调用 `release_permit_neutral` 释放 request-local HalfOpen permit，并继续下一个账号，不再把临时候选失败写入原 Router 的熔断器或数据库 Provider 健康；neutral 与所有非池化错误仍沿用原持久健康路径。
+- 原 `cool_down_pool_account`/`cool_down_account` 已删除，原 reserve/cooldown/affinity 回归也改为通过统一 typed quota outcome 驱动。media 二次重试成功反馈和完整 SSE terminal 仍明确属于后续阶段；本阶段的 `Success` 只代表既有请求发出前/首包边界，不能描述成最终流式成功。
+- TDD 与回归证据：分类映射、池内 401/403/AuthError 切换、账号失败不污染 Provider 健康三项缺失行为先失败后通过；提交前重新运行这三项，以及 direct official 401/403、显式 Router marker、本机 native auth、managed pool 不复用 Desktop bearer、reserve/cooldown/affinity 共八项边界测试，每项均为 1 passed / 0 failed。
+
 ## 2026-08-01 Codex 账号池 typed outcome 与 transient soft-avoid Task 3
 
 - `CodexPoolAttemptOutcome` 统一定义 `Success`、`Credential`、`Quota`、`Transient`、`Neutral`，所有结果必须携带选择时的 `credential_generation` 进入 `record_outcome_at`；未知账号或旧代际直接返回 false，不得清理、恢复或污染当前身份状态。

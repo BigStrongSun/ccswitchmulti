@@ -1073,14 +1073,6 @@ impl CodexOAuthManager {
         )
     }
 
-    pub async fn cool_down_pool_account(&self, account_id: &str, duration: std::time::Duration) {
-        self.pool_runtime.lock().await.cool_down_account(
-            account_id,
-            i64::try_from(duration.as_millis()).unwrap_or(i64::MAX),
-            chrono::Utc::now().timestamp_millis(),
-        );
-    }
-
     async fn reconcile_pool_runtime(&self, policy: &CodexAccountPoolPolicy) {
         let accounts = self.accounts.read().await;
         let native_runtime = self.native_credential_runtime.lock().await;
@@ -2493,9 +2485,16 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].entry.account_id, "acc-a");
 
-        manager
-            .cool_down_pool_account(NATIVE_CODEX_ACCOUNT_ID, std::time::Duration::from_secs(60))
-            .await;
+        assert!(
+            manager
+                .record_pool_attempt(
+                    NATIVE_CODEX_ACCOUNT_ID,
+                    0,
+                    "thread-1",
+                    CodexPoolAttemptOutcome::Quota { status: 429 },
+                )
+                .await
+        );
         let entries = manager.ordered_pool_entries("thread-1", None).await;
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].entry.account_id, "acc-a");

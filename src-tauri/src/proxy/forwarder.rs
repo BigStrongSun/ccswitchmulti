@@ -25,6 +25,7 @@ use super::{
 use crate::commands::{CodexOAuthState, CopilotAuthState, XaiOAuthState};
 use crate::proxy::providers::codex_oauth_auth::CodexOAuthManager;
 use crate::proxy::providers::codex_oauth_auth::NATIVE_CODEX_ACCOUNT_ID;
+use crate::proxy::providers::codex_oauth_pool::CodexPoolAttemptOutcome;
 use crate::proxy::providers::copilot_auth::CopilotAuthManager;
 use crate::proxy::providers::xai_oauth_auth::XaiOAuthManager;
 use crate::proxy::providers::CODEX_ACCOUNT_POOL_ENABLED;
@@ -185,6 +186,54 @@ fn provider_requests_codex_account_pool(provider: &Provider) -> bool {
         .unwrap_or(false)
 }
 
+fn provider_codex_pool_account(provider: &Provider) -> Option<(&str, u64)> {
+    let account_id = provider
+        .settings_config
+        .get("codexPoolAccountId")?
+        .as_str()?;
+    let credential_generation = provider
+        .settings_config
+        .get("codexPoolCredentialGeneration")?
+        .as_u64()?;
+    Some((account_id, credential_generation))
+}
+
+fn classify_codex_pool_attempt(error: &ProxyError) -> CodexPoolAttemptOutcome {
+    match error {
+        ProxyError::AuthError(_) => CodexPoolAttemptOutcome::Credential { status: None },
+        ProxyError::UpstreamError { status, .. } if matches!(*status, 401 | 403) => {
+            CodexPoolAttemptOutcome::Credential {
+                status: Some(*status),
+            }
+        }
+        ProxyError::UpstreamError { status, .. } if matches!(*status, 402 | 429) => {
+            CodexPoolAttemptOutcome::Quota { status: *status }
+        }
+        ProxyError::Timeout(_)
+        | ProxyError::ForwardFailed(_)
+        | ProxyError::ProviderUnhealthy(_)
+        | ProxyError::StreamIdleTimeout(_) => CodexPoolAttemptOutcome::Transient { status: None },
+        ProxyError::UpstreamError {
+            status: 400 | 405 | 406 | 413 | 414 | 415 | 422 | 501,
+            ..
+        } => CodexPoolAttemptOutcome::Neutral,
+        ProxyError::UpstreamError { status, .. } if *status >= 500 => {
+            CodexPoolAttemptOutcome::Transient {
+                status: Some(*status),
+            }
+        }
+        _ => CodexPoolAttemptOutcome::Neutral,
+    }
+}
+
+fn retryable_failure_affects_provider_health(provider: &Provider, error: &ProxyError) -> bool {
+    provider_codex_pool_account(provider).is_none()
+        || matches!(
+            classify_codex_pool_attempt(error),
+            CodexPoolAttemptOutcome::Neutral
+        )
+}
+
 impl RequestForwarder {
     async fn expand_codex_account_pool(
         &self,
@@ -320,23 +369,16 @@ impl RequestForwarder {
         expanded
     }
 
+    /// 记录本阶段已有的请求发出前/首包结果边界。
+    ///
+    /// media 二次重试成功与完整 SSE terminal 仍由后续阶段补齐，不能把首包
+    /// `Success` 描述成最终流式结果。
     async fn record_codex_pool_attempt(
         &self,
         provider: &Provider,
-        success: bool,
-        status: Option<u16>,
+        outcome: CodexPoolAttemptOutcome,
     ) {
-        let Some(account_id) = provider
-            .settings_config
-            .get("codexPoolAccountId")
-            .and_then(Value::as_str)
-        else {
-            return;
-        };
-        let Some(credential_generation) = provider
-            .settings_config
-            .get("codexPoolCredentialGeneration")
-            .and_then(Value::as_u64)
+        let Some((account_id, credential_generation)) = provider_codex_pool_account(provider)
         else {
             return;
         };
@@ -345,15 +387,9 @@ impl RequestForwarder {
         };
         let state = app_handle.state::<CodexOAuthState>();
         let manager = state.0.read().await;
-        if success {
-            manager
-                .bind_pool_session(&self.session_id, account_id, credential_generation)
-                .await;
-        } else if status == Some(429) {
-            manager
-                .cool_down_pool_account(account_id, Duration::from_secs(60))
-                .await;
-        }
+        let _ = manager
+            .record_pool_attempt(account_id, credential_generation, &self.session_id, outcome)
+            .await;
     }
 
     /// 预防式 media 降级：发送前对 text-only 模型把图片块替换为标记。
@@ -750,7 +786,8 @@ impl RequestForwarder {
                 .await
             {
                 Ok((response, effective_provider, outbound_model)) => {
-                    self.record_codex_pool_attempt(provider, true, None).await;
+                    self.record_codex_pool_attempt(provider, CodexPoolAttemptOutcome::Success)
+                        .await;
                     self.record_success_result(
                         &attempt_provider_id,
                         &persistent_provider_id,
@@ -801,11 +838,7 @@ impl RequestForwarder {
                     });
                 }
                 Err(error) => {
-                    let status = match &error {
-                        ProxyError::UpstreamError { status, .. } => Some(*status),
-                        _ => None,
-                    };
-                    self.record_codex_pool_attempt(provider, false, status)
+                    self.record_codex_pool_attempt(provider, classify_codex_pool_attempt(&error))
                         .await;
                     let category = self.categorize_proxy_error(&error, &provider);
                     if matches!(category, ErrorCategory::NonRetryable) {
@@ -830,17 +863,27 @@ impl RequestForwarder {
                         });
                     }
 
-                    let _ = self
-                        .router
-                        .record_result_with_health_provider(
-                            &provider.id,
-                            &persistent_provider_id,
-                            app_type_str,
-                            used_half_open_permit,
-                            false,
-                            Some(error.to_string()),
-                        )
-                        .await;
+                    if retryable_failure_affects_provider_health(provider, &error) {
+                        let _ = self
+                            .router
+                            .record_result_with_health_provider(
+                                &provider.id,
+                                &persistent_provider_id,
+                                app_type_str,
+                                used_half_open_permit,
+                                false,
+                                Some(error.to_string()),
+                            )
+                            .await;
+                    } else {
+                        self.router
+                            .release_permit_neutral(
+                                &provider.id,
+                                app_type_str,
+                                used_half_open_permit,
+                            )
+                            .await;
+                    }
                     {
                         let mut status = self.status.write().await;
                         status.last_error = Some(error.to_string());
@@ -1010,7 +1053,8 @@ impl RequestForwarder {
                 .await
             {
                 Ok((response, claude_api_format, effective_provider, outbound_model)) => {
-                    self.record_codex_pool_attempt(provider, true, None).await;
+                    self.record_codex_pool_attempt(provider, CodexPoolAttemptOutcome::Success)
+                        .await;
                     // 成功：普通闭合熔断状态异步记录，避免阻塞流式首包返回；
                     // HalfOpen 探测仍同步等待，保证 permit 与熔断状态及时释放。
                     self.record_success_result(
@@ -1071,11 +1115,7 @@ impl RequestForwarder {
                     });
                 }
                 Err(e) => {
-                    let pool_status = match &e {
-                        ProxyError::UpstreamError { status, .. } => Some(*status),
-                        _ => None,
-                    };
-                    self.record_codex_pool_attempt(provider, false, pool_status)
+                    self.record_codex_pool_attempt(provider, classify_codex_pool_attempt(&e))
                         .await;
                     // 检测是否需要触发整流器（仅 Claude/ClaudeAuth 供应商）
                     let provider_type = ProviderType::from_app_type_and_config(app_type, provider);
@@ -1566,18 +1606,29 @@ impl RequestForwarder {
 
                     match category {
                         ErrorCategory::Retryable => {
-                            // 可重试：真正的 provider 故障 → 记录失败并更新熔断器/DB 健康度
-                            let _ = self
-                                .router
-                                .record_result_with_health_provider(
-                                    &provider.id,
-                                    &persistent_provider_id,
-                                    app_type_str,
-                                    used_half_open_permit,
-                                    false,
-                                    Some(e.to_string()),
-                                )
-                                .await;
+                            // 账号池的 credential/quota/transient 属于临时候选账号，
+                            // 只释放 permit 并切换池内下一账号，不污染持久 Router 健康。
+                            if retryable_failure_affects_provider_health(provider, &e) {
+                                let _ = self
+                                    .router
+                                    .record_result_with_health_provider(
+                                        &provider.id,
+                                        &persistent_provider_id,
+                                        app_type_str,
+                                        used_half_open_permit,
+                                        false,
+                                        Some(e.to_string()),
+                                    )
+                                    .await;
+                            } else {
+                                self.router
+                                    .release_permit_neutral(
+                                        &provider.id,
+                                        app_type_str,
+                                        used_half_open_permit,
+                                    )
+                                    .await;
+                            }
 
                             {
                                 let mut status = self.status.write().await;
@@ -4478,6 +4529,17 @@ impl RequestForwarder {
     }
 
     fn categorize_proxy_error(&self, error: &ProxyError, provider: &Provider) -> ErrorCategory {
+        if provider_codex_pool_account(provider).is_some()
+            && matches!(
+                classify_codex_pool_attempt(error),
+                CodexPoolAttemptOutcome::Credential { .. }
+                    | CodexPoolAttemptOutcome::Quota { .. }
+                    | CodexPoolAttemptOutcome::Transient { .. }
+            )
+        {
+            return ErrorCategory::Retryable;
+        }
+
         // Authentication belongs to the Codex client for the built-in official
         // route. Retrying another provider would silently move the conversation
         // away from the selected official account and poison its health state.
@@ -6576,6 +6638,17 @@ mod tests {
         provider
     }
 
+    fn test_codex_pool_candidate(account_id: &str, generation: u64) -> Provider {
+        let mut provider = test_provider_with_type(None);
+        provider.id = format!("codex-router::account::{account_id}");
+        provider.category = Some("official".to_string());
+        provider.settings_config[CODEX_ACCOUNT_POOL_ENABLED] = Value::Bool(true);
+        provider.settings_config["codexPoolAccountId"] = Value::String(account_id.to_string());
+        provider.settings_config["codexPoolCredentialGeneration"] =
+            Value::Number(generation.into());
+        provider
+    }
+
     #[test]
     fn plaintext_v2_collaboration_rewrite_requires_mixed_router_and_official_parent() {
         let mut mixed = test_provider_with_type(None);
@@ -6629,6 +6702,137 @@ mod tests {
         let mut pooled = test_codex_official_provider();
         pooled.settings_config[CODEX_ACCOUNT_POOL_ENABLED] = Value::Bool(true);
         assert!(provider_requests_codex_account_pool(&pooled));
+    }
+
+    #[test]
+    fn codex_pool_attempt_classification_maps_proxy_errors() {
+        for (error, expected) in [
+            (
+                ProxyError::AuthError("token unavailable".to_string()),
+                CodexPoolAttemptOutcome::Credential { status: None },
+            ),
+            (
+                ProxyError::UpstreamError {
+                    status: 401,
+                    body: None,
+                },
+                CodexPoolAttemptOutcome::Credential { status: Some(401) },
+            ),
+            (
+                ProxyError::UpstreamError {
+                    status: 403,
+                    body: None,
+                },
+                CodexPoolAttemptOutcome::Credential { status: Some(403) },
+            ),
+            (
+                ProxyError::UpstreamError {
+                    status: 402,
+                    body: None,
+                },
+                CodexPoolAttemptOutcome::Quota { status: 402 },
+            ),
+            (
+                ProxyError::UpstreamError {
+                    status: 429,
+                    body: None,
+                },
+                CodexPoolAttemptOutcome::Quota { status: 429 },
+            ),
+            (
+                ProxyError::Timeout("upstream".to_string()),
+                CodexPoolAttemptOutcome::Transient { status: None },
+            ),
+            (
+                ProxyError::ForwardFailed("connect".to_string()),
+                CodexPoolAttemptOutcome::Transient { status: None },
+            ),
+            (
+                ProxyError::ProviderUnhealthy("temporary".to_string()),
+                CodexPoolAttemptOutcome::Transient { status: None },
+            ),
+            (
+                ProxyError::StreamIdleTimeout(30),
+                CodexPoolAttemptOutcome::Transient { status: None },
+            ),
+            (
+                ProxyError::UpstreamError {
+                    status: 500,
+                    body: None,
+                },
+                CodexPoolAttemptOutcome::Transient { status: Some(500) },
+            ),
+            (
+                ProxyError::UpstreamError {
+                    status: 502,
+                    body: None,
+                },
+                CodexPoolAttemptOutcome::Transient { status: Some(502) },
+            ),
+            (
+                ProxyError::UpstreamError {
+                    status: 503,
+                    body: None,
+                },
+                CodexPoolAttemptOutcome::Transient { status: Some(503) },
+            ),
+        ] {
+            assert_eq!(classify_codex_pool_attempt(&error), expected);
+        }
+
+        for status in [400, 405, 406, 413, 414, 415, 422, 501] {
+            assert_eq!(
+                classify_codex_pool_attempt(&ProxyError::UpstreamError { status, body: None }),
+                CodexPoolAttemptOutcome::Neutral,
+                "status={status} must not mutate account health"
+            );
+        }
+    }
+
+    #[test]
+    fn pool_codex_auth_failures_retry_the_next_account() {
+        let forwarder = test_forwarder(Duration::ZERO, Duration::ZERO);
+        let pool = test_codex_pool_candidate("acc-a", 7);
+
+        for error in [
+            ProxyError::AuthError("re-login".to_string()),
+            ProxyError::UpstreamError {
+                status: 401,
+                body: None,
+            },
+            ProxyError::UpstreamError {
+                status: 403,
+                body: None,
+            },
+        ] {
+            assert_eq!(
+                forwarder.categorize_proxy_error(&error, &pool),
+                ErrorCategory::Retryable
+            );
+        }
+    }
+
+    #[test]
+    fn pool_candidate_failures_do_not_affect_persistent_provider_health() {
+        let pool = test_codex_pool_candidate("acc-a", 7);
+        let direct = test_codex_official_provider();
+
+        for error in [
+            ProxyError::AuthError("re-login".to_string()),
+            ProxyError::UpstreamError {
+                status: 429,
+                body: None,
+            },
+            ProxyError::Timeout("upstream".to_string()),
+        ] {
+            assert!(!retryable_failure_affects_provider_health(&pool, &error));
+            assert!(retryable_failure_affects_provider_health(&direct, &error));
+        }
+
+        assert!(retryable_failure_affects_provider_health(
+            &pool,
+            &ProxyError::ConfigError("route configuration".to_string()),
+        ));
     }
 
     #[test]

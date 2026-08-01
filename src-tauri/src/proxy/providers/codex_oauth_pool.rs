@@ -190,21 +190,6 @@ impl CodexPoolRuntimeState {
         true
     }
 
-    pub(crate) fn cool_down_account(
-        &mut self,
-        account_id: &str,
-        duration_ms: i64,
-        now_ms: i64,
-    ) -> bool {
-        let Some(runtime) = self.accounts.get_mut(account_id) else {
-            return false;
-        };
-        runtime.cooldown_until_ms = Some(now_ms.saturating_add(duration_ms.max(0)));
-        self.bindings
-            .retain(|_, binding| binding.account_id != account_id);
-        true
-    }
-
     pub(crate) fn record_outcome_at(
         &mut self,
         account_id: &str,
