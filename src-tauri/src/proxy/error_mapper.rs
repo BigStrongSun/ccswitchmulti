@@ -28,6 +28,9 @@ pub fn map_proxy_error_to_status(error: &ProxyError) -> u16 {
         // 超时错误：504 Gateway Timeout
         ProxyError::Timeout(_) | ProxyError::StreamIdleTimeout(_) => 504,
 
+        // 请求可能已在上游处理中：不让 Codex 自动重发，用 429 停止重试风暴。
+        ProxyError::ResponsePending(_) => 429,
+
         // 转发失败/连接失败：502 Bad Gateway
         ProxyError::ForwardFailed(_) => 502,
 
@@ -74,6 +77,7 @@ pub fn get_error_message(error: &ProxyError) -> String {
             }
         }
         ProxyError::Timeout(msg) => format!("请求超时: {msg}"),
+        ProxyError::ResponsePending(msg) => format!("上游请求可能仍在处理中: {msg}"),
         ProxyError::ForwardFailed(msg) => format!("转发失败: {msg}"),
         ProxyError::NoAvailableProvider => "无可用 Provider".to_string(),
         ProxyError::AllProvidersCircuitOpen => "所有供应商已熔断，无可用渠道".to_string(),
@@ -103,6 +107,13 @@ mod tests {
     fn test_map_timeout_error() {
         let error = ProxyError::Timeout("Request timeout".to_string());
         assert_eq!(map_proxy_error_to_status(&error), 504);
+    }
+
+    #[test]
+    fn test_map_response_pending_error() {
+        let error = ProxyError::ResponsePending("model is still reasoning".to_string());
+        assert_eq!(map_proxy_error_to_status(&error), 429);
+        assert_eq!(error.retry_after_secs(), Some(30));
     }
 
     #[test]

@@ -3393,6 +3393,10 @@ impl ProxyService {
         doc["model_providers"][proxy_provider_id]["base_url"] = toml_edit::value(proxy_url.trim());
         doc["model_providers"][proxy_provider_id]["wire_api"] = toml_edit::value("responses");
         doc["model_providers"][proxy_provider_id]["supports_websockets"] = toml_edit::value(false);
+        doc["model_providers"][proxy_provider_id]["request_max_retries"] =
+            toml_edit::value(crate::codex_config::CODEX_MANAGED_REQUEST_MAX_RETRIES as i64);
+        doc["model_providers"][proxy_provider_id]["stream_max_retries"] =
+            toml_edit::value(crate::codex_config::CODEX_MANAGED_STREAM_MAX_RETRIES as i64);
 
         if is_multirouter {
             // 自定义 provider 不继承 Codex 内建 openai 的 capability defaults。
@@ -6136,6 +6140,22 @@ wire_api = "chat"
             Some(false)
         );
         assert_eq!(
+            parsed
+                .get("model_providers")
+                .and_then(|v| v.get(crate::codex_config::CC_SWITCH_CODEX_MODEL_PROVIDER_ID))
+                .and_then(|v| v.get("request_max_retries"))
+                .and_then(|v| v.as_integer()),
+            Some(crate::codex_config::CODEX_MANAGED_REQUEST_MAX_RETRIES as i64)
+        );
+        assert_eq!(
+            parsed
+                .get("model_providers")
+                .and_then(|v| v.get(crate::codex_config::CC_SWITCH_CODEX_MODEL_PROVIDER_ID))
+                .and_then(|v| v.get("stream_max_retries"))
+                .and_then(|v| v.as_integer()),
+            Some(crate::codex_config::CODEX_MANAGED_STREAM_MAX_RETRIES as i64)
+        );
+        assert_eq!(
             parsed.get("model").and_then(|v| v.as_str()),
             Some("gpt-5.1-codex")
         );
@@ -6201,6 +6221,14 @@ supports_websockets = true
         assert_eq!(route["wire_api"].as_str(), Some("responses"));
         assert_eq!(route["supports_websockets"].as_bool(), Some(false));
         assert_eq!(
+            route["request_max_retries"].as_integer(),
+            Some(crate::codex_config::CODEX_MANAGED_REQUEST_MAX_RETRIES as i64)
+        );
+        assert_eq!(
+            route["stream_max_retries"].as_integer(),
+            Some(crate::codex_config::CODEX_MANAGED_STREAM_MAX_RETRIES as i64)
+        );
+        assert_eq!(
             route["supports_standalone_web_search"].as_bool(),
             Some(true)
         );
@@ -6242,6 +6270,14 @@ http_headers = { x-cc-switch-proxy-mode = "router", x-user-header = "drop-with-o
         assert_eq!(
             route["experimental_bearer_token"].as_str(),
             Some(PROXY_TOKEN_PLACEHOLDER)
+        );
+        assert_eq!(
+            route["request_max_retries"].as_integer(),
+            Some(crate::codex_config::CODEX_MANAGED_REQUEST_MAX_RETRIES as i64)
+        );
+        assert_eq!(
+            route["stream_max_retries"].as_integer(),
+            Some(crate::codex_config::CODEX_MANAGED_STREAM_MAX_RETRIES as i64)
         );
         assert!(route.get("http_headers").is_none());
     }

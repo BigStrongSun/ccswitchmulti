@@ -2563,12 +2563,16 @@ fn build_chat_proxy_error_response(
     });
     let body = serde_json::to_vec(&body)
         .map_err(|e| ProxyError::Internal(format!("Failed to serialize proxy error: {e}")))?;
-    axum::response::Response::builder()
-        .status(status)
-        .header(
-            axum::http::header::CONTENT_TYPE,
-            axum::http::HeaderValue::from_static("application/json"),
-        )
+    let mut builder = axum::response::Response::builder().status(status).header(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+    if let Some(retry_after_secs) = error.retry_after_secs() {
+        if let Ok(value) = axum::http::HeaderValue::from_str(&retry_after_secs.to_string()) {
+            builder = builder.header(axum::http::header::RETRY_AFTER, value);
+        }
+    }
+    builder
         .body(axum::body::Body::from(body))
         .map_err(|e| ProxyError::Internal(format!("Failed to build proxy error response: {e}")))
 }
@@ -3658,17 +3662,19 @@ fn build_codex_proxy_error_response(
         ProxyError::Internal(format!("Failed to serialize proxy error: {e}"))
     })?;
 
-    axum::response::Response::builder()
-        .status(status)
-        .header(
-            axum::http::header::CONTENT_TYPE,
-            axum::http::HeaderValue::from_static("application/json"),
-        )
-        .body(axum::body::Body::from(body))
-        .map_err(|e| {
-            log::error!("[Codex] 构建代理错误响应失败: {e}");
-            ProxyError::Internal(format!("Failed to build proxy error response: {e}"))
-        })
+    let mut builder = axum::response::Response::builder().status(status).header(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+    if let Some(retry_after_secs) = error.retry_after_secs() {
+        if let Ok(value) = axum::http::HeaderValue::from_str(&retry_after_secs.to_string()) {
+            builder = builder.header(axum::http::header::RETRY_AFTER, value);
+        }
+    }
+    builder.body(axum::body::Body::from(body)).map_err(|e| {
+        log::error!("[Codex] 构建代理错误响应失败: {e}");
+        ProxyError::Internal(format!("Failed to build proxy error response: {e}"))
+    })
 }
 
 fn codex_proxy_error_json(
@@ -3790,6 +3796,7 @@ fn codex_proxy_error_code(error: &ProxyError) -> &'static str {
     match error {
         ProxyError::ForwardFailed(_) => "cc_switch_forward_failed",
         ProxyError::Timeout(_) | ProxyError::StreamIdleTimeout(_) => "cc_switch_timeout",
+        ProxyError::ResponsePending(_) => "cc_switch_response_pending",
         ProxyError::NoAvailableProvider => "cc_switch_no_available_provider",
         ProxyError::AllProvidersCircuitOpen => "cc_switch_all_providers_circuit_open",
         ProxyError::NoProvidersConfigured => "cc_switch_no_providers_configured",

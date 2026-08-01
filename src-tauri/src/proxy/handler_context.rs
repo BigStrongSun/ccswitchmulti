@@ -15,7 +15,7 @@ use axum::http::HeaderMap;
 use std::time::Instant;
 
 /// 流式超时配置
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StreamingTimeoutConfig {
     /// 首字节超时（秒），0 表示禁用
     pub first_byte_timeout: u64,
@@ -265,26 +265,13 @@ impl RequestContext {
     ///
     /// 配置生效规则：
     /// - 故障转移开启：超时配置正常生效（0 表示禁用超时）
-    /// - 故障转移关闭：超时配置不生效（全部传入 0）
+    /// - 故障转移关闭：仍应用非流式总超时和流式静默超时，但首字节使用总超时，
+    ///   避免模型还在同步时被过早判定失败。
     pub fn create_forwarder(&self, state: &ProxyState) -> RequestForwarder {
         let (non_streaming_timeout, first_byte_timeout, idle_timeout) =
-            if self.app_config.auto_failover_enabled {
-                // 故障转移开启：使用配置的值（0 = 禁用超时）
-                (
-                    self.app_config.non_streaming_timeout as u64,
-                    self.app_config.streaming_first_byte_timeout as u64,
-                    self.app_config.streaming_idle_timeout as u64,
-                )
-            } else {
-                // 故障转移关闭：不启用超时配置
-                log::debug!(
-                    "[{}] Failover disabled, timeout configs are bypassed",
-                    self.tag
-                );
-                (0, 0, 0)
-            };
+            effective_timeout_seconds(&self.app_config);
 
-        // 故障转移关闭时强制 max_retries=0（仅尝试 1 个 provider），与「不超时 + 不切换」语义一致。
+        // 故障转移关闭时强制 max_retries=0（仅尝试 1 个 provider）。
         let max_retries = if self.app_config.auto_failover_enabled {
             self.app_config.max_retries
         } else {
@@ -330,22 +317,10 @@ impl RequestContext {
     ///
     /// 配置生效规则：
     /// - 故障转移开启：返回配置的值（0 表示禁用超时检查）
-    /// - 故障转移关闭：返回 0（禁用超时检查）
+    /// - 故障转移关闭：首字节使用非流式总超时，静默期继续使用配置值
     #[inline]
     pub fn streaming_timeout_config(&self) -> StreamingTimeoutConfig {
-        if self.app_config.auto_failover_enabled {
-            // 故障转移开启：使用配置的值（0 = 禁用超时）
-            StreamingTimeoutConfig {
-                first_byte_timeout: self.app_config.streaming_first_byte_timeout as u64,
-                idle_timeout: self.app_config.streaming_idle_timeout as u64,
-            }
-        } else {
-            // 故障转移关闭：禁用流式超时检查
-            StreamingTimeoutConfig {
-                first_byte_timeout: 0,
-                idle_timeout: 0,
-            }
-        }
+        effective_streaming_timeout(&self.app_config)
     }
 }
 
@@ -367,9 +342,46 @@ pub(crate) fn extract_gemini_model_from_path(endpoint: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// 根据故障转移开关计算实际生效的超时。
+///
+/// - 故障转移开启：保留首字节超时，方便快速切到下一家。
+/// - 故障转移关闭：不再提前用首字节超时打断模型同步，改用非流式总超时作为
+///   首个 SSE 字节的硬上限；静默超时继续用于检测已经建立但卡死的流。
+fn effective_timeout_seconds(app_config: &AppProxyConfig) -> (u64, u64, u64) {
+    if app_config.auto_failover_enabled {
+        (
+            app_config.non_streaming_timeout as u64,
+            app_config.streaming_first_byte_timeout as u64,
+            app_config.streaming_idle_timeout as u64,
+        )
+    } else {
+        let non_streaming_timeout = app_config.non_streaming_timeout as u64;
+        (
+            non_streaming_timeout,
+            non_streaming_timeout,
+            app_config.streaming_idle_timeout as u64,
+        )
+    }
+}
+
+fn effective_streaming_timeout(app_config: &AppProxyConfig) -> StreamingTimeoutConfig {
+    if app_config.auto_failover_enabled {
+        StreamingTimeoutConfig {
+            first_byte_timeout: app_config.streaming_first_byte_timeout as u64,
+            idle_timeout: app_config.streaming_idle_timeout as u64,
+        }
+    } else {
+        StreamingTimeoutConfig {
+            first_byte_timeout: app_config.non_streaming_timeout as u64,
+            idle_timeout: app_config.streaming_idle_timeout as u64,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::extract_gemini_model_from_path;
+    use super::*;
+    use crate::proxy::types::AppProxyConfig;
 
     #[test]
     fn extract_model_with_action() {
@@ -442,5 +454,35 @@ mod tests {
                 .as_deref(),
             Some("gemini-2.0-flash"),
         );
+    }
+
+    #[test]
+    fn failover_off_uses_non_streaming_timeout_for_first_byte() {
+        let mut config = AppProxyConfig {
+            app_type: "codex".to_string(),
+            enabled: true,
+            auto_failover_enabled: false,
+            max_retries: 6,
+            streaming_first_byte_timeout: 90,
+            streaming_idle_timeout: 180,
+            non_streaming_timeout: 600,
+            circuit_failure_threshold: 5,
+            circuit_success_threshold: 2,
+            circuit_timeout_seconds: 60,
+            circuit_error_rate_threshold: 0.5,
+            circuit_min_requests: 10,
+        };
+
+        assert_eq!(effective_timeout_seconds(&config), (600, 600, 180));
+        assert_eq!(
+            effective_streaming_timeout(&config),
+            StreamingTimeoutConfig {
+                first_byte_timeout: 600,
+                idle_timeout: 180,
+            }
+        );
+
+        config.auto_failover_enabled = true;
+        assert_eq!(effective_timeout_seconds(&config), (600, 90, 180));
     }
 }

@@ -280,7 +280,12 @@ pub async fn send_request(
             send_raw_request(&uri, &method, &headers, original_cases, &body, proxy_url),
         )
         .await
-        .map_err(|_| ProxyError::Timeout(format!("请求超时: {}s", timeout.as_secs())))?;
+        .map_err(|_| {
+            ProxyError::ResponsePending(format!(
+                "上游请求等待超时: {}s（请求可能已发到上游）",
+                timeout.as_secs()
+            ))
+        })?;
 
         match result {
             Ok(resp) => return Ok(resp),
@@ -308,7 +313,12 @@ pub async fn send_request(
     let client = global_hyper_client();
     let resp = tokio::time::timeout(timeout, client.request(req))
         .await
-        .map_err(|_| ProxyError::Timeout(format!("请求超时: {}s", timeout.as_secs())))?
+        .map_err(|_| {
+            ProxyError::ResponsePending(format!(
+                "上游请求等待超时: {}s（请求可能已发到上游）",
+                timeout.as_secs()
+            ))
+        })?
         .map_err(|e| ProxyError::ForwardFailed(format!("上游请求失败: {e}")))?;
 
     Ok(ProxyResponse::Hyper(resp))
@@ -420,11 +430,11 @@ async fn send_raw_request(
         tls_stream
             .write_all(&raw)
             .await
-            .map_err(|e| ProxyError::ForwardFailed(format!("Write failed: {e}")))?;
+            .map_err(|e| ProxyError::ResponsePending(format!("请求体发送中断: {e}")))?;
         tls_stream
             .flush()
             .await
-            .map_err(|e| ProxyError::ForwardFailed(format!("Flush failed: {e}")))?;
+            .map_err(|e| ProxyError::ResponsePending(format!("请求体发送后刷新中断: {e}")))?;
 
         let filtered = WriteFilter::new(tls_stream);
         do_hyper_response(filtered, method.clone()).await
@@ -433,11 +443,11 @@ async fn send_raw_request(
         stream
             .write_all(&raw)
             .await
-            .map_err(|e| ProxyError::ForwardFailed(format!("Write failed: {e}")))?;
+            .map_err(|e| ProxyError::ResponsePending(format!("请求体发送中断: {e}")))?;
         stream
             .flush()
             .await
-            .map_err(|e| ProxyError::ForwardFailed(format!("Flush failed: {e}")))?;
+            .map_err(|e| ProxyError::ResponsePending(format!("请求体发送后刷新中断: {e}")))?;
 
         let filtered = WriteFilter::new(stream);
         do_hyper_response(filtered, method.clone()).await
@@ -681,7 +691,7 @@ where
         .preserve_header_case(true)
         .handshake::<_, http_body_util::Full<Bytes>>(io)
         .await
-        .map_err(|e| ProxyError::ForwardFailed(format!("Handshake failed: {e}")))?;
+        .map_err(|e| ProxyError::ResponsePending(format!("请求发出后等待响应失败: {e}")))?;
 
     // Spawn the connection driver (reads responses from the stream)
     tokio::spawn(async move {
@@ -701,7 +711,7 @@ where
     let resp = sender
         .send_request(dummy_req)
         .await
-        .map_err(|e| ProxyError::ForwardFailed(format!("Response parse failed: {e}")))?;
+        .map_err(|e| ProxyError::ResponsePending(format!("请求发出后响应解析失败: {e}")))?;
 
     Ok(ProxyResponse::Hyper(resp))
 }

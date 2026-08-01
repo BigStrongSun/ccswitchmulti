@@ -21,6 +21,12 @@ pub const CC_SWITCH_CODEX_MODEL_PROVIDER_ID: &str = "custom";
 /// provider id 主要影响历史/线程归属，不能随构建漂移。
 pub const CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID: &str = "codex_model_router_v2";
 pub const CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME: &str = "cc-switch-model-catalog.json";
+/// CCSM 托管的 Codex provider 不再让 Codex 自动重发整个采样请求。
+///
+/// 通过 CCSM 的请求可能在网络层已经到达上游，重发既浪费流量又可能重复执行。
+/// 只有上游在连接阶段明确失败时，CCSM 自身的 failover 才会切换到下一家。
+pub(crate) const CODEX_MANAGED_REQUEST_MAX_RETRIES: u64 = 0;
+pub(crate) const CODEX_MANAGED_STREAM_MAX_RETRIES: u64 = 0;
 const CODEX_MODELS_CACHE_FILENAME: &str = "models_cache.json";
 const CODEX_MODELS_CACHE_BACKUP_FILENAME: &str = "models_cache.cc-switch-backup.json";
 const CC_SWITCH_CODEX_MODELS_CACHE_ETAG: &str = "cc-switch-model-catalog";
@@ -3396,6 +3402,8 @@ fn codex_official_provider_table(
     table["supports_websockets"] = toml_edit::value(supports_websockets);
     table["supports_standalone_web_search"] = toml_edit::value(true);
     table["wire_api"] = toml_edit::value("responses");
+    table["request_max_retries"] = toml_edit::value(CODEX_MANAGED_REQUEST_MAX_RETRIES as i64);
+    table["stream_max_retries"] = toml_edit::value(CODEX_MANAGED_STREAM_MAX_RETRIES as i64);
     if let Some(base_url) = base_url {
         table["base_url"] = toml_edit::value(base_url.trim_end_matches('/'));
     }
@@ -3528,6 +3536,20 @@ fn table_matches_codex_unified_official_provider(table: &toml_edit::Table) -> bo
                 .get("supports_standalone_web_search")
                 .and_then(|item| item.as_bool())
                 == Some(true)
+        }
+        7 => {
+            table
+                .get("supports_standalone_web_search")
+                .and_then(|item| item.as_bool())
+                == Some(true)
+                && table
+                    .get("request_max_retries")
+                    .and_then(|item| item.as_integer())
+                    == Some(CODEX_MANAGED_REQUEST_MAX_RETRIES as i64)
+                && table
+                    .get("stream_max_retries")
+                    .and_then(|item| item.as_integer())
+                    == Some(CODEX_MANAGED_STREAM_MAX_RETRIES as i64)
         }
         _ => false,
     };
@@ -4177,6 +4199,18 @@ trust_level = "trusted"
             custom.get("wire_api").and_then(|v| v.as_str()),
             Some("responses")
         );
+        assert_eq!(
+            custom
+                .get("request_max_retries")
+                .and_then(|v| v.as_integer()),
+            Some(CODEX_MANAGED_REQUEST_MAX_RETRIES as i64)
+        );
+        assert_eq!(
+            custom
+                .get("stream_max_retries")
+                .and_then(|v| v.as_integer()),
+            Some(CODEX_MANAGED_STREAM_MAX_RETRIES as i64)
+        );
     }
 
     #[test]
@@ -4223,6 +4257,18 @@ command = "example"
                 .get("supports_standalone_web_search")
                 .and_then(toml::Value::as_bool),
             Some(true)
+        );
+        assert_eq!(
+            provider
+                .get("request_max_retries")
+                .and_then(toml::Value::as_integer),
+            Some(CODEX_MANAGED_REQUEST_MAX_RETRIES as i64)
+        );
+        assert_eq!(
+            provider
+                .get("stream_max_retries")
+                .and_then(toml::Value::as_integer),
+            Some(CODEX_MANAGED_STREAM_MAX_RETRIES as i64)
         );
         assert!(codex_config_has_official_proxy_route(&output));
     }

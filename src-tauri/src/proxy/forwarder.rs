@@ -4237,7 +4237,7 @@ impl RequestForwarder {
         let body = tokio::time::timeout(body_timeout, response.bytes())
             .await
             .map_err(|_| {
-                ProxyError::Timeout(format!(
+                ProxyError::ResponsePending(format!(
                     "响应体读取超时: {}s（上游发完响应头后 body 未到达）",
                     body_timeout.as_secs()
                 ))
@@ -4319,7 +4319,7 @@ impl RequestForwarder {
                 tokio::time::timeout(self.streaming_first_byte_timeout, stream.next())
                     .await
                     .map_err(|_| {
-                        ProxyError::Timeout(format!(
+                        ProxyError::ResponsePending(format!(
                             "Responses stream produced no semantic output within {}s",
                             self.streaming_first_byte_timeout.as_secs()
                         ))
@@ -4397,7 +4397,7 @@ impl RequestForwarder {
         let first = tokio::time::timeout(timeout, stream.next())
             .await
             .map_err(|_| {
-                ProxyError::Timeout(format!(
+                ProxyError::ResponsePending(format!(
                     "流式响应首包超时: {}s（上游已返回响应头但未返回数据）",
                     timeout.as_secs()
                 ))
@@ -4567,6 +4567,7 @@ impl RequestForwarder {
         match error {
             // 网络和上游错误：都应该尝试下一个供应商
             ProxyError::Timeout(_) => ErrorCategory::Retryable,
+            ProxyError::ResponsePending(_) => ErrorCategory::NonRetryable,
             ProxyError::ForwardFailed(_) => ErrorCategory::Retryable,
             ProxyError::ProviderUnhealthy(_) => ErrorCategory::Retryable,
             // 上游 HTTP 错误：按状态码分桶。
@@ -5541,7 +5542,7 @@ async fn send_forwarder_upstream_request(
             match tokio::time::timeout(header_timeout, send).await {
                 Ok(result) => result,
                 Err(_) => {
-                    return Err(ProxyError::Timeout(format!(
+                    return Err(ProxyError::ResponsePending(format!(
                         "流式响应首包超时: {}s（上游未返回响应头）",
                         header_timeout.as_secs()
                     )));
@@ -5763,11 +5764,23 @@ fn should_force_identity_encoding(
 
 fn map_reqwest_send_error(error: reqwest::Error) -> ProxyError {
     if error.is_timeout() {
-        ProxyError::Timeout(format!("上游请求超时: {}", error.without_url()))
+        // 超时发生在请求发出后，无法确定上游是否已经开始处理，不能自动重发。
+        ProxyError::ResponsePending(format!(
+            "上游响应等待超时（请求可能已在处理中）: {}",
+            error.without_url()
+        ))
     } else if error.is_connect() {
+        // 连接阶段失败，请求还没有发到上游，可以安全交给 retry/failover。
         ProxyError::ForwardFailed(format!("上游连接失败: {}", error.without_url()))
+    } else if error.is_request() {
+        // 请求构造阶段失败，没有发出任何字节。
+        ProxyError::ForwardFailed(format!("上游请求构造失败: {}", error.without_url()))
     } else {
-        ProxyError::ForwardFailed(format!("上游请求发送失败: {}", error.without_url()))
+        // 请求体发送/响应读取阶段失败：可能已经部分或全部发出。
+        ProxyError::ResponsePending(format!(
+            "上游请求发送或响应读取中断（请求可能已在处理中）: {}",
+            error.without_url()
+        ))
     }
 }
 
@@ -8548,6 +8561,21 @@ mod tests {
                 &provider,
             ),
             ErrorCategory::Retryable
+        );
+    }
+
+    #[test]
+    fn response_pending_is_not_retryable() {
+        let forwarder = test_forwarder(Duration::ZERO, Duration::ZERO);
+        let provider = test_provider_with_type(None);
+        assert_eq!(
+            forwarder.categorize_proxy_error(
+                &ProxyError::ResponsePending(
+                    "upstream may still be processing the request".to_string(),
+                ),
+                &provider,
+            ),
+            ErrorCategory::NonRetryable
         );
     }
 

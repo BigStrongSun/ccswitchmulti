@@ -1,5 +1,5 @@
 use axum::{
-    http::StatusCode,
+    http::{header, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -61,6 +61,10 @@ pub enum ProxyError {
 
     #[error("超时: {0}")]
     Timeout(String),
+
+    /// 请求可能已经到达上游并仍在处理中，不能当作普通超时继续重发。
+    #[error("上游请求可能仍在处理中，未返回最终结果: {0}")]
+    ResponsePending(String),
 
     /// 流式响应空闲超时
     #[allow(dead_code)]
@@ -149,6 +153,9 @@ impl IntoResponse for ProxyError {
                     }
                     ProxyError::InvalidRequest(_) => (StatusCode::BAD_REQUEST, self.to_string()),
                     ProxyError::Timeout(_) => (StatusCode::GATEWAY_TIMEOUT, self.to_string()),
+                    ProxyError::ResponsePending(_) => {
+                        (StatusCode::TOO_MANY_REQUESTS, self.to_string())
+                    }
                     ProxyError::StreamIdleTimeout(_) => {
                         (StatusCode::GATEWAY_TIMEOUT, self.to_string())
                     }
@@ -170,7 +177,26 @@ impl IntoResponse for ProxyError {
             }
         };
 
-        (status, Json(body)).into_response()
+        let mut response = (status, Json(body)).into_response();
+        if let Some(retry_after_secs) = self.retry_after_secs() {
+            if let Ok(value) = HeaderValue::from_str(&retry_after_secs.to_string()) {
+                response.headers_mut().insert(header::RETRY_AFTER, value);
+            }
+        }
+        response
+    }
+}
+
+impl ProxyError {
+    /// 建议客户端等待多久后再手动重试。
+    ///
+    /// 目前只有“请求可能已在途中”的错误返回该提示；这类错误不能让客户端
+    /// 自动重发，否则上游可能已经收到并正在执行同一请求。
+    pub fn retry_after_secs(&self) -> Option<u64> {
+        match self {
+            ProxyError::ResponsePending(_) => Some(30),
+            _ => None,
+        }
     }
 }
 
