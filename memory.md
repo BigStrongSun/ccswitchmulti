@@ -1,5 +1,16 @@
 # CC Switch Repository Memory
 
+## 2026-08-01 Codex 账号池 P0 运行态 Task 5 验证收口
+
+- 本阶段提交链为：`99d17418`（实施计划）、`fb855d37`（统一运行态与生命周期）、`462c7079`（TTL/LRU/凭据代际）、`50e183de`（typed outcome 与 transient soft-avoid）、`3eaa965d`（forwarder 真实失败接管）。公开账号池 JSON 和 `CodexOAuthStore.version=1` 未改变，也没有版本、tag、发布、安装或部署动作。
+- 落地接口与常量：`CodexPoolRuntimeState` 是唯一运行态真值；affinity 空闲 TTL 为 24 小时、上限 2048；managed `credential_generation` 首次登录为 1、同 ID 重登递增、普通 token 刷新不变；Desktop Authorization 只保留进程内 SHA-256 摘要；`CodexPoolAttemptOutcome` 统一 success/credential/quota/transient/neutral，quota 本阶段固定 60 秒，transient 五分钟窗口内第三次起按 30 秒/2 分钟/10 分钟/30 分钟 soft-avoid。
+- 11 项设计验收均按当前公开语义核对：TTL/LRU；managed/native generation；删除、clear、invalid_grant、重登、禁用与外部移除清理；invalidated 排除；池内 AuthError/401/403 reauth 与换号；direct official 认证失败不重试；402/429 冷却解绑；connect/timeout/stream idle/5xx 累计、窗口重置与成功恢复；neutral 不污染；旧 generation 结果无效；reserve/order、Desktop/managed 去重和 External API 不借用 Desktop bearer。当前策略会自动把仍可用但被省略的账号重新补回 policy，因此“策略移除”对应账号删除/外部存储移除；客户端断连没有 `ProxyError` 变体且不会进入 pool recorder，neutral 状态测试覆盖显式 caller-neutral 结果。
+- 聚焦回归：`codex_oauth_pool` 8/8、`codex_oauth_auth` 39/39、`codex_pool` 2/2、direct official 1/1；Task 4 的分类、池内认证切换、Provider 健康隔离及五项认证/调度边界各 1/1。`cargo fmt --check` 与 `git diff --check` 通过。
+- `cargo clippy --lib -- -D warnings` 初次发现本阶段 OAuth reconcile 的 `obfuscated_if_else` 与 `unnecessary_lazy_evaluations`，用等价 `if/else` 和 `then_some` 修正后 OAuth 39/39，复跑已不再报告账号池新增诊断。全局命令仍被 26 个既有错误阻塞：AgentMesh dead code 22 个，usage parser dead code 1 个，history `manual_repeat_n` 1 个，旧 forwarder `needless_borrow` 1 个，transform `too_many_arguments` 1 个；前五个相关文件与账号池改造前 `e31f8a6a` blob 哈希一致，forwarder 报错行由 `b0471ee0` 引入。本阶段不增加 blanket allow，也不把无关清理混入账号池提交。
+- 原样执行完整 `cargo test --lib` 时为 2706 passed / 1 failed / 2 ignored；唯一失败测试 `update_current_claude_desktop_provider_syncs_profile_when_proxy_takeover_is_active` 固定绑定 15721，而现场已安装 `C:\Users\sunda\AppData\Local\CCSwitchMulti\cc-switch.exe` 正在监听。相邻同类测试使用 `listen_port=0`，该失败属于既有测试隔离缺口；不停止用户正在运行的 CCSwitchMulti 后，使用既有 skip 边界重跑为 2706 passed / 0 failed / 2 ignored / 1 filtered。
+- Task 4/Task 5 的 post-commit 流水线必须继续按真实父子进程树和 lock 所有权等待自然退出。Task 4 流水线已完成 typecheck、release 构建、Tauri/NSIS 打包并自行清锁；`scripts/logs/` 保留为现场，不纳入提交。
+- 后续工作仍是四个独立阶段：解析 `Retry-After`/reset/scope/generation/单探测租约的自适应冷却；完整 SSE terminal、断流、流内 402/429 与 media 二次成功反馈；路由与池内候选重试预算分层及大池公平性；保留 `priority` 默认值后再显式增加 quota/RR/fill-first。当前分支不能声称这些 P1 能力已经完成。
+
 ## 2026-08-01 Codex 账号池真实 forwarder 失败接管 Task 4
 
 - `provider_codex_pool_account` 只把同时携带 `codexPoolAccountId` 与选择时 `codexPoolCredentialGeneration` 的 request-local Provider 识别为池化候选；非池化 Provider 的错误分类、重试和持久健康记录保持原路径。真实候选还会继承 `codexAccountPoolEnabled=true`，因此属于 official Codex。最初书面测试夹具漏掉该 marker，没有复现生产中的 official 401/403 不可重试分支；补齐真实 marker 后旧实现稳定失败，新分支稳定通过。

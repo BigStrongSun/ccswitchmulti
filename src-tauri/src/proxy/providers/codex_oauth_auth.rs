@@ -944,33 +944,32 @@ impl CodexOAuthManager {
         if let Some(native_runtime) = native_runtime.as_mut() {
             Self::observe_native_authorization(native_runtime, native_authorization);
         }
-        let enabled_account_generations: HashMap<String, u64> = policy
-            .enabled
-            .then(|| {
-                policy
-                    .entries
-                    .iter()
-                    .filter(|entry| entry.enabled)
-                    .filter_map(|entry| {
-                        if entry.account_id == NATIVE_CODEX_ACCOUNT_ID {
-                            native_runtime.as_ref().map(|native_runtime| {
-                                (
-                                    entry.account_id.clone(),
-                                    native_runtime.credential_generation,
-                                )
+        let enabled_account_generations: HashMap<String, u64> = if policy.enabled {
+            policy
+                .entries
+                .iter()
+                .filter(|entry| entry.enabled)
+                .filter_map(|entry| {
+                    if entry.account_id == NATIVE_CODEX_ACCOUNT_ID {
+                        native_runtime.as_ref().map(|native_runtime| {
+                            (
+                                entry.account_id.clone(),
+                                native_runtime.credential_generation,
+                            )
+                        })
+                    } else {
+                        accounts
+                            .get(&entry.account_id)
+                            .filter(|account| account.is_usable())
+                            .map(|account| {
+                                (entry.account_id.clone(), account.credential_generation)
                             })
-                        } else {
-                            accounts
-                                .get(&entry.account_id)
-                                .filter(|account| account.is_usable())
-                                .map(|account| {
-                                    (entry.account_id.clone(), account.credential_generation)
-                                })
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+                    }
+                })
+                .collect()
+        } else {
+            HashMap::new()
+        };
         let enabled_account_ids: HashSet<String> =
             enabled_account_generations.keys().cloned().collect();
         let now = chrono::Utc::now().timestamp_millis();
@@ -1000,7 +999,7 @@ impl CodexOAuthManager {
                         || runtime
                             .remaining_percent(&entry.account_id)
                             .is_none_or(|value| value > entry.reserve_percent)))
-                .then(|| CodexPoolCandidate {
+                .then_some(CodexPoolCandidate {
                     entry,
                     credential_generation: *credential_generation,
                 })
