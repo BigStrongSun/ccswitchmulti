@@ -6492,6 +6492,37 @@ base_url = "http://127.0.0.1:15721/v1"
 
     #[test]
     #[serial]
+    fn every_official_auth_source_preserves_multi_agent_v2() {
+        for source in [
+            "native_codex_auth",
+            "managed_codex_oauth",
+            "managed_account",
+            "account_pool",
+        ] {
+            let _guard = TestHomeGuard::new();
+            let models = prepared_router_catalog_models(&json!({
+                "modelCatalog": {
+                    "models": [{ "model": "gpt-5.5", "displayName": "GPT-5.5" }]
+                },
+                "codexRouting": {
+                    "enabled": true,
+                    "routes": [{
+                        "id": "official",
+                        "match": { "models": ["gpt-5.5"] },
+                        "upstream": { "auth": { "source": source } }
+                    }]
+                }
+            }));
+
+            assert_eq!(
+                models[0]["multi_agent_version"], "v2",
+                "official auth source {source} should retain backend-encrypted V2 delivery"
+            );
+        }
+    }
+
+    #[test]
+    #[serial]
     fn disabled_third_party_route_does_not_downgrade_managed_oauth_router() {
         let _guard = TestHomeGuard::new();
         let models = prepared_router_catalog_models(&json!({
