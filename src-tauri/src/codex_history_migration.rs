@@ -752,19 +752,31 @@ pub fn list_codex_history_sessions(
     // Codex Desktop 现在以 state DB 为 thread/list 的主数据源；而 backfill_state=complete
     // 时不会再次全量扫描 JSONL。先以 rollout 为权威重建索引快照，避免旧 CCSM 修复只改
     // provider 后仍留下 has_user_event/preview/recency 缺失的“幽灵历史”。
-    let rollout_metadata = scan_rollout_thread_metadata(&codex_dir)?;
+    let mut rollout_metadata = scan_rollout_thread_metadata(&codex_dir)?;
+    let session_index_titles =
+        session_index_thread_titles(&read_jsonl_lines(&codex_dir.join("session_index.jsonl"))?);
     let existing_ids: HashSet<String> = rows.iter().map(|row| row.id.clone()).collect();
     let _thread_rows_to_insert = rollout_metadata
         .iter()
         .filter(|metadata| !existing_ids.contains(&metadata.id))
         .count();
     let mut metadata_repairs = Vec::new();
-    for metadata in &rollout_metadata {
+    for metadata in &mut rollout_metadata {
         if let Some(row) = rows.iter_mut().find(|row| row.id == metadata.id) {
-            if apply_rollout_metadata_to_thread_row(row, metadata) {
-                metadata_repairs.push(metadata.clone());
+            let effective = rollout_metadata_preserving_persisted_title(
+                metadata,
+                Some(row),
+                session_index_titles.get(&metadata.id).map(String::as_str),
+            );
+            if apply_rollout_metadata_to_thread_row(row, &effective) {
+                metadata_repairs.push(effective);
             }
         } else {
+            *metadata = rollout_metadata_preserving_persisted_title(
+                metadata,
+                None,
+                session_index_titles.get(&metadata.id).map(String::as_str),
+            );
             rows.push(thread_history_row_from_rollout(metadata));
         }
     }
@@ -901,19 +913,31 @@ pub fn read_codex_history_session(
     let conn = Connection::open(&active_db.path)
         .map_err(|e| AppError::Database(format!("open Codex active state DB failed: {e}")))?;
     let mut rows = load_codex_thread_history_rows(&conn)?;
-    let rollout_metadata = scan_rollout_thread_metadata(&codex_dir)?;
+    let mut rollout_metadata = scan_rollout_thread_metadata(&codex_dir)?;
+    let session_index_titles =
+        session_index_thread_titles(&read_jsonl_lines(&codex_dir.join("session_index.jsonl"))?);
     let existing_ids: HashSet<String> = rows.iter().map(|row| row.id.clone()).collect();
     let _thread_rows_to_insert = rollout_metadata
         .iter()
         .filter(|metadata| !existing_ids.contains(&metadata.id))
         .count();
     let mut metadata_repairs = Vec::new();
-    for metadata in &rollout_metadata {
+    for metadata in &mut rollout_metadata {
         if let Some(row) = rows.iter_mut().find(|row| row.id == metadata.id) {
-            if apply_rollout_metadata_to_thread_row(row, metadata) {
-                metadata_repairs.push(metadata.clone());
+            let effective = rollout_metadata_preserving_persisted_title(
+                metadata,
+                Some(row),
+                session_index_titles.get(&metadata.id).map(String::as_str),
+            );
+            if apply_rollout_metadata_to_thread_row(row, &effective) {
+                metadata_repairs.push(effective);
             }
         } else {
+            *metadata = rollout_metadata_preserving_persisted_title(
+                metadata,
+                None,
+                session_index_titles.get(&metadata.id).map(String::as_str),
+            );
             rows.push(thread_history_row_from_rollout(metadata));
         }
     }
@@ -1187,12 +1211,23 @@ fn repair_codex_history_visibility_at(
         })
         .collect();
     let mut metadata_repairs = Vec::new();
-    for metadata in &rollout_metadata {
+    let session_index_titles = session_index_thread_titles(&session_index_lines);
+    for metadata in &mut rollout_metadata {
         if let Some(row) = rows.iter_mut().find(|row| row.id == metadata.id) {
-            if apply_rollout_metadata_to_thread_row(row, metadata) {
-                metadata_repairs.push(metadata.clone());
+            let effective = rollout_metadata_preserving_persisted_title(
+                metadata,
+                Some(row),
+                session_index_titles.get(&metadata.id).map(String::as_str),
+            );
+            if apply_rollout_metadata_to_thread_row(row, &effective) {
+                metadata_repairs.push(effective);
             }
         } else {
+            *metadata = rollout_metadata_preserving_persisted_title(
+                metadata,
+                None,
+                session_index_titles.get(&metadata.id).map(String::as_str),
+            );
             rows.push(thread_history_row_from_rollout(metadata));
         }
     }
@@ -2321,6 +2356,35 @@ fn apply_rollout_metadata_to_thread_row(
         )
 }
 
+/// Rollout 只保存原始用户事件，不保存 Desktop 后续重命名。
+/// 重建 thread-store 前先保留 SQLite 或 session index 中与首条消息不同的显式标题。
+fn rollout_metadata_preserving_persisted_title(
+    metadata: &RolloutThreadMetadata,
+    row: Option<&ThreadHistoryRow>,
+    session_index_title: Option<&str>,
+) -> RolloutThreadMetadata {
+    let mut effective = metadata.clone();
+    let first_user_message = row
+        .and_then(|row| row.first_user_message.as_deref())
+        .or(metadata.first_user_message.as_deref());
+    let persisted_title = row
+        .and_then(|row| distinct_persisted_title(row.title.as_deref(), first_user_message))
+        .or_else(|| distinct_persisted_title(session_index_title, first_user_message));
+    if let Some(title) = persisted_title {
+        effective.title = Some(title.to_string());
+    }
+    effective
+}
+
+fn distinct_persisted_title<'a>(
+    title: Option<&'a str>,
+    first_user_message: Option<&str>,
+) -> Option<&'a str> {
+    let title = title.map(str::trim).filter(|title| !title.is_empty())?;
+    let first_user_message = first_user_message.map(str::trim).unwrap_or_default();
+    (title != first_user_message).then_some(title)
+}
+
 /// 读取一行历史的更新时间毫秒值，缺失时回退到秒级字段。
 fn row_updated_ms(row: &ThreadHistoryRow) -> i64 {
     row.updated_at_ms
@@ -2586,6 +2650,18 @@ fn session_index_thread_ids(lines: &[String]) -> HashSet<String> {
         .iter()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .filter_map(|value| value.get("id").and_then(Value::as_str).map(str::to_string))
+        .collect()
+}
+
+fn session_index_thread_titles(lines: &[String]) -> HashMap<String, String> {
+    lines
+        .iter()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter_map(|value| {
+            let id = value.get("id")?.as_str()?.trim();
+            let title = value.get("thread_name")?.as_str()?.trim();
+            (!id.is_empty() && !title.is_empty()).then(|| (id.to_string(), title.to_string()))
+        })
         .collect()
 }
 
