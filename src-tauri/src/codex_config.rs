@@ -6442,7 +6442,7 @@ base_url = "http://127.0.0.1:15721/v1"
 
     #[test]
     #[serial]
-    fn mixed_router_uses_plaintext_multi_agent_v1_for_every_model() {
+    fn mixed_router_keeps_multi_agent_v2_for_every_model() {
         let _guard = TestHomeGuard::new();
         let models = prepared_router_catalog_models(&json!({
             "modelCatalog": {
@@ -6470,7 +6470,7 @@ base_url = "http://127.0.0.1:15721/v1"
 
         assert_eq!(models.len(), 2);
         assert!(models.iter().all(|model| {
-            model.get("multi_agent_version").and_then(Value::as_str) == Some("v1")
+            model.get("multi_agent_version").and_then(Value::as_str) == Some("v2")
         }));
     }
 
