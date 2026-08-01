@@ -1711,6 +1711,7 @@ impl RequestForwarder {
             .is_some();
         let codex_router_configured =
             matches!(app_type, AppType::Codex) && codex_provider_has_routing_config(provider);
+        let codex_router_provider = provider;
         let routed_provider = if matches!(app_type, AppType::Codex) {
             (!provider_is_resolved_codex_route)
                 .then(|| super::providers::resolve_codex_model_routed_provider(provider, body))
@@ -2282,14 +2283,16 @@ impl RequestForwarder {
             && headers.contains_key(http::HeaderName::from_static(
                 "x-openai-internal-codex-responses-lite",
             ));
-        let request_body = if should_normalize_codex_oauth_responses_passthrough_body(
-            app_type,
-            provider,
-            &url,
-            needs_transform,
-            codex_responses_to_chat,
-            codex_responses_to_messages,
-        ) {
+        let normalize_codex_oauth_responses =
+            should_normalize_codex_oauth_responses_passthrough_body(
+                app_type,
+                provider,
+                &url,
+                needs_transform,
+                codex_responses_to_chat,
+                codex_responses_to_messages,
+            );
+        let mut request_body = if normalize_codex_oauth_responses {
             super::providers::openai_compat::normalize_codex_oauth_responses_request(
                 request_body,
                 codex_responses_lite_requested,
@@ -2309,6 +2312,21 @@ impl RequestForwarder {
         } else {
             request_body
         };
+        if should_make_codex_v2_collaboration_plaintext(
+            app_type,
+            codex_router_provider,
+            normalize_codex_oauth_responses,
+        ) {
+            let changed =
+                super::providers::openai_compat::make_codex_v2_collaboration_messages_plaintext(
+                    &mut request_body,
+                );
+            if changed > 0 {
+                log::debug!(
+                    "[CodexRouter] Kept {changed} V2 collaboration message parameter(s) plaintext for cross-provider delivery"
+                );
+            }
+        }
         let mut filtered_body = prepare_upstream_request_body(request_body);
         if !is_copilot {
             if let Some(overrides) = provider
@@ -6084,6 +6102,16 @@ fn codex_provider_has_routing_config(provider: &Provider) -> bool {
     provider.settings_config.get("codexRouting").is_some()
         || provider.settings_config.get("codexModelRoutes").is_some()
         || provider.settings_config.get("modelRoutes").is_some()
+}
+
+fn should_make_codex_v2_collaboration_plaintext(
+    app_type: &AppType,
+    router_provider: &Provider,
+    official_oauth_request: bool,
+) -> bool {
+    matches!(app_type, AppType::Codex)
+        && official_oauth_request
+        && super::providers::codex_multirouter_needs_plaintext_v2_collaboration(router_provider)
 }
 
 /// 判断 fallback base_url 是否指向本机代理入口。

@@ -106,6 +106,60 @@ pub fn classify_codex_multirouter_auth_facade(
     }
 }
 
+/// 判断 MultiRouter 是否需要让官方 V2 协作消息保持明文。
+///
+/// 官方 route 的子 Agent 能由 ChatGPT Codex backend 解密；任一启用的第三方或来源
+/// 不明 route 都可能成为子 Agent，因此 official parent 的协作工具参数必须改为 V2
+/// 明文。禁用 route 不影响当前任务的传输策略。
+pub fn codex_multirouter_needs_plaintext_v2_collaboration(provider: &Provider) -> bool {
+    let Some(routing) = provider.settings_config.get("codexRouting") else {
+        return false;
+    };
+    if routing
+        .get("enabled")
+        .and_then(JsonValue::as_bool)
+        .is_some_and(|enabled| !enabled)
+    {
+        return false;
+    }
+    let Some(routes) = routing
+        .get("routes")
+        .and_then(JsonValue::as_array)
+        .or_else(|| routing.as_array())
+    else {
+        return false;
+    };
+
+    routes.iter().any(|route| {
+        route
+            .get("enabled")
+            .and_then(JsonValue::as_bool)
+            .unwrap_or(true)
+            && !codex_route_uses_official_agent_backend(route)
+    })
+}
+
+fn codex_route_uses_official_agent_backend(route: &JsonValue) -> bool {
+    let upstream = route.get("upstream").unwrap_or(route);
+    let auth = upstream
+        .get("auth")
+        .or_else(|| route.get("auth"))
+        .unwrap_or(upstream);
+    auth.get("source")
+        .and_then(JsonValue::as_str)
+        .is_some_and(|source| {
+            matches!(
+                source.to_ascii_lowercase().as_str(),
+                "native_codex_auth" | "managed_codex_oauth" | "managed_account" | "account_pool"
+            )
+        })
+        || auth
+            .get("authProvider")
+            .or_else(|| auth.get("auth_provider"))
+            .and_then(JsonValue::as_str)
+            .is_some_and(|provider| provider.eq_ignore_ascii_case("codex_oauth"))
+}
+
 /// 官方 Codex 客户端 User-Agent 正则
 #[allow(dead_code)]
 static CODEX_CLIENT_REGEX: LazyLock<Regex> =

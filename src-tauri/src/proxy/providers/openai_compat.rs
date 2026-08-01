@@ -144,6 +144,62 @@ pub(crate) fn normalize_codex_oauth_responses_request(
     Value::Object(body)
 }
 
+/// 让混合 MultiRouter 的 V2 协作消息使用明文 function argument。
+///
+/// Codex 在三个协作工具的 `message` schema 上设置 Responses 私有 `encrypted: true`，
+/// official backend 因此返回密文参数。移除该单一标记后仍是原生 V2 function call，
+/// 但 Codex 会把 message 渲染成第三方上游也能读取的明文 `agent_message`。
+pub(crate) fn make_codex_v2_collaboration_messages_plaintext(body: &mut Value) -> usize {
+    let Some(object) = body.as_object_mut() else {
+        return 0;
+    };
+    let mut changed = object
+        .get_mut("tools")
+        .and_then(Value::as_array_mut)
+        .map_or(0, |tools| make_collaboration_tool_messages_plaintext(tools));
+
+    if let Some(input) = object.get_mut("input").and_then(Value::as_array_mut) {
+        for item in input {
+            if item.get("type").and_then(Value::as_str) != Some("additional_tools") {
+                continue;
+            }
+            if let Some(tools) = item.get_mut("tools").and_then(Value::as_array_mut) {
+                changed += make_collaboration_tool_messages_plaintext(tools);
+            }
+        }
+    }
+    changed
+}
+
+fn make_collaboration_tool_messages_plaintext(tools: &mut [Value]) -> usize {
+    let mut changed = 0;
+    for tool in tools {
+        if tool.get("type").and_then(Value::as_str) != Some("function") {
+            continue;
+        }
+        if tool
+            .get("namespace")
+            .and_then(Value::as_str)
+            .is_some_and(|namespace| !namespace.eq_ignore_ascii_case("collaboration"))
+        {
+            continue;
+        }
+        if !tool
+            .get("name")
+            .and_then(Value::as_str)
+            .is_some_and(|name| matches!(name, "spawn_agent" | "send_message" | "followup_task"))
+        {
+            continue;
+        }
+        let encrypted = tool
+            .pointer_mut("/parameters/properties/message")
+            .and_then(Value::as_object_mut)
+            .and_then(|message| message.remove("encrypted"));
+        changed += usize::from(encrypted.is_some());
+    }
+    changed
+}
+
 /// 归一化 Codex Responses 透传请求中的内部控制消息。
 ///
 /// 参数:
@@ -1670,9 +1726,11 @@ mod tests {
 
         assert_eq!(changed, 4);
         for index in 0..3 {
-            assert!(request["tools"][index]["parameters"]["properties"]["message"]
-                .get("encrypted")
-                .is_none());
+            assert!(
+                request["tools"][index]["parameters"]["properties"]["message"]
+                    .get("encrypted")
+                    .is_none()
+            );
         }
         assert_eq!(
             request["tools"][0]["parameters"]["properties"]["private_note"]["encrypted"],
@@ -1686,9 +1744,11 @@ mod tests {
             request["tools"][4]["parameters"]["properties"]["message"]["encrypted"],
             true
         );
-        assert!(request["input"][0]["tools"][0]["parameters"]["properties"]["message"]
-            .get("encrypted")
-            .is_none());
+        assert!(
+            request["input"][0]["tools"][0]["parameters"]["properties"]["message"]
+                .get("encrypted")
+                .is_none()
+        );
     }
 
     #[test]

@@ -1829,12 +1829,11 @@ fn codex_multi_router_is_enabled(settings: &Value) -> bool {
         .is_some_and(|routes| !routes.is_empty())
 }
 
-/// 判断当前 MultiRouter 是否必须使用明文 Multi-Agent V1 投递。
+/// 判断当前 MultiRouter 是否包含需要跨 provider 投递的启用 route。
 ///
-/// Codex Multi-Agent V2 会让官方模型把 spawn/follow-up 的 message 参数加密，
-/// 并把密文作为 `agent_message.encrypted_content` 发给子 Agent。只有 ChatGPT Codex
-/// backend 能解密；任意第三方 route 都要求整个任务固定为 V1，否则跨 route 子 Agent
-/// 只能看到 `Payload:` 信封头。旧 route 没有认证来源时按第三方处理，避免误报可用。
+/// 混合路由仍保留 Multi-Agent V2；代理会在 official parent 出站时移除协作工具
+/// message 参数的加密标记，让 Codex 生成 V2 明文 agent_message。这里仅负责确保整个
+/// 混合任务的模型目录都声明 V2。旧 route 没有认证来源时按跨 provider 处理。
 fn codex_multi_router_requires_plaintext_multi_agent(settings: &Value) -> bool {
     let Some(routing) = settings.get("codexRouting") else {
         return false;
@@ -1882,10 +1881,10 @@ fn codex_route_uses_official_backend_agent_delivery(route: &Value) -> bool {
             .is_some_and(|provider| provider.eq_ignore_ascii_case("codex_oauth"))
 }
 
-/// 在官方同 slug 元数据合并完成后应用路由级 Multi-Agent 传输策略。
+/// 在官方同 slug 元数据合并完成后应用混合路由的 V2 协议策略。
 ///
-/// 必须最后覆盖，否则官方 GPT 条目的 `multi_agent_version=v2` 会重新盖掉混合路由
-/// 所需的 V1。Codex 会在新任务首轮锁定该版本，随后单发、并发和 follow-up 共用它。
+/// Codex 会在任务首轮锁定协议版本。官方 parent 与第三方 child 必须都留在 V2 候选
+/// 集合中，正文是否加密由出站工具 schema 单独控制，不能再把混合目录降为 V1。
 fn apply_codex_multi_agent_transport_policy(catalog: &mut Value, settings: &Value) {
     if !codex_multi_router_requires_plaintext_multi_agent(settings) {
         return;
@@ -1897,8 +1896,8 @@ fn apply_codex_multi_agent_transport_policy(catalog: &mut Value, settings: &Valu
         let Some(model) = model.as_object_mut() else {
             continue;
         };
-        model.insert("multi_agent_version".to_string(), json!("v1"));
-        model.insert("multiAgentVersion".to_string(), json!("v1"));
+        model.insert("multi_agent_version".to_string(), json!("v2"));
+        model.insert("multiAgentVersion".to_string(), json!("v2"));
     }
 }
 
