@@ -2535,3 +2535,10 @@
 - 待修删除保护：新增 `XaiOAuthSection` 的单账号移除和“移除所有 xAI 账号”均直接执行，没有确认对话框；Codex/Copilot 旧组件也存在同类问题。本次至少应在新 xAI OAuth 发布前补确认，并统一三个 OAuth 组件的删除契约。
 - 待修可发现性：Grok Build 新建页一次展示约 40 个预设且没有折叠/限高；在 903x631 的真实窗口中，供应商名称、认证和地址等主表单全部落在首屏下方，用户只看到预设矩阵和底部操作按钮。应限制预设区域高度、默认折叠非核心预设或选择后自动滚动到表单。
 - 本轮没有修改业务实现，也没有把单元测试当作 UI 验收。Windows UI 工具在最后检查 Codex 用量重建确认框时返回了错误窗口捕获，已立即停止 UI 输入并终止隔离审查进程；该确认逻辑随后只以 `UsageDashboard.tsx` 的 `ConfirmDialog` 源码确认，不能记为完成了可见确认框验收。
+
+## 2026-08-01 撤回 GitHub 上的 3.19 Release
+
+- 用户要求撤回 `BigStrongSun/ccswitchmulti` 当前 GitHub 上发布的 3.19 版本，使最新可用版本回到 3.16.5 系列。
+- 已删除 GitHub Release `v3.19.0-2`（release id `363224997`，稳定版，25 个资产）和 `v3.19.0-3`（release id `363263087`，预发布版，19 个资产）；远端 Release 列表中已无 `v3.19*` 条目。
+- `gh api repos/BigStrongSun/ccswitchmulti/releases/latest` 已复核返回正式版 `v3.16.5-24`（release id `363261864`）。这也使基于 `releases/latest` 的 updater 下载入口回到 3.16.5 系列。
+- 为保留源码追溯和未来恢复依据，本次只删除 Release，不使用 `--cleanup-tag` 删除 tag；`v3.19.0-2` 指向提交 `15dae3db049e674e257ac0f2a02a97f94524efcb`，`v3.19.0-3` 的 annotated tag 为 `22ddd192f870563cd3f8d25b206a813a16182dde`。
