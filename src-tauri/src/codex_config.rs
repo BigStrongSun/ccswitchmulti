@@ -1829,6 +1829,74 @@ fn codex_multi_router_is_enabled(settings: &Value) -> bool {
         .is_some_and(|routes| !routes.is_empty())
 }
 
+/// 判断当前 MultiRouter 是否必须使用明文 Multi-Agent V1 投递。
+///
+/// Codex Multi-Agent V2 会让官方模型把 spawn/follow-up 的 message 参数加密，
+/// 并把密文作为 `agent_message.encrypted_content` 发给子 Agent。只有 ChatGPT Codex
+/// backend 能解密；任意第三方 route 都要求整个任务固定为 V1，否则跨 route 子 Agent
+/// 只能看到 `Payload:` 信封头。旧 route 没有认证来源时按第三方处理，避免误报可用。
+fn codex_multi_router_requires_plaintext_multi_agent(settings: &Value) -> bool {
+    let Some(routing) = settings.get("codexRouting") else {
+        return false;
+    };
+    if routing
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .is_some_and(|enabled| !enabled)
+    {
+        return false;
+    }
+
+    let routes = routing
+        .get("routes")
+        .and_then(Value::as_array)
+        .or_else(|| routing.as_array());
+    routes.into_iter().flatten().any(|route| {
+        route
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(true)
+            && !codex_route_uses_managed_oauth_agent_delivery(route)
+    })
+}
+
+/// 只有显式指向 CCSM 托管 ChatGPT OAuth backend 的 route 才具备 V2 密文解密能力。
+fn codex_route_uses_managed_oauth_agent_delivery(route: &Value) -> bool {
+    let upstream = route.get("upstream").unwrap_or(route);
+    let auth = upstream
+        .get("auth")
+        .or_else(|| route.get("auth"))
+        .unwrap_or(upstream);
+    auth.get("source")
+        .and_then(Value::as_str)
+        .is_some_and(|source| source.eq_ignore_ascii_case("managed_codex_oauth"))
+        || auth
+            .get("authProvider")
+            .or_else(|| auth.get("auth_provider"))
+            .and_then(Value::as_str)
+            .is_some_and(|provider| provider.eq_ignore_ascii_case("codex_oauth"))
+}
+
+/// 在官方同 slug 元数据合并完成后应用路由级 Multi-Agent 传输策略。
+///
+/// 必须最后覆盖，否则官方 GPT 条目的 `multi_agent_version=v2` 会重新盖掉混合路由
+/// 所需的 V1。Codex 会在新任务首轮锁定该版本，随后单发、并发和 follow-up 共用它。
+fn apply_codex_multi_agent_transport_policy(catalog: &mut Value, settings: &Value) {
+    if !codex_multi_router_requires_plaintext_multi_agent(settings) {
+        return;
+    }
+    let Some(models) = catalog.get_mut("models").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for model in models {
+        let Some(model) = model.as_object_mut() else {
+            continue;
+        };
+        model.insert("multi_agent_version".to_string(), json!("v1"));
+        model.insert("multiAgentVersion".to_string(), json!("v1"));
+    }
+}
+
 /// 移除会覆盖逐模型目录元数据的 MultiRouter 顶层字段。
 ///
 /// 这只用于 CCSwitchMulti 托管的多模型路由。普通单模型 provider 仍可使用用户手写的
@@ -2504,7 +2572,8 @@ pub fn prepare_codex_config_text_with_model_catalog(
             }
         };
         let generated_catalog = codex_model_catalog_from_specs(&specs, &template, profile);
-        let catalog = enrich_codex_catalog_with_official_metadata(&generated_catalog)?;
+        let mut catalog = enrich_codex_catalog_with_official_metadata(&generated_catalog)?;
+        apply_codex_multi_agent_transport_policy(&mut catalog, settings);
         let config_text = set_codex_model_catalog_projection_fields(
             config_text,
             Some(&catalog_path),
