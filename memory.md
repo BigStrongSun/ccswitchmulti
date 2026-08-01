@@ -1,5 +1,11 @@
 # CC Switch Repository Memory
 
+## 2026-08-01 Codex 账号池运行态统一 Task 1
+
+- 账号池原有 `pool_cooldowns`、`pool_session_bindings`、`pool_remaining_percent`、`pool_quota_checked_at` 四张独立表已迁入 `src-tauri/src/proxy/providers/codex_oauth_pool.rs` 的单一 `CodexPoolRuntimeState`，manager 只保留一把 `Arc<tokio::sync::Mutex<_>>`。候选读取、quota 快照、固定 cooldown、binding 和 lifecycle purge 现在在同一临界区完成，不再由调用方分别操作四把锁。
+- `remove_account`、`clear_auth`、明确 `invalid_grant` 隔离、同 ID 重新登录和 pool policy 禁用/移除都经过统一 purge/reconcile；重新启用或重登不会恢复旧 binding、cooldown 或 quota 快照。`normalized_pool_policy` 和只读投影也只接受 `CodexAccountData::is_usable()` 的托管账号，已持久化 `invalidated_at` 的账号不再进入候选。
+- TDD 证据：生产修改前，删除后重加、invalidated、禁用后重启、clear 后重登四个测试均因旧运行态残留而断言失败；统一运行态接入后四项与原 `account_pool_honors_order_reserve_cooldown_and_session_binding` 均通过。本提交刻意仍使用 generation `0`；24 小时 TTL、2048 LRU 和凭据代际校验由下一个 TDD 提交实现。
+
 ## 2026-08-01 Codex 官方主 Agent 向第三方子 Agent 投递空正文根修
 
 - 最新 Codex Multi-Agent V2 会把 `spawn_agent`、`send_message`、`followup_task` 的 `message` 参数作为密文返回给客户端；子 Agent 请求使用 `type=agent_message`，正文由明文 `Message Type/Task name/Sender/Payload` 信封头和 `encrypted_content` 组成。只有 ChatGPT Codex Responses backend 能解密密文，DeepSeek、Qwen、Kimi、GLM 等第三方上游经 Responses -> Chat/Messages 转换后只能看到空的 `Payload:`，所以 Agent 能创建、能调用工具，但没有任务正文和可靠最终回复。
