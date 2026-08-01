@@ -1856,12 +1856,12 @@ fn codex_multi_router_requires_plaintext_multi_agent(settings: &Value) -> bool {
             .get("enabled")
             .and_then(Value::as_bool)
             .unwrap_or(true)
-            && !codex_route_uses_managed_oauth_agent_delivery(route)
+            && !codex_route_uses_official_backend_agent_delivery(route)
     })
 }
 
-/// 只有显式指向 CCSM 托管 ChatGPT OAuth backend 的 route 才具备 V2 密文解密能力。
-fn codex_route_uses_managed_oauth_agent_delivery(route: &Value) -> bool {
+/// 只有显式指向 ChatGPT Codex backend 的官方 route 才具备 V2 密文解密能力。
+fn codex_route_uses_official_backend_agent_delivery(route: &Value) -> bool {
     let upstream = route.get("upstream").unwrap_or(route);
     let auth = upstream
         .get("auth")
@@ -1869,7 +1869,15 @@ fn codex_route_uses_managed_oauth_agent_delivery(route: &Value) -> bool {
         .unwrap_or(upstream);
     auth.get("source")
         .and_then(Value::as_str)
-        .is_some_and(|source| source.eq_ignore_ascii_case("managed_codex_oauth"))
+        .is_some_and(|source| {
+            matches!(
+                source.to_ascii_lowercase().as_str(),
+                "native_codex_auth"
+                    | "managed_codex_oauth"
+                    | "managed_account"
+                    | "account_pool"
+            )
+        })
         || auth
             .get("authProvider")
             .or_else(|| auth.get("auth_provider"))
