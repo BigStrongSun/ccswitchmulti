@@ -39,6 +39,13 @@
 - 账号池原有 `pool_cooldowns`、`pool_session_bindings`、`pool_remaining_percent`、`pool_quota_checked_at` 四张独立表已迁入 `src-tauri/src/proxy/providers/codex_oauth_pool.rs` 的单一 `CodexPoolRuntimeState`，manager 只保留一把 `Arc<tokio::sync::Mutex<_>>`。候选读取、quota 快照、固定 cooldown、binding 和 lifecycle purge 现在在同一临界区完成，不再由调用方分别操作四把锁。
 - `remove_account`、`clear_auth`、明确 `invalid_grant` 隔离、同 ID 重新登录和 pool policy 禁用/移除都经过统一 purge/reconcile；重新启用或重登不会恢复旧 binding、cooldown 或 quota 快照。`normalized_pool_policy` 和只读投影也只接受 `CodexAccountData::is_usable()` 的托管账号，已持久化 `invalidated_at` 的账号不再进入候选。
 - TDD 证据：生产修改前，删除后重加、invalidated、禁用后重启、clear 后重登四个测试均因旧运行态残留而断言失败；统一运行态接入后四项与原 `account_pool_honors_order_reserve_cooldown_and_session_binding` 均通过。本提交刻意仍使用 generation `0`；24 小时 TTL、2048 LRU 和凭据代际校验由下一个 TDD 提交实现。
+## 2026-08-01 Codex 历史修复保留重命名标题根修
+
+- 现象：用户在 Codex Desktop 中重命名 task 后执行 CCSM 历史修复，修复后的标题回退为原始首条用户消息。真实数据链显示 rollout 只保留原始用户事件；重命名标题存于 active state DB 的 `threads.title` 和/或 `session_index.jsonl.thread_name`。
+- 根因：历史修复在列表、详情和写入路径都调用 `apply_rollout_metadata_to_thread_row`，无条件用 rollout 推导的 `metadata.title` 覆盖 SQLite title；随后 `move_focus_session_index_rows` 又把已回退的标题写回 session index，形成两次覆盖。
+- 根修：合并 rollout 前先识别与 `first_user_message` 不同的持久化显式标题。优先级为 SQLite 显式标题、session index 显式标题、rollout 推导标题；同一有效标题贯穿列表、详情、缺失 thread 重建、SQLite metadata rebuild 和 session index recent-window 更新。普通未重命名会话仍由 rollout 补齐。
+- 回归 `history_repair_preserves_user_renamed_thread_title` 真实执行完整修复，要求 SQLite 与 session index 都保留重命名。主线 RED/修复提交为 `a51c3614`/`d9e4fb14`；3.16.5 线为 `7d5a70c5`/`2352a77e`。两线历史修复模块均为 51 passed，`cargo check --lib`、rustfmt 和 `git diff --check` 通过。
+- 已被旧版本覆盖且没有修复前备份的自定义标题不能从 rollout 自动还原，因为 rollout 从未保存重命名值；根修保证后续执行不再丢失仍存在于 SQLite 或 session index 任一侧的标题。
 
 ## 2026-08-01 Codex 官方主 Agent 向第三方子 Agent 投递空正文根修
 
