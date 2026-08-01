@@ -95,7 +95,8 @@ pub async fn save_settings(
             // 后台执行存量迁移（openai 桶 → custom 桶；仅当用户勾选了迁入既有
             // 会话，函数内部自门控）。大会话目录可能要读数秒，不能阻塞设置保存；
             // 失败时不写完成标记，下次启动自动重试。
-            tauri::async_runtime::spawn_blocking(|| {
+            let db_for_codex_history_sync = state.db.clone();
+            tauri::async_runtime::spawn_blocking(move || {
                 match crate::codex_history_migration::maybe_migrate_codex_official_history_to_unified_bucket() {
                     Ok(outcome) => {
                         if let Some(reason) = outcome.skipped_reason {
@@ -110,6 +111,25 @@ pub async fn save_settings(
                     }
                     Err(e) => {
                         log::warn!("✗ Codex official history unify migration failed: {e}");
+                    }
+                }
+
+                match crate::codex_history_migration::maybe_sync_codex_history_for_unified_multirouter(
+                    &db_for_codex_history_sync,
+                ) {
+                    Ok(outcome) => {
+                        if let Some(reason) = outcome.skipped_reason {
+                            log::debug!("○ Codex MultiRouter history sync skipped: {reason}");
+                        } else {
+                            log::info!(
+                                "✓ Codex MultiRouter history sync completed: jsonl_files={}, state_rows={}",
+                                outcome.migrated_jsonl_files,
+                                outcome.migrated_state_rows
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("✗ Codex MultiRouter history sync failed: {e}");
                     }
                 }
             });

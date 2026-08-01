@@ -51,12 +51,13 @@ const OFFICIAL_UNIFY_RESTORE_BACKUP_NAME: &str = "codex-official-history-unify-r
 /// SQLite 变量上限保守值，IN 列表按此分块。
 const STATE_DB_ID_CHUNK: usize = 500;
 
-/// 串行化官方历史的迁移与还原：开启迁移（启动重试 + 设置保存后台任务）和
-/// 关闭还原可能在毫秒级先后被触发，对同一批 jsonl / state DB 双向改写。
-static CODEX_OFFICIAL_HISTORY_OP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// 串行化所有历史 provider 桶写入：官方迁移/还原和 MultiRouter 同步可能由
+/// 启动、设置保存、provider 切换在毫秒级先后触发，必须避免对同一批 JSONL /
+/// state DB 并发或反向改写。
+static CODEX_HISTORY_PROVIDER_OP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn lock_codex_official_history_op() -> std::sync::MutexGuard<'static, ()> {
-    CODEX_OFFICIAL_HISTORY_OP_LOCK
+fn lock_codex_history_provider_op() -> std::sync::MutexGuard<'static, ()> {
+    CODEX_HISTORY_PROVIDER_OP_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -517,44 +518,66 @@ pub fn maybe_migrate_codex_openai_history_provider_bucket(
 /// MultiRouter 不能回到内置 `openai` provider，否则 Codex 会重新走官方
 /// OpenAI/WebSocket 语义；因此历史可见性通过手动同步到稳定路由桶解决。
 pub fn sync_codex_history_provider_bucket_to_multirouter(
-    db: &Database,
+    _db: &Database,
 ) -> Result<CodexHistoryProviderBucketMigrationOutcome, AppError> {
-    let mut source_provider_ids = collect_source_model_provider_ids(db)?;
-    source_provider_ids.insert(OFFICIAL_OPENAI_CODEX_MODEL_PROVIDER_ID.to_string());
-    for provider_id in CC_SWITCH_OPENAI_HISTORY_SOURCE_PROVIDER_IDS {
-        source_provider_ids.insert((*provider_id).to_string());
-    }
-    source_provider_ids.remove(CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID);
+    ensure_codex_history_write_is_offline()?;
 
-    if source_provider_ids.is_empty() {
+    let live_config = read_codex_config_text().unwrap_or_default();
+    let target_provider = unified_history_target_provider(&live_config).ok_or_else(|| {
+        AppError::Message(
+            "当前 Codex live 配置没有可识别的 MultiRouter 稳定 provider 桶".to_string(),
+        )
+    })?;
+
+    sync_codex_history_provider_bucket_to_target(&target_provider)
+}
+
+fn sync_codex_history_provider_bucket_to_target(
+    target_provider: &str,
+) -> Result<CodexHistoryProviderBucketMigrationOutcome, AppError> {
+    let _op_guard = lock_codex_history_provider_op();
+    let backup_root = migration_backup_root(MULTIROUTER_CUSTOM_HISTORY_SYNC_NAME);
+    let codex_dir = get_codex_config_dir();
+    let (jsonl_source_provider_ids, migrated_jsonl_files) =
+        migrate_all_non_target_codex_jsonl_files(&codex_dir, &backup_root, target_provider)?;
+    let (state_source_provider_ids, migrated_state_rows) =
+        migrate_all_non_target_codex_state_dbs(&codex_dir, &backup_root, target_provider)?;
+    let mut source_provider_ids = jsonl_source_provider_ids;
+    source_provider_ids.extend(state_source_provider_ids);
+    let changed = migrated_jsonl_files > 0 || migrated_state_rows > 0;
+
+    Ok(CodexHistoryProviderBucketMigrationOutcome {
+        source_provider_ids: source_provider_ids.into_iter().collect(),
+        migrated_jsonl_files,
+        migrated_state_rows,
+        skipped_reason: (!changed).then(|| "already_target_or_no_history".to_string()),
+        backup_dir: changed.then(|| backup_root.to_string_lossy().to_string()),
+    })
+}
+
+/// 当统一历史开关与 MultiRouter 同时启用时，把当前历史归并到 live 使用的
+/// 稳定路由桶。普通官方统一历史仍由 custom 桶处理；两条路径不能互相写入
+/// 对方的桶，否则 Codex 会再次按 active provider 过滤掉全部旧会话。
+pub fn maybe_sync_codex_history_for_unified_multirouter(
+    _db: &Database,
+) -> Result<CodexHistoryProviderBucketMigrationOutcome, AppError> {
+    if !crate::settings::unify_codex_session_history() {
         return Ok(CodexHistoryProviderBucketMigrationOutcome {
-            skipped_reason: Some("no_source_provider_ids".to_string()),
+            skipped_reason: Some("unify_toggle_off".to_string()),
             ..Default::default()
         });
     }
 
-    let backup_root = migration_backup_root(MULTIROUTER_CUSTOM_HISTORY_SYNC_NAME);
-    let codex_dir = get_codex_config_dir();
-    let migrated_jsonl_files = migrate_codex_jsonl_files_to_target(
-        &codex_dir,
-        &source_provider_ids,
-        &backup_root,
-        CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID,
-    )?;
-    let migrated_state_rows = migrate_codex_state_dbs_to_target(
-        &codex_dir,
-        &source_provider_ids,
-        &backup_root,
-        CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID,
-    )?;
+    let live_config = read_codex_config_text().unwrap_or_default();
+    let Some(target_provider) = unified_history_target_provider(&live_config) else {
+        return Ok(CodexHistoryProviderBucketMigrationOutcome {
+            skipped_reason: Some("live_not_multirouter".to_string()),
+            ..Default::default()
+        });
+    };
 
-    Ok(CodexHistoryProviderBucketMigrationOutcome {
-        source_provider_ids: source_provider_ids.iter().cloned().collect(),
-        migrated_jsonl_files,
-        migrated_state_rows,
-        skipped_reason: None,
-        ..Default::default()
-    })
+    ensure_codex_history_write_is_offline()?;
+    sync_codex_history_provider_bucket_to_target(&target_provider)
 }
 
 /// 确认 Codex Desktop/app-server 已完全退出，避免 WAL 或目录同步覆盖离线修复。
@@ -3272,7 +3295,7 @@ pub fn maybe_migrate_codex_official_history_to_unified_bucket(
             ..Default::default()
         });
     }
-    let _op_guard = lock_codex_official_history_op();
+    let _op_guard = lock_codex_history_provider_op();
     let codex_dir = get_codex_config_dir();
     // marker 绑定迁移时的 Codex 目录：切换 codex_config_dir 后旧 marker 不再
     // 挡住新目录的迁移（迁移幂等，重跑无害）。
@@ -3339,15 +3362,47 @@ pub fn maybe_migrate_codex_official_history_to_unified_bucket(
 /// live config.toml 是否路由到共享 custom 桶（会话分桶只看这个实态：
 /// base_url / 接管与否都不影响 session_meta 记录的 model_provider）。
 fn codex_config_text_routes_custom(config_text: &str) -> bool {
+    codex_config_text_model_provider(config_text)
+        .is_some_and(|id| id == CC_SWITCH_CODEX_MODEL_PROVIDER_ID)
+}
+
+fn codex_config_text_model_provider(config_text: &str) -> Option<String> {
     config_text
         .parse::<DocumentMut>()
         .ok()
         .and_then(|doc| {
             doc.get("model_provider")
                 .and_then(|item| item.as_str())
-                .map(|id| id.trim() == CC_SWITCH_CODEX_MODEL_PROVIDER_ID)
+                .map(|id| id.trim().to_string())
         })
-        .unwrap_or(false)
+        .filter(|id| !id.is_empty())
+}
+
+/// 返回当前 live 配置中由 CCSwitchMulti 标记的稳定 MultiRouter provider。
+///
+/// 目标直接取 `model_provider` 的实际值，不假设某个构建版本的 bucket 名称。
+fn unified_history_target_provider(config_text: &str) -> Option<String> {
+    let doc = toml::from_str::<toml::Value>(config_text).ok()?;
+    let provider_id = doc
+        .get("model_provider")
+        .and_then(toml::Value::as_str)?
+        .trim();
+    if provider_id.is_empty() {
+        return None;
+    }
+
+    let provider = doc
+        .get("model_providers")
+        .and_then(toml::Value::as_table)
+        .and_then(|providers| providers.get(provider_id))
+        .and_then(toml::Value::as_table)?;
+    let router_marker = provider
+        .get("http_headers")
+        .and_then(toml::Value::as_table)
+        .and_then(|headers| headers.get("x-cc-switch-proxy-mode"))
+        .and_then(toml::Value::as_str);
+
+    (router_marker == Some("router")).then(|| provider_id.to_string())
 }
 
 /// 目录的规范化字符串形式，用作 marker / 备份代际的目录身份。
@@ -3417,7 +3472,7 @@ fn has_official_history_unify_backup_for_dir(ledger_parent: &Path, codex_dir_key
 /// 且只改写当前仍为 custom 的目标，重复执行无害。
 pub fn restore_codex_official_history_from_backups(
 ) -> Result<CodexOfficialHistoryRestoreOutcome, AppError> {
-    let _op_guard = lock_codex_official_history_op();
+    let _op_guard = lock_codex_history_provider_op();
     // 开关已（重新）开启时拒绝还原：live 正路由 custom，把账本会话翻回
     // openai 桶等于亲手制造分裂。覆盖"关闭保存成功后用户立刻重新开启，
     // 还原排在重开迁移之后才拿到 op lock"的时序。
@@ -4646,6 +4701,93 @@ mod tests {
     use serial_test::serial;
     use std::ffi::OsString;
     use tempfile::tempdir;
+
+    #[test]
+    fn unified_history_uses_the_active_multirouter_bucket() {
+        assert_eq!(
+            unified_history_target_provider(
+                r#"model_provider = "stable_router_v3"
+
+[model_providers.stable_router_v3]
+http_headers = { x-cc-switch-proxy-mode = "router" }
+"#,
+            )
+            .as_deref(),
+            Some("stable_router_v3")
+        );
+        assert_eq!(
+            unified_history_target_provider(
+                r#"model_provider = "custom"
+
+[model_providers.custom]
+base_url = "https://api.example.com/v1"
+"#,
+            ),
+            None,
+            "ordinary third-party providers must not trigger a global history rebucket"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn multirouter_history_sync_migrates_to_dynamic_target_and_is_idempotent() {
+        let dir = tempdir().expect("tempdir");
+        let _home_guard = EnvVarGuard::set("CC_SWITCH_TEST_HOME", dir.path());
+        let codex_dir = dir.path().join(".codex");
+        let sessions_dir = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+        let rollout = sessions_dir.join("dynamic-target.jsonl");
+        fs::write(
+            &rollout,
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"one\",\"model_provider\":\"openai\"}}\n",
+        )
+        .expect("write rollout");
+
+        let db_path = codex_dir.join(CODEX_STATE_DB_FILENAME);
+        let conn = Connection::open(&db_path).expect("open state db");
+        create_history_test_threads_table(&conn);
+        conn.execute(
+            "INSERT INTO threads (id, rollout_path, model_provider) VALUES (?1, ?2, ?3)",
+            (
+                "one",
+                rollout.to_string_lossy().to_string(),
+                "legacy-router",
+            ),
+        )
+        .expect("insert thread");
+        drop(conn);
+
+        let first = sync_codex_history_provider_bucket_to_target("stable_router_v3")
+            .expect("sync dynamic target");
+
+        assert_eq!(first.migrated_jsonl_files, 1);
+        assert_eq!(first.migrated_state_rows, 1);
+        assert!(first.backup_dir.is_some());
+        assert!(fs::read_to_string(&rollout)
+            .expect("read migrated rollout")
+            .contains("\"model_provider\":\"stable_router_v3\""));
+        let conn = Connection::open(&db_path).expect("reopen state db");
+        let provider: String = conn
+            .query_row(
+                "SELECT model_provider FROM threads WHERE id = 'one'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read migrated provider");
+        assert_eq!(provider, "stable_router_v3");
+        drop(conn);
+
+        let second = sync_codex_history_provider_bucket_to_target("stable_router_v3")
+            .expect("rerun dynamic target sync");
+        assert_eq!(
+            (second.migrated_jsonl_files, second.migrated_state_rows),
+            (0, 0)
+        );
+        assert_eq!(
+            second.skipped_reason.as_deref(),
+            Some("already_target_or_no_history")
+        );
+    }
 
     struct EnvVarGuard {
         key: &'static str,

@@ -1711,10 +1711,14 @@ impl RequestForwarder {
             .is_some();
         let codex_router_configured =
             matches!(app_type, AppType::Codex) && codex_provider_has_routing_config(provider);
+        // Retry chains may pre-resolve a route while preserving the parent router's
+        // base_url/auth. It still has to pass through target-provider materialization.
         let routed_provider = if matches!(app_type, AppType::Codex) {
-            (!provider_is_resolved_codex_route)
-                .then(|| super::providers::resolve_codex_model_routed_provider(provider, body))
-                .flatten()
+            if provider_is_resolved_codex_route {
+                Some(provider.clone())
+            } else {
+                super::providers::resolve_codex_model_routed_provider(provider, body)
+            }
         } else {
             None
         };
@@ -3407,12 +3411,15 @@ impl RequestForwarder {
             .is_some();
         let codex_router_configured =
             matches!(app_type, AppType::Codex) && codex_provider_has_routing_config(provider);
-        let routed_provider =
-            if matches!(app_type, AppType::Codex) && !provider_is_resolved_codex_route {
-                resolve_codex_raw_passthrough_route_provider(provider, route_body)
+        let routed_provider = if matches!(app_type, AppType::Codex) {
+            if provider_is_resolved_codex_route {
+                Some(provider.clone())
             } else {
-                None
-            };
+                resolve_codex_raw_passthrough_route_provider(provider, route_body)
+            }
+        } else {
+            None
+        };
         let routed_provider = if let Some(route_provider) = routed_provider {
             if let Some(target_provider_id) =
                 super::providers::codex_route_target_provider_id(&route_provider)
@@ -4078,12 +4085,15 @@ impl RequestForwarder {
             .is_some();
         let codex_router_configured =
             matches!(app_type, AppType::Codex) && codex_provider_has_routing_config(&provider);
-        let routed_provider =
-            if matches!(app_type, AppType::Codex) && !provider_is_resolved_codex_route {
-                resolve_codex_raw_passthrough_route_provider(&provider, route_body)
+        let routed_provider = if matches!(app_type, AppType::Codex) {
+            if provider_is_resolved_codex_route {
+                Some(provider.clone())
             } else {
-                None
-            };
+                resolve_codex_raw_passthrough_route_provider(&provider, route_body)
+            }
+        } else {
+            None
+        };
         let routed_provider = if let Some(route_provider) = routed_provider {
             if let Some(target_provider_id) =
                 super::providers::codex_route_target_provider_id(&route_provider)
@@ -6620,6 +6630,14 @@ mod tests {
     ) -> RequestForwarder {
         let db = Arc::new(Database::memory().expect("memory db"));
 
+        test_forwarder_with_db(db, non_streaming_timeout, streaming_first_byte_timeout)
+    }
+
+    fn test_forwarder_with_db(
+        db: Arc<Database>,
+        non_streaming_timeout: Duration,
+        streaming_first_byte_timeout: Duration,
+    ) -> RequestForwarder {
         RequestForwarder {
             router: Arc::new(ProviderRouter::new(db.clone())),
             status: Arc::new(RwLock::new(ProxyStatus::default())),
@@ -6640,6 +6658,122 @@ mod tests {
             streaming_first_byte_timeout,
             max_attempts: 1,
         }
+    }
+
+    #[tokio::test]
+    async fn resolved_codex_route_materializes_its_target_provider_for_all_http_paths() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind target provider mock");
+        let target_addr = listener.local_addr().expect("target provider mock addr");
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                axum::Router::new().fallback(|| async {
+                    (
+                        StatusCode::OK,
+                        [(http::header::CONTENT_TYPE, "application/json")],
+                        r#"{"ok":true}"#,
+                    )
+                }),
+            )
+            .await
+            .expect("serve target provider mock");
+        });
+
+        let db = Arc::new(Database::memory().expect("memory db"));
+        db.save_provider(
+            "codex",
+            &Provider::with_id(
+                "target-provider".to_string(),
+                "Target Provider".to_string(),
+                json!({
+                    "base_url": format!("http://{target_addr}/v1"),
+                    "api_key": "sk-target"
+                }),
+                None,
+            ),
+        )
+        .expect("save target provider");
+        let mut resolved_route = test_provider_with_type(None);
+        resolved_route.id = "multirouter".to_string();
+        resolved_route.name = "MultiRouter".to_string();
+        resolved_route.settings_config = json!({
+            "base_url": "http://127.0.0.1:9/v1",
+            "api_key": "sk-parent",
+            "codexResolvedRouteId": "target-route",
+            "codexResolvedTargetProviderId": "target-provider"
+        });
+        db.save_provider("codex", &resolved_route)
+            .expect("save resolved route provider");
+        db.set_current_provider("codex", &resolved_route.id)
+            .expect("select resolved route provider");
+        let forwarder = test_forwarder_with_db(db, Duration::from_secs(1), Duration::from_secs(1));
+        let app_type = AppType::Codex;
+        let adapter = get_adapter(&app_type);
+        let method = http::Method::POST;
+        let headers = HeaderMap::new();
+        let extensions = Extensions::new();
+        let route_body = json!({"model": "deepseek-v4-flash", "stream": false});
+
+        let (response, _, effective_provider, _) = forwarder
+            .forward(
+                &app_type,
+                &method,
+                &resolved_route,
+                "/v1/responses",
+                &route_body,
+                &headers,
+                &extensions,
+                adapter.as_ref(),
+            )
+            .await
+            .expect("resolved route should use its target provider");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            effective_provider.settings_config["base_url"],
+            format!("http://{target_addr}/v1")
+        );
+        assert_eq!(effective_provider.settings_config["api_key"], "sk-target");
+
+        let (raw_response, raw_effective_provider, _) = forwarder
+            .forward_raw(
+                &app_type,
+                &method,
+                &resolved_route,
+                "/v1/custom",
+                &route_body,
+                Bytes::from_static(br#"{"model":"deepseek-v4-flash"}"#),
+                &headers,
+                &extensions,
+                adapter.as_ref(),
+            )
+            .await
+            .expect("resolved raw route should use its target provider");
+        assert_eq!(raw_response.status(), StatusCode::OK);
+        assert_eq!(
+            raw_effective_provider.settings_config["base_url"],
+            format!("http://{target_addr}/v1")
+        );
+        assert_eq!(
+            raw_effective_provider.settings_config["api_key"],
+            "sk-target"
+        );
+
+        let selected_raw_provider = forwarder
+            .resolve_codex_raw_endpoint_provider(&app_type, "/v1/custom", &route_body)
+            .await
+            .expect("selected resolved raw route should use its target provider");
+        assert_eq!(
+            selected_raw_provider.settings_config["base_url"],
+            format!("http://{target_addr}/v1")
+        );
+        assert_eq!(
+            selected_raw_provider.settings_config["api_key"],
+            "sk-target"
+        );
+
+        server.abort();
     }
 
     // 验证只有上游明确返回 Responses-Lite 不支持时，才触发剥头重试。

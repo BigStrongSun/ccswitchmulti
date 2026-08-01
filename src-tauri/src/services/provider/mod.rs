@@ -106,6 +106,35 @@ pub fn reapply_current_codex_official_live(state: &AppState) -> Result<bool, App
     Ok(true)
 }
 
+fn schedule_codex_unified_multirouter_history_sync(state: &AppState) {
+    if !crate::settings::unify_codex_session_history() {
+        return;
+    }
+
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        match crate::codex_history_migration::maybe_sync_codex_history_for_unified_multirouter(&db)
+        {
+            Ok(outcome) => {
+                if let Some(reason) = outcome.skipped_reason {
+                    log::debug!("○ Codex MultiRouter history sync skipped: {reason}");
+                } else {
+                    log::info!(
+                        "✓ Codex MultiRouter history sync completed after provider switch: jsonl_files={}, state_rows={}",
+                        outcome.migrated_jsonl_files,
+                        outcome.migrated_state_rows
+                    );
+                }
+            }
+            Err(error) => {
+                log::warn!(
+                    "✗ Codex MultiRouter history sync after provider switch failed: {error}"
+                );
+            }
+        }
+    });
+}
+
 /// Provider business logic service
 pub struct ProviderService;
 
@@ -3743,6 +3772,7 @@ impl ProviderService {
             )
             .map_err(|e| AppError::Message(format!("启用 Codex 本地代理接管失败: {e}")))?;
 
+            schedule_codex_unified_multirouter_history_sync(state);
             return Ok(SwitchResult::default());
         }
 
@@ -3765,6 +3795,9 @@ impl ProviderService {
 
             // The proxy server will route requests to the new provider via is_current.
             // MCP sync is intentionally skipped while Live config is owned by takeover.
+            if matches!(app_type, AppType::Codex) {
+                schedule_codex_unified_multirouter_history_sync(state);
+            }
             return Ok(SwitchResult::default());
         }
 

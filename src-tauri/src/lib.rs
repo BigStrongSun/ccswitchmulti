@@ -835,6 +835,27 @@ pub fn run() {
                             log::warn!("✗ Codex official history unify migration failed: {e}");
                         }
                     }
+
+                    match crate::codex_history_migration::maybe_sync_codex_history_for_unified_multirouter(
+                        &db_for_codex_history_migration,
+                    ) {
+                        Ok(outcome) => {
+                            if let Some(reason) = outcome.skipped_reason {
+                                log::debug!(
+                                    "○ Codex MultiRouter history sync skipped: {reason}"
+                                );
+                            } else {
+                                log::info!(
+                                    "✓ Codex MultiRouter history sync completed: jsonl_files={}, state_rows={}",
+                                    outcome.migrated_jsonl_files,
+                                    outcome.migrated_state_rows
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("✗ Codex MultiRouter history sync failed: {e}");
+                        }
+                    }
                 });
             }
 
