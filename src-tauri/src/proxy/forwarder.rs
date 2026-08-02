@@ -7238,6 +7238,126 @@ mod tests {
     }
 
     #[test]
+    fn codex_multirouter_attempt_materializes_referenced_target_before_forwarding() {
+        let db = Arc::new(Database::memory().expect("memory db"));
+        let target = Provider::with_id(
+            "deepseek-target".to_string(),
+            "DeepSeek Target".to_string(),
+            json!({
+                "base_url": "https://api.deepseek.com",
+                "api_key": "target-secret"
+            }),
+            None,
+        );
+        db.save_provider("codex", &target)
+            .expect("save target provider");
+
+        let mut router = test_provider_with_type(None);
+        router.id = "codex-multirouter".to_string();
+        router.name = "Codex MultiRouter".to_string();
+        router.settings_config = json!({
+            "base_url": "http://127.0.0.1:15721/v1",
+            "codexRouting": {
+                "enabled": true,
+                "routes": [
+                    {
+                        "id": "deepseek",
+                        "label": "DeepSeek",
+                        "enabled": true,
+                        "targetProviderId": "deepseek-target",
+                        "match": { "models": ["deepseek-v4-flash"] },
+                        "upstream": { "apiFormat": "openai_chat" }
+                    }
+                ]
+            }
+        });
+
+        let route_attempts = build_forward_attempt_providers_preserving_codex_router_context(
+            &AppType::Codex,
+            &[router],
+            &json!({ "model": "deepseek-v4-flash" }),
+        );
+        let forwarder = RequestForwarder {
+            router: Arc::new(ProviderRouter::new(db.clone())),
+            status: Arc::new(RwLock::new(ProxyStatus::default())),
+            current_providers: Arc::new(RwLock::new(HashMap::new())),
+            gemini_shadow: Arc::new(GeminiShadowStore::new()),
+            codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
+            failover_manager: Arc::new(FailoverSwitchManager::new(db)),
+            app_handle: None,
+            current_provider_id_at_start: String::new(),
+            session_id: String::new(),
+            session_client_provided: false,
+            preserve_codex_client_originator: false,
+            rectifier_config: RectifierConfig::default(),
+            optimizer_config: OptimizerConfig::default(),
+            copilot_optimizer_config: CopilotOptimizerConfig::default(),
+            codex_responses_lite_fallbacks: Arc::new(RwLock::new(HashMap::new())),
+            non_streaming_timeout: Duration::ZERO,
+            streaming_first_byte_timeout: Duration::ZERO,
+            max_attempts: 1,
+        };
+
+        let effective = forwarder
+            .materialize_codex_forward_attempt_provider(&AppType::Codex, &route_attempts[0])
+            .expect("materialize target provider");
+
+        assert_eq!(effective.settings_config["base_url"], "https://api.deepseek.com");
+        assert_eq!(effective.settings_config["api_key"], "target-secret");
+        assert_eq!(
+            effective.settings_config["codexRouterParentProviderId"],
+            "codex-multirouter"
+        );
+        assert_eq!(
+            effective.settings_config["codexResolvedTargetProviderId"],
+            "deepseek-target"
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_resolved_route_local_self_loop_is_failed_not_successful() {
+        let forwarder = test_forwarder(Duration::from_secs(1), Duration::from_secs(1));
+        let mut resolved = test_provider_with_type(None);
+        resolved.id = "codex-multirouter::route::broken".to_string();
+        resolved.name = "Broken local route".to_string();
+        resolved.settings_config = json!({
+            "base_url": "http://127.0.0.1:0/v1",
+            "api_key": "unused",
+            "codexResolvedRouteId": "broken",
+            "codexResolvedRouteMatched": true,
+            "codexRouterParentProviderId": "codex-multirouter",
+            "codexRouterParentProviderName": "Codex MultiRouter"
+        });
+
+        let error = match forwarder
+            .forward_with_retry(
+                &AppType::Codex,
+                http::Method::POST,
+                "/responses",
+                json!({
+                    "model": "deepseek-v4-flash",
+                    "stream": true,
+                    "input": []
+                }),
+                HeaderMap::new(),
+                Extensions::new(),
+                vec![resolved],
+            )
+            .await
+        {
+            Ok(_) => panic!("local self-loop must be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(error.error, ProxyError::InvalidRequest(_)));
+        let status = forwarder.status.read().await;
+        assert_eq!(status.total_requests, 1);
+        assert_eq!(status.success_requests, 0);
+        assert_eq!(status.failed_requests, 1);
+        assert_eq!(status.success_rate, 0.0);
+    }
+
+    #[test]
     fn compaction_routes_to_current_session_model_not_arbitrary_fallback() {
         let mut provider = test_provider_with_type(None);
         provider.id = "codex-openai-router".to_string();
