@@ -35,3 +35,4 @@ mainWindow.js
 /scripts/codex-history-tool/release/
 /scripts/codex-history-tool/__pycache__/
 /scripts/codex-history-tool/*.spec
+/scripts/logs/
