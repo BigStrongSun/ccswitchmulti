@@ -15,10 +15,10 @@
 **Files:**
 - Modify: `src-tauri/src/proxy/forwarder.rs`
 
-- [ ] Add a regression test showing an expanded route with `targetProviderId` still carries the parent router's local base URL before target materialization.
-- [ ] Add a test for the forwarding-candidate builder that expects the effective candidate to inherit the target provider's external base URL and credentials while retaining parent attribution.
-- [ ] Run the targeted tests and verify they fail for the missing target materialization, not for test setup.
-- [ ] Commit the RED tests with a detailed diagnostic message.
+- [x] Add a regression test showing an expanded route with `targetProviderId` still carries the parent router's local base URL before target materialization.
+- [x] Add a test for the forwarding-candidate builder that expects the effective candidate to inherit the target provider's external base URL and credentials while retaining parent attribution.
+- [x] Run the targeted tests and verify they fail for the missing target materialization, not for test setup.
+- [x] Commit the RED tests with a detailed diagnostic message.
 
 ### Task 2: Make retry candidates effective providers
 
@@ -26,20 +26,20 @@
 - Modify: `src-tauri/src/proxy/forwarder.rs`
 - Reuse: `src-tauri/src/proxy/providers/codex.rs`
 
-- [ ] Change candidate construction to resolve referenced target providers through the router and call the existing `materialize_codex_routed_provider_from_target` contract before retry/account-pool expansion.
-- [ ] Return an explicit configuration error when a route references a missing target provider.
-- [ ] Keep route order, parent provider identity, model override, protocol metadata, and account-pool behavior unchanged.
-- [ ] Run the focused route tests until GREEN.
+- [x] Change candidate construction to resolve referenced target providers through the router and call the existing `materialize_codex_routed_provider_from_target` contract before retry/account-pool expansion.
+- [x] Return an explicit configuration error when a route references a missing target provider.
+- [x] Keep route order, parent provider identity, model override, protocol metadata, and account-pool behavior unchanged.
+- [x] Run the focused route tests until GREEN.
 
 ### Task 3: Reject every effective local-proxy self-loop as failure
 
 **Files:**
 - Modify: `src-tauri/src/proxy/forwarder.rs`
 
-- [ ] Add tests for matched-route and already-resolved-route local proxy URLs, not only route misses.
-- [ ] Centralize the validation so normal, raw passthrough, and unknown-endpoint forwarding reject a local effective upstream.
-- [ ] Emit a deterministic `route_error` reason and an actionable `InvalidRequest`/configuration failure.
-- [ ] Verify the error returns before a response shell can increment `success_requests`; assert the existing retry failure path increments failure accounting.
+- [x] Add tests for matched-route and already-resolved-route local proxy URLs, not only route misses.
+- [x] Centralize the validation so normal, raw passthrough, and unknown-endpoint forwarding reject a local effective upstream.
+- [x] Emit a deterministic `route_error` reason and an actionable `InvalidRequest`/configuration failure.
+- [x] Verify the error returns before a response shell can increment `success_requests`; assert the existing retry failure path increments failure accounting.
 
 ### Task 4: Document and verify the root fix
 
@@ -47,10 +47,10 @@
 - Modify: `memory.md`
 - Modify: `docs/superpowers/plans/2026-08-02-multirouter-self-loop-and-success-accounting.md`
 
-- [ ] Run `cargo fmt --check` and focused tests for all forwarding variants.
-- [ ] Run the relevant Rust library suite, documenting any unrelated live-port conflict separately.
-- [ ] Update project memory with the root cause, invariant, tests, and runtime validation evidence.
-- [ ] Commit implementation and documentation with a detailed message ending in the required attribution.
+- [x] Run `cargo fmt --check` and focused tests for all forwarding variants.
+- [x] Run the relevant Rust library suite, documenting any unrelated live-port conflict separately.
+- [x] Update project memory with the root cause, invariant, tests, and runtime validation evidence.
+- [x] Commit implementation and documentation with a detailed message ending in the required attribution.
 
 ### Task 5: Build, deploy, and validate the running CCSM
 

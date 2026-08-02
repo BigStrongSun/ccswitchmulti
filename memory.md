@@ -2627,3 +2627,11 @@
 - 已删除 GitHub Release `v3.19.0-2`（release id `363224997`，稳定版，25 个资产）和 `v3.19.0-3`（release id `363263087`，预发布版，19 个资产）；远端 Release 列表中已无 `v3.19*` 条目。
 - `gh api repos/BigStrongSun/ccswitchmulti/releases/latest` 已复核返回正式版 `v3.16.5-24`（release id `363261864`）。这也使基于 `releases/latest` 的 updater 下载入口回到 3.16.5 系列。
 - 为保留源码追溯和未来恢复依据，本次只删除 Release，不使用 `--cleanup-tag` 删除 tag；`v3.19.0-2` 指向提交 `15dae3db049e674e257ac0f2a02a97f94524efcb`，`v3.19.0-3` 的 annotated tag 为 `22ddd192f870563cd3f8d25b206a813a16182dde`。
+
+## 2026-08-02 Codex MultiRouter 15721 自环与假成功根修
+
+- 现场不是“上游慢”或前端卡住：`codex-router.log` 同一请求先显示 route 正确命中 DeepSeek/Qwen，但 `request_prepared.upstream_url` 仍为 `http://127.0.0.1:15721/...`；SQLite 请求日志随后在同一 session 中爆发数千条 400/502，错误 body 呈 `CC Switch local proxy failed` 递归嵌套。Codex 必须等到 SSE `response.completed` 才完成 Turn，所以递归返回的 HTTP 响应壳会造成后台看似成功、Desktop 持续思考/重试。
+- 源码根因在 retry/forward 两层契约错位：`build_forward_attempt_providers_preserving_codex_router_context` 先把 MultiRouter 展开成带 `codexResolvedRouteId` 的候选；`forward()` 看到该标记便跳过再次 route 解析和 `targetProviderId` 物化。于是 route ID 与归因正确，但实际 provider 仍继承父路由指向本机 15721 的 base URL。
+- 根修不是改配置或加重试次数：retry 候选在进入账号池与尝试循环前必须通过 `materialize_codex_forward_attempt_provider` 从数据库读取真实目标 provider，并复用 `materialize_codex_routed_provider_from_target`。这样 base URL、认证、apiFormat、reasoning 等来自目标，route 仅保留请求级模型映射、能力和父路由归因；目标丢失必须返回显式配置错误。
+- 防递归边界必须检查“最终有效上游”，不能只检查 route miss。正常 JSON、raw passthrough 和未知 raw endpoint 都在网络发送前调用同一拒绝逻辑；只有回环主机且端口等于 CCSM 当前实际监听端口才拒绝，避免误伤本机其它端口的 vLLM。拒绝使用非重试 `InvalidRequest`，回归证明 `total_requests=1`、`failed_requests=1`、`success_requests=0`。
+- 验证证据：forwarder 模块 119/119；全量库测试在真实 CCSM 占用 15721 时只有既有的硬绑定端口用例失败，跳过该用例后 2691 passed / 2 ignored；`cargo check --lib`、rustfmt、`git diff --check` 通过。任何后续路由重构必须保留“展开候选先物化 target，再以 resolved route 转发”和“有效上游不能回到当前监听端口”两条不变量。
