@@ -6079,23 +6079,33 @@ fn should_force_identity_encoding(
 }
 
 fn map_reqwest_send_error(error: reqwest::Error) -> ProxyError {
-    if error.is_timeout() {
+    map_reqwest_send_error_class(
+        error.is_connect(),
+        error.is_timeout(),
+        error.is_request(),
+        error.without_url().to_string(),
+    )
+}
+
+fn map_reqwest_send_error_class(
+    is_connect: bool,
+    is_timeout: bool,
+    is_request: bool,
+    detail: String,
+) -> ProxyError {
+    if is_connect {
+        // 连接阶段失败，包括 DNS/TCP/TLS 和 connect_timeout：请求尚未发出，可以安全重试。
+        ProxyError::ForwardFailed(format!("上游连接失败: {detail}"))
+    } else if is_timeout {
         // 超时发生在请求发出后，无法确定上游是否已经开始处理，不能自动重发。
-        ProxyError::ResponsePending(format!(
-            "上游响应等待超时（请求可能已在处理中）: {}",
-            error.without_url()
-        ))
-    } else if error.is_connect() {
-        // 连接阶段失败，请求还没有发到上游，可以安全交给 retry/failover。
-        ProxyError::ForwardFailed(format!("上游连接失败: {}", error.without_url()))
-    } else if error.is_request() {
+        ProxyError::ResponsePending(format!("上游响应等待超时（请求可能已在处理中）: {detail}"))
+    } else if is_request {
         // 请求构造阶段失败，没有发出任何字节。
-        ProxyError::ForwardFailed(format!("上游请求构造失败: {}", error.without_url()))
+        ProxyError::ForwardFailed(format!("上游请求构造失败: {detail}"))
     } else {
         // 请求体发送/响应读取阶段失败：可能已经部分或全部发出。
         ProxyError::ResponsePending(format!(
-            "上游请求发送或响应读取中断（请求可能已在处理中）: {}",
-            error.without_url()
+            "上游请求发送或响应读取中断（请求可能已在处理中）: {detail}"
         ))
     }
 }
@@ -8149,7 +8159,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_streaming_body_read_error_is_retryable_before_success_record() {
+    async fn non_streaming_body_read_error_is_pending_before_success_record() {
         let forwarder = test_forwarder(Duration::from_secs(1), Duration::from_secs(1));
         let response = ProxyResponse::streamed(
             StatusCode::OK,
@@ -8167,7 +8177,7 @@ mod tests {
             Err(err) => err,
         };
 
-        assert!(matches!(err, ProxyError::ForwardFailed(_)));
+        assert!(matches!(err, ProxyError::ResponsePending(_)));
     }
 
     #[tokio::test]
@@ -9136,6 +9146,27 @@ mod tests {
             ),
             ErrorCategory::NonRetryable
         );
+    }
+
+    #[test]
+    fn reqwest_connect_timeout_is_forward_failed_not_response_pending() {
+        let err =
+            map_reqwest_send_error_class(true, true, false, "error_sending_request".to_string());
+
+        assert!(matches!(
+            err,
+            ProxyError::ForwardFailed(message) if message.contains("上游连接失败")
+        ));
+    }
+
+    #[test]
+    fn reqwest_in_flight_timeout_stays_response_pending() {
+        let err = map_reqwest_send_error_class(false, true, false, "late result".to_string());
+
+        assert!(matches!(
+            err,
+            ProxyError::ResponsePending(message) if message.contains("上游响应等待超时")
+        ));
     }
 
     #[test]
