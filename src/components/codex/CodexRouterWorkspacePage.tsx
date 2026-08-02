@@ -5347,15 +5347,15 @@ function StatusTab({
     filters: { appType: "codex" },
     range,
     page: 0,
-    pageSize: 500,
-    options: { refetchInterval: 5000 },
+    pageSize: 50,
+    options: { refetchInterval: 30000 },
   });
   const {
     data: subagentUsage,
     isLoading: isLoadingSubagentUsage,
     error: subagentUsageError,
   } = useCodexSubagentUsageStats(range, 80, {
-    refetchInterval: 10000,
+    refetchInterval: 60000,
   });
   const [diagnostics, setDiagnostics] =
     useState<CodexMultiRouterDiagnostics | null>(null);

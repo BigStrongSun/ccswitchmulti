@@ -316,6 +316,9 @@ pub struct CodexHistorySessionListOptions {
     pub limit: Option<usize>,
     pub include_archived: Option<bool>,
     pub include_subagents: Option<bool>,
+    /// 轻量列表模式：只读 active SQLite，跳过 `sessions/archived_sessions`
+    /// 全量 rollout 扫描。子 Agent 统计等高频只读场景必须开启，避免阻塞 UI。
+    pub skip_rollout_metadata_scan: Option<bool>,
 }
 
 impl Default for CodexHistorySessionListOptions {
@@ -331,6 +334,7 @@ impl Default for CodexHistorySessionListOptions {
             limit: Some(80),
             include_archived: Some(false),
             include_subagents: Some(false),
+            skip_rollout_metadata_scan: None,
         }
     }
 }
@@ -749,36 +753,40 @@ pub fn list_codex_history_sessions(
     let conn = Connection::open(&active_db.path)
         .map_err(|e| AppError::Database(format!("open Codex active state DB failed: {e}")))?;
     let mut rows = load_codex_thread_history_rows(&conn)?;
-    // Codex Desktop 现在以 state DB 为 thread/list 的主数据源；而 backfill_state=complete
-    // 时不会再次全量扫描 JSONL。先以 rollout 为权威重建索引快照，避免旧 CCSM 修复只改
-    // provider 后仍留下 has_user_event/preview/recency 缺失的“幽灵历史”。
-    let mut rollout_metadata = scan_rollout_thread_metadata(&codex_dir)?;
-    let session_index_titles =
-        session_index_thread_titles(&read_jsonl_lines(&codex_dir.join("session_index.jsonl"))?);
-    let existing_ids: HashSet<String> = rows.iter().map(|row| row.id.clone()).collect();
-    let _thread_rows_to_insert = rollout_metadata
-        .iter()
-        .filter(|metadata| !existing_ids.contains(&metadata.id))
-        .count();
-    let mut metadata_repairs = Vec::new();
-    for metadata in &mut rollout_metadata {
-        if let Some(row) = rows.iter_mut().find(|row| row.id == metadata.id) {
-            let effective = rollout_metadata_preserving_persisted_title(
-                metadata,
-                Some(row),
-                session_index_titles.get(&metadata.id).map(String::as_str),
-            );
-            if apply_rollout_metadata_to_thread_row(row, &effective) {
-                metadata_repairs.push(effective);
+    if !options.skip_rollout_metadata_scan.unwrap_or(false) {
+        // Codex Desktop 现在以 state DB 为 thread/list 的主数据源；而 backfill_state=complete
+        // 时不会再次全量扫描 JSONL。先以 rollout 为权威重建索引快照，避免旧 CCSM 修复只改
+        // provider 后仍留下 has_user_event/preview/recency 缺失的“幽灵历史”。
+        let mut rollout_metadata = scan_rollout_thread_metadata(&codex_dir)?;
+        let session_index_titles =
+            session_index_thread_titles(&read_jsonl_lines(&codex_dir.join("session_index.jsonl"))?);
+        let existing_ids: HashSet<String> = rows.iter().map(|row| row.id.clone()).collect();
+        let _thread_rows_to_insert = rollout_metadata
+            .iter()
+            .filter(|metadata| !existing_ids.contains(&metadata.id))
+            .count();
+        let mut metadata_repairs = Vec::new();
+        for metadata in &mut rollout_metadata {
+            if let Some(row) = rows.iter_mut().find(|row| row.id == metadata.id) {
+                let effective = rollout_metadata_preserving_persisted_title(
+                    metadata,
+                    Some(row),
+                    session_index_titles.get(&metadata.id).map(String::as_str),
+                );
+                if apply_rollout_metadata_to_thread_row(row, &effective) {
+                    metadata_repairs.push(effective);
+                }
+            } else {
+                *metadata = rollout_metadata_preserving_persisted_title(
+                    metadata,
+                    None,
+                    session_index_titles.get(&metadata.id).map(String::as_str),
+                );
+                rows.push(thread_history_row_from_rollout(metadata));
             }
-        } else {
-            *metadata = rollout_metadata_preserving_persisted_title(
-                metadata,
-                None,
-                session_index_titles.get(&metadata.id).map(String::as_str),
-            );
-            rows.push(thread_history_row_from_rollout(metadata));
         }
+    } else {
+        log::debug!("[codex-history] lightweight list: skip rollout metadata scan");
     }
     let target_provider_candidates =
         codex_target_provider_candidates(live_config_model_provider.as_deref(), &rows);
@@ -5510,11 +5518,18 @@ mod tests {
         .expect("insert subagent row");
         drop(conn);
 
+        // 轻量列表必须忽略 rollout 目录，即使存在不可读/非 UTF-8 文件也不能让
+        // 高频子 Agent 统计命令失败或阻塞主线程。
+        let sessions_dir = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+        fs::write(sessions_dir.join("bad.jsonl"), [0xffu8, 0xfeu8]).expect("write bad rollout");
+
         let result = list_codex_history_sessions(CodexHistorySessionListOptions {
             codex_home: Some(codex_dir.to_string_lossy().to_string()),
             source_filter: Some("all".to_string()),
             limit: Some(10),
             include_subagents: Some(true),
+            skip_rollout_metadata_scan: Some(true),
             ..Default::default()
         })
         .expect("list history sessions");

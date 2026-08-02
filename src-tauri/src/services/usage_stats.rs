@@ -1081,6 +1081,18 @@ fn codex_subagent_bucket_has_tokens(bucket: &CodexSubagentUsageBucket) -> bool {
         || bucket.cache_creation_tokens > 0
 }
 
+/// 判断某个子 Agent 的 DB 用量是否已经包含可展示的 token。
+///
+/// 已含 token 时不必再打开 rollout JSONL 做只读回退；只有零 token 的官方 OAuth
+/// 会话才需要解析本地文件，避免高频状态轮询反复读大文件。
+fn codex_subagent_usage_has_tokens(
+    usage_by_model: &HashMap<String, CodexSubagentUsageBucket>,
+) -> bool {
+    usage_by_model
+        .values()
+        .any(codex_subagent_bucket_has_tokens)
+}
+
 /// 用 rollout token_count 修正数据库中只有请求数、没有 token 的子 Agent 用量。
 fn merge_codex_subagent_rollout_usage(
     usage_by_model: &mut HashMap<String, CodexSubagentUsageBucket>,
@@ -1255,7 +1267,9 @@ fn build_codex_subagent_usage_stats_from_history(
         .into_iter()
         .map(|item| {
             let mut usage_by_model = session_buckets.remove(&item.id).unwrap_or_default();
-            if codex_subagent_history_may_overlap_range(&item, start_date, end_date) {
+            if codex_subagent_history_may_overlap_range(&item, start_date, end_date)
+                && !codex_subagent_usage_has_tokens(&usage_by_model)
+            {
                 let rollout_usage = parse_codex_subagent_usage_from_rollout(
                     conn,
                     item.rollout_path.as_deref(),
@@ -1399,6 +1413,7 @@ impl Database {
             include_archived: Some(false),
             include_subagents: Some(true),
             source_filter: Some("all".to_string()),
+            skip_rollout_metadata_scan: Some(true),
             ..Default::default()
         })?;
         let conn = lock_conn!(self.conn);
@@ -3624,6 +3639,25 @@ mod tests {
         assert_eq!(stats.model_stats[0].total_tokens, 0);
 
         Ok(())
+    }
+
+    #[test]
+    fn codex_subagent_usage_has_tokens_only_skips_zero_token_db_buckets() {
+        let mut usage_by_model: HashMap<String, CodexSubagentUsageBucket> = HashMap::new();
+        usage_by_model.insert(
+            "gpt-5.5".to_string(),
+            CodexSubagentUsageBucket {
+                request_count: 2,
+                ..Default::default()
+            },
+        );
+        assert!(!codex_subagent_usage_has_tokens(&usage_by_model));
+
+        usage_by_model
+            .get_mut("gpt-5.5")
+            .expect("bucket should exist")
+            .input_tokens = 10;
+        assert!(codex_subagent_usage_has_tokens(&usage_by_model));
     }
 
     #[test]
