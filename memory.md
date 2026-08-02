@@ -45,6 +45,7 @@
 - 修复：`auto_failover_enabled=false` 时不再把超时全部置 0，首个 SSE 字节改用 `non_streaming_timeout`（默认 600s）作为硬上限，静默超时继续生效；新增 `ProxyError::ResponsePending`，请求体已写入、上游已返回响应头、响应体/首字节超时等可能已在途的失败映射为 429 + `Retry-After: 30` + `cc_switch_response_pending`，不参与 retry/failover；连接阶段失败仍保留 502/可重试语义。
 - CCSM 托管的 Codex provider 显式写 `request_max_retries=0`、`stream_max_retries=0`，关闭 Codex 端整轮采样请求自动重发；CCSM failover 只对明确未发送的 connect 错误切换下一家。
 - 验证：`cargo check --lib`、新增回归测试、`cargo fmt --check`、`git diff --check` 通过；`cargo test --lib` 2688 passed / 2 ignored / 1 failed，唯一失败是本机 15721 被运行中 CCSM 占用。
+- 构建补漏：Tauri `--bundles msi` 报 `light.exe ICE38: Component codex_history_repairer installs to user profile. It must use a registry key under HKCU as its KeyPath, not a file.` 根因是自定义 `wix/per-user-main.wxs` 的 `binaries` 循环仍用 `<File KeyPath="yes"/>`；per-user 安装目录下额外 binary 必须改用 HKCU `RegistryValue KeyPath="yes"`，文件 `KeyPath="no"`。已按此修复模板。
 
 ## 2026-08-01 Codex 历史修复保留重命名标题根修
 
