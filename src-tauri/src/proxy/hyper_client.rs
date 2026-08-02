@@ -275,23 +275,27 @@ pub async fn send_request(
         .filter(|cases| !cases.cases.is_empty())
     {
         // Primary path: use raw write + hyper handshake for exact header casing
-        let result = tokio::time::timeout(
-            timeout,
+        let result = super::response_grace::await_with_response_grace(
             send_raw_request(&uri, &method, &headers, original_cases, &body, proxy_url),
+            timeout,
+            super::response_grace::RESPONSE_PENDING_GRACE,
+            || {
+                ProxyError::ResponsePending(format!(
+                    "上游请求等待超时: {}s（请求可能已发到上游）",
+                    timeout.as_secs()
+                ))
+            },
         )
-        .await
-        .map_err(|_| {
-            ProxyError::ResponsePending(format!(
-                "上游请求等待超时: {}s（请求可能已发到上游）",
-                timeout.as_secs()
-            ))
-        })?;
+        .await;
 
         match result {
             Ok(resp) => return Ok(resp),
             Err(e) => {
                 if proxy_url.is_some() {
                     // Don't bypass configured proxy with direct connect fallback
+                    return Err(e);
+                }
+                if matches!(e, ProxyError::ResponsePending(_)) {
                     return Err(e);
                 }
                 log::warn!("[HyperClient] Raw write failed, falling back to hyper-util: {e}");
@@ -311,15 +315,23 @@ pub async fn send_request(
     *req.extensions_mut() = original_extensions;
 
     let client = global_hyper_client();
-    let resp = tokio::time::timeout(timeout, client.request(req))
-        .await
-        .map_err(|_| {
+    let resp = super::response_grace::await_with_response_grace(
+        async {
+            client
+                .request(req)
+                .await
+                .map_err(|e| ProxyError::ForwardFailed(format!("上游请求失败: {e}")))
+        },
+        timeout,
+        super::response_grace::RESPONSE_PENDING_GRACE,
+        || {
             ProxyError::ResponsePending(format!(
                 "上游请求等待超时: {}s（请求可能已发到上游）",
                 timeout.as_secs()
             ))
-        })?
-        .map_err(|e| ProxyError::ForwardFailed(format!("上游请求失败: {e}")))?;
+        },
+    )
+    .await?;
 
     Ok(ProxyResponse::Hyper(resp))
 }

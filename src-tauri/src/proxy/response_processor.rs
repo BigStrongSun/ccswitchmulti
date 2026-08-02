@@ -89,14 +89,18 @@ pub(crate) async fn read_decoded_body(
     let raw_bytes = if body_timeout.is_zero() {
         response.bytes().await?
     } else {
-        tokio::time::timeout(body_timeout, response.bytes())
-            .await
-            .map_err(|_| {
+        super::response_grace::await_with_response_grace(
+            response.bytes(),
+            body_timeout,
+            super::response_grace::RESPONSE_PENDING_GRACE,
+            || {
                 ProxyError::ResponsePending(format!(
                     "响应体读取超时: {}s（上游发完响应头后 body 未到达）",
                     body_timeout.as_secs()
                 ))
-            })??
+            },
+        )
+        .await?
     };
 
     log::debug!(

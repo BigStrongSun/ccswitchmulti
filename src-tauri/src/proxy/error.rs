@@ -3,6 +3,8 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+
+pub(crate) const RESPONSE_PENDING_GRACE_SECS: u64 = 30;
 use serde_json::json;
 use thiserror::Error;
 
@@ -194,7 +196,7 @@ impl ProxyError {
     /// 自动重发，否则上游可能已经收到并正在执行同一请求。
     pub fn retry_after_secs(&self) -> Option<u64> {
         match self {
-            ProxyError::ResponsePending(_) => Some(30),
+            ProxyError::ResponsePending(_) => Some(RESPONSE_PENDING_GRACE_SECS),
             _ => None,
         }
     }

@@ -4369,14 +4369,18 @@ impl RequestForwarder {
         let status = response.status();
         let headers = response.headers().clone();
         let body_timeout = self.non_streaming_timeout;
-        let body = tokio::time::timeout(body_timeout, response.bytes())
-            .await
-            .map_err(|_| {
+        let body = super::response_grace::await_with_response_grace(
+            response.bytes(),
+            body_timeout,
+            super::response_grace::RESPONSE_PENDING_GRACE,
+            || {
                 ProxyError::ResponsePending(format!(
                     "响应体读取超时: {}s（上游发完响应头后 body 未到达）",
                     body_timeout.as_secs()
                 ))
-            })??;
+            },
+        )
+        .await?;
 
         Ok(ProxyResponse::buffered(status, headers, body))
     }
@@ -4448,17 +4452,31 @@ impl RequestForwarder {
         let mut utf8_remainder = Vec::new();
 
         loop {
+            let next_result = async {
+                match stream.next().await {
+                    Some(chunk) => Ok(Some(chunk.map_err(|error| {
+                        ProxyError::ForwardFailed(format!(
+                            "Failed while validating Responses stream start: {error}"
+                        ))
+                    })?)),
+                    None => Ok(None),
+                }
+            };
             let next = if self.streaming_first_byte_timeout.is_zero() {
-                stream.next().await
+                next_result.await?
             } else {
-                tokio::time::timeout(self.streaming_first_byte_timeout, stream.next())
-                    .await
-                    .map_err(|_| {
+                super::response_grace::await_with_response_grace(
+                    next_result,
+                    self.streaming_first_byte_timeout,
+                    super::response_grace::RESPONSE_PENDING_GRACE,
+                    || {
                         ProxyError::ResponsePending(format!(
                             "Responses stream produced no semantic output within {}s",
                             self.streaming_first_byte_timeout.as_secs()
                         ))
-                    })?
+                    },
+                )
+                .await?
             };
 
             let Some(chunk) = next else {
@@ -4479,11 +4497,6 @@ impl RequestForwarder {
                         .to_string(),
                 ));
             };
-            let chunk = chunk.map_err(|error| {
-                ProxyError::ForwardFailed(format!(
-                    "Failed while validating Responses stream start: {error}"
-                ))
-            })?;
             crate::proxy::sse::append_utf8_safe(&mut parse_buffer, &mut utf8_remainder, &chunk);
             replay_chunks.push(chunk);
 
@@ -4529,23 +4542,36 @@ impl RequestForwarder {
         let timeout = self.streaming_first_byte_timeout;
         let mut stream = Box::pin(response.bytes_stream());
 
-        let first = tokio::time::timeout(timeout, stream.next())
-            .await
-            .map_err(|_| {
-                ProxyError::ResponsePending(format!(
-                    "流式响应首包超时: {}s（上游已返回响应头但未返回数据）",
-                    timeout.as_secs()
-                ))
-            })?;
+        let first_result = async {
+            match stream.next().await {
+                Some(chunk) => Ok(Some(chunk.map_err(|e| {
+                    ProxyError::ForwardFailed(format!("读取流式响应首包失败: {e}"))
+                })?)),
+                None => Ok(None),
+            }
+        };
+        let first = if timeout.is_zero() {
+            first_result.await?
+        } else {
+            super::response_grace::await_with_response_grace(
+                first_result,
+                timeout,
+                super::response_grace::RESPONSE_PENDING_GRACE,
+                || {
+                    ProxyError::ResponsePending(format!(
+                        "流式响应首包超时: {}s（上游已返回响应头但未返回数据）",
+                        timeout.as_secs()
+                    ))
+                },
+            )
+            .await?
+        };
 
         let Some(first) = first else {
             return Err(ProxyError::ForwardFailed(
                 "流式响应在首包到达前结束".to_string(),
             ));
         };
-
-        let first =
-            first.map_err(|e| ProxyError::ForwardFailed(format!("读取流式响应首包失败: {e}")))?;
 
         if let Some(message) = retryable_error_from_primed_sse_chunk(&first) {
             return Err(ProxyError::UpstreamError {
@@ -5811,28 +5837,39 @@ async fn send_forwarder_upstream_request(
         for (key, value) in &headers {
             request = request.header(key, value);
         }
-        let send = request.body(body_bytes).send();
+        let send = async {
+            request
+                .body(body_bytes)
+                .send()
+                .await
+                .map_err(map_reqwest_send_error)
+        };
         let send_result = if request_is_streaming {
             let header_timeout = if streaming_first_byte_timeout.is_zero() {
                 timeout
             } else {
                 streaming_first_byte_timeout
             };
-            match tokio::time::timeout(header_timeout, send).await {
-                Ok(result) => result,
-                Err(_) => {
-                    return Err(ProxyError::ResponsePending(format!(
-                        "流式响应首包超时: {}s（上游未返回响应头）",
-                        header_timeout.as_secs()
-                    )));
-                }
+            if header_timeout.is_zero() {
+                send.await
+            } else {
+                super::response_grace::await_with_response_grace(
+                    send,
+                    header_timeout,
+                    super::response_grace::RESPONSE_PENDING_GRACE,
+                    || {
+                        ProxyError::ResponsePending(format!(
+                            "流式响应首包超时: {}s（上游未返回响应头）",
+                            header_timeout.as_secs()
+                        ))
+                    },
+                )
+                .await
             }
         } else {
             send.await
         };
-        return send_result
-            .map(ProxyResponse::Reqwest)
-            .map_err(map_reqwest_send_error);
+        return send_result.map(ProxyResponse::Reqwest);
     }
 
     let uri: http::Uri = url.parse().map_err(|e| {
