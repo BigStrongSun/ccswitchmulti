@@ -235,6 +235,45 @@ fn retryable_failure_affects_provider_health(provider: &Provider, error: &ProxyE
 }
 
 impl RequestForwarder {
+    /// 把 retry 层已经展开的 Codex route 候选物化为真实目标 provider。
+    ///
+    /// `resolve_codex_model_routed_providers` 为了保留 route 顺序和父路由归因，会先
+    /// 生成带 `codexResolvedRouteId` 的 request-local provider。这个标记同时会让
+    /// `forward()` 跳过再次解析，因此必须在进入 account pool / retry loop 前完成
+    /// targetProviderId 物化，否则候选会错误继承父 MultiRouter 的本地 base_url。
+    fn materialize_codex_forward_attempt_provider(
+        &self,
+        app_type: &AppType,
+        provider: &Provider,
+    ) -> Result<Provider, ProxyError> {
+        if !matches!(app_type, AppType::Codex) {
+            return Ok(provider.clone());
+        }
+        let Some(target_provider_id) = super::providers::codex_route_target_provider_id(provider)
+        else {
+            return Ok(provider.clone());
+        };
+        let target_provider = self
+            .router
+            .get_provider_by_id(target_provider_id, app_type.as_str())
+            .map_err(|err| {
+                ProxyError::ConfigError(format!(
+                    "读取 Codex retry route 目标供应商 '{target_provider_id}' 失败: {err}"
+                ))
+            })?
+            .ok_or_else(|| {
+                ProxyError::ConfigError(format!(
+                    "Codex retry route 引用了不存在的目标供应商 '{target_provider_id}'"
+                ))
+            })?;
+        Ok(
+            super::providers::materialize_codex_routed_provider_from_target(
+                provider,
+                &target_provider,
+            ),
+        )
+    }
+
     async fn expand_codex_account_pool(
         &self,
         app_type: &AppType,
@@ -955,9 +994,18 @@ impl RequestForwarder {
             }
         }
 
-        let attempt_providers = build_forward_attempt_providers_preserving_codex_router_context(
-            app_type, &providers, &body,
-        );
+        let route_attempt_providers =
+            build_forward_attempt_providers_preserving_codex_router_context(
+                app_type, &providers, &body,
+            );
+        let attempt_providers = route_attempt_providers
+            .iter()
+            .map(|provider| self.materialize_codex_forward_attempt_provider(app_type, provider))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| ForwardError {
+                error,
+                provider: route_attempt_providers.first().cloned(),
+            })?;
         let attempt_providers = self
             .expand_codex_account_pool(app_type, &headers, attempt_providers)
             .await;
@@ -1868,7 +1916,11 @@ impl RequestForwarder {
         }
         // 使用适配器提取 base_url
         let mut base_url = adapter.extract_base_url(provider)?;
-        if codex_route_missed && codex_base_url_points_to_local_proxy(&base_url) {
+        if let Err(error) = reject_codex_effective_local_proxy_upstream(
+            app_type,
+            &base_url,
+            &format!("model '{request_model_for_log}'"),
+        ) {
             let request_model = body
                 .get("model")
                 .and_then(|value| value.as_str())
@@ -1883,13 +1935,14 @@ impl RequestForwarder {
                         ("model", request_model.to_string()),
                         ("outer_provider", outer_provider_id.clone()),
                         ("fallback_base_url", base_url.clone()),
-                        ("reason", "route_miss_local_proxy_fallback".to_string()),
+                        (
+                            "reason",
+                            "effective_upstream_local_proxy_self_loop".to_string(),
+                        ),
                     ],
                 );
             }
-            return Err(ProxyError::InvalidRequest(format!(
-                "Codex router provider did not match model '{request_model}', and its fallback base_url points to the local proxy. Refusing to forward recursively; add a route/defaultRouteId or switch away from the router provider."
-            )));
+            return Err(error);
         }
 
         let is_full_url = provider
@@ -3563,7 +3616,11 @@ impl RequestForwarder {
         }
 
         let base_url = adapter.extract_base_url(provider)?;
-        if codex_route_missed && codex_base_url_points_to_local_proxy(&base_url) {
+        if let Err(error) = reject_codex_effective_local_proxy_upstream(
+            app_type,
+            &base_url,
+            &format!("raw endpoint '{endpoint}'"),
+        ) {
             if let Some(trace_id) = codex_trace_id.as_deref() {
                 super::codex_router_log::append_event(
                     "raw_route_error",
@@ -3574,13 +3631,14 @@ impl RequestForwarder {
                         ("model", request_model_for_log.clone()),
                         ("outer_provider", outer_provider_id.clone()),
                         ("fallback_base_url", base_url.clone()),
-                        ("reason", "route_miss_local_proxy_fallback".to_string()),
+                        (
+                            "reason",
+                            "effective_upstream_local_proxy_self_loop".to_string(),
+                        ),
                     ],
                 );
             }
-            return Err(ProxyError::InvalidRequest(format!(
-                "Codex router provider did not resolve raw endpoint '{endpoint}', and its fallback base_url points to the local proxy. Refusing to forward recursively."
-            )));
+            return Err(error);
         }
 
         let is_full_url = provider
@@ -4163,8 +4221,6 @@ impl RequestForwarder {
             .settings_config
             .get("codexResolvedRouteId")
             .is_some();
-        let codex_router_configured =
-            matches!(app_type, AppType::Codex) && codex_provider_has_routing_config(&provider);
         let routed_provider =
             if matches!(app_type, AppType::Codex) && !provider_is_resolved_codex_route {
                 resolve_codex_raw_passthrough_route_provider(&provider, route_body)
@@ -4200,17 +4256,14 @@ impl RequestForwarder {
         } else {
             None
         };
-        let codex_route_missed = codex_router_configured
-            && !provider_is_resolved_codex_route
-            && routed_provider.is_none();
         let provider = routed_provider.unwrap_or(provider);
         let adapter = get_adapter(app_type);
         let base_url = adapter.extract_base_url(&provider)?;
-        if codex_route_missed && codex_base_url_points_to_local_proxy(&base_url) {
-            return Err(ProxyError::InvalidRequest(format!(
-                "Codex router provider did not resolve raw endpoint '{endpoint}', and its fallback base_url points to the local proxy. Refusing to forward recursively."
-            )));
-        }
+        reject_codex_effective_local_proxy_upstream(
+            app_type,
+            &base_url,
+            &format!("raw endpoint '{endpoint}'"),
+        )?;
         Ok(provider)
     }
 
@@ -6207,16 +6260,30 @@ fn should_make_codex_v2_collaboration_plaintext(
         && super::providers::codex_multirouter_needs_plaintext_v2_collaboration(router_provider)
 }
 
-/// 判断 fallback base_url 是否指向本机代理入口。
+/// 判断 effective base_url 是否精确指向当前 CC Switch 代理入口。
 ///
-/// 这里不依赖端口固定值，因为历史配置里出现过 15721 Rust proxy 和 15722
-/// Node sidecar；只要 router provider 在 route miss 后回到本机地址，就有递归或
-/// 未运行服务导致超时的风险。
+/// 只匹配当前监听端口，不能把其它 loopback 服务一概拒绝：用户可能合法地把
+/// route 指向本机 vLLM。端口由 server 启动时写入 http_client 的共享状态。
 fn codex_base_url_points_to_local_proxy(base_url: &str) -> bool {
-    let normalized = base_url.trim().to_ascii_lowercase();
-    normalized.contains("://127.0.0.1")
-        || normalized.contains("://localhost")
-        || normalized.contains("://[::1]")
+    super::http_client::proxy_points_to_loopback(base_url)
+}
+
+/// 在任何网络发送之前拒绝 Codex 有效上游回到当前代理监听端口。
+///
+/// 这个边界不依赖 route 是否命中；命中但未物化 target provider 正是本次事故的
+/// 触发方式。返回 `InvalidRequest` 后 retry 层按非重试异常记录 failed_requests，
+/// 不会得到可被误计为成功的递归 HTTP 响应壳。
+fn reject_codex_effective_local_proxy_upstream(
+    app_type: &AppType,
+    base_url: &str,
+    request_context: &str,
+) -> Result<(), ProxyError> {
+    if matches!(app_type, AppType::Codex) && codex_base_url_points_to_local_proxy(base_url) {
+        return Err(ProxyError::InvalidRequest(format!(
+            "Codex effective upstream for {request_context} points to the running local proxy ({base_url}). Refusing to forward recursively; repair the route target provider or switch away from the router provider."
+        )));
+    }
+    Ok(())
 }
 
 /// 为未知 `/v1/*` raw passthrough 解析 Codex MultiRouter route。
@@ -7147,8 +7214,8 @@ mod tests {
         assert!(codex_base_url_points_to_local_proxy(
             "http://127.0.0.1:15721/v1"
         ));
-        assert!(codex_base_url_points_to_local_proxy(
-            "http://localhost:15722/v1"
+        assert!(!codex_base_url_points_to_local_proxy(
+            "http://localhost:8000/v1"
         ));
         assert!(!codex_base_url_points_to_local_proxy(
             "https://api.openai.com/v1"
@@ -7302,7 +7369,10 @@ mod tests {
             .materialize_codex_forward_attempt_provider(&AppType::Codex, &route_attempts[0])
             .expect("materialize target provider");
 
-        assert_eq!(effective.settings_config["base_url"], "https://api.deepseek.com");
+        assert_eq!(
+            effective.settings_config["base_url"],
+            "https://api.deepseek.com"
+        );
         assert_eq!(effective.settings_config["api_key"], "target-secret");
         assert_eq!(
             effective.settings_config["codexRouterParentProviderId"],
@@ -7321,7 +7391,7 @@ mod tests {
         resolved.id = "codex-multirouter::route::broken".to_string();
         resolved.name = "Broken local route".to_string();
         resolved.settings_config = json!({
-            "base_url": "http://127.0.0.1:0/v1",
+            "base_url": "http://127.0.0.1:15721/v1",
             "api_key": "unused",
             "codexResolvedRouteId": "broken",
             "codexResolvedRouteMatched": true,

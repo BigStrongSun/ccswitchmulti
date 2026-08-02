@@ -280,7 +280,7 @@ fn system_proxy_points_to_loopback() -> bool {
         .any(|value| proxy_points_to_loopback(&value))
 }
 
-fn proxy_points_to_loopback(value: &str) -> bool {
+pub(crate) fn proxy_points_to_loopback(value: &str) -> bool {
     fn host_is_loopback(host: &str) -> bool {
         if host.eq_ignore_ascii_case("localhost") {
             return true;
