@@ -332,6 +332,31 @@ pub async fn process_response(
     }
 }
 
+/// 与 `process_response` 相同，但允许调用方用请求的 `stream` 标志兜底。
+///
+/// 部分上游（尤其 OpenAI Official Responses 透传）不会标记 `content-type:
+/// text/event-stream`，但 body 实际是 SSE。此时若只按响应头判断，CCSM 会把
+/// 整个流式响应读进内存；body 稍晚被截断或读取失败时就会变成误导性的 502。
+/// 显式 JSON 仍走整包缓冲，以便转换/错误信封识别。
+pub async fn process_response_with_stream_hint(
+    response: ProxyResponse,
+    ctx: &RequestContext,
+    state: &ProxyState,
+    parser_config: &UsageParserConfig,
+    connection_guard: Option<ActiveConnectionGuard>,
+    request_is_streaming: bool,
+) -> Result<Response, ProxyError> {
+    if should_stream_response(&response, request_is_streaming) {
+        Ok(handle_streaming(response, ctx, state, parser_config, connection_guard).await)
+    } else {
+        handle_non_streaming(response, ctx, state, parser_config, connection_guard).await
+    }
+}
+
+fn should_stream_response(response: &ProxyResponse, request_is_streaming: bool) -> bool {
+    response.is_sse() || (request_is_streaming && !response.is_json())
+}
+
 // ============================================================================
 // SSE 使用量收集器
 // ============================================================================
@@ -1249,5 +1274,38 @@ mod tests {
             Decimal::from_str("1.5").unwrap()
         );
         Ok(())
+    }
+
+    #[test]
+    fn stream_hint_streams_unmarked_responses_when_request_streams() {
+        let response =
+            ProxyResponse::buffered(axum::http::StatusCode::OK, HeaderMap::new(), Bytes::new());
+
+        assert!(should_stream_response(&response, true));
+        assert!(!should_stream_response(&response, false));
+    }
+
+    #[test]
+    fn stream_hint_buffers_explicit_json_even_for_streaming_requests() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/json"),
+        );
+        let response = ProxyResponse::buffered(axum::http::StatusCode::OK, headers, Bytes::new());
+
+        assert!(!should_stream_response(&response, true));
+    }
+
+    #[test]
+    fn stream_hint_streams_sse_regardless_of_request_stream_flag() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("text/event-stream"),
+        );
+        let response = ProxyResponse::buffered(axum::http::StatusCode::OK, headers, Bytes::new());
+
+        assert!(should_stream_response(&response, false));
     }
 }

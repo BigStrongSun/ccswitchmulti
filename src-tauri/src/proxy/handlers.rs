@@ -40,8 +40,9 @@ use super::{
     },
     response_processor::{
         create_logged_passthrough_stream, create_usage_collector, process_response,
-        read_decoded_body, strip_entity_headers_for_rebuilt_body,
-        strip_hop_by_hop_response_headers, usage_logging_enabled, SseUsageCollector,
+        process_response_with_stream_hint, read_decoded_body,
+        strip_entity_headers_for_rebuilt_body, strip_hop_by_hop_response_headers,
+        usage_logging_enabled, SseUsageCollector,
     },
     server::ProxyState,
     sse::{strip_sse_field, take_sse_block},
@@ -236,12 +237,13 @@ pub async fn handle_raw_openai_passthrough(
     let connection_guard = result.connection_guard.take();
     ctx.outbound_model = result.outbound_model.take();
     ctx.provider = result.provider;
-    process_response(
+    process_response_with_stream_hint(
         result.response,
         &ctx,
         &state,
         &OPENAI_PARSER_CONFIG,
         connection_guard,
+        is_stream,
     )
     .await
 }
@@ -1289,12 +1291,13 @@ pub async fn handle_chat_completions(
         .await;
     }
 
-    process_response(
+    process_response_with_stream_hint(
         response,
         &ctx,
         &state,
         &OPENAI_PARSER_CONFIG,
         connection_guard,
+        is_stream,
     )
     .await
 }
@@ -2765,12 +2768,13 @@ async fn handle_responses_for_app(
         .await;
     }
 
-    process_response(
+    process_response_with_stream_hint(
         response,
         &ctx,
         &state,
         &CODEX_PARSER_CONFIG,
         connection_guard,
+        is_stream,
     )
     .await
 }
@@ -2932,12 +2936,13 @@ async fn handle_responses_compact_for_app(
         .await;
     }
 
-    process_response(
+    process_response_with_stream_hint(
         response,
         &ctx,
         &state,
         &CODEX_PARSER_CONFIG,
         connection_guard,
+        is_stream,
     )
     .await
 }
