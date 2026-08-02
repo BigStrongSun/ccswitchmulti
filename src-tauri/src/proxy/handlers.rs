@@ -3430,8 +3430,11 @@ async fn handle_codex_chat_to_responses_transform(
             "Cache-Control",
             axum::http::HeaderValue::from_static("no-cache"),
         );
-        let body =
-            axum::body::Body::from(responses_response_to_completed_sse(&responses_response)?);
+        // 客户端仍要求 SSE 时，合成完整的 Responses 事件生命周期
+        // （created → in_progress → output items → completed），而不是只发
+        // 一个 response.completed——Codex 需要 created 之前的增量事件才会把
+        // 这次响应记录为正常的 assistant turn。
+        let body = axum::body::Body::from(responses_response_to_full_sse(&responses_response)?);
         return Ok((headers, body).into_response());
     }
 
@@ -3711,8 +3714,10 @@ fn build_codex_anthropic_sse_response(
 ///
 /// 参数:
 /// - `response`: 已完成的 Responses JSON。
+///
 /// 返回:
 /// - 可以直接返回给 Codex 流式客户端的 SSE 字节。
+///
 /// 副作用:
 /// - 无。该函数只序列化最终响应，不重新解释输出内容。
 fn responses_response_to_completed_sse(response: &Value) -> Result<Bytes, ProxyError> {
@@ -3725,6 +3730,179 @@ fn responses_response_to_completed_sse(response: &Value) -> Result<Bytes, ProxyE
     Ok(Bytes::from(format!(
         "event: response.completed\ndata: {payload}\n\n"
     )))
+}
+
+/// 提取缓冲 Responses item 的 tool arguments 字符串。
+///
+/// Chat→Responses 转换对 function_call 存 JSON 字符串，对 tool_search_call 存
+/// 已解析对象；流式转换器发送 `function_call_arguments.done` 时统一用字符串。
+fn buffered_tool_call_arguments(item: &Value) -> String {
+    match item.get("arguments") {
+        Some(Value::String(value)) => value.clone(),
+        Some(value) => serde_json::to_string(value).unwrap_or_default(),
+        None => String::new(),
+    }
+}
+
+/// 构造缓冲 tool item 的 `output_item.added` 形态。
+///
+/// 真实流式转换器先发 `in_progress` item（arguments/input 为空），完成后再发完整
+/// `output_item.done`。缓冲重放也沿用这一状态迁移，避免客户端把 added 当成已结束。
+fn buffered_tool_call_added_item(item: &Value, item_type: &str) -> Value {
+    let mut added = item.clone();
+    if let Some(obj) = added.as_object_mut() {
+        obj.insert("status".to_string(), json!("in_progress"));
+        match item_type {
+            "function_call" => {
+                obj.insert("arguments".to_string(), json!(""));
+            }
+            "custom_tool_call" => {
+                obj.insert("input".to_string(), json!(""));
+            }
+            "tool_search_call" => {
+                obj.insert("arguments".to_string(), json!({}));
+            }
+            _ => {}
+        }
+    }
+    added
+}
+
+/// 把非流式 Responses JSON 展开成完整的 Responses SSE 事件生命周期。
+///
+/// 客户端声明 `stream: true` 但上游因 hosted 工具循环走缓冲路径时，只回一个
+/// `response.completed` 会让 Codex 无法把响应记为正常的 assistant turn（issue #24）。
+/// 这里按流式语义重放：`response.created` → `response.in_progress` → 每个 output
+/// item 的 `output_item.added` → 内容增量/done → `response.completed`，与
+/// `streaming_codex_chat` 转换器的输出形状保持一致。
+///
+/// 参数:
+/// - `response`: 已完成的 Responses JSON（`transform_codex_chat` 转换结果）。
+///
+/// 返回:
+/// - 可直接返回给 Codex 流式客户端的完整 SSE 事件序列。
+///
+/// 副作用:
+/// - 无。
+fn responses_response_to_full_sse(response: &Value) -> Result<Bytes, ProxyError> {
+    use super::providers::codex_responses_sse::{
+        custom_tool_call_input_delta, custom_tool_call_input_done, function_call_arguments_done,
+        message_close, message_content_part_added, message_item_added, output_item_added,
+        output_item_done, output_text_delta, reasoning_close, reasoning_item_added,
+        reasoning_summary_part_added, reasoning_summary_text_delta, response_completed,
+        response_created, response_in_progress,
+    };
+
+    let mut events: Vec<Bytes> = Vec::new();
+    let base = json!({
+        "id": response.get("id").cloned().unwrap_or_else(|| json!("resp_ccswitch")),
+        "object": "response",
+        "created_at": response.get("created_at").cloned().unwrap_or_else(|| json!(0)),
+        "status": "in_progress",
+        "model": response.get("model").cloned().unwrap_or_else(|| json!("")),
+        "output": [],
+        "usage": response.get("usage").cloned().unwrap_or_else(|| json!({
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "output_tokens_details": { "reasoning_tokens": 0 }
+        }))
+    });
+    events.push(response_created(&base));
+    events.push(response_in_progress(&base));
+
+    let mut output_index: u32 = 0;
+    if let Some(items) = response.get("output").and_then(|v| v.as_array()) {
+        for item in items {
+            let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let item_id = item
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            match item_type {
+                "message" => {
+                    let text = item
+                        .pointer("/content/0/text")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    // 与 streaming_codex_chat 的增量路径保持一致：
+                    // added(in_progress) → content part → 一次性 delta → close。
+                    events.push(message_item_added(output_index, &item_id));
+                    events.push(message_content_part_added(output_index, &item_id));
+                    if !text.is_empty() {
+                        events.push(output_text_delta(output_index, &item_id, text));
+                    }
+                    events.extend(message_close(output_index, &item_id, text).0);
+                }
+                "reasoning" => {
+                    let text = item
+                        .pointer("/summary/0/text")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    events.push(reasoning_item_added(output_index, &item_id));
+                    events.push(reasoning_summary_part_added(output_index, &item_id));
+                    if !text.is_empty() {
+                        events.push(reasoning_summary_text_delta(output_index, &item_id, text));
+                    }
+                    events.extend(reasoning_close(output_index, &item_id, text).0);
+                }
+                "function_call" => {
+                    let arguments = buffered_tool_call_arguments(item);
+                    events.push(output_item_added(
+                        output_index,
+                        &buffered_tool_call_added_item(item, item_type),
+                    ));
+                    events.push(function_call_arguments_done(
+                        output_index,
+                        &item_id,
+                        &arguments,
+                    ));
+                    events.push(output_item_done(output_index, item));
+                }
+                "custom_tool_call" => {
+                    let input = item.get("input").and_then(|v| v.as_str()).unwrap_or("");
+                    events.push(output_item_added(
+                        output_index,
+                        &buffered_tool_call_added_item(item, item_type),
+                    ));
+                    if !input.is_empty() {
+                        events.push(custom_tool_call_input_delta(output_index, &item_id, input));
+                    }
+                    events.push(custom_tool_call_input_done(output_index, &item_id, input));
+                    events.push(output_item_done(output_index, item));
+                }
+                "tool_search_call" => {
+                    let arguments = buffered_tool_call_arguments(item);
+                    events.push(output_item_added(
+                        output_index,
+                        &buffered_tool_call_added_item(item, item_type),
+                    ));
+                    events.push(function_call_arguments_done(
+                        output_index,
+                        &item_id,
+                        &arguments,
+                    ));
+                    events.push(output_item_done(output_index, item));
+                }
+                _ => {
+                    // 未知 item 只保证 added + done，不让客户端卡在 in_progress。
+                    events.push(output_item_added(output_index, item));
+                    events.push(output_item_done(output_index, item));
+                }
+            }
+            output_index += 1;
+        }
+    }
+
+    events.push(response_completed(response));
+
+    Ok(Bytes::from(
+        events
+            .iter()
+            .map(|event| String::from_utf8_lossy(event).into_owned())
+            .collect::<String>(),
+    ))
 }
 
 /// Wrap a completed Responses value as an SSE stream containing exactly one
@@ -4998,8 +5176,9 @@ mod tests {
         resolve_codex_image_generation_provider, resolve_external_codex_router_target,
         resolve_forward_error_provider_for_logging, resolve_forward_error_route_provider,
         responses_response_to_compaction_sse, responses_response_to_completed_sse,
-        responses_sse_to_response_value, should_handle_as_codex_client,
-        should_use_claude_transform_streaming, transform, upstream_body_parse_error,
+        responses_response_to_full_sse, responses_sse_to_response_value,
+        should_handle_as_codex_client, should_use_claude_transform_streaming, transform,
+        upstream_body_parse_error,
     };
     use crate::{
         app_config::AppType,
@@ -5026,6 +5205,27 @@ mod tests {
     use serde_json::{json, Value};
     use std::{collections::HashMap, sync::Arc};
     use tokio::sync::RwLock;
+
+    fn parse_responses_sse_events(text: &str) -> Vec<(String, Value)> {
+        text.split("\n\n")
+            .filter(|block| !block.trim().is_empty())
+            .filter_map(|block| {
+                let mut event = None;
+                let mut data = None;
+                for line in block.lines() {
+                    if let Some(value) = line.strip_prefix("event: ") {
+                        event = Some(value.to_string());
+                    }
+                    if let Some(value) = line.strip_prefix("data: ") {
+                        data = Some(value.to_string());
+                    }
+                }
+                let event = event?;
+                let payload: Value = serde_json::from_str(&data?).ok()?;
+                Some((event, payload))
+            })
+            .collect()
+    }
 
     #[test]
     fn codex_catalog_models_response_keeps_catalog_and_openai_data() {
@@ -5847,6 +6047,294 @@ data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n
             payload["response"]["output"][0]["content"][0]["text"],
             "done"
         );
+    }
+
+    #[test]
+    fn full_sse_wrapper_emits_complete_responses_lifecycle() {
+        let response = json!({
+            "id": "resp_hosted_tool",
+            "object": "response",
+            "created_at": 1234,
+            "status": "completed",
+            "model": "kimi-k3",
+            "output": [
+                {
+                    "id": "rs_resp_hosted_tool",
+                    "type": "reasoning",
+                    "summary": [{ "type": "summary_text", "text": "thinking" }]
+                },
+                {
+                    "id": "resp_hosted_tool_msg",
+                    "type": "message",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "done", "annotations": [] }]
+                },
+                {
+                    "id": "fc_call_0",
+                    "type": "function_call",
+                    "status": "completed",
+                    "call_id": "call_0",
+                    "name": "web_search",
+                    "arguments": r#"{"query":"test"}"#
+                }
+            ],
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "total_tokens": 15,
+                "output_tokens_details": { "reasoning_tokens": 3 }
+            }
+        });
+
+        let body = responses_response_to_full_sse(&response).unwrap();
+        let text = std::str::from_utf8(&body).expect("valid sse utf8");
+
+        // 生命周期顺序：created → in_progress → items → completed
+        assert!(text.starts_with("event: response.created\n"));
+        let created_idx = text.find("response.created").expect("created event");
+        let in_progress_idx = text
+            .find("response.in_progress")
+            .expect("in_progress event");
+        let reasoning_added_idx = text
+            .find("response.output_item.added")
+            .expect("reasoning added");
+        let message_added_idx = text
+            .find("\"id\":\"resp_hosted_tool_msg\"")
+            .expect("message item");
+        let function_done_idx = text
+            .find("response.function_call_arguments.done")
+            .expect("function args done");
+        let completed_idx = text.find("response.completed").expect("completed event");
+        assert!(created_idx < in_progress_idx);
+        assert!(in_progress_idx < reasoning_added_idx);
+        assert!(reasoning_added_idx < message_added_idx);
+        assert!(message_added_idx < function_done_idx);
+        assert!(function_done_idx < completed_idx);
+
+        // 每个 item 都有 added 与 done 对（只统计 event: 行，data 里的 type 字段不计）
+        assert_eq!(
+            text.matches("event: response.output_item.added\n").count(),
+            3,
+            "one added per output item"
+        );
+        assert_eq!(
+            text.matches("event: response.output_item.done\n").count(),
+            3,
+            "one done per output item"
+        );
+        assert_eq!(
+            text.matches("event: response.reasoning_summary_text.done\n")
+                .count(),
+            1
+        );
+        assert_eq!(
+            text.matches("event: response.output_text.done\n").count(),
+            1
+        );
+        // 文本以一次性 delta 重放（与真实流式增量路径一致）
+        assert_eq!(
+            text.matches("event: response.output_text.delta\n").count(),
+            1
+        );
+        assert_eq!(
+            text.matches("event: response.reasoning_summary_text.delta\n")
+                .count(),
+            1
+        );
+
+        // completed 事件携带完整最终 response
+        let data_line = text
+            .lines()
+            .rev()
+            .find_map(|line| line.strip_prefix("data: "))
+            .expect("completed data line");
+        let payload: Value = serde_json::from_str(data_line).expect("sse payload json");
+        assert_eq!(payload["type"], "response.completed");
+        assert_eq!(payload["response"]["status"], "completed");
+        assert_eq!(payload["response"]["usage"]["output_tokens"], 5);
+
+        // added 使用 in_progress 形态，done 使用最终 completed 形态。
+        let events = parse_responses_sse_events(&text);
+        let function_added = events
+            .iter()
+            .position(|(event, payload)| {
+                event == "response.output_item.added"
+                    && payload.pointer("/item/id").and_then(Value::as_str) == Some("fc_call_0")
+            })
+            .expect("function added event");
+        let function_done = events
+            .iter()
+            .position(|(event, payload)| {
+                event == "response.output_item.done"
+                    && payload.pointer("/item/id").and_then(Value::as_str) == Some("fc_call_0")
+            })
+            .expect("function done event");
+        assert!(function_added < function_done);
+        assert_eq!(events[function_added].1["item"]["status"], "in_progress");
+        assert_eq!(events[function_added].1["item"]["arguments"], "");
+        assert_eq!(events[function_done].1["item"]["status"], "completed");
+        assert_eq!(
+            events[function_done].1["item"]["arguments"],
+            r#"{"query":"test"}"#
+        );
+    }
+
+    #[test]
+    fn full_sse_wrapper_replays_custom_and_tool_search_input_lifecycle() {
+        let response = json!({
+            "id": "resp_tools",
+            "status": "completed",
+            "model": "kimi-k3",
+            "output": [
+                {
+                    "id": "ctc_custom_0",
+                    "type": "custom_tool_call",
+                    "status": "completed",
+                    "call_id": "call_custom",
+                    "name": "codex_app__automation_update",
+                    "input": r#"{"id":"1"}"#
+                },
+                {
+                    "id": "tsc_0",
+                    "type": "tool_search_call",
+                    "status": "completed",
+                    "call_id": "call_search",
+                    "execution": "client",
+                    "arguments": { "query": "find tools", "limit": 5 }
+                }
+            ]
+        });
+
+        let body = responses_response_to_full_sse(&response).unwrap();
+        let text = std::str::from_utf8(&body).expect("valid sse utf8");
+        let events = parse_responses_sse_events(&text);
+
+        let custom_added = events
+            .iter()
+            .position(|(event, payload)| {
+                event == "response.output_item.added"
+                    && payload.pointer("/item/id").and_then(Value::as_str) == Some("ctc_custom_0")
+            })
+            .expect("custom added event");
+        let custom_input_done = events
+            .iter()
+            .position(|(event, payload)| {
+                event == "response.custom_tool_call_input.done"
+                    && payload["item_id"] == "ctc_custom_0"
+            })
+            .expect("custom input done event");
+        let custom_done = events
+            .iter()
+            .position(|(event, payload)| {
+                event == "response.output_item.done"
+                    && payload.pointer("/item/id").and_then(Value::as_str) == Some("ctc_custom_0")
+            })
+            .expect("custom done event");
+        assert!(custom_added < custom_input_done);
+        assert!(custom_input_done < custom_done);
+        assert_eq!(events[custom_added].1["item"]["status"], "in_progress");
+        assert_eq!(events[custom_added].1["item"]["input"], "");
+        assert_eq!(events[custom_input_done].1["input"], r#"{"id":"1"}"#);
+        assert_eq!(events[custom_done].1["item"]["status"], "completed");
+        assert_eq!(events[custom_done].1["item"]["input"], r#"{"id":"1"}"#);
+
+        let search_added = events
+            .iter()
+            .position(|(event, payload)| {
+                event == "response.output_item.added"
+                    && payload.pointer("/item/id").and_then(Value::as_str) == Some("tsc_0")
+            })
+            .expect("tool_search added event");
+        let search_args_done = events
+            .iter()
+            .position(|(event, payload)| {
+                event == "response.function_call_arguments.done" && payload["item_id"] == "tsc_0"
+            })
+            .expect("tool_search arguments done event");
+        let search_done = events
+            .iter()
+            .position(|(event, payload)| {
+                event == "response.output_item.done"
+                    && payload.pointer("/item/id").and_then(Value::as_str) == Some("tsc_0")
+            })
+            .expect("tool_search done event");
+        assert!(search_added < search_args_done);
+        assert!(search_args_done < search_done);
+        assert_eq!(events[search_added].1["item"]["status"], "in_progress");
+        assert_eq!(events[search_added].1["item"]["arguments"], json!({}));
+        let search_arguments: Value = serde_json::from_str(
+            events[search_args_done].1["arguments"]
+                .as_str()
+                .expect("arguments string"),
+        )
+        .expect("arguments json");
+        assert_eq!(search_arguments, json!({"limit": 5, "query": "find tools"}));
+        assert_eq!(events[search_done].1["item"]["status"], "completed");
+        assert_eq!(
+            events[search_done].1["item"]["arguments"]["query"],
+            "find tools"
+        );
+    }
+
+    #[test]
+    fn full_sse_wrapper_handles_empty_output_and_fallback_ids() {
+        let response = json!({
+            "id": "resp_empty",
+            "status": "completed",
+            "model": "kimi-k3"
+        });
+
+        let body = responses_response_to_full_sse(&response).unwrap();
+        let text = std::str::from_utf8(&body).expect("valid sse utf8");
+
+        assert!(text.contains("event: response.created\n"));
+        assert!(text.contains("event: response.in_progress\n"));
+        // 无 output：只有 created/in_progress/completed 三个事件
+        assert_eq!(text.matches("event: response.").count(), 3);
+        // completed 事件是最后一块（事件块以空行结尾）
+        let completed_block = text.trim_end().rsplit("\n\n").next().unwrap_or("");
+        assert!(completed_block.starts_with("event: response.completed\n"));
+    }
+
+    #[test]
+    fn full_sse_wrapper_round_trips_through_responses_aggregator() {
+        let response = json!({
+            "id": "resp_round_trip",
+            "status": "completed",
+            "model": "kimi-k3",
+            "output": [
+                {
+                    "id": "rs_resp_round_trip",
+                    "type": "reasoning",
+                    "summary": [{ "type": "summary_text", "text": "thinking" }]
+                },
+                {
+                    "id": "resp_round_trip_msg",
+                    "type": "message",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "done", "annotations": [] }]
+                }
+            ],
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "total_tokens": 15,
+                "output_tokens_details": { "reasoning_tokens": 3 }
+            }
+        });
+
+        let body = responses_response_to_full_sse(&response).unwrap();
+        let text = std::str::from_utf8(&body).expect("valid sse utf8");
+        let parsed = responses_sse_to_response_value(text).expect("round-trip parse");
+
+        assert_eq!(parsed["id"], "resp_round_trip");
+        assert_eq!(parsed["status"], "completed");
+        assert_eq!(parsed["usage"]["output_tokens"], 5);
+        assert_eq!(parsed["output"][0]["type"], "reasoning");
+        assert_eq!(parsed["output"][1]["type"], "message");
+        assert_eq!(parsed["output"][1]["content"][0]["text"], "done");
     }
 
     #[test]
