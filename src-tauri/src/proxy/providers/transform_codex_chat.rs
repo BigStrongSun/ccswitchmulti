@@ -9,6 +9,7 @@ use super::codex_chat_common::{
     response_function_call_item, response_function_call_item_with_namespace,
     split_leading_think_block,
 };
+use super::hosted_tools::web_search::{self, HostedWebSearchConfig};
 use crate::provider::{CodexCacheConfig, CodexChatReasoningConfig};
 use crate::proxy::{
     error::ProxyError,
@@ -53,6 +54,7 @@ pub(crate) enum CodexToolKind {
     Namespace,
     Custom,
     ToolSearch,
+    HostedWebSearch,
 }
 
 #[derive(Debug, Clone)]
@@ -68,20 +70,34 @@ pub(crate) struct CodexToolContext {
     seen_chat_names: HashSet<String>,
     chat_name_to_spec: HashMap<String, CodexToolSpec>,
     namespace_name_to_chat_name: HashMap<(String, String), String>,
+    hosted_web_search: Option<HostedWebSearchConfig>,
 }
 
 impl CodexToolContext {
+    /// 返回转换后要暴露给 Chat 上游的工具定义。
     pub(crate) fn chat_tools(&self) -> &[Value] {
         &self.chat_tools
     }
 
+    /// 按 Chat 工具名查找原始 Codex 工具元数据。
     pub(crate) fn lookup_chat_name(&self, chat_name: &str) -> Option<&CodexToolSpec> {
         self.chat_name_to_spec.get(chat_name)
     }
 
+    /// 判断 Chat 工具名是否来自 Codex custom tool。
     pub(crate) fn is_custom_tool_chat_name(&self, chat_name: &str) -> bool {
         self.lookup_chat_name(chat_name)
             .is_some_and(|spec| matches!(&spec.kind, CodexToolKind::Custom))
+    }
+
+    /// 判断请求是否声明了 hosted `web_search`，供流式/非流式桥接路径复用。
+    pub(crate) fn has_hosted_web_search(&self) -> bool {
+        self.hosted_web_search.is_some()
+    }
+
+    /// 返回 Codex 原始 hosted `web_search` 的安全配置子集。
+    pub(crate) fn hosted_web_search_config(&self) -> Option<&HostedWebSearchConfig> {
+        self.hosted_web_search.as_ref()
     }
 
     pub(crate) fn chat_name_for_response_function(
@@ -198,6 +214,21 @@ impl CodexToolContext {
         self.add_chat_tool(TOOL_SEARCH_PROXY_NAME.to_string(), spec, chat_tool);
     }
 
+    /// 把 OpenAI hosted `web_search` 暴露为第三方 Chat 上游可调用的普通 function。
+    fn add_hosted_web_search_tool(&mut self, tool: &Value) {
+        self.hosted_web_search = Some(web_search::config_from_tool(tool));
+        let spec = CodexToolSpec {
+            kind: CodexToolKind::HostedWebSearch,
+            name: web_search::WEB_SEARCH_FUNCTION_NAME.to_string(),
+            namespace: None,
+        };
+        self.add_chat_tool(
+            web_search::WEB_SEARCH_FUNCTION_NAME.to_string(),
+            spec,
+            web_search::chat_tool_definition(),
+        );
+    }
+
     fn add_namespace_tool(&mut self, namespace_tool: &Value) {
         let Some(namespace) = namespace_tool.get("name").and_then(|v| v.as_str()) else {
             return;
@@ -229,6 +260,7 @@ impl CodexToolContext {
                 Some("function") => self.add_function_tool(tool, None),
                 Some("custom") => self.add_custom_tool(tool),
                 Some("tool_search") => self.add_tool_search_tool(),
+                Some("web_search") => self.add_hosted_web_search_tool(tool),
                 Some("namespace") => self.add_namespace_tool(tool),
                 _ => {}
             },
@@ -1636,6 +1668,14 @@ fn responses_tool_choice_to_chat(tool_choice: &Value, tool_context: &CodexToolCo
                 }
             })
         }
+        Value::Object(obj) if obj.get("type").and_then(|v| v.as_str()) == Some("web_search") => {
+            json!({
+                "type": "function",
+                "function": {
+                    "name": web_search::WEB_SEARCH_FUNCTION_NAME
+                }
+            })
+        }
         Value::Object(obj) if obj.get("type").and_then(|v| v.as_str()) == Some("custom") => {
             let name = obj.get("name").and_then(|v| v.as_str()).unwrap_or("");
             json!({
@@ -1959,6 +1999,9 @@ pub(crate) fn response_tool_call_item_from_chat_name(
         Some(spec) if spec.kind == CodexToolKind::Custom => response_custom_tool_call_item(
             item_id, status, call_id, &spec.name, arguments, reasoning,
         ),
+        Some(spec) if spec.kind == CodexToolKind::HostedWebSearch => {
+            response_function_call_item(item_id, status, call_id, &spec.name, arguments, reasoning)
+        }
         Some(spec) => response_function_call_item_with_namespace(
             item_id,
             status,
@@ -2937,6 +2980,66 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("mcp__codex_apps__gmail"));
+    }
+
+    #[test]
+    fn responses_request_to_chat_maps_hosted_web_search_to_function_tool() {
+        let input = json!({
+            "model": "deepseek-v4-flash",
+            "tools": [{
+                "type": "web_search",
+                "external_web_access": true,
+                "search_content_types": ["text", "image"]
+            }],
+            "tool_choice": {"type": "web_search"},
+            "input": "Search for current OpenAI docs."
+        });
+
+        let result = responses_to_chat_completions(input).unwrap();
+        let tools = result["tools"].as_array().expect("tools");
+
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["type"], "function");
+        assert_eq!(tools[0]["function"]["name"], "web_search");
+        assert_eq!(tools[0]["function"]["parameters"]["required"][0], "query");
+        assert!(
+            tools
+                .iter()
+                .all(|tool| tool.get("type").and_then(Value::as_str) != Some("web_search")),
+            "hosted web_search must not be sent to third-party Chat upstream"
+        );
+        assert_eq!(result["tool_choice"]["type"], "function");
+        assert_eq!(result["tool_choice"]["function"]["name"], "web_search");
+    }
+
+    #[test]
+    fn responses_request_to_chat_leaves_non_hosted_function_tool_unchanged() {
+        let input = json!({
+            "model": "deepseek-v4-flash",
+            "tools": [{
+                "type": "function",
+                "name": "lookup",
+                "description": "Look up a value.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"}
+                    },
+                    "required": ["id"]
+                }
+            }],
+            "tool_choice": {"type": "function", "name": "lookup"},
+            "input": "Use lookup."
+        });
+
+        let result = responses_to_chat_completions(input).unwrap();
+
+        assert_eq!(result["tools"][0]["function"]["name"], "lookup");
+        assert_eq!(
+            result["tools"][0]["function"]["description"],
+            "Look up a value."
+        );
+        assert_eq!(result["tool_choice"]["function"]["name"], "lookup");
     }
 
     #[test]
@@ -4889,6 +4992,50 @@ mod tests {
             "Gmail search emails"
         );
         assert_eq!(result["output"][0]["arguments"]["limit"], 10);
+    }
+
+    #[test]
+    fn chat_response_to_responses_restores_hosted_web_search_function_call() {
+        let request = json!({
+            "model": "deepseek-v4-flash",
+            "tools": [{
+                "type": "web_search",
+                "external_web_access": true,
+                "search_content_types": ["text"]
+            }],
+            "input": "Search the web."
+        });
+        let context = build_codex_tool_context_from_request(&request);
+        let chat = json!({
+            "id": "chatcmpl_web_search",
+            "object": "chat.completion",
+            "created": 123,
+            "model": "deepseek-v4-flash",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_web_search_1",
+                        "type": "function",
+                        "function": {
+                            "name": "web_search",
+                            "arguments": "{\"query\":\"OpenAI Codex web search\",\"count\":5}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+
+        let result = chat_completion_to_response_with_context(chat, &context).unwrap();
+
+        assert_eq!(result["output"][0]["type"], "function_call");
+        assert_eq!(result["output"][0]["call_id"], "call_web_search_1");
+        assert_eq!(result["output"][0]["name"], "web_search");
+        assert_eq!(
+            result["output"][0]["arguments"],
+            r#"{"count":5,"query":"OpenAI Codex web search"}"#
+        );
     }
 
     #[test]

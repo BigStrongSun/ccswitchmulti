@@ -1189,6 +1189,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restores_hosted_web_search_on_streamed_tool_call_items() {
+        let request = json!({
+            "model": "deepseek-v4-flash",
+            "tools": [{
+                "type": "web_search",
+                "external_web_access": true,
+                "search_content_types": ["text"]
+            }],
+            "input": "Search the web."
+        });
+        let context =
+            super::super::transform_codex_chat::build_codex_tool_context_from_request(&request);
+        let output = collect_with_context(
+            vec![
+                "data: {\"id\":\"chatcmpl_web_search\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_web_search_1\",\"type\":\"function\",\"function\":{\"name\":\"web_search\"}}]}}]}\n\n",
+                "data: {\"id\":\"chatcmpl_web_search\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"query\\\":\\\"OpenAI Codex web search\\\",\\\"count\\\":5}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+                "data: [DONE]\n\n",
+            ],
+            context,
+        )
+        .await;
+
+        assert!(output.contains("\"type\":\"function_call\""));
+        assert!(!output.contains("\"type\":\"tool_search_call\""));
+        assert!(output.contains("\"name\":\"web_search\""));
+        assert!(
+            output.contains(r#""arguments":"{\"count\":5,\"query\":\"OpenAI Codex web search\"}""#)
+        );
+    }
+
+    #[tokio::test]
     async fn stream_error_emits_failed_without_completed() {
         let upstream = stream::iter(vec![Err::<Bytes, std::io::Error>(std::io::Error::other(
             "boom",

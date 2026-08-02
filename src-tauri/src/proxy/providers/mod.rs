@@ -25,6 +25,7 @@ pub mod copilot_model_map;
 mod gemini;
 pub(crate) mod gemini_schema;
 pub mod gemini_shadow;
+pub(crate) mod hosted_tools;
 pub mod models;
 pub mod openai_compat;
 pub(crate) mod reasoning_bridge;

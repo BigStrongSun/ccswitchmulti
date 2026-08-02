@@ -24,7 +24,9 @@ use super::{
         codex_chat_history::{
             record_responses_sse_stream, record_responses_sse_stream_with_request,
         },
-        get_adapter, get_claude_api_format, openai_compat,
+        get_adapter, get_claude_api_format,
+        hosted_tools::bridge::HOSTED_TOOL_LOOP_HEADER,
+        openai_compat,
         streaming::create_anthropic_sse_stream,
         streaming_codex_anthropic::{
             create_responses_sse_stream_from_anthropic_with_context,
@@ -3097,6 +3099,7 @@ async fn handle_codex_chat_to_responses_transform(
     tool_context: transform_codex_chat::CodexToolContext,
 ) -> Result<axum::response::Response, ProxyError> {
     let status = response.status();
+    let hosted_tool_loop_response = response.headers().contains_key(HOSTED_TOOL_LOOP_HEADER);
 
     if !status.is_success() {
         // 上游 Chat 错误体形状与 Responses 不一致（如 MiniMax 的 base_resp、自定义 detail 字段）；
@@ -3105,7 +3108,7 @@ async fn handle_codex_chat_to_responses_transform(
         return handle_codex_chat_error_response(response, ctx, status).await;
     }
 
-    if is_stream || response.is_sse() {
+    if (is_stream || response.is_sse()) && !hosted_tool_loop_response {
         let stream = response.bytes_stream();
         let sse_stream = create_responses_sse_stream_from_chat_with_context(stream, tool_context);
         let sse_stream = record_responses_sse_stream(sse_stream, state.codex_chat_history.clone());
@@ -3296,6 +3299,21 @@ async fn handle_codex_chat_to_responses_transform(
     strip_hop_by_hop_response_headers(&mut response_headers);
     // Builder::header 是 append 语义；不先 remove 会和上游 Content-Type 双发。
     response_headers.remove(axum::http::header::CONTENT_TYPE);
+
+    if is_stream && hosted_tool_loop_response {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            "Content-Type",
+            axum::http::HeaderValue::from_static("text/event-stream"),
+        );
+        headers.insert(
+            "Cache-Control",
+            axum::http::HeaderValue::from_static("no-cache"),
+        );
+        let body =
+            axum::body::Body::from(responses_response_to_completed_sse(&responses_response)?);
+        return Ok((headers, body).into_response());
+    }
 
     let mut builder = axum::response::Response::builder().status(status);
     for (key, value) in response_headers.iter() {
@@ -3567,6 +3585,26 @@ fn build_codex_anthropic_sse_response(
 
     let body = axum::body::Body::from_stream(logged_stream);
     Ok((headers, body).into_response())
+}
+
+/// 把非流式 Responses JSON 包装成最小 Responses SSE 完成事件。
+///
+/// 参数:
+/// - `response`: 已完成的 Responses JSON。
+/// 返回:
+/// - 可以直接返回给 Codex 流式客户端的 SSE 字节。
+/// 副作用:
+/// - 无。该函数只序列化最终响应，不重新解释输出内容。
+fn responses_response_to_completed_sse(response: &Value) -> Result<Bytes, ProxyError> {
+    let payload = serde_json::to_string(&json!({
+        "type": "response.completed",
+        "response": response
+    }))
+    .map_err(|e| ProxyError::TransformError(format!("Failed to serialize Responses SSE: {e}")))?;
+
+    Ok(Bytes::from(format!(
+        "event: response.completed\ndata: {payload}\n\n"
+    )))
 }
 
 /// 把上游 Chat Completions 的错误响应转换为 Responses API 错误形状。
@@ -4701,8 +4739,9 @@ mod tests {
         external_openai_api_unsupported_response, mark_external_openai_headers,
         resolve_codex_image_generation_provider, resolve_external_codex_router_target,
         resolve_forward_error_provider_for_logging, resolve_forward_error_route_provider,
-        responses_sse_to_response_value, should_handle_as_codex_client,
-        should_use_claude_transform_streaming, transform, upstream_body_parse_error,
+        responses_response_to_completed_sse, responses_sse_to_response_value,
+        should_handle_as_codex_client, should_use_claude_transform_streaming, transform,
+        upstream_body_parse_error,
     };
     use crate::{
         app_config::AppType,
@@ -5520,6 +5559,36 @@ data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"upstr
 data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n\n";
 
         assert!(responses_sse_to_response_value(sse).is_err());
+    }
+
+    #[test]
+    fn completed_sse_wrapper_contains_final_responses_payload() {
+        let response = json!({
+            "id": "resp_hosted_tool",
+            "status": "completed",
+            "model": "deepseek-v4-flash",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": "done" }]
+            }]
+        });
+
+        let body = responses_response_to_completed_sse(&response).unwrap();
+        let text = std::str::from_utf8(&body).expect("valid sse utf8");
+
+        assert!(text.starts_with("event: response.completed\n"));
+        let data_line = text
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .expect("data line");
+        let payload: Value = serde_json::from_str(data_line).expect("sse payload json");
+        assert_eq!(payload["type"], "response.completed");
+        assert_eq!(payload["response"]["id"], "resp_hosted_tool");
+        assert_eq!(
+            payload["response"]["output"][0]["content"][0]["text"],
+            "done"
+        );
     }
 
     #[test]
