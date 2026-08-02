@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-08-02 本地 main 漏合核对与 v3.19.0-4 release 重建
+
+- 核对基线：本地 `main` HEAD 为 `efc20bab`，相对 `fork/main`（`445a3041`）领先 5 个提交：`41630094` stream hint、`3ecf02ef` Codex remote compact v2、`c4691f19` memory、`74a57591` v3.19.0-4 发布记录、`efc20bab` pre-stream retry 恢复。
+- 远程压缩修复已确认在本地 main：v2 检测限定 `responses_compaction_v2` 或 `/responses + compaction_trigger`；原生 Responses 请求保持 `/v1/responses` 并合成唯一 `ocx1:` compaction item；Chat 路径同样合成；后续请求把 `ocx1:` 还原为 readable summary；官方 route 保留原生透传。`cargo test --lib compaction` 12/12，`managed_codex_retry_budget` 1/1，`response_processor` 11/11，`pnpm typecheck` 通过。
+- 本地 active branches 中没有比 main 更新的未合 bugfix：`bigstrongsun/fix-v3.19-codex-pool-session-affinity` 和 `fix/3.16.5-22-gpt-live` 只是旧线/已合入变体；官方 `v3.19.1` fetch 后检查 release notes 与提交，没有与 Codex remote compaction 直接相关的新修复。
+- 使用 `scripts/export-latest-ccswitchmulti.ps1` 从 `efc20bab` 重建本地 release 到 `最新版ccswitchmulti`。版本仍为 `3.19.0-4`，NSIS setup、portable zip、raw exe 与 `latest.json` 均已导出；SHA256SUMS 逐项校验通过，Tauri signing key 存在，setup `.sig` 与 `latest.json` 已生成。
+
 ## 2026-08-02 CCSwitchMulti v3.19.0-4 正式发布
 
 - GitHub Release：`https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.19.0-4`；`draft=false`、`prerelease=false`，共 19 个资产。
