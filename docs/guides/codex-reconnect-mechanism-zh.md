@@ -14,6 +14,7 @@
 | `streaming_idle_timeout` | 默认 `120s` | SSE 已建立后连续没有数据块的静默超时 |
 | Auto Failover | 关闭 | CCSM 只尝试一个 Provider / Route，不切换模型 |
 | Response Grace | `30s` | 可能已在途的请求，超时后继续保留上游 future 等 30 秒 |
+| CCSM 传输重试 | `2` 次 | 连接/请求构造阶段失败时，代理内同一 Provider 最多再试 2 次（200/600ms） |
 
 重连原则只有一句话：
 
@@ -87,9 +88,9 @@ sequenceDiagram
 
 ### 阶段说明
 
-**阶段 1：流建立前失败，可重试。**
+**阶段 1：流建立前失败，CCSM 先做代理内重试。**
 
-Codex 还没拿到 2xx，也没有收到任何 `output_item.done`，此时重新发一次是安全的。CCSM 把连接错误按 502/可重试错误返回后，Codex 的 `request_max_retries=2` 会重新发请求。
+Codex 还没拿到 2xx，也没有收到任何 `output_item.done`，此时重新发一次是安全的。CCSM 在发送层对“连接失败 / 请求构造失败 / 发送阶段失败”这类还没收到上游 HTTP 状态的错误，先按 200/600ms 退避重试同一 Provider 最多 2 次；仍失败才返回 502。Codex 的 `request_max_retries=2` 作为第二层兜底，继续用客户端身份重新 POST。
 
 **阶段 2：请求可能已在途，不重发，只等待。**
 
@@ -128,8 +129,9 @@ sequenceDiagram
 
     alt 阶段 1：Chat 请求建立前失败
         A--xP: 连接失败 / timeout / 5xx
-        P--xC: 可重试错误
-        C->>C: request_max_retries=2
+        P->>P: CCSM 同一 Provider 重试 2 次（200/600ms）
+        P--xC: 仍失败才返回可重试错误
+        C->>C: request_max_retries=2（第二层）
         C->>P: 重新 POST /v1/responses
         P->>A: 重新 POST /v1/chat/completions
     else 阶段 2：Chat 响应可能已在途
@@ -167,7 +169,7 @@ sequenceDiagram
 
 | 故障窗口 | 是否重连 | 谁负责 | 结果 |
 | --- | --- | --- | --- |
-| 流建立前连接/5xx 失败 | 是 | Codex `request_max_retries=2` | 重新 POST 同一请求 |
+| 流建立前连接/请求构造失败 | 是 | CCSM 传输重试 2 次 + Codex `request_max_retries=2` | 代理内重发同一请求；仍失败才回退给 Codex |
 | 上游可能已在途 | 否，等待 | CCSM `response_grace=30s` | 迟到结果正常交付；否则 429 |
 | 429 ResponsePending | 否 | Codex `retry_429=false` | turn 结束，不自动重发 |
 | SSE 已建立、未收到 completed | 否 | Codex `stream_max_retries=0` | turn 报错，避免重复历史 |
@@ -191,5 +193,6 @@ sequenceDiagram
 - CCSM 托管 retry 配置：`cc-switch/src-tauri/src/codex_config.rs`
 - CCSM failover 关闭时的超时策略：`cc-switch/src-tauri/src/proxy/handler_context.rs`
 - CCSM Response Grace：`cc-switch/src-tauri/src/proxy/response_grace.rs`
+- CCSM 同一 Provider 传输重试：`cc-switch/src-tauri/src/proxy/forwarder.rs`
 - CCSM 流式响应识别：`cc-switch/src-tauri/src/proxy/response_processor.rs`
 - CCSM Responses→Chat 转换：`cc-switch/src-tauri/src/proxy/forwarder.rs`、`cc-switch/src-tauri/src/proxy/providers/codex.rs`
