@@ -292,6 +292,8 @@ export interface CodexHistorySessionListOptions {
   limit?: number | null;
   includeArchived?: boolean | null;
   includeSubagents?: boolean | null;
+  skipRolloutMetadataScan?: boolean | null;
+  forceRolloutMetadataScan?: boolean | null;
 }
 
 export interface CodexHistoryValueCount {

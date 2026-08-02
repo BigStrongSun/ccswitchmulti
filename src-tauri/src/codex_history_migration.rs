@@ -26,6 +26,7 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use toml_edit::DocumentMut;
 
@@ -319,6 +320,9 @@ pub struct CodexHistorySessionListOptions {
     /// 轻量列表模式：只读 active SQLite，跳过 `sessions/archived_sessions`
     /// 全量 rollout 扫描。子 Agent 统计等高频只读场景必须开启，避免阻塞 UI。
     pub skip_rollout_metadata_scan: Option<bool>,
+    /// 强制重新解析 rollout 元数据，绕过 mtime/size/TTL 缓存。
+    /// 仅用于显式“刷新历史元数据”或历史修复等必须看到最新现场的操作。
+    pub force_rollout_metadata_scan: Option<bool>,
 }
 
 impl Default for CodexHistorySessionListOptions {
@@ -335,6 +339,7 @@ impl Default for CodexHistorySessionListOptions {
             include_archived: Some(false),
             include_subagents: Some(false),
             skip_rollout_metadata_scan: None,
+            force_rollout_metadata_scan: None,
         }
     }
 }
@@ -754,10 +759,15 @@ pub fn list_codex_history_sessions(
         .map_err(|e| AppError::Database(format!("open Codex active state DB failed: {e}")))?;
     let mut rows = load_codex_thread_history_rows(&conn)?;
     if !options.skip_rollout_metadata_scan.unwrap_or(false) {
+        let force_scan = options.force_rollout_metadata_scan.unwrap_or(false);
         // Codex Desktop 现在以 state DB 为 thread/list 的主数据源；而 backfill_state=complete
         // 时不会再次全量扫描 JSONL。先以 rollout 为权威重建索引快照，避免旧 CCSM 修复只改
         // provider 后仍留下 has_user_event/preview/recency 缺失的“幽灵历史”。
-        let mut rollout_metadata = scan_rollout_thread_metadata(&codex_dir)?;
+        let mut rollout_metadata = if force_scan {
+            scan_rollout_thread_metadata_force(&codex_dir)?
+        } else {
+            scan_rollout_thread_metadata(&codex_dir)?
+        };
         let session_index_titles =
             session_index_thread_titles(&read_jsonl_lines(&codex_dir.join("session_index.jsonl"))?);
         let existing_ids: HashSet<String> = rows.iter().map(|row| row.id.clone()).collect();
@@ -1212,7 +1222,7 @@ fn repair_codex_history_visibility_at(
     // Rollouts are an event archive, not a sidebar catalog. Only restore a missing
     // thread when Codex itself had already indexed it; otherwise internal continuations
     // and recovery snapshots become synthetic visible tasks.
-    let mut rollout_metadata: Vec<_> = scan_rollout_thread_metadata(codex_dir)?
+    let mut rollout_metadata: Vec<_> = scan_rollout_thread_metadata_force(codex_dir)?
         .into_iter()
         .filter(|metadata| {
             existing_ids.contains(&metadata.id) || session_index_ids.contains(&metadata.id)
@@ -1964,19 +1974,115 @@ fn plan_prefix_duplicate_thread_removals(rows: &[ThreadHistoryRow]) -> BTreeSet<
     removals
 }
 
+/// rollout 元数据缓存 TTL。
+///
+/// 缓存以 mtime + size 为主，TTL 只是防止极端情况下文件系统元数据长时间不更新时
+/// 缓存被无限信任；到期后会重新 stat，并在签名变化时重新解析。
+const ROLLOUT_METADATA_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+#[derive(Debug, Clone)]
+struct CachedRolloutMetadata {
+    modified: Option<SystemTime>,
+    len: u64,
+    last_verified: SystemTime,
+    metadata: Option<RolloutThreadMetadata>,
+}
+
+static ROLLOUT_METADATA_CACHE: OnceLock<
+    Mutex<HashMap<PathBuf, HashMap<PathBuf, CachedRolloutMetadata>>>,
+> = OnceLock::new();
+
+fn rollout_metadata_cache(
+) -> &'static Mutex<HashMap<PathBuf, HashMap<PathBuf, CachedRolloutMetadata>>> {
+    ROLLOUT_METADATA_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// 递归读取当前 Codex home 下的 rollout；只接受含 session_meta 且有可发现 preview 的
 /// 文件。这样不会把工具调用或损坏 JSONL 伪造成侧边栏历史。
+///
+/// 默认复用 mtime/size/TTL 缓存，只解析新增或变化的 JSONL，避免 4.6GB 级历史目录
+/// 每次列表/详情操作都整目录重读。
 fn scan_rollout_thread_metadata(codex_dir: &Path) -> Result<Vec<RolloutThreadMetadata>, AppError> {
+    scan_rollout_thread_metadata_with_cache(codex_dir, false)
+}
+
+/// 显式全量重扫入口：忽略 rollout 元数据缓存，保证历史修复等操作看到最新现场。
+fn scan_rollout_thread_metadata_force(
+    codex_dir: &Path,
+) -> Result<Vec<RolloutThreadMetadata>, AppError> {
+    scan_rollout_thread_metadata_with_cache(codex_dir, true)
+}
+
+fn scan_rollout_thread_metadata_with_cache(
+    codex_dir: &Path,
+    force: bool,
+) -> Result<Vec<RolloutThreadMetadata>, AppError> {
     let mut files = Vec::new();
     for root_name in ["sessions", "archived_sessions"] {
         collect_rollout_jsonl_files(&codex_dir.join(root_name), &mut files)?;
     }
+
+    let now = SystemTime::now();
+    let mut cache = rollout_metadata_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let codex_cache = cache.entry(codex_dir.to_path_buf()).or_default();
+    let mut active_paths = HashSet::new();
     let mut metadata_rows = Vec::new();
+
     for (path, archived) in files {
-        if let Some(metadata) = parse_rollout_thread_metadata(&path, archived)? {
+        active_paths.insert(path.clone());
+        let Ok(stat) = fs::metadata(&path) else {
+            codex_cache.remove(&path);
+            continue;
+        };
+        let modified = stat.modified().ok();
+        let len = stat.len();
+        let expired = codex_cache
+            .get(&path)
+            .map(|entry| {
+                now.duration_since(entry.last_verified)
+                    .map(|duration| duration >= ROLLOUT_METADATA_CACHE_TTL)
+                    .unwrap_or(true)
+            })
+            .unwrap_or(true);
+        let reuse = !force
+            && !expired
+            && codex_cache
+                .get(&path)
+                .map(|entry| entry.modified == modified && entry.len == len)
+                .unwrap_or(false);
+
+        if reuse {
+            if let Some(metadata) = codex_cache
+                .get(&path)
+                .and_then(|entry| entry.metadata.clone())
+            {
+                metadata_rows.push(metadata);
+            }
+            if let Some(entry) = codex_cache.get_mut(&path) {
+                entry.last_verified = now;
+            }
+            continue;
+        }
+
+        let metadata = parse_rollout_thread_metadata(&path, archived)?;
+        codex_cache.insert(
+            path,
+            CachedRolloutMetadata {
+                modified,
+                len,
+                last_verified: now,
+                metadata: metadata.clone(),
+            },
+        );
+        if let Some(metadata) = metadata {
             metadata_rows.push(metadata);
         }
     }
+
+    codex_cache.retain(|path, _| active_paths.contains(path));
+    drop(cache);
 
     // Desktop assigns every "Continue in a new task" branch a fresh session_meta.id
     // and records its ancestry in event_msg.payload.forked_from_id.  The copied first
@@ -5567,6 +5673,18 @@ mod tests {
             .iter()
             .any(|row| row.value.as_deref() == Some("custom") && row.count == 1));
         assert_eq!(result.active_db_kind.as_deref(), Some("sqlite_subdir"));
+
+        // 显式全量刷新不能绕过不可读 rollout，必须暴露真实现场错误；
+        // 轻量列表则永远不应触发该扫描。
+        assert!(list_codex_history_sessions(CodexHistorySessionListOptions {
+            codex_home: Some(codex_dir.to_string_lossy().to_string()),
+            source_filter: Some("all".to_string()),
+            limit: Some(10),
+            include_subagents: Some(true),
+            force_rollout_metadata_scan: Some(true),
+            ..Default::default()
+        })
+        .is_err());
     }
 
     #[test]

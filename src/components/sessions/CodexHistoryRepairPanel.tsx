@@ -136,7 +136,7 @@ export function CodexHistoryRepairPanel({
   }
 
   /// 从后端 active SQLite 加载可修复会话摘要和 source/provider 分布。
-  async function loadHistorySessions() {
+  async function loadHistorySessions(forceRescan = false) {
     setIsLoadingHistory(true);
     setHistoryListError(null);
     try {
@@ -149,6 +149,7 @@ export function CodexHistoryRepairPanel({
         limit: 120,
         includeArchived,
         includeSubagents,
+        forceRolloutMetadataScan: forceRescan,
       });
       setHistoryList(result);
       setSelectedSessionIds((current) => {
@@ -364,7 +365,7 @@ export function CodexHistoryRepairPanel({
             <Button
               size="sm"
               variant="outline"
-              onClick={loadHistorySessions}
+              onClick={() => void loadHistorySessions(true)}
               disabled={isLoadingHistory}
               className="gap-2"
             >
@@ -521,7 +522,7 @@ export function CodexHistoryRepairPanel({
               <Button
                 size="sm"
                 variant="outline"
-                onClick={loadHistorySessions}
+                onClick={() => void loadHistorySessions()}
                 disabled={isLoadingHistory}
               >
                 <RefreshCw
