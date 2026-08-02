@@ -2505,6 +2505,13 @@ impl RequestForwarder {
                 obj.remove("stream_options");
             }
         }
+        // 出站 body 定稿后的真实上游流式状态。与 request_is_streaming（客户端
+        // Accept/body.stream 语义）分开记录，避免 hosted web_search 强制非流式时
+        // 路由日志里的 streaming=true 误导排障（issue #24）。
+        let upstream_stream = filtered_body
+            .get("stream")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
         // 出站 body 定稿后刷新真值（覆盖 Codex chat 上游模型覆写、转换层模型改写）
         if let Some(m) = filtered_body
             .get("model")
@@ -2554,6 +2561,7 @@ impl RequestForwarder {
                     codex_responses_to_anthropic.to_string(),
                 ),
                 ("streaming", request_is_streaming.to_string()),
+                ("upstream_stream", upstream_stream.to_string()),
                 (
                     "elapsed_ms",
                     request_prepare_started_at.elapsed().as_millis().to_string(),
@@ -3561,6 +3569,7 @@ impl RequestForwarder {
                         ("provider", provider.id.clone()),
                         ("status", status.as_u16().to_string()),
                         ("streaming", request_is_streaming.to_string()),
+                        ("upstream_stream", upstream_stream.to_string()),
                         (
                             "elapsed_ms",
                             response_prepare_started_at
