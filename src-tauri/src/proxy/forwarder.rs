@@ -57,6 +57,11 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 const PROXY_AUTH_PLACEHOLDER: &str = "PROXY_MANAGED";
 const CODEX_RESPONSES_LITE_FALLBACK_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+/// 同一 Provider 在流建立前发生连接/请求构造失败时，CCSM 自身额外尝试的次数。
+///
+/// Codex 端 `request_max_retries` 是从客户端重新 POST；这里是在代理内直接复用
+/// 已转换好的请求体重试，减少不稳定网络下“一次 send 失败就整轮失败”的概率。
+const UPSTREAM_TRANSPORT_RETRY_LIMIT: usize = 2;
 
 fn validate_codex_official_authorization(headers: &http::HeaderMap) -> Result<(), ProxyError> {
     let authorization = headers
@@ -3326,32 +3331,34 @@ impl RequestForwarder {
             }
         };
 
-        let mut response = send_upstream_request(ordered_headers.clone(), body_bytes.clone())
-            .await
-            .inspect_err(|err| {
-                if let Some(trace_id) = codex_trace_id.as_deref() {
-                    let transport = if is_socks_proxy || !preserve_exact_header_case {
-                        "reqwest"
-                    } else {
-                        "hyper"
-                    };
-                    super::codex_router_log::append_event(
-                        "upstream_send_error",
-                        &[
-                            ("trace", trace_id.to_string()),
-                            ("session", self.session_id.clone()),
-                            ("model", request_model_for_log.clone()),
-                            ("provider", provider.id.clone()),
-                            ("transport", transport.to_string()),
-                            (
-                                "elapsed_ms",
-                                upstream_started_at.elapsed().as_millis().to_string(),
-                            ),
-                            ("error", err.to_string()),
-                        ],
-                    );
-                }
-            })?;
+        let mut response = send_upstream_request_with_transport_retry(adapter.name(), || {
+            send_upstream_request(ordered_headers.clone(), body_bytes.clone())
+        })
+        .await
+        .inspect_err(|err| {
+            if let Some(trace_id) = codex_trace_id.as_deref() {
+                let transport = if is_socks_proxy || !preserve_exact_header_case {
+                    "reqwest"
+                } else {
+                    "hyper"
+                };
+                super::codex_router_log::append_event(
+                    "upstream_send_error",
+                    &[
+                        ("trace", trace_id.to_string()),
+                        ("session", self.session_id.clone()),
+                        ("model", request_model_for_log.clone()),
+                        ("provider", provider.id.clone()),
+                        ("transport", transport.to_string()),
+                        (
+                            "elapsed_ms",
+                            upstream_started_at.elapsed().as_millis().to_string(),
+                        ),
+                        ("error", err.to_string()),
+                    ],
+                );
+            }
+        })?;
 
         // 检查响应状态
         let mut status = response.status();
@@ -3967,21 +3974,33 @@ impl RequestForwarder {
             endpoint,
             request_model_for_log
         );
-        let response = send_forwarder_upstream_request(
-            method.clone(),
-            url.clone(),
-            target_for_log.clone(),
-            ordered_headers,
-            extensions.clone(),
-            body_bytes,
-            timeout,
-            request_is_streaming,
-            self.non_streaming_timeout,
-            self.streaming_first_byte_timeout,
-            is_socks_proxy,
-            preserve_exact_header_case,
-            upstream_proxy_url.as_deref(),
-        )
+        let response = send_upstream_request_with_transport_retry(adapter.name(), || {
+            let method = method.clone();
+            let url = url.clone();
+            let target_for_log = target_for_log.clone();
+            let ordered_headers = ordered_headers.clone();
+            let extensions = extensions.clone();
+            let body_bytes = body_bytes.clone();
+            let upstream_proxy_url = upstream_proxy_url.clone();
+            async move {
+                send_forwarder_upstream_request(
+                    method,
+                    url,
+                    target_for_log,
+                    ordered_headers,
+                    extensions,
+                    body_bytes,
+                    timeout,
+                    request_is_streaming,
+                    self.non_streaming_timeout,
+                    self.streaming_first_byte_timeout,
+                    is_socks_proxy,
+                    preserve_exact_header_case,
+                    upstream_proxy_url.as_deref(),
+                )
+                .await
+            }
+        })
         .await
         .inspect_err(|err| {
             if let Some(trace_id) = codex_trace_id.as_deref() {
@@ -5886,6 +5905,50 @@ async fn send_forwarder_upstream_request(
         upstream_proxy_url,
     )
     .await
+}
+
+/// 对“还没有收到上游 HTTP 状态”的传输失败做有界重试。
+///
+/// 只重试 `ForwardFailed`（连接失败、请求构造失败、hyper/reqwest 发送阶段失败）；
+/// `ResponsePending` 表示请求可能已经到达上游，不能重发。每个 attempt 都重新执行
+/// 传入的发送闭包，因此重试使用的是同一份已经转换好的 headers/body。
+async fn send_upstream_request_with_transport_retry<F, Fut>(
+    app_tag: &str,
+    mut send: F,
+) -> Result<ProxyResponse, ProxyError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<ProxyResponse, ProxyError>>,
+{
+    let mut attempt = 0usize;
+    loop {
+        match send().await {
+            Ok(response) => return Ok(response),
+            Err(error) if attempt < UPSTREAM_TRANSPORT_RETRY_LIMIT => {
+                if !matches!(error, ProxyError::ForwardFailed(_)) {
+                    return Err(error);
+                }
+                let backoff = upstream_transport_retry_backoff(attempt);
+                log::warn!(
+                    "[{app_tag}] 上游传输阶段失败，同一 Provider 重试 {}/{}（等待 {}ms）: {error}",
+                    attempt + 1,
+                    UPSTREAM_TRANSPORT_RETRY_LIMIT,
+                    backoff.as_millis()
+                );
+                tokio::time::sleep(backoff).await;
+                attempt += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn upstream_transport_retry_backoff(attempt: usize) -> Duration {
+    match attempt {
+        0 => Duration::from_millis(200),
+        1 => Duration::from_millis(600),
+        _ => Duration::from_millis(1500),
+    }
 }
 
 /// 读取并解压上游错误响应体，保留可读错误摘要给日志、fallback 判断和客户端。
@@ -10238,5 +10301,75 @@ mod tests {
         });
         let body = body_with_image("any-model");
         assert!(fwd.media_retry_should_trigger("Claude", false, &body, &image_unsupported_error()));
+    }
+
+    #[tokio::test]
+    async fn upstream_transport_retry_recovers_after_connect_failure() {
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts_for_send = attempts.clone();
+
+        let result = send_upstream_request_with_transport_retry("test", || {
+            let attempts = attempts_for_send.clone();
+            async move {
+                if attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    Err(ProxyError::ForwardFailed(
+                        "上游连接失败: error_sending_request".to_string(),
+                    ))
+                } else {
+                    Ok(ProxyResponse::buffered(
+                        http::StatusCode::OK,
+                        http::HeaderMap::new(),
+                        Bytes::new(),
+                    ))
+                }
+            }
+        })
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn upstream_transport_retry_does_not_replay_response_pending() {
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts_for_send = attempts.clone();
+
+        let result = send_upstream_request_with_transport_retry("test", || {
+            let attempts = attempts_for_send.clone();
+            async move {
+                attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err(ProxyError::ResponsePending(
+                    "请求可能已在处理中".to_string(),
+                ))
+            }
+        })
+        .await;
+
+        assert!(matches!(result, Err(ProxyError::ResponsePending(_))));
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn upstream_transport_retry_stops_after_bounded_attempts() {
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts_for_send = attempts.clone();
+
+        let result = send_upstream_request_with_transport_retry("test", || {
+            let attempts = attempts_for_send.clone();
+            async move {
+                attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err(ProxyError::ForwardFailed(
+                    "上游请求构造失败: error_sending_request".to_string(),
+                ))
+            }
+        })
+        .await;
+
+        assert!(matches!(result, Err(ProxyError::ForwardFailed(_))));
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            UPSTREAM_TRANSPORT_RETRY_LIMIT + 1
+        );
     }
 }
