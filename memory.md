@@ -2652,3 +2652,10 @@
 - 根修不是改配置或加重试次数：retry 候选在进入账号池与尝试循环前必须通过 `materialize_codex_forward_attempt_provider` 从数据库读取真实目标 provider，并复用 `materialize_codex_routed_provider_from_target`。这样 base URL、认证、apiFormat、reasoning 等来自目标，route 仅保留请求级模型映射、能力和父路由归因；目标丢失必须返回显式配置错误。
 - 防递归边界必须检查“最终有效上游”，不能只检查 route miss。正常 JSON、raw passthrough 和未知 raw endpoint 都在网络发送前调用同一拒绝逻辑；只有回环主机且端口等于 CCSM 当前实际监听端口才拒绝，避免误伤本机其它端口的 vLLM。拒绝使用非重试 `InvalidRequest`，回归证明 `total_requests=1`、`failed_requests=1`、`success_requests=0`。
 - 验证证据：forwarder 模块 119/119；全量库测试在真实 CCSM 占用 15721 时只有既有的硬绑定端口用例失败，跳过该用例后 2691 passed / 2 ignored；`cargo check --lib`、rustfmt、`git diff --check` 通过。任何后续路由重构必须保留“展开候选先物化 target，再以 resolved route 转发”和“有效上游不能回到当前监听端口”两条不变量。
+
+## 2026-08-02 Codex remote compact v2 响应语义补齐（3ecf02ef）
+
+- 现象：DeepSeek `/v1/responses` 原生 route 收到 Codex remote compact v2 后返回 5 个普通 output，没有 `type=compaction` item，Codex 报 `expected exactly one compaction output item, got 0 from 5 output items`。
+- 历史缺口：`4f0da985` 只补了 compact 路由/元数据/日志，`transform_codex_chat` 测试仍断言普通 message，没有真正构造 compaction item；`af60c7ed` 只是用 `name="OpenAI"` 打开 remote compact，不解决第三方上游响应。
+- 根修：v2 检测限定 `responses_compaction_v2` 或 `/responses + compaction_trigger` 且无 implementation；原生 Responses 请求不改 wire，响应聚合后合成唯一 `ocx1:` compaction item；Chat 路径同样合成；后续请求转发前把 `ocx1:` 还原成 user summary；官方/显式支持 route 原生透传。
+- 验证：`cargo check --lib`、fmt、12 个 compaction 测试全过；全量库测试的 3 个失败均为既有 Anthropic 断言或 15721 被运行实例占用，非本次改动引入。
