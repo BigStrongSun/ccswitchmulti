@@ -202,6 +202,25 @@ impl ProxyError {
     }
 }
 
+/// 沿 `source()` 链拼接错误信息，用于日志与面向客户端的错误消息。
+///
+/// reqwest/hyper 的 `Display` 只输出最外层描述（如 `error decoding response
+/// body`），真正的传输层原因（连接重置、TLS EOF 等）藏在 source 链里。只保留
+/// 最外层字符串会让用户在排障时看不到实际断流原因。
+pub fn error_chain_message(err: &(dyn std::error::Error + 'static)) -> String {
+    let mut message = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        let cause_text = cause.to_string();
+        if !cause_text.is_empty() && !message.contains(&cause_text) {
+            message.push_str(": ");
+            message.push_str(&cause_text);
+        }
+        source = cause.source();
+    }
+    message
+}
+
 /// 错误分类
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorCategory {
@@ -230,5 +249,28 @@ pub fn categorize_error(error: &reqwest::Error) -> ErrorCategory {
         }
     } else {
         ErrorCategory::Retryable
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_chain_message_includes_deepest_source() {
+        let root = std::io::Error::other("tls eof");
+        let outer = std::io::Error::new(std::io::ErrorKind::Other, root);
+        let message = error_chain_message(&outer);
+
+        assert!(message.contains("tls eof"));
+    }
+
+    #[test]
+    fn error_chain_message_does_not_duplicate_same_text() {
+        let root = std::io::Error::other("error decoding response body");
+        let outer = std::io::Error::new(std::io::ErrorKind::Other, root);
+        let message = error_chain_message(&outer);
+
+        assert_eq!(message.matches("error decoding response body").count(), 1);
     }
 }

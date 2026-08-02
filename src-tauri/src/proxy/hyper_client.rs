@@ -162,19 +162,24 @@ impl ProxyResponse {
         match self {
             Self::Hyper(r) => {
                 let collected = r.into_body().collect().await.map_err(|e| {
-                    ProxyError::ResponsePending(format!("Failed to read response body: {e}"))
+                    let chain = super::error::error_chain_message(&e);
+                    ProxyError::ResponsePending(format!("Failed to read response body: {chain}"))
                 })?;
                 Ok(collected.to_bytes())
             }
             Self::Reqwest(r) => r.bytes().await.map_err(|e| {
-                ProxyError::ResponsePending(format!("Failed to read response body: {e}"))
+                let chain = super::error::error_chain_message(&e);
+                ProxyError::ResponsePending(format!("Failed to read response body: {chain}"))
             }),
             Self::Buffered { body, .. } => Ok(body),
             Self::Streamed { mut stream, .. } => {
                 let mut body = bytes::BytesMut::new();
                 while let Some(chunk) = stream.next().await {
                     let chunk = chunk.map_err(|e| {
-                        ProxyError::ResponsePending(format!("Failed to read response body: {e}"))
+                        let chain = super::error::error_chain_message(&e);
+                        ProxyError::ResponsePending(format!(
+                            "Failed to read response body: {chain}"
+                        ))
                     })?;
                     body.extend_from_slice(&chunk);
                 }
@@ -203,7 +208,7 @@ impl ProxyResponse {
                                 Some((Ok(Bytes::new()), body))
                             }
                         }
-                        Some(Err(e)) => Some((Err(std::io::Error::other(e.to_string())), body)),
+                        Some(Err(e)) => Some((Err(std::io::Error::other(e)), body)),
                         None => None,
                     }
                 })
@@ -214,9 +219,7 @@ impl ProxyResponse {
                     as std::pin::Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>
             }
             Self::Reqwest(r) => {
-                let stream = r
-                    .bytes_stream()
-                    .map(|r| r.map_err(|e| std::io::Error::other(e.to_string())));
+                let stream = r.bytes_stream().map(|r| r.map_err(std::io::Error::other));
                 Box::pin(stream)
             }
             Self::Buffered { body, .. } => Box::pin(futures::stream::once(async move { Ok(body) }))

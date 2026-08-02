@@ -806,8 +806,9 @@ pub fn create_logged_passthrough_stream(
                     yield Ok(bytes);
                 }
                 Some(Err(e)) => {
-                    log::error!("[{tag}] 流错误: {e}");
-                    yield Err(std::io::Error::other(e.to_string()));
+                    let chain = super::error::error_chain_message(&e);
+                    log::error!("[{tag}] 流错误: {chain}");
+                    yield Err(std::io::Error::other(e));
                     break;
                 }
                 None => {
