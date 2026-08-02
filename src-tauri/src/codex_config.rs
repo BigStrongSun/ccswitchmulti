@@ -25,9 +25,12 @@ pub const CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME: &str = "cc-switch-model-catalo
 ///
 /// `request_max_retries` 只覆盖流建立前的传输/HTTP 5xx 重试；`error sending request`
 /// 这类连接/构造失败必须允许 Codex 重试，否则网络短暂恢复后当前 turn 已经直接失败。
-/// `stream_max_retries` 保持 0：流建立后 Codex 不应自动重放整轮采样请求，因为请求
-/// 可能已经到达上游。对可能已在途的响应体读取/超时错误，CCSM 映射为 429 +
-/// Retry-After，而 Codex 的 provider retry policy 明确不重试 429。
+/// `stream_max_retries` 保持 0：Codex 在收到 `response.output_item.done` 时会立即
+/// 通过 `record_conversation_items` 写入会话历史，流级重试在再次请求前用
+/// `clone_history` 重建 input；因此任何已完成的部分 message/tool call 都会进入
+/// 重试 prompt，形成重复或半截历史。当前 Codex 没有“流未 completed 就回滚已写
+/// item”的机制，故这里不允许流级整轮重放。对可能已在途的响应体读取/超时错误，
+/// CCSM 映射为 429 + Retry-After，而 Codex 的 provider retry policy 明确不重试 429。
 pub(crate) const CODEX_MANAGED_REQUEST_MAX_RETRIES: u64 = 2;
 pub(crate) const CODEX_MANAGED_STREAM_MAX_RETRIES: u64 = 0;
 const CODEX_MODELS_CACHE_FILENAME: &str = "models_cache.json";
