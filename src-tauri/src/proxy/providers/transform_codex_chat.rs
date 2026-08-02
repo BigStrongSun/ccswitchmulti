@@ -23,6 +23,7 @@ use crate::proxy::{
         strip_and_clamp_media_from_tool_value, ToolMediaScope, TOOL_RESULT_MEDIA_MOVED_MARKER,
     },
 };
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 
@@ -40,6 +41,110 @@ const EXTRA_CHAT_PASSTHROUGH_FIELDS: &[&str] = &[
     "top_logprobs",
     "user",
 ];
+
+/// CCSwitchMulti-managed compaction envelope.
+///
+/// Official ChatGPT compaction payloads are opaque encrypted blobs that third-party
+/// upstreams cannot read. For third-party Chat/Responses providers we return our own
+/// readable envelope instead, and restore it to a system summary before forwarding
+/// any follow-up request. The prefix is intentionally identical to opencodex's
+/// convention so existing sessions remain compatible with that tooling.
+pub(crate) const CODEX_COMPACTION_ENVELOPE_PREFIX: &str = "ocx1:";
+
+pub(crate) fn codex_compaction_envelope(summary: &str) -> String {
+    format!(
+        "{CODEX_COMPACTION_ENVELOPE_PREFIX}{}",
+        STANDARD.encode(summary)
+    )
+}
+
+pub(crate) fn codex_compaction_summary_from_envelope(encrypted_content: &str) -> Option<String> {
+    let encoded = encrypted_content.strip_prefix(CODEX_COMPACTION_ENVELOPE_PREFIX)?;
+    let decoded = STANDARD.decode(encoded).ok()?;
+    let text = String::from_utf8(decoded).ok()?;
+    (!text.trim().is_empty()).then_some(text)
+}
+
+/// Replace CCSwitchMulti compaction envelopes in a Responses request with a
+/// readable user message before forwarding to third-party upstreams.
+pub(crate) fn restore_codex_compaction_summary_in_request(body: &mut Value) -> bool {
+    let Some(input) = body.get_mut("input").and_then(Value::as_array_mut) else {
+        return false;
+    };
+    let mut changed = false;
+    for item in input {
+        if item.get("type").and_then(Value::as_str) != Some("compaction") {
+            continue;
+        }
+        let Some(encrypted_content) = item.get("encrypted_content").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(summary) = codex_compaction_summary_from_envelope(encrypted_content) else {
+            continue;
+        };
+        *item = json!({
+            "type": "message",
+            "role": "user",
+            "content": [{
+                "type": "input_text",
+                "text": format!("Earlier conversation was compacted. Summary:\n{summary}")
+            }]
+        });
+        changed = true;
+    }
+    changed
+}
+
+/// Convert a completed Responses value into a compaction response containing
+/// exactly one `type=compaction` output item.
+pub(crate) fn responses_to_compaction_response(mut response: Value) -> Result<Value, ProxyError> {
+    let summary = responses_output_text(&response);
+    let summary = summary.trim();
+    if summary.is_empty() {
+        return Err(ProxyError::TransformError(
+            "Upstream returned an empty compaction summary".to_string(),
+        ));
+    }
+
+    let compaction_item = json!({
+        "type": "compaction",
+        "encrypted_content": codex_compaction_envelope(summary),
+    });
+    response["output"] = json!([compaction_item]);
+    Ok(response)
+}
+
+fn responses_output_text(response: &Value) -> String {
+    let mut parts = Vec::new();
+    if let Some(output) = response.get("output").and_then(Value::as_array) {
+        for item in output {
+            match item.get("type").and_then(Value::as_str) {
+                Some("message") => {
+                    if let Some(text) = item.get("content").and_then(Value::as_str) {
+                        parts.push(text.to_string());
+                    } else if let Some(content) = item.get("content").and_then(Value::as_array) {
+                        for part in content {
+                            if let Some(text) = part.get("text").and_then(Value::as_str) {
+                                parts.push(text.to_string());
+                            }
+                        }
+                    }
+                }
+                Some("reasoning") => {
+                    if let Some(summary) = item.get("summary").and_then(Value::as_array) {
+                        for part in summary {
+                            if let Some(text) = part.get("text").and_then(Value::as_str) {
+                                parts.push(text.to_string());
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    parts.join("\n")
+}
 
 const TOOL_SEARCH_PROXY_NAME: &str = "tool_search";
 const CUSTOM_TOOL_INPUT_FIELD: &str = "input";
@@ -1052,6 +1157,29 @@ fn append_responses_item_as_chat_message(
                     last_assistant_index,
                 );
             }
+        }
+        Some("compaction") => {
+            flush_pending_tool_calls(
+                messages,
+                pending_tool_calls,
+                pending_media,
+                pending_reasoning,
+                last_assistant_index,
+            );
+            flush_pending_chat_tool_media(messages, pending_media);
+
+            let summary = item
+                .get("encrypted_content")
+                .and_then(Value::as_str)
+                .and_then(codex_compaction_summary_from_envelope)
+                .unwrap_or_else(|| {
+                    "Earlier conversation was compacted, but its details are not readable by this provider."
+                        .to_string()
+                });
+            messages.push(json!({
+                "role": "system",
+                "content": format!("Earlier conversation was compacted. Summary:\n{summary}")
+            }));
         }
         _ => {
             if item.get("role").is_some() || item.get("content").is_some() {
@@ -2249,7 +2377,6 @@ pub fn chat_error_to_response_error(body: Option<&Value>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
 
     fn large_test_image_data_url() -> String {
         let bytes = b"CC_SWITCH_TOOL_MEDIA_SENTINEL".repeat(400);
@@ -3750,6 +3877,97 @@ mod tests {
             "bounded compact summary"
         );
         assert_eq!(result["model"], "route-model-after-switch");
+    }
+
+    #[test]
+    fn compaction_envelope_round_trips_readable_summary() {
+        let envelope = codex_compaction_envelope("compact summary");
+        assert!(envelope.starts_with(CODEX_COMPACTION_ENVELOPE_PREFIX));
+        assert_eq!(
+            codex_compaction_summary_from_envelope(&envelope).as_deref(),
+            Some("compact summary")
+        );
+        assert!(codex_compaction_summary_from_envelope("not-an-envelope").is_none());
+    }
+
+    #[test]
+    fn responses_compaction_response_has_single_compaction_output() {
+        let chat = json!({
+            "id": "chatcmpl_compact",
+            "model": "deepseek-v4-flash",
+            "choices": [{
+                "index": 0,
+                "message": {"role":"assistant","content":"bounded compact summary"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 20, "completion_tokens": 4, "total_tokens": 24}
+        });
+
+        let responses =
+            chat_completion_to_response_with_context(chat, &CodexToolContext::default())
+                .expect("responses response");
+        let result = responses_to_compaction_response(responses).expect("compaction response");
+        let output = result["output"].as_array().expect("output array");
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0]["type"], "compaction");
+        assert_eq!(
+            codex_compaction_summary_from_envelope(
+                output[0]["encrypted_content"].as_str().expect("envelope")
+            )
+            .as_deref(),
+            Some("bounded compact summary")
+        );
+    }
+
+    #[test]
+    fn responses_request_restores_compaction_summary_as_system_message() {
+        let input = json!({
+            "model": "deepseek-v4-flash",
+            "input": [
+                {
+                    "type": "compaction",
+                    "encrypted_content": codex_compaction_envelope("compact summary")
+                },
+                {"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}
+            ]
+        });
+
+        let result = responses_to_chat_completions(input).expect("chat request");
+        let messages = result["messages"].as_array().expect("messages");
+        let system = messages
+            .iter()
+            .find(|message| message.get("role").and_then(Value::as_str) == Some("system"))
+            .expect("restored system summary");
+        assert!(system["content"]
+            .as_str()
+            .expect("system content")
+            .contains("compact summary"));
+        assert_eq!(messages.last().unwrap()["role"], "user");
+        assert_eq!(messages.last().unwrap()["content"], "continue");
+    }
+
+    #[test]
+    fn native_responses_request_restores_compaction_summary_before_forwarding() {
+        let mut body = json!({
+            "model": "deepseek-v4-flash",
+            "input": [
+                {
+                    "type": "compaction",
+                    "encrypted_content": codex_compaction_envelope("compact summary")
+                },
+                {"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}
+            ]
+        });
+
+        assert!(restore_codex_compaction_summary_in_request(&mut body));
+        let input = body["input"].as_array().expect("input");
+        assert_eq!(input[0]["type"], "message");
+        assert_eq!(input[0]["role"], "user");
+        assert!(input[0]["content"][0]["text"]
+            .as_str()
+            .expect("summary text")
+            .contains("compact summary"));
+        assert_eq!(input[1]["type"], "message");
     }
 
     #[test]

@@ -2668,6 +2668,8 @@ async fn handle_responses_for_app(
     // {namespace, name} map used to restore the native Responses upstream's
     // function-call names (see the namespace-restore dispatch below).
     let namespace_restore_map = transform_codex_responses_namespace::namespace_restore_map(&body);
+    let is_codex_v2_compaction =
+        super::forwarder::codex_request_is_v2_compaction(&app_type, &endpoint, &body, &headers);
 
     let forwarder = ctx.create_forwarder(&state);
     let mut result = match forwarder
@@ -2744,6 +2746,7 @@ async fn handle_responses_for_app(
             &ctx,
             &state,
             is_stream,
+            is_codex_v2_compaction,
             connection_guard,
             codex_tool_context,
         )
@@ -2766,6 +2769,13 @@ async fn handle_responses_for_app(
             namespace_restore_map,
         )
         .await;
+    }
+
+    if is_codex_v2_compaction
+        && !super::providers::codex_route_supports_responses_compaction(&ctx.provider)
+    {
+        return handle_codex_native_compaction_fallback(response, &ctx, &state, connection_guard)
+            .await;
     }
 
     process_response_with_stream_hint(
@@ -2841,6 +2851,8 @@ async fn handle_responses_compact_for_app(
         .unwrap_or(false);
     let codex_tool_context = transform_codex_chat::build_codex_tool_context_from_request(&body);
     let namespace_restore_map = transform_codex_responses_namespace::namespace_restore_map(&body);
+    let is_codex_v2_compaction =
+        super::forwarder::codex_request_is_v2_compaction(&app_type, &endpoint, &body, &headers);
 
     let forwarder = ctx.create_forwarder(&state);
     let mut result = match forwarder
@@ -2917,6 +2929,7 @@ async fn handle_responses_compact_for_app(
             &ctx,
             &state,
             is_stream,
+            is_codex_v2_compaction,
             connection_guard,
             codex_tool_context,
         )
@@ -2934,6 +2947,13 @@ async fn handle_responses_compact_for_app(
             namespace_restore_map,
         )
         .await;
+    }
+
+    if is_codex_v2_compaction
+        && !super::providers::codex_route_supports_responses_compaction(&ctx.provider)
+    {
+        return handle_codex_native_compaction_fallback(response, &ctx, &state, connection_guard)
+            .await;
     }
 
     process_response_with_stream_hint(
@@ -3100,6 +3120,7 @@ async fn handle_codex_chat_to_responses_transform(
     ctx: &RequestContext,
     state: &ProxyState,
     is_stream: bool,
+    is_compaction: bool,
     connection_guard: Option<ActiveConnectionGuard>,
     tool_context: transform_codex_chat::CodexToolContext,
 ) -> Result<axum::response::Response, ProxyError> {
@@ -3111,6 +3132,100 @@ async fn handle_codex_chat_to_responses_transform(
         // 直接透传会让 Codex 客户端无法识别错误码。这里统一转换为 Responses 风格
         // `{"error": {message, type, code, param}}`，保留原始 HTTP 状态码。
         return handle_codex_chat_error_response(response, ctx, status).await;
+    }
+
+    if is_compaction {
+        let body_timeout =
+            if ctx.app_config.auto_failover_enabled && ctx.app_config.non_streaming_timeout > 0 {
+                std::time::Duration::from_secs(ctx.app_config.non_streaming_timeout as u64)
+            } else {
+                std::time::Duration::ZERO
+            };
+        let (response_headers, status, body_bytes) =
+            read_decoded_body(response, ctx.tag, body_timeout).await?;
+        let body_str = String::from_utf8_lossy(&body_bytes);
+        let chat_response: Value = match serde_json::from_slice(&body_bytes) {
+            Ok(value) => value,
+            Err(_) if body_looks_like_sse(&body_str) => {
+                log::warn!("[Codex] 上游对 compact 请求返回未标记 SSE，按 Chat SSE 聚合");
+                chat_sse_to_response_value(&body_str)?
+            }
+            Err(e) => {
+                return Err(upstream_body_parse_error(
+                    "Failed to parse upstream chat response",
+                    &e,
+                    &response_headers,
+                    &body_str,
+                ));
+            }
+        };
+        let responses_response = transform_codex_chat::chat_completion_to_response_with_context(
+            chat_response,
+            &tool_context,
+        )
+        .map_err(|e| {
+            log::error!("[Codex] Chat → Responses 响应转换失败: {e}");
+            e
+        })?;
+        let compaction_response =
+            transform_codex_chat::responses_to_compaction_response(responses_response)?;
+        state
+            .codex_chat_history
+            .record_response(&compaction_response)
+            .await;
+
+        if let Some(usage) = TokenUsage::from_codex_response_auto(&compaction_response)
+            .filter(TokenUsage::has_billable_tokens)
+        {
+            let model = compaction_response
+                .get("model")
+                .and_then(|m| m.as_str())
+                .filter(|m| !m.is_empty())
+                .map(str::to_string)
+                .or_else(|| ctx.outbound_model.clone())
+                .unwrap_or_else(|| ctx.request_model.clone());
+            let request_model = ctx.request_model.clone();
+            let outbound_model = ctx
+                .outbound_model
+                .clone()
+                .unwrap_or_else(|| ctx.request_model.clone());
+            let app_type_str = ctx.app_type_str;
+            tokio::spawn({
+                let state = state.clone();
+                let provider_id = ctx.provider.id.clone();
+                let session_id = ctx.session_id.clone();
+                let latency_ms = ctx.latency_ms();
+                async move {
+                    log_usage(
+                        &state,
+                        &provider_id,
+                        app_type_str,
+                        &model,
+                        &request_model,
+                        &outbound_model,
+                        usage,
+                        latency_ms,
+                        None,
+                        false,
+                        status.as_u16(),
+                        Some(session_id),
+                    )
+                    .await;
+                }
+            });
+        }
+
+        let sse = responses_response_to_compaction_sse(&compaction_response)?;
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("text/event-stream"),
+        );
+        headers.insert(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-cache"),
+        );
+        return Ok((headers, axum::body::Body::from(sse)).into_response());
     }
 
     if (is_stream || response.is_sse()) && !hosted_tool_loop_response {
@@ -3610,6 +3725,144 @@ fn responses_response_to_completed_sse(response: &Value) -> Result<Bytes, ProxyE
     Ok(Bytes::from(format!(
         "event: response.completed\ndata: {payload}\n\n"
     )))
+}
+
+/// Wrap a completed Responses value as an SSE stream containing exactly one
+/// compaction output item followed by `response.completed`.
+fn responses_response_to_compaction_sse(response: &Value) -> Result<Bytes, ProxyError> {
+    let output = response
+        .get("output")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            ProxyError::TransformError("Compaction response is missing output".to_string())
+        })?;
+    let item = output
+        .iter()
+        .find(|item| item.get("type").and_then(Value::as_str) == Some("compaction"))
+        .ok_or_else(|| {
+            ProxyError::TransformError(
+                "Compaction response does not contain a compaction output item".to_string(),
+            )
+        })?;
+    let done_payload = serde_json::to_string(&json!({
+        "type": "response.output_item.done",
+        "item": item,
+    }))
+    .map_err(|e| ProxyError::TransformError(format!("Failed to serialize compaction SSE: {e}")))?;
+    let completed = responses_response_to_completed_sse(response)?;
+    let mut bytes = format!("event: response.output_item.done\ndata: {done_payload}\n\n");
+    bytes.push_str(&String::from_utf8_lossy(&completed));
+    Ok(Bytes::from(bytes))
+}
+
+/// Buffer a native Responses compaction response from a provider that does not
+/// implement Codex remote compaction v2, then return Codex the single compaction
+/// item it requires. The upstream request remains on the Responses wire; only the
+/// response shape is adapted.
+async fn handle_codex_native_compaction_fallback(
+    response: super::hyper_client::ProxyResponse,
+    ctx: &RequestContext,
+    state: &ProxyState,
+    connection_guard: Option<ActiveConnectionGuard>,
+) -> Result<axum::response::Response, ProxyError> {
+    let status = response.status();
+    if !status.is_success() {
+        return process_response(response, ctx, state, &CODEX_PARSER_CONFIG, connection_guard)
+            .await;
+    }
+
+    let body_timeout =
+        if ctx.app_config.auto_failover_enabled && ctx.app_config.non_streaming_timeout > 0 {
+            std::time::Duration::from_secs(ctx.app_config.non_streaming_timeout as u64)
+        } else {
+            std::time::Duration::ZERO
+        };
+    let (response_headers, status, body_bytes) =
+        read_decoded_body(response, ctx.tag, body_timeout).await?;
+    let body_str = String::from_utf8_lossy(&body_bytes);
+    let upstream_response: Value = match serde_json::from_slice(&body_bytes) {
+        Ok(value) => value,
+        Err(_) if body_looks_like_sse(&body_str) => responses_sse_to_response_value(&body_str)?,
+        Err(e) => {
+            return Err(upstream_body_parse_error(
+                "Failed to parse upstream responses body",
+                &e,
+                &response_headers,
+                &body_str,
+            ));
+        }
+    };
+
+    let has_native_compaction = upstream_response
+        .get("output")
+        .and_then(Value::as_array)
+        .is_some_and(|output| {
+            output
+                .iter()
+                .any(|item| item.get("type").and_then(Value::as_str) == Some("compaction"))
+        });
+    let compaction_response = if has_native_compaction {
+        upstream_response
+    } else {
+        transform_codex_chat::responses_to_compaction_response(upstream_response)?
+    };
+    state
+        .codex_chat_history
+        .record_response(&compaction_response)
+        .await;
+
+    if let Some(usage) = TokenUsage::from_codex_response_auto(&compaction_response)
+        .filter(TokenUsage::has_billable_tokens)
+    {
+        let model = compaction_response
+            .get("model")
+            .and_then(|m| m.as_str())
+            .filter(|m| !m.is_empty())
+            .map(str::to_string)
+            .or_else(|| ctx.outbound_model.clone())
+            .unwrap_or_else(|| ctx.request_model.clone());
+        let request_model = ctx.request_model.clone();
+        let outbound_model = ctx
+            .outbound_model
+            .clone()
+            .unwrap_or_else(|| ctx.request_model.clone());
+        let app_type_str = ctx.app_type_str;
+        tokio::spawn({
+            let state = state.clone();
+            let provider_id = ctx.provider.id.clone();
+            let session_id = ctx.session_id.clone();
+            let latency_ms = ctx.latency_ms();
+            async move {
+                log_usage(
+                    &state,
+                    &provider_id,
+                    app_type_str,
+                    &model,
+                    &request_model,
+                    &outbound_model,
+                    usage,
+                    latency_ms,
+                    None,
+                    false,
+                    status.as_u16(),
+                    Some(session_id),
+                )
+                .await;
+            }
+        });
+    }
+
+    let sse = responses_response_to_compaction_sse(&compaction_response)?;
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("text/event-stream"),
+    );
+    headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-cache"),
+    );
+    Ok((headers, axum::body::Body::from(sse)).into_response())
 }
 
 /// 把上游 Chat Completions 的错误响应转换为 Responses API 错误形状。
@@ -4744,9 +4997,9 @@ mod tests {
         external_openai_api_unsupported_response, mark_external_openai_headers,
         resolve_codex_image_generation_provider, resolve_external_codex_router_target,
         resolve_forward_error_provider_for_logging, resolve_forward_error_route_provider,
-        responses_response_to_completed_sse, responses_sse_to_response_value,
-        should_handle_as_codex_client, should_use_claude_transform_streaming, transform,
-        upstream_body_parse_error,
+        responses_response_to_compaction_sse, responses_response_to_completed_sse,
+        responses_sse_to_response_value, should_handle_as_codex_client,
+        should_use_claude_transform_streaming, transform, upstream_body_parse_error,
     };
     use crate::{
         app_config::AppType,
@@ -5594,6 +5847,53 @@ data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n
             payload["response"]["output"][0]["content"][0]["text"],
             "done"
         );
+    }
+
+    #[test]
+    fn compaction_sse_wrapper_emits_exactly_one_compaction_item_then_completed() {
+        let response = json!({
+            "id": "resp_compaction",
+            "status": "completed",
+            "model": "deepseek-v4-flash",
+            "output": [{
+                "type": "compaction",
+                "encrypted_content": "ocx1:YWJj"
+            }]
+        });
+
+        let body = responses_response_to_compaction_sse(&response).unwrap();
+        let text = std::str::from_utf8(&body).expect("valid sse utf8");
+
+        assert!(text.contains("event: response.output_item.done\n"));
+        assert!(text.contains("event: response.completed\n"));
+        let done_line = text
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .expect("done data line");
+        let done: Value = serde_json::from_str(done_line).expect("done payload json");
+        assert_eq!(done["type"], "response.output_item.done");
+        assert_eq!(done["item"]["type"], "compaction");
+        assert!(text.contains("resp_compaction"));
+    }
+
+    #[test]
+    fn native_responses_sse_is_adapted_to_compaction_sse_without_switching_wire() {
+        let upstream = "event: response.output_item.done\n\
+data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"deepseek summary\"}]}}\n\n\
+event: response.completed\n\
+data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_deepseek\",\"model\":\"deepseek-v4-flash\"}}\n\n";
+        let responses = responses_sse_to_response_value(upstream).expect("responses value");
+        let compaction =
+            crate::proxy::providers::transform_codex_chat::responses_to_compaction_response(
+                responses,
+            )
+            .expect("compaction response");
+        let body = responses_response_to_compaction_sse(&compaction).expect("compaction sse");
+        let text = std::str::from_utf8(&body).expect("valid sse utf8");
+
+        assert!(text.contains("\"type\":\"compaction\""));
+        assert!(text.contains("event: response.completed\n"));
+        assert!(text.contains("resp_deepseek"));
     }
 
     #[test]

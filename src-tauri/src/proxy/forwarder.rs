@@ -1005,6 +1005,12 @@ impl RequestForwarder {
             }
         }
 
+        if matches!(app_type, AppType::Codex) {
+            super::providers::transform_codex_chat::restore_codex_compaction_summary_in_request(
+                &mut body,
+            );
+        }
+
         let route_attempt_providers =
             build_forward_attempt_providers_preserving_codex_router_context(
                 app_type, &providers, &body,
@@ -5272,6 +5278,27 @@ impl CodexRequestMetadataSummary {
     }
 }
 
+pub(crate) fn codex_request_is_v2_compaction(
+    app_type: &AppType,
+    endpoint: &str,
+    body: &Value,
+    headers: &http::HeaderMap,
+) -> bool {
+    let summary = CodexRequestMetadataSummary::from_request(app_type, endpoint, body, headers);
+    if summary.request_kind != "compaction" {
+        return false;
+    }
+    if summary.compaction_implementation.as_deref() == Some("responses_compaction_v2") {
+        return true;
+    }
+    // Older metadata may omit the implementation field. Remote compaction v2 is the
+    // only current variant that rides a normal /responses stream with a trigger item;
+    // legacy /responses/compact and local compaction keep their own output contracts.
+    !super::providers::is_codex_remote_compact_endpoint(endpoint)
+        && summary.compaction_implementation.is_none()
+        && summary.compaction_trigger.is_some()
+}
+
 fn metadata_string_field(metadata: Option<&Value>, key: &str) -> Option<String> {
     metadata?
         .get(key)
@@ -9141,6 +9168,58 @@ mod tests {
         );
 
         assert_eq!(summary.request_kind, "compaction");
+    }
+
+    #[test]
+    fn codex_request_v2_compaction_only_matches_remote_v2_contract() {
+        let mut v2_headers = HeaderMap::new();
+        v2_headers.insert(
+            "x-codex-turn-metadata",
+            HeaderValue::from_static(
+                r#"{"request_kind":"compaction","compaction":{"trigger":"auto","implementation":"responses_compaction_v2","phase":"pre_turn"}}"#,
+            ),
+        );
+        assert!(codex_request_is_v2_compaction(
+            &AppType::Codex,
+            "/v1/responses",
+            &json!({"input":[{"type":"compaction_trigger"}]}),
+            &v2_headers,
+        ));
+
+        assert!(!codex_request_is_v2_compaction(
+            &AppType::Codex,
+            "/v1/responses/compact",
+            &json!({"model":"gpt-5.5"}),
+            &HeaderMap::new(),
+        ));
+
+        let mut local_headers = HeaderMap::new();
+        local_headers.insert(
+            "x-codex-turn-metadata",
+            HeaderValue::from_static(
+                r#"{"request_kind":"compaction","compaction":{"trigger":"auto","implementation":"responses","phase":"pre_turn"}}"#,
+            ),
+        );
+        assert!(!codex_request_is_v2_compaction(
+            &AppType::Codex,
+            "/v1/responses",
+            &json!({"input":[{"type":"compaction_trigger"}]}),
+            &local_headers,
+        ));
+
+        let mut legacy_v2_headers = HeaderMap::new();
+        legacy_v2_headers.insert(
+            "x-codex-turn-metadata",
+            HeaderValue::from_static(
+                r#"{"request_kind":"compaction","compaction":{"trigger":"auto"}}"#,
+            ),
+        );
+        assert!(codex_request_is_v2_compaction(
+            &AppType::Codex,
+            "/v1/responses",
+            &json!({"input":[{"type":"compaction_trigger"}]}),
+            &legacy_v2_headers,
+        ));
     }
 
     #[test]

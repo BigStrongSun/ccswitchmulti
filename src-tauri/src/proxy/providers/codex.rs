@@ -316,6 +316,37 @@ pub fn should_convert_codex_responses_to_chat(provider: &Provider, endpoint: &st
         )
 }
 
+/// Whether this effective provider can return a native Responses compaction item.
+///
+/// Only the official ChatGPT backend is known to support the private compaction
+/// payload. Third-party routes may opt in through the route's
+/// `capabilities.supportsRemoteCompaction` field; absent that declaration they
+/// need CCSwitchMulti's compaction response adapter.
+pub fn codex_route_supports_responses_compaction(provider: &Provider) -> bool {
+    if is_codex_official_provider(provider) {
+        return true;
+    }
+
+    if provider
+        .settings_config
+        .get("codexResolvedRouteId")
+        .and_then(JsonValue::as_str)
+        == Some("router-codex-official")
+    {
+        return true;
+    }
+
+    let Some(capabilities) = provider.settings_config.get("codexResolvedCapabilities") else {
+        return false;
+    };
+    for key in ["supportsRemoteCompaction", "supports_remote_compaction"] {
+        if let Some(value) = capabilities.get(key).and_then(JsonValue::as_bool) {
+            return value;
+        }
+    }
+    false
+}
+
 pub fn should_convert_codex_responses_to_messages(provider: &Provider, endpoint: &str) -> bool {
     is_codex_responses_endpoint(endpoint)
         && matches!(
@@ -4945,6 +4976,29 @@ wire_api = "responses"
             &provider,
             "/responses/compact?stream=true"
         ));
+    }
+
+    #[test]
+    fn codex_route_supports_responses_compaction_uses_route_capability_and_official_id() {
+        let third_party = create_provider(json!({
+            "codexResolvedRouteId": "router-deepseek",
+            "codexResolvedCapabilities": {}
+        }));
+        assert!(!codex_route_supports_responses_compaction(&third_party));
+
+        let opted_in = create_provider(json!({
+            "codexResolvedRouteId": "router-deepseek",
+            "codexResolvedCapabilities": {
+                "supportsRemoteCompaction": true
+            }
+        }));
+        assert!(codex_route_supports_responses_compaction(&opted_in));
+
+        let official_route = create_provider(json!({
+            "codexResolvedRouteId": "router-codex-official",
+            "codexResolvedCapabilities": {}
+        }));
+        assert!(codex_route_supports_responses_compaction(&official_route));
     }
 
     #[test]
