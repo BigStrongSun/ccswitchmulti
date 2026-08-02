@@ -1,5 +1,14 @@
 # CC Switch Repository Memory
 
+## 2026-08-02 CCSwitchMulti v3.19.0-4 正式发布
+
+- GitHub Release：`https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.19.0-4`；`draft=false`、`prerelease=false`，共 19 个资产。
+- tag `v3.19.0-4` 解引用到 `445a3041 chore(release): prepare CCSwitchMulti v3.19.0-4`；fork/main 已同步到该提交。
+- Actions run `30744839945` 成功：macOS、Linux x64/ARM64、Windows x64/ARM64 五个构建矩阵，加 Publish GitHub Release、Assemble latest.json 全部通过。
+- `latest.json` 验证为 `version=3.19.0-4`，六个平台键均为 `darwin-aarch64/darwin-x86_64/windows-x86_64/windows-aarch64/linux-x86_64/linux-aarch64`。
+- 该版本基于本地非 agentmesh 整合线：v3.19/v3.17 上游、账号池运行态、MultiRouter 自环根修、超时重发放大修复、历史扫描卡 UI 修复、MSI ICE38、hosted web_search 桥接。
+- 本地验证：`cargo check`、`pnpm typecheck`、`cargo fmt`、`git diff --check` 通过；forwarder `125/125`，hosted web_search `11/11`，SSE wrapper `1/1`，account pool `8/8`，Codex OAuth `39/39`。
+
 ## 2026-08-01 Codex 账号池 P0 运行态 Task 5 验证收口
 
 - 本阶段提交链为：`99d17418`（实施计划）、`fb855d37`（统一运行态与生命周期）、`462c7079`（TTL/LRU/凭据代际）、`50e183de`（typed outcome 与 transient soft-avoid）、`3eaa965d`（forwarder 真实失败接管）。公开账号池 JSON 和 `CodexOAuthStore.version=1` 未改变，也没有版本、tag、发布、安装或部署动作。
