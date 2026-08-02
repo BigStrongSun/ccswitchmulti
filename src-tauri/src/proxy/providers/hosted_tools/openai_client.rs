@@ -1,7 +1,13 @@
 //! OpenAI hosted tool HTTP client.
 
-use super::web_search::{
-    result_from_openai_response, HostedWebSearchConfig, WebSearchArguments, WebSearchResult,
+use super::{
+    image_generation::{
+        result_from_openai_response as image_result_from_openai_response,
+        HostedImageGenerationConfig, ImageGenerationArguments,
+    },
+    web_search::{
+        result_from_openai_response, HostedWebSearchConfig, WebSearchArguments, WebSearchResult,
+    },
 };
 use crate::proxy::error::ProxyError;
 use serde_json::{json, Value};
@@ -108,11 +114,58 @@ impl OpenAiHostedToolClient {
         if !status.is_success() {
             return Err(ProxyError::UpstreamError {
                 status: status.as_u16(),
-                body: Some(summarize_error_body(&value)),
+                body: Some(summarize_error_body(
+                    &value,
+                    "OpenAI hosted web_search returned an error",
+                )),
             });
         }
 
         Ok(result_from_openai_response(&args.query, &value))
+    }
+
+    /// 调用 OpenAI Responses hosted `image_generation` 并规整结果。
+    pub(crate) async fn run_image_generation(
+        &self,
+        args: &ImageGenerationArguments,
+        config: &HostedImageGenerationConfig,
+    ) -> Result<super::image_generation::ImageGenerationResult, ProxyError> {
+        let url = format!("{}/responses", self.base_url);
+        let request_body = self.build_image_generation_request(args, config);
+        let response = crate::proxy::http_client::get()
+            .post(&url)
+            .bearer_auth(&self.api_key)
+            .json(&request_body)
+            .timeout(self.timeout)
+            .send()
+            .await
+            .map_err(|e| {
+                if e.is_timeout() {
+                    ProxyError::Timeout(format!("OpenAI hosted image_generation timed out: {e}"))
+                } else {
+                    ProxyError::ForwardFailed(format!(
+                        "OpenAI hosted image_generation request failed: {e}"
+                    ))
+                }
+            })?;
+
+        let status = response.status();
+        let value: Value = response.json().await.map_err(|e| {
+            ProxyError::ForwardFailed(format!(
+                "Failed to parse OpenAI hosted image_generation response: {e}"
+            ))
+        })?;
+        if !status.is_success() {
+            return Err(ProxyError::UpstreamError {
+                status: status.as_u16(),
+                body: Some(summarize_error_body(
+                    &value,
+                    "OpenAI hosted image_generation returned an error",
+                )),
+            });
+        }
+
+        image_result_from_openai_response(args, &value)
     }
 
     /// 组装 OpenAI Responses hosted `web_search` 请求体。
@@ -142,6 +195,36 @@ impl OpenAiHostedToolClient {
             "stream": false
         })
     }
+
+    /// 组装 OpenAI Responses hosted `image_generation` 请求体。
+    fn build_image_generation_request(
+        &self,
+        args: &ImageGenerationArguments,
+        config: &HostedImageGenerationConfig,
+    ) -> Value {
+        let mut tool = json!({ "type": "image_generation" });
+        if let Some(size) = args.size.as_deref().or(config.size.as_deref()) {
+            tool["size"] = json!(size);
+        }
+        if let Some(quality) = args.quality.as_deref().or(config.quality.as_deref()) {
+            tool["quality"] = json!(quality);
+        }
+        if let Some(format) = args.format.as_deref().or(config.format.as_deref()) {
+            tool["format"] = json!(format);
+        }
+        if let Some(background) = config.background.as_deref() {
+            tool["background"] = json!(background);
+        }
+
+        json!({
+            "model": self.model,
+            "input": format!("Generate an image: {}", args.prompt),
+            "tools": [tool],
+            "tool_choice": { "type": "image_generation" },
+            "store": false,
+            "stream": false
+        })
+    }
 }
 
 /// 判断布尔环境变量是否显式关闭。
@@ -158,12 +241,12 @@ fn env_flag_disabled(name: &str) -> bool {
 }
 
 /// 将 OpenAI 错误体裁剪成可安全回填的短文本。
-fn summarize_error_body(value: &Value) -> String {
+fn summarize_error_body(value: &Value, fallback: &str) -> String {
     let message = value
         .pointer("/error/message")
         .or_else(|| value.get("message"))
         .and_then(Value::as_str)
-        .unwrap_or("OpenAI hosted web_search returned an error");
+        .unwrap_or(fallback);
     if message.chars().count() <= 500 {
         message.to_string()
     } else {
@@ -199,6 +282,39 @@ mod tests {
         assert_eq!(request["model"], "gpt-test");
         assert_eq!(request["tools"][0]["type"], "web_search");
         assert_eq!(request["tools"][0]["search_content_types"][0], "image");
+        assert_eq!(request["store"], false);
+    }
+
+    #[test]
+    fn build_image_generation_request_merges_tool_options() {
+        let client = OpenAiHostedToolClient {
+            api_key: "sk-test".to_string(),
+            base_url: DEFAULT_OPENAI_BASE_URL.to_string(),
+            model: "gpt-test".to_string(),
+            timeout: Duration::from_millis(DEFAULT_TIMEOUT_MS),
+        };
+        let args = ImageGenerationArguments {
+            prompt: "a robot".to_string(),
+            size: Some("1024x1024".to_string()),
+            quality: Some("high".to_string()),
+            format: Some("png".to_string()),
+        };
+        let config = HostedImageGenerationConfig {
+            size: None,
+            quality: None,
+            format: None,
+            background: Some("transparent".to_string()),
+        };
+
+        let request = client.build_image_generation_request(&args, &config);
+
+        assert_eq!(request["model"], "gpt-test");
+        assert_eq!(request["tools"][0]["type"], "image_generation");
+        assert_eq!(request["tools"][0]["size"], "1024x1024");
+        assert_eq!(request["tools"][0]["quality"], "high");
+        assert_eq!(request["tools"][0]["format"], "png");
+        assert_eq!(request["tools"][0]["background"], "transparent");
+        assert_eq!(request["tool_choice"]["type"], "image_generation");
         assert_eq!(request["store"], false);
     }
 }

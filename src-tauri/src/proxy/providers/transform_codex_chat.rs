@@ -9,7 +9,10 @@ use super::codex_chat_common::{
     response_function_call_item, response_function_call_item_with_namespace,
     split_leading_think_block,
 };
-use super::hosted_tools::web_search::{self, HostedWebSearchConfig};
+use super::hosted_tools::{
+    image_generation::{self, HostedImageGenerationConfig, IMAGE_GENERATION_FUNCTION_NAME},
+    web_search::{self, HostedWebSearchConfig},
+};
 use crate::provider::{CodexCacheConfig, CodexChatReasoningConfig};
 use crate::proxy::{
     error::ProxyError,
@@ -160,6 +163,7 @@ pub(crate) enum CodexToolKind {
     Custom,
     ToolSearch,
     HostedWebSearch,
+    HostedImageGeneration,
 }
 
 #[derive(Debug, Clone)]
@@ -176,6 +180,7 @@ pub(crate) struct CodexToolContext {
     chat_name_to_spec: HashMap<String, CodexToolSpec>,
     namespace_name_to_chat_name: HashMap<(String, String), String>,
     hosted_web_search: Option<HostedWebSearchConfig>,
+    hosted_image_generation: Option<HostedImageGenerationConfig>,
 }
 
 impl CodexToolContext {
@@ -195,14 +200,14 @@ impl CodexToolContext {
             .is_some_and(|spec| matches!(&spec.kind, CodexToolKind::Custom))
     }
 
-    /// 判断请求是否声明了 hosted `web_search`，供流式/非流式桥接路径复用。
-    pub(crate) fn has_hosted_web_search(&self) -> bool {
-        self.hosted_web_search.is_some()
-    }
-
     /// 返回 Codex 原始 hosted `web_search` 的安全配置子集。
     pub(crate) fn hosted_web_search_config(&self) -> Option<&HostedWebSearchConfig> {
         self.hosted_web_search.as_ref()
+    }
+
+    /// 返回 Codex 原始 hosted `image_generation` 的安全配置子集。
+    pub(crate) fn hosted_image_generation_config(&self) -> Option<&HostedImageGenerationConfig> {
+        self.hosted_image_generation.as_ref()
     }
 
     pub(crate) fn chat_name_for_response_function(
@@ -334,6 +339,21 @@ impl CodexToolContext {
         );
     }
 
+    /// 把 OpenAI hosted `image_generation` 暴露为第三方 Chat 上游可调用的普通 function。
+    fn add_hosted_image_generation_tool(&mut self, tool: &Value) {
+        self.hosted_image_generation = Some(image_generation::config_from_tool(tool));
+        let spec = CodexToolSpec {
+            kind: CodexToolKind::HostedImageGeneration,
+            name: IMAGE_GENERATION_FUNCTION_NAME.to_string(),
+            namespace: None,
+        };
+        self.add_chat_tool(
+            IMAGE_GENERATION_FUNCTION_NAME.to_string(),
+            spec,
+            image_generation::chat_tool_definition(),
+        );
+    }
+
     fn add_namespace_tool(&mut self, namespace_tool: &Value) {
         let Some(namespace) = namespace_tool.get("name").and_then(|v| v.as_str()) else {
             return;
@@ -366,6 +386,7 @@ impl CodexToolContext {
                 Some("custom") => self.add_custom_tool(tool),
                 Some("tool_search") => self.add_tool_search_tool(),
                 Some("web_search") => self.add_hosted_web_search_tool(tool),
+                Some("image_generation") => self.add_hosted_image_generation_tool(tool),
                 Some("namespace") => self.add_namespace_tool(tool),
                 _ => {}
             },
@@ -1804,6 +1825,16 @@ fn responses_tool_choice_to_chat(tool_choice: &Value, tool_context: &CodexToolCo
                 }
             })
         }
+        Value::Object(obj)
+            if obj.get("type").and_then(|v| v.as_str()) == Some("image_generation") =>
+        {
+            json!({
+                "type": "function",
+                "function": {
+                    "name": IMAGE_GENERATION_FUNCTION_NAME
+                }
+            })
+        }
         Value::Object(obj) if obj.get("type").and_then(|v| v.as_str()) == Some("custom") => {
             let name = obj.get("name").and_then(|v| v.as_str()).unwrap_or("");
             json!({
@@ -2128,6 +2159,9 @@ pub(crate) fn response_tool_call_item_from_chat_name(
             item_id, status, call_id, &spec.name, arguments, reasoning,
         ),
         Some(spec) if spec.kind == CodexToolKind::HostedWebSearch => {
+            response_function_call_item(item_id, status, call_id, &spec.name, arguments, reasoning)
+        }
+        Some(spec) if spec.kind == CodexToolKind::HostedImageGeneration => {
             response_function_call_item(item_id, status, call_id, &spec.name, arguments, reasoning)
         }
         Some(spec) => response_function_call_item_with_namespace(
@@ -3137,6 +3171,37 @@ mod tests {
         );
         assert_eq!(result["tool_choice"]["type"], "function");
         assert_eq!(result["tool_choice"]["function"]["name"], "web_search");
+    }
+
+    #[test]
+    fn responses_request_to_chat_maps_hosted_image_generation_to_function_tool() {
+        let input = json!({
+            "model": "kimi-k3",
+            "tools": [{
+                "type": "image_generation",
+                "size": "1024x1024",
+                "quality": "high",
+                "format": "png"
+            }],
+            "tool_choice": {"type": "image_generation"},
+            "input": "Generate a robot image."
+        });
+
+        let result = responses_to_chat_completions(input).unwrap();
+        let tools = result["tools"].as_array().expect("tools");
+
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["type"], "function");
+        assert_eq!(tools[0]["function"]["name"], "generate_image");
+        assert_eq!(tools[0]["function"]["parameters"]["required"][0], "prompt");
+        assert!(
+            tools
+                .iter()
+                .all(|tool| tool.get("type").and_then(Value::as_str) != Some("image_generation")),
+            "hosted image_generation must not be sent to third-party Chat upstream"
+        );
+        assert_eq!(result["tool_choice"]["type"], "function");
+        assert_eq!(result["tool_choice"]["function"]["name"], "generate_image");
     }
 
     #[test]
@@ -5253,6 +5318,51 @@ mod tests {
         assert_eq!(
             result["output"][0]["arguments"],
             r#"{"count":5,"query":"OpenAI Codex web search"}"#
+        );
+    }
+
+    #[test]
+    fn chat_response_to_responses_restores_hosted_image_generation_function_call() {
+        let request = json!({
+            "model": "kimi-k3",
+            "tools": [{
+                "type": "image_generation",
+                "size": "1024x1024",
+                "quality": "high",
+                "format": "png"
+            }],
+            "input": "Generate a robot image."
+        });
+        let context = build_codex_tool_context_from_request(&request);
+        let chat = json!({
+            "id": "chatcmpl_image",
+            "object": "chat.completion",
+            "created": 123,
+            "model": "kimi-k3",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_generate_image_1",
+                        "type": "function",
+                        "function": {
+                            "name": "generate_image",
+                            "arguments": "{\"prompt\":\"a robot in the rain\",\"format\":\"png\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+
+        let result = chat_completion_to_response_with_context(chat, &context).unwrap();
+
+        assert_eq!(result["output"][0]["type"], "function_call");
+        assert_eq!(result["output"][0]["call_id"], "call_generate_image_1");
+        assert_eq!(result["output"][0]["name"], "generate_image");
+        assert_eq!(
+            result["output"][0]["arguments"],
+            r#"{"format":"png","prompt":"a robot in the rain"}"#
         );
     }
 

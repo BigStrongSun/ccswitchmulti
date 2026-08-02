@@ -1,6 +1,11 @@
 //! Chat-level hosted tool loop.
 
 use super::{
+    image_generation::{
+        self, error_tool_content as image_error_tool_content,
+        result_to_tool_content as image_result_to_tool_content, HostedImageGenerationConfig,
+        IMAGE_GENERATION_FUNCTION_NAME,
+    },
     openai_client::OpenAiHostedToolClient,
     web_search::{
         error_tool_content, parse_arguments, query_hash, result_to_tool_content,
@@ -12,45 +17,69 @@ use serde_json::{json, Value};
 pub(crate) const HOSTED_TOOL_LOOP_HEADER: &str = "x-cc-switch-hosted-tool-loop";
 pub(crate) const MAX_HOSTED_TOOL_ITERATIONS: usize = 3;
 
-/// 第三方 Chat response 中的 `web_search` tool call。
+/// Codex 入站 hosted tools 的本地执行配置。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct HostedToolLoopConfig {
+    pub(crate) web_search: Option<HostedWebSearchConfig>,
+    pub(crate) image_generation: Option<HostedImageGenerationConfig>,
+}
+
+impl HostedToolLoopConfig {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.web_search.is_none() && self.image_generation.is_none()
+    }
+}
+
+/// 已桥接的 hosted tool 类型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HostedToolCallKind {
+    WebSearch,
+    ImageGeneration,
+}
+
+impl HostedToolCallKind {
+    fn from_function_name(name: &str) -> Option<Self> {
+        match name {
+            WEB_SEARCH_FUNCTION_NAME => Some(Self::WebSearch),
+            IMAGE_GENERATION_FUNCTION_NAME => Some(Self::ImageGeneration),
+            _ => None,
+        }
+    }
+}
+
+/// 第三方 Chat response 中的一个 hosted tool call。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct WebSearchToolCall {
+pub(crate) struct HostedToolCall {
+    pub(crate) kind: HostedToolCallKind,
     pub(crate) id: String,
     pub(crate) arguments: String,
 }
 
 /// Chat tool-call 扫描结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum WebSearchCallScan {
+pub(crate) enum HostedToolCallScan {
     NoToolCalls,
-    OnlyWebSearch(Vec<WebSearchToolCall>),
+    OnlyHosted(Vec<HostedToolCall>),
     ContainsUnsupportedToolCalls,
 }
 
-/// 扫描 Chat response 是否只请求了本地可执行的 hosted `web_search`。
-///
-/// 参数:
-/// - `chat_response`: 第三方 Chat Completions JSON。
-/// 返回:
-/// - 没有工具调用、只有 web_search、或混有其它工具调用三种状态。
-/// 副作用:
-/// - 无。
-pub(crate) fn scan_web_search_tool_calls(chat_response: &Value) -> WebSearchCallScan {
+/// 扫描 Chat response 是否只请求了本地可执行的 hosted tools。
+pub(crate) fn scan_hosted_tool_calls(chat_response: &Value) -> HostedToolCallScan {
     let Some(message) = first_choice_message(chat_response) else {
-        return WebSearchCallScan::NoToolCalls;
+        return HostedToolCallScan::NoToolCalls;
     };
 
     if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
         if tool_calls.is_empty() {
-            return WebSearchCallScan::NoToolCalls;
+            return HostedToolCallScan::NoToolCalls;
         }
         let mut calls = Vec::new();
         for (index, tool_call) in tool_calls.iter().enumerate() {
             let function = tool_call.get("function").unwrap_or(&Value::Null);
             let name = function.get("name").and_then(Value::as_str).unwrap_or("");
-            if name != WEB_SEARCH_FUNCTION_NAME {
-                return WebSearchCallScan::ContainsUnsupportedToolCalls;
-            }
+            let Some(kind) = HostedToolCallKind::from_function_name(name) else {
+                return HostedToolCallScan::ContainsUnsupportedToolCalls;
+            };
             let id = tool_call
                 .get("id")
                 .and_then(Value::as_str)
@@ -62,9 +91,13 @@ pub(crate) fn scan_web_search_tool_calls(chat_response: &Value) -> WebSearchCall
                 .and_then(Value::as_str)
                 .unwrap_or("{}")
                 .to_string();
-            calls.push(WebSearchToolCall { id, arguments });
+            calls.push(HostedToolCall {
+                kind,
+                id,
+                arguments,
+            });
         }
-        return WebSearchCallScan::OnlyWebSearch(calls);
+        return HostedToolCallScan::OnlyHosted(calls);
     }
 
     if let Some(function_call) = message.get("function_call") {
@@ -73,31 +106,28 @@ pub(crate) fn scan_web_search_tool_calls(chat_response: &Value) -> WebSearchCall
             .and_then(Value::as_str)
             .unwrap_or("");
         if name.is_empty() {
-            return WebSearchCallScan::NoToolCalls;
+            return HostedToolCallScan::NoToolCalls;
         }
-        if name != WEB_SEARCH_FUNCTION_NAME {
-            return WebSearchCallScan::ContainsUnsupportedToolCalls;
-        }
+        let Some(kind) = HostedToolCallKind::from_function_name(name) else {
+            return HostedToolCallScan::ContainsUnsupportedToolCalls;
+        };
         let arguments = function_call
             .get("arguments")
             .and_then(Value::as_str)
             .unwrap_or("{}")
             .to_string();
-        return WebSearchCallScan::OnlyWebSearch(vec![WebSearchToolCall {
+        return HostedToolCallScan::OnlyHosted(vec![HostedToolCall {
+            kind,
             id: "call_0".to_string(),
             arguments,
         }]);
     }
 
-    WebSearchCallScan::NoToolCalls
+    HostedToolCallScan::NoToolCalls
 }
 
 /// 将 assistant tool-call message 与 tool output messages 追加到 Chat 请求体。
 ///
-/// 参数:
-/// - `chat_request`: 已转换后的 Chat Completions 请求体，会被就地追加 messages。
-/// - `chat_response`: 上一轮 Chat response，提供 assistant tool_calls message。
-/// - `tool_messages`: 本地执行后的 tool messages。
 /// 返回:
 /// - `true` 表示成功追加；`false` 表示缺少 messages 或 assistant message。
 /// 副作用:
@@ -126,75 +156,28 @@ pub(crate) fn append_tool_outputs_to_chat_request(
     true
 }
 
-/// 执行一组 web_search tool calls 并生成 Chat tool messages。
-///
-/// 参数:
-/// - `calls`: 第三方模型请求的 web_search 调用。
-/// - `config`: Codex 原始 hosted web_search 配置。
-/// - `trace_id`: 可选请求 trace id，只用于脱敏日志关联。
-/// 返回:
-/// - 可追加到 Chat messages 的 `role=tool` 消息。
-/// 副作用:
-/// - 可能发起 OpenAI Responses 网络请求；日志只记录 query hash、耗时和状态。
-pub(crate) async fn execute_web_search_tool_calls(
-    calls: &[WebSearchToolCall],
-    config: &HostedWebSearchConfig,
+/// 执行一组 hosted tool calls 并生成 Chat tool messages。
+pub(crate) async fn execute_hosted_tool_calls(
+    calls: &[HostedToolCall],
+    config: &HostedToolLoopConfig,
     trace_id: Option<&str>,
 ) -> Vec<Value> {
     let client = OpenAiHostedToolClient::from_env();
     let mut messages = Vec::new();
 
     for call in calls {
-        let args = parse_arguments(&call.arguments);
-        let hash = query_hash(&args.query);
-        let started = std::time::Instant::now();
-        let content = match &client {
-            Ok(client) if !args.query.trim().is_empty() => {
-                match client.run_web_search(&args, config).await {
-                    Ok(result) => {
-                        log_hosted_tool_event(
-                            trace_id,
-                            &hash,
-                            "ok",
-                            started.elapsed().as_millis(),
-                            None,
-                        );
-                        result_to_tool_content(&result)
-                    }
-                    Err(err) => {
-                        let message = safe_error_message(&err.to_string());
-                        log_hosted_tool_event(
-                            trace_id,
-                            &hash,
-                            "error",
-                            started.elapsed().as_millis(),
-                            Some(&message),
-                        );
-                        error_tool_content(&args.query, &message)
-                    }
-                }
+        let content = match call.kind {
+            HostedToolCallKind::WebSearch => {
+                execute_web_search_call(&client, call, config.web_search.as_ref(), trace_id).await
             }
-            Ok(_) => {
-                let message = "web_search query is empty";
-                log_hosted_tool_event(
+            HostedToolCallKind::ImageGeneration => {
+                execute_image_generation_call(
+                    &client,
+                    call,
+                    config.image_generation.as_ref(),
                     trace_id,
-                    &hash,
-                    "invalid",
-                    started.elapsed().as_millis(),
-                    Some(message),
-                );
-                error_tool_content(&args.query, message)
-            }
-            Err(err) => {
-                let message = safe_error_message(err);
-                log_hosted_tool_event(
-                    trace_id,
-                    &hash,
-                    "not_configured",
-                    started.elapsed().as_millis(),
-                    Some(&message),
-                );
-                error_tool_content(&args.query, &message)
+                )
+                .await
             }
         };
 
@@ -206,6 +189,146 @@ pub(crate) async fn execute_web_search_tool_calls(
     }
 
     messages
+}
+
+async fn execute_web_search_call(
+    client: &Result<OpenAiHostedToolClient, String>,
+    call: &HostedToolCall,
+    config: Option<&HostedWebSearchConfig>,
+    trace_id: Option<&str>,
+) -> String {
+    let Some(config) = config else {
+        return error_tool_content(
+            &call.arguments,
+            "web_search hosted tool is not configured for this request",
+        );
+    };
+    let args = parse_arguments(&call.arguments);
+    let hash = query_hash(&args.query);
+    let started = std::time::Instant::now();
+    match client {
+        Ok(client) if !args.query.trim().is_empty() => {
+            match client.run_web_search(&args, config).await {
+                Ok(result) => {
+                    log_hosted_tool_event(
+                        trace_id,
+                        WEB_SEARCH_FUNCTION_NAME,
+                        &hash,
+                        "ok",
+                        started.elapsed().as_millis(),
+                        None,
+                    );
+                    result_to_tool_content(&result)
+                }
+                Err(err) => {
+                    let message = safe_error_message(&err.to_string());
+                    log_hosted_tool_event(
+                        trace_id,
+                        WEB_SEARCH_FUNCTION_NAME,
+                        &hash,
+                        "error",
+                        started.elapsed().as_millis(),
+                        Some(&message),
+                    );
+                    error_tool_content(&args.query, &message)
+                }
+            }
+        }
+        Ok(_) => {
+            let message = "web_search query is empty";
+            log_hosted_tool_event(
+                trace_id,
+                WEB_SEARCH_FUNCTION_NAME,
+                &hash,
+                "invalid",
+                started.elapsed().as_millis(),
+                Some(message),
+            );
+            error_tool_content(&args.query, message)
+        }
+        Err(err) => {
+            let message = safe_error_message(err);
+            log_hosted_tool_event(
+                trace_id,
+                WEB_SEARCH_FUNCTION_NAME,
+                &hash,
+                "not_configured",
+                started.elapsed().as_millis(),
+                Some(&message),
+            );
+            error_tool_content(&args.query, &message)
+        }
+    }
+}
+
+async fn execute_image_generation_call(
+    client: &Result<OpenAiHostedToolClient, String>,
+    call: &HostedToolCall,
+    config: Option<&HostedImageGenerationConfig>,
+    trace_id: Option<&str>,
+) -> String {
+    let Some(config) = config else {
+        return image_error_tool_content(
+            &call.arguments,
+            "image_generation hosted tool is not configured for this request",
+        );
+    };
+    let args = image_generation::parse_arguments(&call.arguments, config);
+    let hash = image_generation::prompt_hash(&args.prompt);
+    let started = std::time::Instant::now();
+    match client {
+        Ok(client) if !args.prompt.trim().is_empty() => {
+            match client.run_image_generation(&args, config).await {
+                Ok(result) => {
+                    log_hosted_tool_event(
+                        trace_id,
+                        IMAGE_GENERATION_FUNCTION_NAME,
+                        &hash,
+                        "ok",
+                        started.elapsed().as_millis(),
+                        None,
+                    );
+                    image_result_to_tool_content(&result)
+                }
+                Err(err) => {
+                    let message = safe_error_message(&err.to_string());
+                    log_hosted_tool_event(
+                        trace_id,
+                        IMAGE_GENERATION_FUNCTION_NAME,
+                        &hash,
+                        "error",
+                        started.elapsed().as_millis(),
+                        Some(&message),
+                    );
+                    image_error_tool_content(&args.prompt, &message)
+                }
+            }
+        }
+        Ok(_) => {
+            let message = "image_generation prompt is empty";
+            log_hosted_tool_event(
+                trace_id,
+                IMAGE_GENERATION_FUNCTION_NAME,
+                &hash,
+                "invalid",
+                started.elapsed().as_millis(),
+                Some(message),
+            );
+            image_error_tool_content(&args.prompt, message)
+        }
+        Err(err) => {
+            let message = safe_error_message(err);
+            log_hosted_tool_event(
+                trace_id,
+                IMAGE_GENERATION_FUNCTION_NAME,
+                &hash,
+                "not_configured",
+                started.elapsed().as_millis(),
+                Some(&message),
+            );
+            image_error_tool_content(&args.prompt, &message)
+        }
+    }
 }
 
 /// 取第一条 Chat choice message。
@@ -220,6 +343,7 @@ fn first_choice_message(chat_response: &Value) -> Option<&Value> {
 /// 写入 hosted tool 脱敏诊断事件。
 fn log_hosted_tool_event(
     trace_id: Option<&str>,
+    tool: &str,
     query_hash: &str,
     status: &str,
     elapsed_ms: u128,
@@ -228,7 +352,7 @@ fn log_hosted_tool_event(
     if let Some(trace_id) = trace_id {
         let mut fields = vec![
             ("trace", trace_id.to_string()),
-            ("tool", WEB_SEARCH_FUNCTION_NAME.to_string()),
+            ("tool", tool.to_string()),
             ("query_hash", query_hash.to_string()),
             ("status", status.to_string()),
             ("elapsed_ms", elapsed_ms.to_string()),
@@ -256,36 +380,67 @@ mod tests {
     use super::*;
 
     #[test]
-    fn scan_web_search_tool_calls_accepts_only_web_search() {
+    fn hosted_tool_loop_config_is_empty_only_when_no_tools() {
+        assert!(HostedToolLoopConfig::default().is_empty());
+        assert!(!HostedToolLoopConfig {
+            web_search: Some(HostedWebSearchConfig::default()),
+            ..HostedToolLoopConfig::default()
+        }
+        .is_empty());
+        assert!(!HostedToolLoopConfig {
+            image_generation: Some(HostedImageGenerationConfig::default()),
+            ..HostedToolLoopConfig::default()
+        }
+        .is_empty());
+    }
+
+    #[test]
+    fn scan_hosted_tool_calls_accepts_web_search_and_image_generation() {
         let response = json!({
             "choices": [{
                 "message": {
                     "role": "assistant",
-                    "tool_calls": [{
-                        "id": "call_search",
-                        "type": "function",
-                        "function": {
-                            "name": "web_search",
-                            "arguments": "{\"query\":\"Codex\"}"
+                    "tool_calls": [
+                        {
+                            "id": "call_search",
+                            "type": "function",
+                            "function": {
+                                "name": "web_search",
+                                "arguments": "{\"query\":\"Codex\"}"
+                            }
+                        },
+                        {
+                            "id": "call_image",
+                            "type": "function",
+                            "function": {
+                                "name": "generate_image",
+                                "arguments": "{\"prompt\":\"robot\"}"
+                            }
                         }
-                    }]
+                    ]
                 }
             }]
         });
 
-        let scan = scan_web_search_tool_calls(&response);
-
         assert_eq!(
-            scan,
-            WebSearchCallScan::OnlyWebSearch(vec![WebSearchToolCall {
-                id: "call_search".to_string(),
-                arguments: "{\"query\":\"Codex\"}".to_string()
-            }])
+            scan_hosted_tool_calls(&response),
+            HostedToolCallScan::OnlyHosted(vec![
+                HostedToolCall {
+                    kind: HostedToolCallKind::WebSearch,
+                    id: "call_search".to_string(),
+                    arguments: "{\"query\":\"Codex\"}".to_string()
+                },
+                HostedToolCall {
+                    kind: HostedToolCallKind::ImageGeneration,
+                    id: "call_image".to_string(),
+                    arguments: "{\"prompt\":\"robot\"}".to_string()
+                }
+            ])
         );
     }
 
     #[test]
-    fn scan_web_search_tool_calls_rejects_mixed_tools() {
+    fn scan_hosted_tool_calls_rejects_mixed_tools() {
         let response = json!({
             "choices": [{
                 "message": {
@@ -303,8 +458,8 @@ mod tests {
         });
 
         assert_eq!(
-            scan_web_search_tool_calls(&response),
-            WebSearchCallScan::ContainsUnsupportedToolCalls
+            scan_hosted_tool_calls(&response),
+            HostedToolCallScan::ContainsUnsupportedToolCalls
         );
     }
 
@@ -312,7 +467,7 @@ mod tests {
     fn append_tool_outputs_to_chat_request_adds_assistant_and_tool_messages() {
         let mut request = json!({
             "model": "deepseek-v4-flash",
-            "messages": [{"role": "user", "content": "Search."}],
+            "messages": [{"role": "user", "content": "Generate."}],
             "stream": true,
             "stream_options": {"include_usage": true}
         });
@@ -321,9 +476,9 @@ mod tests {
                 "message": {
                     "role": "assistant",
                     "tool_calls": [{
-                        "id": "call_search",
+                        "id": "call_image",
                         "type": "function",
-                        "function": {"name": "web_search", "arguments": "{}"}
+                        "function": {"name": "generate_image", "arguments": "{}"}
                     }]
                 }
             }]
@@ -334,7 +489,7 @@ mod tests {
             &response,
             vec![json!({
                 "role": "tool",
-                "tool_call_id": "call_search",
+                "tool_call_id": "call_image",
                 "content": "{}"
             })],
         ));

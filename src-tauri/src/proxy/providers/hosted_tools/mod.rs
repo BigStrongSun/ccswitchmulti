@@ -4,5 +4,6 @@
 //! 永远是普通 function tool，本地代理负责调用真正的 OpenAI hosted tool。
 
 pub(crate) mod bridge;
+pub(crate) mod image_generation;
 pub(crate) mod openai_client;
 pub(crate) mod web_search;

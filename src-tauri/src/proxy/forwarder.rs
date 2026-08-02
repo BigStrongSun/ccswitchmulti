@@ -4,13 +4,10 @@
 
 use super::hyper_client::ProxyResponse;
 use super::providers::{
-    hosted_tools::{
-        bridge::{
-            append_tool_outputs_to_chat_request, execute_web_search_tool_calls,
-            scan_web_search_tool_calls, WebSearchCallScan, HOSTED_TOOL_LOOP_HEADER,
-            MAX_HOSTED_TOOL_ITERATIONS,
-        },
-        web_search::HostedWebSearchConfig,
+    hosted_tools::bridge::{
+        append_tool_outputs_to_chat_request, execute_hosted_tool_calls, scan_hosted_tool_calls,
+        HostedToolCallScan, HostedToolLoopConfig, HOSTED_TOOL_LOOP_HEADER,
+        MAX_HOSTED_TOOL_ITERATIONS,
     },
     transform_codex_chat::CodexToolContext,
 };
@@ -2491,15 +2488,17 @@ impl RequestForwarder {
                 }
             }
         }
-        let hosted_web_search_config = codex_chat_tool_context
-            .as_ref()
-            .and_then(CodexToolContext::hosted_web_search_config)
-            .cloned();
-        let hosted_web_search_forced_non_stream = codex_responses_to_chat
-            && codex_chat_tool_context
+        let hosted_tool_loop_config =
+            codex_chat_tool_context
                 .as_ref()
-                .is_some_and(CodexToolContext::has_hosted_web_search);
-        if hosted_web_search_forced_non_stream {
+                .map(|context| HostedToolLoopConfig {
+                    web_search: context.hosted_web_search_config().cloned(),
+                    image_generation: context.hosted_image_generation_config().cloned(),
+                });
+        let hosted_tool_loop_config = hosted_tool_loop_config.filter(|config| !config.is_empty());
+        let hosted_tools_forced_non_stream =
+            codex_responses_to_chat && hosted_tool_loop_config.is_some();
+        if hosted_tools_forced_non_stream {
             if let Some(obj) = filtered_body.as_object_mut() {
                 obj.insert("stream".to_string(), serde_json::json!(false));
                 obj.remove("stream_options");
@@ -3517,8 +3516,8 @@ impl RequestForwarder {
                 }
             }
 
-            let response = if let Some(config) = hosted_web_search_config.as_ref() {
-                run_hosted_web_search_chat_loop(
+            let response = if let Some(config) = hosted_tool_loop_config.as_ref() {
+                run_hosted_tool_chat_loop(
                     response,
                     &mut filtered_body,
                     config,
@@ -3553,7 +3552,7 @@ impl RequestForwarder {
                         }
                     },
                     codex_trace_id.as_deref(),
-                    hosted_web_search_forced_non_stream,
+                    hosted_tools_forced_non_stream,
                 )
                 .await?
             } else {
@@ -5633,23 +5632,23 @@ fn is_managed_account_upstream_url(url: &str) -> bool {
         || (host == "api.x.ai" && uri.path().starts_with("/v1/"))
 }
 
-/// 运行 Chat 上游上的 hosted `web_search` 本地工具循环。
+/// 运行 Chat 上游上的 hosted tools 本地工具循环。
 ///
 /// 参数:
 /// - `response`: 第一轮 Chat 上游响应，调用方已完成成功响应预处理。
 /// - `chat_request`: 本轮 Chat 请求体；函数会追加 assistant/tool messages。
-/// - `config`: Codex 原始 hosted `web_search` 的安全配置子集。
+/// - `config`: Codex 原始 hosted tools 的安全配置子集。
 /// - `send_chat_request`: 复用 forwarder 已完成认证/代理/超时配置的发送闭包。
 /// - `trace_id`: 可选 Codex 路由 trace id，只写脱敏诊断日志。
 /// - `force_response_header`: 原始请求可能是流式，强制非流式上游时需要标记给 handler。
 /// 返回:
 /// - 最终 Chat response，仍交给现有 Chat→Responses 转换器处理。
 /// 副作用:
-/// - 可能调用 OpenAI hosted web_search，并可能向同一第三方 Chat 上游追加多轮请求。
-async fn run_hosted_web_search_chat_loop<F, Fut>(
+/// - 可能调用 OpenAI hosted tools，并可能向同一第三方 Chat 上游追加多轮请求。
+async fn run_hosted_tool_chat_loop<F, Fut>(
     mut response: ProxyResponse,
     chat_request: &mut Value,
-    config: &HostedWebSearchConfig,
+    config: &HostedToolLoopConfig,
     mut send_chat_request: F,
     trace_id: Option<&str>,
     force_response_header: bool,
@@ -5672,36 +5671,34 @@ where
         let chat_response: Value = match serde_json::from_slice(&body_bytes) {
             Ok(value) => value,
             Err(_) => {
-                log::warn!(
-                    "[Codex] Hosted web_search loop skipped because Chat response is not JSON"
-                );
+                log::warn!("[Codex] Hosted tool loop skipped because Chat response is not JSON");
                 return Ok(ProxyResponse::buffered(status, headers, body_bytes));
             }
         };
 
-        let calls = match scan_web_search_tool_calls(&chat_response) {
-            WebSearchCallScan::NoToolCalls => {
+        let calls = match scan_hosted_tool_calls(&chat_response) {
+            HostedToolCallScan::NoToolCalls => {
                 return Ok(ProxyResponse::buffered(status, headers, body_bytes));
             }
-            WebSearchCallScan::ContainsUnsupportedToolCalls => {
+            HostedToolCallScan::ContainsUnsupportedToolCalls => {
                 return Ok(ProxyResponse::buffered(status, headers, body_bytes));
             }
-            WebSearchCallScan::OnlyWebSearch(calls) if calls.is_empty() => {
+            HostedToolCallScan::OnlyHosted(calls) if calls.is_empty() => {
                 return Ok(ProxyResponse::buffered(status, headers, body_bytes));
             }
-            WebSearchCallScan::OnlyWebSearch(calls) => calls,
+            HostedToolCallScan::OnlyHosted(calls) => calls,
         };
 
         if iteration >= MAX_HOSTED_TOOL_ITERATIONS {
             log::warn!(
-                "[Codex] Hosted web_search loop reached max iterations ({MAX_HOSTED_TOOL_ITERATIONS})"
+                "[Codex] Hosted tool loop reached max iterations ({MAX_HOSTED_TOOL_ITERATIONS})"
             );
             return Ok(ProxyResponse::buffered(status, headers, body_bytes));
         }
 
-        let tool_messages = execute_web_search_tool_calls(&calls, config, trace_id).await;
+        let tool_messages = execute_hosted_tool_calls(&calls, config, trace_id).await;
         if !append_tool_outputs_to_chat_request(chat_request, &chat_response, tool_messages) {
-            log::warn!("[Codex] Hosted web_search loop skipped because Chat messages are missing");
+            log::warn!("[Codex] Hosted tool loop skipped because Chat messages are missing");
             return Ok(ProxyResponse::buffered(status, headers, body_bytes));
         }
 
@@ -5709,7 +5706,7 @@ where
         response = send_chat_request(chat_request).await?;
     }
 
-    unreachable!("hosted web_search loop always returns inside bounded iteration")
+    unreachable!("hosted tool loop always returns inside bounded iteration")
 }
 
 /// 读取并按 content-encoding 解压一个 ProxyResponse。
@@ -8726,6 +8723,8 @@ mod tests {
     /// 验证 hosted web_search loop 会消费第一轮工具调用、回灌 tool output 并返回最终 Chat 响应。
     #[tokio::test]
     async fn hosted_web_search_loop_appends_tool_output_and_marks_response() {
+        use crate::proxy::providers::hosted_tools::web_search::HostedWebSearchConfig;
+
         let initial_response = ProxyResponse::buffered(
             StatusCode::OK,
             HeaderMap::new(),
@@ -8762,10 +8761,13 @@ mod tests {
         let sent_bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
         let sent_bodies_for_closure = sent_bodies.clone();
 
-        let final_response = run_hosted_web_search_chat_loop(
+        let final_response = run_hosted_tool_chat_loop(
             initial_response,
             &mut chat_request,
-            &HostedWebSearchConfig::default(),
+            &HostedToolLoopConfig {
+                web_search: Some(HostedWebSearchConfig::default()),
+                image_generation: None,
+            },
             move |body| {
                 let sent_bodies = sent_bodies_for_closure.clone();
                 let body = body.clone();
@@ -8827,6 +8829,117 @@ mod tests {
         .expect("tool content json");
         assert!(tool_content.get("error").is_some());
         assert_eq!(tool_content["sources"], json!([]));
+    }
+
+    /// 验证 hosted image_generation loop 会消费第一轮工具调用并回灌错误或结果。
+    #[tokio::test]
+    async fn hosted_image_generation_loop_appends_tool_output_and_marks_response() {
+        use crate::proxy::providers::hosted_tools::image_generation::HostedImageGenerationConfig;
+
+        let initial_response = ProxyResponse::buffered(
+            StatusCode::OK,
+            HeaderMap::new(),
+            Bytes::from(
+                json!({
+                    "id": "chatcmpl_image",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "kimi-k3",
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "tool_calls": [{
+                                "id": "call_image",
+                                "type": "function",
+                                "function": {
+                                    "name": "generate_image",
+                                    "arguments": "{\"prompt\":\"a robot\"}"
+                                }
+                            }]
+                        },
+                        "finish_reason": "tool_calls"
+                    }]
+                })
+                .to_string(),
+            ),
+        );
+        let mut chat_request = json!({
+            "model": "kimi-k3",
+            "messages": [{ "role": "user", "content": "Generate." }],
+            "stream": true,
+            "stream_options": { "include_usage": true }
+        });
+        let sent_bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sent_bodies_for_closure = sent_bodies.clone();
+
+        let final_response = run_hosted_tool_chat_loop(
+            initial_response,
+            &mut chat_request,
+            &HostedToolLoopConfig {
+                web_search: None,
+                image_generation: Some(HostedImageGenerationConfig::default()),
+            },
+            move |body| {
+                let sent_bodies = sent_bodies_for_closure.clone();
+                let body = body.clone();
+                async move {
+                    sent_bodies.lock().unwrap().push(body);
+                    Ok(ProxyResponse::buffered(
+                        StatusCode::OK,
+                        HeaderMap::new(),
+                        Bytes::from(
+                            json!({
+                                "id": "chatcmpl_image_final",
+                                "object": "chat.completion",
+                                "created": 2,
+                                "model": "kimi-k3",
+                                "choices": [{
+                                    "message": {
+                                        "role": "assistant",
+                                        "content": "Image generation was unavailable."
+                                    },
+                                    "finish_reason": "stop"
+                                }]
+                            })
+                            .to_string(),
+                        ),
+                    ))
+                }
+            },
+            None,
+            true,
+        )
+        .await
+        .expect("hosted image_generation loop should finish");
+
+        assert_eq!(final_response.status(), StatusCode::OK);
+        assert!(final_response
+            .headers()
+            .contains_key(HOSTED_TOOL_LOOP_HEADER));
+        let final_body = serde_json::from_slice::<Value>(&final_response.bytes().await.unwrap())
+            .expect("final chat response json");
+        assert_eq!(
+            final_body["choices"][0]["message"]["content"],
+            "Image generation was unavailable."
+        );
+
+        let sent = sent_bodies.lock().unwrap();
+        assert_eq!(sent.len(), 1, "loop should resend Chat request once");
+        assert_eq!(sent[0]["stream"], false);
+        assert!(sent[0].get("stream_options").is_none());
+        let messages = sent[0]["messages"].as_array().expect("messages");
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[2]["role"], "tool");
+        assert_eq!(messages[2]["tool_call_id"], "call_image");
+        let tool_content: Value = serde_json::from_str(
+            messages[2]["content"]
+                .as_str()
+                .expect("tool content should be JSON string"),
+        )
+        .expect("tool content json");
+        assert!(tool_content.get("error").is_some());
+        assert_eq!(tool_content["artifact_path"], "");
     }
 
     #[test]
