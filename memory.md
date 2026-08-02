@@ -2659,3 +2659,10 @@
 - 历史缺口：`4f0da985` 只补了 compact 路由/元数据/日志，`transform_codex_chat` 测试仍断言普通 message，没有真正构造 compaction item；`af60c7ed` 只是用 `name="OpenAI"` 打开 remote compact，不解决第三方上游响应。
 - 根修：v2 检测限定 `responses_compaction_v2` 或 `/responses + compaction_trigger` 且无 implementation；原生 Responses 请求不改 wire，响应聚合后合成唯一 `ocx1:` compaction item；Chat 路径同样合成；后续请求转发前把 `ocx1:` 还原成 user summary；官方/显式支持 route 原生透传。
 - 验证：`cargo check --lib`、fmt、12 个 compaction 测试全过；全量库测试的 3 个失败均为既有 Anthropic 断言或 15721 被运行实例占用，非本次改动引入。
+
+## 2026-08-02 Codex 502 后无法重试根因：Managed retry 预算被写成 0
+
+- 现场 session `019fc255-dd60-7a62-bbc2-99d5206f2487` 在 19:58 连续两次 `upstream_send_error` 后直接 `task_complete`，用户手动发“继续”也只再失败一次，没有自动等待网络恢复后重试。JSONL 显示 `codex_error_info=other`，不是流断开后的 5 次重试。
+- 直接根因：`72c8ca22` 为防“可能已在途”的 502/504 重放，把 CCSM 托管 provider 写成 `request_max_retries=0`、`stream_max_retries=0`；当前 `~/.codex/config.toml` 的 `[model_providers.codex_model_router_v2]` 正是这两个值。Codex 源码 `codex-api/src/endpoint/session.rs` 用 `request_max_retries` 驱动流建立前的 transport/HTTP 5xx 重试，`core/src/session/turn.rs` 再用 `stream_max_retries` 驱动采样重试；两层都为 0 时，即使 `error sending request` 是明确未发送的连接/构造失败，也会立即终止。
+- 修复边界：恢复 `request_max_retries=2`，只允许流建立前的安全重试；`stream_max_retries` 保持 0，避免流建立后整轮采样在途重放。`hyper_client.rs` 的响应体读取失败从 `ForwardFailed/502` 改为 `ResponsePending/429`，Codex retry policy 不重试 429，因此不会因为恢复请求级重试而重新放大 body 读取阶段。
+- 验证：`cargo check --lib`、`cargo fmt --check`、`managed_codex_retry_budget` 与 `hyper_client::tests` 通过。

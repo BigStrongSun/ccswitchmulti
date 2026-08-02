@@ -162,19 +162,19 @@ impl ProxyResponse {
         match self {
             Self::Hyper(r) => {
                 let collected = r.into_body().collect().await.map_err(|e| {
-                    ProxyError::ForwardFailed(format!("Failed to read response body: {e}"))
+                    ProxyError::ResponsePending(format!("Failed to read response body: {e}"))
                 })?;
                 Ok(collected.to_bytes())
             }
             Self::Reqwest(r) => r.bytes().await.map_err(|e| {
-                ProxyError::ForwardFailed(format!("Failed to read response body: {e}"))
+                ProxyError::ResponsePending(format!("Failed to read response body: {e}"))
             }),
             Self::Buffered { body, .. } => Ok(body),
             Self::Streamed { mut stream, .. } => {
                 let mut body = bytes::BytesMut::new();
                 while let Some(chunk) = stream.next().await {
                     let chunk = chunk.map_err(|e| {
-                        ProxyError::ForwardFailed(format!("Failed to read response body: {e}"))
+                        ProxyError::ResponsePending(format!("Failed to read response body: {e}"))
                     })?;
                     body.extend_from_slice(&chunk);
                 }

@@ -21,11 +21,14 @@ pub const CC_SWITCH_CODEX_MODEL_PROVIDER_ID: &str = "custom";
 /// provider id 主要影响历史/线程归属，不能随构建漂移。
 pub const CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID: &str = "codex_model_router_v2";
 pub const CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME: &str = "cc-switch-model-catalog.json";
-/// CCSM 托管的 Codex provider 不再让 Codex 自动重发整个采样请求。
+/// CCSM 托管 Codex provider 的重试预算。
 ///
-/// 通过 CCSM 的请求可能在网络层已经到达上游，重发既浪费流量又可能重复执行。
-/// 只有上游在连接阶段明确失败时，CCSM 自身的 failover 才会切换到下一家。
-pub(crate) const CODEX_MANAGED_REQUEST_MAX_RETRIES: u64 = 0;
+/// `request_max_retries` 只覆盖流建立前的传输/HTTP 5xx 重试；`error sending request`
+/// 这类连接/构造失败必须允许 Codex 重试，否则网络短暂恢复后当前 turn 已经直接失败。
+/// `stream_max_retries` 保持 0：流建立后 Codex 不应自动重放整轮采样请求，因为请求
+/// 可能已经到达上游。对可能已在途的响应体读取/超时错误，CCSM 映射为 429 +
+/// Retry-After，而 Codex 的 provider retry policy 明确不重试 429。
+pub(crate) const CODEX_MANAGED_REQUEST_MAX_RETRIES: u64 = 2;
 pub(crate) const CODEX_MANAGED_STREAM_MAX_RETRIES: u64 = 0;
 const CODEX_MODELS_CACHE_FILENAME: &str = "models_cache.json";
 const CODEX_MODELS_CACHE_BACKUP_FILENAME: &str = "models_cache.cc-switch-backup.json";
@@ -4028,6 +4031,12 @@ pub fn remove_codex_toml_base_url_if(toml_str: &str, predicate: impl Fn(&str) ->
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    fn managed_codex_retry_budget_allows_pre_stream_but_not_in_flight_stream_retry() {
+        assert!(CODEX_MANAGED_REQUEST_MAX_RETRIES > 0);
+        assert_eq!(CODEX_MANAGED_STREAM_MAX_RETRIES, 0);
+    }
 
     #[test]
     fn force_builtin_openai_preserves_global_config_and_removes_provider_fields() {
