@@ -3354,11 +3354,12 @@ impl RequestForwarder {
         // 在 headers/body 被移动之前捕获一份重放工厂，交给下游转换层做
         // 有界重连（见 providers::streaming_retry）。工厂只是重放同一
         // HTTP 请求；是否重试、重试多少次由转换层根据下游状态决定。
-        let stream_reconnect = if request_is_streaming
-            && matches!(
-                resolved_claude_api_format.as_deref(),
-                Some("openai_responses")
-            ) {
+        let stream_reconnect = if should_create_responses_stream_reconnector(
+            app_type,
+            endpoint,
+            request_is_streaming,
+            resolved_claude_api_format.as_deref(),
+        ) {
             let first_byte_timeout = if self.streaming_first_byte_timeout.is_zero() {
                 timeout
             } else {
@@ -6004,6 +6005,20 @@ fn should_retry_without_codex_responses_lite_header(
             .unwrap_or(false)
 }
 
+/// 原生 Codex `/responses` 直通与 Claude 的 Responses 转换都能在未产生语义输出
+/// 前安全重连。其它端点即使是 streaming，也不能假定遵守 Responses SSE 语义。
+fn should_create_responses_stream_reconnector(
+    app_type: &AppType,
+    endpoint: &str,
+    request_is_streaming: bool,
+    resolved_claude_api_format: Option<&str>,
+) -> bool {
+    request_is_streaming
+        && (resolved_claude_api_format == Some("openai_responses")
+            || (matches!(app_type, AppType::Codex)
+                && super::providers::is_codex_responses_endpoint(endpoint)))
+}
+
 /// 生成 Codex Responses-Lite fallback 的能力缓存 key。
 ///
 /// 参数:
@@ -7667,6 +7682,34 @@ mod tests {
         assert_ne!(key_a, key_other_model);
         assert_ne!(key_a, key_other_provider);
         assert!(!key_a.contains("secret"));
+    }
+
+    #[test]
+    fn native_codex_responses_streams_get_reconnect_factory() {
+        assert!(should_create_responses_stream_reconnector(
+            &AppType::Codex,
+            "/v1/responses",
+            true,
+            None,
+        ));
+        assert!(should_create_responses_stream_reconnector(
+            &AppType::Claude,
+            "/v1/messages",
+            true,
+            Some("openai_responses"),
+        ));
+        assert!(!should_create_responses_stream_reconnector(
+            &AppType::Codex,
+            "/v1/responses",
+            false,
+            None,
+        ));
+        assert!(!should_create_responses_stream_reconnector(
+            &AppType::Codex,
+            "/v1/models",
+            true,
+            None,
+        ));
     }
 
     // 验证短期负缓存命中期间有效，过期后会自动删除并允许下一次重新带头探测。

@@ -35,7 +35,8 @@ use super::{
         streaming_codex_chat::create_responses_sse_stream_from_chat_with_context,
         streaming_gemini::create_anthropic_sse_stream_from_gemini,
         streaming_retry::{
-            create_resilient_anthropic_sse_stream_from_responses, StreamReconnector,
+            create_resilient_anthropic_sse_stream_from_responses,
+            create_resilient_responses_sse_stream, StreamReconnector,
         },
         transform, transform_codex_anthropic, transform_codex_chat,
         transform_codex_responses_namespace, transform_gemini, transform_responses,
@@ -2603,6 +2604,14 @@ pub async fn handle_responses(
     handle_responses_for_app(state, request, AppType::Codex, "Codex", "codex").await
 }
 
+fn should_wrap_native_codex_responses_stream(
+    request_is_streaming: bool,
+    response: &super::hyper_client::ProxyResponse,
+    has_reconnector: bool,
+) -> bool {
+    request_is_streaming && has_reconnector && response.status().is_success() && !response.is_json()
+}
+
 pub async fn handle_grokbuild_responses(
     State(state): State<ProxyState>,
     request: axum::extract::Request,
@@ -2706,6 +2715,7 @@ async fn handle_responses_for_app(
     };
 
     let connection_guard = result.connection_guard.take();
+    let stream_reconnect = result.stream_reconnect.take();
     ctx.outbound_model = result.outbound_model.take();
     ctx.provider = result.provider;
     let response = result.response;
@@ -2790,6 +2800,25 @@ async fn handle_responses_for_app(
         return handle_codex_native_compaction_fallback(response, &ctx, &state, connection_guard)
             .await;
     }
+
+    let response = if should_wrap_native_codex_responses_stream(
+        is_stream,
+        &response,
+        stream_reconnect.is_some(),
+    ) {
+        let status = response.status();
+        let response_headers = response.headers().clone();
+        super::hyper_client::ProxyResponse::streamed(
+            status,
+            response_headers,
+            create_resilient_responses_sse_stream(
+                Box::pin(response.bytes_stream()),
+                stream_reconnect,
+            ),
+        )
+    } else {
+        response
+    };
 
     process_response_with_stream_hint(
         response,
@@ -5199,8 +5228,8 @@ mod tests {
         resolve_forward_error_provider_for_logging, resolve_forward_error_route_provider,
         responses_response_to_compaction_sse, responses_response_to_completed_sse,
         responses_response_to_full_sse, responses_sse_to_response_value,
-        should_handle_as_codex_client, should_use_claude_transform_streaming, transform,
-        upstream_body_parse_error,
+        should_handle_as_codex_client, should_use_claude_transform_streaming,
+        should_wrap_native_codex_responses_stream, transform, upstream_body_parse_error,
     };
     use crate::{
         app_config::AppType,
@@ -5247,6 +5276,37 @@ mod tests {
                 Some((event, payload))
             })
             .collect()
+    }
+
+    #[test]
+    fn native_codex_stream_recovery_only_wraps_successful_non_json_streams() {
+        let response = crate::proxy::hyper_client::ProxyResponse::streamed(
+            StatusCode::OK,
+            HeaderMap::new(),
+            futures::stream::empty::<Result<bytes::Bytes, std::io::Error>>(),
+        );
+        assert!(should_wrap_native_codex_responses_stream(
+            true, &response, true
+        ));
+        assert!(!should_wrap_native_codex_responses_stream(
+            false, &response, true
+        ));
+        assert!(!should_wrap_native_codex_responses_stream(
+            true, &response, false
+        ));
+
+        let mut json_headers = HeaderMap::new();
+        json_headers.insert("content-type", HeaderValue::from_static("application/json"));
+        let json_response = crate::proxy::hyper_client::ProxyResponse::buffered(
+            StatusCode::OK,
+            json_headers,
+            bytes::Bytes::new(),
+        );
+        assert!(!should_wrap_native_codex_responses_stream(
+            true,
+            &json_response,
+            true
+        ));
     }
 
     #[test]
