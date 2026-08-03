@@ -1334,7 +1334,7 @@
     "commonConfigHint": "該片段會在勾選「套用通用設定」時附加到 config.toml 末尾",
     "enableGoalMode": "啟用 Goal mode",
     "enableRemoteCompaction": "啟用遠端壓縮",
-    "remoteCompactionHint": "開啟後會將目前 model_providers 條目的 name 寫為 OpenAI，讓 Codex 嘗試使用遠端壓縮。",
+    "remoteCompactionHint": "第三方 provider 預設使用本機壓縮；開啟後會將目前 model_providers 條目的 name 寫為 OpenAI，讓 Codex 嘗試使用遠端壓縮。",
     "apiUrlLabel": "API 請求位址",
     "extractFromCurrent": "從編輯內容擷取",
     "extractNoCommonConfig": "目前編輯內容沒有可擷取的通用設定",

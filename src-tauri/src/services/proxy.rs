@@ -3382,7 +3382,9 @@ impl ProxyService {
         };
         let legacy_facade = is_multirouter
             .then(|| Self::legacy_codex_multirouter_auth_facade(&doc, proxy_provider_id));
-        let proxy_provider_name = if is_multirouter {
+        let proxy_provider_name = if provider
+            .is_some_and(crate::proxy::providers::codex_provider_remote_compaction_enabled)
+        {
             "OpenAI"
         } else {
             provider
@@ -6292,12 +6294,11 @@ supports_websockets = true
         );
         assert!(route.get("experimental_bearer_token").is_none());
         assert!(parsed.get("experimental_bearer_token").is_none());
-        assert!(!output.contains("用户自定义 Router 名称"));
     }
 
     #[test]
     fn codex_multirouter_takeover_facade_projects_fully_managed_toml() {
-        // 回归：managed_codex_oauth 的 MultiRouter 也必须保留 OpenAI 登录门面，
+        // 回归：managed_codex_oauth 的 MultiRouter 也必须保留 OpenAI 认证门面，
         // 否则 Codex Desktop 会丢失账号、用量和退出/重新登录入口。
         let provider = codex_multirouter_provider("managed_codex_oauth");
         let output = ProxyService::apply_codex_proxy_toml_config_with_pool_policy(
@@ -6362,6 +6363,7 @@ http_headers = { x-cc-switch-proxy-mode = "router", x-user-header = "drop-with-o
         let parsed: toml::Value = toml::from_str(&output).expect("valid TOML");
         let route = &parsed["model_providers"]
             [crate::codex_config::CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID];
+        assert_eq!(route["name"].as_str(), Some("OpenAI"));
         assert_eq!(route["requires_openai_auth"].as_bool(), Some(true));
         assert!(route.get("experimental_bearer_token").is_none());
     }
@@ -6391,12 +6393,38 @@ experimental_bearer_token = "PROXY_MANAGED"
         let route = &parsed["model_providers"]
             [crate::codex_config::CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID];
 
-        assert_eq!(route["name"].as_str(), Some("OpenAI"));
+        assert_eq!(route["name"].as_str(), Some("用户自定义 Router 名称"));
         assert_eq!(route["requires_openai_auth"].as_bool(), Some(true));
         assert_eq!(
             route["experimental_bearer_token"].as_str(),
             Some(PROXY_TOKEN_PLACEHOLDER)
         );
+    }
+
+    #[test]
+    fn codex_multirouter_takeover_uses_openai_name_only_when_remote_compaction_opted_in() {
+        let mut provider = codex_multirouter_provider("provider_config");
+        provider.settings_config["config"] = json!(
+            r#"model_provider = "codex_model_router_v2"
+
+[model_providers.codex_model_router_v2]
+name = "OpenAI"
+"#
+        );
+
+        let output = ProxyService::apply_codex_proxy_toml_config_with_pool_policy(
+            "",
+            "http://127.0.0.1:5000/v1",
+            Some(&provider),
+            None,
+        )
+        .expect("project remote compaction facade");
+        let parsed: toml::Value = toml::from_str(&output).expect("valid TOML");
+        let route = &parsed["model_providers"]
+            [crate::codex_config::CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID];
+
+        assert_eq!(route["name"].as_str(), Some("OpenAI"));
+        assert_eq!(route["requires_openai_auth"].as_bool(), Some(true));
     }
 
     #[tokio::test]

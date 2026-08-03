@@ -347,6 +347,95 @@ pub fn codex_route_supports_responses_compaction(provider: &Provider) -> bool {
     false
 }
 
+/// Whether this provider should expose the OpenAI provider name to Codex.
+///
+/// Codex decides remote vs local compaction from the model provider `name`
+/// (`is_openai()`), not from CCSM route capabilities. Third-party providers must
+/// therefore stay on a non-OpenAI name by default. Official OAuth-only
+/// MultiRouter buckets keep remote compaction, while any third-party or mixed
+/// bucket falls back to local unless the user explicitly opts in. The legacy UI
+/// toggle records `name = "OpenAI"` in the provider's Codex TOML, so we honor
+/// that marker and a structured provider setting too.
+pub(crate) fn codex_provider_remote_compaction_enabled(provider: &Provider) -> bool {
+    for key in [
+        "codexRemoteCompaction",
+        "remoteCompaction",
+        "remote_compaction",
+    ] {
+        if provider
+            .settings_config
+            .get(key)
+            .and_then(JsonValue::as_bool)
+            == Some(true)
+        {
+            return true;
+        }
+    }
+
+    if let Some(config_text) = provider
+        .settings_config
+        .get("config")
+        .and_then(JsonValue::as_str)
+    {
+        if let Ok(doc) = config_text.parse::<TomlValue>() {
+            if let Some(provider_id) = doc.get("model_provider").and_then(TomlValue::as_str) {
+                if doc
+                    .get("model_providers")
+                    .and_then(|providers| providers.get(provider_id))
+                    .and_then(|entry| entry.get("name"))
+                    .and_then(TomlValue::as_str)
+                    .is_some_and(|name| name.trim() == "OpenAI")
+                {
+                    return true;
+                }
+            }
+        }
+    }
+
+    // Keep remote compaction for official OAuth-only MultiRouter buckets by
+    // default, but never for third-party or mixed buckets. A route capability
+    // can explicitly claim native compaction support without OAuth.
+    let Some(routing) = provider.settings_config.get("codexRouting") else {
+        return false;
+    };
+    if routing
+        .get("enabled")
+        .and_then(JsonValue::as_bool)
+        .is_some_and(|enabled| !enabled)
+    {
+        return false;
+    }
+    let Some(routes) = routing
+        .get("routes")
+        .and_then(JsonValue::as_array)
+        .or_else(|| routing.as_array())
+    else {
+        return false;
+    };
+    let enabled_routes = routes
+        .iter()
+        .filter(|route| {
+            route
+                .get("enabled")
+                .and_then(JsonValue::as_bool)
+                .unwrap_or(true)
+        })
+        .collect::<Vec<_>>();
+    if enabled_routes.is_empty() {
+        return false;
+    }
+    enabled_routes.iter().all(|route| {
+        if let Some(supports) = route
+            .pointer("/capabilities/supportsRemoteCompaction")
+            .or_else(|| route.pointer("/capabilities/supports_remote_compaction"))
+            .and_then(JsonValue::as_bool)
+        {
+            return supports;
+        }
+        codex_route_uses_official_agent_backend(route)
+    })
+}
+
 pub fn should_convert_codex_responses_to_messages(provider: &Provider, endpoint: &str) -> bool {
     is_codex_responses_endpoint(endpoint)
         && matches!(
@@ -4999,6 +5088,88 @@ wire_api = "responses"
             "codexResolvedCapabilities": {}
         }));
         assert!(codex_route_supports_responses_compaction(&official_route));
+    }
+
+    #[test]
+    fn codex_provider_remote_compaction_enabled_defaults_false_for_third_party() {
+        let provider = create_provider(json!({
+            "config": r#"model_provider = "custom"
+
+[model_providers.custom]
+name = "DeepSeek"
+"#
+        }));
+
+        assert!(!codex_provider_remote_compaction_enabled(&provider));
+    }
+
+    #[test]
+    fn codex_provider_remote_compaction_enabled_honors_toml_and_structured_opt_in() {
+        let toml_enabled = create_provider(json!({
+            "config": r#"model_provider = "custom"
+
+[model_providers.custom]
+name = "OpenAI"
+"#
+        }));
+        assert!(codex_provider_remote_compaction_enabled(&toml_enabled));
+
+        let structured_enabled = create_provider(json!({
+            "codexRemoteCompaction": true
+        }));
+        assert!(codex_provider_remote_compaction_enabled(
+            &structured_enabled
+        ));
+    }
+
+    #[test]
+    fn codex_provider_remote_compaction_enabled_tracks_route_backend() {
+        let official_only = create_provider(json!({
+            "codexRouting": {
+                "enabled": true,
+                "routes": [{
+                    "id": "official",
+                    "upstream": {
+                        "auth": { "source": "managed_codex_oauth" }
+                    }
+                }]
+            }
+        }));
+        assert!(codex_provider_remote_compaction_enabled(&official_only));
+
+        let third_party_only = create_provider(json!({
+            "codexRouting": {
+                "enabled": true,
+                "routes": [{
+                    "id": "deepseek",
+                    "upstream": {
+                        "auth": { "source": "provider_config" }
+                    }
+                }]
+            }
+        }));
+        assert!(!codex_provider_remote_compaction_enabled(&third_party_only));
+
+        let mixed = create_provider(json!({
+            "codexRouting": {
+                "enabled": true,
+                "routes": [
+                    {
+                        "id": "official",
+                        "upstream": {
+                            "auth": { "source": "managed_codex_oauth" }
+                        }
+                    },
+                    {
+                        "id": "deepseek",
+                        "upstream": {
+                            "auth": { "source": "provider_config" }
+                        }
+                    }
+                ]
+            }
+        }));
+        assert!(!codex_provider_remote_compaction_enabled(&mixed));
     }
 
     #[test]

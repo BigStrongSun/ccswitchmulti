@@ -1,5 +1,36 @@
 # CC Switch Repository Memory
 
+## 2026-08-03 第三方 Codex provider 默认本地压缩与远程压缩 opt-in
+
+- Codex 的压缩选择只看 `ModelProviderInfo::supports_remote_compaction()`，实现是
+  provider `name` 是否为 OpenAI（或 Azure Responses）。第三方 Responses 上游即使
+  能跑普通 `/responses`，也不等于实现 Codex private compaction；`name = "OpenAI"`
+  会让 Codex 对未适配上游发起 remote compact，出现
+  `remote compaction v2 expected exactly one compaction output item` 或 4xx。
+- CCSM 根因：`apply_codex_proxy_toml_config_with_pool_policy` 对 MultiRouter 曾经
+  无条件把 live `[model_providers.codex_model_router_v2] name` 写成 `OpenAI`，所以
+  DeepSeek/Qwen 等第三方也被全局拉进远程压缩。该字段只影响 Codex 侧能力选择，
+  不决定 CCSM 内部 route；`requires_openai_auth` 才是 Desktop 登录/账号门面。
+- 修复边界：新增 `codex_provider_remote_compaction_enabled`。结构化
+  `codexRemoteCompaction/remoteCompaction/remote_compaction=true` 或 provider 的
+  Codex config TOML 中对应 `model_providers.<id>.name = "OpenAI"` 是显式 opt-in；
+  没有显式设置时，official OAuth-only MultiRouter 仍写 OpenAI，第三方-only 或
+  mixed MultiRouter 写 provider.name / `CCSwitch MultiRouter`，第三方回到本地压缩。
+- 不采用“把 compaction_trigger 换成普通摘要提示词再包装响应”的方案：第三方普通
+  Responses 的摘要质量和 Codex 本地压缩策略不等价，且远程 v2 的触发/输出契约是
+  专门协议，粗糙改写会污染会话历史。未适配上游应使用本地压缩，远程压缩必须显式
+  opt-in 并只用于确实支持 compaction 的 provider。
+- Codex 的 `[features] remote_compaction_v2=false` 只关 v2，不保证退回本地；若要
+  第三方本地压缩，仍以 provider name 非 OpenAI 为准。MultiRouter 是单个 Codex
+  provider bucket，远程压缩开关在该 bucket 内是全局的；真正逐上游粒度需要拆分
+  provider 或依赖 Codex 未来支持 per-model provider capability。
+- 验证：`cargo test --lib compaction` 15/15，`codex_multirouter_takeover` 5/5，
+  `codex_provider_remote_compaction_enabled` 3/3；完整 lib 跳过现场端口绑定测试
+  `update_current_claude_desktop_provider_syncs_profile_when_proxy_takeover_is_active`
+  和既有 Anthropic transform 断言失败
+  `test_request_tools_and_filtering` / `test_request_custom_tool_survives_with_required_choice`
+  后 2779 passed / 0 failed / 2 ignored；`pnpm typecheck` 与 `git diff --check` 通过。
+
 ## 2026-08-02 本地 main 漏合核对与 v3.19.0-4 release 重建
 
 - 核对基线：本地 `main` HEAD 为 `efc20bab`，相对 `fork/main`（`445a3041`）领先 5 个提交：`41630094` stream hint、`3ecf02ef` Codex remote compact v2、`c4691f19` memory、`74a57591` v3.19.0-4 发布记录、`efc20bab` pre-stream retry 恢复。

@@ -1336,7 +1336,7 @@
     "commonConfigHint": "This snippet will be appended to the end of config.toml when 'Apply Common Config' is checked",
     "enableGoalMode": "Enable Goal mode",
     "enableRemoteCompaction": "Enable remote compaction",
-    "remoteCompactionHint": "When enabled, the active model_providers entry name is written as OpenAI so Codex can try remote compaction.",
+    "remoteCompactionHint": "Third-party providers default to local compaction. Enabling this writes the active model_providers entry name as OpenAI so Codex tries remote compaction.",
     "apiUrlLabel": "API Request URL",
     "extractFromCurrent": "Extract from Editor",
     "extractNoCommonConfig": "No common config available to extract from editor",

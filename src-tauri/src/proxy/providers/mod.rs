@@ -76,8 +76,9 @@ pub use codex::{
     CodexMultiRouterAuthFacade,
 };
 pub(crate) use codex::{
-    codex_route_supports_responses_compaction, is_codex_remote_compact_endpoint,
-    is_codex_responses_endpoint, provider_uses_native_codex_auth, CODEX_ACCOUNT_POOL_ENABLED,
+    codex_provider_remote_compaction_enabled, codex_route_supports_responses_compaction,
+    is_codex_remote_compact_endpoint, is_codex_responses_endpoint, provider_uses_native_codex_auth,
+    CODEX_ACCOUNT_POOL_ENABLED,
 };
 pub use gemini::GeminiAdapter;
 
