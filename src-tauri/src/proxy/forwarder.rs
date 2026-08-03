@@ -9,6 +9,7 @@ use super::providers::{
         HostedToolCallScan, HostedToolLoopConfig, HOSTED_TOOL_LOOP_HEADER,
         MAX_HOSTED_TOOL_ITERATIONS,
     },
+    hosted_tools::openai_client::OpenAiHostedToolClient,
     transform_codex_chat::CodexToolContext,
 };
 use super::{
@@ -3526,10 +3527,13 @@ impl RequestForwarder {
             }
 
             let response = if let Some(config) = hosted_tool_loop_config.as_ref() {
+                let hosted_tool_client =
+                    resolve_hosted_tool_client(self.app_handle.as_ref(), provider, headers).await;
                 run_hosted_tool_chat_loop(
                     response,
                     &mut filtered_body,
                     config,
+                    &hosted_tool_client,
                     |body| {
                         let headers = ordered_headers.clone();
                         let body_bytes = serde_json::to_vec(body).map_err(|e| {
@@ -5649,6 +5653,75 @@ fn hosted_tool_bridge_enabled(settings: &Value, tool: &str) -> bool {
         .unwrap_or(true)
 }
 
+/// 解析 hosted tool 调用凭据：优先显式 API Key，再回退请求自带的 Codex OAuth，最后用 CCSM 托管 OAuth。
+async fn resolve_hosted_tool_client(
+    app_handle: Option<&tauri::AppHandle>,
+    provider: &Provider,
+    source_headers: &http::HeaderMap,
+) -> Result<OpenAiHostedToolClient, String> {
+    if !OpenAiHostedToolClient::hosted_tool_bridge_env_enabled() {
+        return Err("OpenAI hosted tool bridge is disabled by environment".to_string());
+    }
+    if let Some(Ok(client)) = OpenAiHostedToolClient::from_env_if_enabled() {
+        return Ok(client);
+    }
+
+    if let Some((token, account_id)) = source_codex_oauth_credentials(source_headers) {
+        return Ok(OpenAiHostedToolClient::from_codex_oauth(token, account_id));
+    }
+
+    if let Some(app_handle) = app_handle {
+        let codex_state = app_handle.state::<CodexOAuthState>();
+        let codex_auth: tokio::sync::RwLockReadGuard<'_, CodexOAuthManager> =
+            codex_state.0.read().await;
+        let account_id = provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.managed_account_id_for("codex_oauth"));
+        let token_result = match &account_id {
+            Some(id) => codex_auth.get_valid_token_for_account(id).await,
+            None => codex_auth.get_valid_token().await,
+        };
+        return match token_result {
+            Ok(token) => {
+                let resolved_account_id = match &account_id {
+                    Some(_) => account_id,
+                    None => codex_auth.default_account_id().await,
+                };
+                Ok(OpenAiHostedToolClient::from_codex_oauth(
+                    token,
+                    resolved_account_id,
+                ))
+            }
+            Err(err) => Err(format!(
+                "OpenAI hosted tool bridge failed to obtain Codex OAuth token: {err}"
+            )),
+        };
+    }
+
+    Err(
+        "OpenAI hosted tool bridge requires CCSWITCH_HOSTED_TOOLS_OPENAI_API_KEY or a logged-in Codex OAuth request"
+            .to_string(),
+    )
+}
+
+/// 从当前 Codex 请求头提取 native OAuth 凭据，避免为 hosted tools 单独配置 API Key。
+fn source_codex_oauth_credentials(headers: &http::HeaderMap) -> Option<(String, Option<String>)> {
+    let authorization = headers
+        .get(http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())?;
+    let token = authorization.strip_prefix("Bearer ")?.trim();
+    if token.is_empty() {
+        return None;
+    }
+    let account_id = headers
+        .get("chatgpt-account-id")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    Some((token.to_string(), account_id))
+}
+
 /// 运行 Chat 上游上的 hosted tools 本地工具循环。
 ///
 /// 参数:
@@ -5666,6 +5739,7 @@ async fn run_hosted_tool_chat_loop<F, Fut>(
     mut response: ProxyResponse,
     chat_request: &mut Value,
     config: &HostedToolLoopConfig,
+    client: &Result<OpenAiHostedToolClient, String>,
     mut send_chat_request: F,
     trace_id: Option<&str>,
     force_response_header: bool,
@@ -5713,7 +5787,7 @@ where
             return Ok(ProxyResponse::buffered(status, headers, body_bytes));
         }
 
-        let tool_messages = execute_hosted_tool_calls(&calls, config, trace_id).await;
+        let tool_messages = execute_hosted_tool_calls(&calls, config, client, trace_id).await;
         if !append_tool_outputs_to_chat_request(chat_request, &chat_response, tool_messages) {
             log::warn!("[Codex] Hosted tool loop skipped because Chat messages are missing");
             return Ok(ProxyResponse::buffered(status, headers, body_bytes));
@@ -8737,6 +8811,22 @@ mod tests {
         .expect("guard is scoped to managed-account upstreams");
     }
 
+    #[test]
+    fn source_codex_oauth_credentials_reads_request_bearer() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            HeaderValue::from_static("Bearer token-from-codex"),
+        );
+        headers.insert("chatgpt-account-id", HeaderValue::from_static("acct_1"));
+
+        let (token, account_id) =
+            source_codex_oauth_credentials(&headers).expect("oauth credentials");
+
+        assert_eq!(token, "token-from-codex");
+        assert_eq!(account_id.as_deref(), Some("acct_1"));
+    }
+
     /// 验证 hosted web_search loop 会消费第一轮工具调用、回灌 tool output 并返回最终 Chat 响应。
     #[tokio::test]
     async fn hosted_web_search_loop_appends_tool_output_and_marks_response() {
@@ -8785,6 +8875,7 @@ mod tests {
                 web_search: Some(HostedWebSearchConfig::default()),
                 image_generation: None,
             },
+            &Err("test no credentials".to_string()),
             move |body| {
                 let sent_bodies = sent_bodies_for_closure.clone();
                 let body = body.clone();
@@ -8896,6 +8987,7 @@ mod tests {
                 web_search: None,
                 image_generation: Some(HostedImageGenerationConfig::default()),
             },
+            &Err("test no credentials".to_string()),
             move |body| {
                 let sent_bodies = sent_bodies_for_closure.clone();
                 let body = body.clone();

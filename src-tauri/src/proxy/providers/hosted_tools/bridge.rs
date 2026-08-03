@@ -160,19 +160,19 @@ pub(crate) fn append_tool_outputs_to_chat_request(
 pub(crate) async fn execute_hosted_tool_calls(
     calls: &[HostedToolCall],
     config: &HostedToolLoopConfig,
+    client: &Result<OpenAiHostedToolClient, String>,
     trace_id: Option<&str>,
 ) -> Vec<Value> {
-    let client = OpenAiHostedToolClient::from_env();
     let mut messages = Vec::new();
 
     for call in calls {
         let content = match call.kind {
             HostedToolCallKind::WebSearch => {
-                execute_web_search_call(&client, call, config.web_search.as_ref(), trace_id).await
+                execute_web_search_call(client, call, config.web_search.as_ref(), trace_id).await
             }
             HostedToolCallKind::ImageGeneration => {
                 execute_image_generation_call(
-                    &client,
+                    client,
                     call,
                     config.image_generation.as_ref(),
                     trace_id,

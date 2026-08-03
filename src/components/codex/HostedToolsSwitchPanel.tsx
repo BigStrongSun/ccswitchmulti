@@ -24,7 +24,8 @@ export function HostedToolsSwitchPanel({
         </div>
         <p className="mt-1 text-xs leading-5 text-muted-foreground dark:text-slate-400">
           Codex 请求里的 OpenAI hosted tool 会由 CCSM 转成第三方模型可调用的普通
-          function；实际执行仍需要独立 OpenAI hosted 凭据。
+          function；实际执行优先复用已登录的 Codex OAuth，也可使用独立 OpenAI
+          hosted 凭据。
         </p>
       </div>
       <label className="flex cursor-pointer items-start justify-between gap-3 rounded-md border border-border bg-background/80 p-3 dark:border-slate-700 dark:bg-slate-950/60">

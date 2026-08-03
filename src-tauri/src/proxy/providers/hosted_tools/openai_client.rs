@@ -15,31 +15,53 @@ use std::time::Duration;
 
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_OPENAI_MODEL: &str = "gpt-4.1-mini";
+const DEFAULT_CODE_OAUTH_MODEL: &str = "gpt-5.4-mini";
+const CODEX_OAUTH_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+
+/// Hosted tool 调用使用的凭据来源。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HostedToolAuth {
+    ApiKey(String),
+    CodexOAuth {
+        access_token: String,
+        account_id: Option<String>,
+    },
+}
+
+impl HostedToolAuth {
+    fn bearer_token(&self) -> &str {
+        match self {
+            Self::ApiKey(token)
+            | Self::CodexOAuth {
+                access_token: token,
+                ..
+            } => token,
+        }
+    }
+}
 
 /// OpenAI hosted tool 调用配置。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OpenAiHostedToolClient {
-    api_key: String,
+    auth: HostedToolAuth,
     base_url: String,
     model: String,
     timeout: Duration,
 }
 
 impl OpenAiHostedToolClient {
-    /// 从环境变量创建 hosted tool client。
-    ///
-    /// 参数:
-    /// - 无。
-    /// 返回:
-    /// - 成功时返回 client；未配置独立 OpenAI key 时返回安全错误文本。
-    /// 副作用:
-    /// - 读取进程环境变量，不访问磁盘。
-    pub(crate) fn from_env() -> Result<Self, String> {
-        if env_flag_disabled("CCSWITCH_HOSTED_TOOLS_OPENAI_ENABLED") {
-            return Err("OpenAI hosted tool bridge is disabled by environment".to_string());
-        }
+    /// 未配置 API Key 时返回 `None`，供 forwarder 回退到 Codex OAuth。
+    pub(crate) fn from_env_if_enabled() -> Option<Result<Self, String>> {
+        Self::hosted_tool_bridge_env_enabled().then(Self::from_env_inner)
+    }
 
+    /// 进程级总开关是否允许 hosted tool bridge。
+    pub(crate) fn hosted_tool_bridge_env_enabled() -> bool {
+        !env_flag_disabled("CCSWITCH_HOSTED_TOOLS_OPENAI_ENABLED")
+    }
+
+    fn from_env_inner() -> Result<Self, String> {
         let api_key = std::env::var("CCSWITCH_HOSTED_TOOLS_OPENAI_API_KEY")
             .ok()
             .or_else(|| std::env::var("OPENAI_API_KEY").ok())
@@ -65,11 +87,58 @@ impl OpenAiHostedToolClient {
             .clamp(1_000, 120_000);
 
         Ok(Self {
-            api_key,
+            auth: HostedToolAuth::ApiKey(api_key),
             base_url,
             model,
             timeout: Duration::from_millis(timeout_ms),
         })
+    }
+
+    /// 使用已登录 Codex OAuth 创建 hosted tool client。
+    ///
+    /// 不读取 API Key，直接复用 CCSM 托管的 ChatGPT 登录态访问官方 Codex 后端。
+    pub(crate) fn from_codex_oauth(access_token: String, account_id: Option<String>) -> Self {
+        let model = std::env::var("CCSWITCH_HOSTED_TOOLS_OPENAI_MODEL")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| DEFAULT_CODE_OAUTH_MODEL.to_string());
+        let timeout_ms = std::env::var("CCSWITCH_HOSTED_TOOLS_TIMEOUT_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_TIMEOUT_MS)
+            .clamp(1_000, 120_000);
+
+        Self {
+            auth: HostedToolAuth::CodexOAuth {
+                access_token,
+                account_id,
+            },
+            base_url: CODEX_OAUTH_BASE_URL.to_string(),
+            model,
+            timeout: Duration::from_millis(timeout_ms),
+        }
+    }
+
+    fn apply_oauth_headers(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<reqwest::RequestBuilder, ProxyError> {
+        let HostedToolAuth::CodexOAuth { account_id, .. } = &self.auth else {
+            return Ok(request);
+        };
+        let originator =
+            http::HeaderValue::from_static(crate::proxy::providers::CODEX_OAUTH_ORIGINATOR);
+        let mut request = request.header("originator", originator);
+        if let Some(account_id) = account_id {
+            let value = http::HeaderValue::from_str(account_id).map_err(|e| {
+                ProxyError::Internal(format!(
+                    "Invalid Codex OAuth account id for hosted tool call: {e}"
+                ))
+            })?;
+            request = request.header("chatgpt-account-id", value);
+        }
+        Ok(request)
     }
 
     /// 调用 OpenAI Responses hosted `web_search` 并规整结果。
@@ -88,22 +157,19 @@ impl OpenAiHostedToolClient {
     ) -> Result<WebSearchResult, ProxyError> {
         let url = format!("{}/responses", self.base_url);
         let request_body = self.build_web_search_request(args, config);
-        let response = crate::proxy::http_client::get()
+        let mut request = crate::proxy::http_client::get()
             .post(&url)
-            .bearer_auth(&self.api_key)
+            .bearer_auth(self.auth.bearer_token())
             .json(&request_body)
-            .timeout(self.timeout)
-            .send()
-            .await
-            .map_err(|e| {
-                if e.is_timeout() {
-                    ProxyError::Timeout(format!("OpenAI hosted web_search timed out: {e}"))
-                } else {
-                    ProxyError::ForwardFailed(format!(
-                        "OpenAI hosted web_search request failed: {e}"
-                    ))
-                }
-            })?;
+            .timeout(self.timeout);
+        request = self.apply_oauth_headers(request)?;
+        let response = request.send().await.map_err(|e| {
+            if e.is_timeout() {
+                ProxyError::Timeout(format!("OpenAI hosted web_search timed out: {e}"))
+            } else {
+                ProxyError::ForwardFailed(format!("OpenAI hosted web_search request failed: {e}"))
+            }
+        })?;
 
         let status = response.status();
         let value: Value = response.json().await.map_err(|e| {
@@ -132,22 +198,21 @@ impl OpenAiHostedToolClient {
     ) -> Result<super::image_generation::ImageGenerationResult, ProxyError> {
         let url = format!("{}/responses", self.base_url);
         let request_body = self.build_image_generation_request(args, config);
-        let response = crate::proxy::http_client::get()
+        let mut request = crate::proxy::http_client::get()
             .post(&url)
-            .bearer_auth(&self.api_key)
+            .bearer_auth(self.auth.bearer_token())
             .json(&request_body)
-            .timeout(self.timeout)
-            .send()
-            .await
-            .map_err(|e| {
-                if e.is_timeout() {
-                    ProxyError::Timeout(format!("OpenAI hosted image_generation timed out: {e}"))
-                } else {
-                    ProxyError::ForwardFailed(format!(
-                        "OpenAI hosted image_generation request failed: {e}"
-                    ))
-                }
-            })?;
+            .timeout(self.timeout);
+        request = self.apply_oauth_headers(request)?;
+        let response = request.send().await.map_err(|e| {
+            if e.is_timeout() {
+                ProxyError::Timeout(format!("OpenAI hosted image_generation timed out: {e}"))
+            } else {
+                ProxyError::ForwardFailed(format!(
+                    "OpenAI hosted image_generation request failed: {e}"
+                ))
+            }
+        })?;
 
         let status = response.status();
         let value: Value = response.json().await.map_err(|e| {
@@ -263,7 +328,7 @@ mod tests {
     #[test]
     fn build_web_search_request_keeps_original_content_types() {
         let client = OpenAiHostedToolClient {
-            api_key: "sk-test".to_string(),
+            auth: HostedToolAuth::ApiKey("sk-test".to_string()),
             base_url: DEFAULT_OPENAI_BASE_URL.to_string(),
             model: "gpt-test".to_string(),
             timeout: Duration::from_millis(DEFAULT_TIMEOUT_MS),
@@ -288,7 +353,7 @@ mod tests {
     #[test]
     fn build_image_generation_request_merges_tool_options() {
         let client = OpenAiHostedToolClient {
-            api_key: "sk-test".to_string(),
+            auth: HostedToolAuth::ApiKey("sk-test".to_string()),
             base_url: DEFAULT_OPENAI_BASE_URL.to_string(),
             model: "gpt-test".to_string(),
             timeout: Duration::from_millis(DEFAULT_TIMEOUT_MS),
@@ -316,5 +381,20 @@ mod tests {
         assert_eq!(request["tools"][0]["background"], "transparent");
         assert_eq!(request["tool_choice"]["type"], "image_generation");
         assert_eq!(request["store"], false);
+    }
+
+    #[test]
+    fn from_codex_oauth_uses_official_backend_and_default_model() {
+        let client = OpenAiHostedToolClient::from_codex_oauth(
+            "token-test".to_string(),
+            Some("acct_1".to_string()),
+        );
+
+        assert_eq!(client.base_url, "https://chatgpt.com/backend-api/codex");
+        assert_eq!(client.model, "gpt-5.4-mini");
+        assert!(matches!(
+            client.auth,
+            HostedToolAuth::CodexOAuth { account_id: Some(ref id), .. } if id == "acct_1"
+        ));
     }
 }
