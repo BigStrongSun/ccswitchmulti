@@ -246,8 +246,8 @@ pub(crate) fn normalize_codex_responses_passthrough_request_for_transport(
 /// 参数:
 /// - `request_body`: Codex Responses 请求体。
 ///   返回:
-/// - function_call arguments 已规整、历史 message id 已补 `msg_` 前缀、
-///   其余结构保持不变的请求体。
+/// - function_call arguments 已规整、消息类 item id 已按类型补
+///   `msg_`/`amsg_` 前缀，其余结构保持不变的请求体。
 ///   副作用:
 /// - 无。函数只转换传入 JSON 值。
 ///   边界:
@@ -260,7 +260,7 @@ fn normalize_codex_responses_passthrough_items(request_body: Value) -> Value {
     };
 
     normalize_codex_responses_function_call_arguments(&mut body);
-    normalize_codex_responses_message_item_ids(&mut body);
+    normalize_codex_responses_input_item_ids(&mut body);
 
     Value::Object(body)
 }
@@ -407,12 +407,13 @@ fn normalize_codex_responses_function_call_item_arguments(item: &mut Value) {
     object.insert("arguments".to_string(), Value::String(arguments));
 }
 
-/// 规整 Chat/Anthropic 上游消息 item 的历史 id。
+/// 规整 Responses input 消息类 item 的历史 id。
 ///
-/// Codex 会把第三方上游转换出的消息 id（如 `resp_chatcmpl-..._msg`）持久化，
-/// 下一轮切回官方 `/responses` 时会被拒绝：Responses 输入消息 id 必须以
-/// `msg_` 开头。这里幂等补齐前缀，避免旧会话跨 provider 切换后报 400。
-fn normalize_codex_responses_message_item_ids(body: &mut Map<String, Value>) {
+/// 官方 backend 对 id 前缀有按类型区分的校验：普通 message 必须 `msg_`，
+/// agent_message 必须 `amsg_`。Chat/Anthropic 转换出的旧历史可能带
+/// `resp_chatcmpl-..._msg`，此前修正又可能把原生 `amsg_...` 误加成
+/// `msg_amsg_...`；这里按类型幂等补齐，并恢复被双重前缀污染的 id。
+fn normalize_codex_responses_input_item_ids(body: &mut Map<String, Value>) {
     let Some(Value::Array(items)) = body.get_mut("input") else {
         return;
     };
@@ -421,19 +422,24 @@ fn normalize_codex_responses_message_item_ids(body: &mut Map<String, Value>) {
         let Value::Object(object) = item else {
             continue;
         };
-        if !matches!(
-            object.get("type").and_then(Value::as_str),
-            Some("message" | "agent_message")
-        ) {
-            continue;
-        }
+        let expected_prefix = match object.get("type").and_then(Value::as_str) {
+            Some("message") => "msg_",
+            Some("agent_message") => "amsg_",
+            _ => continue,
+        };
         let Some(Value::String(id)) = object.get_mut("id") else {
             continue;
         };
-        if id.is_empty() || id.starts_with("msg_") {
+        if id.is_empty() || id.starts_with(expected_prefix) {
             continue;
         }
-        *id = format!("msg_{id}");
+        if expected_prefix == "amsg_" {
+            if let Some(rest) = id.strip_prefix("msg_amsg_") {
+                *id = format!("amsg_{rest}");
+                continue;
+            }
+        }
+        *id = format!("{expected_prefix}{id}");
     }
 }
 
@@ -2457,8 +2463,52 @@ mod tests {
             "msg_resp_chatcmpl-2gyygAFeaDX2rFNtuG7mOhf9_msg"
         );
         assert_eq!(input[1]["id"], "msg_ok");
-        assert_eq!(input[2]["id"], "msg_resp_msg_1_0");
+        assert_eq!(input[2]["id"], "amsg_resp_msg_1_0");
         assert_eq!(input[3]["id"], "fc_call_1");
+    }
+
+    #[test]
+    fn codex_responses_passthrough_preserves_native_agent_message_ids() {
+        // Codex 自身生成的 agent_message id 以 amsg_ 开头，官方 backend 也要求
+        // 这个前缀；不能像普通 message 一样统一改成 msg_。
+        let body = json!({
+            "model": "gpt-5.4",
+            "input": [
+                {
+                    "type": "agent_message",
+                    "id": "amsg_019fc3fa-9b0a-7db1-9ca8-131d56d047ac",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "subagent done" }]
+                }
+            ]
+        });
+
+        let normalized = normalize_codex_responses_passthrough_request(body);
+        let input = normalized["input"].as_array().expect("input array");
+
+        assert_eq!(input[0]["id"], "amsg_019fc3fa-9b0a-7db1-9ca8-131d56d047ac");
+    }
+
+    #[test]
+    fn codex_oauth_responses_recovers_double_prefixed_agent_message_ids() {
+        // 旧版规整曾把 amsg_... 加成 msg_amsg_...；官方会拒绝并要求 amsg_ 前缀，
+        // 这里必须把双重前缀恢复回去，旧会话才能继续。
+        let body = json!({
+            "model": "gpt-5.4",
+            "input": [
+                {
+                    "type": "agent_message",
+                    "id": "msg_amsg_019fc3fa-9b0a-7db1-9ca8-131d56d047ac",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "subagent done" }]
+                }
+            ]
+        });
+
+        let normalized = normalize_codex_oauth_responses_request(body, false);
+        let input = normalized["input"].as_array().expect("input array");
+
+        assert_eq!(input[0]["id"], "amsg_019fc3fa-9b0a-7db1-9ca8-131d56d047ac");
     }
 
     #[test]
