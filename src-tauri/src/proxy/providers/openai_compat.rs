@@ -534,6 +534,10 @@ fn normalize_codex_oauth_input_item(item: Value) -> Value {
         object.remove("content");
     }
 
+    // Official backend forwards with store=false, so synthetic/replayed item ids
+    // are not persisted server-side and come back as 404. Send history inline.
+    object.remove("id");
+
     Value::Object(object)
 }
 
@@ -2490,9 +2494,9 @@ mod tests {
     }
 
     #[test]
-    fn codex_oauth_responses_recovers_double_prefixed_agent_message_ids() {
-        // 旧版规整曾把 amsg_... 加成 msg_amsg_...；官方会拒绝并要求 amsg_ 前缀，
-        // 这里必须把双重前缀恢复回去，旧会话才能继续。
+    fn codex_oauth_responses_strips_double_prefixed_agent_message_ids() {
+        // 旧版规整曾把 amsg_... 加成 msg_amsg_...；官方按 store=false 转发时
+        // 不会持久化这些 id，直接移除才能避免前缀校验和 404。
         let body = json!({
             "model": "gpt-5.4",
             "input": [
@@ -2508,12 +2512,13 @@ mod tests {
         let normalized = normalize_codex_oauth_responses_request(body, false);
         let input = normalized["input"].as_array().expect("input array");
 
-        assert_eq!(input[0]["id"], "amsg_019fc3fa-9b0a-7db1-9ca8-131d56d047ac");
+        assert!(input[0].get("id").is_none());
     }
 
     #[test]
-    fn codex_oauth_responses_normalizes_chat_sourced_message_ids() {
-        // 官方 OAuth 直透路径同样命中消息 id 校验，必须在 normalize 阶段修复。
+    fn codex_oauth_responses_strips_replayed_message_ids() {
+        // 官方 OAuth 直透路径使用 store=false，历史 message id 不会被服务端
+        // 持久化；直接移除 id，让历史按内联内容发送。
         let body = json!({
             "model": "gpt-5.4",
             "input": [
@@ -2534,11 +2539,35 @@ mod tests {
         let normalized = normalize_codex_oauth_responses_request(body, false);
         let input = normalized["input"].as_array().expect("input array");
 
-        assert_eq!(
-            input[0]["id"],
-            "msg_resp_chatcmpl-2gyygAFeaDX2rFNtuG7mOhf9_msg"
-        );
+        assert!(input[0].get("id").is_none());
         assert_eq!(input[1].get("id"), None);
+    }
+
+    #[test]
+    fn codex_oauth_responses_strips_unpersisted_reasoning_ids() {
+        // 官方 store=false 时，Chat 上游合成的 reasoning id（rs_resp_chatcmpl-...）
+        // 在官方服务端不存在，回放会 404；必须移除 id。
+        let body = json!({
+            "model": "gpt-5.4",
+            "input": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_resp_chatcmpl-L2v9jyTIwSBd0avrEPO8umbl",
+                    "summary": [{ "type": "summary_text", "text": "thinking" }]
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "pong" }]
+                }
+            ]
+        });
+
+        let normalized = normalize_codex_oauth_responses_request(body, false);
+        let input = normalized["input"].as_array().expect("input array");
+
+        assert!(input[0].get("id").is_none());
+        assert!(input[1].get("id").is_none());
     }
 
     #[test]
@@ -2572,10 +2601,7 @@ mod tests {
         let input = normalized["input"].as_array().expect("input array");
 
         assert_eq!(input[0]["type"], "compaction_trigger");
-        assert_eq!(
-            input[1]["id"],
-            "msg_resp_chatcmpl-2gyygAFeaDX2rFNtuG7mOhf9_msg"
-        );
+        assert!(input[1].get("id").is_none());
         assert_eq!(input[2]["type"], "function_call_output");
         assert!(input[3].get("id").is_none());
     }
