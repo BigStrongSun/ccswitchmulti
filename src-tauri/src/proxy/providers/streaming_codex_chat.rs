@@ -308,7 +308,7 @@ impl ChatToResponsesState {
 
         if !self.text.added {
             let output_index = self.next_output_index();
-            let item_id = format!("{}_msg", self.response_id);
+            let item_id = format!("msg_{}", self.response_id);
             self.text.output_index = Some(output_index);
             self.text.item_id = item_id.clone();
             self.text.added = true;
@@ -887,6 +887,24 @@ mod tests {
         assert!(output.contains("\"text\":\"Hello\""));
         assert!(output.contains("event: response.completed"));
         assert!(output.contains("\"input_tokens\":4"));
+    }
+
+    #[tokio::test]
+    async fn text_message_item_id_uses_msg_prefix() {
+        let output = collect(vec![
+            "data: {\"id\":\"chatcmpl_k3\",\"created\":123,\"model\":\"k3\",\"choices\":[{\"delta\":{\"content\":\"pong\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ])
+        .await;
+
+        let events = parse_sse_events(&output);
+        let added = events
+            .iter()
+            .find(|event| event["type"] == "response.output_item.added")
+            .expect("output item added");
+
+        assert_eq!(added["item"]["type"], "message");
+        assert!(added["item"]["id"].as_str().unwrap().starts_with("msg_"));
     }
 
     #[tokio::test]

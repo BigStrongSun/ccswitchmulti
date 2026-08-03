@@ -2009,7 +2009,7 @@ fn chat_message_to_response_output_item(message: &Value, response_id: &str) -> O
     }
 
     Some(json!({
-        "id": format!("{response_id}_msg"),
+        "id": format!("msg_{response_id}"),
         "type": "message",
         "status": "completed",
         "role": "assistant",
@@ -2019,7 +2019,7 @@ fn chat_message_to_response_output_item(message: &Value, response_id: &str) -> O
 
 fn empty_assistant_message_output_item(response_id: &str) -> Value {
     json!({
-        "id": format!("{response_id}_msg"),
+        "id": format!("msg_{response_id}"),
         "type": "message",
         "status": "incomplete",
         "role": "assistant",
@@ -3942,6 +3942,34 @@ mod tests {
             "bounded compact summary"
         );
         assert_eq!(result["model"], "route-model-after-switch");
+    }
+
+    #[test]
+    fn chat_completion_message_item_uses_msg_prefixed_id() {
+        // Codex 会持久化输出 message 的 id 并在下一轮回放；第三方 Chat 上游
+        // 转换出的 id 必须带 msg_ 前缀，否则切回官方 /responses 会被拒绝。
+        let chat = json!({
+            "id": "chatcmpl-2gyygAFeaDX2rFNtuG7mOhf9",
+            "model": "k3",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "pong"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        });
+
+        let result = chat_completion_to_response(chat).unwrap();
+        let output = result["output"].as_array().unwrap();
+        let message = output
+            .iter()
+            .find(|item| item["type"] == "message")
+            .expect("message output item");
+
+        assert_eq!(
+            message["id"],
+            "msg_resp_chatcmpl-2gyygAFeaDX2rFNtuG7mOhf9"
+        );
     }
 
     #[test]
