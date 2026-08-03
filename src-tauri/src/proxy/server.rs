@@ -689,6 +689,61 @@ mod tests {
             .expect("add router to failover queue");
     }
 
+    /// 把 Codex MultiRouter 配置成 Chat 上游，base_url 指向本地 mock。
+    async fn save_codex_chat_mock_router(db: &Database, chat_base_url: &str) {
+        let mut chat_provider = Provider::with_id(
+            "k3-chat".to_string(),
+            "Kimi K3".to_string(),
+            json!({
+                "base_url": chat_base_url,
+                "api_key": "sk-k3"
+            }),
+            None,
+        );
+        chat_provider.meta = Some(crate::provider::ProviderMeta {
+            api_format: Some("openai_chat".to_string()),
+            ..Default::default()
+        });
+        db.save_provider("codex", &chat_provider)
+            .expect("save chat provider");
+        db.save_provider(
+            "codex",
+            &Provider::with_id(
+                "router".to_string(),
+                "Codex Router".to_string(),
+                json!({
+                    "codexRouting": {
+                        "enabled": true,
+                        "defaultRouteId": "k3",
+                        "routes": [
+                            {
+                                "id": "k3",
+                                "label": "Kimi K3",
+                                "enabled": true,
+                                "targetProviderId": "k3-chat",
+                                "match": { "models": ["k3"] },
+                                "upstream": { "apiFormat": "openai_chat" }
+                            }
+                        ]
+                    }
+                }),
+                None,
+            ),
+        )
+        .expect("save router provider");
+        let mut proxy_config = db
+            .get_proxy_config_for_app("codex")
+            .await
+            .expect("read codex proxy config");
+        proxy_config.enabled = true;
+        proxy_config.auto_failover_enabled = true;
+        db.update_proxy_config_for_app(proxy_config)
+            .await
+            .expect("enable codex proxy config");
+        db.add_to_failover_queue("codex", "router")
+            .expect("add router to failover queue");
+    }
+
     #[test]
     fn bind_error_for_addr_in_use_includes_actionable_port_diagnostic() {
         let addr: SocketAddr = "127.0.0.1:15721".parse().expect("socket addr");
@@ -2393,6 +2448,258 @@ base_url = "http://127.0.0.1:15721/v1"
 
     #[tokio::test]
     #[serial]
+    async fn codex_v1_responses_chat_mock_hosted_web_search_replays_full_lifecycle() {
+        let chat_captured = Arc::new(Mutex::new(None));
+        let (chat_base_url, _chat_task) =
+            spawn_openai_chat_mock_with_capture(chat_captured.clone()).await;
+        let (server, db) = build_test_server();
+        save_codex_chat_mock_router(&db, &chat_base_url).await;
+
+        let request_body = json!({
+            "model": "k3",
+            "stream": true,
+            "tools": [{
+                "type": "web_search",
+                "external_web_access": true,
+                "search_content_types": ["text", "image"]
+            }],
+            "tool_choice": { "type": "web_search" },
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "search" }]
+                }
+            ]
+        });
+
+        let response = server
+            .build_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/responses")
+                    .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+                    .header(header::USER_AGENT, "codex/0.146.0-test")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(request_body.to_string()))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let response_text = String::from_utf8_lossy(
+            &response
+                .into_body()
+                .collect()
+                .await
+                .expect("collect hosted tool response")
+                .to_bytes(),
+        )
+        .to_string();
+        let created_pos = response_text
+            .find("event: response.created")
+            .expect("response.created event");
+        let delta_pos = response_text
+            .find("event: response.output_text.delta")
+            .expect("output_text.delta event");
+        let completed_pos = response_text
+            .find("event: response.completed")
+            .expect("response.completed event");
+        assert!(
+            created_pos < delta_pos && delta_pos < completed_pos,
+            "hosted web_search must replay the full lifecycle: {response_text}"
+        );
+        assert!(
+            response_text.contains("\"id\":\"msg_resp_chatcmpl_mock\""),
+            "chat-sourced message id should use msg_ prefix: {response_text}"
+        );
+
+        let chat_body = chat_captured
+            .lock()
+            .expect("captured chat request lock")
+            .clone()
+            .expect("captured chat request");
+        assert_eq!(chat_body["stream"], false);
+        assert_eq!(chat_body["tools"][0]["function"]["name"], "web_search");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn codex_v1_responses_anthropic_mock_round_trip_uses_msg_prefix() {
+        let anthropic_captured = Arc::new(Mutex::new(None));
+        let (anthropic_base_url, _anthropic_task) =
+            spawn_anthropic_messages_mock(anthropic_captured.clone()).await;
+        let (server, db) = build_test_server();
+
+        let mut anthropic_provider = Provider::with_id(
+            "claude-anthropic".to_string(),
+            "Claude Anthropic".to_string(),
+            json!({
+                "base_url": anthropic_base_url,
+                "api_key": "sk-anthropic"
+            }),
+            None,
+        );
+        anthropic_provider.meta = Some(crate::provider::ProviderMeta {
+            api_format: Some("anthropic_messages".to_string()),
+            ..Default::default()
+        });
+        db.save_provider("codex", &anthropic_provider)
+            .expect("save anthropic provider");
+        db.save_provider(
+            "codex",
+            &Provider::with_id(
+                "router".to_string(),
+                "Codex Router".to_string(),
+                json!({
+                    "codexRouting": {
+                        "enabled": true,
+                        "defaultRouteId": "claude",
+                        "routes": [
+                            {
+                                "id": "claude",
+                                "label": "Claude Anthropic",
+                                "enabled": true,
+                                "targetProviderId": "claude-anthropic",
+                                "match": { "models": ["claude"] },
+                                "upstream": { "apiFormat": "anthropic_messages" }
+                            }
+                        ]
+                    }
+                }),
+                None,
+            ),
+        )
+        .expect("save router provider");
+        let mut proxy_config = db
+            .get_proxy_config_for_app("codex")
+            .await
+            .expect("read codex proxy config");
+        proxy_config.enabled = true;
+        proxy_config.auto_failover_enabled = true;
+        db.update_proxy_config_for_app(proxy_config)
+            .await
+            .expect("enable codex proxy config");
+        db.add_to_failover_queue("codex", "router")
+            .expect("add router to failover queue");
+
+        let request_body = json!({
+            "model": "claude",
+            "stream": true,
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "ping" }]
+                }
+            ]
+        });
+        let response = server
+            .build_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/responses")
+                    .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+                    .header(header::USER_AGENT, "codex/0.146.0-test")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(request_body.to_string()))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let response_text = String::from_utf8_lossy(
+            &response
+                .into_body()
+                .collect()
+                .await
+                .expect("collect anthropic response")
+                .to_bytes(),
+        )
+        .to_string();
+        assert!(
+            response_text.contains("\"id\":\"msg_resp_msg_1_0\""),
+            "Anthropic-derived message id should use msg_ prefix: {response_text}"
+        );
+        assert!(response_text.contains("event: response.completed"));
+
+        let anthropic_body = anthropic_captured
+            .lock()
+            .expect("captured anthropic request lock")
+            .clone()
+            .expect("captured anthropic request");
+        assert!(
+            anthropic_body["body"]["messages"].is_array(),
+            "Anthropic mock should receive messages array: {anthropic_body}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn codex_v1_responses_lite_official_mock_strips_replayed_item_ids() {
+        let captured_request = Arc::new(Mutex::new(None));
+        let (upstream_base_url, _upstream_task) =
+            spawn_codex_responses_mock(captured_request.clone()).await;
+        let mock_official_url = format!("{upstream_base_url}/backend-api/codex");
+        std::env::set_var("CC_SWITCH_TEST_CODEX_OFFICIAL_MOCK_URL", &mock_official_url);
+
+        let (server, db) = build_test_server();
+        save_codex_official_mock_router(&db, &upstream_base_url).await;
+
+        let request_body = json!({
+            "model": "gpt-5.6-luna",
+            "input": [
+                {
+                    "type": "message",
+                    "id": "resp_chatcmpl-2gyygAFeaDX2rFNtuG7mOhf9_msg",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "old turn" }]
+                }
+            ]
+        });
+        let response = server
+            .build_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/responses")
+                    .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+                    .header(header::USER_AGENT, "codex/0.146.0-test")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(
+                        http::header::HeaderName::from_static(
+                            "x-openai-internal-codex-responses-lite",
+                        ),
+                        "1",
+                    )
+                    .body(Body::from(request_body.to_string()))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        std::env::remove_var("CC_SWITCH_TEST_CODEX_OFFICIAL_MOCK_URL");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let captured = captured_request
+            .lock()
+            .expect("captured responses request lock")
+            .clone()
+            .expect("captured responses request");
+        let input = captured["body"]["input"].as_array().expect("input array");
+        assert!(
+            input[0].get("id").is_none(),
+            "responses-lite official mock must not receive replayed ids"
+        );
+        assert_eq!(input[0]["content"][0]["text"], "old turn");
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn codex_v1_responses_third_party_mock_preserves_native_agent_message_ids() {
         let captured_request = Arc::new(Mutex::new(None));
         let (upstream_base_url, _upstream_task) =
@@ -2627,6 +2934,52 @@ base_url = "http://127.0.0.1:15721/v1"
             axum::serve(listener, app)
                 .await
                 .expect("502 mock upstream serve");
+        });
+        (format!("http://{addr}"), task)
+    }
+
+    /// 启动 Anthropic Messages mock，捕获出站请求并返回一条文本消息。
+    async fn spawn_anthropic_messages_mock(
+        captured_request: Arc<Mutex<Option<Value>>>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new().route(
+            "/v1/messages",
+            post(move |headers: HeaderMap, body: Bytes| {
+                let captured_request = captured_request.clone();
+                async move {
+                    let parsed_body =
+                        serde_json::from_slice::<Value>(&body).unwrap_or_else(|_| json!(null));
+                    *captured_request.lock().expect("capture anthropic request") = Some(json!({
+                        "authorization": headers
+                            .get(header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or("")
+                            .to_string(),
+                        "body": parsed_body
+                    }));
+                    Json(json!({
+                        "id": "msg_1",
+                        "type": "message",
+                        "role": "assistant",
+                        "model": "claude",
+                        "content": [{ "type": "text", "text": "pong" }],
+                        "stop_reason": "end_turn",
+                        "usage": {
+                            "input_tokens": 1,
+                            "output_tokens": 1
+                        }
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind anthropic mock upstream");
+        let addr = listener.local_addr().expect("anthropic mock upstream addr");
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("anthropic mock upstream serve");
         });
         (format!("http://{addr}"), task)
     }
