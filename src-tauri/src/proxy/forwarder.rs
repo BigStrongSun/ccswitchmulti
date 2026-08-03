@@ -6388,11 +6388,15 @@ fn should_force_identity_encoding(
 }
 
 fn map_reqwest_send_error(error: reqwest::Error) -> ProxyError {
+    // `reqwest::Error::to_string()` 常常只留下 "error sending request"；真正能区分
+    // TLS/HTTP2/连接复用/对端断开的原因在 source 链。先移除 URL，再展开 source 链，
+    // 既保留可操作的网络诊断，又不会把带 query 的上游地址写进 router 日志或客户端错误。
+    let error_without_url = error.without_url();
     map_reqwest_send_error_class(
-        error.is_connect(),
-        error.is_timeout(),
-        error.is_request(),
-        error.without_url().to_string(),
+        error_without_url.is_connect(),
+        error_without_url.is_timeout(),
+        error_without_url.is_request(),
+        error_chain_message(&error_without_url),
     )
 }
 
