@@ -461,6 +461,93 @@ fn should_preserve_live_codex_oauth_for_official_switch(target_auth: &Value) -> 
     }
 }
 
+/// True only when the auth carries material Codex itself authenticates with
+/// ahead of the API-key fallback: OAuth tokens or another first-class login
+/// carrier. Unlike `codex_auth_has_oauth_login_material`, pure metadata such
+/// as `last_refresh` or `tokens.account_id` does NOT count — metadata must not
+/// shield a stale third-party `OPENAI_API_KEY` from post-switch cleanup.
+pub fn codex_auth_has_credential_login_material(auth: &Value) -> bool {
+    let Some(obj) = auth.as_object() else {
+        return false;
+    };
+
+    let value_present = |value: &Value| match value {
+        Value::Null => false,
+        Value::String(text) => !text.trim().is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(map) => !map.is_empty(),
+        _ => true,
+    };
+
+    if ["personal_access_token", "agent_identity", "bedrock_api_key"]
+        .iter()
+        .any(|key| obj.get(*key).is_some_and(value_present))
+    {
+        return true;
+    }
+
+    obj.get("tokens")
+        .and_then(Value::as_object)
+        .is_some_and(|tokens| {
+            ["id_token", "access_token", "refresh_token"]
+                .iter()
+                .any(|key| tokens.get(*key).is_some_and(value_present))
+        })
+}
+
+/// True when live `auth.json` is the shape a preserve-off third-party switch
+/// leaves behind: an `OPENAI_API_KEY` (possibly alongside metadata like
+/// `auth_mode` / `last_refresh`) with no real login credential next to it.
+pub fn codex_live_auth_is_stale_third_party_residue(live_auth: &Value) -> bool {
+    if codex_auth_has_credential_login_material(live_auth) {
+        return false;
+    }
+    live_auth
+        .get("OPENAI_API_KEY")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .is_some_and(|key| !key.is_empty())
+}
+
+/// After a normal switch to an official provider that carries no login
+/// material of its own, delete a live `auth.json` that only holds a stale
+/// third-party API key, so Codex shows its login screen instead of sending
+/// the wrong key to the official endpoint (401 with no way to re-login).
+///
+/// Deleting the file — not writing `{}` — is deliberate: Codex resolves an
+/// empty object to ChatGPT mode without tokens and errors at bootstrap,
+/// while a missing file yields NotAuthenticated and the login screen,
+/// matching Codex's own logout.
+///
+/// Callers must only invoke this after the outgoing provider was
+/// successfully backfilled into the DB — that backfill holds the only other
+/// copy of the third-party key. The switch backfill intentionally lacks the
+/// proxy-side "no credentials in the builtin official row" guard
+/// (`services/proxy.rs` `sync_live_config_to_provider`): that asymmetry is
+/// what heals official API-key logins into the DB row, and this cleanup's
+/// safety depends on it — do not align the two guards.
+///
+/// Returns Ok(true) when the file was deleted.
+pub fn clear_stale_codex_live_auth_after_official_switch(
+    db_auth: &Value,
+) -> Result<bool, AppError> {
+    if codex_auth_has_login_material(db_auth) {
+        // A material-carrying official provider gets a full auth write;
+        // nothing stale can remain.
+        return Ok(false);
+    }
+    let auth_path = get_codex_auth_path();
+    if !auth_path.exists() {
+        return Ok(false);
+    }
+    let live_auth: Value = read_json_file(&auth_path)?;
+    if !codex_live_auth_is_stale_third_party_residue(&live_auth) {
+        return Ok(false);
+    }
+    delete_file(&auth_path)?;
+    Ok(true)
+}
+
 pub fn should_restore_codex_provider_token_for_backfill(
     category: Option<&str>,
     template_settings: &Value,
@@ -924,6 +1011,7 @@ fn codex_catalog_model_entry(
     spec: &CodexCatalogModelSpec,
     priority: usize,
     profile: CodexCatalogToolProfile,
+    _default_context_window: u64,
 ) -> Value {
     let mut entry = template.clone();
     let Some(entry_obj) = entry.as_object_mut() else {
@@ -1471,6 +1559,125 @@ fn load_codex_native_responses_template() -> Value {
     })
 }
 
+/// Hosts whose native `/responses` gateway publishes an OFFICIAL Codex model
+/// catalog (models.json) that cc-switch mirrors verbatim. Matched against
+/// `base_url` ONLY — deliberately NOT by model brand, unlike
+/// `CODEX_WEB_SEARCH_REJECT_MODEL_PREFIXES`: the official entries GRANT
+/// capabilities (freeform `apply_patch`, vendor harness), and an aggregator
+/// merely hosting the same model may not honor them. The safe failure
+/// direction for aggregators is the neutral template (degraded but working);
+/// wrongly granting freeform apply_patch would reintroduce the custom-tool
+/// rejection bug.
+const CODEX_DEEPSEEK_OFFICIAL_CATALOG_HOSTS: &[&str] = &["deepseek.com"];
+
+/// Bundled copy of DeepSeek's official Codex models.json — the exact file
+/// their one-click integration script writes (api-docs.deepseek.com →
+/// quick_start/agent_integrations/codex): freeform apply_patch, GPT-5 harness
+/// base_instructions, low/high/max reasoning levels, web_search supported,
+/// 1m context. Declares `minimal_client_version` 0.144.0.
+fn load_codex_deepseek_official_catalog_models() -> Vec<Value> {
+    let text = include_str!("resources/codex_deepseek_catalog_template.json");
+    let catalog: Value =
+        serde_json::from_str(text).expect("bundled DeepSeek official catalog must be valid JSON");
+    catalog
+        .get("models")
+        .and_then(|models| models.as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Official vendor catalog entries for the provider in `config_text`, if its
+/// gateway ships one. Only the `NativeResponses` profile qualifies: ProxyChat
+/// runs through cc-switch's converter (gpt-5.5 template contract) and the
+/// Anthropic transform drops custom tools, so both must keep their existing
+/// templates. Host-driven like the web_search blacklist, so existing providers
+/// pick it up on their next switch without a re-save.
+fn codex_official_vendor_catalog_models(
+    config_text: &str,
+    profile: CodexCatalogToolProfile,
+) -> Option<Vec<Value>> {
+    if profile != CodexCatalogToolProfile::NativeResponses {
+        return None;
+    }
+    let base_url = extract_codex_base_url(config_text)?.to_ascii_lowercase();
+    if CODEX_DEEPSEEK_OFFICIAL_CATALOG_HOSTS
+        .iter()
+        .any(|host| base_url.contains(host))
+    {
+        let models = load_codex_deepseek_official_catalog_models();
+        if !models.is_empty() {
+            return Some(models);
+        }
+    }
+    None
+}
+
+/// Build one catalog entry from an official vendor catalog: match the user's
+/// model id against the vendor entries by slug; an unknown id clones the
+/// vendor's first (flagship) entry so it keeps the gateway's capability
+/// profile without impersonating the flagship. The official entry is
+/// authoritative — no tool-profile stripping — but explicit per-row user
+/// overrides still win.
+fn codex_vendor_catalog_model_entry(
+    vendor_models: &[Value],
+    spec: &CodexCatalogModelSpec,
+    priority: usize,
+) -> Value {
+    let matched = vendor_models.iter().find(|entry| {
+        entry
+            .get("slug")
+            .and_then(|slug| slug.as_str())
+            .is_some_and(|slug| slug.eq_ignore_ascii_case(&spec.model))
+    });
+    let mut entry = match matched {
+        Some(found) => found.clone(),
+        None => vendor_models.first().cloned().unwrap_or_else(|| json!({})),
+    };
+    let Some(entry_obj) = entry.as_object_mut() else {
+        return json!({});
+    };
+
+    if matched.is_none() {
+        let display_name = if spec.display_name.trim().is_empty() {
+            &spec.model
+        } else {
+            &spec.display_name
+        };
+        entry_obj.insert("slug".to_string(), json!(spec.model));
+        entry_obj.insert("display_name".to_string(), json!(display_name));
+        entry_obj.insert("description".to_string(), json!(display_name));
+        entry_obj.insert("priority".to_string(), json!(1000 + priority));
+    }
+
+    // Explicit user overrides win over the official entry; absent values keep
+    // the vendor's declarations (context window, modalities, harness, ...).
+    if !spec.display_name.trim().is_empty() {
+        let display_name = &spec.display_name;
+        entry_obj.insert("display_name".to_string(), json!(display_name));
+    }
+    entry_obj.insert("context_window".to_string(), json!(spec.context_window));
+    entry_obj.insert("max_context_window".to_string(), json!(spec.context_window));
+    if let Some(parallel) = spec.supports_parallel_tool_calls {
+        entry_obj.insert("supports_parallel_tool_calls".to_string(), json!(parallel));
+    }
+    if let Some(modalities) = spec.input_modalities.as_deref() {
+        entry_obj.insert("input_modalities".to_string(), json!(modalities));
+    }
+    if let Some(base_instructions) = spec
+        .base_instructions
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        entry_obj.insert("base_instructions".to_string(), json!(base_instructions));
+    }
+
+    // Defensive: if a future codex parser requires a field the vendor file
+    // predates, backfill only whitelisted parser-required keys.
+    fill_template_fields_from_static(&mut entry);
+    entry
+}
+
 /// Fields Codex's external-catalog parser REQUIRES (no serde default): when
 /// one is missing Codex rejects the whole catalog file at startup ("missing
 /// field ..."). `base_instructions` is the other known required field; the
@@ -1553,11 +1760,14 @@ fn codex_model_catalog_from_specs(
     specs: &[CodexCatalogModelSpec],
     template: &Value,
     profile: CodexCatalogToolProfile,
+    default_context_window: u64,
 ) -> Value {
     let entries: Vec<Value> = specs
         .iter()
         .enumerate()
-        .map(|(index, spec)| codex_catalog_model_entry(template, spec, index, profile))
+        .map(|(index, spec)| {
+            codex_catalog_model_entry(template, spec, index, profile, default_context_window)
+        })
         .collect();
 
     json!({ "models": entries })
@@ -1611,6 +1821,50 @@ fn codex_provider_reasoning_efforts_toml_array(
         array.push(toml_edit::Value::InlineTable(level));
     }
     toml_edit::Value::Array(array)
+}
+
+fn codex_model_catalog_from_settings(
+    settings: &Value,
+    config_text: &str,
+    profile: CodexCatalogToolProfile,
+) -> Result<Option<Value>, AppError> {
+    let specs = codex_catalog_model_specs(settings, config_text);
+    if specs.is_empty() {
+        return Ok(None);
+    }
+
+    // Vendors that publish an OFFICIAL Codex models.json for their native
+    // `/responses` gateway get it mirrored verbatim instead of the neutral
+    // template: its freeform apply_patch, vendor harness base_instructions and
+    // reasoning levels are load-bearing (the harness tells the model to use
+    // apply_patch, so catalog and harness must stay consistent).
+    if let Some(vendor_models) = codex_official_vendor_catalog_models(config_text, profile) {
+        let entries: Vec<Value> = specs
+            .iter()
+            .enumerate()
+            .map(|(index, spec)| codex_vendor_catalog_model_entry(&vendor_models, spec, index))
+            .collect();
+        return Ok(Some(json!({ "models": entries })));
+    }
+
+    let default_context_window =
+        extract_codex_top_level_u64(config_text, "model_context_window").unwrap_or(128_000);
+
+    // Native providers use the bundled clean template (no freeform apply_patch,
+    // no cache dependency); proxy-chat providers keep cloning Codex's gpt-5.5
+    // entry so the proxy can rewrite custom<->function tools as before.
+    let template = match profile {
+        CodexCatalogToolProfile::NativeResponses | CodexCatalogToolProfile::Anthropic => {
+            load_codex_native_responses_template()
+        }
+        CodexCatalogToolProfile::ProxyChat => load_codex_model_catalog_template()?,
+    };
+    Ok(Some(codex_model_catalog_from_specs(
+        &specs,
+        &template,
+        profile,
+        default_context_window,
+    )))
 }
 
 /// 为当前活动 custom provider 生成 Codex Desktop 可枚举的内联模型数组。
@@ -2581,13 +2835,8 @@ pub fn prepare_codex_config_text_with_model_catalog(
     let specs = codex_catalog_model_specs(settings, config_text);
 
     if !specs.is_empty() {
-        let template = match profile {
-            CodexCatalogToolProfile::ProxyChat => load_codex_model_catalog_template()?,
-            CodexCatalogToolProfile::NativeResponses | CodexCatalogToolProfile::Anthropic => {
-                load_codex_native_responses_template()
-            }
-        };
-        let generated_catalog = codex_model_catalog_from_specs(&specs, &template, profile);
+        let generated_catalog = codex_model_catalog_from_settings(settings, config_text, profile)?
+            .unwrap_or_else(|| json!({ "models": [] }));
         let mut catalog = enrich_codex_catalog_with_official_metadata(&generated_catalog)?;
         apply_codex_multi_agent_transport_policy(&mut catalog, settings);
         let config_text = set_codex_model_catalog_projection_fields(
@@ -3371,7 +3620,9 @@ fn remove_codex_experimental_bearer_token(config_text: &str) -> Result<String, A
 /// Read the current Codex live settings as a `{ auth, config }` object.
 ///
 /// Missing `auth.json` collapses to `{}` so a config-only third-party install
-/// is still importable; both files empty is treated as "no live install".
+/// is still importable; both files missing is treated as "no live install".
+/// A `config.toml` that exists but is empty is a valid state — e.g. the
+/// official seed after stale-auth cleanup — and must stay readable.
 pub fn read_codex_live_settings() -> Result<Value, AppError> {
     let auth_path = get_codex_auth_path();
     let auth_present = auth_path.exists();
@@ -3381,7 +3632,7 @@ pub fn read_codex_live_settings() -> Result<Value, AppError> {
         json!({})
     };
     let cfg_text = read_and_validate_codex_config_text()?;
-    if !auth_present && cfg_text.trim().is_empty() {
+    if !auth_present && !get_codex_config_path().exists() {
         return Err(AppError::localized(
             "codex.live.missing",
             "Codex 配置文件不存在",
@@ -4698,6 +4949,65 @@ experimental_bearer_token = "stale-table-key"
     }
 
     #[test]
+    fn credential_login_material_only_counts_real_credentials() {
+        assert!(codex_auth_has_credential_login_material(&json!({
+            "tokens": { "access_token": "t" }
+        })));
+        assert!(codex_auth_has_credential_login_material(&json!({
+            "tokens": { "refresh_token": "r" }
+        })));
+        assert!(codex_auth_has_credential_login_material(&json!({
+            "personal_access_token": "pat"
+        })));
+
+        // API key and pure metadata are not credentials in this predicate's
+        // sense — they must not shield a stale key from cleanup.
+        assert!(!codex_auth_has_credential_login_material(&json!({
+            "OPENAI_API_KEY": "sk-x"
+        })));
+        assert!(!codex_auth_has_credential_login_material(&json!({
+            "OPENAI_API_KEY": "sk-x",
+            "last_refresh": "2026-01-01T00:00:00Z",
+            "tokens": { "account_id": "acct-meta-only" }
+        })));
+        assert!(!codex_auth_has_credential_login_material(&json!({})));
+    }
+
+    #[test]
+    fn stale_third_party_residue_detection() {
+        // Shapes a preserve-off third-party switch leaves behind: cleared.
+        assert!(codex_live_auth_is_stale_third_party_residue(&json!({
+            "OPENAI_API_KEY": "sk-third-party"
+        })));
+        assert!(codex_live_auth_is_stale_third_party_residue(&json!({
+            "auth_mode": "apikey",
+            "OPENAI_API_KEY": "sk-third-party"
+        })));
+        assert!(codex_live_auth_is_stale_third_party_residue(&json!({
+            "OPENAI_API_KEY": "sk-third-party",
+            "last_refresh": "2026-01-01T00:00:00Z",
+            "tokens": { "account_id": "acct-meta-only" }
+        })));
+
+        // Anything carrying a real credential must survive untouched.
+        assert!(!codex_live_auth_is_stale_third_party_residue(&json!({
+            "OPENAI_API_KEY": "sk-x",
+            "tokens": { "access_token": "t" }
+        })));
+        assert!(!codex_live_auth_is_stale_third_party_residue(&json!({
+            "auth_mode": "chatgpt",
+            "OPENAI_API_KEY": null,
+            "tokens": { "access_token": "official-oauth-token" }
+        })));
+
+        // Nothing to clear.
+        assert!(!codex_live_auth_is_stale_third_party_residue(&json!({})));
+        assert!(!codex_live_auth_is_stale_third_party_residue(&json!({
+            "OPENAI_API_KEY": ""
+        })));
+    }
+
+    #[test]
     fn prepare_provider_live_config_does_not_create_incomplete_provider_table() {
         let input = r#"model_provider = "vendor_x"
 model = "gpt-5"
@@ -5666,8 +5976,12 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             input_modalities: None,
             base_instructions: None,
         }];
-        let catalog =
-            codex_model_catalog_from_specs(&specs, &template, CodexCatalogToolProfile::ProxyChat);
+        let catalog = codex_model_catalog_from_specs(
+            &specs,
+            &template,
+            CodexCatalogToolProfile::ProxyChat,
+            128_000,
+        );
         assert_eq!(
             catalog["models"][0]
                 .get("supports_reasoning_summaries")
@@ -5726,9 +6040,13 @@ openai_base_url = "http://127.0.0.1:15721/v1"
                 ]
             }
         });
-        let specs = codex_catalog_model_specs(&settings, r#"model_context_window = 128000"#);
-        let catalog =
-            codex_model_catalog_from_specs(&specs, &template, CodexCatalogToolProfile::ProxyChat);
+        let specs = codex_catalog_model_specs(&settings, "");
+        let catalog = codex_model_catalog_from_specs(
+            &specs,
+            &template,
+            CodexCatalogToolProfile::ProxyChat,
+            128_000,
+        );
         let models = catalog
             .get("models")
             .and_then(|value| value.as_array())
@@ -6045,8 +6363,13 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             input_modalities: None,
             base_instructions: None,
         };
-        let entry =
-            codex_catalog_model_entry(&template, &spec, 0, CodexCatalogToolProfile::ProxyChat);
+        let entry = codex_catalog_model_entry(
+            &template,
+            &spec,
+            0,
+            CodexCatalogToolProfile::ProxyChat,
+            128_000,
+        );
 
         assert_eq!(
             entry.get("input_modalities"),
@@ -6096,6 +6419,7 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             &spec,
             0,
             CodexCatalogToolProfile::NativeResponses,
+            128_000,
         );
 
         assert_eq!(
@@ -6142,6 +6466,7 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             &specs[0],
             0,
             CodexCatalogToolProfile::NativeResponses,
+            128_000,
         );
 
         assert_eq!(
@@ -6270,8 +6595,13 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             input_modalities: None,
             base_instructions: None,
         };
-        let entry =
-            codex_catalog_model_entry(&template, &spec, 0, CodexCatalogToolProfile::ProxyChat);
+        let entry = codex_catalog_model_entry(
+            &template,
+            &spec,
+            0,
+            CodexCatalogToolProfile::ProxyChat,
+            128_000,
+        );
 
         assert_eq!(entry.get("slug").and_then(|v| v.as_str()), Some("qwen3.6"));
         assert_eq!(
@@ -6812,8 +7142,13 @@ model = "qwen3.6"
             "context_window": 272000,
             "max_context_window": 272000
         });
-        let entry =
-            codex_catalog_model_entry(&template, &specs[0], 0, CodexCatalogToolProfile::ProxyChat);
+        let entry = codex_catalog_model_entry(
+            &template,
+            &specs[0],
+            0,
+            CodexCatalogToolProfile::ProxyChat,
+            128_000,
+        );
 
         assert_eq!(
             entry.get("slug").and_then(|value| value.as_str()),
@@ -6874,8 +7209,13 @@ model = "qwen3.6"
             input_modalities: None,
             base_instructions: None,
         };
-        let entry =
-            codex_catalog_model_entry(&template, &spec, 0, CodexCatalogToolProfile::ProxyChat);
+        let entry = codex_catalog_model_entry(
+            &template,
+            &spec,
+            0,
+            CodexCatalogToolProfile::ProxyChat,
+            128_000,
+        );
 
         assert_eq!(
             entry.get("additional_speed_tiers"),
@@ -6922,8 +7262,13 @@ model = "qwen3.6"
             input_modalities: None,
             base_instructions: None,
         };
-        let entry =
-            codex_catalog_model_entry(&template, &spec, 0, CodexCatalogToolProfile::ProxyChat);
+        let entry = codex_catalog_model_entry(
+            &template,
+            &spec,
+            0,
+            CodexCatalogToolProfile::ProxyChat,
+            128_000,
+        );
 
         assert_eq!(
             entry.get("additional_speed_tiers"),
@@ -6973,8 +7318,12 @@ model = "qwen3.6"
         assert_eq!(specs[0].model, "deepseek-v4-flash");
         assert!(specs[0].text_only);
 
-        let catalog =
-            codex_model_catalog_from_specs(&specs, &template, CodexCatalogToolProfile::ProxyChat);
+        let catalog = codex_model_catalog_from_specs(
+            &specs,
+            &template,
+            CodexCatalogToolProfile::ProxyChat,
+            128_000,
+        );
         let models = catalog
             .get("models")
             .and_then(|value| value.as_array())
