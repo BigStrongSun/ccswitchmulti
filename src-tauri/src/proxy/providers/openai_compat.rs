@@ -2491,6 +2491,45 @@ mod tests {
     }
 
     #[test]
+    fn codex_oauth_responses_normalizes_message_ids_in_compaction_request() {
+        // Codex pre-turn compaction v2 会把整段历史放进 /responses 请求再发往官方，
+        // 历史里残留的 Chat 上游 message id 同样会触发 input[N].id 校验失败。
+        let body = json!({
+            "model": "gpt-5.6-luna",
+            "input": [
+                { "type": "compaction_trigger" },
+                {
+                    "type": "message",
+                    "id": "resp_chatcmpl-2gyygAFeaDX2rFNtuG7mOhf9_msg",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "old turn" }]
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "done"
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "compact now" }]
+                }
+            ]
+        });
+
+        let normalized = normalize_codex_oauth_responses_request(body, false);
+        let input = normalized["input"].as_array().expect("input array");
+
+        assert_eq!(input[0]["type"], "compaction_trigger");
+        assert_eq!(
+            input[1]["id"],
+            "msg_resp_chatcmpl-2gyygAFeaDX2rFNtuG7mOhf9_msg"
+        );
+        assert_eq!(input[2]["type"], "function_call_output");
+        assert!(input[3].get("id").is_none());
+    }
+
+    #[test]
     fn codex_oauth_responses_normalizer_promotes_control_messages_and_strips_tool_content() {
         // official OAuth passthrough 复用通用控制消息提升，同时仍执行 ChatGPT backend
         // 专属的 tool output content 清理。
