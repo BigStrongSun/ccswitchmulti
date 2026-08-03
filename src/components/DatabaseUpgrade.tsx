@@ -13,8 +13,7 @@ import {
   AlertTriangle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-
-const RELEASES_URL = "https://github.com/farion1231/cc-switch/releases";
+import { CCSWITCHMULTI_RELEASES_URL } from "@/config/productLinks";
 
 interface DatabaseUpgradeProps {
   payload: {
@@ -268,7 +267,9 @@ export function DatabaseUpgrade({ payload }: DatabaseUpgradeProps) {
               variant="outline"
               className="gap-2"
               onClick={() =>
-                void invoke("open_external", { url: RELEASES_URL })
+                void invoke("open_external", {
+                  url: CCSWITCHMULTI_RELEASES_URL,
+                })
               }
             >
               <ExternalLink className="h-4 w-4" />
