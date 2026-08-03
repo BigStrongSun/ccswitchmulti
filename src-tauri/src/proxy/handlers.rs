@@ -4459,6 +4459,12 @@ fn responses_sse_to_response_value(body: &str) -> Result<Value, ProxyError> {
             }
         };
 
+        let event_name = if event_name.is_empty() {
+            data.get("type").and_then(Value::as_str).unwrap_or("")
+        } else {
+            event_name
+        };
+
         match event_name {
             "response.output_text.delta" => {
                 if let Some(delta) = data.get("delta").and_then(|value| value.as_str()) {
@@ -4497,7 +4503,10 @@ fn responses_sse_to_response_value(body: &str) -> Result<Value, ProxyError> {
         ProxyError::TransformError("No response.completed event in upstream SSE".to_string())
     })?;
 
-    if output_items.is_empty() && !output_text_deltas.is_empty() {
+    let has_message_item = output_items
+        .iter()
+        .any(|item| item.get("type").and_then(Value::as_str) == Some("message"));
+    if !has_message_item && !output_text_deltas.is_empty() {
         // Codex OAuth 的文本流可能只发送 output_text.delta，不发送完整 output_item.done。
         // 非流式聚合时需要把 delta 合成 Responses output message，供下游 Chat 转换器读取。
         output_items.push(json!({
@@ -6010,6 +6019,39 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_delta\",\"sta
         assert_eq!(response["id"], "resp_delta");
         assert_eq!(response["output"][0]["type"], "message");
         assert_eq!(response["output"][0]["content"][0]["text"], "pong");
+    }
+
+    #[test]
+    fn responses_sse_to_response_value_keeps_text_deltas_beside_reasoning_item() {
+        let sse = "event: response.output_item.done\n\
+data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"summary\":[]}}\n\n\
+event: response.output_text.delta\n\
+data: {\"type\":\"response.output_text.delta\",\"delta\":\"bounded summary\"}\n\n\
+event: response.completed\n\
+data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_reasoning_delta\",\"status\":\"completed\",\"model\":\"deepseek-v4-flash\"}}\n\n";
+
+        let response = responses_sse_to_response_value(sse).unwrap();
+
+        assert_eq!(response["output"][0]["type"], "reasoning");
+        assert_eq!(response["output"][1]["type"], "message");
+        assert_eq!(
+            response["output"][1]["content"][0]["text"],
+            "bounded summary"
+        );
+    }
+
+    #[test]
+    fn responses_sse_to_response_value_uses_json_type_for_data_only_events() {
+        let sse = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"data-only summary\"}\n\n\
+data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_data_only\",\"status\":\"completed\",\"model\":\"deepseek-v4-flash\"}}\n\n";
+
+        let response = responses_sse_to_response_value(sse).unwrap();
+
+        assert_eq!(response["id"], "resp_data_only");
+        assert_eq!(
+            response["output"][0]["content"][0]["text"],
+            "data-only summary"
+        );
     }
 
     #[test]

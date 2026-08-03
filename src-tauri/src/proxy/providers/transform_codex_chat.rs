@@ -98,6 +98,53 @@ pub(crate) fn restore_codex_compaction_summary_in_request(body: &mut Value) -> b
     changed
 }
 
+/// Canonical Responses message item ID derived from a synthetic response ID.
+///
+/// Chat/Anthropic upstream response IDs commonly begin with `chatcmpl_`, `msg_`,
+/// or a vendor UUID. They are response IDs, not Responses message item IDs.
+/// OpenAI validates replayed `type=message` output items with the `msg_` prefix,
+/// so every CCSM-created message item must use this separate namespace.
+pub(crate) fn response_message_item_id(response_id: &str) -> String {
+    let suffix = response_id.strip_prefix("resp_").unwrap_or(response_id);
+    format!("msg_{suffix}")
+}
+
+/// Normalize item IDs created by third-party Responses implementations before
+/// replaying mixed-provider history to an OpenAI official Responses endpoint.
+/// Existing canonical OpenAI IDs remain untouched. Invalid vendor IDs are mapped
+/// deterministically so retries and prompt-cache prefixes stay stable.
+pub(crate) fn normalize_replayed_item_ids_for_openai(body: &mut Value) -> usize {
+    let Some(input) = body.get_mut("input").and_then(Value::as_array_mut) else {
+        return 0;
+    };
+    let mut changed = 0;
+    for item in input {
+        let Some(required_prefix) =
+            item.get("type")
+                .and_then(Value::as_str)
+                .and_then(|item_type| match item_type {
+                    "message" => Some("msg_"),
+                    "web_search_call" => Some("ws_"),
+                    _ => None,
+                })
+        else {
+            continue;
+        };
+        let Some(id) = item.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        if id.starts_with(required_prefix) {
+            continue;
+        }
+        item["id"] = json!(format!(
+            "{required_prefix}ccswitch_{}",
+            short_sha256_hex(id.as_bytes())
+        ));
+        changed += 1;
+    }
+    changed
+}
+
 /// Convert a completed Responses value into a compaction response containing
 /// exactly one `type=compaction` output item.
 pub(crate) fn responses_to_compaction_response(mut response: Value) -> Result<Value, ProxyError> {
@@ -2034,7 +2081,7 @@ fn chat_message_to_response_output_item(message: &Value, response_id: &str) -> O
     }
 
     Some(json!({
-        "id": format!("{response_id}_msg"),
+        "id": response_message_item_id(response_id),
         "type": "message",
         "status": "completed",
         "role": "assistant",
@@ -2044,7 +2091,7 @@ fn chat_message_to_response_output_item(message: &Value, response_id: &str) -> O
 
 fn empty_assistant_message_output_item(response_id: &str) -> Value {
     json!({
-        "id": format!("{response_id}_msg"),
+        "id": response_message_item_id(response_id),
         "type": "message",
         "status": "incomplete",
         "role": "assistant",
@@ -5207,6 +5254,7 @@ mod tests {
             "I should check the weather before answering."
         );
         assert_eq!(result["output"][1]["type"], "message");
+        assert_eq!(result["output"][1]["id"], "msg_chatcmpl_1");
         assert_eq!(result["output"][1]["content"][0]["text"], "Let me check.");
         assert_eq!(result["output"][2]["type"], "function_call");
         assert_eq!(result["output"][2]["call_id"], "call_1");
@@ -5221,6 +5269,62 @@ mod tests {
             result["usage"]["input_tokens_details"]["cache_write_tokens"],
             2
         );
+    }
+
+    #[test]
+    fn openai_request_normalizes_noncanonical_replayed_message_ids() {
+        let mut body = json!({
+            "model": "gpt-5.6-sol",
+            "input": [
+                {
+                    "id": "resp_chatcmpl-8adcdff0de8712dd_msg",
+                    "type": "message",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "from DeepSeek"}]
+                },
+                {
+                    "id": "msg_official_unchanged",
+                    "type": "message",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "from OpenAI"}]
+                }
+            ]
+        });
+
+        assert_eq!(normalize_replayed_item_ids_for_openai(&mut body), 1);
+        assert!(body["input"][0]["id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("msg_")));
+        assert_eq!(body["input"][1]["id"], "msg_official_unchanged");
+    }
+
+    #[test]
+    fn openai_request_normalizes_noncanonical_replayed_web_search_ids() {
+        let mut body = json!({
+            "model": "gpt-5.6-sol",
+            "input": [
+                {
+                    "id": "call_00_A89zZLtxMP15J0arnpWo8734",
+                    "type": "web_search_call",
+                    "status": "completed",
+                    "action": {"type": "search", "queries": ["CCSwitchMulti"]}
+                },
+                {
+                    "id": "ws_official_unchanged",
+                    "type": "web_search_call",
+                    "status": "completed",
+                    "action": {"type": "search", "queries": ["Codex"]}
+                }
+            ]
+        });
+
+        assert_eq!(normalize_replayed_item_ids_for_openai(&mut body), 1);
+        assert!(body["input"][0]["id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("ws_")));
+        assert_eq!(body["input"][1]["id"], "ws_official_unchanged");
     }
 
     #[test]

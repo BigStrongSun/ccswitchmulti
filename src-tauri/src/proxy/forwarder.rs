@@ -2522,6 +2522,21 @@ impl RequestForwarder {
                 );
             }
         }
+        if matches!(app_type, AppType::Codex)
+            && endpoint.contains("responses")
+            && super::providers::is_codex_official_provider(provider)
+        {
+            let changed =
+                super::providers::transform_codex_chat::normalize_replayed_item_ids_for_openai(
+                    &mut request_body,
+                );
+            if changed > 0 {
+                log::debug!(
+                    "[Codex] Normalized {changed} noncanonical replayed item ID(s) for OpenAI Responses (provider={})",
+                    provider.id
+                );
+            }
+        }
         let mut filtered_body = prepare_upstream_request_body(request_body);
         if !is_copilot {
             if let Some(overrides) = provider

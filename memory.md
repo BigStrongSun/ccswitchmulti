@@ -1,5 +1,35 @@
 # CC Switch Repository Memory
 
+## 2026-08-03 Codex 跨 provider 历史 ID 与远程压缩 SSE 聚合根修
+
+- 现场任务 `019fc68a-e5fa-7961-a8d4-d2ffaf0ff8bb` 的官方路由 400 不是
+  `name = "OpenAI"` 或 OAuth 配置错误。`codex-router.log` 证明同一请求中的
+  `input[45/50].id=resp_chatcmpl-8adcdff0de8712dd_msg` 被官方 Responses 拒绝，
+  因为 `type=message` 的回放 item ID 必须属于 `msg_` 命名空间。
+- 根因有两层：CCSM 的 Chat/Anthropic -> Responses 合成器把 response ID 拼成
+  `{response_id}_msg`；第三方 native Responses 也可能返回自己的非标准 message ID。
+  修复同时覆盖源头与边界：所有 CCSM 合成的 message item 使用
+  `response_message_item_id()` 生成 `msg_` ID；混合历史进入 OpenAI official route 前，
+  按 item 类型把非规范 message ID 确定性映射成 `msg_ccswitch_<sha256>`、把非规范
+  web search ID 映射成 `ws_ccswitch_<sha256>`。已合法官方 ID、其他 item 类型与第三方
+  目标不改，旧会话无需改写持久化历史即可恢复。现场另一旧任务中的
+  `type=web_search_call,id=call_00_A89zZLtxMP15J0arnpWo8734` 因此也不会再触发
+  `Expected an ID that begins with 'ws'`。
+- `422 Upstream returned an empty compaction summary` 的现场上游状态实际为 200 SSE，
+  失败在 CCSM 聚合层。旧 `responses_sse_to_response_value()` 只认 SSE `event:` 行，
+  且只有 `output_items` 完全为空时才把 `response.output_text.delta` 合成 message；
+  data-only SSE 或先完成 reasoning item、文本仅以 delta 下发时都会丢掉摘要。
+- 聚合器现在在缺 `event:` 时使用 JSON `data.type`，并在尚无 message item 时把文本
+  delta 追加为 message，即使 reasoning item 已存在。没有把 `compaction_trigger` 改写
+  成粗糙摘要 prompt；第三方默认本地压缩的设计仍保持，显式 remote opt-in 的兼容层
+  只负责无损聚合与协议包装。
+- 定向验证：新增的旧 message/web-search ID 规范化、data-only SSE、reasoning+text
+  delta、Chat 流式 canonical message ID 测试均通过；transform Codex Chat 115/115、
+  streaming Codex Chat 20/20、streaming Codex Anthropic 21/21、Anthropic response
+  7/7。Anthropic transform 仍只有既有
+  `test_request_tools_and_filtering` 与
+  `test_request_custom_tool_survives_with_required_choice` 两项断言失败。
+
 ## 2026-08-03 第三方 Codex provider 默认本地压缩与远程压缩 opt-in
 
 - Codex 的压缩选择只看 `ModelProviderInfo::supports_remote_compaction()`，实现是

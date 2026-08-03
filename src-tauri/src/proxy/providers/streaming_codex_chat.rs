@@ -7,7 +7,7 @@ use super::{
     },
     transform_codex_chat::{
         chat_usage_to_responses_usage, custom_tool_input_from_chat_arguments,
-        response_id_from_chat_id, response_status_from_finish_reason,
+        response_id_from_chat_id, response_message_item_id, response_status_from_finish_reason,
         response_tool_call_item_from_chat_name, response_tool_call_item_id_from_chat_name,
         CodexToolContext,
     },
@@ -308,7 +308,7 @@ impl ChatToResponsesState {
 
         if !self.text.added {
             let output_index = self.next_output_index();
-            let item_id = format!("{}_msg", self.response_id);
+            let item_id = response_message_item_id(&self.response_id);
             self.text.output_index = Some(output_index);
             self.text.item_id = item_id.clone();
             self.text.added = true;
@@ -884,6 +884,7 @@ mod tests {
 
         assert!(output.contains("event: response.created"));
         assert!(output.contains("event: response.output_text.delta"));
+        assert!(output.contains("\"id\":\"msg_chatcmpl_1\""));
         assert!(output.contains("\"text\":\"Hello\""));
         assert!(output.contains("event: response.completed"));
         assert!(output.contains("\"input_tokens\":4"));
