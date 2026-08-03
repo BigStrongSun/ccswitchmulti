@@ -744,6 +744,61 @@ mod tests {
             .expect("add router to failover queue");
     }
 
+    /// 把 Codex MultiRouter 配置成第三方 Responses 直透上游，base_url 指向本地 mock。
+    async fn save_codex_responses_mock_router(db: &Database, responses_base_url: &str) {
+        let mut responses_provider = Provider::with_id(
+            "deepseek-responses".to_string(),
+            "DeepSeek-responses".to_string(),
+            json!({
+                "base_url": responses_base_url,
+                "api_key": "sk-deepseek"
+            }),
+            None,
+        );
+        responses_provider.meta = Some(crate::provider::ProviderMeta {
+            api_format: Some("openai_responses".to_string()),
+            ..Default::default()
+        });
+        db.save_provider("codex", &responses_provider)
+            .expect("save responses provider");
+        db.save_provider(
+            "codex",
+            &Provider::with_id(
+                "router".to_string(),
+                "Codex Router".to_string(),
+                json!({
+                    "codexRouting": {
+                        "enabled": true,
+                        "defaultRouteId": "deepseek",
+                        "routes": [
+                            {
+                                "id": "deepseek",
+                                "label": "DeepSeek-responses",
+                                "enabled": true,
+                                "targetProviderId": "deepseek-responses",
+                                "match": { "models": ["deepseek-v4-flash"] },
+                                "upstream": { "apiFormat": "openai_responses" }
+                            }
+                        ]
+                    }
+                }),
+                None,
+            ),
+        )
+        .expect("save router provider");
+        let mut proxy_config = db
+            .get_proxy_config_for_app("codex")
+            .await
+            .expect("read codex proxy config");
+        proxy_config.enabled = true;
+        proxy_config.auto_failover_enabled = true;
+        db.update_proxy_config_for_app(proxy_config)
+            .await
+            .expect("enable codex proxy config");
+        db.add_to_failover_queue("codex", "router")
+            .expect("add router to failover queue");
+    }
+
     #[test]
     fn bind_error_for_addr_in_use_includes_actionable_port_diagnostic() {
         let addr: SocketAddr = "127.0.0.1:15721".parse().expect("socket addr");
@@ -2613,6 +2668,311 @@ base_url = "http://127.0.0.1:15721/v1"
 
     #[tokio::test]
     #[serial]
+    async fn codex_v1_compaction_chat_mock_overflow_escalates_trim_rounds() {
+        // 第一轮 1/2 裁剪后仍溢出时，必须继续第二轮 1/4 裁剪并在成功时返回 200；
+        // 出站 messages 数量逐轮递减。
+        let captured_requests = Arc::new(Mutex::new(Vec::new()));
+        let (chat_base_url, _chat_task) = spawn_chat_staged_mock(
+            captured_requests.clone(),
+            vec![
+                StatusCode::UNAUTHORIZED,
+                StatusCode::UNAUTHORIZED,
+                StatusCode::OK,
+            ],
+        )
+        .await;
+        let (server, db) = build_test_server();
+        save_codex_chat_mock_router(&db, &chat_base_url).await;
+
+        let response = server
+            .build_router()
+            .oneshot(v2_compaction_mock_request(&v2_compaction_mock_body()))
+            .await
+            .expect("escalated compaction response");
+
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "second trim round must succeed instead of surfacing the overflow 401"
+        );
+
+        let requests = captured_requests
+            .lock()
+            .expect("captured requests lock")
+            .clone();
+        assert_eq!(requests.len(), 3);
+        let message_counts: Vec<usize> = requests
+            .iter()
+            .map(|request| {
+                request["body"]["messages"]
+                    .as_array()
+                    .expect("upstream messages")
+                    .len()
+            })
+            .collect();
+        assert!(
+            message_counts[1] < message_counts[0],
+            "first trim must halve history: {message_counts:?}"
+        );
+        assert!(
+            message_counts[2] < message_counts[1],
+            "second trim must shrink further: {message_counts:?}"
+        );
+        assert!(requests[2]["body"].to_string().contains("compact now"));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn codex_v1_compaction_chat_mock_overflow_exhausted_trim_surfaces_error() {
+        // 两轮裁剪都仍溢出时，不能吞掉错误或无限重试：客户端必须拿到上游 401，
+        // 且总出站次数为原始请求 + 两轮裁剪。
+        let captured_requests = Arc::new(Mutex::new(Vec::new()));
+        let (chat_base_url, _chat_task) = spawn_chat_staged_mock(
+            captured_requests.clone(),
+            vec![
+                StatusCode::UNAUTHORIZED,
+                StatusCode::UNAUTHORIZED,
+                StatusCode::UNAUTHORIZED,
+            ],
+        )
+        .await;
+        let (server, db) = build_test_server();
+        save_codex_chat_mock_router(&db, &chat_base_url).await;
+
+        let response = server
+            .build_router()
+            .oneshot(v2_compaction_mock_request(&v2_compaction_mock_body()))
+            .await
+            .expect("exhausted compaction response");
+
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "overflow must surface as the upstream 401 after both trim rounds fail"
+        );
+        let requests = captured_requests
+            .lock()
+            .expect("captured requests lock")
+            .clone();
+        assert_eq!(requests.len(), 3);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn codex_v1_turn_chat_mock_overflow_never_trims_history() {
+        // turn 请求收到 Kimi 溢出 401 时绝不能走裁剪重试：只出站一次，直接透传错误，
+        // 否则会篡改用户正在进行的对话历史。
+        let captured_requests = Arc::new(Mutex::new(Vec::new()));
+        let (chat_base_url, _chat_task) =
+            spawn_chat_staged_mock(captured_requests.clone(), vec![StatusCode::UNAUTHORIZED]).await;
+        let (server, db) = build_test_server();
+        save_codex_chat_mock_router(&db, &chat_base_url).await;
+
+        let response = server
+            .build_router()
+            .oneshot(plain_responses_mock_request(
+                "k3",
+                json!([{
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "continue" }]
+                }]),
+            ))
+            .await
+            .expect("turn response");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let requests = captured_requests
+            .lock()
+            .expect("captured requests lock")
+            .clone();
+        assert_eq!(
+            requests.len(),
+            1,
+            "turn overflow must not trigger history trimming"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn codex_v1_turn_chat_mock_empty_choices_maps_to_retryable_502() {
+        // Kimi 偶发 HTTP 200 + 空 choices：必须按 502 可重试错误返回给 Codex
+        // 客户端，而不是 422 卡死整轮对话。
+        let captured_body = Arc::new(Mutex::new(None));
+        let (chat_base_url, _chat_task) =
+            spawn_chat_empty_choices_mock(captured_body.clone()).await;
+        let (server, db) = build_test_server();
+        save_codex_chat_mock_router(&db, &chat_base_url).await;
+
+        let response = server
+            .build_router()
+            .oneshot(plain_responses_mock_request(
+                "k3",
+                json!([{
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "ping" }]
+                }]),
+            ))
+            .await
+            .expect("empty choices response");
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = response_json(response).await;
+        // transform 阶段的 UpstreamError 由 axum IntoResponse 包装，只有
+        // message/type；Codex 客户端的 502 重连只看 HTTP 状态码。
+        assert_eq!(body["error"]["type"], "upstream_error");
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("HTTP 200 with empty choices"));
+        assert!(captured_body
+            .lock()
+            .expect("captured upstream body lock")
+            .is_some());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn codex_v1_chat_mock_drops_empty_system_before_upstream() {
+        // 静态 agent 类型可能产生空 developer/system input item；出站 Chat 请求
+        // 不得携带空 system 消息，否则 Kimi 整请求 400。
+        let captured_body = Arc::new(Mutex::new(None));
+        let (chat_base_url, _chat_task) =
+            spawn_openai_chat_mock_with_capture(captured_body.clone()).await;
+        let (server, db) = build_test_server();
+        save_codex_chat_mock_router(&db, &chat_base_url).await;
+
+        let response = server
+            .build_router()
+            .oneshot(plain_responses_mock_request(
+                "k3",
+                json!([
+                    {
+                        "type": "message",
+                        "role": "developer",
+                        "content": [{ "type": "input_text", "text": "" }]
+                    },
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{ "type": "input_text", "text": "PING_123" }]
+                    }
+                ]),
+            ))
+            .await
+            .expect("empty system response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let chat_body = captured_body
+            .lock()
+            .expect("captured upstream body lock")
+            .clone()
+            .expect("captured chat body");
+        let messages = chat_body["messages"].as_array().expect("messages array");
+        assert!(
+            messages
+                .iter()
+                .all(|message| message.get("role").and_then(Value::as_str) != Some("system")),
+            "no system message may reach strict upstreams when empty: {messages:?}"
+        );
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[0]["content"], "PING_123");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn codex_v1_responses_mock_recovers_official_reasoning_for_third_party() {
+        // 官方路由回放的 reasoning item（encrypted_content + summary）在切到
+        // 第三方 Responses 直透时必须转成 reasoning_text content 并移除私有密文，
+        // 否则 DeepSeek thinking 模式整请求 400。
+        let captured_body = Arc::new(Mutex::new(None));
+        let (responses_base_url, _responses_task) =
+            spawn_openai_responses_mock_with_capture(captured_body.clone()).await;
+        let (server, db) = build_test_server();
+        save_codex_responses_mock_router(&db, &responses_base_url).await;
+
+        let response = server
+            .build_router()
+            .oneshot(plain_responses_mock_request(
+                "deepseek-v4-flash",
+                json!([
+                    {
+                        "type": "reasoning",
+                        "id": "rs_official",
+                        "summary": [{ "type": "summary_text", "text": "Need to inspect the code." }],
+                        "encrypted_content": "gAAAAAB..."
+                    },
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{ "type": "input_text", "text": "continue" }]
+                    }
+                ]),
+            ))
+            .await
+            .expect("responses passthrough response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let upstream_body = captured_body
+            .lock()
+            .expect("captured upstream body lock")
+            .clone()
+            .expect("captured responses body");
+        let reasoning = &upstream_body["input"][0];
+        assert_eq!(reasoning["type"], "reasoning");
+        assert!(reasoning.get("encrypted_content").is_none());
+        assert_eq!(reasoning["content"][0]["type"], "reasoning_text");
+        assert_eq!(reasoning["content"][0]["text"], "Need to inspect the code.");
+    }
+
+    fn v2_compaction_mock_body() -> Value {
+        json!({
+            "model": "k3",
+            "input": [
+                { "type": "compaction_trigger" },
+                { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "old question" }] },
+                { "type": "function_call", "call_id": "call_1", "name": "read", "arguments": "{}" },
+                { "type": "function_call_output", "call_id": "call_1", "output": "old result" },
+                { "type": "message", "role": "assistant", "content": [{ "type": "output_text", "text": "mid answer" }] },
+                { "type": "reasoning", "summary": [{ "type": "summary_text", "text": "thinking" }] },
+                { "type": "function_call", "call_id": "call_2", "name": "write", "arguments": "{}" },
+                { "type": "function_call_output", "call_id": "call_2", "output": "new result" },
+                { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "compact now" }] }
+            ]
+        })
+    }
+
+    fn v2_compaction_mock_request(body: &Value) -> Request<Body> {
+        Request::builder()
+            .method(Method::POST)
+            .uri("/v1/responses")
+            .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+            .header(header::USER_AGENT, "codex/0.146.0-test")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(
+                "x-codex-turn-metadata",
+                r#"{"request_kind":"compaction","compaction":{"trigger":"auto","implementation":"responses_compaction_v2","phase":"pre_turn"}}"#,
+            )
+            .body(Body::from(body.to_string()))
+            .expect("compaction request")
+    }
+
+    fn plain_responses_mock_request(model: &str, input: Value) -> Request<Body> {
+        Request::builder()
+            .method(Method::POST)
+            .uri("/v1/responses")
+            .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+            .header(header::USER_AGENT, "codex/0.146.0-test")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({ "model": model, "input": input }).to_string(),
+            ))
+            .expect("plain request")
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn codex_v1_responses_anthropic_mock_round_trip_uses_msg_prefix() {
         let anthropic_captured = Arc::new(Mutex::new(None));
         let (anthropic_base_url, _anthropic_task) =
@@ -3168,6 +3528,46 @@ base_url = "http://127.0.0.1:15721/v1"
         (format!("http://{addr}/v1"), task)
     }
 
+    /// 启动第三方 OpenAI Responses 直透 mock，捕获出站请求体并返回一个
+    /// 简单 completed Responses 响应。用于仿真第三方 Responses 路由的规整行为。
+    async fn spawn_openai_responses_mock_with_capture(
+        captured_body: Arc<Mutex<Option<Value>>>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new().route(
+            "/v1/responses",
+            post(move |Json(body): Json<Value>| {
+                let captured_body = captured_body.clone();
+                async move {
+                    *captured_body.lock().expect("capture upstream body") = Some(body);
+                    Json(json!({
+                        "id": "resp_mock",
+                        "object": "response",
+                        "created_at": 0,
+                        "status": "completed",
+                        "model": "deepseek-v4-flash",
+                        "output": [],
+                        "usage": {
+                            "input_tokens": 0,
+                            "output_tokens": 0,
+                            "total_tokens": 0
+                        }
+                    }))
+                    .into_response()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind responses mock upstream");
+        let addr = listener.local_addr().expect("responses mock upstream addr");
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("responses mock upstream serve");
+        });
+        (format!("http://{addr}/v1"), task)
+    }
+
     /// 启动 Chat 上游 mock：第一次回 401 Kimi 上下文溢出，之后回正常 chat completion，
     /// 并捕获每次出站请求体供断言裁剪行为。
     async fn spawn_chat_overflow_then_success_mock(
@@ -3224,6 +3624,116 @@ base_url = "http://127.0.0.1:15721/v1"
             axum::serve(listener, app)
                 .await
                 .expect("overflow mock upstream serve");
+        });
+        (format!("http://{addr}/v1"), task)
+    }
+
+    /// 启动按状态序列响应的 Chat 上游 mock：按索引消费 `statuses` 返回对应
+    /// 状态（非 OK 回 Kimi 溢出体，OK 回正常 chat completion），并捕获每次
+    /// 出站请求体。用于仿真溢出裁剪的阶梯与最终失败路径。
+    async fn spawn_chat_staged_mock(
+        captured_requests: Arc<Mutex<Vec<Value>>>,
+        statuses: Vec<StatusCode>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let statuses = Arc::new(statuses);
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move |Json(body): Json<Value>| {
+                let captured_requests = captured_requests.clone();
+                let attempts = attempts.clone();
+                let statuses = statuses.clone();
+                async move {
+                    captured_requests
+                        .lock()
+                        .expect("capture requests lock")
+                        .push(json!({ "body": body }));
+                    let index = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let status = statuses
+                        .get(index)
+                        .copied()
+                        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                    if status != StatusCode::OK {
+                        return (
+                            status,
+                            Json(json!({
+                                "error": {
+                                    "message": "k3-256k supports only 256K context.",
+                                    "type": "authentication_error"
+                                }
+                            })),
+                        )
+                            .into_response();
+                    }
+                    Json(json!({
+                        "id": "chatcmpl_compact",
+                        "object": "chat.completion",
+                        "created": 0,
+                        "model": "k3",
+                        "choices": [{
+                            "index": 0,
+                            "message": { "role": "assistant", "content": "compact summary" },
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {
+                            "prompt_tokens": 1,
+                            "completion_tokens": 1,
+                            "total_tokens": 2
+                        }
+                    }))
+                    .into_response()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind staged mock upstream");
+        let addr = listener.local_addr().expect("staged mock upstream addr");
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("staged mock upstream serve");
+        });
+        (format!("http://{addr}/v1"), task)
+    }
+
+    /// 启动返回 HTTP 200 + 空 choices 的 Chat 上游 mock，并捕获出站请求体。
+    /// 用于仿真 Kimi 瞬态空 choices 场景。
+    async fn spawn_chat_empty_choices_mock(
+        captured_body: Arc<Mutex<Option<Value>>>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move |Json(body): Json<Value>| {
+                let captured_body = captured_body.clone();
+                async move {
+                    *captured_body.lock().expect("capture upstream body") = Some(body);
+                    Json(json!({
+                        "id": "chatcmpl_empty",
+                        "object": "chat.completion",
+                        "created": 0,
+                        "model": "k3",
+                        "choices": [],
+                        "usage": {
+                            "prompt_tokens": 1,
+                            "completion_tokens": 1,
+                            "total_tokens": 2
+                        }
+                    }))
+                    .into_response()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind empty choices mock upstream");
+        let addr = listener
+            .local_addr()
+            .expect("empty choices mock upstream addr");
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("empty choices mock upstream serve");
         });
         (format!("http://{addr}/v1"), task)
     }
