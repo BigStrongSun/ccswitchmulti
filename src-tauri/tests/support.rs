@@ -7,7 +7,7 @@ use cc_switch_lib::{update_settings, AppSettings, AppState, Database, MultiAppCo
 pub fn ensure_test_home() -> &'static Path {
     static HOME: OnceLock<PathBuf> = OnceLock::new();
     HOME.get_or_init(|| {
-        let base = std::env::temp_dir().join("cc-switch-test-home");
+        let base = std::env::temp_dir().join(format!("cc-switch-test-home-{}", std::process::id()));
         if base.exists() {
             let _ = std::fs::remove_dir_all(&base);
         }
@@ -40,6 +40,7 @@ pub fn reset_test_fs() {
         ".config",
         ".openclaw",
         "profiles",
+        "AppData",
     ] {
         let path = home.join(sub);
         if path.exists() {
