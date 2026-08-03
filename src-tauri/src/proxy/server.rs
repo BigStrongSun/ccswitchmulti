@@ -634,6 +634,61 @@ mod tests {
         )
     }
 
+    /// 把 Codex MultiRouter 配置成官方 OAuth 路由，但 base_url 指向本地 mock。
+    async fn save_codex_official_mock_router(db: &Database, official_base_url: &str) {
+        let mut official_provider = Provider::with_id(
+            "codex-official".to_string(),
+            "OpenAI Official".to_string(),
+            json!({
+                "base_url": format!("{official_base_url}/backend-api/codex"),
+                "api_key": "sk-official"
+            }),
+            None,
+        );
+        official_provider.meta = Some(crate::provider::ProviderMeta {
+            provider_type: Some("codex_oauth".to_string()),
+            ..Default::default()
+        });
+        db.save_provider("codex", &official_provider)
+            .expect("save official provider");
+        db.save_provider(
+            "codex",
+            &Provider::with_id(
+                "router".to_string(),
+                "Codex Router".to_string(),
+                json!({
+                    "codexRouting": {
+                        "enabled": true,
+                        "defaultRouteId": "official",
+                        "routes": [
+                            {
+                                "id": "official",
+                                "label": "OpenAI Official",
+                                "enabled": true,
+                                "targetProviderId": "codex-official",
+                                "match": { "models": ["gpt-5.6-luna"] },
+                                "upstream": { "apiFormat": "openai_responses" }
+                            }
+                        ]
+                    }
+                }),
+                None,
+            ),
+        )
+        .expect("save router provider");
+        let mut proxy_config = db
+            .get_proxy_config_for_app("codex")
+            .await
+            .expect("read codex proxy config");
+        proxy_config.enabled = true;
+        proxy_config.auto_failover_enabled = true;
+        db.update_proxy_config_for_app(proxy_config)
+            .await
+            .expect("enable codex proxy config");
+        db.add_to_failover_queue("codex", "router")
+            .expect("add router to failover queue");
+    }
+
     #[test]
     fn bind_error_for_addr_in_use_includes_actionable_port_diagnostic() {
         let addr: SocketAddr = "127.0.0.1:15721".parse().expect("socket addr");
@@ -1483,57 +1538,7 @@ base_url = "http://127.0.0.1:15721/v1"
         std::env::set_var("CC_SWITCH_TEST_CODEX_OFFICIAL_MOCK_URL", &mock_official_url);
 
         let (server, db) = build_test_server();
-        let mut official_provider = Provider::with_id(
-            "codex-official".to_string(),
-            "OpenAI Official".to_string(),
-            json!({
-                "base_url": format!("{upstream_base_url}/backend-api/codex"),
-                "api_key": "sk-official"
-            }),
-            None,
-        );
-        official_provider.meta = Some(crate::provider::ProviderMeta {
-            provider_type: Some("codex_oauth".to_string()),
-            ..Default::default()
-        });
-        db.save_provider("codex", &official_provider)
-            .expect("save official provider");
-        db.save_provider(
-            "codex",
-            &Provider::with_id(
-                "router".to_string(),
-                "Codex Router".to_string(),
-                json!({
-                    "codexRouting": {
-                        "enabled": true,
-                        "defaultRouteId": "official",
-                        "routes": [
-                            {
-                                "id": "official",
-                                "label": "OpenAI Official",
-                                "enabled": true,
-                                "targetProviderId": "codex-official",
-                                "match": { "models": ["gpt-5.6-luna"] },
-                                "upstream": { "apiFormat": "openai_responses" }
-                            }
-                        ]
-                    }
-                }),
-                None,
-            ),
-        )
-        .expect("save router provider");
-        let mut proxy_config = db
-            .get_proxy_config_for_app("codex")
-            .await
-            .expect("read codex proxy config");
-        proxy_config.enabled = true;
-        proxy_config.auto_failover_enabled = true;
-        db.update_proxy_config_for_app(proxy_config)
-            .await
-            .expect("enable codex proxy config");
-        db.add_to_failover_queue("codex", "router")
-            .expect("add router to failover queue");
+        save_codex_official_mock_router(&db, &upstream_base_url).await;
 
         let request_body = json!({
             "model": "gpt-5.6-luna",
@@ -1622,6 +1627,883 @@ base_url = "http://127.0.0.1:15721/v1"
         assert_eq!(input[4]["call_id"], "call_1");
     }
 
+    #[tokio::test]
+    #[serial]
+    async fn codex_v1_responses_official_mock_streaming_strips_replayed_item_ids() {
+        let captured_request = Arc::new(Mutex::new(None));
+        let (upstream_base_url, _upstream_task) =
+            spawn_codex_responses_sse_mock(captured_request.clone()).await;
+        let mock_official_url = format!("{upstream_base_url}/backend-api/codex/responses");
+        std::env::set_var("CC_SWITCH_TEST_CODEX_OFFICIAL_MOCK_URL", &mock_official_url);
+
+        let (server, db) = build_test_server();
+        save_codex_official_mock_router(&db, &upstream_base_url).await;
+
+        let request_body = json!({
+            "model": "gpt-5.6-luna",
+            "stream": true,
+            "input": [
+                {
+                    "type": "message",
+                    "id": "resp_chatcmpl-2gyygAFeaDX2rFNtuG7mOhf9_msg",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "old turn" }]
+                },
+                {
+                    "type": "reasoning",
+                    "id": "rs_resp_chatcmpl-L2v9jyTIwSBd0avrEPO8umbl",
+                    "summary": [{ "type": "summary_text", "text": "thinking" }]
+                },
+                {
+                    "type": "agent_message",
+                    "id": "msg_amsg_019fc3fa-9b0a-7db1-9ca8-131d56d047ac",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "subagent done" }]
+                }
+            ]
+        });
+
+        let response = server
+            .build_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/responses")
+                    .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+                    .header(header::USER_AGENT, "codex/0.146.0-test")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(request_body.to_string()))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        std::env::remove_var("CC_SWITCH_TEST_CODEX_OFFICIAL_MOCK_URL");
+        assert_eq!(response.status(), StatusCode::OK);
+        let response_text = String::from_utf8_lossy(
+            &response
+                .into_body()
+                .collect()
+                .await
+                .expect("collect stream")
+                .to_bytes(),
+        )
+        .to_string();
+        let created_pos = response_text
+            .find("event: response.created")
+            .expect("response.created event");
+        let delta_pos = response_text
+            .find("event: response.output_text.delta")
+            .expect("output_text.delta event");
+        let completed_pos = response_text
+            .find("event: response.completed")
+            .expect("response.completed event");
+        assert!(
+            created_pos < delta_pos && delta_pos < completed_pos,
+            "Codex needs the full Responses lifecycle, otherwise it reconnects: {response_text}"
+        );
+
+        let captured = captured_request
+            .lock()
+            .expect("captured responses request lock")
+            .clone()
+            .expect("captured responses request");
+        let input = captured["body"]["input"].as_array().expect("input array");
+        for item in input {
+            assert!(
+                item.get("id").is_none(),
+                "official streaming mock must not receive replayed ids: {item}"
+            );
+        }
+        assert_eq!(input[0]["content"][0]["text"], "old turn");
+        assert_eq!(input[1]["summary"][0]["text"], "thinking");
+        assert_eq!(input[2]["content"][0]["text"], "subagent done");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn codex_v1_responses_compact_official_mock_strips_replayed_item_ids() {
+        let captured_request = Arc::new(Mutex::new(None));
+        let (upstream_base_url, _upstream_task) =
+            spawn_codex_responses_mock(captured_request.clone()).await;
+        let mock_official_url = format!("{upstream_base_url}/backend-api/codex/responses");
+        std::env::set_var("CC_SWITCH_TEST_CODEX_OFFICIAL_MOCK_URL", &mock_official_url);
+
+        let (server, db) = build_test_server();
+        save_codex_official_mock_router(&db, &upstream_base_url).await;
+
+        let request_body = json!({
+            "model": "gpt-5.6-luna",
+            "input": [
+                { "type": "compaction_trigger" },
+                {
+                    "type": "message",
+                    "id": "resp_chatcmpl-2gyygAFeaDX2rFNtuG7mOhf9_msg",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "old turn" }]
+                },
+                {
+                    "type": "reasoning",
+                    "id": "rs_resp_chatcmpl-L2v9jyTIwSBd0avrEPO8umbl",
+                    "summary": [{ "type": "summary_text", "text": "thinking" }]
+                }
+            ]
+        });
+
+        let response = server
+            .build_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/responses/compact")
+                    .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+                    .header(header::USER_AGENT, "codex/0.146.0-test")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(request_body.to_string()))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        std::env::remove_var("CC_SWITCH_TEST_CODEX_OFFICIAL_MOCK_URL");
+        let status = response.status();
+        let response_body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect compact response")
+            .to_bytes();
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "compact proxy returned {status}: {}",
+            String::from_utf8_lossy(&response_body)
+        );
+
+        let captured = captured_request
+            .lock()
+            .expect("captured responses request lock")
+            .clone()
+            .expect("captured responses request");
+        let input = captured["body"]["input"].as_array().expect("input array");
+        assert_eq!(input[0]["type"], "compaction_trigger");
+        for item in input {
+            assert!(
+                item.get("id").is_none(),
+                "official compact mock must not receive replayed ids: {item}"
+            );
+        }
+        assert_eq!(input[1]["content"][0]["text"], "old turn");
+        assert_eq!(input[2]["summary"][0]["text"], "thinking");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn codex_cross_provider_chat_then_official_mock_drops_replayed_history_ids() {
+        let chat_captured = Arc::new(Mutex::new(None));
+        let (chat_base_url, _chat_task) =
+            spawn_openai_chat_mock_with_capture(chat_captured.clone()).await;
+        let official_captured = Arc::new(Mutex::new(None));
+        let (official_base_url, _official_task) =
+            spawn_codex_responses_mock(official_captured.clone()).await;
+        let mock_official_url = format!("{official_base_url}/backend-api/codex/responses");
+        std::env::set_var("CC_SWITCH_TEST_CODEX_OFFICIAL_MOCK_URL", &mock_official_url);
+
+        let (server, db) = build_test_server();
+
+        let mut chat_provider = Provider::with_id(
+            "k3-chat".to_string(),
+            "Kimi K3".to_string(),
+            json!({
+                "base_url": chat_base_url,
+                "api_key": "sk-k3"
+            }),
+            None,
+        );
+        chat_provider.meta = Some(crate::provider::ProviderMeta {
+            api_format: Some("openai_chat".to_string()),
+            ..Default::default()
+        });
+        db.save_provider("codex", &chat_provider)
+            .expect("save chat provider");
+
+        let mut official_provider = Provider::with_id(
+            "codex-official".to_string(),
+            "OpenAI Official".to_string(),
+            json!({
+                "base_url": format!("{official_base_url}/backend-api/codex"),
+                "api_key": "sk-official"
+            }),
+            None,
+        );
+        official_provider.meta = Some(crate::provider::ProviderMeta {
+            provider_type: Some("codex_oauth".to_string()),
+            ..Default::default()
+        });
+        db.save_provider("codex", &official_provider)
+            .expect("save official provider");
+
+        db.save_provider(
+            "codex",
+            &Provider::with_id(
+                "router".to_string(),
+                "Codex Router".to_string(),
+                json!({
+                    "codexRouting": {
+                        "enabled": true,
+                        "defaultRouteId": "k3",
+                        "routes": [
+                            {
+                                "id": "official",
+                                "label": "OpenAI Official",
+                                "enabled": true,
+                                "targetProviderId": "codex-official",
+                                "match": { "models": ["gpt-5.6-luna"] },
+                                "upstream": { "apiFormat": "openai_responses" }
+                            },
+                            {
+                                "id": "k3",
+                                "label": "Kimi K3",
+                                "enabled": true,
+                                "targetProviderId": "k3-chat",
+                                "match": { "models": ["k3"] },
+                                "upstream": { "apiFormat": "openai_chat" }
+                            }
+                        ]
+                    }
+                }),
+                None,
+            ),
+        )
+        .expect("save router provider");
+        let mut proxy_config = db
+            .get_proxy_config_for_app("codex")
+            .await
+            .expect("read codex proxy config");
+        proxy_config.enabled = true;
+        proxy_config.auto_failover_enabled = true;
+        db.update_proxy_config_for_app(proxy_config)
+            .await
+            .expect("enable codex proxy config");
+        db.add_to_failover_queue("codex", "router")
+            .expect("add router to failover queue");
+
+        let first_body = json!({
+            "model": "k3",
+            "stream": true,
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "ping" }]
+                }
+            ]
+        });
+        let first_response = server
+            .build_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/responses")
+                    .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+                    .header(header::USER_AGENT, "codex/0.146.0-test")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(first_body.to_string()))
+                    .expect("first request"),
+            )
+            .await
+            .expect("first response");
+        assert_eq!(first_response.status(), StatusCode::OK);
+        let first_text = String::from_utf8_lossy(
+            &first_response
+                .into_body()
+                .collect()
+                .await
+                .expect("collect first response")
+                .to_bytes(),
+        )
+        .to_string();
+        assert!(
+            first_text.contains("\"id\":\"msg_resp_chatcmpl_mock\""),
+            "chat-sourced message item id should use msg_ prefix: {first_text}"
+        );
+
+        let second_body = json!({
+            "model": "gpt-5.6-luna",
+            "input": [
+                {
+                    "type": "message",
+                    "id": "resp_chatcmpl_mock_msg",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "pong" }]
+                },
+                {
+                    "type": "reasoning",
+                    "id": "rs_resp_chatcmpl_mock",
+                    "summary": [{ "type": "summary_text", "text": "thinking" }]
+                },
+                {
+                    "type": "agent_message",
+                    "id": "msg_amsg_019fc3fa-9b0a-7db1-9ca8-131d56d047ac",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "subagent done" }]
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "done"
+                }
+            ]
+        });
+        let second_response = server
+            .build_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/responses")
+                    .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+                    .header(header::USER_AGENT, "codex/0.146.0-test")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(second_body.to_string()))
+                    .expect("second request"),
+            )
+            .await
+            .expect("second response");
+        std::env::remove_var("CC_SWITCH_TEST_CODEX_OFFICIAL_MOCK_URL");
+        assert_eq!(second_response.status(), StatusCode::OK);
+
+        let captured = official_captured
+            .lock()
+            .expect("captured responses request lock")
+            .clone()
+            .expect("captured official request");
+        let input = captured["body"]["input"].as_array().expect("input array");
+        for item in input {
+            assert!(
+                item.get("id").is_none(),
+                "official mock must not receive replayed history ids: {item}"
+            );
+        }
+        assert_eq!(input[0]["content"][0]["text"], "pong");
+        assert_eq!(input[1]["summary"][0]["text"], "thinking");
+        assert_eq!(input[2]["content"][0]["text"], "subagent done");
+        assert_eq!(input[3]["call_id"], "call_1");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn codex_v1_responses_official_mock_subagent_tool_history_strips_ids() {
+        let captured_request = Arc::new(Mutex::new(None));
+        let (upstream_base_url, _upstream_task) =
+            spawn_codex_responses_mock(captured_request.clone()).await;
+        let mock_official_url = format!("{upstream_base_url}/backend-api/codex/responses");
+        std::env::set_var("CC_SWITCH_TEST_CODEX_OFFICIAL_MOCK_URL", &mock_official_url);
+
+        let (server, db) = build_test_server();
+        save_codex_official_mock_router(&db, &upstream_base_url).await;
+
+        let request_body = json!({
+            "model": "gpt-5.6-luna",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "spawn subagent" }]
+                },
+                {
+                    "type": "function_call",
+                    "id": "fc_spawn_1",
+                    "call_id": "call_spawn",
+                    "name": "spawn_agent",
+                    "arguments": r#"{"task":"check"}"#
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_spawn",
+                    "output": "ok"
+                },
+                {
+                    "type": "agent_message",
+                    "id": "amsg_019fc3fa-9b0a-7db1-9ca8-131d56d047ac",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "subagent running" }]
+                },
+                {
+                    "type": "function_call",
+                    "id": "fc_read_1",
+                    "call_id": "call_read",
+                    "name": "read_file",
+                    "arguments": r#"{"path":"README.md"}"#
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_read",
+                    "output": "content"
+                },
+                {
+                    "type": "agent_message",
+                    "id": "amsg_019fc3fa-9b0a-7db1-9ca8-131d56d047ac",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "subagent done" }]
+                }
+            ]
+        });
+
+        let response = server
+            .build_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/responses")
+                    .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+                    .header(header::USER_AGENT, "codex/0.146.0-test")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(request_body.to_string()))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        std::env::remove_var("CC_SWITCH_TEST_CODEX_OFFICIAL_MOCK_URL");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let captured = captured_request
+            .lock()
+            .expect("captured responses request lock")
+            .clone()
+            .expect("captured responses request");
+        let input = captured["body"]["input"].as_array().expect("input array");
+        for item in input {
+            assert!(
+                item.get("id").is_none(),
+                "official mock must not receive subagent/tool ids: {item}"
+            );
+        }
+        assert_eq!(input[0]["content"][0]["text"], "spawn subagent");
+        assert_eq!(input[1]["call_id"], "call_spawn");
+        assert_eq!(input[1]["name"], "spawn_agent");
+        assert_eq!(input[1]["arguments"], r#"{"task":"check"}"#);
+        assert_eq!(input[2]["call_id"], "call_spawn");
+        assert_eq!(input[2]["output"], "ok");
+        assert_eq!(input[3]["content"][0]["text"], "subagent running");
+        assert_eq!(input[4]["call_id"], "call_read");
+        assert_eq!(input[4]["name"], "read_file");
+        assert_eq!(input[4]["arguments"], r#"{"path":"README.md"}"#);
+        assert_eq!(input[5]["call_id"], "call_read");
+        assert_eq!(input[5]["output"], "content");
+        assert_eq!(input[6]["content"][0]["text"], "subagent done");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn codex_v1_responses_official_mock_recovers_plaintext_encrypted_agent_message() {
+        let captured_request = Arc::new(Mutex::new(None));
+        let (upstream_base_url, _upstream_task) =
+            spawn_codex_responses_mock(captured_request.clone()).await;
+        let mock_official_url = format!("{upstream_base_url}/backend-api/codex/responses");
+        std::env::set_var("CC_SWITCH_TEST_CODEX_OFFICIAL_MOCK_URL", &mock_official_url);
+
+        let (server, db) = build_test_server();
+        save_codex_official_mock_router(&db, &upstream_base_url).await;
+
+        let request_body = json!({
+            "model": "gpt-5.6-luna",
+            "input": [
+                {
+                    "type": "agent_message",
+                    "id": "amsg_019fc3fa-9b0a-7db1-9ca8-131d56d047ac",
+                    "role": "assistant",
+                    "content": [{
+                        "type": "encrypted_content",
+                        "encrypted_content": "subagent plaintext reply"
+                    }]
+                }
+            ]
+        });
+
+        let response = server
+            .build_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/responses")
+                    .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+                    .header(header::USER_AGENT, "codex/0.146.0-test")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(request_body.to_string()))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        std::env::remove_var("CC_SWITCH_TEST_CODEX_OFFICIAL_MOCK_URL");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let captured = captured_request
+            .lock()
+            .expect("captured responses request lock")
+            .clone()
+            .expect("captured responses request");
+        let input = captured["body"]["input"].as_array().expect("input array");
+        assert!(input[0].get("id").is_none());
+        assert_eq!(input[0]["content"][0]["type"], "input_text");
+        assert_eq!(input[0]["content"][0]["text"], "subagent plaintext reply");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn codex_v1_responses_official_mock_local_tool_round_trip_preserves_call_chain() {
+        let captured_request = Arc::new(Mutex::new(None));
+        let tool_output = json!([{
+            "type": "function_call",
+            "id": "fc_call_write",
+            "call_id": "call_write",
+            "name": "apply_patch",
+            "arguments": r#"{"patch":"local"}"#,
+            "status": "completed"
+        }]);
+        let (upstream_base_url, _upstream_task) =
+            spawn_codex_responses_mock_with_output(captured_request.clone(), tool_output).await;
+        let mock_official_url = format!("{upstream_base_url}/backend-api/codex/responses");
+        std::env::set_var("CC_SWITCH_TEST_CODEX_OFFICIAL_MOCK_URL", &mock_official_url);
+
+        let (server, db) = build_test_server();
+        save_codex_official_mock_router(&db, &upstream_base_url).await;
+
+        let first_body = json!({
+            "model": "gpt-5.6-luna",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "read file" }]
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_read",
+                    "output": "file content"
+                }
+            ]
+        });
+        let first_response = server
+            .build_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/responses")
+                    .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+                    .header(header::USER_AGENT, "codex/0.146.0-test")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(first_body.to_string()))
+                    .expect("first request"),
+            )
+            .await
+            .expect("first response");
+        assert_eq!(first_response.status(), StatusCode::OK);
+        let first_json = response_json(first_response).await;
+        assert_eq!(first_json["output"][0]["call_id"], "call_write");
+        assert_eq!(first_json["output"][0]["name"], "apply_patch");
+        assert_eq!(first_json["output"][0]["arguments"], r#"{"patch":"local"}"#);
+
+        let second_body = json!({
+            "model": "gpt-5.6-luna",
+            "input": [
+                {
+                    "type": "function_call",
+                    "id": "fc_call_write",
+                    "call_id": "call_write",
+                    "name": "apply_patch",
+                    "arguments": r#"{"patch":"local"}"#
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_write",
+                    "output": "done"
+                }
+            ]
+        });
+        let second_response = server
+            .build_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/responses")
+                    .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+                    .header(header::USER_AGENT, "codex/0.146.0-test")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(second_body.to_string()))
+                    .expect("second request"),
+            )
+            .await
+            .expect("second response");
+        std::env::remove_var("CC_SWITCH_TEST_CODEX_OFFICIAL_MOCK_URL");
+        assert_eq!(second_response.status(), StatusCode::OK);
+
+        let captured = captured_request
+            .lock()
+            .expect("captured responses request lock")
+            .clone()
+            .expect("captured responses request");
+        let input = captured["body"]["input"].as_array().expect("input array");
+        for item in input {
+            assert!(
+                item.get("id").is_none(),
+                "official mock must not receive tool ids: {item}"
+            );
+        }
+        assert_eq!(input[0]["call_id"], "call_write");
+        assert_eq!(input[0]["name"], "apply_patch");
+        assert_eq!(input[0]["arguments"], r#"{"patch":"local"}"#);
+        assert_eq!(input[1]["call_id"], "call_write");
+        assert_eq!(input[1]["output"], "done");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn codex_v1_responses_official_mock_preserves_real_agent_message_ciphertext() {
+        let captured_request = Arc::new(Mutex::new(None));
+        let (upstream_base_url, _upstream_task) =
+            spawn_codex_responses_mock(captured_request.clone()).await;
+        let mock_official_url = format!("{upstream_base_url}/backend-api/codex/responses");
+        std::env::set_var("CC_SWITCH_TEST_CODEX_OFFICIAL_MOCK_URL", &mock_official_url);
+
+        let (server, db) = build_test_server();
+        save_codex_official_mock_router(&db, &upstream_base_url).await;
+
+        let ciphertext = "AAAA".repeat(32);
+        let request_body = json!({
+            "model": "gpt-5.6-luna",
+            "input": [
+                {
+                    "type": "agent_message",
+                    "id": "amsg_019fc3fa-9b0a-7db1-9ca8-131d56d047ac",
+                    "role": "assistant",
+                    "content": [{
+                        "type": "encrypted_content",
+                        "encrypted_content": ciphertext
+                    }]
+                }
+            ]
+        });
+
+        let response = server
+            .build_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/responses")
+                    .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+                    .header(header::USER_AGENT, "codex/0.146.0-test")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(request_body.to_string()))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        std::env::remove_var("CC_SWITCH_TEST_CODEX_OFFICIAL_MOCK_URL");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let captured = captured_request
+            .lock()
+            .expect("captured responses request lock")
+            .clone()
+            .expect("captured responses request");
+        let input = captured["body"]["input"].as_array().expect("input array");
+        assert!(input[0].get("id").is_none());
+        assert_eq!(input[0]["content"][0]["type"], "encrypted_content");
+        assert_eq!(input[0]["content"][0]["encrypted_content"], ciphertext);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn codex_v1_responses_official_mock_502_preserves_upstream_status_and_allows_reconnect() {
+        let captured_requests = Arc::new(Mutex::new(Vec::new()));
+        let (upstream_base_url, _upstream_task) =
+            spawn_codex_responses_502_then_success_mock(captured_requests.clone()).await;
+        let mock_official_url = format!("{upstream_base_url}/backend-api/codex");
+        std::env::set_var("CC_SWITCH_TEST_CODEX_OFFICIAL_MOCK_URL", &mock_official_url);
+
+        let (server, db) = build_test_server();
+        save_codex_official_mock_router(&db, &upstream_base_url).await;
+
+        let request_body = json!({
+            "model": "gpt-5.6-luna",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "ping" }]
+                }
+            ]
+        });
+
+        let first_response = server
+            .build_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/responses")
+                    .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+                    .header(header::USER_AGENT, "codex/0.146.0-test")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(request_body.to_string()))
+                    .expect("first request"),
+            )
+            .await
+            .expect("first response");
+        assert_eq!(first_response.status(), StatusCode::BAD_GATEWAY);
+        let first_json = response_json(first_response).await;
+        assert_eq!(first_json["error"]["code"], "cc_switch_upstream_error");
+        assert_eq!(first_json["error"]["upstream_status"], 502);
+        assert!(first_json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("upstream_status: HTTP 502"));
+
+        let second_response = server
+            .build_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/responses")
+                    .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+                    .header(header::USER_AGENT, "codex/0.146.0-test")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(request_body.to_string()))
+                    .expect("second request"),
+            )
+            .await
+            .expect("second response");
+        std::env::remove_var("CC_SWITCH_TEST_CODEX_OFFICIAL_MOCK_URL");
+        assert_eq!(
+            second_response.status(),
+            StatusCode::OK,
+            "Codex reconnect after official 502 must not be killed by local policy"
+        );
+
+        let requests = captured_requests
+            .lock()
+            .expect("captured requests lock")
+            .clone();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0]["path"], "/backend-api/codex/responses");
+        assert_eq!(requests[1]["path"], "/backend-api/codex/responses");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn codex_v1_responses_third_party_mock_preserves_native_agent_message_ids() {
+        let captured_request = Arc::new(Mutex::new(None));
+        let (upstream_base_url, _upstream_task) =
+            spawn_codex_responses_mock(captured_request.clone()).await;
+
+        let (server, db) = build_test_server();
+        let mut responses_provider = Provider::with_id(
+            "responses-third".to_string(),
+            "Responses Third".to_string(),
+            json!({
+                "base_url": format!("{upstream_base_url}/backend-api/codex"),
+                "api_key": "sk-third"
+            }),
+            None,
+        );
+        responses_provider.meta = Some(crate::provider::ProviderMeta {
+            api_format: Some("openai_responses".to_string()),
+            ..Default::default()
+        });
+        db.save_provider("codex", &responses_provider)
+            .expect("save responses provider");
+        db.save_provider(
+            "codex",
+            &Provider::with_id(
+                "router".to_string(),
+                "Codex Router".to_string(),
+                json!({
+                    "codexRouting": {
+                        "enabled": true,
+                        "defaultRouteId": "responses",
+                        "routes": [
+                            {
+                                "id": "responses",
+                                "label": "Responses Third",
+                                "enabled": true,
+                                "targetProviderId": "responses-third",
+                                "match": { "models": ["k3"] },
+                                "upstream": { "apiFormat": "openai_responses" }
+                            }
+                        ]
+                    }
+                }),
+                None,
+            ),
+        )
+        .expect("save router provider");
+        let mut proxy_config = db
+            .get_proxy_config_for_app("codex")
+            .await
+            .expect("read codex proxy config");
+        proxy_config.enabled = true;
+        proxy_config.auto_failover_enabled = true;
+        db.update_proxy_config_for_app(proxy_config)
+            .await
+            .expect("enable codex proxy config");
+        db.add_to_failover_queue("codex", "router")
+            .expect("add router to failover queue");
+
+        let request_body = json!({
+            "model": "k3",
+            "input": [
+                {
+                    "type": "agent_message",
+                    "id": "amsg_019fc3fa-9b0a-7db1-9ca8-131d56d047ac",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "subagent done" }]
+                },
+                {
+                    "type": "message",
+                    "id": "resp_chatcmpl-2gyygAFeaDX2rFNtuG7mOhf9_msg",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "old turn" }]
+                }
+            ]
+        });
+
+        let response = server
+            .build_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/responses")
+                    .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+                    .header(header::USER_AGENT, "codex/0.146.0-test")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(request_body.to_string()))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let _ = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect third-party response");
+
+        let captured = captured_request
+            .lock()
+            .expect("captured responses request lock")
+            .clone()
+            .expect("captured responses request");
+        let input = captured["body"]["input"].as_array().expect("input array");
+        assert_eq!(input[0]["id"], "amsg_019fc3fa-9b0a-7db1-9ca8-131d56d047ac");
+        assert_eq!(
+            input[1]["id"],
+            "msg_resp_chatcmpl-2gyygAFeaDX2rFNtuG7mOhf9_msg"
+        );
+    }
+
     /// 启动一个只服务 OpenAI Chat Completions 的本地 mock upstream。
     async fn spawn_openai_chat_mock() -> (String, tokio::task::JoinHandle<()>) {
         spawn_openai_chat_mock_with_capture(Arc::new(Mutex::new(None))).await
@@ -1631,8 +2513,129 @@ base_url = "http://127.0.0.1:15721/v1"
     async fn spawn_codex_responses_mock(
         captured_request: Arc<Mutex<Option<Value>>>,
     ) -> (String, tokio::task::JoinHandle<()>) {
-        let app = Router::new().route(
-            "/backend-api/codex/responses",
+        spawn_codex_responses_mock_with_output(captured_request, json!([])).await
+    }
+
+    /// 启动 Codex /responses 官方链路 mock，允许自定义输出项。
+    async fn spawn_codex_responses_mock_with_output(
+        captured_request: Arc<Mutex<Option<Value>>>,
+        output: Value,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new().fallback(post(
+            move |uri: axum::http::Uri, headers: HeaderMap, body: Bytes| {
+                let captured_request = captured_request.clone();
+                let output = output.clone();
+                async move {
+                    let parsed_body =
+                        serde_json::from_slice::<Value>(&body).unwrap_or_else(|_| json!(null));
+                    *captured_request.lock().expect("capture responses request") = Some(json!({
+                        "path": uri.path(),
+                        "authorization": headers
+                            .get(header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or("")
+                            .to_string(),
+                        "body": parsed_body
+                    }));
+                    Json(json!({
+                        "id": "resp_mock",
+                        "object": "response",
+                        "created_at": 0,
+                        "status": "completed",
+                        "model": "gpt-5.6-luna",
+                        "output": output,
+                        "usage": {
+                            "input_tokens": 0,
+                            "output_tokens": 0,
+                            "total_tokens": 0
+                        }
+                    }))
+                }
+            },
+        ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind responses mock upstream");
+        let addr = listener.local_addr().expect("responses mock upstream addr");
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("responses mock upstream serve");
+        });
+        (format!("http://{addr}"), task)
+    }
+
+    /// 启动官方链路的 502→200 mock：第一次回上游 502，之后回成功，
+    /// 用于验证 Codex 在官方网络抖动后的重连不会被本地策略永久吃掉。
+    async fn spawn_codex_responses_502_then_success_mock(
+        captured_requests: Arc<Mutex<Vec<Value>>>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let app = Router::new().fallback(post(
+            move |uri: axum::http::Uri, headers: HeaderMap, body: Bytes| {
+                let captured_requests = captured_requests.clone();
+                let attempts = attempts.clone();
+                async move {
+                    let parsed_body =
+                        serde_json::from_slice::<Value>(&body).unwrap_or_else(|_| json!(null));
+                    captured_requests
+                        .lock()
+                        .expect("capture requests lock")
+                        .push(json!({
+                            "path": uri.path(),
+                            "authorization": headers
+                                .get(header::AUTHORIZATION)
+                                .and_then(|value| value.to_str().ok())
+                                .unwrap_or("")
+                                .to_string(),
+                            "body": parsed_body
+                        }));
+                    if attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                        return (
+                            StatusCode::BAD_GATEWAY,
+                            Json(json!({
+                                "error": {
+                                    "message": "upstream gateway timeout",
+                                    "type": "server_error"
+                                }
+                            })),
+                        )
+                            .into_response();
+                    }
+                    Json(json!({
+                        "id": "resp_mock",
+                        "object": "response",
+                        "created_at": 0,
+                        "status": "completed",
+                        "model": "gpt-5.6-luna",
+                        "output": [],
+                        "usage": {
+                            "input_tokens": 0,
+                            "output_tokens": 0,
+                            "total_tokens": 0
+                        }
+                    }))
+                    .into_response()
+                }
+            },
+        ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind 502 mock upstream");
+        let addr = listener.local_addr().expect("502 mock upstream addr");
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("502 mock upstream serve");
+        });
+        (format!("http://{addr}"), task)
+    }
+
+    /// 启动 Codex /responses 官方链路的 streaming mock，捕获出站 JSON 并回 SSE。
+    async fn spawn_codex_responses_sse_mock(
+        captured_request: Arc<Mutex<Option<Value>>>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new().fallback(
             post(
                 move |uri: axum::http::Uri, headers: HeaderMap, body: Bytes| {
                     let captured_request = captured_request.clone();
@@ -1649,31 +2652,29 @@ base_url = "http://127.0.0.1:15721/v1"
                                     .to_string(),
                                 "body": parsed_body
                             }));
-                        Json(json!({
-                            "id": "resp_mock",
-                            "object": "response",
-                            "created_at": 0,
-                            "status": "completed",
-                            "model": "gpt-5.6-luna",
-                            "output": [],
-                            "usage": {
-                                "input_tokens": 0,
-                                "output_tokens": 0,
-                                "total_tokens": 0
-                            }
-                        }))
+                        let sse = concat!(
+                            "event: response.created\n",
+                            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_mock\",\"object\":\"response\",\"status\":\"in_progress\",\"model\":\"gpt-5.6-luna\",\"output\":[]}}\n\n",
+                            "event: response.output_text.delta\n",
+                            "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_mock\",\"output_index\":0,\"delta\":\"pong\"}\n\n",
+                            "event: response.completed\n",
+                            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_mock\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"gpt-5.6-luna\",\"output\":[{\"type\":\"message\",\"id\":\"msg_mock\",\"status\":\"completed\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"pong\",\"annotations\":[]}]}],\"usage\":{\"input_tokens\":0,\"output_tokens\":1,\"total_tokens\":1}}}\n\n"
+                        );
+                        ([(header::CONTENT_TYPE, "text/event-stream")], sse)
                     }
                 },
             ),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("bind responses mock upstream");
-        let addr = listener.local_addr().expect("responses mock upstream addr");
+            .expect("bind responses sse mock upstream");
+        let addr = listener
+            .local_addr()
+            .expect("responses sse mock upstream addr");
         let task = tokio::spawn(async move {
             axum::serve(listener, app)
                 .await
-                .expect("responses mock upstream serve");
+                .expect("responses sse mock upstream serve");
         });
         (format!("http://{addr}"), task)
     }

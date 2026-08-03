@@ -6108,7 +6108,7 @@ fn should_normalize_codex_responses_passthrough_control_messages(
 fn is_chatgpt_codex_responses_upstream_url(url: &str) -> bool {
     #[cfg(test)]
     if let Ok(mock_url) = std::env::var("CC_SWITCH_TEST_CODEX_OFFICIAL_MOCK_URL") {
-        if url.trim_end_matches('/') == mock_url.trim_end_matches('/') {
+        if url.starts_with(mock_url.trim_end_matches('/')) {
             return true;
         }
     }
