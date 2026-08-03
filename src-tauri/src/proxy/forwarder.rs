@@ -5531,6 +5531,18 @@ fn codex_compaction_overflow_retry_requested(
         && is_codex_context_overflow_error(error)
 }
 
+/// 判断 Chat Completions 响应是否缺少可转换的 choices。
+///
+/// 上游 HTTP 200 但 `choices` 缺失或为空是瞬态上游异常（Kimi 偶有发生），
+/// 不是客户端请求格式问题。调用方把它映射为 502 可重试错误，让 Codex 客户端
+/// 的 502 重连机制重试这一回合，而不是用 422 卡死整轮对话。
+pub(crate) fn chat_response_choices_empty(body: &Value) -> bool {
+    match body.get("choices").and_then(Value::as_array) {
+        Some(choices) => choices.is_empty(),
+        None => true,
+    }
+}
+
 fn metadata_string_field(metadata: Option<&Value>, key: &str) -> Option<String> {
     metadata?
         .get(key)
@@ -9752,6 +9764,16 @@ mod tests {
             &v2_headers,
             &server_error,
         ));
+    }
+
+    #[test]
+    fn chat_response_choices_empty_detects_missing_and_empty_choices() {
+        // Kimi 曾对正常请求返回 HTTP 200 + 空 choices；该形态必须被识别为
+        // 瞬态上游异常（映射 502 重试），否则转换层会以 422 卡死整轮对话。
+        assert!(chat_response_choices_empty(&json!({})));
+        assert!(chat_response_choices_empty(&json!({ "choices": [] })));
+        assert!(chat_response_choices_empty(&json!({ "choices": null })));
+        assert!(!chat_response_choices_empty(&json!({ "choices": [{}] })));
     }
 
     #[test]

@@ -3159,6 +3159,18 @@ async fn handle_codex_chat_to_responses_transform(
                 ));
             }
         };
+        // 上游 200 但 choices 为空是瞬态上游异常（Kimi 偶有发生），不是请求
+        // 格式问题。按 502 可重试错误返回，Codex 客户端的 502 重连机制会自动
+        // 重试这一回合；422 只会让整轮对话卡死。
+        if super::forwarder::chat_response_choices_empty(&chat_response) {
+            log::warn!("[Codex] 上游 Chat 返回 200 但 choices 为空，按 502 可重试异常处理");
+            return Err(ProxyError::UpstreamError {
+                status: 502,
+                body: Some(
+                    "upstream chat response returned HTTP 200 with empty choices".to_string(),
+                ),
+            });
+        }
         let responses_response = transform_codex_chat::chat_completion_to_response_with_context(
             chat_response,
             &tool_context,
@@ -3357,6 +3369,16 @@ async fn handle_codex_chat_to_responses_transform(
             ));
         }
     };
+    // 上游 200 但 choices 为空是瞬态上游异常（Kimi 偶有发生），不是请求
+    // 格式问题。按 502 可重试错误返回，Codex 客户端的 502 重连机制会自动
+    // 重试这一回合；422 只会让整轮对话卡死。
+    if super::forwarder::chat_response_choices_empty(&chat_response) {
+        log::warn!("[Codex] 上游 Chat 返回 200 但 choices 为空，按 502 可重试异常处理");
+        return Err(ProxyError::UpstreamError {
+            status: 502,
+            body: Some("upstream chat response returned HTTP 200 with empty choices".to_string()),
+        });
+    }
     let responses_response = transform_codex_chat::chat_completion_to_response_with_context(
         chat_response,
         &tool_context,
