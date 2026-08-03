@@ -1,5 +1,23 @@
 # CC Switch Repository Memory
 
+## 2026-08-03 上游 #6078 Windows 集成测试不得写真实 Claude Desktop 配置
+
+- 上游 `farion1231/cc-switch#6077/#6078` 的根因成立：共享集成测试 helper 只覆盖
+  `CC_SWITCH_TEST_HOME`、`HOME`、`USERPROFILE`，而 Windows Claude Desktop 路径直接
+  读取 `LOCALAPPDATA`；因此 `profile_roundtrip` 的 `https://desktop.test` / `dk-1|dk-2`
+  fixture 会把真实两份 `deploymentMode` 改为 `3p` 并写入固定 3P profile。这个边界与
+  CCSwitchMulti `v3.19.1-2` 已做的临时监听端口隔离不同，不是重复修复。
+- 接受上游核心改动时保留原作者归属；CCSwitchMulti 的完善边界是把测试根目录改成
+  `cc-switch-test-home-<pid>`，防止并行测试进程互删同一固定目录，并让
+  `reset_test_fs()` 同时删除测试根内的 `AppData`，避免同一进程中的测试继承旧 3P
+  profile。回归必须分别保护 `LOCALAPPDATA` 投影、进程唯一根和 AppData reset。
+- Windows 实测：旧实现把外部沙箱写成与本机真实污染文件相同的 SHA-256；接受核心
+  改动后 `profile_roundtrip` 8/8 且真实四个配置文件前后哈希不变。反向移除
+  `LOCALAPPDATA` 重定向时安全回归会稳定失败，证明测试能捕获原 bug。
+- 本机真实 Claude Desktop 配置在 `2026-07-31 21:54` 已存在该测试 fixture 污染。
+  源码合入不等于用户配置已恢复；恢复前必须先备份两份 deployment config、`_meta.json`
+  和固定 profile，再按 official restore 语义写回 `1p`、清理固定 fixture profile。
+
 ## 2026-08-03 上游 #6069 GPT token 参数兼容适配
 
 - 上游 `farion1231/cc-switch#6069` 修复 Claude Code 经 OpenAI Chat / Responses
