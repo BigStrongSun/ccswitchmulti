@@ -115,7 +115,8 @@ jobs:
         timeout-minutes: 60
         run: |
           set -euxo pipefail
-          pnpm tauri build --target universal-apple-darwin
+          printf '{"bundle":{"createUpdaterArtifacts":true}}' > "$RUNNER_TEMP/updater-config.json"
+          pnpm tauri build --target universal-apple-darwin --config "$RUNNER_TEMP/updater-config.json"
 
       - name: Stage macOS release assets
         shell: bash

@@ -246,7 +246,8 @@ pub(crate) fn normalize_codex_responses_passthrough_request_for_transport(
 /// 参数:
 /// - `request_body`: Codex Responses 请求体。
 ///   返回:
-/// - function_call arguments 已规整、其余结构保持不变的请求体。
+/// - function_call arguments 已规整、历史 message id 已补 `msg_` 前缀、
+///   其余结构保持不变的请求体。
 ///   副作用:
 /// - 无。函数只转换传入 JSON 值。
 ///   边界:
