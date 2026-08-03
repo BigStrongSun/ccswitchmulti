@@ -2794,6 +2794,12 @@
 - 公开 OpenAI Codex 源码/配置确认 `stream_max_retries` 是 dropped stream reconnect 次数，Responses transport 支持 WebSocket 并在不支持时回退 HTTP。当前本地 GET `/responses` 有意返回 HTTP 426，`supports_websockets=false` 保持不变：旧 relay 曾出现 upstream 101 后首帧前 close，尚无真实官方端到端证明时不能翻开该开关。
 - TDD 证据：先验证缺少 native wrapper / reconnect-factory selector 的编译失败，再通过 `native_responses_*`（created 去重、comment keepalive、output_item.done 禁止重放）、`streaming_retry` 20 tests、handler 与 forwarder selector tests。后续必须在真实官方账户的 WebSocket handshake、首帧、断开、HTTP fallback 全链路通过后，才能新立任务启用 Responses WS relay。
 
+## 2026-08-04 session 019fbd59 的 encrypted/502 根因取证
+
+- 该 session 全程命中 `codex-multirouter::route::router-codex-official`，上游固定为 `https://chatgpt.com/backend-api/codex/responses`、`CodexOAuth`、native Responses，无第三方格式转换。历史中存在官方 `reasoning.encrypted_content`，但这是正常官方 replay 数据；不能以字段存在本身判断 `invalid_encrypted_content`。
+- 证据链：早期 request 约 423 KB；同一 session 后续逐步增长到 7.8 MB、12.9 MB、16.8 MB。16.8 MB 请求在 2026-08-03 13:40 首次发送 119.5 s 后 `upstream_send_error=error_sending_request`，重试在 8.2 s 后也失败；再下一次相同约 16.8 MB 请求在 119.9 s 后收到 HTTP 200。此前多次包含 encrypted history 的请求也均返回 HTTP 200。
+- 结论：现场 502 是本地到官方 backend 的大 body transport/in-flight timeout 不稳定，而非官方服务拒绝 encrypted 内容；当前 v3.19.1-4 的“首个语义输出前 SSE 重连”不能覆盖这个发送阶段。后续根修必须按请求体大小和 in-flight 状态处理：对可能已发送的超大官方请求保留/等待未来结果并停止客户端重复提交，不能把 encrypted reasoning 删除或把 ForwardFailed 盲目重放。日志只记录大小、时长、状态与类别，不记录 encrypted 内容或认证值。
+
 ## 2026-08-03 Codex 第三方 Reasoning 可移植桥设计
 
 - 用户确认的硬约束：第三方 reasoning 必须实时显示；prompt、response 和 reasoning 不得复制到 CCSM 数据库或旁路文件；恢复内置 OpenAI 后 CCSM 完全退出请求链路，Codex 直接走官方 Provider 与 WebSocket；以后仍可重新启用 MultiRouter。
