@@ -2661,7 +2661,12 @@ impl RequestForwarder {
 
             // Codex OAuth 特殊处理：从 CodexOAuthManager 获取真实 access_token
             if auth.strategy == AuthStrategy::CodexOAuth {
-                if let Some(app_handle) = &self.app_handle {
+                #[cfg(test)]
+                if std::env::var("CC_SWITCH_TEST_CODEX_OFFICIAL_MOCK_URL").is_ok() {
+                    auth = AuthInfo::new("mock-token".to_string(), AuthStrategy::CodexOAuth);
+                    is_codex_oauth = true;
+                    log::debug!("[CodexOAuth] test mock token injected");
+                } else if let Some(app_handle) = &self.app_handle {
                     let codex_state = app_handle.state::<CodexOAuthState>();
                     let codex_auth: tokio::sync::RwLockReadGuard<'_, CodexOAuthManager> =
                         codex_state.0.read().await;
@@ -6101,6 +6106,13 @@ fn should_normalize_codex_responses_passthrough_control_messages(
 ///   副作用:
 /// - 无。解析失败时保守返回 `false`，避免影响普通 OpenAI/兼容厂商。
 fn is_chatgpt_codex_responses_upstream_url(url: &str) -> bool {
+    #[cfg(test)]
+    if let Ok(mock_url) = std::env::var("CC_SWITCH_TEST_CODEX_OFFICIAL_MOCK_URL") {
+        if url.trim_end_matches('/') == mock_url.trim_end_matches('/') {
+            return true;
+        }
+    }
+
     let Ok(uri) = url.parse::<http::Uri>() else {
         return false;
     };

@@ -602,7 +602,13 @@ fn should_treat_target_as_managed_codex_oauth(
 /// 这些字段保留在持久 provider 里不会被改写；这里只清理 request-local effective
 /// provider，避免后续诊断或兼容逻辑再次把 `codex-official` 当成第三方中转。
 fn sanitize_materialized_managed_codex_oauth_settings(settings: &mut Map<String, JsonValue>) {
+    #[cfg(test)]
+    let keep_mock_base_url = std::env::var("CC_SWITCH_TEST_CODEX_OFFICIAL_MOCK_URL").is_ok();
     for key in ["base_url", "baseURL", "baseUrl", "apiKey", "api_key"] {
+        #[cfg(test)]
+        if keep_mock_base_url && key == "base_url" {
+            continue;
+        }
         settings.remove(key);
     }
 }
@@ -2449,6 +2455,17 @@ impl ProviderAdapter for CodexAdapter {
     }
 
     fn extract_base_url(&self, provider: &Provider) -> Result<String, ProxyError> {
+        #[cfg(test)]
+        if std::env::var("CC_SWITCH_TEST_CODEX_OFFICIAL_MOCK_URL").is_ok() {
+            if let Some(url) = provider
+                .settings_config
+                .get("base_url")
+                .and_then(|v| v.as_str())
+            {
+                return Ok(url.trim_end_matches('/').to_string());
+            }
+        }
+
         // Codex v2 路由到 ChatGPT OAuth 时仍然固定使用 CodexAdapter；
         // 这里补齐托管账号 provider 的 base_url 语义，避免走普通 OpenAI 兼容配置解析。
         if provider_is_managed_codex_oauth(provider) || is_codex_official_provider(provider) {
