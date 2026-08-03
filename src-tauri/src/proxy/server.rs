@@ -2527,6 +2527,92 @@ base_url = "http://127.0.0.1:15721/v1"
 
     #[tokio::test]
     #[serial]
+    async fn codex_v1_compaction_chat_mock_overflow_trims_history_and_retries() {
+        // 端到端验证 Kimi 256K 溢出修复：v2 compaction 首次 401
+        // "supports only 256K context" 后，代理必须用裁剪后的历史对同一供应商
+        // 重试，而不是直接把 401 抛回客户端。第二次出站请求的 messages 必须
+        // 少于第一次，且保留压缩指令。
+        let captured_requests = Arc::new(Mutex::new(Vec::new()));
+        let (chat_base_url, _chat_task) =
+            spawn_chat_overflow_then_success_mock(captured_requests.clone()).await;
+        let (server, db) = build_test_server();
+        save_codex_chat_mock_router(&db, &chat_base_url).await;
+
+        let request_body = json!({
+            "model": "k3",
+            "input": [
+                { "type": "compaction_trigger" },
+                { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "old question" }] },
+                { "type": "function_call", "call_id": "call_1", "name": "read", "arguments": "{}" },
+                { "type": "function_call_output", "call_id": "call_1", "output": "old result" },
+                { "type": "message", "role": "assistant", "content": [{ "type": "output_text", "text": "mid answer" }] },
+                { "type": "reasoning", "summary": [{ "type": "summary_text", "text": "thinking" }] },
+                { "type": "function_call", "call_id": "call_2", "name": "write", "arguments": "{}" },
+                { "type": "function_call_output", "call_id": "call_2", "output": "new result" },
+                { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "compact now" }] }
+            ]
+        });
+
+        let response = server
+            .build_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/responses")
+                    .header(header::AUTHORIZATION, "Bearer PROXY_MANAGED")
+                    .header(header::USER_AGENT, "codex/0.146.0-test")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(
+                        "x-codex-turn-metadata",
+                        r#"{"request_kind":"compaction","compaction":{"trigger":"auto","implementation":"responses_compaction_v2","phase":"pre_turn"}}"#,
+                    )
+                    .body(Body::from(request_body.to_string()))
+                    .expect("compaction request"),
+            )
+            .await
+            .expect("compaction response");
+
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "overflowed v2 compaction must be retried with trimmed history, not surfaced as 401"
+        );
+
+        let requests = captured_requests
+            .lock()
+            .expect("captured requests lock")
+            .clone();
+        assert_eq!(
+            requests.len(),
+            2,
+            "expected original attempt + trimmed retry"
+        );
+        let first_messages = requests[0]["body"]["messages"]
+            .as_array()
+            .expect("first upstream messages");
+        let retry_messages = requests[1]["body"]["messages"]
+            .as_array()
+            .expect("retry upstream messages");
+        assert!(
+            retry_messages.len() < first_messages.len(),
+            "trimmed retry must carry fewer messages: first={} retry={}",
+            first_messages.len(),
+            retry_messages.len()
+        );
+
+        let retry_text = requests[1]["body"].to_string();
+        assert!(
+            retry_text.contains("compact now"),
+            "compaction instruction must survive trimming: {retry_text}"
+        );
+        assert!(
+            !retry_text.contains("old question"),
+            "oldest history must be trimmed from the retry: {retry_text}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn codex_v1_responses_anthropic_mock_round_trip_uses_msg_prefix() {
         let anthropic_captured = Arc::new(Mutex::new(None));
         let (anthropic_base_url, _anthropic_task) =
@@ -3078,6 +3164,66 @@ base_url = "http://127.0.0.1:15721/v1"
             axum::serve(listener, app)
                 .await
                 .expect("mock upstream serve");
+        });
+        (format!("http://{addr}/v1"), task)
+    }
+
+    /// 启动 Chat 上游 mock：第一次回 401 Kimi 上下文溢出，之后回正常 chat completion，
+    /// 并捕获每次出站请求体供断言裁剪行为。
+    async fn spawn_chat_overflow_then_success_mock(
+        captured_requests: Arc<Mutex<Vec<Value>>>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move |Json(body): Json<Value>| {
+                let captured_requests = captured_requests.clone();
+                let attempts = attempts.clone();
+                async move {
+                    captured_requests
+                        .lock()
+                        .expect("capture requests lock")
+                        .push(json!({ "body": body }));
+                    if attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                        return (
+                            StatusCode::UNAUTHORIZED,
+                            Json(json!({
+                                "error": {
+                                    "message": "k3-256k supports only 256K context.",
+                                    "type": "authentication_error"
+                                }
+                            })),
+                        )
+                            .into_response();
+                    }
+                    Json(json!({
+                        "id": "chatcmpl_compact",
+                        "object": "chat.completion",
+                        "created": 0,
+                        "model": "k3",
+                        "choices": [{
+                            "index": 0,
+                            "message": { "role": "assistant", "content": "compact summary" },
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {
+                            "prompt_tokens": 1,
+                            "completion_tokens": 1,
+                            "total_tokens": 2
+                        }
+                    }))
+                    .into_response()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind overflow mock upstream");
+        let addr = listener.local_addr().expect("overflow mock upstream addr");
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("overflow mock upstream serve");
         });
         (format!("http://{addr}/v1"), task)
     }

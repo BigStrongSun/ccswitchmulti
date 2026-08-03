@@ -682,6 +682,57 @@ impl RequestForwarder {
         })
     }
 
+    /// 整流/裁剪重试成功后的统一记账：熔断与 half-open 结果、当前供应商、
+    /// 成功统计与 failover 切换。media 降级与 compaction 裁剪重试共用。
+    async fn record_rectifier_retry_success(
+        &self,
+        attempt_provider_id: &str,
+        persistent_provider_id: &str,
+        persistent_provider_name: &str,
+        app_type_str: &str,
+        used_half_open_permit: bool,
+    ) {
+        self.record_success_result(
+            attempt_provider_id,
+            persistent_provider_id,
+            app_type_str,
+            used_half_open_permit,
+        )
+        .await;
+
+        {
+            let mut current_providers = self.current_providers.write().await;
+            current_providers.insert(
+                app_type_str.to_string(),
+                (
+                    persistent_provider_id.to_string(),
+                    persistent_provider_name.to_string(),
+                ),
+            );
+        }
+
+        let mut status = self.status.write().await;
+        status.success_requests += 1;
+        status.last_error = None;
+        let should_switch = self.current_provider_id_at_start.as_str() != persistent_provider_id;
+        if should_switch {
+            status.failover_count += 1;
+            let fm = self.failover_manager.clone();
+            let ah = self.app_handle.clone();
+            let pid = persistent_provider_id.to_string();
+            let pname = persistent_provider_name.to_string();
+            let at = app_type_str.to_string();
+
+            tokio::spawn(async move {
+                let _ = fm.try_switch(ah.as_ref(), &at, &pid, &pname).await;
+            });
+        }
+        if status.total_requests > 0 {
+            status.success_rate =
+                (status.success_requests as f32 / status.total_requests as f32) * 100.0;
+        }
+    }
+
     /// 转发请求（带故障转移）
     ///
     /// 这是 thin wrapper：在客户端请求维度记一次 `total_requests` / 调整
@@ -1237,53 +1288,14 @@ impl RequestForwarder {
                                     outbound_model,
                                 )) => {
                                     log::info!("[{app_type_str}] [Media] Image retry succeeded");
-                                    self.record_success_result(
+                                    self.record_rectifier_retry_success(
                                         &attempt_provider_id,
                                         &persistent_provider_id,
+                                        &persistent_provider_name,
                                         app_type_str,
                                         used_half_open_permit,
                                     )
                                     .await;
-
-                                    {
-                                        let mut current_providers =
-                                            self.current_providers.write().await;
-                                        current_providers.insert(
-                                            app_type_str.to_string(),
-                                            (
-                                                persistent_provider_id.clone(),
-                                                persistent_provider_name.clone(),
-                                            ),
-                                        );
-                                    }
-
-                                    {
-                                        let mut status = self.status.write().await;
-                                        status.success_requests += 1;
-                                        status.last_error = None;
-                                        let should_switch =
-                                            self.current_provider_id_at_start.as_str()
-                                                != persistent_provider_id.as_str();
-                                        if should_switch {
-                                            status.failover_count += 1;
-                                            let fm = self.failover_manager.clone();
-                                            let ah = self.app_handle.clone();
-                                            let pid = persistent_provider_id.clone();
-                                            let pname = persistent_provider_name.clone();
-                                            let at = app_type_str.to_string();
-
-                                            tokio::spawn(async move {
-                                                let _ = fm
-                                                    .try_switch(ah.as_ref(), &at, &pid, &pname)
-                                                    .await;
-                                            });
-                                        }
-                                        if status.total_requests > 0 {
-                                            status.success_rate = (status.success_requests as f32
-                                                / status.total_requests as f32)
-                                                * 100.0;
-                                        }
-                                    }
 
                                     return Ok(ForwardResult {
                                         response,
@@ -1315,6 +1327,117 @@ impl RequestForwarder {
                                 }
                             }
                         }
+                    }
+
+                    // v2 compaction 上下文溢出重试：压缩请求携带整段回放历史，跨路由
+                    // 会话的历史按官方大窗口增长，切到 256K 级第三方模型（如 Kimi
+                    // k3-256k）时整请求被拒。压缩是摘要语义，确定性裁掉最旧历史
+                    // 是安全降级，优于让压缩流程整体卡死。两轮 1/2 → 1/4 阶梯裁剪。
+                    if codex_compaction_overflow_retry_requested(
+                        app_type,
+                        endpoint,
+                        &provider_body,
+                        &headers,
+                        &e,
+                    ) {
+                        let mut trim_failure = None;
+                        for round in 1..=2u8 {
+                            let (keep_num, keep_den) =
+                                if round == 1 { (1usize, 2usize) } else { (1, 4) };
+                            let mut trimmed_body = provider_body.clone();
+                            let stats = super::providers::openai_compat::trim_codex_compaction_input_for_context_retry(
+                                &mut trimmed_body,
+                                keep_num,
+                                keep_den,
+                            );
+                            if stats.removed_items == 0 {
+                                break;
+                            }
+                            let model = trimmed_body
+                                .get("model")
+                                .and_then(Value::as_str)
+                                .unwrap_or("");
+                            log::info!(
+                                "[{app_type_str}] [Compaction] Upstream rejected oversized v2 compaction; retrying provider={} model={} with {} oldest history item(s) trimmed ({} remain, round {round})",
+                                provider.id,
+                                model,
+                                stats.removed_items,
+                                stats.remaining_items,
+                            );
+
+                            match self
+                                .forward(
+                                    app_type,
+                                    &method,
+                                    provider,
+                                    endpoint,
+                                    &trimmed_body,
+                                    &headers,
+                                    &extensions,
+                                    adapter.as_ref(),
+                                )
+                                .await
+                            {
+                                Ok((
+                                    response,
+                                    claude_api_format,
+                                    routed_provider,
+                                    outbound_model,
+                                )) => {
+                                    log::info!(
+                                        "[{app_type_str}] [Compaction] Trimmed retry succeeded"
+                                    );
+                                    self.record_rectifier_retry_success(
+                                        &attempt_provider_id,
+                                        &persistent_provider_id,
+                                        &persistent_provider_name,
+                                        app_type_str,
+                                        used_half_open_permit,
+                                    )
+                                    .await;
+
+                                    return Ok(ForwardResult {
+                                        response,
+                                        provider: routed_provider,
+                                        claude_api_format,
+                                        outbound_model,
+                                        connection_guard: None,
+                                    });
+                                }
+                                Err(retry_err) => {
+                                    if round < 2 && is_codex_context_overflow_error(&retry_err) {
+                                        log::warn!(
+                                            "[{app_type_str}] [Compaction] Trimmed retry still overflows, trimming further: {retry_err}"
+                                        );
+                                        continue;
+                                    }
+                                    trim_failure = Some(retry_err);
+                                    break;
+                                }
+                            }
+                        }
+
+                        if let Some(retry_err) = trim_failure {
+                            log::warn!(
+                                "[{app_type_str}] [Compaction] Trimmed retry still failed: {retry_err}"
+                            );
+                            if let Some(err) = self
+                                .handle_rectifier_retry_failure(
+                                    retry_err,
+                                    provider,
+                                    app_type_str,
+                                    used_half_open_permit,
+                                    "compaction 裁剪",
+                                    &mut last_error,
+                                    &mut last_provider,
+                                )
+                                .await
+                            {
+                                return Err(err);
+                            }
+                            continue;
+                        }
+                        // 没有可裁剪的历史：落入常规错误处理。
                     }
 
                     if is_anthropic_provider {
@@ -5355,6 +5478,57 @@ pub(crate) fn codex_request_is_v2_compaction(
     !super::providers::is_codex_remote_compact_endpoint(endpoint)
         && summary.compaction_implementation.is_none()
         && summary.compaction_trigger.is_some()
+}
+
+/// 判断上游错误是否表示请求超出模型上下文窗口。
+///
+/// 各上游的溢出信号不统一：OpenAI 兼容端点通常是 400 + context_length_exceeded；
+/// Kimi For Coding 上下文溢出时返回 401 + "k3-256k supports only 256K context."
+/// （不是凭据错误，凭据错误不含 context 字样）。仅在 v2 compaction 裁剪重试
+/// 场景使用，误判代价只是多一次徒劳重试，不会改动正常请求。
+fn is_codex_context_overflow_error(error: &ProxyError) -> bool {
+    let ProxyError::UpstreamError { status, body } = error else {
+        return false;
+    };
+    if !matches!(*status, 400 | 401 | 413 | 422) {
+        return false;
+    }
+    let Some(body) = body else {
+        return false;
+    };
+    let body = body.to_ascii_lowercase();
+    const OVERFLOW_MARKERS: &[&str] = &[
+        "context_length_exceeded",
+        "maximum context length",
+        "context window",
+        "prompt is too long",
+        "input is too long",
+        "request_too_large",
+        "too many tokens",
+        "reduce the length",
+        "exceeds the context",
+    ];
+    if OVERFLOW_MARKERS.iter().any(|marker| body.contains(marker)) {
+        return true;
+    }
+    // Kimi For Coding：上下文溢出时返回 401 "k3-256k supports only 256K context."
+    body.contains("context") && body.contains("supports only")
+}
+
+/// 判断是否应对溢出失败的 v2 compaction 请求执行裁剪重试。
+///
+/// 只有 v2 compaction 会把整段历史放进单个请求；裁剪最旧历史对压缩语义是
+/// 安全降级（摘要不再覆盖被裁掉的早期历史），优于整请求失败。turn 请求和
+/// legacy /responses/compact 绝不进入裁剪路径。
+fn codex_compaction_overflow_retry_requested(
+    app_type: &AppType,
+    endpoint: &str,
+    body: &Value,
+    headers: &http::HeaderMap,
+    error: &ProxyError,
+) -> bool {
+    codex_request_is_v2_compaction(app_type, endpoint, body, headers)
+        && is_codex_context_overflow_error(error)
 }
 
 fn metadata_string_field(metadata: Option<&Value>, key: &str) -> Option<String> {
@@ -9484,6 +9658,99 @@ mod tests {
             "/v1/responses",
             &json!({"input":[{"type":"compaction_trigger"}]}),
             &legacy_v2_headers,
+        ));
+    }
+
+    #[test]
+    fn codex_context_overflow_error_matches_kimi_401_quirk() {
+        // Kimi For Coding 上下文溢出返回 401 + "supports only 256K context"，
+        // 不是凭据错误；必须被识别为可裁剪重试的溢出。
+        let err = ProxyError::UpstreamError {
+            status: 401,
+            body: Some("k3-256k supports only 256K context.".to_string()),
+        };
+        assert!(is_codex_context_overflow_error(&err));
+    }
+
+    #[test]
+    fn codex_context_overflow_error_rejects_real_auth_failure() {
+        // 同样是 401，凭据错误没有上下文溢出语义，不能触发裁剪重试。
+        let err = ProxyError::UpstreamError {
+            status: 401,
+            body: Some("invalid api key provided".to_string()),
+        };
+        assert!(!is_codex_context_overflow_error(&err));
+    }
+
+    #[test]
+    fn codex_context_overflow_error_matches_openai_and_anthropic_shapes() {
+        let openai = ProxyError::UpstreamError {
+            status: 400,
+            body: Some(
+                "This model's maximum context length is 256000 tokens. context_length_exceeded"
+                    .to_string(),
+            ),
+        };
+        assert!(is_codex_context_overflow_error(&openai));
+
+        let anthropic = ProxyError::UpstreamError {
+            status: 400,
+            body: Some("prompt is too long: 300000 tokens > 200000 maximum".to_string()),
+        };
+        assert!(is_codex_context_overflow_error(&anthropic));
+    }
+
+    #[test]
+    fn codex_context_overflow_error_ignores_server_errors() {
+        let err = ProxyError::UpstreamError {
+            status: 500,
+            body: Some("internal error mentioning context window".to_string()),
+        };
+        assert!(!is_codex_context_overflow_error(&err));
+    }
+
+    #[test]
+    fn codex_compaction_overflow_retry_only_for_v2_compaction_overflow() {
+        let mut v2_headers = HeaderMap::new();
+        v2_headers.insert(
+            "x-codex-turn-metadata",
+            HeaderValue::from_static(
+                r#"{"request_kind":"compaction","compaction":{"trigger":"auto","implementation":"responses_compaction_v2","phase":"pre_turn"}}"#,
+            ),
+        );
+        let compaction_body = json!({"input":[{"type":"compaction_trigger"}]});
+        let overflow = ProxyError::UpstreamError {
+            status: 401,
+            body: Some("k3-256k supports only 256K context.".to_string()),
+        };
+        assert!(codex_compaction_overflow_retry_requested(
+            &AppType::Codex,
+            "/v1/responses",
+            &compaction_body,
+            &v2_headers,
+            &overflow,
+        ));
+
+        // turn 请求绝不裁剪：即使溢出也走常规故障转移。
+        assert!(!codex_compaction_overflow_retry_requested(
+            &AppType::Codex,
+            "/v1/responses",
+            &json!({"input":[{"type":"message","role":"user"}]}),
+            &HeaderMap::new(),
+            &overflow,
+        ));
+
+        // v2 compaction 遇到非溢出错误（如 502）不触发裁剪。
+        let server_error = ProxyError::UpstreamError {
+            status: 502,
+            body: Some("bad gateway".to_string()),
+        };
+        assert!(!codex_compaction_overflow_retry_requested(
+            &AppType::Codex,
+            "/v1/responses",
+            &compaction_body,
+            &v2_headers,
+            &server_error,
         ));
     }
 
