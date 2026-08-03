@@ -1,6 +1,6 @@
 # Codex 第三方 Reasoning 可移植桥设计
 
-日期：2026-08-03  
+日期：2026-08-03
 状态：设计已确认，等待书面评审后进入测试驱动实现
 
 ## 问题
@@ -178,4 +178,3 @@ reasoning.summary[].summary_text，content=[]
 - 原地把所有历史永久迁成官方格式：破坏重新启用MultiRouter的可逆性。
 - 把reasoning降级为普通assistant/commentary消息：污染对话语义。
 - 伪造OpenAI encrypted reasoning：无法验证且存在安全风险。
-
