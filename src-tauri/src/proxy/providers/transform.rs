@@ -53,12 +53,22 @@ pub(crate) fn strip_leading_anthropic_billing_header(text: &str) -> &str {
     }
 }
 
-/// Detect OpenAI o-series reasoning models (o1, o3, o4-mini, etc.)
-/// These models require `max_completion_tokens` instead of `max_tokens`.
+/// Detect OpenAI o-series reasoning models (o1, o3, o4-mini, etc.).
 pub fn is_openai_o_series(model: &str) -> bool {
     model.len() > 1
         && model.starts_with('o')
         && model.as_bytes().get(1).is_some_and(|b| b.is_ascii_digit())
+}
+
+/// Detect OpenAI model families that require `max_completion_tokens` instead
+/// of the legacy `max_tokens` Chat Completions parameter.
+pub fn requires_max_completion_tokens(model: &str) -> bool {
+    let normalized = model.to_lowercase();
+    is_openai_o_series(&normalized)
+        || normalized
+            .strip_prefix("gpt-")
+            .and_then(|rest| rest.chars().next())
+            .is_some_and(|c| c.is_ascii_digit() && c >= '5')
 }
 
 /// Detect Responses-compatible models that support reasoning effort.
@@ -70,11 +80,7 @@ pub fn is_openai_o_series(model: &str) -> bool {
 ///   model; retain the previous `grok-build-*` family for saved providers.
 pub fn supports_reasoning_effort(model: &str) -> bool {
     let normalized = model.to_lowercase();
-    is_openai_o_series(&normalized)
-        || normalized
-            .strip_prefix("gpt-")
-            .and_then(|rest| rest.chars().next())
-            .is_some_and(|c| c.is_ascii_digit() && c >= '5')
+    requires_max_completion_tokens(&normalized)
         || normalized == "grok-4.5"
         || normalized.starts_with("grok-4.5-")
         || normalized.starts_with("grok-build-")
@@ -183,10 +189,10 @@ pub fn anthropic_to_openai_with_reasoning_content(
     normalize_openai_system_messages(&mut messages);
     result["messages"] = json!(messages);
 
-    // 转换参数 — o-series 模型需要 max_completion_tokens
+    // 转换参数 — o-series 和 GPT-5+ 模型需要 max_completion_tokens
     let model = body.get("model").and_then(|m| m.as_str()).unwrap_or("");
     if let Some(v) = body.get("max_tokens") {
-        if is_openai_o_series(model) {
+        if requires_max_completion_tokens(model) {
             result["max_completion_tokens"] = v.clone();
         } else {
             result["max_tokens"] = v.clone();
@@ -1934,6 +1940,27 @@ mod tests {
             assert_eq!(
                 result["max_completion_tokens"], 4096,
                 "{model} should use max_completion_tokens"
+            );
+        }
+    }
+
+    #[test]
+    fn test_anthropic_to_openai_gpt5_uses_max_completion_tokens() {
+        for model in &["gpt-5", "gpt-5.4", "gpt-5-mini", "gpt-5-codex"] {
+            let input = json!({
+                "model": model,
+                "max_tokens": 4096,
+                "messages": [{"role": "user", "content": "Hello"}]
+            });
+
+            let result = anthropic_to_openai(input).unwrap();
+            assert!(
+                result.get("max_tokens").is_none(),
+                "{model} must not receive legacy max_tokens"
+            );
+            assert_eq!(
+                result["max_completion_tokens"], 4096,
+                "{model} must receive max_completion_tokens"
             );
         }
     }

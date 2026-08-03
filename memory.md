@@ -1,5 +1,39 @@
 # CC Switch Repository Memory
 
+## 2026-08-03 上游 #6069 GPT token 参数兼容适配
+
+- 上游 `farion1231/cc-switch#6069` 修复 Claude Code 经 OpenAI Chat / Responses
+  协议调用 GPT 时的两个边界：GPT-5+ 必须使用 `max_completion_tokens`，Claude Code
+  探测用的 `max_tokens=1` 转 Responses 后必须提升到 OpenAI 接受的
+  `max_output_tokens>=16`。
+- CCSwitchMulti 不能原样复制上游把 `supports_reasoning_effort()` 完全委托给 OpenAI
+  token 参数判定的实现，因为本地还支持 `grok-4.5*` / `grok-build-*` reasoning。
+  正确边界是独立的 `requires_max_completion_tokens()` 只判断 o-series 和 GPT-5+，
+  `supports_reasoning_effort()` 再在此基础上追加 Grok 家族。
+- Responses 转换仅对整数 token 值做下限 16 钳制；正常大值不变，非整数异常输入保持
+  原透传语义。回归测试必须同时覆盖 GPT-5 Chat 参数、1/15/16/1024 边界、非整数
+  透传和 Grok reasoning 保留。
+- #6069 初稿只修 Claude/Anthropic -> Chat 转换，实时 Codex review 随后指出
+  Responses -> Chat 仍使用 o-series-only 判断；作者第三个提交补了显式
+  `max_output_tokens` 路径。CCSwitchMulti 进一步发现 provider 配置注入
+  `default_output_tokens` 时还会经 `chat_output_token_field()` 写回 `max_tokens`，因此两处
+  都必须共用新 helper，并分别用显式预算和默认预算测试保护。不能只按上游首版 diff
+  或 PR 标题判断修复已闭环。
+
+## 2026-08-03 Codex MultiRouter 禁止跨 route 改模型回退
+
+- `codexRouting` / legacy route schema 的 route 列表是按请求模型选择真实上游的分流表，
+  不是同一请求的故障转移池。旧 `resolve_codex_model_routed_providers()` 会把最佳匹配
+  route 放在第一位，再把其它 enabled route 追加成 retry 候选；因此 official GPT 请求
+  遇到 5xx/额度错误后可能被发到 DeepSeek/Qwen，并悄悄改成这些 route 的默认模型。
+- 根修位于 route 解析源头：每个 MultiRouter 只返回排序后的第一条最佳匹配 route。
+  `build_forward_attempt_providers_preserving_codex_router_context()` 仍保留外层 failover
+  queue 中显式配置的其它 provider，所以禁止的是 router 内跨模型 fallback，不是关闭
+  provider 级故障转移。
+- 新旧 route schema、重复 exact match、exact 优先 prefix、compaction 跟随当前模型、
+  父 router 归因和显式 provider 级 fallback 均有回归测试。后续不能再把 route candidates
+  当作 retry chain；一个模型选择只能物化一个真实 target provider。
+
 ## 2026-08-03 Codex 跨 provider 历史 ID 与远程压缩 SSE 聚合根修
 
 - 现场任务 `019fc68a-e5fa-7961-a8d4-d2ffaf0ff8bb` 的官方路由 400 不是

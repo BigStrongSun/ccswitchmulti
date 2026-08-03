@@ -392,8 +392,9 @@ pub fn responses_request_to_anthropic(
 
     // Only forward tool_choice when tools survived the filter. Anthropic 400s on a
     // tool_choice with no tools ("tool_choice may only be specified while providing
-    // tools"), and that 400 is non-retryable — so a request whose only tools were
-    // unsupported hosted tools (for example web_search) must drop tool_choice too.
+    // tools"), and that 400 is non-retryable — so a request whose tools all fail
+    // conversion must drop tool_choice too. Hosted tools that the local bridge
+    // converts into ordinary functions count as surviving tools here.
     if has_tools {
         if let Some(tc) = body.get("tool_choice") {
             let mapped = map_tool_choice_to_anthropic(tc, &tool_context);
@@ -1682,7 +1683,7 @@ mod tests {
     }
 
     #[test]
-    fn test_request_tools_and_filtering() {
+    fn test_request_tools_include_hosted_web_search_bridge() {
         let input = json!({
             "model": "claude",
             "max_output_tokens": 100,
@@ -1695,11 +1696,12 @@ mod tests {
         });
         let result = responses_request_to_anthropic(input, 4096).unwrap();
         let tools = result["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 2);
+        assert_eq!(tools.len(), 3);
         assert_eq!(tools[0]["name"], "get_weather");
         assert_eq!(tools[0]["input_schema"]["type"], "object");
         assert!(tools[0].get("parameters").is_none());
-        assert_eq!(tools[1]["name"], "apply_patch");
+        assert_eq!(tools[1]["name"], "web_search");
+        assert_eq!(tools[2]["name"], "apply_patch");
     }
 
     #[test]
@@ -2258,8 +2260,9 @@ mod tests {
             "tool_choice": "required"
         });
         let result = responses_request_to_anthropic(input, 4096).unwrap();
-        assert_eq!(result["tools"].as_array().unwrap().len(), 1);
-        assert_eq!(result["tools"][0]["name"], "apply_patch");
+        assert_eq!(result["tools"].as_array().unwrap().len(), 2);
+        assert_eq!(result["tools"][0]["name"], "web_search");
+        assert_eq!(result["tools"][1]["name"], "apply_patch");
         assert_eq!(result["tool_choice"], json!({ "type": "any" }));
     }
 

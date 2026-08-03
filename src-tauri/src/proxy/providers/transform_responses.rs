@@ -348,9 +348,13 @@ pub fn anthropic_to_responses_with_cache_retention(
         result["input"] = json!(input);
     }
 
-    // max_tokens → max_output_tokens (Responses API uses max_output_tokens for all models)
+    // max_tokens → max_output_tokens (Responses API uses max_output_tokens for all models).
+    // Claude Code may send 1 as a probe, while OpenAI requires at least 16.
     if let Some(v) = body.get("max_tokens") {
-        result["max_output_tokens"] = v.clone();
+        result["max_output_tokens"] = v
+            .as_i64()
+            .map(|tokens| json!(tokens.max(16)))
+            .unwrap_or_else(|| v.clone());
     }
 
     // 直接透传的参数
@@ -1036,6 +1040,32 @@ mod tests {
         assert_eq!(result["input"][0]["content"][0]["text"], "Hello");
         // stop_sequences should not appear
         assert!(result.get("stop_sequences").is_none());
+    }
+
+    #[test]
+    fn test_anthropic_to_responses_clamps_probe_output_tokens_to_openai_minimum() {
+        for (max_tokens, expected) in [(1, 16), (15, 16), (16, 16), (1024, 1024)] {
+            let input = json!({
+                "model": "gpt-5",
+                "max_tokens": max_tokens,
+                "messages": [{"role": "user", "content": "Hello"}]
+            });
+
+            let result = anthropic_to_responses(input, None, false, false).unwrap();
+            assert_eq!(result["max_output_tokens"], expected);
+        }
+    }
+
+    #[test]
+    fn test_anthropic_to_responses_preserves_non_integer_output_token_value() {
+        let input = json!({
+            "model": "gpt-5",
+            "max_tokens": "provider-defined",
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+
+        let result = anthropic_to_responses(input, None, false, false).unwrap();
+        assert_eq!(result["max_output_tokens"], "provider-defined");
     }
 
     #[test]

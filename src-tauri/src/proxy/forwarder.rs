@@ -252,10 +252,10 @@ fn retryable_failure_affects_provider_health(provider: &Provider, error: &ProxyE
 }
 
 impl RequestForwarder {
-    /// 把 retry 层已经展开的 Codex route 候选物化为真实目标 provider。
+    /// 把 retry 层已经选中的 Codex route 物化为真实目标 provider。
     ///
-    /// `resolve_codex_model_routed_providers` 为了保留 route 顺序和父路由归因，会先
-    /// 生成带 `codexResolvedRouteId` 的 request-local provider。这个标记同时会让
+    /// `resolve_codex_model_routed_providers` 会生成带 `codexResolvedRouteId` 和父路由
+    /// 归因的 request-local provider。这个标记同时会让
     /// `forward()` 跳过再次解析，因此必须在进入 account pool / retry loop 前完成
     /// targetProviderId 物化，否则候选会错误继承父 MultiRouter 的本地 base_url。
     fn materialize_codex_forward_attempt_provider(
@@ -6654,9 +6654,9 @@ fn value_for_shape_log(value: &Value) -> String {
 
 /// 构建本次转发要尝试的 provider 列表。
 ///
-/// Codex MultiRouter 在这里展开成 route provider 候选链，转发重试才能在同一请求上
-/// 从主 route 故障转移到其它启用 route。每个 route provider 已携带父 router 的
-/// id/name，`forward()` 仍能用它保持日志、状态页和用量归因的外层身份。
+/// 每个 Codex MultiRouter 在这里仅展开成当前模型实际命中的 route provider；外层
+/// `providers` 中显式配置的其它 provider 仍保留正常故障转移。route provider 携带父
+/// router 的 id/name，`forward()` 仍能保持日志、状态页和用量归因的外层身份。
 fn build_forward_attempt_providers_preserving_codex_router_context(
     app_type: &AppType,
     providers: &[Provider],
@@ -7802,7 +7802,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_multirouter_attempts_expand_route_chain_while_retaining_parent_context() {
+    fn codex_multirouter_attempts_keep_only_matched_route_and_parent_context() {
         let mut provider = test_provider_with_type(None);
         provider.id = "codex-openai-router".to_string();
         provider.name = "OpenAI Multi-Model Router".to_string();
@@ -7836,7 +7836,7 @@ mod tests {
             &json!({ "model": "deepseek-v4-flash" }),
         );
 
-        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts.len(), 1);
         assert_eq!(attempts[0].id, "codex-openai-router::route::deepseek");
         assert_eq!(
             attempts[0]
@@ -7844,14 +7844,6 @@ mod tests {
                 .get("codexResolvedRouteId")
                 .and_then(serde_json::Value::as_str),
             Some("deepseek")
-        );
-        assert_eq!(attempts[1].id, "codex-openai-router::route::qwen-local");
-        assert_eq!(
-            attempts[1]
-                .settings_config
-                .get("codexResolvedRouteId")
-                .and_then(serde_json::Value::as_str),
-            Some("qwen-local")
         );
         for attempt in &attempts {
             assert_eq!(
@@ -7869,6 +7861,45 @@ mod tests {
                 Some("OpenAI Multi-Model Router")
             );
         }
+    }
+
+    #[test]
+    fn codex_multirouter_keeps_outer_provider_failover_without_cross_route_fallback() {
+        let mut router = test_provider_with_type(None);
+        router.id = "codex-openai-router".to_string();
+        router.settings_config = json!({
+            "codexRouting": {
+                "enabled": true,
+                "routes": [
+                    {
+                        "id": "deepseek",
+                        "enabled": true,
+                        "models": ["deepseek-v4-flash"],
+                        "base_url": "https://api.deepseek.com/v1",
+                        "wireApi": "chat"
+                    },
+                    {
+                        "id": "qwen-local",
+                        "enabled": true,
+                        "models": ["qwen3.6"],
+                        "base_url": "https://example.test/v1",
+                        "wireApi": "chat"
+                    }
+                ]
+            }
+        });
+        let mut explicit_fallback = test_provider_with_type(None);
+        explicit_fallback.id = "provider-level-fallback".to_string();
+
+        let attempts = build_forward_attempt_providers_preserving_codex_router_context(
+            &AppType::Codex,
+            &[router, explicit_fallback],
+            &json!({ "model": "deepseek-v4-flash" }),
+        );
+
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0].id, "codex-openai-router::route::deepseek");
+        assert_eq!(attempts[1].id, "provider-level-fallback");
     }
 
     #[test]
@@ -8043,7 +8074,7 @@ mod tests {
             &body,
         );
 
-        assert_eq!(attempts.len(), 3);
+        assert_eq!(attempts.len(), 1);
         assert_eq!(attempts[0].id, "codex-openai-router::route::qwen-local");
         assert_eq!(
             attempts[0]
@@ -8059,17 +8090,6 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("qwen3.6")
         );
-        let fallback_route_ids = attempts[1..]
-            .iter()
-            .filter_map(|attempt| {
-                attempt
-                    .settings_config
-                    .get("codexResolvedRouteId")
-                    .and_then(serde_json::Value::as_str)
-            })
-            .collect::<Vec<_>>();
-        assert!(fallback_route_ids.contains(&"deepseek"));
-        assert!(fallback_route_ids.contains(&"official"));
     }
 
     #[test]

@@ -458,11 +458,11 @@ pub fn resolve_codex_model_routed_provider(
         .next()
 }
 
-/// 解析 Codex router 的候选 route 链。
+/// 解析 Codex router 的唯一命中 route。
 ///
-/// 第一项始终是当前请求模型最匹配的 route；后续项是同一 router 内其它 enabled route，
-/// 用于 official 高负载、首包 `response.failed` 等可重试错误后的降级。降级 route 会使用
-/// 自己的默认上游模型，而不是把 `gpt-*` 原样发给 DeepSeek/Qwen 这类不认识该模型名的上游。
+/// MultiRouter 是按模型分流，不是跨模型的故障转移池：一个请求只可发送给它实际命中的
+/// route。特别是 `gpt-*` 官方模型发生上游错误时，绝不能回退到 DeepSeek/Qwen 等路由，
+/// 否则会改变用户选择的模型与认证边界。
 pub fn resolve_codex_model_routed_providers(
     provider: &Provider,
     body: &JsonValue,
@@ -476,11 +476,11 @@ pub fn resolve_codex_model_routed_providers(
         return Vec::new();
     };
 
-    let routes = resolve_codex_route_candidates(provider, request_model);
-    routes
+    resolve_codex_route_candidates(provider, request_model)
         .into_iter()
-        .map(|route| build_codex_routed_provider(provider, route, request_model))
-        .collect()
+        .next()
+        .map(|route| vec![build_codex_routed_provider(provider, route, request_model)])
+        .unwrap_or_default()
 }
 
 /// 返回 routed Codex provider 对应的真实持久 provider 身份。
@@ -3875,7 +3875,7 @@ wire_api = "chat"
     }
 
     #[test]
-    fn test_codex_router_returns_fallback_route_candidates_after_primary() {
+    fn test_codex_router_returns_only_the_matched_route() {
         let provider = create_provider(json!({
             "codexRouting": {
                 "routes": [
@@ -3909,16 +3909,10 @@ wire_api = "chat"
         let routed =
             resolve_codex_model_routed_providers(&provider, &json!({ "model": "gpt-5.5" }));
 
-        assert_eq!(routed.len(), 2);
+        assert_eq!(routed.len(), 1);
         assert_eq!(routed[0].id, "test::route::official");
         assert_eq!(routed[0].settings_config["model"], "gpt-5.5");
         assert_eq!(routed[0].settings_config["codexResolvedRouteMatched"], true);
-        assert_eq!(routed[1].id, "test::route::deepseek");
-        assert_eq!(routed[1].settings_config["model"], "deepseek-v4-flash");
-        assert_eq!(
-            routed[1].settings_config["codexResolvedRouteMatched"],
-            false
-        );
     }
 
     #[test]
@@ -3954,18 +3948,12 @@ wire_api = "chat"
         let routed =
             resolve_codex_model_routed_providers(&provider, &json!({ "model": "gpt-5.5" }));
 
-        assert_eq!(routed.len(), 2);
+        assert_eq!(routed.len(), 1);
         assert_eq!(
             routed[0].id, "test::route::relay",
             "相同可见模型名没有额外选择信息，只能按 route 顺序命中第一条；前端保存/同步必须生成唯一别名"
         );
         assert_eq!(routed[0].settings_config["codexResolvedRouteMatched"], true);
-        assert_eq!(routed[1].id, "test::route::official");
-        assert_eq!(
-            routed[1].settings_config["codexResolvedRouteMatched"],
-            true,
-            "diagnostic flag describes whether the route rule matches the model, not whether it was selected as primary"
-        );
     }
 
     #[test]
@@ -4002,11 +3990,9 @@ wire_api = "chat"
         let routed =
             resolve_codex_model_routed_providers(&provider, &json!({ "model": "gpt-5.5-pro" }));
 
-        assert_eq!(routed.len(), 2);
+        assert_eq!(routed.len(), 1);
         assert_eq!(routed[0].id, "test::route::aggregate");
         assert_eq!(routed[0].settings_config["codexResolvedRouteMatched"], true);
-        assert_eq!(routed[1].id, "test::route::official");
-        assert_eq!(routed[1].settings_config["codexResolvedRouteMatched"], true);
     }
 
     #[test]
@@ -4038,7 +4024,7 @@ wire_api = "chat"
     }
 
     #[test]
-    fn test_codex_legacy_route_candidates_prefer_exact_over_earlier_prefix_route() {
+    fn test_codex_legacy_router_returns_only_best_route() {
         let provider = create_provider(json!({
             "codexRouting": [
                 {
@@ -4067,9 +4053,8 @@ wire_api = "chat"
         let routed =
             resolve_codex_model_routed_providers(&provider, &json!({ "model": "gpt-5.5-pro" }));
 
-        assert_eq!(routed.len(), 2);
+        assert_eq!(routed.len(), 1);
         assert_eq!(routed[0].id, "test::route::aggregate");
-        assert_eq!(routed[1].id, "test::route::official");
     }
 
     #[test]

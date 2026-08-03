@@ -575,7 +575,7 @@ pub fn responses_to_chat_completions_with_reasoning_text_only_and_cache(
 
     let model = body.get("model").and_then(|v| v.as_str()).unwrap_or("");
     if let Some(max_tokens) = body.get("max_output_tokens") {
-        if super::transform::is_openai_o_series(model) {
+        if super::transform::requires_max_completion_tokens(model) {
             result["max_completion_tokens"] = max_tokens.clone();
         } else {
             result["max_tokens"] = max_tokens.clone();
@@ -703,7 +703,7 @@ fn apply_openai_prompt_cache_options(
 
 /// 根据目标模型选择 Chat Completions 使用的输出 token 字段。
 fn chat_output_token_field(model: &str) -> &'static str {
-    if super::transform::is_openai_o_series(model) {
+    if super::transform::requires_max_completion_tokens(model) {
         "max_completion_tokens"
     } else {
         "max_tokens"
@@ -2786,7 +2786,8 @@ mod tests {
         assert_eq!(result["tools"][0]["function"]["name"], "get_weather");
         assert_eq!(result["tools"][0]["function"]["strict"], true);
         assert_eq!(result["tool_choice"]["function"]["name"], "get_weather");
-        assert_eq!(result["max_tokens"], 100);
+        assert_eq!(result["max_completion_tokens"], 100);
+        assert!(result.get("max_tokens").is_none());
         assert_eq!(result["reasoning_effort"], "high");
     }
 
@@ -3678,6 +3679,43 @@ mod tests {
         assert_eq!(result["max_tokens"], 1024);
         assert!(result.get("enable_thinking").is_none());
         assert!(result.get("thinking").is_none());
+    }
+
+    #[test]
+    fn responses_request_to_chat_gpt5_maps_explicit_budget_to_max_completion_tokens() {
+        let input = json!({
+            "model": "gpt-5.6-sol",
+            "input": "hello",
+            "max_output_tokens": 4096
+        });
+
+        let result = responses_to_chat_completions(input).unwrap();
+
+        assert_eq!(result["max_completion_tokens"], 4096);
+        assert!(result.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn responses_request_to_chat_gpt5_maps_configured_default_to_max_completion_tokens() {
+        let input = json!({
+            "model": "gpt-5.6-sol",
+            "input": "hello"
+        });
+        let config = CodexChatReasoningConfig {
+            supports_thinking: Some(false),
+            supports_effort: Some(true),
+            thinking_param: Some("none".to_string()),
+            effort_param: Some("reasoning_effort".to_string()),
+            effort_value_mode: None,
+            min_output_tokens: None,
+            default_output_tokens: Some(4096),
+            output_format: Some("reasoning_content".to_string()),
+        };
+
+        let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
+
+        assert_eq!(result["max_completion_tokens"], 4096);
+        assert!(result.get("max_tokens").is_none());
     }
 
     #[test]
