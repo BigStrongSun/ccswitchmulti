@@ -3966,10 +3966,7 @@ mod tests {
             .find(|item| item["type"] == "message")
             .expect("message output item");
 
-        assert_eq!(
-            message["id"],
-            "msg_resp_chatcmpl-2gyygAFeaDX2rFNtuG7mOhf9"
-        );
+        assert_eq!(message["id"], "msg_resp_chatcmpl-2gyygAFeaDX2rFNtuG7mOhf9");
     }
 
     #[test]

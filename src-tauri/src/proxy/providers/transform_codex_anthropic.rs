@@ -2418,7 +2418,10 @@ mod tests {
         assert_eq!(result["id"], "resp_msg_1");
         assert_eq!(result["status"], "completed");
         assert_eq!(result["output"][0]["type"], "message");
-        assert!(result["output"][0]["id"].as_str().unwrap().starts_with("msg_"));
+        assert!(result["output"][0]["id"]
+            .as_str()
+            .unwrap()
+            .starts_with("msg_"));
         assert_eq!(result["output"][0]["content"][0]["type"], "output_text");
         assert_eq!(result["output"][0]["content"][0]["text"], "Hello!");
         assert_eq!(result["usage"]["input_tokens"], 10);
