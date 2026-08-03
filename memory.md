@@ -2801,6 +2801,10 @@
 - 已证实但尚不能定根因：该 session 的 385 次官方请求均经 CCSM `reqwest` 出站，且显式 CCSM 上游代理为 false；104 次（27.0%）在收到 HTTP 状态前失败。失败中 96 次的请求体在 5–10 MB，仍有同区间请求成功；16 MB 也曾成功。全量 router 日志中 `router-codex-official` 为 5,873 次里 827 次失败（14.1%），其它路由约 12,291 次仅 2 次失败。因此它是 CCSM 官方出站路径的传输不稳定，不能归因为单纯 body 大小、encrypted 字段，或官方协议 400。
 - `invalid_encrypted_content` 的官方表现应为带该 code 的 HTTP 400；本 session 已抽取到的最终错误是本地 502 映射的 `error sending request`，没有该 code。encrypted 历史仍可能与请求大小/服务端处理时间有关，但不是已证实的断连根因。
 - v3.19.1-4 的“首个语义输出前 SSE 重连”不能覆盖响应头尚未到达的请求阶段。为取得真正根因，`map_reqwest_send_error` 现在会在去掉 URL 后展开底层 source 错误链；只记录安全的传输分类，不记录请求、密文或凭据。下一次复现需据此区分 TLS/HTTP2/连接复用/对端关闭/超时，再决定是否应调整 transport、重连或请求体传输策略；禁止盲目删除 encrypted reasoning 或重放可能在途的请求。
+- 2026-08-04 后续证据已定位共同上游根因：切回原生 `model_provider=openai` 后，该 session 的新 turn（`019fc88a-89fb-72b1-84d7-c39b98d9af7c`，`gpt-5.6-luna`）完全没有进入 CCSM router，却在 5 次重连后返回 `{"detail":"Bad Request"}`；同机同账号的其它原生 OpenAI session 同时连续成功，因此不是 CCSM 502 包装、账号或全局网络故障。
+- 最后一次有效 compaction（rollout line 23154）只有约 0.11 MB/108 items；但其后又积累了 148 个 replay item，约 15.87 MB，其中 40 个 `custom_tool_call_output` 占 15.70 MB。最大的两项约 4.74 MB 和 3.73 MB，均含 `data:image/...;base64`；同一有效回放集里的 encrypted payload 仅约 0.08 MB。该 15.87 MB 与此前 CCSM 记录的 16.79 MB official 出站请求精确对应。
+- Codex 源码链路确认这是结构性边界：`ContextManager::for_prompt()` 仅在模型不支持图片时替换图片；gpt-5.6 支持图片，所以工具输出里的 `InputImage` 保留。`truncate_function_output_items_with_policy()` 只消费/截断文本预算，对 `InputImage` 和 `EncryptedContent` 无条件 clone；`build_responses_request()` 随后把完整 `prompt.get_formatted_input()` 放进 `ResponsesApiRequest.input`。因此原生 WebSocket/HTTP 的每次 retry 都重放相同的超大图片历史。
+- OpenAI Codex 公共 issue #18629 报告了完全相同的 `function_call_output/custom tool output + data:image;base64` 污染和 `{"detail":"Bad Request"}`；#23257 进一步记录 compaction 会保留/复制内联图片。结论更新：encrypted 不是本次 400/502 的根因；根因是图片型工具结果以 Base64 内联进入可回放历史且不受截断预算约束。经 CCSM 时它表现为约 16.8 MB 明文 HTTP body 的高失败率/502，切回官方原生 WebSocket 时表现为 5 次重放后 generic 400。修复必须在历史进入请求前把旧工具图片变成 schema-valid 有界占位或外部引用，并为存量 poisoned session 提供保留可见文本/调用配对/合法 encrypted 的结构化修复；不能做宽泛 Base64 替换。
 
 ## 2026-08-03 Codex 第三方 Reasoning 可移植桥设计
 
