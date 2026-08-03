@@ -246,7 +246,9 @@ pub(crate) fn normalize_codex_responses_passthrough_request_for_transport(
 /// 参数:
 /// - `request_body`: Codex Responses 请求体。
 ///   返回:
-/// - function_call arguments 已规整、其余结构保持不变的请求体。
+/// - function_call arguments 已规整、消息类 item id 已按类型补
+///   `msg_`/`amsg_` 前缀、reasoning item 已按第三方可回放性规整，
+///   其余结构保持不变的请求体。
 ///   副作用:
 /// - 无。函数只转换传入 JSON 值。
 ///   边界:
@@ -259,6 +261,8 @@ fn normalize_codex_responses_passthrough_items(request_body: Value) -> Value {
     };
 
     normalize_codex_responses_function_call_arguments(&mut body);
+    normalize_codex_responses_input_item_ids(&mut body);
+    normalize_codex_responses_passthrough_reasoning_items(&mut body);
 
     Value::Object(body)
 }
@@ -405,6 +409,269 @@ fn normalize_codex_responses_function_call_item_arguments(item: &mut Value) {
     object.insert("arguments".to_string(), Value::String(arguments));
 }
 
+/// 规整 Responses input 消息类 item 的历史 id。
+///
+/// 官方 backend 对 id 前缀有按类型区分的校验：普通 message 必须 `msg_`，
+/// agent_message 必须 `amsg_`。Chat/Anthropic 转换出的旧历史可能带
+/// `resp_chatcmpl-..._msg`，此前修正又可能把原生 `amsg_...` 误加成
+/// `msg_amsg_...`；这里按类型幂等补齐，并恢复被双重前缀污染的 id。
+fn normalize_codex_responses_input_item_ids(body: &mut Map<String, Value>) {
+    let Some(Value::Array(items)) = body.get_mut("input") else {
+        return;
+    };
+
+    for item in items {
+        let Value::Object(object) = item else {
+            continue;
+        };
+        let expected_prefix = match object.get("type").and_then(Value::as_str) {
+            Some("message") => "msg_",
+            Some("agent_message") => "amsg_",
+            _ => continue,
+        };
+        let Some(Value::String(id)) = object.get_mut("id") else {
+            continue;
+        };
+        if id.is_empty() || id.starts_with(expected_prefix) {
+            continue;
+        }
+        if expected_prefix == "amsg_" {
+            if let Some(rest) = id.strip_prefix("msg_amsg_") {
+                *id = format!("amsg_{rest}");
+                continue;
+            }
+        }
+        *id = format!("{expected_prefix}{id}");
+    }
+}
+
+/// 规整第三方 Responses 透传请求中的 reasoning item。
+///
+/// 官方路由回放的 reasoning item 只带 OpenAI 私有 `encrypted_content`，没有
+/// 可读文本；DeepSeek 等 thinking 模式上游要求历史 reasoning 必须携带
+/// `reasoning_text`，否则整请求 400（compaction v2 会回放完整历史，必然命中）。
+/// 这里按可回放性处理：已有文本 content 的原样保留；只有 summary 文本的提升为
+/// `reasoning_text` content 并移除私有密文；什么文本都没有的 item 直接丢弃。
+fn normalize_codex_responses_passthrough_reasoning_items(body: &mut Map<String, Value>) {
+    let Some(Value::Array(items)) = body.get_mut("input") else {
+        return;
+    };
+
+    items.retain_mut(|item| {
+        let Value::Object(object) = item else {
+            return true;
+        };
+        if object.get("type").and_then(Value::as_str) != Some("reasoning") {
+            return true;
+        }
+        if codex_responses_reasoning_item_has_text_content(object) {
+            return true;
+        }
+        object.remove("encrypted_content");
+        match codex_responses_reasoning_summary_to_content(object.get("summary")) {
+            Some(content) => {
+                object.insert("content".to_string(), content);
+                true
+            }
+            // 密文已随 encrypted_content 移除；无任何可读文本的 reasoning item
+            // 对第三方上游没有信息价值，只会触发 thinking 模式校验。
+            None => false,
+        }
+    });
+}
+
+/// 判断 reasoning item 的 content 是否已包含可回放的文本。
+///
+/// 参数:
+/// - `object`: `type=reasoning` 的 Responses input item。
+///   返回:
+/// - `true` 表示 content 里已有非空 reasoning 文本，第三方上游可直接接受。
+///   副作用:
+/// - 无。
+fn codex_responses_reasoning_item_has_text_content(object: &Map<String, Value>) -> bool {
+    let Some(content) = object.get("content") else {
+        return false;
+    };
+    let mut texts = Vec::new();
+    collect_codex_oauth_reasoning_content_text(content, &mut texts);
+    !texts.is_empty()
+}
+
+/// 把 reasoning summary 文本提升为第三方接受的 `reasoning_text` content。
+///
+/// 参数:
+/// - `summary`: reasoning item 的 `summary` 字段。
+///   返回:
+/// - 有可读文本时返回 `reasoning_text` 数组；否则返回 `None`。
+///   副作用:
+/// - 无。
+fn codex_responses_reasoning_summary_to_content(summary: Option<&Value>) -> Option<Value> {
+    let texts: Vec<String> = summary
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+        .collect();
+    if texts.is_empty() {
+        return None;
+    }
+
+    Some(Value::Array(
+        texts
+            .into_iter()
+            .map(|text| json!({ "type": "reasoning_text", "text": text }))
+            .collect(),
+    ))
+}
+
+/// v2 compaction 上下文溢出重试的历史裁剪结果。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct CodexCompactionTrimStats {
+    /// 被裁掉的历史 item 数。
+    pub removed_items: usize,
+    /// 裁剪后剩余的 input item 数。
+    pub remaining_items: usize,
+}
+
+/// 为上下文溢出重试裁剪 v2 compaction 请求的回放历史。
+///
+/// 裁剪规则（确定性）：
+/// - 结构性 item 永远保留：compaction 控制 item（compaction_trigger / compaction /
+///   compaction_summary / context_compaction）和最后一条 message（Codex 的压缩指令）；
+/// - 其余 item 按原始顺序只保留最新的 keep_num/keep_den，最旧的优先裁掉；
+/// - 裁剪后清理孤儿 tool output（其 call 已随前缀被裁掉的 output item），
+///   避免上游因 call_id 配对缺失再报 400。
+///
+/// 参数:
+/// - `body`: v2 compaction 的 Responses 请求体（原地修改）。
+/// - `keep_num` / `keep_den`: 可裁历史中保留最新的比例（如 1/2、1/4）。
+///   返回:
+/// - 裁剪统计；`removed_items == 0` 表示没有可裁内容，重试无意义。
+///   副作用:
+/// - 原地修改 `body` 的 `input` 数组。
+///   边界:
+/// - 只服务 v2 compaction 溢出重试；压缩是摘要语义，丢掉的早期历史只是不进
+///   摘要，优于整请求 400 导致压缩流程卡死。turn 请求绝不经过这里。
+pub(crate) fn trim_codex_compaction_input_for_context_retry(
+    body: &mut Value,
+    keep_num: usize,
+    keep_den: usize,
+) -> CodexCompactionTrimStats {
+    let Value::Object(object) = body else {
+        return CodexCompactionTrimStats::default();
+    };
+    let Some(Value::Array(items)) = object.get_mut("input") else {
+        return CodexCompactionTrimStats::default();
+    };
+
+    let keep_den = keep_den.max(1);
+    let last_message_index = items
+        .iter()
+        .rposition(|item| item.get("type").and_then(Value::as_str) == Some("message"));
+
+    let is_structural = |index: usize, item: &Value| {
+        if Some(index) == last_message_index {
+            return true;
+        }
+        matches!(
+            item.get("type").and_then(Value::as_str),
+            Some("compaction_trigger" | "compaction" | "compaction_summary" | "context_compaction")
+        )
+    };
+
+    let droppable_count = items
+        .iter()
+        .enumerate()
+        .filter(|(index, item)| !is_structural(*index, item))
+        .count();
+    let keep_count = droppable_count.saturating_mul(keep_num) / keep_den;
+    let mut to_remove = droppable_count.saturating_sub(keep_count);
+
+    let mut removed_items = 0usize;
+    let mut index = 0usize;
+    items.retain(|item| {
+        let remove = to_remove > 0 && !is_structural(index, item);
+        index += 1;
+        if remove {
+            to_remove -= 1;
+            removed_items += 1;
+        }
+        !remove
+    });
+
+    removed_items += drop_orphaned_compaction_tool_outputs(items);
+
+    CodexCompactionTrimStats {
+        removed_items,
+        remaining_items: items.len(),
+    }
+}
+
+/// 清理裁剪后孤儿 tool output：其 call 已不在 input 里的 output item。
+///
+/// 前缀裁剪只会把 call 留在被裁区间、output 留在保留区间（output 时序上在
+/// call 之后），单向产生孤儿 output；反方向的孤儿 call 不会由裁剪制造。
+/// 返回清理数量。
+fn drop_orphaned_compaction_tool_outputs(items: &mut Vec<Value>) -> usize {
+    const CALL_TYPES: &[&str] = &[
+        "function_call",
+        "custom_tool_call",
+        "mcp_tool_call",
+        "local_shell_call",
+        "computer_call",
+        "file_search_call",
+        "code_interpreter_call",
+        "web_search_call",
+        "image_generation_call",
+        "tool_search_call",
+    ];
+    const OUTPUT_TYPES: &[&str] = &[
+        "function_call_output",
+        "custom_tool_call_output",
+        "mcp_tool_call_output",
+        "computer_call_output",
+        "tool_search_output",
+    ];
+
+    // call item 的关联键既可能是 call_id 也可能是 id（取决于上游协议形态），
+    // 两个都收进保留集合，避免误删合法 output。
+    let surviving_call_keys: std::collections::HashSet<String> = items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item.get("type").and_then(Value::as_str),
+                Some(item_type) if CALL_TYPES.contains(&item_type)
+            )
+        })
+        .flat_map(|item| [item.get("call_id"), item.get("id")].into_iter().flatten())
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect();
+
+    let mut removed = 0usize;
+    items.retain(|item| {
+        let Some(item_type) = item.get("type").and_then(Value::as_str) else {
+            return true;
+        };
+        if !OUTPUT_TYPES.contains(&item_type) {
+            return true;
+        }
+        // 无 call_id 的 output 形态不明，保守保留。
+        let Some(call_id) = item.get("call_id").and_then(Value::as_str) else {
+            return true;
+        };
+        if surviving_call_keys.contains(call_id) {
+            return true;
+        }
+        removed += 1;
+        false
+    });
+    removed
+}
+
 /// 提升 Codex Responses input 中的 system/developer 控制消息。
 ///
 /// 参数:
@@ -495,6 +762,10 @@ fn normalize_codex_oauth_input_item(item: Value) -> Value {
     } else if codex_oauth_input_item_forbids_content(item_type) {
         object.remove("content");
     }
+
+    // Official backend forwards with store=false, so synthetic/replayed item ids
+    // are not persisted server-side and come back as 404. Send history inline.
+    object.remove("id");
 
     Value::Object(object)
 }
@@ -2380,6 +2651,476 @@ mod tests {
         assert_eq!(input[0]["arguments"], "{}");
         assert_eq!(input[2]["arguments"], r#"{"raw_arguments":"{"}"#);
         assert_eq!(input[3]["role"], "user");
+    }
+
+    #[test]
+    fn codex_responses_passthrough_normalizes_chat_sourced_message_ids() {
+        // 第三方 Chat 上游转换出的消息 item id（resp_chatcmpl-..._msg）被 Codex
+        // 持久化后，切回官方 /responses 时必须规整成 msg_ 前缀，否则 400。
+        let body = json!({
+            "model": "gpt-5.4",
+            "input": [
+                {
+                    "type": "message",
+                    "id": "resp_chatcmpl-2gyygAFeaDX2rFNtuG7mOhf9_msg",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "pong" }]
+                },
+                {
+                    "type": "message",
+                    "id": "msg_ok",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "continue" }]
+                },
+                {
+                    "type": "agent_message",
+                    "id": "resp_msg_1_0",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "subagent done" }]
+                },
+                {
+                    "type": "function_call",
+                    "id": "fc_call_1",
+                    "call_id": "call_1",
+                    "name": "read_file",
+                    "arguments": "{}"
+                }
+            ]
+        });
+
+        let normalized = normalize_codex_responses_passthrough_request(body);
+        let input = normalized["input"].as_array().expect("input array");
+
+        assert_eq!(
+            input[0]["id"],
+            "msg_resp_chatcmpl-2gyygAFeaDX2rFNtuG7mOhf9_msg"
+        );
+        assert_eq!(input[1]["id"], "msg_ok");
+        assert_eq!(input[2]["id"], "amsg_resp_msg_1_0");
+        assert_eq!(input[3]["id"], "fc_call_1");
+    }
+
+    #[test]
+    fn codex_responses_passthrough_preserves_native_agent_message_ids() {
+        // Codex 自身生成的 agent_message id 以 amsg_ 开头，官方 backend 也要求
+        // 这个前缀；不能像普通 message 一样统一改成 msg_。
+        let body = json!({
+            "model": "gpt-5.4",
+            "input": [
+                {
+                    "type": "agent_message",
+                    "id": "amsg_019fc3fa-9b0a-7db1-9ca8-131d56d047ac",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "subagent done" }]
+                }
+            ]
+        });
+
+        let normalized = normalize_codex_responses_passthrough_request(body);
+        let input = normalized["input"].as_array().expect("input array");
+
+        assert_eq!(input[0]["id"], "amsg_019fc3fa-9b0a-7db1-9ca8-131d56d047ac");
+    }
+
+    #[test]
+    fn codex_responses_passthrough_keeps_native_reasoning_text_content() {
+        // DeepSeek thinking 模式自身产生的 reasoning item 带 reasoning_text content，
+        // 回放时必须原样保留，否则上游 400。
+        let body = json!({
+            "model": "deepseek-v4-flash",
+            "input": [
+                {
+                    "type": "reasoning",
+                    "id": "93b00248-92fc-40a5-a15e-69fff8d66599",
+                    "summary": [],
+                    "content": [{ "type": "reasoning_text", "text": "inspect the route first" }]
+                }
+            ]
+        });
+
+        let normalized = normalize_codex_responses_passthrough_request(body);
+        let input = normalized["input"].as_array().expect("input array");
+
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["content"][0]["type"], "reasoning_text");
+        assert_eq!(input[0]["content"][0]["text"], "inspect the route first");
+    }
+
+    #[test]
+    fn codex_responses_passthrough_promotes_encrypted_reasoning_summary_to_content() {
+        // 官方路由回放的 reasoning item 只有 OpenAI 私有 encrypted_content 和 summary
+        // 文本；透传给第三方时把 summary 提升为 reasoning_text content 并移除密文，
+        // 让 DeepSeek thinking 模式有可回放的文本。
+        let body = json!({
+            "model": "deepseek-v4-flash",
+            "input": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_03daef03bee90739",
+                    "summary": [{ "type": "summary_text", "text": "Need to inspect the code." }],
+                    "encrypted_content": "gAAAAAB..."
+                }
+            ]
+        });
+
+        let normalized = normalize_codex_responses_passthrough_request(body);
+        let input = normalized["input"].as_array().expect("input array");
+
+        assert_eq!(input.len(), 1);
+        assert!(input[0].get("encrypted_content").is_none());
+        assert_eq!(input[0]["content"][0]["type"], "reasoning_text");
+        assert_eq!(input[0]["content"][0]["text"], "Need to inspect the code.");
+    }
+
+    #[test]
+    fn codex_responses_passthrough_drops_unrecoverable_encrypted_reasoning() {
+        // 官方路由回放里 encrypted_content + 空 summary 的 reasoning item 没有任何
+        // 可读文本，第三方 thinking 模式上游会因此整请求 400；直接丢弃。
+        let body = json!({
+            "model": "deepseek-v4-flash",
+            "input": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_03daef03bee90739",
+                    "summary": [],
+                    "encrypted_content": "gAAAAAB..."
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "pong" }]
+                }
+            ]
+        });
+
+        let normalized = normalize_codex_responses_passthrough_request(body);
+        let input = normalized["input"].as_array().expect("input array");
+
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["type"], "message");
+    }
+
+    #[test]
+    fn codex_responses_passthrough_compaction_simulation_recovers_reasoning_history() {
+        // 仿真：跨路由会话的 compaction v2 请求混合三类 reasoning item
+        // （DeepSeek 原生、官方带 summary、官方空 summary），出站必须全部
+        // 满足 thinking 模式上游的 reasoning_text 校验。
+        let body = json!({
+            "model": "deepseek-v4-flash",
+            "input": [
+                { "type": "compaction_trigger" },
+                {
+                    "type": "reasoning",
+                    "summary": [],
+                    "content": [{ "type": "reasoning_text", "text": "native thinking" }]
+                },
+                {
+                    "type": "reasoning",
+                    "id": "rs_official_1",
+                    "summary": [{ "type": "summary_text", "text": "official summary" }],
+                    "encrypted_content": "gAAAAAB..."
+                },
+                {
+                    "type": "reasoning",
+                    "id": "rs_official_2",
+                    "summary": [],
+                    "encrypted_content": "gAAAAAB..."
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "compact now" }]
+                }
+            ]
+        });
+
+        let normalized = normalize_codex_responses_passthrough_request(body);
+        let input = normalized["input"].as_array().expect("input array");
+
+        assert_eq!(input.len(), 4);
+        assert_eq!(input[0]["type"], "compaction_trigger");
+        assert_eq!(input[1]["content"][0]["text"], "native thinking");
+        assert!(input[2].get("encrypted_content").is_none());
+        assert_eq!(input[2]["content"][0]["type"], "reasoning_text");
+        assert_eq!(input[2]["content"][0]["text"], "official summary");
+        assert_eq!(input[3]["type"], "message");
+        for item in input {
+            if item["type"] == "reasoning" {
+                assert!(
+                    item["content"].as_array().is_some_and(|parts| parts
+                        .iter()
+                        .any(|part| part["text"]
+                            .as_str()
+                            .is_some_and(|text| !text.trim().is_empty()))),
+                    "third-party reasoning item must carry reasoning text: {item}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compaction_trim_keeps_structural_items_and_newest_half() {
+        // 溢出重试第一轮（1/2）：compaction_trigger 和最后的压缩指令必须保留，
+        // 可裁历史只保留最新一半，call/output 配对不被破坏。
+        let mut body = json!({
+            "model": "k3-256k",
+            "input": [
+                { "type": "compaction_trigger" },
+                { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "old question" }] },
+                { "type": "function_call", "call_id": "call_1", "name": "read", "arguments": "{}" },
+                { "type": "function_call_output", "call_id": "call_1", "output": "old result" },
+                { "type": "message", "role": "assistant", "content": [{ "type": "output_text", "text": "mid answer" }] },
+                { "type": "reasoning", "summary": [] },
+                { "type": "function_call", "call_id": "call_2", "name": "write", "arguments": "{}" },
+                { "type": "function_call_output", "call_id": "call_2", "output": "new result" },
+                { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "compact now" }] }
+            ]
+        });
+
+        let stats = trim_codex_compaction_input_for_context_retry(&mut body, 1, 2);
+        let input = body["input"].as_array().expect("input array");
+
+        // 7 个可裁 item 保留最新 3 个（reasoning、call_2、output_2），裁掉最旧 4 个。
+        assert_eq!(stats.removed_items, 4);
+        assert_eq!(stats.remaining_items, 5);
+        assert_eq!(input[0]["type"], "compaction_trigger");
+        assert_eq!(input[1]["type"], "reasoning");
+        assert_eq!(input[2]["call_id"], "call_2");
+        assert_eq!(input[3]["call_id"], "call_2");
+        assert_eq!(input[3]["output"], "new result");
+        assert_eq!(input[4]["content"][0]["text"], "compact now");
+    }
+
+    #[test]
+    fn compaction_trim_drops_orphan_tool_outputs_at_boundary() {
+        // 裁剪边界落在 call 与 output 之间时，孤儿 output 必须一并删除，
+        // 否则上游会因 call_id 配对缺失再报 400。
+        let mut body = json!({
+            "model": "k3-256k",
+            "input": [
+                { "type": "compaction_trigger" },
+                { "type": "function_call", "call_id": "call_1", "name": "read", "arguments": "{}" },
+                { "type": "reasoning", "summary": [] },
+                { "type": "function_call_output", "call_id": "call_1", "output": "orphaned" },
+                { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "compact now" }] }
+            ]
+        });
+
+        let stats = trim_codex_compaction_input_for_context_retry(&mut body, 1, 2);
+        let input = body["input"].as_array().expect("input array");
+
+        // 可裁 3 个（call_1、reasoning、output_1）保留 1 个（output_1），
+        // call_1 被裁后 output_1 成孤儿，由孤儿清理删除。
+        assert_eq!(stats.removed_items, 3);
+        assert_eq!(stats.remaining_items, 2);
+        assert_eq!(input[0]["type"], "compaction_trigger");
+        assert_eq!(input[1]["type"], "message");
+    }
+
+    #[test]
+    fn compaction_trim_quarter_round_keeps_only_recent_items() {
+        // 第二轮（1/4）：8 个可裁 item 只保留最新 2 个。
+        let mut items = vec![json!({ "type": "compaction_trigger" })];
+        for index in 0..8 {
+            items.push(json!({
+                "type": "message",
+                "role": if index % 2 == 0 { "user" } else { "assistant" },
+                "content": [{ "type": "input_text", "text": format!("turn {index}") }]
+            }));
+        }
+        let mut body = json!({ "model": "k3-256k", "input": items });
+
+        let stats = trim_codex_compaction_input_for_context_retry(&mut body, 1, 4);
+        let input = body["input"].as_array().expect("input array");
+
+        // 最后一条 message（turn 7，压缩指令）是结构 item；可裁为 turn 0..=6
+        // 共 7 个，保留最新 1 个（7*1/4=1），裁掉 6 个。
+        assert_eq!(stats.removed_items, 6);
+        assert_eq!(stats.remaining_items, 3);
+        assert_eq!(input[0]["type"], "compaction_trigger");
+        assert_eq!(input[1]["content"][0]["text"], "turn 6");
+        assert_eq!(input[2]["content"][0]["text"], "turn 7");
+    }
+
+    #[test]
+    fn compaction_trim_without_droppable_history_returns_zero() {
+        // 只有控制 item 的压缩请求没有可裁内容，removed_items=0 让调用方
+        // 放弃重试，避免无效的上游调用。
+        let mut body = json!({
+            "model": "k3-256k",
+            "input": [
+                { "type": "compaction_trigger" },
+                { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "compact now" }] }
+            ]
+        });
+
+        let stats = trim_codex_compaction_input_for_context_retry(&mut body, 1, 2);
+
+        assert_eq!(stats.removed_items, 0);
+        assert_eq!(stats.remaining_items, 2);
+    }
+
+    #[test]
+    fn codex_oauth_responses_strips_double_prefixed_agent_message_ids() {
+        // 旧版规整曾把 amsg_... 加成 msg_amsg_...；官方按 store=false 转发时
+        // 不会持久化这些 id，直接移除才能避免前缀校验和 404。
+        let body = json!({
+            "model": "gpt-5.4",
+            "input": [
+                {
+                    "type": "agent_message",
+                    "id": "msg_amsg_019fc3fa-9b0a-7db1-9ca8-131d56d047ac",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "subagent done" }]
+                }
+            ]
+        });
+
+        let normalized = normalize_codex_oauth_responses_request(body, false);
+        let input = normalized["input"].as_array().expect("input array");
+
+        assert!(input[0].get("id").is_none());
+    }
+
+    #[test]
+    fn codex_oauth_responses_strips_replayed_message_ids() {
+        // 官方 OAuth 直透路径使用 store=false，历史 message id 不会被服务端
+        // 持久化；直接移除 id，让历史按内联内容发送。
+        let body = json!({
+            "model": "gpt-5.4",
+            "input": [
+                {
+                    "type": "message",
+                    "id": "resp_chatcmpl-2gyygAFeaDX2rFNtuG7mOhf9_msg",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "pong" }]
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "continue" }]
+                }
+            ]
+        });
+
+        let normalized = normalize_codex_oauth_responses_request(body, false);
+        let input = normalized["input"].as_array().expect("input array");
+
+        assert!(input[0].get("id").is_none());
+        assert_eq!(input[1].get("id"), None);
+    }
+
+    #[test]
+    fn codex_oauth_responses_strips_unpersisted_reasoning_ids() {
+        // 官方 store=false 时，Chat 上游合成的 reasoning id（rs_resp_chatcmpl-...）
+        // 在官方服务端不存在，回放会 404；必须移除 id。
+        let body = json!({
+            "model": "gpt-5.4",
+            "input": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_resp_chatcmpl-L2v9jyTIwSBd0avrEPO8umbl",
+                    "summary": [{ "type": "summary_text", "text": "thinking" }]
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "pong" }]
+                }
+            ]
+        });
+
+        let normalized = normalize_codex_oauth_responses_request(body, false);
+        let input = normalized["input"].as_array().expect("input array");
+
+        assert!(input[0].get("id").is_none());
+        assert!(input[1].get("id").is_none());
+    }
+
+    #[test]
+    fn codex_oauth_compaction_simulation_drops_all_history_ids() {
+        // 仿真：把三类报错 id（resp_chatcmpl-..._msg、rs_resp_chatcmpl-...、
+        // msg_amsg_...）放进同一个 compaction v2 请求，完整走官方 OAuth 归一化，
+        // 出站 input 必须不带任何历史 item id，内容与工具结构保持不变。
+        let body = json!({
+            "model": "gpt-5.6-luna",
+            "input": [
+                { "type": "compaction_trigger" },
+                {
+                    "type": "message",
+                    "id": "resp_chatcmpl-2gyygAFeaDX2rFNtuG7mOhf9_msg",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "old turn" }]
+                },
+                {
+                    "type": "reasoning",
+                    "id": "rs_resp_chatcmpl-L2v9jyTIwSBd0avrEPO8umbl",
+                    "summary": [{ "type": "summary_text", "text": "thinking" }]
+                },
+                {
+                    "type": "agent_message",
+                    "id": "msg_amsg_019fc3fa-9b0a-7db1-9ca8-131d56d047ac",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "subagent done" }]
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "done"
+                }
+            ]
+        });
+
+        let normalized = normalize_codex_oauth_responses_request(body, false);
+        let input = normalized["input"].as_array().expect("input array");
+
+        assert_eq!(input[0]["type"], "compaction_trigger");
+        for item in input {
+            assert!(
+                item.get("id").is_none(),
+                "official input must not carry replayed ids: {item}"
+            );
+        }
+        assert_eq!(input[1]["content"][0]["text"], "old turn");
+        assert_eq!(input[2]["summary"][0]["text"], "thinking");
+        assert_eq!(input[3]["content"][0]["text"], "subagent done");
+        assert_eq!(input[4]["call_id"], "call_1");
+    }
+
+    #[test]
+    fn codex_oauth_responses_normalizes_message_ids_in_compaction_request() {
+        // Codex pre-turn compaction v2 会把整段历史放进 /responses 请求再发往官方，
+        // 历史里残留的 Chat 上游 message id 同样会触发 input[N].id 校验失败。
+        let body = json!({
+            "model": "gpt-5.6-luna",
+            "input": [
+                { "type": "compaction_trigger" },
+                {
+                    "type": "message",
+                    "id": "resp_chatcmpl-2gyygAFeaDX2rFNtuG7mOhf9_msg",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "old turn" }]
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "done"
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "compact now" }]
+                }
+            ]
+        });
+
+        let normalized = normalize_codex_oauth_responses_request(body, false);
+        let input = normalized["input"].as_array().expect("input array");
+
+        assert_eq!(input[0]["type"], "compaction_trigger");
+        assert!(input[1].get("id").is_none());
+        assert_eq!(input[2]["type"], "function_call_output");
+        assert!(input[3].get("id").is_none());
     }
 
     #[test]

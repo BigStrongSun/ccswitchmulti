@@ -844,19 +844,21 @@ fn map_reasoning_effort(effort: &str, mode: Option<&str>) -> Option<&'static str
 /// 否则返回 `invalid params, chat content has invalid message role: system (2013)`。
 /// 把所有 system 消息合并到首位，避免中间 system（如 Codex 的 `developer` 指令）触发该约束；
 /// 该重排对 OpenAI / DeepSeek 等宽松兼容层也是无损的。
+/// content 为 null / 空串 / 空白 / 空 part 数组的 system 消息对上游没有信息价值，
+/// Kimi 等严格端点会以 "message at position N with role 'system' must not be
+/// empty" 400 整请求，这里一并丢弃；数组形态的非空 system 统一提取文本后合并，
+/// 字符串是所有第三方 Chat 端点都接受的最大公约形态。
 fn collapse_system_messages_to_head(messages: Vec<Value>) -> Vec<Value> {
     let mut system_chunks: Vec<String> = Vec::new();
     let mut rest: Vec<Value> = Vec::with_capacity(messages.len());
 
     for msg in messages {
         if msg.get("role").and_then(|v| v.as_str()) == Some("system") {
-            if let Some(text) = msg.get("content").and_then(|v| v.as_str()) {
-                let trimmed = text.trim();
-                if !trimmed.is_empty() {
-                    system_chunks.push(text.to_string());
-                }
-                continue;
+            let text = chat_system_message_text(&msg);
+            if !text.trim().is_empty() {
+                system_chunks.push(text);
             }
+            continue;
         }
         rest.push(msg);
     }
@@ -870,6 +872,25 @@ fn collapse_system_messages_to_head(messages: Vec<Value>) -> Vec<Value> {
     }
     out.extend(rest);
     out
+}
+
+/// 提取 chat system 消息的可读文本，兼容字符串与 content part 数组形态；
+/// null / 缺失 / 空白片段统一归为空串。
+fn chat_system_message_text(message: &Value) -> String {
+    match message.get("content") {
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Array(parts)) => parts
+            .iter()
+            .filter_map(|part| {
+                part.get("text")
+                    .and_then(Value::as_str)
+                    .or_else(|| part.as_str())
+            })
+            .filter(|text| !text.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        _ => String::new(),
+    }
 }
 
 fn instruction_text(value: &Value) -> String {
@@ -2009,7 +2030,7 @@ fn chat_message_to_response_output_item(message: &Value, response_id: &str) -> O
     }
 
     Some(json!({
-        "id": format!("{response_id}_msg"),
+        "id": format!("msg_{response_id}"),
         "type": "message",
         "status": "completed",
         "role": "assistant",
@@ -2019,7 +2040,7 @@ fn chat_message_to_response_output_item(message: &Value, response_id: &str) -> O
 
 fn empty_assistant_message_output_item(response_id: &str) -> Value {
     json!({
-        "id": format!("{response_id}_msg"),
+        "id": format!("msg_{response_id}"),
         "type": "message",
         "status": "incomplete",
         "role": "assistant",
@@ -3794,6 +3815,78 @@ mod tests {
     }
 
     #[test]
+    fn collapse_system_messages_drops_effectively_empty_system() {
+        // Kimi 严格端点会拒绝空 system 消息（400 "system must not be empty"）；
+        // null / 空串 / 空白 / 空 part 数组形态都必须被丢弃，而非透传。
+        let input = vec![
+            json!({"role": "system", "content": null}),
+            json!({"role": "system", "content": ""}),
+            json!({"role": "system", "content": "   "}),
+            json!({"role": "system", "content": []}),
+            json!({"role": "system", "content": [{"type": "text", "text": ""}]}),
+            json!({"role": "user", "content": "U1"}),
+        ];
+        let out = collapse_system_messages_to_head(input);
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["role"], "user");
+    }
+
+    #[test]
+    fn collapse_system_messages_extracts_text_from_array_content() {
+        // 数组形态的非空 system 统一提取文本合并到首位；字符串是所有第三方
+        // Chat 端点都接受的形态，数组 system content 会被部分严格端点拒绝。
+        let input = vec![
+            json!({"role": "system", "content": [{"type": "text", "text": "S1"}, {"type": "text", "text": "S2"}]}),
+            json!({"role": "user", "content": "U1"}),
+        ];
+        let out = collapse_system_messages_to_head(input);
+
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0]["role"], "system");
+        assert_eq!(out[0]["content"], "S1\n\nS2");
+        assert_eq!(out[1]["content"], "U1");
+    }
+
+    #[test]
+    fn responses_to_chat_drops_empty_developer_message_for_strict_upstreams() {
+        // 端到端：静态 agent 类型（无 role prompt）可能产生空的 developer/system
+        // input item；转换后的 Chat 请求不得携带空 system 消息，否则 Kimi 400。
+        let body = json!({
+            "model": "k3-256k",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": [{"type": "input_text", "text": ""}]
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "PING_123"}]
+                }
+            ]
+        });
+
+        let result = responses_to_chat_completions_with_reasoning_text_only_and_cache(
+            body, None, None, None,
+        )
+        .expect("chat conversion");
+        let messages = result["messages"].as_array().expect("messages array");
+
+        assert!(
+            messages.iter().all(|message| {
+                message.get("role").and_then(Value::as_str) != Some("system")
+                    || message["content"]
+                        .as_str()
+                        .is_some_and(|text| !text.trim().is_empty())
+            }),
+            "no empty system message may leak to strict upstreams: {messages:?}"
+        );
+        assert_eq!(messages[0]["role"], "user");
+    }
+
+    #[test]
     fn responses_request_to_chat_passes_reasoning_content_back_to_assistant_message() {
         let input = json!({
             "model": "gpt-5.4",
@@ -3942,6 +4035,31 @@ mod tests {
             "bounded compact summary"
         );
         assert_eq!(result["model"], "route-model-after-switch");
+    }
+
+    #[test]
+    fn chat_completion_message_item_uses_msg_prefixed_id() {
+        // Codex 会持久化输出 message 的 id 并在下一轮回放；第三方 Chat 上游
+        // 转换出的 id 必须带 msg_ 前缀，否则切回官方 /responses 会被拒绝。
+        let chat = json!({
+            "id": "chatcmpl-2gyygAFeaDX2rFNtuG7mOhf9",
+            "model": "k3",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "pong"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        });
+
+        let result = chat_completion_to_response(chat).unwrap();
+        let output = result["output"].as_array().unwrap();
+        let message = output
+            .iter()
+            .find(|item| item["type"] == "message")
+            .expect("message output item");
+
+        assert_eq!(message["id"], "msg_resp_chatcmpl-2gyygAFeaDX2rFNtuG7mOhf9");
     }
 
     #[test]
