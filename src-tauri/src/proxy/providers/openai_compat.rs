@@ -247,7 +247,8 @@ pub(crate) fn normalize_codex_responses_passthrough_request_for_transport(
 /// - `request_body`: Codex Responses 请求体。
 ///   返回:
 /// - function_call arguments 已规整、消息类 item id 已按类型补
-///   `msg_`/`amsg_` 前缀，其余结构保持不变的请求体。
+///   `msg_`/`amsg_` 前缀、reasoning item 已按第三方可回放性规整，
+///   其余结构保持不变的请求体。
 ///   副作用:
 /// - 无。函数只转换传入 JSON 值。
 ///   边界:
@@ -261,6 +262,7 @@ fn normalize_codex_responses_passthrough_items(request_body: Value) -> Value {
 
     normalize_codex_responses_function_call_arguments(&mut body);
     normalize_codex_responses_input_item_ids(&mut body);
+    normalize_codex_responses_passthrough_reasoning_items(&mut body);
 
     Value::Object(body)
 }
@@ -441,6 +443,88 @@ fn normalize_codex_responses_input_item_ids(body: &mut Map<String, Value>) {
         }
         *id = format!("{expected_prefix}{id}");
     }
+}
+
+/// 规整第三方 Responses 透传请求中的 reasoning item。
+///
+/// 官方路由回放的 reasoning item 只带 OpenAI 私有 `encrypted_content`，没有
+/// 可读文本；DeepSeek 等 thinking 模式上游要求历史 reasoning 必须携带
+/// `reasoning_text`，否则整请求 400（compaction v2 会回放完整历史，必然命中）。
+/// 这里按可回放性处理：已有文本 content 的原样保留；只有 summary 文本的提升为
+/// `reasoning_text` content 并移除私有密文；什么文本都没有的 item 直接丢弃。
+fn normalize_codex_responses_passthrough_reasoning_items(body: &mut Map<String, Value>) {
+    let Some(Value::Array(items)) = body.get_mut("input") else {
+        return;
+    };
+
+    items.retain_mut(|item| {
+        let Value::Object(object) = item else {
+            return true;
+        };
+        if object.get("type").and_then(Value::as_str) != Some("reasoning") {
+            return true;
+        }
+        if codex_responses_reasoning_item_has_text_content(object) {
+            return true;
+        }
+        object.remove("encrypted_content");
+        match codex_responses_reasoning_summary_to_content(object.get("summary")) {
+            Some(content) => {
+                object.insert("content".to_string(), content);
+                true
+            }
+            // 密文已随 encrypted_content 移除；无任何可读文本的 reasoning item
+            // 对第三方上游没有信息价值，只会触发 thinking 模式校验。
+            None => false,
+        }
+    });
+}
+
+/// 判断 reasoning item 的 content 是否已包含可回放的文本。
+///
+/// 参数:
+/// - `object`: `type=reasoning` 的 Responses input item。
+///   返回:
+/// - `true` 表示 content 里已有非空 reasoning 文本，第三方上游可直接接受。
+///   副作用:
+/// - 无。
+fn codex_responses_reasoning_item_has_text_content(object: &Map<String, Value>) -> bool {
+    let Some(content) = object.get("content") else {
+        return false;
+    };
+    let mut texts = Vec::new();
+    collect_codex_oauth_reasoning_content_text(content, &mut texts);
+    !texts.is_empty()
+}
+
+/// 把 reasoning summary 文本提升为第三方接受的 `reasoning_text` content。
+///
+/// 参数:
+/// - `summary`: reasoning item 的 `summary` 字段。
+///   返回:
+/// - 有可读文本时返回 `reasoning_text` 数组；否则返回 `None`。
+///   副作用:
+/// - 无。
+fn codex_responses_reasoning_summary_to_content(summary: Option<&Value>) -> Option<Value> {
+    let texts: Vec<String> = summary
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+        .collect();
+    if texts.is_empty() {
+        return None;
+    }
+
+    Some(Value::Array(
+        texts
+            .into_iter()
+            .map(|text| json!({ "type": "reasoning_text", "text": text }))
+            .collect(),
+    ))
 }
 
 /// 提升 Codex Responses input 中的 system/developer 控制消息。
@@ -2491,6 +2575,142 @@ mod tests {
         let input = normalized["input"].as_array().expect("input array");
 
         assert_eq!(input[0]["id"], "amsg_019fc3fa-9b0a-7db1-9ca8-131d56d047ac");
+    }
+
+    #[test]
+    fn codex_responses_passthrough_keeps_native_reasoning_text_content() {
+        // DeepSeek thinking 模式自身产生的 reasoning item 带 reasoning_text content，
+        // 回放时必须原样保留，否则上游 400。
+        let body = json!({
+            "model": "deepseek-v4-flash",
+            "input": [
+                {
+                    "type": "reasoning",
+                    "id": "93b00248-92fc-40a5-a15e-69fff8d66599",
+                    "summary": [],
+                    "content": [{ "type": "reasoning_text", "text": "inspect the route first" }]
+                }
+            ]
+        });
+
+        let normalized = normalize_codex_responses_passthrough_request(body);
+        let input = normalized["input"].as_array().expect("input array");
+
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["content"][0]["type"], "reasoning_text");
+        assert_eq!(input[0]["content"][0]["text"], "inspect the route first");
+    }
+
+    #[test]
+    fn codex_responses_passthrough_promotes_encrypted_reasoning_summary_to_content() {
+        // 官方路由回放的 reasoning item 只有 OpenAI 私有 encrypted_content 和 summary
+        // 文本；透传给第三方时把 summary 提升为 reasoning_text content 并移除密文，
+        // 让 DeepSeek thinking 模式有可回放的文本。
+        let body = json!({
+            "model": "deepseek-v4-flash",
+            "input": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_03daef03bee90739",
+                    "summary": [{ "type": "summary_text", "text": "Need to inspect the code." }],
+                    "encrypted_content": "gAAAAAB..."
+                }
+            ]
+        });
+
+        let normalized = normalize_codex_responses_passthrough_request(body);
+        let input = normalized["input"].as_array().expect("input array");
+
+        assert_eq!(input.len(), 1);
+        assert!(input[0].get("encrypted_content").is_none());
+        assert_eq!(input[0]["content"][0]["type"], "reasoning_text");
+        assert_eq!(input[0]["content"][0]["text"], "Need to inspect the code.");
+    }
+
+    #[test]
+    fn codex_responses_passthrough_drops_unrecoverable_encrypted_reasoning() {
+        // 官方路由回放里 encrypted_content + 空 summary 的 reasoning item 没有任何
+        // 可读文本，第三方 thinking 模式上游会因此整请求 400；直接丢弃。
+        let body = json!({
+            "model": "deepseek-v4-flash",
+            "input": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_03daef03bee90739",
+                    "summary": [],
+                    "encrypted_content": "gAAAAAB..."
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "pong" }]
+                }
+            ]
+        });
+
+        let normalized = normalize_codex_responses_passthrough_request(body);
+        let input = normalized["input"].as_array().expect("input array");
+
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["type"], "message");
+    }
+
+    #[test]
+    fn codex_responses_passthrough_compaction_simulation_recovers_reasoning_history() {
+        // 仿真：跨路由会话的 compaction v2 请求混合三类 reasoning item
+        // （DeepSeek 原生、官方带 summary、官方空 summary），出站必须全部
+        // 满足 thinking 模式上游的 reasoning_text 校验。
+        let body = json!({
+            "model": "deepseek-v4-flash",
+            "input": [
+                { "type": "compaction_trigger" },
+                {
+                    "type": "reasoning",
+                    "summary": [],
+                    "content": [{ "type": "reasoning_text", "text": "native thinking" }]
+                },
+                {
+                    "type": "reasoning",
+                    "id": "rs_official_1",
+                    "summary": [{ "type": "summary_text", "text": "official summary" }],
+                    "encrypted_content": "gAAAAAB..."
+                },
+                {
+                    "type": "reasoning",
+                    "id": "rs_official_2",
+                    "summary": [],
+                    "encrypted_content": "gAAAAAB..."
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "compact now" }]
+                }
+            ]
+        });
+
+        let normalized = normalize_codex_responses_passthrough_request(body);
+        let input = normalized["input"].as_array().expect("input array");
+
+        assert_eq!(input.len(), 4);
+        assert_eq!(input[0]["type"], "compaction_trigger");
+        assert_eq!(input[1]["content"][0]["text"], "native thinking");
+        assert!(input[2].get("encrypted_content").is_none());
+        assert_eq!(input[2]["content"][0]["type"], "reasoning_text");
+        assert_eq!(input[2]["content"][0]["text"], "official summary");
+        assert_eq!(input[3]["type"], "message");
+        for item in input {
+            if item["type"] == "reasoning" {
+                assert!(
+                    item["content"].as_array().is_some_and(|parts| parts
+                        .iter()
+                        .any(|part| part["text"]
+                            .as_str()
+                            .is_some_and(|text| !text.trim().is_empty()))),
+                    "third-party reasoning item must carry reasoning text: {item}"
+                );
+            }
+        }
     }
 
     #[test]
