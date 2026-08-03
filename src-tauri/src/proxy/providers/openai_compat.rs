@@ -2571,6 +2571,56 @@ mod tests {
     }
 
     #[test]
+    fn codex_oauth_compaction_simulation_drops_all_history_ids() {
+        // 仿真：把三类报错 id（resp_chatcmpl-..._msg、rs_resp_chatcmpl-...、
+        // msg_amsg_...）放进同一个 compaction v2 请求，完整走官方 OAuth 归一化，
+        // 出站 input 必须不带任何历史 item id，内容与工具结构保持不变。
+        let body = json!({
+            "model": "gpt-5.6-luna",
+            "input": [
+                { "type": "compaction_trigger" },
+                {
+                    "type": "message",
+                    "id": "resp_chatcmpl-2gyygAFeaDX2rFNtuG7mOhf9_msg",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "old turn" }]
+                },
+                {
+                    "type": "reasoning",
+                    "id": "rs_resp_chatcmpl-L2v9jyTIwSBd0avrEPO8umbl",
+                    "summary": [{ "type": "summary_text", "text": "thinking" }]
+                },
+                {
+                    "type": "agent_message",
+                    "id": "msg_amsg_019fc3fa-9b0a-7db1-9ca8-131d56d047ac",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "subagent done" }]
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "done"
+                }
+            ]
+        });
+
+        let normalized = normalize_codex_oauth_responses_request(body, false);
+        let input = normalized["input"].as_array().expect("input array");
+
+        assert_eq!(input[0]["type"], "compaction_trigger");
+        for item in input {
+            assert!(
+                item.get("id").is_none(),
+                "official input must not carry replayed ids: {item}"
+            );
+        }
+        assert_eq!(input[1]["content"][0]["text"], "old turn");
+        assert_eq!(input[2]["summary"][0]["text"], "thinking");
+        assert_eq!(input[3]["content"][0]["text"], "subagent done");
+        assert_eq!(input[4]["call_id"], "call_1");
+    }
+
+    #[test]
     fn codex_oauth_responses_normalizes_message_ids_in_compaction_request() {
         // Codex pre-turn compaction v2 会把整段历史放进 /responses 请求再发往官方，
         // 历史里残留的 Chat 上游 message id 同样会触发 input[N].id 校验失败。
