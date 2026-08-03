@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
-  ProxyConfig,
   ProxyStatus,
+  ProxyConfig,
   ProxyServerInfo,
   ProxyTakeoverStatus,
   GlobalProxyConfig,
@@ -27,6 +27,11 @@ export const proxyApi = {
   // 启动代理服务器
   async startProxyServer(): Promise<ProxyServerInfo> {
     return invoke("start_proxy_server");
+  },
+
+  // 停止代理服务器（不恢复已接管配置）
+  async stopProxyServer(): Promise<void> {
+    return invoke("stop_proxy_server");
   },
 
   // 停止代理服务器并恢复配置
@@ -97,7 +102,6 @@ export const proxyApi = {
   ): Promise<void> {
     return invoke("switch_proxy_provider", { appType, providerId });
   },
-
   // ========== 接管状态 API ==========
 
   // 获取各应用接管状态
@@ -150,7 +154,6 @@ export const proxyApi = {
   ): Promise<ExternalOpenAIAPIProfile> {
     return invoke("delete_external_openai_api_key", { keyId });
   },
-
   // ========== v3+ 全局/应用级配置 API ==========
 
   // 获取全局代理配置
