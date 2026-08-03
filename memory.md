@@ -10,9 +10,11 @@
   `{response_id}_msg`；第三方 native Responses 也可能返回自己的非标准 message ID。
   修复同时覆盖源头与边界：所有 CCSM 合成的 message item 使用
   `response_message_item_id()` 生成 `msg_` ID；混合历史进入 OpenAI official route 前，
-  按 item 类型把非规范 message ID 确定性映射成 `msg_ccswitch_<sha256>`、把非规范
-  web search ID 映射成 `ws_ccswitch_<sha256>`。已合法官方 ID、其他 item 类型与第三方
-  目标不改，旧会话无需改写持久化历史即可恢复。现场另一旧任务中的
+  按 item 类型把非规范 ID 确定性映射到官方命名空间：message=`msg_`、无加密内容的
+  reasoning=`rs_`、function call=`fc_`、custom tool call=`ctc_`、web search=`ws_`。
+  已合法官方 ID、第三方目标与带非空 `encrypted_content` 的 reasoning 不改；后者的
+  opaque payload 可能绑定原 provider/item identity，不能为了通过前缀校验盲目改写。
+  旧会话无需改写持久化历史即可恢复。现场另一旧任务中的
   `type=web_search_call,id=call_00_A89zZLtxMP15J0arnpWo8734` 因此也不会再触发
   `Expected an ID that begins with 'ws'`。
 - `422 Upstream returned an empty compaction summary` 的现场上游状态实际为 200 SSE，
@@ -29,6 +31,13 @@
   7/7。Anthropic transform 仍只有既有
   `test_request_tools_and_filtering` 与
   `test_request_custom_tool_survives_with_required_choice` 两项断言失败。
+- 2026-08-03 provider-agnostic 补充审计确认：DeepSeek 只是本次生成 Chat 响应和
+  data-only SSE 的触发上游，不是根因边界。相同故障可由任何 Chat/Anthropic 转换器或
+  非规范 native Responses 上游产生，并在稍后切换到严格 OpenAI official route 时暴露。
+  `function_call_output` / `custom_tool_call_output` 使用 `call_id` 配对而不是 item `id`；
+  `tool_search_call` 与 `local_shell_call` 在当前公开材料中缺少足够的严格前缀证据，不能
+  猜前缀改写。完整矩阵见
+  `docs/codex-cross-provider-responses-compatibility-audit-2026-08-03.md`。
 
 ## 2026-08-03 第三方 Codex provider 默认本地压缩与远程压缩 opt-in
 
