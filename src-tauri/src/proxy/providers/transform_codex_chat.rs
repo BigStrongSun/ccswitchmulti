@@ -210,6 +210,31 @@ impl CodexToolContext {
         self.hosted_image_generation.as_ref()
     }
 
+    /// 按 MultiRouter 开关移除已禁用的 hosted tools。
+    ///
+    /// 未显式写入开关时默认开启，保持现有行为。
+    pub(crate) fn apply_hosted_tool_switches(
+        &mut self,
+        web_search_enabled: bool,
+        image_generation_enabled: bool,
+    ) {
+        if !web_search_enabled {
+            self.hosted_web_search = None;
+            self.remove_chat_tool(web_search::WEB_SEARCH_FUNCTION_NAME);
+        }
+        if !image_generation_enabled {
+            self.hosted_image_generation = None;
+            self.remove_chat_tool(IMAGE_GENERATION_FUNCTION_NAME);
+        }
+    }
+
+    fn remove_chat_tool(&mut self, name: &str) {
+        self.seen_chat_names.remove(name);
+        self.chat_name_to_spec.remove(name);
+        self.chat_tools
+            .retain(|tool| tool.pointer("/function/name").and_then(Value::as_str) != Some(name));
+    }
+
     pub(crate) fn chat_name_for_response_function(
         &self,
         name: &str,
@@ -3202,6 +3227,32 @@ mod tests {
         );
         assert_eq!(result["tool_choice"]["type"], "function");
         assert_eq!(result["tool_choice"]["function"]["name"], "generate_image");
+    }
+
+    #[test]
+    fn hosted_tool_switches_filter_context_chat_tools() {
+        let request = json!({
+            "model": "kimi-k3",
+            "tools": [
+                { "type": "web_search" },
+                { "type": "image_generation" }
+            ],
+            "input": "Use hosted tools."
+        });
+        let mut context = build_codex_tool_context_from_request(&request);
+
+        assert_eq!(context.chat_tools().len(), 2);
+        context.apply_hosted_tool_switches(true, false);
+
+        assert_eq!(context.chat_tools().len(), 1);
+        assert_eq!(
+            context.chat_tools()[0]
+                .pointer("/function/name")
+                .and_then(Value::as_str),
+            Some("web_search")
+        );
+        assert!(context.hosted_web_search_config().is_some());
+        assert!(context.hosted_image_generation_config().is_none());
     }
 
     #[test]

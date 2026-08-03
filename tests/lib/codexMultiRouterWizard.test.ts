@@ -582,6 +582,31 @@ describe("codexMultiRouterWizard helpers", () => {
     ]);
   });
 
+  it("persists hosted tool switches on the wizard plan", () => {
+    const relay = provider({
+      id: "relay",
+      name: "Relay",
+      settingsConfig: {
+        modelCatalog: {
+          models: [{ model: "model-a", upstreamModel: "model-a" }],
+        },
+      },
+    });
+
+    const { plan } = buildCodexMultiRouterWizardPlan([relay], [relay], null, {
+      planName: "Hosted Tools Router",
+      hostedTools: {
+        webSearch: { enabled: false },
+        imageGeneration: { enabled: true },
+      },
+    });
+
+    expect(plan.settingsConfig.hostedTools).toEqual({
+      webSearch: { enabled: false },
+      imageGeneration: { enabled: true },
+    });
+  });
+
   it("reports config issues only for sources without fetch config or model catalog", () => {
     const incomplete = provider({
       id: "empty-relay",

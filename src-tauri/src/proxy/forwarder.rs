@@ -2286,6 +2286,15 @@ impl RequestForwarder {
                     ),
                 );
             }
+            if let Some(context) = codex_chat_tool_context.as_mut() {
+                context.apply_hosted_tool_switches(
+                    hosted_tool_bridge_enabled(&codex_router_provider.settings_config, "webSearch"),
+                    hosted_tool_bridge_enabled(
+                        &codex_router_provider.settings_config,
+                        "imageGeneration",
+                    ),
+                );
+            }
             let mut chat_body = super::providers::transform_codex_chat::responses_to_chat_completions_with_reasoning_text_only_and_cache(
                 mapped_body,
                 reasoning_config.as_ref(),
@@ -5630,6 +5639,14 @@ fn is_managed_account_upstream_url(url: &str) -> bool {
         || host.ends_with(".githubcopilot.com")
         || (host == "chatgpt.com" && uri.path().starts_with("/backend-api/codex"))
         || (host == "api.x.ai" && uri.path().starts_with("/v1/"))
+}
+
+/// 读取 MultiRouter 级 hosted tool 开关；未配置时默认开启。
+fn hosted_tool_bridge_enabled(settings: &Value, tool: &str) -> bool {
+    settings
+        .pointer(&format!("/hostedTools/{tool}/enabled"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
 }
 
 /// 运行 Chat 上游上的 hosted tools 本地工具循环。

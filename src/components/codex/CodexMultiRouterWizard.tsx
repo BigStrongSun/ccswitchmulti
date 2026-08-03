@@ -85,6 +85,11 @@ import {
   type WizardConnectivityResult,
   type WizardModelFetchConfig,
 } from "@/lib/codexMultiRouterWizard";
+import {
+  DEFAULT_HOSTED_TOOLS_CONFIG,
+  readHostedToolsConfig,
+} from "@/lib/hostedTools";
+import { HostedToolsSwitchPanel } from "./HostedToolsSwitchPanel";
 import type { WorkspaceTab } from "@/components/codex/CodexRouterWorkspacePage";
 import { codexCatalogOnlyPlanModelFetchMessage } from "@/utils/codexPlanModelFetch";
 import { CodexOAuthSection } from "@/components/providers/forms/CodexOAuthSection";
@@ -926,6 +931,8 @@ export function CodexMultiRouterWizard({
   );
   const [draftOfficialAuth, setDraftOfficialAuth] =
     useState<CodexOfficialAuthConfig>(DEFAULT_CODEX_OFFICIAL_AUTH);
+  const [webSearchEnabled, setWebSearchEnabled] = useState(true);
+  const [imageGenerationEnabled, setImageGenerationEnabled] = useState(true);
   const [catalogModelOrder, setCatalogModelOrder] = useState<string[] | null>(
     null,
   );
@@ -1038,6 +1045,11 @@ export function CodexMultiRouterWizard({
       inferCodexOfficialAuth(existingPlan?.settingsConfig?.codexRouting) ??
         DEFAULT_CODEX_OFFICIAL_AUTH,
     );
+    const hostedTools = existingPlan
+      ? readHostedToolsConfig(existingPlan)
+      : DEFAULT_HOSTED_TOOLS_CONFIG;
+    setWebSearchEnabled(hostedTools.webSearch.enabled);
+    setImageGenerationEnabled(hostedTools.imageGeneration.enabled);
     // 复用统一的安全目录读取，历史方案中混入 null/原始值时不能让整个窗口白屏。
     setCatalogModelOrder(
       existingPlan
@@ -1795,6 +1807,10 @@ export function CodexMultiRouterWizard({
           catalogModelOrder: activeCatalogModelOrder,
           spawnAgentModels: activeSpawnAgentModels,
           officialAuth: draftOfficialAuth,
+          hostedTools: {
+            webSearch: { enabled: webSearchEnabled },
+            imageGeneration: { enabled: imageGenerationEnabled },
+          },
         },
       );
       if (existingPlan) {
@@ -2163,6 +2179,15 @@ export function CodexMultiRouterWizard({
                     Key，或继续使用已有 modelCatalog。
                   </div>
                 )}
+                <HostedToolsSwitchPanel
+                  webSearchEnabled={webSearchEnabled}
+                  imageGenerationEnabled={imageGenerationEnabled}
+                  onChange={(next) => {
+                    setWebSearchEnabled(next.webSearchEnabled);
+                    setImageGenerationEnabled(next.imageGenerationEnabled);
+                  }}
+                  disabled={isSavingPlan}
+                />
                 <div className="max-h-[min(46vh,32rem)] space-y-3 overflow-y-auto pr-2">
                   {draftSources.map((provider) => {
                     const status = providerConfigStatus(

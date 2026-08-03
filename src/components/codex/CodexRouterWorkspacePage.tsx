@@ -78,6 +78,11 @@ import {
   resolveWizardModelNameCollisions,
 } from "@/lib/codexMultiRouterWizard";
 import { syncCodexMultiRouterPlanWithProviders } from "@/lib/codexMultiRouterSync";
+import {
+  DEFAULT_HOSTED_TOOLS_CONFIG,
+  readHostedToolsConfig,
+  writeHostedToolsConfig,
+} from "@/lib/hostedTools";
 import { usageApi } from "@/lib/api/usage";
 import {
   usageKeys,
@@ -106,6 +111,7 @@ import {
   isCodexCatalogOnlyPlanModelFetch,
 } from "@/utils/codexPlanModelFetch";
 import { useCodexOauth } from "@/components/providers/forms/hooks/useCodexOauth";
+import { HostedToolsSwitchPanel } from "./HostedToolsSwitchPanel";
 import type {
   CodexOfficialAuthConfig,
   CodexOfficialAuthMode,
@@ -341,6 +347,10 @@ type MultiRouterSettingsDraft = {
   enabled: boolean;
   defaultRouteId?: string;
   officialAuth: CodexOfficialAuthConfig;
+  hostedTools: {
+    webSearch: boolean;
+    imageGeneration: boolean;
+  };
 };
 
 export function resolveCodexRouterAuthFacadeLabel(
@@ -1799,6 +1809,7 @@ export function createDraftRoutingPlan(
         enabled: true,
         routes: [],
       },
+      hostedTools: DEFAULT_HOSTED_TOOLS_CONFIG,
     },
     createdAt: Date.now(),
   };
@@ -1841,25 +1852,31 @@ export function applyMultiRouterSettingsDraft(
     ...plan,
     name: draft.name.trim() || plan.name,
     notes: draft.notes?.trim() || undefined,
-    settingsConfig: {
-      ...plan.settingsConfig,
-      auth: plan.settingsConfig?.auth ?? {},
-      base_url:
-        plan.settingsConfig?.base_url ??
-        buildCodexProxyBaseUrl(
-          DEFAULT_CODEX_PROXY_LISTEN_ADDRESS,
-          DEFAULT_CODEX_PROXY_LISTEN_PORT,
-        ),
-      baseUrl:
-        plan.settingsConfig?.baseUrl ??
-        plan.settingsConfig?.base_url ??
-        buildCodexProxyBaseUrl(
-          DEFAULT_CODEX_PROXY_LISTEN_ADDRESS,
-          DEFAULT_CODEX_PROXY_LISTEN_PORT,
-        ),
-      config: plan.settingsConfig?.config ?? null,
-      codexRouting: nextRouting,
-    },
+    settingsConfig: writeHostedToolsConfig(
+      {
+        ...plan.settingsConfig,
+        auth: plan.settingsConfig?.auth ?? {},
+        base_url:
+          plan.settingsConfig?.base_url ??
+          buildCodexProxyBaseUrl(
+            DEFAULT_CODEX_PROXY_LISTEN_ADDRESS,
+            DEFAULT_CODEX_PROXY_LISTEN_PORT,
+          ),
+        baseUrl:
+          plan.settingsConfig?.baseUrl ??
+          plan.settingsConfig?.base_url ??
+          buildCodexProxyBaseUrl(
+            DEFAULT_CODEX_PROXY_LISTEN_ADDRESS,
+            DEFAULT_CODEX_PROXY_LISTEN_PORT,
+          ),
+        config: plan.settingsConfig?.config ?? null,
+        codexRouting: nextRouting,
+      },
+      {
+        webSearch: { enabled: draft.hostedTools.webSearch },
+        imageGeneration: { enabled: draft.hostedTools.imageGeneration },
+      },
+    ),
   };
 }
 
@@ -3979,6 +3996,13 @@ function MultiRouterSettingsPanel({
   const [officialAccountId, setOfficialAccountId] = useState(
     initialOfficialAuth.accountId ?? "",
   );
+  const initialHostedTools = readHostedToolsConfig(selectedPlan);
+  const [webSearchEnabled, setWebSearchEnabled] = useState(
+    initialHostedTools.webSearch.enabled,
+  );
+  const [imageGenerationEnabled, setImageGenerationEnabled] = useState(
+    initialHostedTools.imageGeneration.enabled,
+  );
   const [restartNotice, setRestartNotice] = useState<string | null>(null);
   const { data: accountPoolPolicy } = useQuery({
     queryKey: ["codex-account-pool-policy"],
@@ -4009,6 +4033,9 @@ function MultiRouterSettingsPanel({
     const officialAuth = readRouterOfficialAuth(routing);
     setOfficialAuthMode(officialAuth.mode);
     setOfficialAccountId(officialAuth.accountId ?? "");
+    const hostedTools = readHostedToolsConfig(selectedPlan);
+    setWebSearchEnabled(hostedTools.webSearch.enabled);
+    setImageGenerationEnabled(hostedTools.imageGeneration.enabled);
   }, [selectedPlan]);
 
   useEffect(() => {
@@ -4083,6 +4110,10 @@ function MultiRouterSettingsPanel({
       enabled,
       defaultRouteId,
       officialAuth: nextOfficialAuth,
+      hostedTools: {
+        webSearch: webSearchEnabled,
+        imageGeneration: imageGenerationEnabled,
+      },
     });
     setRestartNotice(
       previousFacade !== nextFacade &&
@@ -4216,6 +4247,15 @@ function MultiRouterSettingsPanel({
               disabled={isSaving || isSavingListener}
             />
           </label>
+          <HostedToolsSwitchPanel
+            webSearchEnabled={webSearchEnabled}
+            imageGenerationEnabled={imageGenerationEnabled}
+            onChange={(next) => {
+              setWebSearchEnabled(next.webSearchEnabled);
+              setImageGenerationEnabled(next.imageGenerationEnabled);
+            }}
+            disabled={isSaving || isSavingListener}
+          />
           <div className="grid gap-2">
             <label className="text-xs font-semibold text-muted-foreground dark:text-slate-300">
               默认路由

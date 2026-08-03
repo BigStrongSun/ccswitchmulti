@@ -2449,6 +2449,10 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       enabled: false,
       defaultRouteId: "missing-route",
       officialAuth: { mode: "desktop_current_login" },
+      hostedTools: {
+        webSearch: false,
+        imageGeneration: true,
+      },
     });
 
     expect(updated.name).toBe("Daily MultiRouter");
@@ -2463,6 +2467,10 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       readCodexRouting(savedPlan)?.routes,
     );
     expect(readCodexRouting(updated)?.defaultRouteId).toBeUndefined();
+    expect(updated.settingsConfig.hostedTools).toEqual({
+      webSearch: { enabled: false },
+      imageGeneration: { enabled: true },
+    });
   });
 
   it("normalizes listener config into a usable Codex proxy base url", () => {
@@ -2523,6 +2531,10 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       name: plan.name,
       enabled: true,
       officialAuth: { mode: "account_pool" },
+      hostedTools: {
+        webSearch: true,
+        imageGeneration: false,
+      },
     });
     const routing = readCodexRouting(updated)!;
 

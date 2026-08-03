@@ -9,6 +9,10 @@ import type {
   CodexRoutingRoute,
   Provider,
 } from "@/types";
+import {
+  normalizeHostedToolsConfig,
+  type HostedToolsConfig,
+} from "./hostedTools";
 import type { FetchedModel } from "@/lib/api/model-fetch";
 import { extractCodexBaseUrl } from "@/utils/providerConfigUtils";
 import {
@@ -44,6 +48,7 @@ export interface WizardPlanBuildOptions {
   catalogModelOrder?: string[];
   spawnAgentModels?: string[];
   officialAuth?: CodexOfficialAuthConfig;
+  hostedTools?: HostedToolsConfig;
 }
 
 export interface WizardConfigIssue {
@@ -1120,6 +1125,9 @@ export function buildCodexMultiRouterWizardPlan(
     options.officialAuth ??
     inferCodexOfficialAuth(existingRouting) ??
     DEFAULT_CODEX_OFFICIAL_AUTH;
+  const hostedTools =
+    options.hostedTools ??
+    normalizeHostedToolsConfig(existingPlan?.settingsConfig?.hostedTools);
   const routes = buildWizardRoutesFromSources(resolvedSources, officialAuth);
   const routing: CodexRoutingConfig = {
     enabled: true,
@@ -1154,6 +1162,7 @@ export function buildCodexMultiRouterWizardPlan(
       config: existingPlan?.settingsConfig?.config ?? null,
       modelCatalog: buildWizardModelCatalog(resolvedSources, options),
       codexRouting: routing,
+      hostedTools,
     },
   };
   return { plan, sourceProviders: resolvedSources };
