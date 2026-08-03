@@ -2784,3 +2784,12 @@
 - 新增 `src-tauri/src/proxy/response_grace.rs`：`await_with_response_grace` 用 `tokio::select!` 保留原 future，常规超时到期后再等 `RESPONSE_PENDING_GRACE_SECS=30`；宽限期内收到结果就正常返回，仍无结果才返回 `ResponsePending/429`。
 - 接入点：reqwest 首包前等待、非流式整包 body 读取、Responses 语义首包预读、普通流式首包预读、hyper raw/fallback 的响应等待。已向客户端返回流头之后的中途断流仍不可逆，继续保持 `stream_max_retries=0` 并在文档中说明。
 - 回归：`response_grace::tests` 覆盖宽限期内恢复与宽限期后 429；`response_` 127 tests、`streaming_first` 3 tests、`hyper_client::tests` 通过。全量 `cargo test --lib -- --skip update_current_claude_desktop_provider_syncs_profile_when_proxy_takeover_is_active` 为 2735 passed / 2 failed，2 个失败均为当前分支既有 `transform_codex_anthropic` 断言，与本次改动无关。
+
+## 2026-08-03 Codex 第三方 Reasoning 可移植桥设计
+
+- 用户确认的硬约束：第三方 reasoning 必须实时显示；prompt、response 和 reasoning 不得复制到 CCSM 数据库或旁路文件；恢复内置 OpenAI 后 CCSM 完全退出请求链路，Codex 直接走官方 Provider 与 WebSocket；以后仍可重新启用 MultiRouter。
+- DeepSeek 原生 Responses 的 `reasoning.content[].reasoning_text` 本来就是 Codex 支持的 raw reasoning，不是非法格式；现场失败来自 ChatGPT Codex 私有 backend 回放时要求该 `content` 为空。OpenAI 官方通常用可读 `summary` 加 provider 专属 `encrypted_content`，CCSM 不能伪造后者。
+- 上游 CC Switch `v3.19.1` 对原生 `openai_responses` 基本透传，但 Chat -> Responses 转换器已经把第三方 reasoning 合成为 `summary_text` 并流式发送 summary delta，因此两条第三方路径当前不一致。
+- 已批准进入实验的设计：仅对显式启用能力的非官方原生 Responses route，把 raw reasoning SSE/最终 item 无状态转换成可识别的 `rs_ccswitch_...` summary；Codex仍逐delta实时显示并只在自身 rollout 持久化。再次请求同一第三方时，CCSM从 marker summary反向恢复目标上游要求的 raw reasoning。官方响应、官方WebSocket、官方encrypted reasoning原样不动。
+- 该设计承认完整raw reasoning承载于summary存在语义、长度、配对和压缩风险；必须先做短/中/长summary、工具调用、官方直连、官方压缩、切回DeepSeek的真实闭环。若官方A/B失败，停止堆叠CCSM兼容，转向Codex provider-aware history projection。
+- 设计文档：`docs/superpowers/specs/2026-08-03-codex-portable-third-party-reasoning-design.md`。第一阶段不处理已污染的旧rollout，存量迁移必须在新桥验证后另立任务。
