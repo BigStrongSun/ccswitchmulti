@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-08-04 CCSwitchMulti v3.19.1-5 正式发布
+
+- 正式 Release：`https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.19.1-5`，非 draft、非 prerelease；发布时间 `2026-08-04T15:46:16Z`，共 19 个资产。
+- annotated tag `v3.19.1-5` 的 tag 对象为 `56945293e20f3ba02a696ca8df43dd01ceec2e55`，远端解引用到已验证提交 `ce6f88b53db339591efa996195bbdaf6fc62eeef`；发布后记忆提交不得移动该标签。
+- GitHub Actions run `30922685914`（`https://github.com/BigStrongSun/ccswitchmulti/actions/runs/30922685914`）最终 `completed/success`：macOS、Windows x64、Windows ARM64、Linux x64、Linux ARM64、Publish GitHub Release、Assemble latest.json 七个作业全部成功。
+- 远端 `latest.json` 版本为 `3.19.1-5`，包含 `darwin-aarch64`、`darwin-x86_64`、`linux-aarch64`、`linux-x86_64`、`windows-aarch64`、`windows-x86_64` 六个平台键；各项 URL 均指向 `BigStrongSun/ccswitchmulti/releases/download/v3.19.1-5/` 且 updater signature 非空。GitHub Latest Release API 已返回 `v3.19.1-5`。
+
 ## 2026-08-04 v3.19.1-5 发布前测试边界与 DeepSeek context 断言修正
 
 - 仓库根目录包含 `.worktrees/*` 时，当前 Vitest 默认发现规则会把旧 worktree 的测试和多套 React 依赖一起加载；本地发布验证必须显式使用 `--exclude '**/.worktrees/**'`。指定单个测试文件本身仍不足以阻止旧 worktree 被发现。
