@@ -25,14 +25,14 @@ pub const CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME: &str = "cc-switch-model-catalo
 ///
 /// `request_max_retries` 只覆盖流建立前的传输/HTTP 5xx 重试；`error sending request`
 /// 这类连接/构造失败必须允许 Codex 重试，否则网络短暂恢复后当前 turn 已经直接失败。
-/// `stream_max_retries` 保持 0：Codex 在收到 `response.output_item.done` 时会立即
-/// 通过 `record_conversation_items` 写入会话历史，流级重试在再次请求前用
-/// `clone_history` 重建 input；因此任何已完成的部分 message/tool call 都会进入
-/// 重试 prompt，形成重复或半截历史。当前 Codex 没有“流未 completed 就回滚已写
-/// item”的机制，故这里不允许流级整轮重放。对可能已在途的响应体读取/超时错误，
-/// CCSM 映射为 429 + Retry-After，而 Codex 的 provider retry policy 明确不重试 429。
+/// `stream_max_retries` 与 Codex 官方默认值 5 对齐：CCSM 只在尚未向客户端发出
+/// 语义事件时做透明 SSE 重连；一旦正文、reasoning 或工具事件已经交付，代理封死
+/// 自身重放通道，把缺少 `response.completed` 的流错误交还 Codex。只有 Codex 拥有
+/// session/turn 历史和工具执行状态，流已开始后的 sampling retry 必须由客户端负责。
+/// 对可能已在途的响应体读取/超时错误，CCSM 仍映射为 429 + Retry-After，而 Codex
+/// 的 provider retry policy 明确不重试 429，避免把未知结果的请求误归为普通断流。
 pub(crate) const CODEX_MANAGED_REQUEST_MAX_RETRIES: u64 = 2;
-pub(crate) const CODEX_MANAGED_STREAM_MAX_RETRIES: u64 = 0;
+pub(crate) const CODEX_MANAGED_STREAM_MAX_RETRIES: u64 = 5;
 const CODEX_MODELS_CACHE_FILENAME: &str = "models_cache.json";
 const CODEX_MODELS_CACHE_BACKUP_FILENAME: &str = "models_cache.cc-switch-backup.json";
 const CC_SWITCH_CODEX_MODELS_CACHE_ETAG: &str = "cc-switch-model-catalog";
@@ -4287,9 +4287,9 @@ mod tests {
     use serial_test::serial;
 
     #[test]
-    fn managed_codex_retry_budget_allows_pre_stream_but_not_in_flight_stream_retry() {
-        assert!(CODEX_MANAGED_REQUEST_MAX_RETRIES > 0);
-        assert_eq!(CODEX_MANAGED_STREAM_MAX_RETRIES, 0);
+    fn managed_codex_retry_budget_preserves_codex_stream_recovery() {
+        assert_eq!(CODEX_MANAGED_REQUEST_MAX_RETRIES, 2);
+        assert_eq!(CODEX_MANAGED_STREAM_MAX_RETRIES, 5);
     }
 
     #[test]
