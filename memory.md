@@ -5,6 +5,7 @@
 - 仓库根目录包含 `.worktrees/*` 时，当前 Vitest 默认发现规则会把旧 worktree 的测试和多套 React 依赖一起加载；本地发布验证必须显式使用 `--exclude '**/.worktrees/**'`。指定单个测试文件本身仍不足以阻止旧 worktree 被发现。
 - 前端全集并行执行时 `tests/integration/App.test.tsx` 偶发因共享 MSW/DOM 状态超时；该文件在排除 worktree 后独立运行 8/8 通过。发布门槛应使用排除 worktree、关闭文件并行的根源码全集，不能用混入旧 worktree 的失败或单文件通过替代全集。
 - `tests/utils/codexModelContext.test.ts` 的 DeepSeek V4 Flash 预设断言仍期望旧值 `1000000`，但上游 `8ae1ce85` 已把业务预设对齐 DeepSeek 官方 catalog 为 `1048576`。Codex 内置搜索与 Matrix 直接读取 DeepSeek 官方 Crush 配置均确认 `context_window=1048576`；因此只修正陈旧测试契约，不改业务值。
+- WebDAV mock 的 `start_mock_webdav` 每个 TCP 连接只处理一次请求并立即关闭，但原响应没有 `Connection: close`。HTTP/1.1 默认持久连接，reqwest 因此会偶发复用 mock 已关闭的连接，使完整串行测试随机在不同的多请求 WebDAV 用例报 `request build failed`；单测重复通过不能排除该竞态。RFC 9112 与 Codex 内置搜索、Matrix 直读结论一致：不支持持久连接的服务器必须在每个非 1xx 响应声明 `Connection: close`。修正测试服务器协议语义后，应以 WebDAV 组连续重复和至少两轮 Rust 全量串行测试验收。
 
 ## 2026-08-03 上游 #6078 Windows 集成测试不得写真实 Claude Desktop 配置
 
