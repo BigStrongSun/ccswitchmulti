@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-08-04 Codex `--ephemeral resume` 污染真实会话与恢复边界
+
+- 现场会话 `019fbd59-0c1a-7592-87d3-1e2ad654fd0d` 无法加载并提示 `Model provider 'capture' not found`，不是全局 `config.toml` 或 CCSM 正常路由错误。另一排障任务为抓取真实 Responses 请求体，对该生产 session 执行了两次 `codex exec resume ... --ephemeral -c model_provider="capture"`；临时 provider 随子进程退出，但 resume 仍把 `thread_settings_applied(model_provider_id="capture")` 和诊断 turn 写入原 rollout，并把 `state_5.sqlite.threads` 对应行同步成 capture/medium/CCSwitch cwd。
+- OpenAI Codex 官方 issue `openai/codex#20084` 与本机 `codex-cli 0.146.0-alpha.9.2` 现场共同证明：resume 路径会忽略 `--ephemeral` 的不持久化语义。以后不得用生产 session ID 做请求捕获；必须使用新建/复制/分叉的诊断 session，并在捕获前后比较原 rollout 的长度与哈希。
+- 恢复不能只改 `~/.codex/config.toml`，也不能永久补一个假的 capture provider。安全边界是：先用 SHA-256 备份原 rollout，并用 SQLite backup API 备份包含 WAL 的一致数据库；以第一条 capture `thread_settings_applied` 为字节边界构造原文件精确前缀候选；验证所有 JSONL、session ID、最后合法 provider/cwd/reasoning 和无 capture 后，再原子替换 rollout，并在事务中只恢复 `threads` 表该 session 一行。
+- 本次原 rollout 为 293,142,176 字节、SHA-256 `F216A17E...E408`；修复后为 293,102,773 字节、23,399 行、SHA-256 `EB8C75F9...8101`，只移除 39,403 字节的两个 capture 诊断 turn。数据库恢复为 `openai / gpt-5.6-luna / xhigh / ACPs跨物种视频`，`quick_check=ok`；Codex Desktop 实际导航后 task 状态由 `notLoaded` 变为 `idle`。完整回滚证据保存在 `~/.codex/session-repair-backups/019fbd59-0c1a-7592-87d3-1e2ad654fd0d-20260804-235449/`。
+
 ## 2026-08-04 CCSwitchMulti v3.19.1-5 正式发布
 
 - 正式 Release：`https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.19.1-5`，非 draft、非 prerelease；发布时间 `2026-08-04T15:46:16Z`，共 19 个资产。
