@@ -3229,8 +3229,6 @@ impl RequestForwarder {
                 ProxyError::Internal(format!("Failed to serialize request body: {e}"))
             })?
         };
-        let mut request_bytes_len = body_bytes.len();
-
         // 确保 content-type 存在
         if !ordered_headers.contains_key(http::header::CONTENT_TYPE) {
             ordered_headers.insert(
@@ -3276,8 +3274,24 @@ impl RequestForwarder {
                     "Failed to serialize cached Responses-Lite fallback body: {error}"
                 ))
             })?;
-            request_bytes_len = body_bytes.len();
         }
+
+        let zstd_compress_codex_official_upstream = should_zstd_compress_codex_official_upstream(
+            app_type,
+            method,
+            &url,
+            is_codex_oauth || codex_official_auth_passthrough,
+            needs_transform
+                || codex_responses_to_chat
+                || codex_responses_to_messages
+                || codex_responses_to_anthropic,
+        );
+        body_bytes = encode_codex_official_upstream_body(
+            &mut ordered_headers,
+            body_bytes,
+            zstd_compress_codex_official_upstream,
+        )?;
+        let request_bytes_len = body_bytes.len();
 
         // 日志目标 URL 的脱敏分两种情形：
         // - 有已知密钥(log_secrets 非空)：记录脱敏后的完整 URL，剥 userinfo/query
@@ -3588,6 +3602,11 @@ impl RequestForwarder {
                         "Failed to serialize Responses-Lite fallback body: {error}"
                     ))
                 })?;
+                let retry_body_bytes = encode_codex_official_upstream_body(
+                    &mut retry_headers,
+                    retry_body_bytes,
+                    zstd_compress_codex_official_upstream,
+                )?;
                 response = send_upstream_request(retry_headers, retry_body_bytes)
                     .await
                     .inspect_err(|err| {
@@ -6588,6 +6607,47 @@ fn prepare_upstream_request_body(request_body: Value) -> Value {
     canonicalize_value(filter_private_params_with_whitelist(request_body, &[]))
 }
 
+fn should_zstd_compress_codex_official_upstream(
+    app_type: &AppType,
+    method: &http::Method,
+    upstream_url: &str,
+    official_auth: bool,
+    transformed: bool,
+) -> bool {
+    matches!(app_type, AppType::Codex)
+        && method == http::Method::POST
+        && official_auth
+        && !transformed
+        && is_chatgpt_codex_responses_upstream_url(upstream_url)
+}
+
+/// Encode the final JSON entity exactly as the official Codex transport does.
+///
+/// The local handler must decode the incoming entity before it can normalize or
+/// route the JSON. Official Responses requests are compressed again only after
+/// those transformations are complete, so retries can clone one immutable wire
+/// body and `content-encoding` always describes the bytes actually sent.
+fn encode_codex_official_upstream_body(
+    headers: &mut http::HeaderMap,
+    body: Vec<u8>,
+    enabled: bool,
+) -> Result<Vec<u8>, ProxyError> {
+    if !enabled || body.is_empty() {
+        return Ok(body);
+    }
+
+    let encoded = zstd::stream::encode_all(std::io::Cursor::new(body), 0).map_err(|error| {
+        ProxyError::Internal(format!("Failed to compress request body: {error}"))
+    })?;
+    headers.insert(
+        http::header::CONTENT_ENCODING,
+        http::HeaderValue::from_static("zstd"),
+    );
+    headers.remove(http::header::CONTENT_LENGTH);
+    headers.remove(http::header::TRANSFER_ENCODING);
+    Ok(encoded)
+}
+
 /// 生成 Codex Responses->Chat 出站请求的脱敏形态摘要。
 ///
 /// 该摘要只记录顶层字段名、对象/数组形态和工具计数，不记录消息正文、工具参数、
@@ -8251,6 +8311,78 @@ mod tests {
         let prepared = prepare_upstream_request_body(body.clone());
 
         assert_eq!(prepared, body);
+    }
+
+    #[test]
+    fn official_codex_responses_wire_body_is_zstd_encoded() {
+        let original = br#"{"model":"gpt-5.6-luna","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"diagnostic"}]}]}"#
+            .repeat(256);
+        let mut headers = HeaderMap::new();
+
+        let encoded = encode_codex_official_upstream_body(
+            &mut headers,
+            original.clone(),
+            /* enabled */ true,
+        )
+        .expect("encode official request");
+
+        assert_eq!(
+            headers
+                .get(http::header::CONTENT_ENCODING)
+                .and_then(|value| value.to_str().ok()),
+            Some("zstd")
+        );
+        assert_ne!(encoded, original);
+        assert_eq!(
+            zstd::stream::decode_all(std::io::Cursor::new(encoded))
+                .expect("decode official request"),
+            original
+        );
+    }
+
+    #[test]
+    fn non_official_upstream_wire_body_remains_uncompressed() {
+        let original = br#"{"model":"deepseek-v4-flash","input":[]}"#.to_vec();
+        let mut headers = HeaderMap::new();
+
+        let encoded = encode_codex_official_upstream_body(
+            &mut headers,
+            original.clone(),
+            /* enabled */ false,
+        )
+        .expect("prepare third-party request");
+
+        assert!(!headers.contains_key(http::header::CONTENT_ENCODING));
+        assert_eq!(encoded, original);
+    }
+
+    #[test]
+    fn official_codex_responses_request_selects_zstd() {
+        assert!(should_zstd_compress_codex_official_upstream(
+            &AppType::Codex,
+            &http::Method::POST,
+            "https://chatgpt.com/backend-api/codex/responses",
+            /* official_auth */ true,
+            /* transformed */ false,
+        ));
+    }
+
+    #[test]
+    fn third_party_or_transformed_responses_request_does_not_select_zstd() {
+        assert!(!should_zstd_compress_codex_official_upstream(
+            &AppType::Codex,
+            &http::Method::POST,
+            "https://api.deepseek.com/v1/responses",
+            /* official_auth */ true,
+            /* transformed */ false,
+        ));
+        assert!(!should_zstd_compress_codex_official_upstream(
+            &AppType::Codex,
+            &http::Method::POST,
+            "https://chatgpt.com/backend-api/codex/responses",
+            /* official_auth */ true,
+            /* transformed */ true,
+        ));
     }
 
     #[test]

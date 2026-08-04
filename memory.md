@@ -2806,6 +2806,7 @@
 - Codex 源码仍证明存在“历史无界放大”缺口：`ContextManager::for_prompt()` 只在模型不支持图片时替换图片；支持图片时 `truncate_function_output_items_with_policy()` 对 `InputImage` 无条件 clone。它会让每次重试都携带同一批旧图片，是超时/断连概率的重要放大因素，但不能单独证明 generic 400 的根因。
 - 反事实实测否定了“该 session 已被图片或 encrypted 永久污染”：使用同一账号、同一 Luna、同一 compaction、全部 29 张图片和全部 49 段 reasoning 密文构造的 16,726,173 字节明文请求、10,832,709 字节 Zstd 请求均返回官方 HTTP 200；再用 Codex CLI `resume --ephemeral` 捕获完整 Responses-Lite 请求（262 input items、4 个嵌套工具、16,823,558 字节原文、10,874,984 字节 Zstd）原样发送，仍返回 HTTP 200。故截图中的 generic 400 是官方边缘/后端的一次瞬态终止；精确内部故障点只有 OpenAI 能通过上述 request ID 查询。
 - CCSM 持续断连仍有一个已证实的传输差异：原生 Codex 对官方登录态默认使用 Zstd，而 `decode_codex_request_body()` 会解压并删除 `content-encoding`，`forwarder` 再把 JSON 序列化成未压缩 `body_bytes` 发往官方。现场同一请求因此从约 10.87 MB 的原生 wire 体膨胀为 16,788,941 字节的 reqwest 上游体；它曾两次在收到响应状态前失败，第三次相同字节请求返回 200。下一步根修应先恢复官方上游 Zstd 语义并保留请求阶段的安全重试/诊断；历史图片有界化只能作为独立的上下文治理，不能伪装成这次 400 的确定修复。
+- 根修已在 `forwarder` 落地：最终 JSON 变换完成后，仅对 Codex POST 到 ChatGPT 官方 `/backend-api/codex/responses` 或 `/responses/compact`、且使用 managed/native official auth、未进入 Chat/Anthropic 转换的请求重新做 Zstd level 0 编码，并同步写 `content-encoding: zstd`、移除旧实体长度头。普通发送、Responses-Lite fallback 缓存和 Lite 去头重试共用同一编码边界；请求级 transport retry 继续 clone 同一不可变 wire body。第三方/转换请求保持明文。TDD 先得到缺少编码与选择函数的编译失败，再通过 4 个定向回归；forwarder 137/137、content-encoding 9/9、`cargo check --lib`、rustfmt 与 `git diff --check` 通过。现有 `openai_cache_read_tokens` dead-code warning 与本次无关。
 
 ## 2026-08-03 Codex 第三方 Reasoning 可移植桥设计
 
