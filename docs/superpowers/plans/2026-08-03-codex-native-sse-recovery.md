@@ -1,5 +1,7 @@
 # Codex Native SSE Recovery Implementation Plan
 
+> **Superseded boundary (2026-08-04):** 本计划实现的“CCSM 只在语义输出前透明重放”边界仍然有效；但原 Global Constraints 要求 managed Codex 保持 `stream_max_retries=0` 的决定已经被 `docs/superpowers/specs/2026-08-04-codex-client-stream-retry-restoration-design.md` 取代。当前实现保留代理安全边界，并恢复 Codex 客户端自己的 `stream_max_retries=5`。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Keep managed Codex HTTP/SSE turns alive through bounded upstream failures before any persistable output, without replaying a completed item or tool invocation.
@@ -10,7 +12,7 @@
 
 ## Global Constraints
 
-- Keep `stream_max_retries = 0` in managed Codex configuration: Codex must not replay a turn after CCSM has emitted semantic output.
+- Historical constraint, superseded on 2026-08-04: CCSM itself must not replay after semantic output; Codex now retains its own `stream_max_retries = 5` recovery budget.
 - Retry only the exact same upstream provider request; do not fail over a live stream.
 - Never log, persist, or add test fixtures containing bearer tokens, account identifiers, or attestation values.
 - Do not enable `supports_websockets` until real official WebSocket integration verification exists.
@@ -166,4 +168,3 @@ Run: `cargo fmt --check && cargo check --lib && git diff --check`
 - [ ] **Step 3: Check the worktree and document any unrelated running build processes instead of terminating them**
 
 Run: `git status --short`
-

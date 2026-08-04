@@ -163,7 +163,7 @@
 
 - 现象：OpenClash 节点 `🇺🇸美国2-IEPL-GPT` 丢 6.6MB POST 时，CCSM 把“可能已在途”的转发/超时错误按 502/504 返回，Codex 默认 `stream_max_retries=5`、`request_max_retries=4` 又自动重发整轮采样请求，造成流量和时延放大。
 - 修复：`auto_failover_enabled=false` 时不再把超时全部置 0，首个 SSE 字节改用 `non_streaming_timeout`（默认 600s）作为硬上限，静默超时继续生效；新增 `ProxyError::ResponsePending`，请求体已写入、上游已返回响应头、响应体/首字节超时等可能已在途的失败映射为 429 + `Retry-After: 30` + `cc_switch_response_pending`，不参与 retry/failover；连接阶段失败仍保留 502/可重试语义。
-- CCSM 托管的 Codex provider 显式写 `request_max_retries=0`、`stream_max_retries=0`，关闭 Codex 端整轮采样请求自动重发；CCSM failover 只对明确未发送的 connect 错误切换下一家。
+- 当时 CCSM 托管的 Codex provider 显式写 `request_max_retries=0`、`stream_max_retries=0`，关闭 Codex 端整轮采样请求自动重发；该决定后来分两步纠正：先恢复 request budget=2，再于 2026-08-04 恢复 stream budget=5。ResponsePending/429 仍负责阻止未知结果的请求重发，CCSM failover 仍只对明确未发送的 connect 错误切换下一家。
 - 验证：`cargo check --lib`、新增回归测试、`cargo fmt --check`、`git diff --check` 通过；`cargo test --lib` 2688 passed / 2 ignored / 1 failed，唯一失败是本机 15721 被运行中 CCSM 占用。
 - 构建补漏：Tauri `--bundles msi` 报 `light.exe ICE38: Component codex_history_repairer installs to user profile. It must use a registry key under HKCU as its KeyPath, not a file.` 根因是自定义 `wix/per-user-main.wxs` 的 `binaries` 循环仍用 `<File KeyPath="yes"/>`；per-user 安装目录下额外 binary 必须改用 HKCU `RegistryValue KeyPath="yes"`，文件 `KeyPath="no"`。已按此修复模板。
 
@@ -2774,25 +2774,32 @@
 ## 2026-08-02 Codex 502 后无法重试根因：Managed retry 预算被写成 0
 
 - 现场 session `019fc255-dd60-7a62-bbc2-99d5206f2487` 在 19:58 连续两次 `upstream_send_error` 后直接 `task_complete`，用户手动发“继续”也只再失败一次，没有自动等待网络恢复后重试。JSONL 显示 `codex_error_info=other`，不是流断开后的 5 次重试。
-- 直接根因：`72c8ca22` 为防“可能已在途”的 502/504 重放，把 CCSM 托管 provider 写成 `request_max_retries=0`、`stream_max_retries=0`；当前 `~/.codex/config.toml` 的 `[model_providers.codex_model_router_v2]` 正是这两个值。Codex 源码 `codex-api/src/endpoint/session.rs` 用 `request_max_retries` 驱动流建立前的 transport/HTTP 5xx 重试，`core/src/session/turn.rs` 再用 `stream_max_retries` 驱动采样重试；两层都为 0 时，即使 `error sending request` 是明确未发送的连接/构造失败，也会立即终止。
-- 修复边界：恢复 `request_max_retries=2`，只允许流建立前的安全重试；`stream_max_retries` 保持 0，避免流建立后整轮采样在途重放。`hyper_client.rs` 的响应体读取失败从 `ForwardFailed/502` 改为 `ResponsePending/429`，Codex retry policy 不重试 429，因此不会因为恢复请求级重试而重新放大 body 读取阶段。
+- 直接根因：`72c8ca22` 为防“可能已在途”的 502/504 重放，把 CCSM 托管 provider 写成 `request_max_retries=0`、`stream_max_retries=0`；该次现场 `~/.codex/config.toml` 的 `[model_providers.codex_model_router_v2]` 正是这两个值。Codex 源码 `codex-api/src/endpoint/session.rs` 用 `request_max_retries` 驱动流建立前的 transport/HTTP 5xx 重试，`core/src/session/turn.rs` 再用 `stream_max_retries` 驱动采样重试；两层都为 0 时，即使 `error sending request` 是明确未发送的连接/构造失败，也会立即终止。
+- 当时修复只恢复 `request_max_retries=2`，并继续把 `stream_max_retries` 保持为 0；2026-08-04 的版本对比证明这留下了新的恢复缺口。`v3.16.5-22` 未覆盖该字段、实际使用 Codex 默认 5 次流重试；`72c8ca22` 才在其后把托管 provider 强制改为 0。`hyper_client.rs` 将未知结果的响应体读取失败映射为 `ResponsePending/429` 仍然正确，因为这类请求不能伪装成普通断流。
 - 验证：`cargo check --lib`、`cargo fmt --check`、`managed_codex_retry_budget` 与 `hyper_client::tests` 通过。
 
 ## 2026-08-02 ResponsePending grace：超时后保留上游 future 再等 30s
 
 - 用户继续追问“上游已经成功但响应迟到”的场景。复核结论：`72c8ca22` 的 `ResponsePending/429` 只阻止自动重发，并不能回收迟到结果；旧实现用 `tokio::time::timeout`，超时即丢弃上游 future，后来即使返回结果也没有客户端可接收。Codex 对普通 429 会映射成 `RetryLimit`，不会按 `Retry-After` 自动等待。
 - 新增 `src-tauri/src/proxy/response_grace.rs`：`await_with_response_grace` 用 `tokio::select!` 保留原 future，常规超时到期后再等 `RESPONSE_PENDING_GRACE_SECS=30`；宽限期内收到结果就正常返回，仍无结果才返回 `ResponsePending/429`。
-- 接入点：reqwest 首包前等待、非流式整包 body 读取、Responses 语义首包预读、普通流式首包预读、hyper raw/fallback 的响应等待。已向客户端返回流头之后的中途断流仍不可逆，继续保持 `stream_max_retries=0` 并在文档中说明。
+- 接入点：reqwest 首包前等待、非流式整包 body 读取、Responses 语义首包预读、普通流式首包预读、hyper raw/fallback 的响应等待。已向客户端返回流头之后，CCSM 自己的透明重放仍不可逆；但不完整 Responses 流必须交给拥有 session/turn 状态的 Codex，用客户端 `stream_max_retries=5` 恢复。
 - 回归：`response_grace::tests` 覆盖宽限期内恢复与宽限期后 429；`response_` 127 tests、`streaming_first` 3 tests、`hyper_client::tests` 通过。全量 `cargo test --lib -- --skip update_current_claude_desktop_provider_syncs_profile_when_proxy_takeover_is_active` 为 2735 passed / 2 failed，2 个失败均为当前分支既有 `transform_codex_anthropic` 断言，与本次改动无关。
 
 ## 2026-08-03 Codex 原生 Responses SSE 安全恢复（v3.19.1-4）
 
-- 不能把 managed Codex 的 `stream_max_retries` 直接调大：Codex 会把 `response.output_item.done`/工具项写进自身历史，流已产生实质事件后的整轮 HTTP 重放会重复工具调用或污染 rollout。
+- 旧结论“managed Codex 的 `stream_max_retries` 必须保持 0”过度保守，已于 2026-08-04 纠正。当前官方 Codex 默认值为 5，`core/src/session/turn.rs` 对所有可重试的 incomplete stream 重跑 sampling request；官方 `stream_no_completed` 测试明确覆盖第一次流已经产生 `response.output_item.done` 后断开、第二次请求完成的场景。CCSM 不应在语义输出后自行重放，但也不能禁用 Codex 自己的状态机。
 - 新增 `providers/streaming_retry.rs::create_resilient_responses_sse_stream`，仅用于 native Codex `/responses` 直通。它在只下发 `response.created` 或 SSE 注释后发生 transport error / 未终止 EOF 时，对同一 provider、同一 URL、headers、body 最多重连 5 次；重连后的重复 `response.created` 被抑制。静默期间发送 `: ping` 注释，以保活下游 watchdog。
 - 一旦任何非 `response.created` 的实际事件、终止事件，或不能安全识别的残块已下发，就永久关闭重放通道；显式 `response.failed`/`error` 逐字透传。这是协议安全分界，不承诺 HTTP SSE 在语义输出后可无感续传。
 - `Forwarder` 现在为 native Codex Responses streaming 建立 reconnect factory；`handle_responses_for_app` 只在成功且非 JSON 的 native passthrough 分支包装流。Responses→Chat/Anthropic、namespace restore、compaction 分支仍沿用各自语义，避免双重转换或错误重放。
 - 公开 OpenAI Codex 源码/配置确认 `stream_max_retries` 是 dropped stream reconnect 次数，Responses transport 支持 WebSocket 并在不支持时回退 HTTP。当前本地 GET `/responses` 有意返回 HTTP 426，`supports_websockets=false` 保持不变：旧 relay 曾出现 upstream 101 后首帧前 close，尚无真实官方端到端证明时不能翻开该开关。
 - TDD 证据：先验证缺少 native wrapper / reconnect-factory selector 的编译失败，再通过 `native_responses_*`（created 去重、comment keepalive、output_item.done 禁止重放）、`streaming_retry` 20 tests、handler 与 forwarder selector tests。后续必须在真实官方账户的 WebSocket handshake、首帧、断开、HTTP fallback 全链路通过后，才能新立任务启用 Responses WS relay。
+
+## 2026-08-04 恢复 Codex 客户端流重试，修复 3.16.5-22 之后的长任务回归
+
+- 对比 tag 和 Git 历史确认：`v3.16.5-22`（`b4b784f1`，2026-07-28）没有生成 `stream_max_retries`，继承 Codex 默认 5；`72c8ca22`（2026-08-02）为防 502/504 放大才首次写成 0。后来 `461dc35c` 只补齐 CCSM 语义输出前的透明重连，没有恢复 Codex 语义输出后的 sampling retry，因此用户观察到旧版能跑长任务、后续版本会直接断开是真实回归。
+- 当前官方源码 main `9873cba8` 与本机 Codex `0.146.0-alpha.3.1` 核验：provider 默认 `stream_max_retries=5`；`turn.rs` 的 retry loop 不以是否已输出语义事件为禁用条件；官方 `stream_no_completed::retries_on_early_close` 用 `response.output_item.done` 后提前 EOF 验证第二次请求。Matrix 直接读取官方 raw 源码与 Codex 内置检索/最新手册结论一致。
+- 根修提交把 `CODEX_MANAGED_STREAM_MAX_RETRIES` 从 0 恢复为 5，`request_max_retries` 保持 2。两层所有权为：CCSM 仅在 `response.created`/注释之后、语义事件之前透明重连；正文、Reasoning、output item 或工具事件之后的 incomplete stream 交给 Codex 自己重试。未知结果的 ResponsePending 仍保持 429 不重试，代理不新增语义事件去重状态机。
+- TDD RED 明确为新契约测试得到 `left=0/right=5`；GREEN 后该测试、`codex_config` 114/114 和 `services::proxy` 75/75 通过。指南和 2026-08-03 历史计划已标明新旧边界，不能再用旧文档声称托管 Codex 必须禁用流重试。
 
 ## 2026-08-04 session 019fbd59 的 encrypted/502 根因取证
 

@@ -9,7 +9,7 @@
 | 项目 | 值 | 作用 |
 | --- | --- | --- |
 | `request_max_retries` | `2` | Codex 在 HTTP 流建立前最多再重试 2 次 |
-| `stream_max_retries` | `0` | SSE 流建立后不自动重发整轮采样请求 |
+| `stream_max_retries` | `5` | SSE 在 `response.completed` 前异常中断时，由 Codex 自身最多重试 5 次 sampling request |
 | `non_streaming_timeout` | 默认 `600s` | Auto Failover 关闭时作为首个 SSE 字节的硬上限 |
 | `streaming_idle_timeout` | 默认 `120s` | SSE 已建立后连续没有数据块的静默超时 |
 | Auto Failover | 关闭 | CCSM 只尝试一个 Provider / Route，不切换模型 |
@@ -18,7 +18,7 @@
 
 重连原则只有一句话：
 
-> **只重试“确认还没发出”或“还能等到结果”的阶段；一旦部分内容已经进入 Codex 历史，就不再自动重放整轮请求。**
+> **CCSM 只在尚未交付语义事件时透明重连；一旦部分内容进入 Codex，由拥有会话与工具状态的 Codex 自身执行官方流重试。**
 
 ## 2. 协议全景
 
@@ -76,10 +76,13 @@ sequenceDiagram
     else 阶段 3：上游返回 2xx + SSE
         A-->>P: Responses SSE
         P-->>C: Responses SSE
-        C->>C: output_item.done 立即写入历史
+        C->>C: 按官方状态机接收/记录事件
         alt SSE 在 response.completed 前断开
-            C->>C: stream_max_retries=0，不自动重发
-            C-->>U: turn 报错，需手动继续
+            C->>C: stream_max_retries=5
+            C->>P: 重试 sampling request
+            P->>A: 按新请求重新转发
+            A-->>P: 新的 Responses 生命周期
+            P-->>C: 继续转发
         else 收到 response.completed
             C-->>U: turn 正常完成
         end
@@ -96,11 +99,11 @@ Codex 还没拿到 2xx，也没有收到任何 `output_item.done`，此时重新
 
 CCSM 无法确认上游是否已经开始处理，所以不会立刻重发，而是把原来的上游 future 保留下来。常规超时后继续等 30 秒；如果上游结果只是迟到，就正常交付；如果 30 秒后仍没有结果，才返回 429。Codex 对 429 不重试，避免重复执行。
 
-**阶段 3：SSE 已建立，不自动重连。**
+**阶段 3：SSE 已建立，按事件交付边界分层恢复。**
 
-Codex 在收到 `response.output_item.done` 时会立即把该 item 写入历史，而流重试会用 `clone_history()` 重建下一次请求。一旦流在 `response.completed` 前断开，自动重发就会把半截消息或已经执行过的工具调用再次放进 prompt，因此 `stream_max_retries=0`。
+在只收到 `response.created` 或 SSE 注释、尚未向 Codex 交付正文、Reasoning、output item 或工具事件时，CCSM 可以透明重连同一个上游请求，最多 5 次，并抑制重复的 `response.created`。一旦交付任何语义事件，CCSM 永久关闭自身重放通道，因为代理无法撤回已发送字节，也不拥有 Codex 的会话和工具执行状态。
 
-如果 SSE 已建立但长时间没有数据，CCSM 的 `streaming_idle_timeout` 会关闭这条流。此时响应头已经给过 Codex，CCSM 无法再把它变成可重试的 502/429；Codex 只能按“流在 `response.completed` 前结束”处理，同样不自动重发。
+如果此后上游在 `response.completed` 前断开，CCSM 把不完整流交还 Codex。Codex 以 `stream_max_retries=5` 使用自己的 session/turn 状态重试 sampling request；官方源码和测试明确覆盖已经出现 `response.output_item.done` 但缺少 completed 的重试。SSE 长时间静默时，CCSM 还会发送注释心跳，减少本地和客户端 watchdog 把合法长思考误判为死流。
 
 ## 4. Chat Completions 上游的完整链路
 
@@ -146,8 +149,12 @@ sequenceDiagram
     else 阶段 3：Chat SSE 已建立
         A-->>P: Chat SSE
         P-->>C: 转成 Responses SSE
-        C->>C: 已写入部分 output_item.done
-        C->>C: 流断开时不自动重发
+        alt 尚未交付语义事件即断开
+            P->>A: CCSM 透明重连，最多 5 次
+        else 已交付语义事件后断开
+            C->>C: stream_max_retries=5
+            C->>P: 重新发起 sampling request
+        end
     end
 ```
 
@@ -163,7 +170,7 @@ sequenceDiagram
    部分上游不返回 `content-type: text/event-stream`，但 body 实际是 SSE。CCSM 使用“请求 `stream=true` + 非 JSON 响应”作为兜底判断，避免把流式响应整包缓冲后误判成 body 读取失败。
 
 4. **Codex 自身没有单独的 Chat 重连层。**
-   因为 Codex 侧永远是 Responses，所以 Chat 上游的恢复仍然由 Codex `request_max_retries`、CCSM Response Grace 和 `stream_max_retries=0` 共同决定。
+   因为 Codex 侧永远是 Responses，所以 Chat 上游的恢复仍然由 CCSM 的语义输出前透明重连、Codex `request_max_retries=2`、Response Grace 和 Codex `stream_max_retries=5` 共同决定。
 
 ## 5. 关键边界总结
 
@@ -172,23 +179,26 @@ sequenceDiagram
 | 流建立前连接/请求构造失败 | 是 | CCSM 传输重试 2 次 + Codex `request_max_retries=2` | 代理内重发同一请求；仍失败才回退给 Codex |
 | 上游可能已在途 | 否，等待 | CCSM `response_grace=30s` | 迟到结果正常交付；否则 429 |
 | 429 ResponsePending | 否 | Codex `retry_429=false` | turn 结束，不自动重发 |
-| SSE 已建立、未收到 completed | 否 | Codex `stream_max_retries=0` | turn 报错，避免重复历史 |
-| `output_item.done` 已写入 | 否 | Codex 当前实现 | 自动重试会把半截 item 再带入 prompt |
+| SSE 已建立、尚未交付语义事件 | 是 | CCSM Responses 流包装器，最多 5 次 | 对 Codex 透明，重复 `response.created` 被抑制 |
+| 已交付语义事件、未收到 completed | 是 | Codex `stream_max_retries=5` | Codex 使用自身 session/turn 状态重试 sampling request |
+| 显式不可重试错误或预算耗尽 | 否 | Codex/CCSM 各自的错误分类器 | turn 明确报错，不无限重试 |
 
-## 6. 为什么不能简单调大 `stream_max_retries`
+## 6. 为什么由 Codex 负责语义输出后的重试
 
-原因是 Codex 当前的持久化时机：
+CCSM 和 Codex 的能力边界不同：
 
-- `response.output_item.done` 到达时，Codex 立即调用 `record_conversation_items()` 写入历史。
-- 流级重试时，Codex 用 `sess.clone_history()` 重新构造 prompt。
-- 因此只要断流发生在任意 item done 之后，重试请求就会包含之前的部分消息、工具调用或工具结果。
+- CCSM 只看到 HTTP/SSE 字节，无法撤回已经交给客户端的 delta，也无法判断工具是否已经执行。
+- Codex 拥有 session history、turn 生命周期、item 记录、工具执行状态和 UI 事件，可以在 retry loop 中重新构造 sampling input。
+- 当前官方 Codex 默认 `stream_max_retries=5`，其 retry loop 对所有可重试流错误生效，不以“是否已出现语义事件”为禁用条件。
+- 官方 `stream_no_completed` 回归测试明确让第一次流产生 `response.output_item.done` 后提前关闭，并断言 Codex 发起第二次请求后正常完成。
 
-调大 `stream_max_retries` 看起来能“自动恢复”，实际上会带来重复文本、重复工具调用和污染后的会话历史。要放开这层重试，需要 Codex 先实现“未收到 `response.completed` 就不持久化”或“重试前回滚已写 item”。
+因此不能在 CCSM 内简单重放语义流，但也不能把 Codex 自己的重试预算设为 0。正确分层是：代理在语义输出前透明恢复；语义输出后只报告不完整流，由 Codex 官方状态机恢复。
 
 ## 7. 相关源码位置
 
-- Codex request retry：`codex-client/src/retry.rs`
-- Codex stream retry：`codex-rs/core/src/session/turn.rs`
+- Codex request retry：`codex-rs/codex-api/src/endpoint/session.rs`
+- Codex stream retry：`codex-rs/core/src/session/turn.rs`、`codex-rs/core/src/responses_retry.rs`
+- Codex incomplete-stream regression：`codex-rs/core/tests/suite/stream_no_completed.rs`
 - Codex 立即持久化 item：`codex-rs/core/src/stream_events_utils.rs`
 - CCSM 托管 retry 配置：`cc-switch/src-tauri/src/codex_config.rs`
 - CCSM failover 关闭时的超时策略：`cc-switch/src-tauri/src/proxy/handler_context.rs`
