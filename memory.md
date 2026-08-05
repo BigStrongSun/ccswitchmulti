@@ -4,9 +4,11 @@
 
 - 本机 Codex Desktop `0.146.0-alpha.9.2` 在 `codex_model_router_v2` 下真实派生 `qwen3.6` 与 `deepseek-v4-flash` child：两条路由都命中第三方上游并返回 HTTP 200，但 `collaboration` namespace 会让 official parent 把任务正文持久化为第三方无法解密的 `encrypted_content`，Qwen 因而报告 `empty payload`。
 - 2026-08-01 至 08-05 的错误方案在发往官方 OAuth backend 前删除 `spawn_agent`、`send_message`、`followup_task` 的 `message.encrypted`，并在 route 物化时传播 `codexRouterPlaintextV2Collaboration`。session `019fc293-3b9c-7c43-9f61-a29350ce24a3` 证明该方案会让新版官方 backend 以 HTTP 400 拒绝：`Function 'collaboration.followup_task' is reserved for use by this model and must match the configured schema`。删除 `encrypted` 已经改变保留工具 schema；三个保留函数都不得由代理改写。
-- 用户回滚 CCSM 后，同一官方 Sol 路由由 400 恢复 HTTP 200。进一步用 Codex `multi_agent_v2.tool_namespace="agents"` 做真实 A/B：官方 parent 正常返回，Sol 派生 `qwen-local` 时第三方 `/chat/completions` 多次 HTTP 200，child 返回 `CHILD_OK`，parent 返回 `PARENT_OK / Child result: CHILD_OK`。因此正确架构是在 Codex 配置层使用非保留 namespace，而不是修改官方出站 schema。
+- 用户回滚 CCSM 后，同一官方 Sol 路由由 400 恢复 HTTP 200。进一步用 Codex `multi_agent_v2.tool_namespace="agents"` 做 A/B，确认官方 parent 正常返回、第三方 child 能创建且路由 HTTP 200、reserved schema 400 消失；但当时仅凭 child/parent 返回 `CHILD_OK/PARENT_OK` 就判断正文可读是过早结论，可能受继承上下文、模型猜测或旧进程影响，不能作为 payload 验收。
 - CCSM 对包含启用第三方或来源歧义 route 的 MultiRouter 投影 `tool_namespace="agents"`，但保留用户已有的其它非保留自定义 namespace；纯官方 Router 不强制切换 namespace。`hide_spawn_agent_metadata=true` 和 catalog 的 `multi_agent_version=v2` 保持不变。
-- 代理层彻底删除 collaboration schema 改写、request-local 明文策略 marker、route 物化传播和对应旧测试。以后官方 OAuth 出站的 reserved tool schema 必须原样透传；第三方 child 可读正文能力由 Codex 原生非保留 namespace 提供。安装新构建并完全重启 CCSwitchMulti/Codex app-server 后，仍需用 Desktop 对 Sol -> Qwen/DeepSeek 真实 spawn 做最终验收。
+- 代理层彻底删除 collaboration schema 改写、request-local 明文策略 marker、route 物化传播和对应旧测试。以后官方 OAuth 出站的 reserved tool schema 必须原样透传；非保留 namespace 只解决工具名冲突，不自动提供第三方可读正文。安装新构建并完全重启 CCSwitchMulti/Codex app-server 后，必须用 Desktop 对 Sol -> Qwen/DeepSeek 做唯一 nonce + 真实工具动作 + child rollout 三重验收。
+- 2026-08-05 最新验收使用 Codex Desktop embedded CLI `0.147.0-alpha.1.2`、CCSM `3.19.1-5` 和有效配置 `hide_spawn_agent_metadata=true/tool_namespace="agents"`：Qwen 与 DeepSeek child 都正确命中 `codex_model_router_v2`，但首个 `agent_message` 仍为 `[input_text 空 Payload 信封, encrypted_content gAAAAA...]`，两个密文长度均为 228；这证明 namespace、路由和 task delivery 是三个独立验收层。
+- 完整问题、脱敏 TOML、官方 `#26210/#35845`、上游 `#36376/#36586`、所有失败方案、双阶段设计与验收矩阵已提交为 `BigStrongSun/ccswitchmulti#31`：https://github.com/BigStrongSun/ccswitchmulti/issues/31 。该 Issue 与 `#18` 相邻但不同：`#31` 是 parent->child 合法 OpenAI ciphertext 导致第三方空 payload；`#18` 是 child->parent 明文被错误标为 encrypted_content 后污染官方 replay。
 
 ## 2026-08-04 Codex `--ephemeral resume` 污染真实会话与恢复边界
 
