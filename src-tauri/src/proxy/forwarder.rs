@@ -2039,6 +2039,19 @@ impl RequestForwarder {
         // 与 CCH 对齐：请求前不做 thinking 主动改写（仅保留兼容入口）
         let mut mapped_body = normalize_thinking_type(mapped_body);
 
+        if should_project_codex_agent_messages_for_provider(app_type, provider, endpoint) {
+            let projected =
+                super::providers::codex_multi_agent::project_codex_agent_messages_for_third_party(
+                    &mut mapped_body,
+                )?;
+            if projected > 0 {
+                log::debug!(
+                    "[CodexRouter] Projected {projected} plaintext agent message(s) for third-party provider={} route",
+                    provider.id
+                );
+            }
+        }
+
         // Grok Build exposes a stable client-side model profile in config.toml.
         // Route requests to the provider's real upstream model before applying
         // the optional Responses -> Chat/Anthropic bridge.
@@ -6905,6 +6918,16 @@ fn should_make_codex_v2_agents_plaintext(
         && super::providers::codex_multirouter_needs_plaintext_v2_collaboration(router_provider)
 }
 
+fn should_project_codex_agent_messages_for_provider(
+    app_type: &AppType,
+    provider: &Provider,
+    endpoint: &str,
+) -> bool {
+    matches!(app_type, AppType::Codex)
+        && super::providers::is_codex_responses_endpoint(endpoint)
+        && !super::providers::is_codex_official_provider(provider)
+}
+
 /// 判断 effective base_url 是否精确指向当前 CC Switch 代理入口。
 ///
 /// 只匹配当前监听端口，不能把其它 loopback 服务一概拒绝：用户可能合法地把
@@ -8161,6 +8184,33 @@ mod tests {
             &AppType::Codex,
             &official_only,
             true
+        ));
+    }
+
+    #[test]
+    fn agent_message_projection_runs_only_for_third_party_codex_responses() {
+        let third_party = test_provider_with_type(None);
+        assert!(should_project_codex_agent_messages_for_provider(
+            &AppType::Codex,
+            &third_party,
+            "/v1/responses"
+        ));
+        assert!(!should_project_codex_agent_messages_for_provider(
+            &AppType::Claude,
+            &third_party,
+            "/v1/responses"
+        ));
+        assert!(!should_project_codex_agent_messages_for_provider(
+            &AppType::Codex,
+            &third_party,
+            "/v1/chat/completions"
+        ));
+
+        let official = test_codex_official_provider();
+        assert!(!should_project_codex_agent_messages_for_provider(
+            &AppType::Codex,
+            &official,
+            "/v1/responses"
         ));
     }
 

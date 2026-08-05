@@ -541,7 +541,7 @@ fn normalize_codex_oauth_agent_message(object: &mut Map<String, Value>) {
         else {
             continue;
         };
-        if looks_like_codex_encrypted_content(&value) {
+        if super::codex_multi_agent::looks_like_codex_opaque_encrypted_content(&value) {
             continue;
         }
 
@@ -549,23 +549,6 @@ fn normalize_codex_oauth_agent_message(object: &mut Map<String, Value>) {
         part.insert("type".to_string(), Value::String("input_text".to_string()));
         part.insert("text".to_string(), Value::String(value));
     }
-}
-
-fn looks_like_codex_encrypted_content(value: &str) -> bool {
-    if value.len() < 64 || !value.is_ascii() {
-        return false;
-    }
-    [
-        &base64::engine::general_purpose::STANDARD,
-        &base64::engine::general_purpose::URL_SAFE,
-        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-    ]
-    .into_iter()
-    .any(|engine| {
-        engine
-            .decode(value)
-            .is_ok_and(|decoded| decoded.len() >= 32)
-    })
 }
 
 /// 判断 input item 是否是 Codex 内部控制消息。

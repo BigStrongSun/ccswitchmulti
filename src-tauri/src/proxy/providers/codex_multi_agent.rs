@@ -1,22 +1,105 @@
 //! Provider-boundary compatibility for Codex Multi-Agent V2 messages.
 
 use crate::proxy::error::ProxyError;
-use serde_json::Value;
+use base64::Engine as _;
+use serde_json::{json, Value};
 
 /// Project Codex-private `agent_message` items into third-party Responses input.
 ///
-/// The RED implementation intentionally leaves the request unchanged; the tests
-/// below define plaintext delivery, legacy recovery, and opaque fail-closed rules.
 pub(crate) fn project_codex_agent_messages_for_third_party(
-    _body: &mut Value,
+    body: &mut Value,
 ) -> Result<usize, ProxyError> {
-    Ok(0)
+    let Some(input) = body.get_mut("input").and_then(Value::as_array_mut) else {
+        return Ok(0);
+    };
+
+    let mut changed = 0;
+    for item in input {
+        if item.get("type").and_then(Value::as_str) != Some("agent_message") {
+            continue;
+        }
+
+        let Some(content) = item.get("content").and_then(Value::as_array) else {
+            return Err(unreadable_agent_payload_error());
+        };
+        let mut projected_content = Vec::with_capacity(content.len());
+        for part in content {
+            match part.get("type").and_then(Value::as_str) {
+                Some("encrypted_content") => {
+                    let encrypted_content = part
+                        .get("encrypted_content")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    if looks_like_codex_opaque_encrypted_content(encrypted_content) {
+                        return Err(opaque_agent_payload_error());
+                    }
+                    if !encrypted_content.is_empty() {
+                        projected_content.push(json!({
+                            "type": "input_text",
+                            "text": encrypted_content
+                        }));
+                    }
+                }
+                Some("output_text") => {
+                    if let Some(text) = part.get("text").and_then(Value::as_str) {
+                        projected_content.push(json!({"type": "input_text", "text": text}));
+                    }
+                }
+                Some("input_text" | "input_image" | "input_file" | "input_audio") => {
+                    projected_content.push(part.clone());
+                }
+                _ => {}
+            }
+        }
+        if projected_content.is_empty() {
+            return Err(unreadable_agent_payload_error());
+        }
+
+        *item = json!({
+            "type": "message",
+            "role": "user",
+            "content": projected_content
+        });
+        changed += 1;
+    }
+
+    Ok(changed)
+}
+
+pub(crate) fn looks_like_codex_opaque_encrypted_content(value: &str) -> bool {
+    if value.len() < 64 || !value.is_ascii() {
+        return false;
+    }
+    [
+        &base64::engine::general_purpose::STANDARD,
+        &base64::engine::general_purpose::URL_SAFE,
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+    ]
+    .into_iter()
+    .any(|engine| {
+        engine
+            .decode(value)
+            .is_ok_and(|decoded| decoded.len() >= 32)
+    })
+}
+
+fn opaque_agent_payload_error() -> ProxyError {
+    ProxyError::InvalidRequest(
+        "third-party child cannot read encrypted Codex agent payload; use a mixed-router non-reserved agents namespace so the official parent emits plaintext"
+            .to_string(),
+    )
+}
+
+fn unreadable_agent_payload_error() -> ProxyError {
+    ProxyError::InvalidRequest(
+        "third-party child received a Codex agent message without readable content".to_string(),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use serde_json::json;
 
     #[test]
@@ -82,7 +165,13 @@ mod tests {
 
     #[test]
     fn rejects_opaque_agent_ciphertext_without_echoing_it() {
-        let opaque = URL_SAFE_NO_PAD.encode([7_u8; 96]);
+        let mut fernet_token = vec![0_u8; 96];
+        fernet_token[0] = 0x80;
+        let opaque = URL_SAFE_NO_PAD.encode(fernet_token);
+        assert!(
+            opaque.starts_with("gAAAAA"),
+            "fixture must match the live Fernet prefix"
+        );
         let mut request = json!({
             "input": [{
                 "type": "agent_message",
@@ -102,5 +191,24 @@ mod tests {
         assert!(message.contains("third-party child cannot read encrypted Codex agent payload"));
         assert!(!message.contains(&opaque));
     }
-}
 
+    #[test]
+    fn projected_agent_message_reaches_chat_as_user_text() {
+        let task = "Message Type: NEW_TASK\nPayload:\nCHAT_NONCE_19";
+        let mut request = json!({
+            "model": "deepseek-v4-flash",
+            "input": [{
+                "type": "agent_message",
+                "author": "/root",
+                "recipient": "/root/deepseek",
+                "content": [{"type": "input_text", "text": task}]
+            }]
+        });
+
+        project_codex_agent_messages_for_third_party(&mut request).unwrap();
+        let chat = super::super::transform_codex_chat::responses_to_chat_completions(request)
+            .expect("projected request should convert to Chat");
+
+        assert_eq!(chat["messages"], json!([{"role": "user", "content": task}]));
+    }
+}
