@@ -1,5 +1,14 @@
 # CC Switch Repository Memory
 
+## 2026-08-05 Codex Multi-Agent V2 跨 Provider 双阶段 payload 根修
+
+- 2026-08-05 重新交叉验证上游：Codex 内置 Web 搜索、GitHub API/源码 diff 均确认 `openai/codex#36376` 与 `#36586` 仍为 open；已合并 `#35845` 只在 `encrypted_function_args=[]` 时走 `DirectPlaintextMessage`，不能恢复官方 parent 已经返回的 `gAAAAA...`。Matrix `matrix-websearch` MCP 已通过 stdio JSON-RPC 独立初始化并检索三组 GitHub 限定查询，但均返回 0 结果，因此不作为正证据。
+- 旧 `a22c5f8b` 只把混合 Router 的 `tool_namespace` 改成非保留 `agents`，消除了 `collaboration.*` reserved schema HTTP 400，却同时删除了 Stage A 的明文化入口；真实 child rollout 随后证明 namespace 成功不等于 payload 可读。正确修复不是恢复旧的 `collaboration.*` 改写，而是只改非保留 `agents.*`。
+- Stage A RED 提交 `aa64e5bf`，生产提交 `4c2854ac`：混合 Router 的跨 provider V2 策略以 request-local `codexRouterPlaintextV2Collaboration=true` 穿过 route 解析和 target provider 物化；仅当 app=Codex、effective parent 为 official OAuth、该策略为 true 时，删除标准 `tools` 与 Responses Lite `additional_tools` 中 `agents.spawn_agent/send_message/followup_task` 的 `parameters.properties.message.encrypted`。`collaboration.*`、普通工具、其它 `encrypted` 字段、第三方 parent、其它 app 与纯官方 Router均保持不变。
+- Stage B RED 提交 `c47f6b4f`，生产提交 `8990f746`：effective provider 已确定为第三方且 endpoint 为 Codex Responses 时，在 native Responses/Chat/Anthropic 转换前把 plaintext `agent_message` 投影成标准 `type=message, role=user`；旧版误把普通明文塞进 `encrypted_content` 时恢复为 `input_text`。若仍包含可解码为 32+ bytes 的 opaque base64/Fernet 内容（现场 `gAAAAA...`），立即返回不含密文和任务正文的 `InvalidRequest`，不再把空 Payload 当成功。
+- 安全边界：CCSM 不解密 OpenAI ciphertext；新日志只记录改写/投影数量与 provider id，不记录 message、Payload 或密文；没有新增数据库、sidecar 或请求体持久化。纯官方 child 不经过 Stage B，继续保留官方加密。
+- 验证：Stage A 两个 RED 分别稳定得到 `changed=0` 和 route marker `None`；Stage B 三个 RED 分别稳定失败于未投影、未恢复和未拒绝。生产实现后 targeted 回归全绿；完整 `cargo test --lib -- --test-threads=1` 为 `2814 passed / 0 failed / 2 ignored`，`cargo check --lib`、rustfmt、`git diff --check` 通过。当前只证明源码/转换边界，仍须安装新包并完全重启 CCSM/Codex 后，以 OpenAI->Qwen/DeepSeek 唯一 nonce + 真实只读工具输出 + child rollout 可读 Payload 做最终验收。
+
 ## 2026-08-05 Codex 0.146 Multi-Agent V2 第三方子 Agent 空正文与 reserved schema 根修
 
 - 本机 Codex Desktop `0.146.0-alpha.9.2` 在 `codex_model_router_v2` 下真实派生 `qwen3.6` 与 `deepseek-v4-flash` child：两条路由都命中第三方上游并返回 HTTP 200，但 `collaboration` namespace 会让 official parent 把任务正文持久化为第三方无法解密的 `encrypted_content`，Qwen 因而报告 `empty payload`。
