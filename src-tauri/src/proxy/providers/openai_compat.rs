@@ -1752,6 +1752,86 @@ mod tests {
     }
 
     #[test]
+    fn mixed_router_makes_nested_collaboration_namespace_messages_plaintext() {
+        let mut request = json!({
+            "tools": [
+                {
+                    "type": "namespace",
+                    "name": "collaboration",
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "spawn_agent",
+                            "parameters": {
+                                "properties": {
+                                    "message": {"type": "string", "encrypted": true},
+                                    "private_note": {"type": "string", "encrypted": true}
+                                }
+                            }
+                        },
+                        {
+                            "type": "function",
+                            "name": "send_message",
+                            "parameters": {
+                                "properties": {"message": {"type": "string", "encrypted": true}}
+                            }
+                        },
+                        {
+                            "type": "function",
+                            "name": "followup_task",
+                            "parameters": {
+                                "properties": {"message": {"type": "string", "encrypted": true}}
+                            }
+                        },
+                        {
+                            "type": "function",
+                            "name": "lookup",
+                            "parameters": {
+                                "properties": {"message": {"type": "string", "encrypted": true}}
+                            }
+                        }
+                    ]
+                },
+                {
+                    "type": "namespace",
+                    "name": "other",
+                    "tools": [{
+                        "type": "function",
+                        "name": "spawn_agent",
+                        "parameters": {
+                            "properties": {"message": {"type": "string", "encrypted": true}}
+                        }
+                    }]
+                }
+            ]
+        });
+
+        let changed = make_codex_v2_collaboration_messages_plaintext(&mut request);
+
+        assert_eq!(changed, 3);
+        for index in 0..3 {
+            assert!(
+                request["tools"][0]["tools"][index]["parameters"]["properties"]["message"]
+                    .get("encrypted")
+                    .is_none()
+            );
+        }
+        assert_eq!(
+            request["tools"][0]["tools"][0]["parameters"]["properties"]["private_note"]
+                ["encrypted"],
+            true
+        );
+        assert_eq!(
+            request["tools"][0]["tools"][3]["parameters"]["properties"]["message"]["encrypted"],
+            true
+        );
+        assert_eq!(
+            request["tools"][1]["tools"][0]["parameters"]["properties"]["message"]["encrypted"],
+            true
+        );
+    }
+
+    #[test]
     fn chat_request_maps_to_codex_responses_contract() {
         let input = json!({
             "model": "gpt-5.4-mini",
