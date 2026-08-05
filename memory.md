@@ -2887,3 +2887,13 @@
 - 上游分支的 3 个新增回归及 `transform_codex_chat` 84 项全部通过，`cargo check --lib`、`cargo fmt --check`、`git diff --check` 通过。上游全量库测试为 `2334 passed, 3 failed, 4 ignored`；两个失败是 Windows symlink 权限错误 1314，一个是运行中的 CCSwitchMulti 占用代理测试端口导致 10048，均不在唯一变更文件路径内，PR 中已如实披露。
 - 以后处理 Responses input 新结构项时，必须先判断它是消息还是协议元数据；不能仅凭 `role` 字段进入 message 兜底。也不能用全局删除 null 的方式修复 Chat schema，因为 assistant tool-call 允许且依赖 `content:null`。
 - 上述根修已经按 RED→GREEN 完成；session JSONL/SQLite 和 Qwen 配置均未修改，也没有增加 provider 特判。
+
+## 2026-08-05 Codex Multi-Agent V2 第三方 Provider 加密任务 Issue/PR 现状
+
+- 官方 `openai/codex#36586` 精确报告自定义非 OpenAI Provider（DeepSeek）收到 `agent_message` 时，真实任务只存在于 `encrypted_content`，可见 `Payload:` 为空；Issue 仍为 open，标签包含 `bug`、`custom-model`、`subagent`。`#36321`、`#36493` 是同类空 payload 复现；`#36387` 记录 OpenAI 父模型到 DeepSeek 子模型的同一问题，后以 duplicate 关闭。
+- 最关键的跨 Provider 证据在 open Issue `#36376`：即使官方 `#35845` 已随 `0.147.0-alpha.4` 落地，OpenAI 父模型仍返回真实密文 `message="gAAAAA..."` 且 `encrypted_function_args=null`；非 OpenAI 子模型因此仍收到 `[input_text header, encrypted_content]`，不能执行任务。
+- 已合并 PR `#35845`（commit `03edf16f0bce2c454fc9a8ddb382e9c23c114f7f`）新增 `DirectPlaintextMessage`：仅当 function call 带 `encrypted_function_args=[]` 时，把 `spawn_agent`、`send_message`、`followup_task` 投递为结构化明文；否则继续加密。它是必要的 plaintext 通道，但不是 OpenAI 父模型到第三方子模型的完整修复。
+- GitHub connector 与 `gh api search/issues` 均未找到关联 `#36376` 或 `#36586` 的官方修复 PR；搜索 `encrypted_content subagent provider` 也没有结果。当前唯一直接相关的上游 PR 是已合并但覆盖不完整的 `#35845`。
+- `#36586` 评论中的真实线级验证补充了一个重要边界：DeepSeek 对 `agent_message` item 本身也可能忽略，即使其中改成明文 `input_text`；非 OpenAI→非 OpenAI 场景的社区验证方案是把 V2 任务降级投影为普通 `user` message。OpenAI→非 OpenAI 场景则不能仅在子请求侧转换，因为 CCSM/Codex 已经只拿到无法解密的 `gAAAAA...`。
+- 因此 CCSM 下一步不能只做 child-side `encrypted_content -> input_text`。可行根方向是：保留 `agents` namespace；在父请求的非保留 `agents.spawn_agent/send_message/followup_task` schema 边界让官方父模型产生 plaintext/`encrypted_function_args=[]`，再按目标 Provider 能力将第三方子任务投影为普通 user input；官方父子链仍保留加密。实现前必须捕获父响应的 `arguments.message` 与 `encrypted_function_args`，并分别做 OpenAI→OpenAI、OpenAI→DeepSeek/Qwen、DeepSeek/Qwen→同类第三方的真实端到端 canary。
+- 搜索渠道：GitHub connector 和 Codex 内置 Web 均找到相同 Issue 簇与 `#35845`；Matrix MCP 已通过 stdio JSON-RPC 成功初始化并调用三次搜索，但相关 GitHub 限定查询均返回 0 结果，其中一次中国搜索链超时，因此 Matrix 没有提供额外正证据。
