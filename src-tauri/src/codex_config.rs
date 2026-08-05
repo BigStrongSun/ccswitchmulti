@@ -6795,6 +6795,134 @@ base_url = "http://127.0.0.1:15721/v1"
         );
     }
 
+    fn prepared_router_multi_agent_v2_config(
+        settings: &Value,
+        multi_agent_v2_body: &str,
+    ) -> toml::Value {
+        let _guard = TestHomeGuard::new();
+        let config = format!(
+            r#"model_provider = "codex_model_router_v2"
+
+[features.multi_agent_v2]
+enabled = true
+{multi_agent_v2_body}
+
+[model_providers.codex_model_router_v2]
+base_url = "http://127.0.0.1:15721/v1"
+"#
+        );
+        let prepared = prepare_codex_config_text_with_model_catalog(
+            settings,
+            &config,
+            CodexCatalogToolProfile::ProxyChat,
+        )
+        .expect("prepare router config");
+        toml::from_str::<toml::Value>(&prepared).expect("parse prepared router config")["features"]
+            ["multi_agent_v2"]
+            .clone()
+    }
+
+    #[test]
+    #[serial]
+    fn mixed_router_uses_non_reserved_agents_tool_namespace() {
+        let multi_agent_v2 = prepared_router_multi_agent_v2_config(
+            &json!({
+                "modelCatalog": {
+                    "models": [
+                        { "model": "gpt-5.6-sol", "displayName": "GPT-5.6-Sol" },
+                        { "model": "qwen3.6", "displayName": "Qwen 3.6" }
+                    ]
+                },
+                "codexRouting": {
+                    "enabled": true,
+                    "routes": [
+                        {
+                            "id": "official",
+                            "match": { "models": ["gpt-5.6-sol"] },
+                            "upstream": { "auth": { "source": "managed_codex_oauth" } }
+                        },
+                        {
+                            "id": "qwen",
+                            "match": { "models": ["qwen3.6"] },
+                            "upstream": { "auth": { "source": "provider_config" } }
+                        }
+                    ]
+                }
+            }),
+            "tool_namespace = \"collaboration\"",
+        );
+
+        assert_eq!(
+            multi_agent_v2
+                .get("tool_namespace")
+                .and_then(toml::Value::as_str),
+            Some("agents"),
+            "mixed routing must avoid the backend-reserved collaboration namespace"
+        );
+        assert_eq!(
+            multi_agent_v2
+                .get("hide_spawn_agent_metadata")
+                .and_then(toml::Value::as_bool),
+            Some(true)
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn mixed_router_preserves_custom_non_reserved_tool_namespace() {
+        let multi_agent_v2 = prepared_router_multi_agent_v2_config(
+            &json!({
+                "modelCatalog": {
+                    "models": [{ "model": "qwen3.6", "displayName": "Qwen 3.6" }]
+                },
+                "codexRouting": {
+                    "enabled": true,
+                    "routes": [{
+                        "id": "qwen",
+                        "match": { "models": ["qwen3.6"] },
+                        "upstream": { "auth": { "source": "provider_config" } }
+                    }]
+                }
+            }),
+            "tool_namespace = \"team_agents\"",
+        );
+
+        assert_eq!(
+            multi_agent_v2
+                .get("tool_namespace")
+                .and_then(toml::Value::as_str),
+            Some("team_agents")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn official_only_router_does_not_force_non_reserved_tool_namespace() {
+        let multi_agent_v2 = prepared_router_multi_agent_v2_config(
+            &json!({
+                "modelCatalog": {
+                    "models": [{ "model": "gpt-5.6-sol", "displayName": "GPT-5.6-Sol" }]
+                },
+                "codexRouting": {
+                    "enabled": true,
+                    "routes": [{
+                        "id": "official",
+                        "match": { "models": ["gpt-5.6-sol"] },
+                        "upstream": { "auth": { "source": "managed_codex_oauth" } }
+                    }]
+                }
+            }),
+            "tool_namespace = \"collaboration\"",
+        );
+
+        assert_eq!(
+            multi_agent_v2
+                .get("tool_namespace")
+                .and_then(toml::Value::as_str),
+            Some("collaboration")
+        );
+    }
+
     fn prepared_router_catalog_models(settings: &Value) -> Vec<Value> {
         seed_codex_models_cache(json!([{
             "slug": "gpt-5.5",
