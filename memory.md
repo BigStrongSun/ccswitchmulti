@@ -3,9 +3,10 @@
 ## 2026-08-05 Codex 0.146 Multi-Agent V2 第三方子 Agent 空正文回归根修
 
 - 本机 Codex Desktop `0.146.0-alpha.9.2` 在 `codex_model_router_v2` 下真实派生 `qwen3.6` 与 `deepseek-v4-flash` child：两条路由都命中第三方上游并返回 HTTP 200，但 child rollout 的初始 `agent_message` 只有 `Payload:` 明文信封头，任务正文为 `encrypted_content`；Qwen 明确报告 `empty payload`。这证明派生和模型路由可用，故障仅在 official parent 到第三方 child 的 V2 正文投递。
-- 2026-08-01 的根修会在混合 Router 的 official OAuth 出站移除 `spawn_agent`、`send_message`、`followup_task` 的 `message.encrypted`，但 2026-08-03 路由重构把 MultiRouter 在 retry 层提前解析并物化成唯一 target provider。物化只保留父 Router ID/名称和 route 元数据，丢失了父 Router 是否含第三方 route 的传输策略；forwarder 因此记录 `routing_configured=false`，把 official route 误判为普通官方 provider，明文化逻辑未触发。
+- 该回归有两层根因。第一层：2026-08-03 路由重构把 MultiRouter 在 retry 层提前解析并物化成唯一 target provider，物化时丢失父 Router 是否含第三方 route 的传输策略；forwarder 因此记录 `routing_configured=false`，把 official route 误判为普通官方 provider，2026-08-01 已有的明文化逻辑未触发。
+- 第二层：Codex 0.146 的 Multi-Agent V2 已把协作工具从扁平 `type=function` 改成 `type=namespace, name=collaboration, tools=[...]`。原 `make_collaboration_tool_messages_plaintext()` 只遍历顶层 function，虽然认识 function 自带的 `namespace` 字段，却会直接跳过 namespace 容器；因此第一层策略恢复后，新版 `spawn_agent` 的 `message.encrypted` 仍未被删除。根修只递归进入名为 `collaboration` 的 namespace，并继续复用三种协作函数白名单；非协作 namespace、普通工具和 `private_note.encrypted` 保持不变。
 - 根修在 route 解析边界把父 Router 的跨 provider V2 明文策略固化为 request-local `codexRouterPlaintextV2Collaboration=true`，并在 target provider 物化白名单中保留该字段。forwarder 可从 effective provider 恢复正确策略，无需复制整份 `codexRouting`，也不会重新路由。最终改写仍同时要求 Codex app、official OAuth 请求和该策略，因此全官方 Router、第三方出站、其它 app 与禁用 route 不受影响。
-- RED 回归 `materialized_official_route_keeps_mixed_router_plaintext_delivery_policy` 在旧实现稳定失败，生产修改后通过；相关 `plaintext_v2`、route attempt、标准 Responses tool rewrite 测试和 rustfmt 均通过。真实验收必须安装新构建并完全重启 CCSwitchMulti/Codex app-server，再检查新 child rollout 的初始正文为 `input_text` 且 Qwen/DeepSeek 回显探针标记；已有空正文 child 不会被追溯修复。
+- 第一层 RED 回归 `materialized_official_route_keeps_mixed_router_plaintext_delivery_policy` 与第二层 RED 回归 `mixed_router_makes_nested_collaboration_namespace_messages_plaintext` 都在各自旧实现稳定失败，生产修改后通过。真实验收必须安装新构建并完全重启 CCSwitchMulti/Codex app-server，再检查新 child rollout 的初始正文为 `input_text` 且 Qwen/DeepSeek 回显探针标记；已有空正文 child 不会被追溯修复。
 
 ## 2026-08-04 Codex `--ephemeral resume` 污染真实会话与恢复边界
 

@@ -174,6 +174,19 @@ pub(crate) fn make_codex_v2_collaboration_messages_plaintext(body: &mut Value) -
 fn make_collaboration_tool_messages_plaintext(tools: &mut [Value]) -> usize {
     let mut changed = 0;
     for tool in tools {
+        if tool.get("type").and_then(Value::as_str) == Some("namespace") {
+            if tool
+                .get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|name| name.eq_ignore_ascii_case("collaboration"))
+            {
+                changed += tool
+                    .get_mut("tools")
+                    .and_then(Value::as_array_mut)
+                    .map_or(0, |tools| make_collaboration_tool_messages_plaintext(tools));
+            }
+            continue;
+        }
         if tool.get("type").and_then(Value::as_str) != Some("function") {
             continue;
         }
