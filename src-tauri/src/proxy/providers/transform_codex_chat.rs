@@ -109,31 +109,40 @@ pub(crate) fn response_message_item_id(response_id: &str) -> String {
     format!("msg_{suffix}")
 }
 
-/// Normalize safely rewriteable item IDs created by third-party Responses
-/// implementations before replaying mixed-provider history to an OpenAI official
-/// Responses endpoint. Existing canonical OpenAI IDs remain untouched. Invalid
-/// vendor IDs are mapped deterministically so retries and prompt-cache prefixes
-/// stay stable. Encrypted reasoning is deliberately excluded because its opaque
-/// payload can be bound to the original provider/item identity.
+/// Normalize replay metadata created by third-party Responses implementations
+/// before replaying mixed-provider history to an OpenAI official Responses
+/// endpoint. Plain reasoning is inlined by removing its synthetic ID: OpenAI
+/// otherwise treats any `rs_*` ID as stored server state and rejects it under
+/// `store: false`. Other invalid vendor IDs are mapped deterministically so
+/// retries and prompt-cache prefixes stay stable. Encrypted reasoning is left
+/// untouched because its opaque payload can be bound to the original provider
+/// and item identity.
 pub(crate) fn normalize_replayed_item_ids_for_openai(body: &mut Value) -> usize {
     let Some(input) = body.get_mut("input").and_then(Value::as_array_mut) else {
         return 0;
     };
     let mut changed = 0;
     for item in input {
+        let is_plain_reasoning = item.get("type").and_then(Value::as_str) == Some("reasoning")
+            && !item
+                .get("encrypted_content")
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.is_empty());
+        if is_plain_reasoning {
+            if item
+                .as_object_mut()
+                .is_some_and(|object| object.remove("id").is_some())
+            {
+                changed += 1;
+            }
+            continue;
+        }
+
         let Some(required_prefix) =
             item.get("type")
                 .and_then(Value::as_str)
                 .and_then(|item_type| match item_type {
                     "message" => Some("msg_"),
-                    "reasoning"
-                        if !item
-                            .get("encrypted_content")
-                            .and_then(Value::as_str)
-                            .is_some_and(|value| !value.is_empty()) =>
-                    {
-                        Some("rs_")
-                    }
                     "function_call" => Some("fc_"),
                     "custom_tool_call" => Some("ctc_"),
                     "web_search_call" => Some("ws_"),
@@ -5573,7 +5582,7 @@ mod tests {
     }
 
     #[test]
-    fn openai_request_normalizes_replayed_plain_reasoning_and_tool_call_ids() {
+    fn openai_request_inlines_plain_reasoning_and_normalizes_tool_call_ids() {
         let mut body = json!({
             "model": "gpt-5.6-sol",
             "input": [
@@ -5602,9 +5611,7 @@ mod tests {
         });
 
         assert_eq!(normalize_replayed_item_ids_for_openai(&mut body), 3);
-        assert!(body["input"][0]["id"]
-            .as_str()
-            .is_some_and(|id| id.starts_with("rs_")));
+        assert!(body["input"][0].get("id").is_none());
         assert!(body["input"][1]["id"]
             .as_str()
             .is_some_and(|id| id.starts_with("fc_")));
