@@ -19,6 +19,7 @@ use toml::Value as TomlValue;
 
 const CODEX_ROUTER_PARENT_PROVIDER_ID: &str = "codexRouterParentProviderId";
 const CODEX_ROUTER_PARENT_PROVIDER_NAME: &str = "codexRouterParentProviderName";
+const CODEX_ROUTER_PLAINTEXT_V2_COLLABORATION: &str = "codexRouterPlaintextV2Collaboration";
 const CODEX_RESOLVED_TARGET_PROVIDER_ID: &str = "codexResolvedTargetProviderId";
 const CODEX_RESOLVED_UPSTREAM_MODEL_OVERRIDE: &str = "codexResolvedUpstreamModelOverride";
 const CODEX_NATIVE_AUTH_PASSTHROUGH: &str = "codexNativeAuthPassthrough";
@@ -112,6 +113,15 @@ pub fn classify_codex_multirouter_auth_facade(
 /// 不明 route 都可能成为子 Agent，因此 official parent 的协作工具参数必须改为 V2
 /// 明文。禁用 route 不影响当前任务的传输策略。
 pub fn codex_multirouter_needs_plaintext_v2_collaboration(provider: &Provider) -> bool {
+    if provider
+        .settings_config
+        .get(CODEX_ROUTER_PLAINTEXT_V2_COLLABORATION)
+        .and_then(JsonValue::as_bool)
+        == Some(true)
+    {
+        return true;
+    }
+
     let Some(routing) = provider.settings_config.get("codexRouting") else {
         return false;
     };
@@ -535,6 +545,7 @@ pub fn materialize_codex_routed_provider_from_target(
         "codexResolvedCapabilities",
         CODEX_ROUTER_PARENT_PROVIDER_ID,
         CODEX_ROUTER_PARENT_PROVIDER_NAME,
+        CODEX_ROUTER_PLAINTEXT_V2_COLLABORATION,
         CODEX_RESOLVED_TARGET_PROVIDER_ID,
         CODEX_ACCOUNT_POOL_ENABLED,
         "apiFormat",
@@ -1123,6 +1134,12 @@ fn build_codex_routed_provider(
         .as_object()
         .cloned()
         .unwrap_or_else(Map::new);
+    if codex_multirouter_needs_plaintext_v2_collaboration(provider) {
+        settings.insert(
+            CODEX_ROUTER_PLAINTEXT_V2_COLLABORATION.to_string(),
+            JsonValue::Bool(true),
+        );
+    }
 
     if let Some(base_url) = upstream
         .get("baseUrl")
