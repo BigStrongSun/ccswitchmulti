@@ -5551,6 +5551,28 @@ mod tests {
     }
 
     #[test]
+    fn openai_request_inlines_synthetic_plain_reasoning_without_id() {
+        let mut body = json!({
+            "model": "gpt-5.6-sol",
+            "input": [{
+                "id": "rs_resp_chatcmpl-b4d3bcf7f34003ac",
+                "type": "reasoning",
+                "summary": [{
+                    "type": "summary_text",
+                    "text": "plain Qwen reasoning survives the provider switch"
+                }]
+            }]
+        });
+
+        assert_eq!(normalize_replayed_item_ids_for_openai(&mut body), 1);
+        assert!(body["input"][0].get("id").is_none());
+        assert_eq!(
+            body["input"][0]["summary"][0]["text"],
+            "plain Qwen reasoning survives the provider switch"
+        );
+    }
+
+    #[test]
     fn openai_request_normalizes_replayed_plain_reasoning_and_tool_call_ids() {
         let mut body = json!({
             "model": "gpt-5.6-sol",
