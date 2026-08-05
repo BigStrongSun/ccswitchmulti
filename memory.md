@@ -2876,4 +2876,12 @@
 - session `019fbd59-0c1a-7592-87d3-1e2ad654fd0d` 在 `pre_turn compaction`（`comp_hash_changed`）切到 Qwen `qwen3.6` 后，CCSM 将 `/responses` 转成 `/chat/completions`；366,973 字节请求连续收到 HTTP 400。上游 Pydantic 的 19 条 validation errors 是同一个 `messages[1]` 在联合消息类型上的分支校验结果，实际坏值是 `{"role":"system","content":null}`，不是 19 条坏消息。
 - 转换根因有三段：`responses_message_item_to_chat_message` 对缺失 `content` 使用 `Value::Null`；`responses_content_to_chat_content` 对显式 null 原样返回；`collapse_system_messages_to_head` 只消费字符串 system content，null system 被保留进 `rest` 并发送。assistant 的 `content:null` 在 tool call 场景可能合法，修复必须按角色和消息语义处理，不能全局删除 null。
 - 归属复核：2026-08-05 fetch 后的上游 `main=0345fad6`、上游 tag `v3.19.1`、fork tag/运行版 `v3.19.1-5` 与当前 HEAD 在上述三段均保留相同逻辑；当前 HEAD 与 `v3.19.1-5` 的整个 `transform_codex_chat.rs` blob 相同。故不是 BigStrongSun 后续改动新引入，而是上游原版缺陷被 fork 继承；上游最新 main 截至该提交也未修复。现有 system-collapse 测试只覆盖字符串内容，缺少 missing/null system/developer 回归。
-- 后续根修应先写失败测试，至少覆盖 system/developer 的缺失 content 与显式 null，再在 Responses->Chat 边界保证非 assistant 消息满足 Chat schema；不得通过改 session JSONL/SQLite 或只对 Qwen 特判来绕过转换器缺陷。
+
+## 2026-08-05 Responses Lite `additional_tools` 转 Chat 根修
+
+- 目标 session `019fbd59-0c1a-7592-87d3-1e2ad654fd0d` 的 HTTP 400 不是 Codex 在普通 message 上主动发送 `content:null`。Codex `0.146.0-alpha.3.1` 的 Responses Lite 请求会动态插入 `{"type":"additional_tools","role":"developer","tools":[...]}`；该结构项协议上没有 `content`，且按官方 rollout policy 不持久化到 session JSONL。
+- 原始错误链在 `src-tauri/src/proxy/providers/transform_codex_chat.rs`：工具上下文只收集顶层 `tools` 和 `tool_search_output.tools`；未知 item 兜底又把带 `role` 的 `additional_tools` 当 message，developer 映射为 system，missing content 变为 null，最终被严格 Chat/vLLM 校验拒绝。同时 `additional_tools.tools` 被静默丢失。
+- 根修提交 `b14e3db` 采用双层契约：递归收集 `input` 内 `additional_tools.tools` 并复用 `CodexToolContext::add_response_tool` 的 function/custom/namespace/hosted tool/去重逻辑；message 投影时显式消费 `additional_tools` 而不生成消息。对真实非 assistant message 的 missing/null content 输出空字符串，已有 system collapse 会消费空 system；assistant synthetic tool-call 的合法 `content:null` 保持不变。
+- TDD 提交 `509646eb` 先锁定三个 RED 场景：Lite 工具丢失和 null system、custom/namespace 与跨来源去重、system/developer/user missing/null 和 assistant null 例外。GREEN 后定向 3 项通过，`transform_codex_chat` 122 项通过；最终 `cargo check --lib`、`cargo fmt --check`、`git diff --check` 通过，全量库测试 `2808 passed, 0 failed, 2 ignored`。
+- 以后处理 Responses input 新结构项时，必须先判断它是消息还是协议元数据；不能仅凭 `role` 字段进入 message 兜底。也不能用全局删除 null 的方式修复 Chat schema，因为 assistant tool-call 允许且依赖 `content:null`。
+- 上述根修已经按 RED→GREEN 完成；session JSONL/SQLite 和 Qwen 配置均未修改，也没有增加 provider 特判。
