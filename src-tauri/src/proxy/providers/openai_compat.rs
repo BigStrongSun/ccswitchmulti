@@ -12,7 +12,6 @@ use crate::proxy::{
     },
     sse::{append_utf8_safe, strip_sse_field, take_sse_block},
 };
-use base64::Engine as _;
 use bytes::Bytes;
 use futures::stream::{Stream, StreamExt};
 use serde_json::{json, Map, Value};
@@ -1663,6 +1662,7 @@ fn normalize_error_object(error: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
     use futures::{stream, StreamExt};
 
     #[test]
