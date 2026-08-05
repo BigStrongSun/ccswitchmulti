@@ -8019,6 +8019,82 @@ mod tests {
         );
     }
 
+    #[test]
+    fn materialized_official_route_keeps_mixed_router_plaintext_delivery_policy() {
+        let db = Arc::new(Database::memory().expect("memory db"));
+        let official_target = test_codex_official_provider();
+        db.save_provider("codex", &official_target)
+            .expect("save official target provider");
+
+        let mut router = test_provider_with_type(None);
+        router.id = "codex-multirouter".to_string();
+        router.settings_config = json!({
+            "codexRouting": {
+                "enabled": true,
+                "routes": [
+                    {
+                        "id": "official",
+                        "enabled": true,
+                        "targetProviderId": official_target.id,
+                        "match": { "models": ["gpt-5.6-sol"] },
+                        "upstream": {
+                            "apiFormat": "openai_responses",
+                            "auth": { "source": "native_codex_auth" }
+                        }
+                    },
+                    {
+                        "id": "qwen",
+                        "enabled": true,
+                        "match": { "models": ["qwen3.6"] },
+                        "upstream": {
+                            "apiFormat": "openai_chat",
+                            "auth": { "source": "provider_config" }
+                        }
+                    }
+                ]
+            }
+        });
+
+        let route_attempts = build_forward_attempt_providers_preserving_codex_router_context(
+            &AppType::Codex,
+            &[router],
+            &json!({ "model": "gpt-5.6-sol" }),
+        );
+        let forwarder = RequestForwarder {
+            router: Arc::new(ProviderRouter::new(db.clone())),
+            status: Arc::new(RwLock::new(ProxyStatus::default())),
+            current_providers: Arc::new(RwLock::new(HashMap::new())),
+            gemini_shadow: Arc::new(GeminiShadowStore::new()),
+            codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
+            failover_manager: Arc::new(FailoverSwitchManager::new(db)),
+            app_handle: None,
+            current_provider_id_at_start: String::new(),
+            session_id: String::new(),
+            session_client_provided: false,
+            preserve_codex_client_originator: false,
+            rectifier_config: RectifierConfig::default(),
+            optimizer_config: OptimizerConfig::default(),
+            copilot_optimizer_config: CopilotOptimizerConfig::default(),
+            codex_responses_lite_fallbacks: Arc::new(RwLock::new(HashMap::new())),
+            non_streaming_timeout: Duration::ZERO,
+            streaming_first_byte_timeout: Duration::ZERO,
+            max_attempts: 1,
+        };
+
+        let effective = forwarder
+            .materialize_codex_forward_attempt_provider(&AppType::Codex, &route_attempts[0])
+            .expect("materialize official target provider");
+
+        assert_eq!(
+            effective
+                .settings_config
+                .get("codexRouterPlaintextV2Collaboration")
+                .and_then(Value::as_bool),
+            Some(true),
+            "retry-layer route materialization must preserve the mixed-router plaintext policy"
+        );
+    }
+
     #[tokio::test]
     async fn codex_resolved_route_local_self_loop_is_failed_not_successful() {
         let forwarder = test_forwarder(Duration::from_secs(1), Duration::from_secs(1));

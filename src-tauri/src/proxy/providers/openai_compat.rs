@@ -144,6 +144,14 @@ pub(crate) fn normalize_codex_oauth_responses_request(
     Value::Object(body)
 }
 
+/// Stage A hook for non-reserved Multi-Agent V2 tool schemas.
+///
+/// The RED implementation intentionally performs no rewrite; the regression
+/// below defines the exact `agents.*` scope before production behavior is added.
+pub(crate) fn make_codex_v2_agents_messages_plaintext(_body: &mut Value) -> usize {
+    0
+}
+
 /// 归一化 Codex Responses 透传请求中的内部控制消息。
 ///
 /// 参数:
@@ -1606,6 +1614,101 @@ fn normalize_error_object(error: &Value) -> Value {
 mod tests {
     use super::*;
     use futures::{stream, StreamExt};
+
+    #[test]
+    fn mixed_router_plaintext_rewrite_targets_only_non_reserved_agents_tools() {
+        let mut request = json!({
+            "input": [{
+                "type": "additional_tools",
+                "tools": [{
+                    "type": "function",
+                    "namespace": "agents",
+                    "name": "send_message",
+                    "parameters": {
+                        "properties": {"message": {"type": "string", "encrypted": true}}
+                    }
+                }]
+            }],
+            "tools": [
+                {
+                    "type": "namespace",
+                    "name": "agents",
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "spawn_agent",
+                            "parameters": {
+                                "properties": {
+                                    "message": {"type": "string", "encrypted": true},
+                                    "private_note": {"type": "string", "encrypted": true}
+                                }
+                            }
+                        },
+                        {
+                            "type": "function",
+                            "name": "followup_task",
+                            "parameters": {
+                                "properties": {"message": {"type": "string", "encrypted": true}}
+                            }
+                        },
+                        {
+                            "type": "function",
+                            "name": "lookup",
+                            "parameters": {
+                                "properties": {"message": {"type": "string", "encrypted": true}}
+                            }
+                        }
+                    ]
+                },
+                {
+                    "type": "namespace",
+                    "name": "collaboration",
+                    "tools": [{
+                        "type": "function",
+                        "name": "spawn_agent",
+                        "parameters": {
+                            "properties": {"message": {"type": "string", "encrypted": true}}
+                        }
+                    }]
+                }
+            ]
+        });
+
+        let changed = make_codex_v2_agents_messages_plaintext(&mut request);
+
+        assert_eq!(changed, 3);
+        assert!(
+            request["tools"][0]["tools"][0]["parameters"]["properties"]["message"]
+                .get("encrypted")
+                .is_none()
+        );
+        assert!(
+            request["tools"][0]["tools"][1]["parameters"]["properties"]["message"]
+                .get("encrypted")
+                .is_none()
+        );
+        assert!(
+            request["input"][0]["tools"][0]["parameters"]["properties"]["message"]
+                .get("encrypted")
+                .is_none()
+        );
+        assert_eq!(
+            request["tools"][0]["tools"][0]["parameters"]["properties"]["private_note"]
+                ["encrypted"],
+            true
+        );
+        assert_eq!(
+            request["tools"][0]["tools"][2]["parameters"]["properties"]["message"]
+                ["encrypted"],
+            true
+        );
+        assert_eq!(
+            request["tools"][1]["tools"][0]["parameters"]["properties"]["message"]
+                ["encrypted"],
+            true,
+            "reserved collaboration schema must remain byte/schema preserving"
+        );
+    }
 
     #[test]
     fn chat_request_maps_to_codex_responses_contract() {
