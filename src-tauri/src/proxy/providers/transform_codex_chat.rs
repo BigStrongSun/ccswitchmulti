@@ -129,11 +129,12 @@ pub(crate) fn normalize_replayed_item_ids_for_openai(body: &mut Value) -> usize 
                 .and_then(Value::as_str)
                 .is_some_and(|value| !value.is_empty());
         if is_plain_reasoning {
-            if item
-                .as_object_mut()
-                .is_some_and(|object| object.remove("id").is_some())
-            {
-                changed += 1;
+            if let Some(object) = item.as_object_mut() {
+                let removed_id = object.remove("id").is_some();
+                let removed_status = object.remove("status").is_some();
+                if removed_id || removed_status {
+                    changed += 1;
+                }
             }
             continue;
         }
