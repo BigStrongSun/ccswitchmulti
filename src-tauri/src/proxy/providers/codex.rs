@@ -19,7 +19,6 @@ use toml::Value as TomlValue;
 
 const CODEX_ROUTER_PARENT_PROVIDER_ID: &str = "codexRouterParentProviderId";
 const CODEX_ROUTER_PARENT_PROVIDER_NAME: &str = "codexRouterParentProviderName";
-const CODEX_ROUTER_PLAINTEXT_V2_COLLABORATION: &str = "codexRouterPlaintextV2Collaboration";
 const CODEX_RESOLVED_TARGET_PROVIDER_ID: &str = "codexResolvedTargetProviderId";
 const CODEX_RESOLVED_UPSTREAM_MODEL_OVERRIDE: &str = "codexResolvedUpstreamModelOverride";
 const CODEX_NATIVE_AUTH_PASSTHROUGH: &str = "codexNativeAuthPassthrough";
@@ -107,48 +106,7 @@ pub fn classify_codex_multirouter_auth_facade(
     }
 }
 
-/// 判断 MultiRouter 是否需要让官方 V2 协作消息保持明文。
-///
-/// 官方 route 的子 Agent 能由 ChatGPT Codex backend 解密；任一启用的第三方或来源
-/// 不明 route 都可能成为子 Agent，因此 official parent 的协作工具参数必须改为 V2
-/// 明文。禁用 route 不影响当前任务的传输策略。
-pub fn codex_multirouter_needs_plaintext_v2_collaboration(provider: &Provider) -> bool {
-    if provider
-        .settings_config
-        .get(CODEX_ROUTER_PLAINTEXT_V2_COLLABORATION)
-        .and_then(JsonValue::as_bool)
-        == Some(true)
-    {
-        return true;
-    }
-
-    let Some(routing) = provider.settings_config.get("codexRouting") else {
-        return false;
-    };
-    if routing
-        .get("enabled")
-        .and_then(JsonValue::as_bool)
-        .is_some_and(|enabled| !enabled)
-    {
-        return false;
-    }
-    let Some(routes) = routing
-        .get("routes")
-        .and_then(JsonValue::as_array)
-        .or_else(|| routing.as_array())
-    else {
-        return false;
-    };
-
-    routes.iter().any(|route| {
-        route
-            .get("enabled")
-            .and_then(JsonValue::as_bool)
-            .unwrap_or(true)
-            && !codex_route_uses_official_agent_backend(route)
-    })
-}
-
+/// 判断 route 是否由 ChatGPT Codex 官方 backend 提供原生能力。
 fn codex_route_uses_official_agent_backend(route: &JsonValue) -> bool {
     let upstream = route.get("upstream").unwrap_or(route);
     let auth = upstream
@@ -545,7 +503,6 @@ pub fn materialize_codex_routed_provider_from_target(
         "codexResolvedCapabilities",
         CODEX_ROUTER_PARENT_PROVIDER_ID,
         CODEX_ROUTER_PARENT_PROVIDER_NAME,
-        CODEX_ROUTER_PLAINTEXT_V2_COLLABORATION,
         CODEX_RESOLVED_TARGET_PROVIDER_ID,
         CODEX_ACCOUNT_POOL_ENABLED,
         "apiFormat",
@@ -1134,13 +1091,6 @@ fn build_codex_routed_provider(
         .as_object()
         .cloned()
         .unwrap_or_else(Map::new);
-    if codex_multirouter_needs_plaintext_v2_collaboration(provider) {
-        settings.insert(
-            CODEX_ROUTER_PLAINTEXT_V2_COLLABORATION.to_string(),
-            JsonValue::Bool(true),
-        );
-    }
-
     if let Some(base_url) = upstream
         .get("baseUrl")
         .or_else(|| upstream.get("base_url"))
@@ -2963,69 +2913,6 @@ context_window = 500000
             classify_codex_multirouter_auth_facade(&ambiguous, None),
             CodexMultiRouterAuthFacade::LegacyPreserved
         );
-    }
-
-    #[test]
-    fn codex_multirouter_plaintext_v2_delivery_depends_on_enabled_route_ownership() {
-        let mixed = multirouter_with_routes(
-            json!([
-                {
-                    "id": "official",
-                    "enabled": true,
-                    "upstream": { "auth": { "source": "managed_codex_oauth" } }
-                },
-                {
-                    "id": "third-party",
-                    "enabled": true,
-                    "upstream": { "auth": { "source": "provider_config" } }
-                }
-            ]),
-            None,
-        );
-        assert!(codex_multirouter_needs_plaintext_v2_collaboration(&mixed));
-
-        let official_only = multirouter_with_routes(
-            json!([{
-                "id": "official",
-                "enabled": true,
-                "upstream": { "auth": { "source": "account_pool" } }
-            }]),
-            None,
-        );
-        assert!(!codex_multirouter_needs_plaintext_v2_collaboration(
-            &official_only
-        ));
-
-        let disabled_third_party = multirouter_with_routes(
-            json!([
-                {
-                    "id": "official",
-                    "enabled": true,
-                    "upstream": { "auth": { "source": "native_codex_auth" } }
-                },
-                {
-                    "id": "third-party",
-                    "enabled": false,
-                    "upstream": { "auth": { "source": "provider_config" } }
-                }
-            ]),
-            None,
-        );
-        assert!(!codex_multirouter_needs_plaintext_v2_collaboration(
-            &disabled_third_party
-        ));
-
-        let ambiguous = multirouter_with_routes(
-            json!([{
-                "id": "legacy",
-                "enabled": true,
-                "upstream": { "apiFormat": "openai_responses" }
-            }]),
-            None,
-        );
-        assert!(codex_multirouter_needs_plaintext_v2_collaboration(
-            &ambiguous
-        ));
     }
 
     #[test]

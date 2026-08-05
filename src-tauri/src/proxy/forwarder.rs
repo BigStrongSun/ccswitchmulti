@@ -2507,21 +2507,6 @@ impl RequestForwarder {
         } else {
             request_body
         };
-        if should_make_codex_v2_collaboration_plaintext(
-            app_type,
-            codex_router_provider,
-            normalize_codex_oauth_responses,
-        ) {
-            let changed =
-                super::providers::openai_compat::make_codex_v2_collaboration_messages_plaintext(
-                    &mut request_body,
-                );
-            if changed > 0 {
-                log::debug!(
-                    "[CodexRouter] Kept {changed} V2 collaboration message parameter(s) plaintext for cross-provider delivery"
-                );
-            }
-        }
         if matches!(app_type, AppType::Codex)
             && endpoint.contains("responses")
             && super::providers::is_codex_official_provider(provider)
@@ -6896,16 +6881,6 @@ fn codex_provider_has_routing_config(provider: &Provider) -> bool {
         || provider.settings_config.get("modelRoutes").is_some()
 }
 
-fn should_make_codex_v2_collaboration_plaintext(
-    app_type: &AppType,
-    router_provider: &Provider,
-    official_oauth_request: bool,
-) -> bool {
-    matches!(app_type, AppType::Codex)
-        && official_oauth_request
-        && super::providers::codex_multirouter_needs_plaintext_v2_collaboration(router_provider)
-}
-
 /// 判断 effective base_url 是否精确指向当前 CC Switch 代理入口。
 ///
 /// 只匹配当前监听端口，不能把其它 loopback 服务一概拒绝：用户可能合法地把
@@ -7373,51 +7348,6 @@ mod tests {
         provider.settings_config["codexPoolCredentialGeneration"] =
             Value::Number(generation.into());
         provider
-    }
-
-    #[test]
-    fn plaintext_v2_collaboration_rewrite_requires_mixed_router_and_official_parent() {
-        let mut mixed = test_provider_with_type(None);
-        mixed.settings_config = json!({
-            "codexRouting": {
-                "enabled": true,
-                "routes": [
-                    {"enabled": true, "upstream": {"auth": {"source": "managed_codex_oauth"}}},
-                    {"enabled": true, "upstream": {"auth": {"source": "provider_config"}}}
-                ]
-            }
-        });
-        assert!(should_make_codex_v2_collaboration_plaintext(
-            &AppType::Codex,
-            &mixed,
-            true
-        ));
-        assert!(!should_make_codex_v2_collaboration_plaintext(
-            &AppType::Codex,
-            &mixed,
-            false
-        ));
-        assert!(!should_make_codex_v2_collaboration_plaintext(
-            &AppType::Claude,
-            &mixed,
-            true
-        ));
-
-        let mut official_only = test_provider_with_type(None);
-        official_only.settings_config = json!({
-            "codexRouting": {
-                "enabled": true,
-                "routes": [{
-                    "enabled": true,
-                    "upstream": {"auth": {"source": "native_codex_auth"}}
-                }]
-            }
-        });
-        assert!(!should_make_codex_v2_collaboration_plaintext(
-            &AppType::Codex,
-            &official_only,
-            true
-        ));
     }
 
     #[test]
@@ -8087,79 +8017,6 @@ mod tests {
             effective.settings_config["codexResolvedTargetProviderId"],
             "deepseek-target"
         );
-    }
-
-    #[test]
-    fn materialized_official_route_keeps_mixed_router_plaintext_delivery_policy() {
-        let db = Arc::new(Database::memory().expect("memory db"));
-        let official_target = test_codex_official_provider();
-        db.save_provider("codex", &official_target)
-            .expect("save official target provider");
-
-        let mut router = test_provider_with_type(None);
-        router.id = "codex-multirouter".to_string();
-        router.settings_config = json!({
-            "codexRouting": {
-                "enabled": true,
-                "routes": [
-                    {
-                        "id": "official",
-                        "enabled": true,
-                        "targetProviderId": official_target.id,
-                        "match": { "models": ["gpt-5.6-sol"] },
-                        "upstream": {
-                            "apiFormat": "openai_responses",
-                            "auth": { "source": "native_codex_auth" }
-                        }
-                    },
-                    {
-                        "id": "qwen",
-                        "enabled": true,
-                        "match": { "models": ["qwen3.6"] },
-                        "upstream": {
-                            "apiFormat": "openai_chat",
-                            "auth": { "source": "provider_config" }
-                        }
-                    }
-                ]
-            }
-        });
-
-        let route_attempts = build_forward_attempt_providers_preserving_codex_router_context(
-            &AppType::Codex,
-            &[router],
-            &json!({ "model": "gpt-5.6-sol" }),
-        );
-        let forwarder = RequestForwarder {
-            router: Arc::new(ProviderRouter::new(db.clone())),
-            status: Arc::new(RwLock::new(ProxyStatus::default())),
-            current_providers: Arc::new(RwLock::new(HashMap::new())),
-            gemini_shadow: Arc::new(GeminiShadowStore::new()),
-            codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
-            failover_manager: Arc::new(FailoverSwitchManager::new(db)),
-            app_handle: None,
-            current_provider_id_at_start: String::new(),
-            session_id: String::new(),
-            session_client_provided: false,
-            preserve_codex_client_originator: false,
-            rectifier_config: RectifierConfig::default(),
-            optimizer_config: OptimizerConfig::default(),
-            copilot_optimizer_config: CopilotOptimizerConfig::default(),
-            codex_responses_lite_fallbacks: Arc::new(RwLock::new(HashMap::new())),
-            non_streaming_timeout: Duration::ZERO,
-            streaming_first_byte_timeout: Duration::ZERO,
-            max_attempts: 1,
-        };
-
-        let effective = forwarder
-            .materialize_codex_forward_attempt_provider(&AppType::Codex, &route_attempts[0])
-            .expect("materialize official target provider");
-
-        assert!(should_make_codex_v2_collaboration_plaintext(
-            &AppType::Codex,
-            &effective,
-            true
-        ));
     }
 
     #[tokio::test]

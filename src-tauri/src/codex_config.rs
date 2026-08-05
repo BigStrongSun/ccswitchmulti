@@ -2056,7 +2056,7 @@ fn set_codex_model_catalog_projection_fields(
             doc["model_catalog_json"] = toml_edit::value(CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME);
             set_active_codex_provider_models(&mut doc, specs, catalog);
             ensure_codex_agents_defaults(&mut doc);
-            ensure_codex_multi_agent_reserved_schema_compatible(&mut doc);
+            ensure_codex_multi_agent_reserved_schema_compatible(&mut doc, false);
         }
         _ => {
             let should_remove = doc
@@ -2097,10 +2097,9 @@ fn codex_multi_router_is_enabled(settings: &Value) -> bool {
 
 /// 判断当前 MultiRouter 是否包含需要跨 provider 投递的启用 route。
 ///
-/// 混合路由仍保留 Multi-Agent V2；代理会在 official parent 出站时移除协作工具
-/// message 参数的加密标记，让 Codex 生成 V2 明文 agent_message。这里仅负责确保整个
-/// 混合任务的模型目录都声明 V2。旧 route 没有认证来源时按跨 provider 处理。
-fn codex_multi_router_requires_plaintext_multi_agent(settings: &Value) -> bool {
+/// 混合路由仍保留 Multi-Agent V2，并通过非保留工具 namespace 让 Codex 直接向
+/// 第三方 child 投递明文任务。旧 route 没有认证来源时按跨 provider 处理。
+fn codex_multi_router_requires_non_reserved_agent_namespace(settings: &Value) -> bool {
     let Some(routing) = settings.get("codexRouting") else {
         return false;
     };
@@ -2152,7 +2151,7 @@ fn codex_route_uses_official_backend_agent_delivery(route: &Value) -> bool {
 /// Codex 会在任务首轮锁定协议版本。官方 parent 与第三方 child 必须都留在 V2 候选
 /// 集合中，正文是否加密由出站工具 schema 单独控制，不能再把混合目录降为 V1。
 fn apply_codex_multi_agent_transport_policy(catalog: &mut Value, settings: &Value) {
-    if !codex_multi_router_requires_plaintext_multi_agent(settings) {
+    if !codex_multi_router_requires_non_reserved_agent_namespace(settings) {
         return;
     }
     let Some(models) = catalog.get_mut("models").and_then(Value::as_array_mut) else {
@@ -2207,17 +2206,21 @@ fn set_codex_native_web_search_field(config_text: &str, disable: bool) -> Result
     Ok(doc.to_string())
 }
 
-/// 让 Codex multi_agent_v2 使用新版模型认可的保留工具 schema。
+/// 让 Codex multi_agent_v2 使用与当前路由拓扑兼容的工具 schema。
 ///
 /// 新版 GPT/Codex 后端把 `collaboration.spawn_agent` 视为保留函数工具，
 /// 并要求客户端提交的 schema 与后端配置完全一致。旧版 CCSwitchMulti 曾通过
 /// `hide_spawn_agent_metadata=false` 暴露 `model` / `reasoning_effort` /
 /// `service_tier` 参数；这些额外字段会让新模型直接拒绝请求。
 ///
-/// CCSwitchMulti 现在通过 `~/.codex/agents/*.toml` 托管 role 文件固定子 Agent
-/// 模型，因此这里只保留用户原本的启用状态，并强制隐藏 metadata，让工具 schema
-/// 回到 Codex 官方保留形态。
-fn ensure_codex_multi_agent_reserved_schema_compatible(doc: &mut DocumentMut) {
+/// CCSwitchMulti 通过 `~/.codex/agents/*.toml` 托管 role 文件固定子 Agent 模型，
+/// 因此始终隐藏 metadata。混合官方/第三方路由不能使用后端保留的
+/// `collaboration` namespace：若用户没有选择 namespace，或仍使用该保留名，改用
+/// Codex 原生支持的 `agents`。用户已有其它非保留 namespace 时保持不变。
+fn ensure_codex_multi_agent_reserved_schema_compatible(
+    doc: &mut DocumentMut,
+    mixed_provider_delivery: bool,
+) {
     if doc.get("features").is_none() {
         doc["features"] = toml_edit::table();
     }
@@ -2244,6 +2247,16 @@ fn ensure_codex_multi_agent_reserved_schema_compatible(doc: &mut DocumentMut) {
             multi_agent_v2["enabled"] = enabled;
         }
         multi_agent_v2["hide_spawn_agent_metadata"] = toml_edit::value(true);
+        let namespace_requires_replacement = multi_agent_v2
+            .get("tool_namespace")
+            .and_then(|item| item.as_str())
+            .map(str::trim)
+            .is_none_or(|namespace| {
+                namespace.is_empty() || namespace.eq_ignore_ascii_case("collaboration")
+            });
+        if mixed_provider_delivery && namespace_requires_replacement {
+            multi_agent_v2["tool_namespace"] = toml_edit::value("agents");
+        }
     }
 }
 
@@ -2848,6 +2861,10 @@ pub fn prepare_codex_config_text_with_model_catalog(
         let mut doc = config_text
             .parse::<DocumentMut>()
             .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
+        ensure_codex_multi_agent_reserved_schema_compatible(
+            &mut doc,
+            codex_multi_router_requires_non_reserved_agent_namespace(settings),
+        );
         let config_text =
             if codex_multi_router_is_enabled(settings) || codex_document_uses_multi_router(&doc) {
                 remove_multi_router_context_overrides(&mut doc);

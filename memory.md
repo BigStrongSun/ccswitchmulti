@@ -1,12 +1,12 @@
 # CC Switch Repository Memory
 
-## 2026-08-05 Codex 0.146 Multi-Agent V2 第三方子 Agent 空正文回归根修
+## 2026-08-05 Codex 0.146 Multi-Agent V2 第三方子 Agent 空正文与 reserved schema 根修
 
-- 本机 Codex Desktop `0.146.0-alpha.9.2` 在 `codex_model_router_v2` 下真实派生 `qwen3.6` 与 `deepseek-v4-flash` child：两条路由都命中第三方上游并返回 HTTP 200，但 child rollout 的初始 `agent_message` 只有 `Payload:` 明文信封头，任务正文为 `encrypted_content`；Qwen 明确报告 `empty payload`。这证明派生和模型路由可用，故障仅在 official parent 到第三方 child 的 V2 正文投递。
-- 该回归有两层根因。第一层：2026-08-03 路由重构把 MultiRouter 在 retry 层提前解析并物化成唯一 target provider，物化时丢失父 Router 是否含第三方 route 的传输策略；forwarder 因此记录 `routing_configured=false`，把 official route 误判为普通官方 provider，2026-08-01 已有的明文化逻辑未触发。
-- 第二层：Codex 0.146 的 Multi-Agent V2 已把协作工具从扁平 `type=function` 改成 `type=namespace, name=collaboration, tools=[...]`。原 `make_collaboration_tool_messages_plaintext()` 只遍历顶层 function，虽然认识 function 自带的 `namespace` 字段，却会直接跳过 namespace 容器；因此第一层策略恢复后，新版 `spawn_agent` 的 `message.encrypted` 仍未被删除。根修只递归进入名为 `collaboration` 的 namespace，并继续复用三种协作函数白名单；非协作 namespace、普通工具和 `private_note.encrypted` 保持不变。
-- 根修在 route 解析边界把父 Router 的跨 provider V2 明文策略固化为 request-local `codexRouterPlaintextV2Collaboration=true`，并在 target provider 物化白名单中保留该字段。forwarder 可从 effective provider 恢复正确策略，无需复制整份 `codexRouting`，也不会重新路由。最终改写仍同时要求 Codex app、official OAuth 请求和该策略，因此全官方 Router、第三方出站、其它 app 与禁用 route 不受影响。
-- 第一层 RED 回归 `materialized_official_route_keeps_mixed_router_plaintext_delivery_policy` 与第二层 RED 回归 `mixed_router_makes_nested_collaboration_namespace_messages_plaintext` 都在各自旧实现稳定失败，生产修改后通过。真实验收必须安装新构建并完全重启 CCSwitchMulti/Codex app-server，再检查新 child rollout 的初始正文为 `input_text` 且 Qwen/DeepSeek 回显探针标记；已有空正文 child 不会被追溯修复。
+- 本机 Codex Desktop `0.146.0-alpha.9.2` 在 `codex_model_router_v2` 下真实派生 `qwen3.6` 与 `deepseek-v4-flash` child：两条路由都命中第三方上游并返回 HTTP 200，但 `collaboration` namespace 会让 official parent 把任务正文持久化为第三方无法解密的 `encrypted_content`，Qwen 因而报告 `empty payload`。
+- 2026-08-01 至 08-05 的错误方案在发往官方 OAuth backend 前删除 `spawn_agent`、`send_message`、`followup_task` 的 `message.encrypted`，并在 route 物化时传播 `codexRouterPlaintextV2Collaboration`。session `019fc293-3b9c-7c43-9f61-a29350ce24a3` 证明该方案会让新版官方 backend 以 HTTP 400 拒绝：`Function 'collaboration.followup_task' is reserved for use by this model and must match the configured schema`。删除 `encrypted` 已经改变保留工具 schema；三个保留函数都不得由代理改写。
+- 用户回滚 CCSM 后，同一官方 Sol 路由由 400 恢复 HTTP 200。进一步用 Codex `multi_agent_v2.tool_namespace="agents"` 做真实 A/B：官方 parent 正常返回，Sol 派生 `qwen-local` 时第三方 `/chat/completions` 多次 HTTP 200，child 返回 `CHILD_OK`，parent 返回 `PARENT_OK / Child result: CHILD_OK`。因此正确架构是在 Codex 配置层使用非保留 namespace，而不是修改官方出站 schema。
+- CCSM 对包含启用第三方或来源歧义 route 的 MultiRouter 投影 `tool_namespace="agents"`，但保留用户已有的其它非保留自定义 namespace；纯官方 Router 不强制切换 namespace。`hide_spawn_agent_metadata=true` 和 catalog 的 `multi_agent_version=v2` 保持不变。
+- 代理层彻底删除 collaboration schema 改写、request-local 明文策略 marker、route 物化传播和对应旧测试。以后官方 OAuth 出站的 reserved tool schema 必须原样透传；第三方 child 可读正文能力由 Codex 原生非保留 namespace 提供。安装新构建并完全重启 CCSwitchMulti/Codex app-server 后，仍需用 Desktop 对 Sol -> Qwen/DeepSeek 真实 spawn 做最终验收。
 
 ## 2026-08-04 Codex `--ephemeral resume` 污染真实会话与恢复边界
 
