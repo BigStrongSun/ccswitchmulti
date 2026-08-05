@@ -144,12 +144,79 @@ pub(crate) fn normalize_codex_oauth_responses_request(
     Value::Object(body)
 }
 
-/// Stage A hook for non-reserved Multi-Agent V2 tool schemas.
+/// Remove the private encrypted marker from non-reserved `agents.*` V2 messages.
 ///
-/// The RED implementation intentionally performs no rewrite; the regression
-/// below defines the exact `agents.*` scope before production behavior is added.
-pub(crate) fn make_codex_v2_agents_messages_plaintext(_body: &mut Value) -> usize {
-    0
+/// Reserved `collaboration.*` tools are deliberately excluded: newer OpenAI
+/// backends validate those schemas exactly and reject any proxy-side mutation.
+pub(crate) fn make_codex_v2_agents_messages_plaintext(body: &mut Value) -> usize {
+    let Some(object) = body.as_object_mut() else {
+        return 0;
+    };
+    let mut changed = object
+        .get_mut("tools")
+        .and_then(Value::as_array_mut)
+        .map_or(0, |tools| make_agents_tool_messages_plaintext(tools, false));
+
+    if let Some(input) = object.get_mut("input").and_then(Value::as_array_mut) {
+        for item in input {
+            if item.get("type").and_then(Value::as_str) != Some("additional_tools") {
+                continue;
+            }
+            if let Some(tools) = item.get_mut("tools").and_then(Value::as_array_mut) {
+                changed += make_agents_tool_messages_plaintext(tools, false);
+            }
+        }
+    }
+    changed
+}
+
+fn make_agents_tool_messages_plaintext(tools: &mut [Value], inside_agents: bool) -> usize {
+    let mut changed = 0;
+    for tool in tools {
+        if tool.get("type").and_then(Value::as_str) == Some("namespace") {
+            let namespace_is_agents = tool
+                .get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|name| name.eq_ignore_ascii_case("agents"));
+            if namespace_is_agents {
+                let children_key = if tool.get("tools").is_some() {
+                    "tools"
+                } else {
+                    "children"
+                };
+                changed += tool
+                    .get_mut(children_key)
+                    .and_then(Value::as_array_mut)
+                    .map_or(0, |children| {
+                        make_agents_tool_messages_plaintext(children, true)
+                    });
+            }
+            continue;
+        }
+        if tool.get("type").and_then(Value::as_str) != Some("function") {
+            continue;
+        }
+        let explicit_agents = tool
+            .get("namespace")
+            .and_then(Value::as_str)
+            .is_some_and(|namespace| namespace.eq_ignore_ascii_case("agents"));
+        if !inside_agents && !explicit_agents {
+            continue;
+        }
+        if !tool
+            .get("name")
+            .and_then(Value::as_str)
+            .is_some_and(|name| matches!(name, "spawn_agent" | "send_message" | "followup_task"))
+        {
+            continue;
+        }
+        let encrypted = tool
+            .pointer_mut("/parameters/properties/message")
+            .and_then(Value::as_object_mut)
+            .and_then(|message| message.remove("encrypted"));
+        changed += usize::from(encrypted.is_some());
+    }
+    changed
 }
 
 /// 归一化 Codex Responses 透传请求中的内部控制消息。
@@ -1698,13 +1765,11 @@ mod tests {
             true
         );
         assert_eq!(
-            request["tools"][0]["tools"][2]["parameters"]["properties"]["message"]
-                ["encrypted"],
+            request["tools"][0]["tools"][2]["parameters"]["properties"]["message"]["encrypted"],
             true
         );
         assert_eq!(
-            request["tools"][1]["tools"][0]["parameters"]["properties"]["message"]
-                ["encrypted"],
+            request["tools"][1]["tools"][0]["parameters"]["properties"]["message"]["encrypted"],
             true,
             "reserved collaboration schema must remain byte/schema preserving"
         );

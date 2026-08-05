@@ -19,6 +19,7 @@ use toml::Value as TomlValue;
 
 const CODEX_ROUTER_PARENT_PROVIDER_ID: &str = "codexRouterParentProviderId";
 const CODEX_ROUTER_PARENT_PROVIDER_NAME: &str = "codexRouterParentProviderName";
+const CODEX_ROUTER_PLAINTEXT_V2_COLLABORATION: &str = "codexRouterPlaintextV2Collaboration";
 const CODEX_RESOLVED_TARGET_PROVIDER_ID: &str = "codexResolvedTargetProviderId";
 const CODEX_RESOLVED_UPSTREAM_MODEL_OVERRIDE: &str = "codexResolvedUpstreamModelOverride";
 const CODEX_NATIVE_AUTH_PASSTHROUGH: &str = "codexNativeAuthPassthrough";
@@ -315,6 +316,49 @@ pub fn codex_route_supports_responses_compaction(provider: &Provider) -> bool {
     false
 }
 
+/// Whether an official parent in this MultiRouter must emit plaintext V2 agent tasks.
+///
+/// A future child may use any enabled route. If one route is third-party or its
+/// credential ownership is ambiguous, OpenAI-only encrypted task arguments are
+/// not portable. Resolved providers retain the request-local marker so retry-layer
+/// materialization cannot erase this decision.
+pub fn codex_multirouter_needs_plaintext_v2_collaboration(provider: &Provider) -> bool {
+    if provider
+        .settings_config
+        .get(CODEX_ROUTER_PLAINTEXT_V2_COLLABORATION)
+        .and_then(JsonValue::as_bool)
+        == Some(true)
+    {
+        return true;
+    }
+
+    let Some(routing) = provider.settings_config.get("codexRouting") else {
+        return false;
+    };
+    if routing
+        .get("enabled")
+        .and_then(JsonValue::as_bool)
+        .is_some_and(|enabled| !enabled)
+    {
+        return false;
+    }
+    let Some(routes) = routing
+        .get("routes")
+        .and_then(JsonValue::as_array)
+        .or_else(|| routing.as_array())
+    else {
+        return false;
+    };
+
+    routes.iter().any(|route| {
+        route
+            .get("enabled")
+            .and_then(JsonValue::as_bool)
+            .unwrap_or(true)
+            && !codex_route_uses_official_agent_backend(route)
+    })
+}
+
 /// Whether this provider should expose the OpenAI provider name to Codex.
 ///
 /// Codex decides remote vs local compaction from the model provider `name`
@@ -503,6 +547,7 @@ pub fn materialize_codex_routed_provider_from_target(
         "codexResolvedCapabilities",
         CODEX_ROUTER_PARENT_PROVIDER_ID,
         CODEX_ROUTER_PARENT_PROVIDER_NAME,
+        CODEX_ROUTER_PLAINTEXT_V2_COLLABORATION,
         CODEX_RESOLVED_TARGET_PROVIDER_ID,
         CODEX_ACCOUNT_POOL_ENABLED,
         "apiFormat",
@@ -1091,6 +1136,12 @@ fn build_codex_routed_provider(
         .as_object()
         .cloned()
         .unwrap_or_else(Map::new);
+    if codex_multirouter_needs_plaintext_v2_collaboration(provider) {
+        settings.insert(
+            CODEX_ROUTER_PLAINTEXT_V2_COLLABORATION.to_string(),
+            JsonValue::Bool(true),
+        );
+    }
     if let Some(base_url) = upstream
         .get("baseUrl")
         .or_else(|| upstream.get("base_url"))

@@ -2507,6 +2507,20 @@ impl RequestForwarder {
         } else {
             request_body
         };
+        if should_make_codex_v2_agents_plaintext(
+            app_type,
+            codex_router_provider,
+            normalize_codex_oauth_responses,
+        ) {
+            let changed = super::providers::openai_compat::make_codex_v2_agents_messages_plaintext(
+                &mut request_body,
+            );
+            if changed > 0 {
+                log::debug!(
+                    "[CodexRouter] Kept {changed} V2 agents message parameter(s) plaintext for cross-provider delivery"
+                );
+            }
+        }
         if matches!(app_type, AppType::Codex)
             && endpoint.contains("responses")
             && super::providers::is_codex_official_provider(provider)
@@ -6881,6 +6895,16 @@ fn codex_provider_has_routing_config(provider: &Provider) -> bool {
         || provider.settings_config.get("modelRoutes").is_some()
 }
 
+fn should_make_codex_v2_agents_plaintext(
+    app_type: &AppType,
+    router_provider: &Provider,
+    official_oauth_request: bool,
+) -> bool {
+    matches!(app_type, AppType::Codex)
+        && official_oauth_request
+        && super::providers::codex_multirouter_needs_plaintext_v2_collaboration(router_provider)
+}
+
 /// 判断 effective base_url 是否精确指向当前 CC Switch 代理入口。
 ///
 /// 只匹配当前监听端口，不能把其它 loopback 服务一概拒绝：用户可能合法地把
@@ -8093,6 +8117,51 @@ mod tests {
             Some(true),
             "retry-layer route materialization must preserve the mixed-router plaintext policy"
         );
+    }
+
+    #[test]
+    fn agents_plaintext_rewrite_requires_codex_mixed_router_and_official_parent() {
+        let mut mixed = test_provider_with_type(None);
+        mixed.settings_config = json!({
+            "codexRouting": {
+                "enabled": true,
+                "routes": [
+                    {"enabled": true, "upstream": {"auth": {"source": "managed_codex_oauth"}}},
+                    {"enabled": true, "upstream": {"auth": {"source": "provider_config"}}}
+                ]
+            }
+        });
+        assert!(should_make_codex_v2_agents_plaintext(
+            &AppType::Codex,
+            &mixed,
+            true
+        ));
+        assert!(!should_make_codex_v2_agents_plaintext(
+            &AppType::Codex,
+            &mixed,
+            false
+        ));
+        assert!(!should_make_codex_v2_agents_plaintext(
+            &AppType::Claude,
+            &mixed,
+            true
+        ));
+
+        let mut official_only = test_provider_with_type(None);
+        official_only.settings_config = json!({
+            "codexRouting": {
+                "enabled": true,
+                "routes": [{
+                    "enabled": true,
+                    "upstream": {"auth": {"source": "native_codex_auth"}}
+                }]
+            }
+        });
+        assert!(!should_make_codex_v2_agents_plaintext(
+            &AppType::Codex,
+            &official_only,
+            true
+        ));
     }
 
     #[tokio::test]
