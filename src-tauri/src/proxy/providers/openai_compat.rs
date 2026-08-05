@@ -140,7 +140,9 @@ pub(crate) fn normalize_codex_oauth_responses_request(
     body.remove("temperature");
     body.remove("top_p");
 
-    Value::Object(body)
+    let mut normalized = Value::Object(body);
+    super::transform_codex_chat::normalize_replayed_item_ids_for_openai(&mut normalized);
+    normalized
 }
 
 /// Remove the private encrypted marker from non-reserved `agents.*` V2 messages.
