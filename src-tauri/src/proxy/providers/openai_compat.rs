@@ -1946,6 +1946,33 @@ mod tests {
     }
 
     #[test]
+    fn codex_oauth_responses_normalizer_rewrites_third_party_web_search_id_for_official_replay() {
+        // A managed Codex OAuth route is materialized with a temporary route ID,
+        // so the later built-in-provider gate does not run. The OAuth boundary
+        // itself must canonicalize replay metadata before ChatGPT validates it.
+        let normalized = normalize_codex_oauth_responses_request(
+            json!({
+                "model": "gpt-5.6-sol",
+                "input": [{
+                    "type": "web_search_call",
+                    "id": "call_00_JYFDjhEPbdA9SmnfBXkC9250",
+                    "status": "completed",
+                    "action": {"type": "search", "queries": ["redacted fixture"]}
+                }]
+            }),
+            false,
+        );
+
+        let id = normalized["input"][0]["id"]
+            .as_str()
+            .expect("web search item ID");
+        assert!(id.starts_with("ws_ccswitch_"), "unexpected ID: {id}");
+        assert_eq!(normalized["input"][0]["type"], "web_search_call");
+        assert_eq!(normalized["input"][0]["status"], "completed");
+        assert_eq!(normalized["input"][0]["action"]["type"], "search");
+    }
+
+    #[test]
     fn codex_responses_request_normalizer_strips_content_from_tool_output_items() {
         // ChatGPT Codex OAuth backend 的 tool/call output item 不接受 content 数组；
         // Codex Desktop 某些工具回传会额外带 content，必须在直透前删除。
