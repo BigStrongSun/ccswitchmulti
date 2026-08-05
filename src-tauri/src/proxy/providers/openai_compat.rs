@@ -1975,6 +1975,32 @@ mod tests {
     }
 
     #[test]
+    fn codex_oauth_responses_normalizer_strips_third_party_plain_reasoning_replay_metadata() {
+        // DeepSeek native Responses emits response-only id/status metadata on
+        // reasoning output items. ChatGPT accepts the inline summary but rejects
+        // status and treats an ID as stored server state under store=false.
+        let normalized = normalize_codex_oauth_responses_request(
+            json!({
+                "model": "gpt-5.6-sol",
+                "input": [{
+                    "type": "reasoning",
+                    "id": "0809ed03-b717-4b92-9e58-6cc019b16486",
+                    "status": "completed",
+                    "summary": [{"type": "summary_text", "text": "portable summary"}]
+                }]
+            }),
+            false,
+        );
+
+        assert!(normalized["input"][0].get("id").is_none());
+        assert!(normalized["input"][0].get("status").is_none());
+        assert_eq!(
+            normalized["input"][0]["summary"],
+            json!([{"type": "summary_text", "text": "portable summary"}])
+        );
+    }
+
+    #[test]
     fn codex_responses_request_normalizer_strips_content_from_tool_output_items() {
         // ChatGPT Codex OAuth backend 的 tool/call output item 不接受 content 数组；
         // Codex Desktop 某些工具回传会额外带 content，必须在直透前删除。
