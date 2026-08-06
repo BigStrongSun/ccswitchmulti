@@ -2940,3 +2940,10 @@
 - TDD RED 提交 `180b5735` 用真实 predicate 锁定 managed OAuth 被错误投影；GREEN 提交 `8d721273` 同时排除 managed Codex OAuth 与原生 official。Qwen、DeepSeek、xAI 和其它真正第三方 Responses route 仍进入投影，opaque 密文仍 fail closed，未放宽密文泄漏边界。
 - `3f351514` 解决的是 native official replay normalizer 范围，不是本次 Stage B ownership 误分类；两者都应保留。版本提交 `969fec5c` 升到 `3.19.1-10` 并新增中文发布说明，当前运行中的 `3.19.1-9` 未替换。
 - 验证：RED 在旧逻辑稳定失败、GREEN 通过；Multi-Agent payload 5/5、OAuth Responses 14/14、完整 Rust library `2818 passed / 0 failed / 2 ignored`；`cargo check --lib`、rustfmt、diff check 通过，仅保留既有 `openai_cache_read_tokens` dead-code warning。官方文档只确认 GPT-5.6 multi-agent 仍为 beta，未公开这种私有 envelope；Codex 内置官方搜索与 Matrix 独立搜索都没有找到该精确错误，进一步证明它属于 CCSM 本地诊断文案。
+
+## 2026-08-06 v3.19.1-10 本地发布与发布锁根修
+
+- Windows 本地发布最终固定在提交 `906a2b7b1d568ef0989fdc50c267c73f935d07a1`，目录为 `C:\Users\sunda\Documents\LLMservice\ccswitchmulti-release-v3.19.1-10`。安装包 SHA256 为 `FFD40C76CD890078B7C48D47C9183A0D28EE3B731D3BB5F22641F5DDC6800279`，portable ZIP 为 `A757104273F380ED36BA6485A6853792310492A7F842DE253E167E819F9FA820`，raw EXE 为 `947167B74B5D70D3599F652E54DE020240D5B920010737E1F4C34C493BB654D1`。
+- 最终验收为 15 个导出文件、15 个 checksum entry、0 个缺失/哈希错误；setup 与 raw EXE 的 PE ProductVersion 均为 `3.19.1-10`，portable 内含 `CCSwitchMulti.exe`，`latest.json` 版本正确且 updater signature 与 `.sig` 完全一致。当前已安装并运行的 `3.19.1-9` 未被替换。
+- 首轮打包曾在 NSIS 阶段触发 Windows OS 32。更深根因不是 Rust/Tauri 编译失败，而是旧 `local-release-pipeline.ps1` 在竞争者获取锁失败后仍由 `finally` 无条件删除活跃流水线的锁，使第三条流水线能并发进入并争写 `target/release/cc-switch.exe`。提交 `906a2b7b` 改为原子 `CreateNew`、每进程 token 和 owner-only release；Windows PowerShell 5.1 回归确认竞争者失败后锁仍属原 owner，错误 token 不能释放，owner 可以释放。
+- 带重复反斜杠的 `ReleaseRoot` 还暴露了 `SHA256SUMS.txt` 相对路径按未经规范化字符串长度截取的问题。提交 `434541de` 在两个 checksum writer 中先 `Path.GetFullPath` 再截取，保持 PowerShell 5.1 兼容；实际 duplicated-separator `-SkipBuild` 导出得到 15 条清单、0 条无效相对路径。
