@@ -6308,15 +6308,16 @@ fn should_preserve_exact_header_case(
 ///
 /// 参数:
 /// - `app_type`: 当前客户端应用类型，只有 Codex Desktop/CLI 请求需要该兼容层。
-/// - `provider`: 已经由 MultiRouter 解析后的 effective provider。
+/// - `provider`: 已经由 MultiRouter 或顶层切换解析后的 effective provider。
 /// - `url`: forwarder 最终要访问的上游 URL。
 /// - `needs_transform`: 是否已经走了 Claude/Anthropic 转换管线。
 /// - `codex_responses_to_chat`: 是否已经被改写到 Chat Completions 上游。
 /// - `codex_responses_to_messages`: 是否已经被改写到 Messages 上游。
 ///   返回:
-/// - `true` 表示需要在透传前补齐 ChatGPT Codex backend 的必填字段。
+/// - `true` 表示需要在透传前投影成 ChatGPT Codex backend 接受的回放形态。
 ///   副作用:
-/// - 无。该函数只读入参，用来把修复范围限制在 official managed Codex OAuth。
+/// - 无。该函数只读入参，用来把修复范围限制在 managed Codex OAuth 或内置
+///   native-auth OpenAI Official 到 ChatGPT Codex Responses 的真实 transport。
 fn should_normalize_codex_oauth_responses_passthrough_body(
     app_type: &AppType,
     provider: &Provider,
@@ -6326,7 +6327,7 @@ fn should_normalize_codex_oauth_responses_passthrough_body(
     codex_responses_to_messages: bool,
 ) -> bool {
     matches!(app_type, AppType::Codex)
-        && provider.is_codex_oauth()
+        && (provider.is_codex_oauth() || super::providers::is_codex_official_provider(provider))
         && !needs_transform
         && !codex_responses_to_chat
         && !codex_responses_to_messages
