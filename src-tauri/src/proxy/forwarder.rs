@@ -8213,6 +8213,13 @@ mod tests {
             &official,
             "/v1/responses"
         ));
+
+        let managed_official = test_provider_with_type(Some("codex_oauth"));
+        assert!(!should_project_codex_agent_messages_for_provider(
+            &AppType::Codex,
+            &managed_official,
+            "/v1/responses"
+        ));
     }
 
     #[tokio::test]
