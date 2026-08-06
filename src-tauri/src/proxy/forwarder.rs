@@ -6924,8 +6924,11 @@ fn should_project_codex_agent_messages_for_provider(
     provider: &Provider,
     endpoint: &str,
 ) -> bool {
+    // Managed Codex OAuth routes are OpenAI-owned even when their request-local
+    // route id/category does not match the built-in `codex-official` seed.
     matches!(app_type, AppType::Codex)
         && super::providers::is_codex_responses_endpoint(endpoint)
+        && !provider.is_codex_oauth()
         && !super::providers::is_codex_official_provider(provider)
 }
 
