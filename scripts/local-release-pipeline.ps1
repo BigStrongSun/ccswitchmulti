@@ -87,16 +87,17 @@ function Write-ReleaseMetadata {
 function Write-Checksums {
     param([string]$Root)
 
+    $normalizedRoot = [System.IO.Path]::GetFullPath($Root)
     $lines = New-Object System.Collections.Generic.List[string]
-    Get-ChildItem -LiteralPath $Root -Recurse -File |
+    Get-ChildItem -LiteralPath $normalizedRoot -Recurse -File |
         Where-Object { $_.Name -ne "SHA256SUMS.txt" } |
         ForEach-Object {
         $file = $_
         $hash = Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256
-        $relative = $file.FullName.Substring($Root.Length).TrimStart([char[]]@([char]92, [char]47))
+        $relative = $file.FullName.Substring($normalizedRoot.Length).TrimStart([char[]]@([char]92, [char]47))
         $lines.Add("$($hash.Hash)  $relative")
     } | Out-Null
-    Set-Content -LiteralPath (Join-Path $Root "SHA256SUMS.txt") -Value ($lines.ToArray() -join "`r`n") -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $normalizedRoot "SHA256SUMS.txt") -Value ($lines.ToArray() -join "`r`n") -Encoding UTF8
 }
 
 $repoRoot = Get-RepoRoot

@@ -218,13 +218,14 @@ function Write-PlatformNote {
 function Write-Checksums {
     param([string]$Root)
 
-    $files = @(Get-ChildItem -Path $Root -Recurse -File | Where-Object { $_.Name -ne "SHA256SUMS.txt" })
+    $normalizedRoot = [System.IO.Path]::GetFullPath($Root)
+    $files = @(Get-ChildItem -LiteralPath $normalizedRoot -Recurse -File | Where-Object { $_.Name -ne "SHA256SUMS.txt" })
     $lines = foreach ($file in $files) {
         $hash = Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256
-        $relative = $file.FullName.Substring($Root.Length).TrimStart("\", "/")
+        $relative = $file.FullName.Substring($normalizedRoot.Length).TrimStart("\", "/")
         "$($hash.Hash)  $relative"
     }
-    Set-Content -LiteralPath (Join-Path $Root "SHA256SUMS.txt") -Value ($lines -join "`r`n") -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $normalizedRoot "SHA256SUMS.txt") -Value ($lines -join "`r`n") -Encoding UTF8
 }
 
 # Write the root release README so testers know which artifact to use.
