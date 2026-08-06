@@ -56,7 +56,43 @@ function Enter-PipelineLock {
         Remove-Item -LiteralPath $LockPath -Force
     }
 
-    New-Item -ItemType File -Path $LockPath -Force -Value (Get-Date).ToString("o") | Out-Null
+    $token = "$PID-$([guid]::NewGuid().ToString('N'))"
+    try {
+        $stream = [System.IO.File]::Open(
+            $LockPath,
+            [System.IO.FileMode]::CreateNew,
+            [System.IO.FileAccess]::Write,
+            [System.IO.FileShare]::None
+        )
+        try {
+            $content = "$token`r`n$((Get-Date).ToString('o'))"
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($content)
+            $stream.Write($bytes, 0, $bytes.Length)
+        } finally {
+            $stream.Dispose()
+        }
+    } catch [System.IO.IOException] {
+        throw "local release pipeline is already running. Lock: $LockPath"
+    }
+
+    return $token
+}
+
+# Remove only the lock created by this process; a failed contender must not delete another run's lock.
+function Exit-PipelineLock {
+    param(
+        [string]$LockPath,
+        [string]$Token
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Token) -or -not (Test-Path -LiteralPath $LockPath)) {
+        return
+    }
+
+    $owner = (Get-Content -LiteralPath $LockPath -TotalCount 1 -ErrorAction SilentlyContinue).Trim()
+    if ($owner -eq $Token) {
+        Remove-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue
+    }
 }
 
 # Write release metadata into the export folder so the artifact can be traced to a commit.
@@ -111,8 +147,9 @@ $lockPath = Join-Path $logDir "local-release.lock"
 
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
+$pipelineLockToken = $null
 try {
-    Enter-PipelineLock -LockPath $lockPath
+    $pipelineLockToken = Enter-PipelineLock -LockPath $lockPath
     Push-Location $repoRoot
 
     Write-Log "Local release pipeline started. reason=$Reason target=$releaseRoot"
@@ -141,5 +178,5 @@ try {
     Write-Log "Local release pipeline completed. Artifacts exported to: $releaseRoot"
 } finally {
     Pop-Location -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue
+    Exit-PipelineLock -LockPath $lockPath -Token $pipelineLockToken
 }
