@@ -8567,6 +8567,25 @@ mod tests {
     }
 
     #[test]
+    fn native_openai_official_responses_uses_the_same_replay_normalizer() {
+        // Switching the top-level Codex provider back from DeepSeek/Qwen uses
+        // the built-in native-auth OpenAI Official provider, not a provider
+        // whose meta.provider_type is codex_oauth. It still targets the same
+        // ChatGPT Codex Responses backend, so third-party reasoning/content
+        // history must cross the same target-transport replay boundary.
+        let native_official = test_codex_official_provider();
+
+        assert!(should_normalize_codex_oauth_responses_passthrough_body(
+            &AppType::Codex,
+            &native_official,
+            "https://chatgpt.com/backend-api/codex/responses",
+            false,
+            false,
+            false
+        ));
+    }
+
+    #[test]
     fn codex_responses_passthrough_control_message_normalizer_is_scoped() {
         let codex_oauth = test_provider_with_type(Some("codex_oauth"));
         let regular = test_provider_with_type(None);
