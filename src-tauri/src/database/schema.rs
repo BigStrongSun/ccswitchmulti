@@ -2975,6 +2975,77 @@ impl Database {
     pub(crate) fn repair_deepseek_native_responses_on_conn(
         conn: &Connection,
     ) -> Result<(), AppError> {
+        fn route_target_provider_id(route: &serde_json::Value) -> Option<&str> {
+            [
+                route.get("targetProviderId"),
+                route.get("target_provider_id"),
+                route.get("providerId"),
+                route.get("provider_id"),
+                route.pointer("/upstream/targetProviderId"),
+                route.pointer("/upstream/target_provider_id"),
+                route.pointer("/upstream/providerId"),
+                route.pointer("/upstream/provider_id"),
+            ]
+            .into_iter()
+            .flatten()
+            .find_map(serde_json::Value::as_str)
+        }
+
+        fn route_matches_model(route: &serde_json::Value, model: &str) -> bool {
+            route
+                .pointer("/match/models")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|models| {
+                    models
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .any(|candidate| candidate.eq_ignore_ascii_case(model))
+                })
+        }
+
+        fn canonicalize_deepseek_route(
+            route: &mut serde_json::Value,
+            model: &str,
+            api_format: &str,
+        ) -> bool {
+            let mut changed = false;
+            let next_models = serde_json::json!([model]);
+            if route.pointer("/match/models") != Some(&next_models) {
+                route["match"]["models"] = next_models;
+                changed = true;
+            }
+            let next_prefixes = serde_json::json!([model]);
+            if route.pointer("/match/prefixes") != Some(&next_prefixes) {
+                route["match"]["prefixes"] = next_prefixes;
+                changed = true;
+            }
+
+            if route.get("upstream").is_some() {
+                if route
+                    .pointer("/upstream/apiFormat")
+                    .and_then(serde_json::Value::as_str)
+                    != Some(api_format)
+                {
+                    route["upstream"]["apiFormat"] = serde_json::json!(api_format);
+                    changed = true;
+                }
+                if let Some(model_map) = route
+                    .pointer_mut("/upstream/modelMap")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    let before = model_map.len();
+                    model_map.retain(|key, _| key == model);
+                    changed |= model_map.len() != before;
+                }
+            } else if route.get("apiFormat").and_then(serde_json::Value::as_str) != Some(api_format)
+            {
+                route["apiFormat"] = serde_json::json!(api_format);
+                changed = true;
+            }
+
+            changed
+        }
+
         let mut stmt = conn
             .prepare("SELECT id, name, meta, settings_config FROM providers WHERE app_type='codex'")
             .map_err(|e| AppError::Database(e.to_string()))?;
@@ -3004,6 +3075,20 @@ impl Database {
                     .then(|| id.clone())
             })
             .collect();
+        let official_deepseek_models = providers
+            .iter()
+            .filter(|(id, _, _, _)| official_deepseek_ids.contains(id))
+            .map(|(id, _, _, settings)| {
+                let lower = settings.to_lowercase();
+                (
+                    id.clone(),
+                    (
+                        lower.contains("deepseek-v4-flash"),
+                        lower.contains("deepseek-v4-pro"),
+                    ),
+                )
+            })
+            .collect::<std::collections::HashMap<_, _>>();
 
         let mut updates = Vec::new();
         for (id, name, meta_str, settings_str) in providers {
@@ -3054,6 +3139,46 @@ impl Database {
                     if !route_text.contains("deepseek") {
                         continue;
                     }
+                    let target_models = route_target_provider_id(route)
+                        .and_then(|target_id| official_deepseek_models.get(target_id))
+                        .copied();
+
+                    // A route that references a dedicated official DeepSeek provider must be
+                    // repaired from that provider's own catalog, not from the MultiRouter's
+                    // aggregate settings JSON. The old aggregate `has_flash` check saw Flash in
+                    // a sibling route and repeatedly rewrote a separate Pro/Chat route into the
+                    // Flash/Responses window on every startup.
+                    match target_models {
+                        Some((false, true)) => {
+                            changed |= canonicalize_deepseek_route(
+                                route,
+                                "deepseek-v4-pro",
+                                "openai_chat",
+                            );
+                            continue;
+                        }
+                        Some((true, false)) => {
+                            changed |= canonicalize_deepseek_route(
+                                route,
+                                "deepseek-v4-flash",
+                                "openai_responses",
+                            );
+                            continue;
+                        }
+                        Some((true, true))
+                            if route_matches_model(route, "deepseek-v4-pro")
+                                && !route_matches_model(route, "deepseek-v4-flash") =>
+                        {
+                            changed |= canonicalize_deepseek_route(
+                                route,
+                                "deepseek-v4-pro",
+                                "openai_chat",
+                            );
+                            continue;
+                        }
+                        _ => {}
+                    }
+
                     let old_api = route
                         .pointer("/upstream/apiFormat")
                         .and_then(serde_json::Value::as_str)
@@ -3065,7 +3190,10 @@ impl Database {
                     let covers_pro = route_text.contains("deepseek-v4-pro")
                         || route_text.contains("\"deepseek\"")
                         || route_text.contains("\"deepseek-\"");
-                    if has_flash {
+                    let route_has_flash = target_models
+                        .map(|(target_has_flash, _)| target_has_flash)
+                        .unwrap_or(has_flash);
+                    if route_has_flash {
                         if let Some(upstream) = route.get_mut("upstream") {
                             upstream["apiFormat"] = serde_json::json!("openai_responses");
                         } else {
@@ -3109,7 +3237,7 @@ impl Database {
                         changed = true;
                     }
 
-                    if covers_pro && has_flash && !has_pro_chat_route {
+                    if covers_pro && route_has_flash && !has_pro_chat_route {
                         let route_id = route
                             .get("id")
                             .and_then(serde_json::Value::as_str)
