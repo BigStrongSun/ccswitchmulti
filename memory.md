@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-08-07 DeepSeek Pro Chat 路由被启动迁移反复改写为 Flash Responses
+
+- 用户反馈在官方 DeepSeek 选择 Chat 后，Codex 只“一问一答”而不继续工具循环；改选 Responses 后，大对话又会因官方端点实现边界报错。本机 3.19.1-10 的真实 SQLite 显示：`DeepSeek-chat` Provider 自身仍是 `openai_chat` 且目录只有 `deepseek-v4-pro`，但 MultiRouter 中引用它的 route 已被改成 `openai_responses`，匹配窗口也变成 `deepseek-v4-flash`。因此 UI 选择与实际出站协议发生漂移，不能把症状归因于 DeepSeek 不支持工具。
+- 根因位于 `Database::repair_deepseek_native_responses_on_conn`：旧实现对每个 Provider/Router 直接在整份 `settings_config` 字符串上计算 `has_flash`。MultiRouter 只要有任意一个 Flash sibling route，就会在后续每次启动时把所有官方 DeepSeek Chat route 改写成 Flash/Responses；即使 route 明确 `targetProviderId` 指向独立的 Pro/Chat Provider 也不例外。原“幂等”测试第二次运行只检查 route 数量，没有复核协议与模型窗口，所以漏掉了反复污染。
+- 修复先提交失败测试 `fdd9ab76`，再在 `4d62e500` 中按 route 的 `targetProviderId` 解析官方 DeepSeek Provider 的真实模型归属：Flash-only 规范为 `deepseek-v4-flash + openai_responses`，Pro-only 规范为 `deepseek-v4-pro + openai_chat`，同 Provider 同时拥有两种模型时继续保留旧版拆分迁移。该逻辑也会自愈已经污染的 route，并同时收敛 `match.models`、`match.prefixes` 与 route `modelMap`。
+- 实网交叉验证：DeepSeek 官方 Chat Completions 文档仍声明 `tool_calls` / `finish_reason=tool_calls`；直接对官方 `/v1/chat/completions` 的 V4 Flash 工具场景返回了合法流式 `tool_calls`。OpenAI Codex 当前源码已移除原生 `wire_api=chat`，所以 CCSM 必须继续对外维持 Responses、只在内部将目标 Chat route 转换到 `/chat/completions`。这与本次“修路由归属而非绕开工具循环”的边界一致。
+- 回归命令：`cargo test --manifest-path src-tauri/Cargo.toml repair_deepseek_native_responses -- --nocapture`（2 passed）；`cargo fmt --manifest-path src-tauri/Cargo.toml --check` 与 `git diff --check` 通过。运行中安装版仍是 3.19.1-10，源码修复尚未构建/安装，不能把源码通过等同于现场已经生效。
+
 ## 2026-08-05 Codex Multi-Agent V2 跨 Provider 双阶段 payload 根修
 
 - 2026-08-05 21:21 重装并完全重启后的真实验收通过：运行中 `C:\Users\sunda\AppData\Local\CCSwitchMulti\cc-switch.exe` 文件/产品版本均为 `3.19.1-6`，进程与 Codex app-server 均在 21:18 后新建；父 task `019fcf70-03a2-7791-a383-45b5a88e1e4e` 的 `turn_context` 为 `gpt-5.6-sol`，router log 同时证明 effective provider 为 `OpenAI_Official` 且官方请求 HTTP 200。
