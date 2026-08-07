@@ -3612,4 +3612,122 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn repair_deepseek_native_responses_keeps_separate_pro_provider_on_chat() -> Result<(), AppError>
+    {
+        let conn = Connection::open_in_memory()?;
+        Database::create_tables_on_conn(&conn)?;
+
+        let flash_settings = json!({
+            "auth": {"OPENAI_API_KEY": "sk-test"},
+            "base_url": "https://api.deepseek.com",
+            "apiFormat": "openai_responses",
+            "modelCatalog": {"models": [{"model": "deepseek-v4-flash"}]}
+        });
+        let pro_settings = json!({
+            "auth": {"OPENAI_API_KEY": "sk-test"},
+            "base_url": "https://api.deepseek.com",
+            "apiFormat": "openai_chat",
+            "modelCatalog": {"models": [{"model": "deepseek-v4-pro"}]}
+        });
+        // This is the live corruption seen in the user report: the route still targets the
+        // dedicated Pro/Chat provider, but an earlier startup repair rewrote its protocol and
+        // match window to Flash/Responses.
+        let router_settings = json!({
+            "codexRouting": {
+                "enabled": true,
+                "routes": [
+                    {
+                        "id": "router-deepseek-flash",
+                        "label": "DeepSeek Flash",
+                        "enabled": true,
+                        "targetProviderId": "deepseek-flash",
+                        "match": {
+                            "models": ["deepseek-v4-flash"],
+                            "prefixes": ["deepseek-v4-flash"]
+                        },
+                        "upstream": {
+                            "apiFormat": "openai_responses",
+                            "auth": {"source": "provider_config"}
+                        }
+                    },
+                    {
+                        "id": "router-deepseek-pro",
+                        "label": "DeepSeek Pro Chat",
+                        "enabled": true,
+                        "targetProviderId": "deepseek-pro",
+                        "match": {
+                            "models": ["deepseek-v4-flash"],
+                            "prefixes": ["deepseek-v4-flash"]
+                        },
+                        "upstream": {
+                            "apiFormat": "openai_responses",
+                            "auth": {"source": "provider_config"}
+                        }
+                    }
+                ]
+            }
+        });
+
+        conn.execute(
+            "INSERT INTO providers (id, app_type, name, settings_config, meta) VALUES ('deepseek-flash', 'codex', 'DeepSeek Responses', ?1, ?2)",
+            params![
+                flash_settings.to_string(),
+                json!({"apiFormat": "openai_responses"}).to_string()
+            ],
+        )?;
+        conn.execute(
+            "INSERT INTO providers (id, app_type, name, settings_config, meta) VALUES ('deepseek-pro', 'codex', 'DeepSeek Chat', ?1, ?2)",
+            params![
+                pro_settings.to_string(),
+                json!({"apiFormat": "openai_chat", "apiFormatSource": "manual"}).to_string()
+            ],
+        )?;
+        conn.execute(
+            "INSERT INTO providers (id, app_type, name, settings_config, meta) VALUES ('codex-multirouter', 'codex', 'Router', ?1, '{}')",
+            params![router_settings.to_string()],
+        )?;
+
+        Database::repair_deepseek_native_responses_on_conn(&conn)?;
+
+        let settings_text: String = conn.query_row(
+            "SELECT settings_config FROM providers WHERE id='codex-multirouter' AND app_type='codex'",
+            [],
+            |row| row.get(0),
+        )?;
+        let settings: serde_json::Value =
+            serde_json::from_str(&settings_text).map_err(|e| AppError::Database(e.to_string()))?;
+        let routes = settings
+            .pointer("/codexRouting/routes")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| AppError::Config("missing routes".to_string()))?;
+        let pro_route = routes
+            .iter()
+            .find(|route| route.get("targetProviderId") == Some(&json!("deepseek-pro")))
+            .ok_or_else(|| AppError::Config("missing Pro route".to_string()))?;
+
+        assert_eq!(
+            pro_route.pointer("/upstream/apiFormat"),
+            Some(&json!("openai_chat"))
+        );
+        assert_eq!(
+            pro_route.pointer("/match/models"),
+            Some(&json!(["deepseek-v4-pro"]))
+        );
+        assert_eq!(
+            pro_route.pointer("/match/prefixes"),
+            Some(&json!(["deepseek-v4-pro"]))
+        );
+
+        Database::repair_deepseek_native_responses_on_conn(&conn)?;
+        let settings_text_after: String = conn.query_row(
+            "SELECT settings_config FROM providers WHERE id='codex-multirouter' AND app_type='codex'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(settings_text_after, settings_text);
+
+        Ok(())
+    }
 }
