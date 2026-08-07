@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+﻿use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -9,8 +9,8 @@ use serde_json::{json, Value};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
-const DEFAULT_CODEX_DEBUG_PORT: u16 = 9229;
-const CDP_HTTP_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const DEFAULT_CODEX_DEBUG_PORT: u16 = 9229;
+pub(crate) const CDP_HTTP_TIMEOUT: Duration = Duration::from_secs(2);
 const CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
 const CDP_COMMAND_TIMEOUT: Duration = Duration::from_secs(4);
 const MODEL_PICKER_PATCH_KEY: &str = "__ccSwitchCodexAppCompatibilityV5";
@@ -37,7 +37,7 @@ pub struct CodexModelPickerUnlockResult {
 
 /// renderer 脚本返回的新版历史目录同步证据。
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct CodexAppCompatibilityEvidence {
+pub(crate) struct CodexAppCompatibilityEvidence {
     history_sync_requested: bool,
     history_catalog_complete: Option<bool>,
     history_catalog_count: Option<usize>,
@@ -46,7 +46,7 @@ struct CodexAppCompatibilityEvidence {
 /// 注入脚本需要的模型目录投影，避免把整个 catalog 私有字段泄漏到 renderer。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CodexModelCatalogProjection {
+pub(crate) struct CodexModelCatalogProjection {
     default_model: Option<String>,
     model_names: Vec<String>,
     models: Vec<Value>,
@@ -65,16 +65,16 @@ impl CodexModelCatalogProjection {
 
 /// Chrome DevTools Protocol `/json` 返回的页面 target 摘要。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-struct CdpTarget {
-    id: String,
+pub(crate) struct CdpTarget {
+    pub(crate) id: String,
     #[serde(rename = "type")]
-    target_type: String,
+    pub(crate) target_type: String,
     #[serde(default)]
-    title: String,
+    pub(crate) title: String,
     #[serde(default)]
-    url: String,
+    pub(crate) url: String,
     #[serde(default, rename = "webSocketDebuggerUrl")]
-    web_socket_debugger_url: Option<String>,
+    pub(crate) web_socket_debugger_url: Option<String>,
 }
 
 /// 尝试为当前或新启动的 Codex App 安装 renderer 兼容层。
@@ -189,7 +189,7 @@ fn codex_desktop_executable_not_found_message() -> String {
 }
 
 /// 从 cc-switch 生成的 catalog 中读取模型名和 renderer 需要的最小描述。
-fn load_cc_switch_model_catalog_projection() -> Result<CodexModelCatalogProjection, String> {
+pub(crate) fn load_cc_switch_model_catalog_projection() -> Result<CodexModelCatalogProjection, String> {
     let catalog_path = crate::codex_config::get_codex_model_catalog_path();
     let default_model = read_current_codex_default_model();
     let mut candidates = Vec::new();
@@ -345,7 +345,7 @@ fn read_current_codex_default_model() -> Option<String> {
 }
 
 /// 在候选 CDP 端口中寻找 Codex renderer 并安装模型白名单补丁。
-async fn try_inject_on_candidate_ports(
+pub(crate) async fn try_inject_on_candidate_ports(
     catalog: &CodexModelCatalogProjection,
     ports: &[u16],
 ) -> Option<CodexModelPickerUnlockResult> {
@@ -401,7 +401,7 @@ async fn try_inject_on_candidate_ports(
 }
 
 /// 生成去重后的 CDP 端口探测列表。
-fn candidate_debug_ports(preferred: u16) -> Vec<u16> {
+pub(crate) fn candidate_debug_ports(preferred: u16) -> Vec<u16> {
     let mut ports = vec![preferred, DEFAULT_CODEX_DEBUG_PORT, 9222, 9223, 9230, 9231];
     ports.sort_unstable();
     ports.dedup();
@@ -409,7 +409,7 @@ fn candidate_debug_ports(preferred: u16) -> Vec<u16> {
 }
 
 /// 查询 CDP 页面 target。
-async fn list_cdp_targets(debug_port: u16) -> Result<Vec<CdpTarget>, String> {
+pub(crate) async fn list_cdp_targets(debug_port: u16) -> Result<Vec<CdpTarget>, String> {
     let client = reqwest::Client::builder()
         .no_proxy()
         .timeout(CDP_HTTP_TIMEOUT)
@@ -440,7 +440,7 @@ async fn list_cdp_targets(debug_port: u16) -> Result<Vec<CdpTarget>, String> {
 /// 共享调试端口如 9222 可能属于 Chrome 或其它 Electron 应用，必须看到 Codex
 /// 标识才注入；CCSwitchMulti 自己启动的默认 9229 允许在标题还没初始化时退回
 /// 到第一个 page target。
-fn pick_codex_page_targets(
+pub(crate) fn pick_codex_page_targets(
     targets: &[CdpTarget],
     debug_port: u16,
 ) -> Result<Vec<CdpTarget>, String> {
@@ -475,7 +475,7 @@ fn target_matches_codex_desktop(target: &CdpTarget) -> bool {
 }
 
 /// 使用 CDP 同时安装新文档脚本并立即 patch 当前页面。
-async fn install_script(
+pub(crate) async fn install_script(
     websocket_url: &str,
     script: &str,
 ) -> Result<CodexAppCompatibilityEvidence, String> {
@@ -1024,7 +1024,7 @@ Get-CimInstance Win32_Process -Filter "Name = 'Codex.exe' OR Name = 'ChatGPT.exe
 "#;
 
 /// 查找 Codex Desktop 主进程路径；已运行但未开放 CDP 时不能原地注入。
-fn detect_running_codex_main_process() -> Option<PathBuf> {
+pub(crate) fn detect_running_codex_main_process() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     {
         let script = DETECT_CODEX_MAIN_PROCESS_SCRIPT;

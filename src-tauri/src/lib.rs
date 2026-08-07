@@ -1,4 +1,4 @@
-mod app_config;
+﻿mod app_config;
 mod app_exit_monitor;
 mod app_store;
 mod auto_launch;
@@ -7,6 +7,7 @@ mod claude_mcp;
 mod claude_plugin;
 mod codex_config;
 mod codex_desktop;
+mod codex_guardian;
 pub mod codex_history_migration;
 mod codex_state_db;
 mod commands;
@@ -1552,6 +1553,7 @@ pub fn run() {
             commands::get_proxy_status,
             commands::diagnose_codex_multirouter,
             commands::unlock_codex_model_picker,
+            commands::get_codex_guardian_status,
             commands::sync_codex_history_to_multirouter,
             commands::repair_codex_history_visibility,
             commands::list_codex_history_sessions,

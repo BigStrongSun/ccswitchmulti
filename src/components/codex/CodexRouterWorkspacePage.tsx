@@ -1,4 +1,4 @@
-import {
+﻿import {
   useEffect,
   useMemo,
   useRef,
@@ -68,6 +68,7 @@ import {
   fetchModelsForConfig,
   type FetchedModel,
 } from "@/lib/api/model-fetch";
+import type { CodexGuardianStatus } from "@/types/proxy";
 import { proxyApi } from "@/lib/api/proxy";
 import {
   codexOfficialAuthRouteBinding,
@@ -5403,6 +5404,8 @@ function StatusTab({
   const [isDiagnosing, setIsDiagnosing] = useState(false);
   const [modelPickerUnlockResult, setModelPickerUnlockResult] =
     useState<CodexModelPickerUnlockResult | null>(null);
+
+  const { data: guardianStatus } = useQuery<CodexGuardianStatus | null>({ queryKey: ["codexGuardianStatus"], queryFn: () => proxyApi.getCodexGuardianStatus(), refetchInterval: 10_000 });
   const [modelPickerUnlockError, setModelPickerUnlockError] = useState<
     string | null
   >(null);
@@ -5798,6 +5801,35 @@ function StatusTab({
           {validationRefreshMessage ? (
             <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs leading-5 text-slate-700 dark:border-slate-600/50 dark:bg-slate-900/60 dark:text-slate-200">
               {validationRefreshMessage}
+            </div>
+          ) : null}
+          {guardianStatus?.active ? (
+            <div className={cn(
+              "mt-3 rounded-lg border p-3 text-xs leading-5",
+              guardianStatus.injected
+                ? "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-700/50 dark:bg-emerald-950/25 dark:text-emerald-100"
+                : guardianStatus.cdpAvailable
+                  ? "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-700/50 dark:bg-amber-950/25 dark:text-amber-100"
+                  : "border-slate-200 bg-slate-50 text-slate-600 dark:border-slate-600/50 dark:bg-slate-900/60 dark:text-slate-300",
+            )}>
+              <div className="font-semibold flex items-center gap-2">
+                <span className={cn(
+                  "inline-block h-2 w-2 rounded-full",
+                  guardianStatus.injected ? "bg-emerald-500" : guardianStatus.cdpAvailable ? "bg-amber-400" : "bg-slate-400",
+                )} />
+                模型菜单守护
+                {guardianStatus.injected ? " · 已注入" : guardianStatus.cdpAvailable ? " · 待注入" : " · 轮询中"}
+              </div>
+              <div className="mt-1">{guardianStatus.message}</div>
+              <div className="mt-1 font-mono text-[11px] opacity-80">
+                codex={guardianStatus.codexRunning ? "运行中" : "未运行"} cdp=
+                {guardianStatus.cdpAvailable ? "可用" : "不可用"} targets=
+                {guardianStatus.injectedTargetCount}
+              </div>
+            </div>
+          ) : isCodexTakeoverActive ? (
+            <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs leading-5 text-slate-600 dark:border-slate-600/50 dark:bg-slate-900/60 dark:text-slate-300">
+              模型菜单守护未启动；重新开启 Codex 接管以激活。
             </div>
           ) : null}
           {!modelPickerUnlockResult ? (

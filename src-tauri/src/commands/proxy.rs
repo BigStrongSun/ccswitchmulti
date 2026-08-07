@@ -582,6 +582,15 @@ pub async fn diagnose_codex_multirouter(
 ///
 /// CLI/app-server 不是这个 CDP 入口的启动目标；它们通过 live `config.toml`、
 /// `model_catalog_json`、本地 `/v1/models` 和 MultiRouter 转发链路继续受支持。
+
+#[tauri::command]
+pub async fn get_codex_guardian_status(
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::codex_guardian::CodexGuardianStatus, String> {
+    let status = state.proxy_service.codex_guardian_status.lock().await.clone();
+    Ok(status)
+}
+
 #[tauri::command]
 pub async fn unlock_codex_model_picker() -> Result<CodexModelPickerUnlockResult, String> {
     crate::codex_desktop::unlock_codex_model_picker().await
