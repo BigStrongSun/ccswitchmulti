@@ -612,26 +612,18 @@ fn cdp_command_result(response: Value, method: &str) -> Result<Value, String> {
     }
 }
 
-/// 构造 renderer 注入脚本：触发新版本地历史目录同步，并修复模型白名单和缓存。
-fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> String {
-    let payload = serde_json::to_string(catalog).unwrap_or_else(|_| "{}".to_string());
-    format!(
-        r#"
-(async () => {{
-  const payload = {payload};
-  const patchKey = "{MODEL_PICKER_PATCH_KEY}";
-  const state = window[patchKey] || {{}};
-  state.payload = payload;
-  state.requestIds = state.requestIds || new Set();
-  state.modulePromises = state.modulePromises || new Map();
-  state.failures = state.failures || [];
-  window[patchKey] = state;
-
-  const reasoningEfforts = () => ["low", "medium", "high", "xhigh"].map((reasoningEffort) => ({{ reasoningEffort, description: `${{reasoningEffort}} effort` }}));
+/// 模型目录 patch 的可执行 JavaScript 核心。
+///
+/// 这段逻辑会同时嵌入 Codex renderer，并由 QuickJS 回归直接执行。任何字段写入都必须
+/// 先通过明确的模型门特征；不能把 React Fiber、Intl context 或普通 API 对象当成模型
+/// 容器遍历和改写。
+fn model_picker_patch_core_script() -> &'static str {
+    r#"
+  const reasoningEfforts = () => ["low", "medium", "high", "xhigh"].map((reasoningEffort) => ({ reasoningEffort, description: `${reasoningEffort} effort` }));
   const modelNames = () => Array.from(new Set([payload.defaultModel, ...(payload.modelNames || [])].filter((name) => typeof name === "string" && name.trim()).map((name) => name.trim())));
-  const descriptorFor = (name) => {{
+  const descriptorFor = (name) => {
     const existing = (payload.models || []).find((model) => model && model.model === name);
-    return {{
+    return {
       model: name,
       id: name,
       slug: name,
@@ -640,64 +632,66 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
       hidden: false,
       defaultReasoningEffort: "medium",
       supportedReasoningEfforts: reasoningEfforts(),
-      ...(existing || {{}}),
+      ...(existing || {}),
       hidden: false,
-    }};
-  }};
+    };
+  };
   const stringArray = (value) => Array.isArray(value) && value.every((item) => typeof item === "string");
   const modelArray = (value, allowEmpty = false) => Array.isArray(value) && (allowEmpty || value.length > 0) && value.every((item) => item && typeof item === "object" && typeof item.model === "string");
-  const patchModelNameArray = (models) => {{
+  const patchModelNameArray = (models) => {
     if (!stringArray(models)) return false;
     let changed = false;
-    for (const name of modelNames()) {{
-      if (!models.includes(name)) {{
+    for (const name of modelNames()) {
+      if (!models.includes(name)) {
         models.push(name);
         changed = true;
-      }}
-    }}
+      }
+    }
     return changed;
-  }};
-  const patchModelArray = (models, allowEmpty = false) => {{
+  };
+  const patchModelArray = (models, allowEmpty = false) => {
     if (!modelArray(models, allowEmpty)) return false;
     const names = modelNames();
     const existing = new Map(models.map((model) => [model.model, model]));
     let changed = false;
-    for (const model of models) {{
-      if (names.includes(model.model) && model.hidden !== false) {{
+    for (const model of models) {
+      if (names.includes(model.model) && model.hidden !== false) {
         model.hidden = false;
         changed = true;
-      }}
-    }}
-    for (const name of names) {{
-      if (!existing.has(name)) {{
+      }
+    }
+    for (const name of names) {
+      if (!existing.has(name)) {
         models.push(descriptorFor(name));
         changed = true;
-      }}
-    }}
+      }
+    }
     return changed;
-  }};
-  const removeHiddenNames = (container, key) => {{
+  };
+  const removeHiddenNames = (container, key) => {
     if (!Array.isArray(container?.[key])) return false;
     const names = new Set(modelNames());
     const before = container[key].length;
     container[key] = container[key].filter((name) => !names.has(name));
     return before !== container[key].length;
-  }};
-  const patchNameSet = (setLike) => {{
+  };
+  const patchNameSet = (setLike) => {
     if (!(setLike instanceof Set)) return false;
     let changed = false;
-    for (const name of modelNames()) {{
-      if (!setLike.has(name)) {{
+    for (const name of modelNames()) {
+      if (!setLike.has(name)) {
         setLike.add(name);
         changed = true;
-      }}
-    }}
+      }
+    }
     return changed;
-  }};
-  const patchModelContainer = (value) => {{
+  };
+  const patchModelContainer = (value) => {
     if (!value || typeof value !== "object") return false;
-    let changed = false;
     const looksLikeModelGate = "availableModels" in value || "available_models" in value || "useHiddenModels" in value || "use_hidden_models" in value || "defaultModel" in value || "default_model" in value;
+    if (!looksLikeModelGate) return false;
+
+    let changed = false;
     if (patchModelArray(value.models, "defaultModel" in value || "availableModels" in value || "available_models" in value)) changed = true;
     if (patchModelNameArray(value.models)) changed = true;
     if (patchModelArray(value.data)) changed = true;
@@ -713,37 +707,43 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
     if (patchModelNameArray(value.available_models)) changed = true;
     if (removeHiddenNames(value, "hiddenModels")) changed = true;
     if (removeHiddenNames(value, "hidden_models")) changed = true;
-    if (looksLikeModelGate && value.useHiddenModels !== false) {{
+    if ("useHiddenModels" in value && value.useHiddenModels !== false) {
       value.useHiddenModels = false;
       changed = true;
-    }}
-    if (looksLikeModelGate && value.use_hidden_models !== false) {{
+    }
+    if ("use_hidden_models" in value && value.use_hidden_models !== false) {
       value.use_hidden_models = false;
       changed = true;
-    }}
-    if (typeof value.default_model === "string" && modelNames().length && !modelNames().includes(value.default_model)) {{
+    }
+    if ("default_model" in value && typeof value.default_model === "string" && modelNames().length && !modelNames().includes(value.default_model)) {
       value.default_model = modelNames()[0];
       changed = true;
-    }}
-    if (value.defaultModel == null && modelNames().length > 0) {{
+    }
+    if ("defaultModel" in value && value.defaultModel == null && modelNames().length > 0) {
       value.defaultModel = descriptorFor(modelNames()[0]);
       changed = true;
-    }}
+    }
     return changed;
-  }};
-  const patchObjectGraph = (root, visited = new WeakSet(), depth = 0) => {{
-    if (!root || typeof root !== "object" || visited.has(root) || depth > 5) return false;
-    visited.add(root);
-    let changed = patchModelContainer(root);
-    if (root instanceof Element || root === window || root === document || root === document.body || root === document.documentElement) return changed;
-    for (const key of Object.keys(root)) {{
-      if (["ownerDocument", "parentElement", "parentNode", "children", "childNodes"].includes(key)) continue;
-      try {{
-        if (patchObjectGraph(root[key], visited, depth + 1)) changed = true;
-      }} catch {{}}
-    }}
-    return changed;
-  }};
+  };
+"#
+}
+
+/// 构造 renderer 注入脚本：触发新版本地历史目录同步，并修复模型白名单和缓存。
+fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> String {
+    let payload = serde_json::to_string(catalog).unwrap_or_else(|_| "{}".to_string());
+    let model_patch_core = model_picker_patch_core_script();
+    format!(
+        r#"
+(async () => {{
+  const payload = {payload};
+  const patchKey = "{MODEL_PICKER_PATCH_KEY}";
+  const state = window[patchKey] || {{}};
+  state.payload = payload;
+  state.requestIds = state.requestIds || new Set();
+  state.modulePromises = state.modulePromises || new Map();
+  state.failures = state.failures || [];
+  window[patchKey] = state;
+{model_patch_core}
   const patchStatsigConfig = (config) => {{
     const value = config?.value;
     if (!value || typeof value !== "object") return config;
@@ -849,8 +849,13 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
     if (Array.isArray(result) && patchModelArray(result, true)) changed = true;
     if (Array.isArray(result?.data) && patchModelArray(result.data, true)) changed = true;
     if (Array.isArray(result?.models) && patchModelArray(result.models, true)) changed = true;
+    if (Array.isArray(result?.result) && patchModelArray(result.result, true)) changed = true;
+    if (Array.isArray(result?.result?.data) && patchModelArray(result.result.data, true)) changed = true;
+    if (Array.isArray(result?.result?.models) && patchModelArray(result.result.models, true)) changed = true;
+    if (Array.isArray(result?.pages?.[0]?.data) && patchModelArray(result.pages[0].data, true)) changed = true;
+    if (Array.isArray(result?.message?.result?.data) && patchModelArray(result.message.result.data, true)) changed = true;
+    if (Array.isArray(result?.message?.result?.models) && patchModelArray(result.message.result.models, true)) changed = true;
     if (patchModelContainer(result)) changed = true;
-    if (patchObjectGraph(result)) changed = true;
     return changed;
   }};
   const patchAppServerResult = (method, result) => {{
@@ -913,16 +918,6 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
       try {{ patchMcpModelResponseData(event?.data); }} catch (error) {{ state.failures.push(String(error?.message || error)); }}
     }}, true);
   }};
-  const installResponsePatch = () => {{
-    if (state.responsePatchInstalled || typeof Response === "undefined") return;
-    state.responsePatchInstalled = true;
-    const originalJson = Response.prototype.json;
-    Response.prototype.json = async function ccSwitchPatchedResponseJson(...args) {{
-      const data = await originalJson.apply(this, args);
-      try {{ patchModelContainer(data); patchObjectGraph(data); }} catch (error) {{ state.failures.push(String(error?.message || error)); }}
-      return data;
-    }};
-  }};
   const reactFiberKeys = (element) => Object.keys(element || {{}}).filter((key) => key.startsWith("__reactFiber") || key.startsWith("__reactInternalInstance") || key.startsWith("__reactProps"));
   // Codex app-server 会根据 requires_openai_auth 暴露 OAuth 状态；旧配置或缓存状态
   // 可能把 renderer 留在非 chatgpt 模式，这里只修复前端 context，不改请求路由。
@@ -948,15 +943,12 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
     }}
   }};
   const patchReactState = () => {{
-    const visited = new WeakSet();
     const nodes = [document.body, ...document.querySelectorAll("button, [role='menu'], [role='dialog'], [data-radix-popper-content-wrapper]")].filter(Boolean);
     for (const node of nodes.slice(0, 220)) {{
       spoofChatGPTAuthMethod(node);
-      for (const key of reactFiberKeys(node)) patchObjectGraph(node[key], visited);
     }}
   }};
   const run = async () => {{
-    installResponsePatch();
     installMessagePatch();
     await installAppServerPatch();
     void triggerLocalThreadCatalogSync();
