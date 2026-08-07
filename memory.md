@@ -2939,6 +2939,12 @@
 - 矛盾 Provider 标签的根因是 ownership 判定分裂：MultiRouter 的 OpenAI route 物化后使用 request-local route ID，并以 `provider_type=codex_oauth` 表示托管官方 transport；`should_project_codex_agent_messages_for_provider()` 却只排除狭义 `is_codex_official_provider()`，没有排除 `provider.is_codex_oauth()`。于是合法的官方加密 `agent_message` 回放被误分类为第三方 child，在主会话本地 400；handler 又用外层 route 名输出 `OpenAI Official`。
 - TDD RED 提交 `180b5735` 用真实 predicate 锁定 managed OAuth 被错误投影；GREEN 提交 `8d721273` 同时排除 managed Codex OAuth 与原生 official。Qwen、DeepSeek、xAI 和其它真正第三方 Responses route 仍进入投影，opaque 密文仍 fail closed，未放宽密文泄漏边界。
 - `3f351514` 解决的是 native official replay normalizer 范围，不是本次 Stage B ownership 误分类；两者都应保留。版本提交 `969fec5c` 升到 `3.19.1-10` 并新增中文发布说明，当前运行中的 `3.19.1-9` 未替换。
+
+## 2026-08-07 v3.19.1-9 主线程误通知用户反馈复核
+
+- 用户转述的通知原文与 2026-08-06 已定位问题逐字一致：`Provider: OpenAI Official; model: gpt-5.6-sol; cause: third-party child cannot read encrypted Codex agent payload`。重新核对提交链确认，`180b5735` 先用 RED 测试复现 `provider_type=codex_oauth` 被误投影为第三方 child，`8d721273` 再让 `should_project_codex_agent_messages_for_provider()` 同时排除 managed Codex OAuth 与 native official ownership；不是新增根因，也不需要在 `v3.19.1-10` 上叠加补丁。
+- 当前本机运行进程 `C:\Users\sunda\AppData\Local\CCSwitchMulti\cc-switch.exe` 的 PE ProductVersion/FileVersion 均为 `3.19.1-10`，监听 `127.0.0.1:15721`；源码定向回归 `proxy::forwarder::tests::agent_message_projection_runs_only_for_third_party_codex_responses` 为 1 passed / 0 failed，本地日志未再检出该错误文本。用户现场仍使用 `-9` 时，直接升级 `3.19.1-10` 才会生效。
+- 联网交叉验证：Codex 内置 Web 搜索命中 OpenAI Codex issue `#34833`、`#33551`，确认 Multi-Agent V2 的 encrypted `agent_message` 对非 OpenAI provider 是真实的 provider-boundary 问题；Matrix WebSearch 独立搜索未稳定召回 issue，但直接打开 `https://github.com/openai/codex/issues/34833` 得到相同正文和 same-provider OpenAI control。外部来源支持“加密 payload 必须按 provider ownership 分流”这一背景；CCSM 主线程误通知的精确 ownership 漏判仍以本仓库源码、RED 测试和提交 diff 为权威证据。
 - 验证：RED 在旧逻辑稳定失败、GREEN 通过；Multi-Agent payload 5/5、OAuth Responses 14/14、完整 Rust library `2818 passed / 0 failed / 2 ignored`；`cargo check --lib`、rustfmt、diff check 通过，仅保留既有 `openai_cache_read_tokens` dead-code warning。官方文档只确认 GPT-5.6 multi-agent 仍为 beta，未公开这种私有 envelope；Codex 内置官方搜索与 Matrix 独立搜索都没有找到该精确错误，进一步证明它属于 CCSM 本地诊断文案。
 
 ## 2026-08-06 v3.19.1-10 本地发布与发布锁根修
