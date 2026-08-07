@@ -1872,6 +1872,81 @@ mod tests {
         assert_eq!(projection.default_model.as_deref(), Some("qwen3.6"));
     }
 
+    fn run_model_picker_patch_core_probe(probe: &str) -> serde_json::Value {
+        let runtime = rquickjs::Runtime::new().expect("create JavaScript runtime");
+        let context = rquickjs::Context::full(&runtime).expect("create JavaScript context");
+        let payload = json!({
+            "defaultModel": "qwen3.6",
+            "modelNames": ["qwen3.6", "deepseek-v4-flash"],
+            "models": [
+                {"model": "qwen3.6", "displayName": "Qwen 3.6", "hidden": false},
+                {"model": "deepseek-v4-flash", "displayName": "DeepSeek V4 Flash", "hidden": false}
+            ]
+        });
+        let script = format!(
+            "const payload = {};\n{}\n{}",
+            payload,
+            model_picker_patch_core_script(),
+            probe
+        );
+
+        context.with(|ctx| {
+            let json_text: String = ctx.eval(script).expect("execute model picker patch core");
+            serde_json::from_str(&json_text).expect("parse model picker patch probe result")
+        })
+    }
+
+    /// 回归：模型解锁器不能再给 React Intl 的 formats/defaultFormats/formatters
+    /// 写入 defaultModel/useHiddenModels，否则 MessageFormat 缓存会因循环引用失败并回退
+    /// 为未插值的 ICU source。
+    #[test]
+    fn model_picker_patch_core_does_not_pollute_react_intl_objects() {
+        let result = run_model_picker_patch_core_probe(
+            r#"
+const intl = {
+  formats: {number: {compact: {notation: "compact"}}},
+  defaultFormats: {date: {short: {year: "numeric"}}},
+  formatters: {cache: {message: {}}},
+};
+const before = JSON.stringify(intl);
+const changed = [intl, intl.formats, intl.defaultFormats, intl.formatters]
+  .map((value) => patchModelContainer(value));
+JSON.stringify({before, after: JSON.stringify(intl), changed});
+"#,
+        );
+
+        assert_eq!(result["before"], result["after"]);
+        assert_eq!(result["changed"], json!([false, false, false, false]));
+    }
+
+    /// 已验证的模型门仍应补齐目录、解除隐藏并设置已有的默认模型字段；同时不能
+    /// 凭空向 camelCase 容器追加 snake_case 控制字段。
+    #[test]
+    fn model_picker_patch_core_still_unlocks_explicit_model_gate() {
+        let result = run_model_picker_patch_core_probe(
+            r#"
+const gate = {availableModels: ["gpt-5.6-sol"], useHiddenModels: true, defaultModel: null};
+const changed = patchModelContainer(gate);
+JSON.stringify({
+  changed,
+  availableModels: gate.availableModels,
+  useHiddenModels: gate.useHiddenModels,
+  defaultModel: gate.defaultModel?.model,
+  hasSnakeCaseFlag: Object.prototype.hasOwnProperty.call(gate, "use_hidden_models"),
+});
+"#,
+        );
+
+        assert_eq!(result["changed"], true);
+        assert_eq!(
+            result["availableModels"],
+            json!(["gpt-5.6-sol", "qwen3.6", "deepseek-v4-flash"])
+        );
+        assert_eq!(result["useHiddenModels"], false);
+        assert_eq!(result["defaultModel"], "qwen3.6");
+        assert_eq!(result["hasSnakeCaseFlag"], false);
+    }
+
     #[test]
     fn model_picker_unlock_script_patches_renderer_whitelists() {
         let catalog = CodexModelCatalogProjection {
