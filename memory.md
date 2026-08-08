@@ -3007,3 +3007,12 @@
 - `#3` 的 draft PR `#4` 使用了已过期的 `CCSwitchMulti_<version>_aarch64.*` 资产名且当前显示 mergeable=false，不能直接合并。当前 `v3.19.1-12` Release 和 workflow 实际资产是 `CCSwitchMulti-v3.19.1-12-macOS.dmg/.zip`。提交 `c5440fa8` 在当前精简 README 中加入中英文 unsigned/unnotarized 说明、Apple `Open Anyway` 流程和仅针对 `/Applications/CCSwitchMulti.app` 的 quarantine 删除命令，并明确不会全局关闭 Gatekeeper；资产名和安全禁用命令检查通过。
 - 批次新鲜验证：完整 Rust library `2825 passed / 0 failed / 2 ignored`，`cargo check --lib` exit 0；本批次三份 Rust 文件独立 rustfmt check、README 语义检查、`git diff --check` 均通过。全仓 `cargo fmt --check` 仍因此前 `cfe3028e` 附近已提交的 `codex_desktop.rs`、`codex_guardian.rs`、`commands/proxy.rs`、`services/proxy.rs` 格式差异失败，这些文件不属于本批次，未混入修复提交。
 - 联网交叉验证：Codex 内置 Web 搜索命中 LM Studio 官方 Responses 文档，GitHub connector/`gh`/workflow/Release 资产用于核验 Issue、PR 和当前 macOS 文件名；Matrix `matrix-websearch` 独立查询继续返回 HTTP 521，因此没有作为正证据。仍需在推送/合并后处理 `#3/#6/#34/#35` 的 GitHub 状态；需要运行时或发布验收的行为不得因本地测试提前宣称已发布。
+
+# 2026-08-08 CCSwitchMulti v3.19.1-13 GitHub 正式发布
+
+- `v3.19.1-13` 使用 annotated tag；远端 tag object 为 `25b34680ddc612197511bb902a2ba92134baf3de`，peeled commit 精确指向候选 `c022d821d70f0935a641951648c99cd8cf658f31`。候选包含 Codex Desktop lifecycle guardian（#32）、LM Studio Responses `text.format`（#34）、上游连接错误归因（#6）、Claude Desktop profile 用户字段保留（#35）和 macOS 未签名安装说明（#3）。
+- 本地最终门禁：前端 Vitest `112 passed / 818 passed`；首次完整运行的 App 集成用例发生一次 10 秒时序超时，隔离重跑 `8/8` 通过，随后完整重跑 `818/818` 通过；Rust library `2825 passed / 0 failed / 2 ignored`，`cargo check --lib`、`cargo fmt --check`、TypeScript typecheck 和 `git diff --check` 全部通过，仅保留既有 `openai_cache_read_tokens` dead-code warning。
+- GitHub Actions Release run `31252533548` 完整成功：macOS、Linux x64、Linux ARM64、Windows x64、Windows ARM64 五个平台，以及 `Publish GitHub Release`、`Assemble latest.json` 均为 `completed/success`。
+- 正式 Release 为 `https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.19.1-13`，`draft=false`、`prerelease=false`，共 19 个资产。`latest.json` 为 `version=3.19.1-13`，包含 `darwin-aarch64`、`darwin-x86_64`、`windows-x86_64`、`windows-aarch64`、`linux-x86_64`、`linux-aarch64` 六个平台；全部 signature 非空并与下载的对应 `.sig` 内容一致，URL 全部指向本 tag。
+- 下载验证：`latest.json` SHA-256 为 `532d2a2dd85bd866d300c864702cb0c0d35992980dbc8945710a6f29fa3cec61`；Windows x64 setup SHA-256 为 `f5c5b03617e41a973ce59c0c081fbd45e9525e7ff3eeba85a310b104df74e529`；两者均与 GitHub 服务端 digest 一致。发布成功只证明远端构建与资产完整，不等同于已经在用户机器安装和完成运行态验收。
+- 联网事实核对继续使用 Codex 内置搜索和 GitHub 官方 API/CLI；Matrix `matrix-websearch` 独立链路仍为 HTTP 521，不能提供第二份正证据，因此 tag、Actions、Release、清单和哈希结论以 GitHub 一手数据及本地下载复核为准，并保留 Matrix 通道不可用这一不确定性。
