@@ -112,3 +112,22 @@ Codex MultiRouter 不是简单地把 Codex 切到某一个第三方 Provider。C
 - Windows 发布导出使用 `pnpm release:export`；本地打包在没有签名私钥时会显式关闭 updater artifact 签名。
 - 免安装版仍使用系统默认用户数据和配置目录，因此除非明确要共享状态，否则不要同时运行多个安装版或便携版实例。
 - macOS 产物需要 macOS 构建、签名和 notarization 环境；Windows/WSL 构建不会产出已签名公证的 macOS 包。
+
+### macOS 未签名版本的打开方法
+
+当前 CCSwitchMulti 的 macOS 通用版本尚未使用 Apple Developer ID 签名和 notarization。从 [Releases](https://github.com/BigStrongSun/ccswitchmulti/releases) 下载 `CCSwitchMulti-v<version>-macOS.dmg` 或 `CCSwitchMulti-v<version>-macOS.zip` 后，如果系统提示“应用已损坏”“无法验证开发者”或“Apple 无法检查此 App 是否包含恶意软件”，请先把 `CCSwitchMulti.app` 放入“应用程序”文件夹。
+
+优先尝试 Apple 提供的图形界面流程：先打开一次应用，然后进入“系统设置 → 隐私与安全性”，在 CCSwitchMulti 的提示旁选择“仍要打开 / Open Anyway”。
+
+如果图形界面没有出现该选项，可以在“终端”执行：
+
+```bash
+xattr -dr com.apple.quarantine /Applications/CCSwitchMulti.app
+open /Applications/CCSwitchMulti.app
+```
+
+该命令只移除 `/Applications/CCSwitchMulti.app` 的下载隔离标记，不会关闭系统 Gatekeeper，也不会修改全局安全策略。请只使用本仓库 Releases 页面提供的安装包，并在执行前确认应用路径正确。
+
+### Opening the unsigned macOS build
+
+The current universal macOS package is unsigned and unnotarized. Download `CCSwitchMulti-v<version>-macOS.dmg` or `CCSwitchMulti-v<version>-macOS.zip` from this repository's Releases page, move `CCSwitchMulti.app` to `/Applications`, and first try **System Settings → Privacy & Security → Open Anyway**. If that option is unavailable, run the two app-scoped commands above. They remove the quarantine attribute from CCSwitchMulti only and do not disable Gatekeeper globally.
