@@ -175,13 +175,14 @@ jobs:
       - name: Prepare Tauri signing key
         shell: bash
         run: |
-          # 调试：检查 Secret 是否存在
+          # 调试：检查 Secret 是否存在。fork 无签名私钥时降级为不签名构建
+          # （updater 签名产物跳过，mac 出 unsigned dmg，Windows 出无签名 exe）。
           if [ -z "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}" ]; then
-            echo "❌ TAURI_SIGNING_PRIVATE_KEY Secret 为空或不存在" >&2
-            echo "请检查 GitHub 仓库 Settings > Secrets and variables > Actions" >&2
-            exit 1
+            echo "⚠️ TAURI_SIGNING_PRIVATE_KEY Secret 为空；本次构建跳过 updater 签名（unsigned artifacts）"
+            echo "TAURI_SIGNING_PRIVATE_KEY=" >> "$GITHUB_ENV"
+            exit 0
           fi
-          
+
           RAW="${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}"
           # 目标：提供正确的私钥“文件路径”给 Tauri CLI，避免内容解码歧义
           KEY_PATH="$RUNNER_TEMP/tauri_signing.key"
@@ -304,7 +305,7 @@ jobs:
           max_attempts=3
           for attempt in $(seq 1 "$max_attempts"); do
             echo "=== macOS build/notarization attempt ${attempt}/${max_attempts} ==="
-            if pnpm tauri build --target universal-apple-darwin; then
+            if pnpm tauri build --target universal-apple-darwin --no-updater; then
               echo "✅ macOS build/notarization succeeded"
               exit 0
             fi
@@ -345,9 +346,9 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           if ($env:WINDOWS_RELEASE_ARCH -eq 'arm64') {
-            pnpm tauri build --target aarch64-pc-windows-msvc --bundles nsis
+            pnpm tauri build --target aarch64-pc-windows-msvc --bundles nsis --no-updater
           } else {
-            pnpm tauri build --bundles nsis
+            pnpm tauri build --bundles nsis --no-updater
           }
 
       - name: Build Linux history repair sidecar
@@ -359,7 +360,7 @@ jobs:
 
       - name: Build Tauri App (Linux)
         if: runner.os == 'Linux'
-        run: pnpm tauri build --bundles appimage,deb,rpm
+        run: pnpm tauri build --bundles appimage,deb,rpm --no-updater
 
       - name: Prepare macOS Assets
         if: runner.os == 'macOS'
@@ -388,8 +389,7 @@ jobs:
           done
 
           if [ -z "$TAR_GZ" ]; then
-            echo "❌ No macOS .tar.gz updater artifact found" >&2
-            exit 1
+            echo "⚠️ No macOS .tar.gz updater artifact found (unsigned build); skipping updater artifacts"
           fi
           if [ -z "$APP_PATH" ]; then
             echo "❌ No .app found" >&2
@@ -404,11 +404,15 @@ jobs:
             echo "⚠️ macOS signing or notarization credentials are missing; skipping .app stapling"
           fi
 
-          # 1) Collect .tar.gz (updater artifact)
-          NEW_TAR_GZ="CCSwitchMulti-${VERSION}-macOS.tar.gz"
-          cp "$TAR_GZ" "release-assets/$NEW_TAR_GZ"
-          [ -f "$TAR_GZ.sig" ] && cp "$TAR_GZ.sig" "release-assets/$NEW_TAR_GZ.sig" || echo ".sig for macOS not found yet"
-          echo "macOS updater artifact copied: $NEW_TAR_GZ"
+          # 1) Collect .tar.gz (updater artifact); absent in unsigned builds
+          if [ -n "$TAR_GZ" ]; then
+            NEW_TAR_GZ="CCSwitchMulti-${VERSION}-macOS.tar.gz"
+            cp "$TAR_GZ" "release-assets/$NEW_TAR_GZ"
+            [ -f "$TAR_GZ.sig" ] && cp "$TAR_GZ.sig" "release-assets/$NEW_TAR_GZ.sig" || echo ".sig for macOS not found yet"
+            echo "macOS updater artifact copied: $NEW_TAR_GZ"
+          else
+            echo "⚠️ Skipping macOS updater artifact copy (no .tar.gz in unsigned build)"
+          fi
 
           # 2) Collect .app as zip
           NEW_ZIP="CCSwitchMulti-${VERSION}-macOS.zip"
@@ -583,7 +587,7 @@ jobs:
             } elseif (-not $isArm64) {
               Write-Warning "Signature not found for $($nsis.Name)"
             } else {
-              throw "Signature not found for $($nsis.Name)"
+              Write-Warning "Signature not found for ARM64 $($nsis.Name); publishing unsigned"
             }
           } elseif (-not $isArm64) {
             throw 'No Windows x64 NSIS installer found'
