@@ -1014,23 +1014,69 @@ fn apply_provider_to_paths_inner(
 /// cc-switch 只托管少量网关字段；用户手动加进 profile 的其它字段
 /// （如 autoModeEnabled / toolSearchEnabled / prefer1m / inferenceCredentialKind）
 /// 会在全量覆盖写时丢失。写入前把现有 profile 里的非托管字段合并回来。
+///
+/// 顶层合并之外，还要按 `name` 并回 `inferenceModels` 每个条目里的非托管字段
+/// （如 Claude Desktop「Default to 1M context」写入的 `prefer1m`），因为整组
+/// `inferenceModels` 是托管键，会被按路由重建。
 fn preserve_user_profile_extras(
     paths: &ClaudeDesktopPaths,
     new_profile: Value,
 ) -> Result<Value, AppError> {
     let existing = read_json_or_empty(&paths.profile_path)?;
     // 首次写入或读失败时没有既有字段，直接返回新 profile。
-    if let Some(existing_obj) = existing.as_object() {
-        let new_obj = new_profile.as_object().unwrap().clone();
-        let mut merged = new_obj.clone();
+    let Some(existing_obj) = existing.as_object() else {
+        return Ok(new_profile);
+    };
+    let new_obj = new_profile.as_object().unwrap().clone();
+    let mut merged = Value::Object(new_obj.clone());
+    for (key, value) in existing_obj {
+        if !new_obj.contains_key(key) {
+            merged
+                .as_object_mut()
+                .unwrap()
+                .insert(key.clone(), value.clone());
+        }
+    }
+    preserve_inference_model_extras(&mut merged, existing_obj);
+    Ok(merged)
+}
+
+/// 把既有 `inferenceModels` 条目里、新重建条目中没有的字段并回（按 `name` 匹配）。
+/// 只处理对象条目；纯字符串条目没有可保留的额外字段。
+fn preserve_inference_model_extras(
+    new_profile: &mut Value,
+    existing_profile: &serde_json::Map<String, Value>,
+) {
+    let Some(new_models) = new_profile
+        .get_mut("inferenceModels")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    let Some(existing_models) = existing_profile
+        .get("inferenceModels")
+        .and_then(Value::as_array)
+    else {
+        return;
+    };
+    for new_entry in new_models.iter_mut() {
+        let Some(new_obj) = new_entry.as_object_mut() else {
+            continue;
+        };
+        let Some(new_name) = new_obj.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(existing_obj) = existing_models.iter().find_map(|item| {
+            item.as_object()
+                .filter(|obj| obj.get("name").and_then(Value::as_str) == Some(new_name))
+        }) else {
+            continue;
+        };
         for (key, value) in existing_obj {
             if !new_obj.contains_key(key) {
-                merged.insert(key.clone(), value.clone());
+                new_obj.insert(key.clone(), value.clone());
             }
         }
-        Ok(Value::Object(merged))
-    } else {
-        Ok(new_profile)
     }
 }
 
@@ -1636,6 +1682,41 @@ mod tests {
             rewritten["inferenceGatewayBaseUrl"],
             json!("http://127.0.0.1:15721/claude-desktop")
         );
+    }
+
+    #[test]
+    fn claude_desktop_apply_preserves_per_model_1m_preference() {
+        let temp = TempDir::new().expect("tempdir");
+        let paths = test_paths(temp.path());
+        let provider = proxy_provider("proxy");
+        let db = test_db();
+
+        // 首次应用写入托管字段
+        apply_provider_to_paths(&db, &provider, &paths).expect("apply proxy provider");
+
+        // 用户在 Claude Desktop 里勾选「Default to 1M context」：给默认模型条目加 prefer1m
+        let mut profile: Value = read_json_file(&paths.profile_path).expect("read profile");
+        let models = profile["inferenceModels"]
+            .as_array_mut()
+            .expect("inferenceModels array");
+        models[0]
+            .as_object_mut()
+            .expect("model entry")
+            .insert("prefer1m".to_string(), json!(true));
+        write_json_file(&paths.profile_path, &profile).expect("write user extras");
+
+        // 再次切换（cc-switch 重写 profile）必须保留条目内的 prefer1m
+        apply_provider_to_paths(&db, &provider, &paths).expect("re-apply proxy provider");
+
+        let rewritten: Value = read_json_file(&paths.profile_path).expect("read profile");
+        let models = rewritten["inferenceModels"]
+            .as_array()
+            .expect("inferenceModels array");
+        assert_eq!(models[0]["name"], json!("claude-sonnet-4-6"));
+        assert_eq!(models[0]["prefer1m"], json!(true));
+        // 托管字段仍是 cc-switch 的值
+        assert_eq!(models[0]["labelOverride"], json!("Kimi K2"));
+        assert_eq!(models[0]["supports1m"], json!(true));
     }
 
     #[test]
