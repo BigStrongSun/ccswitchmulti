@@ -4258,9 +4258,20 @@ fn codex_proxy_error_json(
         let status_fragment = upstream_status
             .map(|status| format!("; upstream_status: HTTP {status}"))
             .unwrap_or_default();
-        format!(
-            "CC Switch local proxy failed while handling Codex endpoint {endpoint}. Provider: {provider_name}; model: {request_model}{status_fragment}; cause: {cause}"
-        )
+        if matches!(error, ProxyError::ForwardFailed(_)) {
+            let failure = if provider_name.eq_ignore_ascii_case("OpenAI Official") {
+                "OpenAI Codex upstream connection failed"
+            } else {
+                "Upstream provider connection failed"
+            };
+            format!(
+                "{failure} while sending Codex endpoint {endpoint}. Provider: {provider_name}; model: {request_model}; cause: {cause}"
+            )
+        } else {
+            format!(
+                "CC Switch local proxy failed while handling Codex endpoint {endpoint}. Provider: {provider_name}; model: {request_model}{status_fragment}; cause: {cause}"
+            )
+        }
     };
 
     error_obj.insert(
@@ -6500,19 +6511,30 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_deepseek\",\"
     }
 
     #[test]
-    fn codex_proxy_forward_error_includes_context_and_cause() {
+    fn codex_proxy_forward_error_points_to_upstream_connection() {
         let error = ProxyError::ForwardFailed("连接失败: dns lookup failed".to_string());
+        let body = codex_proxy_error_json("OpenAI Official", "gpt-5.6-sol", "/responses", &error);
+
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(!message.contains("CC Switch local proxy failed"));
+        assert!(message.contains("OpenAI Codex upstream connection failed"));
+        assert!(message.contains("OpenAI Official"));
+        assert!(message.contains("gpt-5.6-sol"));
+        assert!(message.contains("/responses"));
+        assert!(message.contains("dns lookup failed"));
+        assert_eq!(body["error"]["code"], "cc_switch_forward_failed");
+        assert_eq!(body["error"]["provider"], "OpenAI Official");
+        assert_eq!(body["error"]["model"], "gpt-5.6-sol");
+    }
+
+    #[test]
+    fn codex_proxy_internal_error_keeps_local_proxy_classification() {
+        let error = ProxyError::Internal("failed to serialize local response".to_string());
         let body = codex_proxy_error_json("DeepSeek", "deepseek-chat", "/responses", &error);
 
         let message = body["error"]["message"].as_str().unwrap();
         assert!(message.contains("CC Switch local proxy failed"));
-        assert!(message.contains("DeepSeek"));
-        assert!(message.contains("deepseek-chat"));
-        assert!(message.contains("/responses"));
-        assert!(message.contains("dns lookup failed"));
-        assert_eq!(body["error"]["code"], "cc_switch_forward_failed");
-        assert_eq!(body["error"]["provider"], "DeepSeek");
-        assert_eq!(body["error"]["model"], "deepseek-chat");
+        assert!(message.contains("failed to serialize local response"));
     }
 
     /// 验证 MultiRouter 请求失败时，usage/error 归因回到已命中的 route provider。
