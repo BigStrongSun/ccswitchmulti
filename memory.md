@@ -2997,3 +2997,13 @@
 - 按上一轮真实性审计结论，通过 GitHub connector 将 `BigStrongSun/ccswitchmulti` 的 `#1/#5/#8/#10/#11/#17/#18/#21/#23/#26/#31` 统一关闭为 `state=closed`、`state_reason=completed`；逐项远端回读确认 11 项全部成功关闭。
 - 关闭后再次检索远端 open 列表，数量从 20 降为 9，精确剩余 `#2/#3/#6/#7/#16/#28/#32/#34/#35`。其中 `#2/#7` 仍等待当前版本复测或重写证据，其余 7 项仍有明确未完成工作，未误关。
 - 本轮联网仍执行两条独立链：Codex 内置搜索返回 GitHub 官方 Issue 状态筛选文档；Matrix `matrix-websearch` 再次返回 HTTP 521。最终关闭结果以 GitHub connector 的写入响应和关闭后的逐项/列表回读为权威证据。
+
+# 2026-08-08 Open Issue 修复批次（#35 / #34 / #6 / #3）
+
+- 设计和计划分别提交为 `185f788c`、`d12c9b33`，四个 Issue 保持独立提交和独立验收边界；当前工作分支 `bigstrongsun/fix-portable-third-party-reasoning` 尚未推送这些提交，因此不能把本地实现当作 GitHub 可见完成或已发布修复。
+- `#35` 根因是 `apply_provider_to_paths_inner` 生成完整 Claude Desktop profile 后直接覆盖 `configLibrary/*.json`，没有区分 CCSM 托管字段与用户扩展字段。提交 `b96c3a4c` 在写入前合并现有对象中生成 profile 未包含的键；生成值继续覆盖 `inferenceGatewayBaseUrl` 等托管键，`autoModeEnabled`、`toolSearchEnabled`、`prefer1m` 等用户键保留。RED 测试因 `autoModeEnabled` 实际为 `Null` 失败，GREEN 后定向 1/1、模块 24/24 通过。
+- `#34` 的现场请求包含 `text.verbosity` 但缺少 LM Studio Responses 要求的 `text.format`。提交 `f9ed9bb0` 在最终 native Responses 请求边界增加 LM Studio 专属归一化：仅 Codex + Responses + 未走 Chat/Anthropic 转换 + effective provider 的 type/id/name 可识别为 LM Studio 时，在缺失键时补 `{"type":"text"}`；显式格式、非 LM Studio 和转换路径不变。RED 因归一化函数不存在而编译失败，GREEN 范围测试 2/2、邻近 passthrough 3/3 通过。
+- `#6` 根因是 `codex_proxy_error_json` 对已解析 route/auth 后的 `ProxyError::ForwardFailed` 仍统一包装成 `CC Switch local proxy failed`。提交 `a1b83163` 将该阶段改为 upstream connection 分类，官方 route 使用 `OpenAI Codex upstream connection failed`，同时保留 502/status code、provider/model/endpoint/cause 和既有重试语义；`ProxyError::Internal` 仍保留 local proxy 分类。RED 在旧文案断言失败，GREEN 两项定向测试通过，`codex_proxy_` 10/10、error mapper 7/7 通过。
+- `#3` 的 draft PR `#4` 使用了已过期的 `CCSwitchMulti_<version>_aarch64.*` 资产名且当前显示 mergeable=false，不能直接合并。当前 `v3.19.1-12` Release 和 workflow 实际资产是 `CCSwitchMulti-v3.19.1-12-macOS.dmg/.zip`。提交 `c5440fa8` 在当前精简 README 中加入中英文 unsigned/unnotarized 说明、Apple `Open Anyway` 流程和仅针对 `/Applications/CCSwitchMulti.app` 的 quarantine 删除命令，并明确不会全局关闭 Gatekeeper；资产名和安全禁用命令检查通过。
+- 批次新鲜验证：完整 Rust library `2825 passed / 0 failed / 2 ignored`，`cargo check --lib` exit 0；本批次三份 Rust 文件独立 rustfmt check、README 语义检查、`git diff --check` 均通过。全仓 `cargo fmt --check` 仍因此前 `cfe3028e` 附近已提交的 `codex_desktop.rs`、`codex_guardian.rs`、`commands/proxy.rs`、`services/proxy.rs` 格式差异失败，这些文件不属于本批次，未混入修复提交。
+- 联网交叉验证：Codex 内置 Web 搜索命中 LM Studio 官方 Responses 文档，GitHub connector/`gh`/workflow/Release 资产用于核验 Issue、PR 和当前 macOS 文件名；Matrix `matrix-websearch` 独立查询继续返回 HTTP 521，因此没有作为正证据。仍需在推送/合并后处理 `#3/#6/#34/#35` 的 GitHub 状态；需要运行时或发布验收的行为不得因本地测试提前宣称已发布。
