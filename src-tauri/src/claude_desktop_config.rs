@@ -1001,6 +1001,7 @@ fn apply_provider_to_paths_inner(
             build_gateway_profile(&base_url, &api_key, Some(model_specs.as_slice()))
         }
     };
+    let profile = merge_existing_profile_extras(&paths.profile_path, profile)?;
 
     write_deployment_mode(&paths.normal_config_path, "3p")?;
     write_deployment_mode(&paths.threep_config_path, "3p")?;
@@ -1008,6 +1009,22 @@ fn apply_provider_to_paths_inner(
     write_meta(&paths.meta_path, Some(PROFILE_ID))?;
 
     Ok(())
+}
+
+fn merge_existing_profile_extras(path: &Path, generated_profile: Value) -> Result<Value, AppError> {
+    let existing_profile = read_json_or_empty(path)?;
+    let Value::Object(mut generated) = generated_profile else {
+        return Ok(generated_profile);
+    };
+    let Value::Object(existing) = existing_profile else {
+        return Ok(Value::Object(generated));
+    };
+
+    for (key, value) in existing {
+        generated.entry(key).or_insert(value);
+    }
+
+    Ok(Value::Object(generated))
 }
 
 fn restore_official_at_paths_inner(paths: &ClaudeDesktopPaths) -> Result<(), AppError> {
@@ -1517,6 +1534,35 @@ mod tests {
             .expect("entries")
             .iter()
             .any(|entry| entry["id"] == json!(PROFILE_ID) && entry["name"] == json!(PROFILE_NAME)));
+    }
+
+    #[test]
+    fn claude_desktop_apply_preserves_user_profile_extra_fields() {
+        let temp = TempDir::new().expect("tempdir");
+        let paths = test_paths(temp.path());
+        let provider = direct_provider("direct");
+        let db = test_db();
+        write_json_file(
+            &paths.profile_path,
+            &json!({
+                "inferenceGatewayBaseUrl": "https://stale.example.com",
+                "autoModeEnabled": true,
+                "toolSearchEnabled": true,
+                "prefer1m": false
+            }),
+        )
+        .expect("write existing profile");
+
+        apply_provider_to_paths(&db, &provider, &paths).expect("apply provider");
+
+        let profile: Value = read_json_file(&paths.profile_path).expect("read profile");
+        assert_eq!(
+            profile["inferenceGatewayBaseUrl"],
+            json!("https://gateway.example.com")
+        );
+        assert_eq!(profile["autoModeEnabled"], json!(true));
+        assert_eq!(profile["toolSearchEnabled"], json!(true));
+        assert_eq!(profile["prefer1m"], json!(false));
     }
 
     #[test]
