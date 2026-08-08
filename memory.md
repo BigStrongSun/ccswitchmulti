@@ -2991,3 +2991,9 @@
 - 建议关闭或在让报告者用最新版复测后关闭 11 项：`#1`（spawnAgentModels 前五排序已发布）、`#5`（15721 是本地 takeover 端口，属咨询）、`#8`（MiMo preset 能力字段修复自 v3.16.4-13 已发布；原“中途停”根因未被单独证明）、`#10`（评论已确认模型列表恢复，当前 auth/catalog 路径已有实现）、`#11`（visible alias + upstreamModel 已实现并发布）、`#17`（历史 v13/v12 降级不兼容，当前 schema v16 可迁移 v13）、`#18`（坏明文 encrypted_content 自愈已发布）、`#21`（reserved collaboration schema 兼容与 agents namespace 已发布）、`#23`（DeepSeek low/high/max 官方目录已发布）、`#26`（跨 provider replay ID 规整已在 v3.19.1-2 起发布）、`#31`（双阶段跨 Provider V2 投递修复已在 v3.19.1-9 发布，并有 OpenAI->Qwen/DeepSeek nonce+真实 shell 的 live 验收）。
 - 两项不能按现有标题直接判定为当前真实 Bug：`#2` 只有泛化浅色模式描述、无当前截图/路径，源码已大量使用 light/dark theme tokens，应该改成带页面截图的视觉 QA 清单；`#7` 的 400 现场是真实历史信号，但“developer.content[3] 被拆成 input[3]”没有 raw request body 支持，且当前 official Responses 归一化已有多轮修复，应要求最新版最小复现或关闭/重写根因。
 - 联网交叉验证：Codex 内置 Web 搜索命中 Apple 官方 Gatekeeper/Notarization 说明及 OpenAI Codex 跨 Provider encrypted `agent_message` issues；GitHub connector、`gh`、源码/tag/Actions 日志提供项目当前事实。Matrix `matrix-websearch` 按独立查询链调用，但连续返回 HTTP 521，未能提供第二条正证据，因此对项目状态不使用 Matrix 结果背书。
+
+# 2026-08-08 已处理 GitHub Issue 关闭执行
+
+- 按上一轮真实性审计结论，通过 GitHub connector 将 `BigStrongSun/ccswitchmulti` 的 `#1/#5/#8/#10/#11/#17/#18/#21/#23/#26/#31` 统一关闭为 `state=closed`、`state_reason=completed`；逐项远端回读确认 11 项全部成功关闭。
+- 关闭后再次检索远端 open 列表，数量从 20 降为 9，精确剩余 `#2/#3/#6/#7/#16/#28/#32/#34/#35`。其中 `#2/#7` 仍等待当前版本复测或重写证据，其余 7 项仍有明确未完成工作，未误关。
+- 本轮联网仍执行两条独立链：Codex 内置搜索返回 GitHub 官方 Issue 状态筛选文档；Matrix `matrix-websearch` 再次返回 HTTP 521。最终关闭结果以 GitHub connector 的写入响应和关闭后的逐项/列表回读为权威证据。
