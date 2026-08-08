@@ -3033,3 +3033,13 @@
 - 合并前定向回归为 Claude profile 25/25、自启 2/2、Codex 主进程探测 1/1、代理诊断 10/10；`cargo check --lib`、rustfmt 和 `git diff --check` 通过。仅保留既有 `openai_cache_read_tokens` dead-code warning。
 - 联网交叉验证使用 Codex 内置搜索的 Microsoft Run/RunOnce 官方文档、Rust `CommandExt` 官方文档，以及本地 `auto-launch 0.5.0` Windows 源码；官方文档确认 Run 值是 command line，路径含空格时应正确引用，Rust API 确认 `creation_flags` 传给 CreateProcess。`StartupApproved` 是未公开稳定契约，因此精确 marker 语义以当前 crate 源码和本机 Windows 行为为依据。Matrix WebSearch 独立查询仍返回 HTTP 521，没有提供正证据。
 - 干净提交与首次记忆提交已推送到 `bigstrongsun/fix-portable-third-party-reasoning@332c6a4d`；PR 评论为 `https://github.com/BigStrongSun/ccswitchmulti/pull/36#issuecomment-5226946143`。随后将 PR `#36` 关闭，远端回读为 `state=CLOSED`、`mergedAt=null`，表示贡献已手工集成而原 PR 未被 merge。
+
+# 2026-08-09 CCSwitchMulti v3.19.1-14 GitHub 正式发布
+
+- `v3.19.1-14` 使用 annotated tag：远端 tag object 为 `b4a3e173e9858d3968a6563f261320c7170621f8`，peeled commit 精确指向发布候选 `832d3f09076b0f4d61dbb5ddc67d6fc5753c1490`。本地先删除仅属于 PR #36 贡献者分支、未存在于 BigStrongSun 远端且不在当前发布历史中的轻量 `v3.19.1-14/-15/-16`，再在正式候选上重建本 tag；发布后记忆提交不得移动该标签。
+- 本版发布内容包括：Claude Desktop 每模型 `prefer1m` 用户字段保留、Windows 后台 PowerShell `CREATE_NO_WINDOW`、Windows 开机自启 Run/StartupApproved 状态修复，并在发布说明中感谢贡献者 `@zhushihao`。版本号已同步到 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock` 和 `src-tauri/tauri.conf.json`，中文发布说明位于 `docs/release-notes/v3.19.1-14-zh.md`。
+- 发布前新鲜门禁：Rust library `2828 passed / 0 failed / 2 ignored`，前端在显式排除 `.worktrees/**` 后为 `112 files / 818 passed`；`cargo check --lib`、`cargo fmt --check`、`pnpm typecheck`、发布说明 Prettier 和 `git diff --check` 均通过。只保留既有 `openai_cache_read_tokens` dead-code warning；直接运行未排除 `.worktrees/**` 的 Vitest 会扫描旧 worktree 并引入重复 React/旧断言污染，不能作为当前根源码结果。
+- GitHub Actions run `31272882703`（`https://github.com/BigStrongSun/ccswitchmulti/actions/runs/31272882703`）最终 `completed/success`：Windows x64、Windows ARM64、Linux x64、Linux ARM64、macOS、`Publish GitHub Release` 和 `Assemble latest.json` 七个作业全部成功。
+- 正式 Release 为 `https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.19.1-14`，`draft=false`、`prerelease=false`，发布时间 `2026-08-08T19:22:46Z`，共 19 个资产。远端 `latest.json` 为 `version=3.19.1-14`，包含 `darwin-aarch64`、`darwin-x86_64`、`windows-x86_64`、`windows-aarch64`、`linux-x86_64`、`linux-aarch64` 六个平台键；全部 signature 非空，URL 全部指向本 tag。
+- 下载哈希验证：Windows x64 setup SHA-256 为 `773b71152a69e16f576a3159d6300beb02f56d0d25675edacc25c14974e39330`，`latest.json` SHA-256 为 `fc017ce6ea9b3e179933093fe9d3cb51932f517e37ae02b4e1d8c6de81c72fa2`，两者均与 GitHub 服务端 digest 完全一致。发布成功只证明远端构建与资产完整，不等同于已在用户机器安装并完成运行态验收。
+- 联网事实核对使用了 Codex 内置搜索和 GitHub 官方 API/CLI；Matrix `matrix-websearch` 独立链路仍返回 HTTP 521，不能提供第二份正证据。因此 tag、Actions、Release、清单和哈希结论以 GitHub 一手数据及本地下载复核为准，并保留 Matrix 通道不可用这一不确定性。
