@@ -587,7 +587,12 @@ pub async fn diagnose_codex_multirouter(
 pub async fn get_codex_guardian_status(
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<crate::codex_guardian::CodexGuardianStatus, String> {
-    let status = state.proxy_service.codex_guardian_status.lock().await.clone();
+    let status = state
+        .proxy_service
+        .codex_guardian_status
+        .lock()
+        .await
+        .clone();
     Ok(status)
 }
 

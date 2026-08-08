@@ -1,7 +1,7 @@
-﻿use std::sync::Arc;
-use std::time::Duration;
 use serde::Serialize;
-use tokio::sync::{Mutex, watch};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::{watch, Mutex};
 
 use crate::codex_desktop::{
     candidate_debug_ports, detect_running_codex_main_process, list_cdp_targets,
@@ -131,19 +131,17 @@ async fn run_guardian_cycle(
 
     for port in &ports {
         match list_cdp_targets(*port).await {
-            Ok(targets) => {
-                match pick_codex_page_targets(&targets, *port) {
-                    Ok(pages) => {
-                        cdp_available = true;
-                        for t in &pages {
-                            if !current_ids.contains(&t.id) {
-                                current_ids.push(t.id.clone());
-                            }
+            Ok(targets) => match pick_codex_page_targets(&targets, *port) {
+                Ok(pages) => {
+                    cdp_available = true;
+                    for t in &pages {
+                        if !current_ids.contains(&t.id) {
+                            current_ids.push(t.id.clone());
                         }
                     }
-                    Err(_) => continue,
                 }
-            }
+                Err(_) => continue,
+            },
             Err(_) => continue,
         }
     }
@@ -185,7 +183,9 @@ async fn run_guardian_cycle(
             s.message = "CDP 可用但尚未注入（可能 target 启动中）".into();
         }
         // 清理已消失的 target
-        guard.injected_target_ids.retain(|id| current_ids.contains(id));
+        guard
+            .injected_target_ids
+            .retain(|id| current_ids.contains(id));
         return;
     }
 
@@ -199,7 +199,10 @@ async fn run_guardian_cycle(
     {
         let mut s = status.lock().await;
         s.last_event = format!("检测到新 CDP target，发起注入 (gen {gen})");
-        s.message = format!("检测到 {} 个新 CDP renderer target，正在注入...", new_ids.len());
+        s.message = format!(
+            "检测到 {} 个新 CDP renderer target，正在注入...",
+            new_ids.len()
+        );
     }
 
     match load_cc_switch_model_catalog_projection() {
@@ -214,7 +217,9 @@ async fn run_guardian_cycle(
                         }
                     }
                     // 清理已消失的
-                    guard.injected_target_ids.retain(|id| current_ids.contains(id));
+                    guard
+                        .injected_target_ids
+                        .retain(|id| current_ids.contains(id));
 
                     let mut s = status.lock().await;
                     s.codex_running = true;

@@ -1,4 +1,4 @@
-﻿use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -189,7 +189,8 @@ fn codex_desktop_executable_not_found_message() -> String {
 }
 
 /// 从 cc-switch 生成的 catalog 中读取模型名和 renderer 需要的最小描述。
-pub(crate) fn load_cc_switch_model_catalog_projection() -> Result<CodexModelCatalogProjection, String> {
+pub(crate) fn load_cc_switch_model_catalog_projection(
+) -> Result<CodexModelCatalogProjection, String> {
     let catalog_path = crate::codex_config::get_codex_model_catalog_path();
     let default_model = read_current_codex_default_model();
     let mut candidates = Vec::new();

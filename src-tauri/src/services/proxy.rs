@@ -1,10 +1,10 @@
-﻿//! 代理服务业务逻辑层
+//! 代理服务业务逻辑层
 //!
 //! 提供代理服务器的启动、停止和配置管理
 
 use crate::app_config::AppType;
-use crate::config::{get_claude_settings_path, read_json_file, write_json_file};
 use crate::codex_guardian::{self, GuardianHandle};
+use crate::config::{get_claude_settings_path, read_json_file, write_json_file};
 use crate::database::Database;
 use crate::provider::Provider;
 use crate::proxy::switch_lock::SwitchLockManager;
@@ -777,7 +777,10 @@ impl ProxyService {
 
         // 5. 启动代理服务器
         match self.start().await {
-            Ok(info) => { self.ensure_codex_guardian_started(); Ok(info) },
+            Ok(info) => {
+                self.ensure_codex_guardian_started();
+                Ok(info)
+            }
             Err(e) => {
                 // 启动失败，恢复原始配置
                 log::error!("代理启动失败，尝试恢复原始配置: {e}");
@@ -884,7 +887,9 @@ impl ProxyService {
                 // live 文件仍停留在普通供应商配置。
                 if has_backup && live_matches_current_proxy {
                     self.refresh_active_target_from_current_provider(&app).await;
-                    if app == AppType::Codex { self.ensure_codex_guardian_started(); self.try_repair_codex_model_picker_after_takeover();
+                    if app == AppType::Codex {
+                        self.ensure_codex_guardian_started();
+                        self.try_repair_codex_model_picker_after_takeover();
                     }
                     return Ok(());
                 }
@@ -965,7 +970,9 @@ impl ProxyService {
                 }
             }
 
-            if app == AppType::Codex { self.ensure_codex_guardian_started(); self.try_repair_codex_model_picker_after_takeover();
+            if app == AppType::Codex {
+                self.ensure_codex_guardian_started();
+                self.try_repair_codex_model_picker_after_takeover();
             }
 
             return Ok(());
@@ -979,7 +986,9 @@ impl ProxyService {
             .map_err(|e| format!("获取 {app_type_str} 配置失败: {e}"))?;
 
         if !current_config.enabled {
-        if app == AppType::Codex { self.stop_codex_guardian(); }
+            if app == AppType::Codex {
+                self.stop_codex_guardian();
+            }
             return Ok(()); // 未接管，幂等返回
         }
 
@@ -3782,7 +3791,6 @@ impl ProxyService {
         });
     }
 
-    
     fn ensure_codex_guardian_started(&self) {
         let handle_arc = self.codex_guardian.clone();
         let status_arc = self.codex_guardian_status.clone();
@@ -3820,7 +3828,7 @@ impl ProxyService {
             }
         });
     }
-fn write_codex_live_verbatim(&self, config: &Value) -> Result<(), String> {
+    fn write_codex_live_verbatim(&self, config: &Value) -> Result<(), String> {
         self.write_codex_live_snapshot(config, true)
     }
 
