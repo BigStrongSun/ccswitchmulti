@@ -2520,6 +2520,16 @@ impl RequestForwarder {
         } else {
             request_body
         };
+        request_body = normalize_lm_studio_responses_request(
+            app_type,
+            provider,
+            endpoint,
+            !needs_transform
+                && !codex_responses_to_chat
+                && !codex_responses_to_messages
+                && !codex_responses_to_anthropic,
+            request_body,
+        );
         if should_make_codex_v2_agents_plaintext(
             app_type,
             codex_router_provider,
@@ -6364,6 +6374,54 @@ fn should_normalize_codex_responses_passthrough_control_messages(
         && super::providers::is_codex_responses_endpoint(endpoint)
 }
 
+fn normalize_lm_studio_responses_request(
+    app_type: &AppType,
+    provider: &Provider,
+    endpoint: &str,
+    native_responses: bool,
+    request_body: Value,
+) -> Value {
+    if !matches!(app_type, AppType::Codex)
+        || !native_responses
+        || !super::providers::is_codex_responses_endpoint(endpoint)
+        || !is_lm_studio_provider(provider)
+    {
+        return request_body;
+    }
+
+    let Value::Object(mut body) = request_body else {
+        return request_body;
+    };
+    let text = body
+        .entry("text".to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if let Value::Object(text) = text {
+        text.entry("format".to_string())
+            .or_insert_with(|| serde_json::json!({"type": "text"}));
+    }
+
+    Value::Object(body)
+}
+
+fn is_lm_studio_provider(provider: &Provider) -> bool {
+    if provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.provider_type.as_deref())
+        .is_some_and(|provider_type| provider_type.eq_ignore_ascii_case("lmstudio"))
+    {
+        return true;
+    }
+
+    [&provider.id, &provider.name].into_iter().any(|identity| {
+        identity
+            .chars()
+            .filter(|character| character.is_ascii_alphanumeric())
+            .collect::<String>()
+            .eq_ignore_ascii_case("lmstudio")
+    })
+}
+
 /// 判断 URL 是否指向 ChatGPT 的 Codex Responses backend。
 ///
 /// 参数:
@@ -8671,6 +8729,63 @@ mod tests {
                 false
             )
         );
+    }
+
+    #[test]
+    fn lm_studio_native_responses_adds_missing_text_format() {
+        let mut lm_studio = test_provider_with_type(Some("lmstudio"));
+        lm_studio.id = "lmstudio".to_string();
+        lm_studio.name = "LM Studio".to_string();
+
+        let normalized = normalize_lm_studio_responses_request(
+            &AppType::Codex,
+            &lm_studio,
+            "/v1/responses",
+            true,
+            json!({"model": "local-model", "text": {"verbosity": "low"}}),
+        );
+
+        assert_eq!(normalized["text"]["verbosity"], "low");
+        assert_eq!(normalized["text"]["format"], json!({"type": "text"}));
+    }
+
+    #[test]
+    fn lm_studio_responses_preserves_explicit_format_and_scope() {
+        let mut lm_studio = test_provider_with_type(Some("lmstudio"));
+        lm_studio.name = "LM Studio".to_string();
+        let explicit_format = json!({
+            "type": "json_schema",
+            "name": "answer",
+            "schema": {"type": "object"}
+        });
+
+        let explicit = normalize_lm_studio_responses_request(
+            &AppType::Codex,
+            &lm_studio,
+            "/responses",
+            true,
+            json!({"text": {"format": explicit_format.clone()}}),
+        );
+        assert_eq!(explicit["text"]["format"], explicit_format);
+
+        let unrelated = test_provider_with_type(None);
+        let unrelated_body = normalize_lm_studio_responses_request(
+            &AppType::Codex,
+            &unrelated,
+            "/responses",
+            true,
+            json!({"text": {"verbosity": "low"}}),
+        );
+        assert!(unrelated_body["text"].get("format").is_none());
+
+        let transformed = normalize_lm_studio_responses_request(
+            &AppType::Codex,
+            &lm_studio,
+            "/responses",
+            false,
+            json!({"text": {"verbosity": "low"}}),
+        );
+        assert!(transformed["text"].get("format").is_none());
     }
 
     #[test]
