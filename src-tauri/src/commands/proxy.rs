@@ -1074,6 +1074,8 @@ struct RawWindowsCodexProcess {
 fn query_codex_processes() -> (Vec<CodexAppServerProcessDiagnostics>, Option<String>) {
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
         let script = r#"
 Get-CimInstance Win32_Process -Filter "Name = 'Codex.exe' OR Name = 'codex.exe'" |
   Select-Object ProcessId,Name,ExecutablePath,CommandLine,@{Name='StartedAt';Expression={$_.CreationDate.ToLocalTime().ToString('o')}} |
@@ -1081,6 +1083,7 @@ Get-CimInstance Win32_Process -Filter "Name = 'Codex.exe' OR Name = 'codex.exe'"
 "#;
         let output = match Command::new("powershell")
             .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .creation_flags(CREATE_NO_WINDOW)
             .output()
         {
             Ok(output) => output,
