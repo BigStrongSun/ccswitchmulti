@@ -1004,10 +1004,34 @@ fn apply_provider_to_paths_inner(
 
     write_deployment_mode(&paths.normal_config_path, "3p")?;
     write_deployment_mode(&paths.threep_config_path, "3p")?;
+    let profile = preserve_user_profile_extras(paths, profile)?;
     write_json_file(&paths.profile_path, &profile)?;
     write_meta(&paths.meta_path, Some(PROFILE_ID))?;
 
     Ok(())
+}
+
+/// cc-switch 只托管少量网关字段；用户手动加进 profile 的其它字段
+/// （如 autoModeEnabled / toolSearchEnabled / prefer1m / inferenceCredentialKind）
+/// 会在全量覆盖写时丢失。写入前把现有 profile 里的非托管字段合并回来。
+fn preserve_user_profile_extras(
+    paths: &ClaudeDesktopPaths,
+    new_profile: Value,
+) -> Result<Value, AppError> {
+    let existing = read_json_or_empty(&paths.profile_path)?;
+    // 首次写入或读失败时没有既有字段，直接返回新 profile。
+    if let Some(existing_obj) = existing.as_object() {
+        let new_obj = new_profile.as_object().unwrap().clone();
+        let mut merged = new_obj.clone();
+        for (key, value) in existing_obj {
+            if !new_obj.contains_key(key) {
+                merged.insert(key.clone(), value.clone());
+            }
+        }
+        Ok(Value::Object(merged))
+    } else {
+        Ok(new_profile)
+    }
 }
 
 fn restore_official_at_paths_inner(paths: &ClaudeDesktopPaths) -> Result<(), AppError> {
@@ -1581,6 +1605,37 @@ mod tests {
             json!([{ "name": "claude-sonnet-4-6", "labelOverride": "Kimi K2", "supports1m": true }])
         );
         assert!(!profile.to_string().contains("kimi-k2"));
+    }
+
+    #[test]
+    fn claude_desktop_apply_preserves_user_profile_extra_fields() {
+        let temp = TempDir::new().expect("tempdir");
+        let paths = test_paths(temp.path());
+        let provider = proxy_provider("proxy");
+        let db = test_db();
+
+        // 首次应用写入托管字段
+        apply_provider_to_paths(&db, &provider, &paths).expect("apply proxy provider");
+
+        // 用户手动加非托管字段
+        let mut profile: Value = read_json_file(&paths.profile_path).expect("read profile");
+        profile["autoModeEnabled"] = json!(true);
+        profile["toolSearchEnabled"] = json!(true);
+        profile["inferenceCredentialKind"] = json!("static");
+        write_json_file(&paths.profile_path, &profile).expect("write user extras");
+
+        // 再次切换（cc-switch 重写 profile）必须保留用户字段
+        apply_provider_to_paths(&db, &provider, &paths).expect("re-apply proxy provider");
+
+        let rewritten: Value = read_json_file(&paths.profile_path).expect("read profile");
+        assert_eq!(rewritten["autoModeEnabled"], json!(true));
+        assert_eq!(rewritten["toolSearchEnabled"], json!(true));
+        assert_eq!(rewritten["inferenceCredentialKind"], json!("static"));
+        // 托管字段仍是 cc-switch 的值
+        assert_eq!(
+            rewritten["inferenceGatewayBaseUrl"],
+            json!("http://127.0.0.1:15721/claude-desktop")
+        );
     }
 
     #[test]
