@@ -1028,9 +1028,12 @@ Get-CimInstance Win32_Process -Filter "Name = 'Codex.exe' OR Name = 'ChatGPT.exe
 pub(crate) fn detect_running_codex_main_process() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
         let script = DETECT_CODEX_MAIN_PROCESS_SCRIPT;
         let output = Command::new("powershell")
             .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .creation_flags(CREATE_NO_WINDOW)
             .output()
             .ok()?;
         if !output.status.success() {
@@ -1749,8 +1752,11 @@ fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 /// 执行 PowerShell 并解析 JSON 输出，统一处理空输出和脚本失败。
 #[cfg(target_os = "windows")]
 fn powershell_json_value(script: &str) -> Option<Value> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
     let output = Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .ok()?;
     if !output.status.success() {
