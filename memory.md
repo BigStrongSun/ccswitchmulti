@@ -3016,3 +3016,9 @@
 - 正式 Release 为 `https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.19.1-13`，`draft=false`、`prerelease=false`，共 19 个资产。`latest.json` 为 `version=3.19.1-13`，包含 `darwin-aarch64`、`darwin-x86_64`、`windows-x86_64`、`windows-aarch64`、`linux-x86_64`、`linux-aarch64` 六个平台；全部 signature 非空并与下载的对应 `.sig` 内容一致，URL 全部指向本 tag。
 - 下载验证：`latest.json` SHA-256 为 `532d2a2dd85bd866d300c864702cb0c0d35992980dbc8945710a6f29fa3cec61`；Windows x64 setup SHA-256 为 `f5c5b03617e41a973ce59c0c081fbd45e9525e7ff3eeba85a310b104df74e529`；两者均与 GitHub 服务端 digest 一致。发布成功只证明远端构建与资产完整，不等同于已经在用户机器安装和完成运行态验收。
 - 联网事实核对继续使用 Codex 内置搜索和 GitHub 官方 API/CLI；Matrix `matrix-websearch` 独立链路仍为 HTTP 521，不能提供第二份正证据，因此 tag、Actions、Release、清单和哈希结论以 GitHub 一手数据及本地下载复核为准，并保留 Matrix 通道不可用这一不确定性。
+
+# 2026-08-08 v3.19.1-13 发布后 Issue 与旧 PR 收尾
+
+- 在正式 Release、Actions 和 updater 资产验证通过后，先逐项回读远端 open 状态，再给 `#3/#6/#32/#34/#35` 添加 `v3.19.1-13` 修复说明并关闭为 `state=closed`、`state_reason=completed`；关闭后再次逐项回读，五项均为 completed。
+- macOS 文档 draft PR `#4` 的目标已由当前分支实现并发布，且旧草稿资产名过时、`mergeable=false`；添加替代说明后关闭，最终 `state=closed`、`merged=false`、`draft=true`，没有合并旧补丁。
+- 收尾远端 open Issue 精确剩余 `#2/#7/#16/#28/#37`；其中 `#37` 是协助仓库脱离 fork network 的协调事项，本轮没有将其误判为产品 Bug 或关闭。open PR 仍为 `#13/#22/#25/#27/#36`，本轮仅按既定范围关闭 `#4`，未扩大到其他 PR。
