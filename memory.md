@@ -3022,3 +3022,13 @@
 - 在正式 Release、Actions 和 updater 资产验证通过后，先逐项回读远端 open 状态，再给 `#3/#6/#32/#34/#35` 添加 `v3.19.1-13` 修复说明并关闭为 `state=closed`、`state_reason=completed`；关闭后再次逐项回读，五项均为 completed。
 - macOS 文档 draft PR `#4` 的目标已由当前分支实现并发布，且旧草稿资产名过时、`mergeable=false`；添加替代说明后关闭，最终 `state=closed`、`merged=false`、`draft=true`，没有合并旧补丁。
 - 收尾远端 open Issue 精确剩余 `#2/#7/#16/#28/#37`；其中 `#37` 是协助仓库脱离 fork network 的协调事项，本轮没有将其误判为产品 Bug 或关闭。open PR 仍为 `#13/#22/#25/#27/#36`，本轮仅按既定范围关闭 `#4`，未扩大到其他 PR。
+
+# 2026-08-09 PR #36 审查、干净移植与 Windows 自启根修
+
+- `zhushihao` 的 PR `#36` 标题为“保留 Claude profile 用户字段 + 消除 powershell 弹窗 + 修复开机自启”，但 head `d18d1b49107f1d879b91a1dba3fcd47eb6860b07` 基于长期未更新的远端 `main@f13fea48`，相对该 base 混入 94 commits / 53 files；相对实际发布分支仍 ahead 12 / behind 16。不能直接 merge，否则会把旧 release、Codex 路由、workflow、版本和冲突解决历史带入当前发布线。
+- 真正相关提交只有 `e48510fb`（顶层 Claude profile extras）、`0fd46f7d`（模型条目 `prefer1m`）、`bb7d8dee`（后台 PowerShell `CREATE_NO_WINDOW`）和 `dbfe6273`（Windows 自启注册表）。顶层 extras 已由当前线 `b96c3a4c` 独立实现，因此不重复吸收；其余贡献在隔离 worktree 审查后映射为干净提交 `27ba2724`、`9482e057`、`15770e31`，作者保留为 Shawn Pro，提交者为 BigStrongSun。
+- `27ba2724` 在现有 `merge_existing_profile_extras` 上按模型 `name` 合并 `inferenceModels` 条目中生成配置未包含的字段。回归测试先在无实现分支真实失败：`prefer1m` 由 `Bool(true)` 变为 `Null`；实现后目标 1/1、完整 Claude Desktop config 模块 25/25 通过。
+- `9482e057` 给剩余三处后台直接 PowerShell 调用补 `CREATE_NO_WINDOW`：Codex guardian 主进程探测、Windows 安装候选 JSON 探测和代理诊断进程探测。历史迁移路径原本已有同一标志；用户主动安装器和终端流程不在本次隐藏窗口范围。Windows `cargo check --lib` 通过。
+- 原 `dbfe6273` 不能原样吸收：它的 `is_enabled()` 只看 Run 值，会忽略用户在 Task Manager 中写入的 `StartupApproved` 禁用状态；路径比较大小写敏感；`StartupApproved` 写入/删除错误被静默吞掉。`15770e31` 保留其“引用含空格 exe 路径并同步维护两处注册表”的核心，增加 Windows 路径大小写不敏感匹配、StartupApproved override 判断、仅忽略 NotFound 的错误语义，并在 StartupApproved 启用写入失败时回滚 Run 值。两条 RED 先因 Windows 状态模块不存在而编译失败，GREEN 后 2/2 通过。
+- 合并前定向回归为 Claude profile 25/25、自启 2/2、Codex 主进程探测 1/1、代理诊断 10/10；`cargo check --lib`、rustfmt 和 `git diff --check` 通过。仅保留既有 `openai_cache_read_tokens` dead-code warning。
+- 联网交叉验证使用 Codex 内置搜索的 Microsoft Run/RunOnce 官方文档、Rust `CommandExt` 官方文档，以及本地 `auto-launch 0.5.0` Windows 源码；官方文档确认 Run 值是 command line，路径含空格时应正确引用，Rust API 确认 `creation_flags` 传给 CreateProcess。`StartupApproved` 是未公开稳定契约，因此精确 marker 语义以当前 crate 源码和本机 Windows 行为为依据。Matrix WebSearch 独立查询仍返回 HTTP 521，没有提供正证据。
