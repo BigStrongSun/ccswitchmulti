@@ -337,6 +337,23 @@ public static class Task3ASqliteFixtureNative {
     }
 }
 
+function New-FakeRetainedProcessHandle {
+    param([bool]$WaitForExitResult = $true)
+
+    $script:retainedHandleCalls = New-Object System.Collections.Generic.List[string]
+    $script:retainedHandleWaitForExitResult = $WaitForExitResult
+    $handle = New-Object psobject
+    $handle | Add-Member -MemberType ScriptMethod -Name Kill -Value {
+        $script:retainedHandleCalls.Add("kill") | Out-Null
+    }
+    $handle | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {
+        param([int]$TimeoutMilliseconds)
+        $script:retainedHandleCalls.Add("wait:$TimeoutMilliseconds") | Out-Null
+        return $script:retainedHandleWaitForExitResult
+    }
+    return $handle
+}
+
 Describe "CCSwitchMulti transactional reinstall orchestration" {
     It "keeps condition polling internal instead of contaminating transaction output" {
         $script:conditionAttempts = 0
@@ -358,6 +375,45 @@ Describe "CCSwitchMulti transactional reinstall orchestration" {
     It "rejects a dot-dot backup path that only appears to be inside the transaction root" {
         Test-CcsmPathInside -Candidate "D:\ccsm-transaction-backups\txn-1\..\outside" `
             -Parent "D:\ccsm-transaction-backups\txn-1" | Should Be $false
+    }
+
+    It "kills and waits through the same retained verified process handle" {
+        $handle = New-FakeRetainedProcessHandle -WaitForExitResult $true
+
+        Stop-CcsmVerifiedProcessHandle -Process $handle -TimeoutSeconds 7
+
+        ($script:retainedHandleCalls -join ",") | Should Be "kill,wait:7000"
+    }
+
+    It "fails only when the retained verified process handle times out" {
+        $handle = New-FakeRetainedProcessHandle -WaitForExitResult $false
+
+        { Stop-CcsmVerifiedProcessHandle -Process $handle -TimeoutSeconds 3 } | Should Throw "verified process did not exit before timeout"
+        ($script:retainedHandleCalls -join ",") | Should Be "kill,wait:3000"
+    }
+
+    It "terminates a disposable PowerShell child through the actual retained-handle helper" {
+        $child = $null
+        try {
+            $child = Start-Process -FilePath (Join-Path $PSHOME "powershell.exe") `
+                -ArgumentList @("-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Seconds 30") `
+                -WindowStyle Hidden -PassThru -ErrorAction Stop
+
+            Stop-CcsmVerifiedProcessHandle -Process $child -TimeoutSeconds 5
+
+            $child.HasExited | Should Be $true
+        } finally {
+            if ($null -ne $child) {
+                try {
+                    if (-not $child.HasExited) {
+                        $child.Kill()
+                        [void]$child.WaitForExit(5000)
+                    }
+                } finally {
+                    $child.Dispose()
+                }
+            }
+        }
     }
 
     It "fails closed before copying a recursive child junction and leaves its target untouched during cleanup" {
