@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-08-09 Codex Sub-Agent V1/V2 双模式设置设计
+
+- 用户确认 MultiRouter 应同时保留 `Sub-Agent V1（兼容）` 与 `Sub-Agent V2（推荐）` 两套配置，并由每个方案选择当前生效版本；同一方案、同一会话只运行一种协议。新方案和缺少版本字段的旧方案默认 V2，现有 `modelCatalog.spawnAgentModels` 保留为 V1 direct override 前五顺序，切换版本不删除另一套数据。
+- 方案级单一数据源定为 `settingsConfig.codexRouting.subagentVersion: "v1" | "v2"`。向导左侧在路由与发布之间同时加入 V1/V2 两步；MultiRouter 工作台把模糊的高级覆盖面板改为完整 Sub-Agent 设置区。V1 强调显式控制和旧工具兼容，V2 强调 task path、follow-up、mailbox 与 DeepSeek Flash/Pro managed roles 自动选型。
+- 上游源码证明选择 V1 不能只改 catalog：Codex 的 `features.multi_agent_v2` override 优先于模型 `multi_agent_version`。V1 投影必须统一写 V1 metadata 并显式设置 `multi_agent_v2.enabled=false`；V2 统一写 V2、启用 feature、保留混合路由 `tool_namespace=agents` 和 reserved schema 边界。
+- V2 managed roles 只在 V2 激活时由完整可路由 catalog 生成；V1 激活时清理 CCSM 自己带 marker 的托管 role，用户手写 role 永远保留。direct override 前五与 managed role 全目录继续彻底解耦。
+- 批准规格位于 `docs/superpowers/specs/2026-08-09-codex-subagent-v1-v2-settings-design.md`。实现必须 TDD RED/GREEN 分提交，最终构建 `3.19.1-15`、安装并重启 CCSM/Codex，用 V1 direct override 和 V2 无模型名 Flash/Pro 两条真实 canary 验收。Matrix WebSearch 本轮仍为 HTTP 521，未提供正证据。
+
 ## 2026-08-07 DeepSeek Pro Chat 路由被启动迁移反复改写为 Flash Responses
 
 - 用户反馈在官方 DeepSeek 选择 Chat 后，Codex 只“一问一答”而不继续工具循环；改选 Responses 后，大对话又会因官方端点实现边界报错。本机 3.19.1-10 的真实 SQLite 显示：`DeepSeek-chat` Provider 自身仍是 `openai_chat` 且目录只有 `deepseek-v4-pro`，但 MultiRouter 中引用它的 route 已被改成 `openai_responses`，匹配窗口也变成 `deepseek-v4-flash`。因此 UI 选择与实际出站协议发生漂移，不能把症状归因于 DeepSeek 不支持工具。
