@@ -6307,6 +6307,49 @@ wire_api = "chat"
     }
 
     #[test]
+    fn codex_model_catalog_projection_keeps_provider_v2_routing_metadata_for_live_snapshot() {
+        // The projection input begins with the current live OAuth/config snapshot,
+        // but the catalog and V2 routing contract remain provider-owned metadata.
+        let live_snapshot = json!({
+            "auth": { "auth_mode": "chatgpt", "tokens": { "access_token": "live" } },
+            "config": "model_provider = \"codex_model_router_v2\"\nmodel = \"gpt-5.6-sol\"\n"
+        });
+        let provider = Provider::with_id(
+            "router".to_string(),
+            "V2 Router".to_string(),
+            json!({
+                "modelCatalog": {
+                    "models": [{ "model": "gpt-5.6-sol", "displayName": "Sol" }]
+                },
+                "codexRouting": {
+                    "enabled": true,
+                    "subagentVersion": "v2",
+                    "routes": [{ "id": "sol", "enabled": true }]
+                }
+            }),
+            None,
+        );
+
+        let projected = ProxyService::codex_settings_for_model_catalog_projection(
+            &live_snapshot,
+            Some(&provider),
+        );
+
+        assert_eq!(projected.get("auth"), live_snapshot.get("auth"));
+        assert_eq!(projected.get("config"), live_snapshot.get("config"));
+        assert_eq!(
+            projected.get("codexRouting"),
+            provider.settings_config.get("codexRouting"),
+            "projection must retain the provider-owned enabled V2 routing contract"
+        );
+        assert_eq!(
+            projected.get("modelCatalog"),
+            provider.settings_config.get("modelCatalog"),
+            "projection must retain the provider-owned model catalog"
+        );
+    }
+
+    #[test]
     fn codex_multirouter_takeover_facade_projects_native_mixed_toml() {
         let provider = codex_multirouter_provider("native_codex_auth");
         let output = ProxyService::apply_codex_proxy_toml_config_with_pool_policy(
