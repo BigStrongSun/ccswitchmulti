@@ -452,6 +452,16 @@ function Assert-CcsmVerifiedStopTarget {
     return $currentIdentity
 }
 
+function Stop-CcsmVerifiedProcessHandle {
+    param($Process, [int]$TimeoutSeconds)
+
+    $timeoutMilliseconds = [int]([int64]$TimeoutSeconds * 1000)
+    $Process.Kill()
+    if (-not $Process.WaitForExit($timeoutMilliseconds)) {
+        throw "verified process did not exit before timeout"
+    }
+}
+
 function Write-CcsmBestEffortLog {
     param(
         [hashtable]$Operations,
@@ -1128,11 +1138,7 @@ function New-CcsmRealOperations {
             throw "process instance changed before verified stop"
         }
         if ($null -eq $liveIdentity.Handle) { throw "verified process handle is unavailable" }
-        Stop-Process -InputObject $liveIdentity.Handle -Force -ErrorAction Stop
-        Wait-Process -Id $liveIdentity.ProcessId -Timeout $Context.TimeoutSeconds -ErrorAction SilentlyContinue
-        if (Get-Process -Id $liveIdentity.ProcessId -ErrorAction SilentlyContinue) {
-            throw "verified process $($liveIdentity.ProcessId) did not exit"
-        }
+        Stop-CcsmVerifiedProcessHandle -Process $liveIdentity.Handle -TimeoutSeconds $Context.TimeoutSeconds
     }
     $operations.WaitPortReleased = {
         param($Context)
