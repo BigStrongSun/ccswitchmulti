@@ -3763,11 +3763,20 @@ impl ProxyService {
             .map(|meta| meta.codex_model_catalog_projection_enabled(&provider.settings_config))
             .unwrap_or_else(|| provider.settings_config.get("modelCatalog").is_some());
 
+        let mut next = config.clone();
         if should_project {
-            return config.clone();
+            if let Some(root) = next.as_object_mut() {
+                for key in ["modelCatalog", "codexRouting"] {
+                    if !root.contains_key(key) {
+                        if let Some(value) = provider.settings_config.get(key) {
+                            root.insert(key.to_string(), value.clone());
+                        }
+                    }
+                }
+            }
+            return next;
         }
 
-        let mut next = config.clone();
         if let Some(root) = next.as_object_mut() {
             root.remove("modelCatalog");
         }
