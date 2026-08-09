@@ -1,6 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
-import React from "react";
 import { describe, expect, it, vi } from "vitest";
 import type { Provider } from "@/types";
 import { CodexMultiRouterWizard } from "./CodexMultiRouterWizard";

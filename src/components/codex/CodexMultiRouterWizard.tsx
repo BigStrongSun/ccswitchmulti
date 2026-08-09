@@ -14,7 +14,6 @@ import {
   Route,
   Server,
   ShieldAlert,
-  Trash2,
   Wand2,
   X,
 } from "lucide-react";
@@ -114,7 +113,6 @@ type WizardStepKey =
   | "collisions"
   | "selectModels"
   | "routes"
-  | "spawnAgent"
   | "publish"
   | "finish";
 
@@ -224,12 +222,6 @@ const STEPS: WizardStep[] = [
     icon: GitBranch,
   },
   {
-    key: "spawnAgent",
-    title: "子 Agent 候选",
-    description: "从最终模型列表里选择并排序最多 5 个子 Agent 候选模型。",
-    icon: Route,
-  },
-  {
     key: "publish",
     title: "保存并发布",
     description:
@@ -288,10 +280,6 @@ const STEP_RULES: Record<WizardStepKey, WizardStepRule> = {
   routes: {
     errors: ["没有 match.models/prefixes 的 route 不会稳定命中模型请求。"],
     canContinue: "至少生成一条 route 且没有连通性阻塞项时可以继续保存。",
-  },
-  spawnAgent: {
-    errors: ["子 Agent 候选最多 5 个；不选择时会默认使用最终模型列表前 5 个。"],
-    canContinue: "候选为空或不超过 5 个都可以继续；保存时会过滤掉已剔除模型。",
   },
   publish: {
     errors: ["数据库写入失败或 provider id 冲突会进入 saveFailed。"],
@@ -396,8 +384,6 @@ function statusForStep(stepKey: WizardStepKey): WizardFlowStatus {
     case "selectModels":
       return "routePreview";
     case "routes":
-      return "routePreview";
-    case "spawnAgent":
       return "routePreview";
     case "publish":
       return "published";
@@ -1180,33 +1166,6 @@ export function CodexMultiRouterWizard({
     );
   };
 
-  // 添加或移除子 Agent 候选；候选只从最终保留模型中选择，最多 5 个。
-  const toggleSpawnAgentModel = (model: string, checked: boolean) => {
-    if (!checked) {
-      setDraftSpawnAgentModels((current) =>
-        current.filter((item) => item !== model),
-      );
-      return;
-    }
-    setDraftSpawnAgentModels((current) => {
-      if (current.includes(model)) return current;
-      if (current.length >= 5) {
-        toast.error("子 Agent 候选最多只能选择 5 个模型。", {
-          closeButton: true,
-        });
-        return current;
-      }
-      return [...current, model];
-    });
-  };
-
-  // 调整子 Agent 候选顺序；这个顺序会写入 modelCatalog.spawnAgentModels。
-  const moveSpawnAgentModel = (model: string, direction: -1 | 1) => {
-    setDraftSpawnAgentModels((current) =>
-      moveOrderedItem(current, model, direction),
-    );
-  };
-
   // 关闭/跳过时记录 dismissed；首页按钮仍可再次显式打开。
   const closeWizard = (dismissed = true) => {
     if (dismissed) {
@@ -1338,13 +1297,6 @@ export function CodexMultiRouterWizard({
         });
         return;
       case "routes":
-        dispatchFlow({
-          type: "NEXT",
-          nextStatus: "routePreview",
-          nextStepKey: "spawnAgent",
-        });
-        return;
-      case "spawnAgent":
         dispatchFlow({
           type: "NEXT",
           nextStatus: "published",
@@ -2048,7 +2000,7 @@ export function CodexMultiRouterWizard({
                 <div className="rounded-lg border p-4">
                   <div className="flex items-center gap-2 font-medium">
                     <Wand2 className="h-4 w-4" />
-                    这套向导会帮你完成 7 件事
+                    这套向导会帮你完成 6 件事
                   </div>
                   <div className="mt-4 grid gap-3 md:grid-cols-2">
                     {[
@@ -2056,7 +2008,6 @@ export function CodexMultiRouterWizard({
                       "给新的 MultiRouter 方案命名，方便后续识别",
                       "自动读取模型列表，并处理官方模型和中转模型重名",
                       "汇总所有模型后排序，并剔除旧模型或不想暴露的模型",
-                      "从最终模型池里选择并排序 5 个子 Agent 候选",
                       "按模型名称生成分流规则，让 Codex 自动选上游",
                       "启用后等待真实请求成功，再带你修复历史记录",
                     ].map((item, index) => (
@@ -2426,8 +2377,9 @@ export function CodexMultiRouterWizard({
               <div className="space-y-4">
                 <div className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
                   这里决定最终写入 MultiRouter modelCatalog 和各 route
-                  的模型。取消勾选会把旧模型或不想暴露的模型从最终路由里剔除；子
-                  Agent 候选会在下一步单独选择。
+                  的模型。取消勾选会把旧模型或不想暴露的模型从最终路由里剔除。V4
+                  Pro / Flash 子 Agent
+                  角色会从可路由目录自动注册，无需在向导中手工选模型。
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
                   <Button
@@ -2646,106 +2598,6 @@ export function CodexMultiRouterWizard({
                     </div>
                   </div>
                 ))}
-              </div>
-            )}
-
-            {currentStep.key === "spawnAgent" && (
-              <div className="space-y-4">
-                <div className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
-                  子 Agent 候选只从上一步保留的模型里选，最多 5
-                  个。顺序越靠前，越适合放常用或稳定的模型；如果不选，保存时会默认取最终模型列表前
-                  5 个。
-                </div>
-                <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)]">
-                  <div className="rounded-lg border">
-                    <div className="border-b px-3 py-2 text-sm font-medium">
-                      已选候选 {activeSpawnAgentModels.length} / 5
-                    </div>
-                    <div className="max-h-80 overflow-auto">
-                      {activeSpawnAgentModels.length === 0 && (
-                        <div className="p-3 text-sm text-muted-foreground">
-                          暂未选择，保存时会使用最终模型列表前 5 个。
-                        </div>
-                      )}
-                      {activeSpawnAgentModels.map((model, index) => (
-                        <div
-                          key={model}
-                          className="grid grid-cols-[2rem_minmax(0,1fr)_5rem_2rem] items-center gap-2 border-b px-3 py-2 text-sm last:border-b-0"
-                        >
-                          <Badge variant="outline">#{index + 1}</Badge>
-                          <span className="truncate font-medium">{model}</span>
-                          <div className="flex gap-1">
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon"
-                              className="h-8 w-8"
-                              disabled={index === 0}
-                              onClick={() => moveSpawnAgentModel(model, -1)}
-                              title="上移"
-                            >
-                              <ArrowUp className="h-4 w-4" />
-                            </Button>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon"
-                              className="h-8 w-8"
-                              disabled={
-                                index === activeSpawnAgentModels.length - 1
-                              }
-                              onClick={() => moveSpawnAgentModel(model, 1)}
-                              title="下移"
-                            >
-                              <ArrowDown className="h-4 w-4" />
-                            </Button>
-                          </div>
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="icon"
-                            className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                            onClick={() => toggleSpawnAgentModel(model, false)}
-                            title="移除"
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </Button>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="rounded-lg border">
-                    <div className="border-b px-3 py-2 text-sm font-medium">
-                      最终模型池
-                    </div>
-                    <div className="max-h-80 overflow-auto">
-                      {previewModels.map((model) => {
-                        const selected = activeSpawnAgentModels.includes(
-                          model.model,
-                        );
-                        return (
-                          <label
-                            key={model.model}
-                            className="grid grid-cols-[2rem_minmax(0,1fr)] items-center gap-2 border-b px-3 py-2 text-sm last:border-b-0"
-                          >
-                            <input
-                              type="checkbox"
-                              className="h-4 w-4"
-                              checked={selected}
-                              onChange={(event) =>
-                                toggleSpawnAgentModel(
-                                  model.model,
-                                  event.target.checked,
-                                )
-                              }
-                            />
-                            <span className="truncate">{model.model}</span>
-                          </label>
-                        );
-                      })}
-                    </div>
-                  </div>
-                </div>
               </div>
             )}
 

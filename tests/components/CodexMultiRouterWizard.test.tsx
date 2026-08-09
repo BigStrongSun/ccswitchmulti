@@ -86,7 +86,8 @@ describe("CodexMultiRouterWizard", () => {
       />,
     );
 
-    expect(screen.getByText("这套向导会帮你完成 7 件事")).toBeInTheDocument();
+    expect(screen.getByText("这套向导会帮你完成 6 件事")).toBeInTheDocument();
+    expect(screen.queryByText("子 Agent 候选")).not.toBeInTheDocument();
     expect(screen.getByText(/你不用手动改配置文件/)).toBeInTheDocument();
     expect(
       screen.getByText(/技术备注：Codex 最后仍只连接本机/),
@@ -960,7 +961,7 @@ describe("CodexMultiRouterWizard", () => {
     expect(screen.getAllByText("db locked").length).toBeGreaterThan(0);
   });
 
-  it("saves renamed plan with curated catalog and ordered spawn agent models", async () => {
+  it("saves a renamed curated plan without requiring manual subagent selection", async () => {
     const onOpenChange = vi.fn();
     const source = provider({
       id: "relay",
@@ -998,14 +999,6 @@ describe("CodexMultiRouterWizard", () => {
     fireEvent.click(screen.getByLabelText("保留 model-b"));
     fireEvent.click(screen.getAllByTitle("上移")[1]);
 
-    fireEvent.click(screen.getByRole("button", { name: "子 Agent 候选" }));
-    fireEvent.click(screen.getByLabelText("model-c"));
-    fireEvent.click(screen.getByLabelText("model-a"));
-    const enabledMoveUp = screen
-      .getAllByTitle("上移")
-      .find((button) => !(button as HTMLButtonElement).disabled);
-    fireEvent.click(enabledMoveUp!);
-
     fireEvent.click(screen.getByRole("button", { name: "保存并发布" }));
     fireEvent.click(
       screen.getAllByRole("button", { name: "保存并发布" }).at(-1)!,
@@ -1022,8 +1015,8 @@ describe("CodexMultiRouterWizard", () => {
       ),
     ).toEqual(["model-c", "model-a"]);
     expect(savedProvider.settingsConfig.modelCatalog.spawnAgentModels).toEqual([
-      "model-a",
       "model-c",
+      "model-a",
     ]);
     expect(
       savedProvider.settingsConfig.codexRouting.routes[0].match.models,

@@ -2319,10 +2319,10 @@ fn codex_agent_description_for_model(model: &str) -> String {
         return "Low-cost Qwen worker for read-heavy exploration, summaries, and bounded helper tasks.".to_string();
     }
     if lower.contains("deepseek-v4-flash") {
-        return "DeepSeek V4 Flash worker for long-context code reading, architecture tracing, and implementation support.".to_string();
+        return "DeepSeek V4 Flash worker for long-context code reading, read-heavy exploration, architecture tracing, parallel evidence collection, and lightweight verification.".to_string();
     }
     if lower.contains("deepseek-v4-pro") {
-        return "DeepSeek V4 Pro worker for higher-depth debugging, review, and complex code changes.".to_string();
+        return "DeepSeek V4 Pro worker for complex debugging, cross-module reasoning, architecture decisions, high-risk review, and complex implementation.".to_string();
     }
     if lower.contains("codex-spark") || lower.contains("spark") {
         return "Codex Spark worker for fast, focused edits, formatting, and quick verification."
@@ -2436,7 +2436,7 @@ fn sync_codex_managed_agent_files(specs: &[CodexCatalogModelSpec]) -> Result<(),
 
     let mut seen_roles = HashSet::new();
     let mut desired_paths = HashSet::new();
-    for spec in specs.iter().take(5) {
+    for spec in specs {
         let base_role = codex_agent_role_name_for_model(&spec.model);
         if base_role.is_empty() {
             continue;
@@ -2462,7 +2462,7 @@ fn sync_codex_managed_agent_files(specs: &[CodexCatalogModelSpec]) -> Result<(),
     Ok(())
 }
 
-/// 删除已经不属于当前前五候选窗口的 CCSwitchMulti 托管 agent 文件。
+/// 删除已经不属于当前可路由模型目录的 CCSwitchMulti 托管 agent 文件。
 ///
 /// 只清理带托管标记的文件，用户手写 role、旧版未标记文件和其它扩展 agent 都保留。
 fn prune_stale_codex_managed_agent_files(
@@ -7189,26 +7189,34 @@ model_provider = "custom"
             ("deepseek-v4-pro", "DeepSeek V4 Pro", 1_000_000),
         ]
         .into_iter()
-        .map(|(model, display_name, context_window)| CodexCatalogModelSpec {
-            model: model.to_string(),
-            upstream_model: None,
-            display_name: display_name.to_string(),
-            context_window,
-            text_only: false,
-            is_default: false,
-            supports_parallel_tool_calls: None,
-            input_modalities: None,
-            base_instructions: None,
-        })
+        .map(
+            |(model, display_name, context_window)| CodexCatalogModelSpec {
+                model: model.to_string(),
+                upstream_model: None,
+                display_name: display_name.to_string(),
+                context_window,
+                text_only: false,
+                is_default: false,
+                supports_parallel_tool_calls: None,
+                input_modalities: None,
+                base_instructions: None,
+            },
+        )
         .collect::<Vec<_>>();
 
         sync_codex_managed_agent_files(&specs).expect("sync managed agents");
 
+        let mut reordered_specs = specs.clone();
+        reordered_specs.rotate_left(1);
+        sync_codex_managed_agent_files(&reordered_specs)
+            .expect("changing direct override order must not change managed roles");
+
         let agents_dir = get_codex_agents_dir();
         let flash = std::fs::read_to_string(agents_dir.join("deepseek-flash.toml"))
             .expect("Flash role should be generated from the full routable catalog");
-        let pro = std::fs::read_to_string(agents_dir.join("deepseek-pro.toml"))
-            .expect("Pro role should be generated even when it is outside the direct override top five");
+        let pro = std::fs::read_to_string(agents_dir.join("deepseek-pro.toml")).expect(
+            "Pro role should be generated even when it is outside the direct override top five",
+        );
 
         assert!(flash.contains(r#"name = "deepseek-flash""#));
         assert!(flash.contains(r#"model = "deepseek-v4-flash""#));

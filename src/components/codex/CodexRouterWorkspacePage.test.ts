@@ -1608,9 +1608,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     const advancedTrigger = screen.getByRole("button", {
       name: /高级：子 Agent 模型覆盖/,
     });
-    expect(
-      screen.queryByText("可拖拽排序的前五候选"),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByText("可拖拽排序的前五候选")).not.toBeInTheDocument();
     expect(
       screen.getByText(/V4 Pro\/Flash custom roles 会自动注册/),
     ).toBeInTheDocument();
@@ -1618,7 +1616,9 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     await userEvent.setup().click(advancedTrigger);
 
     expect(screen.getByText("可拖拽排序的前五候选")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "保存排序" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "保存排序" }),
+    ).toBeInTheDocument();
   });
 
   it("exposes a delete action for routing plans inside the workspace", async () => {

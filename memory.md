@@ -586,7 +586,7 @@
 
 - 完整实测报告见 `docs/guides/gpt-app-thread-subagent-mechanism-2026-07-10.md`。Windows 新桌面包为 `OpenAI.Codex`，实际运行链是 `ChatGPT.exe -> resources/codex.exe app-server -> code-mode/tool runtimes`；历史的原始事件在 `~/.codex/sessions/**/rollout-*.jsonl`，`state_5.sqlite` 提供 thread 元数据和 `thread_spawn_edges` 父子关系。修复历史必须离线备份并把 JSONL、SQLite 与子线程 edge 当成整体，不能只改轻量 `session_index.jsonl` 或伪造 `local_thread_catalog`。
 - 新版 multi-agent 的当前 live 保留工具契约为 `collaboration.spawn_agent(task_name, message, fork_turns)`；历史 v1 的 `model/reasoning_effort/service_tier` 与历史 v2 的可选 `agent_type` 绝不可重新硬编码。截图的 `reserved for use by this model and must match configured schema` 根因是旧 CCSwitchMulti 扩展了保留 schema；`ensure_codex_multi_agent_reserved_schema_compatible` 必须保持 `hide_spawn_agent_metadata=true`，子 Agent 模型改由 `~/.codex/agents/*.toml` role 选择。
-- 角色、模型、推理强度、provider 路由和 `spawnAgentModels` 前五候选是不同层。当前 Codex 内置角色为 `default/worker/explorer`；custom role 可 pin `model`/`model_reasoning_effort`，缺省继承父会话。前五候选仅影响 picker/CCSwitchMulti role 投影，不改实际路由或服务端最终调度。本机 5.6 已进总目录且有历史子线程使用；没有出现在特定候选卡片是旧人工前五被保留，需手动排进前五保存。
+- 角色、模型、推理强度、provider 路由和 `spawnAgentModels` 前五 direct override 是不同层。custom role 可 pin `model`/`model_provider`/`model_reasoning_effort`，缺省继承父会话。前五仅影响 `spawn_agent.model` 描述窗口，不控制 CCSwitchMulti managed role 投影；managed roles 必须从完整可路由目录生成。
 - 官方依据：`https://learn.chatgpt.com/docs/agent-configuration/subagents`、`https://learn.chatgpt.com/docs/app-server`。本机当前 config 为 `agents.max_threads=10`、`max_depth=1`；实际运行并发还需取产品会话资源上限与该配置的最小值。写密集任务仍需串行或 worktree 隔离，独立 Agent thread 不等于自动独立文件系统。
 
 ## 2026-07-10 MultiRouter 长模型摘要换行
@@ -1036,7 +1036,7 @@
 ## 2026-07-01 Codex MultiRouter Wizard Catalog Curation Flow
 
 - Codex 单 provider 表单 `CodexFormFields` 的模型映射表第一列语义是“保留这个模型进入该 provider 的 modelCatalog”，不是子 Agent 候选。取消勾选会删除该模型行；上下箭头移动的是 catalog 行顺序。不要再在单 provider 获取 `/models` 后自动写 `spawnAgentModels` 前 5 个。
-- MultiRouter 设置向导的正确顺序是：模型源 -> MultiRouter 命名 -> 配置检查 -> 获取/测试模型 -> 重名别名 -> 汇总模型排序/剔除 -> 路由预览 -> 子 Agent 候选排序 -> 保存发布。最终汇总页决定 `modelCatalog.models` 和 route `match.models` 保留哪些模型；子 Agent 页只从最终保留模型中选择最多 5 个并写入 `modelCatalog.spawnAgentModels`。
+- MultiRouter 设置向导的正确顺序是：模型源 -> MultiRouter 命名 -> 配置检查 -> 获取/测试模型 -> 重名别名 -> 汇总模型排序/剔除 -> 路由预览 -> 保存发布。最终汇总页决定 `modelCatalog.models` 和 route `match.models` 保留哪些模型；`spawnAgentModels` 兼容编辑器留在 RoutesTab 的折叠高级设置中，不再作为主向导必经步骤。
 - `buildCodexMultiRouterWizardPlan` 支持可选 `planName`、`catalogModelOrder`、`spawnAgentModels`。传入 `catalogModelOrder` 时必须同时过滤 routes 和 final catalog，避免 UI 剔除模型但路由仍命中；传入 `spawnAgentModels` 时要过滤掉已剔除模型并限制最多 5 个。
 - MultiRouter 向导进入“获取模型列表”步骤后必须逐个普通 Codex provider 重新调用 `/models`，不能因为已有 `modelCatalog` 自动跳过。每个 provider 卡片要显示读取中、成功有更新、成功无更新、跳过或失败状态；失败文案统一为“获取模型列表失败，请检查当前 provider 配置”，并同时进入向导问题面板。刷新后要保留“整理模型”里用户已取消/保留的勾选，只追加新增模型；`displayName` 缺省和显式等于模型 ID 在更新判断里等价，不应误报“有模型列表更新”。卡片点击应关闭向导并打开对应 provider 配置页。
 - 普通 Codex provider 保存后需要同步引用它的已保存 MultiRouter 方案：route `match.models`、route `upstream.modelMap`、聚合 `modelCatalog.models` 和 `spawnAgentModels` 都要从 provider 最新 `modelCatalog` 重建。但同步时必须保留已保存 route 的可见别名和 `modelMap`，只用目标 provider 的最新目录补上下文、多模态等能力字段；不能直接用目标 provider 原始模型名覆盖 route，否则官方源和第三方中转暴露同名上游模型时会丢失路由区分。若同步导致 `spawnAgentModels` 中的模型被删除，只剪枝旧候选并提示用户点“处理”进入对应 MultiRouter routes 页人工补选，不要自动按 catalog 前 5 个补齐。
@@ -1546,7 +1546,7 @@
 
 - 新增用户向说明书 `docs/guides/codex-multirouter-guide-zh.md`，定位为把 Codex Desktop 登录、CCSwitchMulti OAuth 授权、第三方模型源、本地路由映射、MultiRouter 工作台、子 Agent 前 5 候选排序、路由启动、Debug 检查、Codex 重启和历史修复串成完整流程的中文 Markdown。
 - 文档只引用仓库已有真实截图：`docs/images/codex-official-auth-preservation/01-codex-app-enhancement-setting.png`、`docs/images/codex-deepseek-routing/01-codex-providers-require-routing.png`、`02-deepseek-codex-routing-form.png`、`03-local-route-codex-takeover.png`。MultiRouter 工作台、子 Agent 排序、状态 Debug、会话管理历史修复等新页面尚无真实截图，文档末尾列出待补路径，后续应补真实 UI 截图，不要伪造。
-- 使用规则固化：先登录 Codex Desktop，再在 CCSwitchMulti `设置 → 认证` 完成 ChatGPT/Codex OAuth；额外模型源如 DeepSeek/GLM/本地模型通常要开启 `需要本地路由映射`，在高级选项 `模型映射` 中点击 `获取模型列表` 并配置上下文窗口；MultiRouter 的 `子 Agent 候选模型` 必须手动把目标模型排入前 5 并 `保存排序`；保存/切换/模型目录变化后必须完全退出并重启 Codex Desktop。
+- 使用规则固化：先登录 Codex Desktop，再在 CCSwitchMulti `设置 → 认证` 完成 ChatGPT/Codex OAuth；额外模型源如 DeepSeek/GLM/本地模型通常要开启 `需要本地路由映射`，在高级选项 `模型映射` 中点击 `获取模型列表` 并配置上下文窗口；V4 Pro/Flash managed roles 自动从完整可路由目录注册，只有 direct model override 展示排序需要手工展开高级设置；保存/切换/模型目录变化后必须完全退出并重启 Codex Desktop。
 - 历史修复说明保持当前产品边界：历史入口在右上角时钟/会话管理页的 `Codex 历史修复`，流程是 `加载历史`、按需全选当前页、`预览修复`、确认计数后 `确认写入`，完成后再次重启 Codex。该功能修复 provider bucket 可见性，不应表述为会话正文丢失修复。
 - 主 `README.md` 前部的 CCSwitchMulti 分支说明后新增 `Codex 多路由配置说明书` 小节，直接链接 `docs/guides/codex-multirouter-guide-zh.md`，让首次配置用户先读完整流程而不是只看功能截图。
 - 2026-06-22 用户补齐 MultiRouter 教程真实 UI 截图，稳定保存到 `docs/images/codex-multirouter/`：`01-settings-auth-oauth.png`、`02-add-provider-entry.png`、`03-configure-provider-local-routing.png`、`04-fetch-models-context-window.png`、`05-multirouter-entry.png`、`06-create-multirouter.png`、`07-configure-route-rules.png`、`08-save-route-rules.png`、`09-subagent-model-order.png`、`10-enable-routing-settings.png`、`11-debug-entry.png`、`12-13-history-repair-panel.png`、`13-codex-model-picker-validation.png`。这些图对应用户指定的 1-13 步及重启后 Codex 模型候选验证，不要再把这些场景列为待补截图。
@@ -2586,7 +2586,7 @@
 
 - 用户截图中的错误 `Invalid Value: 'tools'. Function 'collaboration.spawn_agent' is reserved for use by this model and must match the configured schema.` 指向新版 GPT/Codex 后端对保留工具名的 schema 校验变严格；本机 live `~/.codex/config.toml` 当时存在 `[features.multi_agent_v2] hide_spawn_agent_metadata = false`，会让 Codex 给 `collaboration.spawn_agent` 追加 `model`、`reasoning_effort`、`service_tier` 等 metadata 字段，从而和新版模型的保留 schema 不一致。
 - 旧修复思路是为了让 `spawn_agent` 参数里可直接覆盖模型；新版路径已经有 `~/.codex/agents/*.toml` custom agent role 文件承载子 Agent 的 `model`、`model_provider`、`model_reasoning_effort`，因此不应再通过扩展保留函数 schema 选择模型。
-- `src-tauri/src/codex_config.rs` 的 Codex catalog/config 投影改为 `ensure_codex_multi_agent_reserved_schema_compatible`：保留用户原本 `multi_agent_v2` 启用状态，但写入 `hide_spawn_agent_metadata = true`，让 `collaboration.spawn_agent` 回到官方保留工具形态；文档 `docs/codex-spawn-agent-model-candidates.md` 同步说明子模型选择走 managed role 文件。
+- `src-tauri/src/codex_config.rs` 的 Codex catalog/config 投影使用 `ensure_codex_multi_agent_reserved_schema_compatible`：保留用户原本 `multi_agent_v2` 启用状态并写入 `hide_spawn_agent_metadata = true`。本机 `0.147.0-alpha.6.5` 实测仍暴露 `agent_type`、`model`、`reasoning_effort`，只隐藏 `service_tier`；默认自动选型走 managed custom roles。
 - 现场快速恢复可以把 `~/.codex/config.toml` 里的 `[features.multi_agent_v2] hide_spawn_agent_metadata = false` 改为 `true` 后重启 Codex/GPT app；长期修复依赖新版 CCSwitchMulti 重新投影配置。
 
 ## 2026-07-17 MultiRouter spawn_agent 保留 schema 二次根因
@@ -3055,3 +3055,14 @@
 - `v3.19.1-12..v3.19.1-14` 的 `codex_config.rs` 完全一致；`forwarder.rs` 只在 V2 明文化逻辑前新增 LM Studio `text.format` 归一化，V2 明文化、第三方 `agent_message` 投影和 ownership 判断本身没有变化。当前 `v3.19.1-14` 源码定向回归为 `codex_multi_agent 5/5`、mixed-router plaintext 1/1、third-party projection ownership 1/1、materialized official policy 1/1，合计 8/8，通过时仅有既存 `openai_cache_read_tokens` warning。
 - 结论：本机无法复现“V2 子 Agent 整体不可用”；官方同源 spawn/follow-up 与 OpenAI 父模型到 DeepSeek 子模型都可用。可复现的两个局部问题是 Qwen 服务端 HTTP 521，以及直接动态模型覆盖只暴露 Sol/Terra。若外部用户反馈的是 DeepSeek/profile 路径，仍需对方提供 Codex 版本、实际 child model/provider、错误文本和 child rollout 形态才能与本机差异对齐。
 - 上游交叉验证：`openai/codex#34833`、`#33551`、`#35932`、`#32705`、`#32988`、`#33314` 截至本轮仍为 open；`#32749`（暴露 V2 model overrides）已 merged。Codex 内置搜索与 GitHub 官方 API/CLI 结论一致；Matrix WebSearch 与本机 Qwen 共用的 Matrix 服务本轮均返回 HTTP 521，因此 Matrix 没有提供第二份正证据。
+
+# 2026-08-09 Multi-Agent V2 第三方子 Agent 自动选型根修
+
+- Codex V2 的 `model` direct override 与 `agent_type` custom role 是两条独立选择路径。`spawnAgentModels` 只负责 direct override 工具描述中的前 5 个展示顺序；默认“用户不选模型，由 Codex 按任务选择 Flash/Pro”必须通过带互斥 `description` 的 managed custom roles 实现。
+- 直接根因位于 `src-tauri/src/codex_config.rs::sync_codex_managed_agent_files`：旧实现 `specs.iter().take(5)` 把 managed role 注册错误耦合到 direct override 前五窗口。本机目录中 `deepseek-v4-pro` 排第 6，因此没有 `deepseek-pro.toml`。修复后遍历完整当前可路由 catalog；stale prune 的 desired set 同样来自完整目录，不会再因模型掉出前五删除有效 role。
+- `deepseek-flash` 固定 `deepseek-v4-flash`、`codex_model_router_v2` 和 medium reasoning，用于长上下文阅读、read-heavy exploration、架构追踪、并行证据收集和轻量验证；`deepseek-pro` 固定 `deepseek-v4-pro`、同一 provider 和 high reasoning，用于复杂调试、跨模块推理、架构决策、高风险审查和复杂实现。用户同名 role 继续保留，CCSwitchMulti 回退写入 `ccswitch-<role>`。
+- MultiRouter 主向导已删除“子 Agent 候选”必经步骤；既有 `modelCatalog.spawnAgentModels` 继续读取、过滤和保存，RoutesTab 编辑器改为默认折叠的 `高级：子 Agent 模型覆盖`，明确其只控制 direct override 排序。Qwen 行为、`hide_spawn_agent_metadata=true`、混合路由 `tool_namespace=agents` 和 proxy 请求参数均未改变。
+- TDD RED 提交 `9dc9c68f`：Rust 因第 6 位 Pro role 文件不存在而失败，前端分别因旧向导步骤仍存在和工作台没有高级折叠入口而失败。GREEN 定向结果为 managed agent 4/4、direct override priority 1/1、前端 workspace/wizard 49/49；完整 Rust library 为 2831/2831，完整前端在排除 `.worktrees/**` 后为 113 files / 820 tests，`cargo check --lib`、typecheck、rustfmt 和 `git diff --check` 通过。全仓 `pnpm format:check` 仍只报告本次未修改的 `src/lib/api/proxy.ts` 与 `src/types/proxy.ts` 两个既有格式差异。
+- 当前 Codex `0.147.0-alpha.6.5` 选择 custom role 时需 `fork_turns=none` 或正整数；`rust-v0.148.0-alpha.1` 起上游 PR `#37252` 允许 role 应用于 full-history fork。CCSwitchMulti 不固定改写 `fork_turns`，由各版本 Codex 的工具描述指导父模型。`hide_spawn_agent_metadata=true` 在当前版本只隐藏 `service_tier`，仍保留 `agent_type`、`model` 和 `reasoning_effort`。
+- Vitest 必须显式 `--exclude ".worktrees/**"`：仓库内旧 worktree 会被默认 glob 扫描并加载不同 React 实例，导致 `Invalid hook call / useState null` 的假失败；不能用业务补丁规避测试发现污染。
+- 联网复核使用 Codex 内置搜索交叉验证 OpenAI 官方 Subagents 文档、当前 `multi_agents_spec.rs` 和 PR `#37252`。Matrix WebSearch 按独立链路重试仍返回 HTTP 521，没有提供第二条正证据；版本和机制结论以官方一手来源、本机运行态与当前源码为依据。
