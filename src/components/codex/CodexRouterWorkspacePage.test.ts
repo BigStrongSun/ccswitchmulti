@@ -1669,6 +1669,37 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     ).toBeInTheDocument();
   });
 
+  it("shows a missing V2 role model without hiding the routable role", () => {
+    const source: Provider = {
+      id: "codex-deepseek-flash-only",
+      name: "DeepSeek Flash only",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: {
+          models: [{ model: "deepseek-v4-flash" }],
+        },
+      },
+    };
+    const plan = createDraftRoutingPlan([source], [source]);
+
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [source, plan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: plan.id,
+        initialProviderId: plan.id,
+        initialTab: "routes",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+
+    expect(screen.getByText("可路由")).toBeInTheDocument();
+    expect(screen.getByText("目录中缺失")).toBeInTheDocument();
+  });
+
   it("exposes a delete action for routing plans inside the workspace", async () => {
     const source: Provider = {
       id: "codex-qwen",

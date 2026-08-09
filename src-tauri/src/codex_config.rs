@@ -7169,6 +7169,30 @@ base_url = "http://127.0.0.1:15721/v1"
 
     #[test]
     #[serial]
+    fn managed_oauth_only_router_projects_selected_subagent_v1() {
+        let _guard = TestHomeGuard::new();
+        let models = prepared_router_catalog_models(&json!({
+            "modelCatalog": {
+                "models": [{ "model": "gpt-5.5", "displayName": "GPT-5.5" }]
+            },
+            "codexRouting": {
+                "enabled": true,
+                "subagentVersion": "v1",
+                "routes": [{
+                    "id": "official",
+                    "match": { "models": ["gpt-5.5"] },
+                    "upstream": { "auth": { "source": "managed_codex_oauth" } }
+                }]
+            }
+        }));
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0]["multi_agent_version"], "v1");
+        assert_eq!(models[0]["multiAgentVersion"], "v1");
+    }
+
+    #[test]
+    #[serial]
     fn every_official_auth_source_preserves_multi_agent_v2() {
         for source in [
             "native_codex_auth",
