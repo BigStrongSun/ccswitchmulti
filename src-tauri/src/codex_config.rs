@@ -7178,6 +7178,58 @@ model_provider = "custom"
 
     #[test]
     #[serial]
+    fn managed_agent_files_include_deepseek_roles_beyond_direct_override_window() {
+        let _guard = TestHomeGuard::new();
+        let specs = [
+            ("deepseek-v4-flash", "DeepSeek V4 Flash", 1_000_000),
+            ("gpt-5.6-sol", "GPT-5.6 Sol", 400_000),
+            ("qwen3.6", "Qwen 3.6", 262_144),
+            ("gpt-5.6-luna", "GPT-5.6 Luna", 400_000),
+            ("gpt-5.6-terra", "GPT-5.6 Terra", 400_000),
+            ("deepseek-v4-pro", "DeepSeek V4 Pro", 1_000_000),
+        ]
+        .into_iter()
+        .map(|(model, display_name, context_window)| CodexCatalogModelSpec {
+            model: model.to_string(),
+            upstream_model: None,
+            display_name: display_name.to_string(),
+            context_window,
+            text_only: false,
+            is_default: false,
+            supports_parallel_tool_calls: None,
+            input_modalities: None,
+            base_instructions: None,
+        })
+        .collect::<Vec<_>>();
+
+        sync_codex_managed_agent_files(&specs).expect("sync managed agents");
+
+        let agents_dir = get_codex_agents_dir();
+        let flash = std::fs::read_to_string(agents_dir.join("deepseek-flash.toml"))
+            .expect("Flash role should be generated from the full routable catalog");
+        let pro = std::fs::read_to_string(agents_dir.join("deepseek-pro.toml"))
+            .expect("Pro role should be generated even when it is outside the direct override top five");
+
+        assert!(flash.contains(r#"name = "deepseek-flash""#));
+        assert!(flash.contains(r#"model = "deepseek-v4-flash""#));
+        assert!(flash.contains(r#"model_provider = "codex_model_router_v2""#));
+        assert!(flash.contains(r#"model_reasoning_effort = "medium""#));
+        assert!(flash.contains("read-heavy exploration"));
+        assert!(flash.contains("lightweight verification"));
+        assert!(!flash.contains("architecture decisions"));
+
+        assert!(pro.contains(r#"name = "deepseek-pro""#));
+        assert!(pro.contains(r#"model = "deepseek-v4-pro""#));
+        assert!(pro.contains(r#"model_provider = "codex_model_router_v2""#));
+        assert!(pro.contains(r#"model_reasoning_effort = "high""#));
+        assert!(pro.contains("cross-module reasoning"));
+        assert!(pro.contains("architecture decisions"));
+        assert!(pro.contains("complex implementation"));
+        assert!(!pro.contains("routine scanning"));
+    }
+
+    #[test]
+    #[serial]
     fn managed_agent_files_prune_stale_cc_switch_roles() {
         let _guard = TestHomeGuard::new();
         let agents_dir = get_codex_agents_dir();

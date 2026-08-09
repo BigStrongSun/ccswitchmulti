@@ -1575,6 +1575,52 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     );
   });
 
+  it("keeps direct subagent model overrides collapsed as an advanced setting", async () => {
+    const source: Provider = {
+      id: "codex-deepseek",
+      name: "DeepSeek",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: {
+          models: [
+            { model: "deepseek-v4-flash" },
+            { model: "deepseek-v4-pro" },
+          ],
+        },
+      },
+    };
+    const plan = createDraftRoutingPlan([source], [source]);
+
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [source, plan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: plan.id,
+        initialProviderId: plan.id,
+        initialTab: "routes",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+
+    const advancedTrigger = screen.getByRole("button", {
+      name: /高级：子 Agent 模型覆盖/,
+    });
+    expect(
+      screen.queryByText("可拖拽排序的前五候选"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/V4 Pro\/Flash custom roles 会自动注册/),
+    ).toBeInTheDocument();
+
+    await userEvent.setup().click(advancedTrigger);
+
+    expect(screen.getByText("可拖拽排序的前五候选")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "保存排序" })).toBeInTheDocument();
+  });
+
   it("exposes a delete action for routing plans inside the workspace", async () => {
     const source: Provider = {
       id: "codex-qwen",
