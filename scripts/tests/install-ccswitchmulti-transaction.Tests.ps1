@@ -92,6 +92,14 @@ function New-FakeOperations {
         GetProcessIdentity = {
             param($ProcessId)
             $script:checks.Add("process-identity:$ProcessId") | Out-Null
+            if ($ProcessId -eq $script:newPid) {
+                if ($script:newProcessPath -eq "__missing__") { throw "injected process not found" }
+                return @{
+                    ProcessId = $script:newPid
+                    Path = $script:newProcessPath
+                    StartTime = "2026-08-09T08:10:00.0000000Z"
+                }
+            }
             if ($ProcessId -eq 4242) {
                 return @{
                     ProcessId = 4242
@@ -146,6 +154,15 @@ function New-FakeOperations {
                 throw "attempted to stop a changed process identity"
             }
             $script:events.Add("stop:$ProcessId") | Out-Null
+        }
+        StopVerifiedProcess = {
+            param($Context, $ExpectedIdentity)
+            $processId = [int]$ExpectedIdentity.ProcessId
+            if ($processId -eq 4242 -and $script:identityChanged) {
+                $script:events.Add("unsafe-stop:$processId") | Out-Null
+                throw "attempted to stop a changed process identity"
+            }
+            $script:events.Add("stop:$processId") | Out-Null
         }
         WaitPortReleased = {
             param($Context)
@@ -217,6 +234,7 @@ function New-FakeOperations {
         RestoreAppAndConfig = {
             param($Context, $Backup)
             $script:events.Add("restore-app-config") | Out-Null
+            if ($script:failAt -contains "restore") { throw "injected restore failure" }
             $script:installedNew = $false
         }
         DeleteRegistryKey = {
@@ -247,7 +265,7 @@ function Assert-PreflightRejectsWithoutMutation {
     $operations = New-FakeOperations
     { Invoke-CcsmReinstallTransaction -Spec $Spec -Operations $operations -Simulation } | Should Throw $Message
     ($script:events -contains "backup") | Should Be $false
-    (($script:events | Where-Object { $_ -like "stop:*" -or $_ -like "unsafe-stop:*" }).Count) | Should Be 0
+    (@($script:events | Where-Object { $_ -like "stop:*" -or $_ -like "unsafe-stop:*" }).Count) | Should Be 0
 }
 
 function Assert-TamperedBackupFailsClosed {
@@ -258,7 +276,7 @@ function Assert-TamperedBackupFailsClosed {
 
     $result.Status | Should Be "RollbackFailed"
     ($script:events -contains "validate-backup:$Tamper") | Should Be $true
-    (($script:events | Where-Object { $_ -like "destructive:*" }).Count) | Should Be 0
+    (@($script:events | Where-Object { $_ -like "destructive:*" }).Count) | Should Be 0
     ($script:events -contains "start:previous") | Should Be $true
     ($script:events -contains "wait-ready:6000") | Should Be $true
 }
@@ -277,8 +295,13 @@ Describe "CCSwitchMulti transactional reinstall orchestration" {
     It "exposes a non-mutating plan with the complete transaction and rollback boundary" {
         $plan = Get-CcsmReinstallPlan
 
-        ($plan.Forward -join ",") | Should Be "preflight,backup,stop-verified-pid,wait-port-release,uninstall-silent,install-silent,start-hidden,wait-listener-health,verify-version-hash-path"
+        ($plan.Forward -join ",") | Should Be "preflight,backup,stop-verified-pid,wait-port-release,quiescent-config-snapshot,uninstall-silent,install-silent,start-hidden,wait-listener-health,verify-version-hash-path"
         ($plan.Rollback -join ",") | Should Be "verify-and-stop-new-process,restore-app-config-registry,start-previous-hidden,wait-listener-health,verify-previous-runtime"
+    }
+
+    It "rejects a dot-dot backup path that only appears to be inside the transaction root" {
+        Test-CcsmPathInside -Candidate "D:\ccsm-transaction-backups\txn-1\..\outside" `
+            -Parent "D:\ccsm-transaction-backups\txn-1" | Should Be $false
     }
 
     It "runs every guard before the first mutating operation" {
@@ -297,7 +320,7 @@ Describe "CCSwitchMulti transactional reinstall orchestration" {
         ($script:checks -contains "hash:C:\artifacts\CCSwitchMulti-new-setup.exe") | Should Be $true
         ($script:checks -contains "hash:C:\Program Files\CCSwitchMulti\cc-switch.exe") | Should Be $true
         ($script:checks -contains "version:C:\Program Files\CCSwitchMulti\cc-switch.exe") | Should Be $true
-        ($script:checks -contains "process-path:4242") | Should Be $true
+        ($script:checks -contains "process-identity:4242") | Should Be $true
         ($script:checks -contains "listener:15721") | Should Be $true
     }
 
@@ -307,7 +330,7 @@ Describe "CCSwitchMulti transactional reinstall orchestration" {
         { Invoke-CcsmReinstallTransaction -Spec (New-TestSpec) -Operations $operations -Simulation } |
             Should Throw "listener owner mismatch"
         ($script:events -contains "backup") | Should Be $false
-        (($script:events | Where-Object { $_ -like "stop:*" }).Count) | Should Be 0
+        (@($script:events | Where-Object { $_ -like "stop:*" }).Count) | Should Be 0
     }
 
     It "rejects unsafe backup inputs before mutation" {
@@ -331,7 +354,7 @@ Describe "CCSwitchMulti transactional reinstall orchestration" {
         $result = Invoke-CcsmReinstallTransaction -Spec (New-TestSpec) -Operations $operations -Simulation
         $mutations = @($script:events | Where-Object { $_ -notlike "log:*" })
 
-        ($mutations -join ",") | Should Be "backup,stop:4242,wait-port-release,uninstall,install,start:new,wait-ready:5000"
+        ($mutations -join ",") | Should Be "backup,stop:4242,wait-port-release,snapshot-config,verify-config-snapshot,uninstall,install,start:new,wait-ready:5000"
         ($script:checks -contains "process-path:5000") | Should Be $true
         ($script:checks -contains "health:http://127.0.0.1:15721/health") | Should Be $true
         $result.NewPid | Should Be 5000
@@ -343,8 +366,8 @@ Describe "CCSwitchMulti transactional reinstall orchestration" {
         $mutations = @($script:events | Where-Object { $_ -notlike "log:*" })
 
         $result.Status | Should Be "RolledBack"
-        ($mutations -join ",") | Should Be "backup,stop:4242,wait-port-release,uninstall,install,start:new,wait-ready:5000,stop:5000,restore,start:previous,wait-ready:6000"
-        ($script:checks -contains "process-path:5000") | Should Be $true
+        ($mutations -join ",") | Should Be "backup,stop:4242,wait-port-release,snapshot-config,verify-config-snapshot,uninstall,install,start:new,wait-ready:5000,stop:5000,validate-backup:,restore-app-config,registry-delete:HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\CCSwitchMulti,registry-import,registry-verify,verify-restored-state,start:previous,wait-ready:6000"
+        ($script:checks -contains "process-identity:5000") | Should Be $true
         ($script:checks -contains "process-path:6000") | Should Be $true
     }
 
@@ -354,7 +377,7 @@ Describe "CCSwitchMulti transactional reinstall orchestration" {
 
         $result.Status | Should Be "RolledBack"
         ($script:events -contains "stop:5000") | Should Be $false
-        ($script:events -contains "restore") | Should Be $true
+        ($script:events -contains "restore-app-config") | Should Be $true
     }
 
     It "reports rollback failure explicitly after attempting restore and restart" {
@@ -362,7 +385,7 @@ Describe "CCSwitchMulti transactional reinstall orchestration" {
         $result = Invoke-CcsmReinstallTransaction -Spec (New-TestSpec) -Operations $operations -Simulation
 
         $result.Status | Should Be "RollbackFailed"
-        ($script:events -contains "restore") | Should Be $true
+        ($script:events -contains "restore-app-config") | Should Be $true
         ($script:events -contains "start:previous") | Should Be $true
         $result.RollbackError | Should Match "rollback start failure"
     }
@@ -372,7 +395,7 @@ Describe "CCSwitchMulti transactional reinstall orchestration" {
         $result = Invoke-CcsmReinstallTransaction -Spec (New-TestSpec) -Operations $operations -Simulation
 
         $result.Status | Should Be "RolledBack"
-        ($script:events -contains "restore") | Should Be $true
+        ($script:events -contains "restore-app-config") | Should Be $true
         ($script:events -contains "start:previous") | Should Be $true
     }
 
@@ -381,7 +404,7 @@ Describe "CCSwitchMulti transactional reinstall orchestration" {
         $result = Invoke-CcsmReinstallTransaction -Spec (New-TestSpec) -Operations $operations -Simulation
 
         $result.Status | Should Be "RollbackFailed"
-        ($script:events -contains "restore") | Should Be $true
+        ($script:events -contains "restore-app-config") | Should Be $true
         ($script:events -contains "start:previous") | Should Be $true
         ($script:events -contains "wait-ready:6000") | Should Be $true
         $result.RollbackError | Should Match "restore failure"
@@ -392,7 +415,7 @@ Describe "CCSwitchMulti transactional reinstall orchestration" {
 
         { Invoke-CcsmReinstallTransaction -Spec (New-TestSpec) -Operations $operations -Simulation } |
             Should Throw "injected backup failure"
-        ($script:events -contains "restore") | Should Be $false
+        ($script:events -contains "restore-app-config") | Should Be $false
         ($script:events -contains "start:previous") | Should Be $false
     }
 
@@ -409,7 +432,7 @@ Describe "CCSwitchMulti transactional reinstall orchestration" {
         $result = Invoke-CcsmReinstallTransaction -Spec (New-TestSpec) -Operations $operations -Simulation
 
         $result.Status | Should Be "RollbackFailed"
-        ($script:events -contains "restore") | Should Be $true
+        ($script:events -contains "restore-app-config") | Should Be $true
         ($script:events -contains "start:previous") | Should Be $true
         ($script:events -contains "wait-ready:6000") | Should Be $true
         ($script:checks -contains "process-path:6000") | Should Be $true
@@ -420,7 +443,7 @@ Describe "CCSwitchMulti transactional reinstall orchestration" {
         $result = Invoke-CcsmReinstallTransaction -Spec (New-TestSpec) -Operations $operations -Simulation
 
         $result.Status | Should Be "RollbackFailed"
-        ($script:events -contains "restore") | Should Be $true
+        ($script:events -contains "restore-app-config") | Should Be $true
         ($script:events -contains "start:previous") | Should Be $true
         ($script:events -contains "wait-ready:6000") | Should Be $true
         ($script:checks -contains "process-path:6000") | Should Be $true
@@ -431,7 +454,7 @@ Describe "CCSwitchMulti transactional reinstall orchestration" {
         $result = Invoke-CcsmReinstallTransaction -Spec (New-TestSpec) -Operations $operations -Simulation
 
         $result.Status | Should Be "RollbackFailed"
-        ($script:events -contains "restore") | Should Be $true
+        ($script:events -contains "restore-app-config") | Should Be $true
         ($script:events -contains "start:previous") | Should Be $true
         ($script:events -contains "wait-ready:6000") | Should Be $true
         ($script:checks -contains "process-path:6000") | Should Be $true
@@ -442,7 +465,7 @@ Describe "CCSwitchMulti transactional reinstall orchestration" {
         $result = Invoke-CcsmReinstallTransaction -Spec (New-TestSpec) -Operations $operations -Simulation
 
         $result.Status | Should Be "RollbackFailed"
-        ($script:events -contains "restore") | Should Be $true
+        ($script:events -contains "restore-app-config") | Should Be $true
         ($script:events -contains "start:previous") | Should Be $true
         ($script:events -contains "wait-ready:6000") | Should Be $true
         ($script:checks -contains "process-path:6000") | Should Be $true
@@ -453,9 +476,9 @@ Describe "CCSwitchMulti transactional reinstall orchestration" {
         $result = Invoke-CcsmReinstallTransaction -Spec (New-TestSpec) -Operations $operations -Simulation
 
         $result.Status | Should Be "RolledBack"
-        (($script:events | Where-Object { $_ -like "unsafe-stop:*" }).Count) | Should Be 0
-        (($script:checks | Where-Object { $_ -eq "process-identity:4242" }).Count) | Should BeGreaterThan 1
-        ($script:events -contains "restore") | Should Be $true
+        (@($script:events | Where-Object { $_ -like "unsafe-stop:*" }).Count) | Should Be 0
+        (@($script:checks | Where-Object { $_ -eq "process-identity:4242" }).Count) | Should BeGreaterThan 1
+        ($script:events -contains "restore-app-config") | Should Be $true
         ($script:events -contains "start:previous") | Should Be $true
         ($script:events -contains "wait-ready:6000") | Should Be $true
         ($script:checks -contains "process-path:6000") | Should Be $true
@@ -467,7 +490,7 @@ Describe "CCSwitchMulti transactional reinstall orchestration" {
         { Invoke-CcsmReinstallTransaction -Spec (New-TestSpec) -Operations $operations -Simulation } |
             Should Throw "preflight health verification failed"
         ($script:events -contains "backup") | Should Be $false
-        (($script:events | Where-Object { $_ -like "stop:*" -or $_ -like "unsafe-stop:*" }).Count) | Should Be 0
+        (@($script:events | Where-Object { $_ -like "stop:*" -or $_ -like "unsafe-stop:*" }).Count) | Should Be 0
     }
 
     It "rejects a volume-root config before mutation" {

@@ -20,6 +20,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
+
+$script:CcsmUninstallRegistryKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\CCSwitchMulti"
 
 function Get-CcsmReinstallPlan {
     [CmdletBinding()]
@@ -31,6 +34,7 @@ function Get-CcsmReinstallPlan {
             "backup",
             "stop-verified-pid",
             "wait-port-release",
+            "quiescent-config-snapshot",
             "uninstall-silent",
             "install-silent",
             "start-hidden",
@@ -47,19 +51,26 @@ function Get-CcsmReinstallPlan {
     }
 }
 
+function ConvertTo-CcsmCanonicalPath {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { throw "path must not be empty" }
+    return [System.IO.Path]::GetFullPath($Path).TrimEnd([char[]]@([char]92, [char]47))
+}
+
 function Test-CcsmSamePath {
     param([string]$Left, [string]$Right)
 
-    $leftPath = $Left.TrimEnd([char[]]@([char]92, [char]47))
-    $rightPath = $Right.TrimEnd([char[]]@([char]92, [char]47))
+    $leftPath = ConvertTo-CcsmCanonicalPath -Path $Left
+    $rightPath = ConvertTo-CcsmCanonicalPath -Path $Right
     return [string]::Equals($leftPath, $rightPath, [System.StringComparison]::OrdinalIgnoreCase)
 }
 
 function Test-CcsmPathInside {
     param([string]$Candidate, [string]$Parent)
 
-    $candidatePath = $Candidate.TrimEnd([char[]]@([char]92, [char]47))
-    $parentPath = $Parent.TrimEnd([char[]]@([char]92, [char]47))
+    $candidatePath = ConvertTo-CcsmCanonicalPath -Path $Candidate
+    $parentPath = ConvertTo-CcsmCanonicalPath -Path $Parent
     if (Test-CcsmSamePath -Left $candidatePath -Right $parentPath) {
         return $true
     }
@@ -89,8 +100,72 @@ function Assert-CcsmHash {
 function Assert-CcsmRegistryKey {
     param([string]$Key)
 
-    if ($Key -notmatch '^(HKCU|HKLM):\\[^\\]+\\.+$') {
-        throw "registry key must be a non-root HKCU or HKLM subkey: $Key"
+    if (-not [string]::Equals($Key, $script:CcsmUninstallRegistryKey, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "registry key must be the exact CCSwitchMulti uninstall key: $script:CcsmUninstallRegistryKey"
+    }
+}
+
+function Test-CcsmStrictDescendant {
+    param([string]$Candidate, [string]$Parent)
+
+    return (Test-CcsmPathInside -Candidate $Candidate -Parent $Parent) -and
+        -not (Test-CcsmSamePath -Left $Candidate -Right $Parent)
+}
+
+function Assert-CcsmProductInstallBoundary {
+    param(
+        [string]$InstallDirectory,
+        [string]$InstalledExecutable,
+        [string]$UninstallExecutable
+    )
+
+    $root = [System.IO.Path]::GetPathRoot($InstallDirectory)
+    $parent = Split-Path -Parent $InstallDirectory
+    if ((Test-CcsmSamePath -Left $InstallDirectory -Right $root) -or
+        (Test-CcsmSamePath -Left $parent -Right $root)) {
+        throw "install directory is too broad for transactional restore: $InstallDirectory"
+    }
+    if (-not [string]::Equals((Split-Path -Leaf $InstallDirectory), "CCSwitchMulti", [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "install directory must be the product-owned CCSwitchMulti directory"
+    }
+    if (-not (Test-CcsmSamePath -Left (Split-Path -Parent $InstalledExecutable) -Right $InstallDirectory) -or
+        -not [string]::Equals((Split-Path -Leaf $InstalledExecutable), "cc-switch.exe", [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "installed executable must be the product-owned cc-switch.exe immediate child"
+    }
+    if (-not (Test-CcsmSamePath -Left (Split-Path -Parent $UninstallExecutable) -Right $InstallDirectory)) {
+        throw "uninstaller must be an immediate child of the install directory"
+    }
+}
+
+function Test-CcsmProductConfigRoot {
+    param([string]$Path)
+
+    return $Path -match '^[A-Za-z]:\\Users\\[^\\]+\\\.cc-switch$'
+}
+
+function Assert-CcsmProductConfigBoundary {
+    param([string[]]$ConfigPaths)
+
+    for ($leftIndex = 0; $leftIndex -lt $ConfigPaths.Count; $leftIndex++) {
+        for ($rightIndex = $leftIndex + 1; $rightIndex -lt $ConfigPaths.Count; $rightIndex++) {
+            if ((Test-CcsmPathInside -Candidate $ConfigPaths[$leftIndex] -Parent $ConfigPaths[$rightIndex]) -or
+                (Test-CcsmPathInside -Candidate $ConfigPaths[$rightIndex] -Parent $ConfigPaths[$leftIndex])) {
+                throw "config paths must be unique and non-overlapping"
+            }
+        }
+    }
+    foreach ($configPath in $ConfigPaths) {
+        if (-not (Test-CcsmProductConfigRoot -Path $configPath)) {
+            throw "config path must be a product-owned .cc-switch root: $configPath"
+        }
+    }
+}
+
+function Assert-CcsmHealthyResponse {
+    param($Health, [string]$Label)
+
+    if ($null -eq $Health -or -not $Health.Healthy -or [int]$Health.StatusCode -lt 200 -or [int]$Health.StatusCode -ge 300) {
+        throw "$Label health verification failed"
     }
 }
 
@@ -99,9 +174,10 @@ function Assert-CcsmRequiredOperations {
 
     $required = @(
         "ResolvePath", "TestPath", "GetFileHash", "GetFileVersion",
-        "GetProcessPath", "GetListenerOwner", "GetHealth", "WriteLog",
-        "Backup", "StopProcess", "WaitPortReleased", "RunUninstaller",
-        "RunInstaller", "StartProcess", "WaitReady", "Restore"
+        "GetProcessPath", "GetProcessIdentity", "GetListenerOwner", "GetHealth", "WriteLog",
+        "Backup", "StopVerifiedProcess", "WaitPortReleased", "SnapshotConfig", "VerifyConfigSnapshot",
+        "RunUninstaller", "RunInstaller", "StartProcess", "WaitReady", "ValidateRestoreBackup",
+        "RestoreAppAndConfig", "DeleteRegistryKey", "ImportRegistry", "VerifyRegistryRestore", "VerifyRestoredState"
     )
     foreach ($name in $required) {
         if (-not $Operations.ContainsKey($name) -or $Operations[$name] -isnot [scriptblock]) {
@@ -179,17 +255,8 @@ function Resolve-CcsmTransactionContext {
     $installedExecutable = $resolved.InstalledExecutable
     $uninstallExecutable = $resolved.UninstallExecutable
     $backupRoot = $resolved.BackupRoot
-    $installRoot = [System.IO.Path]::GetPathRoot($installDirectory)
-    $installParent = Split-Path -Parent $installDirectory
-    if ((Test-CcsmSamePath $installDirectory $installRoot) -or (Test-CcsmSamePath $installParent $installRoot)) {
-        throw "install directory is too broad for transactional restore: $installDirectory"
-    }
-    if (-not (Test-CcsmSamePath (Split-Path -Parent $installedExecutable) $installDirectory)) {
-        throw "installed executable must be an immediate child of the install directory"
-    }
-    if (-not (Test-CcsmSamePath (Split-Path -Parent $uninstallExecutable) $installDirectory)) {
-        throw "uninstaller must be an immediate child of the install directory"
-    }
+    Assert-CcsmProductInstallBoundary -InstallDirectory $installDirectory -InstalledExecutable $installedExecutable -UninstallExecutable $uninstallExecutable
+    Assert-CcsmProductConfigBoundary -ConfigPaths $configPaths
     if (Test-CcsmPathInside $resolved.InstallerPath $installDirectory) {
         throw "installer must be outside the install directory"
     }
@@ -229,14 +296,17 @@ function Resolve-CcsmTransactionContext {
     if ($currentVersion -ne $Spec.ExpectedCurrentVersion) {
         throw "current installed version mismatch"
     }
-    $processPath = & $Operations.GetProcessPath ([int]$Spec.CurrentPid)
-    if (-not (Test-CcsmSamePath $processPath $installedExecutable)) {
+    $processIdentity = & $Operations.GetProcessIdentity ([int]$Spec.CurrentPid)
+    if ($null -eq $processIdentity -or [int]$processIdentity.ProcessId -ne [int]$Spec.CurrentPid -or
+        -not (Test-CcsmSamePath -Left ([string]$processIdentity.Path) -Right $installedExecutable) -or
+        [string]::IsNullOrWhiteSpace([string]$processIdentity.StartTime)) {
         throw "current PID executable ownership mismatch"
     }
     $listenerOwner = & $Operations.GetListenerOwner ([int]$Spec.Port)
     if ($listenerOwner -ne [int]$Spec.CurrentPid) {
         throw "listener owner mismatch: actual=$listenerOwner expected=$($Spec.CurrentPid)"
     }
+    Assert-CcsmHealthyResponse -Health (& $Operations.GetHealth $health.AbsoluteUri) -Label "preflight"
 
     $transactionId = "ccsm-{0}-{1}" -f (Get-Date -Format "yyyyMMdd-HHmmss"), ([guid]::NewGuid().ToString("N"))
     return [pscustomobject]@{
@@ -247,6 +317,7 @@ function Resolve-CcsmTransactionContext {
         ExpectedInstalledVersion = $Spec.ExpectedInstalledVersion
         ExpectedInstalledHash    = $Spec.ExpectedInstalledHash.ToUpperInvariant()
         CurrentPid               = [int]$Spec.CurrentPid
+        CurrentProcessIdentity   = $processIdentity
         InstalledExecutable      = $installedExecutable
         InstallDirectory         = $installDirectory
         UninstallExecutable      = $uninstallExecutable
@@ -280,10 +351,7 @@ function Assert-CcsmRuntime {
     if ($listenerOwner -ne $ProcessId) {
         throw "$Label listener owner mismatch"
     }
-    $health = & $Operations.GetHealth $Context.HealthUri
-    if (-not $health.Healthy -or [int]$health.StatusCode -lt 200 -or [int]$health.StatusCode -ge 300) {
-        throw "$Label health verification failed"
-    }
+    Assert-CcsmHealthyResponse -Health (& $Operations.GetHealth $Context.HealthUri) -Label $Label
     $version = & $Operations.GetFileVersion $Context.InstalledExecutable
     if ($version -ne $ExpectedVersion) {
         throw "$Label version mismatch"
@@ -291,6 +359,48 @@ function Assert-CcsmRuntime {
     $hash = & $Operations.GetFileHash $Context.InstalledExecutable
     if (-not [string]::Equals($hash, $ExpectedHash, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "$Label hash mismatch"
+    }
+}
+
+function Test-CcsmSameProcessIdentity {
+    param($Expected, $Actual)
+
+    if ($null -eq $Expected -or $null -eq $Actual) { return $false }
+    if ([int]$Expected.ProcessId -ne [int]$Actual.ProcessId) { return $false }
+    if (-not (Test-CcsmSamePath -Left ([string]$Expected.Path) -Right ([string]$Actual.Path))) { return $false }
+    return [string]::Equals([string]$Expected.StartTime, [string]$Actual.StartTime, [System.StringComparison]::Ordinal)
+}
+
+function Assert-CcsmVerifiedStopTarget {
+    param($Context, [hashtable]$Operations)
+
+    $currentIdentity = & $Operations.GetProcessIdentity $Context.CurrentPid
+    if (-not (Test-CcsmSameProcessIdentity -Expected $Context.CurrentProcessIdentity -Actual $currentIdentity)) {
+        throw "current process instance changed after preflight"
+    }
+    $listenerOwner = & $Operations.GetListenerOwner $Context.Port
+    if ($listenerOwner -ne $Context.CurrentPid) {
+        throw "listener owner changed after preflight"
+    }
+    return $currentIdentity
+}
+
+function Write-CcsmBestEffortLog {
+    param(
+        [hashtable]$Operations,
+        $Context,
+        [string]$Level,
+        [string]$Event,
+        [hashtable]$Detail,
+        [System.Collections.Generic.List[string]]$Errors
+    )
+
+    try {
+        & $Operations.WriteLog $Context $Level $Event $Detail
+    } catch {
+        if ($null -ne $Errors) {
+            $Errors.Add("log ${Event}: $($_.Exception.Message)") | Out-Null
+        }
     }
 }
 
@@ -323,15 +433,19 @@ function Invoke-CcsmReinstallTransaction {
         & $Operations.WriteLog $context "info" "backup-ok" @{ BackupPath = $backup.Path }
 
         $rollbackRequired = $true
-        & $Operations.StopProcess $context $context.CurrentPid
+        $verifiedStopIdentity = Assert-CcsmVerifiedStopTarget -Context $context -Operations $Operations
+        & $Operations.StopVerifiedProcess $context $verifiedStopIdentity
         & $Operations.WaitPortReleased $context
+        [void](& $Operations.SnapshotConfig $context $backup)
+        & $Operations.VerifyConfigSnapshot $context $backup
         & $Operations.RunUninstaller $context
         & $Operations.RunInstaller $context
         $newPid = & $Operations.StartProcess $context "new"
         & $Operations.WaitReady $context $newPid
         Assert-CcsmRuntime -Context $context -Operations $Operations -ProcessId $newPid `
             -ExpectedVersion $context.ExpectedInstalledVersion -ExpectedHash $context.ExpectedInstalledHash -Label "new runtime"
-        & $Operations.WriteLog $context "info" "transaction-success" @{ NewPid = $newPid }
+        Write-CcsmBestEffortLog -Operations $Operations -Context $context -Level "info" -Event "transaction-success" `
+            -Detail @{ NewPid = $newPid } -Errors $null
         return [pscustomobject]@{
             Status = "Success"
             TransactionId = $context.TransactionId
@@ -342,45 +456,81 @@ function Invoke-CcsmReinstallTransaction {
         }
     } catch {
         $transactionError = $_.Exception.Message
-        & $Operations.WriteLog $context "error" "transaction-failed" @{ Error = $transactionError }
+        $rollbackErrors = New-Object System.Collections.Generic.List[string]
+        Write-CcsmBestEffortLog -Operations $Operations -Context $context -Level "error" -Event "transaction-failed" `
+            -Detail @{ Error = $transactionError } -Errors $rollbackErrors
         if (-not $rollbackRequired) {
             throw
         }
 
-        & $Operations.WriteLog $context "warning" "rollback-start" @{ Error = $transactionError }
-        $rollbackErrors = New-Object System.Collections.Generic.List[string]
+        Write-CcsmBestEffortLog -Operations $Operations -Context $context -Level "warning" -Event "rollback-start" `
+            -Detail @{ Error = $transactionError } -Errors $rollbackErrors
         if ($null -ne $newPid) {
-            $newPath = $null
+            $newIdentity = $null
             try {
-                $newPath = & $Operations.GetProcessPath $newPid
+                $newIdentity = & $Operations.GetProcessIdentity $newPid
             } catch {
-                & $Operations.WriteLog $context "warning" "rollback-new-process-not-verifiable" @{
-                    ProcessId = $newPid
-                    Error = $_.Exception.Message
-                }
+                Write-CcsmBestEffortLog -Operations $Operations -Context $context -Level "warning" `
+                    -Event "rollback-new-process-not-verifiable" -Detail @{ ProcessId = $newPid; Error = $_.Exception.Message } `
+                    -Errors $rollbackErrors
             }
-            if ($null -ne $newPath -and (Test-CcsmSamePath $newPath $context.InstalledExecutable)) {
+            if ($null -ne $newIdentity -and [int]$newIdentity.ProcessId -eq [int]$newPid -and
+                (Test-CcsmSamePath -Left ([string]$newIdentity.Path) -Right $context.InstalledExecutable) -and
+                -not [string]::IsNullOrWhiteSpace([string]$newIdentity.StartTime)) {
                 try {
-                    & $Operations.StopProcess $context $newPid
+                    & $Operations.StopVerifiedProcess $context $newIdentity
                 } catch {
                     $rollbackErrors.Add("stop new process: $($_.Exception.Message)") | Out-Null
                 }
-            } elseif ($null -ne $newPath) {
-                & $Operations.WriteLog $context "warning" "rollback-skip-unverified-process" @{ ProcessId = $newPid }
+            } elseif ($null -ne $newIdentity) {
+                Write-CcsmBestEffortLog -Operations $Operations -Context $context -Level "warning" `
+                    -Event "rollback-skip-unverified-process" -Detail @{ ProcessId = $newPid } -Errors $rollbackErrors
             }
         }
 
+        $restoreValidated = $true
         try {
-            & $Operations.Restore $context $backup
+            & $Operations.ValidateRestoreBackup $context $backup
         } catch {
-            $rollbackErrors.Add("restore state: $($_.Exception.Message)") | Out-Null
+            $restoreValidated = $false
+            $rollbackErrors.Add("validate restore backup: $($_.Exception.Message)") | Out-Null
+        }
+        if ($restoreValidated) {
+            try {
+                & $Operations.RestoreAppAndConfig $context $backup
+            } catch {
+                $rollbackErrors.Add("restore app and config: $($_.Exception.Message)") | Out-Null
+            }
+            try {
+                & $Operations.DeleteRegistryKey $context $backup
+            } catch {
+                $rollbackErrors.Add("delete restored registry key: $($_.Exception.Message)") | Out-Null
+            }
+            try {
+                & $Operations.ImportRegistry $context $backup
+            } catch {
+                $rollbackErrors.Add("import restored registry key: $($_.Exception.Message)") | Out-Null
+            }
+            try {
+                & $Operations.VerifyRegistryRestore $context $backup
+            } catch {
+                $rollbackErrors.Add("verify restored registry key: $($_.Exception.Message)") | Out-Null
+            }
+            try {
+                & $Operations.VerifyRestoredState $context $backup
+            } catch {
+                $rollbackErrors.Add("verify restored app and config: $($_.Exception.Message)") | Out-Null
+            }
+        } else {
+            Write-CcsmBestEffortLog -Operations $Operations -Context $context -Level "warning" `
+                -Event "rollback-restore-skipped-invalid-backup" -Detail @{ Error = $transactionError } -Errors $rollbackErrors
         }
 
         $previousPid = $null
         try {
             $previousPid = & $Operations.StartProcess $context "previous"
         } catch {
-            $rollbackErrors.Add("start previous runtime: $($_.Exception.Message)") | Out-Null
+                $rollbackErrors.Add("start previous runtime: $($_.Exception.Message)") | Out-Null
         }
         if ($null -ne $previousPid) {
             try {
@@ -390,24 +540,21 @@ function Invoke-CcsmReinstallTransaction {
             } catch {
                 $rollbackErrors.Add("verify previous runtime: $($_.Exception.Message)") | Out-Null
             }
+        } else {
+            $rollbackErrors.Add("start previous runtime: no process ID returned") | Out-Null
         }
 
         if ($rollbackErrors.Count -eq 0) {
-            & $Operations.WriteLog $context "info" "rollback-success" @{ PreviousPid = $previousPid }
-            return [pscustomobject]@{
-                Status = "RolledBack"
-                TransactionId = $context.TransactionId
-                BackupPath = $backup.Path
-                NewPid = $newPid
-                Error = $transactionError
-                RollbackError = $null
-            }
+            Write-CcsmBestEffortLog -Operations $Operations -Context $context -Level "info" -Event "rollback-success" `
+                -Detail @{ PreviousPid = $previousPid } -Errors $rollbackErrors
+        }
+        if ($rollbackErrors.Count -eq 0) {
+            return [pscustomobject]@{ Status = "RolledBack"; TransactionId = $context.TransactionId; BackupPath = $backup.Path; NewPid = $newPid; Error = $transactionError; RollbackError = $null }
         }
         $rollbackError = $rollbackErrors -join "; "
-        & $Operations.WriteLog $context "error" "rollback-failed" @{
-            Error = $transactionError
-            RollbackError = $rollbackError
-        }
+        Write-CcsmBestEffortLog -Operations $Operations -Context $context -Level "error" -Event "rollback-failed" `
+            -Detail @{ Error = $transactionError; RollbackError = $rollbackError } -Errors $rollbackErrors
+        $rollbackError = $rollbackErrors -join "; "
         return [pscustomobject]@{
             Status = "RollbackFailed"
             TransactionId = $context.TransactionId
@@ -457,14 +604,203 @@ function ConvertTo-CcsmNativeRegistryPath {
 function Assert-CcsmRestoreBoundary {
     param($Context, [string]$BackupPath)
 
-    if (-not (Test-CcsmPathInside $BackupPath $Context.BackupRoot) -or
-        (Test-CcsmSamePath $BackupPath $Context.BackupRoot) -or
-        -not (Test-CcsmSamePath $BackupPath $Context.TransactionRoot)) {
+    if (-not (Test-CcsmStrictDescendant -Candidate $Context.TransactionRoot -Parent $Context.BackupRoot) -or
+        -not (Test-CcsmSamePath -Left $BackupPath -Right $Context.TransactionRoot)) {
         throw "backup path escaped the validated transaction boundary"
     }
-    if (-not (Test-CcsmPathInside $Context.InstalledExecutable $Context.InstallDirectory)) {
-        throw "install restore boundary is invalid"
+    Assert-CcsmProductInstallBoundary -InstallDirectory $Context.InstallDirectory `
+        -InstalledExecutable $Context.InstalledExecutable -UninstallExecutable $Context.UninstallExecutable
+    Assert-CcsmProductConfigBoundary -ConfigPaths $Context.ConfigPaths
+    Assert-CcsmRegistryKey -Key $Context.RegistryKey
+}
+
+function Copy-CcsmDirectoryContents {
+    param([string]$Source, [string]$Destination)
+
+    if (-not (Test-Path -LiteralPath $Source -PathType Container)) {
+        throw "directory copy source is missing: $Source"
     }
+    if (-not (Test-Path -LiteralPath $Destination -PathType Container)) {
+        New-Item -ItemType Directory -Path $Destination -Force -ErrorAction Stop | Out-Null
+    }
+    foreach ($item in @(Get-ChildItem -LiteralPath $Source -Force -ErrorAction Stop)) {
+        Copy-Item -LiteralPath $item.FullName -Destination $Destination -Recurse -Force -ErrorAction Stop
+    }
+}
+
+function Get-CcsmConfigInventory {
+    param([string]$ConfigRoot)
+
+    if (-not (Test-Path -LiteralPath $ConfigRoot -PathType Container)) {
+        throw "config root is missing: $ConfigRoot"
+    }
+    $databasePath = Join-Path $ConfigRoot "cc-switch.db"
+    if (-not (Test-Path -LiteralPath $databasePath -PathType Leaf)) {
+        throw "config database is missing: $databasePath"
+    }
+    $files = @()
+    foreach ($file in @(Get-ChildItem -LiteralPath $ConfigRoot -File -Force -Recurse -ErrorAction Stop)) {
+        $relativePath = $file.FullName.Substring($ConfigRoot.TrimEnd([char[]]@([char]92, [char]47)).Length).TrimStart([char[]]@([char]92, [char]47))
+        if ([string]::IsNullOrWhiteSpace($relativePath) -or $relativePath -match '(^|[\\/])\.\.([\\/]|$)') {
+            throw "config inventory contains an unsafe relative path"
+        }
+        $files += [pscustomobject]@{ RelativePath = $relativePath; Hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash }
+    }
+    $sidecars = @()
+    foreach ($name in @("cc-switch.db", "cc-switch.db-wal", "cc-switch.db-shm")) {
+        $candidate = Join-Path $ConfigRoot $name
+        $exists = Test-Path -LiteralPath $candidate -PathType Leaf
+        $sidecars += [pscustomobject]@{
+            Name = $name
+            Exists = [bool]$exists
+            Hash = if ($exists) { (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash } else { $null }
+        }
+    }
+    return [pscustomobject]@{ Files = $files; Sidecars = $sidecars }
+}
+
+function Invoke-CcsmSqliteIntegrityCheck {
+    param([string]$DatabasePath)
+
+    if (-not (Test-Path -LiteralPath $DatabasePath -PathType Leaf)) {
+        throw "SQLite database is missing: $DatabasePath"
+    }
+    if ($null -eq ("CcsmSqliteNative" -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class CcsmSqliteNative {
+    [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+    public static extern int sqlite3_open16(string filename, out IntPtr db);
+    [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+    public static extern int sqlite3_prepare16_v2(IntPtr db, string sql, int bytes, out IntPtr statement, IntPtr tail);
+    [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+    public static extern int sqlite3_step(IntPtr statement);
+    [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+    public static extern IntPtr sqlite3_column_text16(IntPtr statement, int column);
+    [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+    public static extern int sqlite3_finalize(IntPtr statement);
+    [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+    public static extern int sqlite3_close(IntPtr db);
+}
+'@ -ErrorAction Stop
+    }
+    $database = [IntPtr]::Zero
+    $statement = [IntPtr]::Zero
+    try {
+        if ([CcsmSqliteNative]::sqlite3_open16($DatabasePath, [ref]$database) -ne 0) {
+            throw "SQLite open failed for integrity check"
+        }
+        if ([CcsmSqliteNative]::sqlite3_prepare16_v2($database, "PRAGMA integrity_check", -1, [ref]$statement, [IntPtr]::Zero) -ne 0) {
+            throw "SQLite integrity_check preparation failed"
+        }
+        if ([CcsmSqliteNative]::sqlite3_step($statement) -ne 100) {
+            throw "SQLite integrity_check did not return a result"
+        }
+        $resultPointer = [CcsmSqliteNative]::sqlite3_column_text16($statement, 0)
+        $result = [Runtime.InteropServices.Marshal]::PtrToStringUni($resultPointer)
+        if ($result -ne "ok") {
+            throw "SQLite integrity_check failed: $result"
+        }
+    } finally {
+        if ($statement -ne [IntPtr]::Zero) { [void][CcsmSqliteNative]::sqlite3_finalize($statement) }
+        if ($database -ne [IntPtr]::Zero) { [void][CcsmSqliteNative]::sqlite3_close($database) }
+    }
+}
+
+function Assert-CcsmConfigInventory {
+    param($Expected, [string]$ConfigRoot)
+
+    $actual = Get-CcsmConfigInventory -ConfigRoot $ConfigRoot
+    $expectedFiles = @($Expected.Files)
+    $actualFiles = @($actual.Files)
+    if ($expectedFiles.Count -ne $actualFiles.Count) {
+        throw "config file inventory count changed"
+    }
+    foreach ($expectedFile in $expectedFiles) {
+        $match = @($actualFiles | Where-Object {
+            $_.RelativePath -eq $expectedFile.RelativePath -and
+            [string]::Equals($_.Hash, $expectedFile.Hash, [System.StringComparison]::OrdinalIgnoreCase)
+        })
+        if ($match.Count -ne 1) { throw "config file hash changed: $($expectedFile.RelativePath)" }
+    }
+    foreach ($expectedSidecar in @($Expected.Sidecars)) {
+        $match = @($actual.Sidecars | Where-Object {
+            $_.Name -eq $expectedSidecar.Name -and $_.Exists -eq $expectedSidecar.Exists -and
+            [string]::Equals([string]$_.Hash, [string]$expectedSidecar.Hash, [System.StringComparison]::OrdinalIgnoreCase)
+        })
+        if ($match.Count -ne 1) { throw "config SQLite sidecar changed: $($expectedSidecar.Name)" }
+    }
+    Invoke-CcsmSqliteIntegrityCheck -DatabasePath (Join-Path $ConfigRoot "cc-switch.db")
+}
+
+function Write-CcsmBackupManifest {
+    param($Context, $Backup)
+
+    $manifest = [ordered]@{
+        TransactionId = $Context.TransactionId
+        InstallDirectory = $Context.InstallDirectory
+        AppBackup = $Backup.AppBackup
+        ConfigSnapshotComplete = [bool]$Backup.ConfigSnapshotComplete
+        ConfigBackups = @($Backup.ConfigBackups)
+        RegistryKey = $Context.RegistryKey
+        RegistryExisted = [bool]$Backup.RegistryExisted
+        RegistryFile = $Backup.RegistryFile
+        RegistryFileHash = $Backup.RegistryFileHash
+    }
+    $Backup.ManifestPath = Join-Path $Backup.Path "backup-manifest.json"
+    $manifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $Backup.ManifestPath -Encoding UTF8 -ErrorAction Stop
+    $Backup.ManifestHash = (Get-FileHash -LiteralPath $Backup.ManifestPath -Algorithm SHA256).Hash
+}
+
+function Get-CcsmValidatedBackupManifest {
+    param($Context, $Backup)
+
+    Assert-CcsmRestoreBoundary -Context $Context -BackupPath ([string]$Backup.Path)
+    if (-not (Test-CcsmSamePath -Left ([string]$Backup.ManifestPath) -Right (Join-Path $Context.TransactionRoot "backup-manifest.json")) -or
+        -not (Test-Path -LiteralPath $Backup.ManifestPath -PathType Leaf)) {
+        throw "backup manifest is missing or escaped the transaction boundary"
+    }
+    Assert-CcsmHash -Name "backup manifest hash" -Value ([string]$Backup.ManifestHash)
+    $actualManifestHash = (Get-FileHash -LiteralPath $Backup.ManifestPath -Algorithm SHA256).Hash
+    if (-not [string]::Equals($actualManifestHash, $Backup.ManifestHash, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "backup manifest integrity hash mismatch"
+    }
+    $manifest = Get-Content -LiteralPath $Backup.ManifestPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    if ($manifest.TransactionId -ne $Context.TransactionId -or
+        -not (Test-CcsmSamePath -Left ([string]$manifest.InstallDirectory) -Right $Context.InstallDirectory) -or
+        -not (Test-CcsmStrictDescendant -Candidate ([string]$manifest.AppBackup) -Parent $Context.TransactionRoot) -or
+        -not (Test-Path -LiteralPath $manifest.AppBackup -PathType Container)) {
+        throw "backup manifest does not match the validated transaction"
+    }
+    Assert-CcsmRegistryKey -Key ([string]$manifest.RegistryKey)
+    $configBackups = @($manifest.ConfigBackups)
+    if ([bool]$manifest.ConfigSnapshotComplete -and $configBackups.Count -ne $Context.ConfigPaths.Count) {
+        throw "config snapshot manifest count mismatch"
+    }
+    if (-not [bool]$manifest.ConfigSnapshotComplete -and $configBackups.Count -ne 0) {
+        throw "incomplete config snapshot has backup entries"
+    }
+    foreach ($configBackup in $configBackups) {
+        $expectedConfig = @($Context.ConfigPaths | Where-Object { Test-CcsmSamePath -Left $_ -Right ([string]$configBackup.Source) })
+        if ($expectedConfig.Count -ne 1 -or
+            -not (Test-CcsmStrictDescendant -Candidate ([string]$configBackup.Backup) -Parent $Context.TransactionRoot) -or
+            -not (Test-Path -LiteralPath $configBackup.Backup -PathType Container)) {
+            throw "config backup escaped the validated restore boundary"
+        }
+    }
+    if ([bool]$manifest.RegistryExisted) {
+        if (-not (Test-CcsmStrictDescendant -Candidate ([string]$manifest.RegistryFile) -Parent $Context.TransactionRoot) -or
+            -not (Test-Path -LiteralPath $manifest.RegistryFile -PathType Leaf)) {
+            throw "registry backup escaped the validated restore boundary"
+        }
+        Assert-CcsmHash -Name "registry backup hash" -Value ([string]$manifest.RegistryFileHash)
+        $actualRegistryHash = (Get-FileHash -LiteralPath $manifest.RegistryFile -Algorithm SHA256).Hash
+        if (-not [string]::Equals($actualRegistryHash, $manifest.RegistryFileHash, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "registry backup integrity hash mismatch"
+        }
+    }
+    return $manifest
 }
 
 function New-CcsmRealOperations {
@@ -487,7 +823,7 @@ function New-CcsmRealOperations {
         if (@("installer", "installed-executable", "uninstaller") -contains $Kind) {
             return -not $item.PSIsContainer
         }
-        if (@("install-directory", "backup-root") -contains $Kind) {
+        if (@("install-directory", "backup-root", "config") -contains $Kind) {
             return $item.PSIsContainer
         }
         return $true
@@ -506,6 +842,16 @@ function New-CcsmRealOperations {
         param($ProcessId)
         $process = Get-Process -Id $ProcessId -ErrorAction Stop
         return $process.MainModule.FileName
+    }
+    $operations.GetProcessIdentity = {
+        param($ProcessId)
+        $process = Get-Process -Id $ProcessId -ErrorAction Stop
+        return [pscustomobject]@{
+            ProcessId = [int]$process.Id
+            Path = $process.MainModule.FileName
+            StartTime = $process.StartTime.ToUniversalTime().ToString("o")
+            Handle = $process
+        }
     }
     $operations.GetListenerOwner = {
         param($Port)
@@ -542,44 +888,77 @@ function New-CcsmRealOperations {
         param($Context)
         Assert-CcsmRestoreBoundary -Context $Context -BackupPath $Context.TransactionRoot
         $appBackup = Join-Path $Context.TransactionRoot "app"
-        Copy-Item -LiteralPath $Context.InstallDirectory -Destination $appBackup -Recurse -Force -ErrorAction Stop
-
-        $configBackups = @()
-        $configRoot = Join-Path $Context.TransactionRoot "config"
-        if ($Context.ConfigPaths.Count -gt 0) {
-            New-Item -ItemType Directory -Path $configRoot -ErrorAction Stop | Out-Null
-        }
-        for ($index = 0; $index -lt $Context.ConfigPaths.Count; $index++) {
-            $destination = Join-Path $configRoot ([string]$index)
-            Copy-Item -LiteralPath $Context.ConfigPaths[$index] -Destination $destination -Recurse -Force -ErrorAction Stop
-            $configBackups += @{ Source = $Context.ConfigPaths[$index]; Backup = $destination }
-        }
+        New-Item -ItemType Directory -Path $appBackup -Force -ErrorAction Stop | Out-Null
+        Copy-CcsmDirectoryContents -Source $Context.InstallDirectory -Destination $appBackup
 
         $registryExisted = Test-Path -LiteralPath $Context.RegistryKey
-        $registryFile = Join-Path $Context.TransactionRoot "registry.reg"
+        $registryFile = $null
+        $registryFileHash = $null
         if ($registryExisted) {
+            $registryFile = Join-Path $Context.TransactionRoot "registry.reg"
             $nativeKey = ConvertTo-CcsmNativeRegistryPath $Context.RegistryKey
             & reg.exe export $nativeKey $registryFile /y | Out-Null
             if ($LASTEXITCODE -ne 0) { throw "registry export failed with exit code $LASTEXITCODE" }
+            $registryFileHash = (Get-FileHash -LiteralPath $registryFile -Algorithm SHA256).Hash
         }
-        $manifest = [ordered]@{
-            TransactionId = $Context.TransactionId
-            InstallDirectory = $Context.InstallDirectory
+        $backup = [pscustomobject]@{
+            Path = $Context.TransactionRoot
             AppBackup = $appBackup
-            ConfigBackups = $configBackups
-            RegistryKey = $Context.RegistryKey
-            RegistryExisted = $registryExisted
+            ConfigSnapshotComplete = $false
+            ConfigBackups = @()
+            RegistryExisted = [bool]$registryExisted
             RegistryFile = $registryFile
+            RegistryFileHash = $registryFileHash
+            ManifestPath = $null
+            ManifestHash = $null
         }
-        $manifest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $Context.TransactionRoot "backup-manifest.json") -Encoding UTF8
-        return [pscustomobject]@{ Path = $Context.TransactionRoot; Manifest = $manifest }
+        Write-CcsmBackupManifest -Context $Context -Backup $backup
+        return $backup
     }
-    $operations.StopProcess = {
-        param($Context, $ProcessId)
-        Stop-Process -Id $ProcessId -Force -ErrorAction Stop
-        Wait-Process -Id $ProcessId -Timeout $Context.TimeoutSeconds -ErrorAction SilentlyContinue
-        if (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue) {
-            throw "process $ProcessId did not exit"
+    $operations.SnapshotConfig = {
+        param($Context, $Backup)
+        Assert-CcsmRestoreBoundary -Context $Context -BackupPath $Backup.Path
+        $configRoot = Join-Path $Backup.Path "config"
+        New-Item -ItemType Directory -Path $configRoot -Force -ErrorAction Stop | Out-Null
+        $configBackups = @()
+        for ($index = 0; $index -lt $Context.ConfigPaths.Count; $index++) {
+            $source = $Context.ConfigPaths[$index]
+            $destination = Join-Path $configRoot ([string]$index)
+            Invoke-CcsmSqliteIntegrityCheck -DatabasePath (Join-Path $source "cc-switch.db")
+            New-Item -ItemType Directory -Path $destination -Force -ErrorAction Stop | Out-Null
+            Copy-CcsmDirectoryContents -Source $source -Destination $destination
+            $inventory = Get-CcsmConfigInventory -ConfigRoot $destination
+            Invoke-CcsmSqliteIntegrityCheck -DatabasePath (Join-Path $destination "cc-switch.db")
+            $configBackups += [pscustomobject]@{
+                Source = $source
+                Backup = $destination
+                Files = @($inventory.Files)
+                Sidecars = @($inventory.Sidecars)
+            }
+        }
+        $Backup.ConfigBackups = $configBackups
+        $Backup.ConfigSnapshotComplete = $true
+        Write-CcsmBackupManifest -Context $Context -Backup $Backup
+    }
+    $operations.VerifyConfigSnapshot = {
+        param($Context, $Backup)
+        $manifest = Get-CcsmValidatedBackupManifest -Context $Context -Backup $Backup
+        if (-not [bool]$manifest.ConfigSnapshotComplete) { throw "config snapshot was not completed" }
+        foreach ($configBackup in @($manifest.ConfigBackups)) {
+            Assert-CcsmConfigInventory -Expected $configBackup -ConfigRoot ([string]$configBackup.Backup)
+        }
+    }
+    $operations.StopVerifiedProcess = {
+        param($Context, $ExpectedIdentity)
+        $liveIdentity = & $operations.GetProcessIdentity ([int]$ExpectedIdentity.ProcessId)
+        if (-not (Test-CcsmSameProcessIdentity -Expected $ExpectedIdentity -Actual $liveIdentity)) {
+            throw "process instance changed before verified stop"
+        }
+        if ($null -eq $liveIdentity.Handle) { throw "verified process handle is unavailable" }
+        Stop-Process -InputObject $liveIdentity.Handle -Force -ErrorAction Stop
+        Wait-Process -Id $liveIdentity.ProcessId -Timeout $Context.TimeoutSeconds -ErrorAction SilentlyContinue
+        if (Get-Process -Id $liveIdentity.ProcessId -ErrorAction SilentlyContinue) {
+            throw "verified process $($liveIdentity.ProcessId) did not exit"
         }
     }
     $operations.WaitPortReleased = {
@@ -613,45 +992,83 @@ function New-CcsmRealOperations {
             return $healthResult.Healthy -and [int]$healthResult.StatusCode -ge 200 -and [int]$healthResult.StatusCode -lt 300
         }
     }
-    $operations.Restore = {
+    $operations.ValidateRestoreBackup = {
         param($Context, $Backup)
-        Assert-CcsmRestoreBoundary -Context $Context -BackupPath $Backup.Path
-        $manifestPath = Join-Path $Backup.Path "backup-manifest.json"
-        if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
-            throw "backup manifest is missing"
-        }
-        $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-        if ($manifest.TransactionId -ne $Context.TransactionId -or
-            -not (Test-CcsmSamePath $manifest.InstallDirectory $Context.InstallDirectory) -or
-            -not (Test-Path -LiteralPath $manifest.AppBackup -PathType Container)) {
-            throw "backup manifest does not match the validated transaction"
-        }
+        [void](Get-CcsmValidatedBackupManifest -Context $Context -Backup $Backup)
+    }
+    $operations.RestoreAppAndConfig = {
+        param($Context, $Backup)
+        $manifest = Get-CcsmValidatedBackupManifest -Context $Context -Backup $Backup
 
         if (Test-Path -LiteralPath $Context.InstallDirectory) {
             Remove-Item -LiteralPath $Context.InstallDirectory -Recurse -Force -ErrorAction Stop
         }
-        Copy-Item -LiteralPath $manifest.AppBackup -Destination $Context.InstallDirectory -Recurse -Force -ErrorAction Stop
+        New-Item -ItemType Directory -Path $Context.InstallDirectory -Force -ErrorAction Stop | Out-Null
+        Copy-CcsmDirectoryContents -Source ([string]$manifest.AppBackup) -Destination $Context.InstallDirectory
 
-        foreach ($configBackup in @($manifest.ConfigBackups)) {
-            $expectedConfig = @($Context.ConfigPaths | Where-Object { Test-CcsmSamePath $_ $configBackup.Source })
-            if ($expectedConfig.Count -ne 1 -or -not (Test-Path -LiteralPath $configBackup.Backup)) {
-                throw "config backup escaped the validated restore boundary"
+        if ([bool]$manifest.ConfigSnapshotComplete) {
+            foreach ($configBackup in @($manifest.ConfigBackups)) {
+                $source = [string]$configBackup.Source
+                if (Test-Path -LiteralPath $source) {
+                    Remove-Item -LiteralPath $source -Recurse -Force -ErrorAction Stop
+                }
+                New-Item -ItemType Directory -Path $source -Force -ErrorAction Stop | Out-Null
+                Copy-CcsmDirectoryContents -Source ([string]$configBackup.Backup) -Destination $source
             }
-            if (Test-Path -LiteralPath $configBackup.Source) {
-                Remove-Item -LiteralPath $configBackup.Source -Recurse -Force -ErrorAction Stop
-            }
-            Copy-Item -LiteralPath $configBackup.Backup -Destination $configBackup.Source -Recurse -Force -ErrorAction Stop
         }
-
-        if ($manifest.RegistryExisted) {
-            if (-not (Test-Path -LiteralPath $manifest.RegistryFile -PathType Leaf)) {
-                throw "registry backup is missing"
-            }
-            & reg.exe import $manifest.RegistryFile | Out-Null
-            if ($LASTEXITCODE -ne 0) { throw "registry import failed with exit code $LASTEXITCODE" }
-        } elseif (Test-Path -LiteralPath $Context.RegistryKey) {
-            Assert-CcsmRegistryKey -Key $Context.RegistryKey
+    }
+    $operations.DeleteRegistryKey = {
+        param($Context, $Backup)
+        [void](Get-CcsmValidatedBackupManifest -Context $Context -Backup $Backup)
+        Assert-CcsmRegistryKey -Key $Context.RegistryKey
+        if (Test-Path -LiteralPath $Context.RegistryKey) {
             Remove-Item -LiteralPath $Context.RegistryKey -Recurse -Force -ErrorAction Stop
+        }
+    }
+    $operations.ImportRegistry = {
+        param($Context, $Backup)
+        $manifest = Get-CcsmValidatedBackupManifest -Context $Context -Backup $Backup
+        if ([bool]$manifest.RegistryExisted) {
+            & reg.exe import ([string]$manifest.RegistryFile) | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "registry import failed with exit code $LASTEXITCODE" }
+        }
+    }
+    $operations.VerifyRegistryRestore = {
+        param($Context, $Backup)
+        $manifest = Get-CcsmValidatedBackupManifest -Context $Context -Backup $Backup
+        if (-not [bool]$manifest.RegistryExisted) {
+            if (Test-Path -LiteralPath $Context.RegistryKey) { throw "registry key unexpectedly exists after restore" }
+            return
+        }
+        if (-not (Test-Path -LiteralPath $Context.RegistryKey)) { throw "registry key is missing after import" }
+        $verificationFile = Join-Path $Backup.Path "registry-verify.reg"
+        Assert-CcsmRestoreBoundary -Context $Context -BackupPath $Backup.Path
+        try {
+            & reg.exe export (ConvertTo-CcsmNativeRegistryPath $Context.RegistryKey) $verificationFile /y | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "registry verification export failed with exit code $LASTEXITCODE" }
+            $verificationHash = (Get-FileHash -LiteralPath $verificationFile -Algorithm SHA256).Hash
+            if (-not [string]::Equals($verificationHash, [string]$manifest.RegistryFileHash, [System.StringComparison]::OrdinalIgnoreCase)) {
+                throw "registry verification hash mismatch"
+            }
+        } finally {
+            if (Test-Path -LiteralPath $verificationFile) {
+                Remove-Item -LiteralPath $verificationFile -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+    $operations.VerifyRestoredState = {
+        param($Context, $Backup)
+        $manifest = Get-CcsmValidatedBackupManifest -Context $Context -Backup $Backup
+        $restoredVersion = & $operations.GetFileVersion $Context.InstalledExecutable
+        if ($restoredVersion -ne $Context.ExpectedCurrentVersion) { throw "restored application version mismatch" }
+        $restoredHash = & $operations.GetFileHash $Context.InstalledExecutable
+        if (-not [string]::Equals($restoredHash, $Context.ExpectedCurrentHash, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "restored application hash mismatch"
+        }
+        if ([bool]$manifest.ConfigSnapshotComplete) {
+            foreach ($configBackup in @($manifest.ConfigBackups)) {
+                Assert-CcsmConfigInventory -Expected $configBackup -ConfigRoot ([string]$configBackup.Source)
+            }
         }
     }
     return $operations
