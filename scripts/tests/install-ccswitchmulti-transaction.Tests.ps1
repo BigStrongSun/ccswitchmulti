@@ -277,8 +277,64 @@ function Assert-TamperedBackupFailsClosed {
     $result.Status | Should Be "RollbackFailed"
     ($script:events -contains "validate-backup:$Tamper") | Should Be $true
     (@($script:events | Where-Object { $_ -like "destructive:*" }).Count) | Should Be 0
-    ($script:events -contains "start:previous") | Should Be $true
-    ($script:events -contains "wait-ready:6000") | Should Be $true
+    ($script:events -contains "start:previous") | Should Be $false
+    ($script:events -contains "wait-ready:6000") | Should Be $false
+}
+
+function New-Task3ATestDirectory {
+    $path = Join-Path ([System.IO.Path]::GetTempPath()) ("ccsm-transaction-test-" + [guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path $path -Force -ErrorAction Stop | Out-Null
+    return $path
+}
+
+function Remove-Task3ATestTree {
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    $isReparsePoint = (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)
+    if ($isReparsePoint) {
+        if ($item.PSIsContainer) {
+            & cmd.exe /d /c rmdir "$($item.FullName)"
+            if ($LASTEXITCODE -ne 0) { throw "failed to remove test junction: $($item.FullName)" }
+        } else {
+            [System.IO.File]::Delete($item.FullName)
+        }
+        return
+    }
+    if ($item.PSIsContainer) {
+        foreach ($child in @(Get-ChildItem -LiteralPath $item.FullName -Force -ErrorAction Stop)) {
+            Remove-Task3ATestTree -Path $child.FullName
+        }
+        [System.IO.Directory]::Delete($item.FullName, $false)
+    } else {
+        [System.IO.File]::Delete($item.FullName)
+    }
+}
+
+function New-Task3AEmptySqliteDatabase {
+    param([string]$Path)
+
+    if ($null -eq ("Task3ASqliteFixtureNative" -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class Task3ASqliteFixtureNative {
+    [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode, ExactSpelling = true)]
+    public static extern int sqlite3_open16(string filename, out IntPtr db);
+    [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    public static extern int sqlite3_close(IntPtr db);
+}
+'@
+    }
+    $database = [IntPtr]::Zero
+    try {
+        if ([Task3ASqliteFixtureNative]::sqlite3_open16($Path, [ref]$database) -ne 0) {
+            throw "failed to create SQLite test database"
+        }
+    } finally {
+        if ($database -ne [IntPtr]::Zero) { [void][Task3ASqliteFixtureNative]::sqlite3_close($database) }
+    }
 }
 
 Describe "CCSwitchMulti transactional reinstall orchestration" {
@@ -302,6 +358,150 @@ Describe "CCSwitchMulti transactional reinstall orchestration" {
     It "rejects a dot-dot backup path that only appears to be inside the transaction root" {
         Test-CcsmPathInside -Candidate "D:\ccsm-transaction-backups\txn-1\..\outside" `
             -Parent "D:\ccsm-transaction-backups\txn-1" | Should Be $false
+    }
+
+    It "fails closed before copying a recursive child junction and leaves its target untouched during cleanup" {
+        $fixtureRoot = New-Task3ATestDirectory
+        $outsideRoot = New-Task3ATestDirectory
+        $source = Join-Path $fixtureRoot "source"
+        $destination = Join-Path $fixtureRoot "destination"
+        $junction = Join-Path $source "escape"
+        $sentinel = Join-Path $outsideRoot "sentinel.txt"
+        try {
+            New-Item -ItemType Directory -Path $source, $destination -Force | Out-Null
+            [System.IO.File]::WriteAllText((Join-Path $source "regular.txt"), "inside")
+            [System.IO.File]::WriteAllText($sentinel, "outside")
+            New-Item -ItemType Junction -Path $junction -Target $outsideRoot -ErrorAction Stop | Out-Null
+
+            { Copy-CcsmDirectoryContents -Source $source -Destination $destination } | Should Throw "reparse"
+            (Test-Path -LiteralPath (Join-Path $destination "escape\sentinel.txt")) | Should Be $false
+        } finally {
+            Remove-Task3ATestTree -Path $fixtureRoot
+            (Test-Path -LiteralPath $sentinel) | Should Be $true
+            Remove-Task3ATestTree -Path $outsideRoot
+        }
+    }
+
+    It "rejects reparse roots, ancestors, manifest sources, and recursive destinations before restore operations" {
+        $fixtureRoot = New-Task3ATestDirectory
+        $outsideRoot = New-Task3ATestDirectory
+        $sentinel = Join-Path $outsideRoot "sentinel.txt"
+        try {
+            [System.IO.File]::WriteAllText($sentinel, "outside")
+            $installRoot = Join-Path $fixtureRoot "install-root"
+            $configRoot = Join-Path $fixtureRoot "config-root"
+            $backupRoot = Join-Path $fixtureRoot "backup-root"
+            $manifestSource = Join-Path $fixtureRoot "manifest-source"
+            $manifestDestination = Join-Path $fixtureRoot "manifest-destination"
+            New-Item -ItemType Junction -Path $installRoot -Target $outsideRoot -ErrorAction Stop | Out-Null
+            New-Item -ItemType Junction -Path $configRoot -Target $outsideRoot -ErrorAction Stop | Out-Null
+            New-Item -ItemType Junction -Path $backupRoot -Target $outsideRoot -ErrorAction Stop | Out-Null
+            New-Item -ItemType Junction -Path $manifestSource -Target $outsideRoot -ErrorAction Stop | Out-Null
+            New-Item -ItemType Junction -Path $manifestDestination -Target $outsideRoot -ErrorAction Stop | Out-Null
+            $ordinaryRoot = Join-Path $fixtureRoot "ordinary"
+            New-Item -ItemType Directory -Path $ordinaryRoot -Force | Out-Null
+            $ancestor = Join-Path $ordinaryRoot "ancestor"
+            New-Item -ItemType Junction -Path $ancestor -Target $outsideRoot -ErrorAction Stop | Out-Null
+
+            { Assert-CcsmNoReparseBoundary -Path @(
+                    $installRoot, $configRoot, $backupRoot, $manifestSource, $manifestDestination,
+                    (Join-Path $ancestor "descendant")
+                ) -Purpose "transaction fixture" } | Should Throw "reparse"
+        } finally {
+            Remove-Task3ATestTree -Path $fixtureRoot
+            (Test-Path -LiteralPath $sentinel) | Should Be $true
+            Remove-Task3ATestTree -Path $outsideRoot
+        }
+    }
+
+    It "records every regular app backup file hash and binds its inventory digest into the manifest" {
+        $fixtureRoot = New-Task3ATestDirectory
+        try {
+            $install = Join-Path $fixtureRoot "CCSwitchMulti"
+            $transactionRoot = Join-Path $fixtureRoot "transaction"
+            $appBackup = Join-Path $transactionRoot "app"
+            New-Item -ItemType Directory -Path (Join-Path $install "nested"), $transactionRoot -Force | Out-Null
+            [System.IO.File]::WriteAllText((Join-Path $install "cc-switch.exe"), "binary")
+            [System.IO.File]::WriteAllText((Join-Path $install "uninstall.exe"), "uninstaller")
+            [System.IO.File]::WriteAllText((Join-Path $install "nested\resource.dll"), "resource")
+            Copy-CcsmDirectoryContents -Source $install -Destination $appBackup
+            $inventory = Get-CcsmRegularFileInventory -Root $appBackup
+            $context = [pscustomobject]@{
+                TransactionId = "fixture-transaction"
+                TransactionRoot = $transactionRoot
+                InstallDirectory = $install
+                RegistryKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\CCSwitchMulti"
+            }
+            $backup = [pscustomobject]@{
+                Path = $transactionRoot
+                AppBackup = $appBackup
+                AppInventory = $inventory.Files
+                AppInventoryDigest = $inventory.Digest
+                ConfigSnapshotComplete = $false
+                ConfigBackups = @()
+                RegistryExisted = $false
+                RegistryFile = $null
+                RegistryFileHash = $null
+                ManifestPath = $null
+                ManifestHash = $null
+            }
+
+            Assert-CcsmRegularFileInventory -Expected $inventory -Root $appBackup
+            Write-CcsmBackupManifest -Context $context -Backup $backup
+            $manifest = Get-Content -LiteralPath $backup.ManifestPath -Raw | ConvertFrom-Json
+            @($manifest.AppInventory).Count | Should Be 3
+            $manifest.AppInventoryDigest | Should Be $inventory.Digest
+        } finally {
+            Remove-Task3ATestTree -Path $fixtureRoot
+        }
+    }
+
+    It "rejects a modified, added, or deleted app backup file before restore validation" {
+        foreach ($mutation in @("modified", "added", "deleted")) {
+            $fixtureRoot = New-Task3ATestDirectory
+            try {
+                $appBackup = Join-Path $fixtureRoot "app"
+                New-Item -ItemType Directory -Path $appBackup -Force | Out-Null
+                [System.IO.File]::WriteAllText((Join-Path $appBackup "cc-switch.exe"), "binary")
+                [System.IO.File]::WriteAllText((Join-Path $appBackup "component.dll"), "component")
+                $inventory = Get-CcsmRegularFileInventory -Root $appBackup
+                switch ($mutation) {
+                    "modified" { [System.IO.File]::WriteAllText((Join-Path $appBackup "component.dll"), "tampered") }
+                    "added" { [System.IO.File]::WriteAllText((Join-Path $appBackup "unexpected.dll"), "tampered") }
+                    "deleted" { [System.IO.File]::Delete((Join-Path $appBackup "component.dll")) }
+                }
+
+                { Assert-CcsmRegularFileInventory -Expected $inventory -Root $appBackup } | Should Throw "app backup inventory";
+            } finally {
+                Remove-Task3ATestTree -Path $fixtureRoot
+            }
+        }
+    }
+
+    It "does not restore or launch from a rejected app inventory backup" {
+        Assert-TamperedBackupFailsClosed -Tamper "app-inventory"
+    }
+
+    It "runs the real SQLite integrity helper with UTF-16 preparation for valid and corrupt temporary databases" {
+        $fixtureRoot = New-Task3ATestDirectory
+        try {
+            $unicodeDirectory = Join-Path $fixtureRoot (([char]0x5B8C).ToString() + ([char]0x6574).ToString() + ([char]0x6027).ToString())
+            New-Item -ItemType Directory -Path $unicodeDirectory -Force | Out-Null
+            $validDatabase = Join-Path $unicodeDirectory "valid.db"
+            $corruptDatabase = Join-Path $unicodeDirectory "corrupt.db"
+            New-Task3AEmptySqliteDatabase -Path $validDatabase
+            [System.IO.File]::WriteAllBytes($corruptDatabase, [byte[]](0, 1, 2, 3, 4, 5, 6, 7))
+
+            Invoke-CcsmSqliteIntegrityCheck -DatabasePath $validDatabase
+            $import = [CcsmSqliteNative].GetMethod("sqlite3_prepare16_v2").GetCustomAttributes(
+                [System.Runtime.InteropServices.DllImportAttribute], $false
+            )[0]
+            $import.CharSet | Should Be ([System.Runtime.InteropServices.CharSet]::Unicode)
+            $import.ExactSpelling | Should Be $true
+            { Invoke-CcsmSqliteIntegrityCheck -DatabasePath $corruptDatabase } | Should Throw
+        } finally {
+            Remove-Task3ATestTree -Path $fixtureRoot
+        }
     }
 
     It "runs every guard before the first mutating operation" {
