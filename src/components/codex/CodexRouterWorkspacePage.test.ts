@@ -1643,9 +1643,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     expect(screen.getByRole("button", { name: "启用 V1" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "启用 V2" })).toBeInTheDocument();
     expect(screen.getByText("当前使用 V2")).toBeInTheDocument();
-    expect(
-      screen.getByText(/deepseek-flash/),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/deepseek-flash/)).toBeInTheDocument();
     expect(screen.getByText(/deepseek-pro/)).toBeInTheDocument();
 
     await userEvent
