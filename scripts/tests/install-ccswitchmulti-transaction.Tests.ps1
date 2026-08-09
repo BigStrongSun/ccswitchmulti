@@ -24,7 +24,7 @@ function New-TestSpec {
 
 function New-FakeOperations {
     param(
-        [string]$FailAt = "",
+        [string[]]$FailAt = @(),
         [int]$ListenerOwner = 4242,
         [string]$NewProcessPath = "C:\Program Files\CCSwitchMulti\cc-switch.exe",
         [switch]$RollbackStartFails
@@ -35,6 +35,10 @@ function New-FakeOperations {
     $script:installedNew = $false
     $script:newPid = 5000
     $script:oldPid = 6000
+    $script:runtimePid = $ListenerOwner
+    $script:failAt = $FailAt
+    $script:newProcessPath = $NewProcessPath
+    $script:rollbackStartFails = [bool]$RollbackStartFails
 
     return @{
         ResolvePath = {
@@ -63,14 +67,16 @@ function New-FakeOperations {
         GetProcessPath = {
             param($ProcessId)
             $script:checks.Add("process-path:$ProcessId") | Out-Null
-            if ($ProcessId -eq $script:newPid) { return $NewProcessPath }
+            if ($ProcessId -eq $script:newPid) {
+                if ($script:newProcessPath -eq "__missing__") { throw "injected process not found" }
+                return $script:newProcessPath
+            }
             return "C:\Program Files\CCSwitchMulti\cc-switch.exe"
         }
         GetListenerOwner = {
             param($Port)
             $script:checks.Add("listener:$Port") | Out-Null
-            if ($script:installedNew) { return $script:newPid }
-            return $ListenerOwner
+            return $script:runtimePid
         }
         GetHealth = {
             param($Uri)
@@ -84,7 +90,7 @@ function New-FakeOperations {
         Backup = {
             param($Context)
             $script:events.Add("backup") | Out-Null
-            if ($FailAt -eq "backup") { throw "injected backup failure" }
+            if ($script:failAt -contains "backup") { throw "injected backup failure" }
             return @{ Path = "D:\ccsm-transaction-backups\txn-1" }
         }
         StopProcess = {
@@ -102,35 +108,48 @@ function New-FakeOperations {
         RunInstaller = {
             param($Context)
             $script:events.Add("install") | Out-Null
-            if ($FailAt -eq "install") { throw "injected install failure" }
+            if ($script:failAt -contains "install") { throw "injected install failure" }
             $script:installedNew = $true
         }
         StartProcess = {
             param($Context, $Mode)
             $script:events.Add("start:$Mode") | Out-Null
             if ($Mode -eq "previous") {
-                if ($RollbackStartFails) { throw "injected rollback start failure" }
+                if ($script:rollbackStartFails) { throw "injected rollback start failure" }
                 $script:installedNew = $false
+                $script:runtimePid = $script:oldPid
                 return $script:oldPid
             }
+            $script:runtimePid = $script:newPid
             return $script:newPid
         }
         WaitReady = {
             param($Context, $ProcessId)
             $script:events.Add("wait-ready:$ProcessId") | Out-Null
-            if ($FailAt -eq "ready" -and $ProcessId -eq $script:newPid) {
+            if ($script:failAt -contains "ready" -and $ProcessId -eq $script:newPid) {
                 throw "injected readiness failure"
             }
         }
         Restore = {
             param($Context, $Backup)
             $script:events.Add("restore") | Out-Null
+            if ($script:failAt -contains "restore") { throw "injected restore failure" }
             $script:installedNew = $false
         }
     }
 }
 
 Describe "CCSwitchMulti transactional reinstall orchestration" {
+    It "keeps condition polling internal instead of contaminating transaction output" {
+        $script:conditionAttempts = 0
+        $output = @(Wait-CcsmCondition -TimeoutSeconds 2 -Description "test condition" -Condition {
+            $script:conditionAttempts++
+            return $script:conditionAttempts -ge 2
+        })
+
+        $output.Count | Should Be 0
+    }
+
     It "exposes a non-mutating plan with the complete transaction and rollback boundary" {
         $plan = Get-CcsmReinstallPlan
 
@@ -145,17 +164,17 @@ Describe "CCSwitchMulti transactional reinstall orchestration" {
         $result.Status | Should Be "Success"
         $script:events[0] | Should Be "log:preflight-ok"
         $script:events[1] | Should Be "backup"
-        $script:checks | Should Contain "resolve:installer"
-        $script:checks | Should Contain "resolve:installed-executable"
-        $script:checks | Should Contain "resolve:install-directory"
-        $script:checks | Should Contain "resolve:uninstaller"
-        $script:checks | Should Contain "resolve:backup-root"
-        $script:checks | Should Contain "resolve:config"
-        $script:checks | Should Contain "hash:C:\artifacts\CCSwitchMulti-new-setup.exe"
-        $script:checks | Should Contain "hash:C:\Program Files\CCSwitchMulti\cc-switch.exe"
-        $script:checks | Should Contain "version:C:\Program Files\CCSwitchMulti\cc-switch.exe"
-        $script:checks | Should Contain "process-path:4242"
-        $script:checks | Should Contain "listener:15721"
+        ($script:checks -contains "resolve:installer") | Should Be $true
+        ($script:checks -contains "resolve:installed-executable") | Should Be $true
+        ($script:checks -contains "resolve:install-directory") | Should Be $true
+        ($script:checks -contains "resolve:uninstaller") | Should Be $true
+        ($script:checks -contains "resolve:backup-root") | Should Be $true
+        ($script:checks -contains "resolve:config") | Should Be $true
+        ($script:checks -contains "hash:C:\artifacts\CCSwitchMulti-new-setup.exe") | Should Be $true
+        ($script:checks -contains "hash:C:\Program Files\CCSwitchMulti\cc-switch.exe") | Should Be $true
+        ($script:checks -contains "version:C:\Program Files\CCSwitchMulti\cc-switch.exe") | Should Be $true
+        ($script:checks -contains "process-path:4242") | Should Be $true
+        ($script:checks -contains "listener:15721") | Should Be $true
     }
 
     It "refuses a listener owner mismatch without backup or process mutation" {
@@ -167,14 +186,30 @@ Describe "CCSwitchMulti transactional reinstall orchestration" {
         (($script:events | Where-Object { $_ -like "stop:*" }).Count) | Should Be 0
     }
 
+    It "rejects unsafe backup inputs before mutation" {
+        $missingConfigSpec = New-TestSpec
+        $missingConfigSpec.ConfigPaths = @()
+        $operations = New-FakeOperations
+        { Invoke-CcsmReinstallTransaction -Spec $missingConfigSpec -Operations $operations -Simulation } |
+            Should Throw "at least one config path is required"
+        ($script:events -contains "backup") | Should Be $false
+
+        $embeddedInstallerSpec = New-TestSpec
+        $embeddedInstallerSpec.InstallerPath = "C:\Program Files\CCSwitchMulti\new-setup.exe"
+        $operations = New-FakeOperations
+        { Invoke-CcsmReinstallTransaction -Spec $embeddedInstallerSpec -Operations $operations -Simulation } |
+            Should Throw "installer must be outside the install directory"
+        ($script:events -contains "backup") | Should Be $false
+    }
+
     It "performs the forward transaction in exact order and verifies the new runtime" {
         $operations = New-FakeOperations
         $result = Invoke-CcsmReinstallTransaction -Spec (New-TestSpec) -Operations $operations -Simulation
         $mutations = @($script:events | Where-Object { $_ -notlike "log:*" })
 
         ($mutations -join ",") | Should Be "backup,stop:4242,wait-port-release,uninstall,install,start:new,wait-ready:5000"
-        $script:checks | Should Contain "process-path:5000"
-        $script:checks | Should Contain "health:http://127.0.0.1:15721/health"
+        ($script:checks -contains "process-path:5000") | Should Be $true
+        ($script:checks -contains "health:http://127.0.0.1:15721/health") | Should Be $true
         $result.NewPid | Should Be 5000
     }
 
@@ -185,8 +220,8 @@ Describe "CCSwitchMulti transactional reinstall orchestration" {
 
         $result.Status | Should Be "RolledBack"
         ($mutations -join ",") | Should Be "backup,stop:4242,wait-port-release,uninstall,install,start:new,wait-ready:5000,stop:5000,restore,start:previous,wait-ready:6000"
-        $script:checks | Should Contain "process-path:5000"
-        $script:checks | Should Contain "process-path:6000"
+        ($script:checks -contains "process-path:5000") | Should Be $true
+        ($script:checks -contains "process-path:6000") | Should Be $true
     }
 
     It "never terminates a newly launched process whose executable path cannot be verified" {
@@ -206,6 +241,26 @@ Describe "CCSwitchMulti transactional reinstall orchestration" {
         ($script:events -contains "restore") | Should Be $true
         ($script:events -contains "start:previous") | Should Be $true
         $result.RollbackError | Should Match "rollback start failure"
+    }
+
+    It "continues restore and restart when the failed new process has already disappeared" {
+        $operations = New-FakeOperations -FailAt "ready" -NewProcessPath "__missing__"
+        $result = Invoke-CcsmReinstallTransaction -Spec (New-TestSpec) -Operations $operations -Simulation
+
+        $result.Status | Should Be "RolledBack"
+        ($script:events -contains "restore") | Should Be $true
+        ($script:events -contains "start:previous") | Should Be $true
+    }
+
+    It "still attempts to restart and verify the previous runtime when state restore fails" {
+        $operations = New-FakeOperations -FailAt @("ready", "restore")
+        $result = Invoke-CcsmReinstallTransaction -Spec (New-TestSpec) -Operations $operations -Simulation
+
+        $result.Status | Should Be "RollbackFailed"
+        ($script:events -contains "restore") | Should Be $true
+        ($script:events -contains "start:previous") | Should Be $true
+        ($script:events -contains "wait-ready:6000") | Should Be $true
+        $result.RollbackError | Should Match "restore failure"
     }
 
     It "does not attempt rollback when backup fails before the verified stop boundary" {
