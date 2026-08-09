@@ -2637,7 +2637,12 @@ fn codex_official_picker_metadata_field(
         | "supports_parallel_tool_calls"
         | "supportsParallelToolCalls"
         | "base_instructions"
-        | "baseInstructions" => false,
+        | "baseInstructions"
+        // MultiRouter applies one user-selected transport policy after official
+        // metadata enrichment. Cache synchronization must not reintroduce a
+        // stale per-model value from the pre-takeover official backup.
+        | "multi_agent_version"
+        | "multiAgentVersion" => false,
         // 对同 slug 的官方 GPT，图片能力必须来自接管前官方 catalog。路由
         // catalog 往往是 NativeResponses text-only 模板的产物；允许它覆盖会把
         // 官方模型错误降级，令 Desktop 在请求送达代理前就拒绝图片输入。
