@@ -7233,6 +7233,66 @@ model_provider = "codex_model_router"
 
     #[test]
     #[serial]
+    fn subagent_v1_prunes_only_ccswitch_managed_roles() {
+        let _guard = TestHomeGuard::new();
+        let agents_dir = get_codex_agents_dir();
+        std::fs::create_dir_all(&agents_dir).expect("create agents dir");
+        let managed_role_path = agents_dir.join("deepseek-flash.toml");
+        std::fs::write(
+            &managed_role_path,
+            format!(
+                "{CC_SWITCH_MANAGED_AGENT_MARKER}\nname = \"deepseek-flash\"\nmodel = \"deepseek-v4-flash\"\n"
+            ),
+        )
+        .expect("seed managed role");
+        let user_role_path = agents_dir.join("my-reviewer.toml");
+        std::fs::write(
+            &user_role_path,
+            "name = \"my-reviewer\"\nmodel = \"custom-model\"\n",
+        )
+        .expect("seed user role");
+        let settings = json!({
+            "modelCatalog": {
+                "models": [{
+                    "model": "deepseek-v4-flash",
+                    "displayName": "DeepSeek V4 Flash"
+                }]
+            },
+            "codexRouting": {
+                "enabled": true,
+                "subagentVersion": "v1",
+                "routes": [{
+                    "id": "deepseek",
+                    "match": { "models": ["deepseek-v4-flash"] },
+                    "upstream": { "auth": { "source": "provider_config" } }
+                }]
+            }
+        });
+        let config = r#"model_provider = "codex_model_router_v2"
+
+[model_providers.codex_model_router_v2]
+base_url = "http://127.0.0.1:15721/v1"
+"#;
+
+        prepare_codex_config_text_with_model_catalog(
+            &settings,
+            config,
+            CodexCatalogToolProfile::ProxyChat,
+        )
+        .expect("prepare V1 router");
+
+        assert!(
+            !managed_role_path.exists(),
+            "V1 must remove CCSwitchMulti V2 role projections"
+        );
+        assert!(
+            user_role_path.exists(),
+            "V1 cleanup must never remove a user-authored role"
+        );
+    }
+
+    #[test]
+    #[serial]
     fn managed_agent_files_do_not_overwrite_user_roles() {
         let _guard = TestHomeGuard::new();
         let agents_dir = get_codex_agents_dir();
