@@ -112,6 +112,70 @@ function Test-CcsmStrictDescendant {
         -not (Test-CcsmSamePath -Left $Candidate -Right $Parent)
 }
 
+function Get-CcsmExistingFileSystemItem {
+    param([string]$Path)
+
+    try {
+        return Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    } catch {
+        if ($_.CategoryInfo.Category -eq [System.Management.Automation.ErrorCategory]::ObjectNotFound) {
+            return $null
+        }
+        throw "cannot inspect filesystem boundary: $Path"
+    }
+}
+
+function Assert-CcsmNoReparseTree {
+    param($Item, [string]$Purpose)
+
+    if (($Item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "reparse"
+    }
+    if (-not $Item.PSIsContainer) { return }
+    foreach ($child in @(Get-ChildItem -LiteralPath $Item.FullName -Force -ErrorAction Stop)) {
+        Assert-CcsmNoReparseTree -Item $child -Purpose $Purpose
+    }
+}
+
+function Assert-CcsmNoReparseBoundary {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Path,
+        [Parameter(Mandatory = $true)][string]$Purpose
+    )
+
+    foreach ($candidate in @($Path)) {
+        if ([string]::IsNullOrWhiteSpace($candidate)) { throw "reparse" }
+        $current = [System.IO.Path]::GetFullPath($candidate)
+        $candidatePath = $current
+        while ($true) {
+            $item = Get-CcsmExistingFileSystemItem -Path $current
+            if ($null -ne $item) {
+                if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    throw "reparse"
+                }
+                if ([string]::Equals($current, $candidatePath, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    Assert-CcsmNoReparseTree -Item $item -Purpose $Purpose
+                }
+            }
+            $parent = [System.IO.Directory]::GetParent($current)
+            if ($null -eq $parent -or [string]::Equals($parent.FullName, $current, [System.StringComparison]::OrdinalIgnoreCase)) {
+                break
+            }
+            $current = $parent.FullName
+        }
+    }
+}
+
+function Remove-CcsmDirectoryTree {
+    param([string]$Path, [string]$Purpose)
+
+    if (Test-Path -LiteralPath $Path) {
+        Assert-CcsmNoReparseBoundary -Path $Path -Purpose $Purpose
+        Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+    }
+}
+
 function Assert-CcsmProductInstallBoundary {
     param(
         [string]$InstallDirectory,
@@ -272,6 +336,9 @@ function Resolve-CcsmTransactionContext {
             throw "config paths must not overlap the install directory or backup root: $configResolved"
         }
     }
+    Assert-CcsmNoReparseBoundary -Path (@(
+        $resolved.InstallerPath, $installedExecutable, $installDirectory, $uninstallExecutable, $backupRoot
+    ) + @($configPaths)) -Purpose "transaction preflight"
 
     $health = [uri]$Spec.HealthUri
     if (-not $health.IsAbsoluteUri -or $health.Scheme -ne "http") {
@@ -527,21 +594,25 @@ function Invoke-CcsmReinstallTransaction {
         }
 
         $previousPid = $null
-        try {
-            $previousPid = & $Operations.StartProcess $context "previous"
-        } catch {
-                $rollbackErrors.Add("start previous runtime: $($_.Exception.Message)") | Out-Null
-        }
-        if ($null -ne $previousPid) {
+        if ($restoreValidated) {
             try {
-                & $Operations.WaitReady $context $previousPid
-                Assert-CcsmRuntime -Context $context -Operations $Operations -ProcessId $previousPid `
-                    -ExpectedVersion $context.ExpectedCurrentVersion -ExpectedHash $context.ExpectedCurrentHash -Label "rollback runtime"
+                $previousPid = & $Operations.StartProcess $context "previous"
             } catch {
-                $rollbackErrors.Add("verify previous runtime: $($_.Exception.Message)") | Out-Null
+                    $rollbackErrors.Add("start previous runtime: $($_.Exception.Message)") | Out-Null
+            }
+            if ($null -ne $previousPid) {
+                try {
+                    & $Operations.WaitReady $context $previousPid
+                    Assert-CcsmRuntime -Context $context -Operations $Operations -ProcessId $previousPid `
+                        -ExpectedVersion $context.ExpectedCurrentVersion -ExpectedHash $context.ExpectedCurrentHash -Label "rollback runtime"
+                } catch {
+                    $rollbackErrors.Add("verify previous runtime: $($_.Exception.Message)") | Out-Null
+                }
+            } else {
+                $rollbackErrors.Add("start previous runtime: no process ID returned") | Out-Null
             }
         } else {
-            $rollbackErrors.Add("start previous runtime: no process ID returned") | Out-Null
+            $rollbackErrors.Add("start previous runtime: skipped because backup validation failed") | Out-Null
         }
 
         if ($rollbackErrors.Count -eq 0) {
@@ -612,11 +683,15 @@ function Assert-CcsmRestoreBoundary {
         -InstalledExecutable $Context.InstalledExecutable -UninstallExecutable $Context.UninstallExecutable
     Assert-CcsmProductConfigBoundary -ConfigPaths $Context.ConfigPaths
     Assert-CcsmRegistryKey -Key $Context.RegistryKey
+    Assert-CcsmNoReparseBoundary -Path (@(
+        $Context.BackupRoot, $Context.TransactionRoot, $BackupPath, $Context.InstallDirectory
+    ) + @($Context.ConfigPaths)) -Purpose "transaction restore"
 }
 
 function Copy-CcsmDirectoryContents {
     param([string]$Source, [string]$Destination)
 
+    Assert-CcsmNoReparseBoundary -Path @($Source, $Destination) -Purpose "directory copy"
     if (-not (Test-Path -LiteralPath $Source -PathType Container)) {
         throw "directory copy source is missing: $Source"
     }
@@ -628,9 +703,84 @@ function Copy-CcsmDirectoryContents {
     }
 }
 
+function Get-CcsmRegularFileInventory {
+    param([string]$Root)
+
+    Assert-CcsmNoReparseBoundary -Path $Root -Purpose "app backup inventory"
+    if (-not (Test-Path -LiteralPath $Root -PathType Container)) {
+        throw "app backup inventory"
+    }
+    $rootPath = [System.IO.Path]::GetFullPath($Root).TrimEnd([char[]]@([char]92, [char]47))
+    $records = New-Object System.Collections.Generic.List[string]
+    foreach ($file in @(Get-ChildItem -LiteralPath $Root -File -Force -Recurse -ErrorAction Stop)) {
+        $filePath = [System.IO.Path]::GetFullPath($file.FullName)
+        $separator = [System.IO.Path]::DirectorySeparatorChar
+        if (-not $filePath.StartsWith("$rootPath$separator", [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "app backup inventory"
+        }
+        $relativePath = $filePath.Substring($rootPath.Length).TrimStart([char[]]@([char]92, [char]47))
+        if ([string]::IsNullOrWhiteSpace($relativePath) -or $relativePath -match '(^|[\\/])\.\.([\\/]|$)') {
+            throw "app backup inventory"
+        }
+        $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToUpperInvariant()
+        [void]$records.Add("$relativePath`t$hash")
+    }
+    $orderedRecords = [string[]]$records.ToArray()
+    [Array]::Sort($orderedRecords, [System.StringComparer]::Ordinal)
+    $files = New-Object System.Collections.Generic.List[object]
+    foreach ($record in $orderedRecords) {
+        $tabIndex = $record.IndexOf([char]9)
+        if ($tabIndex -lt 1) { throw "app backup inventory" }
+        [void]$files.Add([pscustomobject]@{
+            RelativePath = $record.Substring(0, $tabIndex)
+            Hash = $record.Substring($tabIndex + 1)
+        })
+    }
+    $digestAlgorithm = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $digestBytes = $digestAlgorithm.ComputeHash([System.Text.Encoding]::UTF8.GetBytes([string]::Join("`n", $orderedRecords)))
+        $digest = ([System.BitConverter]::ToString($digestBytes)).Replace("-", "")
+    } finally {
+        $digestAlgorithm.Dispose()
+    }
+    return [pscustomobject]@{ Files = $files.ToArray(); Digest = $digest }
+}
+
+function Assert-CcsmRegularFileInventory {
+    param($Expected, [string]$Root)
+
+    if ($null -eq $Expected) { throw "app backup inventory" }
+    $filesProperty = $Expected.PSObject.Properties["Files"]
+    $digestProperty = $Expected.PSObject.Properties["Digest"]
+    if ($null -eq $filesProperty -or $null -eq $digestProperty) { throw "app backup inventory" }
+    $expectedFiles = @($filesProperty.Value)
+    $expectedDigest = [string]$digestProperty.Value
+    if ($expectedDigest -notmatch '^[A-Fa-f0-9]{64}$') { throw "app backup inventory" }
+    foreach ($expectedFile in $expectedFiles) {
+        if ($null -eq $expectedFile -or [string]::IsNullOrWhiteSpace([string]$expectedFile.RelativePath) -or
+            [string]$expectedFile.RelativePath -match '(^|[\\/])\.\.([\\/]|$)' -or
+            [string]$expectedFile.Hash -notmatch '^[A-Fa-f0-9]{64}$') {
+            throw "app backup inventory"
+        }
+    }
+    $actual = Get-CcsmRegularFileInventory -Root $Root
+    if (-not [string]::Equals($actual.Digest, $expectedDigest, [System.StringComparison]::OrdinalIgnoreCase) -or
+        $actual.Files.Count -ne $expectedFiles.Count) {
+        throw "app backup inventory"
+    }
+    foreach ($expectedFile in $expectedFiles) {
+        $matches = @($actual.Files | Where-Object {
+            $_.RelativePath -eq $expectedFile.RelativePath -and
+            [string]::Equals($_.Hash, $expectedFile.Hash, [System.StringComparison]::OrdinalIgnoreCase)
+        })
+        if ($matches.Count -ne 1) { throw "app backup inventory" }
+    }
+}
+
 function Get-CcsmConfigInventory {
     param([string]$ConfigRoot)
 
+    Assert-CcsmNoReparseBoundary -Path $ConfigRoot -Purpose "config inventory"
     if (-not (Test-Path -LiteralPath $ConfigRoot -PathType Container)) {
         throw "config root is missing: $ConfigRoot"
     }
@@ -670,13 +820,13 @@ function Invoke-CcsmSqliteIntegrityCheck {
 using System;
 using System.Runtime.InteropServices;
 public static class CcsmSqliteNative {
-    [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+    [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode, ExactSpelling = true)]
     public static extern int sqlite3_open16(string filename, out IntPtr db);
-    [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+    [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode, ExactSpelling = true)]
     public static extern int sqlite3_prepare16_v2(IntPtr db, string sql, int bytes, out IntPtr statement, IntPtr tail);
     [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
     public static extern int sqlite3_step(IntPtr statement);
-    [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+    [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode, ExactSpelling = true)]
     public static extern IntPtr sqlite3_column_text16(IntPtr statement, int column);
     [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
     public static extern int sqlite3_finalize(IntPtr statement);
@@ -741,6 +891,8 @@ function Write-CcsmBackupManifest {
         TransactionId = $Context.TransactionId
         InstallDirectory = $Context.InstallDirectory
         AppBackup = $Backup.AppBackup
+        AppInventory = @($Backup.AppInventory)
+        AppInventoryDigest = $Backup.AppInventoryDigest
         ConfigSnapshotComplete = [bool]$Backup.ConfigSnapshotComplete
         ConfigBackups = @($Backup.ConfigBackups)
         RegistryKey = $Context.RegistryKey
@@ -761,6 +913,7 @@ function Get-CcsmValidatedBackupManifest {
         -not (Test-Path -LiteralPath $Backup.ManifestPath -PathType Leaf)) {
         throw "backup manifest is missing or escaped the transaction boundary"
     }
+    Assert-CcsmNoReparseBoundary -Path $Backup.ManifestPath -Purpose "backup manifest"
     Assert-CcsmHash -Name "backup manifest hash" -Value ([string]$Backup.ManifestHash)
     $actualManifestHash = (Get-FileHash -LiteralPath $Backup.ManifestPath -Algorithm SHA256).Hash
     if (-not [string]::Equals($actualManifestHash, $Backup.ManifestHash, [System.StringComparison]::OrdinalIgnoreCase)) {
@@ -773,6 +926,17 @@ function Get-CcsmValidatedBackupManifest {
         -not (Test-Path -LiteralPath $manifest.AppBackup -PathType Container)) {
         throw "backup manifest does not match the validated transaction"
     }
+    Assert-CcsmNoReparseBoundary -Path ([string]$manifest.AppBackup) -Purpose "app backup manifest source"
+    $appInventoryProperty = $manifest.PSObject.Properties["AppInventory"]
+    $appInventoryDigestProperty = $manifest.PSObject.Properties["AppInventoryDigest"]
+    if ($null -eq $appInventoryProperty -or $null -eq $appInventoryDigestProperty) {
+        throw "app backup inventory"
+    }
+    $appInventory = [pscustomobject]@{
+        Files = @($appInventoryProperty.Value)
+        Digest = [string]$appInventoryDigestProperty.Value
+    }
+    Assert-CcsmRegularFileInventory -Expected $appInventory -Root ([string]$manifest.AppBackup)
     Assert-CcsmRegistryKey -Key ([string]$manifest.RegistryKey)
     $configBackups = @($manifest.ConfigBackups)
     if ([bool]$manifest.ConfigSnapshotComplete -and $configBackups.Count -ne $Context.ConfigPaths.Count) {
@@ -784,14 +948,20 @@ function Get-CcsmValidatedBackupManifest {
     foreach ($configBackup in $configBackups) {
         $expectedConfig = @($Context.ConfigPaths | Where-Object { Test-CcsmSamePath -Left $_ -Right ([string]$configBackup.Source) })
         if ($expectedConfig.Count -ne 1 -or
-            -not (Test-CcsmStrictDescendant -Candidate ([string]$configBackup.Backup) -Parent $Context.TransactionRoot) -or
-            -not (Test-Path -LiteralPath $configBackup.Backup -PathType Container)) {
+            -not (Test-CcsmStrictDescendant -Candidate ([string]$configBackup.Backup) -Parent $Context.TransactionRoot)) {
+            throw "config backup escaped the validated restore boundary"
+        }
+        Assert-CcsmNoReparseBoundary -Path @([string]$configBackup.Source, [string]$configBackup.Backup) -Purpose "config backup manifest source"
+        if (-not (Test-Path -LiteralPath $configBackup.Backup -PathType Container)) {
             throw "config backup escaped the validated restore boundary"
         }
     }
     if ([bool]$manifest.RegistryExisted) {
-        if (-not (Test-CcsmStrictDescendant -Candidate ([string]$manifest.RegistryFile) -Parent $Context.TransactionRoot) -or
-            -not (Test-Path -LiteralPath $manifest.RegistryFile -PathType Leaf)) {
+        if (-not (Test-CcsmStrictDescendant -Candidate ([string]$manifest.RegistryFile) -Parent $Context.TransactionRoot)) {
+            throw "registry backup escaped the validated restore boundary"
+        }
+        Assert-CcsmNoReparseBoundary -Path ([string]$manifest.RegistryFile) -Purpose "registry backup manifest source"
+        if (-not (Test-Path -LiteralPath $manifest.RegistryFile -PathType Leaf)) {
             throw "registry backup escaped the validated restore boundary"
         }
         Assert-CcsmHash -Name "registry backup hash" -Value ([string]$manifest.RegistryFileHash)
@@ -890,6 +1060,7 @@ function New-CcsmRealOperations {
         $appBackup = Join-Path $Context.TransactionRoot "app"
         New-Item -ItemType Directory -Path $appBackup -Force -ErrorAction Stop | Out-Null
         Copy-CcsmDirectoryContents -Source $Context.InstallDirectory -Destination $appBackup
+        $appInventory = Get-CcsmRegularFileInventory -Root $appBackup
 
         $registryExisted = Test-Path -LiteralPath $Context.RegistryKey
         $registryFile = $null
@@ -904,6 +1075,8 @@ function New-CcsmRealOperations {
         $backup = [pscustomobject]@{
             Path = $Context.TransactionRoot
             AppBackup = $appBackup
+            AppInventory = @($appInventory.Files)
+            AppInventoryDigest = $appInventory.Digest
             ConfigSnapshotComplete = $false
             ConfigBackups = @()
             RegistryExisted = [bool]$registryExisted
@@ -1000,18 +1173,14 @@ function New-CcsmRealOperations {
         param($Context, $Backup)
         $manifest = Get-CcsmValidatedBackupManifest -Context $Context -Backup $Backup
 
-        if (Test-Path -LiteralPath $Context.InstallDirectory) {
-            Remove-Item -LiteralPath $Context.InstallDirectory -Recurse -Force -ErrorAction Stop
-        }
+        Remove-CcsmDirectoryTree -Path $Context.InstallDirectory -Purpose "restore install directory"
         New-Item -ItemType Directory -Path $Context.InstallDirectory -Force -ErrorAction Stop | Out-Null
         Copy-CcsmDirectoryContents -Source ([string]$manifest.AppBackup) -Destination $Context.InstallDirectory
 
         if ([bool]$manifest.ConfigSnapshotComplete) {
             foreach ($configBackup in @($manifest.ConfigBackups)) {
                 $source = [string]$configBackup.Source
-                if (Test-Path -LiteralPath $source) {
-                    Remove-Item -LiteralPath $source -Recurse -Force -ErrorAction Stop
-                }
+                Remove-CcsmDirectoryTree -Path $source -Purpose "restore config directory"
                 New-Item -ItemType Directory -Path $source -Force -ErrorAction Stop | Out-Null
                 Copy-CcsmDirectoryContents -Source ([string]$configBackup.Backup) -Destination $source
             }
@@ -1059,6 +1228,11 @@ function New-CcsmRealOperations {
     $operations.VerifyRestoredState = {
         param($Context, $Backup)
         $manifest = Get-CcsmValidatedBackupManifest -Context $Context -Backup $Backup
+        $appInventory = [pscustomobject]@{
+            Files = @($manifest.AppInventory)
+            Digest = [string]$manifest.AppInventoryDigest
+        }
+        Assert-CcsmRegularFileInventory -Expected $appInventory -Root $Context.InstallDirectory
         $restoredVersion = & $operations.GetFileVersion $Context.InstalledExecutable
         if ($restoredVersion -ne $Context.ExpectedCurrentVersion) { throw "restored application version mismatch" }
         $restoredHash = & $operations.GetFileHash $Context.InstalledExecutable
