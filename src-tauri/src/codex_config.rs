@@ -2637,12 +2637,7 @@ fn codex_official_picker_metadata_field(
         | "supports_parallel_tool_calls"
         | "supportsParallelToolCalls"
         | "base_instructions"
-        | "baseInstructions"
-        // MultiRouter applies one user-selected transport policy after official
-        // metadata enrichment. Cache synchronization must not reintroduce a
-        // stale per-model value from the pre-takeover official backup.
-        | "multi_agent_version"
-        | "multiAgentVersion" => false,
+        | "baseInstructions" => false,
         // 对同 slug 的官方 GPT，图片能力必须来自接管前官方 catalog。路由
         // catalog 往往是 NativeResponses text-only 模板的产物；允许它覆盖会把
         // 官方模型错误降级，令 Desktop 在请求送达代理前就拒绝图片输入。
@@ -2848,7 +2843,30 @@ fn sync_codex_models_cache_with_cc_switch_catalog(catalog: &Value) -> Result<(),
         .and_then(Value::as_array)
         .map(Vec::as_slice)
         .unwrap_or_default();
-    let merged_models = merge_codex_models(official_models, models);
+    let mut merged_models = merge_codex_models(official_models, models);
+    let routed_models_by_id = models
+        .iter()
+        .filter_map(|model| codex_model_stable_id(model).map(|model_id| (model_id, model)))
+        .collect::<HashMap<_, _>>();
+    for merged_model in &mut merged_models {
+        let Some(model_id) = codex_model_stable_id(merged_model) else {
+            continue;
+        };
+        let Some(routed_model) = routed_models_by_id.get(&model_id) else {
+            continue;
+        };
+        let Some(merged_object) = merged_model.as_object_mut() else {
+            continue;
+        };
+        // 普通 catalog enrichment 仍以同 slug 官方 transport 元数据为权威；
+        // 只有最终写入 CCSM-owned cache 时，才让当前用户选择的 V1/V2 投影
+        // 覆盖接管前备份，避免第二次合并重新带回过期协议。
+        for field in ["multi_agent_version", "multiAgentVersion"] {
+            if let Some(value) = routed_model.get(field).cloned() {
+                merged_object.insert(field.to_string(), value);
+            }
+        }
+    }
 
     // 以官方缓存对象为底稿还能保留新版 App 可能新增的顶层元数据；这里只覆盖
     // CCSM 必须维护的刷新时间、所有权标记、客户端版本和合并后的模型数组。
