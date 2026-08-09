@@ -327,6 +327,8 @@ export interface CodexModelCatalogConfig {
   spawnAgentModels?: string[];
 }
 
+export type CodexSubagentVersion = "v1" | "v2";
+
 export type CodexRoutingAuthSource =
   | "provider_config"
   | "managed_account"
@@ -380,6 +382,7 @@ export interface CodexRoutingConfig {
   enabled?: boolean;
   defaultRouteId?: string;
   officialAuth?: CodexOfficialAuthConfig;
+  subagentVersion?: CodexSubagentVersion;
   routes?: CodexRoutingRoute[];
 }
 

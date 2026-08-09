@@ -116,12 +116,14 @@ import {
   codexPlanModelListAction,
   isCodexCatalogOnlyPlanModelFetch,
 } from "@/utils/codexPlanModelFetch";
+import { normalizeCodexSubagentVersion } from "@/utils/codexSubagentVersion";
 import { useCodexOauth } from "@/components/providers/forms/hooks/useCodexOauth";
 import { HostedToolsSwitchPanel } from "./HostedToolsSwitchPanel";
 import type {
   CodexOfficialAuthConfig,
   CodexOfficialAuthMode,
   CodexRoutingConfig,
+  CodexSubagentVersion,
   Provider,
 } from "@/types";
 import type { RequestLog } from "@/types/usage";
@@ -203,6 +205,7 @@ type CodexRouting = {
   enabled?: boolean;
   defaultRouteId?: string;
   officialAuth?: CodexOfficialAuthConfig;
+  subagentVersion?: CodexSubagentVersion;
   routes?: CodexRoute[];
 };
 
@@ -950,10 +953,16 @@ export function readCodexRouting(
   if (Array.isArray(routing)) {
     return {
       enabled: true,
+      subagentVersion: "v2",
       routes: routing.map(normalizeLegacyCodexRoutingRoute),
     };
   }
-  return routing as CodexRouting;
+  return {
+    ...(routing as Omit<CodexRouting, "subagentVersion">),
+    subagentVersion: normalizeCodexSubagentVersion(
+      (routing as { subagentVersion?: unknown }).subagentVersion,
+    ),
+  };
 }
 
 /// 将旧版扁平 route 数组条目转换成新版 `codexRouting.routes[]` 条目，避免保存时清空历史路由。
