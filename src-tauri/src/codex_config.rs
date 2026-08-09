@@ -2463,9 +2463,16 @@ model_provider = "{model_provider}"
 /// 同步 CCSwitchMulti 托管的官方 custom agent TOML 文件。
 ///
 /// 已有用户手写同名文件不会被覆盖；这种情况下使用 `ccswitch-<role>` 作为托管角色名。
-fn sync_codex_managed_agent_files(specs: &[CodexCatalogModelSpec]) -> Result<(), AppError> {
+fn sync_codex_managed_agent_files(
+    specs: &[CodexCatalogModelSpec],
+    version: CodexSubagentVersion,
+) -> Result<(), AppError> {
     let agents_dir = get_codex_agents_dir();
     fs::create_dir_all(&agents_dir).map_err(|e| AppError::io(&agents_dir, e))?;
+
+    if version == CodexSubagentVersion::V1 {
+        return prune_stale_codex_managed_agent_files(&agents_dir, &HashSet::new());
+    }
 
     let mut seen_roles = HashSet::new();
     let mut desired_paths = HashSet::new();
@@ -2916,7 +2923,7 @@ pub fn prepare_codex_config_text_with_model_catalog(
         let config_text = set_codex_native_web_search_field(&config_text, disable_web_search)?;
         write_json_file(&catalog_path, &catalog)?;
         sync_codex_models_cache_with_cc_switch_catalog(&catalog)?;
-        sync_codex_managed_agent_files(&specs)?;
+        sync_codex_managed_agent_files(&specs, codex_subagent_version(settings))?;
         Ok(config_text)
     } else {
         restore_codex_models_cache_if_cc_switch_owned()?;
@@ -7213,7 +7220,8 @@ model_provider = "codex_model_router"
             base_instructions: None,
         }];
 
-        sync_codex_managed_agent_files(&specs).expect("sync managed agents");
+        sync_codex_managed_agent_files(&specs, CodexSubagentVersion::V2)
+            .expect("sync managed agents");
 
         let managed = std::fs::read_to_string(&legacy_role_path).expect("read migrated role");
         assert!(managed.contains(CC_SWITCH_MANAGED_AGENT_MARKER));
@@ -7318,7 +7326,8 @@ model_provider = "custom"
             base_instructions: None,
         }];
 
-        sync_codex_managed_agent_files(&specs).expect("sync managed agents");
+        sync_codex_managed_agent_files(&specs, CodexSubagentVersion::V2)
+            .expect("sync managed agents");
 
         let preserved = std::fs::read_to_string(&user_role_path).expect("read user role");
         assert!(preserved.contains(r#"model_provider = "custom""#));
@@ -7363,11 +7372,12 @@ model_provider = "custom"
         )
         .collect::<Vec<_>>();
 
-        sync_codex_managed_agent_files(&specs).expect("sync managed agents");
+        sync_codex_managed_agent_files(&specs, CodexSubagentVersion::V2)
+            .expect("sync managed agents");
 
         let mut reordered_specs = specs.clone();
         reordered_specs.rotate_left(1);
-        sync_codex_managed_agent_files(&reordered_specs)
+        sync_codex_managed_agent_files(&reordered_specs, CodexSubagentVersion::V2)
             .expect("changing direct override order must not change managed roles");
 
         let agents_dir = get_codex_agents_dir();
@@ -7432,7 +7442,8 @@ model = "handwritten"
             base_instructions: None,
         }];
 
-        sync_codex_managed_agent_files(&specs).expect("sync managed agents");
+        sync_codex_managed_agent_files(&specs, CodexSubagentVersion::V2)
+            .expect("sync managed agents");
 
         assert!(
             !stale_path.exists(),
