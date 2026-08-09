@@ -8566,6 +8566,52 @@ base_url = "http://127.0.0.1:15721/v1"
 
     #[test]
     #[serial]
+    fn model_cache_sync_applies_selected_subagent_transport_over_official_metadata() {
+        let _home = TestHomeGuard::new();
+        seed_codex_models_cache(json!([{
+            "slug": "gpt-5.6-luna",
+            "display_name": "GPT-5.6 Luna",
+            "context_window": 256000,
+            "multi_agent_version": "v1"
+        }]));
+        let settings = json!({
+            "modelCatalog": {
+                "models": [{ "model": "gpt-5.6-luna", "displayName": "GPT-5.6 Luna" }]
+            },
+            "codexRouting": {
+                "enabled": true,
+                "subagentVersion": "v2",
+                "routes": [{
+                    "id": "official",
+                    "match": { "models": ["gpt-5.6-luna"] },
+                    "upstream": { "auth": { "source": "managed_codex_oauth" } }
+                }]
+            }
+        });
+        let config = r#"model_provider = "codex_model_router_v2"
+
+[model_providers.codex_model_router_v2]
+base_url = "http://127.0.0.1:15721/v1"
+"#;
+
+        prepare_codex_config_text_with_model_catalog(
+            &settings,
+            config,
+            CodexCatalogToolProfile::ProxyChat,
+        )
+        .expect("prepare V2 catalog and cache");
+
+        let cache: Value = read_json_file(&get_codex_models_cache_path()).expect("read cache");
+        let model = cache["models"]
+            .as_array()
+            .and_then(|models| models.first())
+            .expect("cached model");
+        assert_eq!(model["multi_agent_version"], "v2");
+        assert_eq!(model["multiAgentVersion"], "v2");
+    }
+
+    #[test]
+    #[serial]
     /// 重复同步只从接管前备份恢复同 slug 元数据，不能恢复未路由的官方独有模型。
     fn repeated_model_catalog_sync_keeps_same_slug_metadata_from_backup() {
         let _home = TestHomeGuard::new();
