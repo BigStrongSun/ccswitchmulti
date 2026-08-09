@@ -7407,6 +7407,81 @@ model_provider = "custom"
 
     #[test]
     #[serial]
+    fn managed_deepseek_roles_render_windows_safe_execution_contract() {
+        let _guard = TestHomeGuard::new();
+        let specs = [
+            ("deepseek-v4-flash", "DeepSeek V4 Flash", 1_000_000),
+            ("deepseek-v4-pro", "DeepSeek V4 Pro", 1_000_000),
+        ]
+        .into_iter()
+        .map(
+            |(model, display_name, context_window)| CodexCatalogModelSpec {
+                model: model.to_string(),
+                upstream_model: None,
+                display_name: display_name.to_string(),
+                context_window,
+                text_only: false,
+                is_default: false,
+                supports_parallel_tool_calls: None,
+                input_modalities: None,
+                base_instructions: None,
+            },
+        )
+        .collect::<Vec<_>>();
+
+        sync_codex_managed_agent_files(&specs, CodexSubagentVersion::V2)
+            .expect("sync managed DeepSeek roles");
+
+        let agents_dir = get_codex_agents_dir();
+        let flash: toml::Value = toml::from_str(
+            &std::fs::read_to_string(agents_dir.join("deepseek-flash.toml"))
+                .expect("read generated Flash role"),
+        )
+        .expect("parse generated Flash role TOML");
+        let pro: toml::Value = toml::from_str(
+            &std::fs::read_to_string(agents_dir.join("deepseek-pro.toml"))
+                .expect("read generated Pro role"),
+        )
+        .expect("parse generated Pro role TOML");
+
+        let expected_shared_guidance = "On Windows, use `rg` for targeted recursive search; scope it to named paths and exclude heavy directories such as `node_modules`, `.git`, `target`, `dist`, and generated outputs.\nDo not use Unix-only commands such as `wc`, and do not assume `Select-String -Recurse` exists; if `rg` is unavailable, pipe `Get-ChildItem -File -Recurse` to `Select-String`.\nFor ordinary read-only inspection, call tools without escalation metadata or a justification.\nStop and report as soon as the requested evidence is sufficient; do not keep scanning merely to be exhaustive.";
+        for (role, model, description, reasoning_effort) in [
+            (
+                &flash,
+                "deepseek-v4-flash",
+                "DeepSeek V4 Flash worker for long-context code reading, read-heavy exploration, architecture tracing, parallel evidence collection, and lightweight verification.",
+                "medium",
+            ),
+            (
+                &pro,
+                "deepseek-v4-pro",
+                "DeepSeek V4 Pro worker for complex debugging, cross-module reasoning, architecture decisions, high-risk review, and complex implementation.",
+                "high",
+            ),
+        ] {
+            let expected_instructions = format!(
+                "You are a CCSwitchMulti managed Codex subagent pinned to `{model}`.\nStay within the delegated task, report concrete file paths and verification results, and escalate risky decisions to the parent agent.\nDo not change unrelated files or override user-owned worktree changes.\n{expected_shared_guidance}"
+            );
+            assert_eq!(role.get("model").and_then(toml::Value::as_str), Some(model));
+            assert_eq!(
+                role.get("description").and_then(toml::Value::as_str),
+                Some(description)
+            );
+            assert_eq!(
+                role.get("model_reasoning_effort")
+                    .and_then(toml::Value::as_str),
+                Some(reasoning_effort)
+            );
+            assert_eq!(
+                role.get("developer_instructions")
+                    .and_then(toml::Value::as_str),
+                Some(expected_instructions.as_str())
+            );
+        }
+    }
+
+    #[test]
+    #[serial]
     fn managed_agent_files_prune_stale_cc_switch_roles() {
         let _guard = TestHomeGuard::new();
         let agents_dir = get_codex_agents_dir();
