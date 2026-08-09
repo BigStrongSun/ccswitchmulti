@@ -80,6 +80,7 @@ const CODEX_REASONING_EFFORTS: &[(&str, &str)] = &[
     ("xhigh", "Extra high reasoning depth for complex problems"),
 ];
 const CODEX_DEFAULT_REASONING_EFFORT: &str = "medium";
+const DEEPSEEK_WINDOWS_EXECUTION_GUIDANCE: &str = "On Windows, use `rg` for targeted recursive search; scope it to named paths and exclude heavy directories such as `node_modules`, `.git`, `target`, `dist`, and generated outputs.\nDo not use Unix-only commands such as `wc`, and do not assume `Select-String -Recurse` exists; if `rg` is unavailable, pipe `Get-ChildItem -File -Recurse` to `Select-String`.\nFor ordinary read-only inspection, call tools without escalation metadata or a justification.\nStop and report as soon as the requested evidence is sufficient; do not keep scanning merely to be exhaustive.";
 
 /// Codex model catalog 的工具配置画像。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2382,6 +2383,15 @@ fn codex_agent_reasoning_effort_for_model(model: &str) -> Option<&'static str> {
     }
 }
 
+fn codex_agent_execution_guidance_for_model(model: &str) -> Option<&'static str> {
+    let lower = model.to_ascii_lowercase();
+    if lower.contains("deepseek-v4-flash") || lower.contains("deepseek-v4-pro") {
+        Some(DEEPSEEK_WINDOWS_EXECUTION_GUIDANCE)
+    } else {
+        None
+    }
+}
+
 /// 为 role 文件写入更可读的昵称候选。
 fn codex_agent_nickname_candidates_for_role(role: &str) -> Vec<&'static str> {
     if role.ends_with("qwen-local") {
@@ -2431,6 +2441,7 @@ fn codex_managed_agent_role_name(
 /// 渲染官方 custom agent TOML。
 fn render_codex_managed_agent_toml(role: &str, spec: &CodexCatalogModelSpec) -> String {
     let description = codex_agent_description_for_model(&spec.model);
+    let execution_guidance = codex_agent_execution_guidance_for_model(&spec.model).unwrap_or("");
     let effort_line = codex_agent_reasoning_effort_for_model(&spec.model)
         .map(|effort| format!("model_reasoning_effort = \"{effort}\"\n"))
         .unwrap_or_default();
@@ -2451,7 +2462,7 @@ developer_instructions = """
 You are a CCSwitchMulti managed Codex subagent pinned to `{model}`.
 Stay within the delegated task, report concrete file paths and verification results, and escalate risky decisions to the parent agent.
 Do not change unrelated files or override user-owned worktree changes.
-"""
+{execution_guidance}"""
 nickname_candidates = [{nicknames}]
 model = "{model}"
 model_provider = "{model_provider}"
@@ -7337,6 +7348,17 @@ model_provider = "custom"
         assert!(managed.contains(CC_SWITCH_MANAGED_AGENT_MARKER));
         assert!(managed.contains(r#"name = "ccswitch-qwen-local""#));
         assert!(managed.contains(r#"model_provider = "codex_model_router_v2""#));
+        let managed_toml: toml::Value =
+            toml::from_str(&managed).expect("parse generated Qwen role TOML");
+        assert_eq!(
+            managed_toml
+                .get("developer_instructions")
+                .and_then(toml::Value::as_str),
+            Some(
+                "You are a CCSwitchMulti managed Codex subagent pinned to `qwen3.6`.\nStay within the delegated task, report concrete file paths and verification results, and escalate risky decisions to the parent agent.\nDo not change unrelated files or override user-owned worktree changes.\n"
+            ),
+            "DeepSeek-only Windows guidance must not alter Qwen managed roles"
+        );
         assert!(
             !managed.contains("model_reasoning_effort"),
             "managed qwen agents should not pin an effort in fallback role files"
