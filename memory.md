@@ -6,7 +6,20 @@
 - 方案级单一数据源定为 `settingsConfig.codexRouting.subagentVersion: "v1" | "v2"`。向导左侧在路由与发布之间同时加入 V1/V2 两步；MultiRouter 工作台把模糊的高级覆盖面板改为完整 Sub-Agent 设置区。V1 强调显式控制和旧工具兼容，V2 强调 task path、follow-up、mailbox 与 DeepSeek Flash/Pro managed roles 自动选型。
 - 上游源码证明选择 V1 不能只改 catalog：Codex 的 `features.multi_agent_v2` override 优先于模型 `multi_agent_version`。V1 投影必须统一写 V1 metadata 并显式设置 `multi_agent_v2.enabled=false`；V2 统一写 V2、启用 feature、保留混合路由 `tool_namespace=agents` 和 reserved schema 边界。
 - V2 managed roles 只在 V2 激活时由完整可路由 catalog 生成；V1 激活时清理 CCSM 自己带 marker 的托管 role，用户手写 role 永远保留。direct override 前五与 managed role 全目录继续彻底解耦。
-- 批准规格位于 `docs/superpowers/specs/2026-08-09-codex-subagent-v1-v2-settings-design.md`。实现已按 TDD RED/GREEN 分提交，最终因事务安全加固和安装态缓存回归递增到 `3.19.1-17`；V1 direct override 与 V2 无模型名 Flash/Pro 三条真实 canary 均已完成。Matrix WebSearch 本轮仍为 HTTP 521，未提供正证据。
+- 批准规格位于 `docs/superpowers/specs/2026-08-09-codex-subagent-v1-v2-settings-design.md`。实现已按 TDD RED/GREEN 分提交，最终因事务安全加固、安装态缓存回归和 transport 所有权边界收窄递增到 `3.19.1-18`；V1 direct override 与 V2 无模型名 Flash/Pro 三条真实 canary 均已完成。Matrix WebSearch 本轮仍为 HTTP 521，未提供正证据。
+
+## 2026-08-10 Sub-Agent V1/V2 3.19.1-18 transport 边界修正与最终安装验收
+
+- `3.19.1-17` 完整 Rust 回归暴露 `codex_model_catalog_keeps_official_transport_and_reserved_tool_metadata` 失败：上一版 `5562788d` 把 `multi_agent_version`/`multiAgentVersion` 的 MultiRouter 所有权放进共享的 `codex_official_picker_metadata_field`，虽然修复最终 cache 第二次合并，却同时破坏普通 catalog enrichment 的“官方同 slug transport 优先”契约。根因不是缓存内容，而是 cache 专属策略落在了共享合并原语上。
+- 边界修复提交 `02841942` 恢复共享合并的官方 transport 优先，只在 `sync_codex_models_cache_with_cc_switch_catalog` 最终写入 CCSM-owned cache 前，按 stable model id 从当前 routed catalog 覆盖 snake/camel 两个版本字段。两个原本冲突的测试同时通过，cache-sync 3/3、transport/merge 4/4，完整 Rust 为 `2835 passed / 0 failed / 2 ignored`；前端 `114 files / 825 tests`、typecheck、cargo check、rustfmt 和 diff check 均通过。
+- Whole-branch review 没有 Critical；建议的两个重要覆盖缺口已在 `31c3a210` 补齐：official-only managed OAuth 的 V1 双拼写投影，以及仅 Flash 可路由时 V2 工作台同时显示“可路由/目录中缺失”。版本提交 `798b2fb9` 将四个版本源统一为 `3.19.1-18`。
+- 固定 HEAD `798b2fb965d1313157a950c5387b0798ebec0b3b` 的独立 release 流水线完整 exit 0，metadata commit/version 与工作树一致。NSIS SHA-256 `BBA84A0E943F6FAF948CF9485DCDAEA0678A8288EB4A07681FD73C3BC7F1FDFC`，raw EXE SHA-256 `51153ED5DC8819C430D8F9174244E49A3382986A40EA1D6A391D939B777B7E81`，二者文件/产品版本均为 `3.19.1-18`，updater signature 432 bytes。升版前已启动且跨越文件变化的旧流水线自然结束后被明确废弃，未作为安装源。
+- Pester 事务安全回归 42/42 后，事务 `ccsm-20260810-052852-1d2c03160f934a3ba627a30c78d48545` 按 `kill -> retained-handle wait -> port release -> uninstall -> install -> hidden relaunch -> listener/health/version/hash` 成功完成，错误与回滚错误均为空。事务外复核：新 PID/15721 owner `8772`，installed/file/product/registry 全部为 `3.19.1-18`，安装 EXE 哈希与 raw artifact 完全一致，health HTTP 200；Codex Desktop 未被停止。
+- 安装态 `cc-switch-model-catalog.json` 与 `models_cache.json` 都为 9 个模型、9/9 同时 `v2/v2`，Flash/Pro 均存在；`deepseek-flash.toml` 固定 `deepseek-v4-flash / codex_model_router_v2 / medium`，`deepseek-pro.toml` 固定 `deepseek-v4-pro / codex_model_router_v2 / high`，互斥描述保持正确。
+- `3.19.1-18` Flash child `019fe86e-9825-76f3-9c12-2964c43de797` 为 `agent_role=deepseek-flash / model=deepseek-v4-flash / provider=codex_model_router_v2 / effort=medium`，完成初始真实只读 Git/源码扫描与同 child 安装态 follow-up；rollout 有 2 turns 和真实 function calls。Router 日志证明 `/responses -> https://api.deepseek.com/v1/responses`、`responses_to_chat=false`，多轮 HTTP 200。
+- `3.19.1-18` Pro child `019fe86e-af54-7283-8078-3b3132de2a3a` 为 `agent_role=deepseek-pro / model=deepseek-v4-pro / provider=codex_model_router_v2 / effort=high`，完成复杂所有权追踪与同 child role/EXE follow-up；rollout 有 2 turns 和真实 function calls。Router 日志证明入站 `/responses` 被桥接到 `/chat/completions`、`responses_to_chat=true`，多轮 HTTP 200。此次 canary 使用新 child rollout 和新 CCSM PID，但保留当前 Desktop parent/app-server，不把“未重启 Desktop”误记为已重启。
+- 新发现的非阻塞边缘风险：CCSM 接管后的官方 `models_cache` 备份只创建一次；除当前 V1/V2 两字段外，其它官方 transport/picker 元数据可能在长期接管期间冻结。该问题不影响本轮两个契约和安装验收，后续若处理应设计官方 cache 刷新/再合并机制，不能简单扩大当前 override 列表。
+- 本轮继续使用 Codex 内置 Web 与 Matrix MCP 两条独立链；内置搜索定位到 Codex 官方 `multi_agent_version`/cache 一手源码和近期 cache 行为问题，Matrix 仍返回 HTTP 521。最终技术判断以本地失败测试、当前源码、安装产物、事务日志、child rollout、SQLite 请求记录和 Router HTTP 200 为主。
 
 ## 2026-08-10 Sub-Agent V1/V2 3.19.1-17 本机交付与真实验收
 
