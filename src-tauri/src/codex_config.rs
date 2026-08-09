@@ -2056,7 +2056,11 @@ fn set_codex_model_catalog_projection_fields(
             doc["model_catalog_json"] = toml_edit::value(CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME);
             set_active_codex_provider_models(&mut doc, specs, catalog);
             ensure_codex_agents_defaults(&mut doc);
-            ensure_codex_multi_agent_reserved_schema_compatible(&mut doc, false);
+            ensure_codex_multi_agent_reserved_schema_compatible(
+                &mut doc,
+                CodexSubagentVersion::V2,
+                false,
+            );
         }
         _ => {
             let should_remove = doc
@@ -2146,14 +2150,40 @@ fn codex_route_uses_official_backend_agent_delivery(route: &Value) -> bool {
             .is_some_and(|provider| provider.eq_ignore_ascii_case("codex_oauth"))
 }
 
-/// 在官方同 slug 元数据合并完成后应用混合路由的 V2 协议策略。
-///
-/// Codex 会在任务首轮锁定协议版本。官方 parent 与第三方 child 必须都留在 V2 候选
-/// 集合中，正文是否加密由出站工具 schema 单独控制，不能再把混合目录降为 V1。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodexSubagentVersion {
+    V1,
+    V2,
+}
+
+impl CodexSubagentVersion {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::V1 => "v1",
+            Self::V2 => "v2",
+        }
+    }
+}
+
+/// 旧方案和非法值都保持当前 V2 行为；只有显式 `v1` 才启用兼容协议。
+fn codex_subagent_version(settings: &Value) -> CodexSubagentVersion {
+    match settings
+        .get("codexRouting")
+        .and_then(Value::as_object)
+        .and_then(|routing| routing.get("subagentVersion"))
+        .and_then(Value::as_str)
+    {
+        Some("v1") => CodexSubagentVersion::V1,
+        _ => CodexSubagentVersion::V2,
+    }
+}
+
+/// 在官方同 slug 元数据合并完成后，把 MultiRouter 的所有模型统一投影为用户选择的协议。
 fn apply_codex_multi_agent_transport_policy(catalog: &mut Value, settings: &Value) {
-    if !codex_multi_router_requires_non_reserved_agent_namespace(settings) {
+    if !codex_multi_router_is_enabled(settings) {
         return;
     }
+    let version = codex_subagent_version(settings).as_str();
     let Some(models) = catalog.get_mut("models").and_then(Value::as_array_mut) else {
         return;
     };
@@ -2161,8 +2191,8 @@ fn apply_codex_multi_agent_transport_policy(catalog: &mut Value, settings: &Valu
         let Some(model) = model.as_object_mut() else {
             continue;
         };
-        model.insert("multi_agent_version".to_string(), json!("v2"));
-        model.insert("multiAgentVersion".to_string(), json!("v2"));
+        model.insert("multi_agent_version".to_string(), json!(version));
+        model.insert("multiAgentVersion".to_string(), json!(version));
     }
 }
 
@@ -2219,6 +2249,7 @@ fn set_codex_native_web_search_field(config_text: &str, disable: bool) -> Result
 /// Codex 原生支持的 `agents`。用户已有其它非保留 namespace 时保持不变。
 fn ensure_codex_multi_agent_reserved_schema_compatible(
     doc: &mut DocumentMut,
+    version: CodexSubagentVersion,
     mixed_provider_delivery: bool,
 ) {
     if doc.get("features").is_none() {
@@ -2228,10 +2259,6 @@ fn ensure_codex_multi_agent_reserved_schema_compatible(
         return;
     };
 
-    let existing_enabled = features
-        .get("multi_agent_v2")
-        .and_then(|item| item.as_bool())
-        .map(toml_edit::value);
     if features
         .get("multi_agent_v2")
         .and_then(|item| item.as_table())
@@ -2243,8 +2270,14 @@ fn ensure_codex_multi_agent_reserved_schema_compatible(
         .get_mut("multi_agent_v2")
         .and_then(|item| item.as_table_mut())
     {
-        if let Some(enabled) = existing_enabled {
-            multi_agent_v2["enabled"] = enabled;
+        match version {
+            CodexSubagentVersion::V1 => {
+                multi_agent_v2["enabled"] = toml_edit::value(false);
+                return;
+            }
+            CodexSubagentVersion::V2 => {
+                multi_agent_v2["enabled"] = toml_edit::value(true);
+            }
         }
         multi_agent_v2["hide_spawn_agent_metadata"] = toml_edit::value(true);
         let namespace_requires_replacement = multi_agent_v2
@@ -2863,6 +2896,7 @@ pub fn prepare_codex_config_text_with_model_catalog(
             .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
         ensure_codex_multi_agent_reserved_schema_compatible(
             &mut doc,
+            codex_subagent_version(settings),
             codex_multi_router_requires_non_reserved_agent_namespace(settings),
         );
         let config_text =
