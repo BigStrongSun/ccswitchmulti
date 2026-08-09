@@ -33,7 +33,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -733,7 +733,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout release notes
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Download built release artifacts
         uses: actions/download-artifact@v8
