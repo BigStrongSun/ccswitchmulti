@@ -1598,7 +1598,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     );
   });
 
-  it("keeps direct subagent model overrides collapsed as an advanced setting", async () => {
+  it("exposes V1 and V2 subagent settings while preserving routes and direct overrides", async () => {
     const source: Provider = {
       id: "codex-deepseek",
       name: "DeepSeek",
@@ -1612,7 +1612,18 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
         },
       },
     };
-    const plan = createDraftRoutingPlan([source], [source]);
+    const draftPlan = createDraftRoutingPlan([source], [source]);
+    const existingRoutes = draftPlan.settingsConfig?.codexRouting?.routes ?? [];
+    const plan: Provider = {
+      ...draftPlan,
+      settingsConfig: {
+        ...draftPlan.settingsConfig,
+        modelCatalog: {
+          ...draftPlan.settingsConfig?.modelCatalog,
+          spawnAgentModels: ["deepseek-v4-pro", "deepseek-v4-flash"],
+        },
+      },
+    };
 
     renderWorkspace(
       React.createElement(CodexRouterWorkspacePage, {
@@ -1628,16 +1639,32 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       }),
     );
 
-    const advancedTrigger = screen.getByRole("button", {
-      name: /高级：子 Agent 模型覆盖/,
-    });
-    expect(screen.queryByText("可拖拽排序的前五候选")).not.toBeInTheDocument();
+    expect(screen.getByText("Sub-Agent 设置")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "启用 V1" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "启用 V2" })).toBeInTheDocument();
+    expect(screen.getByText("当前使用 V2")).toBeInTheDocument();
     expect(
-      screen.getByText(/V4 Pro\/Flash custom roles 会自动注册/),
+      screen.getByText(/deepseek-flash/),
     ).toBeInTheDocument();
+    expect(screen.getByText(/deepseek-pro/)).toBeInTheDocument();
 
-    await userEvent.setup().click(advancedTrigger);
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "启用 V1" }));
 
+    await waitFor(() => expect(providersApi.update).toHaveBeenCalledOnce());
+    const [updatedProvider, appType] = vi.mocked(providersApi.update).mock
+      .calls[0];
+    expect(appType).toBe("codex");
+    expect(updatedProvider.settingsConfig?.codexRouting).toMatchObject({
+      subagentVersion: "v1",
+      routes: existingRoutes,
+    });
+    expect(
+      updatedProvider.settingsConfig?.modelCatalog?.spawnAgentModels,
+    ).toEqual(["deepseek-v4-pro", "deepseek-v4-flash"]);
+    expect(screen.getByText("当前使用 V1")).toBeInTheDocument();
+    expect(screen.getByText(/V1 direct model override/)).toBeInTheDocument();
     expect(screen.getByText("可拖拽排序的前五候选")).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "保存排序" }),
