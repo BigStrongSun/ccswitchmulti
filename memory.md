@@ -3074,3 +3074,11 @@
 - 当前 Codex `0.147.0-alpha.6.5` 选择 custom role 时需 `fork_turns=none` 或正整数；`rust-v0.148.0-alpha.1` 起上游 PR `#37252` 允许 role 应用于 full-history fork。CCSwitchMulti 不固定改写 `fork_turns`，由各版本 Codex 的工具描述指导父模型。`hide_spawn_agent_metadata=true` 在当前版本只隐藏 `service_tier`，仍保留 `agent_type`、`model` 和 `reasoning_effort`。
 - Vitest 必须显式 `--exclude ".worktrees/**"`：仓库内旧 worktree 会被默认 glob 扫描并加载不同 React 实例，导致 `Invalid hook call / useState null` 的假失败；不能用业务补丁规避测试发现污染。
 - 联网复核使用 Codex 内置搜索交叉验证 OpenAI 官方 Subagents 文档、当前 `multi_agents_spec.rs` 和 PR `#37252`。Matrix WebSearch 按独立链路重试仍返回 HTTP 521，没有提供第二条正证据；版本和机制结论以官方一手来源、本机运行态与当前源码为依据。
+
+# 2026-08-09 CCSwitchMulti 在线替换安装事故与强制恢复规则
+
+- 当前 Codex 会话通过 CCSwitchMulti 的 `127.0.0.1:15721` 访问上游模型，因此运行中的 CCSM 是当前任务的基础设施，不是可以随意停止的普通被测桌面应用。为 WebView2/CDP 调试而单独停止 CCSM 会切断当前会话；本轮发生过一次该错误，随后已重新拉起服务。以后在停止或替换 CCSM 前必须先画清运行依赖，禁止再次执行孤立的 stop/kill。
+- 如果需要替换安装，必须先启动一个不依赖后续模型调用的独立 PowerShell 事务脚本；脚本在被启动前就应包含完整的 `预检和备份 -> 按已核实 PID kill -> 等待进程退出和 15721 释放 -> 正式卸载旧版 -> 等待卸载完成 -> 安装新版并检查退出码 -> 拉起新版 -> 等待 15721 -> 健康请求和版本/哈希/路由验证`。绝不能先 kill，再依赖 Codex 下一轮工具调用继续安装。
+- 事务脚本必须有 `try/finally` 等价的恢复语义：成功路径拉起并验收新版；任一步失败也必须优先重新拉起仍可用版本，必要时用预先准备的旧安装包回滚，恢复用户配置，再验证 `127.0.0.1:15721`。脚本退出时不得把机器留在“CCSM 已停止且无人恢复”的状态。
+- kill 必须限定为已确认安装路径对应的 PID：先尝试正常退出并限时等待，超时后才强制终止，不能按进程名误杀其他实例。卸载只清理程序安装范围，用户数据库、Provider、路由、凭据和未知配置字段必须备份并保留。
+- UI/CDP 验收不得通过当前会话临时停止 CCSM来注入启动参数。确需重启态验收时，应由独立、不依赖该 CCSM 的会话执行，或在用户明确控制的维护窗口执行；当前会话只能做不中断服务的只读配置、日志和路由验证。
