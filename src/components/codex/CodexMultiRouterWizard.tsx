@@ -26,6 +26,7 @@ import type {
   CodexOfficialAuthConfig,
   CodexOfficialAuthMode,
   CodexRoutingRoute,
+  CodexSubagentVersion,
 } from "@/types";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -91,6 +92,7 @@ import {
 import { HostedToolsSwitchPanel } from "./HostedToolsSwitchPanel";
 import type { WorkspaceTab } from "@/components/codex/CodexRouterWorkspacePage";
 import { codexCatalogOnlyPlanModelFetchMessage } from "@/utils/codexPlanModelFetch";
+import { normalizeCodexSubagentVersion } from "@/utils/codexSubagentVersion";
 import { CodexOAuthSection } from "@/components/providers/forms/CodexOAuthSection";
 import { useCodexOauth } from "@/components/providers/forms/hooks/useCodexOauth";
 
@@ -113,6 +115,8 @@ type WizardStepKey =
   | "collisions"
   | "selectModels"
   | "routes"
+  | "subagentV1"
+  | "subagentV2"
   | "publish"
   | "finish";
 
@@ -222,6 +226,20 @@ const STEPS: WizardStep[] = [
     icon: GitBranch,
   },
   {
+    key: "subagentV1",
+    title: "Sub-Agent V1",
+    description:
+      "兼容旧版 agent id 工作流，并显式控制 direct model override 的前 5 个候选。",
+    icon: GitBranch,
+  },
+  {
+    key: "subagentV2",
+    title: "Sub-Agent V2",
+    description:
+      "推荐的新任务路径协议，由 Codex 按任务自动选择 DeepSeek Flash 或 Pro managed role。",
+    icon: Wand2,
+  },
+  {
     key: "publish",
     title: "保存并发布",
     description:
@@ -280,6 +298,15 @@ const STEP_RULES: Record<WizardStepKey, WizardStepRule> = {
   routes: {
     errors: ["没有 match.models/prefixes 的 route 不会稳定命中模型请求。"],
     canContinue: "至少生成一条 route 且没有连通性阻塞项时可以继续保存。",
+  },
+  subagentV1: {
+    errors: ["V1 候选引用已移除模型时，保存会自动过滤这些引用。"],
+    canContinue:
+      "可保留 V2，或启用 V1 并按需要选择最多 5 个 direct overrides。",
+  },
+  subagentV2: {
+    errors: ["Flash 或 Pro 不在可路由目录时，对应 managed role 不会生成。"],
+    canContinue: "V2 不要求用户选择模型；查看角色预览后可以继续保存。",
   },
   publish: {
     errors: ["数据库写入失败或 provider id 冲突会进入 saveFailed。"],
@@ -384,6 +411,9 @@ function statusForStep(stepKey: WizardStepKey): WizardFlowStatus {
     case "selectModels":
       return "routePreview";
     case "routes":
+      return "routePreview";
+    case "subagentV1":
+    case "subagentV2":
       return "routePreview";
     case "publish":
       return "published";
@@ -925,6 +955,8 @@ export function CodexMultiRouterWizard({
   const [draftSpawnAgentModels, setDraftSpawnAgentModels] = useState<string[]>(
     [],
   );
+  const [draftSubagentVersion, setDraftSubagentVersion] =
+    useState<CodexSubagentVersion>("v2");
   const [savedPlan, setSavedPlan] = useState<Provider | null>(null);
   const [connectivityResults, setConnectivityResults] = useState<
     WizardConnectivityResult[]
@@ -1048,6 +1080,11 @@ export function CodexMultiRouterWizard({
         5,
       ) ?? [],
     );
+    setDraftSubagentVersion(
+      normalizeCodexSubagentVersion(
+        existingPlan?.settingsConfig?.codexRouting?.subagentVersion,
+      ),
+    );
     setConnectivityResults([]);
     setWizardIssues([]);
     setModelFetchCards(
@@ -1164,6 +1201,17 @@ export function CodexMultiRouterWizard({
         direction,
       ),
     );
+  };
+
+  const toggleSpawnAgentModel = (model: string, checked: boolean) => {
+    setDraftSpawnAgentModels((current) => {
+      const active = current.filter((item) =>
+        activeCatalogModelOrder.includes(item),
+      );
+      if (!checked) return active.filter((item) => item !== model);
+      if (active.includes(model) || active.length >= 5) return active;
+      return [...active, model];
+    });
   };
 
   // 关闭/跳过时记录 dismissed；首页按钮仍可再次显式打开。
@@ -1297,6 +1345,20 @@ export function CodexMultiRouterWizard({
         });
         return;
       case "routes":
+        dispatchFlow({
+          type: "NEXT",
+          nextStatus: "routePreview",
+          nextStepKey: "subagentV1",
+        });
+        return;
+      case "subagentV1":
+        dispatchFlow({
+          type: "NEXT",
+          nextStatus: "routePreview",
+          nextStepKey: "subagentV2",
+        });
+        return;
+      case "subagentV2":
         dispatchFlow({
           type: "NEXT",
           nextStatus: "published",
@@ -1758,6 +1820,7 @@ export function CodexMultiRouterWizard({
           planName: draftPlanName,
           catalogModelOrder: activeCatalogModelOrder,
           spawnAgentModels: activeSpawnAgentModels,
+          subagentVersion: draftSubagentVersion,
           officialAuth: draftOfficialAuth,
           hostedTools: {
             webSearch: { enabled: webSearchEnabled },
@@ -1829,6 +1892,7 @@ export function CodexMultiRouterWizard({
       planName: draftPlanName,
       catalogModelOrder: activeCatalogModelOrder,
       spawnAgentModels: activeSpawnAgentModels,
+      subagentVersion: draftSubagentVersion,
       officialAuth: draftOfficialAuth,
     },
   ).plan;
@@ -1908,7 +1972,17 @@ export function CodexMultiRouterWizard({
                   }
                 >
                   <StepIcon className="h-4 w-4 shrink-0" />
-                  <span className="truncate">{step.title}</span>
+                  <span className="min-w-0 flex-1 truncate">{step.title}</span>
+                  {step.key === "subagentV1" || step.key === "subagentV2" ? (
+                    <span className="shrink-0 text-[10px] opacity-80">
+                      {draftSubagentVersion ===
+                      (step.key === "subagentV1" ? "v1" : "v2")
+                        ? "当前使用"
+                        : step.key === "subagentV2"
+                          ? "推荐"
+                          : "兼容"}
+                    </span>
+                  ) : null}
                 </button>
               );
             })}
@@ -2598,6 +2672,133 @@ export function CodexMultiRouterWizard({
                     </div>
                   </div>
                 ))}
+              </div>
+            )}
+
+            {currentStep.key === "subagentV1" && (
+              <div className="space-y-4">
+                <div className="border-b pb-4 text-sm leading-6 text-muted-foreground">
+                  <div className="mb-1 font-medium text-foreground">
+                    V1：兼容与显式控制
+                  </div>
+                  使用旧版 agent id、send_input、resume_agent 和 close_agent
+                  工作流。下面的顺序只控制 Codex V1 spawn_agent 工具描述中最多 5
+                  个 direct model overrides，不影响 V2 managed roles。
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    type="button"
+                    variant={
+                      draftSubagentVersion === "v1" ? "default" : "outline"
+                    }
+                    onClick={() => setDraftSubagentVersion("v1")}
+                  >
+                    启用 V1
+                  </Button>
+                  {draftSubagentVersion === "v1" ? (
+                    <Badge>当前使用 V1</Badge>
+                  ) : (
+                    <Badge variant="outline">当前配置保留，尚未启用</Badge>
+                  )}
+                  <Badge variant="outline">
+                    {activeSpawnAgentModels.length} / 5
+                  </Badge>
+                </div>
+                <div className="divide-y rounded-lg border">
+                  {activeCatalogModelOrder.map((model) => {
+                    const checked = activeSpawnAgentModels.includes(model);
+                    return (
+                      <label
+                        key={model}
+                        className="flex items-center gap-3 px-3 py-2 text-sm"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          disabled={
+                            !checked && activeSpawnAgentModels.length >= 5
+                          }
+                          onChange={(event) =>
+                            toggleSpawnAgentModel(model, event.target.checked)
+                          }
+                        />
+                        <span className="min-w-0 flex-1 truncate">{model}</span>
+                        {checked ? (
+                          <span className="text-xs text-muted-foreground">
+                            优先级 {activeSpawnAgentModels.indexOf(model) + 1}
+                          </span>
+                        ) : null}
+                      </label>
+                    );
+                  })}
+                </div>
+                <div className="text-xs leading-5 text-muted-foreground">
+                  切换协议后请完全重启 Codex
+                  app-server，并使用新会话验证；已有会话可能已经锁定协议版本。
+                </div>
+              </div>
+            )}
+
+            {currentStep.key === "subagentV2" && (
+              <div className="space-y-4">
+                <div className="border-b pb-4 text-sm leading-6 text-muted-foreground">
+                  <div className="mb-1 font-medium text-foreground">
+                    V2：任务路径与自动角色选型
+                  </div>
+                  使用 task
+                  path、send_message、followup_task、mailbox、interrupt 和
+                  list_agents。用户不需要选择子模型，父 Codex 会根据 role
+                  description 在 Flash 与 Pro 之间自动选择。
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    type="button"
+                    variant={
+                      draftSubagentVersion === "v2" ? "default" : "outline"
+                    }
+                    onClick={() => setDraftSubagentVersion("v2")}
+                  >
+                    启用 V2
+                  </Button>
+                  {draftSubagentVersion === "v2" ? (
+                    <Badge>当前使用 V2</Badge>
+                  ) : (
+                    <Badge variant="outline">配置可随时切回</Badge>
+                  )}
+                  <Badge variant="outline">推荐</Badge>
+                </div>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div className="border-l-2 border-cyan-500 pl-3">
+                    <div className="font-medium">deepseek-flash</div>
+                    <div className="mt-1 text-xs leading-5 text-muted-foreground">
+                      deepseek-v4-flash · medium reasoning
+                      <br />
+                      长上下文阅读、代码扫描、架构追踪、证据收集和轻量验证。
+                    </div>
+                    <Badge className="mt-2" variant="outline">
+                      {activeCatalogModelOrder.includes("deepseek-v4-flash")
+                        ? "可生成"
+                        : "模型未路由"}
+                    </Badge>
+                  </div>
+                  <div className="border-l-2 border-amber-500 pl-3">
+                    <div className="font-medium">deepseek-pro</div>
+                    <div className="mt-1 text-xs leading-5 text-muted-foreground">
+                      deepseek-v4-pro · high reasoning
+                      <br />
+                      复杂调试、跨模块推理、架构决策、高风险审查和复杂实现。
+                    </div>
+                    <Badge className="mt-2" variant="outline">
+                      {activeCatalogModelOrder.includes("deepseek-v4-pro")
+                        ? "可生成"
+                        : "模型未路由"}
+                    </Badge>
+                  </div>
+                </div>
+                <div className="text-xs leading-5 text-muted-foreground">
+                  managed roles 从完整可路由目录生成，不受 V1 前 5 个 direct
+                  overrides 限制。用户手写同名 role 不会被覆盖。
+                </div>
               </div>
             )}
 
