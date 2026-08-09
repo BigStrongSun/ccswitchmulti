@@ -7008,6 +7008,71 @@ base_url = "http://127.0.0.1:15721/v1"
 
     #[test]
     #[serial]
+    fn subagent_v1_disables_v2_feature_and_projects_every_router_model_as_v1() {
+        let _guard = TestHomeGuard::new();
+        seed_codex_models_cache(json!([{
+            "slug": "gpt-5.5",
+            "display_name": "GPT-5.5",
+            "context_window": 272000,
+            "multi_agent_version": "v2",
+            "use_responses_lite": true,
+            "model_messages": { "instructions_template": "template" }
+        }]));
+        let settings = json!({
+            "modelCatalog": {
+                "models": [
+                    { "model": "gpt-5.5", "displayName": "GPT-5.5" },
+                    { "model": "deepseek-v4-flash", "displayName": "DeepSeek V4 Flash" }
+                ]
+            },
+            "codexRouting": {
+                "enabled": true,
+                "subagentVersion": "v1",
+                "routes": [
+                    {
+                        "id": "official",
+                        "match": { "models": ["gpt-5.5"] },
+                        "upstream": { "auth": { "source": "managed_codex_oauth" } }
+                    },
+                    {
+                        "id": "deepseek",
+                        "match": { "models": ["deepseek-v4-flash"] },
+                        "upstream": { "auth": { "source": "provider_config" } }
+                    }
+                ]
+            }
+        });
+        let config = r#"model_provider = "codex_model_router_v2"
+
+[features.multi_agent_v2]
+enabled = true
+tool_namespace = "collaboration"
+
+[model_providers.codex_model_router_v2]
+base_url = "http://127.0.0.1:15721/v1"
+"#;
+
+        let prepared = prepare_codex_config_text_with_model_catalog(
+            &settings,
+            config,
+            CodexCatalogToolProfile::ProxyChat,
+        )
+        .expect("prepare V1 router config");
+        let parsed: toml::Value = toml::from_str(&prepared).expect("parse prepared config");
+        let feature = &parsed["features"]["multi_agent_v2"];
+        let catalog = read_json_file::<Value>(&get_codex_model_catalog_path())
+            .expect("read generated catalog");
+        let models = catalog["models"].as_array().expect("generated models");
+
+        assert_eq!(feature["enabled"].as_bool(), Some(false));
+        assert!(models.iter().all(|model| {
+            model["multi_agent_version"].as_str() == Some("v1")
+                && model["multiAgentVersion"].as_str() == Some("v1")
+        }));
+    }
+
+    #[test]
+    #[serial]
     fn managed_oauth_only_router_preserves_multi_agent_v2() {
         let _guard = TestHomeGuard::new();
         let models = prepared_router_catalog_models(&json!({
