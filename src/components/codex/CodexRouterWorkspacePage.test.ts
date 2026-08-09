@@ -213,6 +213,29 @@ it("没有 MultiRouter 方案时打开工作台不会读取 null settingsConfig"
 });
 
 describe("Codex MultiRouter workspace route persistence helpers", () => {
+  it("normalizes missing and invalid subagent versions to V2 while preserving V1", () => {
+    const planWith = (subagentVersion?: unknown): Provider => ({
+      id: `router-${String(subagentVersion)}`,
+      name: "Router",
+      category: "custom",
+      settingsConfig: {
+        codexRouting: {
+          enabled: true,
+          routes: [],
+          ...(subagentVersion === undefined ? {} : { subagentVersion }),
+        },
+      },
+    });
+
+    expect((readCodexRouting(planWith()) as any)?.subagentVersion).toBe("v2");
+    expect(
+      (readCodexRouting(planWith("unexpected")) as any)?.subagentVersion,
+    ).toBe("v2");
+    expect((readCodexRouting(planWith("v1")) as any)?.subagentVersion).toBe(
+      "v1",
+    );
+  });
+
   it("按 Router 官方认证与账号池 Desktop 成员展示生成门面", () => {
     expect(
       resolveCodexRouterAuthFacadeLabel({ mode: "desktop_current_login" }),
