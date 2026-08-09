@@ -80,7 +80,7 @@ const CODEX_REASONING_EFFORTS: &[(&str, &str)] = &[
     ("xhigh", "Extra high reasoning depth for complex problems"),
 ];
 const CODEX_DEFAULT_REASONING_EFFORT: &str = "medium";
-const DEEPSEEK_WINDOWS_EXECUTION_GUIDANCE: &str = "On Windows, use `rg` for targeted recursive search; scope it to named paths and exclude heavy directories such as `node_modules`, `.git`, `target`, `dist`, and generated outputs.\nDo not use Unix-only commands such as `wc`, and do not assume `Select-String -Recurse` exists; if `rg` is unavailable, pipe `Get-ChildItem -File -Recurse` to `Select-String`.\nFor ordinary read-only inspection, call tools without escalation metadata or a justification.\nStop and report as soon as the requested evidence is sufficient; do not keep scanning merely to be exhaustive.";
+const DEEPSEEK_WINDOWS_EXECUTION_GUIDANCE: &str = "On Windows, use PowerShell syntax and minimal directed commands. For content, use `rg <pattern> <named-path>`; for file discovery, use `rg --files <named-path>`. Use narrow `-g` includes and excludes, including `-g '!node_modules/**'`, `-g '!.git/**'`, `-g '!target/**'`, `-g '!dist/**'`, and `-g '!generated/**'`. First identify a narrow source or test subtree; never recursively scan a user profile/home, drive root, or broad repository root.\nDo not use Unix-only commands such as `wc`, and do not assume `Select-String -Recurse` exists; if `rg` is unavailable, only after identifying a narrow target use `Get-ChildItem -LiteralPath <narrow-target> -File -Recurse | Select-String`.\nFor ordinary read-only inspection, call tools without escalation metadata or a justification.\nStop and report as soon as the requested evidence is sufficient; do not keep scanning merely to be exhaustive.";
 
 /// Codex model catalog 的工具配置画像。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -7512,7 +7512,10 @@ model_provider = "custom"
             spark.get("description").and_then(toml::Value::as_str),
             Some("Codex Spark worker for fast, focused edits, formatting, and quick verification.")
         );
-        assert_eq!(spark.get("model").and_then(toml::Value::as_str), Some("codex-spark"));
+        assert_eq!(
+            spark.get("model").and_then(toml::Value::as_str),
+            Some("codex-spark")
+        );
         assert_eq!(
             spark.get("model_provider").and_then(toml::Value::as_str),
             Some("codex_model_router_v2")
