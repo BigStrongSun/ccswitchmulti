@@ -676,6 +676,10 @@ describe("Codex Sub-Agent V2 review round 1 regressions", () => {
       "non-string modelReasoningEffort",
       { modelReasoningEffort: { raw: "RAW_REASONING_EFFORT" } },
     ],
+    [
+      "unsupported modelReasoningEffort string",
+      { modelReasoningEffort: "RAW_REASONING_EFFORT" },
+    ],
   ])(
     "isolates %s without dereferencing or reflecting invalid raw content",
     async (_caseName, overrides) => {
