@@ -4695,6 +4695,83 @@ mod tests {
         );
     }
 
+    fn classify_subagent_route_with_provider_records_for_red(
+        settings: &Value,
+        model: &str,
+        provider_records: &[(&str, SubagentProviderKind)],
+    ) -> Option<SubagentProviderKind> {
+        let _ = provider_records;
+        codex_subagent_route_classification(settings, model)
+    }
+
+    #[test]
+    fn codex_subagent_v2_target_provider_record_is_authoritative_with_safe_inline_fallback() {
+        let generic_target = json!({
+            "codexRouting": { "enabled": true, "routes": [{
+                "match": { "models": ["neutral-model"] },
+                "upstream": {
+                    "targetProviderId": "target-provider",
+                    "auth": { "source": "provider_config" }
+                }
+            }] }
+        });
+        assert_eq!(
+            classify_subagent_route_with_provider_records_for_red(
+                &generic_target,
+                "neutral-model",
+                &[("target-provider", SubagentProviderKind::Official)],
+            ),
+            Some(SubagentProviderKind::Official),
+            "an official ChatGPT/Codex OAuth target record must override generic inline auth"
+        );
+        assert_eq!(
+            classify_subagent_route_with_provider_records_for_red(
+                &generic_target,
+                "neutral-model",
+                &[("target-provider", SubagentProviderKind::ThirdParty)],
+            ),
+            Some(SubagentProviderKind::ThirdParty),
+            "a third-party target record must remain third-party"
+        );
+
+        let misleading_inline = json!({
+            "codexRouting": { "enabled": true, "routes": [{
+                "match": { "models": ["gpt-looking-name"] },
+                "upstream": {
+                    "targetProviderId": "target-provider",
+                    "auth": { "source": "managed_codex_oauth" }
+                }
+            }] }
+        });
+        assert_eq!(
+            classify_subagent_route_with_provider_records_for_red(
+                &misleading_inline,
+                "gpt-looking-name",
+                &[("target-provider", SubagentProviderKind::ThirdParty)],
+            ),
+            Some(SubagentProviderKind::ThirdParty),
+            "the target record must win over inline auth and model names must not influence classification"
+        );
+        assert_eq!(
+            classify_subagent_route_with_provider_records_for_red(
+                &misleading_inline,
+                "gpt-looking-name",
+                &[],
+            ),
+            Some(SubagentProviderKind::Official),
+            "a missing target record must safely fall back to inline auth"
+        );
+        assert_eq!(
+            classify_subagent_route_with_provider_records_for_red(
+                &generic_target,
+                "gpt-5.6-sol",
+                &[],
+            ),
+            Some(SubagentProviderKind::ThirdParty),
+            "an official-looking model name must never imply an official provider"
+        );
+    }
+
     #[test]
     fn codex_subagent_v2_compile_marks_unmatched_and_disabled_declared_models_unroutable() {
         let settings = json!({

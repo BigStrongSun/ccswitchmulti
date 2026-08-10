@@ -1162,20 +1162,22 @@ mod tests {
 
     // Independent literal fixtures for the production compiler contract.  These are intentionally
     // not derived through production helpers, so a compiler regression cannot rewrite its own oracle.
-    const DESC_BALANCED_REPOSITORY: &str = "This role is suited to repository exploration. It optimizes for speed and allows read-only work. It is eligible under balanced selection and uses the third-party provider path.";
-    const DESC_ARCHITECTURE: &str = "This role is suited to architecture design. It optimizes for quality and allows read-only work. It is eligible under balanced selection and uses the third-party provider path.";
-    const DESC_TESTING: &str = "This role is suited to testing. It optimizes for speed and allows read-only work. It is eligible under balanced selection and uses the third-party provider path.";
-    const DESC_OFFICIAL_FIRST_ELIGIBLE: &str = "This role is suited to repository exploration. It optimizes for speed and allows read-only work. It is eligible under official-first selection and uses the third-party provider path.";
-    const DESC_THIRD_PARTY_FIRST_ELIGIBLE: &str = "This role is suited to repository exploration. It optimizes for speed and allows read-only work. It is eligible under third-party-first selection and uses the third-party provider path.";
-    const DESC_OFFICIAL_FIRST_PREFERRED: &str = "This role is suited to repository exploration. It optimizes for speed and allows read-only work. It is preferred under official-first selection and uses the third-party provider path.";
-    const DESC_FALLBACK: &str = "This role is suited to repository exploration. It optimizes for speed and allows read-only work. It is fallback-only under third-party-first selection and uses the third-party provider path.";
-    const INSTRUCTIONS_BALANCED_REPOSITORY: &str = "Work only on delegated repository exploration tasks. Optimize for speed and keep changes within read-only work. Treat this profile as eligible under balanced selection, using the third-party provider path. Report concrete evidence and verification to the parent agent.";
-    const INSTRUCTIONS_ARCHITECTURE: &str = "Work only on delegated architecture design tasks. Optimize for quality and keep changes within read-only work. Treat this profile as eligible under balanced selection, using the third-party provider path. Report concrete evidence and verification to the parent agent.";
-    const INSTRUCTIONS_TESTING: &str = "Work only on delegated testing tasks. Optimize for speed and keep changes within read-only work. Treat this profile as eligible under balanced selection, using the third-party provider path. Report concrete evidence and verification to the parent agent.";
-    const INSTRUCTIONS_OFFICIAL_FIRST_ELIGIBLE: &str = "Work only on delegated repository exploration tasks. Optimize for speed and keep changes within read-only work. Treat this profile as eligible under official-first selection, using the third-party provider path. Report concrete evidence and verification to the parent agent.";
-    const INSTRUCTIONS_THIRD_PARTY_FIRST_ELIGIBLE: &str = "Work only on delegated repository exploration tasks. Optimize for speed and keep changes within read-only work. Treat this profile as eligible under third-party-first selection, using the third-party provider path. Report concrete evidence and verification to the parent agent.";
-    const INSTRUCTIONS_OFFICIAL_FIRST_PREFERRED: &str = "Work only on delegated repository exploration tasks. Optimize for speed and keep changes within read-only work. Treat this profile as preferred under official-first selection, using the third-party provider path. Report concrete evidence and verification to the parent agent.";
-    const INSTRUCTIONS_FALLBACK: &str = "Work only on delegated repository exploration tasks. Optimize for speed and keep changes within read-only work. Treat this profile as fallback-only under third-party-first selection, using the third-party provider path. Report concrete evidence and verification to the parent agent.";
+    const DESC_BALANCED_REPOSITORY: &str = "This role matches delegated repository exploration tasks. It excludes long-context reading, evidence collection, summarization, complex debugging, architecture design, bounded implementation, complex implementation, testing, and high-risk review, and it does not own final integration, merging, or release. It optimizes for speed and is limited to read-only work. Under balanced selection, this eligible third-party profile has no provider bias.";
+    const DESC_ARCHITECTURE: &str = "This role matches delegated architecture design tasks. It excludes long-context reading, repository exploration, evidence collection, summarization, complex debugging, bounded implementation, complex implementation, testing, and high-risk review, and it does not own final integration, merging, or release. It optimizes for quality and is limited to read-only work. Under balanced selection, this eligible third-party profile has no provider bias.";
+    const DESC_TESTING: &str = "This role matches delegated testing tasks. It excludes long-context reading, repository exploration, evidence collection, summarization, complex debugging, architecture design, bounded implementation, complex implementation, and high-risk review, and it does not own final integration, merging, or release. It optimizes for speed and is limited to read-only work. Under balanced selection, this eligible third-party profile has no provider bias.";
+    const DESC_OFFICIAL_FIRST_ELIGIBLE: &str = "This role matches delegated repository exploration tasks. It excludes long-context reading, evidence collection, summarization, complex debugging, architecture design, bounded implementation, complex implementation, testing, and high-risk review, and it does not own final integration, merging, or release. It optimizes for speed and is limited to read-only work. Under official-first selection, this eligible third-party profile may be chosen only for a strong, well-bounded task match; otherwise prefer an official provider path.";
+    const DESC_THIRD_PARTY_FIRST_ELIGIBLE: &str = "This role matches delegated repository exploration tasks. It excludes long-context reading, evidence collection, summarization, complex debugging, architecture design, bounded implementation, complex implementation, testing, and high-risk review, and it does not own final integration, merging, or release. It optimizes for speed and is limited to read-only work. Under third-party-first selection, matching preferred or eligible third-party profiles go first; this profile is eligible.";
+    const DESC_OFFICIAL_FIRST_PREFERRED: &str = "This role matches delegated repository exploration tasks. It excludes long-context reading, evidence collection, summarization, complex debugging, architecture design, bounded implementation, complex implementation, testing, and high-risk review, and it does not own final integration, merging, or release. It optimizes for speed and is limited to read-only work. Task match makes this preferred third-party profile override the global official-first provider bias.";
+    const DESC_FALLBACK: &str = "This role matches delegated repository exploration tasks. It excludes long-context reading, evidence collection, summarization, complex debugging, architecture design, bounded implementation, complex implementation, testing, and high-risk review, and it does not own final integration, merging, or release. It optimizes for speed and is limited to read-only work. This third-party fallback profile is never promoted and may be used only when preferred profiles are unavailable or it is explicitly requested.";
+    const INSTRUCTIONS_BALANCED_REPOSITORY: &str = "Work only on delegated repository exploration tasks and do not edit files. Optimize for speed and keep all work read-only. Under balanced selection, this eligible third-party profile has no provider bias. Return concrete evidence to the parent; final integration, merging, and release remain with the parent agent.";
+    const INSTRUCTIONS_ARCHITECTURE: &str = "Work only on delegated architecture design tasks and do not edit files. Optimize for quality and keep all work read-only. Under balanced selection, this eligible third-party profile has no provider bias. Return concrete evidence to the parent; final integration, merging, and release remain with the parent agent.";
+    const INSTRUCTIONS_TESTING: &str = "Work only on delegated testing tasks and do not edit files. Optimize for speed and keep all work read-only. Under balanced selection, this eligible third-party profile has no provider bias. Return concrete evidence to the parent; final integration, merging, and release remain with the parent agent.";
+    const INSTRUCTIONS_OFFICIAL_FIRST_ELIGIBLE: &str = "Work only on delegated repository exploration tasks and do not edit files. Optimize for speed and keep all work read-only. Under official-first selection, use this eligible third-party profile only for a strong, well-bounded task match; otherwise prefer an official provider path. Return concrete evidence to the parent; final integration, merging, and release remain with the parent agent.";
+    const INSTRUCTIONS_THIRD_PARTY_FIRST_ELIGIBLE: &str = "Work only on delegated repository exploration tasks and do not edit files. Optimize for speed and keep all work read-only. Under third-party-first selection, put matching preferred or eligible third-party profiles first; this profile is eligible. Return concrete evidence to the parent; final integration, merging, and release remain with the parent agent.";
+    const INSTRUCTIONS_OFFICIAL_FIRST_PREFERRED: &str = "Work only on delegated repository exploration tasks and do not edit files. Optimize for speed and keep all work read-only. Task match makes this preferred third-party profile override the global official-first provider bias. Return concrete evidence to the parent; final integration, merging, and release remain with the parent agent.";
+    const INSTRUCTIONS_FALLBACK: &str = "Work only on delegated repository exploration tasks and do not edit files. Optimize for speed and keep all work read-only. Never promote this third-party fallback profile; use it only when preferred profiles are unavailable or it is explicitly requested. Return concrete evidence to the parent; final integration, merging, and release remain with the parent agent.";
+    const INSTRUCTIONS_BOUNDED_CHANGES: &str = "Work only on delegated bounded implementation tasks. Optimize for balanced execution and edit only the files explicitly assigned to this role; do not expand ownership without parent approval. Under balanced selection, this eligible third-party profile has no provider bias. Return concrete evidence to the parent; final integration, merging, and release remain with the parent agent.";
+    const INSTRUCTIONS_COMPLEX_CHANGES: &str = "Work only on delegated complex implementation tasks. Optimize for quality; cross-module changes are allowed within the delegated objective, but final integration, merging, and release remain with the parent agent. Under balanced selection, this eligible third-party profile has no provider bias. Return concrete evidence and verification to the parent agent.";
 
     fn assert_parse(raw: Value, expected: Result<CodexSubagentV2, CompileError>) {
         assert_eq!(parse_persisted_subagent_v2(&raw), expected);
@@ -1447,8 +1449,35 @@ mod tests {
         let parsed = parse_persisted_subagent_v2(&raw).expect("strict public payload");
         assert_eq!(
             serde_json::to_value(parsed).expect("serialize public payload"),
-            raw,
+            raw.clone(),
             "the persisted API is a keyed map and must not expose internal keys or flattened questionnaire fields"
+        );
+        let serde_parsed: CodexSubagentV2 =
+            serde_json::from_value(raw.clone()).expect("deserialize aggregate public DTO");
+        assert_eq!(
+            serde_json::to_value(serde_parsed).expect("round-trip aggregate public DTO"),
+            raw
+        );
+    }
+
+    #[test]
+    fn codex_subagent_profile_public_serde_shape_is_exactly_nested() {
+        let profile = profile("flash", "DeepSeek-V4-Flash");
+        let literal = json!({
+            "model": "DeepSeek-V4-Flash",
+            "enabled": true,
+            "questionnaire": {
+                "taskStrengths": ["repository_exploration"],
+                "optimization": "speed",
+                "writeScope": "read_only",
+                "preference": "eligible",
+                "reasoningEffort": "auto"
+            }
+        });
+        assert_eq!(
+            serde_json::to_value(&profile).expect("serialize public profile"),
+            literal,
+            "profile-alone serialization must use the same nested public DTO as the aggregate"
         );
     }
 
@@ -1813,6 +1842,35 @@ mod tests {
             .developer_instructions
             .to_ascii_lowercase()
             .contains("official"));
+    }
+
+    #[test]
+    fn codex_subagent_v2_write_scope_instructions_have_exact_ownership_boundaries() {
+        let mut bounded = profile("flash", "DeepSeek-V4-Flash");
+        bounded.strengths = vec![TaskStrength::BoundedImplementation];
+        bounded.optimization = Optimization::Balanced;
+        bounded.write_scope = WriteScope::BoundedChanges;
+        assert_eq!(
+            generated_instructions_for_provider(
+                SelectionPolicy::Balanced,
+                &bounded,
+                ProviderKind::ThirdParty,
+            ),
+            INSTRUCTIONS_BOUNDED_CHANGES
+        );
+
+        let mut complex = profile("flash", "DeepSeek-V4-Flash");
+        complex.strengths = vec![TaskStrength::ComplexImplementation];
+        complex.optimization = Optimization::Quality;
+        complex.write_scope = WriteScope::ComplexChanges;
+        assert_eq!(
+            generated_instructions_for_provider(
+                SelectionPolicy::Balanced,
+                &complex,
+                ProviderKind::ThirdParty,
+            ),
+            INSTRUCTIONS_COMPLEX_CHANGES
+        );
     }
 
     fn effort_profile(
@@ -2193,7 +2251,7 @@ mod tests {
             vec![],
             vec![status(
                 "broken",
-                Some("broken"),
+                None,
                 ProfileStatusCode::Invalid,
                 Some(DiagnosticReasonCode::Invalid),
             )],
@@ -2205,7 +2263,7 @@ mod tests {
     #[test]
     fn codex_subagent_v2_production_diagnostics_are_allowlisted() {
         let raw = json!({
-            "model": "broken",
+            "model": "MODEL_SECRET_MARKER",
             "enabled": "yes",
             "apiKey": "API_KEY_SECRET",
             "taskBody": "TASK_BODY_SECRET",
@@ -2214,7 +2272,7 @@ mod tests {
         let saved = config(
             SelectionPolicy::Balanced,
             vec![PersistedProfileEntry::Invalid {
-                key: s("broken"),
+                key: s("PROFILE_KEY_SECRET_MARKER"),
                 raw,
                 validation_code: s("invalid_enabled"),
             }],
@@ -2228,14 +2286,26 @@ mod tests {
                 .keys()
                 .map(String::as_str)
                 .collect::<std::collections::BTreeSet<_>>(),
-            ["model", "role", "policy", "status", "reasonCode"]
-                .into_iter()
-                .collect()
+            [
+                "model",
+                "role",
+                "profileKey",
+                "policy",
+                "status",
+                "reasonCode"
+            ]
+            .into_iter()
+            .collect()
         );
         let serialized = value.to_string();
         assert!(!serialized.contains("API_KEY_SECRET"));
         assert!(!serialized.contains("TASK_BODY_SECRET"));
         assert!(!serialized.contains("ENCRYPTED_SECRET"));
+        assert!(!serialized.contains("MODEL_SECRET_MARKER"));
+        assert!(!serialized.contains("PROFILE_KEY_SECRET_MARKER"));
+        assert_eq!(value[0]["model"], Value::Null);
+        assert_eq!(value[0]["role"], Value::Null);
+        assert_eq!(value[0]["profileKey"], Value::Null);
     }
 
     #[test]
