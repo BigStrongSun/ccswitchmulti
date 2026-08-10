@@ -23,7 +23,7 @@ type QuestionnaireReasoningEffort = "auto" | "low" | "medium" | "high" | "xhigh"
 type CodexSubagentV2 = {
   schemaVersion: 1;
   selectionPolicy: SubagentV2SelectionPolicy;
-  profiles: Record<string, CodexSubagentV2Profile>;
+  profiles: Record<NormalizedProfileKey, CodexSubagentV2Profile>;
 };
 
 type CodexSubagentQuestionnaire = {
@@ -35,7 +35,11 @@ type CodexSubagentQuestionnaire = {
 };
 ```
 
-`profiles` keys preserve the canonical visible `model` string. Matching uses trim plus Unicode normalization and a case-insensitive stable lookup; it must not destructively ASCII-normalize the key. This keeps aliases and existing profiles stable across a catalog refresh. A profile contains `model`, `enabled`, `questionnaire`, and optional `overrides`. Its `taskStrengths: CodexSubagentTaskStrength[]` is a unique list selecting one through five of the following values:
+The persisted `profiles` map key is uniquely defined as `trim(model)`, followed by Unicode NFKC normalization and Unicode Default Case Folding. Backend code must own this exact fixed algorithm (for example via `unicode-normalization` or an equivalent implementation), and tests must fix its expected output. `profile.model` separately preserves the original visible/routable spelling and is the role `model` value. This is not ASCII conversion.
+
+If two stored keys normalize to the same key, the related configuration is a validation error: all conflicting profiles produce no role, the UI shows the collision and requires a user merge, and the backend must never silently choose a last write. Compatibility/case examples: `"Ｆｏｏ"` and `"foo"` normalize to the same key; `"Straße"` and `"STRASSE"` collide through default case folding. A catalog alias change updates technical catalog data only; it never rewrites the profile map key or `profile.model`. A profile that cannot be matched remains stored and unroutable.
+
+A profile contains `model`, `enabled`, `questionnaire`, and optional `overrides`. Its `taskStrengths: CodexSubagentTaskStrength[]` is a unique list selecting one through five of the following values:
 
 `long_context_reading`, `repository_exploration`, `evidence_collection`, `summarization`, `complex_debugging`, `architecture_design`, `bounded_implementation`, `complex_implementation`, `testing`, and `high_risk_review`.
 
@@ -71,7 +75,7 @@ Initialization sets global `selectionPolicy` to `balanced` and enables two prese
 - DeepSeek Flash: `optimization="speed"`, `writeScope="read_only"`, `preference="eligible"`, `reasoningEffort="medium"`, and `taskStrengths=[long_context_reading, repository_exploration, evidence_collection, summarization, testing]`.
 - DeepSeek Pro: `optimization="quality"`, `writeScope="complex_changes"`, `preference="eligible"`, `reasoningEffort="high"`, and `taskStrengths=[complex_debugging, architecture_design, complex_implementation, high_risk_review, testing]`.
 
-Every other catalog model begins as a disabled draft until configured and enabled. Existing user-authored role files are never overwritten. Role-name overrides normalize by trimming, lowercasing, mapping each run of invalid characters to one `-`, collapsing repeated `-`/`_`, and trimming edge separators; only lowercase ASCII letters, digits, dashes, and underscores remain, and an empty result is forbidden. `default`, `worker`, and `explorer` are forbidden after normalization. Conflicts dedupe case-insensitively in this exact order: requested base, `ccswitch-<base>`, then `ccswitch-<base>-2`, `ccswitch-<base>-3`, and so on until unused. Examples: `"  Deep Seek  "` becomes `deep-seek`; `"深度模型"` and `"!!!"` are rejected as empty; `"Pro!!!Review"` becomes `pro-review`; `"A__B"` becomes `a_b`; and repeated conflicts for `review` resolve as `review`, `ccswitch-review`, then `ccswitch-review-2`. Nicknames contain one to three nonempty, unique values using only ASCII alphanumerics, spaces, dashes, or underscores.
+Every other catalog model begins as a disabled draft until configured and enabled. Existing user-authored role files are never overwritten. Role-name overrides normalize exactly as follows: trim; ASCII-lowercase; map every maximal run of invalid characters to `-`; repeatedly replace `--` with `-`, `__` with `_`, and either `-_` or `_-` with `-` until stable; then trim leading/trailing `-` or `_`. Only lowercase ASCII letters, digits, dashes, and underscores remain, and an empty result is an error. `default`, `worker`, and `explorer` are forbidden after normalization. Conflicts dedupe case-insensitively in this exact order: requested base, `ccswitch-<base>`, then `ccswitch-<base>-2`, `ccswitch-<base>-3`, and so on until unused. Examples: `"  Deep Seek  "` becomes `deep-seek`; `"深度模型"` and `"!!!"` are rejected as empty; `"Pro!!!Review"` becomes `pro-review`; `"A__B"` becomes `a_b`; `"Foo__-- Bar"` becomes `foo-bar`; and repeated conflicts for `review` resolve as `review`, `ccswitch-review`, then `ccswitch-review-2`. Nicknames contain one to three nonempty, unique values using only ASCII alphanumerics, spaces, dashes, or underscores.
 
 CCSM preserves `hide_spawn_agent_metadata=true`, mixed routing `tool_namespace="agents"`, the reserved schema, the current V2 body projection, and Qwen behavior. Diagnostics must exclude credentials, task text, and encrypted content.
 

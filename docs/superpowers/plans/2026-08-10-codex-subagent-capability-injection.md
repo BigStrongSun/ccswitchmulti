@@ -14,7 +14,7 @@ Preserve V1 direct override behavior, official provider classification, V2 body 
 
 ## 2. Backend RED
 
-- [ ] Add failing Rust tests for schema parsing/defaulting, one-to-five unique `taskStrengths` membership, profile preservation over catalog refresh, backend-only compilation, auto effort, policy semantics, override deletion, nickname/role normalization, collision handling, unroutable non-generation, legacy initialization, and diagnostics redaction.
+- [ ] Add failing Rust tests for schema parsing/defaulting, one-to-five unique `taskStrengths` membership, the fixed trim/NFKC/default-case-fold profile-key algorithm, collision validation with no generated roles, profile preservation over catalog refresh, backend-only compilation, auto effort, policy semantics, override deletion, nickname/role normalization, collision handling, unroutable non-generation, legacy initialization, and diagnostics redaction.
 - [ ] Cover V1 activation preserving inactive V2 data and V2 activation only materializing enabled/routable profiles.
 
 Run:
@@ -73,7 +73,7 @@ Acceptance: policy changes update derived preview; manual field overrides visibl
 
 ## 6. Compatibility, diagnostics, and memory
 
-- [ ] Add regression tests for legacy configurations without `subagentV2`, mode switching, catalog refresh, disabled drafts, canonical-visible-model stable matching, user-role collisions, V1's first-five direct overrides, built-in role protection, diagnostics redaction, and unchanged Qwen behavior.
+- [ ] Add regression tests for legacy configurations without `subagentV2`, mode switching, catalog refresh, disabled drafts, NFKC/default-case-fold profile-key collisions, canonical `profile.model` preservation across catalog aliases, user-role collisions, V1's first-five direct overrides, built-in role protection, diagnostics redaction, and unchanged Qwen behavior.
 - [ ] Update project `memory.md` with the actual architecture, commands, test evidence, known limits, and transaction-install safety rule after implementation evidence exists.
 
 Run:
@@ -128,8 +128,8 @@ Invoke-Pester .\scripts\tests\install-ccswitchmulti-transaction.Tests.ps1 -Outpu
 $installedExecutable = 'C:\Users\sunda\AppData\Local\CCSwitchMulti\cc-switch.exe'
 $installDirectory = Split-Path -Parent $installedExecutable
 $uninstallExecutable = Join-Path $installDirectory 'uninstall.exe'
-$currentPid = (Get-NetTCPConnection -State Listen -LocalPort 15721 | Select-Object -First 1 -ExpandProperty OwningProcess)
-if (-not $currentPid) { throw 'No CCSM listener owns port 15721' }
+$ccsmPid = (Get-NetTCPConnection -State Listen -LocalPort 15721 | Select-Object -First 1 -ExpandProperty OwningProcess)
+if (-not $ccsmPid) { throw 'No CCSM listener owns port 15721' }
 $currentHash = (Get-FileHash -LiteralPath $installedExecutable -Algorithm SHA256).Hash
 $currentVersion = (Get-Item -LiteralPath $installedExecutable).VersionInfo.FileVersion
 $backupRoot = 'C:\Users\sunda\.cc-switch\backups\ccsm-3.19.1-19-transaction'
@@ -139,14 +139,30 @@ $transactionArgs = @('-NoProfile','-ExecutionPolicy','Bypass','-File',(Resolve-P
   '-InstallerPath',$installerPath,'-ExpectedInstallerHash',$installerHash,
   '-ExpectedCurrentVersion',$currentVersion,'-ExpectedCurrentHash',$currentHash,
   '-ExpectedInstalledVersion','3.19.1-19','-ExpectedInstalledHash',$installedHash,
-  '-CurrentPid',$currentPid,'-InstalledExecutable',$installedExecutable,'-InstallDirectory',$installDirectory,
+  '-CurrentPid',$ccsmPid,'-InstalledExecutable',$installedExecutable,'-InstallDirectory',$installDirectory,
   '-UninstallExecutable',$uninstallExecutable,'-ConfigPath',(Join-Path $env:USERPROFILE '.cc-switch'),
   '-RegistryKey','HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\CCSwitchMulti',
   '-Port','15721','-HealthUri','http://127.0.0.1:15721/health','-TimeoutSeconds','90','-BackupRoot',$backupRoot)
 $transaction = Start-Process powershell.exe -WindowStyle Hidden -PassThru -Wait -ArgumentList $transactionArgs -RedirectStandardOutput $transactionLog -RedirectStandardError "$transactionLog.stderr"
-if ($transaction.ExitCode -ne 0) { throw "Transaction failed: exit=$($transaction.ExitCode)" }
-$result = Get-Content -Raw $transactionLog | ConvertFrom-Json
-if ($result.Status -ne 'Success' -or $result.Error -or $result.RollbackError) { throw "Unexpected transaction result: $($result | ConvertTo-Json -Compress)" }
+if (-not (Test-Path -LiteralPath $transactionLog)) { throw 'Transaction did not create result JSON' }
+try { $result = Get-Content -Raw $transactionLog | ConvertFrom-Json -ErrorAction Stop } catch { throw "Transaction result JSON is invalid: $($_.Exception.Message)" }
+switch ($result.Status) {
+  'Success' {
+    if ($transaction.ExitCode -ne 0 -or $result.Error -or $result.RollbackError) { throw "Success result/exit mismatch: $($result | ConvertTo-Json -Compress)" }
+  }
+  'RolledBack' {
+    if ($transaction.ExitCode -eq 0 -or -not $result.Error -or $result.RollbackError) { throw "Invalid rollback result: $($result | ConvertTo-Json -Compress)" }
+    $rollbackOwner = Get-NetTCPConnection -State Listen -LocalPort 15721 | Select-Object -First 1 -ExpandProperty OwningProcess
+    if (-not $rollbackOwner -or -not (Test-Path -LiteralPath $installedExecutable)) { throw 'Rollback did not restore a listening installed runtime' }
+    if ((Invoke-WebRequest -UseBasicParsing http://127.0.0.1:15721/health).StatusCode -ne 200) { throw 'Rollback health is not HTTP 200' }
+    if ((Get-FileHash -LiteralPath $installedExecutable -Algorithm SHA256).Hash -ne $currentHash) { throw 'Rollback restored hash mismatch' }
+    if ((Get-Item -LiteralPath $installedExecutable).VersionInfo.FileVersion -ne $currentVersion) { throw 'Rollback restored version mismatch' }
+    Write-Warning "Transaction safely rolled back; installation is incomplete. TransactionId=$($result.TransactionId)"
+    throw 'Safe rollback: do not treat this task as installed or accepted'
+  }
+  'RollbackFailed' { throw "Rollback failed: $($result | ConvertTo-Json -Compress)" }
+  default { throw "Unsupported transaction status: $($result.Status)" }
+}
 ```
 
 The transaction receives the expected installed hash from the versioned raw executable resolved in the first block, not from the NSIS installer hash.
