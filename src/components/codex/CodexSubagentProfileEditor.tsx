@@ -120,6 +120,30 @@ function settingsWithConfig(
   };
 }
 
+function settingsForDiagnostics(
+  provider: Provider,
+  config: CodexSubagentV2Config,
+): Record<string, unknown> {
+  const rawProfiles = readRawProfiles(config);
+  const profiles = Object.fromEntries(
+    Object.entries(rawProfiles).filter(([, profile]) =>
+      isUsableProfile(profile),
+    ),
+  ) as Record<string, CodexSubagentV2Profile>;
+  let invalidOrdinal = 1;
+  for (const [, profile] of Object.entries(rawProfiles)) {
+    if (isUsableProfile(profile)) continue;
+    let diagnosticKey = `invalid-profile-${invalidOrdinal}`;
+    while (diagnosticKey in profiles) {
+      invalidOrdinal += 1;
+      diagnosticKey = `invalid-profile-${invalidOrdinal}`;
+    }
+    profiles[diagnosticKey] = {} as CodexSubagentV2Profile;
+    invalidOrdinal += 1;
+  }
+  return settingsWithConfig(provider, { ...config, profiles });
+}
+
 function parseNicknames(value: string): string[] {
   return value
     .split(",")
@@ -201,12 +225,12 @@ export function CodexSubagentProfileEditor({
     setStatusError(null);
   }, [provider.id, persistedKey]);
 
-  const draftSettings = useMemo(
+  const diagnosticSettings = useMemo(
     () =>
-      draft ? settingsWithConfig(provider, draft) : provider.settingsConfig,
+      draft ? settingsForDiagnostics(provider, draft) : provider.settingsConfig,
     [draft, provider],
   );
-  const draftSettingsKey = JSON.stringify(draftSettings);
+  const diagnosticSettingsKey = JSON.stringify(diagnosticSettings);
 
   useEffect(() => {
     if (!draft) {
@@ -217,7 +241,7 @@ export function CodexSubagentProfileEditor({
     let ignore = false;
     setStatusError(null);
     codexSubagentV2Api
-      .getProfileStatuses(draftSettings)
+      .getProfileStatuses(diagnosticSettings)
       .then((result) => {
         if (!ignore) setStatuses(result);
       })
@@ -232,7 +256,7 @@ export function CodexSubagentProfileEditor({
     return () => {
       ignore = true;
     };
-  }, [draftSettingsKey]);
+  }, [diagnosticSettingsKey]);
 
   useEffect(() => {
     if (!draft) {
@@ -249,7 +273,7 @@ export function CodexSubagentProfileEditor({
       entries.map(async ([profileKey, profile]) => {
         try {
           const preview = await codexSubagentV2Api.previewProfile(
-            draftSettings,
+            diagnosticSettings,
             profile.model,
             profile,
           );
@@ -276,7 +300,7 @@ export function CodexSubagentProfileEditor({
     return () => {
       ignore = true;
     };
-  }, [draftSettingsKey]);
+  }, [diagnosticSettingsKey]);
 
   async function persist(nextConfig: CodexSubagentV2Config) {
     const nextProvider = await codexSubagentV2Api.updateProviderConfig(
@@ -323,7 +347,7 @@ export function CodexSubagentProfileEditor({
   function repairProfile(profileKey: string) {
     const replacement = defaultProfileForModel(profileKey);
     if (!replacement) {
-      setSaveError(`没有可用于 ${profileKey} 的安全默认问卷`);
+      setSaveError("此无效能力配置无法安全修复。");
       return;
     }
     setSaveMessage(null);
@@ -390,7 +414,7 @@ export function CodexSubagentProfileEditor({
     setSaveMessage(null);
     try {
       const authoritativeStatuses =
-        await codexSubagentV2Api.getProfileStatuses(draftSettings);
+        await codexSubagentV2Api.getProfileStatuses(diagnosticSettings);
       setStatuses(authoritativeStatuses);
       setStatusError(null);
       const blocking = authoritativeStatuses.profiles.filter(
@@ -398,6 +422,13 @@ export function CodexSubagentProfileEditor({
           profile.status === "collision" || profile.status === "invalid",
       );
       if (blocking.length > 0) {
+        if (
+          Object.values(rawProfiles).some(
+            (profile) => !isUsableProfile(profile),
+          )
+        ) {
+          throw new Error("存在无效能力配置，无法保存。");
+        }
         const details = blocking.flatMap((profile) => profile.warnings);
         throw new Error(
           details[0] ??
@@ -443,17 +474,20 @@ export function CodexSubagentProfileEditor({
   const invalidProfileEntries = rawProfileEntries.filter(
     ([, profile]) => !isUsableProfile(profile),
   );
+  const usableProfileKeys = new Set(
+    profileEntries.map(([profileKey]) => profileKey),
+  );
   const statusByProfileKey = new Map(
     (statuses?.profiles ?? [])
-      .filter((status) => status.profileKey)
+      .filter(
+        (status) =>
+          status.profileKey !== undefined &&
+          usableProfileKeys.has(status.profileKey),
+      )
       .map((status) => [status.profileKey!, status]),
   );
   const unassignedStatuses = (statuses?.profiles ?? []).filter(
-    (status) =>
-      !status.profileKey ||
-      !rawProfileEntries.some(
-        ([profileKey]) => profileKey === status.profileKey,
-      ),
+    (status) => !status.profileKey || !usableProfileKeys.has(status.profileKey),
   );
 
   return (
@@ -773,9 +807,9 @@ export function CodexSubagentProfileEditor({
               </section>
             );
           })}
-          {invalidProfileEntries.map(([profileKey]) => {
-            const title =
-              PROFILE_TITLES[profileKey] ?? `${profileKey} 子 Agent 能力`;
+          {invalidProfileEntries.map(([profileKey], index) => {
+            const ordinal = index + 1;
+            const title = `无效能力配置 ${ordinal}`;
             return (
               <section
                 key={profileKey}
@@ -786,16 +820,13 @@ export function CodexSubagentProfileEditor({
                 <p className="text-sm text-rose-700">
                   持久化的 profile 结构无效，原始条目尚未被修改。
                 </p>
-                <ProfileBackendOutput
-                  profileKey={profileKey}
-                  status={statusByProfileKey.get(profileKey)}
-                />
+                <ProfileBackendOutput status={undefined} />
                 <Button
                   type="button"
                   variant="outline"
                   onClick={() => repairProfile(profileKey)}
                 >
-                  使用默认问卷修复 {profileKey}
+                  修复无效能力配置 {ordinal}
                 </Button>
               </section>
             );
@@ -818,11 +849,7 @@ export function CodexSubagentProfileEditor({
         <div className="space-y-2 rounded-lg border bg-background/80 p-4 text-sm">
           <p>生成来源：{statuses.generationSource}</p>
           {unassignedStatuses.map((status, index) => (
-            <ProfileBackendOutput
-              key={`${status.profileKey ?? "invalid"}-${index}`}
-              profileKey={status.profileKey}
-              status={status}
-            />
+            <ProfileBackendOutput key={`unassigned-${index}`} status={status} />
           ))}
           {statuses.warnings.map((warning) => (
             <p key={warning} className="text-amber-700">

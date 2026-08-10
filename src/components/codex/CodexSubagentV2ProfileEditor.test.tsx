@@ -660,8 +660,7 @@ describe("Codex Sub-Agent V2 review round 1 regressions", () => {
   it("keeps an invalid secret-bearing profile key out of UI, diagnostics, requests, and persistence", async () => {
     const secretProfileKey = "RAW_PROFILE_KEY_SECRET_SENTINEL";
     const profiles =
-      ipcState.providers.router.settingsConfig.codexRouting.subagentV2
-        .profiles;
+      ipcState.providers.router.settingsConfig.codexRouting.subagentV2.profiles;
     profiles[secretProfileKey] = {
       model: "deepseek-v4-flash",
       enabled: true,
@@ -686,7 +685,9 @@ describe("Codex Sub-Agent V2 review round 1 regressions", () => {
     expect(
       await screen.findByRole("region", { name: "无效能力配置 1" }),
     ).toBeVisible();
-    expect(screen.getByRole("button", { name: "修复无效能力配置 1" })).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "修复无效能力配置 1" }),
+    ).toBeVisible();
     expect(document.body.textContent).not.toContain(secretProfileKey);
     expect(
       Array.from(document.querySelectorAll("*")).flatMap((element) => [
