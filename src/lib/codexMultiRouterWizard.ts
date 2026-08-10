@@ -1136,6 +1136,7 @@ export function buildCodexMultiRouterWizardPlan(
     options.subagentVersion ?? existingRouting?.subagentVersion,
   );
   const routing: CodexRoutingConfig = {
+    ...existingRouting,
     enabled: true,
     defaultRouteId: routes[0]?.id,
     officialAuth,

@@ -1817,7 +1817,7 @@ export function CodexMultiRouterWizard({
       const result = buildCodexMultiRouterWizardPlan(
         providers,
         routeReadySources,
-        existingPlan,
+        savedPlan ?? existingPlan,
         {
           planName: draftPlanName,
           catalogModelOrder: activeCatalogModelOrder,
@@ -1902,7 +1902,7 @@ export function CodexMultiRouterWizard({
   const planPreview = buildCodexMultiRouterWizardPlan(
     providers,
     routeReadySources,
-    existingPlan,
+    savedPlan ?? existingPlan,
     {
       planName: draftPlanName,
       catalogModelOrder: activeCatalogModelOrder,
@@ -2815,7 +2815,10 @@ export function CodexMultiRouterWizard({
                   overrides 限制。用户手写同名 role 不会被覆盖。
                 </div>
                 {existingPlan ? (
-                  <CodexSubagentProfileEditor provider={existingPlan} />
+                  <CodexSubagentProfileEditor
+                    provider={planPreview}
+                    onPersisted={setSavedPlan}
+                  />
                 ) : (
                   <div className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
                     新方案发布后可继续编辑每个 V2 子 Agent

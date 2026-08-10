@@ -70,8 +70,8 @@ export interface CodexSubagentProfilePreview {
   nicknameCandidates: string[];
   model: string;
   modelProvider: "codex_model_router_v2";
-  modelReasoningEffort?: CodexSubagentExplicitReasoningEffort;
-  modelContextWindow?: number;
+  modelReasoningEffort: CodexSubagentExplicitReasoningEffort;
+  modelContextWindow: number;
   tomlPreview: string;
   warnings: string[];
 }
