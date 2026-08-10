@@ -748,6 +748,11 @@ pub(crate) fn write_live_with_common_config(
         return Ok(());
     }
 
+    if matches!(app_type, AppType::Codex) {
+        let provider_context = crate::codex_config::codex_provider_classification_context(db)?;
+        return write_codex_live_snapshot(&effective_provider, Some(&provider_context));
+    }
+
     write_live_snapshot(app_type, &effective_provider)
 }
 
@@ -788,7 +793,8 @@ pub(crate) fn write_codex_config_only_with_common_config(
         .ok_or_else(|| AppError::Config("Codex 供应商配置必须是 JSON 对象".to_string()))?;
     let config_text = settings.get("config").and_then(|value| value.as_str());
 
-    crate::codex_config::write_codex_provider_config_only_with_catalog(
+    let provider_context = crate::codex_config::codex_provider_classification_context(db)?;
+    crate::codex_config::write_codex_provider_config_only_with_catalog_and_provider_context(
         &settings_for_live,
         effective_provider.category.as_deref(),
         config_text,
@@ -798,6 +804,7 @@ pub(crate) fn write_codex_config_only_with_common_config(
                 .as_ref()
                 .and_then(|meta| meta.api_format.as_deref()),
         ),
+        Some(&provider_context),
     )
 }
 
@@ -1131,28 +1138,7 @@ pub(crate) fn write_live_snapshot(app_type: &AppType, provider: &Provider) -> Re
             ));
         }
         AppType::Codex => {
-            let settings_for_live = codex_settings_for_live_projection(provider);
-            let obj = settings_for_live
-                .as_object()
-                .ok_or_else(|| AppError::Config("Codex 供应商配置必须是 JSON 对象".to_string()))?;
-            let auth = obj
-                .get("auth")
-                .ok_or_else(|| AppError::Config("Codex 供应商配置缺少 'auth' 字段".to_string()))?;
-            let config_str = obj.get("config").and_then(|v| v.as_str());
-
-            // Native (direct) Responses and Anthropic providers must suppress Codex's
-            // freeform apply_patch custom tool via the generated catalog; chat/proxy
-            // providers keep the default tool set. Uses the same Anthropic detection as
-            // the proxy router (apiFormat meta/settings + TOML wire_api).
-            let profile = crate::proxy::providers::resolve_codex_catalog_tool_profile(provider);
-
-            crate::codex_config::write_codex_provider_live_with_catalog(
-                &settings_for_live,
-                provider.category.as_deref(),
-                auth,
-                config_str,
-                profile,
-            )?;
+            write_codex_live_snapshot(provider, None)?;
         }
         AppType::Gemini => {
             // Delegate to write_gemini_live which handles env file writing correctly
@@ -1267,6 +1253,35 @@ pub(crate) fn write_live_snapshot(app_type: &AppType, provider: &Provider) -> Re
         }
     }
     Ok(())
+}
+
+fn write_codex_live_snapshot(
+    provider: &Provider,
+    provider_context: Option<&crate::codex_config::ProviderClassificationContext>,
+) -> Result<(), AppError> {
+    let settings_for_live = codex_settings_for_live_projection(provider);
+    let obj = settings_for_live
+        .as_object()
+        .ok_or_else(|| AppError::Config("Codex 供应商配置必须是 JSON 对象".to_string()))?;
+    let auth = obj
+        .get("auth")
+        .ok_or_else(|| AppError::Config("Codex 供应商配置缺少 'auth' 字段".to_string()))?;
+    let config_str = obj.get("config").and_then(|v| v.as_str());
+
+    // Native (direct) Responses and Anthropic providers must suppress Codex's
+    // freeform apply_patch custom tool via the generated catalog; chat/proxy
+    // providers keep the default tool set. Uses the same Anthropic detection as
+    // the proxy router (apiFormat meta/settings + TOML wire_api).
+    let profile = crate::proxy::providers::resolve_codex_catalog_tool_profile(provider);
+
+    crate::codex_config::write_codex_provider_live_with_catalog_and_provider_context(
+        &settings_for_live,
+        provider.category.as_deref(),
+        auth,
+        config_str,
+        profile,
+        provider_context,
+    )
 }
 
 /// Sync all providers to live configuration (for additive mode apps)

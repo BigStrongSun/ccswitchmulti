@@ -92,31 +92,34 @@ pub enum ProviderKind {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CodexSubagentV2 {
-    pub schema_version: u8,
-    pub selection_policy: SelectionPolicy,
-    pub profiles: Vec<PersistedProfileEntry>,
+    pub(crate) schema_version: u8,
+    pub(crate) selection_policy: SelectionPolicy,
+    pub(crate) profiles: Vec<ParsedProfileEntry>,
 }
 
-struct PublicProfiles<'a>(&'a [PersistedProfileEntry]);
+struct PublicProfiles<'a>(&'a [ParsedProfileEntry]);
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct PublicQuestionnaire<'a> {
-    task_strengths: &'a [TaskStrength],
-    optimization: Optimization,
-    write_scope: WriteScope,
-    preference: Preference,
-    reasoning_effort: QuestionnaireReasoningEffort,
+pub struct CodexSubagentQuestionnaire {
+    pub task_strengths: Vec<TaskStrength>,
+    pub optimization: Optimization,
+    pub write_scope: WriteScope,
+    pub preference: Preference,
+    pub reasoning_effort: QuestionnaireReasoningEffort,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct PublicProfile<'a> {
-    model: &'a str,
-    enabled: bool,
-    questionnaire: PublicQuestionnaire<'a>,
-    #[serde(skip_serializing_if = "Overrides::is_empty")]
-    overrides: &'a Overrides,
+pub struct CodexSubagentProfileConfig {
+    pub model: String,
+    pub enabled: bool,
+    pub questionnaire: CodexSubagentQuestionnaire,
+    #[serde(
+        default,
+        skip_serializing_if = "CodexSubagentProfileOverrides::is_empty"
+    )]
+    pub overrides: CodexSubagentProfileOverrides,
 }
 
 impl Serialize for PublicProfiles<'_> {
@@ -127,24 +130,24 @@ impl Serialize for PublicProfiles<'_> {
         let mut map = serializer.serialize_map(Some(self.0.len()))?;
         for entry in self.0 {
             match entry {
-                PersistedProfileEntry::Valid(profile) => {
+                ParsedProfileEntry::Valid(profile) => {
                     map.serialize_entry(
                         &profile.key,
-                        &PublicProfile {
-                            model: &profile.model,
+                        &CodexSubagentProfileConfig {
+                            model: profile.model.clone(),
                             enabled: profile.enabled,
-                            questionnaire: PublicQuestionnaire {
-                                task_strengths: &profile.strengths,
+                            questionnaire: CodexSubagentQuestionnaire {
+                                task_strengths: profile.strengths.clone(),
                                 optimization: profile.optimization,
                                 write_scope: profile.write_scope,
                                 preference: profile.preference,
                                 reasoning_effort: profile.reasoning_effort,
                             },
-                            overrides: &profile.overrides,
+                            overrides: profile.overrides.clone(),
                         },
                     )?;
                 }
-                PersistedProfileEntry::Invalid { key, raw, .. } => {
+                ParsedProfileEntry::Invalid { key, raw, .. } => {
                     map.serialize_entry(key, raw)?;
                 }
             }
@@ -177,10 +180,9 @@ impl<'de> Deserialize<'de> for CodexSubagentV2 {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum PersistedProfileEntry {
-    Valid(CodexSubagentProfile),
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ParsedProfileEntry {
+    Valid(ParsedCodexSubagentProfile),
     Invalid {
         key: String,
         raw: Value,
@@ -188,9 +190,8 @@ pub enum PersistedProfileEntry {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CodexSubagentProfile {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ParsedCodexSubagentProfile {
     pub key: String,
     pub model: String,
     pub enabled: bool,
@@ -199,12 +200,12 @@ pub struct CodexSubagentProfile {
     pub write_scope: WriteScope,
     pub preference: Preference,
     pub reasoning_effort: QuestionnaireReasoningEffort,
-    pub overrides: Overrides,
+    pub overrides: CodexSubagentProfileOverrides,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Overrides {
+pub struct CodexSubagentProfileOverrides {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -217,8 +218,8 @@ pub struct Overrides {
     pub model_reasoning_effort: Option<ModelReasoningEffort>,
 }
 
-impl Overrides {
-    fn is_empty(&self) -> bool {
+impl CodexSubagentProfileOverrides {
+    pub fn is_empty(&self) -> bool {
         self.role_name.is_none()
             && self.description.is_none()
             && self.developer_instructions.is_none()
@@ -328,8 +329,9 @@ pub enum DiagnosticReasonCode {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Diagnostic {
-    model: String,
+    model: Option<String>,
     role: Option<String>,
+    profile_key: Option<String>,
     policy: SelectionPolicy,
     status: ProfileStatusCode,
     reason_code: Option<DiagnosticReasonCode>,
@@ -515,7 +517,7 @@ pub fn parse_persisted_subagent_v2(raw: &Value) -> Result<CodexSubagentV2, Compi
             "questionnaire.reasoningEffort is required",
             "reasoningEffort is not an allowed enum member",
         )?;
-        let overrides: Overrides = match p.get("overrides") {
+        let overrides: CodexSubagentProfileOverrides = match p.get("overrides") {
             Some(v) => serde_json::from_value(v.clone()).map_err(|_| {
                 validation_error(
                     "invalid_override_effort",
@@ -523,9 +525,9 @@ pub fn parse_persisted_subagent_v2(raw: &Value) -> Result<CodexSubagentV2, Compi
                     "modelReasoningEffort allows only low, medium, high, or xhigh",
                 )
             })?,
-            None => Overrides::default(),
+            None => CodexSubagentProfileOverrides::default(),
         };
-        parsed.push(PersistedProfileEntry::Valid(CodexSubagentProfile {
+        parsed.push(ParsedProfileEntry::Valid(ParsedCodexSubagentProfile {
             key,
             model: model.to_string(),
             enabled,
@@ -577,7 +579,7 @@ pub fn parse_persisted_subagent_v2_tolerant(raw: &Value) -> Result<CodexSubagent
         match parse_persisted_subagent_v2(&one) {
             Ok(one) => parsed.profiles.extend(one.profiles),
             Err(CompileError::Validation { code, .. }) => {
-                parsed.profiles.push(PersistedProfileEntry::Invalid {
+                parsed.profiles.push(ParsedProfileEntry::Invalid {
                     key,
                     raw: profile_raw,
                     validation_code: code,
@@ -616,7 +618,7 @@ fn normalize_role_name(value: &str) -> String {
     out.trim_matches(['-', '_']).to_string()
 }
 
-fn auto_effort(p: &CodexSubagentProfile) -> ModelReasoningEffort {
+fn auto_effort(p: &ParsedCodexSubagentProfile) -> ModelReasoningEffort {
     if let Some(effort) = p.overrides.model_reasoning_effort {
         return effort;
     }
@@ -703,71 +705,171 @@ fn write_scope_label(value: WriteScope) -> &'static str {
     }
 }
 
-fn preference_label(value: Preference) -> &'static str {
-    match value {
-        Preference::Preferred => "preferred",
-        Preference::Eligible => "eligible",
-        Preference::Fallback => "fallback-only",
-    }
-}
-
-fn policy_label(value: SelectionPolicy) -> &'static str {
-    match value {
-        SelectionPolicy::Balanced => "balanced selection",
-        SelectionPolicy::OfficialFirst => "official-first selection",
-        SelectionPolicy::ThirdPartyFirst => "third-party-first selection",
-    }
-}
-
 fn provider_label(value: ProviderKind) -> &'static str {
     match value {
-        ProviderKind::Official => "official provider path",
-        ProviderKind::ThirdParty => "third-party provider path",
+        ProviderKind::Official => "official",
+        ProviderKind::ThirdParty => "third-party",
+    }
+}
+
+const ALL_TASK_STRENGTHS: [TaskStrength; 10] = [
+    TaskStrength::LongContextReading,
+    TaskStrength::RepositoryExploration,
+    TaskStrength::EvidenceCollection,
+    TaskStrength::Summarization,
+    TaskStrength::ComplexDebugging,
+    TaskStrength::ArchitectureDesign,
+    TaskStrength::BoundedImplementation,
+    TaskStrength::ComplexImplementation,
+    TaskStrength::Testing,
+    TaskStrength::HighRiskReview,
+];
+
+fn excluded_strengths(strengths: &[TaskStrength]) -> String {
+    let selected = strengths.iter().copied().collect::<HashSet<_>>();
+    joined_strengths(
+        &ALL_TASK_STRENGTHS
+            .iter()
+            .copied()
+            .filter(|strength| !selected.contains(strength))
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn selection_behavior(
+    policy: SelectionPolicy,
+    preference: Preference,
+    provider_kind: ProviderKind,
+) -> String {
+    let provider = provider_label(provider_kind);
+    match preference {
+        Preference::Fallback => format!(
+            "This {provider} fallback profile is never promoted and may be used only when preferred profiles are unavailable or it is explicitly requested."
+        ),
+        Preference::Preferred => match policy {
+            SelectionPolicy::OfficialFirst => format!(
+                "Task match makes this preferred {provider} profile override the global official-first provider bias."
+            ),
+            SelectionPolicy::ThirdPartyFirst if provider_kind == ProviderKind::ThirdParty => {
+                "Under third-party-first selection, matching preferred or eligible third-party profiles go first; this profile is preferred.".to_string()
+            }
+            SelectionPolicy::ThirdPartyFirst => format!(
+                "Under third-party-first selection, matching preferred or eligible third-party profiles go first; this {provider} profile remains preferred when its task match is stronger."
+            ),
+            SelectionPolicy::Balanced => format!(
+                "Under balanced selection, this preferred {provider} profile has no provider bias."
+            ),
+        },
+        Preference::Eligible => match policy {
+            SelectionPolicy::OfficialFirst if provider_kind == ProviderKind::ThirdParty => {
+                "Under official-first selection, this eligible third-party profile may be chosen only for a strong, well-bounded task match; otherwise prefer an official provider path.".to_string()
+            }
+            SelectionPolicy::OfficialFirst => {
+                "Under official-first selection, this eligible official profile follows the global official provider preference when the task matches.".to_string()
+            }
+            SelectionPolicy::ThirdPartyFirst if provider_kind == ProviderKind::ThirdParty => {
+                "Under third-party-first selection, matching preferred or eligible third-party profiles go first; this profile is eligible.".to_string()
+            }
+            SelectionPolicy::ThirdPartyFirst => {
+                "Under third-party-first selection, matching preferred or eligible third-party profiles go first; this official profile remains eligible when no stronger third-party task match exists.".to_string()
+            }
+            SelectionPolicy::Balanced => format!(
+                "Under balanced selection, this eligible {provider} profile has no provider bias."
+            ),
+        },
+    }
+}
+
+fn instruction_selection_behavior(
+    policy: SelectionPolicy,
+    preference: Preference,
+    provider_kind: ProviderKind,
+) -> String {
+    match (policy, preference, provider_kind) {
+        (_, Preference::Fallback, kind) => format!(
+            "Never promote this {} fallback profile; use it only when preferred profiles are unavailable or it is explicitly requested.",
+            provider_label(kind)
+        ),
+        (SelectionPolicy::OfficialFirst, Preference::Preferred, kind) => format!(
+            "Task match makes this preferred {} profile override the global official-first provider bias.",
+            provider_label(kind)
+        ),
+        (SelectionPolicy::OfficialFirst, Preference::Eligible, ProviderKind::ThirdParty) => {
+            "Under official-first selection, use this eligible third-party profile only for a strong, well-bounded task match; otherwise prefer an official provider path.".to_string()
+        }
+        (SelectionPolicy::ThirdPartyFirst, Preference::Eligible, ProviderKind::ThirdParty) => {
+            "Under third-party-first selection, put matching preferred or eligible third-party profiles first; this profile is eligible.".to_string()
+        }
+        _ => selection_behavior(policy, preference, provider_kind),
     }
 }
 
 fn generated_description_for_provider(
     policy: SelectionPolicy,
-    p: &CodexSubagentProfile,
+    p: &ParsedCodexSubagentProfile,
     provider_kind: ProviderKind,
 ) -> String {
     if let Some(description) = &p.overrides.description {
         return description.clone();
     }
     format!(
-        "This role is suited to {}. It optimizes for {} and allows {}. It is {} under {} and uses the {}.",
+        "This role matches delegated {} tasks. It excludes {}, and it does not own final integration, merging, or release. It optimizes for {} and is limited to {}. {}",
         joined_strengths(&p.strengths),
+        excluded_strengths(&p.strengths),
         optimization_label(p.optimization),
         write_scope_label(p.write_scope),
-        preference_label(p.preference),
-        policy_label(policy),
-        provider_label(provider_kind),
+        selection_behavior(policy, p.preference, provider_kind),
     )
 }
 
 fn generated_instructions_for_provider(
     policy: SelectionPolicy,
-    p: &CodexSubagentProfile,
+    p: &ParsedCodexSubagentProfile,
     provider_kind: ProviderKind,
 ) -> String {
     if let Some(value) = &p.overrides.developer_instructions {
         return value.clone();
     }
+    let scope_instruction = match p.write_scope {
+        WriteScope::ReadOnly => format!(
+            "Optimize for {} and keep all work read-only.",
+            optimization_label(p.optimization)
+        ),
+        WriteScope::BoundedChanges => format!(
+            "Optimize for {} and edit only the files explicitly assigned to this role; do not expand ownership without parent approval.",
+            optimization_label(p.optimization)
+        ),
+        WriteScope::ComplexChanges => format!(
+            "Optimize for {}; cross-module changes are allowed within the delegated objective, but final integration, merging, and release remain with the parent agent.",
+            optimization_label(p.optimization)
+        ),
+    };
+    let task_boundary = if p.write_scope == WriteScope::ReadOnly {
+        format!(
+            "Work only on delegated {} tasks and do not edit files.",
+            joined_strengths(&p.strengths)
+        )
+    } else {
+        format!(
+            "Work only on delegated {} tasks.",
+            joined_strengths(&p.strengths)
+        )
+    };
+    let final_boundary = if p.write_scope == WriteScope::ComplexChanges {
+        "Return concrete evidence and verification to the parent agent."
+    } else {
+        "Return concrete evidence to the parent; final integration, merging, and release remain with the parent agent."
+    };
     format!(
-        "Work only on delegated {} tasks. Optimize for {} and keep changes within {}. Treat this profile as {} under {}, using the {}. Report concrete evidence and verification to the parent agent.",
-        joined_strengths(&p.strengths),
-        optimization_label(p.optimization),
-        write_scope_label(p.write_scope),
-        preference_label(p.preference),
-        policy_label(policy),
-        provider_label(provider_kind),
+        "{task_boundary} {scope_instruction} {} {final_boundary}",
+        instruction_selection_behavior(policy, p.preference, provider_kind),
     )
 }
 
-fn default_role_name(p: &CodexSubagentProfile) -> String {
+fn default_role_name(p: &ParsedCodexSubagentProfile) -> String {
     p.key.clone()
 }
-fn default_nickname(p: &CodexSubagentProfile) -> String {
+fn default_nickname(p: &ParsedCodexSubagentProfile) -> String {
     let source = p.key.split(['-', '_']).next().unwrap_or(&p.key);
     let mut chars = source.chars();
     chars
@@ -789,8 +891,8 @@ pub fn compile_subagent_v2_profiles(request: &CompileRequest) -> CompileResult {
     let mut normalized: HashMap<String, usize> = HashMap::new();
     for entry in &config.profiles {
         let key = match entry {
-            PersistedProfileEntry::Valid(profile) => &profile.key,
-            PersistedProfileEntry::Invalid { key, .. } => key,
+            ParsedProfileEntry::Valid(profile) => &profile.key,
+            ParsedProfileEntry::Invalid { key, .. } => key,
         };
         *normalized.entry(normalize_profile_key(key)).or_default() += 1;
     }
@@ -808,8 +910,8 @@ pub fn compile_subagent_v2_profiles(request: &CompileRequest) -> CompileResult {
         .collect();
     for entry in &config.profiles {
         let entry_key = match entry {
-            PersistedProfileEntry::Valid(profile) => &profile.key,
-            PersistedProfileEntry::Invalid { key, .. } => key,
+            ParsedProfileEntry::Valid(profile) => &profile.key,
+            ParsedProfileEntry::Invalid { key, .. } => key,
         };
         let collision = normalized
             .get(&normalize_profile_key(entry_key))
@@ -817,14 +919,11 @@ pub fn compile_subagent_v2_profiles(request: &CompileRequest) -> CompileResult {
             .unwrap_or(0)
             > 1;
         let p = match entry {
-            PersistedProfileEntry::Invalid { key, raw, .. } => {
+            ParsedProfileEntry::Invalid { raw, .. } => {
                 output.preserved_invalid_profiles.push(raw.clone());
                 output.profile_statuses.push(ProfileStatus {
-                    key: key.clone(),
-                    model: raw
-                        .get("model")
-                        .and_then(Value::as_str)
-                        .map(ToString::to_string),
+                    key: String::new(),
+                    model: None,
                     status: if collision {
                         ProfileStatusCode::Collision
                     } else {
@@ -838,7 +937,7 @@ pub fn compile_subagent_v2_profiles(request: &CompileRequest) -> CompileResult {
                 });
                 continue;
             }
-            PersistedProfileEntry::Valid(p) => p,
+            ParsedProfileEntry::Valid(p) => p,
         };
         let push_status = |output: &mut CompileOutput, status, reason| {
             output.profile_statuses.push(ProfileStatus {
@@ -979,8 +1078,9 @@ pub fn compile_subagent_v2_profiles(request: &CompileRequest) -> CompileResult {
         .iter()
         .filter(|status| status.status != ProfileStatusCode::Routable)
         .map(|status| Diagnostic {
-            model: status.model.clone().unwrap_or_default(),
+            model: status.model.clone(),
             role: None,
+            profile_key: None,
             policy: config.selection_policy,
             status: status.status,
             reason_code: status.reason,
@@ -990,7 +1090,7 @@ pub fn compile_subagent_v2_profiles(request: &CompileRequest) -> CompileResult {
 }
 
 pub fn initialize_legacy_subagent_v2() -> Result<CodexSubagentV2, CompileError> {
-    let flash = CodexSubagentProfile {
+    let flash = ParsedCodexSubagentProfile {
         key: "deepseek-v4-flash".into(),
         model: "deepseek-v4-flash".into(),
         enabled: true,
@@ -1005,7 +1105,7 @@ pub fn initialize_legacy_subagent_v2() -> Result<CodexSubagentV2, CompileError> 
         write_scope: WriteScope::ReadOnly,
         preference: Preference::Eligible,
         reasoning_effort: QuestionnaireReasoningEffort::Medium,
-        overrides: Overrides::default(),
+        overrides: CodexSubagentProfileOverrides::default(),
     };
     let mut pro = flash.clone();
     pro.key = "deepseek-v4-pro".into();
@@ -1024,8 +1124,8 @@ pub fn initialize_legacy_subagent_v2() -> Result<CodexSubagentV2, CompileError> 
         schema_version: 1,
         selection_policy: SelectionPolicy::Balanced,
         profiles: vec![
-            PersistedProfileEntry::Valid(flash),
-            PersistedProfileEntry::Valid(pro),
+            ParsedProfileEntry::Valid(flash),
+            ParsedProfileEntry::Valid(pro),
         ],
     })
 }
@@ -1037,12 +1137,12 @@ mod tests {
         value.to_owned()
     }
 
-    fn valid(profile: CodexSubagentProfile) -> PersistedProfileEntry {
-        PersistedProfileEntry::Valid(profile)
+    fn valid(profile: ParsedCodexSubagentProfile) -> ParsedProfileEntry {
+        ParsedProfileEntry::Valid(profile)
     }
 
-    fn profile(key: &str, model: &str) -> CodexSubagentProfile {
-        CodexSubagentProfile {
+    fn profile(key: &str, model: &str) -> ParsedCodexSubagentProfile {
+        ParsedCodexSubagentProfile {
             key: s(key),
             model: s(model),
             enabled: true,
@@ -1051,13 +1151,13 @@ mod tests {
             write_scope: WriteScope::ReadOnly,
             preference: Preference::Eligible,
             reasoning_effort: QuestionnaireReasoningEffort::Auto,
-            overrides: Overrides::default(),
+            overrides: CodexSubagentProfileOverrides::default(),
         }
     }
 
     fn config(
         selection_policy: SelectionPolicy,
-        profiles: Vec<PersistedProfileEntry>,
+        profiles: Vec<ParsedProfileEntry>,
     ) -> CodexSubagentV2 {
         CodexSubagentV2 {
             schema_version: 1,
@@ -1132,8 +1232,9 @@ mod tests {
             .iter()
             .filter(|status| status.status != ProfileStatusCode::Routable)
             .map(|status| Diagnostic {
-                model: status.model.clone().unwrap_or_default(),
+                model: status.model.clone(),
                 role: None,
+                profile_key: None,
                 policy: SelectionPolicy::Balanced,
                 status: status.status,
                 reason_code: status.reason,
@@ -1230,7 +1331,7 @@ mod tests {
         config(SelectionPolicy::Balanced, vec![valid(p)])
     }
 
-    fn generated_for_profile(p: CodexSubagentProfile, expected: GeneratedRole) {
+    fn generated_for_profile(p: ParsedCodexSubagentProfile, expected: GeneratedRole) {
         assert_compile(
             &request(Some(config(SelectionPolicy::Balanced, vec![valid(p)]))),
             Ok(expected_routable_output(expected)),
@@ -1414,7 +1515,7 @@ mod tests {
     #[test]
     fn codex_subagent_v2_round_trips_all_overrides() {
         let mut p = profile("flash", "DeepSeek-V4-Flash");
-        p.overrides = Overrides {
+        p.overrides = CodexSubagentProfileOverrides {
             role_name: Some(s("flash-reader")),
             description: Some(s("Manual.")),
             developer_instructions: Some(s("Read only.")),
@@ -1462,7 +1563,18 @@ mod tests {
 
     #[test]
     fn codex_subagent_profile_public_serde_shape_is_exactly_nested() {
-        let profile = profile("flash", "DeepSeek-V4-Flash");
+        let profile = CodexSubagentProfileConfig {
+            model: s("DeepSeek-V4-Flash"),
+            enabled: true,
+            questionnaire: CodexSubagentQuestionnaire {
+                task_strengths: vec![TaskStrength::RepositoryExploration],
+                optimization: Optimization::Speed,
+                write_scope: WriteScope::ReadOnly,
+                preference: Preference::Eligible,
+                reasoning_effort: QuestionnaireReasoningEffort::Auto,
+            },
+            overrides: CodexSubagentProfileOverrides::default(),
+        };
         let literal = json!({
             "model": "DeepSeek-V4-Flash",
             "enabled": true,
@@ -1478,6 +1590,11 @@ mod tests {
             serde_json::to_value(&profile).expect("serialize public profile"),
             literal,
             "profile-alone serialization must use the same nested public DTO as the aggregate"
+        );
+        assert_eq!(
+            serde_json::from_value::<CodexSubagentProfileConfig>(literal)
+                .expect("deserialize public profile"),
+            profile
         );
     }
 
@@ -1550,7 +1667,7 @@ mod tests {
         assert!(parsed
             .profiles
             .iter()
-            .all(|entry| matches!(entry, PersistedProfileEntry::Invalid { .. })));
+            .all(|entry| matches!(entry, ParsedProfileEntry::Invalid { .. })));
     }
 
     #[test]
@@ -1706,7 +1823,7 @@ mod tests {
             SelectionPolicy::Balanced,
             vec![
                 valid(valid_profile),
-                PersistedProfileEntry::Invalid {
+                ParsedProfileEntry::Invalid {
                     key: s("STRASSE"),
                     raw: raw.clone(),
                     validation_code: s("invalid_model"),
@@ -1734,12 +1851,12 @@ mod tests {
         let saved = config(
             SelectionPolicy::Balanced,
             vec![
-                PersistedProfileEntry::Invalid {
+                ParsedProfileEntry::Invalid {
                     key: s("Ｆｏｏ"),
                     raw: raw_a.clone(),
                     validation_code: s("invalid_model"),
                 },
-                PersistedProfileEntry::Invalid {
+                ParsedProfileEntry::Invalid {
                     key: s("foo"),
                     raw: raw_b.clone(),
                     validation_code: s("invalid_enabled"),
@@ -1877,7 +1994,7 @@ mod tests {
         strength: TaskStrength,
         optimization: Optimization,
         override_effort: Option<ModelReasoningEffort>,
-    ) -> CodexSubagentProfile {
+    ) -> ParsedCodexSubagentProfile {
         let mut p = profile("flash", "DeepSeek-V4-Flash");
         p.strengths = vec![strength];
         p.optimization = optimization;
@@ -1957,7 +2074,7 @@ mod tests {
         );
     }
 
-    fn policy_profile(preference: Preference) -> CodexSubagentProfile {
+    fn policy_profile(preference: Preference) -> ParsedCodexSubagentProfile {
         let mut p = profile("flash", "DeepSeek-V4-Flash");
         p.preference = preference;
         p
@@ -2241,7 +2358,7 @@ mod tests {
         let raw = json!({"model":"broken","enabled":"yes","questionnaire":false});
         let saved = config(
             SelectionPolicy::Balanced,
-            vec![PersistedProfileEntry::Invalid {
+            vec![ParsedProfileEntry::Invalid {
                 key: s("broken"),
                 raw: raw.clone(),
                 validation_code: s("invalid_enabled"),
@@ -2250,7 +2367,7 @@ mod tests {
         let mut expected = output(
             vec![],
             vec![status(
-                "broken",
+                "",
                 None,
                 ProfileStatusCode::Invalid,
                 Some(DiagnosticReasonCode::Invalid),
@@ -2271,7 +2388,7 @@ mod tests {
         });
         let saved = config(
             SelectionPolicy::Balanced,
-            vec![PersistedProfileEntry::Invalid {
+            vec![ParsedProfileEntry::Invalid {
                 key: s("PROFILE_KEY_SECRET_MARKER"),
                 raw,
                 validation_code: s("invalid_enabled"),

@@ -2982,12 +2982,16 @@ impl ProxyService {
                 let profile =
                     crate::proxy::providers::resolve_codex_catalog_tool_profile(&provider);
 
-                crate::codex_config::write_codex_provider_live_with_catalog(
+                let provider_context =
+                    crate::codex_config::codex_provider_classification_context(self.db.as_ref())
+                        .map_err(|e| format!("读取 Codex Provider 分类上下文失败: {e}"))?;
+                crate::codex_config::write_codex_provider_live_with_catalog_and_provider_context(
                     &effective_settings,
                     provider.category.as_deref(),
                     auth,
                     config_str,
                     profile,
+                    Some(&provider_context),
                 )
                 .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
             }
@@ -3697,12 +3701,16 @@ impl ProxyService {
         let config_for_projection =
             Self::codex_settings_for_model_catalog_projection(config, Some(provider));
 
-        crate::codex_config::write_codex_provider_live_with_catalog(
+        let provider_context =
+            crate::codex_config::codex_provider_classification_context(self.db.as_ref())
+                .map_err(|e| format!("读取 Codex Provider 分类上下文失败: {e}"))?;
+        crate::codex_config::write_codex_provider_live_with_catalog_and_provider_context(
             &config_for_projection,
             provider.category.as_deref(),
             auth,
             config_str,
             profile,
+            Some(&provider_context),
         )
         .map_err(|e| format!("写入 Codex 配置失败: {e}"))
     }

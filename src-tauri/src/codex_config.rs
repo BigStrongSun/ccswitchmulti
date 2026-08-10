@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 use crate::codex_subagent_profiles::{
     compile_subagent_v2_profiles, normalize_profile_key, parse_persisted_subagent_v2,
     parse_persisted_subagent_v2_tolerant, render_generated_role_toml,
-    CatalogModel as SubagentCatalogModel, CompileRequest as SubagentCompileRequest,
-    GeneratedRole as SubagentGeneratedRole, ProviderKind as SubagentProviderKind,
-    SubagentVersion as ProfileSubagentVersion,
+    CatalogModel as SubagentCatalogModel, CodexSubagentProfileConfig,
+    CompileRequest as SubagentCompileRequest, GeneratedRole as SubagentGeneratedRole,
+    ProviderKind as SubagentProviderKind, SubagentVersion as ProfileSubagentVersion,
 };
 use crate::config::{
     atomic_write, delete_file, get_home_dir, read_json_file, sanitize_provider_name,
@@ -14,14 +14,17 @@ use crate::config::{
 };
 use crate::error::AppError;
 use crate::model_capabilities::{image_input_capability_from_modalities, ImageInputCapability};
+use crate::provider::Provider;
 use crate::proxy::providers::{
-    codex_route_uses_official_agent_backend, resolve_codex_primary_route_from_settings,
+    codex_route_uses_official_agent_backend, is_codex_official_provider,
+    resolve_codex_primary_route_from_settings,
 };
 use once_cell::sync::OnceCell;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::fs;
 use std::process::{Command, Stdio};
+use tauri::State;
 use toml_edit::{Array, DocumentMut, InlineTable, Item, TableLike};
 
 pub const CC_SWITCH_CODEX_MODEL_PROVIDER_ID: &str = "custom";
@@ -2502,15 +2505,101 @@ fn sync_codex_managed_agent_files(
     Ok(())
 }
 
-fn codex_subagent_route_classification(
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ProviderClassificationContext {
+    provider_kinds: HashMap<String, SubagentProviderKind>,
+}
+
+impl ProviderClassificationContext {
+    pub(crate) fn from_providers<'a>(providers: impl IntoIterator<Item = &'a Provider>) -> Self {
+        Self {
+            provider_kinds: providers
+                .into_iter()
+                .map(|provider| {
+                    (
+                        provider.id.clone(),
+                        if codex_provider_record_is_official(provider) {
+                            SubagentProviderKind::Official
+                        } else {
+                            SubagentProviderKind::ThirdParty
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    fn get(&self, provider_id: &str) -> Option<SubagentProviderKind> {
+        self.provider_kinds.get(provider_id).copied()
+    }
+}
+
+fn codex_provider_record_is_official(provider: &Provider) -> bool {
+    provider.category.as_deref() == Some("official")
+        || is_codex_official_provider(provider)
+        || provider.is_codex_oauth()
+        || provider
+            .settings_config
+            .pointer("/auth/auth_mode")
+            .and_then(Value::as_str)
+            .is_some_and(|mode| mode.eq_ignore_ascii_case("chatgpt"))
+        || provider
+            .settings_config
+            .get("config")
+            .and_then(Value::as_str)
+            .is_some_and(|config| config.contains("chatgpt.com/backend-api/codex"))
+}
+
+pub(crate) fn codex_provider_classification_context(
+    db: &crate::database::Database,
+) -> Result<ProviderClassificationContext, AppError> {
+    let providers = db.get_all_providers("codex")?;
+    Ok(ProviderClassificationContext::from_providers(
+        providers.values(),
+    ))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RouteClassification {
+    provider_kind: SubagentProviderKind,
+    warning: Option<&'static str>,
+}
+
+fn codex_subagent_route_classification_with_context(
     settings: &Value,
     model: &str,
-) -> Option<SubagentProviderKind> {
+    provider_context: Option<&ProviderClassificationContext>,
+) -> Option<RouteClassification> {
     let route = resolve_codex_primary_route_from_settings(settings, model)?;
-    Some(if codex_route_uses_official_agent_backend(route) {
-        SubagentProviderKind::Official
-    } else {
-        SubagentProviderKind::ThirdParty
+    if let Some(target_provider_id) = route
+        .pointer("/upstream/targetProviderId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    {
+        if let Some(provider_kind) =
+            provider_context.and_then(|context| context.get(target_provider_id))
+        {
+            return Some(RouteClassification {
+                provider_kind,
+                warning: None,
+            });
+        }
+        return Some(RouteClassification {
+            provider_kind: if codex_route_uses_official_agent_backend(route) {
+                SubagentProviderKind::Official
+            } else {
+                SubagentProviderKind::ThirdParty
+            },
+            warning: Some("target_provider_record_unavailable_inline_auth_fallback"),
+        });
+    }
+    Some(RouteClassification {
+        provider_kind: if codex_route_uses_official_agent_backend(route) {
+            SubagentProviderKind::Official
+        } else {
+            SubagentProviderKind::ThirdParty
+        },
+        warning: None,
     })
 }
 
@@ -2549,6 +2638,7 @@ fn compile_configured_codex_subagent_roles(
     settings: &Value,
     specs: &[CodexCatalogModelSpec],
     version: CodexSubagentVersion,
+    provider_context: Option<&ProviderClassificationContext>,
 ) -> Result<Option<Vec<SubagentGeneratedRole>>, AppError> {
     let Some(raw) = settings
         .get("codexRouting")
@@ -2562,10 +2652,23 @@ fn compile_configured_codex_subagent_roles(
     let catalog_models = specs
         .iter()
         .map(|spec| {
-            let classification = codex_subagent_route_classification(settings, &spec.model);
+            let classification = codex_subagent_route_classification_with_context(
+                settings,
+                &spec.model,
+                provider_context,
+            );
+            if let Some(warning) = classification.as_ref().and_then(|value| value.warning) {
+                log::warn!(
+                    "Codex subagent route classification warning for model {}: {warning}",
+                    spec.model
+                );
+            }
             SubagentCatalogModel {
                 model: spec.model.clone(),
-                provider_kind: classification.unwrap_or(SubagentProviderKind::ThirdParty),
+                provider_kind: classification
+                    .as_ref()
+                    .map(|value| value.provider_kind)
+                    .unwrap_or(SubagentProviderKind::ThirdParty),
                 routable: classification.is_some(),
                 context_window: spec.context_window,
             }
@@ -2609,16 +2712,27 @@ pub struct CodexSubagentProfilePreview {
 #[tauri::command]
 #[allow(non_snake_case)]
 pub fn preview_codex_subagent_profile(
+    appState: State<'_, crate::store::AppState>,
     settingsConfig: Value,
-    model: String,
-    profile: Value,
+    profile: CodexSubagentProfileConfig,
 ) -> Result<CodexSubagentProfilePreview, String> {
+    let provider_context = codex_provider_classification_context(appState.db.as_ref())
+        .map_err(|error| format!("Unable to load Codex provider records: {error}"))?;
+    preview_codex_subagent_profile_with_context(settingsConfig, profile, Some(&provider_context))
+}
+
+fn preview_codex_subagent_profile_with_context(
+    settings_config: Value,
+    profile: CodexSubagentProfileConfig,
+    provider_context: Option<&ProviderClassificationContext>,
+) -> Result<CodexSubagentProfilePreview, String> {
+    let model = profile.model.clone();
     let profile_key = normalize_profile_key(&model);
-    let mut profile = profile;
-    profile["model"] = Value::String(model.clone());
+    let profile = serde_json::to_value(profile)
+        .map_err(|error| format!("Invalid subagentV2 profile config: {error}"))?;
     let raw = json!({
         "schemaVersion": 1,
-        "selectionPolicy": settingsConfig.pointer("/codexRouting/subagentV2/selectionPolicy").and_then(Value::as_str).unwrap_or("balanced"),
+        "selectionPolicy": settings_config.pointer("/codexRouting/subagentV2/selectionPolicy").and_then(Value::as_str).unwrap_or("balanced"),
         "profiles": { profile_key: profile }
     });
     let mut persisted = parse_persisted_subagent_v2(&raw)
@@ -2629,24 +2743,32 @@ pub fn preview_codex_subagent_profile(
         .first_mut()
         .ok_or_else(|| "The selected profile is missing".to_string())?;
     let model = match first_profile {
-        crate::codex_subagent_profiles::PersistedProfileEntry::Valid(profile) => {
+        crate::codex_subagent_profiles::ParsedProfileEntry::Valid(profile) => {
             if !profile.enabled {
                 warnings.push("profile_disabled".to_string());
                 profile.enabled = true;
             }
             profile.model.clone()
         }
-        crate::codex_subagent_profiles::PersistedProfileEntry::Invalid { .. } => {
+        crate::codex_subagent_profiles::ParsedProfileEntry::Invalid { .. } => {
             return Err("The selected profile is invalid and cannot be previewed".to_string())
         }
     };
-    let specs = codex_catalog_model_specs(&settingsConfig, "");
+    let specs = codex_catalog_model_specs(&settings_config, "");
     let spec = specs
         .iter()
         .find(|spec| spec.model.eq_ignore_ascii_case(&model))
         .ok_or_else(|| format!("Profile model is not routable: {model}"))?;
-    let provider_kind = codex_subagent_route_classification(&settingsConfig, &model)
-        .ok_or_else(|| format!("Profile model is not routable: {model}"))?;
+    let classification = codex_subagent_route_classification_with_context(
+        &settings_config,
+        &model,
+        provider_context,
+    )
+    .ok_or_else(|| format!("Profile model is not routable: {model}"))?;
+    if let Some(warning) = classification.warning {
+        warnings.push(warning.to_string());
+    }
+    let provider_kind = classification.provider_kind;
     let output = compile_subagent_v2_profiles(&SubagentCompileRequest {
         subagent_version: ProfileSubagentVersion::V2,
         persisted_subagent_v2: Some(persisted),
@@ -2687,8 +2809,11 @@ fn sync_codex_managed_agent_files_with_settings(
     specs: &[CodexCatalogModelSpec],
     version: CodexSubagentVersion,
     settings: &Value,
+    provider_context: Option<&ProviderClassificationContext>,
 ) -> Result<(), AppError> {
-    let Some(roles) = compile_configured_codex_subagent_roles(settings, specs, version)? else {
+    let Some(roles) =
+        compile_configured_codex_subagent_roles(settings, specs, version, provider_context)?
+    else {
         return sync_codex_managed_agent_files(specs, version);
     };
     let agents_dir = get_codex_agents_dir();
@@ -3114,6 +3239,20 @@ pub fn prepare_codex_config_text_with_model_catalog(
     config_text: &str,
     profile: CodexCatalogToolProfile,
 ) -> Result<String, AppError> {
+    prepare_codex_config_text_with_model_catalog_and_provider_context(
+        settings,
+        config_text,
+        profile,
+        None,
+    )
+}
+
+pub(crate) fn prepare_codex_config_text_with_model_catalog_and_provider_context(
+    settings: &Value,
+    config_text: &str,
+    profile: CodexCatalogToolProfile,
+    provider_context: Option<&ProviderClassificationContext>,
+) -> Result<String, AppError> {
     let catalog_path = get_codex_model_catalog_path();
     let specs = codex_catalog_model_specs(settings, config_text);
 
@@ -3157,6 +3296,7 @@ pub fn prepare_codex_config_text_with_model_catalog(
             &specs,
             codex_subagent_version(settings),
             settings,
+            provider_context,
         )?;
         Ok(config_text)
     } else {
@@ -3741,15 +3881,23 @@ pub(crate) fn merge_codex_provider_config_with_live(config_text: &str) -> Result
     merge_codex_provider_config_texts(&live_config, config_text)
 }
 
-pub fn write_codex_provider_live_with_catalog(
+pub(crate) fn write_codex_provider_live_with_catalog_and_provider_context(
     settings: &Value,
     category: Option<&str>,
     auth: &Value,
     config_text: Option<&str>,
     profile: CodexCatalogToolProfile,
+    provider_context: Option<&ProviderClassificationContext>,
 ) -> Result<(), AppError> {
     let prepared_config = config_text
-        .map(|text| prepare_codex_config_text_with_model_catalog(settings, text, profile))
+        .map(|text| {
+            prepare_codex_config_text_with_model_catalog_and_provider_context(
+                settings,
+                text,
+                profile,
+                provider_context,
+            )
+        })
         .transpose()?;
     write_codex_live_for_provider(category, auth, prepared_config.as_deref())
 }
@@ -3760,14 +3908,22 @@ pub fn write_codex_provider_live_with_catalog(
 /// 才是当前用户真实登录态，而 DB 里的 official provider 可能只是早期导入的旧
 /// OAuth 快照。该函数仍会走 model catalog 投影、统一会话路由注入和 live 配置
 /// 合并，但最终只写 `config.toml`，避免把旧快照覆盖到 `auth.json`。
-pub fn write_codex_provider_config_only_with_catalog(
+pub(crate) fn write_codex_provider_config_only_with_catalog_and_provider_context(
     settings: &Value,
     category: Option<&str>,
     config_text: Option<&str>,
     profile: CodexCatalogToolProfile,
+    provider_context: Option<&ProviderClassificationContext>,
 ) -> Result<(), AppError> {
     let prepared_config = config_text
-        .map(|text| prepare_codex_config_text_with_model_catalog(settings, text, profile))
+        .map(|text| {
+            prepare_codex_config_text_with_model_catalog_and_provider_context(
+                settings,
+                text,
+                profile,
+                provider_context,
+            )
+        })
         .transpose()?;
     let unified_official_config =
         if category == Some("official") && crate::settings::unify_codex_session_history() {
@@ -4581,7 +4737,7 @@ mod tests {
     #[serial_test::serial]
     fn codex_subagent_v2_preview_command_uses_exact_safe_camel_case_contract() {
         let _guard = TestHomeGuard::new();
-        let preview = preview_codex_subagent_profile(
+        let preview = preview_codex_subagent_profile_with_context(
             json!({
                 "modelCatalog": { "models": [{ "model": "DeepSeek-V4-Flash", "contextWindow": 1000000 }] },
                 "codexRouting": {
@@ -4592,8 +4748,8 @@ mod tests {
                     }]
                 }
             }),
-            "DeepSeek-V4-Flash".to_string(),
-            json!({
+            serde_json::from_value(json!({
+                "model": "DeepSeek-V4-Flash",
                 "enabled": true,
                 "questionnaire": {
                     "taskStrengths": ["repository_exploration"],
@@ -4602,8 +4758,11 @@ mod tests {
                     "preference": "eligible",
                     "reasoningEffort": "auto"
                 }
-            }),
-        ).expect("preview configured profile");
+            }))
+            .expect("typed preview profile"),
+            None,
+        )
+        .expect("preview configured profile");
         let value = serde_json::to_value(preview).expect("serialize preview");
         let object = value.as_object().expect("preview object");
         assert_eq!(
@@ -4641,6 +4800,10 @@ mod tests {
 
     #[test]
     fn codex_subagent_v2_route_classifier_uses_runtime_exact_prefix_and_default_order() {
+        let classify = |settings: &Value, model: &str| {
+            codex_subagent_route_classification_with_context(settings, model, None)
+                .map(|classification| classification.provider_kind)
+        };
         let settings = json!({
             "codexRouting": {
                 "enabled": true,
@@ -4669,12 +4832,12 @@ mod tests {
             }
         });
         assert_eq!(
-            codex_subagent_route_classification(&settings, "gpt-5.5-relay"),
+            classify(&settings, "gpt-5.5-relay"),
             Some(SubagentProviderKind::ThirdParty),
             "an exact relay route must beat an earlier official prefix"
         );
         assert_eq!(
-            codex_subagent_route_classification(&settings, "unknown-model"),
+            classify(&settings, "unknown-model"),
             Some(SubagentProviderKind::Official),
             "an unmatched request uses the enabled defaultRouteId in runtime order"
         );
@@ -4689,19 +4852,34 @@ mod tests {
             }
         });
         assert_eq!(
-            codex_subagent_route_classification(&fallback_settings, "unmatched-model"),
+            classify(&fallback_settings, "unmatched-model"),
             Some(SubagentProviderKind::ThirdParty),
             "profile compilation must classify the same first enabled fallback candidate as runtime"
         );
     }
 
-    fn classify_subagent_route_with_provider_records_for_red(
+    fn classify_subagent_route_with_provider_records(
         settings: &Value,
         model: &str,
         provider_records: &[(&str, SubagentProviderKind)],
     ) -> Option<SubagentProviderKind> {
-        let _ = provider_records;
-        codex_subagent_route_classification(settings, model)
+        let providers = provider_records
+            .iter()
+            .map(|(id, kind)| {
+                let mut provider =
+                    Provider::with_id((*id).to_string(), (*id).to_string(), json!({}), None);
+                if *kind == SubagentProviderKind::Official {
+                    provider.meta = Some(crate::provider::ProviderMeta {
+                        provider_type: Some("codex_oauth".to_string()),
+                        ..Default::default()
+                    });
+                }
+                provider
+            })
+            .collect::<Vec<_>>();
+        let context = ProviderClassificationContext::from_providers(providers.iter());
+        codex_subagent_route_classification_with_context(settings, model, Some(&context))
+            .map(|classification| classification.provider_kind)
     }
 
     #[test]
@@ -4716,7 +4894,7 @@ mod tests {
             }] }
         });
         assert_eq!(
-            classify_subagent_route_with_provider_records_for_red(
+            classify_subagent_route_with_provider_records(
                 &generic_target,
                 "neutral-model",
                 &[("target-provider", SubagentProviderKind::Official)],
@@ -4724,8 +4902,25 @@ mod tests {
             Some(SubagentProviderKind::Official),
             "an official ChatGPT/Codex OAuth target record must override generic inline auth"
         );
+        let chatgpt_provider = Provider::with_id(
+            "target-provider".to_string(),
+            "ChatGPT".to_string(),
+            json!({"auth": {"auth_mode": "chatgpt"}}),
+            None,
+        );
+        let chatgpt_context = ProviderClassificationContext::from_providers([&chatgpt_provider]);
         assert_eq!(
-            classify_subagent_route_with_provider_records_for_red(
+            codex_subagent_route_classification_with_context(
+                &generic_target,
+                "neutral-model",
+                Some(&chatgpt_context),
+            )
+            .map(|classification| classification.provider_kind),
+            Some(SubagentProviderKind::Official),
+            "a ChatGPT auth_mode Provider record is official even when inline route auth is generic"
+        );
+        assert_eq!(
+            classify_subagent_route_with_provider_records(
                 &generic_target,
                 "neutral-model",
                 &[("target-provider", SubagentProviderKind::ThirdParty)],
@@ -4744,7 +4939,7 @@ mod tests {
             }] }
         });
         assert_eq!(
-            classify_subagent_route_with_provider_records_for_red(
+            classify_subagent_route_with_provider_records(
                 &misleading_inline,
                 "gpt-looking-name",
                 &[("target-provider", SubagentProviderKind::ThirdParty)],
@@ -4753,7 +4948,7 @@ mod tests {
             "the target record must win over inline auth and model names must not influence classification"
         );
         assert_eq!(
-            classify_subagent_route_with_provider_records_for_red(
+            classify_subagent_route_with_provider_records(
                 &misleading_inline,
                 "gpt-looking-name",
                 &[],
@@ -4762,11 +4957,7 @@ mod tests {
             "a missing target record must safely fall back to inline auth"
         );
         assert_eq!(
-            classify_subagent_route_with_provider_records_for_red(
-                &generic_target,
-                "gpt-5.6-sol",
-                &[],
-            ),
+            classify_subagent_route_with_provider_records(&generic_target, "gpt-5.6-sol", &[],),
             Some(SubagentProviderKind::ThirdParty),
             "an official-looking model name must never imply an official provider"
         );
@@ -4799,10 +4990,14 @@ mod tests {
             }
         });
         let specs = codex_catalog_model_specs(&settings, "");
-        let roles =
-            compile_configured_codex_subagent_roles(&settings, &specs, CodexSubagentVersion::V2)
-                .expect("compile controlled unroutable profiles")
-                .expect("configured compiler selected");
+        let roles = compile_configured_codex_subagent_roles(
+            &settings,
+            &specs,
+            CodexSubagentVersion::V2,
+            None,
+        )
+        .expect("compile controlled unroutable profiles")
+        .expect("configured compiler selected");
         assert!(
             roles.is_empty(),
             "catalog presence alone must not make a model routable"
@@ -4855,8 +5050,13 @@ mod tests {
             base_instructions: None,
         }];
 
-        sync_codex_managed_agent_files_with_settings(&specs, CodexSubagentVersion::V2, &settings)
-            .expect("real configured filesystem sync");
+        sync_codex_managed_agent_files_with_settings(
+            &specs,
+            CodexSubagentVersion::V2,
+            &settings,
+            None,
+        )
+        .expect("real configured filesystem sync");
 
         assert_eq!(
             std::fs::read_to_string(&user_path).expect("read user file"),
@@ -4909,6 +5109,7 @@ mod tests {
             &specs,
             CodexSubagentVersion::V2,
             &make_settings("First filesystem config."),
+            None,
         )
         .expect("first sync");
         let path = agents_dir.join("flash.toml");
@@ -4917,6 +5118,7 @@ mod tests {
             &specs,
             CodexSubagentVersion::V2,
             &make_settings("Second filesystem config."),
+            None,
         )
         .expect("second sync");
         let second = std::fs::read_to_string(&path).expect("second managed role");
@@ -4927,6 +5129,7 @@ mod tests {
             &specs,
             CodexSubagentVersion::V1,
             &make_settings("Preserved config."),
+            None,
         )
         .expect("V1 cleanup");
         assert!(!path.exists());
@@ -4966,6 +5169,7 @@ mod tests {
             &specs,
             CodexSubagentVersion::V2,
             &json!({"codexRouting": {"enabled": true}}),
+            None,
         )
         .expect("legacy filesystem sync");
         let role = std::fs::read_to_string(get_codex_agents_dir().join("qwen-local.toml"))
