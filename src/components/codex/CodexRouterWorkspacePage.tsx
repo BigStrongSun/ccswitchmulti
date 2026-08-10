@@ -114,6 +114,7 @@ import {
 import { normalizeCodexSubagentVersion } from "@/utils/codexSubagentVersion";
 import { useCodexOauth } from "@/components/providers/forms/hooks/useCodexOauth";
 import { HostedToolsSwitchPanel } from "./HostedToolsSwitchPanel";
+import { CodexSubagentProfileEditor } from "./CodexSubagentProfileEditor";
 import type {
   CodexOfficialAuthConfig,
   CodexOfficialAuthMode,
@@ -122,6 +123,7 @@ import type {
   Provider,
 } from "@/types";
 import type { RequestLog } from "@/types/usage";
+import { createDefaultCodexSubagentV2Config } from "@/types/codexSubagentV2";
 import type {
   CodexDiagnosticCheck,
   CodexDiagnosticStatus,
@@ -1817,6 +1819,8 @@ export function createDraftRoutingPlan(
       modelCatalog,
       codexRouting: {
         enabled: true,
+        subagentVersion: "v2",
+        subagentV2: createDefaultCodexSubagentV2Config(),
         routes: [],
       },
       hostedTools: DEFAULT_HOSTED_TOOLS_CONFIG,
@@ -5240,6 +5244,12 @@ function SpawnAgentCandidatesPanel({
         切换协议后请重启 Codex
         Desktop/app-server，并新建会话；已有会话不会在中途更换子 Agent 协议。
       </div>
+
+      {activeSubagentVersion === "v2" && selectedPlan ? (
+        <div className="mt-3">
+          <CodexSubagentProfileEditor provider={selectedPlan} />
+        </div>
+      ) : null}
 
       {activeSubagentVersion === "v1" ? (
         <div className="mt-3 rounded-md border border-amber-200 bg-background/70 p-3 dark:border-amber-700/50 dark:bg-slate-950/30">

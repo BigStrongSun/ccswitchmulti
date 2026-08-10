@@ -90,11 +90,13 @@ import {
   readHostedToolsConfig,
 } from "@/lib/hostedTools";
 import { HostedToolsSwitchPanel } from "./HostedToolsSwitchPanel";
+import { CodexSubagentProfileEditor } from "./CodexSubagentProfileEditor";
 import type { WorkspaceTab } from "@/components/codex/CodexRouterWorkspacePage";
 import { codexCatalogOnlyPlanModelFetchMessage } from "@/utils/codexPlanModelFetch";
 import { normalizeCodexSubagentVersion } from "@/utils/codexSubagentVersion";
 import { CodexOAuthSection } from "@/components/providers/forms/CodexOAuthSection";
 import { useCodexOauth } from "@/components/providers/forms/hooks/useCodexOauth";
+import { createDefaultCodexSubagentV2Config } from "@/types/codexSubagentV2";
 
 interface CodexMultiRouterWizardProps {
   open: boolean;
@@ -1828,12 +1830,25 @@ export function CodexMultiRouterWizard({
           },
         },
       );
+      const planToPersist =
+        !existingPlan && draftSubagentVersion === "v2"
+          ? {
+              ...result.plan,
+              settingsConfig: {
+                ...result.plan.settingsConfig,
+                codexRouting: {
+                  ...result.plan.settingsConfig.codexRouting,
+                  subagentV2: createDefaultCodexSubagentV2Config(),
+                },
+              },
+            }
+          : result.plan;
       if (existingPlan) {
-        await providersApi.update(result.plan, "codex");
+        await providersApi.update(planToPersist, "codex");
       } else {
-        await providersApi.add(result.plan, "codex", false);
+        await providersApi.add(planToPersist, "codex", false);
       }
-      setSavedPlan(result.plan);
+      setSavedPlan(planToPersist);
       setDraftSources(result.sourceProviders);
       await queryClient.invalidateQueries({ queryKey: ["providers", "codex"] });
       toast.success("MultiRouter 方案已保存。", { closeButton: true });
@@ -2799,6 +2814,14 @@ export function CodexMultiRouterWizard({
                   managed roles 从完整可路由目录生成，不受 V1 前 5 个 direct
                   overrides 限制。用户手写同名 role 不会被覆盖。
                 </div>
+                {existingPlan ? (
+                  <CodexSubagentProfileEditor provider={existingPlan} />
+                ) : (
+                  <div className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
+                    新方案发布后可继续编辑每个 V2 子 Agent
+                    的能力问卷与最终字段。
+                  </div>
+                )}
               </div>
             )}
 
