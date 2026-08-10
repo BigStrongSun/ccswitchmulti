@@ -615,7 +615,7 @@ describe("Codex Sub-Agent V2 review round 1 regressions", () => {
     );
   });
 
-  it("renders the backend's redacted invalid DTO and repairs from a safe profile key", async () => {
+  it("renders the backend's redacted invalid DTO and repairs from a generic label", async () => {
     ipcState.providers.router.settingsConfig.codexRouting.subagentV2.profiles[
       "deepseek-v4-flash"
     ] = {
@@ -645,7 +645,7 @@ describe("Codex Sub-Agent V2 review round 1 regressions", () => {
     ).toBeGreaterThan(0);
     expect(screen.queryByText(/RAW_MODEL_MUST_NOT_RENDER/)).toBeNull();
     const repair = screen.getByRole("button", {
-      name: "使用默认问卷修复 deepseek-v4-flash",
+      name: "修复无效能力配置 1",
     });
     await user.click(repair);
     expect(
@@ -655,6 +655,55 @@ describe("Codex Sub-Agent V2 review round 1 regressions", () => {
         }),
       ).getByRole("group", { name: "任务优势" }),
     ).toBeVisible();
+  });
+
+  it("keeps an invalid secret-bearing profile key out of UI, diagnostics, requests, and persistence", async () => {
+    const secretProfileKey = "RAW_PROFILE_KEY_SECRET_SENTINEL";
+    const profiles =
+      ipcState.providers.router.settingsConfig.codexRouting.subagentV2
+        .profiles;
+    profiles[secretProfileKey] = {
+      model: "deepseek-v4-flash",
+      enabled: true,
+    };
+    delete profiles["repository-scout"];
+    ipcState.statusResponse = {
+      ...statusFixture,
+      profiles: [
+        {
+          routable: false,
+          status: "invalid",
+          nonGenerationReason: "invalid",
+          warnings: [],
+        },
+        statusFixture.profiles[1],
+      ],
+    };
+
+    const user = userEvent.setup();
+    await mountWorkspaceFromPersistedPlan();
+
+    expect(
+      await screen.findByRole("region", { name: "无效能力配置 1" }),
+    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "修复无效能力配置 1" })).toBeVisible();
+    expect(document.body.textContent).not.toContain(secretProfileKey);
+    expect(
+      Array.from(document.querySelectorAll("*")).flatMap((element) => [
+        element.getAttribute("aria-label"),
+        element.getAttribute("aria-description"),
+        element.getAttribute("aria-describedby"),
+      ]),
+    ).not.toContain(secretProfileKey);
+
+    await user.click(
+      screen.getByRole("button", { name: "保存 V2 子 Agent 能力配置" }),
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent("无效能力配置");
+    expect(v2PersistenceCalls()).toHaveLength(0);
+    expect(
+      vi.mocked(invoke).mock.calls.map(([, args]) => JSON.stringify(args)),
+    ).not.toContain(secretProfileKey);
   });
 
   it.each([
@@ -710,7 +759,7 @@ describe("Codex Sub-Agent V2 review round 1 regressions", () => {
 
       expect(
         await screen.findByRole("button", {
-          name: "使用默认问卷修复 deepseek-v4-flash",
+          name: "修复无效能力配置 1",
         }),
       ).toBeVisible();
       expect(document.body.textContent).not.toMatch(secretPattern);
@@ -727,7 +776,7 @@ describe("Codex Sub-Agent V2 review round 1 regressions", () => {
 
       await user.click(
         screen.getByRole("button", {
-          name: "使用默认问卷修复 deepseek-v4-flash",
+          name: "修复无效能力配置 1",
         }),
       );
       expect(
