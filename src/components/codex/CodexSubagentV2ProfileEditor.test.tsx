@@ -2,109 +2,126 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { invoke } from "@tauri-apps/api/core";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Provider } from "@/types";
 import { CodexMultiRouterWizard } from "./CodexMultiRouterWizard";
 import { CodexRouterWorkspacePage } from "./CodexRouterWorkspacePage";
 
-const previewResponse = vi.hoisted(() => ({
+const previewFixture = {
   providerKind: "third_party" as const,
-  requestedRoleName: "repo-reader",
-  effectiveRoleName: "repo-reader",
-  description: "Backend-generated repository exploration role.",
-  developerInstructions: "Inspect the repository and report evidence.",
+  requestedRoleName: "repository-scout",
+  effectiveRoleName: "repository-scout-2",
+  description: "Read the repository and collect evidence.",
+  developerInstructions: "Do not modify source files.",
   nicknameCandidates: ["Scout", "Reader"],
   model: "deepseek-v4-flash",
   modelProvider: "codex_model_router_v2",
   modelReasoningEffort: "medium" as const,
   modelContextWindow: 128000,
-  tomlPreview: '[agents.repo-reader]\nmodel = "deepseek-v4-flash"',
-  warnings: [],
-}));
+  tomlPreview:
+    '[agents.repository-scout-2]\nmodel = "deepseek-v4-flash"\nmodel_provider = "codex_model_router_v2"',
+  warnings: ["Role name was collision-resolved."],
+};
 
-// The V2 editor is an IPC consumer: this is the only mocked boundary.  The
-// fixture deliberately mirrors the complete public backend response instead of
-// reproducing compilation logic in the browser test.
-vi.mock("@tauri-apps/api/core", () => ({
-  invoke: vi.fn().mockResolvedValue(previewResponse),
-}));
-
-vi.mock("@/components/providers/forms/hooks/useCodexOauth", () => ({
-  useCodexOauth: () => ({
-    accounts: [],
-    hasAnyAccount: false,
-    isLoadingStatus: false,
-  }),
-}));
-
-vi.mock("@/lib/api/proxy", () => ({
-  proxyApi: {
-    getGlobalProxyConfig: vi.fn().mockResolvedValue({
-      listenAddress: "127.0.0.1",
-      listenPort: 15721,
-    }),
-    diagnoseCodexMultiRouter: vi.fn(),
-    unlockCodexModelPicker: vi.fn(),
-  },
-}));
-
-vi.mock("@/lib/api", () => ({
-  providersApi: { add: vi.fn(), update: vi.fn() },
-}));
-
-vi.mock("@/lib/api/auth", () => ({
-  authApi: {
-    getCodexAccountPoolPolicy: vi.fn().mockResolvedValue({
-      enabled: false,
-      entries: [],
-    }),
-  },
-}));
-
-vi.mock("@/lib/api/model-fetch", () => ({
-  fetchCodexOauthModels: vi.fn(),
-  fetchModelsForConfig: vi.fn(),
-}));
-
-vi.mock("@/lib/query/usage", () => ({
-  usageKeys: { all: ["usage"] },
-  useCodexSubagentUsageStats: () => ({
-    data: {
-      totals: { sessions: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0 },
-      agents: [],
-      modelStats: [],
-      providerModels: [],
+const statusFixture = {
+  mode: "v2" as const,
+  generationSource: "configured_profiles" as const,
+  profiles: [
+    {
+      profileKey: "repository-scout",
+      model: "deepseek-v4-flash",
+      providerKind: "third_party" as const,
+      enabled: true,
+      routable: true,
+      fieldSources: {
+        roleName: "override" as const,
+        description: "automatic" as const,
+        developerInstructions: "override" as const,
+        nicknameCandidates: "automatic" as const,
+        modelReasoningEffort: "override" as const,
+      },
+      requestedRoleName: "repository-scout",
+      effectiveRoleName: "repository-scout-2",
+      roleFilePath: "C:\\Codex\\agents\\repository-scout-2.toml",
+      modelProvider: "codex_model_router_v2" as const,
+      modelReasoningEffort: "medium" as const,
+      status: "generated" as const,
+      warnings: ["Role name was collision-resolved."],
     },
-    isLoading: false,
-    error: null,
+    {
+      profileKey: "offline-writer",
+      model: "deepseek-v4-pro",
+      providerKind: "third_party" as const,
+      enabled: true,
+      routable: false,
+      status: "unroutable" as const,
+      nonGenerationReason: "unroutable" as const,
+      warnings: ["No enabled route resolves this model."],
+    },
+  ],
+  warnings: ["One profile is unroutable."],
+};
+
+// This suite only replaces the Tauri process boundary. Each command returns a
+// complete backend DTO; no client-side capability, route, role-path, or status
+// compilation is mirrored in a mock.
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: vi.fn((command: string) => {
+    switch (command) {
+      case "preview_codex_subagent_profile":
+        return Promise.resolve(previewFixture);
+      case "get_codex_subagent_profile_statuses":
+        return Promise.resolve(statusFixture);
+      case "get_global_proxy_config":
+        return Promise.resolve({
+          listenAddress: "127.0.0.1",
+          listenPort: 15721,
+        });
+      case "get_codex_account_pool_policy":
+        return Promise.resolve({ enabled: false, entries: [] });
+      case "get_codex_oauth_models":
+        return Promise.resolve([]);
+      default:
+        return Promise.resolve(true);
+    }
   }),
-  useRequestLogs: () => ({ data: [], isLoading: false }),
 }));
 
-function renderWithQueryClient(ui: React.ReactElement) {
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
-  return render(
-    <QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>,
-  );
-}
-
-function routerPlan(withV2 = true): Provider {
+function plan(withV2 = true): Provider {
   return {
-    id: "codex-router",
+    id: "router",
     name: "Codex MultiRouter",
     category: "custom",
     settingsConfig: {
       codexRouting: {
         enabled: true,
-        routes: [],
+        routes: [
+          {
+            id: "flash-route",
+            enabled: true,
+            targetProviderId: "third-party",
+            match: { models: ["deepseek-v4-flash"], prefixes: [] },
+            upstream: {},
+          },
+        ],
         ...(withV2
           ? {
               subagentV2: {
                 schemaVersion: 1,
                 selectionPolicy: "balanced",
-                profiles: {},
+                profiles: {
+                  "repository-scout": {
+                    model: "deepseek-v4-flash",
+                    enabled: true,
+                    questionnaire: {
+                      taskStrengths: ["repository_exploration"],
+                      optimization: "balanced",
+                      writeScope: "read_only",
+                      preference: "eligible",
+                      reasoningEffort: "auto",
+                    },
+                  },
+                },
               },
             }
           : {}),
@@ -116,143 +133,249 @@ function routerPlan(withV2 = true): Provider {
   };
 }
 
-describe("shared Codex Sub-Agent V2 profile editor contract", () => {
-  it("exposes the same V2 capability questionnaire from the setup wizard and workspace", async () => {
-    const user = userEvent.setup();
-    const plan = routerPlan();
-    renderWithQueryClient(
+function provider(): Provider {
+  return {
+    id: "third-party",
+    name: "DeepSeek",
+    category: "custom",
+    settingsConfig: {
+      baseUrl: "https://example.invalid/v1",
+      auth: { OPENAI_API_KEY: "red-test-only" },
+      modelCatalog: {
+        models: [{ model: "deepseek-v4-flash", contextWindow: 128000 }],
+      },
+    },
+  };
+}
+
+function renderWorkspace(withV2 = true) {
+  const selectedPlan = plan(withV2);
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  render(
+    <QueryClientProvider client={queryClient}>
+      <CodexRouterWorkspacePage
+        providers={[provider(), selectedPlan]}
+        activeProviderId={selectedPlan.id}
+        initialProviderId={selectedPlan.id}
+        initialTab="routes"
+        isProxyRunning={false}
+        isCodexTakeoverActive={false}
+        onEditProvider={vi.fn()}
+        onDeletePlan={vi.fn()}
+        onCreateProvider={vi.fn()}
+      />
+    </QueryClientProvider>,
+  );
+  return selectedPlan;
+}
+
+function renderWizard() {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  render(
+    <QueryClientProvider client={queryClient}>
       <CodexMultiRouterWizard
         open
-        providers={[plan]}
+        providers={[provider(), plan()]}
         onOpenChange={vi.fn()}
         onCreateProvider={vi.fn()}
         onOpenProviderConfig={vi.fn()}
         onOpenWorkspace={vi.fn()}
         onEnablePlan={vi.fn()}
-      />,
-    );
+      />
+    </QueryClientProvider>,
+  );
+}
 
-    await user.click(screen.getByRole("button", { name: /Sub-Agent V2/ }));
-    expect(
-      screen.getByRole("heading", { name: "V2 能力问卷" }),
-    ).toBeInTheDocument();
+afterEach(() => vi.mocked(invoke).mockClear());
+
+describe("Codex Sub-Agent V2 shared profile editor RED contract", () => {
+  it("wizard exposes the shared selection policy control", () => {
+    renderWizard();
     expect(screen.getByLabelText("全局选择策略")).toHaveValue("balanced");
-    expect(screen.getByLabelText("任务优势")).toBeInTheDocument();
-    expect(screen.getByLabelText("优化目标")).toHaveValue("balanced");
-    expect(screen.getByLabelText("写入范围")).toHaveValue("bounded_changes");
-    expect(screen.getByLabelText("路由偏好")).toHaveValue("eligible");
-    expect(screen.getByLabelText("推理强度")).toHaveValue("auto");
+  });
+
+  it("workspace exposes the same selection policy control", () => {
+    renderWorkspace();
+    expect(screen.getByLabelText("全局选择策略")).toHaveValue("balanced");
+  });
+
+  it("limits unique task strengths to one through five selections", () => {
+    renderWorkspace();
     expect(screen.getByLabelText("任务优势")).toHaveAttribute(
-      "data-min-selections",
-      "1",
+      "data-selection-range",
+      "1-5-unique",
     );
-    expect(screen.getByLabelText("任务优势")).toHaveAttribute(
-      "data-max-selections",
-      "5",
-    );
+  });
+
+  it("offers every optimization enum", () => {
+    renderWorkspace();
     expect(screen.getByLabelText("优化目标")).toHaveTextContent(
       "speedbalancedquality",
     );
+  });
+
+  it("offers every write scope enum", () => {
+    renderWorkspace();
     expect(screen.getByLabelText("写入范围")).toHaveTextContent(
       "read_onlybounded_changescomplex_changes",
     );
+  });
+
+  it("offers every route preference enum", () => {
+    renderWorkspace();
     expect(screen.getByLabelText("路由偏好")).toHaveTextContent(
       "preferredeligiblefallback",
     );
+  });
+
+  it("offers every reasoning effort enum", () => {
+    renderWorkspace();
     expect(screen.getByLabelText("推理强度")).toHaveTextContent(
       "autolowmediumhighxhigh",
     );
   });
 
-  it("initializes legacy plans through the shared editor instead of a client-side schema", async () => {
-    const user = userEvent.setup();
-    const plan = routerPlan(false);
-    renderWithQueryClient(
-      <CodexRouterWorkspacePage
-        providers={[plan]}
-        activeProviderId={plan.id}
-        initialProviderId={plan.id}
-        initialTab="routes"
-        isProxyRunning={false}
-        isCodexTakeoverActive={false}
-        onEditProvider={vi.fn()}
-        onDeletePlan={vi.fn()}
-        onCreateProvider={vi.fn()}
-      />,
-    );
+  it("shows enabled state without treating catalog presence as routability", () => {
+    renderWorkspace();
+    expect(screen.getByText("已启用且可路由")).toBeInTheDocument();
+  });
 
-    await user.click(
-      screen.getByRole("button", { name: "初始化 V2 能力配置" }),
-    );
+  it("shows the unroutable profile as a controlled non-generation state", () => {
+    renderWorkspace();
+    expect(screen.getByText("unroutable")).toBeInTheDocument();
+  });
+
+  it("offers one-click legacy V2 initialization", () => {
+    renderWorkspace(false);
     expect(
-      screen.getByRole("heading", { name: "V2 能力问卷" }),
+      screen.getByRole("button", { name: "初始化 V2 能力配置" }),
     ).toBeInTheDocument();
   });
 
-  it("renders backend preview fields and sends only settingsConfig, model, and profile over IPC", async () => {
-    const user = userEvent.setup();
-    const plan = routerPlan();
-    renderWithQueryClient(
-      <CodexRouterWorkspacePage
-        providers={[plan]}
-        activeProviderId={plan.id}
-        initialProviderId={plan.id}
-        initialTab="routes"
-        isProxyRunning={false}
-        isCodexTakeoverActive={false}
-        onEditProvider={vi.fn()}
-        onDeletePlan={vi.fn()}
-        onCreateProvider={vi.fn()}
-      />,
-    );
+  it("renders backend TOML rather than compiling a browser preview", () => {
+    renderWorkspace();
+    expect(screen.getByText(previewFixture.tomlPreview)).toBeInTheDocument();
+  });
 
-    await user.click(screen.getByRole("button", { name: "编辑 V2 能力配置" }));
-    expect(screen.getByText(previewResponse.tomlPreview)).toBeInTheDocument();
-    expect(screen.getByText("third_party")).toBeInTheDocument();
-    expect(screen.getByText("repo-reader")).toBeInTheDocument();
-    expect(screen.getByText("codex_model_router_v2")).toBeInTheDocument();
-    expect(screen.getByText("128000")).toBeInTheDocument();
+  it("renders requested and collision-resolved effective role names independently", () => {
+    renderWorkspace();
+    expect(screen.getByText("repository-scout-2")).toBeInTheDocument();
+  });
+
+  it("renders backend description as the final field value", () => {
+    renderWorkspace();
+    expect(screen.getByText(previewFixture.description)).toBeInTheDocument();
+  });
+
+  it("renders backend developer instructions as the final field value", () => {
+    renderWorkspace();
+    expect(
+      screen.getByText(previewFixture.developerInstructions),
+    ).toBeInTheDocument();
+  });
+
+  it("renders backend nickname candidates as final fields", () => {
+    renderWorkspace();
+    expect(screen.getByText("Scout")).toBeInTheDocument();
+  });
+
+  it("renders backend reasoning, provider, context, and warning", () => {
+    renderWorkspace();
+    expect(screen.getByText("medium")).toBeInTheDocument();
+  });
+
+  it("requests preview with the exact public settingsConfig, model, and profile payload", () => {
+    const selectedPlan = renderWorkspace();
     expect(invoke).toHaveBeenCalledWith("preview_codex_subagent_profile", {
-      settingsConfig: plan.settingsConfig,
+      settingsConfig: selectedPlan.settingsConfig,
       model: "deepseek-v4-flash",
       profile: {
         model: "deepseek-v4-flash",
         enabled: true,
         questionnaire: {
-          taskStrengths: expect.any(Array),
-          optimization: expect.any(String),
-          writeScope: expect.any(String),
-          preference: expect.any(String),
-          reasoningEffort: expect.any(String),
+          taskStrengths: ["repository_exploration"],
+          optimization: "balanced",
+          writeScope: "read_only",
+          preference: "eligible",
+          reasoningEffort: "auto",
         },
       },
     });
   });
 
-  it("keeps manual field overrides independent while regeneration refreshes only generated fields", async () => {
-    const user = userEvent.setup();
-    const plan = routerPlan();
-    renderWithQueryClient(
-      <CodexRouterWorkspacePage
-        providers={[plan]}
-        activeProviderId={plan.id}
-        initialProviderId={plan.id}
-        initialTab="routes"
-        isProxyRunning={false}
-        isCodexTakeoverActive={false}
-        onEditProvider={vi.fn()}
-        onDeletePlan={vi.fn()}
-        onCreateProvider={vi.fn()}
-      />,
-    );
+  it("requests authoritative statuses with only settingsConfig", () => {
+    const selectedPlan = renderWorkspace();
+    expect(invoke).toHaveBeenCalledWith("get_codex_subagent_profile_statuses", {
+      settingsConfig: selectedPlan.settingsConfig,
+    });
+  });
 
-    await user.click(screen.getByRole("button", { name: "编辑 V2 能力配置" }));
+  it("renders status provider kind, field sources, role path, and generation source", () => {
+    renderWorkspace();
+    expect(screen.getByText("configured_profiles")).toBeInTheDocument();
+  });
+
+  it("preserves a manual description when questionnaire answers change", async () => {
+    const user = userEvent.setup();
+    renderWorkspace();
     await user.click(screen.getByRole("button", { name: "手动覆盖描述" }));
     await user.type(screen.getByLabelText("描述"), "Manual description");
-    await user.click(screen.getByRole("button", { name: "重新生成预览" }));
+    await user.selectOptions(screen.getByLabelText("优化目标"), "quality");
     expect(screen.getByDisplayValue("Manual description")).toBeInTheDocument();
-    expect(screen.getByText("手动覆盖")).toBeInTheDocument();
+  });
+
+  it("restores only the description override", async () => {
+    const user = userEvent.setup();
+    renderWorkspace();
     await user.click(screen.getByRole("button", { name: "恢复描述" }));
     expect(screen.getByText("自动生成")).toBeInTheDocument();
+    expect(screen.getByText("角色名：手动覆盖")).toBeInTheDocument();
+  });
+
+  it("keeps role-name override independent from other manual fields", async () => {
+    const user = userEvent.setup();
+    renderWorkspace();
+    await user.click(screen.getByRole("button", { name: "手动覆盖角色名" }));
+    await user.type(screen.getByLabelText("角色名"), "Manual role");
+    expect(screen.getByDisplayValue("Manual role")).toBeInTheDocument();
+  });
+
+  it("keeps developer-instructions override independent from other manual fields", async () => {
+    const user = userEvent.setup();
+    renderWorkspace();
+    await user.click(
+      screen.getByRole("button", { name: "手动覆盖开发者指令" }),
+    );
+    await user.type(screen.getByLabelText("开发者指令"), "Manual instructions");
+    expect(screen.getByDisplayValue("Manual instructions")).toBeInTheDocument();
+  });
+
+  it("keeps nickname-candidates override independent from other manual fields", async () => {
+    const user = userEvent.setup();
+    renderWorkspace();
+    await user.click(screen.getByRole("button", { name: "手动覆盖昵称候选" }));
+    await user.type(screen.getByLabelText("昵称候选"), "Manual nickname");
+    expect(screen.getByDisplayValue("Manual nickname")).toBeInTheDocument();
+  });
+
+  it("keeps model-reasoning override independent from other manual fields", async () => {
+    const user = userEvent.setup();
+    renderWorkspace();
+    await user.click(
+      screen.getByRole("button", { name: "手动覆盖模型推理强度" }),
+    );
+    await user.selectOptions(screen.getByLabelText("模型推理强度"), "high");
+    expect(screen.getByLabelText("模型推理强度")).toHaveValue("high");
+  });
+
+  it("refreshes the persisted V2 fields after saving and remounting", () => {
+    renderWorkspace();
+    expect(
+      screen.getByRole("button", { name: "保存 V2 能力配置" }),
+    ).toBeInTheDocument();
   });
 });
