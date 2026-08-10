@@ -716,7 +716,8 @@ describe("Codex Sub-Agent V2 review round 1 regressions", () => {
           .mock.calls.filter(
             ([command, args]) =>
               command === "preview_codex_subagent_profile" &&
-              args?.model === "deepseek-v4-flash",
+              (args as Record<string, unknown> | undefined)?.model ===
+                "deepseek-v4-flash",
           ),
       ).toHaveLength(0);
 
