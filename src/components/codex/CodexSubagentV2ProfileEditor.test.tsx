@@ -82,7 +82,27 @@ vi.mock("@tauri-apps/api/core", () => ({
       case "get_providers":
         return JSON.parse(JSON.stringify(ipcState.providers));
       case "update_provider": {
+        if (!args || args.app !== "codex") {
+          throw new Error(
+            'update_provider must receive the source envelope app="codex"',
+          );
+        }
+        if (!Object.prototype.hasOwnProperty.call(args, "originalId")) {
+          throw new Error(
+            "update_provider must include originalId in the source envelope",
+          );
+        }
+        if (args.originalId !== undefined) {
+          throw new Error(
+            "update_provider stable-plan save expects originalId to be undefined",
+          );
+        }
         const savedProvider = args?.provider as Provider;
+        if (!savedProvider || typeof savedProvider.id !== "string") {
+          throw new Error(
+            "update_provider must include a provider with a stable id",
+          );
+        }
         ipcState.providers[savedProvider.id] = JSON.parse(
           JSON.stringify(savedProvider),
         );
@@ -951,7 +971,78 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
     await user.clear(description);
     await user.type(description, "Persisted manual description");
     await saveV2(user);
-    await waitFor(() => expect(updateProviderCalls()).toHaveLength(1));
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("update_provider", {
+        provider: {
+          id: "router",
+          name: "Codex MultiRouter",
+          category: "custom",
+          settingsConfig: {
+            codexRouting: {
+              enabled: true,
+              routes: [
+                {
+                  id: "flash-route",
+                  enabled: true,
+                  targetProviderId: "third-party",
+                  match: {
+                    models: ["deepseek-v4-flash"],
+                    prefixes: [],
+                  },
+                  upstream: {},
+                },
+              ],
+              subagentV2: {
+                schemaVersion: 1,
+                selectionPolicy: "third_party_first",
+                profiles: {
+                  "repository-scout": {
+                    model: "deepseek-v4-flash",
+                    enabled: true,
+                    questionnaire: {
+                      taskStrengths: ["repository_exploration"],
+                      optimization: "quality",
+                      writeScope: "read_only",
+                      preference: "eligible",
+                      reasoningEffort: "auto",
+                    },
+                    overrides: {
+                      roleName: "repository-scout",
+                      description: "Persisted manual description",
+                      developerInstructions: "Do not modify source files.",
+                      modelReasoningEffort: "medium",
+                    },
+                  },
+                  "offline-writer": {
+                    model: "deepseek-v4-pro",
+                    enabled: true,
+                    questionnaire: {
+                      taskStrengths: ["complex_implementation"],
+                      optimization: "quality",
+                      writeScope: "complex_changes",
+                      preference: "fallback",
+                      reasoningEffort: "high",
+                    },
+                  },
+                },
+              },
+            },
+            modelCatalog: {
+              models: [
+                {
+                  model: "deepseek-v4-flash",
+                  contextWindow: 128000,
+                },
+                { model: "deepseek-v4-pro", contextWindow: 128000 },
+              ],
+            },
+          },
+        },
+        app: "codex",
+        originalId: undefined,
+      }),
+    );
+    expect(updateProviderCalls()).toHaveLength(1);
     firstMount.unmount();
 
     await mountWorkspaceFromPersistedPlan();
@@ -1073,6 +1164,7 @@ describe("Codex Sub-Agent V2 preview visible output", () => {
     ["description", previewFixture.description],
     ["developer instructions", previewFixture.developerInstructions],
     ["first nickname candidate", "Scout"],
+    ["second nickname candidate", "Reader"],
     ["fixed model provider", "codex_model_router_v2"],
     ["model reasoning effort", "medium"],
     ["context window", "128000"],
