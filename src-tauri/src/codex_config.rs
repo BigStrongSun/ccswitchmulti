@@ -6128,6 +6128,84 @@ mod tests {
         .expect("V1 cleanup");
         assert!(!path.exists());
         assert!(user_path.exists());
+
+        sync_codex_managed_agent_files_with_settings(
+            &specs,
+            CodexSubagentVersion::V2,
+            &make_settings("Preserved config."),
+            None,
+        )
+        .expect("V2 restore after V1");
+        let restored = std::fs::read_to_string(&path).expect("restored managed role");
+        assert!(restored.contains("Preserved config."));
+        assert!(user_path.exists());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn codex_subagent_v2_catalog_disappearance_and_alias_change_preserve_canonical_profile() {
+        let _guard = TestHomeGuard::new();
+        let agents_dir = get_codex_agents_dir();
+        std::fs::create_dir_all(&agents_dir).expect("create agents dir");
+        let canonical_model = "vendor/canonical-model";
+        let settings = json!({
+            "codexRouting": {
+                "enabled": true,
+                "subagentVersion": "v2",
+                "subagentV2": { "schemaVersion": 1, "profiles": { "canonical": {
+                    "model": canonical_model,
+                    "enabled": true,
+                    "questionnaire": { "taskStrengths": ["testing"], "optimization": "quality", "writeScope": "bounded_changes", "preference": "preferred", "reasoningEffort": "auto" },
+                    "overrides": { "roleName": "stable-role", "description": "Persisted questionnaire override." }
+                }}},
+                "routes": [{ "match": { "models": [canonical_model] }, "upstream": { "auth": { "source": "provider_config" } } }]
+            }
+        });
+        let spec = |display_name: &str| CodexCatalogModelSpec {
+            model: canonical_model.to_string(),
+            upstream_model: None,
+            display_name: display_name.to_string(),
+            context_window: 262_144,
+            text_only: true,
+            is_default: false,
+            supports_parallel_tool_calls: None,
+            input_modalities: None,
+            base_instructions: None,
+        };
+        let path = agents_dir.join("stable-role.toml");
+
+        sync_codex_managed_agent_files_with_settings(
+            &[spec("Old visible alias")],
+            CodexSubagentVersion::V2,
+            &settings,
+            None,
+        )
+        .expect("initial catalog sync");
+        assert!(path.exists());
+
+        sync_codex_managed_agent_files_with_settings(
+            &[],
+            CodexSubagentVersion::V2,
+            &settings,
+            None,
+        )
+        .expect("catalog model temporarily absent");
+        assert!(!path.exists());
+        assert_eq!(
+            settings["codexRouting"]["subagentV2"]["profiles"]["canonical"]["model"],
+            canonical_model
+        );
+
+        sync_codex_managed_agent_files_with_settings(
+            &[spec("Renamed visible alias")],
+            CodexSubagentVersion::V2,
+            &settings,
+            None,
+        )
+        .expect("catalog model restored under a new visible alias");
+        let restored = std::fs::read_to_string(&path).expect("restored canonical role");
+        assert!(restored.contains(&format!("model = \"{canonical_model}\"")));
+        assert!(restored.contains("Persisted questionnaire override."));
     }
 
     #[test]
