@@ -4445,6 +4445,44 @@ mod tests {
             "current hardcoded managed-role rendering must use the configured V2 explicit effort"
         );
     }
+
+    #[test]
+    fn codex_subagent_v2_configured_materialization_boundary_uses_each_profile_input() {
+        let settings = json!({ "codexRouting": { "subagentV2": { "schemaVersion": 1 } } });
+        let first_profile = json!({ "overrides": { "description": "First manual description.", "modelReasoningEffort": "low" } });
+        let second_profile = json!({ "overrides": { "description": "Second manual description.", "modelReasoningEffort": "xhigh" } });
+        let spec = CodexCatalogModelSpec {
+            model: "DeepSeek-V4-Flash".to_string(),
+            upstream_model: None,
+            display_name: "Configured Flash".to_string(),
+            context_window: 1_000_000,
+            text_only: false,
+            is_default: false,
+            supports_parallel_tool_calls: None,
+            input_modalities: None,
+            base_instructions: None,
+        };
+        let first = render_codex_managed_agent_toml_for_subagent_v2_red(
+            &settings,
+            &first_profile,
+            "configured-flash",
+            &spec,
+        );
+        let second = render_codex_managed_agent_toml_for_subagent_v2_red(
+            &settings,
+            &second_profile,
+            "configured-flash",
+            &spec,
+        );
+        assert!(
+            first.contains("First manual description.")
+                && first.contains(r#"model_reasoning_effort = "low""#)
+                && second.contains("Second manual description.")
+                && second.contains(r#"model_reasoning_effort = "xhigh""#)
+                && first != second,
+            "configured materialization must consume each settings/profile input instead of a hardcoded renderer"
+        );
+    }
     use serial_test::serial;
 
     #[test]
