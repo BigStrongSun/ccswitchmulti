@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { invoke } from "@tauri-apps/api/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -119,6 +119,22 @@ function plan(withV2 = true): Provider {
                       writeScope: "read_only",
                       preference: "eligible",
                       reasoningEffort: "auto",
+                    },
+                    overrides: {
+                      roleName: "repository-scout",
+                      developerInstructions: "Do not modify source files.",
+                      modelReasoningEffort: "medium",
+                    },
+                  },
+                  "offline-writer": {
+                    model: "deepseek-v4-pro",
+                    enabled: true,
+                    questionnaire: {
+                      taskStrengths: ["complex_implementation"],
+                      optimization: "quality",
+                      writeScope: "complex_changes",
+                      preference: "fallback",
+                      reasoningEffort: "high",
                     },
                   },
                 },
@@ -256,9 +272,11 @@ describe("Codex Sub-Agent V2 shared profile editor RED contract", () => {
     ).toBeInTheDocument();
   });
 
-  it("renders backend TOML rather than compiling a browser preview", () => {
+  it("renders backend TOML rather than compiling a browser preview", async () => {
     renderWorkspace();
-    expect(screen.getByText(previewFixture.tomlPreview)).toBeInTheDocument();
+    expect(
+      await screen.findByText(previewFixture.tomlPreview),
+    ).toBeInTheDocument();
   });
 
   it("renders requested and collision-resolved effective role names independently", () => {
@@ -266,15 +284,17 @@ describe("Codex Sub-Agent V2 shared profile editor RED contract", () => {
     expect(screen.getByText("repository-scout-2")).toBeInTheDocument();
   });
 
-  it("renders backend description as the final field value", () => {
-    renderWorkspace();
-    expect(screen.getByText(previewFixture.description)).toBeInTheDocument();
-  });
-
-  it("renders backend developer instructions as the final field value", () => {
+  it("renders backend description as the final field value", async () => {
     renderWorkspace();
     expect(
-      screen.getByText(previewFixture.developerInstructions),
+      await screen.findByText(previewFixture.description),
+    ).toBeInTheDocument();
+  });
+
+  it("renders backend developer instructions as the final field value", async () => {
+    renderWorkspace();
+    expect(
+      await screen.findByText(previewFixture.developerInstructions),
     ).toBeInTheDocument();
   });
 
@@ -288,30 +308,42 @@ describe("Codex Sub-Agent V2 shared profile editor RED contract", () => {
     expect(screen.getByText("medium")).toBeInTheDocument();
   });
 
-  it("requests preview with the exact public settingsConfig, model, and profile payload", () => {
+  it("requests preview with the exact public settingsConfig, model, and profile payload", async () => {
     const selectedPlan = renderWorkspace();
-    expect(invoke).toHaveBeenCalledWith("preview_codex_subagent_profile", {
-      settingsConfig: selectedPlan.settingsConfig,
-      model: "deepseek-v4-flash",
-      profile: {
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("preview_codex_subagent_profile", {
+        settingsConfig: selectedPlan.settingsConfig,
         model: "deepseek-v4-flash",
-        enabled: true,
-        questionnaire: {
-          taskStrengths: ["repository_exploration"],
-          optimization: "balanced",
-          writeScope: "read_only",
-          preference: "eligible",
-          reasoningEffort: "auto",
+        profile: {
+          model: "deepseek-v4-flash",
+          enabled: true,
+          questionnaire: {
+            taskStrengths: ["repository_exploration"],
+            optimization: "balanced",
+            writeScope: "read_only",
+            preference: "eligible",
+            reasoningEffort: "auto",
+          },
+          overrides: {
+            roleName: "repository-scout",
+            developerInstructions: "Do not modify source files.",
+            modelReasoningEffort: "medium",
+          },
         },
-      },
-    });
+      }),
+    );
   });
 
-  it("requests authoritative statuses with only settingsConfig", () => {
+  it("requests authoritative statuses with only settingsConfig", async () => {
     const selectedPlan = renderWorkspace();
-    expect(invoke).toHaveBeenCalledWith("get_codex_subagent_profile_statuses", {
-      settingsConfig: selectedPlan.settingsConfig,
-    });
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith(
+        "get_codex_subagent_profile_statuses",
+        {
+          settingsConfig: selectedPlan.settingsConfig,
+        },
+      ),
+    );
   });
 
   it("renders status provider kind, field sources, role path, and generation source", () => {
