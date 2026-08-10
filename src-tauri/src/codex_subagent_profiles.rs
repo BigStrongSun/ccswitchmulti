@@ -1,28 +1,73 @@
-//! RED-only typed contract for the future Codex V2 capability-profile compiler.
+//! RED-only contracts for the future Codex V2 capability-profile backend.
 //!
-//! This is declared once from crate root under `cfg(test)`. Task 3 can promote this exact module
-//! to production without changing its identity. The sentinel deliberately has no production caller.
-
-use std::collections::BTreeMap;
+//! The module has one crate-root `cfg(test)` identity. The sentinels deliberately have no
+//! production caller; Task 3 can promote these request/result shapes directly to production.
 
 use serde_json::{json, Value};
 
-#[derive(Debug, PartialEq, Eq)]
-enum CompileError {
-    NotImplemented,
-    Validation {
-        code: &'static str,
-        profile_key: Option<&'static str>,
-        detail: &'static str,
-    },
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PersistedV2 {
+    schema_version: u8,
+    selection_policy: &'static str,
+    profiles: Vec<PersistedProfile>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PersistedProfile {
+    key: &'static str,
+    model: &'static str,
+    enabled: bool,
+    strengths: Vec<&'static str>,
+    optimization: &'static str,
+    write_scope: &'static str,
+    preference: &'static str,
+    reasoning_effort: &'static str,
+    overrides: Overrides,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Overrides {
+    role_name: Option<&'static str>,
+    description: Option<&'static str>,
+    developer_instructions: Option<&'static str>,
+    nickname_candidates: Option<Vec<&'static str>>,
+    model_reasoning_effort: Option<&'static str>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CatalogModel {
+    model: &'static str,
+    provider_kind: &'static str,
+    routable: bool,
+    context_window: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CompileRequest {
+    subagent_version: &'static str,
+    persisted_subagent_v2: Option<PersistedV2>,
+    catalog_models: Vec<CatalogModel>,
+    occupied_role_names: Vec<&'static str>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 struct CompileOutput {
-    persisted_profiles: Vec<ProfileStatus>,
     generated_roles: Vec<GeneratedRole>,
-    initialized: Option<InitializedPresets>,
-    diagnostics: DiagnosticPayload,
+    profile_statuses: Vec<ProfileStatus>,
+    diagnostics: Vec<Diagnostic>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct GeneratedRole {
+    requested_role_name: &'static str,
+    effective_role_name: &'static str,
+    description: &'static str,
+    developer_instructions: &'static str,
+    nickname_candidates: Vec<&'static str>,
+    model: &'static str,
+    model_provider: &'static str,
+    effort: &'static str,
+    context_window: u64,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -34,118 +79,179 @@ struct ProfileStatus {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct GeneratedRole {
-    name: &'static str,
+struct Diagnostic {
     model: &'static str,
-    provider: &'static str,
-    effort: &'static str,
-    description: &'static str,
-    nicknames: Vec<&'static str>,
+    role: Option<&'static str>,
+    policy: &'static str,
+    status: &'static str,
+    reason: Option<&'static str>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct InitializedPresets {
-    selection_policy: &'static str,
-    flash: &'static str,
-    pro: &'static str,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct DiagnosticPayload {
-    fields: BTreeMap<&'static str, &'static str>,
+enum CompileError {
+    NotImplemented,
+    Validation {
+        code: &'static str,
+        profile_key: Option<&'static str>,
+        detail: &'static str,
+    },
 }
 
 type CompileResult = Result<CompileOutput, CompileError>;
 
-/// Test-only wished-for compiler boundary. Its intentional failure prevents an `Ok(null)` or an
-/// untyped placeholder from satisfying this RED suite.
-fn compile_subagent_v2_profiles_for_red_test(_settings: &Value) -> CompileResult {
+#[derive(Debug, PartialEq, Eq)]
+struct DiagnosticSource {
+    model: &'static str,
+    role: &'static str,
+    policy: &'static str,
+    status: &'static str,
+    reason: &'static str,
+    api_key: &'static str,
+    task_body: &'static str,
+    encrypted_content: &'static str,
+}
+
+fn parse_persisted_subagent_v2_for_red_test(_raw: &Value) -> Result<PersistedV2, CompileError> {
     Err(CompileError::NotImplemented)
 }
 
-fn diagnostics(entries: &[(&'static str, &'static str)]) -> DiagnosticPayload {
-    DiagnosticPayload {
-        fields: entries.iter().copied().collect(),
-    }
+fn compile_subagent_v2_profiles_for_red_test(_request: &CompileRequest) -> CompileResult {
+    Err(CompileError::NotImplemented)
 }
 
-fn assert_compile_eq(input: Value, expected: CompileResult) {
-    let actual = compile_subagent_v2_profiles_for_red_test(&input);
-    assert_eq!(actual, expected);
+fn initialize_legacy_subagent_v2_for_red_test() -> Result<PersistedV2, CompileError> {
+    Err(CompileError::NotImplemented)
 }
 
-fn profile(
-    model: &'static str,
-    status: &'static str,
-    reason: Option<&'static str>,
-) -> ProfileStatus {
-    ProfileStatus {
-        key: model,
+fn sanitize_subagent_v2_diagnostic_for_red_test(
+    _source: &DiagnosticSource,
+) -> Result<Diagnostic, CompileError> {
+    Err(CompileError::NotImplemented)
+}
+
+fn assert_parse_eq(raw: Value, expected: Result<PersistedV2, CompileError>) {
+    assert_eq!(parse_persisted_subagent_v2_for_red_test(&raw), expected);
+}
+
+fn assert_compile_eq(request: &CompileRequest, expected: CompileResult) {
+    assert_eq!(compile_subagent_v2_profiles_for_red_test(request), expected);
+}
+
+fn profile(key: &'static str, model: &'static str) -> PersistedProfile {
+    PersistedProfile {
+        key,
         model,
-        status,
-        reason,
+        enabled: true,
+        strengths: vec!["repository_exploration"],
+        optimization: "speed",
+        write_scope: "read_only",
+        preference: "eligible",
+        reasoning_effort: "auto",
+        overrides: Overrides::default(),
     }
 }
 
-fn empty_output(profiles: Vec<ProfileStatus>) -> CompileOutput {
-    CompileOutput {
-        persisted_profiles: profiles,
-        generated_roles: vec![],
-        initialized: None,
-        diagnostics: diagnostics(&[]),
+fn config(policy: &'static str, profiles: Vec<PersistedProfile>) -> PersistedV2 {
+    PersistedV2 {
+        schema_version: 1,
+        selection_policy: policy,
+        profiles,
     }
 }
 
-fn v2_profile(strengths: Value, overrides: Value) -> Value {
-    json!({
-        "codexRouting": {
-            "subagentVersion": "v2",
-            "subagentV2": {
-                "schemaVersion": 1,
-                "selectionPolicy": "balanced",
-                "profiles": { "flash": {
-                    "model": "DeepSeek-V4-Flash",
-                    "enabled": true,
-                    "questionnaire": {
-                        "taskStrengths": strengths,
-                        "optimization": "speed",
-                        "writeScope": "read_only",
-                        "preference": "eligible",
-                        "reasoningEffort": "auto"
-                    },
-                    "overrides": overrides
-                }}
-            }
-        }
-    })
+fn raw_profile(strengths: Value) -> Value {
+    json!({ "schemaVersion": 1, "profiles": { "flash": { "model": "DeepSeek-V4-Flash", "enabled": true, "questionnaire": { "taskStrengths": strengths, "optimization": "speed", "writeScope": "read_only", "preference": "eligible", "reasoningEffort": "auto" } } } })
 }
 
-fn v2_profile_with_policy(policy: &'static str, preference: &'static str) -> Value {
-    let mut input = v2_profile(json!(["testing"]), json!({}));
-    input["codexRouting"]["subagentV2"]["selectionPolicy"] = json!(policy);
-    input["codexRouting"]["subagentV2"]["profiles"]["flash"]["questionnaire"]["preference"] =
-        json!(preference);
-    input
+fn flash_catalog() -> CatalogModel {
+    CatalogModel {
+        model: "DeepSeek-V4-Flash",
+        provider_kind: "third_party",
+        routable: true,
+        context_window: 1_000_000,
+    }
+}
+
+fn request(config: PersistedV2) -> CompileRequest {
+    CompileRequest {
+        subagent_version: "v2",
+        persisted_subagent_v2: Some(config),
+        catalog_models: vec![flash_catalog()],
+        occupied_role_names: vec![],
+    }
 }
 
 fn validation(
     code: &'static str,
-    profile_key: Option<&'static str>,
+    key: Option<&'static str>,
     detail: &'static str,
-) -> CompileResult {
+) -> Result<PersistedV2, CompileError> {
     Err(CompileError::Validation {
         code,
-        profile_key,
+        profile_key: key,
         detail,
     })
 }
 
+fn compile_validation(
+    code: &'static str,
+    key: Option<&'static str>,
+    detail: &'static str,
+) -> CompileResult {
+    Err(CompileError::Validation {
+        code,
+        profile_key: key,
+        detail,
+    })
+}
+
+fn generated(
+    requested: &'static str,
+    effective: &'static str,
+    description: &'static str,
+    instructions: &'static str,
+    nicknames: Vec<&'static str>,
+    effort: &'static str,
+) -> GeneratedRole {
+    GeneratedRole {
+        requested_role_name: requested,
+        effective_role_name: effective,
+        description,
+        developer_instructions: instructions,
+        nickname_candidates: nicknames,
+        model: "DeepSeek-V4-Flash",
+        model_provider: "codex_model_router_v2",
+        effort,
+        context_window: 1_000_000,
+    }
+}
+
+fn output(roles: Vec<GeneratedRole>, statuses: Vec<ProfileStatus>) -> CompileOutput {
+    CompileOutput {
+        generated_roles: roles,
+        profile_statuses: statuses,
+        diagnostics: vec![],
+    }
+}
+
+#[test]
+fn codex_subagent_v2_defaults_omitted_selection_policy_to_balanced() {
+    let raw = json!({ "schemaVersion": 1, "profiles": {} });
+    assert_parse_eq(raw, Ok(config("balanced", vec![])));
+}
+
+#[test]
+fn codex_subagent_v2_rejects_missing_schema_version() {
+    assert_parse_eq(
+        json!({ "selectionPolicy": "balanced", "profiles": {} }),
+        validation("missing_schema_version", None, "schemaVersion is required"),
+    );
+}
+
 #[test]
 fn codex_subagent_v2_rejects_non_v1_schema_version() {
-    let mut input = v2_profile(json!(["repository_exploration"]), json!({}));
-    input["codexRouting"]["subagentV2"]["schemaVersion"] = json!(2);
-    assert_compile_eq(
-        input,
+    assert_parse_eq(
+        json!({ "schemaVersion": 2, "profiles": {} }),
         validation(
             "unsupported_schema_version",
             None,
@@ -156,11 +262,8 @@ fn codex_subagent_v2_rejects_non_v1_schema_version() {
 
 #[test]
 fn codex_subagent_v2_rejects_illegal_questionnaire_enum() {
-    let mut input = v2_profile(json!(["repository_exploration"]), json!({}));
-    input["codexRouting"]["subagentV2"]["profiles"]["flash"]["questionnaire"]["optimization"] =
-        json!("fastest");
-    assert_compile_eq(
-        input,
+    assert_parse_eq(
+        json!({ "schemaVersion": 1, "profiles": { "flash": { "model": "DeepSeek-V4-Flash", "enabled": true, "questionnaire": { "taskStrengths": ["testing"], "optimization": "fastest", "writeScope": "read_only", "preference": "eligible", "reasoningEffort": "auto" } } } }),
         validation(
             "invalid_optimization",
             Some("flash"),
@@ -170,14 +273,9 @@ fn codex_subagent_v2_rejects_illegal_questionnaire_enum() {
 }
 
 #[test]
-fn codex_subagent_v2_rejects_missing_required_questionnaire_field() {
-    let mut input = v2_profile(json!(["repository_exploration"]), json!({}));
-    input["codexRouting"]["subagentV2"]["profiles"]["flash"]["questionnaire"]
-        .as_object_mut()
-        .expect("fixture questionnaire")
-        .remove("writeScope");
-    assert_compile_eq(
-        input,
+fn codex_subagent_v2_rejects_missing_questionnaire_field() {
+    assert_parse_eq(
+        json!({ "schemaVersion": 1, "profiles": { "flash": { "model": "DeepSeek-V4-Flash", "enabled": true, "questionnaire": { "taskStrengths": ["testing"], "optimization": "speed", "preference": "eligible", "reasoningEffort": "auto" } } } }),
         validation(
             "missing_write_scope",
             Some("flash"),
@@ -187,39 +285,25 @@ fn codex_subagent_v2_rejects_missing_required_questionnaire_field() {
 }
 
 #[test]
-fn codex_subagent_v2_defaults_only_documented_fields_and_round_trips_overrides() {
-    let input = v2_profile(
-        json!(["repository_exploration"]),
-        json!({
-            "roleName": "flash-reader",
-            "description": "Manual selection text.",
-            "developerInstructions": "Read only.",
-            "nicknameCandidates": ["Flash Reader"],
-            "modelReasoningEffort": "xhigh"
-        }),
-    );
-    assert_compile_eq(
-        input,
-        Ok(CompileOutput {
-            persisted_profiles: vec![profile("DeepSeek-V4-Flash", "routable", None)],
-            generated_roles: vec![GeneratedRole {
-                name: "flash-reader",
-                model: "DeepSeek-V4-Flash",
-                provider: "codex_model_router_v2",
-                effort: "xhigh",
-                description: "Manual selection text.",
-                nicknames: vec!["Flash Reader"],
-            }],
-            initialized: None,
-            diagnostics: diagnostics(&[("model", "DeepSeek-V4-Flash"), ("status", "routable")]),
-        }),
+fn codex_subagent_v2_round_trips_all_override_fields() {
+    let mut p = profile("flash", "DeepSeek-V4-Flash");
+    p.overrides = Overrides {
+        role_name: Some("flash-reader"),
+        description: Some("Manual selection text."),
+        developer_instructions: Some("Read only."),
+        nickname_candidates: Some(vec!["Flash Reader"]),
+        model_reasoning_effort: Some("xhigh"),
+    };
+    assert_parse_eq(
+        json!({ "schemaVersion": 1, "profiles": { "flash": { "model": "DeepSeek-V4-Flash", "enabled": true, "questionnaire": { "taskStrengths": ["repository_exploration"], "optimization": "speed", "writeScope": "read_only", "preference": "eligible", "reasoningEffort": "auto" }, "overrides": { "roleName": "flash-reader", "description": "Manual selection text.", "developerInstructions": "Read only.", "nicknameCandidates": ["Flash Reader"], "modelReasoningEffort": "xhigh" } } } }),
+        Ok(config("balanced", vec![p])),
     );
 }
 
 #[test]
 fn codex_subagent_v2_rejects_zero_strengths() {
-    assert_compile_eq(
-        v2_profile(json!([]), json!({})),
+    assert_parse_eq(
+        raw_profile(json!([])),
         validation(
             "strength_count",
             Some("flash"),
@@ -227,54 +311,58 @@ fn codex_subagent_v2_rejects_zero_strengths() {
         ),
     );
 }
-
 #[test]
 fn codex_subagent_v2_accepts_one_strength() {
     assert_compile_eq(
-        v2_profile(json!(["testing"]), json!({})),
-        Ok(empty_output(vec![profile(
-            "DeepSeek-V4-Flash",
-            "routable",
-            None,
-        )])),
+        &request(config(
+            "balanced",
+            vec![profile("flash", "DeepSeek-V4-Flash")],
+        )),
+        Ok(output(
+            vec![],
+            vec![ProfileStatus {
+                key: "flash",
+                model: "DeepSeek-V4-Flash",
+                status: "routable",
+                reason: None,
+            }],
+        )),
     );
 }
-
 #[test]
 fn codex_subagent_v2_accepts_five_strengths() {
+    let mut p = profile("flash", "DeepSeek-V4-Flash");
+    p.strengths = vec![
+        "long_context_reading",
+        "repository_exploration",
+        "evidence_collection",
+        "summarization",
+        "testing",
+    ];
     assert_compile_eq(
-        v2_profile(
-            json!([
-                "long_context_reading",
-                "repository_exploration",
-                "evidence_collection",
-                "summarization",
-                "testing"
-            ]),
-            json!({}),
-        ),
-        Ok(empty_output(vec![profile(
-            "DeepSeek-V4-Flash",
-            "routable",
-            None,
-        )])),
+        &request(config("balanced", vec![p])),
+        Ok(output(
+            vec![],
+            vec![ProfileStatus {
+                key: "flash",
+                model: "DeepSeek-V4-Flash",
+                status: "routable",
+                reason: None,
+            }],
+        )),
     );
 }
-
 #[test]
 fn codex_subagent_v2_rejects_six_strengths() {
-    assert_compile_eq(
-        v2_profile(
-            json!([
-                "long_context_reading",
-                "repository_exploration",
-                "evidence_collection",
-                "summarization",
-                "testing",
-                "complex_debugging"
-            ]),
-            json!({}),
-        ),
+    assert_parse_eq(
+        raw_profile(json!([
+            "long_context_reading",
+            "repository_exploration",
+            "evidence_collection",
+            "summarization",
+            "testing",
+            "complex_debugging"
+        ])),
         validation(
             "strength_count",
             Some("flash"),
@@ -282,23 +370,21 @@ fn codex_subagent_v2_rejects_six_strengths() {
         ),
     );
 }
-
 #[test]
-fn codex_subagent_v2_rejects_duplicate_and_unknown_strengths() {
-    assert_compile_eq(
-        v2_profile(json!(["testing", "testing", "unknown"]), json!({})),
+fn codex_subagent_v2_rejects_duplicate_strength() {
+    assert_parse_eq(
+        raw_profile(json!(["testing", "testing"])),
         validation(
-            "invalid_task_strengths",
+            "duplicate_task_strength",
             Some("flash"),
-            "taskStrengths must be unique known enum members",
+            "taskStrengths members must be unique",
         ),
     );
 }
-
 #[test]
 fn codex_subagent_v2_rejects_unknown_strength() {
-    assert_compile_eq(
-        v2_profile(json!(["unknown"]), json!({})),
+    assert_parse_eq(
+        raw_profile(json!(["unknown"])),
         validation(
             "unknown_task_strength",
             Some("flash"),
@@ -308,428 +394,378 @@ fn codex_subagent_v2_rejects_unknown_strength() {
 }
 
 #[test]
-fn codex_subagent_v2_rejects_all_nfkc_collisions_and_keeps_original_models() {
-    let mut input = v2_profile(json!(["testing"]), json!({}));
-    let profiles = input["codexRouting"]["subagentV2"]["profiles"]
-        .as_object_mut()
-        .expect("fixture profiles");
-    let fullwidth = profiles.remove("flash").expect("fixture profile");
-    profiles.insert("Ｆｏｏ".to_string(), fullwidth);
-    profiles.insert("foo".to_string(), json!({
-        "model": "foo", "enabled": true,
-        "questionnaire": { "taskStrengths": ["testing"], "optimization": "speed", "writeScope": "read_only", "preference": "eligible", "reasoningEffort": "auto" }
-    }));
+fn codex_subagent_v2_nfkc_collision_rejects_all_profiles_and_emits_no_roles() {
+    let mut a = profile("Ｆｏｏ", "Ｆｏｏ");
+    let b = profile("foo", "foo");
+    a.overrides.role_name = Some("fullwidth");
     assert_compile_eq(
-        input,
-        Ok(empty_output(vec![
-            ProfileStatus {
-                key: "Ｆｏｏ",
-                model: "DeepSeek-V4-Flash",
-                status: "collision",
-                reason: Some("normalized key foo conflicts"),
-            },
-            ProfileStatus {
-                key: "foo",
-                model: "foo",
-                status: "collision",
-                reason: Some("normalized key foo conflicts"),
-            },
-        ])),
+        &request(config("balanced", vec![a, b])),
+        Ok(output(
+            vec![],
+            vec![
+                ProfileStatus {
+                    key: "Ｆｏｏ",
+                    model: "Ｆｏｏ",
+                    status: "collision",
+                    reason: Some("normalized key foo conflicts"),
+                },
+                ProfileStatus {
+                    key: "foo",
+                    model: "foo",
+                    status: "collision",
+                    reason: Some("normalized key foo conflicts"),
+                },
+            ],
+        )),
     );
 }
 
 #[test]
-fn codex_subagent_v2_rejects_all_default_case_fold_collisions() {
-    let input = json!({ "codexRouting": { "subagentV2": {
-        "schemaVersion": 1, "selectionPolicy": "balanced", "profiles": {
-            "Straße": { "model": "Straße", "enabled": true, "questionnaire": { "taskStrengths": ["testing"], "optimization": "speed", "writeScope": "read_only", "preference": "eligible", "reasoningEffort": "auto" } },
-            "STRASSE": { "model": "STRASSE", "enabled": true, "questionnaire": { "taskStrengths": ["testing"], "optimization": "speed", "writeScope": "read_only", "preference": "eligible", "reasoningEffort": "auto" } }
-        }
-    }}});
+fn codex_subagent_v2_default_case_fold_collision_preserves_original_model_spelling() {
     assert_compile_eq(
-        input,
-        Ok(empty_output(vec![
-            ProfileStatus {
-                key: "Straße",
-                model: "Straße",
-                status: "collision",
-                reason: Some("normalized key strasse conflicts"),
-            },
-            ProfileStatus {
-                key: "STRASSE",
-                model: "STRASSE",
-                status: "collision",
-                reason: Some("normalized key strasse conflicts"),
-            },
-        ])),
+        &request(config(
+            "balanced",
+            vec![profile("Straße", "Straße"), profile("STRASSE", "STRASSE")],
+        )),
+        Ok(output(
+            vec![],
+            vec![
+                ProfileStatus {
+                    key: "Straße",
+                    model: "Straße",
+                    status: "collision",
+                    reason: Some("normalized key strasse conflicts"),
+                },
+                ProfileStatus {
+                    key: "STRASSE",
+                    model: "STRASSE",
+                    status: "collision",
+                    reason: Some("normalized key strasse conflicts"),
+                },
+            ],
+        )),
     );
 }
 
-fn effort_expected(effort: &'static str) -> CompileResult {
-    Ok(CompileOutput {
-        persisted_profiles: vec![profile("DeepSeek-V4-Flash", "routable", None)],
-        generated_roles: vec![GeneratedRole {
-            name: "flash",
-            model: "DeepSeek-V4-Flash",
-            provider: "codex_model_router_v2",
-            effort,
-            description: "generated",
-            nicknames: vec!["Flash"],
-        }],
-        initialized: None,
-        diagnostics: diagnostics(&[]),
-    })
-}
-
-#[test]
-fn codex_subagent_v2_effort_architecture_is_high() {
+fn effort_case(
+    strength: &'static str,
+    optimization: &'static str,
+    override_effort: Option<&'static str>,
+    expected: &'static str,
+) {
+    let mut p = profile("flash", "DeepSeek-V4-Flash");
+    p.strengths = vec![strength];
+    p.optimization = optimization;
+    p.overrides.model_reasoning_effort = override_effort;
     assert_compile_eq(
-        v2_profile(json!(["architecture_design"]), json!({})),
-        effort_expected("high"),
+        &request(config("balanced", vec![p])),
+        Ok(output(
+            vec![generated(
+                "flash",
+                "flash",
+                "generated",
+                "generated",
+                vec!["Flash"],
+                expected,
+            )],
+            vec![],
+        )),
     );
 }
-
 #[test]
-fn codex_subagent_v2_effort_speed_read_explore_evidence_summarize_is_low() {
-    assert_compile_eq(
-        v2_profile(
-            json!([
-                "long_context_reading",
-                "repository_exploration",
-                "evidence_collection",
-                "summarization"
-            ]),
-            json!({}),
-        ),
-        effort_expected("low"),
-    );
+fn codex_subagent_v2_architecture_effort_is_high() {
+    effort_case("architecture_design", "quality", None, "high");
+}
+#[test]
+fn codex_subagent_v2_speed_reading_effort_is_low() {
+    effort_case("repository_exploration", "speed", None, "low");
+}
+#[test]
+fn codex_subagent_v2_speed_testing_effort_is_medium() {
+    effort_case("testing", "speed", None, "medium");
+}
+#[test]
+fn codex_subagent_v2_explicit_xhigh_effort_wins() {
+    effort_case("architecture_design", "quality", Some("xhigh"), "xhigh");
 }
 
 #[test]
-fn codex_subagent_v2_effort_speed_with_testing_is_medium() {
+fn codex_subagent_v2_balanced_generates_unbiased_third_party_selection_text() {
     assert_compile_eq(
-        v2_profile(json!(["repository_exploration", "testing"]), json!({})),
-        effort_expected("medium"),
+        &request(config(
+            "balanced",
+            vec![profile("flash", "DeepSeek-V4-Flash")],
+        )),
+        Ok(output(
+            vec![generated(
+                "flash",
+                "flash",
+                "Balanced selection: matching eligible profile.",
+                "generated",
+                vec!["Flash"],
+                "low",
+            )],
+            vec![],
+        )),
     );
 }
-
 #[test]
-fn codex_subagent_v2_explicit_effort_xhigh_wins() {
+fn codex_subagent_v2_official_first_keeps_generated_role_on_router_provider() {
+    assert_compile_eq(&request(config("official_first", vec![profile("flash", "DeepSeek-V4-Flash")])), Ok(output(vec![generated("flash", "flash", "Official-first selection: eligible third-party profile is not promoted for high-risk work.", "generated", vec!["Flash"], "low")], vec![])));
+}
+#[test]
+fn codex_subagent_v2_third_party_first_changes_only_selection_guidance() {
     assert_compile_eq(
-        v2_profile(
-            json!(["architecture_design"]),
-            json!({ "modelReasoningEffort": "xhigh" }),
-        ),
-        effort_expected("xhigh"),
+        &request(config(
+            "third_party_first",
+            vec![profile("flash", "DeepSeek-V4-Flash")],
+        )),
+        Ok(output(
+            vec![generated(
+                "flash",
+                "flash",
+                "Third-party-first selection: matching eligible profile is promoted.",
+                "generated",
+                vec!["Flash"],
+                "low",
+            )],
+            vec![],
+        )),
     );
 }
-
 #[test]
-fn codex_subagent_v2_policy_balanced_has_no_provider_bias() {
+fn codex_subagent_v2_preferred_profile_overrides_official_first_bias() {
+    let mut p = profile("flash", "DeepSeek-V4-Flash");
+    p.preference = "preferred";
     assert_compile_eq(
-        v2_profile(json!(["testing"]), json!({})),
-        Ok(CompileOutput {
-            persisted_profiles: vec![profile("DeepSeek-V4-Flash", "routable", None)],
-            generated_roles: vec![GeneratedRole {
-                name: "balanced",
-                model: "DeepSeek-V4-Flash",
-                provider: "codex_model_router_v2",
-                effort: "medium",
-                description: "balanced: no provider bias",
-                nicknames: vec!["Balanced"],
-            }],
-            initialized: None,
-            diagnostics: diagnostics(&[("policy", "balanced")]),
-        }),
+        &request(config("official_first", vec![p])),
+        Ok(output(
+            vec![generated(
+                "flash",
+                "flash",
+                "Official-first selection: explicitly preferred profile overrides provider bias.",
+                "generated",
+                vec!["Flash"],
+                "low",
+            )],
+            vec![],
+        )),
     );
 }
-
 #[test]
-fn codex_subagent_v2_policy_official_first_keeps_high_risk_official_unless_preferred() {
+fn codex_subagent_v2_fallback_profile_is_never_promoted() {
+    let mut p = profile("flash", "DeepSeek-V4-Flash");
+    p.preference = "fallback";
     assert_compile_eq(
-        v2_profile(json!(["high_risk_review"]), json!({})),
-        Ok(CompileOutput {
-            persisted_profiles: vec![profile("DeepSeek-V4-Flash", "routable", None)],
-            generated_roles: vec![GeneratedRole {
-                name: "official-control",
-                model: "official",
-                provider: "openai",
-                effort: "high",
-                description: "official_first high-risk control",
-                nicknames: vec!["Official"],
-            }],
-            initialized: None,
-            diagnostics: diagnostics(&[("policy", "official_first"), ("preference", "eligible")]),
-        }),
-    );
-}
-
-#[test]
-fn codex_subagent_v2_policy_third_party_first_promotes_preferred_or_eligible_not_fallback() {
-    assert_compile_eq(
-        v2_profile(json!(["testing"]), json!({})),
-        Ok(CompileOutput {
-            persisted_profiles: vec![profile("DeepSeek-V4-Flash", "routable", None)],
-            generated_roles: vec![GeneratedRole {
-                name: "third-party",
-                model: "DeepSeek-V4-Flash",
-                provider: "codex_model_router_v2",
-                effort: "medium",
-                description: "third_party_first preferred/eligible",
-                nicknames: vec!["Third Party"],
-            }],
-            initialized: None,
-            diagnostics: diagnostics(&[
-                ("policy", "third_party_first"),
-                ("fallback", "never_promoted"),
-            ]),
-        }),
-    );
-}
-
-#[test]
-fn codex_subagent_v2_preferred_profile_overrides_official_first_provider_bias() {
-    assert_compile_eq(
-        v2_profile_with_policy("official_first", "preferred"),
-        Ok(CompileOutput {
-            persisted_profiles: vec![profile("DeepSeek-V4-Flash", "routable", None)],
-            generated_roles: vec![GeneratedRole {
-                name: "preferred-third-party",
-                model: "DeepSeek-V4-Flash",
-                provider: "codex_model_router_v2",
-                effort: "medium",
-                description: "preferred profile overrides official_first provider bias",
-                nicknames: vec!["Preferred"],
-            }],
-            initialized: None,
-            diagnostics: diagnostics(&[("policy", "official_first"), ("preference", "preferred")]),
-        }),
+        &request(config("third_party_first", vec![p])),
+        Ok(output(
+            vec![generated(
+                "flash",
+                "flash",
+                "Fallback profile is never promoted.",
+                "generated",
+                vec!["Flash"],
+                "low",
+            )],
+            vec![],
+        )),
     );
 }
 
 #[test]
-fn codex_subagent_v2_fallback_profile_is_never_promoted_by_third_party_first() {
+fn codex_subagent_v2_manual_description_replaces_generated_text() {
+    let mut with_override = profile("flash", "DeepSeek-V4-Flash");
+    with_override.overrides.description = Some("Manual only.");
+    with_override.overrides.developer_instructions = Some("Keep this override.");
     assert_compile_eq(
-        v2_profile_with_policy("third_party_first", "fallback"),
-        Ok(CompileOutput {
-            persisted_profiles: vec![profile("DeepSeek-V4-Flash", "routable", None)],
-            generated_roles: vec![],
-            initialized: None,
-            diagnostics: diagnostics(&[
-                ("policy", "third_party_first"),
-                ("preference", "fallback"),
-                ("promotion", "none"),
-            ]),
-        }),
+        &request(config("balanced", vec![with_override])),
+        Ok(output(
+            vec![generated(
+                "flash",
+                "flash",
+                "Manual only.",
+                "Keep this override.",
+                vec!["Flash"],
+                "low",
+            )],
+            vec![],
+        )),
     );
 }
-
 #[test]
-fn codex_subagent_v2_manual_description_exactly_replaces_generated_policy_text() {
+fn codex_subagent_v2_restoring_description_keeps_other_overrides() {
+    let mut restored = profile("flash", "DeepSeek-V4-Flash");
+    restored.overrides.developer_instructions = Some("Keep this override.");
     assert_compile_eq(
-        v2_profile(
-            json!(["testing"]),
-            json!({ "description": "Manual only. Exclude generated policy selection text." }),
-        ),
-        Ok(CompileOutput {
-            persisted_profiles: vec![profile("DeepSeek-V4-Flash", "routable", None)],
-            generated_roles: vec![GeneratedRole {
-                name: "flash",
-                model: "DeepSeek-V4-Flash",
-                provider: "codex_model_router_v2",
-                effort: "medium",
-                description: "Manual only. Exclude generated policy selection text.",
-                nicknames: vec!["Flash"],
-            }],
-            initialized: None,
-            diagnostics: diagnostics(&[("generated_policy_text", "absent")]),
-        }),
+        &request(config("balanced", vec![restored])),
+        Ok(output(
+            vec![generated(
+                "flash",
+                "flash",
+                "Balanced selection: matching eligible profile.",
+                "Keep this override.",
+                vec!["Flash"],
+                "low",
+            )],
+            vec![],
+        )),
     );
 }
 
 #[test]
 fn codex_subagent_v2_rejects_empty_and_builtin_role_names() {
+    let mut p = profile("flash", "DeepSeek-V4-Flash");
+    p.overrides.role_name = Some("!!!");
     assert_compile_eq(
-        v2_profile(json!(["testing"]), json!({ "roleName": "!!!" })),
-        validation(
+        &request(config("balanced", vec![p])),
+        compile_validation(
             "empty_role_name",
             Some("flash"),
             "normalized role name is empty",
         ),
     );
+}
+#[test]
+fn codex_subagent_v2_rejects_builtin_role_name() {
+    let mut p = profile("flash", "DeepSeek-V4-Flash");
+    p.overrides.role_name = Some("Worker");
     assert_compile_eq(
-        v2_profile(json!(["testing"]), json!({ "roleName": "Worker" })),
-        validation("builtin_role_name", Some("flash"), "worker is reserved"),
+        &request(config("balanced", vec![p])),
+        compile_validation("builtin_role_name", Some("flash"), "worker is reserved"),
+    );
+}
+#[test]
+fn codex_subagent_v2_normalizes_foo_mixed_separators() {
+    let mut p = profile("flash", "DeepSeek-V4-Flash");
+    p.overrides.role_name = Some("Foo__-- Bar");
+    assert_compile_eq(
+        &request(config("balanced", vec![p])),
+        Ok(output(
+            vec![generated(
+                "Foo__-- Bar",
+                "foo-bar",
+                "generated",
+                "generated",
+                vec!["Flash"],
+                "low",
+            )],
+            vec![],
+        )),
+    );
+}
+#[test]
+fn codex_subagent_v2_dedupes_occupied_role_names_from_request_environment() {
+    let mut r = request(config(
+        "balanced",
+        vec![profile("flash", "DeepSeek-V4-Flash")],
+    ));
+    r.occupied_role_names = vec!["review", "ccswitch-review", "ccswitch-review-2"];
+    r.persisted_subagent_v2
+        .as_mut()
+        .expect("fixture config")
+        .profiles[0]
+        .overrides
+        .role_name = Some("review");
+    assert_compile_eq(
+        &r,
+        Ok(output(
+            vec![generated(
+                "review",
+                "ccswitch-review-3",
+                "generated",
+                "generated",
+                vec!["Flash"],
+                "low",
+            )],
+            vec![],
+        )),
     );
 }
 
-#[test]
-fn codex_subagent_v2_rejects_builtin_default_role_name() {
-    assert_compile_eq(
-        v2_profile(json!(["testing"]), json!({ "roleName": "default" })),
-        validation("builtin_role_name", Some("flash"), "default is reserved"),
-    );
+fn nickname_request(candidates: Vec<&'static str>) -> CompileRequest {
+    let mut p = profile("flash", "DeepSeek-V4-Flash");
+    p.overrides.nickname_candidates = Some(candidates);
+    request(config("balanced", vec![p]))
 }
-
 #[test]
-fn codex_subagent_v2_normalizes_mixed_role_separators_and_dedupes_occupied_names() {
+fn codex_subagent_v2_rejects_zero_nicknames() {
     assert_compile_eq(
-        v2_profile(
-            json!(["testing"]),
-            json!({ "roleName": "Foo__-- Bar", "occupiedRoleNames": ["review", "ccswitch-review", "ccswitch-review-2"], "requestedRoleName": "review" }),
-        ),
-        Ok(CompileOutput {
-            persisted_profiles: vec![profile("DeepSeek-V4-Flash", "routable", None)],
-            generated_roles: vec![GeneratedRole {
-                name: "ccswitch-review-3",
-                model: "DeepSeek-V4-Flash",
-                provider: "codex_model_router_v2",
-                effort: "medium",
-                description: "generated",
-                nicknames: vec!["Flash"],
-            }],
-            initialized: None,
-            diagnostics: diagnostics(&[
-                ("normalizedFoo", "foo-bar"),
-                ("effectiveRoleName", "ccswitch-review-3"),
-            ]),
-        }),
-    );
-}
-
-#[test]
-fn codex_subagent_v2_validates_nickname_count_empty_duplicate_and_characters() {
-    assert_compile_eq(
-        v2_profile(json!(["testing"]), json!({ "nicknameCandidates": [] })),
-        validation(
+        &nickname_request(vec![]),
+        compile_validation(
             "nickname_count",
             Some("flash"),
             "nicknameCandidates must contain 1 through 3 entries",
         ),
     );
-    assert_compile_eq(
-        v2_profile(
-            json!(["testing"]),
-            json!({ "nicknameCandidates": ["One", "Two", "Three", "Four"] }),
-        ),
-        validation(
-            "nickname_count",
-            Some("flash"),
-            "nicknameCandidates must contain 1 through 3 entries",
-        ),
-    );
-    assert_compile_eq(
-        v2_profile(json!(["testing"]), json!({ "nicknameCandidates": [""] })),
-        validation("empty_nickname", Some("flash"), "nickname must be nonempty"),
-    );
-    assert_compile_eq(
-        v2_profile(
-            json!(["testing"]),
-            json!({ "nicknameCandidates": ["Dup", "Dup"] }),
-        ),
-        validation(
-            "duplicate_nickname",
-            Some("flash"),
-            "nicknameCandidates must be unique",
-        ),
-    );
-    assert_compile_eq(
-        v2_profile(
-            json!(["testing"]),
-            json!({ "nicknameCandidates": ["Bad!"] }),
-        ),
-        validation(
-            "invalid_nickname",
-            Some("flash"),
-            "nickname uses only ASCII alphanumeric, space, dash, underscore",
-        ),
-    );
-    assert_compile_eq(
-        v2_profile(
-            json!(["testing"]),
-            json!({ "nicknameCandidates": ["One", "Two", "Three"] }),
-        ),
-        Ok(empty_output(vec![profile(
-            "DeepSeek-V4-Flash",
-            "routable",
-            None,
-        )])),
-    );
 }
-
 #[test]
-fn codex_subagent_v2_accepts_one_valid_nickname() {
+fn codex_subagent_v2_accepts_one_nickname() {
     assert_compile_eq(
-        v2_profile(json!(["testing"]), json!({ "nicknameCandidates": ["One"] })),
-        Ok(empty_output(vec![profile(
-            "DeepSeek-V4-Flash",
-            "routable",
-            None,
-        )])),
+        &nickname_request(vec!["One"]),
+        Ok(output(
+            vec![generated(
+                "flash",
+                "flash",
+                "generated",
+                "generated",
+                vec!["One"],
+                "low",
+            )],
+            vec![],
+        )),
     );
 }
-
 #[test]
-fn codex_subagent_v2_accepts_three_valid_nicknames() {
+fn codex_subagent_v2_accepts_three_nicknames() {
     assert_compile_eq(
-        v2_profile(
-            json!(["testing"]),
-            json!({ "nicknameCandidates": ["One", "Two", "Three"] }),
-        ),
-        Ok(empty_output(vec![profile(
-            "DeepSeek-V4-Flash",
-            "routable",
-            None,
-        )])),
+        &nickname_request(vec!["One", "Two", "Three"]),
+        Ok(output(
+            vec![generated(
+                "flash",
+                "flash",
+                "generated",
+                "generated",
+                vec!["One", "Two", "Three"],
+                "low",
+            )],
+            vec![],
+        )),
     );
 }
-
 #[test]
 fn codex_subagent_v2_rejects_four_nicknames() {
     assert_compile_eq(
-        v2_profile(
-            json!(["testing"]),
-            json!({ "nicknameCandidates": ["One", "Two", "Three", "Four"] }),
-        ),
-        validation(
+        &nickname_request(vec!["One", "Two", "Three", "Four"]),
+        compile_validation(
             "nickname_count",
             Some("flash"),
             "nicknameCandidates must contain 1 through 3 entries",
         ),
     );
 }
-
 #[test]
 fn codex_subagent_v2_rejects_empty_nickname() {
     assert_compile_eq(
-        v2_profile(json!(["testing"]), json!({ "nicknameCandidates": [""] })),
-        validation("empty_nickname", Some("flash"), "nickname must be nonempty"),
+        &nickname_request(vec![""]),
+        compile_validation("empty_nickname", Some("flash"), "nickname must be nonempty"),
     );
 }
-
 #[test]
 fn codex_subagent_v2_rejects_duplicate_nickname() {
     assert_compile_eq(
-        v2_profile(
-            json!(["testing"]),
-            json!({ "nicknameCandidates": ["Dup", "Dup"] }),
-        ),
-        validation(
+        &nickname_request(vec!["Dup", "Dup"]),
+        compile_validation(
             "duplicate_nickname",
             Some("flash"),
             "nicknameCandidates must be unique",
         ),
     );
 }
-
 #[test]
 fn codex_subagent_v2_rejects_invalid_nickname_characters() {
     assert_compile_eq(
-        v2_profile(
-            json!(["testing"]),
-            json!({ "nicknameCandidates": ["Bad!"] }),
-        ),
-        validation(
+        &nickname_request(vec!["Bad!"]),
+        compile_validation(
             "invalid_nickname",
             Some("flash"),
             "nickname uses only ASCII alphanumeric, space, dash, underscore",
@@ -738,73 +774,151 @@ fn codex_subagent_v2_rejects_invalid_nickname_characters() {
 }
 
 #[test]
-fn codex_subagent_v2_lifecycle_preserves_persisted_profiles_and_materializes_only_enabled_routable_v2(
-) {
+fn codex_subagent_v2_v1_preserves_profiles_but_generates_no_v2_roles() {
+    let saved = config("balanced", vec![profile("flash", "DeepSeek-V4-Flash")]);
+    let mut r = request(saved.clone());
+    r.subagent_version = "v1";
+    assert_eq!(r.persisted_subagent_v2, Some(saved));
     assert_compile_eq(
-        json!({ "codexRouting": { "subagentVersion": "v1", "subagentV2": "profiles preserved" }, "catalogAfterAliasRefresh": "technical data only" }),
-        Ok(CompileOutput {
-            persisted_profiles: vec![
-                profile("DeepSeek-V4-Flash", "disabled", Some("disabled")),
-                profile("missing-alias", "unroutable", Some("not in catalog")),
-                profile("invalid", "invalid", Some("validation error")),
-            ],
-            generated_roles: vec![],
-            initialized: None,
-            diagnostics: diagnostics(&[("mode", "v1"), ("aliasRefresh", "preserved")]),
-        }),
-    );
-}
-
-#[test]
-fn codex_subagent_v2_mode_materializes_only_enabled_routable_profiles() {
-    assert_compile_eq(
-        json!({
-            "codexRouting": { "subagentVersion": "v2", "subagentV2": "profiles preserved" },
-            "profiles": ["enabled-routable", "disabled", "unroutable", "invalid"]
-        }),
-        Ok(CompileOutput {
-            persisted_profiles: vec![
-                profile("enabled-routable", "routable", None),
-                profile("disabled", "disabled", Some("disabled")),
-                profile("unroutable", "unroutable", Some("not in catalog")),
-                profile("invalid", "invalid", Some("validation error")),
-            ],
-            generated_roles: vec![GeneratedRole {
-                name: "enabled-routable",
-                model: "enabled-routable",
-                provider: "codex_model_router_v2",
-                effort: "medium",
-                description: "generated",
-                nicknames: vec!["Enabled"],
+        &r,
+        Ok(output(
+            vec![],
+            vec![ProfileStatus {
+                key: "flash",
+                model: "DeepSeek-V4-Flash",
+                status: "inactive_v1",
+                reason: Some("V2 profiles are preserved"),
             }],
-            initialized: None,
-            diagnostics: diagnostics(&[("mode", "v2")]),
-        }),
+        )),
+    );
+}
+#[test]
+fn codex_subagent_v2_v2_generates_only_enabled_routable_profiles() {
+    let mut disabled = profile("disabled", "disabled-model");
+    disabled.enabled = false;
+    let unroutable = profile("unroutable", "missing-model");
+    let mut r = request(config(
+        "balanced",
+        vec![profile("flash", "DeepSeek-V4-Flash"), disabled, unroutable],
+    ));
+    r.catalog_models.push(CatalogModel {
+        model: "disabled-model",
+        provider_kind: "third_party",
+        routable: true,
+        context_window: 1,
+    });
+    assert_compile_eq(
+        &r,
+        Ok(output(
+            vec![generated(
+                "flash",
+                "flash",
+                "Balanced selection: matching eligible profile.",
+                "generated",
+                vec!["Flash"],
+                "low",
+            )],
+            vec![
+                ProfileStatus {
+                    key: "flash",
+                    model: "DeepSeek-V4-Flash",
+                    status: "routable",
+                    reason: None,
+                },
+                ProfileStatus {
+                    key: "disabled",
+                    model: "disabled-model",
+                    status: "disabled",
+                    reason: Some("disabled"),
+                },
+                ProfileStatus {
+                    key: "unroutable",
+                    model: "missing-model",
+                    status: "unroutable",
+                    reason: Some("not in catalog"),
+                },
+            ],
+        )),
+    );
+}
+#[test]
+fn codex_subagent_v2_alias_refresh_changes_catalog_not_persisted_profile() {
+    let saved = config("balanced", vec![profile("flash-key", "DeepSeek-V4-Flash")]);
+    let mut r = request(saved.clone());
+    r.catalog_models[0].model = "deepseek-flash-alias";
+    assert_eq!(r.persisted_subagent_v2, Some(saved));
+    assert_compile_eq(
+        &r,
+        Ok(output(
+            vec![],
+            vec![ProfileStatus {
+                key: "flash-key",
+                model: "DeepSeek-V4-Flash",
+                status: "unroutable",
+                reason: Some("catalog alias changed"),
+            }],
+        )),
     );
 }
 
 #[test]
-fn codex_subagent_v2_legacy_initialization_has_exact_flash_and_pro_presets() {
-    assert_compile_eq(json!({ "codexRouting": { "subagentVersion": "v2" } }), Ok(CompileOutput { persisted_profiles: vec![], generated_roles: vec![], initialized: Some(InitializedPresets { selection_policy: "balanced", flash: "speed|read_only|eligible|medium|long_context_reading,repository_exploration,evidence_collection,summarization,testing", pro: "quality|complex_changes|eligible|high|complex_debugging,architecture_design,complex_implementation,high_risk_review,testing" }), diagnostics: diagnostics(&[("legacy", "initialized")]) }));
+fn codex_subagent_v2_missing_config_retains_legacy_behavior_without_auto_initialization() {
+    let r = CompileRequest {
+        subagent_version: "v2",
+        persisted_subagent_v2: None,
+        catalog_models: vec![flash_catalog()],
+        occupied_role_names: vec![],
+    };
+    assert_compile_eq(&r, Ok(output(vec![], vec![])));
+}
+#[test]
+fn codex_subagent_v2_explicit_legacy_initialize_returns_exact_flash_and_pro_presets() {
+    let mut flash = profile("deepseek-v4-flash", "deepseek-v4-flash");
+    flash.strengths = vec![
+        "long_context_reading",
+        "repository_exploration",
+        "evidence_collection",
+        "summarization",
+        "testing",
+    ];
+    flash.reasoning_effort = "medium";
+    let mut pro = profile("deepseek-v4-pro", "deepseek-v4-pro");
+    pro.strengths = vec![
+        "complex_debugging",
+        "architecture_design",
+        "complex_implementation",
+        "high_risk_review",
+        "testing",
+    ];
+    pro.optimization = "quality";
+    pro.write_scope = "complex_changes";
+    pro.reasoning_effort = "high";
+    assert_eq!(
+        initialize_legacy_subagent_v2_for_red_test(),
+        Ok(config("balanced", vec![flash, pro]))
+    );
 }
 
 #[test]
-fn codex_subagent_v2_diagnostics_expose_only_allowed_metadata() {
-    assert_compile_eq(
-        v2_profile(
-            json!(["testing"]),
-            json!({ "apiKey": "secret", "taskBody": "secret", "encryptedContent": "secret", "arbitrarySecret": "secret" }),
-        ),
-        Ok(CompileOutput {
-            persisted_profiles: vec![profile("DeepSeek-V4-Flash", "routable", None)],
-            generated_roles: vec![],
-            initialized: None,
-            diagnostics: diagnostics(&[
-                ("model", "DeepSeek-V4-Flash"),
-                ("role", "flash"),
-                ("policy", "balanced"),
-                ("status", "routable"),
-            ]),
-        }),
+fn codex_subagent_v2_diagnostic_sanitizer_allows_only_metadata() {
+    let source = DiagnosticSource {
+        model: "DeepSeek-V4-Flash",
+        role: "flash",
+        policy: "balanced",
+        status: "routable",
+        reason: "enabled",
+        api_key: "secret",
+        task_body: "secret task",
+        encrypted_content: "secret ciphertext",
+    };
+    assert_eq!(
+        sanitize_subagent_v2_diagnostic_for_red_test(&source),
+        Ok(Diagnostic {
+            model: "DeepSeek-V4-Flash",
+            role: Some("flash"),
+            policy: "balanced",
+            status: "routable",
+            reason: Some("enabled")
+        })
     );
 }

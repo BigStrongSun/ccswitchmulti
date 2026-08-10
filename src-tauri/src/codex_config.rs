@@ -4374,6 +4374,17 @@ pub fn remove_codex_toml_base_url_if(toml_str: &str, predicate: impl Fn(&str) ->
 }
 
 #[cfg(test)]
+fn render_codex_managed_agent_toml_for_subagent_v2_red(
+    _settings: &Value,
+    _profile: &Value,
+    role: &str,
+    spec: &CodexCatalogModelSpec,
+) -> String {
+    // RED-only compatibility wrapper. Task 3 must replace this hardcoded path with the V2 compiler.
+    render_codex_managed_agent_toml(role, spec)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -4390,7 +4401,14 @@ mod tests {
             input_modalities: None,
             base_instructions: None,
         };
-        let rendered = render_codex_managed_agent_toml("configured-flash", &spec);
+        let settings = json!({ "codexRouting": { "subagentV2": { "schemaVersion": 1 } } });
+        let profile = json!({ "overrides": { "description": "Only investigate protocol evidence supplied by the user; never select this role for implementation." } });
+        let rendered = render_codex_managed_agent_toml_for_subagent_v2_red(
+            &settings,
+            &profile,
+            "configured-flash",
+            &spec,
+        );
 
         assert!(
             rendered.contains(
@@ -4413,7 +4431,14 @@ mod tests {
             input_modalities: None,
             base_instructions: None,
         };
-        let rendered = render_codex_managed_agent_toml("configured-flash", &spec);
+        let settings = json!({ "codexRouting": { "subagentV2": { "schemaVersion": 1 } } });
+        let profile = json!({ "overrides": { "modelReasoningEffort": "xhigh" } });
+        let rendered = render_codex_managed_agent_toml_for_subagent_v2_red(
+            &settings,
+            &profile,
+            "configured-flash",
+            &spec,
+        );
 
         assert!(
             rendered.contains(r#"model_reasoning_effort = "xhigh""#),
