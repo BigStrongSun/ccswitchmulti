@@ -25,9 +25,17 @@ type CodexSubagentV2 = {
   selectionPolicy: SubagentV2SelectionPolicy;
   profiles: Record<string, CodexSubagentV2Profile>;
 };
+
+type CodexSubagentQuestionnaire = {
+  taskStrengths: CodexSubagentTaskStrength[]; // 1-5 unique enum members
+  optimization: QuestionnaireOptimization;
+  writeScope: QuestionnaireWriteScope;
+  preference: QuestionnairePreference;
+  reasoningEffort: QuestionnaireReasoningEffort;
+};
 ```
 
-`profiles` keys are normalized visible model names. A profile contains `model`, `enabled`, `questionnaire`, and optional `overrides`. The questionnaire requires every strength below as an integer from 1 through 5:
+`profiles` keys preserve the canonical visible `model` string. Matching uses trim plus Unicode normalization and a case-insensitive stable lookup; it must not destructively ASCII-normalize the key. This keeps aliases and existing profiles stable across a catalog refresh. A profile contains `model`, `enabled`, `questionnaire`, and optional `overrides`. Its `taskStrengths: CodexSubagentTaskStrength[]` is a unique list selecting one through five of the following values:
 
 `long_context_reading`, `repository_exploration`, `evidence_collection`, `summarization`, `complex_debugging`, `architecture_design`, `bounded_implementation`, `complex_implementation`, `testing`, and `high_risk_review`.
 
@@ -45,7 +53,7 @@ Provider kind reuses the existing official ChatGPT backend/provider classificati
 
 Generated descriptions are two to four English sentences. They say what task types match and what task types are excluded. A manual description replaces the generated selection text completely; for that role only, global policy no longer affects its selection text.
 
-Automatic effort is deterministic: use `high` when complex debugging, architecture design, complex implementation, or high-risk review is a selected strength; use `low` only for pure read/summarize work optimized for speed; otherwise use `medium`. An explicit `modelReasoningEffort` replaces this result.
+Automatic effort is deterministic. Use `high` if `taskStrengths` contains any of `complex_debugging`, `architecture_design`, `complex_implementation`, or `high_risk_review`. Otherwise use `low` only when `optimization="speed"` and every selected strength is one of `long_context_reading`, `repository_exploration`, `evidence_collection`, or `summarization`; use `medium` in every other case. An explicit `modelReasoningEffort` replaces this result. Examples: `[architecture_design]` produces `high`; speed with `[repository_exploration, summarization]` produces `low`; speed with `[repository_exploration, testing]` produces `medium`.
 
 Selection policy is applied after a matching task profile is identified:
 
@@ -58,12 +66,12 @@ Selection policy is applied after a matching task profile is identified:
 
 V1 stays the first five direct model overrides. V2 profile materialization happens only while V2 is active; toggling modes preserves inactive configuration. Legacy configurations missing `subagentV2` retain legacy managed-role behavior until the user performs one-click initialization.
 
-Initialization enables two presets:
+Initialization sets global `selectionPolicy` to `balanced` and enables two presets:
 
-- DeepSeek Flash: long reading, repository exploration, evidence collection, and light validation; `speed`/`balanced`, `read_only`, `medium`.
-- DeepSeek Pro: complex debugging, architecture design, complex implementation, and high-risk review; `quality`, `complex_changes`, `high`.
+- DeepSeek Flash: `optimization="speed"`, `writeScope="read_only"`, `preference="eligible"`, `reasoningEffort="medium"`, and `taskStrengths=[long_context_reading, repository_exploration, evidence_collection, summarization, testing]`.
+- DeepSeek Pro: `optimization="quality"`, `writeScope="complex_changes"`, `preference="eligible"`, `reasoningEffort="high"`, and `taskStrengths=[complex_debugging, architecture_design, complex_implementation, high_risk_review, testing]`.
 
-Every other catalog model begins as a disabled draft until configured and enabled. Existing user-authored role files are never overwritten. A collision becomes `ccswitch-<role>`. Built-in names are forbidden. Role names normalize to lowercase ASCII letters, digits, dashes, and underscores and dedupe case-insensitively. Nicknames contain one to three nonempty, unique values using only ASCII alphanumerics, spaces, dashes, or underscores.
+Every other catalog model begins as a disabled draft until configured and enabled. Existing user-authored role files are never overwritten. Role-name overrides normalize by trimming, lowercasing, mapping each run of invalid characters to one `-`, collapsing repeated `-`/`_`, and trimming edge separators; only lowercase ASCII letters, digits, dashes, and underscores remain, and an empty result is forbidden. `default`, `worker`, and `explorer` are forbidden after normalization. Conflicts dedupe case-insensitively in this exact order: requested base, `ccswitch-<base>`, then `ccswitch-<base>-2`, `ccswitch-<base>-3`, and so on until unused. Examples: `"  Deep Seek  "` becomes `deep-seek`; `"深度模型"` and `"!!!"` are rejected as empty; `"Pro!!!Review"` becomes `pro-review`; `"A__B"` becomes `a_b`; and repeated conflicts for `review` resolve as `review`, `ccswitch-review`, then `ccswitch-review-2`. Nicknames contain one to three nonempty, unique values using only ASCII alphanumerics, spaces, dashes, or underscores.
 
 CCSM preserves `hide_spawn_agent_metadata=true`, mixed routing `tool_namespace="agents"`, the reserved schema, the current V2 body projection, and Qwen behavior. Diagnostics must exclude credentials, task text, and encrypted content.
 
@@ -75,4 +83,4 @@ The UI has four areas: selection policy, questionnaire, final fields, and TOML p
 
 The official [Subagents documentation](https://learn.chatgpt.com/docs/agent-configuration/subagents) says custom role descriptions guide selection, role model/effort can override spawn/default/parent resolution, and local Codex delegation is triggered by a direct user request or applicable `AGENTS.md`/skill instructions. The official [config reference](https://learn.chatgpt.com/docs/config-file/config-reference) confirms supported config keys. Local confirmation used `C:/Users/sunda/Documents/LLMservice/codex-official/codex-rs/core/src/agent/role.rs` and `C:/Users/sunda/Documents/LLMservice/codex-official/codex-rs/core/src/tools/spec_plan.rs`.
 
-Matrix WebSearch independently ran on 2026-08-10. Its search results did not include an equivalent official first-party result, while its direct fetch of the official page succeeded. Primary conclusions therefore use the official documentation, local official source, and local runtime evidence.
+Matrix WebSearch independently ran on 2026-08-10. Its search results did not include equivalent official first-party hits, while direct Matrix fetches of both official pages succeeded. Primary conclusions therefore use the official documentation, local official source, and local runtime evidence.
