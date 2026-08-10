@@ -1398,6 +1398,7 @@ pub fn run() {
             commands::extract_common_config_snippet,
             commands::read_live_provider_settings,
             commands::get_settings,
+            codex_config::get_codex_subagent_profile_statuses,
             codex_config::preview_codex_subagent_profile,
             commands::save_settings,
             commands::has_codex_unify_history_backup,

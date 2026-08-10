@@ -299,10 +299,10 @@ pub fn render_generated_role_toml(
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct ProfileStatus {
-    key: String,
-    model: Option<String>,
-    status: ProfileStatusCode,
-    reason: Option<DiagnosticReasonCode>,
+    pub(crate) key: String,
+    pub(crate) model: Option<String>,
+    pub(crate) status: ProfileStatusCode,
+    pub(crate) reason: Option<DiagnosticReasonCode>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

@@ -5,8 +5,11 @@ use crate::codex_subagent_profiles::{
     compile_subagent_v2_profiles, normalize_profile_key, parse_persisted_subagent_v2,
     parse_persisted_subagent_v2_tolerant, render_generated_role_toml,
     CatalogModel as SubagentCatalogModel, CodexSubagentProfileConfig,
-    CompileRequest as SubagentCompileRequest, GeneratedRole as SubagentGeneratedRole,
-    ProviderKind as SubagentProviderKind, SubagentVersion as ProfileSubagentVersion,
+    CompileOutput as SubagentCompileOutput, CompileRequest as SubagentCompileRequest,
+    DiagnosticReasonCode as SubagentDiagnosticReasonCode,
+    ModelReasoningEffort as SubagentReasoningEffort,
+    ProfileStatusCode as SubagentProfileStatusCode, ProviderKind as SubagentProviderKind,
+    SubagentVersion as ProfileSubagentVersion,
 };
 use crate::config::{
     atomic_write, delete_file, get_home_dir, read_json_file, sanitize_provider_name,
@@ -2463,6 +2466,49 @@ model_provider = "{model_provider}"
     )
 }
 
+#[derive(Debug)]
+struct LegacyManagedAgentRole<'a> {
+    requested_role_name: String,
+    effective_role_name: String,
+    path: PathBuf,
+    spec: &'a CodexCatalogModelSpec,
+}
+
+/// 复用 legacy sync 的角色筛选与用户文件所有权解析，但不创建目录或写入文件。
+fn inspect_legacy_codex_managed_agent_roles<'a>(
+    specs: &'a [CodexCatalogModelSpec],
+    agents_dir: &Path,
+) -> Vec<LegacyManagedAgentRole<'a>> {
+    let mut seen_roles = HashSet::new();
+    let mut roles = Vec::new();
+    for spec in specs {
+        let requested_role_name = codex_agent_role_name_for_model(&spec.model);
+        if requested_role_name.is_empty() {
+            continue;
+        }
+        let base_path = agents_dir.join(format!("{requested_role_name}.toml"));
+        let effective_role_name =
+            codex_managed_agent_role_name(&requested_role_name, &base_path, spec);
+        if !seen_roles.insert(effective_role_name.clone()) {
+            continue;
+        }
+        let path = agents_dir.join(format!("{effective_role_name}.toml"));
+        if path.exists()
+            && !codex_agent_file_is_cc_switch_managed(&path)
+            && !codex_agent_file_is_legacy_cc_switch_role(&path, spec)
+        {
+            continue;
+        }
+        roles.push(LegacyManagedAgentRole {
+            requested_role_name,
+            effective_role_name,
+            path,
+            spec,
+        });
+    }
+    roles
+}
+
 /// 同步 CCSwitchMulti 托管的官方 custom agent TOML 文件。
 ///
 /// 已有用户手写同名文件不会被覆盖；这种情况下使用 `ccswitch-<role>` 作为托管角色名。
@@ -2477,27 +2523,13 @@ fn sync_codex_managed_agent_files(
         return prune_stale_codex_managed_agent_files(&agents_dir, &HashSet::new());
     }
 
-    let mut seen_roles = HashSet::new();
     let mut desired_paths = HashSet::new();
-    for spec in specs {
-        let base_role = codex_agent_role_name_for_model(&spec.model);
-        if base_role.is_empty() {
-            continue;
-        }
-        let base_path = agents_dir.join(format!("{base_role}.toml"));
-        let role = codex_managed_agent_role_name(&base_role, &base_path, spec);
-        if !seen_roles.insert(role.clone()) {
-            continue;
-        }
-        let path = agents_dir.join(format!("{role}.toml"));
-        if path.exists()
-            && !codex_agent_file_is_cc_switch_managed(&path)
-            && !codex_agent_file_is_legacy_cc_switch_role(&path, spec)
-        {
-            continue;
-        }
-        desired_paths.insert(path.clone());
-        write_text_file(&path, &render_codex_managed_agent_toml(&role, spec))?;
+    for role in inspect_legacy_codex_managed_agent_roles(specs, &agents_dir) {
+        desired_paths.insert(role.path.clone());
+        write_text_file(
+            &role.path,
+            &render_codex_managed_agent_toml(&role.effective_role_name, role.spec),
+        )?;
     }
 
     prune_stale_codex_managed_agent_files(&agents_dir, &desired_paths)?;
@@ -2630,12 +2662,19 @@ fn occupied_user_codex_agent_names(agents_dir: &Path) -> Result<Vec<String>, App
     Ok(names)
 }
 
+#[derive(Debug)]
+struct ConfiguredCodexSubagentCompilation {
+    persisted: crate::codex_subagent_profiles::CodexSubagentV2,
+    output: SubagentCompileOutput,
+    route_classifications: HashMap<String, RouteClassification>,
+}
+
 fn compile_configured_codex_subagent_roles(
     settings: &Value,
     specs: &[CodexCatalogModelSpec],
     version: CodexSubagentVersion,
     provider_context: Option<&ProviderClassificationContext>,
-) -> Result<Option<Vec<SubagentGeneratedRole>>, AppError> {
+) -> Result<Option<ConfiguredCodexSubagentCompilation>, AppError> {
     let Some(raw) = settings
         .get("codexRouting")
         .and_then(|value| value.get("subagentV2"))
@@ -2645,6 +2684,7 @@ fn compile_configured_codex_subagent_roles(
     let persisted = parse_persisted_subagent_v2_tolerant(raw).map_err(|error| {
         AppError::Message(format!("Invalid codexRouting.subagentV2: {error:?}"))
     })?;
+    let mut route_classifications = HashMap::new();
     let catalog_models = specs
         .iter()
         .map(|spec| {
@@ -2658,6 +2698,9 @@ fn compile_configured_codex_subagent_roles(
                     "Codex subagent route classification warning for model {}: {warning}",
                     spec.model
                 );
+            }
+            if let Some(classification) = classification.clone() {
+                route_classifications.insert(spec.model.to_ascii_lowercase(), classification);
             }
             SubagentCatalogModel {
                 model: spec.model.clone(),
@@ -2676,7 +2719,7 @@ fn compile_configured_codex_subagent_roles(
         } else {
             ProfileSubagentVersion::V2
         },
-        persisted_subagent_v2: Some(persisted),
+        persisted_subagent_v2: Some(persisted.clone()),
         catalog_models,
         occupied_role_names: occupied_user_codex_agent_names(&get_codex_agents_dir())?,
     })
@@ -2685,7 +2728,379 @@ fn compile_configured_codex_subagent_roles(
             "Unable to compile Codex subagent profiles: {error:?}"
         ))
     })?;
-    Ok(Some(output.generated_roles))
+    Ok(Some(ConfiguredCodexSubagentCompilation {
+        persisted,
+        output,
+        route_classifications,
+    }))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexSubagentProfileStatusMode {
+    V1,
+    V2,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexSubagentProfileGenerationSource {
+    LegacyManagedRoles,
+    ConfiguredProfiles,
+    InactiveV1,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexSubagentProfileStatusCode {
+    Generated,
+    Disabled,
+    Unroutable,
+    Invalid,
+    Collision,
+    InactiveV1,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexSubagentNonGenerationReason {
+    Disabled,
+    Unroutable,
+    Invalid,
+    Collision,
+    InactiveV1,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexSubagentFieldSource {
+    Automatic,
+    Override,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexSubagentProfileFieldSources {
+    role_name: CodexSubagentFieldSource,
+    description: CodexSubagentFieldSource,
+    developer_instructions: CodexSubagentFieldSource,
+    nickname_candidates: CodexSubagentFieldSource,
+    model_reasoning_effort: CodexSubagentFieldSource,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexSubagentProfileStatus {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profile_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider_kind: Option<SubagentProviderKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enabled: Option<bool>,
+    routable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    field_sources: Option<CodexSubagentProfileFieldSources>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    requested_role_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effective_role_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role_file_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_reasoning_effort: Option<SubagentReasoningEffort>,
+    status: CodexSubagentProfileStatusCode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    non_generation_reason: Option<CodexSubagentNonGenerationReason>,
+    warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexSubagentProfileStatuses {
+    mode: CodexSubagentProfileStatusMode,
+    generation_source: CodexSubagentProfileGenerationSource,
+    profiles: Vec<CodexSubagentProfileStatus>,
+    warnings: Vec<String>,
+}
+
+fn public_subagent_status_code(
+    status: SubagentProfileStatusCode,
+) -> CodexSubagentProfileStatusCode {
+    match status {
+        SubagentProfileStatusCode::Routable => CodexSubagentProfileStatusCode::Generated,
+        SubagentProfileStatusCode::Disabled => CodexSubagentProfileStatusCode::Disabled,
+        SubagentProfileStatusCode::Unroutable => CodexSubagentProfileStatusCode::Unroutable,
+        SubagentProfileStatusCode::Invalid => CodexSubagentProfileStatusCode::Invalid,
+        SubagentProfileStatusCode::Collision => CodexSubagentProfileStatusCode::Collision,
+        SubagentProfileStatusCode::InactiveV1 => CodexSubagentProfileStatusCode::InactiveV1,
+    }
+}
+
+fn public_subagent_non_generation_reason(
+    reason: SubagentDiagnosticReasonCode,
+) -> CodexSubagentNonGenerationReason {
+    match reason {
+        SubagentDiagnosticReasonCode::Disabled => CodexSubagentNonGenerationReason::Disabled,
+        SubagentDiagnosticReasonCode::Unroutable => CodexSubagentNonGenerationReason::Unroutable,
+        SubagentDiagnosticReasonCode::Invalid => CodexSubagentNonGenerationReason::Invalid,
+        SubagentDiagnosticReasonCode::Collision => CodexSubagentNonGenerationReason::Collision,
+        SubagentDiagnosticReasonCode::InactiveV1 => CodexSubagentNonGenerationReason::InactiveV1,
+    }
+}
+
+fn field_source(present: bool) -> CodexSubagentFieldSource {
+    if present {
+        CodexSubagentFieldSource::Override
+    } else {
+        CodexSubagentFieldSource::Automatic
+    }
+}
+
+fn configured_profile_field_sources(
+    profile: &crate::codex_subagent_profiles::ParsedCodexSubagentProfile,
+) -> CodexSubagentProfileFieldSources {
+    CodexSubagentProfileFieldSources {
+        role_name: field_source(profile.overrides.role_name.is_some()),
+        description: field_source(profile.overrides.description.is_some()),
+        developer_instructions: field_source(profile.overrides.developer_instructions.is_some()),
+        nickname_candidates: field_source(profile.overrides.nickname_candidates.is_some()),
+        model_reasoning_effort: field_source(profile.overrides.model_reasoning_effort.is_some()),
+    }
+}
+
+fn absolute_codex_role_path(path: &Path) -> Result<String, AppError> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| {
+                AppError::Message(format!("Unable to resolve current directory: {error}"))
+            })?
+            .join(path)
+    };
+    Ok(absolute.to_string_lossy().into_owned())
+}
+
+fn push_unique_warning(warnings: &mut Vec<String>, warning: &str) {
+    if !warnings.iter().any(|existing| existing == warning) {
+        warnings.push(warning.to_string());
+    }
+}
+
+fn configured_codex_subagent_profile_statuses(
+    compilation: ConfiguredCodexSubagentCompilation,
+    agents_dir: &Path,
+) -> Result<(Vec<CodexSubagentProfileStatus>, Vec<String>), AppError> {
+    let expected_profile_count = compilation.persisted.profiles.len();
+    let compiled_status_count = compilation.output.profile_statuses.len();
+    let mut generated_roles = compilation.output.generated_roles.into_iter();
+    let mut profiles = Vec::with_capacity(expected_profile_count);
+    let mut aggregate_warnings = Vec::new();
+
+    for (entry, compiled_status) in compilation
+        .persisted
+        .profiles
+        .iter()
+        .zip(compilation.output.profile_statuses.iter())
+    {
+        let status = public_subagent_status_code(compiled_status.status);
+        let non_generation_reason = compiled_status
+            .reason
+            .map(public_subagent_non_generation_reason);
+        let crate::codex_subagent_profiles::ParsedProfileEntry::Valid(profile) = entry else {
+            profiles.push(CodexSubagentProfileStatus {
+                profile_key: None,
+                model: None,
+                provider_kind: None,
+                enabled: None,
+                routable: false,
+                field_sources: None,
+                requested_role_name: None,
+                effective_role_name: None,
+                role_file_path: None,
+                model_provider: None,
+                model_reasoning_effort: None,
+                status,
+                non_generation_reason,
+                warnings: Vec::new(),
+            });
+            continue;
+        };
+
+        let classification = compilation
+            .route_classifications
+            .get(&profile.model.to_ascii_lowercase());
+        let mut warnings = Vec::new();
+        if let Some(warning) = classification.and_then(|value| value.warning) {
+            push_unique_warning(&mut warnings, warning);
+            push_unique_warning(&mut aggregate_warnings, warning);
+        }
+        let mut public_status = CodexSubagentProfileStatus {
+            profile_key: Some(compiled_status.key.clone()),
+            model: compiled_status.model.clone(),
+            provider_kind: classification.map(|value| value.provider_kind),
+            enabled: Some(profile.enabled),
+            routable: false,
+            field_sources: Some(configured_profile_field_sources(profile)),
+            requested_role_name: None,
+            effective_role_name: None,
+            role_file_path: None,
+            model_provider: None,
+            model_reasoning_effort: None,
+            status,
+            non_generation_reason,
+            warnings,
+        };
+        if compiled_status.status == SubagentProfileStatusCode::Routable {
+            let role = generated_roles.next().ok_or_else(|| {
+                AppError::Message(
+                    "Codex subagent compiler omitted a generated role for a routable status"
+                        .to_string(),
+                )
+            })?;
+            public_status.routable = true;
+            public_status.requested_role_name = Some(role.requested_role_name);
+            public_status.effective_role_name = Some(role.effective_role_name.clone());
+            public_status.role_file_path = Some(absolute_codex_role_path(
+                &agents_dir.join(format!("{}.toml", role.effective_role_name)),
+            )?);
+            public_status.model_provider = Some(role.model_provider);
+            public_status.model_reasoning_effort = Some(role.effort);
+        }
+        profiles.push(public_status);
+    }
+
+    if profiles.len() != expected_profile_count
+        || profiles.len() != compiled_status_count
+        || generated_roles.next().is_some()
+    {
+        return Err(AppError::Message(
+            "Codex subagent compiler returned inconsistent profile status metadata".to_string(),
+        ));
+    }
+    Ok((profiles, aggregate_warnings))
+}
+
+fn legacy_reasoning_effort(model: &str) -> Option<SubagentReasoningEffort> {
+    match codex_agent_reasoning_effort_for_model(model) {
+        Some("low") => Some(SubagentReasoningEffort::Low),
+        Some("medium") => Some(SubagentReasoningEffort::Medium),
+        Some("high") => Some(SubagentReasoningEffort::High),
+        Some("xhigh") => Some(SubagentReasoningEffort::XHigh),
+        _ => None,
+    }
+}
+
+fn legacy_codex_subagent_profile_statuses(
+    settings: &Value,
+    specs: &[CodexCatalogModelSpec],
+    provider_context: Option<&ProviderClassificationContext>,
+) -> Result<(Vec<CodexSubagentProfileStatus>, Vec<String>), AppError> {
+    let agents_dir = get_codex_agents_dir();
+    let mut profiles = Vec::new();
+    let mut aggregate_warnings = Vec::new();
+    for role in inspect_legacy_codex_managed_agent_roles(specs, &agents_dir) {
+        let classification = codex_subagent_route_classification_with_context(
+            settings,
+            &role.spec.model,
+            provider_context,
+        );
+        let mut warnings = Vec::new();
+        if let Some(warning) = classification.as_ref().and_then(|value| value.warning) {
+            push_unique_warning(&mut warnings, warning);
+            push_unique_warning(&mut aggregate_warnings, warning);
+        }
+        profiles.push(CodexSubagentProfileStatus {
+            profile_key: None,
+            model: Some(role.spec.model.clone()),
+            provider_kind: classification.as_ref().map(|value| value.provider_kind),
+            enabled: None,
+            routable: classification.is_some(),
+            field_sources: None,
+            requested_role_name: Some(role.requested_role_name),
+            effective_role_name: Some(role.effective_role_name),
+            role_file_path: Some(absolute_codex_role_path(&role.path)?),
+            model_provider: Some(CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID.to_string()),
+            model_reasoning_effort: legacy_reasoning_effort(&role.spec.model),
+            status: CodexSubagentProfileStatusCode::Generated,
+            non_generation_reason: None,
+            warnings,
+        });
+    }
+    Ok((profiles, aggregate_warnings))
+}
+
+fn get_codex_subagent_profile_statuses_with_context(
+    settings_config: Value,
+    provider_context: Option<&ProviderClassificationContext>,
+) -> Result<CodexSubagentProfileStatuses, AppError> {
+    let version = codex_subagent_version(&settings_config);
+    let mode = if version == CodexSubagentVersion::V1 {
+        CodexSubagentProfileStatusMode::V1
+    } else {
+        CodexSubagentProfileStatusMode::V2
+    };
+    let specs = codex_catalog_model_specs(&settings_config, "");
+    match compile_configured_codex_subagent_roles(
+        &settings_config,
+        &specs,
+        version,
+        provider_context,
+    )? {
+        Some(compilation) => {
+            let (profiles, warnings) =
+                configured_codex_subagent_profile_statuses(compilation, &get_codex_agents_dir())?;
+            Ok(CodexSubagentProfileStatuses {
+                mode,
+                generation_source: if version == CodexSubagentVersion::V1 {
+                    CodexSubagentProfileGenerationSource::InactiveV1
+                } else {
+                    CodexSubagentProfileGenerationSource::ConfiguredProfiles
+                },
+                profiles,
+                warnings,
+            })
+        }
+        None if version == CodexSubagentVersion::V1 => Ok(CodexSubagentProfileStatuses {
+            mode,
+            generation_source: CodexSubagentProfileGenerationSource::InactiveV1,
+            profiles: Vec::new(),
+            warnings: Vec::new(),
+        }),
+        None => {
+            let (profiles, warnings) =
+                legacy_codex_subagent_profile_statuses(&settings_config, &specs, provider_context)?;
+            Ok(CodexSubagentProfileStatuses {
+                mode,
+                generation_source: CodexSubagentProfileGenerationSource::LegacyManagedRoles,
+                profiles,
+                warnings,
+            })
+        }
+    }
+}
+
+fn get_codex_subagent_profile_statuses_from_db(
+    db: &crate::database::Database,
+    settings_config: Value,
+) -> Result<CodexSubagentProfileStatuses, String> {
+    let provider_context = codex_provider_classification_context(db)
+        .map_err(|error| format!("Unable to load Codex provider records: {error}"))?;
+    get_codex_subagent_profile_statuses_with_context(settings_config, Some(&provider_context))
+        .map_err(|error| format!("Unable to inspect Codex subagent profiles: {error}"))
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn get_codex_subagent_profile_statuses(
+    appState: State<'_, crate::store::AppState>,
+    settingsConfig: Value,
+) -> Result<CodexSubagentProfileStatuses, String> {
+    get_codex_subagent_profile_statuses_from_db(appState.db.as_ref(), settingsConfig)
 }
 
 #[derive(Debug, Serialize)]
@@ -2825,7 +3240,7 @@ fn sync_codex_managed_agent_files_with_settings(
     settings: &Value,
     provider_context: Option<&ProviderClassificationContext>,
 ) -> Result<(), AppError> {
-    let Some(roles) =
+    let Some(compilation) =
         compile_configured_codex_subagent_roles(settings, specs, version, provider_context)?
     else {
         return sync_codex_managed_agent_files(specs, version);
@@ -2833,7 +3248,7 @@ fn sync_codex_managed_agent_files_with_settings(
     let agents_dir = get_codex_agents_dir();
     fs::create_dir_all(&agents_dir).map_err(|error| AppError::io(&agents_dir, error))?;
     let mut desired_paths = HashSet::new();
-    for role in roles {
+    for role in compilation.output.generated_roles {
         let path = agents_dir.join(format!("{}.toml", role.effective_role_name));
         if path.exists() && !codex_agent_file_is_cc_switch_managed(&path) {
             continue;
@@ -4800,22 +5215,13 @@ pub fn remove_codex_toml_base_url_if(toml_str: &str, predicate: impl Fn(&str) ->
 mod tests {
     use super::*;
 
-    /// RED-only view of the current backend boundary. Materialization currently
-    /// discards compiler statuses and exposes only generated roles (or `null`
-    /// for legacy mode), which lets the status-contract tests fail by assertion
-    /// instead of failing to compile before the public command exists.
-    fn current_backend_status_surface_for_red(
+    fn codex_subagent_profile_status_json(
         settings: &Value,
         provider_context: Option<&ProviderClassificationContext>,
     ) -> Result<Value, AppError> {
-        let specs = codex_catalog_model_specs(settings, "");
-        let roles = compile_configured_codex_subagent_roles(
-            settings,
-            &specs,
-            codex_subagent_version(settings),
-            provider_context,
-        )?;
-        serde_json::to_value(roles).map_err(|error| AppError::Config(error.to_string()))
+        let statuses =
+            get_codex_subagent_profile_statuses_with_context(settings.clone(), provider_context)?;
+        serde_json::to_value(statuses).map_err(|error| AppError::Config(error.to_string()))
     }
 
     fn codex_subagent_profile_status_settings(
@@ -4976,7 +5382,7 @@ mod tests {
         official.category = Some("official".to_string());
         let context = ProviderClassificationContext::from_providers([&official]);
 
-        let value = current_backend_status_surface_for_red(&settings, Some(&context))
+        let value = codex_subagent_profile_status_json(&settings, Some(&context))
             .expect("inspect configured status");
         let expected_path = agents_dir.join("ccswitch-analysis-role-2.toml");
         assert_eq!(
@@ -5051,11 +5457,12 @@ mod tests {
                 { "model": "collision-b", "contextWindow": 1000 }
             ]),
             json!([{
+                "enabled": false,
                 "match": { "models": ["disabled-model", "collision-a", "collision-b"] },
                 "upstream": { "auth": { "source": "provider_config" } }
             }]),
         );
-        let value = current_backend_status_surface_for_red(&settings, None)
+        let value = codex_subagent_profile_status_json(&settings, None)
             .expect("inspect non-generation statuses");
         assert_eq!(value["mode"], "v2");
         assert_eq!(value["generationSource"], "configured_profiles");
@@ -5122,7 +5529,7 @@ mod tests {
                 "upstream": { "auth": { "source": "provider_config" } }
             }]),
         );
-        let value = current_backend_status_surface_for_red(&settings, None)
+        let value = codex_subagent_profile_status_json(&settings, None)
             .expect("inspect inactive V1 profile");
         assert_eq!(value["mode"], "v1");
         assert_eq!(value["generationSource"], "inactive_v1");
@@ -5155,7 +5562,7 @@ mod tests {
                 }]
             }
         });
-        let value = current_backend_status_surface_for_red(&settings, None)
+        let value = codex_subagent_profile_status_json(&settings, None)
             .expect("inspect legacy managed roles");
         assert_eq!(value["mode"], "v2");
         assert_eq!(value["generationSource"], "legacy_managed_roles");
@@ -5192,9 +5599,9 @@ mod tests {
                 rusqlite::Connection::open_in_memory().expect("open schema-less database"),
             ),
         };
-        let error = codex_provider_classification_context(&broken_db)
-            .expect_err("provider query errors must propagate");
-        assert!(error.to_string().contains("no such table: providers"));
+        let error = get_codex_subagent_profile_statuses_from_db(&broken_db, json!({}))
+            .expect_err("provider query errors must propagate through the status command");
+        assert!(error.contains("no such table: providers"));
 
         let settings = codex_subagent_profile_status_settings(
             "v2",
@@ -5217,7 +5624,7 @@ mod tests {
             None,
         );
         let context = ProviderClassificationContext::from_providers([&third_party]);
-        let value = current_backend_status_surface_for_red(&settings, Some(&context))
+        let value = codex_subagent_profile_status_json(&settings, Some(&context))
             .expect("inspect authoritative provider record");
         assert_eq!(value["profiles"][0]["providerKind"], "third_party");
         assert_eq!(value["profiles"][0]["status"], "generated");
@@ -5577,7 +5984,7 @@ mod tests {
             }
         });
         let specs = codex_catalog_model_specs(&settings, "");
-        let roles = compile_configured_codex_subagent_roles(
+        let compilation = compile_configured_codex_subagent_roles(
             &settings,
             &specs,
             CodexSubagentVersion::V2,
@@ -5586,7 +5993,7 @@ mod tests {
         .expect("compile controlled unroutable profiles")
         .expect("configured compiler selected");
         assert!(
-            roles.is_empty(),
+            compilation.output.generated_roles.is_empty(),
             "catalog presence alone must not make a model routable"
         );
     }
