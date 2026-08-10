@@ -6068,7 +6068,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn codex_subagent_v2_real_sync_changes_outputs_and_v1_cleans_only_managed_files() {
+    fn codex_subagent_v2_real_sync_rewrites_managed_output_for_changed_settings() {
         let _guard = TestHomeGuard::new();
         let agents_dir = get_codex_agents_dir();
         std::fs::create_dir_all(&agents_dir).expect("create agents dir");
@@ -6099,16 +6099,74 @@ mod tests {
                 }
             })
         };
-        let persisted_settings = make_settings("Preserved config.");
+        let first_settings = make_settings("First filesystem config.");
+        sync_codex_managed_agent_files_with_settings(
+            &specs,
+            CodexSubagentVersion::V2,
+            &first_settings,
+            None,
+        )
+        .expect("first sync");
+        let path = agents_dir.join("flash.toml");
+        let first = std::fs::read_to_string(&path).expect("first managed role");
+        let second_settings = make_settings("Second filesystem config.");
+
+        sync_codex_managed_agent_files_with_settings(
+            &specs,
+            CodexSubagentVersion::V2,
+            &second_settings,
+            None,
+        )
+        .expect("second sync with changed settings");
+        let second = std::fs::read_to_string(&path).expect("rewritten managed role");
+        assert_ne!(first, second);
+        assert!(second.contains("Second filesystem config."));
+        assert_eq!(
+            std::fs::read_to_string(&user_path).expect("read user role after changed V2 sync"),
+            user_content
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn codex_subagent_v2_same_retained_settings_survive_v1_cleanup_and_v2_restore() {
+        let _guard = TestHomeGuard::new();
+        let agents_dir = get_codex_agents_dir();
+        std::fs::create_dir_all(&agents_dir).expect("create agents dir");
+        let user_path = agents_dir.join("user.toml");
+        let user_content = "name = \"user\"\nmodel = \"custom\"\n";
+        std::fs::write(&user_path, user_content).expect("seed user role");
+        let specs = vec![CodexCatalogModelSpec {
+            model: "DeepSeek-V4-Flash".to_string(),
+            upstream_model: None,
+            display_name: "Flash".to_string(),
+            context_window: 1000,
+            text_only: true,
+            is_default: false,
+            supports_parallel_tool_calls: None,
+            input_modalities: None,
+            base_instructions: None,
+        }];
+        let persisted_settings = json!({
+            "codexRouting": {
+                "enabled": true,
+                "subagentV2": { "schemaVersion": 1, "profiles": { "flash": {
+                    "model": "DeepSeek-V4-Flash", "enabled": true,
+                    "questionnaire": { "taskStrengths": ["testing"], "optimization": "speed", "writeScope": "read_only", "preference": "eligible", "reasoningEffort": "auto" },
+                    "overrides": { "description": "Preserved config." }
+                }}},
+                "routes": [{ "match": { "models": ["DeepSeek-V4-Flash"] }, "upstream": { "auth": { "source": "provider_config" } } }]
+            }
+        });
         sync_codex_managed_agent_files_with_settings(
             &specs,
             CodexSubagentVersion::V2,
             &persisted_settings,
             None,
         )
-        .expect("first sync");
+        .expect("initial V2 sync from retained settings");
         let path = agents_dir.join("flash.toml");
-        let first = std::fs::read_to_string(&path).expect("first managed role");
+        let first = std::fs::read_to_string(&path).expect("initial managed role");
         assert!(first.contains("Preserved config."));
         assert!(first.contains("model_reasoning_effort = \"medium\""));
 
@@ -6118,7 +6176,7 @@ mod tests {
             &persisted_settings,
             None,
         )
-        .expect("V1 cleanup");
+        .expect("V1 cleanup using retained settings");
         assert!(!path.exists());
         assert_eq!(
             std::fs::read_to_string(&user_path).expect("read user role after V1 cleanup"),
