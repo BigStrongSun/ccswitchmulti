@@ -1,6 +1,10 @@
 import { http, HttpResponse } from "msw";
 import type { AppId } from "@/lib/api/types";
 import type { McpServer, Provider, Settings } from "@/types";
+import type {
+  CodexSubagentProfilePreview,
+  CodexSubagentProfileStatuses,
+} from "@/types/codexSubagentV2";
 import {
   addProvider,
   deleteProvider,
@@ -38,6 +42,84 @@ const withJson = async <T>(request: Request): Promise<T> => {
 };
 
 const success = <T>(payload: T) => HttpResponse.json(payload as any);
+
+const codexSubagentPreviewFixtures: Record<
+  string,
+  CodexSubagentProfilePreview
+> = {
+  "deepseek-v4-flash": {
+    providerKind: "third_party",
+    requestedRoleName: "deepseek-flash",
+    effectiveRoleName: "deepseek-flash",
+    description: "Read repositories, trace architecture, and collect evidence.",
+    developerInstructions:
+      "Inspect the repository carefully and do not modify source files.",
+    nicknameCandidates: ["Flash", "Scout"],
+    model: "deepseek-v4-flash",
+    modelProvider: "codex_model_router_v2",
+    modelReasoningEffort: "medium",
+    modelContextWindow: 128000,
+    tomlPreview:
+      '[agents.deepseek-flash]\nmodel = "deepseek-v4-flash"\nmodel_provider = "codex_model_router_v2"\nmodel_reasoning_effort = "medium"',
+    warnings: [],
+  },
+  "deepseek-v4-pro": {
+    providerKind: "third_party",
+    requestedRoleName: "deepseek-pro",
+    effectiveRoleName: "deepseek-pro",
+    description:
+      "Handle complex debugging, architecture decisions, and high-risk review.",
+    developerInstructions:
+      "Investigate the complete call chain before proposing or making changes.",
+    nicknameCandidates: ["Pro", "Reviewer"],
+    model: "deepseek-v4-pro",
+    modelProvider: "codex_model_router_v2",
+    modelReasoningEffort: "high",
+    modelContextWindow: 128000,
+    tomlPreview:
+      '[agents.deepseek-pro]\nmodel = "deepseek-v4-pro"\nmodel_provider = "codex_model_router_v2"\nmodel_reasoning_effort = "high"',
+    warnings: [],
+  },
+};
+
+const codexSubagentStatusesFixture: CodexSubagentProfileStatuses = {
+  mode: "v2",
+  generationSource: "configured_profiles",
+  profiles: [
+    {
+      profileKey: "deepseek-v4-flash",
+      model: "deepseek-v4-flash",
+      providerKind: "third_party",
+      enabled: true,
+      routable: true,
+      fieldSources: {
+        roleName: "automatic",
+        description: "automatic",
+        developerInstructions: "automatic",
+        nicknameCandidates: "automatic",
+        modelReasoningEffort: "automatic",
+      },
+      requestedRoleName: "deepseek-flash",
+      effectiveRoleName: "deepseek-flash",
+      roleFilePath: "C:\\Codex\\agents\\deepseek-flash.toml",
+      modelProvider: "codex_model_router_v2",
+      modelReasoningEffort: "medium",
+      status: "generated",
+      warnings: [],
+    },
+    {
+      profileKey: "deepseek-v4-pro",
+      model: "deepseek-v4-pro",
+      providerKind: "third_party",
+      enabled: true,
+      routable: false,
+      status: "unroutable",
+      nonGenerationReason: "unroutable",
+      warnings: ["No enabled route resolves this model."],
+    },
+  ],
+  warnings: ["One profile is unroutable."],
+};
 
 export const handlers = [
   http.post(`${TAURI_ENDPOINT}/get_migration_result`, () => success(false)),
@@ -112,6 +194,21 @@ export const handlers = [
     updateProvider(app, provider);
     return success(true);
   }),
+
+  http.post(
+    `${TAURI_ENDPOINT}/preview_codex_subagent_profile`,
+    async ({ request }) => {
+      const { model } = await withJson<{ model: string }>(request);
+      return success(
+        codexSubagentPreviewFixtures[model] ??
+          codexSubagentPreviewFixtures["deepseek-v4-flash"],
+      );
+    },
+  ),
+
+  http.post(`${TAURI_ENDPOINT}/get_codex_subagent_profile_statuses`, () =>
+    success(codexSubagentStatusesFixture),
+  ),
 
   http.post(`${TAURI_ENDPOINT}/delete_provider`, async ({ request }) => {
     const { id, app } = await withJson<{ id: string; app: AppId }>(request);
