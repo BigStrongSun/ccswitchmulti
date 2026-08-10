@@ -5233,6 +5233,79 @@ wire_api = "responses"
         assert_eq!(live_auth, auth);
     }
 
+    #[test]
+    #[serial]
+    fn codex_takeover_catalog_projection_uses_db_provider_classification_context() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+        let mut official = Provider::with_id(
+            "official-target".to_string(),
+            "Official target".to_string(),
+            json!({}),
+            None,
+        );
+        official.category = Some("official".to_string());
+        db.save_provider("codex", &official)
+            .expect("save target Provider record");
+
+        let settings = json!({
+            "auth": { "OPENAI_API_KEY": PROXY_TOKEN_PLACEHOLDER },
+            "config": "model = \"neutral-model\"\n",
+            "modelCatalog": {
+                "models": [{ "model": "neutral-model", "contextWindow": 1000000 }]
+            },
+            "codexRouting": {
+                "enabled": true,
+                "subagentVersion": "v2",
+                "subagentV2": {
+                    "schemaVersion": 1,
+                    "selectionPolicy": "balanced",
+                    "profiles": {
+                        "reader": {
+                            "model": "neutral-model",
+                            "enabled": true,
+                            "questionnaire": {
+                                "taskStrengths": ["repository_exploration"],
+                                "optimization": "speed",
+                                "writeScope": "read_only",
+                                "preference": "eligible",
+                                "reasoningEffort": "auto"
+                            }
+                        }
+                    }
+                },
+                "routes": [{
+                    "match": { "models": ["neutral-model"] },
+                    "upstream": {
+                        "targetProviderId": "official-target",
+                        "auth": { "source": "provider_config" }
+                    }
+                }]
+            }
+        });
+        let mut router = Provider::with_id(
+            "router".to_string(),
+            "Router".to_string(),
+            settings.clone(),
+            None,
+        );
+        router.category = Some("custom".to_string());
+
+        service
+            .write_codex_takeover_live_for_provider(&settings, Some(&router))
+            .expect("write takeover config");
+        let role = std::fs::read_to_string(
+            crate::codex_config::get_codex_agents_dir().join("reader.toml"),
+        )
+        .expect("read generated role");
+        assert!(
+            role.contains("this eligible official profile has no provider bias"),
+            "ordinary takeover must classify the target using current DB Provider records: {role}"
+        );
+    }
+
     #[tokio::test]
     #[serial]
     async fn codex_sync_live_does_not_store_credentials_in_builtin_official_row() {

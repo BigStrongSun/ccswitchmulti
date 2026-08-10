@@ -4964,6 +4964,170 @@ mod tests {
     }
 
     #[test]
+    fn codex_subagent_v2_target_provider_aliases_share_runtime_extractor_and_warning() {
+        let aliases = [
+            "targetProviderId",
+            "target_provider_id",
+            "providerId",
+            "provider_id",
+            "upstreamProviderId",
+            "upstream_provider_id",
+            "provider",
+        ];
+        let official = Provider::with_id(
+            "official-target".to_string(),
+            "Official target".to_string(),
+            json!({}),
+            None,
+        );
+        let mut official = official;
+        official.category = Some("official".to_string());
+        let context = ProviderClassificationContext::from_providers([&official]);
+
+        for scope in ["upstream", "top-level"] {
+            for alias in aliases {
+                let mut route = json!({
+                    "match": { "models": ["neutral-model"] },
+                    "upstream": { "auth": { "source": "provider_config" } }
+                });
+                if scope == "upstream" {
+                    route["upstream"][alias] = json!("official-target");
+                } else {
+                    route[alias] = json!("official-target");
+                }
+                let settings = json!({
+                    "codexRouting": { "enabled": true, "routes": [route] }
+                });
+                let classified = codex_subagent_route_classification_with_context(
+                    &settings,
+                    "neutral-model",
+                    Some(&context),
+                )
+                .expect("alias route classification");
+                assert_eq!(
+                    classified.provider_kind,
+                    SubagentProviderKind::Official,
+                    "{scope} alias {alias} must resolve the real target record before inline auth"
+                );
+                assert_eq!(classified.warning, None, "known record must not warn");
+
+                let missing = codex_subagent_route_classification_with_context(
+                    &settings,
+                    "neutral-model",
+                    Some(&ProviderClassificationContext::default()),
+                )
+                .expect("missing-record classification");
+                assert_eq!(
+                    missing.warning,
+                    Some("target_provider_record_unavailable_inline_auth_fallback"),
+                    "{scope} alias {alias} must preserve the controlled missing-record warning"
+                );
+            }
+        }
+
+        let precedence = json!({
+            "codexRouting": { "enabled": true, "routes": [{
+                "match": { "models": ["neutral-model"] },
+                "providerId": "third-party-target",
+                "upstream": {
+                    "provider_id": "official-target",
+                    "auth": { "source": "provider_config" }
+                }
+            }] }
+        });
+        let third_party = Provider::with_id(
+            "third-party-target".to_string(),
+            "Third party".to_string(),
+            json!({}),
+            None,
+        );
+        let context = ProviderClassificationContext::from_providers([&official, &third_party]);
+        assert_eq!(
+            codex_subagent_route_classification_with_context(
+                &precedence,
+                "neutral-model",
+                Some(&context),
+            )
+            .expect("precedence classification")
+            .provider_kind,
+            SubagentProviderKind::Official,
+            "upstream target aliases must precede top-level aliases exactly like runtime routing"
+        );
+    }
+
+    #[test]
+    fn codex_verbatim_restore_has_an_explicit_no_provider_context_prepare_boundary() {
+        let config_source = include_str!("codex_config.rs");
+        let proxy_source = include_str!("services/proxy.rs");
+        let boundary = concat!(
+            "prepare_codex_live_config_text_for_verbatim_restore_",
+            "without_provider_context"
+        );
+        assert!(
+            config_source.contains(boundary),
+            "deleted-provider restore must have a named no-context boundary"
+        );
+        assert!(
+            proxy_source.contains(boundary),
+            "verbatim restore must call only the named no-context boundary"
+        );
+        assert!(
+            !config_source.contains(concat!(
+                "pub fn prepare_codex_config_text_with_model_",
+                "catalog("
+            )),
+            "ordinary public prepare must not hide an implicit None provider context"
+        );
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PreviewIpcArgsForContract {
+        settings_config: Value,
+        model: String,
+        profile: CodexSubagentProfileConfig,
+    }
+
+    fn preview_with_explicit_model_for_red(
+        args: PreviewIpcArgsForContract,
+    ) -> Result<CodexSubagentProfilePreview, String> {
+        let _ = args.model;
+        preview_codex_subagent_profile_with_context(args.settings_config, args.profile, None)
+    }
+
+    #[test]
+    fn codex_subagent_preview_ipc_uses_camel_case_three_argument_contract_and_rejects_mismatch() {
+        let args: PreviewIpcArgsForContract = serde_json::from_value(json!({
+            "settingsConfig": {
+                "modelCatalog": { "models": [{ "model": "DeepSeek-V4-Flash", "contextWindow": 1000000 }] },
+                "codexRouting": {
+                    "subagentV2": { "selectionPolicy": "balanced" },
+                    "routes": [{
+                        "match": { "models": ["DeepSeek-V4-Flash"] },
+                        "upstream": { "auth": { "source": "provider_config" } }
+                    }]
+                }
+            },
+            "model": "  deepseek-v4-pro  ",
+            "profile": {
+                "model": "DeepSeek-V4-Flash",
+                "enabled": true,
+                "questionnaire": {
+                    "taskStrengths": ["repository_exploration"],
+                    "optimization": "speed",
+                    "writeScope": "read_only",
+                    "preference": "eligible",
+                    "reasoningEffort": "auto"
+                }
+            }
+        }))
+        .expect("camelCase preview IPC request");
+        let error = preview_with_explicit_model_for_red(args)
+            .expect_err("independent model/profile.model mismatch must be rejected");
+        assert_eq!(error, "Profile model does not match the requested model");
+    }
+
+    #[test]
     fn codex_subagent_v2_compile_marks_unmatched_and_disabled_declared_models_unroutable() {
         let settings = json!({
             "modelCatalog": { "models": [
