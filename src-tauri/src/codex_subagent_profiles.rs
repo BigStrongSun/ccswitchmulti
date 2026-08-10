@@ -1210,6 +1210,93 @@ mod tests {
     }
 
     #[test]
+    fn codex_subagent_v2_public_serde_shape_is_keyed_and_nested() {
+        let raw = json!({
+            "schemaVersion": 1,
+            "selectionPolicy": "official_first",
+            "profiles": {
+                "flash": {
+                    "model": "DeepSeek-V4-Flash",
+                    "enabled": true,
+                    "questionnaire": {
+                        "taskStrengths": ["repository_exploration"],
+                        "optimization": "speed",
+                        "writeScope": "read_only",
+                        "preference": "eligible",
+                        "reasoningEffort": "auto"
+                    }
+                }
+            }
+        });
+        let parsed = parse_persisted_subagent_v2(&raw).expect("strict public payload");
+        assert_eq!(
+            serde_json::to_value(parsed).expect("serialize public payload"),
+            raw,
+            "the persisted API is a keyed map and must not expose internal keys or flattened questionnaire fields"
+        );
+    }
+
+    #[test]
+    fn codex_subagent_v2_strict_parser_rejects_required_container_and_scalar_errors() {
+        let cases = [
+            (json!({"schemaVersion": 1}), "missing_profiles"),
+            (
+                json!({"schemaVersion": 1, "profiles": []}),
+                "invalid_profiles",
+            ),
+            (
+                json!({"schemaVersion": 1, "profiles": {"flash": {"enabled": true, "questionnaire": questionnaire()}}}),
+                "missing_model",
+            ),
+            (
+                json!({"schemaVersion": 1, "profiles": {"flash": {"model": "", "enabled": true, "questionnaire": questionnaire()}}}),
+                "empty_model",
+            ),
+            (
+                json!({"schemaVersion": 1, "profiles": {"flash": {"model": 7, "enabled": true, "questionnaire": questionnaire()}}}),
+                "invalid_model",
+            ),
+            (
+                json!({"schemaVersion": 1, "profiles": {"flash": {"model": "m", "questionnaire": questionnaire()}}}),
+                "missing_enabled",
+            ),
+            (
+                json!({"schemaVersion": 1, "profiles": {"flash": {"model": "m", "enabled": "yes", "questionnaire": questionnaire()}}}),
+                "invalid_enabled",
+            ),
+        ];
+        for (raw, expected_code) in cases {
+            let actual = parse_persisted_subagent_v2(&raw);
+            assert!(
+                matches!(actual, Err(CompileError::Validation { ref code, .. }) if code == expected_code),
+                "expected {expected_code}, got {actual:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn codex_subagent_v2_tolerant_loader_requires_profiles_but_preserves_bad_entries() {
+        assert!(matches!(
+            parse_persisted_subagent_v2_tolerant(&json!({"schemaVersion": 1})),
+            Err(CompileError::Validation { ref code, .. }) if code == "missing_profiles"
+        ));
+        let raw = json!({
+            "schemaVersion": 1,
+            "profiles": {
+                "bad-model": {"model": 7, "enabled": true, "questionnaire": questionnaire()},
+                "bad-enabled": {"model": "m", "enabled": "yes", "questionnaire": questionnaire()}
+            }
+        });
+        let parsed =
+            parse_persisted_subagent_v2_tolerant(&raw).expect("preserve malformed entries");
+        assert_eq!(parsed.profiles.len(), 2);
+        assert!(parsed
+            .profiles
+            .iter()
+            .all(|entry| matches!(entry, PersistedProfileEntry::Invalid { .. })));
+    }
+
+    #[test]
     fn codex_subagent_v2_rejects_zero_task_strengths() {
         assert_parse(
             raw_profile(json!([])),
@@ -1351,6 +1438,141 @@ mod tests {
                 ],
             )),
         );
+    }
+
+    #[test]
+    fn codex_subagent_v2_collision_counts_valid_and_invalid_raw_keys() {
+        let raw = json!({"model": 7, "enabled": true, "questionnaire": questionnaire()});
+        let mut valid_profile = profile("Straße", "DeepSeek-V4-Flash");
+        valid_profile.overrides.nickname_candidates = Some(vec![s("Street")]);
+        let saved = config(
+            SelectionPolicy::Balanced,
+            vec![
+                valid(valid_profile),
+                PersistedProfileEntry::Invalid {
+                    key: s("STRASSE"),
+                    raw: raw.clone(),
+                    validation_code: s("invalid_model"),
+                },
+            ],
+        );
+        let actual =
+            compile_subagent_v2_profiles(&request(Some(saved))).expect("controlled collision");
+        assert!(actual.generated_roles.is_empty());
+        assert_eq!(
+            actual
+                .profile_statuses
+                .iter()
+                .map(|status| status.status)
+                .collect::<Vec<_>>(),
+            vec![ProfileStatusCode::Collision, ProfileStatusCode::Collision]
+        );
+        assert_eq!(actual.preserved_invalid_profiles, vec![raw]);
+    }
+
+    #[test]
+    fn codex_subagent_v2_collision_counts_two_invalid_raw_keys() {
+        let raw_a = json!({"model": 1});
+        let raw_b = json!({"enabled": "yes"});
+        let saved = config(
+            SelectionPolicy::Balanced,
+            vec![
+                PersistedProfileEntry::Invalid {
+                    key: s("Ｆｏｏ"),
+                    raw: raw_a.clone(),
+                    validation_code: s("invalid_model"),
+                },
+                PersistedProfileEntry::Invalid {
+                    key: s("foo"),
+                    raw: raw_b.clone(),
+                    validation_code: s("invalid_enabled"),
+                },
+            ],
+        );
+        let actual =
+            compile_subagent_v2_profiles(&request(Some(saved))).expect("controlled collision");
+        assert_eq!(
+            actual
+                .profile_statuses
+                .iter()
+                .map(|status| status.status)
+                .collect::<Vec<_>>(),
+            vec![ProfileStatusCode::Collision, ProfileStatusCode::Collision]
+        );
+        assert_eq!(actual.preserved_invalid_profiles, vec![raw_a, raw_b]);
+    }
+
+    #[test]
+    fn codex_subagent_v2_generated_copy_covers_every_questionnaire_dimension() {
+        let strengths = [
+            (TaskStrength::LongContextReading, "long-context reading"),
+            (
+                TaskStrength::RepositoryExploration,
+                "repository exploration",
+            ),
+            (TaskStrength::EvidenceCollection, "evidence collection"),
+            (TaskStrength::Summarization, "summarization"),
+            (TaskStrength::ComplexDebugging, "complex debugging"),
+            (TaskStrength::ArchitectureDesign, "architecture design"),
+            (
+                TaskStrength::BoundedImplementation,
+                "bounded implementation",
+            ),
+            (
+                TaskStrength::ComplexImplementation,
+                "complex implementation",
+            ),
+            (TaskStrength::Testing, "testing"),
+            (TaskStrength::HighRiskReview, "high-risk review"),
+        ];
+        for (strength, phrase) in strengths {
+            let mut p = profile("flash", "DeepSeek-V4-Flash");
+            p.strengths = vec![strength];
+            let description = generated_description(SelectionPolicy::Balanced, &p);
+            let instructions = generated_instructions(SelectionPolicy::Balanced, &p);
+            assert!(
+                description.to_ascii_lowercase().contains(phrase),
+                "description missing {phrase}: {description}"
+            );
+            assert!(
+                instructions.to_ascii_lowercase().contains(phrase),
+                "instructions missing {phrase}: {instructions}"
+            );
+            assert!(
+                (2..=4).contains(&description.matches('.').count()),
+                "description must remain 2-4 sentences: {description}"
+            );
+        }
+        let mut p = profile("flash", "DeepSeek-V4-Flash");
+        p.optimization = Optimization::Quality;
+        p.write_scope = WriteScope::BoundedChanges;
+        p.preference = Preference::Preferred;
+        let description = generated_description(SelectionPolicy::OfficialFirst, &p);
+        assert!(description.contains("quality"));
+        assert!(description.contains("bounded changes"));
+        assert!(description.contains("preferred"));
+        assert!(description.contains("official-first"));
+    }
+
+    #[test]
+    fn codex_subagent_v2_generated_copy_reflects_selected_provider_kind() {
+        let saved = config(
+            SelectionPolicy::Balanced,
+            vec![valid(profile("flash", "DeepSeek-V4-Flash"))],
+        );
+        let mut req = request(Some(saved));
+        req.catalog_models[0].provider_kind = ProviderKind::Official;
+        let role = compile_subagent_v2_profiles(&req)
+            .expect("compile official profile")
+            .generated_roles
+            .into_iter()
+            .next()
+            .expect("generated role");
+        assert!(role.description.to_ascii_lowercase().contains("official"));
+        assert!(role
+            .developer_instructions
+            .to_ascii_lowercase()
+            .contains("official"));
     }
 
     fn effort_profile(

@@ -4705,6 +4705,208 @@ mod tests {
     }
 
     #[test]
+    fn codex_subagent_v2_route_classifier_uses_runtime_exact_prefix_and_default_order() {
+        let settings = json!({
+            "codexRouting": {
+                "enabled": true,
+                "defaultRouteId": "official-default",
+                "routes": [
+                    {
+                        "id": "official-prefix",
+                        "match": { "prefixes": ["gpt-"] },
+                        "upstream": { "auth": { "source": "managed_codex_oauth" } }
+                    },
+                    {
+                        "id": "relay-exact",
+                        "match": { "models": ["gpt-5.5-relay"] },
+                        "upstream": {
+                            "targetProviderId": "relay-provider",
+                            "modelMap": { "gpt-5.5-relay": "gpt-5.5" },
+                            "auth": { "source": "provider_config" }
+                        }
+                    },
+                    {
+                        "id": "official-default",
+                        "match": { "models": ["gpt-default"] },
+                        "upstream": { "auth": { "source": "account_pool" } }
+                    }
+                ]
+            }
+        });
+        assert_eq!(
+            codex_subagent_provider_kind(&settings, "gpt-5.5-relay"),
+            SubagentProviderKind::ThirdParty,
+            "an exact relay route must beat an earlier official prefix"
+        );
+        assert_eq!(
+            codex_subagent_provider_kind(&settings, "unknown-model"),
+            SubagentProviderKind::Official,
+            "an unmatched request uses the enabled defaultRouteId in runtime order"
+        );
+    }
+
+    #[test]
+    fn codex_subagent_v2_compile_marks_unmatched_and_disabled_declared_models_unroutable() {
+        let settings = json!({
+            "modelCatalog": { "models": [
+                { "model": "unknown", "contextWindow": 1000 },
+                { "model": "disabled-model", "contextWindow": 1000 }
+            ] },
+            "codexRouting": {
+                "enabled": true,
+                "subagentVersion": "v2",
+                "subagentV2": {
+                    "schemaVersion": 1,
+                    "selectionPolicy": "balanced",
+                    "profiles": {
+                        "unknown": { "model": "unknown", "enabled": true, "questionnaire": { "taskStrengths": ["testing"], "optimization": "speed", "writeScope": "read_only", "preference": "eligible", "reasoningEffort": "auto" } },
+                        "disabled": { "model": "disabled-model", "enabled": true, "questionnaire": { "taskStrengths": ["testing"], "optimization": "speed", "writeScope": "read_only", "preference": "eligible", "reasoningEffort": "auto" } }
+                    }
+                },
+                "routes": [{
+                    "id": "disabled",
+                    "enabled": false,
+                    "match": { "models": ["disabled-model"] },
+                    "upstream": { "auth": { "source": "provider_config" } }
+                }]
+            }
+        });
+        let specs = codex_catalog_model_specs(&settings, "");
+        let roles =
+            compile_configured_codex_subagent_roles(&settings, &specs, CodexSubagentVersion::V2)
+                .expect("compile controlled unroutable profiles")
+                .expect("configured compiler selected");
+        assert!(
+            roles.is_empty(),
+            "catalog presence alone must not make a model routable"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn codex_subagent_v2_real_sync_honors_overrides_and_declared_user_name() {
+        let _guard = TestHomeGuard::new();
+        let agents_dir = get_codex_agents_dir();
+        std::fs::create_dir_all(&agents_dir).expect("create agents dir");
+        let user_path = agents_dir.join("reviewer-file.toml");
+        let user_content = "name = \"flash-role\"\nmodel = \"user-model\"\n";
+        std::fs::write(&user_path, user_content).expect("seed differently named user role");
+        let stale = agents_dir.join("stale.toml");
+        std::fs::write(
+            &stale,
+            format!("{CC_SWITCH_MANAGED_AGENT_MARKER}\nname = \"stale\"\nmodel = \"old\"\n"),
+        )
+        .expect("seed stale managed role");
+        let settings = json!({
+            "codexRouting": {
+                "enabled": true,
+                "subagentVersion": "v2",
+                "subagentV2": {
+                    "schemaVersion": 1,
+                    "selectionPolicy": "balanced",
+                    "profiles": {
+                        "flash": {
+                            "model": "DeepSeek-V4-Flash",
+                            "enabled": true,
+                            "questionnaire": { "taskStrengths": ["repository_exploration"], "optimization": "quality", "writeScope": "bounded_changes", "preference": "preferred", "reasoningEffort": "auto" },
+                            "overrides": { "roleName": "flash-role", "description": "Filesystem description.", "modelReasoningEffort": "xhigh" }
+                        }
+                    }
+                },
+                "routes": [{ "id": "flash", "match": { "models": ["DeepSeek-V4-Flash"] }, "upstream": { "auth": { "source": "provider_config" } } }]
+            }
+        });
+        let specs = vec![CodexCatalogModelSpec {
+            model: "DeepSeek-V4-Flash".to_string(),
+            upstream_model: None,
+            display_name: "Flash".to_string(),
+            context_window: 1_000_000,
+            text_only: true,
+            is_default: false,
+            supports_parallel_tool_calls: None,
+            input_modalities: None,
+            base_instructions: None,
+        }];
+
+        sync_codex_managed_agent_files_with_settings(&specs, CodexSubagentVersion::V2, &settings)
+            .expect("real configured filesystem sync");
+
+        assert_eq!(
+            std::fs::read_to_string(&user_path).expect("read user file"),
+            user_content
+        );
+        let managed = std::fs::read_to_string(agents_dir.join("ccswitch-flash-role.toml"))
+            .expect("declared user name must force managed fallback");
+        assert!(managed.contains("Filesystem description."));
+        assert!(managed.contains("model_reasoning_effort = \"xhigh\""));
+        assert!(
+            !stale.exists(),
+            "stale managed roles are pruned by the real sync path"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn codex_subagent_v2_real_sync_changes_outputs_and_v1_cleans_only_managed_files() {
+        let _guard = TestHomeGuard::new();
+        let agents_dir = get_codex_agents_dir();
+        std::fs::create_dir_all(&agents_dir).expect("create agents dir");
+        let user_path = agents_dir.join("user.toml");
+        std::fs::write(&user_path, "name = \"user\"\nmodel = \"custom\"\n")
+            .expect("seed user role");
+        let specs = vec![CodexCatalogModelSpec {
+            model: "DeepSeek-V4-Flash".to_string(),
+            upstream_model: None,
+            display_name: "Flash".to_string(),
+            context_window: 1000,
+            text_only: true,
+            is_default: false,
+            supports_parallel_tool_calls: None,
+            input_modalities: None,
+            base_instructions: None,
+        }];
+        let make_settings = |description: &str| {
+            json!({
+                "codexRouting": {
+                    "enabled": true,
+                    "subagentV2": { "schemaVersion": 1, "profiles": { "flash": {
+                        "model": "DeepSeek-V4-Flash", "enabled": true,
+                        "questionnaire": { "taskStrengths": ["testing"], "optimization": "speed", "writeScope": "read_only", "preference": "eligible", "reasoningEffort": "auto" },
+                        "overrides": { "description": description }
+                    }}},
+                    "routes": [{ "match": { "models": ["DeepSeek-V4-Flash"] }, "upstream": { "auth": { "source": "provider_config" } } }]
+                }
+            })
+        };
+        sync_codex_managed_agent_files_with_settings(
+            &specs,
+            CodexSubagentVersion::V2,
+            &make_settings("First filesystem config."),
+        )
+        .expect("first sync");
+        let path = agents_dir.join("flash.toml");
+        let first = std::fs::read_to_string(&path).expect("first managed role");
+        sync_codex_managed_agent_files_with_settings(
+            &specs,
+            CodexSubagentVersion::V2,
+            &make_settings("Second filesystem config."),
+        )
+        .expect("second sync");
+        let second = std::fs::read_to_string(&path).expect("second managed role");
+        assert_ne!(first, second);
+        assert!(second.contains("Second filesystem config."));
+
+        sync_codex_managed_agent_files_with_settings(
+            &specs,
+            CodexSubagentVersion::V1,
+            &make_settings("Preserved config."),
+        )
+        .expect("V1 cleanup");
+        assert!(!path.exists());
+        assert!(user_path.exists());
+    }
+
+    #[test]
     fn codex_subagent_v2_current_managed_agent_path_cannot_honor_manual_description() {
         let spec = CodexCatalogModelSpec {
             model: "DeepSeek-V4-Flash".to_string(),
