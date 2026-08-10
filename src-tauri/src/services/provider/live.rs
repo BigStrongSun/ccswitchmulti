@@ -804,7 +804,7 @@ pub(crate) fn write_codex_config_only_with_common_config(
                 .as_ref()
                 .and_then(|meta| meta.api_format.as_deref()),
         ),
-        Some(&provider_context),
+        &provider_context,
     )
 }
 
@@ -1274,14 +1274,26 @@ fn write_codex_live_snapshot(
     // the proxy router (apiFormat meta/settings + TOML wire_api).
     let profile = crate::proxy::providers::resolve_codex_catalog_tool_profile(provider);
 
-    crate::codex_config::write_codex_provider_live_with_catalog_and_provider_context(
-        &settings_for_live,
-        provider.category.as_deref(),
-        auth,
-        config_str,
-        profile,
-        provider_context,
-    )
+    if let Some(provider_context) = provider_context {
+        crate::codex_config::write_codex_provider_live_with_catalog_and_provider_context(
+            &settings_for_live,
+            provider.category.as_deref(),
+            auth,
+            config_str,
+            profile,
+            provider_context,
+        )
+    } else {
+        // `write_live_snapshot` is the legacy no-DB utility boundary. Normal provider switching
+        // enters through `write_live_with_common_config` and always supplies current DB context.
+        crate::codex_config::write_codex_provider_live_with_catalog_without_provider_context(
+            &settings_for_live,
+            provider.category.as_deref(),
+            auth,
+            config_str,
+            profile,
+        )
+    }
 }
 
 /// Sync all providers to live configuration (for additive mode apps)

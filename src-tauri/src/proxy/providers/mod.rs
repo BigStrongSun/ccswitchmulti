@@ -78,8 +78,8 @@ pub use codex::{
 };
 pub(crate) use codex::{
     codex_provider_remote_compaction_enabled, codex_route_supports_responses_compaction,
-    codex_route_uses_official_agent_backend, is_codex_remote_compact_endpoint,
-    is_codex_responses_endpoint, provider_uses_native_codex_auth,
+    codex_route_target_provider_id_from_route, codex_route_uses_official_agent_backend,
+    is_codex_remote_compact_endpoint, is_codex_responses_endpoint, provider_uses_native_codex_auth,
     resolve_codex_primary_route_from_settings, CODEX_ACCOUNT_POOL_ENABLED,
 };
 pub use gemini::GeminiAdapter;

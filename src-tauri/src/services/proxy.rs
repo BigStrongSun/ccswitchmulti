@@ -2991,7 +2991,7 @@ impl ProxyService {
                     auth,
                     config_str,
                     profile,
-                    Some(&provider_context),
+                    &provider_context,
                 )
                 .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
             }
@@ -3710,7 +3710,7 @@ impl ProxyService {
             auth,
             config_str,
             profile,
-            Some(&provider_context),
+            &provider_context,
         )
         .map_err(|e| format!("写入 Codex 配置失败: {e}"))
     }
@@ -3742,11 +3742,15 @@ impl ProxyService {
             let profile = crate::codex_config::CodexCatalogToolProfile::from_api_format(
                 provider.and_then(|p| p.meta.as_ref()?.api_format.as_deref()),
             );
+            let provider_context =
+                crate::codex_config::codex_provider_classification_context(self.db.as_ref())
+                    .map_err(|e| format!("读取 Codex Provider 分类上下文失败: {e}"))?;
             let prepared_config =
-                crate::codex_config::prepare_codex_live_config_text_with_optional_catalog(
+                crate::codex_config::prepare_codex_live_config_text_with_optional_catalog_and_provider_context(
                     &config_for_projection,
                     config_str,
                     profile,
+                    &provider_context,
                 )
                 .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
             crate::codex_config::write_codex_live_config_atomic(Some(&prepared_config))
@@ -3883,7 +3887,7 @@ impl ProxyService {
         // limitation (restore-of-deleted-provider-backup only).
         let prepared_cfg = config_str
             .map(|cfg| {
-                crate::codex_config::prepare_codex_live_config_text_with_optional_catalog(
+                crate::codex_config::prepare_codex_live_config_text_for_verbatim_restore_without_provider_context(
                     config,
                     cfg,
                     crate::codex_config::CodexCatalogToolProfile::ProxyChat,

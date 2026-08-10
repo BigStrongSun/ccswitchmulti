@@ -16,8 +16,8 @@ use crate::error::AppError;
 use crate::model_capabilities::{image_input_capability_from_modalities, ImageInputCapability};
 use crate::provider::Provider;
 use crate::proxy::providers::{
-    codex_route_uses_official_agent_backend, is_codex_official_provider,
-    resolve_codex_primary_route_from_settings,
+    codex_route_target_provider_id_from_route, codex_route_uses_official_agent_backend,
+    is_codex_official_provider, resolve_codex_primary_route_from_settings,
 };
 use once_cell::sync::OnceCell;
 use serde::Serialize;
@@ -108,7 +108,7 @@ pub enum CodexCatalogToolProfile {
     /// tools — the Responses→Anthropic transform keeps only `function` tools.
     /// Additionally the Codex `web_search` hosted tool is unusable on this path
     /// (the transform drops it), so it is always disabled — see
-    /// `prepare_codex_config_text_with_model_catalog`.
+    /// `prepare_codex_config_text_with_model_catalog_impl`.
     Anthropic,
 }
 
@@ -2571,11 +2571,7 @@ fn codex_subagent_route_classification_with_context(
     provider_context: Option<&ProviderClassificationContext>,
 ) -> Option<RouteClassification> {
     let route = resolve_codex_primary_route_from_settings(settings, model)?;
-    if let Some(target_provider_id) = route
-        .pointer("/upstream/targetProviderId")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-    {
+    if let Some(target_provider_id) = codex_route_target_provider_id_from_route(route) {
         if let Some(provider_kind) =
             provider_context.and_then(|context| context.get(target_provider_id))
         {
@@ -2714,19 +2710,37 @@ pub struct CodexSubagentProfilePreview {
 pub fn preview_codex_subagent_profile(
     appState: State<'_, crate::store::AppState>,
     settingsConfig: Value,
+    model: String,
     profile: CodexSubagentProfileConfig,
 ) -> Result<CodexSubagentProfilePreview, String> {
     let provider_context = codex_provider_classification_context(appState.db.as_ref())
         .map_err(|error| format!("Unable to load Codex provider records: {error}"))?;
-    preview_codex_subagent_profile_with_context(settingsConfig, profile, Some(&provider_context))
+    preview_codex_subagent_profile_with_context(
+        settingsConfig,
+        model,
+        profile,
+        Some(&provider_context),
+    )
 }
 
 fn preview_codex_subagent_profile_with_context(
     settings_config: Value,
-    profile: CodexSubagentProfileConfig,
+    model: String,
+    mut profile: CodexSubagentProfileConfig,
     provider_context: Option<&ProviderClassificationContext>,
 ) -> Result<CodexSubagentProfilePreview, String> {
-    let model = profile.model.clone();
+    let model = model.trim().to_string();
+    if model.is_empty() {
+        return Err("The requested model must be nonempty".to_string());
+    }
+    let profile_model = profile.model.trim();
+    if profile_model.is_empty() {
+        return Err("The profile model must be nonempty".to_string());
+    }
+    if profile_model != model {
+        return Err("Profile model does not match the requested model".to_string());
+    }
+    profile.model = model.clone();
     let profile_key = normalize_profile_key(&model);
     let profile = serde_json::to_value(profile)
         .map_err(|error| format!("Invalid subagentV2 profile config: {error}"))?;
@@ -2742,7 +2756,7 @@ fn preview_codex_subagent_profile_with_context(
         .profiles
         .first_mut()
         .ok_or_else(|| "The selected profile is missing".to_string())?;
-    let model = match first_profile {
+    let parsed_model = match first_profile {
         crate::codex_subagent_profiles::ParsedProfileEntry::Valid(profile) => {
             if !profile.enabled {
                 warnings.push("profile_disabled".to_string());
@@ -2757,11 +2771,11 @@ fn preview_codex_subagent_profile_with_context(
     let specs = codex_catalog_model_specs(&settings_config, "");
     let spec = specs
         .iter()
-        .find(|spec| spec.model.eq_ignore_ascii_case(&model))
+        .find(|spec| spec.model.eq_ignore_ascii_case(&parsed_model))
         .ok_or_else(|| format!("Profile model is not routable: {model}"))?;
     let classification = codex_subagent_route_classification_with_context(
         &settings_config,
-        &model,
+        &parsed_model,
         provider_context,
     )
     .ok_or_else(|| format!("Profile model is not routable: {model}"))?;
@@ -2773,7 +2787,7 @@ fn preview_codex_subagent_profile_with_context(
         subagent_version: ProfileSubagentVersion::V2,
         persisted_subagent_v2: Some(persisted),
         catalog_models: vec![SubagentCatalogModel {
-            model: model.clone(),
+            model: parsed_model,
             provider_kind,
             routable: true,
             context_window: spec.context_window,
@@ -2796,7 +2810,7 @@ fn preview_codex_subagent_profile_with_context(
         description: role.description,
         developer_instructions: role.developer_instructions,
         nickname_candidates: role.nickname_candidates,
-        model: role.model,
+        model,
         model_provider: role.model_provider,
         model_reasoning_effort: Some(role.effort),
         model_context_window: role.context_window,
@@ -3234,20 +3248,29 @@ fn restore_codex_models_cache_if_cc_switch_owned() -> Result<(), AppError> {
 
 /// Generate Codex `model_catalog_json` from provider settings and inject/remove
 /// the top-level TOML field that points Codex to the generated file.
-pub fn prepare_codex_config_text_with_model_catalog(
+pub(crate) fn prepare_codex_config_text_with_model_catalog_without_provider_context(
     settings: &Value,
     config_text: &str,
     profile: CodexCatalogToolProfile,
 ) -> Result<String, AppError> {
-    prepare_codex_config_text_with_model_catalog_and_provider_context(
-        settings,
-        config_text,
-        profile,
-        None,
-    )
+    prepare_codex_config_text_with_model_catalog_impl(settings, config_text, profile, None)
 }
 
 pub(crate) fn prepare_codex_config_text_with_model_catalog_and_provider_context(
+    settings: &Value,
+    config_text: &str,
+    profile: CodexCatalogToolProfile,
+    provider_context: &ProviderClassificationContext,
+) -> Result<String, AppError> {
+    prepare_codex_config_text_with_model_catalog_impl(
+        settings,
+        config_text,
+        profile,
+        Some(provider_context),
+    )
+}
+
+fn prepare_codex_config_text_with_model_catalog_impl(
     settings: &Value,
     config_text: &str,
     profile: CodexCatalogToolProfile,
@@ -3310,7 +3333,7 @@ pub(crate) fn prepare_codex_config_text_with_model_catalog_and_provider_context(
     }
 }
 
-/// Reverse of `prepare_codex_config_text_with_model_catalog`: read the
+/// Reverse of the model-catalog prepare pipeline: read the
 /// cc-switch–maintained catalog file referenced by `~/.codex/config.toml` and
 /// convert it back into the simplified shape the frontend table uses:
 /// `{ "models": [{ "model", "displayName"?, "contextWindow"?, hidden overrides... }, ...] }`.
@@ -3475,13 +3498,40 @@ fn build_simplified_catalog_from_texts(config_text: &str, catalog_text: &str) ->
 /// `modelCatalog` with empty `auth.json` (the API key living in the config's
 /// `experimental_bearer_token`), so the caller must decide config projection
 /// independently of whether it writes or deletes `auth.json`.
-pub fn prepare_codex_live_config_text_with_optional_catalog(
+pub(crate) fn prepare_codex_live_config_text_with_optional_catalog_and_provider_context(
+    settings: &Value,
+    config_text: &str,
+    profile: CodexCatalogToolProfile,
+    provider_context: &ProviderClassificationContext,
+) -> Result<String, AppError> {
+    if settings.get("modelCatalog").is_some() {
+        prepare_codex_config_text_with_model_catalog_and_provider_context(
+            settings,
+            config_text,
+            profile,
+            provider_context,
+        )
+    } else {
+        Ok(config_text.to_string())
+    }
+}
+
+/// Prepare a deleted-provider backup when its target Provider record can no longer be loaded.
+///
+/// This boundary is intentionally narrow: classification can only use the route's inline auth,
+/// and any target Provider id therefore emits the controlled inline-fallback warning. Ordinary
+/// activation/takeover paths must use the context-aware prepare function above.
+pub(crate) fn prepare_codex_live_config_text_for_verbatim_restore_without_provider_context(
     settings: &Value,
     config_text: &str,
     profile: CodexCatalogToolProfile,
 ) -> Result<String, AppError> {
     if settings.get("modelCatalog").is_some() {
-        prepare_codex_config_text_with_model_catalog(settings, config_text, profile)
+        prepare_codex_config_text_with_model_catalog_without_provider_context(
+            settings,
+            config_text,
+            profile,
+        )
     } else {
         Ok(config_text.to_string())
     }
@@ -3887,7 +3937,7 @@ pub(crate) fn write_codex_provider_live_with_catalog_and_provider_context(
     auth: &Value,
     config_text: Option<&str>,
     profile: CodexCatalogToolProfile,
-    provider_context: Option<&ProviderClassificationContext>,
+    provider_context: &ProviderClassificationContext,
 ) -> Result<(), AppError> {
     let prepared_config = config_text
         .map(|text| {
@@ -3896,6 +3946,23 @@ pub(crate) fn write_codex_provider_live_with_catalog_and_provider_context(
                 text,
                 profile,
                 provider_context,
+            )
+        })
+        .transpose()?;
+    write_codex_live_for_provider(category, auth, prepared_config.as_deref())
+}
+
+pub(crate) fn write_codex_provider_live_with_catalog_without_provider_context(
+    settings: &Value,
+    category: Option<&str>,
+    auth: &Value,
+    config_text: Option<&str>,
+    profile: CodexCatalogToolProfile,
+) -> Result<(), AppError> {
+    let prepared_config = config_text
+        .map(|text| {
+            prepare_codex_config_text_with_model_catalog_without_provider_context(
+                settings, text, profile,
             )
         })
         .transpose()?;
@@ -3913,7 +3980,7 @@ pub(crate) fn write_codex_provider_config_only_with_catalog_and_provider_context
     category: Option<&str>,
     config_text: Option<&str>,
     profile: CodexCatalogToolProfile,
-    provider_context: Option<&ProviderClassificationContext>,
+    provider_context: &ProviderClassificationContext,
 ) -> Result<(), AppError> {
     let prepared_config = config_text
         .map(|text| {
@@ -4748,6 +4815,7 @@ mod tests {
                     }]
                 }
             }),
+            "DeepSeek-V4-Flash".to_string(),
             serde_json::from_value(json!({
                 "model": "DeepSeek-V4-Flash",
                 "enabled": true,
@@ -5088,13 +5156,6 @@ mod tests {
         profile: CodexSubagentProfileConfig,
     }
 
-    fn preview_with_explicit_model_for_red(
-        args: PreviewIpcArgsForContract,
-    ) -> Result<CodexSubagentProfilePreview, String> {
-        let _ = args.model;
-        preview_codex_subagent_profile_with_context(args.settings_config, args.profile, None)
-    }
-
     #[test]
     fn codex_subagent_preview_ipc_uses_camel_case_three_argument_contract_and_rejects_mismatch() {
         let args: PreviewIpcArgsForContract = serde_json::from_value(json!({
@@ -5122,8 +5183,13 @@ mod tests {
             }
         }))
         .expect("camelCase preview IPC request");
-        let error = preview_with_explicit_model_for_red(args)
-            .expect_err("independent model/profile.model mismatch must be rejected");
+        let error = preview_codex_subagent_profile_with_context(
+            args.settings_config,
+            args.model,
+            args.profile,
+            None,
+        )
+        .expect_err("independent model/profile.model mismatch must be rejected");
         assert_eq!(error, "Profile model does not match the requested model");
     }
 
@@ -7871,7 +7937,7 @@ enabled = true
 base_url = "http://127.0.0.1:15721/v1"
 "#
         );
-        let prepared = prepare_codex_config_text_with_model_catalog(
+        let prepared = prepare_codex_config_text_with_model_catalog_without_provider_context(
             settings,
             &config,
             CodexCatalogToolProfile::ProxyChat,
@@ -8001,7 +8067,7 @@ multi_agent_v2 = true
 base_url = "http://127.0.0.1:15721/v1"
 "#;
 
-        prepare_codex_config_text_with_model_catalog(
+        prepare_codex_config_text_with_model_catalog_without_provider_context(
             settings,
             config,
             CodexCatalogToolProfile::ProxyChat,
@@ -8095,7 +8161,7 @@ tool_namespace = "collaboration"
 base_url = "http://127.0.0.1:15721/v1"
 "#;
 
-        let prepared = prepare_codex_config_text_with_model_catalog(
+        let prepared = prepare_codex_config_text_with_model_catalog_without_provider_context(
             &settings,
             config,
             CodexCatalogToolProfile::ProxyChat,
@@ -8308,7 +8374,7 @@ model_provider = "codex_model_router"
 base_url = "http://127.0.0.1:15721/v1"
 "#;
 
-        prepare_codex_config_text_with_model_catalog(
+        prepare_codex_config_text_with_model_catalog_without_provider_context(
             &settings,
             config,
             CodexCatalogToolProfile::ProxyChat,
@@ -8622,7 +8688,7 @@ model = "qwen3.6"
         )
         .expect("seed managed role");
 
-        let prepared = prepare_codex_config_text_with_model_catalog(
+        let prepared = prepare_codex_config_text_with_model_catalog_without_provider_context(
             &json!({}),
             r#"model_provider = "custom""#,
             CodexCatalogToolProfile::ProxyChat,
@@ -9511,7 +9577,7 @@ model_auto_compact_token_limit = 96000
 base_url = "http://127.0.0.1:15721/v1"
 "#;
 
-        let prepared = prepare_codex_config_text_with_model_catalog(
+        let prepared = prepare_codex_config_text_with_model_catalog_without_provider_context(
             &settings,
             config,
             CodexCatalogToolProfile::ProxyChat,
@@ -9609,7 +9675,7 @@ base_url = "http://127.0.0.1:15721/v1"
 base_url = "http://127.0.0.1:15721/v1"
 "#;
 
-        prepare_codex_config_text_with_model_catalog(
+        prepare_codex_config_text_with_model_catalog_without_provider_context(
             &settings,
             config,
             CodexCatalogToolProfile::ProxyChat,
@@ -9659,7 +9725,7 @@ base_url = "http://127.0.0.1:15721/v1"
 base_url = "http://127.0.0.1:15721/v1"
 "#;
 
-        prepare_codex_config_text_with_model_catalog(
+        prepare_codex_config_text_with_model_catalog_without_provider_context(
             &settings,
             config,
             CodexCatalogToolProfile::ProxyChat,
@@ -9738,7 +9804,7 @@ base_url = "http://127.0.0.1:15721/v1"
 [model_providers.custom]
 base_url = "http://127.0.0.1:15721/v1"
 "#;
-        prepare_codex_config_text_with_model_catalog(
+        prepare_codex_config_text_with_model_catalog_without_provider_context(
             &settings,
             config,
             CodexCatalogToolProfile::ProxyChat,
@@ -9748,7 +9814,7 @@ base_url = "http://127.0.0.1:15721/v1"
         let official_config = r#"model_provider = "openai"
 model_catalog_json = "cc-switch-model-catalog.json"
 "#;
-        let restored = prepare_codex_config_text_with_model_catalog(
+        let restored = prepare_codex_config_text_with_model_catalog_without_provider_context(
             &json!({}),
             official_config,
             CodexCatalogToolProfile::ProxyChat,

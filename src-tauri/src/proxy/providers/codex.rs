@@ -1236,7 +1236,7 @@ fn build_codex_routed_provider(
 }
 
 /// 从 route 中读取显式声明的目标 provider id。
-fn codex_route_target_provider_id_from_route(route: &JsonValue) -> Option<&str> {
+pub(crate) fn codex_route_target_provider_id_from_route(route: &JsonValue) -> Option<&str> {
     let upstream = route.get("upstream").unwrap_or(route);
     [
         upstream.get("targetProviderId"),
