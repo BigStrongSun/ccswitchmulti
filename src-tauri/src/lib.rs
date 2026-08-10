@@ -10,8 +10,7 @@ mod codex_desktop;
 mod codex_guardian;
 pub mod codex_history_migration;
 mod codex_state_db;
-#[cfg(test)]
-mod codex_subagent_profiles;
+pub(crate) mod codex_subagent_profiles;
 mod commands;
 mod config;
 mod database;
@@ -1399,6 +1398,7 @@ pub fn run() {
             commands::extract_common_config_snippet,
             commands::read_live_provider_settings,
             commands::get_settings,
+            codex_config::preview_codex_subagent_profile,
             commands::save_settings,
             commands::has_codex_unify_history_backup,
             commands::restore_codex_unified_history,
