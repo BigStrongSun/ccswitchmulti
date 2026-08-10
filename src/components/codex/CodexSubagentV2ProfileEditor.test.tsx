@@ -279,6 +279,33 @@ async function renderWorkspace(withV2 = true) {
   return mountWorkspaceFromPersistedPlan();
 }
 
+async function mountWorkspaceWithoutPlan() {
+  const source = provider();
+  ipcState.providers = { [source.id]: source };
+  const loaded = await providersApi.getAll("codex");
+  const queryClient = createQueryClient();
+  const result = render(
+    <QueryClientProvider client={queryClient}>
+      <CodexRouterWorkspacePage
+        providers={Object.values(loaded)}
+        activeProviderId={source.id}
+        initialProviderId={source.id}
+        initialTab="routes"
+        isProxyRunning={false}
+        isCodexTakeoverActive={false}
+        onEditProvider={vi.fn()}
+        onDeletePlan={vi.fn()}
+        onCreateProvider={vi.fn()}
+      />
+    </QueryClientProvider>,
+  );
+  await screen.findByRole("tab", { name: "路由规则" });
+  await waitFor(() =>
+    expect(invoke).toHaveBeenCalledWith("get_global_proxy_config"),
+  );
+  return { ...result, source };
+}
+
 async function mountWizardFromPersistedPlan() {
   const loaded = await providersApi.getAll("codex");
   const queryClient = createQueryClient();
@@ -314,6 +341,12 @@ function updateProviderCalls() {
   return vi
     .mocked(invoke)
     .mock.calls.filter(([command]) => command === "update_provider");
+}
+
+function addProviderCalls() {
+  return vi
+    .mocked(invoke)
+    .mock.calls.filter(([command]) => command === "add_provider");
 }
 
 function latestSavedPlan() {
@@ -377,6 +410,170 @@ async function expectSavedSubagentV2(expected: Record<string, unknown>) {
 beforeEach(() => {
   seedPersistedPlan(true);
   vi.mocked(invoke).mockClear();
+});
+
+describe("Codex Sub-Agent V2 new-plan capability defaults", () => {
+  it("persists exact schema-v1 defaults through the workspace create action", async () => {
+    const user = userEvent.setup();
+    await mountWorkspaceWithoutPlan();
+    await user.click(
+      (await screen.findAllByRole("button", { name: "创建多路路由" }))[0],
+    );
+    await waitFor(() => expect(addProviderCalls()).toHaveLength(1));
+
+    expect(addProviderCalls()[0]).toEqual([
+      "add_provider",
+      {
+        provider: expect.objectContaining({
+          settingsConfig: expect.objectContaining({
+            codexRouting: expect.objectContaining({
+              subagentV2: {
+                schemaVersion: 1,
+                selectionPolicy: "balanced",
+                profiles: {
+                  "deepseek-v4-flash": {
+                    model: "deepseek-v4-flash",
+                    enabled: true,
+                    questionnaire: {
+                      taskStrengths: [
+                        "long_context_reading",
+                        "repository_exploration",
+                        "evidence_collection",
+                        "summarization",
+                        "testing",
+                      ],
+                      optimization: "speed",
+                      writeScope: "read_only",
+                      preference: "eligible",
+                      reasoningEffort: "medium",
+                    },
+                  },
+                  "deepseek-v4-pro": {
+                    model: "deepseek-v4-pro",
+                    enabled: true,
+                    questionnaire: {
+                      taskStrengths: [
+                        "complex_debugging",
+                        "architecture_design",
+                        "complex_implementation",
+                        "high_risk_review",
+                        "testing",
+                      ],
+                      optimization: "quality",
+                      writeScope: "complex_changes",
+                      preference: "eligible",
+                      reasoningEffort: "high",
+                    },
+                  },
+                },
+              },
+            }),
+          }),
+        }),
+        app: "codex",
+        addToLive: false,
+      },
+    ]);
+  });
+
+  it("persists exact schema-v1 defaults when the wizard publishes a new V2 plan", async () => {
+    const source = provider();
+    ipcState.providers = { [source.id]: source };
+    const wizard = await mountWizardFromPersistedPlan();
+    await wizard.user.click(screen.getByRole("button", { name: "保存并发布" }));
+    await wizard.user.click(
+      screen.getAllByRole("button", { name: "保存并发布" }).at(-1)!,
+    );
+    await waitFor(() => expect(addProviderCalls()).toHaveLength(1));
+
+    expect(addProviderCalls()[0]).toEqual([
+      "add_provider",
+      {
+        provider: expect.objectContaining({
+          settingsConfig: expect.objectContaining({
+            codexRouting: expect.objectContaining({
+              subagentV2: {
+                schemaVersion: 1,
+                selectionPolicy: "balanced",
+                profiles: {
+                  "deepseek-v4-flash": {
+                    model: "deepseek-v4-flash",
+                    enabled: true,
+                    questionnaire: {
+                      taskStrengths: [
+                        "long_context_reading",
+                        "repository_exploration",
+                        "evidence_collection",
+                        "summarization",
+                        "testing",
+                      ],
+                      optimization: "speed",
+                      writeScope: "read_only",
+                      preference: "eligible",
+                      reasoningEffort: "medium",
+                    },
+                  },
+                  "deepseek-v4-pro": {
+                    model: "deepseek-v4-pro",
+                    enabled: true,
+                    questionnaire: {
+                      taskStrengths: [
+                        "complex_debugging",
+                        "architecture_design",
+                        "complex_implementation",
+                        "high_risk_review",
+                        "testing",
+                      ],
+                      optimization: "quality",
+                      writeScope: "complex_changes",
+                      preference: "eligible",
+                      reasoningEffort: "high",
+                    },
+                  },
+                },
+              },
+            }),
+          }),
+        }),
+        app: "codex",
+        addToLive: false,
+      },
+    ]);
+  });
+
+  it("keeps an existing legacy V2 plan uninitialized through an ordinary wizard save", async () => {
+    seedPersistedPlan(false);
+    ipcState.providers.router.settingsConfig.codexRouting.subagentVersion =
+      "v2";
+    const wizard = await mountWizardFromPersistedPlan();
+    expect(
+      await screen.findByRole("button", {
+        name: "初始化 V2 子 Agent 能力配置",
+      }),
+    ).toBeInTheDocument();
+    await wizard.user.click(screen.getByRole("button", { name: "保存并发布" }));
+    await wizard.user.click(
+      screen.getAllByRole("button", { name: "保存并发布" }).at(-1)!,
+    );
+    await waitFor(() => expect(updateProviderCalls()).toHaveLength(1));
+
+    expect(updateProviderCalls()[0]).toEqual([
+      "update_provider",
+      {
+        provider: expect.objectContaining({
+          id: "router",
+        }),
+        app: "codex",
+        originalId: undefined,
+      },
+    ]);
+    const savedProvider = (
+      updateProviderCalls()[0][1] as { provider: Provider }
+    ).provider;
+    expect(savedProvider.settingsConfig.codexRouting).not.toHaveProperty(
+      "subagentV2",
+    );
+  });
 });
 
 describe("Codex Sub-Agent V2 shared editor accessible areas", () => {
