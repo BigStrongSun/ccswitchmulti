@@ -100,6 +100,7 @@ const ipcState = vi.hoisted(() => ({
   statusResponse: undefined as unknown,
   statusError: null as string | null,
   updateGate: null as Promise<void> | null,
+  beforeV2Persistence: null as (() => void) | null,
 }));
 
 // The only test double is the real frontend process boundary. The dispatcher
@@ -133,10 +134,34 @@ vi.mock("@tauri-apps/api/core", () => ({
           );
         }
         if (ipcState.updateGate) await ipcState.updateGate;
+        ipcState.beforeV2Persistence?.();
         ipcState.providers[savedProvider.id] = JSON.parse(
           JSON.stringify(savedProvider),
         );
         return true;
+      }
+      case "update_codex_subagent_v2": {
+        if (!args || typeof args.providerId !== "string") {
+          throw new Error(
+            "update_codex_subagent_v2 requires a stable providerId",
+          );
+        }
+        if (!Object.prototype.hasOwnProperty.call(args, "subagentV2")) {
+          throw new Error(
+            "update_codex_subagent_v2 requires the focused subagentV2 field",
+          );
+        }
+        if (ipcState.updateGate) await ipcState.updateGate;
+        ipcState.beforeV2Persistence?.();
+        const latest = ipcState.providers[args.providerId];
+        if (!latest) throw new Error("provider not found");
+        const savedProvider = JSON.parse(JSON.stringify(latest)) as Provider;
+        savedProvider.settingsConfig.codexRouting = {
+          ...savedProvider.settingsConfig.codexRouting,
+          subagentV2: JSON.parse(JSON.stringify(args.subagentV2)),
+        };
+        ipcState.providers[savedProvider.id] = savedProvider;
+        return JSON.parse(JSON.stringify(savedProvider));
       }
       case "add_provider": {
         const savedProvider = args?.provider as Provider;
@@ -385,6 +410,12 @@ function updateProviderCalls() {
     .mock.calls.filter(([command]) => command === "update_provider");
 }
 
+function v2PersistenceCalls() {
+  return vi
+    .mocked(invoke)
+    .mock.calls.filter(([command]) => command === "update_codex_subagent_v2");
+}
+
 function addProviderCalls() {
   return vi
     .mocked(invoke)
@@ -392,6 +423,9 @@ function addProviderCalls() {
 }
 
 function latestSavedPlan() {
+  if (v2PersistenceCalls().length > 0) {
+    return ipcState.providers.router;
+  }
   const call = updateProviderCalls().at(-1);
   return (call?.[1] as { provider?: Provider } | undefined)?.provider;
 }
@@ -481,6 +515,7 @@ beforeEach(() => {
   ipcState.statusResponse = JSON.parse(JSON.stringify(statusFixture));
   ipcState.statusError = null;
   ipcState.updateGate = null;
+  ipcState.beforeV2Persistence = null;
   vi.mocked(invoke).mockClear();
 });
 
@@ -570,7 +605,7 @@ describe("Codex Sub-Agent V2 review round 1 regressions", () => {
 
     await saveV2(user);
 
-    await waitFor(() => expect(updateProviderCalls()).toHaveLength(1));
+    await waitFor(() => expect(v2PersistenceCalls()).toHaveLength(1));
     expect(
       latestSavedPlan()?.settingsConfig.codexRouting.subagentV2.profiles[
         "offline-writer"
@@ -580,24 +615,23 @@ describe("Codex Sub-Agent V2 review round 1 regressions", () => {
     );
   });
 
-  it("renders a preserved invalid raw profile and offers a controlled repair action", async () => {
+  it("renders the backend's redacted invalid DTO and repairs from a safe profile key", async () => {
     ipcState.providers.router.settingsConfig.codexRouting.subagentV2.profiles[
-      "repository-scout"
+      "deepseek-v4-flash"
     ] = {
-      model: "deepseek-v4-flash",
+      model: "RAW_MODEL_MUST_NOT_RENDER",
       enabled: true,
     };
+    delete ipcState.providers.router.settingsConfig.codexRouting.subagentV2
+      .profiles["repository-scout"];
     ipcState.statusResponse = {
       ...statusFixture,
       profiles: [
         {
-          profileKey: "repository-scout",
-          model: "deepseek-v4-flash",
-          enabled: true,
           routable: false,
           status: "invalid",
           nonGenerationReason: "invalid",
-          warnings: ["questionnaire is missing"],
+          warnings: [],
         },
         statusFixture.profiles[1],
       ],
@@ -606,9 +640,12 @@ describe("Codex Sub-Agent V2 review round 1 regressions", () => {
     const user = userEvent.setup();
     await mountWorkspaceFromPersistedPlan();
 
-    expect(await screen.findByText("repository-scout：invalid")).toBeVisible();
+    expect(
+      (await screen.findAllByText("生成状态：invalid")).length,
+    ).toBeGreaterThan(0);
+    expect(screen.queryByText(/RAW_MODEL_MUST_NOT_RENDER/)).toBeNull();
     const repair = screen.getByRole("button", {
-      name: "使用默认问卷修复 repository-scout",
+      name: "使用默认问卷修复 deepseek-v4-flash",
     });
     await user.click(repair);
     expect(
@@ -619,6 +656,81 @@ describe("Codex Sub-Agent V2 review round 1 regressions", () => {
       ).getByRole("group", { name: "任务优势" }),
     ).toBeVisible();
   });
+
+  it.each([
+    ["string override container", "RAW_OVERRIDE_STRING"],
+    ["null override container", null],
+    ["array override container", ["RAW_OVERRIDE_ARRAY"]],
+    ["non-string roleName", { roleName: { raw: "RAW_ROLE_NAME" } }],
+    ["non-string description", { description: ["RAW_DESCRIPTION"] }],
+    [
+      "non-string developerInstructions",
+      { developerInstructions: { raw: "RAW_DEVELOPER_INSTRUCTIONS" } },
+    ],
+    ["non-array nicknameCandidates", { nicknameCandidates: "RAW_NICKNAME" }],
+    [
+      "non-string nicknameCandidates entry",
+      { nicknameCandidates: [{ raw: "RAW_NICKNAME_ENTRY" }] },
+    ],
+    [
+      "non-string modelReasoningEffort",
+      { modelReasoningEffort: { raw: "RAW_REASONING_EFFORT" } },
+    ],
+  ])(
+    "isolates %s without dereferencing or reflecting invalid raw content",
+    async (_caseName, overrides) => {
+      const secretPattern = /RAW_[A-Z_]+/;
+      const profiles =
+        ipcState.providers.router.settingsConfig.codexRouting.subagentV2
+          .profiles;
+      profiles["deepseek-v4-flash"] = {
+        ...profiles["repository-scout"],
+        overrides,
+      };
+      delete profiles["repository-scout"];
+      ipcState.statusResponse = {
+        ...statusFixture,
+        profiles: [
+          {
+            routable: false,
+            status: "invalid",
+            nonGenerationReason: "invalid",
+            warnings: [],
+          },
+          statusFixture.profiles[1],
+        ],
+      };
+
+      const user = userEvent.setup();
+      await mountWorkspaceFromPersistedPlan();
+
+      expect(
+        await screen.findByRole("button", {
+          name: "使用默认问卷修复 deepseek-v4-flash",
+        }),
+      ).toBeVisible();
+      expect(document.body.textContent).not.toMatch(secretPattern);
+      expect(
+        vi
+          .mocked(invoke)
+          .mock.calls.filter(
+            ([command, args]) =>
+              command === "preview_codex_subagent_profile" &&
+              args?.model === "deepseek-v4-flash",
+          ),
+      ).toHaveLength(0);
+
+      await user.click(
+        screen.getByRole("button", {
+          name: "使用默认问卷修复 deepseek-v4-flash",
+        }),
+      );
+      expect(
+        within(flashRegion()).getByRole("group", { name: "任务优势" }),
+      ).toBeVisible();
+      expect(document.body.textContent).not.toMatch(secretPattern);
+    },
+  );
 
   it("renders preview, authoritative status, and TOML inside each profile region", async () => {
     await renderWorkspace();
@@ -661,7 +773,7 @@ describe("Codex Sub-Agent V2 review round 1 regressions", () => {
     await user.click(
       screen.getByRole("button", { name: "保存 V2 子 Agent 能力配置" }),
     );
-    await waitFor(() => expect(updateProviderCalls()).toHaveLength(1));
+    await waitFor(() => expect(v2PersistenceCalls()).toHaveLength(1));
     expect(policy).toBeDisabled();
     expect(within(flashRegion()).getByLabelText("角色描述")).toBeDisabled();
 
@@ -678,9 +790,14 @@ describe("Codex Sub-Agent V2 review round 1 regressions", () => {
   it("merges a concurrent provider catalog refresh instead of rolling it back", async () => {
     const user = userEvent.setup();
     await renderWorkspace();
-    ipcState.providers.router.settingsConfig.modelCatalog = {
-      ...ipcState.providers.router.settingsConfig.modelCatalog,
-      refreshedAlias: { "deepseek-v4-flash": "flash-live" },
+    ipcState.beforeV2Persistence = () => {
+      ipcState.providers.router.settingsConfig.modelCatalog = {
+        ...ipcState.providers.router.settingsConfig.modelCatalog,
+        refreshedAlias: { "deepseek-v4-flash": "flash-live" },
+      };
+      ipcState.providers.router.settingsConfig.codexRouting.catalogAliases = {
+        flash: "deepseek-v4-flash-live",
+      };
     };
     await chooseOption(
       user,
@@ -690,7 +807,8 @@ describe("Codex Sub-Agent V2 review round 1 regressions", () => {
 
     await saveV2(user);
 
-    await waitFor(() => expect(updateProviderCalls()).toHaveLength(1));
+    await waitFor(() => expect(v2PersistenceCalls()).toHaveLength(1));
+    expect(updateProviderCalls()).toHaveLength(0);
     expect(latestSavedPlan()?.settingsConfig.modelCatalog).toEqual(
       expect.objectContaining({
         refreshedAlias: { "deepseek-v4-flash": "flash-live" },
@@ -699,6 +817,9 @@ describe("Codex Sub-Agent V2 review round 1 regressions", () => {
     expect(
       latestSavedPlan()?.settingsConfig.codexRouting.subagentV2.selectionPolicy,
     ).toBe("official_first");
+    expect(
+      latestSavedPlan()?.settingsConfig.codexRouting.catalogAliases,
+    ).toEqual({ flash: "deepseek-v4-flash-live" });
   });
 
   it("shows preview absence explicitly without inventing a medium effort", async () => {
@@ -920,7 +1041,7 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
     ["官方优先", "official_first"],
     ["第三方优先", "third_party_first"],
   ])(
-    "saves policy option %s as %s through update_provider",
+    "saves policy option %s as %s through the focused atomic command",
     async (optionName, persistedValue) => {
       const user = userEvent.setup();
       await renderWorkspace();
@@ -1496,77 +1617,25 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
     await user.type(description, "Persisted manual description");
     await saveV2(user);
     await waitFor(() =>
-      expect(invoke).toHaveBeenCalledWith("update_provider", {
-        provider: {
-          id: "router",
-          name: "Codex MultiRouter",
-          category: "custom",
-          settingsConfig: {
-            codexRouting: {
-              enabled: true,
-              routes: [
-                {
-                  id: "flash-route",
-                  enabled: true,
-                  targetProviderId: "third-party",
-                  match: {
-                    models: ["deepseek-v4-flash"],
-                    prefixes: [],
-                  },
-                  upstream: {},
-                },
-              ],
-              subagentV2: {
-                schemaVersion: 1,
-                selectionPolicy: "third_party_first",
-                profiles: {
-                  "repository-scout": {
-                    model: "deepseek-v4-flash",
-                    enabled: true,
-                    questionnaire: {
-                      taskStrengths: ["repository_exploration"],
-                      optimization: "quality",
-                      writeScope: "read_only",
-                      preference: "eligible",
-                      reasoningEffort: "auto",
-                    },
-                    overrides: {
-                      roleName: "repository-scout",
-                      description: "Persisted manual description",
-                      developerInstructions: "Do not modify source files.",
-                      modelReasoningEffort: "medium",
-                    },
-                  },
-                  "offline-writer": {
-                    model: "deepseek-v4-pro",
-                    enabled: true,
-                    questionnaire: {
-                      taskStrengths: ["complex_implementation"],
-                      optimization: "quality",
-                      writeScope: "complex_changes",
-                      preference: "fallback",
-                      reasoningEffort: "high",
-                    },
-                  },
-                },
-              },
-            },
-            modelCatalog: {
-              models: [
-                {
-                  model: "deepseek-v4-flash",
-                  contextWindow: 128000,
-                },
-                { model: "deepseek-v4-pro", contextWindow: 128000 },
-              ],
-            },
-          },
-        },
-        app: "codex",
-        originalId: undefined,
+      expect(invoke).toHaveBeenCalledWith("update_codex_subagent_v2", {
+        providerId: "router",
+        subagentV2: expect.objectContaining({
+          selectionPolicy: "third_party_first",
+          profiles: expect.objectContaining({
+            "repository-scout": expect.objectContaining({
+              questionnaire: expect.objectContaining({
+                optimization: "quality",
+              }),
+              overrides: expect.objectContaining({
+                description: "Persisted manual description",
+              }),
+            }),
+          }),
+        }),
       }),
     );
-    expect(updateProviderCalls()).toHaveLength(1);
+    expect(v2PersistenceCalls()).toHaveLength(1);
+    expect(updateProviderCalls()).toHaveLength(0);
     firstMount.unmount();
 
     await mountWorkspaceFromPersistedPlan();
@@ -1586,7 +1655,7 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
       vi
         .mocked(invoke)
         .mock.calls.filter(([command]) => command === "get_providers"),
-    ).toHaveLength(3);
+    ).toHaveLength(2);
   });
 
   it("shares the wizard-saved V2 source with the remounted workspace", async () => {
@@ -1605,7 +1674,7 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
     await wizard.user.clear(roleName);
     await wizard.user.type(roleName, "wizard-scout");
     await saveV2(wizard.user);
-    await waitFor(() => expect(updateProviderCalls()).toHaveLength(1));
+    await waitFor(() => expect(v2PersistenceCalls()).toHaveLength(1));
     wizard.unmount();
 
     await mountWorkspaceFromPersistedPlan();
@@ -1623,7 +1692,7 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
     );
   });
 
-  it("initializes the exact legacy V2 defaults with one update_provider write", async () => {
+  it("initializes the exact legacy V2 defaults with one focused atomic write", async () => {
     const user = userEvent.setup();
     await renderWorkspace(false);
     await user.click(
@@ -1631,7 +1700,7 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
         name: "初始化 V2 子 Agent 能力配置",
       }),
     );
-    await waitFor(() => expect(updateProviderCalls()).toHaveLength(1));
+    await waitFor(() => expect(v2PersistenceCalls()).toHaveLength(1));
     await expectSavedSubagentV2({
       schemaVersion: 1,
       selectionPolicy: "balanced",

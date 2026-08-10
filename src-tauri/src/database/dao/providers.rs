@@ -794,6 +794,109 @@ mod tests {
             .expect("read normalized stored config");
         assert_eq!(stored_config, "{}");
     }
+
+    /// Deterministic TOCTOU regression: the editor's stale snapshot is read first, then a
+    /// catalog/alias refresh lands, and finally the focused V2 write must merge into that latest
+    /// row instead of replacing it with the stale snapshot.
+    #[test]
+    fn codex_subagent_v2_atomic_update_preserves_interleaved_catalog_alias_refresh() {
+        let db = Database::memory().expect("create in-memory database");
+        let original = Provider::with_id(
+            "router".to_string(),
+            "Codex MultiRouter".to_string(),
+            json!({
+                "auth": { "apiKey": "credential-must-survive" },
+                "modelCatalog": {
+                    "models": [{ "model": "deepseek-v4-flash" }],
+                    "aliases": { "flash": "deepseek-v4-flash" }
+                },
+                "codexRouting": {
+                    "routes": [{ "id": "route-before-refresh" }],
+                    "qwen": { "enabled": true },
+                    "subagentVersion": "v2",
+                    "subagentV2": {
+                        "schemaVersion": 1,
+                        "selectionPolicy": "balanced",
+                        "profiles": {}
+                    },
+                    "futureRoutingField": { "preserve": true }
+                },
+                "futureProviderField": { "preserve": true }
+            }),
+            None,
+        );
+        db.save_provider("codex", &original).expect("seed provider");
+
+        let stale_snapshot = db
+            .get_provider_by_id("router", "codex")
+            .expect("read stale editor snapshot")
+            .expect("provider exists");
+
+        let mut refreshed_settings = stale_snapshot.settings_config.clone();
+        refreshed_settings["modelCatalog"]["aliases"]["flash"] = json!("deepseek-v4-flash-live");
+        refreshed_settings["codexRouting"]["routes"] = json!([{ "id": "route-after-refresh" }]);
+        refreshed_settings["codexRouting"]["catalogAliases"] =
+            json!({ "flash": "deepseek-v4-flash-live" });
+        db.update_provider_settings_config("codex", "router", &refreshed_settings)
+            .expect("interleaved catalog/alias refresh");
+
+        let edited_v2 = json!({
+            "schemaVersion": 1,
+            "selectionPolicy": "official_first",
+            "profiles": {
+                "deepseek-v4-flash": {
+                    "model": "deepseek-v4-flash",
+                    "enabled": true,
+                    "questionnaire": {
+                        "taskStrengths": ["repository_exploration"],
+                        "optimization": "speed",
+                        "writeScope": "read_only",
+                        "preference": "eligible",
+                        "reasoningEffort": "medium"
+                    }
+                }
+            }
+        });
+        db.update_codex_subagent_v2("router", &edited_v2)
+            .expect("atomically merge V2 into latest provider row");
+
+        let saved = db
+            .get_provider_by_id("router", "codex")
+            .expect("read merged provider")
+            .expect("provider still exists");
+        assert_eq!(
+            saved.settings_config["codexRouting"]["subagentV2"],
+            edited_v2
+        );
+        assert_eq!(
+            saved.settings_config["modelCatalog"]["aliases"]["flash"],
+            json!("deepseek-v4-flash-live")
+        );
+        assert_eq!(
+            saved.settings_config["codexRouting"]["routes"],
+            json!([{ "id": "route-after-refresh" }])
+        );
+        assert_eq!(
+            saved.settings_config["codexRouting"]["catalogAliases"],
+            json!({ "flash": "deepseek-v4-flash-live" })
+        );
+        assert_eq!(
+            saved.settings_config["codexRouting"]["qwen"],
+            json!({ "enabled": true })
+        );
+        assert_eq!(
+            saved.settings_config["codexRouting"]["futureRoutingField"],
+            json!({ "preserve": true })
+        );
+        assert_eq!(
+            saved.settings_config["auth"]["apiKey"],
+            json!("credential-must-survive")
+        );
+        assert_eq!(
+            saved.settings_config["futureProviderField"],
+            json!({ "preserve": true })
+        );
+    }
 }
 
 #[cfg(test)]
