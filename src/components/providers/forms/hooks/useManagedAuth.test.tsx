@@ -2,6 +2,10 @@ import React from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type {
+  ManagedAuthDeviceCodeResponse,
+  ManagedAuthStatus,
+} from "@/lib/api";
 import { useManagedAuth } from "./useManagedAuth";
 
 const mocks = vi.hoisted(() => ({
@@ -32,21 +36,33 @@ function renderManagedAuth() {
   return renderHook(() => useManagedAuth("codex_oauth"), { wrapper });
 }
 
-const loggedOutStatus = {
+const loggedOutStatus: ManagedAuthStatus = {
   provider: "codex_oauth" as const,
   authenticated: false,
   default_account_id: null,
   accounts: [],
 };
 
-const loggedInStatus = {
+const loggedInStatus: ManagedAuthStatus = {
   provider: "codex_oauth" as const,
   authenticated: true,
   default_account_id: "account-1",
-  accounts: [{ id: "account-1", login: "user@example.com" }],
+  accounts: [
+    {
+      id: "account-1",
+      provider: "codex_oauth",
+      login: "user@example.com",
+      avatar_url: null,
+      authenticated_at: 1,
+      is_default: true,
+      github_domain: "",
+      requires_reauth: false,
+    },
+  ],
 };
 
-const deviceCode = {
+const deviceCode: ManagedAuthDeviceCodeResponse = {
+  provider: "codex_oauth",
   device_code: "device-secret",
   user_code: "ABCD-EFGH",
   verification_uri: "https://example.com/device",
@@ -76,7 +92,9 @@ describe("useManagedAuth device flow", () => {
       }),
     );
     const { result } = renderManagedAuth();
-    await waitFor(() => expect(result.current.authStatus).toEqual(loggedOutStatus));
+    await waitFor(() =>
+      expect(result.current.authStatus).toEqual(loggedOutStatus),
+    );
 
     act(() => {
       result.current.startAuth();
@@ -85,14 +103,18 @@ describe("useManagedAuth device flow", () => {
 
     await waitFor(() => expect(mocks.authStartLogin).toHaveBeenCalled());
     expect(mocks.authStartLogin).toHaveBeenCalledTimes(1);
-    resolveLogin?.(deviceCode);
+    await act(async () => resolveLogin?.(deviceCode));
+    await waitFor(() => expect(result.current.pollingState).toBe("polling"));
+    act(() => result.current.cancelAuth());
   });
 
   it("device code 到期时若账号已落盘则结束流程而不显示过期错误", async () => {
     let authoritativeStatus = loggedOutStatus;
     mocks.authGetStatus.mockImplementation(async () => authoritativeStatus);
     const { result } = renderManagedAuth();
-    await waitFor(() => expect(result.current.authStatus).toEqual(loggedOutStatus));
+    await waitFor(() =>
+      expect(result.current.authStatus).toEqual(loggedOutStatus),
+    );
 
     act(() => result.current.startAuth());
     await waitFor(() => expect(result.current.pollingState).toBe("polling"));

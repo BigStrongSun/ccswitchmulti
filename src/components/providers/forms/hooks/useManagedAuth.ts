@@ -26,6 +26,9 @@ export function useManagedAuth(
     null,
   );
   const pollingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const flowGenerationRef = useRef(0);
+  const flowActiveRef = useRef(false);
+  const expirationCheckRef = useRef(false);
 
   const {
     data: authStatus,
@@ -54,13 +57,70 @@ export function useManagedAuth(
 
   useEffect(() => {
     return () => {
+      flowGenerationRef.current += 1;
+      flowActiveRef.current = false;
       stopPolling();
     };
   }, [stopPolling]);
 
+  const finishFlow = useCallback(
+    (flowGeneration: number) => {
+      if (flowGeneration !== flowGenerationRef.current) return false;
+      stopPolling();
+      flowActiveRef.current = false;
+      expirationCheckRef.current = false;
+      flowGenerationRef.current += 1;
+      return true;
+    },
+    [stopPolling],
+  );
+
+  const finishExpiredFlow = useCallback(
+    async (flowGeneration: number) => {
+      if (
+        flowGeneration !== flowGenerationRef.current ||
+        expirationCheckRef.current
+      ) {
+        return;
+      }
+      expirationCheckRef.current = true;
+      stopPolling();
+
+      try {
+        const latest = await refetchStatus();
+        if (flowGeneration !== flowGenerationRef.current) return;
+        const status = latest.data;
+        if (status?.authenticated && status.accounts.length > 0) {
+          finishFlow(flowGeneration);
+          setPollingState("idle");
+          setDeviceCode(null);
+          setError(null);
+          await queryClient.invalidateQueries({ queryKey });
+          return;
+        }
+      } catch (statusError) {
+        console.debug(
+          "[ManagedAuth] Failed to refresh status after device expiry:",
+          statusError,
+        );
+      }
+
+      if (flowGeneration === flowGenerationRef.current) {
+        finishFlow(flowGeneration);
+        setPollingState("error");
+        setError("Device code expired. Please try again.");
+      }
+    },
+    [finishFlow, queryClient, queryKey, refetchStatus, stopPolling],
+  );
+
   const startLoginMutation = useMutation({
-    mutationFn: () => authApi.authStartLogin(authProvider, githubDomain),
-    onSuccess: async (response) => {
+    mutationFn: async (flowGeneration: number) => ({
+      flowGeneration,
+      response: await authApi.authStartLogin(authProvider, githubDomain),
+    }),
+    onSuccess: async ({ flowGeneration, response }) => {
+      if (flowGeneration !== flowGenerationRef.current) return;
       setDeviceCode(response);
       setPollingState("polling");
       setError(null);
@@ -83,10 +143,9 @@ export function useManagedAuth(
       const expiresAt = Date.now() + response.expires_in * 1000;
 
       const pollOnce = async () => {
+        if (flowGeneration !== flowGenerationRef.current) return;
         if (Date.now() > expiresAt) {
-          stopPolling();
-          setPollingState("error");
-          setError("Device code expired. Please try again.");
+          await finishExpiredFlow(flowGeneration);
           return;
         }
 
@@ -97,7 +156,7 @@ export function useManagedAuth(
             githubDomain,
           );
           if (newAccount) {
-            stopPolling();
+            if (!finishFlow(flowGeneration)) return;
             setPollingState("success");
             await refetchStatus();
             await queryClient.invalidateQueries({ queryKey });
@@ -105,6 +164,7 @@ export function useManagedAuth(
             setDeviceCode(null);
           }
         } catch (e) {
+          if (flowGeneration !== flowGenerationRef.current) return;
           const errorMessage = e instanceof Error ? e.message : String(e);
           if (
             !errorMessage.includes("pending") &&
@@ -120,12 +180,11 @@ export function useManagedAuth(
       void pollOnce();
       pollingIntervalRef.current = setInterval(pollOnce, interval);
       pollingTimeoutRef.current = setTimeout(() => {
-        stopPolling();
-        setPollingState("error");
-        setError("Device code expired. Please try again.");
+        void finishExpiredFlow(flowGeneration);
       }, response.expires_in * 1000);
     },
-    onError: (e) => {
+    onError: (e, flowGeneration) => {
+      if (!finishFlow(flowGeneration)) return;
       setPollingState("error");
       setError(e instanceof Error ? e.message : String(e));
     },
@@ -182,14 +241,22 @@ export function useManagedAuth(
   });
 
   const startAuth = useCallback(() => {
+    if (flowActiveRef.current) return;
+    flowActiveRef.current = true;
+    expirationCheckRef.current = false;
+    const flowGeneration = flowGenerationRef.current + 1;
+    flowGenerationRef.current = flowGeneration;
     setPollingState("idle");
     setDeviceCode(null);
     setError(null);
     stopPolling();
-    startLoginMutation.mutate();
+    startLoginMutation.mutate(flowGeneration);
   }, [startLoginMutation, stopPolling]);
 
   const cancelAuth = useCallback(() => {
+    flowGenerationRef.current += 1;
+    flowActiveRef.current = false;
+    expirationCheckRef.current = false;
     stopPolling();
     setPollingState("idle");
     setDeviceCode(null);
