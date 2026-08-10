@@ -756,9 +756,7 @@ fn selection_behavior(
             SelectionPolicy::ThirdPartyFirst => format!(
                 "Under third-party-first selection, matching preferred or eligible third-party profiles go first; this {provider} profile remains preferred when its task match is stronger."
             ),
-            SelectionPolicy::Balanced => format!(
-                "Under balanced selection, this preferred {provider} profile has no provider bias."
-            ),
+            SelectionPolicy::Balanced => "Under balanced selection, when declared task strengths match, prefer this specialized role over the built-in generic default, worker, and explorer roles; provider identity does not break ties otherwise.".to_string(),
         },
         Preference::Eligible => match policy {
             SelectionPolicy::OfficialFirst if provider_kind == ProviderKind::ThirdParty => {
@@ -1103,7 +1101,7 @@ pub fn initialize_legacy_subagent_v2() -> Result<CodexSubagentV2, CompileError> 
         ],
         optimization: Optimization::Speed,
         write_scope: WriteScope::ReadOnly,
-        preference: Preference::Eligible,
+        preference: Preference::Preferred,
         reasoning_effort: QuestionnaireReasoningEffort::Medium,
         overrides: CodexSubagentProfileOverrides::default(),
     };
