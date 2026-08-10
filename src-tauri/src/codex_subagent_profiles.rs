@@ -1,6 +1,7 @@
 //! Codex V2 questionnaire persistence, validation, compilation, and safe preview projection.
 
-use serde::{Deserialize, Serialize};
+use serde::ser::{SerializeMap, SerializeStruct};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 #[cfg(test)]
 use serde_json::json;
 use serde_json::Value;
@@ -89,12 +90,91 @@ pub enum ProviderKind {
     ThirdParty,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CodexSubagentV2 {
     pub schema_version: u8,
     pub selection_policy: SelectionPolicy,
     pub profiles: Vec<PersistedProfileEntry>,
+}
+
+struct PublicProfiles<'a>(&'a [PersistedProfileEntry]);
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PublicQuestionnaire<'a> {
+    task_strengths: &'a [TaskStrength],
+    optimization: Optimization,
+    write_scope: WriteScope,
+    preference: Preference,
+    reasoning_effort: QuestionnaireReasoningEffort,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PublicProfile<'a> {
+    model: &'a str,
+    enabled: bool,
+    questionnaire: PublicQuestionnaire<'a>,
+    #[serde(skip_serializing_if = "Overrides::is_empty")]
+    overrides: &'a Overrides,
+}
+
+impl Serialize for PublicProfiles<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(self.0.len()))?;
+        for entry in self.0 {
+            match entry {
+                PersistedProfileEntry::Valid(profile) => {
+                    map.serialize_entry(
+                        &profile.key,
+                        &PublicProfile {
+                            model: &profile.model,
+                            enabled: profile.enabled,
+                            questionnaire: PublicQuestionnaire {
+                                task_strengths: &profile.strengths,
+                                optimization: profile.optimization,
+                                write_scope: profile.write_scope,
+                                preference: profile.preference,
+                                reasoning_effort: profile.reasoning_effort,
+                            },
+                            overrides: &profile.overrides,
+                        },
+                    )?;
+                }
+                PersistedProfileEntry::Invalid { key, raw, .. } => {
+                    map.serialize_entry(key, raw)?;
+                }
+            }
+        }
+        map.end()
+    }
+}
+
+impl Serialize for CodexSubagentV2 {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("CodexSubagentV2", 3)?;
+        state.serialize_field("schemaVersion", &self.schema_version)?;
+        state.serialize_field("selectionPolicy", &self.selection_policy)?;
+        state.serialize_field("profiles", &PublicProfiles(&self.profiles))?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for CodexSubagentV2 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        parse_persisted_subagent_v2(&value)
+            .map_err(|error| serde::de::Error::custom(format!("{error:?}")))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,11 +205,26 @@ pub struct CodexSubagentProfile {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Overrides {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub role_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub developer_instructions: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub nickname_candidates: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub model_reasoning_effort: Option<ModelReasoningEffort>,
+}
+
+impl Overrides {
+    fn is_empty(&self) -> bool {
+        self.role_name.is_none()
+            && self.description.is_none()
+            && self.developer_instructions.is_none()
+            && self.nickname_candidates.is_none()
+            && self.model_reasoning_effort.is_none()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -210,6 +305,7 @@ pub struct ProfileStatus {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProfileStatusCode {
     Routable,
     Disabled,
@@ -220,29 +316,23 @@ pub enum ProfileStatusCode {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DiagnosticReasonCode {
     Disabled,
     Unroutable,
     Invalid,
-    RoleConflict,
     Collision,
     InactiveV1,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Diagnostic {
     model: String,
     role: Option<String>,
-    policy: SelectionPolicyForDiagnostic,
+    policy: SelectionPolicy,
     status: ProfileStatusCode,
     reason_code: Option<DiagnosticReasonCode>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-pub enum SelectionPolicyForDiagnostic {
-    Balanced,
-    OfficialFirst,
-    ThirdPartyFirst,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -255,20 +345,6 @@ pub enum CompileError {
 }
 
 pub type CompileResult = Result<CompileOutput, CompileError>;
-
-#[derive(Debug)]
-pub struct DiagnosticSource {
-    model: String,
-    role: String,
-    policy: SelectionPolicyForDiagnostic,
-    status: ProfileStatusCode,
-    reason_code: DiagnosticReasonCode,
-    reason_detail: String,
-    arbitrary_secret: String,
-    api_key: String,
-    task_body: String,
-    encrypted_content: String,
-}
 
 fn validation_error(code: &str, key: Option<&str>, detail: &str) -> CompileError {
     CompileError::Validation {
@@ -292,6 +368,13 @@ fn enum_field<T: for<'de> Deserialize<'de>>(
 }
 
 pub fn parse_persisted_subagent_v2(raw: &Value) -> Result<CodexSubagentV2, CompileError> {
+    if !raw.is_object() {
+        return Err(validation_error(
+            "invalid_subagent_v2",
+            None,
+            "subagentV2 must be an object",
+        ));
+    }
     let schema = raw
         .get("schemaVersion")
         .and_then(Value::as_u64)
@@ -315,26 +398,51 @@ pub fn parse_persisted_subagent_v2(raw: &Value) -> Result<CodexSubagentV2, Compi
             )
         })?,
     };
-    let profiles = raw
+    let profiles_value = raw
         .get("profiles")
-        .and_then(Value::as_object)
+        .ok_or_else(|| validation_error("missing_profiles", None, "profiles is required"))?;
+    let profiles = profiles_value
+        .as_object()
         .cloned()
-        .unwrap_or_default();
+        .ok_or_else(|| validation_error("invalid_profiles", None, "profiles must be an object"))?;
     let mut parsed = Vec::with_capacity(profiles.len());
     for (key, raw_profile) in profiles {
         let p = raw_profile.as_object().ok_or_else(|| {
             validation_error("invalid_profile", Some(&key), "profile must be an object")
         })?;
-        let q = p
-            .get("questionnaire")
-            .and_then(Value::as_object)
-            .ok_or_else(|| {
-                validation_error(
-                    "invalid_questionnaire",
-                    Some(&key),
-                    "questionnaire must be an object",
-                )
-            })?;
+        let model_value = p
+            .get("model")
+            .ok_or_else(|| validation_error("missing_model", Some(&key), "model is required"))?;
+        let model = model_value.as_str().ok_or_else(|| {
+            validation_error("invalid_model", Some(&key), "model must be a string")
+        })?;
+        if model.trim().is_empty() {
+            return Err(validation_error(
+                "empty_model",
+                Some(&key),
+                "model must be nonempty",
+            ));
+        }
+        let enabled_value = p.get("enabled").ok_or_else(|| {
+            validation_error("missing_enabled", Some(&key), "enabled is required")
+        })?;
+        let enabled = enabled_value.as_bool().ok_or_else(|| {
+            validation_error("invalid_enabled", Some(&key), "enabled must be a boolean")
+        })?;
+        let questionnaire_value = p.get("questionnaire").ok_or_else(|| {
+            validation_error(
+                "missing_questionnaire",
+                Some(&key),
+                "questionnaire is required",
+            )
+        })?;
+        let q = questionnaire_value.as_object().ok_or_else(|| {
+            validation_error(
+                "invalid_questionnaire",
+                Some(&key),
+                "questionnaire must be an object",
+            )
+        })?;
         let strengths_value = q.get("taskStrengths").ok_or_else(|| {
             validation_error(
                 "missing_task_strengths",
@@ -419,12 +527,8 @@ pub fn parse_persisted_subagent_v2(raw: &Value) -> Result<CodexSubagentV2, Compi
         };
         parsed.push(PersistedProfileEntry::Valid(CodexSubagentProfile {
             key,
-            model: p
-                .get("model")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            enabled: p.get("enabled").and_then(Value::as_bool).unwrap_or(false),
+            model: model.to_string(),
+            enabled,
             strengths,
             optimization,
             write_scope,
@@ -452,14 +556,18 @@ pub fn normalize_profile_key(value: &str) -> String {
 /// Runtime loader that preserves malformed profile values while retaining strict top-level
 /// schema validation. This lets the UI surface and repair one bad entry without losing peers.
 pub fn parse_persisted_subagent_v2_tolerant(raw: &Value) -> Result<CodexSubagentV2, CompileError> {
-    let mut top_level = raw.clone();
-    top_level["profiles"] = serde_json::json!({});
-    let mut parsed = parse_persisted_subagent_v2(&top_level)?;
     let profiles = raw
         .get("profiles")
-        .and_then(Value::as_object)
+        .ok_or_else(|| validation_error("missing_profiles", None, "profiles is required"))?
+        .as_object()
         .cloned()
-        .unwrap_or_default();
+        .ok_or_else(|| validation_error("invalid_profiles", None, "profiles must be an object"))?;
+    let mut top_level = raw.as_object().cloned().ok_or_else(|| {
+        validation_error("invalid_subagent_v2", None, "subagentV2 must be an object")
+    })?;
+    top_level.insert("profiles".to_string(), serde_json::json!({}));
+    let top_level = Value::Object(top_level);
+    let mut parsed = parse_persisted_subagent_v2(&top_level)?;
     for (key, profile_raw) in profiles {
         let one = serde_json::json!({
             "schemaVersion": 1,
@@ -546,42 +654,114 @@ fn auto_effort(p: &CodexSubagentProfile) -> ModelReasoningEffort {
     }
 }
 
-fn generated_description(policy: SelectionPolicy, p: &CodexSubagentProfile) -> String {
+fn strength_label(strength: TaskStrength) -> &'static str {
+    match strength {
+        TaskStrength::LongContextReading => "long-context reading",
+        TaskStrength::RepositoryExploration => "repository exploration",
+        TaskStrength::EvidenceCollection => "evidence collection",
+        TaskStrength::Summarization => "summarization",
+        TaskStrength::ComplexDebugging => "complex debugging",
+        TaskStrength::ArchitectureDesign => "architecture design",
+        TaskStrength::BoundedImplementation => "bounded implementation",
+        TaskStrength::ComplexImplementation => "complex implementation",
+        TaskStrength::Testing => "testing",
+        TaskStrength::HighRiskReview => "high-risk review",
+    }
+}
+
+fn joined_strengths(strengths: &[TaskStrength]) -> String {
+    let labels = strengths
+        .iter()
+        .copied()
+        .map(strength_label)
+        .collect::<Vec<_>>();
+    match labels.as_slice() {
+        [] => "unspecified delegated work".to_string(),
+        [only] => (*only).to_string(),
+        [left, right] => format!("{left} and {right}"),
+        _ => format!(
+            "{}, and {}",
+            labels[..labels.len() - 1].join(", "),
+            labels[labels.len() - 1]
+        ),
+    }
+}
+
+fn optimization_label(value: Optimization) -> &'static str {
+    match value {
+        Optimization::Speed => "speed",
+        Optimization::Balanced => "balanced execution",
+        Optimization::Quality => "quality",
+    }
+}
+
+fn write_scope_label(value: WriteScope) -> &'static str {
+    match value {
+        WriteScope::ReadOnly => "read-only work",
+        WriteScope::BoundedChanges => "bounded changes",
+        WriteScope::ComplexChanges => "complex changes",
+    }
+}
+
+fn preference_label(value: Preference) -> &'static str {
+    match value {
+        Preference::Preferred => "preferred",
+        Preference::Eligible => "eligible",
+        Preference::Fallback => "fallback-only",
+    }
+}
+
+fn policy_label(value: SelectionPolicy) -> &'static str {
+    match value {
+        SelectionPolicy::Balanced => "balanced selection",
+        SelectionPolicy::OfficialFirst => "official-first selection",
+        SelectionPolicy::ThirdPartyFirst => "third-party-first selection",
+    }
+}
+
+fn provider_label(value: ProviderKind) -> &'static str {
+    match value {
+        ProviderKind::Official => "official provider path",
+        ProviderKind::ThirdParty => "third-party provider path",
+    }
+}
+
+fn generated_description_for_provider(
+    policy: SelectionPolicy,
+    p: &CodexSubagentProfile,
+    provider_kind: ProviderKind,
+) -> String {
     if let Some(description) = &p.overrides.description {
         return description.clone();
     }
-    if p.strengths == [TaskStrength::ArchitectureDesign] {
-        return "This role is suited to architecture design. Do not use it for routine long-context reading, repository exploration, evidence collection, or summarization. It favors quality and may make complex changes.".to_string();
-    }
-    if p.strengths == [TaskStrength::Testing] {
-        return "This role is suited to testing. Do not use it for architecture design, complex debugging, complex implementation, or high-risk review. It favors speed but remains read-only.".to_string();
-    }
-    match (policy, p.preference) {
-        (_, Preference::Fallback) => "This role is suited to repository exploration only when stronger matches are unavailable. Do not use it for complex debugging, architecture design, complex implementation, or high-risk review. A fallback profile is never promoted, including under third-party-first selection.",
-        (SelectionPolicy::OfficialFirst, Preference::Preferred) => "This role is suited to repository exploration. Do not use it for complex debugging, architecture design, complex implementation, or high-risk review. Its preferred status overrides official-first provider bias when the task matches.",
-        (SelectionPolicy::OfficialFirst, _) => "This role is suited to repository exploration. Do not use it for complex debugging, architecture design, complex implementation, or high-risk review. Under official-first selection, this eligible third-party profile is not promoted for high-risk work.",
-        (SelectionPolicy::ThirdPartyFirst, _) => "This role is suited to repository exploration. Do not use it for complex debugging, architecture design, complex implementation, or high-risk review. Under third-party-first selection, this matching eligible third-party profile is promoted.",
-        (SelectionPolicy::Balanced, _) => "This role is suited to repository exploration. Do not use it for complex debugging, architecture design, complex implementation, or high-risk review. It favors speed and is eligible under balanced selection without provider bias.",
-    }.to_string()
+    format!(
+        "This role is suited to {}. It optimizes for {} and allows {}. It is {} under {} and uses the {}.",
+        joined_strengths(&p.strengths),
+        optimization_label(p.optimization),
+        write_scope_label(p.write_scope),
+        preference_label(p.preference),
+        policy_label(policy),
+        provider_label(provider_kind),
+    )
 }
 
-fn generated_instructions(policy: SelectionPolicy, p: &CodexSubagentProfile) -> String {
+fn generated_instructions_for_provider(
+    policy: SelectionPolicy,
+    p: &CodexSubagentProfile,
+    provider_kind: ProviderKind,
+) -> String {
     if let Some(value) = &p.overrides.developer_instructions {
         return value.clone();
     }
-    if p.strengths == [TaskStrength::ArchitectureDesign] {
-        return "Work only on delegated architecture-design tasks. Exclude routine long-context reading, repository exploration, evidence collection, and summarization. Optimize for quality, limit writes to justified complex changes, and report verification to the parent agent. This profile is eligible; follow balanced selection without adding provider bias.".to_string();
-    }
-    if p.strengths == [TaskStrength::Testing] {
-        return "Work only on delegated testing tasks. Exclude architecture design, complex debugging, complex implementation, and high-risk review. Optimize for speed, keep all work read-only, and report verification to the parent agent. This profile is eligible; follow balanced selection without adding provider bias.".to_string();
-    }
-    match (policy, p.preference) {
-        (_, Preference::Fallback) => "Work only on delegated repository-exploration tasks when no stronger role matches. Exclude complex debugging, architecture design, complex implementation, and high-risk review. Optimize for speed, keep all work read-only, and report evidence to the parent agent. This profile is fallback-only and must never be promoted.",
-        (SelectionPolicy::OfficialFirst, Preference::Preferred) => "Work only on delegated repository-exploration tasks. Exclude complex debugging, architecture design, complex implementation, and high-risk review. Optimize for speed, keep all work read-only, and report evidence to the parent agent. This profile is preferred and overrides official-first provider bias only when the task matches.",
-        (SelectionPolicy::OfficialFirst, _) => "Work only on delegated repository-exploration tasks. Exclude complex debugging, architecture design, complex implementation, and high-risk review. Optimize for speed, keep all work read-only, and report evidence to the parent agent. This profile is eligible; under official-first selection, leave high-risk work and final integration to official roles.",
-        (SelectionPolicy::ThirdPartyFirst, _) => "Work only on delegated repository-exploration tasks. Exclude complex debugging, architecture design, complex implementation, and high-risk review. Optimize for speed, keep all work read-only, and report evidence to the parent agent. This profile is eligible and promoted for matching work under third-party-first selection.",
-        (SelectionPolicy::Balanced, _) => "Work only on delegated repository-exploration tasks. Exclude complex debugging, architecture design, complex implementation, and high-risk review. Optimize for speed, keep all work read-only, and report evidence to the parent agent. This profile is eligible; follow balanced selection without adding provider bias.",
-    }.to_string()
+    format!(
+        "Work only on delegated {} tasks. Optimize for {} and keep changes within {}. Treat this profile as {} under {}, using the {}. Report concrete evidence and verification to the parent agent.",
+        joined_strengths(&p.strengths),
+        optimization_label(p.optimization),
+        write_scope_label(p.write_scope),
+        preference_label(p.preference),
+        policy_label(policy),
+        provider_label(provider_kind),
+    )
 }
 
 fn default_role_name(p: &CodexSubagentProfile) -> String {
@@ -608,9 +788,11 @@ pub fn compile_subagent_v2_profiles(request: &CompileRequest) -> CompileResult {
     };
     let mut normalized: HashMap<String, usize> = HashMap::new();
     for entry in &config.profiles {
-        if let PersistedProfileEntry::Valid(p) = entry {
-            *normalized.entry(normalize_profile_key(&p.key)).or_default() += 1;
-        }
+        let key = match entry {
+            PersistedProfileEntry::Valid(profile) => &profile.key,
+            PersistedProfileEntry::Invalid { key, .. } => key,
+        };
+        *normalized.entry(normalize_profile_key(key)).or_default() += 1;
     }
     let mut output = CompileOutput {
         generated_roles: vec![],
@@ -625,14 +807,34 @@ pub fn compile_subagent_v2_profiles(request: &CompileRequest) -> CompileResult {
         .map(|s| s.to_ascii_lowercase())
         .collect();
     for entry in &config.profiles {
+        let entry_key = match entry {
+            PersistedProfileEntry::Valid(profile) => &profile.key,
+            PersistedProfileEntry::Invalid { key, .. } => key,
+        };
+        let collision = normalized
+            .get(&normalize_profile_key(entry_key))
+            .copied()
+            .unwrap_or(0)
+            > 1;
         let p = match entry {
             PersistedProfileEntry::Invalid { key, raw, .. } => {
                 output.preserved_invalid_profiles.push(raw.clone());
                 output.profile_statuses.push(ProfileStatus {
                     key: key.clone(),
-                    model: None,
-                    status: ProfileStatusCode::Invalid,
-                    reason: Some(DiagnosticReasonCode::Invalid),
+                    model: raw
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .map(ToString::to_string),
+                    status: if collision {
+                        ProfileStatusCode::Collision
+                    } else {
+                        ProfileStatusCode::Invalid
+                    },
+                    reason: Some(if collision {
+                        DiagnosticReasonCode::Collision
+                    } else {
+                        DiagnosticReasonCode::Invalid
+                    }),
                 });
                 continue;
             }
@@ -646,12 +848,7 @@ pub fn compile_subagent_v2_profiles(request: &CompileRequest) -> CompileResult {
                 reason,
             })
         };
-        if normalized
-            .get(&normalize_profile_key(&p.key))
-            .copied()
-            .unwrap_or(0)
-            > 1
-        {
+        if collision {
             push_status(
                 &mut output,
                 ProfileStatusCode::Collision,
@@ -759,8 +956,16 @@ pub fn compile_subagent_v2_profiles(request: &CompileRequest) -> CompileResult {
         output.generated_roles.push(GeneratedRole {
             requested_role_name: requested,
             effective_role_name: effective,
-            description: generated_description(config.selection_policy, p),
-            developer_instructions: generated_instructions(config.selection_policy, p),
+            description: generated_description_for_provider(
+                config.selection_policy,
+                p,
+                catalog.provider_kind,
+            ),
+            developer_instructions: generated_instructions_for_provider(
+                config.selection_policy,
+                p,
+                catalog.provider_kind,
+            ),
             nickname_candidates: nicknames,
             model: p.model.clone(),
             model_provider: "codex_model_router_v2".to_string(),
@@ -769,6 +974,18 @@ pub fn compile_subagent_v2_profiles(request: &CompileRequest) -> CompileResult {
         });
         push_status(&mut output, ProfileStatusCode::Routable, None);
     }
+    output.diagnostics = output
+        .profile_statuses
+        .iter()
+        .filter(|status| status.status != ProfileStatusCode::Routable)
+        .map(|status| Diagnostic {
+            model: status.model.clone().unwrap_or_default(),
+            role: None,
+            policy: config.selection_policy,
+            status: status.status,
+            reason_code: status.reason,
+        })
+        .collect();
     Ok(output)
 }
 
@@ -810,18 +1027,6 @@ pub fn initialize_legacy_subagent_v2() -> Result<CodexSubagentV2, CompileError> 
             PersistedProfileEntry::Valid(flash),
             PersistedProfileEntry::Valid(pro),
         ],
-    })
-}
-
-pub fn sanitize_subagent_v2_diagnostic(
-    source: &DiagnosticSource,
-) -> Result<Diagnostic, CompileError> {
-    Ok(Diagnostic {
-        model: source.model.clone(),
-        role: Some(source.role.clone()),
-        policy: source.policy,
-        status: source.status,
-        reason_code: Some(source.reason_code),
     })
 }
 
@@ -923,11 +1128,22 @@ mod tests {
     }
 
     fn output(roles: Vec<GeneratedRole>, statuses: Vec<ProfileStatus>) -> CompileOutput {
+        let diagnostics = statuses
+            .iter()
+            .filter(|status| status.status != ProfileStatusCode::Routable)
+            .map(|status| Diagnostic {
+                model: status.model.clone().unwrap_or_default(),
+                role: None,
+                policy: SelectionPolicy::Balanced,
+                status: status.status,
+                reason_code: status.reason,
+            })
+            .collect();
         CompileOutput {
             generated_roles: roles,
             profile_statuses: statuses,
             preserved_invalid_profiles: vec![],
-            diagnostics: vec![],
+            diagnostics,
             legacy_managed_roles_preserved: false,
         }
     }
@@ -946,20 +1162,20 @@ mod tests {
 
     // Independent literal fixtures for the production compiler contract.  These are intentionally
     // not derived through production helpers, so a compiler regression cannot rewrite its own oracle.
-    const DESC_BALANCED_REPOSITORY: &str = "This role is suited to repository exploration. Do not use it for complex debugging, architecture design, complex implementation, or high-risk review. It favors speed and is eligible under balanced selection without provider bias.";
-    const DESC_ARCHITECTURE: &str = "This role is suited to architecture design. Do not use it for routine long-context reading, repository exploration, evidence collection, or summarization. It favors quality and may make complex changes.";
-    const DESC_TESTING: &str = "This role is suited to testing. Do not use it for architecture design, complex debugging, complex implementation, or high-risk review. It favors speed but remains read-only.";
-    const DESC_OFFICIAL_FIRST_ELIGIBLE: &str = "This role is suited to repository exploration. Do not use it for complex debugging, architecture design, complex implementation, or high-risk review. Under official-first selection, this eligible third-party profile is not promoted for high-risk work.";
-    const DESC_THIRD_PARTY_FIRST_ELIGIBLE: &str = "This role is suited to repository exploration. Do not use it for complex debugging, architecture design, complex implementation, or high-risk review. Under third-party-first selection, this matching eligible third-party profile is promoted.";
-    const DESC_OFFICIAL_FIRST_PREFERRED: &str = "This role is suited to repository exploration. Do not use it for complex debugging, architecture design, complex implementation, or high-risk review. Its preferred status overrides official-first provider bias when the task matches.";
-    const DESC_FALLBACK: &str = "This role is suited to repository exploration only when stronger matches are unavailable. Do not use it for complex debugging, architecture design, complex implementation, or high-risk review. A fallback profile is never promoted, including under third-party-first selection.";
-    const INSTRUCTIONS_BALANCED_REPOSITORY: &str = "Work only on delegated repository-exploration tasks. Exclude complex debugging, architecture design, complex implementation, and high-risk review. Optimize for speed, keep all work read-only, and report evidence to the parent agent. This profile is eligible; follow balanced selection without adding provider bias.";
-    const INSTRUCTIONS_ARCHITECTURE: &str = "Work only on delegated architecture-design tasks. Exclude routine long-context reading, repository exploration, evidence collection, and summarization. Optimize for quality, limit writes to justified complex changes, and report verification to the parent agent. This profile is eligible; follow balanced selection without adding provider bias.";
-    const INSTRUCTIONS_TESTING: &str = "Work only on delegated testing tasks. Exclude architecture design, complex debugging, complex implementation, and high-risk review. Optimize for speed, keep all work read-only, and report verification to the parent agent. This profile is eligible; follow balanced selection without adding provider bias.";
-    const INSTRUCTIONS_OFFICIAL_FIRST_ELIGIBLE: &str = "Work only on delegated repository-exploration tasks. Exclude complex debugging, architecture design, complex implementation, and high-risk review. Optimize for speed, keep all work read-only, and report evidence to the parent agent. This profile is eligible; under official-first selection, leave high-risk work and final integration to official roles.";
-    const INSTRUCTIONS_THIRD_PARTY_FIRST_ELIGIBLE: &str = "Work only on delegated repository-exploration tasks. Exclude complex debugging, architecture design, complex implementation, and high-risk review. Optimize for speed, keep all work read-only, and report evidence to the parent agent. This profile is eligible and promoted for matching work under third-party-first selection.";
-    const INSTRUCTIONS_OFFICIAL_FIRST_PREFERRED: &str = "Work only on delegated repository-exploration tasks. Exclude complex debugging, architecture design, complex implementation, and high-risk review. Optimize for speed, keep all work read-only, and report evidence to the parent agent. This profile is preferred and overrides official-first provider bias only when the task matches.";
-    const INSTRUCTIONS_FALLBACK: &str = "Work only on delegated repository-exploration tasks when no stronger role matches. Exclude complex debugging, architecture design, complex implementation, and high-risk review. Optimize for speed, keep all work read-only, and report evidence to the parent agent. This profile is fallback-only and must never be promoted.";
+    const DESC_BALANCED_REPOSITORY: &str = "This role is suited to repository exploration. It optimizes for speed and allows read-only work. It is eligible under balanced selection and uses the third-party provider path.";
+    const DESC_ARCHITECTURE: &str = "This role is suited to architecture design. It optimizes for quality and allows read-only work. It is eligible under balanced selection and uses the third-party provider path.";
+    const DESC_TESTING: &str = "This role is suited to testing. It optimizes for speed and allows read-only work. It is eligible under balanced selection and uses the third-party provider path.";
+    const DESC_OFFICIAL_FIRST_ELIGIBLE: &str = "This role is suited to repository exploration. It optimizes for speed and allows read-only work. It is eligible under official-first selection and uses the third-party provider path.";
+    const DESC_THIRD_PARTY_FIRST_ELIGIBLE: &str = "This role is suited to repository exploration. It optimizes for speed and allows read-only work. It is eligible under third-party-first selection and uses the third-party provider path.";
+    const DESC_OFFICIAL_FIRST_PREFERRED: &str = "This role is suited to repository exploration. It optimizes for speed and allows read-only work. It is preferred under official-first selection and uses the third-party provider path.";
+    const DESC_FALLBACK: &str = "This role is suited to repository exploration. It optimizes for speed and allows read-only work. It is fallback-only under third-party-first selection and uses the third-party provider path.";
+    const INSTRUCTIONS_BALANCED_REPOSITORY: &str = "Work only on delegated repository exploration tasks. Optimize for speed and keep changes within read-only work. Treat this profile as eligible under balanced selection, using the third-party provider path. Report concrete evidence and verification to the parent agent.";
+    const INSTRUCTIONS_ARCHITECTURE: &str = "Work only on delegated architecture design tasks. Optimize for quality and keep changes within read-only work. Treat this profile as eligible under balanced selection, using the third-party provider path. Report concrete evidence and verification to the parent agent.";
+    const INSTRUCTIONS_TESTING: &str = "Work only on delegated testing tasks. Optimize for speed and keep changes within read-only work. Treat this profile as eligible under balanced selection, using the third-party provider path. Report concrete evidence and verification to the parent agent.";
+    const INSTRUCTIONS_OFFICIAL_FIRST_ELIGIBLE: &str = "Work only on delegated repository exploration tasks. Optimize for speed and keep changes within read-only work. Treat this profile as eligible under official-first selection, using the third-party provider path. Report concrete evidence and verification to the parent agent.";
+    const INSTRUCTIONS_THIRD_PARTY_FIRST_ELIGIBLE: &str = "Work only on delegated repository exploration tasks. Optimize for speed and keep changes within read-only work. Treat this profile as eligible under third-party-first selection, using the third-party provider path. Report concrete evidence and verification to the parent agent.";
+    const INSTRUCTIONS_OFFICIAL_FIRST_PREFERRED: &str = "Work only on delegated repository exploration tasks. Optimize for speed and keep changes within read-only work. Treat this profile as preferred under official-first selection, using the third-party provider path. Report concrete evidence and verification to the parent agent.";
+    const INSTRUCTIONS_FALLBACK: &str = "Work only on delegated repository exploration tasks. Optimize for speed and keep changes within read-only work. Treat this profile as fallback-only under third-party-first selection, using the third-party provider path. Report concrete evidence and verification to the parent agent.";
 
     fn assert_parse(raw: Value, expected: Result<CodexSubagentV2, CompileError>) {
         assert_eq!(parse_persisted_subagent_v2(&raw), expected);
@@ -1264,6 +1480,18 @@ mod tests {
                 json!({"schemaVersion": 1, "profiles": {"flash": {"model": "m", "enabled": "yes", "questionnaire": questionnaire()}}}),
                 "invalid_enabled",
             ),
+            (
+                json!({"schemaVersion": 1, "profiles": {"flash": {"model": "m", "enabled": true}}}),
+                "missing_questionnaire",
+            ),
+            (
+                json!({"schemaVersion": 1, "profiles": {"flash": {"model": "m", "enabled": true, "questionnaire": []}}}),
+                "invalid_questionnaire",
+            ),
+            (
+                json!({"schemaVersion": 1, "profiles": {"flash": false}}),
+                "invalid_profile",
+            ),
         ];
         for (raw, expected_code) in cases {
             let actual = parse_persisted_subagent_v2(&raw);
@@ -1528,8 +1756,16 @@ mod tests {
         for (strength, phrase) in strengths {
             let mut p = profile("flash", "DeepSeek-V4-Flash");
             p.strengths = vec![strength];
-            let description = generated_description(SelectionPolicy::Balanced, &p);
-            let instructions = generated_instructions(SelectionPolicy::Balanced, &p);
+            let description = generated_description_for_provider(
+                SelectionPolicy::Balanced,
+                &p,
+                ProviderKind::ThirdParty,
+            );
+            let instructions = generated_instructions_for_provider(
+                SelectionPolicy::Balanced,
+                &p,
+                ProviderKind::ThirdParty,
+            );
             assert!(
                 description.to_ascii_lowercase().contains(phrase),
                 "description missing {phrase}: {description}"
@@ -1547,7 +1783,11 @@ mod tests {
         p.optimization = Optimization::Quality;
         p.write_scope = WriteScope::BoundedChanges;
         p.preference = Preference::Preferred;
-        let description = generated_description(SelectionPolicy::OfficialFirst, &p);
+        let description = generated_description_for_provider(
+            SelectionPolicy::OfficialFirst,
+            &p,
+            ProviderKind::ThirdParty,
+        );
         assert!(description.contains("quality"));
         assert!(description.contains("bounded changes"));
         assert!(description.contains("preferred"));
@@ -1953,13 +2193,49 @@ mod tests {
             vec![],
             vec![status(
                 "broken",
-                None,
+                Some("broken"),
                 ProfileStatusCode::Invalid,
                 Some(DiagnosticReasonCode::Invalid),
             )],
         );
         expected.preserved_invalid_profiles = vec![raw];
         assert_compile(&request(Some(saved)), Ok(expected));
+    }
+
+    #[test]
+    fn codex_subagent_v2_production_diagnostics_are_allowlisted() {
+        let raw = json!({
+            "model": "broken",
+            "enabled": "yes",
+            "apiKey": "API_KEY_SECRET",
+            "taskBody": "TASK_BODY_SECRET",
+            "encryptedContent": "ENCRYPTED_SECRET"
+        });
+        let saved = config(
+            SelectionPolicy::Balanced,
+            vec![PersistedProfileEntry::Invalid {
+                key: s("broken"),
+                raw,
+                validation_code: s("invalid_enabled"),
+            }],
+        );
+        let output = compile_subagent_v2_profiles(&request(Some(saved)))
+            .expect("compile invalid profile status");
+        let value = serde_json::to_value(&output.diagnostics).expect("serialize diagnostics");
+        let object = value[0].as_object().expect("diagnostic object");
+        assert_eq!(
+            object
+                .keys()
+                .map(String::as_str)
+                .collect::<std::collections::BTreeSet<_>>(),
+            ["model", "role", "policy", "status", "reasonCode"]
+                .into_iter()
+                .collect()
+        );
+        let serialized = value.to_string();
+        assert!(!serialized.contains("API_KEY_SECRET"));
+        assert!(!serialized.contains("TASK_BODY_SECRET"));
+        assert!(!serialized.contains("ENCRYPTED_SECRET"));
     }
 
     #[test]
@@ -2098,43 +2374,6 @@ mod tests {
             Ok(config(
                 SelectionPolicy::Balanced,
                 vec![valid(flash), valid(pro)],
-            ))
-        );
-    }
-
-    #[test]
-    fn codex_subagent_v2_diagnostic_sanitizer_emits_only_allowlisted_metadata() {
-        let source = DiagnosticSource {
-            model: s("DeepSeek-V4-Flash"),
-            role: s("flash"),
-            policy: SelectionPolicyForDiagnostic::Balanced,
-            status: ProfileStatusCode::Unroutable,
-            reason_code: DiagnosticReasonCode::Unroutable,
-            reason_detail: s("internal detail SECRET_REASON"),
-            arbitrary_secret: s("ARBITRARY_SECRET"),
-            api_key: s("API_KEY_SECRET"),
-            task_body: s("TASK_BODY_SECRET"),
-            encrypted_content: s("ENCRYPTED_SECRET"),
-        };
-        let expected = Diagnostic {
-            model: s("DeepSeek-V4-Flash"),
-            role: Some(s("flash")),
-            policy: SelectionPolicyForDiagnostic::Balanced,
-            status: ProfileStatusCode::Unroutable,
-            reason_code: Some(DiagnosticReasonCode::Unroutable),
-        };
-        let actual = sanitize_subagent_v2_diagnostic(&source).map(|diagnostic| {
-            let serialized = serde_json::to_string(&diagnostic)
-                .expect("allowlisted diagnostic must remain serializable");
-            (diagnostic, serialized)
-        });
-        assert_eq!(
-            actual,
-            Ok((
-                expected,
-                s(
-                    r#"{"model":"DeepSeek-V4-Flash","role":"flash","policy":"Balanced","status":"Unroutable","reason_code":"Unroutable"}"#
-                ),
             ))
         );
     }

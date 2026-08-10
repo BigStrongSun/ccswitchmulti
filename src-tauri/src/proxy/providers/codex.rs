@@ -108,7 +108,7 @@ pub fn classify_codex_multirouter_auth_facade(
 }
 
 /// 判断 route 是否由 ChatGPT Codex 官方 backend 提供原生能力。
-fn codex_route_uses_official_agent_backend(route: &JsonValue) -> bool {
+pub(crate) fn codex_route_uses_official_agent_backend(route: &JsonValue) -> bool {
     let upstream = route.get("upstream").unwrap_or(route);
     let auth = upstream
         .get("auth")
@@ -821,45 +821,18 @@ fn resolve_codex_route_candidates<'a>(
     request_model: &str,
 ) -> Vec<&'a JsonValue> {
     if let Some(routing) = provider.settings_config.get("codexRouting") {
-        if let Some(routes) = routing.as_array() {
-            return resolve_codex_legacy_route_candidates(routes, request_model);
-        }
-
-        if routing
-            .get("enabled")
-            .and_then(|value| value.as_bool())
-            .is_some_and(|enabled| !enabled)
-        {
-            return Vec::new();
-        }
-
-        let Some(routes) = routing.get("routes").and_then(|value| value.as_array()) else {
+        let routes = routing
+            .as_array()
+            .or_else(|| routing.get("routes").and_then(|value| value.as_array()));
+        let Some(routes) = routes else {
             return Vec::new();
         };
-
-        let mut selected = Vec::new();
-        if let Some(route) = find_codex_route_by_match_priority(routes, request_model) {
-            selected.push(route);
-        } else if codex_model_is_declared_only_by_disabled_route(routes, request_model) {
+        let Some(primary) =
+            resolve_codex_primary_route_from_settings(&provider.settings_config, request_model)
+        else {
             return Vec::new();
-        } else if let Some(default_route) = routing
-            .get("defaultRouteId")
-            .or_else(|| routing.get("default_route_id"))
-            .and_then(|value| value.as_str())
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-            .and_then(|default_route_id| {
-                routes.iter().find(|route| {
-                    codex_route_is_enabled(route)
-                        && route
-                            .get("id")
-                            .and_then(|value| value.as_str())
-                            .is_some_and(|id| id.eq_ignore_ascii_case(default_route_id))
-                })
-            })
-        {
-            selected.push(default_route);
-        }
+        };
+        let mut selected = vec![primary];
 
         let primary_id = selected
             .first()
@@ -916,7 +889,16 @@ pub fn codex_provider_text_only_input(provider: &Provider) -> Option<bool> {
 /// 新配置允许显式关闭路由，并支持 `defaultRouteId` 兜底；旧配置没有开关语义，只要数组
 /// 存在就按旧规则匹配，保证已有本地数据库不会在升级后突然失效。
 fn resolve_codex_route<'a>(provider: &'a Provider, request_model: &str) -> Option<&'a JsonValue> {
-    if let Some(routing) = provider.settings_config.get("codexRouting") {
+    resolve_codex_route_from_settings(&provider.settings_config, request_model)
+}
+
+/// Resolve an exact, prefix, or explicit default route without applying the runtime candidate
+/// fallback. This is the selection primitive used by both the single-route and candidate paths.
+fn resolve_codex_route_from_settings<'a>(
+    settings: &'a JsonValue,
+    request_model: &str,
+) -> Option<&'a JsonValue> {
+    if let Some(routing) = settings.get("codexRouting") {
         if let Some(routes) = routing.as_array() {
             return find_codex_route_by_match_priority(routes, request_model);
         }
@@ -954,10 +936,9 @@ fn resolve_codex_route<'a>(provider: &'a Provider, request_model: &str) -> Optio
             });
     }
 
-    provider
-        .settings_config
+    settings
         .get("codexModelRoutes")
-        .or_else(|| provider.settings_config.get("modelRoutes"))
+        .or_else(|| settings.get("modelRoutes"))
         .and_then(|value| value.as_array())
         .and_then(|routes| {
             routes
@@ -971,45 +952,39 @@ fn resolve_codex_route<'a>(provider: &'a Provider, request_model: &str) -> Optio
         })
 }
 
+/// Resolve the first route runtime will actually try. MultiRouter keeps its historical behavior:
+/// after exact/prefix/default selection, an otherwise unmatched model falls back to the first
+/// enabled candidate. A model explicitly declared only by disabled routes still fails closed.
+pub(crate) fn resolve_codex_primary_route_from_settings<'a>(
+    settings: &'a JsonValue,
+    request_model: &str,
+) -> Option<&'a JsonValue> {
+    if let Some(route) = resolve_codex_route_from_settings(settings, request_model) {
+        return Some(route);
+    }
+    let routing = settings.get("codexRouting")?;
+    if routing
+        .get("enabled")
+        .and_then(JsonValue::as_bool)
+        .is_some_and(|enabled| !enabled)
+    {
+        return None;
+    }
+    let routes = routing
+        .as_array()
+        .or_else(|| routing.get("routes").and_then(JsonValue::as_array))?;
+    if codex_model_is_declared_only_by_disabled_route(routes, request_model) {
+        return None;
+    }
+    routes.iter().find(|route| codex_route_is_enabled(route))
+}
+
 /// 判断 route 是否启用；字段缺省时按启用处理，减少手写配置的必填项。
 fn codex_route_is_enabled(route: &JsonValue) -> bool {
     route
         .get("enabled")
         .and_then(|value| value.as_bool())
         .unwrap_or(true)
-}
-
-/// 兼容被旧版/损坏保存路径写成 `codexRouting: []` 的 MultiRouter 配置。
-///
-/// 这类数据没有 `enabled/defaultRouteId` 外壳，但数组里的 route 本身仍然完整；
-/// 请求链路必须直接消费它，否则升级后所有模型都会 `route_missed=true`。
-fn resolve_codex_legacy_route_candidates<'a>(
-    routes: &'a [JsonValue],
-    request_model: &str,
-) -> Vec<&'a JsonValue> {
-    let mut selected = Vec::new();
-    if let Some(route) = find_codex_route_by_match_priority(routes, request_model) {
-        selected.push(route);
-    } else if codex_model_is_declared_only_by_disabled_route(routes, request_model) {
-        return Vec::new();
-    }
-
-    let primary_id = selected
-        .first()
-        .and_then(|route| route.get("id"))
-        .and_then(|value| value.as_str())
-        .map(|id| id.to_ascii_lowercase());
-    selected.extend(routes.iter().filter(|route| {
-        if !codex_route_is_enabled(route) {
-            return false;
-        }
-        let route_id = route
-            .get("id")
-            .and_then(|value| value.as_str())
-            .map(|id| id.to_ascii_lowercase());
-        route_id != primary_id
-    }));
-    selected
 }
 
 /// 判断请求模型是否只存在于已停用 route 的精确模型列表中。
@@ -3778,6 +3753,43 @@ wire_api = "chat"
         assert_eq!(
             routed.settings_config["base_url"],
             "https://fallback.example"
+        );
+    }
+
+    #[test]
+    fn test_codex_route_unmatched_model_keeps_first_enabled_candidate_fallback() {
+        let provider = create_provider(json!({
+            "codexRouting": {
+                "enabled": true,
+                "routes": [
+                    {
+                        "id": "disabled-first",
+                        "enabled": false,
+                        "match": { "models": ["disabled"] },
+                        "base_url": "https://disabled.example"
+                    },
+                    {
+                        "id": "first-enabled",
+                        "match": { "models": ["qwen3.6"] },
+                        "base_url": "https://first-enabled.example"
+                    },
+                    {
+                        "id": "second-enabled",
+                        "match": { "models": ["deepseek-v4-flash"] },
+                        "base_url": "https://second-enabled.example"
+                    }
+                ]
+            }
+        }));
+
+        let routed =
+            resolve_codex_model_routed_provider(&provider, &json!({ "model": "unmatched-model" }))
+                .expect("historical first-enabled candidate fallback");
+
+        assert_eq!(routed.id, "test::route::first-enabled");
+        assert_eq!(
+            routed.settings_config["base_url"],
+            "https://first-enabled.example"
         );
     }
 

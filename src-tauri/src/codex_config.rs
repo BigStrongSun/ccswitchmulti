@@ -14,6 +14,9 @@ use crate::config::{
 };
 use crate::error::AppError;
 use crate::model_capabilities::{image_input_capability_from_modalities, ImageInputCapability};
+use crate::proxy::providers::{
+    codex_route_uses_official_agent_backend, resolve_codex_primary_route_from_settings,
+};
 use once_cell::sync::OnceCell;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -2133,30 +2136,8 @@ fn codex_multi_router_requires_non_reserved_agent_namespace(settings: &Value) ->
             .get("enabled")
             .and_then(Value::as_bool)
             .unwrap_or(true)
-            && !codex_route_uses_official_backend_agent_delivery(route)
+            && !codex_route_uses_official_agent_backend(route)
     })
-}
-
-/// 只有显式指向 ChatGPT Codex backend 的官方 route 才具备 V2 密文解密能力。
-fn codex_route_uses_official_backend_agent_delivery(route: &Value) -> bool {
-    let upstream = route.get("upstream").unwrap_or(route);
-    let auth = upstream
-        .get("auth")
-        .or_else(|| route.get("auth"))
-        .unwrap_or(upstream);
-    auth.get("source")
-        .and_then(Value::as_str)
-        .is_some_and(|source| {
-            matches!(
-                source.to_ascii_lowercase().as_str(),
-                "native_codex_auth" | "managed_codex_oauth" | "managed_account" | "account_pool"
-            )
-        })
-        || auth
-            .get("authProvider")
-            .or_else(|| auth.get("auth_provider"))
-            .and_then(Value::as_str)
-            .is_some_and(|provider| provider.eq_ignore_ascii_case("codex_oauth"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2521,39 +2502,16 @@ fn sync_codex_managed_agent_files(
     Ok(())
 }
 
-fn codex_route_matches_model(route: &Value, model: &str) -> bool {
-    route
-        .get("match")
-        .and_then(|value| value.get("models"))
-        .and_then(Value::as_array)
-        .is_some_and(|models| {
-            models
-                .iter()
-                .filter_map(Value::as_str)
-                .any(|candidate| candidate.eq_ignore_ascii_case(model))
-        })
-}
-
-fn codex_subagent_provider_kind(settings: &Value, model: &str) -> SubagentProviderKind {
-    let official = settings
-        .get("codexRouting")
-        .and_then(|routing| routing.get("routes"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|route| {
-            route
-                .get("enabled")
-                .and_then(Value::as_bool)
-                .unwrap_or(true)
-        })
-        .filter(|route| codex_route_matches_model(route, model))
-        .any(codex_route_uses_official_backend_agent_delivery);
-    if official {
+fn codex_subagent_route_classification(
+    settings: &Value,
+    model: &str,
+) -> Option<SubagentProviderKind> {
+    let route = resolve_codex_primary_route_from_settings(settings, model)?;
+    Some(if codex_route_uses_official_agent_backend(route) {
         SubagentProviderKind::Official
     } else {
         SubagentProviderKind::ThirdParty
-    }
+    })
 }
 
 fn occupied_user_codex_agent_names(agents_dir: &Path) -> Result<Vec<String>, AppError> {
@@ -2569,8 +2527,19 @@ fn occupied_user_codex_agent_names(agents_dir: &Path) -> Result<Vec<String>, App
         {
             continue;
         }
-        if let Some(name) = path.file_stem().and_then(|value| value.to_str()) {
-            names.push(name.to_string());
+        if let Some(stem) = path.file_stem().and_then(|value| value.to_str()) {
+            names.push(stem.to_string());
+        }
+        if let Ok(contents) = fs::read_to_string(&path) {
+            if let Some(declared_name) = contents
+                .parse::<toml::Value>()
+                .ok()
+                .and_then(|document| document.get("name")?.as_str().map(ToString::to_string))
+                .map(|name| name.trim().to_string())
+                .filter(|name| !name.is_empty())
+            {
+                names.push(declared_name);
+            }
         }
     }
     Ok(names)
@@ -2592,11 +2561,14 @@ fn compile_configured_codex_subagent_roles(
     })?;
     let catalog_models = specs
         .iter()
-        .map(|spec| SubagentCatalogModel {
-            model: spec.model.clone(),
-            provider_kind: codex_subagent_provider_kind(settings, &spec.model),
-            routable: true,
-            context_window: spec.context_window,
+        .map(|spec| {
+            let classification = codex_subagent_route_classification(settings, &spec.model);
+            SubagentCatalogModel {
+                model: spec.model.clone(),
+                provider_kind: classification.unwrap_or(SubagentProviderKind::ThirdParty),
+                routable: classification.is_some(),
+                context_window: spec.context_window,
+            }
         })
         .collect();
     let output = compile_subagent_v2_profiles(&SubagentCompileRequest {
@@ -2652,7 +2624,11 @@ pub fn preview_codex_subagent_profile(
     let mut persisted = parse_persisted_subagent_v2(&raw)
         .map_err(|error| format!("Invalid subagentV2 profile config: {error:?}"))?;
     let mut warnings = Vec::new();
-    let model = match &mut persisted.profiles[0] {
+    let first_profile = persisted
+        .profiles
+        .first_mut()
+        .ok_or_else(|| "The selected profile is missing".to_string())?;
+    let model = match first_profile {
         crate::codex_subagent_profiles::PersistedProfileEntry::Valid(profile) => {
             if !profile.enabled {
                 warnings.push("profile_disabled".to_string());
@@ -2669,7 +2645,8 @@ pub fn preview_codex_subagent_profile(
         .iter()
         .find(|spec| spec.model.eq_ignore_ascii_case(&model))
         .ok_or_else(|| format!("Profile model is not routable: {model}"))?;
-    let provider_kind = codex_subagent_provider_kind(&settingsConfig, &model);
+    let provider_kind = codex_subagent_route_classification(&settingsConfig, &model)
+        .ok_or_else(|| format!("Profile model is not routable: {model}"))?;
     let output = compile_subagent_v2_profiles(&SubagentCompileRequest {
         subagent_version: ProfileSubagentVersion::V2,
         persisted_subagent_v2: Some(persisted),
@@ -4597,48 +4574,6 @@ pub fn remove_codex_toml_base_url_if(toml_str: &str, predicate: impl Fn(&str) ->
 }
 
 #[cfg(test)]
-fn render_codex_configured_managed_agent_toml(
-    settings: &Value,
-    profile: &Value,
-    role: &str,
-    spec: &CodexCatalogModelSpec,
-) -> String {
-    let raw = json!({
-        "schemaVersion": 1,
-        "selectionPolicy": settings.pointer("/codexRouting/subagentV2/selectionPolicy").and_then(Value::as_str).unwrap_or("balanced"),
-        "profiles": {
-            role: {
-                "model": spec.model,
-                "enabled": true,
-                "questionnaire": {
-                    "taskStrengths": ["repository_exploration"],
-                    "optimization": "speed",
-                    "writeScope": "read_only",
-                    "preference": "eligible",
-                    "reasoningEffort": "auto"
-                },
-                "overrides": profile.get("overrides").cloned().unwrap_or_else(|| json!({}))
-            }
-        }
-    });
-    let persisted = parse_persisted_subagent_v2(&raw).expect("configured RED fixture must parse");
-    let output = compile_subagent_v2_profiles(&SubagentCompileRequest {
-        subagent_version: ProfileSubagentVersion::V2,
-        persisted_subagent_v2: Some(persisted),
-        catalog_models: vec![SubagentCatalogModel {
-            model: spec.model.clone(),
-            provider_kind: codex_subagent_provider_kind(settings, &spec.model),
-            routable: true,
-            context_window: spec.context_window,
-        }],
-        occupied_role_names: Vec::new(),
-    })
-    .expect("configured RED fixture must compile");
-    render_generated_role_toml(&output.generated_roles[0], CC_SWITCH_MANAGED_AGENT_MARKER)
-        .expect("configured RED fixture must render")
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -4734,14 +4669,29 @@ mod tests {
             }
         });
         assert_eq!(
-            codex_subagent_provider_kind(&settings, "gpt-5.5-relay"),
-            SubagentProviderKind::ThirdParty,
+            codex_subagent_route_classification(&settings, "gpt-5.5-relay"),
+            Some(SubagentProviderKind::ThirdParty),
             "an exact relay route must beat an earlier official prefix"
         );
         assert_eq!(
-            codex_subagent_provider_kind(&settings, "unknown-model"),
-            SubagentProviderKind::Official,
+            codex_subagent_route_classification(&settings, "unknown-model"),
+            Some(SubagentProviderKind::Official),
             "an unmatched request uses the enabled defaultRouteId in runtime order"
+        );
+        let fallback_settings = json!({
+            "codexRouting": {
+                "enabled": true,
+                "routes": [{
+                    "id": "first-enabled-relay",
+                    "match": { "models": ["relay-only"] },
+                    "upstream": { "targetProviderId": "relay-provider", "auth": { "source": "provider_config" } }
+                }]
+            }
+        });
+        assert_eq!(
+            codex_subagent_route_classification(&fallback_settings, "unmatched-model"),
+            Some(SubagentProviderKind::ThirdParty),
+            "profile compilation must classify the same first enabled fallback candidate as runtime"
         );
     }
 
@@ -4907,106 +4857,48 @@ mod tests {
     }
 
     #[test]
-    fn codex_subagent_v2_current_managed_agent_path_cannot_honor_manual_description() {
-        let spec = CodexCatalogModelSpec {
-            model: "DeepSeek-V4-Flash".to_string(),
-            upstream_model: None,
-            display_name: "Configured Flash".to_string(),
-            context_window: 1_000_000,
-            text_only: false,
-            is_default: false,
-            supports_parallel_tool_calls: None,
-            input_modalities: None,
-            base_instructions: None,
-        };
-        let settings = json!({ "codexRouting": { "subagentV2": { "schemaVersion": 1 } } });
-        let profile = json!({ "overrides": { "description": "Only investigate protocol evidence supplied by the user; never select this role for implementation." } });
-        let rendered = render_codex_configured_managed_agent_toml(
-            &settings,
-            &profile,
-            "configured-flash",
-            &spec,
-        );
-
-        assert_eq!(
-            rendered.contains(
-                "Only investigate protocol evidence supplied by the user; never select this role for implementation."
-            ),
-            true,
-            "current hardcoded managed-role rendering must use the configured V2 manual description"
-        );
+    #[serial_test::serial]
+    fn codex_subagent_v2_invalid_user_toml_still_reserves_its_filename_stem() {
+        let _guard = TestHomeGuard::new();
+        let agents_dir = get_codex_agents_dir();
+        std::fs::create_dir_all(&agents_dir).expect("create agents dir");
+        std::fs::write(agents_dir.join("Invalid-Role.toml"), "name = [")
+            .expect("seed invalid user TOML");
+        let occupied = occupied_user_codex_agent_names(&agents_dir).expect("scan user agents");
+        assert!(occupied
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case("invalid-role")));
     }
 
     #[test]
-    fn codex_subagent_v2_current_managed_agent_path_cannot_honor_explicit_effort() {
-        let spec = CodexCatalogModelSpec {
-            model: "DeepSeek-V4-Flash".to_string(),
+    #[serial_test::serial]
+    fn codex_subagent_v2_missing_config_uses_real_legacy_filesystem_sync() {
+        let _guard = TestHomeGuard::new();
+        let specs = vec![CodexCatalogModelSpec {
+            model: "qwen3.6".to_string(),
             upstream_model: None,
-            display_name: "Configured Flash".to_string(),
-            context_window: 1_000_000,
-            text_only: false,
+            display_name: "Qwen 3.6".to_string(),
+            context_window: 262_144,
+            text_only: true,
             is_default: false,
             supports_parallel_tool_calls: None,
             input_modalities: None,
             base_instructions: None,
-        };
-        let settings = json!({ "codexRouting": { "subagentV2": { "schemaVersion": 1 } } });
-        let profile = json!({ "overrides": { "modelReasoningEffort": "xhigh" } });
-        let rendered = render_codex_configured_managed_agent_toml(
-            &settings,
-            &profile,
-            "configured-flash",
-            &spec,
-        );
-
-        assert_eq!(
-            rendered.contains(r#"model_reasoning_effort = "xhigh""#),
-            true,
-            "current hardcoded managed-role rendering must use the configured V2 explicit effort"
-        );
+        }];
+        sync_codex_managed_agent_files_with_settings(
+            &specs,
+            CodexSubagentVersion::V2,
+            &json!({"codexRouting": {"enabled": true}}),
+        )
+        .expect("legacy filesystem sync");
+        let role = std::fs::read_to_string(get_codex_agents_dir().join("qwen-local.toml"))
+            .expect("legacy managed role");
+        assert!(role.contains(CC_SWITCH_MANAGED_AGENT_MARKER));
+        assert!(role.contains(
+            "Low-cost Qwen worker for read-heavy exploration, summaries, and bounded helper tasks."
+        ));
     }
 
-    #[test]
-    fn codex_subagent_v2_configured_materialization_boundary_uses_each_profile_input() {
-        let settings = json!({ "codexRouting": { "subagentV2": { "schemaVersion": 1 } } });
-        let first_profile = json!({ "overrides": { "description": "First manual description.", "modelReasoningEffort": "low" } });
-        let second_profile = json!({ "overrides": { "description": "Second manual description.", "modelReasoningEffort": "xhigh" } });
-        let spec = CodexCatalogModelSpec {
-            model: "DeepSeek-V4-Flash".to_string(),
-            upstream_model: None,
-            display_name: "Configured Flash".to_string(),
-            context_window: 1_000_000,
-            text_only: false,
-            is_default: false,
-            supports_parallel_tool_calls: None,
-            input_modalities: None,
-            base_instructions: None,
-        };
-        let first = render_codex_configured_managed_agent_toml(
-            &settings,
-            &first_profile,
-            "configured-flash",
-            &spec,
-        );
-        let second = render_codex_configured_managed_agent_toml(
-            &settings,
-            &second_profile,
-            "configured-flash",
-            &spec,
-        );
-        let actual_relations = [
-            first.contains("First manual description."),
-            first.contains(r#"model_reasoning_effort = "low""#),
-            second.contains("Second manual description."),
-            second.contains(r#"model_reasoning_effort = "xhigh""#),
-            first != second,
-        ];
-        assert_eq!(
-            actual_relations,
-            [true, true, true, true, true],
-            "configured materialization must consume each settings/profile input instead of a hardcoded renderer"
-        );
-    }
     use serial_test::serial;
 
     #[test]
