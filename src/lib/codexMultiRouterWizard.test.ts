@@ -10,10 +10,7 @@ const deepseekSource: Provider = {
     baseUrl: "https://example.invalid/v1",
     auth: { OPENAI_API_KEY: "test-only" },
     modelCatalog: {
-      models: [
-        { model: "deepseek-v4-flash" },
-        { model: "deepseek-v4-pro" },
-      ],
+      models: [{ model: "deepseek-v4-flash" }, { model: "deepseek-v4-pro" }],
     },
   },
 };

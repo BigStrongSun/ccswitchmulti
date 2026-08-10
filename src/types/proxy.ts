@@ -140,7 +140,6 @@ export interface CodexRouterLogDiagnostics {
   recentEvents: CodexRouterLogEvent[];
 }
 
-
 export interface CodexGuardianStatus {
   active: boolean;
   codexRunning: boolean;
@@ -149,7 +148,8 @@ export interface CodexGuardianStatus {
   injected: boolean;
   lastEvent: string;
   message: string;
-}export interface CodexModelPickerUnlockResult {
+}
+export interface CodexModelPickerUnlockResult {
   attemptedPorts: number[];
   debugPort: number | null;
   targetId: string | null;

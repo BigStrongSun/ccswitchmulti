@@ -52,10 +52,11 @@ export const proxyApi = {
   },
 
   // 解锁 Codex Desktop 模型菜单；CLI/app-server 支持由 live config/catalog/proxy 链路负责。
-  
+
   async getCodexGuardianStatus(): Promise<CodexGuardianStatus> {
     return invoke("get_codex_guardian_status");
-  },async unlockCodexModelPicker(): Promise<CodexModelPickerUnlockResult> {
+  },
+  async unlockCodexModelPicker(): Promise<CodexModelPickerUnlockResult> {
     return invoke("unlock_codex_model_picker");
   },
 
