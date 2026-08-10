@@ -12,6 +12,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { providersApi } from "@/lib/api/providers";
 import type { Provider } from "@/types";
+import type { CodexSubagentProfilePreview } from "@/types/codexSubagentV2";
 import { CodexMultiRouterWizard } from "./CodexMultiRouterWizard";
 import { CodexRouterWorkspacePage } from "./CodexRouterWorkspacePage";
 
@@ -29,6 +30,27 @@ const previewFixture = {
   tomlPreview:
     '[agents.repository-scout-2]\nmodel = "deepseek-v4-flash"\nmodel_provider = "codex_model_router_v2"',
   warnings: ["Role name was collision-resolved."],
+} satisfies CodexSubagentProfilePreview;
+
+const proPreviewFixture = {
+  providerKind: "third_party" as const,
+  requestedRoleName: "deep-reviewer",
+  effectiveRoleName: "deep-reviewer",
+  description: "Trace cross-module failures and review risky changes.",
+  developerInstructions: "Investigate root causes before editing files.",
+  nicknameCandidates: ["Reviewer", "Debugger"],
+  model: "deepseek-v4-pro",
+  modelProvider: "codex_model_router_v2" as const,
+  modelReasoningEffort: "high" as const,
+  modelContextWindow: 256000,
+  tomlPreview:
+    '[agents.deep-reviewer]\nmodel = "deepseek-v4-pro"\nmodel_provider = "codex_model_router_v2"',
+  warnings: ["Pro profile warning."],
+} satisfies CodexSubagentProfilePreview;
+
+const previewFixturesByModel: Record<string, CodexSubagentProfilePreview> = {
+  "deepseek-v4-flash": previewFixture,
+  "deepseek-v4-pro": proPreviewFixture,
 };
 
 const statusFixture = {
@@ -62,6 +84,8 @@ const statusFixture = {
       providerKind: "third_party" as const,
       enabled: true,
       routable: false,
+      requestedRoleName: "deep-reviewer",
+      effectiveRoleName: "deep-reviewer",
       status: "unroutable" as const,
       nonGenerationReason: "unroutable" as const,
       warnings: ["No enabled route resolves this model."],
@@ -72,6 +96,10 @@ const statusFixture = {
 
 const ipcState = vi.hoisted(() => ({
   providers: {} as Record<string, Provider>,
+  previewErrors: {} as Record<string, string>,
+  statusResponse: undefined as unknown,
+  statusError: null as string | null,
+  updateGate: null as Promise<void> | null,
 }));
 
 // The only test double is the real frontend process boundary. The dispatcher
@@ -104,6 +132,7 @@ vi.mock("@tauri-apps/api/core", () => ({
             "update_provider must include a provider with a stable id",
           );
         }
+        if (ipcState.updateGate) await ipcState.updateGate;
         ipcState.providers[savedProvider.id] = JSON.parse(
           JSON.stringify(savedProvider),
         );
@@ -116,10 +145,23 @@ vi.mock("@tauri-apps/api/core", () => ({
         );
         return true;
       }
-      case "preview_codex_subagent_profile":
-        return JSON.parse(JSON.stringify(previewFixture));
+      case "preview_codex_subagent_profile": {
+        const model = args?.model;
+        if (typeof model !== "string" || !model) {
+          throw new Error("preview fixture requires a nonempty model");
+        }
+        if (ipcState.previewErrors[model]) {
+          throw new Error(ipcState.previewErrors[model]);
+        }
+        const fixture = previewFixturesByModel[model];
+        if (!fixture) {
+          throw new Error(`No preview fixture registered for model: ${model}`);
+        }
+        return JSON.parse(JSON.stringify(fixture));
+      }
       case "get_codex_subagent_profile_statuses":
-        return JSON.parse(JSON.stringify(statusFixture));
+        if (ipcState.statusError) throw new Error(ipcState.statusError);
+        return JSON.parse(JSON.stringify(ipcState.statusResponse));
       case "get_global_proxy_config":
         return {
           listenAddress: "127.0.0.1",
@@ -381,6 +423,32 @@ function flashRegion() {
   });
 }
 
+function proRegion() {
+  return screen.getByRole("region", {
+    name: "DeepSeek V4 Pro 子 Agent 能力",
+  });
+}
+
+function flashBackendRegion() {
+  return screen.getByRole("region", {
+    name: "repository-scout 后端预览状态",
+  });
+}
+
+function proBackendRegion() {
+  return screen.getByRole("region", {
+    name: "offline-writer 后端预览状态",
+  });
+}
+
+function createDeferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 function expectControlValue(
   control: HTMLElement,
   persistedValue: string,
@@ -409,7 +477,265 @@ async function expectSavedSubagentV2(expected: Record<string, unknown>) {
 
 beforeEach(() => {
   seedPersistedPlan(true);
+  ipcState.previewErrors = {};
+  ipcState.statusResponse = JSON.parse(JSON.stringify(statusFixture));
+  ipcState.statusError = null;
+  ipcState.updateGate = null;
   vi.mocked(invoke).mockClear();
+});
+
+describe("Codex Sub-Agent V2 review round 1 regressions", () => {
+  it("preserves explicit V2 data and unknown routing fields through wizard publish", async () => {
+    const originalV2 = ipcState.providers.router.settingsConfig.codexRouting
+      .subagentV2 as Record<string, unknown>;
+    ipcState.providers.router.settingsConfig.codexRouting.futureRouting = {
+      mode: "keep-me",
+    };
+
+    const wizard = await mountWizardFromPersistedPlan();
+    await wizard.user.click(screen.getByRole("button", { name: "保存并发布" }));
+    await wizard.user.click(
+      screen.getAllByRole("button", { name: "保存并发布" }).at(-1)!,
+    );
+    await waitFor(() => expect(updateProviderCalls()).toHaveLength(1));
+
+    expect(latestSavedPlan()?.settingsConfig.codexRouting).toEqual(
+      expect.objectContaining({
+        futureRouting: { mode: "keep-me" },
+        subagentV2: originalV2,
+      }),
+    );
+  });
+
+  it("uses the current wizard plan draft for V2 preview and status requests", async () => {
+    await mountWizardFromPersistedPlan();
+
+    await waitFor(() => {
+      const statusCalls = vi
+        .mocked(invoke)
+        .mock.calls.filter(
+          ([command]) => command === "get_codex_subagent_profile_statuses",
+        );
+      expect(statusCalls).toContainEqual([
+        "get_codex_subagent_profile_statuses",
+        {
+          settingsConfig: expect.objectContaining({
+            codexRouting: expect.objectContaining({
+              routes: expect.arrayContaining([
+                expect.objectContaining({
+                  match: expect.objectContaining({
+                    models: expect.arrayContaining(["deepseek-v4-pro"]),
+                  }),
+                }),
+              ]),
+            }),
+          }),
+        },
+      ]);
+    });
+  });
+
+  it("blocks persistence when authoritative status reports a role collision", async () => {
+    ipcState.statusResponse = {
+      ...statusFixture,
+      profiles: [
+        {
+          ...statusFixture.profiles[0],
+          routable: false,
+          status: "collision",
+          nonGenerationReason: "collision",
+          warnings: ["Normalized role name collision."],
+        },
+        statusFixture.profiles[1],
+      ],
+    };
+    const user = userEvent.setup();
+    await mountWorkspaceFromPersistedPlan();
+    const saveButton = await screen.findByRole("button", {
+      name: "保存 V2 子 Agent 能力配置",
+    });
+
+    await user.click(saveButton);
+    await waitFor(() => expect(saveButton).toBeEnabled());
+
+    expect(updateProviderCalls()).toHaveLength(0);
+    expect(screen.getByRole("alert")).toHaveTextContent(/collision/i);
+  });
+
+  it("allows saving while an enabled retained profile is authoritatively unroutable", async () => {
+    ipcState.previewErrors["deepseek-v4-pro"] =
+      "No enabled route resolves this model.";
+    const user = userEvent.setup();
+    await mountWorkspaceFromPersistedPlan();
+
+    await saveV2(user);
+
+    await waitFor(() => expect(updateProviderCalls()).toHaveLength(1));
+    expect(
+      latestSavedPlan()?.settingsConfig.codexRouting.subagentV2.profiles[
+        "offline-writer"
+      ],
+    ).toEqual(
+      plan().settingsConfig.codexRouting.subagentV2.profiles["offline-writer"],
+    );
+  });
+
+  it("renders a preserved invalid raw profile and offers a controlled repair action", async () => {
+    ipcState.providers.router.settingsConfig.codexRouting.subagentV2.profiles[
+      "repository-scout"
+    ] = {
+      model: "deepseek-v4-flash",
+      enabled: true,
+    };
+    ipcState.statusResponse = {
+      ...statusFixture,
+      profiles: [
+        {
+          profileKey: "repository-scout",
+          model: "deepseek-v4-flash",
+          enabled: true,
+          routable: false,
+          status: "invalid",
+          nonGenerationReason: "invalid",
+          warnings: ["questionnaire is missing"],
+        },
+        statusFixture.profiles[1],
+      ],
+    };
+
+    const user = userEvent.setup();
+    await mountWorkspaceFromPersistedPlan();
+
+    expect(await screen.findByText("repository-scout：invalid")).toBeVisible();
+    const repair = screen.getByRole("button", {
+      name: "使用默认问卷修复 repository-scout",
+    });
+    await user.click(repair);
+    expect(
+      within(
+        screen.getByRole("region", {
+          name: "DeepSeek V4 Flash 子 Agent 能力",
+        }),
+      ).getByRole("group", { name: "任务优势" }),
+    ).toBeVisible();
+  });
+
+  it("renders preview, authoritative status, and TOML inside each profile region", async () => {
+    await renderWorkspace();
+
+    const flash = within(flashRegion());
+    const pro = within(proRegion());
+    expect(
+      await flash.findByText(previewFixture.requestedRoleName),
+    ).toBeVisible();
+    expect(flash.getByText("repository-scout：generated")).toBeVisible();
+    expect(
+      flash.getByText(previewFixture.tomlPreview, {
+        normalizer: getDefaultNormalizer({
+          trim: false,
+          collapseWhitespace: false,
+        }),
+      }),
+    ).toBeVisible();
+    expect(
+      (await pro.findAllByText(proPreviewFixture.requestedRoleName)).length,
+    ).toBeGreaterThan(0);
+    expect(pro.getByText("offline-writer：unroutable")).toBeVisible();
+    expect(
+      pro.getByText(proPreviewFixture.tomlPreview, {
+        normalizer: getDefaultNormalizer({
+          trim: false,
+          collapseWhitespace: false,
+        }),
+      }),
+    ).toBeVisible();
+  });
+
+  it("disables draft controls while a save transaction is pending", async () => {
+    const gate = createDeferred();
+    ipcState.updateGate = gate.promise;
+    const user = userEvent.setup();
+    await mountWorkspaceFromPersistedPlan();
+    const policy = await screen.findByLabelText("第三方子 Agent 选择策略");
+
+    await user.click(
+      screen.getByRole("button", { name: "保存 V2 子 Agent 能力配置" }),
+    );
+    await waitFor(() => expect(updateProviderCalls()).toHaveLength(1));
+    expect(policy).toBeDisabled();
+    expect(within(flashRegion()).getByLabelText("角色描述")).toBeDisabled();
+
+    gate.resolve();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", {
+          name: "保存 V2 子 Agent 能力配置",
+        }),
+      ).toBeEnabled(),
+    );
+  });
+
+  it("merges a concurrent provider catalog refresh instead of rolling it back", async () => {
+    const user = userEvent.setup();
+    await renderWorkspace();
+    ipcState.providers.router.settingsConfig.modelCatalog = {
+      ...ipcState.providers.router.settingsConfig.modelCatalog,
+      refreshedAlias: { "deepseek-v4-flash": "flash-live" },
+    };
+    await chooseOption(
+      user,
+      screen.getByLabelText("第三方子 Agent 选择策略"),
+      "官方优先",
+    );
+
+    await saveV2(user);
+
+    await waitFor(() => expect(updateProviderCalls()).toHaveLength(1));
+    expect(latestSavedPlan()?.settingsConfig.modelCatalog).toEqual(
+      expect.objectContaining({
+        refreshedAlias: { "deepseek-v4-flash": "flash-live" },
+      }),
+    );
+    expect(
+      latestSavedPlan()?.settingsConfig.codexRouting.subagentV2.selectionPolicy,
+    ).toBe("official_first");
+  });
+
+  it("shows preview absence explicitly without inventing a medium effort", async () => {
+    delete ipcState.providers.router.settingsConfig.codexRouting.subagentV2
+      .profiles["repository-scout"].overrides.modelReasoningEffort;
+    ipcState.previewErrors["deepseek-v4-flash"] = "preview unavailable";
+
+    await mountWorkspaceFromPersistedPlan();
+
+    const region = within(flashRegion());
+    expect(await region.findByText("preview unavailable")).toHaveAttribute(
+      "role",
+      "alert",
+    );
+    expect(region.getByLabelText("模型推理强度")).toHaveValue("");
+  });
+
+  it("surfaces authoritative status IPC failures", async () => {
+    ipcState.statusError = "status bridge unavailable";
+
+    await renderWorkspace();
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "status bridge unavailable",
+    );
+  });
+
+  it("uses multiline controls for generated descriptions and instructions", async () => {
+    await renderWorkspace();
+
+    expect(within(flashRegion()).getByLabelText("角色描述").tagName).toBe(
+      "TEXTAREA",
+    );
+    expect(within(flashRegion()).getByLabelText("开发者指令").tagName).toBe(
+      "TEXTAREA",
+    );
+  });
 });
 
 describe("Codex Sub-Agent V2 new-plan capability defaults", () => {
@@ -1260,7 +1586,7 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
       vi
         .mocked(invoke)
         .mock.calls.filter(([command]) => command === "get_providers"),
-    ).toHaveLength(2);
+    ).toHaveLength(3);
   });
 
   it("shares the wizard-saved V2 source with the remounted workspace", async () => {
@@ -1352,10 +1678,11 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
 describe("Codex Sub-Agent V2 preview visible output", () => {
   it("distinguishes requested and effective role names", async () => {
     await renderWorkspace();
-    expect(await screen.findByText("请求角色名")).toBeInTheDocument();
-    expect(screen.getByText("repository-scout")).toBeInTheDocument();
-    expect(screen.getByText("实际角色名")).toBeInTheDocument();
-    expect(screen.getByText("repository-scout-2")).toBeInTheDocument();
+    const output = within(flashBackendRegion());
+    expect(await output.findByText("请求角色名")).toBeInTheDocument();
+    expect(output.getByText("repository-scout")).toBeInTheDocument();
+    expect(output.getByText("实际角色名")).toBeInTheDocument();
+    expect(output.getByText("repository-scout-2")).toBeInTheDocument();
   });
 
   it.each([
@@ -1369,18 +1696,23 @@ describe("Codex Sub-Agent V2 preview visible output", () => {
     ["warning", "Role name was collision-resolved."],
   ])("renders backend-returned %s", async (_field, value) => {
     await renderWorkspace();
-    expect(await screen.findByText(value)).toBeInTheDocument();
+    expect(
+      (await within(flashBackendRegion()).findAllByText(value)).length,
+    ).toBeGreaterThan(0);
   });
 
   it("renders backend-returned backend TOML", async () => {
     await renderWorkspace();
     expect(
-      await screen.findByText(previewFixture.tomlPreview, {
-        normalizer: getDefaultNormalizer({
-          trim: false,
-          collapseWhitespace: false,
-        }),
-      }),
+      await within(flashBackendRegion()).findByText(
+        previewFixture.tomlPreview,
+        {
+          normalizer: getDefaultNormalizer({
+            trim: false,
+            collapseWhitespace: false,
+          }),
+        },
+      ),
     ).toBeInTheDocument();
   });
 
@@ -1413,33 +1745,44 @@ describe("Codex Sub-Agent V2 preview visible output", () => {
 
 describe("Codex Sub-Agent V2 authoritative status visible output", () => {
   it.each([
-    ["provider kind", "Provider 类型：third_party"],
-    ["routable flag", "可路由：是"],
-    ["enabled flag", "已启用：是"],
-    ["role-name source", "角色名称来源：override"],
-    ["description source", "角色描述来源：automatic"],
-    ["developer-instructions source", "开发者指令来源：override"],
-    ["nickname-candidates source", "昵称候选来源：automatic"],
-    ["model-reasoning source", "模型推理强度来源：override"],
-    ["absolute role path", "C:\\Codex\\agents\\repository-scout-2.toml"],
-    ["model", "模型：deepseek-v4-flash"],
-    ["model provider", "模型 Provider：codex_model_router_v2"],
-    ["reasoning effort", "推理强度：medium"],
-    ["generation source", "生成来源：configured_profiles"],
-    ["generated status", "生成状态：generated"],
-    ["second profile status", "offline-writer：unroutable"],
-    ["second profile controlled reason", "未生成原因：unroutable"],
-  ])("renders authoritative %s", async (_field, value) => {
+    ["provider kind", "Provider 类型：third_party", "flash"],
+    ["routable flag", "可路由：是", "flash"],
+    ["enabled flag", "已启用：是", "flash"],
+    ["role-name source", "角色名称来源：override", "flash"],
+    ["description source", "角色描述来源：automatic", "flash"],
+    ["developer-instructions source", "开发者指令来源：override", "flash"],
+    ["nickname-candidates source", "昵称候选来源：automatic", "flash"],
+    ["model-reasoning source", "模型推理强度来源：override", "flash"],
+    [
+      "absolute role path",
+      "C:\\Codex\\agents\\repository-scout-2.toml",
+      "flash",
+    ],
+    ["model", "模型：deepseek-v4-flash", "flash"],
+    ["model provider", "模型 Provider：codex_model_router_v2", "flash"],
+    ["reasoning effort", "推理强度：medium", "flash"],
+    ["generation source", "生成来源：configured_profiles", "global"],
+    ["generated status", "生成状态：generated", "flash"],
+    ["second profile status", "offline-writer：unroutable", "pro"],
+    ["second profile controlled reason", "未生成原因：unroutable", "pro"],
+  ])("renders authoritative %s", async (_field, value, scope) => {
     await renderWorkspace();
-    expect(await screen.findByText(value)).toBeInTheDocument();
+    const output =
+      scope === "flash"
+        ? within(flashBackendRegion())
+        : scope === "pro"
+          ? within(proBackendRegion())
+          : screen;
+    expect(await output.findByText(value)).toBeInTheDocument();
   });
 
   it("renders authoritative requested and effective roles separately", async () => {
     await renderWorkspace();
-    expect(await screen.findByText("请求角色名")).toBeInTheDocument();
-    expect(screen.getByText("repository-scout")).toBeInTheDocument();
-    expect(screen.getByText("实际角色名")).toBeInTheDocument();
-    expect(screen.getByText("repository-scout-2")).toBeInTheDocument();
+    const output = within(flashBackendRegion());
+    expect(await output.findByText("请求角色名")).toBeInTheDocument();
+    expect(output.getByText("repository-scout")).toBeInTheDocument();
+    expect(output.getByText("实际角色名")).toBeInTheDocument();
+    expect(output.getByText("repository-scout-2")).toBeInTheDocument();
   });
 
   it("requests authoritative statuses with the exact settingsConfig-only payload", async () => {
