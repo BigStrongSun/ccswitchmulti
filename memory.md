@@ -31,6 +31,15 @@
 - 新发现的非阻塞边缘风险：CCSM 接管后的官方 `models_cache` 备份只创建一次；除当前 V1/V2 两字段外，其它官方 transport/picker 元数据可能在长期接管期间冻结。该问题不影响本轮两个契约和安装验收，后续若处理应设计官方 cache 刷新/再合并机制，不能简单扩大当前 override 列表。
 - 本轮继续使用 Codex 内置 Web 与 Matrix MCP 两条独立链；内置搜索定位到 Codex 官方 `multi_agent_version`/cache 一手源码和近期 cache 行为问题，Matrix 仍返回 HTTP 521。最终技术判断以本地失败测试、当前源码、安装产物、事务日志、child rollout、SQLite 请求记录和 Router HTTP 200 为主。
 
+## 2026-08-11 Codex OAuth 过期提示竞态与 Windows 开机自启漂移根修
+
+- OAuth 现场日志证明授权完成并保存账号后，同一时刻仍有多条 device-code 流并发；旧 `useManagedAuth` 只保存最后一组 timer 句柄，旧流程的 timeout/poll 回调无法全部取消，随后可把已登录页面重新写成 `Device code expired`。根修提交 `4588fe14`/`7e2bfddf` 将流程收敛为单活动 generation，完成、取消、超时和卸载都会令旧回调失效；到期前重新读取后端账号状态，若账号已可用则保持登录态而不是展示过期错误。RFC 8628 的边界是授权请求到期，不等价于既有账号失效。
+- Windows 现场为 `settings.json.launchOnStartup=true`，但 `HKCU\\...\\Run\\CCSwitchMulti` 缺失，仅有 `StartupApproved` enabled marker。根因是旧版只在前端开关值变化时调用系统 API；升级后注册项丢失而持久设置仍为 true，不会触发修复。`auto_launch.rs` 现在在应用启动时对账持久期望和真实注册状态，Run 缺失或路径漂移时重建带引号的当前 EXE；若 Run 正确但被任务管理器明确禁用则尊重系统选择。边界测试提交 `d9905d6c`，实现同在 `7e2bfddf`。
+- 最终交付基于包含 Sub-Agent V1/V2 全部工作的 `bigstrongsun/subagent-v1-v2`，版本提交 `9b19ee7b`，版本 `3.19.1-19`。可信本地产物位于 `C:\\Users\\sunda\\Documents\\LLMservice\\ccswitchmulti-release-v3.19.1-19-auth-startup-final`；raw EXE SHA-256 为 `4A7DC16978DFF4191014E89B95A60715F76BC4596BB8F24BEFA4BF46D5B5E396`，安装器 SHA-256 为 `003578E5D5B7504372110BA4F8A9E028E702C34A51D10F93F2C43AD88BBB7DC5`。不要使用此前文件名/latest.json 仍停留在 18 的竞态快照。
+- 第一次事务 `ccsm-20260811-000008-58700350f7de4198991ff0d7de754ac1` 因旧 PID 后的 15721 释放等待超时而自动恢复 18；受控实验确认停止旧进程后端口从首个样本起释放且 15 秒无自启动抢占。第二次事务 `ccsm-20260811-033128-ee959119dd414e60b7de6efeb6854c92` 成功安装并启动 19，备份位于 `C:\\Users\\sunda\\Documents\\LLMservice\\ccsm-transaction-backups\\ccsm-20260811-033128-ee959119dd414e60b7de6efeb6854c92`。
+- 安装态独立复核：`C:\\Users\\sunda\\AppData\\Local\\CCSwitchMulti\\cc-switch.exe` 文件/产品版本均为 `3.19.1-19`，哈希与 raw artifact 一致；PID 46868 同时拥有 15721 listener，`/health` HTTP 200。Run 值为带引号的当前 EXE，StartupApproved 为 enabled。实际 UI 显示 Codex OAuth `1 个账号` 且无过期提示，开机自启开关开启。定向前端 10/10、Rust auto_launch 4/4、typecheck 通过；仅有既存 dead-code 与 baseline-browser-mapping 过期提示。尚未执行真实 Windows 注销/登录或重启，因此只能确认注册与启动时对账恢复，不能把系统重启验收记为已完成。
+- 本轮研究同时使用 Codex 内置 Web 与 `matrix-websearch` 两条独立链。内置链以 RFC 8628、Tauri/Windows 启动机制为依据；Matrix 仅独立印证通用 Tauri 自启动 API，CCSwitchMulti 专项结果较弱。最终根因和交付结论以现场日志、当前源码、RED/GREEN 回归、事务安装、注册表、端口、健康接口及实际 UI 为主。
+
 ## 2026-08-10 Sub-Agent V1/V2 3.19.1-17 本机交付与真实验收
 
 - V2 保存后的现场核对先发现一个未被主 catalog 检查覆盖的真实漂移：`cc-switch-model-catalog.json` 的 9 个模型均为 `v2/v2`，但 `models_cache.json` 中 `gpt-5.6-luna` 为 `multi_agent_version=v1 / multiAgentVersion=v2`。接管前备份中 Luna 的官方 snake_case 字段恰为 V1；`sync_codex_models_cache_with_cc_switch_catalog` 再次合并官方备份时，`codex_official_picker_metadata_field` 把该 transport 字段误当成官方权威值，覆盖了当前方案已经投影出的 V2。不能靠手改缓存解决。
