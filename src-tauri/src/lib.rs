@@ -1,4 +1,4 @@
-﻿mod app_config;
+mod app_config;
 mod app_exit_monitor;
 mod app_store;
 mod auto_launch;
@@ -10,6 +10,8 @@ mod codex_desktop;
 mod codex_guardian;
 pub mod codex_history_migration;
 mod codex_state_db;
+#[cfg(test)]
+mod codex_subagent_profiles;
 mod commands;
 mod config;
 mod database;

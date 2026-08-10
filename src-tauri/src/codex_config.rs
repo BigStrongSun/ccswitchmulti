@@ -4374,12 +4374,52 @@ pub fn remove_codex_toml_base_url_if(toml_str: &str, predicate: impl Fn(&str) ->
 }
 
 #[cfg(test)]
-#[path = "codex_subagent_profiles.rs"]
-mod codex_subagent_profiles;
-
-#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_subagent_v2_current_managed_agent_path_cannot_honor_manual_description() {
+        let spec = CodexCatalogModelSpec {
+            model: "DeepSeek-V4-Flash".to_string(),
+            upstream_model: None,
+            display_name: "Configured Flash".to_string(),
+            context_window: 1_000_000,
+            text_only: false,
+            is_default: false,
+            supports_parallel_tool_calls: None,
+            input_modalities: None,
+            base_instructions: None,
+        };
+        let rendered = render_codex_managed_agent_toml("configured-flash", &spec);
+
+        assert!(
+            rendered.contains(
+                "Only investigate protocol evidence supplied by the user; never select this role for implementation."
+            ),
+            "current hardcoded managed-role rendering must use the configured V2 manual description"
+        );
+    }
+
+    #[test]
+    fn codex_subagent_v2_current_managed_agent_path_cannot_honor_explicit_effort() {
+        let spec = CodexCatalogModelSpec {
+            model: "DeepSeek-V4-Flash".to_string(),
+            upstream_model: None,
+            display_name: "Configured Flash".to_string(),
+            context_window: 1_000_000,
+            text_only: false,
+            is_default: false,
+            supports_parallel_tool_calls: None,
+            input_modalities: None,
+            base_instructions: None,
+        };
+        let rendered = render_codex_managed_agent_toml("configured-flash", &spec);
+
+        assert!(
+            rendered.contains(r#"model_reasoning_effort = "xhigh""#),
+            "current hardcoded managed-role rendering must use the configured V2 explicit effort"
+        );
+    }
     use serial_test::serial;
 
     #[test]
