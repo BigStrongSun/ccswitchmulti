@@ -4410,10 +4410,11 @@ mod tests {
             &spec,
         );
 
-        assert!(
+        assert_eq!(
             rendered.contains(
                 "Only investigate protocol evidence supplied by the user; never select this role for implementation."
             ),
+            true,
             "current hardcoded managed-role rendering must use the configured V2 manual description"
         );
     }
@@ -4440,8 +4441,9 @@ mod tests {
             &spec,
         );
 
-        assert!(
+        assert_eq!(
             rendered.contains(r#"model_reasoning_effort = "xhigh""#),
+            true,
             "current hardcoded managed-role rendering must use the configured V2 explicit effort"
         );
     }
@@ -4474,12 +4476,16 @@ mod tests {
             "configured-flash",
             &spec,
         );
-        assert!(
-            first.contains("First manual description.")
-                && first.contains(r#"model_reasoning_effort = "low""#)
-                && second.contains("Second manual description.")
-                && second.contains(r#"model_reasoning_effort = "xhigh""#)
-                && first != second,
+        let actual_relations = [
+            first.contains("First manual description."),
+            first.contains(r#"model_reasoning_effort = "low""#),
+            second.contains("Second manual description."),
+            second.contains(r#"model_reasoning_effort = "xhigh""#),
+            first != second,
+        ];
+        assert_eq!(
+            actual_relations,
+            [true, true, true, true, true],
             "configured materialization must consume each settings/profile input instead of a hardcoded renderer"
         );
     }

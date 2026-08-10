@@ -3,12 +3,84 @@
 use serde::Serialize;
 use serde_json::{json, Value};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SubagentVersion {
+    V1,
+    V2,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SelectionPolicy {
+    Balanced,
+    OfficialFirst,
+    ThirdPartyFirst,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TaskStrength {
+    LongContextReading,
+    RepositoryExploration,
+    EvidenceCollection,
+    Summarization,
+    ComplexDebugging,
+    ArchitectureDesign,
+    BoundedImplementation,
+    ComplexImplementation,
+    Testing,
+    HighRiskReview,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Optimization {
+    Speed,
+    Balanced,
+    Quality,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WriteScope {
+    ReadOnly,
+    BoundedChanges,
+    ComplexChanges,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Preference {
+    Preferred,
+    Eligible,
+    Fallback,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QuestionnaireReasoningEffort {
+    Auto,
+    Low,
+    Medium,
+    High,
+    XHigh,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ModelReasoningEffort {
+    Low,
+    Medium,
+    High,
+    XHigh,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProviderKind {
+    Official,
+    ThirdParty,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CodexSubagentV2 {
     schema_version: u8,
-    selection_policy: String,
+    selection_policy: SelectionPolicy,
     profiles: Vec<PersistedProfileEntry>,
 }
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum PersistedProfileEntry {
     Valid(CodexSubagentProfile),
@@ -18,47 +90,54 @@ enum PersistedProfileEntry {
         validation_code: String,
     },
 }
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CodexSubagentProfile {
     key: String,
     model: String,
     enabled: bool,
-    strengths: Vec<String>,
-    optimization: String,
-    write_scope: String,
-    preference: String,
-    reasoning_effort: String,
+    strengths: Vec<TaskStrength>,
+    optimization: Optimization,
+    write_scope: WriteScope,
+    preference: Preference,
+    reasoning_effort: QuestionnaireReasoningEffort,
     overrides: Overrides,
 }
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Overrides {
     role_name: Option<String>,
     description: Option<String>,
     developer_instructions: Option<String>,
     nickname_candidates: Option<Vec<String>>,
-    model_reasoning_effort: Option<String>,
+    model_reasoning_effort: Option<ModelReasoningEffort>,
 }
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CatalogModel {
     model: String,
-    provider_kind: String,
+    provider_kind: ProviderKind,
     routable: bool,
     context_window: u64,
 }
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CompileRequest {
-    subagent_version: String,
+    subagent_version: SubagentVersion,
     persisted_subagent_v2: Option<CodexSubagentV2>,
     catalog_models: Vec<CatalogModel>,
     occupied_role_names: Vec<String>,
 }
+
 #[derive(Debug, PartialEq, Eq)]
 struct CompileOutput {
     generated_roles: Vec<GeneratedRole>,
     profile_statuses: Vec<ProfileStatus>,
     preserved_invalid_profiles: Vec<Value>,
     diagnostics: Vec<Diagnostic>,
+    legacy_managed_roles_preserved: bool,
 }
+
 #[derive(Debug, PartialEq, Eq)]
 struct GeneratedRole {
     requested_role_name: String,
@@ -68,9 +147,10 @@ struct GeneratedRole {
     nickname_candidates: Vec<String>,
     model: String,
     model_provider: String,
-    effort: String,
+    effort: ModelReasoningEffort,
     context_window: u64,
 }
+
 #[derive(Debug, PartialEq, Eq)]
 struct ProfileStatus {
     key: String,
@@ -78,6 +158,7 @@ struct ProfileStatus {
     status: ProfileStatusCode,
     reason: Option<DiagnosticReasonCode>,
 }
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 enum ProfileStatusCode {
     Routable,
@@ -87,6 +168,7 @@ enum ProfileStatusCode {
     Collision,
     InactiveV1,
 }
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 enum DiagnosticReasonCode {
     Disabled,
@@ -96,14 +178,23 @@ enum DiagnosticReasonCode {
     Collision,
     InactiveV1,
 }
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 struct Diagnostic {
     model: String,
     role: Option<String>,
-    policy: String,
+    policy: SelectionPolicyForDiagnostic,
     status: ProfileStatusCode,
     reason_code: Option<DiagnosticReasonCode>,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+enum SelectionPolicyForDiagnostic {
+    Balanced,
+    OfficialFirst,
+    ThirdPartyFirst,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum CompileError {
     NotImplemented,
@@ -113,12 +204,14 @@ enum CompileError {
         detail: String,
     },
 }
+
 type CompileResult = Result<CompileOutput, CompileError>;
+
 #[derive(Debug)]
 struct DiagnosticSource {
     model: String,
     role: String,
-    policy: String,
+    policy: SelectionPolicyForDiagnostic,
     status: ProfileStatusCode,
     reason_code: DiagnosticReasonCode,
     reason_detail: String,
@@ -131,12 +224,15 @@ struct DiagnosticSource {
 fn parse_persisted_subagent_v2_for_red_test(_: &Value) -> Result<CodexSubagentV2, CompileError> {
     Err(CompileError::NotImplemented)
 }
+
 fn compile_subagent_v2_profiles_for_red_test(_: &CompileRequest) -> CompileResult {
     Err(CompileError::NotImplemented)
 }
+
 fn initialize_legacy_subagent_v2_for_red_test() -> Result<CodexSubagentV2, CompileError> {
     Err(CompileError::NotImplemented)
 }
+
 fn sanitize_subagent_v2_diagnostic_for_red_test(
     _: &DiagnosticSource,
 ) -> Result<Diagnostic, CompileError> {
@@ -146,45 +242,54 @@ fn sanitize_subagent_v2_diagnostic_for_red_test(
 fn s(value: &str) -> String {
     value.to_owned()
 }
+
 fn valid(profile: CodexSubagentProfile) -> PersistedProfileEntry {
     PersistedProfileEntry::Valid(profile)
 }
+
 fn profile(key: &str, model: &str) -> CodexSubagentProfile {
     CodexSubagentProfile {
         key: s(key),
         model: s(model),
         enabled: true,
-        strengths: vec![s("repository_exploration")],
-        optimization: s("speed"),
-        write_scope: s("read_only"),
-        preference: s("eligible"),
-        reasoning_effort: s("auto"),
+        strengths: vec![TaskStrength::RepositoryExploration],
+        optimization: Optimization::Speed,
+        write_scope: WriteScope::ReadOnly,
+        preference: Preference::Eligible,
+        reasoning_effort: QuestionnaireReasoningEffort::Auto,
         overrides: Overrides::default(),
     }
 }
-fn config(policy: &str, profiles: Vec<PersistedProfileEntry>) -> CodexSubagentV2 {
+
+fn config(
+    selection_policy: SelectionPolicy,
+    profiles: Vec<PersistedProfileEntry>,
+) -> CodexSubagentV2 {
     CodexSubagentV2 {
         schema_version: 1,
-        selection_policy: s(policy),
+        selection_policy,
         profiles,
     }
 }
+
 fn catalog(model: &str, routable: bool) -> CatalogModel {
     CatalogModel {
         model: s(model),
-        provider_kind: s("third_party"),
+        provider_kind: ProviderKind::ThirdParty,
         routable,
         context_window: 1_000_000,
     }
 }
+
 fn request(config: Option<CodexSubagentV2>) -> CompileRequest {
     CompileRequest {
-        subagent_version: s("v2"),
+        subagent_version: SubagentVersion::V2,
         persisted_subagent_v2: config,
         catalog_models: vec![catalog("DeepSeek-V4-Flash", true)],
         occupied_role_names: vec![],
     }
 }
+
 fn validation(code: &str, key: Option<&str>, detail: &str) -> CompileError {
     CompileError::Validation {
         code: s(code),
@@ -192,13 +297,14 @@ fn validation(code: &str, key: Option<&str>, detail: &str) -> CompileError {
         detail: s(detail),
     }
 }
+
 fn role(
     requested: &str,
     effective: &str,
     description: &str,
     instructions: &str,
     nicknames: Vec<String>,
-    effort: &str,
+    effort: ModelReasoningEffort,
 ) -> GeneratedRole {
     GeneratedRole {
         requested_role_name: s(requested),
@@ -208,10 +314,11 @@ fn role(
         nickname_candidates: nicknames,
         model: s("DeepSeek-V4-Flash"),
         model_provider: s("codex_model_router_v2"),
-        effort: s(effort),
+        effort,
         context_window: 1_000_000,
     }
 }
+
 fn status(
     key: &str,
     model: Option<&str>,
@@ -225,35 +332,99 @@ fn status(
         reason,
     }
 }
+
 fn output(roles: Vec<GeneratedRole>, statuses: Vec<ProfileStatus>) -> CompileOutput {
     CompileOutput {
         generated_roles: roles,
         profile_statuses: statuses,
         preserved_invalid_profiles: vec![],
         diagnostics: vec![],
+        legacy_managed_roles_preserved: false,
     }
 }
+
+fn expected_routable_output(role: GeneratedRole) -> CompileOutput {
+    output(
+        vec![role],
+        vec![status(
+            "flash",
+            Some("DeepSeek-V4-Flash"),
+            ProfileStatusCode::Routable,
+            None,
+        )],
+    )
+}
+
 fn assert_parse(raw: Value, expected: Result<CodexSubagentV2, CompileError>) {
     assert_eq!(parse_persisted_subagent_v2_for_red_test(&raw), expected);
 }
+
 fn assert_compile(request: &CompileRequest, expected: CompileResult) {
     assert_eq!(compile_subagent_v2_profiles_for_red_test(request), expected);
 }
+
+fn questionnaire() -> Value {
+    json!({
+        "taskStrengths": ["repository_exploration"],
+        "optimization": "speed",
+        "writeScope": "read_only",
+        "preference": "eligible",
+        "reasoningEffort": "auto"
+    })
+}
+
+fn raw_profile_with_questionnaire(questionnaire: Value) -> Value {
+    json!({
+        "schemaVersion": 1,
+        "profiles": {
+            "flash": {
+                "model": "DeepSeek-V4-Flash",
+                "enabled": true,
+                "questionnaire": questionnaire
+            }
+        }
+    })
+}
+
 fn raw_profile(strengths: Value) -> Value {
-    json!({ "schemaVersion": 1, "profiles": { "flash": { "model": "DeepSeek-V4-Flash", "enabled": true, "questionnaire": { "taskStrengths": strengths, "optimization": "speed", "writeScope": "read_only", "preference": "eligible", "reasoningEffort": "auto" } } } })
+    let mut q = questionnaire();
+    q["taskStrengths"] = strengths;
+    raw_profile_with_questionnaire(q)
+}
+
+fn raw_profile_missing_questionnaire_field(field: &str) -> Value {
+    let mut q = questionnaire();
+    q.as_object_mut()
+        .expect("questionnaire fixture is an object")
+        .remove(field);
+    raw_profile_with_questionnaire(q)
+}
+
+fn expected_valid_profile_with_strengths(strengths: Vec<TaskStrength>) -> CodexSubagentV2 {
+    let mut p = profile("flash", "DeepSeek-V4-Flash");
+    p.strengths = strengths;
+    config(SelectionPolicy::Balanced, vec![valid(p)])
+}
+
+fn generated_for_profile(p: CodexSubagentProfile, expected: GeneratedRole) {
+    assert_compile(
+        &request(Some(config(SelectionPolicy::Balanced, vec![valid(p)]))),
+        Ok(expected_routable_output(expected)),
+    );
 }
 
 #[test]
 fn codex_subagent_v2_defaults_only_missing_selection_policy() {
     assert_parse(
-        json!({"schemaVersion":1,"profiles":{}}),
-        Ok(config("balanced", vec![])),
+        json!({"schemaVersion": 1, "profiles": {}}),
+        Ok(config(SelectionPolicy::Balanced, vec![])),
     );
 }
+
 #[test]
 fn codex_subagent_v2_rejects_missing_schema_version() {
     assert_parse(
-        json!({"profiles":{}}),
+        json!({"profiles": {}}),
         Err(validation(
             "missing_schema_version",
             None,
@@ -261,10 +432,37 @@ fn codex_subagent_v2_rejects_missing_schema_version() {
         )),
     );
 }
+
 #[test]
-fn codex_subagent_v2_rejects_invalid_enum_and_missing_questionnaire_field() {
+fn codex_subagent_v2_rejects_schema_version_other_than_one() {
     assert_parse(
-        json!({"schemaVersion":1,"profiles":{"flash":{"model":"m","enabled":true,"questionnaire":{"taskStrengths":["testing"],"optimization":"fastest","preference":"eligible","reasoningEffort":"auto"}}}}),
+        json!({"schemaVersion": 2, "profiles": {}}),
+        Err(validation(
+            "unsupported_schema_version",
+            None,
+            "schemaVersion must be 1",
+        )),
+    );
+}
+
+#[test]
+fn codex_subagent_v2_rejects_invalid_selection_policy_enum() {
+    assert_parse(
+        json!({"schemaVersion": 1, "selectionPolicy": "fastest", "profiles": {}}),
+        Err(validation(
+            "invalid_selection_policy",
+            None,
+            "selectionPolicy is not an allowed enum member",
+        )),
+    );
+}
+
+#[test]
+fn codex_subagent_v2_rejects_invalid_optimization_enum() {
+    let mut q = questionnaire();
+    q["optimization"] = json!("fastest");
+    assert_parse(
+        raw_profile_with_questionnaire(q),
         Err(validation(
             "invalid_optimization",
             Some("flash"),
@@ -272,6 +470,123 @@ fn codex_subagent_v2_rejects_invalid_enum_and_missing_questionnaire_field() {
         )),
     );
 }
+
+#[test]
+fn codex_subagent_v2_rejects_invalid_write_scope_enum() {
+    let mut q = questionnaire();
+    q["writeScope"] = json!("unbounded");
+    assert_parse(
+        raw_profile_with_questionnaire(q),
+        Err(validation(
+            "invalid_write_scope",
+            Some("flash"),
+            "writeScope is not an allowed enum member",
+        )),
+    );
+}
+
+#[test]
+fn codex_subagent_v2_rejects_invalid_preference_enum() {
+    let mut q = questionnaire();
+    q["preference"] = json!("always");
+    assert_parse(
+        raw_profile_with_questionnaire(q),
+        Err(validation(
+            "invalid_preference",
+            Some("flash"),
+            "preference is not an allowed enum member",
+        )),
+    );
+}
+
+#[test]
+fn codex_subagent_v2_rejects_invalid_questionnaire_effort_enum() {
+    let mut q = questionnaire();
+    q["reasoningEffort"] = json!("max");
+    assert_parse(
+        raw_profile_with_questionnaire(q),
+        Err(validation(
+            "invalid_reasoning_effort",
+            Some("flash"),
+            "reasoningEffort is not an allowed enum member",
+        )),
+    );
+}
+
+#[test]
+fn codex_subagent_v2_rejects_auto_as_override_effort_enum() {
+    let mut raw = raw_profile(json!(["repository_exploration"]));
+    raw["profiles"]["flash"]["overrides"] = json!({"modelReasoningEffort": "auto"});
+    assert_parse(
+        raw,
+        Err(validation(
+            "invalid_override_effort",
+            Some("flash"),
+            "modelReasoningEffort allows only low, medium, high, or xhigh",
+        )),
+    );
+}
+
+#[test]
+fn codex_subagent_v2_rejects_missing_task_strengths() {
+    assert_parse(
+        raw_profile_missing_questionnaire_field("taskStrengths"),
+        Err(validation(
+            "missing_task_strengths",
+            Some("flash"),
+            "questionnaire.taskStrengths is required",
+        )),
+    );
+}
+
+#[test]
+fn codex_subagent_v2_rejects_missing_optimization() {
+    assert_parse(
+        raw_profile_missing_questionnaire_field("optimization"),
+        Err(validation(
+            "missing_optimization",
+            Some("flash"),
+            "questionnaire.optimization is required",
+        )),
+    );
+}
+
+#[test]
+fn codex_subagent_v2_rejects_missing_write_scope() {
+    assert_parse(
+        raw_profile_missing_questionnaire_field("writeScope"),
+        Err(validation(
+            "missing_write_scope",
+            Some("flash"),
+            "questionnaire.writeScope is required",
+        )),
+    );
+}
+
+#[test]
+fn codex_subagent_v2_rejects_missing_preference() {
+    assert_parse(
+        raw_profile_missing_questionnaire_field("preference"),
+        Err(validation(
+            "missing_preference",
+            Some("flash"),
+            "questionnaire.preference is required",
+        )),
+    );
+}
+
+#[test]
+fn codex_subagent_v2_rejects_missing_reasoning_effort() {
+    assert_parse(
+        raw_profile_missing_questionnaire_field("reasoningEffort"),
+        Err(validation(
+            "missing_reasoning_effort",
+            Some("flash"),
+            "questionnaire.reasoningEffort is required",
+        )),
+    );
+}
+
 #[test]
 fn codex_subagent_v2_round_trips_all_overrides() {
     let mut p = profile("flash", "DeepSeek-V4-Flash");
@@ -280,16 +595,16 @@ fn codex_subagent_v2_round_trips_all_overrides() {
         description: Some(s("Manual.")),
         developer_instructions: Some(s("Read only.")),
         nickname_candidates: Some(vec![s("Flash Reader")]),
-        model_reasoning_effort: Some(s("xhigh")),
+        model_reasoning_effort: Some(ModelReasoningEffort::XHigh),
     };
     assert_parse(
         json!({"schemaVersion":1,"profiles":{"flash":{"model":"DeepSeek-V4-Flash","enabled":true,"questionnaire":{"taskStrengths":["repository_exploration"],"optimization":"speed","writeScope":"read_only","preference":"eligible","reasoningEffort":"auto"},"overrides":{"roleName":"flash-reader","description":"Manual.","developerInstructions":"Read only.","nicknameCandidates":["Flash Reader"],"modelReasoningEffort":"xhigh"}}}}),
-        Ok(config("balanced", vec![valid(p)])),
+        Ok(config(SelectionPolicy::Balanced, vec![valid(p)])),
     );
 }
 
 #[test]
-fn codex_subagent_v2_strength_count_and_membership_boundaries() {
+fn codex_subagent_v2_rejects_zero_task_strengths() {
     assert_parse(
         raw_profile(json!([])),
         Err(validation(
@@ -298,6 +613,59 @@ fn codex_subagent_v2_strength_count_and_membership_boundaries() {
             "taskStrengths must contain 1 through 5 members",
         )),
     );
+}
+
+#[test]
+fn codex_subagent_v2_accepts_one_task_strength() {
+    assert_parse(
+        raw_profile(json!(["testing"])),
+        Ok(expected_valid_profile_with_strengths(vec![
+            TaskStrength::Testing,
+        ])),
+    );
+}
+
+#[test]
+fn codex_subagent_v2_accepts_five_unique_task_strengths() {
+    assert_parse(
+        raw_profile(json!([
+            "long_context_reading",
+            "repository_exploration",
+            "evidence_collection",
+            "summarization",
+            "testing"
+        ])),
+        Ok(expected_valid_profile_with_strengths(vec![
+            TaskStrength::LongContextReading,
+            TaskStrength::RepositoryExploration,
+            TaskStrength::EvidenceCollection,
+            TaskStrength::Summarization,
+            TaskStrength::Testing,
+        ])),
+    );
+}
+
+#[test]
+fn codex_subagent_v2_rejects_six_task_strengths() {
+    assert_parse(
+        raw_profile(json!([
+            "long_context_reading",
+            "repository_exploration",
+            "evidence_collection",
+            "summarization",
+            "testing",
+            "architecture_design"
+        ])),
+        Err(validation(
+            "strength_count",
+            Some("flash"),
+            "taskStrengths must contain 1 through 5 members",
+        )),
+    );
+}
+
+#[test]
+fn codex_subagent_v2_rejects_duplicate_task_strength() {
     assert_parse(
         raw_profile(json!(["testing", "testing"])),
         Err(validation(
@@ -306,6 +674,10 @@ fn codex_subagent_v2_strength_count_and_membership_boundaries() {
             "taskStrengths members must be unique",
         )),
     );
+}
+
+#[test]
+fn codex_subagent_v2_rejects_unknown_task_strength() {
     assert_parse(
         raw_profile(json!(["unknown"])),
         Err(validation(
@@ -315,12 +687,16 @@ fn codex_subagent_v2_strength_count_and_membership_boundaries() {
         )),
     );
 }
+
 #[test]
 fn codex_subagent_v2_nfkc_collision_rejects_all_and_keeps_models() {
     let a = profile("Ｆｏｏ", "Ｆｏｏ");
     let b = profile("foo", "foo");
     assert_compile(
-        &request(Some(config("balanced", vec![valid(a), valid(b)]))),
+        &request(Some(config(
+            SelectionPolicy::Balanced,
+            vec![valid(a), valid(b)],
+        ))),
         Ok(output(
             vec![],
             vec![
@@ -340,11 +716,12 @@ fn codex_subagent_v2_nfkc_collision_rejects_all_and_keeps_models() {
         )),
     );
 }
+
 #[test]
 fn codex_subagent_v2_default_case_fold_collision_keeps_models() {
     assert_compile(
         &request(Some(config(
-            "balanced",
+            SelectionPolicy::Balanced,
             vec![
                 valid(profile("Straße", "Straße")),
                 valid(profile("STRASSE", "STRASSE")),
@@ -370,158 +747,287 @@ fn codex_subagent_v2_default_case_fold_collision_keeps_models() {
     );
 }
 
-fn effort_case(strength: &str, optimization: &str, override_effort: Option<&str>, expected: &str) {
+fn effort_profile(
+    strength: TaskStrength,
+    optimization: Optimization,
+    override_effort: Option<ModelReasoningEffort>,
+) -> CodexSubagentProfile {
     let mut p = profile("flash", "DeepSeek-V4-Flash");
-    p.strengths = vec![s(strength)];
-    p.optimization = s(optimization);
-    p.overrides.model_reasoning_effort = override_effort.map(s);
-    assert_compile(
-        &request(Some(config("balanced", vec![valid(p)]))),
-        Ok(output(
-            vec![role(
-                "flash",
-                "flash",
-                "generated",
-                "generated",
-                vec![s("Flash")],
-                expected,
-            )],
-            vec![],
-        )),
-    );
-}
-#[test]
-fn codex_subagent_v2_effort_truth_table() {
-    effort_case("architecture_design", "quality", None, "high");
-    effort_case("repository_exploration", "speed", None, "low");
-    effort_case("testing", "speed", None, "medium");
-    effort_case("architecture_design", "quality", Some("xhigh"), "xhigh");
+    p.strengths = vec![strength];
+    p.optimization = optimization;
+    p.overrides.model_reasoning_effort = override_effort;
+    p
 }
 
-fn policy_case(policy: &str, preference: &str, description: &str) {
-    let mut p = profile("flash", "DeepSeek-V4-Flash");
-    p.preference = s(preference);
-    assert_compile(
-        &request(Some(config(policy, vec![valid(p)]))),
-        Ok(output(
-            vec![role(
-                "flash",
-                "flash",
-                description,
-                "generated",
-                vec![s("Flash")],
-                "low",
-            )],
-            vec![],
-        )),
+#[test]
+fn codex_subagent_v2_auto_effort_is_high_for_complex_strength() {
+    generated_for_profile(
+        effort_profile(
+            TaskStrength::ArchitectureDesign,
+            Optimization::Quality,
+            None,
+        ),
+        role(
+            "flash",
+            "flash",
+            "generated",
+            "generated",
+            vec![s("Flash")],
+            ModelReasoningEffort::High,
+        ),
     );
 }
+
 #[test]
-fn codex_subagent_v2_policy_semantics_keep_router_provider() {
-    policy_case(
-        "balanced",
-        "eligible",
+fn codex_subagent_v2_auto_effort_is_low_for_speed_read_only_strengths() {
+    generated_for_profile(
+        effort_profile(
+            TaskStrength::RepositoryExploration,
+            Optimization::Speed,
+            None,
+        ),
+        role(
+            "flash",
+            "flash",
+            "generated",
+            "generated",
+            vec![s("Flash")],
+            ModelReasoningEffort::Low,
+        ),
+    );
+}
+
+#[test]
+fn codex_subagent_v2_auto_effort_is_medium_for_speed_testing() {
+    generated_for_profile(
+        effort_profile(TaskStrength::Testing, Optimization::Speed, None),
+        role(
+            "flash",
+            "flash",
+            "generated",
+            "generated",
+            vec![s("Flash")],
+            ModelReasoningEffort::Medium,
+        ),
+    );
+}
+
+#[test]
+fn codex_subagent_v2_explicit_effort_overrides_auto_effort() {
+    generated_for_profile(
+        effort_profile(
+            TaskStrength::ArchitectureDesign,
+            Optimization::Quality,
+            Some(ModelReasoningEffort::XHigh),
+        ),
+        role(
+            "flash",
+            "flash",
+            "generated",
+            "generated",
+            vec![s("Flash")],
+            ModelReasoningEffort::XHigh,
+        ),
+    );
+}
+
+fn policy_profile(preference: Preference) -> CodexSubagentProfile {
+    let mut p = profile("flash", "DeepSeek-V4-Flash");
+    p.preference = preference;
+    p
+}
+
+fn assert_policy(selection_policy: SelectionPolicy, preference: Preference, description: &str) {
+    assert_compile(
+        &request(Some(config(
+            selection_policy,
+            vec![valid(policy_profile(preference))],
+        ))),
+        Ok(expected_routable_output(role(
+            "flash",
+            "flash",
+            description,
+            "generated",
+            vec![s("Flash")],
+            ModelReasoningEffort::Low,
+        ))),
+    );
+}
+
+#[test]
+fn codex_subagent_v2_balanced_policy_adds_no_provider_bias() {
+    assert_policy(
+        SelectionPolicy::Balanced,
+        Preference::Eligible,
         "Balanced selection: matching eligible profile.",
     );
-    policy_case("official_first","eligible","Official-first selection: eligible third-party profile is not promoted for high-risk work.");
-    policy_case(
-        "third_party_first",
-        "eligible",
+}
+
+#[test]
+fn codex_subagent_v2_official_first_policy_keeps_high_risk_work_official() {
+    assert_policy(
+        SelectionPolicy::OfficialFirst,
+        Preference::Eligible,
+        "Official-first selection: eligible third-party profile is not promoted for high-risk work.",
+    );
+}
+
+#[test]
+fn codex_subagent_v2_third_party_first_policy_promotes_eligible_profile() {
+    assert_policy(
+        SelectionPolicy::ThirdPartyFirst,
+        Preference::Eligible,
         "Third-party-first selection: matching eligible profile is promoted.",
     );
-    policy_case(
-        "official_first",
-        "preferred",
+}
+
+#[test]
+fn codex_subagent_v2_preferred_profile_overrides_official_provider_bias() {
+    assert_policy(
+        SelectionPolicy::OfficialFirst,
+        Preference::Preferred,
         "Official-first selection: explicitly preferred profile overrides provider bias.",
     );
-    policy_case(
-        "third_party_first",
-        "fallback",
+}
+
+#[test]
+fn codex_subagent_v2_fallback_profile_is_never_promoted() {
+    assert_policy(
+        SelectionPolicy::ThirdPartyFirst,
+        Preference::Fallback,
         "Fallback profile is never promoted.",
     );
 }
 
 #[test]
-fn codex_subagent_v2_manual_description_and_field_restore_keep_other_override() {
+fn codex_subagent_v2_manual_description_fully_replaces_policy_text() {
     let mut p = profile("flash", "DeepSeek-V4-Flash");
-    p.overrides.description = Some(s("Manual."));
-    p.overrides.developer_instructions = Some(s("Keep."));
-    assert_compile(
-        &request(Some(config("balanced", vec![valid(p)]))),
-        Ok(output(
-            vec![role(
-                "flash",
-                "flash",
-                "Manual.",
-                "Keep.",
-                vec![s("Flash")],
-                "low",
-            )],
-            vec![],
-        )),
+    p.overrides.description = Some(s("Manual selection text only."));
+    generated_for_profile(
+        p,
+        role(
+            "flash",
+            "flash",
+            "Manual selection text only.",
+            "generated",
+            vec![s("Flash")],
+            ModelReasoningEffort::Low,
+        ),
     );
-    let mut restored = profile("flash", "DeepSeek-V4-Flash");
-    restored.overrides.developer_instructions = Some(s("Keep."));
+}
+
+#[test]
+fn codex_subagent_v2_restoring_description_keeps_other_override() {
+    let mut p = profile("flash", "DeepSeek-V4-Flash");
+    p.overrides.developer_instructions = Some(s("Keep this override."));
+    generated_for_profile(
+        p,
+        role(
+            "flash",
+            "flash",
+            "Balanced selection: matching eligible profile.",
+            "Keep this override.",
+            vec![s("Flash")],
+            ModelReasoningEffort::Low,
+        ),
+    );
+}
+
+fn role_name_request(role_name: &str) -> CompileRequest {
+    let mut p = profile("flash", "DeepSeek-V4-Flash");
+    p.overrides.role_name = Some(s(role_name));
+    request(Some(config(SelectionPolicy::Balanced, vec![valid(p)])))
+}
+
+#[test]
+fn codex_subagent_v2_normalizes_mixed_role_name_separators() {
     assert_compile(
-        &request(Some(config("balanced", vec![valid(restored)]))),
-        Ok(output(
-            vec![role(
-                "flash",
-                "flash",
-                "Balanced selection: matching eligible profile.",
-                "Keep.",
-                vec![s("Flash")],
-                "low",
-            )],
-            vec![],
+        &role_name_request("Foo__-- Bar"),
+        Ok(expected_routable_output(role(
+            "Foo__-- Bar",
+            "foo-bar",
+            "generated",
+            "generated",
+            vec![s("Flash")],
+            ModelReasoningEffort::Low,
+        ))),
+    );
+}
+
+#[test]
+fn codex_subagent_v2_rejects_empty_normalized_role_name() {
+    assert_compile(
+        &role_name_request("深度模型!!!"),
+        Err(validation(
+            "empty_role_name",
+            Some("flash"),
+            "roleName is empty after ASCII normalization",
         )),
     );
 }
-#[test]
-fn codex_subagent_v2_role_normalization_and_request_occupancy() {
-    let mut p = profile("flash", "DeepSeek-V4-Flash");
-    p.overrides.role_name = Some(s("Foo__-- Bar"));
+
+fn assert_builtin_role_rejected(role_name: &str) {
     assert_compile(
-        &request(Some(config("balanced", vec![valid(p)]))),
-        Ok(output(
-            vec![role(
-                "Foo__-- Bar",
-                "foo-bar",
-                "generated",
-                "generated",
-                vec![s("Flash")],
-                "low",
-            )],
-            vec![],
+        &role_name_request(role_name),
+        Err(validation(
+            "reserved_role_name",
+            Some("flash"),
+            "normalized roleName conflicts with a built-in role",
         )),
     );
-    let mut q = profile("flash", "DeepSeek-V4-Flash");
-    q.overrides.role_name = Some(s("review"));
-    let mut r = request(Some(config("balanced", vec![valid(q)])));
-    r.occupied_role_names = vec![s("review"), s("ccswitch-review"), s("ccswitch-review-2")];
+}
+
+#[test]
+fn codex_subagent_v2_rejects_builtin_default_role_name() {
+    assert_builtin_role_rejected(" DEFAULT ");
+}
+
+#[test]
+fn codex_subagent_v2_rejects_builtin_worker_role_name() {
+    assert_builtin_role_rejected("Worker");
+}
+
+#[test]
+fn codex_subagent_v2_rejects_builtin_explorer_role_name() {
+    assert_builtin_role_rejected("explorer");
+}
+
+#[test]
+fn codex_subagent_v2_resolves_case_insensitive_occupied_role_names_in_order() {
+    let mut request = role_name_request("Review");
+    request.occupied_role_names = vec![s("REVIEW"), s("CcSwitch-Review"), s("CCSWITCH-REVIEW-2")];
     assert_compile(
-        &r,
-        Ok(output(
-            vec![role(
-                "review",
-                "ccswitch-review-3",
-                "generated",
-                "generated",
-                vec![s("Flash")],
-                "low",
-            )],
-            vec![],
-        )),
+        &request,
+        Ok(expected_routable_output(role(
+            "Review",
+            "ccswitch-review-3",
+            "generated",
+            "generated",
+            vec![s("Flash")],
+            ModelReasoningEffort::Low,
+        ))),
     );
 }
 
 fn nicknames(values: Vec<&str>) -> CompileRequest {
     let mut p = profile("flash", "DeepSeek-V4-Flash");
     p.overrides.nickname_candidates = Some(values.into_iter().map(s).collect());
-    request(Some(config("balanced", vec![valid(p)])))
+    request(Some(config(SelectionPolicy::Balanced, vec![valid(p)])))
 }
+
+fn expected_nicknames(values: Vec<&str>) -> CompileOutput {
+    expected_routable_output(role(
+        "flash",
+        "flash",
+        "generated",
+        "generated",
+        values.into_iter().map(s).collect(),
+        ModelReasoningEffort::Low,
+    ))
+}
+
 #[test]
-fn codex_subagent_v2_nickname_contract() {
+fn codex_subagent_v2_rejects_zero_nicknames() {
     assert_compile(
         &nicknames(vec![]),
         Err(validation(
@@ -530,34 +1036,23 @@ fn codex_subagent_v2_nickname_contract() {
             "nicknameCandidates must contain 1 through 3 entries",
         )),
     );
-    assert_compile(
-        &nicknames(vec!["One"]),
-        Ok(output(
-            vec![role(
-                "flash",
-                "flash",
-                "generated",
-                "generated",
-                vec![s("One")],
-                "low",
-            )],
-            vec![],
-        )),
-    );
+}
+
+#[test]
+fn codex_subagent_v2_accepts_one_nickname() {
+    assert_compile(&nicknames(vec!["One"]), Ok(expected_nicknames(vec!["One"])));
+}
+
+#[test]
+fn codex_subagent_v2_accepts_three_nicknames() {
     assert_compile(
         &nicknames(vec!["One", "Two", "Three"]),
-        Ok(output(
-            vec![role(
-                "flash",
-                "flash",
-                "generated",
-                "generated",
-                vec![s("One"), s("Two"), s("Three")],
-                "low",
-            )],
-            vec![],
-        )),
+        Ok(expected_nicknames(vec!["One", "Two", "Three"])),
     );
+}
+
+#[test]
+fn codex_subagent_v2_rejects_four_nicknames() {
     assert_compile(
         &nicknames(vec!["One", "Two", "Three", "Four"]),
         Err(validation(
@@ -566,6 +1061,10 @@ fn codex_subagent_v2_nickname_contract() {
             "nicknameCandidates must contain 1 through 3 entries",
         )),
     );
+}
+
+#[test]
+fn codex_subagent_v2_rejects_empty_nickname() {
     assert_compile(
         &nicknames(vec![""]),
         Err(validation(
@@ -574,6 +1073,10 @@ fn codex_subagent_v2_nickname_contract() {
             "nickname must be nonempty",
         )),
     );
+}
+
+#[test]
+fn codex_subagent_v2_rejects_duplicate_nickname() {
     assert_compile(
         &nicknames(vec!["Dup", "Dup"]),
         Err(validation(
@@ -582,6 +1085,10 @@ fn codex_subagent_v2_nickname_contract() {
             "nicknameCandidates must be unique",
         )),
     );
+}
+
+#[test]
+fn codex_subagent_v2_rejects_non_ascii_nickname_character() {
     assert_compile(
         &nicknames(vec!["Bad!"]),
         Err(validation(
@@ -596,37 +1103,38 @@ fn codex_subagent_v2_nickname_contract() {
 fn codex_subagent_v2_invalid_raw_profile_is_preserved_but_not_generated() {
     let raw = json!({"model":"broken","enabled":"yes","questionnaire":false});
     let saved = config(
-        "balanced",
+        SelectionPolicy::Balanced,
         vec![PersistedProfileEntry::Invalid {
             key: s("broken"),
             raw: raw.clone(),
             validation_code: s("invalid_enabled"),
         }],
     );
-    let expected = CompileOutput {
-        generated_roles: vec![],
-        profile_statuses: vec![status(
+    let mut expected = output(
+        vec![],
+        vec![status(
             "broken",
             None,
             ProfileStatusCode::Invalid,
             Some(DiagnosticReasonCode::Invalid),
         )],
-        preserved_invalid_profiles: vec![raw],
-        diagnostics: vec![],
-    };
+    );
+    expected.preserved_invalid_profiles = vec![raw];
     assert_compile(&request(Some(saved)), Ok(expected));
 }
+
 #[test]
-fn codex_subagent_v2_lifecycle_v1_v2_and_alias_preserve_persisted_data() {
+fn codex_subagent_v2_v1_preserves_profiles_without_materializing_v2_roles() {
     let saved = config(
-        "balanced",
+        SelectionPolicy::Balanced,
         vec![valid(profile("flash", "DeepSeek-V4-Flash"))],
     );
-    let mut v1 = request(Some(saved.clone()));
-    v1.subagent_version = s("v1");
-    assert_eq!(v1.persisted_subagent_v2, Some(saved.clone()));
-    assert_compile(
-        &v1,
+    let mut request = request(Some(saved.clone()));
+    request.subagent_version = SubagentVersion::V1;
+    let actual = compile_subagent_v2_profiles_for_red_test(&request);
+    assert_eq!(request.persisted_subagent_v2, Some(saved));
+    assert_eq!(
+        actual,
         Ok(output(
             vec![],
             vec![status(
@@ -635,13 +1143,76 @@ fn codex_subagent_v2_lifecycle_v1_v2_and_alias_preserve_persisted_data() {
                 ProfileStatusCode::InactiveV1,
                 Some(DiagnosticReasonCode::InactiveV1),
             )],
+        ))
+    );
+}
+
+#[test]
+fn codex_subagent_v2_catalog_alias_change_preserves_profile_and_marks_it_unroutable() {
+    let saved = config(
+        SelectionPolicy::Balanced,
+        vec![valid(profile("flash", "DeepSeek-V4-Flash"))],
+    );
+    let mut request = request(Some(saved.clone()));
+    request.catalog_models = vec![catalog("deepseek-flash-alias", true)];
+    let actual = compile_subagent_v2_profiles_for_red_test(&request);
+    assert_eq!(request.persisted_subagent_v2, Some(saved));
+    assert_eq!(
+        actual,
+        Ok(output(
+            vec![],
+            vec![status(
+                "flash",
+                Some("DeepSeek-V4-Flash"),
+                ProfileStatusCode::Unroutable,
+                Some(DiagnosticReasonCode::Unroutable),
+            )],
+        ))
+    );
+}
+
+#[test]
+fn codex_subagent_v2_enabled_routable_profile_generates_role_and_status() {
+    generated_for_profile(
+        profile("flash", "DeepSeek-V4-Flash"),
+        role(
+            "flash",
+            "flash",
+            "Balanced selection: matching eligible profile.",
+            "generated",
+            vec![s("Flash")],
+            ModelReasoningEffort::Low,
+        ),
+    );
+}
+
+#[test]
+fn codex_subagent_v2_disabled_profile_is_retained_but_generates_no_role() {
+    let mut p = profile("flash", "DeepSeek-V4-Flash");
+    p.enabled = false;
+    assert_compile(
+        &request(Some(config(SelectionPolicy::Balanced, vec![valid(p)]))),
+        Ok(output(
+            vec![],
+            vec![status(
+                "flash",
+                Some("DeepSeek-V4-Flash"),
+                ProfileStatusCode::Disabled,
+                Some(DiagnosticReasonCode::Disabled),
+            )],
         )),
     );
-    let mut alias = request(Some(saved.clone()));
-    alias.catalog_models = vec![catalog("deepseek-flash-alias", true)];
-    assert_eq!(alias.persisted_subagent_v2, Some(saved));
+}
+
+#[test]
+fn codex_subagent_v2_unroutable_profile_is_retained_but_generates_no_role() {
+    let mut request = request(Some(config(
+        SelectionPolicy::Balanced,
+        vec![valid(profile("flash", "DeepSeek-V4-Flash"))],
+    )));
+    request.catalog_models = vec![catalog("DeepSeek-V4-Flash", false)];
     assert_compile(
-        &alias,
+        &request,
         Ok(output(
             vec![],
             vec![status(
@@ -653,40 +1224,51 @@ fn codex_subagent_v2_lifecycle_v1_v2_and_alias_preserve_persisted_data() {
         )),
     );
 }
+
 #[test]
-fn codex_subagent_v2_missing_config_is_legacy_and_explicit_init_has_exact_presets() {
-    assert_compile(&request(None), Ok(output(vec![], vec![])));
+fn codex_subagent_v2_missing_config_preserves_legacy_managed_role_behavior() {
+    let mut expected = output(vec![], vec![]);
+    expected.legacy_managed_roles_preserved = true;
+    assert_compile(&request(None), Ok(expected));
+}
+
+#[test]
+fn codex_subagent_v2_explicit_init_has_exact_flash_and_pro_presets() {
     let mut flash = profile("deepseek-v4-flash", "deepseek-v4-flash");
     flash.strengths = vec![
-        s("long_context_reading"),
-        s("repository_exploration"),
-        s("evidence_collection"),
-        s("summarization"),
-        s("testing"),
+        TaskStrength::LongContextReading,
+        TaskStrength::RepositoryExploration,
+        TaskStrength::EvidenceCollection,
+        TaskStrength::Summarization,
+        TaskStrength::Testing,
     ];
-    flash.reasoning_effort = s("medium");
+    flash.reasoning_effort = QuestionnaireReasoningEffort::Medium;
     let mut pro = profile("deepseek-v4-pro", "deepseek-v4-pro");
     pro.strengths = vec![
-        s("complex_debugging"),
-        s("architecture_design"),
-        s("complex_implementation"),
-        s("high_risk_review"),
-        s("testing"),
+        TaskStrength::ComplexDebugging,
+        TaskStrength::ArchitectureDesign,
+        TaskStrength::ComplexImplementation,
+        TaskStrength::HighRiskReview,
+        TaskStrength::Testing,
     ];
-    pro.optimization = s("quality");
-    pro.write_scope = s("complex_changes");
-    pro.reasoning_effort = s("high");
+    pro.optimization = Optimization::Quality;
+    pro.write_scope = WriteScope::ComplexChanges;
+    pro.reasoning_effort = QuestionnaireReasoningEffort::High;
     assert_eq!(
         initialize_legacy_subagent_v2_for_red_test(),
-        Ok(config("balanced", vec![valid(flash), valid(pro)]))
+        Ok(config(
+            SelectionPolicy::Balanced,
+            vec![valid(flash), valid(pro)],
+        ))
     );
 }
+
 #[test]
-fn codex_subagent_v2_diagnostic_sanitizer_uses_reason_code_not_arbitrary_text() {
+fn codex_subagent_v2_diagnostic_sanitizer_emits_only_allowlisted_metadata() {
     let source = DiagnosticSource {
         model: s("DeepSeek-V4-Flash"),
         role: s("flash"),
-        policy: s("balanced"),
+        policy: SelectionPolicyForDiagnostic::Balanced,
         status: ProfileStatusCode::Unroutable,
         reason_code: DiagnosticReasonCode::Unroutable,
         reason_detail: s("internal detail SECRET_REASON"),
@@ -698,25 +1280,22 @@ fn codex_subagent_v2_diagnostic_sanitizer_uses_reason_code_not_arbitrary_text() 
     let expected = Diagnostic {
         model: s("DeepSeek-V4-Flash"),
         role: Some(s("flash")),
-        policy: s("balanced"),
+        policy: SelectionPolicyForDiagnostic::Balanced,
         status: ProfileStatusCode::Unroutable,
         reason_code: Some(DiagnosticReasonCode::Unroutable),
     };
+    let actual = sanitize_subagent_v2_diagnostic_for_red_test(&source).map(|diagnostic| {
+        let serialized = serde_json::to_string(&diagnostic)
+            .expect("allowlisted diagnostic must remain serializable");
+        (diagnostic, serialized)
+    });
     assert_eq!(
-        sanitize_subagent_v2_diagnostic_for_red_test(&source),
-        Ok(expected.clone())
+        actual,
+        Ok((
+            expected,
+            s(
+                r#"{"model":"DeepSeek-V4-Flash","role":"flash","policy":"Balanced","status":"Unroutable","reason_code":"Unroutable"}"#
+            ),
+        ))
     );
-    let serialized = serde_json::to_string(&expected).expect("serialize allowlisted diagnostic");
-    for marker in [
-        "SECRET_REASON",
-        "ARBITRARY_SECRET",
-        "API_KEY_SECRET",
-        "TASK_BODY_SECRET",
-        "ENCRYPTED_SECRET",
-    ] {
-        assert!(
-            !serialized.contains(marker),
-            "sanitized diagnostic must not contain {marker}"
-        );
-    }
 }
