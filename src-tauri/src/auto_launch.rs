@@ -275,6 +275,14 @@ mod tests {
         assert_eq!(auto_launch_reconciliation_action(false, false), None);
     }
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_startup_reconciliation_repairs_missing_run_but_respects_task_manager_disable() {
+        assert_eq!(windows::reconciliation_action(true, false, true), Some(true));
+        assert_eq!(windows::reconciliation_action(true, true, false), None);
+        assert_eq!(windows::reconciliation_action(false, true, true), Some(false));
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn test_get_macos_app_bundle_path_valid() {
