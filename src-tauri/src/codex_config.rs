@@ -4800,6 +4800,59 @@ pub fn remove_codex_toml_base_url_if(toml_str: &str, predicate: impl Fn(&str) ->
 mod tests {
     use super::*;
 
+    /// RED-only view of the current backend boundary. Materialization currently
+    /// discards compiler statuses and exposes only generated roles (or `null`
+    /// for legacy mode), which lets the status-contract tests fail by assertion
+    /// instead of failing to compile before the public command exists.
+    fn current_backend_status_surface_for_red(
+        settings: &Value,
+        provider_context: Option<&ProviderClassificationContext>,
+    ) -> Result<Value, AppError> {
+        let specs = codex_catalog_model_specs(settings, "");
+        let roles = compile_configured_codex_subagent_roles(
+            settings,
+            &specs,
+            codex_subagent_version(settings),
+            provider_context,
+        )?;
+        serde_json::to_value(roles).map_err(|error| AppError::Config(error.to_string()))
+    }
+
+    fn codex_subagent_profile_status_settings(
+        version: &str,
+        profiles: Value,
+        models: Value,
+        routes: Value,
+    ) -> Value {
+        json!({
+            "modelCatalog": { "models": models },
+            "codexRouting": {
+                "enabled": true,
+                "subagentVersion": version,
+                "subagentV2": {
+                    "schemaVersion": 1,
+                    "selectionPolicy": "balanced",
+                    "profiles": profiles
+                },
+                "routes": routes
+            }
+        })
+    }
+
+    fn codex_subagent_profile_status_profile(model: &str, enabled: bool) -> Value {
+        json!({
+            "model": model,
+            "enabled": enabled,
+            "questionnaire": {
+                "taskStrengths": ["repository_exploration"],
+                "optimization": "speed",
+                "writeScope": "read_only",
+                "preference": "eligible",
+                "reasoningEffort": "auto"
+            }
+        })
+    }
+
     #[test]
     #[serial_test::serial]
     fn codex_subagent_v2_preview_command_uses_exact_safe_camel_case_contract() {
@@ -4864,6 +4917,310 @@ mod tests {
         let serialized = serde_json::to_string(&value).expect("serialize safe preview");
         assert!(!serialized.contains("MUST_NOT_LEAK"));
         assert!(!serialized.contains("apiKey"));
+    }
+
+    #[test]
+    fn codex_subagent_profile_status_command_is_registered_without_changing_preview_ipc() {
+        let lib_source = include_str!("lib.rs");
+        assert!(
+            lib_source.contains("codex_config::get_codex_subagent_profile_statuses,"),
+            "the read-only status command must be registered independently from preview"
+        );
+        assert!(lib_source.contains("codex_config::preview_codex_subagent_profile,"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn codex_subagent_profile_status_configured_generated_is_exact_and_dry_run() {
+        let _guard = TestHomeGuard::new();
+        let agents_dir = get_codex_agents_dir();
+        std::fs::create_dir_all(&agents_dir).expect("create isolated agents dir");
+        let first_user_role = agents_dir.join("analysis-role.toml");
+        let second_user_role = agents_dir.join("ccswitch-analysis-role.toml");
+        std::fs::write(
+            &first_user_role,
+            "name = \"analysis-role\"\nuser = \"FIRST\"\n",
+        )
+        .expect("seed first user role");
+        std::fs::write(
+            &second_user_role,
+            "name = \"ccswitch-analysis-role\"\nuser = \"SECOND\"\n",
+        )
+        .expect("seed second user role");
+
+        let mut profile = codex_subagent_profile_status_profile("neutral-model", true);
+        profile["overrides"] = json!({
+            "roleName": "Analysis Role",
+            "nicknameCandidates": ["Neutral Scout"],
+            "modelReasoningEffort": "high"
+        });
+        let settings = codex_subagent_profile_status_settings(
+            "v2",
+            json!({ "neutral": profile }),
+            json!([{ "model": "neutral-model", "contextWindow": 262144 }]),
+            json!([{
+                "id": "neutral-route",
+                "match": { "models": ["neutral-model"] },
+                "upstream": {
+                    "targetProviderId": "official-target",
+                    "auth": { "source": "provider_config", "apiKey": "ROUTE_SECRET_SENTINEL" }
+                }
+            }]),
+        );
+        let mut official = Provider::with_id(
+            "official-target".to_string(),
+            "Official target".to_string(),
+            json!({}),
+            None,
+        );
+        official.category = Some("official".to_string());
+        let context = ProviderClassificationContext::from_providers([&official]);
+
+        let value = current_backend_status_surface_for_red(&settings, Some(&context))
+            .expect("inspect configured status");
+        let expected_path = agents_dir.join("ccswitch-analysis-role-2.toml");
+        assert_eq!(
+            value,
+            json!({
+                "mode": "v2",
+                "generationSource": "configured_profiles",
+                "profiles": [{
+                    "profileKey": "neutral",
+                    "model": "neutral-model",
+                    "providerKind": "official",
+                    "enabled": true,
+                    "routable": true,
+                    "fieldSources": {
+                        "roleName": "override",
+                        "description": "automatic",
+                        "developerInstructions": "automatic",
+                        "nicknameCandidates": "override",
+                        "modelReasoningEffort": "override"
+                    },
+                    "requestedRoleName": "Analysis Role",
+                    "effectiveRoleName": "ccswitch-analysis-role-2",
+                    "roleFilePath": expected_path.to_string_lossy(),
+                    "modelProvider": "codex_model_router_v2",
+                    "modelReasoningEffort": "high",
+                    "status": "generated",
+                    "warnings": []
+                }],
+                "warnings": []
+            })
+        );
+        assert_eq!(
+            std::fs::read_to_string(&first_user_role).expect("read first user role"),
+            "name = \"analysis-role\"\nuser = \"FIRST\"\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&second_user_role).expect("read second user role"),
+            "name = \"ccswitch-analysis-role\"\nuser = \"SECOND\"\n"
+        );
+        assert!(
+            !expected_path.exists(),
+            "status inspection must not write roles"
+        );
+        let serialized = value.to_string();
+        assert!(!serialized.contains("ROUTE_SECRET_SENTINEL"));
+        assert!(!serialized.contains("apiKey"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn codex_subagent_profile_status_reports_non_generation_reasons_and_redacts_invalid_raw() {
+        let _guard = TestHomeGuard::new();
+        let settings = codex_subagent_profile_status_settings(
+            "v2",
+            json!({
+                "disabled": codex_subagent_profile_status_profile("disabled-model", false),
+                "unroutable": codex_subagent_profile_status_profile("unroutable-model", true),
+                "flash": codex_subagent_profile_status_profile("collision-a", true),
+                "Ｆｌａｓｈ": codex_subagent_profile_status_profile("collision-b", true),
+                "PROFILE_KEY_SECRET_SENTINEL": {
+                    "model": "MODEL_SECRET_SENTINEL",
+                    "enabled": "CREDENTIAL_SECRET_SENTINEL",
+                    "apiKey": "API_KEY_SECRET_SENTINEL",
+                    "taskBody": "TASK_SECRET_SENTINEL",
+                    "encryptedContent": "ENCRYPTED_SECRET_SENTINEL"
+                }
+            }),
+            json!([
+                { "model": "disabled-model", "contextWindow": 1000 },
+                { "model": "unroutable-model", "contextWindow": 1000 },
+                { "model": "collision-a", "contextWindow": 1000 },
+                { "model": "collision-b", "contextWindow": 1000 }
+            ]),
+            json!([{
+                "match": { "models": ["disabled-model", "collision-a", "collision-b"] },
+                "upstream": { "auth": { "source": "provider_config" } }
+            }]),
+        );
+        let value = current_backend_status_surface_for_red(&settings, None)
+            .expect("inspect non-generation statuses");
+        assert_eq!(value["mode"], "v2");
+        assert_eq!(value["generationSource"], "configured_profiles");
+        let profiles = value["profiles"].as_array().expect("status profiles");
+        assert_eq!(profiles.len(), 5, "every stored entry must be preserved");
+        assert!(profiles.iter().any(|status| {
+            status["profileKey"] == "disabled"
+                && status["status"] == "disabled"
+                && status["nonGenerationReason"] == "disabled"
+                && status["routable"] == false
+                && status.get("roleFilePath").is_none()
+        }));
+        assert!(profiles.iter().any(|status| {
+            status["profileKey"] == "unroutable"
+                && status["status"] == "unroutable"
+                && status["nonGenerationReason"] == "unroutable"
+                && status["routable"] == false
+        }));
+        assert_eq!(
+            profiles
+                .iter()
+                .filter(|status| status["status"] == "collision")
+                .count(),
+            2
+        );
+        let invalid = profiles
+            .iter()
+            .find(|status| status["status"] == "invalid")
+            .expect("invalid status");
+        assert_eq!(
+            invalid,
+            &json!({
+                "routable": false,
+                "status": "invalid",
+                "nonGenerationReason": "invalid",
+                "warnings": []
+            })
+        );
+        let serialized = value.to_string();
+        for sentinel in [
+            "PROFILE_KEY_SECRET_SENTINEL",
+            "MODEL_SECRET_SENTINEL",
+            "CREDENTIAL_SECRET_SENTINEL",
+            "API_KEY_SECRET_SENTINEL",
+            "TASK_SECRET_SENTINEL",
+            "ENCRYPTED_SECRET_SENTINEL",
+        ] {
+            assert!(!serialized.contains(sentinel), "leaked sentinel {sentinel}");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn codex_subagent_profile_status_v1_marks_each_explicit_profile_inactive() {
+        let _guard = TestHomeGuard::new();
+        let settings = codex_subagent_profile_status_settings(
+            "v1",
+            json!({
+                "flash": codex_subagent_profile_status_profile("deepseek-v4-flash", true)
+            }),
+            json!([{ "model": "deepseek-v4-flash", "contextWindow": 1000000 }]),
+            json!([{
+                "match": { "models": ["deepseek-v4-flash"] },
+                "upstream": { "auth": { "source": "provider_config" } }
+            }]),
+        );
+        let value = current_backend_status_surface_for_red(&settings, None)
+            .expect("inspect inactive V1 profile");
+        assert_eq!(value["mode"], "v1");
+        assert_eq!(value["generationSource"], "inactive_v1");
+        assert_eq!(value["profiles"][0]["status"], "inactive_v1");
+        assert_eq!(value["profiles"][0]["nonGenerationReason"], "inactive_v1");
+        assert_eq!(value["profiles"][0]["routable"], false);
+        assert!(value["profiles"][0].get("roleFilePath").is_none());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn codex_subagent_profile_status_legacy_inspects_actual_roles_without_writes() {
+        let _guard = TestHomeGuard::new();
+        let agents_dir = get_codex_agents_dir();
+        std::fs::create_dir_all(&agents_dir).expect("create isolated agents dir");
+        let user_role = agents_dir.join("qwen-local.toml");
+        std::fs::write(&user_role, "name = \"qwen-local\"\nuser = \"KEEP\"\n")
+            .expect("seed user role");
+        let settings = json!({
+            "modelCatalog": { "models": [
+                { "model": "qwen3.6", "contextWindow": 262144 },
+                { "model": "deepseek-v4-flash", "contextWindow": 1000000 }
+            ] },
+            "codexRouting": {
+                "enabled": true,
+                "subagentVersion": "v2",
+                "routes": [{
+                    "match": { "models": ["qwen3.6", "deepseek-v4-flash"] },
+                    "upstream": { "auth": { "source": "provider_config" } }
+                }]
+            }
+        });
+        let value = current_backend_status_surface_for_red(&settings, None)
+            .expect("inspect legacy managed roles");
+        assert_eq!(value["mode"], "v2");
+        assert_eq!(value["generationSource"], "legacy_managed_roles");
+        assert_eq!(value["profiles"].as_array().map(Vec::len), Some(2));
+        let qwen = value["profiles"]
+            .as_array()
+            .and_then(|profiles| profiles.iter().find(|status| status["model"] == "qwen3.6"))
+            .expect("qwen legacy status");
+        assert_eq!(qwen["requestedRoleName"], "qwen-local");
+        assert_eq!(qwen["effectiveRoleName"], "ccswitch-qwen-local");
+        assert_eq!(
+            qwen["roleFilePath"],
+            agents_dir
+                .join("ccswitch-qwen-local.toml")
+                .to_string_lossy()
+                .as_ref()
+        );
+        assert_eq!(qwen["status"], "generated");
+        assert_eq!(qwen["routable"], true);
+        assert_eq!(
+            std::fs::read_to_string(&user_role).expect("read preserved user role"),
+            "name = \"qwen-local\"\nuser = \"KEEP\"\n"
+        );
+        assert!(!agents_dir.join("ccswitch-qwen-local.toml").exists());
+        assert!(!agents_dir.join("deepseek-flash.toml").exists());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn codex_subagent_profile_status_propagates_db_errors_and_never_infers_provider_from_model() {
+        let _guard = TestHomeGuard::new();
+        let broken_db = crate::database::Database {
+            conn: std::sync::Mutex::new(
+                rusqlite::Connection::open_in_memory().expect("open schema-less database"),
+            ),
+        };
+        let error = codex_provider_classification_context(&broken_db)
+            .expect_err("provider query errors must propagate");
+        assert!(error.to_string().contains("no such table: providers"));
+
+        let settings = codex_subagent_profile_status_settings(
+            "v2",
+            json!({
+                "official-looking": codex_subagent_profile_status_profile("gpt-official-looking", true)
+            }),
+            json!([{ "model": "gpt-official-looking", "contextWindow": 128000 }]),
+            json!([{
+                "match": { "models": ["gpt-official-looking"] },
+                "upstream": {
+                    "targetProviderId": "third-party-target",
+                    "auth": { "source": "managed_codex_oauth" }
+                }
+            }]),
+        );
+        let third_party = Provider::with_id(
+            "third-party-target".to_string(),
+            "Third party target".to_string(),
+            json!({}),
+            None,
+        );
+        let context = ProviderClassificationContext::from_providers([&third_party]);
+        let value = current_backend_status_surface_for_red(&settings, Some(&context))
+            .expect("inspect authoritative provider record");
+        assert_eq!(value["profiles"][0]["providerKind"], "third_party");
+        assert_eq!(value["profiles"][0]["status"], "generated");
     }
 
     #[test]
