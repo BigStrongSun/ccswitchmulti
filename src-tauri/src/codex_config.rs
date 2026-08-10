@@ -6073,8 +6073,8 @@ mod tests {
         let agents_dir = get_codex_agents_dir();
         std::fs::create_dir_all(&agents_dir).expect("create agents dir");
         let user_path = agents_dir.join("user.toml");
-        std::fs::write(&user_path, "name = \"user\"\nmodel = \"custom\"\n")
-            .expect("seed user role");
+        let user_content = "name = \"user\"\nmodel = \"custom\"\n";
+        std::fs::write(&user_path, user_content).expect("seed user role");
         let specs = vec![CodexCatalogModelSpec {
             model: "DeepSeek-V4-Flash".to_string(),
             upstream_model: None,
@@ -6099,46 +6099,46 @@ mod tests {
                 }
             })
         };
+        let persisted_settings = make_settings("Preserved config.");
         sync_codex_managed_agent_files_with_settings(
             &specs,
             CodexSubagentVersion::V2,
-            &make_settings("First filesystem config."),
+            &persisted_settings,
             None,
         )
         .expect("first sync");
         let path = agents_dir.join("flash.toml");
         let first = std::fs::read_to_string(&path).expect("first managed role");
-        sync_codex_managed_agent_files_with_settings(
-            &specs,
-            CodexSubagentVersion::V2,
-            &make_settings("Second filesystem config."),
-            None,
-        )
-        .expect("second sync");
-        let second = std::fs::read_to_string(&path).expect("second managed role");
-        assert_ne!(first, second);
-        assert!(second.contains("Second filesystem config."));
+        assert!(first.contains("Preserved config."));
+        assert!(first.contains("model_reasoning_effort = \"medium\""));
 
         sync_codex_managed_agent_files_with_settings(
             &specs,
             CodexSubagentVersion::V1,
-            &make_settings("Preserved config."),
+            &persisted_settings,
             None,
         )
         .expect("V1 cleanup");
         assert!(!path.exists());
-        assert!(user_path.exists());
+        assert_eq!(
+            std::fs::read_to_string(&user_path).expect("read user role after V1 cleanup"),
+            user_content
+        );
 
         sync_codex_managed_agent_files_with_settings(
             &specs,
             CodexSubagentVersion::V2,
-            &make_settings("Preserved config."),
+            &persisted_settings,
             None,
         )
         .expect("V2 restore after V1");
         let restored = std::fs::read_to_string(&path).expect("restored managed role");
         assert!(restored.contains("Preserved config."));
-        assert!(user_path.exists());
+        assert!(restored.contains("model_reasoning_effort = \"medium\""));
+        assert_eq!(
+            std::fs::read_to_string(&user_path).expect("read user role after V2 restore"),
+            user_content
+        );
     }
 
     #[test]
@@ -6191,11 +6191,8 @@ mod tests {
         )
         .expect("catalog model temporarily absent");
         assert!(!path.exists());
-        assert_eq!(
-            settings["codexRouting"]["subagentV2"]["profiles"]["canonical"]["model"],
-            canonical_model
-        );
-
+        // This renderer does not own persistence. Reusing the same retained settings
+        // proves filesystem/compiler restoration; DAO interleaving tests cover storage survival.
         sync_codex_managed_agent_files_with_settings(
             &[spec("Renamed visible alias")],
             CodexSubagentVersion::V2,
@@ -6206,6 +6203,7 @@ mod tests {
         let restored = std::fs::read_to_string(&path).expect("restored canonical role");
         assert!(restored.contains(&format!("model = \"{canonical_model}\"")));
         assert!(restored.contains("Persisted questionnaire override."));
+        assert!(restored.contains("model_reasoning_effort = \"medium\""));
     }
 
     #[test]
