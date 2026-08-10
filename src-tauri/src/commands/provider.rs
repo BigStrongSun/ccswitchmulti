@@ -71,6 +71,17 @@ pub fn update_provider(
 }
 
 #[tauri::command]
+#[allow(non_snake_case)]
+pub fn update_codex_subagent_v2(
+    state: State<'_, AppState>,
+    providerId: String,
+    subagentV2: serde_json::Value,
+) -> Result<Provider, String> {
+    ProviderService::update_codex_subagent_v2(state.inner(), &providerId, subagentV2)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn delete_provider(
     state: State<'_, AppState>,
     app: String,

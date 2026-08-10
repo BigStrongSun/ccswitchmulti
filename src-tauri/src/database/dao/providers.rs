@@ -2,7 +2,7 @@ use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 use crate::provider::{Provider, ProviderMeta};
 use indexmap::IndexMap;
-use rusqlite::params;
+use rusqlite::{params, TransactionBehavior};
 use std::collections::{HashMap, HashSet};
 
 /// 将持久化的供应商配置规范化为 JSON 对象。
@@ -347,6 +347,62 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
         Ok(())
+    }
+
+    /// Atomically replace only `settingsConfig.codexRouting.subagentV2` in the latest Codex
+    /// provider row. The read and write share one IMMEDIATE transaction so an editor snapshot
+    /// can never overwrite catalog, alias, route, credential, or future-field refreshes that
+    /// committed before this operation acquired the writer boundary.
+    pub fn update_codex_subagent_v2(
+        &self,
+        provider_id: &str,
+        subagent_v2: &serde_json::Value,
+    ) -> Result<serde_json::Value, AppError> {
+        let mut conn = lock_conn!(self.conn);
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        let settings_config_str = tx
+            .query_row(
+                "SELECT settings_config FROM providers WHERE id = ?1 AND app_type = 'codex'",
+                params![provider_id],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    AppError::InvalidInput("Codex provider does not exist".to_string())
+                }
+                other => AppError::Database(other.to_string()),
+            })?;
+        let mut settings_config = parse_provider_settings_config(&settings_config_str);
+        let settings = settings_config.as_object_mut().ok_or_else(|| {
+            AppError::Database("Provider settings normalization failed".to_string())
+        })?;
+        let routing = settings
+            .entry("codexRouting".to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        if !routing.is_object() {
+            *routing = serde_json::json!({});
+        }
+        routing
+            .as_object_mut()
+            .ok_or_else(|| AppError::Database("Codex routing normalization failed".to_string()))?
+            .insert("subagentV2".to_string(), subagent_v2.clone());
+        let serialized = serde_json::to_string(&settings_config)
+            .map_err(|e| AppError::Database(format!("Failed to serialize settings_config: {e}")))?;
+        let changed = tx
+            .execute(
+                "UPDATE providers SET settings_config = ?1 WHERE id = ?2 AND app_type = 'codex'",
+                params![serialized, provider_id],
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        if changed != 1 {
+            return Err(AppError::Database(
+                "Focused Codex subagent V2 update changed an unexpected row count".to_string(),
+            ));
+        }
+        tx.commit().map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(settings_config)
     }
 
     pub fn add_custom_endpoint(

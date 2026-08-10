@@ -3513,6 +3513,34 @@ impl ProviderService {
         Ok(true)
     }
 
+    /// Persist one V2 capability document without replacing the surrounding Provider record.
+    /// Domain validation happens before the DAO transaction; the DAO then merges only the owned
+    /// field into the latest row, and the established current-provider projection path applies
+    /// the committed result to Codex live state when necessary.
+    pub fn update_codex_subagent_v2(
+        state: &AppState,
+        provider_id: &str,
+        subagent_v2: Value,
+    ) -> Result<Provider, AppError> {
+        crate::codex_subagent_profiles::parse_persisted_subagent_v2(&subagent_v2).map_err(
+            |_| {
+                AppError::InvalidInput(
+                    "codexRouting.subagentV2 does not satisfy the schema-v1 contract".to_string(),
+                )
+            },
+        )?;
+        state
+            .db
+            .update_codex_subagent_v2(provider_id, &subagent_v2)?;
+        Self::sync_current_provider_for_app(state, AppType::Codex)?;
+        state
+            .db
+            .get_all_providers(AppType::Codex.as_str())?
+            .get(provider_id)
+            .cloned()
+            .ok_or_else(|| AppError::InvalidInput("Codex provider does not exist".to_string()))
+    }
+
     /// Delete a provider
     ///
     /// 同时检查本地 settings 和数据库的当前供应商，防止删除任一端正在使用的供应商。

@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
-import { providersApi } from "@/lib/api/providers";
 import { codexSubagentV2Api } from "@/lib/api/codexSubagentV2";
 import type { Provider } from "@/types";
 import {
@@ -36,6 +35,8 @@ const PROFILE_TITLES: Record<string, string> = {
   "deepseek-v4-pro": "DeepSeek V4 Pro 子 Agent 能力",
 };
 
+const EXPLICIT_REASONING_EFFORTS = new Set(["low", "medium", "high", "xhigh"]);
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -46,12 +47,38 @@ function isUsableProfile(value: unknown): value is CodexSubagentV2Profile {
     return false;
   }
   const questionnaire = value.questionnaire;
+  if (
+    !(
+      Array.isArray(questionnaire.taskStrengths) &&
+      questionnaire.taskStrengths.every(
+        (strength) => typeof strength === "string",
+      ) &&
+      typeof questionnaire.optimization === "string" &&
+      typeof questionnaire.writeScope === "string" &&
+      typeof questionnaire.preference === "string" &&
+      typeof questionnaire.reasoningEffort === "string"
+    )
+  ) {
+    return false;
+  }
+  if (value.overrides === undefined) return true;
+  if (!isRecord(value.overrides)) return false;
+  const overrides = value.overrides;
   return (
-    Array.isArray(questionnaire.taskStrengths) &&
-    typeof questionnaire.optimization === "string" &&
-    typeof questionnaire.writeScope === "string" &&
-    typeof questionnaire.preference === "string" &&
-    typeof questionnaire.reasoningEffort === "string"
+    (overrides.roleName === undefined ||
+      typeof overrides.roleName === "string") &&
+    (overrides.description === undefined ||
+      typeof overrides.description === "string") &&
+    (overrides.developerInstructions === undefined ||
+      typeof overrides.developerInstructions === "string") &&
+    (overrides.nicknameCandidates === undefined ||
+      (Array.isArray(overrides.nicknameCandidates) &&
+        overrides.nicknameCandidates.every(
+          (nickname) => typeof nickname === "string",
+        ))) &&
+    (overrides.modelReasoningEffort === undefined ||
+      (typeof overrides.modelReasoningEffort === "string" &&
+        EXPLICIT_REASONING_EFFORTS.has(overrides.modelReasoningEffort)))
   );
 }
 
@@ -252,13 +279,10 @@ export function CodexSubagentProfileEditor({
   }, [draftSettingsKey]);
 
   async function persist(nextConfig: CodexSubagentV2Config) {
-    const latestProviders = await providersApi.getAll("codex");
-    const latestProvider = latestProviders[provider.id] ?? provider;
-    const nextProvider: Provider = {
-      ...latestProvider,
-      settingsConfig: settingsWithConfig(latestProvider, nextConfig),
-    };
-    await providersApi.update(nextProvider, "codex");
+    const nextProvider = await codexSubagentV2Api.updateProviderConfig(
+      provider.id,
+      nextConfig,
+    );
     setDraft(nextConfig);
     onPersisted?.(nextProvider);
     await queryClient.invalidateQueries({ queryKey: ["providers", "codex"] });
@@ -296,12 +320,8 @@ export function CodexSubagentProfileEditor({
     );
   }
 
-  function repairProfile(profileKey: string, value: unknown) {
-    const model =
-      isRecord(value) && typeof value.model === "string"
-        ? value.model
-        : profileKey;
-    const replacement = defaultProfileForModel(model);
+  function repairProfile(profileKey: string) {
+    const replacement = defaultProfileForModel(profileKey);
     if (!replacement) {
       setSaveError(`没有可用于 ${profileKey} 的安全默认问卷`);
       return;
@@ -753,13 +773,9 @@ export function CodexSubagentProfileEditor({
               </section>
             );
           })}
-          {invalidProfileEntries.map(([profileKey, rawProfile]) => {
-            const rawModel =
-              isRecord(rawProfile) && typeof rawProfile.model === "string"
-                ? rawProfile.model
-                : profileKey;
+          {invalidProfileEntries.map(([profileKey]) => {
             const title =
-              PROFILE_TITLES[rawModel] ?? `${rawModel} 子 Agent 能力`;
+              PROFILE_TITLES[profileKey] ?? `${profileKey} 子 Agent 能力`;
             return (
               <section
                 key={profileKey}
@@ -777,7 +793,7 @@ export function CodexSubagentProfileEditor({
                 <Button
                   type="button"
                   variant="outline"
-                  onClick={() => repairProfile(profileKey, rawProfile)}
+                  onClick={() => repairProfile(profileKey)}
                 >
                   使用默认问卷修复 {profileKey}
                 </Button>
