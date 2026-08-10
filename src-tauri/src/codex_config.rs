@@ -4374,6 +4374,10 @@ pub fn remove_codex_toml_base_url_if(toml_str: &str, predicate: impl Fn(&str) ->
 }
 
 #[cfg(test)]
+#[path = "codex_subagent_profiles.rs"]
+mod codex_subagent_profiles;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serial_test::serial;
