@@ -267,6 +267,14 @@ mod tests {
         assert!(!windows::startup_approved_enabled(Some(&disabled)));
     }
 
+    #[test]
+    fn startup_reconciliation_repairs_persisted_and_system_state_drift() {
+        assert_eq!(auto_launch_reconciliation_action(true, false), Some(true));
+        assert_eq!(auto_launch_reconciliation_action(false, true), Some(false));
+        assert_eq!(auto_launch_reconciliation_action(true, true), None);
+        assert_eq!(auto_launch_reconciliation_action(false, false), None);
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn test_get_macos_app_bundle_path_valid() {
