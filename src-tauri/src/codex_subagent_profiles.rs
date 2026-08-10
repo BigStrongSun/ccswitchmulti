@@ -1264,6 +1264,7 @@ mod tests {
     // Independent literal fixtures for the production compiler contract.  These are intentionally
     // not derived through production helpers, so a compiler regression cannot rewrite its own oracle.
     const DESC_BALANCED_REPOSITORY: &str = "This role matches delegated repository exploration tasks. It excludes long-context reading, evidence collection, summarization, complex debugging, architecture design, bounded implementation, complex implementation, testing, and high-risk review, and it does not own final integration, merging, or release. It optimizes for speed and is limited to read-only work. Under balanced selection, this eligible third-party profile has no provider bias.";
+    const DESC_BALANCED_PREFERRED: &str = "This role matches delegated repository exploration tasks. It excludes long-context reading, evidence collection, summarization, complex debugging, architecture design, bounded implementation, complex implementation, testing, and high-risk review, and it does not own final integration, merging, or release. It optimizes for speed and is limited to read-only work. Under balanced selection, when declared task strengths match, prefer this specialized role over the built-in generic default, worker, and explorer roles; provider identity does not break ties otherwise.";
     const DESC_ARCHITECTURE: &str = "This role matches delegated architecture design tasks. It excludes long-context reading, repository exploration, evidence collection, summarization, complex debugging, bounded implementation, complex implementation, testing, and high-risk review, and it does not own final integration, merging, or release. It optimizes for quality and is limited to read-only work. Under balanced selection, this eligible third-party profile has no provider bias.";
     const DESC_TESTING: &str = "This role matches delegated testing tasks. It excludes long-context reading, repository exploration, evidence collection, summarization, complex debugging, architecture design, bounded implementation, complex implementation, and high-risk review, and it does not own final integration, merging, or release. It optimizes for speed and is limited to read-only work. Under balanced selection, this eligible third-party profile has no provider bias.";
     const DESC_OFFICIAL_FIRST_ELIGIBLE: &str = "This role matches delegated repository exploration tasks. It excludes long-context reading, evidence collection, summarization, complex debugging, architecture design, bounded implementation, complex implementation, testing, and high-risk review, and it does not own final integration, merging, or release. It optimizes for speed and is limited to read-only work. Under official-first selection, this eligible third-party profile may be chosen only for a strong, well-bounded task match; otherwise prefer an official provider path.";
@@ -1271,6 +1272,7 @@ mod tests {
     const DESC_OFFICIAL_FIRST_PREFERRED: &str = "This role matches delegated repository exploration tasks. It excludes long-context reading, evidence collection, summarization, complex debugging, architecture design, bounded implementation, complex implementation, testing, and high-risk review, and it does not own final integration, merging, or release. It optimizes for speed and is limited to read-only work. Task match makes this preferred third-party profile override the global official-first provider bias.";
     const DESC_FALLBACK: &str = "This role matches delegated repository exploration tasks. It excludes long-context reading, evidence collection, summarization, complex debugging, architecture design, bounded implementation, complex implementation, testing, and high-risk review, and it does not own final integration, merging, or release. It optimizes for speed and is limited to read-only work. This third-party fallback profile is never promoted and may be used only when preferred profiles are unavailable or it is explicitly requested.";
     const INSTRUCTIONS_BALANCED_REPOSITORY: &str = "Work only on delegated repository exploration tasks and do not edit files. Optimize for speed and keep all work read-only. Under balanced selection, this eligible third-party profile has no provider bias. Return concrete evidence to the parent; final integration, merging, and release remain with the parent agent.";
+    const INSTRUCTIONS_BALANCED_PREFERRED: &str = "Work only on delegated repository exploration tasks and do not edit files. Optimize for speed and keep all work read-only. Under balanced selection, when declared task strengths match, prefer this specialized role over the built-in generic default, worker, and explorer roles; provider identity does not break ties otherwise. Return concrete evidence to the parent; final integration, merging, and release remain with the parent agent.";
     const INSTRUCTIONS_ARCHITECTURE: &str = "Work only on delegated architecture design tasks and do not edit files. Optimize for quality and keep all work read-only. Under balanced selection, this eligible third-party profile has no provider bias. Return concrete evidence to the parent; final integration, merging, and release remain with the parent agent.";
     const INSTRUCTIONS_TESTING: &str = "Work only on delegated testing tasks and do not edit files. Optimize for speed and keep all work read-only. Under balanced selection, this eligible third-party profile has no provider bias. Return concrete evidence to the parent; final integration, merging, and release remain with the parent agent.";
     const INSTRUCTIONS_OFFICIAL_FIRST_ELIGIBLE: &str = "Work only on delegated repository exploration tasks and do not edit files. Optimize for speed and keep all work read-only. Under official-first selection, use this eligible third-party profile only for a strong, well-bounded task match; otherwise prefer an official provider path. Return concrete evidence to the parent; final integration, merging, and release remain with the parent agent.";
@@ -2113,6 +2115,16 @@ mod tests {
     }
 
     #[test]
+    fn codex_subagent_v2_balanced_preferred_profile_outranks_builtin_generic_roles() {
+        assert_policy(
+            SelectionPolicy::Balanced,
+            Preference::Preferred,
+            DESC_BALANCED_PREFERRED,
+            INSTRUCTIONS_BALANCED_PREFERRED,
+        );
+    }
+
+    #[test]
     fn codex_subagent_v2_official_first_policy_keeps_high_risk_work_official() {
         assert_policy(
             SelectionPolicy::OfficialFirst,
@@ -2545,6 +2557,7 @@ mod tests {
             TaskStrength::Testing,
         ];
         flash.reasoning_effort = QuestionnaireReasoningEffort::Medium;
+        flash.preference = Preference::Preferred;
         let mut pro = profile("deepseek-v4-pro", "deepseek-v4-pro");
         pro.strengths = vec![
             TaskStrength::ComplexDebugging,
@@ -2556,6 +2569,7 @@ mod tests {
         pro.optimization = Optimization::Quality;
         pro.write_scope = WriteScope::ComplexChanges;
         pro.reasoning_effort = QuestionnaireReasoningEffort::High;
+        pro.preference = Preference::Preferred;
         assert_eq!(
             initialize_legacy_subagent_v2(),
             Ok(config(
