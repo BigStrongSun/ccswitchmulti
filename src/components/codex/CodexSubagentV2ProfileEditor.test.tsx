@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
+  getDefaultNormalizer,
   render,
   screen,
   waitFor,
@@ -1169,10 +1170,21 @@ describe("Codex Sub-Agent V2 preview visible output", () => {
     ["model reasoning effort", "medium"],
     ["context window", "128000"],
     ["warning", "Role name was collision-resolved."],
-    ["backend TOML", previewFixture.tomlPreview],
   ])("renders backend-returned %s", async (_field, value) => {
     await renderWorkspace();
     expect(await screen.findByText(value)).toBeInTheDocument();
+  });
+
+  it("renders backend-returned backend TOML", async () => {
+    await renderWorkspace();
+    expect(
+      await screen.findByText(previewFixture.tomlPreview, {
+        normalizer: getDefaultNormalizer({
+          trim: false,
+          collapseWhitespace: false,
+        }),
+      }),
+    ).toBeInTheDocument();
   });
 
   it("requests preview with exact settingsConfig, model, and profile", async () => {
