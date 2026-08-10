@@ -355,6 +355,23 @@ fn expected_routable_output(role: GeneratedRole) -> CompileOutput {
     )
 }
 
+// Independent literal fixtures for the production compiler contract.  These are intentionally
+// not derived through production helpers, so a compiler regression cannot rewrite its own oracle.
+const DESC_BALANCED_REPOSITORY: &str = "This role is suited to repository exploration. Do not use it for complex debugging, architecture design, complex implementation, or high-risk review. It favors speed and is eligible under balanced selection without provider bias.";
+const DESC_ARCHITECTURE: &str = "This role is suited to architecture design. Do not use it for routine long-context reading, repository exploration, evidence collection, or summarization. It favors quality and may make complex changes.";
+const DESC_TESTING: &str = "This role is suited to testing. Do not use it for architecture design, complex debugging, complex implementation, or high-risk review. It favors speed but remains read-only.";
+const DESC_OFFICIAL_FIRST_ELIGIBLE: &str = "This role is suited to repository exploration. Do not use it for complex debugging, architecture design, complex implementation, or high-risk review. Under official-first selection, this eligible third-party profile is not promoted for high-risk work.";
+const DESC_THIRD_PARTY_FIRST_ELIGIBLE: &str = "This role is suited to repository exploration. Do not use it for complex debugging, architecture design, complex implementation, or high-risk review. Under third-party-first selection, this matching eligible third-party profile is promoted.";
+const DESC_OFFICIAL_FIRST_PREFERRED: &str = "This role is suited to repository exploration. Do not use it for complex debugging, architecture design, complex implementation, or high-risk review. Its preferred status overrides official-first provider bias when the task matches.";
+const DESC_FALLBACK: &str = "This role is suited to repository exploration only when stronger matches are unavailable. Do not use it for complex debugging, architecture design, complex implementation, or high-risk review. A fallback profile is never promoted, including under third-party-first selection.";
+const INSTRUCTIONS_BALANCED_REPOSITORY: &str = "Work only on delegated repository-exploration tasks. Exclude complex debugging, architecture design, complex implementation, and high-risk review. Optimize for speed, keep all work read-only, and report evidence to the parent agent. This profile is eligible; follow balanced selection without adding provider bias.";
+const INSTRUCTIONS_ARCHITECTURE: &str = "Work only on delegated architecture-design tasks. Exclude routine long-context reading, repository exploration, evidence collection, and summarization. Optimize for quality, limit writes to justified complex changes, and report verification to the parent agent. This profile is eligible; follow balanced selection without adding provider bias.";
+const INSTRUCTIONS_TESTING: &str = "Work only on delegated testing tasks. Exclude architecture design, complex debugging, complex implementation, and high-risk review. Optimize for speed, keep all work read-only, and report verification to the parent agent. This profile is eligible; follow balanced selection without adding provider bias.";
+const INSTRUCTIONS_OFFICIAL_FIRST_ELIGIBLE: &str = "Work only on delegated repository-exploration tasks. Exclude complex debugging, architecture design, complex implementation, and high-risk review. Optimize for speed, keep all work read-only, and report evidence to the parent agent. This profile is eligible; under official-first selection, leave high-risk work and final integration to official roles.";
+const INSTRUCTIONS_THIRD_PARTY_FIRST_ELIGIBLE: &str = "Work only on delegated repository-exploration tasks. Exclude complex debugging, architecture design, complex implementation, and high-risk review. Optimize for speed, keep all work read-only, and report evidence to the parent agent. This profile is eligible and promoted for matching work under third-party-first selection.";
+const INSTRUCTIONS_OFFICIAL_FIRST_PREFERRED: &str = "Work only on delegated repository-exploration tasks. Exclude complex debugging, architecture design, complex implementation, and high-risk review. Optimize for speed, keep all work read-only, and report evidence to the parent agent. This profile is preferred and overrides official-first provider bias only when the task matches.";
+const INSTRUCTIONS_FALLBACK: &str = "Work only on delegated repository-exploration tasks when no stronger role matches. Exclude complex debugging, architecture design, complex implementation, and high-risk review. Optimize for speed, keep all work read-only, and report evidence to the parent agent. This profile is fallback-only and must never be promoted.";
+
 fn assert_parse(raw: Value, expected: Result<CodexSubagentV2, CompileError>) {
     assert_eq!(parse_persisted_subagent_v2_for_red_test(&raw), expected);
 }
@@ -770,8 +787,8 @@ fn codex_subagent_v2_auto_effort_is_high_for_complex_strength() {
         role(
             "flash",
             "flash",
-            "generated",
-            "generated",
+            DESC_ARCHITECTURE,
+            INSTRUCTIONS_ARCHITECTURE,
             vec![s("Flash")],
             ModelReasoningEffort::High,
         ),
@@ -789,8 +806,8 @@ fn codex_subagent_v2_auto_effort_is_low_for_speed_read_only_strengths() {
         role(
             "flash",
             "flash",
-            "generated",
-            "generated",
+            DESC_BALANCED_REPOSITORY,
+            INSTRUCTIONS_BALANCED_REPOSITORY,
             vec![s("Flash")],
             ModelReasoningEffort::Low,
         ),
@@ -804,8 +821,8 @@ fn codex_subagent_v2_auto_effort_is_medium_for_speed_testing() {
         role(
             "flash",
             "flash",
-            "generated",
-            "generated",
+            DESC_TESTING,
+            INSTRUCTIONS_TESTING,
             vec![s("Flash")],
             ModelReasoningEffort::Medium,
         ),
@@ -823,8 +840,8 @@ fn codex_subagent_v2_explicit_effort_overrides_auto_effort() {
         role(
             "flash",
             "flash",
-            "generated",
-            "generated",
+            DESC_ARCHITECTURE,
+            INSTRUCTIONS_ARCHITECTURE,
             vec![s("Flash")],
             ModelReasoningEffort::XHigh,
         ),
@@ -837,7 +854,12 @@ fn policy_profile(preference: Preference) -> CodexSubagentProfile {
     p
 }
 
-fn assert_policy(selection_policy: SelectionPolicy, preference: Preference, description: &str) {
+fn assert_policy(
+    selection_policy: SelectionPolicy,
+    preference: Preference,
+    description: &str,
+    developer_instructions: &str,
+) {
     assert_compile(
         &request(Some(config(
             selection_policy,
@@ -847,7 +869,7 @@ fn assert_policy(selection_policy: SelectionPolicy, preference: Preference, desc
             "flash",
             "flash",
             description,
-            "generated",
+            developer_instructions,
             vec![s("Flash")],
             ModelReasoningEffort::Low,
         ))),
@@ -859,7 +881,8 @@ fn codex_subagent_v2_balanced_policy_adds_no_provider_bias() {
     assert_policy(
         SelectionPolicy::Balanced,
         Preference::Eligible,
-        "Balanced selection: matching eligible profile.",
+        DESC_BALANCED_REPOSITORY,
+        INSTRUCTIONS_BALANCED_REPOSITORY,
     );
 }
 
@@ -868,7 +891,8 @@ fn codex_subagent_v2_official_first_policy_keeps_high_risk_work_official() {
     assert_policy(
         SelectionPolicy::OfficialFirst,
         Preference::Eligible,
-        "Official-first selection: eligible third-party profile is not promoted for high-risk work.",
+        DESC_OFFICIAL_FIRST_ELIGIBLE,
+        INSTRUCTIONS_OFFICIAL_FIRST_ELIGIBLE,
     );
 }
 
@@ -877,7 +901,8 @@ fn codex_subagent_v2_third_party_first_policy_promotes_eligible_profile() {
     assert_policy(
         SelectionPolicy::ThirdPartyFirst,
         Preference::Eligible,
-        "Third-party-first selection: matching eligible profile is promoted.",
+        DESC_THIRD_PARTY_FIRST_ELIGIBLE,
+        INSTRUCTIONS_THIRD_PARTY_FIRST_ELIGIBLE,
     );
 }
 
@@ -886,7 +911,8 @@ fn codex_subagent_v2_preferred_profile_overrides_official_provider_bias() {
     assert_policy(
         SelectionPolicy::OfficialFirst,
         Preference::Preferred,
-        "Official-first selection: explicitly preferred profile overrides provider bias.",
+        DESC_OFFICIAL_FIRST_PREFERRED,
+        INSTRUCTIONS_OFFICIAL_FIRST_PREFERRED,
     );
 }
 
@@ -895,7 +921,8 @@ fn codex_subagent_v2_fallback_profile_is_never_promoted() {
     assert_policy(
         SelectionPolicy::ThirdPartyFirst,
         Preference::Fallback,
-        "Fallback profile is never promoted.",
+        DESC_FALLBACK,
+        INSTRUCTIONS_FALLBACK,
     );
 }
 
@@ -909,7 +936,7 @@ fn codex_subagent_v2_manual_description_fully_replaces_policy_text() {
             "flash",
             "flash",
             "Manual selection text only.",
-            "generated",
+            INSTRUCTIONS_BALANCED_REPOSITORY,
             vec![s("Flash")],
             ModelReasoningEffort::Low,
         ),
@@ -925,7 +952,7 @@ fn codex_subagent_v2_restoring_description_keeps_other_override() {
         role(
             "flash",
             "flash",
-            "Balanced selection: matching eligible profile.",
+            DESC_BALANCED_REPOSITORY,
             "Keep this override.",
             vec![s("Flash")],
             ModelReasoningEffort::Low,
@@ -946,8 +973,8 @@ fn codex_subagent_v2_normalizes_mixed_role_name_separators() {
         Ok(expected_routable_output(role(
             "Foo__-- Bar",
             "foo-bar",
-            "generated",
-            "generated",
+            DESC_BALANCED_REPOSITORY,
+            INSTRUCTIONS_BALANCED_REPOSITORY,
             vec![s("Flash")],
             ModelReasoningEffort::Low,
         ))),
@@ -1001,8 +1028,8 @@ fn codex_subagent_v2_resolves_case_insensitive_occupied_role_names_in_order() {
         Ok(expected_routable_output(role(
             "Review",
             "ccswitch-review-3",
-            "generated",
-            "generated",
+            DESC_BALANCED_REPOSITORY,
+            INSTRUCTIONS_BALANCED_REPOSITORY,
             vec![s("Flash")],
             ModelReasoningEffort::Low,
         ))),
@@ -1019,8 +1046,8 @@ fn expected_nicknames(values: Vec<&str>) -> CompileOutput {
     expected_routable_output(role(
         "flash",
         "flash",
-        "generated",
-        "generated",
+        DESC_BALANCED_REPOSITORY,
+        INSTRUCTIONS_BALANCED_REPOSITORY,
         values.into_iter().map(s).collect(),
         ModelReasoningEffort::Low,
     ))
@@ -1178,8 +1205,8 @@ fn codex_subagent_v2_enabled_routable_profile_generates_role_and_status() {
         role(
             "flash",
             "flash",
-            "Balanced selection: matching eligible profile.",
-            "generated",
+            DESC_BALANCED_REPOSITORY,
+            INSTRUCTIONS_BALANCED_REPOSITORY,
             vec![s("Flash")],
             ModelReasoningEffort::Low,
         ),
