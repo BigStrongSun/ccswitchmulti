@@ -503,6 +503,13 @@ pub fn run() {
                 );
             }
 
+            let launch_on_startup = crate::settings::get_settings().launch_on_startup;
+            if let Err(error) = crate::auto_launch::reconcile_auto_launch(launch_on_startup) {
+                log::warn!(
+                    "开机自启状态对账失败: desired={launch_on_startup}, error={error}"
+                );
+            }
+
             // 初始化数据库
             let app_config_dir = crate::config::get_app_config_dir();
             let db_path = app_config_dir.join("cc-switch.db");
