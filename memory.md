@@ -3139,3 +3139,11 @@
 - TDD 先在旧实现验证窄槽位没有 `appSwitcher.more` 而失败；GREEN 覆盖 120px 窄槽位保留当前 Hermes、隐藏应用可访问且不重复，以及 1000px 宽槽位恢复全部 8 个应用且不显示“更多应用”。四语言新增 `appSwitcher.more`。
 - 全量前端验证为 `117 files / 917 tests`、TypeScript 与 production renderer build 通过；本次文件 Prettier 与 `git diff --check` 通过。全仓 `format:check` 仍只被本次未修改的 `src/lib/api/proxy.ts`、`src/lib/codexMultiRouterWizard.test.ts`、`src/types/proxy.ts` 三个既有格式差异阻断。
 - 独立 Vite 预览未停止正式 CCSM。浏览器按截图尺寸 `924x646` 和 Tauri 最小窗口 `900x600` 验收：document `scrollWidth == clientWidth`；所有 header 按钮边界均在 viewport 内；Codex 当前标签、多模型路由、用量、Agent API、Skills、提示词、会话、MCP 与新增按钮完整可见；OpenCode/OpenClaw/Hermes 可从“更多应用”打开。
+
+## 2026-08-11 Codex Responses 断流错误呈现根因与修复
+
+- 现场 `stream disconnected before completion: Transport error: network error: error decoding response body` 不能直接判定为 timeout。`~/.cc-switch/logs/cc-switch.log` 的完整 error source chain 明确为 `unexpected EOF during chunk size line`：上游 HTTP chunked response 在下一条 chunk-size 行读取完成前提前关闭；相邻时段还出现 `unexpected EOF during handshake`，共同指向上游/代理链路提前断开。
+- 根因位于 `src-tauri/src/proxy/providers/streaming_retry.rs::create_resilient_responses_sse_stream`：已有 semantic output 后，为避免正文或工具调用被重放，代码正确地停止重连，但错误地继续 `yield Err(error)`。该错误随后经 passthrough 作为 Axum HTTP Body error 传给本地 Codex，使 CCSwitchMulti 到 Codex 的响应体异常终止；Codex 只能二次报告泛化的 `error decoding response body`，无法看到代理已捕获的深层原因。
+- 修复边界：保留“已有 semantic output 后绝不重放”的副作用安全约束；将传输错误转换为合法 Responses SSE `event: error` 后干净结束 HTTP body。chunk-size EOF、真实 timeout、其他传输中断分别显示“HTTP 分块响应未完整结束”“读取超时”“传输中断”；正文前最多 5 次安全重连耗尽也通过合法 SSE 报错，不再制造损坏的下游 body。
+- 历史定位：通用 passthrough 将 stream error 作为 Body error 的基础行为来自初始导入 `693c3872`；原生 Responses 在已输出正文后明确 `yield Err` 的当前安全重连路径由 `461dc35c`（2026-08-03）引入，最早包含该行为的现存正式 tag 为 `v3.19.1-5`。该提交的不重放设计本身正确，缺陷是错误呈现协议选择错误。
+- 回归验收：`native_responses_surfaces_post_content_chunked_eof_as_protocol_error` 证明不重放、下游所有 stream item 均为 `Ok`、存在合法 `event: error` 且不再泄漏 `error decoding response body`；`native_responses_transport_error_message_distinguishes_true_timeout` 保证 timeout 不与 EOF 混淆。`cargo test --lib proxy::providers::streaming_retry::tests` 为 22/22；完整 Rust library 为 2925 passed、0 failed、2 ignored；`cargo fmt --check`、`cargo check --lib`、`git diff --check` 通过。

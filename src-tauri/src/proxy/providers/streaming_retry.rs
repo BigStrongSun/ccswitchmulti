@@ -148,6 +148,31 @@ fn raw_sse_block_is_comment(block: &[u8]) -> bool {
         == Some(b':')
 }
 
+fn native_responses_transport_error_message(error: &std::io::Error) -> &'static str {
+    let chain = crate::proxy::error::error_chain_message(error).to_ascii_lowercase();
+    if chain.contains("unexpected eof during chunk size line") {
+        "上游响应流连接提前关闭（HTTP 分块响应未完整结束），请检查网络或代理后重试"
+    } else if error.kind() == std::io::ErrorKind::TimedOut
+        || chain.contains("timed out")
+        || chain.contains("timeout")
+    {
+        "上游响应流读取超时，请检查网络或代理后重试"
+    } else {
+        "上游响应流传输中断，请检查网络或代理后重试"
+    }
+}
+
+fn native_responses_transport_error_sse(message: &str) -> Bytes {
+    let payload = json!({
+        "type": "error",
+        "error": {
+            "type": "stream_error",
+            "message": message,
+        }
+    });
+    Bytes::from(format!("event: error\ndata: {payload}\n\n"))
+}
+
 /// 原生 Codex Responses 的安全 SSE 重连。
 ///
 /// 与 Anthropic 转换路径不同，这里不重写协议字节。只有 `response.created` 和
@@ -210,7 +235,12 @@ pub fn create_resilient_responses_sse_stream(
                     Ok(chunk) => chunk,
                     Err(error) => {
                         if semantic_output_forwarded {
-                            yield Err(error);
+                            let message = native_responses_transport_error_message(&error);
+                            log::error!(
+                                "[Codex/Responses] upstream stream failed after semantic output: {}; client_message={message}",
+                                crate::proxy::error::error_chain_message(&error)
+                            );
+                            yield Ok(native_responses_transport_error_sse(message));
                             break 'attempts;
                         }
                         failure = Some(format!("upstream Responses SSE transport error: {error}"));
@@ -248,9 +278,11 @@ pub fn create_resilient_responses_sse_stream(
             let Some(mut reason) = failure else { break 'attempts };
             loop {
                 if attempt >= RESPONSES_STREAM_MAX_RETRIES {
-                    yield Err(std::io::Error::other(format!(
-                        "Responses upstream stream failed after {attempt} reconnect attempt(s): {reason}"
-                    )));
+                    let message = "上游响应流在输出正文前反复中断，自动重连已耗尽，请检查网络或代理后重试";
+                    log::error!(
+                        "[Codex/Responses] stream failed after {attempt} reconnect attempt(s): {reason}; client_message={message}"
+                    );
+                    yield Ok(native_responses_transport_error_sse(message));
                     break 'attempts;
                 }
                 attempt += 1;
@@ -623,6 +655,15 @@ mod tests {
         Box::pin(stream::iter(items))
     }
 
+    fn chunks_then_named_error(parts: &[&str], message: &str) -> ByteStream {
+        let mut items: Vec<Result<Bytes, std::io::Error>> = parts
+            .iter()
+            .map(|part| Ok(Bytes::from(part.to_string())))
+            .collect();
+        items.push(Err(std::io::Error::other(message.to_string())));
+        Box::pin(stream::iter(items))
+    }
+
     /// head 立即到达，tail 在 `delay` 之后到达——模拟推理模型隐藏思考的静默窗口。
     fn delayed_chunks(head: &str, delay: Duration, tail: &str) -> ByteStream {
         let head = Bytes::from(head.to_string());
@@ -746,6 +787,46 @@ mod tests {
             "must not replay a completed item"
         );
         assert!(out.contains("response.output_item.done"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_responses_surfaces_post_content_chunked_eof_as_protocol_error() {
+        let (reconnector, calls) = scripted_reconnector(vec![]);
+        let first = chunks_then_named_error(
+            &[[created(), text_delta("partial")].concat().as_str()],
+            "error decoding response body: unexpected EOF during chunk size line",
+        );
+
+        let items: Vec<_> = create_resilient_responses_sse_stream(first, Some(reconnector))
+            .collect()
+            .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "must not replay output");
+        assert!(
+            items.iter().all(Result::is_ok),
+            "the downstream HTTP body must close cleanly: {items:?}"
+        );
+        let out = items
+            .into_iter()
+            .map(Result::unwrap)
+            .fold(String::new(), |mut output, bytes| {
+                output.push_str(&String::from_utf8_lossy(&bytes));
+                output
+            });
+        assert!(out.contains("event: error"), "got: {out}");
+        assert!(out.contains("上游响应流连接提前关闭"), "got: {out}");
+        assert!(out.contains("HTTP 分块响应未完整结束"), "got: {out}");
+        assert!(!out.contains("error decoding response body"), "got: {out}");
+    }
+
+    #[test]
+    fn native_responses_transport_error_message_distinguishes_true_timeout() {
+        let timeout = std::io::Error::new(std::io::ErrorKind::TimedOut, "operation timed out");
+
+        assert_eq!(
+            native_responses_transport_error_message(&timeout),
+            "上游响应流读取超时，请检查网络或代理后重试"
+        );
     }
 
     #[tokio::test(start_paused = true)]
