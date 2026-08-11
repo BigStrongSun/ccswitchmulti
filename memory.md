@@ -1,11 +1,11 @@
 # CC Switch Repository Memory
 
-## 2026-08-12 Sub-Agent 双主题工作台 3.19.1-21 发布准备
+## 2026-08-12 Sub-Agent 双主题工作台 3.19.1-22 发布准备
 
-- `3.19.1-21` 将 Sub-Agent 配置收敛为 MultiRouter 独立顶层工作区，并完成深浅双主题语义色：V1/V2 状态、选择策略、目录同步、模型折叠卡片、能力问卷、高级覆盖、TOML 预览和 sticky 保存栏都复用 MultiRouter 的蓝/青/绿/紫/红/琥珀层级。最终设计证据位于 `design-qa.md` 与 `artifacts/design-audit/subagent-theme-2026-08-11/{05-light-after,06-light-toml-after,07-dark-after,08-dark-toml-after}.jpg`，结论为 `final result: passed`；误生成的 15x15 `05-light-after.png` 只是光标图层，不得提交或作为验收证据。
+- `3.19.1-22` 将 Sub-Agent 配置收敛为 MultiRouter 独立顶层工作区，并完成深浅双主题语义色：V1/V2 状态、选择策略、目录同步、模型折叠卡片、能力问卷、高级覆盖、TOML 预览和 sticky 保存栏都复用 MultiRouter 的蓝/青/绿/紫/红/琥珀层级。最终设计证据位于 `design-qa.md` 与 `artifacts/design-audit/subagent-theme-2026-08-11/{05-light-after,06-light-toml-after,07-dark-after,08-dark-toml-after}.jpg`，结论为 `final result: passed`；误生成的 15x15 `05-light-after.png` 只是光标图层，不得提交或作为验收证据。
 - 当前本机安装进程 `C:\Users\sunda\AppData\Local\CCSwitchMulti\cc-switch.exe` 为 PID/15721 owner `65888`，FileVersion/ProductVersion 均为 `3.19.1-21`，SHA-256 `92B73DC3B8286CE21259D792D248B2D1ED783982DCAE6B1182505A534B844D0E`，`/health` HTTP 200。该安装候选用于真实 UI 验收；它早于后续合并公开 `v3.19.1-20` 发布线，不能单独代表最终 tag 的组合源码。
-- 发布前已用 merge commit `3044215a` 合入公开 `v3.19.1-20@8de0b422` 的 OAuth 过期竞态、自启动漂移、小窗口 AppSwitcher 和 Responses 断流修复，四个版本文件统一保留 `3.19.1-21`。最终发布树的定向回归为 `codex_subagent_profiles 71/71`、`codex_config 156/156`、`useManagedAuth + AppSwitcher 4/4`、`streaming_retry 22/22`、`auto_launch 4/4`；完整 Rust `2949 passed / 0 failed / 2 ignored`、Vitest `117 files / 939 tests`、Pester `46/46`，cargo check/fmt、typecheck、Prettier 与 diff check 均通过。
-- 正式发布说明位于 `docs/release-notes/v3.19.1-21-zh.md`，重点解释独立子 Agent 导航、V1/V2 边界、V2 问卷与 custom role 语义自动选型、全模型折叠配置、手工字段/TOML/诊断和深浅主题适配。Release workflow 由 `v*` tag 触发；必须等待五个平台构建、Publish Release 和 Assemble `latest.json` 全部成功，再核验非 draft/非 prerelease、19 个资产、六个平台 updater 签名/URL 和 GitHub 服务端 digest，不能把 tag push 或工作流启动当作发布完成。
+- 发布前已用 merge commit `3044215a` 合入公开 `v3.19.1-20@8de0b422` 的 OAuth 过期竞态、自启动漂移、小窗口 AppSwitcher 和 Responses 断流修复；随后因远端并发出现 `v3.19.1-21@45f6a0a4`，继续合入其 updater 代理检查、macOS ChatGPT.app 识别、MultiRouter 原子启用与失败传播修复，并把本功能顺延为 `3.19.1-22`，避免覆盖公开标签或回退新发布线。合入 V21 前基线为 `codex_subagent_profiles 71/71`、`codex_config 156/156`、完整 Rust `2949/0/2`、Vitest `117 files / 939 tests`、Pester `46/46`；最终组合树必须重新验证后才能推 tag。
+- 正式发布说明位于 `docs/release-notes/v3.19.1-22-zh.md`，重点解释独立子 Agent 导航、V1/V2 边界、V2 问卷与 custom role 语义自动选型、全模型折叠配置、手工字段/TOML/诊断和深浅主题适配。Release workflow 由 `v*` tag 触发；必须等待五个平台构建、Publish Release 和 Assemble `latest.json` 全部成功，再核验非 draft/非 prerelease、19 个资产、六个平台 updater 签名/URL 和 GitHub 服务端 digest，不能把 tag push 或工作流启动当作发布完成。
 
 ## 2026-08-11 Sub-Agent 工作台 UI 重构 3.19.1-20 本机交付闭环
 
@@ -3177,3 +3177,30 @@
 - 修复边界：保留“已有 semantic output 后绝不重放”的副作用安全约束；将传输错误转换为合法 Responses SSE `event: error` 后干净结束 HTTP body。chunk-size EOF、真实 timeout、其他传输中断分别显示“HTTP 分块响应未完整结束”“读取超时”“传输中断”；正文前最多 5 次安全重连耗尽也通过合法 SSE 报错，不再制造损坏的下游 body。
 - 历史定位：通用 passthrough 将 stream error 作为 Body error 的基础行为来自初始导入 `693c3872`；原生 Responses 在已输出正文后明确 `yield Err` 的当前安全重连路径由 `461dc35c`（2026-08-03）引入，最早包含该行为的现存正式 tag 为 `v3.19.1-5`。该提交的不重放设计本身正确，缺陷是错误呈现协议选择错误。
 - 回归验收：`native_responses_surfaces_post_content_chunked_eof_as_protocol_error` 证明不重放、下游所有 stream item 均为 `Ok`、存在合法 `event: error` 且不再泄漏 `error decoding response body`；`native_responses_transport_error_message_distinguishes_true_timeout` 保证 timeout 不与 EOF 混淆。`cargo test --lib proxy::providers::streaming_retry::tests` 为 22/22；完整 Rust library 为 2925 passed、0 failed、2 ignored；`cargo fmt --check`、`cargo check --lib`、`git diff --check` 通过。
+
+## 2026-08-11 CCSwitchMulti v3.19.1-20 GitHub 正式发布
+
+- `v3.19.1-20` 是 `v3.19.1-14` 之后首个 GitHub 正式版本；本地 `3.19.1-15` 至 `-19` 只用于阶段性交付，没有复用 `-19` 标签发布内容不同的二进制。版本提交 `8de0b4222695dda7119284642671fce2ac3314d1` 同步 `package.json`、`Cargo.toml`、`Cargo.lock` 与 `tauri.conf.json`，中文累计说明为 `docs/release-notes/v3.19.1-20-zh.md`。
+- annotated tag object 为 `3638885a87f2fd6fcb0e6b3cc89fc9fb79913e2f`，远端 peeled commit 精确为 `8de0b4222695dda7119284642671fce2ac3314d1`。发布后记忆提交不得移动该 tag。
+- GitHub Actions Release run `31467563416`（`https://github.com/BigStrongSun/ccswitchmulti/actions/runs/31467563416`）耗时 42m47s；Linux x64/ARM64、Windows x64/ARM64、macOS、Publish GitHub Release、Assemble `latest.json` 全部 `completed/success`。
+- 正式 Release 为 `https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.19.1-20`，页面标记 Latest，正文完整覆盖 Sub-Agent V1/V2、OAuth device-flow 竞态、自启动/安全重装、小窗口裁切和 Responses 断流错误呈现。页面共 21 项：19 个实际 release assets，加 GitHub 自动生成的 source zip/tar.gz。
+- 远端 `latest.json` 为 `version=3.19.1-20`、6 个平台键，所有 URL 均指向本 tag、HTTP 200，所有 signature 非空且逐项与对应 `.sig` 完全一致；`/releases/latest` 最终跳转本 tag。下载后的 `latest.json` SHA-256 为 `a0a5d5f785d18603cf6fc814e2376f786e6c2c6746897cdc33590e05d08ff1a2`，Windows x64 setup SHA-256 为 `99177dcd9ed098a7f34f82afc81caa8b6c3c53be7381a5df3e8a15c9ad2e9763`，均与 GitHub 页面服务端 digest 一致。
+- 本地发布候选门禁：Rust `2925 passed / 0 failed / 2 ignored`；前端 `117 files / 918 tests passed`；typecheck、production renderer build、`cargo fmt --check`、`cargo check --lib` 和 `git diff --check` 通过。发布成功不等于用户机器已安装 `-20` 或已完成 Windows/macOS/Linux 真实重启/登录验收。
+
+## 2026-08-11 应用内升级检查双客户端根修
+
+- 安装态 `3.19.1-19` 已在真实 UI 成功识别 GitHub `3.19.1-20`，因此远端 `latest.json`、版本比较和签名清单当前可用；但 `~/.cc-switch/logs/cc-switch.log` 在 2026-08-03 至 08-11 多次记录前端 updater 直连 GitHub 的 `error sending request`，说明“这一次能显示”不能证明链路稳定。
+- 直接根因是 updater 被拆成两个 HTTP client：`src/lib/updater.ts` 的例行检查直接调用 JavaScript `@tauri-apps/plugin-updater.check()`，下载/安装及数据库恢复页则调用 Rust `updater_builder_with_runtime_proxy()`。提交 `0d693c8a`（`3.19.1-3`）声称让所有 updater 检查/下载继承全局代理，实际只修改了 Rust 路径，漏掉 About 页/顶部徽标使用的前端检查；因此该缺陷从 `3.19.1-3` 起存在并会随 GitHub 直连条件间歇复现。
+- 根修新增后端 `check_app_update`，从同一个 proxy-aware builder 返回 `currentVersion/availableVersion/notes/pubDate`；前端 `checkForUpdate()` 只调用该 IPC，不再构造第二个 updater client。TDD RED 明确失败于前端插件仍被调用，GREEN 后前端 2/2、Rust metadata 1/1、typecheck 和 production renderer build 通过。
+- Windows 普通升级不需要先卸载：当前锁定 `tauri-plugin-updater 2.10.0` 会用 NSIS `/P /R /UPDATE /ARGS` 启动外部 installer，再 `std::process::exit(0)`；应用在 install 前先保存窗口、恢复 Live 配置、停止代理、移除托盘并释放单实例锁。SQLite 位于 `~/.cc-switch` 而非 `$INSTDIR`，正常升级不会复制或删除数据库；`Database` 连接随旧进程退出释放，新实例随后重新打开，因此不存在安装器与数据库文件的直接覆盖冲突。
+- 完整“停止 -> SQLite 全目录快照/完整性 -> 卸载 -> 安装 -> health/version/hash -> 回滚”事务脚本只用于安装损坏或安装器族迁移。把它作为每次升级默认路径反而会执行卸载 hooks，并可能再次删除 Windows 开机自启等用户集成状态；该路径必须继续备份 `cc-switch.db/-wal/-shm` 和注册表并做恢复验证。
+- macOS updater 原地替换 `.app` bundle，现有后端链在 install 返回后清理并重启，避免旧 WebView 在 bundle 替换后继续调用 JS；Linux AppImage 原地替换可执行文件，DEB/RPM 可能通过 `pkexec`/系统包管理器获取权限，随后同样清理和重启。三平台共享的网络检查缺陷已由统一后端命令一并消除；只有 Windows 存在 NSIS 外部进程和 `std::process::exit` 的特殊退出顺序。
+
+## 2026-08-11 macOS ChatGPT.app MultiRouter 首次启用失效根修
+
+- 用户现场为 CCSwitchMulti `3.19.1-20`、macOS `26.6.1 arm64`、Codex Desktop `26.803.61601`，实际统一包 `/Applications/ChatGPT.app`、bundle id `com.openai.codex`。并非所有 Mac 都触发：需要新版统一壳、从向导首次启用、启用前 current provider 不是目标 MultiRouter、尚未 takeover，并继续使用未重载的当前会话；旧 `Codex.app`、已经接管、直接从 Provider 列表切换或启用后立即重启的用户可能绕开部分缺陷。配置是触发条件，不是用户配置错误。
+- 跨平台主根因由 `ae431551` 引入并最早发布于 `v3.16.4-3`：`handleEnableCodexMultiRouterPlan` 手动执行 `start proxy -> takeover current provider -> switch target`，因此先以 OpenAI Official 生成官方 catalog 和 legacy managed roles，再热切换目标。修复提交 `2b1f497b` 删除提前启动/接管，只切换目标 Provider，让 `ProviderService::switch` 在尚未 takeover 时进入现有锁内原子入口。`ProviderSwitchOutcome` 明确返回 success/error，向导 helper 对失败抛出原始 Error，不能再吞错后派发 `ENABLE_SUCCESS`。
+- macOS 旧壳 discovery 由 `3dcd2a11` 引入并最早发布于 `v3.16.4-16`，只认进程 `Codex`、目录 `Codex.app` 和 `Contents/MacOS/Codex`。修复提交 `44b9de42` 以 `com.openai.codex` 和 `Info.plist/CFBundleExecutable` 为权威，同时支持 `/Applications`、`~/Applications` 中的 `Codex.app`/`ChatGPT.app` 和 Spotlight；独立 ChatGPT bundle、路径穿越 executable name、Framework 内部 Service.app 均不会被误当主壳。Windows 继续只接受 `OpenAI.Codex` MSIX 下的 `ChatGPT.exe`，Linux 继续接受 `Codex`/`Codex*.AppImage`。
+- 原子入口此前验证成功后漏掉手动 takeover 已有的 guardian/model-picker 收尾。提交 `3c27e38a` 将三个成功出口统一到 `run_post_takeover_lifecycle`，只在 Codex 且 takeover 已验证后启动；CDP 注入仍是 best-effort warning，不是 HTTP 路由成败条件。`target_provider_record_unavailable_inline_auth_fallback` 是 provider 分类降级，不是 executable discovery 或无请求进入代理的直接原因。
+- TDD/门禁：严格启用 helper 2/2、`useProviderActions` 29/29、`codex_desktop` 23/23、Provider service 78/78；完整前端 `119 files / 922 tests`、完整 Rust `2930 passed / 2 ignored`、TypeScript、renderer build、cargo check 和 diff check 通过。全仓 Prettier 仍只被本次未修改的 `src/lib/api/proxy.ts`、`src/lib/codexMultiRouterWizard.test.ts`、`src/types/proxy.ts` 三处既有差异阻断。当前 Windows 主机没有真实 macOS UI，因此不能宣称现场运行已验收；必须以 GitHub macOS 构建成功和受影响 Mac 用户重启后请求真实进入 `127.0.0.1:15721` 作为后续证据。
+- 联网链：Codex Web 找到 OpenAI 官方 issue `#31866/#31944/#32022` 证明 2026 年 7 月统一包迁移到 `ChatGPT.app` 且 bundle id 保持 `com.openai.codex`，Apple 官方 NSWorkspace API确认 bundle identifier 是平台稳定发现边界；Matrix WebSearch 正常但仅返回弱二手结果，没有提供关键事实的独立正证据。结论由官方一手来源、本地源码、Git 历史和用户脱敏现场交叉确认。

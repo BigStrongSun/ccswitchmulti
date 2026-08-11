@@ -25,6 +25,10 @@ const PROXY_TOKEN_PLACEHOLDER: &str = "PROXY_MANAGED";
 /// Codex 接管时暴露给官方客户端的本地代理入口名称。
 const CODEX_LOCAL_PROXY_PROVIDER_NAME: &str = "CCSwitch MultiRouter";
 
+fn should_run_codex_post_takeover(app_type: &AppType) -> bool {
+    matches!(app_type, AppType::Codex)
+}
+
 /// 代理接管模式下需要从 Claude Live 配置中移除的"模型覆盖"字段。
 ///
 /// 原因：接管模式下 `*_MODEL` 必须由 CC Switch 写成稳定的 Claude 角色别名，
@@ -887,10 +891,7 @@ impl ProxyService {
                 // live 文件仍停留在普通供应商配置。
                 if has_backup && live_matches_current_proxy {
                     self.refresh_active_target_from_current_provider(&app).await;
-                    if app == AppType::Codex {
-                        self.ensure_codex_guardian_started();
-                        self.try_repair_codex_model_picker_after_takeover();
-                    }
+                    self.run_post_takeover_lifecycle(&app);
                     return Ok(());
                 }
                 restore_existing_backup_before_takeover = has_backup;
@@ -970,10 +971,7 @@ impl ProxyService {
                 }
             }
 
-            if app == AppType::Codex {
-                self.ensure_codex_guardian_started();
-                self.try_repair_codex_model_picker_after_takeover();
-            }
+            self.run_post_takeover_lifecycle(&app);
 
             return Ok(());
         }
@@ -1225,6 +1223,7 @@ impl ProxyService {
             return Err(e);
         }
 
+        self.run_post_takeover_lifecycle(app_type);
         Ok(())
     }
 
@@ -3812,6 +3811,16 @@ impl ProxyService {
         });
     }
 
+    /// 只在接管已经写入并验证成功后启动 Codex Desktop 的 best-effort 收尾。
+    /// guardian/CDP 不属于 HTTP 路由事务，失败只记录诊断，不能反向破坏已验证接管。
+    fn run_post_takeover_lifecycle(&self, app_type: &AppType) {
+        if !should_run_codex_post_takeover(app_type) {
+            return;
+        }
+        self.ensure_codex_guardian_started();
+        self.try_repair_codex_model_picker_after_takeover();
+    }
+
     fn ensure_codex_guardian_started(&self) {
         let handle_arc = self.codex_guardian.clone();
         let status_arc = self.codex_guardian_status.clone();
@@ -4224,6 +4233,13 @@ mod tests {
         db.update_proxy_config(proxy_config)
             .await
             .expect("set test proxy config to an ephemeral port");
+    }
+
+    #[test]
+    fn atomic_takeover_requests_desktop_repair_only_for_codex() {
+        assert!(should_run_codex_post_takeover(&AppType::Codex));
+        assert!(!should_run_codex_post_takeover(&AppType::Claude));
+        assert!(!should_run_codex_post_takeover(&AppType::Gemini));
     }
 
     async fn running_codex_base_url(service: &ProxyService) -> String {
