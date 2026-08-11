@@ -121,10 +121,11 @@ if (-not $artifactExe) { throw 'Export did not contain the versioned raw executa
 $installedHash = (Get-FileHash -LiteralPath $artifactExe.FullName -Algorithm SHA256).Hash
 ```
 
-Run the script's existing Pester suite before installing, then start exactly one independent hidden transaction process; all named parameters below are the script's real parameters:
+Run the script's existing Pester suite before installing, then start exactly one independent hidden transaction process; all named parameters below are the script's real parameters. The `-Script`/`-PassThru` form is intentional because the target machine currently has Windows PowerShell Pester 3.4.0, where `-Output Detailed` is not a valid unambiguous parameter:
 
 ```powershell
-Invoke-Pester .\scripts\tests\install-ccswitchmulti-transaction.Tests.ps1 -Output Detailed
+$pesterResult = Invoke-Pester -Script '.\scripts\tests\install-ccswitchmulti-transaction.Tests.ps1' -PassThru
+if ($pesterResult.FailedCount -ne 0) { throw "Transaction Pester suite failed: $($pesterResult.FailedCount) of $($pesterResult.TotalCount)" }
 $installedExecutable = 'C:\Users\sunda\AppData\Local\CCSwitchMulti\cc-switch.exe'
 $installDirectory = Split-Path -Parent $installedExecutable
 $uninstallExecutable = Join-Path $installDirectory 'uninstall.exe'
@@ -132,7 +133,7 @@ $ccsmPid = (Get-NetTCPConnection -State Listen -LocalPort 15721 | Select-Object 
 if (-not $ccsmPid) { throw 'No CCSM listener owns port 15721' }
 $currentHash = (Get-FileHash -LiteralPath $installedExecutable -Algorithm SHA256).Hash
 $currentVersion = (Get-Item -LiteralPath $installedExecutable).VersionInfo.FileVersion
-$backupRoot = 'C:\Users\sunda\.cc-switch\backups\ccsm-3.19.1-19-transaction'
+$backupRoot = 'C:\Users\sunda\AppData\Local\CCSwitchMultiTransactionBackups\ccsm-3.19.1-19-transaction'
 New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
 $transactionLog = Join-Path $backupRoot 'transaction-result.json'
 $transactionArgs = @('-NoProfile','-ExecutionPolicy','Bypass','-File',(Resolve-Path .\scripts\install-ccswitchmulti-transaction.ps1),
@@ -143,7 +144,8 @@ $transactionArgs = @('-NoProfile','-ExecutionPolicy','Bypass','-File',(Resolve-P
   '-UninstallExecutable',$uninstallExecutable,'-ConfigPath',(Join-Path $env:USERPROFILE '.cc-switch'),
   '-RegistryKey','HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\CCSwitchMulti',
   '-Port','15721','-HealthUri','http://127.0.0.1:15721/health','-TimeoutSeconds','90','-BackupRoot',$backupRoot)
-$transaction = Start-Process powershell.exe -WindowStyle Hidden -PassThru -Wait -ArgumentList $transactionArgs -RedirectStandardOutput $transactionLog -RedirectStandardError "$transactionLog.stderr"
+$transaction = Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList $transactionArgs -RedirectStandardOutput $transactionLog -RedirectStandardError "$transactionLog.stderr"
+$transaction.WaitForExit()
 if (-not (Test-Path -LiteralPath $transactionLog)) { throw 'Transaction did not create result JSON' }
 try { $result = Get-Content -Raw $transactionLog | ConvertFrom-Json -ErrorAction Stop } catch { throw "Transaction result JSON is invalid: $($_.Exception.Message)" }
 switch ($result.Status) {
@@ -165,7 +167,7 @@ switch ($result.Status) {
 }
 ```
 
-The transaction receives the expected installed hash from the versioned raw executable resolved in the first block, not from the NSIS installer hash.
+The launcher deliberately does not use `Start-Process -Wait`: on Windows that switch waits for the entire descendant process tree, so it would keep waiting after the transaction PowerShell exits because the successfully relaunched CCSM remains alive. `Process.WaitForExit()` waits only for the captured transaction PowerShell process. The transaction receives the expected installed hash from the versioned raw executable resolved in the first block, not from the NSIS installer hash.
 
 After a successful transaction, inspect the structured result/log and prove the installed runtime:
 
@@ -221,6 +223,36 @@ git status --short
 ```
 
 Acceptance: the transaction proves rollback safety and installed `3.19.1-19`; live acceptance proves actual generated-role behavior rather than source/config presence. Record exact IDs, hashes, versions, health evidence, limitations, and final status in `memory.md`.
+
+## Task 10: Whole-branch review RED contracts
+
+- [ ] Add failing Rust tests requiring every persisted profile map key to equal the backend `normalize_profile_key(profile.model)` result, and requiring duplicate canonical models under unrelated stored keys to be rejected or isolated in tolerant status loading.
+- [ ] Add failing Rust tests that reject empty or whitespace-only `description` / `developerInstructions` overrides and whitespace-only nickname candidates before role generation.
+- [ ] Add a failing service/command test proving compiler-domain validation happens before `update_codex_subagent_v2` mutates SQLite, including a non-current provider case.
+- [ ] Add a failing preview test with two enabled profiles requesting the same role name; preview must compile the full draft from `settingsConfig` and report the same requested/effective role allocation as materialization.
+- [ ] Add failing managed-file provenance tests proving a user-authored TOML containing the marker only in its body is never overwritten or pruned, and a user file that merely matches provider/model is not treated as a legacy CCSM file.
+- [ ] Add failing frontend tests requiring catalog models beyond Flash/Pro to appear as disabled drafts and requiring explicit sync/remove/recover actions for missing or malformed profiles. Initialization and synchronization must call the backend so the frontend never duplicates Unicode normalization.
+- [ ] RED commits contain tests only. Every focused command must fail for the intended missing behavior, not compilation, fixture, or environment errors.
+
+## Task 11: Whole-branch review GREEN remediation
+
+- [ ] Enforce the strict canonical key/model invariant; tolerant parsing may preserve malformed raw data for safe diagnostics but must group conflicts by extractable canonical model identity.
+- [ ] Validate intrinsic field overrides before disabled, unroutable, or V1 early returns. Trim required manual fields and reject empty nickname candidates after trimming.
+- [ ] Make preview compile the complete draft and select the requested profile from the shared allocation result. Do not add a second client-side compiler or change the public preview payload shape unless unavoidable.
+- [ ] Validate the complete latest-provider candidate with the backend compiler before the focused DAO transaction commits. If live projection fails after commit, return explicit projection status without pretending the database write did not happen.
+- [ ] Replace substring ownership checks with strong generated-file provenance: exact first-line marker, filename/name consistency, CCSM provider, and a legacy signature specific enough to exclude user-authored lookalikes.
+- [ ] Add backend catalog-draft synchronization that preserves existing profiles, creates enabled preferred Flash/Pro presets, creates disabled generic drafts for every other routable catalog model, and returns safe recoverable status for malformed entries.
+- [ ] Extend the shared editor with catalog sync, profile removal, and recovery/re-key/merge affordances driven by backend results. Wizard and MultiRouter must keep one source of truth.
+- [ ] Update the design to `preferred` Flash/Pro defaults and explicitly record that Codex semantic role choice remains best-effort; correct memory wording to “read-only instruction scope”.
+
+## Task 12: Rebuild, reinstall, and re-accept after review remediation
+
+- [ ] Re-run the complete Rust, frontend, formatting, type, Pester, and diff gates from Tasks 6-8, followed by a fresh whole-branch review.
+- [ ] Rebuild the unchanged local target version `3.19.1-19`; record new artifact sizes and SHA-256 values, because production bytes changed even though the version string did not.
+- [ ] Use only the independent hidden transaction process to kill the verified CCSM PID, wait, uninstall, install, relaunch, verify health/version/hash/routing, and roll back on any failure. Never stop CCSM alone in the interactive shell.
+- [ ] Re-check the installed Wizard and MultiRouter editor, catalog-draft synchronization, invalid profile recovery, V1 preservation, and V2 role files.
+- [ ] Start new Codex app-server sessions and repeat no-model-name Flash, Pro, and official-control canaries with real tool calls, follow-up, rollout metadata, router paths, and HTTP 200 evidence.
+- [ ] Update `memory.md` with the new hashes, transaction ID, process/health evidence, child IDs, limitations, and final review result. Keep all work local: no push, PR, or GitHub Release.
 
 ## Research evidence
 
