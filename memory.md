@@ -3130,3 +3130,12 @@
 - 事务脚本必须有 `try/finally` 等价的恢复语义：成功路径拉起并验收新版；任一步失败也必须优先重新拉起仍可用版本，必要时用预先准备的旧安装包回滚，恢复用户配置，再验证 `127.0.0.1:15721`。脚本退出时不得把机器留在“CCSM 已停止且无人恢复”的状态。
 - kill 必须限定为已确认安装路径对应的 PID：先尝试正常退出并限时等待，超时后才强制终止，不能按进程名误杀其他实例。卸载只清理程序安装范围，用户数据库、Provider、路由、凭据和未知配置字段必须备份并保留。
 - UI/CDP 验收不得通过当前会话临时停止 CCSM来注入启动参数。确需重启态验收时，应由独立、不依赖该 CCSM 的会话执行，或在用户明确控制的维护窗口执行；当前会话只能做不中断服务的只读配置、日志和路由验证。
+
+# 2026-08-11 CCSwitchMulti 小窗口顶部操作裁切根修
+
+- 用户截图约为 `924x646`。旧顶部栏把 AppSwitcher、Codex 工具与新增供应商按钮全部放在同一个 `shrink-0` 集群，外层同时使用 `overflow-x-hidden`；即使全局自适应缩放已降至 80%，全部 8 个应用开启时总宽度仍超出弹性槽，右端操作被直接裁切。
+- 仓库已有同类根修 `0cb6e014`（`fix(ui): keep header actions visible when all apps are enabled`），但它不是当前 `3.19.1-19` 分支祖先，且没有任何当前 tag 包含它；本次故障属于发布分支漏集成已有响应式修复，而不是 Tauri 最小窗口尺寸或 WebView 缩放本身失效。
+- 根修结构是：AppSwitcher 独占 `min-w-0 flex-1` 弹性中段，通过父槽真实 `clientWidth` 与 `ResizeObserver` 计算可见应用数量；溢出应用进入“更多应用” Popover，当前激活应用始终顶替最后一个可见位。Codex 页面工具与新增供应商按钮进入独立 `shrink-0` 右端区，不再被应用标签挤出。
+- TDD 先在旧实现验证窄槽位没有 `appSwitcher.more` 而失败；GREEN 覆盖 120px 窄槽位保留当前 Hermes、隐藏应用可访问且不重复，以及 1000px 宽槽位恢复全部 8 个应用且不显示“更多应用”。四语言新增 `appSwitcher.more`。
+- 全量前端验证为 `117 files / 917 tests`、TypeScript 与 production renderer build 通过；本次文件 Prettier 与 `git diff --check` 通过。全仓 `format:check` 仍只被本次未修改的 `src/lib/api/proxy.ts`、`src/lib/codexMultiRouterWizard.test.ts`、`src/types/proxy.ts` 三个既有格式差异阻断。
+- 独立 Vite 预览未停止正式 CCSM。浏览器按截图尺寸 `924x646` 和 Tauri 最小窗口 `900x600` 验收：document `scrollWidth == clientWidth`；所有 header 按钮边界均在 viewport 内；Codex 当前标签、多模型路由、用量、Agent API、Skills、提示词、会话、MCP 与新增按钮完整可见；OpenCode/OpenClaw/Hermes 可从“更多应用”打开。
