@@ -353,11 +353,16 @@ impl Database {
     /// provider row. The read and write share one IMMEDIATE transaction so an editor snapshot
     /// can never overwrite catalog, alias, route, credential, or future-field refreshes that
     /// committed before this operation acquired the writer boundary.
-    pub fn update_codex_subagent_v2(
+    pub fn update_codex_subagent_v2<M, V>(
         &self,
         provider_id: &str,
-        subagent_v2: &serde_json::Value,
-    ) -> Result<serde_json::Value, AppError> {
+        mutate: M,
+        validate: V,
+    ) -> Result<serde_json::Value, AppError>
+    where
+        M: FnOnce(&serde_json::Value) -> Result<serde_json::Value, AppError>,
+        V: FnOnce(&serde_json::Value) -> Result<(), AppError>,
+    {
         let mut conn = lock_conn!(self.conn);
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -375,6 +380,7 @@ impl Database {
                 other => AppError::Database(other.to_string()),
             })?;
         let mut settings_config = parse_provider_settings_config(&settings_config_str);
+        let subagent_v2 = mutate(&settings_config)?;
         let settings = settings_config.as_object_mut().ok_or_else(|| {
             AppError::Database("Provider settings normalization failed".to_string())
         })?;
@@ -387,7 +393,8 @@ impl Database {
         routing
             .as_object_mut()
             .ok_or_else(|| AppError::Database("Codex routing normalization failed".to_string()))?
-            .insert("subagentV2".to_string(), subagent_v2.clone());
+            .insert("subagentV2".to_string(), subagent_v2);
+        validate(&settings_config)?;
         let serialized = serde_json::to_string(&settings_config)
             .map_err(|e| AppError::Database(format!("Failed to serialize settings_config: {e}")))?;
         let changed = tx
@@ -913,7 +920,7 @@ mod tests {
                 }
             }
         });
-        db.update_codex_subagent_v2("router", &edited_v2)
+        db.update_codex_subagent_v2("router", |_| Ok(edited_v2.clone()), |_| Ok(()))
             .expect("atomically merge V2 into latest provider row");
 
         let saved = db

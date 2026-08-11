@@ -1,7 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
-import { codexSubagentV2Api } from "@/lib/api/codexSubagentV2";
+import {
+  codexSubagentV2Api,
+  type CodexSubagentV2MutationProvider,
+  type CodexSubagentV2ReconcileAction,
+} from "@/lib/api/codexSubagentV2";
 import type { Provider } from "@/types";
 import {
   createDefaultCodexSubagentV2Config,
@@ -36,6 +40,27 @@ const PROFILE_TITLES: Record<string, string> = {
 };
 
 const EXPLICIT_REASONING_EFFORTS = new Set(["low", "medium", "high", "xhigh"]);
+const TASK_STRENGTH_VALUES = new Set<string>(
+  TASK_STRENGTHS.map(({ value }) => value),
+);
+const OPTIMIZATION_VALUES = new Set<string>(["speed", "balanced", "quality"]);
+const WRITE_SCOPE_VALUES = new Set<string>([
+  "read_only",
+  "bounded_changes",
+  "complex_changes",
+]);
+const PREFERENCE_VALUES = new Set<string>([
+  "preferred",
+  "eligible",
+  "fallback",
+]);
+const QUESTIONNAIRE_REASONING_EFFORTS = new Set<string>([
+  "auto",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -51,12 +76,17 @@ function isUsableProfile(value: unknown): value is CodexSubagentV2Profile {
     !(
       Array.isArray(questionnaire.taskStrengths) &&
       questionnaire.taskStrengths.every(
-        (strength) => typeof strength === "string",
+        (strength) =>
+          typeof strength === "string" && TASK_STRENGTH_VALUES.has(strength),
       ) &&
       typeof questionnaire.optimization === "string" &&
+      OPTIMIZATION_VALUES.has(questionnaire.optimization) &&
       typeof questionnaire.writeScope === "string" &&
+      WRITE_SCOPE_VALUES.has(questionnaire.writeScope) &&
       typeof questionnaire.preference === "string" &&
-      typeof questionnaire.reasoningEffort === "string"
+      PREFERENCE_VALUES.has(questionnaire.preference) &&
+      typeof questionnaire.reasoningEffort === "string" &&
+      QUESTIONNAIRE_REASONING_EFFORTS.has(questionnaire.reasoningEffort)
     )
   ) {
     return false;
@@ -214,12 +244,16 @@ export function CodexSubagentProfileEditor({
   >(null);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [projectionWarning, setProjectionWarning] = useState<string | null>(
+    null,
+  );
   const [isSaving, setIsSaving] = useState(false);
 
   useEffect(() => {
     setDraft(readPersistedConfig(provider));
     setSaveMessage(null);
     setSaveError(null);
+    setProjectionWarning(null);
     setStrengthLimitMessage(null);
     setNicknameDrafts({});
     setStatusError(null);
@@ -302,22 +336,64 @@ export function CodexSubagentProfileEditor({
     };
   }, [diagnosticSettingsKey]);
 
+  async function adoptBackendProvider(
+    nextProvider: CodexSubagentV2MutationProvider,
+  ) {
+    const nextConfig = readPersistedConfig(nextProvider);
+    if (!nextConfig) {
+      throw new Error("后端未返回已保存的 V2 子 Agent 能力配置。");
+    }
+    setDraft(nextConfig);
+    setProjectionWarning(nextProvider.projection?.warning?.message ?? null);
+    onPersisted?.(nextProvider);
+    await queryClient.invalidateQueries({ queryKey: ["providers", "codex"] });
+  }
+
   async function persist(nextConfig: CodexSubagentV2Config) {
     const nextProvider = await codexSubagentV2Api.updateProviderConfig(
       provider.id,
       nextConfig,
     );
-    setDraft(nextConfig);
-    onPersisted?.(nextProvider);
-    await queryClient.invalidateQueries({ queryKey: ["providers", "codex"] });
+    await adoptBackendProvider(nextProvider);
   }
 
   async function initialize() {
     setIsSaving(true);
     setSaveError(null);
     try {
-      await persist(createDefaultCodexSubagentV2Config());
+      const nextProvider = await codexSubagentV2Api.initializeProviderConfig(
+        provider.id,
+      );
+      await adoptBackendProvider(nextProvider);
       setSaveMessage("V2 子 Agent 能力配置已初始化");
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function reconcile(
+    action: CodexSubagentV2ReconcileAction,
+    currentDraft?: CodexSubagentV2Config,
+  ) {
+    setIsSaving(true);
+    setSaveError(null);
+    setSaveMessage(null);
+    try {
+      const nextProvider = await codexSubagentV2Api.reconcileProviderProfiles(
+        provider.id,
+        action,
+        currentDraft,
+      );
+      await adoptBackendProvider(nextProvider);
+      setSaveMessage(
+        action === "sync_catalog"
+          ? "模型目录能力配置已同步"
+          : action === "remove_all_invalid"
+            ? "无效能力配置已删除"
+            : "无效能力配置已从模型目录恢复",
+      );
     } catch (error) {
       setSaveError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -520,6 +596,35 @@ export function CodexSubagentProfileEditor({
         <h3 className="text-sm font-semibold">模型能力问卷</h3>
         <h3 className="text-sm font-semibold">最终字段</h3>
         <h3 className="text-sm font-semibold">TOML 预览</h3>
+
+        <div className="flex flex-wrap gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => reconcile("sync_catalog", draft)}
+          >
+            同步模型目录能力配置
+          </Button>
+          {invalidProfileEntries.length > 0 ? (
+            <>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => reconcile("remove_all_invalid")}
+              >
+                删除全部无效能力配置（{invalidProfileEntries.length} 项）
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => reconcile("recover_all_invalid_from_catalog")}
+              >
+                从模型目录恢复全部无效能力配置（
+                {invalidProfileEntries.length} 项）
+              </Button>
+            </>
+          ) : null}
+        </div>
 
         <div className="grid gap-4 xl:grid-cols-2">
           {profileEntries.map(([profileKey, profile], profileIndex) => {
@@ -871,6 +976,15 @@ export function CodexSubagentProfileEditor({
         {saveError ? (
           <span role="alert" className="text-sm text-rose-600">
             {saveError}
+          </span>
+        ) : null}
+        {projectionWarning ? (
+          <span
+            role="status"
+            aria-live="polite"
+            className="text-sm text-amber-700"
+          >
+            {projectionWarning}
           </span>
         ) : null}
       </div>

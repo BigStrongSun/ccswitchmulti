@@ -8,7 +8,7 @@ mod live;
 mod usage;
 
 use indexmap::IndexMap;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::future::Future;
 
@@ -108,6 +108,72 @@ pub fn reapply_current_codex_official_live(state: &AppState) -> Result<bool, App
 
 /// Provider business logic service
 pub struct ProviderService;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexSubagentV2ProjectionStatus {
+    Applied,
+    NotRequired,
+    PendingRetry,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexSubagentV2ProjectionWarning {
+    pub code: &'static str,
+    pub message: &'static str,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexSubagentV2ProjectionOutcome {
+    pub status: CodexSubagentV2ProjectionStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<CodexSubagentV2ProjectionWarning>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexSubagentV2MutationResult {
+    #[serde(flatten)]
+    pub provider: Provider,
+    pub projection: CodexSubagentV2ProjectionOutcome,
+}
+
+const CODEX_LIVE_PROJECTION_RETRY_CODE: &str = "codex_live_projection_pending_retry";
+const CODEX_LIVE_PROJECTION_RETRY_MESSAGE: &str = "数据库已保存，Codex live 投影待重试。";
+const CODEX_CURRENT_PROVIDER_LOOKUP_RETRY_CODE: &str =
+    "codex_current_provider_lookup_pending_retry";
+const CODEX_CURRENT_PROVIDER_LOOKUP_RETRY_MESSAGE: &str =
+    "数据库已保存，暂时无法确认当前 Codex Provider，live 投影待重试。";
+
+fn codex_subagent_v2_projection_warning(
+    code: &'static str,
+    message: &'static str,
+) -> CodexSubagentV2ProjectionWarning {
+    CodexSubagentV2ProjectionWarning { code, message }
+}
+
+fn app_error_diagnostic_kind(error: &AppError) -> &'static str {
+    match error {
+        AppError::Config(_) => "config",
+        AppError::InvalidInput(_) => "invalid_input",
+        AppError::Io { .. } => "io",
+        AppError::IoContext { .. } => "io_context",
+        AppError::Json { .. } => "json",
+        AppError::JsonSerialize { .. } => "json_serialize",
+        AppError::Toml { .. } => "toml",
+        AppError::Lock(_) => "lock",
+        AppError::McpValidation(_) => "mcp_validation",
+        AppError::Message(_) => "message",
+        AppError::HttpStatus { .. } => "http_status",
+        AppError::Localized { .. } => "localized",
+        AppError::Database(_) => "database",
+        AppError::OmoConfigNotFound => "omo_config_not_found",
+        AppError::AllProvidersCircuitOpen => "all_providers_circuit_open",
+        AppError::NoProvidersConfigured => "no_providers_configured",
+    }
+}
 
 /// 在同步的 provider 命令里安全等待异步代理任务。
 ///
@@ -800,6 +866,51 @@ mod tests {
                 "reserved roleName must be rejected by the compiler before persistence, got {result:?}"
             );
         });
+    }
+
+    #[test]
+    fn codex_subagent_v2_mutation_result_keeps_provider_shape_and_redacts_projection_errors() {
+        let sensitive_error = AppError::Config(
+            "settings.taskBody=PRIVATE_TASK apiKey=PRIVATE_CREDENTIAL".to_string(),
+        );
+        assert_eq!(app_error_diagnostic_kind(&sensitive_error), "config");
+
+        let provider = Provider::with_id(
+            "router".to_string(),
+            "Router".to_string(),
+            json!({ "codexRouting": { "subagentVersion": "v2" } }),
+            None,
+        );
+        let result = CodexSubagentV2MutationResult {
+            provider,
+            projection: CodexSubagentV2ProjectionOutcome {
+                status: CodexSubagentV2ProjectionStatus::PendingRetry,
+                warning: Some(codex_subagent_v2_projection_warning(
+                    CODEX_LIVE_PROJECTION_RETRY_CODE,
+                    CODEX_LIVE_PROJECTION_RETRY_MESSAGE,
+                )),
+            },
+        };
+        let serialized = serde_json::to_value(&result).expect("serialize mutation result");
+
+        assert_eq!(serialized["id"], "router");
+        assert_eq!(serialized["name"], "Router");
+        assert_eq!(serialized["projection"]["status"], "pending_retry");
+        assert_eq!(
+            serialized["projection"]["warning"],
+            json!({
+                "code": "codex_live_projection_pending_retry",
+                "message": "数据库已保存，Codex live 投影待重试。"
+            })
+        );
+        let public_payload = serialized.to_string();
+        assert!(!public_payload.contains("PRIVATE_TASK"));
+        assert!(!public_payload.contains("PRIVATE_CREDENTIAL"));
+
+        let provider_consumer: Provider = serde_json::from_value(serialized)
+            .expect("existing Provider consumers must ignore the additive projection field");
+        assert_eq!(provider_consumer.id, "router");
+        assert_eq!(provider_consumer.name, "Router");
     }
 
     #[test]
@@ -3611,32 +3722,149 @@ impl ProviderService {
         Ok(true)
     }
 
+    fn finish_codex_subagent_v2_mutation(
+        state: &AppState,
+        provider_id: &str,
+        candidate_settings: Value,
+    ) -> Result<CodexSubagentV2MutationResult, AppError> {
+        let mut provider = state
+            .db
+            .get_provider_by_id(provider_id, AppType::Codex.as_str())?
+            .ok_or_else(|| AppError::InvalidInput("Codex provider does not exist".to_string()))?;
+        provider.settings_config = candidate_settings;
+
+        let current = crate::settings::get_effective_current_provider(&state.db, &AppType::Codex);
+        let projection = match current {
+            Ok(Some(current_id)) if current_id == provider_id => {
+                match Self::sync_current_provider_for_app(state, AppType::Codex) {
+                    Ok(()) => CodexSubagentV2ProjectionOutcome {
+                        status: CodexSubagentV2ProjectionStatus::Applied,
+                        warning: None,
+                    },
+                    Err(error) => {
+                        log::warn!(
+                            "Codex V2 子 Agent 数据库保存成功但 live 投影失败；\
+                             将在后续同步重试，error_kind={}",
+                            app_error_diagnostic_kind(&error)
+                        );
+                        CodexSubagentV2ProjectionOutcome {
+                            status: CodexSubagentV2ProjectionStatus::PendingRetry,
+                            warning: Some(codex_subagent_v2_projection_warning(
+                                CODEX_LIVE_PROJECTION_RETRY_CODE,
+                                CODEX_LIVE_PROJECTION_RETRY_MESSAGE,
+                            )),
+                        }
+                    }
+                }
+            }
+            Ok(_) => CodexSubagentV2ProjectionOutcome {
+                status: CodexSubagentV2ProjectionStatus::NotRequired,
+                warning: None,
+            },
+            Err(error) => {
+                log::warn!(
+                    "Codex V2 子 Agent 数据库保存成功但当前 Provider 查询失败；\
+                     将在后续同步重试，error_kind={}",
+                    app_error_diagnostic_kind(&error)
+                );
+                CodexSubagentV2ProjectionOutcome {
+                    status: CodexSubagentV2ProjectionStatus::PendingRetry,
+                    warning: Some(codex_subagent_v2_projection_warning(
+                        CODEX_CURRENT_PROVIDER_LOOKUP_RETRY_CODE,
+                        CODEX_CURRENT_PROVIDER_LOOKUP_RETRY_MESSAGE,
+                    )),
+                }
+            }
+        };
+        Ok(CodexSubagentV2MutationResult {
+            provider,
+            projection,
+        })
+    }
+
     /// Persist one V2 capability document without replacing the surrounding Provider record.
-    /// Domain validation happens before the DAO transaction; the DAO then merges only the owned
-    /// field into the latest row, and the established current-provider projection path applies
-    /// the committed result to Codex live state when necessary.
+    /// The DAO acquires an IMMEDIATE write boundary, merges the focused field into the latest
+    /// settings, and invokes the full compiler validation closure before committing.
     pub fn update_codex_subagent_v2(
         state: &AppState,
         provider_id: &str,
         subagent_v2: Value,
-    ) -> Result<Provider, AppError> {
-        crate::codex_subagent_profiles::parse_persisted_subagent_v2(&subagent_v2).map_err(
-            |_| {
-                AppError::InvalidInput(
-                    "codexRouting.subagentV2 does not satisfy the schema-v1 contract".to_string(),
+    ) -> Result<CodexSubagentV2MutationResult, AppError> {
+        let provider_context =
+            crate::codex_config::codex_provider_classification_context(state.db.as_ref())?;
+        let candidate = state.db.update_codex_subagent_v2(
+            provider_id,
+            move |_| Ok(subagent_v2),
+            |settings| {
+                crate::codex_config::validate_codex_subagent_v2_candidate(
+                    settings,
+                    Some(&provider_context),
+                    true,
                 )
             },
         )?;
-        state
-            .db
-            .update_codex_subagent_v2(provider_id, &subagent_v2)?;
-        Self::sync_current_provider_for_app(state, AppType::Codex)?;
-        state
-            .db
-            .get_all_providers(AppType::Codex.as_str())?
-            .get(provider_id)
-            .cloned()
-            .ok_or_else(|| AppError::InvalidInput("Codex provider does not exist".to_string()))
+        Self::finish_codex_subagent_v2_mutation(state, provider_id, candidate)
+    }
+
+    pub fn initialize_codex_subagent_v2(
+        state: &AppState,
+        provider_id: &str,
+    ) -> Result<CodexSubagentV2MutationResult, AppError> {
+        let provider_context =
+            crate::codex_config::codex_provider_classification_context(state.db.as_ref())?;
+        let candidate = state.db.update_codex_subagent_v2(
+            provider_id,
+            |settings| {
+                crate::codex_config::initialize_codex_subagent_v2_for_candidate(
+                    settings,
+                    Some(&provider_context),
+                )
+            },
+            |settings| {
+                crate::codex_config::validate_codex_subagent_v2_candidate(
+                    settings,
+                    Some(&provider_context),
+                    true,
+                )
+            },
+        )?;
+        Self::finish_codex_subagent_v2_mutation(state, provider_id, candidate)
+    }
+
+    pub fn reconcile_codex_subagent_v2_profiles(
+        state: &AppState,
+        provider_id: &str,
+        action: crate::codex_config::CodexSubagentV2ReconcileAction,
+        subagent_v2: Option<Value>,
+    ) -> Result<CodexSubagentV2MutationResult, AppError> {
+        if action != crate::codex_config::CodexSubagentV2ReconcileAction::SyncCatalog
+            && subagent_v2.is_some()
+        {
+            return Err(AppError::InvalidInput(
+                "Only sync_catalog accepts a subagentV2 draft".to_string(),
+            ));
+        }
+        let provider_context =
+            crate::codex_config::codex_provider_classification_context(state.db.as_ref())?;
+        let candidate = state.db.update_codex_subagent_v2(
+            provider_id,
+            |settings| {
+                crate::codex_config::reconcile_codex_subagent_v2_for_candidate(
+                    settings,
+                    action,
+                    subagent_v2.as_ref(),
+                    Some(&provider_context),
+                )
+            },
+            |settings| {
+                crate::codex_config::validate_codex_subagent_v2_candidate(
+                    settings,
+                    Some(&provider_context),
+                    false,
+                )
+            },
+        )?;
+        Self::finish_codex_subagent_v2_mutation(state, provider_id, candidate)
     }
 
     /// Delete a provider

@@ -7,6 +7,23 @@ import type {
   CodexSubagentV2Profile,
 } from "@/types/codexSubagentV2";
 
+export type CodexSubagentV2MutationProvider = Provider & {
+  projection?: {
+    status: "applied" | "not_required" | "pending_retry";
+    warning?: {
+      code:
+        | "codex_live_projection_pending_retry"
+        | "codex_current_provider_lookup_pending_retry";
+      message: string;
+    };
+  };
+};
+
+export type CodexSubagentV2ReconcileAction =
+  | "sync_catalog"
+  | "remove_all_invalid"
+  | "recover_all_invalid_from_catalog";
+
 export const codexSubagentV2Api = {
   previewProfile(
     settingsConfig: Record<string, unknown>,
@@ -29,7 +46,25 @@ export const codexSubagentV2Api = {
   updateProviderConfig(
     providerId: string,
     subagentV2: CodexSubagentV2Config,
-  ): Promise<Provider> {
+  ): Promise<CodexSubagentV2MutationProvider> {
     return invoke("update_codex_subagent_v2", { providerId, subagentV2 });
+  },
+
+  initializeProviderConfig(
+    providerId: string,
+  ): Promise<CodexSubagentV2MutationProvider> {
+    return invoke("initialize_codex_subagent_v2", { providerId });
+  },
+
+  reconcileProviderProfiles(
+    providerId: string,
+    action: CodexSubagentV2ReconcileAction,
+    subagentV2?: CodexSubagentV2Config,
+  ): Promise<CodexSubagentV2MutationProvider> {
+    return invoke("reconcile_codex_subagent_v2_profiles", {
+      providerId,
+      action,
+      ...(subagentV2 === undefined ? {} : { subagentV2 }),
+    });
   },
 };

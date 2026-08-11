@@ -76,9 +76,36 @@ pub fn update_codex_subagent_v2(
     state: State<'_, AppState>,
     providerId: String,
     subagentV2: serde_json::Value,
-) -> Result<Provider, String> {
+) -> Result<crate::services::CodexSubagentV2MutationResult, String> {
     ProviderService::update_codex_subagent_v2(state.inner(), &providerId, subagentV2)
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn initialize_codex_subagent_v2(
+    state: State<'_, AppState>,
+    providerId: String,
+) -> Result<crate::services::CodexSubagentV2MutationResult, String> {
+    ProviderService::initialize_codex_subagent_v2(state.inner(), &providerId)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn reconcile_codex_subagent_v2_profiles(
+    state: State<'_, AppState>,
+    providerId: String,
+    action: crate::codex_config::CodexSubagentV2ReconcileAction,
+    subagentV2: Option<serde_json::Value>,
+) -> Result<crate::services::CodexSubagentV2MutationResult, String> {
+    ProviderService::reconcile_codex_subagent_v2_profiles(
+        state.inner(),
+        &providerId,
+        action,
+        subagentV2,
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

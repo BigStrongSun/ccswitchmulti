@@ -2232,7 +2232,7 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
     );
   });
 
-  it("initializes the exact legacy V2 defaults with one focused atomic write", async () => {
+  it("initializes V2 with one backend-owned focused mutation", async () => {
     const user = userEvent.setup();
     await renderWorkspace(false);
     await user.click(
@@ -2240,43 +2240,27 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
         name: "初始化 V2 子 Agent 能力配置",
       }),
     );
-    await waitFor(() => expect(v2PersistenceCalls()).toHaveLength(1));
-    await expectSavedSubagentV2({
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("initialize_codex_subagent_v2", {
+        providerId: "router",
+      }),
+    );
+    expect(v2PersistenceCalls()).toHaveLength(0);
+    expect(
+      ipcState.providers.router.settingsConfig.codexRouting.subagentV2,
+    ).toEqual({
       schemaVersion: 1,
       selectionPolicy: "balanced",
       profiles: {
-        "deepseek-v4-flash": {
-          model: "deepseek-v4-flash",
-          enabled: true,
+        "qwen-draft": {
+          model: "QWEN-ＤＲＡＦＴ",
+          enabled: false,
           questionnaire: {
-            taskStrengths: [
-              "long_context_reading",
-              "repository_exploration",
-              "evidence_collection",
-              "summarization",
-              "testing",
-            ],
-            optimization: "speed",
+            taskStrengths: ["repository_exploration"],
+            optimization: "balanced",
             writeScope: "read_only",
-            preference: "preferred",
-            reasoningEffort: "medium",
-          },
-        },
-        "deepseek-v4-pro": {
-          model: "deepseek-v4-pro",
-          enabled: true,
-          questionnaire: {
-            taskStrengths: [
-              "complex_debugging",
-              "architecture_design",
-              "complex_implementation",
-              "high_risk_review",
-              "testing",
-            ],
-            optimization: "quality",
-            writeScope: "complex_changes",
-            preference: "preferred",
-            reasoningEffort: "high",
+            preference: "eligible",
+            reasoningEffort: "auto",
           },
         },
       },

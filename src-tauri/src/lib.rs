@@ -1369,6 +1369,8 @@ pub fn run() {
             commands::add_provider,
             commands::update_provider,
             commands::update_codex_subagent_v2,
+            commands::initialize_codex_subagent_v2,
+            commands::reconcile_codex_subagent_v2_profiles,
             commands::delete_provider,
             commands::remove_provider_from_live_config,
             commands::switch_provider,

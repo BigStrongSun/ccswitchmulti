@@ -527,6 +527,13 @@ pub fn parse_persisted_subagent_v2(raw: &Value) -> Result<CodexSubagentV2, Compi
             })?,
             None => CodexSubagentProfileOverrides::default(),
         };
+        if key != normalize_profile_key(model) {
+            return Err(validation_error(
+                "profile_key_model_mismatch",
+                Some(&key),
+                "profile key must equal normalize_profile_key(model)",
+            ));
+        }
         parsed.push(ParsedProfileEntry::Valid(ParsedCodexSubagentProfile {
             key,
             model: model.to_string(),
@@ -876,6 +883,86 @@ fn default_nickname(p: &ParsedCodexSubagentProfile) -> String {
         .unwrap_or_default()
 }
 
+fn profile_collision_identity(entry: &ParsedProfileEntry) -> String {
+    match entry {
+        ParsedProfileEntry::Valid(profile) => normalize_profile_key(&profile.model),
+        ParsedProfileEntry::Invalid { key, raw, .. } => raw
+            .get("model")
+            .and_then(Value::as_str)
+            .map(normalize_profile_key)
+            .filter(|identity| !identity.is_empty())
+            .unwrap_or_else(|| normalize_profile_key(key)),
+    }
+}
+
+fn validate_and_trim_intrinsic_overrides(
+    profile: &mut ParsedCodexSubagentProfile,
+) -> Result<(), CompileError> {
+    if let Some(description) = profile.overrides.description.as_mut() {
+        *description = description.trim().to_string();
+        if description.is_empty() {
+            return Err(validation_error(
+                "empty_description",
+                Some(&profile.key),
+                "description must contain non-whitespace characters",
+            ));
+        }
+    }
+    if let Some(instructions) = profile.overrides.developer_instructions.as_mut() {
+        *instructions = instructions.trim().to_string();
+        if instructions.is_empty() {
+            return Err(validation_error(
+                "empty_developer_instructions",
+                Some(&profile.key),
+                "developerInstructions must contain non-whitespace characters",
+            ));
+        }
+    }
+    if let Some(nicknames) = profile.overrides.nickname_candidates.as_mut() {
+        if !(1..=3).contains(&nicknames.len()) {
+            return Err(validation_error(
+                "nickname_count",
+                Some(&profile.key),
+                "nicknameCandidates must contain 1 through 3 entries",
+            ));
+        }
+        let mut seen = HashSet::new();
+        for nickname in nicknames {
+            let was_empty = nickname.is_empty();
+            *nickname = nickname.trim().to_string();
+            if nickname.is_empty() {
+                return Err(validation_error(
+                    "empty_nickname",
+                    Some(&profile.key),
+                    if was_empty {
+                        "nickname must be nonempty"
+                    } else {
+                        "nickname must contain non-whitespace characters"
+                    },
+                ));
+            }
+            if !nickname
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_'))
+            {
+                return Err(validation_error(
+                    "invalid_nickname",
+                    Some(&profile.key),
+                    "nickname uses only ASCII alphanumeric, space, dash, underscore",
+                ));
+            }
+            if !seen.insert(nickname.clone()) {
+                return Err(validation_error(
+                    "duplicate_nickname",
+                    Some(&profile.key),
+                    "nicknameCandidates must be unique",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn compile_subagent_v2_profiles(request: &CompileRequest) -> CompileResult {
     let Some(config) = &request.persisted_subagent_v2 else {
         return Ok(CompileOutput {
@@ -888,11 +975,9 @@ pub fn compile_subagent_v2_profiles(request: &CompileRequest) -> CompileResult {
     };
     let mut normalized: HashMap<String, usize> = HashMap::new();
     for entry in &config.profiles {
-        let key = match entry {
-            ParsedProfileEntry::Valid(profile) => &profile.key,
-            ParsedProfileEntry::Invalid { key, .. } => key,
-        };
-        *normalized.entry(normalize_profile_key(key)).or_default() += 1;
+        *normalized
+            .entry(profile_collision_identity(entry))
+            .or_default() += 1;
     }
     let mut output = CompileOutput {
         generated_roles: vec![],
@@ -907,16 +992,12 @@ pub fn compile_subagent_v2_profiles(request: &CompileRequest) -> CompileResult {
         .map(|s| s.to_ascii_lowercase())
         .collect();
     for entry in &config.profiles {
-        let entry_key = match entry {
-            ParsedProfileEntry::Valid(profile) => &profile.key,
-            ParsedProfileEntry::Invalid { key, .. } => key,
-        };
         let collision = normalized
-            .get(&normalize_profile_key(entry_key))
+            .get(&profile_collision_identity(entry))
             .copied()
             .unwrap_or(0)
             > 1;
-        let p = match entry {
+        let mut p = match entry {
             ParsedProfileEntry::Invalid { raw, .. } => {
                 output.preserved_invalid_profiles.push(raw.clone());
                 output.profile_statuses.push(ProfileStatus {
@@ -935,8 +1016,9 @@ pub fn compile_subagent_v2_profiles(request: &CompileRequest) -> CompileResult {
                 });
                 continue;
             }
-            ParsedProfileEntry::Valid(p) => p,
+            ParsedProfileEntry::Valid(p) => p.clone(),
         };
+        validate_and_trim_intrinsic_overrides(&mut p)?;
         let push_status = |output: &mut CompileOutput, status, reason| {
             output.profile_statuses.push(ProfileStatus {
                 key: p.key.clone(),
@@ -985,7 +1067,7 @@ pub fn compile_subagent_v2_profiles(request: &CompileRequest) -> CompileResult {
             .overrides
             .role_name
             .clone()
-            .unwrap_or_else(|| default_role_name(p));
+            .unwrap_or_else(|| default_role_name(&p));
         let base = normalize_role_name(&requested);
         if base.is_empty() {
             return Err(validation_error(
@@ -1015,58 +1097,24 @@ pub fn compile_subagent_v2_profiles(request: &CompileRequest) -> CompileResult {
             .overrides
             .nickname_candidates
             .clone()
-            .unwrap_or_else(|| vec![default_nickname(p)]);
-        if !(1..=3).contains(&nicknames.len()) {
-            return Err(validation_error(
-                "nickname_count",
-                Some(&p.key),
-                "nicknameCandidates must contain 1 through 3 entries",
-            ));
-        }
-        let mut seen = HashSet::new();
-        for nickname in &nicknames {
-            if nickname.is_empty() {
-                return Err(validation_error(
-                    "empty_nickname",
-                    Some(&p.key),
-                    "nickname must be nonempty",
-                ));
-            }
-            if !nickname
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_'))
-            {
-                return Err(validation_error(
-                    "invalid_nickname",
-                    Some(&p.key),
-                    "nickname uses only ASCII alphanumeric, space, dash, underscore",
-                ));
-            }
-            if !seen.insert(nickname) {
-                return Err(validation_error(
-                    "duplicate_nickname",
-                    Some(&p.key),
-                    "nicknameCandidates must be unique",
-                ));
-            }
-        }
+            .unwrap_or_else(|| vec![default_nickname(&p)]);
         output.generated_roles.push(GeneratedRole {
             requested_role_name: requested,
             effective_role_name: effective,
             description: generated_description_for_provider(
                 config.selection_policy,
-                p,
+                &p,
                 catalog.provider_kind,
             ),
             developer_instructions: generated_instructions_for_provider(
                 config.selection_policy,
-                p,
+                &p,
                 catalog.provider_kind,
             ),
             nickname_candidates: nicknames,
             model: p.model.clone(),
             model_provider: "codex_model_router_v2".to_string(),
-            effort: auto_effort(p),
+            effort: auto_effort(&p),
             context_window: catalog.context_window,
         });
         push_status(&mut output, ProfileStatusCode::Routable, None);
@@ -1317,6 +1365,17 @@ mod tests {
         raw_profile_with_questionnaire(q)
     }
 
+    fn canonical_raw_profile(strengths: Value) -> Value {
+        let mut raw = raw_profile(strengths);
+        let profile = raw["profiles"]
+            .as_object_mut()
+            .expect("profiles fixture is an object")
+            .remove("flash")
+            .expect("flash fixture exists");
+        raw["profiles"]["deepseek-v4-flash"] = profile;
+        raw
+    }
+
     fn raw_profile_missing_questionnaire_field(field: &str) -> Value {
         let mut q = questionnaire();
         q.as_object_mut()
@@ -1326,7 +1385,7 @@ mod tests {
     }
 
     fn expected_valid_profile_with_strengths(strengths: Vec<TaskStrength>) -> CodexSubagentV2 {
-        let mut p = profile("flash", "DeepSeek-V4-Flash");
+        let mut p = profile("deepseek-v4-flash", "DeepSeek-V4-Flash");
         p.strengths = strengths;
         config(SelectionPolicy::Balanced, vec![valid(p)])
     }
@@ -1514,7 +1573,7 @@ mod tests {
 
     #[test]
     fn codex_subagent_v2_round_trips_all_overrides() {
-        let mut p = profile("flash", "DeepSeek-V4-Flash");
+        let mut p = profile("deepseek-v4-flash", "DeepSeek-V4-Flash");
         p.overrides = CodexSubagentProfileOverrides {
             role_name: Some(s("flash-reader")),
             description: Some(s("Manual.")),
@@ -1523,7 +1582,7 @@ mod tests {
             model_reasoning_effort: Some(ModelReasoningEffort::XHigh),
         };
         assert_parse(
-            json!({"schemaVersion":1,"profiles":{"flash":{"model":"DeepSeek-V4-Flash","enabled":true,"questionnaire":{"taskStrengths":["repository_exploration"],"optimization":"speed","writeScope":"read_only","preference":"eligible","reasoningEffort":"auto"},"overrides":{"roleName":"flash-reader","description":"Manual.","developerInstructions":"Read only.","nicknameCandidates":["Flash Reader"],"modelReasoningEffort":"xhigh"}}}}),
+            json!({"schemaVersion":1,"profiles":{"deepseek-v4-flash":{"model":"DeepSeek-V4-Flash","enabled":true,"questionnaire":{"taskStrengths":["repository_exploration"],"optimization":"speed","writeScope":"read_only","preference":"eligible","reasoningEffort":"auto"},"overrides":{"roleName":"flash-reader","description":"Manual.","developerInstructions":"Read only.","nicknameCandidates":["Flash Reader"],"modelReasoningEffort":"xhigh"}}}}),
             Ok(config(SelectionPolicy::Balanced, vec![valid(p)])),
         );
     }
@@ -1534,7 +1593,7 @@ mod tests {
             "schemaVersion": 1,
             "selectionPolicy": "official_first",
             "profiles": {
-                "flash": {
+                "deepseek-v4-flash": {
                     "model": "DeepSeek-V4-Flash",
                     "enabled": true,
                     "questionnaire": {
@@ -1757,7 +1816,7 @@ mod tests {
     #[test]
     fn codex_subagent_v2_accepts_one_task_strength() {
         assert_parse(
-            raw_profile(json!(["testing"])),
+            canonical_raw_profile(json!(["testing"])),
             Ok(expected_valid_profile_with_strengths(vec![
                 TaskStrength::Testing,
             ])),
@@ -1767,7 +1826,7 @@ mod tests {
     #[test]
     fn codex_subagent_v2_accepts_five_unique_task_strengths() {
         assert_parse(
-            raw_profile(json!([
+            canonical_raw_profile(json!([
                 "long_context_reading",
                 "repository_exploration",
                 "evidence_collection",
@@ -1889,7 +1948,7 @@ mod tests {
     #[test]
     fn codex_subagent_v2_collision_counts_valid_and_invalid_raw_keys() {
         let raw = json!({"model": 7, "enabled": true, "questionnaire": questionnaire()});
-        let mut valid_profile = profile("Straße", "DeepSeek-V4-Flash");
+        let mut valid_profile = profile("Straße", "Straße");
         valid_profile.overrides.nickname_candidates = Some(vec![s("Street")]);
         let saved = config(
             SelectionPolicy::Balanced,
