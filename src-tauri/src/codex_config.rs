@@ -5406,11 +5406,26 @@ mod tests {
             None,
         )
         .expect("materialize the full settings draft to real managed files");
-        let materialized_path = get_codex_agents_dir().join("ccswitch-shared-review.toml");
-        let materialized_toml = std::fs::read_to_string(&materialized_path)
-            .expect("read the collision-resolved managed role file");
-        let materialized: toml::Value =
-            toml::from_str(&materialized_toml).expect("parse the generated role TOML");
+        let materialized_for_model_b = std::fs::read_dir(get_codex_agents_dir())
+            .expect("enumerate generated managed role files")
+            .filter_map(|entry| {
+                let path = entry.expect("read generated role directory entry").path();
+                if path.extension().and_then(|extension| extension.to_str()) != Some("toml") {
+                    return None;
+                }
+                let rendered =
+                    std::fs::read_to_string(&path).expect("read a generated managed role file");
+                let parsed: toml::Value =
+                    toml::from_str(&rendered).expect("parse a generated role TOML");
+                (parsed["model"].as_str() == Some("model-b")).then_some((path, parsed))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            materialized_for_model_b.len(),
+            1,
+            "real sync must materialize exactly one managed TOML for model-b"
+        );
+        let (materialized_path, materialized) = &materialized_for_model_b[0];
         let materialized_name = materialized["name"].as_str().expect("generated role name");
         assert_eq!(
             materialized_path.file_stem().and_then(|stem| stem.to_str()),

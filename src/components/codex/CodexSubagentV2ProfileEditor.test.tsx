@@ -12,7 +12,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { providersApi } from "@/lib/api/providers";
 import type { Provider } from "@/types";
-import type { CodexSubagentProfilePreview } from "@/types/codexSubagentV2";
+import type {
+  CodexSubagentProfilePreview,
+  CodexSubagentV2Profile,
+} from "@/types/codexSubagentV2";
 import { CodexMultiRouterWizard } from "./CodexMultiRouterWizard";
 import { CodexRouterWorkspacePage } from "./CodexRouterWorkspacePage";
 
@@ -268,30 +271,31 @@ vi.mock("@tauri-apps/api/core", () => ({
             },
           };
         } else if (args.action === "remove_all_invalid") {
-          config.profiles = {};
+          delete config.profiles.RAW_INVALID_PROFILE_KEY_ALPHA;
+          delete config.profiles.RAW_INVALID_PROFILE_KEY_BETA;
         } else if (args.action === "recover_all_invalid_from_catalog") {
-          config.profiles = {
-            "deepseek-v4-flash": {
-              model: "deepseek-v4-flash",
-              enabled: false,
-              questionnaire: {
-                taskStrengths: ["repository_exploration"],
-                optimization: "speed",
-                writeScope: "read_only",
-                preference: "eligible",
-                reasoningEffort: "auto",
-              },
+          delete config.profiles.RAW_INVALID_PROFILE_KEY_ALPHA;
+          delete config.profiles.RAW_INVALID_PROFILE_KEY_BETA;
+          config.profiles["deepseek-v4-pro"] = {
+            model: "deepseek-v4-pro",
+            enabled: false,
+            questionnaire: {
+              taskStrengths: ["complex_implementation"],
+              optimization: "quality",
+              writeScope: "complex_changes",
+              preference: "eligible",
+              reasoningEffort: "high",
             },
-            "deepseek-v4-pro": {
-              model: "deepseek-v4-pro",
-              enabled: false,
-              questionnaire: {
-                taskStrengths: ["complex_implementation"],
-                optimization: "quality",
-                writeScope: "complex_changes",
-                preference: "eligible",
-                reasoningEffort: "high",
-              },
+          };
+          config.profiles["qwen3.6"] = {
+            model: "qwen3.6",
+            enabled: false,
+            questionnaire: {
+              taskStrengths: ["repository_exploration"],
+              optimization: "balanced",
+              writeScope: "read_only",
+              preference: "eligible",
+              reasoningEffort: "auto",
             },
           };
         }
@@ -442,18 +446,45 @@ function seedPersistedPlan(withV2 = true) {
   };
 }
 
+function preservedValidProfile(): CodexSubagentV2Profile {
+  return {
+    model: "deepseek-v4-flash",
+    enabled: true,
+    questionnaire: {
+      taskStrengths: ["repository_exploration", "testing"],
+      optimization: "quality",
+      writeScope: "bounded_changes",
+      preference: "fallback",
+      reasoningEffort: "xhigh",
+    },
+    overrides: {
+      roleName: "keep-valid-role",
+      description: "KEEP_VALID_DESCRIPTION",
+      developerInstructions: "KEEP_VALID_INSTRUCTIONS",
+      nicknameCandidates: ["KeepValid", "Stable"],
+      modelReasoningEffort: "xhigh",
+    },
+  };
+}
+
 function seedMalformedProfiles() {
+  const catalog = ipcState.providers.router.settingsConfig.modelCatalog.models;
+  catalog.push({
+    model: "qwen3.6",
+    displayName: "Qwen 3.6",
+    contextWindow: 262144,
+  });
   const profiles =
     ipcState.providers.router.settingsConfig.codexRouting.subagentV2.profiles;
+  profiles["repository-scout"] = preservedValidProfile();
   profiles.RAW_INVALID_PROFILE_KEY_ALPHA = {
-    model: "RAW_INVALID_MODEL_ALPHA",
+    model: "deepseek-v4-pro",
     enabled: true,
   };
   profiles.RAW_INVALID_PROFILE_KEY_BETA = {
-    model: "RAW_INVALID_MODEL_BETA",
+    model: "qwen3.6",
     enabled: true,
   };
-  delete profiles["repository-scout"];
   delete profiles["offline-writer"];
   ipcState.statusResponse = {
     ...statusFixture,
@@ -622,6 +653,34 @@ function flashRegion() {
   return screen.getByRole("region", {
     name: "DeepSeek V4 Flash 子 Agent 能力",
   });
+}
+
+function expectPreservedValidProfileInUi() {
+  const region = flashRegion();
+  expect(
+    within(region).getByRole("checkbox", {
+      name: "启用此模型作为 V2 子 Agent",
+    }),
+  ).toBeChecked();
+  expect(within(region).getByLabelText("优化目标")).toHaveValue("quality");
+  expect(within(region).getByLabelText("写入范围")).toHaveValue(
+    "bounded_changes",
+  );
+  expect(within(region).getByLabelText("模型偏好")).toHaveValue("fallback");
+  expect(within(region).getByLabelText("推理强度")).toHaveValue("xhigh");
+  expect(within(region).getByLabelText("角色名称")).toHaveValue(
+    "keep-valid-role",
+  );
+  expect(within(region).getByLabelText("角色描述")).toHaveValue(
+    "KEEP_VALID_DESCRIPTION",
+  );
+  expect(within(region).getByLabelText("开发者指令")).toHaveValue(
+    "KEEP_VALID_INSTRUCTIONS",
+  );
+  expect(within(region).getByLabelText("昵称候选")).toHaveValue(
+    "KeepValid, Stable",
+  );
+  expect(within(region).getByLabelText("模型推理强度")).toHaveValue("xhigh");
 }
 
 function proRegion() {
@@ -1344,6 +1403,7 @@ describe("Codex Sub-Agent V2 backend-owned catalog reconciliation", () => {
 
   it("offers one backend-owned batch removal action for every malformed profile", async () => {
     seedMalformedProfiles();
+    const expectedValidProfile = preservedValidProfile();
     const user = userEvent.setup();
     await mountWorkspaceFromPersistedPlan();
 
@@ -1357,6 +1417,7 @@ describe("Codex Sub-Agent V2 backend-owned catalog reconciliation", () => {
         name: "无效能力配置 2",
       }),
     ).toBeInTheDocument();
+    expectPreservedValidProfileInUi();
     await user.click(
       screen.getByRole("button", {
         name: "删除全部无效能力配置（2 项）",
@@ -1381,11 +1442,12 @@ describe("Codex Sub-Agent V2 backend-owned catalog reconciliation", () => {
         name: "无效能力配置 2",
       }),
     ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("region", {
-        name: /子 Agent 能力$/,
-      }),
-    ).not.toBeInTheDocument();
+    expectPreservedValidProfileInUi();
+    const profilesAfterRemoval =
+      ipcState.providers.router.settingsConfig.codexRouting.subagentV2.profiles;
+    expect(profilesAfterRemoval).toEqual({
+      "repository-scout": expectedValidProfile,
+    });
     expect(
       vi
         .mocked(invoke)
@@ -1400,6 +1462,7 @@ describe("Codex Sub-Agent V2 backend-owned catalog reconciliation", () => {
 
   it("offers one backend-owned catalog recovery action for every malformed profile", async () => {
     seedMalformedProfiles();
+    const expectedValidProfile = preservedValidProfile();
     const user = userEvent.setup();
     await mountWorkspaceFromPersistedPlan();
 
@@ -1413,6 +1476,7 @@ describe("Codex Sub-Agent V2 backend-owned catalog reconciliation", () => {
         name: "无效能力配置 2",
       }),
     ).toBeInTheDocument();
+    expectPreservedValidProfileInUi();
     await user.click(
       screen.getByRole("button", {
         name: "从模型目录恢复全部无效能力配置（2 项）",
@@ -1439,6 +1503,11 @@ describe("Codex Sub-Agent V2 backend-owned catalog reconciliation", () => {
       }),
     ).toBeInTheDocument();
     expect(
+      await screen.findByRole("region", {
+        name: "qwen3.6 子 Agent 能力",
+      }),
+    ).toBeInTheDocument();
+    expect(
       screen.queryByRole("region", {
         name: "无效能力配置 1",
       }),
@@ -1448,6 +1517,39 @@ describe("Codex Sub-Agent V2 backend-owned catalog reconciliation", () => {
         name: "无效能力配置 2",
       }),
     ).not.toBeInTheDocument();
+    expectPreservedValidProfileInUi();
+    const profilesAfterRecovery =
+      ipcState.providers.router.settingsConfig.codexRouting.subagentV2.profiles;
+    expect(Object.keys(profilesAfterRecovery).sort()).toEqual([
+      "deepseek-v4-pro",
+      "qwen3.6",
+      "repository-scout",
+    ]);
+    expect(profilesAfterRecovery["repository-scout"]).toEqual(
+      expectedValidProfile,
+    );
+    expect(profilesAfterRecovery["deepseek-v4-pro"]).toEqual({
+      model: "deepseek-v4-pro",
+      enabled: false,
+      questionnaire: {
+        taskStrengths: ["complex_implementation"],
+        optimization: "quality",
+        writeScope: "complex_changes",
+        preference: "eligible",
+        reasoningEffort: "high",
+      },
+    });
+    expect(profilesAfterRecovery["qwen3.6"]).toEqual({
+      model: "qwen3.6",
+      enabled: false,
+      questionnaire: {
+        taskStrengths: ["repository_exploration"],
+        optimization: "balanced",
+        writeScope: "read_only",
+        preference: "eligible",
+        reasoningEffort: "auto",
+      },
+    });
     expect(
       vi
         .mocked(invoke)
