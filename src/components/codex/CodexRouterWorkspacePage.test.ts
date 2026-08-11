@@ -1736,6 +1736,20 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     expect(activeV2).toHaveClass("bg-muted");
     expect(inactiveV1).toBeEnabled();
     expect(inactiveV1).toHaveClass("bg-blue-600");
+    expect(
+      inactiveV1.closest('[data-subagent-protocol="v1"]'),
+    ).toHaveClass(
+      "border-sky-200",
+      "bg-sky-50/70",
+      "dark:border-sky-500/40",
+      "dark:bg-sky-950/20",
+    );
+    expect(activeV2.closest('[data-subagent-protocol="v2"]')).toHaveClass(
+      "border-emerald-300",
+      "bg-emerald-50",
+      "dark:border-emerald-500/60",
+      "dark:bg-emerald-500/10",
+    );
 
     await user.click(inactiveV1);
 

@@ -2083,6 +2083,142 @@ describe("Codex Sub-Agent V2 shared editor accessible areas", () => {
   });
 });
 
+describe("Codex Sub-Agent V2 dual-theme visual contract", () => {
+  it("uses the MultiRouter blue, violet, and cyan hierarchy in both themes", async () => {
+    await renderWorkspace();
+
+    const editor = document.querySelector<HTMLElement>(
+      '[data-theme-contract="codex-subagent-v2"]',
+    );
+    if (!editor) throw new Error("missing V2 theme contract root");
+    expect(editor).toHaveClass(
+      "from-blue-50/80",
+      "to-violet-50/70",
+      "dark:from-blue-950/25",
+      "dark:to-violet-950/20",
+    );
+
+    const strategy = editor.querySelector<HTMLElement>(
+      '[data-subagent-panel="strategy"]',
+    );
+    const catalog = editor.querySelector<HTMLElement>(
+      '[data-subagent-panel="catalog"]',
+    );
+    expect(strategy).toHaveClass(
+      "border-blue-200",
+      "bg-blue-50/70",
+      "dark:border-blue-500/40",
+      "dark:bg-blue-950/20",
+    );
+    expect(catalog).toHaveClass(
+      "border-cyan-200",
+      "bg-cyan-50/70",
+      "dark:border-cyan-500/40",
+      "dark:bg-cyan-950/20",
+    );
+  });
+
+  it("assigns semantic paired colors to routable and unroutable model cards", async () => {
+    await renderWorkspace();
+
+    const flashTrigger = await screen.findByRole("button", {
+      name: "配置 deepseek-v4-flash",
+    });
+    const proTrigger = screen.getByRole("button", {
+      name: "配置 deepseek-v4-pro",
+    });
+    const flashCard = flashTrigger.closest<HTMLElement>(
+      '[data-profile-tone="enabled-routable"]',
+    );
+    const proCard = proTrigger.closest<HTMLElement>(
+      '[data-profile-tone="unroutable"]',
+    );
+    expect(flashCard).toHaveClass(
+      "border-emerald-200",
+      "bg-emerald-50/70",
+      "dark:border-emerald-500/40",
+      "dark:bg-emerald-950/25",
+    );
+    expect(proCard).toHaveClass(
+      "border-rose-200",
+      "bg-rose-50/70",
+      "dark:border-rose-500/40",
+      "dark:bg-rose-950/20",
+    );
+  });
+
+  it("renders questionnaire choices as dual-theme capability chips", async () => {
+    await renderWorkspace();
+    const flash = flashRegion();
+    const selectedChip = within(flash)
+      .getByRole("checkbox", { name: "仓库探索" })
+      .closest("label");
+    const idleChip = within(flash)
+      .getByRole("checkbox", { name: "复杂调试" })
+      .closest("label");
+
+    expect(selectedChip).toHaveClass(
+      "border-sky-300",
+      "bg-sky-100/80",
+      "text-sky-950",
+      "dark:border-sky-500/50",
+      "dark:bg-sky-500/15",
+      "dark:text-sky-100",
+    );
+    expect(idleChip).toHaveClass(
+      "bg-background/70",
+      "dark:bg-slate-950/35",
+    );
+  });
+
+  it("distinguishes advanced, TOML, saved, and dirty states by paired colors", async () => {
+    const user = userEvent.setup();
+    await renderWorkspace();
+    const flash = flashRegion();
+    expect(
+      within(flash).getByRole("button", { name: "高级字段" }),
+    ).toHaveClass(
+      "border-violet-200",
+      "bg-violet-50",
+      "dark:border-violet-500/40",
+      "dark:bg-violet-950/25",
+    );
+    expect(
+      within(flash).getByRole("button", { name: "生成结果与 TOML" }),
+    ).toHaveClass(
+      "border-cyan-200",
+      "bg-cyan-50",
+      "dark:border-cyan-500/40",
+      "dark:bg-cyan-950/25",
+    );
+
+    const savedBar = document.querySelector<HTMLElement>(
+      '[data-save-state="saved"]',
+    );
+    expect(savedBar).toHaveClass(
+      "border-emerald-200",
+      "bg-emerald-50/95",
+      "dark:border-emerald-500/40",
+      "dark:bg-emerald-950/90",
+    );
+
+    await chooseOption(
+      user,
+      within(flash).getByLabelText("优化目标"),
+      "质量",
+    );
+    const dirtyBar = document.querySelector<HTMLElement>(
+      '[data-save-state="dirty"]',
+    );
+    expect(dirtyBar).toHaveClass(
+      "border-blue-200",
+      "bg-blue-50/95",
+      "dark:border-blue-500/40",
+      "dark:bg-blue-950/90",
+    );
+  });
+});
+
 describe("Codex Sub-Agent V2 persisted interactions", () => {
   it.each([
     ["均衡", "balanced"],
