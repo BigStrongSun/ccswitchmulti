@@ -1731,6 +1731,15 @@ mod tests {
         );
         assert_eq!(compiled.preserved_invalid_profiles.len(), 2);
         assert!(compiled.generated_roles.is_empty());
+        let diagnostics = serde_json::to_value(&compiled.diagnostics)
+            .expect("serialize collision diagnostics without raw identities");
+        assert_eq!(diagnostics[0]["status"], "collision");
+        assert_eq!(diagnostics[1]["status"], "collision");
+        assert_eq!(diagnostics[0]["profileKey"], Value::Null);
+        assert_eq!(diagnostics[1]["profileKey"], Value::Null);
+        let public_diagnostics = diagnostics.to_string();
+        assert!(!public_diagnostics.contains("first-alias"));
+        assert!(!public_diagnostics.contains("second-alias"));
     }
 
     #[test]
@@ -2417,44 +2426,73 @@ mod tests {
     }
 
     #[test]
-    fn codex_subagent_v2_rejects_empty_or_whitespace_only_description_override() {
-        for (description, enabled) in [(" \t\r\n ", false), ("", true)] {
-            let mut profile = profile("flash", "DeepSeek-V4-Flash");
-            profile.enabled = enabled;
-            profile.overrides.description = Some(s(description));
-            let actual = compile_subagent_v2_profiles(&request(Some(config(
-                SelectionPolicy::Balanced,
-                vec![valid(profile)],
-            ))));
-            assert!(
-                matches!(actual, Err(CompileError::Validation { ref code, ref profile_key, .. })
+    fn codex_subagent_v2_rejects_all_empty_description_variants_before_early_returns() {
+        let cases = [
+            (SubagentVersion::V1, true, ""),
+            (SubagentVersion::V1, true, " \t\r\n "),
+            (SubagentVersion::V2, false, ""),
+            (SubagentVersion::V2, false, " \t\r\n "),
+        ];
+        let actual = cases
+            .into_iter()
+            .map(|(version, enabled, description)| {
+                let mut profile = profile("flash", "DeepSeek-V4-Flash");
+                profile.enabled = enabled;
+                profile.overrides.description = Some(s(description));
+                let mut request = request(Some(config(
+                    SelectionPolicy::Balanced,
+                    vec![valid(profile)],
+                )));
+                request.subagent_version = version;
+                compile_subagent_v2_profiles(&request)
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(actual.len(), 4);
+        assert!(
+            actual.iter().all(|result| matches!(
+                result,
+                Err(CompileError::Validation { code, profile_key, .. })
                     if code == "empty_description"
-                        && profile_key.as_deref() == Some("flash")),
-                "description override {description:?} must fail before role generation, got {actual:?}"
-            );
-        }
+                        && profile_key.as_deref() == Some("flash")
+            )),
+            "empty and whitespace description overrides must both fail in V1 and disabled V2 before early returns, got {actual:#?}"
+        );
     }
 
     #[test]
-    fn codex_subagent_v2_rejects_empty_or_whitespace_only_developer_instructions_override() {
-        for instructions in [" \t\r\n ", ""] {
-            let mut profile = profile("flash", "DeepSeek-V4-Flash");
-            profile.overrides.developer_instructions = Some(s(instructions));
-            let mut request = request(Some(config(
-                SelectionPolicy::Balanced,
-                vec![valid(profile)],
-            )));
-            if instructions.trim().is_empty() && !instructions.is_empty() {
-                request.subagent_version = SubagentVersion::V1;
-            }
-            let actual = compile_subagent_v2_profiles(&request);
-            assert!(
-                matches!(actual, Err(CompileError::Validation { ref code, ref profile_key, .. })
+    fn codex_subagent_v2_rejects_all_empty_developer_instruction_variants_before_early_returns() {
+        let cases = [
+            (SubagentVersion::V1, true, ""),
+            (SubagentVersion::V1, true, " \t\r\n "),
+            (SubagentVersion::V2, false, ""),
+            (SubagentVersion::V2, false, " \t\r\n "),
+        ];
+        let actual = cases
+            .into_iter()
+            .map(|(version, enabled, instructions)| {
+                let mut profile = profile("flash", "DeepSeek-V4-Flash");
+                profile.enabled = enabled;
+                profile.overrides.developer_instructions = Some(s(instructions));
+                let mut request = request(Some(config(
+                    SelectionPolicy::Balanced,
+                    vec![valid(profile)],
+                )));
+                request.subagent_version = version;
+                compile_subagent_v2_profiles(&request)
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(actual.len(), 4);
+        assert!(
+            actual.iter().all(|result| matches!(
+                result,
+                Err(CompileError::Validation { code, profile_key, .. })
                     if code == "empty_developer_instructions"
-                        && profile_key.as_deref() == Some("flash")),
-                "developerInstructions override {instructions:?} must fail before role generation, got {actual:?}"
-            );
-        }
+                        && profile_key.as_deref() == Some("flash")
+            )),
+            "empty and whitespace developerInstructions overrides must both fail in V1 and disabled V2 before early returns, got {actual:#?}"
+        );
     }
 
     #[test]

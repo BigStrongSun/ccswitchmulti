@@ -5375,16 +5375,47 @@ mod tests {
                 "upstream": { "auth": { "source": "provider_config" } }
             }]),
         );
-        let materialized = codex_subagent_profile_status_json(&settings, None)
-            .expect("compile the same full settings draft used by materialization");
-        let model_b_status = materialized["profiles"]
-            .as_array()
-            .and_then(|profiles| profiles.iter().find(|status| status["model"] == "model-b"))
-            .expect("materialized status for the second model");
-        assert_eq!(model_b_status["requestedRoleName"], "shared-review");
+        let specs = vec![
+            CodexCatalogModelSpec {
+                model: "model-a".to_string(),
+                upstream_model: None,
+                display_name: "Model A".to_string(),
+                context_window: 128_000,
+                text_only: true,
+                is_default: false,
+                supports_parallel_tool_calls: None,
+                input_modalities: None,
+                base_instructions: None,
+            },
+            CodexCatalogModelSpec {
+                model: "model-b".to_string(),
+                upstream_model: None,
+                display_name: "Model B".to_string(),
+                context_window: 256_000,
+                text_only: true,
+                is_default: false,
+                supports_parallel_tool_calls: None,
+                input_modalities: None,
+                base_instructions: None,
+            },
+        ];
+        sync_codex_managed_agent_files_with_settings(
+            &specs,
+            CodexSubagentVersion::V2,
+            &settings,
+            None,
+        )
+        .expect("materialize the full settings draft to real managed files");
+        let materialized_path = get_codex_agents_dir().join("ccswitch-shared-review.toml");
+        let materialized_toml = std::fs::read_to_string(&materialized_path)
+            .expect("read the collision-resolved managed role file");
+        let materialized: toml::Value =
+            toml::from_str(&materialized_toml).expect("parse the generated role TOML");
+        let materialized_name = materialized["name"].as_str().expect("generated role name");
         assert_eq!(
-            model_b_status["effectiveRoleName"],
-            "ccswitch-shared-review"
+            materialized_path.file_stem().and_then(|stem| stem.to_str()),
+            Some(materialized_name),
+            "the generated filename and TOML name must identify the same effective role"
         );
 
         let preview = preview_codex_subagent_profile_with_context(
@@ -5397,12 +5428,12 @@ mod tests {
         let preview = serde_json::to_value(preview).expect("serialize preview");
 
         assert_eq!(
-            preview["requestedRoleName"], model_b_status["requestedRoleName"],
-            "preview and materialization must report the same requested role"
+            preview["requestedRoleName"], "shared-review",
+            "preview must retain the requested role from the materialized profile"
         );
         assert_eq!(
-            preview["effectiveRoleName"], model_b_status["effectiveRoleName"],
-            "preview must allocate collisions across every enabled profile in settingsConfig"
+            preview["effectiveRoleName"], materialized_name,
+            "preview must match the effective role in the actual generated TOML"
         );
     }
 
