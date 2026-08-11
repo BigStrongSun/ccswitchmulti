@@ -3174,3 +3174,12 @@
 - 原子入口此前验证成功后漏掉手动 takeover 已有的 guardian/model-picker 收尾。提交 `3c27e38a` 将三个成功出口统一到 `run_post_takeover_lifecycle`，只在 Codex 且 takeover 已验证后启动；CDP 注入仍是 best-effort warning，不是 HTTP 路由成败条件。`target_provider_record_unavailable_inline_auth_fallback` 是 provider 分类降级，不是 executable discovery 或无请求进入代理的直接原因。
 - TDD/门禁：严格启用 helper 2/2、`useProviderActions` 29/29、`codex_desktop` 23/23、Provider service 78/78；完整前端 `119 files / 922 tests`、完整 Rust `2930 passed / 2 ignored`、TypeScript、renderer build、cargo check 和 diff check 通过。全仓 Prettier 仍只被本次未修改的 `src/lib/api/proxy.ts`、`src/lib/codexMultiRouterWizard.test.ts`、`src/types/proxy.ts` 三处既有差异阻断。当前 Windows 主机没有真实 macOS UI，因此不能宣称现场运行已验收；必须以 GitHub macOS 构建成功和受影响 Mac 用户重启后请求真实进入 `127.0.0.1:15721` 作为后续证据。
 - 联网链：Codex Web 找到 OpenAI 官方 issue `#31866/#31944/#32022` 证明 2026 年 7 月统一包迁移到 `ChatGPT.app` 且 bundle id 保持 `com.openai.codex`，Apple 官方 NSWorkspace API确认 bundle identifier 是平台稳定发现边界；Matrix WebSearch 正常但仅返回弱二手结果，没有提供关键事实的独立正证据。结论由官方一手来源、本地源码、Git 历史和用户脱敏现场交叉确认。
+
+## 2026-08-12 CCSwitchMulti v3.19.1-21 GitHub 正式发布验收
+
+- annotated tag `v3.19.1-21` 的 tag object 为 `f1bc572448b45e98b4eb63a13ad57fd4a43829fa`，远端 peeled commit 为 `45f6a0a453eaafb866285fc407e98e2e47f81d11`；发布后只追加本条证据，不移动公开 tag。
+- GitHub Actions Release run `31510159337`（`https://github.com/BigStrongSun/ccswitchmulti/actions/runs/31510159337`）七个 job 全部 `completed/success`：Linux x64/ARM64、Windows x64/ARM64、macOS、Publish GitHub Release、Assemble `latest.json`。其中 `macos-14` 的 Tauri 编译、DMG 准备、公证、代码签名/公证验证和产物上传均成功，证明本次 `ChatGPT.app` discovery 根修能够在 macOS runner 编译并产出签名包。
+- 正式 Release 为 `https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.19.1-21`，`draft=false`、`prerelease=false`，且 `/releases/latest` 指向本 tag；共有 19 个实际 assets，覆盖 Windows x64/ARM64、Linux x64/ARM64、macOS 及 `latest.json`。
+- 下载验真：`latest.json` 为 `version=3.19.1-21`，精确包含 `darwin-aarch64`、`darwin-x86_64`、`windows-x86_64`、`windows-aarch64`、`linux-x86_64`、`linux-aarch64` 六个平台键；全部 URL 指向本 tag 且 HEAD 最终 HTTP 200，全部 signature 非空并与对应 `.sig` 逐字一致。macOS universal tarball 的同一签名按设计供两个 Darwin 架构键使用。
+- 下载后的 `latest.json` SHA-256 为 `d18d2b948696af9da46e4d441003ea94a0525cb16219691541f9be5d6ec233c1`，Windows x64 Setup SHA-256 为 `c8ae87b209a7843e170c1b764da0dab523a7b7aee8c01a01cef9853dc25cb8c7`，均与 GitHub 服务器 asset digest 一致。
+- 验收边界：GitHub macOS job 只能证明源码编译、签名、公证和打包成功，不能替代受影响用户真实 `/Applications/ChatGPT.app` 的 UI/进程发现和请求路由验收。后续仍需在现场安装 `3.19.1-21`、完全退出并重启 ChatGPT.app，再确认 MultiRouter 启用成功且请求真实进入 `127.0.0.1:15721`。
