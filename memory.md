@@ -3156,3 +3156,12 @@
 - 正式 Release 为 `https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.19.1-20`，页面标记 Latest，正文完整覆盖 Sub-Agent V1/V2、OAuth device-flow 竞态、自启动/安全重装、小窗口裁切和 Responses 断流错误呈现。页面共 21 项：19 个实际 release assets，加 GitHub 自动生成的 source zip/tar.gz。
 - 远端 `latest.json` 为 `version=3.19.1-20`、6 个平台键，所有 URL 均指向本 tag、HTTP 200，所有 signature 非空且逐项与对应 `.sig` 完全一致；`/releases/latest` 最终跳转本 tag。下载后的 `latest.json` SHA-256 为 `a0a5d5f785d18603cf6fc814e2376f786e6c2c6746897cdc33590e05d08ff1a2`，Windows x64 setup SHA-256 为 `99177dcd9ed098a7f34f82afc81caa8b6c3c53be7381a5df3e8a15c9ad2e9763`，均与 GitHub 页面服务端 digest 一致。
 - 本地发布候选门禁：Rust `2925 passed / 0 failed / 2 ignored`；前端 `117 files / 918 tests passed`；typecheck、production renderer build、`cargo fmt --check`、`cargo check --lib` 和 `git diff --check` 通过。发布成功不等于用户机器已安装 `-20` 或已完成 Windows/macOS/Linux 真实重启/登录验收。
+
+## 2026-08-11 应用内升级检查双客户端根修
+
+- 安装态 `3.19.1-19` 已在真实 UI 成功识别 GitHub `3.19.1-20`，因此远端 `latest.json`、版本比较和签名清单当前可用；但 `~/.cc-switch/logs/cc-switch.log` 在 2026-08-03 至 08-11 多次记录前端 updater 直连 GitHub 的 `error sending request`，说明“这一次能显示”不能证明链路稳定。
+- 直接根因是 updater 被拆成两个 HTTP client：`src/lib/updater.ts` 的例行检查直接调用 JavaScript `@tauri-apps/plugin-updater.check()`，下载/安装及数据库恢复页则调用 Rust `updater_builder_with_runtime_proxy()`。提交 `0d693c8a`（`3.19.1-3`）声称让所有 updater 检查/下载继承全局代理，实际只修改了 Rust 路径，漏掉 About 页/顶部徽标使用的前端检查；因此该缺陷从 `3.19.1-3` 起存在并会随 GitHub 直连条件间歇复现。
+- 根修新增后端 `check_app_update`，从同一个 proxy-aware builder 返回 `currentVersion/availableVersion/notes/pubDate`；前端 `checkForUpdate()` 只调用该 IPC，不再构造第二个 updater client。TDD RED 明确失败于前端插件仍被调用，GREEN 后前端 2/2、Rust metadata 1/1、typecheck 和 production renderer build 通过。
+- Windows 普通升级不需要先卸载：当前锁定 `tauri-plugin-updater 2.10.0` 会用 NSIS `/P /R /UPDATE /ARGS` 启动外部 installer，再 `std::process::exit(0)`；应用在 install 前先保存窗口、恢复 Live 配置、停止代理、移除托盘并释放单实例锁。SQLite 位于 `~/.cc-switch` 而非 `$INSTDIR`，正常升级不会复制或删除数据库；`Database` 连接随旧进程退出释放，新实例随后重新打开，因此不存在安装器与数据库文件的直接覆盖冲突。
+- 完整“停止 -> SQLite 全目录快照/完整性 -> 卸载 -> 安装 -> health/version/hash -> 回滚”事务脚本只用于安装损坏或安装器族迁移。把它作为每次升级默认路径反而会执行卸载 hooks，并可能再次删除 Windows 开机自启等用户集成状态；该路径必须继续备份 `cc-switch.db/-wal/-shm` 和注册表并做恢复验证。
+- macOS updater 原地替换 `.app` bundle，现有后端链在 install 返回后清理并重启，避免旧 WebView 在 bundle 替换后继续调用 JS；Linux AppImage 原地替换可执行文件，DEB/RPM 可能通过 `pkexec`/系统包管理器获取权限，随后同样清理和重启。三平台共享的网络检查缺陷已由统一后端命令一并消除；只有 Windows 存在 NSIS 外部进程和 `std::process::exit` 的特殊退出顺序。
