@@ -2851,67 +2851,10 @@ pub enum CodexSubagentV2ReconcileAction {
     RecoverAllInvalidFromCatalog,
 }
 
-fn codex_catalog_route_is_enabled(route: &Value) -> bool {
-    route
-        .get("enabled")
-        .and_then(Value::as_bool)
-        .unwrap_or(true)
-}
-
-fn codex_catalog_model_has_configured_route(settings: &Value, model: &str) -> bool {
-    if let Some(routing) = settings.get("codexRouting") {
-        if let Some(routes) = routing.as_array() {
-            return routes.iter().any(|route| {
-                codex_catalog_route_is_enabled(route)
-                    && codex_catalog_route_matches_model(route, model)
-            });
-        }
-        if routing
-            .get("enabled")
-            .and_then(Value::as_bool)
-            .is_some_and(|enabled| !enabled)
-        {
-            return false;
-        }
-        let Some(routes) = routing.get("routes").and_then(Value::as_array) else {
-            return false;
-        };
-        if routes.iter().any(|route| {
-            codex_catalog_route_is_enabled(route) && codex_catalog_route_matches_model(route, model)
-        }) {
-            return true;
-        }
-        return routing
-            .get("defaultRouteId")
-            .or_else(|| routing.get("default_route_id"))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-            .is_some_and(|default_route_id| {
-                routes.iter().any(|route| {
-                    codex_catalog_route_is_enabled(route)
-                        && route
-                            .get("id")
-                            .and_then(Value::as_str)
-                            .is_some_and(|id| id.eq_ignore_ascii_case(default_route_id))
-                })
-            });
-    }
-    settings
-        .get("codexModelRoutes")
-        .or_else(|| settings.get("modelRoutes"))
-        .and_then(Value::as_array)
-        .is_some_and(|routes| {
-            routes
-                .iter()
-                .any(|route| codex_catalog_route_matches_model(route, model))
-        })
-}
-
 fn routable_codex_subagent_catalog(settings: &Value) -> Vec<(String, String)> {
     codex_catalog_model_specs(settings, "")
         .into_iter()
-        .filter(|spec| codex_catalog_model_has_configured_route(settings, &spec.model))
+        .filter(|spec| resolve_codex_primary_route_from_settings(settings, &spec.model).is_some())
         .map(|spec| (normalize_profile_key(&spec.model), spec.model))
         .filter(|(identity, _)| !identity.is_empty())
         .collect()
@@ -6004,11 +5947,19 @@ mod tests {
                 { "model": "deepseek-v4-pro", "contextWindow": 1000000 },
                 { "model": "qwen3.6", "contextWindow": 262144 }
             ]),
-            json!([{
-                "id": "qwen-only",
-                "match": { "models": ["qwen3.6"] },
-                "upstream": { "auth": { "source": "provider_config" } }
-            }]),
+            json!([
+                {
+                    "id": "qwen-only",
+                    "match": { "models": ["qwen3.6"] },
+                    "upstream": { "auth": { "source": "provider_config" } }
+                },
+                {
+                    "id": "disabled-deepseek",
+                    "enabled": false,
+                    "match": { "models": ["deepseek-v4-flash", "deepseek-v4-pro"] },
+                    "upstream": { "auth": { "source": "provider_config" } }
+                }
+            ]),
         );
 
         let initialized = initialize_codex_subagent_v2_for_candidate(&settings, None)
@@ -6053,8 +6004,7 @@ mod tests {
             .expect("initialize from runtime-routable catalog models");
 
         assert_eq!(
-            initialized["profiles"]["unmatched-model"]["enabled"],
-            false,
+            initialized["profiles"]["unmatched-model"]["enabled"], false,
             "a catalog model routed by the runtime first-enabled fallback needs a disabled draft"
         );
     }
@@ -6081,8 +6031,7 @@ mod tests {
             ]),
         );
         let mut settings = settings;
-        settings["codexRouting"]["defaultRouteId"] =
-            Value::String("official-default".to_string());
+        settings["codexRouting"]["defaultRouteId"] = Value::String("official-default".to_string());
 
         assert!(
             resolve_codex_primary_route_from_settings(&settings, "disabled-model").is_none(),

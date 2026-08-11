@@ -251,3 +251,64 @@ Round 1 已分别使用 Codex 内置 Web 与 Matrix WebSearch 两条独立链，
 
 - semantic role 自动选择仍是 Codex runtime best-effort；本地 compiler 能保证 role 物化与偏好数据，不能保证每次任务都由指定 profile 命中。
 - `openai_cache_read_tokens` dead-code warning 为仓库既有 warning，本轮未扩大范围处理。
+
+## Task 11 fix round 2/5：catalog routability 单一 SSOT
+
+### Reviewer finding 与根因
+
+Round 1 在 `codex_config.rs` 新增的 `codex_catalog_model_has_configured_route` 复制了 runtime route 判定。它只把 enabled exact/prefix 或 enabled default 当作“可路由”，与 `proxy/providers/codex.rs::resolve_codex_primary_route_from_settings` 的真实 allocator 有两个相反偏差：
+
+1. 没有 default、catalog model 未显式 match、但存在 first enabled route 时，runtime 保留历史 first-enabled candidate fallback；复制 helper 错误漏建 disabled draft。
+2. catalog model 只显式存在于 disabled route、同时存在 enabled default 时，runtime 会在 default 前 fail-closed；复制 helper 错误把 enabled default 当作可路由并误建 draft。
+
+根因不是两条条件分支各自写错，而是 catalog initialization 建立了第二套路由判定。修复删除复制 helper，`routable_codex_subagent_catalog` 直接调用现有 crate-visible runtime `resolve_codex_primary_route_from_settings`，以 `Some/None` 作为唯一 routability 结果。没有修改 runtime resolver、候选顺序、provider classification、proxy forwarding、spawn schema、V1、Qwen 或 reserved schema；`proxy/providers/codex.rs` 与 `proxy/providers/mod.rs` 均无本轮 diff。
+
+### TDD RED
+
+tests-only 提交：`d0901cb67fb626add099c91adb6a5754f04e9034`。
+
+新增两条真实 backend initialization helper 回归，并在断言 backend 结果前直接观察同一个 runtime resolver：
+
+- `codex_subagent_v2_initialization_includes_runtime_first_enabled_fallback_model`
+  - runtime 返回 route id `first-enabled`；
+  - 旧 helper 漏建 profile，断言实际 `enabled = Null`、期望 `false`，稳定 RED。
+- `codex_subagent_v2_initialization_excludes_disabled_declared_model_before_enabled_default`
+  - runtime 对 disabled-only model 返回 `None`；
+  - 旧 helper 仍生成 `disabled-model` profile，稳定 RED。
+
+两条失败都是目标行为断言失败，不是编译、fixture 或路径错误。RED commit 只有测试新增，没有生产实现。
+
+### GREEN 与旧预言机校正
+
+GREEN 删除 `codex_catalog_route_is_enabled` 与 `codex_catalog_model_has_configured_route`，没有复制 runtime 的 exact/prefix/default/fallback/fail-closed 条件。两条新增 exact 回归随后各自 `1 passed / 0 failed`。
+
+初始化 filter 首跑还揭示 Round 1 旧测试 `codex_subagent_v2_initialization_only_includes_routable_catalog_models` 把“未显式 match”错误等同于“runtime 不可路由”。在 runtime first-enabled fallback 下，原 fixture 的 Flash/Pro 实际可路由。fixture 因此为 Flash/Pro 增加 disabled-only route 声明，使“只有 qwen runtime 可路由”成为真实前提；没有改生产语义或弱化断言。校正后 initialization filter 为 `3 passed / 0 failed`。
+
+### 定向验证
+
+- 两条新增 exact：各 `1/1`
+- `cargo test --lib codex_subagent_v2_initialization -- --nocapture`：`3/3`
+- `cargo test --lib codex_subagent_v2_preview -- --nocapture`：`3/3`
+- `cargo test --lib reconcile_codex_subagent_v2 -- --nocapture`：`1/1`
+- runtime first-enabled fallback exact：`1/1`
+- runtime disabled-only-before-default fail-closed exact：`1/1`
+- 完整 editor 文件：`95/95`
+- `pnpm typecheck`：exit 0
+- `cargo check --lib`：exit 0，仅既有 `openai_cache_read_tokens` warning
+- `rustfmt --check`、Prettier、`git diff --check`：最终 exit 0
+
+按 scoped re-review 要求，本轮不重复运行完整 2942/920 套件；Task 12 将执行 fresh 全量门禁。
+
+### 联网检索与交叉验证
+
+执行前分别完成 Codex Web 与 Matrix WebSearch 独立链路。两条链都直接读取 Rust 官方资料并得出一致结论：
+
+- Rust Reference 明确 `pub(crate)` 只在当前 crate 内可见，适合跨内部模块复用同一纯 resolver 而不扩大外部 API：<https://doc.rust-lang.org/reference/visibility-and-privacy.html>
+- Rust Book 明确同源 unit tests 可覆盖模块内部实现；本轮测试因此直接组合 runtime resolver 与真实 backend initialization helper，而不是 grep 或 mock：<https://doc.rust-lang.org/book/ch11-03-test-organization.html>
+
+外部资料用于确认共享边界与测试组织。具体 first-enabled fallback 和 disabled-only fail-closed 语义以当前 runtime 源码及两条真实回归为准，两条搜索链没有冲突。
+
+### Concerns
+
+- 本轮唯一编译 warning 仍是既有 `openai_cache_read_tokens` dead code。
+- 仅做 scoped 定向验证；完整 Rust/前端套件留给 Task 12，不能据此提前声明整仓全量状态。
