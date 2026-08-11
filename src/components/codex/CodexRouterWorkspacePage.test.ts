@@ -103,7 +103,7 @@ vi.mock("@/lib/api/codexSubagentV2", () => ({
       modelProvider: "codex_model_router_v2",
       modelReasoningEffort: "medium",
       modelContextWindow: 128000,
-      tomlPreview: "model = \"deepseek-v4-flash\"",
+      tomlPreview: 'model = "deepseek-v4-flash"',
       warnings: [],
     }),
     getProfileStatuses: vi.fn().mockResolvedValue({
@@ -1713,14 +1713,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       within(screen.getByRole("tablist"))
         .getAllByRole("tab")
         .map((tab) => tab.textContent?.trim()),
-    ).toEqual([
-      "总览",
-      "模型源",
-      "路由规则",
-      "子 Agent",
-      "状态",
-      "测试发布",
-    ]);
+    ).toEqual(["总览", "模型源", "路由规则", "子 Agent", "状态", "测试发布"]);
     expect(screen.queryByText("Sub-Agent 设置")).not.toBeInTheDocument();
 
     await userEvent

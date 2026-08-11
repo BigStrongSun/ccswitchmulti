@@ -1815,6 +1815,46 @@ describe("Codex Sub-Agent V2 searchable Accordion workspace", () => {
     expect(within(triggers[1]).getByText("复杂实现")).toBeVisible();
   });
 
+  it("supports Accordion keyboard navigation without coupling the adjacent model Switch", async () => {
+    const user = userEvent.setup();
+    await renderWorkspace();
+    const triggers = await screen.findAllByRole("button", {
+      name: /配置 deepseek-v4-/i,
+    });
+    const flashSwitch = screen.getByRole("switch", {
+      name: "启用 deepseek-v4-flash 作为 V2 子 Agent",
+    });
+    const proSwitch = screen.getByRole("switch", {
+      name: "启用 deepseek-v4-pro 作为 V2 子 Agent",
+    });
+
+    expect(triggers[0]).toHaveAttribute("aria-controls");
+    expect(triggers[1]).toHaveAttribute("aria-controls");
+    expect(triggers[0].getAttribute("aria-controls")).not.toBe(
+      triggers[1].getAttribute("aria-controls"),
+    );
+    expect(flashSwitch).toHaveAccessibleName(
+      "启用 deepseek-v4-flash 作为 V2 子 Agent",
+    );
+    expect(proSwitch).toHaveAccessibleName(
+      "启用 deepseek-v4-pro 作为 V2 子 Agent",
+    );
+
+    triggers[0].focus();
+    await user.keyboard("{ArrowDown}");
+    expect(triggers[1]).toHaveFocus();
+    await user.keyboard("{Enter}");
+    expect(triggers[0]).toHaveAttribute("aria-expanded", "false");
+    expect(triggers[1]).toHaveAttribute("aria-expanded", "true");
+
+    await user.tab();
+    expect(proSwitch).toHaveFocus();
+    expect(proSwitch).toBeChecked();
+    await user.keyboard(" ");
+    expect(proSwitch).not.toBeChecked();
+    expect(triggers[1]).toHaveAttribute("aria-expanded", "true");
+  });
+
   it("通过搜索模型、profile key 和 Provider 类型快速定位配置", async () => {
     const user = userEvent.setup();
     await renderWorkspace();
@@ -1892,6 +1932,31 @@ describe("Codex Sub-Agent V2 searchable Accordion workspace", () => {
     expect(
       screen.getAllByRole("button", { name: /配置 deepseek-v4-/i }),
     ).toHaveLength(2);
+  });
+
+  it("keeps invalid profiles in the repair area while normal models are filtered", async () => {
+    seedMalformedProfiles();
+    const user = userEvent.setup();
+    await mountWorkspaceFromPersistedPlan();
+
+    await user.type(
+      await screen.findByRole("searchbox", { name: "搜索子 Agent 模型" }),
+      "model-does-not-exist",
+    );
+
+    expect(screen.getByText("没有符合条件的子 Agent 模型")).toBeVisible();
+    expect(
+      screen.getByRole("region", { name: "无效能力配置 1" }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("region", { name: "无效能力配置 2" }),
+    ).toBeVisible();
+    expect(document.body.textContent).not.toContain(
+      "RAW_INVALID_PROFILE_KEY_ALPHA",
+    );
+    expect(document.body.textContent).not.toContain(
+      "RAW_INVALID_PROFILE_KEY_BETA",
+    );
   });
 
   it("keeps 高级字段 and generated TOML collapsed until requested", async () => {
@@ -2677,6 +2742,11 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
       within(flashRegion()).getByLabelText("模型偏好"),
       "preferred",
     );
+    await chooseOption(
+      wizard.user,
+      within(flashRegion()).getByLabelText("优化目标"),
+      "质量",
+    );
     const roleName = within(flashRegion()).getByLabelText("角色名称");
     await wizard.user.clear(roleName);
     await wizard.user.type(roleName, "wizard-scout");
@@ -2694,6 +2764,10 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
     expectControlValue(
       within(flashRegion()).getByLabelText("模型偏好"),
       "preferred",
+    );
+    expectControlValue(
+      within(flashRegion()).getByLabelText("优化目标"),
+      "quality",
     );
     expect(within(flashRegion()).getByLabelText("角色名称")).toHaveValue(
       "wizard-scout",
