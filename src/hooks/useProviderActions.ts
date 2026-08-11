@@ -30,6 +30,7 @@ import {
   supportsOfficialProxyTakeover,
 } from "@/utils/providerCapabilities";
 import { isOAuthProviderType } from "@/config/constants";
+import type { ProviderSwitchOutcome } from "@/lib/codexMultiRouterEnable";
 
 /**
  * Hook for managing provider actions (add, update, delete, switch)
@@ -163,7 +164,7 @@ export function useProviderActions(
 
   // 切换供应商
   const switchProvider = useCallback(
-    async (provider: Provider) => {
+    async (provider: Provider): Promise<ProviderSwitchOutcome> => {
       const isCopilotProvider =
         activeApp === "claude" &&
         provider.meta?.providerType === "github_copilot";
@@ -295,14 +296,12 @@ export function useProviderActions(
         !officialSupportsTakeover &&
         !isCodexRouterProvider
       ) {
-        toast.error(
-          t("notifications.officialBlockedByProxy", {
-            defaultValue:
-              "代理接管模式下不能切换到官方供应商，使用代理访问官方 API 可能导致账号被封禁",
-          }),
-          { duration: 6000 },
-        );
-        return;
+        const message = t("notifications.officialBlockedByProxy", {
+          defaultValue:
+            "代理接管模式下不能切换到官方供应商，使用代理访问官方 API 可能导致账号被封禁",
+        });
+        toast.error(message, { duration: 6000 });
+        return { ok: false, error: new Error(message) };
       }
 
       try {
@@ -352,8 +351,14 @@ export function useProviderActions(
             duration: activeApp === "codex" ? 8000 : undefined,
           });
         }
-      } catch {
+        return { ok: true, result };
+      } catch (error) {
         // 错误提示由 mutation 处理
+        const detail = extractErrorMessage(error) || "切换供应商失败";
+        return {
+          ok: false,
+          error: error instanceof Error ? error : new Error(detail),
+        };
       }
     },
     [

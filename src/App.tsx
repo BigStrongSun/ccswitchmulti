@@ -34,7 +34,6 @@ import type { EnvConflict } from "@/types/env";
 import { proxyKeys, useProvidersQuery, useSettingsQuery } from "@/lib/query";
 import {
   providersApi,
-  proxyApi,
   settingsApi,
   type AppId,
   type ProviderSwitchEvent,
@@ -56,6 +55,7 @@ import { extractErrorMessage } from "@/utils/errorUtils";
 import { isTextEditableTarget } from "@/utils/domUtils";
 import { deepClone } from "@/utils/deepClone";
 import { cn } from "@/lib/utils";
+import { enableCodexMultiRouterPlan } from "@/lib/codexMultiRouterEnable";
 import {
   isWindows,
   isLinux,
@@ -1009,16 +1009,11 @@ function App() {
     openCodexRouterWorkspace(existingPlan ?? null, "status");
   };
 
-  // 用户在向导里选择启用 MultiRouter 时，必须把 CCSwitchMulti 本地代理和 Codex 接管一起打开。
+  // 目标 Provider 的 switch 路径会在同一个后端切换锁内启动代理并完成接管；
+  // 这里不能先接管当前 Provider，否则会短暂写入错误的模型目录与 managed roles。
   const handleEnableCodexMultiRouterPlan = async (provider: Provider) => {
     setActiveApp("codex");
-    if (!isProxyRunning) {
-      await proxyApi.startProxyServer();
-    }
-    if (!takeoverStatus?.codex) {
-      await proxyApi.setProxyTakeoverForApp("codex", true);
-    }
-    await switchProvider(provider);
+    await enableCodexMultiRouterPlan(provider, switchProvider);
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ["proxyStatus"] }),
       queryClient.invalidateQueries({ queryKey: ["proxyTakeoverStatus"] }),
