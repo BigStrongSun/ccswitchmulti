@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { Search } from "lucide-react";
+import { Code2, Database, Search, SlidersHorizontal } from "lucide-react";
 import {
   Accordion,
   AccordionContent,
@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
+import { cn } from "@/lib/utils";
 import {
   codexSubagentV2Api,
   type CodexSubagentV2MutationProvider,
@@ -50,6 +51,7 @@ const TASK_STRENGTHS: Array<{
 ];
 
 type ProfileFilter = "enabled" | "draft" | "unroutable" | "all";
+type ProfileTone = "enabled-routable" | "draft" | "unroutable";
 
 const PROFILE_FILTERS: Array<{ value: ProfileFilter; label: string }> = [
   { value: "enabled", label: "已启用" },
@@ -80,6 +82,26 @@ const QUESTIONNAIRE_REASONING_EFFORTS = new Set<string>([
   "high",
   "xhigh",
 ]);
+
+function profileToneFor(
+  profile: CodexSubagentV2Profile,
+  status?: CodexSubagentProfileStatus,
+): ProfileTone {
+  if (status?.routable === false) return "unroutable";
+  return profile.enabled ? "enabled-routable" : "draft";
+}
+
+function profileToneClassName(tone: ProfileTone): string {
+  switch (tone) {
+    case "unroutable":
+      return "border-rose-200 bg-rose-50/70 dark:border-rose-500/40 dark:bg-rose-950/20";
+    case "draft":
+      return "border-amber-200 bg-amber-50/65 dark:border-amber-500/40 dark:bg-amber-950/20";
+    case "enabled-routable":
+    default:
+      return "border-emerald-200 bg-emerald-50/70 dark:border-emerald-500/40 dark:bg-emerald-950/25";
+  }
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -671,15 +693,28 @@ export function CodexSubagentProfileEditor({
       return haystack.includes(profileSearch.trim().toLocaleLowerCase());
     });
 
+  const saveState = saveError ? "error" : isDirty ? "dirty" : "saved";
+
   return (
-    <section className="space-y-4 rounded-lg border border-emerald-200 bg-emerald-50/40 p-4 dark:border-emerald-700/50 dark:bg-emerald-950/15">
+    <section
+      data-theme-contract="codex-subagent-v2"
+      className="space-y-4 rounded-xl border border-blue-200/80 bg-gradient-to-br from-blue-50/80 via-background to-violet-50/70 p-4 shadow-sm dark:border-blue-500/30 dark:from-blue-950/25 dark:via-slate-950/40 dark:to-violet-950/20"
+    >
       <fieldset disabled={isSaving} className="contents">
-        <div>
-          <h3 className="text-sm font-semibold">选择策略</h3>
-          <label className="mt-2 grid gap-1 text-sm">
-            <span>第三方子 Agent 选择策略</span>
+        <section
+          data-subagent-panel="strategy"
+          className="space-y-3 rounded-lg border border-blue-200 bg-blue-50/70 p-3 dark:border-blue-500/40 dark:bg-blue-950/20"
+        >
+          <div className="flex items-center gap-2 text-blue-900 dark:text-blue-100">
+            <SlidersHorizontal aria-hidden="true" className="h-4 w-4" />
+            <h3 className="text-sm font-semibold">选择策略</h3>
+          </div>
+          <label className="grid gap-1 text-sm">
+            <span className="font-medium text-blue-950 dark:text-blue-100">
+              第三方子 Agent 选择策略
+            </span>
             <select
-              className="rounded-md border bg-background px-3 py-2"
+              className="rounded-md border border-blue-200 bg-background/90 px-3 py-2 dark:border-blue-500/35 dark:bg-slate-950/60"
               value={draft.selectionPolicy}
               onChange={(event) => {
                 setSaveMessage(null);
@@ -696,59 +731,73 @@ export function CodexSubagentProfileEditor({
               <option value="third_party_first">第三方优先</option>
             </select>
           </label>
-        </div>
 
-        <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
-          <label
-            htmlFor="codex-subagent-profile-search"
-            className="grid gap-1 text-sm"
-          >
-            <span>搜索子 Agent 模型</span>
-            <span className="relative">
-              <Search
-                aria-hidden="true"
-                className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground"
-              />
-              <Input
-                id="codex-subagent-profile-search"
-                type="search"
-                value={profileSearch}
-                onChange={(event) => setProfileSearch(event.target.value)}
-                placeholder="模型、角色名或 Provider 类型"
-                className="pl-9"
-              />
-            </span>
-          </label>
-          <div
-            className="flex flex-wrap gap-2"
-            role="group"
-            aria-label="子 Agent 模型筛选"
-          >
-            {PROFILE_FILTERS.map((filter) => (
-              <Button
-                key={filter.value}
-                type="button"
-                size="sm"
-                variant={profileFilter === filter.value ? "default" : "outline"}
-                aria-pressed={profileFilter === filter.value}
-                onClick={() => setProfileFilter(filter.value)}
-              >
-                {filter.label}
-              </Button>
-            ))}
+          <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
+            <label
+              htmlFor="codex-subagent-profile-search"
+              className="grid gap-1 text-sm"
+            >
+              <span className="font-medium text-blue-950 dark:text-blue-100">
+                搜索子 Agent 模型
+              </span>
+              <span className="relative">
+                <Search
+                  aria-hidden="true"
+                  className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-blue-600 dark:text-blue-300"
+                />
+                <Input
+                  id="codex-subagent-profile-search"
+                  type="search"
+                  value={profileSearch}
+                  onChange={(event) => setProfileSearch(event.target.value)}
+                  placeholder="模型、角色名或 Provider 类型"
+                  className="border-blue-200 bg-background/90 pl-9 dark:border-blue-500/35 dark:bg-slate-950/60"
+                />
+              </span>
+            </label>
+            <div
+              className="flex flex-wrap gap-2"
+              role="group"
+              aria-label="子 Agent 模型筛选"
+            >
+              {PROFILE_FILTERS.map((filter) => (
+                <Button
+                  key={filter.value}
+                  type="button"
+                  size="sm"
+                  variant={
+                    profileFilter === filter.value ? "default" : "outline"
+                  }
+                  className={cn(
+                    profileFilter === filter.value
+                      ? "bg-blue-600 text-white hover:bg-blue-500"
+                      : "border-blue-200 bg-background/80 text-blue-800 hover:bg-blue-100 dark:border-blue-500/35 dark:bg-blue-950/25 dark:text-blue-100 dark:hover:bg-blue-500/20",
+                  )}
+                  aria-pressed={profileFilter === filter.value}
+                  onClick={() => setProfileFilter(filter.value)}
+                >
+                  {filter.label}
+                </Button>
+              ))}
+            </div>
           </div>
-        </div>
+        </section>
 
-        <div className="space-y-3 rounded-lg border bg-background/70 p-3">
+        <div
+          data-subagent-panel="catalog"
+          className="space-y-3 rounded-lg border border-cyan-200 bg-cyan-50/70 p-3 dark:border-cyan-500/40 dark:bg-cyan-950/20"
+        >
           <div className="flex flex-wrap items-start gap-3">
             <Button
               type="button"
               variant="outline"
+              className="border-cyan-200 bg-background/85 text-cyan-800 hover:bg-cyan-100 dark:border-cyan-500/40 dark:bg-cyan-950/30 dark:text-cyan-100 dark:hover:bg-cyan-500/20"
               onClick={() => reconcile("sync_catalog", draft)}
             >
+              <Database aria-hidden="true" className="h-4 w-4" />
               从模型目录添加可配置模型
             </Button>
-            <p className="max-w-2xl text-xs leading-5 text-muted-foreground">
+            <p className="max-w-2xl text-xs leading-5 text-cyan-900/75 dark:text-cyan-100/75">
               发现当前可路由模型并加入列表；新模型默认关闭，已有问卷和手工设置不会被覆盖。
             </p>
           </div>
@@ -787,6 +836,7 @@ export function CodexSubagentProfileEditor({
               ([profileKey, profile], profileIndex) => {
                 const preview = previews[profileKey];
                 const status = statusByProfileKey.get(profileKey);
+                const profileTone = profileToneFor(profile, status);
                 const overrides = profile.overrides ?? {};
                 const nicknameValue =
                   nicknameDrafts[profileKey] ??
@@ -799,7 +849,11 @@ export function CodexSubagentProfileEditor({
                   <AccordionItem
                     key={profileKey}
                     value={profileKey}
-                    className="rounded-lg border bg-background/80 px-4"
+                    data-profile-tone={profileTone}
+                    className={cn(
+                      "rounded-xl border px-4 shadow-sm transition-colors",
+                      profileToneClassName(profileTone),
+                    )}
                   >
                     <div className="flex items-center gap-3">
                       <div className="min-w-0 flex-1">
@@ -831,7 +885,7 @@ export function CodexSubagentProfileEditor({
                     <AccordionContent
                       role="region"
                       aria-labelledby={`codex-subagent-${profileIndex}-region-label`}
-                      className="space-y-4"
+                      className="space-y-4 rounded-lg border border-white/70 bg-background/80 p-4 dark:border-white/10 dark:bg-slate-950/40"
                     >
                       <span
                         id={`codex-subagent-${profileIndex}-region-label`}
@@ -839,18 +893,29 @@ export function CodexSubagentProfileEditor({
                       >
                         {profile.model} 子 Agent 配置
                       </span>
-                      <fieldset className="grid gap-2" aria-label="任务优势">
-                        <legend className="text-sm font-medium">
+                      <fieldset
+                        className="grid gap-3 rounded-lg border border-sky-200 bg-sky-50/60 p-3 dark:border-sky-500/40 dark:bg-sky-950/20"
+                        aria-label="任务优势"
+                      >
+                        <legend className="px-1 text-sm font-semibold text-sky-900 dark:text-sky-100">
                           任务优势
                         </legend>
-                        <div className="grid gap-1 sm:grid-cols-2">
+                        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
                           {TASK_STRENGTHS.map((strength) => (
                             <label
                               key={strength.value}
-                              className="flex items-center gap-2 text-xs"
+                              className={cn(
+                                "flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2 text-xs font-medium transition-colors",
+                                profile.questionnaire.taskStrengths.includes(
+                                  strength.value,
+                                )
+                                  ? "border-sky-300 bg-sky-100/80 text-sky-950 shadow-sm dark:border-sky-500/50 dark:bg-sky-500/15 dark:text-sky-100"
+                                  : "border-slate-200 bg-background/70 text-slate-700 hover:border-sky-300 hover:bg-sky-50 dark:border-slate-700 dark:bg-slate-950/35 dark:text-slate-300 dark:hover:border-sky-500/40 dark:hover:bg-sky-950/25",
+                              )}
                             >
                               <input
                                 type="checkbox"
+                                className="h-4 w-4 accent-sky-600"
                                 value={strength.value}
                                 checked={profile.questionnaire.taskStrengths.includes(
                                   strength.value,
@@ -890,7 +955,7 @@ export function CodexSubagentProfileEditor({
                         </div>
                       </fieldset>
 
-                      <div className="grid gap-2 sm:grid-cols-2">
+                      <div className="grid gap-3 sm:grid-cols-2">
                         <QuestionnaireSelect
                           label="优化目标"
                           value={profile.questionnaire.optimization}
@@ -973,11 +1038,19 @@ export function CodexSubagentProfileEditor({
 
                       <Collapsible>
                         <CollapsibleTrigger asChild>
-                          <Button type="button" variant="outline">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            className="border-violet-200 bg-violet-50 text-violet-800 hover:bg-violet-100 dark:border-violet-500/40 dark:bg-violet-950/25 dark:text-violet-100 dark:hover:bg-violet-500/20"
+                          >
+                            <SlidersHorizontal
+                              aria-hidden="true"
+                              className="h-4 w-4"
+                            />
                             高级字段
                           </Button>
                         </CollapsibleTrigger>
-                        <CollapsibleContent className="mt-3 space-y-3">
+                        <CollapsibleContent className="mt-3 space-y-3 rounded-lg border border-violet-200 bg-violet-50/55 p-3 dark:border-violet-500/35 dark:bg-violet-950/20">
                           <OverrideField
                             id={`codex-subagent-${profileIndex}-role-name`}
                             label="角色名称"
@@ -1121,11 +1194,16 @@ export function CodexSubagentProfileEditor({
 
                       <Collapsible>
                         <CollapsibleTrigger asChild>
-                          <Button type="button" variant="outline">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            className="border-cyan-200 bg-cyan-50 text-cyan-800 hover:bg-cyan-100 dark:border-cyan-500/40 dark:bg-cyan-950/25 dark:text-cyan-100 dark:hover:bg-cyan-500/20"
+                          >
+                            <Code2 aria-hidden="true" className="h-4 w-4" />
                             生成结果与 TOML
                           </Button>
                         </CollapsibleTrigger>
-                        <CollapsibleContent className="mt-3 space-y-3">
+                        <CollapsibleContent className="mt-3 space-y-3 rounded-lg border border-cyan-200 bg-cyan-50/55 p-3 dark:border-cyan-500/35 dark:bg-cyan-950/20">
                           {previewErrors[profileKey] ? (
                             <p role="alert" className="text-xs text-rose-600">
                               {previewErrors[profileKey]}
@@ -1201,44 +1279,73 @@ export function CodexSubagentProfileEditor({
       </fieldset>
 
       {strengthLimitMessage ? (
-        <p role="alert" className="text-sm text-amber-700">
+        <p role="alert" className="text-sm text-amber-700 dark:text-amber-200">
           {strengthLimitMessage}
         </p>
       ) : null}
 
       {statusError ? (
-        <p role="alert" className="text-sm text-rose-600">
+        <p role="alert" className="text-sm text-rose-600 dark:text-rose-300">
           {statusError}
         </p>
       ) : null}
       {statuses ? (
-        <div className="space-y-2 rounded-lg border bg-background/80 p-4 text-sm">
-          <p>生成来源：{statuses.generationSource}</p>
+        <div className="space-y-2 rounded-lg border border-indigo-200 bg-indigo-50/65 p-4 text-sm text-indigo-950 dark:border-indigo-500/35 dark:bg-indigo-950/20 dark:text-indigo-100">
+          <p className="font-medium">生成来源：{statuses.generationSource}</p>
           {unassignedStatuses.map((status, index) => (
             <ProfileBackendOutput key={`unassigned-${index}`} status={status} />
           ))}
           {statuses.warnings.map((warning) => (
-            <p key={warning} className="text-amber-700">
+            <p key={warning} className="text-amber-700 dark:text-amber-200">
               {warning}
             </p>
           ))}
         </div>
       ) : null}
 
-      <div className="sticky bottom-0 z-10 flex flex-wrap items-center gap-3 rounded-lg border bg-background/95 p-3 shadow-sm backdrop-blur">
-        <span className="text-sm text-muted-foreground">
+      <div
+        data-save-state={saveState}
+        className={cn(
+          "sticky bottom-0 z-10 flex flex-wrap items-center gap-3 rounded-lg border p-3 shadow-lg backdrop-blur",
+          saveState === "error"
+            ? "border-rose-200 bg-rose-50/95 dark:border-rose-500/40 dark:bg-rose-950/90"
+            : saveState === "dirty"
+              ? "border-blue-200 bg-blue-50/95 dark:border-blue-500/40 dark:bg-blue-950/90"
+              : "border-emerald-200 bg-emerald-50/95 dark:border-emerald-500/40 dark:bg-emerald-950/90",
+        )}
+      >
+        <span
+          className={cn(
+            "text-sm font-medium",
+            saveState === "error"
+              ? "text-rose-800 dark:text-rose-100"
+              : saveState === "dirty"
+                ? "text-blue-800 dark:text-blue-100"
+                : "text-emerald-800 dark:text-emerald-100",
+          )}
+        >
           {isDirty ? "有未保存更改" : "所有更改均已保存"}
         </span>
-        <Button onClick={save} disabled={isSaving || !isDirty}>
+        <Button
+          className="bg-blue-600 text-white hover:bg-blue-500"
+          onClick={save}
+          disabled={isSaving || !isDirty}
+        >
           {isSaving ? "保存中…" : "保存 V2 子 Agent 配置"}
         </Button>
         {saveMessage ? (
-          <span aria-live="polite" className="text-sm text-emerald-700">
+          <span
+            aria-live="polite"
+            className="text-sm text-emerald-700 dark:text-emerald-200"
+          >
             {saveMessage}
           </span>
         ) : null}
         {saveError ? (
-          <span role="alert" className="text-sm text-rose-600">
+          <span
+            role="alert"
+            className="text-sm text-rose-600 dark:text-rose-200"
+          >
             {saveError}
           </span>
         ) : null}
@@ -1246,7 +1353,7 @@ export function CodexSubagentProfileEditor({
           <span
             role="status"
             aria-live="polite"
-            className="text-sm text-amber-700"
+            className="text-sm text-amber-700 dark:text-amber-200"
           >
             {projectionWarning}
           </span>
@@ -1287,22 +1394,60 @@ function ProfileSummary({
     <div className="min-w-0 flex-1 text-left">
       <div className="truncate text-sm font-semibold">{profile.model}</div>
       <div className="mt-1 flex flex-wrap gap-1.5 text-xs">
-        <Badge variant="outline">
+        <Badge
+          variant="outline"
+          className={
+            providerKind === "official"
+              ? "border-blue-200 bg-blue-100/80 text-blue-800 dark:border-blue-500/40 dark:bg-blue-500/15 dark:text-blue-100"
+              : "border-violet-200 bg-violet-100/80 text-violet-800 dark:border-violet-500/40 dark:bg-violet-500/15 dark:text-violet-100"
+          }
+        >
           {providerKind === "official" ? "官方" : "第三方"}
         </Badge>
-        <Badge variant="outline">
+        <Badge
+          variant="outline"
+          className={
+            status?.routable === false
+              ? "border-rose-200 bg-rose-100/80 text-rose-800 dark:border-rose-500/40 dark:bg-rose-500/15 dark:text-rose-100"
+              : "border-emerald-200 bg-emerald-100/80 text-emerald-800 dark:border-emerald-500/40 dark:bg-emerald-500/15 dark:text-emerald-100"
+          }
+        >
           {status?.routable === false ? "不可路由" : "可路由"}
         </Badge>
-        <Badge variant="outline">{profile.enabled ? "已启用" : "待配置"}</Badge>
-        <Badge variant="outline">
+        <Badge
+          variant="outline"
+          className={
+            profile.enabled
+              ? "border-teal-200 bg-teal-100/80 text-teal-800 dark:border-teal-500/40 dark:bg-teal-500/15 dark:text-teal-100"
+              : "border-amber-200 bg-amber-100/80 text-amber-800 dark:border-amber-500/40 dark:bg-amber-500/15 dark:text-amber-100"
+          }
+        >
+          {profile.enabled ? "已启用" : "待配置"}
+        </Badge>
+        <Badge
+          variant="outline"
+          className="border-amber-200 bg-amber-100/70 text-amber-800 dark:border-amber-500/40 dark:bg-amber-500/15 dark:text-amber-100"
+        >
           {preferenceLabels[profile.questionnaire.preference]}
         </Badge>
-        <Badge variant="outline">推理 {reasoning}</Badge>
-        <Badge variant="outline">
+        <Badge
+          variant="outline"
+          className="border-sky-200 bg-sky-100/70 text-sky-800 dark:border-sky-500/40 dark:bg-sky-500/15 dark:text-sky-100"
+        >
+          推理 {reasoning}
+        </Badge>
+        <Badge
+          variant="outline"
+          className="border-indigo-200 bg-indigo-100/70 text-indigo-800 dark:border-indigo-500/40 dark:bg-indigo-500/15 dark:text-indigo-100"
+        >
           {hasOverrides ? "含手工覆盖" : "自动生成"}
         </Badge>
         {strengthLabels.map((label) => (
-          <Badge key={label} variant="outline">
+          <Badge
+            key={label}
+            variant="outline"
+            className="border-cyan-200 bg-cyan-100/70 text-cyan-800 dark:border-cyan-500/40 dark:bg-cyan-500/15 dark:text-cyan-100"
+          >
             {label}
           </Badge>
         ))}
@@ -1335,7 +1480,7 @@ function ProfileBackendOutput({
     <div
       role="region"
       aria-label={`${profileKey ?? "未识别 profile"} 后端预览状态`}
-      className="space-y-2 rounded-lg border bg-muted/20 p-3 text-sm"
+      className="space-y-2 rounded-lg border border-cyan-200 bg-cyan-50/65 p-3 text-sm text-cyan-950 dark:border-cyan-500/35 dark:bg-cyan-950/20 dark:text-cyan-100"
     >
       {status ? (
         <>
@@ -1414,7 +1559,7 @@ function ProfileBackendOutput({
       )}
 
       {warnings.map((warning) => (
-        <p key={warning} className="text-amber-700">
+        <p key={warning} className="text-amber-700 dark:text-amber-200">
           {warning}
         </p>
       ))}
@@ -1434,10 +1579,12 @@ function QuestionnaireSelect({
   onChange: (value: string) => void;
 }) {
   return (
-    <label className="grid gap-1 text-sm">
-      <span>{label}</span>
+    <label className="grid gap-1 rounded-lg border border-violet-200 bg-violet-50/60 p-3 text-sm dark:border-violet-500/35 dark:bg-violet-950/20">
+      <span className="font-medium text-violet-900 dark:text-violet-100">
+        {label}
+      </span>
       <select
-        className="rounded-md border bg-background px-3 py-2"
+        className="rounded-md border border-violet-200 bg-background/90 px-3 py-2 dark:border-violet-500/35 dark:bg-slate-950/60"
         value={value}
         onChange={(event) => onChange(event.target.value)}
       >

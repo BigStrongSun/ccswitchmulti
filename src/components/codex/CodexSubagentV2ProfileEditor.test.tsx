@@ -2165,19 +2165,14 @@ describe("Codex Sub-Agent V2 dual-theme visual contract", () => {
       "dark:bg-sky-500/15",
       "dark:text-sky-100",
     );
-    expect(idleChip).toHaveClass(
-      "bg-background/70",
-      "dark:bg-slate-950/35",
-    );
+    expect(idleChip).toHaveClass("bg-background/70", "dark:bg-slate-950/35");
   });
 
   it("distinguishes advanced, TOML, saved, and dirty states by paired colors", async () => {
     const user = userEvent.setup();
     await renderWorkspace();
     const flash = flashRegion();
-    expect(
-      within(flash).getByRole("button", { name: "高级字段" }),
-    ).toHaveClass(
+    expect(within(flash).getByRole("button", { name: "高级字段" })).toHaveClass(
       "border-violet-200",
       "bg-violet-50",
       "dark:border-violet-500/40",
@@ -2202,11 +2197,7 @@ describe("Codex Sub-Agent V2 dual-theme visual contract", () => {
       "dark:bg-emerald-950/90",
     );
 
-    await chooseOption(
-      user,
-      within(flash).getByLabelText("优化目标"),
-      "质量",
-    );
+    await chooseOption(user, within(flash).getByLabelText("优化目标"), "质量");
     const dirtyBar = document.querySelector<HTMLElement>(
       '[data-save-state="dirty"]',
     );

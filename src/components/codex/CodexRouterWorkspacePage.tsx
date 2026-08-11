@@ -5234,7 +5234,7 @@ function SpawnAgentCandidatesPanel({
   }
 
   return (
-    <section className="rounded-lg border border-violet-200 bg-violet-50/70 p-3 dark:border-violet-700/40 dark:bg-violet-950/15">
+    <section className="rounded-xl border border-violet-200 bg-gradient-to-br from-violet-50/90 via-background to-cyan-50/70 p-3 shadow-sm dark:border-violet-500/35 dark:from-violet-950/25 dark:via-slate-950/40 dark:to-cyan-950/20">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="max-w-3xl">
           <div className="flex items-center gap-2 text-sm font-semibold text-violet-800 dark:text-violet-100">
@@ -5254,11 +5254,12 @@ function SpawnAgentCandidatesPanel({
 
       <div className="mt-3 grid gap-2 lg:grid-cols-2">
         <div
+          data-subagent-protocol="v1"
           className={cn(
-            "rounded-md border p-3",
+            "rounded-lg border p-3 shadow-sm transition-colors",
             activeSubagentVersion === "v1"
-              ? "border-amber-300 bg-amber-50 dark:border-amber-500/60 dark:bg-amber-500/10"
-              : "border-border bg-background/70 dark:border-slate-700 dark:bg-slate-950/30",
+              ? "border-blue-300 bg-blue-50 dark:border-blue-500/60 dark:bg-blue-950/25"
+              : "border-sky-200 bg-sky-50/70 dark:border-sky-500/40 dark:bg-sky-950/20",
           )}
         >
           <div className="flex items-center justify-between gap-2">
@@ -5290,11 +5291,12 @@ function SpawnAgentCandidatesPanel({
           </p>
         </div>
         <div
+          data-subagent-protocol="v2"
           className={cn(
-            "rounded-md border p-3",
+            "rounded-lg border p-3 shadow-sm transition-colors",
             activeSubagentVersion === "v2"
               ? "border-emerald-300 bg-emerald-50 dark:border-emerald-500/60 dark:bg-emerald-500/10"
-              : "border-border bg-background/70 dark:border-slate-700 dark:bg-slate-950/30",
+              : "border-violet-200 bg-violet-50/70 dark:border-violet-500/40 dark:bg-violet-950/20",
           )}
         >
           <div className="flex items-center justify-between gap-2">
