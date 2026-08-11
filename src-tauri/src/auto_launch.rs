@@ -88,6 +88,21 @@ mod windows {
             .unwrap_or(true)
     }
 
+    pub(super) fn reconciliation_action(
+        desired: bool,
+        run_matches_current_exe: bool,
+        startup_approved: bool,
+    ) -> Option<bool> {
+        match (desired, run_matches_current_exe, startup_approved) {
+            (true, false, _) => Some(true),
+            // Respect an explicit Windows Task Manager disable when the Run
+            // registration itself is otherwise valid.
+            (true, true, false) => None,
+            (false, true, _) => Some(false),
+            _ => None,
+        }
+    }
+
     fn delete_value_if_present(
         key: &RegKey,
         value_name: &str,
@@ -181,6 +196,60 @@ mod windows {
 
         Ok(startup_approved_enabled(Some(&raw_value.bytes)))
     }
+
+    pub(super) fn reconcile(desired: bool) -> Result<(), AppError> {
+        let exe = current_exe()?;
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let run_value = match hkcu.open_subkey_with_flags(RUN_REGKEY, KEY_READ) {
+            Ok(key) => match key.get_value::<String, _>(APP_NAME) {
+                Ok(value) => Some(value),
+                Err(error) if error.kind() == ErrorKind::NotFound => None,
+                Err(error) => return Err(registry_error("读取自启 Run 值失败", error)),
+            },
+            Err(error) if error.kind() == ErrorKind::NotFound => None,
+            Err(error) => return Err(registry_error("读取 Run 注册表键失败", error)),
+        };
+        let run_matches = run_value
+            .as_deref()
+            .is_some_and(|value| run_value_matches_exe(value, &exe));
+        let startup_approved = match hkcu.open_subkey_with_flags(STARTUP_APPROVED_REGKEY, KEY_READ)
+        {
+            Ok(key) => match key.get_raw_value(APP_NAME) {
+                Ok(value) => startup_approved_enabled(Some(&value.bytes)),
+                Err(error) if error.kind() == ErrorKind::NotFound => true,
+                Err(error) => return Err(registry_error("读取 StartupApproved 状态失败", error)),
+            },
+            Err(error) if error.kind() == ErrorKind::NotFound => true,
+            Err(error) => return Err(registry_error("读取 StartupApproved 注册表键失败", error)),
+        };
+
+        match reconciliation_action(desired, run_matches, startup_approved) {
+            Some(true) => enable(),
+            Some(false) => disable(),
+            None => Ok(()),
+        }
+    }
+}
+
+#[cfg(any(not(target_os = "windows"), test))]
+fn auto_launch_reconciliation_action(desired: bool, actual: bool) -> Option<bool> {
+    (desired != actual).then_some(desired)
+}
+
+pub fn reconcile_auto_launch(desired: bool) -> Result<(), AppError> {
+    #[cfg(target_os = "windows")]
+    {
+        windows::reconcile(desired)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let actual = is_auto_launch_enabled()?;
+        match auto_launch_reconciliation_action(desired, actual) {
+            Some(true) => enable_auto_launch(),
+            Some(false) => disable_auto_launch(),
+            None => Ok(()),
+        }
+    }
 }
 
 /// 启用开机自启
@@ -265,6 +334,28 @@ mod tests {
         assert!(windows::startup_approved_enabled(None));
         assert!(windows::startup_approved_enabled(Some(&enabled)));
         assert!(!windows::startup_approved_enabled(Some(&disabled)));
+    }
+
+    #[test]
+    fn startup_reconciliation_repairs_persisted_and_system_state_drift() {
+        assert_eq!(auto_launch_reconciliation_action(true, false), Some(true));
+        assert_eq!(auto_launch_reconciliation_action(false, true), Some(false));
+        assert_eq!(auto_launch_reconciliation_action(true, true), None);
+        assert_eq!(auto_launch_reconciliation_action(false, false), None);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_startup_reconciliation_repairs_missing_run_but_respects_task_manager_disable() {
+        assert_eq!(
+            windows::reconciliation_action(true, false, true),
+            Some(true)
+        );
+        assert_eq!(windows::reconciliation_action(true, true, false), None);
+        assert_eq!(
+            windows::reconciliation_action(false, true, true),
+            Some(false)
+        );
     }
 
     #[cfg(target_os = "macos")]

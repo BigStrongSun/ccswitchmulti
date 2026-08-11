@@ -54,6 +54,18 @@
 - 新发现的非阻塞边缘风险：CCSM 接管后的官方 `models_cache` 备份只创建一次；除当前 V1/V2 两字段外，其它官方 transport/picker 元数据可能在长期接管期间冻结。该问题不影响本轮两个契约和安装验收，后续若处理应设计官方 cache 刷新/再合并机制，不能简单扩大当前 override 列表。
 - 本轮继续使用 Codex 内置 Web 与 Matrix MCP 两条独立链；内置搜索定位到 Codex 官方 `multi_agent_version`/cache 一手源码和近期 cache 行为问题，Matrix 仍返回 HTTP 521。最终技术判断以本地失败测试、当前源码、安装产物、事务日志、child rollout、SQLite 请求记录和 Router HTTP 200 为主。
 
+## 2026-08-11 Codex OAuth 过期提示竞态与 Windows 开机自启漂移根修
+
+- OAuth 现场日志证明授权完成并保存账号后，同一时刻仍有多条 device-code 流并发；旧 `useManagedAuth` 只保存最后一组 timer 句柄，旧流程的 timeout/poll 回调无法全部取消，随后可把已登录页面重新写成 `Device code expired`。根修提交 `4588fe14`/`7e2bfddf` 将流程收敛为单活动 generation，完成、取消、超时和卸载都会令旧回调失效；到期前重新读取后端账号状态，若账号已可用则保持登录态而不是展示过期错误。RFC 8628 的边界是授权请求到期，不等价于既有账号失效。
+- Windows 现场为 `settings.json.launchOnStartup=true`，但 `HKCU\\...\\Run\\CCSwitchMulti` 缺失，仅有 `StartupApproved` enabled marker。根因是旧版只在前端开关值变化时调用系统 API；升级后注册项丢失而持久设置仍为 true，不会触发修复。`auto_launch.rs` 现在在应用启动时对账持久期望和真实注册状态，Run 缺失或路径漂移时重建带引号的当前 EXE；若 Run 正确但被任务管理器明确禁用则尊重系统选择。边界测试提交 `d9905d6c`，实现同在 `7e2bfddf`。
+- 版本考古必须区分“潜伏设计缺陷”和“本机触发器”。自启代码最早在源码版本仍标为 `3.7.0` 的 `162c9214`/`524fa943` 出现，但同线功能被 `eb46ac85` 回滚，正式 tag `v3.7.1` 没有 `auto_launch.rs`；长期实现由 `d38fcd63` 重新进入源码，首个包含它的正式 tag 是 `v3.8.0`。因此对用户可见的潜伏缺陷首发版本应记为 `v3.8.0`，不是 `v3.7.0`：持久设置与系统注册从一开始就是两套状态，应用启动不做对账，只有设置保存路径会调用系统 API。
+- 本机这次失效的触发器是 `6dca12c4` 在源码版本 `3.19.1-15` 引入的事务重装。其 `RunUninstaller` 以 `/S _?=<install dir>` 执行 Tauri 2.8.5 NSIS 卸载器，却没有 `/UPDATE`；官方模板在非 UpdateMode 下明确删除 `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\${PRODUCTNAME}`。第一次成功完整执行该路径的事务 `ccsm-20260810-034021-30bb9f3bfbb94fbc80e1df504107b468` 从注册表备份证明旧安装为 `3.19.1-15`，配置备份证明 `launchOnStartup=true`，并于 03:40:32 成功启动 `3.19.1-16`。因此触发机制进入源码是 `3.19.1-15`，本机首次实际触发/开始失效是升级到 `3.19.1-16`，到用户发现时的 `3.19.1-18` 仍不会自愈；`3.19.1-19` 才加入启动对账。事务未备份 Run 项，故没有卸载前的逐值快照或注册表审计日志，但卸载参数、Tauri 删除语义、`settings=true`、Run 缺失而 StartupApproved 残留形成高置信度闭环。
+- macOS/Linux 不会原样复现这次 Windows NSIS 删除链：当前 `auto-launch 0.5.0` 在 macOS 默认使用 AppleScript Login Item，普通 `.app` 覆盖升级不会调用 Windows 卸载模板；Linux 写用户目录 `~/.config/autostart/CCSwitchMulti.desktop`，普通 deb/rpm 升级通常也不删除它。不过两端都存在同构漂移：macOS `is_enabled()` 只按 Login Item 名称判断，不核对 `.app` 路径；Linux `is_enabled()` 只检查 desktop 文件存在，不核对 `Exec`、`Hidden=true` 或目标可执行文件。因此 `3.19.1-19` 能修复“条目完全缺失”，但仍不能修复 macOS 同名失效路径、Linux 陈旧 Exec/Hidden 条目。macOS 13+ 后续应评估 `SMAppService.status`，Linux 应解析并校验 desktop entry，而不是继续依赖文件存在布尔值。此结论为源码与 Apple/Freedesktop 官方规范审计，尚未在真实 macOS/Linux 主机执行升级/登录验收。
+- 最终交付基于包含 Sub-Agent V1/V2 全部工作的 `bigstrongsun/subagent-v1-v2`，版本提交 `9b19ee7b`，版本 `3.19.1-19`。可信本地产物位于 `C:\\Users\\sunda\\Documents\\LLMservice\\ccswitchmulti-release-v3.19.1-19-auth-startup-final`；raw EXE SHA-256 为 `4A7DC16978DFF4191014E89B95A60715F76BC4596BB8F24BEFA4BF46D5B5E396`，安装器 SHA-256 为 `003578E5D5B7504372110BA4F8A9E028E702C34A51D10F93F2C43AD88BBB7DC5`。不要使用此前文件名/latest.json 仍停留在 18 的竞态快照。
+- 第一次事务 `ccsm-20260811-000008-58700350f7de4198991ff0d7de754ac1` 因旧 PID 后的 15721 释放等待超时而自动恢复 18；受控实验确认停止旧进程后端口从首个样本起释放且 15 秒无自启动抢占。第二次事务 `ccsm-20260811-033128-ee959119dd414e60b7de6efeb6854c92` 成功安装并启动 19，备份位于 `C:\\Users\\sunda\\Documents\\LLMservice\\ccsm-transaction-backups\\ccsm-20260811-033128-ee959119dd414e60b7de6efeb6854c92`。
+- 安装态独立复核：`C:\\Users\\sunda\\AppData\\Local\\CCSwitchMulti\\cc-switch.exe` 文件/产品版本均为 `3.19.1-19`，哈希与 raw artifact 一致；PID 46868 同时拥有 15721 listener，`/health` HTTP 200。Run 值为带引号的当前 EXE，StartupApproved 为 enabled。实际 UI 显示 Codex OAuth `1 个账号` 且无过期提示，开机自启开关开启。定向前端 10/10、Rust auto_launch 4/4、typecheck 通过；仅有既存 dead-code 与 baseline-browser-mapping 过期提示。尚未执行真实 Windows 注销/登录或重启，因此只能确认注册与启动时对账恢复，不能把系统重启验收记为已完成。
+- 本轮研究同时使用 Codex 内置 Web 与 `matrix-websearch` 两条独立链。内置链以 RFC 8628、Tauri/Windows 启动机制为依据；Matrix 仅独立印证通用 Tauri 自启动 API，CCSwitchMulti 专项结果较弱。最终根因和交付结论以现场日志、当前源码、RED/GREEN 回归、事务安装、注册表、端口、健康接口及实际 UI 为主。
+
 ## 2026-08-10 Sub-Agent V1/V2 3.19.1-17 本机交付与真实验收
 
 - V2 保存后的现场核对先发现一个未被主 catalog 检查覆盖的真实漂移：`cc-switch-model-catalog.json` 的 9 个模型均为 `v2/v2`，但 `models_cache.json` 中 `gpt-5.6-luna` 为 `multi_agent_version=v1 / multiAgentVersion=v2`。接管前备份中 Luna 的官方 snake_case 字段恰为 V1；`sync_codex_models_cache_with_cc_switch_catalog` 再次合并官方备份时，`codex_official_picker_metadata_field` 把该 transport 字段误当成官方权威值，覆盖了当前方案已经投影出的 V2。不能靠手改缓存解决。
@@ -3141,3 +3153,20 @@
 - 事务脚本必须有 `try/finally` 等价的恢复语义：成功路径拉起并验收新版；任一步失败也必须优先重新拉起仍可用版本，必要时用预先准备的旧安装包回滚，恢复用户配置，再验证 `127.0.0.1:15721`。脚本退出时不得把机器留在“CCSM 已停止且无人恢复”的状态。
 - kill 必须限定为已确认安装路径对应的 PID：先尝试正常退出并限时等待，超时后才强制终止，不能按进程名误杀其他实例。卸载只清理程序安装范围，用户数据库、Provider、路由、凭据和未知配置字段必须备份并保留。
 - UI/CDP 验收不得通过当前会话临时停止 CCSM来注入启动参数。确需重启态验收时，应由独立、不依赖该 CCSM 的会话执行，或在用户明确控制的维护窗口执行；当前会话只能做不中断服务的只读配置、日志和路由验证。
+
+# 2026-08-11 CCSwitchMulti 小窗口顶部操作裁切根修
+
+- 用户截图约为 `924x646`。旧顶部栏把 AppSwitcher、Codex 工具与新增供应商按钮全部放在同一个 `shrink-0` 集群，外层同时使用 `overflow-x-hidden`；即使全局自适应缩放已降至 80%，全部 8 个应用开启时总宽度仍超出弹性槽，右端操作被直接裁切。
+- 仓库已有同类根修 `0cb6e014`（`fix(ui): keep header actions visible when all apps are enabled`），但它不是当前 `3.19.1-19` 分支祖先，且没有任何当前 tag 包含它；本次故障属于发布分支漏集成已有响应式修复，而不是 Tauri 最小窗口尺寸或 WebView 缩放本身失效。
+- 根修结构是：AppSwitcher 独占 `min-w-0 flex-1` 弹性中段，通过父槽真实 `clientWidth` 与 `ResizeObserver` 计算可见应用数量；溢出应用进入“更多应用” Popover，当前激活应用始终顶替最后一个可见位。Codex 页面工具与新增供应商按钮进入独立 `shrink-0` 右端区，不再被应用标签挤出。
+- TDD 先在旧实现验证窄槽位没有 `appSwitcher.more` 而失败；GREEN 覆盖 120px 窄槽位保留当前 Hermes、隐藏应用可访问且不重复，以及 1000px 宽槽位恢复全部 8 个应用且不显示“更多应用”。四语言新增 `appSwitcher.more`。
+- 全量前端验证为 `117 files / 917 tests`、TypeScript 与 production renderer build 通过；本次文件 Prettier 与 `git diff --check` 通过。全仓 `format:check` 仍只被本次未修改的 `src/lib/api/proxy.ts`、`src/lib/codexMultiRouterWizard.test.ts`、`src/types/proxy.ts` 三个既有格式差异阻断。
+- 独立 Vite 预览未停止正式 CCSM。浏览器按截图尺寸 `924x646` 和 Tauri 最小窗口 `900x600` 验收：document `scrollWidth == clientWidth`；所有 header 按钮边界均在 viewport 内；Codex 当前标签、多模型路由、用量、Agent API、Skills、提示词、会话、MCP 与新增按钮完整可见；OpenCode/OpenClaw/Hermes 可从“更多应用”打开。
+
+## 2026-08-11 Codex Responses 断流错误呈现根因与修复
+
+- 现场 `stream disconnected before completion: Transport error: network error: error decoding response body` 不能直接判定为 timeout。`~/.cc-switch/logs/cc-switch.log` 的完整 error source chain 明确为 `unexpected EOF during chunk size line`：上游 HTTP chunked response 在下一条 chunk-size 行读取完成前提前关闭；相邻时段还出现 `unexpected EOF during handshake`，共同指向上游/代理链路提前断开。
+- 根因位于 `src-tauri/src/proxy/providers/streaming_retry.rs::create_resilient_responses_sse_stream`：已有 semantic output 后，为避免正文或工具调用被重放，代码正确地停止重连，但错误地继续 `yield Err(error)`。该错误随后经 passthrough 作为 Axum HTTP Body error 传给本地 Codex，使 CCSwitchMulti 到 Codex 的响应体异常终止；Codex 只能二次报告泛化的 `error decoding response body`，无法看到代理已捕获的深层原因。
+- 修复边界：保留“已有 semantic output 后绝不重放”的副作用安全约束；将传输错误转换为合法 Responses SSE `event: error` 后干净结束 HTTP body。chunk-size EOF、真实 timeout、其他传输中断分别显示“HTTP 分块响应未完整结束”“读取超时”“传输中断”；正文前最多 5 次安全重连耗尽也通过合法 SSE 报错，不再制造损坏的下游 body。
+- 历史定位：通用 passthrough 将 stream error 作为 Body error 的基础行为来自初始导入 `693c3872`；原生 Responses 在已输出正文后明确 `yield Err` 的当前安全重连路径由 `461dc35c`（2026-08-03）引入，最早包含该行为的现存正式 tag 为 `v3.19.1-5`。该提交的不重放设计本身正确，缺陷是错误呈现协议选择错误。
+- 回归验收：`native_responses_surfaces_post_content_chunked_eof_as_protocol_error` 证明不重放、下游所有 stream item 均为 `Ok`、存在合法 `event: error` 且不再泄漏 `error decoding response body`；`native_responses_transport_error_message_distinguishes_true_timeout` 保证 timeout 不与 EOF 混淆。`cargo test --lib proxy::providers::streaming_retry::tests` 为 22/22；完整 Rust library 为 2925 passed、0 failed、2 ignored；`cargo fmt --check`、`cargo check --lib`、`git diff --check` 通过。

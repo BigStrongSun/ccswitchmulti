@@ -3,6 +3,9 @@
     "title": "CCSwitchMulti",
     "description": "Claude Code / Codex / Gemini CLI 全方位輔助工具"
   },
+  "appSwitcher": {
+    "more": "更多應用"
+  },
   "common": {
     "add": "新增",
     "edit": "編輯",

@@ -3,6 +3,9 @@
     "title": "CCSwitchMulti",
     "description": "All-in-One Assistant for Claude Code, Codex & Gemini CLI"
   },
+  "appSwitcher": {
+    "more": "More apps"
+  },
   "common": {
     "add": "Add",
     "edit": "Edit",
