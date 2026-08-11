@@ -1655,7 +1655,6 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       },
     };
     const draftPlan = createDraftRoutingPlan([source], [source]);
-    const existingRoutes = draftPlan.settingsConfig?.codexRouting?.routes ?? [];
     const plan: Provider = {
       ...draftPlan,
       settingsConfig: {
@@ -1794,7 +1793,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("shows a missing V2 role model without hiding the routable role", () => {
+  it("shows a missing V2 role model without hiding the routable role", async () => {
     const source: Provider = {
       id: "codex-deepseek-flash-only",
       name: "DeepSeek Flash only",
@@ -1820,6 +1819,8 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
         onCreateProvider: vi.fn(),
       }),
     );
+
+    await userEvent.click(screen.getByRole("tab", { name: "子 Agent" }));
 
     expect(screen.getByText("可路由")).toBeInTheDocument();
     expect(screen.getByText("目录中缺失")).toBeInTheDocument();

@@ -28,6 +28,7 @@ import {
   Activity,
   AlertTriangle,
   ArrowRight,
+  Bot,
   Bug,
   CheckCircle2,
   Clipboard,
@@ -139,6 +140,7 @@ export type WorkspaceTab =
   | "overview"
   | "sources"
   | "routes"
+  | "subagents"
   | "status"
   | "test";
 
@@ -3069,7 +3071,7 @@ export function CodexRouterWorkspacePage({
           onValueChange={(value) => setActiveTab(value as WorkspaceTab)}
         >
           <div className="sticky top-0 z-10 -mx-1 bg-background/95 px-1 py-2 backdrop-blur">
-            <TabsList className="grid w-full grid-cols-5 bg-muted p-1 dark:bg-slate-950/40">
+            <TabsList className="grid w-full grid-cols-3 bg-muted p-1 dark:bg-slate-950/40 lg:grid-cols-6">
               <WorkspaceTabTrigger
                 value="overview"
                 icon={Layers3}
@@ -3084,6 +3086,11 @@ export function CodexRouterWorkspacePage({
                 value="routes"
                 icon={Route}
                 label="路由规则"
+              />
+              <WorkspaceTabTrigger
+                value="subagents"
+                icon={Bot}
+                label="子 Agent"
               />
               <WorkspaceTabTrigger
                 value="status"
@@ -3151,6 +3158,14 @@ export function CodexRouterWorkspacePage({
               routePickerMessage={routePickerMessage}
               routePickerError={routePickerError}
               onRoutePickerOpenChange={setIsRoutePickerOpen}
+            />
+          </TabsContent>
+
+          <TabsContent value="subagents" className="mt-3">
+            <SubagentsTab
+              selectedPlan={selectedPlan}
+              selectedRoutes={selectedPlanRouteEntries}
+              onCreatePlan={handleCreatePlan}
             />
           </TabsContent>
 
@@ -3563,6 +3578,48 @@ function SourcesTab({
   );
 }
 
+/// 子 Agent 使用独立工作区承载协议与模型能力，避免用户在路由规则页尾部寻找配置入口。
+function SubagentsTab({
+  selectedPlan,
+  selectedRoutes,
+  onCreatePlan,
+}: {
+  selectedPlan: Provider | null;
+  selectedRoutes: RouteEntry[];
+  onCreatePlan: () => void;
+}) {
+  if (!selectedPlan) {
+    return (
+      <EmptyState
+        icon={Bot}
+        title="还没有可配置的 MultiRouter"
+        detail="先创建或选择一个多路路由方案，再配置它的子 Agent 协议和模型能力。"
+        actionLabel="创建多路路由"
+        onAction={onCreatePlan}
+      />
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      <section
+        aria-label="当前子 Agent 方案"
+        className="rounded-lg border border-blue-200 bg-blue-50/70 p-3 dark:border-blue-700/40 dark:bg-blue-950/15"
+      >
+        <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-blue-800 dark:text-blue-100">
+          <Bot className="h-4 w-4" />
+          当前 MultiRouter
+        </div>
+        <PlanCardContent provider={selectedPlan} compact />
+      </section>
+      <SpawnAgentCandidatesPanel
+        selectedPlan={selectedPlan}
+        selectedRoutes={selectedRoutes}
+      />
+    </div>
+  );
+}
+
 /// 路由规则页提供方案选择、规则列表和右侧详情，形成真实的“查/改/删入口”工作流。
 function RoutesTab({
   routingPlans,
@@ -3850,11 +3907,6 @@ function RoutesTab({
       <ProviderModelRefreshPanel
         modelSources={modelSources}
         states={providerModelRefreshStates}
-      />
-
-      <SpawnAgentCandidatesPanel
-        selectedPlan={selectedPlan}
-        selectedRoutes={selectedPlanRoutes}
       />
     </div>
   );
@@ -4912,7 +4964,12 @@ function SpawnAgentCandidatesPanel({
   const [activeSubagentVersion, setActiveSubagentVersion] =
     useState<CodexSubagentVersion>(persistedSubagentVersion);
   const [isSavingSubagentVersion, setIsSavingSubagentVersion] = useState(false);
+  const [pendingSubagentVersion, setPendingSubagentVersion] =
+    useState<CodexSubagentVersion | null>(null);
   const [subagentVersionError, setSubagentVersionError] = useState<
+    string | null
+  >(null);
+  const [subagentVersionMessage, setSubagentVersionMessage] = useState<
     string | null
   >(null);
   const queryClient = useQueryClient();
@@ -5002,6 +5059,8 @@ function SpawnAgentCandidatesPanel({
   useEffect(() => {
     setActiveSubagentVersion(persistedSubagentVersion);
     setSubagentVersionError(null);
+    setSubagentVersionMessage(null);
+    setPendingSubagentVersion(null);
   }, [persistedSubagentVersion, selectedPlan?.id]);
 
   useEffect(() => {
@@ -5100,7 +5159,9 @@ function SpawnAgentCandidatesPanel({
   async function saveSubagentVersion(version: CodexSubagentVersion) {
     if (!selectedPlan || version === activeSubagentVersion) return;
     setIsSavingSubagentVersion(true);
+    setPendingSubagentVersion(version);
     setSubagentVersionError(null);
+    setSubagentVersionMessage(null);
     try {
       const rawRouting =
         selectedPlan.settingsConfig?.codexRouting &&
@@ -5123,6 +5184,9 @@ function SpawnAgentCandidatesPanel({
       };
       await providersApi.update(nextProvider, "codex");
       setActiveSubagentVersion(version);
+      setSubagentVersionMessage(
+        `已启用 ${version.toUpperCase()}；重启 Codex/app-server 并新建会话后生效。`,
+      );
       await queryClient.invalidateQueries({ queryKey: ["providers", "codex"] });
     } catch (error) {
       setSubagentVersionError(
@@ -5130,6 +5194,7 @@ function SpawnAgentCandidatesPanel({
       );
     } finally {
       setIsSavingSubagentVersion(false);
+      setPendingSubagentVersion(null);
     }
   }
 
@@ -5200,11 +5265,22 @@ function SpawnAgentCandidatesPanel({
             <div className="text-sm font-semibold">Sub-Agent V1</div>
             <Button
               size="sm"
-              variant={activeSubagentVersion === "v1" ? "default" : "outline"}
-              disabled={isSavingSubagentVersion}
+              variant={activeSubagentVersion === "v1" ? "outline" : "default"}
+              disabled={
+                isSavingSubagentVersion || activeSubagentVersion === "v1"
+              }
+              className={cn(
+                activeSubagentVersion === "v1"
+                  ? "border-border bg-muted text-muted-foreground hover:bg-muted"
+                  : "bg-blue-600 text-white hover:bg-blue-500",
+              )}
               onClick={() => saveSubagentVersion("v1")}
             >
-              启用 V1
+              {pendingSubagentVersion === "v1"
+                ? "切换中…"
+                : activeSubagentVersion === "v1"
+                  ? "已启用 V1"
+                  : "启用 V1"}
             </Button>
           </div>
           <p className="mt-1 text-xs leading-5 text-muted-foreground">
@@ -5225,11 +5301,22 @@ function SpawnAgentCandidatesPanel({
             <div className="text-sm font-semibold">Sub-Agent V2</div>
             <Button
               size="sm"
-              variant={activeSubagentVersion === "v2" ? "default" : "outline"}
-              disabled={isSavingSubagentVersion}
+              variant={activeSubagentVersion === "v2" ? "outline" : "default"}
+              disabled={
+                isSavingSubagentVersion || activeSubagentVersion === "v2"
+              }
+              className={cn(
+                activeSubagentVersion === "v2"
+                  ? "border-border bg-muted text-muted-foreground hover:bg-muted"
+                  : "bg-blue-600 text-white hover:bg-blue-500",
+              )}
               onClick={() => saveSubagentVersion("v2")}
             >
-              启用 V2
+              {pendingSubagentVersion === "v2"
+                ? "切换中…"
+                : activeSubagentVersion === "v2"
+                  ? "已启用 V2"
+                  : "启用 V2"}
             </Button>
           </div>
           <p className="mt-1 text-xs leading-5 text-muted-foreground">
@@ -5243,8 +5330,19 @@ function SpawnAgentCandidatesPanel({
       </div>
 
       {subagentVersionError ? (
-        <div className="mt-3 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700 dark:border-rose-700/50 dark:bg-rose-950/30 dark:text-rose-100">
+        <div
+          role="alert"
+          className="mt-3 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700 dark:border-rose-700/50 dark:bg-rose-950/30 dark:text-rose-100"
+        >
           切换失败：{subagentVersionError}
+        </div>
+      ) : null}
+      {subagentVersionMessage ? (
+        <div
+          aria-live="polite"
+          className="mt-3 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-800 dark:border-emerald-700/50 dark:bg-emerald-950/30 dark:text-emerald-100"
+        >
+          {subagentVersionMessage}
         </div>
       ) : null}
       <div className="mt-3 rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-xs leading-5 text-sky-800 dark:border-sky-700/50 dark:bg-sky-950/25 dark:text-sky-100">
