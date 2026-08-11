@@ -705,6 +705,104 @@ mod tests {
     }
 
     #[test]
+    #[serial]
+    fn update_codex_subagent_v2_compiles_before_mutating_a_non_current_provider() {
+        with_test_home(|state, _| {
+            let current = Provider::with_id(
+                "current-router".to_string(),
+                "Current router".to_string(),
+                codex_settings("https://current.example/v1", "sk-current"),
+                None,
+            );
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &current)
+                .expect("seed current provider");
+            state
+                .db
+                .set_current_provider(AppType::Codex.as_str(), &current.id)
+                .expect("mark a different provider current");
+
+            let target_settings = json!({
+                "auth": { "OPENAI_API_KEY": "sk-target" },
+                "config": "model = \"deepseek-v4-flash\"\n",
+                "modelCatalog": {
+                    "models": [{
+                        "model": "deepseek-v4-flash",
+                        "displayName": "DeepSeek V4 Flash",
+                        "contextWindow": 1000000
+                    }]
+                },
+                "codexRouting": {
+                    "enabled": true,
+                    "subagentVersion": "v2",
+                    "routes": [{
+                        "id": "flash-route",
+                        "enabled": true,
+                        "match": { "models": ["deepseek-v4-flash"] },
+                        "upstream": { "auth": { "source": "provider_config" } }
+                    }],
+                    "subagentV2": {
+                        "schemaVersion": 1,
+                        "selectionPolicy": "balanced",
+                        "profiles": {}
+                    }
+                }
+            });
+            let target = Provider::with_id(
+                "non-current-router".to_string(),
+                "Non-current router".to_string(),
+                target_settings,
+                None,
+            );
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &target)
+                .expect("seed non-current target provider");
+            let before = state
+                .db
+                .get_provider_by_id(&target.id, AppType::Codex.as_str())
+                .expect("read target before invalid save")
+                .expect("target exists before invalid save");
+            let compiler_invalid = json!({
+                "schemaVersion": 1,
+                "selectionPolicy": "balanced",
+                "profiles": {
+                    "deepseek-v4-flash": {
+                        "model": "deepseek-v4-flash",
+                        "enabled": true,
+                        "questionnaire": {
+                            "taskStrengths": ["repository_exploration"],
+                            "optimization": "speed",
+                            "writeScope": "read_only",
+                            "preference": "eligible",
+                            "reasoningEffort": "auto"
+                        },
+                        "overrides": { "roleName": "default" }
+                    }
+                }
+            });
+
+            let result =
+                ProviderService::update_codex_subagent_v2(state, &target.id, compiler_invalid);
+            let after = state
+                .db
+                .get_provider_by_id(&target.id, AppType::Codex.as_str())
+                .expect("read target after rejected save")
+                .expect("target still exists after rejected save");
+
+            assert_eq!(
+                after.settings_config, before.settings_config,
+                "compiler-domain rejection must happen before SQLite mutation; result was {result:?}"
+            );
+            assert!(
+                matches!(result, Err(AppError::InvalidInput(_) | AppError::Message(_))),
+                "reserved roleName must be rejected by the compiler before persistence, got {result:?}"
+            );
+        });
+    }
+
+    #[test]
     fn validate_provider_settings_rejects_missing_auth() {
         let provider = Provider::with_id(
             "codex".into(),

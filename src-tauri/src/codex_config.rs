@@ -5259,6 +5259,20 @@ mod tests {
         })
     }
 
+    fn review_codex_catalog_spec(model: &str) -> CodexCatalogModelSpec {
+        CodexCatalogModelSpec {
+            model: model.to_string(),
+            upstream_model: None,
+            display_name: model.to_string(),
+            context_window: 128_000,
+            text_only: true,
+            is_default: false,
+            supports_parallel_tool_calls: None,
+            input_modalities: None,
+            base_instructions: None,
+        }
+    }
+
     #[test]
     #[serial_test::serial]
     fn codex_subagent_v2_preview_command_uses_exact_safe_camel_case_contract() {
@@ -5323,6 +5337,73 @@ mod tests {
         let serialized = serde_json::to_string(&value).expect("serialize safe preview");
         assert!(!serialized.contains("MUST_NOT_LEAK"));
         assert!(!serialized.contains("apiKey"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn codex_subagent_v2_preview_compiles_the_full_draft_for_duplicate_requested_roles() {
+        let _guard = TestHomeGuard::new();
+        let shared_questionnaire = json!({
+            "taskStrengths": ["repository_exploration"],
+            "optimization": "speed",
+            "writeScope": "read_only",
+            "preference": "eligible",
+            "reasoningEffort": "auto"
+        });
+        let first = json!({
+            "model": "model-a",
+            "enabled": true,
+            "questionnaire": shared_questionnaire.clone(),
+            "overrides": { "roleName": "shared-review" }
+        });
+        let second = json!({
+            "model": "model-b",
+            "enabled": true,
+            "questionnaire": shared_questionnaire,
+            "overrides": { "roleName": "shared-review" }
+        });
+        let settings = codex_subagent_profile_status_settings(
+            "v2",
+            json!({ "model-a": first, "model-b": second.clone() }),
+            json!([
+                { "model": "model-a", "contextWindow": 128000 },
+                { "model": "model-b", "contextWindow": 256000 }
+            ]),
+            json!([{
+                "id": "shared-route",
+                "match": { "models": ["model-a", "model-b"] },
+                "upstream": { "auth": { "source": "provider_config" } }
+            }]),
+        );
+        let materialized = codex_subagent_profile_status_json(&settings, None)
+            .expect("compile the same full settings draft used by materialization");
+        let model_b_status = materialized["profiles"]
+            .as_array()
+            .and_then(|profiles| profiles.iter().find(|status| status["model"] == "model-b"))
+            .expect("materialized status for the second model");
+        assert_eq!(model_b_status["requestedRoleName"], "shared-review");
+        assert_eq!(
+            model_b_status["effectiveRoleName"],
+            "ccswitch-shared-review"
+        );
+
+        let preview = preview_codex_subagent_profile_with_context(
+            settings,
+            "model-b".to_string(),
+            serde_json::from_value(second).expect("typed second profile"),
+            None,
+        )
+        .expect("preview the second model from the full draft");
+        let preview = serde_json::to_value(preview).expect("serialize preview");
+
+        assert_eq!(
+            preview["requestedRoleName"], model_b_status["requestedRoleName"],
+            "preview and materialization must report the same requested role"
+        );
+        assert_eq!(
+            preview["effectiveRoleName"], model_b_status["effectiveRoleName"],
+            "preview must allocate collisions across every enabled profile in settingsConfig"
+        );
     }
 
     #[test]
@@ -6064,6 +6145,99 @@ mod tests {
             !stale.exists(),
             "stale managed roles are pruned by the real sync path"
         );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn codex_subagent_sync_never_overwrites_user_toml_with_marker_only_in_its_body() {
+        let _guard = TestHomeGuard::new();
+        let agents_dir = get_codex_agents_dir();
+        std::fs::create_dir_all(&agents_dir).expect("create isolated agents dir");
+        let path = agents_dir.join("deepseek-flash.toml");
+        let user_content = format!(
+            "name = \"deepseek-flash\"\n\
+             description = \"User authored role\"\n\
+             developer_instructions = \"\"\"\n\
+             This prose mentions {CC_SWITCH_MANAGED_AGENT_MARKER}\n\
+             but the file is not owned by CCSwitchMulti.\n\
+             \"\"\"\n\
+             model = \"deepseek-v4-flash\"\n\
+             model_provider = \"user-provider\"\n"
+        );
+        std::fs::write(&path, &user_content).expect("seed user-authored same-name role");
+
+        sync_codex_managed_agent_files(
+            &[review_codex_catalog_spec("deepseek-v4-flash")],
+            CodexSubagentVersion::V2,
+        )
+        .expect("sync without taking ownership of user content");
+
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read preserved user role"),
+            user_content,
+            "a marker substring in the TOML body is not a provenance header"
+        );
+        assert!(
+            agents_dir.join("ccswitch-deepseek-flash.toml").exists(),
+            "managed output must use a fallback path when the requested path is user-owned"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn codex_subagent_prune_never_deletes_user_toml_with_marker_only_in_its_body() {
+        let _guard = TestHomeGuard::new();
+        let agents_dir = get_codex_agents_dir();
+        std::fs::create_dir_all(&agents_dir).expect("create isolated agents dir");
+        let path = agents_dir.join("user-not-managed.toml");
+        let user_content = format!(
+            "name = \"user-not-managed\"\n\
+             description = \"A user note containing {CC_SWITCH_MANAGED_AGENT_MARKER}\"\n\
+             model = \"user-model\"\n"
+        );
+        std::fs::write(&path, &user_content).expect("seed user role with marker substring");
+
+        prune_stale_codex_managed_agent_files(&agents_dir, &HashSet::new())
+            .expect("prune only genuinely managed roles");
+
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("user file must survive prune"),
+            user_content
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn codex_subagent_sync_does_not_infer_legacy_ownership_from_provider_and_model_match() {
+        let _guard = TestHomeGuard::new();
+        let agents_dir = get_codex_agents_dir();
+        std::fs::create_dir_all(&agents_dir).expect("create isolated agents dir");
+        let path = agents_dir.join("deepseek-flash.toml");
+        let user_content = "name = \"deepseek-flash\"\n\
+                            description = \"User authored matching model\"\n\
+                            model = \"deepseek-v4-flash\"\n\
+                            model_provider = \"codex_model_router\"\n";
+        std::fs::write(&path, user_content).expect("seed legacy-looking user role");
+
+        sync_codex_managed_agent_files(
+            &[review_codex_catalog_spec("deepseek-v4-flash")],
+            CodexSubagentVersion::V2,
+        )
+        .expect("sync must preserve an unmarked user file");
+
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read preserved matching user role"),
+            user_content,
+            "provider/model equality alone is not proof of legacy CCSwitchMulti ownership"
+        );
+        let fallback = agents_dir.join("ccswitch-deepseek-flash.toml");
+        assert!(
+            fallback.exists(),
+            "managed role must move to a fallback path"
+        );
+        assert!(std::fs::read_to_string(fallback)
+            .expect("read fallback managed role")
+            .starts_with(CC_SWITCH_MANAGED_AGENT_MARKER));
     }
 
     #[test]

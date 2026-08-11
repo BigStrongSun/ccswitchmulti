@@ -1671,6 +1671,69 @@ mod tests {
     }
 
     #[test]
+    fn codex_subagent_v2_requires_each_profile_key_to_match_its_canonical_model() {
+        let raw = json!({
+            "schemaVersion": 1,
+            "profiles": {
+                "friendly-alias": {
+                    "model": " DeepSeek-V4-Flash ",
+                    "enabled": true,
+                    "questionnaire": questionnaire()
+                }
+            }
+        });
+
+        let actual = parse_persisted_subagent_v2(&raw);
+
+        assert!(
+            matches!(actual, Err(CompileError::Validation { ref code, ref profile_key, .. })
+                if code == "profile_key_model_mismatch"
+                    && profile_key.as_deref() == Some("friendly-alias")),
+            "persisted map keys must equal normalize_profile_key(profile.model), got {actual:?}"
+        );
+    }
+
+    #[test]
+    fn codex_subagent_v2_tolerant_loader_isolates_duplicate_canonical_models_under_unrelated_keys()
+    {
+        let profile = json!({
+            "model": "DeepSeek-V4-Flash",
+            "enabled": true,
+            "questionnaire": questionnaire()
+        });
+        let raw = json!({
+            "schemaVersion": 1,
+            "profiles": {
+                "first-alias": profile.clone(),
+                "second-alias": profile
+            }
+        });
+
+        let parsed = parse_persisted_subagent_v2_tolerant(&raw)
+            .expect("tolerant status loading must preserve both bad entries");
+
+        assert_eq!(parsed.profiles.len(), 2);
+        assert!(parsed.profiles.iter().all(|entry| matches!(
+            entry,
+            ParsedProfileEntry::Invalid { validation_code, .. }
+                if validation_code == "profile_key_model_mismatch"
+        )));
+        let compiled = compile_subagent_v2_profiles(&request(Some(parsed)))
+            .expect("isolated invalid profiles must remain status-readable");
+        assert_eq!(
+            compiled
+                .profile_statuses
+                .iter()
+                .map(|status| status.status)
+                .collect::<Vec<_>>(),
+            vec![ProfileStatusCode::Collision, ProfileStatusCode::Collision],
+            "tolerant compilation must group isolated entries by extractable canonical model identity"
+        );
+        assert_eq!(compiled.preserved_invalid_profiles.len(), 2);
+        assert!(compiled.generated_roles.is_empty());
+    }
+
+    #[test]
     fn codex_subagent_v2_rejects_zero_task_strengths() {
         assert_parse(
             raw_profile(json!([])),
@@ -2337,6 +2400,61 @@ mod tests {
                 "nickname must be nonempty",
             )),
         );
+    }
+
+    #[test]
+    fn codex_subagent_v2_rejects_whitespace_only_nickname() {
+        let mut request = nicknames(vec!["   "]);
+        request.catalog_models = vec![catalog("unrelated-model", true)];
+        assert_compile(
+            &request,
+            Err(validation(
+                "empty_nickname",
+                Some("flash"),
+                "nickname must contain non-whitespace characters",
+            )),
+        );
+    }
+
+    #[test]
+    fn codex_subagent_v2_rejects_empty_or_whitespace_only_description_override() {
+        for (description, enabled) in [(" \t\r\n ", false), ("", true)] {
+            let mut profile = profile("flash", "DeepSeek-V4-Flash");
+            profile.enabled = enabled;
+            profile.overrides.description = Some(s(description));
+            let actual = compile_subagent_v2_profiles(&request(Some(config(
+                SelectionPolicy::Balanced,
+                vec![valid(profile)],
+            ))));
+            assert!(
+                matches!(actual, Err(CompileError::Validation { ref code, ref profile_key, .. })
+                    if code == "empty_description"
+                        && profile_key.as_deref() == Some("flash")),
+                "description override {description:?} must fail before role generation, got {actual:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn codex_subagent_v2_rejects_empty_or_whitespace_only_developer_instructions_override() {
+        for instructions in [" \t\r\n ", ""] {
+            let mut profile = profile("flash", "DeepSeek-V4-Flash");
+            profile.overrides.developer_instructions = Some(s(instructions));
+            let mut request = request(Some(config(
+                SelectionPolicy::Balanced,
+                vec![valid(profile)],
+            )));
+            if instructions.trim().is_empty() && !instructions.is_empty() {
+                request.subagent_version = SubagentVersion::V1;
+            }
+            let actual = compile_subagent_v2_profiles(&request);
+            assert!(
+                matches!(actual, Err(CompileError::Validation { ref code, ref profile_key, .. })
+                    if code == "empty_developer_instructions"
+                        && profile_key.as_deref() == Some("flash")),
+                "developerInstructions override {instructions:?} must fail before role generation, got {actual:?}"
+            );
+        }
     }
 
     #[test]

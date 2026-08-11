@@ -48,9 +48,26 @@ const proPreviewFixture = {
   warnings: ["Pro profile warning."],
 } satisfies CodexSubagentProfilePreview;
 
+const qwenPreviewFixture = {
+  providerKind: "third_party" as const,
+  requestedRoleName: "qwen3-6",
+  effectiveRoleName: "qwen3-6",
+  description: "Catalog draft awaiting explicit enablement.",
+  developerInstructions: "Remain disabled until the user reviews this draft.",
+  nicknameCandidates: ["Qwen"],
+  model: "qwen3.6",
+  modelProvider: "codex_model_router_v2" as const,
+  modelReasoningEffort: "medium" as const,
+  modelContextWindow: 262144,
+  tomlPreview:
+    '[agents.qwen3-6]\nmodel = "qwen3.6"\nmodel_provider = "codex_model_router_v2"',
+  warnings: ["Catalog profile remains disabled by default."],
+} satisfies CodexSubagentProfilePreview;
+
 const previewFixturesByModel: Record<string, CodexSubagentProfilePreview> = {
   "deepseek-v4-flash": previewFixture,
   "deepseek-v4-pro": proPreviewFixture,
+  "qwen3.6": qwenPreviewFixture,
 };
 
 const statusFixture = {
@@ -160,6 +177,59 @@ vi.mock("@tauri-apps/api/core", () => ({
           ...savedProvider.settingsConfig.codexRouting,
           subagentV2: JSON.parse(JSON.stringify(args.subagentV2)),
         };
+        ipcState.providers[savedProvider.id] = savedProvider;
+        return JSON.parse(JSON.stringify(savedProvider));
+      }
+      case "initialize_codex_subagent_v2": {
+        if (!args || typeof args.providerId !== "string") {
+          throw new Error("initialize_codex_subagent_v2 requires providerId");
+        }
+        const latest = ipcState.providers[args.providerId];
+        if (!latest) throw new Error("provider not found");
+        return JSON.parse(JSON.stringify(latest));
+      }
+      case "reconcile_codex_subagent_v2_profiles": {
+        if (
+          !args ||
+          typeof args.providerId !== "string" ||
+          !["sync_catalog", "remove_invalid", "recover_invalid"].includes(
+            String(args.action),
+          )
+        ) {
+          throw new Error(
+            "reconcile_codex_subagent_v2_profiles requires a controlled backend action",
+          );
+        }
+        if (
+          args.action === "sync_catalog" &&
+          (typeof args.subagentV2 !== "object" || args.subagentV2 === null)
+        ) {
+          throw new Error(
+            "sync_catalog requires the current unsaved subagentV2 draft",
+          );
+        }
+        const latest = ipcState.providers[args.providerId];
+        if (!latest) throw new Error("provider not found");
+        const savedProvider = JSON.parse(JSON.stringify(latest)) as Provider;
+        if (args.action === "sync_catalog") {
+          savedProvider.settingsConfig.codexRouting.subagentV2 = JSON.parse(
+            JSON.stringify(args.subagentV2),
+          );
+        }
+        const config = savedProvider.settingsConfig.codexRouting.subagentV2;
+        if (args.action === "sync_catalog") {
+          config.profiles["qwen3.6"] = {
+            model: "qwen3.6",
+            enabled: false,
+            questionnaire: {
+              taskStrengths: ["repository_exploration"],
+              optimization: "balanced",
+              writeScope: "read_only",
+              preference: "eligible",
+              reasoningEffort: "auto",
+            },
+          };
+        }
         ipcState.providers[savedProvider.id] = savedProvider;
         return JSON.parse(JSON.stringify(savedProvider));
       }
@@ -304,6 +374,28 @@ function seedPersistedPlan(withV2 = true) {
   ipcState.providers = {
     [source.id]: source,
     [persistedPlan.id]: persistedPlan,
+  };
+}
+
+function seedMalformedProfile() {
+  const profiles =
+    ipcState.providers.router.settingsConfig.codexRouting.subagentV2.profiles;
+  profiles.RAW_INVALID_PROFILE_KEY = {
+    model: "RAW_INVALID_MODEL",
+    enabled: true,
+  };
+  delete profiles["repository-scout"];
+  ipcState.statusResponse = {
+    ...statusFixture,
+    profiles: [
+      {
+        routable: false,
+        status: "invalid",
+        nonGenerationReason: "invalid",
+        warnings: [],
+      },
+      statusFixture.profiles[1],
+    ],
   };
 }
 
@@ -1074,6 +1166,116 @@ describe("Codex Sub-Agent V2 new-plan capability defaults", () => {
     ).provider;
     expect(savedProvider.settingsConfig.codexRouting).not.toHaveProperty(
       "subagentV2",
+    );
+  });
+});
+
+describe("Codex Sub-Agent V2 backend-owned catalog reconciliation", () => {
+  it("initializes through the backend instead of constructing canonical keys in the frontend", async () => {
+    const user = userEvent.setup();
+    await renderWorkspace(false);
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: "初始化 V2 子 Agent 能力配置",
+      }),
+    );
+
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("initialize_codex_subagent_v2", {
+        providerId: "router",
+      }),
+    );
+    expect(v2PersistenceCalls()).toHaveLength(0);
+  });
+
+  it("synchronizes every catalog model as a backend-keyed disabled draft", async () => {
+    const models = ipcState.providers.router.settingsConfig.modelCatalog.models;
+    models.push({
+      model: "qwen3.6",
+      displayName: "Qwen 3.6",
+      contextWindow: 262144,
+    });
+    const currentDraft = JSON.parse(
+      JSON.stringify(
+        ipcState.providers.router.settingsConfig.codexRouting.subagentV2,
+      ),
+    );
+    const user = userEvent.setup();
+    await mountWorkspaceFromPersistedPlan();
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: "同步模型目录能力配置",
+      }),
+    );
+
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith(
+        "reconcile_codex_subagent_v2_profiles",
+        {
+          providerId: "router",
+          action: "sync_catalog",
+          subagentV2: currentDraft,
+        },
+      ),
+    );
+    const qwenRegion = await screen.findByRole("region", {
+      name: "qwen3.6 子 Agent 能力",
+    });
+    expect(
+      within(qwenRegion).getByRole("checkbox", {
+        name: "启用此模型作为 V2 子 Agent",
+      }),
+    ).not.toBeChecked();
+  });
+
+  it("offers a backend-owned removal action for a malformed profile", async () => {
+    seedMalformedProfile();
+    const user = userEvent.setup();
+    await mountWorkspaceFromPersistedPlan();
+
+    const invalidRegion = await screen.findByRole("region", {
+      name: "无效能力配置 1",
+    });
+    await user.click(
+      within(invalidRegion).getByRole("button", {
+        name: "删除无效能力配置 1",
+      }),
+    );
+
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith(
+        "reconcile_codex_subagent_v2_profiles",
+        { providerId: "router", action: "remove_invalid" },
+      ),
+    );
+    expect(
+      vi
+        .mocked(invoke)
+        .mock.calls.map(([, args]) => JSON.stringify(args))
+        .every((serialized) => !serialized.includes("RAW_INVALID_PROFILE_KEY")),
+    ).toBe(true);
+  });
+
+  it("offers a backend-owned catalog recovery action for a malformed profile", async () => {
+    seedMalformedProfile();
+    const user = userEvent.setup();
+    await mountWorkspaceFromPersistedPlan();
+
+    await user.click(
+      within(
+        await screen.findByRole("region", { name: "无效能力配置 1" }),
+      ).getByRole("button", {
+        name: "从模型目录恢复无效能力配置 1",
+      }),
+    );
+
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith(
+        "reconcile_codex_subagent_v2_profiles",
+        { providerId: "router", action: "recover_invalid" },
+      ),
     );
   });
 });
