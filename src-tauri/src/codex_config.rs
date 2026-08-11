@@ -6029,6 +6029,75 @@ mod tests {
     }
 
     #[test]
+    fn codex_subagent_v2_initialization_includes_runtime_first_enabled_fallback_model() {
+        let settings = codex_subagent_profile_status_settings(
+            "v2",
+            json!({}),
+            json!([{ "model": "unmatched-model", "contextWindow": 128000 }]),
+            json!([{
+                "id": "first-enabled",
+                "enabled": true,
+                "match": { "models": ["qwen3.6"] },
+                "upstream": { "auth": { "source": "provider_config" } }
+            }]),
+        );
+
+        assert_eq!(
+            resolve_codex_primary_route_from_settings(&settings, "unmatched-model")
+                .and_then(|route| route.get("id"))
+                .and_then(Value::as_str),
+            Some("first-enabled"),
+            "the backend helper must follow the runtime's historical first-enabled fallback"
+        );
+        let initialized = initialize_codex_subagent_v2_for_candidate(&settings, None)
+            .expect("initialize from runtime-routable catalog models");
+
+        assert_eq!(
+            initialized["profiles"]["unmatched-model"]["enabled"],
+            false,
+            "a catalog model routed by the runtime first-enabled fallback needs a disabled draft"
+        );
+    }
+
+    #[test]
+    fn codex_subagent_v2_initialization_excludes_disabled_declared_model_before_enabled_default() {
+        let settings = codex_subagent_profile_status_settings(
+            "v2",
+            json!({}),
+            json!([{ "model": "disabled-model", "contextWindow": 128000 }]),
+            json!([
+                {
+                    "id": "official-default",
+                    "enabled": true,
+                    "match": { "models": ["gpt-5.5"] },
+                    "upstream": { "auth": { "source": "managed_codex_oauth" } }
+                },
+                {
+                    "id": "disabled-model-route",
+                    "enabled": false,
+                    "match": { "models": ["disabled-model"] },
+                    "upstream": { "auth": { "source": "provider_config" } }
+                }
+            ]),
+        );
+        let mut settings = settings;
+        settings["codexRouting"]["defaultRouteId"] =
+            Value::String("official-default".to_string());
+
+        assert!(
+            resolve_codex_primary_route_from_settings(&settings, "disabled-model").is_none(),
+            "the runtime must fail closed before considering the enabled default"
+        );
+        let initialized = initialize_codex_subagent_v2_for_candidate(&settings, None)
+            .expect("initialize without disabled-only catalog models");
+
+        assert!(
+            initialized["profiles"].get("disabled-model").is_none(),
+            "a model declared only by a disabled route must not receive a draft"
+        );
+    }
+
+    #[test]
     fn codex_subagent_v2_strict_candidate_error_redacts_raw_profile_identity() {
         let settings = codex_subagent_profile_status_settings(
             "v2",
