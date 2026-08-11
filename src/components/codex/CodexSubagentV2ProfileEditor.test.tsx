@@ -583,12 +583,21 @@ async function mountWorkspaceFromPersistedPlan(): Promise<
     </QueryClientProvider>,
   );
   await screen.findByRole("tab", { name: "子 Agent" });
-  await waitFor(() =>
-    expect(invoke).toHaveBeenCalledWith(
-      "get_codex_subagent_profile_statuses",
-      { settingsConfig: selectedPlan.settingsConfig },
-    ),
-  );
+  if (selectedPlan.settingsConfig.codexRouting.subagentV2) {
+    await waitFor(() =>
+      expect(
+        vi
+          .mocked(invoke)
+          .mock.calls.some(
+            ([command]) => command === "get_codex_subagent_profile_statuses",
+          ),
+      ).toBe(true),
+    );
+  } else {
+    await screen.findByRole("button", {
+      name: "初始化 V2 子 Agent 能力配置",
+    });
+  }
   return { ...result, selectedPlan };
 }
 
@@ -722,11 +731,11 @@ function flashRegion() {
   });
 }
 
-function expectPreservedValidProfileInUi() {
-  const region = flashRegion();
+async function expectPreservedValidProfileInUi(user: UserEvent) {
+  const region = await openAdvancedFields(user);
   expect(
-    within(region).getByRole("checkbox", {
-      name: "启用此模型作为 V2 子 Agent",
+    screen.getByRole("switch", {
+      name: "启用 deepseek-v4-flash 作为 V2 子 Agent",
     }),
   ).toBeChecked();
   expect(within(region).getByLabelText("优化目标")).toHaveValue("quality");
@@ -750,13 +759,10 @@ function expectPreservedValidProfileInUi() {
   expect(within(region).getByLabelText("模型推理强度")).toHaveValue("xhigh");
 }
 
-function proRegion() {
-  return screen.getByRole("region", {
-    name: "deepseek-v4-pro 子 Agent 配置",
-  });
-}
-
-async function openAdvancedFields(user: UserEvent, model = "deepseek-v4-flash") {
+async function openAdvancedFields(
+  user: UserEvent,
+  model = "deepseek-v4-flash",
+) {
   const region = await openProfile(user, model);
   const trigger = within(region).getByRole("button", { name: "高级字段" });
   if (trigger.getAttribute("aria-expanded") !== "true") {
@@ -765,7 +771,10 @@ async function openAdvancedFields(user: UserEvent, model = "deepseek-v4-flash") 
   return region;
 }
 
-async function openGeneratedOutput(user: UserEvent, model = "deepseek-v4-flash") {
+async function openGeneratedOutput(
+  user: UserEvent,
+  model = "deepseek-v4-flash",
+) {
   const region = await openProfile(user, model);
   const trigger = within(region).getByRole("button", {
     name: "生成结果与 TOML",
@@ -902,8 +911,13 @@ describe("Codex Sub-Agent V2 review round 1 regressions", () => {
     const user = userEvent.setup();
     await mountWorkspaceFromPersistedPlan();
     const saveButton = await screen.findByRole("button", {
-      name: "保存 V2 子 Agent 能力配置",
+      name: "保存 V2 子 Agent 配置",
     });
+    await chooseOption(
+      user,
+      screen.getByLabelText("第三方子 Agent 选择策略"),
+      "官方优先",
+    );
 
     await user.click(saveButton);
     await waitFor(() => expect(saveButton).toBeEnabled());
@@ -917,6 +931,11 @@ describe("Codex Sub-Agent V2 review round 1 regressions", () => {
       "No enabled route resolves this model.";
     const user = userEvent.setup();
     await mountWorkspaceFromPersistedPlan();
+    await chooseOption(
+      user,
+      screen.getByLabelText("第三方子 Agent 选择策略"),
+      "官方优先",
+    );
 
     await saveV2(user);
 
@@ -963,12 +982,9 @@ describe("Codex Sub-Agent V2 review round 1 regressions", () => {
       name: "修复无效能力配置 1",
     });
     await user.click(repair);
+    const repaired = await openProfile(user, "deepseek-v4-flash");
     expect(
-      within(
-        screen.getByRole("region", {
-          name: "DeepSeek V4 Flash 子 Agent 能力",
-        }),
-      ).getByRole("group", { name: "任务优势" }),
+      within(repaired).getByRole("group", { name: "任务优势" }),
     ).toBeVisible();
   });
 
@@ -1011,9 +1027,14 @@ describe("Codex Sub-Agent V2 review round 1 regressions", () => {
         element.getAttribute("aria-describedby"),
       ]),
     ).not.toContain(secretProfileKey);
+    await chooseOption(
+      user,
+      screen.getByLabelText("第三方子 Agent 选择策略"),
+      "官方优先",
+    );
 
     await user.click(
-      screen.getByRole("button", { name: "保存 V2 子 Agent 能力配置" }),
+      screen.getByRole("button", { name: "保存 V2 子 Agent 配置" }),
     );
     expect(await screen.findByRole("alert")).toHaveTextContent("无效能力配置");
     expect(v2PersistenceCalls()).toHaveLength(0);
@@ -1095,6 +1116,7 @@ describe("Codex Sub-Agent V2 review round 1 regressions", () => {
           name: "修复无效能力配置 1",
         }),
       );
+      await openProfile(user, "deepseek-v4-flash");
       expect(
         within(flashRegion()).getByRole("group", { name: "任务优势" }),
       ).toBeVisible();
@@ -1103,10 +1125,10 @@ describe("Codex Sub-Agent V2 review round 1 regressions", () => {
   );
 
   it("renders preview, authoritative status, and TOML inside each profile region", async () => {
+    const user = userEvent.setup();
     await renderWorkspace();
 
-    const flash = within(flashRegion());
-    const pro = within(proRegion());
+    const flash = within(await openGeneratedOutput(user));
     expect(
       await flash.findByText(previewFixture.requestedRoleName),
     ).toBeVisible();
@@ -1119,6 +1141,7 @@ describe("Codex Sub-Agent V2 review round 1 regressions", () => {
         }),
       }),
     ).toBeVisible();
+    const pro = within(await openGeneratedOutput(user, "deepseek-v4-pro"));
     expect(
       (await pro.findAllByText(proPreviewFixture.requestedRoleName)).length,
     ).toBeGreaterThan(0);
@@ -1139,21 +1162,23 @@ describe("Codex Sub-Agent V2 review round 1 regressions", () => {
     const user = userEvent.setup();
     await mountWorkspaceFromPersistedPlan();
     const policy = await screen.findByLabelText("第三方子 Agent 选择策略");
+    const flash = within(await openAdvancedFields(user));
+    await chooseOption(user, policy, "官方优先");
 
     await user.click(
-      screen.getByRole("button", { name: "保存 V2 子 Agent 能力配置" }),
+      screen.getByRole("button", { name: "保存 V2 子 Agent 配置" }),
     );
     await waitFor(() => expect(v2PersistenceCalls()).toHaveLength(1));
     expect(policy).toBeDisabled();
-    expect(within(flashRegion()).getByLabelText("角色描述")).toBeDisabled();
+    expect(flash.getByLabelText("角色描述")).toBeDisabled();
 
     gate.resolve();
     await waitFor(() =>
       expect(
         screen.getByRole("button", {
-          name: "保存 V2 子 Agent 能力配置",
+          name: "保存 V2 子 Agent 配置",
         }),
-      ).toBeEnabled(),
+      ).toBeDisabled(),
     );
   });
 
@@ -1197,9 +1222,11 @@ describe("Codex Sub-Agent V2 review round 1 regressions", () => {
       .profiles["repository-scout"].overrides.modelReasoningEffort;
     ipcState.previewErrors["deepseek-v4-flash"] = "preview unavailable";
 
+    const user = userEvent.setup();
     await mountWorkspaceFromPersistedPlan();
 
-    const region = within(flashRegion());
+    const region = within(await openAdvancedFields(user));
+    await openGeneratedOutput(user);
     expect(await region.findByText("preview unavailable")).toHaveAttribute(
       "role",
       "alert",
@@ -1218,7 +1245,9 @@ describe("Codex Sub-Agent V2 review round 1 regressions", () => {
   });
 
   it("uses multiline controls for generated descriptions and instructions", async () => {
+    const user = userEvent.setup();
     await renderWorkspace();
+    await openAdvancedFields(user);
 
     expect(within(flashRegion()).getByLabelText("角色描述").tagName).toBe(
       "TEXTAREA",
@@ -1289,19 +1318,16 @@ describe("Codex Sub-Agent V2 new-plan capability defaults", () => {
         providerId: persisted.id,
       }),
     );
-    expect(
-      await screen.findByRole("region", {
-        name: "gpt-5.6-sol 子 Agent 能力",
-      }),
-    ).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "子 Agent" }));
+    expect(await openProfile(user, "gpt-5.6-sol")).toBeInTheDocument();
     expect(
       screen.queryByRole("region", {
-        name: "DeepSeek V4 Flash 子 Agent 能力",
+        name: "deepseek-v4-flash 子 Agent 配置",
       }),
     ).not.toBeInTheDocument();
     expect(
       screen.queryByRole("region", {
-        name: "DeepSeek V4 Pro 子 Agent 能力",
+        name: "deepseek-v4-pro 子 Agent 配置",
       }),
     ).not.toBeInTheDocument();
     const cached = queryClient.getQueryData<{
@@ -1403,22 +1429,21 @@ describe("Codex Sub-Agent V2 backend-owned catalog reconciliation", () => {
         providerId: "router",
       }),
     );
-    const backendDraft = await screen.findByRole("region", {
-      name: "QWEN-ＤＲＡＦＴ 子 Agent 能力",
-    });
+    const backendDraft = await openProfile(user, "QWEN-ＤＲＡＦＴ");
     expect(
-      within(backendDraft).getByRole("checkbox", {
-        name: "启用此模型作为 V2 子 Agent",
+      screen.getByRole("switch", {
+        name: "启用 QWEN-ＤＲＡＦＴ 作为 V2 子 Agent",
       }),
     ).not.toBeChecked();
+    expect(backendDraft).toBeVisible();
     expect(
       screen.queryByRole("region", {
-        name: "DeepSeek V4 Flash 子 Agent 能力",
+        name: "deepseek-v4-flash 子 Agent 配置",
       }),
     ).not.toBeInTheDocument();
     expect(
       screen.queryByRole("region", {
-        name: "DeepSeek V4 Pro 子 Agent 能力",
+        name: "deepseek-v4-pro 子 Agent 配置",
       }),
     ).not.toBeInTheDocument();
     expect(v2PersistenceCalls()).toHaveLength(0);
@@ -1443,9 +1468,7 @@ describe("Codex Sub-Agent V2 backend-owned catalog reconciliation", () => {
     const user = userEvent.setup();
     await mountWorkspaceFromPersistedPlan();
 
-    const flashRegion = await screen.findByRole("region", {
-      name: "DeepSeek V4 Flash 子 Agent 能力",
-    });
+    const flashRegion = await openAdvancedFields(user);
     const description = within(flashRegion).getByLabelText("角色描述");
     await user.clear(description);
     await user.type(description, unsavedDescription);
@@ -1453,7 +1476,7 @@ describe("Codex Sub-Agent V2 backend-owned catalog reconciliation", () => {
 
     await user.click(
       await screen.findByRole("button", {
-        name: "同步模型目录能力配置",
+        name: "从模型目录添加可配置模型",
       }),
     );
 
@@ -1467,19 +1490,13 @@ describe("Codex Sub-Agent V2 backend-owned catalog reconciliation", () => {
         },
       ),
     );
+    const flashAfterSync = await openAdvancedFields(user);
+    expect(within(flashAfterSync).getByLabelText("角色描述")).toHaveValue(
+      unsavedDescription,
+    );
     expect(
-      within(
-        await screen.findByRole("region", {
-          name: "DeepSeek V4 Flash 子 Agent 能力",
-        }),
-      ).getByLabelText("角色描述"),
-    ).toHaveValue(unsavedDescription);
-    const qwenRegion = await screen.findByRole("region", {
-      name: "qwen3.6 子 Agent 能力",
-    });
-    expect(
-      within(qwenRegion).getByRole("checkbox", {
-        name: "启用此模型作为 V2 子 Agent",
+      screen.getByRole("switch", {
+        name: "启用 qwen3.6 作为 V2 子 Agent",
       }),
     ).not.toBeChecked();
   });
@@ -1510,7 +1527,7 @@ describe("Codex Sub-Agent V2 backend-owned catalog reconciliation", () => {
         name: "无效能力配置 2",
       }),
     ).toBeInTheDocument();
-    expectPreservedValidProfileInUi();
+    await expectPreservedValidProfileInUi(user);
     await chooseOption(
       user,
       screen.getByLabelText("第三方子 Agent 选择策略"),
@@ -1606,7 +1623,7 @@ describe("Codex Sub-Agent V2 backend-owned catalog reconciliation", () => {
         name: "无效能力配置 2",
       }),
     ).toBeInTheDocument();
-    expectPreservedValidProfileInUi();
+    await expectPreservedValidProfileInUi(user);
     const roleName = within(flashRegion()).getByLabelText("角色名称");
     await user.clear(roleName);
     await user.type(roleName, "unsaved-recovery-role");
@@ -1634,17 +1651,17 @@ describe("Codex Sub-Agent V2 backend-owned catalog reconciliation", () => {
     );
     expect(
       await screen.findByRole("region", {
-        name: "DeepSeek V4 Flash 子 Agent 能力",
+        name: "deepseek-v4-flash 子 Agent 配置",
       }),
     ).toBeInTheDocument();
     expect(
-      await screen.findByRole("region", {
-        name: "DeepSeek V4 Pro 子 Agent 能力",
+      await screen.findByRole("button", {
+        name: "配置 deepseek-v4-pro",
       }),
     ).toBeInTheDocument();
     expect(
-      await screen.findByRole("region", {
-        name: "qwen3.6 子 Agent 能力",
+      await screen.findByRole("button", {
+        name: "配置 qwen3.6",
       }),
     ).toBeInTheDocument();
     expect(
@@ -1729,7 +1746,7 @@ describe("Codex Sub-Agent V2 backend-owned catalog reconciliation", () => {
 
     expect(
       await screen.findByRole("region", {
-        name: "DeepSeek V4 Flash 子 Agent 能力",
+        name: "deepseek-v4-flash 子 Agent 配置",
       }),
     ).toBeInTheDocument();
     expect(document.body.textContent).not.toContain("LEGACY_ALIAS_SENTINEL");
@@ -1749,9 +1766,7 @@ describe("Codex Sub-Agent V2 backend-owned catalog reconciliation", () => {
         },
       ),
     );
-    const recovered = await screen.findByRole("region", {
-      name: "DeepSeek V4 Flash 子 Agent 能力",
-    });
+    const recovered = await openAdvancedFields(user);
     expect(within(recovered).getByLabelText("角色名称")).toHaveValue(
       "keep-valid-role",
     );
@@ -1775,10 +1790,9 @@ describe("Codex Sub-Agent V2 searchable Accordion workspace", () => {
     const triggers = await screen.findAllByRole("button", {
       name: /配置 deepseek-v4-/i,
     });
-    expect(triggers.map((button) => button.getAttribute("aria-expanded"))).toEqual([
-      "true",
-      "false",
-    ]);
+    expect(
+      triggers.map((button) => button.getAttribute("aria-expanded")),
+    ).toEqual(["true", "false"]);
     expect(triggers[0]).toHaveTextContent("deepseek-v4-flash");
     expect(within(triggers[0]).getByText("第三方")).toBeVisible();
     expect(within(triggers[0]).getByText("可路由")).toBeVisible();
@@ -1885,7 +1899,9 @@ describe("Codex Sub-Agent V2 searchable Accordion workspace", () => {
     await renderWorkspace();
     const flash = flashRegion();
 
-    expect(within(flash).getByRole("group", { name: "任务优势" })).toBeVisible();
+    expect(
+      within(flash).getByRole("group", { name: "任务优势" }),
+    ).toBeVisible();
     expect(within(flash).queryByLabelText("角色描述")).not.toBeInTheDocument();
     expect(
       within(flash).queryByText(previewFixture.tomlPreview, {
@@ -1922,8 +1938,9 @@ describe("Codex Sub-Agent V2 searchable Accordion workspace", () => {
         ipcState.providers.router.settingsConfig.codexRouting.subagentV2,
       ),
     );
-    expectedUnsavedDraft.profiles["repository-scout"].questionnaire.optimization =
-      "quality";
+    expectedUnsavedDraft.profiles[
+      "repository-scout"
+    ].questionnaire.optimization = "quality";
 
     expect(
       screen.getByText(
@@ -1973,15 +1990,32 @@ describe("Codex Sub-Agent V2 searchable Accordion workspace", () => {
 });
 
 describe("Codex Sub-Agent V2 shared editor accessible areas", () => {
-  it.each(["选择策略", "模型能力问卷", "最终字段", "TOML 预览"])(
-    "renders the %s area as its own heading",
-    async (heading) => {
-      await renderWorkspace();
-      expect(
-        await screen.findByRole("heading", { name: heading }),
-      ).toBeInTheDocument();
-    },
-  );
+  it("keeps the questionnaire visible and advanced areas collapsed", async () => {
+    const user = userEvent.setup();
+    await renderWorkspace();
+
+    expect(
+      await screen.findByRole("heading", { name: "选择策略" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "配置 deepseek-v4-flash" }),
+    ).toHaveAttribute("aria-expanded", "true");
+    const flash = flashRegion();
+    expect(
+      within(flash).getByRole("group", { name: "任务优势" }),
+    ).toBeVisible();
+    const advanced = within(flash).getByRole("button", { name: "高级字段" });
+    const generated = within(flash).getByRole("button", {
+      name: "生成结果与 TOML",
+    });
+    expect(advanced).toHaveAttribute("aria-expanded", "false");
+    expect(generated).toHaveAttribute("aria-expanded", "false");
+
+    await user.click(advanced);
+    expect(within(flash).getByLabelText("角色描述")).toBeVisible();
+    await user.click(generated);
+    expect(within(flashBackendRegion()).getByText("请求角色名")).toBeVisible();
+  });
 });
 
 describe("Codex Sub-Agent V2 persisted interactions", () => {
@@ -1993,12 +2027,16 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
     "saves policy option %s as %s through the focused atomic command",
     async (optionName, persistedValue) => {
       const user = userEvent.setup();
-      await renderWorkspace();
-      await chooseOption(
-        user,
-        await screen.findByLabelText("第三方子 Agent 选择策略"),
-        optionName,
-      );
+      if (optionName === "均衡") {
+        seedPersistedPlan(true);
+        ipcState.providers.router.settingsConfig.codexRouting.subagentV2.selectionPolicy =
+          "official_first";
+        await mountWorkspaceFromPersistedPlan();
+      } else {
+        await renderWorkspace();
+      }
+      const policy = await screen.findByLabelText("第三方子 Agent 选择策略");
+      await chooseOption(user, policy, optionName);
       await saveV2(user);
       await expectSavedSettingsConfig({
         codexRouting: {
@@ -2060,7 +2098,9 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
     const user = userEvent.setup();
     await renderWorkspace();
     await user.click(
-      within(flashRegion()).getByLabelText("启用此模型作为 V2 子 Agent"),
+      screen.getByRole("switch", {
+        name: "启用 deepseek-v4-flash 作为 V2 子 Agent",
+      }),
     );
     await saveV2(user);
     await expectSavedSettingsConfig({
@@ -2202,6 +2242,11 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
     await user.click(checkbox);
     await user.click(checkbox);
     await user.click(checkbox);
+    await chooseOption(
+      user,
+      screen.getByLabelText("第三方子 Agent 选择策略"),
+      "官方优先",
+    );
     await saveV2(user);
     await waitFor(() =>
       expect(
@@ -2421,14 +2466,21 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
       const user = userEvent.setup();
       await renderWorkspace();
       const control = within(flashRegion()).getByLabelText(label);
-      if (
+      const startedAtRequestedValue =
         (control instanceof HTMLSelectElement && control.value === value) ||
         (!(control instanceof HTMLSelectElement) &&
-          control.textContent?.includes(value))
-      ) {
+          control.textContent?.includes(value));
+      if (startedAtRequestedValue) {
         await chooseOption(user, control, alternate);
       }
       await chooseOption(user, control, value);
+      if (startedAtRequestedValue) {
+        await chooseOption(
+          user,
+          screen.getByLabelText("第三方子 Agent 选择策略"),
+          "官方优先",
+        );
+      }
       await saveV2(user);
       await waitFor(() =>
         expect(
@@ -2465,7 +2517,9 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
     async (label, typedValue, overrideKey, persistedValue) => {
       const user = userEvent.setup();
       await renderWorkspace();
-      const input = within(flashRegion()).getByLabelText(label);
+      const input = within(await openAdvancedFields(user)).getByLabelText(
+        label,
+      );
       await user.clear(input);
       await user.type(input, typedValue);
       await saveV2(user);
@@ -2496,6 +2550,7 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
   it("edits model reasoning effort and preserves all other overrides", async () => {
     const user = userEvent.setup();
     await renderWorkspace();
+    await openAdvancedFields(user);
     await chooseOption(
       user,
       within(flashRegion()).getByLabelText("模型推理强度"),
@@ -2518,7 +2573,7 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
   it("removes description alone after all five overrides were established", async () => {
     const user = userEvent.setup();
     await renderWorkspace();
-    const region = within(flashRegion());
+    const region = within(await openAdvancedFields(user));
     for (const [label, value] of [
       ["角色名称", "audit-role"],
       ["角色描述", "Manual description to restore"],
@@ -2561,6 +2616,7 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
       within(flashRegion()).getByLabelText("优化目标"),
       "quality",
     );
+    await openAdvancedFields(user);
     const description = within(flashRegion()).getByLabelText("角色描述");
     await user.clear(description);
     await user.type(description, "Persisted manual description");
@@ -2588,6 +2644,7 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
     firstMount.unmount();
 
     await mountWorkspaceFromPersistedPlan();
+    await openAdvancedFields(user);
     expectControlValue(
       await screen.findByLabelText("第三方子 Agent 选择策略"),
       "third_party_first",
@@ -2609,6 +2666,7 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
 
   it("shares the wizard-saved V2 source with the remounted workspace", async () => {
     const wizard = await renderWizard();
+    await openAdvancedFields(wizard.user);
     await chooseOption(
       wizard.user,
       await screen.findByLabelText("第三方子 Agent 选择策略"),
@@ -2627,6 +2685,7 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
     wizard.unmount();
 
     await mountWorkspaceFromPersistedPlan();
+    await openAdvancedFields(wizard.user);
     expectControlValue(
       await screen.findByLabelText("第三方子 Agent 选择策略"),
       "official_first",
@@ -2651,6 +2710,7 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
       },
     };
     const wizard = await renderWizard();
+    await openAdvancedFields(wizard.user);
     const description = within(flashRegion()).getByLabelText("角色描述");
     await wizard.user.clear(description);
     await wizard.user.type(description, "warning lifecycle refresh draft");
@@ -2703,7 +2763,9 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
 
 describe("Codex Sub-Agent V2 preview visible output", () => {
   it("distinguishes requested and effective role names", async () => {
+    const user = userEvent.setup();
     await renderWorkspace();
+    await openGeneratedOutput(user);
     const output = within(flashBackendRegion());
     expect(await output.findByText("请求角色名")).toBeInTheDocument();
     expect(output.getByText("repository-scout")).toBeInTheDocument();
@@ -2721,14 +2783,18 @@ describe("Codex Sub-Agent V2 preview visible output", () => {
     ["context window", "128000"],
     ["warning", "Role name was collision-resolved."],
   ])("renders backend-returned %s", async (_field, value) => {
+    const user = userEvent.setup();
     await renderWorkspace();
+    await openGeneratedOutput(user);
     expect(
       (await within(flashBackendRegion()).findAllByText(value)).length,
     ).toBeGreaterThan(0);
   });
 
   it("renders backend-returned backend TOML", async () => {
+    const user = userEvent.setup();
     await renderWorkspace();
+    await openGeneratedOutput(user);
     expect(
       await within(flashBackendRegion()).findByText(
         previewFixture.tomlPreview,
@@ -2792,7 +2858,12 @@ describe("Codex Sub-Agent V2 authoritative status visible output", () => {
     ["second profile status", "offline-writer：unroutable", "pro"],
     ["second profile controlled reason", "未生成原因：unroutable", "pro"],
   ])("renders authoritative %s", async (_field, value, scope) => {
+    const user = userEvent.setup();
     await renderWorkspace();
+    if (scope === "flash") await openGeneratedOutput(user);
+    if (scope === "pro") {
+      await openGeneratedOutput(user, "deepseek-v4-pro");
+    }
     const output =
       scope === "flash"
         ? within(flashBackendRegion())
@@ -2803,7 +2874,9 @@ describe("Codex Sub-Agent V2 authoritative status visible output", () => {
   });
 
   it("renders authoritative requested and effective roles separately", async () => {
+    const user = userEvent.setup();
     await renderWorkspace();
+    await openGeneratedOutput(user);
     const output = within(flashBackendRegion());
     expect(await output.findByText("请求角色名")).toBeInTheDocument();
     expect(output.getByText("repository-scout")).toBeInTheDocument();

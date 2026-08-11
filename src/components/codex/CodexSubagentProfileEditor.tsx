@@ -1,6 +1,21 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { Search } from "lucide-react";
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from "@/components/ui/accordion";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import {
   codexSubagentV2Api,
   type CodexSubagentV2MutationProvider,
@@ -34,10 +49,14 @@ const TASK_STRENGTHS: Array<{
   { value: "high_risk_review", label: "高风险审查" },
 ];
 
-const PROFILE_TITLES: Record<string, string> = {
-  "deepseek-v4-flash": "DeepSeek V4 Flash 子 Agent 能力",
-  "deepseek-v4-pro": "DeepSeek V4 Pro 子 Agent 能力",
-};
+type ProfileFilter = "enabled" | "draft" | "unroutable" | "all";
+
+const PROFILE_FILTERS: Array<{ value: ProfileFilter; label: string }> = [
+  { value: "enabled", label: "已启用" },
+  { value: "draft", label: "待配置" },
+  { value: "unroutable", label: "不可路由" },
+  { value: "all", label: "全部" },
+];
 
 const EXPLICIT_REASONING_EFFORTS = new Set(["low", "medium", "high", "xhigh"]);
 const TASK_STRENGTH_VALUES = new Set<string>(
@@ -248,10 +267,45 @@ export function CodexSubagentProfileEditor({
     null,
   );
   const [isSaving, setIsSaving] = useState(false);
+  const [profileSearch, setProfileSearch] = useState("");
+  const [profileFilter, setProfileFilter] = useState<ProfileFilter>("all");
+  const [openProfileKey, setOpenProfileKey] = useState("");
   const backendAdoptedPersistedKey = useRef<{
     providerId: string;
     persistedKey: string;
   } | null>(null);
+  const usableProfileEntries = useMemo(
+    () =>
+      draft
+        ? Object.entries(readRawProfiles(draft)).filter(
+            (entry): entry is [string, CodexSubagentV2Profile] =>
+              isUsableProfile(entry[1]),
+          )
+        : [],
+    [draft],
+  );
+  const usableProfileKeySignature = usableProfileEntries
+    .map(([profileKey]) => profileKey)
+    .join("\n");
+  const defaultOpenProfileKey =
+    usableProfileEntries.find(([, profile]) => profile.enabled)?.[0] ??
+    usableProfileEntries[0]?.[0] ??
+    "";
+  const effectivePersistedKey =
+    backendAdoptedPersistedKey.current?.providerId === provider.id
+      ? backendAdoptedPersistedKey.current.persistedKey
+      : persistedKey;
+  const isDirty =
+    draft !== null && JSON.stringify(draft) !== effectivePersistedKey;
+
+  useEffect(() => {
+    const usableKeys = new Set(
+      usableProfileKeySignature.split("\n").filter(Boolean),
+    );
+    setOpenProfileKey((current) =>
+      usableKeys.has(current) ? current : defaultOpenProfileKey,
+    );
+  }, [provider.id, usableProfileKeySignature, defaultOpenProfileKey]);
 
   useEffect(() => {
     const adopted = backendAdoptedPersistedKey.current;
@@ -402,7 +456,7 @@ export function CodexSubagentProfileEditor({
       await adoptBackendProvider(nextProvider);
       setSaveMessage(
         action === "sync_catalog"
-          ? "模型目录能力配置已同步"
+          ? "已从模型目录添加可配置模型；已有设置保持不变"
           : action === "remove_all_invalid"
             ? "无效能力配置已删除"
             : "无效能力配置已从模型目录恢复",
@@ -530,7 +584,7 @@ export function CodexSubagentProfileEditor({
         );
       }
       await persist(draft);
-      setSaveMessage("V2 子 Agent 能力配置已保存");
+      setSaveMessage("配置已保存；重启 Codex/app-server 并新建会话后生效");
     } catch (error) {
       setSaveError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -556,10 +610,7 @@ export function CodexSubagentProfileEditor({
   }
 
   const rawProfileEntries = Object.entries(readRawProfiles(draft));
-  const profileEntries = rawProfileEntries.filter(
-    (entry): entry is [string, CodexSubagentV2Profile] =>
-      isUsableProfile(entry[1]),
-  );
+  const profileEntries = usableProfileEntries;
   const invalidProfileEntries = rawProfileEntries.filter(
     ([, profile]) => !isUsableProfile(profile),
   );
@@ -585,6 +636,40 @@ export function CodexSubagentProfileEditor({
   const unassignedStatuses = (statuses?.profiles ?? []).filter(
     (status) => !status.profileKey || !usableProfileKeys.has(status.profileKey),
   );
+  const visibleProfileEntries = [...profileEntries]
+    .sort(([leftKey, left], [rightKey, right]) => {
+      const leftStatus = statusByProfileKey.get(leftKey);
+      const rightStatus = statusByProfileKey.get(rightKey);
+      return (
+        Number(right.enabled) - Number(left.enabled) ||
+        Number(rightStatus?.routable ?? false) -
+          Number(leftStatus?.routable ?? false) ||
+        left.model.localeCompare(right.model, "en")
+      );
+    })
+    .filter(([profileKey, profile]) => {
+      const status = statusByProfileKey.get(profileKey);
+      if (profileFilter === "enabled" && !profile.enabled) return false;
+      if (profileFilter === "draft" && profile.enabled) return false;
+      if (profileFilter === "unroutable" && status?.routable !== false) {
+        return false;
+      }
+      const preview = previews[profileKey];
+      const haystack = [
+        profile.model,
+        profileKey,
+        preview?.requestedRoleName,
+        preview?.effectiveRoleName,
+        status?.requestedRoleName,
+        status?.effectiveRoleName,
+        status?.providerKind,
+        preview?.providerKind,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLocaleLowerCase();
+      return haystack.includes(profileSearch.trim().toLocaleLowerCase());
+    });
 
   return (
     <section className="space-y-4 rounded-lg border border-emerald-200 bg-emerald-50/40 p-4 dark:border-emerald-700/50 dark:bg-emerald-950/15">
@@ -613,20 +698,62 @@ export function CodexSubagentProfileEditor({
           </label>
         </div>
 
-        <h3 className="text-sm font-semibold">模型能力问卷</h3>
-        <h3 className="text-sm font-semibold">最终字段</h3>
-        <h3 className="text-sm font-semibold">TOML 预览</h3>
-
-        <div className="flex flex-wrap gap-2">
-          <Button
-            type="button"
-            variant="outline"
-            onClick={() => reconcile("sync_catalog", draft)}
+        <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
+          <label
+            htmlFor="codex-subagent-profile-search"
+            className="grid gap-1 text-sm"
           >
-            同步模型目录能力配置
-          </Button>
+            <span>搜索子 Agent 模型</span>
+            <span className="relative">
+              <Search
+                aria-hidden="true"
+                className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground"
+              />
+              <Input
+                id="codex-subagent-profile-search"
+                type="search"
+                value={profileSearch}
+                onChange={(event) => setProfileSearch(event.target.value)}
+                placeholder="模型、角色名或 Provider 类型"
+                className="pl-9"
+              />
+            </span>
+          </label>
+          <div
+            className="flex flex-wrap gap-2"
+            role="group"
+            aria-label="子 Agent 模型筛选"
+          >
+            {PROFILE_FILTERS.map((filter) => (
+              <Button
+                key={filter.value}
+                type="button"
+                size="sm"
+                variant={profileFilter === filter.value ? "default" : "outline"}
+                aria-pressed={profileFilter === filter.value}
+                onClick={() => setProfileFilter(filter.value)}
+              >
+                {filter.label}
+              </Button>
+            ))}
+          </div>
+        </div>
+
+        <div className="space-y-3 rounded-lg border bg-background/70 p-3">
+          <div className="flex flex-wrap items-start gap-3">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => reconcile("sync_catalog", draft)}
+            >
+              从模型目录添加可配置模型
+            </Button>
+            <p className="max-w-2xl text-xs leading-5 text-muted-foreground">
+              发现当前可路由模型并加入列表；新模型默认关闭，已有问卷和手工设置不会被覆盖。
+            </p>
+          </div>
           {reconciliableProfileCount > 0 ? (
-            <>
+            <div className="flex flex-wrap gap-2">
               <Button
                 type="button"
                 variant="outline"
@@ -644,321 +771,433 @@ export function CodexSubagentProfileEditor({
                 从模型目录恢复全部无效能力配置（
                 {reconciliableProfileCount} 项）
               </Button>
-            </>
+            </div>
           ) : null}
         </div>
 
-        <div className="grid gap-4 xl:grid-cols-2">
-          {profileEntries.map(([profileKey, profile], profileIndex) => {
-            const preview = previews[profileKey];
-            const status = statusByProfileKey.get(profileKey);
-            const overrides = profile.overrides ?? {};
-            const nicknameValue =
-              nicknameDrafts[profileKey] ??
-              (
-                overrides.nicknameCandidates ??
-                preview?.nicknameCandidates ??
-                []
-              ).join(", ");
-            const title =
-              PROFILE_TITLES[profile.model] ?? `${profile.model} 子 Agent 能力`;
-            return (
-              <section
-                key={profileKey}
-                aria-label={title}
-                className="space-y-3 rounded-lg border bg-background/80 p-4"
-              >
-                <div className="font-medium">{title}</div>
-                <label className="flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={profile.enabled}
-                    onChange={(event) =>
-                      updateProfile(profileKey, (current) => ({
-                        ...current,
-                        enabled: event.target.checked,
-                      }))
-                    }
-                  />
-                  启用此模型作为 V2 子 Agent
-                </label>
-
-                <fieldset className="grid gap-2" aria-label="任务优势">
-                  <legend className="text-sm font-medium">任务优势</legend>
-                  <div className="grid gap-1 sm:grid-cols-2">
-                    {TASK_STRENGTHS.map((strength) => (
-                      <label
-                        key={strength.value}
-                        className="flex items-center gap-2 text-xs"
+        {visibleProfileEntries.length > 0 ? (
+          <Accordion
+            type="single"
+            collapsible
+            value={openProfileKey}
+            onValueChange={setOpenProfileKey}
+            className="space-y-2"
+          >
+            {visibleProfileEntries.map(
+              ([profileKey, profile], profileIndex) => {
+                const preview = previews[profileKey];
+                const status = statusByProfileKey.get(profileKey);
+                const overrides = profile.overrides ?? {};
+                const nicknameValue =
+                  nicknameDrafts[profileKey] ??
+                  (
+                    overrides.nicknameCandidates ??
+                    preview?.nicknameCandidates ??
+                    []
+                  ).join(", ");
+                return (
+                  <AccordionItem
+                    key={profileKey}
+                    value={profileKey}
+                    className="rounded-lg border bg-background/80 px-4"
+                  >
+                    <div className="flex items-center gap-3">
+                      <div className="min-w-0 flex-1">
+                        <AccordionTrigger
+                          aria-label={`配置 ${profile.model}`}
+                          className="py-3 hover:no-underline"
+                        >
+                          <ProfileSummary
+                            profile={profile}
+                            preview={preview}
+                            status={status}
+                          />
+                        </AccordionTrigger>
+                      </div>
+                      <label className="flex shrink-0 items-center gap-2 text-xs">
+                        <Switch
+                          aria-label={`启用 ${profile.model} 作为 V2 子 Agent`}
+                          checked={profile.enabled}
+                          onCheckedChange={(checked) =>
+                            updateProfile(profileKey, (current) => ({
+                              ...current,
+                              enabled: checked,
+                            }))
+                          }
+                        />
+                        {profile.enabled ? "已启用" : "未启用"}
+                      </label>
+                    </div>
+                    <AccordionContent
+                      role="region"
+                      aria-labelledby={`codex-subagent-${profileIndex}-region-label`}
+                      className="space-y-4"
+                    >
+                      <span
+                        id={`codex-subagent-${profileIndex}-region-label`}
+                        className="sr-only"
                       >
-                        <input
-                          type="checkbox"
-                          value={strength.value}
-                          checked={profile.questionnaire.taskStrengths.includes(
-                            strength.value,
-                          )}
-                          onChange={(event) => {
-                            const selected =
-                              profile.questionnaire.taskStrengths;
-                            if (event.target.checked && selected.length >= 5) {
-                              setStrengthLimitMessage("任务优势最多选择 5 项");
-                              return;
-                            }
-                            setStrengthLimitMessage(null);
-                            const taskStrengths = event.target.checked
-                              ? selected.includes(strength.value)
-                                ? selected
-                                : [...selected, strength.value]
-                              : selected.filter(
-                                  (item) => item !== strength.value,
-                                );
+                        {profile.model} 子 Agent 配置
+                      </span>
+                      <fieldset className="grid gap-2" aria-label="任务优势">
+                        <legend className="text-sm font-medium">
+                          任务优势
+                        </legend>
+                        <div className="grid gap-1 sm:grid-cols-2">
+                          {TASK_STRENGTHS.map((strength) => (
+                            <label
+                              key={strength.value}
+                              className="flex items-center gap-2 text-xs"
+                            >
+                              <input
+                                type="checkbox"
+                                value={strength.value}
+                                checked={profile.questionnaire.taskStrengths.includes(
+                                  strength.value,
+                                )}
+                                onChange={(event) => {
+                                  const selected =
+                                    profile.questionnaire.taskStrengths;
+                                  if (
+                                    event.target.checked &&
+                                    selected.length >= 5
+                                  ) {
+                                    setStrengthLimitMessage(
+                                      "任务优势最多选择 5 项",
+                                    );
+                                    return;
+                                  }
+                                  setStrengthLimitMessage(null);
+                                  const taskStrengths = event.target.checked
+                                    ? selected.includes(strength.value)
+                                      ? selected
+                                      : [...selected, strength.value]
+                                    : selected.filter(
+                                        (item) => item !== strength.value,
+                                      );
+                                  updateProfile(profileKey, (current) => ({
+                                    ...current,
+                                    questionnaire: {
+                                      ...current.questionnaire,
+                                      taskStrengths,
+                                    },
+                                  }));
+                                }}
+                              />
+                              {strength.label}
+                            </label>
+                          ))}
+                        </div>
+                      </fieldset>
+
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        <QuestionnaireSelect
+                          label="优化目标"
+                          value={profile.questionnaire.optimization}
+                          options={[
+                            ["speed", "速度"],
+                            ["balanced", "均衡"],
+                            ["quality", "质量"],
+                          ]}
+                          onChange={(value) =>
                             updateProfile(profileKey, (current) => ({
                               ...current,
                               questionnaire: {
                                 ...current.questionnaire,
-                                taskStrengths,
+                                optimization:
+                                  value as typeof current.questionnaire.optimization,
                               },
-                            }));
-                          }}
+                            }))
+                          }
                         />
-                        {strength.label}
-                      </label>
-                    ))}
-                  </div>
-                </fieldset>
+                        <QuestionnaireSelect
+                          label="写入范围"
+                          value={profile.questionnaire.writeScope}
+                          options={[
+                            ["read_only", "只读"],
+                            ["bounded_changes", "有限修改"],
+                            ["complex_changes", "复杂修改"],
+                          ]}
+                          onChange={(value) =>
+                            updateProfile(profileKey, (current) => ({
+                              ...current,
+                              questionnaire: {
+                                ...current.questionnaire,
+                                writeScope:
+                                  value as typeof current.questionnaire.writeScope,
+                              },
+                            }))
+                          }
+                        />
+                        <QuestionnaireSelect
+                          label="模型偏好"
+                          value={profile.questionnaire.preference}
+                          options={[
+                            ["preferred", "优先"],
+                            ["eligible", "可用"],
+                            ["fallback", "后备"],
+                          ]}
+                          onChange={(value) =>
+                            updateProfile(profileKey, (current) => ({
+                              ...current,
+                              questionnaire: {
+                                ...current.questionnaire,
+                                preference:
+                                  value as typeof current.questionnaire.preference,
+                              },
+                            }))
+                          }
+                        />
+                        <QuestionnaireSelect
+                          label="推理强度"
+                          value={profile.questionnaire.reasoningEffort}
+                          options={[
+                            ["auto", "自动"],
+                            ["low", "低"],
+                            ["medium", "中"],
+                            ["high", "高"],
+                            ["xhigh", "极高"],
+                          ]}
+                          onChange={(value) =>
+                            updateProfile(profileKey, (current) => ({
+                              ...current,
+                              questionnaire: {
+                                ...current.questionnaire,
+                                reasoningEffort:
+                                  value as typeof current.questionnaire.reasoningEffort,
+                              },
+                            }))
+                          }
+                        />
+                      </div>
 
-                <div className="grid gap-2 sm:grid-cols-2">
-                  <QuestionnaireSelect
-                    label="优化目标"
-                    value={profile.questionnaire.optimization}
-                    options={[
-                      ["speed", "速度"],
-                      ["balanced", "均衡"],
-                      ["quality", "质量"],
-                    ]}
-                    onChange={(value) =>
-                      updateProfile(profileKey, (current) => ({
-                        ...current,
-                        questionnaire: {
-                          ...current.questionnaire,
-                          optimization:
-                            value as typeof current.questionnaire.optimization,
-                        },
-                      }))
-                    }
-                  />
-                  <QuestionnaireSelect
-                    label="写入范围"
-                    value={profile.questionnaire.writeScope}
-                    options={[
-                      ["read_only", "只读"],
-                      ["bounded_changes", "有限修改"],
-                      ["complex_changes", "复杂修改"],
-                    ]}
-                    onChange={(value) =>
-                      updateProfile(profileKey, (current) => ({
-                        ...current,
-                        questionnaire: {
-                          ...current.questionnaire,
-                          writeScope:
-                            value as typeof current.questionnaire.writeScope,
-                        },
-                      }))
-                    }
-                  />
-                  <QuestionnaireSelect
-                    label="模型偏好"
-                    value={profile.questionnaire.preference}
-                    options={[
-                      ["preferred", "优先"],
-                      ["eligible", "可用"],
-                      ["fallback", "后备"],
-                    ]}
-                    onChange={(value) =>
-                      updateProfile(profileKey, (current) => ({
-                        ...current,
-                        questionnaire: {
-                          ...current.questionnaire,
-                          preference:
-                            value as typeof current.questionnaire.preference,
-                        },
-                      }))
-                    }
-                  />
-                  <QuestionnaireSelect
-                    label="推理强度"
-                    value={profile.questionnaire.reasoningEffort}
-                    options={[
-                      ["auto", "自动"],
-                      ["low", "低"],
-                      ["medium", "中"],
-                      ["high", "高"],
-                      ["xhigh", "极高"],
-                    ]}
-                    onChange={(value) =>
-                      updateProfile(profileKey, (current) => ({
-                        ...current,
-                        questionnaire: {
-                          ...current.questionnaire,
-                          reasoningEffort:
-                            value as typeof current.questionnaire.reasoningEffort,
-                        },
-                      }))
-                    }
-                  />
-                </div>
+                      <Collapsible>
+                        <CollapsibleTrigger asChild>
+                          <Button type="button" variant="outline">
+                            高级字段
+                          </Button>
+                        </CollapsibleTrigger>
+                        <CollapsibleContent className="mt-3 space-y-3">
+                          <OverrideField
+                            id={`codex-subagent-${profileIndex}-role-name`}
+                            label="角色名称"
+                            value={
+                              overrides.roleName ??
+                              preview?.requestedRoleName ??
+                              ""
+                            }
+                            automatic={overrides.roleName === undefined}
+                            restoreLabel="恢复角色名称自动值"
+                            onChange={(value) =>
+                              setOverride(profileKey, "roleName", value)
+                            }
+                            onRestore={() =>
+                              restoreOverride(profileKey, "roleName")
+                            }
+                          />
+                          <OverrideField
+                            id={`codex-subagent-${profileIndex}-description`}
+                            label="角色描述"
+                            value={
+                              overrides.description ??
+                              preview?.description ??
+                              ""
+                            }
+                            automatic={overrides.description === undefined}
+                            restoreLabel="恢复角色描述自动值"
+                            multiline
+                            onChange={(value) =>
+                              setOverride(profileKey, "description", value)
+                            }
+                            onRestore={() =>
+                              restoreOverride(profileKey, "description")
+                            }
+                          />
+                          <OverrideField
+                            id={`codex-subagent-${profileIndex}-developer-instructions`}
+                            label="开发者指令"
+                            value={
+                              overrides.developerInstructions ??
+                              preview?.developerInstructions ??
+                              ""
+                            }
+                            automatic={
+                              overrides.developerInstructions === undefined
+                            }
+                            restoreLabel="恢复开发者指令自动值"
+                            multiline
+                            onChange={(value) =>
+                              setOverride(
+                                profileKey,
+                                "developerInstructions",
+                                value,
+                              )
+                            }
+                            onRestore={() =>
+                              restoreOverride(
+                                profileKey,
+                                "developerInstructions",
+                              )
+                            }
+                          />
+                          <OverrideField
+                            id={`codex-subagent-${profileIndex}-nickname-candidates`}
+                            label="昵称候选"
+                            value={nicknameValue}
+                            automatic={
+                              overrides.nicknameCandidates === undefined
+                            }
+                            restoreLabel="恢复昵称候选自动值"
+                            onChange={(value) => {
+                              setNicknameDrafts((current) => ({
+                                ...current,
+                                [profileKey]: value,
+                              }));
+                              setOverride(
+                                profileKey,
+                                "nicknameCandidates",
+                                parseNicknames(value),
+                              );
+                            }}
+                            onRestore={() =>
+                              restoreOverride(profileKey, "nicknameCandidates")
+                            }
+                          />
+                          <div className="grid gap-1 text-sm">
+                            <span className="flex items-center justify-between gap-2">
+                              <label
+                                htmlFor={`codex-subagent-${profileIndex}-model-reasoning`}
+                              >
+                                模型推理强度
+                              </label>
+                              <span className="text-xs text-muted-foreground">
+                                {overrides.modelReasoningEffort === undefined
+                                  ? "自动"
+                                  : "手工覆盖"}
+                              </span>
+                            </span>
+                            <div className="flex gap-2">
+                              <select
+                                id={`codex-subagent-${profileIndex}-model-reasoning`}
+                                className="min-w-0 flex-1 rounded-md border bg-background px-3 py-2"
+                                value={
+                                  overrides.modelReasoningEffort ??
+                                  preview?.modelReasoningEffort ??
+                                  ""
+                                }
+                                onChange={(event) =>
+                                  setOverride(
+                                    profileKey,
+                                    "modelReasoningEffort",
+                                    event.target
+                                      .value as CodexSubagentExplicitReasoningEffort,
+                                  )
+                                }
+                              >
+                                <option value="" disabled>
+                                  等待后端预览
+                                </option>
+                                <option value="low">低</option>
+                                <option value="medium">中</option>
+                                <option value="high">高</option>
+                                <option value="xhigh">极高</option>
+                              </select>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                onClick={() =>
+                                  restoreOverride(
+                                    profileKey,
+                                    "modelReasoningEffort",
+                                  )
+                                }
+                              >
+                                恢复模型推理强度自动值
+                              </Button>
+                            </div>
+                          </div>
+                        </CollapsibleContent>
+                      </Collapsible>
 
-                <OverrideField
-                  id={`codex-subagent-${profileIndex}-role-name`}
-                  label="角色名称"
-                  value={overrides.roleName ?? preview?.requestedRoleName ?? ""}
-                  automatic={overrides.roleName === undefined}
-                  restoreLabel="恢复角色名称自动值"
-                  onChange={(value) =>
-                    setOverride(profileKey, "roleName", value)
-                  }
-                  onRestore={() => restoreOverride(profileKey, "roleName")}
-                />
-                <OverrideField
-                  id={`codex-subagent-${profileIndex}-description`}
-                  label="角色描述"
-                  value={overrides.description ?? preview?.description ?? ""}
-                  automatic={overrides.description === undefined}
-                  restoreLabel="恢复角色描述自动值"
-                  multiline
-                  onChange={(value) =>
-                    setOverride(profileKey, "description", value)
-                  }
-                  onRestore={() => restoreOverride(profileKey, "description")}
-                />
-                <OverrideField
-                  id={`codex-subagent-${profileIndex}-developer-instructions`}
-                  label="开发者指令"
-                  value={
-                    overrides.developerInstructions ??
-                    preview?.developerInstructions ??
-                    ""
-                  }
-                  automatic={overrides.developerInstructions === undefined}
-                  restoreLabel="恢复开发者指令自动值"
-                  multiline
-                  onChange={(value) =>
-                    setOverride(profileKey, "developerInstructions", value)
-                  }
-                  onRestore={() =>
-                    restoreOverride(profileKey, "developerInstructions")
-                  }
-                />
-                <OverrideField
-                  id={`codex-subagent-${profileIndex}-nickname-candidates`}
-                  label="昵称候选"
-                  value={nicknameValue}
-                  automatic={overrides.nicknameCandidates === undefined}
-                  restoreLabel="恢复昵称候选自动值"
-                  onChange={(value) => {
-                    setNicknameDrafts((current) => ({
-                      ...current,
-                      [profileKey]: value,
-                    }));
-                    setOverride(
-                      profileKey,
-                      "nicknameCandidates",
-                      parseNicknames(value),
-                    );
-                  }}
-                  onRestore={() =>
-                    restoreOverride(profileKey, "nicknameCandidates")
-                  }
-                />
-                <div className="grid gap-1 text-sm">
-                  <span className="flex items-center justify-between gap-2">
-                    <label
-                      htmlFor={`codex-subagent-${profileIndex}-model-reasoning`}
-                    >
-                      模型推理强度
-                    </label>
-                    <span className="text-xs text-muted-foreground">
-                      {overrides.modelReasoningEffort === undefined
-                        ? "自动"
-                        : "手工覆盖"}
-                    </span>
-                  </span>
-                  <div className="flex gap-2">
-                    <select
-                      id={`codex-subagent-${profileIndex}-model-reasoning`}
-                      className="min-w-0 flex-1 rounded-md border bg-background px-3 py-2"
-                      value={
-                        overrides.modelReasoningEffort ??
-                        preview?.modelReasoningEffort ??
-                        ""
-                      }
-                      onChange={(event) =>
-                        setOverride(
-                          profileKey,
-                          "modelReasoningEffort",
-                          event.target
-                            .value as CodexSubagentExplicitReasoningEffort,
-                        )
-                      }
-                    >
-                      <option value="" disabled>
-                        等待后端预览
-                      </option>
-                      <option value="low">低</option>
-                      <option value="medium">中</option>
-                      <option value="high">高</option>
-                      <option value="xhigh">极高</option>
-                    </select>
+                      <Collapsible>
+                        <CollapsibleTrigger asChild>
+                          <Button type="button" variant="outline">
+                            生成结果与 TOML
+                          </Button>
+                        </CollapsibleTrigger>
+                        <CollapsibleContent className="mt-3 space-y-3">
+                          {previewErrors[profileKey] ? (
+                            <p role="alert" className="text-xs text-rose-600">
+                              {previewErrors[profileKey]}
+                            </p>
+                          ) : null}
+                          <ProfileBackendOutput
+                            profileKey={profileKey}
+                            profile={profile}
+                            preview={preview}
+                            status={status}
+                          />
+                        </CollapsibleContent>
+                      </Collapsible>
+                    </AccordionContent>
+                  </AccordionItem>
+                );
+              },
+            )}
+          </Accordion>
+        ) : (
+          <div className="rounded-lg border border-dashed bg-background/70 p-6 text-center">
+            <p className="text-sm font-medium">没有符合条件的子 Agent 模型</p>
+            <Button
+              type="button"
+              variant="outline"
+              className="mt-3"
+              onClick={() => {
+                setProfileSearch("");
+                setProfileFilter("all");
+              }}
+            >
+              清除筛选
+            </Button>
+          </div>
+        )}
+
+        {invalidProfileEntries.length > 0 ? (
+          <section
+            aria-label="需要处理"
+            className="space-y-3 rounded-lg border border-rose-300 bg-rose-50/40 p-3 dark:bg-rose-950/15"
+          >
+            <h3 className="text-sm font-semibold text-rose-800 dark:text-rose-100">
+              需要处理
+            </h3>
+            <div className="grid gap-3 lg:grid-cols-2">
+              {invalidProfileEntries.map(([profileKey], index) => {
+                const ordinal = index + 1;
+                const title = `无效能力配置 ${ordinal}`;
+                return (
+                  <section
+                    key={profileKey}
+                    aria-label={title}
+                    className="space-y-3 rounded-lg border border-rose-300 bg-background/80 p-4"
+                  >
+                    <div className="font-medium">{title}</div>
+                    <p className="text-sm text-rose-700">
+                      持久化的 profile 结构无效，原始条目尚未被修改。
+                    </p>
+                    <ProfileBackendOutput status={undefined} />
                     <Button
                       type="button"
                       variant="outline"
-                      onClick={() =>
-                        restoreOverride(profileKey, "modelReasoningEffort")
-                      }
+                      onClick={() => repairProfile(profileKey)}
                     >
-                      恢复模型推理强度自动值
+                      修复无效能力配置 {ordinal}
                     </Button>
-                  </div>
-                </div>
-                {previewErrors[profileKey] ? (
-                  <p role="alert" className="text-xs text-rose-600">
-                    {previewErrors[profileKey]}
-                  </p>
-                ) : null}
-                <ProfileBackendOutput
-                  profileKey={profileKey}
-                  profile={profile}
-                  preview={preview}
-                  status={status}
-                />
-              </section>
-            );
-          })}
-          {invalidProfileEntries.map(([profileKey], index) => {
-            const ordinal = index + 1;
-            const title = `无效能力配置 ${ordinal}`;
-            return (
-              <section
-                key={profileKey}
-                aria-label={title}
-                className="space-y-3 rounded-lg border border-rose-300 bg-background/80 p-4"
-              >
-                <div className="font-medium">{title}</div>
-                <p className="text-sm text-rose-700">
-                  持久化的 profile 结构无效，原始条目尚未被修改。
-                </p>
-                <ProfileBackendOutput status={undefined} />
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() => repairProfile(profileKey)}
-                >
-                  修复无效能力配置 {ordinal}
-                </Button>
-              </section>
-            );
-          })}
-        </div>
+                  </section>
+                );
+              })}
+            </div>
+          </section>
+        ) : null}
       </fieldset>
 
       {strengthLimitMessage ? (
@@ -986,9 +1225,12 @@ export function CodexSubagentProfileEditor({
         </div>
       ) : null}
 
-      <div className="flex items-center gap-3">
-        <Button onClick={save} disabled={isSaving}>
-          保存 V2 子 Agent 能力配置
+      <div className="sticky bottom-0 z-10 flex flex-wrap items-center gap-3 rounded-lg border bg-background/95 p-3 shadow-sm backdrop-blur">
+        <span className="text-sm text-muted-foreground">
+          {isDirty ? "有未保存更改" : "所有更改均已保存"}
+        </span>
+        <Button onClick={save} disabled={isSaving || !isDirty}>
+          {isSaving ? "保存中…" : "保存 V2 子 Agent 配置"}
         </Button>
         {saveMessage ? (
           <span aria-live="polite" className="text-sm text-emerald-700">
@@ -1011,6 +1253,61 @@ export function CodexSubagentProfileEditor({
         ) : null}
       </div>
     </section>
+  );
+}
+
+function ProfileSummary({
+  profile,
+  preview,
+  status,
+}: {
+  profile: CodexSubagentV2Profile;
+  preview?: CodexSubagentProfilePreview;
+  status?: CodexSubagentProfileStatus;
+}) {
+  const preferenceLabels = {
+    preferred: "优先",
+    eligible: "可用",
+    fallback: "后备",
+  } as const;
+  const providerKind = status?.providerKind ?? preview?.providerKind;
+  const reasoning =
+    status?.modelReasoningEffort ??
+    preview?.modelReasoningEffort ??
+    profile.questionnaire.reasoningEffort;
+  const strengthLabels = profile.questionnaire.taskStrengths
+    .slice(0, 3)
+    .map((value) => TASK_STRENGTHS.find((item) => item.value === value)?.label)
+    .filter((label): label is string => Boolean(label));
+  const hasOverrides = Boolean(
+    profile.overrides && Object.keys(profile.overrides).length > 0,
+  );
+
+  return (
+    <div className="min-w-0 flex-1 text-left">
+      <div className="truncate text-sm font-semibold">{profile.model}</div>
+      <div className="mt-1 flex flex-wrap gap-1.5 text-xs">
+        <Badge variant="outline">
+          {providerKind === "official" ? "官方" : "第三方"}
+        </Badge>
+        <Badge variant="outline">
+          {status?.routable === false ? "不可路由" : "可路由"}
+        </Badge>
+        <Badge variant="outline">{profile.enabled ? "已启用" : "待配置"}</Badge>
+        <Badge variant="outline">
+          {preferenceLabels[profile.questionnaire.preference]}
+        </Badge>
+        <Badge variant="outline">推理 {reasoning}</Badge>
+        <Badge variant="outline">
+          {hasOverrides ? "含手工覆盖" : "自动生成"}
+        </Badge>
+        {strengthLabels.map((label) => (
+          <Badge key={label} variant="outline">
+            {label}
+          </Badge>
+        ))}
+      </div>
+    </div>
   );
 }
 
