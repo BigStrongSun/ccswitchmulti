@@ -6,6 +6,7 @@ import type { Provider } from "@/types";
 import { CodexMultiRouterWizard } from "@/components/codex/CodexMultiRouterWizard";
 import { CODEX_MULTI_ROUTER_WIZARD_DISMISSED_KEY } from "@/lib/codexMultiRouterWizard";
 import { providersApi } from "@/lib/api/providers";
+import { codexSubagentV2Api } from "@/lib/api/codexSubagentV2";
 import {
   fetchCodexOauthCachedModels,
   fetchCodexOauthModels,
@@ -18,6 +19,12 @@ vi.mock("@/lib/api/providers", () => ({
   providersApi: {
     add: vi.fn(),
     update: vi.fn(),
+  },
+}));
+
+vi.mock("@/lib/api/codexSubagentV2", () => ({
+  codexSubagentV2Api: {
+    initializeProviderConfig: vi.fn(),
   },
 }));
 
@@ -71,6 +78,42 @@ beforeEach(() => {
   localStorage.clear();
   vi.clearAllMocks();
   vi.mocked(fetchCodexOauthCachedModels).mockResolvedValue([]);
+  vi.mocked(codexSubagentV2Api.initializeProviderConfig).mockImplementation(
+    async (providerId) => {
+      const persisted = vi
+        .mocked(providersApi.add)
+        .mock.calls.find(([candidate]) => candidate.id === providerId)?.[0];
+      if (!persisted) {
+        throw new Error("backend initializer requires the persisted provider");
+      }
+      return {
+        ...persisted,
+        settingsConfig: {
+          ...persisted.settingsConfig,
+          codexRouting: {
+            ...persisted.settingsConfig.codexRouting,
+            subagentV2: {
+              schemaVersion: 1,
+              selectionPolicy: "balanced",
+              profiles: {
+                "qwen3.6": {
+                  model: "qwen3.6",
+                  enabled: false,
+                  questionnaire: {
+                    taskStrengths: ["repository_exploration"],
+                    optimization: "balanced",
+                    writeScope: "read_only",
+                    preference: "eligible",
+                    reasoningEffort: "auto",
+                  },
+                },
+              },
+            },
+          },
+        },
+      };
+    },
+  );
 });
 
 describe("CodexMultiRouterWizard", () => {
@@ -92,6 +135,82 @@ describe("CodexMultiRouterWizard", () => {
     expect(
       screen.getByText(/技术备注：Codex 最后仍只连接本机/),
     ).toBeInTheDocument();
+  });
+
+  it("states that V2 role guidance is best-effort and keeps built-in roles eligible", () => {
+    renderWithQueryClient(
+      <CodexMultiRouterWizard
+        open
+        providers={[provider()]}
+        onOpenChange={vi.fn()}
+        onCreateProvider={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+        onEnablePlan={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Sub-Agent V2/ }));
+
+    expect(screen.getByText(/best-effort/)).toBeVisible();
+    expect(screen.getByText(/问卷与角色说明只提供选择指导/)).toBeVisible();
+    expect(screen.getByText(/不保证选择 Flash 或 Pro/)).toBeVisible();
+    expect(screen.getByText(/default、worker、explorer/)).toBeVisible();
+  });
+
+  it("persists a Qwen-only V2 plan before backend initialization and adopts the returned provider", async () => {
+    const qwenSource = provider({
+      id: "qwen-local",
+      name: "Qwen Local",
+      settingsConfig: {
+        base_url: "https://qwen.example/v1",
+        auth: { OPENAI_API_KEY: "sk-qwen" },
+        modelCatalog: { models: [{ model: "qwen3.6" }] },
+      },
+    });
+    const onEnablePlan = vi.fn();
+    renderWithQueryClient(
+      <CodexMultiRouterWizard
+        open
+        providers={[qwenSource]}
+        onOpenChange={vi.fn()}
+        onCreateProvider={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+        onEnablePlan={onEnablePlan}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "保存并发布" }));
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "保存并发布" }).at(-1)!,
+    );
+
+    await waitFor(() => expect(providersApi.add).toHaveBeenCalledTimes(1));
+    const persisted = vi.mocked(providersApi.add).mock.calls[0][0];
+    expect(persisted.settingsConfig.codexRouting).not.toHaveProperty(
+      "subagentV2",
+    );
+    await waitFor(() =>
+      expect(codexSubagentV2Api.initializeProviderConfig).toHaveBeenCalledWith(
+        persisted.id,
+      ),
+    );
+    const initialized = await vi.mocked(
+      codexSubagentV2Api.initializeProviderConfig,
+    ).mock.results[0].value;
+    expect(
+      Object.keys(initialized.settingsConfig.codexRouting.subagentV2.profiles),
+    ).toEqual(["qwen3.6"]);
+    expect(
+      initialized.settingsConfig.codexRouting.subagentV2.profiles,
+    ).not.toHaveProperty("deepseek-v4-flash");
+    expect(
+      initialized.settingsConfig.codexRouting.subagentV2.profiles,
+    ).not.toHaveProperty("deepseek-v4-pro");
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "启用这个多路路由" }),
+    );
+    await waitFor(() => expect(onEnablePlan).toHaveBeenCalledWith(initialized));
   });
 
   it("keeps the wizard controls inside small app windows", () => {

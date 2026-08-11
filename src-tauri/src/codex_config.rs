@@ -5872,6 +5872,78 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
+    fn codex_subagent_v2_preview_keeps_canonical_alias_collision_fail_closed_and_redacted() {
+        let _guard = TestHomeGuard::new();
+        let raw_alias_sentinel = "RAW_CANONICAL_ALIAS_SECRET_SENTINEL";
+        let canonical_model = "collision-model";
+        let selected = codex_subagent_profile_status_profile(canonical_model, true);
+        let settings = codex_subagent_profile_status_settings(
+            "v2",
+            json!({
+                (canonical_model): selected.clone(),
+                (raw_alias_sentinel): codex_subagent_profile_status_profile(canonical_model, true)
+            }),
+            json!([{ "model": canonical_model, "contextWindow": 128000 }]),
+            json!([{
+                "id": "collision-route",
+                "enabled": true,
+                "match": { "models": [canonical_model] },
+                "upstream": { "auth": { "source": "provider_config" } }
+            }]),
+        );
+
+        let statuses = codex_subagent_profile_status_json(&settings, None)
+            .expect("status must safely preserve the complete malformed draft");
+        assert_eq!(
+            statuses["profiles"]
+                .as_array()
+                .expect("status profiles")
+                .iter()
+                .filter(|status| status["status"] == "collision")
+                .count(),
+            2,
+            "status must keep both canonical identities fail closed"
+        );
+        assert!(!statuses.to_string().contains(raw_alias_sentinel));
+
+        sync_codex_managed_agent_files_with_settings(
+            &[review_codex_catalog_spec(canonical_model)],
+            CodexSubagentVersion::V2,
+            &settings,
+            None,
+        )
+        .expect("materialization must handle the collision as controlled non-generation");
+        assert_eq!(
+            std::fs::read_dir(get_codex_agents_dir())
+                .expect("enumerate managed role directory")
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry.path().extension().and_then(|value| value.to_str()) == Some("toml")
+                })
+                .count(),
+            0,
+            "materialization must not generate either colliding role"
+        );
+
+        let error = preview_codex_subagent_profile_with_context(
+            settings,
+            canonical_model.to_string(),
+            serde_json::from_value(selected).expect("typed selected canonical profile"),
+            None,
+        )
+        .expect_err("preview must not erase the alias sibling and return TOML");
+        assert!(
+            error.contains("did not produce a preview role"),
+            "preview must report controlled collision non-generation"
+        );
+        assert!(
+            !error.contains(raw_alias_sentinel),
+            "preview errors must not expose the raw alias"
+        );
+    }
+
+    #[test]
     fn codex_subagent_v2_backend_initialization_and_catalog_sync_own_canonical_drafts() {
         let settings = codex_subagent_profile_status_settings(
             "v2",

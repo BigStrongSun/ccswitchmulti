@@ -83,11 +83,28 @@ const backendDraftPreviewFixture = {
   warnings: ["Backend-created profile remains disabled by default."],
 } satisfies CodexSubagentProfilePreview;
 
+const officialDraftPreviewFixture = {
+  providerKind: "official" as const,
+  requestedRoleName: "official-integrator",
+  effectiveRoleName: "official-integrator",
+  description: "Backend-created official catalog draft.",
+  developerInstructions: "Keep the official draft disabled until reviewed.",
+  nicknameCandidates: ["Integrator"],
+  model: "gpt-5.6-sol",
+  modelProvider: "codex_model_router_v2" as const,
+  modelReasoningEffort: "high" as const,
+  modelContextWindow: 262144,
+  tomlPreview:
+    '[agents.official-integrator]\nmodel = "gpt-5.6-sol"\nmodel_provider = "codex_model_router_v2"',
+  warnings: ["Official catalog profile remains disabled by default."],
+} satisfies CodexSubagentProfilePreview;
+
 const previewFixturesByModel: Record<string, CodexSubagentProfilePreview> = {
   "deepseek-v4-flash": previewFixture,
   "deepseek-v4-pro": proPreviewFixture,
   "qwen3.6": qwenPreviewFixture,
   "QWEN-ＤＲＡＦＴ": backendDraftPreviewFixture,
+  "gpt-5.6-sol": officialDraftPreviewFixture,
 };
 
 const statusFixture = {
@@ -138,6 +155,7 @@ const ipcState = vi.hoisted(() => ({
   statusError: null as string | null,
   updateGate: null as Promise<void> | null,
   beforeV2Persistence: null as (() => void) | null,
+  nextInitializedProvider: null as Provider | null,
   nextProjection: null as null | {
     status: "applied" | "not_required" | "pending_retry";
     warning?: { code: string; message: string };
@@ -217,24 +235,31 @@ vi.mock("@tauri-apps/api/core", () => ({
         }
         const latest = ipcState.providers[args.providerId];
         if (!latest) throw new Error("provider not found");
-        const initialized = JSON.parse(JSON.stringify(latest)) as Provider;
-        initialized.settingsConfig.codexRouting.subagentV2 = {
-          schemaVersion: 1,
-          selectionPolicy: "balanced",
-          profiles: {
-            "qwen-draft": {
-              model: "QWEN-ＤＲＡＦＴ",
-              enabled: false,
-              questionnaire: {
-                taskStrengths: ["repository_exploration"],
-                optimization: "balanced",
-                writeScope: "read_only",
-                preference: "eligible",
-                reasoningEffort: "auto",
+        const initialized = ipcState.nextInitializedProvider
+          ? (JSON.parse(
+              JSON.stringify(ipcState.nextInitializedProvider),
+            ) as Provider)
+          : (JSON.parse(JSON.stringify(latest)) as Provider);
+        initialized.id = args.providerId;
+        if (!ipcState.nextInitializedProvider) {
+          initialized.settingsConfig.codexRouting.subagentV2 = {
+            schemaVersion: 1,
+            selectionPolicy: "balanced",
+            profiles: {
+              "qwen-draft": {
+                model: "QWEN-ＤＲＡＦＴ",
+                enabled: false,
+                questionnaire: {
+                  taskStrengths: ["repository_exploration"],
+                  optimization: "balanced",
+                  writeScope: "read_only",
+                  preference: "eligible",
+                  reasoningEffort: "auto",
+                },
               },
             },
-          },
-        };
+          };
+        }
         ipcState.providers[initialized.id] = initialized;
         return JSON.parse(JSON.stringify(initialized));
       }
@@ -448,6 +473,20 @@ function provider(): Provider {
   };
 }
 
+function officialProvider(): Provider {
+  return {
+    id: "codex-official",
+    name: "OpenAI Official",
+    category: "official",
+    settingsConfig: {
+      auth: {},
+      modelCatalog: {
+        models: [{ model: "gpt-5.6-sol", contextWindow: 262144 }],
+      },
+    },
+  };
+}
+
 function seedPersistedPlan(withV2 = true) {
   const source = provider();
   const persistedPlan = plan(withV2);
@@ -555,11 +594,14 @@ async function renderWorkspace(withV2 = true) {
   return mountWorkspaceFromPersistedPlan();
 }
 
-async function mountWorkspaceWithoutPlan() {
-  const source = provider();
+async function mountWorkspaceWithoutPlan(source = provider()) {
   ipcState.providers = { [source.id]: source };
   const loaded = await providersApi.getAll("codex");
   const queryClient = createQueryClient();
+  queryClient.setQueryData(["providers", "codex"], {
+    currentProviderId: source.id,
+    providers: loaded,
+  });
   const result = render(
     <QueryClientProvider client={queryClient}>
       <CodexRouterWorkspacePage
@@ -579,7 +621,7 @@ async function mountWorkspaceWithoutPlan() {
   await waitFor(() =>
     expect(invoke).toHaveBeenCalledWith("get_global_proxy_config"),
   );
-  return { ...result, source };
+  return { ...result, source, queryClient };
 }
 
 async function mountWizardFromPersistedPlan() {
@@ -753,6 +795,7 @@ beforeEach(() => {
   ipcState.statusError = null;
   ipcState.updateGate = null;
   ipcState.beforeV2Persistence = null;
+  ipcState.nextInitializedProvider = null;
   ipcState.nextProjection = null;
   vi.mocked(invoke).mockClear();
 });
@@ -1153,70 +1196,101 @@ describe("Codex Sub-Agent V2 review round 1 regressions", () => {
 });
 
 describe("Codex Sub-Agent V2 new-plan capability defaults", () => {
-  it("persists exact schema-v1 defaults through the workspace create action", async () => {
+  it("states that Workspace V2 selection is best-effort guidance and retains built-in roles", async () => {
+    await renderWorkspace();
+
+    expect(screen.getByText(/best-effort/)).toBeVisible();
+    expect(screen.getByText(/问卷与角色说明只提供选择指导/)).toBeVisible();
+    expect(screen.getByText(/不保证选择 Flash 或 Pro/)).toBeVisible();
+    expect(screen.getByText(/default、worker、explorer/)).toBeVisible();
+  });
+
+  it("creates an official-only workspace plan without phantom profiles and adopts backend initialization", async () => {
+    ipcState.nextInitializedProvider = {
+      id: "backend-will-adopt-persisted-id",
+      name: "Backend Initialized Official Plan",
+      category: "custom",
+      settingsConfig: {
+        codexRouting: {
+          enabled: true,
+          subagentVersion: "v2",
+          routes: [],
+          subagentV2: {
+            schemaVersion: 1,
+            selectionPolicy: "balanced",
+            profiles: {
+              "gpt-5.6-sol": {
+                model: "gpt-5.6-sol",
+                enabled: false,
+                questionnaire: {
+                  taskStrengths: ["high_risk_review"],
+                  optimization: "quality",
+                  writeScope: "complex_changes",
+                  preference: "eligible",
+                  reasoningEffort: "high",
+                },
+              },
+            },
+          },
+        },
+        modelCatalog: {
+          models: [{ model: "gpt-5.6-sol", contextWindow: 262144 }],
+        },
+      },
+    };
     const user = userEvent.setup();
-    await mountWorkspaceWithoutPlan();
+    const { queryClient } = await mountWorkspaceWithoutPlan(officialProvider());
     await user.click(
       (await screen.findAllByRole("button", { name: "创建多路路由" }))[0],
     );
     await waitFor(() => expect(addProviderCalls()).toHaveLength(1));
 
-    expect(addProviderCalls()[0]).toEqual([
-      "add_provider",
-      {
-        provider: expect.objectContaining({
-          settingsConfig: expect.objectContaining({
-            codexRouting: expect.objectContaining({
-              subagentV2: {
-                schemaVersion: 1,
-                selectionPolicy: "balanced",
-                profiles: {
-                  "deepseek-v4-flash": {
-                    model: "deepseek-v4-flash",
-                    enabled: true,
-                    questionnaire: {
-                      taskStrengths: [
-                        "long_context_reading",
-                        "repository_exploration",
-                        "evidence_collection",
-                        "summarization",
-                        "testing",
-                      ],
-                      optimization: "speed",
-                      writeScope: "read_only",
-                      preference: "preferred",
-                      reasoningEffort: "medium",
-                    },
-                  },
-                  "deepseek-v4-pro": {
-                    model: "deepseek-v4-pro",
-                    enabled: true,
-                    questionnaire: {
-                      taskStrengths: [
-                        "complex_debugging",
-                        "architecture_design",
-                        "complex_implementation",
-                        "high_risk_review",
-                        "testing",
-                      ],
-                      optimization: "quality",
-                      writeScope: "complex_changes",
-                      preference: "preferred",
-                      reasoningEffort: "high",
-                    },
-                  },
-                },
-              },
-            }),
-          }),
-        }),
-        app: "codex",
-        addToLive: false,
+    const persisted = (addProviderCalls()[0][1] as { provider: Provider })
+      .provider;
+    expect(persisted.settingsConfig.codexRouting).not.toHaveProperty(
+      "subagentV2",
+    );
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("initialize_codex_subagent_v2", {
+        providerId: persisted.id,
+      }),
+    );
+    expect(
+      await screen.findByRole("region", {
+        name: "gpt-5.6-sol 子 Agent 能力",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("region", {
+        name: "DeepSeek V4 Flash 子 Agent 能力",
+      }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("region", {
+        name: "DeepSeek V4 Pro 子 Agent 能力",
+      }),
+    ).not.toBeInTheDocument();
+    const cached = queryClient.getQueryData<{
+      providers: Record<string, Provider>;
+    }>(["providers", "codex"]);
+    expect(cached?.providers[persisted.id]).toMatchObject({
+      id: persisted.id,
+      name: "Backend Initialized Official Plan",
+      settingsConfig: {
+        codexRouting: {
+          subagentV2: {
+            profiles: {
+              "gpt-5.6-sol": expect.objectContaining({
+                model: "gpt-5.6-sol",
+              }),
+            },
+          },
+        },
       },
-    ]);
+    });
   });
 
-  it("persists exact schema-v1 defaults when the wizard publishes a new V2 plan", async () => {
+  it("publishes a new wizard plan before asking the backend to initialize V2", async () => {
     const source = provider();
     ipcState.providers = { [source.id]: source };
     const wizard = await mountWizardFromPersistedPlan();
@@ -1226,59 +1300,22 @@ describe("Codex Sub-Agent V2 new-plan capability defaults", () => {
     );
     await waitFor(() => expect(addProviderCalls()).toHaveLength(1));
 
-    expect(addProviderCalls()[0]).toEqual([
-      "add_provider",
-      {
-        provider: expect.objectContaining({
-          settingsConfig: expect.objectContaining({
-            codexRouting: expect.objectContaining({
-              subagentV2: {
-                schemaVersion: 1,
-                selectionPolicy: "balanced",
-                profiles: {
-                  "deepseek-v4-flash": {
-                    model: "deepseek-v4-flash",
-                    enabled: true,
-                    questionnaire: {
-                      taskStrengths: [
-                        "long_context_reading",
-                        "repository_exploration",
-                        "evidence_collection",
-                        "summarization",
-                        "testing",
-                      ],
-                      optimization: "speed",
-                      writeScope: "read_only",
-                      preference: "preferred",
-                      reasoningEffort: "medium",
-                    },
-                  },
-                  "deepseek-v4-pro": {
-                    model: "deepseek-v4-pro",
-                    enabled: true,
-                    questionnaire: {
-                      taskStrengths: [
-                        "complex_debugging",
-                        "architecture_design",
-                        "complex_implementation",
-                        "high_risk_review",
-                        "testing",
-                      ],
-                      optimization: "quality",
-                      writeScope: "complex_changes",
-                      preference: "preferred",
-                      reasoningEffort: "high",
-                    },
-                  },
-                },
-              },
-            }),
-          }),
-        }),
-        app: "codex",
-        addToLive: false,
-      },
-    ]);
+    const persisted = (addProviderCalls()[0][1] as { provider: Provider })
+      .provider;
+    expect(persisted.settingsConfig.codexRouting).not.toHaveProperty(
+      "subagentV2",
+    );
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("initialize_codex_subagent_v2", {
+        providerId: persisted.id,
+      }),
+    );
+    expect(
+      ipcState.providers[persisted.id].settingsConfig.codexRouting.subagentV2
+        .profiles,
+    ).toEqual({
+      "qwen-draft": expect.objectContaining({ model: "QWEN-ＤＲＡＦＴ" }),
+    });
   });
 
   it("keeps an existing legacy V2 plan uninitialized through an ordinary wizard save", async () => {
