@@ -534,6 +534,110 @@ Describe "CCSwitchMulti transactional reinstall orchestration" {
         }
     }
 
+    It "inventories only authoritative top-level config files and ignores backup log and unknown files" {
+        $fixtureRoot = New-Task3ATestDirectory
+        try {
+            $configRoot = Join-Path $fixtureRoot ".cc-switch"
+            New-Item -ItemType Directory -Path (Join-Path $configRoot "backups\volatile"), `
+                (Join-Path $configRoot "logs") -Force | Out-Null
+            New-Task3AEmptySqliteDatabase -Path (Join-Path $configRoot "cc-switch.db")
+            [System.IO.File]::WriteAllText((Join-Path $configRoot "settings.json"), "settings")
+            [System.IO.File]::WriteAllText((Join-Path $configRoot "model-pricing.json"), "pricing")
+            [System.IO.File]::WriteAllText((Join-Path $configRoot "codex-desktop-executable.json"), "desktop")
+            [System.IO.File]::WriteAllText((Join-Path $configRoot "codex_oauth_auth.json"), "oauth")
+            [System.IO.File]::WriteAllText((Join-Path $configRoot "backups\volatile\transaction-result.json"), "dynamic")
+            [System.IO.File]::WriteAllText((Join-Path $configRoot "logs\codex-router.log"), "log")
+            [System.IO.File]::WriteAllText((Join-Path $configRoot "unmanaged-root.txt"), "unknown")
+
+            $inventory = Get-CcsmConfigInventory -ConfigRoot $configRoot
+            $relativePaths = @($inventory.Files | Select-Object -ExpandProperty RelativePath | Sort-Object)
+
+            ($relativePaths -join ",") | Should Be "cc-switch.db,codex-desktop-executable.json,codex_oauth_auth.json,model-pricing.json,settings.json"
+            @($inventory.Sidecars).Count | Should Be 3
+        } finally {
+            Remove-Task3ATestTree -Path $fixtureRoot
+        }
+    }
+
+    It "snapshots only authoritative config files instead of recursively copying volatile history" {
+        $fixtureRoot = New-Task3ATestDirectory
+        try {
+            $configRoot = Join-Path $fixtureRoot ".cc-switch"
+            $transactionRoot = Join-Path $fixtureRoot "transaction"
+            New-Item -ItemType Directory -Path (Join-Path $configRoot "backups\volatile"), `
+                (Join-Path $configRoot "logs"), $transactionRoot -Force | Out-Null
+            New-Task3AEmptySqliteDatabase -Path (Join-Path $configRoot "cc-switch.db")
+            [System.IO.File]::WriteAllText((Join-Path $configRoot "settings.json"), "settings")
+            [System.IO.File]::WriteAllText((Join-Path $configRoot "backups\volatile\transaction-result.json"), "dynamic")
+            [System.IO.File]::WriteAllText((Join-Path $configRoot "logs\codex-router.log"), "log")
+
+            Mock Assert-CcsmRestoreBoundary { }
+            Mock Write-CcsmBackupManifest { }
+            $operations = New-CcsmRealOperations
+            $context = [pscustomobject]@{
+                ConfigPaths = @($configRoot)
+                TransactionRoot = $transactionRoot
+            }
+            $backup = [pscustomobject]@{
+                Path = $transactionRoot
+                ConfigBackups = @()
+                ConfigSnapshotComplete = $false
+            }
+
+            & $operations.SnapshotConfig $context $backup
+
+            $snapshot = Join-Path $transactionRoot "config\0"
+            (Test-Path -LiteralPath (Join-Path $snapshot "cc-switch.db") -PathType Leaf) | Should Be $true
+            (Test-Path -LiteralPath (Join-Path $snapshot "settings.json") -PathType Leaf) | Should Be $true
+            (Test-Path -LiteralPath (Join-Path $snapshot "backups")) | Should Be $false
+            (Test-Path -LiteralPath (Join-Path $snapshot "logs")) | Should Be $false
+        } finally {
+            Remove-Task3ATestTree -Path $fixtureRoot
+        }
+    }
+
+    It "restores authoritative config files without deleting live backup and log history" {
+        $fixtureRoot = New-Task3ATestDirectory
+        try {
+            $installRoot = Join-Path $fixtureRoot "CCSwitchMulti"
+            $appBackup = Join-Path $fixtureRoot "app-backup"
+            $configRoot = Join-Path $fixtureRoot ".cc-switch"
+            $configBackup = Join-Path $fixtureRoot "config-backup"
+            New-Item -ItemType Directory -Path $installRoot, $appBackup, `
+                (Join-Path $configRoot "backups"), (Join-Path $configRoot "logs"), `
+                (Join-Path $configBackup "backups") -Force | Out-Null
+            [System.IO.File]::WriteAllText((Join-Path $installRoot "cc-switch.exe"), "new-install")
+            [System.IO.File]::WriteAllText((Join-Path $appBackup "cc-switch.exe"), "old-install")
+            [System.IO.File]::WriteAllText((Join-Path $configRoot "cc-switch.db"), "new-db")
+            [System.IO.File]::WriteAllText((Join-Path $configRoot "settings.json"), "new-settings")
+            [System.IO.File]::WriteAllText((Join-Path $configRoot "backups\keep.txt"), "keep-backup")
+            [System.IO.File]::WriteAllText((Join-Path $configRoot "logs\keep.log"), "keep-log")
+            [System.IO.File]::WriteAllText((Join-Path $configBackup "cc-switch.db"), "old-db")
+            [System.IO.File]::WriteAllText((Join-Path $configBackup "settings.json"), "old-settings")
+            [System.IO.File]::WriteAllText((Join-Path $configBackup "backups\must-not-copy.txt"), "excluded")
+
+            $script:task12RestoreManifest = [pscustomobject]@{
+                AppBackup = $appBackup
+                ConfigSnapshotComplete = $true
+                ConfigBackups = @([pscustomobject]@{ Source = $configRoot; Backup = $configBackup })
+            }
+            Mock Get-CcsmValidatedBackupManifest { return $script:task12RestoreManifest }
+            $operations = New-CcsmRealOperations
+            $context = [pscustomobject]@{ InstallDirectory = $installRoot }
+            $backup = [pscustomobject]@{ Path = $fixtureRoot }
+
+            & $operations.RestoreAppAndConfig $context $backup
+
+            (Get-Content -Raw -LiteralPath (Join-Path $configRoot "cc-switch.db")) | Should Be "old-db"
+            (Get-Content -Raw -LiteralPath (Join-Path $configRoot "settings.json")) | Should Be "old-settings"
+            (Get-Content -Raw -LiteralPath (Join-Path $configRoot "backups\keep.txt")) | Should Be "keep-backup"
+            (Get-Content -Raw -LiteralPath (Join-Path $configRoot "logs\keep.log")) | Should Be "keep-log"
+            (Test-Path -LiteralPath (Join-Path $configRoot "backups\must-not-copy.txt")) | Should Be $false
+        } finally {
+            Remove-Task3ATestTree -Path $fixtureRoot
+        }
+    }
+
     It "does not restore or launch from a rejected app inventory backup" {
         Assert-TamperedBackupFailsClosed -Tamper "app-inventory"
     }
