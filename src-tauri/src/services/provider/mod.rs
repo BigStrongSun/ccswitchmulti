@@ -869,6 +869,159 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_codex_subagent_v2_uses_the_complete_current_draft_for_batch_actions() {
+        with_test_home(|state, _| {
+            let current = Provider::with_id(
+                "current-router".to_string(),
+                "Current router".to_string(),
+                codex_settings("https://current.example/v1", "sk-current"),
+                None,
+            );
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &current)
+                .expect("seed current provider");
+            state
+                .db
+                .set_current_provider(AppType::Codex.as_str(), &current.id)
+                .expect("keep target provider non-current");
+
+            let target_settings = json!({
+                "modelCatalog": { "models": [
+                    { "model": "repository-scout", "contextWindow": 128000 },
+                    { "model": "qwen3.6", "contextWindow": 262144 }
+                ] },
+                "codexRouting": {
+                    "enabled": true,
+                    "subagentVersion": "v2",
+                    "routes": [{
+                        "id": "all-models",
+                        "match": { "models": ["repository-scout", "qwen3.6"] },
+                        "upstream": { "auth": { "source": "provider_config" } }
+                    }],
+                    "subagentV2": {
+                        "schemaVersion": 1,
+                        "selectionPolicy": "balanced",
+                        "profiles": {
+                            "repository-scout": {
+                                "model": "repository-scout",
+                                "enabled": true,
+                                "questionnaire": {
+                                    "taskStrengths": ["repository_exploration"],
+                                    "optimization": "speed",
+                                    "writeScope": "read_only",
+                                    "preference": "eligible",
+                                    "reasoningEffort": "auto"
+                                }
+                            },
+                            "RAW_INVALID_PROFILE_SENTINEL": {
+                                "model": "qwen3.6",
+                                "enabled": "broken"
+                            }
+                        }
+                    }
+                }
+            });
+            let target = Provider::with_id(
+                "draft-router".to_string(),
+                "Draft router".to_string(),
+                target_settings.clone(),
+                None,
+            );
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &target)
+                .expect("seed target provider");
+
+            let mut current_draft = target_settings["codexRouting"]["subagentV2"].clone();
+            current_draft["selectionPolicy"] = json!("third_party_first");
+            current_draft["profiles"]["repository-scout"]["overrides"] = json!({
+                "description": "Unsaved batch edit must survive."
+            });
+
+            let result = ProviderService::reconcile_codex_subagent_v2_profiles(
+                state,
+                &target.id,
+                crate::codex_config::CodexSubagentV2ReconcileAction::RemoveAllInvalid,
+                Some(current_draft),
+            )
+            .expect("batch action must accept and persist the complete current draft");
+            let persisted = &result.provider.settings_config["codexRouting"]["subagentV2"];
+
+            assert_eq!(persisted["selectionPolicy"], "third_party_first");
+            assert_eq!(
+                persisted["profiles"]["repository-scout"]["overrides"]["description"],
+                "Unsaved batch edit must survive."
+            );
+            assert!(persisted["profiles"]
+                .get("RAW_INVALID_PROFILE_SENTINEL")
+                .is_none());
+        });
+    }
+
+    #[test]
+    fn update_codex_subagent_v2_service_error_redacts_raw_profile_identity() {
+        with_test_home(|state, _| {
+            let target = Provider::with_id(
+                "redaction-router".to_string(),
+                "Redaction router".to_string(),
+                json!({
+                    "modelCatalog": { "models": [
+                        { "model": "PRIVATE_MODEL_SENTINEL", "contextWindow": 128000 }
+                    ] },
+                    "codexRouting": {
+                        "enabled": true,
+                        "subagentVersion": "v2",
+                        "routes": [{
+                            "id": "private-route",
+                            "match": { "models": ["PRIVATE_MODEL_SENTINEL"] },
+                            "upstream": { "auth": { "source": "provider_config" } }
+                        }],
+                        "subagentV2": {
+                            "schemaVersion": 1,
+                            "selectionPolicy": "balanced",
+                            "profiles": {}
+                        }
+                    }
+                }),
+                None,
+            );
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &target)
+                .expect("seed target provider");
+            let invalid = json!({
+                "schemaVersion": 1,
+                "selectionPolicy": "balanced",
+                "profiles": {
+                    "RAW_PROFILE_KEY_SENTINEL": {
+                        "model": "PRIVATE_MODEL_SENTINEL",
+                        "enabled": true,
+                        "questionnaire": {
+                            "taskStrengths": ["repository_exploration"],
+                            "optimization": "speed",
+                            "writeScope": "read_only",
+                            "preference": "eligible",
+                            "reasoningEffort": "auto"
+                        }
+                    }
+                }
+            });
+
+            let error = ProviderService::update_codex_subagent_v2(state, &target.id, invalid)
+                .expect_err("strict update must reject key/model mismatch");
+            let public_error = error.to_string();
+
+            assert_eq!(
+                public_error,
+                "无效输入: Codex subagent V2 configuration is invalid (profile_key_model_mismatch)"
+            );
+            assert!(!public_error.contains("RAW_PROFILE_KEY_SENTINEL"));
+            assert!(!public_error.contains("PRIVATE_MODEL_SENTINEL"));
+        });
+    }
+
+    #[test]
     fn codex_subagent_v2_mutation_result_keeps_provider_shape_and_redacts_projection_errors() {
         let sensitive_error = AppError::Config(
             "settings.taskBody=PRIVATE_TASK apiKey=PRIVATE_CREDENTIAL".to_string(),

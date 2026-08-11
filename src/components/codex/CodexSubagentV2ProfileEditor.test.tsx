@@ -138,6 +138,10 @@ const ipcState = vi.hoisted(() => ({
   statusError: null as string | null,
   updateGate: null as Promise<void> | null,
   beforeV2Persistence: null as (() => void) | null,
+  nextProjection: null as null | {
+    status: "applied" | "not_required" | "pending_retry";
+    warning?: { code: string; message: string };
+  },
 }));
 
 // The only test double is the real frontend process boundary. The dispatcher
@@ -198,7 +202,14 @@ vi.mock("@tauri-apps/api/core", () => ({
           subagentV2: JSON.parse(JSON.stringify(args.subagentV2)),
         };
         ipcState.providers[savedProvider.id] = savedProvider;
-        return JSON.parse(JSON.stringify(savedProvider));
+        return JSON.parse(
+          JSON.stringify({
+            ...savedProvider,
+            ...(ipcState.nextProjection
+              ? { projection: ipcState.nextProjection }
+              : {}),
+          }),
+        );
       }
       case "initialize_codex_subagent_v2": {
         if (!args || typeof args.providerId !== "string") {
@@ -241,22 +252,17 @@ vi.mock("@tauri-apps/api/core", () => ({
             "reconcile_codex_subagent_v2_profiles requires a controlled backend action",
           );
         }
-        if (
-          args.action === "sync_catalog" &&
-          (typeof args.subagentV2 !== "object" || args.subagentV2 === null)
-        ) {
+        if (typeof args.subagentV2 !== "object" || args.subagentV2 === null) {
           throw new Error(
-            "sync_catalog requires the current unsaved subagentV2 draft",
+            "every reconcile action requires the complete current unsaved subagentV2 draft",
           );
         }
         const latest = ipcState.providers[args.providerId];
         if (!latest) throw new Error("provider not found");
         const savedProvider = JSON.parse(JSON.stringify(latest)) as Provider;
-        if (args.action === "sync_catalog") {
-          savedProvider.settingsConfig.codexRouting.subagentV2 = JSON.parse(
-            JSON.stringify(args.subagentV2),
-          );
-        }
+        savedProvider.settingsConfig.codexRouting.subagentV2 = JSON.parse(
+          JSON.stringify(args.subagentV2),
+        );
         const config = savedProvider.settingsConfig.codexRouting.subagentV2;
         if (args.action === "sync_catalog") {
           config.profiles["qwen3.6"] = {
@@ -274,8 +280,13 @@ vi.mock("@tauri-apps/api/core", () => ({
           delete config.profiles.RAW_INVALID_PROFILE_KEY_ALPHA;
           delete config.profiles.RAW_INVALID_PROFILE_KEY_BETA;
         } else if (args.action === "recover_all_invalid_from_catalog") {
+          const aliasProfile = config.profiles.LEGACY_ALIAS_SENTINEL;
+          delete config.profiles.LEGACY_ALIAS_SENTINEL;
           delete config.profiles.RAW_INVALID_PROFILE_KEY_ALPHA;
           delete config.profiles.RAW_INVALID_PROFILE_KEY_BETA;
+          if (aliasProfile) {
+            config.profiles["deepseek-v4-flash"] = aliasProfile;
+          }
           config.profiles["deepseek-v4-pro"] = {
             model: "deepseek-v4-pro",
             enabled: false,
@@ -742,6 +753,7 @@ beforeEach(() => {
   ipcState.statusError = null;
   ipcState.updateGate = null;
   ipcState.beforeV2Persistence = null;
+  ipcState.nextProjection = null;
   vi.mocked(invoke).mockClear();
 });
 
@@ -1403,7 +1415,17 @@ describe("Codex Sub-Agent V2 backend-owned catalog reconciliation", () => {
 
   it("offers one backend-owned batch removal action for every malformed profile", async () => {
     seedMalformedProfiles();
-    const expectedValidProfile = preservedValidProfile();
+    const expectedValidProfile = {
+      ...preservedValidProfile(),
+      questionnaire: {
+        ...preservedValidProfile().questionnaire,
+        optimization: "speed" as const,
+      },
+      overrides: {
+        ...preservedValidProfile().overrides,
+        description: "UNSAVED_REMOVE_DESCRIPTION",
+      },
+    };
     const user = userEvent.setup();
     await mountWorkspaceFromPersistedPlan();
 
@@ -1418,6 +1440,26 @@ describe("Codex Sub-Agent V2 backend-owned catalog reconciliation", () => {
       }),
     ).toBeInTheDocument();
     expectPreservedValidProfileInUi();
+    await chooseOption(
+      user,
+      screen.getByLabelText("第三方子 Agent 选择策略"),
+      "第三方优先",
+    );
+    await chooseOption(
+      user,
+      within(flashRegion()).getByLabelText("优化目标"),
+      "速度",
+    );
+    const description = within(flashRegion()).getByLabelText("角色描述");
+    await user.clear(description);
+    await user.type(description, "UNSAVED_REMOVE_DESCRIPTION");
+    const expectedDraft = JSON.parse(
+      JSON.stringify(
+        ipcState.providers.router.settingsConfig.codexRouting.subagentV2,
+      ),
+    );
+    expectedDraft.selectionPolicy = "third_party_first";
+    expectedDraft.profiles["repository-scout"] = expectedValidProfile;
     await user.click(
       screen.getByRole("button", {
         name: "删除全部无效能力配置（2 项）",
@@ -1427,7 +1469,11 @@ describe("Codex Sub-Agent V2 backend-owned catalog reconciliation", () => {
     await waitFor(() =>
       expect(invoke).toHaveBeenCalledWith(
         "reconcile_codex_subagent_v2_profiles",
-        { providerId: "router", action: "remove_all_invalid" },
+        {
+          providerId: "router",
+          action: "remove_all_invalid",
+          subagentV2: expectedDraft,
+        },
       ),
     );
     await waitFor(() =>
@@ -1442,27 +1488,40 @@ describe("Codex Sub-Agent V2 backend-owned catalog reconciliation", () => {
         name: "无效能力配置 2",
       }),
     ).not.toBeInTheDocument();
-    expectPreservedValidProfileInUi();
+    expect(screen.getByLabelText("第三方子 Agent 选择策略")).toHaveValue(
+      "third_party_first",
+    );
+    expect(within(flashRegion()).getByLabelText("优化目标")).toHaveValue(
+      "speed",
+    );
+    expect(within(flashRegion()).getByLabelText("角色描述")).toHaveValue(
+      "UNSAVED_REMOVE_DESCRIPTION",
+    );
+    expect(within(flashRegion()).getByLabelText("开发者指令")).toHaveValue(
+      "KEEP_VALID_INSTRUCTIONS",
+    );
     const profilesAfterRemoval =
       ipcState.providers.router.settingsConfig.codexRouting.subagentV2.profiles;
     expect(profilesAfterRemoval).toEqual({
       "repository-scout": expectedValidProfile,
     });
-    expect(
-      vi
-        .mocked(invoke)
-        .mock.calls.map(([, args]) => JSON.stringify(args) ?? "")
-        .every(
-          (serialized) =>
-            !serialized.includes("RAW_INVALID_PROFILE_KEY_ALPHA") &&
-            !serialized.includes("RAW_INVALID_PROFILE_KEY_BETA"),
-        ),
-    ).toBe(true);
+    expect(document.body.textContent).not.toContain(
+      "RAW_INVALID_PROFILE_KEY_ALPHA",
+    );
+    expect(document.body.textContent).not.toContain(
+      "RAW_INVALID_PROFILE_KEY_BETA",
+    );
   });
 
   it("offers one backend-owned catalog recovery action for every malformed profile", async () => {
     seedMalformedProfiles();
-    const expectedValidProfile = preservedValidProfile();
+    const expectedValidProfile = {
+      ...preservedValidProfile(),
+      overrides: {
+        ...preservedValidProfile().overrides,
+        roleName: "unsaved-recovery-role",
+      },
+    };
     const user = userEvent.setup();
     await mountWorkspaceFromPersistedPlan();
 
@@ -1477,6 +1536,15 @@ describe("Codex Sub-Agent V2 backend-owned catalog reconciliation", () => {
       }),
     ).toBeInTheDocument();
     expectPreservedValidProfileInUi();
+    const roleName = within(flashRegion()).getByLabelText("角色名称");
+    await user.clear(roleName);
+    await user.type(roleName, "unsaved-recovery-role");
+    const expectedDraft = JSON.parse(
+      JSON.stringify(
+        ipcState.providers.router.settingsConfig.codexRouting.subagentV2,
+      ),
+    );
+    expectedDraft.profiles["repository-scout"] = expectedValidProfile;
     await user.click(
       screen.getByRole("button", {
         name: "从模型目录恢复全部无效能力配置（2 项）",
@@ -1489,6 +1557,7 @@ describe("Codex Sub-Agent V2 backend-owned catalog reconciliation", () => {
         {
           providerId: "router",
           action: "recover_all_invalid_from_catalog",
+          subagentV2: expectedDraft,
         },
       ),
     );
@@ -1517,7 +1586,12 @@ describe("Codex Sub-Agent V2 backend-owned catalog reconciliation", () => {
         name: "无效能力配置 2",
       }),
     ).not.toBeInTheDocument();
-    expectPreservedValidProfileInUi();
+    expect(within(flashRegion()).getByLabelText("角色名称")).toHaveValue(
+      "unsaved-recovery-role",
+    );
+    expect(within(flashRegion()).getByLabelText("角色描述")).toHaveValue(
+      "KEEP_VALID_DESCRIPTION",
+    );
     const profilesAfterRecovery =
       ipcState.providers.router.settingsConfig.codexRouting.subagentV2.profiles;
     expect(Object.keys(profilesAfterRecovery).sort()).toEqual([
@@ -1550,16 +1624,75 @@ describe("Codex Sub-Agent V2 backend-owned catalog reconciliation", () => {
         reasoningEffort: "auto",
       },
     });
+    expect(document.body.textContent).not.toContain(
+      "RAW_INVALID_PROFILE_KEY_ALPHA",
+    );
+    expect(document.body.textContent).not.toContain(
+      "RAW_INVALID_PROFILE_KEY_BETA",
+    );
+  });
+
+  it("offers backend re-key recovery for a structurally usable canonical key mismatch", async () => {
+    const legacyProfile = preservedValidProfile();
+    const config =
+      ipcState.providers.router.settingsConfig.codexRouting.subagentV2;
+    config.profiles = {
+      LEGACY_ALIAS_SENTINEL: legacyProfile,
+    };
+    ipcState.statusResponse = {
+      mode: "v2",
+      generationSource: "configured_profiles",
+      profiles: [
+        {
+          routable: false,
+          status: "invalid",
+          nonGenerationReason: "invalid",
+          warnings: [],
+        },
+      ],
+      warnings: [],
+    };
+    const expectedDraft = JSON.parse(JSON.stringify(config));
+    const user = userEvent.setup();
+    await mountWorkspaceFromPersistedPlan();
+
     expect(
-      vi
-        .mocked(invoke)
-        .mock.calls.map(([, args]) => JSON.stringify(args) ?? "")
-        .every(
-          (serialized) =>
-            !serialized.includes("RAW_INVALID_PROFILE_KEY_ALPHA") &&
-            !serialized.includes("RAW_INVALID_PROFILE_KEY_BETA"),
-        ),
-    ).toBe(true);
+      await screen.findByRole("region", {
+        name: "DeepSeek V4 Flash 子 Agent 能力",
+      }),
+    ).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("LEGACY_ALIAS_SENTINEL");
+    await user.click(
+      await screen.findByRole("button", {
+        name: "从模型目录恢复全部无效能力配置（1 项）",
+      }),
+    );
+
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith(
+        "reconcile_codex_subagent_v2_profiles",
+        {
+          providerId: "router",
+          action: "recover_all_invalid_from_catalog",
+          subagentV2: expectedDraft,
+        },
+      ),
+    );
+    const recovered = await screen.findByRole("region", {
+      name: "DeepSeek V4 Flash 子 Agent 能力",
+    });
+    expect(within(recovered).getByLabelText("角色名称")).toHaveValue(
+      "keep-valid-role",
+    );
+    expect(within(recovered).getByLabelText("角色描述")).toHaveValue(
+      "KEEP_VALID_DESCRIPTION",
+    );
+    expect(
+      ipcState.providers.router.settingsConfig.codexRouting.subagentV2.profiles[
+        "deepseek-v4-flash"
+      ],
+    ).toEqual(legacyProfile);
+    expect(document.body.textContent).not.toContain("LEGACY_ALIAS_SENTINEL");
   });
 });
 
@@ -2229,6 +2362,30 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
     );
     expect(within(flashRegion()).getByLabelText("角色名称")).toHaveValue(
       "wizard-scout",
+    );
+  });
+
+  it("keeps a pending projection warning visible after the wizard persisted callback refreshes provider props", async () => {
+    const warning = "数据库已保存，Codex live 投影待重试。";
+    ipcState.nextProjection = {
+      status: "pending_retry",
+      warning: {
+        code: "codex_live_projection_pending_retry",
+        message: warning,
+      },
+    };
+    const wizard = await renderWizard();
+    const description = within(flashRegion()).getByLabelText("角色描述");
+    await wizard.user.clear(description);
+    await wizard.user.type(description, "warning lifecycle refresh draft");
+
+    await saveV2(wizard.user);
+    await waitFor(() => expect(v2PersistenceCalls()).toHaveLength(1));
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    expect(screen.getByText(warning)).toBeInTheDocument();
+    expect(within(flashRegion()).getByLabelText("角色描述")).toHaveValue(
+      "warning lifecycle refresh draft",
     );
   });
 

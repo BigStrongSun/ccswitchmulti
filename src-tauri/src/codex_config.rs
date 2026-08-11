@@ -5721,6 +5721,81 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
+    fn codex_subagent_v2_preview_preserves_selected_non_last_profile_allocation_order() {
+        let _guard = TestHomeGuard::new();
+        let shared_questionnaire = json!({
+            "taskStrengths": ["repository_exploration"],
+            "optimization": "speed",
+            "writeScope": "read_only",
+            "preference": "eligible",
+            "reasoningEffort": "auto"
+        });
+        let selected_first = json!({
+            "model": "model-a",
+            "enabled": true,
+            "questionnaire": shared_questionnaire.clone(),
+            "overrides": { "roleName": "shared-review" }
+        });
+        let later_peer = json!({
+            "model": "model-b",
+            "enabled": true,
+            "questionnaire": shared_questionnaire,
+            "overrides": { "roleName": "shared-review" }
+        });
+        let settings = codex_subagent_profile_status_settings(
+            "v2",
+            json!({ "model-a": selected_first.clone(), "model-b": later_peer }),
+            json!([
+                { "model": "model-a", "contextWindow": 128000 },
+                { "model": "model-b", "contextWindow": 256000 }
+            ]),
+            json!([{
+                "id": "shared-route",
+                "match": { "models": ["model-a", "model-b"] },
+                "upstream": { "auth": { "source": "provider_config" } }
+            }]),
+        );
+        let specs = vec![
+            review_codex_catalog_spec("model-a"),
+            review_codex_catalog_spec("model-b"),
+        ];
+        sync_codex_managed_agent_files_with_settings(
+            &specs,
+            CodexSubagentVersion::V2,
+            &settings,
+            None,
+        )
+        .expect("materialize original profile order");
+        let materialized_name = std::fs::read_dir(get_codex_agents_dir())
+            .expect("enumerate materialized roles")
+            .filter_map(|entry| {
+                let path = entry.expect("role entry").path();
+                let rendered = std::fs::read_to_string(path).ok()?;
+                let parsed: toml::Value = toml::from_str(&rendered).ok()?;
+                (parsed["model"].as_str() == Some("model-a"))
+                    .then(|| parsed["name"].as_str().map(ToString::to_string))
+                    .flatten()
+            })
+            .next()
+            .expect("materialized selected model-a role");
+        assert_eq!(materialized_name, "shared-review");
+
+        let preview = preview_codex_subagent_profile_with_context(
+            settings,
+            "model-a".to_string(),
+            serde_json::from_value(selected_first).expect("typed selected profile"),
+            None,
+        )
+        .expect("preview selected non-last profile");
+
+        assert_eq!(
+            preview.effective_role_name, materialized_name,
+            "replacing a selected non-last profile must not move it behind a later collision peer"
+        );
+    }
+
+    #[test]
     fn codex_subagent_v2_backend_initialization_and_catalog_sync_own_canonical_drafts() {
         let settings = codex_subagent_profile_status_settings(
             "v2",
@@ -5784,6 +5859,77 @@ mod tests {
         assert_eq!(synced["profiles"]["qwen3.6"]["enabled"], false);
         parse_persisted_subagent_v2(&synced)
             .expect("synced backend result must be strict-storage valid");
+    }
+
+    #[test]
+    fn codex_subagent_v2_initialization_only_includes_routable_catalog_models() {
+        let settings = codex_subagent_profile_status_settings(
+            "v2",
+            json!({}),
+            json!([
+                { "model": "deepseek-v4-flash", "contextWindow": 1000000 },
+                { "model": "deepseek-v4-pro", "contextWindow": 1000000 },
+                { "model": "qwen3.6", "contextWindow": 262144 }
+            ]),
+            json!([{
+                "id": "qwen-only",
+                "match": { "models": ["qwen3.6"] },
+                "upstream": { "auth": { "source": "provider_config" } }
+            }]),
+        );
+
+        let initialized = initialize_codex_subagent_v2_for_candidate(&settings, None)
+            .expect("initialize from the actually routable catalog only");
+        let keys = initialized["profiles"]
+            .as_object()
+            .expect("initialized profiles object")
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+
+        assert_eq!(keys, vec!["qwen3.6"]);
+        assert_eq!(initialized["profiles"]["qwen3.6"]["enabled"], false);
+        assert_eq!(
+            initialized["profiles"]["qwen3.6"]["questionnaire"]["preference"],
+            "eligible"
+        );
+    }
+
+    #[test]
+    fn codex_subagent_v2_strict_candidate_error_redacts_raw_profile_identity() {
+        let settings = codex_subagent_profile_status_settings(
+            "v2",
+            json!({
+                "RAW_PROFILE_KEY_SENTINEL": {
+                    "model": "PRIVATE_MODEL_SENTINEL",
+                    "enabled": true,
+                    "questionnaire": {
+                        "taskStrengths": ["repository_exploration"],
+                        "optimization": "speed",
+                        "writeScope": "read_only",
+                        "preference": "eligible",
+                        "reasoningEffort": "auto"
+                    }
+                }
+            }),
+            json!([{ "model": "PRIVATE_MODEL_SENTINEL", "contextWindow": 128000 }]),
+            json!([{
+                "id": "private-route",
+                "match": { "models": ["PRIVATE_MODEL_SENTINEL"] },
+                "upstream": { "auth": { "source": "provider_config" } }
+            }]),
+        );
+
+        let error = validate_codex_subagent_v2_candidate(&settings, None, true)
+            .expect_err("strict key/model mismatch must reject the candidate");
+        let public_error = error.to_string();
+
+        assert_eq!(
+            public_error,
+            "无效输入: Codex subagent V2 configuration is invalid (profile_key_model_mismatch)"
+        );
+        assert!(!public_error.contains("RAW_PROFILE_KEY_SENTINEL"));
+        assert!(!public_error.contains("PRIVATE_MODEL_SENTINEL"));
     }
 
     #[test]
@@ -5853,6 +5999,52 @@ mod tests {
         assert!(!public_recovered.contains("RAW_SECRET_QWEN"));
         parse_persisted_subagent_v2(&recovered)
             .expect("catalog recovery must produce strict-storage valid output");
+    }
+
+    #[test]
+    fn codex_subagent_v2_backend_rekeys_a_structurally_valid_alias_without_losing_fields() {
+        let legacy_profile = json!({
+            "model": "deepseek-v4-flash",
+            "enabled": true,
+            "questionnaire": {
+                "taskStrengths": ["repository_exploration", "testing"],
+                "optimization": "quality",
+                "writeScope": "bounded_changes",
+                "preference": "fallback",
+                "reasoningEffort": "xhigh"
+            },
+            "overrides": {
+                "roleName": "keep-valid-role",
+                "description": "KEEP_VALID_DESCRIPTION",
+                "developerInstructions": "KEEP_VALID_INSTRUCTIONS",
+                "nicknameCandidates": ["KeepValid", "Stable"],
+                "modelReasoningEffort": "xhigh"
+            }
+        });
+        let settings = codex_subagent_profile_status_settings(
+            "v2",
+            json!({ "LEGACY_ALIAS_SENTINEL": legacy_profile.clone() }),
+            json!([{ "model": "deepseek-v4-flash", "contextWindow": 1000000 }]),
+            json!([{
+                "id": "flash-route",
+                "match": { "models": ["deepseek-v4-flash"] },
+                "upstream": { "auth": { "source": "provider_config" } }
+            }]),
+        );
+        let draft = settings["codexRouting"]["subagentV2"].clone();
+
+        let recovered = reconcile_codex_subagent_v2_for_candidate(
+            &settings,
+            CodexSubagentV2ReconcileAction::RecoverAllInvalidFromCatalog,
+            Some(&draft),
+            None,
+        )
+        .expect("backend recovery should re-key a structurally valid alias");
+
+        assert_eq!(recovered["profiles"]["deepseek-v4-flash"], legacy_profile);
+        assert!(recovered["profiles"].get("LEGACY_ALIAS_SENTINEL").is_none());
+        parse_persisted_subagent_v2(&recovered)
+            .expect("re-keyed alias recovery must be strict-storage valid");
     }
 
     #[test]
