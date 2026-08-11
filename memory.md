@@ -3147,3 +3147,12 @@
 - 修复边界：保留“已有 semantic output 后绝不重放”的副作用安全约束；将传输错误转换为合法 Responses SSE `event: error` 后干净结束 HTTP body。chunk-size EOF、真实 timeout、其他传输中断分别显示“HTTP 分块响应未完整结束”“读取超时”“传输中断”；正文前最多 5 次安全重连耗尽也通过合法 SSE 报错，不再制造损坏的下游 body。
 - 历史定位：通用 passthrough 将 stream error 作为 Body error 的基础行为来自初始导入 `693c3872`；原生 Responses 在已输出正文后明确 `yield Err` 的当前安全重连路径由 `461dc35c`（2026-08-03）引入，最早包含该行为的现存正式 tag 为 `v3.19.1-5`。该提交的不重放设计本身正确，缺陷是错误呈现协议选择错误。
 - 回归验收：`native_responses_surfaces_post_content_chunked_eof_as_protocol_error` 证明不重放、下游所有 stream item 均为 `Ok`、存在合法 `event: error` 且不再泄漏 `error decoding response body`；`native_responses_transport_error_message_distinguishes_true_timeout` 保证 timeout 不与 EOF 混淆。`cargo test --lib proxy::providers::streaming_retry::tests` 为 22/22；完整 Rust library 为 2925 passed、0 failed、2 ignored；`cargo fmt --check`、`cargo check --lib`、`git diff --check` 通过。
+
+## 2026-08-11 CCSwitchMulti v3.19.1-20 GitHub 正式发布
+
+- `v3.19.1-20` 是 `v3.19.1-14` 之后首个 GitHub 正式版本；本地 `3.19.1-15` 至 `-19` 只用于阶段性交付，没有复用 `-19` 标签发布内容不同的二进制。版本提交 `8de0b4222695dda7119284642671fce2ac3314d1` 同步 `package.json`、`Cargo.toml`、`Cargo.lock` 与 `tauri.conf.json`，中文累计说明为 `docs/release-notes/v3.19.1-20-zh.md`。
+- annotated tag object 为 `3638885a87f2fd6fcb0e6b3cc89fc9fb79913e2f`，远端 peeled commit 精确为 `8de0b4222695dda7119284642671fce2ac3314d1`。发布后记忆提交不得移动该 tag。
+- GitHub Actions Release run `31467563416`（`https://github.com/BigStrongSun/ccswitchmulti/actions/runs/31467563416`）耗时 42m47s；Linux x64/ARM64、Windows x64/ARM64、macOS、Publish GitHub Release、Assemble `latest.json` 全部 `completed/success`。
+- 正式 Release 为 `https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.19.1-20`，页面标记 Latest，正文完整覆盖 Sub-Agent V1/V2、OAuth device-flow 竞态、自启动/安全重装、小窗口裁切和 Responses 断流错误呈现。页面共 21 项：19 个实际 release assets，加 GitHub 自动生成的 source zip/tar.gz。
+- 远端 `latest.json` 为 `version=3.19.1-20`、6 个平台键，所有 URL 均指向本 tag、HTTP 200，所有 signature 非空且逐项与对应 `.sig` 完全一致；`/releases/latest` 最终跳转本 tag。下载后的 `latest.json` SHA-256 为 `a0a5d5f785d18603cf6fc814e2376f786e6c2c6746897cdc33590e05d08ff1a2`，Windows x64 setup SHA-256 为 `99177dcd9ed098a7f34f82afc81caa8b6c3c53be7381a5df3e8a15c9ad2e9763`，均与 GitHub 页面服务端 digest 一致。
+- 本地发布候选门禁：Rust `2925 passed / 0 failed / 2 ignored`；前端 `117 files / 918 tests passed`；typecheck、production renderer build、`cargo fmt --check`、`cargo check --lib` 和 `git diff --check` 通过。发布成功不等于用户机器已安装 `-20` 或已完成 Windows/macOS/Linux 真实重启/登录验收。
