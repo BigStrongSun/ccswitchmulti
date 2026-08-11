@@ -573,7 +573,7 @@ async function mountWorkspaceFromPersistedPlan(): Promise<
         providers={Object.values(loaded)}
         activeProviderId={selectedPlan.id}
         initialProviderId={selectedPlan.id}
-        initialTab="routes"
+        initialTab="subagents"
         isProxyRunning={false}
         isCodexTakeoverActive={false}
         onEditProvider={vi.fn()}
@@ -582,9 +582,12 @@ async function mountWorkspaceFromPersistedPlan(): Promise<
       />
     </QueryClientProvider>,
   );
-  await screen.findByRole("tab", { name: "路由规则" });
+  await screen.findByRole("tab", { name: "子 Agent" });
   await waitFor(() =>
-    expect(invoke).toHaveBeenCalledWith("get_global_proxy_config"),
+    expect(invoke).toHaveBeenCalledWith(
+      "get_codex_subagent_profile_statuses",
+      { settingsConfig: selectedPlan.settingsConfig },
+    ),
   );
   return { ...result, selectedPlan };
 }
@@ -608,7 +611,7 @@ async function mountWorkspaceWithoutPlan(source = provider()) {
         providers={Object.values(loaded)}
         activeProviderId={source.id}
         initialProviderId={source.id}
-        initialTab="routes"
+        initialTab="subagents"
         isProxyRunning={false}
         isCodexTakeoverActive={false}
         onEditProvider={vi.fn()}
@@ -617,9 +620,9 @@ async function mountWorkspaceWithoutPlan(source = provider()) {
       />
     </QueryClientProvider>,
   );
-  await screen.findByRole("tab", { name: "路由规则" });
-  await waitFor(() =>
-    expect(invoke).toHaveBeenCalledWith("get_global_proxy_config"),
+  await screen.findByRole("tab", { name: "子 Agent" });
+  await screen.findByText(
+    "先创建或选择一个多路路由方案，再配置它的子 Agent 协议和模型能力。",
   );
   return { ...result, source, queryClient };
 }
@@ -684,7 +687,7 @@ function latestSavedPlan() {
 async function saveV2(user: UserEvent) {
   await user.click(
     await screen.findByRole("button", {
-      name: "保存 V2 子 Agent 能力配置",
+      name: "保存 V2 子 Agent 配置",
     }),
   );
 }
@@ -702,9 +705,20 @@ async function chooseOption(
   await user.click(await screen.findByRole("option", { name: optionName }));
 }
 
+async function openProfile(user: UserEvent, model: string) {
+  const trigger = await screen.findByRole("button", {
+    name: new RegExp(`配置 ${model}`, "i"),
+  });
+  if (trigger.getAttribute("aria-expanded") !== "true") {
+    await user.click(trigger);
+  }
+  expect(trigger).toHaveAttribute("aria-expanded", "true");
+  return screen.getByRole("region", { name: `${model} 子 Agent 配置` });
+}
+
 function flashRegion() {
   return screen.getByRole("region", {
-    name: "DeepSeek V4 Flash 子 Agent 能力",
+    name: "deepseek-v4-flash 子 Agent 配置",
   });
 }
 
@@ -738,8 +752,28 @@ function expectPreservedValidProfileInUi() {
 
 function proRegion() {
   return screen.getByRole("region", {
-    name: "DeepSeek V4 Pro 子 Agent 能力",
+    name: "deepseek-v4-pro 子 Agent 配置",
   });
+}
+
+async function openAdvancedFields(user: UserEvent, model = "deepseek-v4-flash") {
+  const region = await openProfile(user, model);
+  const trigger = within(region).getByRole("button", { name: "高级字段" });
+  if (trigger.getAttribute("aria-expanded") !== "true") {
+    await user.click(trigger);
+  }
+  return region;
+}
+
+async function openGeneratedOutput(user: UserEvent, model = "deepseek-v4-flash") {
+  const region = await openProfile(user, model);
+  const trigger = within(region).getByRole("button", {
+    name: "生成结果与 TOML",
+  });
+  if (trigger.getAttribute("aria-expanded") !== "true") {
+    await user.click(trigger);
+  }
+  return region;
 }
 
 function flashBackendRegion() {
@@ -1730,6 +1764,211 @@ describe("Codex Sub-Agent V2 backend-owned catalog reconciliation", () => {
       ],
     ).toEqual(legacyProfile);
     expect(document.body.textContent).not.toContain("LEGACY_ALIAS_SENTINEL");
+  });
+});
+
+describe("Codex Sub-Agent V2 searchable Accordion workspace", () => {
+  it("sorts enabled routable profiles first and expands only one Accordion model", async () => {
+    const user = userEvent.setup();
+    await renderWorkspace();
+
+    const triggers = await screen.findAllByRole("button", {
+      name: /配置 deepseek-v4-/i,
+    });
+    expect(triggers.map((button) => button.getAttribute("aria-expanded"))).toEqual([
+      "true",
+      "false",
+    ]);
+    expect(triggers[0]).toHaveTextContent("deepseek-v4-flash");
+    expect(within(triggers[0]).getByText("第三方")).toBeVisible();
+    expect(within(triggers[0]).getByText("可路由")).toBeVisible();
+    expect(within(triggers[0]).getByText("可用")).toBeVisible();
+    expect(within(triggers[0]).getByText("推理 medium")).toBeVisible();
+    expect(within(triggers[0]).getByText("含手工覆盖")).toBeVisible();
+    expect(within(triggers[0]).getByText("仓库探索")).toBeVisible();
+    expect(
+      screen.getByRole("switch", {
+        name: "启用 deepseek-v4-flash 作为 V2 子 Agent",
+      }),
+    ).toBeChecked();
+
+    await user.click(triggers[1]);
+
+    expect(triggers[0]).toHaveAttribute("aria-expanded", "false");
+    expect(triggers[1]).toHaveAttribute("aria-expanded", "true");
+    expect(within(triggers[1]).getByText("不可路由")).toBeVisible();
+    expect(within(triggers[1]).getByText("后备")).toBeVisible();
+    expect(within(triggers[1]).getByText("复杂实现")).toBeVisible();
+  });
+
+  it("通过搜索模型、profile key 和 Provider 类型快速定位配置", async () => {
+    const user = userEvent.setup();
+    await renderWorkspace();
+    const search = await screen.findByRole("searchbox", {
+      name: "搜索子 Agent 模型",
+    });
+
+    await user.type(search, "offline-writer");
+    expect(
+      screen.getByRole("button", { name: /配置 deepseek-v4-pro/i }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: /配置 deepseek-v4-flash/i }),
+    ).not.toBeInTheDocument();
+
+    await user.clear(search);
+    await user.type(search, "third_party");
+    expect(
+      screen.getAllByRole("button", { name: /配置 deepseek-v4-/i }),
+    ).toHaveLength(2);
+  });
+
+  it("使用筛选区分已启用、待配置、不可路由并可恢复全部", async () => {
+    seedPersistedPlan(true);
+    ipcState.providers.router.settingsConfig.codexRouting.subagentV2.profiles[
+      "offline-writer"
+    ].enabled = false;
+    const user = userEvent.setup();
+    await mountWorkspaceFromPersistedPlan();
+
+    const draftFilter = await screen.findByRole("button", { name: "待配置" });
+    await user.click(draftFilter);
+    expect(draftFilter).toHaveAttribute("aria-pressed", "true");
+    expect(
+      screen.getByRole("button", { name: /配置 deepseek-v4-pro/i }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: /配置 deepseek-v4-flash/i }),
+    ).not.toBeInTheDocument();
+
+    const unroutableFilter = screen.getByRole("button", { name: "不可路由" });
+    await user.click(unroutableFilter);
+    expect(unroutableFilter).toHaveAttribute("aria-pressed", "true");
+    expect(
+      screen.getByRole("button", { name: /配置 deepseek-v4-pro/i }),
+    ).toBeVisible();
+
+    const enabledFilter = screen.getByRole("button", { name: "已启用" });
+    await user.click(enabledFilter);
+    expect(
+      screen.getByRole("button", { name: /配置 deepseek-v4-flash/i }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: /配置 deepseek-v4-pro/i }),
+    ).not.toBeInTheDocument();
+
+    const allFilter = screen.getByRole("button", { name: "全部" });
+    await user.click(allFilter);
+    expect(allFilter).toHaveAttribute("aria-pressed", "true");
+    expect(
+      screen.getAllByRole("button", { name: /配置 deepseek-v4-/i }),
+    ).toHaveLength(2);
+  });
+
+  it("在搜索和筛选无结果时提供可执行的清除入口", async () => {
+    const user = userEvent.setup();
+    await renderWorkspace();
+    await user.type(
+      await screen.findByRole("searchbox", { name: "搜索子 Agent 模型" }),
+      "model-does-not-exist",
+    );
+
+    expect(screen.getByText("没有符合条件的子 Agent 模型")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "清除筛选" }));
+    expect(
+      screen.getAllByRole("button", { name: /配置 deepseek-v4-/i }),
+    ).toHaveLength(2);
+  });
+
+  it("keeps 高级字段 and generated TOML collapsed until requested", async () => {
+    const user = userEvent.setup();
+    await renderWorkspace();
+    const flash = flashRegion();
+
+    expect(within(flash).getByRole("group", { name: "任务优势" })).toBeVisible();
+    expect(within(flash).queryByLabelText("角色描述")).not.toBeInTheDocument();
+    expect(
+      within(flash).queryByText(previewFixture.tomlPreview, {
+        normalizer: getDefaultNormalizer({
+          trim: false,
+          collapseWhitespace: false,
+        }),
+      }),
+    ).not.toBeInTheDocument();
+
+    await openAdvancedFields(user);
+    expect(within(flash).getByLabelText("角色描述")).toBeVisible();
+    await openGeneratedOutput(user);
+    expect(
+      within(flash).getByText(previewFixture.tomlPreview, {
+        normalizer: getDefaultNormalizer({
+          trim: false,
+          collapseWhitespace: false,
+        }),
+      }),
+    ).toBeVisible();
+  });
+
+  it("用清晰的模型目录动作保留完整未保存草稿", async () => {
+    const user = userEvent.setup();
+    await renderWorkspace();
+    await chooseOption(
+      user,
+      within(flashRegion()).getByLabelText("优化目标"),
+      "质量",
+    );
+    const expectedUnsavedDraft = JSON.parse(
+      JSON.stringify(
+        ipcState.providers.router.settingsConfig.codexRouting.subagentV2,
+      ),
+    );
+    expectedUnsavedDraft.profiles["repository-scout"].questionnaire.optimization =
+      "quality";
+
+    expect(
+      screen.getByText(
+        "发现当前可路由模型并加入列表；新模型默认关闭，已有问卷和手工设置不会被覆盖。",
+      ),
+    ).toBeVisible();
+    await user.click(
+      screen.getByRole("button", { name: "从模型目录添加可配置模型" }),
+    );
+
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith(
+        "reconcile_codex_subagent_v2_profiles",
+        {
+          providerId: "router",
+          action: "sync_catalog",
+          subagentV2: expectedUnsavedDraft,
+        },
+      ),
+    );
+    expect(
+      await screen.findByText("已从模型目录添加可配置模型；已有设置保持不变"),
+    ).toBeVisible();
+  });
+
+  it("在粘性保存区反馈未保存和保存成功状态", async () => {
+    const user = userEvent.setup();
+    await renderWorkspace();
+
+    expect(screen.getByText("所有更改均已保存")).toBeVisible();
+    await chooseOption(
+      user,
+      within(flashRegion()).getByLabelText("优化目标"),
+      "质量",
+    );
+    expect(screen.getByText("有未保存更改")).toBeVisible();
+
+    await saveV2(user);
+
+    expect(
+      await screen.findByText(
+        "配置已保存；重启 Codex/app-server 并新建会话后生效",
+      ),
+    ).toBeVisible();
+    expect(screen.getByText("所有更改均已保存")).toBeVisible();
   });
 });
 
