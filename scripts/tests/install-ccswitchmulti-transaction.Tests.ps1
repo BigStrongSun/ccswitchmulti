@@ -541,6 +541,8 @@ Describe "CCSwitchMulti transactional reinstall orchestration" {
             New-Item -ItemType Directory -Path (Join-Path $configRoot "backups\volatile"), `
                 (Join-Path $configRoot "logs") -Force | Out-Null
             New-Task3AEmptySqliteDatabase -Path (Join-Path $configRoot "cc-switch.db")
+            [System.IO.File]::WriteAllText((Join-Path $configRoot "cc-switch.db-wal"), "wal")
+            [System.IO.File]::WriteAllText((Join-Path $configRoot "cc-switch.db-shm"), "shm")
             [System.IO.File]::WriteAllText((Join-Path $configRoot "settings.json"), "settings")
             [System.IO.File]::WriteAllText((Join-Path $configRoot "model-pricing.json"), "pricing")
             [System.IO.File]::WriteAllText((Join-Path $configRoot "codex-desktop-executable.json"), "desktop")
@@ -550,10 +552,12 @@ Describe "CCSwitchMulti transactional reinstall orchestration" {
             [System.IO.File]::WriteAllText((Join-Path $configRoot "unmanaged-root.txt"), "unknown")
 
             $inventory = Get-CcsmConfigInventory -ConfigRoot $configRoot
-            $relativePaths = @($inventory.Files | Select-Object -ExpandProperty RelativePath | Sort-Object)
+            [string[]]$relativePaths = @($inventory.Files | Select-Object -ExpandProperty RelativePath)
+            [Array]::Sort($relativePaths, [System.StringComparer]::Ordinal)
 
-            ($relativePaths -join ",") | Should Be "cc-switch.db,codex-desktop-executable.json,codex_oauth_auth.json,model-pricing.json,settings.json"
+            ($relativePaths -join ",") | Should Be "cc-switch.db,cc-switch.db-shm,cc-switch.db-wal,codex-desktop-executable.json,codex_oauth_auth.json,model-pricing.json,settings.json"
             @($inventory.Sidecars).Count | Should Be 3
+            @($inventory.Sidecars | Where-Object { $_.Exists }).Count | Should Be 3
         } finally {
             Remove-Task3ATestTree -Path $fixtureRoot
         }
@@ -570,6 +574,7 @@ Describe "CCSwitchMulti transactional reinstall orchestration" {
             [System.IO.File]::WriteAllText((Join-Path $configRoot "settings.json"), "settings")
             [System.IO.File]::WriteAllText((Join-Path $configRoot "backups\volatile\transaction-result.json"), "dynamic")
             [System.IO.File]::WriteAllText((Join-Path $configRoot "logs\codex-router.log"), "log")
+            [System.IO.File]::WriteAllText((Join-Path $configRoot "unmanaged-root.txt"), "unknown")
 
             Mock Assert-CcsmRestoreBoundary { }
             Mock Write-CcsmBackupManifest { }
@@ -591,6 +596,7 @@ Describe "CCSwitchMulti transactional reinstall orchestration" {
             (Test-Path -LiteralPath (Join-Path $snapshot "settings.json") -PathType Leaf) | Should Be $true
             (Test-Path -LiteralPath (Join-Path $snapshot "backups")) | Should Be $false
             (Test-Path -LiteralPath (Join-Path $snapshot "logs")) | Should Be $false
+            (Test-Path -LiteralPath (Join-Path $snapshot "unmanaged-root.txt")) | Should Be $false
         } finally {
             Remove-Task3ATestTree -Path $fixtureRoot
         }
@@ -609,9 +615,12 @@ Describe "CCSwitchMulti transactional reinstall orchestration" {
             [System.IO.File]::WriteAllText((Join-Path $installRoot "cc-switch.exe"), "new-install")
             [System.IO.File]::WriteAllText((Join-Path $appBackup "cc-switch.exe"), "old-install")
             [System.IO.File]::WriteAllText((Join-Path $configRoot "cc-switch.db"), "new-db")
+            [System.IO.File]::WriteAllText((Join-Path $configRoot "cc-switch.db-wal"), "stale-wal")
+            [System.IO.File]::WriteAllText((Join-Path $configRoot "cc-switch.db-shm"), "stale-shm")
             [System.IO.File]::WriteAllText((Join-Path $configRoot "settings.json"), "new-settings")
             [System.IO.File]::WriteAllText((Join-Path $configRoot "backups\keep.txt"), "keep-backup")
             [System.IO.File]::WriteAllText((Join-Path $configRoot "logs\keep.log"), "keep-log")
+            [System.IO.File]::WriteAllText((Join-Path $configRoot "unmanaged-root.txt"), "keep-unknown")
             [System.IO.File]::WriteAllText((Join-Path $configBackup "cc-switch.db"), "old-db")
             [System.IO.File]::WriteAllText((Join-Path $configBackup "settings.json"), "old-settings")
             [System.IO.File]::WriteAllText((Join-Path $configBackup "backups\must-not-copy.txt"), "excluded")
@@ -630,8 +639,11 @@ Describe "CCSwitchMulti transactional reinstall orchestration" {
 
             (Get-Content -Raw -LiteralPath (Join-Path $configRoot "cc-switch.db")) | Should Be "old-db"
             (Get-Content -Raw -LiteralPath (Join-Path $configRoot "settings.json")) | Should Be "old-settings"
+            (Test-Path -LiteralPath (Join-Path $configRoot "cc-switch.db-wal")) | Should Be $false
+            (Test-Path -LiteralPath (Join-Path $configRoot "cc-switch.db-shm")) | Should Be $false
             (Get-Content -Raw -LiteralPath (Join-Path $configRoot "backups\keep.txt")) | Should Be "keep-backup"
             (Get-Content -Raw -LiteralPath (Join-Path $configRoot "logs\keep.log")) | Should Be "keep-log"
+            (Get-Content -Raw -LiteralPath (Join-Path $configRoot "unmanaged-root.txt")) | Should Be "keep-unknown"
             (Test-Path -LiteralPath (Join-Path $configRoot "backups\must-not-copy.txt")) | Should Be $false
         } finally {
             Remove-Task3ATestTree -Path $fixtureRoot

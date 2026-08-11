@@ -167,6 +167,31 @@ function Assert-CcsmNoReparseBoundary {
     }
 }
 
+function Assert-CcsmNoReparsePathBoundary {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Path,
+        [Parameter(Mandatory = $true)][string]$Purpose
+    )
+
+    foreach ($candidate in @($Path)) {
+        if ([string]::IsNullOrWhiteSpace($candidate)) { throw "reparse" }
+        $current = [System.IO.Path]::GetFullPath($candidate)
+        while ($true) {
+            $item = Get-CcsmExistingFileSystemItem -Path $current
+            if ($null -ne $item -and
+                ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "reparse"
+            }
+            $parent = [System.IO.Directory]::GetParent($current)
+            if ($null -eq $parent -or [string]::Equals($parent.FullName, $current, [System.StringComparison]::OrdinalIgnoreCase)) {
+                break
+            }
+            $current = $parent.FullName
+        }
+    }
+}
+
 function Remove-CcsmDirectoryTree {
     param([string]$Path, [string]$Purpose)
 
@@ -693,9 +718,12 @@ function Assert-CcsmRestoreBoundary {
         -InstalledExecutable $Context.InstalledExecutable -UninstallExecutable $Context.UninstallExecutable
     Assert-CcsmProductConfigBoundary -ConfigPaths $Context.ConfigPaths
     Assert-CcsmRegistryKey -Key $Context.RegistryKey
-    Assert-CcsmNoReparseBoundary -Path (@(
+    Assert-CcsmNoReparseBoundary -Path @(
         $Context.BackupRoot, $Context.TransactionRoot, $BackupPath, $Context.InstallDirectory
-    ) + @($Context.ConfigPaths)) -Purpose "transaction restore"
+    ) -Purpose "transaction restore"
+    foreach ($configPath in @($Context.ConfigPaths)) {
+        Assert-CcsmAuthoritativeConfigBoundary -ConfigRoot $configPath -Purpose "transaction restore config"
+    }
 }
 
 function Copy-CcsmDirectoryContents {
@@ -710,6 +738,75 @@ function Copy-CcsmDirectoryContents {
     }
     foreach ($item in @(Get-ChildItem -LiteralPath $Source -Force -ErrorAction Stop)) {
         Copy-Item -LiteralPath $item.FullName -Destination $Destination -Recurse -Force -ErrorAction Stop
+    }
+}
+
+function Get-CcsmAuthoritativeConfigFileNames {
+    return @(
+        "cc-switch.db",
+        "cc-switch.db-wal",
+        "cc-switch.db-shm",
+        "settings.json",
+        "model-pricing.json",
+        "codex-desktop-executable.json",
+        "codex_oauth_auth.json"
+    )
+}
+
+function Assert-CcsmAuthoritativeConfigBoundary {
+    param([string]$ConfigRoot, [string]$Purpose = "config boundary")
+
+    Assert-CcsmNoReparsePathBoundary -Path $ConfigRoot -Purpose $Purpose
+    foreach ($name in @(Get-CcsmAuthoritativeConfigFileNames)) {
+        $candidate = Join-Path $ConfigRoot $name
+        Assert-CcsmNoReparsePathBoundary -Path $candidate -Purpose $Purpose
+        if (Test-Path -LiteralPath $candidate) {
+            $item = Get-Item -LiteralPath $candidate -Force -ErrorAction Stop
+            if ($item.PSIsContainer) {
+                throw "authoritative config path is not a regular file: $candidate"
+            }
+        }
+    }
+}
+
+function Copy-CcsmAuthoritativeConfigFiles {
+    param(
+        [string]$Source,
+        [string]$Destination,
+        [switch]$ReplaceDestination
+    )
+
+    if (-not (Test-Path -LiteralPath $Source -PathType Container)) {
+        throw "config copy source is missing: $Source"
+    }
+    Assert-CcsmAuthoritativeConfigBoundary -ConfigRoot $Source -Purpose "config copy source"
+    $databasePath = Join-Path $Source "cc-switch.db"
+    if (-not (Test-Path -LiteralPath $databasePath -PathType Leaf)) {
+        throw "config database is missing: $databasePath"
+    }
+    Assert-CcsmAuthoritativeConfigBoundary -ConfigRoot $Destination -Purpose "config copy destination"
+    if (-not (Test-Path -LiteralPath $Destination -PathType Container)) {
+        New-Item -ItemType Directory -Path $Destination -Force -ErrorAction Stop | Out-Null
+    }
+
+    $names = @(Get-CcsmAuthoritativeConfigFileNames)
+    if ($ReplaceDestination) {
+        foreach ($name in $names) {
+            $destinationPath = Join-Path $Destination $name
+            if (Test-Path -LiteralPath $destinationPath) {
+                $destinationItem = Get-Item -LiteralPath $destinationPath -Force -ErrorAction Stop
+                if ($destinationItem.PSIsContainer) {
+                    throw "authoritative config path is not a regular file: $destinationPath"
+                }
+                Remove-Item -LiteralPath $destinationPath -Force -ErrorAction Stop
+            }
+        }
+    }
+    foreach ($name in $names) {
+        $sourcePath = Join-Path $Source $name
+        if (Test-Path -LiteralPath $sourcePath -PathType Leaf) {
+            Copy-Item -LiteralPath $sourcePath -Destination (Join-Path $Destination $name) -Force -ErrorAction Stop
+        }
     }
 }
 
@@ -790,7 +887,7 @@ function Assert-CcsmRegularFileInventory {
 function Get-CcsmConfigInventory {
     param([string]$ConfigRoot)
 
-    Assert-CcsmNoReparseBoundary -Path $ConfigRoot -Purpose "config inventory"
+    Assert-CcsmAuthoritativeConfigBoundary -ConfigRoot $ConfigRoot -Purpose "config inventory"
     if (-not (Test-Path -LiteralPath $ConfigRoot -PathType Container)) {
         throw "config root is missing: $ConfigRoot"
     }
@@ -799,12 +896,14 @@ function Get-CcsmConfigInventory {
         throw "config database is missing: $databasePath"
     }
     $files = @()
-    foreach ($file in @(Get-ChildItem -LiteralPath $ConfigRoot -File -Force -Recurse -ErrorAction Stop)) {
-        $relativePath = $file.FullName.Substring($ConfigRoot.TrimEnd([char[]]@([char]92, [char]47)).Length).TrimStart([char[]]@([char]92, [char]47))
-        if ([string]::IsNullOrWhiteSpace($relativePath) -or $relativePath -match '(^|[\\/])\.\.([\\/]|$)') {
-            throw "config inventory contains an unsafe relative path"
+    foreach ($name in @(Get-CcsmAuthoritativeConfigFileNames)) {
+        $filePath = Join-Path $ConfigRoot $name
+        if (Test-Path -LiteralPath $filePath -PathType Leaf) {
+            $files += [pscustomobject]@{
+                RelativePath = $name
+                Hash = (Get-FileHash -LiteralPath $filePath -Algorithm SHA256).Hash
+            }
         }
-        $files += [pscustomobject]@{ RelativePath = $relativePath; Hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash }
     }
     $sidecars = @()
     foreach ($name in @("cc-switch.db", "cc-switch.db-wal", "cc-switch.db-shm")) {
@@ -961,7 +1060,8 @@ function Get-CcsmValidatedBackupManifest {
             -not (Test-CcsmStrictDescendant -Candidate ([string]$configBackup.Backup) -Parent $Context.TransactionRoot)) {
             throw "config backup escaped the validated restore boundary"
         }
-        Assert-CcsmNoReparseBoundary -Path @([string]$configBackup.Source, [string]$configBackup.Backup) -Purpose "config backup manifest source"
+        Assert-CcsmAuthoritativeConfigBoundary -ConfigRoot ([string]$configBackup.Source) -Purpose "config backup manifest source"
+        Assert-CcsmAuthoritativeConfigBoundary -ConfigRoot ([string]$configBackup.Backup) -Purpose "config backup manifest source"
         if (-not (Test-Path -LiteralPath $configBackup.Backup -PathType Container)) {
             throw "config backup escaped the validated restore boundary"
         }
@@ -1109,7 +1209,7 @@ function New-CcsmRealOperations {
             $destination = Join-Path $configRoot ([string]$index)
             Invoke-CcsmSqliteIntegrityCheck -DatabasePath (Join-Path $source "cc-switch.db")
             New-Item -ItemType Directory -Path $destination -Force -ErrorAction Stop | Out-Null
-            Copy-CcsmDirectoryContents -Source $source -Destination $destination
+            Copy-CcsmAuthoritativeConfigFiles -Source $source -Destination $destination -ReplaceDestination
             $inventory = Get-CcsmConfigInventory -ConfigRoot $destination
             Invoke-CcsmSqliteIntegrityCheck -DatabasePath (Join-Path $destination "cc-switch.db")
             $configBackups += [pscustomobject]@{
@@ -1186,9 +1286,7 @@ function New-CcsmRealOperations {
         if ([bool]$manifest.ConfigSnapshotComplete) {
             foreach ($configBackup in @($manifest.ConfigBackups)) {
                 $source = [string]$configBackup.Source
-                Remove-CcsmDirectoryTree -Path $source -Purpose "restore config directory"
-                New-Item -ItemType Directory -Path $source -Force -ErrorAction Stop | Out-Null
-                Copy-CcsmDirectoryContents -Source ([string]$configBackup.Backup) -Destination $source
+                Copy-CcsmAuthoritativeConfigFiles -Source ([string]$configBackup.Backup) -Destination $source -ReplaceDestination
             }
         }
     }
