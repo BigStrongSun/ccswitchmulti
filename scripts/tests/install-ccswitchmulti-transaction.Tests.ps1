@@ -372,6 +372,17 @@ Describe "CCSwitchMulti transactional reinstall orchestration" {
         ($plan.Rollback -join ",") | Should Be "verify-and-stop-new-process,restore-app-config-registry,start-previous-hidden,wait-listener-health,verify-previous-runtime"
     }
 
+    It "maps only a clean structured Success result to process exit code zero" {
+        $cleanSuccess = [pscustomobject]@{ Status = "Success"; Error = $null; RollbackError = $null }
+        $dirtySuccess = [pscustomobject]@{ Status = "Success"; Error = "unexpected"; RollbackError = $null }
+        $rolledBack = [pscustomobject]@{ Status = "RolledBack"; Error = "install failed"; RollbackError = $null }
+
+        (Get-CcsmTransactionExitCode -Result $cleanSuccess) | Should Be 0
+        (Get-CcsmTransactionExitCode -Result $dirtySuccess) | Should Be 1
+        (Get-CcsmTransactionExitCode -Result $rolledBack) | Should Be 1
+        (Get-CcsmTransactionExitCode -Result $null) | Should Be 1
+    }
+
     It "rejects a dot-dot backup path that only appears to be inside the transaction root" {
         Test-CcsmPathInside -Candidate "D:\ccsm-transaction-backups\txn-1\..\outside" `
             -Parent "D:\ccsm-transaction-backups\txn-1" | Should Be $false
