@@ -5,8 +5,8 @@ use crate::codex_subagent_profiles::{
     compile_subagent_v2_profiles, initialize_legacy_subagent_v2, normalize_profile_key,
     parse_persisted_subagent_v2, parse_persisted_subagent_v2_tolerant, render_generated_role_toml,
     CatalogModel as SubagentCatalogModel, CodexSubagentProfileConfig,
-    CompileOutput as SubagentCompileOutput, CompileRequest as SubagentCompileRequest,
-    DiagnosticReasonCode as SubagentDiagnosticReasonCode,
+    CompileError as SubagentCompileError, CompileOutput as SubagentCompileOutput,
+    CompileRequest as SubagentCompileRequest, DiagnosticReasonCode as SubagentDiagnosticReasonCode,
     ModelReasoningEffort as SubagentReasoningEffort, ParsedProfileEntry,
     ProfileStatusCode as SubagentProfileStatusCode, ProviderKind as SubagentProviderKind,
     SubagentVersion as ProfileSubagentVersion,
@@ -2727,6 +2727,61 @@ struct ConfiguredCodexSubagentCompilation {
     route_classifications: HashMap<String, RouteClassification>,
 }
 
+fn public_codex_subagent_validation_code(error: &SubagentCompileError) -> &str {
+    let SubagentCompileError::Validation { code, .. } = error;
+    if matches!(
+        code.as_str(),
+        "invalid_subagent_v2"
+            | "missing_schema_version"
+            | "unsupported_schema_version"
+            | "invalid_selection_policy"
+            | "missing_profiles"
+            | "invalid_profiles"
+            | "invalid_profile"
+            | "missing_model"
+            | "invalid_model"
+            | "empty_model"
+            | "missing_enabled"
+            | "invalid_enabled"
+            | "missing_questionnaire"
+            | "invalid_questionnaire"
+            | "missing_task_strengths"
+            | "unknown_task_strength"
+            | "strength_count"
+            | "duplicate_task_strength"
+            | "missing_optimization"
+            | "invalid_optimization"
+            | "missing_write_scope"
+            | "invalid_write_scope"
+            | "missing_preference"
+            | "invalid_preference"
+            | "missing_reasoning_effort"
+            | "invalid_reasoning_effort"
+            | "invalid_override_effort"
+            | "profile_key_model_mismatch"
+            | "empty_description"
+            | "empty_developer_instructions"
+            | "nickname_count"
+            | "empty_nickname"
+            | "invalid_nickname"
+            | "duplicate_nickname"
+            | "empty_role_name"
+            | "reserved_role_name"
+            | "toml_serialization"
+    ) {
+        code
+    } else {
+        "invalid_configuration"
+    }
+}
+
+fn codex_subagent_validation_error(error: &SubagentCompileError) -> AppError {
+    AppError::InvalidInput(format!(
+        "Codex subagent V2 configuration is invalid ({})",
+        public_codex_subagent_validation_code(error)
+    ))
+}
+
 fn compile_configured_codex_subagent_roles(
     settings: &Value,
     specs: &[CodexCatalogModelSpec],
@@ -2739,9 +2794,8 @@ fn compile_configured_codex_subagent_roles(
     else {
         return Ok(None);
     };
-    let persisted = parse_persisted_subagent_v2_tolerant(raw).map_err(|error| {
-        AppError::Message(format!("Invalid codexRouting.subagentV2: {error:?}"))
-    })?;
+    let persisted = parse_persisted_subagent_v2_tolerant(raw)
+        .map_err(|error| codex_subagent_validation_error(&error))?;
     let mut route_classifications = HashMap::new();
     let catalog_models = specs
         .iter()
@@ -2781,11 +2835,7 @@ fn compile_configured_codex_subagent_roles(
         catalog_models,
         occupied_role_names: occupied_user_codex_agent_names(&get_codex_agents_dir())?,
     })
-    .map_err(|error| {
-        AppError::Message(format!(
-            "Unable to compile Codex subagent profiles: {error:?}"
-        ))
-    })?;
+    .map_err(|error| codex_subagent_validation_error(&error))?;
     Ok(Some(ConfiguredCodexSubagentCompilation {
         persisted,
         output,
@@ -2801,20 +2851,67 @@ pub enum CodexSubagentV2ReconcileAction {
     RecoverAllInvalidFromCatalog,
 }
 
-fn routable_codex_subagent_catalog(
-    settings: &Value,
-    provider_context: Option<&ProviderClassificationContext>,
-) -> Vec<(String, String)> {
+fn codex_catalog_route_is_enabled(route: &Value) -> bool {
+    route
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+}
+
+fn codex_catalog_model_has_configured_route(settings: &Value, model: &str) -> bool {
+    if let Some(routing) = settings.get("codexRouting") {
+        if let Some(routes) = routing.as_array() {
+            return routes.iter().any(|route| {
+                codex_catalog_route_is_enabled(route)
+                    && codex_catalog_route_matches_model(route, model)
+            });
+        }
+        if routing
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .is_some_and(|enabled| !enabled)
+        {
+            return false;
+        }
+        let Some(routes) = routing.get("routes").and_then(Value::as_array) else {
+            return false;
+        };
+        if routes.iter().any(|route| {
+            codex_catalog_route_is_enabled(route) && codex_catalog_route_matches_model(route, model)
+        }) {
+            return true;
+        }
+        return routing
+            .get("defaultRouteId")
+            .or_else(|| routing.get("default_route_id"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .is_some_and(|default_route_id| {
+                routes.iter().any(|route| {
+                    codex_catalog_route_is_enabled(route)
+                        && route
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .is_some_and(|id| id.eq_ignore_ascii_case(default_route_id))
+                })
+            });
+    }
+    settings
+        .get("codexModelRoutes")
+        .or_else(|| settings.get("modelRoutes"))
+        .and_then(Value::as_array)
+        .is_some_and(|routes| {
+            routes
+                .iter()
+                .any(|route| codex_catalog_route_matches_model(route, model))
+        })
+}
+
+fn routable_codex_subagent_catalog(settings: &Value) -> Vec<(String, String)> {
     codex_catalog_model_specs(settings, "")
         .into_iter()
-        .filter(|spec| {
-            codex_subagent_route_classification_with_context(
-                settings,
-                &spec.model,
-                provider_context,
-            )
-            .is_some()
-        })
+        .filter(|spec| codex_catalog_model_has_configured_route(settings, &spec.model))
         .map(|spec| (normalize_profile_key(&spec.model), spec.model))
         .filter(|(identity, _)| !identity.is_empty())
         .collect()
@@ -2851,47 +2948,51 @@ fn catalog_profile_draft(model: &str, enabled_preferred: bool) -> Result<Value, 
 
 pub(crate) fn initialize_codex_subagent_v2_for_candidate(
     settings: &Value,
-    provider_context: Option<&ProviderClassificationContext>,
+    _provider_context: Option<&ProviderClassificationContext>,
 ) -> Result<Value, AppError> {
-    let mut initialized =
-        serde_json::to_value(initialize_legacy_subagent_v2().map_err(|error| {
-            AppError::Message(format!(
-                "Unable to initialize Codex subagent defaults: {error:?}"
-            ))
-        })?)
-        .map_err(|error| AppError::Message(format!("Unable to serialize defaults: {error}")))?;
+    let mut initialized = json!({
+        "schemaVersion": 1,
+        "selectionPolicy": "balanced",
+        "profiles": {}
+    });
     let profiles = initialized
         .get_mut("profiles")
         .and_then(Value::as_object_mut)
         .ok_or_else(|| AppError::Message("Initialized profiles are not an object".to_string()))?;
-    for (identity, model) in routable_codex_subagent_catalog(settings, provider_context) {
-        if !profiles.contains_key(&identity) {
-            profiles.insert(identity, catalog_profile_draft(&model, false)?);
-        }
+    for (identity, model) in routable_codex_subagent_catalog(settings) {
+        let preferred = matches!(identity.as_str(), "deepseek-v4-flash" | "deepseek-v4-pro");
+        profiles.insert(identity, catalog_profile_draft(&model, preferred)?);
     }
     Ok(initialized)
+}
+
+fn profile_is_strictly_valid_under_identity(
+    schema_version: &Value,
+    selection_policy: &Value,
+    identity: &str,
+    raw_profile: &Value,
+) -> bool {
+    let mut profiles = serde_json::Map::new();
+    profiles.insert(identity.to_string(), raw_profile.clone());
+    let candidate = json!({
+        "schemaVersion": schema_version,
+        "selectionPolicy": selection_policy,
+        "profiles": profiles
+    });
+    parse_persisted_subagent_v2(&candidate).is_ok()
 }
 
 pub(crate) fn reconcile_codex_subagent_v2_for_candidate(
     settings: &Value,
     action: CodexSubagentV2ReconcileAction,
     draft: Option<&Value>,
-    provider_context: Option<&ProviderClassificationContext>,
+    _provider_context: Option<&ProviderClassificationContext>,
 ) -> Result<Value, AppError> {
-    let source = match action {
-        CodexSubagentV2ReconcileAction::SyncCatalog => draft.ok_or_else(|| {
-            AppError::InvalidInput("sync_catalog requires the current subagentV2 draft".to_string())
-        })?,
-        CodexSubagentV2ReconcileAction::RemoveAllInvalid
-        | CodexSubagentV2ReconcileAction::RecoverAllInvalidFromCatalog => settings
-            .pointer("/codexRouting/subagentV2")
-            .ok_or_else(|| {
-                AppError::InvalidInput("Codex provider has no subagentV2 document".to_string())
-            })?,
-    };
-    let parsed = parse_persisted_subagent_v2_tolerant(source).map_err(|error| {
-        AppError::InvalidInput(format!("Invalid codexRouting.subagentV2: {error:?}"))
+    let source = draft.ok_or_else(|| {
+        AppError::InvalidInput("Reconcile actions require the current subagentV2 draft".to_string())
     })?;
+    let parsed = parse_persisted_subagent_v2_tolerant(source)
+        .map_err(|error| codex_subagent_validation_error(&error))?;
     let invalid = parsed
         .profiles
         .iter()
@@ -2916,11 +3017,13 @@ pub(crate) fn reconcile_codex_subagent_v2_for_candidate(
         .collect::<HashSet<_>>();
     let mut reconciled = serde_json::to_value(&parsed)
         .map_err(|error| AppError::Message(format!("Unable to serialize profiles: {error}")))?;
+    let schema_version = reconciled["schemaVersion"].clone();
+    let selection_policy = reconciled["selectionPolicy"].clone();
     let profiles = reconciled
         .get_mut("profiles")
         .and_then(Value::as_object_mut)
         .ok_or_else(|| AppError::Message("Reconciled profiles are not an object".to_string()))?;
-    let routable = routable_codex_subagent_catalog(settings, provider_context);
+    let routable = routable_codex_subagent_catalog(settings);
     let routable_by_identity = routable.iter().cloned().collect::<HashMap<_, _>>();
 
     match action {
@@ -2949,21 +3052,39 @@ pub(crate) fn reconcile_codex_subagent_v2_for_candidate(
         }
         CodexSubagentV2ReconcileAction::RemoveAllInvalid => {
             for (key, _) in invalid {
-                profiles.remove(&key);
+                profiles.shift_remove(&key);
             }
         }
         CodexSubagentV2ReconcileAction::RecoverAllInvalidFromCatalog => {
-            for (key, identity) in invalid {
+            let mut invalid_by_key = invalid.into_iter().collect::<HashMap<_, _>>();
+            let current_profiles = std::mem::take(profiles);
+            for (key, raw_profile) in current_profiles {
+                let Some(identity) = invalid_by_key.remove(&key) else {
+                    profiles.insert(key, raw_profile);
+                    continue;
+                };
                 let Some(identity) = identity else {
+                    profiles.insert(key, raw_profile);
                     continue;
                 };
                 let Some(model) = routable_by_identity.get(&identity) else {
+                    profiles.insert(key, raw_profile);
                     continue;
                 };
-                profiles.remove(&key);
-                if valid_identities.insert(identity.clone()) {
-                    profiles.insert(identity, catalog_profile_draft(model, false)?);
+                if !valid_identities.insert(identity.clone()) {
+                    continue;
                 }
+                let recovered = if profile_is_strictly_valid_under_identity(
+                    &schema_version,
+                    &selection_policy,
+                    &identity,
+                    &raw_profile,
+                ) {
+                    raw_profile
+                } else {
+                    catalog_profile_draft(model, false)?
+                };
+                profiles.insert(identity, recovered);
             }
         }
     }
@@ -2981,13 +3102,11 @@ pub(crate) fn validate_codex_subagent_v2_candidate(
             AppError::InvalidInput("Candidate has no subagentV2 document".to_string())
         })?;
     if require_strict_storage {
-        parse_persisted_subagent_v2(raw).map_err(|error| {
-            AppError::InvalidInput(format!("Invalid codexRouting.subagentV2: {error:?}"))
-        })?;
+        parse_persisted_subagent_v2(raw)
+            .map_err(|error| codex_subagent_validation_error(&error))?;
     } else {
-        parse_persisted_subagent_v2_tolerant(raw).map_err(|error| {
-            AppError::InvalidInput(format!("Invalid codexRouting.subagentV2: {error:?}"))
-        })?;
+        parse_persisted_subagent_v2_tolerant(raw)
+            .map_err(|error| codex_subagent_validation_error(&error))?;
     }
     let specs = codex_catalog_model_specs(settings, "");
     compile_configured_codex_subagent_roles(
@@ -3442,15 +3561,29 @@ fn preview_codex_subagent_profile_with_context(
         .ok_or_else(|| {
             "settingsConfig.codexRouting.subagentV2.profiles must be an object".to_string()
         })?;
-    profiles.retain(|key, raw| {
-        key != &profile_key
-            && raw
-                .get("model")
-                .and_then(Value::as_str)
-                .map(normalize_profile_key)
-                .is_none_or(|identity| identity != profile_key)
-    });
-    profiles.insert(profile_key.clone(), profile);
+    let has_exact_key = profiles.contains_key(&profile_key);
+    let current_profiles = std::mem::take(profiles);
+    let mut replacement = Some(profile);
+    for (key, raw) in current_profiles {
+        let same_model = raw
+            .get("model")
+            .and_then(Value::as_str)
+            .map(normalize_profile_key)
+            .is_some_and(|identity| identity == profile_key);
+        if key == profile_key || same_model {
+            let insertion_slot = key == profile_key || (!has_exact_key && replacement.is_some());
+            if insertion_slot {
+                if let Some(profile) = replacement.take() {
+                    profiles.insert(profile_key.clone(), profile);
+                }
+            }
+            continue;
+        }
+        profiles.insert(key, raw);
+    }
+    if let Some(profile) = replacement {
+        profiles.insert(profile_key.clone(), profile);
+    }
 
     let specs = codex_catalog_model_specs(&settings_config, "");
     let spec = specs
@@ -5959,11 +6092,12 @@ mod tests {
                 "upstream": { "auth": { "source": "provider_config" } }
             }]),
         );
+        let draft = settings["codexRouting"]["subagentV2"].clone();
 
         let removed = reconcile_codex_subagent_v2_for_candidate(
             &settings,
             CodexSubagentV2ReconcileAction::RemoveAllInvalid,
-            None,
+            Some(&draft),
             None,
         )
         .expect("remove all invalid profiles in backend");
@@ -5974,7 +6108,7 @@ mod tests {
         let recovered = reconcile_codex_subagent_v2_for_candidate(
             &settings,
             CodexSubagentV2ReconcileAction::RecoverAllInvalidFromCatalog,
-            None,
+            Some(&draft),
             None,
         )
         .expect("recover catalog-identifiable invalid profiles in backend");
@@ -10066,7 +10200,7 @@ model_context_window = 262144
         std::fs::write(
             &managed_role_path,
             format!(
-                "{CC_SWITCH_MANAGED_AGENT_MARKER}\nname = \"deepseek-flash\"\nmodel = \"deepseek-v4-flash\"\n"
+                "{CC_SWITCH_MANAGED_AGENT_MARKER}\nname = \"deepseek-flash\"\nmodel = \"deepseek-v4-flash\"\nmodel_provider = \"codex_model_router_v2\"\n"
             ),
         )
         .expect("seed managed role");
@@ -10355,6 +10489,7 @@ model_provider = "custom"
                 r#"{CC_SWITCH_MANAGED_AGENT_MARKER}
 name = "deepseek-flash"
 model = "deepseek-v4-flash"
+model_provider = "codex_model_router_v2"
 "#
             ),
         )
@@ -10408,6 +10543,7 @@ model = "handwritten"
                 r#"{CC_SWITCH_MANAGED_AGENT_MARKER}
 name = "qwen-local"
 model = "qwen3.6"
+model_provider = "codex_model_router_v2"
 "#
             ),
         )

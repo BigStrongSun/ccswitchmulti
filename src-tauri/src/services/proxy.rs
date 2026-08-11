@@ -5267,7 +5267,7 @@ wire_api = "responses"
                     "schemaVersion": 1,
                     "selectionPolicy": "balanced",
                     "profiles": {
-                        "reader": {
+                        "neutral-model": {
                             "model": "neutral-model",
                             "enabled": true,
                             "questionnaire": {
@@ -5276,7 +5276,8 @@ wire_api = "responses"
                                 "writeScope": "read_only",
                                 "preference": "eligible",
                                 "reasoningEffort": "auto"
-                            }
+                            },
+                            "overrides": { "roleName": "reader" }
                         }
                     }
                 },

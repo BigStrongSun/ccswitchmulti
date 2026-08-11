@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import {
@@ -248,12 +248,21 @@ export function CodexSubagentProfileEditor({
     null,
   );
   const [isSaving, setIsSaving] = useState(false);
+  const backendAdoptedPersistedKey = useRef<{
+    providerId: string;
+    persistedKey: string;
+  } | null>(null);
 
   useEffect(() => {
+    const adopted = backendAdoptedPersistedKey.current;
+    const isBackendAdoptedRefresh =
+      adopted?.providerId === provider.id &&
+      adopted.persistedKey === persistedKey;
+    backendAdoptedPersistedKey.current = null;
     setDraft(readPersistedConfig(provider));
     setSaveMessage(null);
     setSaveError(null);
-    setProjectionWarning(null);
+    if (!isBackendAdoptedRefresh) setProjectionWarning(null);
     setStrengthLimitMessage(null);
     setNicknameDrafts({});
     setStatusError(null);
@@ -343,6 +352,10 @@ export function CodexSubagentProfileEditor({
     if (!nextConfig) {
       throw new Error("后端未返回已保存的 V2 子 Agent 能力配置。");
     }
+    backendAdoptedPersistedKey.current = {
+      providerId: nextProvider.id,
+      persistedKey: JSON.stringify(nextConfig),
+    };
     setDraft(nextConfig);
     setProjectionWarning(nextProvider.projection?.warning?.message ?? null);
     onPersisted?.(nextProvider);
@@ -375,7 +388,7 @@ export function CodexSubagentProfileEditor({
 
   async function reconcile(
     action: CodexSubagentV2ReconcileAction,
-    currentDraft?: CodexSubagentV2Config,
+    currentDraft: CodexSubagentV2Config,
   ) {
     setIsSaving(true);
     setSaveError(null);
@@ -550,6 +563,13 @@ export function CodexSubagentProfileEditor({
   const invalidProfileEntries = rawProfileEntries.filter(
     ([, profile]) => !isUsableProfile(profile),
   );
+  const backendReconciliableProfileCount = (statuses?.profiles ?? []).filter(
+    ({ status }) => status === "invalid" || status === "collision",
+  ).length;
+  const reconciliableProfileCount = Math.max(
+    invalidProfileEntries.length,
+    backendReconciliableProfileCount,
+  );
   const usableProfileKeys = new Set(
     profileEntries.map(([profileKey]) => profileKey),
   );
@@ -605,22 +625,24 @@ export function CodexSubagentProfileEditor({
           >
             同步模型目录能力配置
           </Button>
-          {invalidProfileEntries.length > 0 ? (
+          {reconciliableProfileCount > 0 ? (
             <>
               <Button
                 type="button"
                 variant="outline"
-                onClick={() => reconcile("remove_all_invalid")}
+                onClick={() => reconcile("remove_all_invalid", draft)}
               >
-                删除全部无效能力配置（{invalidProfileEntries.length} 项）
+                删除全部无效能力配置（{reconciliableProfileCount} 项）
               </Button>
               <Button
                 type="button"
                 variant="outline"
-                onClick={() => reconcile("recover_all_invalid_from_catalog")}
+                onClick={() =>
+                  reconcile("recover_all_invalid_from_catalog", draft)
+                }
               >
                 从模型目录恢复全部无效能力配置（
-                {invalidProfileEntries.length} 项）
+                {reconciliableProfileCount} 项）
               </Button>
             </>
           ) : null}

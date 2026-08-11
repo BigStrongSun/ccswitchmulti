@@ -14,11 +14,22 @@ This is configuration generation, not a new Codex orchestration implementation. 
 `settingsConfig.codexRouting.subagentV2` is the sole persisted V2 profile source:
 
 ```ts
-type SubagentV2SelectionPolicy = "balanced" | "official_first" | "third_party_first";
+type SubagentV2SelectionPolicy =
+  | "balanced"
+  | "official_first"
+  | "third_party_first";
 type QuestionnaireOptimization = "speed" | "balanced" | "quality";
-type QuestionnaireWriteScope = "read_only" | "bounded_changes" | "complex_changes";
+type QuestionnaireWriteScope =
+  | "read_only"
+  | "bounded_changes"
+  | "complex_changes";
 type QuestionnairePreference = "preferred" | "eligible" | "fallback";
-type QuestionnaireReasoningEffort = "auto" | "low" | "medium" | "high" | "xhigh";
+type QuestionnaireReasoningEffort =
+  | "auto"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh";
 
 type CodexSubagentV2 = {
   schemaVersion: 1;
@@ -66,16 +77,18 @@ Selection policy is applied after a matching task profile is identified:
 - `third_party_first` promotes matching preferred or eligible third-party roles.
 - `balanced` adds no provider bias.
 
+These fields guide Codex's semantic role selection on a best-effort basis. Even `preferred` changes selection guidance rather than creating deterministic hard routing; CCSM does not intercept or rewrite the parent's spawn decision.
+
 ## Compatibility and lifecycle
 
 V1 stays the first five direct model overrides. V2 profile materialization happens only while V2 is active; toggling modes preserves inactive configuration. Legacy configurations missing `subagentV2` retain legacy managed-role behavior until the user performs one-click initialization.
 
-Initialization sets global `selectionPolicy` to `balanced` and enables two presets:
+Initialization sets global `selectionPolicy` to `balanced`. It creates profiles only for models that are both present in the current catalog and actually routable through the candidate provider. When the corresponding model is routable, initialization enables these two presets:
 
-- DeepSeek Flash: `optimization="speed"`, `writeScope="read_only"`, `preference="eligible"`, `reasoningEffort="medium"`, and `taskStrengths=[long_context_reading, repository_exploration, evidence_collection, summarization, testing]`.
-- DeepSeek Pro: `optimization="quality"`, `writeScope="complex_changes"`, `preference="eligible"`, `reasoningEffort="high"`, and `taskStrengths=[complex_debugging, architecture_design, complex_implementation, high_risk_review, testing]`.
+- DeepSeek Flash: `optimization="speed"`, `writeScope="read_only"`, `preference="preferred"`, `reasoningEffort="medium"`, and `taskStrengths=[long_context_reading, repository_exploration, evidence_collection, summarization, testing]`.
+- DeepSeek Pro: `optimization="quality"`, `writeScope="complex_changes"`, `preference="preferred"`, `reasoningEffort="high"`, and `taskStrengths=[complex_debugging, architecture_design, complex_implementation, high_risk_review, testing]`.
 
-Every other catalog model begins as a disabled draft until configured and enabled. Existing user-authored role files are never overwritten. Role-name overrides normalize exactly as follows: trim; ASCII-lowercase; map every maximal run of invalid characters to `-`; repeatedly replace `--` with `-`, `__` with `_`, and either `-_` or `_-` with `-` until stable; then trim leading/trailing `-` or `_`. Only lowercase ASCII letters, digits, dashes, and underscores remain, and an empty result is an error. `default`, `worker`, and `explorer` are forbidden after normalization. Conflicts dedupe case-insensitively in this exact order: requested base, `ccswitch-<base>`, then `ccswitch-<base>-2`, `ccswitch-<base>-3`, and so on until unused. Examples: `"  Deep Seek  "` becomes `deep-seek`; `"深度模型"` and `"!!!"` are rejected as empty; `"Pro!!!Review"` becomes `pro-review`; `"A__B"` becomes `a_b`; `"Foo__-- Bar"` becomes `foo-bar`; and repeated conflicts for `review` resolve as `review`, `ccswitch-review`, then `ccswitch-review-2`. Nicknames contain one to three nonempty, unique values using only ASCII alphanumerics, spaces, dashes, or underscores.
+Every other actually routable catalog model begins as a disabled draft until configured and enabled; unavailable Flash/Pro models are not seeded as phantom profiles. Existing user-authored role files are never overwritten. Role-name overrides normalize exactly as follows: trim; ASCII-lowercase; map every maximal run of invalid characters to `-`; repeatedly replace `--` with `-`, `__` with `_`, and either `-_` or `_-` with `-` until stable; then trim leading/trailing `-` or `_`. Only lowercase ASCII letters, digits, dashes, and underscores remain, and an empty result is an error. `default`, `worker`, and `explorer` are forbidden after normalization. Conflicts dedupe case-insensitively in this exact order: requested base, `ccswitch-<base>`, then `ccswitch-<base>-2`, `ccswitch-<base>-3`, and so on until unused. Examples: `"  Deep Seek  "` becomes `deep-seek`; `"深度模型"` and `"!!!"` are rejected as empty; `"Pro!!!Review"` becomes `pro-review`; `"A__B"` becomes `a_b`; `"Foo__-- Bar"` becomes `foo-bar`; and repeated conflicts for `review` resolve as `review`, `ccswitch-review`, then `ccswitch-review-2`. Nicknames contain one to three nonempty, unique values using only ASCII alphanumerics, spaces, dashes, or underscores.
 
 CCSM preserves `hide_spawn_agent_metadata=true`, mixed routing `tool_namespace="agents"`, the reserved schema, the current V2 body projection, and Qwen behavior. Diagnostics must exclude credentials, task text, and encrypted content.
 

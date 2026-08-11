@@ -59,12 +59,12 @@ export const codexSubagentV2Api = {
   reconcileProviderProfiles(
     providerId: string,
     action: CodexSubagentV2ReconcileAction,
-    subagentV2?: CodexSubagentV2Config,
+    subagentV2: CodexSubagentV2Config,
   ): Promise<CodexSubagentV2MutationProvider> {
     return invoke("reconcile_codex_subagent_v2_profiles", {
       providerId,
       action,
-      ...(subagentV2 === undefined ? {} : { subagentV2 }),
+      subagentV2,
     });
   },
 };

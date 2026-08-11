@@ -869,6 +869,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn reconcile_codex_subagent_v2_uses_the_complete_current_draft_for_batch_actions() {
         with_test_home(|state, _| {
             let current = Provider::with_id(
@@ -960,6 +961,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn update_codex_subagent_v2_service_error_redacts_raw_profile_identity() {
         with_test_home(|state, _| {
             let target = Provider::with_id(
@@ -3990,11 +3992,9 @@ impl ProviderService {
         action: crate::codex_config::CodexSubagentV2ReconcileAction,
         subagent_v2: Option<Value>,
     ) -> Result<CodexSubagentV2MutationResult, AppError> {
-        if action != crate::codex_config::CodexSubagentV2ReconcileAction::SyncCatalog
-            && subagent_v2.is_some()
-        {
+        if subagent_v2.is_none() {
             return Err(AppError::InvalidInput(
-                "Only sync_catalog accepts a subagentV2 draft".to_string(),
+                "Reconcile actions require the current subagentV2 draft".to_string(),
             ));
         }
         let provider_context =
