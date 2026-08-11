@@ -123,7 +123,7 @@ import type {
   Provider,
 } from "@/types";
 import type { RequestLog } from "@/types/usage";
-import { createDefaultCodexSubagentV2Config } from "@/types/codexSubagentV2";
+import { codexSubagentV2Api } from "@/lib/api/codexSubagentV2";
 import type {
   CodexDiagnosticCheck,
   CodexDiagnosticStatus,
@@ -1820,7 +1820,6 @@ export function createDraftRoutingPlan(
       codexRouting: {
         enabled: true,
         subagentVersion: "v2",
-        subagentV2: createDefaultCodexSubagentV2Config(),
         routes: [],
       },
       hostedTools: DEFAULT_HOSTED_TOOLS_CONFIG,
@@ -2813,21 +2812,26 @@ export function CodexRouterWorkspacePage({
     setRoutePickerMessage(null);
     try {
       await providersApi.add(nextPlan, "codex", false);
-      queryClient.setQueryData(["providers", "codex"], (current: any) =>
-        current?.providers
-          ? {
-              ...current,
-              providers: { ...current.providers, [nextPlan.id]: nextPlan },
-            }
-          : current,
+      const initializedPlan = await codexSubagentV2Api.initializeProviderConfig(
+        nextPlan.id,
       );
+      queryClient.setQueryData(["providers", "codex"], (current: any) => ({
+        ...(current ?? { currentProviderId: "" }),
+        providers: {
+          ...Object.fromEntries(
+            providers.map((provider) => [provider.id, provider]),
+          ),
+          ...(current?.providers ?? {}),
+          [initializedPlan.id]: initializedPlan,
+        },
+      }));
       await queryClient.invalidateQueries({ queryKey: ["providers", "codex"] });
       await queryClient.refetchQueries({
         queryKey: ["providers", "codex"],
         type: "active",
       });
-      setOptimisticRoutingPlan(nextPlan);
-      setSelectedPlanId(nextPlan.id);
+      setOptimisticRoutingPlan(initializedPlan);
+      setSelectedPlanId(initializedPlan.id);
       setSelectedRouteKey(null);
       setActiveTab("routes");
       setRoutePickerSelectAll(true);
@@ -5174,8 +5178,8 @@ function SpawnAgentCandidatesPanel({
           </div>
           <p className="mt-1 text-xs leading-5 text-violet-700/80 dark:text-violet-200/80">
             V1 适合旧版 Codex 和需要手工指定子模型的兼容场景；V2 适合新版本
-            Codex，由父 Agent
-            按任务自动选择角色。两套配置都会保留，但同一会话只启用一种协议。
+            Codex，由父 Agent 按任务做 best-effort
+            语义角色选择。两套配置都会保留， 但同一会话只启用一种协议。
           </p>
         </div>
         <Badge className="border border-violet-300 bg-background text-violet-800 dark:border-violet-500/50 dark:bg-violet-500/10 dark:text-violet-100">
@@ -5229,8 +5233,11 @@ function SpawnAgentCandidatesPanel({
             </Button>
           </div>
           <p className="mt-1 text-xs leading-5 text-muted-foreground">
-            使用任务路径、mailbox 和 follow-up；父 Codex 根据角色说明自动选择
-            Flash 或 Pro，用户无需选择子模型。推荐新版本 Codex 使用。
+            使用任务路径、mailbox 和 follow-up；Codex 会在符合条件的内置与自定义
+            角色之间进行 best-effort
+            语义选择。能力问卷与角色说明只提供选择指导， 不保证选择 Flash 或
+            Pro；内置 default、worker、explorer 仍可能被选择。 推荐新版本 Codex
+            使用。
           </p>
         </div>
       </div>

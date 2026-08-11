@@ -151,7 +151,7 @@ describe("CodexMultiRouterWizard", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /Sub-Agent V2/ }));
 
-    expect(screen.getByText(/best-effort/)).toBeVisible();
+    expect(screen.getAllByText(/best-effort/).length).toBeGreaterThan(0);
     expect(screen.getByText(/问卷与角色说明只提供选择指导/)).toBeVisible();
     expect(screen.getByText(/不保证选择 Flash 或 Pro/)).toBeVisible();
     expect(screen.getByText(/default、worker、explorer/)).toBeVisible();

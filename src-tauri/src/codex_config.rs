@@ -3504,29 +3504,7 @@ fn preview_codex_subagent_profile_with_context(
         .ok_or_else(|| {
             "settingsConfig.codexRouting.subagentV2.profiles must be an object".to_string()
         })?;
-    let has_exact_key = profiles.contains_key(&profile_key);
-    let current_profiles = std::mem::take(profiles);
-    let mut replacement = Some(profile);
-    for (key, raw) in current_profiles {
-        let same_model = raw
-            .get("model")
-            .and_then(Value::as_str)
-            .map(normalize_profile_key)
-            .is_some_and(|identity| identity == profile_key);
-        if key == profile_key || same_model {
-            let insertion_slot = key == profile_key || (!has_exact_key && replacement.is_some());
-            if insertion_slot {
-                if let Some(profile) = replacement.take() {
-                    profiles.insert(profile_key.clone(), profile);
-                }
-            }
-            continue;
-        }
-        profiles.insert(key, raw);
-    }
-    if let Some(profile) = replacement {
-        profiles.insert(profile_key.clone(), profile);
-    }
+    profiles.insert(profile_key.clone(), profile);
 
     let specs = codex_catalog_model_specs(&settings_config, "");
     let spec = specs

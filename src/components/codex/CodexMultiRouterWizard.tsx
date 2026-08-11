@@ -96,7 +96,7 @@ import { codexCatalogOnlyPlanModelFetchMessage } from "@/utils/codexPlanModelFet
 import { normalizeCodexSubagentVersion } from "@/utils/codexSubagentVersion";
 import { CodexOAuthSection } from "@/components/providers/forms/CodexOAuthSection";
 import { useCodexOauth } from "@/components/providers/forms/hooks/useCodexOauth";
-import { createDefaultCodexSubagentV2Config } from "@/types/codexSubagentV2";
+import { codexSubagentV2Api } from "@/lib/api/codexSubagentV2";
 
 interface CodexMultiRouterWizardProps {
   open: boolean;
@@ -238,7 +238,7 @@ const STEPS: WizardStep[] = [
     key: "subagentV2",
     title: "Sub-Agent V2",
     description:
-      "推荐的新任务路径协议，由 Codex 按任务自动选择 DeepSeek Flash 或 Pro managed role。",
+      "推荐的新任务路径协议，由 Codex 在符合条件的内置与自定义角色间做 best-effort 语义选择。",
     icon: Wand2,
   },
   {
@@ -307,7 +307,7 @@ const STEP_RULES: Record<WizardStepKey, WizardStepRule> = {
       "可保留 V2，或启用 V1 并按需要选择最多 5 个 direct overrides。",
   },
   subagentV2: {
-    errors: ["Flash 或 Pro 不在可路由目录时，对应 managed role 不会生成。"],
+    errors: ["模型不在可路由目录时，对应 managed role 不会生成。"],
     canContinue: "V2 不要求用户选择模型；查看角色预览后可以继续保存。",
   },
   publish: {
@@ -1830,25 +1830,29 @@ export function CodexMultiRouterWizard({
           },
         },
       );
-      const planToPersist =
-        !existingPlan && draftSubagentVersion === "v2"
-          ? {
-              ...result.plan,
-              settingsConfig: {
-                ...result.plan.settingsConfig,
-                codexRouting: {
-                  ...result.plan.settingsConfig.codexRouting,
-                  subagentV2: createDefaultCodexSubagentV2Config(),
-                },
-              },
-            }
-          : result.plan;
+      const planToPersist = result.plan;
+      let persistedPlan = planToPersist;
       if (existingPlan) {
         await providersApi.update(planToPersist, "codex");
       } else {
         await providersApi.add(planToPersist, "codex", false);
+        if (draftSubagentVersion === "v2") {
+          persistedPlan = await codexSubagentV2Api.initializeProviderConfig(
+            planToPersist.id,
+          );
+        }
       }
-      setSavedPlan(planToPersist);
+      queryClient.setQueryData(["providers", "codex"], (current: any) => ({
+        ...(current ?? { currentProviderId: "" }),
+        providers: {
+          ...Object.fromEntries(
+            providers.map((provider) => [provider.id, provider]),
+          ),
+          ...(current?.providers ?? {}),
+          [persistedPlan.id]: persistedPlan,
+        },
+      }));
+      setSavedPlan(persistedPlan);
       setDraftSources(result.sourceProviders);
       await queryClient.invalidateQueries({ queryKey: ["providers", "codex"] });
       toast.success("MultiRouter 方案已保存。", { closeButton: true });
@@ -2762,8 +2766,14 @@ export function CodexMultiRouterWizard({
                   </div>
                   使用 task
                   path、send_message、followup_task、mailbox、interrupt 和
-                  list_agents。用户不需要选择子模型，父 Codex 会根据 role
-                  description 在 Flash 与 Pro 之间自动选择。
+                  list_agents。Codex 会在符合条件的内置与自定义角色之间进行
+                  best-effort
+                  语义选择。能力问卷与角色说明只提供选择指导，不保证选择 Flash
+                  或 Pro；内置 default、worker、explorer 仍可能被选择。
+                </div>
+                <div className="text-xs font-medium text-muted-foreground">
+                  以下是当前可用时由后端初始化的两个 preset，不是 V2
+                  的全部候选：
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
                   <Button

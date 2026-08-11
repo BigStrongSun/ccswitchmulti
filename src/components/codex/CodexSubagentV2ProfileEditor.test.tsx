@@ -1199,7 +1199,7 @@ describe("Codex Sub-Agent V2 new-plan capability defaults", () => {
   it("states that Workspace V2 selection is best-effort guidance and retains built-in roles", async () => {
     await renderWorkspace();
 
-    expect(screen.getByText(/best-effort/)).toBeVisible();
+    expect(screen.getAllByText(/best-effort/).length).toBeGreaterThan(0);
     expect(screen.getByText(/问卷与角色说明只提供选择指导/)).toBeVisible();
     expect(screen.getByText(/不保证选择 Flash 或 Pro/)).toBeVisible();
     expect(screen.getByText(/default、worker、explorer/)).toBeVisible();
