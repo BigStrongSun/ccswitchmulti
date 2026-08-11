@@ -15,6 +15,7 @@ const CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
 const CDP_COMMAND_TIMEOUT: Duration = Duration::from_secs(4);
 const MODEL_PICKER_PATCH_KEY: &str = "__ccSwitchCodexAppCompatibilityV5";
 const REMEMBERED_CODEX_DESKTOP_EXECUTABLE_FILENAME: &str = "codex-desktop-executable.json";
+#[cfg(any(target_os = "macos", test))]
 const CODEX_DESKTOP_BUNDLE_IDENTIFIER: &str = "com.openai.codex";
 /// Codex App 历史目录与模型兼容层安装命令的执行结果。
 #[derive(Debug, Clone, Serialize)]
@@ -1331,6 +1332,7 @@ fn macos_codex_common_bundle_candidates() -> Vec<PathBuf> {
 }
 
 /// 以 bundle 的稳定身份和声明的主程序名构造候选，拒绝路径穿越与独立 ChatGPT。
+#[cfg(any(target_os = "macos", test))]
 fn macos_codex_bundle_executable_from_metadata(
     bundle: &Path,
     bundle_identifier: &str,
@@ -1376,6 +1378,7 @@ fn macos_codex_bundle_executable(bundle: &Path) -> Option<PathBuf> {
 }
 
 /// 找到受支持的顶层包装；Framework 内部 Service.app 不会提前截断搜索。
+#[cfg(any(target_os = "macos", test))]
 fn macos_codex_bundle_ancestor(executable: &Path) -> Option<PathBuf> {
     executable.ancestors().find_map(|path| {
         path.file_name()
