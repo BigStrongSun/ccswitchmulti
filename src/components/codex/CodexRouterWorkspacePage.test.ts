@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -88,6 +88,48 @@ vi.mock("@/lib/api/auth", () => ({
 vi.mock("@/lib/api/model-fetch", () => ({
   fetchCodexOauthModels: vi.fn(),
   fetchModelsForConfig: vi.fn(),
+}));
+
+vi.mock("@/lib/api/codexSubagentV2", () => ({
+  codexSubagentV2Api: {
+    previewProfile: vi.fn().mockResolvedValue({
+      providerKind: "third_party",
+      requestedRoleName: "deepseek-v4-flash",
+      effectiveRoleName: "deepseek-v4-flash",
+      description: "Flash profile",
+      developerInstructions: "Read only",
+      nicknameCandidates: ["Flash"],
+      model: "deepseek-v4-flash",
+      modelProvider: "codex_model_router_v2",
+      modelReasoningEffort: "medium",
+      modelContextWindow: 128000,
+      tomlPreview: "model = \"deepseek-v4-flash\"",
+      warnings: [],
+    }),
+    getProfileStatuses: vi.fn().mockResolvedValue({
+      mode: "v2",
+      generationSource: "configured_profiles",
+      profiles: [
+        {
+          profileKey: "deepseek-v4-flash",
+          model: "deepseek-v4-flash",
+          providerKind: "third_party",
+          enabled: true,
+          routable: true,
+          requestedRoleName: "deepseek-v4-flash",
+          effectiveRoleName: "deepseek-v4-flash",
+          modelProvider: "codex_model_router_v2",
+          modelReasoningEffort: "medium",
+          status: "generated",
+          warnings: [],
+        },
+      ],
+      warnings: [],
+    }),
+    updateProviderConfig: vi.fn(),
+    initializeProviderConfig: vi.fn(),
+    reconcileProviderProfiles: vi.fn(),
+  },
 }));
 
 type Deferred<T> = {
@@ -1598,7 +1640,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     );
   });
 
-  it("exposes V1 and V2 subagent settings while preserving routes and direct overrides", async () => {
+  function createSubagentWorkspaceFixture() {
     const source: Provider = {
       id: "codex-deepseek",
       name: "DeepSeek",
@@ -1622,10 +1664,34 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
           ...draftPlan.settingsConfig?.modelCatalog,
           spawnAgentModels: ["deepseek-v4-pro", "deepseek-v4-flash"],
         },
+        codexRouting: {
+          ...draftPlan.settingsConfig?.codexRouting,
+          subagentVersion: "v2",
+          subagentV2: {
+            schemaVersion: 1,
+            selectionPolicy: "balanced",
+            profiles: {
+              "deepseek-v4-flash": {
+                model: "deepseek-v4-flash",
+                enabled: true,
+                questionnaire: {
+                  taskStrengths: ["repository_exploration"],
+                  optimization: "speed",
+                  writeScope: "read_only",
+                  preference: "preferred",
+                  reasoningEffort: "medium",
+                },
+              },
+            },
+          },
+        },
       },
     };
+    return { source, plan };
+  }
 
-    renderWorkspace(
+  function renderSubagentWorkspace(source: Provider, plan: Provider) {
+    return renderWorkspace(
       React.createElement(CodexRouterWorkspacePage, {
         providers: [source, plan],
         isProxyRunning: true,
@@ -1638,17 +1704,48 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
         onCreateProvider: vi.fn(),
       }),
     );
+  }
 
-    expect(screen.getByText("Sub-Agent 设置")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "启用 V1" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "启用 V2" })).toBeInTheDocument();
-    expect(screen.getByText("当前使用 V2")).toBeInTheDocument();
-    expect(screen.getByText(/deepseek-flash/)).toBeInTheDocument();
-    expect(screen.getByText(/deepseek-pro/)).toBeInTheDocument();
+  it("moves Sub-Agent settings into a dedicated top-level workspace tab", async () => {
+    const { source, plan } = createSubagentWorkspaceFixture();
+    renderSubagentWorkspace(source, plan);
+
+    expect(
+      within(screen.getByRole("tablist"))
+        .getAllByRole("tab")
+        .map((tab) => tab.textContent?.trim()),
+    ).toEqual([
+      "总览",
+      "模型源",
+      "路由规则",
+      "子 Agent",
+      "状态",
+      "测试发布",
+    ]);
+    expect(screen.queryByText("Sub-Agent 设置")).not.toBeInTheDocument();
 
     await userEvent
       .setup()
-      .click(screen.getByRole("button", { name: "启用 V1" }));
+      .click(screen.getByRole("tab", { name: "子 Agent" }));
+    expect(await screen.findByText("Sub-Agent 设置")).toBeInTheDocument();
+  });
+
+  it("renders the active protocol as disabled and the inactive protocol as actionable", async () => {
+    const { source, plan } = createSubagentWorkspaceFixture();
+    const existingRoutes = plan.settingsConfig?.codexRouting?.routes ?? [];
+    const existingV2 = plan.settingsConfig?.codexRouting?.subagentV2;
+    renderSubagentWorkspace(source, plan);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("tab", { name: "子 Agent" }));
+
+    const activeV2 = screen.getByRole("button", { name: "已启用 V2" });
+    const inactiveV1 = screen.getByRole("button", { name: "启用 V1" });
+    expect(activeV2).toBeDisabled();
+    expect(activeV2).toHaveClass("bg-muted");
+    expect(inactiveV1).toBeEnabled();
+    expect(inactiveV1).toHaveClass("bg-blue-600");
+
+    await user.click(inactiveV1);
 
     await waitFor(() => expect(providersApi.update).toHaveBeenCalledOnce());
     const [updatedProvider, appType] = vi.mocked(providersApi.update).mock
@@ -1657,16 +1754,44 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     expect(updatedProvider.settingsConfig?.codexRouting).toMatchObject({
       subagentVersion: "v1",
       routes: existingRoutes,
+      subagentV2: existingV2,
     });
     expect(
       updatedProvider.settingsConfig?.modelCatalog?.spawnAgentModels,
     ).toEqual(["deepseek-v4-pro", "deepseek-v4-flash"]);
-    expect(screen.getByText("当前使用 V1")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "已启用 V1" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "启用 V2" })).toBeEnabled();
+    expect(
+      screen.getByText(/重启 Codex\/app-server 并新建会话后生效/),
+    ).toBeInTheDocument();
     expect(screen.getByText(/V1 direct model override/)).toBeInTheDocument();
     expect(screen.getByText("可拖拽排序的前五候选")).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "保存排序" }),
     ).toBeInTheDocument();
+  });
+
+  it("disables protocol actions while switching and keeps the previous protocol after failure", async () => {
+    const { source, plan } = createSubagentWorkspaceFixture();
+    const switching = createDeferred<boolean>();
+    vi.mocked(providersApi.update).mockReturnValueOnce(switching.promise);
+    renderSubagentWorkspace(source, plan);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("tab", { name: "子 Agent" }));
+
+    await user.click(screen.getByRole("button", { name: "启用 V1" }));
+    expect(screen.getByRole("button", { name: "切换中…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "已启用 V2" })).toBeDisabled();
+
+    switching.reject(new Error("persist failed"));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "切换失败：persist failed",
+    );
+    expect(screen.getByRole("button", { name: "已启用 V2" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "启用 V1" })).toBeEnabled();
+    expect(
+      screen.queryByText(/V1 direct model override/),
+    ).not.toBeInTheDocument();
   });
 
   it("shows a missing V2 role model without hiding the routable role", () => {
