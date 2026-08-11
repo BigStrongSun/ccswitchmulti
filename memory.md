@@ -1,5 +1,15 @@
 # CC Switch Repository Memory
 
+## 2026-08-11 Sub-Agent 工作台 UI 重构 3.19.1-20 本机交付闭环
+
+- 在 capability-injection 分支 `a77fd77a0b829ef78c56e059d733ef0b8c748e49` 上完成独立 Sub-Agent 工作台：MultiRouter 顶部导航固定为“总览 -> 模型源 -> 路由规则 -> 子 Agent -> 状态 -> 测试发布”，路由规则页不再夹带 Sub-Agent 配置。子 Agent 页同时保留 V1/V2；当前 V2 时，V1 显示蓝色“启用 V1”，V2 显示灰色不可点击“已启用 V2”，并明确切换后需重启 Codex app-server 和新建会话。
+- V2 模型目录区改为“搜索 + 已启用/待配置/不可路由/全部筛选 + 单模型 Accordion”。“从模型目录添加可配置模型”明确说明新模型默认关闭且不覆盖已有问卷/手工设置；每个模型只在展开时显示问卷，高级字段和“生成结果与 TOML”各自再折叠，sticky 底栏持续显示保存状态。此结构与 W3C APG 的 Accordion `button`/`aria-expanded` 及键盘操作语义一致；Codex 内置搜索取到官方一手页面，Matrix 搜索未发现对应一手结果且直开 W3C 被 403 验证页阻断，因此 Matrix 不能作为本轮正证据。
+- 安装版真实 UI 验收使用 `deepseek-v4-pro` 搜索：结果只剩 Pro，单项可展开，5 项持久化能力为复杂调试、架构设计、复杂实现、测试验证和高风险审查，“有限实现”未选；优化目标=质量、写入范围=复杂修改、模型偏好=优先、推理强度=高。高级字段与 TOML 均保持收起，页面无校验告警，sticky 显示“所有更改均已保存”，保存按钮 disabled。一次故意制造的 6 项未保存草稿通过离开并重新进入子 Agent 页恢复为数据库值，未点击保存、未污染 profile。
+- 完整源码门禁在本轮构建前通过：Rust `2945 passed / 0 failed / 2 ignored`，Vitest `115 files / 931 tests`，focused UI `156 passed`，Pester `46/46`；`pnpm typecheck`、Prettier、Cargo check/fmt 和 `git diff --check` 均通过。版本源统一为 `3.19.1-20`，版本提交为 `a77fd77a`。
+- `3.19.1-20` 产物 SHA-256：NSIS installer `29E866C7C4D97512111EF8A996762CDF32F62D5445BBC9876038AA0A945B8B66`，portable ZIP `BB6679458F4112A2B530763F1489EAA91469FD422BD6C58B2DF9E5F4CEFC4F30`，raw EXE `612B1BDBC248F455F25977C6AAB90EE7EBD3025FB02C480B25518484072BC064`，updater signature `B7D71DA47D97AECC69AA24C1E4F3E3356C634ABA17CD39FEE24F624292AD4E99`。
+- 独立隐藏事务 `ccsm-20260811-191254-83e0b85fc78d4b20bdf9958a6c4ece73` 状态为 `Success`，`Error=null`、`RollbackError=null`，完成 preflight、backup、kill/wait、卸载、安装、隐藏拉起和 health/version/hash 校验。事务外复核 PID/15721 owner `68356`，运行路径 `C:\Users\sunda\AppData\Local\CCSwitchMulti\cc-switch.exe`，FileVersion/ProductVersion 均为 `3.19.1-20`，安装 EXE 哈希与 raw artifact 一致，`/health` HTTP 200。
+- 最终 UI 证据为 `artifacts/ui-acceptance/3.19.1-20-subagent-workspace.png`（2560x1392，218852 bytes，SHA-256 `735A8FEC315DC039982530404631F2A2850F7622292768BCE647C8128445CD8F`）；画面同时包含六项导航、V1/V2 正确状态、Pro 搜索与展开问卷、收起的高级字段和已保存 sticky 状态。本轮只做本地提交、构建和安装，不 push、不创建 PR、不发布 GitHub Release。
+
 ## 2026-08-09 Codex Sub-Agent V1/V2 双模式设置设计
 
 - 用户确认 MultiRouter 应同时保留 `Sub-Agent V1（兼容）` 与 `Sub-Agent V2（推荐）` 两套配置，并由每个方案选择当前生效版本；同一方案、同一会话只运行一种协议。新方案和缺少版本字段的旧方案默认 V2，现有 `modelCatalog.spawnAgentModels` 保留为 V1 direct override 前五顺序，切换版本不删除另一套数据。
