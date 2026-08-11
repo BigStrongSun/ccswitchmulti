@@ -167,6 +167,24 @@ function Assert-CcsmNoReparseBoundary {
     }
 }
 
+function Get-CcsmTransactionExitCode {
+    param($Result)
+
+    if ($null -eq $Result) { return 1 }
+    $statusProperty = $Result.PSObject.Properties["Status"]
+    $errorProperty = $Result.PSObject.Properties["Error"]
+    $rollbackErrorProperty = $Result.PSObject.Properties["RollbackError"]
+    if ($null -eq $statusProperty -or $null -eq $errorProperty -or $null -eq $rollbackErrorProperty) {
+        return 1
+    }
+    if ([string]::Equals([string]$statusProperty.Value, "Success", [System.StringComparison]::Ordinal) -and
+        [string]::IsNullOrWhiteSpace([string]$errorProperty.Value) -and
+        [string]::IsNullOrWhiteSpace([string]$rollbackErrorProperty.Value)) {
+        return 0
+    }
+    return 1
+}
+
 function Assert-CcsmNoReparsePathBoundary {
     [CmdletBinding()]
     param(
@@ -1377,5 +1395,5 @@ if ($MyInvocation.InvocationName -ne '.') {
     }
     $result = Invoke-CcsmReinstallTransaction -Spec $spec
     $result | ConvertTo-Json -Depth 6
-    if ($result.Status -ne "Success") { exit 1 }
+    exit (Get-CcsmTransactionExitCode -Result $result)
 }
