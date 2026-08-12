@@ -1,6 +1,7 @@
 # 从 V1 到 V2：Codex Sub-Agent，以及 CCSM 如何让第三方模型成为 V2 Child
 
-> 一份从概念、官方实现到跨 Provider 适配的技术拆解报告  
+> 一份从概念、官方实现到跨 Provider 适配的技术拆解报告
+>
 > CCSwitchMulti / CCSM，2026-08-13
 
 ## 摘要
