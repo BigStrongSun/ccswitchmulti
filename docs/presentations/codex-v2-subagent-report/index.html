@@ -83,6 +83,7 @@
 <section class="slide" data-title="V2 六层架构">
   <p class="kicker">09 / NATIVE V2 ARCHITECTURE</p><h2>Codex 原生 V2 是六层调用链，不是一个 spawn 函数</h2>
   <div class="layer-stack mt-m"><div class="layer"><span class="n">01</span><b>配置层</b><span>model catalog · multi_agent_v2 feature · agents/*.toml</span></div><div class="layer"><span class="n">02</span><b>语义调度层</b><span><button class="term" data-term="description">description</button> → parent 选择 role</span></div><div class="layer"><span class="n">03</span><b>工具契约层</b><span>namespace · <button class="term" data-term="reserved schema">reserved schema</button> · hidden metadata</span></div><div class="layer"><span class="n">04</span><b>线程协作层</b><span>parent/child thread · task path · activity · mailbox</span></div><div class="layer"><span class="n">05</span><b>运行绑定层</b><span>model · provider · reasoning · sandbox · MCP · skills</span></div><div class="layer"><span class="n">06</span><b>Provider 消息层</b><span><button class="term" data-term="Responses">Responses</button> item · <button class="term" data-term="agent_message">agent_message</button> · encryption</span></div></div>
+  <a class="explore-link" href="#native-v2" data-explore="explore-native-v2">深入源码：六层如何在 Spawn Handler 汇合</a>
   <div class="conclusion">只看到 role TOML，最多证明第 1 层存在；不能据此证明第 2 层选角、第 5 层运行绑定或第 6 层请求成功。</div>
 </section>
 
@@ -196,6 +197,7 @@ let last_n = fork_turns.parse::&lt;usize&gt;()?;</pre></div><div class="line-not
 <section class="slide" data-title="CCSM 控制面">
   <p class="kicker">21 / CONTROL PLANE</p><h2>控制面把用户语义编译成 Codex 可以发现并运行的 Role</h2>
   <div class="figure-box"><div class="fig-title">CAPABILITY COMPILATION PIPELINE</div><svg viewBox="0 0 1300 300"><defs><marker id="a2" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#e66d25"/></marker></defs><g fill="none" stroke="currentColor"><rect x="30" y="90" width="210" height="100"/><rect x="300" y="70" width="250" height="140"/><rect x="630" y="20" width="230" height="70"/><rect x="630" y="115" width="230" height="70"/><rect x="630" y="210" width="230" height="70"/><rect x="970" y="90" width="270" height="100"/></g><g stroke="#e66d25" stroke-width="2" marker-end="url(#a2)"><path d="M240 140L300 140"/><path d="M550 120L630 55"/><path d="M550 140L630 150"/><path d="M550 160L630 245"/><path d="M860 55L970 115"/><path d="M860 150L970 140"/><path d="M860 245L970 165"/></g><text x="135" y="125" text-anchor="middle" font-weight="700">用户问卷</text><text x="135" y="150" text-anchor="middle" font-size="13">强项 · 排除 · 优化</text><text x="135" y="172" text-anchor="middle" font-size="13">范围 · 偏好 · effort</text><text x="425" y="115" text-anchor="middle" font-weight="700">Capability Compiler</text><text x="425" y="140" text-anchor="middle" font-size="13">规范化 · 校验 · Provider 分类</text><text x="425" y="164" text-anchor="middle" font-size="13">冲突检测 · role 生成</text><text x="745" y="60" text-anchor="middle">Role TOML</text><text x="745" y="155" text-anchor="middle">Model Catalog</text><text x="745" y="250" text-anchor="middle">config.toml</text><text x="1105" y="125" text-anchor="middle" font-weight="700">Codex Parent</text><text x="1105" y="151" text-anchor="middle" font-size="13">读取 description 并语义选角</text></svg><p class="caption">Backend compiler 是唯一编译器；前端 preview 与实际保存不各自拼装一套语义。</p></div>
+  <a class="explore-link" href="#control-plane" data-explore="explore-control-plane">深入源码：问卷、Compiler 与 Live Projection</a>
   <p class="source">C-SRC · codex_subagent_profiles.rs / codex_config.rs</p>
 </section>
 
@@ -223,6 +225,7 @@ let last_n = fork_turns.parse::&lt;usize&gt;()?;</pre></div><div class="line-not
   <p class="kicker">23 / DATA PLANE</p><h2>两阶段兼容必须分开：先让 Parent 产明文，再让第三方读标准消息</h2>
   <div class="two-col"><div class="card"><h3>Stage A · Parent 请求前</h3><p class="small"><strong>已知：</strong>请求来自 Official parent，router 拓扑含第三方 route。</p><p class="small"><strong>动作：</strong>只移除非保留 <code>agents.spawn/send/followup</code> 的 <code>message.encrypted</code> marker。</p><p class="small"><strong>不做：</strong>不改 <code>collaboration.*</code>，不投影 item。</p></div><div class="card"><h3>Stage B · Child Route 后</h3><p class="small"><strong>已知：</strong>effective Provider 已物化，确认为第三方 Responses 目标。</p><p class="small"><strong>动作：</strong><code>agent_message</code> → 标准 user message，再进 Chat/Anthropic converter。</p><p class="small"><strong>不做：</strong>不处理 Official OAuth，不解密 ciphertext。</p></div></div>
   <div class="figure-box mt-l"><div class="flow"><span>Official Parent</span><span>Stage A</span><span>Codex Orchestrator</span><span>Route + Materialize</span><span>Stage B</span><span>Third-party Child</span></div><p class="caption">Stage A 只能依据 router 拓扑；Stage B 必须等待真实 target Provider 身份。</p></div>
+  <a class="explore-link" href="#data-plane" data-explore="explore-data-plane">深入请求：Stage A 与 Stage B 的边界条件</a>
 </section>
 
 <section class="slide" data-title="Provider 物化代码">
@@ -268,6 +271,7 @@ if looks_like_opaque_ciphertext(content) {
   <div class="state-line" style="grid-template-columns:repeat(5,1fr)"><div class="state">问卷</div><div class="state">规范化</div><div class="state">Provider 分类</div><div class="state">冲突重命名</div><div class="state">Role 编译</div></div><div class="state-line" style="grid-template-columns:repeat(5,1fr)"><div class="state">Config 投影</div><div class="state">Parent 选角</div><div class="state">Child Spawn</div><div class="state">Provider 物化</div><div class="state">结果整合</div></div>
   <div class="two-col mt-l"><div class="card"><h3>输入语义</h3><p class="small">长上下文阅读 / 仓库探索 / 证据收集；排除复杂实现；只读；优化速度；medium reasoning。</p></div><div class="card"><h3>运行证明</h3><p class="small">不能只看 TOML。还要核对 agent_type、child model/provider、工具行为、route identity 与 child result。</p></div></div>
   <div class="conclusion">同名用户 role 无 CCSM marker 时不会覆盖；CCSM 会安全生成 <code>ccswitch-...</code> 名称。非 current Provider 保存也不会触碰 live projection。</div>
+  <a class="explore-link" href="#role-runtime" data-explore="explore-role-runtime">深入运行：从 Role TOML 到真实 Provider</a>
 </section>
 
 <section class="slide" data-title="Role TOML 案例">
@@ -296,6 +300,32 @@ model_reasoning_effort = "medium"</pre></div><div class="line-notes"><div class=
 </section>
 
 </div>
+<template id="explore-native-v2"><h2>原生 V2：六层在 Spawn Handler 如何汇合</h2><div class="explore-grid"><div class="card"><h3>控制流</h3><ol><li>Config loader 合并 catalog、feature 与 role config。</li><li>Parent 依据 description 选择 <code>agent_type</code>。</li><li>Handler 解析 <code>fork_turns</code>，构建 child config。</li><li>非 full-history 模式应用 role，再应用 model/runtime overrides。</li><li><code>thread_spawn_source</code> 建 canonical task path。</li><li>AgentControl 用 communication、parent thread/turn 创建 child。</li></ol><p><strong>真实副作用：</strong>thread 的创建发生在 <code>spawn_agent_with_communication</code>，不是 role 文件加载时。</p></div><div class="code-box"><pre>// 来源：openai/codex multi_agents_v2/spawn.rs
+let role_name = args.agent_type.as_deref(); // 读取角色身份，不使用 task_name 代替
+let mut config = build_agent_spawn_config(...)?; // 从 parent 当前有效配置建立 child 底座
+apply_spawn_agent_role(&session,&mut config,role_name).await?; // 叠加角色专属配置
+let source = thread_spawn_source(...,args.task_name.clone())?; // 生成 canonical task path
+agent_control.spawn_agent_with_communication( // 进入真正创建 child thread 的控制层
+ config, communication, context, Some(source), options // 一并交付配置、消息和父子关系
+).await?; // 等待 spawn 结果，失败则沿调用链返回</pre></div></div></template>
+<template id="explore-control-plane"><h2>CCSM 控制面：谁读问卷，谁改 Live 文件</h2><div class="explore-grid"><div class="card"><h3>源码职责</h3><ul><li><code>codex_subagent_profiles.rs</code>：解析 profile、Provider 分类、生成 description/instructions、命名冲突处理。</li><li><code>codex_config.rs</code>：投影 catalog/config/CCSM-owned role，保护用户文件。</li><li><code>services/provider/mod.rs</code>：只有 effective current Provider 才触发 live projection；非 current 返回 <code>NotRequired</code>。</li></ul><p>问卷保存与 live 生效是不同事务。这样编辑未启用 Provider 不会偷偷改变正在运行的 Codex。</p></div><div class="code-box"><pre>// 下列名称是控制面关键回归锚点
+compile_subagent_v2_profiles(...) // 验证问卷只经后端唯一编译器
+mixed_router_uses_non_reserved_agents_tool_namespace // 混合路由使用 agents namespace
+official_only_router_does_not_force_non_reserved_tool_namespace // 纯 Official 保留原生策略
+updating_valid_non_current_subagent_v2_ // 非当前 Provider 保存时
+  does_not_touch_live_projection_files // 明确验证 live 文件没有副作用</pre></div></div></template>
+<template id="explore-data-plane"><h2>CCSM 数据面：为什么必须分 Stage A / Stage B</h2><div class="explore-grid"><div class="card"><h3>Stage A · schema 时刻</h3><p>此时只知道 parent 是 Official、router 中存在第三方 route。CCSM 只能安全地让非保留 <code>agents.*</code> 的 message 产生明文，不能提前认定最终 child 一定去第三方。</p><h3>Stage B · effective Provider 时刻</h3><p>route 已解析并基于 target Provider 物化，CCSM 才能排除 Official/OAuth，并把可读 <code>agent_message</code> 投影为 user message。</p></div><div class="code-box"><pre>// request-local 因果标记：只传播一次 schema 决策
+codexRouterPlaintextV2Collaboration = true // 不复制整个 router，也不二次解析
+
+// Stage B gate：四个条件全部满足才投影
+AppType::Codex // 排除其他应用的普通 API 请求
+&& is_codex_responses_endpoint(endpoint) // 只处理 Codex Responses input
+&& !provider.is_codex_oauth() // 保护 managed Official OAuth
+&& !is_codex_official_provider(provider) // 保护其他 Official 身份
+
+// 不可读内容：CCSM 不尝试解密或发送空 Payload
+opaque_ciphertext =&gt; explicit InvalidRequest // 显式失败并指出正确配置边界</pre></div></div></template>
+<template id="explore-role-runtime"><h2>Role Runtime：语义选择之后，真实 Provider 如何出现</h2><div class="explore-grid"><div class="card"><h3>身份链</h3><ol><li><code>agent_type</code> 选择 role。</li><li>Role 中 <code>model</code> 是 catalog 可见模型。</li><li><code>model_provider=codex_model_router_v2</code> 指向统一 Router。</li><li>Router 按 exact / prefix / default 匹配 route。</li><li><code>targetProviderId</code> 找到真实 Provider。</li><li>Materialization 合并 URL、认证、apiFormat、modelMap 与请求级 route 身份。</li></ol></div><div class="card"><h3>验收证据</h3><p>至少核对 child task path 与 role、实际 request model、materialized Provider identity、第三方 upstream、工具执行和 child final。description 和 TOML 只是前置证据。</p><p><strong>边界：</strong>CCSM 不修改 GUI current Provider，不保存协作正文，也不负责 Codex mailbox 和 final 回收。</p></div></div></template>
 <script src="assets/runtime.js"></script>
 <script src="deck.js"></script>
 </body></html>
