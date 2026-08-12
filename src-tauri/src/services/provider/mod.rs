@@ -870,6 +870,98 @@ mod tests {
 
     #[test]
     #[serial]
+    fn updating_valid_non_current_subagent_v2_does_not_touch_live_projection_files() {
+        with_test_home(|state, _| {
+            let current = Provider::with_id(
+                "openai".to_string(),
+                "OpenAI Official".to_string(),
+                codex_settings("https://api.openai.com/v1", "sk-current"),
+                None,
+            );
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &current)
+                .expect("seed current provider");
+            state
+                .db
+                .set_current_provider(AppType::Codex.as_str(), &current.id)
+                .expect("mark official provider current");
+
+            let target = Provider::with_id(
+                "saved-router".to_string(),
+                "Saved router".to_string(),
+                json!({
+                    "modelCatalog": { "models": [{
+                        "model": "deepseek-v4-flash",
+                        "displayName": "DeepSeek V4 Flash",
+                        "contextWindow": 1000000
+                    }] },
+                    "codexRouting": {
+                        "enabled": true,
+                        "subagentVersion": "v2",
+                        "routes": [{
+                            "id": "flash-route",
+                            "enabled": true,
+                            "match": { "models": ["deepseek-v4-flash"] },
+                            "upstream": { "auth": { "source": "provider_config" } }
+                        }],
+                        "subagentV2": {
+                            "schemaVersion": 1,
+                            "selectionPolicy": "balanced",
+                            "profiles": {}
+                        }
+                    }
+                }),
+                None,
+            );
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &target)
+                .expect("seed saved router");
+
+            let config_path = crate::codex_config::get_codex_config_path();
+            let catalog_path = crate::codex_config::get_codex_model_catalog_path();
+            let agents_dir = crate::codex_config::get_codex_agents_dir();
+            std::fs::create_dir_all(config_path.parent().expect("config parent"))
+                .expect("create config dir");
+            std::fs::create_dir_all(&agents_dir).expect("create agents dir");
+            std::fs::write(&config_path, "model_provider = \"openai\"\n")
+                .expect("seed official live config");
+            std::fs::write(&catalog_path, "{\"sentinel\":true}")
+                .expect("seed catalog sentinel");
+            let managed_path = agents_dir.join("sentinel.toml");
+            std::fs::write(&managed_path, "# user sentinel\nmodel = \"keep\"\n")
+                .expect("seed agent sentinel");
+
+            let result = ProviderService::update_codex_subagent_v2(
+                state,
+                &target.id,
+                json!({
+                    "schemaVersion": 1,
+                    "selectionPolicy": "balanced",
+                    "profiles": {}
+                }),
+            )
+            .expect("save non-current V2 config");
+
+            assert_eq!(result.projection.status, CodexSubagentV2ProjectionStatus::NotRequired);
+            assert_eq!(
+                std::fs::read_to_string(&config_path).expect("read live config"),
+                "model_provider = \"openai\"\n"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&catalog_path).expect("read catalog sentinel"),
+                "{\"sentinel\":true}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&managed_path).expect("read agent sentinel"),
+                "# user sentinel\nmodel = \"keep\"\n"
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
     fn reconcile_codex_subagent_v2_uses_the_complete_current_draft_for_batch_actions() {
         with_test_home(|state, _| {
             let current = Provider::with_id(

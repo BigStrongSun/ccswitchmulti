@@ -10910,7 +10910,7 @@ model_provider = "codex_model_router_v2"
     }
 
     #[test]
-    fn model_catalog_json_field_writes_relative_filename() {
+    fn model_catalog_json_field_writes_absolute_path_required_by_codex() {
         let input = r#"model_provider = "any"
 
 [model_providers.any]
@@ -10920,11 +10920,14 @@ name = "any"
 
         let result = set_codex_model_catalog_json_field(input, Some(catalog_path)).unwrap();
         let parsed: toml::Value = toml::from_str(&result).unwrap();
-        assert_eq!(
-            parsed
-                .get("model_catalog_json")
-                .and_then(|value| value.as_str()),
-            Some(CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME)
+        let written = parsed
+            .get("model_catalog_json")
+            .and_then(|value| value.as_str())
+            .expect("model_catalog_json should be written");
+        assert_eq!(written, catalog_path.to_string_lossy());
+        assert!(
+            Path::new(written).is_absolute(),
+            "Codex AbsolutePathBuf rejects a relative model_catalog_json: {written}"
         );
         assert!(
             parsed
@@ -10934,6 +10937,52 @@ name = "any"
                 .is_none(),
             "model_catalog_json should stay top-level"
         );
+    }
+
+    #[test]
+    fn catalog_projection_canonicalizes_agent_thread_aliases() {
+        let input = r#"model_provider = "codex_model_router_v2"
+
+[agents]
+max_threads = 10
+max_concurrent_threads_per_session = 8
+max_depth = 2
+"#;
+        let specs = vec![CodexCatalogModelSpec {
+            model: "gpt-5.6-sol".to_string(),
+            upstream_model: None,
+            display_name: "GPT-5.6-Sol".to_string(),
+            context_window: 1_000_000,
+            text_only: false,
+            is_default: true,
+            supports_parallel_tool_calls: None,
+            input_modalities: None,
+            base_instructions: None,
+        }];
+        let catalog_path = get_codex_model_catalog_path();
+
+        let projected = set_codex_model_catalog_projection_fields(
+            input,
+            Some(&catalog_path),
+            Some(&specs),
+            None,
+        )
+        .expect("project catalog fields");
+        let parsed: toml::Value = toml::from_str(&projected).expect("parse projected config");
+        let agents = parsed.get("agents").expect("agents table");
+
+        assert_eq!(
+            agents
+                .get("max_concurrent_threads_per_session")
+                .and_then(|value| value.as_integer()),
+            Some(8),
+            "canonical user value must win"
+        );
+        assert!(
+            agents.get("max_threads").is_none(),
+            "serde treats max_threads as an alias of max_concurrent_threads_per_session; both keys make Codex reject the config"
+        );
+        assert_eq!(agents.get("max_depth").and_then(|value| value.as_integer()), Some(2));
     }
 
     #[test]
