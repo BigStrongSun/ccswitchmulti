@@ -927,8 +927,7 @@ mod tests {
             std::fs::create_dir_all(&agents_dir).expect("create agents dir");
             std::fs::write(&config_path, "model_provider = \"openai\"\n")
                 .expect("seed official live config");
-            std::fs::write(&catalog_path, "{\"sentinel\":true}")
-                .expect("seed catalog sentinel");
+            std::fs::write(&catalog_path, "{\"sentinel\":true}").expect("seed catalog sentinel");
             let managed_path = agents_dir.join("sentinel.toml");
             std::fs::write(&managed_path, "# user sentinel\nmodel = \"keep\"\n")
                 .expect("seed agent sentinel");
@@ -944,7 +943,10 @@ mod tests {
             )
             .expect("save non-current V2 config");
 
-            assert_eq!(result.projection.status, CodexSubagentV2ProjectionStatus::NotRequired);
+            assert_eq!(
+                result.projection.status,
+                CodexSubagentV2ProjectionStatus::NotRequired
+            );
             assert_eq!(
                 std::fs::read_to_string(&config_path).expect("read live config"),
                 "model_provider = \"openai\"\n"

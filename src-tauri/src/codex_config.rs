@@ -2304,11 +2304,14 @@ fn ensure_codex_agents_defaults(doc: &mut DocumentMut) {
     let max_concurrent_threads = agents
         .get("max_concurrent_threads_per_session")
         .and_then(|value| value.as_integer())
-        .or_else(|| agents.get("max_threads").and_then(|value| value.as_integer()))
+        .or_else(|| {
+            agents
+                .get("max_threads")
+                .and_then(|value| value.as_integer())
+        })
         .unwrap_or(CC_SWITCH_CODEX_AGENT_THREADS);
     agents.remove("max_threads");
-    agents["max_concurrent_threads_per_session"] =
-        toml_edit::value(max_concurrent_threads);
+    agents["max_concurrent_threads_per_session"] = toml_edit::value(max_concurrent_threads);
     if !agents.contains_key("max_depth") {
         agents["max_depth"] = toml_edit::value(CC_SWITCH_CODEX_AGENT_DEPTH);
     }
@@ -10990,7 +10993,10 @@ max_depth = 2
             agents.get("max_threads").is_none(),
             "serde treats max_threads as an alias of max_concurrent_threads_per_session; both keys make Codex reject the config"
         );
-        assert_eq!(agents.get("max_depth").and_then(|value| value.as_integer()), Some(2));
+        assert_eq!(
+            agents.get("max_depth").and_then(|value| value.as_integer()),
+            Some(2)
+        );
     }
 
     #[test]
