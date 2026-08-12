@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-themes="engineering-whiteprint,academic-paper,tokyo-night">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>从 V1 到 V2 · Codex Sub-Agent 与 CCSM 第三方模型适配</title>
+<link rel="stylesheet" href="assets/fonts.css">
+<link rel="stylesheet" href="assets/base.css">
+<link rel="stylesheet" id="theme-link" href="assets/themes/engineering-whiteprint.css">
+<link rel="stylesheet" href="assets/animations/animations.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="tpl-document-deck">
+<div class="deck">
+
+<section class="slide" data-title="封面">
+  <p class="kicker">CCSM ENGINEERING REPORT · 2026-08-13</p>
+  <h1>从 V1 到 V2<span>Codex Sub-Agent，以及 CCSM 如何让第三方模型成为 V2 Child</span></h1>
+  <p class="lede">从上下文治理、V1 生命周期和 V2 协作树开始，逐层拆解角色能力、官方调用链、第三方四层障碍，以及 CCSM 的控制面与数据面适配。页面本身就是完整技术文档，不依赖讲者口播。</p>
+  <div class="meta-row"><span>32 页 · 独立阅读</span><span>OpenAI 文档 / Codex 源码 / CCSM 源码与测试</span><span>← → 翻页 · O 总览 · T 换主题</span></div>
+  <div class="deck-footer"><span>REPORT / CODEX-V2-SUBAGENT</span><span class="slide-number" data-current="1" data-total="32"></span></div>
+</section>
+
+<section class="slide" data-title="阅读地图">
+  <p class="kicker">00 / READING MAP</p><h2>先建立概念，再进入源码：六段因果链</h2>
+  <div class="two-col mt-m">
+    <div class="read-article"><p><strong>这不是安装与排障手册。</strong>目标是让第一次接触 Sub-Agent 的读者，也能沿着“为什么存在 → 原生如何运行 → 为什么第三方失败 → CCSM 如何恢复互操作”读懂完整机制。</p><p>橙色虚线术语提供可选深度；每张图只回答一个结构或时序问题。源码结论优先采用官方文档和当前源码，公开 issue 只证明具体复现。</p></div>
+    <div class="card source-card"><h3>事实标记</h3><ul><li>O-DOC / O-SRC：官方语义与当前实现</li><li>O-ISSUE：指定版本现场复现</li><li>C-SRC / C-TEST：CCSM 实现与回归契约</li><li>RUNTIME：本地或 CI 的实际结果</li></ul></div>
+  </div>
+  <div class="flow mt-l"><span>Sub-Agent 定位</span><span>V1 基线</span><span>V2 原生结构</span><span>第三方障碍</span><span>CCSM 适配</span><span>角色案例与复盘</span></div>
+  <p class="source">SOURCE · OpenAI Subagents / Config docs；docs/references/codex-v2-subagent-evidence-index.md</p>
+</section>
+
+<section class="slide" data-title="单 Agent 上下文竞争">
+  <p class="kicker">01 / WHY SUB-AGENTS</p><h2>单 Agent 的瓶颈常常不是推理，而是上下文竞争</h2>
+  <div class="doc-grid mt-m"><div class="read-article"><p><strong>仓库探索、日志、测试输出和最终决策都挤在同一线程时，中间材料会逐渐覆盖真正重要的目标与约束。</strong>OpenAI 将这种风险描述为 <button class="term" data-term="context pollution">context pollution</button> / context rot。</p><p>Sub-Agent 不会凭空增加模型能力。它改变的是信息组织：过程噪声留在独立 child thread，parent 只接收经过压缩的结论、证据与产物。</p><div class="conclusion">关键收益：把“谁做过程”与“谁保留全局目标并整合”分开。</div></div>
+  <div class="figure-box"><div class="fig-title">CONTEXT BUDGET COMPETITION</div><svg viewBox="0 0 360 350" aria-label="上下文预算对比"><rect x="35" y="30" width="110" height="270" fill="none" stroke="currentColor"/><rect x="215" y="30" width="110" height="270" fill="none" stroke="currentColor"/><rect x="35" y="30" width="110" height="60" fill="#e66d25" opacity=".75"/><rect x="35" y="90" width="110" height="100" fill="#316ca6" opacity=".55"/><rect x="35" y="190" width="110" height="110" fill="#8095aa" opacity=".5"/><rect x="215" y="30" width="110" height="120" fill="#e66d25" opacity=".75"/><rect x="215" y="150" width="110" height="150" fill="#316ca6" opacity=".28"/><text x="90" y="326" text-anchor="middle" font-size="13">单线程</text><text x="270" y="326" text-anchor="middle" font-size="13">Parent + Child</text><text x="90" y="65" text-anchor="middle" fill="white" font-size="12">目标/决策</text><text x="90" y="140" text-anchor="middle" fill="white" font-size="12">探索日志</text><text x="90" y="245" text-anchor="middle" font-size="12">测试/中间态</text><text x="270" y="85" text-anchor="middle" fill="white" font-size="12">目标/整合</text><text x="270" y="220" text-anchor="middle" font-size="12">Child 摘要</text></svg><p class="caption">左：过程材料挤压决策空间；右：child 隔离过程，parent 保留目标。</p></div></div>
+</section>
+
+<section class="slide" data-title="Sub-Agent 定位">
+  <p class="kicker">02 / RESPONSIBILITY</p><h2>Sub-Agent 是有边界的协作执行者，不是第二个总负责人</h2>
+  <div class="three-col mt-m"><div class="card"><h3>Parent</h3><p class="small">持有用户目标、任务拆分、文件所有权、冲突协调、验收与最终交付。</p></div><div class="card"><h3>Child</h3><p class="small">在独立 Agent thread 中完成一项清晰任务，返回证据、局部产物或风险。</p></div><div class="card"><h3>共享边界</h3><p class="small">工具和工作区可以共享，但全局承诺、合并与发布不会因 spawn 自动转移。</p></div></div>
+  <div class="figure-box mt-l"><div class="fig-title">PARENT / CHILD RESPONSIBILITY GRAPH</div><svg viewBox="0 0 1200 270"><defs><marker id="a1" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#e66d25"/></marker></defs><rect x="480" y="25" width="240" height="70" rx="4" fill="none" stroke="currentColor" stroke-width="2"/><text x="600" y="54" text-anchor="middle" font-weight="700">Parent Agent</text><text x="600" y="77" text-anchor="middle" font-size="13">拆分 · 授权 · 整合 · 验收</text><g fill="none" stroke="#e66d25" stroke-width="2" marker-end="url(#a1)"><path d="M535 95L240 160"/><path d="M600 95L600 160"/><path d="M665 95L960 160"/></g><g fill="none" stroke="currentColor"><rect x="100" y="165" width="280" height="75"/><rect x="460" y="165" width="280" height="75"/><rect x="820" y="165" width="280" height="75"/></g><text x="240" y="194" text-anchor="middle" font-weight="700">Explorer Child</text><text x="240" y="217" text-anchor="middle" font-size="13">只读探索 · 证据锚点</text><text x="600" y="194" text-anchor="middle" font-weight="700">Reviewer Child</text><text x="600" y="217" text-anchor="middle" font-size="13">反例 · 风险 · 高危审查</text><text x="960" y="194" text-anchor="middle" font-weight="700">Worker Child</text><text x="960" y="217" text-anchor="middle" font-size="13">明确文件范围内实现</text></svg><p class="caption">Parent 保留“对用户负责”的全局职责；child 承担可委派、可验收的局部过程。</p></div>
+</section>
+
+<section class="slide" data-title="V1 核心抽象">
+  <p class="kicker">03 / V1 BASELINE</p><h2>V1 以 Agent ID 为句柄：直接、显式、需要 Parent 手工记账</h2>
+  <div class="doc-grid mt-m"><div class="read-article"><p><strong>V1 工具族围绕一个运行中的 agent id 管理生命周期。</strong>Parent 创建 child 后保存 id，再用 id 发送输入、恢复、等待或关闭。当前官方 V1 handler 把调用翻译成 AgentControl 操作，并让 child 继承有效 provider、审批、sandbox 与 cwd，再叠加 role 配置。</p><p>机制很直观，但当 child 数量增加时，parent 必须自己维护“a1 对应哪个任务、谁已完成、谁需要追问”。</p></div><div class="card source-card"><h3>V1 TOOL FAMILY</h3><ul><li><code>spawn_agent</code>：创建并返回 id</li><li><code>send_input</code>：继续发输入</li><li><code>resume_agent</code>：恢复运行</li><li><code>wait_agent</code>：等待状态</li><li><code>close_agent</code>：关闭生命周期</li></ul></div></div>
+  <div class="figure-box"><div class="fig-title">ID-CENTRIC STRUCTURE</div><div class="flow"><span>Parent turn</span><span>AgentControl</span><span>child a1</span><span>wait / result</span><span>Parent integration</span></div><p class="caption">精确工具名与 schema 可能随版本变化；这里固定的是已审计版本的运行抽象。</p></div><p class="source">O-SRC · openai/codex codex-rs/core/src/tools/handlers/multi_agents.rs</p>
+</section>
+
+<section class="slide" data-title="V1 状态机">
+  <p class="kicker">04 / V1 LIFECYCLE</p><h2>V1 生命周期：Parent 围绕一个运行实例推进状态</h2>
+  <div class="state-line"><div class="state">Spawned</div><div class="state">Running</div><div class="state">Waiting</div><div class="state">Running</div><div class="state">Completed</div><div class="state">Closed</div></div>
+  <div class="two-col mt-l"><div class="read-article"><p><strong>状态转换由具体操作驱动。</strong><code>spawn_agent</code> 创建实例；child 运行中可能等待工具；<code>send_input</code> 或 <code>resume_agent</code> 让它继续；<code>wait_agent</code> 只是观察状态，不替 child 执行工作。</p><p>完成与关闭也不是同一概念。Completed 表示某一轮返回 final，Closed 才表示生命周期被明确收回。</p></div><div class="table-card"><table><tr><th>转换</th><th>触发</th></tr><tr><td>Spawned → Running</td><td>child turn 开始</td></tr><tr><td>Waiting → Running</td><td>工具完成 / resume / input</td></tr><tr><td>Running → Completed</td><td>child 返回 final</td></tr><tr><td>任意可运行态 → Closed</td><td>Parent 主动关闭</td></tr></table></div></div>
+  <div class="conclusion">V1 管得很好的是“一个 child 实例”；不擅长表达的是“一个可寻址、可后续追加的协作任务”。</div>
+</section>
+
+<section class="slide" data-title="V1 时序">
+  <p class="kicker">05 / V1 SEQUENCE</p><h2>一次 V1 调用：实例先创建，任务含义由 Parent 自己维护</h2>
+  <div class="sequence mt-m" style="--actors:4"><div class="actor">User</div><div class="actor">Parent</div><div class="actor">AgentControl</div><div class="actor">Child a1</div><div class="event" style="--from:1;--span:2">① 审计配置回归</div><div class="event" style="--from:2;--span:2">② spawn_agent(message, role/model?)</div><div class="event" style="--from:3;--span:2">③ 创建 child thread + 有效配置</div><div class="event back" style="--from:2;--span:2">④ 返回 agent_id = a1</div><div class="event" style="--from:4;--span:1">⑤ 搜索源码、Git、测试</div><div class="event" style="--from:2;--span:2">⑥ wait_agent(a1)</div><div class="event back" style="--from:2;--span:3">⑦ final + evidence</div><div class="event back" style="--from:1;--span:2">⑧ Parent 整合根因</div></div>
+  <div class="two-col mt-l"><div class="card"><h3>优势</h3><p class="small">机制直接、id 明确、显式 override 容易理解；已审计的异构 payload 路径更接近标准 message。</p></div><div class="card"><h3>扩展限制</h3><p class="small">任务身份、层级、follow-up 和横向通信主要靠 parent 自己记忆与组织。</p></div></div>
+</section>
+
+<section class="slide" data-title="为什么 V2">
+  <p class="kicker">06 / WHY V2</p><h2>V2 把“运行一个 Child”提升为“创建一个协作任务”</h2>
+  <div class="doc-grid mt-m"><div class="read-article"><p><strong>V2 的核心不是多几个模型参数，而是协作对象变了。</strong><button class="term" data-term="task path">task path</button> 给任务规范身份；<button class="term" data-term="mailbox">mailbox</button> 让任务间可以定向通信；follow-up 能给已完成任务追加新一轮工作。</p><p>于是 parent 面对的不是一组随机 id，而是一棵有层级、可寻址、可继续的任务树。</p><div class="conclusion">V1：管理 child 实例。V2：管理带身份和生命周期的协作任务。</div></div>
+  <div class="figure-box"><div class="fig-title">CANONICAL TASK TREE</div><svg viewBox="0 0 400 360"><g fill="none" stroke="#e66d25" stroke-width="2"><path d="M200 70L105 150"/><path d="M200 70L295 150"/><path d="M105 205L105 275"/><path stroke-dasharray="6 5" d="M285 190C250 245 165 245 125 190"/></g><g fill="none" stroke="currentColor"><rect x="130" y="25" width="140" height="48"/><rect x="35" y="150" width="140" height="55"/><rect x="225" y="150" width="140" height="55"/><rect x="35" y="275" width="140" height="55"/></g><text x="200" y="55" text-anchor="middle">/root</text><text x="105" y="180" text-anchor="middle">/root/repo_audit</text><text x="295" y="180" text-anchor="middle">/root/protocol</text><text x="105" y="305" text-anchor="middle">/root/repo_audit/tests</text><text x="200" y="235" text-anchor="middle" font-size="12" fill="#e66d25">send_message</text></svg><p class="caption">task path 表达协作树身份；它不等于 custom role 名。</p></div></div>
+</section>
+
+<section class="slide" data-title="V2 协作工具">
+  <p class="kicker">07 / V2 COLLABORATION</p><h2>V2 把“消息”和“追加工作”分成不同语义</h2>
+  <div class="table-card"><table><thead><tr><th>工具</th><th>协作语义</th><th>是否启动 turn</th></tr></thead><tbody><tr><td><code>spawn_agent</code></td><td>创建有 task_name 和 canonical path 的 child</td><td>是</td></tr><tr><td><code>send_message</code></td><td>向现有任务 mailbox 发送信息</td><td>否，默认只投递</td></tr><tr><td><code>followup_task</code></td><td>给既有任务追加工作</td><td>空闲时启动</td></tr><tr><td><code>interrupt_agent</code></td><td>打断当前 turn，保留任务身份</td><td>终止当前轮</td></tr><tr><td><code>list_agents</code></td><td>按路径检查协作树和活动状态</td><td>否</td></tr></tbody></table></div>
+  <div class="read-article mt-l"><p><strong>这套语义让“告知一个事实”和“要求再做一轮”不再混在一起。</strong>task path 也使兄弟任务可以被明确寻址，parent 不必把所有横向协调都翻译成 id。</p></div>
+  <p class="source">O-SRC · openai/codex multi_agents_v2 handlers；当前工具 schema 以所用 Codex 版本为准</p>
+</section>
+
+<section class="slide" data-title="V1 V2 对照">
+  <p class="kicker">08 / COMPARISON</p><h2>V2 改善的是协作模型，不是把 V1 简单换一个名字</h2>
+  <div class="table-card"><table><thead><tr><th>维度</th><th>V1</th><th>V2</th><th>工程影响</th></tr></thead><tbody><tr><td>主要身份</td><td>agent id</td><td>canonical task path</td><td>任务可追踪、可分层</td></tr><tr><td>组织方式</td><td>实例集合</td><td>协作任务树</td><td>Parent 调度负担降低</td></tr><tr><td>后续工作</td><td>send / resume</td><td>message / follow-up 分离</td><td>意图更明确</td></tr><tr><td>角色</td><td>可叠加</td><td><code>agent_type</code> 选择 custom role</td><td>能力目录变成一等入口</td></tr><tr><td>上下文</td><td>继承有效配置</td><td><button class="term" data-term="fork_turns">fork_turns</button> = none/all/N</td><td>历史与异构 override 需权衡</td></tr><tr><td>跨 Provider</td><td>已审计路径较直接</td><td>encrypted schema + agent_message</td><td>需要额外互操作层</td></tr></tbody></table></div>
+  <div class="conclusion">判断 V2 是否“更好”要看任务：它更适合结构化协作，但也引入更严格的工具、上下文和消息边界。</div>
+</section>
+
+<section class="slide" data-title="V2 六层架构">
+  <p class="kicker">09 / NATIVE V2 ARCHITECTURE</p><h2>Codex 原生 V2 是六层调用链，不是一个 spawn 函数</h2>
+  <div class="layer-stack mt-m"><div class="layer"><span class="n">01</span><b>配置层</b><span>model catalog · multi_agent_v2 feature · agents/*.toml</span></div><div class="layer"><span class="n">02</span><b>语义调度层</b><span><button class="term" data-term="description">description</button> → parent 选择 role</span></div><div class="layer"><span class="n">03</span><b>工具契约层</b><span>namespace · <button class="term" data-term="reserved schema">reserved schema</button> · hidden metadata</span></div><div class="layer"><span class="n">04</span><b>线程协作层</b><span>parent/child thread · task path · activity · mailbox</span></div><div class="layer"><span class="n">05</span><b>运行绑定层</b><span>model · provider · reasoning · sandbox · MCP · skills</span></div><div class="layer"><span class="n">06</span><b>Provider 消息层</b><span><button class="term" data-term="Responses">Responses</button> item · <button class="term" data-term="agent_message">agent_message</button> · encryption</span></div></div>
+  <div class="conclusion">只看到 role TOML，最多证明第 1 层存在；不能据此证明第 2 层选角、第 5 层运行绑定或第 6 层请求成功。</div>
+</section>
+
+<section class="slide" data-title="Role 配置结构">
+  <p class="kicker">10 / ROLE CONFIG</p><h2>一个 Role 同时服务三个阶段：选角、执行、运行绑定</h2>
+  <div class="role-triptych mt-l"><div class="card"><h3><button class="term" data-term="description">description</button></h3><p class="small"><strong>选择前。</strong>告诉 parent 这个角色擅长、排除、何时优先。</p></div><div class="arrow">→</div><div class="card"><h3><button class="term" data-term="developer_instructions">developer_instructions</button></h3><p class="small"><strong>选择后。</strong>约束 child 如何工作、写入范围和交付责任。</p></div><div class="arrow">→</div><div class="card"><h3>runtime binding</h3><p class="small"><strong>运行时。</strong>model、provider、effort、sandbox、MCP 和 skills。</p></div></div>
+  <div class="code-box mt-l"><pre># ~/.codex/agents/repo_explorer.toml
+name = "repo_explorer" # 稳定 role 标识，供 agent_type 引用
+description = "Use for read-only repository exploration." # 给 parent 的选角提示
+developer_instructions = "Inspect only; return evidence." # child 的执行边界
+model = "gpt-5.6-terra" # child session 的模型覆盖
+model_reasoning_effort = "medium" # child 的推理强度覆盖</pre></div>
+  <p class="caption">nickname 只负责显示。任务名、角色名、模型名和 Provider 身份也不是同一个概念。</p>
+</section>
+
+<section class="slide" data-title="Spawn 源码">
+  <p class="kicker">11 / CODE SLICE</p><h2>官方 SpawnAgentArgs：task_name 与 agent_type 进入不同机制</h2>
+  <div class="code-grid"><div class="code-box"><pre>struct SpawnAgentArgs {
+ message: String,
+ task_name: String,
+ agent_type: Option&lt;String&gt;,
+ model: Option&lt;String&gt;,
+ reasoning_effort: Option&lt;ReasoningEffort&gt;,
+ service_tier: Option&lt;String&gt;,
+ fork_turns: Option&lt;String&gt;,
+ fork_context: Option&lt;bool&gt;,
+}</pre></div><div class="line-notes"><div class="line-note"><b>01</b><span><code>message</code> 是 child 的任务正文，后续会被包装为协作通信。</span></div><div class="line-note"><b>02</b><span><code>task_name</code> 参与 canonical path；它不加载 role。</span></div><div class="line-note"><b>03</b><span><code>agent_type</code> 才进入 <code>apply_spawn_agent_role</code>。</span></div><div class="line-note"><b>04</b><span><code>model/effort/tier</code> 是运行覆盖，但会受 reserved schema 和 fork mode 约束。</span></div><div class="line-note"><b>05</b><span><code>fork_turns</code> 决定 child 继承 none/all/最近 N 轮。</span></div><div class="line-note"><b>06</b><span><code>fork_context</code> 是旧字段，V2 当前明确拒绝。</span></div></div></div>
+  <div class="conclusion"><strong>整体控制流：</strong>handler 解析 fork → 构建 child config → 应用 role/model/runtime → 建 task path 与 communication → AgentControl 创建 thread。真实副作用发生在 AgentControl spawn，而不是 struct 解析。</div>
+  <p class="source">O-SRC · openai/codex codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs</p>
+</section>
+
+<section class="slide" data-title="fork_turns">
+  <p class="kicker">12 / CONTEXT FORK</p><h2>fork_turns 决定历史继承；当前默认 all 会影响异构 Role</h2>
+  <div class="code-grid"><div class="code-box"><pre>let fork_turns = self.fork_turns
+ .as_deref()             // 读取显式策略
+ .map(str::trim)         // 去掉空白
+ .filter(|v| !v.is_empty()) // 排除空值
+ .unwrap_or("all");     // 当前默认完整历史
+
+if fork_turns == "none" { return Ok(None); }
+if fork_turns == "all" {
+ return Ok(Some(FullHistory));
+}
+let last_n = fork_turns.parse::&lt;usize&gt;()?;</pre></div><div class="line-notes"><div class="line-note"><b>A</b><span><code>none</code>：child 不 fork 历史，适合独立异构 worker。</span></div><div class="line-note"><b>B</b><span><code>all</code>：完整继承 parent 历史，当前实现默认值。</span></div><div class="line-note"><b>C</b><span>正整数：只继承最近 N 轮，在上下文与隔离间折中。</span></div><div class="line-note"><b>D</b><span>full-history fork 会限制 role/model override；不能同时假设完整继承和自由换 runtime。</span></div></div></div>
+  <div class="conclusion"><strong>整体控制流：</strong>fork mode 改变 child 的上下文来源，不直接决定 Provider。选择异构 custom role 时应明确给出 <code>fork_turns: "none"</code> 或经过验证的最近 N 轮。</div>
+</section>
+
+<section class="slide" data-title="原生 V2 时序">
+  <p class="kicker">13 / NATIVE SEQUENCE</p><h2>从配置加载到 Child 完成：每一层都可能独立失败</h2>
+  <div class="sequence" style="--actors:6"><div class="actor">Config</div><div class="actor">Parent</div><div class="actor">Spawn Handler</div><div class="actor">AgentControl</div><div class="actor">Child Thread</div><div class="actor">Provider</div><div class="event" style="--from:1;--span:2">① catalog + role guidance</div><div class="event" style="--from:2;--span:2">② spawn(message, task, agent_type?, fork?)</div><div class="event" style="--from:3;--span:1">③ build child config / apply overrides</div><div class="event" style="--from:3;--span:2">④ communication + task path + parent IDs</div><div class="event" style="--from:4;--span:2">⑤ 创建 child thread</div><div class="event" style="--from:5;--span:2">⑥ Responses(input: agent_message)</div><div class="event back" style="--from:5;--span:2">⑦ tool/model output</div><div class="event back" style="--from:2;--span:4">⑧ activity + final result</div></div>
+  <div class="conclusion">验收也必须逐层：配置可解析 → role 可选 → child config 正确 → Provider 请求正确 → child 执行 → parent 回收。不能用前一层的证据代替后一层。</div>
+</section>
+
+<section class="slide" data-title="能力描述为什么必要">
+  <p class="kicker">14 / SEMANTIC ROUTING</p><h2>模型名说明“在哪里跑”，能力描述才说明“为什么选它”</h2>
+  <div class="two-col mt-m"><div class="card"><h3>Flash Explorer</h3><p class="small"><strong>匹配：</strong>长上下文阅读、仓库探索、证据收集、总结与测试观察。</p><p class="small"><strong>排除：</strong>复杂架构、复杂实现、高风险审查。</p><p class="small"><strong>范围：</strong>只读。</p></div><div class="card"><h3>Pro Engineer</h3><p class="small"><strong>匹配：</strong>复杂调试、架构设计、跨模块实现、高风险审查。</p><p class="small"><strong>排除：</strong>泛化阅读和简单摘要。</p><p class="small"><strong>范围：</strong>委派目标内复杂改动。</p></div></div>
+  <div class="read-article mt-l"><p><strong>即使两个角色来自相同模型家族，它们也可以承担完全不同的任务边界。</strong>Parent 依据 description 做 best-effort 语义选择；选中后，developer instructions 决定 child 行为；最后 runtime binding 才把请求送到具体模型。</p></div>
+  <div class="conclusion">description 不是确定性硬路由。真实模型与 Provider 必须通过 child config、请求或路由证据验证。</div>
+</section>
+
+<section class="slide" data-title="task_name 不是 role">
+  <p class="kicker">15 / IDENTITY SEPARATION</p><h2>task_name 只建立任务路径；agent_type 才选择 Custom Role</h2>
+  <div class="two-col"><div><h3 class="bad">错误理解</h3><div class="code-box"><pre>{
+ "task_name": "deepseek_flash", // 只得到路径
+ "message": "审计仓库"          // 没有选择 role
+}</pre></div><p class="small mt-m">结果可能是 generic inherited child；路径像角色名，不会触发 role 加载。</p></div><div><h3 class="good">正确分离</h3><div class="code-box"><pre>{
+ "task_name": "audit_router",       // /root/audit_router
+ "agent_type": "deepseek-v4-flash", // custom role
+ "fork_turns": "none",              // 独立异构上下文
+ "message": "只读审计路由代码"      // 本次任务
+}</pre></div><p class="small mt-m">任务身份、角色身份、上下文策略与具体工作各自有独立字段。</p></div></div>
+  <div class="conclusion">官方 handler 从 <code>args.agent_type</code> 计算 role_name；<code>thread_spawn_source</code> 才消费 task_name。源码路径已经把两个概念分开。</div>
+</section>
+
+<section class="slide" data-title="第三方四层障碍">
+  <p class="kicker">16 / THIRD-PARTY FAILURE FUNNEL</p><h2>“协议不兼容”太粗：第三方 V2 要连续穿过四层障碍</h2>
+  <div class="funnel mt-m"><div style="--w:94%"><strong>① Reserved schema</strong> · Official backend 是否接受工具定义？</div><div style="--w:80%"><strong>② Encrypted argument</strong> · 第三方 child 能否得到任务明文？</div><div style="--w:66%"><strong>③ Private input item</strong> · 第三方是否理解 agent_message？</div><div style="--w:52%"><strong>④ Cross-transport replay</strong> · 历史能否进入 Responses/Chat/Anthropic？</div><div style="--w:38%;border-color:#13764b"><strong>第三方 Child 开始推理</strong></div></div>
+  <div class="four-col mt-l"><div class="card"><h3>① 失败</h3><p class="tiny">推理前 400；parent 根本没处理用户任务。</p></div><div class="card"><h3>② 失败</h3><p class="tiny">Payload 为空或是 ciphertext，child 不知道任务。</p></div><div class="card"><h3>③ 失败</h3><p class="tiny">上游拒绝未知 input item。</p></div><div class="card"><h3>④ 失败</h3><p class="tiny">reasoning、search、ID 或 tool history 不合法。</p></div></div>
+</section>
+
+<section class="slide" data-title="障碍 1 Reserved schema">
+  <p class="kicker">17 / BARRIER ONE</p><h2>Reserved schema：多一个可选字段，也可能让整个请求在推理前失败</h2>
+  <div class="doc-grid"><div class="read-article"><p><strong>部分模型把 <code>collaboration.spawn_agent</code> 视为服务端保留工具。</strong>客户端提交的 JSON Schema 必须与后端模型配置严格一致。旧方案设置 <code>hide_spawn_agent_metadata=false</code> 后暴露 model、reasoning、service tier，这不是无害扩展，而是契约变化。</p><p>公开 issue #32674 复现了 schema mismatch 400。issue 能证明具体版本发生过，设计边界仍需由官方源码和实际 schema 共同判断。</p><div class="conclusion">硬边界：不要修改 reserved <code>collaboration.*</code> 来换取第三方 routing metadata。</div></div><div class="figure-box"><div class="fig-title">PRE-INFERENCE REJECTION</div><div class="flow"><span>Codex schema</span><span>OpenAI validator</span><span class="bad">400 mismatch</span></div><p class="caption">错误发生在模型推理前；用户提示词甚至尚未进入 parent reasoning。</p></div></div>
+  <p class="source">O-ISSUE · openai/codex#32674；C-TEST · hide_spawn_agent_metadata reserved-schema regressions</p>
+</section>
+
+<section class="slide" data-title="障碍 2 3 4">
+  <p class="kicker">18 / PAYLOAD BARRIERS</p><h2>改 Namespace 只能通过第一层，任务正文仍可能无法投递</h2>
+  <div class="three-col"><div class="card"><h3>② Encrypted</h3><p class="small">V2 可标记 spawn/send/follow-up 的 message 为 encrypted。Official backend 返回 opaque argument，第三方没有 OpenAI 解密能力。</p></div><div class="card"><h3>③ agent_message</h3><p class="small">即使正文已是明文，Codex 私有 input item 也不等于第三方实现的标准 Responses message。</p></div><div class="card"><h3>④ Replay</h3><p class="small">reasoning、web search、encrypted content、item ID 和工具历史不能跨 transport 原样重放。</p></div></div>
+  <div class="code-box mt-l"><pre>{
+ "type": "agent_message", // Codex V2 私有协作 item
+ "author": "/root",       // 发送者任务路径
+ "recipient": "/root/a", // 接收者任务路径
+ "content": [{"type":"input_text","text":"检查路由"}]
+}</pre></div>
+  <div class="conclusion">因此 V1 可用不代表 V2 可用：二者经过的工具 schema、协作正文与 input item 路径不同。</div>
+</section>
+
+<section class="slide" data-title="失败时序">
+  <p class="kicker">19 / FAILURE SEQUENCE</p><h2>三个常见失败位置，对应三种完全不同的修复方向</h2>
+  <div class="sequence" style="--actors:4"><div class="actor">Codex</div><div class="actor">OpenAI Parent</div><div class="actor">V2 Runtime</div><div class="actor">Third-party</div><div class="event" style="--from:1;--span:2">A. collaboration schema + extra metadata</div><div class="event back bad" style="--from:1;--span:2">400 reserved mismatch</div><div class="event" style="--from:1;--span:2">B. agents schema + message.encrypted</div><div class="event back" style="--from:1;--span:2">opaque argument</div><div class="event" style="--from:3;--span:2">agent_message(encrypted_content)</div><div class="event back bad" style="--from:3;--span:2">无法解密 / 空 Payload</div><div class="event" style="--from:3;--span:2">C. agent_message(input_text)</div><div class="event back bad" style="--from:3;--span:2">unsupported item type</div></div>
+  <div class="conclusion">A 要保持 reserved schema；B 要让 mixed-router 非保留工具生成明文；C 要在真实第三方 Provider 已知后投影标准消息。三者不能用一个“改协议”概括。</div>
+</section>
+
+<section class="slide" data-title="CCSM 前后对照">
+  <p class="kicker">20 / ADAPTATION BOUNDARY</p><h2>CCSM 不接管 Codex Orchestrator；它只补齐配置、路由与 Transport 边界</h2>
+  <div class="two-col"><div class="card"><h3 class="bad">原生跨 Provider 尝试</h3><div class="flow"><span>Official parent</span><span>encrypted agent_message</span><span class="bad">Third-party ✕</span></div><p class="small mt-m">角色可能存在，但协作 payload 到不了可读标准消息。</p></div><div class="card"><h3 class="good">CCSM 适配后</h3><div class="flow"><span>非保留明文 schema</span><span>Codex V2</span><span>MultiRouter</span><span>message projection</span><span class="good">Child ✓</span></div><p class="small mt-m">task path、mailbox、child lifecycle 与结果回收仍由 Codex 负责。</p></div></div>
+  <div class="four-col mt-l"><div class="card"><h3>不改</h3><p class="tiny">reserved collaboration schema</p></div><div class="card"><h3>不解密</h3><p class="tiny">OpenAI opaque ciphertext</p></div><div class="card"><h3>不降级</h3><p class="tiny">Official → Official OAuth</p></div><div class="card"><h3>不记录</h3><p class="tiny">prompt/reasoning/response 正文</p></div></div>
+</section>
+
+<section class="slide" data-title="CCSM 控制面">
+  <p class="kicker">21 / CONTROL PLANE</p><h2>控制面把用户语义编译成 Codex 可以发现并运行的 Role</h2>
+  <div class="figure-box"><div class="fig-title">CAPABILITY COMPILATION PIPELINE</div><svg viewBox="0 0 1300 300"><defs><marker id="a2" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#e66d25"/></marker></defs><g fill="none" stroke="currentColor"><rect x="30" y="90" width="210" height="100"/><rect x="300" y="70" width="250" height="140"/><rect x="630" y="20" width="230" height="70"/><rect x="630" y="115" width="230" height="70"/><rect x="630" y="210" width="230" height="70"/><rect x="970" y="90" width="270" height="100"/></g><g stroke="#e66d25" stroke-width="2" marker-end="url(#a2)"><path d="M240 140L300 140"/><path d="M550 120L630 55"/><path d="M550 140L630 150"/><path d="M550 160L630 245"/><path d="M860 55L970 115"/><path d="M860 150L970 140"/><path d="M860 245L970 165"/></g><text x="135" y="125" text-anchor="middle" font-weight="700">用户问卷</text><text x="135" y="150" text-anchor="middle" font-size="13">强项 · 排除 · 优化</text><text x="135" y="172" text-anchor="middle" font-size="13">范围 · 偏好 · effort</text><text x="425" y="115" text-anchor="middle" font-weight="700">Capability Compiler</text><text x="425" y="140" text-anchor="middle" font-size="13">规范化 · 校验 · Provider 分类</text><text x="425" y="164" text-anchor="middle" font-size="13">冲突检测 · role 生成</text><text x="745" y="60" text-anchor="middle">Role TOML</text><text x="745" y="155" text-anchor="middle">Model Catalog</text><text x="745" y="250" text-anchor="middle">config.toml</text><text x="1105" y="125" text-anchor="middle" font-weight="700">Codex Parent</text><text x="1105" y="151" text-anchor="middle" font-size="13">读取 description 并语义选角</text></svg><p class="caption">Backend compiler 是唯一编译器；前端 preview 与实际保存不各自拼装一套语义。</p></div>
+  <p class="source">C-SRC · codex_subagent_profiles.rs / codex_config.rs</p>
+</section>
+
+<section class="slide" data-title="Capability Compiler 代码">
+  <p class="kicker">22 / CODE SLICE</p><h2>能力编译器：Description 同时表达匹配、排除和优先级</h2>
+  <div class="code-grid"><div class="code-box"><pre>fn generated_description_for_provider(
+ policy: SelectionPolicy,
+ p: &ParsedCodexSubagentProfile,
+ provider_kind: ProviderKind,
+) -&gt; String {
+ if let Some(d) = &p.overrides.description {
+  return d.clone();
+ }
+ format!(
+  "This role matches {}. It excludes {}. {}",
+  joined_strengths(&p.strengths),
+  excluded_strengths(&p.strengths),
+  selection_behavior(policy,p.preference,provider_kind),
+ )
+}</pre></div><div class="line-notes"><div class="line-note"><b>01</b><span><code>policy</code> 带入全局 official-first / third-party-first 语义。</span></div><div class="line-note"><b>02</b><span>profile 已经过规范化与字段校验，不直接消费任意 JSON。</span></div><div class="line-note"><b>03</b><span>Provider kind 来自 Provider record/context，不按模型名猜。</span></div><div class="line-note"><b>04</b><span>手写 override 完全替换自动 selection text，避免双重指令。</span></div><div class="line-note"><b>05</b><span>自动文本同时写入正向强项、排除项和选角优先级。</span></div></div></div>
+  <div class="conclusion"><strong>整体控制流：</strong>编译器输出 role name、description、instructions、nickname、model/provider/effort；真实副作用在后续 CCSM-owned role/catalog/config 投影，不在本函数中。</div>
+</section>
+
+<section class="slide" data-title="数据面两阶段">
+  <p class="kicker">23 / DATA PLANE</p><h2>两阶段兼容必须分开：先让 Parent 产明文，再让第三方读标准消息</h2>
+  <div class="two-col"><div class="card"><h3>Stage A · Parent 请求前</h3><p class="small"><strong>已知：</strong>请求来自 Official parent，router 拓扑含第三方 route。</p><p class="small"><strong>动作：</strong>只移除非保留 <code>agents.spawn/send/followup</code> 的 <code>message.encrypted</code> marker。</p><p class="small"><strong>不做：</strong>不改 <code>collaboration.*</code>，不投影 item。</p></div><div class="card"><h3>Stage B · Child Route 后</h3><p class="small"><strong>已知：</strong>effective Provider 已物化，确认为第三方 Responses 目标。</p><p class="small"><strong>动作：</strong><code>agent_message</code> → 标准 user message，再进 Chat/Anthropic converter。</p><p class="small"><strong>不做：</strong>不处理 Official OAuth，不解密 ciphertext。</p></div></div>
+  <div class="figure-box mt-l"><div class="flow"><span>Official Parent</span><span>Stage A</span><span>Codex Orchestrator</span><span>Route + Materialize</span><span>Stage B</span><span>Third-party Child</span></div><p class="caption">Stage A 只能依据 router 拓扑；Stage B 必须等待真实 target Provider 身份。</p></div>
+</section>
+
+<section class="slide" data-title="Provider 物化代码">
+  <p class="kicker">24 / PROVIDER MATERIALIZATION</p><h2>路由命中不是终点：真实认证、URL 与协议来自 Target Provider</h2>
+  <div class="code-grid"><div class="code-box"><pre>pub fn materialize_codex_routed_provider_from_target(
+ route_provider: &Provider,
+ target_provider: &Provider,
+) -&gt; Provider {
+ let mut p = target_provider.clone();
+ p.id = route_provider.id.clone();
+ p.name = route_provider.name.clone();
+ // 仅叠加 route id、capabilities、apiFormat、
+ // model override 与 plaintext compatibility marker
+ p
+}</pre></div><div class="line-notes"><div class="line-note"><b>01</b><span>route provider 表示本请求命中的模型路由，不一定持有真实凭证。</span></div><div class="line-note"><b>02</b><span>target provider 是数据库中的真实上游，持有 URL、认证和转换配置。</span></div><div class="line-note"><b>03</b><span>先 clone target，确保 transport 与认证完整。</span></div><div class="line-note"><b>04</b><span>再保留 request-local route 身份，用于统计和模型映射。</span></div><div class="line-note"><b>05</b><span>只叠加必要字段，不复制整个 router，也不二次路由。</span></div></div></div>
+  <div class="conclusion"><strong>整体控制流：</strong><button class="term" data-term="MultiRouter">MultiRouter</button> 按 model 的 exact/prefix/default 解析 route，再按 targetProviderId 物化。它不会修改 GUI current provider，也不会把一个请求变成跨模型 fallback 池。</div>
+</section>
+
+<section class="slide" data-title="agent_message 投影代码">
+  <p class="kicker">25 / MESSAGE PROJECTION</p><h2>只有真实第三方 Child 才投影；Opaque Ciphertext 必须 Fail Closed</h2>
+  <div class="code-grid"><div class="code-box"><pre>if item["type"] != "agent_message" {
+ continue; // 普通 item 保持原样
+}
+if looks_like_opaque_ciphertext(content) {
+ return Err(opaque_payload_error());
+}
+*item = json!({
+ "type": "message", // 通用 Responses item
+ "role": "user",   // child 任务输入语义
+ "content": readable_parts
+});</pre></div><div class="line-notes"><div class="line-note"><b>01</b><span>非 agent_message 不动，避免无关历史被重写。</span></div><div class="line-note"><b>02</b><span>像真实 Base64 ciphertext 的内容无法由 CCSM 解密。</span></div><div class="line-note"><b>03</b><span><button class="term" data-term="fail closed">fail closed</button> 阻止空任务、乱码或伪成功进入第三方。</span></div><div class="line-note"><b>04</b><span>可读 part 投影为标准 <code>type=message, role=user</code>。</span></div><div class="line-note"><b>05</b><span>投影后再进入 <button class="term" data-term="Chat bridge">Chat bridge</button> / Anthropic converter。</span></div></div></div>
+  <div class="conclusion"><strong>整体控制流：</strong>forwarder 的 gate 先确认 App=Codex、endpoint=Responses、Provider 非 OAuth/Official；投影函数只负责 item 语义。数据库与日志不额外保存正文。</div>
+</section>
+
+<section class="slide" data-title="完整数据面时序">
+  <p class="kicker">26 / END-TO-END DATA SEQUENCE</p><h2>Official Parent → Third-party Child：真实请求如何穿过 CCSM</h2>
+  <div class="sequence" style="--actors:6"><div class="actor">Parent</div><div class="actor">CCSM</div><div class="actor">OpenAI</div><div class="actor">Codex V2</div><div class="actor">Router</div><div class="actor">Third-party</div><div class="event" style="--from:1;--span:2">① Responses + agents.spawn schema</div><div class="event" style="--from:2;--span:2">② Stage A：只移除 message.encrypted</div><div class="event back" style="--from:2;--span:2">③ 明文 spawn argument</div><div class="event" style="--from:4;--span:1">④ 创建 path/mailbox/child config</div><div class="event" style="--from:4;--span:2">⑤ child agent_message</div><div class="event" style="--from:5;--span:2">⑥ route → target Provider 物化</div><div class="event" style="--from:2;--span:4">⑦ Stage B + transport normalization</div><div class="event back" style="--from:4;--span:3">⑧ model/tool response</div><div class="event back" style="--from:1;--span:4">⑨ Codex activity + child final</div></div>
+  <div class="conclusion">CCSM 负责 schema、route、Provider 和消息边界；Codex 负责 child 的创建、通信、工具执行生命周期和回收。</div>
+</section>
+
+<section class="slide" data-title="新 Role 流水线">
+  <p class="kicker">27 / ROLE CASE STUDY</p><h2>一个 Flash 型只读角色，从问卷到 Child 完成的十个状态</h2>
+  <div class="state-line" style="grid-template-columns:repeat(5,1fr)"><div class="state">问卷</div><div class="state">规范化</div><div class="state">Provider 分类</div><div class="state">冲突重命名</div><div class="state">Role 编译</div></div><div class="state-line" style="grid-template-columns:repeat(5,1fr)"><div class="state">Config 投影</div><div class="state">Parent 选角</div><div class="state">Child Spawn</div><div class="state">Provider 物化</div><div class="state">结果整合</div></div>
+  <div class="two-col mt-l"><div class="card"><h3>输入语义</h3><p class="small">长上下文阅读 / 仓库探索 / 证据收集；排除复杂实现；只读；优化速度；medium reasoning。</p></div><div class="card"><h3>运行证明</h3><p class="small">不能只看 TOML。还要核对 agent_type、child model/provider、工具行为、route identity 与 child result。</p></div></div>
+  <div class="conclusion">同名用户 role 无 CCSM marker 时不会覆盖；CCSM 会安全生成 <code>ccswitch-...</code> 名称。非 current Provider 保存也不会触碰 live projection。</div>
+</section>
+
+<section class="slide" data-title="Role TOML 案例">
+  <p class="kicker">28 / ROLE ARTIFACT</p><h2>编译后的每一行都只承担一种职责</h2>
+  <div class="code-grid"><div class="code-box"><pre>name = "deepseek-v4-flash"
+nickname = "DeepSeek Flash"
+description = "Matches delegated repository exploration..."
+developer_instructions = "Keep work read-only..."
+model = "deepseek-v4-flash"
+model_provider = "codex_model_router_v2"
+model_reasoning_effort = "medium"</pre></div><div class="line-notes"><div class="line-note"><b>01</b><span><code>name</code>：稳定 role identity，冲突时安全改名。</span></div><div class="line-note"><b>02</b><span><code>nickname</code>：只用于显示，不参与选角或路由。</span></div><div class="line-note"><b>03</b><span><code>description</code>：parent 选择 guidance。</span></div><div class="line-note"><b>04</b><span><code>developer_instructions</code>：child 的只读与交付边界。</span></div><div class="line-note"><b>05</b><span><code>model</code>：catalog 中的可路由模型名。</span></div><div class="line-note"><b>06</b><span><code>model_provider</code>：统一 Router，不写死 endpoint。</span></div><div class="line-note"><b>07</b><span><code>effort</code>：child 的推理强度。</span></div></div></div>
+  <div class="conclusion"><strong>整体控制流：</strong>新会话加载 role 后，parent 用 agent_type 选择；model 进入统一 Router，再物化真实第三方 Provider。TOML 存在只证明配置层，不证明执行层。</div>
+</section>
+
+<section class="slide" data-title="踩坑矩阵">
+  <p class="kicker">29 / PITFALL MAP</p><h2>踩坑地图：每个错误方案都把责任放错了层</h2>
+  <div class="table-card"><table><thead><tr><th>错误方案</th><th>为什么看似合理</th><th>真正失败点</th><th>根治原则</th></tr></thead><tbody><tr><td>扩展 reserved schema</td><td>Parent 能显式指定模型</td><td>推理前 400</td><td>保留 canonical schema</td></tr><tr><td>只换 namespace</td><td>不再名称冲突</td><td>encrypted marker 仍在</td><td>Stage A 精确去标记</td></tr><tr><td>task_name 当 role</td><td>名字看起来一致</td><td>未调用 role loader</td><td>必须使用 agent_type</td></tr><tr><td>TOML 即验收</td><td>配置文件已生成</td><td>未证明真实选角</td><td>查 child/provider/route</td></tr><tr><td>Role 绑定静态 endpoint</td><td>配置更直接</td><td>绕过认证与 modelMap</td><td>统一 Router + 物化</td></tr><tr><td>全局投影 agent_message</td><td>第三方都能读</td><td>破坏 Official OAuth</td><td>真实第三方 gate</td></tr><tr><td>Opaque 当文本发</td><td>避免本地报错</td><td>空任务/乱码/伪成功</td><td>fail closed</td></tr><tr><td>按模型名猜身份</td><td>实现简单</td><td>managed/custom slug 误判</td><td>Provider record 为准</td></tr></tbody></table></div>
+</section>
+
+<section class="slide" data-title="V23 与结论">
+  <p class="kicker">30 / V23 + TAKEAWAYS</p><h2>V23 修的是入口阻断；完整适配仍是一条分层因果链</h2>
+  <div class="two-col"><div class="card"><h3>V23 两个根因</h3><p class="small"><strong>Catalog path：</strong>旧相对文件名进入新版 AbsolutePathBuf 解析失败。</p><p class="small"><strong>Agent alias：</strong><code>max_threads</code> 与 canonical 字段同时存在，被 Serde 视为 duplicate。</p><p class="small">V23 写绝对路径、迁移并删除 legacy alias；修的是 config → catalog → role 入口。</p></div><div class="card"><h3>五个不能混淆的问题</h3><ol class="small"><li>能力描述：为什么选这个角色</li><li>Role runtime：使用哪个可路由模型</li><li>MultiRouter：实际去哪个 Provider</li><li>Payload compatibility：任务怎样被第三方读到</li><li>Codex V2：child 如何创建、通信、回收</li></ol></div></div>
+  <div class="conclusion">CCSM 没有重写 Orchestrator，也不能解密 OpenAI ciphertext。它实现的是能力编译、配置投影、路由物化和跨 transport 的最小兼容层。</div>
+  <div class="meta-row"><span>OpenAI Subagents / Config docs</span><span>openai/codex spawn.rs / config_toml.rs</span><span>CCSM codex_* / forwarder.rs</span><span>v3.19.1-23 · Actions 31577095852</span></div>
+  <p class="source">完整引用与边界 · ../../references/codex-v2-subagent-evidence-index.md · 权威正文 · ../../codex-v2-subagent-third-party-adaptation-zh.md</p>
+</section>
+
+</div>
+<script src="assets/runtime.js"></script>
+<script src="deck.js"></script>
+</body></html>
