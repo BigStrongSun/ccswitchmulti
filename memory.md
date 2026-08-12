@@ -3227,3 +3227,40 @@
 - TDD 提交为 `c3976e97`（RED）与 `4b6f7dfb`（GREEN）；旧路由测试契约更新为 `786248c5`，格式提交为 `99d72136`。验证：三条根因/边界定向测试通过，`codex_config::tests` 156/156，通过完整 `cargo test --lib`（2956 passed / 0 failed / 2 ignored）、`cargo check --lib`、`cargo fmt --check` 和 `git diff --check`。仅有既存 `openai_cache_read_tokens` dead-code warning。
 - 联网交叉验证：Codex 内置 Web 搜索命中 OpenAI 官方源码、配置文档与 issue，均使用绝对 `model_catalog_json`，且官方 `AgentsToml` 明确声明 `max_threads` alias；独立 Matrix WebSearch 三条相关查询无结果，不能作为正证据。结论由官方一手证据、本地提交历史、源码与 RED/GREEN 测试共同支持；当前 Windows 环境不能替代受影响 macOS 机器的最终运行验收。
 - 发布验收方法与 GitHub 官方 REST 文档一致：release asset 的 `digest` 用作服务端 SHA-256，二进制下载后再本地复算；Codex 内置搜索与 Matrix WebSearch 均独立打开 GitHub 官方 release-assets 文档并得到同一字段/下载语义，Matrix 泛搜索未返回相关结果但官方页面直开成功。
+# 2026-08-13 Codex V2 Sub-Agent 技术报告与 HTML 课件
+
+## 交付物
+
+- 权威中文技术报告：`docs/codex-v2-subagent-third-party-adaptation-zh.md`。
+- 分级证据索引：`docs/references/codex-v2-subagent-evidence-index.md`。
+- HTML 独立阅读课件：`docs/presentations/codex-v2-subagent-report/index.html`，从 html-ppt `document-deck` 模板派生，默认 `engineering-whiteprint`，可切 `academic-paper` / `tokyo-night`。
+- V23 Release Note：`docs/release-notes/v3.19.1-23-zh.md`。
+- 七张视觉验收截图：`artifacts/codex-v2-subagent-report/`。
+- 文档实现分支：`bigstrongsun/subagent-v2-capability-injection`。
+
+## 报告认知与证据边界
+
+- Sub-Agent 的首要价值是上下文治理；parent 持有目标、授权、整合和最终验收，child 在独立 Agent thread 中承担有边界的探索、审查或实现。
+- V1 以 agent id 管理实例生命周期；V2 以 canonical task path、mailbox、follow-up 和角色身份管理协作任务。V2 改善的是协作模型，不是简单增加模型参数。
+- 原生 V2 必须按六层理解：config/catalog/role、语义选角、工具 schema、thread/task/mailbox、runtime binding、Provider message。
+- Role 的 `description`、`developer_instructions` 与 runtime binding 分别负责选角、执行行为和模型/Provider 运行；`task_name` 只建立 task path，不能替代 `agent_type`；description 是 best-effort guidance，不是硬路由。
+- 第三方 V2 不能用“协议不兼容”概括，至少有四层障碍：reserved schema、encrypted collaboration argument、Codex-private `agent_message`、跨 Responses/Chat/Anthropic history replay。
+- CCSM 不重写 Codex orchestrator，也不解密 OpenAI ciphertext。控制面编译问卷并投影 config/catalog/role；数据面 Stage A 只让 mixed-router 的非保留 `agents.*` 产生明文，Stage B 只在真实第三方 Provider 已物化后投影 `agent_message`。Official → Official 保持原生 OAuth/加密语义，opaque ciphertext fail closed。
+- `model_provider=codex_model_router_v2` 保留 MultiRouter 的 route、target Provider 认证、modelMap、apiFormat 与 transport converter；不能把 role 直接静态绑定第三方 endpoint。
+- V23 两个根因位于 config → catalog → role 入口：`model_catalog_json` 需要绝对路径；`max_threads` legacy alias 不能与 `max_concurrent_threads_per_session` 同时存在。这不是第三方 payload 实现的再次修改。
+- OpenAI issue 只作为指定版本复现，不能表述为永久设计承诺；GitHub macOS 构建也不等于受影响用户机器完成运行验收。
+- 两条检索链均执行：Codex Web 命中官方文档/源码/issue；Matrix WebSearch 只返回泛化结果，因此不作为关键正证据。
+
+## HTML 与视觉验收经验
+
+- HTML 共 32 页，含 6 个“代码 → 逐行中文机制说明 → 整体控制流”页面、4 个 exploration 深入入口、术语 hover/focus/pin、总览、主题切换和 hash 深链。
+- 应用内浏览器 1280×720 对 32 页逐页核对：每页 `scrollWidth == clientWidth`、`scrollHeight == clientHeight`，无元素越界和 console error。
+- 900×650 断点下，代码页保持 12.5px 字号，通过 page `overflow:auto` 纵向滚动，不以缩小文字隐藏密度；表格页无横向溢出。
+- html-ppt runtime 翻页有约 500ms 过渡。截图若只等待 120ms，会把上一页过渡残影误判为静态叠层；视觉验收应等待至少 900ms，并确认只有一个 `.slide` 的 computed opacity 大于 0，再截图。
+- 最终截图覆盖封面、V1 结构、V2 六层结构、第三方四层障碍、CCSM 数据面、新 Role 流水线和踩坑矩阵。
+
+## Release 状态
+
+- `v3.19.1-23` GitHub Release 正文已加入报告、HTML 课件目录和证据索引绝对链接；仍为正式非 prerelease。
+- 更新前后均为 19 个 assets，名称集合完全一致；workflow 下载区仍存在。
+- Release 页中的技术资料不能使用仓库文件的相对链接：相对 URL 会按 `/releases/` 页面解析。使用 GitHub 分支上的绝对 blob/tree URL，待以后文档进入 tag 或默认稳定分支时再迁移。
