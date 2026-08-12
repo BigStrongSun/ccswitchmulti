@@ -2158,9 +2158,21 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             live_config.contains("supports_websockets = false"),
             "router takeover must disable Codex websocket attempts, got:\n{live_config}"
         );
+        let live_config_toml: toml::Value =
+            toml::from_str(&live_config).expect("parse Codex live config");
+        let model_catalog_json = live_config_toml
+            .get("model_catalog_json")
+            .and_then(toml::Value::as_str)
+            .expect("router takeover must expose the generated model catalog to Codex");
+        let expected_catalog_path = crate::codex_config::get_codex_model_catalog_path();
+        assert_eq!(
+            std::path::Path::new(model_catalog_json),
+            expected_catalog_path.as_path(),
+            "router takeover must point Codex at the generated model catalog"
+        );
         assert!(
-            live_config.contains("model_catalog_json = \"cc-switch-model-catalog.json\""),
-            "router takeover must expose the generated model catalog to Codex, got:\n{live_config}"
+            std::path::Path::new(model_catalog_json).is_absolute(),
+            "Codex requires model_catalog_json to be absolute, got: {model_catalog_json}"
         );
         assert!(
             !live_config.contains("openai_base_url"),
@@ -2316,9 +2328,20 @@ experimental_bearer_token = "PROXY_MANAGED"
                 live_config.contains("model_provider = \"codex_model_router_v2\""),
                 "{label}: live config must stay on the stable MultiRouter provider, got:\n{live_config}"
             );
+            let live_toml: toml::Value =
+                toml::from_str(&live_config).expect("parse refreshed Codex live config");
+            let model_catalog_json = live_toml
+                .get("model_catalog_json")
+                .and_then(toml::Value::as_str)
+                .expect("live config must keep the generated catalog pointer");
+            assert_eq!(
+                std::path::Path::new(model_catalog_json),
+                crate::codex_config::get_codex_model_catalog_path().as_path(),
+                "{label}: live config must point at the generated catalog"
+            );
             assert!(
-                live_config.contains("model_catalog_json = \"cc-switch-model-catalog.json\""),
-                "{label}: live config must keep the generated catalog pointer, got:\n{live_config}"
+                std::path::Path::new(model_catalog_json).is_absolute(),
+                "{label}: Codex requires an absolute generated catalog pointer"
             );
             assert!(
                 !live_config.contains("model_provider = \"openai\""),
@@ -2328,8 +2351,6 @@ experimental_bearer_token = "PROXY_MANAGED"
                 !live_config.contains("openai_base_url"),
                 "{label}: live config must not use built-in OpenAI base URL, got:\n{live_config}"
             );
-            let live_toml: toml::Value =
-                toml::from_str(&live_config).expect("parse refreshed Codex live config");
             let router_facade = live_toml
                 .get("model_providers")
                 .and_then(|providers| providers.get("codex_model_router_v2"))
