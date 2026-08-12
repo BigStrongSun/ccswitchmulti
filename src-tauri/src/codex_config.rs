@@ -2040,8 +2040,8 @@ fn set_codex_model_catalog_json_field(
         .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
 
     match catalog_path {
-        Some(_) => {
-            doc["model_catalog_json"] = toml_edit::value(CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME);
+        Some(path) => {
+            doc["model_catalog_json"] = toml_edit::value(path.to_string_lossy().as_ref());
         }
         None => {
             let should_remove = doc
@@ -2070,8 +2070,8 @@ fn set_codex_model_catalog_projection_fields(
         .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
 
     match (catalog_path, specs) {
-        (Some(_), Some(specs)) => {
-            doc["model_catalog_json"] = toml_edit::value(CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME);
+        (Some(path), Some(specs)) => {
+            doc["model_catalog_json"] = toml_edit::value(path.to_string_lossy().as_ref());
             set_active_codex_provider_models(&mut doc, specs, catalog);
             ensure_codex_agents_defaults(&mut doc);
             ensure_codex_multi_agent_reserved_schema_compatible(
@@ -2301,9 +2301,14 @@ fn ensure_codex_agents_defaults(doc: &mut DocumentMut) {
         return;
     };
 
-    if !agents.contains_key("max_threads") {
-        agents["max_threads"] = toml_edit::value(CC_SWITCH_CODEX_AGENT_THREADS);
-    }
+    let max_concurrent_threads = agents
+        .get("max_concurrent_threads_per_session")
+        .and_then(|value| value.as_integer())
+        .or_else(|| agents.get("max_threads").and_then(|value| value.as_integer()))
+        .unwrap_or(CC_SWITCH_CODEX_AGENT_THREADS);
+    agents.remove("max_threads");
+    agents["max_concurrent_threads_per_session"] =
+        toml_edit::value(max_concurrent_threads);
     if !agents.contains_key("max_depth") {
         agents["max_depth"] = toml_edit::value(CC_SWITCH_CODEX_AGENT_DEPTH);
     }
@@ -9682,7 +9687,7 @@ openai_base_url = "http://127.0.0.1:15721/v1"
     }
 
     #[test]
-    fn codex_agent_defaults_are_added_without_overwriting_user_limits() {
+    fn codex_agent_defaults_migrate_legacy_alias_without_overwriting_user_limits() {
         let specs = vec![CodexCatalogModelSpec {
             model: "qwen3.6".to_string(),
             upstream_model: None,
@@ -9714,9 +9719,12 @@ base_url = "http://127.0.0.1:15721/v1"
         let agents = parsed.get("agents").expect("agents section should exist");
 
         assert_eq!(
-            agents.get("max_threads").and_then(|v| v.as_integer()),
+            agents
+                .get("max_concurrent_threads_per_session")
+                .and_then(|v| v.as_integer()),
             Some(8)
         );
+        assert!(agents.get("max_threads").is_none());
         assert_eq!(
             agents.get("max_depth").and_then(|v| v.as_integer()),
             Some(1)
@@ -10916,9 +10924,9 @@ model_provider = "codex_model_router_v2"
 [model_providers.any]
 name = "any"
 "#;
-        let catalog_path = Path::new("/tmp/cc-switch-model-catalog.json");
+        let catalog_path = get_codex_model_catalog_path();
 
-        let result = set_codex_model_catalog_json_field(input, Some(catalog_path)).unwrap();
+        let result = set_codex_model_catalog_json_field(input, Some(&catalog_path)).unwrap();
         let parsed: toml::Value = toml::from_str(&result).unwrap();
         let written = parsed
             .get("model_catalog_json")
@@ -11288,12 +11296,13 @@ max_depth = 2
 
     #[test]
     #[cfg(target_os = "windows")]
-    fn set_catalog_json_field_writes_filename_ignoring_unc_path() {
+    fn set_catalog_json_field_preserves_absolute_unc_path() {
         let input = r#"model_provider = "custom"
 model = "glm-5"
 "#;
-        // Simulate a WSL UNC path as cc-switch would see it on Windows;
-        // the function now writes just the relative filename.
+        // Simulate a WSL UNC path as cc-switch would see it on Windows. Codex's
+        // AbsolutePathBuf requires the full absolute path; UNC remains portable
+        // between the Windows process and its WSL-backed config directory.
         let unc_path =
             Path::new(r"\\wsl.localhost\Ubuntu\home\user\.codex\cc-switch-model-catalog.json");
 
@@ -11305,13 +11314,15 @@ model = "glm-5"
             .and_then(|v| v.as_str())
             .expect("model_catalog_json should be set");
         assert_eq!(
-            written_path, CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME,
-            "should write only the relative filename, not the UNC path"
+            written_path,
+            unc_path.to_string_lossy(),
+            "should preserve the absolute UNC path"
         );
+        assert!(Path::new(written_path).is_absolute());
     }
 
     #[test]
-    fn set_catalog_json_field_writes_filename_for_any_path() {
+    fn set_catalog_json_field_preserves_absolute_path() {
         let input = r#"model_provider = "custom"
 model = "glm-5"
 "#;
@@ -11322,8 +11333,8 @@ model = "glm-5"
 
         assert_eq!(
             parsed.get("model_catalog_json").and_then(|v| v.as_str()),
-            Some(CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME),
-            "should write only the relative filename, not the full path"
+            Some(regular_path.to_string_lossy().as_ref()),
+            "should preserve the full path required by Codex AbsolutePathBuf"
         );
     }
 
