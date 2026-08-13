@@ -3103,3 +3103,11 @@
 - 统一设计以一个 resolved capability 同时驱动 catalog、Desktop aliases、inline TOML、MultiRouter route 物化和出站转换。未知第三方模型采用不展示档位、不覆盖上游默认值的保守策略，禁止继续继承 GPT/Native Responses 通用 reasoning 档位。
 - 设计规范位于 `docs/superpowers/specs/2026-08-13-codex-preset-reasoning-capabilities-design.md`；首批校准 DeepSeek V4、Grok 4.5、GLM-5.2、StepFun 与 OpenRouter，并显式处理 Kimi/Qwen/MiniMax/MiMo/SiliconFlow 只有开关或不支持 effort 的路径。
 - 官方检索使用 Codex 内置 Web Search 与 Matrix WebSearch 两条独立链：Matrix 索引查询无结果，但直接读取 xAI、智谱、StepFun 官方 URL 成功并与内置搜索结论一致。Qwen 能力随模型和 API 变化，证据不足时不得写成厂商级固定枚举。
+
+# 2026-08-13 Codex 预设推理覆盖与完整 catalog 收口
+
+- 内置预设能力不能直接编辑：默认只读，用户必须点击“创建高级覆盖”后才进入 `source=user`，界面明确显示“已偏离内置预设”，并能一键恢复当前版本的内置能力。`ProviderMeta.codexPresetId` 保存稳定 `presetKey`，不得保存会随数组顺序变化的 `codex-N`；旧 `codex-N` 只保留兼容读取。
+- 本轮发现目录受控状态的根因：`catalogRowsMatchModels()` 在模型级 reasoning schema 加入后没有比较 `reasoning`，所以覆盖按钮虽更新了子组件状态，子到父 effect 却误判为未变化。修复是把完整 reasoning 纳入统一相等性边界，不是在按钮或测试里绕过同步。
+- `modelCatalog()` 现在保证每个内置目录模型都有显式 reasoning capability。有官方 effort 的 DeepSeek/Grok/GLM/Step 按模型枚举；Kimi、Qwen、MiniMax、MiMo、SiliconFlow 只声明 boolean thinking 且 `supportedEfforts=[]`，不展示虚假强度；其余证据不足模型显式 `supported=false`，不继承 GPT/Native Responses 通用档位。
+- 聚合平台能力仍必须优先于模型原厂能力，例如 SiliconFlow 的 `enable_thinking` 和 OpenRouter 的 `reasoning.effort`；未知模型或平台证据不足时保持不展示、不注入 effort 的保守策略。
+- 提交 `ba927d22` 完成只读/覆盖/恢复、预设身份持久化、全 catalog 显式能力和 reasoning 同步根修。验证：Rust library `2842 passed / 0 failed / 2 ignored`；前端 `116 files / 841 tests` 全通过；`cargo check --lib`、typecheck、rustfmt、变更文件 Prettier 和 `git diff --check` 通过。仅保留既有 `openai_cache_read_tokens` dead-code warning 及测试夹具预期 stderr。
