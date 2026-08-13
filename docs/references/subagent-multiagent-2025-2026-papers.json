@@ -1,6 +1,1109 @@
 {
   "schema_version": "1.0",
   "generated_at": "2026-08-13",
-  "search_chains": [],
-  "papers": []
+  "inclusion_rule": "核心计数仅纳入 2025–2026 年 ACL Anthology 正式论文；2026 数量严格多于 2025。",
+  "search_chains": [
+    {
+      "name": "Codex built-in Web Search",
+      "independent": true,
+      "result": "成功召回 ACL Anthology、arXiv 与 OpenAI/Codex 资料；核心元数据回到 ACL 原始页面交叉核对。"
+    },
+    {
+      "name": "Matrix WebSearch MCP",
+      "independent": true,
+      "result": "已独立检索，但对 2026 ACL multi-agent 查询主要返回日历和无关页面，学术召回不足，未作为论文元数据正证据。"
+    }
+  ],
+  "papers": [
+    {
+      "id": "P01",
+      "acl_id": "2026.acl-long.468",
+      "topic": "分布式上下文",
+      "title": "Scaling External Knowledge Input Beyond Context Windows of LLMs via Multi-Agent Collaboration",
+      "authors": [
+        "Zijun Liu",
+        "Zhennan Wan",
+        "Peng Li",
+        "Ming Yan",
+        "Fei Huang",
+        "Yang Liu"
+      ],
+      "year": 2026,
+      "venue": "Proceedings of the 64th Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers)",
+      "doi": "10.18653/v1/2026.acl-long.468",
+      "pages": "10284–10314",
+      "publication_status": "formal",
+      "paper_url": "https://aclanthology.org/2026.acl-long.468/",
+      "pdf_url": "https://aclanthology.org/2026.acl-long.468.pdf",
+      "research_question": "当外部知识超过单模型上下文窗口时，多 Agent 是否能分片处理并有效整合？",
+      "method": "ExtAgents 将检索知识分配给并行 Agent，再进行层级整合，并在多跳问答、长综述生成等任务比较非训练型基线。",
+      "experiment_scope": "增强的多跳问答 ∞Bench+、公开测试集与长综述生成；重点考察输入位于或超过上下文窗口时的知识整合。",
+      "supported_conclusion": "当输入天然可分片且结果可层级汇总时，多 Agent 可以把上下文容量问题转化为分布式知识处理问题。",
+      "non_generalizable_boundary": "结论只适用于论文测试的知识密集任务和编排方式，不能证明任意长任务或任意 Agent 数量都会受益。",
+      "report_sections": [
+        "3.1",
+        "4.2"
+      ],
+      "deck_slides": [
+        11,
+        17,
+        29
+      ],
+      "download": {
+        "status": "downloaded",
+        "bytes": 10563596,
+        "sha256": "2d70a04365fefe725466b3e628273b09c07ab4567cb386a0f304dc3310098c87",
+        "local_path": "docs/references/papers/subagent-multiagent-2025-2026/2026.acl-long.468.pdf"
+      }
+    },
+    {
+      "id": "P02",
+      "acl_id": "2026.findings-acl.624",
+      "topic": "群体能力",
+      "title": "Identifying Collective Intelligence Factor in LLM Agent Groups for Generalizable Multi-Agent System Design",
+      "authors": [
+        "Zhilun Zhou",
+        "Zihan Liu",
+        "Jiahe Liu",
+        "Yihan Wang",
+        "Qingyu Shao",
+        "Fengli Xu",
+        "Depeng Jin",
+        "Yong Li"
+      ],
+      "year": 2026,
+      "venue": "Findings of the Association for Computational Linguistics: ACL 2026",
+      "doi": "10.18653/v1/2026.findings-acl.624",
+      "pages": "12827–12842",
+      "publication_status": "formal",
+      "paper_url": "https://aclanthology.org/2026.findings-acl.624/",
+      "pdf_url": "https://aclanthology.org/2026.findings-acl.624.pdf",
+      "research_question": "LLM Agent 群体是否存在可预测跨任务表现的集体智能因子？",
+      "method": "构造 108 个不同规模、模型组成与通信拓扑的 Agent 群体，跨任务测量并提取人工集体智能因子。",
+      "experiment_scope": "108 个群体，多种规模、模型组合、通信拓扑和任务，用于群体泛化能力预测。",
+      "supported_conclusion": "评价多 Agent 时需要把团队组成和拓扑视为系统变量，不能只看单个模型分数。",
+      "non_generalizable_boundary": "一个统计因子能预测所测任务，不等于存在适用于所有环境的通用 Agent 总分。",
+      "report_sections": [
+        "6.4",
+        "7.2"
+      ],
+      "deck_slides": [
+        35,
+        40,
+        41
+      ],
+      "download": {
+        "status": "downloaded",
+        "bytes": 697242,
+        "sha256": "5e988bc21fcbbef5f8164017de24abc4a34862dd5b5e856e18fdf1d4d3082638",
+        "local_path": "docs/references/papers/subagent-multiagent-2025-2026/2026.findings-acl.624.pdf"
+      }
+    },
+    {
+      "id": "P03",
+      "acl_id": "2026.acl-long.1764",
+      "topic": "动态拓扑",
+      "title": "Dynamic Generation of Multi LLM Agents Communication Topologies with Graph Diffusion Models",
+      "authors": [
+        "Eric Hanchen Jiang",
+        "Levina Li",
+        "Frank Wan",
+        "Xiao Liang (梁霄)",
+        "Sophia Yin",
+        "Yuchen Wu",
+        "Xinfeng Li",
+        "Yizhou Sun",
+        "Wei Wang",
+        "Kai-Wei Chang",
+        "Ying Nian Wu"
+      ],
+      "year": 2026,
+      "venue": "Proceedings of the 64th Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers)",
+      "doi": "10.18653/v1/2026.acl-long.1764",
+      "pages": "38042–38060",
+      "publication_status": "formal",
+      "paper_url": "https://aclanthology.org/2026.acl-long.1764/",
+      "pdf_url": "https://aclanthology.org/2026.acl-long.1764.pdf",
+      "research_question": "能否按任务动态生成兼顾质量、通信成本与鲁棒性的 Agent 拓扑？",
+      "method": "Guided Topology Diffusion 用离散图扩散逐步生成拓扑，并由轻量代理模型引导多目标奖励。",
+      "experiment_scope": "多个推理 benchmark，比较静态、手工与生成式拓扑的任务表现、成本和鲁棒性。",
+      "supported_conclusion": "通信拓扑是可优化的系统参数，复杂任务与简单任务可能需要不同稀疏度和结构。",
+      "non_generalizable_boundary": "论文结果不能推出动态拓扑在任意领域都优于人工层级，也不能直接映射为 Codex 的固定 Parent–Child 设计。",
+      "report_sections": [
+        "6.3",
+        "6.6"
+      ],
+      "deck_slides": [
+        29,
+        34,
+        35
+      ],
+      "download": {
+        "status": "downloaded",
+        "bytes": 4429122,
+        "sha256": "880f4e60d3938616c4574b85b7eb1eacfd1b3fa913a21884dbc159c37168ee60",
+        "local_path": "docs/references/papers/subagent-multiagent-2025-2026/2026.acl-long.1764.pdf"
+      }
+    },
+    {
+      "id": "P04",
+      "acl_id": "2026.acl-long.77",
+      "topic": "伙伴建模",
+      "title": "Explicit Trait Inference for Multi-Agent Coordination",
+      "authors": [
+        "Suhaib Abdurahman",
+        "Etsuko Ishii",
+        "Katerina Margatina",
+        "Divya Bhargavi",
+        "Monica Sunkara",
+        "Yi Zhang"
+      ],
+      "year": 2026,
+      "venue": "Proceedings of the 64th Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers)",
+      "doi": "10.18653/v1/2026.acl-long.77",
+      "pages": "1670–1704",
+      "publication_status": "formal",
+      "paper_url": "https://aclanthology.org/2026.acl-long.77/",
+      "pdf_url": "https://aclanthology.org/2026.acl-long.77.pdf",
+      "research_question": "显式推断协作者的能力与可信度，能否减少多 Agent 协调失败？",
+      "method": "Explicit Trait Inference 从交互历史推断 warmth 与 competence 两类特征，用结构化伙伴画像指导决策。",
+      "experiment_scope": "经济博弈与 MultiAgentBench；相对 CoT 基线测量收益损失和任务表现。",
+      "supported_conclusion": "协作需要对伙伴能力形成可更新描述；只有角色名字而没有可观察能力，难以支持稳健选角。",
+      "non_generalizable_boundary": "心理学维度和特定 benchmark 的增益不能外推为所有 Role 描述都会改善协调。",
+      "report_sections": [
+        "7.1",
+        "7.3"
+      ],
+      "deck_slides": [
+        37,
+        38,
+        42
+      ],
+      "download": {
+        "status": "downloaded",
+        "bytes": 1366872,
+        "sha256": "e6a682287d1c08c55857748156597e8a0558bb97df892cf851b35a332e7a4f26",
+        "local_path": "docs/references/papers/subagent-multiagent-2025-2026/2026.acl-long.77.pdf"
+      }
+    },
+    {
+      "id": "P05",
+      "acl_id": "2026.acl-demo.34",
+      "topic": "系统评价",
+      "title": "MASEval: Extending Multi-Agent Evaluation from Models to Systems",
+      "authors": [
+        "Cornelius Emde",
+        "Alexander Rubinstein",
+        "Anmol Goel",
+        "Ahmed Heakl",
+        "Sangdoo Yun",
+        "Seong Joon Oh",
+        "Martin Gubri"
+      ],
+      "year": 2026,
+      "venue": "Proceedings of the 64th Annual Meeting of the Association for Computational Linguistics (Volume 3: System Demonstrations)",
+      "doi": "10.18653/v1/2026.acl-demo.34",
+      "pages": "345–356",
+      "publication_status": "formal",
+      "paper_url": "https://aclanthology.org/2026.acl-demo.34/",
+      "pdf_url": "https://aclanthology.org/2026.acl-demo.34.pdf",
+      "research_question": "为什么多 Agent 评价必须从模型扩展到完整系统？",
+      "method": "MASEval 把框架、拓扑、编排、上下文工程与错误处理作为一等实验变量。",
+      "experiment_scope": "3 个 benchmark、3 个模型和 3 个框架的系统级比较。",
+      "supported_conclusion": "框架选择可能像模型选择一样显著影响结果，因此 Agent 评价对象应包括 harness 和 orchestration。",
+      "non_generalizable_boundary": "系统演示论文的比较规模有限，不能给所有框架做永久排名。",
+      "report_sections": [
+        "7.4",
+        "7.5"
+      ],
+      "deck_slides": [
+        40,
+        41,
+        42
+      ],
+      "download": {
+        "status": "downloaded",
+        "bytes": 265663,
+        "sha256": "894d35d4c6b8f34bf83ed0ff677e467b062d60b911798bccdc48c7dd1a31f70a",
+        "local_path": "docs/references/papers/subagent-multiagent-2025-2026/2026.acl-demo.34.pdf"
+      }
+    },
+    {
+      "id": "P06",
+      "acl_id": "2026.acl-long.1354",
+      "topic": "分布式协调反例",
+      "title": "SILO-BENCH: A Scalable Environment for Evaluating Distributed Coordination in Multi-Agent LLM Systems",
+      "authors": [
+        "Yuzhe Zhang",
+        "Feiran Liu",
+        "Yi Shan",
+        "Xinyi Huang",
+        "Xin Yang",
+        "Yueqi Zhu",
+        "Xuxin Cheng",
+        "Cao Liu",
+        "Ke Zeng",
+        "Terry Jingchen Zhang",
+        "Wenyuan Jiang"
+      ],
+      "year": 2026,
+      "venue": "Proceedings of the 64th Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers)",
+      "doi": "10.18653/v1/2026.acl-long.1354",
+      "pages": "29379–29398",
+      "publication_status": "formal",
+      "paper_url": "https://aclanthology.org/2026.acl-long.1354/",
+      "pdf_url": "https://aclanthology.org/2026.acl-long.1354.pdf",
+      "research_question": "Agent 各自只见局部信息时，能否仅靠自由通信完成分布式计算？",
+      "method": "SILO-BENCH 用无预设角色的精确答案任务，系统改变协议、Agent 数量和模型。",
+      "experiment_scope": "30 个算法任务、3 个通信复杂度等级、54 种配置、1,620 次实验。",
+      "supported_conclusion": "高通信密度不等于有效协调；任务复杂度和 Agent 数量上升时可能出现 communication–reasoning gap。",
+      "non_generalizable_boundary": "零成功率结论限定于 Level-III、超过 50 Agent 等实验条件，不能说所有小规模层级 Sub-Agent 都会失败。",
+      "report_sections": [
+        "3.4",
+        "6.5",
+        "7.6"
+      ],
+      "deck_slides": [
+        15,
+        33,
+        39,
+        42
+      ],
+      "download": {
+        "status": "downloaded",
+        "bytes": 1005243,
+        "sha256": "8526f19fe3dc2e2a48c23b3e8498763a9d46538d6e6b24d9f7a62ad3abd5c4d6",
+        "local_path": "docs/references/papers/subagent-multiagent-2025-2026/2026.acl-long.1354.pdf"
+      }
+    },
+    {
+      "id": "P07",
+      "acl_id": "2026.acl-long.1294",
+      "topic": "澄清与交接",
+      "title": "AgentAsk: Multi-Agent Systems Need to Ask",
+      "authors": [
+        "Bohan Lin",
+        "Kuo Yang",
+        "Zelin Tan",
+        "Yingchuan Lai",
+        "Chen Zhang",
+        "Guibin Zhang",
+        "Xinlei Yu",
+        "Miao Yu",
+        "Xu Wang",
+        "Yudong Zhang",
+        "Yang Wang"
+      ],
+      "year": 2026,
+      "venue": "Proceedings of the 64th Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers)",
+      "doi": "10.18653/v1/2026.acl-long.1294",
+      "pages": "28055–28077",
+      "publication_status": "formal",
+      "paper_url": "https://aclanthology.org/2026.acl-long.1294/",
+      "pdf_url": "https://aclanthology.org/2026.acl-long.1294.pdf",
+      "research_question": "多 Agent 在消息交接处为什么失败，澄清机制能否阻断错误级联？",
+      "method": "提出 Data Gap、Signal Corruption、Referential Drift、Capability Gap 四类边级错误，并用 AgentAsk 在关键交接处请求最小澄清。",
+      "experiment_scope": "5 个 benchmark；同时衡量准确率、延迟和额外成本。",
+      "supported_conclusion": "Parent–Child 委托需要清晰的输入、输出和歧义处理机制，通信边本身也是故障面。",
+      "non_generalizable_boundary": "最高 4.69% 增益和低于 10% 开销只属于论文实验，不可写成通用保证。",
+      "report_sections": [
+        "4.3",
+        "7.6"
+      ],
+      "deck_slides": [
+        18,
+        19,
+        42
+      ],
+      "download": {
+        "status": "downloaded",
+        "bytes": 9027094,
+        "sha256": "75e8a924c7ab64b9d1c5c18545b5c6fd4343571d2fc3a7189d7a2e9c60fdc766",
+        "local_path": "docs/references/papers/subagent-multiagent-2025-2026/2026.acl-long.1294.pdf"
+      }
+    },
+    {
+      "id": "P08",
+      "acl_id": "2026.findings-acl.2115",
+      "topic": "协同搜索",
+      "title": "Multi-LLM Collaborative Search for Complex Problem Solving",
+      "authors": [
+        "Sen Yang",
+        "Yafu Li",
+        "Wai Lam",
+        "Yu Cheng"
+      ],
+      "year": 2026,
+      "venue": "Findings of the Association for Computational Linguistics: ACL 2026",
+      "doi": "10.18653/v1/2026.findings-acl.2115",
+      "pages": "42599–42614",
+      "publication_status": "formal",
+      "paper_url": "https://aclanthology.org/2026.findings-acl.2115/",
+      "pdf_url": "https://aclanthology.org/2026.findings-acl.2115.pdf",
+      "research_question": "多模型独立探索与迭代汇总能否扩大复杂推理的搜索空间？",
+      "method": "MOSA 以 MCTS 为骨架，让多个 LLM 提议、聚合并继续细化推理步骤。",
+      "experiment_scope": "4 个数学与常识推理 benchmark，比较单 Agent 与其他多 Agent 基线。",
+      "supported_conclusion": "当子问题允许独立探索并可通过统一搜索状态合并时，多 Agent 能提供互补候选路径。",
+      "non_generalizable_boundary": "搜索型 benchmark 的改进不能证明软件工程、工具执行或强共享状态任务同样受益。",
+      "report_sections": [
+        "3.3",
+        "5.3"
+      ],
+      "deck_slides": [
+        13,
+        21,
+        34
+      ],
+      "download": {
+        "status": "downloaded",
+        "bytes": 821231,
+        "sha256": "a0841bb2402562932c2970c69b5e7d8ae4cf69300b3fdb4e5e4b7291e3c98ba6",
+        "local_path": "docs/references/papers/subagent-multiagent-2025-2026/2026.findings-acl.2115.pdf"
+      }
+    },
+    {
+      "id": "P09",
+      "acl_id": "2026.findings-acl.1694",
+      "topic": "辩论反例",
+      "title": "Demystifying Multi-Agent Debate: The Role of Confidence and Diversity",
+      "authors": [
+        "Xiaochen Zhu",
+        "Caiqi Zhang",
+        "Yizhou Chi",
+        "Tom Stafford",
+        "Nigel Collier",
+        "Andreas Vlachos"
+      ],
+      "year": 2026,
+      "venue": "Findings of the Association for Computational Linguistics: ACL 2026",
+      "doi": "10.18653/v1/2026.findings-acl.1694",
+      "pages": "33909–33930",
+      "publication_status": "formal",
+      "paper_url": "https://aclanthology.org/2026.findings-acl.1694/",
+      "pdf_url": "https://aclanthology.org/2026.findings-acl.1694.pdf",
+      "research_question": "为什么同质 Multi-Agent Debate 可能不如多数投票？",
+      "method": "理论分析均匀信念更新，并引入多样化初始化和显式置信度通信。",
+      "experiment_scope": "6 个推理型问答 benchmark，对比 vanilla debate、多数投票和两种干预。",
+      "supported_conclusion": "协作收益来自有效差异和可校准信息，而不是重复启动多个同质 Agent。",
+      "non_generalizable_boundary": "经改造 debate 的结果不能外推为所有辩论拓扑优于 Parent–Child，也不能把置信度当真实概率。",
+      "report_sections": [
+        "5.4",
+        "6.4"
+      ],
+      "deck_slides": [
+        21,
+        33,
+        39
+      ],
+      "download": {
+        "status": "downloaded",
+        "bytes": 2549292,
+        "sha256": "c4dec55da73771f013a6d09a4b7c1626d11bbcc6b8057138efdd29812ce3bdc9",
+        "local_path": "docs/references/papers/subagent-multiagent-2025-2026/2026.findings-acl.1694.pdf"
+      }
+    },
+    {
+      "id": "P10",
+      "acl_id": "2026.findings-acl.1712",
+      "topic": "专业化流水线",
+      "title": "LLM Multi-Agent Systems for Long Triple Set Data-to-Text Generation",
+      "authors": [
+        "Chinonso Cynthia Osuji",
+        "Simon Mille",
+        "Mark Andrade",
+        "Jane Adkins",
+        "Ornait O’Connell",
+        "Elaine Uí Dhonnchadha",
+        "Bláithín Heffernan",
+        "Fírinne Nic an tSaoir",
+        "Anja Belz",
+        "Thiago Castro Ferreira",
+        "Brian Davis"
+      ],
+      "year": 2026,
+      "venue": "Findings of the Association for Computational Linguistics: ACL 2026",
+      "doi": "10.18653/v1/2026.findings-acl.1712",
+      "pages": "34261–34275",
+      "publication_status": "formal",
+      "paper_url": "https://aclanthology.org/2026.findings-acl.1712/",
+      "pdf_url": "https://aclanthology.org/2026.findings-acl.1712.pdf",
+      "research_question": "把长结构化输入拆给专业 Agent 是否比单工作器更连贯？",
+      "method": "内容排序、文本结构和表层实现由三个专业工作器完成，orchestrator 与 guardrail 闭环监督。",
+      "experiment_scope": "最长 199 个 DBpedia triples，英语和爱尔兰语；人工与 LLM judge 双重评价。",
+      "supported_conclusion": "可验证的专业化流水线可改善长输入生成中的控制与连贯性，但增益可能较小且依赖任务结构。",
+      "non_generalizable_boundary": "爱尔兰语评审相关性不显著且人类与 LLM judge 对齐很弱，不能宣称多 Agent 普遍提升生成质量。",
+      "report_sections": [
+        "4.4",
+        "6.2"
+      ],
+      "deck_slides": [
+        22,
+        32,
+        38
+      ],
+      "download": {
+        "status": "downloaded",
+        "bytes": 1310701,
+        "sha256": "af6333f9db12fb262bde02830ff0171e28e3cc888765f9ed7763e97c02e25dd5",
+        "local_path": "docs/references/papers/subagent-multiagent-2025-2026/2026.findings-acl.1712.pdf"
+      }
+    },
+    {
+      "id": "P11",
+      "acl_id": "2026.findings-acl.1934",
+      "topic": "风险评价",
+      "title": "From Tasks to Teams: A Risk-First Evaluation Framework for Multi-Agent LLM Systems in Finance",
+      "authors": [
+        "Zichen Chen",
+        "Jianda Chen",
+        "Jiaao Chen",
+        "Misha Sra"
+      ],
+      "year": 2026,
+      "venue": "Findings of the Association for Computational Linguistics: ACL 2026",
+      "doi": "10.18653/v1/2026.findings-acl.1934",
+      "pages": "38819–38857",
+      "publication_status": "formal",
+      "paper_url": "https://aclanthology.org/2026.findings-acl.1934/",
+      "pdf_url": "https://aclanthology.org/2026.findings-acl.1934.pdf",
+      "research_question": "如何在准确率之外评价多 Agent 的协作、工具共享和真实行动风险？",
+      "method": "M-SAEA 用十种探针从模型、工作流、交互和系统四层生成连续风险向量与理由。",
+      "experiment_scope": "金融管理、网店自动化、交易服务三类高风险任务，覆盖 6 个模型。",
+      "supported_conclusion": "系统验收应包含安全、时效性、工具副作用和交互风险，不能只有任务正确率。",
+      "non_generalizable_boundary": "金融场景探针不能直接证明其他行业的风险阈值，也不能替代人工安全审计。",
+      "report_sections": [
+        "7.5",
+        "7.6"
+      ],
+      "deck_slides": [
+        41,
+        42
+      ],
+      "download": {
+        "status": "downloaded",
+        "bytes": 777927,
+        "sha256": "7ce94b8fafa8668782e2a1cd603b91ac059b2dfc89fdf81a10333a5e7d1f09a6",
+        "local_path": "docs/references/papers/subagent-multiagent-2025-2026/2026.findings-acl.1934.pdf"
+      }
+    },
+    {
+      "id": "P12",
+      "acl_id": "2026.acl-long.1387",
+      "topic": "成本压缩",
+      "title": "AgentSlimming: Towards Efficient and Cost-Aware Multi-Agent Systems",
+      "authors": [
+        "Yulang Chen",
+        "Haoxuan Peng",
+        "Jinyan Liu",
+        "Zichen Wen",
+        "Dongrui Liu",
+        "Linfeng Zhang"
+      ],
+      "year": 2026,
+      "venue": "Proceedings of the 64th Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers)",
+      "doi": "10.18653/v1/2026.acl-long.1387",
+      "pages": "30064–30086",
+      "publication_status": "formal",
+      "paper_url": "https://aclanthology.org/2026.acl-long.1387/",
+      "pdf_url": "https://aclanthology.org/2026.acl-long.1387.pdf",
+      "research_question": "图结构工作流中哪些 Agent 或模型是冗余的？",
+      "method": "AgentSlimming 估计节点重要性，删除冗余 Agent 或替换低成本模型，并用基线锚定规则防止质量崩塌。",
+      "experiment_scope": "多个图结构 multi-agent workflow，比较 token 成本与任务质量的 Pareto 关系。",
+      "supported_conclusion": "Agent 数量和模型成本都应按边际贡献验收；可删除的节点说明更多 Agent 并非天然更好。",
+      "non_generalizable_boundary": "最高 78.9% token 降幅属于测试工作流，不能承诺 CCSM 或 Codex 获得同等节省。",
+      "report_sections": [
+        "7.5",
+        "7.6"
+      ],
+      "deck_slides": [
+        39,
+        41,
+        42
+      ],
+      "download": {
+        "status": "downloaded",
+        "bytes": 2770212,
+        "sha256": "b3acc39c06f1ac19716535ee71dfdbcc93e7a096fe097f75f0c8515cf0b05790",
+        "local_path": "docs/references/papers/subagent-multiagent-2025-2026/2026.acl-long.1387.pdf"
+      }
+    },
+    {
+      "id": "P13",
+      "acl_id": "2026.findings-acl.13",
+      "topic": "多样性坍缩",
+      "title": "Diversity Collapse in Multi-Agent LLM Systems: Structural Coupling and Collective Failure in Open-Ended Idea Generation",
+      "authors": [
+        "Nuo Chen",
+        "Yicheng Tong",
+        "Yuzhe Yang",
+        "Yufei He",
+        "Xueyi Zhang",
+        "Zou Qingyun",
+        "Qian Wang",
+        "Bingsheng He"
+      ],
+      "year": 2026,
+      "venue": "Findings of the Association for Computational Linguistics: ACL 2026",
+      "doi": "10.18653/v1/2026.findings-acl.13",
+      "pages": "251–306",
+      "publication_status": "formal",
+      "paper_url": "https://aclanthology.org/2026.findings-acl.13/",
+      "pdf_url": "https://aclanthology.org/2026.findings-acl.13.pdf",
+      "research_question": "多 Agent 互动是否真的扩大开放式创意的解空间？",
+      "method": "从模型能力、Agent 认知和系统动力三层分析开放式创意中的语义多样性。",
+      "experiment_scope": "多模型、多团队权力结构、不同群体规模和通信密度的创意生成实验。",
+      "supported_conclusion": "密集通信和权威耦合可能让 Agent 过早趋同；隔离与独立性有时比更多消息更重要。",
+      "non_generalizable_boundary": "创意多样性结果不能直接等同于代码正确率或事实问答精度。",
+      "report_sections": [
+        "3.5",
+        "6.5"
+      ],
+      "deck_slides": [
+        15,
+        33,
+        39
+      ],
+      "download": {
+        "status": "downloaded",
+        "bytes": 4557455,
+        "sha256": "746caf0657ba364c45e089b6a66fd8d9f884b34817919daa318d219a0f357bd2",
+        "local_path": "docs/references/papers/subagent-multiagent-2025-2026/2026.findings-acl.13.pdf"
+      }
+    },
+    {
+      "id": "P14",
+      "acl_id": "2026.findings-acl.753",
+      "topic": "内部失效",
+      "title": "Superficial Success vs. Internal Breakdown: An Empirical Study of Generalization in Adaptive Multi-Agent Systems",
+      "authors": [
+        "Namyeong So",
+        "Seokgyu Jang",
+        "Taeuk Kim"
+      ],
+      "year": 2026,
+      "venue": "Findings of the Association for Computational Linguistics: ACL 2026",
+      "doi": "10.18653/v1/2026.findings-acl.753",
+      "pages": "15328–15354",
+      "publication_status": "formal",
+      "paper_url": "https://aclanthology.org/2026.findings-acl.753/",
+      "pdf_url": "https://aclanthology.org/2026.findings-acl.753.pdf",
+      "research_question": "自适应 MAS 的最终正确率是否掩盖内部协调崩坏？",
+      "method": "跨域转移和内部行为分析识别 topological overfitting 与 illusory coordination。",
+      "experiment_scope": "多种自适应 MAS 在训练域与迁移域上的最终结果和内部协作行为。",
+      "supported_conclusion": "最终答案正确不足以证明协作机制健康，必须检查任务分工、消息与回收过程。",
+      "non_generalizable_boundary": "论文定义的理想 MAS 行为有特定度量，不能未经复核套用到所有运行时。",
+      "report_sections": [
+        "7.4",
+        "7.6"
+      ],
+      "deck_slides": [
+        40,
+        42
+      ],
+      "download": {
+        "status": "downloaded",
+        "bytes": 1641333,
+        "sha256": "afa59dd89629f6a09867e2c9b66cf9e1b85a288405cf54ec6501fd9d16cb33d6",
+        "local_path": "docs/references/papers/subagent-multiagent-2025-2026/2026.findings-acl.753.pdf"
+      }
+    },
+    {
+      "id": "P15",
+      "acl_id": "2026.findings-eacl.140",
+      "topic": "过程评价",
+      "title": "Process Evaluation for Agentic Systems",
+      "authors": [
+        "Milan Gritta",
+        "Debjit Paul",
+        "Xiaoguang Li",
+        "Lifeng Shang",
+        "Jun Wang",
+        "Gerasimos Lampouras"
+      ],
+      "year": 2026,
+      "venue": "Findings of the Association for Computational Linguistics: EACL 2026",
+      "doi": "10.18653/v1/2026.findings-eacl.140",
+      "pages": "2678–2692",
+      "publication_status": "formal",
+      "paper_url": "https://aclanthology.org/2026.findings-eacl.140/",
+      "pdf_url": "https://aclanthology.org/2026.findings-eacl.140.pdf",
+      "research_question": "只评价最终答案会漏掉哪些 Agent 风险？",
+      "method": "立场论文提出过程评价与 compliance score，并用小规模研究展示自动评价可行性。",
+      "experiment_scope": "医疗、金融、法律、基础设施等敏感应用讨论，加一项小规模过程评价研究。",
+      "supported_conclusion": "Agent 可能通过跳步骤、伪造工具调用或使用过期知识得到表面正确答案，因此要验证过程。",
+      "non_generalizable_boundary": "这是立场论文和小规模验证，不能当作成熟通用评价标准。",
+      "report_sections": [
+        "7.4",
+        "7.6"
+      ],
+      "deck_slides": [
+        40,
+        42
+      ],
+      "download": {
+        "status": "downloaded",
+        "bytes": 359410,
+        "sha256": "79e491f1ae4918c0ca4cf4212184826c3654ebbee4aef360e9708b546897c419",
+        "local_path": "docs/references/papers/subagent-multiagent-2025-2026/2026.findings-eacl.140.pdf"
+      }
+    },
+    {
+      "id": "P16",
+      "acl_id": "2026.acl-tutorials.3",
+      "topic": "研究综述",
+      "title": "Towards Effective and Efficient Multi-Agent Language Model Systems: Foundations, Prospects, and Applications",
+      "authors": [
+        "Xuan Wang",
+        "Shuxiang Cao",
+        "Yuchen Zhuang",
+        "Wenqi Shi"
+      ],
+      "year": 2026,
+      "venue": "Proceedings of the 64th Annual Meeting of the Association for Computational Linguistics (Volume 5: Tutorial Abstracts)",
+      "doi": "10.18653/v1/2026.acl-tutorials.3",
+      "pages": "5–6",
+      "publication_status": "formal",
+      "paper_url": "https://aclanthology.org/2026.acl-tutorials.3/",
+      "pdf_url": "https://aclanthology.org/2026.acl-tutorials.3.pdf",
+      "research_question": "有效且高效的多 Agent LLM 系统由哪些研究问题组成？",
+      "method": "ACL 教程从单 Agent 能力、协作通信与真实应用三个部分梳理方法。",
+      "experiment_scope": "教程摘要覆盖模型蒸馏、动态路由、记忆/服务效率、图优化、谄媚缓解与应用。",
+      "supported_conclusion": "模型、Agent、通信和服务成本是一个耦合系统，不能只改一个层面后宣布整体最优。",
+      "non_generalizable_boundary": "教程摘要用于建立研究地图，不作为具体性能数字的实验证据。",
+      "report_sections": [
+        "2.1",
+        "5.1"
+      ],
+      "deck_slides": [
+        4,
+        24,
+        43
+      ],
+      "download": {
+        "status": "downloaded",
+        "bytes": 66646,
+        "sha256": "60fdf7456fb8bbb05ccef5c88b1ba1f4987a517f5df77164fcaf0333c630cb33",
+        "local_path": "docs/references/papers/subagent-multiagent-2025-2026/2026.acl-tutorials.3.pdf"
+      }
+    },
+    {
+      "id": "P17",
+      "acl_id": "2025.acl-long.421",
+      "topic": "协作基准",
+      "title": "MultiAgentBench : Evaluating the Collaboration and Competition of LLM agents",
+      "authors": [
+        "Kunlun Zhu",
+        "Hongyi Du",
+        "Zhaochen Hong",
+        "Xiaocheng Yang",
+        "Shuyi Guo",
+        "Daisy Zhe Wang",
+        "Zhenhailong Wang",
+        "Cheng Qian",
+        "Xiangru Tang",
+        "Heng Ji",
+        "Jiaxuan You"
+      ],
+      "year": 2025,
+      "venue": "Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers)",
+      "doi": "10.18653/v1/2025.acl-long.421",
+      "pages": "8580–8622",
+      "publication_status": "formal",
+      "paper_url": "https://aclanthology.org/2025.acl-long.421/",
+      "pdf_url": "https://aclanthology.org/2025.acl-long.421.pdf",
+      "research_question": "如何同时衡量 LLM Agent 的协作与竞争？",
+      "method": "MultiAgentBench 在交互场景中以里程碑 KPI 比较星、链、树、图和认知规划等协议。",
+      "experiment_scope": "多种协作/竞争场景与多种协调协议；报告任务得分和里程碑达成。",
+      "supported_conclusion": "拓扑改变会改变任务表现，系统评价需要过程里程碑，而非只看最终完成。",
+      "non_generalizable_boundary": "某研究场景中图结构最好、规划提高 3% 不代表所有场景的全局最优。",
+      "report_sections": [
+        "5.2",
+        "6.1",
+        "7.4"
+      ],
+      "deck_slides": [
+        25,
+        29,
+        40
+      ],
+      "download": {
+        "status": "downloaded",
+        "bytes": 2487425,
+        "sha256": "035f673b459aecad0b7fa0fdac21dd9585f644cb29fba45f4ecbceef28f81eb5",
+        "local_path": "docs/references/papers/subagent-multiagent-2025-2026/2025.acl-long.421.pdf"
+      }
+    },
+    {
+      "id": "P18",
+      "acl_id": "2025.emnlp-main.623",
+      "topic": "信息传播",
+      "title": "Understanding the Information Propagation Effects of Communication Topologies in LLM-based Multi-Agent Systems",
+      "authors": [
+        "Xu Shen",
+        "Yixin Liu",
+        "Yiwei Dai",
+        "Yili Wang",
+        "Rui Miao",
+        "Yue Tan",
+        "Shirui Pan",
+        "Xin Wang"
+      ],
+      "year": 2025,
+      "venue": "Proceedings of the 2025 Conference on Empirical Methods in Natural Language Processing",
+      "doi": "10.18653/v1/2025.emnlp-main.623",
+      "pages": "12347–12361",
+      "publication_status": "formal",
+      "paper_url": "https://aclanthology.org/2025.emnlp-main.623/",
+      "pdf_url": "https://aclanthology.org/2025.emnlp-main.623.pdf",
+      "research_question": "稀疏和稠密拓扑如何传播正确信息与错误？",
+      "method": "构建因果分析框架，并提出融合稀疏/稠密连接的 EIB-Learner。",
+      "experiment_scope": "多种拓扑稀疏度下比较正确/错误输出传播、通信成本和鲁棒性。",
+      "supported_conclusion": "中等稀疏结构可能在传播有益信息与抑制错误之间取得更好平衡。",
+      "non_generalizable_boundary": "最优稀疏度依赖任务和模型，不能写成固定边数规则。",
+      "report_sections": [
+        "6.1",
+        "6.5"
+      ],
+      "deck_slides": [
+        29,
+        34,
+        35
+      ],
+      "download": {
+        "status": "downloaded",
+        "bytes": 1399507,
+        "sha256": "f94767d936354030dc25f10db92a2f6f85f49b7d7163ac45b253e047ca67bd8b",
+        "local_path": "docs/references/papers/subagent-multiagent-2025-2026/2025.emnlp-main.623.pdf"
+      }
+    },
+    {
+      "id": "P19",
+      "acl_id": "2025.acl-long.1105",
+      "topic": "角色差异",
+      "title": "Advancing Collaborative Debates with Role Differentiation through Multi-Agent Reinforcement Learning",
+      "authors": [
+        "Haoran Li",
+        "Ziyi Su",
+        "Yun Xue (薛云)",
+        "Zhiliang Tian",
+        "Yiping Song",
+        "Minlie Huang"
+      ],
+      "year": 2025,
+      "venue": "Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers)",
+      "doi": "10.18653/v1/2025.acl-long.1105",
+      "pages": "22655–22666",
+      "publication_status": "formal",
+      "paper_url": "https://aclanthology.org/2025.acl-long.1105/",
+      "pdf_url": "https://aclanthology.org/2025.acl-long.1105.pdf",
+      "research_question": "角色如何从标签变成可学习的互补行为？",
+      "method": "Multi-LLM Cooperation 联合学习时序角色嵌入，并用角色差异模块避免收敛。",
+      "experiment_scope": "7 个数据集上的协作与专业性实验。",
+      "supported_conclusion": "有效角色需要表达任务相关的能力差异；通用的 judge/summarizer 名字未必足够。",
+      "non_generalizable_boundary": "学习式角色嵌入的结果不能证明自然语言 description 一定产生相同互补性。",
+      "report_sections": [
+        "7.1",
+        "7.2"
+      ],
+      "deck_slides": [
+        37,
+        38,
+        39
+      ],
+      "download": {
+        "status": "downloaded",
+        "bytes": 1065318,
+        "sha256": "ddeebe36c83773a78d815c2b811f6634594ca2bfe1d2288b40a9c26d1cbc2775",
+        "local_path": "docs/references/papers/subagent-multiagent-2025-2026/2025.acl-long.1105.pdf"
+      }
+    },
+    {
+      "id": "P20",
+      "acl_id": "2025.findings-naacl.448",
+      "topic": "协调能力",
+      "title": "LLM-Coordination: Evaluating and Analyzing Multi-agent Coordination Abilities in Large Language Models",
+      "authors": [
+        "Saaket Agashe",
+        "Yue Fan",
+        "Anthony Reyna",
+        "Xin Eric Wang"
+      ],
+      "year": 2025,
+      "venue": "Findings of the Association for Computational Linguistics: NAACL 2025",
+      "doi": "10.18653/v1/2025.findings-naacl.448",
+      "pages": "8053–8072",
+      "publication_status": "formal",
+      "paper_url": "https://aclanthology.org/2025.findings-naacl.448/",
+      "pdf_url": "https://aclanthology.org/2025.findings-naacl.448.pdf",
+      "research_question": "LLM 在纯协调问题中具备哪些能力、缺少哪些能力？",
+      "method": "LLM-Coordination 包含 4 个纯协调博弈和 198 个 CoordQA 问题，分解环境理解、Theory of Mind 与联合规划。",
+      "experiment_scope": "Agentic Coordination、CoordQA 和未见伙伴的 zero-shot coordination。",
+      "supported_conclusion": "环境线索驱动的协调相对较强，但需要推断伙伴信念与意图时仍有明显不足。",
+      "non_generalizable_boundary": "纯协调游戏不能完整代表软件工程 Parent–Child 生命周期。",
+      "report_sections": [
+        "5.3",
+        "7.2"
+      ],
+      "deck_slides": [
+        26,
+        38,
+        41
+      ],
+      "download": {
+        "status": "downloaded",
+        "bytes": 5537183,
+        "sha256": "0990537c9643c4057464000e85509949d75266b06359d99f18732883fa6d222d",
+        "local_path": "docs/references/papers/subagent-multiagent-2025-2026/2025.findings-naacl.448.pdf"
+      }
+    },
+    {
+      "id": "P21",
+      "acl_id": "2025.emnlp-main.249",
+      "topic": "连续协作",
+      "title": "Collab-Overcooked: Benchmarking and Evaluating Large Language Models as Collaborative Agents",
+      "authors": [
+        "Haochen Sun",
+        "Shuwen Zhang",
+        "Lujie Niu",
+        "Lei Ren",
+        "Hao Xu",
+        "Hao Fu",
+        "Fangkun Zhao",
+        "Caixia Yuan",
+        "Xiaojie Wang"
+      ],
+      "year": 2025,
+      "venue": "Proceedings of the 2025 Conference on Empirical Methods in Natural Language Processing",
+      "doi": "10.18653/v1/2025.emnlp-main.249",
+      "pages": "4922–4951",
+      "publication_status": "formal",
+      "paper_url": "https://aclanthology.org/2025.emnlp-main.249/",
+      "pdf_url": "https://aclanthology.org/2025.emnlp-main.249.pdf",
+      "research_question": "交互环境中 Agent 能否持续理解目标、主动协作并适应伙伴？",
+      "method": "Collab-Overcooked 扩展 Overcooked-AI，并引入过程导向的协作指标。",
+      "experiment_scope": "13 个 LLM、30 个开放任务和自然语言协作环境。",
+      "supported_conclusion": "模型可能理解目标却仍缺乏主动协作与持续适应；理解任务不等于能形成团队。",
+      "non_generalizable_boundary": "游戏环境的动作和通信约束不能直接外推到代码 Agent。",
+      "report_sections": [
+        "5.3",
+        "7.4"
+      ],
+      "deck_slides": [
+        26,
+        40,
+        42
+      ],
+      "download": {
+        "status": "downloaded",
+        "bytes": 6103805,
+        "sha256": "757bb679e728dbc84bdbe81dfaca790ce63e5b53547165e094a39e17fe57d501",
+        "local_path": "docs/references/papers/subagent-multiagent-2025-2026/2025.emnlp-main.249.pdf"
+      }
+    },
+    {
+      "id": "P22",
+      "acl_id": "2025.emnlp-main.584",
+      "topic": "动态级联",
+      "title": "AnyMAC: Cascading Flexible Multi-Agent Collaboration via Next-Agent Prediction",
+      "authors": [
+        "Song Wang",
+        "Zhen Tan",
+        "Zihan Chen",
+        "Shuang Zhou",
+        "Tianlong Chen",
+        "Jundong Li"
+      ],
+      "year": 2025,
+      "venue": "Proceedings of the 2025 Conference on Empirical Methods in Natural Language Processing",
+      "doi": "10.18653/v1/2025.emnlp-main.584",
+      "pages": "11555–11567",
+      "publication_status": "formal",
+      "paper_url": "https://aclanthology.org/2025.emnlp-main.584/",
+      "pdf_url": "https://aclanthology.org/2025.emnlp-main.584.pdf",
+      "research_question": "能否动态选择下一位 Agent 及其可见上下文？",
+      "method": "AnyMAC 使用 Next-Agent Prediction 和 Next-Context Selection 构造任务自适应的顺序协作管线。",
+      "experiment_scope": "多个 benchmark 上比较静态/图结构基线的表现与通信开销。",
+      "supported_conclusion": "动态选角必须同时决定谁执行和看什么上下文；上下文治理与角色路由不可分割。",
+      "non_generalizable_boundary": "顺序级联的增益不代表并行 Parent–Child 在所有任务上更差。",
+      "report_sections": [
+        "6.3",
+        "7.2"
+      ],
+      "deck_slides": [
+        35,
+        38,
+        56
+      ],
+      "download": {
+        "status": "downloaded",
+        "bytes": 1503840,
+        "sha256": "63ebb5d31fb65f83a18c7c0791b89595ac0b45b8f36597f4cbd5c0bdf345b266",
+        "local_path": "docs/references/papers/subagent-multiagent-2025-2026/2025.emnlp-main.584.pdf"
+      }
+    },
+    {
+      "id": "P23",
+      "acl_id": "2025.findings-acl.601",
+      "topic": "效率训练",
+      "title": "Optima: Optimizing Effectiveness and Efficiency for LLM-Based Multi-Agent System",
+      "authors": [
+        "Weize Chen",
+        "Jiarui Yuan",
+        "Chen Qian",
+        "Cheng Yang",
+        "Zhiyuan Liu",
+        "Maosong Sun (孙茂松)"
+      ],
+      "year": 2025,
+      "venue": "Findings of the Association for Computational Linguistics: ACL 2025",
+      "doi": "10.18653/v1/2025.findings-acl.601",
+      "pages": "11534–11557",
+      "publication_status": "formal",
+      "paper_url": "https://aclanthology.org/2025.findings-acl.601/",
+      "pdf_url": "https://aclanthology.org/2025.findings-acl.601.pdf",
+      "research_question": "如何联合优化多 Agent 的任务效果、token 效率和通信可读性？",
+      "method": "Optima 采用生成、排序、选择、训练循环，比较 SFT、DPO 与混合方案，并借鉴 MCTS 生成偏好数据。",
+      "experiment_scope": "信息不对称问答和复杂推理，使用 Llama 3 8B/3.2 3B 等配置。",
+      "supported_conclusion": "多 Agent 的优化目标需要同时包含质量、通信成本和可读性。",
+      "non_generalizable_boundary": "最高 2.8 倍表现与少于 10% token 只属于指定模型、任务和训练设置。",
+      "report_sections": [
+        "7.5",
+        "7.6"
+      ],
+      "deck_slides": [
+        41,
+        42
+      ],
+      "download": {
+        "status": "downloaded",
+        "bytes": 3329103,
+        "sha256": "6f136b9b97ea7d57b9b23f952df7b0a7e994de5ba064aa35ea0415388c9120ac",
+        "local_path": "docs/references/papers/subagent-multiagent-2025-2026/2025.findings-acl.601.pdf"
+      }
+    },
+    {
+      "id": "P24",
+      "acl_id": "2025.acl-long.757",
+      "topic": "模型路由",
+      "title": "MasRouter: Learning to Route LLMs for Multi-Agent Systems",
+      "authors": [
+        "Yanwei Yue",
+        "Guibin Zhang",
+        "Boyang Liu",
+        "Guancheng Wan",
+        "Kun Wang",
+        "Dawei Cheng",
+        "Yiyan Qi"
+      ],
+      "year": 2025,
+      "venue": "Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers)",
+      "doi": "10.18653/v1/2025.acl-long.757",
+      "pages": "15549–15572",
+      "publication_status": "formal",
+      "paper_url": "https://aclanthology.org/2025.acl-long.757/",
+      "pdf_url": "https://aclanthology.org/2025.acl-long.757.pdf",
+      "research_question": "Multi-Agent 系统怎样联合选择协作模式、角色和模型？",
+      "method": "MasRouter 通过级联控制器依次确定协作模式、角色分配和 LLM 路由。",
+      "experiment_scope": "代码与推理 benchmark，比较性能、成本和接入不同 MAS 框架的能力。",
+      "supported_conclusion": "多 Agent 模型绑定不是单一模型路由问题，而是协作模式、角色和 provider 的联合决策。",
+      "non_generalizable_boundary": "MBPP/HumanEval 上的数字不能外推为 CCSM 的确定性语义选角或实际节省。",
+      "report_sections": [
+        "7.2",
+        "12.2"
+      ],
+      "deck_slides": [
+        38,
+        56,
+        66
+      ],
+      "download": {
+        "status": "downloaded",
+        "bytes": 6764646,
+        "sha256": "1bf45eaa68515ae2a6d3de2e2240ac321fef37a46ba831718aacee52bb12f457",
+        "local_path": "docs/references/papers/subagent-multiagent-2025-2026/2025.acl-long.757.pdf"
+      }
+    },
+    {
+      "id": "P25",
+      "acl_id": "2025.emnlp-demos.29",
+      "topic": "可配置辩论",
+      "title": "MALLM: Multi-Agent Large Language Models Framework",
+      "authors": [
+        "Jonas Becker",
+        "Lars Benedikt Kaesberg",
+        "Niklas Bauer",
+        "Jan Philip Wahle",
+        "Terry Ruas",
+        "Bela Gipp"
+      ],
+      "year": 2025,
+      "venue": "Proceedings of the 2025 Conference on Empirical Methods in Natural Language Processing: System Demonstrations",
+      "doi": "10.18653/v1/2025.emnlp-demos.29",
+      "pages": "418–439",
+      "publication_status": "formal",
+      "paper_url": "https://aclanthology.org/2025.emnlp-demos.29/",
+      "pdf_url": "https://aclanthology.org/2025.emnlp-demos.29.pdf",
+      "research_question": "如何系统比较 persona、响应方式、讨论范式和决策协议？",
+      "method": "MALLM 提供 144 种以上可配置组合和统一评估管线。",
+      "experiment_scope": "Hugging Face 文本数据集、persona、response generator、discussion paradigm 和 voting/consensus。",
+      "supported_conclusion": "Agent 组织不是一个开关；persona、信息流和决策协议需要分别配置和比较。",
+      "non_generalizable_boundary": "框架可配置性本身不证明某个配置有效，也不代表 Codex V2 的官方架构。",
+      "report_sections": [
+        "5.4",
+        "6.4"
+      ],
+      "deck_slides": [
+        33,
+        40
+      ],
+      "download": {
+        "status": "downloaded",
+        "bytes": 1689339,
+        "sha256": "55b1b58f23b9238ec453f3fb1103f9b26d86a7b154d543f89b15a0cb6ea6bae5",
+        "local_path": "docs/references/papers/subagent-multiagent-2025-2026/2025.emnlp-demos.29.pdf"
+      }
+    },
+    {
+      "id": "P26",
+      "acl_id": "2025.findings-emnlp.636",
+      "topic": "团队初始化",
+      "title": "AgentInit: Initializing LLM-based Multi-Agent Systems via Diversity and Expertise Orchestration for Effective and Efficient Collaboration",
+      "authors": [
+        "Chunhao Tian",
+        "Yutong Wang",
+        "Xuebo Liu",
+        "Zhexuan Wang",
+        "Liang Ding",
+        "Miao Zhang",
+        "Min Zhang"
+      ],
+      "year": 2025,
+      "venue": "Findings of the Association for Computational Linguistics: EMNLP 2025",
+      "doi": "10.18653/v1/2025.findings-emnlp.636",
+      "pages": "11870–11902",
+      "publication_status": "formal",
+      "paper_url": "https://aclanthology.org/2025.findings-emnlp.636/",
+      "pdf_url": "https://aclanthology.org/2025.findings-emnlp.636.pdf",
+      "research_question": "如何在任务相关性、专业性与多样性之间初始化 Agent 团队？",
+      "method": "AgentInit 通过多轮交互/反思生成 Agent，用格式化机制和 Pareto 团队选择平衡多样性与任务相关性。",
+      "experiment_scope": "多框架、多任务，比较预定义与自动初始化策略的表现和 token。",
+      "supported_conclusion": "团队组建需要同时考虑能力相关性与多样性；角色描述是系统选择能力的输入。",
+      "non_generalizable_boundary": "最高提升数字依赖论文的初始化方法与任务，不能把 description 当确定性路由规则。",
+      "report_sections": [
+        "7.1",
+        "7.2"
+      ],
+      "deck_slides": [
+        37,
+        38,
+        56
+      ],
+      "download": {
+        "status": "downloaded",
+        "bytes": 2223085,
+        "sha256": "b1a207b855995ea3af241103cab79f0f7c1d1eb4c6212e5bf256fabe17c649d7",
+        "local_path": "docs/references/papers/subagent-multiagent-2025-2026/2025.findings-emnlp.636.pdf"
+      }
+    }
+  ]
 }
