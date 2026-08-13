@@ -15,6 +15,42 @@ function presetModel(providerName: string, modelName: string) {
 }
 
 describe("Codex preset reasoning capabilities", () => {
+  it("declares a conservative capability for every maintained catalog model", () => {
+    for (const provider of codexProviderPresets) {
+      for (const model of provider.modelCatalog ?? []) {
+        expect(
+          model.reasoning,
+          `missing reasoning capability for ${provider.name}/${model.model}`,
+        ).toBeDefined();
+      }
+    }
+  });
+
+  it.each([
+    ["Kimi", "kimi-k2.7-code", "thinking"],
+    ["Bailian", "qwen3-coder-plus", "enable_thinking"],
+    ["MiniMax", "MiniMax-M3", "reasoning_split"],
+    ["Xiaomi MiMo", "mimo-v2.5-pro", "thinking"],
+    ["SiliconFlow", "Pro/MiniMaxAI/MiniMax-M2.7", "enable_thinking"],
+  ])(
+    "declares boolean-only reasoning without fake efforts for %s/%s",
+    (providerName, modelName, parameter) => {
+      expect(presetModel(providerName, modelName).reasoning).toEqual(
+        expect.objectContaining({
+          supported: true,
+          supportedEfforts: [],
+          upstream: expect.objectContaining({
+            format: "boolean",
+            parameter,
+          }),
+        }),
+      );
+      expect(presetModel(providerName, modelName).reasoning).not.toHaveProperty(
+        "defaultEffort",
+      );
+    },
+  );
+
   it("declares DeepSeek V4 official efforts", () => {
     expect(presetModel("DeepSeek", "deepseek-v4-flash").reasoning).toEqual(
       expect.objectContaining({

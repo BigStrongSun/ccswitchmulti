@@ -244,6 +244,8 @@ export interface ProviderMeta {
   codexFastMode?: boolean;
   // Codex Responses -> Chat Completions reasoning capability metadata
   codexChatReasoning?: CodexChatReasoning;
+  // Stable CCSwitchMulti preset identity used to resolve maintained model capabilities.
+  codexPresetId?: string;
   // Codex 单供应商模型目录是否投射为 /model 菜单映射；关闭时 modelCatalog 只作为目录/上下文元数据保存。
   codexLocalModelMapping?: boolean;
   // Codex -> Anthropic provider options.

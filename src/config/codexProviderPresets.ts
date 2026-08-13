@@ -13,6 +13,9 @@ import type { PresetTheme } from "./claudeProviderPresets";
 
 export interface CodexProviderPreset {
   name: string;
+  // Stable persistence identity; unlike the UI's codex-N index this must not
+  // change when presets are inserted or reordered.
+  presetKey?: string;
   nameKey?: string; // i18n key for localized display name
   websiteUrl: string;
   // 第三方供应商可提供单独的获取 API Key 链接
@@ -104,6 +107,41 @@ base_url = ${tomlString(baseUrl)}
 wire_api = "responses"`;
 }
 
+const unsupportedBuiltinReasoning: CodexModelReasoningCapability = {
+  supported: false,
+  supportedEfforts: [],
+  disableAllowed: false,
+  upstream: { format: "none", parameter: "none" },
+  source: "builtin",
+};
+
+function booleanBuiltinReasoning(
+  parameter: "thinking" | "enable_thinking" | "reasoning_split",
+  outputFormat: "reasoning_content" | "reasoning_details",
+): CodexModelReasoningCapability {
+  return {
+    supported: true,
+    supportedEfforts: [],
+    disableAllowed: true,
+    upstream: { format: "boolean", parameter },
+    outputFormat,
+    source: "builtin",
+  };
+}
+
+const thinkingBooleanReasoning = booleanBuiltinReasoning(
+  "thinking",
+  "reasoning_content",
+);
+const enableThinkingBooleanReasoning = booleanBuiltinReasoning(
+  "enable_thinking",
+  "reasoning_content",
+);
+const reasoningSplitBooleanReasoning = booleanBuiltinReasoning(
+  "reasoning_split",
+  "reasoning_details",
+);
+
 function modelCatalog(
   models: Array<
     | string
@@ -129,7 +167,7 @@ function modelCatalog(
 ): CodexCatalogModel[] {
   return models.map((entry) =>
     typeof entry === "string"
-      ? { model: entry }
+      ? { model: entry, reasoning: unsupportedBuiltinReasoning }
       : {
           model: entry.model,
           displayName: entry.displayName,
@@ -137,7 +175,7 @@ function modelCatalog(
           ...(entry.inputModalities
             ? { inputModalities: entry.inputModalities }
             : {}),
-          ...(entry.reasoning ? { reasoning: entry.reasoning } : {}),
+          reasoning: entry.reasoning ?? unsupportedBuiltinReasoning,
           ...(entry.textOnly !== undefined ? { textOnly: entry.textOnly } : {}),
           ...(entry.supportsImage !== undefined
             ? { supportsImage: entry.supportsImage }
@@ -252,11 +290,13 @@ export const codexProviderPresets: CodexProviderPreset[] = [
         model: "kimi-k2.7-code",
         displayName: "Kimi K2.7 Code",
         contextWindow: 262144,
+        reasoning: thinkingBooleanReasoning,
       },
       {
         model: "kimi-k3",
         displayName: "Kimi K3",
         contextWindow: 1048576,
+        reasoning: thinkingBooleanReasoning,
       },
     ]),
     codexChatReasoning: {
@@ -289,6 +329,7 @@ export const codexProviderPresets: CodexProviderPreset[] = [
         model: "kimi-for-coding",
         displayName: "Kimi For Coding",
         contextWindow: 262144,
+        reasoning: thinkingBooleanReasoning,
       },
     ]),
     codexChatReasoning: {
@@ -676,6 +717,7 @@ requires_openai_auth = true`,
         model: "Pro/MiniMaxAI/MiniMax-M2.7",
         displayName: "Pro / MiniMax M2.7",
         contextWindow: 200000,
+        reasoning: enableThinkingBooleanReasoning,
       },
     ]),
     category: "aggregator",
@@ -701,6 +743,7 @@ requires_openai_auth = true`,
         model: "MiniMaxAI/MiniMax-M2.7",
         displayName: "MiniMax M2.7",
         contextWindow: 200000,
+        reasoning: enableThinkingBooleanReasoning,
       },
     ]),
     category: "aggregator",
@@ -1057,6 +1100,7 @@ wire_api = "responses"`,
   },
   {
     name: "DeepSeek",
+    presetKey: "deepseek",
     websiteUrl: "https://platform.deepseek.com",
     apiKeyUrl: "https://platform.deepseek.com/api_keys",
     auth: generateThirdPartyAuth(""),
@@ -1101,6 +1145,7 @@ wire_api = "responses"`,
   },
   {
     name: "Zhipu GLM",
+    presetKey: "zhipu-glm-cn",
     websiteUrl: "https://open.bigmodel.cn",
     apiKeyUrl: "https://www.bigmodel.cn/claude-code?ic=RRVJPB5SII",
     auth: generateThirdPartyAuth(""),
@@ -1136,6 +1181,7 @@ wire_api = "responses"`,
   },
   {
     name: "Zhipu GLM en",
+    presetKey: "zhipu-glm-en",
     websiteUrl: "https://z.ai",
     apiKeyUrl: "https://z.ai/subscribe?ic=8JVLJQFSKB",
     auth: generateThirdPartyAuth(""),
@@ -1212,6 +1258,7 @@ wire_api = "responses"`,
         model: "qwen3-coder-plus",
         displayName: "Qwen3 Coder Plus",
         contextWindow: 1048576,
+        reasoning: enableThinkingBooleanReasoning,
       },
     ]),
     category: "cn_official",
@@ -1264,6 +1311,7 @@ wire_api = "responses"`,
   },
   {
     name: "StepFun",
+    presetKey: "stepfun-cn",
     websiteUrl: "https://platform.stepfun.com/step-plan",
     apiKeyUrl: "https://platform.stepfun.com/interface-key",
     auth: generateThirdPartyAuth(""),
@@ -1300,6 +1348,7 @@ wire_api = "responses"`,
   },
   {
     name: "StepFun en",
+    presetKey: "stepfun-en",
     websiteUrl: "https://platform.stepfun.ai/step-plan",
     apiKeyUrl: "https://platform.stepfun.ai/interface-key",
     auth: generateThirdPartyAuth(""),
@@ -1414,6 +1463,7 @@ wire_api = "responses"`,
         inputModalities: ["text", "image"],
         baseInstructions:
           "You are Codex, a coding agent based on MiniMax-M3. You and the user share the same workspace and collaborate to achieve the user's goals.",
+        reasoning: reasoningSplitBooleanReasoning,
       },
     ]),
     category: "cn_official",
@@ -1449,6 +1499,7 @@ wire_api = "responses"`,
         inputModalities: ["text", "image"],
         baseInstructions:
           "You are Codex, a coding agent based on MiniMax-M3. You and the user share the same workspace and collaborate to achieve the user's goals.",
+        reasoning: reasoningSplitBooleanReasoning,
       },
     ]),
     category: "cn_official",
@@ -1504,6 +1555,7 @@ wire_api = "responses"`,
         inputModalities: ["text"],
         baseInstructions:
           "You are MiMo, an AI assistant developed by Xiaomi. Today's date: {date} {week}. Your knowledge cutoff date is December 2024.",
+        reasoning: thinkingBooleanReasoning,
       },
       {
         model: "mimo-v2.5",
@@ -1512,6 +1564,7 @@ wire_api = "responses"`,
         inputModalities: ["text", "image"],
         baseInstructions:
           "You are MiMo, an AI assistant developed by Xiaomi. Today's date: {date} {week}. Your knowledge cutoff date is December 2024.",
+        reasoning: thinkingBooleanReasoning,
       },
     ]),
     category: "cn_official",
@@ -1541,6 +1594,7 @@ wire_api = "responses"`,
         inputModalities: ["text"],
         baseInstructions:
           "You are MiMo, an AI assistant developed by Xiaomi. Today's date: {date} {week}. Your knowledge cutoff date is December 2024.",
+        reasoning: thinkingBooleanReasoning,
       },
       {
         model: "mimo-v2.5",
@@ -1549,6 +1603,7 @@ wire_api = "responses"`,
         inputModalities: ["text", "image"],
         baseInstructions:
           "You are MiMo, an AI assistant developed by Xiaomi. Today's date: {date} {week}. Your knowledge cutoff date is December 2024.",
+        reasoning: thinkingBooleanReasoning,
       },
     ]),
     category: "cn_official",
@@ -1587,6 +1642,7 @@ wire_api = "responses"`,
   },
   {
     name: "xAI (Grok)",
+    presetKey: "xai-grok",
     websiteUrl: "https://x.ai/api",
     apiKeyUrl: "https://console.x.ai",
     auth: generateThirdPartyAuth(""),
@@ -1612,6 +1668,7 @@ wire_api = "responses"`,
   },
   {
     name: "xAI (Grok) OAuth",
+    presetKey: "xai-grok-oauth",
     websiteUrl: "https://x.ai/grok",
     auth: generateThirdPartyAuth(""),
     // 托管 OAuth：真实 token 由本地代理按请求注入，CodexAdapter 硬定向

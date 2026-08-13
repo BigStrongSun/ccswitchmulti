@@ -465,6 +465,7 @@ function ProviderFormFull({
   );
   const [activePreset, setActivePreset] = useState<{
     id: string;
+    presetKey?: string;
     category?: ProviderCategory;
     isPartner?: boolean;
     partnerPromotionKey?: string;
@@ -925,6 +926,30 @@ function ProviderFormFull({
     )?.preset;
     return preset && "providerType" in preset ? preset.providerType : undefined;
   }, [presetEntries, selectedPresetId]);
+
+  const codexPresetBaseline = useMemo(() => {
+    if (appId !== "codex") return [];
+    const selectedPreset = selectedPresetId
+      ? (presetEntries.find((entry) => entry.id === selectedPresetId)
+          ?.preset as CodexProviderPreset | undefined)
+      : undefined;
+    const identity =
+      selectedPreset?.presetKey ?? initialData?.meta?.codexPresetId;
+    if (!identity) return [];
+    const preset = identity.startsWith("codex-")
+      ? (presetEntries.find((entry) => entry.id === identity)?.preset as
+          | CodexProviderPreset
+          | undefined)
+      : codexProviderPresets.find(
+          (candidate) => candidate.presetKey === identity,
+        );
+    return preset?.modelCatalog ?? [];
+  }, [
+    appId,
+    initialData?.meta?.codexPresetId,
+    presetEntries,
+    selectedPresetId,
+  ]);
 
   const {
     templateValues,
@@ -1817,6 +1842,12 @@ function ProviderFormFull({
               models: codexCatalogModels,
             })
           : undefined,
+      codexPresetId:
+        appId === "codex"
+          ? selectedPresetId === "custom"
+            ? undefined
+            : (activePreset?.presetKey ?? initialData?.meta?.codexPresetId)
+          : undefined,
       codexLocalModelMapping:
         appId === "codex" && category !== "official"
           ? codexTakeoverEnabled
@@ -2053,6 +2084,10 @@ function ProviderFormFull({
 
     setActivePreset({
       id: value,
+      presetKey:
+        appId === "codex"
+          ? (entry.preset as CodexProviderPreset).presetKey
+          : undefined,
       category: entry.preset.category,
       isPartner: entry.preset.isPartner,
       partnerPromotionKey: entry.preset.partnerPromotionKey,
@@ -2607,6 +2642,7 @@ function ProviderFormFull({
                 promptCacheRouting={promptCacheRouting}
                 onPromptCacheRoutingChange={setPromptCacheRouting}
                 catalogModels={codexCatalogModels}
+                presetCatalogModels={codexPresetBaseline}
                 onCatalogModelsChange={setCodexCatalogModels}
                 spawnAgentModels={codexSpawnAgentModels}
                 onSpawnAgentModelsChange={setCodexSpawnAgentModels}
