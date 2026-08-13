@@ -191,6 +191,10 @@ function extractCodexCatalogModels(modelCatalog: any): CodexCatalogModel[] {
               typeof item?.context_window === "number"
             ? item.context_window
             : undefined;
+      const reasoning =
+        item?.reasoning && typeof item.reasoning === "object"
+          ? item.reasoning
+          : undefined;
 
       return {
         model: typeof item?.model === "string" ? item.model : "",
@@ -202,6 +206,7 @@ function extractCodexCatalogModels(modelCatalog: any): CodexCatalogModel[] {
           : {}),
         ...(inputModalities ? { inputModalities } : {}),
         ...(baseInstructions ? { baseInstructions } : {}),
+        ...(reasoning ? { reasoning } : {}),
       };
     })
     .filter((item: CodexCatalogModel) => item.model.trim());

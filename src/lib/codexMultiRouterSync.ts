@@ -142,16 +142,10 @@ function readStrictProviderCatalogModels(
           ? { context_window: model.context_window }
           : {}),
         ...(model.inputModalities
-          ? {
-              inputModalities: model.inputModalities as Array<"text" | "image">,
-            }
+          ? { inputModalities: model.inputModalities }
           : {}),
         ...(model.input_modalities
-          ? {
-              input_modalities: model.input_modalities as Array<
-                "text" | "image"
-              >,
-            }
+          ? { input_modalities: model.input_modalities }
           : {}),
         ...(model.textOnly !== undefined ? { textOnly: model.textOnly } : {}),
         ...(model.text_only !== undefined
@@ -164,6 +158,7 @@ function readStrictProviderCatalogModels(
           ? { supports_image: model.supports_image }
           : {}),
         ...(model.vision !== undefined ? { vision: model.vision } : {}),
+        ...(model.reasoning ? { reasoning: model.reasoning } : {}),
       } satisfies CodexCatalogModel;
     })
     .filter((model): model is CodexCatalogModel => Boolean(model));
