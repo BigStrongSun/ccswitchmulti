@@ -9787,6 +9787,59 @@ openai_base_url = "http://127.0.0.1:15721/v1"
     }
 
     #[test]
+    fn codex_model_catalog_projects_declared_glm_reasoning_capability() {
+        let settings = json!({
+            "modelCatalog": { "models": [{
+                "model": "glm-5.2",
+                "reasoning": {
+                    "supported": true,
+                    "supportedEfforts": ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+                    "defaultEffort": "max",
+                    "disableAllowed": true,
+                    "upstream": { "format": "string", "parameter": "reasoning_effort" }
+                }
+            }]}
+        });
+        let catalog = codex_model_catalog_from_settings(
+            &settings,
+            "model = \"glm-5.2\"",
+            CodexCatalogToolProfile::ProxyChat,
+        )
+        .expect("build catalog")
+        .expect("catalog");
+        let entry = &catalog["models"][0];
+        let efforts = entry["supported_reasoning_levels"]
+            .as_array()
+            .expect("levels")
+            .iter()
+            .filter_map(|level| level["effort"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(entry["default_reasoning_level"], "max");
+        assert_eq!(
+            efforts,
+            vec!["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+        );
+    }
+
+    #[test]
+    fn unknown_third_party_model_does_not_inherit_template_reasoning() {
+        let settings = json!({
+            "modelCatalog": { "models": [{ "model": "private-model" }] }
+        });
+        let catalog = codex_model_catalog_from_settings(
+            &settings,
+            "model = \"private-model\"",
+            CodexCatalogToolProfile::ProxyChat,
+        )
+        .expect("build catalog")
+        .expect("catalog");
+        let entry = &catalog["models"][0];
+        assert!(entry.get("default_reasoning_level").is_none());
+        assert!(entry.get("supported_reasoning_levels").is_none());
+        assert!(entry.get("supportedReasoningEfforts").is_none());
+    }
+
+    #[test]
     fn codex_agent_defaults_migrate_legacy_alias_without_overwriting_user_limits() {
         let specs = vec![CodexCatalogModelSpec {
             model: "qwen3.6".to_string(),
