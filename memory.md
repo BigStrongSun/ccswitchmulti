@@ -1,5 +1,14 @@
 # CC Switch Repository Memory
 
+## 2026-08-13 Codex 内置预设推理能力统一实现
+
+- CCSwitchMulti 的 Codex 内置 Provider 现以 `modelCatalog.models[].reasoning` 作为逐模型能力契约；能力维度包含支持档位、默认档位、是否允许关闭、上游参数形态、effortMap、输出格式和来源。首批维护 DeepSeek V4 Flash/Pro、Grok 4.5、GLM-5.2、Step 3.7/3.5/2603；未知第三方模型不再继承 GPT/Native Responses 通用档位。
+- 同一能力对象由 Rust resolver 校验后投影到外部 catalog 的 snake_case、Desktop camelCase aliases 和 `config.toml` inline models，并驱动 Responses→Chat 请求转换。GLM 的兼容档位映射到 none/high/max；Step 2603 拒绝未声明的 medium；DeepSeek 使用 low/high/max 且默认 high。旧 Provider 仅在缺少模型级能力时保留 `codexChatReasoning` legacy fallback。
+- MultiRouter 向导、Provider 更新同步和已有 Provider 表单读回都保留 reasoning；visible alias 与 upstream model 均可解析。`codexSpawnAgentCandidates` 不再维护第二份 `CodexCatalogModel` 接口，统一复用 `src/types.ts`，避免新增能力字段在同步中被静默剥离。
+- Provider 模型目录的“Codex 推理能力”高级区域支持 JSON 覆盖：内置值标为 `builtin`，编辑后标为 `user`，空白/清除进入保守未声明；重新选择内置预设恢复维护值。保存前拒绝默认值不在列表、不可关闭却含 none、以及显式 effortMap 覆盖不完整的配置，不再静默回退。
+- 新鲜验证：Rust library `2842 passed / 0 failed / 2 ignored`；完整前端首次为 `115 files passed / 1 App integration file flaky, 830 passed / 2 timed out`，同一既有不稳定文件独立重跑 `8/8` 通过；`cargo check --lib`、`pnpm typecheck`、rustfmt、changed-file Prettier 和 `git diff --check` 通过。Rust 只保留既有 `openai_cache_read_tokens` dead-code warning；前端全集必须继续排除 `.worktrees/**` 并串行文件执行。
+- 设计与计划分别位于 `docs/superpowers/specs/2026-08-13-codex-preset-reasoning-capabilities-design.md` 和 `docs/superpowers/plans/2026-08-13-codex-preset-reasoning-capabilities.md`。官方事实由 Codex 内置 Web Search 与 Matrix WebSearch 独立链交叉核对；Matrix 索引无结果但直接读取 xAI/GLM/Step 官方页面成功。Qwen 等随模型/API 变化的能力证据不足时继续采用保守未声明，不写成厂商级通用枚举。
+
 ## 2026-08-13 DeepSeek V4 reasoning effort 目录污染根修
 
 - 用户反馈 MultiRouter 保存后会把 `deepseek-v4-flash` / `deepseek-v4-pro` 的官方 `low/high/max`、默认 `high` 覆盖为 `low/medium/high/xhigh`、默认 `medium`。根因不是 DeepSeek 官方模板缺失：`src-tauri/src/resources/codex_deepseek_catalog_template.json` 本来就是正确的官方目录；问题只发生在 MultiRouter 的 `ProxyChat` 聚合目录，它克隆通用 GPT 模板并把同一组全局 effort 枚举套给所有第三方模型。
@@ -247,6 +256,7 @@
 - 账号池原有 `pool_cooldowns`、`pool_session_bindings`、`pool_remaining_percent`、`pool_quota_checked_at` 四张独立表已迁入 `src-tauri/src/proxy/providers/codex_oauth_pool.rs` 的单一 `CodexPoolRuntimeState`，manager 只保留一把 `Arc<tokio::sync::Mutex<_>>`。候选读取、quota 快照、固定 cooldown、binding 和 lifecycle purge 现在在同一临界区完成，不再由调用方分别操作四把锁。
 - `remove_account`、`clear_auth`、明确 `invalid_grant` 隔离、同 ID 重新登录和 pool policy 禁用/移除都经过统一 purge/reconcile；重新启用或重登不会恢复旧 binding、cooldown 或 quota 快照。`normalized_pool_policy` 和只读投影也只接受 `CodexAccountData::is_usable()` 的托管账号，已持久化 `invalidated_at` 的账号不再进入候选。
 - TDD 证据：生产修改前，删除后重加、invalidated、禁用后重启、clear 后重登四个测试均因旧运行态残留而断言失败；统一运行态接入后四项与原 `account_pool_honors_order_reserve_cooldown_and_session_binding` 均通过。本提交刻意仍使用 generation `0`；24 小时 TTL、2048 LRU 和凭据代际校验由下一个 TDD 提交实现。
+
 ## 2026-08-02 Codex 超时与重试放大修复
 
 - 现象：OpenClash 节点 `🇺🇸美国2-IEPL-GPT` 丢 6.6MB POST 时，CCSM 把“可能已在途”的转发/超时错误按 502/504 返回，Codex 默认 `stream_max_retries=5`、`request_max_retries=4` 又自动重发整轮采样请求，造成流量和时延放大。
@@ -737,6 +747,7 @@
 - 回归测试新增 `test_codex_subagent_usage_stats_repairs_zero_token_db_rows_from_rollout`：模拟 `gpt-5.5` 子 Agent 已有两条 `codex_session` 请求但 token 全 0，同时 rollout JSONL 有 `total_token_usage`，最终 agent/model 统计必须显示 1550 tokens 且 request_count 保持 2。
 - 验证命令：`cargo fmt --manifest-path src-tauri/Cargo.toml --check`、`cargo test --manifest-path src-tauri/Cargo.toml codex_subagent_usage_stats --lib`、`cargo test --manifest-path src-tauri/Cargo.toml test_sync_codex_subagent_uses_rollout_thread_id --lib`、`git diff --check`。
 - 另一个相邻但未纳入本次 token 修复的发现：`gpt-5.3-codex-spark` 等 spark 变体如果 token 已有但 cost 为 0，可能是 `model_pricing` 种子缺少对应模型定价和历史成本回填，应该作为单独成本统计任务处理，避免和 token 修复混在一个提交里。
+
 ## 2026-07-07 Codex Hosted Web Search Bridge MVP
 
 - 本轮在隔离 worktree `C:\Users\sunda\.codex\worktrees\aec9\LLMservice\cc-switch` 的 `codex/hosted-tool-bridge` 分支实现 Phase 1 MVP：Codex `/v1/responses` 入站的 hosted `{ "type": "web_search" }` 不再原样交给第三方 Chat 上游，而是在 `transform_codex_chat.rs` 中映射成普通 function tool `web_search(query,count)`；`tool_search` 仍保持 Codex client-side tool 语义，二者不能混淆。
@@ -2979,6 +2990,7 @@
 - 收尾运行态复核时，`127.0.0.1:15721` 已变成 PID `71064` 的已安装 `3.19.1-10`，安装目录文件 LastWriteTime 为 `16:20:35`、进程启动于 `16:22:55`，早于本轮最终成功打包完成时间 `16:42:43`，也早于发布脚本提交；本轮没有执行 installer、AppData 复制或进程重启。该已安装 EXE 的 SHA256 为 `05F3A6DE4F70518E72D8B6B2DC1E0CEDB29AFDA37DD9CF76D2E4D1CB462B353C`，与最终验收 raw EXE 不同，因此仍应由用户用最终目录内 setup 自行重装，不能把当前运行版当作最终包安装验收。现有本地证据无法恢复已退出 parent PID `60456`，故不能断言是谁触发了 16:20 的替换。
 - 首轮打包曾在 NSIS 阶段触发 Windows OS 32。更深根因不是 Rust/Tauri 编译失败，而是旧 `local-release-pipeline.ps1` 在竞争者获取锁失败后仍由 `finally` 无条件删除活跃流水线的锁，使第三条流水线能并发进入并争写 `target/release/cc-switch.exe`。提交 `906a2b7b` 改为原子 `CreateNew`、每进程 token 和 owner-only release；Windows PowerShell 5.1 回归确认竞争者失败后锁仍属原 owner，错误 token 不能释放，owner 可以释放。
 - 带重复反斜杠的 `ReleaseRoot` 还暴露了 `SHA256SUMS.txt` 相对路径按未经规范化字符串长度截取的问题。提交 `434541de` 在两个 checksum writer 中先 `Path.GetFullPath` 再截取，保持 PowerShell 5.1 兼容；实际 duplicated-separator `-SkipBuild` 导出得到 15 条清单、0 条无效相对路径。
+
 # 2026-08-07 Codex Desktop 国际化占位符原样显示根修与 3.19.1-12 本地交付
 
 - 用户截图中的 `已处理 {time}`、`正在运行 {command}`、`<projectSelect>{projectName}</projectSelect>` 不是 Codex 中文语言包漏翻译，也不是用户项目数据问题。当前本机同样可复现：Appx `OpenAI.Codex_26.730.8199.0`（包内版本 `26.730.61639`）的 renderer DOM 在 `lang=zh-CN` 下实际包含 `Worked for {time}`。
