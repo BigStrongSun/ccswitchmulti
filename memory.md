@@ -1,5 +1,14 @@
 # CC Switch Repository Memory
 
+## 2026-08-13 DeepSeek V4 reasoning effort 目录污染根修
+
+- 用户反馈 MultiRouter 保存后会把 `deepseek-v4-flash` / `deepseek-v4-pro` 的官方 `low/high/max`、默认 `high` 覆盖为 `low/medium/high/xhigh`、默认 `medium`。根因不是 DeepSeek 官方模板缺失：`src-tauri/src/resources/codex_deepseek_catalog_template.json` 本来就是正确的官方目录；问题只发生在 MultiRouter 的 `ProxyChat` 聚合目录，它克隆通用 GPT 模板并把同一组全局 effort 枚举套给所有第三方模型。
+- `src-tauri/src/codex_config.rs` 新增按模型识别的 reasoning capability 单一源。DeepSeek V4 Flash/Pro 无论经官方直连还是 MultiRouter 生成，都强制投影 `low/high/max`、默认 `high`，并同步覆盖外部 JSON catalog 的 `supported_reasoning_levels` / `supportedReasoningEfforts`，以及 `config.toml` inline models 的 `supported_reasoning_levels` / `supported_reasoning_efforts` / `supportedReasoningEfforts` 与三个默认字段。
+- 同源修正托管 custom agent role：`deepseek-flash.toml` 不再硬编码非法的 `medium`，而是与模型默认一致写 `high`；`deepseek-pro` 保持 `high`。Qwen 等其它模型仍维持原策略，没有被全局改成 DeepSeek 枚举。
+- 参数边界：Codex 模型目录决定 UI/运行时允许选择哪些 effort 以及省略显式配置时的默认值；Codex 随后在 Responses 请求体发送 `reasoning: { effort: ... }`。DeepSeek 网关/模型实际解释该值并分配 High 或独立 Think Max 推理模式，因此这是“Codex 选择和传参、模型供应商执行”的两段式能力，不是 Codex 本地模拟，也不是各模型可接受任意通用档位。
+- 官方交叉验证：DeepSeek 官方 Codex 集成页的完整 `models.json` 对两模型都列出 `low/high/max`、默认 `high`；官方 Copilot 集成页列出 None/High/Max 且 High 默认。OpenAI 官方文档表明 `reasoning.effort` 是请求字段且不同 OpenAI 模型支持集合也不同；本地 `codex-official` 源码测试确认 catalog 默认 effort 会写入请求体的 `reasoning.effort`。Codex 内置 Web 与 Matrix WebSearch 两条独立链均成功打开 DeepSeek 官方资料，结论一致。
+- TDD 证据：新增测试先在旧实现真实失败（catalog 得到 `medium`，Flash role 仍为 `medium`），修复后 DeepSeek 定向 29/29 通过，inline 三变体回归通过，完整 Rust library `2833 passed / 0 failed / 2 ignored`。仅保留既有 `openai_cache_read_tokens` dead-code warning。
+
 ## 2026-08-09 Codex Sub-Agent V1/V2 双模式设置设计
 
 - 用户确认 MultiRouter 应同时保留 `Sub-Agent V1（兼容）` 与 `Sub-Agent V2（推荐）` 两套配置，并由每个方案选择当前生效版本；同一方案、同一会话只运行一种协议。新方案和缺少版本字段的旧方案默认 V2，现有 `modelCatalog.spawnAgentModels` 保留为 V1 direct override 前五顺序，切换版本不删除另一套数据。
