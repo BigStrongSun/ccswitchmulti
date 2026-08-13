@@ -6790,6 +6790,87 @@ openai_base_url = "http://127.0.0.1:15721/v1"
     }
 
     #[test]
+    fn codex_model_catalog_projects_grok_reasoning_without_none() {
+        let settings = json!({
+            "modelCatalog": { "models": [{
+                "model": "grok-4.5",
+                "reasoning": {
+                    "supported": true,
+                    "supportedEfforts": ["low", "medium", "high"],
+                    "defaultEffort": "high",
+                    "disableAllowed": false,
+                    "upstream": { "format": "reasoning_object", "parameter": "reasoning.effort" }
+                }
+            }]}
+        });
+        let catalog = codex_model_catalog_from_settings(
+            &settings,
+            "model = \"grok-4.5\"",
+            CodexCatalogToolProfile::NativeResponses,
+        )
+        .expect("build catalog")
+        .expect("catalog");
+        let entry = &catalog["models"][0];
+        let efforts = entry["supported_reasoning_levels"]
+            .as_array()
+            .expect("levels")
+            .iter()
+            .filter_map(|level| level["effort"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(entry["default_reasoning_level"], "high");
+        assert_eq!(efforts, vec!["low", "medium", "high"]);
+        assert!(!efforts.contains(&"none"));
+    }
+
+    #[test]
+    fn codex_model_catalog_projects_distinct_step_model_efforts() {
+        let settings = json!({
+            "modelCatalog": { "models": [
+                {
+                    "model": "step-3.7-flash",
+                    "reasoning": {
+                        "supported": true,
+                        "supportedEfforts": ["low", "medium", "high"],
+                        "defaultEffort": "medium",
+                        "disableAllowed": false,
+                        "upstream": { "format": "string", "parameter": "reasoning_effort" }
+                    }
+                },
+                {
+                    "model": "step-3.5-flash-2603",
+                    "reasoning": {
+                        "supported": true,
+                        "supportedEfforts": ["low", "high"],
+                        "defaultEffort": "high",
+                        "disableAllowed": false,
+                        "upstream": { "format": "string", "parameter": "reasoning_effort" }
+                    }
+                }
+            ]}
+        });
+        let catalog = codex_model_catalog_from_settings(
+            &settings,
+            "model = \"step-3.7-flash\"",
+            CodexCatalogToolProfile::ProxyChat,
+        )
+        .expect("build catalog")
+        .expect("catalog");
+        let models = catalog["models"].as_array().expect("models");
+        let efforts = |index: usize| {
+            models[index]["supported_reasoning_levels"]
+                .as_array()
+                .expect("levels")
+                .iter()
+                .filter_map(|level| level["effort"].as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(efforts(0), vec!["low", "medium", "high"]);
+        assert_eq!(models[0]["default_reasoning_level"], "medium");
+        assert_eq!(efforts(1), vec!["low", "high"]);
+        assert_eq!(models[1]["default_reasoning_level"], "high");
+    }
+
+    #[test]
     fn unknown_third_party_model_does_not_inherit_template_reasoning() {
         let settings = json!({
             "modelCatalog": { "models": [{ "model": "private-model" }] }
