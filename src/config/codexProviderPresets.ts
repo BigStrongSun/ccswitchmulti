@@ -6,6 +6,7 @@ import type {
   CodexApiFormat,
   CodexCatalogModel,
   CodexChatReasoning,
+  CodexModelReasoningCapability,
   PromptCacheRoutingMode,
 } from "../types";
 import type { PresetTheme } from "./claudeProviderPresets";
@@ -122,6 +123,7 @@ function modelCatalog(
         // Vendor's OFFICIAL base_instructions; omit to inherit the neutral
         // template default. Required by Codex, so the backend always emits one.
         baseInstructions?: string;
+        reasoning?: CodexModelReasoningCapability;
       }
   >,
 ): CodexCatalogModel[] {
@@ -135,6 +137,7 @@ function modelCatalog(
           ...(entry.inputModalities
             ? { inputModalities: entry.inputModalities }
             : {}),
+          ...(entry.reasoning ? { reasoning: entry.reasoning } : {}),
           ...(entry.textOnly !== undefined ? { textOnly: entry.textOnly } : {}),
           ...(entry.supportsImage !== undefined
             ? { supportsImage: entry.supportsImage }
@@ -149,6 +152,70 @@ function modelCatalog(
         },
   );
 }
+
+const deepSeekV4Reasoning: CodexModelReasoningCapability = {
+  supported: true,
+  supportedEfforts: ["low", "high", "max"],
+  defaultEffort: "high",
+  disableAllowed: false,
+  upstream: { format: "reasoning_object", parameter: "reasoning.effort" },
+  source: "builtin",
+};
+
+const grok45Reasoning: CodexModelReasoningCapability = {
+  supported: true,
+  supportedEfforts: ["low", "medium", "high"],
+  defaultEffort: "high",
+  disableAllowed: false,
+  upstream: { format: "reasoning_object", parameter: "reasoning.effort" },
+  source: "builtin",
+};
+
+const glm52Reasoning: CodexModelReasoningCapability = {
+  supported: true,
+  supportedEfforts: [
+    "none",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+  ],
+  defaultEffort: "max",
+  disableAllowed: true,
+  upstream: {
+    format: "string",
+    parameter: "reasoning_effort",
+    effortMap: {
+      none: "none",
+      minimal: "none",
+      low: "high",
+      medium: "high",
+      high: "high",
+      xhigh: "max",
+      max: "max",
+    },
+  },
+  outputFormat: "reasoning_content",
+  source: "builtin",
+};
+
+const stepThreeLevelReasoning: CodexModelReasoningCapability = {
+  supported: true,
+  supportedEfforts: ["low", "medium", "high"],
+  defaultEffort: "medium",
+  disableAllowed: false,
+  upstream: { format: "string", parameter: "reasoning_effort" },
+  outputFormat: "reasoning",
+  source: "builtin",
+};
+
+const step2603Reasoning: CodexModelReasoningCapability = {
+  ...stepThreeLevelReasoning,
+  supportedEfforts: ["low", "high"],
+  defaultEffort: "high",
+};
 
 export const codexProviderPresets: CodexProviderPreset[] = [
   {
@@ -1014,6 +1081,7 @@ wire_api = "responses"`,
         inputModalities: ["text"],
         textOnly: true,
         supportsImage: false,
+        reasoning: deepSeekV4Reasoning,
       },
       // 官方预计 2026-08 初开通 pro 的 Codex 集成（官方 models.json 已含该条目），
       // 在那之前切到 pro 会上游报错
@@ -1024,6 +1092,7 @@ wire_api = "responses"`,
         inputModalities: ["text"],
         textOnly: true,
         supportsImage: false,
+        reasoning: deepSeekV4Reasoning,
       },
     ]),
     category: "cn_official",
@@ -1050,6 +1119,7 @@ wire_api = "responses"`,
         inputModalities: ["text"],
         textOnly: true,
         supportsImage: false,
+        reasoning: glm52Reasoning,
       },
     ]),
     codexChatReasoning: {
@@ -1084,6 +1154,7 @@ wire_api = "responses"`,
         inputModalities: ["text"],
         textOnly: true,
         supportsImage: false,
+        reasoning: glm52Reasoning,
       },
     ]),
     codexChatReasoning: {
@@ -1208,16 +1279,19 @@ wire_api = "responses"`,
         model: "step-3.7-flash",
         displayName: "Step 3.7 Flash",
         contextWindow: 262144,
+        reasoning: stepThreeLevelReasoning,
       },
       {
         model: "step-3.5-flash-2603",
         displayName: "Step 3.5 Flash 2603",
         contextWindow: 262144,
+        reasoning: step2603Reasoning,
       },
       {
         model: "step-3.5-flash",
         displayName: "Step 3.5 Flash",
         contextWindow: 262144,
+        reasoning: stepThreeLevelReasoning,
       },
     ]),
     category: "cn_official",
@@ -1241,16 +1315,19 @@ wire_api = "responses"`,
         model: "step-3.7-flash",
         displayName: "Step 3.7 Flash",
         contextWindow: 262144,
+        reasoning: stepThreeLevelReasoning,
       },
       {
         model: "step-3.5-flash-2603",
         displayName: "Step 3.5 Flash 2603",
         contextWindow: 262144,
+        reasoning: step2603Reasoning,
       },
       {
         model: "step-3.5-flash",
         displayName: "Step 3.5 Flash",
         contextWindow: 262144,
+        reasoning: stepThreeLevelReasoning,
       },
     ]),
     category: "cn_official",
@@ -1526,6 +1603,7 @@ wire_api = "responses"`,
         contextWindow: 500000,
         supportsParallelToolCalls: true,
         inputModalities: ["text", "image"],
+        reasoning: grok45Reasoning,
       },
     ]),
     category: "third_party",
@@ -1549,6 +1627,7 @@ wire_api = "responses"`,
         contextWindow: 500000,
         supportsParallelToolCalls: true,
         inputModalities: ["text", "image"],
+        reasoning: grok45Reasoning,
       },
     ]),
     category: "third_party",
