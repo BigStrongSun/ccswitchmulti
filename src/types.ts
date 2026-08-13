@@ -285,6 +285,29 @@ export type CodexApiFormat =
   | "openai_messages"
   | "anthropic";
 
+export type CodexReasoningEffort =
+  | "none"
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max";
+
+export interface CodexModelReasoningCapability {
+  supported: boolean;
+  supportedEfforts: CodexReasoningEffort[];
+  defaultEffort?: CodexReasoningEffort;
+  disableAllowed: boolean;
+  upstream: {
+    format: "none" | "boolean" | "string" | "reasoning_object";
+    parameter: CodexChatThinkingParam | CodexChatEffortParam;
+    effortMap?: Partial<Record<CodexReasoningEffort, CodexReasoningEffort>>;
+  };
+  outputFormat?: CodexChatReasoningOutputFormat;
+  source?: "builtin" | "user" | "legacy";
+}
+
 export interface CodexCatalogModel {
   model: string;
   upstreamModel?: string;
@@ -301,6 +324,7 @@ export interface CodexCatalogModel {
   // Native Responses profile overrides for generated Codex model catalogs.
   supportsParallelToolCalls?: boolean;
   baseInstructions?: string;
+  reasoning?: CodexModelReasoningCapability;
 }
 
 export type CodexCacheMode =
