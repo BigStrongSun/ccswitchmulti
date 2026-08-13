@@ -20,4 +20,12 @@ for (const selector of [
   assert.doesNotMatch(rule, /background:[^;}]*transparent/, `${selector} 不能让页面网格透过正文表面`);
 }
 
+for (const selector of [".boundary", ".paper-dialog", ".vector", ".layers"]) {
+  assert.ok(css.includes(selector), `缺少新学术课件组件 ${selector}`);
+}
+assert.match(css, /\.paper-dialog[^}]*background:[^;}]*var\(--surface\)/s, "论文详情必须使用不透明主题表面");
+assert.match(css, /pre\{[^}]*font-size:12\.5px/s, "代码字号不得低于 12.5px");
+assert.match(css, /@media\(max-width:1100px\)[\s\S]*overflow-x:hidden/, "小窗口必须禁止横向溢出");
+assert.match(css, /:focus-visible/, "交互控件需要清晰键盘焦点");
+
 console.log("opaque content surfaces: ok");
