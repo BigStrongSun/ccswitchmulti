@@ -1881,6 +1881,18 @@ pub fn resolve_codex_chat_reasoning_config(
     provider: &Provider,
     body: &JsonValue,
 ) -> Option<CodexChatReasoningConfig> {
+    let requested_model = body
+        .get("model")
+        .and_then(JsonValue::as_str)
+        .map(ToString::to_string)
+        .or_else(|| codex_provider_upstream_model(provider))
+        .unwrap_or_default();
+    if let Some(capability) = super::codex_reasoning::resolve_reasoning_capability_from_settings(
+        &provider.settings_config,
+        &requested_model,
+    ) {
+        return Some(codex_chat_reasoning_config_from_capability(capability));
+    }
     let inferred = infer_codex_chat_reasoning_config(provider, body);
     if let Some(config) = provider
         .meta
@@ -1895,6 +1907,52 @@ pub fn resolve_codex_chat_reasoning_config(
     }
 
     inferred
+}
+
+fn codex_chat_reasoning_config_from_capability(
+    capability: super::codex_reasoning::CodexModelReasoningCapability,
+) -> CodexChatReasoningConfig {
+    let has_efforts = capability.supported && !capability.supported_efforts.is_empty();
+    let boolean_thinking = capability.upstream.format == "boolean";
+    CodexChatReasoningConfig {
+        supports_thinking: Some(capability.supported),
+        supports_effort: Some(has_efforts && !boolean_thinking),
+        thinking_param: Some(if boolean_thinking {
+            capability.upstream.parameter.clone()
+        } else if capability.disable_allowed {
+            "thinking".to_string()
+        } else {
+            "none".to_string()
+        }),
+        effort_param: Some(if has_efforts && !boolean_thinking {
+            capability.upstream.parameter
+        } else {
+            "none".to_string()
+        }),
+        effort_value_mode: Some(encode_codex_capability_effort_mode(
+            &capability.supported_efforts,
+            &capability.upstream.effort_map,
+        )),
+        min_output_tokens: None,
+        default_output_tokens: None,
+        output_format: capability.output_format,
+    }
+}
+
+fn encode_codex_capability_effort_mode(
+    supported_efforts: &[String],
+    effort_map: &std::collections::HashMap<String, String>,
+) -> String {
+    let allowed = supported_efforts.join(",");
+    let mappings = supported_efforts
+        .iter()
+        .map(|effort| {
+            let mapped = effort_map.get(effort).unwrap_or(effort);
+            format!("{effort}={mapped}")
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("capability|{allowed}|{mappings}")
 }
 
 /// 解析 Codex provider 当前请求应采用的缓存能力。
@@ -5387,6 +5445,33 @@ wire_api = "chat"
         assert_eq!(config.supports_effort, Some(true));
         assert_eq!(config.effort_param.as_deref(), Some("reasoning_effort"));
         assert_eq!(config.effort_value_mode.as_deref(), Some("deepseek"));
+    }
+
+    #[test]
+    fn declared_glm_capability_drives_request_mapping_config() {
+        let provider = create_provider(json!({
+            "modelCatalog": {"models": [{
+                "model": "glm-5.2",
+                "reasoning": {
+                    "supported": true,
+                    "supportedEfforts": ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+                    "defaultEffort": "max",
+                    "disableAllowed": true,
+                    "upstream": {
+                        "format": "string", "parameter": "reasoning_effort",
+                        "effortMap": {"none":"none","minimal":"none","low":"high","medium":"high","high":"high","xhigh":"max","max":"max"}
+                    },
+                    "outputFormat": "reasoning_content"
+                }
+            }]}
+        }));
+        let config = resolve_codex_chat_reasoning_config(&provider, &json!({"model":"glm-5.2"}))
+            .expect("reasoning config");
+        assert_eq!(config.effort_param.as_deref(), Some("reasoning_effort"));
+        assert!(config
+            .effort_value_mode
+            .as_deref()
+            .is_some_and(|mode| mode.contains("medium=high") && mode.contains("xhigh=max")));
     }
 
     #[test]

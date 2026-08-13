@@ -607,7 +607,7 @@ pub fn responses_to_chat_completions_with_reasoning_text_only_and_cache(
         }
     }
 
-    apply_reasoning_options(&mut result, &body, model, reasoning_config);
+    apply_reasoning_options(&mut result, &body, model, reasoning_config)?;
 
     let tools = tool_context.chat_tools();
     if !tools.is_empty() {
@@ -775,14 +775,14 @@ fn apply_reasoning_options(
     body: &Value,
     model: &str,
     config: Option<&CodexChatReasoningConfig>,
-) {
+) -> Result<(), ProxyError> {
     let Some(config) = config else {
         if super::transform::supports_reasoning_effort(model) {
             if let Some(effort) = body.pointer("/reasoning/effort") {
                 result["reasoning_effort"] = effort.clone();
             }
         }
-        return;
+        return Ok(());
     };
 
     let supports_effort = config.supports_effort.unwrap_or(false);
@@ -802,7 +802,7 @@ fn apply_reasoning_options(
     }
 
     let Some(reasoning_enabled) = reasoning_requested(body) else {
-        return;
+        return Ok(());
     };
 
     if supports_thinking {
@@ -844,18 +844,24 @@ fn apply_reasoning_options(
         if effort_param == "reasoning.effort" {
             result["reasoning"] = json!({ "effort": "none" });
         }
-        return;
+        return Ok(());
     }
 
     if !supports_effort {
-        return;
+        return Ok(());
     }
 
     let Some(effort) = body.pointer("/reasoning/effort").and_then(|v| v.as_str()) else {
-        return;
+        return Ok(());
     };
-    let Some(mapped) = map_reasoning_effort(effort, config.effort_value_mode.as_deref()) else {
-        return;
+    let effort_mode = config.effort_value_mode.as_deref();
+    let mapped = if effort_mode.is_some_and(|mode| mode.starts_with("capability|")) {
+        map_capability_reasoning_effort(effort, effort_mode.unwrap())?
+    } else {
+        let Some(mapped) = map_reasoning_effort(effort, config.effort_value_mode.as_deref()) else {
+            return Ok(());
+        };
+        mapped
     };
 
     match effort_param.as_str() {
@@ -872,6 +878,27 @@ fn apply_reasoning_options(
         }
         _ => {}
     }
+    Ok(())
+}
+
+fn map_capability_reasoning_effort<'a>(
+    effort: &'a str,
+    mode: &'a str,
+) -> Result<&'a str, ProxyError> {
+    let mut sections = mode.splitn(3, '|');
+    let _kind = sections.next();
+    let allowed = sections.next().unwrap_or_default();
+    let mappings = sections.next().unwrap_or_default();
+    if !allowed.split(',').any(|candidate| candidate == effort) {
+        return Err(ProxyError::TransformError(format!(
+            "reasoning effort `{effort}` is not supported; allowed=[{allowed}]"
+        )));
+    }
+    Ok(mappings
+        .split(',')
+        .filter_map(|mapping| mapping.split_once('='))
+        .find_map(|(source, target)| (source == effort).then_some(target))
+        .unwrap_or(effort))
 }
 
 /// 写入 vLLM/HF chat template 常用的嵌套 thinking 开关，同时保留已有 kwargs。
@@ -3469,6 +3496,49 @@ mod tests {
 
         assert_eq!(result["thinking"]["type"], "enabled");
         assert_eq!(result["reasoning_effort"], "max");
+    }
+
+    #[test]
+    fn responses_request_to_chat_uses_declared_capability_effort_map() {
+        let input = json!({
+            "model": "glm-5.2",
+            "input": "hello",
+            "reasoning": {"effort": "medium"}
+        });
+        let config = CodexChatReasoningConfig {
+            supports_thinking: Some(true),
+            supports_effort: Some(true),
+            thinking_param: Some("thinking".to_string()),
+            effort_param: Some("reasoning_effort".to_string()),
+            effort_value_mode: Some("capability|none,minimal,low,medium,high,xhigh,max|none=none,minimal=none,low=high,medium=high,high=high,xhigh=max,max=max".to_string()),
+            min_output_tokens: None,
+            default_output_tokens: None,
+            output_format: Some("reasoning_content".to_string()),
+        };
+        let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
+        assert_eq!(result["reasoning_effort"], "high");
+    }
+
+    #[test]
+    fn responses_request_to_chat_rejects_effort_hidden_by_capability() {
+        let input = json!({
+            "model": "step-3.5-flash-2603",
+            "input": "hello",
+            "reasoning": {"effort": "medium"}
+        });
+        let config = CodexChatReasoningConfig {
+            supports_thinking: Some(true),
+            supports_effort: Some(true),
+            thinking_param: Some("none".to_string()),
+            effort_param: Some("reasoning_effort".to_string()),
+            effort_value_mode: Some("capability|low,high|low=low,high=high".to_string()),
+            min_output_tokens: None,
+            default_output_tokens: None,
+            output_format: Some("reasoning".to_string()),
+        };
+        let error = responses_to_chat_completions_with_reasoning(input, Some(&config))
+            .expect_err("medium must be rejected");
+        assert!(error.to_string().contains("allowed=[low,high]"));
     }
 
     #[test]
