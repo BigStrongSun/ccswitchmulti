@@ -1,21 +1,6 @@
-import type { Provider } from "@/types";
+import type { CodexCatalogModel, Provider } from "@/types";
 
-export interface CodexCatalogModel {
-  model?: string;
-  upstreamModel?: string;
-  upstream_model?: string;
-  displayName?: string;
-  display_name?: string;
-  contextWindow?: string | number;
-  context_window?: string | number;
-  inputModalities?: string[];
-  input_modalities?: string[];
-  textOnly?: boolean;
-  text_only?: boolean;
-  supportsImage?: boolean;
-  supports_image?: boolean;
-  vision?: boolean;
-}
+export type { CodexCatalogModel } from "@/types";
 
 export interface CodexModelCatalog {
   models: CodexCatalogModel[];

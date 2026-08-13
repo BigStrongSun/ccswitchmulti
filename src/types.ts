@@ -313,9 +313,11 @@ export interface CodexCatalogModel {
   upstreamModel?: string;
   upstream_model?: string;
   displayName?: string;
+  display_name?: string;
   contextWindow?: string | number;
-  inputModalities?: Array<"text" | "image">;
-  input_modalities?: Array<"text" | "image">;
+  context_window?: string | number;
+  inputModalities?: string[];
+  input_modalities?: string[];
   textOnly?: boolean;
   text_only?: boolean;
   supportsImage?: boolean;
@@ -323,7 +325,9 @@ export interface CodexCatalogModel {
   vision?: boolean;
   // Native Responses profile overrides for generated Codex model catalogs.
   supportsParallelToolCalls?: boolean;
+  supports_parallel_tool_calls?: boolean;
   baseInstructions?: string;
+  base_instructions?: string;
   reasoning?: CodexModelReasoningCapability;
 }
 

@@ -17,6 +17,59 @@ function provider(overrides: Partial<Provider>): Provider {
 }
 
 describe("codexMultiRouterSync", () => {
+  it("preserves target-provider reasoning capability in the rebuilt router catalog", () => {
+    const reasoning = {
+      supported: true as const,
+      supportedEfforts: ["low", "high", "max"] as const,
+      defaultEffort: "high" as const,
+      disableAllowed: false,
+      upstream: {
+        format: "string" as const,
+        parameter: "reasoning_effort",
+      },
+      source: "builtin" as const,
+    };
+    const target = provider({
+      id: "deepseek",
+      settingsConfig: {
+        modelCatalog: {
+          models: [{ model: "deepseek-v4-pro", reasoning }],
+        },
+      },
+    });
+    const plan = provider({
+      id: "router",
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "deepseek-v4-pro" }] },
+        codexRouting: {
+          enabled: true,
+          routes: [
+            {
+              id: "deepseek-route",
+              targetProviderId: target.id,
+              match: { models: ["deepseek-v4-pro"] },
+              upstream: {
+                apiFormat: "openai_chat",
+                auth: { source: "provider_config" },
+              },
+            },
+          ],
+        },
+      },
+    });
+
+    const synced = syncCodexMultiRouterPlanWithProviders(
+      plan,
+      new Map([
+        [target.id, target],
+        [plan.id, plan],
+      ]),
+    );
+
+    expect(
+      synced?.plan.settingsConfig.modelCatalog.models[0].reasoning,
+    ).toEqual(reasoning);
+  });
   it("重建 catalog 时排除停用 route 的模型", () => {
     const enabled = provider({
       id: "qwen-enabled",
