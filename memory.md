@@ -3083,3 +3083,11 @@
 - 当前 Codex `0.147.0-alpha.6.5` 选择 custom role 时需 `fork_turns=none` 或正整数；`rust-v0.148.0-alpha.1` 起上游 PR `#37252` 允许 role 应用于 full-history fork。CCSwitchMulti 不固定改写 `fork_turns`，由各版本 Codex 的工具描述指导父模型。`hide_spawn_agent_metadata=true` 在当前版本只隐藏 `service_tier`，仍保留 `agent_type`、`model` 和 `reasoning_effort`。
 - Vitest 必须显式 `--exclude ".worktrees/**"`：仓库内旧 worktree 会被默认 glob 扫描并加载不同 React 实例，导致 `Invalid hook call / useState null` 的假失败；不能用业务补丁规避测试发现污染。
 - 联网复核使用 Codex 内置搜索交叉验证 OpenAI 官方 Subagents 文档、当前 `multi_agents_spec.rs` 和 PR `#37252`。Matrix WebSearch 按独立链路重试仍返回 HTTP 521，没有提供第二条正证据；版本和机制结论以官方一手来源、本机运行态与当前源码为依据。
+
+# 2026-08-13 Codex 预设模型推理能力统一设计
+
+- 根因不是 DeepSeek 单点枚举错误，而是 `codexProviderPresets.ts`、`codex_config.rs` catalog 生成与 `proxy/providers/codex.rs` 请求转换分别维护能力，导致菜单、默认值和真实出站参数漂移。
+- 产品边界已确认：CCSwitchMulti 内置预设是受维护的 Codex 适配器，必须按“Provider + API 协议 + 具体模型”提供准确能力；自定义 Provider 才默认开放编辑，内置预设只允许带偏离标记的高级覆盖。
+- 统一设计以一个 resolved capability 同时驱动 catalog、Desktop aliases、inline TOML、MultiRouter route 物化和出站转换。未知第三方模型采用不展示档位、不覆盖上游默认值的保守策略，禁止继续继承 GPT/Native Responses 通用 reasoning 档位。
+- 设计规范位于 `docs/superpowers/specs/2026-08-13-codex-preset-reasoning-capabilities-design.md`；首批校准 DeepSeek V4、Grok 4.5、GLM-5.2、StepFun 与 OpenRouter，并显式处理 Kimi/Qwen/MiniMax/MiMo/SiliconFlow 只有开关或不支持 effort 的路径。
+- 官方检索使用 Codex 内置 Web Search 与 Matrix WebSearch 两条独立链：Matrix 索引查询无结果，但直接读取 xAI、智谱、StepFun 官方 URL 成功并与内置搜索结论一致。Qwen 能力随模型和 API 变化，证据不足时不得写成厂商级固定枚举。
