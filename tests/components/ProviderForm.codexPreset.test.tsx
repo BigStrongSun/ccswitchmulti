@@ -67,12 +67,18 @@ vi.mock("@/components/providers/forms/CodexFormFields", () => ({
     codexBaseUrl,
     catalogModels,
     takeoverEnabled,
+    onApiKeyChange,
     onCatalogModelsChange,
   }: {
     codexApiKey: string;
     codexBaseUrl: string;
-    catalogModels?: Array<{ model: string; contextWindow?: number | string }>;
+    catalogModels?: Array<{
+      model: string;
+      contextWindow?: number | string;
+      reasoning?: unknown;
+    }>;
     takeoverEnabled: boolean;
+    onApiKeyChange?: (value: string) => void;
     onCatalogModelsChange?: (
       models: Array<{ model: string; contextWindow?: number | string }>,
     ) => void;
@@ -93,6 +99,9 @@ vi.mock("@/components/providers/forms/CodexFormFields", () => ({
         }
       >
         mock-set-catalog
+      </button>
+      <button type="button" onClick={() => onApiKeyChange?.("sk-test")}>
+        mock-set-api-key
       </button>
     </section>
   ),
@@ -205,6 +214,7 @@ describe("ProviderForm Codex preset selection", () => {
     await waitFor(() => {
       expect(screen.getByTestId("codex-catalog")).toHaveTextContent("gpt-5.5");
     });
+    fireEvent.click(screen.getByRole("button", { name: "mock-set-api-key" }));
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
 
     await waitFor(() => {
@@ -216,5 +226,36 @@ describe("ProviderForm Codex preset selection", () => {
     expect(savedSettings.modelCatalog.models).toEqual([
       { model: "gpt-5.5", contextWindow: 272000 },
     ]);
+  });
+
+  it("persists maintained reasoning capabilities after selecting a built-in provider", async () => {
+    const onSubmit = vi.fn();
+    renderProviderForm({ showButtons: true, submitLabel: "保存", onSubmit });
+
+    fireEvent.click(screen.getByRole("button", { name: /Zhipu GLM$/ }));
+    await waitFor(() => {
+      expect(screen.getByTestId("codex-catalog")).toHaveTextContent("glm-5.2");
+    });
+    fireEvent.click(screen.getByRole("button", { name: "mock-set-api-key" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+    const savedSettings = JSON.parse(onSubmit.mock.calls[0][0].settingsConfig);
+    expect(savedSettings.modelCatalog.models).toHaveLength(1);
+    for (const model of savedSettings.modelCatalog.models) {
+      expect(model.reasoning).toMatchObject({
+        supportedEfforts: [
+          "none",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max",
+        ],
+        defaultEffort: "max",
+        source: "builtin",
+      });
+    }
   });
 });

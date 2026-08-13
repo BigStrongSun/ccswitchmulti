@@ -52,21 +52,6 @@ impl CodexModelReasoningCapability {
         }
         Ok(())
     }
-
-    pub fn map_effort<'a>(&'a self, effort: &'a str) -> Result<&'a str, String> {
-        if !self.supported_efforts.iter().any(|item| item == effort) {
-            return Err(format!(
-                "reasoning effort `{effort}` is not supported; allowed={:?}",
-                self.supported_efforts
-            ));
-        }
-        Ok(self
-            .upstream
-            .effort_map
-            .get(effort)
-            .map(String::as_str)
-            .unwrap_or(effort))
-    }
 }
 
 pub fn reasoning_capability_from_model_entry(
