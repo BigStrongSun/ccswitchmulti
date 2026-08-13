@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-08-13 DeepSeek V4 reasoning effort 目录污染根修
+
+- 用户反馈 MultiRouter 保存后会把 `deepseek-v4-flash` / `deepseek-v4-pro` 的官方 `low/high/max`、默认 `high` 覆盖为 `low/medium/high/xhigh`、默认 `medium`。根因不是 DeepSeek 官方模板缺失：`src-tauri/src/resources/codex_deepseek_catalog_template.json` 本来就是正确的官方目录；问题只发生在 MultiRouter 的 `ProxyChat` 聚合目录，它克隆通用 GPT 模板并把同一组全局 effort 枚举套给所有第三方模型。
+- `src-tauri/src/codex_config.rs` 新增按模型识别的 reasoning capability 单一源。DeepSeek V4 Flash/Pro 无论经官方直连还是 MultiRouter 生成，都强制投影 `low/high/max`、默认 `high`，并同步覆盖外部 JSON catalog 与 `config.toml` inline models 的兼容字段。
+- 参数边界：Codex 模型目录决定 UI/运行时允许选择哪些 effort 以及省略显式配置时的默认值；Codex 随后在请求体发送 reasoning effort，供应商网关/模型实际解释并执行。因此这是“Codex 选择和传参、模型供应商执行”的两段式能力，不是 Codex 本地模拟，也不是各模型可接受任意通用档位。
+- 官方交叉验证：DeepSeek 官方 Codex 集成页对两模型列出 `low/high/max`、默认 `high`；OpenAI 官方文档表明 reasoning effort 是请求字段且不同模型支持集合不同。本地测试锁定 MultiRouter 目录和托管 agent role 的正确投影。
+
 ## 2026-08-12 Sub-Agent 双主题工作台 3.19.1-22 发布准备
 
 - `3.19.1-22` 将 Sub-Agent 配置收敛为 MultiRouter 独立顶层工作区，并完成深浅双主题语义色：V1/V2 状态、选择策略、目录同步、模型折叠卡片、能力问卷、高级覆盖、TOML 预览和 sticky 保存栏都复用 MultiRouter 的蓝/青/绿/紫/红/琥珀层级。最终设计证据位于 `design-qa.md` 与 `artifacts/design-audit/subagent-theme-2026-08-11/{05-light-after,06-light-toml-after,07-dark-after,08-dark-toml-after}.jpg`，结论为 `final result: passed`；误生成的 15x15 `05-light-after.png` 只是光标图层，不得提交或作为验收证据。

@@ -98,6 +98,11 @@ const CODEX_REASONING_EFFORTS: &[(&str, &str)] = &[
 ];
 const CODEX_DEFAULT_REASONING_EFFORT: &str = "medium";
 const DEEPSEEK_WINDOWS_EXECUTION_GUIDANCE: &str = "On Windows, use PowerShell syntax and minimal directed commands. For content, use `rg <pattern> <named-path>`; for file discovery, use `rg --files <named-path>`. Use narrow `-g` includes and excludes, including `-g '!node_modules/**'`, `-g '!.git/**'`, `-g '!target/**'`, `-g '!dist/**'`, and `-g '!generated/**'`. First identify a narrow source or test subtree; never recursively scan a user profile/home, drive root, or broad repository root.\nDo not use Unix-only commands such as `wc`, and do not assume `Select-String -Recurse` exists; if `rg` is unavailable, only after identifying a narrow target use `Get-ChildItem -LiteralPath <narrow-target> -File -Recurse | Select-String`.\nFor ordinary read-only inspection, call tools without escalation metadata or a justification.\nStop and report as soon as the requested evidence is sufficient; do not keep scanning merely to be exhaustive.";
+const DEEPSEEK_V4_REASONING_EFFORTS: &[(&str, &str)] = &[
+    ("low", "Fast responses with lighter reasoning"),
+    ("high", "Extra high reasoning depth for complex problems"),
+    ("max", "Maximum reasoning depth for the hardest problems"),
+];
 
 /// Codex model catalog 的工具配置画像。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -912,6 +917,42 @@ fn codex_desktop_reasoning_efforts_from_levels(levels: Option<&Value>) -> Value 
     Value::Array(efforts)
 }
 
+/// 返回模型厂商声明的 reasoning capability，而不是 Codex/GPT 通用兜底档位。
+///
+/// DeepSeek V4 的 `max` 会选择厂商独立的 Think Max 模式；`medium` / `xhigh`
+/// 不是其官方 Codex catalog 枚举，因此 MultiRouter 也不能从 GPT 模板继承它们。
+fn codex_vendor_reasoning_capabilities_for_model(
+    model: &str,
+) -> Option<(&'static str, &'static [(&'static str, &'static str)])> {
+    let normalized = model.trim().to_ascii_lowercase();
+    if normalized.contains("deepseek-v4-flash") || normalized.contains("deepseek-v4-pro") {
+        return Some(("high", DEEPSEEK_V4_REASONING_EFFORTS));
+    }
+    None
+}
+
+fn apply_codex_vendor_reasoning_capabilities(
+    entry_obj: &mut serde_json::Map<String, Value>,
+    model: &str,
+) {
+    let Some((default_effort, efforts)) = codex_vendor_reasoning_capabilities_for_model(model)
+    else {
+        return;
+    };
+    entry_obj.insert("default_reasoning_level".to_string(), json!(default_effort));
+    entry_obj.insert(
+        "supported_reasoning_levels".to_string(),
+        Value::Array(
+            efforts
+                .iter()
+                .map(
+                    |(effort, description)| json!({ "effort": effort, "description": description }),
+                )
+                .collect(),
+        ),
+    );
+}
+
 /// 为最新版 Codex `ModelInfo` 保留 snake_case reasoning levels。
 ///
 /// `spawn_agent` 的 `model` 参数校验走 `ModelInfo.supported_reasoning_levels`；
@@ -1066,6 +1107,7 @@ fn codex_catalog_model_entry(
         entry_obj.insert("web_search_tool_type".to_string(), json!("text"));
         entry_obj.insert("webSearchToolType".to_string(), json!("text"));
     }
+    apply_codex_vendor_reasoning_capabilities(entry_obj, &spec.model);
     project_codex_desktop_model_fields(entry_obj, spec);
 
     if profile != CodexCatalogToolProfile::ProxyChat {
@@ -2376,6 +2418,9 @@ fn codex_agent_reasoning_effort_for_model(model: &str) -> Option<&'static str> {
     let lower = model.to_ascii_lowercase();
     if lower.starts_with("qwen") {
         return None;
+    }
+    if let Some((default_effort, _)) = codex_vendor_reasoning_capabilities_for_model(model) {
+        return Some(default_effort);
     }
     if lower.contains("spark") {
         Some("low")
@@ -9690,6 +9735,58 @@ openai_base_url = "http://127.0.0.1:15721/v1"
     }
 
     #[test]
+    /// DeepSeek V4 的原生 effort 枚举不能继承通用 GPT ProxyChat 模板。
+    fn codex_model_catalog_uses_deepseek_v4_reasoning_capabilities() {
+        let template = json!({
+            "slug": "gpt-5.5",
+            "display_name": "GPT-5.5",
+            "supported_reasoning_levels": [
+                { "effort": "low", "description": "Low" },
+                { "effort": "medium", "description": "Medium" },
+                { "effort": "high", "description": "High" },
+                { "effort": "xhigh", "description": "Extra high" }
+            ],
+            "default_reasoning_level": "medium"
+        });
+        let spec = CodexCatalogModelSpec {
+            model: "deepseek-v4-flash".to_string(),
+            upstream_model: None,
+            display_name: "DeepSeek V4 Flash".to_string(),
+            context_window: 1_048_576,
+            text_only: true,
+            is_default: true,
+            supports_parallel_tool_calls: Some(true),
+            input_modalities: Some(vec!["text".to_string()]),
+            base_instructions: None,
+        };
+
+        let entry = codex_catalog_model_entry(
+            &template,
+            &spec,
+            0,
+            CodexCatalogToolProfile::ProxyChat,
+            128_000,
+        );
+        let levels = entry["supported_reasoning_levels"]
+            .as_array()
+            .expect("reasoning levels")
+            .iter()
+            .filter_map(|level| level.get("effort").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        let desktop_levels = entry["supportedReasoningEfforts"]
+            .as_array()
+            .expect("desktop reasoning levels")
+            .iter()
+            .filter_map(|level| level.get("reasoningEffort").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+
+        assert_eq!(entry["default_reasoning_level"], "high");
+        assert_eq!(entry["defaultReasoningEffort"], "high");
+        assert_eq!(levels, vec!["low", "high", "max"]);
+        assert_eq!(desktop_levels, vec!["low", "high", "max"]);
+    }
+
+    #[test]
     fn codex_agent_defaults_migrate_legacy_alias_without_overwriting_user_limits() {
         let specs = vec![CodexCatalogModelSpec {
             model: "qwen3.6".to_string(),
@@ -9800,6 +9897,78 @@ base_url = "http://127.0.0.1:15721/v1"
             efforts,
             vec!["low", "medium", "high", "xhigh", "max", "ultra"]
         );
+    }
+
+    #[test]
+    fn codex_provider_inline_models_keep_deepseek_v4_reasoning_capabilities() {
+        let specs = vec![CodexCatalogModelSpec {
+            model: "deepseek-v4-pro".to_string(),
+            upstream_model: None,
+            display_name: "DeepSeek V4 Pro".to_string(),
+            context_window: 1_048_576,
+            text_only: true,
+            is_default: true,
+            supports_parallel_tool_calls: Some(true),
+            input_modalities: Some(vec!["text".to_string()]),
+            base_instructions: None,
+        }];
+        let catalog = codex_model_catalog_from_specs(
+            &specs,
+            &json!({
+                "slug": "gpt-5.5",
+                "display_name": "GPT-5.5",
+                "default_reasoning_level": "medium",
+                "supported_reasoning_levels": [
+                    { "effort": "low" },
+                    { "effort": "medium" },
+                    { "effort": "high" },
+                    { "effort": "xhigh" }
+                ]
+            }),
+            CodexCatalogToolProfile::ProxyChat,
+            128_000,
+        );
+        let config = r#"model_provider = "codex_model_router_v2"
+
+[model_providers.codex_model_router_v2]
+base_url = "http://127.0.0.1:15721/v1"
+"#;
+
+        let projected = set_codex_model_catalog_projection_fields(
+            config,
+            Some(Path::new("catalog")),
+            Some(&specs),
+            Some(&catalog),
+        )
+        .expect("project catalog fields");
+        let parsed: toml::Value = toml::from_str(&projected).expect("parse projected config");
+        let model = parsed["model_providers"]["codex_model_router_v2"]["models"]
+            .as_array()
+            .and_then(|models| models.first())
+            .expect("inline model");
+
+        for field in [
+            "supported_reasoning_levels",
+            "supported_reasoning_efforts",
+            "supportedReasoningEfforts",
+        ] {
+            let efforts = model[field]
+                .as_array()
+                .expect("inline reasoning levels")
+                .iter()
+                .filter_map(|level| {
+                    level
+                        .get("effort")
+                        .or_else(|| level.get("reasoning_effort"))
+                        .or_else(|| level.get("reasoningEffort"))
+                        .and_then(|effort| effort.as_str())
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(efforts, vec!["low", "high", "max"], "field {field}");
+        }
+        assert_eq!(model["default_reasoning_level"].as_str(), Some("high"));
+        assert_eq!(model["default_reasoning_effort"].as_str(), Some("high"));
+        assert_eq!(model["defaultReasoningEffort"].as_str(), Some("high"));
     }
 
     #[test]
@@ -10431,7 +10600,7 @@ model_provider = "custom"
         assert!(flash.contains(r#"name = "deepseek-flash""#));
         assert!(flash.contains(r#"model = "deepseek-v4-flash""#));
         assert!(flash.contains(r#"model_provider = "codex_model_router_v2""#));
-        assert!(flash.contains(r#"model_reasoning_effort = "medium""#));
+        assert!(flash.contains(r#"model_reasoning_effort = "high""#));
         assert!(flash.contains("read-heavy exploration"));
         assert!(flash.contains("lightweight verification"));
         assert!(!flash.contains("architecture decisions"));
