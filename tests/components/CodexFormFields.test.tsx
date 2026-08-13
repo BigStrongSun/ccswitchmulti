@@ -132,6 +132,7 @@ function renderCatalogHarness(
     planAccessKeyId?: string;
     planSecretAccessKey?: string;
     takeoverEnabled?: boolean;
+    presetCatalogModels?: CodexCatalogModel[];
     onProviderSplitSuggestionChange?: ReturnType<typeof vi.fn>;
   } = {},
 ) {
@@ -175,6 +176,7 @@ function renderCatalogHarness(
         apiFormat="openai_chat"
         onApiFormatChange={onApiFormatChange}
         catalogModels={catalog}
+        presetCatalogModels={options.presetCatalogModels}
         onCatalogModelsChange={handleCatalogChange}
         spawnAgentModels={[]}
         onSpawnAgentModelsChange={vi.fn()}
@@ -280,6 +282,48 @@ function renderAutoSplitHarness() {
 }
 
 describe("CodexFormFields local model routing", () => {
+  it("keeps built-in reasoning read-only until an explicit override and restores the preset", async () => {
+    const builtinReasoning: NonNullable<CodexCatalogModel["reasoning"]> = {
+      supported: true as const,
+      supportedEfforts: ["low", "high", "max"],
+      defaultEffort: "high" as const,
+      disableAllowed: false,
+      upstream: {
+        format: "reasoning_object" as const,
+        parameter: "reasoning.effort" as const,
+      },
+      source: "builtin" as const,
+    };
+    const { latestCatalog } = renderCatalogHarness(
+      [{ model: "deepseek-v4-pro", reasoning: builtinReasoning }],
+      {
+        presetCatalogModels: [
+          { model: "deepseek-v4-pro", reasoning: builtinReasoning },
+        ],
+      },
+    );
+
+    const textarea = screen.getByLabelText("deepseek-v4-pro推理能力 JSON");
+    expect(textarea).toHaveAttribute("readonly");
+    expect(screen.getByText(/内置预设，只读/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "创建高级覆盖" }));
+    await waitFor(() => {
+      expect(latestCatalog()[0].reasoning?.source).toBe("user");
+    });
+    expect(
+      screen.getByLabelText("deepseek-v4-pro推理能力 JSON"),
+    ).not.toHaveAttribute("readonly");
+    expect(screen.getByText(/已偏离内置预设/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "恢复内置默认" }));
+    await waitFor(() => {
+      expect(latestCatalog()[0].reasoning).toEqual(builtinReasoning);
+    });
+    expect(
+      screen.getByLabelText("deepseek-v4-pro推理能力 JSON"),
+    ).toHaveAttribute("readonly");
+  });
   it("classifies fetched relay models into Responses and Chat groups", () => {
     expect(
       splitFetchedModelsByLikelyCodexProtocol([

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import {
@@ -294,6 +294,8 @@ interface CodexFormFieldsProps {
 
   // Model Catalog
   catalogModels?: CodexCatalogModel[];
+  // Current maintained preset baseline, used only for explicit override/restore.
+  presetCatalogModels?: CodexCatalogModel[];
   onCatalogModelsChange?: (models: CodexCatalogModel[]) => void;
   spawnAgentModels?: string[];
   onSpawnAgentModelsChange?: (models: string[]) => void;
@@ -429,6 +431,7 @@ function catalogRowsMatchModels(
       | "supportsParallelToolCalls"
       | "baseInstructions"
       | "inputModalities"
+      | "reasoning"
     >
   >,
   models: CodexCatalogModel[],
@@ -446,7 +449,9 @@ function catalogRowsMatchModels(
         (incoming.supportsParallelToolCalls ?? null) &&
       (row.baseInstructions ?? "") === (incoming.baseInstructions ?? "") &&
       JSON.stringify(row.inputModalities ?? []) ===
-        JSON.stringify(incoming.inputModalities ?? [])
+        JSON.stringify(incoming.inputModalities ?? []) &&
+      JSON.stringify(row.reasoning ?? null) ===
+        JSON.stringify(incoming.reasoning ?? null)
     );
   });
 }
@@ -604,6 +609,7 @@ export function CodexFormFields({
   promptCacheRouting = "auto",
   onPromptCacheRoutingChange = () => undefined,
   catalogModels = [],
+  presetCatalogModels = [],
   onCatalogModelsChange,
   codexRouting = { enabled: false, defaultRouteId: "", routes: [] },
   onCodexRoutingChange,
@@ -1204,6 +1210,22 @@ export function CodexFormFields({
     },
     [handleUpdateCatalogRow],
   );
+
+  const presetReasoningByModel = useMemo(() => {
+    const entries: Array<
+      readonly [string, NonNullable<CodexCatalogModel["reasoning"]>]
+    > = [];
+    for (const model of presetCatalogModels) {
+      if (!model.reasoning) continue;
+      const visible = model.model.trim();
+      const upstream = catalogRowUpstreamModel(model);
+      if (visible) entries.push([visible, model.reasoning]);
+      if (upstream && upstream !== visible) {
+        entries.push([upstream, model.reasoning]);
+      }
+    }
+    return new Map(entries);
+  }, [presetCatalogModels]);
 
   const handleSelectFetchedCatalogModel = useCallback(
     (
@@ -2482,6 +2504,16 @@ export function CodexFormFields({
                       const probeBadge = getProtocolProbeBadge(
                         protocolProbeOutcomesByModel[probeModel],
                       );
+                      const presetReasoning =
+                        presetReasoningByModel.get(row.model.trim()) ??
+                        presetReasoningByModel.get(
+                          catalogRowUpstreamModel(row),
+                        );
+                      const isBuiltinReasoning =
+                        row.reasoning?.source === "builtin";
+                      const isUserPresetOverride =
+                        Boolean(presetReasoning) &&
+                        row.reasoning?.source === "user";
 
                       return (
                         <div
@@ -2658,25 +2690,31 @@ export function CodexFormFields({
                           <details className="md:col-span-7">
                             <summary className="cursor-pointer text-xs text-muted-foreground">
                               Codex 推理能力
-                              {row.reasoning?.source === "builtin"
-                                ? "（内置预设）"
-                                : row.reasoning
-                                  ? "（用户覆盖）"
-                                  : "（未声明，使用保守模式）"}
+                              {isBuiltinReasoning
+                                ? "（内置预设，只读）"
+                                : isUserPresetOverride
+                                  ? "（已偏离内置预设）"
+                                  : row.reasoning
+                                    ? "（用户覆盖）"
+                                    : "（未声明，使用保守模式）"}
                             </summary>
                             <Textarea
+                              key={`${row.rowId}:${JSON.stringify(row.reasoning)}`}
                               className="mt-2 min-h-28 font-mono text-xs"
                               defaultValue={
                                 row.reasoning
                                   ? JSON.stringify(row.reasoning, null, 2)
                                   : ""
                               }
-                              onBlur={(event) =>
-                                handleUpdateCatalogReasoningJson(
-                                  index,
-                                  event.target.value,
-                                )
-                              }
+                              onBlur={(event) => {
+                                if (!isBuiltinReasoning) {
+                                  handleUpdateCatalogReasoningJson(
+                                    index,
+                                    event.target.value,
+                                  );
+                                }
+                              }}
+                              readOnly={isBuiltinReasoning}
                               placeholder='例如：{"supported":true,"supportedEfforts":["low","high"],"defaultEffort":"high","disableAllowed":false,"upstream":{"format":"string","parameter":"reasoning_effort"}}'
                               aria-label={`${row.model || "模型"}推理能力 JSON`}
                             />
@@ -2685,7 +2723,25 @@ export function CodexFormFields({
                                 保存时校验默认档位、关闭语义和
                                 effortMap；空白表示不向 Codex 声明推理档位。
                               </span>
-                              {row.reasoning && (
+                              {isBuiltinReasoning && row.reasoning && (
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  size="sm"
+                                  className="h-6 px-2 text-[11px]"
+                                  onClick={() =>
+                                    handleUpdateCatalogRow(index, {
+                                      reasoning: {
+                                        ...row.reasoning!,
+                                        source: "user",
+                                      },
+                                    })
+                                  }
+                                >
+                                  创建高级覆盖
+                                </Button>
+                              )}
+                              {isUserPresetOverride && presetReasoning && (
                                 <Button
                                   type="button"
                                   variant="ghost"
@@ -2693,13 +2749,30 @@ export function CodexFormFields({
                                   className="h-6 px-2 text-[11px]"
                                   onClick={() =>
                                     handleUpdateCatalogRow(index, {
-                                      reasoning: undefined,
+                                      reasoning: { ...presetReasoning },
                                     })
                                   }
                                 >
-                                  清除覆盖
+                                  恢复内置默认
                                 </Button>
                               )}
+                              {row.reasoning &&
+                                !isBuiltinReasoning &&
+                                !isUserPresetOverride && (
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-6 px-2 text-[11px]"
+                                    onClick={() =>
+                                      handleUpdateCatalogRow(index, {
+                                        reasoning: undefined,
+                                      })
+                                    }
+                                  >
+                                    清除覆盖
+                                  </Button>
+                                )}
                             </div>
                           </details>
                         </div>
