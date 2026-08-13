@@ -11,6 +11,7 @@ import {
 } from "@/components/ui/dialog";
 import { FormLabel } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
   SelectContent,
@@ -340,6 +341,7 @@ function createCatalogRow(seed?: Partial<CodexCatalogModel>): CodexCatalogRow {
     ...(seed?.baseInstructions
       ? { baseInstructions: seed.baseInstructions }
       : {}),
+    ...(seed?.reasoning ? { reasoning: seed.reasoning } : {}),
   };
 }
 
@@ -1182,6 +1184,25 @@ export function CodexFormFields({
       );
     },
     [],
+  );
+
+  const handleUpdateCatalogReasoningJson = useCallback(
+    (index: number, value: string) => {
+      const trimmed = value.trim();
+      if (!trimmed) {
+        handleUpdateCatalogRow(index, { reasoning: undefined });
+        return;
+      }
+      try {
+        const reasoning = JSON.parse(trimmed) as CodexCatalogModel["reasoning"];
+        handleUpdateCatalogRow(index, {
+          reasoning: reasoning ? { ...reasoning, source: "user" } : undefined,
+        });
+      } catch {
+        toast.error("推理能力 JSON 格式无效，未保存本次修改");
+      }
+    },
+    [handleUpdateCatalogRow],
   );
 
   const handleSelectFetchedCatalogModel = useCallback(
@@ -2465,7 +2486,7 @@ export function CodexFormFields({
                       return (
                         <div
                           key={row.rowId}
-                          className="grid grid-cols-1 gap-2 md:grid-cols-[88px_1fr_1fr_1fr_132px_76px_36px]"
+                          className="grid grid-cols-1 gap-2 rounded-md border border-transparent p-1 md:grid-cols-[88px_1fr_1fr_1fr_132px_76px_36px]"
                         >
                           <label className="flex h-9 items-center gap-2 text-xs text-muted-foreground">
                             <input
@@ -2634,6 +2655,53 @@ export function CodexFormFields({
                           >
                             <Trash2 className="h-4 w-4" />
                           </Button>
+                          <details className="md:col-span-7">
+                            <summary className="cursor-pointer text-xs text-muted-foreground">
+                              Codex 推理能力
+                              {row.reasoning?.source === "builtin"
+                                ? "（内置预设）"
+                                : row.reasoning
+                                  ? "（用户覆盖）"
+                                  : "（未声明，使用保守模式）"}
+                            </summary>
+                            <Textarea
+                              className="mt-2 min-h-28 font-mono text-xs"
+                              defaultValue={
+                                row.reasoning
+                                  ? JSON.stringify(row.reasoning, null, 2)
+                                  : ""
+                              }
+                              onBlur={(event) =>
+                                handleUpdateCatalogReasoningJson(
+                                  index,
+                                  event.target.value,
+                                )
+                              }
+                              placeholder='例如：{"supported":true,"supportedEfforts":["low","high"],"defaultEffort":"high","disableAllowed":false,"upstream":{"format":"string","parameter":"reasoning_effort"}}'
+                              aria-label={`${row.model || "模型"}推理能力 JSON`}
+                            />
+                            <div className="mt-1 flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
+                              <span>
+                                保存时校验默认档位、关闭语义和
+                                effortMap；空白表示不向 Codex 声明推理档位。
+                              </span>
+                              {row.reasoning && (
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-6 px-2 text-[11px]"
+                                  onClick={() =>
+                                    handleUpdateCatalogRow(index, {
+                                      reasoning: undefined,
+                                    })
+                                  }
+                                >
+                                  清除覆盖
+                                </Button>
+                              )}
+                            </div>
+                          </details>
                         </div>
                       );
                     })}

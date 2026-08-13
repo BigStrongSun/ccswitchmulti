@@ -201,6 +201,36 @@ export const normalizeCodexCatalogModelsForSave = (
     );
 
     const baseInstructions = item.baseInstructions?.trim();
+    const reasoning = item.reasoning;
+    if (
+      reasoning?.defaultEffort &&
+      !reasoning.supportedEfforts.includes(reasoning.defaultEffort)
+    ) {
+      throw new Error(
+        `${model}: reasoning.defaultEffort must be present in supportedEfforts`,
+      );
+    }
+    if (
+      reasoning &&
+      !reasoning.disableAllowed &&
+      reasoning.supportedEfforts.includes("none")
+    ) {
+      throw new Error(`${model}: reasoning none requires disableAllowed=true`);
+    }
+    if (
+      reasoning?.supported &&
+      reasoning.upstream.format !== "none" &&
+      reasoning.upstream.format !== "boolean"
+    ) {
+      for (const effort of reasoning.supportedEfforts) {
+        if (
+          reasoning.upstream.effortMap &&
+          !reasoning.upstream.effortMap[effort]
+        ) {
+          throw new Error(`${model}: reasoning effortMap is missing ${effort}`);
+        }
+      }
+    }
 
     normalized.push({
       model,
@@ -215,6 +245,7 @@ export const normalizeCodexCatalogModelsForSave = (
         ? { inputModalities }
         : {}),
       ...(baseInstructions ? { baseInstructions } : {}),
+      ...(reasoning ? { reasoning } : {}),
     });
   }
 
@@ -1592,6 +1623,10 @@ function ProviderFormFull({
         }
         settingsConfig = JSON.stringify(configObj);
       } catch (err) {
+        if (err instanceof Error && err.message.includes("reasoning")) {
+          toast.error(`Codex 推理能力配置无效：${err.message}`);
+          return;
+        }
         settingsConfig = values.settingsConfig.trim();
       }
     } else if (appId === "gemini") {
