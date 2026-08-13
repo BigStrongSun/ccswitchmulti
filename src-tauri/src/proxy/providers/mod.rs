@@ -20,6 +20,7 @@ pub mod codex_chat_history;
 pub(crate) mod codex_multi_agent;
 pub mod codex_oauth_auth;
 pub(crate) mod codex_oauth_pool;
+pub(crate) mod codex_reasoning;
 pub(crate) mod codex_responses_sse;
 pub mod copilot_auth;
 pub mod copilot_model_map;
