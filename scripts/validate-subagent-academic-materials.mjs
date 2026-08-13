@@ -69,10 +69,27 @@ function parseArgs(argv) {
   return argv[i + 1];
 }
 
+export function validateCitations(catalog, files) {
+  const issues = [];
+  const texts = files.map((file) => ({ file, text: fs.readFileSync(file, "utf8") }));
+  for (const paper of catalog.papers || []) {
+    if (!texts.some(({ text }) => text.includes(`[${paper.id}]`) || text.includes(`data-paper="${paper.id}"`))) {
+      issues.push(`${paper.id} 未在指定材料中引用`);
+    }
+  }
+  return issues;
+}
+
 if (import.meta.url === new URL(`file://${process.argv[1].replaceAll("\\", "/")}`).href) {
   try {
     const filePath = parseArgs(process.argv.slice(2));
-    const result = validatePapers(loadPapers(filePath), process.cwd());
+    const catalog = loadPapers(filePath);
+    const result = validatePapers(catalog, process.cwd());
+    const citeIndex = process.argv.indexOf("--citations");
+    if (citeIndex >= 0) {
+      const files = process.argv.slice(citeIndex + 1).filter((value) => !value.startsWith("--"));
+      result.issues.push(...validateCitations(catalog, files));
+    }
     if (result.issues.length) {
       console.error(`FAIL：发现 ${result.issues.length} 个问题`);
       for (const issue of result.issues) console.error(`- ${issue}`);

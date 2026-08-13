@@ -2,18 +2,33 @@
 
 更新时间：2026-08-13
 
-这份索引为《Codex V2 Sub-Agent 与 CCSM 第三方模型适配》技术报告提供证据账本。它把“官方已说明的能力”“官方源码中的运行机制”“公开问题复现”“CCSM 当前实现”和“本地/发布验证”分开，避免把 issue 里的推断写成 OpenAI 的设计承诺。
+这份索引为《Codex V2 Sub-Agent 与 CCSM 第三方模型适配》技术报告提供证据账本。它把“2025–2026 学术研究”“官方已说明的能力”“官方源码中的运行机制”“公开问题复现”“CCSM 当前实现”和“本地/发布验证”分开，避免把论文 benchmark、issue 复现或构建结果写成超出其范围的承诺。
 
 ## 证据等级
 
 | 标记 | 含义 | 可支持的表述 |
 |---|---|---|
+| PAPER | 2025–2026 正式论文 | 指定模型、任务、组织结构和实验范围内的研究机制与反例 |
 | O-DOC | OpenAI 官方文档 | 产品能力、公开配置字段、推荐用法 |
 | O-SRC | OpenAI Codex 官方源码 | 当前实现的数据结构、分支和调用顺序 |
 | O-ISSUE | OpenAI 官方仓库 issue | 已报告的现场复现；不自动代表官方设计结论 |
 | C-SRC | CCSwitchMulti 当前源码 | CCSM 已实现的配置、路由和协议行为 |
 | C-TEST | CCSM 自动化测试/提交 | 回归契约及其引入、修复历史 |
 | RUNTIME | 本地或 GitHub Actions 运行证据 | 指定环境中真实发生的结果 |
+
+## 0. 论文研究证据
+
+核心论文的唯一结构化目录是 [`subagent-multiagent-2025-2026-papers.json`](subagent-multiagent-2025-2026-papers.json)，逐篇研究问题、方法、实验范围、支持结论和不可外推边界见 [`subagent-multiagent-2025-2026-annotated-bibliography.md`](subagent-multiagent-2025-2026-annotated-bibliography.md)。26 篇均为 ACL Anthology 正式论文，其中 2026 年 16 篇、2025 年 10 篇；26 份官方 PDF 与 SHA-256 见 [`papers/subagent-multiagent-2025-2026/README.md`](papers/subagent-multiagent-2025-2026/README.md)。
+
+| 研究结论 | 等级 | 核心证据与边界 |
+|---|---|---|
+| 多 Agent 的系统价值是条件性的：可分片上下文、并行搜索和专业化流水线可以获益。 | PAPER | P01 ExtAgents、P08 MOSA、P10 长 triple-set 生成；结论限定于论文各自可分解且可整合的任务。 |
+| 更多 Agent 和更多通信不天然更好。 | PAPER | P06 SILO-BENCH、P09 Debate、P12 AgentSlimming、P13 Diversity Collapse；分别覆盖协调鸿沟、同质辩论、冗余节点和结构耦合。 |
+| 拓扑是任务相关的设计变量，不存在由现有证据支持的全局最优拓扑。 | PAPER | P03 动态拓扑、P17 MultiAgentBench、P18 信息传播、P22 AnyMAC。 |
+| Role 需要表达任务相关能力和差异，但描述不是确定性路由。 | PAPER | P04 伙伴 trait、P19 学习式角色差异、P20 Theory of Mind、P26 团队初始化；自然语言 Role 与论文机制不可直接等同。 |
+| 评价对象必须从模型扩展到 harness、拓扑、编排、过程、成本和安全。 | PAPER | P02 ACI、P05 MASEval、P11 风险优先评价、P14 内部失效、P15 过程评价、P21 Collab-Overcooked。 |
+
+论文只用于解释一般机制、实验反例和设计问题；Codex V1/V2 字段、调用顺序与 CCSM 行为仍必须分别由 O-DOC/O-SRC 和 C-SRC/C-TEST/RUNTIME 证明。
 
 ## 1. Sub-Agent 的意义与公开定位
 
