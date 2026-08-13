@@ -1,0 +1,50 @@
+{
+  "slides": 68,
+  "uniqueIds": 68,
+  "directPlain": 68,
+  "viewports": [
+    {
+      "width": 1280,
+      "height": 720,
+      "bodyOverflow": false,
+      "horizontalOverflow": [],
+      "visible": 1
+    },
+    {
+      "width": 900,
+      "height": 650,
+      "bodyOverflow": false,
+      "horizontalOverflow": [],
+      "visible": 1
+    }
+  ],
+  "themes": [
+    {
+      "horizontalOverflow": false,
+      "name": "assets/themes/engineering-whiteprint.css",
+      "surfaceAlpha": 1,
+      "surfaceCount": 2,
+      "visible": 1
+    },
+    {
+      "horizontalOverflow": false,
+      "name": "assets/themes/academic-paper.css",
+      "surfaceAlpha": 1,
+      "surfaceCount": 2,
+      "visible": 1
+    },
+    {
+      "horizontalOverflow": false,
+      "name": "assets/themes/tokyo-night.css",
+      "surfaceAlpha": 1,
+      "surfaceCount": 2,
+      "visible": 1
+    }
+  ],
+  "paperDialog": {
+    "opened": true,
+    "closedByEscape": true
+  },
+  "overviewMiniSlides": 68,
+  "consoleProblems": []
+}

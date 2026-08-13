@@ -1,5 +1,16 @@
 # CC Switch Repository Memory
 
+## 2026-08-13 Codex V2 Sub-Agent 68页学术专著课件与论文证据库
+
+- 当前权威材料已经从 32 页工程说明重构为 68 页中文阅读型学术课件：`docs/presentations/codex-v2-subagent-report/index.html`。叙事顺序固定为 Agent 基础 → 单 Agent 的结构性瓶颈 → Sub-Agent 正式定义 → 与 Multi-Agent 的包含关系 → 组织拓扑 → 能力与系统评价 → Codex V1 → V1→V2 → Codex V2 → 第三方四层障碍 → CCSM 控制面/数据面 → 总结。每页都有稳定 `data-slide-id` 和唯一“这页用大白话说”；V1/V2 在机制细节前都有概括，转换原因单独成章。
+- 论文结构化唯一数据源为 `docs/references/subagent-multiagent-2025-2026-papers.json`。核心集是 26 篇 ACL Anthology 正式论文：2026 年 16 篇、2025 年 10 篇；26 份官方 PDF 全部归档在 `docs/references/papers/subagent-multiagent-2025-2026/`，清单记录字节数和 SHA-256。逐篇研究问题、方法、实验范围、支持结论、不可外推边界与材料映射见 `subagent-multiagent-2025-2026-annotated-bibliography.md`。
+- 两条联网检索链必须如实区分：Codex 内置 Web Search 能稳定召回 ACL/arXiv/官方资料；Matrix WebSearch 本轮对 2026 ACL multi-agent 查询主要返回日历等无关页面，学术召回不足，不能作为正证据。最终元数据逐篇回到 ACL 原始论文页、DOI 和官方 PDF 核对。
+- 研究主结论是条件判断，而不是“Agent 越多越好”：只有任务可委托、可隔离、可验收，并行/能力互补/上下文治理收益大于通信、整合与错误传播成本时，Sub-Agent 才有系统价值。正向证据包括 ExtAgents、MOSA 和专业化流水线；反例必须保留 SILO-BENCH 的 communication-reasoning gap、同质 debate、AgentSlimming 的冗余节点、Diversity Collapse 和 superficial success/internal breakdown。
+- 术语边界：Sub-Agent 是层级式 Multi-Agent 的子集；“Sub”来自目标、授权、责任、范围和生命周期的从属关系，不来自模型大小、价格或厂商。Tool call 没有独立目标与生命周期；parallel sampling/ensemble 不天然形成协作。Agent 评级使用任务分解、角色匹配、工具、状态、通信、验证、终止恢复、成本鲁棒性、安全权限九维向量，评价对象包含 model、harness、topology、orchestration 和 environment。
+- Codex/CCSM 表述边界保持不变：V1/V2 是当前材料的工程分期，不是学术统一标准；`description` 是语义 guidance，不是确定性硬路由；`task_name` 不替代 `agent_type`；CCSM 不重写 orchestrator、不解密 OpenAI ciphertext；Official→Official 保留原生语义；只有真实第三方 Provider 物化后才做消息投影；opaque ciphertext fail closed；TOML/构建存在不能替代真实 Child rollout、Provider 和 HTTP 证据。
+- 可重复验收：`node scripts/validate-subagent-academic-materials.mjs --papers docs/references/subagent-multiagent-2025-2026-papers.json --citations docs/codex-v2-subagent-third-party-adaptation-zh.md docs/presentations/codex-v2-subagent-report/index.html`；`node docs/presentations/codex-v2-subagent-report/content.test.mjs`；`node docs/presentations/codex-v2-subagent-report/style.test.mjs`；`node docs/presentations/codex-v2-subagent-report/browser.test.mjs artifacts/codex-v2-subagent-report/browser-audit.json`。真实浏览器报告覆盖 1280×720、900×650、三主题、仅一页 active、无横向溢出、不透明内容表面、论文弹窗、Esc、68 页总览和零 console error/warning。
+- 视觉证据位于 `artifacts/codex-v2-subagent-report/`，关键页截图导航后等待至少 1000ms。用户已有的未跟踪文件 `artifacts/design-audit/subagent-theme-2026-08-11/05-light-after.png` 仍属于无关用户文件，不得纳入提交。
+
 ## 2026-08-12 Sub-Agent 双主题工作台 3.19.1-22 发布准备
 
 - `3.19.1-22` 将 Sub-Agent 配置收敛为 MultiRouter 独立顶层工作区，并完成深浅双主题语义色：V1/V2 状态、选择策略、目录同步、模型折叠卡片、能力问卷、高级覆盖、TOML 预览和 sticky 保存栏都复用 MultiRouter 的蓝/青/绿/紫/红/琥珀层级。最终设计证据位于 `design-qa.md` 与 `artifacts/design-audit/subagent-theme-2026-08-11/{05-light-after,06-light-toml-after,07-dark-after,08-dark-toml-after}.jpg`，结论为 `final result: passed`；误生成的 15x15 `05-light-after.png` 只是光标图层，不得提交或作为验收证据。
