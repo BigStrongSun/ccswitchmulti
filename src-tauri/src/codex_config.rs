@@ -10835,7 +10835,7 @@ model_provider = "custom"
                 &flash,
                 "deepseek-v4-flash",
                 "DeepSeek V4 Flash worker for long-context code reading, read-heavy exploration, architecture tracing, parallel evidence collection, and lightweight verification.",
-                "medium",
+                "high",
             ),
             (
                 &pro,
