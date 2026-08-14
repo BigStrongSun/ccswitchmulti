@@ -118,6 +118,50 @@ export function applyCodexReasoningCapabilitySource(
   };
 }
 
+export function validateCodexReasoningCapabilityDraft(
+  capability: CodexModelReasoningCapability,
+): void {
+  const allowed = new Set<CodexReasoningEffort>([
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+    "ultra",
+  ]);
+  if (typeof capability?.supported !== "boolean") {
+    throw new Error("supported must be boolean");
+  }
+  if (
+    !Array.isArray(capability.supportedEfforts) ||
+    capability.supportedEfforts.some((effort) => !allowed.has(effort))
+  ) {
+    throw new Error("supportedEfforts contains an unknown Provider effort");
+  }
+  if (
+    capability.defaultEffort !== undefined &&
+    !capability.supportedEfforts.includes(capability.defaultEffort)
+  ) {
+    throw new Error("defaultEffort must be Provider-supported");
+  }
+  if (typeof capability.disableAllowed !== "boolean") {
+    throw new Error("disableAllowed must be boolean");
+  }
+  if (
+    !capability.upstream ||
+    typeof capability.upstream.parameter !== "string" ||
+    !capability.upstream.parameter.trim()
+  ) {
+    throw new Error("upstream.parameter must be nonempty");
+  }
+  for (const target of Object.values(capability.upstream.effortMap ?? {})) {
+    if (target && !capability.supportedEfforts.includes(target)) {
+      throw new Error(`mapping target ${target} is not Provider-supported`);
+    }
+  }
+}
+
 // 用小并发池执行真实上游探测，避免串行太慢，也避免一次性打爆供应商限流。
 async function runCodexProtocolProbePool(
   models: string[],
@@ -1234,11 +1278,17 @@ export function CodexFormFields({
       }
       try {
         const reasoning = JSON.parse(trimmed) as CodexCatalogModel["reasoning"];
+        if (!reasoning) {
+          throw new Error("reasoning capability must be an object");
+        }
+        validateCodexReasoningCapabilityDraft(reasoning);
         handleUpdateCatalogRow(index, {
-          reasoning: reasoning ? { ...reasoning, source: "user" } : undefined,
+          reasoning: { ...reasoning, source: "user" },
         });
-      } catch {
-        toast.error("推理能力 JSON 格式无效，未保存本次修改");
+      } catch (error) {
+        toast.error(
+          `推理能力 JSON 无效，未修改草稿：${error instanceof Error ? error.message : String(error)}`,
+        );
       }
     },
     [handleUpdateCatalogRow],
