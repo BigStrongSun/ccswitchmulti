@@ -1051,7 +1051,25 @@ mod tests {
                         "contextWindow": 1000000,
                         "inputModalities": ["text"],
                         "textOnly": true,
-                        "supportsImage": false
+                        "supportsImage": false,
+                        "reasoning": {
+                            "supported": true,
+                            "supportedEfforts": ["low", "high", "max"],
+                            "defaultEffort": "high",
+                            "disableAllowed": true,
+                            "upstream": {
+                                "format": "string",
+                                "parameter": "reasoning_effort",
+                                "effortMap": {
+                                    "low": "low",
+                                    "medium": "high",
+                                    "high": "high",
+                                    "xhigh": "high",
+                                    "max": "max"
+                                }
+                            },
+                            "source": "builtin"
+                        }
                     }] },
                     "codexRouting": {
                         "enabled": true,
