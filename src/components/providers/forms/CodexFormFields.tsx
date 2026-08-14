@@ -31,11 +31,8 @@ import {
   ChevronRight,
   ArrowDown,
   ArrowUp,
-  Download,
-  Loader2,
   Pencil,
   Plus,
-  Route,
   Trash2,
 } from "lucide-react";
 import EndpointSpeedTest from "./EndpointSpeedTest";
@@ -52,6 +49,7 @@ import {
 } from "@/lib/api/model-fetch";
 import { CustomUserAgentField } from "./CustomUserAgentField";
 import { LocalProxyRequestOverridesField } from "./LocalProxyRequestOverridesField";
+import { CodexProviderReadinessSection } from "./CodexProviderReadinessSection";
 import { cn } from "@/lib/utils";
 import { resolveFetchedCodexModelContextWindow } from "@/utils/codexModelContext";
 import {
@@ -244,6 +242,7 @@ interface CodexFormFieldsProps {
   providerName?: string;
   // xAI OAuth 托管预设（Grok 订阅）：隐藏 API Key / 端点输入，挂账号选择区块
   isXaiOauthPreset?: boolean;
+  isMaintainedPreset?: boolean;
   isXaiOauthAuthenticated?: boolean;
   selectedXaiAccountId?: string | null;
   onXaiAccountSelect?: (accountId: string | null) => void;
@@ -571,6 +570,7 @@ export function CodexFormFields({
   providerId,
   providerName,
   isXaiOauthPreset,
+  isMaintainedPreset = false,
   isXaiOauthAuthenticated,
   selectedXaiAccountId,
   onXaiAccountSelect,
@@ -684,13 +684,8 @@ export function CodexFormFields({
   const hasAnyAdvancedValue =
     !!customUserAgent ||
     hasRequestOverrides ||
-    catalogModels.length > 0 ||
-    codexRouting.enabled ||
-    (codexRouting.routes?.length ?? 0) > 0 ||
-    apiFormat === "openai_responses" ||
-    isAnthropicFormat ||
-    supportsThinking ||
-    supportsEffort ||
+    (!isMaintainedPreset &&
+      (isAnthropicFormat || supportsThinking || supportsEffort)) ||
     promptCacheRouting !== "auto" ||
     !!maxOutputTokens;
   const [advancedExpanded, setAdvancedExpanded] = useState(
@@ -732,10 +727,9 @@ export function CodexFormFields({
   }, [catalogRows]);
 
   const revealModelCatalogFetchAction = useCallback(() => {
-    setAdvancedExpanded(true);
     setProtocolProbeTone("warning");
     setProtocolProbeSummary(
-      "请先在上方“模型目录与上下文”点击“获取模型列表”，或手动添加模型后再测试。",
+      "请先在“模型与兼容性”同步模型，或在高级设置中手动添加至少一个模型后再验证。",
     );
     setShouldHighlightFetchModels(true);
     window.setTimeout(() => {
@@ -1393,29 +1387,6 @@ export function CodexFormFields({
   const splitRoutingProviderName = providerName?.trim() || "provider";
   const pendingResponsesModels = pendingSplitRouting?.responsesModels ?? [];
   const pendingChatModels = pendingSplitRouting?.chatModels ?? [];
-
-  const renderFetchModelsButton = () => (
-    <Button
-      ref={fetchModelsButtonRef}
-      type="button"
-      variant="default"
-      size="sm"
-      onClick={handleFetchModels}
-      disabled={isFetchingModels}
-      className={cn(
-        "h-8 gap-1 border border-blue-700 bg-blue-600 px-3 text-white shadow-sm hover:bg-blue-700 dark:border-blue-400 dark:bg-blue-500 dark:hover:bg-blue-600",
-        shouldHighlightFetchModels &&
-          "border-blue-500 bg-blue-50 text-blue-700 shadow-[0_0_0_3px_rgba(59,130,246,0.18)] dark:bg-blue-950/40 dark:text-blue-200",
-      )}
-    >
-      {isFetchingModels ? (
-        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-      ) : (
-        <Download className="h-3.5 w-3.5" />
-      )}
-      {t("providerForm.fetchModels")}
-    </Button>
-  );
 
   const renderCatalogActionButtons = (onAdd: () => void, addLabel: string) => (
     <div className="flex gap-1">
@@ -2083,7 +2054,31 @@ export function CodexFormFields({
         </DialogContent>
       </Dialog>
 
-      {/* 高级选项 —— 模型目录、Codex 菜单映射、协议检测、思考能力、自定义 UA；预设供应商通常无需展开 */}
+      {category !== "official" && canEditCatalog && (
+        <CodexProviderReadinessSection
+          models={catalogRows}
+          defaultModel={codexModel}
+          apiFormat={apiFormat}
+          isMaintainedPreset={isMaintainedPreset}
+          isSyncingModels={isFetchingModels}
+          isValidatingConnection={isProbingProtocol}
+          validationSummary={protocolProbeSummary}
+          validationTone={protocolProbeTone}
+          highlightSync={shouldHighlightFetchModels}
+          syncButtonRef={fetchModelsButtonRef}
+          sectionRef={modelMappingSectionRef}
+          onSyncModels={handleFetchModels}
+          onValidateConnection={() => {
+            setProtocolProbeTone("muted");
+            setProtocolProbeSummary(
+              "已打开验证确认框；如果没有看到弹窗，请按 Esc 后重试。",
+            );
+            setIsProtocolProbeConfirmOpen(true);
+          }}
+        />
+      )}
+
+      {/* 高级选项只保留手动协议与模型能力覆盖、请求覆盖和目录明细。 */}
       {category !== "official" && (
         <Collapsible
           open={advancedExpanded}
@@ -2116,37 +2111,6 @@ export function CodexFormFields({
             </p>
           )}
           <CollapsibleContent className="space-y-3 pt-3">
-            {canEditCatalog && (
-              <div
-                ref={modelMappingSectionRef}
-                className="space-y-2 rounded-md border border-border-default bg-muted/20 p-3"
-              >
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div className="space-y-1">
-                    <FormLabel>
-                      {t("codexConfig.modelListPrepareTitle", {
-                        defaultValue: "模型目录与上下文",
-                      })}
-                    </FormLabel>
-                    <p className="text-xs leading-relaxed text-muted-foreground">
-                      {t("codexConfig.modelListPrepareHint", {
-                        defaultValue:
-                          "先获取或手动添加模型，再维护上下文窗口和测试 Chat / Responses；此步骤与“在 Codex /model 菜单中显示”开关无关。",
-                      })}
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs text-muted-foreground">
-                      {catalogRows.length > 0
-                        ? `${catalogRows.length} 个已记录模型`
-                        : "尚未记录模型"}
-                    </span>
-                    {renderFetchModelsButton()}
-                  </div>
-                </div>
-              </div>
-            )}
-
             {/* 上游格式与协议探测沿用 shouldShowSpeedTest 门控，
                 cloud_provider 保持不可切换；xAI OAuth 托管预设格式固定为 Responses。 */}
             {shouldShowSpeedTest && !isXaiOauthPreset && (
@@ -2277,53 +2241,7 @@ export function CodexFormFields({
                     </div>
                   )}
                   <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-xs leading-relaxed text-amber-900 dark:text-amber-200">
-                    不确定该选哪个时，可以测试 Chat /
-                    Responses。测试前需要先在“模型目录与上下文”里获取模型列表或手动添加模型；测试会发送真实模型请求，
-                    输出上限为
-                    1024，可能产生少量额度或流量消耗。通过只代表基础协议入口可用，不等于完整
-                    Codex 功能验证。
-                  </div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <Button
-                      type="button"
-                      variant="default"
-                      size="sm"
-                      className="gap-1 border border-amber-700 bg-amber-500 text-white shadow-sm hover:bg-amber-600 dark:border-amber-300 dark:bg-amber-500 dark:hover:bg-amber-600"
-                      disabled={isProbingProtocol}
-                      onClick={() => {
-                        setProtocolProbeTone("muted");
-                        setProtocolProbeSummary(
-                          "已打开测试确认框；如果没有看到弹窗，请按 Esc 后重试。",
-                        );
-                        setIsProtocolProbeConfirmOpen(true);
-                      }}
-                    >
-                      {isProbingProtocol ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : (
-                        <Route className="h-3.5 w-3.5" />
-                      )}
-                      测试 Chat / Responses
-                    </Button>
-                    {protocolProbeSummary && (
-                      <span
-                        role={
-                          protocolProbeTone === "error" ? "alert" : "status"
-                        }
-                        className={cn(
-                          "text-xs leading-relaxed",
-                          protocolProbeTone === "success" &&
-                            "text-emerald-700 dark:text-emerald-300",
-                          protocolProbeTone === "warning" &&
-                            "text-amber-700 dark:text-amber-300",
-                          protocolProbeTone === "error" && "text-destructive",
-                          protocolProbeTone === "muted" &&
-                            "text-muted-foreground",
-                        )}
-                      >
-                        {protocolProbeSummary}
-                      </span>
-                    )}
+                    上游格式通常由维护预设或主流程的连接验证确定。只有自动识别不正确时才在这里手动覆盖；验证会发送真实模型请求，可能产生少量额度或流量消耗。
                   </div>
                 </div>
               </div>

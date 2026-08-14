@@ -36,10 +36,7 @@ describe("CodexProviderReadinessSection", () => {
   it("shows maintained preset ownership and a routable state without asking for protocol selection", () => {
     render(
       <CodexProviderReadinessSection
-        models={[
-          { model: "deepseek-v4-flash" },
-          { model: "deepseek-v4-pro" },
-        ]}
+        models={[{ model: "deepseek-v4-flash" }, { model: "deepseek-v4-pro" }]}
         defaultModel="deepseek-v4-flash"
         apiFormat="openai_responses"
         isMaintainedPreset
