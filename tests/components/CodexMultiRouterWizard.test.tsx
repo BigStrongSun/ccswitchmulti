@@ -137,6 +137,28 @@ describe("CodexMultiRouterWizard", () => {
     ).toBeInTheDocument();
   });
 
+  it("keeps runtime validation in the workspace and history repair as an independent Sessions action", () => {
+    renderWithQueryClient(
+      <CodexMultiRouterWizard
+        open
+        providers={[provider()]}
+        onOpenChange={vi.fn()}
+        onCreateProvider={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+        onEnablePlan={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByText(
+        "启用后在状态页完成真实请求验证；历史记录修复可按需从 Sessions 独立进入",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("启用后等待真实请求成功，再带你修复历史记录"),
+    ).not.toBeInTheDocument();
+  });
+
   it("keeps V1 and V2 settings out of the four routing stages", () => {
     renderWithQueryClient(
       <CodexMultiRouterWizard
