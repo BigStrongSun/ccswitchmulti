@@ -16,6 +16,7 @@ import {
   ScrollText,
   HardDriveDownload,
   FlaskConical,
+  Code2,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -52,6 +53,7 @@ import { UsageDashboard } from "@/components/usage/UsageDashboard";
 import { LogConfigPanel } from "@/components/settings/LogConfigPanel";
 import { AuthCenterPanel } from "@/components/settings/AuthCenterPanel";
 import { CodexAuthSettings } from "@/components/settings/CodexAuthSettings";
+import { CodexGlobalConfigSettings } from "@/components/settings/CodexGlobalConfigSettings";
 import { useInstalledSkills } from "@/hooks/useSkills";
 import { useSettings } from "@/hooks/useSettings";
 import { useImportExport } from "@/hooks/useImportExport";
@@ -498,6 +500,28 @@ export function SettingsPage({
                         </AccordionTrigger>
                         <AccordionContent className="px-6 pb-6 pt-4 border-t border-border/50">
                           <LogConfigPanel />
+                        </AccordionContent>
+                      </AccordionItem>
+
+                      <AccordionItem
+                        value="codexGlobalConfig"
+                        className="rounded-xl glass-card overflow-hidden"
+                      >
+                        <AccordionTrigger className="px-6 py-4 hover:no-underline hover:bg-muted/50 data-[state=open]:bg-muted/50">
+                          <div className="flex items-center gap-3">
+                            <Code2 className="h-5 w-5 text-violet-500" />
+                            <div className="text-left">
+                              <h3 className="text-base font-semibold">
+                                Codex 全局配置
+                              </h3>
+                              <p className="text-sm font-normal text-muted-foreground">
+                                管理 Goal mode 和跨 Provider 共享的 Codex TOML
+                              </p>
+                            </div>
+                          </div>
+                        </AccordionTrigger>
+                        <AccordionContent className="border-t border-border/50 px-6 pt-4 pb-6">
+                          <CodexGlobalConfigSettings />
                         </AccordionContent>
                       </AccordionItem>
                     </Accordion>
