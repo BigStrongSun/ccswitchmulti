@@ -1,5 +1,35 @@
 # CC Switch Repository Memory
 
+## 2026-08-14 主 Agent / Sub-Agent 推理强度协调设计（待实施）
+
+- Codex 当前原生 `ReasoningEffort` 已包含 `none/minimal/low/medium/high/xhigh/max/ultra/custom`，但目标模型 spawn 只接受其 catalog `supported_reasoning_levels` 中的值。`ultra` 还参与 Codex 主动多 Agent 行为；Provider 未声明 ultra 时不得默认映射到 max。
+- “自动获取”只解析 Provider/模型能力，不负责根据 Sub-Agent 任务算出并固定 effort。能力来源和运行策略必须拆开：前者为自动发现/受维护声明/手动声明；后者为允许主 Agent 或 spawn 指定、使用模型默认（固定）、固定档位、关闭推理。
+- Codex spawn 的真实顺序：先继承父线程当前 effort（缺少则父 catalog 默认）；`spawn_agent.reasoning_effort` 覆盖 `[agents].default_subagent_reasoning_effort`；spawn 换模型且仍无 effort 时使用目标 catalog 默认；随后 role TOML 显式 `model_reasoning_effort` 以高优先级覆盖，未写则保留；最终按目标 catalog 校验。不存在统一的 Sub-Agent 默认 high。
+- `是否开启推理`需要结构化运行策略，但只能在能力确认可关闭时启用。Codex catalog 需包含 `none` 才能通过 spawn 校验；Responses 映射 effort=none，DeepSeek Chat 映射 `thinking.type=disabled`，boolean-only Provider 使用自己的关闭参数。
+- DeepSeek 2026-08-14 当前官方文档：思考默认开启、默认 effort=high，可关闭；原生 effort 为 low/high/max，medium/xhigh 实际映射 high。现有 CCSM `disableAllowed=false` 已落后于官方事实，后续实现必须校准。
+- 设计规范位于 `docs/superpowers/specs/2026-08-14-codex-main-subagent-reasoning-coordination-design.md`；实现前需先写实施计划，并通过主 picker、真实 spawn、角色 TOML 回读和代理上游请求四层证据验收。
+
+## 2026-08-14 Sub-Agent V2 推理强度预设读取审计（待修）
+
+- CCSwitchMulti 的模型级 reasoning 能力单一来源是 Provider `modelCatalog.models[].reasoning`：维护 `supportedEfforts/defaultEffort/disableAllowed/upstream/source`，Rust 再投影为 Codex catalog 的 `supported_reasoning_levels/default_reasoning_level` 及 Desktop aliases。DeepSeek V4 当前内置能力为 `low/high/max`、默认 `high`；这不是登录 DeepSeek API 后动态查询得到，而是 CCSM 维护的官方资料预设，也允许用户用 `source=user` 高级覆盖。
+- Sub-Agent V2 当前没有读取上述模型级 reasoning capability。前端问卷固定提供 `auto/low/medium/high/xhigh`，Rust 的 `QuestionnaireReasoningEffort` 与 `ModelReasoningEffort` 同样没有 `max`；编译器只把 catalog 的 provider kind/context window 带入角色生成，最终 effort 完全由 profile 手工覆盖、问卷显式值或 `auto_effort()` 规则决定。
+- `auto_effort()` 的当前优先级是：`overrides.modelReasoningEffort` > 问卷显式档位 > 复杂调试/架构/复杂实现/高风险审查强制 `high` > 速度优先且全部只读强项用 `low` > 其他 `medium`。生成的 role TOML 总会写 `model_reasoning_effort`，因此它会覆盖模型 catalog 默认值；对 DeepSeek V4 可能生成厂商未声明的 `medium/xhigh`，同时无法选择 `max`。这是模型 catalog 与 Sub-Agent V2 之间尚未收口的真实缺口，不能把主模型目录正确显示 `low/high/max` 误认为 Sub-Agent 已动态读取。
+- 后续根修应让 Sub-Agent profile compiler 接收 resolved model reasoning capability，以模型支持集合约束 UI、校验手工值；旧 `auto` 应迁移为允许主 Agent / spawn 按 Codex 原生优先级指定，不再由任务问卷算档并固定。模型默认值应作为单独、显式固定的运行策略；未知模型继续保守处理，不能套 GPT 通用档位。本轮只完成读取链审计与说明，没有修改运行行为。
+- 官方 OpenAI 文档确认 `model_reasoning_effort` 只对支持该档位的模型有效，custom agent 文件显式设置会固定子 Agent effort；DeepSeek 官方 2026-08-13 changelog 确认 V4-Pro/Flash 三档为 `low/high/max`。Codex 内置搜索、Matrix WebSearch 独立链和当前源码结论一致；Matrix 泛搜命中的“只支持三档 low/medium/high”二手文章与当前官方文档冲突，未采信。
+- 真实主机核验补充：当前安装运行的是健康的 CCSwitchMulti `3.19.1-21`（`127.0.0.1:15721/health` HTTP 200），它在 2026-08-14 21:50 左右重写的 `~/.codex/cc-switch-model-catalog.json` 仍把 DeepSeek V4 Flash/Pro 生成为通用 `low/medium/high/xhigh`、默认 `medium`；同批 `agents/deepseek-v4-flash.toml` 明确写 `medium`，Pro 写 `high`。因此“当前主界面已正确显示厂商档位”与本机持久化事实不符；`3.19.1-25` 源码的主目录根修尚未安装到该运行实例。
+- 当前分支与安装版要分开判断：`3.19.1-25` 源码已让主 model catalog 按 DeepSeek `low/high/max`、默认 `high` 投影，但 Sub-Agent V2 的 `CatalogModel` 仍只携带 model/provider kind/routable/context window，reasoning capability 在进入 profile compiler 前丢失。现有前端测试夹具甚至把 `deepseek-v4-flash` preview 固定为 `medium`，说明错误假设已经被测试固化。
+- 影响不只在 UI。Responses→Chat 转换的 capability 模式会检查请求 effort 是否属于 `supportedEfforts`，不属于时返回 `TransformError: reasoning effort ... is not supported`；现有 Step 2603 回归测试已证明该拒绝路径。若 DeepSeek 路由使用已物化的 `low/high/max` capability，而 Sub-Agent role 仍发 `medium/xhigh`，请求会在 CCSM 转换层失败；走旧推断 fallback 时又可能被静默钳成 `high/max`，形成同一错误配置在不同路径表现不一致的第二层风险。
+- “预设是手写的”不是单独根因：第三方 API 普遍没有统一的 capability introspection，CCSM 依据厂商一手资料维护内置预设并允许 `source=user` 覆盖是合理边界。根因是同一能力被 Provider catalog、Sub-Agent 固定枚举/auto 算法和 legacy 推断分别表达，且没有把 resolved capability 作为端到端单一契约传递、校验和展示。
+
+## 2026-08-14 Sub-Agent V2 编辑、写入回读与输入模态根修
+
+- 用户反馈有两条同源缺口：模型卡片缺少明确“编辑”动作，保存后也没有证据说明更改是否真正进入 Codex；同时 V2 profile 只记录任务优势/写入范围/推理强度，完全丢失文本与图像输入能力，导致 DeepSeek V4 与 ChatGPT 生成同类 role 描述。RED 提交 `ff739720` 证明前端会在缺少回读响应时仍显示成功，Rust schema 往返把 `inputModalities` 变成 `null`。
+- GREEN 提交 `c3e7311c` 把 `inputModalities` 作为 profile 结构化字段，合法显式值只有 `["text"]` 与 `["text","image"]`，未知能力继续保守未声明。来源优先级为 profile 显式覆盖 > `modelCatalog` 的 `inputModalities/textOnly/supportsImage/vision` > 既有后端保守模型识别；保存、初始化、目录同步和无效 profile 恢复都会把已知目录能力显式写回 V2 JSON。前端在旧 profile 尚未重存时也直接显示目录推导值，并为每张模型卡提供独立“编辑”按钮。
+- capability 安全文案必须追加到 `description` 和 `developer_instructions`，手工覆盖基础文案也不能静默去掉：多模态角色明确支持 image input / image understanding；纯文本角色明确不能接收图像，且不得用于依赖图像理解的任务。这样 Codex 的 role 选择说明与执行约束都能区分 ChatGPT 类图文模型和 DeepSeek V4 纯文本模型。
+- focused mutation 的新事务结果同时返回 `projection` 与 `verification`：`databasePersisted`、`roleFilesStatus=verified|not_required|pending_retry|failed`、逐文件绝对路径/存在性/内容一致性，以及固定 `restart_codex_and_start_new_session` 激活边界。当前方案在原子写 TOML 后重新编译期望内容并逐文件回读精确比对；非当前方案明确 `not_required`，不能声称修改了 live Codex；缺少验证、状态矛盾或内容不匹配时前端必须报错，禁止显示保存成功。
+- Codex Desktop 当前会话的 custom-agent role 列表可能在会话配置快照中保持旧值。CCSwitchMulti 能证明数据库和 `~/.codex/agents/*.toml` 已一致，但不能通过自己不拥有的 app-server stdio 连接保证运行中 turn 立即热加载；产品文案继续要求重启 Codex/app-server 并新建会话。官方 Codex 文档确认 personal custom agents 位于 `~/.codex/agents/*.toml`，核心字段为 `name/description/developer_instructions`，`description` 用于角色选择；Codex 内置搜索与 Matrix WebSearch 两条独立链结论一致，无来源冲突。
+- 聚焦验收：Vitest V2 editor `110/110`；Rust `codex_subagent_v2_` `98/98`；真实隔离 home 的 current-provider 测试完成 SQLite 保存、原子生成 managed TOML、回读一致性和纯文本安全文案检查；`pnpm typecheck`、`cargo fmt --check`、`git diff --check` 通过。变更文件经 UTF-8 strict 解码，无 BOM、无 U+FFFD。既有 `openai_cache_read_tokens` dead-code warning 与本功能无关。
+
 ## 2026-08-14 CCSwitchMulti 3.19.1-24 阻断 Codex Windows setup 根修
 
 - 用户与多名使用者看到 Codex Desktop `Finish Windows setup` / `Windows setup didn't finish`，点击重试不弹 UAC。同机把 CCSwitchMulti 从 `3.19.1-24` 降回 `3.19.1-23` 后立即恢复；这不是 UAC helper、`[windows] sandbox` 或 Codex MSIX ACL 本身损坏。
