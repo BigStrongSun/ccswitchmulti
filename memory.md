@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-08-14 CCSwitchMulti 3.19.1-24 阻断 Codex Windows setup 根修
+
+- 用户与多名使用者看到 Codex Desktop `Finish Windows setup` / `Windows setup didn't finish`，点击重试不弹 UAC。同机把 CCSwitchMulti 从 `3.19.1-24` 降回 `3.19.1-23` 后立即恢复；这不是 UAC helper、`[windows] sandbox` 或 Codex MSIX ACL 本身损坏。
+- MODT 的 Codex Desktop `0.147.0-alpha.6.6` 日志给出完整调用链：`cc-switch-model-catalog.json` 的未知第三方模型缺少 `supported_reasoning_levels`，令 `config/read` 失败；点击重试时 `windowsSandbox/setupStart` 也在读取配置阶段返回 `invalid_config`，因此 `codex-windows-sandbox-setup.exe` 根本没有启动，UAC 自然不会出现。
+- 根因来自 `3.19.1-24` 的推理能力收口：为了不让未知第三方模型继承 GPT effort，`apply_codex_model_reasoning_capability()` 删除了模板的 reasoning 字段后直接返回。Codex `ModelInfo.default_reasoning_level` 是可选字段，但 `supported_reasoning_levels: Vec<_>` 没有 serde default，是 JSON 必填字段；官方源码的无 reasoning 示例也使用空数组而不是省略字段。
+- 正确语义是：未知或明确不支持 reasoning 的模型写 `supported_reasoning_levels: []`，同时省略默认 effort 和 Desktop reasoning aliases；声明能力的 DeepSeek/GLM/Grok/Step 等继续覆盖各自真实档位。禁止用恢复 GPT 通用档位来规避解析错误。
+- RED 提交 `c59e2642` 在旧实现稳定得到 `left=None / right=Some(Array [])`；GREEN 提交 `d56aa840` 只补必填空数组，两个现场回归测试与 `codex_model_catalog` 聚焦套件 24/24 通过。验证时应额外检查真实 Codex `config/read` 和 `windowsSandbox/setupStart`，不能只看 catalog JSON 能被通用 JSON parser 读取。
+
 ## 2026-08-14 CCSwitchMulti v3.19.1-24 Codex 推理能力正式发布
 
 - `v3.19.1-24` 以公开 `v3.19.1-23@d87312f4` 为基线移植逐模型 reasoning capability，避免直接发布旧功能分支而回退 v20-v23 的 Sub-Agent 工作台、事务安装器、更新器、macOS 与配置解析修复。发布提交为 `8168c488ea7ee0f4dc4c3af6ac4833b9311ad057`，annotated tag object 为 `8728c1fc7d990d9c6b43aca66e336ef121b2e63f`，本地与远端 peeled commit 均精确指向发布提交；发布后 memory 提交不得移动该 tag。
