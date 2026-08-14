@@ -273,6 +273,7 @@ interface CodexFormFieldsProps {
   // Codex 菜单映射开关；仅控制是否把目录投射到 /model 菜单，不再控制目录/上下文的编辑和保存。
   takeoverEnabled?: boolean;
   onTakeoverEnabledChange?: (enabled: boolean) => void;
+  allowModelMenuProjectionToggle?: boolean;
 
   codexModel?: string;
   onModelChange?: (model: string) => void;
@@ -594,6 +595,7 @@ export function CodexFormFields({
   onAutoSelectChange,
   takeoverEnabled = false,
   onTakeoverEnabledChange = () => undefined,
+  allowModelMenuProjectionToggle = true,
   codexModel = "",
   onModelChange,
   apiFormat,
@@ -2327,37 +2329,6 @@ export function CodexFormFields({
               </div>
             )}
 
-            {/* 模型菜单投影属于 Provider 自身设置，不依赖测速/协议探测能力。 */}
-            {appId === "codex" && !isXaiOauthPreset && (
-              <div className="flex items-center justify-between gap-4 rounded-md border border-blue-200 bg-blue-50/60 p-3 dark:border-blue-900/60 dark:bg-blue-950/20">
-                <div className="space-y-1">
-                  <FormLabel>
-                    {t("codexConfig.localRoutingToggle", {
-                      defaultValue: "在 Codex /model 菜单中显示",
-                    })}
-                  </FormLabel>
-                  <p className="text-xs leading-relaxed text-muted-foreground">
-                    {takeoverEnabled
-                      ? t("codexConfig.localRoutingOnHint", {
-                          defaultValue:
-                            "开启后会把“模型目录与上下文”投射到 Codex /model 菜单，并让可见模型名映射到真实上游模型。",
-                        })
-                      : t("codexConfig.localRoutingOffHint", {
-                          defaultValue:
-                            "关闭时仍会保存 /models 列表和上下文窗口，但不改写 Codex /model 菜单；适合 Responses 原生、直接使用真实模型名的 provider。",
-                        })}
-                  </p>
-                </div>
-                <Switch
-                  checked={takeoverEnabled}
-                  onCheckedChange={onTakeoverEnabledChange}
-                  aria-label={t("codexConfig.localRoutingToggle", {
-                    defaultValue: "在 Codex /model 菜单中显示",
-                  })}
-                />
-              </div>
-            )}
-
             {takeoverEnabled && isChatFormat && canEditReasoning && (
               <div
                 className={cn(
@@ -2806,6 +2777,52 @@ export function CodexFormFields({
                 />
               </div>
             </div>
+
+            {/* 仅自定义 Provider 可以退出 CCSwitchMulti 的目录管理；维护预设始终投影正确目录。 */}
+            {appId === "codex" &&
+              !isXaiOauthPreset &&
+              allowModelMenuProjectionToggle && (
+                <div className="flex items-center justify-between gap-4 rounded-md border border-blue-200 bg-blue-50/60 p-3 dark:border-blue-900/60 dark:bg-blue-950/20">
+                  <div className="space-y-1.5">
+                    <FormLabel>
+                      {t("codexConfig.localRoutingToggle", {
+                        defaultValue: "在 Codex /model 菜单中显示",
+                      })}
+                    </FormLabel>
+                    <p className="text-xs leading-relaxed text-muted-foreground">
+                      {t("codexConfig.localRoutingDescription", {
+                        defaultValue:
+                          "开启后，CCSwitchMulti 会生成 Codex 启动时加载的模型目录，让这里配置的模型、显示名、上下文窗口和推理档位出现在 /model 中，并把显示名映射到真实上游模型。它不控制 Provider、代理或 MultiRouter 是否可用；仅当你要使用自己维护的 model_catalog_json 时关闭。",
+                      })}
+                    </p>
+                    <p
+                      className={cn(
+                        "text-xs leading-relaxed",
+                        takeoverEnabled
+                          ? "text-muted-foreground"
+                          : "text-amber-700 dark:text-amber-300",
+                      )}
+                    >
+                      {takeoverEnabled
+                        ? t("codexConfig.localRoutingOnHint", {
+                            defaultValue:
+                              "推荐保持开启。模型目录会在下次 Codex 启动时加载。",
+                          })
+                        : t("codexConfig.localRoutingOffHint", {
+                            defaultValue:
+                              "当前已关闭：Provider 和直接指定的真实模型仍可使用，目录数据也会继续保存，但 Codex /model 不再获得这些模型、别名、上下文窗口和推理档位。仅当你要使用自己维护的 model_catalog_json 时关闭。",
+                          })}
+                    </p>
+                  </div>
+                  <Switch
+                    checked={takeoverEnabled}
+                    onCheckedChange={onTakeoverEnabledChange}
+                    aria-label={t("codexConfig.localRoutingToggle", {
+                      defaultValue: "在 Codex /model 菜单中显示",
+                    })}
+                  />
+                </div>
+              )}
           </CollapsibleContent>
         </Collapsible>
       )}

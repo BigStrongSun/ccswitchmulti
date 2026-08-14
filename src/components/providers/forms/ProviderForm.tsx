@@ -854,7 +854,7 @@ function ProviderFormFull({
       resetCodexConfig(template.auth, template.config);
       setCodexChatReasoning({});
       setCodexRouting({ enabled: false, defaultRouteId: "", routes: [] });
-      setCodexTakeoverEnabled(false);
+      setCodexTakeoverEnabled(true);
       setPromptCacheRouting("auto");
     }
   }, [appId, initialData, selectedPresetId, resetCodexConfig, setCodexRouting]);
@@ -928,29 +928,32 @@ function ProviderFormFull({
     return preset && "providerType" in preset ? preset.providerType : undefined;
   }, [presetEntries, selectedPresetId]);
 
-  const codexPresetBaseline = useMemo(() => {
-    if (appId !== "codex") return [];
+  const maintainedCodexPreset = useMemo(() => {
+    if (appId !== "codex") return undefined;
     const selectedPreset = selectedPresetId
       ? (presetEntries.find((entry) => entry.id === selectedPresetId)
           ?.preset as CodexProviderPreset | undefined)
       : undefined;
     const identity =
       selectedPreset?.presetKey ?? initialData?.meta?.codexPresetId;
-    if (!identity) return [];
-    const preset = identity.startsWith("codex-")
+    if (!identity) return undefined;
+    return identity.startsWith("codex-")
       ? (presetEntries.find((entry) => entry.id === identity)?.preset as
           | CodexProviderPreset
           | undefined)
       : codexProviderPresets.find(
           (candidate) => candidate.presetKey === identity,
         );
-    return preset?.modelCatalog ?? [];
   }, [
     appId,
     initialData?.meta?.codexPresetId,
     presetEntries,
     selectedPresetId,
   ]);
+  const codexPresetBaseline = maintainedCodexPreset?.modelCatalog ?? [];
+  const isMaintainedCodexPreset = Boolean(maintainedCodexPreset);
+  const effectiveCodexMenuProjection =
+    isMaintainedCodexPreset || codexTakeoverEnabled;
 
   const {
     templateValues,
@@ -1835,7 +1838,7 @@ function ProviderFormFull({
       codexChatReasoning:
         appId === "codex" &&
         category !== "official" &&
-        codexTakeoverEnabled &&
+        effectiveCodexMenuProjection &&
         localCodexApiFormat === "openai_chat"
           ? normalizeCodexChatReasoningForSave(codexChatReasoning, {
               providerName: form.getValues("name"),
@@ -1851,7 +1854,7 @@ function ProviderFormFull({
           : undefined,
       codexLocalModelMapping:
         appId === "codex" && category !== "official"
-          ? codexTakeoverEnabled
+          ? effectiveCodexMenuProjection
           : undefined,
       promptCacheRouting:
         appId === "codex" &&
@@ -2624,8 +2627,9 @@ function ProviderFormFull({
                 }
                 autoSelect={endpointAutoSelect}
                 onAutoSelectChange={setEndpointAutoSelect}
-                takeoverEnabled={codexTakeoverEnabled}
+                takeoverEnabled={effectiveCodexMenuProjection}
                 onTakeoverEnabledChange={setCodexTakeoverEnabled}
+                allowModelMenuProjectionToggle={!isMaintainedCodexPreset}
                 codexModel={codexModel}
                 onModelChange={handleCodexModelChange}
                 apiFormat={localCodexApiFormat}

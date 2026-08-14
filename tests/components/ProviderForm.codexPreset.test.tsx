@@ -68,6 +68,7 @@ vi.mock("@/components/providers/forms/CodexFormFields", () => ({
     catalogModels,
     presetCatalogModels,
     takeoverEnabled,
+    allowModelMenuProjectionToggle,
     onApiKeyChange,
     onCatalogModelsChange,
   }: {
@@ -80,6 +81,7 @@ vi.mock("@/components/providers/forms/CodexFormFields", () => ({
     }>;
     presetCatalogModels?: Array<{ model: string; reasoning?: unknown }>;
     takeoverEnabled: boolean;
+    allowModelMenuProjectionToggle?: boolean;
     onApiKeyChange?: (value: string) => void;
     onCatalogModelsChange?: (
       models: Array<{ model: string; contextWindow?: number | string }>,
@@ -90,6 +92,9 @@ vi.mock("@/components/providers/forms/CodexFormFields", () => ({
       <div data-testid="codex-base-url">{codexBaseUrl}</div>
       <div data-testid="codex-takeover">
         {takeoverEnabled ? "enabled" : "disabled"}
+      </div>
+      <div data-testid="codex-menu-projection-editability">
+        {allowModelMenuProjectionToggle ? "editable" : "managed"}
       </div>
       <div data-testid="codex-catalog">
         {(catalogModels ?? []).map((model) => model.model).join(",")}
@@ -149,6 +154,42 @@ describe("ProviderForm Codex preset selection", () => {
     });
   });
 
+  it("forces a saved maintained preset back to model menu projection", async () => {
+    const onSubmit = vi.fn();
+    renderProviderForm({
+      showButtons: true,
+      submitLabel: "保存",
+      onSubmit,
+      initialData: {
+        name: "Zhipu legacy opt-out",
+        category: "custom",
+        settingsConfig: {
+          auth: { OPENAI_API_KEY: "sk-test" },
+          config:
+            'model_provider = "zhipu"\nmodel = "glm-5.2"\n[model_providers.zhipu]\nbase_url = "https://open.bigmodel.cn/api/coding/paas/v4"\nwire_api = "responses"\n',
+          modelCatalog: { models: [{ model: "glm-5.2" }] },
+        },
+        meta: {
+          apiFormat: "openai_responses",
+          codexLocalModelMapping: false,
+          codexPresetId: "zhipu-glm-cn",
+        },
+      },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("codex-takeover")).toHaveTextContent("enabled");
+      expect(
+        screen.getByTestId("codex-menu-projection-editability"),
+      ).toHaveTextContent("managed");
+    });
+    fireEvent.click(screen.getByRole("button", { name: "mock-set-api-key" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+    expect(onSubmit.mock.calls[0][0].meta.codexLocalModelMapping).toBe(true);
+  });
+
   it("does not scroll when applying the default Codex source preset on mount", async () => {
     const scrollIntoView = vi.fn();
     Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
@@ -181,6 +222,9 @@ describe("ProviderForm Codex preset selection", () => {
       expect(screen.getByTestId("codex-base-url")).toHaveTextContent(
         "https://api.deepseek.com",
       );
+      expect(
+        screen.getByTestId("codex-menu-projection-editability"),
+      ).toHaveTextContent("managed");
     });
     expect(scrollIntoView).toHaveBeenCalledWith({
       behavior: "smooth",
@@ -330,6 +374,10 @@ describe("ProviderForm Codex preset selection", () => {
       expect(screen.getByTestId("codex-catalog")).toHaveTextContent("glm-5.2");
     });
     fireEvent.click(screen.getByRole("button", { name: "自定义模型源" }));
+    expect(screen.getByTestId("codex-takeover")).toHaveTextContent("enabled");
+    expect(
+      screen.getByTestId("codex-menu-projection-editability"),
+    ).toHaveTextContent("editable");
     fireEvent.change(screen.getByRole("textbox", { name: "provider.name" }), {
       target: { value: "Custom source" },
     });
