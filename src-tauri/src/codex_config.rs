@@ -9911,7 +9911,7 @@ openai_base_url = "http://127.0.0.1:15721/v1"
     }
 
     #[test]
-    /// DeepSeek V4 的原生 effort 枚举不能继承通用 GPT ProxyChat 模板。
+    /// DeepSeek V4 保留原生 effort 集合，并只投影已经确认的 Codex 映射键。
     fn codex_model_catalog_uses_deepseek_v4_reasoning_capabilities() {
         let template = json!({
             "slug": "gpt-5.5",
@@ -9939,12 +9939,20 @@ openai_base_url = "http://127.0.0.1:15721/v1"
                     supported: true,
                     supported_efforts: vec!["low".into(), "high".into(), "max".into()],
                     default_effort: Some("high".into()),
-                    disable_allowed: false,
+                    disable_allowed: true,
                     upstream:
                         crate::proxy::providers::codex_reasoning::CodexModelReasoningUpstream {
-                            format: "reasoning_object".into(),
-                            parameter: "reasoning.effort".into(),
-                            effort_map: Default::default(),
+                            format: "string".into(),
+                            parameter: "reasoning_effort".into(),
+                            effort_map: [
+                                ("low".into(), "low".into()),
+                                ("medium".into(), "high".into()),
+                                ("high".into(), "high".into()),
+                                ("xhigh".into(), "high".into()),
+                                ("max".into(), "max".into()),
+                            ]
+                            .into_iter()
+                            .collect(),
                         },
                     output_format: None,
                     source: Some("builtin".into()),
@@ -9974,8 +9982,15 @@ openai_base_url = "http://127.0.0.1:15721/v1"
 
         assert_eq!(entry["default_reasoning_level"], "high");
         assert_eq!(entry["defaultReasoningEffort"], "high");
-        assert_eq!(levels, vec!["low", "high", "max"]);
-        assert_eq!(desktop_levels, vec!["low", "high", "max"]);
+        assert_eq!(
+            levels,
+            vec!["none", "low", "medium", "high", "xhigh", "max"]
+        );
+        assert_eq!(
+            desktop_levels,
+            vec!["none", "low", "medium", "high", "xhigh", "max"]
+        );
+        assert!(!levels.contains(&"ultra"));
     }
 
     #[test]

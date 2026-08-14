@@ -57,7 +57,18 @@ describe("Codex preset reasoning capabilities", () => {
         supported: true,
         supportedEfforts: ["low", "high", "max"],
         defaultEffort: "high",
-        disableAllowed: false,
+        disableAllowed: true,
+        upstream: {
+          format: "string",
+          parameter: "reasoning_effort",
+          effortMap: {
+            low: "low",
+            medium: "high",
+            high: "high",
+            xhigh: "high",
+            max: "max",
+          },
+        },
       }),
     );
     expect(presetModel("DeepSeek", "deepseek-v4-pro").reasoning).toEqual(
