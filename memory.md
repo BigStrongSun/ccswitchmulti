@@ -3119,3 +3119,6 @@
 - “在 Codex `/model` 菜单中显示”移入默认折叠的高级选项，并从 `shouldShowSpeedTest` 门控中拆出：即使某类 Provider 不显示测速/协议探测，该菜单投影设置仍可独立编辑。xAI OAuth 托管预设继续隐藏该开关。
 - 默认开启菜单投影不能计入 `hasAnyAdvancedValue`，否则高级区会因默认值自动展开，违背“移到高级”的交互意图。空模型目录即使开关为 true 也不会生成无效菜单项。
 - TDD 定向覆盖包括：旧路由入口不可见但传入 routing state 保持不变；菜单开关在折叠高级区内；新 Provider 默认 enabled；已有显式 false 保存不变。定向 28/28、MultiRouter state/sync 14/14、App 集成隔离重跑 8/8、typecheck 通过。App 与其他文件并行运行曾出现 2 项 DOM/时序污染，隔离重跑全过；全仓 format check 仍只剩既有 `src/lib/api/proxy.ts`、`src/types/proxy.ts` 两处差异。
+- 后续产品边界收紧：带稳定 `codexPresetId` 的 CCSwitchMulti 维护预设始终使用 `effectiveCodexMenuProjection=true`，不再显示可关闭开关；历史预设若误存 `codexLocalModelMapping=false`，下次保存会纠正为 true。MultiRouter 的后端强制投影规则保持不变。
+- 只有自定义 Provider 保留退出目录管理的能力：新建或从预设切换到自定义时默认开启，编辑既有自定义 Provider 时继续尊重显式 false。开关位于高级选项最后，并明确说明它只控制 Codex 启动时加载的 `model_catalog_json`、`/model` 模型/别名/上下文/推理档位，不控制 Provider、代理或 MultiRouter 是否可用；仅自行维护目录的用户应关闭。
+- 收紧后的 TDD 先得到 4 项预期失败，随后定向 30/30、路由状态同步 14/14、App 集成隔离重跑 8/8、typecheck 和变更文件 Prettier 检查通过。App 首轮仍出现既有异步 DOM/时序超时，完全相同命令重跑通过；测试夹具仍有既存 Tauri window metadata stderr 与 React act warning。

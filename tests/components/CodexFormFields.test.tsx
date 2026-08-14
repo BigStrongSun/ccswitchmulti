@@ -132,6 +132,7 @@ function renderCatalogHarness(
     planAccessKeyId?: string;
     planSecretAccessKey?: string;
     takeoverEnabled?: boolean;
+    allowModelMenuProjectionToggle?: boolean;
     presetCatalogModels?: CodexCatalogModel[];
     onProviderSplitSuggestionChange?: ReturnType<typeof vi.fn>;
   } = {},
@@ -173,6 +174,9 @@ function renderCatalogHarness(
         onAutoSelectChange={vi.fn()}
         takeoverEnabled={options.takeoverEnabled ?? true}
         onTakeoverEnabledChange={vi.fn()}
+        allowModelMenuProjectionToggle={
+          options.allowModelMenuProjectionToggle ?? true
+        }
         apiFormat="openai_chat"
         onApiFormatChange={onApiFormatChange}
         catalogModels={catalog}
@@ -949,7 +953,7 @@ describe("CodexFormFields local model routing", () => {
     });
   });
 
-  it("keeps the default-enabled menu projection inside collapsed advanced options", () => {
+  it("places the explained custom menu projection control last in advanced options", () => {
     renderCatalogHarness([], {
       shouldShowSpeedTest: false,
       takeoverEnabled: true,
@@ -961,6 +965,30 @@ describe("CodexFormFields local model routing", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "高级选项" }));
 
-    expect(screen.getByText("在 Codex /model 菜单中显示")).toBeInTheDocument();
+    const overrides = screen.getByText("本地代理请求覆盖");
+    const projection = screen.getByText("在 Codex /model 菜单中显示");
+    expect(projection).toBeInTheDocument();
+    expect(
+      overrides.compareDocumentPosition(projection) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      screen.getByText(/它不控制 Provider、代理或 MultiRouter 是否可用/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/仅当你要使用自己维护的 model_catalog_json 时关闭/),
+    ).toBeInTheDocument();
+  });
+
+  it("does not offer a menu projection opt-out for maintained presets", () => {
+    renderCatalogHarness([], {
+      allowModelMenuProjectionToggle: false,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "高级选项" }));
+
+    expect(
+      screen.queryByText("在 Codex /model 菜单中显示"),
+    ).not.toBeInTheDocument();
   });
 });
