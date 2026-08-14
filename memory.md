@@ -3342,3 +3342,11 @@
 ## 2026-08-14 v3.19.1-26 候选门禁运行时边界
 
 - 事务安装器 Pester 套件依赖 Windows PowerShell 5.1 / Pester 3.4 语义：测试会从 `$PSHOME\\powershell.exe` 启动 disposable child，且 SQLite corrupt/StrictMode 断言在该宿主可靠。不要用 Codex primary-runtime 的 PowerShell 7 直接判定产品回归；其 `$PSHOME` 缺少 `powershell.exe`，会造成 3 个环境性失败。应以 `C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -ExecutionPolicy Bypass` 运行，候选门禁为 46/46。
+
+## 2026-08-15 v3.19.1-26 本地发布 PowerShell 宿主污染根修
+
+- `pnpm release:local` 的第一次 v26 调用在进入 Tauri 编译前就于 `scripts/export-latest-ccswitchmulti.ps1` 的 `New-TemporaryFile` 失败，因此没有生成可验收的新二进制，不能计作一次有效构建。
+- 根因不是 Windows PowerShell 5.1 缺失该 cmdlet，而是 Codex primary-runtime 启动的 `pnpm exec powershell` 继承了含 PowerShell 7 模块目录的 `PSModulePath`；Windows PowerShell 随后优先兼容加载 `Microsoft.PowerShell.Utility 7.0.0.0`，该导出面没有 `New-TemporaryFile`。普通 WinPS 5.1 同机可正常发现该命令。
+- RED `cdeb6969` 先在污染宿主暴露 helper 缺失；GREEN `39e41d70` 新增 `scripts/release-build-config.ps1`，仅使用 `[System.IO.Path]::GetTempFileName()` 与 `[System.IO.File]::WriteAllText(..., UTF8Encoding(false))` 生成 Tauri override，并由显式 cleanup 删除。不要通过修改用户/系统 `PSModulePath` 或 Codex runtime 来修发布脚本。
+- GREEN 验证：污染的 `pnpm exec powershell` 1/1，原生 Windows PowerShell 5.1 1/1，事务安装器加发布配置测试 47/47，typecheck 与 diff/UTF-8 hygiene 通过。修复后的下一次 `pnpm release:local` 才是 v26 的第一份有效本地构建证据。
+- 官方事实交叉验证使用 Codex Web 与固定 Matrix WebSearch 两条独立链；两者均能读取 Microsoft Learn 的 `New-TemporaryFile` 与 `about_PSModulePath`，具体污染顺序仍以本机 `$PSModulePath`、实际模块版本和可复现子进程为权威。
