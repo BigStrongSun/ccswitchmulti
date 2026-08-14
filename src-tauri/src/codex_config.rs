@@ -2877,6 +2877,10 @@ fn compile_configured_codex_subagent_roles(
                     .unwrap_or(SubagentProviderKind::ThirdParty),
                 routable: classification.is_some(),
                 context_window: spec.context_window,
+                reasoning:
+                    crate::proxy::providers::codex_reasoning::resolve_subagent_reasoning_capability(
+                        spec.reasoning.as_ref(),
+                    ),
             }
         })
         .collect();
@@ -5821,6 +5825,31 @@ mod tests {
         }
     }
 
+    fn deepseek_reasoning_capability(
+    ) -> crate::proxy::providers::codex_reasoning::CodexModelReasoningCapability {
+        crate::proxy::providers::codex_reasoning::CodexModelReasoningCapability {
+            supported: true,
+            supported_efforts: vec!["low".into(), "high".into(), "max".into()],
+            default_effort: Some("high".into()),
+            disable_allowed: true,
+            upstream: crate::proxy::providers::codex_reasoning::CodexModelReasoningUpstream {
+                format: "string".into(),
+                parameter: "reasoning_effort".into(),
+                effort_map: [
+                    ("low".into(), "low".into()),
+                    ("medium".into(), "high".into()),
+                    ("high".into(), "high".into()),
+                    ("xhigh".into(), "high".into()),
+                    ("max".into(), "max".into()),
+                ]
+                .into_iter()
+                .collect(),
+            },
+            output_format: Some("reasoning_content".into()),
+            source: Some("builtin".into()),
+        }
+    }
+
     #[test]
     #[serial_test::serial]
     fn codex_subagent_v2_preview_command_uses_exact_safe_camel_case_contract() {
@@ -6525,7 +6554,12 @@ mod tests {
         let settings = codex_subagent_profile_status_settings(
             "v2",
             json!({ "neutral-model": profile }),
-            json!([{ "model": "neutral-model", "contextWindow": 262144 }]),
+            json!([{
+                "model": "neutral-model",
+                "contextWindow": 262144,
+                "reasoning": serde_json::to_value(deepseek_reasoning_capability())
+                    .expect("serialize reasoning capability")
+            }]),
             json!([{
                 "id": "neutral-route",
                 "match": { "models": ["neutral-model"] },
@@ -7208,7 +7242,7 @@ mod tests {
             supports_parallel_tool_calls: None,
             input_modalities: None,
             base_instructions: None,
-            reasoning: None,
+            reasoning: Some(deepseek_reasoning_capability()),
         }];
 
         sync_codex_managed_agent_files_with_settings(

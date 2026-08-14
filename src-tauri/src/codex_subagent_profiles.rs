@@ -1,6 +1,8 @@
 //! Codex V2 questionnaire persistence, validation, compilation, and safe preview projection.
 
-use crate::proxy::providers::codex_reasoning::CodexReasoningEffort;
+use crate::proxy::providers::codex_reasoning::{
+    CodexReasoningEffort, ResolvedSubagentReasoningCapability,
+};
 use serde::ser::{SerializeMap, SerializeStruct};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 #[cfg(test)]
@@ -299,6 +301,7 @@ pub struct CatalogModel {
     pub provider_kind: ProviderKind,
     pub routable: bool,
     pub context_window: u64,
+    pub reasoning: ResolvedSubagentReasoningCapability,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -792,12 +795,53 @@ fn normalize_role_name(value: &str) -> String {
     out.trim_matches(['-', '_']).to_string()
 }
 
-fn compiled_effort(p: &ParsedCodexSubagentProfile) -> Option<CodexReasoningEffort> {
-    match p.reasoning.policy {
-        ReasoningRuntimePolicy::Fixed => p.reasoning.effort,
-        ReasoningRuntimePolicy::Delegated
-        | ReasoningRuntimePolicy::ModelDefault
-        | ReasoningRuntimePolicy::Disabled => None,
+fn compile_reasoning_policy(
+    policy: &CodexSubagentReasoningPolicy,
+    capability: &ResolvedSubagentReasoningCapability,
+    profile_key: &str,
+) -> Result<Option<CodexReasoningEffort>, CompileError> {
+    match policy.policy {
+        ReasoningRuntimePolicy::Delegated => Ok(None),
+        ReasoningRuntimePolicy::ModelDefault => {
+            capability.provider_default_effort.map(Some).ok_or_else(|| {
+                validation_error(
+                    "missing_default_reasoning_effort",
+                    Some(profile_key),
+                    "target model has no resolved default reasoning effort",
+                )
+            })
+        }
+        ReasoningRuntimePolicy::Fixed => {
+            let effort = policy.effort.ok_or_else(|| {
+                validation_error(
+                    "missing_fixed_reasoning_effort",
+                    Some(profile_key),
+                    "fixed reasoning policy requires effort",
+                )
+            })?;
+            if !capability.codex_selectable_efforts.contains(&effort) {
+                return Err(validation_error(
+                    "unsupported_reasoning_effort",
+                    Some(profile_key),
+                    "fixed reasoning effort is not supported by the target model",
+                ));
+            }
+            Ok(Some(effort))
+        }
+        ReasoningRuntimePolicy::Disabled => {
+            if !capability.disable_allowed
+                || !capability
+                    .codex_selectable_efforts
+                    .contains(&CodexReasoningEffort::None)
+            {
+                return Err(validation_error(
+                    "reasoning_disable_unsupported",
+                    Some(profile_key),
+                    "target model does not support disabling reasoning",
+                ));
+            }
+            Ok(Some(CodexReasoningEffort::None))
+        }
     }
 }
 
@@ -1260,6 +1304,7 @@ pub fn compile_subagent_v2_profiles(request: &CompileRequest) -> CompileResult {
             .nickname_candidates
             .clone()
             .unwrap_or_else(|| vec![default_nickname(&p)]);
+        let effort = compile_reasoning_policy(&p.reasoning, &catalog.reasoning, &p.key)?;
         output.generated_roles.push(GeneratedRole {
             requested_role_name: requested,
             effective_role_name: effective,
@@ -1276,7 +1321,7 @@ pub fn compile_subagent_v2_profiles(request: &CompileRequest) -> CompileResult {
             nickname_candidates: nicknames,
             model: p.model.clone(),
             model_provider: "codex_model_router_v2".to_string(),
-            effort: compiled_effort(&p),
+            effort,
             context_window: catalog.context_window,
         });
         push_status(&mut output, ProfileStatusCode::Routable, None);
