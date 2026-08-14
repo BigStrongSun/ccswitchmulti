@@ -6631,7 +6631,9 @@ openai_base_url = "http://127.0.0.1:15721/v1"
     }
 
     #[test]
-    /// 未声明 reasoning 的第三方模型仍满足 picker 字段，但不能继承 GPT 档位。
+    /// 未声明 reasoning 的第三方模型不能继承 GPT 档位，但仍必须保留
+    /// Codex `ModelInfo` 反序列化所需的空 reasoning 数组。缺失该字段会让
+    /// `windowsSandbox/setupStart` 在启动 UAC helper 前因 invalid_config 失败。
     fn codex_model_catalog_projects_spawn_agent_model_info_fields() {
         let template = json!({
             "slug": "gpt-5.5",
@@ -6683,7 +6685,7 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             "non-ChatGPT auth filters must not remove MultiRouter models"
         );
         assert!(entry.get("default_reasoning_level").is_none());
-        assert!(entry.get("supported_reasoning_levels").is_none());
+        assert_eq!(entry.get("supported_reasoning_levels"), Some(&json!([])));
     }
 
     #[test]
@@ -6884,7 +6886,7 @@ openai_base_url = "http://127.0.0.1:15721/v1"
         .expect("catalog");
         let entry = &catalog["models"][0];
         assert!(entry.get("default_reasoning_level").is_none());
-        assert!(entry.get("supported_reasoning_levels").is_none());
+        assert_eq!(entry.get("supported_reasoning_levels"), Some(&json!([])));
         assert!(entry.get("supportedReasoningEfforts").is_none());
     }
 
