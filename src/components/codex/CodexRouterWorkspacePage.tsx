@@ -2357,7 +2357,6 @@ export function CodexRouterWorkspacePage({
   onEditProvider,
   onDeletePlan,
   onCreateProvider,
-  onRuntimeReady,
 }: {
   providers: Provider[];
   proxyStatus?: ProxyStatus;
@@ -2369,7 +2368,6 @@ export function CodexRouterWorkspacePage({
   onEditProvider: (provider: Provider) => void;
   onDeletePlan: (provider: Provider) => void;
   onCreateProvider: () => void;
-  onRuntimeReady?: (provider: Provider) => void;
 }) {
   const [activeTab, setActiveTab] = useState<WorkspaceTab>(initialTab);
   const [selectedPlanId, setSelectedPlanId] = useState<string | null>(null);
@@ -3154,7 +3152,6 @@ export function CodexRouterWorkspacePage({
               activeProviderId={activeProviderId}
               onEditPlan={handleEditPlan}
               onDeletePlan={onDeletePlan}
-              onRuntimeReady={onRuntimeReady}
             />
           </TabsContent>
 
@@ -5384,7 +5381,6 @@ function StatusTab({
   activeProviderId,
   onEditPlan,
   onDeletePlan,
-  onRuntimeReady,
 }: {
   selectedPlan: Provider | null;
   selectedRouting: CodexRouting | null;
@@ -5396,7 +5392,6 @@ function StatusTab({
   activeProviderId?: string;
   onEditPlan: (provider: Provider, detail?: string) => void;
   onDeletePlan: (provider: Provider) => void;
-  onRuntimeReady?: (provider: Provider) => void;
 }) {
   const queryClient = useQueryClient();
   const range = useMemo(() => ({ preset: "today" as const }), []);
@@ -5540,12 +5535,6 @@ function StatusTab({
       ? "没有启用的匹配规则"
       : "",
   ].filter(Boolean);
-
-  // 当状态页确认 MultiRouter 配置与真实转发都成功后，通知 App 进入“配置成功 -> 历史修复”收尾流程。
-  useEffect(() => {
-    if (!selectedPlan || !linkOnline || !currentRouteForwardOk) return;
-    onRuntimeReady?.(selectedPlan);
-  }, [currentRouteForwardOk, linkOnline, onRuntimeReady, selectedPlan]);
 
   /// 配置完成返回状态页后，手动刷新所有校验数据，避免用户等待轮询才看到最新监听、接管和转发日志。
   async function refreshValidationState() {
@@ -5818,6 +5807,20 @@ function StatusTab({
               }
             />
           </div>
+          {linkOnline ? (
+            <div
+              role="status"
+              className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm leading-6 text-emerald-800 dark:border-emerald-700/50 dark:bg-emerald-950/25 dark:text-emerald-100"
+            >
+              <div className="font-semibold">
+                MultiRouter 已通过真实请求验证
+              </div>
+              <div className="text-xs">
+                当前 Provider、代理监听、Codex
+                接管、路由入口和最近一次路由转发均正常。你可以继续留在状态页观察流量或调整路由。
+              </div>
+            </div>
+          ) : null}
           {validationRefreshMessage ? (
             <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs leading-5 text-slate-700 dark:border-slate-600/50 dark:bg-slate-900/60 dark:text-slate-200">
               {validationRefreshMessage}
