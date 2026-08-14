@@ -5638,6 +5638,7 @@ mod tests {
             supports_parallel_tool_calls: None,
             input_modalities: None,
             base_instructions: None,
+            reasoning: None,
         }
     }
 
@@ -5758,6 +5759,7 @@ mod tests {
                 supports_parallel_tool_calls: None,
                 input_modalities: None,
                 base_instructions: None,
+                reasoning: None,
             },
             CodexCatalogModelSpec {
                 model: "model-b".to_string(),
@@ -5769,6 +5771,7 @@ mod tests {
                 supports_parallel_tool_calls: None,
                 input_modalities: None,
                 base_instructions: None,
+                reasoning: None,
             },
         ];
         sync_codex_managed_agent_files_with_settings(
@@ -7020,6 +7023,7 @@ mod tests {
             supports_parallel_tool_calls: None,
             input_modalities: None,
             base_instructions: None,
+            reasoning: None,
         }];
 
         sync_codex_managed_agent_files_with_settings(
@@ -7156,6 +7160,7 @@ mod tests {
             supports_parallel_tool_calls: None,
             input_modalities: None,
             base_instructions: None,
+            reasoning: None,
         }];
         let make_settings = |description: &str| {
             json!({
@@ -7217,6 +7222,7 @@ mod tests {
             supports_parallel_tool_calls: None,
             input_modalities: None,
             base_instructions: None,
+            reasoning: None,
         }];
         let persisted_settings = json!({
             "codexRouting": {
@@ -7300,6 +7306,7 @@ mod tests {
             supports_parallel_tool_calls: None,
             input_modalities: None,
             base_instructions: None,
+            reasoning: None,
         };
         let path = agents_dir.join("stable-role.toml");
 
@@ -7363,6 +7370,7 @@ mod tests {
             supports_parallel_tool_calls: None,
             input_modalities: None,
             base_instructions: None,
+            reasoning: None,
         }];
         sync_codex_managed_agent_files_with_settings(
             &specs,
@@ -10796,6 +10804,7 @@ model_provider = "custom"
                 supports_parallel_tool_calls: None,
                 input_modalities: None,
                 base_instructions: None,
+                reasoning: None,
             },
         )
         .collect::<Vec<_>>();
@@ -11301,6 +11310,7 @@ max_depth = 2
             supports_parallel_tool_calls: None,
             input_modalities: None,
             base_instructions: None,
+            reasoning: None,
         }];
         let catalog_path = get_codex_model_catalog_path();
 
