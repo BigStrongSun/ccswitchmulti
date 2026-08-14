@@ -3336,7 +3336,8 @@
 - 严格 TDD RED `d8d72239` 只修改实际 save normalizer 与真实 hook 的测试：2 files / 11 tests 中 8 passed / 3 expected failed，收到对象均只缺 `supportsImage`。fixture 分别锁定无 `inputModalities` 时独立保存 `true` / `false`、camelCase DB SSOT 读回、snake_case live reverse-parse 和 legacy `vision` 统一为 camelCase；没有通过 mock 或 modalities 反推预期。
 - 最小 GREEN `5b08272e` 只修改 `ProviderForm.tsx` 与 `useCodexConfigState.ts`：保存端仅以 `typeof supportsImage === 'boolean'` 写出 canonical 字段，读取端按 camelCase、snake_case、legacy `vision` 的显式 boolean 优先级归一化；`false` 不因 falsy 被丢弃，不从模型名或 `inputModalities` 推断。RED 边界转为 11/11，扩大 CodexFormFields / ProviderForm / config-state 聚焦为 6 files / 48 tests 全绿，typecheck、Prettier、diff check、两份生产文件 strict UTF-8/no BOM/no U+FFFD 通过。
 - Task 11A 再次以 Codex 内置搜索和固定 Matrix WebSearch bridge 独立核对 OpenAI Codex 官方 `openai_models.rs`：`input_modalities` 是 backend/client 交换的模型元数据。Matrix 索引搜索没有返回权威结果，但对官方 raw 源直接 `open` / `find` 成功；具体 persistence blocker 仍以本地 save/load 调用链和 RED/GREEN 为权威。聚焦运行保留既有 `baseline-browser-mapping` 提示，ProviderForm preset 测试还输出既有 React `act(...)` warning，均不影响退出码。
-- Important 3 现在从 `/models` 获取、表单新增/更新/手选、父表单保存 normalizer 到 DB/live reload canonicalizer 端到端闭环。Task 11A 未重跑全量 Vitest，上一轮 123/990 证据只对应 `ae764934`；未修改 Rust、版本或 reasoning defaults，也未 build/install/tag/push/publish。`localeCompare` vs NFKC + case-fold 与 V2 reasoning/catalog 仍是原两项条件性非阻断风险，状态不变。
+- Important 3 现在从 `/models` 获取、表单新增/更新/手选、父表单保存 normalizer 到 DB/live reload canonicalizer 端到端闭环。`ae764934` 的 123 files / 990 tests 是加入三项 Task 11A 回归前的历史中间门禁；最终实现 HEAD `7c5fb51c` 由主线程运行完整 Vitest，123 files / 993 tests 全部通过、exit 0、耗时 238.4 秒，随后 `vitest list --exclude '**/.worktrees/**' --json` 独立确认同为 123/993。Task 11A 独立复审在该实现 HEAD 返回 PASS，历史 `final-rereview-report.md` 继续只代表 `ae764934` 的 FAIL 时点。
+- Task 11A 未修改 Rust、版本或 reasoning defaults，也未 build/install/tag/push/publish。`localeCompare` vs NFKC + case-fold 与 V2 reasoning/catalog 仍是原两项条件性非阻断风险，状态不变。
 
 ## 2026-08-14 v3.19.1-26 候选门禁运行时边界
 
