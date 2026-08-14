@@ -3372,3 +3372,14 @@
 - `CatalogModel` 现在携带 supported/default reasoning；profile compiler 只生成目标模型支持的 `model_reasoning_effort`，不支持时回退 catalog 默认并输出 warning，能力未知时省略固定 effort。DeepSeek V4 Flash/Pro 精确旧 ID 恢复 `low/high/max`、默认 `high`；显式行能力优先，未知第三方不得继承 GPT 档位。
 - 根修后的门禁为 profiles 77/77、`codex_config` 166/166、reasoning resolver 3/3、Rust library 2978 passed / 0 failed / 2 ignored、Vitest 123 files / 993 tests（234.01 秒），并通过 `cargo check --lib`、rustfmt、UTF-8/no BOM/no U+FFFD。该问题是最终安装 canary 新发现的 acceptance gap，不是 173-ref/198-patch 历史分叉审计中的漏移植；`actionable-missing=0` 仍成立。
 - `71f35116` 的资产与安装态仅用于阻断证据，全部哈希作废。必须从包含 `80e7b04a` 及后续文档提交的 clean HEAD 重新构建、事务安装并覆盖诊断时手工修改的 DeepSeek agent TOML，再重启 app-server、新建会话验证 Flash、Pro 与官方保留路径；配置或单元测试不能代替真实无模型名 canary。
+
+## 2026-08-15 v3.19.1-26 正式构建、安装、canary 与分叉复核
+
+- 正式 tag peeled commit 为 `7e6665fcfd297f3f8954850d59f9786831b1e3d2`。`pnpm release:local` exit 0，metadata 精确绑定该提交，15/15 checksum 回读一致；Windows x64 raw EXE SHA-256 为 `CFE8B6684B2FAF6C0D1178B3515BDD2779116E6DDCEED251C72ABECC6A41B626`，NSIS 安装态 SHA-256 为 `01B3181D5775FE06FFA11C31246B66F3AF03118197F7C3E5D4247719EB408791`。
+- 事务 `ccsm-20260815-055216-f59d4af5f0354cb6a76f17614b090351` 由独立隐藏 PowerShell 进程完整执行 kill、卸载、安装、拉起、健康检查和失败回滚边界；最终 PID `55436`，`/health` HTTP 200，FileVersion/ProductVersion 均为 `3.19.1-26`，运行中安装态哈希与预期值精确一致。任何后续安装都不得在普通交互 shell 中单独停止 CCSM。
+- 新会话 Flash child `01a00247-28f8-7ae0-9240-fa20a8eac5b4` 为 `agent_role/model=deepseek-v4-flash`、`model_provider=codex_model_router_v2`、effort high，真实执行 `rg` 和 `git status` 并完成同 child follow-up；Router 命中 DeepSeek native `/responses` 且 HTTP 200。
+- 新会话 Pro child `01a0024a-1feb-7212-907e-04cb8655a742` 为 `agent_role/model=deepseek-v4-pro`、provider `codex_model_router_v2`、effort high，完成实际源码/commit 审查；Router 将 Responses 桥接到 DeepSeek `/chat/completions` 并返回 HTTP 200。
+- 官方保留 child `01a0024e-5404-7f90-ae0b-ec76026f067b` 选择内置 `default`、`gpt-5.6-sol`、effort medium，Router 命中 ChatGPT Codex Responses 并返回 HTTP 200。三条 canary 证明最终父级 selection policy 能在匹配的 Flash/Pro 与官方保留路径之间自动选择，而不是仅证明角色文件存在。
+- 推送发布分支后再次用 live `git ls-remote --heads fork` 对照：139 个远端 heads 与 139 个本地非 symbolic tracking tips 逐 SHA 一致，`NEW/MOVED/DELETED=0`。新增 tip 仅为发布分支自身，且本地/远端都等于正式 tag peeled commit；原 173-ref/198-patch 审计的 `actionable-missing=0` 结论不变。
+- GitHub Actions run `31846073316` 最终为 success：Windows x64/ARM64、Linux x64/ARM64、macOS、Publish GitHub Release、Assemble `latest.json` 七个 jobs 全部成功。Release 非 draft、非 prerelease，且 `releases/latest` 返回 `v3.19.1-26`；19 个资产全部下载后逐一计算 SHA-256，与 GitHub 服务端 digest 无任何 mismatch。
+- `latest.json` 版本为 `3.19.1-26`，六个平台键为 `darwin-aarch64`、`darwin-x86_64`、`windows-x86_64`、`windows-aarch64`、`linux-x86_64`、`linux-aarch64`；URL 全部指向 `/releases/download/v3.19.1-26/`，签名全部非空。Annotated tag object 为 `52ff4d24f0c0c7f2e304816f70484227e4ff5b43`，本地/远端 peeled commit 和发布分支均为 `7e6665fcfd297f3f8954850d59f9786831b1e3d2`。发布后只允许追加文档提交，不得移动 v26 tag。
