@@ -133,6 +133,7 @@ function renderCatalogHarness(
     planSecretAccessKey?: string;
     takeoverEnabled?: boolean;
     allowModelMenuProjectionToggle?: boolean;
+    openAdvancedOptions?: boolean;
     presetCatalogModels?: CodexCatalogModel[];
     onProviderSplitSuggestionChange?: ReturnType<typeof vi.fn>;
   } = {},
@@ -199,8 +200,13 @@ function renderCatalogHarness(
     );
   }
 
+  const renderResult = render(<Harness />);
+  if (options.openAdvancedOptions ?? true) {
+    fireEvent.click(screen.getByRole("button", { name: "高级选项" }));
+  }
+
   return {
-    ...render(<Harness />),
+    ...renderResult,
     onCatalogChange,
     onApiFormatChange,
     latestCatalog: () => latestCatalog,
@@ -274,8 +280,11 @@ function renderAutoSplitHarness() {
     );
   }
 
+  const renderResult = render(<Harness />);
+  fireEvent.click(screen.getByRole("button", { name: "高级选项" }));
+
   return {
-    ...render(<Harness />),
+    ...renderResult,
     latestRouting: () => latestRouting,
     onCatalogChange,
     onRoutingChange,
@@ -371,10 +380,7 @@ describe("CodexFormFields local model routing", () => {
       onProviderSplitSuggestionChange,
     } = renderAutoSplitHarness();
 
-    fireEvent.click(screen.getByRole("button", { name: "高级选项" }));
-    fireEvent.click(
-      screen.getByRole("button", { name: "providerForm.fetchModels" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "同步模型" }));
 
     expect(await screen.findByText("检测到混合协议模型")).toBeInTheDocument();
     expect(screen.getByText("Relay-responses")).toBeInTheDocument();
@@ -414,10 +420,7 @@ describe("CodexFormFields local model routing", () => {
       onProviderSplitSuggestionChange,
     } = renderAutoSplitHarness();
 
-    fireEvent.click(screen.getByRole("button", { name: "高级选项" }));
-    fireEvent.click(
-      screen.getByRole("button", { name: "providerForm.fetchModels" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "同步模型" }));
 
     expect(await screen.findByText("检测到混合协议模型")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "暂不拆分" }));
@@ -471,9 +474,7 @@ describe("CodexFormFields local model routing", () => {
       { shouldShowSpeedTest: true },
     );
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "测试 Chat / Responses" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "验证连接" }));
     expect(screen.getByText("确认测试 Chat / Responses")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
 
@@ -555,9 +556,7 @@ describe("CodexFormFields local model routing", () => {
       },
     );
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "测试 Chat / Responses" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "验证连接" }));
     fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
 
     await waitFor(() => {
@@ -622,9 +621,7 @@ describe("CodexFormFields local model routing", () => {
       { shouldShowSpeedTest: true },
     );
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "测试 Chat / Responses" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "验证连接" }));
     fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
 
     await waitFor(() => {
@@ -664,13 +661,8 @@ describe("CodexFormFields local model routing", () => {
       shouldShowSpeedTest: true,
     });
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "测试 Chat / Responses" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "验证连接" }));
 
-    expect(
-      screen.getByText("已打开测试确认框；如果没有看到弹窗，请按 Esc 后重试。"),
-    ).toBeInTheDocument();
     expect(screen.getByRole("dialog")).toHaveClass("z-[200]");
     expect(screen.getByText("确认测试 Chat / Responses")).toBeInTheDocument();
   });
@@ -679,15 +671,16 @@ describe("CodexFormFields local model routing", () => {
     renderCatalogHarness([], {
       shouldShowSpeedTest: true,
       takeoverEnabled: false,
+      openAdvancedOptions: false,
     });
 
     fireEvent.click(screen.getByRole("button", { name: "高级选项" }));
 
     const fetchButton = screen.getByRole("button", {
-      name: "providerForm.fetchModels",
+      name: "同步模型",
     });
     const probeButton = screen.getByRole("button", {
-      name: "测试 Chat / Responses",
+      name: "验证连接",
     });
 
     expect(fetchButton).toBeVisible();
@@ -715,10 +708,7 @@ describe("CodexFormFields local model routing", () => {
       takeoverEnabled: false,
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "高级选项" }));
-    fireEvent.click(
-      screen.getByRole("button", { name: "providerForm.fetchModels" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "同步模型" }));
 
     await waitFor(() => {
       expect(latestCatalog()).toEqual([
@@ -735,17 +725,14 @@ describe("CodexFormFields local model routing", () => {
   it("points users to fetch models when protocol probing has no catalog", async () => {
     renderCatalogHarness([], { shouldShowSpeedTest: true });
 
-    fireEvent.click(screen.getByRole("button", { name: "高级选项" }));
-    fireEvent.click(
-      screen.getByRole("button", { name: "测试 Chat / Responses" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "验证连接" }));
     fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
 
     expect(await screen.findByRole("status")).toHaveTextContent(
-      "请先在上方“模型目录与上下文”点击“获取模型列表”，或手动添加模型后再测试。",
+      "请先在“模型与兼容性”同步模型，或在高级设置中手动添加至少一个模型后再验证。",
     );
     const fetchButton = screen.getByRole("button", {
-      name: "providerForm.fetchModels",
+      name: "同步模型",
     });
     expect(fetchButton).toHaveClass("border-blue-500");
     expect(Element.prototype.scrollIntoView).toHaveBeenCalled();
@@ -761,17 +748,13 @@ describe("CodexFormFields local model routing", () => {
       shouldShowSpeedTest: true,
     });
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "测试 Chat / Responses" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "验证连接" }));
     fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "协议测试中断：backend timeout",
     );
-    expect(
-      screen.getByRole("button", { name: "测试 Chat / Responses" }),
-    ).toBeEnabled();
+    expect(screen.getByRole("button", { name: "验证连接" })).toBeEnabled();
   });
 
   it("merges fetched models by upstream model without overwriting a visible alias", async () => {
@@ -786,9 +769,7 @@ describe("CodexFormFields local model routing", () => {
       },
     ]);
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "providerForm.fetchModels" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "同步模型" }));
 
     await waitFor(() => {
       expect(latestCatalog()).toEqual([
@@ -816,9 +797,7 @@ describe("CodexFormFields local model routing", () => {
       },
     );
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "providerForm.fetchModels" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "同步模型" }));
 
     await waitFor(() => {
       expect(fetchModelsForConfig).toHaveBeenCalledWith(
@@ -847,9 +826,7 @@ describe("CodexFormFields local model routing", () => {
       },
     );
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "providerForm.fetchModels" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "同步模型" }));
 
     expect(fetchModelsForConfig).not.toHaveBeenCalled();
     expect(latestCatalog()).toEqual([
@@ -872,9 +849,7 @@ describe("CodexFormFields local model routing", () => {
       },
     );
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "providerForm.fetchModels" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "同步模型" }));
 
     await waitFor(() => {
       expect(fetchModelsForConfig).toHaveBeenCalledWith(
@@ -957,6 +932,7 @@ describe("CodexFormFields local model routing", () => {
     renderCatalogHarness([], {
       shouldShowSpeedTest: false,
       takeoverEnabled: true,
+      openAdvancedOptions: false,
     });
 
     expect(
@@ -983,6 +959,7 @@ describe("CodexFormFields local model routing", () => {
   it("does not offer a menu projection opt-out for maintained presets", () => {
     renderCatalogHarness([], {
       allowModelMenuProjectionToggle: false,
+      openAdvancedOptions: false,
     });
 
     fireEvent.click(screen.getByRole("button", { name: "高级选项" }));
