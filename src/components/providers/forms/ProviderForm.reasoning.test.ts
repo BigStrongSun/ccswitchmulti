@@ -1,19 +1,24 @@
 import { describe, expect, it } from "vitest";
+import type { CodexModelReasoningCapability } from "@/types";
 
 import { normalizeCodexCatalogModelsForSave } from "./ProviderForm";
 import { applyCodexReasoningCapabilitySource } from "./CodexFormFields";
 
 describe("Codex catalog reasoning capability persistence", () => {
   it("separates automatic, maintained and manual capability sources", () => {
-    const maintained = {
+    const maintained: CodexModelReasoningCapability = {
       supported: true,
-      supportedEfforts: ["low", "high", "max"] as const,
+      supportedEfforts: ["low", "high", "max"],
       defaultEffort: "high" as const,
       disableAllowed: true,
       upstream: {
         format: "string" as const,
         parameter: "reasoning_effort" as const,
-        effortMap: { low: "low" as const, high: "high" as const, max: "max" as const },
+        effortMap: {
+          low: "low" as const,
+          high: "high" as const,
+          max: "max" as const,
+        },
       },
       source: "builtin" as const,
     };
