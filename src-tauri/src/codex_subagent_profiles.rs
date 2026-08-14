@@ -1455,6 +1455,80 @@ mod tests {
         raw
     }
 
+    fn legacy_reasoning_profile(
+        questionnaire_effort: &str,
+        override_effort: Option<&str>,
+    ) -> Value {
+        let mut raw = canonical_raw_profile(json!(["repository_exploration"]));
+        raw["profiles"]["deepseek-v4-flash"]["questionnaire"]["reasoningEffort"] =
+            json!(questionnaire_effort);
+        if let Some(effort) = override_effort {
+            raw["profiles"]["deepseek-v4-flash"]["overrides"] =
+                json!({"modelReasoningEffort": effort});
+        }
+        raw
+    }
+
+    fn only_profile(config: &CodexSubagentV2) -> &ParsedCodexSubagentProfile {
+        match config.profiles.as_slice() {
+            [ParsedProfileEntry::Valid(profile)] => profile,
+            profiles => panic!("expected one valid profile, got {profiles:?}"),
+        }
+    }
+
+    fn fixed_reasoning(effort: CodexReasoningEffort) -> CodexSubagentReasoningPolicy {
+        CodexSubagentReasoningPolicy {
+            policy: ReasoningRuntimePolicy::Fixed,
+            effort: Some(effort),
+        }
+    }
+
+    #[test]
+    fn legacy_auto_migrates_to_delegated_schema_v2() {
+        let parsed = parse_persisted_subagent_v2(&legacy_reasoning_profile("auto", None))
+            .expect("migrate legacy auto");
+        assert_eq!(parsed.schema_version, 2);
+        assert_eq!(
+            only_profile(&parsed).reasoning,
+            CodexSubagentReasoningPolicy {
+                policy: ReasoningRuntimePolicy::Delegated,
+                effort: None,
+            }
+        );
+    }
+
+    #[test]
+    fn legacy_explicit_effort_migrates_to_fixed_schema_v2() {
+        let parsed = parse_persisted_subagent_v2(&legacy_reasoning_profile("high", None))
+            .expect("migrate legacy explicit effort");
+        assert_eq!(
+            only_profile(&parsed).reasoning,
+            fixed_reasoning(CodexReasoningEffort::High)
+        );
+    }
+
+    #[test]
+    fn legacy_override_has_priority_during_schema_v2_migration() {
+        let parsed = parse_persisted_subagent_v2(&legacy_reasoning_profile("auto", Some("xhigh")))
+            .expect("migrate legacy override");
+        assert_eq!(
+            only_profile(&parsed).reasoning,
+            fixed_reasoning(CodexReasoningEffort::XHigh)
+        );
+        let serialized = serde_json::to_value(&parsed).expect("serialize migrated profile");
+        assert_eq!(serialized["schemaVersion"], 2);
+        assert_eq!(
+            serialized["profiles"]["deepseek-v4-flash"]["reasoning"],
+            json!({"policy": "fixed", "effort": "xhigh"})
+        );
+        assert!(serialized["profiles"]["deepseek-v4-flash"]["questionnaire"]
+            .get("reasoningEffort")
+            .is_none());
+        assert!(serialized["profiles"]["deepseek-v4-flash"]["overrides"]
+            .get("modelReasoningEffort")
+            .is_none());
+    }
+
     fn raw_profile_missing_questionnaire_field(field: &str) -> Value {
         let mut q = questionnaire();
         q.as_object_mut()
