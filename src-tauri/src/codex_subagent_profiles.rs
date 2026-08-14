@@ -1344,6 +1344,11 @@ pub fn initialize_legacy_subagent_v2() -> Result<CodexSubagentV2, CompileError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proxy::providers::codex_reasoning::{
+        ReasoningConfidence, ReasoningSupportKind, ResolvedSubagentReasoningCapability,
+    };
+    use std::collections::BTreeMap;
+
     fn s(value: &str) -> String {
         value.to_owned()
     }
@@ -1387,6 +1392,37 @@ mod tests {
             provider_kind: ProviderKind::ThirdParty,
             routable,
             context_window: 1_000_000,
+            reasoning: deepseek_reasoning(),
+        }
+    }
+
+    fn deepseek_reasoning() -> ResolvedSubagentReasoningCapability {
+        ResolvedSubagentReasoningCapability {
+            support_kind: ReasoningSupportKind::EffortLevels,
+            source: Some(s("builtin")),
+            confidence: ReasoningConfidence::Confirmed,
+            codex_selectable_efforts: vec![
+                CodexReasoningEffort::None,
+                CodexReasoningEffort::Low,
+                CodexReasoningEffort::Medium,
+                CodexReasoningEffort::High,
+                CodexReasoningEffort::XHigh,
+                CodexReasoningEffort::Max,
+            ],
+            provider_accepted_efforts: vec![
+                CodexReasoningEffort::Low,
+                CodexReasoningEffort::High,
+                CodexReasoningEffort::Max,
+            ],
+            provider_default_effort: Some(CodexReasoningEffort::High),
+            disable_allowed: true,
+            effort_map: BTreeMap::from([
+                (CodexReasoningEffort::Low, CodexReasoningEffort::Low),
+                (CodexReasoningEffort::Medium, CodexReasoningEffort::High),
+                (CodexReasoningEffort::High, CodexReasoningEffort::High),
+                (CodexReasoningEffort::XHigh, CodexReasoningEffort::High),
+                (CodexReasoningEffort::Max, CodexReasoningEffort::Max),
+            ]),
         }
     }
 
@@ -2494,6 +2530,75 @@ mod tests {
             },
         };
         p
+    }
+
+    fn reasoning_policy_toml(policy: CodexSubagentReasoningPolicy) -> Result<String, CompileError> {
+        let mut p = profile("flash", "DeepSeek-V4-Flash");
+        p.reasoning = policy;
+        let output = compile_subagent_v2_profiles(&request(Some(config(
+            SelectionPolicy::Balanced,
+            vec![valid(p)],
+        ))))?;
+        let role = output
+            .generated_roles
+            .first()
+            .expect("reasoning policy should generate one role");
+        render_generated_role_toml(role, "# managed")
+    }
+
+    #[test]
+    fn reasoning_policy_delegated_omits_role_effort_for_pinned_model() {
+        let toml = reasoning_policy_toml(CodexSubagentReasoningPolicy {
+            policy: ReasoningRuntimePolicy::Delegated,
+            effort: None,
+        })
+        .expect("delegated role TOML");
+        assert!(!toml.contains("model_reasoning_effort"));
+    }
+
+    #[test]
+    fn reasoning_policy_model_default_pins_resolved_catalog_default() {
+        let toml = reasoning_policy_toml(CodexSubagentReasoningPolicy {
+            policy: ReasoningRuntimePolicy::ModelDefault,
+            effort: None,
+        })
+        .expect("model-default role TOML");
+        assert!(toml.contains("model_reasoning_effort = \"high\""));
+    }
+
+    #[test]
+    fn reasoning_policy_fixed_max_round_trips_exact_role_toml() {
+        let toml = reasoning_policy_toml(fixed_reasoning(CodexReasoningEffort::Max))
+            .expect("fixed max role TOML");
+        let parsed: toml::Value = toml::from_str(&toml).expect("parse fixed max role TOML");
+        assert_eq!(
+            parsed
+                .get("model_reasoning_effort")
+                .and_then(toml::Value::as_str),
+            Some("max")
+        );
+    }
+
+    #[test]
+    fn reasoning_policy_disabled_writes_none_when_capability_allows_disable() {
+        let toml = reasoning_policy_toml(CodexSubagentReasoningPolicy {
+            policy: ReasoningRuntimePolicy::Disabled,
+            effort: None,
+        })
+        .expect("disabled role TOML");
+        assert!(toml.contains("model_reasoning_effort = \"none\""));
+    }
+
+    #[test]
+    fn reasoning_policy_rejects_fixed_effort_absent_from_selectable_catalog() {
+        assert_eq!(
+            reasoning_policy_toml(fixed_reasoning(CodexReasoningEffort::Ultra)),
+            Err(validation(
+                "unsupported_reasoning_effort",
+                Some("flash"),
+                "fixed reasoning effort is not supported by the target model",
+            ))
+        );
     }
 
     #[test]
