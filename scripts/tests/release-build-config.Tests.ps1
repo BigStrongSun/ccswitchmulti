@@ -103,4 +103,38 @@ Describe "CCSwitchMulti local release build config" {
             [System.IO.File]::Delete($filePath)
         }
     }
+
+    It "derives the NSIS-installed executable hash from exactly one restored Tauri marker" {
+        . $helperPath
+
+        $filePath = [System.IO.Path]::GetTempFileName()
+        try {
+            [System.IO.File]::WriteAllBytes(
+                $filePath,
+                [System.Text.Encoding]::ASCII.GetBytes("before__TAURI_BUNDLE_TYPE_VAR_UNKafter")
+            )
+
+            $hash = Get-TauriNsisInstalledExeSha256 -Path $filePath
+
+            $hash | Should Be "2609555DE77DC53CFF714B5AD8D8054D8E7322EDCC395A47828F06E6797695B1"
+        } finally {
+            [System.IO.File]::Delete($filePath)
+        }
+    }
+
+    It "rejects raw executables without exactly one restored Tauri marker" {
+        . $helperPath
+
+        $filePath = [System.IO.Path]::GetTempFileName()
+        try {
+            [System.IO.File]::WriteAllBytes(
+                $filePath,
+                [System.Text.Encoding]::ASCII.GetBytes("no bundle marker")
+            )
+
+            { Get-TauriNsisInstalledExeSha256 -Path $filePath } | Should Throw
+        } finally {
+            [System.IO.File]::Delete($filePath)
+        }
+    }
 }
