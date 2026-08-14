@@ -224,9 +224,9 @@ function Write-Checksums {
     $normalizedRoot = [System.IO.Path]::GetFullPath($Root)
     $files = @(Get-ChildItem -LiteralPath $normalizedRoot -Recurse -File | Where-Object { $_.Name -ne "SHA256SUMS.txt" })
     $lines = foreach ($file in $files) {
-        $hash = Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256
+        $hash = Get-ReleaseFileSha256 -Path $file.FullName
         $relative = $file.FullName.Substring($normalizedRoot.Length).TrimStart("\", "/")
-        "$($hash.Hash)  $relative"
+        "$hash  $relative"
     }
     Set-Content -LiteralPath (Join-Path $normalizedRoot "SHA256SUMS.txt") -Value ($lines -join "`r`n") -Encoding UTF8
 }

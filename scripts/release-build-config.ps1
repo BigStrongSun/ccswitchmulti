@@ -18,3 +18,20 @@ function Remove-TauriBuildConfigFile {
         [System.IO.File]::Delete($Path)
     }
 }
+
+function Get-ReleaseFileSha256 {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [System.IO.File]::OpenRead($Path)
+        try {
+            $bytes = $sha256.ComputeHash($stream)
+            return [System.BitConverter]::ToString($bytes).Replace("-", "")
+        } finally {
+            $stream.Dispose()
+        }
+    } finally {
+        $sha256.Dispose()
+    }
+}
