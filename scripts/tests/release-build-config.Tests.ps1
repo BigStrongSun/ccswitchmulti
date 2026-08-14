@@ -1,6 +1,20 @@
 $helperPath = Join-Path (Split-Path -Parent $PSScriptRoot) "release-build-config.ps1"
 
 Describe "CCSwitchMulti local release build config" {
+    function Get-CargoPackageVersion {
+        param(
+            [string]$CargoLock,
+            [string]$PackageName
+        )
+
+        $match = [regex]::Match(
+            $CargoLock,
+            "(?ms)^name = `"$([regex]::Escape($PackageName))`"\r?\nversion = `"(?<version>[^`"]+)`""
+        )
+        $match.Success | Should Be $true
+        return [version]$match.Groups["version"].Value
+    }
+
     It "pins a Tauri CLI that understands marker-based tauri-utils bundle metadata" {
         $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
         $packageJson = [System.IO.File]::ReadAllText((Join-Path $repoRoot "package.json")) | ConvertFrom-Json
@@ -18,6 +32,27 @@ Describe "CCSwitchMulti local release build config" {
 
         if ($tauriUtilsVersion -ge [version]'2.8.3') {
             $tauriCliVersion -ge [version]'2.10.1' | Should Be $true
+        }
+    }
+
+    It "keeps Tauri JavaScript bindings on the same major and minor release as Rust" {
+        $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+        $packageJson = [System.IO.File]::ReadAllText((Join-Path $repoRoot "package.json")) | ConvertFrom-Json
+        $cargoLock = [System.IO.File]::ReadAllText((Join-Path $repoRoot "src-tauri\Cargo.lock"))
+        $pairs = @(
+            @{ Rust = 'tauri'; JavaScript = '@tauri-apps/api' },
+            @{ Rust = 'tauri-plugin-dialog'; JavaScript = '@tauri-apps/plugin-dialog' },
+            @{ Rust = 'tauri-plugin-updater'; JavaScript = '@tauri-apps/plugin-updater' }
+        )
+
+        foreach ($pair in $pairs) {
+            $rustVersion = Get-CargoPackageVersion -CargoLock $cargoLock -PackageName $pair.Rust
+            $javascriptRequirement = [string]$packageJson.dependencies.($pair.JavaScript)
+            $javascriptRequirement | Should Match '^\d+\.\d+\.\d+$'
+            $javascriptVersion = [version]$javascriptRequirement
+
+            $javascriptVersion.Major | Should Be $rustVersion.Major
+            $javascriptVersion.Minor | Should Be $rustVersion.Minor
         }
     }
 
