@@ -92,6 +92,31 @@ vi.mock("@/lib/api/model-fetch", () => ({
 
 vi.mock("@/lib/api/codexSubagentV2", () => ({
   codexSubagentV2Api: {
+    getReasoningCapabilities: vi.fn().mockResolvedValue({
+      "deepseek-v4-flash": {
+        supportKind: "effort_levels",
+        source: "builtin",
+        confidence: "confirmed",
+        codexSelectableEfforts: [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max",
+        ],
+        providerAcceptedEfforts: ["low", "high", "max"],
+        providerDefaultEffort: "high",
+        disableAllowed: true,
+        effortMap: {
+          low: "low",
+          medium: "high",
+          high: "high",
+          xhigh: "high",
+          max: "max",
+        },
+      },
+    }),
     previewProfile: vi.fn().mockResolvedValue({
       providerKind: "third_party",
       requestedRoleName: "deepseek-v4-flash",
@@ -102,6 +127,30 @@ vi.mock("@/lib/api/codexSubagentV2", () => ({
       model: "deepseek-v4-flash",
       modelProvider: "codex_model_router_v2",
       modelReasoningEffort: "medium",
+      reasoningPolicy: "fixed",
+      reasoningCapability: {
+        supportKind: "effort_levels",
+        source: "builtin",
+        confidence: "confirmed",
+        codexSelectableEfforts: [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max",
+        ],
+        providerAcceptedEfforts: ["low", "high", "max"],
+        providerDefaultEffort: "high",
+        disableAllowed: true,
+        effortMap: {
+          low: "low",
+          medium: "high",
+          high: "high",
+          xhigh: "high",
+          max: "max",
+        },
+      },
       modelContextWindow: 128000,
       tomlPreview: 'model = "deepseek-v4-flash"',
       warnings: [],

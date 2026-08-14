@@ -2708,6 +2708,46 @@ export function CodexFormFields({
                                   <option value="manual">手动声明</option>
                                 </select>
                               </label>
+                              <div className="flex flex-wrap gap-2">
+                                {isBuiltinReasoning && row.reasoning ? (
+                                  <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={() =>
+                                      handleUpdateCatalogRow(index, {
+                                        reasoning:
+                                          applyCodexReasoningCapabilitySource(
+                                            "manual",
+                                            row.reasoning,
+                                            presetReasoning,
+                                          ),
+                                      })
+                                    }
+                                  >
+                                    创建高级覆盖
+                                  </Button>
+                                ) : null}
+                                {isUserPresetOverride && presetReasoning ? (
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() =>
+                                      handleUpdateCatalogRow(index, {
+                                        reasoning:
+                                          applyCodexReasoningCapabilitySource(
+                                            "builtin",
+                                            row.reasoning,
+                                            presetReasoning,
+                                          ),
+                                      })
+                                    }
+                                  >
+                                    恢复内置默认
+                                  </Button>
+                                ) : null}
+                              </div>
                               <p className="text-muted-foreground">
                                 自动发现只读取可验证的模型能力；证据不足时保持未声明，不会套用
                                 GPT 通用档位。
