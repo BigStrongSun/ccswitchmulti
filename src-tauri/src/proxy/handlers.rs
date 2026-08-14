@@ -4170,8 +4170,8 @@ fn build_codex_proxy_error_response(
     endpoint: &str,
     error: &ProxyError,
 ) -> Result<axum::response::Response, ProxyError> {
-    let status = axum::http::StatusCode::from_u16(map_proxy_error_to_status(error))
-        .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+    let status = codex_proxy_error_status(endpoint, error);
+    let image_result_unknown = codex_image_result_unknown(endpoint, error);
     let body = codex_proxy_error_json(&ctx.provider.name, &ctx.request_model, endpoint, error);
     let body = serde_json::to_vec(&body).map_err(|e| {
         log::error!("[Codex] 序列化代理错误体失败: {e}");
@@ -4182,9 +4182,11 @@ fn build_codex_proxy_error_response(
         axum::http::header::CONTENT_TYPE,
         axum::http::HeaderValue::from_static("application/json"),
     );
-    if let Some(retry_after_secs) = error.retry_after_secs() {
-        if let Ok(value) = axum::http::HeaderValue::from_str(&retry_after_secs.to_string()) {
-            builder = builder.header(axum::http::header::RETRY_AFTER, value);
+    if !image_result_unknown {
+        if let Some(retry_after_secs) = error.retry_after_secs() {
+            if let Ok(value) = axum::http::HeaderValue::from_str(&retry_after_secs.to_string()) {
+                builder = builder.header(axum::http::header::RETRY_AFTER, value);
+            }
         }
     }
     builder.body(axum::body::Body::from(body)).map_err(|e| {
@@ -4193,12 +4195,30 @@ fn build_codex_proxy_error_response(
     })
 }
 
+fn codex_proxy_error_status(endpoint: &str, error: &ProxyError) -> axum::http::StatusCode {
+    if codex_image_result_unknown(endpoint, error) {
+        return axum::http::StatusCode::FAILED_DEPENDENCY;
+    }
+    axum::http::StatusCode::from_u16(map_proxy_error_to_status(error))
+        .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+fn codex_image_result_unknown(endpoint: &str, error: &ProxyError) -> bool {
+    matches!(error, ProxyError::ResponsePending(_)) && codex_image_endpoint(endpoint)
+}
+
+fn codex_image_endpoint(endpoint: &str) -> bool {
+    let path = endpoint.split('?').next().unwrap_or(endpoint);
+    path.ends_with("/images/generations") || path.ends_with("/images/edits")
+}
+
 fn codex_proxy_error_json(
     provider_name: &str,
     request_model: &str,
     endpoint: &str,
     error: &ProxyError,
 ) -> Value {
+    let image_result_unknown = codex_image_result_unknown(endpoint, error);
     let (mut body, upstream_status) = match error {
         ProxyError::UpstreamError { status, body } => {
             let parsed_body = body
@@ -4214,7 +4234,11 @@ fn codex_proxy_error_json(
                 "error": {
                     "message": get_error_message(error),
                     "type": "proxy_error",
-                    "code": codex_proxy_error_code(error),
+                    "code": if image_result_unknown {
+                        "cc_switch_image_result_unknown"
+                    } else {
+                        codex_proxy_error_code(error)
+                    },
                     "param": Value::Null,
                 }
             }),
@@ -4258,7 +4282,11 @@ fn codex_proxy_error_json(
         let status_fragment = upstream_status
             .map(|status| format!("; upstream_status: HTTP {status}"))
             .unwrap_or_default();
-        if matches!(error, ProxyError::ForwardFailed(_)) {
+        if image_result_unknown {
+            format!(
+                "The OpenAI image request was sent, but the connection closed before a final result was received. Provider: {provider_name}; model: {request_model}; endpoint: {endpoint}; cause: {cause}. The result state is unknown and this request must not be replayed automatically."
+            )
+        } else if matches!(error, ProxyError::ForwardFailed(_)) {
             let failure = if provider_name.eq_ignore_ascii_case("OpenAI Official") {
                 "OpenAI Codex upstream connection failed"
             } else {
@@ -4288,7 +4316,13 @@ fn codex_proxy_error_json(
         error_obj.insert("type".to_string(), Value::String("proxy_error".to_string()));
     }
 
-    if error_obj.get("code").map(Value::is_null).unwrap_or(true) {
+    if image_result_unknown {
+        error_obj.insert(
+            "code".to_string(),
+            Value::String("cc_switch_image_result_unknown".to_string()),
+        );
+        error_obj.insert("retryable".to_string(), Value::Bool(false));
+    } else if error_obj.get("code").map(Value::is_null).unwrap_or(true) {
         error_obj.insert(
             "code".to_string(),
             Value::String(codex_proxy_error_code(error).to_string()),
@@ -6545,7 +6579,10 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_deepseek\",\"
         let endpoint = "/v1/images/edits";
         let body = codex_proxy_error_json("OpenAI Official", "gpt-image-2", endpoint, &error);
 
-        assert_eq!(codex_proxy_error_status(endpoint, &error), StatusCode::FAILED_DEPENDENCY);
+        assert_eq!(
+            codex_proxy_error_status(endpoint, &error),
+            StatusCode::FAILED_DEPENDENCY
+        );
         assert_eq!(body["error"]["code"], "cc_switch_image_result_unknown");
         assert_eq!(body["error"]["retryable"], false);
         assert!(body["error"]["message"]

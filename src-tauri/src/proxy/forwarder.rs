@@ -6485,6 +6485,7 @@ fn map_reqwest_send_error(error: reqwest::Error) -> ProxyError {
     map_reqwest_send_error_class(
         error_without_url.is_connect(),
         error_without_url.is_timeout(),
+        error_without_url.is_builder(),
         error_without_url.is_request(),
         error_chain_message(&error_without_url),
     )
@@ -6493,7 +6494,8 @@ fn map_reqwest_send_error(error: reqwest::Error) -> ProxyError {
 fn map_reqwest_send_error_class(
     is_connect: bool,
     is_timeout: bool,
-    is_request: bool,
+    is_builder: bool,
+    _is_request: bool,
     detail: String,
 ) -> ProxyError {
     if is_connect {
@@ -6502,7 +6504,7 @@ fn map_reqwest_send_error_class(
     } else if is_timeout {
         // 超时发生在请求发出后，无法确定上游是否已经开始处理，不能自动重发。
         ProxyError::ResponsePending(format!("上游响应等待超时（请求可能已在处理中）: {detail}"))
-    } else if is_request {
+    } else if is_builder {
         // 请求构造阶段失败，没有发出任何字节。
         ProxyError::ForwardFailed(format!("上游请求构造失败: {detail}"))
     } else {
@@ -10047,8 +10049,13 @@ mod tests {
 
     #[test]
     fn reqwest_connect_timeout_is_forward_failed_not_response_pending() {
-        let err =
-            map_reqwest_send_error_class(true, true, false, "error_sending_request".to_string());
+        let err = map_reqwest_send_error_class(
+            true,
+            true,
+            false,
+            true,
+            "error_sending_request".to_string(),
+        );
 
         assert!(matches!(
             err,
@@ -10058,7 +10065,7 @@ mod tests {
 
     #[test]
     fn reqwest_in_flight_timeout_stays_response_pending() {
-        let err = map_reqwest_send_error_class(false, true, false, "late result".to_string());
+        let err = map_reqwest_send_error_class(false, true, false, true, "late result".to_string());
 
         assert!(matches!(
             err,
@@ -10069,6 +10076,7 @@ mod tests {
     #[test]
     fn reqwest_send_request_disconnect_is_not_treated_as_pre_send_build_failure() {
         let err = map_reqwest_send_error_class(
+            false,
             false,
             false,
             true,
