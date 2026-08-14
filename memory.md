@@ -3450,3 +3450,10 @@
 - 推送发布分支后再次用 live `git ls-remote --heads fork` 对照：139 个远端 heads 与 139 个本地非 symbolic tracking tips 逐 SHA 一致，`NEW/MOVED/DELETED=0`。新增 tip 仅为发布分支自身；正式 tag 固定在 `7e6665fc`，tag 之后的 post-release 提交（首个为 `07f1da65`）只修改审计、发布说明和 memory。原 173-ref/198-patch 审计的 `actionable-missing=0` 结论不变。
 - GitHub Actions run `31846073316` 最终为 success：Windows x64/ARM64、Linux x64/ARM64、macOS、Publish GitHub Release、Assemble `latest.json` 七个 jobs 全部成功。Release 非 draft、非 prerelease，且 `releases/latest` 返回 `v3.19.1-26`；19 个资产全部下载后逐一计算 SHA-256，与 GitHub 服务端 digest 无任何 mismatch。
 - `latest.json` 版本为 `3.19.1-26`，六个平台键为 `darwin-aarch64`、`darwin-x86_64`、`windows-x86_64`、`windows-aarch64`、`linux-x86_64`、`linux-aarch64`；URL 全部指向 `/releases/download/v3.19.1-26/`，签名全部非空。Annotated tag object 为 `52ff4d24f0c0c7f2e304816f70484227e4ff5b43`，本地/远端 peeled commit 均为 `7e6665fcfd297f3f8954850d59f9786831b1e3d2`；发布分支可在 tag 之后追加只含文档的发布证据提交，但不得移动 v26 tag。
+
+## 2026-08-15 v3.19.1-27 发布线汇合与候选门禁
+
+- v27 工作树在主任务接手前已有 32 个独立提交，覆盖 reasoning capability resolver、Sub-Agent schema v2/UI 协调和 ImageGen 长请求防重放，但它从 v26 早期候选 `dd967801` 分叉，缺少 v26 最终 30 个独立提交。合流提交 `6fe99e9d` 整体合入 `e963b07d`，没有从 v26 重建空分支或重复 cherry-pick；合流前备份 ref 为 `backup/release-v27-pre-v26-final-merge-20260815`。
+- 冲突根因是 v26 的 supported/default effort 临时契约与 v27 的统一 runtime policy 同时修改 profile compiler。最终采用 v27 的 `delegated/model_default/fixed/disabled` 与 resolved capability，同时保留 v26 的父级 selection policy、legacy DeepSeek fallback、状态 warning 汇总和发布/事务脚本。legacy `auto` 迁移为 delegated；显式 `xhigh` 保持 fixed `xhigh`；DeepSeek fallback 声明 Provider `low/high/max`、默认 `high`、允许关闭，并映射 `medium/xhigh -> high`。
+- 合流聚焦门禁：profiles 84/84、`codex_config` 167/167、ImageGen 13/13、Codex proxy 10/10、reqwest 3/3、前端 7 files / 241 tests。全量门禁：Rust library 2991 passed / 0 failed / 2 ignored；Vitest 123 files / 996 tests；typecheck、Prettier、cargo check/fmt、diff hygiene 均通过；原生 Windows PowerShell 5.1 Pester 53/53。
+- v27 不重复 v26 的 173-ref/198-patch 历史审计；v26 已证明 `actionable-missing=0`。本轮只确认 v27 现有新提交与 v26 最终发布线已经同树可达。正式 build/install/tag/Release 证据必须在 `3.19.1-27` 版本提交之后追加，不能复用 v26 资产或哈希。
