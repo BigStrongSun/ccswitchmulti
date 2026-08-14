@@ -659,10 +659,15 @@ describe("CodexFormFields local model routing", () => {
   it("opens the protocol probe confirmation above the full screen provider panel", () => {
     renderCatalogHarness([{ model: "gpt-5.5", upstreamModel: "gpt-5.5" }], {
       shouldShowSpeedTest: true,
+      openAdvancedOptions: false,
     });
 
+    fireEvent.click(screen.getByRole("button", { name: "高级选项" }));
     fireEvent.click(screen.getByRole("button", { name: "验证连接" }));
 
+    expect(
+      screen.getByText("已打开验证确认框；如果没有看到弹窗，请按 Esc 后重试。"),
+    ).toBeVisible();
     expect(screen.getByRole("dialog")).toHaveClass("z-[200]");
     expect(screen.getByText("确认测试 Chat / Responses")).toBeInTheDocument();
   });
