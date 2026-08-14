@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Hide the legacy route editor from ordinary Codex Provider forms, default new non-official providers to model-menu projection, and preserve all stored routing compatibility.
+**Goal:** Hide the legacy route editor, force maintained presets to project their model catalog, keep an explained opt-out only for custom providers, and preserve all stored routing compatibility.
 
 **Architecture:** Keep `codexRouting` parsing, state, persistence, backend resolution, and the MultiRouter workspace unchanged. Restrict the generic form to catalog/menu controls by disabling its legacy editor presentation, and change only the new-provider initialization path for `codexLocalModelMapping`.
 
@@ -12,19 +12,22 @@
 
 - Existing `codexRouting` object and array-shaped legacy data must remain readable and writable.
 - MultiRouter workspace remains the sole visible route editor.
-- Explicit `codexLocalModelMapping: false` values must remain false.
-- New non-official Codex providers default to `codexLocalModelMapping: true`.
-- The menu projection switch remains inside the collapsed advanced section.
+- Explicit `codexLocalModelMapping: false` values remain false only for custom providers.
+- Maintained presets and MultiRouter always project their catalog.
+- New custom Codex providers default to `codexLocalModelMapping: true`.
+- The custom-provider switch is the final control inside the collapsed advanced section and explains its exact effect.
 
 ---
 
 ### Task 1: Lock The Generic Form Behavior
 
 **Files:**
+
 - Modify: `tests/components/CodexFormFields.test.tsx`
 - Modify: `tests/components/ProviderForm.codexPreset.test.tsx`
 
 **Interfaces:**
+
 - Consumes: `CodexFormFields`, `ProviderForm`
 - Produces: regression expectations for hidden route controls and default menu projection
 
@@ -45,10 +48,12 @@ Expected: the hidden-entry and new-default assertions fail against the current i
 ### Task 2: Implement The Presentation And Default Changes
 
 **Files:**
+
 - Modify: `src/components/providers/forms/CodexFormFields.tsx`
 - Modify: `src/components/providers/forms/ProviderForm.tsx`
 
 **Interfaces:**
+
 - Consumes: existing `codexRouting`, `onCodexRoutingChange`, and `meta.codexLocalModelMapping`
 - Produces: no generic route editor UI; new Provider default `true`; explicit stored values unchanged
 
@@ -73,9 +78,11 @@ Expected: both suites pass.
 ### Task 3: Record And Verify Compatibility
 
 **Files:**
+
 - Modify: `memory.md`
 
 **Interfaces:**
+
 - Consumes: final behavior and test evidence
 - Produces: repository-local maintenance guidance
 
@@ -97,3 +104,38 @@ Expected: all commands exit successfully.
 
 Stage only the planned files and commit with the required attribution footer `本次提交由BigStrongsSun完成`.
 
+### Task 4: Restrict And Explain The Projection Opt-Out
+
+**Files:**
+
+- Modify: `tests/components/CodexFormFields.test.tsx`
+- Modify: `tests/components/ProviderForm.codexPreset.test.tsx`
+- Modify: `src/components/providers/forms/CodexFormFields.tsx`
+- Modify: `src/components/providers/forms/ProviderForm.tsx`
+- Modify: `src/i18n/locales/en.json`
+- Modify: `src/i18n/locales/ja.json`
+- Modify: `src/i18n/locales/zh.json`
+- Modify: `src/i18n/locales/zh-TW.json`
+
+**Interfaces:**
+
+- Consumes: stable `codexPresetId`, `codexTakeoverEnabled`, existing advanced collapsible
+- Produces: `allowModelMenuProjectionToggle` presentation boundary and forced maintained-preset save semantics
+
+- [ ] **Step 1: Add failing component and form tests**
+
+Assert that the custom toggle renders after request overrides with complete explanatory copy, maintained presets pass no editable toggle and save `codexLocalModelMapping: true`, and switching to a custom source defaults the toggle to enabled.
+
+- [ ] **Step 2: Verify RED**
+
+Run: `pnpm vitest run tests/components/CodexFormFields.test.tsx tests/components/ProviderForm.codexPreset.test.tsx --exclude "**/.worktrees/**"`
+
+Expected: fail because the toggle is not last, maintained preset editability is not distinguished, and custom selection currently resets the state to false.
+
+- [ ] **Step 3: Implement the minimal behavior**
+
+Derive maintained-preset identity from the selected preset or saved stable `codexPresetId`; force its projection state and saved metadata to true. Pass an explicit custom-only presentation prop to `CodexFormFields`, move the panel to the end of `CollapsibleContent`, and replace the hints in all four locales with the approved control/not-control/opt-out explanation.
+
+- [ ] **Step 4: Verify GREEN and compatibility**
+
+Run the focused tests, `pnpm typecheck`, changed-file Prettier checks, MultiRouter state/sync tests, and isolated App integration suite. Record the final boundary in `memory.md` and commit with the required attribution footer.
