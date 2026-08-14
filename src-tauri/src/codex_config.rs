@@ -900,10 +900,7 @@ fn codex_desktop_reasoning_efforts_from_levels(levels: Option<&Value>) -> Value 
     Value::Array(efforts)
 }
 
-/// 返回模型厂商声明的 reasoning capability，而不是 Codex/GPT 通用兜底档位。
-///
-/// DeepSeek V4 的 `max` 会选择厂商独立的 Think Max 模式；`medium` / `xhigh`
-/// 不是其官方 Codex catalog 枚举，因此 MultiRouter 也不能从 GPT 模板继承它们。
+/// 把 Provider 原生档位与已确认映射归一为 Codex 可选择的 reasoning levels。
 fn apply_codex_model_reasoning_capability(
     entry_obj: &mut serde_json::Map<String, Value>,
     capability: Option<&crate::proxy::providers::codex_reasoning::CodexModelReasoningCapability>,
@@ -922,21 +919,24 @@ fn apply_codex_model_reasoning_capability(
         "supported_reasoning_levels".to_string(),
         Value::Array(Vec::new()),
     );
-    let Some(capability) = capability.filter(|capability| capability.supported) else {
-        return;
-    };
-    if let Some(default_effort) = capability.default_effort.as_deref() {
-        entry_obj.insert("default_reasoning_level".to_string(), json!(default_effort));
+    let resolved =
+        crate::proxy::providers::codex_reasoning::resolve_subagent_reasoning_capability(capability);
+    if let Some(default_effort) = resolved.provider_default_effort {
+        entry_obj.insert(
+            "default_reasoning_level".to_string(),
+            json!(default_effort.as_str()),
+        );
     }
     entry_obj.insert(
         "supported_reasoning_levels".to_string(),
         Value::Array(
-            capability
-                .supported_efforts
+            resolved
+                .codex_selectable_efforts
                 .iter()
-                .map(
-                    |effort| json!({ "effort": effort, "description": format!("{effort} effort") }),
-                )
+                .map(|effort| {
+                    let effort = effort.as_str();
+                    json!({ "effort": effort, "description": format!("{effort} effort") })
+                })
                 .collect(),
         ),
     );

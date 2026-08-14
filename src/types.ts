@@ -294,7 +294,8 @@ export type CodexReasoningEffort =
   | "medium"
   | "high"
   | "xhigh"
-  | "max";
+  | "max"
+  | "ultra";
 
 export interface CodexModelReasoningCapability {
   supported: boolean;

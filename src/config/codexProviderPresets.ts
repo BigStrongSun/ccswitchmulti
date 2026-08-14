@@ -195,8 +195,18 @@ const deepSeekV4Reasoning: CodexModelReasoningCapability = {
   supported: true,
   supportedEfforts: ["low", "high", "max"],
   defaultEffort: "high",
-  disableAllowed: false,
-  upstream: { format: "reasoning_object", parameter: "reasoning.effort" },
+  disableAllowed: true,
+  upstream: {
+    format: "string",
+    parameter: "reasoning_effort",
+    effortMap: {
+      low: "low",
+      medium: "high",
+      high: "high",
+      xhigh: "high",
+      max: "max",
+    },
+  },
   source: "builtin",
 };
 

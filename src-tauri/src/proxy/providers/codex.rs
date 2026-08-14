@@ -1887,7 +1887,9 @@ pub fn resolve_codex_chat_reasoning_config(
 fn codex_chat_reasoning_config_from_capability(
     capability: super::codex_reasoning::CodexModelReasoningCapability,
 ) -> CodexChatReasoningConfig {
-    let has_efforts = capability.supported && !capability.supported_efforts.is_empty();
+    let resolved = super::codex_reasoning::resolve_subagent_reasoning_capability(Some(&capability));
+    let has_efforts =
+        resolved.support_kind == super::codex_reasoning::ReasoningSupportKind::EffortLevels;
     let boolean_thinking = capability.upstream.format == "boolean";
     CodexChatReasoningConfig {
         supports_thinking: Some(capability.supported),
@@ -1905,8 +1907,8 @@ fn codex_chat_reasoning_config_from_capability(
             "none".to_string()
         }),
         effort_value_mode: Some(encode_codex_capability_effort_mode(
-            &capability.supported_efforts,
-            &capability.upstream.effort_map,
+            &resolved.codex_selectable_efforts,
+            &resolved.effort_map,
         )),
         min_output_tokens: None,
         default_output_tokens: None,
@@ -1915,15 +1917,22 @@ fn codex_chat_reasoning_config_from_capability(
 }
 
 fn encode_codex_capability_effort_mode(
-    supported_efforts: &[String],
-    effort_map: &std::collections::HashMap<String, String>,
+    supported_efforts: &[super::codex_reasoning::CodexReasoningEffort],
+    effort_map: &std::collections::BTreeMap<
+        super::codex_reasoning::CodexReasoningEffort,
+        super::codex_reasoning::CodexReasoningEffort,
+    >,
 ) -> String {
-    let allowed = supported_efforts.join(",");
+    let allowed = supported_efforts
+        .iter()
+        .map(|effort| effort.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
     let mappings = supported_efforts
         .iter()
         .map(|effort| {
             let mapped = effort_map.get(effort).unwrap_or(effort);
-            format!("{effort}={mapped}")
+            format!("{}={}", effort.as_str(), mapped.as_str())
         })
         .collect::<Vec<_>>()
         .join(",");
