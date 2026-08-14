@@ -5902,6 +5902,8 @@ mod tests {
                 "model",
                 "modelProvider",
                 "modelReasoningEffort",
+                "reasoningPolicy",
+                "reasoningCapability",
                 "modelContextWindow",
                 "tomlPreview",
                 "warnings"
@@ -5915,6 +5917,20 @@ mod tests {
             CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID
         );
         assert_eq!(value["modelContextWindow"], 1_000_000);
+        assert_eq!(value["reasoningPolicy"], "delegated");
+        assert_eq!(
+            value["reasoningCapability"],
+            json!({
+                "supportKind": "unknown",
+                "source": null,
+                "confidence": "unverified",
+                "codexSelectableEfforts": [],
+                "providerAcceptedEfforts": [],
+                "providerDefaultEffort": null,
+                "disableAllowed": false,
+                "effortMap": {}
+            })
+        );
         let serialized = serde_json::to_string(&value).expect("serialize safe preview");
         assert!(!serialized.contains("MUST_NOT_LEAK"));
         assert!(!serialized.contains("apiKey"));
@@ -6604,6 +6620,23 @@ mod tests {
                     "roleFilePath": expected_path.to_string_lossy(),
                     "modelProvider": "codex_model_router_v2",
                     "modelReasoningEffort": "high",
+                    "reasoningPolicy": "fixed",
+                    "reasoningCapability": {
+                        "supportKind": "effort_levels",
+                        "source": "builtin",
+                        "confidence": "confirmed",
+                        "codexSelectableEfforts": ["none", "low", "medium", "high", "xhigh", "max"],
+                        "providerAcceptedEfforts": ["low", "high", "max"],
+                        "providerDefaultEffort": "high",
+                        "disableAllowed": true,
+                        "effortMap": {
+                            "low": "low",
+                            "medium": "high",
+                            "high": "high",
+                            "xhigh": "high",
+                            "max": "max"
+                        }
+                    },
                     "status": "generated",
                     "warnings": []
                 }],
