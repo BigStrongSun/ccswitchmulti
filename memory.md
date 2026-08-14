@@ -3353,3 +3353,10 @@
 - 修复后第二次 `pnpm release:local` 已完成 release 编译、Vite build、最终应用链接和 NSIS，随后在 exporter `Write-Checksums` 的 `Get-FileHash` 再次失败。这不是新根因，而是同一不完整 `Microsoft.PowerShell.Utility` 导出面的第二个依赖点；只修临时文件而不审计同模块后续调用的边界过窄。
 - 第二轮 TDD RED `44705602` 用固定内容和固定 SHA-256 锁定缺失的 `Get-ReleaseFileSha256`；GREEN `9808b11e` 在现有 helper 中实现流式 `[System.Security.Cryptography.SHA256]`，并让 exporter 与 `local-release-pipeline.ps1` 两处 checksum 都不再调用 `Get-FileHash`。污染宿主和原生 WinPS 各 2/2，事务安装器加发布测试 48/48，三份脚本 WinPS 5.1 parse、typecheck、UTF-8/diff hygiene 通过。
 - 第二次调用虽然留下 raw EXE 和 NSIS，但缺少完整导出、metadata 和最终 checksum，因此不能冒充完整 release；最终必须从包含两轮修复的 clean HEAD 重跑完整流水线，而不是只给失败目录补文件后宣称完成。
+
+## 2026-08-15 v3.19.1-26 Tauri updater bundle metadata 版本配对
+
+- clean HEAD 的完整本地构建 exit 0，但 Tauri CLI 输出 `__TAURI_BUNDLE_TYPE variable not found in binary`。不能仅凭 raw EXE 同时能搜到 `__TAURI_BUNDLE_TYPE_VAR_NSS` 与 `..._UNK` 就判定为假警告：后者也存在于 `bundle_type()` 的 match 常量中，文本出现不证明运行时 static 被正确改写。
+- 根因是构建两端协议错位：npm `@tauri-apps/cli 2.8.1` 内置的 `tauri-bundler 2.6.1` 仍通过 `.taubndl` PE section 和指针定位三字节 `UNK`；Cargo 实际解析的 `tauri-utils 2.8.3` 来自提交 `9b17a7ae`，已移除该 section，改为长字符串 `__TAURI_BUNDLE_TYPE_VAR_UNK`。官方 `tauri-apps/tauri#14521` / `0575dd287e02` 同时改变 utils 与 bundler，改用字符串搜索替换；这与本机二进制、Cargo.lock 和 CLI 源码逐层一致。
+- RED `6a513c08` 在生产依赖未变时稳定证明 CLI 版本不满足 marker-based utils 的最低兼容边界；GREEN `82a4e7c1` 将 `@tauri-apps/cli` 精确锁到 `2.10.1`，该版本源码包含官方字符串替换实现。原生 Windows PowerShell 5.1 下 transaction/release Pester 为 49/49，frozen install、`tauri-cli 2.10.1` 和 typecheck 通过。不要为了这个单点问题顺带升级完整 Tauri/API/plugin 栈。
+- 本轮联网交叉验证使用 Codex Web 与固定 Matrix WebSearch：Codex Web 命中官方 issue `#14059`、官方源码和 `#14521`；Matrix 精确搜索无结果。最终版本边界以官方 GitHub commit、npm registry、Cargo crate VCS metadata 和本地实际二进制为权威，Matrix 空结果只表示独立检索未命中，不表示 bridge 失效。
