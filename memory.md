@@ -3291,3 +3291,10 @@
 - 后续产品边界收紧：带稳定 `codexPresetId` 的 CCSwitchMulti 维护预设始终使用 `effectiveCodexMenuProjection=true`，不再显示可关闭开关；历史预设若误存 `codexLocalModelMapping=false`，下次保存会纠正为 true。MultiRouter 的后端强制投影规则保持不变。
 - 只有自定义 Provider 保留退出目录管理的能力：新建或从预设切换到自定义时默认开启，编辑既有自定义 Provider 时继续尊重显式 false。开关位于高级选项最后，并明确说明它只控制 Codex 启动时加载的 `model_catalog_json`、`/model` 模型/别名/上下文/推理档位，不控制 Provider、代理或 MultiRouter 是否可用；仅自行维护目录的用户应关闭。
 - 收紧后的 TDD 先得到 4 项预期失败，随后定向 30/30、路由状态同步 14/14、App 集成隔离重跑 8/8、typecheck 和变更文件 Prettier 检查通过。App 首轮仍出现既有异步 DOM/时序超时，完全相同命令重跑通过；测试夹具仍有既存 Tauri window metadata stderr 与 React act warning。
+
+## 2026-08-14 Codex Provider 模型源就绪主流程
+
+- Codex Provider 表单的“模型与兼容性”必须常显模型同步、默认模型、上游协议、连接验证与 MultiRouter 就绪结论；不要再把这些主流程动作藏回高级折叠。
+- `CodexProviderReadinessSection` 只消费 `CodexFormFields` 已拥有的 model sync/protocol probe state 和回调，不应另建平行状态；错误验证结果用 `role="alert"`，其它验证结果用 `role="status"`。
+- 维护预设继续显示协议、上下文、推理档位及 `/model` 目录由 CCSwitchMulti 维护；自定义 Provider 继续是自动检测 Chat/Responses，失败后才允许高级手动覆盖。Task 4 的旧 route editor 可见入口仍保持收口，`codexRouting` 历史兼容链不能被本 UI 变动误删。
+- TDD 移植证据：RED `1abad036` 的独立测试在 GREEN 前因缺少 `CodexProviderReadinessSection` import 预期失败；GREEN `ee1c393c` 后 `CodexProviderReadinessSection` 与 `ProviderForm.codexPreset` 定向测试 12/12 通过，`git diff --check` 通过。测试输出仍有既有 baseline-browser-mapping 过期与 React act warning，非失败。

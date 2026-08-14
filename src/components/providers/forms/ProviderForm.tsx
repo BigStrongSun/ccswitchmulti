@@ -2601,6 +2601,7 @@ function ProviderFormFull({
                   presetProviderType === "xai_oauth" ||
                   initialData?.meta?.providerType === "xai_oauth"
                 }
+                isMaintainedPreset={isMaintainedCodexPreset}
                 isXaiOauthAuthenticated={isXaiOauthAuthenticated}
                 selectedXaiAccountId={selectedXaiAccountId}
                 onXaiAccountSelect={setSelectedXaiAccountId}
