@@ -2171,9 +2171,7 @@ describe("Codex Sub-Agent V2 searchable Accordion workspace", () => {
         "已从模型目录添加可配置模型；已有设置保持不变；数据库已保存；当前方案未激活，因此未改写 Codex Agent 文件",
       ),
     ).toBeVisible();
-    expect(
-      screen.queryByText(/Codex Agent 文件均已写入并回读验证/),
-    ).toBeNull();
+    expect(screen.queryByText(/Codex Agent 文件均已写入并回读验证/)).toBeNull();
   });
 
   it("在粘性保存区反馈未保存和保存成功状态", async () => {

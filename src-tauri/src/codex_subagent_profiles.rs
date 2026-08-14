@@ -882,7 +882,9 @@ fn generated_description_for_provider(
         Some([InputModality::Text, InputModality::Image]) => {
             format!("{base} It supports text and image input, including image understanding.")
         }
-        _ => base,
+        _ => format!(
+            "{base} Input capabilities are unknown, so this role must not be assigned tasks that depend on image understanding."
+        ),
     }
 }
 
@@ -936,7 +938,9 @@ fn generated_instructions_for_provider(
         Some([InputModality::Text, InputModality::Image]) => format!(
             "{base} This model supports image input and may be selected for tasks that require image understanding."
         ),
-        _ => base,
+        _ => format!(
+            "{base} This model's input capabilities are unknown; do not select this role for tasks that depend on image understanding."
+        ),
     }
 }
 
@@ -1321,9 +1325,7 @@ mod tests {
             requested_role_name: s(requested),
             effective_role_name: s(effective),
             description: format!("{description}{UNKNOWN_MODALITY_DESCRIPTION_SAFETY}"),
-            developer_instructions: format!(
-                "{instructions}{UNKNOWN_MODALITY_INSTRUCTIONS_SAFETY}"
-            ),
+            developer_instructions: format!("{instructions}{UNKNOWN_MODALITY_INSTRUCTIONS_SAFETY}"),
             nickname_candidates: nicknames,
             model: s("DeepSeek-V4-Flash"),
             model_provider: s("codex_model_router_v2"),
@@ -2219,8 +2221,8 @@ mod tests {
                 "instructions missing {phrase}: {instructions}"
             );
             assert!(
-                (2..=4).contains(&description.matches('.').count()),
-                "description must remain 2-4 sentences: {description}"
+                (2..=5).contains(&description.matches('.').count()),
+                "description must remain 2-5 sentences including modality safety: {description}"
             );
         }
         let mut p = profile("flash", "DeepSeek-V4-Flash");
@@ -2271,7 +2273,7 @@ mod tests {
                 &bounded,
                 ProviderKind::ThirdParty,
             ),
-            INSTRUCTIONS_BOUNDED_CHANGES
+            format!("{INSTRUCTIONS_BOUNDED_CHANGES}{UNKNOWN_MODALITY_INSTRUCTIONS_SAFETY}")
         );
 
         let mut complex = profile("flash", "DeepSeek-V4-Flash");
@@ -2284,7 +2286,7 @@ mod tests {
                 &complex,
                 ProviderKind::ThirdParty,
             ),
-            INSTRUCTIONS_COMPLEX_CHANGES
+            format!("{INSTRUCTIONS_COMPLEX_CHANGES}{UNKNOWN_MODALITY_INSTRUCTIONS_SAFETY}")
         );
     }
 

@@ -107,6 +107,55 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function evaluateMutationResult(
+  result: CodexSubagentV2MutationProvider,
+): string {
+  const verification = result.verification;
+  if (!verification) {
+    throw new Error("后端未返回 Codex Agent 文件写入验证结果。");
+  }
+  if (!verification.databasePersisted) {
+    throw new Error("后端未确认 V2 子 Agent 配置已写入数据库。");
+  }
+  if (verification.activation !== "restart_codex_and_start_new_session") {
+    throw new Error("后端返回的 Codex Agent 激活条件不一致。");
+  }
+
+  switch (result.projection?.status) {
+    case "applied": {
+      const filesVerified =
+        Array.isArray(verification.roleFiles) &&
+        verification.roleFiles.every(
+          (file) => file.exists && file.contentMatches,
+        );
+      if (verification.roleFilesStatus !== "verified" || !filesVerified) {
+        throw new Error("Codex Agent 文件写入后回读校验失败。");
+      }
+      return "数据库与 Codex Agent 文件均已写入并回读验证；重启 Codex/app-server 并新建会话后生效";
+    }
+    case "not_required":
+      if (
+        verification.roleFilesStatus !== "not_required" ||
+        !Array.isArray(verification.roleFiles) ||
+        verification.roleFiles.length !== 0
+      ) {
+        throw new Error("非当前方案的 Codex Agent 文件验证状态不一致。");
+      }
+      return "数据库已保存；当前方案未激活，因此未改写 Codex Agent 文件";
+    case "pending_retry":
+      if (
+        verification.roleFilesStatus !== "pending_retry" ||
+        !Array.isArray(verification.roleFiles) ||
+        verification.roleFiles.length !== 0
+      ) {
+        throw new Error("Codex Agent 待重试状态未通过后端一致性检查。");
+      }
+      return "数据库已保存；Codex Agent 文件投影待自动重试";
+    default:
+      throw new Error("后端未返回明确的 Codex Agent 投影状态。");
+  }
+}
+
 function isUsableProfile(value: unknown): value is CodexSubagentV2Profile {
   if (!isRecord(value) || typeof value.model !== "string") return false;
   if (typeof value.enabled !== "boolean" || !isRecord(value.questionnaire)) {
@@ -494,12 +543,15 @@ export function CodexSubagentProfileEditor({
   async function initialize() {
     setIsSaving(true);
     setSaveError(null);
+    setSaveMessage(null);
     try {
       const nextProvider = await codexSubagentV2Api.initializeProviderConfig(
         provider.id,
       );
       await adoptBackendProvider(nextProvider);
-      setSaveMessage("V2 子 Agent 能力配置已初始化");
+      setSaveMessage(
+        `V2 子 Agent 能力配置已初始化；${evaluateMutationResult(nextProvider)}`,
+      );
     } catch (error) {
       setSaveError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -521,12 +573,14 @@ export function CodexSubagentProfileEditor({
         currentDraft,
       );
       await adoptBackendProvider(nextProvider);
-      setSaveMessage(
+      const actionMessage =
         action === "sync_catalog"
           ? "已从模型目录添加可配置模型；已有设置保持不变"
           : action === "remove_all_invalid"
             ? "无效能力配置已删除"
-            : "无效能力配置已从模型目录恢复",
+            : "无效能力配置已从模型目录恢复";
+      setSaveMessage(
+        `${actionMessage}；${evaluateMutationResult(nextProvider)}`,
       );
     } catch (error) {
       setSaveError(error instanceof Error ? error.message : String(error));
@@ -651,38 +705,7 @@ export function CodexSubagentProfileEditor({
         );
       }
       const result = await persist(draft);
-      const verification = result.verification;
-      if (!verification) {
-        throw new Error("后端未返回 Codex Agent 文件写入验证结果。");
-      }
-      if (!verification.databasePersisted) {
-        throw new Error("后端未确认 V2 子 Agent 配置已写入数据库。");
-      }
-      if (result.projection?.status === "applied") {
-        const filesVerified = verification.roleFiles.every(
-          (file) => file.exists && file.contentMatches,
-        );
-        if (verification.roleFilesStatus !== "verified" || !filesVerified) {
-          throw new Error("Codex Agent 文件写入后回读校验失败。");
-        }
-        setSaveMessage(
-          "数据库与 Codex Agent 文件均已写入并回读验证；重启 Codex/app-server 并新建会话后生效",
-        );
-      } else if (result.projection?.status === "not_required") {
-        if (verification.roleFilesStatus !== "not_required") {
-          throw new Error("非当前方案的 Codex Agent 文件验证状态不一致。");
-        }
-        setSaveMessage(
-          "数据库已保存；当前方案未激活，因此未改写 Codex Agent 文件",
-        );
-      } else if (result.projection?.status === "pending_retry") {
-        if (verification.roleFilesStatus !== "pending_retry") {
-          throw new Error("Codex Agent 待重试状态未通过后端一致性检查。");
-        }
-        setSaveMessage("数据库已保存；Codex Agent 文件投影待自动重试");
-      } else {
-        throw new Error("后端未返回明确的 Codex Agent 投影状态。");
-      }
+      setSaveMessage(evaluateMutationResult(result));
     } catch (error) {
       setSaveError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -1050,9 +1073,9 @@ export function CodexSubagentProfileEditor({
                         <QuestionnaireSelect
                           label="输入能力"
                           value={
-                            effectiveInputModalities?.includes("image")
+                            effectiveInputModalities?.[1] === "image"
                               ? "text_and_image"
-                              : effectiveInputModalities?.includes("text")
+                              : effectiveInputModalities?.[0] === "text"
                                 ? "text_only"
                                 : "unknown"
                           }

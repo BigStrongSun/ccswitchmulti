@@ -16,7 +16,6 @@ export type CodexSubagentTaskStrength =
   | "high_risk_review";
 
 export type CodexSubagentOptimization = "speed" | "balanced" | "quality";
-export type CodexSubagentInputModality = "text" | "image";
 export type CodexSubagentWriteScope =
   | "read_only"
   | "bounded_changes"
@@ -52,7 +51,7 @@ export interface CodexSubagentProfileOverrides {
 export interface CodexSubagentV2Profile {
   model: string;
   enabled: boolean;
-  inputModalities?: CodexSubagentInputModality[];
+  inputModalities?: ["text"] | ["text", "image"];
   questionnaire: CodexSubagentQuestionnaire;
   overrides?: CodexSubagentProfileOverrides;
 }
