@@ -3122,3 +3122,14 @@
 - 后续产品边界收紧：带稳定 `codexPresetId` 的 CCSwitchMulti 维护预设始终使用 `effectiveCodexMenuProjection=true`，不再显示可关闭开关；历史预设若误存 `codexLocalModelMapping=false`，下次保存会纠正为 true。MultiRouter 的后端强制投影规则保持不变。
 - 只有自定义 Provider 保留退出目录管理的能力：新建或从预设切换到自定义时默认开启，编辑既有自定义 Provider 时继续尊重显式 false。开关位于高级选项最后，并明确说明它只控制 Codex 启动时加载的 `model_catalog_json`、`/model` 模型/别名/上下文/推理档位，不控制 Provider、代理或 MultiRouter 是否可用；仅自行维护目录的用户应关闭。
 - 收紧后的 TDD 先得到 4 项预期失败，随后定向 30/30、路由状态同步 14/14、App 集成隔离重跑 8/8、typecheck 和变更文件 Prettier 检查通过。App 首轮仍出现既有异步 DOM/时序超时，完全相同命令重跑通过；测试夹具仍有既存 Tauri window metadata stderr 与 React act warning。
+
+# 2026-08-14 Codex Provider 与 MultiRouter 配置体验审计
+
+- 当前配置体验的根因是三代结构叠加：Provider 内旧 route editor、把自动过程拆成 10 步的旧向导、以及已经具备模型源/规则/状态/发布能力的新 MultiRouter 工作台。不要继续以“高级设置”技术分组掩盖职责冲突。
+- 产品边界确定为：单 Provider 页只把一个上游变成健康、可路由的模型源；MultiRouter 工作台负责组合模型源、选择暴露模型、自动处理重名、生成/调整路由、官方认证策略、启用和真实请求验证；状态页集中链路、协议、分流、流量和 Debug。
+- Provider 推荐按任务排列为“模型源身份、连接凭据、模型与兼容性、就绪状态、高级自定义”。同步模型、默认模型、自动协议探测/连接验证、探测结果和可路由状态必须从高级提升到主流程；Goal mode 和应用/编辑通用配置移到全局 Codex 设置。
+- 维护预设的协议、catalog、上下文、reasoning 和 `/model` 投影应自动且只读展示；正常流程只需凭据与连接验证。自定义 Provider 保存前自动尝试 `/models` 和双协议探测，失败时才开放手动协议；未知能力保持未声明，不套用 GPT 档位。
+- 真正高级仅包括手动协议覆盖、reasoning 能力覆盖、prompt cache routing、User-Agent、Header/Body 覆盖、远程压缩、raw auth/config、计费覆盖，以及高级最后的自定义 catalog opt-out。Provider 内旧路由入口继续隐藏，但历史数据和后端兼容层不可删除。
+- MultiRouter 向导应从 10 步收敛为 4 步：选择/添加模型源；自动准备与验证；选择模型并预览路由（含方案名）；启用并用真实请求验证。删除所有历史迁移/历史修复跳转和文案，正常自动结果只显示摘要，只有失败项要求用户处理。
+- 审计文档与九张真实 UI 证据位于 `docs/audits/2026-08-14-provider-configuration-ux/README.md`。安装版截图仍含当前源码已经隐藏的旧 Provider route editor，因此后续判断必须同时核对当前分支源码，不能按旧截图恢复入口。
+- 联网核对使用 Codex 内置搜索命中 OpenAI 官方配置参考、官方源码和模型目录；Matrix WebSearch 独立链返回 HTTP 521，未提供正证据。产品结论由官方资料、本地源码与真实 UI 三者交叉支持。
