@@ -468,7 +468,7 @@ function Assert-CcsmRuntime {
     }
     $hash = & $Operations.GetFileHash $Context.InstalledExecutable
     if (-not [string]::Equals($hash, $ExpectedHash, [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw "$Label hash mismatch"
+        throw "$Label hash mismatch: actual=$hash expected=$ExpectedHash"
     }
 }
 
