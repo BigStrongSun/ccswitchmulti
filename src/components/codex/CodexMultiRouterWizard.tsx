@@ -9,7 +9,6 @@ import {
   CheckCircle2,
   Database,
   GitBranch,
-  KeyRound,
   RefreshCw,
   Route,
   Server,
@@ -104,17 +103,7 @@ interface CodexMultiRouterWizardProps {
   onEnablePlan: (provider: Provider) => void | Promise<void>;
 }
 
-type WizardStepKey =
-  | "intro"
-  | "sources"
-  | "rename"
-  | "providerConfig"
-  | "fetchModels"
-  | "collisions"
-  | "selectModels"
-  | "routes"
-  | "publish"
-  | "finish";
+type WizardStepKey = "sources" | "prepare" | "review" | "activate";
 
 interface WizardStep {
   key: WizardStepKey;
@@ -167,131 +156,64 @@ interface CodexOAuthWizardStatus {
 
 const STEPS: WizardStep[] = [
   {
-    key: "intro",
-    title: "理解 MultiRouter",
-    description:
-      "Codex 仍连接本地 15721，CCSwitchMulti 按 model 分发到不同上游。",
-    icon: Wand2,
-  },
-  {
     key: "sources",
-    title: "创建模型源",
-    description:
-      "逐个添加 OpenAI/中转站、DeepSeek、Qwen、本地 vLLM/Ollama 等 Codex provider。",
+    title: "选择模型源",
+    description: "选择已经接入的 Provider，或先添加一个新的 Codex 模型源。",
     icon: Server,
   },
   {
-    key: "rename",
-    title: "命名方案",
-    description:
-      "给这次新配置的 MultiRouter 起一个清晰名称，后续状态页和 provider 列表都会使用它。",
-    icon: Wand2,
-  },
-  {
-    key: "providerConfig",
-    title: "配置核心参数",
-    description:
-      "检查 API Key、Base URL、Responses / Chat Completions、Codex 菜单映射和多模型路由。",
-    icon: KeyRound,
-  },
-  {
-    key: "fetchModels",
-    title: "获取模型列表",
-    description:
-      "自动调用 /models，空目录用于初始化，已有目录只刷新保留模型的元数据。",
+    key: "prepare",
+    title: "自动准备与验证",
+    description: "同步模型目录、验证协议，并自动处理不同模型源之间的重名。",
     icon: RefreshCw,
   },
   {
-    key: "collisions",
-    title: "处理重名模型",
+    key: "review",
+    title: "选择模型并预览路由",
     description:
-      "官方模型保留原名，中转站或第三方同名模型会在模型名后追加 provider 名称并保留 upstreamModel。",
-    icon: ShieldAlert,
-  },
-  {
-    key: "selectModels",
-    title: "整理模型",
-    description: "汇总所有模型后，排序并剔除旧模型或不想暴露给 Codex 的模型。",
-    icon: Database,
-  },
-  {
-    key: "routes",
-    title: "生成路由规则",
-    description:
-      "按 provider 分组生成规则，gpt/o、deepseek、qwen 等前缀自动命中对应上游。",
+      "命名方案，选择要展示给 Codex 的模型，并确认生成的路由与认证策略。",
     icon: GitBranch,
   },
   {
-    key: "publish",
-    title: "保存并发布",
-    description:
-      "创建或更新带 codexRouting 和 modelCatalog 的 MultiRouter provider。",
-    icon: Database,
-  },
-  {
-    key: "finish",
-    title: "启用并测试",
-    description:
-      "显式启用多路路由，进入状态页等待真实转发成功，再自动跳到历史修复。",
+    key: "activate",
+    title: "启用并验证",
+    description: "保存并启用 MultiRouter，然后在状态页完成一次真实请求验证。",
     icon: CheckCircle2,
   },
 ];
 
 const STEP_RULES: Record<WizardStepKey, WizardStepRule> = {
-  intro: {
-    errors: ["本地代理未运行或 15721 被其它进程占用时，后续启用会失败。"],
-    canContinue: "这是说明步骤，总是可以继续。",
-  },
   sources: {
-    errors: ["没有普通 Codex provider 时，不能生成任何路由。"],
-    canContinue: "至少识别到一个普通 Codex provider 后可以继续。",
-  },
-  rename: {
-    errors: ["名称为空会让后续 provider 列表和状态页难以区分。"],
-    canContinue: "填写 MultiRouter 名称后可以继续。",
-  },
-  providerConfig: {
     errors: [
+      "没有普通 Codex provider 时，不能生成任何路由。",
       "缺少 Base URL/API Key 时无法自动获取模型，也无法做真实连通性测试。",
-      "apiFormat 未显式设置时会按模型源和探测结果推断：官方 GPT/O 优先 Responses，未知第三方保守走 Chat Completions。",
     ],
     canContinue:
-      "有可用 modelCatalog 时可继续；没有 modelCatalog 且缺配置会停在配置缺口状态。",
+      "至少选择一个模型源；已有目录可以继续，连接缺口会在下一步集中显示。",
   },
-  fetchModels: {
+  prepare: {
     errors: [
       "/models 失败会保留已有目录，不会清空用户配置。",
       "Responses 直连 provider 的 /v1/responses 探测失败是阻塞项。",
-      "Chat Completions provider 的 /v1/responses 探测失败是可继续警告。",
+      "多个 Provider 暴露同一模型名时必须应用稳定别名。",
     ],
     canContinue:
-      "无阻塞连通性失败即可继续；未测试时允许继续但状态条会提示风险。",
+      "同步和探测可以重试；无阻塞连通性失败时自动应用重名别名并继续。",
   },
-  collisions: {
+  review: {
     errors: [
-      "多个 provider 暴露同一 upstreamModel 时，后面的同名模型会被路由顺序遮蔽。",
+      "名称为空时无法保存方案。",
+      "未保留任何模型或没有可命中规则时，MultiRouter 不可用。",
     ],
-    canContinue: "接受自动别名策略后可以继续，upstreamModel 会保留真实模型名。",
+    canContinue: "填写名称、至少保留一个模型并确认路由预览后可以继续。",
   },
-  selectModels: {
-    errors: ["未保留任何模型时，MultiRouter 不会有可路由模型。"],
-    canContinue: "至少保留一个模型后可以继续生成路由。",
-  },
-  routes: {
-    errors: ["没有 match.models/prefixes 的 route 不会稳定命中模型请求。"],
-    canContinue: "至少生成一条 route 且没有连通性阻塞项时可以继续保存。",
-  },
-  publish: {
-    errors: ["数据库写入失败或 provider id 冲突会进入 saveFailed。"],
-    canContinue: "点击保存并发布成功后进入完成页；保存失败必须重试或返回修改。",
-  },
-  finish: {
+  activate: {
     errors: [
+      "数据库写入失败或 provider id 冲突时需要重试保存。",
       "本地代理未运行、端口冲突或切换 provider 失败会进入 enableFailed。",
-      "启用后如果 Codex 没有发出真实请求，状态页会停在待请求验证，不会提前跳历史修复。",
+      "启用后如果 Codex 没有发出真实请求，状态页会停在待请求验证。",
     ],
-    canContinue:
-      "显式启用成功后会自动打开状态页；最近一次转发成功后，App 会提示配置成功并进入历史修复。",
+    canContinue: "先保存方案，再显式启用并打开状态页完成真实请求验证。",
   },
 };
 
@@ -365,7 +287,7 @@ type WizardFlowEvent =
 
 const INITIAL_FLOW_STATE: WizardFlowState = {
   status: "opened",
-  stepKey: "intro",
+  stepKey: "sources",
 };
 
 // 将左侧教程步骤映射到业务状态；手动跳步也会进入对应的状态分支，避免 UI 步骤和流程状态脱节。
@@ -373,23 +295,12 @@ function statusForStep(stepKey: WizardStepKey): WizardFlowStatus {
   switch (stepKey) {
     case "sources":
       return "reviewProviderConfig";
-    case "rename":
-      return "reviewProviderConfig";
-    case "providerConfig":
-      return "reviewProviderConfig";
-    case "fetchModels":
+    case "prepare":
       return "readyToFetchModels";
-    case "collisions":
-      return "collisionReviewRequired";
-    case "selectModels":
+    case "review":
       return "routePreview";
-    case "routes":
-      return "routePreview";
-    case "publish":
-      return "published";
-    case "finish":
+    case "activate":
       return "enablePrompt";
-    case "intro":
     default:
       return "opened";
   }
@@ -404,7 +315,7 @@ function wizardFlowReducer(
     case "INIT":
       return {
         status: event.hasSources ? "opened" : "needSources",
-        stepKey: "intro",
+        stepKey: "sources",
       };
     case "GOTO_STEP":
       return {
@@ -426,14 +337,14 @@ function wizardFlowReducer(
       return {
         ...state,
         status: event.partial ? "modelFetchPartial" : "modelsFetched",
-        stepKey: "fetchModels",
+        stepKey: "prepare",
         fetchSummary: event.summary,
       };
     case "PROBE_START":
       return {
         ...state,
         status: "probingConnectivity",
-        stepKey: "fetchModels",
+        stepKey: "prepare",
         lastError: undefined,
       };
     case "PROBE_DONE":
@@ -444,29 +355,29 @@ function wizardFlowReducer(
             ? "connectivityPartial"
             : "connectivityPassed"
           : "connectivityFailed",
-        stepKey: event.canContinue ? "collisions" : "fetchModels",
+        stepKey: event.canContinue ? "review" : "prepare",
         connectivitySummary: event.summary,
       };
     case "SAVE_START":
       return { ...state, status: "savingPlan", lastError: undefined };
     case "SAVE_SUCCESS":
-      return { ...state, status: "published", stepKey: "finish" };
+      return { ...state, status: "published", stepKey: "activate" };
     case "SAVE_ERROR":
       return {
         ...state,
         status: "saveFailed",
-        stepKey: "publish",
+        stepKey: "activate",
         lastError: event.error,
       };
     case "ENABLE_START":
       return { ...state, status: "enabling", lastError: undefined };
     case "ENABLE_SUCCESS":
-      return { ...state, status: "enabled", stepKey: "finish" };
+      return { ...state, status: "enabled", stepKey: "activate" };
     case "ENABLE_ERROR":
       return {
         ...state,
         status: "enableFailed",
-        stepKey: "finish",
+        stepKey: "activate",
         lastError: event.error,
       };
     case "DISMISS":
@@ -1180,14 +1091,6 @@ export function CodexMultiRouterWizard({
   // 下一步按钮按状态机 gate 推进；配置不完整时停在当前状态并给出可操作提示。
   const advanceWizard = () => {
     switch (currentStep.key) {
-      case "intro":
-        dispatchFlow({
-          type: "NEXT",
-          nextStatus:
-            draftSources.length > 0 ? "reviewProviderConfig" : "needSources",
-          nextStepKey: "sources",
-        });
-        return;
       case "sources":
         if (draftSources.length === 0) {
           dispatchFlow({
@@ -1202,28 +1105,9 @@ export function CodexMultiRouterWizard({
         }
         dispatchFlow({
           type: "NEXT",
-          nextStatus: "reviewProviderConfig",
-          nextStepKey: "rename",
-        });
-        return;
-      case "rename":
-        if (!draftPlanName.trim()) {
-          toast.error("请先填写 MultiRouter 名称。", { closeButton: true });
-          return;
-        }
-        dispatchFlow({
-          type: "NEXT",
           nextStatus:
             configIssues.length > 0 ? "configIncomplete" : "readyToFetchModels",
-          nextStepKey: "providerConfig",
-        });
-        return;
-      case "providerConfig":
-        dispatchFlow({
-          type: "NEXT",
-          nextStatus:
-            configIssues.length > 0 ? "configIncomplete" : "readyToFetchModels",
-          nextStepKey: "fetchModels",
+          nextStepKey: "prepare",
         });
         if (hasUnauthenticatedCodexOAuthSources) {
           toast.warning(
@@ -1242,7 +1126,7 @@ export function CodexMultiRouterWizard({
           );
         }
         return;
-      case "fetchModels":
+      case "prepare":
         if (
           connectivityResults.length > 0 &&
           !canContinueAfterConnectivity(connectivityResults)
@@ -1250,10 +1134,10 @@ export function CodexMultiRouterWizard({
           dispatchFlow({
             type: "NEXT",
             nextStatus: "connectivityFailed",
-            nextStepKey: "fetchModels",
+            nextStepKey: "prepare",
           });
           recordWizardIssue({
-            stage: "fetchModels",
+            stage: "prepare",
             severity: "error",
             title: "Responses 连通性存在阻塞项",
             detail:
@@ -1268,48 +1152,36 @@ export function CodexMultiRouterWizard({
           );
           return;
         }
-        dispatchFlow({
-          type: "NEXT",
-          nextStatus:
-            modelCollisions.length > 0
-              ? "collisionReviewRequired"
-              : "routePreview",
-          nextStepKey: modelCollisions.length > 0 ? "collisions" : "routes",
-        });
-        return;
-      case "collisions":
         setDraftSources(resolveWizardModelNameCollisions(draftSources));
         dispatchFlow({
           type: "NEXT",
           nextStatus: "routePreview",
-          nextStepKey: "selectModels",
+          nextStepKey: "review",
         });
         return;
-      case "selectModels":
+      case "review":
+        if (!draftPlanName.trim()) {
+          toast.error("请先填写 MultiRouter 名称。", { closeButton: true });
+          return;
+        }
         if (activeCatalogModelOrder.length === 0) {
           toast.error("请至少保留一个模型。", { closeButton: true });
           return;
         }
         dispatchFlow({
           type: "NEXT",
-          nextStatus: "routePreview",
-          nextStepKey: "routes",
-        });
-        return;
-      case "routes":
-        dispatchFlow({
-          type: "NEXT",
           nextStatus: "published",
-          nextStepKey: "publish",
+          nextStepKey: "activate",
         });
         return;
-      case "publish":
+      case "activate":
+        if (savedPlan) {
+          closeWizard(false);
+          return;
+        }
         toast.info("请点击“保存并发布”写入 MultiRouter provider。", {
           closeButton: true,
         });
-        return;
-      case "finish":
-        closeWizard(false);
         return;
       default:
         return;
@@ -1325,7 +1197,7 @@ export function CodexMultiRouterWizard({
   // 顺序抓取所有可抓模型源；失败不阻塞其它 provider，最终由保存页继续使用已成功目录。
   const refreshModelSources = async () => {
     dispatchFlow({ type: "FETCH_START" });
-    clearWizardIssuesForStage("fetchModels");
+    clearWizardIssuesForStage("prepare");
     const previousAvailableModels = availableCatalogModels.map(
       (model) => model.model,
     );
@@ -1430,7 +1302,7 @@ export function CodexMultiRouterWizard({
                 nextSources.push(nextProvider);
                 successCount += 1;
                 recordWizardIssue({
-                  stage: "fetchModels",
+                  stage: "prepare",
                   severity: "warning",
                   title: "OAuth 在线模型列表获取失败，已使用本地缓存",
                   detail: `ChatGPT OAuth 在线模型列表暂时不可用，已用本地 Codex 模型缓存恢复 ${afterModels.length} 个模型。在线错误：${message}`,
@@ -1456,7 +1328,7 @@ export function CodexMultiRouterWizard({
             failedCount += 1;
             nextSources.push(provider);
             recordWizardIssue({
-              stage: "fetchModels",
+              stage: "prepare",
               severity: "warning",
               title: "OAuth 模型列表获取失败",
               detail: `获取 ChatGPT OAuth 模型列表失败，已保留现有目录：${message}${
@@ -1561,7 +1433,7 @@ export function CodexMultiRouterWizard({
           console.error("[CodexMultiRouterWizard] fetch models failed", error);
           const message = formatWizardError(error);
           recordWizardIssue({
-            stage: "fetchModels",
+            stage: "prepare",
             severity: "warning",
             title: "模型列表获取失败",
             detail: `获取模型列表失败，请检查当前 provider 配置：${message}`,
@@ -1611,7 +1483,7 @@ export function CodexMultiRouterWizard({
     } catch (error) {
       const message = formatWizardError(error);
       recordWizardIssue({
-        stage: "fetchModels",
+        stage: "prepare",
         severity: "error",
         title: "模型列表刷新中断",
         detail: message,
@@ -1632,7 +1504,7 @@ export function CodexMultiRouterWizard({
   const probeResponsesConnectivity = async () => {
     setIsConnectivityConfirmOpen(false);
     dispatchFlow({ type: "PROBE_START" });
-    clearWizardIssuesForStage("fetchModels");
+    clearWizardIssuesForStage("prepare");
     const results: WizardConnectivityResult[] = [];
     for (const provider of draftSources) {
       const config = getWizardModelFetchConfig(provider);
@@ -1709,7 +1581,7 @@ export function CodexMultiRouterWizard({
             detail: message,
           });
           recordWizardIssue({
-            stage: "fetchModels",
+            stage: "prepare",
             severity: classified.canContinue ? "warning" : "error",
             title: "连通性探测命令异常",
             detail: message,
@@ -1744,7 +1616,7 @@ export function CodexMultiRouterWizard({
   // 保存 MultiRouter provider；这里才真正写入 DB，不会静默切换当前 Codex provider。
   const saveMultiRouterPlan = async () => {
     dispatchFlow({ type: "SAVE_START" });
-    clearWizardIssuesForStage("publish");
+    clearWizardIssuesForStage("activate");
     try {
       const routeReadySources = applyWizardConnectivityApiFormatOverrides(
         draftSources,
@@ -1778,7 +1650,7 @@ export function CodexMultiRouterWizard({
     } catch (error) {
       const message = formatWizardError(error);
       recordWizardIssue({
-        stage: "publish",
+        stage: "activate",
         severity: "error",
         title: "MultiRouter 保存失败",
         detail: message,
@@ -1793,7 +1665,7 @@ export function CodexMultiRouterWizard({
   const enableSavedPlan = async () => {
     if (!savedPlan) return;
     dispatchFlow({ type: "ENABLE_START" });
-    clearWizardIssuesForStage("finish");
+    clearWizardIssuesForStage("activate");
     try {
       await onEnablePlan(savedPlan);
       dispatchFlow({ type: "ENABLE_SUCCESS" });
@@ -1808,7 +1680,7 @@ export function CodexMultiRouterWizard({
     } catch (error) {
       const message = formatWizardError(error);
       recordWizardIssue({
-        stage: "finish",
+        stage: "activate",
         severity: "error",
         title: "启用多路路由失败",
         detail: message,
@@ -1995,7 +1867,7 @@ export function CodexMultiRouterWizard({
               </div>
             </div>
 
-            {currentStep.key === "intro" && (
+            {currentStep.key === "sources" && (
               <div className="space-y-4">
                 <div className="rounded-lg border p-4">
                   <div className="flex items-center gap-2 font-medium">
@@ -2091,7 +1963,7 @@ export function CodexMultiRouterWizard({
               </div>
             )}
 
-            {currentStep.key === "rename" && (
+            {currentStep.key === "review" && (
               <div className="space-y-4">
                 <div className="rounded-lg border p-4">
                   <label className="text-sm font-medium" htmlFor="plan-name">
@@ -2113,7 +1985,7 @@ export function CodexMultiRouterWizard({
               </div>
             )}
 
-            {currentStep.key === "providerConfig" && (
+            {currentStep.key === "sources" && (
               <div className="space-y-3">
                 {hasCodexOAuthSources && (
                   <div className="rounded-lg border border-blue-500/30 bg-blue-500/10 p-3 text-sm leading-6 text-blue-950 dark:text-blue-100">
@@ -2210,7 +2082,7 @@ export function CodexMultiRouterWizard({
               </div>
             )}
 
-            {currentStep.key === "fetchModels" && (
+            {currentStep.key === "prepare" && (
               <div className="space-y-4">
                 <div className="flex flex-wrap gap-3">
                   <Button
@@ -2330,7 +2202,7 @@ export function CodexMultiRouterWizard({
               </div>
             )}
 
-            {currentStep.key === "collisions" && (
+            {currentStep.key === "prepare" && (
               <div className="space-y-4">
                 <Button
                   variant="outline"
@@ -2373,7 +2245,7 @@ export function CodexMultiRouterWizard({
               </div>
             )}
 
-            {currentStep.key === "selectModels" && (
+            {currentStep.key === "review" && (
               <div className="space-y-4">
                 <div className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
                   这里决定最终写入 MultiRouter modelCatalog 和各 route
@@ -2482,7 +2354,7 @@ export function CodexMultiRouterWizard({
               </div>
             )}
 
-            {currentStep.key === "routes" && (
+            {currentStep.key === "review" && (
               <div className="space-y-3">
                 <div className="grid gap-3 rounded-lg border bg-muted/30 p-4 md:grid-cols-2">
                   <div className="space-y-2">
@@ -2601,7 +2473,7 @@ export function CodexMultiRouterWizard({
               </div>
             )}
 
-            {currentStep.key === "publish" && (
+            {currentStep.key === "activate" && (
               <div className="space-y-4">
                 <div className="rounded-lg border p-4 text-sm text-muted-foreground">
                   将保存 {previewRoutes.length} 条路由和 {previewModels.length}{" "}
@@ -2623,7 +2495,7 @@ export function CodexMultiRouterWizard({
               </div>
             )}
 
-            {currentStep.key === "finish" && (
+            {currentStep.key === "activate" && (
               <div className="space-y-4">
                 <div className="rounded-lg border p-4 text-sm leading-6 text-muted-foreground">
                   保存完成后，请显式启用这个多路路由。启用成功后向导会自动关闭，并露出
