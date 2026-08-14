@@ -27,6 +27,8 @@ import {
   createDefaultCodexSubagentV2Config,
   type CodexSubagentExplicitReasoningEffort,
   type CodexSubagentProfilePreview,
+  type CodexSubagentReasoningCapabilities,
+  type CodexSubagentReasoningCapability,
   type CodexSubagentProfileStatus,
   type CodexSubagentProfileStatuses,
   type CodexSubagentTaskStrength,
@@ -446,6 +448,8 @@ export function CodexSubagentProfileEditor({
     null,
   );
   const [statusError, setStatusError] = useState<string | null>(null);
+  const [reasoningCapabilities, setReasoningCapabilities] =
+    useState<CodexSubagentReasoningCapabilities>({});
   const [strengthLimitMessage, setStrengthLimitMessage] = useState<
     string | null
   >(null);
@@ -516,6 +520,25 @@ export function CodexSubagentProfileEditor({
     [draft, provider],
   );
   const diagnosticSettingsKey = JSON.stringify(diagnosticSettings);
+
+  useEffect(() => {
+    if (!draft) {
+      setReasoningCapabilities({});
+      return;
+    }
+    let ignore = false;
+    codexSubagentV2Api
+      .getReasoningCapabilities(diagnosticSettings)
+      .then((result) => {
+        if (!ignore) setReasoningCapabilities(result);
+      })
+      .catch(() => {
+        if (!ignore) setReasoningCapabilities({});
+      });
+    return () => {
+      ignore = true;
+    };
+  }, [diagnosticSettingsKey]);
 
   useEffect(() => {
     if (!draft) {
@@ -1008,6 +1031,36 @@ export function CodexSubagentProfileEditor({
               ([profileKey, profile], profileIndex) => {
                 const preview = previews[profileKey];
                 const status = statusByProfileKey.get(profileKey);
+                const reasoningCapability =
+                  Object.entries(reasoningCapabilities).find(
+                    ([model]) =>
+                      model.localeCompare(profile.model, undefined, {
+                        sensitivity: "accent",
+                      }) === 0,
+                  )?.[1] ??
+                  preview?.reasoningCapability ??
+                  status?.reasoningCapability;
+                const selectableFixedEfforts = (
+                  reasoningCapability?.codexSelectableEfforts ?? []
+                ).filter(
+                  (effort): effort is CodexSubagentExplicitReasoningEffort =>
+                    effort !== "none" && EXPLICIT_REASONING_EFFORTS.has(effort),
+                );
+                const reasoningPolicyOptions: Array<[string, string]> = [
+                  ["delegated", "允许主 Agent / spawn 指定"],
+                ];
+                if (reasoningCapability?.providerDefaultEffort) {
+                  reasoningPolicyOptions.push([
+                    "model_default",
+                    "使用模型默认（固定）",
+                  ]);
+                }
+                if (selectableFixedEfforts.length > 0) {
+                  reasoningPolicyOptions.push(["fixed", "固定档位"]);
+                }
+                if (reasoningCapability?.disableAllowed) {
+                  reasoningPolicyOptions.push(["disabled", "关闭推理"]);
+                }
                 const profileTone = profileToneFor(profile, status);
                 const overrides = profile.overrides ?? {};
                 const effectiveInputModalities = inferredInputModalities(
@@ -1233,12 +1286,7 @@ export function CodexSubagentProfileEditor({
                         <QuestionnaireSelect
                           label="推理策略"
                           value={profile.reasoning.policy}
-                          options={[
-                            ["delegated", "允许主 Agent / spawn 指定"],
-                            ["model_default", "使用模型默认（固定）"],
-                            ["fixed", "固定档位"],
-                            ["disabled", "关闭推理"],
-                          ]}
+                          options={reasoningPolicyOptions}
                           onChange={(value) =>
                             updateProfile(profileKey, (current) => ({
                               ...current,
@@ -1249,8 +1297,12 @@ export function CodexSubagentProfileEditor({
                                       effort:
                                         current.reasoning.policy === "fixed"
                                           ? current.reasoning.effort
-                                          : (preview?.modelReasoningEffort ??
-                                            "medium"),
+                                          : (selectableFixedEfforts.find(
+                                              (effort) =>
+                                                effort ===
+                                                reasoningCapability?.providerDefaultEffort,
+                                            ) ??
+                                            (selectableFixedEfforts[0] as CodexSubagentExplicitReasoningEffort)),
                                     }
                                   : {
                                       policy: value as
@@ -1260,6 +1312,10 @@ export function CodexSubagentProfileEditor({
                                     },
                             }))
                           }
+                        />
+                        <ReasoningCapabilitySummary
+                          capability={reasoningCapability}
+                          policy={profile.reasoning}
                         />
                       </div>
 
@@ -1397,15 +1453,16 @@ export function CodexSubagentProfileEditor({
                                   }))
                                 }
                               >
-                                <option value="" disabled>
-                                  等待后端预览
-                                </option>
-                                <option value="low">低</option>
-                                <option value="medium">中</option>
-                                <option value="high">高</option>
-                                <option value="xhigh">极高</option>
-                                <option value="max">最大</option>
-                                <option value="ultra">超高</option>
+                                {profile.reasoning.policy !== "fixed" ? (
+                                  <option value="" disabled>
+                                    等待后端能力
+                                  </option>
+                                ) : null}
+                                {selectableFixedEfforts.map((effort) => (
+                                  <option key={effort} value={effort}>
+                                    {effort}
+                                  </option>
+                                ))}
                               </select>
                               <Button
                                 type="button"
@@ -1592,6 +1649,58 @@ export function CodexSubagentProfileEditor({
         ) : null}
       </div>
     </section>
+  );
+}
+
+function ReasoningCapabilitySummary({
+  capability,
+  policy,
+}: {
+  capability?: CodexSubagentReasoningCapability;
+  policy: CodexSubagentV2Profile["reasoning"];
+}) {
+  if (!capability) {
+    return (
+      <div className="rounded-md border border-amber-200 bg-amber-50/70 p-3 text-xs text-amber-900 dark:border-amber-500/35 dark:bg-amber-950/20 dark:text-amber-100">
+        正在读取后端解析后的推理能力；未确认前不会启用固定档位或关闭推理。
+      </div>
+    );
+  }
+
+  const mappings = capability.codexSelectableEfforts
+    .filter((effort) => effort !== "none" && capability.effortMap[effort])
+    .map((effort) => `${effort}→${capability.effortMap[effort]}`)
+    .join("，");
+  const behavior =
+    policy.policy === "delegated"
+      ? "由主 Agent、spawn 参数或 Codex 默认值决定"
+      : policy.policy === "model_default"
+        ? `固定为模型当前默认 ${capability.providerDefaultEffort ?? "未声明"}`
+        : policy.policy === "fixed"
+          ? `固定 ${policy.effort}；主 Agent 无法覆盖`
+          : "关闭推理；上游将使用已确认的 Provider 关闭语义";
+
+  return (
+    <div className="space-y-1 rounded-md border border-indigo-200 bg-indigo-50/70 p-3 text-xs text-indigo-950 dark:border-indigo-500/35 dark:bg-indigo-950/20 dark:text-indigo-100">
+      <p>
+        能力来源：{capability.source ?? "未声明"}（{capability.confidence}）
+      </p>
+      <p>
+        Provider 原生档位：
+        {capability.providerAcceptedEfforts.join(" / ") || "未声明"}
+      </p>
+      <p>
+        Codex 可选档位：
+        {capability.codexSelectableEfforts.join(" / ") || "未确认"}
+      </p>
+      <p>模型默认：{capability.providerDefaultEffort ?? "未声明"}</p>
+      <p>允许关闭：{capability.disableAllowed ? "是" : "否"}</p>
+      {mappings ? <p>映射：{mappings}</p> : null}
+      <p className="font-medium">{behavior}</p>
+      {capability.supportKind === "unknown" ? (
+        <p>请先在 Provider 模型目录中手动声明能力，再选择固定档位。</p>
+      ) : null}
+    </div>
   );
 }
 

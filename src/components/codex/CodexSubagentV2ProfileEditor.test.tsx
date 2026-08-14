@@ -24,14 +24,7 @@ const deepseekReasoningCapability: CodexSubagentReasoningCapability = {
   supportKind: "effort_levels" as const,
   source: "builtin",
   confidence: "confirmed" as const,
-  codexSelectableEfforts: [
-    "none",
-    "low",
-    "medium",
-    "high",
-    "xhigh",
-    "max",
-  ],
+  codexSelectableEfforts: ["none", "low", "medium", "high", "xhigh", "max"],
   providerAcceptedEfforts: ["low", "high", "max"],
   providerDefaultEffort: "high" as const,
   disableAllowed: true,
@@ -58,7 +51,7 @@ const previewFixture = {
   reasoningCapability: deepseekReasoningCapability,
   modelContextWindow: 128000,
   tomlPreview:
-    '[agents.repository-scout-2]\nmodel = "deepseek-v4-flash"\nmodel_provider = "codex_model_router_v2"',
+    '[agents.repository-scout-2]\nmodel = "deepseek-v4-flash"\nmodel_provider = "codex_model_router_v2"\nmodel_reasoning_effort = "medium"',
   warnings: ["Role name was collision-resolved."],
 } satisfies CodexSubagentProfilePreview;
 
@@ -76,7 +69,7 @@ const proPreviewFixture = {
   reasoningCapability: deepseekReasoningCapability,
   modelContextWindow: 256000,
   tomlPreview:
-    '[agents.deep-reviewer]\nmodel = "deepseek-v4-pro"\nmodel_provider = "codex_model_router_v2"',
+    '[agents.deep-reviewer]\nmodel = "deepseek-v4-pro"\nmodel_provider = "codex_model_router_v2"\nmodel_reasoning_effort = "high"',
   warnings: ["Pro profile warning."],
 } satisfies CodexSubagentProfilePreview;
 
@@ -94,7 +87,7 @@ const qwenPreviewFixture = {
   reasoningCapability: deepseekReasoningCapability,
   modelContextWindow: 262144,
   tomlPreview:
-    '[agents.qwen3-6]\nmodel = "qwen3.6"\nmodel_provider = "codex_model_router_v2"',
+    '[agents.qwen3-6]\nmodel = "qwen3.6"\nmodel_provider = "codex_model_router_v2"\nmodel_reasoning_effort = "medium"',
   warnings: ["Catalog profile remains disabled by default."],
 } satisfies CodexSubagentProfilePreview;
 
@@ -112,7 +105,7 @@ const backendDraftPreviewFixture = {
   reasoningCapability: deepseekReasoningCapability,
   modelContextWindow: 131072,
   tomlPreview:
-    '[agents.qwen-draft]\nmodel = "QWEN-ＤＲＡＦＴ"\nmodel_provider = "codex_model_router_v2"',
+    '[agents.qwen-draft]\nmodel = "QWEN-ＤＲＡＦＴ"\nmodel_provider = "codex_model_router_v2"\nmodel_reasoning_effort = "medium"',
   warnings: ["Backend-created profile remains disabled by default."],
 } satisfies CodexSubagentProfilePreview;
 
@@ -130,7 +123,7 @@ const officialDraftPreviewFixture = {
   reasoningCapability: deepseekReasoningCapability,
   modelContextWindow: 262144,
   tomlPreview:
-    '[agents.official-integrator]\nmodel = "gpt-5.6-sol"\nmodel_provider = "codex_model_router_v2"',
+    '[agents.official-integrator]\nmodel = "gpt-5.6-sol"\nmodel_provider = "codex_model_router_v2"\nmodel_reasoning_effort = "high"',
   warnings: ["Official catalog profile remains disabled by default."],
 } satisfies CodexSubagentProfilePreview;
 
@@ -427,6 +420,10 @@ vi.mock("@tauri-apps/api/core", () => ({
             : reasoning?.policy === "model_default"
               ? "high"
               : effort;
+        const baseToml = fixture.tomlPreview.replace(
+          /\nmodel_reasoning_effort = "[^"]+"$/,
+          "",
+        );
         const response = {
           ...fixture,
           reasoningPolicy: reasoning?.policy ?? "delegated",
@@ -435,8 +432,8 @@ vi.mock("@tauri-apps/api/core", () => ({
             ? { modelReasoningEffort: effectiveEffort }
             : { modelReasoningEffort: undefined }),
           tomlPreview: effectiveEffort
-            ? `${fixture.tomlPreview}\nmodel_reasoning_effort = "${effectiveEffort}"`
-            : fixture.tomlPreview,
+            ? `${baseToml}\nmodel_reasoning_effort = "${effectiveEffort}"`
+            : baseToml,
         };
         return JSON.parse(JSON.stringify(response));
       }
@@ -3050,15 +3047,21 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
         expect.objectContaining({ settingsConfig: expect.any(Object) }),
       ),
     );
-    expect(flash.getByText("能力来源：builtin（confirmed）")).toBeInTheDocument();
-    expect(flash.getByText("Provider 原生档位：low / high / max")).toBeInTheDocument();
+    expect(
+      flash.getByText("能力来源：builtin（confirmed）"),
+    ).toBeInTheDocument();
+    expect(
+      flash.getByText("Provider 原生档位：low / high / max"),
+    ).toBeInTheDocument();
     expect(
       flash.getByText(
         "Codex 可选档位：none / low / medium / high / xhigh / max",
       ),
     ).toBeInTheDocument();
     expect(
-      flash.getByText("映射：low→low，medium→high，high→high，xhigh→high，max→max"),
+      flash.getByText(
+        "映射：low→low，medium→high，high→high，xhigh→high，max→max",
+      ),
     ).toBeInTheDocument();
 
     const effort = flash.getByLabelText("模型推理强度");
@@ -3081,11 +3084,13 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
     ).toBeInTheDocument();
 
     await chooseOption(user, policy, "使用模型默认（固定）");
-    expect(await flash.findByText("固定为模型当前默认 high")).toBeInTheDocument();
+    expect(
+      await flash.findByText("固定为模型当前默认 high"),
+    ).toBeInTheDocument();
 
     await chooseOption(user, policy, "关闭推理");
     expect(
-      await flash.findByText(/关闭推理；上游将使用 reasoning_effort 的关闭语义/),
+      await flash.findByText("关闭推理；上游将使用已确认的 Provider 关闭语义"),
     ).toBeInTheDocument();
   });
 
