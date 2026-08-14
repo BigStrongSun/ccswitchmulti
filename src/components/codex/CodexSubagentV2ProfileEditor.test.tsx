@@ -160,6 +160,7 @@ const ipcState = vi.hoisted(() => ({
     status: "applied" | "not_required" | "pending_retry";
     warning?: { code: string; message: string };
   },
+  omitWriteVerification: false,
 }));
 
 // The only test double is the real frontend process boundary. The dispatcher
@@ -225,7 +226,25 @@ vi.mock("@tauri-apps/api/core", () => ({
             ...savedProvider,
             ...(ipcState.nextProjection
               ? { projection: ipcState.nextProjection }
-              : {}),
+              : { projection: { status: "applied" } }),
+            ...(ipcState.omitWriteVerification
+              ? {}
+              : {
+                  verification: {
+                    databasePersisted: true,
+                    roleFilesStatus:
+                      ipcState.nextProjection?.status ?? "verified",
+                    roleFiles: [
+                      {
+                        profileKey: "repository-scout",
+                        path: "C:\\Codex\\agents\\repository-scout-2.toml",
+                        exists: true,
+                        contentMatches: true,
+                      },
+                    ],
+                    activation: "restart_codex_and_start_new_session",
+                  },
+                }),
           }),
         );
       }
@@ -840,6 +859,7 @@ beforeEach(() => {
   ipcState.beforeV2Persistence = null;
   ipcState.nextInitializedProvider = null;
   ipcState.nextProjection = null;
+  ipcState.omitWriteVerification = false;
   vi.mocked(invoke).mockClear();
 });
 
@@ -2047,14 +2067,66 @@ describe("Codex Sub-Agent V2 searchable Accordion workspace", () => {
 
     expect(
       await screen.findByText(
-        "配置已保存；重启 Codex/app-server 并新建会话后生效",
+        "数据库与 Codex Agent 文件均已写入并回读验证；重启 Codex/app-server 并新建会话后生效",
       ),
     ).toBeVisible();
     expect(screen.getByText("所有更改均已保存")).toBeVisible();
   });
+
+  it("does not report success when the backend omits write verification", async () => {
+    ipcState.omitWriteVerification = true;
+    const user = userEvent.setup();
+    await renderWorkspace();
+    await chooseOption(
+      user,
+      within(flashRegion()).getByLabelText("优化目标"),
+      "质量",
+    );
+
+    await saveV2(user);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "后端未返回 Codex Agent 文件写入验证结果",
+    );
+    expect(
+      screen.queryByText(/Codex Agent 文件均已写入并回读验证/),
+    ).toBeNull();
+  });
+
+  it("persists explicit text and image input capability in the V2 profile JSON", async () => {
+    const user = userEvent.setup();
+    await renderWorkspace();
+    const capability = within(flashRegion()).getByLabelText("输入能力");
+
+    await chooseOption(user, capability, "文本与图像");
+    await saveV2(user);
+
+    await waitFor(() =>
+      expect(
+        latestSavedPlan()?.settingsConfig.codexRouting.subagentV2.profiles[
+          "repository-scout"
+        ].inputModalities,
+      ).toEqual(["text", "image"]),
+    );
+  });
 });
 
 describe("Codex Sub-Agent V2 shared editor accessible areas", () => {
+  it("exposes an explicit edit action that opens the requested model", async () => {
+    const user = userEvent.setup();
+    await renderWorkspace();
+
+    await user.click(
+      screen.getByRole("button", { name: "编辑 deepseek-v4-pro" }),
+    );
+
+    expect(
+      screen.getByRole("region", {
+        name: "deepseek-v4-pro 子 Agent 配置",
+      }),
+    ).toBeVisible();
+  });
+
   it("keeps the questionnaire visible and advanced areas collapsed", async () => {
     const user = userEvent.setup();
     await renderWorkspace();

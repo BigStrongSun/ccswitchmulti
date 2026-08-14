@@ -947,6 +947,10 @@ mod tests {
                 result.projection.status,
                 CodexSubagentV2ProjectionStatus::NotRequired
             );
+            let public = serde_json::to_value(&result).expect("serialize non-current result");
+            assert_eq!(public["verification"]["databasePersisted"], true);
+            assert_eq!(public["verification"]["roleFilesStatus"], "not_required");
+            assert_eq!(public["verification"]["roleFiles"], json!([]));
             assert_eq!(
                 std::fs::read_to_string(&config_path).expect("read live config"),
                 "model_provider = \"openai\"\n"
@@ -1145,6 +1149,15 @@ mod tests {
         assert_eq!(serialized["id"], "router");
         assert_eq!(serialized["name"], "Router");
         assert_eq!(serialized["projection"]["status"], "pending_retry");
+        assert_eq!(serialized["verification"]["databasePersisted"], true);
+        assert_eq!(
+            serialized["verification"]["roleFilesStatus"],
+            "pending_retry"
+        );
+        assert_eq!(
+            serialized["verification"]["activation"],
+            "restart_codex_and_start_new_session"
+        );
         assert_eq!(
             serialized["projection"]["warning"],
             json!({

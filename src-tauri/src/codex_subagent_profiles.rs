@@ -1588,6 +1588,60 @@ mod tests {
     }
 
     #[test]
+    fn codex_subagent_v2_text_only_capability_round_trips_and_guards_generated_copy() {
+        let mut raw = canonical_raw_profile(json!(["repository_exploration"]));
+        raw["profiles"]["deepseek-v4-flash"]["inputModalities"] = json!(["text"]);
+        raw["profiles"]["deepseek-v4-flash"]["overrides"] = json!({
+            "description": "Manual specialist description.",
+            "developerInstructions": "Follow the delegated objective."
+        });
+
+        let parsed = parse_persisted_subagent_v2(&raw).expect("parse text-only capability");
+        let round_trip = serde_json::to_value(&parsed).expect("serialize text-only capability");
+        assert_eq!(
+            round_trip["profiles"]["deepseek-v4-flash"]["inputModalities"],
+            json!(["text"])
+        );
+
+        let compiled = compile_subagent_v2_profiles(&request(Some(parsed)))
+            .expect("compile text-only capability");
+        let role = &compiled.generated_roles[0];
+        assert_eq!(
+            role.description,
+            "Manual specialist description. It accepts text input only and cannot inspect or understand images."
+        );
+        assert_eq!(
+            role.developer_instructions,
+            "Follow the delegated objective. This model does not support image input; do not select this role for tasks that depend on image understanding."
+        );
+    }
+
+    #[test]
+    fn codex_subagent_v2_multimodal_capability_round_trips_and_advertises_image_understanding() {
+        let mut raw = canonical_raw_profile(json!(["repository_exploration"]));
+        raw["profiles"]["deepseek-v4-flash"]["inputModalities"] =
+            json!(["text", "image"]);
+
+        let parsed =
+            parse_persisted_subagent_v2(&raw).expect("parse multimodal capability");
+        let round_trip = serde_json::to_value(&parsed).expect("serialize multimodal capability");
+        assert_eq!(
+            round_trip["profiles"]["deepseek-v4-flash"]["inputModalities"],
+            json!(["text", "image"])
+        );
+
+        let compiled = compile_subagent_v2_profiles(&request(Some(parsed)))
+            .expect("compile multimodal capability");
+        let role = &compiled.generated_roles[0];
+        assert!(role
+            .description
+            .ends_with("It supports text and image input, including image understanding."));
+        assert!(role.developer_instructions.ends_with(
+            "This model supports image input and may be selected for tasks that require image understanding."
+        ));
+    }
+
+    #[test]
     fn codex_subagent_v2_public_serde_shape_is_keyed_and_nested() {
         let raw = json!({
             "schemaVersion": 1,
