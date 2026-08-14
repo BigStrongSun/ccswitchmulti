@@ -1,6 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { Provider } from "@/types";
 import { CodexMultiRouterWizard } from "./CodexMultiRouterWizard";
@@ -32,9 +31,8 @@ function renderWizard(providers: Provider[]) {
   );
 }
 
-describe("CodexMultiRouterWizard V2 subagent flow", () => {
-  it("shows separate V1 and V2 navigation and lets the user select V1", async () => {
-    const user = userEvent.setup();
+describe("CodexMultiRouterWizard", () => {
+  it("keeps V1 and V2 configuration out of the four-stage routing wizard", () => {
     renderWizard([
       {
         id: "codex-deepseek",
@@ -53,17 +51,12 @@ describe("CodexMultiRouterWizard V2 subagent flow", () => {
       },
     ]);
 
-    const v1Navigation = screen.getByRole("button", {
-      name: /Sub-Agent V1/,
-    });
     expect(
-      screen.getByRole("button", { name: /Sub-Agent V2/ }),
-    ).toBeInTheDocument();
-
-    await user.click(v1Navigation);
-    expect(screen.getByText(/兼容与显式控制/)).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "启用 V1" }));
-    expect(screen.getByText("当前使用 V1")).toBeInTheDocument();
+      screen.queryByRole("button", { name: /Sub-Agent V1/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Sub-Agent V2/ }),
+    ).not.toBeInTheDocument();
   });
 
   it("presents MultiRouter setup as four user tasks", () => {
