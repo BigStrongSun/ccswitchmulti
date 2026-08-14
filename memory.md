@@ -3141,3 +3141,13 @@
 - MultiRouter 向导应从 10 步收敛为 4 步：选择/添加模型源；自动准备与验证；选择模型并预览路由（含方案名）；启用并用真实请求验证。删除所有历史迁移/历史修复跳转和文案，正常自动结果只显示摘要，只有失败项要求用户处理。
 - 审计文档与九张真实 UI 证据位于 `docs/audits/2026-08-14-provider-configuration-ux/README.md`。安装版截图仍含当前源码已经隐藏的旧 Provider route editor，因此后续判断必须同时核对当前分支源码，不能按旧截图恢复入口。
 - 联网核对使用 Codex 内置搜索命中 OpenAI 官方配置参考、官方源码和模型目录；Matrix WebSearch 独立链返回 HTTP 521，未提供正证据。产品结论由官方资料、本地源码与真实 UI 三者交叉支持。
+
+# 2026-08-14 Codex Provider 与 MultiRouter 配置体验实施
+
+- Provider 页面最终按五段职责收口：模型源身份、连接凭据、常显的“模型与兼容性”、就绪状态、默认折叠的专家配置。同步模型、验证连接、模型数、默认模型、上游协议和可路由状态属于正常配置流程；raw auth/config、手动协议、reasoning 覆盖、User-Agent 与 Header/Body 覆盖留在专家配置。Goal mode 和公共 TOML 编辑统一迁入设置页高级区末尾的“Codex 全局配置”。
+- CCSwitchMulti 维护预设必须按稳定 `codexPresetId` 自动应用准确 catalog、上下文、协议、reasoning 和 `/model` 投影；正常用户只填凭据并验证。自定义 Provider 才允许高级覆盖与 catalog opt-out。“在 Codex /model 菜单中显示”只控制目录投影，不控制 Provider、代理或 MultiRouter 可用性，并位于高级选项最后。
+- MultiRouter 可见状态机正式收敛为 `sources / prepare / review / activate` 四步：选择模型源；自动同步、双协议探测与重名处理；选择模型、方案名、官方认证和路由预览；保存启用并用真实请求验证。旧十步按钮和 Provider 内旧 route editor 不再可见，历史 schema、normalize/save 和后端 resolver 继续保留兼容。
+- MultiRouter 成功后不再跳转 Sessions 或自动打开历史修复；独立 Sessions 历史修复工具仍保留。状态工作台在当前方案真实转发成功时原地显示“MultiRouter 已通过真实请求验证”。
+- 前端定向回归：四步向导相关 109/109，工作台/向导/Session 92/92，Provider 表单及关联预设/就绪/推理能力 36/36，App 集成隔离 8/8。完整 Vitest 为 118 files / 849 tests，其中 117 files / 845 tests 通过；唯一 App 文件在全量并发时出现 3 个超时和 1 个重复 DOM 污染，隔离重跑 8/8，不能误判为生产回归。`pnpm typecheck` 与 renderer build 通过，Vite 转换 3331 modules；仅保留既有 Browserslist、动态/静态 import 和大 chunk 警告。
+- 真实桌面截图没有在实现后强行补造：纯 Vite 因缺少 Tauri 注入为空白；独立 identifier 的 Tauri dev 仍会通过旧数据库兼容逻辑回退到真实 `C:\Users\sunda\.cc-switch`，且启动恢复会与正在运行的 15721 实例争用。发现后立即停止开发实例并删除临时配置。已安装实例 PID 65888 继续监听 `127.0.0.1:15721`，`/health` 返回 200；现有九张审计截图保留为改前证据，实现后验收以 DOM 交互测试、集成测试和源码边界为准。
+- 本轮联网前置仍为双链：Codex 内置搜索命中 OpenAI 官方配置参考、源码与模型目录；Matrix WebSearch 独立链 HTTP 521，无第二份正证据。关键协议和目录结论以 OpenAI 一手资料、当前源码和本地回归交叉确认，Matrix 不作背书。
