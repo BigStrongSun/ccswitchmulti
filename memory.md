@@ -3304,3 +3304,8 @@
 - MultiRouter 的运行态五项验证成功（当前 Provider、代理监听、Codex 接管、路由入口、最近一次匹配路由的转发）必须留在状态工作台原地显示“MultiRouter 已通过真实请求验证”；不得再通过 App 回调自动跳到 Sessions 或自动打开历史修复。
 - 只移除 MultiRouter 专属 `onRuntimeReady`、post-setup ref 和 Sessions 自动导航。`SessionManagerPage` 的独立 Codex 历史修复工具及 `onCodexHistoryRepairCompleted` 回调必须继续保留；四阶段向导和 V2 `initializeProviderConfig` 初始化调用也不得随之回退。
 - TDD 移植证据：RED `90321d0e` 在未修改生产代码前得到两项预期失败——工作台缺少原地成功提示；App 在 15 秒超时下实际 `data-runtime-ready-wired=true`、预期 false。GREEN `86e4965c` 后工作台与 App 60/60 通过；随后表单回归 `c16a17ed` 让测试壳按用户真实路径展开“高级选项”，同时保留默认折叠、按钮入口和菜单投影断言。最终聚焦测试 82/82、typecheck、变更文件 Prettier 与 `git diff --check` 均通过。本轮写入文件已严格 UTF-8 解码、无新增 BOM、无 U+FFFD；`CodexRouterWorkspacePage.tsx` 的 BOM 已存在于任务基线。App 测试仍会输出既有 Tauri window metadata stderr，且 `baseline-browser-mapping` 数据过期提示不影响退出码。
+
+### Review fix round 1
+
+- “验证连接”打开确认框后的用户反馈“已打开验证确认框；如果没有看到弹窗，请按 Esc 后重试。”是仍在生产组件中的可见行为。相关测试必须真实点击“高级选项”后再点击“验证连接”，并同时断言反馈、顶层对话框层级和标题；不得为适配测试删除该反馈。
+- 向导首步完成说明也不得残留“启用后带你修复历史记录”的自动流程暗示。正确边界是：真实请求验证留在状态工作台原地完成；历史记录修复由用户按需从 Sessions 独立进入。该文案边界由 RED `75b4306b`（旧文案实际失败）和 GREEN `1c367539`（最小单行修复）锁定，独立 Sessions 工具与完成回调不变。
