@@ -1,6 +1,6 @@
 # CC Switch Repository Memory
 
-## 2026-08-14 主 Agent / Sub-Agent 推理强度协调设计（待实施）
+## 2026-08-15 V27 主 Agent / Sub-Agent 推理强度协调实现与验收
 
 - Codex 当前原生 `ReasoningEffort` 已包含 `none/minimal/low/medium/high/xhigh/max/ultra/custom`，但目标模型 spawn 只接受其 catalog `supported_reasoning_levels` 中的值。`ultra` 还参与 Codex 主动多 Agent 行为；Provider 未声明 ultra 时不得默认映射到 max。
 - “自动获取”只解析 Provider/模型能力，不负责根据 Sub-Agent 任务算出并固定 effort。能力来源和运行策略必须拆开：前者为自动发现/受维护声明/手动声明；后者为允许主 Agent 或 spawn 指定、使用模型默认（固定）、固定档位、关闭推理。
@@ -9,9 +9,17 @@
 - 单次 spawn override 有运行版本差异：当前 OpenAI `main` 已允许 full-history 路径应用 model/effort override，本机当前工具契约仍要求 full-history 继承、override 使用 fresh/partial fork。CCSM 的 delegated 策略只省略角色固定 effort，并按实际 Codex 运行时能力显示/验收，不能承诺所有版本都支持 full-history 覆盖。
 - `是否开启推理`需要结构化运行策略，但只能在能力确认可关闭时启用。Codex catalog 需包含 `none` 才能通过 spawn 校验；Responses 映射 effort=none，DeepSeek Chat 映射 `thinking.type=disabled`，boolean-only Provider 使用自己的关闭参数。
 - DeepSeek 2026-08-14 当前官方文档：思考默认开启、默认 effort=high，可关闭；原生 effort 为 low/high/max，medium/xhigh 实际映射 high。现有 CCSM `disableAllowed=false` 已落后于官方事实，后续实现必须校准。
-- 设计规范位于 `docs/superpowers/specs/2026-08-14-codex-main-subagent-reasoning-coordination-design.md`；实现前需先写实施计划，并通过主 picker、真实 spawn、角色 TOML 回读和代理上游请求四层证据验收。
+- 设计规范位于 `docs/superpowers/specs/2026-08-14-codex-main-subagent-reasoning-coordination-design.md`，实施计划位于 `docs/superpowers/plans/2026-08-14-codex-subagent-reasoning-coordination.md`。实现分支固定为 `bigstrongsun/release-v3.19.1-27`，基线是正在打包的 `release-v3.19.1-26@dd967801`；V26 工作树未被修改。
+- V27 已完成 schema v2：`delegated` 省略角色 TOML effort，`model_default` 写 resolved 模型默认，`fixed` 写 capability 校验后的选择，`disabled` 仅在允许关闭时写 `none`。v1 `auto` 迁移为 delegated，v1 显式问卷 effort 迁移为 fixed，旧 override 迁移优先。角色 TOML 的显式 `model_reasoning_effort` 仍是最终覆盖层。
+- 后端 `get_codex_subagent_reasoning_capabilities` 与 catalog、role compiler、Chat 请求转换共用同一 resolver；前端只消费该结果。DeepSeek V4 的 Provider 原生集合为 `low/high/max`、默认 `high`、允许关闭；Codex 映射为 `low->low`、`medium->high`、`high->high`、`xhigh->high`、`max->max`，不推断 `ultra`。
+- Provider 编辑器把能力来源拆为自动发现、CCSM 受维护声明、手动声明；手动路径提供原生档位、默认、关闭、上游参数与映射的结构化控件，专家 JSON 仅作为高级入口，并在修改草稿前拒绝未知档位、无效默认、空参数和映射到非原生目标。Sub-Agent 编辑器固定档位只显示 resolved selectable 集合，`none` 不混入正向档位，unknown capability 不开放运行值。
+- 保存权威仍是事务 mutation：数据库写后回读 schema v2，当前 Provider 的 managed role TOML 逐文件检查绝对路径、存在性和精确内容；delegated 的字段缺失也必须被正向验证。保存成功不代表运行中 Codex 热加载，仍要求重启 Codex/app-server 并新建会话。
+- 原全量 Rust 唯一失败 `updating_current_subagent_v2_returns_verified_role_file_readback` 的根因是测试夹具把 legacy `medium` 迁移为 fixed，却未声明 DeepSeek capability，resolver 正确把 unknown 模型解析为空集合。`c551c911` 为夹具补入维护型 DeepSeek capability，没有放宽生产校验；定向回归 1/1 通过。
+- 2026-08-15 最终门禁：Rust library `2986 passed / 0 failed / 2 ignored`；Vitest `285 suites / 989 tests` 全通过；`cargo check --lib`、`cargo fmt --check`、`pnpm typecheck`、`pnpm build:renderer`、`git diff --check` 通过。角色策略定向测试 5/5，V25 fixed-max 精确 TOML 往返 1/1。既有 `openai_cache_read_tokens` dead-code、browser data 过旧、chunk size 和 Tauri 测试 stderr 仍为非本功能警告。
+- Codex CLI `0.147.0` 在两个 Temp 隔离 home 的真实 spawn 日志确认：父 `high`、无全局默认、delegated、spawn 省略得到子 `high`；全局默认 `low` 时得到子 `low`；delegated + spawn 显式 `max` 得到子 `max`；角色 TOML 固定 `low` + spawn 显式 `max` 最终仍为子 `low`。full-history fork 会拒绝不同角色/override，`fork_turns=1` 可用；这与条件式 UI 说明一致。`127.0.0.1:15721` 全程保持原 PID 监听。
+- DeepSeek disabled 与 unsupported `ultra` 已由请求转换和写文件前拒绝测试覆盖，但本轮没有可安全隔离的第三方凭据，因此未做真实 DeepSeek 上游 spawn；旧 runtime compatibility class 也未安装，均不得描述为 live 已验证。官方 OpenAI Subagents/Config Reference 与前序 Codex 内置搜索、Matrix WebSearch 结论一致：custom agent 文件显式值最高，显式 spawn 高于 `[agents]` 默认，省略时再继承父值或目标模型默认。
 
-## 2026-08-14 Sub-Agent V2 推理强度预设读取审计（待修）
+## 2026-08-14 Sub-Agent V2 推理强度预设读取审计（已由 V27 根修）
 
 - CCSwitchMulti 的模型级 reasoning 能力单一来源是 Provider `modelCatalog.models[].reasoning`：维护 `supportedEfforts/defaultEffort/disableAllowed/upstream/source`，Rust 再投影为 Codex catalog 的 `supported_reasoning_levels/default_reasoning_level` 及 Desktop aliases。DeepSeek V4 当前内置能力为 `low/high/max`、默认 `high`；这不是登录 DeepSeek API 后动态查询得到，而是 CCSM 维护的官方资料预设，也允许用户用 `source=user` 高级覆盖。
 - 根因审计时，Sub-Agent V2 没有读取模型级 reasoning capability。旧前端问卷固定提供 `auto/low/medium/high/xhigh`，旧 Rust 类型同样没有 `max`；编译器只把 catalog 的 provider kind/context window 带入角色生成，effort 由 profile 手工覆盖、问卷显式值或 `auto_effort()` 规则决定。
