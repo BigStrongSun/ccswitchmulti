@@ -5930,7 +5930,6 @@ mod tests {
                 "nicknameCandidates",
                 "model",
                 "modelProvider",
-                "modelReasoningEffort",
                 "reasoningPolicy",
                 "reasoningCapability",
                 "modelContextWindow",
@@ -5947,6 +5946,10 @@ mod tests {
         );
         assert_eq!(value["modelContextWindow"], 1_000_000);
         assert_eq!(value["reasoningPolicy"], "delegated");
+        assert!(
+            !object.contains_key("modelReasoningEffort"),
+            "delegated preview must not expose a null or invented fixed effort"
+        );
         assert_eq!(
             value["reasoningCapability"],
             json!({
