@@ -32,6 +32,49 @@ function renderWizard(providers: Provider[]) {
 }
 
 describe("CodexMultiRouterWizard V2 subagent flow", () => {
+  it("presents MultiRouter setup as four user tasks", () => {
+    renderWizard([
+      {
+        id: "codex-deepseek",
+        name: "DeepSeek",
+        category: "custom",
+        settingsConfig: {
+          baseUrl: "https://example.invalid/v1",
+          auth: { OPENAI_API_KEY: "test-only" },
+          modelCatalog: {
+            models: [{ model: "deepseek-v4-flash" }],
+          },
+        },
+      },
+    ]);
+
+    expect(
+      screen.getByRole("button", { name: "选择模型源" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "自动准备与验证" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "选择模型并预览路由" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "启用并验证" }),
+    ).toBeInTheDocument();
+
+    expect(
+      screen.queryByRole("button", { name: "理解 MultiRouter" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "获取模型列表" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "处理重名模型" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "保存并发布" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("does not require users to choose subagent models in the main wizard", () => {
     renderWizard([
       {
