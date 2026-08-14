@@ -132,12 +132,37 @@ pub struct CodexSubagentV2ProjectionOutcome {
     pub warning: Option<CodexSubagentV2ProjectionWarning>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexSubagentV2RoleFilesStatus {
+    Verified,
+    NotRequired,
+    PendingRetry,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexSubagentV2ActivationBoundary {
+    RestartCodexAndStartNewSession,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexSubagentV2WriteVerification {
+    pub database_persisted: bool,
+    pub role_files_status: CodexSubagentV2RoleFilesStatus,
+    pub role_files: Vec<crate::codex_config::CodexSubagentRoleFileVerification>,
+    pub activation: CodexSubagentV2ActivationBoundary,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexSubagentV2MutationResult {
     #[serde(flatten)]
     pub provider: Provider,
     pub projection: CodexSubagentV2ProjectionOutcome,
+    pub verification: CodexSubagentV2WriteVerification,
 }
 
 const CODEX_LIVE_PROJECTION_RETRY_CODE: &str = "codex_live_projection_pending_retry";
@@ -152,6 +177,50 @@ fn codex_subagent_v2_projection_warning(
     message: &'static str,
 ) -> CodexSubagentV2ProjectionWarning {
     CodexSubagentV2ProjectionWarning { code, message }
+}
+
+fn codex_subagent_v2_write_verification(
+    state: &AppState,
+    settings: &Value,
+    projection_status: CodexSubagentV2ProjectionStatus,
+) -> CodexSubagentV2WriteVerification {
+    let (role_files_status, role_files) = match projection_status {
+        CodexSubagentV2ProjectionStatus::NotRequired => {
+            (CodexSubagentV2RoleFilesStatus::NotRequired, Vec::new())
+        }
+        CodexSubagentV2ProjectionStatus::PendingRetry => {
+            (CodexSubagentV2RoleFilesStatus::PendingRetry, Vec::new())
+        }
+        CodexSubagentV2ProjectionStatus::Applied => {
+            let checks =
+                crate::codex_config::codex_provider_classification_context(state.db.as_ref())
+                    .and_then(|context| {
+                        crate::codex_config::verify_codex_subagent_role_files(
+                            settings,
+                            Some(&context),
+                        )
+                    });
+            match checks {
+                Ok(files) if files.iter().all(|file| file.exists && file.content_matches) => {
+                    (CodexSubagentV2RoleFilesStatus::Verified, files)
+                }
+                Ok(files) => (CodexSubagentV2RoleFilesStatus::Failed, files),
+                Err(error) => {
+                    log::warn!(
+                        "Codex V2 子 Agent live 投影完成但文件回读验证失败，error_kind={}",
+                        app_error_diagnostic_kind(&error)
+                    );
+                    (CodexSubagentV2RoleFilesStatus::Failed, Vec::new())
+                }
+            }
+        }
+    };
+    CodexSubagentV2WriteVerification {
+        database_persisted: true,
+        role_files_status,
+        role_files,
+        activation: CodexSubagentV2ActivationBoundary::RestartCodexAndStartNewSession,
+    }
 }
 
 fn app_error_diagnostic_kind(error: &AppError) -> &'static str {
@@ -968,6 +1037,103 @@ mod tests {
 
     #[test]
     #[serial]
+    fn updating_current_subagent_v2_returns_verified_role_file_readback() {
+        with_test_home(|state, _| {
+            let provider = Provider::with_id(
+                "active-router".to_string(),
+                "Active router".to_string(),
+                json!({
+                    "auth": { "OPENAI_API_KEY": "sk-test" },
+                    "config": "model = \"deepseek-v4-flash\"\n",
+                    "modelCatalog": { "models": [{
+                        "model": "deepseek-v4-flash",
+                        "displayName": "DeepSeek V4 Flash",
+                        "contextWindow": 1000000,
+                        "inputModalities": ["text"],
+                        "textOnly": true,
+                        "supportsImage": false
+                    }] },
+                    "codexRouting": {
+                        "enabled": true,
+                        "subagentVersion": "v2",
+                        "routes": [{
+                            "id": "flash-route",
+                            "enabled": true,
+                            "match": { "models": ["deepseek-v4-flash"] },
+                            "upstream": {
+                                "baseUrl": "https://router.example/v1",
+                                "apiFormat": "openai_responses",
+                                "auth": { "source": "provider_config" }
+                            }
+                        }],
+                        "subagentV2": {
+                            "schemaVersion": 1,
+                            "selectionPolicy": "balanced",
+                            "profiles": {}
+                        }
+                    }
+                }),
+                None,
+            );
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &provider)
+                .expect("seed active provider");
+            state
+                .db
+                .set_current_provider(AppType::Codex.as_str(), &provider.id)
+                .expect("mark provider current");
+
+            let result = ProviderService::update_codex_subagent_v2(
+                state,
+                &provider.id,
+                json!({
+                    "schemaVersion": 1,
+                    "selectionPolicy": "balanced",
+                    "profiles": {
+                        "deepseek-v4-flash": {
+                            "model": "deepseek-v4-flash",
+                            "enabled": true,
+                            "questionnaire": {
+                                "taskStrengths": ["repository_exploration"],
+                                "optimization": "speed",
+                                "writeScope": "read_only",
+                                "preference": "eligible",
+                                "reasoningEffort": "medium"
+                            }
+                        }
+                    }
+                }),
+            )
+            .expect("save and project active V2 profile");
+
+            assert_eq!(
+                result.projection.status,
+                CodexSubagentV2ProjectionStatus::Applied
+            );
+            assert_eq!(
+                result.verification.role_files_status,
+                CodexSubagentV2RoleFilesStatus::Verified
+            );
+            assert_eq!(result.verification.role_files.len(), 1);
+            assert_eq!(
+                result.provider.settings_config["codexRouting"]["subagentV2"]["profiles"]
+                    ["deepseek-v4-flash"]["inputModalities"],
+                json!(["text"]),
+                "the focused mutation must persist catalog-derived capability explicitly"
+            );
+            let file = &result.verification.role_files[0];
+            assert!(file.exists);
+            assert!(file.content_matches);
+            let content = std::fs::read_to_string(&file.path).expect("read verified role TOML");
+            assert!(content.contains(
+                "This model does not support image input; do not select this role for tasks that depend on image understanding."
+            ));
+        });
+    }
+
+    #[test]
+    #[serial]
     fn reconcile_codex_subagent_v2_uses_the_complete_current_draft_for_batch_actions() {
         with_test_home(|state, _| {
             let current = Provider::with_id(
@@ -1142,6 +1308,12 @@ mod tests {
                     CODEX_LIVE_PROJECTION_RETRY_CODE,
                     CODEX_LIVE_PROJECTION_RETRY_MESSAGE,
                 )),
+            },
+            verification: CodexSubagentV2WriteVerification {
+                database_persisted: true,
+                role_files_status: CodexSubagentV2RoleFilesStatus::PendingRetry,
+                role_files: Vec::new(),
+                activation: CodexSubagentV2ActivationBoundary::RestartCodexAndStartNewSession,
             },
         };
         let serialized = serde_json::to_value(&result).expect("serialize mutation result");
@@ -4059,9 +4231,15 @@ impl ProviderService {
                 }
             }
         };
+        let verification = codex_subagent_v2_write_verification(
+            state,
+            &provider.settings_config,
+            projection.status,
+        );
         Ok(CodexSubagentV2MutationResult {
             provider,
             projection,
+            verification,
         })
     }
 
@@ -4077,7 +4255,14 @@ impl ProviderService {
             crate::codex_config::codex_provider_classification_context(state.db.as_ref())?;
         let candidate = state.db.update_codex_subagent_v2(
             provider_id,
-            move |_| Ok(subagent_v2),
+            move |settings| {
+                Ok(
+                    crate::codex_config::hydrate_codex_subagent_v2_input_modalities(
+                        settings,
+                        &subagent_v2,
+                    ),
+                )
+            },
             |settings| {
                 crate::codex_config::validate_codex_subagent_v2_candidate(
                     settings,

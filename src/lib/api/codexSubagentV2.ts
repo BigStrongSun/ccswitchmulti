@@ -17,6 +17,17 @@ export type CodexSubagentV2MutationProvider = Provider & {
       message: string;
     };
   };
+  verification?: {
+    databasePersisted: boolean;
+    roleFilesStatus: "verified" | "not_required" | "pending_retry" | "failed";
+    roleFiles: Array<{
+      profileKey: string;
+      path: string;
+      exists: boolean;
+      contentMatches: boolean;
+    }>;
+    activation: "restart_codex_and_start_new_session";
+  };
 };
 
 export type CodexSubagentV2ReconcileAction =

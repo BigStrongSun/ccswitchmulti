@@ -16,6 +16,7 @@ export type CodexSubagentTaskStrength =
   | "high_risk_review";
 
 export type CodexSubagentOptimization = "speed" | "balanced" | "quality";
+export type CodexSubagentInputModality = "text" | "image";
 export type CodexSubagentWriteScope =
   | "read_only"
   | "bounded_changes"
@@ -51,6 +52,7 @@ export interface CodexSubagentProfileOverrides {
 export interface CodexSubagentV2Profile {
   model: string;
   enabled: boolean;
+  inputModalities?: CodexSubagentInputModality[];
   questionnaire: CodexSubagentQuestionnaire;
   overrides?: CodexSubagentProfileOverrides;
 }
@@ -131,6 +133,7 @@ export const DEFAULT_CODEX_SUBAGENT_V2: CodexSubagentV2Config = {
     "deepseek-v4-flash": {
       model: "deepseek-v4-flash",
       enabled: true,
+      inputModalities: ["text"],
       questionnaire: {
         taskStrengths: [
           "long_context_reading",
@@ -148,6 +151,7 @@ export const DEFAULT_CODEX_SUBAGENT_V2: CodexSubagentV2Config = {
     "deepseek-v4-pro": {
       model: "deepseek-v4-pro",
       enabled: true,
+      inputModalities: ["text"],
       questionnaire: {
         taskStrengths: [
           "complex_debugging",

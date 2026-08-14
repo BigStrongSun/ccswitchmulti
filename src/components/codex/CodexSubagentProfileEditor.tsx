@@ -113,8 +113,14 @@ function isUsableProfile(value: unknown): value is CodexSubagentV2Profile {
     return false;
   }
   const questionnaire = value.questionnaire;
+  const inputModalities = value.inputModalities;
   if (
     !(
+      (inputModalities === undefined ||
+        (Array.isArray(inputModalities) &&
+          (inputModalities.length === 1 || inputModalities.length === 2) &&
+          inputModalities[0] === "text" &&
+          (inputModalities.length === 1 || inputModalities[1] === "image"))) &&
       Array.isArray(questionnaire.taskStrengths) &&
       questionnaire.taskStrengths.every(
         (strength) =>
@@ -170,6 +176,44 @@ function readPersistedConfig(provider: Provider): CodexSubagentV2Config | null {
   const routing = provider.settingsConfig?.codexRouting;
   if (!isRecord(routing) || !isRecord(routing.subagentV2)) return null;
   return routing.subagentV2 as unknown as CodexSubagentV2Config;
+}
+
+function inferredInputModalities(
+  provider: Provider,
+  profile: CodexSubagentV2Profile,
+): CodexSubagentV2Profile["inputModalities"] {
+  if (profile.inputModalities) return profile.inputModalities;
+  const catalog = isRecord(provider.settingsConfig?.modelCatalog)
+    ? provider.settingsConfig.modelCatalog
+    : null;
+  const models = catalog && Array.isArray(catalog.models) ? catalog.models : [];
+  const entry = models.find(
+    (candidate) =>
+      isRecord(candidate) &&
+      typeof candidate.model === "string" &&
+      candidate.model.localeCompare(profile.model, undefined, {
+        sensitivity: "accent",
+      }) === 0,
+  );
+  if (!isRecord(entry)) return undefined;
+  const declared = entry.inputModalities ?? entry.input_modalities;
+  if (Array.isArray(declared)) {
+    const hasText = declared.includes("text");
+    const hasImage = declared.includes("image");
+    if (hasText && hasImage) return ["text", "image"];
+    if (hasText) return ["text"];
+  }
+  const textOnly = entry.textOnly ?? entry.text_only;
+  if (textOnly === true) return ["text"];
+  const supportsImage =
+    entry.supportsImage ??
+    entry.supports_image ??
+    entry.vision ??
+    entry.supportsImageDetailOriginal ??
+    entry.supports_image_detail_original;
+  if (supportsImage === true) return ["text", "image"];
+  if (supportsImage === false) return ["text"];
+  return undefined;
 }
 
 function settingsWithConfig(
@@ -444,6 +488,7 @@ export function CodexSubagentProfileEditor({
       nextConfig,
     );
     await adoptBackendProvider(nextProvider);
+    return nextProvider;
   }
 
   async function initialize() {
@@ -605,8 +650,39 @@ export function CodexSubagentProfileEditor({
               .join("；"),
         );
       }
-      await persist(draft);
-      setSaveMessage("配置已保存；重启 Codex/app-server 并新建会话后生效");
+      const result = await persist(draft);
+      const verification = result.verification;
+      if (!verification) {
+        throw new Error("后端未返回 Codex Agent 文件写入验证结果。");
+      }
+      if (!verification.databasePersisted) {
+        throw new Error("后端未确认 V2 子 Agent 配置已写入数据库。");
+      }
+      if (result.projection?.status === "applied") {
+        const filesVerified = verification.roleFiles.every(
+          (file) => file.exists && file.contentMatches,
+        );
+        if (verification.roleFilesStatus !== "verified" || !filesVerified) {
+          throw new Error("Codex Agent 文件写入后回读校验失败。");
+        }
+        setSaveMessage(
+          "数据库与 Codex Agent 文件均已写入并回读验证；重启 Codex/app-server 并新建会话后生效",
+        );
+      } else if (result.projection?.status === "not_required") {
+        if (verification.roleFilesStatus !== "not_required") {
+          throw new Error("非当前方案的 Codex Agent 文件验证状态不一致。");
+        }
+        setSaveMessage(
+          "数据库已保存；当前方案未激活，因此未改写 Codex Agent 文件",
+        );
+      } else if (result.projection?.status === "pending_retry") {
+        if (verification.roleFilesStatus !== "pending_retry") {
+          throw new Error("Codex Agent 待重试状态未通过后端一致性检查。");
+        }
+        setSaveMessage("数据库已保存；Codex Agent 文件投影待自动重试");
+      } else {
+        throw new Error("后端未返回明确的 Codex Agent 投影状态。");
+      }
     } catch (error) {
       setSaveError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -838,6 +914,10 @@ export function CodexSubagentProfileEditor({
                 const status = statusByProfileKey.get(profileKey);
                 const profileTone = profileToneFor(profile, status);
                 const overrides = profile.overrides ?? {};
+                const effectiveInputModalities = inferredInputModalities(
+                  provider,
+                  profile,
+                );
                 const nicknameValue =
                   nicknameDrafts[profileKey] ??
                   (
@@ -868,6 +948,17 @@ export function CodexSubagentProfileEditor({
                           />
                         </AccordionTrigger>
                       </div>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        aria-label={`编辑 ${profile.model}`}
+                        onClick={() => setOpenProfileKey(profileKey)}
+                        disabled={isSaving}
+                        className="shrink-0"
+                      >
+                        编辑
+                      </Button>
                       <label className="flex shrink-0 items-center gap-2 text-xs">
                         <Switch
                           aria-label={`启用 ${profile.model} 作为 V2 子 Agent`}
@@ -956,6 +1047,36 @@ export function CodexSubagentProfileEditor({
                       </fieldset>
 
                       <div className="grid gap-3 sm:grid-cols-2">
+                        <QuestionnaireSelect
+                          label="输入能力"
+                          value={
+                            effectiveInputModalities?.includes("image")
+                              ? "text_and_image"
+                              : effectiveInputModalities?.includes("text")
+                                ? "text_only"
+                                : "unknown"
+                          }
+                          options={[
+                            ["unknown", "未声明"],
+                            ["text_only", "仅文本"],
+                            ["text_and_image", "文本与图像"],
+                          ]}
+                          onChange={(value) =>
+                            updateProfile(profileKey, (current) => {
+                              if (value === "unknown") {
+                                const { inputModalities: _, ...rest } = current;
+                                return rest;
+                              }
+                              return {
+                                ...current,
+                                inputModalities:
+                                  value === "text_and_image"
+                                    ? ["text", "image"]
+                                    : ["text"],
+                              };
+                            })
+                          }
+                        />
                         <QuestionnaireSelect
                           label="优化目标"
                           value={profile.questionnaire.optimization}

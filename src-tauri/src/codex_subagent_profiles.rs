@@ -90,6 +90,13 @@ pub enum ProviderKind {
     ThirdParty,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InputModality {
+    Text,
+    Image,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CodexSubagentV2 {
     pub(crate) schema_version: u8,
@@ -114,6 +121,8 @@ pub struct CodexSubagentQuestionnaire {
 pub struct CodexSubagentProfileConfig {
     pub model: String,
     pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_modalities: Option<Vec<InputModality>>,
     pub questionnaire: CodexSubagentQuestionnaire,
     #[serde(
         default,
@@ -136,6 +145,7 @@ impl Serialize for PublicProfiles<'_> {
                         &CodexSubagentProfileConfig {
                             model: profile.model.clone(),
                             enabled: profile.enabled,
+                            input_modalities: profile.input_modalities.clone(),
                             questionnaire: CodexSubagentQuestionnaire {
                                 task_strengths: profile.strengths.clone(),
                                 optimization: profile.optimization,
@@ -195,6 +205,7 @@ pub(crate) struct ParsedCodexSubagentProfile {
     pub key: String,
     pub model: String,
     pub enabled: bool,
+    pub input_modalities: Option<Vec<InputModality>>,
     pub strengths: Vec<TaskStrength>,
     pub optimization: Optimization,
     pub write_scope: WriteScope,
@@ -431,6 +442,43 @@ pub fn parse_persisted_subagent_v2(raw: &Value) -> Result<CodexSubagentV2, Compi
         let enabled = enabled_value.as_bool().ok_or_else(|| {
             validation_error("invalid_enabled", Some(&key), "enabled must be a boolean")
         })?;
+        let input_modalities = match p.get("inputModalities") {
+            None => None,
+            Some(value) => {
+                let modalities = value.as_array().ok_or_else(|| {
+                    validation_error(
+                        "invalid_input_modalities",
+                        Some(&key),
+                        "inputModalities must be an array",
+                    )
+                })?;
+                let parsed = modalities
+                    .iter()
+                    .map(|item| {
+                        serde_json::from_value::<InputModality>(item.clone()).map_err(|_| {
+                            validation_error(
+                                "invalid_input_modalities",
+                                Some(&key),
+                                "inputModalities allows only text and image",
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let valid = matches!(parsed.as_slice(), [InputModality::Text])
+                    || matches!(
+                        parsed.as_slice(),
+                        [InputModality::Text, InputModality::Image]
+                    );
+                if !valid {
+                    return Err(validation_error(
+                        "invalid_input_modalities",
+                        Some(&key),
+                        "inputModalities must be exactly [text] or [text, image]",
+                    ));
+                }
+                Some(parsed)
+            }
+        };
         let questionnaire_value = p.get("questionnaire").ok_or_else(|| {
             validation_error(
                 "missing_questionnaire",
@@ -538,6 +586,7 @@ pub fn parse_persisted_subagent_v2(raw: &Value) -> Result<CodexSubagentV2, Compi
             key,
             model: model.to_string(),
             enabled,
+            input_modalities,
             strengths,
             optimization,
             write_scope,
@@ -814,17 +863,27 @@ fn generated_description_for_provider(
     p: &ParsedCodexSubagentProfile,
     provider_kind: ProviderKind,
 ) -> String {
-    if let Some(description) = &p.overrides.description {
-        return description.clone();
-    }
-    format!(
+    let base = if let Some(description) = &p.overrides.description {
+        description.clone()
+    } else {
+        format!(
         "This role matches delegated {} tasks. It excludes {}, and it does not own final integration, merging, or release. It optimizes for {} and is limited to {}. {}",
         joined_strengths(&p.strengths),
         excluded_strengths(&p.strengths),
         optimization_label(p.optimization),
         write_scope_label(p.write_scope),
         selection_behavior(policy, p.preference, provider_kind),
-    )
+        )
+    };
+    match p.input_modalities.as_deref() {
+        Some([InputModality::Text]) => {
+            format!("{base} It accepts text input only and cannot inspect or understand images.")
+        }
+        Some([InputModality::Text, InputModality::Image]) => {
+            format!("{base} It supports text and image input, including image understanding.")
+        }
+        _ => base,
+    }
 }
 
 fn generated_instructions_for_provider(
@@ -832,10 +891,10 @@ fn generated_instructions_for_provider(
     p: &ParsedCodexSubagentProfile,
     provider_kind: ProviderKind,
 ) -> String {
-    if let Some(value) = &p.overrides.developer_instructions {
-        return value.clone();
-    }
-    let scope_instruction = match p.write_scope {
+    let base = if let Some(value) = &p.overrides.developer_instructions {
+        value.clone()
+    } else {
+        let scope_instruction = match p.write_scope {
         WriteScope::ReadOnly => format!(
             "Optimize for {} and keep all work read-only.",
             optimization_label(p.optimization)
@@ -848,27 +907,37 @@ fn generated_instructions_for_provider(
             "Optimize for {}; cross-module changes are allowed within the delegated objective, but final integration, merging, and release remain with the parent agent.",
             optimization_label(p.optimization)
         ),
-    };
-    let task_boundary = if p.write_scope == WriteScope::ReadOnly {
+        };
+        let task_boundary = if p.write_scope == WriteScope::ReadOnly {
+            format!(
+                "Work only on delegated {} tasks and do not edit files.",
+                joined_strengths(&p.strengths)
+            )
+        } else {
+            format!(
+                "Work only on delegated {} tasks.",
+                joined_strengths(&p.strengths)
+            )
+        };
+        let final_boundary = if p.write_scope == WriteScope::ComplexChanges {
+            "Return concrete evidence and verification to the parent agent."
+        } else {
+            "Return concrete evidence to the parent; final integration, merging, and release remain with the parent agent."
+        };
         format!(
-            "Work only on delegated {} tasks and do not edit files.",
-            joined_strengths(&p.strengths)
-        )
-    } else {
-        format!(
-            "Work only on delegated {} tasks.",
-            joined_strengths(&p.strengths)
+            "{task_boundary} {scope_instruction} {} {final_boundary}",
+            instruction_selection_behavior(policy, p.preference, provider_kind),
         )
     };
-    let final_boundary = if p.write_scope == WriteScope::ComplexChanges {
-        "Return concrete evidence and verification to the parent agent."
-    } else {
-        "Return concrete evidence to the parent; final integration, merging, and release remain with the parent agent."
-    };
-    format!(
-        "{task_boundary} {scope_instruction} {} {final_boundary}",
-        instruction_selection_behavior(policy, p.preference, provider_kind),
-    )
+    match p.input_modalities.as_deref() {
+        Some([InputModality::Text]) => format!(
+            "{base} This model does not support image input; do not select this role for tasks that depend on image understanding."
+        ),
+        Some([InputModality::Text, InputModality::Image]) => format!(
+            "{base} This model supports image input and may be selected for tasks that require image understanding."
+        ),
+        _ => base,
+    }
 }
 
 fn default_role_name(p: &ParsedCodexSubagentProfile) -> String {
@@ -1140,6 +1209,7 @@ pub fn initialize_legacy_subagent_v2() -> Result<CodexSubagentV2, CompileError> 
         key: "deepseek-v4-flash".into(),
         model: "deepseek-v4-flash".into(),
         enabled: true,
+        input_modalities: Some(vec![InputModality::Text]),
         strengths: vec![
             TaskStrength::LongContextReading,
             TaskStrength::RepositoryExploration,
@@ -1192,6 +1262,7 @@ mod tests {
             key: s(key),
             model: s(model),
             enabled: true,
+            input_modalities: None,
             strengths: vec![TaskStrength::RepositoryExploration],
             optimization: Optimization::Speed,
             write_scope: WriteScope::ReadOnly,
@@ -1619,11 +1690,9 @@ mod tests {
     #[test]
     fn codex_subagent_v2_multimodal_capability_round_trips_and_advertises_image_understanding() {
         let mut raw = canonical_raw_profile(json!(["repository_exploration"]));
-        raw["profiles"]["deepseek-v4-flash"]["inputModalities"] =
-            json!(["text", "image"]);
+        raw["profiles"]["deepseek-v4-flash"]["inputModalities"] = json!(["text", "image"]);
 
-        let parsed =
-            parse_persisted_subagent_v2(&raw).expect("parse multimodal capability");
+        let parsed = parse_persisted_subagent_v2(&raw).expect("parse multimodal capability");
         let round_trip = serde_json::to_value(&parsed).expect("serialize multimodal capability");
         assert_eq!(
             round_trip["profiles"]["deepseek-v4-flash"]["inputModalities"],
@@ -1679,6 +1748,7 @@ mod tests {
         let profile = CodexSubagentProfileConfig {
             model: s("DeepSeek-V4-Flash"),
             enabled: true,
+            input_modalities: None,
             questionnaire: CodexSubagentQuestionnaire {
                 task_strengths: vec![TaskStrength::RepositoryExploration],
                 optimization: Optimization::Speed,
@@ -2825,6 +2895,7 @@ mod tests {
         ];
         flash.reasoning_effort = QuestionnaireReasoningEffort::Medium;
         flash.preference = Preference::Preferred;
+        flash.input_modalities = Some(vec![InputModality::Text]);
         let mut pro = profile("deepseek-v4-pro", "deepseek-v4-pro");
         pro.strengths = vec![
             TaskStrength::ComplexDebugging,
@@ -2837,6 +2908,7 @@ mod tests {
         pro.write_scope = WriteScope::ComplexChanges;
         pro.reasoning_effort = QuestionnaireReasoningEffort::High;
         pro.preference = Preference::Preferred;
+        pro.input_modalities = Some(vec![InputModality::Text]);
         assert_eq!(
             initialize_legacy_subagent_v2(),
             Ok(config(

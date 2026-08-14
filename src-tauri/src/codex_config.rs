@@ -7,9 +7,9 @@ use crate::codex_subagent_profiles::{
     CatalogModel as SubagentCatalogModel, CodexSubagentProfileConfig,
     CompileError as SubagentCompileError, CompileOutput as SubagentCompileOutput,
     CompileRequest as SubagentCompileRequest, DiagnosticReasonCode as SubagentDiagnosticReasonCode,
-    ModelReasoningEffort as SubagentReasoningEffort, ParsedProfileEntry,
-    ProfileStatusCode as SubagentProfileStatusCode, ProviderKind as SubagentProviderKind,
-    SubagentVersion as ProfileSubagentVersion,
+    InputModality as SubagentInputModality, ModelReasoningEffort as SubagentReasoningEffort,
+    ParsedProfileEntry, ProfileStatusCode as SubagentProfileStatusCode,
+    ProviderKind as SubagentProviderKind, SubagentVersion as ProfileSubagentVersion,
 };
 use crate::config::{
     atomic_write, delete_file, get_home_dir, read_json_file, sanitize_provider_name,
@@ -2905,16 +2905,81 @@ pub enum CodexSubagentV2ReconcileAction {
     RecoverAllInvalidFromCatalog,
 }
 
-fn routable_codex_subagent_catalog(settings: &Value) -> Vec<(String, String)> {
+fn codex_subagent_profile_input_modalities(spec: &CodexCatalogModelSpec) -> Option<Vec<String>> {
+    if spec.text_only {
+        return Some(vec!["text".to_string()]);
+    }
+    spec.input_modalities.as_ref().and_then(|modalities| {
+        let has_text = modalities
+            .iter()
+            .any(|value| value.eq_ignore_ascii_case("text"));
+        let has_image = modalities
+            .iter()
+            .any(|value| value.eq_ignore_ascii_case("image"));
+        if has_text && has_image {
+            Some(vec!["text".to_string(), "image".to_string()])
+        } else if has_text {
+            Some(vec!["text".to_string()])
+        } else {
+            None
+        }
+    })
+}
+
+fn routable_codex_subagent_catalog(settings: &Value) -> Vec<(String, String, Option<Vec<String>>)> {
     codex_catalog_model_specs(settings, "")
         .into_iter()
         .filter(|spec| resolve_codex_primary_route_from_settings(settings, &spec.model).is_some())
-        .map(|spec| (normalize_profile_key(&spec.model), spec.model))
-        .filter(|(identity, _)| !identity.is_empty())
+        .map(|spec| {
+            let input_modalities = codex_subagent_profile_input_modalities(&spec);
+            (
+                normalize_profile_key(&spec.model),
+                spec.model,
+                input_modalities,
+            )
+        })
+        .filter(|(identity, _, _)| !identity.is_empty())
         .collect()
 }
 
-fn catalog_profile_draft(model: &str, enabled_preferred: bool) -> Result<Value, AppError> {
+pub(crate) fn hydrate_codex_subagent_v2_input_modalities(
+    settings: &Value,
+    raw_subagent_v2: &Value,
+) -> Value {
+    let mut hydrated = raw_subagent_v2.clone();
+    let Some(profiles) = hydrated.get_mut("profiles").and_then(Value::as_object_mut) else {
+        return hydrated;
+    };
+    let modalities_by_model = codex_catalog_model_specs(settings, "")
+        .into_iter()
+        .filter_map(|spec| {
+            let modalities = codex_subagent_profile_input_modalities(&spec)?;
+            Some((normalize_profile_key(&spec.model), modalities))
+        })
+        .collect::<HashMap<_, _>>();
+    for profile in profiles.values_mut().filter_map(Value::as_object_mut) {
+        if profile.contains_key("inputModalities") {
+            continue;
+        }
+        let Some(identity) = profile
+            .get("model")
+            .and_then(Value::as_str)
+            .map(normalize_profile_key)
+        else {
+            continue;
+        };
+        if let Some(modalities) = modalities_by_model.get(&identity) {
+            profile.insert("inputModalities".to_string(), json!(modalities));
+        }
+    }
+    hydrated
+}
+
+fn catalog_profile_draft(
+    model: &str,
+    enabled_preferred: bool,
+    input_modalities: Option<&[String]>,
+) -> Result<Value, AppError> {
     let identity = normalize_profile_key(model);
     let defaults = serde_json::to_value(initialize_legacy_subagent_v2().map_err(|error| {
         AppError::Message(format!(
@@ -2928,9 +2993,12 @@ fn catalog_profile_draft(model: &str, enabled_preferred: bool) -> Result<Value, 
         if !enabled_preferred {
             preset["questionnaire"]["preference"] = Value::String("eligible".to_string());
         }
+        if let Some(input_modalities) = input_modalities {
+            preset["inputModalities"] = json!(input_modalities);
+        }
         return Ok(preset);
     }
-    Ok(json!({
+    let mut profile = json!({
         "model": model,
         "enabled": false,
         "questionnaire": {
@@ -2940,7 +3008,11 @@ fn catalog_profile_draft(model: &str, enabled_preferred: bool) -> Result<Value, 
             "preference": "eligible",
             "reasoningEffort": "auto"
         }
-    }))
+    });
+    if let Some(input_modalities) = input_modalities {
+        profile["inputModalities"] = json!(input_modalities);
+    }
+    Ok(profile)
 }
 
 pub(crate) fn initialize_codex_subagent_v2_for_candidate(
@@ -2956,9 +3028,12 @@ pub(crate) fn initialize_codex_subagent_v2_for_candidate(
         .get_mut("profiles")
         .and_then(Value::as_object_mut)
         .ok_or_else(|| AppError::Message("Initialized profiles are not an object".to_string()))?;
-    for (identity, model) in routable_codex_subagent_catalog(settings) {
+    for (identity, model, input_modalities) in routable_codex_subagent_catalog(settings) {
         let preferred = matches!(identity.as_str(), "deepseek-v4-flash" | "deepseek-v4-pro");
-        profiles.insert(identity, catalog_profile_draft(&model, preferred)?);
+        profiles.insert(
+            identity,
+            catalog_profile_draft(&model, preferred, input_modalities.as_deref())?,
+        );
     }
     Ok(initialized)
 }
@@ -3021,7 +3096,12 @@ pub(crate) fn reconcile_codex_subagent_v2_for_candidate(
         .and_then(Value::as_object_mut)
         .ok_or_else(|| AppError::Message("Reconciled profiles are not an object".to_string()))?;
     let routable = routable_codex_subagent_catalog(settings);
-    let routable_by_identity = routable.iter().cloned().collect::<HashMap<_, _>>();
+    let routable_by_identity = routable
+        .iter()
+        .map(|(identity, model, modalities)| {
+            (identity.clone(), (model.clone(), modalities.clone()))
+        })
+        .collect::<HashMap<_, _>>();
 
     match action {
         CodexSubagentV2ReconcileAction::SyncCatalog => {
@@ -3038,13 +3118,16 @@ pub(crate) fn reconcile_codex_subagent_v2_for_candidate(
                         .unwrap_or_else(|| normalize_profile_key(key)),
                 })
                 .collect::<HashSet<_>>();
-            for (identity, model) in routable {
+            for (identity, model, input_modalities) in routable {
                 if existing_identities.contains(&identity) {
                     continue;
                 }
                 let preferred =
                     matches!(identity.as_str(), "deepseek-v4-flash" | "deepseek-v4-pro");
-                profiles.insert(identity, catalog_profile_draft(&model, preferred)?);
+                profiles.insert(
+                    identity,
+                    catalog_profile_draft(&model, preferred, input_modalities.as_deref())?,
+                );
             }
         }
         CodexSubagentV2ReconcileAction::RemoveAllInvalid => {
@@ -3064,7 +3147,7 @@ pub(crate) fn reconcile_codex_subagent_v2_for_candidate(
                     profiles.insert(key, raw_profile);
                     continue;
                 };
-                let Some(model) = routable_by_identity.get(&identity) else {
+                let Some((model, input_modalities)) = routable_by_identity.get(&identity) else {
                     profiles.insert(key, raw_profile);
                     continue;
                 };
@@ -3079,13 +3162,16 @@ pub(crate) fn reconcile_codex_subagent_v2_for_candidate(
                 ) {
                     raw_profile
                 } else {
-                    catalog_profile_draft(model, false)?
+                    catalog_profile_draft(model, false, input_modalities.as_deref())?
                 };
                 profiles.insert(identity, recovered);
             }
         }
     }
-    Ok(reconciled)
+    Ok(hydrate_codex_subagent_v2_input_modalities(
+        settings,
+        &reconciled,
+    ))
 }
 
 pub(crate) fn validate_codex_subagent_v2_candidate(
@@ -3542,6 +3628,22 @@ fn preview_codex_subagent_profile_with_context(
         warnings.push("profile_disabled".to_string());
         profile.enabled = true;
     }
+    if profile.input_modalities.is_none() {
+        profile.input_modalities = codex_catalog_model_specs(&settings_config, "")
+            .iter()
+            .find(|spec| normalize_profile_key(&spec.model) == profile_key)
+            .and_then(codex_subagent_profile_input_modalities)
+            .map(|modalities| {
+                modalities
+                    .iter()
+                    .filter_map(|value| match value.as_str() {
+                        "text" => Some(SubagentInputModality::Text),
+                        "image" => Some(SubagentInputModality::Image),
+                        _ => None,
+                    })
+                    .collect()
+            });
+    }
     let profile = serde_json::to_value(profile)
         .map_err(|error| format!("Invalid subagentV2 profile config: {error}"))?;
     let routing = settings_config
@@ -3633,6 +3735,76 @@ fn sync_codex_managed_agent_files_with_settings(
         write_text_file(&path, &rendered)?;
     }
     prune_stale_codex_managed_agent_files(&agents_dir, &desired_paths)
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexSubagentRoleFileVerification {
+    pub profile_key: String,
+    pub path: String,
+    pub exists: bool,
+    pub content_matches: bool,
+}
+
+/// Recompile the persisted V2 document and compare every expected managed role
+/// against the bytes that were atomically written to `~/.codex/agents`.
+pub(crate) fn verify_codex_subagent_role_files(
+    settings: &Value,
+    provider_context: Option<&ProviderClassificationContext>,
+) -> Result<Vec<CodexSubagentRoleFileVerification>, AppError> {
+    let specs = codex_catalog_model_specs(settings, "");
+    let Some(compilation) = compile_configured_codex_subagent_roles(
+        settings,
+        &specs,
+        codex_subagent_version(settings),
+        provider_context,
+    )?
+    else {
+        return Ok(Vec::new());
+    };
+    let agents_dir = get_codex_agents_dir();
+    let mut generated_roles = compilation.output.generated_roles.into_iter();
+    let mut verification = Vec::new();
+    for (entry, status) in compilation
+        .persisted
+        .profiles
+        .iter()
+        .zip(compilation.output.profile_statuses.iter())
+    {
+        if status.status != SubagentProfileStatusCode::Routable {
+            continue;
+        }
+        let ParsedProfileEntry::Valid(profile) = entry else {
+            return Err(AppError::Message(
+                "Routable Codex subagent status has no valid profile".to_string(),
+            ));
+        };
+        let role = generated_roles.next().ok_or_else(|| {
+            AppError::Message(
+                "Codex subagent compiler omitted a role during write verification".to_string(),
+            )
+        })?;
+        let path = agents_dir.join(format!("{}.toml", role.effective_role_name));
+        let expected =
+            render_generated_role_toml(&role, CC_SWITCH_MANAGED_AGENT_MARKER).map_err(|error| {
+                AppError::Message(format!(
+                    "Unable to render Codex subagent role during verification: {error:?}"
+                ))
+            })?;
+        let actual = fs::read_to_string(&path).ok();
+        verification.push(CodexSubagentRoleFileVerification {
+            profile_key: profile.key.clone(),
+            path: absolute_codex_role_path(&path)?,
+            exists: actual.is_some(),
+            content_matches: actual.as_deref() == Some(expected.as_str()),
+        });
+    }
+    if generated_roles.next().is_some() {
+        return Err(AppError::Message(
+            "Codex subagent compiler returned extra roles during write verification".to_string(),
+        ));
+    }
+    Ok(verification)
 }
 
 /// 删除已经不属于当前可路由模型目录的 CCSwitchMulti 托管 agent 文件。
@@ -6300,7 +6472,9 @@ mod tests {
         )
         .expect("backend recovery should re-key a structurally valid alias");
 
-        assert_eq!(recovered["profiles"]["deepseek-v4-flash"], legacy_profile);
+        let mut expected_profile = legacy_profile;
+        expected_profile["inputModalities"] = json!(["text"]);
+        assert_eq!(recovered["profiles"]["deepseek-v4-flash"], expected_profile);
         assert!(recovered["profiles"].get("LEGACY_ALIAS_SENTINEL").is_none());
         parse_persisted_subagent_v2(&recovered)
             .expect("re-keyed alias recovery must be strict-storage valid");
@@ -12179,5 +12353,61 @@ model_catalog_json = "cc-switch-model-catalog.json"
             .filter_map(|model| model.get("slug").and_then(|slug| slug.as_str()))
             .collect::<Vec<_>>();
         assert_eq!(slugs, vec!["gpt-5.5"]);
+    }
+
+    #[test]
+    fn subagent_v2_hydration_uses_catalog_modalities_and_preserves_explicit_overrides() {
+        let settings = json!({
+            "modelCatalog": { "models": [
+                {
+                    "model": "deepseek-v4-flash",
+                    "inputModalities": ["text"],
+                    "textOnly": true,
+                    "supportsImage": false
+                },
+                {
+                    "model": "gpt-vision",
+                    "inputModalities": ["text", "image"],
+                    "supportsImage": true
+                }
+            ] }
+        });
+        let raw = json!({
+            "schemaVersion": 1,
+            "profiles": {
+                "deepseek-v4-flash": {
+                    "model": "deepseek-v4-flash",
+                    "enabled": true,
+                    "questionnaire": {}
+                },
+                "gpt-vision": {
+                    "model": "gpt-vision",
+                    "enabled": true,
+                    "questionnaire": {}
+                },
+                "manual": {
+                    "model": "gpt-vision",
+                    "enabled": true,
+                    "inputModalities": ["text"],
+                    "questionnaire": {}
+                }
+            }
+        });
+
+        let hydrated = hydrate_codex_subagent_v2_input_modalities(&settings, &raw);
+
+        assert_eq!(
+            hydrated["profiles"]["deepseek-v4-flash"]["inputModalities"],
+            json!(["text"])
+        );
+        assert_eq!(
+            hydrated["profiles"]["gpt-vision"]["inputModalities"],
+            json!(["text", "image"])
+        );
+        assert_eq!(
+            hydrated["profiles"]["manual"]["inputModalities"],
+            json!(["text"]),
+            "an explicit per-profile override must remain authoritative"
+        );
     }
 }

@@ -233,7 +233,11 @@ vi.mock("@tauri-apps/api/core", () => ({
                   verification: {
                     databasePersisted: true,
                     roleFilesStatus:
-                      ipcState.nextProjection?.status ?? "verified",
+                      ipcState.nextProjection?.status === "not_required"
+                        ? "not_required"
+                        : ipcState.nextProjection?.status === "pending_retry"
+                          ? "pending_retry"
+                          : "verified",
                     roleFiles: [
                       {
                         profileKey: "repository-scout",
@@ -677,13 +681,14 @@ async function mountWizardFromPersistedPlan() {
     }),
   );
   const user = userEvent.setup();
-  await user.click(await screen.findByRole("button", { name: /Sub-Agent V2/ }));
+  await user.click(await screen.findByRole("button", { name: "启用并验证" }));
   return { ...result, user };
 }
 
-async function renderWizard() {
+async function renderPersistedWorkspace() {
   seedPersistedPlan(true);
-  return mountWizardFromPersistedPlan();
+  const result = await mountWorkspaceFromPersistedPlan();
+  return { ...result, user: userEvent.setup() };
 }
 
 function updateProviderCalls() {
@@ -873,9 +878,6 @@ describe("Codex Sub-Agent V2 review round 1 regressions", () => {
 
     const wizard = await mountWizardFromPersistedPlan();
     await wizard.user.click(screen.getByRole("button", { name: "保存并发布" }));
-    await wizard.user.click(
-      screen.getAllByRole("button", { name: "保存并发布" }).at(-1)!,
-    );
     await waitFor(() => expect(updateProviderCalls()).toHaveLength(1));
 
     expect(latestSavedPlan()?.settingsConfig.codexRouting).toEqual(
@@ -886,32 +888,19 @@ describe("Codex Sub-Agent V2 review round 1 regressions", () => {
     );
   });
 
-  it("uses the current wizard plan draft for V2 preview and status requests", async () => {
+  it("keeps V2 preview and status requests out of the four-step routing wizard", async () => {
     await mountWizardFromPersistedPlan();
 
-    await waitFor(() => {
-      const statusCalls = vi
+    expect(
+      screen.queryByRole("button", { name: /Sub-Agent V2/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      vi
         .mocked(invoke)
         .mock.calls.filter(
           ([command]) => command === "get_codex_subagent_profile_statuses",
-        );
-      expect(statusCalls).toContainEqual([
-        "get_codex_subagent_profile_statuses",
-        {
-          settingsConfig: expect.objectContaining({
-            codexRouting: expect.objectContaining({
-              routes: expect.arrayContaining([
-                expect.objectContaining({
-                  match: expect.objectContaining({
-                    models: expect.arrayContaining(["deepseek-v4-pro"]),
-                  }),
-                }),
-              ]),
-            }),
-          }),
-        },
-      ]);
-    });
+        ),
+    ).toHaveLength(0);
   });
 
   it("blocks persistence when authoritative status reports a role collision", async () => {
@@ -1375,9 +1364,6 @@ describe("Codex Sub-Agent V2 new-plan capability defaults", () => {
     ipcState.providers = { [source.id]: source };
     const wizard = await mountWizardFromPersistedPlan();
     await wizard.user.click(screen.getByRole("button", { name: "保存并发布" }));
-    await wizard.user.click(
-      screen.getAllByRole("button", { name: "保存并发布" }).at(-1)!,
-    );
     await waitFor(() => expect(addProviderCalls()).toHaveLength(1));
 
     const persisted = (addProviderCalls()[0][1] as { provider: Provider })
@@ -1404,14 +1390,9 @@ describe("Codex Sub-Agent V2 new-plan capability defaults", () => {
       "v2";
     const wizard = await mountWizardFromPersistedPlan();
     expect(
-      await screen.findByRole("button", {
-        name: "初始化 V2 子 Agent 能力配置",
-      }),
-    ).toBeInTheDocument();
+      screen.queryByRole("button", { name: /Sub-Agent V2/ }),
+    ).not.toBeInTheDocument();
     await wizard.user.click(screen.getByRole("button", { name: "保存并发布" }));
-    await wizard.user.click(
-      screen.getAllByRole("button", { name: "保存并发布" }).at(-1)!,
-    );
     await waitFor(() => expect(updateProviderCalls()).toHaveLength(1));
 
     expect(updateProviderCalls()[0]).toEqual([
@@ -1430,6 +1411,13 @@ describe("Codex Sub-Agent V2 new-plan capability defaults", () => {
     expect(savedProvider.settingsConfig.codexRouting).not.toHaveProperty(
       "subagentV2",
     );
+    expect(
+      vi
+        .mocked(invoke)
+        .mock.calls.filter(
+          ([command]) => command === "initialize_codex_subagent_v2",
+        ),
+    ).toHaveLength(0);
   });
 });
 
@@ -1868,6 +1856,10 @@ describe("Codex Sub-Agent V2 searchable Accordion workspace", () => {
     expect(triggers[1]).toHaveAttribute("aria-expanded", "true");
 
     await user.tab();
+    expect(
+      screen.getByRole("button", { name: "编辑 deepseek-v4-pro" }),
+    ).toHaveFocus();
+    await user.tab();
     expect(proSwitch).toHaveFocus();
     expect(proSwitch).toBeChecked();
     await user.keyboard(" ");
@@ -2088,9 +2080,7 @@ describe("Codex Sub-Agent V2 searchable Accordion workspace", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "后端未返回 Codex Agent 文件写入验证结果",
     );
-    expect(
-      screen.queryByText(/Codex Agent 文件均已写入并回读验证/),
-    ).toBeNull();
+    expect(screen.queryByText(/Codex Agent 文件均已写入并回读验证/)).toBeNull();
   });
 
   it("persists explicit text and image input capability in the V2 profile JSON", async () => {
@@ -2112,6 +2102,21 @@ describe("Codex Sub-Agent V2 searchable Accordion workspace", () => {
 });
 
 describe("Codex Sub-Agent V2 shared editor accessible areas", () => {
+  it("shows catalog-derived text-only capability before the legacy profile is resaved", async () => {
+    seedPersistedPlan(true);
+    ipcState.providers.router.settingsConfig.modelCatalog.models[0] = {
+      ...ipcState.providers.router.settingsConfig.modelCatalog.models[0],
+      inputModalities: ["text"],
+      textOnly: true,
+      supportsImage: false,
+    };
+    await mountWorkspaceFromPersistedPlan();
+
+    expect(within(flashRegion()).getByLabelText("输入能力")).toHaveValue(
+      "text_only",
+    );
+  });
+
   it("exposes an explicit edit action that opens the requested model", async () => {
     const user = userEvent.setup();
     await renderWorkspace();
@@ -2928,33 +2933,33 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
     ).toHaveLength(2);
   });
 
-  it("shares the wizard-saved V2 source with the remounted workspace", async () => {
-    const wizard = await renderWizard();
-    await openAdvancedFields(wizard.user);
+  it("shares the workspace-saved V2 source with the remounted workspace", async () => {
+    const workspace = await renderPersistedWorkspace();
+    await openAdvancedFields(workspace.user);
     await chooseOption(
-      wizard.user,
+      workspace.user,
       await screen.findByLabelText("第三方子 Agent 选择策略"),
       "官方优先",
     );
     await chooseOption(
-      wizard.user,
+      workspace.user,
       within(flashRegion()).getByLabelText("模型偏好"),
       "preferred",
     );
     await chooseOption(
-      wizard.user,
+      workspace.user,
       within(flashRegion()).getByLabelText("优化目标"),
       "质量",
     );
     const roleName = within(flashRegion()).getByLabelText("角色名称");
-    await wizard.user.clear(roleName);
-    await wizard.user.type(roleName, "wizard-scout");
-    await saveV2(wizard.user);
+    await workspace.user.clear(roleName);
+    await workspace.user.type(roleName, "workspace-scout");
+    await saveV2(workspace.user);
     await waitFor(() => expect(v2PersistenceCalls()).toHaveLength(1));
-    wizard.unmount();
+    workspace.unmount();
 
     await mountWorkspaceFromPersistedPlan();
-    await openAdvancedFields(wizard.user);
+    await openAdvancedFields(workspace.user);
     expectControlValue(
       await screen.findByLabelText("第三方子 Agent 选择策略"),
       "official_first",
@@ -2969,11 +2974,11 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
       "quality",
     );
     expect(within(flashRegion()).getByLabelText("角色名称")).toHaveValue(
-      "wizard-scout",
+      "workspace-scout",
     );
   });
 
-  it("keeps a pending projection warning visible after the wizard persisted callback refreshes provider props", async () => {
+  it("keeps a pending projection warning visible after the workspace persisted callback refreshes provider props", async () => {
     const warning = "数据库已保存，Codex live 投影待重试。";
     ipcState.nextProjection = {
       status: "pending_retry",
@@ -2982,13 +2987,13 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
         message: warning,
       },
     };
-    const wizard = await renderWizard();
-    await openAdvancedFields(wizard.user);
+    const workspace = await renderPersistedWorkspace();
+    await openAdvancedFields(workspace.user);
     const description = within(flashRegion()).getByLabelText("角色描述");
-    await wizard.user.clear(description);
-    await wizard.user.type(description, "warning lifecycle refresh draft");
+    await workspace.user.clear(description);
+    await workspace.user.type(description, "warning lifecycle refresh draft");
 
-    await saveV2(wizard.user);
+    await saveV2(workspace.user);
     await waitFor(() => expect(v2PersistenceCalls()).toHaveLength(1));
     await new Promise((resolve) => setTimeout(resolve, 25));
 
