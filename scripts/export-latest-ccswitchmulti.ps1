@@ -5,6 +5,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$releaseBuildConfigHelperPath = Join-Path (Split-Path -Parent $PSCommandPath) "release-build-config.ps1"
+. $releaseBuildConfigHelperPath
+
 # Resolve the repository root. This script may be called from any directory.
 function Get-RepoRoot {
     $scriptDir = Split-Path -Parent $PSCommandPath
@@ -221,9 +224,9 @@ function Write-Checksums {
     $normalizedRoot = [System.IO.Path]::GetFullPath($Root)
     $files = @(Get-ChildItem -LiteralPath $normalizedRoot -Recurse -File | Where-Object { $_.Name -ne "SHA256SUMS.txt" })
     $lines = foreach ($file in $files) {
-        $hash = Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256
+        $hash = Get-ReleaseFileSha256 -Path $file.FullName
         $relative = $file.FullName.Substring($normalizedRoot.Length).TrimStart("\", "/")
-        "$($hash.Hash)  $relative"
+        "$hash  $relative"
     }
     Set-Content -LiteralPath (Join-Path $normalizedRoot "SHA256SUMS.txt") -Value ($lines -join "`r`n") -Encoding UTF8
 }
@@ -306,24 +309,18 @@ $hasUpdaterSigningKey = Initialize-TauriSigningKey -DefaultKeyPath $defaultSigni
 
 if (-not $SkipBuild) {
     Push-Location $repoRoot
-    $buildConfig = New-TemporaryFile
+    $buildConfigPath = New-TauriBuildConfigFile
     try {
         if (-not $hasUpdaterSigningKey) {
             Write-Warning "Tauri updater signing key was not found. Building without updater signatures."
         }
-        $override = @{
-            bundle = @{
-                createUpdaterArtifacts = $false
-            }
-        } | ConvertTo-Json -Depth 8
-        Set-Content -LiteralPath $buildConfig.FullName -Value $override -Encoding UTF8
         Build-HistoryRepairSidecar -TauriDir $tauriDir
-        pnpm tauri build --bundles nsis --config $buildConfig.FullName
+        pnpm tauri build --bundles nsis --config $buildConfigPath
         if ($LASTEXITCODE -ne 0) {
             throw "tauri build failed with exit code $LASTEXITCODE"
         }
     } finally {
-        Remove-Item -LiteralPath $buildConfig.FullName -Force -ErrorAction SilentlyContinue
+        Remove-TauriBuildConfigFile -Path $buildConfigPath
         Pop-Location
     }
 }

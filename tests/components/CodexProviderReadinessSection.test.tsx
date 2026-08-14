@@ -33,8 +33,8 @@ describe("CodexProviderReadinessSection", () => {
     expect(onValidateConnection).toHaveBeenCalledTimes(1);
   });
 
-  it("shows maintained preset ownership and a routable state without asking for protocol selection", () => {
-    render(
+  it("keeps maintained metadata ownership visible without treating unverified credentials as ready", () => {
+    const { rerender } = render(
       <CodexProviderReadinessSection
         models={[{ model: "deepseek-v4-flash" }, { model: "deepseek-v4-pro" }]}
         defaultModel="deepseek-v4-flash"
@@ -48,9 +48,27 @@ describe("CodexProviderReadinessSection", () => {
     );
 
     expect(screen.getByText("由 CCSwitchMulti 维护")).toBeInTheDocument();
-    expect(screen.getByText("可加入 MultiRouter")).toBeInTheDocument();
+    expect(screen.getByText("建议先验证连接")).toBeInTheDocument();
+    expect(screen.queryByText("可加入 MultiRouter")).not.toBeInTheDocument();
     expect(screen.getByText("deepseek-v4-flash")).toBeInTheDocument();
     expect(screen.queryByText("请选择上游协议")).not.toBeInTheDocument();
+
+    rerender(
+      <CodexProviderReadinessSection
+        models={[{ model: "deepseek-v4-flash" }, { model: "deepseek-v4-pro" }]}
+        defaultModel="deepseek-v4-flash"
+        apiFormat="openai_responses"
+        isMaintainedPreset
+        isSyncingModels={false}
+        isValidatingConnection={false}
+        validationSummary="当前凭据和端点验证通过"
+        validationTone="success"
+        onSyncModels={vi.fn()}
+        onValidateConnection={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("可加入 MultiRouter")).toBeInTheDocument();
   });
 
   it("explains automatic protocol detection for custom providers", () => {

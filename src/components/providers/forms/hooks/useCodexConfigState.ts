@@ -165,6 +165,14 @@ function extractCodexCatalogModels(modelCatalog: any): CodexCatalogModel[] {
         : Array.isArray(item?.input_modalities)
           ? item.input_modalities
           : undefined;
+      const supportsImage =
+        typeof item?.supportsImage === "boolean"
+          ? item.supportsImage
+          : typeof item?.supports_image === "boolean"
+            ? item.supports_image
+            : typeof item?.vision === "boolean"
+              ? item.vision
+              : undefined;
       const baseInstructions =
         typeof item?.baseInstructions === "string"
           ? item.baseInstructions
@@ -205,6 +213,7 @@ function extractCodexCatalogModels(modelCatalog: any): CodexCatalogModel[] {
           ? { supportsParallelToolCalls }
           : {}),
         ...(inputModalities ? { inputModalities } : {}),
+        ...(supportsImage !== undefined ? { supportsImage } : {}),
         ...(baseInstructions ? { baseInstructions } : {}),
         ...(reasoning ? { reasoning } : {}),
       };

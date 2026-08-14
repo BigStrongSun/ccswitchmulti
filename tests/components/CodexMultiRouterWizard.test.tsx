@@ -226,6 +226,14 @@ describe("CodexMultiRouterWizard", () => {
     const initialized = await vi.mocked(
       codexSubagentV2Api.initializeProviderConfig,
     ).mock.results[0].value;
+    expect(initialized).toMatchObject({
+      id: persisted.id,
+      name: persisted.name,
+      settingsConfig: expect.objectContaining({
+        base_url: persisted.settingsConfig.base_url,
+        auth: persisted.settingsConfig.auth,
+      }),
+    });
     expect(
       initialized.settingsConfig.codexRouting.subagentV2.profiles,
     ).toHaveProperty("qwen3.6");
@@ -233,21 +241,8 @@ describe("CodexMultiRouterWizard", () => {
     fireEvent.click(
       await screen.findByRole("button", { name: "启用这个多路路由" }),
     );
-    await waitFor(() =>
-      expect(onEnablePlan).toHaveBeenCalledWith(
-        expect.objectContaining({
-          settingsConfig: expect.objectContaining({
-            codexRouting: expect.objectContaining({
-              subagentV2: expect.objectContaining({
-                profiles: expect.objectContaining({
-                  "qwen3.6": expect.objectContaining({ model: "qwen3.6" }),
-                }),
-              }),
-            }),
-          }),
-        }),
-      ),
-    );
+    await waitFor(() => expect(onEnablePlan).toHaveBeenCalledWith(initialized));
+    expect(onEnablePlan.mock.calls[0][0]).toBe(initialized);
   });
 
   it("keeps the wizard controls inside small app windows", () => {

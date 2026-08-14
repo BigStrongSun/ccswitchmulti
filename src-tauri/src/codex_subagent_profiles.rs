@@ -333,6 +333,7 @@ pub struct GeneratedRole {
     pub model_provider: String,
     pub effort: Option<CodexReasoningEffort>,
     pub context_window: u64,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -1305,6 +1306,7 @@ pub fn compile_subagent_v2_profiles(request: &CompileRequest) -> CompileResult {
             .clone()
             .unwrap_or_else(|| vec![default_nickname(&p)]);
         let effort = compile_reasoning_policy(&p.reasoning, &catalog.reasoning, &p.key)?;
+        let warnings = Vec::new();
         output.generated_roles.push(GeneratedRole {
             requested_role_name: requested,
             effective_role_name: effective,
@@ -1323,6 +1325,7 @@ pub fn compile_subagent_v2_profiles(request: &CompileRequest) -> CompileResult {
             model_provider: "codex_model_router_v2".to_string(),
             effort,
             context_window: catalog.context_window,
+            warnings,
         });
         push_status(&mut output, ProfileStatusCode::Routable, None);
     }
@@ -1506,6 +1509,7 @@ mod tests {
             model_provider: s("codex_model_router_v2"),
             effort: effort.into(),
             context_window: 1_000_000,
+            warnings: Vec::new(),
         }
     }
 

@@ -249,6 +249,41 @@ pub fn resolve_subagent_reasoning_capability(
     }
 }
 
+/// Return CCSwitchMulti's maintained capability for exact, stable model IDs.
+///
+/// This is a migration fallback for Provider/model-catalog rows saved before reasoning metadata
+/// became part of the persisted schema. Explicit row metadata remains authoritative. Keep this
+/// list narrow: unknown third-party models must not inherit GPT effort levels.
+pub fn builtin_reasoning_capability_for_model(
+    model: &str,
+) -> Option<CodexModelReasoningCapability> {
+    let normalized = model.trim().to_ascii_lowercase();
+    if !matches!(normalized.as_str(), "deepseek-v4-flash" | "deepseek-v4-pro") {
+        return None;
+    }
+    Some(CodexModelReasoningCapability {
+        supported: true,
+        supported_efforts: vec!["low".into(), "high".into(), "max".into()],
+        default_effort: Some("high".into()),
+        disable_allowed: true,
+        upstream: CodexModelReasoningUpstream {
+            format: "string".into(),
+            parameter: "reasoning_effort".into(),
+            effort_map: [
+                ("low".into(), "low".into()),
+                ("medium".into(), "high".into()),
+                ("high".into(), "high".into()),
+                ("xhigh".into(), "high".into()),
+                ("max".into(), "max".into()),
+            ]
+            .into_iter()
+            .collect(),
+        },
+        output_format: Some("reasoning_content".into()),
+        source: Some("builtin".into()),
+    })
+}
+
 pub fn reasoning_capability_from_model_entry(
     model_entry: &Value,
 ) -> Option<CodexModelReasoningCapability> {
@@ -377,5 +412,17 @@ mod tests {
                 "upstream":{"format":"string","parameter":"reasoning_effort"}}
         }]}});
         assert!(resolve_reasoning_capability_from_settings(&settings, "broken").is_none());
+    }
+
+    #[test]
+    fn restores_only_exact_builtin_deepseek_v4_capabilities() {
+        let flash = builtin_reasoning_capability_for_model("deepseek-v4-flash")
+            .expect("known Flash capability");
+        let pro = builtin_reasoning_capability_for_model("DEEPSEEK-V4-PRO")
+            .expect("known Pro capability");
+        assert_eq!(flash.supported_efforts, vec!["low", "high", "max"]);
+        assert_eq!(pro.default_effort.as_deref(), Some("high"));
+        assert!(builtin_reasoning_capability_for_model("deepseek-v4-flash-preview").is_none());
+        assert!(builtin_reasoning_capability_for_model("vendor/deepseek-v4-pro").is_none());
     }
 }

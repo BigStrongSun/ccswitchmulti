@@ -355,6 +355,31 @@ function New-FakeRetainedProcessHandle {
 }
 
 Describe "CCSwitchMulti transactional reinstall orchestration" {
+    It "reports actual and expected hashes when runtime verification fails" {
+        $context = [pscustomobject]@{
+            InstalledExecutable = "C:\Program Files\CCSwitchMulti\cc-switch.exe"
+            Port = 15721
+            HealthUri = "http://127.0.0.1:15721/health"
+        }
+        $operations = @{
+            GetProcessPath = { param($ProcessId) $context.InstalledExecutable }
+            GetListenerOwner = { param($Port) 5000 }
+            GetHealth = { param($Uri) @{ StatusCode = 200; Healthy = $true } }
+            GetFileVersion = { param($Path) "2.0.0" }
+            GetFileHash = { param($Path) ("D" * 64) }
+        }
+
+        $message = ""
+        try {
+            Assert-CcsmRuntime -Context $context -Operations $operations -ProcessId 5000 `
+                -ExpectedVersion "2.0.0" -ExpectedHash ("C" * 64) -Label "new runtime"
+        } catch {
+            $message = $_.Exception.Message
+        }
+
+        $message | Should Be ("new runtime hash mismatch: actual={0} expected={1}" -f ("D" * 64), ("C" * 64))
+    }
+
     It "keeps condition polling internal instead of contaminating transaction output" {
         $script:conditionAttempts = 0
         $output = @(Wait-CcsmCondition -TimeoutSeconds 2 -Description "test condition" -Condition {

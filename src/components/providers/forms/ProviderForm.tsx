@@ -242,6 +242,9 @@ export const normalizeCodexCatalogModelsForSave = (
       ...(typeof item.supportsParallelToolCalls === "boolean"
         ? { supportsParallelToolCalls: item.supportsParallelToolCalls }
         : {}),
+      ...(typeof item.supportsImage === "boolean"
+        ? { supportsImage: item.supportsImage }
+        : {}),
       ...(inputModalities && inputModalities.length > 0
         ? { inputModalities }
         : {}),

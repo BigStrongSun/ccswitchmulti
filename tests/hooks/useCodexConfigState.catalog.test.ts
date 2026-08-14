@@ -77,6 +77,52 @@ describe("useCodexConfigState catalog load", () => {
     ]);
   });
 
+  it("reloads camelCase image-support booleans from the DB SSOT without modalities", () => {
+    const initialData = {
+      settingsConfig: {
+        auth: {},
+        config: "",
+        modelCatalog: {
+          models: [
+            { model: "vision-camel", supportsImage: true },
+            { model: "text-camel", supportsImage: false },
+          ],
+        },
+      },
+    };
+
+    const { result } = renderHook(() => useCodexConfigState({ initialData }));
+
+    expect(result.current.codexCatalogModels).toEqual([
+      { model: "vision-camel", supportsImage: true },
+      { model: "text-camel", supportsImage: false },
+    ]);
+  });
+
+  it("reloads snake_case and legacy image-support booleans as camelCase without modalities", () => {
+    const initialData = {
+      settingsConfig: {
+        auth: {},
+        config: "",
+        modelCatalog: {
+          models: [
+            { model: "vision-snake", supports_image: true },
+            { model: "text-snake", supports_image: false },
+            { model: "vision-legacy", vision: true },
+          ],
+        },
+      },
+    };
+
+    const { result } = renderHook(() => useCodexConfigState({ initialData }));
+
+    expect(result.current.codexCatalogModels).toEqual([
+      { model: "vision-snake", supportsImage: true },
+      { model: "text-snake", supportsImage: false },
+      { model: "vision-legacy", supportsImage: true },
+    ]);
+  });
+
   it("preserves per-model reasoning capability while loading an existing provider", () => {
     const reasoning = {
       supported: true as const,
