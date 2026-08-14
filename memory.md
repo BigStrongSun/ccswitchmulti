@@ -3350,3 +3350,6 @@
 - RED `cdeb6969` 先在污染宿主暴露 helper 缺失；GREEN `39e41d70` 新增 `scripts/release-build-config.ps1`，仅使用 `[System.IO.Path]::GetTempFileName()` 与 `[System.IO.File]::WriteAllText(..., UTF8Encoding(false))` 生成 Tauri override，并由显式 cleanup 删除。不要通过修改用户/系统 `PSModulePath` 或 Codex runtime 来修发布脚本。
 - GREEN 验证：污染的 `pnpm exec powershell` 1/1，原生 Windows PowerShell 5.1 1/1，事务安装器加发布配置测试 47/47，typecheck 与 diff/UTF-8 hygiene 通过。修复后的下一次 `pnpm release:local` 才是 v26 的第一份有效本地构建证据。
 - 官方事实交叉验证使用 Codex Web 与固定 Matrix WebSearch 两条独立链；两者均能读取 Microsoft Learn 的 `New-TemporaryFile` 与 `about_PSModulePath`，具体污染顺序仍以本机 `$PSModulePath`、实际模块版本和可复现子进程为权威。
+- 修复后第二次 `pnpm release:local` 已完成 release 编译、Vite build、最终应用链接和 NSIS，随后在 exporter `Write-Checksums` 的 `Get-FileHash` 再次失败。这不是新根因，而是同一不完整 `Microsoft.PowerShell.Utility` 导出面的第二个依赖点；只修临时文件而不审计同模块后续调用的边界过窄。
+- 第二轮 TDD RED `44705602` 用固定内容和固定 SHA-256 锁定缺失的 `Get-ReleaseFileSha256`；GREEN `9808b11e` 在现有 helper 中实现流式 `[System.Security.Cryptography.SHA256]`，并让 exporter 与 `local-release-pipeline.ps1` 两处 checksum 都不再调用 `Get-FileHash`。污染宿主和原生 WinPS 各 2/2，事务安装器加发布测试 48/48，三份脚本 WinPS 5.1 parse、typecheck、UTF-8/diff hygiene 通过。
+- 第二次调用虽然留下 raw EXE 和 NSIS，但缺少完整导出、metadata 和最终 checksum，因此不能冒充完整 release；最终必须从包含两轮修复的 clean HEAD 重跑完整流水线，而不是只给失败目录补文件后宣称完成。
