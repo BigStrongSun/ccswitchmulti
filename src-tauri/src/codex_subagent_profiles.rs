@@ -83,6 +83,27 @@ pub enum ModelReasoningEffort {
     XHigh,
 }
 
+impl ModelReasoningEffort {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+        }
+    }
+
+    pub fn from_catalog_value(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            "xhigh" => Some(Self::XHigh),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderKind {
@@ -245,6 +266,8 @@ pub struct CatalogModel {
     pub provider_kind: ProviderKind,
     pub routable: bool,
     pub context_window: u64,
+    pub supported_reasoning_efforts: Vec<ModelReasoningEffort>,
+    pub default_reasoning_effort: Option<ModelReasoningEffort>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -274,8 +297,9 @@ pub struct GeneratedRole {
     pub nickname_candidates: Vec<String>,
     pub model: String,
     pub model_provider: String,
-    pub effort: ModelReasoningEffort,
+    pub effort: Option<ModelReasoningEffort>,
     pub context_window: u64,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -286,7 +310,8 @@ struct RoleToml<'a> {
     nickname_candidates: &'a [String],
     model: &'a str,
     model_provider: &'a str,
-    model_reasoning_effort: ModelReasoningEffort,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_reasoning_effort: Option<ModelReasoningEffort>,
     model_context_window: u64,
 }
 
@@ -710,6 +735,38 @@ fn auto_effort(p: &ParsedCodexSubagentProfile) -> ModelReasoningEffort {
     } else {
         ModelReasoningEffort::Medium
     }
+}
+
+fn catalog_compatible_effort(
+    profile: &ParsedCodexSubagentProfile,
+    catalog: &CatalogModel,
+) -> (Option<ModelReasoningEffort>, Vec<String>) {
+    let requested = auto_effort(profile);
+    if catalog.supported_reasoning_efforts.is_empty() {
+        return (
+            None,
+            vec![format!(
+                "Model `{}` does not declare selectable reasoning efforts; the managed role omits model_reasoning_effort instead of pinning an invalid value.",
+                catalog.model
+            )],
+        );
+    }
+    if catalog.supported_reasoning_efforts.contains(&requested) {
+        return (Some(requested), Vec::new());
+    }
+    let resolved = catalog
+        .default_reasoning_effort
+        .filter(|effort| catalog.supported_reasoning_efforts.contains(effort))
+        .unwrap_or(catalog.supported_reasoning_efforts[0]);
+    (
+        Some(resolved),
+        vec![format!(
+            "Questionnaire reasoning effort `{}` is not supported by model `{}`; using catalog default `{}`.",
+            requested.as_str(),
+            catalog.model,
+            resolved.as_str()
+        )],
+    )
 }
 
 fn strength_label(strength: TaskStrength) -> &'static str {
@@ -1171,6 +1228,7 @@ pub fn compile_subagent_v2_profiles(request: &CompileRequest) -> CompileResult {
             .nickname_candidates
             .clone()
             .unwrap_or_else(|| vec![default_nickname(&p)]);
+        let (effort, warnings) = catalog_compatible_effort(&p, catalog);
         output.generated_roles.push(GeneratedRole {
             requested_role_name: requested,
             effective_role_name: effective,
@@ -1187,8 +1245,9 @@ pub fn compile_subagent_v2_profiles(request: &CompileRequest) -> CompileResult {
             nickname_candidates: nicknames,
             model: p.model.clone(),
             model_provider: "codex_model_router_v2".to_string(),
-            effort: auto_effort(&p),
+            effort,
             context_window: catalog.context_window,
+            warnings,
         });
         push_status(&mut output, ProfileStatusCode::Routable, None);
     }
@@ -1336,8 +1395,9 @@ mod tests {
             nickname_candidates: nicknames,
             model: s("DeepSeek-V4-Flash"),
             model_provider: s("codex_model_router_v2"),
-            effort,
+            effort: Some(effort),
             context_window: 1_000_000,
+            warnings: Vec::new(),
         }
     }
 
@@ -2391,10 +2451,8 @@ mod tests {
                 None,
             ))],
         )));
-        request.catalog_models[0].supported_reasoning_efforts = vec![
-            ModelReasoningEffort::Low,
-            ModelReasoningEffort::High,
-        ];
+        request.catalog_models[0].supported_reasoning_efforts =
+            vec![ModelReasoningEffort::Low, ModelReasoningEffort::High];
         request.catalog_models[0].default_reasoning_effort = Some(ModelReasoningEffort::High);
 
         let compiled = compile_subagent_v2_profiles(&request).expect("compile catalog effort");
@@ -2411,7 +2469,9 @@ mod tests {
             SelectionPolicy::Balanced,
             vec![valid(policy_profile(Preference::Preferred))],
         )));
-        request.catalog_models[0].supported_reasoning_efforts.clear();
+        request.catalog_models[0]
+            .supported_reasoning_efforts
+            .clear();
         request.catalog_models[0].default_reasoning_effort = None;
 
         let compiled = compile_subagent_v2_profiles(&request).expect("compile unknown capability");
