@@ -6,6 +6,7 @@ import type { Provider } from "@/types";
 import { CodexMultiRouterWizard } from "@/components/codex/CodexMultiRouterWizard";
 import { CODEX_MULTI_ROUTER_WIZARD_DISMISSED_KEY } from "@/lib/codexMultiRouterWizard";
 import { providersApi } from "@/lib/api/providers";
+import { codexSubagentV2Api } from "@/lib/api/codexSubagentV2";
 import {
   fetchCodexOauthCachedModels,
   fetchCodexOauthModels,
@@ -18,6 +19,12 @@ vi.mock("@/lib/api/providers", () => ({
   providersApi: {
     add: vi.fn(),
     update: vi.fn(),
+  },
+}));
+
+vi.mock("@/lib/api/codexSubagentV2", () => ({
+  codexSubagentV2Api: {
+    initializeProviderConfig: vi.fn(),
   },
 }));
 
@@ -71,6 +78,42 @@ beforeEach(() => {
   localStorage.clear();
   vi.clearAllMocks();
   vi.mocked(fetchCodexOauthCachedModels).mockResolvedValue([]);
+  vi.mocked(codexSubagentV2Api.initializeProviderConfig).mockImplementation(
+    async (providerId) => {
+      const persisted = vi
+        .mocked(providersApi.add)
+        .mock.calls.find(([candidate]) => candidate.id === providerId)?.[0];
+      if (!persisted) {
+        throw new Error("backend initializer requires the persisted provider");
+      }
+      return {
+        ...persisted,
+        settingsConfig: {
+          ...persisted.settingsConfig,
+          codexRouting: {
+            ...persisted.settingsConfig.codexRouting,
+            subagentV2: {
+              schemaVersion: 1,
+              selectionPolicy: "balanced",
+              profiles: {
+                "qwen3.6": {
+                  model: "qwen3.6",
+                  enabled: false,
+                  questionnaire: {
+                    taskStrengths: ["repository_exploration"],
+                    optimization: "balanced",
+                    writeScope: "read_only",
+                    preference: "eligible",
+                    reasoningEffort: "auto",
+                  },
+                },
+              },
+            },
+          },
+        },
+      };
+    },
+  );
 });
 
 describe("CodexMultiRouterWizard", () => {
@@ -122,7 +165,7 @@ describe("CodexMultiRouterWizard", () => {
     expect(screen.getByRole("button", { name: "启用并验证" })).toBeVisible();
   });
 
-  it("persists a Qwen-only plan through the four routing stages", async () => {
+  it("initializes a new default V2 plan before handing it to enable", async () => {
     const qwenSource = provider({
       id: "qwen-local",
       name: "Qwen Local",
@@ -153,10 +196,36 @@ describe("CodexMultiRouterWizard", () => {
     const persisted = vi.mocked(providersApi.add).mock.calls[0][0];
     expect(persisted.settingsConfig.codexRouting.subagentVersion).toBe("v2");
 
+    await waitFor(() =>
+      expect(codexSubagentV2Api.initializeProviderConfig).toHaveBeenCalledWith(
+        persisted.id,
+      ),
+    );
+    const initialized = await vi.mocked(
+      codexSubagentV2Api.initializeProviderConfig,
+    ).mock.results[0].value;
+    expect(
+      initialized.settingsConfig.codexRouting.subagentV2.profiles,
+    ).toHaveProperty("qwen3.6");
+
     fireEvent.click(
       await screen.findByRole("button", { name: "启用这个多路路由" }),
     );
-    await waitFor(() => expect(onEnablePlan).toHaveBeenCalledWith(persisted));
+    await waitFor(() =>
+      expect(onEnablePlan).toHaveBeenCalledWith(
+        expect.objectContaining({
+          settingsConfig: expect.objectContaining({
+            codexRouting: expect.objectContaining({
+              subagentV2: expect.objectContaining({
+                profiles: expect.objectContaining({
+                  "qwen3.6": expect.objectContaining({ model: "qwen3.6" }),
+                }),
+              }),
+            }),
+          }),
+        }),
+      ),
+    );
   });
 
   it("keeps the wizard controls inside small app windows", () => {
