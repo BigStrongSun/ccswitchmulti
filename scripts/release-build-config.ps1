@@ -35,3 +35,34 @@ function Get-ReleaseFileSha256 {
         $sha256.Dispose()
     }
 }
+
+function Get-TauriNsisInstalledExeSha256 {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $unknownMarker = "__TAURI_BUNDLE_TYPE_VAR_UNK"
+    $nsisMarker = "__TAURI_BUNDLE_TYPE_VAR_NSS"
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    $latin1 = [System.Text.Encoding]::GetEncoding(28591)
+    $binaryText = $latin1.GetString($bytes)
+    $markerOffset = $binaryText.IndexOf(
+        $unknownMarker,
+        [System.StringComparison]::Ordinal
+    )
+    if ($markerOffset -lt 0 -or $binaryText.IndexOf(
+            $unknownMarker,
+            $markerOffset + 1,
+            [System.StringComparison]::Ordinal
+        ) -ge 0) {
+        throw "raw Tauri executable must contain exactly one restored UNK bundle marker"
+    }
+
+    $replacement = [System.Text.Encoding]::ASCII.GetBytes($nsisMarker)
+    [System.Array]::Copy($replacement, 0, $bytes, $markerOffset, $replacement.Length)
+
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return [System.BitConverter]::ToString($sha256.ComputeHash($bytes)).Replace("-", "")
+    } finally {
+        $sha256.Dispose()
+    }
+}
