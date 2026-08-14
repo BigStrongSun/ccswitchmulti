@@ -114,8 +114,15 @@ vi.mock("@/components/codex/CodexRouterWorkspacePage", async () => {
   );
   return {
     ...actual,
-    CodexRouterWorkspacePage: ({ initialProviderId, initialTab }: any) => (
-      <div data-testid="codex-router-workspace">
+    CodexRouterWorkspacePage: ({
+      initialProviderId,
+      initialTab,
+      onRuntimeReady,
+    }: any) => (
+      <div
+        data-testid="codex-router-workspace"
+        data-runtime-ready-wired={String(Boolean(onRuntimeReady))}
+      >
         <span data-testid="codex-router-target">{initialProviderId}</span>
         <span data-testid="codex-router-tab">{initialTab}</span>
       </div>
@@ -462,6 +469,10 @@ describe("App integration with MSW", () => {
       "codex-router",
     );
     expect(screen.getByTestId("codex-router-tab").textContent).toBe("status");
+    expect(screen.getByTestId("codex-router-workspace")).toHaveAttribute(
+      "data-runtime-ready-wired",
+      "false",
+    );
   });
 
   it("opens the Codex usage page from the Codex toolbar", async () => {

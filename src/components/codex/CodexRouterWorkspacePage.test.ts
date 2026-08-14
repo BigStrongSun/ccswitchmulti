@@ -2645,9 +2645,9 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     });
   });
 
-  // onRuntimeReady 测试：当本地代理运行、Codex 接管激活、当前 MultiRouter 已发布并启用路由、
-  // 且最新请求转发成功（statusCode 200-399）时，onRuntimeReady 回调应被调用。
-  it("calls onRuntimeReady when config is ready and latest request forward succeeds", async () => {
+  // 当本地代理、Codex 接管、当前方案路由和最新真实转发都成功时，
+  // 状态页应在原地给出完成结果，不再触发 App 进入历史修复。
+  it("shows runtime validation success in the workspace without a post-setup callback", async () => {
     const source: Provider = {
       id: "codex-online-source",
       name: "Online Source",
@@ -2681,8 +2681,6 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
         },
       },
     };
-    const onRuntimeReady = vi.fn();
-
     requestLogsFixture.value = {
       data: {
         data: [
@@ -2710,12 +2708,13 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
         onEditProvider: vi.fn(),
         onDeletePlan: vi.fn(),
         onCreateProvider: vi.fn(),
-        onRuntimeReady,
       }),
     );
 
     await waitFor(() =>
-      expect(onRuntimeReady).toHaveBeenCalledWith(routedPlan),
+      expect(
+        screen.getByText("MultiRouter 已通过真实请求验证"),
+      ).toBeInTheDocument(),
     );
   });
 
