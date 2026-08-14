@@ -5881,6 +5881,60 @@ mod tests {
     }
 
     #[test]
+    fn codex_subagent_reasoning_capabilities_are_exact_and_credential_free() {
+        let settings = json!({
+            "modelCatalog": {
+                "models": [{
+                    "model": "deepseek-v4-pro",
+                    "reasoning": serde_json::to_value(deepseek_reasoning_capability())
+                        .expect("serialize maintained capability")
+                }]
+            },
+            "apiKey": "MUST_NOT_LEAK",
+            "codexRouting": {
+                "routes": [{
+                    "match": { "models": ["deepseek-v4-pro"] },
+                    "upstream": {
+                        "auth": {
+                            "source": "provider_config",
+                            "apiKey": "ROUTE_SECRET_MUST_NOT_LEAK"
+                        }
+                    }
+                }]
+            }
+        });
+
+        let value = serde_json::to_value(get_codex_subagent_reasoning_capabilities_from_settings(
+            &settings,
+        ))
+        .expect("serialize capability response");
+        assert_eq!(
+            value,
+            json!({
+                "deepseek-v4-pro": {
+                    "supportKind": "effort_levels",
+                    "source": "builtin",
+                    "confidence": "confirmed",
+                    "codexSelectableEfforts": ["none", "low", "medium", "high", "xhigh", "max"],
+                    "providerAcceptedEfforts": ["low", "high", "max"],
+                    "providerDefaultEffort": "high",
+                    "disableAllowed": true,
+                    "effortMap": {
+                        "low": "low",
+                        "medium": "high",
+                        "high": "high",
+                        "xhigh": "high",
+                        "max": "max"
+                    }
+                }
+            })
+        );
+        let serialized = value.to_string();
+        assert!(!serialized.contains("MUST_NOT_LEAK"));
+        assert!(!serialized.contains("apiKey"));
+    }
+
+    #[test]
     #[serial_test::serial]
     fn codex_subagent_v2_preview_command_uses_exact_safe_camel_case_contract() {
         let _guard = TestHomeGuard::new();
