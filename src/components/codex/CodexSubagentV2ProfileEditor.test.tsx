@@ -2996,6 +2996,28 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
     );
   });
 
+  it("persists max and exposes it in the generated role preview", async () => {
+    const user = userEvent.setup();
+    await renderWorkspace();
+    await openAdvancedFields(user);
+    await chooseOption(
+      user,
+      within(flashRegion()).getByLabelText("模型推理强度"),
+      "max",
+    );
+    await saveV2(user);
+    await waitFor(() =>
+      expect(
+        latestSavedPlan()?.settingsConfig.codexRouting.subagentV2.profiles[
+          "repository-scout"
+        ].overrides.modelReasoningEffort,
+      ).toBe("max"),
+    );
+    expect(
+      await within(flashRegion()).findByText(/model_reasoning_effort = "max"/),
+    ).toBeInTheDocument();
+  });
+
   it("removes description alone after all five overrides were established", async () => {
     const user = userEvent.setup();
     await renderWorkspace();

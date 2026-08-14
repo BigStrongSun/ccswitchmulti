@@ -2341,6 +2341,35 @@ mod tests {
     }
 
     #[test]
+    fn codex_subagent_v2_fixed_max_round_trips_into_role_toml() {
+        let generated = role(
+            "flash",
+            "flash",
+            DESC_ARCHITECTURE,
+            INSTRUCTIONS_ARCHITECTURE,
+            vec![s("Flash")],
+            ModelReasoningEffort::Max,
+        );
+        generated_for_profile(
+            effort_profile(
+                TaskStrength::ArchitectureDesign,
+                Optimization::Quality,
+                Some(ModelReasoningEffort::Max),
+            ),
+            generated.clone(),
+        );
+        let toml = render_generated_role_toml(&generated, "# managed")
+            .expect("fixed max role TOML");
+        let parsed: toml::Value = toml::from_str(&toml).expect("parse fixed max role TOML");
+        assert_eq!(
+            parsed
+                .get("model_reasoning_effort")
+                .and_then(toml::Value::as_str),
+            Some("max")
+        );
+    }
+
+    #[test]
     fn codex_subagent_v2_auto_effort_is_medium_for_speed_testing() {
         generated_for_profile(
             effort_profile(TaskStrength::Testing, Optimization::Speed, None),
