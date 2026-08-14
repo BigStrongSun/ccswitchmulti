@@ -5233,7 +5233,7 @@ mod tests {
     use super::{
         body_looks_like_sse, build_external_codex_official_oauth_provider,
         chat_sse_to_response_value, classify_body_for_diagnostics, codex_catalog_models_response,
-        codex_proxy_error_json, external_openai_api_models_response,
+        codex_proxy_error_json, codex_proxy_error_status, external_openai_api_models_response,
         external_openai_api_unsupported_response, mark_external_openai_headers,
         resolve_codex_image_generation_provider, resolve_external_codex_router_target,
         resolve_forward_error_provider_for_logging, resolve_forward_error_route_provider,
@@ -6535,6 +6535,23 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_deepseek\",\"
         let message = body["error"]["message"].as_str().unwrap();
         assert!(message.contains("CC Switch local proxy failed"));
         assert!(message.contains("failed to serialize local response"));
+    }
+
+    #[test]
+    fn codex_image_response_pending_is_result_unknown_and_not_retryable() {
+        let error = ProxyError::ResponsePending(
+            "connection_closed_before_message_completed after request upload".to_string(),
+        );
+        let endpoint = "/v1/images/edits";
+        let body = codex_proxy_error_json("OpenAI Official", "gpt-image-2", endpoint, &error);
+
+        assert_eq!(codex_proxy_error_status(endpoint, &error), StatusCode::FAILED_DEPENDENCY);
+        assert_eq!(body["error"]["code"], "cc_switch_image_result_unknown");
+        assert_eq!(body["error"]["retryable"], false);
+        assert!(body["error"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("must not be replayed automatically"));
     }
 
     /// 验证 MultiRouter 请求失败时，usage/error 归因回到已命中的 route provider。

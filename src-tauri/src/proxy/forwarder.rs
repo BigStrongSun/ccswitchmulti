@@ -10067,6 +10067,22 @@ mod tests {
     }
 
     #[test]
+    fn reqwest_send_request_disconnect_is_not_treated_as_pre_send_build_failure() {
+        let err = map_reqwest_send_error_class(
+            false,
+            false,
+            true,
+            "client_error (SendRequest): connection_closed_before_message_completed".to_string(),
+        );
+
+        assert!(matches!(
+            err,
+            ProxyError::ResponsePending(message)
+                if message.contains("connection_closed_before_message_completed")
+        ));
+    }
+
+    #[test]
     fn official_codex_rejects_stale_proxy_placeholder_with_restart_hint() {
         let mut headers = HeaderMap::new();
         headers.insert(
