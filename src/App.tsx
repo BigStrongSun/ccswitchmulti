@@ -211,15 +211,6 @@ function App() {
     providerId?: string | null;
     tab: WorkspaceTab;
   }>({ tab: "status" });
-  const codexPostSetupGuideRef = useRef<{
-    planId: string;
-    successSeen: boolean;
-    historyRepairPrompted: boolean;
-  } | null>(null);
-  const [
-    openCodexHistoryRepairOnSessions,
-    setOpenCodexHistoryRepairOnSessions,
-  ] = useState(false);
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [
     isCodexMultiRouterEntryChoiceOpen,
@@ -1032,32 +1023,7 @@ function App() {
       }),
       queryClient.refetchQueries({ queryKey: usageKeys.all, type: "active" }),
     ]);
-    codexPostSetupGuideRef.current = {
-      planId: provider.id,
-      successSeen: false,
-      historyRepairPrompted: false,
-    };
     openCodexRouterWorkspace(provider, "status");
-  };
-
-  // MultiRouter 工作台确认运行态全绿后，进入历史修复，并给用户明确下一步。
-  const handleCodexMultiRouterReady = (provider: Provider) => {
-    const current = codexPostSetupGuideRef.current;
-    if (!current || current.planId !== provider.id || current.successSeen) {
-      return;
-    }
-    toast.success(
-      "Codex MultiRouter 配置成功：当前 provider、代理监听、Codex 接管、路由入口和最近请求转发都已成功。下一步请修复历史记录可见性。",
-      { closeButton: true, duration: 10000 },
-    );
-    setActiveApp("codex");
-    setOpenCodexHistoryRepairOnSessions(true);
-    setCurrentView("sessions");
-    codexPostSetupGuideRef.current = {
-      ...current,
-      successSeen: true,
-      historyRepairPrompted: true,
-    };
   };
 
   // 历史修复写入完成后，先提示重启 Codex，再征求点赞并用默认浏览器打开 CCSwitchMulti 仓库。
@@ -1173,7 +1139,6 @@ function App() {
               onDeletePlan={(provider) =>
                 setConfirmAction({ provider, action: "delete" })
               }
-              onRuntimeReady={handleCodexMultiRouterReady}
             />
           );
         case "codexUsage":
@@ -1221,10 +1186,6 @@ function App() {
             <SessionManagerPage
               key={sharedFeatureApp}
               appId={sharedFeatureApp}
-              initialCodexHistoryRepair={openCodexHistoryRepairOnSessions}
-              onInitialCodexHistoryRepairConsumed={() =>
-                setOpenCodexHistoryRepairOnSessions(false)
-              }
               onCodexHistoryRepairCompleted={
                 sharedFeatureApp === "codex"
                   ? handleCodexHistoryRepairCompleted
@@ -1939,8 +1900,8 @@ function App() {
                 开始引导配置
               </div>
               <p className="mt-2 text-sm leading-6 text-muted-foreground">
-                按步骤创建 provider、获取模型、处理重名、生成路由、启用
-                MultiRouter，并接到状态页和历史修复流程。
+                按四个任务选择模型源、自动同步并验证、预览路由，最后启用
+                MultiRouter 并在状态页完成真实请求验证。
               </p>
             </button>
 

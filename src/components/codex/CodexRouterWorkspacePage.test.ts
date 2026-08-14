@@ -3169,9 +3169,9 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     ).not.toBeInTheDocument();
   });
 
-  // onRuntimeReady 负向测试：即使最近一条 Codex 代理日志成功，只要它没有命中当前
-  // MultiRouter 方案的 route，就不能提前进入“配置成功 -> 历史修复”收尾流程。
-  it("does not call onRuntimeReady when latest successful request is outside the selected route", async () => {
+  // 即使最近一条 Codex 代理日志成功，只要它没有命中当前 MultiRouter 方案的 route，
+  // 就不能显示当前方案已通过真实请求验证。
+  it("does not show runtime validation success when the latest request is outside the selected route", async () => {
     const source: Provider = {
       id: "codex-online-source",
       name: "Online Source",
@@ -3215,8 +3215,6 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
         },
       },
     };
-    const onRuntimeReady = vi.fn();
-
     requestLogsFixture.value = {
       data: {
         data: [
@@ -3246,7 +3244,6 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
         onEditProvider: vi.fn(),
         onDeletePlan: vi.fn(),
         onCreateProvider: vi.fn(),
-        onRuntimeReady,
       }),
     );
 
@@ -3254,6 +3251,8 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       expect(screen.getByText("成功 200")).toBeInTheDocument(),
     );
     expect(screen.queryByText("当前方案成功")).not.toBeInTheDocument();
-    expect(onRuntimeReady).not.toHaveBeenCalled();
+    expect(
+      screen.queryByText("MultiRouter 已通过真实请求验证"),
+    ).not.toBeInTheDocument();
   });
 });

@@ -1675,7 +1675,7 @@ export function CodexMultiRouterWizard({
       await onEnablePlan(savedPlan);
       dispatchFlow({ type: "ENABLE_SUCCESS" });
       toast.success(
-        "已启用多路模型，状态页已打开。请在 Codex 里发送一次请求，等待当前链路、监听、Codex 接管、路由入口和最近转发都成功后，会自动进入历史修复。",
+        "已启用多路模型，状态页已打开。请在 Codex 里发送一次请求；当前链路、监听、Codex 接管、路由入口和最近转发均成功后，状态页会显示真实请求验证结果。",
         {
           closeButton: true,
           duration: 12000,
@@ -2505,9 +2505,8 @@ export function CodexMultiRouterWizard({
                 <div className="rounded-lg border p-4 text-sm leading-6 text-muted-foreground">
                   保存完成后，请显式启用这个多路路由。启用成功后向导会自动关闭，并露出
                   MultiRouter 状态页；保持 CCSwitchMulti 运行，去 Codex
-                  里发送一次请求，状态页五项成功后会提示配置成功并跳到历史修复。
-                  历史修复会继续指导你按顺序加载历史、预览修复、确认写入、重启
-                  Codex，并打开 GitHub 仓库点 Star。
+                  里发送一次请求。状态页会持续展示当前链路、监听、Codex
+                  接管、路由入口和最近转发；五项成功后会在原地显示真实请求验证通过。
                 </div>
                 <div className="flex flex-wrap gap-3">
                   <Button
@@ -2557,7 +2556,7 @@ export function CodexMultiRouterWizard({
                 <span className="block">
                   注意：Responses 通过只证明最小非流式请求能返回成功，不等于完整
                   Codex 功能验证。保存启用后仍需要在状态页和真实 Codex
-                  会话里确认路由、流式响应、工具调用和历史修复流程。
+                  会话里确认路由、流式响应和工具调用。
                 </span>
               </DialogDescription>
             </DialogHeader>
