@@ -1320,8 +1320,10 @@ mod tests {
         GeneratedRole {
             requested_role_name: s(requested),
             effective_role_name: s(effective),
-            description: s(description),
-            developer_instructions: s(instructions),
+            description: format!("{description}{UNKNOWN_MODALITY_DESCRIPTION_SAFETY}"),
+            developer_instructions: format!(
+                "{instructions}{UNKNOWN_MODALITY_INSTRUCTIONS_SAFETY}"
+            ),
             nickname_candidates: nicknames,
             model: s("DeepSeek-V4-Flash"),
             model_provider: s("codex_model_router_v2"),
@@ -1380,6 +1382,8 @@ mod tests {
 
     // Independent literal fixtures for the production compiler contract.  These are intentionally
     // not derived through production helpers, so a compiler regression cannot rewrite its own oracle.
+    const UNKNOWN_MODALITY_DESCRIPTION_SAFETY: &str = " Input capabilities are unknown, so this role must not be assigned tasks that depend on image understanding.";
+    const UNKNOWN_MODALITY_INSTRUCTIONS_SAFETY: &str = " This model's input capabilities are unknown; do not select this role for tasks that depend on image understanding.";
     const DESC_BALANCED_REPOSITORY: &str = "This role matches delegated repository exploration tasks. It excludes long-context reading, evidence collection, summarization, complex debugging, architecture design, bounded implementation, complex implementation, testing, and high-risk review, and it does not own final integration, merging, or release. It optimizes for speed and is limited to read-only work. Under balanced selection, this eligible third-party profile has no provider bias.";
     const DESC_BALANCED_PREFERRED: &str = "This role matches delegated repository exploration tasks. It excludes long-context reading, evidence collection, summarization, complex debugging, architecture design, bounded implementation, complex implementation, testing, and high-risk review, and it does not own final integration, merging, or release. It optimizes for speed and is limited to read-only work. Under balanced selection, when declared task strengths match, prefer this specialized role over the built-in generic default, worker, and explorer roles; provider identity does not break ties otherwise.";
     const DESC_ARCHITECTURE: &str = "This role matches delegated architecture design tasks. It excludes long-context reading, repository exploration, evidence collection, summarization, complex debugging, bounded implementation, complex implementation, testing, and high-risk review, and it does not own final integration, merging, or release. It optimizes for quality and is limited to read-only work. Under balanced selection, this eligible third-party profile has no provider bias.";
@@ -1708,6 +1712,45 @@ mod tests {
         assert!(role.developer_instructions.ends_with(
             "This model supports image input and may be selected for tasks that require image understanding."
         ));
+    }
+
+    #[test]
+    fn codex_subagent_v2_unknown_input_modalities_guard_automatic_copy() {
+        let compiled = compile_subagent_v2_profiles(&request(Some(config(
+            SelectionPolicy::Balanced,
+            vec![valid(profile("flash", "DeepSeek-V4-Flash"))],
+        ))))
+        .expect("compile profile with unknown input capabilities");
+        let role = &compiled.generated_roles[0];
+
+        assert!(role
+            .description
+            .ends_with(UNKNOWN_MODALITY_DESCRIPTION_SAFETY));
+        assert!(role
+            .developer_instructions
+            .ends_with(UNKNOWN_MODALITY_INSTRUCTIONS_SAFETY));
+    }
+
+    #[test]
+    fn codex_subagent_v2_unknown_input_modalities_guard_manual_overrides() {
+        let mut p = profile("flash", "DeepSeek-V4-Flash");
+        p.overrides.description = Some(s("Manual role selection guidance."));
+        p.overrides.developer_instructions = Some(s("Follow the delegated objective."));
+        let compiled = compile_subagent_v2_profiles(&request(Some(config(
+            SelectionPolicy::Balanced,
+            vec![valid(p)],
+        ))))
+        .expect("compile overridden profile with unknown input capabilities");
+        let role = &compiled.generated_roles[0];
+
+        assert_eq!(
+            role.description,
+            format!("Manual role selection guidance.{UNKNOWN_MODALITY_DESCRIPTION_SAFETY}")
+        );
+        assert_eq!(
+            role.developer_instructions,
+            format!("Follow the delegated objective.{UNKNOWN_MODALITY_INSTRUCTIONS_SAFETY}")
+        );
     }
 
     #[test]

@@ -160,6 +160,7 @@ const ipcState = vi.hoisted(() => ({
     status: "applied" | "not_required" | "pending_retry";
     warning?: { code: string; message: string };
   },
+  nextVerification: null as Record<string, unknown> | null,
   omitWriteVerification: false,
 }));
 
@@ -168,6 +169,36 @@ const ipcState = vi.hoisted(() => ({
 // application, so save/remount tests cannot pass through a second local schema.
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(async (command: string, args?: Record<string, unknown>) => {
+    const mutationResult = (savedProvider: Provider) => {
+      const projection = ipcState.nextProjection ?? { status: "applied" };
+      const roleFilesStatus =
+        projection.status === "not_required"
+          ? "not_required"
+          : projection.status === "pending_retry"
+            ? "pending_retry"
+            : "verified";
+      const verification = ipcState.nextVerification ?? {
+        databasePersisted: true,
+        roleFilesStatus,
+        roleFiles:
+          projection.status === "applied"
+            ? [
+                {
+                  profileKey: "repository-scout",
+                  path: "C:\\Codex\\agents\\repository-scout-2.toml",
+                  exists: true,
+                  contentMatches: true,
+                },
+              ]
+            : [],
+        activation: "restart_codex_and_start_new_session",
+      };
+      return {
+        ...savedProvider,
+        projection,
+        ...(ipcState.omitWriteVerification ? {} : { verification }),
+      };
+    };
     switch (command) {
       case "get_providers":
         return JSON.parse(JSON.stringify(ipcState.providers));
@@ -221,36 +252,7 @@ vi.mock("@tauri-apps/api/core", () => ({
           subagentV2: JSON.parse(JSON.stringify(args.subagentV2)),
         };
         ipcState.providers[savedProvider.id] = savedProvider;
-        return JSON.parse(
-          JSON.stringify({
-            ...savedProvider,
-            ...(ipcState.nextProjection
-              ? { projection: ipcState.nextProjection }
-              : { projection: { status: "applied" } }),
-            ...(ipcState.omitWriteVerification
-              ? {}
-              : {
-                  verification: {
-                    databasePersisted: true,
-                    roleFilesStatus:
-                      ipcState.nextProjection?.status === "not_required"
-                        ? "not_required"
-                        : ipcState.nextProjection?.status === "pending_retry"
-                          ? "pending_retry"
-                          : "verified",
-                    roleFiles: [
-                      {
-                        profileKey: "repository-scout",
-                        path: "C:\\Codex\\agents\\repository-scout-2.toml",
-                        exists: true,
-                        contentMatches: true,
-                      },
-                    ],
-                    activation: "restart_codex_and_start_new_session",
-                  },
-                }),
-          }),
-        );
+        return JSON.parse(JSON.stringify(mutationResult(savedProvider)));
       }
       case "initialize_codex_subagent_v2": {
         if (!args || typeof args.providerId !== "string") {
@@ -284,7 +286,7 @@ vi.mock("@tauri-apps/api/core", () => ({
           };
         }
         ipcState.providers[initialized.id] = initialized;
-        return JSON.parse(JSON.stringify(initialized));
+        return JSON.parse(JSON.stringify(mutationResult(initialized)));
       }
       case "reconcile_codex_subagent_v2_profiles": {
         if (
@@ -359,7 +361,7 @@ vi.mock("@tauri-apps/api/core", () => ({
           };
         }
         ipcState.providers[savedProvider.id] = savedProvider;
-        return JSON.parse(JSON.stringify(savedProvider));
+        return JSON.parse(JSON.stringify(mutationResult(savedProvider)));
       }
       case "add_provider": {
         const savedProvider = args?.provider as Provider;
@@ -725,6 +727,44 @@ async function saveV2(user: UserEvent) {
   );
 }
 
+type FocusedV2Mutation = "initialize" | "reconcile";
+
+async function runFocusedV2Mutation(operation: FocusedV2Mutation) {
+  const user = userEvent.setup();
+  await renderWorkspace(operation !== "initialize");
+  await user.click(
+    await screen.findByRole("button", {
+      name:
+        operation === "initialize"
+          ? "初始化 V2 子 Agent 能力配置"
+          : "从模型目录添加可配置模型",
+    }),
+  );
+}
+
+function appliedVerification(overrides: Record<string, unknown> = {}) {
+  return {
+    databasePersisted: true,
+    roleFilesStatus: "verified",
+    roleFiles: [
+      {
+        profileKey: "repository-scout",
+        path: "C:\\Codex\\agents\\repository-scout-2.toml",
+        exists: true,
+        contentMatches: true,
+      },
+    ],
+    activation: "restart_codex_and_start_new_session",
+    ...overrides,
+  };
+}
+
+function focusedMutationSuccessPattern(operation: FocusedV2Mutation) {
+  return operation === "initialize"
+    ? /V2 子 Agent 能力配置已初始化/
+    : /已从模型目录添加可配置模型/;
+}
+
 async function chooseOption(
   user: UserEvent,
   control: HTMLElement,
@@ -864,8 +904,80 @@ beforeEach(() => {
   ipcState.beforeV2Persistence = null;
   ipcState.nextInitializedProvider = null;
   ipcState.nextProjection = null;
+  ipcState.nextVerification = null;
   ipcState.omitWriteVerification = false;
   vi.mocked(invoke).mockClear();
+});
+
+describe.each([
+  ["initialize", "初始化"] as const,
+  ["reconcile", "目录同步"] as const,
+])("Codex Sub-Agent V2 %s mutation verification", (operation, label) => {
+  it(`${label}在后端省略 verification 时不得成功`, async () => {
+    ipcState.omitWriteVerification = true;
+
+    await runFocusedV2Mutation(operation);
+
+    expect(
+      await screen.findByText("后端未返回 Codex Agent 文件写入验证结果。"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(focusedMutationSuccessPattern(operation)),
+    ).toBeNull();
+  });
+
+  it(`${label}在 roleFilesStatus=failed 时不得成功`, async () => {
+    ipcState.nextVerification = appliedVerification({
+      roleFilesStatus: "failed",
+      roleFiles: [],
+    });
+
+    await runFocusedV2Mutation(operation);
+
+    expect(
+      await screen.findByText("Codex Agent 文件写入后回读校验失败。"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(focusedMutationSuccessPattern(operation)),
+    ).toBeNull();
+  });
+
+  it(`${label}在 Agent 文件内容不匹配时不得成功`, async () => {
+    ipcState.nextVerification = appliedVerification({
+      roleFiles: [
+        {
+          profileKey: "repository-scout",
+          path: "C:\\Codex\\agents\\repository-scout-2.toml",
+          exists: true,
+          contentMatches: false,
+        },
+      ],
+    });
+
+    await runFocusedV2Mutation(operation);
+
+    expect(
+      await screen.findByText("Codex Agent 文件写入后回读校验失败。"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(focusedMutationSuccessPattern(operation)),
+    ).toBeNull();
+  });
+
+  it(`${label}在 activation 不匹配时不得成功`, async () => {
+    ipcState.nextVerification = appliedVerification({
+      activation: "already_active",
+    });
+
+    await runFocusedV2Mutation(operation);
+
+    expect(
+      await screen.findByText("后端返回的 Codex Agent 激活条件不一致。"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(focusedMutationSuccessPattern(operation)),
+    ).toBeNull();
+  });
 });
 
 describe("Codex Sub-Agent V2 review round 1 regressions", () => {
@@ -2039,8 +2151,29 @@ describe("Codex Sub-Agent V2 searchable Accordion workspace", () => {
       ),
     );
     expect(
-      await screen.findByText("已从模型目录添加可配置模型；已有设置保持不变"),
+      await screen.findByText(
+        "已从模型目录添加可配置模型；已有设置保持不变；数据库与 Codex Agent 文件均已写入并回读验证；重启 Codex/app-server 并新建会话后生效",
+      ),
     ).toBeVisible();
+  });
+
+  it("reports a legal inactive/not_required reconcile without claiming role files were applied", async () => {
+    ipcState.nextProjection = { status: "not_required" };
+    const user = userEvent.setup();
+    await renderWorkspace();
+
+    await user.click(
+      screen.getByRole("button", { name: "从模型目录添加可配置模型" }),
+    );
+
+    expect(
+      await screen.findByText(
+        "已从模型目录添加可配置模型；已有设置保持不变；数据库已保存；当前方案未激活，因此未改写 Codex Agent 文件",
+      ),
+    ).toBeVisible();
+    expect(
+      screen.queryByText(/Codex Agent 文件均已写入并回读验证/),
+    ).toBeNull();
   });
 
   it("在粘性保存区反馈未保存和保存成功状态", async () => {
@@ -2082,6 +2215,32 @@ describe("Codex Sub-Agent V2 searchable Accordion workspace", () => {
     );
     expect(screen.queryByText(/Codex Agent 文件均已写入并回读验证/)).toBeNull();
   });
+
+  it.each([
+    ["missing", undefined],
+    ["incorrect", "already_active"],
+  ])(
+    "does not report ordinary save success when verification.activation is %s",
+    async (_label, activation) => {
+      ipcState.nextVerification = appliedVerification({ activation });
+      const user = userEvent.setup();
+      await renderWorkspace();
+      await chooseOption(
+        user,
+        within(flashRegion()).getByLabelText("优化目标"),
+        "质量",
+      );
+
+      await saveV2(user);
+
+      expect(
+        await screen.findByText("后端返回的 Codex Agent 激活条件不一致。"),
+      ).toBeVisible();
+      expect(
+        screen.queryByText(/Codex Agent 文件均已写入并回读验证/),
+      ).toBeNull();
+    },
+  );
 
   it("persists explicit text and image input capability in the V2 profile JSON", async () => {
     const user = userEvent.setup();
@@ -2998,6 +3157,9 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
     await new Promise((resolve) => setTimeout(resolve, 25));
 
     expect(screen.getByText(warning)).toBeInTheDocument();
+    expect(
+      screen.getByText("数据库已保存；Codex Agent 文件投影待自动重试"),
+    ).toBeInTheDocument();
     expect(within(flashRegion()).getByLabelText("角色描述")).toHaveValue(
       "warning lifecycle refresh draft",
     );
@@ -3016,6 +3178,11 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
         providerId: "router",
       }),
     );
+    expect(
+      await screen.findByText(
+        "V2 子 Agent 能力配置已初始化；数据库与 Codex Agent 文件均已写入并回读验证；重启 Codex/app-server 并新建会话后生效",
+      ),
+    ).toBeVisible();
     expect(v2PersistenceCalls()).toHaveLength(0);
     expect(
       ipcState.providers.router.settingsConfig.codexRouting.subagentV2,
