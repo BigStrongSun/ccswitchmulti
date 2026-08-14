@@ -19,6 +19,7 @@ use crate::config::{
 use crate::error::AppError;
 use crate::model_capabilities::{image_input_capability_from_modalities, ImageInputCapability};
 use crate::provider::Provider;
+use crate::proxy::providers::codex_reasoning::ResolvedSubagentReasoningCapability;
 use crate::proxy::providers::{
     codex_route_target_provider_id_from_route, codex_route_uses_official_agent_backend,
     is_codex_official_provider, resolve_codex_primary_route_from_settings,
@@ -2780,6 +2781,7 @@ struct ConfiguredCodexSubagentCompilation {
     persisted: crate::codex_subagent_profiles::CodexSubagentV2,
     output: SubagentCompileOutput,
     route_classifications: HashMap<String, RouteClassification>,
+    reasoning_capabilities: HashMap<String, ResolvedSubagentReasoningCapability>,
 }
 
 fn public_codex_subagent_validation_code(error: &SubagentCompileError) -> &str {
@@ -2852,7 +2854,7 @@ fn compile_configured_codex_subagent_roles(
     let persisted = parse_persisted_subagent_v2_tolerant(raw)
         .map_err(|error| codex_subagent_validation_error(&error))?;
     let mut route_classifications = HashMap::new();
-    let catalog_models = specs
+    let catalog_models: Vec<SubagentCatalogModel> = specs
         .iter()
         .map(|spec| {
             let classification = codex_subagent_route_classification_with_context(
@@ -2884,6 +2886,10 @@ fn compile_configured_codex_subagent_roles(
             }
         })
         .collect();
+    let reasoning_capabilities = catalog_models
+        .iter()
+        .map(|model| (model.model.to_ascii_lowercase(), model.reasoning.clone()))
+        .collect();
     let output = compile_subagent_v2_profiles(&SubagentCompileRequest {
         subagent_version: if version == CodexSubagentVersion::V1 {
             ProfileSubagentVersion::V1
@@ -2899,6 +2905,7 @@ fn compile_configured_codex_subagent_roles(
         persisted,
         output,
         route_classifications,
+        reasoning_capabilities,
     }))
 }
 
@@ -3283,6 +3290,10 @@ pub struct CodexSubagentProfileStatus {
     model_provider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     model_reasoning_effort: Option<SubagentReasoningEffort>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_policy: Option<SubagentReasoningRuntimePolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_capability: Option<ResolvedSubagentReasoningCapability>,
     status: CodexSubagentProfileStatusCode,
     #[serde(skip_serializing_if = "Option::is_none")]
     non_generation_reason: Option<CodexSubagentNonGenerationReason>,
@@ -3397,6 +3408,8 @@ fn configured_codex_subagent_profile_statuses(
                 role_file_path: None,
                 model_provider: None,
                 model_reasoning_effort: None,
+                reasoning_policy: None,
+                reasoning_capability: None,
                 status,
                 non_generation_reason,
                 warnings: Vec::new(),
@@ -3424,6 +3437,11 @@ fn configured_codex_subagent_profile_statuses(
             role_file_path: None,
             model_provider: None,
             model_reasoning_effort: None,
+            reasoning_policy: Some(profile.reasoning.policy),
+            reasoning_capability: compilation
+                .reasoning_capabilities
+                .get(&profile.model.to_ascii_lowercase())
+                .cloned(),
             status,
             non_generation_reason,
             warnings,
@@ -3499,6 +3517,8 @@ fn legacy_codex_subagent_profile_statuses(
             role_file_path: Some(absolute_codex_role_path(&role.path)?),
             model_provider: Some(CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID.to_string()),
             model_reasoning_effort: legacy_reasoning_effort(&role.spec.model),
+            reasoning_policy: None,
+            reasoning_capability: None,
             status: CodexSubagentProfileStatusCode::Generated,
             non_generation_reason: None,
             warnings,
@@ -3588,6 +3608,8 @@ pub struct CodexSubagentProfilePreview {
     model: String,
     model_provider: String,
     model_reasoning_effort: Option<crate::codex_subagent_profiles::ModelReasoningEffort>,
+    reasoning_policy: SubagentReasoningRuntimePolicy,
+    reasoning_capability: ResolvedSubagentReasoningCapability,
     model_context_window: u64,
     toml_preview: String,
     warnings: Vec<String>,
@@ -3651,6 +3673,7 @@ fn preview_codex_subagent_profile_with_context(
                     .collect()
             });
     }
+    let reasoning_policy = profile.reasoning.policy;
     let profile = serde_json::to_value(profile)
         .map_err(|error| format!("Invalid subagentV2 profile config: {error}"))?;
     let routing = settings_config
@@ -3674,6 +3697,10 @@ fn preview_codex_subagent_profile_with_context(
         .iter()
         .find(|spec| normalize_profile_key(&spec.model) == profile_key)
         .ok_or_else(|| format!("Profile model is not routable: {model}"))?;
+    let reasoning_capability =
+        crate::proxy::providers::codex_reasoning::resolve_subagent_reasoning_capability(
+            spec.reasoning.as_ref(),
+        );
     let compilation = compile_configured_codex_subagent_roles(
         &settings_config,
         &specs,
@@ -3709,6 +3736,8 @@ fn preview_codex_subagent_profile_with_context(
         model,
         model_provider: role.model_provider,
         model_reasoning_effort: role.effort,
+        reasoning_policy,
+        reasoning_capability,
         model_context_window: role.context_window,
         toml_preview,
         warnings,
