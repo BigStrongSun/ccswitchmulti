@@ -667,7 +667,9 @@ export function CodexFormFields({
   const isChatFormat = apiFormat === "openai_chat";
   const isAnthropicFormat = apiFormat === "anthropic";
   const canEditCatalog = Boolean(onCatalogModelsChange);
-  const canEditRouting = Boolean(onCodexRoutingChange);
+  // 普通 Provider 表单只消费并原样回传历史 codexRouting；可见编辑入口统一收口到
+  // CodexRouterWorkspacePage，避免与完整 MultiRouter 工作台形成两套配置界面。
+  const canEditRouting = false;
   const canEditReasoning = Boolean(onCodexChatReasoningChange);
   const supportsThinking =
     codexChatReasoning.supportsThinking === true ||
@@ -680,7 +682,6 @@ export function CodexFormFields({
   const hasAnyAdvancedValue =
     !!customUserAgent ||
     hasRequestOverrides ||
-    takeoverEnabled ||
     catalogModels.length > 0 ||
     codexRouting.enabled ||
     (codexRouting.routes?.length ?? 0) > 0 ||
@@ -2144,10 +2145,8 @@ export function CodexFormFields({
               </div>
             )}
 
-            {/* 上游格式 + Codex 菜单映射 —— 两个平级、相互独立的控件。
-                格式不依赖路由：Responses 原生供应商无需开启路由即可直连；
-                沿用 shouldShowSpeedTest 门控，cloud_provider 保持不可切换；
-                xAI OAuth 托管预设格式固定为 Responses。 */}
+            {/* 上游格式与协议探测沿用 shouldShowSpeedTest 门控，
+                cloud_provider 保持不可切换；xAI OAuth 托管预设格式固定为 Responses。 */}
             {shouldShowSpeedTest && !isXaiOauthPreset && (
               <div className="space-y-3">
                 {/* 上游格式 —— 顶层独立选择，与路由开关解耦 */}
@@ -2325,36 +2324,37 @@ export function CodexFormFields({
                     )}
                   </div>
                 </div>
+              </div>
+            )}
 
-                {appId === "codex" && (
-                  <div className="flex items-center justify-between gap-4 rounded-md border border-blue-200 bg-blue-50/60 p-3 dark:border-blue-900/60 dark:bg-blue-950/20">
-                    <div className="space-y-1">
-                      <FormLabel>
-                        {t("codexConfig.localRoutingToggle", {
-                          defaultValue: "在 Codex /model 菜单中显示",
+            {/* 模型菜单投影属于 Provider 自身设置，不依赖测速/协议探测能力。 */}
+            {appId === "codex" && !isXaiOauthPreset && (
+              <div className="flex items-center justify-between gap-4 rounded-md border border-blue-200 bg-blue-50/60 p-3 dark:border-blue-900/60 dark:bg-blue-950/20">
+                <div className="space-y-1">
+                  <FormLabel>
+                    {t("codexConfig.localRoutingToggle", {
+                      defaultValue: "在 Codex /model 菜单中显示",
+                    })}
+                  </FormLabel>
+                  <p className="text-xs leading-relaxed text-muted-foreground">
+                    {takeoverEnabled
+                      ? t("codexConfig.localRoutingOnHint", {
+                          defaultValue:
+                            "开启后会把“模型目录与上下文”投射到 Codex /model 菜单，并让可见模型名映射到真实上游模型。",
+                        })
+                      : t("codexConfig.localRoutingOffHint", {
+                          defaultValue:
+                            "关闭时仍会保存 /models 列表和上下文窗口，但不改写 Codex /model 菜单；适合 Responses 原生、直接使用真实模型名的 provider。",
                         })}
-                      </FormLabel>
-                      <p className="text-xs leading-relaxed text-muted-foreground">
-                        {takeoverEnabled
-                          ? t("codexConfig.localRoutingOnHint", {
-                              defaultValue:
-                                "开启后会把“模型目录与上下文”投射到 Codex /model 菜单，并让可见模型名映射到真实上游模型。",
-                            })
-                          : t("codexConfig.localRoutingOffHint", {
-                              defaultValue:
-                                "关闭时仍会保存 /models 列表和上下文窗口，但不改写 Codex /model 菜单；适合 Responses 原生、直接使用真实模型名的 provider。",
-                            })}
-                      </p>
-                    </div>
-                    <Switch
-                      checked={takeoverEnabled}
-                      onCheckedChange={onTakeoverEnabledChange}
-                      aria-label={t("codexConfig.localRoutingToggle", {
-                        defaultValue: "在 Codex /model 菜单中显示",
-                      })}
-                    />
-                  </div>
-                )}
+                  </p>
+                </div>
+                <Switch
+                  checked={takeoverEnabled}
+                  onCheckedChange={onTakeoverEnabledChange}
+                  aria-label={t("codexConfig.localRoutingToggle", {
+                    defaultValue: "在 Codex /model 菜单中显示",
+                  })}
+                />
               </div>
             )}
 
