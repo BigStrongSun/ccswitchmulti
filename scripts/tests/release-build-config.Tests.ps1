@@ -29,4 +29,23 @@ Describe "CCSwitchMulti local release build config" {
 
         (Test-Path -LiteralPath $configPath) | Should Be $false
     }
+
+    It "computes SHA256 without PowerShell utility cmdlets" {
+        . $helperPath
+
+        $filePath = [System.IO.Path]::GetTempFileName()
+        try {
+            [System.IO.File]::WriteAllText(
+                $filePath,
+                "ccswitchmulti-release",
+                [System.Text.UTF8Encoding]::new($false)
+            )
+
+            $hash = Get-ReleaseFileSha256 -Path $filePath
+
+            $hash | Should Be "7C10D97BCA5D29117B515F045186B8A7AA535CE7A0F1E775AEC72A1AC9504C2F"
+        } finally {
+            [System.IO.File]::Delete($filePath)
+        }
+    }
 }
