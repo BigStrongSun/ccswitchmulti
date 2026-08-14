@@ -1293,6 +1293,13 @@ mod tests {
             provider_kind: ProviderKind::ThirdParty,
             routable,
             context_window: 1_000_000,
+            supported_reasoning_efforts: vec![
+                ModelReasoningEffort::Low,
+                ModelReasoningEffort::Medium,
+                ModelReasoningEffort::High,
+                ModelReasoningEffort::XHigh,
+            ],
+            default_reasoning_effort: Some(ModelReasoningEffort::Medium),
         }
     }
 
@@ -2372,6 +2379,50 @@ mod tests {
                 ModelReasoningEffort::XHigh,
             ),
         );
+    }
+
+    #[test]
+    fn codex_subagent_v2_unsupported_questionnaire_effort_uses_catalog_default() {
+        let mut request = request(Some(config(
+            SelectionPolicy::Balanced,
+            vec![valid(effort_profile(
+                TaskStrength::Testing,
+                Optimization::Speed,
+                None,
+            ))],
+        )));
+        request.catalog_models[0].supported_reasoning_efforts = vec![
+            ModelReasoningEffort::Low,
+            ModelReasoningEffort::High,
+        ];
+        request.catalog_models[0].default_reasoning_effort = Some(ModelReasoningEffort::High);
+
+        let compiled = compile_subagent_v2_profiles(&request).expect("compile catalog effort");
+        let role = &compiled.generated_roles[0];
+        assert_eq!(role.effort, Some(ModelReasoningEffort::High));
+        assert!(role.warnings.iter().any(|warning| {
+            warning.contains("medium") && warning.contains("catalog default `high`")
+        }));
+    }
+
+    #[test]
+    fn codex_subagent_v2_unknown_reasoning_capability_omits_fixed_effort() {
+        let mut request = request(Some(config(
+            SelectionPolicy::Balanced,
+            vec![valid(policy_profile(Preference::Preferred))],
+        )));
+        request.catalog_models[0].supported_reasoning_efforts.clear();
+        request.catalog_models[0].default_reasoning_effort = None;
+
+        let compiled = compile_subagent_v2_profiles(&request).expect("compile unknown capability");
+        let role = &compiled.generated_roles[0];
+        assert_eq!(role.effort, None);
+        assert!(role
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("does not declare selectable reasoning efforts")));
+        let rendered = render_generated_role_toml(role, "# managed").expect("render role");
+        assert!(!rendered.contains("model_reasoning_effort"));
     }
 
     fn policy_profile(preference: Preference) -> ParsedCodexSubagentProfile {

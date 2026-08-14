@@ -9979,6 +9979,84 @@ openai_base_url = "http://127.0.0.1:15721/v1"
     }
 
     #[test]
+    fn codex_catalog_restores_builtin_deepseek_reasoning_for_legacy_rows() {
+        let settings = json!({
+            "modelCatalog": { "models": [{
+                "model": "deepseek-v4-flash",
+                "displayName": "DeepSeek V4 Flash"
+            }]}
+        });
+
+        let specs = codex_catalog_model_specs(&settings, "");
+        let capability = specs[0]
+            .reasoning
+            .as_ref()
+            .expect("known DeepSeek preset should survive legacy rows without reasoning metadata");
+        assert_eq!(capability.supported_efforts, vec!["low", "high", "max"]);
+        assert_eq!(capability.default_effort.as_deref(), Some("high"));
+        assert_eq!(capability.source.as_deref(), Some("builtin"));
+    }
+
+    #[test]
+    fn codex_subagent_v2_parent_policy_preserves_user_instructions_and_is_reversible() {
+        let settings = json!({
+            "codexRouting": {
+                "subagentVersion": "v2",
+                "subagentV2": {
+                    "schemaVersion": 1,
+                    "selectionPolicy": "balanced",
+                    "profiles": {
+                        "deepseek-v4-flash": {
+                            "model": "deepseek-v4-flash",
+                            "enabled": true,
+                            "questionnaire": {
+                                "taskStrengths": ["repository_exploration"],
+                                "optimization": "speed",
+                                "writeScope": "read_only",
+                                "preference": "preferred",
+                                "reasoningEffort": "medium"
+                            }
+                        }
+                    }
+                }
+            },
+            "modelCatalog": { "models": [{ "model": "deepseek-v4-flash" }] }
+        });
+        let specs = codex_catalog_model_specs(&settings, "");
+        let original = "developer_instructions = \"Keep my project-specific rule.\"\n";
+
+        let injected = project_codex_subagent_v2_parent_instructions(
+            &settings,
+            original,
+            &specs,
+            CodexSubagentVersion::V2,
+            None,
+        )
+        .expect("inject parent policy");
+        let doc = injected.parse::<DocumentMut>().expect("parse injected config");
+        let instructions = doc["developer_instructions"]
+            .as_str()
+            .expect("developer instructions");
+        assert!(instructions.starts_with("Keep my project-specific rule."));
+        assert!(instructions.contains(CC_SWITCH_SUBAGENT_V2_POLICY_BEGIN));
+        assert!(instructions.contains("select `deepseek-v4-flash` via `agent_type`"));
+        assert!(instructions.contains("instead of `default`, `worker`, or `explorer`"));
+        assert!(instructions.contains("use `fork_turns=none` or a positive turn count"));
+        assert!(instructions.contains("retry the same `agent_type`"));
+        assert!(instructions.contains("never drop `agent_type` as a workaround"));
+
+        let removed = project_codex_subagent_v2_parent_instructions(
+            &settings,
+            &injected,
+            &specs,
+            CodexSubagentVersion::V1,
+            None,
+        )
+        .expect("remove parent policy in V1");
+        assert_eq!(removed, original);
+    }
+
+    #[test]
     fn codex_model_catalog_projects_declared_glm_reasoning_capability() {
         let settings = json!({
             "modelCatalog": { "models": [{
