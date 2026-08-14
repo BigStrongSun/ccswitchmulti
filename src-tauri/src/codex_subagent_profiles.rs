@@ -81,6 +81,8 @@ pub enum ModelReasoningEffort {
     High,
     #[serde(rename = "xhigh")]
     XHigh,
+    Max,
+    Ultra,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -570,7 +572,7 @@ pub fn parse_persisted_subagent_v2(raw: &Value) -> Result<CodexSubagentV2, Compi
                 validation_error(
                     "invalid_override_effort",
                     Some(&key),
-                    "modelReasoningEffort allows only low, medium, high, or xhigh",
+                    "modelReasoningEffort allows only low, medium, high, xhigh, max, or ultra",
                 )
             })?,
             None => CodexSubagentProfileOverrides::default(),
@@ -1583,7 +1585,7 @@ mod tests {
             Err(validation(
                 "invalid_override_effort",
                 Some("flash"),
-                "modelReasoningEffort allows only low, medium, high, or xhigh",
+                "modelReasoningEffort allows only low, medium, high, xhigh, max, or ultra",
             )),
         );
     }
@@ -2358,8 +2360,8 @@ mod tests {
             ),
             generated.clone(),
         );
-        let toml = render_generated_role_toml(&generated, "# managed")
-            .expect("fixed max role TOML");
+        let toml =
+            render_generated_role_toml(&generated, "# managed").expect("fixed max role TOML");
         let parsed: toml::Value = toml::from_str(&toml).expect("parse fixed max role TOML");
         assert_eq!(
             parsed

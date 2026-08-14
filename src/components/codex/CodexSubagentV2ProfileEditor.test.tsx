@@ -382,6 +382,17 @@ vi.mock("@tauri-apps/api/core", () => ({
         if (!fixture) {
           throw new Error(`No preview fixture registered for model: ${model}`);
         }
+        const effort = (args?.profile as CodexSubagentV2Profile | undefined)
+          ?.overrides?.modelReasoningEffort;
+        if (effort === "max") {
+          return JSON.parse(
+            JSON.stringify({
+              ...fixture,
+              modelReasoningEffort: effort,
+              tomlPreview: `${fixture.tomlPreview}\nmodel_reasoning_effort = "max"`,
+            }),
+          );
+        }
         return JSON.parse(JSON.stringify(fixture));
       }
       case "get_codex_subagent_profile_statuses":
@@ -3005,6 +3016,11 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
       within(flashRegion()).getByLabelText("模型推理强度"),
       "max",
     );
+    const flash = within(flashRegion());
+    await user.click(flash.getByRole("button", { name: "生成结果与 TOML" }));
+    expect(
+      await flash.findByText(/model_reasoning_effort = "max"/),
+    ).toBeInTheDocument();
     await saveV2(user);
     await waitFor(() =>
       expect(
@@ -3013,9 +3029,6 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
         ].overrides.modelReasoningEffort,
       ).toBe("max"),
     );
-    expect(
-      await within(flashRegion()).findByText(/model_reasoning_effort = "max"/),
-    ).toBeInTheDocument();
   });
 
   it("removes description alone after all five overrides were established", async () => {

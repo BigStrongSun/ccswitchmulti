@@ -60,7 +60,14 @@ const PROFILE_FILTERS: Array<{ value: ProfileFilter; label: string }> = [
   { value: "all", label: "全部" },
 ];
 
-const EXPLICIT_REASONING_EFFORTS = new Set(["low", "medium", "high", "xhigh"]);
+const EXPLICIT_REASONING_EFFORTS = new Set([
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
+]);
 const TASK_STRENGTH_VALUES = new Set<string>(
   TASK_STRENGTHS.map(({ value }) => value),
 );
@@ -1318,6 +1325,8 @@ export function CodexSubagentProfileEditor({
                                 <option value="medium">中</option>
                                 <option value="high">高</option>
                                 <option value="xhigh">极高</option>
+                                <option value="max">最大</option>
+                                <option value="ultra">超高</option>
                               </select>
                               <Button
                                 type="button"

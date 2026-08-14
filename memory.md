@@ -3357,3 +3357,9 @@
 ## 2026-08-14 v3.19.1-26 候选门禁运行时边界
 
 - 事务安装器 Pester 套件依赖 Windows PowerShell 5.1 / Pester 3.4 语义：测试会从 `$PSHOME\\powershell.exe` 启动 disposable child，且 SQLite corrupt/StrictMode 断言在该宿主可靠。不要用 Codex primary-runtime 的 PowerShell 7 直接判定产品回归；其 `$PSHOME` 缺少 `powershell.exe`，会造成 3 个环境性失败。应以 `C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -ExecutionPolicy Bypass` 运行，候选门禁为 46/46。
+
+## 2026-08-15 V27 角色 TOML `max` 回归根因
+
+- `3.19.1-25` 用户无法把 `model_reasoning_effort = "max"` 写入角色 TOML，不只是 Rust 枚举缺少 `Max`：前端 `CodexSubagentProfileEditor.isUsableProfile()` 仍使用 `low/medium/high/xhigh` 四档白名单。用户选择 `max` 后，草稿会立即被归类为“无效能力配置”，正常 profile 区域消失，因而无法继续预览和保存。
+- 修复边界位于 `bigstrongsun/release-v3.19.1-27`，基于正在打包的 `bigstrongsun/release-v3.19.1-26@dd967801`；不得修改 `-26` 打包工作树。显式档位契约现阶段同时补齐 Rust Serde/TOML 枚举、TypeScript 类型、前端可用性白名单和下拉框的 `max/ultra` 候选；后续仍须由统一 capability resolver 对具体模型收紧实际可选集合，DeepSeek 不得凭空获得 `ultra`。
+- RED 提交 `42dd052c` 同时证明 Rust 缺少 `ModelReasoningEffort::Max` 且前端没有 `max` 选项。GREEN 定向证据：`codex_subagent_v2_fixed_max_round_trips_into_role_toml` 通过；前端选择 `max` 后 profile 不再变成 invalid，生成预览包含精确 `model_reasoning_effort = "max"` 并能持久化；Rust V2 profiles 75/75 通过。

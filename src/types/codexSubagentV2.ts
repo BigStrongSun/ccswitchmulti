@@ -27,10 +27,10 @@ export type CodexSubagentQuestionnaireReasoningEffort =
   | "medium"
   | "high"
   | "xhigh";
-export type CodexSubagentExplicitReasoningEffort = Exclude<
-  CodexSubagentQuestionnaireReasoningEffort,
-  "auto"
->;
+export type CodexSubagentExplicitReasoningEffort =
+  | Exclude<CodexSubagentQuestionnaireReasoningEffort, "auto">
+  | "max"
+  | "ultra";
 
 export interface CodexSubagentQuestionnaire {
   taskStrengths: CodexSubagentTaskStrength[];
