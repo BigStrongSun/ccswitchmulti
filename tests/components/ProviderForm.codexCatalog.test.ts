@@ -140,4 +140,16 @@ describe("ProviderForm Codex catalog helpers", () => {
       { model: "mimo-v2.5-pro", supportsParallelToolCalls: false },
     ]);
   });
+
+  it("preserves explicit image-support booleans without input modalities", () => {
+    expect(
+      normalizeCodexCatalogModelsForSave([
+        { model: "vision-explicit", supportsImage: true },
+        { model: "text-explicit", supportsImage: false },
+      ]),
+    ).toEqual([
+      { model: "vision-explicit", supportsImage: true },
+      { model: "text-explicit", supportsImage: false },
+    ]);
+  });
 });
