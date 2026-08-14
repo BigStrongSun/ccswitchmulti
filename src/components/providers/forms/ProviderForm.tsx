@@ -166,6 +166,7 @@ const codexCatalogCountFromSettings = (settingsConfig: unknown): number => {
 const codexLocalModelMappingFromInitialData = (
   initialData: ProviderFormProps["initialData"] | undefined,
 ): boolean => {
+  if (!initialData) return true;
   if (typeof initialData?.meta?.codexLocalModelMapping === "boolean") {
     return initialData.meta.codexLocalModelMapping;
   }
@@ -795,7 +796,7 @@ function ProviderFormFull({
 
   useEffect(() => {
     if (appId !== "codex") {
-      setCodexTakeoverEnabled(false);
+      setCodexTakeoverEnabled(true);
       return;
     }
     setCodexTakeoverEnabled(codexLocalModelMappingFromInitialData(initialData));
@@ -2054,8 +2055,8 @@ function ProviderFormFull({
           codexApiFormatFromWireApi(extractCodexWireApi(template.config)) ??
             "openai_responses",
         );
-        // 自定义模板无模型映射，路由默认关闭
-        setCodexTakeoverEnabled(false);
+        // 新建自定义 Provider 默认投射模型目录；目录为空时不会生成无效菜单项。
+        setCodexTakeoverEnabled(true);
       }
       if (shouldScrollDetails) {
         scrollCodexProviderDetailsIntoView();
@@ -2107,8 +2108,8 @@ function ProviderFormFull({
           codexApiFormatFromWireApi(extractCodexWireApi(config)) ??
           "openai_responses",
       );
-      // 路由开关与格式无关，仅按预设是否带模型映射决定
-      setCodexTakeoverEnabled((preset.modelCatalog?.length ?? 0) > 0);
+      // 预设 Provider 默认加入 Codex 模型菜单；空目录在用户获取模型前不会产生菜单项。
+      setCodexTakeoverEnabled(true);
 
       form.reset({
         name: preset.nameKey ? t(preset.nameKey) : preset.name,

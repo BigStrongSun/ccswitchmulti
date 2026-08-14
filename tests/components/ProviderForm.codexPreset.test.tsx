@@ -141,6 +141,14 @@ function renderProviderForm(
 }
 
 describe("ProviderForm Codex preset selection", () => {
+  it("defaults new Codex providers to model menu projection", async () => {
+    renderProviderForm();
+
+    await waitFor(() => {
+      expect(screen.getByTestId("codex-takeover")).toHaveTextContent("enabled");
+    });
+  });
+
   it("does not scroll when applying the default Codex source preset on mount", async () => {
     const scrollIntoView = vi.fn();
     Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {

@@ -367,6 +367,7 @@ describe("CodexFormFields local model routing", () => {
       onProviderSplitSuggestionChange,
     } = renderAutoSplitHarness();
 
+    fireEvent.click(screen.getByRole("button", { name: "高级选项" }));
     fireEvent.click(
       screen.getByRole("button", { name: "providerForm.fetchModels" }),
     );
@@ -409,6 +410,7 @@ describe("CodexFormFields local model routing", () => {
       onProviderSplitSuggestionChange,
     } = renderAutoSplitHarness();
 
+    fireEvent.click(screen.getByRole("button", { name: "高级选项" }));
     fireEvent.click(
       screen.getByRole("button", { name: "providerForm.fetchModels" }),
     );
@@ -729,6 +731,7 @@ describe("CodexFormFields local model routing", () => {
   it("points users to fetch models when protocol probing has no catalog", async () => {
     renderCatalogHarness([], { shouldShowSpeedTest: true });
 
+    fireEvent.click(screen.getByRole("button", { name: "高级选项" }));
     fireEvent.click(
       screen.getByRole("button", { name: "测试 Chat / Responses" }),
     );
@@ -915,78 +918,10 @@ describe("CodexFormFields local model routing", () => {
     });
   });
 
-  it("shows local model routing even when endpoint speed tools are hidden", () => {
-    renderRoutingHarness(
-      { enabled: false, defaultRouteId: "", routes: [] },
-      { shouldShowSpeedTest: false },
-    );
-
-    expect(screen.getByText("Codex 多模型路由")).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "添加路由" }),
-    ).toBeInTheDocument();
-  });
-
-  it("adds and edits a route through the dialog without persisting rowId", async () => {
-    const { latestRouting } = renderRoutingHarness();
-
-    fireEvent.click(screen.getByRole("button", { name: "添加路由" }));
-
-    await waitFor(() => {
-      expect(screen.getByRole("dialog")).toBeInTheDocument();
-      expect(latestRouting().routes).toHaveLength(1);
-    });
-
-    fireEvent.change(screen.getByPlaceholderText("路由 ID"), {
-      target: { value: "deepseek" },
-    });
-    fireEvent.change(screen.getByPlaceholderText("路由名称"), {
-      target: { value: "DeepSeek" },
-    });
-    fireEvent.change(
-      screen.getByPlaceholderText("匹配模型，多个用英文逗号分隔"),
-      {
-        target: { value: "deepseek-v4-flash, deepseek-v4-pro" },
-      },
-    );
-    fireEvent.change(
-      screen.getByPlaceholderText("匹配前缀，多个用英文逗号分隔"),
-      {
-        target: { value: "deepseek-" },
-      },
-    );
-    fireEvent.change(screen.getByPlaceholderText("上游 Base URL"), {
-      target: { value: "https://api.deepseek.example" },
-    });
-    fireEvent.change(screen.getByPlaceholderText("路由 API Key"), {
-      target: { value: "sk-route" },
-    });
-    fireEvent.change(screen.getByPlaceholderText("codex模型=上游模型"), {
-      target: { value: "deepseek-v4-flash=deepseek-chat" },
-    });
-
-    await waitFor(() => {
-      expect(latestRouting().routes?.[0]).toMatchObject({
-        id: "deepseek",
-        label: "DeepSeek",
-        match: {
-          models: ["deepseek-v4-flash", "deepseek-v4-pro"],
-          prefixes: ["deepseek-"],
-        },
-        upstream: {
-          baseUrl: "https://api.deepseek.example",
-          apiKey: "sk-route",
-          modelMap: { "deepseek-v4-flash": "deepseek-chat" },
-        },
-      });
-    });
-    expect(latestRouting().routes?.[0]).not.toHaveProperty("rowId");
-  });
-
-  it("removes a route from the list and writes the shortened routing config", async () => {
-    const { latestRouting, container } = renderRoutingHarness({
+  it("hides the legacy route editor while retaining the supplied routing state", () => {
+    const { latestRouting } = renderRoutingHarness({
       enabled: true,
-      defaultRouteId: "",
+      defaultRouteId: "deepseek",
       routes: [
         {
           id: "deepseek",
@@ -1003,12 +938,29 @@ describe("CodexFormFields local model routing", () => {
       ],
     });
 
-    const deleteButton = container.querySelector('button[title="删除"]');
-    expect(deleteButton).not.toBeNull();
-    fireEvent.click(deleteButton!);
-
-    await waitFor(() => {
-      expect(latestRouting().routes).toEqual([]);
+    expect(screen.queryByText("Codex 多模型路由")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "添加路由" }),
+    ).not.toBeInTheDocument();
+    expect(latestRouting()).toMatchObject({
+      enabled: true,
+      defaultRouteId: "deepseek",
+      routes: [{ id: "deepseek" }],
     });
+  });
+
+  it("keeps the default-enabled menu projection inside collapsed advanced options", () => {
+    renderCatalogHarness([], {
+      shouldShowSpeedTest: false,
+      takeoverEnabled: true,
+    });
+
+    expect(
+      screen.queryByText("在 Codex /model 菜单中显示"),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "高级选项" }));
+
+    expect(screen.getByText("在 Codex /model 菜单中显示")).toBeInTheDocument();
   });
 });
