@@ -77,8 +77,8 @@ const renderPage = (appId = "codex") => {
   };
 };
 
-/// 渲染 SessionManagerPage 并传入 initialCodexHistoryRepair 等向导收尾相关属性；
-/// 用于验证启用 MultiRouter 后自动跳转历史修复页面的流程。
+/// 渲染 SessionManagerPage 并显式传入 initialCodexHistoryRepair；
+/// 用于验证独立调用方请求打开历史修复页面时的一次性消费流程。
 function renderPageWithRepair({
   appId = "codex",
   initialCodexHistoryRepair = false,
@@ -449,8 +449,8 @@ describe("SessionManagerPage", () => {
     invalidateSpy.mockRestore();
   });
 
-  // initialCodexHistoryRepair=true 且 appId="codex" 时：自动打开 Codex 历史修复面板，并消费一次性标记。
-  it("opens CodexHistoryRepairPanel and consumes initialCodexHistoryRepair for codex app", async () => {
+  // initialCodexHistoryRepair=true 且 appId="codex" 时：按调用方显式请求打开面板，并消费一次性标记。
+  it("honors and consumes an explicit initialCodexHistoryRepair request for codex", async () => {
     const onConsumed = vi.fn();
     const onRepairCompleted = vi.fn();
 

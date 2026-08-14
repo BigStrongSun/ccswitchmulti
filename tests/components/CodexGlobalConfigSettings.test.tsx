@@ -30,6 +30,8 @@ vi.mock("@/lib/api", () => ({
 
 describe("CodexGlobalConfigSettings", () => {
   beforeEach(() => {
+    vi.mocked(configApi.getCommonConfigSnippet).mockReset();
+    vi.mocked(configApi.setCommonConfigSnippet).mockReset();
     vi.mocked(configApi.getCommonConfigSnippet).mockResolvedValue(
       'model_reasoning_summary = "auto"\n',
     );
@@ -73,5 +75,35 @@ describe("CodexGlobalConfigSettings", () => {
         (screen.getByLabelText("Codex 全局 TOML") as HTMLTextAreaElement).value,
       ),
     ).toBe(true);
+  });
+
+  it("fails closed after a load error and retries before exposing editable shared config", async () => {
+    vi.mocked(configApi.getCommonConfigSnippet)
+      .mockRejectedValueOnce(new Error("shared config unavailable"))
+      .mockResolvedValueOnce('model_reasoning_summary = "none"\n');
+
+    render(<CodexGlobalConfigSettings />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "加载 Codex 全局配置失败：shared config unavailable",
+    );
+    expect(screen.queryByLabelText("Codex 全局 TOML")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("checkbox", { name: "启用 Goal mode" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "保存 Codex 全局配置" }),
+    ).not.toBeInTheDocument();
+    expect(configApi.setCommonConfigSnippet).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "重试加载" }));
+
+    expect(await screen.findByLabelText("Codex 全局 TOML")).toHaveValue(
+      'model_reasoning_summary = "none"\n',
+    );
+    expect(
+      screen.getByRole("checkbox", { name: "启用 Goal mode" }),
+    ).toBeInTheDocument();
+    expect(configApi.getCommonConfigSnippet).toHaveBeenCalledTimes(2);
   });
 });

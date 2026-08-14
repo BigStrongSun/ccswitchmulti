@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { useState, type ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -11,7 +17,11 @@ import {
   probeCodexChatForConfig,
   probeCodexResponsesForConfig,
 } from "@/lib/api/model-fetch";
-import type { CodexCatalogModel, CodexRoutingConfig } from "@/types";
+import type {
+  CodexApiFormat,
+  CodexCatalogModel,
+  CodexRoutingConfig,
+} from "@/types";
 
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
@@ -58,6 +68,24 @@ function createProbeResult(
     model,
     detail,
   };
+}
+
+function createProbeFailure(model: string, detail = "HTTP 401") {
+  return {
+    ok: false,
+    status: 401,
+    url: "https://api.thirdparty.example/v1/probe",
+    model,
+    detail,
+  };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((nextResolve) => {
+    resolve = nextResolve;
+  });
+  return { promise, resolve };
 }
 
 function renderRoutingHarness(
@@ -210,6 +238,107 @@ function renderCatalogHarness(
     onCatalogChange,
     onApiFormatChange,
     latestCatalog: () => latestCatalog,
+  };
+}
+
+interface ReadinessIdentityState {
+  baseUrl: string;
+  apiKey: string;
+  selectedAccountId: string | null;
+  customUserAgent: string;
+  headersOverride: string;
+  apiFormat: CodexApiFormat;
+  defaultModel: string;
+  catalog: CodexCatalogModel[];
+}
+
+function renderReadinessIdentityHarness(
+  overrides: Partial<ReadinessIdentityState> = {},
+) {
+  const initial: ReadinessIdentityState = {
+    baseUrl: "https://old.example/v1",
+    apiKey: "sk-old",
+    selectedAccountId: "account-old",
+    customUserAgent: "ccswitch-old",
+    headersOverride: '{"X-Route":"old"}',
+    apiFormat: "openai_chat",
+    defaultModel: "model-a",
+    catalog: [
+      {
+        model: "model-a",
+        upstreamModel: "model-a",
+        inputModalities: ["text"],
+        supportsImage: false,
+      },
+    ],
+    ...overrides,
+  };
+  const onApiFormatChange = vi.fn();
+  let patchIdentity: (patch: Partial<ReadinessIdentityState>) => void = () => {
+    throw new Error("readiness identity harness is not mounted");
+  };
+
+  function Harness() {
+    const [identity, setIdentity] = useState(initial);
+    patchIdentity = (patch) =>
+      setIdentity((current) => ({ ...current, ...patch }));
+
+    return (
+      <CodexFormFields
+        providerId="identity-provider"
+        providerName="Identity Provider"
+        selectedXaiAccountId={identity.selectedAccountId}
+        onXaiAccountSelect={vi.fn()}
+        codexApiKey={identity.apiKey}
+        onApiKeyChange={(apiKey) => patchIdentity({ apiKey })}
+        category="custom"
+        shouldShowApiKeyLink={false}
+        websiteUrl=""
+        shouldShowSpeedTest
+        codexBaseUrl={identity.baseUrl}
+        onBaseUrlChange={(baseUrl) => patchIdentity({ baseUrl })}
+        isFullUrl={false}
+        onFullUrlChange={vi.fn()}
+        isEndpointModalOpen={false}
+        onEndpointModalToggle={vi.fn()}
+        autoSelect={false}
+        onAutoSelectChange={vi.fn()}
+        takeoverEnabled
+        onTakeoverEnabledChange={vi.fn()}
+        codexModel={identity.defaultModel}
+        onModelChange={(defaultModel) => patchIdentity({ defaultModel })}
+        apiFormat={identity.apiFormat}
+        onApiFormatChange={(apiFormat) => {
+          onApiFormatChange(apiFormat);
+          patchIdentity({ apiFormat });
+        }}
+        catalogModels={identity.catalog}
+        onCatalogModelsChange={(catalog) => patchIdentity({ catalog })}
+        spawnAgentModels={[]}
+        onSpawnAgentModelsChange={vi.fn()}
+        codexRouting={{ enabled: false, defaultRouteId: "", routes: [] }}
+        speedTestEndpoints={[]}
+        customUserAgent={identity.customUserAgent}
+        onCustomUserAgentChange={(customUserAgent) =>
+          patchIdentity({ customUserAgent })
+        }
+        localProxyHeadersOverride={identity.headersOverride}
+        onLocalProxyHeadersOverrideChange={(headersOverride) =>
+          patchIdentity({ headersOverride })
+        }
+        localProxyBodyOverride=""
+        onLocalProxyBodyOverrideChange={vi.fn()}
+      />
+    );
+  }
+
+  const renderResult = render(<Harness />);
+  return {
+    ...renderResult,
+    onApiFormatChange,
+    updateIdentity(patch: Partial<ReadinessIdentityState>) {
+      act(() => patchIdentity(patch));
+    },
   };
 }
 
@@ -497,6 +626,111 @@ describe("CodexFormFields local model routing", () => {
     );
   });
 
+  it("invalidates successful readiness for every routing and catalog identity input", async () => {
+    vi.mocked(probeCodexResponsesForConfig).mockImplementation(
+      async (_baseUrl, _apiKey, model) => createProbeResult(model),
+    );
+    vi.mocked(probeCodexChatForConfig).mockImplementation(
+      async (_baseUrl, _apiKey, model) => createProbeResult(model),
+    );
+    const { updateIdentity } = renderReadinessIdentityHarness();
+
+    const validateCurrentIdentity = async () => {
+      fireEvent.click(screen.getByRole("button", { name: "验证连接" }));
+      fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
+      expect(await screen.findByText("可加入 MultiRouter")).toBeInTheDocument();
+    };
+    const expectInvalidated = async () => {
+      await waitFor(() => {
+        expect(
+          screen.queryByText("可加入 MultiRouter"),
+        ).not.toBeInTheDocument();
+      });
+      expect(screen.getByText("建议先验证连接")).toBeInTheDocument();
+    };
+
+    await validateCurrentIdentity();
+    const identityChanges: Array<Partial<ReadinessIdentityState>> = [
+      { baseUrl: "https://new.example/v1" },
+      { apiKey: "sk-new" },
+      { selectedAccountId: "account-new" },
+      { customUserAgent: "ccswitch-new" },
+      { headersOverride: '{"X-Route":"new"}' },
+      { apiFormat: "openai_responses" },
+      { defaultModel: "model-a-alias" },
+      {
+        catalog: [
+          {
+            model: "model-a",
+            upstreamModel: "model-a",
+            inputModalities: ["text", "image"],
+            supportsImage: true,
+          },
+        ],
+      },
+    ];
+
+    for (const patch of identityChanges) {
+      updateIdentity(patch);
+      await expectInvalidated();
+      await validateCurrentIdentity();
+    }
+  });
+
+  it("ignores an older probe completion after a newer provider identity succeeds", async () => {
+    type ProbeResult = Awaited<ReturnType<typeof probeCodexResponsesForConfig>>;
+    const oldResponses = deferred<ProbeResult>();
+    const oldChat = deferred<ProbeResult>();
+    const newResponses = deferred<ProbeResult>();
+    const newChat = deferred<ProbeResult>();
+
+    vi.mocked(probeCodexResponsesForConfig).mockImplementation(
+      async (baseUrl) =>
+        baseUrl.includes("old") ? oldResponses.promise : newResponses.promise,
+    );
+    vi.mocked(probeCodexChatForConfig).mockImplementation(async (baseUrl) =>
+      baseUrl.includes("old") ? oldChat.promise : newChat.promise,
+    );
+    const { updateIdentity } = renderReadinessIdentityHarness();
+
+    fireEvent.click(screen.getByRole("button", { name: "验证连接" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
+    await waitFor(() => {
+      expect(probeCodexResponsesForConfig).toHaveBeenCalledWith(
+        "https://old.example/v1",
+        expect.anything(),
+        "model-a",
+        expect.anything(),
+        expect.anything(),
+      );
+    });
+
+    updateIdentity({ baseUrl: "https://new.example/v1" });
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "验证连接" })).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "验证连接" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
+
+    await act(async () => {
+      newResponses.resolve(createProbeResult("model-a", "new responses ok"));
+      newChat.resolve(createProbeResult("model-a", "new chat ok"));
+      await Promise.resolve();
+    });
+    expect(await screen.findByText("可加入 MultiRouter")).toBeInTheDocument();
+
+    await act(async () => {
+      oldResponses.resolve(createProbeFailure("model-a", "old credentials"));
+      oldChat.resolve(createProbeFailure("model-a", "old credentials"));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("可加入 MultiRouter")).toBeInTheDocument();
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    });
+  });
+
   it("shows per-model protocol tags and suggests split providers for mixed probe results", async () => {
     vi.mocked(probeCodexResponsesForConfig)
       .mockResolvedValueOnce({
@@ -722,6 +956,55 @@ describe("CodexFormFields local model routing", () => {
           displayName: "gpt-5.5",
           upstreamModel: "gpt-5.5",
           contextWindow: "272000",
+        },
+      ]);
+    });
+  });
+
+  it("preserves fetched image support and updates existing rows to explicit text-only capabilities", async () => {
+    vi.mocked(fetchModelsForConfig).mockResolvedValueOnce([
+      {
+        id: "vision-model",
+        ownedBy: null,
+        inputModalities: ["text", "image"],
+        supportsImage: true,
+      },
+      {
+        id: "text-model",
+        ownedBy: null,
+        inputModalities: ["text"],
+        supportsImage: false,
+      },
+    ]);
+    const { latestCatalog } = renderCatalogHarness([
+      {
+        model: "text-model",
+        upstreamModel: "text-model",
+        displayName: "Existing text model",
+        inputModalities: ["text", "image"],
+        supportsImage: true,
+      },
+    ]);
+
+    fireEvent.click(screen.getByRole("button", { name: "同步模型" }));
+
+    await waitFor(() => {
+      expect(latestCatalog()).toEqual([
+        {
+          model: "text-model",
+          upstreamModel: "text-model",
+          displayName: "Existing text model",
+          contextWindow: "",
+          inputModalities: ["text"],
+          supportsImage: false,
+        },
+        {
+          model: "vision-model",
+          upstreamModel: "vision-model",
+          displayName: "vision-model",
+          contextWindow: "",
+          inputModalities: ["text", "image"],
+          supportsImage: true,
         },
       ]);
     });
