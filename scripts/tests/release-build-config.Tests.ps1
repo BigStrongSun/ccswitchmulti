@@ -1,6 +1,26 @@
 $helperPath = Join-Path (Split-Path -Parent $PSScriptRoot) "release-build-config.ps1"
 
 Describe "CCSwitchMulti local release build config" {
+    It "pins a Tauri CLI that understands marker-based tauri-utils bundle metadata" {
+        $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+        $packageJson = [System.IO.File]::ReadAllText((Join-Path $repoRoot "package.json")) | ConvertFrom-Json
+        $cargoLock = [System.IO.File]::ReadAllText((Join-Path $repoRoot "src-tauri\Cargo.lock"))
+
+        $tauriUtilsMatch = [regex]::Match(
+            $cargoLock,
+            '(?ms)^name = "tauri-utils"\r?\nversion = "(?<version>[^"]+)"'
+        )
+        $tauriUtilsMatch.Success | Should Be $true
+
+        $tauriUtilsVersion = [version]$tauriUtilsMatch.Groups["version"].Value
+        $tauriCliRequirement = [string]$packageJson.devDependencies.'@tauri-apps/cli'
+        $tauriCliVersion = [version]($tauriCliRequirement.TrimStart('^', '~', '=', ' '))
+
+        if ($tauriUtilsVersion -ge [version]'2.8.3') {
+            $tauriCliVersion -ge [version]'2.10.1' | Should Be $true
+        }
+    }
+
     It "creates a BOM-free Tauri override without PowerShell utility cmdlets and always supports cleanup" {
         $helperExists = Test-Path -LiteralPath $helperPath
         $helperExists | Should Be $true
