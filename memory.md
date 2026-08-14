@@ -3379,3 +3379,12 @@
 - DeepSeek V4 维护声明的 Provider 原生集合是 `low/high/max`、默认 `high`、允许关闭；确认映射为 `low->low`、`medium->high`、`high->high`、`xhigh->high`、`max->max`。生成 Codex catalog 因此声明 `none/low/medium/high/xhigh/max`，但不得推断 `ultra`。映射目标不属于 Provider 原生集合时，声明验证直接失败。
 - `CodexReasoningEffort` 的候选词汇统一覆盖 `none/minimal/low/medium/high/xhigh/max/ultra`；具体模型只能从归一后的 `codexSelectableEfforts` 取值。该 resolver 同时供 catalog 投影和 Chat 转换配置使用，避免前后端或投影/请求各自维护模型名分支。
 - TDD 证据：resolver RED `8f787070`、GREEN `998d517c`；DeepSeek catalog/preset RED `77b6cb09`。当前聚焦门禁为 resolver 5/5、Codex config 163/163、Codex Provider 98/98、preset 10/10，TypeScript typecheck 通过；仅保留既有 `openai_cache_read_tokens` dead-code warning。
+
+## 2026-08-15 Codex ImageGen 502 transport root cause (V27)
+
+- Live installed runtime is `3.19.1-25` on `127.0.0.1:15721`; V26 packaging worktree remains untouched. Diagnosis and the follow-up fix belong to `bigstrongsun/release-v3.19.1-27`.
+- Current Codex image generation/editing uses long-running HTTP POST requests to `/backend-api/codex/images/generations` and `/backend-api/codex/images/edits`; it does not use the Responses WebSocket. A working Responses WebSocket therefore does not prove the image POST path is healthy.
+- Live `codex-router.log` evidence on 2026-08-15 showed a 13.1 MB `gpt-image-2` edit correctly routed through the official OAuth route, followed by `connection_closed_before_message_completed` after 134-181 seconds. The request had already been uploaded and could still have executed upstream.
+- `map_reqwest_send_error_class` incorrectly treated `reqwest::Error::is_request()` as a pre-send build failure. Reqwest request errors also include failures such as `client_error (SendRequest): connection_closed_before_message_completed`; returning retryable 502 caused Codex `EndpointSession` transport retries to replay the expensive, non-idempotent image request.
+- Separate 7-13 second `unexpected EOF during handshake` failures were true connect-stage failures and remain safe for bounded retry. Raising the existing 600-second non-streaming timeout cannot fix either class because the observed failures occurred earlier than that deadline.
+- Correct repair boundary: use `is_builder()` only for definitely pre-send construction failures; classify other non-connect/non-timeout send/read failures as response-pending; map image response-pending failures to a non-retryable result-unknown response; and add long-lived HTTP/2 keepalive support for the image POST path instead of blindly replaying it.
