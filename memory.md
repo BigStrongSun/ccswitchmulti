@@ -5,6 +5,8 @@
 - Codex 当前原生 `ReasoningEffort` 已包含 `none/minimal/low/medium/high/xhigh/max/ultra/custom`，但目标模型 spawn 只接受其 catalog `supported_reasoning_levels` 中的值。`ultra` 还参与 Codex 主动多 Agent 行为；Provider 未声明 ultra 时不得默认映射到 max。
 - “自动获取”只解析 Provider/模型能力，不负责根据 Sub-Agent 任务算出并固定 effort。能力来源和运行策略必须拆开：前者为自动发现/受维护声明/手动声明；后者为允许主 Agent 或 spawn 指定、使用模型默认（固定）、固定档位、关闭推理。
 - Codex spawn 的真实顺序：先继承父线程当前 effort（缺少则父 catalog 默认）；`spawn_agent.reasoning_effort` 覆盖 `[agents].default_subagent_reasoning_effort`；spawn 换模型且仍无 effort 时使用目标 catalog 默认；随后 role TOML 显式 `model_reasoning_effort` 以高优先级覆盖，未写则保留；最终按目标 catalog 校验。不存在统一的 Sub-Agent 默认 high。
+- 角色 TOML 是最后应用层，显式 `model_reasoning_effort` 覆盖父线程、全局默认和 spawn 值。`3.19.1-25` 用户现场的直接缺陷是角色编辑/类型无法写入 `max`；`3.19.1-26@dd967801` 正在打包且仍有该缺口，修复必须在基于它的 `bigstrongsun/release-v3.19.1-27` 实施，不得污染 `-26` 打包工作树。
+- 单次 spawn override 有运行版本差异：当前 OpenAI `main` 已允许 full-history 路径应用 model/effort override，本机当前工具契约仍要求 full-history 继承、override 使用 fresh/partial fork。CCSM 的 delegated 策略只省略角色固定 effort，并按实际 Codex 运行时能力显示/验收，不能承诺所有版本都支持 full-history 覆盖。
 - `是否开启推理`需要结构化运行策略，但只能在能力确认可关闭时启用。Codex catalog 需包含 `none` 才能通过 spawn 校验；Responses 映射 effort=none，DeepSeek Chat 映射 `thinking.type=disabled`，boolean-only Provider 使用自己的关闭参数。
 - DeepSeek 2026-08-14 当前官方文档：思考默认开启、默认 effort=high，可关闭；原生 effort 为 low/high/max，medium/xhigh 实际映射 high。现有 CCSM `disableAllowed=false` 已落后于官方事实，后续实现必须校准。
 - 设计规范位于 `docs/superpowers/specs/2026-08-14-codex-main-subagent-reasoning-coordination-design.md`；实现前需先写实施计划，并通过主 picker、真实 spawn、角色 TOML 回读和代理上游请求四层证据验收。

@@ -72,6 +72,10 @@ model / provider_kind / routable / context_window
 4. 应用 agent role TOML；role 显式 `model_reasoning_effort` 时覆盖前述结果，未写时保留当前结果；
 5. 对最终 model/effort 组合按目标模型 `supported_reasoning_levels` 校验；不支持则拒绝 spawn。
 
+角色 TOML 是最后应用的配置层。只要角色文件显式写入 `model_reasoning_effort`，它就覆盖父线程、全局 Sub-Agent 默认和本次 spawn effort；这正是 CCSM 生成角色文件必须支持 `max` 的直接原因。
+
+单次 spawn override 还存在运行版本差异：当前 OpenAI `main` 已在 full-history 路径应用 model/effort override，但本机当前 Codex 工具契约仍声明 full-history 继承 model/effort，显式 override 需要 fresh/partial fork。因此 CCSM 不能承诺所有 Codex 版本都支持 full-history 单次覆盖；它只负责省略角色固定值并让当前运行时按自身能力解析，同时在 UI/诊断中显示单次覆盖是否可用。
+
 因此没有统一的“Sub-Agent 默认 high”。`[agents].default_subagent_reasoning_effort` 是可选值；本机 Codex 0.147.0 bundled catalog 中 `gpt-5.6-sol` 默认 `low`，Terra/Luna 默认 `medium`，其他模型也可以不同。
 
 CCSM 当前 V2 与此原生模型冲突：其问卷 `auto_effort()` 根据任务类型算出 low/medium/high，且角色 TOML 总是写 `model_reasoning_effort`，结果是角色被锁定，主 Agent 无法在 spawn 时调节。
@@ -155,7 +159,7 @@ CCSM 当前 V2 与此原生模型冲突：其问卷 `auto_effort()` 根据任务
 
 - 角色 TOML 省略 `model_reasoning_effort`；
 - 同模型且 spawn 未指定时继承父线程当前 effort；
-- spawn 指定 effort 时采用其值；
+- 当前 Codex 运行时允许单次覆盖时，spawn 指定 effort 采用其值；不允许时按该运行时的 full-history 继承规则处理；
 - `[agents].default_subagent_reasoning_effort` 仅在 spawn 未指定时生效；
 - 角色切换到不同模型时，对最终值重新校验。
 
@@ -207,7 +211,7 @@ Provider 能力未知且没有用户覆盖时，可以在能力编辑器中提�
 > 父模型 catalog 默认值
 ```
 
-上述是源码执行结果，不是 CCSM 自定义偏好。角色未写 effort 时才允许后面的值保留下来。
+上述是当前 `main` 的源码执行结果，不是 CCSM 自定义偏好。角色未写 effort 时才允许后面的值保留下来；旧版/安装态 Codex 对 full-history override 的限制必须作为运行时能力差异单独展示。
 
 界面必须明确显示策略：
 
@@ -260,6 +264,8 @@ Provider 能力未知且没有用户覆盖时，可以在能力编辑器中提�
 - 主 Agent high + `[agents].default_subagent_reasoning_effort=low` + spawn 未指定：子 Agent 为 low；
 - 主 Agent high + 全局子 Agent 默认 low + spawn 指定 max：子 Agent 为 max；
 - role 固定 low + spawn 指定 max：最终仍为 role low；
+- `3.19.1-25` 用户现场角色编辑选择 max：保存后角色 TOML 精确写 `model_reasoning_effort = "max"`，回读与预览一致；
+- 支持 full-history override 的 Codex 与要求 fresh/partial fork 的 Codex 分别验证，禁止只验证一种运行时后宣称普遍可用；
 - DeepSeek `disabled`：Codex catalog 接受 none，Chat 上游写 `thinking.type=disabled`；
 - 主 Agent ultra + 不声明 ultra 的 DeepSeek role 继承：spawn 明确失败或要求选择兼容值，不静默改 max；
 - 角色显式非法值：预览和保存都拒绝；
@@ -284,6 +290,8 @@ Provider 能力未知且没有用户覆盖时，可以在能力编辑器中提�
 - DeepSeek 当前 Thinking Mode 文档：<https://api-docs.deepseek.com/guides/thinking_mode/>
 
 当前证据仍未证明所有第三方 Provider 都能原生发现 reasoning capability，也未证明 DeepSeek 支持 `ultra`；这两项必须保持“证据不足/未解析”，不能用兼容推测冒充厂商能力。
+
+分支边界：用户问题来自已发布 `3.19.1-25`；`3.19.1-26@dd967801` 正在打包且仍缺少角色 `max` 类型支持。本设计的运行代码必须基于 `bigstrongsun/release-v3.19.1-26` 创建下一版本分支实施，不能修改 `-26` 打包工作树，也不能继续落在旧 `-25` 分支。
 
 ## 14. 实施边界
 

@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - `自动获取` resolves capability evidence only; it must never choose effort from task strengths or optimization answers.
-- Native Codex precedence remains: explicit role TOML > `spawn_agent.reasoning_effort` > `[agents].default_subagent_reasoning_effort` > target-model default on model override > parent turn effort > parent-model default.
+- Native Codex precedence remains: explicit role TOML > `spawn_agent.reasoning_effort` > `[agents].default_subagent_reasoning_effort` > target-model default on model override > parent turn effort > parent-model default. Per-spawn override availability is runtime/fork-mode dependent; delegated roles must work even when full-history can only inherit.
 - There is no universal Sub-Agent default of `high`; defaults and valid efforts come from the resolved target-model catalog.
 - Unknown providers may expose the full candidate vocabulary only in the manual declaration editor; unconfirmed values must not enter the runtime model catalog.
 - Main effort choices are `low`, `medium`, `high`, `xhigh`, `max`, and `ultra`; `none` and `minimal` are capability-gated special choices.
@@ -22,6 +22,7 @@
 - A role selecting a model that does not advertise the resolved effort must fail preview/save; no silent clamping is allowed.
 - Preserve user-owned role files and unrelated dirty changes. Every implementation task ends in a local Git commit whose final message line is `本次提交由BigStrongsSun完成`.
 - Repository text stays UTF-8 without BOM; verify strict decoding and absence of U+FFFD before completion.
+- Implementation branch is `bigstrongsun/release-v3.19.1-27`, based on packaging baseline `bigstrongsun/release-v3.19.1-26@dd967801`; never modify the `-26` packaging worktree.
 
 ---
 
@@ -289,6 +290,8 @@ assert!(compile_role(fixed(CodexReasoningEffort::Max), deepseek()).toml.contains
 assert!(compile_role(disabled(), deepseek()).toml.contains("model_reasoning_effort = \"none\""));
 assert_compile_error(fixed(CodexReasoningEffort::Ultra), deepseek(), "unsupported_reasoning_effort");
 ```
+
+The first regression is the reported `3.19.1-25` failure: a fixed `max` selection must serialize, compile, render `model_reasoning_effort = "max"`, and survive exact TOML read-back.
 
 Also prove a role that pins a different model but delegates preserves the missing effort field, leaving native Codex to validate the inherited/spawn value.
 
@@ -626,9 +629,11 @@ Use a separate test-owned Codex configuration or an independent transactional ru
 
 - parent `high`, delegated role, spawn omitted;
 - parent `high`, global Sub-Agent default `low`, spawn omitted;
-- global default `low`, spawn explicit `max`;
+- global default `low`, spawn explicit `max` on a runtime/fork mode that exposes overrides;
 - role fixed `low`, spawn explicit `max`;
 - DeepSeek disabled and DeepSeek unsupported `ultra`.
+
+Run the override case in both compatibility classes when available: current-main behavior that permits full-history override, and installed/older behavior that requires fresh or partial fork. If only one runtime class is available, mark the other as unverified and keep the UI capability statement conditional.
 
 Do not stop `127.0.0.1:15721` from the current dependent session. If isolated real spawn cannot be completed safely, report that exact acceptance item as unverified rather than substituting configuration inspection.
 
