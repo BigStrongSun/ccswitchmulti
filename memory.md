@@ -3327,8 +3327,16 @@
 - 起点固定为候选 `dd96780149685c369e934e09a288077c7f5cfb2c`。统一 RED `6a757b96` 在生产代码未变时运行 79 项聚焦测试，得到 74 passed / 5 expected failed；五项失败精确覆盖共享 Codex TOML 加载失败仍可编辑、维护预设绕过真实验证、身份变化后沿用成功、旧探测晚到覆盖新身份、`/models` 能力字段丢失。RED 同时加强 initializer exact identity 断言并清理 Sessions 测试语义。
 - 共享设置根因是 `CodexGlobalConfigSettings` 以可编辑占位 TOML 初始化，后端读取失败后仍挂载 Goal mode、编辑器和保存入口。GREEN `fdd7c835` 改为 fail closed：展示真实错误与 Retry，成功读取前不挂载编辑/Goal/save，`save()` 也以 `isLoaded` 二次守卫；聚焦 3/3。
 - Provider 根因是 readiness 只绑定 UI 状态而未绑定完整 Provider 身份，维护预设名称又被误当作凭据就绪；异步探测没有 sequence/identity owner，`/models` 合并只保留 context。GREEN `5290171b` 让 readiness 必须来自当前身份的真实成功验证，身份覆盖 provider、endpoint/full URL、API key/OAuth/AgentPlan/Anthropic auth、UA/header/body override、协议参数、默认模型和完整 catalog 能力；身份变化立即失效，旧请求进度/结果不得回写。拆分建议也绑定生成后的身份，避免同步 catalog 时误清本次建议，同时在后续身份变化时失效。
-- `5290171b` 同步保留后端明确返回的 `inputModalities` / `supportsImage`，同时覆盖新增行、已有行和手动选择路径；不按模型名称推断图像能力。维护预设只说明 CCSwitchMulti 拥有 metadata，不再跳过端点/凭据验证。生产提交前聚焦 76/76；修复拆分建议 ownership 后复跑相关 29/29；typecheck、Prettier、`git diff --check` 均通过。
+- `5290171b` 在表单组件内保留后端明确返回的 `inputModalities` / `supportsImage`，同时覆盖新增行、已有行和手动选择路径；不按模型名称推断图像能力。维护预设只说明 CCSwitchMulti 拥有 metadata，不再跳过端点/凭据验证。生产提交前聚焦 76/76；修复拆分建议 ownership 后复跑相关 29/29；typecheck、Prettier、`git diff --check` 均通过。该提交当时尚未覆盖表单下游的实际 save/reload normalizer，不能单独作为端到端持久化证明。
 - 文档前全量前端门禁以 `pnpm exec vitest run --exclude '**/.worktrees/**' --no-file-parallelism` 运行 123 files / 990 tests，退出码 0；`vitest list` 的 JSON 清单独立核对同为 123/990。唯一工具级提示是 `baseline-browser-mapping` 数据超过两个月；负路径测试按设计输出既有 stderr，但不影响通过。final fix wave 未触碰 Rust，因此没有重复运行 Rust，也不能把此前 Rust 门禁冒充为本轮新执行。
+
+## 2026-08-15 v3.19.1-26 Task 11A 图像能力持久化闭环
+
+- 独立 final re-review 在 `ae764934` 发现最后一个 Important blocker：`CodexFormFields` 已把显式图像能力交给父表单，但 `ProviderForm.normalizeCodexCatalogModelsForSave()` 未写出 `supportsImage`，`useCodexConfigState.extractCodexCatalogModels()` 也未从 `supportsImage` / `supports_image` / legacy `vision` 读回；因此没有 `inputModalities` 时，显式 `true` 或有语义的 `false` 都会在真实 save/edit/re-save 边界丢失。根因是两个持久化 canonicalizer 字段表不完整，不是同步合并或模型能力推断错误。
+- 严格 TDD RED `d8d72239` 只修改实际 save normalizer 与真实 hook 的测试：2 files / 11 tests 中 8 passed / 3 expected failed，收到对象均只缺 `supportsImage`。fixture 分别锁定无 `inputModalities` 时独立保存 `true` / `false`、camelCase DB SSOT 读回、snake_case live reverse-parse 和 legacy `vision` 统一为 camelCase；没有通过 mock 或 modalities 反推预期。
+- 最小 GREEN `5b08272e` 只修改 `ProviderForm.tsx` 与 `useCodexConfigState.ts`：保存端仅以 `typeof supportsImage === 'boolean'` 写出 canonical 字段，读取端按 camelCase、snake_case、legacy `vision` 的显式 boolean 优先级归一化；`false` 不因 falsy 被丢弃，不从模型名或 `inputModalities` 推断。RED 边界转为 11/11，扩大 CodexFormFields / ProviderForm / config-state 聚焦为 6 files / 48 tests 全绿，typecheck、Prettier、diff check、两份生产文件 strict UTF-8/no BOM/no U+FFFD 通过。
+- Task 11A 再次以 Codex 内置搜索和固定 Matrix WebSearch bridge 独立核对 OpenAI Codex 官方 `openai_models.rs`：`input_modalities` 是 backend/client 交换的模型元数据。Matrix 索引搜索没有返回权威结果，但对官方 raw 源直接 `open` / `find` 成功；具体 persistence blocker 仍以本地 save/load 调用链和 RED/GREEN 为权威。聚焦运行保留既有 `baseline-browser-mapping` 提示，ProviderForm preset 测试还输出既有 React `act(...)` warning，均不影响退出码。
+- Important 3 现在从 `/models` 获取、表单新增/更新/手选、父表单保存 normalizer 到 DB/live reload canonicalizer 端到端闭环。Task 11A 未重跑全量 Vitest，上一轮 123/990 证据只对应 `ae764934`；未修改 Rust、版本或 reasoning defaults，也未 build/install/tag/push/publish。`localeCompare` vs NFKC + case-fold 与 V2 reasoning/catalog 仍是原两项条件性非阻断风险，状态不变。
 
 ## 2026-08-14 v3.19.1-26 候选门禁运行时边界
 
