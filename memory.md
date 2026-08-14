@@ -1,5 +1,15 @@
 # CC Switch Repository Memory
 
+## 2026-08-14 CCSwitchMulti v3.19.1-24 Codex 推理能力正式发布
+
+- `v3.19.1-24` 以公开 `v3.19.1-23@d87312f4` 为基线移植逐模型 reasoning capability，避免直接发布旧功能分支而回退 v20-v23 的 Sub-Agent 工作台、事务安装器、更新器、macOS 与配置解析修复。发布提交为 `8168c488ea7ee0f4dc4c3af6ac4833b9311ad057`，annotated tag object 为 `8728c1fc7d990d9c6b43aca66e336ef121b2e63f`，本地与远端 peeled commit 均精确指向发布提交；发布后 memory 提交不得移动该 tag。
+- 正式 Release 为 `https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.19.1-24`，非 draft/prerelease，且 GitHub `/releases/latest` 指向该 tag。Actions run `31765031272`（`https://github.com/BigStrongSun/ccswitchmulti/actions/runs/31765031272`）的 Linux x64/ARM64、Windows x64/ARM64、macOS、Publish GitHub Release、Assemble latest.json 七个 job 全部 `completed/success`。
+- Release 恰有 19 个 assets。`latest.json` 为 `version=3.19.1-24`，包含 `darwin-aarch64`、`darwin-x86_64`、`windows-x86_64`、`windows-aarch64`、`linux-x86_64`、`linux-aarch64` 六个平台键；所有 signature 非空、逐项等于对应 `.sig`，所有 URL 指向本 tag。
+- 下载验收：`latest.json` SHA-256 为 `53e1a47e331c9541244ecfba0bd7a5f6fe2a0425a223804bb207fbc054e820b5`；Windows x64 Setup SHA-256 为 `1e061261901f871733650ca4d314fe98879903ae4150251155d65633c9480424`，FileVersion/ProductVersion 均为 `3.19.1-24`。两项都与 GitHub Release asset 服务端 digest 精确一致。
+- 组合树门禁：Rust library `2967 passed / 0 failed / 2 ignored`；前端 `121 files / 962 tests`；版本测试 8/8；`cargo check --lib`、rustfmt、TypeScript typecheck、变更文件 Prettier 与 `git diff --check` 通过。仅保留既有 `openai_cache_read_tokens` dead-code warning 和测试夹具预期 stderr。
+- GitHub API 验收期间出现过短暂 EOF/TLS 查询失败，重试后恢复，最终 REST、Release 页面、远端 tag 与下载 digest 结论一致。前置事实检索使用 Codex 内置 Web Search 和 Matrix WebSearch 两条独立链；Matrix 查询无相关结果，关键远端状态以 GitHub CLI/API、`git ls-remote` 和下载文件为一手证据。
+- 发布成功不等于用户机器已安装 `3.19.1-24`，本轮没有停止当前依赖 `127.0.0.1:15721` 的 CCSwitchMulti，也没有执行安装事务。Release workflow 不包含 R2 同步步骤，因此不得声称 Cloudflare/R2 镜像已同步。
+
 ## 2026-08-13 Codex 预设推理覆盖与完整 catalog 收口
 
 - 内置预设能力不能直接编辑：默认只读，用户必须点击“创建高级覆盖”后才进入 `source=user`，界面明确显示“已偏离内置预设”，并能一键恢复当前版本的内置能力。`ProviderMeta.codexPresetId` 保存稳定 `presetKey`，不得保存会随数组顺序变化的 `codex-N`；旧 `codex-N` 只保留兼容读取。
