@@ -60,12 +60,21 @@ interface CodexModelReasoningCapability {
   disableAllowed: boolean;
   upstream: {
     format: "none" | "boolean" | "string" | "reasoning_object";
-    parameter: "none" | "thinking" | "enable_thinking" |
-      "reasoning_split" | "reasoning_effort" | "reasoning.effort";
+    parameter:
+      | "none"
+      | "thinking"
+      | "enable_thinking"
+      | "reasoning_split"
+      | "reasoning_effort"
+      | "reasoning.effort";
     effortMap?: Partial<Record<CodexReasoningEffort, CodexReasoningEffort>>;
   };
-  outputFormat?: "auto" | "reasoning_content" | "reasoning" |
-    "reasoning_details" | "think_tags";
+  outputFormat?:
+    | "auto"
+    | "reasoning_content"
+    | "reasoning"
+    | "reasoning_details"
+    | "think_tags";
   source?: "builtin" | "user" | "legacy";
 }
 ```
