@@ -56,9 +56,6 @@ describe("Common config modals", () => {
         onConfigChange={() => {}}
         useCommonConfig={false}
         onCommonConfigToggle={() => {}}
-        commonConfigSnippet={`base_url = "https://example.com"`}
-        onCommonConfigSnippetChange={() => false}
-        onCommonConfigErrorClear={() => {}}
         commonConfigError="Invalid TOML"
         authError=""
         configError=""
@@ -69,8 +66,7 @@ describe("Common config modals", () => {
       "aria-expanded",
       "false",
     );
-    expect(screen.queryByLabelText("codexConfig.authJson")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("codexConfig.configToml")).not.toBeInTheDocument();
+    expect(screen.queryAllByLabelText("mock-editor")).toHaveLength(0);
     expect(
       screen.queryByRole("checkbox", { name: "codexConfig.enableGoalMode" }),
     ).not.toBeInTheDocument();
@@ -82,8 +78,9 @@ describe("Common config modals", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "专家配置" }));
 
-    expect(screen.getByLabelText("codexConfig.authJson")).toBeInTheDocument();
-    expect(screen.getByLabelText("codexConfig.configToml")).toBeInTheDocument();
+    expect(screen.getByText("codexConfig.authJson")).toBeInTheDocument();
+    expect(screen.getByText("codexConfig.configToml")).toBeInTheDocument();
+    expect(screen.getAllByLabelText("mock-editor")).toHaveLength(2);
   });
 
   it("keeps the Gemini common config modal closed after user closes it with an error present", async () => {

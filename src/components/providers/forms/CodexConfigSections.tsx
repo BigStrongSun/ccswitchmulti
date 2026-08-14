@@ -11,9 +11,7 @@ import React, {
 import { useTranslation } from "react-i18next";
 import JsonEditor from "@/components/JsonEditor";
 import {
-  isCodexGoalModeEnabled,
   isCodexRemoteCompactionEnabled,
-  setCodexGoalMode,
   setCodexRemoteCompaction,
 } from "@/utils/providerConfigUtils";
 /*
@@ -110,7 +108,6 @@ interface CodexConfigSectionProps {
   showRemoteCompaction?: boolean;
   useCommonConfig: boolean;
   onCommonConfigToggle: (checked: boolean) => void;
-  onEditCommonConfig: () => void;
   commonConfigError?: string;
   configError?: string;
   isProxyTakeover?: boolean;
@@ -126,7 +123,6 @@ export const CodexConfigSection: React.FC<CodexConfigSectionProps> = ({
   showRemoteCompaction = true,
   useCommonConfig,
   onCommonConfigToggle,
-  onEditCommonConfig,
   commonConfigError,
   configError,
   isProxyTakeover = false,
@@ -167,20 +163,9 @@ export const CodexConfigSection: React.FC<CodexConfigSectionProps> = ({
     [onChange],
   );
 
-  const goalModeEnabled = useMemo(
-    () => isCodexGoalModeEnabled(localValue),
-    [localValue],
-  );
   const remoteCompactionEnabled = useMemo(
     () => isCodexRemoteCompactionEnabled(localValue),
     [localValue],
-  );
-
-  const handleGoalModeToggle = useCallback(
-    (checked: boolean) => {
-      handleLocalChange(setCodexGoalMode(localValueRef.current || "", checked));
-    },
-    [handleLocalChange],
   );
 
   const handleRemoteCompactionToggle = useCallback(
@@ -278,16 +263,6 @@ export const CodexConfigSection: React.FC<CodexConfigSectionProps> = ({
         </label>
 
         <div className="flex flex-wrap items-center justify-end gap-x-4 gap-y-1">
-          <label className="inline-flex cursor-pointer items-center gap-2 text-sm text-muted-foreground">
-            <input
-              type="checkbox"
-              checked={goalModeEnabled}
-              onChange={(e) => handleGoalModeToggle(e.target.checked)}
-              className="w-4 h-4 text-blue-500 bg-white dark:bg-gray-800 border-border-default rounded focus:ring-blue-500 dark:focus:ring-blue-400 focus:ring-2"
-            />
-            {t("codexConfig.enableGoalMode")}
-          </label>
-
           {showRemoteCompaction && (
             <label
               className="inline-flex cursor-pointer items-center gap-2 text-sm text-muted-foreground"
@@ -313,16 +288,6 @@ export const CodexConfigSection: React.FC<CodexConfigSectionProps> = ({
             {t("codexConfig.writeCommonConfig")}
           </label>
         </div>
-      </div>
-
-      <div className="flex items-center justify-end">
-        <button
-          type="button"
-          onClick={onEditCommonConfig}
-          className="text-xs text-blue-500 dark:text-blue-400 hover:underline"
-        >
-          {t("codexConfig.editCommonConfig")}
-        </button>
       </div>
 
       {commonConfigError && (

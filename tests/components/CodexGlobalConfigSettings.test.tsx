@@ -46,7 +46,9 @@ describe("CodexGlobalConfigSettings", () => {
     fireEvent.change(screen.getByLabelText("Codex 全局 TOML"), {
       target: { value: 'model_reasoning_summary = "none"\n' },
     });
-    fireEvent.click(screen.getByRole("button", { name: "保存 Codex 全局配置" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "保存 Codex 全局配置" }),
+    );
 
     await waitFor(() =>
       expect(configApi.setCommonConfigSnippet).toHaveBeenCalledWith(
