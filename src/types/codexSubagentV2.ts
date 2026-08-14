@@ -21,23 +21,26 @@ export type CodexSubagentWriteScope =
   | "bounded_changes"
   | "complex_changes";
 export type CodexSubagentPreference = "preferred" | "eligible" | "fallback";
-export type CodexSubagentQuestionnaireReasoningEffort =
-  | "auto"
+export type CodexSubagentExplicitReasoningEffort =
+  | "minimal"
   | "low"
   | "medium"
   | "high"
-  | "xhigh";
-export type CodexSubagentExplicitReasoningEffort =
-  | Exclude<CodexSubagentQuestionnaireReasoningEffort, "auto">
+  | "xhigh"
   | "max"
   | "ultra";
+
+export type CodexSubagentReasoningPolicy =
+  | { policy: "delegated" }
+  | { policy: "model_default" }
+  | { policy: "fixed"; effort: CodexSubagentExplicitReasoningEffort }
+  | { policy: "disabled" };
 
 export interface CodexSubagentQuestionnaire {
   taskStrengths: CodexSubagentTaskStrength[];
   optimization: CodexSubagentOptimization;
   writeScope: CodexSubagentWriteScope;
   preference: CodexSubagentPreference;
-  reasoningEffort: CodexSubagentQuestionnaireReasoningEffort;
 }
 
 export interface CodexSubagentProfileOverrides {
@@ -45,7 +48,6 @@ export interface CodexSubagentProfileOverrides {
   description?: string;
   developerInstructions?: string;
   nicknameCandidates?: string[];
-  modelReasoningEffort?: CodexSubagentExplicitReasoningEffort;
 }
 
 export interface CodexSubagentV2Profile {
@@ -53,11 +55,12 @@ export interface CodexSubagentV2Profile {
   enabled: boolean;
   inputModalities?: ["text"] | ["text", "image"];
   questionnaire: CodexSubagentQuestionnaire;
+  reasoning: CodexSubagentReasoningPolicy;
   overrides?: CodexSubagentProfileOverrides;
 }
 
 export interface CodexSubagentV2Config {
-  schemaVersion: 1;
+  schemaVersion: 2;
   selectionPolicy: CodexSubagentV2SelectionPolicy;
   profiles: Record<string, CodexSubagentV2Profile>;
 }
@@ -71,7 +74,7 @@ export interface CodexSubagentProfilePreview {
   nicknameCandidates: string[];
   model: string;
   modelProvider: "codex_model_router_v2";
-  modelReasoningEffort: CodexSubagentExplicitReasoningEffort;
+  modelReasoningEffort?: CodexSubagentExplicitReasoningEffort;
   modelContextWindow: number;
   tomlPreview: string;
   warnings: string[];
@@ -126,7 +129,7 @@ export interface CodexSubagentProfileStatuses {
 }
 
 export const DEFAULT_CODEX_SUBAGENT_V2: CodexSubagentV2Config = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   selectionPolicy: "balanced",
   profiles: {
     "deepseek-v4-flash": {
@@ -144,8 +147,8 @@ export const DEFAULT_CODEX_SUBAGENT_V2: CodexSubagentV2Config = {
         optimization: "speed",
         writeScope: "read_only",
         preference: "preferred",
-        reasoningEffort: "medium",
       },
+      reasoning: { policy: "delegated" },
     },
     "deepseek-v4-pro": {
       model: "deepseek-v4-pro",
@@ -162,8 +165,8 @@ export const DEFAULT_CODEX_SUBAGENT_V2: CodexSubagentV2Config = {
         optimization: "quality",
         writeScope: "complex_changes",
         preference: "preferred",
-        reasoningEffort: "high",
       },
+      reasoning: { policy: "delegated" },
     },
   },
 };

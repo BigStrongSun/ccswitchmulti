@@ -9,7 +9,8 @@ use crate::codex_subagent_profiles::{
     CompileRequest as SubagentCompileRequest, DiagnosticReasonCode as SubagentDiagnosticReasonCode,
     InputModality as SubagentInputModality, ModelReasoningEffort as SubagentReasoningEffort,
     ParsedProfileEntry, ProfileStatusCode as SubagentProfileStatusCode,
-    ProviderKind as SubagentProviderKind, SubagentVersion as ProfileSubagentVersion,
+    ProviderKind as SubagentProviderKind, ReasoningRuntimePolicy as SubagentReasoningRuntimePolicy,
+    SubagentVersion as ProfileSubagentVersion,
 };
 use crate::config::{
     atomic_write, delete_file, get_home_dir, read_json_file, sanitize_provider_name,
@@ -3005,9 +3006,9 @@ fn catalog_profile_draft(
             "taskStrengths": ["repository_exploration"],
             "optimization": "balanced",
             "writeScope": "read_only",
-            "preference": "eligible",
-            "reasoningEffort": "auto"
-        }
+            "preference": "eligible"
+        },
+        "reasoning": { "policy": "delegated" }
     });
     if let Some(input_modalities) = input_modalities {
         profile["inputModalities"] = json!(input_modalities);
@@ -3020,7 +3021,7 @@ pub(crate) fn initialize_codex_subagent_v2_for_candidate(
     _provider_context: Option<&ProviderClassificationContext>,
 ) -> Result<Value, AppError> {
     let mut initialized = json!({
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "selectionPolicy": "balanced",
         "profiles": {}
     });
@@ -3334,7 +3335,9 @@ fn configured_profile_field_sources(
         description: field_source(profile.overrides.description.is_some()),
         developer_instructions: field_source(profile.overrides.developer_instructions.is_some()),
         nickname_candidates: field_source(profile.overrides.nickname_candidates.is_some()),
-        model_reasoning_effort: field_source(profile.overrides.model_reasoning_effort.is_some()),
+        model_reasoning_effort: field_source(
+            profile.reasoning.policy == SubagentReasoningRuntimePolicy::Fixed,
+        ),
     }
 }
 
@@ -3435,7 +3438,7 @@ fn configured_codex_subagent_profile_statuses(
                 &agents_dir.join(format!("{}.toml", role.effective_role_name)),
             )?);
             public_status.model_provider = Some(role.model_provider);
-            public_status.model_reasoning_effort = Some(role.effort);
+            public_status.model_reasoning_effort = role.effort;
         }
         profiles.push(public_status);
     }
@@ -3701,7 +3704,7 @@ fn preview_codex_subagent_profile_with_context(
         nickname_candidates: role.nickname_candidates,
         model,
         model_provider: role.model_provider,
-        model_reasoning_effort: Some(role.effort),
+        model_reasoning_effort: role.effort,
         model_context_window: role.context_window,
         toml_preview,
         warnings,
@@ -5780,7 +5783,7 @@ mod tests {
                 "enabled": true,
                 "subagentVersion": version,
                 "subagentV2": {
-                    "schemaVersion": 1,
+                    "schemaVersion": 2,
                     "selectionPolicy": "balanced",
                     "profiles": profiles
                 },
@@ -5797,9 +5800,9 @@ mod tests {
                 "taskStrengths": ["repository_exploration"],
                 "optimization": "speed",
                 "writeScope": "read_only",
-                "preference": "eligible",
-                "reasoningEffort": "auto"
-            }
+                "preference": "eligible"
+            },
+            "reasoning": { "policy": "delegated" }
         })
     }
 
@@ -5827,7 +5830,7 @@ mod tests {
                 "modelCatalog": { "models": [{ "model": "DeepSeek-V4-Flash", "contextWindow": 1000000 }] },
                 "codexRouting": {
                     "subagentV2": {
-                        "schemaVersion": 1,
+                        "schemaVersion": 2,
                         "selectionPolicy": "balanced",
                         "profiles": {}
                     },
@@ -5845,9 +5848,9 @@ mod tests {
                     "taskStrengths": ["repository_exploration"],
                     "optimization": "speed",
                     "writeScope": "read_only",
-                    "preference": "eligible",
-                    "reasoningEffort": "auto"
-                }
+                    "preference": "eligible"
+                },
+                "reasoning": { "policy": "delegated" }
             }))
             .expect("typed preview profile"),
             None,
@@ -5896,19 +5899,20 @@ mod tests {
             "taskStrengths": ["repository_exploration"],
             "optimization": "speed",
             "writeScope": "read_only",
-            "preference": "eligible",
-            "reasoningEffort": "auto"
+            "preference": "eligible"
         });
         let first = json!({
             "model": "model-a",
             "enabled": true,
             "questionnaire": shared_questionnaire.clone(),
+            "reasoning": { "policy": "delegated" },
             "overrides": { "roleName": "shared-review" }
         });
         let second = json!({
             "model": "model-b",
             "enabled": true,
             "questionnaire": shared_questionnaire,
+            "reasoning": { "policy": "delegated" },
             "overrides": { "roleName": "shared-review" }
         });
         let settings = codex_subagent_profile_status_settings(
@@ -6011,19 +6015,20 @@ mod tests {
             "taskStrengths": ["repository_exploration"],
             "optimization": "speed",
             "writeScope": "read_only",
-            "preference": "eligible",
-            "reasoningEffort": "auto"
+            "preference": "eligible"
         });
         let selected_first = json!({
             "model": "model-a",
             "enabled": true,
             "questionnaire": shared_questionnaire.clone(),
+            "reasoning": { "policy": "delegated" },
             "overrides": { "roleName": "shared-review" }
         });
         let later_peer = json!({
             "model": "model-b",
             "enabled": true,
             "questionnaire": shared_questionnaire,
+            "reasoning": { "policy": "delegated" },
             "overrides": { "roleName": "shared-review" }
         });
         let settings = codex_subagent_profile_status_settings(
@@ -6185,9 +6190,12 @@ mod tests {
                 "taskStrengths": ["repository_exploration"],
                 "optimization": "balanced",
                 "writeScope": "read_only",
-                "preference": "eligible",
-                "reasoningEffort": "auto"
+                "preference": "eligible"
             })
+        );
+        assert_eq!(
+            initialized["profiles"]["qwen3.6"]["reasoning"],
+            json!({ "policy": "delegated" })
         );
         parse_persisted_subagent_v2(&initialized)
             .expect("initialized backend result must be strict-storage valid");
@@ -6337,9 +6345,9 @@ mod tests {
                         "taskStrengths": ["repository_exploration"],
                         "optimization": "speed",
                         "writeScope": "read_only",
-                        "preference": "eligible",
-                        "reasoningEffort": "auto"
-                    }
+                        "preference": "eligible"
+                    },
+                    "reasoning": { "policy": "delegated" }
                 }
             }),
             json!([{ "model": "PRIVATE_MODEL_SENTINEL", "contextWindow": 128000 }]),
@@ -6434,27 +6442,26 @@ mod tests {
 
     #[test]
     fn codex_subagent_v2_backend_rekeys_a_structurally_valid_alias_without_losing_fields() {
-        let legacy_profile = json!({
+        let aliased_profile = json!({
             "model": "deepseek-v4-flash",
             "enabled": true,
             "questionnaire": {
                 "taskStrengths": ["repository_exploration", "testing"],
                 "optimization": "quality",
                 "writeScope": "bounded_changes",
-                "preference": "fallback",
-                "reasoningEffort": "xhigh"
+                "preference": "fallback"
             },
+            "reasoning": { "policy": "fixed", "effort": "xhigh" },
             "overrides": {
                 "roleName": "keep-valid-role",
                 "description": "KEEP_VALID_DESCRIPTION",
                 "developerInstructions": "KEEP_VALID_INSTRUCTIONS",
-                "nicknameCandidates": ["KeepValid", "Stable"],
-                "modelReasoningEffort": "xhigh"
+                "nicknameCandidates": ["KeepValid", "Stable"]
             }
         });
         let settings = codex_subagent_profile_status_settings(
             "v2",
-            json!({ "LEGACY_ALIAS_SENTINEL": legacy_profile.clone() }),
+            json!({ "LEGACY_ALIAS_SENTINEL": aliased_profile.clone() }),
             json!([{ "model": "deepseek-v4-flash", "contextWindow": 1000000 }]),
             json!([{
                 "id": "flash-route",
@@ -6472,7 +6479,7 @@ mod tests {
         )
         .expect("backend recovery should re-key a structurally valid alias");
 
-        let mut expected_profile = legacy_profile;
+        let mut expected_profile = aliased_profile;
         expected_profile["inputModalities"] = json!(["text"]);
         assert_eq!(recovered["profiles"]["deepseek-v4-flash"], expected_profile);
         assert!(recovered["profiles"].get("LEGACY_ALIAS_SENTINEL").is_none());
@@ -6510,10 +6517,10 @@ mod tests {
         .expect("seed second user role");
 
         let mut profile = codex_subagent_profile_status_profile("neutral-model", true);
+        profile["reasoning"] = json!({ "policy": "fixed", "effort": "high" });
         profile["overrides"] = json!({
             "roleName": "Analysis Role",
-            "nicknameCandidates": ["Neutral Scout"],
-            "modelReasoningEffort": "high"
+            "nicknameCandidates": ["Neutral Scout"]
         });
         let settings = codex_subagent_profile_status_settings(
             "v2",
@@ -7095,9 +7102,9 @@ mod tests {
                     "taskStrengths": ["repository_exploration"],
                     "optimization": "speed",
                     "writeScope": "read_only",
-                    "preference": "eligible",
-                    "reasoningEffort": "auto"
-                }
+                    "preference": "eligible"
+                },
+                "reasoning": { "policy": "delegated" }
             }
         }))
         .expect("camelCase preview IPC request");
@@ -7423,7 +7430,7 @@ mod tests {
         let path = agents_dir.join("deepseek-v4-flash.toml");
         let first = std::fs::read_to_string(&path).expect("initial managed role");
         assert!(first.contains("Preserved config."));
-        assert!(first.contains("model_reasoning_effort = \"medium\""));
+        assert!(!first.contains("model_reasoning_effort"));
 
         sync_codex_managed_agent_files_with_settings(
             &specs,
@@ -7447,7 +7454,7 @@ mod tests {
         .expect("V2 restore after V1");
         let restored = std::fs::read_to_string(&path).expect("restored managed role");
         assert!(restored.contains("Preserved config."));
-        assert!(restored.contains("model_reasoning_effort = \"medium\""));
+        assert!(!restored.contains("model_reasoning_effort"));
         assert_eq!(
             std::fs::read_to_string(&user_path).expect("read user role after V2 restore"),
             user_content
@@ -7517,7 +7524,7 @@ mod tests {
         let restored = std::fs::read_to_string(&path).expect("restored canonical role");
         assert!(restored.contains(&format!("model = \"{canonical_model}\"")));
         assert!(restored.contains("Persisted questionnaire override."));
-        assert!(restored.contains("model_reasoning_effort = \"medium\""));
+        assert!(!restored.contains("model_reasoning_effort"));
     }
 
     #[test]

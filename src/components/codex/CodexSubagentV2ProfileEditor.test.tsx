@@ -268,7 +268,7 @@ vi.mock("@tauri-apps/api/core", () => ({
         initialized.id = args.providerId;
         if (!ipcState.nextInitializedProvider) {
           initialized.settingsConfig.codexRouting.subagentV2 = {
-            schemaVersion: 1,
+            schemaVersion: 2,
             selectionPolicy: "balanced",
             profiles: {
               "qwen-draft": {
@@ -279,8 +279,8 @@ vi.mock("@tauri-apps/api/core", () => ({
                   optimization: "balanced",
                   writeScope: "read_only",
                   preference: "eligible",
-                  reasoningEffort: "auto",
                 },
+                reasoning: { policy: "delegated" },
               },
             },
           };
@@ -323,8 +323,8 @@ vi.mock("@tauri-apps/api/core", () => ({
               optimization: "balanced",
               writeScope: "read_only",
               preference: "eligible",
-              reasoningEffort: "auto",
             },
+            reasoning: { policy: "delegated" },
           };
         } else if (args.action === "remove_all_invalid") {
           delete config.profiles.RAW_INVALID_PROFILE_KEY_ALPHA;
@@ -345,8 +345,8 @@ vi.mock("@tauri-apps/api/core", () => ({
               optimization: "quality",
               writeScope: "complex_changes",
               preference: "eligible",
-              reasoningEffort: "high",
             },
+            reasoning: { policy: "delegated" },
           };
           config.profiles["qwen3.6"] = {
             model: "qwen3.6",
@@ -356,8 +356,8 @@ vi.mock("@tauri-apps/api/core", () => ({
               optimization: "balanced",
               writeScope: "read_only",
               preference: "eligible",
-              reasoningEffort: "auto",
             },
+            reasoning: { policy: "delegated" },
           };
         }
         ipcState.providers[savedProvider.id] = savedProvider;
@@ -382,8 +382,10 @@ vi.mock("@tauri-apps/api/core", () => ({
         if (!fixture) {
           throw new Error(`No preview fixture registered for model: ${model}`);
         }
-        const effort = (args?.profile as CodexSubagentV2Profile | undefined)
-          ?.overrides?.modelReasoningEffort;
+        const reasoning = (args?.profile as CodexSubagentV2Profile | undefined)
+          ?.reasoning;
+        const effort =
+          reasoning?.policy === "fixed" ? reasoning.effort : undefined;
         if (effort === "max") {
           return JSON.parse(
             JSON.stringify({
@@ -444,7 +446,7 @@ function plan(withV2 = true): Provider {
         ...(withV2
           ? {
               subagentV2: {
-                schemaVersion: 1,
+                schemaVersion: 2,
                 selectionPolicy: "balanced",
                 profiles: {
                   "repository-scout": {
@@ -455,12 +457,11 @@ function plan(withV2 = true): Provider {
                       optimization: "balanced",
                       writeScope: "read_only",
                       preference: "eligible",
-                      reasoningEffort: "auto",
                     },
+                    reasoning: { policy: "fixed", effort: "medium" },
                     overrides: {
                       roleName: "repository-scout",
                       developerInstructions: "Do not modify source files.",
-                      modelReasoningEffort: "medium",
                     },
                   },
                   "offline-writer": {
@@ -471,8 +472,8 @@ function plan(withV2 = true): Provider {
                       optimization: "quality",
                       writeScope: "complex_changes",
                       preference: "fallback",
-                      reasoningEffort: "high",
                     },
+                    reasoning: { policy: "fixed", effort: "high" },
                   },
                 },
               },
@@ -541,14 +542,13 @@ function preservedValidProfile(): CodexSubagentV2Profile {
       optimization: "quality",
       writeScope: "bounded_changes",
       preference: "fallback",
-      reasoningEffort: "xhigh",
     },
+    reasoning: { policy: "fixed", effort: "xhigh" },
     overrides: {
       roleName: "keep-valid-role",
       description: "KEEP_VALID_DESCRIPTION",
       developerInstructions: "KEEP_VALID_INSTRUCTIONS",
       nicknameCandidates: ["KeepValid", "Stable"],
-      modelReasoningEffort: "xhigh",
     },
   };
 }
@@ -818,7 +818,7 @@ async function expectPreservedValidProfileInUi(user: UserEvent) {
     "bounded_changes",
   );
   expect(within(region).getByLabelText("模型偏好")).toHaveValue("fallback");
-  expect(within(region).getByLabelText("推理强度")).toHaveValue("xhigh");
+  expect(within(region).getByLabelText("推理策略")).toHaveValue("fixed");
   expect(within(region).getByLabelText("角色名称")).toHaveValue(
     "keep-valid-role",
   );
@@ -1191,23 +1191,26 @@ describe("Codex Sub-Agent V2 review round 1 regressions", () => {
       { nicknameCandidates: [{ raw: "RAW_NICKNAME_ENTRY" }] },
     ],
     [
-      "non-string modelReasoningEffort",
-      { modelReasoningEffort: { raw: "RAW_REASONING_EFFORT" } },
+      "non-string fixed reasoning effort",
+      undefined,
+      { policy: "fixed", effort: { raw: "RAW_REASONING_EFFORT" } },
     ],
     [
-      "unsupported modelReasoningEffort string",
-      { modelReasoningEffort: "RAW_REASONING_EFFORT" },
+      "unsupported fixed reasoning effort string",
+      undefined,
+      { policy: "fixed", effort: "RAW_REASONING_EFFORT" },
     ],
-  ])(
+  ] as Array<[string, unknown, unknown?]>)(
     "isolates %s without dereferencing or reflecting invalid raw content",
-    async (_caseName, overrides) => {
+    async (_caseName, overrides, reasoning) => {
       const secretPattern = /RAW_[A-Z_]+/;
       const profiles =
         ipcState.providers.router.settingsConfig.codexRouting.subagentV2
           .profiles;
       profiles["deepseek-v4-flash"] = {
         ...profiles["repository-scout"],
-        overrides,
+        ...(overrides === undefined ? {} : { overrides }),
+        ...(reasoning === undefined ? {} : { reasoning }),
       };
       delete profiles["repository-scout"];
       ipcState.statusResponse = {
@@ -1350,8 +1353,9 @@ describe("Codex Sub-Agent V2 review round 1 regressions", () => {
   });
 
   it("shows preview absence explicitly without inventing a medium effort", async () => {
-    delete ipcState.providers.router.settingsConfig.codexRouting.subagentV2
-      .profiles["repository-scout"].overrides.modelReasoningEffort;
+    ipcState.providers.router.settingsConfig.codexRouting.subagentV2.profiles[
+      "repository-scout"
+    ].reasoning = { policy: "delegated" };
     ipcState.previewErrors["deepseek-v4-flash"] = "preview unavailable";
 
     const user = userEvent.setup();
@@ -1829,8 +1833,8 @@ describe("Codex Sub-Agent V2 backend-owned catalog reconciliation", () => {
         optimization: "quality",
         writeScope: "complex_changes",
         preference: "eligible",
-        reasoningEffort: "high",
       },
+      reasoning: { policy: "delegated" },
     });
     expect(profilesAfterRecovery["qwen3.6"]).toEqual({
       model: "qwen3.6",
@@ -1840,8 +1844,8 @@ describe("Codex Sub-Agent V2 backend-owned catalog reconciliation", () => {
         optimization: "balanced",
         writeScope: "read_only",
         preference: "eligible",
-        reasoningEffort: "auto",
       },
+      reasoning: { policy: "delegated" },
     });
     expect(document.body.textContent).not.toContain(
       "RAW_INVALID_PROFILE_KEY_ALPHA",
@@ -2488,7 +2492,7 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
             },
           ],
           subagentV2: {
-            schemaVersion: 1,
+            schemaVersion: 2,
             selectionPolicy: persistedValue,
             profiles: {
               "repository-scout": {
@@ -2499,12 +2503,11 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
                   optimization: "balanced",
                   writeScope: "read_only",
                   preference: "eligible",
-                  reasoningEffort: "auto",
                 },
+                reasoning: { policy: "fixed", effort: "medium" },
                 overrides: {
                   roleName: "repository-scout",
                   developerInstructions: "Do not modify source files.",
-                  modelReasoningEffort: "medium",
                 },
               },
               "offline-writer": {
@@ -2515,8 +2518,8 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
                   optimization: "quality",
                   writeScope: "complex_changes",
                   preference: "fallback",
-                  reasoningEffort: "high",
                 },
+                reasoning: { policy: "fixed", effort: "high" },
               },
             },
           },
@@ -2553,7 +2556,7 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
           },
         ],
         subagentV2: {
-          schemaVersion: 1,
+          schemaVersion: 2,
           selectionPolicy: "balanced",
           profiles: {
             "repository-scout": {
@@ -2564,12 +2567,11 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
                 optimization: "balanced",
                 writeScope: "read_only",
                 preference: "eligible",
-                reasoningEffort: "auto",
               },
+              reasoning: { policy: "fixed", effort: "medium" },
               overrides: {
                 roleName: "repository-scout",
                 developerInstructions: "Do not modify source files.",
-                modelReasoningEffort: "medium",
               },
             },
             "offline-writer": {
@@ -2580,8 +2582,8 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
                 optimization: "quality",
                 writeScope: "complex_changes",
                 preference: "fallback",
-                reasoningEffort: "high",
               },
+              reasoning: { policy: "fixed", effort: "high" },
             },
           },
         },
@@ -2605,7 +2607,7 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
     await user.click(strengths.getByDisplayValue("testing"));
     await saveV2(user);
     await expectSavedSubagentV2({
-      schemaVersion: 1,
+      schemaVersion: 2,
       selectionPolicy: "balanced",
       profiles: {
         "repository-scout": {
@@ -2616,12 +2618,11 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
             optimization: "balanced",
             writeScope: "read_only",
             preference: "eligible",
-            reasoningEffort: "auto",
           },
+          reasoning: { policy: "fixed", effort: "medium" },
           overrides: {
             roleName: "repository-scout",
             developerInstructions: "Do not modify source files.",
-            modelReasoningEffort: "medium",
           },
         },
         "offline-writer": {
@@ -2632,8 +2633,8 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
             optimization: "quality",
             writeScope: "complex_changes",
             preference: "fallback",
-            reasoningEffort: "high",
           },
+          reasoning: { policy: "fixed", effort: "high" },
         },
       },
     });
@@ -2738,7 +2739,6 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
         optimization: "speed",
         writeScope: "read_only",
         preference: "eligible",
-        reasoningEffort: "auto",
       },
     ],
     [
@@ -2750,7 +2750,6 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
         optimization: "balanced",
         writeScope: "read_only",
         preference: "eligible",
-        reasoningEffort: "auto",
       },
     ],
     [
@@ -2762,7 +2761,6 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
         optimization: "quality",
         writeScope: "read_only",
         preference: "eligible",
-        reasoningEffort: "auto",
       },
     ],
     [
@@ -2774,7 +2772,6 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
         optimization: "balanced",
         writeScope: "read_only",
         preference: "eligible",
-        reasoningEffort: "auto",
       },
     ],
     [
@@ -2786,7 +2783,6 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
         optimization: "balanced",
         writeScope: "bounded_changes",
         preference: "eligible",
-        reasoningEffort: "auto",
       },
     ],
     [
@@ -2798,7 +2794,6 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
         optimization: "balanced",
         writeScope: "complex_changes",
         preference: "eligible",
-        reasoningEffort: "auto",
       },
     ],
     [
@@ -2810,7 +2805,6 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
         optimization: "balanced",
         writeScope: "read_only",
         preference: "preferred",
-        reasoningEffort: "auto",
       },
     ],
     [
@@ -2822,7 +2816,6 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
         optimization: "balanced",
         writeScope: "read_only",
         preference: "eligible",
-        reasoningEffort: "auto",
       },
     ],
     [
@@ -2834,67 +2827,6 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
         optimization: "balanced",
         writeScope: "read_only",
         preference: "fallback",
-        reasoningEffort: "auto",
-      },
-    ],
-    [
-      "推理强度",
-      "auto",
-      "low",
-      {
-        taskStrengths: ["repository_exploration"],
-        optimization: "balanced",
-        writeScope: "read_only",
-        preference: "eligible",
-        reasoningEffort: "auto",
-      },
-    ],
-    [
-      "推理强度",
-      "low",
-      "medium",
-      {
-        taskStrengths: ["repository_exploration"],
-        optimization: "balanced",
-        writeScope: "read_only",
-        preference: "eligible",
-        reasoningEffort: "low",
-      },
-    ],
-    [
-      "推理强度",
-      "medium",
-      "low",
-      {
-        taskStrengths: ["repository_exploration"],
-        optimization: "balanced",
-        writeScope: "read_only",
-        preference: "eligible",
-        reasoningEffort: "medium",
-      },
-    ],
-    [
-      "推理强度",
-      "high",
-      "low",
-      {
-        taskStrengths: ["repository_exploration"],
-        optimization: "balanced",
-        writeScope: "read_only",
-        preference: "eligible",
-        reasoningEffort: "high",
-      },
-    ],
-    [
-      "推理强度",
-      "xhigh",
-      "low",
-      {
-        taskStrengths: ["repository_exploration"],
-        optimization: "balanced",
-        writeScope: "read_only",
-        preference: "eligible",
-        reasoningEffort: "xhigh",
       },
     ],
   ])(
@@ -2925,6 +2857,31 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
             "repository-scout"
           ].questionnaire,
         ).toEqual(expectedQuestionnaire),
+      );
+    },
+  );
+
+  it.each([
+    ["delegated", { policy: "delegated" }],
+    ["model_default", { policy: "model_default" }],
+    ["disabled", { policy: "disabled" }],
+  ] as const)(
+    "persists reasoning policy %s outside the questionnaire",
+    async (policy, expected) => {
+      const user = userEvent.setup();
+      await renderWorkspace();
+      await chooseOption(
+        user,
+        within(flashRegion()).getByLabelText("推理策略"),
+        policy,
+      );
+      await saveV2(user);
+      await waitFor(() =>
+        expect(
+          latestSavedPlan()?.settingsConfig.codexRouting.subagentV2.profiles[
+            "repository-scout"
+          ].reasoning,
+        ).toEqual(expected),
       );
     },
   );
@@ -2978,7 +2935,6 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
           ...(overrideKey === "nicknameCandidates"
             ? { nicknameCandidates: persistedValue }
             : {}),
-          modelReasoningEffort: "medium",
         }),
       );
     },
@@ -3002,9 +2958,13 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
       ).toEqual({
         roleName: "repository-scout",
         developerInstructions: "Do not modify source files.",
-        modelReasoningEffort: "high",
       }),
     );
+    expect(
+      latestSavedPlan()?.settingsConfig.codexRouting.subagentV2.profiles[
+        "repository-scout"
+      ].reasoning,
+    ).toEqual({ policy: "fixed", effort: "high" });
   });
 
   it("persists max and exposes it in the generated role preview", async () => {
@@ -3026,8 +2986,8 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
       expect(
         latestSavedPlan()?.settingsConfig.codexRouting.subagentV2.profiles[
           "repository-scout"
-        ].overrides.modelReasoningEffort,
-      ).toBe("max"),
+        ].reasoning,
+      ).toEqual({ policy: "fixed", effort: "max" }),
     );
   });
 
@@ -3059,9 +3019,13 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
         roleName: "audit-role",
         developerInstructions: "Audit without modifying source files.",
         nicknameCandidates: ["Audit", "Reviewer"],
-        modelReasoningEffort: "high",
       }),
     );
+    expect(
+      latestSavedPlan()?.settingsConfig.codexRouting.subagentV2.profiles[
+        "repository-scout"
+      ].reasoning,
+    ).toEqual({ policy: "fixed", effort: "high" });
   });
 
   it("reloads policy, questionnaire, and override from get_providers after save/remount", async () => {
@@ -3220,7 +3184,7 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
     expect(
       ipcState.providers.router.settingsConfig.codexRouting.subagentV2,
     ).toEqual({
-      schemaVersion: 1,
+      schemaVersion: 2,
       selectionPolicy: "balanced",
       profiles: {
         "qwen-draft": {
@@ -3231,8 +3195,8 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
             optimization: "balanced",
             writeScope: "read_only",
             preference: "eligible",
-            reasoningEffort: "auto",
           },
+          reasoning: { policy: "delegated" },
         },
       },
     });
@@ -3300,12 +3264,11 @@ describe("Codex Sub-Agent V2 preview visible output", () => {
             optimization: "balanced",
             writeScope: "read_only",
             preference: "eligible",
-            reasoningEffort: "auto",
           },
+          reasoning: { policy: "fixed", effort: "medium" },
           overrides: {
             roleName: "repository-scout",
             developerInstructions: "Do not modify source files.",
-            modelReasoningEffort: "medium",
           },
         },
       }),

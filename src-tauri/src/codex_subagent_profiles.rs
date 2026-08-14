@@ -1,5 +1,6 @@
 //! Codex V2 questionnaire persistence, validation, compilation, and safe preview projection.
 
+use crate::proxy::providers::codex_reasoning::CodexReasoningEffort;
 use serde::ser::{SerializeMap, SerializeStruct};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 #[cfg(test)]
@@ -64,7 +65,7 @@ pub enum Preference {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum QuestionnaireReasoningEffort {
+enum LegacyQuestionnaireReasoningEffort {
     Auto,
     Low,
     Medium,
@@ -73,16 +74,49 @@ pub enum QuestionnaireReasoningEffort {
     XHigh,
 }
 
+pub type ModelReasoningEffort = CodexReasoningEffort;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ModelReasoningEffort {
-    Low,
-    Medium,
-    High,
-    #[serde(rename = "xhigh")]
-    XHigh,
-    Max,
-    Ultra,
+pub enum ReasoningRuntimePolicy {
+    Delegated,
+    ModelDefault,
+    Fixed,
+    Disabled,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexSubagentReasoningPolicy {
+    pub policy: ReasoningRuntimePolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<CodexReasoningEffort>,
+}
+
+impl CodexSubagentReasoningPolicy {
+    fn validate(&self, key: &str) -> Result<(), CompileError> {
+        match (self.policy, self.effort) {
+            (ReasoningRuntimePolicy::Fixed, Some(CodexReasoningEffort::None)) => {
+                Err(validation_error(
+                    "invalid_reasoning_policy",
+                    Some(key),
+                    "fixed effort cannot be none",
+                ))
+            }
+            (ReasoningRuntimePolicy::Fixed, Some(_)) => Ok(()),
+            (ReasoningRuntimePolicy::Fixed, None) => Err(validation_error(
+                "missing_fixed_reasoning_effort",
+                Some(key),
+                "fixed reasoning policy requires effort",
+            )),
+            (_, Some(_)) => Err(validation_error(
+                "unexpected_reasoning_effort",
+                Some(key),
+                "only fixed reasoning policy accepts effort",
+            )),
+            (_, None) => Ok(()),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,7 +149,6 @@ pub struct CodexSubagentQuestionnaire {
     pub optimization: Optimization,
     pub write_scope: WriteScope,
     pub preference: Preference,
-    pub reasoning_effort: QuestionnaireReasoningEffort,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,6 +159,7 @@ pub struct CodexSubagentProfileConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_modalities: Option<Vec<InputModality>>,
     pub questionnaire: CodexSubagentQuestionnaire,
+    pub reasoning: CodexSubagentReasoningPolicy,
     #[serde(
         default,
         skip_serializing_if = "CodexSubagentProfileOverrides::is_empty"
@@ -153,8 +187,8 @@ impl Serialize for PublicProfiles<'_> {
                                 optimization: profile.optimization,
                                 write_scope: profile.write_scope,
                                 preference: profile.preference,
-                                reasoning_effort: profile.reasoning_effort,
                             },
+                            reasoning: profile.reasoning.clone(),
                             overrides: profile.overrides.clone(),
                         },
                     )?;
@@ -212,7 +246,7 @@ pub(crate) struct ParsedCodexSubagentProfile {
     pub optimization: Optimization,
     pub write_scope: WriteScope,
     pub preference: Preference,
-    pub reasoning_effort: QuestionnaireReasoningEffort,
+    pub reasoning: CodexSubagentReasoningPolicy,
     pub overrides: CodexSubagentProfileOverrides,
 }
 
@@ -227,8 +261,6 @@ pub struct CodexSubagentProfileOverrides {
     pub developer_instructions: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nickname_candidates: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model_reasoning_effort: Option<ModelReasoningEffort>,
 }
 
 impl CodexSubagentProfileOverrides {
@@ -237,7 +269,27 @@ impl CodexSubagentProfileOverrides {
             && self.description.is_none()
             && self.developer_instructions.is_none()
             && self.nickname_candidates.is_none()
-            && self.model_reasoning_effort.is_none()
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacyCodexSubagentProfileOverrides {
+    role_name: Option<String>,
+    description: Option<String>,
+    developer_instructions: Option<String>,
+    nickname_candidates: Option<Vec<String>>,
+    model_reasoning_effort: Option<CodexReasoningEffort>,
+}
+
+impl LegacyCodexSubagentProfileOverrides {
+    fn into_current(self) -> CodexSubagentProfileOverrides {
+        CodexSubagentProfileOverrides {
+            role_name: self.role_name,
+            description: self.description,
+            developer_instructions: self.developer_instructions,
+            nickname_candidates: self.nickname_candidates,
+        }
     }
 }
 
@@ -276,7 +328,7 @@ pub struct GeneratedRole {
     pub nickname_candidates: Vec<String>,
     pub model: String,
     pub model_provider: String,
-    pub effort: ModelReasoningEffort,
+    pub effort: Option<CodexReasoningEffort>,
     pub context_window: u64,
 }
 
@@ -288,7 +340,8 @@ struct RoleToml<'a> {
     nickname_candidates: &'a [String],
     model: &'a str,
     model_provider: &'a str,
-    model_reasoning_effort: ModelReasoningEffort,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_reasoning_effort: Option<CodexReasoningEffort>,
     model_context_window: u64,
 }
 
@@ -396,11 +449,11 @@ pub fn parse_persisted_subagent_v2(raw: &Value) -> Result<CodexSubagentV2, Compi
         .ok_or_else(|| {
             validation_error("missing_schema_version", None, "schemaVersion is required")
         })?;
-    if schema != 1 {
+    if !matches!(schema, 1 | 2) {
         return Err(validation_error(
             "unsupported_schema_version",
             None,
-            "schemaVersion must be 1",
+            "schemaVersion must be 1 or 2",
         ));
     }
     let selection_policy = match raw.get("selectionPolicy") {
@@ -559,23 +612,80 @@ pub fn parse_persisted_subagent_v2(raw: &Value) -> Result<CodexSubagentV2, Compi
             "questionnaire.preference is required",
             "preference is not an allowed enum member",
         )?;
-        let reasoning_effort = enum_field(
-            q.get("reasoningEffort"),
-            "missing_reasoning_effort",
-            "invalid_reasoning_effort",
-            &key,
-            "questionnaire.reasoningEffort is required",
-            "reasoningEffort is not an allowed enum member",
-        )?;
-        let overrides: CodexSubagentProfileOverrides = match p.get("overrides") {
-            Some(v) => serde_json::from_value(v.clone()).map_err(|_| {
-                validation_error(
-                    "invalid_override_effort",
+        let (reasoning, overrides) = if schema == 1 {
+            let legacy_effort: LegacyQuestionnaireReasoningEffort = enum_field(
+                q.get("reasoningEffort"),
+                "missing_reasoning_effort",
+                "invalid_reasoning_effort",
+                &key,
+                "questionnaire.reasoningEffort is required",
+                "reasoningEffort is not an allowed enum member",
+            )?;
+            let legacy_overrides: LegacyCodexSubagentProfileOverrides = match p.get("overrides") {
+                Some(v) => serde_json::from_value(v.clone()).map_err(|_| {
+                    validation_error(
+                        "invalid_override_effort",
+                        Some(&key),
+                        "modelReasoningEffort allows only low, medium, high, xhigh, max, or ultra",
+                    )
+                })?,
+                None => LegacyCodexSubagentProfileOverrides::default(),
+            };
+            let fixed_effort = legacy_overrides
+                .model_reasoning_effort
+                .or(match legacy_effort {
+                    LegacyQuestionnaireReasoningEffort::Auto => None,
+                    LegacyQuestionnaireReasoningEffort::Low => Some(CodexReasoningEffort::Low),
+                    LegacyQuestionnaireReasoningEffort::Medium => {
+                        Some(CodexReasoningEffort::Medium)
+                    }
+                    LegacyQuestionnaireReasoningEffort::High => Some(CodexReasoningEffort::High),
+                    LegacyQuestionnaireReasoningEffort::XHigh => Some(CodexReasoningEffort::XHigh),
+                });
+            let reasoning = match fixed_effort {
+                Some(effort) => CodexSubagentReasoningPolicy {
+                    policy: ReasoningRuntimePolicy::Fixed,
+                    effort: Some(effort),
+                },
+                None => CodexSubagentReasoningPolicy {
+                    policy: ReasoningRuntimePolicy::Delegated,
+                    effort: None,
+                },
+            };
+            (reasoning, legacy_overrides.into_current())
+        } else {
+            if q.contains_key("reasoningEffort") {
+                return Err(validation_error(
+                    "legacy_reasoning_effort_in_schema_v2",
                     Some(&key),
-                    "modelReasoningEffort allows only low, medium, high, xhigh, max, or ultra",
-                )
-            })?,
-            None => CodexSubagentProfileOverrides::default(),
+                    "schemaVersion 2 stores reasoning outside questionnaire",
+                ));
+            }
+            let reasoning: CodexSubagentReasoningPolicy = enum_field(
+                p.get("reasoning"),
+                "missing_reasoning_policy",
+                "invalid_reasoning_policy",
+                &key,
+                "reasoning is required",
+                "reasoning policy is invalid",
+            )?;
+            reasoning.validate(&key)?;
+            let overrides: CodexSubagentProfileOverrides = match p.get("overrides") {
+                Some(v) => {
+                    if v.get("modelReasoningEffort").is_some() {
+                        return Err(validation_error(
+                            "legacy_override_effort_in_schema_v2",
+                            Some(&key),
+                            "schemaVersion 2 stores effort in reasoning",
+                        ));
+                    }
+                    serde_json::from_value(v.clone()).map_err(|_| {
+                        validation_error("invalid_overrides", Some(&key), "overrides is invalid")
+                    })?
+                }
+                None => CodexSubagentProfileOverrides::default(),
+            };
+            (reasoning, overrides)
         };
         if key != normalize_profile_key(model) {
             return Err(validation_error(
@@ -593,12 +703,12 @@ pub fn parse_persisted_subagent_v2(raw: &Value) -> Result<CodexSubagentV2, Compi
             optimization,
             write_scope,
             preference,
-            reasoning_effort,
+            reasoning,
             overrides,
         }));
     }
     Ok(CodexSubagentV2 {
-        schema_version: 1,
+        schema_version: 2,
         selection_policy,
         profiles: parsed,
     })
@@ -616,6 +726,12 @@ pub fn normalize_profile_key(value: &str) -> String {
 /// Runtime loader that preserves malformed profile values while retaining strict top-level
 /// schema validation. This lets the UI surface and repair one bad entry without losing peers.
 pub fn parse_persisted_subagent_v2_tolerant(raw: &Value) -> Result<CodexSubagentV2, CompileError> {
+    let source_schema = raw
+        .get("schemaVersion")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            validation_error("missing_schema_version", None, "schemaVersion is required")
+        })?;
     let profiles = raw
         .get("profiles")
         .ok_or_else(|| validation_error("missing_profiles", None, "profiles is required"))?
@@ -630,7 +746,7 @@ pub fn parse_persisted_subagent_v2_tolerant(raw: &Value) -> Result<CodexSubagent
     let mut parsed = parse_persisted_subagent_v2(&top_level)?;
     for (key, profile_raw) in profiles {
         let one = serde_json::json!({
-            "schemaVersion": 1,
+            "schemaVersion": source_schema,
             "selectionPolicy": parsed.selection_policy,
             "profiles": { key.clone(): profile_raw.clone() }
         });
@@ -676,41 +792,12 @@ fn normalize_role_name(value: &str) -> String {
     out.trim_matches(['-', '_']).to_string()
 }
 
-fn auto_effort(p: &ParsedCodexSubagentProfile) -> ModelReasoningEffort {
-    if let Some(effort) = p.overrides.model_reasoning_effort {
-        return effort;
-    }
-    match p.reasoning_effort {
-        QuestionnaireReasoningEffort::Low => return ModelReasoningEffort::Low,
-        QuestionnaireReasoningEffort::Medium => return ModelReasoningEffort::Medium,
-        QuestionnaireReasoningEffort::High => return ModelReasoningEffort::High,
-        QuestionnaireReasoningEffort::XHigh => return ModelReasoningEffort::XHigh,
-        QuestionnaireReasoningEffort::Auto => {}
-    }
-    if p.strengths.iter().any(|s| {
-        matches!(
-            s,
-            TaskStrength::ComplexDebugging
-                | TaskStrength::ArchitectureDesign
-                | TaskStrength::ComplexImplementation
-                | TaskStrength::HighRiskReview
-        )
-    }) {
-        return ModelReasoningEffort::High;
-    }
-    let read_only = p.strengths.iter().all(|s| {
-        matches!(
-            s,
-            TaskStrength::LongContextReading
-                | TaskStrength::RepositoryExploration
-                | TaskStrength::EvidenceCollection
-                | TaskStrength::Summarization
-        )
-    });
-    if p.optimization == Optimization::Speed && read_only {
-        ModelReasoningEffort::Low
-    } else {
-        ModelReasoningEffort::Medium
+fn compiled_effort(p: &ParsedCodexSubagentProfile) -> Option<CodexReasoningEffort> {
+    match p.reasoning.policy {
+        ReasoningRuntimePolicy::Fixed => p.reasoning.effort,
+        ReasoningRuntimePolicy::Delegated
+        | ReasoningRuntimePolicy::ModelDefault
+        | ReasoningRuntimePolicy::Disabled => None,
     }
 }
 
@@ -1189,7 +1276,7 @@ pub fn compile_subagent_v2_profiles(request: &CompileRequest) -> CompileResult {
             nickname_candidates: nicknames,
             model: p.model.clone(),
             model_provider: "codex_model_router_v2".to_string(),
-            effort: auto_effort(&p),
+            effort: compiled_effort(&p),
             context_window: catalog.context_window,
         });
         push_status(&mut output, ProfileStatusCode::Routable, None);
@@ -1226,7 +1313,10 @@ pub fn initialize_legacy_subagent_v2() -> Result<CodexSubagentV2, CompileError> 
         optimization: Optimization::Speed,
         write_scope: WriteScope::ReadOnly,
         preference: Preference::Preferred,
-        reasoning_effort: QuestionnaireReasoningEffort::Medium,
+        reasoning: CodexSubagentReasoningPolicy {
+            policy: ReasoningRuntimePolicy::Delegated,
+            effort: None,
+        },
         overrides: CodexSubagentProfileOverrides::default(),
     };
     let mut pro = flash.clone();
@@ -1241,9 +1331,8 @@ pub fn initialize_legacy_subagent_v2() -> Result<CodexSubagentV2, CompileError> 
     ];
     pro.optimization = Optimization::Quality;
     pro.write_scope = WriteScope::ComplexChanges;
-    pro.reasoning_effort = QuestionnaireReasoningEffort::High;
     Ok(CodexSubagentV2 {
-        schema_version: 1,
+        schema_version: 2,
         selection_policy: SelectionPolicy::Balanced,
         profiles: vec![
             ParsedProfileEntry::Valid(flash),
@@ -1273,7 +1362,10 @@ mod tests {
             optimization: Optimization::Speed,
             write_scope: WriteScope::ReadOnly,
             preference: Preference::Eligible,
-            reasoning_effort: QuestionnaireReasoningEffort::Auto,
+            reasoning: CodexSubagentReasoningPolicy {
+                policy: ReasoningRuntimePolicy::Delegated,
+                effort: None,
+            },
             overrides: CodexSubagentProfileOverrides::default(),
         }
     }
@@ -1283,7 +1375,7 @@ mod tests {
         profiles: Vec<ParsedProfileEntry>,
     ) -> CodexSubagentV2 {
         CodexSubagentV2 {
-            schema_version: 1,
+            schema_version: 2,
             selection_policy,
             profiles,
         }
@@ -1321,7 +1413,7 @@ mod tests {
         description: &str,
         instructions: &str,
         nicknames: Vec<String>,
-        effort: ModelReasoningEffort,
+        effort: impl Into<Option<CodexReasoningEffort>>,
     ) -> GeneratedRole {
         GeneratedRole {
             requested_role_name: s(requested),
@@ -1331,7 +1423,7 @@ mod tests {
             nickname_candidates: nicknames,
             model: s("DeepSeek-V4-Flash"),
             model_provider: s("codex_model_router_v2"),
-            effort,
+            effort: effort.into(),
             context_window: 1_000_000,
         }
     }
@@ -1571,13 +1663,13 @@ mod tests {
     }
 
     #[test]
-    fn codex_subagent_v2_rejects_schema_version_other_than_one() {
+    fn codex_subagent_v2_rejects_schema_version_other_than_one_or_two() {
         assert_parse(
-            json!({"schemaVersion": 2, "profiles": {}}),
+            json!({"schemaVersion": 3, "profiles": {}}),
             Err(validation(
                 "unsupported_schema_version",
                 None,
-                "schemaVersion must be 1",
+                "schemaVersion must be 1 or 2",
             )),
         );
     }
@@ -1732,8 +1824,8 @@ mod tests {
             description: Some(s("Manual.")),
             developer_instructions: Some(s("Read only.")),
             nickname_candidates: Some(vec![s("Flash Reader")]),
-            model_reasoning_effort: Some(ModelReasoningEffort::XHigh),
         };
+        p.reasoning = fixed_reasoning(CodexReasoningEffort::XHigh);
         assert_parse(
             json!({"schemaVersion":1,"profiles":{"deepseek-v4-flash":{"model":"DeepSeek-V4-Flash","enabled":true,"questionnaire":{"taskStrengths":["repository_exploration"],"optimization":"speed","writeScope":"read_only","preference":"eligible","reasoningEffort":"auto"},"overrides":{"roleName":"flash-reader","description":"Manual.","developerInstructions":"Read only.","nicknameCandidates":["Flash Reader"],"modelReasoningEffort":"xhigh"}}}}),
             Ok(config(SelectionPolicy::Balanced, vec![valid(p)])),
@@ -1833,7 +1925,7 @@ mod tests {
 
     #[test]
     fn codex_subagent_v2_public_serde_shape_is_keyed_and_nested() {
-        let raw = json!({
+        let legacy = json!({
             "schemaVersion": 1,
             "selectionPolicy": "official_first",
             "profiles": {
@@ -1850,17 +1942,34 @@ mod tests {
                 }
             }
         });
-        let parsed = parse_persisted_subagent_v2(&raw).expect("strict public payload");
+        let expected = json!({
+            "schemaVersion": 2,
+            "selectionPolicy": "official_first",
+            "profiles": {
+                "deepseek-v4-flash": {
+                    "model": "DeepSeek-V4-Flash",
+                    "enabled": true,
+                    "questionnaire": {
+                        "taskStrengths": ["repository_exploration"],
+                        "optimization": "speed",
+                        "writeScope": "read_only",
+                        "preference": "eligible"
+                    },
+                    "reasoning": {"policy": "delegated"}
+                }
+            }
+        });
+        let parsed = parse_persisted_subagent_v2(&legacy).expect("strict public payload");
         assert_eq!(
             serde_json::to_value(parsed).expect("serialize public payload"),
-            raw.clone(),
+            expected.clone(),
             "the persisted API is a keyed map and must not expose internal keys or flattened questionnaire fields"
         );
         let serde_parsed: CodexSubagentV2 =
-            serde_json::from_value(raw.clone()).expect("deserialize aggregate public DTO");
+            serde_json::from_value(expected.clone()).expect("deserialize aggregate public DTO");
         assert_eq!(
             serde_json::to_value(serde_parsed).expect("round-trip aggregate public DTO"),
-            raw
+            expected
         );
     }
 
@@ -1875,7 +1984,10 @@ mod tests {
                 optimization: Optimization::Speed,
                 write_scope: WriteScope::ReadOnly,
                 preference: Preference::Eligible,
-                reasoning_effort: QuestionnaireReasoningEffort::Auto,
+            },
+            reasoning: CodexSubagentReasoningPolicy {
+                policy: ReasoningRuntimePolicy::Delegated,
+                effort: None,
             },
             overrides: CodexSubagentProfileOverrides::default(),
         };
@@ -1886,9 +1998,9 @@ mod tests {
                 "taskStrengths": ["repository_exploration"],
                 "optimization": "speed",
                 "writeScope": "read_only",
-                "preference": "eligible",
-                "reasoningEffort": "auto"
-            }
+                "preference": "eligible"
+            },
+            "reasoning": {"policy": "delegated"}
         });
         assert_eq!(
             serde_json::to_value(&profile).expect("serialize public profile"),
@@ -2374,12 +2486,18 @@ mod tests {
         let mut p = profile("flash", "DeepSeek-V4-Flash");
         p.strengths = vec![strength];
         p.optimization = optimization;
-        p.overrides.model_reasoning_effort = override_effort;
+        p.reasoning = match override_effort {
+            Some(effort) => fixed_reasoning(effort),
+            None => CodexSubagentReasoningPolicy {
+                policy: ReasoningRuntimePolicy::Delegated,
+                effort: None,
+            },
+        };
         p
     }
 
     #[test]
-    fn codex_subagent_v2_auto_effort_is_high_for_complex_strength() {
+    fn codex_subagent_v2_delegated_effort_is_not_selected_from_complex_strength() {
         generated_for_profile(
             effort_profile(
                 TaskStrength::ArchitectureDesign,
@@ -2392,13 +2510,13 @@ mod tests {
                 DESC_ARCHITECTURE,
                 INSTRUCTIONS_ARCHITECTURE,
                 vec![s("Flash")],
-                ModelReasoningEffort::High,
+                Option::<CodexReasoningEffort>::None,
             ),
         );
     }
 
     #[test]
-    fn codex_subagent_v2_auto_effort_is_low_for_speed_read_only_strengths() {
+    fn codex_subagent_v2_delegated_effort_is_not_selected_from_read_only_strengths() {
         generated_for_profile(
             effort_profile(
                 TaskStrength::RepositoryExploration,
@@ -2411,7 +2529,7 @@ mod tests {
                 DESC_BALANCED_REPOSITORY,
                 INSTRUCTIONS_BALANCED_REPOSITORY,
                 vec![s("Flash")],
-                ModelReasoningEffort::Low,
+                Option::<CodexReasoningEffort>::None,
             ),
         );
     }
@@ -2446,7 +2564,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_subagent_v2_auto_effort_is_medium_for_speed_testing() {
+    fn codex_subagent_v2_delegated_effort_is_not_selected_from_testing_strength() {
         generated_for_profile(
             effort_profile(TaskStrength::Testing, Optimization::Speed, None),
             role(
@@ -2455,13 +2573,13 @@ mod tests {
                 DESC_TESTING,
                 INSTRUCTIONS_TESTING,
                 vec![s("Flash")],
-                ModelReasoningEffort::Medium,
+                Option::<CodexReasoningEffort>::None,
             ),
         );
     }
 
     #[test]
-    fn codex_subagent_v2_explicit_effort_overrides_auto_effort() {
+    fn codex_subagent_v2_fixed_effort_is_explicit() {
         generated_for_profile(
             effort_profile(
                 TaskStrength::ArchitectureDesign,
@@ -2502,7 +2620,7 @@ mod tests {
                 description,
                 developer_instructions,
                 vec![s("Flash")],
-                ModelReasoningEffort::Low,
+                Option::<CodexReasoningEffort>::None,
             ))),
         );
     }
@@ -2579,7 +2697,7 @@ mod tests {
                 "Manual selection text only.",
                 INSTRUCTIONS_BALANCED_REPOSITORY,
                 vec![s("Flash")],
-                ModelReasoningEffort::Low,
+                Option::<CodexReasoningEffort>::None,
             ),
         );
     }
@@ -2596,7 +2714,7 @@ mod tests {
                 DESC_BALANCED_REPOSITORY,
                 "Keep this override.",
                 vec![s("Flash")],
-                ModelReasoningEffort::Low,
+                Option::<CodexReasoningEffort>::None,
             ),
         );
     }
@@ -2617,7 +2735,7 @@ mod tests {
                 DESC_BALANCED_REPOSITORY,
                 INSTRUCTIONS_BALANCED_REPOSITORY,
                 vec![s("Flash")],
-                ModelReasoningEffort::Low,
+                Option::<CodexReasoningEffort>::None,
             ))),
         );
     }
@@ -2673,7 +2791,7 @@ mod tests {
                 DESC_BALANCED_REPOSITORY,
                 INSTRUCTIONS_BALANCED_REPOSITORY,
                 vec![s("Flash")],
-                ModelReasoningEffort::Low,
+                Option::<CodexReasoningEffort>::None,
             ))),
         );
     }
@@ -2691,7 +2809,7 @@ mod tests {
             DESC_BALANCED_REPOSITORY,
             INSTRUCTIONS_BALANCED_REPOSITORY,
             values.into_iter().map(s).collect(),
-            ModelReasoningEffort::Low,
+            Option::<CodexReasoningEffort>::None,
         ))
     }
 
@@ -2982,7 +3100,7 @@ mod tests {
                 DESC_BALANCED_REPOSITORY,
                 INSTRUCTIONS_BALANCED_REPOSITORY,
                 vec![s("Flash")],
-                ModelReasoningEffort::Low,
+                Option::<CodexReasoningEffort>::None,
             ),
         );
     }
@@ -3043,7 +3161,6 @@ mod tests {
             TaskStrength::Summarization,
             TaskStrength::Testing,
         ];
-        flash.reasoning_effort = QuestionnaireReasoningEffort::Medium;
         flash.preference = Preference::Preferred;
         flash.input_modalities = Some(vec![InputModality::Text]);
         let mut pro = profile("deepseek-v4-pro", "deepseek-v4-pro");
@@ -3056,7 +3173,6 @@ mod tests {
         ];
         pro.optimization = Optimization::Quality;
         pro.write_scope = WriteScope::ComplexChanges;
-        pro.reasoning_effort = QuestionnaireReasoningEffort::High;
         pro.preference = Preference::Preferred;
         pro.input_modalities = Some(vec![InputModality::Text]);
         assert_eq!(

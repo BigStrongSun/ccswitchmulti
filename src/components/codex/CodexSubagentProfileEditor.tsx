@@ -82,14 +82,6 @@ const PREFERENCE_VALUES = new Set<string>([
   "eligible",
   "fallback",
 ]);
-const QUESTIONNAIRE_REASONING_EFFORTS = new Set<string>([
-  "auto",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-]);
-
 function profileToneFor(
   profile: CodexSubagentV2Profile,
   status?: CodexSubagentProfileStatus,
@@ -187,10 +179,29 @@ function isUsableProfile(value: unknown): value is CodexSubagentV2Profile {
       typeof questionnaire.writeScope === "string" &&
       WRITE_SCOPE_VALUES.has(questionnaire.writeScope) &&
       typeof questionnaire.preference === "string" &&
-      PREFERENCE_VALUES.has(questionnaire.preference) &&
-      typeof questionnaire.reasoningEffort === "string" &&
-      QUESTIONNAIRE_REASONING_EFFORTS.has(questionnaire.reasoningEffort)
+      PREFERENCE_VALUES.has(questionnaire.preference)
     )
+  ) {
+    return false;
+  }
+  if (
+    !isRecord(value.reasoning) ||
+    typeof value.reasoning.policy !== "string"
+  ) {
+    return false;
+  }
+  const reasoning = value.reasoning;
+  const policy = reasoning.policy as string;
+  if (policy === "fixed") {
+    if (
+      typeof reasoning.effort !== "string" ||
+      !EXPLICIT_REASONING_EFFORTS.has(reasoning.effort)
+    ) {
+      return false;
+    }
+  } else if (
+    !["delegated", "model_default", "disabled"].includes(policy) ||
+    reasoning.effort !== undefined
   ) {
     return false;
   }
@@ -208,10 +219,7 @@ function isUsableProfile(value: unknown): value is CodexSubagentV2Profile {
       (Array.isArray(overrides.nicknameCandidates) &&
         overrides.nicknameCandidates.every(
           (nickname) => typeof nickname === "string",
-        ))) &&
-    (overrides.modelReasoningEffort === undefined ||
-      (typeof overrides.modelReasoningEffort === "string" &&
-        EXPLICIT_REASONING_EFFORTS.has(overrides.modelReasoningEffort)))
+        )))
   );
 }
 
@@ -231,7 +239,65 @@ function defaultProfileForModel(model: string): CodexSubagentV2Profile | null {
 function readPersistedConfig(provider: Provider): CodexSubagentV2Config | null {
   const routing = provider.settingsConfig?.codexRouting;
   if (!isRecord(routing) || !isRecord(routing.subagentV2)) return null;
-  return routing.subagentV2 as unknown as CodexSubagentV2Config;
+  const config = routing.subagentV2;
+  if (config.schemaVersion === 2) {
+    return config as unknown as CodexSubagentV2Config;
+  }
+  if (config.schemaVersion !== 1 || !isRecord(config.profiles)) return null;
+  const profiles: Record<string, unknown> = {};
+  for (const [key, rawProfile] of Object.entries(config.profiles)) {
+    if (!isRecord(rawProfile) || !isRecord(rawProfile.questionnaire)) {
+      profiles[key] = rawProfile;
+      continue;
+    }
+    const questionnaire = rawProfile.questionnaire;
+    const legacyEffort = questionnaire.reasoningEffort;
+    const rawOverrides = rawProfile.overrides;
+    if (rawOverrides !== undefined && !isRecord(rawOverrides)) {
+      profiles[key] = rawProfile;
+      continue;
+    }
+    const overrideEffort = rawOverrides?.modelReasoningEffort;
+    if (
+      typeof legacyEffort !== "string" ||
+      !["auto", "low", "medium", "high", "xhigh"].includes(legacyEffort) ||
+      (overrideEffort !== undefined &&
+        (typeof overrideEffort !== "string" ||
+          !EXPLICIT_REASONING_EFFORTS.has(overrideEffort)))
+    ) {
+      profiles[key] = rawProfile;
+      continue;
+    }
+    const { reasoningEffort: _legacyEffort, ...nextQuestionnaire } =
+      questionnaire;
+    const { modelReasoningEffort: _overrideEffort, ...nextOverrides } =
+      rawOverrides ?? {};
+    const fixedEffort =
+      typeof overrideEffort === "string"
+        ? overrideEffort
+        : legacyEffort === "auto"
+          ? undefined
+          : legacyEffort;
+    profiles[key] = {
+      ...rawProfile,
+      questionnaire: nextQuestionnaire,
+      reasoning: fixedEffort
+        ? { policy: "fixed", effort: fixedEffort }
+        : { policy: "delegated" },
+      ...(Object.keys(nextOverrides).length > 0
+        ? { overrides: nextOverrides }
+        : {}),
+    };
+  }
+  return {
+    schemaVersion: 2,
+    selectionPolicy:
+      config.selectionPolicy === "official_first" ||
+      config.selectionPolicy === "third_party_first"
+        ? config.selectionPolicy
+        : "balanced",
+    profiles: profiles as Record<string, CodexSubagentV2Profile>,
+  };
 }
 
 function inferredInputModalities(
@@ -1165,23 +1231,33 @@ export function CodexSubagentProfileEditor({
                           }
                         />
                         <QuestionnaireSelect
-                          label="推理强度"
-                          value={profile.questionnaire.reasoningEffort}
+                          label="推理策略"
+                          value={profile.reasoning.policy}
                           options={[
-                            ["auto", "自动"],
-                            ["low", "低"],
-                            ["medium", "中"],
-                            ["high", "高"],
-                            ["xhigh", "极高"],
+                            ["delegated", "允许主 Agent / spawn 指定"],
+                            ["model_default", "使用模型默认（固定）"],
+                            ["fixed", "固定档位"],
+                            ["disabled", "关闭推理"],
                           ]}
                           onChange={(value) =>
                             updateProfile(profileKey, (current) => ({
                               ...current,
-                              questionnaire: {
-                                ...current.questionnaire,
-                                reasoningEffort:
-                                  value as typeof current.questionnaire.reasoningEffort,
-                              },
+                              reasoning:
+                                value === "fixed"
+                                  ? {
+                                      policy: "fixed",
+                                      effort:
+                                        current.reasoning.policy === "fixed"
+                                          ? current.reasoning.effort
+                                          : (preview?.modelReasoningEffort ??
+                                            "medium"),
+                                    }
+                                  : {
+                                      policy: value as
+                                        | "delegated"
+                                        | "model_default"
+                                        | "disabled",
+                                    },
                             }))
                           }
                         />
@@ -1295,9 +1371,9 @@ export function CodexSubagentProfileEditor({
                                 模型推理强度
                               </label>
                               <span className="text-xs text-muted-foreground">
-                                {overrides.modelReasoningEffort === undefined
-                                  ? "自动"
-                                  : "手工覆盖"}
+                                {profile.reasoning.policy === "fixed"
+                                  ? "固定"
+                                  : "未固定"}
                               </span>
                             </span>
                             <div className="flex gap-2">
@@ -1305,17 +1381,20 @@ export function CodexSubagentProfileEditor({
                                 id={`codex-subagent-${profileIndex}-model-reasoning`}
                                 className="min-w-0 flex-1 rounded-md border bg-background px-3 py-2"
                                 value={
-                                  overrides.modelReasoningEffort ??
-                                  preview?.modelReasoningEffort ??
-                                  ""
+                                  profile.reasoning.policy === "fixed"
+                                    ? profile.reasoning.effort
+                                    : (preview?.modelReasoningEffort ?? "")
                                 }
+                                disabled={profile.reasoning.policy !== "fixed"}
                                 onChange={(event) =>
-                                  setOverride(
-                                    profileKey,
-                                    "modelReasoningEffort",
-                                    event.target
-                                      .value as CodexSubagentExplicitReasoningEffort,
-                                  )
+                                  updateProfile(profileKey, (current) => ({
+                                    ...current,
+                                    reasoning: {
+                                      policy: "fixed",
+                                      effort: event.target
+                                        .value as CodexSubagentExplicitReasoningEffort,
+                                    },
+                                  }))
                                 }
                               >
                                 <option value="" disabled>
@@ -1332,13 +1411,13 @@ export function CodexSubagentProfileEditor({
                                 type="button"
                                 variant="outline"
                                 onClick={() =>
-                                  restoreOverride(
-                                    profileKey,
-                                    "modelReasoningEffort",
-                                  )
+                                  updateProfile(profileKey, (current) => ({
+                                    ...current,
+                                    reasoning: { policy: "delegated" },
+                                  }))
                                 }
                               >
-                                恢复模型推理强度自动值
+                                允许主 Agent / spawn 指定
                               </Button>
                             </div>
                           </div>
@@ -1532,9 +1611,9 @@ function ProfileSummary({
   } as const;
   const providerKind = status?.providerKind ?? preview?.providerKind;
   const reasoning =
-    status?.modelReasoningEffort ??
-    preview?.modelReasoningEffort ??
-    profile.questionnaire.reasoningEffort;
+    profile.reasoning.policy === "fixed"
+      ? profile.reasoning.effort
+      : profile.reasoning.policy;
   const strengthLabels = profile.questionnaire.taskStrengths
     .slice(0, 3)
     .map((value) => TASK_STRENGTHS.find((item) => item.value === value)?.label)
