@@ -3,6 +3,7 @@ import type { Provider } from "@/types";
 import type {
   CodexSubagentProfilePreview,
   CodexSubagentProfileStatuses,
+  CodexSubagentReasoningCapabilities,
   CodexSubagentV2Config,
   CodexSubagentV2Profile,
 } from "@/types/codexSubagentV2";
@@ -36,6 +37,14 @@ export type CodexSubagentV2ReconcileAction =
   | "recover_all_invalid_from_catalog";
 
 export const codexSubagentV2Api = {
+  getReasoningCapabilities(
+    settingsConfig: Record<string, unknown>,
+  ): Promise<CodexSubagentReasoningCapabilities> {
+    return invoke("get_codex_subagent_reasoning_capabilities", {
+      settingsConfig,
+    });
+  },
+
   previewProfile(
     settingsConfig: Record<string, unknown>,
     model: string,

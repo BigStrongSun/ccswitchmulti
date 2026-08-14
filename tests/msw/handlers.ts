@@ -4,6 +4,7 @@ import type { McpServer, Provider, Settings } from "@/types";
 import type {
   CodexSubagentProfilePreview,
   CodexSubagentProfileStatuses,
+  CodexSubagentReasoningCapability,
 } from "@/types/codexSubagentV2";
 import {
   addProvider,
@@ -43,6 +44,30 @@ const withJson = async <T>(request: Request): Promise<T> => {
 
 const success = <T>(payload: T) => HttpResponse.json(payload as any);
 
+const deepseekReasoningCapability: CodexSubagentReasoningCapability = {
+  supportKind: "effort_levels" as const,
+  source: "builtin",
+  confidence: "confirmed" as const,
+  codexSelectableEfforts: [
+    "none",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+  ],
+  providerAcceptedEfforts: ["low", "high", "max"],
+  providerDefaultEffort: "high" as const,
+  disableAllowed: true,
+  effortMap: {
+    low: "low" as const,
+    medium: "high" as const,
+    high: "high" as const,
+    xhigh: "high" as const,
+    max: "max" as const,
+  },
+};
+
 const codexSubagentPreviewFixtures: Record<
   string,
   CodexSubagentProfilePreview
@@ -58,6 +83,8 @@ const codexSubagentPreviewFixtures: Record<
     model: "deepseek-v4-flash",
     modelProvider: "codex_model_router_v2",
     modelReasoningEffort: "medium",
+    reasoningPolicy: "fixed",
+    reasoningCapability: deepseekReasoningCapability,
     modelContextWindow: 128000,
     tomlPreview:
       '[agents.deepseek-flash]\nmodel = "deepseek-v4-flash"\nmodel_provider = "codex_model_router_v2"\nmodel_reasoning_effort = "medium"',
@@ -75,6 +102,8 @@ const codexSubagentPreviewFixtures: Record<
     model: "deepseek-v4-pro",
     modelProvider: "codex_model_router_v2",
     modelReasoningEffort: "high",
+    reasoningPolicy: "fixed",
+    reasoningCapability: deepseekReasoningCapability,
     modelContextWindow: 128000,
     tomlPreview:
       '[agents.deepseek-pro]\nmodel = "deepseek-v4-pro"\nmodel_provider = "codex_model_router_v2"\nmodel_reasoning_effort = "high"',

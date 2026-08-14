@@ -14,10 +14,35 @@ import { providersApi } from "@/lib/api/providers";
 import type { Provider } from "@/types";
 import type {
   CodexSubagentProfilePreview,
+  CodexSubagentReasoningCapability,
   CodexSubagentV2Profile,
 } from "@/types/codexSubagentV2";
 import { CodexMultiRouterWizard } from "./CodexMultiRouterWizard";
 import { CodexRouterWorkspacePage } from "./CodexRouterWorkspacePage";
+
+const deepseekReasoningCapability: CodexSubagentReasoningCapability = {
+  supportKind: "effort_levels" as const,
+  source: "builtin",
+  confidence: "confirmed" as const,
+  codexSelectableEfforts: [
+    "none",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+  ],
+  providerAcceptedEfforts: ["low", "high", "max"],
+  providerDefaultEffort: "high" as const,
+  disableAllowed: true,
+  effortMap: {
+    low: "low" as const,
+    medium: "high" as const,
+    high: "high" as const,
+    xhigh: "high" as const,
+    max: "max" as const,
+  },
+};
 
 const previewFixture = {
   providerKind: "third_party" as const,
@@ -29,6 +54,8 @@ const previewFixture = {
   model: "deepseek-v4-flash",
   modelProvider: "codex_model_router_v2",
   modelReasoningEffort: "medium" as const,
+  reasoningPolicy: "fixed" as const,
+  reasoningCapability: deepseekReasoningCapability,
   modelContextWindow: 128000,
   tomlPreview:
     '[agents.repository-scout-2]\nmodel = "deepseek-v4-flash"\nmodel_provider = "codex_model_router_v2"',
@@ -45,6 +72,8 @@ const proPreviewFixture = {
   model: "deepseek-v4-pro",
   modelProvider: "codex_model_router_v2" as const,
   modelReasoningEffort: "high" as const,
+  reasoningPolicy: "fixed" as const,
+  reasoningCapability: deepseekReasoningCapability,
   modelContextWindow: 256000,
   tomlPreview:
     '[agents.deep-reviewer]\nmodel = "deepseek-v4-pro"\nmodel_provider = "codex_model_router_v2"',
@@ -61,6 +90,8 @@ const qwenPreviewFixture = {
   model: "qwen3.6",
   modelProvider: "codex_model_router_v2" as const,
   modelReasoningEffort: "medium" as const,
+  reasoningPolicy: "fixed" as const,
+  reasoningCapability: deepseekReasoningCapability,
   modelContextWindow: 262144,
   tomlPreview:
     '[agents.qwen3-6]\nmodel = "qwen3.6"\nmodel_provider = "codex_model_router_v2"',
@@ -77,6 +108,8 @@ const backendDraftPreviewFixture = {
   model: "QWEN-ＤＲＡＦＴ",
   modelProvider: "codex_model_router_v2" as const,
   modelReasoningEffort: "medium" as const,
+  reasoningPolicy: "fixed" as const,
+  reasoningCapability: deepseekReasoningCapability,
   modelContextWindow: 131072,
   tomlPreview:
     '[agents.qwen-draft]\nmodel = "QWEN-ＤＲＡＦＴ"\nmodel_provider = "codex_model_router_v2"',
@@ -93,6 +126,8 @@ const officialDraftPreviewFixture = {
   model: "gpt-5.6-sol",
   modelProvider: "codex_model_router_v2" as const,
   modelReasoningEffort: "high" as const,
+  reasoningPolicy: "fixed" as const,
+  reasoningCapability: deepseekReasoningCapability,
   modelContextWindow: 262144,
   tomlPreview:
     '[agents.official-integrator]\nmodel = "gpt-5.6-sol"\nmodel_provider = "codex_model_router_v2"',

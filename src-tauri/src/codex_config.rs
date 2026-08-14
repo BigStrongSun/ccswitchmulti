@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::codex_subagent_profiles::{
@@ -3587,6 +3587,29 @@ fn get_codex_subagent_profile_statuses_from_db(
         .map_err(|error| format!("Unable to inspect Codex subagent profiles: {error}"))
 }
 
+fn get_codex_subagent_reasoning_capabilities_from_settings(
+    settings: &Value,
+) -> BTreeMap<String, ResolvedSubagentReasoningCapability> {
+    codex_catalog_model_specs(settings, "")
+        .into_iter()
+        .map(|spec| {
+            let capability =
+                crate::proxy::providers::codex_reasoning::resolve_subagent_reasoning_capability(
+                    spec.reasoning.as_ref(),
+                );
+            (spec.model, capability)
+        })
+        .collect()
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn get_codex_subagent_reasoning_capabilities(
+    settingsConfig: Value,
+) -> BTreeMap<String, ResolvedSubagentReasoningCapability> {
+    get_codex_subagent_reasoning_capabilities_from_settings(&settingsConfig)
+}
+
 #[tauri::command]
 #[allow(non_snake_case)]
 pub fn get_codex_subagent_profile_statuses(
@@ -6622,6 +6645,7 @@ mod tests {
     #[test]
     fn codex_subagent_profile_status_command_is_registered_without_changing_preview_ipc() {
         let lib_source = include_str!("lib.rs");
+        assert!(lib_source.contains("codex_config::get_codex_subagent_reasoning_capabilities,"));
         assert!(
             lib_source.contains("codex_config::get_codex_subagent_profile_statuses,"),
             "the read-only status command must be registered independently from preview"

@@ -30,6 +30,28 @@ export type CodexSubagentExplicitReasoningEffort =
   | "max"
   | "ultra";
 
+export type CodexSubagentReasoningEffort =
+  | "none"
+  | CodexSubagentExplicitReasoningEffort;
+
+export interface CodexSubagentReasoningCapability {
+  supportKind: "effort_levels" | "boolean_only" | "unsupported" | "unknown";
+  source?: string | null;
+  confidence: "confirmed" | "declared" | "unverified";
+  codexSelectableEfforts: CodexSubagentReasoningEffort[];
+  providerAcceptedEfforts: CodexSubagentReasoningEffort[];
+  providerDefaultEffort?: CodexSubagentReasoningEffort | null;
+  disableAllowed: boolean;
+  effortMap: Partial<
+    Record<CodexSubagentReasoningEffort, CodexSubagentReasoningEffort>
+  >;
+}
+
+export type CodexSubagentReasoningCapabilities = Record<
+  string,
+  CodexSubagentReasoningCapability
+>;
+
 export type CodexSubagentReasoningPolicy =
   | { policy: "delegated" }
   | { policy: "model_default" }
@@ -75,6 +97,8 @@ export interface CodexSubagentProfilePreview {
   model: string;
   modelProvider: "codex_model_router_v2";
   modelReasoningEffort?: CodexSubagentExplicitReasoningEffort;
+  reasoningPolicy: CodexSubagentReasoningPolicy["policy"];
+  reasoningCapability: CodexSubagentReasoningCapability;
   modelContextWindow: number;
   tomlPreview: string;
   warnings: string[];
@@ -113,6 +137,8 @@ export interface CodexSubagentProfileStatus {
   roleFilePath?: string;
   modelProvider?: "codex_model_router_v2";
   modelReasoningEffort?: CodexSubagentExplicitReasoningEffort;
+  reasoningPolicy?: CodexSubagentReasoningPolicy["policy"];
+  reasoningCapability?: CodexSubagentReasoningCapability;
   status: CodexSubagentProfileStatusCode;
   nonGenerationReason?: CodexSubagentNonGenerationReason;
   warnings: string[];
