@@ -421,17 +421,30 @@ vi.mock("@tauri-apps/api/core", () => ({
           ?.reasoning;
         const effort =
           reasoning?.policy === "fixed" ? reasoning.effort : undefined;
-        if (effort === "max") {
-          return JSON.parse(
-            JSON.stringify({
-              ...fixture,
-              modelReasoningEffort: effort,
-              tomlPreview: `${fixture.tomlPreview}\nmodel_reasoning_effort = "max"`,
-            }),
-          );
-        }
-        return JSON.parse(JSON.stringify(fixture));
+        const effectiveEffort =
+          reasoning?.policy === "disabled"
+            ? "none"
+            : reasoning?.policy === "model_default"
+              ? "high"
+              : effort;
+        const response = {
+          ...fixture,
+          reasoningPolicy: reasoning?.policy ?? "delegated",
+          reasoningCapability: deepseekReasoningCapability,
+          ...(effectiveEffort
+            ? { modelReasoningEffort: effectiveEffort }
+            : { modelReasoningEffort: undefined }),
+          tomlPreview: effectiveEffort
+            ? `${fixture.tomlPreview}\nmodel_reasoning_effort = "${effectiveEffort}"`
+            : fixture.tomlPreview,
+        };
+        return JSON.parse(JSON.stringify(response));
       }
+      case "get_codex_subagent_reasoning_capabilities":
+        return {
+          "deepseek-v4-flash": deepseekReasoningCapability,
+          "deepseek-v4-pro": deepseekReasoningCapability,
+        };
       case "get_codex_subagent_profile_statuses":
         if (ipcState.statusError) throw new Error(ipcState.statusError);
         return JSON.parse(JSON.stringify(ipcState.statusResponse));
@@ -3024,6 +3037,56 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
         ].reasoning,
       ).toEqual({ policy: "fixed", effort: "max" }),
     );
+  });
+
+  it("uses backend capability evidence to restrict DeepSeek fixed effort choices", async () => {
+    const user = userEvent.setup();
+    await renderWorkspace();
+    const flash = within(await openAdvancedFields(user));
+
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith(
+        "get_codex_subagent_reasoning_capabilities",
+        expect.objectContaining({ settingsConfig: expect.any(Object) }),
+      ),
+    );
+    expect(flash.getByText("能力来源：builtin（confirmed）")).toBeInTheDocument();
+    expect(flash.getByText("Provider 原生档位：low / high / max")).toBeInTheDocument();
+    expect(
+      flash.getByText(
+        "Codex 可选档位：none / low / medium / high / xhigh / max",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      flash.getByText("映射：low→low，medium→high，high→high，xhigh→high，max→max"),
+    ).toBeInTheDocument();
+
+    const effort = flash.getByLabelText("模型推理强度");
+    expect(
+      within(effort)
+        .getAllByRole("option")
+        .map((option) => option.getAttribute("value")),
+    ).toEqual(["low", "medium", "high", "xhigh", "max"]);
+  });
+
+  it("makes delegated, model-default, fixed and disabled semantics explicit", async () => {
+    const user = userEvent.setup();
+    await renderWorkspace();
+    const flash = within(await openProfile(user, "deepseek-v4-flash"));
+    const policy = flash.getByLabelText("推理策略");
+
+    await chooseOption(user, policy, "允许主 Agent / spawn 指定");
+    expect(
+      await flash.findByText("由主 Agent、spawn 参数或 Codex 默认值决定"),
+    ).toBeInTheDocument();
+
+    await chooseOption(user, policy, "使用模型默认（固定）");
+    expect(await flash.findByText("固定为模型当前默认 high")).toBeInTheDocument();
+
+    await chooseOption(user, policy, "关闭推理");
+    expect(
+      await flash.findByText(/关闭推理；上游将使用 reasoning_effort 的关闭语义/),
+    ).toBeInTheDocument();
   });
 
   it("removes description alone after all five overrides were established", async () => {
