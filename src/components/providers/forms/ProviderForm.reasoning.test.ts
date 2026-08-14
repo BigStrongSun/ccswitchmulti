@@ -1,8 +1,34 @@
 import { describe, expect, it } from "vitest";
 
 import { normalizeCodexCatalogModelsForSave } from "./ProviderForm";
+import { applyCodexReasoningCapabilitySource } from "./CodexFormFields";
 
 describe("Codex catalog reasoning capability persistence", () => {
+  it("separates automatic, maintained and manual capability sources", () => {
+    const maintained = {
+      supported: true,
+      supportedEfforts: ["low", "high", "max"] as const,
+      defaultEffort: "high" as const,
+      disableAllowed: true,
+      upstream: {
+        format: "string" as const,
+        parameter: "reasoning_effort" as const,
+        effortMap: { low: "low" as const, high: "high" as const, max: "max" as const },
+      },
+      source: "builtin" as const,
+    };
+
+    expect(
+      applyCodexReasoningCapabilitySource("automatic", undefined, maintained),
+    ).toBeUndefined();
+    expect(
+      applyCodexReasoningCapabilitySource("builtin", undefined, maintained),
+    ).toEqual(maintained);
+    expect(
+      applyCodexReasoningCapabilitySource("manual", maintained, maintained),
+    ).toEqual(expect.objectContaining({ source: "user" }));
+  });
+
   it("preserves a valid user model reasoning override", () => {
     const [model] = normalizeCodexCatalogModelsForSave([
       {
