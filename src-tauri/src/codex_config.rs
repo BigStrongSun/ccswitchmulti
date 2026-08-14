@@ -918,6 +918,10 @@ fn apply_codex_model_reasoning_capability(
     ] {
         entry_obj.remove(field);
     }
+    entry_obj.insert(
+        "supported_reasoning_levels".to_string(),
+        Value::Array(Vec::new()),
+    );
     let Some(capability) = capability.filter(|capability| capability.supported) else {
         return;
     };
