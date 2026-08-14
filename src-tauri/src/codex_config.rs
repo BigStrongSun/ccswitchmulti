@@ -3607,6 +3607,7 @@ pub struct CodexSubagentProfilePreview {
     nickname_candidates: Vec<String>,
     model: String,
     model_provider: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     model_reasoning_effort: Option<crate::codex_subagent_profiles::ModelReasoningEffort>,
     reasoning_policy: SubagentReasoningRuntimePolicy,
     reasoning_capability: ResolvedSubagentReasoningCapability,
