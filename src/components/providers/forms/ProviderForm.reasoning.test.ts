@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import type { CodexModelReasoningCapability } from "@/types";
 
 import { normalizeCodexCatalogModelsForSave } from "./ProviderForm";
-import { applyCodexReasoningCapabilitySource } from "./CodexFormFields";
+import {
+  applyCodexReasoningCapabilitySource,
+  validateCodexReasoningCapabilityDraft,
+} from "./CodexFormFields";
 
 describe("Codex catalog reasoning capability persistence", () => {
   it("separates automatic, maintained and manual capability sources", () => {
@@ -76,5 +79,22 @@ describe("Codex catalog reasoning capability persistence", () => {
         },
       ]),
     ).toThrow(/defaultEffort/);
+  });
+
+  it("rejects expert JSON mappings before they can mutate the draft", () => {
+    expect(() =>
+      validateCodexReasoningCapabilityDraft({
+        supported: true,
+        supportedEfforts: ["low", "high"],
+        defaultEffort: "high",
+        disableAllowed: false,
+        upstream: {
+          format: "string",
+          parameter: "reasoning_effort",
+          effortMap: { medium: "max" },
+        },
+        source: "user",
+      }),
+    ).toThrow(/mapping target max/);
   });
 });
