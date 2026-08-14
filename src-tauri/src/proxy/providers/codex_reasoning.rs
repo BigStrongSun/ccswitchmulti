@@ -1,8 +1,101 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    fmt,
+    str::FromStr,
+};
 
-const VALID_EFFORTS: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+const VALID_EFFORTS: &[&str] = &[
+    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CodexReasoningEffort {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    #[serde(rename = "xhigh")]
+    XHigh,
+    Max,
+    Ultra,
+}
+
+impl CodexReasoningEffort {
+    const ORDERED: [Self; 8] = [
+        Self::None,
+        Self::Minimal,
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::XHigh,
+        Self::Max,
+        Self::Ultra,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+            Self::Ultra => "ultra",
+        }
+    }
+}
+
+impl fmt::Display for CodexReasoningEffort {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for CodexReasoningEffort {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::ORDERED
+            .into_iter()
+            .find(|candidate| candidate.as_str() == value)
+            .ok_or_else(|| format!("unknown reasoning effort: {value}"))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningSupportKind {
+    EffortLevels,
+    BooleanOnly,
+    Unsupported,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningConfidence {
+    Confirmed,
+    Declared,
+    Unverified,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedSubagentReasoningCapability {
+    pub support_kind: ReasoningSupportKind,
+    pub source: Option<String>,
+    pub confidence: ReasoningConfidence,
+    pub codex_selectable_efforts: Vec<CodexReasoningEffort>,
+    pub provider_accepted_efforts: Vec<CodexReasoningEffort>,
+    pub provider_default_effort: Option<CodexReasoningEffort>,
+    pub disable_allowed: bool,
+    pub effort_map: BTreeMap<CodexReasoningEffort, CodexReasoningEffort>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -50,7 +143,109 @@ impl CodexModelReasoningCapability {
         if !self.supported && !self.supported_efforts.is_empty() {
             return Err("unsupported capability cannot advertise efforts".to_string());
         }
+        if self.upstream.effort_map.iter().any(|(source, target)| {
+            !VALID_EFFORTS.contains(&source.as_str()) || !VALID_EFFORTS.contains(&target.as_str())
+        }) {
+            return Err("effortMap contains an unknown effort".to_string());
+        }
+        if self.upstream.effort_map.values().any(|target| {
+            !self
+                .supported_efforts
+                .iter()
+                .any(|supported| supported == target)
+        }) {
+            return Err("effortMap target must be present in supportedEfforts".to_string());
+        }
         Ok(())
+    }
+}
+
+pub fn resolve_subagent_reasoning_capability(
+    capability: Option<&CodexModelReasoningCapability>,
+) -> ResolvedSubagentReasoningCapability {
+    let Some(capability) = capability.filter(|value| value.validate().is_ok()) else {
+        return ResolvedSubagentReasoningCapability {
+            support_kind: ReasoningSupportKind::Unknown,
+            source: None,
+            confidence: ReasoningConfidence::Unverified,
+            codex_selectable_efforts: Vec::new(),
+            provider_accepted_efforts: Vec::new(),
+            provider_default_effort: None,
+            disable_allowed: false,
+            effort_map: BTreeMap::new(),
+        };
+    };
+
+    let provider_accepted_efforts = CodexReasoningEffort::ORDERED
+        .into_iter()
+        .filter(|effort| {
+            capability
+                .supported_efforts
+                .iter()
+                .any(|value| value == effort.as_str())
+        })
+        .collect::<Vec<_>>();
+    let provider_effort_set = provider_accepted_efforts
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    let mut effort_map = provider_accepted_efforts
+        .iter()
+        .copied()
+        .map(|effort| (effort, effort))
+        .collect::<BTreeMap<_, _>>();
+    for (source, target) in &capability.upstream.effort_map {
+        let Ok(source) = source.parse::<CodexReasoningEffort>() else {
+            continue;
+        };
+        let Ok(target) = target.parse::<CodexReasoningEffort>() else {
+            continue;
+        };
+        if provider_effort_set.contains(&target) {
+            effort_map.insert(source, target);
+        }
+    }
+
+    let selectable_set = effort_map
+        .keys()
+        .copied()
+        .chain(
+            capability
+                .disable_allowed
+                .then_some(CodexReasoningEffort::None),
+        )
+        .collect::<HashSet<_>>();
+    let codex_selectable_efforts = CodexReasoningEffort::ORDERED
+        .into_iter()
+        .filter(|effort| selectable_set.contains(effort))
+        .collect();
+    let support_kind = if !capability.supported {
+        ReasoningSupportKind::Unsupported
+    } else if !provider_accepted_efforts.is_empty() {
+        ReasoningSupportKind::EffortLevels
+    } else if capability.upstream.format == "boolean" {
+        ReasoningSupportKind::BooleanOnly
+    } else {
+        ReasoningSupportKind::Unknown
+    };
+    let confidence = match capability.source.as_deref() {
+        Some("builtin") => ReasoningConfidence::Confirmed,
+        Some("user") => ReasoningConfidence::Declared,
+        _ => ReasoningConfidence::Unverified,
+    };
+
+    ResolvedSubagentReasoningCapability {
+        support_kind,
+        source: capability.source.clone(),
+        confidence,
+        codex_selectable_efforts,
+        provider_accepted_efforts,
+        provider_default_effort: capability
+            .default_effort
+            .as_deref()
+            .and_then(|value| value.parse().ok()),
+        disable_allowed: capability.disable_allowed,
+        effort_map,
     }
 }
 
