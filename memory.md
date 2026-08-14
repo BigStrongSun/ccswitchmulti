@@ -3298,3 +3298,9 @@
 - `CodexProviderReadinessSection` 只消费 `CodexFormFields` 已拥有的 model sync/protocol probe state 和回调，不应另建平行状态；错误验证结果用 `role="alert"`，其它验证结果用 `role="status"`。
 - 维护预设继续显示协议、上下文、推理档位及 `/model` 目录由 CCSwitchMulti 维护；自定义 Provider 继续是自动检测 Chat/Responses，失败后才允许高级手动覆盖。Task 4 的旧 route editor 可见入口仍保持收口，`codexRouting` 历史兼容链不能被本 UI 变动误删。
 - TDD 移植证据：RED `1abad036` 的独立测试在 GREEN 前因缺少 `CodexProviderReadinessSection` import 预期失败；GREEN `ee1c393c` 后 `CodexProviderReadinessSection` 与 `ProviderForm.codexPreset` 定向测试 12/12 通过，`git diff --check` 通过。测试输出仍有既有 baseline-browser-mapping 过期与 React act warning，非失败。
+
+## 2026-08-14 MultiRouter 原地完成收尾
+
+- MultiRouter 的运行态五项验证成功（当前 Provider、代理监听、Codex 接管、路由入口、最近一次匹配路由的转发）必须留在状态工作台原地显示“MultiRouter 已通过真实请求验证”；不得再通过 App 回调自动跳到 Sessions 或自动打开历史修复。
+- 只移除 MultiRouter 专属 `onRuntimeReady`、post-setup ref 和 Sessions 自动导航。`SessionManagerPage` 的独立 Codex 历史修复工具及 `onCodexHistoryRepairCompleted` 回调必须继续保留；四阶段向导和 V2 `initializeProviderConfig` 初始化调用也不得随之回退。
+- TDD 移植证据：RED `90321d0e` 在未修改生产代码前得到两项预期失败——工作台缺少原地成功提示；App 在 15 秒超时下实际 `data-runtime-ready-wired=true`、预期 false。GREEN `86e4965c` 后工作台与 App 60/60 通过；随后表单回归 `c16a17ed` 让测试壳按用户真实路径展开“高级选项”，同时保留默认折叠、按钮入口和菜单投影断言。最终聚焦测试 82/82、typecheck、变更文件 Prettier 与 `git diff --check` 均通过。本轮写入文件已严格 UTF-8 解码、无新增 BOM、无 U+FFFD；`CodexRouterWorkspacePage.tsx` 的 BOM 已存在于任务基线。App 测试仍会输出既有 Tauri window metadata stderr，且 `baseline-browser-mapping` 数据过期提示不影响退出码。
