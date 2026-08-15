@@ -9432,6 +9432,44 @@ mod tests {
         assert_eq!(account_id.as_deref(), Some("acct_1"));
     }
 
+    #[test]
+    fn streaming_auto_tool_choice_preserves_upstream_stream_instead_of_hosted_loop() {
+        let request = serde_json::json!({
+            "stream": true,
+            "tool_choice": "auto",
+            "tools": [
+                {"type": "web_search"},
+                {"type": "function", "name": "shell", "parameters": {"type": "object"}}
+            ]
+        });
+
+        assert!(!should_enable_hosted_tool_loop(&request));
+    }
+
+    #[test]
+    fn explicit_hosted_tool_choice_may_use_buffered_hosted_loop() {
+        for hosted_type in ["web_search", "image_generation"] {
+            let request = serde_json::json!({
+                "stream": true,
+                "tool_choice": {"type": hosted_type},
+                "tools": [{"type": hosted_type}]
+            });
+
+            assert!(should_enable_hosted_tool_loop(&request));
+        }
+    }
+
+    #[test]
+    fn non_streaming_auto_request_keeps_hosted_tool_loop() {
+        let request = serde_json::json!({
+            "stream": false,
+            "tool_choice": "auto",
+            "tools": [{"type": "web_search"}]
+        });
+
+        assert!(should_enable_hosted_tool_loop(&request));
+    }
+
     /// 验证 hosted web_search loop 会消费第一轮工具调用、回灌 tool output 并返回最终 Chat 响应。
     #[tokio::test]
     async fn hosted_web_search_loop_appends_tool_output_and_marks_response() {
