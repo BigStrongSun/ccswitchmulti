@@ -3529,3 +3529,9 @@
 - annotated tag object 为 `9d6a8d95f36adaabcb5563eba0cf577c1e24f1cf`，本地和远端 peeled commit 均精确为可信构建提交 `a94210a8e3be0ca7e0bfd5f8f4bc20621f006a94`；后续发布证据提交不得移动 v28 tag。
 - GitHub Actions run `31865535416` 最终为 success，Linux x64/ARM64、Windows x64/ARM64、macOS、Publish GitHub Release、Assemble `latest.json` 七个 jobs 全部完成。Release id `370966917`，非 draft、非 prerelease，`releases/latest` 返回 `v3.19.1-28`。
 - Release 共 19 个实际资产。全部下载到独立临时目录后逐项使用 SHA-256 对照 GitHub 服务端 `digest`，`DigestMismatchCount=0`；`latest.json` 版本为 `3.19.1-28`，六个平台键齐全，URL 全部指向 v28，签名全部非空且与对应 `.sig` 精确一致。
+
+## 2026-08-15 linked worktree 发布目录推导
+
+- `local-release-pipeline.ps1` 与 `export-latest-ccswitchmulti.ps1` 原先分别以当前 `RepoRoot` 的父目录作为工作区根。普通 checkout 中这恰好是 `LLMservice`，但 linked worktree 的 `RepoRoot` 位于 `cc-switch\.worktrees\<name>`，因此 v29 工件被错误导出到 `cc-switch\.worktrees\最新版ccswitchmulti`。
+- Git 官方文档明确 linked worktree 的私有 `GIT_DIR` 位于主仓库 `.git\worktrees\<id>`，共享 `GIT_COMMON_DIR` 指回主仓库 `.git`；本机 `git rev-parse --git-common-dir` 同样返回 `C:\Users\sunda\Documents\LLMservice\cc-switch\.git`。默认发布目录必须从 common dir 的父目录定位主仓库，再取其父目录作为工作区，不能从当前 worktree 路径猜测。
+- 默认路径解析已收敛到 `release-build-config.ps1` 的单一 helper；两个发布入口共用。显式 `-ReleaseRoot` 不访问 Git 元数据并保持最高优先级；缺失/异常 Git common dir 时 fail closed，不再静默导出到错误目录。RED `5d1fa8f4` 锁定普通 checkout、linked worktree、显式覆盖与非 Git 失败四类契约。

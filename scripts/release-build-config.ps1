@@ -36,6 +36,55 @@ function Get-ReleaseFileSha256 {
     }
 }
 
+function Resolve-CcswitchmultiReleaseRoot {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [string]$RequestedRoot = "",
+        [string]$GitCommonDir
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($RequestedRoot)) {
+        return $RequestedRoot
+    }
+
+    $resolvedCommonDir = $GitCommonDir
+    if (-not $PSBoundParameters.ContainsKey("GitCommonDir")) {
+        $commonDirOutput = @(
+            & git -C $RepoRoot rev-parse --path-format=absolute --git-common-dir 2>$null
+        )
+        if ($LASTEXITCODE -eq 0) {
+            $resolvedCommonDir = ($commonDirOutput | ForEach-Object { [string]$_ }) -join ""
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($resolvedCommonDir)) {
+        throw "cannot resolve the CCSwitchMulti main repository from Git common-dir metadata"
+    }
+
+    if (-not [System.IO.Path]::IsPathRooted($resolvedCommonDir)) {
+        $resolvedCommonDir = [System.IO.Path]::GetFullPath((Join-Path $RepoRoot $resolvedCommonDir))
+    } else {
+        $resolvedCommonDir = [System.IO.Path]::GetFullPath($resolvedCommonDir)
+    }
+
+    if (-not [string]::Equals(
+            [System.IO.Path]::GetFileName($resolvedCommonDir.TrimEnd('\', '/')),
+            ".git",
+            [System.StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "cannot resolve the CCSwitchMulti main repository: Git common-dir is not a .git directory"
+    }
+
+    $mainRepositoryRoot = Split-Path -Parent $resolvedCommonDir
+    $workspaceRoot = Split-Path -Parent $mainRepositoryRoot
+    if ([string]::IsNullOrWhiteSpace($workspaceRoot)) {
+        throw "cannot resolve the CCSwitchMulti workspace root from Git common-dir metadata"
+    }
+
+    $folderName = @([char]0x6700, [char]0x65B0, [char]0x7248, "ccswitchmulti") -join ""
+    return Join-Path $workspaceRoot $folderName
+}
+
 function Assert-LocalTauriCliVersion {
     param([Parameter(Mandatory = $true)][string]$RepoRoot)
 
