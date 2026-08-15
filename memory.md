@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-08-15 v29 Codex Windows project key parse failure root cause
+
+- 用户打开历史任务 `019ffff0-c707-7be1-9075-4c85450b8fb4` 时，Codex Desktop 报 `~/.codex/config.toml:8:16 too few unicode value digits`。失败行是 Windows project trust 表头；basic quoted key 中的裸 `c:\users\...` 会把反斜杠加 `u` 解释为 Unicode escape。
+- 运行日志把故障窗口锁到 CCSM 生命周期：19:51:10 v29 主动退出并执行 `codex Live 配置已从备份恢复`，19:51:13 重启重新接管，19:51:23 又关闭并恢复、19:51:24 再接管。当前配置在后续重写后变为合法 literal quoted project key，目标任务从 `notLoaded` 恢复为 `idle`。
+- 代码根因是配置兼容修复边界过窄：`normalize_codex_config_text_for_live_read` 只修复 Codex Desktop 生成的 root `notify = ["C:\Users\..."]`，不修复同一类 `[projects."C:\Users\..."]` 表头；restore/switch 的原子写边界又只验证、不规范化。因此历史 Live/备份一旦含该 Windows project key，CCSM 的恢复链无法自愈，并可在退出/重启窗口把不可加载状态暴露给 Codex Desktop。
+- 修复边界：只在原文整体无效时，定向识别 `[projects."..."]` / `[projects.'...']` 的 Windows 路径键；basic key 补齐反斜杠转义，literal key保持原样。所有 Codex 原子写入口在落盘前都必须走同一 normalize + validate，确保备份恢复、provider switch、force repair 不再分叉。
+- 在线交叉验证：Codex 官方源码确认 `projects` 是配置 trust map，Windows 会规范化 lookup key；TOML 规范要求 basic string/key 中反斜杠使用转义。Codex 内置搜索和 Matrix WebSearch 都未找到 CCSwitchMulti 此具体报错的公开 issue；现场日志、报错列、当前 DB 历史字符串和 v29 源码构成主要证据。
+
 ## 2026-08-15 PR #9 reasoning 修复选择性吸收
 
 - GitHub PR #9（`zhushihao/fix/28-reasoning@da4300ac`）准确定位了 v28 的一项 UI 死锁：后端 `status="disabled"` 代表 profile 未启用，并不等于模型 `unroutable`。V2 编辑器必须以权威 `status.status == "unroutable"` 禁用编辑/启用控件，不能继续用历史兼容字段 `routable == false` 判断。
