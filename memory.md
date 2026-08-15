@@ -3548,3 +3548,10 @@
 - 默认路径解析已收敛到 `release-build-config.ps1` 的单一 helper；两个发布入口共用。显式 `-ReleaseRoot` 不访问 Git 元数据并保持最高优先级；缺失/异常 Git common dir 时 fail closed，不再静默导出到错误目录。RED `5d1fa8f4` 锁定普通 checkout、linked worktree、显式覆盖与非 Git 失败四类契约。
 - GREEN `066ecfb9` 后 Windows PowerShell 5.1 的 release/transaction Pester 为 62/62；实际 `-SkipBuild` 复用 v29 已构建工件并导出到 `C:\Users\sunda\Documents\LLMservice\最新版ccswitchmulti`。目录内 15/15 checksum 回读一致，installer `B371BE5A...A406C`、raw EXE `A165E2AE...FE5`、NSIS 安装态 `9ABF497D...3C40E` 与先前可信构建/事务证据一致。
 - 当前安装进程唯一 PID `48256`，路径 `C:\Users\sunda\AppData\Local\CCSwitchMulti\cc-switch.exe`，FileVersion/ProductVersion 与注册表均为 `3.19.1-29`；实际 SHA-256 精确为 `9ABF497D...3C40E`，15721 只有一个 listener 且 health HTTP 200。误导出目录已解析确认仅为 `.worktrees\最新版ccswitchmulti` 的 16 个生成文件；当前执行安全策略拒绝递归删除，未绕过限制，它不属于 Git 工作树内容且不参与后续发布上传。
+
+## 2026-08-15 v3.19.1-29 GitHub 正式发布
+
+- annotated tag object 为 `92bf19832a057d2de718a010ce1d4ca728d5426d`，本地与远端 peeled commit 均为 `ba3189340837f2e5f17908107369e73ba853e87b`；该提交包含 linked worktree 导出根修和本地安装/导出证据，后续文档提交不得移动 v29 tag。
+- GitHub Actions run `31882903091` 最终 success：Linux x64/ARM64、Windows x64/ARM64、macOS、Publish GitHub Release、Assemble `latest.json` 七个 job 全部成功。Release 非 draft、非 prerelease并成为 `/releases/latest`，共 19 个实际资产。
+- 19 个远端资产全部下载到独立临时目录后逐项对照 GitHub 服务端 `digest`，`DigestMismatchCount=0`。远端 `latest.json` SHA-256 为 `750581D779821758A8C1E72CAF67F46531B8BC8150A51E36FDA11B88F11DF228`，Windows x64 setup 为 `AD84F67EC155F0B219014C5D0CAB800D3DE4BBA7B7ADBBE182735E7CC10C0BFA`。
+- `latest.json` 版本为 `3.19.1-29`，六个平台键齐全；所有 URL 均指向 `/releases/download/v3.19.1-29/`，所有 signature 非空并与对应 `.sig` 精确一致。发布地址为 `https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.19.1-29`。
