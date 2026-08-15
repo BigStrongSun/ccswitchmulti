@@ -3496,11 +3496,18 @@
 - 目标会话约 189K prompt tokens、945 KB 请求体、139 条 Chat message 和 41 个工具，仍低于 Qwen3.8 的 262144 上下文；现场没有 429、5xx、context overflow 或转换丢失。长上下文只放大等待，不是根因。
 - roglinux 透明代理把 thinking/Tool Guard 模型硬编码为 `qwen3.6`，且模型切换只重启 vLLM worker：环境文件已写 `VLLM_SERVED_MODEL_NAME=qwen3.8`，长驻 proxy 进程仍持有 `qwen3.6`。独立修复仓库 `C:\Users\sunda\Documents\LLMservice\qwen38-tool-guard-fix` 用 RED/GREEN 将系统 Guard、tail Guard、流过滤和 generation limit 统一到运行时模型解析器，并让 controller/兼容 shell 切换事务重启 proxy/dashboard。生产 canary 日志为 `codex_tool_guard_applied=true`、`system_applied+tail_applied`，同时正常最终文本成功，不能用全局 `tool_choice=required` 代替。
 - CCSwitch 根因位于 `forwarder.rs`：只要原始请求带 Hosted Web Search/Image Generation 且开关启用，就把全部 Responses-to-Chat 请求改成 `stream=false`；Codex 显示流式但上游没有增量，长上下文时表现为持续“正在思考”。v31 改为语义化传输策略：流式 `tool_choice=auto` 保留 SSE 并从 Chat 投影中移除 hosted-only 工具，普通客户端工具不受影响；显式 hosted tool choice 与真正非流式请求继续走有界 loop。不得根据用户文本猜测是否搜索。
-- RED/GREEN 提交为 `9ca173a0` / `c45d0dfa`（从 v30 基线重放后的哈希）。完整 Rust library 为 3000 passed / 0 failed / 2 ignored，`cargo check --lib`、rustfmt 与 `git diff --check` 通过。安装验收必须看到同一 trace 的 `streaming=true` 和 `upstream_stream=true`，并分别验证普通工具循环、显式 Hosted 工具、正常最终回答与长上下文。
+- RED/GREEN 提交为 `9ca173a0` / `c45d0dfa`（从 v30 基线重放后的哈希）。与 reasoning PR 合流后的完整 Rust library 为 3006 passed / 0 failed / 2 ignored，前端相关测试 179/179；typecheck、`cargo check --lib`、rustfmt 与 `git diff --check` 通过。安装验收必须看到同一 trace 的 `streaming=true` 和 `upstream_stream=true`，并分别验证普通工具循环、显式 Hosted 工具、正常最终回答与长上下文。
 - v31 本地 release 构建日志明确出现 Tauri `Patching ... with bundle type information: nsis`，安装包 SHA-256 为 `665CDBF69AE889CAA5AD3473A3AB71CAD4B99C79633EB41CDF93B86E15FE88F5`。事务 `ccsm-20260815-214338-8abca640d04e4137bf314eaa3d95264d` 返回 `Success`、`Error=null`、`RollbackError=null`；安装版 PID/15721 owner 均为 `48992`，ProductVersion `3.19.1-31`，SHA-256 `DE307C845D02CE59AF334DFEE98C2A2BC193E9A1A0981266BEFC59A5C0754A96`，health HTTP 200。
 - 安装版真实 Qwen canary 使用 `stream=true`、`tool_choice=auto`，同时携带 hosted `web_search` 与普通 function。首个 SSE 事件 0.593 秒到达，共 50 个事件并以 `response.completed` 结束；router trace `ef86c36b-0970-4665-9a50-2c8b7371365d` 显示 `/responses -> /chat/completions`、Qwen route HTTP 200、`streaming=true`、`upstream_stream=true`。这证明全局 Hosted Tools 不再让普通 Agent 请求失去增量输出。
 - 第二个安装版 canary 在相同 hosted `web_search` 广告下要求普通 `report_marker`，实际收到流式 `response.function_call_arguments.done`、正确工具名和 `CCSM_QWEN38_TOOL_OK` 参数；trace `ed4f112d-8604-4857-b8b3-9f81c00d38c2` 同样为 HTTP 200、`streaming=true`、`upstream_stream=true`。因此策略只移除 hosted-only 定义，没有误删 Codex 的终端/文件/MCP 类客户端工具。
 - 发布流水线曾在进程启动时读取 v30，随后 worktree 提升 v31，导致实际成功构建 v31 但导出阶段仍寻找 v30；重新执行 `export-latest-ccswitchmulti.ps1 -SkipBuild` 后按当前 v31 正确生成安装包、签名和 `latest.json`。以后版本提升必须发生在启动发布流水线之前，不能在持锁构建期间改变版本源。
+
+## 2026-08-15 v3.19.1-31 GitHub 正式发布
+
+- 正式 annotated tag object 为 `faf339642fc6dbcd5f817d84563c9e04c0fc59ae`，本地与远端 peeled commit 均精确为最终合并候选 `12272a3184838f86284f55bfd3cd75ae7be9bd24`；tag 后的审计文档提交不得移动该标签。
+- GitHub Actions Release run `31891915431` 七个 job 全部 success：Windows x64/ARM64、Linux x64/ARM64、macOS、`Publish GitHub Release` 与 `Assemble latest.json`。Release id `371086603`，非 draft、非 prerelease，并成为 Latest。
+- Release 共 19 个实际资产。全部下载到独立临时目录后使用流式 SHA-256 逐项对照 GitHub 服务端 digest，`DIGEST_MISMATCH_COUNT=0`；Windows x64 Setup 大小为 `11678809` bytes，FileVersion/ProductVersion 均为 `3.19.1-31`，SHA-256 为 `a638296671d3ca20e1831e96521517e4ddb42c82fd1081ef1859ed79c6d6cdda`。
+- `latest.json` 的版本为 `3.19.1-31`，六个平台键齐全，全部下载 URL 指向本 tag；六项 signature 均非空并与对应 `.sig` 文件精确一致。`release.released` 没有触发新的 R2 同步 run，因此本轮只声明 GitHub Release 完成，不声明 R2 已同步。
 
 ## 2026-08-15 v3.19.1-28 可信构建、事务安装与 UI 验收
 
