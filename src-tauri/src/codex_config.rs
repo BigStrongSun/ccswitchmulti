@@ -7803,6 +7803,31 @@ mod tests {
     }
 
     #[test]
+    fn codex_live_read_recovers_desktop_rewritten_notify_inside_developer_instructions() {
+        let invalid = concat!(
+            "developer_instructions = \"\"\"\n",
+            "notify = ['C:\\Users\\sunda\\AppData\\Local\\OpenAI\\Codex\\runtimes\\cua_node\\bin\\codex-computer-use.exe', \"turn-ended\"]\n",
+            "Keep this user instruction.\n",
+            "\"\"\"\n",
+            "notify = [\"C:\\\\Users\\\\sunda\\\\codex-computer-use.exe\", \"turn-ended\"]\n",
+        );
+        assert!(validate_config_toml(invalid).is_err());
+
+        let normalized = normalize_codex_config_text_for_live_read(invalid)
+            .expect("Desktop-rewritten notify text inside instructions should be recoverable");
+        let doc = normalized
+            .parse::<DocumentMut>()
+            .expect("recovered config should parse");
+        assert_eq!(
+            doc["developer_instructions"].as_str(),
+            Some(concat!(
+                "notify = ['C:\\Users\\sunda\\AppData\\Local\\OpenAI\\Codex\\runtimes\\cua_node\\bin\\codex-computer-use.exe', \"turn-ended\"]\n",
+                "Keep this user instruction.\n",
+            ))
+        );
+    }
+
+    #[test]
     fn codex_subagent_v2_missing_fixed_reasoning_field_reports_specific_code() {
         let error = parse_persisted_subagent_v2(&json!({
             "schemaVersion": 2,
@@ -10805,6 +10830,48 @@ openai_base_url = "http://127.0.0.1:15721/v1"
         )
         .expect("remove parent policy in V1");
         assert_eq!(removed, original);
+    }
+
+    #[test]
+    fn codex_subagent_parent_projection_does_not_leave_notify_shaped_instruction_lines() {
+        let settings = json!({
+            "codexRouting": {
+                "enabled": true,
+                "subagentVersion": "v2",
+                "routes": [],
+                "subagentV2": {
+                    "schemaVersion": 2,
+                    "selectionPolicy": "balanced",
+                    "profiles": {}
+                }
+            },
+            "modelCatalog": { "models": [] }
+        });
+        let original = concat!(
+            "developer_instructions = \"\"\"\n",
+            "notify = ['C:\\\\Users\\\\sunda\\\\example.exe', \"turn-ended\"]\n",
+            "Keep this user instruction.\n",
+            "\"\"\"\n",
+        );
+
+        let projected = project_codex_subagent_v2_parent_instructions(
+            &settings,
+            original,
+            &[],
+            CodexSubagentVersion::V2,
+            None,
+        )
+        .expect("project parent policy");
+        validate_config_toml(&projected).expect("projected config must stay valid");
+        assert!(
+            !projected.lines().any(|line| line.starts_with("notify =")),
+            "instruction contents must be escaped instead of resembling a root notify assignment"
+        );
+        let doc = projected.parse::<DocumentMut>().expect("parse projection");
+        assert!(doc["developer_instructions"]
+            .as_str()
+            .expect("developer instructions")
+            .contains("notify = ['C:\\Users\\sunda\\example.exe', \"turn-ended\"]"));
     }
 
     #[test]
