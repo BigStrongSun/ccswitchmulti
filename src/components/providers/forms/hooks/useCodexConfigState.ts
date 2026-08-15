@@ -107,6 +107,7 @@ export function extractCodexRoutingConfig(
 
   if (routing && typeof routing === "object") {
     return {
+      ...routing,
       enabled: routing.enabled !== false,
       defaultRouteId:
         typeof routing.defaultRouteId === "string"

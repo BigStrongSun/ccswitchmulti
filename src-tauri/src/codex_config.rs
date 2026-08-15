@@ -306,11 +306,130 @@ pub fn validate_config_toml(text: &str) -> Result<(), AppError> {
         .map_err(|e| AppError::toml(Path::new("config.toml"), e))
 }
 
+fn line_toggles_toml_multiline_string(line: &str, delimiter: &str) -> bool {
+    let mut count = 0usize;
+    let mut offset = 0usize;
+    while let Some(relative) = line[offset..].find(delimiter) {
+        let index = offset + relative;
+        if delimiter == "'''"
+            || index == 0
+            || line.as_bytes().get(index.wrapping_sub(1)) != Some(&b'\\')
+        {
+            count += 1;
+        }
+        offset = index + delimiter.len();
+    }
+    count % 2 == 1
+}
+
+fn escape_unescaped_toml_windows_path(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    if bytes.len() < 3 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b':' || bytes[2] != b'\\' {
+        return None;
+    }
+
+    let mut output = String::with_capacity(value.len() + 8);
+    let mut chars = value.chars().peekable();
+    let mut repaired = false;
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            output.push(ch);
+            continue;
+        }
+
+        let mut run = 1usize;
+        while chars.peek() == Some(&'\\') {
+            chars.next();
+            run += 1;
+        }
+        if run % 2 == 1 {
+            repaired = true;
+        }
+        for _ in 0..run.div_ceil(2) {
+            output.push_str("\\\\");
+        }
+    }
+
+    repaired.then_some(output)
+}
+
+fn repair_root_notify_windows_path_line(line: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    let notify_tail = trimmed.strip_prefix("notify")?;
+    if !notify_tail.trim_start().starts_with('=') {
+        return None;
+    }
+    let array_start = line.find('[')?;
+    let quote_start = line[array_start + 1..].find('"')? + array_start + 1;
+    let value_start = quote_start + 1;
+    let quote_end = line[value_start..].find('"')? + value_start;
+    let value = &line[value_start..quote_end];
+    let escaped = escape_unescaped_toml_windows_path(value)?;
+
+    let mut output = String::with_capacity(line.len() + escaped.len() - value.len());
+    output.push_str(&line[..value_start]);
+    output.push_str(&escaped);
+    output.push_str(&line[quote_end..]);
+    Some(output)
+}
+
+/// Codex Desktop 的 Windows Computer Use 初始化器曾生成过裸反斜杠的根级
+/// `notify = ["C:\Users\...", ...]`。在 TOML basic string 中 `\U` 会被解释为
+/// 8 位 Unicode 转义并使整个 Live 配置不可解析。这里只在原文本确实无效时，
+/// 对首个 table 之前、且不在多行字符串内的根级 notify 命令路径做规范化；用户
+/// 的其他 TOML、说明文字和已经合法的双反斜杠保持逐字不变。
+fn normalize_codex_config_text_for_live_read(text: &str) -> Result<String, AppError> {
+    if validate_config_toml(text).is_ok() {
+        return Ok(text.to_string());
+    }
+
+    let mut output = String::with_capacity(text.len() + 16);
+    let mut in_basic_multiline = false;
+    let mut in_literal_multiline = false;
+    let mut root_scope = true;
+    let mut repaired = false;
+
+    for line in text.split_inclusive('\n') {
+        let outside_multiline = !in_basic_multiline && !in_literal_multiline;
+        if outside_multiline && root_scope && line.trim_start().starts_with('[') {
+            root_scope = false;
+        }
+
+        if outside_multiline && root_scope {
+            if let Some(next) = repair_root_notify_windows_path_line(line) {
+                output.push_str(&next);
+                repaired = true;
+            } else {
+                output.push_str(line);
+            }
+        } else {
+            output.push_str(line);
+        }
+
+        if !in_literal_multiline && line_toggles_toml_multiline_string(line, "\"\"\"") {
+            in_basic_multiline = !in_basic_multiline;
+        }
+        if !in_basic_multiline && line_toggles_toml_multiline_string(line, "'''") {
+            in_literal_multiline = !in_literal_multiline;
+        }
+    }
+
+    if repaired {
+        validate_config_toml(&output)?;
+        log::warn!(
+            "Normalized an invalid unescaped Windows path in Codex Live notify configuration"
+        );
+        return Ok(output);
+    }
+
+    validate_config_toml(text)?;
+    Ok(text.to_string())
+}
+
 /// 读取并校验 `~/.codex/config.toml`，返回文本（可能为空）
 pub fn read_and_validate_codex_config_text() -> Result<String, AppError> {
     let s = read_codex_config_text()?;
-    validate_config_toml(&s)?;
-    Ok(s)
+    normalize_codex_config_text_for_live_read(&s)
 }
 
 fn active_codex_model_provider_id(doc: &DocumentMut) -> Option<String> {
@@ -2827,6 +2946,17 @@ fn public_codex_subagent_validation_code(error: &SubagentCompileError) -> &str {
             | "missing_reasoning_effort"
             | "invalid_reasoning_effort"
             | "invalid_override_effort"
+            | "missing_reasoning_policy"
+            | "invalid_reasoning_policy"
+            | "missing_fixed_reasoning_effort"
+            | "unexpected_reasoning_effort"
+            | "invalid_input_modalities"
+            | "legacy_reasoning_effort_in_schema_v2"
+            | "legacy_override_effort_in_schema_v2"
+            | "invalid_overrides"
+            | "missing_default_reasoning_effort"
+            | "unsupported_reasoning_effort"
+            | "reasoning_disable_unsupported"
             | "profile_key_model_mismatch"
             | "empty_description"
             | "empty_developer_instructions"
@@ -7488,7 +7618,7 @@ mod tests {
     fn codex_live_read_normalizes_only_invalid_unescaped_windows_notify_paths() {
         let invalid = concat!(
             "developer_instructions = \"\"\"\n",
-            "notify = [\"C:\\Users\\inside\\instructions.exe\", \"turn-ended\"]\n",
+            "notify = [\"C:\\\\Users\\\\inside\\\\instructions.exe\", \"turn-ended\"]\n",
             "\"\"\"\n",
             "notify = [\"C:\\Users\\sunda\\AppData\\Local\\OpenAI\\Codex\\runtimes\\cua_node\\bin\\codex-computer-use.exe\", \"turn-ended\"]\n",
             "model = \"gpt-5.5\"\n",
@@ -7503,7 +7633,7 @@ mod tests {
             "\\\\runtimes\\\\cua_node\\\\bin\\\\codex-computer-use.exe\", \"turn-ended\"]"
         )));
         assert!(normalized
-            .contains("notify = [\"C:\\Users\\inside\\instructions.exe\", \"turn-ended\"]"));
+            .contains("notify = [\"C:\\\\Users\\\\inside\\\\instructions.exe\", \"turn-ended\"]"));
 
         let already_valid =
             "notify = [\"C:\\\\Users\\\\sunda\\\\codex-computer-use.exe\", \"turn-ended\"]\n";

@@ -1,3 +1,5 @@
+import type { CodexSubagentV2Config } from "./types/codexSubagentV2";
+
 export type ProviderCategory =
   | "official" // 官方
   | "cn_official" // 开源官方（原"国产官方"）
@@ -414,6 +416,7 @@ export interface CodexRoutingConfig {
   defaultRouteId?: string;
   officialAuth?: CodexOfficialAuthConfig;
   subagentVersion?: CodexSubagentVersion;
+  subagentV2?: CodexSubagentV2Config;
   routes?: CodexRoutingRoute[];
 }
 

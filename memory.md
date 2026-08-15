@@ -3475,3 +3475,12 @@
 - `routable=false` 是可用性/配置状态，不是错误，必须使用中性灰色；红色只用于解析失败、保存失败等真实错误。不可路由且未启用的 profile 不允许启用或编辑；已启用后变得不可路由的 profile 仍必须允许用户关闭。
 - 本轮 RED 提交为 `bcdc8ef6`。生产实现 focused 证据：V2 前端、向导新旧测试和 App 入口集成共 168/168；Rust `codex_subagent_v2` 103/103；typecheck、Prettier、rustfmt、`git diff --check` 通过。Browser 在独立 Vite renderer 中实际验证深色与通过 CDP 模拟的浅色首屏；Tauri-only invoke/event 错误属于 renderer 脱离 native host 的预期限制，不能冒充安装版运行时无错误证明。
 - 本修复位于 `bigstrongsun/fix-wizard-provider-subagent-ux`，基线为已发布 v27 的 `d2a0a2dc`；不得移动或重建 `v3.19.1-27` tag，也未获授权推送、安装或发布本修复。
+
+## 2026-08-15 Codex 热切换 Windows notify 与 Sub-Agent V2 固定字段丢失
+
+- 用户同时报告了两条互不依赖的切换失败。第一条是 Codex Desktop 生成的根级 `notify` 命令把 Windows 路径写成 TOML basic string 中的裸反斜杠，`C:\Users...` 的 `\U` 被解析为 8 位 Unicode 转义起点，CCSM 在读取原 Live 配置时严格失败。第二条是普通 Provider 表单读取已有 `codexRouting` 时只重建 `enabled/defaultRouteId/officialAuth/routes`，把 `subagentVersion` 和完整 `subagentV2` 固定字段从保存结果中删除，下一次 V2 编译因此报笼统 `invalid_configuration`。
+- Live 兼容边界只能处理首个 TOML table 之前、不在多行字符串内、根级 `notify` 数组首参数中的 Windows 绝对路径；仅当原 TOML 无效且路径含未配对反斜杠时补齐转义。合法配置、单引号 literal path、多行 developer instructions、其他表和任意非 notify 语法错误必须保持原行为，不能用宽泛字符串替换掩盖损坏。
+- `codexRouting` 是方案级可扩展对象。`extractCodexRoutingConfig()` 读取对象 schema 时必须先保留原对象，再规范化 UI 直接维护的核心字段；类型契约显式包含 `subagentV2`。普通 Provider 保存、模型目录编辑或协议刷新都不得擦除 V1/V2 选择、问卷、reasoning runtime policy、overrides 或未来新增的方案级字段。
+- V2 schema 2 的公开校验码必须覆盖 `missing_reasoning_policy`、`invalid_reasoning_policy`、fixed/default effort、input modalities、legacy v2 字段和 reasoning capability 不兼容等实际错误；已知结构错误不得再折叠为 `invalid_configuration`，否则用户无法定位丢失栏位。
+- RED 提交 `7460469b` 分别锁定路由固定字段保留、Windows notify 读取归一化和具体 reasoning 缺失错误码。GREEN 聚焦验证为 ProviderForm/配置状态与 V2 编辑器合计 140/140、扩大 Codex config 170/170、`cargo check --lib`、typecheck、Prettier、rustfmt 和 `git diff --check` 全部通过；既有 `baseline-browser-mapping` 提示和 `openai_cache_read_tokens` dead-code warning 与本修复无关。
+- 本机当前 Live 配置同时存在多行 `developer_instructions` 内的 notify 示例文字和真正根级 notify；实际复读确认前者必须逐字保留、后者在当前 Codex 版本已是合法双反斜杠。读取兼容器的 multiline/root-scope 限制正是防止把说明文字当配置修复。
