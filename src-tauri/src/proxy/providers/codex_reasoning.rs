@@ -119,6 +119,13 @@ pub struct CodexModelReasoningCapability {
     pub source: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReasoningCapabilityRepairOutcome {
+    pub repaired_models: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
 impl CodexModelReasoningCapability {
     pub fn validate(&self) -> Result<(), String> {
         if self
@@ -158,6 +165,114 @@ impl CodexModelReasoningCapability {
         }
         Ok(())
     }
+}
+
+/// Repair persisted reasoning metadata that older CCSwitchMulti versions allowed to drift.
+///
+/// Exact DeepSeek V4 model IDs use the maintained built-in declaration. Unknown models keep
+/// their own declared levels and merely choose the first valid level when their default is
+/// invalid; they never inherit GPT or DeepSeek capabilities.
+pub fn repair_invalid_reasoning_capabilities(
+    settings: &mut Value,
+) -> ReasoningCapabilityRepairOutcome {
+    let mut outcome = ReasoningCapabilityRepairOutcome::default();
+    let Some(models) = settings
+        .get_mut("modelCatalog")
+        .and_then(|catalog| catalog.get_mut("models"))
+        .and_then(Value::as_array_mut)
+    else {
+        return outcome;
+    };
+
+    for entry in models {
+        let model = ["model", "id", "slug", "upstreamModel", "upstream_model"]
+            .into_iter()
+            .find_map(|field| entry.get(field).and_then(Value::as_str))
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let Some(reasoning) = entry.get("reasoning") else {
+            continue;
+        };
+        let parsed = serde_json::from_value::<CodexModelReasoningCapability>(reasoning.clone());
+        if parsed.as_ref().is_ok_and(|value| value.validate().is_ok()) {
+            continue;
+        }
+
+        if let Some(builtin) = builtin_reasoning_capability_for_model(&model) {
+            entry["reasoning"] = serde_json::to_value(builtin)
+                .expect("built-in reasoning capability must be serializable");
+            outcome.repaired_models.push(model.clone());
+            outcome.warnings.push(format!(
+                "Restored maintained reasoning capability for {model}"
+            ));
+            continue;
+        }
+
+        let Some(object) = entry.get_mut("reasoning").and_then(Value::as_object_mut) else {
+            continue;
+        };
+        let supported = object
+            .get("supportedEfforts")
+            .and_then(Value::as_array)
+            .map(|values| {
+                let mut seen = HashSet::new();
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter(|effort| VALID_EFFORTS.contains(effort))
+                    .filter(|effort| seen.insert((*effort).to_string()))
+                    .map(|effort| Value::String(effort.to_string()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let supported_names = supported
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect::<HashSet<_>>();
+        object.insert("supportedEfforts".to_string(), Value::Array(supported));
+
+        let default_is_valid = object
+            .get("defaultEffort")
+            .and_then(Value::as_str)
+            .is_some_and(|effort| supported_names.contains(effort));
+        if !default_is_valid {
+            if let Some(first) = supported_names
+                .iter()
+                .min_by_key(|effort| {
+                    VALID_EFFORTS
+                        .iter()
+                        .position(|candidate| candidate == &effort.as_str())
+                        .unwrap_or(usize::MAX)
+                })
+                .cloned()
+            {
+                object.insert("defaultEffort".to_string(), Value::String(first));
+            } else {
+                object.remove("defaultEffort");
+            }
+        }
+        if let Some(effort_map) = object
+            .get_mut("upstream")
+            .and_then(Value::as_object_mut)
+            .and_then(|upstream| upstream.get_mut("effortMap"))
+            .and_then(Value::as_object_mut)
+        {
+            effort_map.retain(|source, target| {
+                VALID_EFFORTS.contains(&source.as_str())
+                    && target
+                        .as_str()
+                        .is_some_and(|target| supported_names.contains(target))
+            });
+        }
+        outcome.repaired_models.push(model.clone());
+        outcome.warnings.push(format!(
+            "Repaired invalid reasoning metadata for {model} using only its declared efforts"
+        ));
+    }
+
+    outcome
 }
 
 pub fn resolve_subagent_reasoning_capability(
@@ -343,7 +458,9 @@ mod tests {
         let repaired = &settings["modelCatalog"]["models"][0]["reasoning"];
         assert_eq!(repaired["supportedEfforts"], json!(["low", "high", "max"]));
         assert_eq!(repaired["defaultEffort"], json!("high"));
-        assert!(outcome.repaired_models.contains(&"deepseek-v4-flash".to_string()));
+        assert!(outcome
+            .repaired_models
+            .contains(&"deepseek-v4-flash".to_string()));
         assert!(!outcome.warnings.is_empty());
     }
 
@@ -368,7 +485,9 @@ mod tests {
         assert_eq!(repaired["supportedEfforts"], json!(["low"]));
         assert_eq!(repaired["defaultEffort"], json!("low"));
         assert_eq!(repaired["source"], json!("user"));
-        assert!(outcome.repaired_models.contains(&"private-model".to_string()));
+        assert!(outcome
+            .repaired_models
+            .contains(&"private-model".to_string()));
     }
 
     fn deepseek_capability() -> CodexModelReasoningCapability {

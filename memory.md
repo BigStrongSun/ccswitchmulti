@@ -6,6 +6,8 @@
 - “强制覆盖”不能删除整份 `~/.codex/config.toml`。已确认边界：先备份 Live 配置和目标 Provider；保留 MCP、projects、plugins、memories、用户自定义 role 等非托管字段；规范化 agents alias 和可迁移 reasoning；再以目标 Provider 重跑正常切换；任一步失败恢复原 Live 和 Provider。
 - DeepSeek V4 的旧坏 `defaultEffort` 应回到已维护预设 `low/high/max + high`。未知模型只能从自身合法 `supportedEfforts` 中选择默认值，不能套用 GPT 或 DeepSeek 档位。
 - 切换失败 toast 必须携带失败时的 `appId/providerId`：Codex 显示“复制 + 强制覆盖”，其他应用仍只显示复制，防止误修另一 Provider。
+- GREEN 已实现显式 Tauri 恢复命令：创建 `~/.cc-switch/backups/codex-force-repair/<timestamp>-<provider>/`，保存原始 `config.toml` 与 Provider JSON；格式保留地迁移 notify Windows 路径和 agents alias；修复 reasoning；重跑正常切换；最终补回 `mcp_servers/projects/plugins/memories` 中被普通投影清掉的用户条目。切换或最终校验失败会恢复 Provider、当前 Provider ID、settings 与原始 Live TOML。
+- 聚焦验证已通过：3 个 force-repair Rust 测试（成功迁移、用户字段保留、失败精确回滚）、8 个 codex_reasoning 测试、2 个前端 action 测试、TypeScript typecheck 与 `git diff --check`。
 
 ## 2026-08-15 V27 主 Agent / Sub-Agent 推理强度协调实现与验收
 

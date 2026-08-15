@@ -2493,6 +2493,98 @@ fn ensure_codex_agents_defaults(doc: &mut DocumentMut) {
     }
 }
 
+/// Result of the narrow, format-preserving repair used before a forced Codex switch.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexLiveConfigRepairOutcome {
+    pub config_text: String,
+    pub repaired_fields: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+/// Canonicalize legacy Codex fields without replacing the user's configuration document.
+///
+/// The caller is responsible for backing up and atomically writing the returned text. This
+/// function intentionally edits only schema aliases CCSwitchMulti knows how to migrate. MCP,
+/// projects, plugins, memories and user-authored agent configuration remain untouched.
+pub fn repair_codex_live_config_text_for_force_switch(
+    config_text: &str,
+) -> Result<CodexLiveConfigRepairOutcome, AppError> {
+    let normalized = normalize_codex_config_text_for_live_read(config_text)?;
+    let mut doc = if normalized.trim().is_empty() {
+        DocumentMut::new()
+    } else {
+        normalized
+            .parse::<DocumentMut>()
+            .map_err(|error| AppError::Message(format!("Invalid Codex config.toml: {error}")))?
+    };
+    let had_legacy_threads = doc
+        .get("agents")
+        .and_then(|item| item.as_table())
+        .is_some_and(|agents| agents.contains_key("max_threads"));
+    let had_canonical_threads = doc
+        .get("agents")
+        .and_then(|item| item.as_table())
+        .is_some_and(|agents| agents.contains_key("max_concurrent_threads_per_session"));
+
+    ensure_codex_agents_defaults(&mut doc);
+
+    let mut repaired_fields = Vec::new();
+    let mut warnings = Vec::new();
+    if had_legacy_threads {
+        repaired_fields.push("agents.max_threads".to_string());
+        if had_canonical_threads {
+            warnings.push(
+                "Removed duplicate agents.max_threads alias; preserved max_concurrent_threads_per_session"
+                    .to_string(),
+            );
+        }
+    }
+    if normalized != config_text {
+        repaired_fields.push("notify".to_string());
+        warnings.push("Escaped a legacy Windows notify path so the TOML remains valid".to_string());
+    }
+
+    let repaired = doc.to_string();
+    validate_config_toml(&repaired)?;
+    Ok(CodexLiveConfigRepairOutcome {
+        config_text: repaired,
+        repaired_fields,
+        warnings,
+    })
+}
+
+/// Restore user-owned root tables after the normal switch pipeline has projected CCSM state.
+///
+/// Existing post-switch values win; entries that disappeared solely because they are not in
+/// CCSwitchMulti's database are filled from the pre-switch document. Provider/model routing is
+/// deliberately excluded so stale endpoints or bearer tokens cannot be resurrected.
+pub fn restore_codex_user_owned_tables_after_force_switch(
+    before_switch: &str,
+    after_switch: &str,
+) -> Result<String, AppError> {
+    let before = before_switch
+        .parse::<DocumentMut>()
+        .map_err(|error| AppError::Message(format!("Invalid pre-switch Codex config: {error}")))?;
+    let mut after = after_switch
+        .parse::<DocumentMut>()
+        .map_err(|error| AppError::Message(format!("Invalid post-switch Codex config: {error}")))?;
+
+    for key in ["mcp_servers", "projects", "plugins", "memories"] {
+        let Some(original) = before.get(key) else {
+            continue;
+        };
+        match after.as_table_mut().get_mut(key) {
+            Some(current) => merge_missing_codex_toml_item(current, original),
+            None => {
+                after.as_table_mut().insert(key, original.clone());
+            }
+        }
+    }
+
+    Ok(after.to_string())
+}
+
 /// 根据模型 slug 生成官方 custom agent 的稳定角色名。
 fn codex_agent_role_name_for_model(model: &str) -> String {
     let normalized = model.trim().to_ascii_lowercase();
@@ -12203,14 +12295,14 @@ max_depth = 2
 [mcp_servers.user_owned]
 command = "example-mcp"
 
-[projects.'C:\\Users\\example\\repo']
+[projects.'C:\Users\example\repo']
 trust_level = "trusted"
 "#;
 
         let outcome = repair_codex_live_config_text_for_force_switch(input)
             .expect("force repair should accept valid legacy TOML");
-        let parsed: toml::Value = toml::from_str(&outcome.config_text)
-            .expect("repaired config should remain valid TOML");
+        let parsed: toml::Value =
+            toml::from_str(&outcome.config_text).expect("repaired config should remain valid TOML");
         let agents = parsed.get("agents").expect("agents table");
 
         assert_eq!(
