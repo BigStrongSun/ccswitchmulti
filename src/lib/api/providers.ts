@@ -21,6 +21,14 @@ export interface SwitchResult {
   warnings: string[];
 }
 
+export interface CodexForceRepairOutcome {
+  providerId: string;
+  backupDirectory: string;
+  repairedFields: string[];
+  repairedModels: string[];
+  warnings: string[];
+}
+
 export interface CodexOfficialRestoreOutcome {
   officialProviderId: string;
   switchWarnings: string[];
@@ -163,6 +171,14 @@ export const providersApi = {
 
   async switch(id: string, appId: AppId): Promise<SwitchResult> {
     return await invoke("switch_provider", { id, app: appId });
+  },
+
+  async forceRepairAndSwitchCodexProvider(
+    providerId: string,
+  ): Promise<CodexForceRepairOutcome> {
+    return await invoke("force_repair_and_switch_codex_provider", {
+      providerId,
+    });
   },
 
   /** 退出 Codex 接管、切回 OpenAI 官方，并把全部历史归并到 openai 桶。 */
