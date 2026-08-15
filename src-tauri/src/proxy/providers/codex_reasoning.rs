@@ -206,10 +206,7 @@ pub fn resolve_subagent_reasoning_capability(
         }
     }
 
-    let selectable_set = provider_effort_set
-        .iter()
-        .copied()
-        .collect::<HashSet<_>>();
+    let selectable_set = provider_effort_set.iter().copied().collect::<HashSet<_>>();
     let codex_selectable_efforts = CodexReasoningEffort::ORDERED
         .into_iter()
         .filter(|effort| selectable_set.contains(effort))

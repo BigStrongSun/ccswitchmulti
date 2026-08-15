@@ -2571,8 +2571,7 @@ mod tests {
 
     #[test]
     fn capability_effort_mapping_narrow_display_wide_remap() {
-        let mode =
-            "capability|low,high,max|low=low,medium=high,high=high,xhigh=high,max=max";
+        let mode = "capability|low,high,max|low=low,medium=high,high=high,xhigh=high,max=max";
         // 映射档位兜底：medium/xhigh 命中 effort_map 映射，转发到上游 high
         assert_eq!(
             map_capability_reasoning_effort("medium", mode).unwrap(),
@@ -2583,14 +2582,8 @@ mod tests {
             "high"
         );
         // 真实档位 identity 映射
-        assert_eq!(
-            map_capability_reasoning_effort("low", mode).unwrap(),
-            "low"
-        );
-        assert_eq!(
-            map_capability_reasoning_effort("max", mode).unwrap(),
-            "max"
-        );
+        assert_eq!(map_capability_reasoning_effort("low", mode).unwrap(), "low");
+        assert_eq!(map_capability_reasoning_effort("max", mode).unwrap(), "max");
         // 未知档位：无映射且不在 allowed，仍 fail closed
         assert!(map_capability_reasoning_effort("foo", mode).is_err());
     }

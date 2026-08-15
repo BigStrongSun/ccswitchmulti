@@ -2793,13 +2793,15 @@ mod tests {
 
     #[test]
     fn capability_effort_mode_keeps_wide_mappings_for_narrow_selectable() {
-        let capability = crate::proxy::providers::codex_reasoning::builtin_reasoning_capability_for_model(
-            "deepseek-v4-flash",
-        )
-        .expect("deepseek builtin");
-        let resolved = crate::proxy::providers::codex_reasoning::resolve_subagent_reasoning_capability(
-            Some(&capability),
-        );
+        let capability =
+            crate::proxy::providers::codex_reasoning::builtin_reasoning_capability_for_model(
+                "deepseek-v4-flash",
+            )
+            .expect("deepseek builtin");
+        let resolved =
+            crate::proxy::providers::codex_reasoning::resolve_subagent_reasoning_capability(Some(
+                &capability,
+            ));
         let mode = encode_codex_capability_effort_mode(
             &resolved.codex_selectable_efforts,
             &resolved.effort_map,
