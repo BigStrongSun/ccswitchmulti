@@ -494,6 +494,7 @@ fn normalized_image_url(part: &Value) -> Option<Value> {
         _ => return None,
     };
     merge_top_level_detail(part, &mut object);
+    normalize_chat_image_detail(&mut object);
     Some(Value::Object(object))
 }
 
@@ -560,6 +561,7 @@ fn typed_image_url(part: &Value) -> Option<Value> {
             let mut image_url = Map::new();
             image_url.insert("url".to_string(), Value::String(url.to_string()));
             merge_top_level_detail(part, &mut image_url);
+            normalize_chat_image_detail(&mut image_url);
             return Some(Value::Object(image_url));
         }
 
@@ -585,6 +587,7 @@ fn typed_image_url(part: &Value) -> Option<Value> {
             let mut image_url = Map::new();
             image_url.insert("url".to_string(), Value::String(url));
             merge_top_level_detail(part, &mut image_url);
+            normalize_chat_image_detail(&mut image_url);
             return Some(Value::Object(image_url));
         }
     }
@@ -604,6 +607,7 @@ fn typed_image_url(part: &Value) -> Option<Value> {
         Value::String(format!("data:{media_type};base64,{data}")),
     );
     merge_top_level_detail(part, &mut image_url);
+    normalize_chat_image_detail(&mut image_url);
     Some(Value::Object(image_url))
 }
 
@@ -630,6 +634,31 @@ fn merge_top_level_detail(part: &Value, image_url: &mut Map<String, Value>) {
     if image_url.get("detail").is_none() {
         if let Some(detail) = part.get("detail") {
             image_url.insert("detail".to_string(), detail.clone());
+        }
+    }
+}
+
+/// Keep image detail inside the Chat Completions enum. Responses supports the
+/// higher-fidelity `original` value, while Chat-compatible servers only accept
+/// `auto`, `low`, or `high`. Mapping `original` to `high` preserves the caller's
+/// quality intent; removing unknown values lets the upstream use its default.
+pub(crate) fn normalize_chat_image_detail(image_url: &mut Map<String, Value>) {
+    let Some(detail) = image_url.get("detail").and_then(Value::as_str) else {
+        image_url.remove("detail");
+        return;
+    };
+    let normalized = match detail.trim().to_ascii_lowercase().as_str() {
+        "auto" => Some("auto"),
+        "low" => Some("low"),
+        "high" | "original" => Some("high"),
+        _ => None,
+    };
+    match normalized {
+        Some(detail) => {
+            image_url.insert("detail".to_string(), Value::String(detail.to_string()));
+        }
+        None => {
+            image_url.remove("detail");
         }
     }
 }

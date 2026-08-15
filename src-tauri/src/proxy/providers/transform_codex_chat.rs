@@ -22,7 +22,7 @@ use crate::proxy::{
     },
     tool_media::{
         chat_audio_from_input_audio, chat_file_from_input_file, flush_pending_chat_tool_media,
-        plan_chat_tool_output_media, queue_chat_tool_output_media,
+        normalize_chat_image_detail, plan_chat_tool_output_media, queue_chat_tool_output_media,
         strip_and_clamp_media_from_tool_value, ToolMediaScope, TOOL_RESULT_MEDIA_MOVED_MARKER,
     },
 };
@@ -1663,11 +1663,20 @@ fn responses_content_to_chat_content(_role: &str, content: &Value, text_only_mod
                     continue;
                 }
                 if let Some(image_url) = part.get("image_url") {
-                    let image_url = if image_url.is_object() {
-                        image_url.clone()
+                    let mut image_url = if let Some(object) = image_url.as_object() {
+                        object.clone()
                     } else {
-                        json!({ "url": image_url.as_str().unwrap_or_default() })
+                        let mut object = serde_json::Map::new();
+                        object.insert(
+                            "url".to_string(),
+                            json!(image_url.as_str().unwrap_or_default()),
+                        );
+                        if let Some(detail) = part.get("detail") {
+                            object.insert("detail".to_string(), detail.clone());
+                        }
+                        object
                     };
+                    normalize_chat_image_detail(&mut image_url);
                     chat_parts.push(json!({
                         "type": "image_url",
                         "image_url": image_url

@@ -1219,9 +1219,13 @@ fn codex_catalog_model_entry(
     };
     entry_obj.insert("input_modalities".to_string(), json!(input_modalities));
     entry_obj.insert("inputModalities".to_string(), json!(input_modalities));
+    // Generated route entries are third-party projections cloned from an
+    // official GPT template. Image input support does not imply the Responses-
+    // only `detail=original` capability. Official same-slug entries recover
+    // their authoritative value later in `merge_codex_model_entry`.
+    entry_obj.insert("supports_image_detail_original".to_string(), json!(false));
+    entry_obj.insert("supportsImageDetailOriginal".to_string(), json!(false));
     if spec.text_only {
-        entry_obj.insert("supports_image_detail_original".to_string(), json!(false));
-        entry_obj.insert("supportsImageDetailOriginal".to_string(), json!(false));
         entry_obj.insert("web_search_tool_type".to_string(), json!("text"));
         entry_obj.insert("webSearchToolType".to_string(), json!("text"));
     }
