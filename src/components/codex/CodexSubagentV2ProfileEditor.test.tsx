@@ -1594,6 +1594,50 @@ describe("Codex Sub-Agent V2 new-plan capability defaults", () => {
 });
 
 describe("Codex Sub-Agent V2 backend-owned catalog reconciliation", () => {
+  it("keeps official profiles in an explicit advanced section instead of the third-party list", async () => {
+    const current =
+      ipcState.providers.router.settingsConfig.codexRouting.subagentV2;
+    current.profiles["gpt-5.6-sol"] = {
+      model: "gpt-5.6-sol",
+      enabled: false,
+      questionnaire: {
+        taskStrengths: ["high_risk_review"],
+        optimization: "quality",
+        writeScope: "complex_changes",
+        preference: "eligible",
+      },
+      reasoning: { policy: "fixed", effort: "high" },
+    };
+    ipcState.statusResponse = {
+      ...statusFixture,
+      profiles: [
+        ...statusFixture.profiles,
+        {
+          profileKey: "gpt-5.6-sol",
+          model: "gpt-5.6-sol",
+          providerKind: "official",
+          enabled: false,
+          routable: true,
+          status: "disabled",
+          warnings: [],
+        },
+      ],
+    };
+    const user = userEvent.setup();
+    await mountWorkspaceFromPersistedPlan();
+
+    expect(
+      screen.queryByRole("button", { name: "配置 gpt-5.6-sol" }),
+    ).not.toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: /官方模型（高级）/ }),
+    );
+    expect(
+      screen.getByRole("button", { name: "配置 gpt-5.6-sol" }),
+    ).toBeVisible();
+    expect(screen.getByText(/官方模型通常不需要创建固定角色/)).toBeVisible();
+  });
+
   it("initializes through the backend instead of constructing canonical keys in the frontend", async () => {
     const user = userEvent.setup();
     await renderWorkspace(false);

@@ -6550,6 +6550,56 @@ mod tests {
     }
 
     #[test]
+    fn codex_subagent_v2_catalog_sync_adds_third_party_without_silently_adding_official_models() {
+        let settings = codex_subagent_profile_status_settings(
+            "v2",
+            json!({}),
+            json!([
+                { "model": "gpt-5.6-sol", "contextWindow": 262144 },
+                { "model": "deepseek-v4-flash", "contextWindow": 1000000 }
+            ]),
+            json!([
+                {
+                    "id": "official-route",
+                    "match": { "models": ["gpt-5.6-sol"] },
+                    "upstream": { "auth": { "source": "managed_codex_oauth" } }
+                },
+                {
+                    "id": "third-party-route",
+                    "match": { "models": ["deepseek-v4-flash"] },
+                    "upstream": { "targetProviderId": "deepseek", "auth": { "source": "provider_config" } }
+                }
+            ]),
+        );
+        let third_party = Provider::with_id(
+            "deepseek".to_string(),
+            "DeepSeek".to_string(),
+            json!({}),
+            None,
+        );
+        let context = ProviderClassificationContext::from_providers([&third_party]);
+        let draft = json!({
+            "schemaVersion": 2,
+            "selectionPolicy": "balanced",
+            "profiles": {}
+        });
+
+        let synced = reconcile_codex_subagent_v2_for_candidate(
+            &settings,
+            CodexSubagentV2ReconcileAction::SyncCatalog,
+            Some(&draft),
+            Some(&context),
+        )
+        .expect("sync third-party candidates");
+
+        assert!(synced["profiles"].get("deepseek-v4-flash").is_some());
+        assert!(
+            synced["profiles"].get("gpt-5.6-sol").is_none(),
+            "the normal candidate import must not silently add official models"
+        );
+    }
+
+    #[test]
     fn codex_subagent_v2_initialization_includes_runtime_first_enabled_fallback_model() {
         let settings = codex_subagent_profile_status_settings(
             "v2",
