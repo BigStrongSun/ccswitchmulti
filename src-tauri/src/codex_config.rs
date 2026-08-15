@@ -1219,12 +1219,19 @@ fn codex_catalog_model_entry(
     };
     entry_obj.insert("input_modalities".to_string(), json!(input_modalities));
     entry_obj.insert("inputModalities".to_string(), json!(input_modalities));
-    // Generated route entries are third-party projections cloned from an
-    // official GPT template. Image input support does not imply the Responses-
-    // only `detail=original` capability. Official same-slug entries recover
-    // their authoritative value later in `merge_codex_model_entry`.
-    entry_obj.insert("supports_image_detail_original".to_string(), json!(false));
-    entry_obj.insert("supportsImageDetailOriginal".to_string(), json!(false));
+    // Codex may emit `detail=original` for image-capable routes. Chat-compatible
+    // upstreams receive the best equivalent their schema supports (`high`) at
+    // the shared media boundary, so this is an adapter capability rather than
+    // a claim that the upstream accepts the Responses-only enum verbatim.
+    let supports_adapted_original_detail = !spec.text_only;
+    entry_obj.insert(
+        "supports_image_detail_original".to_string(),
+        json!(supports_adapted_original_detail),
+    );
+    entry_obj.insert(
+        "supportsImageDetailOriginal".to_string(),
+        json!(supports_adapted_original_detail),
+    );
     if spec.text_only {
         entry_obj.insert("web_search_tool_type".to_string(), json!("text"));
         entry_obj.insert("webSearchToolType".to_string(), json!("text"));
@@ -10098,8 +10105,8 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             models[1]
                 .get("supports_image_detail_original")
                 .and_then(Value::as_bool),
-            Some(false),
-            "third-party image input must not inherit the official template's original-detail capability"
+            Some(true),
+            "image-capable Chat routes should expose original detail through the adapter's high-detail translation"
         );
         assert!(
             models[0].get("model_messages").is_some(),
