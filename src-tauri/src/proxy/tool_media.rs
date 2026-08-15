@@ -696,6 +696,34 @@ mod tests {
     }
 
     #[test]
+    fn maps_responses_original_image_detail_to_chat_high() {
+        let part = json!({
+            "type": "input_image",
+            "image_url": "data:image/png;base64,AAAA",
+            "detail": "original"
+        });
+
+        let mapped = chat_media_part_from_tool_part(&part, ToolMediaScope::AllSupported).unwrap();
+
+        assert_eq!(mapped["image_url"]["detail"], "high");
+    }
+
+    #[test]
+    fn drops_unknown_image_detail_at_chat_boundary() {
+        let part = json!({
+            "type": "image_url",
+            "image_url": {
+                "url": "https://example.com/image.png",
+                "detail": "future-detail"
+            }
+        });
+
+        let mapped = chat_media_part_from_tool_part(&part, ToolMediaScope::AllSupported).unwrap();
+
+        assert!(mapped["image_url"].get("detail").is_none());
+    }
+
+    #[test]
     fn maps_already_chat_shaped_image_url() {
         let part = json!({
             "type": "image_url",

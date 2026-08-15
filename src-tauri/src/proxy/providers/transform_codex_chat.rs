@@ -4567,6 +4567,57 @@ mod tests {
     }
 
     #[test]
+    fn responses_request_to_chat_normalizes_original_detail_from_view_image_output() {
+        let input = json!({
+            "model": "qwen3.8",
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_image",
+                    "name": "view_image",
+                    "arguments": "{\"path\":\"slide.png\"}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_image",
+                    "output": [{
+                        "type": "input_image",
+                        "image_url": "data:image/png;base64,AAAA",
+                        "detail": "original"
+                    }]
+                }
+            ]
+        });
+
+        let result = responses_to_chat_completions(input).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+
+        assert_eq!(messages[2]["content"][1]["image_url"]["detail"], "high");
+    }
+
+    #[test]
+    fn responses_request_to_chat_normalizes_original_detail_inside_image_url_object() {
+        let input = json!({
+            "model": "qwen3.8",
+            "input": [{
+                "role": "user",
+                "content": [{
+                    "type": "input_image",
+                    "image_url": {
+                        "url": "data:image/png;base64,AAAA",
+                        "detail": "original"
+                    }
+                }]
+            }]
+        });
+
+        let result = responses_to_chat_completions(input).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+
+        assert_eq!(messages[0]["content"][0]["image_url"]["detail"], "high");
+    }
+
+    #[test]
     fn responses_request_to_chat_converts_all_structured_custom_tool_modalities() {
         let input = json!({
             "model": "vision-model",

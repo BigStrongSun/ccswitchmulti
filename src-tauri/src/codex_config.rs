@@ -10090,6 +10090,13 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             Some(&json!(["text", "image"])),
             "models without a text-only override should keep the template modalities"
         );
+        assert_eq!(
+            models[1]
+                .get("supports_image_detail_original")
+                .and_then(Value::as_bool),
+            Some(false),
+            "third-party image input must not inherit the official template's original-detail capability"
+        );
         assert!(
             models[0].get("model_messages").is_some(),
             "Codex requires model_messages in custom catalogs"
