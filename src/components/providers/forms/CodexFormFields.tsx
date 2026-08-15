@@ -2238,6 +2238,9 @@ export function CodexFormFields({
                           </SelectItem>
                         </SelectContent>
                       </Select>
+                      <p className="text-xs leading-relaxed text-muted-foreground">
+                        {t("codexConfig.promptCacheRoutingHint")}
+                      </p>
                     </div>
                   )}
                   <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-xs leading-relaxed text-amber-900 dark:text-amber-200">

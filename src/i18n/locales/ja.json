@@ -1359,7 +1359,7 @@
     "promptCacheRoutingAuto": "自動（推奨）",
     "promptCacheRoutingEnabled": "有効",
     "promptCacheRoutingDisabled": "無効",
-    "promptCacheRoutingHint": "自動モードでは、互換性を確認済みの上流にのみ prompt_cache_key を送信します。他の互換ゲートウェイでは有効にし、未知のフィールドを 400 で拒否する厳格なゲートウェイでは無効にしてください。クライアントが提供した安定したセッション ID のみを使用します。",
+    "promptCacheRoutingHint": "安定したセッション識別子から prompt_cache_key を送信し、互換性のある上流が反復プレフィックスを同じキャッシュへルーティングできるようにします。これにより遅延と入力コストが下がる可能性があります。自動モードは OpenAI、Azure OpenAI、OpenRouter、Kimi Coding に対応します。他のゲートウェイでは、このフィールドの対応が明示されている場合のみ有効にし、未知フィールドの HTTP 400 が発生した場合は無効にしてください。実際のヒットには安定した反復プレフィックスが必要で、usage の cached_tokens で確認します。",
     "upstreamModelName": "上流モデル名",
     "upstreamModelNameHint": "Chat 形式ではここに実際の上流モデルを入力します。ルーティングで Codex の Responses リクエストを Chat Completions に変換し、このモデルを維持します。",
     "modelNamePlaceholder": "例: gpt-5-codex",

@@ -4,10 +4,11 @@
 
 - 用户问 Codex 表单高级选项里的「提示词缓存路由」是不是 Codex 提供的。结论：UI 开关是 CCSwitchMulti 本地代理自己的功能（v3.17.0 引入，commit `a078b4b2`，作者 Jason/farion1231，2026-07-11），不是 Codex 官方功能。底层 `prompt_cache_key` 是 OpenAI API 参数：OpenAI 按 `prompt_cache_key` + 前缀 hash 把请求路由到同一台缓存机器，GPT-5.6 起必须设置该 key 才能用更可靠的隐式/显式缓存匹配（官方文档 developers.openai.com/api/docs/guides/prompt-caching）。
 - Codex CLI 原生行为：Responses 请求默认带 `prompt_cache_key`（默认 thread id，见 docs/codex-oauth-native-diff.md）。问题出在 CCSM 把 Responses 转 Chat Completions 时把这个字段丢了，导致按 key 路由缓存的上游（如 Kimi Coding）会话缓存亲和性断裂；v3.17.0 在转换后按 provider 感知地重新注入。相关前史：#2218（@majiayu000，v3.14.1）把客户端 session ID 用作 prompt_cache_key 和 Codex session header。
-- 自动模式白名单（`should_send_codex_chat_prompt_cache_key`，src-tauri/src/proxy/providers/codex.rs:1549）只有 `api.openai.com` 和 `api.kimi.com/coding`；Kimi For Coding 预设（base_url `https://api.kimi.com/coding/v1`）在 codexProviderPresets.ts 显式 `promptCacheRouting: "enabled"`。
-- 联网交叉验证（matrix-websearch MCP，searxng 后端；Codex 内置 web_search 本环境不可用，返回 unsupported call）：OpenRouter 官方 prompt caching 文档确认未设 `session_id`/`x-session-id` 时会回退用 OpenAI 风格 `prompt_cache_key` 作为 sticky routing key（"Clients that already send prompt_cache_key get session-pinned routing without any changes"），即 OpenRouter 也接受该字段，但不在 CCSM 自动白名单里，需要手动选「开启」。
+- 本轮修改前，自动模式白名单（`should_send_codex_chat_prompt_cache_key`，src-tauri/src/proxy/providers/codex.rs）只有 `api.openai.com` 和 `api.kimi.com/coding`；本轮按已确认的网关能力扩展为 OpenAI、`*.openai.azure.com`、OpenRouter 和 Kimi Coding。Kimi For Coding 预设（base_url `https://api.kimi.com/coding/v1`）仍显式设置 `promptCacheRouting: "enabled"`。
+- 联网交叉验证（matrix-websearch MCP，searxng 后端；Codex 内置 web_search 本环境不可用，返回 unsupported call）：Azure OpenAI 官方文档确认 GPT-5.6+ 的 Chat Completions/Responses 支持 `prompt_cache_key`，且 Codex v1 endpoint 使用 `<resource>.openai.azure.com/openai/v1`；OpenRouter 官方 prompt caching 文档确认未设 `session_id`/`x-session-id` 时会回退用 OpenAI 风格 `prompt_cache_key` 作为 sticky routing key。因此两者加入自动白名单，不再要求手动开启。
 - Kimi 官方文档（platform.kimi.com K3 quickstart）确认 Kimi 有自动前缀缓存（prompt tokens > 256 才能命中，< 256 丢弃）；「Kimi Coding 按 key 路由」的说法来自 CCSM 维护者 commit message，Kimi 文档站是 SPA，context-caching 页无法被无 JS 抓取器直接读取，未能从 Kimi 官方文档直接证实 prompt_cache_key 字段本身。
 - 其他主流上游不用 OpenAI 私有 cache 参数：DeepSeek/GLM(Z.AI)/Gemini 走自动前缀缓存，Anthropic/Qwen 显式缓存用 `cache_control`；对严格 schema 网关（commit 里点名 Fireworks）注入未知字段会 400，所以默认 auto 对未知网关保持关闭。该开关针对的是上游网关能力而非具体模型；DeepSeek/GLM/Qwen 等模型在各自网关上自动缓存，无需也不应开启此开关。
+- Codex Provider 表单现在实际渲染四语说明：稳定会话标识只是帮助重复且稳定的提示词前缀获得缓存亲和性，不能保证命中；列出自动支持的四类网关，提示未知字段 400 时关闭，并要求以 `usage.cached_tokens` 验证真实命中。Rust 单测覆盖已知网关、Kimi 路径限制、DeepSeek/GLM 默认关闭、Azure 伪装域名拒绝，以及显式开启/关闭优先于自动判断。
 
 ## 2026-08-14 CCSwitchMulti 3.19.1-24 阻断 Codex Windows setup 根修
 

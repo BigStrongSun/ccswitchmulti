@@ -1365,7 +1365,7 @@
     "promptCacheRoutingAuto": "自動（建議）",
     "promptCacheRoutingEnabled": "開啟",
     "promptCacheRoutingDisabled": "關閉",
-    "promptCacheRoutingHint": "自動模式僅對已確認相容的上游傳送 prompt_cache_key；開啟可用於其他相容閘道，關閉可避免嚴格閘道因未知欄位回傳 400。只使用客戶端提供的穩定工作階段 ID。",
+    "promptCacheRoutingHint": "使用穩定工作階段識別碼傳送 prompt_cache_key，協助相容上游將重複前綴路由至同一快取，可能降低延遲和輸入成本。自動模式已涵蓋 OpenAI、Azure OpenAI、OpenRouter 和 Kimi Coding；其他閘道僅在明確支援此欄位時開啟，若出現未知欄位 400 請關閉。實際命中仍需前綴穩定且重複，以 usage 中的 cached_tokens 為準。",
     "defaultModelLabel": "預設模型",
     "defaultModelPlaceholder": "例如: gpt-5.6-sol",
     "defaultModelHint": "Codex 預設請求的模型，隨時可改，無需等待軟體更新供應商範本。留空且設定了模型映射時，預設使用映射第一行。",

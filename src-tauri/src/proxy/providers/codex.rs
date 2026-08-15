@@ -1579,9 +1579,20 @@ pub fn should_send_codex_chat_prompt_cache_key(provider: &Provider) -> bool {
         return false;
     };
 
-    match url.host_str() {
-        Some("api.openai.com") => true,
-        Some("api.kimi.com") => {
+    let host = url.host_str().unwrap_or("");
+    match host {
+        "api.openai.com" => true,
+        // Azure OpenAI: per-resource host <resource>.openai.azure.com. The
+        // Chat Completions API accepts prompt_cache_key on GPT-5.6+ models
+        // (Microsoft Foundry prompt-caching docs), same request shape as
+        // OpenAI.
+        _ if host.ends_with(".openai.azure.com") => true,
+        // OpenRouter: falls back to the OpenAI-style prompt_cache_key field
+        // as its sticky-routing key when session_id/x-session-id are absent
+        // (OpenRouter prompt-caching docs), so the field is accepted and
+        // improves provider-pinned cache affinity.
+        "openrouter.ai" => true,
+        "api.kimi.com" => {
             let path = url.path().trim_end_matches('/');
             path == "/coding" || path.starts_with("/coding/")
         }
@@ -5889,5 +5900,71 @@ wire_api = "responses"
             "config": "base_url = \"https://api.x.ai/v1\"\nwire_api = \"responses\""
         }));
         assert!(!provider_needs_responses_namespace_flatten(&plain));
+    }
+
+    fn provider_with_base_url_and_routing(base_url: &str, routing: Option<&str>) -> Provider {
+        let mut provider = create_provider(json!({ "base_url": base_url }));
+        if let Some(routing) = routing {
+            provider.meta = Some(crate::provider::ProviderMeta {
+                prompt_cache_routing: Some(routing.to_string()),
+                ..Default::default()
+            });
+        }
+        provider
+    }
+
+    #[test]
+    fn codex_chat_prompt_cache_key_auto_allowlist_covers_known_gateways() {
+        // OpenAI official endpoint.
+        assert!(should_send_codex_chat_prompt_cache_key(
+            &provider_with_base_url_and_routing("https://api.openai.com/v1", None)
+        ));
+        // Azure OpenAI per-resource host.
+        assert!(should_send_codex_chat_prompt_cache_key(
+            &provider_with_base_url_and_routing(
+                "https://my-resource.openai.azure.com/openai/v1",
+                None
+            )
+        ));
+        // OpenRouter accepts prompt_cache_key as a sticky-routing fallback.
+        assert!(should_send_codex_chat_prompt_cache_key(
+            &provider_with_base_url_and_routing("https://openrouter.ai/api/v1", None)
+        ));
+        // Kimi Coding path only.
+        assert!(should_send_codex_chat_prompt_cache_key(
+            &provider_with_base_url_and_routing("https://api.kimi.com/coding/v1", None)
+        ));
+        // Kimi non-coding path must stay off.
+        assert!(!should_send_codex_chat_prompt_cache_key(
+            &provider_with_base_url_and_routing("https://api.kimi.com/v1", None)
+        ));
+        // Unknown strict gateways stay off to avoid 400 on unknown fields.
+        assert!(!should_send_codex_chat_prompt_cache_key(
+            &provider_with_base_url_and_routing("https://api.deepseek.com/v1", None)
+        ));
+        assert!(!should_send_codex_chat_prompt_cache_key(
+            &provider_with_base_url_and_routing("https://open.bigmodel.cn/api/paas/v4", None)
+        ));
+        // Lookalike hosts must not match: a sibling domain that ends with
+        // "openai.azure.com" but is not a subdomain of it, and a host that
+        // merely contains the suffix followed by another domain.
+        assert!(!should_send_codex_chat_prompt_cache_key(
+            &provider_with_base_url_and_routing("https://xopenai.azure.com/v1", None)
+        ));
+        assert!(!should_send_codex_chat_prompt_cache_key(
+            &provider_with_base_url_and_routing("https://evil.openai.azure.com.example/v1", None)
+        ));
+    }
+
+    #[test]
+    fn codex_chat_prompt_cache_key_explicit_override_wins_over_host() {
+        // Explicit enabled forces the key even on an unknown gateway.
+        assert!(should_send_codex_chat_prompt_cache_key(
+            &provider_with_base_url_and_routing("https://api.deepseek.com/v1", Some("enabled"))
+        ));
+        // Explicit disabled suppresses the key even on a known gateway.
+        assert!(!should_send_codex_chat_prompt_cache_key(
+            &provider_with_base_url_and_routing("https://api.openai.com/v1", Some("disabled"))
+        ));
     }
 }
