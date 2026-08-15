@@ -3501,3 +3501,15 @@
 - 安装版真实 Qwen canary 使用 `stream=true`、`tool_choice=auto`，同时携带 hosted `web_search` 与普通 function。首个 SSE 事件 0.593 秒到达，共 50 个事件并以 `response.completed` 结束；router trace `ef86c36b-0970-4665-9a50-2c8b7371365d` 显示 `/responses -> /chat/completions`、Qwen route HTTP 200、`streaming=true`、`upstream_stream=true`。这证明全局 Hosted Tools 不再让普通 Agent 请求失去增量输出。
 - 第二个安装版 canary 在相同 hosted `web_search` 广告下要求普通 `report_marker`，实际收到流式 `response.function_call_arguments.done`、正确工具名和 `CCSM_QWEN38_TOOL_OK` 参数；trace `ed4f112d-8604-4857-b8b3-9f81c00d38c2` 同样为 HTTP 200、`streaming=true`、`upstream_stream=true`。因此策略只移除 hosted-only 定义，没有误删 Codex 的终端/文件/MCP 类客户端工具。
 - 发布流水线曾在进程启动时读取 v30，随后 worktree 提升 v31，导致实际成功构建 v31 但导出阶段仍寻找 v30；重新执行 `export-latest-ccswitchmulti.ps1 -SkipBuild` 后按当前 v31 正确生成安装包、签名和 `latest.json`。以后版本提升必须发生在启动发布流水线之前，不能在持锁构建期间改变版本源。
+
+## 2026-08-15 v3.19.1-28 可信构建、事务安装与 UI 验收
+
+- 可信发布候选固定为 `a94210a8e3be0ca7e0bfd5f8f4bc20621f006a94`。发布流水线先以 `pnpm install --frozen-lockfile --force` 重建真实依赖，再同时校验 package 声明、安装包版本和 `pnpm exec tauri --version` 均为 `2.10.1`；日志明确输出 NSIS bundle marker patch。导出目录 15/15 checksum 一致，raw EXE SHA-256 为 `4150120A7E5CEC39F160F7625786A262DCEC32F4FB12F34E1E47D1F5490953C3`，NSIS installer 为 `C56F2791739D1EA4B0245F7D3E036487D134E067000F2E3D6FC81BA66B0E9673`，预期安装态为 `19F41913EA5F5075FD35E09565B1D4133EEF8F60E228D3BFD60BC4732C4494A6`；updater `.sig` 为 432 字符且与 `latest.json` 一致。
+- 独立隐藏事务 `ccsm-20260815-124330-93e15cd367bd4477a1ab26521a0e4ca1` 返回 `Status=Success`、`Error=null`、`RollbackError=null`。新 PID 为 `19660`，安装版 FileVersion/ProductVersion 和注册表均为 `3.19.1-28`，实际安装态哈希与预期精确一致，`127.0.0.1:15721/health` HTTP 200。临时 launcher 因 Windows PowerShell 5.1 `Start-Process -PassThru` 在本机返回空 `ExitCode` 误报失败；事务本体、结果文件和安装态证明实际成功，不能据 launcher 外层空值重复安装。
+- 安装版只读 UI 验收确认 MultiRouter 六个顶部导航包含独立“子 Agent”；当前 V2 按钮为 disabled“已启用 V2”，V1 为可操作“启用 V1”。普通入口显示“添加第三方可配置模型”，官方 profile 收进“官方模型（高级）”；不可路由语义不再使用红色错误样式。配置入口明确区分“创建新配置”和“编辑旧配置”，编辑项显示 `New Codex MultiRouter / codex-multirouter`；进入编辑向导后顶部持续显示同一名称、ID 和“编辑旧配置”，首步明确只选择模型源，Provider 凭据、模型目录、API 协议、推理能力和工具兼容性回归各 Provider 页面。
+
+## 2026-08-15 v3.19.1-28 GitHub 正式发布
+
+- annotated tag object 为 `9d6a8d95f36adaabcb5563eba0cf577c1e24f1cf`，本地和远端 peeled commit 均精确为可信构建提交 `a94210a8e3be0ca7e0bfd5f8f4bc20621f006a94`；后续发布证据提交不得移动 v28 tag。
+- GitHub Actions run `31865535416` 最终为 success，Linux x64/ARM64、Windows x64/ARM64、macOS、Publish GitHub Release、Assemble `latest.json` 七个 jobs 全部完成。Release id `370966917`，非 draft、非 prerelease，`releases/latest` 返回 `v3.19.1-28`。
+- Release 共 19 个实际资产。全部下载到独立临时目录后逐项使用 SHA-256 对照 GitHub 服务端 `digest`，`DigestMismatchCount=0`；`latest.json` 版本为 `3.19.1-28`，六个平台键齐全，URL 全部指向 v28，签名全部非空且与对应 `.sig` 精确一致。
