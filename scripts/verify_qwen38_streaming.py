@@ -75,3 +75,36 @@ print(
         ensure_ascii=False,
     )
 )
+
+tool_payload = json.loads(json.dumps(payload))
+tool_payload["input"][0]["content"][0]["text"] = (
+    "Call report_marker exactly once with marker CCSM_QWEN38_TOOL_OK. Do not answer with text."
+)
+tool_request = urllib.request.Request(
+    "http://127.0.0.1:15721/v1/responses",
+    data=json.dumps(tool_payload).encode("utf-8"),
+    headers={
+        "Authorization": "Bearer PROXY_MANAGED",
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+        "User-Agent": "Codex Desktop/qwen38-tool-canary",
+        "session_id": "qwen38-client-tool-rootfix-20260815",
+    },
+)
+tool_events = []
+with urllib.request.urlopen(tool_request, timeout=180) as response:
+    for raw_line in response:
+        line = raw_line.decode("utf-8").strip()
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if data != "[DONE]":
+            tool_events.append(json.loads(data))
+
+tool_serialized = json.dumps(tool_events, ensure_ascii=False)
+assert "response.function_call_arguments.done" in [
+    event.get("type") for event in tool_events
+], tool_serialized[-2000:]
+assert "report_marker" in tool_serialized, tool_serialized[-2000:]
+assert "CCSM_QWEN38_TOOL_OK" in tool_serialized, tool_serialized[-2000:]
+print("CCSM_QWEN38_TOOL_OK")
