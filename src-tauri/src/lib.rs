@@ -1992,6 +1992,16 @@ async fn enabled_proxy_apps_on_startup(db: &database::Database) -> Vec<&'static 
 }
 
 async fn restore_proxy_state_on_startup(state: &store::AppState) {
+    match state
+        .proxy_service
+        .reconcile_codex_owned_projection_on_startup()
+        .await
+    {
+        Ok(true) => log::info!("✓ 已对账 CCSwitchMulti 自有 Codex 模型目录"),
+        Ok(false) => log::debug!("Codex 未使用 CCSwitchMulti 自有模型目录，跳过启动对账"),
+        Err(e) => log::warn!("启动时对账 Codex 模型目录失败: {e}"),
+    }
+
     match crate::proxy::external_openai_api::load_profile(&state.db) {
         Ok(profile) if profile.enabled => {
             match state.proxy_service.start_external_openai_api().await {

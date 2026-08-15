@@ -1585,6 +1585,27 @@ impl ProxyService {
         }
     }
 
+    /// Refresh a CCSwitchMulti-owned Codex catalog on application startup even
+    /// when the persisted takeover flag has drifted. A user-managed external
+    /// catalog is never rewritten.
+    pub(crate) async fn reconcile_codex_owned_projection_on_startup(&self) -> Result<bool, String> {
+        let live_config = self.read_codex_live()?;
+        let config_text = live_config
+            .get("config")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let generated_path = crate::codex_config::get_codex_model_catalog_path();
+        if crate::codex_config::resolve_cc_switch_catalog_path(config_text, &generated_path)
+            .is_none()
+        {
+            return Ok(false);
+        }
+
+        self.takeover_live_config_best_effort(&AppType::Codex)
+            .await?;
+        Ok(true)
+    }
+
     /// 停止代理服务器（恢复 Live 配置，用户手动关闭时使用）
     ///
     /// 会清除 settings 表中的代理状态，下次启动不会自动恢复。
@@ -5526,6 +5547,82 @@ wire_api = "responses"
             .set_takeover_for_app("codex", false)
             .await
             .expect("disable Codex takeover");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn codex_startup_reconciles_owned_catalog_when_takeover_flag_drifted() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        let db = Arc::new(Database::memory().expect("init db"));
+        use_ephemeral_proxy_port(&db).await;
+        let service = ProxyService::new(db.clone());
+        crate::codex_config::write_codex_live_atomic(
+            &json!({ "OPENAI_API_KEY": "qwen-key" }),
+            Some("model = \"qwen3.8\"\n"),
+        )
+        .expect("seed live Codex config");
+
+        let provider = Provider::with_id(
+            "qwen".to_string(),
+            "Qwen".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "qwen-key" },
+                "config": "model = \"qwen3.8\"\n",
+                "modelCatalog": {
+                    "models": [{ "model": "qwen3.8", "contextWindow": 262144 }]
+                }
+            }),
+            None,
+        );
+        db.save_provider("codex", &provider)
+            .expect("save Qwen provider");
+        db.set_current_provider("codex", "qwen")
+            .expect("set current provider");
+        crate::settings::set_current_provider(&AppType::Codex, Some("qwen"))
+            .expect("set local current provider");
+
+        service
+            .set_takeover_for_app("codex", true)
+            .await
+            .expect("enable Codex takeover");
+        let mut proxy_config = db
+            .get_proxy_config_for_app("codex")
+            .await
+            .expect("read proxy config");
+        proxy_config.enabled = false;
+        db.update_proxy_config_for_app(proxy_config)
+            .await
+            .expect("simulate drifted takeover flag");
+
+        let catalog_path = crate::codex_config::get_codex_model_catalog_path();
+        let mut stale_catalog: Value =
+            crate::config::read_json_file(&catalog_path).expect("read generated catalog");
+        let qwen = stale_catalog["models"]
+            .as_array_mut()
+            .expect("models")
+            .iter_mut()
+            .find(|entry| entry["slug"] == "qwen3.8")
+            .expect("Qwen entry");
+        qwen["supports_image_detail_original"] = json!(false);
+        qwen["supportsImageDetailOriginal"] = json!(false);
+        crate::config::write_json_file(&catalog_path, &stale_catalog)
+            .expect("seed stale generated catalog");
+
+        assert!(service
+            .reconcile_codex_owned_projection_on_startup()
+            .await
+            .expect("reconcile owned startup projection"));
+        let refreshed: Value =
+            crate::config::read_json_file(&catalog_path).expect("read refreshed catalog");
+        let qwen = refreshed["models"]
+            .as_array()
+            .expect("models")
+            .iter()
+            .find(|entry| entry["slug"] == "qwen3.8")
+            .expect("Qwen entry");
+        assert_eq!(qwen["supports_image_detail_original"], true);
+        assert_eq!(qwen["supportsImageDetailOriginal"], true);
     }
 
     #[tokio::test]
