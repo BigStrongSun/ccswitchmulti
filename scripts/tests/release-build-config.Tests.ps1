@@ -180,4 +180,16 @@ Describe "CCSwitchMulti local release build config" {
             [System.IO.File]::Delete($filePath)
         }
     }
+
+    It "exports the projected NSIS-installed executable hash before final checksums" {
+        $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+        $exportScript = [System.IO.File]::ReadAllText((Join-Path $repoRoot "scripts\export-latest-ccswitchmulti.ps1"))
+        $sourceOffset = $exportScript.IndexOf('$sourceExe = Join-Path $releaseDir "cc-switch.exe"')
+        $installedHashOffset = $exportScript.IndexOf('Write-NsisInstalledExeHash -SourceExe $sourceExe')
+        $checksumsOffset = $exportScript.LastIndexOf('Write-Checksums -Root $exportRoot')
+
+        $sourceOffset | Should BeGreaterThan -1
+        $installedHashOffset | Should BeGreaterThan $sourceOffset
+        $checksumsOffset | Should BeGreaterThan $installedHashOffset
+    }
 }
