@@ -4,7 +4,7 @@ Set-StrictMode -Version Latest
 $repoRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot "release-build-config.ps1")
 
-$installer = "C:\Users\sunda\Documents\LLMservice\最新版ccswitchmulti\windows\installer\CCSwitchMulti_3.19.1-31_x64-setup.exe"
+$installer = "C:\Users\sunda\Documents\LLMservice\ccswitchmulti-qwen38-original-fix-7fbcdd01\windows\installer\CCSwitchMulti_3.19.1-31_x64-setup.exe"
 $rawExecutable = Join-Path $repoRoot "src-tauri\target\release\cc-switch.exe"
 $installedExecutable = "C:\Users\sunda\AppData\Local\CCSwitchMulti\cc-switch.exe"
 $installDirectory = Split-Path -Parent $installedExecutable
@@ -12,7 +12,7 @@ $uninstallExecutable = Join-Path $installDirectory "uninstall.exe"
 $listener = Get-NetTCPConnection -State Listen -LocalPort 15721 | Select-Object -First 1
 if (-not $listener) { throw "CCSwitchMulti is not listening on port 15721" }
 
-$transactionId = "ccsm-20260815-qwen38-stream-v31"
+$transactionId = "ccsm-20260816-qwen38-original-7fbcdd01"
 $backupRoot = Join-Path "C:\Users\sunda\AppData\Local\CCSwitchMultiTransactionBackups" $transactionId
 New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
 $resultPath = Join-Path $backupRoot "transaction-result.json"
