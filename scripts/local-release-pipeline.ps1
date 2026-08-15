@@ -16,15 +16,6 @@ function Get-RepoRoot {
     return (Resolve-Path (Join-Path $scriptDir "..")).Path
 }
 
-# Build the default Chinese release folder name from char codes to avoid source encoding issues.
-function Get-DefaultReleaseRoot {
-    param([string]$RepoRoot)
-
-    $workspaceRoot = Split-Path -Parent $RepoRoot
-    $folderName = @([char]0x6700, [char]0x65B0, [char]0x7248, "ccswitchmulti") -join ""
-    return Join-Path $workspaceRoot $folderName
-}
-
 # Write timestamped log lines so post-commit background failures are traceable.
 function Write-Log {
     param([string]$Message)
@@ -140,11 +131,7 @@ function Write-Checksums {
 }
 
 $repoRoot = Get-RepoRoot
-$releaseRoot = if ([string]::IsNullOrWhiteSpace($ReleaseRoot)) {
-    Get-DefaultReleaseRoot -RepoRoot $repoRoot
-} else {
-    $ReleaseRoot
-}
+$releaseRoot = Resolve-CcswitchmultiReleaseRoot -RepoRoot $repoRoot -RequestedRoot $ReleaseRoot
 $logDir = Join-Path $repoRoot "scripts\logs"
 $lockPath = Join-Path $logDir "local-release.lock"
 

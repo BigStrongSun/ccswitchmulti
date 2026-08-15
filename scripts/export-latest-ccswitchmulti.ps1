@@ -14,23 +14,6 @@ function Get-RepoRoot {
     return (Resolve-Path (Join-Path $scriptDir "..")).Path
 }
 
-# Build the requested Chinese export directory name without relying on source-file encoding.
-function Get-DefaultExportFolderName {
-    return @([char]0x6700, [char]0x65B0, [char]0x7248, "ccswitchmulti") -join ""
-}
-
-# Resolve the final export directory. By default it sits under the LLMservice root.
-function Get-ExportRoot {
-    param([string]$RepoRoot, [string]$RequestedRoot)
-
-    if (-not [string]::IsNullOrWhiteSpace($RequestedRoot)) {
-        return $RequestedRoot
-    }
-
-    $workspaceRoot = Split-Path -Parent $RepoRoot
-    return Join-Path $workspaceRoot (Get-DefaultExportFolderName)
-}
-
 # Copy matched build artifacts and return the copied file count.
 function Copy-Artifacts {
     param(
@@ -320,7 +303,7 @@ function Write-LatestJson {
 }
 
 $repoRoot = Get-RepoRoot
-$exportRoot = Get-ExportRoot -RepoRoot $repoRoot -RequestedRoot $ReleaseRoot
+$exportRoot = Resolve-CcswitchmultiReleaseRoot -RepoRoot $repoRoot -RequestedRoot $ReleaseRoot
 $tauriDir = Join-Path $repoRoot "src-tauri"
 $releaseDir = Join-Path $tauriDir "target\release"
 $bundleDir = Join-Path $releaseDir "bundle"
