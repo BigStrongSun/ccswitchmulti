@@ -8042,6 +8042,29 @@ mod tests {
     }
 
     #[test]
+    fn codex_live_read_repairs_unescaped_windows_project_basic_key() {
+        let invalid = concat!(
+            "model = \"gpt-5.6-sol\"\n",
+            "[projects.\"C:\\Users\\sunda\\Documents\\LLMservice\"]\n",
+            "trust_level = \"trusted\"\n",
+        );
+        assert!(validate_config_toml(invalid).is_err());
+
+        let normalized = normalize_codex_config_text_for_live_read(invalid)
+            .expect("the generated Windows project key should be recoverable");
+        validate_config_toml(&normalized).expect("normalized live config must be valid TOML");
+        let parsed: toml::Value = toml::from_str(&normalized).expect("parse normalized project");
+        assert_eq!(
+            parsed["projects"][r"C:\Users\sunda\Documents\LLMservice"]["trust_level"]
+                .as_str(),
+            Some("trusted")
+        );
+        assert!(normalized.contains(concat!(
+            "[projects.\"C:\\\\Users\\\\sunda\\\\Documents\\\\LLMservice\"]"
+        )));
+    }
+
+    #[test]
     fn codex_subagent_v2_missing_fixed_reasoning_field_reports_specific_code() {
         let error = parse_persisted_subagent_v2(&json!({
             "schemaVersion": 2,
