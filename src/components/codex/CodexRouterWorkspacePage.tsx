@@ -716,6 +716,9 @@ function providerWithFetchedModelCatalog(
         ? { supports_image: model.supports_image }
         : {}),
       ...(model.vision !== undefined ? { vision: model.vision } : {}),
+      // 模型目录刷新必须保留已有 reasoning 声明（用户手动声明的档位/能力）。
+      // 否则 /models 拉取重建会把声明清空，导致档位消失（K3/Qwen 均受影响）。
+      ...(model.reasoning ? { reasoning: model.reasoning } : {}),
     } satisfies CodexCatalogModelDraft;
   });
   const byFetchedModel = new Map<string, number>();
