@@ -9,7 +9,7 @@
 - 在线交叉验证：Codex 官方源码确认 `projects` 是配置 trust map，Windows 会规范化 lookup key；TOML 规范要求 basic string/key 中反斜杠使用转义。Codex 内置搜索和 Matrix WebSearch 都未找到 CCSwitchMulti 此具体报错的公开 issue；现场日志、报错列、当前 DB 历史字符串和 v29 源码构成主要证据。
 - RED `67e2e2f5` 精确复现 live normalizer 对裸反斜杠 Windows project basic key 返回 invalid Unicode；RED `e2865c0b` 进一步证明 Live backup restore 在进入原子写之前就会因 raw provider config merge 失败。
 - GREEN 实现扩展 `normalize_codex_config_text_for_live_read`：仅识别 `[projects."<drive>:\..."]` Windows basic key并复用奇偶反斜杠修复；root notify、多行字符串与已合法 TOML 保持原样。`write_codex_live_atomic`、`write_codex_live_config_atomic` 和 provider/live merge 三个边界统一先 normalize 再 validate/parse。
-- 聚焦验证：project-key normalizer 2/2、两种 atomic writer 1/1、真实 backup restore 1/1；原有 force repair 3/3、Codex restore 6/6、provider/user table merge 1/1 均通过，仅保留既有 `openai_cache_read_tokens` dead-code warning。
+- 聚焦验证：project-key normalizer 2/2、两种 atomic writer 1/1、真实 backup restore 1/1；原有 force repair 3/3、Codex restore 6/6、provider/user table merge 1/1 均通过。全量 `cargo test --lib` 为 3005 passed / 0 failed / 2 ignored，`cargo check --lib`、`cargo fmt --check`、`git diff --check` 通过，仅保留既有 `openai_cache_read_tokens` dead-code warning。
 
 ## 2026-08-15 PR #9 reasoning 修复选择性吸收
 
