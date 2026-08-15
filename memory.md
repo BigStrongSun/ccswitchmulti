@@ -1,5 +1,15 @@
 # CC Switch Repository Memory
 
+## 2026-08-16 Qwen original image detail 完整适配与 Codex Live TOML 生命周期根修
+
+- `supports_image_detail_original` / `supportsImageDetailOriginal` 表达的是 Codex 经 Adapter 后能否获得 original-image-detail 能力，不是第三方 Chat 上游能否原样接受 Responses 的 `original` 枚举。视觉第三方模型必须继续投影 `true`，Responses 到 Chat 的共享媒体边界把 `original` 映射为上游最高可用的 `high`；纯文本模型保持 `false`，官方 Native Responses 保持原生语义。
+- Qwen 现场的第二层阻断不是图片转换失败，而是 `~/.codex/config.toml` 无法解析。`developer_instructions` 历史内容里有一行形似 `notify = [...]` 的示例；Codex Desktop 更新 Computer Use 路径时把它误当根级配置并写成裸 Windows 反斜杠，导致 multiline basic string 中的 `\U` 成为非法 TOML 转义。旧兼容器只修根级 notify，且测试明确保留说明文字，因此没有覆盖 Desktop 后续改写的生命周期。
+- 根修分两层：Live 读取仅在原 TOML 无效时恢复根级或 basic multiline 中 notify-shaped Windows 路径，并要求恢复结果通过完整 TOML 校验；Sub-Agent 父策略写回时把 `developer_instructions` 强制编码为单个 escaped basic-string 表达，不再留下 Desktop 能误识别的物理 `notify =` 行。解析后的用户说明文字与真正根级 notify 均保持不变。
+- 启动时对账还必须以 live `model_catalog_json` 的 CCSwitchMulti 所有权为准，即使 takeover flag 漂移也刷新自有 catalog；不得触碰用户自管外部 catalog。安装后日志为 `✓ 已对账 CCSwitchMulti 自有 Codex 模型目录`，Qwen 3.8 两个 original-detail 字段均为 `true`。
+- 固定源码 `7e6515db` 的 NSIS SHA-256 为 `B7006B39DDE1239C8CF2E8DF0A6A01641583ADA11B8CFEA87FE207552190256B`。事务 `ccsm-20260816-qwen38-original-toml-root-7e6515db-r3` / `ccsm-20260816-035917-77cf4a507ab64a40b514130220fea091` 成功，安装版 `3.19.1-31`、PID 4792、15721 healthy。
+- 真实 canary 同时通过 `CCSM_QWEN38_STREAM_OK`、`CCSM_QWEN38_TOOL_OK`、`CCSM_QWEN38_ORIGINAL_REPLAY_OK`；router log 证明 original replay 为 `/responses -> /chat/completions` 且 upstream HTTP 200。Rust library 为 `3014 passed / 0 failed / 2 ignored`。
+- 安装事务首次在 detached Windows PowerShell 预检中复现 `Get-FileHash` 未自动加载。根修为脚本内统一使用 .NET `SHA256` + `FileStream`，不再依赖模块自动加载状态；事务 Pester 47/47。前两次事务均在任何停止、备份、卸载或配置写入前退出。
+
 ## 2026-08-15 V27 主 Agent / Sub-Agent 推理强度协调实现与验收
 
 - Codex 当前原生 `ReasoningEffort` 已包含 `none/minimal/low/medium/high/xhigh/max/ultra/custom`，但目标模型 spawn 只接受其 catalog `supported_reasoning_levels` 中的值。`ultra` 还参与 Codex 主动多 Agent 行为；Provider 未声明 ultra 时不得默认映射到 max。
