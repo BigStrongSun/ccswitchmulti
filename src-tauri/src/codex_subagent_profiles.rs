@@ -1083,11 +1083,29 @@ fn default_role_name(p: &ParsedCodexSubagentProfile) -> String {
 }
 fn default_nickname(p: &ParsedCodexSubagentProfile) -> String {
     let source = p.key.split(['-', '_']).next().unwrap_or(&p.key);
-    let mut chars = source.chars();
-    chars
+    let sanitized = source
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, ' ' | '-' | '_') {
+                character
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut chars = sanitized.chars();
+    let nickname = chars
         .next()
         .map(|c| c.to_uppercase().collect::<String>() + chars.as_str())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if nickname.is_empty() {
+        "CCSwitch Worker".to_string()
+    } else {
+        nickname
+    }
 }
 
 fn profile_collision_identity(entry: &ParsedProfileEntry) -> String {
@@ -1915,6 +1933,21 @@ mod tests {
             json!({"schemaVersion":1,"profiles":{"deepseek-v4-flash":{"model":"DeepSeek-V4-Flash","enabled":true,"questionnaire":{"taskStrengths":["repository_exploration"],"optimization":"speed","writeScope":"read_only","preference":"eligible","reasoningEffort":"auto"},"overrides":{"roleName":"flash-reader","description":"Manual.","developerInstructions":"Read only.","nicknameCandidates":["Flash Reader"],"modelReasoningEffort":"xhigh"}}}}),
             Ok(config(SelectionPolicy::Balanced, vec![valid(p)])),
         );
+    }
+
+    #[test]
+    fn generated_default_nickname_sanitizes_model_punctuation_for_codex_role_files() {
+        let mut compile_request = request(Some(config(
+            SelectionPolicy::Balanced,
+            vec![valid(profile("qwen3.8", "qwen3.8"))],
+        )));
+        compile_request.catalog_models = vec![catalog("qwen3.8", true)];
+        let output = compile_subagent_v2_profiles(&compile_request).expect("compile Qwen profile");
+        let role = output.generated_roles.first().expect("generated Qwen role");
+        assert_eq!(role.nickname_candidates, vec!["Qwen3 8"]);
+        let toml = render_generated_role_toml(role, "# managed").expect("render Qwen role");
+        assert!(toml.contains("nickname_candidates = [\"Qwen3 8\"]"));
+        assert!(!toml.contains("nickname_candidates = [\"Qwen3.8\"]"));
     }
 
     #[test]
