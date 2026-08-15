@@ -1,7 +1,7 @@
 //! Codex V2 questionnaire persistence, validation, compilation, and safe preview projection.
 
 use crate::proxy::providers::codex_reasoning::{
-    CodexReasoningEffort, ResolvedSubagentReasoningCapability,
+    CodexReasoningEffort, ReasoningSupportKind, ResolvedSubagentReasoningCapability,
 };
 use serde::ser::{SerializeMap, SerializeStruct};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -820,14 +820,31 @@ fn compile_reasoning_policy(
                     "fixed reasoning policy requires effort",
                 )
             })?;
-            if !capability.codex_selectable_efforts.contains(&effort) {
-                return Err(validation_error(
-                    "unsupported_reasoning_effort",
-                    Some(profile_key),
-                    "fixed reasoning effort is not supported by the target model",
-                ));
+            match capability.support_kind {
+                // 能力明确：宽校验 + 保留显式档位。legacy/schema1 声明的映射档位
+                // （xhigh/medium 等）经 effort_map 映射后若落在模型真实档位内
+                // （如 high），则编译通过并**保留原档位**，由代理层运行时映射
+                // 到上游；映射后仍不在可选档位内才拒绝（Unsupported/BooleanOnly
+                // 的 selectable 集合不含该档位，同样会在此拒绝）。
+                ReasoningSupportKind::EffortLevels
+                | ReasoningSupportKind::BooleanOnly
+                | ReasoningSupportKind::Unsupported => {
+                    let resolved = capability.effort_map.get(&effort).unwrap_or(&effort);
+                    if capability.codex_selectable_efforts.contains(resolved) {
+                        Ok(Some(effort))
+                    } else {
+                        return Err(validation_error(
+                            "unsupported_reasoning_effort",
+                            Some(profile_key),
+                            "fixed reasoning effort is not supported by the target model",
+                        ));
+                    }
+                }
+                // 能力未知（Unknown）：无法验证档位合法性，但 Unknown ≠ Unsupported。
+                // 信任用户显式声明的 Fixed effort，避免 schema1 旧配置（legacy effort
+                // 迁移为 Fixed）在模型目录未声明能力时直接编译失败（v27/v28 回归）。
+                ReasoningSupportKind::Unknown => Ok(Some(effort)),
             }
-            Ok(Some(effort))
         }
         ReasoningRuntimePolicy::Disabled => {
             if !capability.disable_allowed
@@ -2741,6 +2758,41 @@ mod tests {
                 "fixed reasoning effort is not supported by the target model",
             ))
         );
+    }
+
+    #[test]
+    fn reasoning_policy_fixed_unknown_capability_trusts_declared_effort() {
+        // schema1 旧配置（legacy reasoningEffort）迁移为 Fixed 后，目标模型能力
+        // Unknown 时不得编译失败——Unknown ≠ Unsupported，信任用户显式声明。
+        // v27/v28 曾因 selectable 为空集而报 unsupported_reasoning_effort，
+        // 导致 "Unable to inspect Codex subagent profiles" 全线失败。
+        let capability = ResolvedSubagentReasoningCapability {
+            support_kind: ReasoningSupportKind::Unknown,
+            source: None,
+            confidence: ReasoningConfidence::Unverified,
+            codex_selectable_efforts: vec![],
+            provider_accepted_efforts: vec![],
+            provider_default_effort: None,
+            disable_allowed: false,
+            effort_map: BTreeMap::new(),
+        };
+        assert_eq!(
+            compile_reasoning_policy(
+                &fixed_reasoning(CodexReasoningEffort::High),
+                &capability,
+                "legacy-model",
+            )
+            .expect("Unknown capability + Fixed must compile"),
+            Some(CodexReasoningEffort::High)
+        );
+        // EffortLevels 能力下 Ultra 仍被拒绝（能力明确时不放行）
+        let deepseek = deepseek_reasoning();
+        assert!(compile_reasoning_policy(
+            &fixed_reasoning(CodexReasoningEffort::Ultra),
+            &deepseek,
+            "flash",
+        )
+        .is_err());
     }
 
     #[test]

@@ -88,7 +88,9 @@ function profileToneFor(
   profile: CodexSubagentV2Profile,
   status?: CodexSubagentProfileStatus,
 ): ProfileTone {
-  if (status?.routable === false) return "unroutable";
+  // 只有真不可路由（编译状态 Unroutable）才标"不可路由"；
+  // 未启用的可路由 profile（编译状态 Disabled）应显示为草稿。
+  if (status?.status === "unroutable") return "unroutable";
   return profile.enabled ? "enabled-routable" : "draft";
 }
 
@@ -877,7 +879,7 @@ export function CodexSubagentProfileEditor({
       if (providerKind === "official" && !showOfficialProfiles) return false;
       if (profileFilter === "enabled" && !profile.enabled) return false;
       if (profileFilter === "draft" && profile.enabled) return false;
-      if (profileFilter === "unroutable" && status?.routable !== false) {
+      if (profileFilter === "unroutable" && status?.status !== "unroutable") {
         return false;
       }
       const haystack = [
@@ -1134,7 +1136,10 @@ export function CodexSubagentProfileEditor({
                         variant="outline"
                         aria-label={`编辑 ${profile.model}`}
                         onClick={() => setOpenProfileKey(profileKey)}
-                        disabled={isSaving || status?.routable === false}
+                        // 真不可路由（编译状态 Unroutable）一律禁止编辑；
+                        // 未启用的可路由 profile（编译状态 Disabled）必须可编辑，
+                        // 否则死锁（v28 回归：未启用 → routable=false → 禁编辑）。
+                        disabled={isSaving || status?.status === "unroutable"}
                         className="shrink-0"
                       >
                         编辑
@@ -1143,8 +1148,12 @@ export function CodexSubagentProfileEditor({
                         <Switch
                           aria-label={`启用 ${profile.model} 作为 V2 子 Agent`}
                           checked={profile.enabled}
+                          // 用 status.status 区分"未启用（disabled）"与"真不可路由
+                          // （unroutable）"：未启用 profile 的后端编译状态是 Disabled，
+                          // routable=false 会把它误判成不可路由，导致永远无法启用。
                           disabled={
-                            status?.routable === false && !profile.enabled
+                            status?.status === "unroutable" &&
+                            !profile.enabled
                           }
                           onCheckedChange={(checked) =>
                             updateProfile(profileKey, (current) => ({
@@ -1782,12 +1791,12 @@ function ProfileSummary({
         <Badge
           variant="outline"
           className={
-            status?.routable === false
+            status?.status === "unroutable"
               ? "border-border bg-muted text-muted-foreground dark:border-slate-600 dark:bg-slate-800/70 dark:text-slate-300"
               : "border-emerald-200 bg-emerald-100/80 text-emerald-800 dark:border-emerald-500/40 dark:bg-emerald-500/15 dark:text-emerald-100"
           }
         >
-          {status?.routable === false ? "不可路由" : "可路由"}
+          {status?.status === "unroutable" ? "不可路由" : "可路由"}
         </Badge>
         <Badge
           variant="outline"

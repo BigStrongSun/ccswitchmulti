@@ -3056,8 +3056,9 @@ export function CodexFormFields({
                                               )}
                                               disabled={isBuiltinReasoning}
                                               onChange={(event) => {
-                                                const supportedEfforts = event
-                                                  .target.checked
+                                                const checked =
+                                                  event.target.checked;
+                                                const supportedEfforts = checked
                                                   ? [
                                                       ...row.reasoning!
                                                         .supportedEfforts,
@@ -3074,11 +3075,40 @@ export function CodexFormFields({
                                                     ? row.reasoning!
                                                         .defaultEffort
                                                     : supportedEfforts[0];
+                                                // 取消勾选时同步清理 effortMap 中指向被移除档位的孤儿映射，
+                                                // 否则保存后后端 validate（target 必须在 supportedEfforts）
+                                                // 会拒绝整份声明并被静默清空（v27/v28 回归）。
+                                                const nextEffortMap: Record<
+                                                  string,
+                                                  CodexReasoningEffort
+                                                > = {
+                                                  ...(row.reasoning!.upstream
+                                                    .effortMap ?? {}),
+                                                };
+                                                if (!checked) {
+                                                  for (const [
+                                                    source,
+                                                    target,
+                                                  ] of Object.entries(
+                                                    nextEffortMap,
+                                                  )) {
+                                                    if (target === effort) {
+                                                      delete nextEffortMap[
+                                                        source
+                                                      ];
+                                                    }
+                                                  }
+                                                }
                                                 handleUpdateCatalogRow(index, {
                                                   reasoning: {
                                                     ...row.reasoning!,
                                                     supportedEfforts,
                                                     defaultEffort,
+                                                    upstream: {
+                                                      ...row.reasoning!
+                                                        .upstream,
+                                                      effortMap: nextEffortMap,
+                                                    },
                                                     source: "user",
                                                   },
                                                 });
