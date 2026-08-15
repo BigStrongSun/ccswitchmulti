@@ -171,7 +171,9 @@ describe("CodexMultiRouterWizard", () => {
     ]);
 
     expect(screen.queryByText("OpenAI Hosted Tools")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("Third party source API 格式")).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("Third party source API 格式"),
+    ).not.toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "配置 Third party source" }),
     ).toBeVisible();

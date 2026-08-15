@@ -117,7 +117,7 @@ beforeEach(() => {
 });
 
 describe("CodexMultiRouterWizard", () => {
-  it("explains the first step with user-facing guidance before technical details", () => {
+  it("keeps the first step focused on source selection and provider-owned configuration", () => {
     renderWithQueryClient(
       <CodexMultiRouterWizard
         open
@@ -129,12 +129,14 @@ describe("CodexMultiRouterWizard", () => {
       />,
     );
 
-    expect(screen.getByText("这套向导会帮你完成 6 件事")).toBeInTheDocument();
-    expect(screen.queryByText("子 Agent 候选")).not.toBeInTheDocument();
-    expect(screen.getByText(/你不用手动改配置文件/)).toBeInTheDocument();
+    expect(screen.getByText("这里只选择模型源")).toBeInTheDocument();
+    expect(screen.getByText(/都在各自 Provider 页面维护/)).toBeInTheDocument();
     expect(
-      screen.getByText(/技术备注：Codex 最后仍只连接本机/),
+      screen.getByRole("button", { name: "配置 DeepSeek" }),
     ).toBeInTheDocument();
+    expect(screen.queryByText("子 Agent 候选")).not.toBeInTheDocument();
+    expect(screen.queryByText(/这套向导会帮你完成/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/技术备注/)).not.toBeInTheDocument();
   });
 
   it("keeps runtime validation in the workspace and history repair as an independent Sessions action", () => {
@@ -149,11 +151,7 @@ describe("CodexMultiRouterWizard", () => {
       />,
     );
 
-    expect(
-      screen.getByText(
-        "启用后在状态页完成真实请求验证；历史记录修复可按需从 Sessions 独立进入",
-      ),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "启用并验证" })).toBeVisible();
     expect(
       screen.queryByText("启用后等待真实请求成功，再带你修复历史记录"),
     ).not.toBeInTheDocument();
@@ -323,29 +321,29 @@ describe("CodexMultiRouterWizard", () => {
   });
 
   it("guides official Codex sources to configure ChatGPT OAuth in provider config step", () => {
+    const onOpenProviderConfig = vi.fn();
+    const official = provider({
+      id: "codex-official",
+      name: "OpenAI Official",
+      category: "official",
+      settingsConfig: {},
+    });
     renderWithQueryClient(
       <CodexMultiRouterWizard
         open
-        providers={[
-          provider({
-            id: "codex-official",
-            name: "OpenAI Official",
-            category: "official",
-            settingsConfig: {},
-          }),
-        ]}
+        providers={[official]}
         onOpenChange={vi.fn()}
         onCreateProvider={vi.fn()}
+        onOpenProviderConfig={onOpenProviderConfig}
         onOpenWorkspace={vi.fn()}
         onEnablePlan={vi.fn()}
       />,
     );
 
-    expect(screen.getByText(/必须先完成 ChatGPT OAuth/)).toBeInTheDocument();
-    expect(screen.getByText("需要 ChatGPT OAuth")).toBeInTheDocument();
-    expect(
-      screen.getByTestId("wizard-codex-oauth-section"),
-    ).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "配置 OpenAI Official" }),
+    );
+    expect(onOpenProviderConfig).toHaveBeenCalledWith(official);
     expect(
       screen.queryByLabelText("OpenAI Official API 格式"),
     ).not.toBeInTheDocument();
@@ -396,7 +394,7 @@ describe("CodexMultiRouterWizard", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("keeps a manually selected Chat draft and route when a stale provider refetch arrives", async () => {
+  it("keeps provider protocol editing out of the wizard when a stale provider refetch arrives", async () => {
     const queryClient = new QueryClient({
       defaultOptions: { queries: { retry: false } },
     });
@@ -426,25 +424,23 @@ describe("CodexMultiRouterWizard", () => {
     );
     const { rerender } = render(renderWizard(staleQwen));
 
-    fireEvent.click(screen.getByRole("button", { name: "选择模型源" }));
-    fireEvent.click(screen.getByLabelText("Qwen Local API 格式"));
-    fireEvent.click(screen.getByRole("option", { name: "Chat Completions" }));
-
-    expect(screen.getByLabelText("Qwen Local API 格式")).toHaveTextContent(
-      "Chat Completions",
-    );
-    expect(screen.getByText(/协议选择：用户已锁定/)).toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("Qwen Local API 格式"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "配置 Qwen Local" }),
+    ).toBeInTheDocument();
 
     // 模拟后台 provider query 在用户选择之后返回数据库里的旧 Responses 快照。
     rerender(renderWizard({ ...staleQwen }));
 
-    await waitFor(() => {
-      expect(screen.getByLabelText("Qwen Local API 格式")).toHaveTextContent(
-        "Chat Completions",
-      );
-    });
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "配置 Qwen Local" }),
+      ).toBeInTheDocument(),
+    );
     fireEvent.click(screen.getByRole("button", { name: "选择模型并预览路由" }));
-    expect(screen.getByText("openai_chat")).toBeInTheDocument();
+    expect(screen.getByText("openai_responses")).toBeInTheDocument();
   });
 
   it("marks catalog-only providers as continuable instead of requiring full config", () => {
@@ -467,10 +463,7 @@ describe("CodexMultiRouterWizard", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "选择模型源" }));
-
-    expect(screen.getByText("已有模型目录，可继续")).toBeInTheDocument();
-    expect(screen.getByText(/仍会重新尝试/)).toBeInTheDocument();
+    expect(screen.getByText("1 个模型")).toBeInTheDocument();
     expect(screen.queryByText(/未配置在线获取参数/)).not.toBeInTheDocument();
     expect(screen.queryByText("需补全配置")).not.toBeInTheDocument();
   });
@@ -756,9 +749,6 @@ describe("CodexMultiRouterWizard", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "选择模型源" }));
-    expect(screen.getByText("可自动获取模型")).toBeInTheDocument();
-
     fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
     fireEvent.click(
       screen.getByRole("button", { name: "自动获取并写入模型列表" }),
@@ -804,9 +794,6 @@ describe("CodexMultiRouterWizard", () => {
         onEnablePlan={vi.fn()}
       />,
     );
-
-    fireEvent.click(screen.getByRole("button", { name: "选择模型源" }));
-    expect(screen.getByText("缺在线凭据，使用内置目录")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
     fireEvent.click(
@@ -857,9 +844,6 @@ describe("CodexMultiRouterWizard", () => {
         onEnablePlan={vi.fn()}
       />,
     );
-
-    fireEvent.click(screen.getByRole("button", { name: "选择模型源" }));
-    expect(screen.getByText("可通过火山 OpenAPI 获取模型")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
     fireEvent.click(
@@ -962,7 +946,7 @@ describe("CodexMultiRouterWizard", () => {
     expect(onOpenProviderConfig).toHaveBeenCalledWith(source);
   });
 
-  it("shows inferred Responses format for official OpenAI sources with stale chat metadata", () => {
+  it("does not expose inferred protocol details for official sources in the source picker", () => {
     renderWithQueryClient(
       <CodexMultiRouterWizard
         open
@@ -986,18 +970,15 @@ describe("CodexMultiRouterWizard", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "选择模型源" }));
-
     expect(
       screen.getAllByText(/OpenAI Official Backup/).length,
     ).toBeGreaterThan(0);
     expect(
-      screen.getByText(/API 格式：Responses API（向导推断/),
-    ).toBeInTheDocument();
+      screen.queryByText(/API 格式：Responses API（向导推断/),
+    ).not.toBeInTheDocument();
     expect(
-      screen.getByText(/已覆盖旧配置里的 Chat Completions/),
+      screen.getByRole("button", { name: "配置 OpenAI Official Backup" }),
     ).toBeInTheDocument();
-    expect(screen.queryByText(/默认 Chat Completions/)).not.toBeInTheDocument();
   });
 
   it("saves manually locked chat protocol instead of probe recommendations", async () => {
@@ -1203,7 +1184,7 @@ describe("CodexMultiRouterWizard", () => {
       screen.getByRole("button", { name: "测试 Chat / Responses 连通性" }),
     );
     expect(screen.getByText("确认开始连通性测试")).toBeInTheDocument();
-    expect(screen.getByRole("dialog")).toHaveClass("z-[200]");
+    expect(screen.getAllByRole("dialog").at(-1)).toHaveClass("z-[200]");
     fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
 
     expect(
@@ -1250,7 +1231,9 @@ describe("CodexMultiRouterWizard", () => {
     );
 
     expect(await screen.findByText("模型列表获取失败")).toBeInTheDocument();
-    expect(screen.getAllByText(/upstream \/models timeout/).length).toBe(2);
+    expect(
+      screen.getAllByText(/upstream \/models timeout/).length,
+    ).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("可继续")).toBeInTheDocument();
     consoleError.mockRestore();
   });

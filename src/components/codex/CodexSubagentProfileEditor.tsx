@@ -95,7 +95,7 @@ function profileToneFor(
 function profileToneClassName(tone: ProfileTone): string {
   switch (tone) {
     case "unroutable":
-      return "border-rose-200 bg-rose-50/70 dark:border-rose-500/40 dark:bg-rose-950/20";
+      return "border-border/70 bg-muted/35 dark:border-slate-700/70 dark:bg-slate-900/35";
     case "draft":
       return "border-amber-200 bg-amber-50/65 dark:border-amber-500/40 dark:bg-amber-950/20";
     case "enabled-routable":
@@ -461,6 +461,7 @@ export function CodexSubagentProfileEditor({
   const [isSaving, setIsSaving] = useState(false);
   const [profileSearch, setProfileSearch] = useState("");
   const [profileFilter, setProfileFilter] = useState<ProfileFilter>("all");
+  const [showOfficialProfiles, setShowOfficialProfiles] = useState(false);
   const [openProfileKey, setOpenProfileKey] = useState("");
   const backendAdoptedPersistedKey = useRef<{
     providerId: string;
@@ -671,7 +672,7 @@ export function CodexSubagentProfileEditor({
       await adoptBackendProvider(nextProvider);
       const actionMessage =
         action === "sync_catalog"
-          ? "已从模型目录添加可配置模型；已有设置保持不变"
+          ? "已添加第三方可配置模型；已有设置保持不变"
           : action === "remove_all_invalid"
             ? "无效能力配置已删除"
             : "无效能力配置已从模型目录恢复";
@@ -853,6 +854,11 @@ export function CodexSubagentProfileEditor({
   const unassignedStatuses = (statuses?.profiles ?? []).filter(
     (status) => !status.profileKey || !usableProfileKeys.has(status.profileKey),
   );
+  const officialProfileCount = profileEntries.filter(([profileKey]) => {
+    const status = statusByProfileKey.get(profileKey);
+    const preview = previews[profileKey];
+    return (status?.providerKind ?? preview?.providerKind) === "official";
+  }).length;
   const visibleProfileEntries = [...profileEntries]
     .sort(([leftKey, left], [rightKey, right]) => {
       const leftStatus = statusByProfileKey.get(leftKey);
@@ -866,12 +872,14 @@ export function CodexSubagentProfileEditor({
     })
     .filter(([profileKey, profile]) => {
       const status = statusByProfileKey.get(profileKey);
+      const preview = previews[profileKey];
+      const providerKind = status?.providerKind ?? preview?.providerKind;
+      if (providerKind === "official" && !showOfficialProfiles) return false;
       if (profileFilter === "enabled" && !profile.enabled) return false;
       if (profileFilter === "draft" && profile.enabled) return false;
       if (profileFilter === "unroutable" && status?.routable !== false) {
         return false;
       }
-      const preview = previews[profileKey];
       const haystack = [
         profile.model,
         profileKey,
@@ -980,7 +988,7 @@ export function CodexSubagentProfileEditor({
 
         <div
           data-subagent-panel="catalog"
-          className="space-y-3 rounded-lg border border-cyan-200 bg-cyan-50/70 p-3 dark:border-cyan-500/40 dark:bg-cyan-950/20"
+          className="space-y-3 rounded-lg border border-cyan-200/70 bg-cyan-50/60 p-3 dark:border-cyan-500/30 dark:bg-cyan-950/15"
         >
           <div className="flex flex-wrap items-start gap-3">
             <Button
@@ -990,10 +998,10 @@ export function CodexSubagentProfileEditor({
               onClick={() => reconcile("sync_catalog", draft)}
             >
               <Database aria-hidden="true" className="h-4 w-4" />
-              从模型目录添加可配置模型
+              添加第三方可配置模型
             </Button>
             <p className="max-w-2xl text-xs leading-5 text-cyan-900/75 dark:text-cyan-100/75">
-              发现当前可路由模型并加入列表；新模型默认关闭，已有问卷和手工设置不会被覆盖。
+              只加入当前可路由的第三方模型；新模型默认关闭，已有问卷和手工设置不会被覆盖。
             </p>
           </div>
           {reconciliableProfileCount > 0 ? (
@@ -1018,6 +1026,29 @@ export function CodexSubagentProfileEditor({
             </div>
           ) : null}
         </div>
+
+        {officialProfileCount > 0 ? (
+          <div className="rounded-lg border border-border/60 bg-muted/25 p-3">
+            <Button
+              type="button"
+              variant="ghost"
+              className="w-full justify-between px-2 text-left"
+              aria-expanded={showOfficialProfiles}
+              onClick={() => setShowOfficialProfiles((current) => !current)}
+            >
+              <span>官方模型（高级） · {officialProfileCount} 个</span>
+              <span className="text-xs text-muted-foreground">
+                {showOfficialProfiles ? "收起" : "查看"}
+              </span>
+            </Button>
+            {showOfficialProfiles ? (
+              <p className="px-2 pt-2 text-xs leading-5 text-muted-foreground">
+                官方模型通常不需要创建固定角色，Codex
+                内置角色会继承当前官方模型。仅在你明确需要锁定某个官方模型时才启用这里的配置。
+              </p>
+            ) : null}
+          </div>
+        ) : null}
 
         {visibleProfileEntries.length > 0 ? (
           <Accordion
@@ -1103,7 +1134,7 @@ export function CodexSubagentProfileEditor({
                         variant="outline"
                         aria-label={`编辑 ${profile.model}`}
                         onClick={() => setOpenProfileKey(profileKey)}
-                        disabled={isSaving}
+                        disabled={isSaving || status?.routable === false}
                         className="shrink-0"
                       >
                         编辑
@@ -1112,6 +1143,9 @@ export function CodexSubagentProfileEditor({
                         <Switch
                           aria-label={`启用 ${profile.model} 作为 V2 子 Agent`}
                           checked={profile.enabled}
+                          disabled={
+                            status?.routable === false && !profile.enabled
+                          }
                           onCheckedChange={(checked) =>
                             updateProfile(profileKey, (current) => ({
                               ...current,
@@ -1125,7 +1159,7 @@ export function CodexSubagentProfileEditor({
                     <AccordionContent
                       role="region"
                       aria-labelledby={`codex-subagent-${profileIndex}-region-label`}
-                      className="space-y-4 rounded-lg border border-white/70 bg-background/80 p-4 dark:border-white/10 dark:bg-slate-950/40"
+                      className="space-y-4 rounded-lg border border-border/60 bg-background/75 p-4 dark:bg-slate-950/35"
                     >
                       <span
                         id={`codex-subagent-${profileIndex}-region-label`}
@@ -1749,7 +1783,7 @@ function ProfileSummary({
           variant="outline"
           className={
             status?.routable === false
-              ? "border-rose-200 bg-rose-100/80 text-rose-800 dark:border-rose-500/40 dark:bg-rose-500/15 dark:text-rose-100"
+              ? "border-border bg-muted text-muted-foreground dark:border-slate-600 dark:bg-slate-800/70 dark:text-slate-300"
               : "border-emerald-200 bg-emerald-100/80 text-emerald-800 dark:border-emerald-500/40 dark:bg-emerald-500/15 dark:text-emerald-100"
           }
         >

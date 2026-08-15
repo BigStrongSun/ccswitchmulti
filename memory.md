@@ -3466,3 +3466,12 @@
 - annotated tag object 为 `afe53ad14fa3f5e84e7c697c31c5002d18ac6944`，本地/远端 peeled commit 均为 `50c32b3731c91e50c1249821aebc9e5da4110823`。GitHub Actions run `31851926650` 七个 jobs 全部 success；Release 非 draft、非 prerelease并成为 Latest。
 - GitHub Release 有 19 个实际资产。全部资产下载到独立临时目录后按服务端 `digest` 逐项复算 SHA-256，`MismatchCount=0`；`latest.json` 版本为 `3.19.1-27`，六个平台键齐全，全部 URL 指向 v27 且签名非空。
 - 用户本轮明确要求 GitHub Release；R2 `release.released` workflow 没有被 Actions 的 `GITHUB_TOKEN` 二次触发，因此未手动 dispatch，也不得声称 R2 已同步。tag 后只允许提交发布证据文档，禁止移动 v27 tag 或用文档变化触发重复构建。
+
+## 2026-08-15 MultiRouter 向导职责与 Sub-Agent V2 候选边界
+
+- MultiRouter 向导只负责“选择已就绪模型源、同步验证、组合路由、保存启用”。Provider 凭据、模型目录、API 协议、推理能力和 Hosted Tools 的配置归各自 Provider 页面或 MultiRouter 工作台所有；不要再把这些编辑器重复塞回向导首屏。向导中的 Provider 卡片只显示低干扰摘要和“配置 Provider”跳转。
+- 向导入口必须显式区分“创建新配置”和“编辑旧配置”。编辑入口列出每条可编辑方案的名称与 ID，向导以精确 `planId` 读取目标，顶部持续显示当前方案身份；打开入口前先刷新 Provider query，目标丢失时 fail closed，不能回退到 `providers.find(...)` 的第一条路由方案。
+- Sub-Agent V2 的普通“添加第三方可配置模型”只同步 authoritative classifier 判定为 third-party 的可路由模型。已有官方 profile 为兼容保留，但默认收进“官方模型（高级）”折叠区；官方 Codex 通常由内置角色继承当前模型，不应让普通用户误以为必须逐个勾选官方模型。
+- `routable=false` 是可用性/配置状态，不是错误，必须使用中性灰色；红色只用于解析失败、保存失败等真实错误。不可路由且未启用的 profile 不允许启用或编辑；已启用后变得不可路由的 profile 仍必须允许用户关闭。
+- 本轮 RED 提交为 `bcdc8ef6`。生产实现 focused 证据：V2 前端、向导新旧测试和 App 入口集成共 168/168；Rust `codex_subagent_v2` 103/103；typecheck、Prettier、rustfmt、`git diff --check` 通过。Browser 在独立 Vite renderer 中实际验证深色与通过 CDP 模拟的浅色首屏；Tauri-only invoke/event 错误属于 renderer 脱离 native host 的预期限制，不能冒充安装版运行时无错误证明。
+- 本修复位于 `bigstrongsun/fix-wizard-provider-subagent-ux`，基线为已发布 v27 的 `d2a0a2dc`；不得移动或重建 `v3.19.1-27` tag，也未获授权推送、安装或发布本修复。

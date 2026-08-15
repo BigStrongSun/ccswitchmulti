@@ -793,7 +793,7 @@ async function runFocusedV2Mutation(operation: FocusedV2Mutation) {
       name:
         operation === "initialize"
           ? "初始化 V2 子 Agent 能力配置"
-          : "从模型目录添加可配置模型",
+          : "添加第三方可配置模型",
     }),
   );
 }
@@ -818,7 +818,7 @@ function appliedVerification(overrides: Record<string, unknown> = {}) {
 function focusedMutationSuccessPattern(operation: FocusedV2Mutation) {
   return operation === "initialize"
     ? /V2 子 Agent 能力配置已初始化/
-    : /已从模型目录添加可配置模型/;
+    : /已添加第三方可配置模型/;
 }
 
 async function chooseOption(
@@ -1500,6 +1500,7 @@ describe("Codex Sub-Agent V2 new-plan capability defaults", () => {
       }),
     );
     await user.click(screen.getByRole("tab", { name: "子 Agent" }));
+    await user.click(screen.getByRole("button", { name: /官方模型（高级）/ }));
     expect(await openProfile(user, "gpt-5.6-sol")).toBeInTheDocument();
     expect(
       screen.queryByRole("region", {
@@ -1629,9 +1630,7 @@ describe("Codex Sub-Agent V2 backend-owned catalog reconciliation", () => {
     expect(
       screen.queryByRole("button", { name: "配置 gpt-5.6-sol" }),
     ).not.toBeInTheDocument();
-    await user.click(
-      screen.getByRole("button", { name: /官方模型（高级）/ }),
-    );
+    await user.click(screen.getByRole("button", { name: /官方模型（高级）/ }));
     expect(
       screen.getByRole("button", { name: "配置 gpt-5.6-sol" }),
     ).toBeVisible();
@@ -1700,7 +1699,7 @@ describe("Codex Sub-Agent V2 backend-owned catalog reconciliation", () => {
 
     await user.click(
       await screen.findByRole("button", {
-        name: "从模型目录添加可配置模型",
+        name: "添加第三方可配置模型",
       }),
     );
 
@@ -2071,10 +2070,9 @@ describe("Codex Sub-Agent V2 searchable Accordion workspace", () => {
     expect(triggers[0]).toHaveAttribute("aria-expanded", "false");
     expect(triggers[1]).toHaveAttribute("aria-expanded", "true");
 
-    await user.tab();
     expect(
       screen.getByRole("button", { name: "编辑 deepseek-v4-pro" }),
-    ).toHaveFocus();
+    ).toBeDisabled();
     await user.tab();
     expect(proSwitch).toHaveFocus();
     expect(proSwitch).toBeChecked();
@@ -2237,11 +2235,11 @@ describe("Codex Sub-Agent V2 searchable Accordion workspace", () => {
 
     expect(
       screen.getByText(
-        "发现当前可路由模型并加入列表；新模型默认关闭，已有问卷和手工设置不会被覆盖。",
+        "只加入当前可路由的第三方模型；新模型默认关闭，已有问卷和手工设置不会被覆盖。",
       ),
     ).toBeVisible();
     await user.click(
-      screen.getByRole("button", { name: "从模型目录添加可配置模型" }),
+      screen.getByRole("button", { name: "添加第三方可配置模型" }),
     );
 
     await waitFor(() =>
@@ -2256,7 +2254,7 @@ describe("Codex Sub-Agent V2 searchable Accordion workspace", () => {
     );
     expect(
       await screen.findByText(
-        "已从模型目录添加可配置模型；已有设置保持不变；数据库与 Codex Agent 文件均已写入并回读验证；重启 Codex/app-server 并新建会话后生效",
+        "已添加第三方可配置模型；已有设置保持不变；数据库与 Codex Agent 文件均已写入并回读验证；重启 Codex/app-server 并新建会话后生效",
       ),
     ).toBeVisible();
   });
@@ -2267,12 +2265,12 @@ describe("Codex Sub-Agent V2 searchable Accordion workspace", () => {
     await renderWorkspace();
 
     await user.click(
-      screen.getByRole("button", { name: "从模型目录添加可配置模型" }),
+      screen.getByRole("button", { name: "添加第三方可配置模型" }),
     );
 
     expect(
       await screen.findByText(
-        "已从模型目录添加可配置模型；已有设置保持不变；数据库已保存；当前方案未激活，因此未改写 Codex Agent 文件",
+        "已添加第三方可配置模型；已有设置保持不变；数据库已保存；当前方案未激活，因此未改写 Codex Agent 文件",
       ),
     ).toBeVisible();
     expect(screen.queryByText(/Codex Agent 文件均已写入并回读验证/)).toBeNull();
@@ -2378,17 +2376,20 @@ describe("Codex Sub-Agent V2 shared editor accessible areas", () => {
     );
   });
 
-  it("exposes an explicit edit action that opens the requested model", async () => {
+  it("disables editing for an unavailable model and keeps routable models editable", async () => {
     const user = userEvent.setup();
     await renderWorkspace();
 
-    await user.click(
+    expect(
       screen.getByRole("button", { name: "编辑 deepseek-v4-pro" }),
+    ).toBeDisabled();
+    await user.click(
+      screen.getByRole("button", { name: "编辑 deepseek-v4-flash" }),
     );
 
     expect(
       screen.getByRole("region", {
-        name: "deepseek-v4-pro 子 Agent 配置",
+        name: "deepseek-v4-flash 子 Agent 配置",
       }),
     ).toBeVisible();
   });
@@ -2449,10 +2450,10 @@ describe("Codex Sub-Agent V2 dual-theme visual contract", () => {
       "dark:bg-blue-950/20",
     );
     expect(catalog).toHaveClass(
-      "border-cyan-200",
-      "bg-cyan-50/70",
-      "dark:border-cyan-500/40",
-      "dark:bg-cyan-950/20",
+      "border-cyan-200/70",
+      "bg-cyan-50/60",
+      "dark:border-cyan-500/30",
+      "dark:bg-cyan-950/15",
     );
   });
 
@@ -2478,10 +2479,10 @@ describe("Codex Sub-Agent V2 dual-theme visual contract", () => {
       "dark:bg-emerald-950/25",
     );
     expect(proCard).toHaveClass(
-      "border-rose-200",
-      "bg-rose-50/70",
-      "dark:border-rose-500/40",
-      "dark:bg-rose-950/20",
+      "border-border/70",
+      "bg-muted/35",
+      "dark:border-slate-700/70",
+      "dark:bg-slate-900/35",
     );
   });
 

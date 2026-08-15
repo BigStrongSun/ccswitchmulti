@@ -3171,7 +3171,7 @@ pub(crate) fn reconcile_codex_subagent_v2_for_candidate(
     settings: &Value,
     action: CodexSubagentV2ReconcileAction,
     draft: Option<&Value>,
-    _provider_context: Option<&ProviderClassificationContext>,
+    provider_context: Option<&ProviderClassificationContext>,
 ) -> Result<Value, AppError> {
     let source = draft.ok_or_else(|| {
         AppError::InvalidInput("Reconcile actions require the current subagentV2 draft".to_string())
@@ -3233,6 +3233,16 @@ pub(crate) fn reconcile_codex_subagent_v2_for_candidate(
                 .collect::<HashSet<_>>();
             for (identity, model, input_modalities) in routable {
                 if existing_identities.contains(&identity) {
+                    continue;
+                }
+                if codex_subagent_route_classification_with_context(
+                    settings,
+                    &model,
+                    provider_context,
+                )
+                .is_some_and(|classification| {
+                    classification.provider_kind == SubagentProviderKind::Official
+                }) {
                     continue;
                 }
                 let preferred =
