@@ -19,7 +19,6 @@ import {
 import { toast } from "sonner";
 import type { Provider } from "@/types";
 import type {
-  CodexApiFormat,
   CodexCacheConfig,
   CodexCatalogModel,
   CodexOfficialAuthConfig,
@@ -67,11 +66,8 @@ import {
   getWizardConnectivityProbeModels,
   getWizardConfigIssues,
   getWizardModelFetchConfig,
-  hasWizardModelCatalog,
   isWizardCatalogOnlyModelSource,
   isWizardCodexOAuthSource,
-  isWizardVolcengineAgentPlanModelSource,
-  inferWizardApiFormat,
   inferCodexOfficialAuth,
   isCodexMultiRouterPlan,
   mergeFetchedModelsIntoWizardProvider,
@@ -87,15 +83,15 @@ import {
   DEFAULT_HOSTED_TOOLS_CONFIG,
   readHostedToolsConfig,
 } from "@/lib/hostedTools";
-import { HostedToolsSwitchPanel } from "./HostedToolsSwitchPanel";
 import type { WorkspaceTab } from "@/components/codex/CodexRouterWorkspacePage";
 import { codexCatalogOnlyPlanModelFetchMessage } from "@/utils/codexPlanModelFetch";
-import { CodexOAuthSection } from "@/components/providers/forms/CodexOAuthSection";
 import { useCodexOauth } from "@/components/providers/forms/hooks/useCodexOauth";
 
 interface CodexMultiRouterWizardProps {
   open: boolean;
   providers: Provider[];
+  mode?: "create" | "edit";
+  planId?: string;
   onOpenChange: (open: boolean) => void;
   onCreateProvider: () => void;
   onOpenProviderConfig?: (provider: Provider) => void;
@@ -110,11 +106,6 @@ interface WizardStep {
   title: string;
   description: string;
   icon: typeof Wand2;
-}
-
-interface WizardStepRule {
-  errors: string[];
-  canContinue: string;
 }
 
 interface WizardIssue {
@@ -148,12 +139,6 @@ interface ModelFetchCardState {
   diff?: ModelFetchDiff;
 }
 
-interface CodexOAuthWizardStatus {
-  isLoading: boolean;
-  hasAnyAccount: boolean;
-  accountCount: number;
-}
-
 const STEPS: WizardStep[] = [
   {
     key: "sources",
@@ -181,41 +166,6 @@ const STEPS: WizardStep[] = [
     icon: CheckCircle2,
   },
 ];
-
-const STEP_RULES: Record<WizardStepKey, WizardStepRule> = {
-  sources: {
-    errors: [
-      "没有普通 Codex provider 时，不能生成任何路由。",
-      "缺少 Base URL/API Key 时无法自动获取模型，也无法做真实连通性测试。",
-    ],
-    canContinue:
-      "至少选择一个模型源；已有目录可以继续，连接缺口会在下一步集中显示。",
-  },
-  prepare: {
-    errors: [
-      "/models 失败会保留已有目录，不会清空用户配置。",
-      "Responses 直连 provider 的 /v1/responses 探测失败是阻塞项。",
-      "多个 Provider 暴露同一模型名时必须应用稳定别名。",
-    ],
-    canContinue:
-      "同步和探测可以重试；无阻塞连通性失败时自动应用重名别名并继续。",
-  },
-  review: {
-    errors: [
-      "名称为空时无法保存方案。",
-      "未保留任何模型或没有可命中规则时，MultiRouter 不可用。",
-    ],
-    canContinue: "填写名称、至少保留一个模型并确认路由预览后可以继续。",
-  },
-  activate: {
-    errors: [
-      "数据库写入失败或 provider id 冲突时需要重试保存。",
-      "本地代理未运行、端口冲突或切换 provider 失败会进入 enableFailed。",
-      "启用后如果 Codex 没有发出真实请求，状态页会停在待请求验证。",
-    ],
-    canContinue: "先保存方案，再显式启用并打开状态页完成真实请求验证。",
-  },
-};
 
 type WizardFlowStatus =
   | "opened"
@@ -513,49 +463,6 @@ function fetchConfigSummary(config: WizardModelFetchConfig | null): string {
   return `${config.baseUrl}${config.isFullUrl ? " (完整 URL)" : ""}`;
 }
 
-// 将协议枚举转成用户能理解的名称，避免在配置页直接暴露 openai_chat 这种内部值。
-function apiFormatDisplayName(format: CodexApiFormat): string {
-  return format === "openai_responses" ? "Responses API" : "Chat Completions";
-}
-
-// 判断旧配置里是否有可识别的显式协议值；未知字符串只用于说明，不参与 route 生成。
-function normalizeApiFormat(value: unknown): CodexApiFormat | null {
-  return value === "openai_responses" || value === "openai_chat" ? value : null;
-}
-
-// 配置页统一调用向导的数据层推断协议，保证 UI 文案和最终 route 保存结果一致。
-function providerApiFormatSummary(provider: Provider): string {
-  const inferredFormat = inferWizardApiFormat(provider);
-  const explicitFormat = normalizeApiFormat(
-    provider.meta?.apiFormat ??
-      provider.settingsConfig?.apiFormat ??
-      provider.settingsConfig?.api_format,
-  );
-  if (explicitFormat === inferredFormat) {
-    return `${apiFormatDisplayName(inferredFormat)}（已显式设置）`;
-  }
-  if (explicitFormat) {
-    return `${apiFormatDisplayName(inferredFormat)}（向导推断；已覆盖旧配置里的 ${apiFormatDisplayName(explicitFormat)}）`;
-  }
-  return `${apiFormatDisplayName(inferredFormat)}（向导推断；官方 GPT/O 优先 Responses，未知第三方默认 Chat）`;
-}
-
-// 判断协议是否由用户在向导里锁定；锁定后保存阶段不会再被连通性探测推荐覆盖。
-function providerApiFormatSourceLabel(provider: Provider): string {
-  return provider.meta?.apiFormatSource === "manual"
-    ? "用户已锁定"
-    : "可由探测推荐更新";
-}
-
-// 向导只暴露 Codex 当前支持的两个上游协议；历史 openai_messages 配置按 Chat 路径展示和保存。
-function selectableApiFormat(
-  provider: Provider,
-): Extract<CodexApiFormat, "openai_responses" | "openai_chat"> {
-  return inferWizardApiFormat(provider) === "openai_responses"
-    ? "openai_responses"
-    : "openai_chat";
-}
-
 // 将 route 的缓存能力转换成向导里的说明，强调缓存验证看真实 usage，而不是基础连通性。
 function cacheCapabilitySummary(cache?: CodexCacheConfig): string {
   switch (cache?.cacheMode) {
@@ -575,79 +482,6 @@ function cacheCapabilitySummary(cache?: CodexCacheConfig): string {
     default:
       return "缓存能力未知：只做基础连通性与路由验证，真实命中需看上游 usage。";
   }
-}
-
-// 给配置页提供三态说明：能在线读取、官方 OAuth 需登录、已有目录可继续或确实需要补全。
-function providerConfigStatus(
-  provider: Provider,
-  codexOAuthStatus: CodexOAuthWizardStatus,
-): {
-  badge: string;
-  badgeVariant: "outline" | "secondary" | "destructive";
-  summary: string;
-} {
-  if (isWizardCodexOAuthSource(provider)) {
-    if (codexOAuthStatus.isLoading) {
-      return {
-        badge: "正在检查 OAuth",
-        badgeVariant: "outline",
-        summary:
-          "官方 Codex 使用 ChatGPT OAuth，不需要 API Key/Base URL；正在读取本机已托管的 ChatGPT 账号状态。",
-      };
-    }
-    if (codexOAuthStatus.hasAnyAccount) {
-      return {
-        badge: "OAuth 已配置",
-        badgeVariant: "secondary",
-        summary: `已检测到 ${codexOAuthStatus.accountCount} 个可用 ChatGPT 账号；向导会使用官方 Codex 内置模型目录，启用后由 CCSwitchMulti 托管 OAuth 转发。`,
-      };
-    }
-    return {
-      badge: "需要 ChatGPT OAuth",
-      badgeVariant: "destructive",
-      summary:
-        "官方 Codex 不使用 API Key/Base URL。请先在这里登录 ChatGPT 账号，否则保存后官方 GPT/O 路由会因为缺少 OAuth token 而无法真实转发。",
-    };
-  }
-  const config = getWizardModelFetchConfig(provider);
-  const isCatalogOnlyPlan = isWizardCatalogOnlyModelSource(provider);
-  const isVolcengineAgentPlan =
-    isWizardVolcengineAgentPlanModelSource(provider);
-  if (isCatalogOnlyPlan && hasWizardModelCatalog(provider)) {
-    return {
-      badge: isVolcengineAgentPlan
-        ? "缺在线凭据，使用内置目录"
-        : "使用内置模型目录",
-      badgeVariant: "secondary",
-      summary: isVolcengineAgentPlan
-        ? "火山 AgentPlan 当前没有推理 API Key 或 AK/SK，向导会保留已有 modelCatalog 继续生成路由。"
-        : "当前 Plan 的模型枚举不走 OpenAI /models，向导会保留已有 modelCatalog 继续生成路由。",
-    };
-  }
-  if (config) {
-    return {
-      badge: config.volcengineModelListAction
-        ? "可通过火山 OpenAPI 获取模型"
-        : "可自动获取模型",
-      badgeVariant: "outline",
-      summary: fetchConfigSummary(config),
-    };
-  }
-  if (hasWizardModelCatalog(provider)) {
-    return {
-      badge: "已有模型目录，可继续",
-      badgeVariant: "secondary",
-      summary:
-        "已有 modelCatalog，可以继续生成路由；进入获取模型列表步骤时仍会重新尝试 /models 在线读取。",
-    };
-  }
-  return {
-    badge: "需补全配置",
-    badgeVariant: "destructive",
-    summary: isCatalogOnlyPlan
-      ? "当前 Plan 缺少推理 API Key 或专用模型列表凭据，且没有可用 modelCatalog"
-      : "缺少 Base URL/API Key，且没有可用 modelCatalog",
-  };
 }
 
 // 生成官方 Codex OAuth 动态目录读取文案；失败时保留最后一次成功目录，不清空用户配置。
@@ -783,28 +617,11 @@ function reconcileCatalogModelOrderAfterFetch(
   return [...retained, ...added];
 }
 
-// 将用户在配置步骤选择的协议写回草稿 provider，并清空旧探测结果避免预览继续使用过期推荐。
-function applyManualApiFormatToProvider(
-  provider: Provider,
-  apiFormat: CodexApiFormat,
-): Provider {
-  return {
-    ...provider,
-    meta: {
-      ...(provider.meta ?? {}),
-      apiFormat,
-      apiFormatSource: "manual",
-    },
-    settingsConfig: {
-      ...(provider.settingsConfig ?? {}),
-      apiFormat,
-    },
-  };
-}
-
 export function CodexMultiRouterWizard({
   open,
   providers,
+  mode,
+  planId,
   onOpenChange,
   onCreateProvider,
   onOpenProviderConfig,
@@ -848,25 +665,24 @@ export function CodexMultiRouterWizard({
   >({});
   const initializedOpenRef = useRef(false);
 
-  const existingPlan = useMemo(
-    () => providers.find((provider) => isCodexMultiRouterPlan(provider)),
-    [providers],
-  );
+  const resolvedMode =
+    mode ??
+    (planId || providers.some((provider) => isCodexMultiRouterPlan(provider))
+      ? "edit"
+      : "create");
+  const existingPlan = useMemo(() => {
+    if (resolvedMode !== "edit") return undefined;
+    return planId
+      ? providers.find(
+          (provider) =>
+            provider.id === planId && isCodexMultiRouterPlan(provider),
+        )
+      : providers.find((provider) => isCodexMultiRouterPlan(provider));
+  }, [planId, providers, resolvedMode]);
+  const editingTargetMissing = resolvedMode === "edit" && !existingPlan;
   const providerModelSources = useMemo(
     () => defaultWizardModelSources(providers),
     [providers],
-  );
-  const codexOAuthStatus = useMemo(
-    () => ({
-      isLoading: isCodexOauthStatusLoading,
-      hasAnyAccount: hasCodexOauthAccount,
-      accountCount: codexOauthAccounts.length,
-    }),
-    [
-      codexOauthAccounts.length,
-      hasCodexOauthAccount,
-      isCodexOauthStatusLoading,
-    ],
   );
   const hasCodexOAuthSources = useMemo(
     () => draftSources.some((provider) => isWizardCodexOAuthSource(provider)),
@@ -909,21 +725,6 @@ export function CodexMultiRouterWizard({
   const isProbingConnectivity = flowState.status === "probingConnectivity";
   const isSavingPlan = flowState.status === "savingPlan";
   const isEnablingPlan = flowState.status === "enabling";
-
-  // 用户手动选择协议时立即更新草稿，并废弃旧探测结果，避免保存时再次套用过期推荐。
-  const handleProviderApiFormatChange = (
-    providerId: string,
-    apiFormat: CodexApiFormat,
-  ) => {
-    setDraftSources((current) =>
-      current.map((provider) =>
-        provider.id === providerId
-          ? applyManualApiFormatToProvider(provider, apiFormat)
-          : provider,
-      ),
-    );
-    setConnectivityResults([]);
-  };
 
   // 每次打开向导只初始化一次。父组件 rerender 会传入新的 providers 数组，不能因此把用户从第 2 步重置回第 1 步。
   useEffect(() => {
@@ -973,7 +774,7 @@ export function CodexMultiRouterWizard({
       type: "INIT",
       hasSources: providerModelSources.length > 0,
     });
-  }, [existingPlan, open, providerModelSources]);
+  }, [existingPlan, open, planId, providerModelSources, resolvedMode]);
 
   // 向导打开后只同步 source 的增删；已存在 source 必须保留向导草稿。
   // 父层 provider 查询可能在用户手动选择协议、刷新模型或处理别名后完成 refetch，
@@ -1727,9 +1528,9 @@ export function CodexMultiRouterWizard({
         aria-modal="true"
         aria-labelledby="codex-multirouter-wizard-title"
         data-testid="codex-multirouter-wizard-shell"
-        className="flex max-h-full w-[min(96vw,1280px)] min-h-0 flex-col rounded-lg border border-white/15 bg-background shadow-2xl"
+        className="flex max-h-full w-[min(96vw,1280px)] min-h-0 flex-col overflow-hidden rounded-2xl border border-border/60 bg-background shadow-2xl"
       >
-        <div className="flex shrink-0 items-start justify-between border-b px-5 py-4">
+        <div className="flex shrink-0 items-start justify-between border-b border-border/60 bg-gradient-to-r from-blue-500/10 via-background to-violet-500/10 px-5 py-4">
           <div className="flex items-start gap-3">
             <div className="rounded-md bg-primary/10 p-2 text-primary">
               <CurrentStepIcon className="h-5 w-5" />
@@ -1763,7 +1564,7 @@ export function CodexMultiRouterWizard({
           data-testid="codex-multirouter-wizard-body"
           className="grid min-h-0 flex-1 grid-cols-[15rem_minmax(0,1fr)] overflow-hidden"
         >
-          <div className="space-y-1 overflow-y-auto border-r bg-muted/30 p-3">
+          <div className="space-y-1 overflow-y-auto border-r border-border/60 bg-gradient-to-b from-blue-500/8 via-muted/25 to-violet-500/8 p-3">
             {STEPS.map((step, index) => {
               const StepIcon = step.icon;
               return (
@@ -1787,35 +1588,48 @@ export function CodexMultiRouterWizard({
           </div>
 
           <div className="min-h-0 overflow-y-auto p-5">
-            <div className="mb-4 rounded-lg border bg-muted/30 p-3 text-sm">
-              <div className="flex flex-wrap items-center gap-2">
-                <Badge variant="outline">状态机：{flowState.status}</Badge>
-                <span className="text-muted-foreground">
-                  {wizardStatusText(flowState)}
-                </span>
+            <div
+              role="status"
+              aria-atomic="true"
+              className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border/60 bg-gradient-to-r from-blue-500/10 via-background to-violet-500/10 px-4 py-3"
+            >
+              <div>
+                <div className="text-sm font-semibold">
+                  {resolvedMode === "edit" && existingPlan
+                    ? `正在编辑：${existingPlan.name}`
+                    : "正在创建：新的 MultiRouter 配置"}
+                </div>
+                <div className="mt-1 text-xs text-muted-foreground">
+                  {resolvedMode === "edit" && existingPlan
+                    ? existingPlan.id
+                    : "新配置不会覆盖已有 MultiRouter；保存后将生成独立方案。"}
+                </div>
               </div>
-              {flowState.fetchSummary && (
-                <div className="mt-2 text-xs text-muted-foreground">
-                  最近一次获取模型：成功 {flowState.fetchSummary.successCount}
-                  ，跳过 {flowState.fetchSummary.skippedCount}，失败{" "}
-                  {flowState.fetchSummary.failedCount}
-                </div>
-              )}
-              {flowState.connectivitySummary && (
-                <div className="mt-2 text-xs text-muted-foreground">
-                  最近一次 Chat / Responses 基础协议测试：通过{" "}
-                  {flowState.connectivitySummary.passCount}，警告{" "}
-                  {flowState.connectivitySummary.warnCount}，跳过{" "}
-                  {flowState.connectivitySummary.skippedCount}，失败{" "}
-                  {flowState.connectivitySummary.failCount}
-                </div>
-              )}
-              {flowState.lastError && (
-                <div className="mt-2 text-xs text-destructive">
-                  {flowState.lastError}
-                </div>
-              )}
+              <Badge variant="outline">
+                {resolvedMode === "edit" ? "编辑旧配置" : "创建新配置"}
+              </Badge>
             </div>
+            {editingTargetMissing ? (
+              <div
+                role="alert"
+                className="mb-4 rounded-lg border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive"
+              >
+                目标配置已不存在或尚未刷新。请关闭向导后重新选择要编辑的
+                MultiRouter。
+              </div>
+            ) : null}
+            <div role="status" aria-live="polite" className="sr-only">
+              <span>状态机：{flowState.status}</span>
+              <span>{wizardStatusText(flowState)}</span>
+            </div>
+            {flowState.lastError && wizardIssues.length === 0 ? (
+              <div
+                role="alert"
+                className="mb-4 rounded-lg border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive"
+              >
+                {flowState.lastError}
+              </div>
+            ) : null}
             {wizardIssues.length > 0 && (
               <div className="mb-4 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm">
                 <div className="font-medium text-foreground">
@@ -1855,53 +1669,14 @@ export function CodexMultiRouterWizard({
                 </div>
               </div>
             )}
-            <div className="mb-4 rounded-lg border p-3 text-sm">
-              <div className="font-medium">本步骤异常与继续条件</div>
-              <ul className="mt-2 space-y-1 text-xs text-muted-foreground">
-                {STEP_RULES[currentStep.key].errors.map((error) => (
-                  <li key={error}>{error}</li>
-                ))}
-              </ul>
-              <div className="mt-2 text-xs text-muted-foreground">
-                可继续判断：{STEP_RULES[currentStep.key].canContinue}
-              </div>
-            </div>
-
             {currentStep.key === "sources" && (
               <div className="space-y-4">
-                <div className="rounded-lg border p-4">
-                  <div className="flex items-center gap-2 font-medium">
-                    <Wand2 className="h-4 w-4" />
-                    这套向导会帮你完成 6 件事
-                  </div>
-                  <div className="mt-4 grid gap-3 md:grid-cols-2">
-                    {[
-                      "把 OpenAI、中转站、DeepSeek、Qwen、本地模型接进来",
-                      "给新的 MultiRouter 方案命名，方便后续识别",
-                      "自动读取模型列表，并处理官方模型和中转模型重名",
-                      "汇总所有模型后排序，并剔除旧模型或不想暴露的模型",
-                      "按模型名称生成分流规则，让 Codex 自动选上游",
-                      "启用后等待真实请求成功，再带你修复历史记录",
-                    ].map((item, index) => (
-                      <div
-                        key={item}
-                        className="flex gap-3 rounded-md border bg-muted/30 p-3 text-sm"
-                      >
-                        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-primary text-xs font-medium text-primary-foreground">
-                          {index + 1}
-                        </span>
-                        <span className="leading-6">{item}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-                <div className="rounded-lg border p-4 text-sm leading-6 text-muted-foreground">
-                  你不用手动改配置文件。向导会先预览模型源、连通性和路由规则，只有点击“保存并发布”后才写入本地
-                  providers 数据库；点击“启用这个多路路由”后才会接管当前 Codex。
-                </div>
-                <div className="rounded-lg border bg-muted/30 p-4 text-xs leading-6 text-muted-foreground">
-                  技术备注：Codex 最后仍只连接本机 127.0.0.1:15721，
-                  CCSwitchMulti 会根据请求里的 model 把流量发到对应上游。
+                <div className="rounded-xl border border-border/60 bg-gradient-to-r from-sky-500/10 via-background to-cyan-500/10 p-4 text-sm leading-6">
+                  <div className="font-medium">这里只选择模型源</div>
+                  <p className="mt-1 text-muted-foreground">
+                    凭据、模型目录、API 协议、推理能力和工具兼容性都在各自
+                    Provider 页面维护。向导只读取就绪结果并组合路由。
+                  </p>
                 </div>
               </div>
             )}
@@ -1922,7 +1697,10 @@ export function CodexMultiRouterWizard({
                 <div className="max-h-[min(42vh,28rem)] overflow-y-auto pr-2">
                   <div className="grid gap-3 md:grid-cols-2">
                     {providerModelSources.map((provider) => (
-                      <div key={provider.id} className="rounded-lg border p-3">
+                      <div
+                        key={provider.id}
+                        className="rounded-xl border border-border/60 bg-card/70 p-3 shadow-sm"
+                      >
                         <label className="flex cursor-pointer items-start gap-3">
                           <input
                             type="checkbox"
@@ -1945,10 +1723,19 @@ export function CodexMultiRouterWizard({
                             </span>
                           </span>
                         </label>
-                        <div className="mt-3">
+                        <div className="mt-3 flex items-center justify-between gap-3">
                           <Badge variant="outline">
                             {modelSourceSummary(provider)}
                           </Badge>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            aria-label={`配置 ${provider.name}`}
+                            onClick={() => onOpenProviderConfig?.(provider)}
+                          >
+                            配置 Provider
+                          </Button>
                         </div>
                       </div>
                     ))}
@@ -1981,103 +1768,6 @@ export function CodexMultiRouterWizard({
                     列表、状态页和后续启用提示里。重命名只影响 MultiRouter
                     方案本身，不会改动单个上游 provider 的名称。
                   </p>
-                </div>
-              </div>
-            )}
-
-            {currentStep.key === "sources" && (
-              <div className="space-y-3">
-                {hasCodexOAuthSources && (
-                  <div className="rounded-lg border border-blue-500/30 bg-blue-500/10 p-3 text-sm leading-6 text-blue-950 dark:text-blue-100">
-                    官方 Codex / OpenAI Official 源必须先完成 ChatGPT OAuth
-                    登录。它不需要 API Key，也不会调用普通
-                    /models；向导会使用内置官方模型目录，
-                    登录状态决定启用后能否真实转发官方 GPT/O 请求。
-                  </div>
-                )}
-                {configIssues.length > 0 && (
-                  <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-900 dark:text-amber-200">
-                    {configIssues.length} 个 provider
-                    不能自动获取模型。你可以补全 Base URL/API
-                    Key，或继续使用已有 modelCatalog。
-                  </div>
-                )}
-                <HostedToolsSwitchPanel
-                  webSearchEnabled={webSearchEnabled}
-                  imageGenerationEnabled={imageGenerationEnabled}
-                  onChange={(next) => {
-                    setWebSearchEnabled(next.webSearchEnabled);
-                    setImageGenerationEnabled(next.imageGenerationEnabled);
-                  }}
-                  disabled={isSavingPlan}
-                />
-                <div className="max-h-[min(46vh,32rem)] space-y-3 overflow-y-auto pr-2">
-                  {draftSources.map((provider) => {
-                    const status = providerConfigStatus(
-                      provider,
-                      codexOAuthStatus,
-                    );
-                    const isCodexOAuth = isWizardCodexOAuthSource(provider);
-                    return (
-                      <div
-                        key={provider.id}
-                        className="rounded-lg border p-4 text-sm"
-                      >
-                        <div className="flex items-center justify-between gap-3">
-                          <div className="font-medium">{provider.name}</div>
-                          <Badge variant={status.badgeVariant}>
-                            {status.badge}
-                          </Badge>
-                        </div>
-                        <div className="mt-2 text-muted-foreground">
-                          {status.summary}
-                        </div>
-                        <div className="mt-2 text-xs text-muted-foreground">
-                          API 格式：{providerApiFormatSummary(provider)}
-                        </div>
-                        {isCodexOAuth ? (
-                          <div className="mt-4 rounded-lg border bg-muted/30 p-3">
-                            <div className="mb-3 text-xs leading-5 text-muted-foreground">
-                              此 provider 将固定使用 CCSwitchMulti 托管的 Codex
-                              OAuth。登录后可继续使用默认账号；需要指定账号时，请先在
-                              Provider 配置页绑定账号。
-                            </div>
-                            <CodexOAuthSection />
-                          </div>
-                        ) : (
-                          <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                            <div className="text-xs text-muted-foreground">
-                              协议选择：{providerApiFormatSourceLabel(provider)}
-                            </div>
-                            <Select
-                              value={selectableApiFormat(provider)}
-                              onValueChange={(value) =>
-                                handleProviderApiFormatChange(
-                                  provider.id,
-                                  value as CodexApiFormat,
-                                )
-                              }
-                            >
-                              <SelectTrigger
-                                aria-label={`${provider.name} API 格式`}
-                                className="w-full sm:w-[220px]"
-                              >
-                                <SelectValue />
-                              </SelectTrigger>
-                              <SelectContent>
-                                <SelectItem value="openai_responses">
-                                  Responses API
-                                </SelectItem>
-                                <SelectItem value="openai_chat">
-                                  Chat Completions
-                                </SelectItem>
-                              </SelectContent>
-                            </Select>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
                 </div>
               </div>
             )}
@@ -2484,6 +2174,7 @@ export function CodexMultiRouterWizard({
                   onClick={saveMultiRouterPlan}
                   disabled={
                     isSavingPlan ||
+                    editingTargetMissing ||
                     draftSources.length === 0 ||
                     (connectivityResults.length > 0 &&
                       !canContinueAfterConnectivity(connectivityResults))

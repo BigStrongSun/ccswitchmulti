@@ -12,7 +12,10 @@ vi.mock("@/components/providers/forms/hooks/useCodexOauth", () => ({
   }),
 }));
 
-function renderWizard(providers: Provider[]) {
+function renderWizard(
+  providers: Provider[],
+  options?: { mode?: "create" | "edit"; planId?: string },
+) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
@@ -21,6 +24,8 @@ function renderWizard(providers: Provider[]) {
       <CodexMultiRouterWizard
         open
         providers={providers}
+        mode={options?.mode ?? "create"}
+        planId={options?.planId}
         onOpenChange={vi.fn()}
         onCreateProvider={vi.fn()}
         onOpenProviderConfig={vi.fn()}
@@ -31,7 +36,34 @@ function renderWizard(providers: Provider[]) {
   );
 }
 
-describe("CodexMultiRouterWizard V2 subagent flow", () => {
+describe("CodexMultiRouterWizard", () => {
+  it("keeps V1 and V2 configuration out of the four-stage routing wizard", () => {
+    renderWizard([
+      {
+        id: "codex-deepseek",
+        name: "DeepSeek",
+        category: "custom",
+        settingsConfig: {
+          baseUrl: "https://example.invalid/v1",
+          auth: { OPENAI_API_KEY: "test-only" },
+          modelCatalog: {
+            models: [
+              { model: "deepseek-v4-flash" },
+              { model: "deepseek-v4-pro" },
+            ],
+          },
+        },
+      },
+    ]);
+
+    expect(
+      screen.queryByRole("button", { name: /Sub-Agent V1/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Sub-Agent V2/ }),
+    ).not.toBeInTheDocument();
+  });
+
   it("presents MultiRouter setup as four user tasks", () => {
     renderWizard([
       {
@@ -98,5 +130,52 @@ describe("CodexMultiRouterWizard V2 subagent flow", () => {
     expect(
       screen.queryByText(/选择并排序最多 5 个子 Agent 候选模型/),
     ).not.toBeInTheDocument();
+  });
+
+  it("edits the explicitly selected plan instead of the first cached routing plan", () => {
+    const routingPlan = (id: string, name: string): Provider => ({
+      id,
+      name,
+      category: "custom",
+      settingsConfig: {
+        codexRouting: { enabled: true, routes: [{ id: `${id}-route` }] },
+        modelCatalog: { models: [{ model: `${id}-model` }] },
+      },
+    });
+
+    renderWizard(
+      [
+        routingPlan("router-a", "旧方案 A"),
+        routingPlan("router-b", "目标方案 B"),
+      ],
+      { mode: "edit", planId: "router-b" },
+    );
+
+    expect(screen.getByText("正在编辑：目标方案 B")).toBeVisible();
+    expect(screen.getByText("router-b")).toBeVisible();
+    expect(screen.queryByText("正在编辑：旧方案 A")).not.toBeInTheDocument();
+  });
+
+  it("keeps provider-owned protocol and hosted-tool controls out of source selection", () => {
+    renderWizard([
+      {
+        id: "third-party",
+        name: "Third party source",
+        category: "custom",
+        settingsConfig: {
+          baseUrl: "https://example.invalid/v1",
+          auth: { OPENAI_API_KEY: "test-only" },
+          modelCatalog: { models: [{ model: "third-party-model" }] },
+        },
+      },
+    ]);
+
+    expect(screen.queryByText("OpenAI Hosted Tools")).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("Third party source API 格式"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "配置 Third party source" }),
+    ).toBeVisible();
   });
 });

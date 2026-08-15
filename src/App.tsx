@@ -218,6 +218,11 @@ function App() {
   ] = useState(false);
   const [isCodexMultiRouterWizardOpen, setIsCodexMultiRouterWizardOpen] =
     useState(false);
+  const [codexMultiRouterWizardMode, setCodexMultiRouterWizardMode] = useState<
+    "create" | "edit"
+  >("create");
+  const [codexMultiRouterWizardPlanId, setCodexMultiRouterWizardPlanId] =
+    useState<string>();
   const [isWindowMaximized, setIsWindowMaximized] = useState(false);
 
   useEffect(() => {
@@ -338,6 +343,10 @@ function App() {
   const codexWizardProviders = useMemo(
     () => (activeApp === "codex" ? Object.values(providers) : []),
     [activeApp, providers],
+  );
+  const codexRoutingPlans = useMemo(
+    () => codexWizardProviders.filter(isRoutingPlan),
+    [codexWizardProviders],
   );
   const currentProviderId = data?.currentProviderId ?? "";
   const isOpenClawView =
@@ -978,15 +987,26 @@ function App() {
   };
 
   // 从首页 CTA 进入入口选择面板；用户可以随时退出，也可以选择引导或直接进入工作台。
-  const handleStartCodexMultiRouterWizard = () => {
+  const handleStartCodexMultiRouterWizard = async () => {
     setActiveApp("codex");
     setCurrentView("providers");
+    await queryClient.invalidateQueries({ queryKey: ["providers", "codex"] });
+    await refetch();
     setIsCodexMultiRouterEntryChoiceOpen(true);
   };
 
-  // 用户明确选择引导时才打开遮罩式向导，避免每次点击入口都被强制带入教程。
-  const handleOpenCodexMultiRouterGuide = () => {
+  const handleCreateCodexMultiRouter = () => {
     setActiveApp("codex");
+    setCodexMultiRouterWizardMode("create");
+    setCodexMultiRouterWizardPlanId(undefined);
+    setIsCodexMultiRouterEntryChoiceOpen(false);
+    setIsCodexMultiRouterWizardOpen(true);
+  };
+
+  const handleEditCodexMultiRouter = (provider: Provider) => {
+    setActiveApp("codex");
+    setCodexMultiRouterWizardMode("edit");
+    setCodexMultiRouterWizardPlanId(provider.id);
     setIsCodexMultiRouterEntryChoiceOpen(false);
     setIsCodexMultiRouterWizardOpen(true);
   };
@@ -1886,40 +1906,63 @@ function App() {
               配置多路模型
             </DialogTitle>
             <DialogDescription className="leading-6">
-              你可以开始完整引导，也可以随时退出并直接进入 MultiRouter
-              工作台。再次点击首页入口时仍会先回到这个选择面板。
+              先明确是创建独立的新方案，还是编辑一条已有方案。打开此窗口时会重新读取
+              Provider 数据，避免沿用上次向导草稿。
             </DialogDescription>
           </DialogHeader>
 
           <div className="grid gap-3 px-6 py-4">
             <button
               type="button"
-              onClick={handleOpenCodexMultiRouterGuide}
-              className="rounded-lg border border-primary/30 bg-primary/5 p-4 text-left transition-colors hover:bg-primary/10"
+              onClick={handleCreateCodexMultiRouter}
+              className="rounded-xl border border-blue-500/25 bg-gradient-to-r from-blue-500/10 via-background to-cyan-500/10 p-4 text-left shadow-sm transition-colors hover:border-blue-500/45 hover:from-blue-500/15"
             >
               <div className="flex items-center gap-2 font-medium">
-                <Wrench className="h-4 w-4 text-primary" />
-                开始引导配置
+                <Plus className="h-4 w-4 text-blue-500" />
+                创建新配置
               </div>
               <p className="mt-2 text-sm leading-6 text-muted-foreground">
-                按四个任务选择模型源、自动同步并验证、预览路由，最后启用
-                MultiRouter 并在状态页完成真实请求验证。
+                从空白方案开始选择模型源。不会覆盖任何已有 MultiRouter。
               </p>
             </button>
 
-            <button
-              type="button"
-              onClick={handleOpenCodexMultiRouterWorkspaceDirectly}
-              className="rounded-lg border bg-card p-4 text-left transition-colors hover:bg-muted/60"
-            >
+            <div className="rounded-xl border border-violet-500/25 bg-gradient-to-r from-violet-500/10 via-background to-fuchsia-500/10 p-4 shadow-sm">
               <div className="flex items-center gap-2 font-medium">
-                <LayoutDashboard className="h-4 w-4 text-muted-foreground" />
-                直接打开工作台
+                <Wrench className="h-4 w-4 text-violet-500" />
+                编辑旧配置
               </div>
               <p className="mt-2 text-sm leading-6 text-muted-foreground">
-                跳过教程，直接进入 MultiRouter 状态页查看、编辑或测试现有路由。
+                选择明确的方案后再进入向导；方案名称和 ID 会始终显示在顶部。
               </p>
-            </button>
+              <div className="mt-3 max-h-40 space-y-2 overflow-y-auto pr-1">
+                {codexRoutingPlans.length > 0 ? (
+                  codexRoutingPlans.map((plan) => (
+                    <button
+                      key={plan.id}
+                      type="button"
+                      onClick={() => handleEditCodexMultiRouter(plan)}
+                      className="flex w-full items-center justify-between gap-3 rounded-lg border border-border/60 bg-background/65 px-3 py-2 text-left transition hover:border-violet-500/40 hover:bg-violet-500/10"
+                    >
+                      <span className="min-w-0">
+                        <span className="block truncate text-sm font-medium">
+                          {plan.name}
+                        </span>
+                        <span className="block truncate text-xs text-muted-foreground">
+                          {plan.id}
+                        </span>
+                      </span>
+                      <span className="shrink-0 text-xs text-violet-600 dark:text-violet-300">
+                        编辑
+                      </span>
+                    </button>
+                  ))
+                ) : (
+                  <div className="rounded-lg border border-dashed border-border/70 px-3 py-3 text-xs text-muted-foreground">
+                    暂无已有 MultiRouter，请先创建新配置。
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
 
           <DialogFooter>
@@ -1929,7 +1972,13 @@ function App() {
             >
               暂不配置
             </Button>
-            <Button onClick={handleOpenCodexMultiRouterGuide}>开始引导</Button>
+            <Button
+              variant="outline"
+              onClick={handleOpenCodexMultiRouterWorkspaceDirectly}
+            >
+              <LayoutDashboard className="mr-2 h-4 w-4" />
+              直接打开工作台
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -1938,6 +1987,8 @@ function App() {
         <CodexMultiRouterWizard
           open
           providers={codexWizardProviders}
+          mode={codexMultiRouterWizardMode}
+          planId={codexMultiRouterWizardPlanId}
           onOpenChange={setIsCodexMultiRouterWizardOpen}
           onCreateProvider={() => {
             setActiveApp("codex");

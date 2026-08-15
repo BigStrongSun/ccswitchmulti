@@ -74,6 +74,29 @@ beforeEach(() => {
 });
 
 describe("CodexMultiRouterWizard", () => {
+  it("renders the publish and enable page for a new plan with no existing MultiRouter", () => {
+    renderWithQueryClient(
+      <CodexMultiRouterWizard
+        open
+        mode="create"
+        providers={[provider()]}
+        onOpenChange={vi.fn()}
+        onCreateProvider={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+        onEnablePlan={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "启用并验证" }));
+
+    expect(
+      screen.getByRole("button", { name: "保存并发布" }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "启用这个多路路由" }),
+    ).toBeVisible();
+  });
+
   it("explains the first step with user-facing guidance before technical details", () => {
     renderWithQueryClient(
       <CodexMultiRouterWizard
