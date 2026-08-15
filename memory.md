@@ -3500,6 +3500,13 @@
 - v31 本地 release 构建日志明确出现 Tauri `Patching ... with bundle type information: nsis`，安装包 SHA-256 为 `665CDBF69AE889CAA5AD3473A3AB71CAD4B99C79633EB41CDF93B86E15FE88F5`。事务 `ccsm-20260815-214338-8abca640d04e4137bf314eaa3d95264d` 返回 `Success`、`Error=null`、`RollbackError=null`；安装版 PID/15721 owner 均为 `48992`，ProductVersion `3.19.1-31`，SHA-256 `DE307C845D02CE59AF334DFEE98C2A2BC193E9A1A0981266BEFC59A5C0754A96`，health HTTP 200。
 - 安装版真实 Qwen canary 使用 `stream=true`、`tool_choice=auto`，同时携带 hosted `web_search` 与普通 function。首个 SSE 事件 0.593 秒到达，共 50 个事件并以 `response.completed` 结束；router trace `ef86c36b-0970-4665-9a50-2c8b7371365d` 显示 `/responses -> /chat/completions`、Qwen route HTTP 200、`streaming=true`、`upstream_stream=true`。这证明全局 Hosted Tools 不再让普通 Agent 请求失去增量输出。
 - 第二个安装版 canary 在相同 hosted `web_search` 广告下要求普通 `report_marker`，实际收到流式 `response.function_call_arguments.done`、正确工具名和 `CCSM_QWEN38_TOOL_OK` 参数；trace `ed4f112d-8604-4857-b8b3-9f81c00d38c2` 同样为 HTTP 200、`streaming=true`、`upstream_stream=true`。因此策略只移除 hosted-only 定义，没有误删 Codex 的终端/文件/MCP 类客户端工具。
+
+## 2026-08-16 Qwen3.8 view_image original detail 回放 400 根修
+
+- 现场任务 `01a005e2-7e5e-7a91-91be-1f69223b3c0a` 在 context compaction 后调用 `view_image` 检查 PPT 渲染页；工具输出被 Codex 持久化为 `input_image + detail=original`。随后 trace `c22c06de-491d-4448-a770-41e8a9316974` 和 `1c18bf43-f975-434b-aee0-752164d7a8e1` 都在 Responses→Chat 后由 Qwen vLLM 以 HTTP 400 拒绝，因为 Chat `image_url.detail` 只接受 `auto/low/high`。这不是超时、上下文溢出或最新 v31 流式修复引入的问题。
+- 时间线表明缺口长期潜伏：Responses→Chat 的图片对象原样复制自初始桥接提交 `693c3872`（2026-06-02）；Codex 自 2026-03/04 已支持工具图片 `original`；2026-07-25 的 `dce97209`/`b2278d06` 开始系统保留图片能力，但生成的第三方 catalog 仍克隆官方 GPT 模板，令 Qwen 最终获得错误的 `supports_image_detail_original=true`。以前的 Qwen canary 主要验证文本、普通图片和工具调用，没有实际执行会返回原图 detail 的 `view_image`，所以没有触发。
+- RED `308e2b32` 覆盖真实 view_image tool output、replayed image_url object、未知未来 detail 和第三方 catalog 能力泄漏。GREEN `92df4c4b` 在共享 Chat 媒体边界统一 `original -> high`、保留 `auto/low/high`、删除未知/非字符串 detail；直接 Responses input_image 对象也复用该归一化。生成的第三方 route catalog 一律写 `supports_image_detail_original=false`，同 slug 官方模型仍由 `merge_codex_model_entry` 恢复官方权威值。
+- 影响面不止 PPT：view_image、MCP/custom tool 图片、function tool output、压缩历史以及跨 provider 回放都可能携带 original；仅修 catalog 不能处理旧历史或先官方后第三方的跨模型回放，仅修转换又会继续错误诱导 Codex 生成 original。两层必须同时修。Native Responses/官方透传不经过 Chat detail 归一化，原始语义保持不变。
 - 发布流水线曾在进程启动时读取 v30，随后 worktree 提升 v31，导致实际成功构建 v31 但导出阶段仍寻找 v30；重新执行 `export-latest-ccswitchmulti.ps1 -SkipBuild` 后按当前 v31 正确生成安装包、签名和 `latest.json`。以后版本提升必须发生在启动发布流水线之前，不能在持锁构建期间改变版本源。
 
 ## 2026-08-15 v3.19.1-31 GitHub 正式发布
