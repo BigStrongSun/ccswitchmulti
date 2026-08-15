@@ -890,6 +890,13 @@ impl ProxyService {
                 // 只看占位符会把半接管/旧端口残留误判为可复用，导致开启接管后
                 // live 文件仍停留在普通供应商配置。
                 if has_backup && live_matches_current_proxy {
+                    // An application upgrade may change generated Codex catalog
+                    // semantics while the live takeover URL remains valid. Refresh
+                    // only the owned projection on the idempotent startup path so
+                    // stale capability flags do not survive until a manual switch.
+                    if app == AppType::Codex {
+                        self.takeover_live_config_best_effort(&app).await?;
+                    }
                     self.refresh_active_target_from_current_provider(&app).await;
                     self.run_post_takeover_lifecycle(&app);
                     return Ok(());
@@ -5445,6 +5452,80 @@ wire_api = "responses"
             .expect("disable Codex takeover");
         crate::settings::update_settings(crate::settings::AppSettings::default())
             .expect("reset settings");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn codex_idempotent_takeover_refreshes_stale_owned_model_catalog() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        let db = Arc::new(Database::memory().expect("init db"));
+        use_ephemeral_proxy_port(&db).await;
+        let service = ProxyService::new(db.clone());
+        crate::codex_config::write_codex_live_atomic(
+            &json!({ "OPENAI_API_KEY": "qwen-key" }),
+            Some("model = \"qwen3.8\"\n"),
+        )
+        .expect("seed live Codex config");
+
+        let provider = Provider::with_id(
+            "qwen".to_string(),
+            "Qwen".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "qwen-key" },
+                "config": "model = \"qwen3.8\"\n",
+                "modelCatalog": {
+                    "models": [{ "model": "qwen3.8", "contextWindow": 262144 }]
+                }
+            }),
+            None,
+        );
+        db.save_provider("codex", &provider)
+            .expect("save Qwen provider");
+        db.set_current_provider("codex", "qwen")
+            .expect("set current provider");
+        crate::settings::set_current_provider(&AppType::Codex, Some("qwen"))
+            .expect("set local current provider");
+
+        service
+            .set_takeover_for_app("codex", true)
+            .await
+            .expect("enable Codex takeover");
+
+        let catalog_path = crate::codex_config::get_codex_model_catalog_path();
+        let mut stale_catalog: Value =
+            crate::config::read_json_file(&catalog_path).expect("read generated catalog");
+        let qwen = stale_catalog["models"]
+            .as_array_mut()
+            .expect("models")
+            .iter_mut()
+            .find(|entry| entry["slug"] == "qwen3.8")
+            .expect("Qwen entry");
+        qwen["supports_image_detail_original"] = json!(false);
+        qwen["supportsImageDetailOriginal"] = json!(false);
+        crate::config::write_json_file(&catalog_path, &stale_catalog)
+            .expect("seed stale generated catalog");
+
+        service
+            .set_takeover_for_app("codex", true)
+            .await
+            .expect("reconcile existing Codex takeover");
+
+        let refreshed: Value =
+            crate::config::read_json_file(&catalog_path).expect("read refreshed catalog");
+        let qwen = refreshed["models"]
+            .as_array()
+            .expect("models")
+            .iter()
+            .find(|entry| entry["slug"] == "qwen3.8")
+            .expect("Qwen entry");
+        assert_eq!(qwen["supports_image_detail_original"], true);
+        assert_eq!(qwen["supportsImageDetailOriginal"], true);
+
+        service
+            .set_takeover_for_app("codex", false)
+            .await
+            .expect("disable Codex takeover");
     }
 
     #[tokio::test]
