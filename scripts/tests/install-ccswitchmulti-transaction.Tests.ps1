@@ -450,6 +450,23 @@ Describe "CCSwitchMulti transactional reinstall orchestration" {
         { Resolve-CcsmReplacementListenerAction -Context $context -ListenerIdentity $foreign } | Should Throw "foreign process"
     }
 
+    It "adopts one already healthy exact runtime instead of starting a duplicate instance" {
+        $context = [pscustomobject]@{ InstalledExecutable = "C:\Program Files\CCSwitchMulti\cc-switch.exe" }
+        $identity = [pscustomobject]@{
+            ProcessId = 202
+            Path = "c:\PROGRAM FILES\CCSwitchMulti\CC-SWITCH.EXE"
+        }
+        $health = @{ Healthy = $true; StatusCode = 200 }
+
+        (Resolve-CcsmExistingRuntimeProcessId -Context $context -ListenerIdentity $identity `
+            -ExpectedVersion "3.19.1-29" -ExpectedHash "ABC" `
+            -ActualVersion "3.19.1-29" -ActualHash "abc" -Health $health) | Should Be 202
+
+        { Resolve-CcsmExistingRuntimeProcessId -Context $context -ListenerIdentity $identity `
+            -ExpectedVersion "3.19.1-29" -ExpectedHash "ABC" `
+            -ActualVersion "3.19.1-28" -ActualHash "abc" -Health $health } | Should Throw "version mismatch"
+    }
+
     It "terminates a disposable PowerShell child through the actual retained-handle helper" {
         $child = $null
         try {
