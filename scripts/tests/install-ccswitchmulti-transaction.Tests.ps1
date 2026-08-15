@@ -428,6 +428,28 @@ Describe "CCSwitchMulti transactional reinstall orchestration" {
         ($script:retainedHandleCalls -join ",") | Should Be "kill,wait:3000"
     }
 
+    It "stops a verified same-product replacement listener but rejects a foreign replacement" {
+        $context = [pscustomobject]@{
+            CurrentPid = 101
+            InstalledExecutable = "C:\Program Files\CCSwitchMulti\cc-switch.exe"
+        }
+        $sameProduct = [pscustomobject]@{
+            ProcessId = 202
+            Path = "c:\PROGRAM FILES\CCSwitchMulti\CC-SWITCH.EXE"
+            StartTime = "2026-08-15T10:00:00.0000000Z"
+            Handle = New-FakeRetainedProcessHandle -WaitForExitResult $true
+        }
+        $foreign = [pscustomobject]@{
+            ProcessId = 303
+            Path = "C:\Temp\foreign.exe"
+            StartTime = "2026-08-15T10:00:01.0000000Z"
+            Handle = New-FakeRetainedProcessHandle -WaitForExitResult $true
+        }
+
+        (Resolve-CcsmReplacementListenerAction -Context $context -ListenerIdentity $sameProduct) | Should Be "stop"
+        { Resolve-CcsmReplacementListenerAction -Context $context -ListenerIdentity $foreign } | Should Throw "foreign process"
+    }
+
     It "terminates a disposable PowerShell child through the actual retained-handle helper" {
         $child = $null
         try {
