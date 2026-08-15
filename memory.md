@@ -3484,3 +3484,8 @@
 - V2 schema 2 的公开校验码必须覆盖 `missing_reasoning_policy`、`invalid_reasoning_policy`、fixed/default effort、input modalities、legacy v2 字段和 reasoning capability 不兼容等实际错误；已知结构错误不得再折叠为 `invalid_configuration`，否则用户无法定位丢失栏位。
 - RED 提交 `7460469b` 分别锁定路由固定字段保留、Windows notify 读取归一化和具体 reasoning 缺失错误码。GREEN 聚焦验证为 ProviderForm/配置状态与 V2 编辑器合计 140/140、扩大 Codex config 170/170、`cargo check --lib`、typecheck、Prettier、rustfmt 和 `git diff --check` 全部通过；既有 `baseline-browser-mapping` 提示和 `openai_cache_read_tokens` dead-code warning 与本修复无关。
 - 本机当前 Live 配置同时存在多行 `developer_instructions` 内的 notify 示例文字和真正根级 notify；实际复读确认前者必须逐字保留、后者在当前 Codex 版本已是合法双反斜杠。读取兼容器的 multiline/root-scope 限制正是防止把说明文字当配置修复。
+
+## 2026-08-15 v3.19.1-28 发布准备
+
+- v28 只包含 v27 后的向导职责收敛、Sub-Agent V2 第三方候选隔离、Windows notify Live 读取兼容和普通 Provider 保存保留 V2 固定字段；已发布的 v27 tag 与资产保持不变。四处版本统一提交为 `fa70e7b3`，中文说明为 `docs/release-notes/v3.19.1-28-zh.md`。
+- 固定构建前完整门禁：Rust library 2996/2996，Vitest 123 files / 1002 tests，原生 Windows PowerShell 5.1 下 release-build-config 6/6、事务安装 47/47；`cargo check --lib`、typecheck、Prettier、rustfmt 和 `git diff --check` 通过。Pester 3.4.0 的 `Should Throw` 在 PowerShell 7 下会误报，必须按仓库既定边界使用 Windows PowerShell 5.1，不能把运行器不兼容当生产失败或伪装成通过。
