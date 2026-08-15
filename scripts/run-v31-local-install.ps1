@@ -12,7 +12,7 @@ $uninstallExecutable = Join-Path $installDirectory "uninstall.exe"
 $listener = Get-NetTCPConnection -State Listen -LocalPort 15721 | Select-Object -First 1
 if (-not $listener) { throw "CCSwitchMulti is not listening on port 15721" }
 
-$transactionId = "ccsm-20260816-qwen38-original-toml-root-7e6515db"
+$transactionId = "ccsm-20260816-qwen38-original-toml-root-7e6515db-r2"
 $backupRoot = Join-Path "C:\Users\sunda\AppData\Local\CCSwitchMultiTransactionBackups" $transactionId
 New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
 $resultPath = Join-Path $backupRoot "transaction-result.json"
