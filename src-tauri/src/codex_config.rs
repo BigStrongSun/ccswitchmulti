@@ -7485,6 +7485,62 @@ mod tests {
     }
 
     #[test]
+    fn codex_live_read_normalizes_only_invalid_unescaped_windows_notify_paths() {
+        let invalid = concat!(
+            "developer_instructions = \"\"\"\n",
+            "notify = [\"C:\\Users\\inside\\instructions.exe\", \"turn-ended\"]\n",
+            "\"\"\"\n",
+            "notify = [\"C:\\Users\\sunda\\AppData\\Local\\OpenAI\\Codex\\runtimes\\cua_node\\bin\\codex-computer-use.exe\", \"turn-ended\"]\n",
+            "model = \"gpt-5.5\"\n",
+        );
+        assert!(validate_config_toml(invalid).is_err());
+
+        let normalized = normalize_codex_config_text_for_live_read(invalid)
+            .expect("the generated Windows notify path should be recoverable");
+        validate_config_toml(&normalized).expect("normalized live config must be valid TOML");
+        assert!(normalized.contains(concat!(
+            "notify = [\"C:\\\\Users\\\\sunda\\\\AppData\\\\Local\\\\OpenAI\\\\Codex",
+            "\\\\runtimes\\\\cua_node\\\\bin\\\\codex-computer-use.exe\", \"turn-ended\"]"
+        )));
+        assert!(normalized
+            .contains("notify = [\"C:\\Users\\inside\\instructions.exe\", \"turn-ended\"]"));
+
+        let already_valid =
+            "notify = [\"C:\\\\Users\\\\sunda\\\\codex-computer-use.exe\", \"turn-ended\"]\n";
+        assert_eq!(
+            normalize_codex_config_text_for_live_read(already_valid)
+                .expect("valid config should pass through"),
+            already_valid
+        );
+    }
+
+    #[test]
+    fn codex_subagent_v2_missing_fixed_reasoning_field_reports_specific_code() {
+        let error = parse_persisted_subagent_v2(&json!({
+            "schemaVersion": 2,
+            "selectionPolicy": "balanced",
+            "profiles": {
+                "deepseek-v4-pro": {
+                    "model": "deepseek-v4-pro",
+                    "enabled": true,
+                    "questionnaire": {
+                        "taskStrengths": ["complex_debugging"],
+                        "optimization": "quality",
+                        "writeScope": "complex_changes",
+                        "preference": "preferred"
+                    }
+                }
+            }
+        }))
+        .expect_err("schema v2 profile without reasoning must be rejected");
+
+        assert_eq!(
+            public_codex_subagent_validation_code(&error),
+            "missing_reasoning_policy"
+        );
+    }
+
+    #[test]
     fn codex_subagent_v2_compile_marks_unmatched_and_disabled_declared_models_unroutable() {
         let settings = json!({
             "modelCatalog": { "models": [
