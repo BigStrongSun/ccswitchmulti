@@ -181,6 +181,46 @@ Describe "CCSwitchMulti local release build config" {
         }
     }
 
+    It "keeps the default export beside the main repository from a linked worktree" {
+        . $helperPath
+
+        $repoRoot = 'C:\workspace\cc-switch\.worktrees\feature'
+        $gitCommonDir = 'C:\workspace\cc-switch\.git'
+
+        $releaseRoot = Resolve-CcswitchmultiReleaseRoot `
+            -RepoRoot $repoRoot `
+            -GitCommonDir $gitCommonDir
+
+        $releaseRoot | Should Be 'C:\workspace\最新版ccswitchmulti'
+    }
+
+    It "keeps the default export beside a normal main checkout" {
+        . $helperPath
+
+        $releaseRoot = Resolve-CcswitchmultiReleaseRoot `
+            -RepoRoot 'C:\workspace\cc-switch' `
+            -GitCommonDir 'C:\workspace\cc-switch\.git'
+
+        $releaseRoot | Should Be 'C:\workspace\最新版ccswitchmulti'
+    }
+
+    It "honors an explicit release root without consulting Git metadata" {
+        . $helperPath
+
+        $releaseRoot = Resolve-CcswitchmultiReleaseRoot `
+            -RepoRoot 'C:\not-a-repository' `
+            -RequestedRoot 'D:\ccsm-release'
+
+        $releaseRoot | Should Be 'D:\ccsm-release'
+    }
+
+    It "fails clearly when the default export root cannot be tied to Git metadata" {
+        . $helperPath
+
+        { Resolve-CcswitchmultiReleaseRoot -RepoRoot 'C:\not-a-repository' -GitCommonDir '' } |
+            Should Throw 'cannot resolve the CCSwitchMulti main repository'
+    }
+
     It "exports the projected NSIS-installed executable hash before final checksums" {
         $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
         $exportScript = [System.IO.File]::ReadAllText((Join-Path $repoRoot "scripts\export-latest-ccswitchmulti.ps1"))
