@@ -3457,3 +3457,12 @@
 - 冲突根因是 v26 的 supported/default effort 临时契约与 v27 的统一 runtime policy 同时修改 profile compiler。最终采用 v27 的 `delegated/model_default/fixed/disabled` 与 resolved capability，同时保留 v26 的父级 selection policy、legacy DeepSeek fallback、状态 warning 汇总和发布/事务脚本。legacy `auto` 迁移为 delegated；显式 `xhigh` 保持 fixed `xhigh`；DeepSeek fallback 声明 Provider `low/high/max`、默认 `high`、允许关闭，并映射 `medium/xhigh -> high`。
 - 合流聚焦门禁：profiles 84/84、`codex_config` 167/167、ImageGen 13/13、Codex proxy 10/10、reqwest 3/3、前端 7 files / 241 tests。全量门禁：Rust library 2991 passed / 0 failed / 2 ignored；Vitest 123 files / 996 tests；typecheck、Prettier、cargo check/fmt、diff hygiene 均通过；原生 Windows PowerShell 5.1 Pester 53/53。
 - v27 不重复 v26 的 173-ref/198-patch 历史审计；v26 已证明 `actionable-missing=0`。本轮只确认 v27 现有新提交与 v26 最终发布线已经同树可达。正式 build/install/tag/Release 证据必须在 `3.19.1-27` 版本提交之后追加，不能复用 v26 资产或哈希。
+
+## 2026-08-15 v3.19.1-27 本地安装与 GitHub 正式发布
+
+- 版本提交 `50c32b3731c91e50c1249821aebc9e5da4110823` 统一 package/Cargo/Tauri/lock 版本并包含 v27 中文说明；`pnpm release:local` 在该 clean HEAD 上 exit 0，metadata 精确绑定该提交，15/15 checksum 一致。raw EXE SHA-256 为 `CF31C903F52027F6B7D6E608AF6AA43FF2C1C609CBE2224D8C66F2304B008107`，NSIS installer 为 `D318CCDC6BF8CB7F7424E38FF9B359D1E4BEE6620EF9307CB3FDF74C59CDF522`，NSIS 安装态预期哈希为 `FA9726A634969DF11AD068E034063DBF3658694EC06078FF1F901DBB3D2B7D7D`。
+- 独立隐藏事务 `ccsm-20260815-074918-c5bf859249d348ec98840a8717578637` 返回 `Success`、`Error=null`、`RollbackError=null`。新 PID/15721 owner 为 `48284`，路径为已安装 `cc-switch.exe`；FileVersion/ProductVersion 均为 `3.19.1-27`，安装态哈希精确匹配推导值，`/health` HTTP 200。普通交互 shell 未单独停止 CCSM。
+- 安装版 UI 真实验收通过：MultiRouter 顶部六个导航包含独立“子 Agent”；当前 V2 的按钮为 disabled“已启用 V2”，V1 为可操作“启用 V1”。Flash profile 展开后实际显示 builtin/confirmed 能力来源、Provider `low/high/max`、Codex `none/low/medium/high/xhigh/max`、默认 `high`、允许关闭以及 `medium/xhigh -> high` 映射；旧配置固定 `medium` 被明确标注为主 Agent 不可覆盖，不再伪装成 delegated。
+- annotated tag object 为 `afe53ad14fa3f5e84e7c697c31c5002d18ac6944`，本地/远端 peeled commit 均为 `50c32b3731c91e50c1249821aebc9e5da4110823`。GitHub Actions run `31851926650` 七个 jobs 全部 success；Release 非 draft、非 prerelease并成为 Latest。
+- GitHub Release 有 19 个实际资产。全部资产下载到独立临时目录后按服务端 `digest` 逐项复算 SHA-256，`MismatchCount=0`；`latest.json` 版本为 `3.19.1-27`，六个平台键齐全，全部 URL 指向 v27 且签名非空。
+- 用户本轮明确要求 GitHub Release；R2 `release.released` workflow 没有被 Actions 的 `GITHUB_TOKEN` 二次触发，因此未手动 dispatch，也不得声称 R2 已同步。tag 后只允许提交发布证据文档，禁止移动 v27 tag 或用文档变化触发重复构建。
