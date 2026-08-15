@@ -7,6 +7,7 @@
 - 官方 cache 的安全边界：当前 `models_cache.json` 若带 CCSM 托管 etag，只能读取官方 backup；backup 缺失时返回无官方能力，禁止回退读取 CCSM 自己投影的第三方目录并将其误标为 official。
 - 未吸收 PR 的 K3/K3-256K `low/high/max` 硬编码、Unknown capability + Fixed 无条件放行及整套宽档位映射。双链搜索没有 Moonshot 官方三档依据；Codex child turn context 还会按目标 catalog 钳制不支持的 effort，因此不能保证代理层收到并映射原始值。
 - 聚焦门禁：官方 cache string/object/exact-slug/owned-cache tests 4/4；codex_reasoning 8/8；V2 编辑器与 Provider reasoning 129/129；`pnpm typecheck`、rustfmt、Prettier 与 `git diff --check` 通过。GitHub PR 当前只有 label job，没有构建/测试 CI 证明，不能直接 merge/cherry-pick。
+- v29 发布前完整门禁已通过：Rust library `3002 passed / 0 failed / 2 ignored`；Vitest `124 files / 1006 tests`；`cargo check --lib`、rustfmt、typecheck、Prettier 与 `git diff --check` 全部通过。版本源统一升级为 `3.19.1-29`，发布说明为 `docs/release-notes/v3.19.1-29-zh.md`。
 
 ## 2026-08-15 v29 Codex 配置强制恢复（进行中）
 
