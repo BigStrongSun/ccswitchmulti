@@ -12192,6 +12192,56 @@ max_depth = 2
     }
 
     #[test]
+    fn force_repair_canonicalizes_agent_aliases_and_preserves_user_config() {
+        let input = r#"model_provider = "codex_model_router_v2"
+
+[agents]
+max_threads = 10
+max_concurrent_threads_per_session = 8
+max_depth = 2
+
+[mcp_servers.user_owned]
+command = "example-mcp"
+
+[projects.'C:\\Users\\example\\repo']
+trust_level = "trusted"
+"#;
+
+        let outcome = repair_codex_live_config_text_for_force_switch(input)
+            .expect("force repair should accept valid legacy TOML");
+        let parsed: toml::Value = toml::from_str(&outcome.config_text)
+            .expect("repaired config should remain valid TOML");
+        let agents = parsed.get("agents").expect("agents table");
+
+        assert_eq!(
+            agents
+                .get("max_concurrent_threads_per_session")
+                .and_then(toml::Value::as_integer),
+            Some(8),
+            "canonical value must win when both spellings exist"
+        );
+        assert!(agents.get("max_threads").is_none());
+        assert_eq!(
+            agents.get("max_depth").and_then(toml::Value::as_integer),
+            Some(2)
+        );
+        assert_eq!(
+            parsed["mcp_servers"]["user_owned"]["command"].as_str(),
+            Some("example-mcp"),
+            "force repair must preserve user-owned MCP config"
+        );
+        assert_eq!(
+            parsed["projects"][r"C:\Users\example\repo"]["trust_level"].as_str(),
+            Some("trusted"),
+            "force repair must preserve user-owned project config"
+        );
+        assert!(outcome
+            .repaired_fields
+            .iter()
+            .any(|field| field == "agents.max_threads"));
+    }
+
+    #[test]
     fn resolve_catalog_path_returns_none_when_config_missing_field() {
         let generated = PathBuf::from("/tmp/.codex/cc-switch-model-catalog.json");
         assert!(resolve_cc_switch_catalog_path("", &generated).is_none());

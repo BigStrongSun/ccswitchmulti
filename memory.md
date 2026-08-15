@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-08-15 v29 Codex 配置强制恢复（进行中）
+
+- v28 并未更换 TOML 写入库；正常模型目录投影已使用 `toml_edit::DocumentMut` 并会把 `[agents].max_threads` 迁移为唯一的 `max_concurrent_threads_per_session`。现场仍失败的根因是热切换会先校验 Sub-Agent V2/reasoning，旧坏数据在进入最终投影前就中止，因此旧 Live 配置永远没有得到 canonical 化。
+- “强制覆盖”不能删除整份 `~/.codex/config.toml`。已确认边界：先备份 Live 配置和目标 Provider；保留 MCP、projects、plugins、memories、用户自定义 role 等非托管字段；规范化 agents alias 和可迁移 reasoning；再以目标 Provider 重跑正常切换；任一步失败恢复原 Live 和 Provider。
+- DeepSeek V4 的旧坏 `defaultEffort` 应回到已维护预设 `low/high/max + high`。未知模型只能从自身合法 `supportedEfforts` 中选择默认值，不能套用 GPT 或 DeepSeek 档位。
+- 切换失败 toast 必须携带失败时的 `appId/providerId`：Codex 显示“复制 + 强制覆盖”，其他应用仍只显示复制，防止误修另一 Provider。
+
 ## 2026-08-15 V27 主 Agent / Sub-Agent 推理强度协调实现与验收
 
 - Codex 当前原生 `ReasoningEffort` 已包含 `none/minimal/low/medium/high/xhigh/max/ultra/custom`，但目标模型 spawn 只接受其 catalog `supported_reasoning_levels` 中的值。`ultra` 还参与 Codex 主动多 Agent 行为；Provider 未声明 ultra 时不得默认映射到 max。
