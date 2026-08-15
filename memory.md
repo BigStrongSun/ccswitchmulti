@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-08-15 PR #9 reasoning 修复选择性吸收
+
+- GitHub PR #9（`zhushihao/fix/28-reasoning@da4300ac`）准确定位了 v28 的一项 UI 死锁：后端 `status="disabled"` 代表 profile 未启用，并不等于模型 `unroutable`。V2 编辑器必须以权威 `status.status == "unroutable"` 禁用编辑/启用控件，不能继续用历史兼容字段 `routable == false` 判断。
+- 已选择性吸收并独立验证：Disabled/Unroutable 状态区分；取消 Provider reasoning 档位时清除所有指向该 target 的 `effortMap` 孤儿映射；保存时拒绝 target 不属于 `supportedEfforts` 的映射；无效 reasoning 声明记录模型名和校验错误；官方模型按精确 slug 从 Codex 官方 cache/backup 读取字符串或对象形态的 reasoning levels。
+- 官方 cache 的安全边界：当前 `models_cache.json` 若带 CCSM 托管 etag，只能读取官方 backup；backup 缺失时返回无官方能力，禁止回退读取 CCSM 自己投影的第三方目录并将其误标为 official。
+- 未吸收 PR 的 K3/K3-256K `low/high/max` 硬编码、Unknown capability + Fixed 无条件放行及整套宽档位映射。双链搜索没有 Moonshot 官方三档依据；Codex child turn context 还会按目标 catalog 钳制不支持的 effort，因此不能保证代理层收到并映射原始值。
+- 聚焦门禁：官方 cache string/object/exact-slug/owned-cache tests 4/4；codex_reasoning 8/8；V2 编辑器与 Provider reasoning 129/129；`pnpm typecheck`、rustfmt、Prettier 与 `git diff --check` 通过。GitHub PR 当前只有 label job，没有构建/测试 CI 证明，不能直接 merge/cherry-pick。
+
 ## 2026-08-15 v29 Codex 配置强制恢复（进行中）
 
 - v28 并未更换 TOML 写入库；正常模型目录投影已使用 `toml_edit::DocumentMut` 并会把 `[agents].max_threads` 迁移为唯一的 `max_concurrent_threads_per_session`。现场仍失败的根因是热切换会先校验 Sub-Agent V2/reasoning，旧坏数据在进入最终投影前就中止，因此旧 Live 配置永远没有得到 canonical 化。

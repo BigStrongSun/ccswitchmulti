@@ -403,8 +403,28 @@ pub fn reasoning_capability_from_model_entry(
     model_entry: &Value,
 ) -> Option<CodexModelReasoningCapability> {
     let value = model_entry.get("reasoning")?;
-    let capability: CodexModelReasoningCapability = serde_json::from_value(value.clone()).ok()?;
-    capability.validate().ok()?;
+    if value.is_null() {
+        return None;
+    }
+    let model = model_entry
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("?");
+    let capability: CodexModelReasoningCapability = match serde_json::from_value(value.clone()) {
+        Ok(capability) => capability,
+        Err(error) => {
+            log::warn!(
+                    "Codex reasoning declaration for model {model} is not parseable and will be ignored: {error}"
+                );
+            return None;
+        }
+    };
+    if let Err(error) = capability.validate() {
+        log::warn!(
+            "Codex reasoning declaration for model {model} is invalid and will be ignored: {error}"
+        );
+        return None;
+    }
     Some(capability)
 }
 

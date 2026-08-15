@@ -162,6 +162,15 @@ export function validateCodexReasoningCapabilityDraft(
   }
 }
 
+export function removeCodexEffortMappingsTargeting(
+  effortMap: Partial<Record<CodexReasoningEffort, CodexReasoningEffort>>,
+  removedEffort: CodexReasoningEffort,
+): Partial<Record<CodexReasoningEffort, CodexReasoningEffort>> {
+  return Object.fromEntries(
+    Object.entries(effortMap).filter(([, target]) => target !== removedEffort),
+  ) as Partial<Record<CodexReasoningEffort, CodexReasoningEffort>>;
+}
+
 // 用小并发池执行真实上游探测，避免串行太慢，也避免一次性打爆供应商限流。
 async function runCodexProtocolProbePool(
   models: string[],
@@ -3056,8 +3065,9 @@ export function CodexFormFields({
                                               )}
                                               disabled={isBuiltinReasoning}
                                               onChange={(event) => {
-                                                const supportedEfforts = event
-                                                  .target.checked
+                                                const checked =
+                                                  event.target.checked;
+                                                const supportedEfforts = checked
                                                   ? [
                                                       ...row.reasoning!
                                                         .supportedEfforts,
@@ -3074,11 +3084,27 @@ export function CodexFormFields({
                                                     ? row.reasoning!
                                                         .defaultEffort
                                                     : supportedEfforts[0];
+                                                let nextEffortMap = {
+                                                  ...(row.reasoning!.upstream
+                                                    .effortMap ?? {}),
+                                                };
+                                                if (!checked) {
+                                                  nextEffortMap =
+                                                    removeCodexEffortMappingsTargeting(
+                                                      nextEffortMap,
+                                                      effort,
+                                                    );
+                                                }
                                                 handleUpdateCatalogRow(index, {
                                                   reasoning: {
                                                     ...row.reasoning!,
                                                     supportedEfforts,
                                                     defaultEffort,
+                                                    upstream: {
+                                                      ...row.reasoning!
+                                                        .upstream,
+                                                      effortMap: nextEffortMap,
+                                                    },
                                                     source: "user",
                                                   },
                                                 });

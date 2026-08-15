@@ -23,6 +23,7 @@ import type {
   CodexModelCatalogConfig,
   CodexRoutingConfig,
   CodexChatReasoning,
+  CodexReasoningEffort,
   PromptCacheRoutingMode,
   ClaudeApiKeyField,
 } from "@/types";
@@ -229,6 +230,20 @@ export const normalizeCodexCatalogModelsForSave = (
           !reasoning.upstream.effortMap[effort]
         ) {
           throw new Error(`${model}: reasoning effortMap is missing ${effort}`);
+        }
+      }
+      if (reasoning.upstream.effortMap) {
+        for (const [source, target] of Object.entries(
+          reasoning.upstream.effortMap,
+        )) {
+          if (
+            target &&
+            !reasoning.supportedEfforts.includes(target as CodexReasoningEffort)
+          ) {
+            throw new Error(
+              `${model}: reasoning effortMap target "${target}" (source "${source}") is not in supportedEfforts`,
+            );
+          }
         }
       }
     }

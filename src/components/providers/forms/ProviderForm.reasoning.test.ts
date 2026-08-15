@@ -4,6 +4,7 @@ import type { CodexModelReasoningCapability } from "@/types";
 import { normalizeCodexCatalogModelsForSave } from "./ProviderForm";
 import {
   applyCodexReasoningCapabilitySource,
+  removeCodexEffortMappingsTargeting,
   validateCodexReasoningCapabilityDraft,
 } from "./CodexFormFields";
 
@@ -81,6 +82,27 @@ describe("Codex catalog reasoning capability persistence", () => {
     ).toThrow(/defaultEffort/);
   });
 
+  it("rejects an effort mapping whose target was removed from supported efforts", () => {
+    expect(() =>
+      normalizeCodexCatalogModelsForSave([
+        {
+          model: "broken-map-model",
+          reasoning: {
+            supported: true,
+            supportedEfforts: ["low", "high"],
+            defaultEffort: "high",
+            disableAllowed: false,
+            upstream: {
+              format: "string",
+              parameter: "reasoning_effort",
+              effortMap: { low: "low", medium: "max", high: "high" },
+            },
+          },
+        },
+      ]),
+    ).toThrow(/target "max".*not in supportedEfforts/);
+  });
+
   it("rejects expert JSON mappings before they can mutate the draft", () => {
     expect(() =>
       validateCodexReasoningCapabilityDraft({
@@ -96,5 +118,14 @@ describe("Codex catalog reasoning capability persistence", () => {
         source: "user",
       }),
     ).toThrow(/mapping target max/);
+  });
+
+  it("removes every orphan mapping that targets an unchecked effort", () => {
+    expect(
+      removeCodexEffortMappingsTargeting(
+        { low: "low", medium: "high", high: "high", max: "max" },
+        "high",
+      ),
+    ).toEqual({ low: "low", max: "max" });
   });
 });

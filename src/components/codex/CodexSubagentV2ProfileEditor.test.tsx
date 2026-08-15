@@ -1618,7 +1618,9 @@ describe("Codex Sub-Agent V2 backend-owned catalog reconciliation", () => {
           model: "gpt-5.6-sol",
           providerKind: "official",
           enabled: false,
-          routable: true,
+          // Disabled is a generation state, not proof that the catalog model is unavailable.
+          // The backend may retain the historical `routable: false` compatibility field.
+          routable: false,
           status: "disabled",
           warnings: [],
         },
@@ -1634,6 +1636,14 @@ describe("Codex Sub-Agent V2 backend-owned catalog reconciliation", () => {
     expect(
       screen.getByRole("button", { name: "配置 gpt-5.6-sol" }),
     ).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "编辑 gpt-5.6-sol" }),
+    ).toBeEnabled();
+    expect(
+      screen.getByRole("switch", {
+        name: "启用 gpt-5.6-sol 作为 V2 子 Agent",
+      }),
+    ).toBeEnabled();
     expect(screen.getByText(/官方模型通常不需要创建固定角色/)).toBeVisible();
   });
 

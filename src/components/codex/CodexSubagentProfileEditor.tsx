@@ -88,7 +88,7 @@ function profileToneFor(
   profile: CodexSubagentV2Profile,
   status?: CodexSubagentProfileStatus,
 ): ProfileTone {
-  if (status?.routable === false) return "unroutable";
+  if (status?.status === "unroutable") return "unroutable";
   return profile.enabled ? "enabled-routable" : "draft";
 }
 
@@ -877,7 +877,7 @@ export function CodexSubagentProfileEditor({
       if (providerKind === "official" && !showOfficialProfiles) return false;
       if (profileFilter === "enabled" && !profile.enabled) return false;
       if (profileFilter === "draft" && profile.enabled) return false;
-      if (profileFilter === "unroutable" && status?.routable !== false) {
+      if (profileFilter === "unroutable" && status?.status !== "unroutable") {
         return false;
       }
       const haystack = [
@@ -1134,7 +1134,7 @@ export function CodexSubagentProfileEditor({
                         variant="outline"
                         aria-label={`编辑 ${profile.model}`}
                         onClick={() => setOpenProfileKey(profileKey)}
-                        disabled={isSaving || status?.routable === false}
+                        disabled={isSaving || status?.status === "unroutable"}
                         className="shrink-0"
                       >
                         编辑
@@ -1144,7 +1144,7 @@ export function CodexSubagentProfileEditor({
                           aria-label={`启用 ${profile.model} 作为 V2 子 Agent`}
                           checked={profile.enabled}
                           disabled={
-                            status?.routable === false && !profile.enabled
+                            status?.status === "unroutable" && !profile.enabled
                           }
                           onCheckedChange={(checked) =>
                             updateProfile(profileKey, (current) => ({
@@ -1782,12 +1782,12 @@ function ProfileSummary({
         <Badge
           variant="outline"
           className={
-            status?.routable === false
+            status?.status === "unroutable"
               ? "border-border bg-muted text-muted-foreground dark:border-slate-600 dark:bg-slate-800/70 dark:text-slate-300"
               : "border-emerald-200 bg-emerald-100/80 text-emerald-800 dark:border-emerald-500/40 dark:bg-emerald-500/15 dark:text-emerald-100"
           }
         >
-          {status?.routable === false ? "不可路由" : "可路由"}
+          {status?.status === "unroutable" ? "不可路由" : "可路由"}
         </Badge>
         <Badge
           variant="outline"

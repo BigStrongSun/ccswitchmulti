@@ -1358,6 +1358,89 @@ fn sort_codex_catalog_specs_for_picker(
     indexed_specs.into_iter().map(|(_, spec)| spec).collect()
 }
 
+/// Read the last known official Codex model catalog for capability projection.
+///
+/// While CCSwitchMulti owns `models_cache.json`, the official snapshot lives in its backup. A
+/// malformed or missing cache is treated as unavailable so third-party models never inherit
+/// guessed capabilities.
+fn select_codex_official_models_cache(
+    existing_cache: Option<Value>,
+    backup_cache: Option<Value>,
+) -> Option<Vec<Value>> {
+    let official_cache = match existing_cache.as_ref() {
+        Some(cache) if codex_models_cache_is_cc_switch_owned(cache) => backup_cache,
+        _ => existing_cache,
+    }?;
+    official_cache
+        .get("models")
+        .and_then(Value::as_array)
+        .cloned()
+}
+
+fn codex_official_models_cache() -> Option<Vec<Value>> {
+    let cache_path = get_codex_models_cache_path();
+    let backup_path = get_codex_models_cache_backup_path();
+    let existing_cache = read_json_file_if_exists(&cache_path).ok().flatten();
+    let backup_cache = read_json_file_if_exists(&backup_path).ok().flatten();
+    select_codex_official_models_cache(existing_cache, backup_cache)
+}
+
+/// Build a reasoning declaration from an exact model slug in Codex's official cache.
+fn official_reasoning_capability_for_model(
+    model: &str,
+    official_models: &[Value],
+) -> Option<crate::proxy::providers::codex_reasoning::CodexModelReasoningCapability> {
+    use crate::proxy::providers::codex_reasoning::{
+        CodexModelReasoningCapability, CodexModelReasoningUpstream,
+    };
+
+    let entry = official_models.iter().find(|entry| {
+        entry
+            .get("slug")
+            .and_then(Value::as_str)
+            .is_some_and(|slug| slug.eq_ignore_ascii_case(model))
+    })?;
+    let levels = entry
+        .get("supported_reasoning_levels")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(|level| {
+            level
+                .as_str()
+                .or_else(|| level.get("effort").and_then(Value::as_str))
+                .map(str::trim)
+                .filter(|level| !level.is_empty())
+                .map(str::to_string)
+        })
+        .collect::<Vec<_>>();
+    if levels.is_empty() {
+        return None;
+    }
+    let capability = CodexModelReasoningCapability {
+        supported: true,
+        supported_efforts: levels.clone(),
+        default_effort: entry
+            .get("default_reasoning_level")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|level| !level.is_empty())
+            .map(str::to_string),
+        disable_allowed: false,
+        upstream: CodexModelReasoningUpstream {
+            format: "string".to_string(),
+            parameter: "reasoning_effort".to_string(),
+            effort_map: levels
+                .into_iter()
+                .map(|level| (level.clone(), level))
+                .collect(),
+        },
+        output_format: None,
+        source: Some("official".to_string()),
+    };
+    capability.validate().ok()?;
+    Some(capability)
+}
+
 fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCatalogModelSpec> {
     let Some(models) = settings
         .get("modelCatalog")
@@ -1373,6 +1456,7 @@ fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCa
     let cached_context_windows = codex_cached_model_context_windows();
     let mut seen = std::collections::HashSet::new();
     let mut specs = Vec::new();
+    let official_models = codex_official_models_cache().unwrap_or_default();
 
     for model_config in models {
         let Some(model) = model_config
@@ -1465,7 +1549,8 @@ fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCa
                 upstream_model.as_deref().and_then(
                     crate::proxy::providers::codex_reasoning::builtin_reasoning_capability_for_model,
                 )
-            });
+            })
+            .or_else(|| official_reasoning_capability_for_model(model, &official_models));
 
         specs.push(CodexCatalogModelSpec {
             model: model.to_string(),
@@ -13221,5 +13306,64 @@ model_catalog_json = "cc-switch-model-catalog.json"
             json!(["text"]),
             "an explicit per-profile override must remain authoritative"
         );
+    }
+
+    #[test]
+    fn official_reasoning_capability_accepts_string_and_object_level_shapes() {
+        let official_models = json!([
+            {
+                "slug": "gpt-string-levels",
+                "supported_reasoning_levels": ["low", "high"],
+                "default_reasoning_level": "high"
+            },
+            {
+                "slug": "gpt-object-levels",
+                "supported_reasoning_levels": [
+                    { "effort": "medium", "description": "Fast" },
+                    { "effort": "xhigh", "description": "Deep" }
+                ],
+                "default_reasoning_level": "medium"
+            }
+        ]);
+        let models = official_models.as_array().expect("official models");
+
+        let strings = official_reasoning_capability_for_model("GPT-STRING-LEVELS", models)
+            .expect("string levels");
+        assert_eq!(strings.supported_efforts, vec!["low", "high"]);
+        assert_eq!(strings.default_effort.as_deref(), Some("high"));
+
+        let objects = official_reasoning_capability_for_model("gpt-object-levels", models)
+            .expect("object levels");
+        assert_eq!(objects.supported_efforts, vec!["medium", "xhigh"]);
+        assert_eq!(objects.default_effort.as_deref(), Some("medium"));
+    }
+
+    #[test]
+    fn official_reasoning_capability_requires_an_exact_slug() {
+        let official_models = json!([{
+            "slug": "gpt-5.6-sol",
+            "supported_reasoning_levels": ["high"],
+            "default_reasoning_level": "high"
+        }]);
+        let models = official_models.as_array().expect("official models");
+
+        assert!(official_reasoning_capability_for_model("gpt-5.6-sol-custom", models).is_none());
+    }
+
+    #[test]
+    fn cc_switch_owned_cache_uses_backup_and_never_relabels_owned_rows_as_official() {
+        let owned = json!({
+            "etag": CC_SWITCH_CODEX_MODELS_CACHE_ETAG,
+            "models": [{ "slug": "third-party-route" }]
+        });
+        let backup = json!({
+            "etag": "official-snapshot",
+            "models": [{ "slug": "gpt-official" }]
+        });
+
+        let selected = select_codex_official_models_cache(Some(owned.clone()), Some(backup))
+            .expect("backup models");
+        assert_eq!(selected[0]["slug"], json!("gpt-official"));
+        assert!(select_codex_official_models_cache(Some(owned), None).is_none());
     }
 }
