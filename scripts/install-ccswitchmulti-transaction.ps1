@@ -24,6 +24,22 @@ Set-StrictMode -Version Latest
 
 $script:CcsmUninstallRegistryKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\CCSwitchMulti"
 
+function Get-CcsmSha256 {
+    param([Parameter(Mandatory = $true)][string]$LiteralPath)
+
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [System.IO.File]::OpenRead($LiteralPath)
+        try {
+            return [System.BitConverter]::ToString($sha256.ComputeHash($stream)).Replace("-", "")
+        } finally {
+            $stream.Dispose()
+        }
+    } finally {
+        $sha256.Dispose()
+    }
+}
+
 function Get-CcsmReinstallPlan {
     [CmdletBinding()]
     param()
@@ -847,7 +863,7 @@ function Get-CcsmRegularFileInventory {
         if ([string]::IsNullOrWhiteSpace($relativePath) -or $relativePath -match '(^|[\\/])\.\.([\\/]|$)') {
             throw "app backup inventory"
         }
-        $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToUpperInvariant()
+        $hash = (Get-CcsmSha256 -LiteralPath $file.FullName).ToUpperInvariant()
         [void]$records.Add("$relativePath`t$hash")
     }
     $orderedRecords = [string[]]$records.ToArray()
@@ -919,7 +935,7 @@ function Get-CcsmConfigInventory {
         if (Test-Path -LiteralPath $filePath -PathType Leaf) {
             $files += [pscustomobject]@{
                 RelativePath = $name
-                Hash = (Get-FileHash -LiteralPath $filePath -Algorithm SHA256).Hash
+                Hash = Get-CcsmSha256 -LiteralPath $filePath
             }
         }
     }
@@ -930,7 +946,7 @@ function Get-CcsmConfigInventory {
         $sidecars += [pscustomobject]@{
             Name = $name
             Exists = [bool]$exists
-            Hash = if ($exists) { (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash } else { $null }
+            Hash = if ($exists) { Get-CcsmSha256 -LiteralPath $candidate } else { $null }
         }
     }
     return [pscustomobject]@{ Files = $files; Sidecars = $sidecars }
@@ -1029,7 +1045,7 @@ function Write-CcsmBackupManifest {
     }
     $Backup.ManifestPath = Join-Path $Backup.Path "backup-manifest.json"
     $manifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $Backup.ManifestPath -Encoding UTF8 -ErrorAction Stop
-    $Backup.ManifestHash = (Get-FileHash -LiteralPath $Backup.ManifestPath -Algorithm SHA256).Hash
+    $Backup.ManifestHash = Get-CcsmSha256 -LiteralPath $Backup.ManifestPath
 }
 
 function Get-CcsmValidatedBackupManifest {
@@ -1042,7 +1058,7 @@ function Get-CcsmValidatedBackupManifest {
     }
     Assert-CcsmNoReparseBoundary -Path $Backup.ManifestPath -Purpose "backup manifest"
     Assert-CcsmHash -Name "backup manifest hash" -Value ([string]$Backup.ManifestHash)
-    $actualManifestHash = (Get-FileHash -LiteralPath $Backup.ManifestPath -Algorithm SHA256).Hash
+    $actualManifestHash = Get-CcsmSha256 -LiteralPath $Backup.ManifestPath
     if (-not [string]::Equals($actualManifestHash, $Backup.ManifestHash, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "backup manifest integrity hash mismatch"
     }
@@ -1093,7 +1109,7 @@ function Get-CcsmValidatedBackupManifest {
             throw "registry backup escaped the validated restore boundary"
         }
         Assert-CcsmHash -Name "registry backup hash" -Value ([string]$manifest.RegistryFileHash)
-        $actualRegistryHash = (Get-FileHash -LiteralPath $manifest.RegistryFile -Algorithm SHA256).Hash
+        $actualRegistryHash = Get-CcsmSha256 -LiteralPath $manifest.RegistryFile
         if (-not [string]::Equals($actualRegistryHash, $manifest.RegistryFileHash, [System.StringComparison]::OrdinalIgnoreCase)) {
             throw "registry backup integrity hash mismatch"
         }
@@ -1128,7 +1144,7 @@ function New-CcsmRealOperations {
     }
     $operations.GetFileHash = {
         param($Path)
-        return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+        return Get-CcsmSha256 -LiteralPath $Path
     }
     $operations.GetFileVersion = {
         param($Path)
@@ -1198,7 +1214,7 @@ function New-CcsmRealOperations {
             $nativeKey = ConvertTo-CcsmNativeRegistryPath $Context.RegistryKey
             & reg.exe export $nativeKey $registryFile /y | Out-Null
             if ($LASTEXITCODE -ne 0) { throw "registry export failed with exit code $LASTEXITCODE" }
-            $registryFileHash = (Get-FileHash -LiteralPath $registryFile -Algorithm SHA256).Hash
+            $registryFileHash = Get-CcsmSha256 -LiteralPath $registryFile
         }
         $backup = [pscustomobject]@{
             Path = $Context.TransactionRoot
@@ -1337,7 +1353,7 @@ function New-CcsmRealOperations {
         try {
             & reg.exe export (ConvertTo-CcsmNativeRegistryPath $Context.RegistryKey) $verificationFile /y | Out-Null
             if ($LASTEXITCODE -ne 0) { throw "registry verification export failed with exit code $LASTEXITCODE" }
-            $verificationHash = (Get-FileHash -LiteralPath $verificationFile -Algorithm SHA256).Hash
+            $verificationHash = Get-CcsmSha256 -LiteralPath $verificationFile
             if (-not [string]::Equals($verificationHash, [string]$manifest.RegistryFileHash, [System.StringComparison]::OrdinalIgnoreCase)) {
                 throw "registry verification hash mismatch"
             }
