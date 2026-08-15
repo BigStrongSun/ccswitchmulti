@@ -360,9 +360,17 @@ fn repair_root_notify_windows_path_line(line: &str) -> Option<String> {
         return None;
     }
     let array_start = line.find('[')?;
-    let quote_start = line[array_start + 1..].find('"')? + array_start + 1;
+    let array_tail = &line[array_start + 1..];
+    let quote_offset = match (array_tail.find('"'), array_tail.find('\'')) {
+        (Some(basic), Some(literal)) => basic.min(literal),
+        (Some(basic), None) => basic,
+        (None, Some(literal)) => literal,
+        (None, None) => return None,
+    };
+    let quote_start = quote_offset + array_start + 1;
+    let quote = line.as_bytes()[quote_start] as char;
     let value_start = quote_start + 1;
-    let quote_end = line[value_start..].find('"')? + value_start;
+    let quote_end = line[value_start..].find(quote)? + value_start;
     let value = &line[value_start..quote_end];
     let escaped = escape_unescaped_toml_windows_path(value)?;
 
@@ -395,7 +403,8 @@ fn normalize_codex_config_text_for_live_read(text: &str) -> Result<String, AppEr
             root_scope = false;
         }
 
-        if outside_multiline && root_scope {
+        let recoverable_notify_line = (outside_multiline && root_scope) || in_basic_multiline;
+        if recoverable_notify_line {
             if let Some(next) = repair_root_notify_windows_path_line(line) {
                 output.push_str(&next);
                 repaired = true;
@@ -3236,7 +3245,23 @@ fn project_codex_subagent_v2_parent_instructions(
     if projected.is_empty() {
         doc.as_table_mut().remove("developer_instructions");
     } else {
-        doc["developer_instructions"] = toml_edit::value(projected);
+        // Do not retain an existing multiline representation. Codex Desktop's
+        // notify updater scans line-shaped assignments and can mistake a line
+        // inside developer instructions for the root `notify` setting. A fresh
+        // value uses an escaped representation, so instruction text cannot be
+        // rewritten as live configuration on a later Desktop startup.
+        let basic_repr = serde_json::to_string(&projected).map_err(|error| {
+            AppError::Message(format!(
+                "Failed to encode Codex developer instructions: {error}"
+            ))
+        })?;
+        let projected_value = basic_repr.parse::<toml_edit::Value>().map_err(|error| {
+            AppError::Message(format!(
+                "Failed to encode Codex developer instructions: {error}"
+            ))
+        })?;
+        doc.as_table_mut().remove("developer_instructions");
+        doc["developer_instructions"] = toml_edit::Item::Value(projected_value);
     }
     Ok(doc.to_string())
 }
