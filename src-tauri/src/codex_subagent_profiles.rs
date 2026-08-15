@@ -1098,13 +1098,42 @@ fn generated_instructions_for_provider(
 fn default_role_name(p: &ParsedCodexSubagentProfile) -> String {
     p.key.clone()
 }
-fn default_nickname(p: &ParsedCodexSubagentProfile) -> String {
-    let source = p.key.split(['-', '_']).next().unwrap_or(&p.key);
-    let mut chars = source.chars();
-    chars
+
+fn is_valid_codex_nickname(nickname: &str) -> bool {
+    !nickname.is_empty()
+        && nickname.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, ' ' | '-' | '_')
+        })
+}
+
+fn sanitize_codex_nickname(source: &str) -> String {
+    let sanitized = source
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, ' ' | '-' | '_') {
+                character
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut chars = sanitized.chars();
+    let nickname = chars
         .next()
-        .map(|c| c.to_uppercase().collect::<String>() + chars.as_str())
-        .unwrap_or_default()
+        .map(|character| character.to_uppercase().collect::<String>() + chars.as_str())
+        .unwrap_or_default();
+    if is_valid_codex_nickname(&nickname) {
+        nickname
+    } else {
+        "CCSwitch Worker".to_string()
+    }
+}
+
+fn default_nickname(p: &ParsedCodexSubagentProfile) -> String {
+    sanitize_codex_nickname(&p.key)
 }
 
 fn profile_collision_identity(entry: &ParsedProfileEntry) -> String {
@@ -1165,10 +1194,7 @@ fn validate_and_trim_intrinsic_overrides(
                     },
                 ));
             }
-            if !nickname
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_'))
-            {
+            if !is_valid_codex_nickname(nickname) {
                 return Err(validation_error(
                     "invalid_nickname",
                     Some(&profile.key),
@@ -1932,6 +1958,73 @@ mod tests {
             json!({"schemaVersion":1,"profiles":{"deepseek-v4-flash":{"model":"DeepSeek-V4-Flash","enabled":true,"questionnaire":{"taskStrengths":["repository_exploration"],"optimization":"speed","writeScope":"read_only","preference":"eligible","reasoningEffort":"auto"},"overrides":{"roleName":"flash-reader","description":"Manual.","developerInstructions":"Read only.","nicknameCandidates":["Flash Reader"],"modelReasoningEffort":"xhigh"}}}}),
             Ok(config(SelectionPolicy::Balanced, vec![valid(p)])),
         );
+    }
+
+    #[test]
+    fn generated_default_nickname_sanitizes_model_punctuation_for_codex_role_files() {
+        let mut compile_request = request(Some(config(
+            SelectionPolicy::Balanced,
+            vec![valid(profile("qwen3.8", "qwen3.8"))],
+        )));
+        compile_request.catalog_models = vec![catalog("qwen3.8", true)];
+        let output = compile_subagent_v2_profiles(&compile_request).expect("compile Qwen profile");
+        let role = output.generated_roles.first().expect("generated Qwen role");
+        assert_eq!(role.nickname_candidates, vec!["Qwen3 8"]);
+        let toml = render_generated_role_toml(role, "# managed").expect("render Qwen role");
+        assert!(toml.contains("nickname_candidates = [\"Qwen3 8\"]"));
+        assert!(!toml.contains("nickname_candidates = [\"Qwen3.8\"]"));
+    }
+
+    #[test]
+    fn generated_default_nickname_is_codex_valid_for_diverse_model_identifiers() {
+        let cases = [
+            ("gpt-4.1", "Gpt-4 1"),
+            ("claude-3.7-sonnet", "Claude-3 7-sonnet"),
+            ("qwen2.5-coder", "Qwen2 5-coder"),
+            ("moonshot_v1.8", "Moonshot_v1 8"),
+            ("vendor/model:1.0", "Vendor model 1 0"),
+            ("模型.版本", "CCSwitch Worker"),
+            ("...", "CCSwitch Worker"),
+        ];
+
+        for (model, expected) in cases {
+            let nickname = sanitize_codex_nickname(model);
+            assert_eq!(nickname, expected, "model={model}");
+            assert!(is_valid_codex_nickname(&nickname), "model={model}");
+        }
+    }
+
+    #[test]
+    fn every_automatically_generated_nickname_satisfies_codex_role_grammar() {
+        let models = [
+            "qwen3.8",
+            "gpt-4.1",
+            "deepseek-v4.flash",
+            "vendor/model:1.0",
+            "...model",
+        ];
+
+        for model in models {
+            let mut compile_request = request(Some(config(
+                SelectionPolicy::Balanced,
+                vec![valid(profile(model, model))],
+            )));
+            compile_request.catalog_models = vec![catalog(model, true)];
+            let output = compile_subagent_v2_profiles(&compile_request)
+                .unwrap_or_else(|error| panic!("compile model={model}: {error:?}"));
+            let role = output
+                .generated_roles
+                .first()
+                .unwrap_or_else(|| panic!("missing generated role for model={model}"));
+            assert_eq!(role.nickname_candidates.len(), 1, "model={model}");
+            assert!(
+                is_valid_codex_nickname(&role.nickname_candidates[0]),
+                "model={model}, nickname={}",
+                role.nickname_candidates[0]
+            );
+            render_generated_role_toml(role, "# managed")
+                .unwrap_or_else(|error| panic!("render model={model}: {error:?}"));
+        }
     }
 
     #[test]

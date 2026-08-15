@@ -1377,7 +1377,10 @@ fn codex_official_models_cache() -> Option<Vec<Value>> {
         }
         _ => existing_cache,
     }?;
-    let models = official_cache.get("models").and_then(Value::as_array)?.clone();
+    let models = official_cache
+        .get("models")
+        .and_then(Value::as_array)?
+        .clone();
     Some(models)
 }
 
@@ -6193,7 +6196,9 @@ mod tests {
         let sol_models = sol.as_array().unwrap().clone();
         let sol_capability = official_reasoning_capability_for_model("gpt-5.6-sol", &sol_models)
             .expect("sol official capability");
-        assert!(sol_capability.supported_efforts.contains(&"ultra".to_string()));
+        assert!(sol_capability
+            .supported_efforts
+            .contains(&"ultra".to_string()));
         // 不匹配的 slug 返回 None
         assert!(official_reasoning_capability_for_model("gpt-5.6-sol", &models).is_none());
     }
