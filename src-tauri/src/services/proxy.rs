@@ -9392,6 +9392,50 @@ wire_api = "responses"
         );
     }
 
+    #[tokio::test]
+    #[serial]
+    async fn codex_restore_repairs_unescaped_windows_project_key_from_backup() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+        std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
+            .expect("create codex dir");
+        std::fs::write(
+            crate::codex_config::get_codex_config_path(),
+            "model_provider = \"codex_model_router_v2\"\n",
+        )
+        .expect("seed live config");
+
+        let invalid_project_config = concat!(
+            "model_provider = \"openai\"\n",
+            "[projects.\"C:\\Users\\sunda\\Documents\\LLMservice\"]\n",
+            "trust_level = \"trusted\"\n",
+        );
+        let backup_json = serde_json::to_string(&json!({
+            "auth": {},
+            "config": invalid_project_config
+        }))
+        .expect("serialize backup");
+        db.save_live_backup("codex", &backup_json)
+            .await
+            .expect("seed live backup");
+
+        service
+            .restore_live_config_for_app_with_fallback(&AppType::Codex)
+            .await
+            .expect("restore should repair the Windows project key");
+
+        let restored = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
+            .expect("read restored config");
+        let parsed: toml::Value = toml::from_str(&restored).expect("restored config must parse");
+        assert_eq!(
+            parsed["projects"][r"C:\Users\sunda\Documents\LLMservice"]["trust_level"].as_str(),
+            Some("trusted")
+        );
+    }
+
     /// 回归：Codex Desktop 会把编辑器和通知偏好写进用户自有 TOML 表。
     ///
     /// 恢复旧接管备份时只能替换 provider 字段，不能回滚 live 文件里较新的
