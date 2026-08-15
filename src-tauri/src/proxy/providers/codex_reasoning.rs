@@ -350,6 +350,54 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn repair_legacy_deepseek_reasoning_restores_builtin_capability() {
+        let mut settings = json!({
+            "modelCatalog": {"models": [{
+                "model": "deepseek-v4-flash",
+                "reasoning": {
+                    "supported": true,
+                    "supportedEfforts": ["low", "high", "max"],
+                    "defaultEffort": "medium",
+                    "disableAllowed": true,
+                    "upstream": {"format": "string", "parameter": "reasoning_effort"},
+                    "source": "builtin"
+                }
+            }]}
+        });
+
+        let outcome = repair_invalid_reasoning_capabilities(&mut settings);
+        let repaired = &settings["modelCatalog"]["models"][0]["reasoning"];
+        assert_eq!(repaired["supportedEfforts"], json!(["low", "high", "max"]));
+        assert_eq!(repaired["defaultEffort"], json!("high"));
+        assert!(outcome.repaired_models.contains(&"deepseek-v4-flash".to_string()));
+        assert!(!outcome.warnings.is_empty());
+    }
+
+    #[test]
+    fn repair_unknown_reasoning_uses_only_declared_supported_efforts() {
+        let mut settings = json!({
+            "modelCatalog": {"models": [{
+                "model": "private-model",
+                "reasoning": {
+                    "supported": true,
+                    "supportedEfforts": ["low"],
+                    "defaultEffort": "high",
+                    "disableAllowed": false,
+                    "upstream": {"format": "string", "parameter": "reasoning_effort"},
+                    "source": "user"
+                }
+            }]}
+        });
+
+        let outcome = repair_invalid_reasoning_capabilities(&mut settings);
+        let repaired = &settings["modelCatalog"]["models"][0]["reasoning"];
+        assert_eq!(repaired["supportedEfforts"], json!(["low"]));
+        assert_eq!(repaired["defaultEffort"], json!("low"));
+        assert_eq!(repaired["source"], json!("user"));
+        assert!(outcome.repaired_models.contains(&"private-model".to_string()));
+    }
+
     fn deepseek_capability() -> CodexModelReasoningCapability {
         serde_json::from_value(json!({
             "supported": true,
