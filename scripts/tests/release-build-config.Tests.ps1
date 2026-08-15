@@ -56,6 +56,49 @@ Describe "CCSwitchMulti local release build config" {
         }
     }
 
+    It "rejects a stale installed Tauri CLI before any local release build" {
+        . $helperPath
+
+        $command = Get-Command Assert-LocalTauriCliVersion -ErrorAction SilentlyContinue
+        $command | Should Not BeNullOrEmpty
+        if ($null -eq $command) {
+            return
+        }
+
+        $fixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("ccsm-tauri-cli-" + [guid]::NewGuid().ToString("N"))
+        $installedPackageRoot = Join-Path $fixtureRoot "node_modules\@tauri-apps\cli"
+        [System.IO.Directory]::CreateDirectory($installedPackageRoot) | Out-Null
+        try {
+            [System.IO.File]::WriteAllText(
+                (Join-Path $fixtureRoot "package.json"),
+                '{"devDependencies":{"@tauri-apps/cli":"2.10.1"}}',
+                [System.Text.UTF8Encoding]::new($false)
+            )
+            [System.IO.File]::WriteAllText(
+                (Join-Path $installedPackageRoot "package.json"),
+                '{"version":"2.8.1"}',
+                [System.Text.UTF8Encoding]::new($false)
+            )
+
+            { Assert-LocalTauriCliVersion -RepoRoot $fixtureRoot } |
+                Should Throw "installed Tauri CLI package version mismatch"
+        } finally {
+            [System.IO.Directory]::Delete($fixtureRoot, $true)
+        }
+    }
+
+    It "runs a frozen dependency install before validating and building a local release" {
+        $pipelinePath = Join-Path (Split-Path -Parent $helperPath) "local-release-pipeline.ps1"
+        $pipeline = [System.IO.File]::ReadAllText($pipelinePath)
+        $installOffset = $pipeline.IndexOf('Invoke-CheckedCommand -FilePath "pnpm" -Arguments @("install", "--frozen-lockfile")')
+        $assertOffset = $pipeline.IndexOf("Assert-LocalTauriCliVersion -RepoRoot `$repoRoot")
+        $exportOffset = $pipeline.IndexOf('Invoke-CheckedCommand -FilePath "powershell" -Arguments $exportArgs')
+
+        $installOffset | Should BeGreaterThan -1
+        $assertOffset | Should BeGreaterThan $installOffset
+        $exportOffset | Should BeGreaterThan $assertOffset
+    }
+
     It "creates a BOM-free Tauri override without PowerShell utility cmdlets and always supports cleanup" {
         $helperExists = Test-Path -LiteralPath $helperPath
         $helperExists | Should Be $true
