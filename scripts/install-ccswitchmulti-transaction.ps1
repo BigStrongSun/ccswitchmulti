@@ -481,6 +481,45 @@ function Test-CcsmSameProcessIdentity {
     return [string]::Equals([string]$Expected.StartTime, [string]$Actual.StartTime, [System.StringComparison]::Ordinal)
 }
 
+function Resolve-CcsmReplacementListenerAction {
+    param($Context, $ListenerIdentity)
+
+    if ($null -eq $ListenerIdentity) { return "released" }
+    if ([int]$ListenerIdentity.ProcessId -eq [int]$Context.CurrentPid) { return "wait" }
+    if (-not (Test-CcsmSamePath -Left ([string]$ListenerIdentity.Path) -Right ([string]$Context.InstalledExecutable))) {
+        throw "foreign process owns listener port after verified stop: pid=$($ListenerIdentity.ProcessId) path=$($ListenerIdentity.Path)"
+    }
+    if ($null -eq $ListenerIdentity.Handle) {
+        throw "same-product replacement listener has no retained process handle"
+    }
+    return "stop"
+}
+
+function Resolve-CcsmExistingRuntimeProcessId {
+    param(
+        $Context,
+        $ListenerIdentity,
+        [string]$ExpectedVersion,
+        [string]$ExpectedHash,
+        [string]$ActualVersion,
+        [string]$ActualHash,
+        $Health
+    )
+
+    if ($null -eq $ListenerIdentity -or
+        -not (Test-CcsmSamePath -Left ([string]$ListenerIdentity.Path) -Right ([string]$Context.InstalledExecutable))) {
+        throw "listener is not a CCSwitchMulti runtime from the installed path"
+    }
+    Assert-CcsmHealthyResponse -Health $Health -Label "existing CCSwitchMulti runtime"
+    if ($ActualVersion -ne $ExpectedVersion) {
+        throw "existing CCSwitchMulti runtime version mismatch: actual=$ActualVersion expected=$ExpectedVersion"
+    }
+    if (-not [string]::Equals($ActualHash, $ExpectedHash, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "existing CCSwitchMulti runtime hash mismatch: actual=$ActualHash expected=$ExpectedHash"
+    }
+    return [int]$ListenerIdentity.ProcessId
+}
+
 function Assert-CcsmVerifiedStopTarget {
     param($Context, [hashtable]$Operations)
 
@@ -1260,8 +1299,31 @@ function New-CcsmRealOperations {
     }
     $operations.WaitPortReleased = {
         param($Context)
+        $state = [pscustomobject]@{ ReplacementStops = 0 }
         Wait-CcsmCondition -TimeoutSeconds $Context.TimeoutSeconds -Description "port $($Context.Port) release" -Condition {
-            $null -eq (& $operations.GetListenerOwner $Context.Port)
+            $owner = & $operations.GetListenerOwner $Context.Port
+            if ($null -eq $owner) { return $true }
+            try {
+                $identity = & $operations.GetProcessIdentity ([int]$owner)
+            } catch {
+                # The TCP row can briefly outlive the process handle. Poll again instead of treating
+                # the stale owner as a product replacement or a foreign listener.
+                return $false
+            }
+            $action = Resolve-CcsmReplacementListenerAction -Context $Context -ListenerIdentity $identity
+            if ($action -eq "stop") {
+                $state.ReplacementStops++
+                if ($state.ReplacementStops -gt 3) {
+                    throw "CCSwitchMulti repeatedly reclaimed port $($Context.Port) during install"
+                }
+                & $operations.WriteLog $Context "warning" "replacement-listener-stopped" @{
+                    ProcessId = [int]$identity.ProcessId
+                    Path = [string]$identity.Path
+                    Attempt = [int]$state.ReplacementStops
+                }
+                & $operations.StopVerifiedProcess $Context $identity
+            }
+            return $false
         }
     }
     $operations.RunUninstaller = {
@@ -1277,6 +1339,23 @@ function New-CcsmRealOperations {
     }
     $operations.StartProcess = {
         param($Context, $Mode)
+        $owner = & $operations.GetListenerOwner $Context.Port
+        if ($null -ne $owner) {
+            $identity = & $operations.GetProcessIdentity ([int]$owner)
+            $expectedVersion = if ($Mode -eq "new") { $Context.ExpectedInstalledVersion } else { $Context.ExpectedCurrentVersion }
+            $expectedHash = if ($Mode -eq "new") { $Context.ExpectedInstalledHash } else { $Context.ExpectedCurrentHash }
+            $actualVersion = & $operations.GetFileVersion $Context.InstalledExecutable
+            $actualHash = & $operations.GetFileHash $Context.InstalledExecutable
+            $health = & $operations.GetHealth $Context.HealthUri
+            $adoptedPid = Resolve-CcsmExistingRuntimeProcessId -Context $Context -ListenerIdentity $identity `
+                -ExpectedVersion $expectedVersion -ExpectedHash $expectedHash `
+                -ActualVersion $actualVersion -ActualHash $actualHash -Health $health
+            & $operations.WriteLog $Context "warning" "existing-listener-adopted" @{
+                ProcessId = $adoptedPid
+                Mode = $Mode
+            }
+            return $adoptedPid
+        }
         $process = Start-Process -FilePath $Context.InstalledExecutable -WindowStyle Hidden -PassThru
         return [int]$process.Id
     }

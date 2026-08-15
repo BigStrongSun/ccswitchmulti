@@ -9,6 +9,12 @@
 - 聚焦门禁：官方 cache string/object/exact-slug/owned-cache tests 4/4；codex_reasoning 8/8；V2 编辑器与 Provider reasoning 129/129；`pnpm typecheck`、rustfmt、Prettier 与 `git diff --check` 通过。GitHub PR 当前只有 label job，没有构建/测试 CI 证明，不能直接 merge/cherry-pick。
 - v29 发布前完整门禁已通过：Rust library `3002 passed / 0 failed / 2 ignored`；Vitest `124 files / 1006 tests`；`cargo check --lib`、rustfmt、typecheck、Prettier 与 `git diff --check` 全部通过。版本源统一升级为 `3.19.1-29`，发布说明为 `docs/release-notes/v3.19.1-29-zh.md`。
 
+## 2026-08-15 v29 事务安装重复实例根修
+
+- 首次 v29 事务 `ccsm-20260815-181906-44076a15a5cb4396829d8af85411389d` 在停止已验证 v28 PID 后持续等待 15721 释放，随后回滚阶段又启动 CCSM；结果为 `RollbackFailed`，但事务退出后 v28 原版本、原 SHA-256、注册表和 health 200 均已恢复。用户截图的 `os error 10048` 与该时序一致：同一路径旧/替代实例仍监听时又启动第二实例。
+- 根修不能放宽端口冲突。安装前若出现新 listener，必须重新获取其 PID、路径、启动时间和 retained process handle；仅当它来自精确安装路径时最多停止 3 次，外部路径立即 fail closed。安装/回滚拉起前若已有 listener，只在路径、目标版本、SHA-256 与 health 全部精确匹配时接管其 PID，不再启动重复实例。
+- RED `3b62ea87` 锁定“同产品替代 listener 可停止、外部 listener 必须拒绝”。GREEN 后 Windows PowerShell 5.1 Pester `49 passed / 0 failed`；PowerShell 7 的旧失败来自 `$PSHOME\powershell.exe` 与 Pester/SQLite 环境差异，不代表事务产品逻辑失败。
+
 ## 2026-08-15 v29 Codex 配置强制恢复（进行中）
 
 - v28 并未更换 TOML 写入库；正常模型目录投影已使用 `toml_edit::DocumentMut` 并会把 `[agents].max_threads` 迁移为唯一的 `max_concurrent_threads_per_session`。现场仍失败的根因是热切换会先校验 Sub-Agent V2/reasoning，旧坏数据在进入最终投影前就中止，因此旧 Live 配置永远没有得到 canonical 化。
