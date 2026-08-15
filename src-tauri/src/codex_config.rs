@@ -262,7 +262,7 @@ pub fn write_codex_live_atomic(
 
     // 准备写入内容
     let cfg_text = match config_text_opt {
-        Some(s) => s.to_string(),
+        Some(s) => normalize_codex_config_text_for_live_read(s)?,
         None => String::new(),
     };
     if !cfg_text.trim().is_empty() {
@@ -373,6 +373,37 @@ fn repair_root_notify_windows_path_line(line: &str) -> Option<String> {
     Some(output)
 }
 
+fn repair_projects_windows_path_table_line(line: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    let prefix = "[projects.\"";
+    let path_start_in_trimmed = prefix.len();
+    if !trimmed.starts_with(prefix) {
+        return None;
+    }
+
+    let suffix_start_in_trimmed =
+        trimmed[path_start_in_trimmed..].find("\"]")? + path_start_in_trimmed;
+    let path = &trimmed[path_start_in_trimmed..suffix_start_in_trimmed];
+    if !looks_like_windows_path(path) {
+        return None;
+    }
+    let escaped = escape_unescaped_toml_windows_path(path)?;
+    let indentation_len = line.len() - trimmed.len();
+    let path_start = indentation_len + path_start_in_trimmed;
+    let path_end = indentation_len + suffix_start_in_trimmed;
+
+    let mut output = String::with_capacity(line.len() + escaped.len() - path.len());
+    output.push_str(&line[..path_start]);
+    output.push_str(&escaped);
+    output.push_str(&line[path_end..]);
+    Some(output)
+}
+
+fn looks_like_windows_path(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\'
+}
+
 /// Codex Desktop 的 Windows Computer Use 初始化器曾生成过裸反斜杠的根级
 /// `notify = ["C:\Users\...", ...]`。在 TOML basic string 中 `\U` 会被解释为
 /// 8 位 Unicode 转义并使整个 Live 配置不可解析。这里只在原文本确实无效时，
@@ -391,19 +422,26 @@ fn normalize_codex_config_text_for_live_read(text: &str) -> Result<String, AppEr
 
     for line in text.split_inclusive('\n') {
         let outside_multiline = !in_basic_multiline && !in_literal_multiline;
-        if outside_multiline && root_scope && line.trim_start().starts_with('[') {
-            root_scope = false;
-        }
-
-        if outside_multiline && root_scope {
-            if let Some(next) = repair_root_notify_windows_path_line(line) {
+        if outside_multiline {
+            if let Some(next) = repair_projects_windows_path_table_line(line) {
                 output.push_str(&next);
                 repaired = true;
+            } else if root_scope {
+                if let Some(next) = repair_root_notify_windows_path_line(line) {
+                    output.push_str(&next);
+                    repaired = true;
+                } else {
+                    output.push_str(line);
+                }
             } else {
                 output.push_str(line);
             }
         } else {
             output.push_str(line);
+        }
+
+        if outside_multiline && root_scope && line.trim_start().starts_with('[') {
+            root_scope = false;
         }
 
         if !in_literal_multiline && line_toggles_toml_multiline_string(line, "\"\"\"") {
@@ -416,9 +454,7 @@ fn normalize_codex_config_text_for_live_read(text: &str) -> Result<String, AppEr
 
     if repaired {
         validate_config_toml(&output)?;
-        log::warn!(
-            "Normalized an invalid unescaped Windows path in Codex Live notify configuration"
-        );
+        log::warn!("Normalized an invalid unescaped Windows path in Codex Live configuration");
         return Ok(output);
     }
 
@@ -456,7 +492,7 @@ pub(crate) fn is_custom_codex_model_provider_id(id: &str) -> bool {
 pub fn write_codex_live_config_atomic(config_text_opt: Option<&str>) -> Result<(), AppError> {
     let config_path = get_codex_config_path();
     let cfg_text = match config_text_opt {
-        Some(config_text) => config_text.to_string(),
+        Some(config_text) => normalize_codex_config_text_for_live_read(config_text)?,
         None => String::new(),
     };
 
@@ -5312,12 +5348,15 @@ pub(crate) fn merge_codex_provider_config_texts(
     live_config_text: &str,
     provider_config_text: &str,
 ) -> Result<String, AppError> {
+    let live_config_text = normalize_codex_config_text_for_live_read(live_config_text)?;
+    let provider_config_text = normalize_codex_config_text_for_live_read(provider_config_text)?;
+
     if provider_config_text.trim().is_empty() {
-        return strip_codex_provider_owned_fields_from_live(live_config_text);
+        return strip_codex_provider_owned_fields_from_live(&live_config_text);
     }
 
     if live_config_text.trim().is_empty() {
-        return Ok(provider_config_text.to_string());
+        return Ok(provider_config_text);
     }
 
     let mut live_doc = live_config_text
@@ -7835,13 +7874,38 @@ mod tests {
         validate_config_toml(&normalized).expect("normalized live config must be valid TOML");
         let parsed: toml::Value = toml::from_str(&normalized).expect("parse normalized project");
         assert_eq!(
-            parsed["projects"][r"C:\Users\sunda\Documents\LLMservice"]["trust_level"]
-                .as_str(),
+            parsed["projects"][r"C:\Users\sunda\Documents\LLMservice"]["trust_level"].as_str(),
             Some("trusted")
         );
         assert!(normalized.contains(concat!(
             "[projects.\"C:\\\\Users\\\\sunda\\\\Documents\\\\LLMservice\"]"
         )));
+    }
+
+    #[test]
+    #[serial]
+    fn codex_atomic_write_repairs_unescaped_windows_project_basic_key() {
+        let _home = TestHomeGuard::new();
+        let invalid = concat!(
+            "model = \"gpt-5.6-sol\"\n",
+            "[projects.\"C:\\Users\\sunda\\Documents\\LLMservice\"]\n",
+            "trust_level = \"trusted\"\n",
+        );
+
+        write_codex_live_config_atomic(Some(invalid))
+            .expect("config-only restore should repair the project key before writing");
+        let config_only = read_codex_config_text().expect("read config-only output");
+        validate_config_toml(&config_only).expect("config-only output must stay valid");
+
+        write_codex_live_atomic(&json!({"auth_mode": "chatgpt"}), Some(invalid))
+            .expect("auth plus config restore should repair the project key before writing");
+        let auth_and_config = read_codex_config_text().expect("read atomic output");
+        let parsed: toml::Value =
+            toml::from_str(&auth_and_config).expect("parse atomic write output");
+        assert_eq!(
+            parsed["projects"][r"C:\Users\sunda\Documents\LLMservice"]["trust_level"].as_str(),
+            Some("trusted")
+        );
     }
 
     #[test]

@@ -7,6 +7,9 @@
 - 代码根因是配置兼容修复边界过窄：`normalize_codex_config_text_for_live_read` 只修复 Codex Desktop 生成的 root `notify = ["C:\Users\..."]`，不修复同一类 `[projects."C:\Users\..."]` 表头；restore/switch 的原子写边界又只验证、不规范化。因此历史 Live/备份一旦含该 Windows project key，CCSM 的恢复链无法自愈，并可在退出/重启窗口把不可加载状态暴露给 Codex Desktop。
 - 修复边界：只在原文整体无效时，定向识别 `[projects."..."]` / `[projects.'...']` 的 Windows 路径键；basic key 补齐反斜杠转义，literal key保持原样。所有 Codex 原子写入口在落盘前都必须走同一 normalize + validate，确保备份恢复、provider switch、force repair 不再分叉。
 - 在线交叉验证：Codex 官方源码确认 `projects` 是配置 trust map，Windows 会规范化 lookup key；TOML 规范要求 basic string/key 中反斜杠使用转义。Codex 内置搜索和 Matrix WebSearch 都未找到 CCSwitchMulti 此具体报错的公开 issue；现场日志、报错列、当前 DB 历史字符串和 v29 源码构成主要证据。
+- RED `67e2e2f5` 精确复现 live normalizer 对裸反斜杠 Windows project basic key 返回 invalid Unicode；RED `e2865c0b` 进一步证明 Live backup restore 在进入原子写之前就会因 raw provider config merge 失败。
+- GREEN 实现扩展 `normalize_codex_config_text_for_live_read`：仅识别 `[projects."<drive>:\..."]` Windows basic key并复用奇偶反斜杠修复；root notify、多行字符串与已合法 TOML 保持原样。`write_codex_live_atomic`、`write_codex_live_config_atomic` 和 provider/live merge 三个边界统一先 normalize 再 validate/parse。
+- 聚焦验证：project-key normalizer 2/2、两种 atomic writer 1/1、真实 backup restore 1/1；原有 force repair 3/3、Codex restore 6/6、provider/user table merge 1/1 均通过，仅保留既有 `openai_cache_read_tokens` dead-code warning。
 
 ## 2026-08-15 PR #9 reasoning 修复选择性吸收
 
