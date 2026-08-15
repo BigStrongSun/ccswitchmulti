@@ -206,14 +206,9 @@ pub fn resolve_subagent_reasoning_capability(
         }
     }
 
-    let selectable_set = effort_map
-        .keys()
+    let selectable_set = provider_effort_set
+        .iter()
         .copied()
-        .chain(
-            capability
-                .disable_allowed
-                .then_some(CodexReasoningEffort::None),
-        )
         .collect::<HashSet<_>>();
     let codex_selectable_efforts = CodexReasoningEffort::ORDERED
         .into_iter()
@@ -258,9 +253,21 @@ pub fn builtin_reasoning_capability_for_model(
     model: &str,
 ) -> Option<CodexModelReasoningCapability> {
     let normalized = model.trim().to_ascii_lowercase();
-    if !matches!(normalized.as_str(), "deepseek-v4-flash" | "deepseek-v4-pro") {
+    // 官方维护清单：DeepSeek V4 与 Kimi K3 均支持 reasoning_effort: low/high/max（默认 high）。
+    // 保持精确匹配，未知第三方模型不得继承 GPT 通用档位。
+    if !matches!(
+        normalized.as_str(),
+        "deepseek-v4-flash" | "deepseek-v4-pro" | "k3" | "k3-256k"
+    ) {
         return None;
     }
+    // DeepSeek Responses 返回 reasoning_content 字段；Kimi 响应字段未确认，
+    // 不声明 output_format（代理层按默认行为处理，避免错误字段破坏转换）。
+    let output_format = if normalized.starts_with("deepseek") {
+        Some("reasoning_content".into())
+    } else {
+        None
+    };
     Some(CodexModelReasoningCapability {
         supported: true,
         supported_efforts: vec!["low".into(), "high".into(), "max".into()],
@@ -279,7 +286,7 @@ pub fn builtin_reasoning_capability_for_model(
             .into_iter()
             .collect(),
         },
-        output_format: Some("reasoning_content".into()),
+        output_format,
         source: Some("builtin".into()),
     })
 }
@@ -287,9 +294,34 @@ pub fn builtin_reasoning_capability_for_model(
 pub fn reasoning_capability_from_model_entry(
     model_entry: &Value,
 ) -> Option<CodexModelReasoningCapability> {
-    let value = model_entry.get("reasoning")?;
-    let capability: CodexModelReasoningCapability = serde_json::from_value(value.clone()).ok()?;
-    capability.validate().ok()?;
+    let Some(value) = model_entry.get("reasoning") else {
+        return None;
+    };
+    if value.is_null() {
+        // reasoning: null 与缺失等价，均视为"未声明"
+        return None;
+    }
+    let model = model_entry
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("?");
+    let capability: CodexModelReasoningCapability = match serde_json::from_value(value.clone()) {
+        Ok(capability) => capability,
+        Err(error) => {
+            // 声明存在但无法解析：打日志暴露问题，避免用户手动声明
+            // 被静默当作"未声明"而清空（v27/v28 回归）。
+            log::warn!(
+                "Codex reasoning declaration for model {model} is not parseable and will be ignored: {error}"
+            );
+            return None;
+        }
+    };
+    if let Err(error) = capability.validate() {
+        log::warn!(
+            "Codex reasoning declaration for model {model} is invalid and will be ignored: {error}"
+        );
+        return None;
+    }
     Some(capability)
 }
 
@@ -354,7 +386,7 @@ mod tests {
         );
         assert_eq!(
             resolved.codex_selectable_efforts,
-            efforts(&["none", "low", "medium", "high", "xhigh", "max"])
+            efforts(&["low", "high", "max"])
         );
         assert_eq!(
             resolved.effort_map.get(&CodexReasoningEffort::Medium),
@@ -424,5 +456,20 @@ mod tests {
         assert_eq!(pro.default_effort.as_deref(), Some("high"));
         assert!(builtin_reasoning_capability_for_model("deepseek-v4-flash-preview").is_none());
         assert!(builtin_reasoning_capability_for_model("vendor/deepseek-v4-pro").is_none());
+    }
+
+    #[test]
+    fn restores_exact_kimi_k3_capabilities() {
+        for model in ["k3", "K3-256K", "k3-256k"] {
+            let capability = builtin_reasoning_capability_for_model(model)
+                .unwrap_or_else(|| panic!("{model} must resolve a Kimi capability"));
+            assert_eq!(capability.supported_efforts, vec!["low", "high", "max"]);
+            assert_eq!(capability.default_effort.as_deref(), Some("high"));
+            // Kimi 响应字段未确认，output_format 保持 None
+            assert_eq!(capability.output_format, None);
+            assert_eq!(capability.source.as_deref(), Some("builtin"));
+        }
+        assert!(builtin_reasoning_capability_for_model("k3-ultra").is_none());
+        assert!(builtin_reasoning_capability_for_model("vendor/k3").is_none());
     }
 }

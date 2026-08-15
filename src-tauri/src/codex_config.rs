@@ -1358,6 +1358,91 @@ fn sort_codex_catalog_specs_for_picker(
     indexed_specs.into_iter().map(|(_, spec)| spec).collect()
 }
 
+/// 读取 Codex 官方模型缓存（models 数组）。
+///
+/// CC Switch 接管后会把路由目录写进 models_cache.json（etag 标记为 CC_SWITCH 拥有），
+/// 官方原始档位在 backup 文件里。此处与 enrich_codex_catalog_with_official_metadata
+/// 保持同一选择逻辑：缓存被 CC Switch 拥有时优先读 backup。
+/// 任何读取/解析失败都返回 None（静默降级，不阻断投影）。
+fn codex_official_models_cache() -> Option<Vec<Value>> {
+    let cache_path = get_codex_models_cache_path();
+    let backup_path = get_codex_models_cache_backup_path();
+    let existing_cache = read_json_file_if_exists(&cache_path).ok().flatten();
+    let official_cache = match existing_cache.as_ref() {
+        Some(cache) if codex_models_cache_is_cc_switch_owned(cache) => {
+            read_json_file_if_exists(&backup_path)
+                .ok()
+                .flatten()
+                .or_else(|| existing_cache.clone())
+        }
+        _ => existing_cache,
+    }?;
+    let models = official_cache.get("models").and_then(Value::as_array)?.clone();
+    Some(models)
+}
+
+/// 从 Codex 官方缓存为指定 slug 构造 reasoning capability。
+///
+/// 官方缓存字段是 snake_case，`supported_reasoning_levels` 可能是字符串数组
+/// （["low","medium",...]）或对象数组（[{"effort":"low","description":...},...]）：
+/// CCSM 写入的 cache 为字符串数组，官方 backup 为对象数组，两种都兼容。
+/// 官方 GPT 模型走 OpenAI 顶层 `reasoning_effort` 字段，effort_map 用 identity。
+/// 任何校验失败都返回 None（保守降级为 Unknown，不产生虚假档位）。
+fn official_reasoning_capability_for_model(
+    model: &str,
+    official_models: &[Value],
+) -> Option<crate::proxy::providers::codex_reasoning::CodexModelReasoningCapability> {
+    use crate::proxy::providers::codex_reasoning::{
+        CodexModelReasoningCapability, CodexModelReasoningUpstream,
+    };
+    let entry = official_models.iter().find(|entry| {
+        entry
+            .get("slug")
+            .and_then(Value::as_str)
+            .is_some_and(|slug| slug.eq_ignore_ascii_case(model))
+    })?;
+    let levels: Vec<String> = entry
+        .get("supported_reasoning_levels")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(|level| {
+            level
+                .as_str()
+                .or_else(|| level.get("effort").and_then(Value::as_str))
+                .map(str::trim)
+                .map(ToString::to_string)
+        })
+        .filter(|level| !level.is_empty())
+        .collect();
+    if levels.is_empty() {
+        return None;
+    }
+    let default_effort = entry
+        .get("default_reasoning_level")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|level| !level.is_empty())
+        .map(ToString::to_string);
+    let capability = CodexModelReasoningCapability {
+        supported: true,
+        supported_efforts: levels.clone(),
+        default_effort,
+        disable_allowed: false,
+        upstream: CodexModelReasoningUpstream {
+            format: "string".to_string(),
+            parameter: "reasoning_effort".to_string(),
+            effort_map: levels
+                .into_iter()
+                .map(|level| (level.clone(), level))
+                .collect(),
+        },
+        output_format: None,
+        source: Some("official".to_string()),
+    };
+    capability.validate().ok()?;
+    Some(capability)
+}
+
 fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCatalogModelSpec> {
     let Some(models) = settings
         .get("modelCatalog")
@@ -1373,6 +1458,7 @@ fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCa
     let cached_context_windows = codex_cached_model_context_windows();
     let mut seen = std::collections::HashSet::new();
     let mut specs = Vec::new();
+    let official_models = codex_official_models_cache().unwrap_or_default();
 
     for model_config in models {
         let Some(model) = model_config
@@ -1465,7 +1551,8 @@ fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCa
                 upstream_model.as_deref().and_then(
                     crate::proxy::providers::codex_reasoning::builtin_reasoning_capability_for_model,
                 )
-            });
+            })
+            .or_else(|| official_reasoning_capability_for_model(model, &official_models));
 
         specs.push(CodexCatalogModelSpec {
             model: model.to_string(),
@@ -6081,6 +6168,61 @@ pub fn remove_codex_toml_base_url_if(toml_str: &str, predicate: impl Fn(&str) ->
 mod tests {
     use super::*;
 
+    #[test]
+    fn official_reasoning_capability_reads_snake_case_levels() {
+        let official = serde_json::json!([{
+            "slug": "gpt-5.6-luna",
+            "supported_reasoning_levels": ["low", "medium", "high", "xhigh", "max"],
+            "default_reasoning_level": "medium"
+        }]);
+        let models = official.as_array().unwrap().clone();
+        let capability = official_reasoning_capability_for_model("gpt-5.6-luna", &models)
+            .expect("luna official capability");
+        assert_eq!(
+            capability.supported_efforts,
+            vec!["low", "medium", "high", "xhigh", "max"]
+        );
+        assert_eq!(capability.default_effort.as_deref(), Some("medium"));
+        assert_eq!(capability.source.as_deref(), Some("official"));
+        // 官方档位含 ultra 的模型（sol/terra）也能通过 validate
+        let sol = serde_json::json!([{
+            "slug": "gpt-5.6-sol",
+            "supported_reasoning_levels": ["low", "medium", "high", "xhigh", "max", "ultra"],
+            "default_reasoning_level": "low"
+        }]);
+        let sol_models = sol.as_array().unwrap().clone();
+        let sol_capability = official_reasoning_capability_for_model("gpt-5.6-sol", &sol_models)
+            .expect("sol official capability");
+        assert!(sol_capability.supported_efforts.contains(&"ultra".to_string()));
+        // 不匹配的 slug 返回 None
+        assert!(official_reasoning_capability_for_model("gpt-5.6-sol", &models).is_none());
+    }
+
+    #[test]
+    fn official_reasoning_capability_accepts_object_levels_from_backup() {
+        // 官方 backup 文件（models_cache.cc-switch-backup.json）里
+        // supported_reasoning_levels 是对象数组 {effort, description}，必须兼容。
+        let official = serde_json::json!([{
+            "slug": "gpt-5.6-luna",
+            "supported_reasoning_levels": [
+                {"effort": "low", "description": "Fast"},
+                {"effort": "medium", "description": "Balanced"},
+                {"effort": "high", "description": "Deep"},
+                {"effort": "xhigh", "description": "Extra deep"},
+                {"effort": "max", "description": "Maximum"}
+            ],
+            "default_reasoning_level": "medium"
+        }]);
+        let models = official.as_array().unwrap().clone();
+        let capability = official_reasoning_capability_for_model("gpt-5.6-luna", &models)
+            .expect("object levels must resolve");
+        assert_eq!(
+            capability.supported_efforts,
+            vec!["low", "medium", "high", "xhigh", "max"]
+        );
+        assert_eq!(capability.default_effort.as_deref(), Some("medium"));
+    }
+
     fn codex_subagent_profile_status_json(
         settings: &Value,
         provider_context: Option<&ProviderClassificationContext>,
@@ -6200,7 +6342,7 @@ mod tests {
                     "supportKind": "effort_levels",
                     "source": "builtin",
                     "confidence": "confirmed",
-                    "codexSelectableEfforts": ["none", "low", "medium", "high", "xhigh", "max"],
+                    "codexSelectableEfforts": ["low", "high", "max"],
                     "providerAcceptedEfforts": ["low", "high", "max"],
                     "providerDefaultEffort": "high",
                     "disableAllowed": true,
@@ -6296,7 +6438,7 @@ mod tests {
                 "supportKind": "effort_levels",
                 "source": "builtin",
                 "confidence": "confirmed",
-                "codexSelectableEfforts": ["none", "low", "medium", "high", "xhigh", "max"],
+                "codexSelectableEfforts": ["low", "high", "max"],
                 "providerAcceptedEfforts": ["low", "high", "max"],
                 "providerDefaultEffort": "high",
                 "disableAllowed": true,
@@ -7054,7 +7196,7 @@ mod tests {
                         "supportKind": "effort_levels",
                         "source": "builtin",
                         "confidence": "confirmed",
-                        "codexSelectableEfforts": ["none", "low", "medium", "high", "xhigh", "max"],
+                        "codexSelectableEfforts": ["low", "high", "max"],
                         "providerAcceptedEfforts": ["low", "high", "max"],
                         "providerDefaultEffort": "high",
                         "disableAllowed": true,
@@ -10547,14 +10689,8 @@ openai_base_url = "http://127.0.0.1:15721/v1"
 
         assert_eq!(entry["default_reasoning_level"], "high");
         assert_eq!(entry["defaultReasoningEffort"], "high");
-        assert_eq!(
-            levels,
-            vec!["none", "low", "medium", "high", "xhigh", "max"]
-        );
-        assert_eq!(
-            desktop_levels,
-            vec!["none", "low", "medium", "high", "xhigh", "max"]
-        );
+        assert_eq!(levels, vec!["low", "high", "max"]);
+        assert_eq!(desktop_levels, vec!["low", "high", "max"]);
         assert!(!levels.contains(&"ultra"));
     }
 

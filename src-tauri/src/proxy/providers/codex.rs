@@ -1928,12 +1928,9 @@ fn encode_codex_capability_effort_mode(
         .map(|effort| effort.as_str())
         .collect::<Vec<_>>()
         .join(",");
-    let mappings = supported_efforts
+    let mappings = effort_map
         .iter()
-        .map(|effort| {
-            let mapped = effort_map.get(effort).unwrap_or(effort);
-            format!("{}={}", effort.as_str(), mapped.as_str())
-        })
+        .map(|(source, target)| format!("{}={}", source.as_str(), target.as_str()))
         .collect::<Vec<_>>()
         .join(",");
     format!("capability|{allowed}|{mappings}")
@@ -2793,6 +2790,26 @@ mod tests {
         CodexAccountPoolEntry, CodexAccountPoolPolicy, NATIVE_CODEX_ACCOUNT_ID,
     };
     use serde_json::json;
+
+    #[test]
+    fn capability_effort_mode_keeps_wide_mappings_for_narrow_selectable() {
+        let capability = crate::proxy::providers::codex_reasoning::builtin_reasoning_capability_for_model(
+            "deepseek-v4-flash",
+        )
+        .expect("deepseek builtin");
+        let resolved = crate::proxy::providers::codex_reasoning::resolve_subagent_reasoning_capability(
+            Some(&capability),
+        );
+        let mode = encode_codex_capability_effort_mode(
+            &resolved.codex_selectable_efforts,
+            &resolved.effort_map,
+        );
+        // allowed 收窄为真实档位，mappings 保留 medium/xhigh 上游映射（宽映射兜底）
+        assert_eq!(
+            mode,
+            "capability|low,high,max|low=low,medium=high,high=high,xhigh=high,max=max"
+        );
+    }
 
     fn create_provider(config: serde_json::Value) -> Provider {
         Provider {

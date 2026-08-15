@@ -889,16 +889,21 @@ fn map_capability_reasoning_effort<'a>(
     let _kind = sections.next();
     let allowed = sections.next().unwrap_or_default();
     let mappings = sections.next().unwrap_or_default();
+    // 宽映射兜底：medium/xhigh 等映射档位直接命中，返回上游档位（如 high）。
+    // 先查映射再校验 allowed，避免 Codex 端仍发送映射档位时被 fail closed。
+    if let Some(target) = mappings
+        .split(',')
+        .filter_map(|mapping| mapping.split_once('='))
+        .find_map(|(source, target)| (source == effort).then_some(target))
+    {
+        return Ok(target);
+    }
     if !allowed.split(',').any(|candidate| candidate == effort) {
         return Err(ProxyError::TransformError(format!(
             "reasoning effort `{effort}` is not supported; allowed=[{allowed}]"
         )));
     }
-    Ok(mappings
-        .split(',')
-        .filter_map(|mapping| mapping.split_once('='))
-        .find_map(|(source, target)| (source == effort).then_some(target))
-        .unwrap_or(effort))
+    Ok(effort)
 }
 
 /// 写入 vLLM/HF chat template 常用的嵌套 thinking 开关，同时保留已有 kwargs。
@@ -2563,6 +2568,32 @@ pub fn chat_error_to_response_error(body: Option<&Value>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capability_effort_mapping_narrow_display_wide_remap() {
+        let mode =
+            "capability|low,high,max|low=low,medium=high,high=high,xhigh=high,max=max";
+        // 映射档位兜底：medium/xhigh 命中 effort_map 映射，转发到上游 high
+        assert_eq!(
+            map_capability_reasoning_effort("medium", mode).unwrap(),
+            "high"
+        );
+        assert_eq!(
+            map_capability_reasoning_effort("xhigh", mode).unwrap(),
+            "high"
+        );
+        // 真实档位 identity 映射
+        assert_eq!(
+            map_capability_reasoning_effort("low", mode).unwrap(),
+            "low"
+        );
+        assert_eq!(
+            map_capability_reasoning_effort("max", mode).unwrap(),
+            "max"
+        );
+        // 未知档位：无映射且不在 allowed，仍 fail closed
+        assert!(map_capability_reasoning_effort("foo", mode).is_err());
+    }
 
     fn large_test_image_data_url() -> String {
         let bytes = b"CC_SWITCH_TOOL_MEDIA_SENTINEL".repeat(400);

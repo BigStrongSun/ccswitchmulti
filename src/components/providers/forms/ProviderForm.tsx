@@ -23,6 +23,7 @@ import type {
   CodexModelCatalogConfig,
   CodexRoutingConfig,
   CodexChatReasoning,
+  CodexReasoningEffort,
   PromptCacheRoutingMode,
   ClaudeApiKeyField,
 } from "@/types";
@@ -229,6 +230,24 @@ export const normalizeCodexCatalogModelsForSave = (
           !reasoning.upstream.effortMap[effort]
         ) {
           throw new Error(`${model}: reasoning effortMap is missing ${effort}`);
+        }
+      }
+      // 与后端 CodexModelReasoningCapability::validate 对齐：
+      // effortMap 每个 target 必须是 supportedEfforts 中的档位。
+      // 此前只校验 key 存在性，孤儿映射（指向已移除档位）会落库后
+      // 被后端拒绝并在投影时静默清空，用户手动声明"消失"。
+      if (reasoning.upstream.effortMap) {
+        for (const [source, target] of Object.entries(
+          reasoning.upstream.effortMap,
+        )) {
+          if (
+            target &&
+            !reasoning.supportedEfforts.includes(target as CodexReasoningEffort)
+          ) {
+            throw new Error(
+              `${model}: reasoning effortMap target "${target}" (source "${source}") is not in supportedEfforts`,
+            );
+          }
         }
       }
     }
