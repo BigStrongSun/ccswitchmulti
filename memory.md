@@ -14,6 +14,8 @@
 - 首次 v29 事务 `ccsm-20260815-181906-44076a15a5cb4396829d8af85411389d` 在停止已验证 v28 PID 后持续等待 15721 释放，随后回滚阶段又启动 CCSM；结果为 `RollbackFailed`，但事务退出后 v28 原版本、原 SHA-256、注册表和 health 200 均已恢复。用户截图的 `os error 10048` 与该时序一致：同一路径旧/替代实例仍监听时又启动第二实例。
 - 根修不能放宽端口冲突。安装前若出现新 listener，必须重新获取其 PID、路径、启动时间和 retained process handle；仅当它来自精确安装路径时最多停止 3 次，外部路径立即 fail closed。安装/回滚拉起前若已有 listener，只在路径、目标版本、SHA-256 与 health 全部精确匹配时接管其 PID，不再启动重复实例。
 - RED `3b62ea87` 锁定“同产品替代 listener 可停止、外部 listener 必须拒绝”。GREEN 后 Windows PowerShell 5.1 Pester `49 passed / 0 failed`；PowerShell 7 的旧失败来自 `$PSHOME\powershell.exe` 与 Pester/SQLite 环境差异，不代表事务产品逻辑失败。
+- 第二次事务已不再出现重复实例，失败后干净返回 `RolledBack` 并恢复 v28。新失败是安装态 hash `9ABF497D...` 与 raw EXE hash `A165E2AE...` 不同；二进制内存投影证明仅将 Tauri 唯一 `__TAURI_BUNDLE_TYPE_VAR_UNK` marker 改为 `NSS` 后，SHA-256 就精确等于安装态 hash。`release-build-config.ps1` 早已有该投影 helper 和测试，但 export pipeline 未调用，属于历史功能分叉。
+- 正确发布契约是在 `windows/installer` 生成 `CCSwitchMulti_<version>_x64-installed-exe.sha256` 并纳入最终 `SHA256SUMS.txt`；事务安装读取该值验证 NSIS 安装态，raw EXE/portable 仍按各自原哈希发布，不能混用。
 
 ## 2026-08-15 v29 Codex 配置强制恢复（进行中）
 

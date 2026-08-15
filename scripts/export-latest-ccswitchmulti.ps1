@@ -93,6 +93,29 @@ function Copy-RawExe {
     }
 }
 
+# Export the exact hash of the executable embedded by the NSIS bundle. Tauri temporarily replaces
+# its restored UNK bundle marker with NSS while packaging, then restores the raw release binary.
+# The installed executable therefore intentionally differs from windows/raw-exe by this marker.
+function Write-NsisInstalledExeHash {
+    param(
+        [string]$SourceExe,
+        [string]$Destination,
+        [string]$Version
+    )
+
+    if (-not (Test-Path -LiteralPath $SourceExe -PathType Leaf)) {
+        throw "raw executable is missing while deriving NSIS installed hash: $SourceExe"
+    }
+    New-Item -ItemType Directory -Force -Path $Destination | Out-Null
+    $hash = Get-TauriNsisInstalledExeSha256 -Path $SourceExe
+    $path = Join-Path $Destination "CCSwitchMulti_$Version`_x64-installed-exe.sha256"
+    [System.IO.File]::WriteAllText(
+        $path,
+        "$hash`r`n",
+        [System.Text.UTF8Encoding]::new($false)
+    )
+}
+
 # Copy the standalone Codex history repair Python tool.
 function Copy-HistoryRepairPythonTool {
     param(
@@ -351,6 +374,7 @@ if (Test-Path -LiteralPath $sourceExe) {
 }
 
 Copy-RawExe -SourceExe $sourceExe -Destination $windowsRawExe -Version $version
+Write-NsisInstalledExeHash -SourceExe $sourceExe -Destination $windowsInstaller -Version $version
 Copy-HistoryRepairPythonTool -SourceDir (Join-Path $repoRoot "scripts\codex-history-tool") -Destination $historyTool
 
 Write-PlatformNote -Path (Join-Path $exportRoot "linux") -Platform "Linux" -Reason "Run pnpm tauri build on a Linux host with Rust, Node/pnpm, and Tauri WebKit/GTK dependencies installed, then run this export script."
