@@ -90,7 +90,7 @@ Describe "CCSwitchMulti local release build config" {
     It "runs a frozen dependency install before validating and building a local release" {
         $pipelinePath = Join-Path (Split-Path -Parent $helperPath) "local-release-pipeline.ps1"
         $pipeline = [System.IO.File]::ReadAllText($pipelinePath)
-        $installOffset = $pipeline.IndexOf('Invoke-CheckedCommand -FilePath "pnpm" -Arguments @("install", "--frozen-lockfile")')
+        $installOffset = $pipeline.IndexOf('Invoke-CheckedCommand -FilePath "pnpm" -Arguments @("install", "--frozen-lockfile", "--force")')
         $assertOffset = $pipeline.IndexOf("Assert-LocalTauriCliVersion -RepoRoot `$repoRoot")
         $exportOffset = $pipeline.IndexOf('Invoke-CheckedCommand -FilePath "powershell" -Arguments $exportArgs')
 

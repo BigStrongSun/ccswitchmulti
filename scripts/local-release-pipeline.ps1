@@ -157,6 +157,9 @@ try {
 
     Write-Log "Local release pipeline started. reason=$Reason target=$releaseRoot"
 
+    Invoke-CheckedCommand -FilePath "pnpm" -Arguments @("install", "--frozen-lockfile", "--force")
+    Assert-LocalTauriCliVersion -RepoRoot $repoRoot
+
     if (-not $NoTypecheck) {
         Invoke-CheckedCommand -FilePath "pnpm" -Arguments @("typecheck")
     }
