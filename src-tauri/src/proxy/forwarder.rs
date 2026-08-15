@@ -2309,6 +2309,10 @@ impl RequestForwarder {
         // 转换请求体（如果需要）
         let request_prepare_started_at = std::time::Instant::now();
         let mut codex_chat_tool_context: Option<CodexToolContext> = None;
+        let client_requested_streaming =
+            is_streaming_request(&effective_endpoint, &mapped_body, headers);
+        let hosted_tool_loop_allowed = !codex_responses_to_chat
+            || should_enable_hosted_tool_loop(&mapped_body, client_requested_streaming);
         let mut request_body = if codex_responses_to_chat || codex_responses_to_messages {
             let mut mapped_body = mapped_body;
             let explicit_prompt_cache_key = mapped_body
@@ -2338,11 +2342,16 @@ impl RequestForwarder {
             }
             if let Some(context) = codex_chat_tool_context.as_mut() {
                 context.apply_hosted_tool_switches(
-                    hosted_tool_bridge_enabled(&codex_router_provider.settings_config, "webSearch"),
-                    hosted_tool_bridge_enabled(
-                        &codex_router_provider.settings_config,
-                        "imageGeneration",
-                    ),
+                    hosted_tool_loop_allowed
+                        && hosted_tool_bridge_enabled(
+                            &codex_router_provider.settings_config,
+                            "webSearch",
+                        ),
+                    hosted_tool_loop_allowed
+                        && hosted_tool_bridge_enabled(
+                            &codex_router_provider.settings_config,
+                            "imageGeneration",
+                        ),
                 );
             }
             let mut chat_body = super::providers::transform_codex_chat::responses_to_chat_completions_with_reasoning_text_only_and_cache(
@@ -5827,6 +5836,32 @@ fn hosted_tool_bridge_enabled(settings: &Value, tool: &str) -> bool {
         .pointer(&format!("/hostedTools/{tool}/enabled"))
         .and_then(Value::as_bool)
         .unwrap_or(true)
+}
+
+/// Decide whether the buffered Chat hosted-tool loop owns this request.
+///
+/// Streaming `auto` requests prioritize incremental agent progress: hosted
+/// tools are omitted from the Chat projection, while ordinary client tools
+/// remain available. An explicit hosted selection is safe to buffer because
+/// the caller requested that exact bridge. Non-streaming requests retain the
+/// existing automatic hosted-tool loop.
+fn should_enable_hosted_tool_loop(request: &Value, client_requested_streaming: bool) -> bool {
+    if !client_requested_streaming {
+        return true;
+    }
+
+    let Some(choice) = request.get("tool_choice").and_then(Value::as_object) else {
+        return false;
+    };
+    let choice_type = choice.get("type").and_then(Value::as_str);
+    if matches!(choice_type, Some("web_search" | "image_generation")) {
+        return true;
+    }
+    choice_type == Some("function")
+        && matches!(
+            choice.get("name").and_then(Value::as_str),
+            Some("web_search" | "generate_image")
+        )
 }
 
 /// 解析 hosted tool 调用凭据：优先显式 API Key，再回退请求自带的 Codex OAuth，最后用 CCSM 托管 OAuth。
@@ -9443,7 +9478,7 @@ mod tests {
             ]
         });
 
-        assert!(!should_enable_hosted_tool_loop(&request));
+        assert!(!should_enable_hosted_tool_loop(&request, true));
     }
 
     #[test]
@@ -9455,7 +9490,7 @@ mod tests {
                 "tools": [{"type": hosted_type}]
             });
 
-            assert!(should_enable_hosted_tool_loop(&request));
+            assert!(should_enable_hosted_tool_loop(&request, true));
         }
     }
 
@@ -9467,7 +9502,7 @@ mod tests {
             "tools": [{"type": "web_search"}]
         });
 
-        assert!(should_enable_hosted_tool_loop(&request));
+        assert!(should_enable_hosted_tool_loop(&request, false));
     }
 
     /// 验证 hosted web_search loop 会消费第一轮工具调用、回灌 tool output 并返回最终 Chat 响应。
