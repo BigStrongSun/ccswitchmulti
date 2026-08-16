@@ -1,4 +1,4 @@
-﻿mod app_config;
+mod app_config;
 mod app_exit_monitor;
 mod app_store;
 mod auto_launch;
@@ -10,6 +10,7 @@ mod codex_desktop;
 mod codex_guardian;
 pub mod codex_history_migration;
 mod codex_state_db;
+pub(crate) mod codex_subagent_profiles;
 mod commands;
 mod config;
 mod database;
@@ -1374,6 +1375,9 @@ pub fn run() {
             commands::get_current_provider,
             commands::add_provider,
             commands::update_provider,
+            commands::update_codex_subagent_v2,
+            commands::initialize_codex_subagent_v2,
+            commands::reconcile_codex_subagent_v2_profiles,
             commands::delete_provider,
             commands::remove_provider_from_live_config,
             commands::switch_provider,
@@ -1404,6 +1408,9 @@ pub fn run() {
             commands::extract_common_config_snippet,
             commands::read_live_provider_settings,
             commands::get_settings,
+            codex_config::get_codex_subagent_reasoning_capabilities,
+            codex_config::get_codex_subagent_profile_statuses,
+            codex_config::preview_codex_subagent_profile,
             commands::save_settings,
             commands::has_codex_unify_history_backup,
             commands::restore_codex_unified_history,
@@ -1418,6 +1425,7 @@ pub fn run() {
             commands::open_log_dir,
             commands::restart_app,
             commands::install_update_and_restart,
+            commands::check_app_update,
             commands::check_app_update_available,
             commands::check_for_updates,
             commands::is_portable_mode,
@@ -1477,6 +1485,7 @@ pub fn run() {
             commands::apply_profile,
             // model list fetch (OpenAI-compatible /v1/models)
             commands::fetch_models_for_config,
+            commands::get_opencode_models,
             commands::probe_codex_chat_for_config,
             commands::probe_codex_responses_for_config,
             // ours: endpoint speed test + custom endpoint management
@@ -1984,6 +1993,16 @@ async fn enabled_proxy_apps_on_startup(db: &database::Database) -> Vec<&'static 
 }
 
 async fn restore_proxy_state_on_startup(state: &store::AppState) {
+    match state
+        .proxy_service
+        .reconcile_codex_owned_projection_on_startup()
+        .await
+    {
+        Ok(true) => log::info!("✓ 已对账 CCSwitchMulti 自有 Codex 模型目录"),
+        Ok(false) => log::debug!("Codex 未使用 CCSwitchMulti 自有模型目录，跳过启动对账"),
+        Err(e) => log::warn!("启动时对账 Codex 模型目录失败: {e}"),
+    }
+
     match crate::proxy::external_openai_api::load_profile(&state.db) {
         Ok(profile) if profile.enabled => {
             match state.proxy_service.start_external_openai_api().await {

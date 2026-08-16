@@ -44,6 +44,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { providersApi } from "@/lib/api/providers";
+import { codexSubagentV2Api } from "@/lib/api/codexSubagentV2";
 import {
   fetchCodexOauthCachedModels,
   fetchCodexOauthModels,
@@ -1438,12 +1439,16 @@ export function CodexMultiRouterWizard({
           },
         },
       );
+      let savedProvider = result.plan;
       if (existingPlan) {
         await providersApi.update(result.plan, "codex");
       } else {
         await providersApi.add(result.plan, "codex", false);
+        savedProvider = await codexSubagentV2Api.initializeProviderConfig(
+          result.plan.id,
+        );
       }
-      setSavedPlan(result.plan);
+      setSavedPlan(savedProvider);
       setDraftSources(result.sourceProviders);
       await queryClient.invalidateQueries({ queryKey: ["providers", "codex"] });
       toast.success("MultiRouter 方案已保存。", { closeButton: true });

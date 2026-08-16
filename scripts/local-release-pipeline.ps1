@@ -7,6 +7,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$releaseBuildConfigHelperPath = Join-Path (Split-Path -Parent $PSCommandPath) "release-build-config.ps1"
+. $releaseBuildConfigHelperPath
+
 # Resolve the repository root for hook, terminal, and scheduled calls.
 function Get-RepoRoot {
     $scriptDir = Split-Path -Parent $PSCommandPath
@@ -129,9 +132,9 @@ function Write-Checksums {
         Where-Object { $_.Name -ne "SHA256SUMS.txt" } |
         ForEach-Object {
         $file = $_
-        $hash = Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256
+        $hash = Get-ReleaseFileSha256 -Path $file.FullName
         $relative = $file.FullName.Substring($normalizedRoot.Length).TrimStart([char[]]@([char]92, [char]47))
-        $lines.Add("$($hash.Hash)  $relative")
+        $lines.Add("$hash  $relative")
     } | Out-Null
     Set-Content -LiteralPath (Join-Path $normalizedRoot "SHA256SUMS.txt") -Value ($lines.ToArray() -join "`r`n") -Encoding UTF8
 }
@@ -153,6 +156,9 @@ try {
     Push-Location $repoRoot
 
     Write-Log "Local release pipeline started. reason=$Reason target=$releaseRoot"
+
+    Invoke-CheckedCommand -FilePath "pnpm" -Arguments @("install", "--frozen-lockfile", "--force")
+    Assert-LocalTauriCliVersion -RepoRoot $repoRoot
 
     if (-not $NoTypecheck) {
         Invoke-CheckedCommand -FilePath "pnpm" -Arguments @("typecheck")

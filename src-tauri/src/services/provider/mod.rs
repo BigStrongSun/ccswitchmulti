@@ -8,7 +8,7 @@ mod live;
 mod usage;
 
 use indexmap::IndexMap;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::future::Future;
 
@@ -108,6 +108,141 @@ pub fn reapply_current_codex_official_live(state: &AppState) -> Result<bool, App
 
 /// Provider business logic service
 pub struct ProviderService;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexSubagentV2ProjectionStatus {
+    Applied,
+    NotRequired,
+    PendingRetry,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexSubagentV2ProjectionWarning {
+    pub code: &'static str,
+    pub message: &'static str,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexSubagentV2ProjectionOutcome {
+    pub status: CodexSubagentV2ProjectionStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<CodexSubagentV2ProjectionWarning>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexSubagentV2RoleFilesStatus {
+    Verified,
+    NotRequired,
+    PendingRetry,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexSubagentV2ActivationBoundary {
+    RestartCodexAndStartNewSession,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexSubagentV2WriteVerification {
+    pub database_persisted: bool,
+    pub role_files_status: CodexSubagentV2RoleFilesStatus,
+    pub role_files: Vec<crate::codex_config::CodexSubagentRoleFileVerification>,
+    pub activation: CodexSubagentV2ActivationBoundary,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexSubagentV2MutationResult {
+    #[serde(flatten)]
+    pub provider: Provider,
+    pub projection: CodexSubagentV2ProjectionOutcome,
+    pub verification: CodexSubagentV2WriteVerification,
+}
+
+const CODEX_LIVE_PROJECTION_RETRY_CODE: &str = "codex_live_projection_pending_retry";
+const CODEX_LIVE_PROJECTION_RETRY_MESSAGE: &str = "数据库已保存，Codex live 投影待重试。";
+const CODEX_CURRENT_PROVIDER_LOOKUP_RETRY_CODE: &str =
+    "codex_current_provider_lookup_pending_retry";
+const CODEX_CURRENT_PROVIDER_LOOKUP_RETRY_MESSAGE: &str =
+    "数据库已保存，暂时无法确认当前 Codex Provider，live 投影待重试。";
+
+fn codex_subagent_v2_projection_warning(
+    code: &'static str,
+    message: &'static str,
+) -> CodexSubagentV2ProjectionWarning {
+    CodexSubagentV2ProjectionWarning { code, message }
+}
+
+fn codex_subagent_v2_write_verification(
+    state: &AppState,
+    settings: &Value,
+    projection_status: CodexSubagentV2ProjectionStatus,
+) -> CodexSubagentV2WriteVerification {
+    let (role_files_status, role_files) = match projection_status {
+        CodexSubagentV2ProjectionStatus::NotRequired => {
+            (CodexSubagentV2RoleFilesStatus::NotRequired, Vec::new())
+        }
+        CodexSubagentV2ProjectionStatus::PendingRetry => {
+            (CodexSubagentV2RoleFilesStatus::PendingRetry, Vec::new())
+        }
+        CodexSubagentV2ProjectionStatus::Applied => {
+            let checks =
+                crate::codex_config::codex_provider_classification_context(state.db.as_ref())
+                    .and_then(|context| {
+                        crate::codex_config::verify_codex_subagent_role_files(
+                            settings,
+                            Some(&context),
+                        )
+                    });
+            match checks {
+                Ok(files) if files.iter().all(|file| file.exists && file.content_matches) => {
+                    (CodexSubagentV2RoleFilesStatus::Verified, files)
+                }
+                Ok(files) => (CodexSubagentV2RoleFilesStatus::Failed, files),
+                Err(error) => {
+                    log::warn!(
+                        "Codex V2 子 Agent live 投影完成但文件回读验证失败，error_kind={}",
+                        app_error_diagnostic_kind(&error)
+                    );
+                    (CodexSubagentV2RoleFilesStatus::Failed, Vec::new())
+                }
+            }
+        }
+    };
+    CodexSubagentV2WriteVerification {
+        database_persisted: true,
+        role_files_status,
+        role_files,
+        activation: CodexSubagentV2ActivationBoundary::RestartCodexAndStartNewSession,
+    }
+}
+
+fn app_error_diagnostic_kind(error: &AppError) -> &'static str {
+    match error {
+        AppError::Config(_) => "config",
+        AppError::InvalidInput(_) => "invalid_input",
+        AppError::Io { .. } => "io",
+        AppError::IoContext { .. } => "io_context",
+        AppError::Json { .. } => "json",
+        AppError::JsonSerialize { .. } => "json_serialize",
+        AppError::Toml { .. } => "toml",
+        AppError::Lock(_) => "lock",
+        AppError::McpValidation(_) => "mcp_validation",
+        AppError::Message(_) => "message",
+        AppError::HttpStatus { .. } => "http_status",
+        AppError::Localized { .. } => "localized",
+        AppError::Database(_) => "database",
+        AppError::OmoConfigNotFound => "omo_config_not_found",
+        AppError::AllProvidersCircuitOpen => "all_providers_circuit_open",
+        AppError::NoProvidersConfigured => "no_providers_configured",
+    }
+}
 
 /// 在同步的 provider 命令里安全等待异步代理任务。
 ///
@@ -702,6 +837,532 @@ mod tests {
             assert_eq!(script.access_key_id.as_deref(), Some("ak-test"));
             assert_eq!(script.secret_access_key.as_deref(), Some("sk-test"));
         });
+    }
+
+    #[test]
+    #[serial]
+    fn update_codex_subagent_v2_compiles_before_mutating_a_non_current_provider() {
+        with_test_home(|state, _| {
+            let current = Provider::with_id(
+                "current-router".to_string(),
+                "Current router".to_string(),
+                codex_settings("https://current.example/v1", "sk-current"),
+                None,
+            );
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &current)
+                .expect("seed current provider");
+            state
+                .db
+                .set_current_provider(AppType::Codex.as_str(), &current.id)
+                .expect("mark a different provider current");
+
+            let target_settings = json!({
+                "auth": { "OPENAI_API_KEY": "sk-target" },
+                "config": "model = \"deepseek-v4-flash\"\n",
+                "modelCatalog": {
+                    "models": [{
+                        "model": "deepseek-v4-flash",
+                        "displayName": "DeepSeek V4 Flash",
+                        "contextWindow": 1000000
+                    }]
+                },
+                "codexRouting": {
+                    "enabled": true,
+                    "subagentVersion": "v2",
+                    "routes": [{
+                        "id": "flash-route",
+                        "enabled": true,
+                        "match": { "models": ["deepseek-v4-flash"] },
+                        "upstream": { "auth": { "source": "provider_config" } }
+                    }],
+                    "subagentV2": {
+                        "schemaVersion": 1,
+                        "selectionPolicy": "balanced",
+                        "profiles": {}
+                    }
+                }
+            });
+            let target = Provider::with_id(
+                "non-current-router".to_string(),
+                "Non-current router".to_string(),
+                target_settings,
+                None,
+            );
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &target)
+                .expect("seed non-current target provider");
+            let before = state
+                .db
+                .get_provider_by_id(&target.id, AppType::Codex.as_str())
+                .expect("read target before invalid save")
+                .expect("target exists before invalid save");
+            let compiler_invalid = json!({
+                "schemaVersion": 1,
+                "selectionPolicy": "balanced",
+                "profiles": {
+                    "deepseek-v4-flash": {
+                        "model": "deepseek-v4-flash",
+                        "enabled": true,
+                        "questionnaire": {
+                            "taskStrengths": ["repository_exploration"],
+                            "optimization": "speed",
+                            "writeScope": "read_only",
+                            "preference": "eligible",
+                            "reasoningEffort": "auto"
+                        },
+                        "overrides": { "roleName": "default" }
+                    }
+                }
+            });
+
+            let result =
+                ProviderService::update_codex_subagent_v2(state, &target.id, compiler_invalid);
+            let after = state
+                .db
+                .get_provider_by_id(&target.id, AppType::Codex.as_str())
+                .expect("read target after rejected save")
+                .expect("target still exists after rejected save");
+
+            assert_eq!(
+                after.settings_config, before.settings_config,
+                "compiler-domain rejection must happen before SQLite mutation; result was {result:?}"
+            );
+            assert!(
+                matches!(result, Err(AppError::InvalidInput(_) | AppError::Message(_))),
+                "reserved roleName must be rejected by the compiler before persistence, got {result:?}"
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn updating_valid_non_current_subagent_v2_does_not_touch_live_projection_files() {
+        with_test_home(|state, _| {
+            let current = Provider::with_id(
+                "openai".to_string(),
+                "OpenAI Official".to_string(),
+                codex_settings("https://api.openai.com/v1", "sk-current"),
+                None,
+            );
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &current)
+                .expect("seed current provider");
+            state
+                .db
+                .set_current_provider(AppType::Codex.as_str(), &current.id)
+                .expect("mark official provider current");
+
+            let target = Provider::with_id(
+                "saved-router".to_string(),
+                "Saved router".to_string(),
+                json!({
+                    "modelCatalog": { "models": [{
+                        "model": "deepseek-v4-flash",
+                        "displayName": "DeepSeek V4 Flash",
+                        "contextWindow": 1000000
+                    }] },
+                    "codexRouting": {
+                        "enabled": true,
+                        "subagentVersion": "v2",
+                        "routes": [{
+                            "id": "flash-route",
+                            "enabled": true,
+                            "match": { "models": ["deepseek-v4-flash"] },
+                            "upstream": { "auth": { "source": "provider_config" } }
+                        }],
+                        "subagentV2": {
+                            "schemaVersion": 1,
+                            "selectionPolicy": "balanced",
+                            "profiles": {}
+                        }
+                    }
+                }),
+                None,
+            );
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &target)
+                .expect("seed saved router");
+
+            let config_path = crate::codex_config::get_codex_config_path();
+            let catalog_path = crate::codex_config::get_codex_model_catalog_path();
+            let agents_dir = crate::codex_config::get_codex_agents_dir();
+            std::fs::create_dir_all(config_path.parent().expect("config parent"))
+                .expect("create config dir");
+            std::fs::create_dir_all(&agents_dir).expect("create agents dir");
+            std::fs::write(&config_path, "model_provider = \"openai\"\n")
+                .expect("seed official live config");
+            std::fs::write(&catalog_path, "{\"sentinel\":true}").expect("seed catalog sentinel");
+            let managed_path = agents_dir.join("sentinel.toml");
+            std::fs::write(&managed_path, "# user sentinel\nmodel = \"keep\"\n")
+                .expect("seed agent sentinel");
+
+            let result = ProviderService::update_codex_subagent_v2(
+                state,
+                &target.id,
+                json!({
+                    "schemaVersion": 1,
+                    "selectionPolicy": "balanced",
+                    "profiles": {}
+                }),
+            )
+            .expect("save non-current V2 config");
+
+            assert_eq!(
+                result.projection.status,
+                CodexSubagentV2ProjectionStatus::NotRequired
+            );
+            let public = serde_json::to_value(&result).expect("serialize non-current result");
+            assert_eq!(public["verification"]["databasePersisted"], true);
+            assert_eq!(public["verification"]["roleFilesStatus"], "not_required");
+            assert_eq!(public["verification"]["roleFiles"], json!([]));
+            assert_eq!(
+                std::fs::read_to_string(&config_path).expect("read live config"),
+                "model_provider = \"openai\"\n"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&catalog_path).expect("read catalog sentinel"),
+                "{\"sentinel\":true}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&managed_path).expect("read agent sentinel"),
+                "# user sentinel\nmodel = \"keep\"\n"
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn updating_current_subagent_v2_returns_verified_role_file_readback() {
+        with_test_home(|state, _| {
+            let provider = Provider::with_id(
+                "active-router".to_string(),
+                "Active router".to_string(),
+                json!({
+                    "auth": { "OPENAI_API_KEY": "sk-test" },
+                    "config": "model = \"deepseek-v4-flash\"\n",
+                    "modelCatalog": { "models": [{
+                        "model": "deepseek-v4-flash",
+                        "displayName": "DeepSeek V4 Flash",
+                        "contextWindow": 1000000,
+                        "inputModalities": ["text"],
+                        "textOnly": true,
+                        "supportsImage": false,
+                        "reasoning": {
+                            "supported": true,
+                            "supportedEfforts": ["low", "high", "max"],
+                            "defaultEffort": "high",
+                            "disableAllowed": true,
+                            "upstream": {
+                                "format": "string",
+                                "parameter": "reasoning_effort",
+                                "effortMap": {
+                                    "low": "low",
+                                    "medium": "high",
+                                    "high": "high",
+                                    "xhigh": "high",
+                                    "max": "max"
+                                }
+                            },
+                            "source": "builtin"
+                        }
+                    }] },
+                    "codexRouting": {
+                        "enabled": true,
+                        "subagentVersion": "v2",
+                        "routes": [{
+                            "id": "flash-route",
+                            "enabled": true,
+                            "match": { "models": ["deepseek-v4-flash"] },
+                            "upstream": {
+                                "baseUrl": "https://router.example/v1",
+                                "apiFormat": "openai_responses",
+                                "auth": { "source": "provider_config" }
+                            }
+                        }],
+                        "subagentV2": {
+                            "schemaVersion": 1,
+                            "selectionPolicy": "balanced",
+                            "profiles": {}
+                        }
+                    }
+                }),
+                None,
+            );
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &provider)
+                .expect("seed active provider");
+            state
+                .db
+                .set_current_provider(AppType::Codex.as_str(), &provider.id)
+                .expect("mark provider current");
+
+            let result = ProviderService::update_codex_subagent_v2(
+                state,
+                &provider.id,
+                json!({
+                    "schemaVersion": 1,
+                    "selectionPolicy": "balanced",
+                    "profiles": {
+                        "deepseek-v4-flash": {
+                            "model": "deepseek-v4-flash",
+                            "enabled": true,
+                            "questionnaire": {
+                                "taskStrengths": ["repository_exploration"],
+                                "optimization": "speed",
+                                "writeScope": "read_only",
+                                "preference": "eligible",
+                                "reasoningEffort": "medium"
+                            }
+                        }
+                    }
+                }),
+            )
+            .expect("save and project active V2 profile");
+
+            assert_eq!(
+                result.projection.status,
+                CodexSubagentV2ProjectionStatus::Applied
+            );
+            assert_eq!(
+                result.verification.role_files_status,
+                CodexSubagentV2RoleFilesStatus::Verified
+            );
+            assert_eq!(result.verification.role_files.len(), 1);
+            assert_eq!(
+                result.provider.settings_config["codexRouting"]["subagentV2"]["profiles"]
+                    ["deepseek-v4-flash"]["inputModalities"],
+                json!(["text"]),
+                "the focused mutation must persist catalog-derived capability explicitly"
+            );
+            let file = &result.verification.role_files[0];
+            assert!(file.exists);
+            assert!(file.content_matches);
+            let content = std::fs::read_to_string(&file.path).expect("read verified role TOML");
+            assert!(content.contains(
+                "This model does not support image input; do not select this role for tasks that depend on image understanding."
+            ));
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn reconcile_codex_subagent_v2_uses_the_complete_current_draft_for_batch_actions() {
+        with_test_home(|state, _| {
+            let current = Provider::with_id(
+                "current-router".to_string(),
+                "Current router".to_string(),
+                codex_settings("https://current.example/v1", "sk-current"),
+                None,
+            );
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &current)
+                .expect("seed current provider");
+            state
+                .db
+                .set_current_provider(AppType::Codex.as_str(), &current.id)
+                .expect("keep target provider non-current");
+
+            let target_settings = json!({
+                "modelCatalog": { "models": [
+                    { "model": "repository-scout", "contextWindow": 128000 },
+                    { "model": "qwen3.6", "contextWindow": 262144 }
+                ] },
+                "codexRouting": {
+                    "enabled": true,
+                    "subagentVersion": "v2",
+                    "routes": [{
+                        "id": "all-models",
+                        "match": { "models": ["repository-scout", "qwen3.6"] },
+                        "upstream": { "auth": { "source": "provider_config" } }
+                    }],
+                    "subagentV2": {
+                        "schemaVersion": 1,
+                        "selectionPolicy": "balanced",
+                        "profiles": {
+                            "repository-scout": {
+                                "model": "repository-scout",
+                                "enabled": true,
+                                "questionnaire": {
+                                    "taskStrengths": ["repository_exploration"],
+                                    "optimization": "speed",
+                                    "writeScope": "read_only",
+                                    "preference": "eligible",
+                                    "reasoningEffort": "auto"
+                                }
+                            },
+                            "RAW_INVALID_PROFILE_SENTINEL": {
+                                "model": "qwen3.6",
+                                "enabled": "broken"
+                            }
+                        }
+                    }
+                }
+            });
+            let target = Provider::with_id(
+                "draft-router".to_string(),
+                "Draft router".to_string(),
+                target_settings.clone(),
+                None,
+            );
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &target)
+                .expect("seed target provider");
+
+            let mut current_draft = target_settings["codexRouting"]["subagentV2"].clone();
+            current_draft["selectionPolicy"] = json!("third_party_first");
+            current_draft["profiles"]["repository-scout"]["overrides"] = json!({
+                "description": "Unsaved batch edit must survive."
+            });
+
+            let result = ProviderService::reconcile_codex_subagent_v2_profiles(
+                state,
+                &target.id,
+                crate::codex_config::CodexSubagentV2ReconcileAction::RemoveAllInvalid,
+                Some(current_draft),
+            )
+            .expect("batch action must accept and persist the complete current draft");
+            let persisted = &result.provider.settings_config["codexRouting"]["subagentV2"];
+
+            assert_eq!(persisted["selectionPolicy"], "third_party_first");
+            assert_eq!(
+                persisted["profiles"]["repository-scout"]["overrides"]["description"],
+                "Unsaved batch edit must survive."
+            );
+            assert!(persisted["profiles"]
+                .get("RAW_INVALID_PROFILE_SENTINEL")
+                .is_none());
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn update_codex_subagent_v2_service_error_redacts_raw_profile_identity() {
+        with_test_home(|state, _| {
+            let target = Provider::with_id(
+                "redaction-router".to_string(),
+                "Redaction router".to_string(),
+                json!({
+                    "modelCatalog": { "models": [
+                        { "model": "PRIVATE_MODEL_SENTINEL", "contextWindow": 128000 }
+                    ] },
+                    "codexRouting": {
+                        "enabled": true,
+                        "subagentVersion": "v2",
+                        "routes": [{
+                            "id": "private-route",
+                            "match": { "models": ["PRIVATE_MODEL_SENTINEL"] },
+                            "upstream": { "auth": { "source": "provider_config" } }
+                        }],
+                        "subagentV2": {
+                            "schemaVersion": 1,
+                            "selectionPolicy": "balanced",
+                            "profiles": {}
+                        }
+                    }
+                }),
+                None,
+            );
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &target)
+                .expect("seed target provider");
+            let invalid = json!({
+                "schemaVersion": 1,
+                "selectionPolicy": "balanced",
+                "profiles": {
+                    "RAW_PROFILE_KEY_SENTINEL": {
+                        "model": "PRIVATE_MODEL_SENTINEL",
+                        "enabled": true,
+                        "questionnaire": {
+                            "taskStrengths": ["repository_exploration"],
+                            "optimization": "speed",
+                            "writeScope": "read_only",
+                            "preference": "eligible",
+                            "reasoningEffort": "auto"
+                        }
+                    }
+                }
+            });
+
+            let error = ProviderService::update_codex_subagent_v2(state, &target.id, invalid)
+                .expect_err("strict update must reject key/model mismatch");
+            let public_error = error.to_string();
+
+            assert_eq!(
+                public_error,
+                "无效输入: Codex subagent V2 configuration is invalid (profile_key_model_mismatch)"
+            );
+            assert!(!public_error.contains("RAW_PROFILE_KEY_SENTINEL"));
+            assert!(!public_error.contains("PRIVATE_MODEL_SENTINEL"));
+        });
+    }
+
+    #[test]
+    fn codex_subagent_v2_mutation_result_keeps_provider_shape_and_redacts_projection_errors() {
+        let sensitive_error = AppError::Config(
+            "settings.taskBody=PRIVATE_TASK apiKey=PRIVATE_CREDENTIAL".to_string(),
+        );
+        assert_eq!(app_error_diagnostic_kind(&sensitive_error), "config");
+
+        let provider = Provider::with_id(
+            "router".to_string(),
+            "Router".to_string(),
+            json!({ "codexRouting": { "subagentVersion": "v2" } }),
+            None,
+        );
+        let result = CodexSubagentV2MutationResult {
+            provider,
+            projection: CodexSubagentV2ProjectionOutcome {
+                status: CodexSubagentV2ProjectionStatus::PendingRetry,
+                warning: Some(codex_subagent_v2_projection_warning(
+                    CODEX_LIVE_PROJECTION_RETRY_CODE,
+                    CODEX_LIVE_PROJECTION_RETRY_MESSAGE,
+                )),
+            },
+            verification: CodexSubagentV2WriteVerification {
+                database_persisted: true,
+                role_files_status: CodexSubagentV2RoleFilesStatus::PendingRetry,
+                role_files: Vec::new(),
+                activation: CodexSubagentV2ActivationBoundary::RestartCodexAndStartNewSession,
+            },
+        };
+        let serialized = serde_json::to_value(&result).expect("serialize mutation result");
+
+        assert_eq!(serialized["id"], "router");
+        assert_eq!(serialized["name"], "Router");
+        assert_eq!(serialized["projection"]["status"], "pending_retry");
+        assert_eq!(serialized["verification"]["databasePersisted"], true);
+        assert_eq!(
+            serialized["verification"]["roleFilesStatus"],
+            "pending_retry"
+        );
+        assert_eq!(
+            serialized["verification"]["activation"],
+            "restart_codex_and_start_new_session"
+        );
+        assert_eq!(
+            serialized["projection"]["warning"],
+            json!({
+                "code": "codex_live_projection_pending_retry",
+                "message": "数据库已保存，Codex live 投影待重试。"
+            })
+        );
+        let public_payload = serialized.to_string();
+        assert!(!public_payload.contains("PRIVATE_TASK"));
+        assert!(!public_payload.contains("PRIVATE_CREDENTIAL"));
+
+        let provider_consumer: Provider = serde_json::from_value(serialized)
+            .expect("existing Provider consumers must ignore the additive projection field");
+        assert_eq!(provider_consumer.id, "router");
+        assert_eq!(provider_consumer.name, "Router");
     }
 
     #[test]
@@ -1702,9 +2363,21 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             live_config.contains("supports_websockets = false"),
             "router takeover must disable Codex websocket attempts, got:\n{live_config}"
         );
+        let live_config_toml: toml::Value =
+            toml::from_str(&live_config).expect("parse Codex live config");
+        let model_catalog_json = live_config_toml
+            .get("model_catalog_json")
+            .and_then(toml::Value::as_str)
+            .expect("router takeover must expose the generated model catalog to Codex");
+        let expected_catalog_path = crate::codex_config::get_codex_model_catalog_path();
+        assert_eq!(
+            std::path::Path::new(model_catalog_json),
+            expected_catalog_path.as_path(),
+            "router takeover must point Codex at the generated model catalog"
+        );
         assert!(
-            live_config.contains("model_catalog_json = \"cc-switch-model-catalog.json\""),
-            "router takeover must expose the generated model catalog to Codex, got:\n{live_config}"
+            std::path::Path::new(model_catalog_json).is_absolute(),
+            "Codex requires model_catalog_json to be absolute, got: {model_catalog_json}"
         );
         assert!(
             !live_config.contains("openai_base_url"),
@@ -1860,9 +2533,20 @@ experimental_bearer_token = "PROXY_MANAGED"
                 live_config.contains("model_provider = \"codex_model_router_v2\""),
                 "{label}: live config must stay on the stable MultiRouter provider, got:\n{live_config}"
             );
+            let live_toml: toml::Value =
+                toml::from_str(&live_config).expect("parse refreshed Codex live config");
+            let model_catalog_json = live_toml
+                .get("model_catalog_json")
+                .and_then(toml::Value::as_str)
+                .expect("live config must keep the generated catalog pointer");
+            assert_eq!(
+                std::path::Path::new(model_catalog_json),
+                crate::codex_config::get_codex_model_catalog_path().as_path(),
+                "{label}: live config must point at the generated catalog"
+            );
             assert!(
-                live_config.contains("model_catalog_json = \"cc-switch-model-catalog.json\""),
-                "{label}: live config must keep the generated catalog pointer, got:\n{live_config}"
+                std::path::Path::new(model_catalog_json).is_absolute(),
+                "{label}: Codex requires an absolute generated catalog pointer"
             );
             assert!(
                 !live_config.contains("model_provider = \"openai\""),
@@ -1872,8 +2556,6 @@ experimental_bearer_token = "PROXY_MANAGED"
                 !live_config.contains("openai_base_url"),
                 "{label}: live config must not use built-in OpenAI base URL, got:\n{live_config}"
             );
-            let live_toml: toml::Value =
-                toml::from_str(&live_config).expect("parse refreshed Codex live config");
             let router_facade = live_toml
                 .get("model_providers")
                 .and_then(|providers| providers.get("codex_model_router_v2"))
@@ -3511,6 +4193,162 @@ impl ProviderService {
         }
 
         Ok(true)
+    }
+
+    fn finish_codex_subagent_v2_mutation(
+        state: &AppState,
+        provider_id: &str,
+        candidate_settings: Value,
+    ) -> Result<CodexSubagentV2MutationResult, AppError> {
+        let mut provider = state
+            .db
+            .get_provider_by_id(provider_id, AppType::Codex.as_str())?
+            .ok_or_else(|| AppError::InvalidInput("Codex provider does not exist".to_string()))?;
+        provider.settings_config = candidate_settings;
+
+        let current = crate::settings::get_effective_current_provider(&state.db, &AppType::Codex);
+        let projection = match current {
+            Ok(Some(current_id)) if current_id == provider_id => {
+                match Self::sync_current_provider_for_app(state, AppType::Codex) {
+                    Ok(()) => CodexSubagentV2ProjectionOutcome {
+                        status: CodexSubagentV2ProjectionStatus::Applied,
+                        warning: None,
+                    },
+                    Err(error) => {
+                        log::warn!(
+                            "Codex V2 子 Agent 数据库保存成功但 live 投影失败；\
+                             将在后续同步重试，error_kind={}",
+                            app_error_diagnostic_kind(&error)
+                        );
+                        CodexSubagentV2ProjectionOutcome {
+                            status: CodexSubagentV2ProjectionStatus::PendingRetry,
+                            warning: Some(codex_subagent_v2_projection_warning(
+                                CODEX_LIVE_PROJECTION_RETRY_CODE,
+                                CODEX_LIVE_PROJECTION_RETRY_MESSAGE,
+                            )),
+                        }
+                    }
+                }
+            }
+            Ok(_) => CodexSubagentV2ProjectionOutcome {
+                status: CodexSubagentV2ProjectionStatus::NotRequired,
+                warning: None,
+            },
+            Err(error) => {
+                log::warn!(
+                    "Codex V2 子 Agent 数据库保存成功但当前 Provider 查询失败；\
+                     将在后续同步重试，error_kind={}",
+                    app_error_diagnostic_kind(&error)
+                );
+                CodexSubagentV2ProjectionOutcome {
+                    status: CodexSubagentV2ProjectionStatus::PendingRetry,
+                    warning: Some(codex_subagent_v2_projection_warning(
+                        CODEX_CURRENT_PROVIDER_LOOKUP_RETRY_CODE,
+                        CODEX_CURRENT_PROVIDER_LOOKUP_RETRY_MESSAGE,
+                    )),
+                }
+            }
+        };
+        let verification = codex_subagent_v2_write_verification(
+            state,
+            &provider.settings_config,
+            projection.status,
+        );
+        Ok(CodexSubagentV2MutationResult {
+            provider,
+            projection,
+            verification,
+        })
+    }
+
+    /// Persist one V2 capability document without replacing the surrounding Provider record.
+    /// The DAO acquires an IMMEDIATE write boundary, merges the focused field into the latest
+    /// settings, and invokes the full compiler validation closure before committing.
+    pub fn update_codex_subagent_v2(
+        state: &AppState,
+        provider_id: &str,
+        subagent_v2: Value,
+    ) -> Result<CodexSubagentV2MutationResult, AppError> {
+        let provider_context =
+            crate::codex_config::codex_provider_classification_context(state.db.as_ref())?;
+        let candidate = state.db.update_codex_subagent_v2(
+            provider_id,
+            move |settings| {
+                Ok(
+                    crate::codex_config::hydrate_codex_subagent_v2_input_modalities(
+                        settings,
+                        &subagent_v2,
+                    ),
+                )
+            },
+            |settings| {
+                crate::codex_config::validate_codex_subagent_v2_candidate(
+                    settings,
+                    Some(&provider_context),
+                    true,
+                )
+            },
+        )?;
+        Self::finish_codex_subagent_v2_mutation(state, provider_id, candidate)
+    }
+
+    pub fn initialize_codex_subagent_v2(
+        state: &AppState,
+        provider_id: &str,
+    ) -> Result<CodexSubagentV2MutationResult, AppError> {
+        let provider_context =
+            crate::codex_config::codex_provider_classification_context(state.db.as_ref())?;
+        let candidate = state.db.update_codex_subagent_v2(
+            provider_id,
+            |settings| {
+                crate::codex_config::initialize_codex_subagent_v2_for_candidate(
+                    settings,
+                    Some(&provider_context),
+                )
+            },
+            |settings| {
+                crate::codex_config::validate_codex_subagent_v2_candidate(
+                    settings,
+                    Some(&provider_context),
+                    true,
+                )
+            },
+        )?;
+        Self::finish_codex_subagent_v2_mutation(state, provider_id, candidate)
+    }
+
+    pub fn reconcile_codex_subagent_v2_profiles(
+        state: &AppState,
+        provider_id: &str,
+        action: crate::codex_config::CodexSubagentV2ReconcileAction,
+        subagent_v2: Option<Value>,
+    ) -> Result<CodexSubagentV2MutationResult, AppError> {
+        if subagent_v2.is_none() {
+            return Err(AppError::InvalidInput(
+                "Reconcile actions require the current subagentV2 draft".to_string(),
+            ));
+        }
+        let provider_context =
+            crate::codex_config::codex_provider_classification_context(state.db.as_ref())?;
+        let candidate = state.db.update_codex_subagent_v2(
+            provider_id,
+            |settings| {
+                crate::codex_config::reconcile_codex_subagent_v2_for_candidate(
+                    settings,
+                    action,
+                    subagent_v2.as_ref(),
+                    Some(&provider_context),
+                )
+            },
+            |settings| {
+                crate::codex_config::validate_codex_subagent_v2_candidate(
+                    settings,
+                    Some(&provider_context),
+                    false,
+                )
+            },
+        )?;
+        Self::finish_codex_subagent_v2_mutation(state, provider_id, candidate)
     }
 
     /// Delete a provider

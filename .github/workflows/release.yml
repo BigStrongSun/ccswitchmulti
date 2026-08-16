@@ -132,9 +132,8 @@ jobs:
         if: runner.os == 'Windows' && runner.arch == 'ARM64'
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
           corepack enable
-          corepack prepare pnpm@10.12.3 --activate
+          corepack install
           node --version
           pnpm --version
 

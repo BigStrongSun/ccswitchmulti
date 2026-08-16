@@ -25,6 +25,10 @@ const PROXY_TOKEN_PLACEHOLDER: &str = "PROXY_MANAGED";
 /// Codex 接管时暴露给官方客户端的本地代理入口名称。
 const CODEX_LOCAL_PROXY_PROVIDER_NAME: &str = "CCSwitch MultiRouter";
 
+fn should_run_codex_post_takeover(app_type: &AppType) -> bool {
+    matches!(app_type, AppType::Codex)
+}
+
 /// 代理接管模式下需要从 Claude Live 配置中移除的"模型覆盖"字段。
 ///
 /// 原因：接管模式下 `*_MODEL` 必须由 CC Switch 写成稳定的 Claude 角色别名，
@@ -886,11 +890,15 @@ impl ProxyService {
                 // 只看占位符会把半接管/旧端口残留误判为可复用，导致开启接管后
                 // live 文件仍停留在普通供应商配置。
                 if has_backup && live_matches_current_proxy {
-                    self.refresh_active_target_from_current_provider(&app).await;
+                    // An application upgrade may change generated Codex catalog
+                    // semantics while the live takeover URL remains valid. Refresh
+                    // only the owned projection on the idempotent startup path so
+                    // stale capability flags do not survive until a manual switch.
                     if app == AppType::Codex {
-                        self.ensure_codex_guardian_started();
-                        self.try_repair_codex_model_picker_after_takeover();
+                        self.takeover_live_config_best_effort(&app).await?;
                     }
+                    self.refresh_active_target_from_current_provider(&app).await;
+                    self.run_post_takeover_lifecycle(&app);
                     return Ok(());
                 }
                 restore_existing_backup_before_takeover = has_backup;
@@ -970,10 +978,7 @@ impl ProxyService {
                 }
             }
 
-            if app == AppType::Codex {
-                self.ensure_codex_guardian_started();
-                self.try_repair_codex_model_picker_after_takeover();
-            }
+            self.run_post_takeover_lifecycle(&app);
 
             return Ok(());
         }
@@ -1225,6 +1230,7 @@ impl ProxyService {
             return Err(e);
         }
 
+        self.run_post_takeover_lifecycle(app_type);
         Ok(())
     }
 
@@ -1577,6 +1583,27 @@ impl ProxyService {
         } else {
             Err("代理服务器未运行".to_string())
         }
+    }
+
+    /// Refresh a CCSwitchMulti-owned Codex catalog on application startup even
+    /// when the persisted takeover flag has drifted. A user-managed external
+    /// catalog is never rewritten.
+    pub(crate) async fn reconcile_codex_owned_projection_on_startup(&self) -> Result<bool, String> {
+        let live_config = self.read_codex_live()?;
+        let config_text = live_config
+            .get("config")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let generated_path = crate::codex_config::get_codex_model_catalog_path();
+        if crate::codex_config::resolve_cc_switch_catalog_path(config_text, &generated_path)
+            .is_none()
+        {
+            return Ok(false);
+        }
+
+        self.takeover_live_config_best_effort(&AppType::Codex)
+            .await?;
+        Ok(true)
     }
 
     /// 停止代理服务器（恢复 Live 配置，用户手动关闭时使用）
@@ -2982,12 +3009,16 @@ impl ProxyService {
                 let profile =
                     crate::proxy::providers::resolve_codex_catalog_tool_profile(&provider);
 
-                crate::codex_config::write_codex_provider_live_with_catalog(
+                let provider_context =
+                    crate::codex_config::codex_provider_classification_context(self.db.as_ref())
+                        .map_err(|e| format!("读取 Codex Provider 分类上下文失败: {e}"))?;
+                crate::codex_config::write_codex_provider_live_with_catalog_and_provider_context(
                     &effective_settings,
                     provider.category.as_deref(),
                     auth,
                     config_str,
                     profile,
+                    &provider_context,
                 )
                 .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
             }
@@ -3697,12 +3728,16 @@ impl ProxyService {
         let config_for_projection =
             Self::codex_settings_for_model_catalog_projection(config, Some(provider));
 
-        crate::codex_config::write_codex_provider_live_with_catalog(
+        let provider_context =
+            crate::codex_config::codex_provider_classification_context(self.db.as_ref())
+                .map_err(|e| format!("读取 Codex Provider 分类上下文失败: {e}"))?;
+        crate::codex_config::write_codex_provider_live_with_catalog_and_provider_context(
             &config_for_projection,
             provider.category.as_deref(),
             auth,
             config_str,
             profile,
+            &provider_context,
         )
         .map_err(|e| format!("写入 Codex 配置失败: {e}"))
     }
@@ -3734,11 +3769,15 @@ impl ProxyService {
             let profile = crate::codex_config::CodexCatalogToolProfile::from_api_format(
                 provider.and_then(|p| p.meta.as_ref()?.api_format.as_deref()),
             );
+            let provider_context =
+                crate::codex_config::codex_provider_classification_context(self.db.as_ref())
+                    .map_err(|e| format!("读取 Codex Provider 分类上下文失败: {e}"))?;
             let prepared_config =
-                crate::codex_config::prepare_codex_live_config_text_with_optional_catalog(
+                crate::codex_config::prepare_codex_live_config_text_with_optional_catalog_and_provider_context(
                     &config_for_projection,
                     config_str,
                     profile,
+                    &provider_context,
                 )
                 .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
             crate::codex_config::write_codex_live_config_atomic(Some(&prepared_config))
@@ -3763,11 +3802,20 @@ impl ProxyService {
             .map(|meta| meta.codex_model_catalog_projection_enabled(&provider.settings_config))
             .unwrap_or_else(|| provider.settings_config.get("modelCatalog").is_some());
 
+        let mut next = config.clone();
         if should_project {
-            return config.clone();
+            if let Some(root) = next.as_object_mut() {
+                for key in ["modelCatalog", "codexRouting"] {
+                    if !root.contains_key(key) {
+                        if let Some(value) = provider.settings_config.get(key) {
+                            root.insert(key.to_string(), value.clone());
+                        }
+                    }
+                }
+            }
+            return next;
         }
 
-        let mut next = config.clone();
         if let Some(root) = next.as_object_mut() {
             root.remove("modelCatalog");
         }
@@ -3789,6 +3837,16 @@ impl ProxyService {
                 Err(error) => log::warn!("Codex Desktop 模型菜单白名单注入失败: {error}"),
             }
         });
+    }
+
+    /// 只在接管已经写入并验证成功后启动 Codex Desktop 的 best-effort 收尾。
+    /// guardian/CDP 不属于 HTTP 路由事务，失败只记录诊断，不能反向破坏已验证接管。
+    fn run_post_takeover_lifecycle(&self, app_type: &AppType) {
+        if !should_run_codex_post_takeover(app_type) {
+            return;
+        }
+        self.ensure_codex_guardian_started();
+        self.try_repair_codex_model_picker_after_takeover();
     }
 
     fn ensure_codex_guardian_started(&self) {
@@ -3866,7 +3924,7 @@ impl ProxyService {
         // limitation (restore-of-deleted-provider-backup only).
         let prepared_cfg = config_str
             .map(|cfg| {
-                crate::codex_config::prepare_codex_live_config_text_with_optional_catalog(
+                crate::codex_config::prepare_codex_live_config_text_for_verbatim_restore_without_provider_context(
                     config,
                     cfg,
                     crate::codex_config::CodexCatalogToolProfile::ProxyChat,
@@ -4203,6 +4261,13 @@ mod tests {
         db.update_proxy_config(proxy_config)
             .await
             .expect("set test proxy config to an ephemeral port");
+    }
+
+    #[test]
+    fn atomic_takeover_requests_desktop_repair_only_for_codex() {
+        assert!(should_run_codex_post_takeover(&AppType::Codex));
+        assert!(!should_run_codex_post_takeover(&AppType::Claude));
+        assert!(!should_run_codex_post_takeover(&AppType::Gemini));
     }
 
     async fn running_codex_base_url(service: &ProxyService) -> String {
@@ -5216,6 +5281,80 @@ wire_api = "responses"
         assert_eq!(live_auth, auth);
     }
 
+    #[test]
+    #[serial]
+    fn codex_takeover_catalog_projection_uses_db_provider_classification_context() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+        let mut official = Provider::with_id(
+            "official-target".to_string(),
+            "Official target".to_string(),
+            json!({}),
+            None,
+        );
+        official.category = Some("official".to_string());
+        db.save_provider("codex", &official)
+            .expect("save target Provider record");
+
+        let settings = json!({
+            "auth": { "OPENAI_API_KEY": PROXY_TOKEN_PLACEHOLDER },
+            "config": "model = \"neutral-model\"\n",
+            "modelCatalog": {
+                "models": [{ "model": "neutral-model", "contextWindow": 1000000 }]
+            },
+            "codexRouting": {
+                "enabled": true,
+                "subagentVersion": "v2",
+                "subagentV2": {
+                    "schemaVersion": 1,
+                    "selectionPolicy": "balanced",
+                    "profiles": {
+                        "neutral-model": {
+                            "model": "neutral-model",
+                            "enabled": true,
+                            "questionnaire": {
+                                "taskStrengths": ["repository_exploration"],
+                                "optimization": "speed",
+                                "writeScope": "read_only",
+                                "preference": "eligible",
+                                "reasoningEffort": "auto"
+                            },
+                            "overrides": { "roleName": "reader" }
+                        }
+                    }
+                },
+                "routes": [{
+                    "match": { "models": ["neutral-model"] },
+                    "upstream": {
+                        "targetProviderId": "official-target",
+                        "auth": { "source": "provider_config" }
+                    }
+                }]
+            }
+        });
+        let mut router = Provider::with_id(
+            "router".to_string(),
+            "Router".to_string(),
+            settings.clone(),
+            None,
+        );
+        router.category = Some("custom".to_string());
+
+        service
+            .write_codex_takeover_live_for_provider(&settings, Some(&router))
+            .expect("write takeover config");
+        let role = std::fs::read_to_string(
+            crate::codex_config::get_codex_agents_dir().join("reader.toml"),
+        )
+        .expect("read generated role");
+        assert!(
+            role.contains("this eligible official profile has no provider bias"),
+            "ordinary takeover must classify the target using current DB Provider records: {role}"
+        );
+    }
+
     #[tokio::test]
     #[serial]
     async fn codex_sync_live_does_not_store_credentials_in_builtin_official_row() {
@@ -5334,6 +5473,156 @@ wire_api = "responses"
             .expect("disable Codex takeover");
         crate::settings::update_settings(crate::settings::AppSettings::default())
             .expect("reset settings");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn codex_idempotent_takeover_refreshes_stale_owned_model_catalog() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        let db = Arc::new(Database::memory().expect("init db"));
+        use_ephemeral_proxy_port(&db).await;
+        let service = ProxyService::new(db.clone());
+        crate::codex_config::write_codex_live_atomic(
+            &json!({ "OPENAI_API_KEY": "qwen-key" }),
+            Some("model = \"qwen3.8\"\n"),
+        )
+        .expect("seed live Codex config");
+
+        let provider = Provider::with_id(
+            "qwen".to_string(),
+            "Qwen".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "qwen-key" },
+                "config": "model = \"qwen3.8\"\n",
+                "modelCatalog": {
+                    "models": [{ "model": "qwen3.8", "contextWindow": 262144 }]
+                }
+            }),
+            None,
+        );
+        db.save_provider("codex", &provider)
+            .expect("save Qwen provider");
+        db.set_current_provider("codex", "qwen")
+            .expect("set current provider");
+        crate::settings::set_current_provider(&AppType::Codex, Some("qwen"))
+            .expect("set local current provider");
+
+        service
+            .set_takeover_for_app("codex", true)
+            .await
+            .expect("enable Codex takeover");
+
+        let catalog_path = crate::codex_config::get_codex_model_catalog_path();
+        let mut stale_catalog: Value =
+            crate::config::read_json_file(&catalog_path).expect("read generated catalog");
+        let qwen = stale_catalog["models"]
+            .as_array_mut()
+            .expect("models")
+            .iter_mut()
+            .find(|entry| entry["slug"] == "qwen3.8")
+            .expect("Qwen entry");
+        qwen["supports_image_detail_original"] = json!(false);
+        qwen["supportsImageDetailOriginal"] = json!(false);
+        crate::config::write_json_file(&catalog_path, &stale_catalog)
+            .expect("seed stale generated catalog");
+
+        service
+            .set_takeover_for_app("codex", true)
+            .await
+            .expect("reconcile existing Codex takeover");
+
+        let refreshed: Value =
+            crate::config::read_json_file(&catalog_path).expect("read refreshed catalog");
+        let qwen = refreshed["models"]
+            .as_array()
+            .expect("models")
+            .iter()
+            .find(|entry| entry["slug"] == "qwen3.8")
+            .expect("Qwen entry");
+        assert_eq!(qwen["supports_image_detail_original"], true);
+        assert_eq!(qwen["supportsImageDetailOriginal"], true);
+
+        service
+            .set_takeover_for_app("codex", false)
+            .await
+            .expect("disable Codex takeover");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn codex_startup_reconciles_owned_catalog_when_takeover_flag_drifted() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        let db = Arc::new(Database::memory().expect("init db"));
+        use_ephemeral_proxy_port(&db).await;
+        let service = ProxyService::new(db.clone());
+        crate::codex_config::write_codex_live_atomic(
+            &json!({ "OPENAI_API_KEY": "qwen-key" }),
+            Some("model = \"qwen3.8\"\n"),
+        )
+        .expect("seed live Codex config");
+
+        let provider = Provider::with_id(
+            "qwen".to_string(),
+            "Qwen".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "qwen-key" },
+                "config": "model = \"qwen3.8\"\n",
+                "modelCatalog": {
+                    "models": [{ "model": "qwen3.8", "contextWindow": 262144 }]
+                }
+            }),
+            None,
+        );
+        db.save_provider("codex", &provider)
+            .expect("save Qwen provider");
+        db.set_current_provider("codex", "qwen")
+            .expect("set current provider");
+        crate::settings::set_current_provider(&AppType::Codex, Some("qwen"))
+            .expect("set local current provider");
+
+        service
+            .set_takeover_for_app("codex", true)
+            .await
+            .expect("enable Codex takeover");
+        let mut proxy_config = db
+            .get_proxy_config_for_app("codex")
+            .await
+            .expect("read proxy config");
+        proxy_config.enabled = false;
+        db.update_proxy_config_for_app(proxy_config)
+            .await
+            .expect("simulate drifted takeover flag");
+
+        let catalog_path = crate::codex_config::get_codex_model_catalog_path();
+        let mut stale_catalog: Value =
+            crate::config::read_json_file(&catalog_path).expect("read generated catalog");
+        let qwen = stale_catalog["models"]
+            .as_array_mut()
+            .expect("models")
+            .iter_mut()
+            .find(|entry| entry["slug"] == "qwen3.8")
+            .expect("Qwen entry");
+        qwen["supports_image_detail_original"] = json!(false);
+        qwen["supportsImageDetailOriginal"] = json!(false);
+        crate::config::write_json_file(&catalog_path, &stale_catalog)
+            .expect("seed stale generated catalog");
+
+        assert!(service
+            .reconcile_codex_owned_projection_on_startup()
+            .await
+            .expect("reconcile owned startup projection"));
+        let refreshed: Value =
+            crate::config::read_json_file(&catalog_path).expect("read refreshed catalog");
+        let qwen = refreshed["models"]
+            .as_array()
+            .expect("models")
+            .iter()
+            .find(|entry| entry["slug"] == "qwen3.8")
+            .expect("Qwen entry");
+        assert_eq!(qwen["supports_image_detail_original"], true);
+        assert_eq!(qwen["supportsImageDetailOriginal"], true);
     }
 
     #[tokio::test]
@@ -6304,6 +6593,49 @@ wire_api = "chat"
             }),
             None,
         )
+    }
+
+    #[test]
+    fn codex_model_catalog_projection_keeps_provider_v2_routing_metadata_for_live_snapshot() {
+        // The projection input begins with the current live OAuth/config snapshot,
+        // but the catalog and V2 routing contract remain provider-owned metadata.
+        let live_snapshot = json!({
+            "auth": { "auth_mode": "chatgpt", "tokens": { "access_token": "live" } },
+            "config": "model_provider = \"codex_model_router_v2\"\nmodel = \"gpt-5.6-sol\"\n"
+        });
+        let provider = Provider::with_id(
+            "router".to_string(),
+            "V2 Router".to_string(),
+            json!({
+                "modelCatalog": {
+                    "models": [{ "model": "gpt-5.6-sol", "displayName": "Sol" }]
+                },
+                "codexRouting": {
+                    "enabled": true,
+                    "subagentVersion": "v2",
+                    "routes": [{ "id": "sol", "enabled": true }]
+                }
+            }),
+            None,
+        );
+
+        let projected = ProxyService::codex_settings_for_model_catalog_projection(
+            &live_snapshot,
+            Some(&provider),
+        );
+
+        assert_eq!(projected.get("auth"), live_snapshot.get("auth"));
+        assert_eq!(projected.get("config"), live_snapshot.get("config"));
+        assert_eq!(
+            projected.get("codexRouting"),
+            provider.settings_config.get("codexRouting"),
+            "projection must retain the provider-owned enabled V2 routing contract"
+        );
+        assert_eq!(
+            projected.get("modelCatalog"),
+            provider.settings_config.get("modelCatalog"),
+            "projection must retain the provider-owned model catalog"
+        );
     }
 
     #[test]
@@ -7411,6 +7743,96 @@ base_url = "https://codex.example/v1"
         assert!(
             config.contains("disable_response_storage = true"),
             "common config should be applied into Codex restore backup"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn update_live_backup_from_multirouter_combines_common_and_user_config() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        db.set_config_snippet(
+            "codex",
+            Some(
+                "model_reasoning_effort = \"medium\"\n[mcp_servers.matrix]\ncommand = \"node\"\n"
+                    .to_string(),
+            ),
+        )
+        .expect("set common config");
+        db.save_live_backup(
+            "codex",
+            &serde_json::to_string(&json!({
+                "auth": { "OPENAI_API_KEY": "original-token" },
+                "config": "approval_policy = \"on-request\"\n[desktop]\nshow_context_window_usage = true\n"
+            }))
+            .expect("serialize seed backup"),
+        )
+        .await
+        .expect("seed backup");
+
+        let service = ProxyService::new(db.clone());
+        let provider = Provider::with_id(
+            "codex-multirouter".to_string(),
+            "Router".to_string(),
+            json!({
+                "auth": {},
+                "modelCatalog": { "models": [{ "model": "qwen" }] },
+                "codexRouting": {
+                    "enabled": true,
+                    "routes": [{ "id": "qwen", "enabled": true }]
+                }
+            }),
+            None,
+        );
+
+        service
+            .update_live_backup_from_provider("codex", &provider)
+            .await
+            .expect("update multirouter backup");
+
+        let backup = db
+            .get_live_backup("codex")
+            .await
+            .expect("read backup")
+            .expect("backup exists");
+        let stored: Value =
+            serde_json::from_str(&backup.original_config).expect("parse backup json");
+        let config = stored
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("config string");
+        let parsed: toml::Value = toml::from_str(config).expect("parse backup TOML");
+
+        assert_eq!(
+            parsed.get("approval_policy").and_then(toml::Value::as_str),
+            Some("on-request"),
+            "user-owned backup fields must survive"
+        );
+        assert_eq!(
+            parsed
+                .get("desktop")
+                .and_then(|value| value.get("show_context_window_usage"))
+                .and_then(toml::Value::as_bool),
+            Some(true),
+            "unknown desktop fields must survive"
+        );
+        assert_eq!(
+            parsed
+                .get("model_reasoning_effort")
+                .and_then(toml::Value::as_str),
+            Some("medium"),
+            "authoritative Common Config must be materialized"
+        );
+        assert_eq!(
+            parsed
+                .get("mcp_servers")
+                .and_then(|value| value.get("matrix"))
+                .and_then(|value| value.get("command"))
+                .and_then(toml::Value::as_str),
+            Some("node"),
+            "Common Config MCP entries must not be lost"
         );
     }
 

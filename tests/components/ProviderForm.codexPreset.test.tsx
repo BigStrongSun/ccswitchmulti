@@ -288,6 +288,60 @@ describe("ProviderForm Codex preset selection", () => {
     ]);
   });
 
+  it("preserves the complete Sub-Agent V2 document during an ordinary provider save", async () => {
+    const onSubmit = vi.fn();
+    const subagentV2 = {
+      schemaVersion: 2,
+      selectionPolicy: "balanced",
+      profiles: {
+        "deepseek-v4-pro": {
+          model: "deepseek-v4-pro",
+          enabled: true,
+          inputModalities: ["text"],
+          questionnaire: {
+            taskStrengths: ["complex_debugging"],
+            optimization: "quality",
+            writeScope: "complex_changes",
+            preference: "preferred",
+          },
+          reasoning: { policy: "fixed", effort: "high" },
+        },
+      },
+    };
+    renderProviderForm({
+      showButtons: true,
+      submitLabel: "保存",
+      onSubmit,
+      initialData: {
+        name: "Existing MultiRouter",
+        category: "custom",
+        settingsConfig: {
+          auth: { OPENAI_API_KEY: "sk-test" },
+          config:
+            'model_provider = "codex_model_router_v2"\nmodel = "deepseek-v4-pro"\n[model_providers.codex_model_router_v2]\nbase_url = "http://127.0.0.1:15721/v1"\nwire_api = "responses"\n',
+          modelCatalog: { models: [{ model: "deepseek-v4-pro" }] },
+          codexRouting: {
+            enabled: true,
+            defaultRouteId: "deepseek",
+            subagentVersion: "v2",
+            subagentV2,
+            routes: [],
+          },
+        },
+        meta: {
+          apiFormat: "openai_responses",
+          codexLocalModelMapping: true,
+        },
+      },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+    const savedSettings = JSON.parse(onSubmit.mock.calls[0][0].settingsConfig);
+    expect(savedSettings.codexRouting.subagentVersion).toBe("v2");
+    expect(savedSettings.codexRouting.subagentV2).toEqual(subagentV2);
+  });
+
   it("persists maintained reasoning capabilities after selecting a built-in provider", async () => {
     const onSubmit = vi.fn();
     renderProviderForm({ showButtons: true, submitLabel: "保存", onSubmit });

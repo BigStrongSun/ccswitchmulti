@@ -7,6 +7,7 @@ import type {
   CodexRoutingConfig,
   CodexRoutingAuth,
   CodexRoutingRoute,
+  CodexSubagentVersion,
   Provider,
 } from "@/types";
 import {
@@ -20,6 +21,7 @@ import {
   isCodexCatalogOnlyPlanModelFetch,
   isCodexVolcengineAgentPlanModelFetch,
 } from "@/utils/codexPlanModelFetch";
+import { normalizeCodexSubagentVersion } from "@/utils/codexSubagentVersion";
 
 export const CODEX_MULTI_ROUTER_WIZARD_DISMISSED_KEY =
   "ccswitchmulti.codexMultiRouterWizard.dismissed";
@@ -47,6 +49,7 @@ export interface WizardPlanBuildOptions {
   planName?: string;
   catalogModelOrder?: string[];
   spawnAgentModels?: string[];
+  subagentVersion?: CodexSubagentVersion;
   officialAuth?: CodexOfficialAuthConfig;
   hostedTools?: HostedToolsConfig;
 }
@@ -1129,10 +1132,15 @@ export function buildCodexMultiRouterWizardPlan(
     options.hostedTools ??
     normalizeHostedToolsConfig(existingPlan?.settingsConfig?.hostedTools);
   const routes = buildWizardRoutesFromSources(resolvedSources, officialAuth);
+  const subagentVersion = normalizeCodexSubagentVersion(
+    options.subagentVersion ?? existingRouting?.subagentVersion,
+  );
   const routing: CodexRoutingConfig = {
+    ...existingRouting,
     enabled: true,
     defaultRouteId: routes[0]?.id,
     officialAuth,
+    subagentVersion,
     routes,
   };
   const existingIds = new Set(allProviders.map((provider) => provider.id));
@@ -1160,7 +1168,12 @@ export function buildCodexMultiRouterWizardPlan(
       base_url: CODEX_MULTI_ROUTER_PROXY_BASE_URL,
       baseUrl: CODEX_MULTI_ROUTER_PROXY_BASE_URL,
       config: existingPlan?.settingsConfig?.config ?? null,
-      modelCatalog: buildWizardModelCatalog(resolvedSources, options),
+      modelCatalog: buildWizardModelCatalog(resolvedSources, {
+        ...options,
+        spawnAgentModels:
+          options.spawnAgentModels ??
+          existingPlan?.settingsConfig?.modelCatalog?.spawnAgentModels,
+      }),
       codexRouting: routing,
       hostedTools,
     },

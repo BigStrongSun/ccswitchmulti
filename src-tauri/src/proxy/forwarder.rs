@@ -2,7 +2,7 @@
 //!
 //! 负责将请求转发到上游Provider，支持故障转移
 
-use super::hyper_client::ProxyResponse;
+use super::hyper_client::{ProxyResponse, MAX_RESPONSE_BODY_BYTES};
 use super::providers::{
     hosted_tools::bridge::{
         append_tool_outputs_to_chat_request, execute_hosted_tool_calls, scan_hosted_tool_calls,
@@ -14,7 +14,7 @@ use super::providers::{
 };
 use super::{
     body_filter::filter_private_params_with_whitelist,
-    content_encoding::{decompress_body, get_content_encoding},
+    content_encoding::{decompress_body_with_limit, get_content_encoding},
     error::*,
     failover_switch::FailoverSwitchManager,
     json_canonical::{canonicalize_value, short_value_hash},
@@ -59,7 +59,11 @@ const CODEX_RESPONSES_LITE_FALLBACK_TTL: Duration = Duration::from_secs(24 * 60 
 ///
 /// Codex 端 `request_max_retries` 是从客户端重新 POST；这里是在代理内直接复用
 /// 已转换好的请求体重试，减少不稳定网络下“一次 send 失败就整轮失败”的概率。
-const UPSTREAM_TRANSPORT_RETRY_LIMIT: usize = 2;
+// Keep pre-dispatch/connect failures inside CCSM long enough that a short TLS or edge outage
+// does not consume Codex's own five reconnect attempts. `ForwardFailed` is restricted below to
+// failures for which no upstream execution is possible; ambiguous in-flight requests remain
+// `ResponsePending` and never enter this loop.
+const UPSTREAM_TRANSPORT_RETRY_LIMIT: usize = 5;
 /// 真实上游在尚未建立成功响应时明确返回 429，等价于拒绝接收本次采样请求，
 /// 因而可以安全重放同一份 headers/body。次数与 Codex 默认流恢复预算对齐。
 const CODEX_RATE_LIMIT_RETRY_LIMIT: usize = 5;
@@ -2314,6 +2318,10 @@ impl RequestForwarder {
         // 转换请求体（如果需要）
         let request_prepare_started_at = std::time::Instant::now();
         let mut codex_chat_tool_context: Option<CodexToolContext> = None;
+        let client_requested_streaming =
+            is_streaming_request(&effective_endpoint, &mapped_body, headers);
+        let hosted_tool_loop_allowed = !codex_responses_to_chat
+            || should_enable_hosted_tool_loop(&mapped_body, client_requested_streaming);
         let mut request_body = if codex_responses_to_chat || codex_responses_to_messages {
             let mut mapped_body = mapped_body;
             let explicit_prompt_cache_key = mapped_body
@@ -2343,11 +2351,16 @@ impl RequestForwarder {
             }
             if let Some(context) = codex_chat_tool_context.as_mut() {
                 context.apply_hosted_tool_switches(
-                    hosted_tool_bridge_enabled(&codex_router_provider.settings_config, "webSearch"),
-                    hosted_tool_bridge_enabled(
-                        &codex_router_provider.settings_config,
-                        "imageGeneration",
-                    ),
+                    hosted_tool_loop_allowed
+                        && hosted_tool_bridge_enabled(
+                            &codex_router_provider.settings_config,
+                            "webSearch",
+                        ),
+                    hosted_tool_loop_allowed
+                        && hosted_tool_bridge_enabled(
+                            &codex_router_provider.settings_config,
+                            "imageGeneration",
+                        ),
                 );
             }
             let mut chat_body = super::providers::transform_codex_chat::responses_to_chat_completions_with_reasoning_text_only_and_cache(
@@ -4597,7 +4610,7 @@ impl RequestForwarder {
         let headers = response.headers().clone();
         let body_timeout = self.non_streaming_timeout;
         let body = super::response_grace::await_with_response_grace(
-            response.bytes(),
+            response.bytes_with_limit(MAX_RESPONSE_BODY_BYTES),
             body_timeout,
             super::response_grace::RESPONSE_PENDING_GRACE,
             || {
@@ -4622,12 +4635,14 @@ impl RequestForwarder {
         let status = response.status();
         let headers = response.headers().clone();
         let encoding = get_content_encoding(&headers);
-        let raw = response.bytes().await?;
+        let raw = response.bytes_with_limit(MAX_RESPONSE_BODY_BYTES).await?;
         let decoded = match encoding {
-            Some(encoding) => match decompress_body(&encoding, &raw) {
-                Ok(Some(decompressed)) => decompressed,
-                _ => raw.to_vec(),
-            },
+            Some(encoding) => {
+                match decompress_body_with_limit(&encoding, &raw, MAX_RESPONSE_BODY_BYTES) {
+                    Ok(Some(decompressed)) => decompressed,
+                    _ => raw.to_vec(),
+                }
+            }
             None => raw.to_vec(),
         };
 
@@ -4647,12 +4662,14 @@ impl RequestForwarder {
         let status = response.status();
         let headers = response.headers().clone();
         let encoding = get_content_encoding(&headers);
-        let raw = response.bytes().await?;
+        let raw = response.bytes_with_limit(MAX_RESPONSE_BODY_BYTES).await?;
         let decoded = match encoding {
-            Some(encoding) => match decompress_body(&encoding, &raw) {
-                Ok(Some(decompressed)) => decompressed,
-                _ => raw.to_vec(),
-            },
+            Some(encoding) => {
+                match decompress_body_with_limit(&encoding, &raw, MAX_RESPONSE_BODY_BYTES) {
+                    Ok(Some(decompressed)) => decompressed,
+                    _ => raw.to_vec(),
+                }
+            }
             None => raw.to_vec(),
         };
 
@@ -5840,6 +5857,32 @@ fn hosted_tool_bridge_enabled(settings: &Value, tool: &str) -> bool {
         .unwrap_or(true)
 }
 
+/// Decide whether the buffered Chat hosted-tool loop owns this request.
+///
+/// Streaming `auto` requests prioritize incremental agent progress: hosted
+/// tools are omitted from the Chat projection, while ordinary client tools
+/// remain available. An explicit hosted selection is safe to buffer because
+/// the caller requested that exact bridge. Non-streaming requests retain the
+/// existing automatic hosted-tool loop.
+fn should_enable_hosted_tool_loop(request: &Value, client_requested_streaming: bool) -> bool {
+    if !client_requested_streaming {
+        return true;
+    }
+
+    let Some(choice) = request.get("tool_choice").and_then(Value::as_object) else {
+        return false;
+    };
+    let choice_type = choice.get("type").and_then(Value::as_str);
+    if matches!(choice_type, Some("web_search" | "image_generation")) {
+        return true;
+    }
+    choice_type == Some("function")
+        && matches!(
+            choice.get("name").and_then(Value::as_str),
+            Some("web_search" | "generate_image")
+        )
+}
+
 /// 解析 hosted tool 调用凭据：优先显式 API Key，再回退请求自带的 Codex OAuth，最后用 CCSM 托管 OAuth。
 async fn resolve_hosted_tool_client(
     app_handle: Option<&tauri::AppHandle>,
@@ -6001,15 +6044,17 @@ async fn read_decoded_proxy_response(
     let status = response.status();
     let mut headers = response.headers().clone();
     let encoding = get_content_encoding(&headers);
-    let raw = response.bytes().await?;
+    let raw = response.bytes_with_limit(MAX_RESPONSE_BODY_BYTES).await?;
     let decoded = match encoding {
-        Some(encoding) => match decompress_body(&encoding, &raw) {
-            Ok(Some(decompressed)) => {
-                strip_proxy_response_entity_headers(&mut headers);
-                Bytes::from(decompressed)
+        Some(encoding) => {
+            match decompress_body_with_limit(&encoding, &raw, MAX_RESPONSE_BODY_BYTES) {
+                Ok(Some(decompressed)) => {
+                    strip_proxy_response_entity_headers(&mut headers);
+                    Bytes::from(decompressed)
+                }
+                _ => raw,
             }
-            _ => raw,
-        },
+        }
         None => raw,
     };
 
@@ -6359,19 +6404,23 @@ fn upstream_transport_retry_backoff(attempt: usize) -> Duration {
     match attempt {
         0 => Duration::from_millis(200),
         1 => Duration::from_millis(600),
-        _ => Duration::from_millis(1500),
+        2 => Duration::from_millis(1500),
+        3 => Duration::from_millis(3000),
+        _ => Duration::from_millis(6000),
     }
 }
 
 /// 读取并解压上游错误响应体，保留可读错误摘要给日志、fallback 判断和客户端。
 async fn read_decoded_error_body(response: ProxyResponse) -> Result<Option<String>, ProxyError> {
     let encoding = get_content_encoding(response.headers());
-    let raw = response.bytes().await?;
+    let raw = response.bytes_with_limit(MAX_RESPONSE_BODY_BYTES).await?;
     let decoded = match encoding {
-        Some(encoding) => match decompress_body(&encoding, &raw) {
-            Ok(Some(decompressed)) => decompressed,
-            _ => raw.to_vec(),
-        },
+        Some(encoding) => {
+            match decompress_body_with_limit(&encoding, &raw, MAX_RESPONSE_BODY_BYTES) {
+                Ok(Some(decompressed)) => decompressed,
+                _ => raw.to_vec(),
+            }
+        }
         None => raw.to_vec(),
     };
     Ok(String::from_utf8(decoded).ok())
@@ -6610,6 +6659,7 @@ fn map_reqwest_send_error(error: reqwest::Error) -> ProxyError {
     map_reqwest_send_error_class(
         error_without_url.is_connect(),
         error_without_url.is_timeout(),
+        error_without_url.is_builder(),
         error_without_url.is_request(),
         error_chain_message(&error_without_url),
     )
@@ -6618,7 +6668,8 @@ fn map_reqwest_send_error(error: reqwest::Error) -> ProxyError {
 fn map_reqwest_send_error_class(
     is_connect: bool,
     is_timeout: bool,
-    is_request: bool,
+    is_builder: bool,
+    _is_request: bool,
     detail: String,
 ) -> ProxyError {
     if is_connect {
@@ -6627,7 +6678,7 @@ fn map_reqwest_send_error_class(
     } else if is_timeout {
         // 超时发生在请求发出后，无法确定上游是否已经开始处理，不能自动重发。
         ProxyError::ResponsePending(format!("上游响应等待超时（请求可能已在处理中）: {detail}"))
-    } else if is_request {
+    } else if is_builder {
         // 请求构造阶段失败，没有发出任何字节。
         ProxyError::ForwardFailed(format!("上游请求构造失败: {detail}"))
     } else {
@@ -9041,7 +9092,10 @@ mod tests {
             .expect("response should be buffered");
 
         assert_eq!(
-            prepared.bytes().await.unwrap(),
+            prepared
+                .bytes_with_limit(MAX_RESPONSE_BODY_BYTES)
+                .await
+                .unwrap(),
             Bytes::from_static(b"{\"ok\":true}")
         );
     }
@@ -9086,7 +9140,10 @@ mod tests {
             .expect("stream should be primed");
 
         assert_eq!(
-            prepared.bytes().await.unwrap(),
+            prepared
+                .bytes_with_limit(MAX_RESPONSE_BODY_BYTES)
+                .await
+                .unwrap(),
             Bytes::from_static(b"firstsecond")
         );
     }
@@ -9164,7 +9221,10 @@ mod tests {
             .await
             .expect("normal first SSE event should be replayed");
 
-        let body = prepared.bytes().await.unwrap();
+        let body = prepared
+            .bytes_with_limit(MAX_RESPONSE_BODY_BYTES)
+            .await
+            .unwrap();
         assert!(String::from_utf8_lossy(&body).contains("response.created"));
         assert!(String::from_utf8_lossy(&body).contains("response.completed"));
     }
@@ -9555,6 +9615,44 @@ mod tests {
         assert_eq!(account_id.as_deref(), Some("acct_1"));
     }
 
+    #[test]
+    fn streaming_auto_tool_choice_preserves_upstream_stream_instead_of_hosted_loop() {
+        let request = serde_json::json!({
+            "stream": true,
+            "tool_choice": "auto",
+            "tools": [
+                {"type": "web_search"},
+                {"type": "function", "name": "shell", "parameters": {"type": "object"}}
+            ]
+        });
+
+        assert!(!should_enable_hosted_tool_loop(&request, true));
+    }
+
+    #[test]
+    fn explicit_hosted_tool_choice_may_use_buffered_hosted_loop() {
+        for hosted_type in ["web_search", "image_generation"] {
+            let request = serde_json::json!({
+                "stream": true,
+                "tool_choice": {"type": hosted_type},
+                "tools": [{"type": hosted_type}]
+            });
+
+            assert!(should_enable_hosted_tool_loop(&request, true));
+        }
+    }
+
+    #[test]
+    fn non_streaming_auto_request_keeps_hosted_tool_loop() {
+        let request = serde_json::json!({
+            "stream": false,
+            "tool_choice": "auto",
+            "tools": [{"type": "web_search"}]
+        });
+
+        assert!(should_enable_hosted_tool_loop(&request, false));
+    }
+
     /// 验证 hosted web_search loop 会消费第一轮工具调用、回灌 tool output 并返回最终 Chat 响应。
     #[tokio::test]
     async fn hosted_web_search_loop_appends_tool_output_and_marks_response() {
@@ -9641,8 +9739,13 @@ mod tests {
         assert!(final_response
             .headers()
             .contains_key(HOSTED_TOOL_LOOP_HEADER));
-        let final_body = serde_json::from_slice::<Value>(&final_response.bytes().await.unwrap())
-            .expect("final chat response json");
+        let final_body = serde_json::from_slice::<Value>(
+            &final_response
+                .bytes_with_limit(MAX_RESPONSE_BODY_BYTES)
+                .await
+                .unwrap(),
+        )
+        .expect("final chat response json");
         assert_eq!(
             final_body["choices"][0]["message"]["content"],
             "Search was unavailable."
@@ -9753,8 +9856,13 @@ mod tests {
         assert!(final_response
             .headers()
             .contains_key(HOSTED_TOOL_LOOP_HEADER));
-        let final_body = serde_json::from_slice::<Value>(&final_response.bytes().await.unwrap())
-            .expect("final chat response json");
+        let final_body = serde_json::from_slice::<Value>(
+            &final_response
+                .bytes_with_limit(MAX_RESPONSE_BODY_BYTES)
+                .await
+                .unwrap(),
+        )
+        .expect("final chat response json");
         assert_eq!(
             final_body["choices"][0]["message"]["content"],
             "Image generation was unavailable."
@@ -10172,8 +10280,13 @@ mod tests {
 
     #[test]
     fn reqwest_connect_timeout_is_forward_failed_not_response_pending() {
-        let err =
-            map_reqwest_send_error_class(true, true, false, "error_sending_request".to_string());
+        let err = map_reqwest_send_error_class(
+            true,
+            true,
+            false,
+            true,
+            "error_sending_request".to_string(),
+        );
 
         assert!(matches!(
             err,
@@ -10183,11 +10296,28 @@ mod tests {
 
     #[test]
     fn reqwest_in_flight_timeout_stays_response_pending() {
-        let err = map_reqwest_send_error_class(false, true, false, "late result".to_string());
+        let err = map_reqwest_send_error_class(false, true, false, true, "late result".to_string());
 
         assert!(matches!(
             err,
             ProxyError::ResponsePending(message) if message.contains("上游响应等待超时")
+        ));
+    }
+
+    #[test]
+    fn reqwest_send_request_disconnect_is_not_treated_as_pre_send_build_failure() {
+        let err = map_reqwest_send_error_class(
+            false,
+            false,
+            false,
+            true,
+            "client_error (SendRequest): connection_closed_before_message_completed".to_string(),
+        );
+
+        assert!(matches!(
+            err,
+            ProxyError::ResponsePending(message)
+                if message.contains("connection_closed_before_message_completed")
         ));
     }
 
@@ -11330,6 +11460,33 @@ mod tests {
             attempts.load(std::sync::atomic::Ordering::SeqCst),
             UPSTREAM_TRANSPORT_RETRY_LIMIT + 1
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn upstream_transport_retry_survives_five_safe_connect_failures() {
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts_for_send = attempts.clone();
+
+        let result = send_upstream_request_with_transport_retry("test", || {
+            let attempts = attempts_for_send.clone();
+            async move {
+                if attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 5 {
+                    Err(ProxyError::ForwardFailed(
+                        "上游连接失败: unexpected EOF during handshake".to_string(),
+                    ))
+                } else {
+                    Ok(ProxyResponse::buffered(
+                        http::StatusCode::OK,
+                        http::HeaderMap::new(),
+                        Bytes::new(),
+                    ))
+                }
+            }
+        })
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 6);
     }
 
     #[tokio::test(start_paused = true)]

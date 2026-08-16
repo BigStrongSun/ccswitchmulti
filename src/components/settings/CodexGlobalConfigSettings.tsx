@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Loader2, Save } from "lucide-react";
+import { Loader2, RefreshCw, Save } from "lucide-react";
 import { toast } from "sonner";
 
 import JsonEditor from "@/components/JsonEditor";
@@ -14,22 +14,29 @@ const DEFAULT_CODEX_GLOBAL_CONFIG = `# Shared Codex configuration
 # Settings here are available to Codex providers that apply the common config.`;
 
 export function CodexGlobalConfigSettings() {
-  const [value, setValue] = useState(DEFAULT_CODEX_GLOBAL_CONFIG);
+  const [value, setValue] = useState("");
   const [isLoading, setIsLoading] = useState(true);
+  const [isLoaded, setIsLoaded] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState("");
+  const [loadAttempt, setLoadAttempt] = useState(0);
 
   useEffect(() => {
     let active = true;
+    setIsLoading(true);
+    setIsLoaded(false);
+    setError("");
     configApi
       .getCommonConfigSnippet("codex")
       .then((snippet) => {
         if (!active) return;
         setValue(snippet?.trim() ? snippet : DEFAULT_CODEX_GLOBAL_CONFIG);
+        setIsLoaded(true);
         setError("");
       })
       .catch((loadError) => {
         if (!active) return;
+        setIsLoaded(false);
         setError(
           `加载 Codex 全局配置失败：${loadError instanceof Error ? loadError.message : String(loadError)}`,
         );
@@ -40,9 +47,10 @@ export function CodexGlobalConfigSettings() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [loadAttempt]);
 
   async function save() {
+    if (!isLoaded) return;
     setIsSaving(true);
     setError("");
     try {
@@ -65,6 +73,25 @@ export function CodexGlobalConfigSettings() {
       >
         <Loader2 className="h-4 w-4 animate-spin" />
         正在加载 Codex 全局配置…
+      </div>
+    );
+  }
+
+  if (!isLoaded) {
+    return (
+      <div className="space-y-3 rounded-md border border-destructive/30 bg-destructive/5 p-4">
+        <p role="alert" className="text-sm text-destructive">
+          {error}
+        </p>
+        <Button
+          type="button"
+          variant="outline"
+          className="gap-2"
+          onClick={() => setLoadAttempt((attempt) => attempt + 1)}
+        >
+          <RefreshCw className="h-4 w-4" />
+          重试加载
+        </Button>
       </div>
     );
   }

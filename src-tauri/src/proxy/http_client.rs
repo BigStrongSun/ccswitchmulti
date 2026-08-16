@@ -10,6 +10,9 @@ use std::net::IpAddr;
 use std::sync::RwLock;
 use std::time::Duration;
 
+const LONG_CONNECTION_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+const LONG_CONNECTION_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// 全局 HTTP 客户端实例
 static GLOBAL_CLIENT: OnceCell<RwLock<Client>> = OnceCell::new();
 
@@ -219,6 +222,13 @@ fn build_client(proxy_url: Option<&str>) -> Result<Client, String> {
         .connect_timeout(Duration::from_secs(30))
         .pool_max_idle_per_host(10)
         .tcp_keepalive(Duration::from_secs(60))
+        // Image generation can legitimately wait several minutes before the first response
+        // byte. Keep the negotiated HTTP/2 connection active during that quiet period so a
+        // gateway does not mistake the in-flight request for an abandoned idle connection.
+        .http2_keep_alive_interval(LONG_CONNECTION_KEEPALIVE_INTERVAL)
+        .http2_keep_alive_timeout(LONG_CONNECTION_KEEPALIVE_TIMEOUT)
+        .http2_keep_alive_while_idle(true)
+        .http2_adaptive_window(true)
         // 禁用 reqwest 自动解压：防止 reqwest 覆盖客户端原始 accept-encoding header。
         // 响应解压由 response_processor 根据 content-encoding 手动处理。
         .no_gzip()

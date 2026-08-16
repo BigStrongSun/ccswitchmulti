@@ -65,7 +65,7 @@ export function UpdateProvider({ children }: { children: React.ReactNode }) {
     setError(null);
 
     try {
-      const result = await checkForUpdate({ timeout: 30000 });
+      const result = await checkForUpdate();
 
       if (result.status === "available") {
         setHasUpdate(true);

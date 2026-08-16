@@ -108,7 +108,7 @@ pub fn classify_codex_multirouter_auth_facade(
 }
 
 /// 判断 route 是否由 ChatGPT Codex 官方 backend 提供原生能力。
-fn codex_route_uses_official_agent_backend(route: &JsonValue) -> bool {
+pub(crate) fn codex_route_uses_official_agent_backend(route: &JsonValue) -> bool {
     let upstream = route.get("upstream").unwrap_or(route);
     let auth = upstream
         .get("auth")
@@ -821,45 +821,18 @@ fn resolve_codex_route_candidates<'a>(
     request_model: &str,
 ) -> Vec<&'a JsonValue> {
     if let Some(routing) = provider.settings_config.get("codexRouting") {
-        if let Some(routes) = routing.as_array() {
-            return resolve_codex_legacy_route_candidates(routes, request_model);
-        }
-
-        if routing
-            .get("enabled")
-            .and_then(|value| value.as_bool())
-            .is_some_and(|enabled| !enabled)
-        {
-            return Vec::new();
-        }
-
-        let Some(routes) = routing.get("routes").and_then(|value| value.as_array()) else {
+        let routes = routing
+            .as_array()
+            .or_else(|| routing.get("routes").and_then(|value| value.as_array()));
+        let Some(routes) = routes else {
             return Vec::new();
         };
-
-        let mut selected = Vec::new();
-        if let Some(route) = find_codex_route_by_match_priority(routes, request_model) {
-            selected.push(route);
-        } else if codex_model_is_declared_only_by_disabled_route(routes, request_model) {
+        let Some(primary) =
+            resolve_codex_primary_route_from_settings(&provider.settings_config, request_model)
+        else {
             return Vec::new();
-        } else if let Some(default_route) = routing
-            .get("defaultRouteId")
-            .or_else(|| routing.get("default_route_id"))
-            .and_then(|value| value.as_str())
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-            .and_then(|default_route_id| {
-                routes.iter().find(|route| {
-                    codex_route_is_enabled(route)
-                        && route
-                            .get("id")
-                            .and_then(|value| value.as_str())
-                            .is_some_and(|id| id.eq_ignore_ascii_case(default_route_id))
-                })
-            })
-        {
-            selected.push(default_route);
-        }
+        };
+        let mut selected = vec![primary];
 
         let primary_id = selected
             .first()
@@ -916,7 +889,16 @@ pub fn codex_provider_text_only_input(provider: &Provider) -> Option<bool> {
 /// 新配置允许显式关闭路由，并支持 `defaultRouteId` 兜底；旧配置没有开关语义，只要数组
 /// 存在就按旧规则匹配，保证已有本地数据库不会在升级后突然失效。
 fn resolve_codex_route<'a>(provider: &'a Provider, request_model: &str) -> Option<&'a JsonValue> {
-    if let Some(routing) = provider.settings_config.get("codexRouting") {
+    resolve_codex_route_from_settings(&provider.settings_config, request_model)
+}
+
+/// Resolve an exact, prefix, or explicit default route without applying the runtime candidate
+/// fallback. This is the selection primitive used by both the single-route and candidate paths.
+fn resolve_codex_route_from_settings<'a>(
+    settings: &'a JsonValue,
+    request_model: &str,
+) -> Option<&'a JsonValue> {
+    if let Some(routing) = settings.get("codexRouting") {
         if let Some(routes) = routing.as_array() {
             return find_codex_route_by_match_priority(routes, request_model);
         }
@@ -954,10 +936,9 @@ fn resolve_codex_route<'a>(provider: &'a Provider, request_model: &str) -> Optio
             });
     }
 
-    provider
-        .settings_config
+    settings
         .get("codexModelRoutes")
-        .or_else(|| provider.settings_config.get("modelRoutes"))
+        .or_else(|| settings.get("modelRoutes"))
         .and_then(|value| value.as_array())
         .and_then(|routes| {
             routes
@@ -971,45 +952,39 @@ fn resolve_codex_route<'a>(provider: &'a Provider, request_model: &str) -> Optio
         })
 }
 
+/// Resolve the first route runtime will actually try. MultiRouter keeps its historical behavior:
+/// after exact/prefix/default selection, an otherwise unmatched model falls back to the first
+/// enabled candidate. A model explicitly declared only by disabled routes still fails closed.
+pub(crate) fn resolve_codex_primary_route_from_settings<'a>(
+    settings: &'a JsonValue,
+    request_model: &str,
+) -> Option<&'a JsonValue> {
+    if let Some(route) = resolve_codex_route_from_settings(settings, request_model) {
+        return Some(route);
+    }
+    let routing = settings.get("codexRouting")?;
+    if routing
+        .get("enabled")
+        .and_then(JsonValue::as_bool)
+        .is_some_and(|enabled| !enabled)
+    {
+        return None;
+    }
+    let routes = routing
+        .as_array()
+        .or_else(|| routing.get("routes").and_then(JsonValue::as_array))?;
+    if codex_model_is_declared_only_by_disabled_route(routes, request_model) {
+        return None;
+    }
+    routes.iter().find(|route| codex_route_is_enabled(route))
+}
+
 /// 判断 route 是否启用；字段缺省时按启用处理，减少手写配置的必填项。
 fn codex_route_is_enabled(route: &JsonValue) -> bool {
     route
         .get("enabled")
         .and_then(|value| value.as_bool())
         .unwrap_or(true)
-}
-
-/// 兼容被旧版/损坏保存路径写成 `codexRouting: []` 的 MultiRouter 配置。
-///
-/// 这类数据没有 `enabled/defaultRouteId` 外壳，但数组里的 route 本身仍然完整；
-/// 请求链路必须直接消费它，否则升级后所有模型都会 `route_missed=true`。
-fn resolve_codex_legacy_route_candidates<'a>(
-    routes: &'a [JsonValue],
-    request_model: &str,
-) -> Vec<&'a JsonValue> {
-    let mut selected = Vec::new();
-    if let Some(route) = find_codex_route_by_match_priority(routes, request_model) {
-        selected.push(route);
-    } else if codex_model_is_declared_only_by_disabled_route(routes, request_model) {
-        return Vec::new();
-    }
-
-    let primary_id = selected
-        .first()
-        .and_then(|route| route.get("id"))
-        .and_then(|value| value.as_str())
-        .map(|id| id.to_ascii_lowercase());
-    selected.extend(routes.iter().filter(|route| {
-        if !codex_route_is_enabled(route) {
-            return false;
-        }
-        let route_id = route
-            .get("id")
-            .and_then(|value| value.as_str())
-            .map(|id| id.to_ascii_lowercase());
-        route_id != primary_id
-    }));
-    selected
 }
 
 /// 判断请求模型是否只存在于已停用 route 的精确模型列表中。
@@ -1261,7 +1236,7 @@ fn build_codex_routed_provider(
 }
 
 /// 从 route 中读取显式声明的目标 provider id。
-fn codex_route_target_provider_id_from_route(route: &JsonValue) -> Option<&str> {
+pub(crate) fn codex_route_target_provider_id_from_route(route: &JsonValue) -> Option<&str> {
     let upstream = route.get("upstream").unwrap_or(route);
     [
         upstream.get("targetProviderId"),
@@ -1579,20 +1554,9 @@ pub fn should_send_codex_chat_prompt_cache_key(provider: &Provider) -> bool {
         return false;
     };
 
-    let host = url.host_str().unwrap_or("");
-    match host {
-        "api.openai.com" => true,
-        // Azure OpenAI: per-resource host <resource>.openai.azure.com. The
-        // Chat Completions API accepts prompt_cache_key on GPT-5.6+ models
-        // (Microsoft Foundry prompt-caching docs), same request shape as
-        // OpenAI.
-        _ if host.ends_with(".openai.azure.com") => true,
-        // OpenRouter: falls back to the OpenAI-style prompt_cache_key field
-        // as its sticky-routing key when session_id/x-session-id are absent
-        // (OpenRouter prompt-caching docs), so the field is accepted and
-        // improves provider-pinned cache affinity.
-        "openrouter.ai" => true,
-        "api.kimi.com" => {
+    match url.host_str() {
+        Some("api.openai.com") => true,
+        Some("api.kimi.com") => {
             let path = url.path().trim_end_matches('/');
             path == "/coding" || path.starts_with("/coding/")
         }
@@ -1923,7 +1887,9 @@ pub fn resolve_codex_chat_reasoning_config(
 fn codex_chat_reasoning_config_from_capability(
     capability: super::codex_reasoning::CodexModelReasoningCapability,
 ) -> CodexChatReasoningConfig {
-    let has_efforts = capability.supported && !capability.supported_efforts.is_empty();
+    let resolved = super::codex_reasoning::resolve_subagent_reasoning_capability(Some(&capability));
+    let has_efforts =
+        resolved.support_kind == super::codex_reasoning::ReasoningSupportKind::EffortLevels;
     let boolean_thinking = capability.upstream.format == "boolean";
     CodexChatReasoningConfig {
         supports_thinking: Some(capability.supported),
@@ -1941,8 +1907,8 @@ fn codex_chat_reasoning_config_from_capability(
             "none".to_string()
         }),
         effort_value_mode: Some(encode_codex_capability_effort_mode(
-            &capability.supported_efforts,
-            &capability.upstream.effort_map,
+            &resolved.codex_selectable_efforts,
+            &resolved.effort_map,
         )),
         min_output_tokens: None,
         default_output_tokens: None,
@@ -1951,16 +1917,20 @@ fn codex_chat_reasoning_config_from_capability(
 }
 
 fn encode_codex_capability_effort_mode(
-    supported_efforts: &[String],
-    effort_map: &std::collections::HashMap<String, String>,
+    supported_efforts: &[super::codex_reasoning::CodexReasoningEffort],
+    effort_map: &std::collections::BTreeMap<
+        super::codex_reasoning::CodexReasoningEffort,
+        super::codex_reasoning::CodexReasoningEffort,
+    >,
 ) -> String {
-    let allowed = supported_efforts.join(",");
-    let mappings = supported_efforts
+    let allowed = supported_efforts
         .iter()
-        .map(|effort| {
-            let mapped = effort_map.get(effort).unwrap_or(effort);
-            format!("{effort}={mapped}")
-        })
+        .map(|effort| effort.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    let mappings = effort_map
+        .iter()
+        .map(|(source, target)| format!("{}={}", source.as_str(), target.as_str()))
         .collect::<Vec<_>>()
         .join(",");
     format!("capability|{allowed}|{mappings}")
@@ -2154,7 +2124,12 @@ fn merge_qwen_vllm_reasoning_defaults(
         .unwrap_or("")
         .trim()
         .to_ascii_lowercase();
-    if thinking_param.is_empty() || thinking_param == "thinking" {
+    let inferred_removes_implicit_qwen_toggle =
+        inferred.thinking_param.as_deref() == Some("none") && thinking_param == "enable_thinking";
+    if thinking_param.is_empty()
+        || thinking_param == "thinking"
+        || inferred_removes_implicit_qwen_toggle
+    {
         explicit.thinking_param = inferred.thinking_param;
     }
     if explicit.effort_param.is_none() {
@@ -2195,8 +2170,10 @@ fn merge_qwen_vllm_reasoning_defaults(
 
 /// 判断推断结果是否是 Qwen/vLLM 专用默认值。
 fn is_qwen_vllm_reasoning_defaults(config: &CodexChatReasoningConfig) -> bool {
-    config.thinking_param.as_deref() == Some("enable_thinking")
-        && config.effort_param.as_deref() == Some("none")
+    matches!(
+        config.thinking_param.as_deref(),
+        Some("none" | "enable_thinking")
+    ) && config.effort_param.as_deref() == Some("none")
         && config.min_output_tokens == Some(QWEN_VLLM_MIN_OUTPUT_TOKENS)
         && config.output_format.as_deref() == Some("reasoning_content")
 }
@@ -2301,7 +2278,9 @@ fn infer_codex_chat_reasoning_config(
         return Some(CodexChatReasoningConfig {
             supports_thinking: Some(true),
             supports_effort: Some(false),
-            thinking_param: Some("enable_thinking".to_string()),
+            // Codex 的 `reasoning.effort=none` 是 OpenAI Responses 语义，不能在缺少
+            // provider 明示关闭契约时擅自翻译成 Qwen chat-template 的 false。
+            thinking_param: Some("none".to_string()),
             effort_param: Some("none".to_string()),
             effort_value_mode: None,
             min_output_tokens: Some(QWEN_VLLM_MIN_OUTPUT_TOKENS),
@@ -2820,6 +2799,28 @@ mod tests {
         CodexAccountPoolEntry, CodexAccountPoolPolicy, NATIVE_CODEX_ACCOUNT_ID,
     };
     use serde_json::json;
+
+    #[test]
+    fn capability_effort_mode_keeps_wide_mappings_for_narrow_selectable() {
+        let capability =
+            crate::proxy::providers::codex_reasoning::builtin_reasoning_capability_for_model(
+                "deepseek-v4-flash",
+            )
+            .expect("deepseek builtin");
+        let resolved =
+            crate::proxy::providers::codex_reasoning::resolve_subagent_reasoning_capability(Some(
+                &capability,
+            ));
+        let mode = encode_codex_capability_effort_mode(
+            &resolved.codex_selectable_efforts,
+            &resolved.effort_map,
+        );
+        // allowed 收窄为真实档位，mappings 保留 medium/xhigh 上游映射（宽映射兜底）
+        assert_eq!(
+            mode,
+            "capability|low,high,max|low=low,medium=high,high=high,xhigh=high,max=max"
+        );
+    }
 
     fn create_provider(config: serde_json::Value) -> Provider {
         Provider {
@@ -3564,7 +3565,7 @@ experimental_bearer_token = "PROXY_MANAGED"
 
         assert_eq!(config.supports_thinking, Some(true));
         assert_eq!(config.supports_effort, Some(false));
-        assert_eq!(config.thinking_param.as_deref(), Some("enable_thinking"));
+        assert_eq!(config.thinking_param.as_deref(), Some("none"));
         assert_eq!(config.effort_param.as_deref(), Some("none"));
         assert_eq!(config.min_output_tokens, Some(QWEN_VLLM_MIN_OUTPUT_TOKENS));
         assert_eq!(config.default_output_tokens, None);
@@ -3632,7 +3633,7 @@ experimental_bearer_token = "PROXY_MANAGED"
 
         assert_eq!(config.supports_thinking, Some(true));
         assert_eq!(config.supports_effort, Some(false));
-        assert_eq!(config.thinking_param.as_deref(), Some("enable_thinking"));
+        assert_eq!(config.thinking_param.as_deref(), Some("none"));
         assert_eq!(config.effort_param.as_deref(), Some("none"));
         assert_eq!(config.min_output_tokens, Some(QWEN_VLLM_MIN_OUTPUT_TOKENS));
         assert_eq!(config.default_output_tokens, None);
@@ -3670,7 +3671,7 @@ wire_api = "chat"
 
         assert_eq!(config.supports_thinking, Some(true));
         assert_eq!(config.supports_effort, Some(false));
-        assert_eq!(config.thinking_param.as_deref(), Some("enable_thinking"));
+        assert_eq!(config.thinking_param.as_deref(), Some("none"));
         assert_eq!(config.effort_param.as_deref(), Some("none"));
         assert_eq!(config.min_output_tokens, Some(QWEN_VLLM_MIN_OUTPUT_TOKENS));
         assert_eq!(config.default_output_tokens, None);
@@ -3706,7 +3707,7 @@ wire_api = "chat"
         let config = resolve_codex_chat_reasoning_config(&provider, &json!({ "model": "qwen3.6" }))
             .expect("qwen vllm reasoning config");
 
-        assert_eq!(config.thinking_param.as_deref(), Some("enable_thinking"));
+        assert_eq!(config.thinking_param.as_deref(), Some("none"));
         assert_eq!(config.min_output_tokens, Some(QWEN_VLLM_MIN_OUTPUT_TOKENS));
         assert_eq!(config.default_output_tokens, None);
     }
@@ -3741,7 +3742,7 @@ wire_api = "chat"
         let config = resolve_codex_chat_reasoning_config(&provider, &json!({ "model": "qwen3.6" }))
             .expect("qwen vllm reasoning config");
 
-        assert_eq!(config.thinking_param.as_deref(), Some("enable_thinking"));
+        assert_eq!(config.thinking_param.as_deref(), Some("none"));
         assert_eq!(config.min_output_tokens, Some(4096));
         assert_eq!(config.default_output_tokens, Some(65_536));
     }
@@ -3847,6 +3848,43 @@ wire_api = "chat"
         assert_eq!(
             routed.settings_config["base_url"],
             "https://fallback.example"
+        );
+    }
+
+    #[test]
+    fn test_codex_route_unmatched_model_keeps_first_enabled_candidate_fallback() {
+        let provider = create_provider(json!({
+            "codexRouting": {
+                "enabled": true,
+                "routes": [
+                    {
+                        "id": "disabled-first",
+                        "enabled": false,
+                        "match": { "models": ["disabled"] },
+                        "base_url": "https://disabled.example"
+                    },
+                    {
+                        "id": "first-enabled",
+                        "match": { "models": ["qwen3.6"] },
+                        "base_url": "https://first-enabled.example"
+                    },
+                    {
+                        "id": "second-enabled",
+                        "match": { "models": ["deepseek-v4-flash"] },
+                        "base_url": "https://second-enabled.example"
+                    }
+                ]
+            }
+        }));
+
+        let routed =
+            resolve_codex_model_routed_provider(&provider, &json!({ "model": "unmatched-model" }))
+                .expect("historical first-enabled candidate fallback");
+
+        assert_eq!(routed.id, "test::route::first-enabled");
+        assert_eq!(
+            routed.settings_config["base_url"],
+            "https://first-enabled.example"
         );
     }
 
@@ -5900,71 +5938,5 @@ wire_api = "responses"
             "config": "base_url = \"https://api.x.ai/v1\"\nwire_api = \"responses\""
         }));
         assert!(!provider_needs_responses_namespace_flatten(&plain));
-    }
-
-    fn provider_with_base_url_and_routing(base_url: &str, routing: Option<&str>) -> Provider {
-        let mut provider = create_provider(json!({ "base_url": base_url }));
-        if let Some(routing) = routing {
-            provider.meta = Some(crate::provider::ProviderMeta {
-                prompt_cache_routing: Some(routing.to_string()),
-                ..Default::default()
-            });
-        }
-        provider
-    }
-
-    #[test]
-    fn codex_chat_prompt_cache_key_auto_allowlist_covers_known_gateways() {
-        // OpenAI official endpoint.
-        assert!(should_send_codex_chat_prompt_cache_key(
-            &provider_with_base_url_and_routing("https://api.openai.com/v1", None)
-        ));
-        // Azure OpenAI per-resource host.
-        assert!(should_send_codex_chat_prompt_cache_key(
-            &provider_with_base_url_and_routing(
-                "https://my-resource.openai.azure.com/openai/v1",
-                None
-            )
-        ));
-        // OpenRouter accepts prompt_cache_key as a sticky-routing fallback.
-        assert!(should_send_codex_chat_prompt_cache_key(
-            &provider_with_base_url_and_routing("https://openrouter.ai/api/v1", None)
-        ));
-        // Kimi Coding path only.
-        assert!(should_send_codex_chat_prompt_cache_key(
-            &provider_with_base_url_and_routing("https://api.kimi.com/coding/v1", None)
-        ));
-        // Kimi non-coding path must stay off.
-        assert!(!should_send_codex_chat_prompt_cache_key(
-            &provider_with_base_url_and_routing("https://api.kimi.com/v1", None)
-        ));
-        // Unknown strict gateways stay off to avoid 400 on unknown fields.
-        assert!(!should_send_codex_chat_prompt_cache_key(
-            &provider_with_base_url_and_routing("https://api.deepseek.com/v1", None)
-        ));
-        assert!(!should_send_codex_chat_prompt_cache_key(
-            &provider_with_base_url_and_routing("https://open.bigmodel.cn/api/paas/v4", None)
-        ));
-        // Lookalike hosts must not match: a sibling domain that ends with
-        // "openai.azure.com" but is not a subdomain of it, and a host that
-        // merely contains the suffix followed by another domain.
-        assert!(!should_send_codex_chat_prompt_cache_key(
-            &provider_with_base_url_and_routing("https://xopenai.azure.com/v1", None)
-        ));
-        assert!(!should_send_codex_chat_prompt_cache_key(
-            &provider_with_base_url_and_routing("https://evil.openai.azure.com.example/v1", None)
-        ));
-    }
-
-    #[test]
-    fn codex_chat_prompt_cache_key_explicit_override_wins_over_host() {
-        // Explicit enabled forces the key even on an unknown gateway.
-        assert!(should_send_codex_chat_prompt_cache_key(
-            &provider_with_base_url_and_routing("https://api.deepseek.com/v1", Some("enabled"))
-        ));
-        // Explicit disabled suppresses the key even on a known gateway.
-        assert!(!should_send_codex_chat_prompt_cache_key(
-            &provider_with_base_url_and_routing("https://api.openai.com/v1", Some("disabled"))
-        ));
     }
 }

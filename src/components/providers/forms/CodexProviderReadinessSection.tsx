@@ -54,7 +54,7 @@ export function CodexProviderReadinessSection({
     defaultModel?.trim() || normalizedModels[0]?.model.trim() || "尚未选择";
   const hasModels = normalizedModels.length > 0;
   const validationPassed = validationTone === "success";
-  const ready = hasModels && (isMaintainedPreset || validationPassed);
+  const ready = hasModels && validationPassed;
   const readinessLabel = !hasModels
     ? "需要同步模型"
     : ready

@@ -38,7 +38,9 @@ pub use config::ConfigService;
 pub use mcp::McpService;
 pub use omo::OmoService;
 pub use prompt::PromptService;
-pub use provider::{ProviderService, ProviderSortUpdate, SwitchResult};
+pub use provider::{
+    CodexSubagentV2MutationResult, ProviderService, ProviderSortUpdate, SwitchResult,
+};
 pub use proxy::ProxyService;
 #[allow(unused_imports)]
 pub use skill::{DiscoverableSkill, Skill, SkillRepo, SkillService};

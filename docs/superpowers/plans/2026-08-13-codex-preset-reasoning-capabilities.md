@@ -22,11 +22,13 @@
 ### Task 1: Shared schema and preset capabilities
 
 **Files:**
+
 - Modify: `src/types.ts`
 - Modify: `src/config/codexProviderPresets.ts`
 - Test: `src/config/codexProviderPresets.test.ts`
 
 **Interfaces:**
+
 - Produces `CodexModelReasoningCapability`, `CodexReasoningEffort`, and `CodexCatalogModel.reasoning`.
 - Built-in catalog rows consume the schema directly.
 
@@ -40,12 +42,14 @@
 ### Task 2: Backend resolver and catalog projection
 
 **Files:**
+
 - Create: `src-tauri/src/proxy/providers/codex_reasoning.rs`
 - Modify: `src-tauri/src/proxy/providers/mod.rs`
 - Modify: `src-tauri/src/codex_config.rs`
 - Test: Rust unit tests colocated in the module and `codex_config.rs`.
 
 **Interfaces:**
+
 - Produces `resolve_codex_model_reasoning_capability(provider, model)`.
 - Produces normalized supported/default/disable/upstream mapping data.
 - Catalog generation consumes the JSON capability already present on each model row.
@@ -62,6 +66,7 @@
 ### Task 3: Request conversion and MultiRouter preservation
 
 **Files:**
+
 - Modify: `src-tauri/src/proxy/providers/codex.rs`
 - Modify: `src-tauri/src/proxy/providers/transform_codex_chat.rs`
 - Modify: `src-tauri/src/codex_config.rs`
@@ -70,6 +75,7 @@
 - Test: colocated Rust tests and existing MultiRouter Vitest suites.
 
 **Interfaces:**
+
 - Consumes the Task 2 resolver using the effective routed provider and mapped upstream model.
 - Converts each visible effort through the capability `effortMap` and parameter format.
 
@@ -85,12 +91,14 @@
 ### Task 4: User editing and validation
 
 **Files:**
+
 - Modify: `src/components/providers/forms/CodexFormFields.tsx`
 - Modify: `src/components/providers/forms/hooks/useCodexConfigState.ts`
 - Modify: `src/components/providers/forms/ProviderForm.tsx`
 - Test: relevant Provider form Vitest files.
 
 **Interfaces:**
+
 - Edits `CodexCatalogModel.reasoning` for custom providers.
 - Displays built-in values as maintained defaults and marks edited rows as user overrides.
 
@@ -105,9 +113,11 @@
 ### Task 5: Verification and knowledge update
 
 **Files:**
+
 - Modify: `memory.md`
 
 **Interfaces:**
+
 - Records final architecture, commands, test counts, and any remaining evidence limits.
 
 - [ ] Run focused preset, Provider form, MultiRouter, resolver, catalog, and conversion suites.

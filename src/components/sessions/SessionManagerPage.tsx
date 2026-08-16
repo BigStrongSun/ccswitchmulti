@@ -323,7 +323,7 @@ export function SessionManagerPage({
     setShowCodexHistoryRepairGuide(false);
   }, [isCodexManager]);
 
-  // MultiRouter 向导完成后会把用户直接带到 Codex 历史修复页；消费一次后交回普通手动切换。
+  // 显式调用方可独立请求打开 Codex 历史修复页；消费一次后交回普通手动切换。
   useEffect(() => {
     if (!isCodexManager || !initialCodexHistoryRepair) return;
     setProviderFilter("codex");

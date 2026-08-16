@@ -1,3 +1,5 @@
+import type { CodexSubagentV2Config } from "./types/codexSubagentV2";
+
 export type ProviderCategory =
   | "official" // 官方
   | "cn_official" // 开源官方（原"国产官方"）
@@ -294,7 +296,8 @@ export type CodexReasoningEffort =
   | "medium"
   | "high"
   | "xhigh"
-  | "max";
+  | "max"
+  | "ultra";
 
 export interface CodexModelReasoningCapability {
   supported: boolean;
@@ -357,6 +360,8 @@ export interface CodexModelCatalogConfig {
   spawnAgentModels?: string[];
 }
 
+export type CodexSubagentVersion = "v1" | "v2";
+
 export type CodexRoutingAuthSource =
   | "provider_config"
   | "managed_account"
@@ -410,6 +415,8 @@ export interface CodexRoutingConfig {
   enabled?: boolean;
   defaultRouteId?: string;
   officialAuth?: CodexOfficialAuthConfig;
+  subagentVersion?: CodexSubagentVersion;
+  subagentV2?: CodexSubagentV2Config;
   routes?: CodexRoutingRoute[];
 }
 

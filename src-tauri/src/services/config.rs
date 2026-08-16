@@ -162,13 +162,22 @@ impl ConfigService {
         let cfg_text = settings.get("config").and_then(Value::as_str);
 
         let profile = crate::proxy::providers::resolve_codex_catalog_tool_profile(provider);
+        let provider_context = config
+            .get_manager(&AppType::Codex)
+            .map(|manager| {
+                crate::codex_config::ProviderClassificationContext::from_providers(
+                    manager.providers.values(),
+                )
+            })
+            .unwrap_or_default();
 
-        crate::codex_config::write_codex_provider_live_with_catalog(
+        crate::codex_config::write_codex_provider_live_with_catalog_and_provider_context(
             &provider.settings_config,
             provider.category.as_deref(),
             auth,
             cfg_text,
             profile,
+            &provider_context,
         )?;
         // 注意：MCP 同步在 v3.7.0 中已通过 McpService 进行，不再在此调用
         // sync_enabled_to_codex 使用旧的 config.mcp.codex 结构，在新架构中为空

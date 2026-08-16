@@ -15,6 +15,8 @@ const CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
 const CDP_COMMAND_TIMEOUT: Duration = Duration::from_secs(4);
 const MODEL_PICKER_PATCH_KEY: &str = "__ccSwitchCodexAppCompatibilityV5";
 const REMEMBERED_CODEX_DESKTOP_EXECUTABLE_FILENAME: &str = "codex-desktop-executable.json";
+#[cfg(any(target_os = "macos", test))]
+const CODEX_DESKTOP_BUNDLE_IDENTIFIER: &str = "com.openai.codex";
 /// Codex App 历史目录与模型兼容层安装命令的执行结果。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -177,7 +179,7 @@ fn codex_desktop_executable_not_found_message() -> String {
     let platform_sources = if cfg!(target_os = "windows") {
         "running Desktop process, remembered Desktop path, MSIX/Appx package metadata and manifest, App Paths registry entries, PATH commands, and common local install folders"
     } else if cfg!(target_os = "macos") {
-        "running Desktop process, remembered Desktop path, /Applications, ~/Applications, and Spotlight-discovered Codex.app bundles"
+        "running Desktop process, remembered Desktop path, /Applications, ~/Applications, and Spotlight-discovered com.openai.codex bundles (Codex.app or ChatGPT.app)"
     } else if cfg!(target_os = "linux") {
         "running Desktop process, remembered Desktop path, PATH entries for Codex/Codex.AppImage, .desktop entries with absolute Exec paths, and common AppImage or /opt install folders"
     } else {
@@ -1131,18 +1133,18 @@ fn is_codex_desktop_executable_path(path: &Path) -> bool {
     })
 }
 
-/// 非 Windows 平台沿用文件名级别的 Desktop shell 校验。
-#[cfg(not(target_os = "windows"))]
+/// macOS 统一壳可能叫 Codex 或 ChatGPT；必须回到 bundle 元数据校验身份与实际主程序。
+#[cfg(target_os = "macos")]
+fn is_codex_desktop_executable_path(path: &Path) -> bool {
+    macos_codex_bundle_for_executable(path).is_some()
+}
+
+/// Linux 等平台沿用文件名级别的 Desktop shell 校验。
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn is_codex_desktop_executable_path(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
         .is_some_and(is_codex_desktop_executable_name)
-}
-
-/// 判断路径文件名是否是当前平台的 Desktop shell，而不是小写 CLI/app-server。
-#[cfg(target_os = "macos")]
-fn is_codex_desktop_executable_name(name: &str) -> bool {
-    name == "Codex"
 }
 
 /// 判断路径文件名是否是当前平台的 Desktop shell，而不是小写 CLI/app-server。
@@ -1227,36 +1229,42 @@ fn remember_codex_desktop_executable_at(
     Ok(executable)
 }
 
-/// macOS 上通过 System Events 找到运行中的 Codex.app，再解析 bundle 内部二进制。
+/// macOS 上通过稳定 bundle identifier 找到运行中的 Codex/ChatGPT 统一壳。
 #[cfg(target_os = "macos")]
 fn detect_running_macos_codex_main_process() -> Option<PathBuf> {
-    let script = r#"
+    let script = format!(
+        r#"
 tell application "System Events"
-  set matches to application processes whose name is "Codex"
+  set matches to application processes whose bundle identifier is "{}"
   if (count of matches) is 0 then return ""
   try
     return POSIX path of (application file of item 1 of matches)
   end try
 end tell
-"#;
+"#,
+        CODEX_DESKTOP_BUNDLE_IDENTIFIER
+    );
     if let Some(bundle) = command_stdout_trimmed(Command::new("osascript").arg("-e").arg(script))
         .filter(|path| !path.is_empty())
     {
-        let executable = macos_codex_bundle_executable(Path::new(&bundle));
-        if let Ok(executable) = canonical_codex_desktop_executable_path(&executable) {
-            return Some(executable);
+        if let Some(executable) = macos_codex_bundle_executable(Path::new(&bundle)) {
+            if let Ok(executable) = canonical_codex_desktop_executable_path(&executable) {
+                return Some(executable);
+            }
         }
     }
 
     let mut saw_codex_process = false;
-    for pid in command_stdout_lines(Command::new("pgrep").args(["-x", "Codex"])) {
-        saw_codex_process = true;
-        let path = command_stdout_trimmed(Command::new("ps").args(["-p", &pid, "-o", "comm="]));
-        let Some(path) = path.filter(|path| !path.is_empty()) else {
-            continue;
-        };
-        if let Ok(executable) = canonical_codex_desktop_executable_path(Path::new(&path)) {
-            return Some(executable);
+    for process_name in ["Codex", "ChatGPT"] {
+        for pid in command_stdout_lines(Command::new("pgrep").args(["-x", process_name])) {
+            saw_codex_process = true;
+            let path = command_stdout_trimmed(Command::new("ps").args(["-p", &pid, "-o", "comm="]));
+            let Some(path) = path.filter(|path| !path.is_empty()) else {
+                continue;
+            };
+            if let Ok(executable) = canonical_codex_desktop_executable_path(Path::new(&path)) {
+                return Some(executable);
+            }
         }
     }
     if saw_codex_process {
@@ -1292,21 +1300,17 @@ fn detect_running_linux_codex_main_process() -> Option<PathBuf> {
 fn find_macos_codex_executable() -> Option<PathBuf> {
     let mut candidates = Vec::new();
     for bundle in macos_codex_common_bundle_candidates() {
-        push_codex_desktop_executable_candidate(
-            &mut candidates,
-            Vec::new(),
-            macos_codex_bundle_executable(&bundle),
-        );
+        if let Some(executable) = macos_codex_bundle_executable(&bundle) {
+            push_codex_desktop_executable_candidate(&mut candidates, Vec::new(), executable);
+        }
     }
-    for bundle in command_stdout_lines(
-        Command::new("mdfind")
-            .arg("kMDItemFSName == 'Codex.app' || kMDItemCFBundleIdentifier == 'com.openai.codex'"),
-    ) {
-        push_codex_desktop_executable_candidate(
-            &mut candidates,
-            Vec::new(),
-            macos_codex_bundle_executable(Path::new(&bundle)),
-        );
+    for bundle in command_stdout_lines(Command::new("mdfind").arg(format!(
+        "kMDItemCFBundleIdentifier == '{}' || kMDItemFSName == 'Codex.app'",
+        CODEX_DESKTOP_BUNDLE_IDENTIFIER
+    ))) {
+        if let Some(executable) = macos_codex_bundle_executable(Path::new(&bundle)) {
+            push_codex_desktop_executable_candidate(&mut candidates, Vec::new(), executable);
+        }
     }
 
     candidates.pop().map(|(_, executable)| executable)
@@ -1315,34 +1319,81 @@ fn find_macos_codex_executable() -> Option<PathBuf> {
 /// macOS 常见应用目录候选，覆盖系统级和用户级安装。
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn macos_codex_common_bundle_candidates() -> Vec<PathBuf> {
-    let mut bundles = vec![PathBuf::from("/Applications/Codex.app")];
+    let mut bundles = vec![
+        PathBuf::from("/Applications/Codex.app"),
+        PathBuf::from("/Applications/ChatGPT.app"),
+    ];
     if let Some(home) = std::env::var_os("HOME") {
-        bundles.push(PathBuf::from(home).join("Applications").join("Codex.app"));
+        let applications = PathBuf::from(home).join("Applications");
+        bundles.push(applications.join("Codex.app"));
+        bundles.push(applications.join("ChatGPT.app"));
     }
     bundles
 }
 
-/// 从 macOS `.app` bundle 路径推导 Desktop 主二进制路径。
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn macos_codex_bundle_executable(bundle: &Path) -> PathBuf {
-    bundle.join("Contents").join("MacOS").join("Codex")
+/// 以 bundle 的稳定身份和声明的主程序名构造候选，拒绝路径穿越与独立 ChatGPT。
+#[cfg(any(target_os = "macos", test))]
+fn macos_codex_bundle_executable_from_metadata(
+    bundle: &Path,
+    bundle_identifier: &str,
+    executable_name: &str,
+) -> Option<PathBuf> {
+    if bundle_identifier.trim() != CODEX_DESKTOP_BUNDLE_IDENTIFIER {
+        return None;
+    }
+    let executable_name = executable_name.trim();
+    let executable_path = Path::new(executable_name);
+    if executable_name.is_empty()
+        || executable_path.file_name().and_then(|name| name.to_str()) != Some(executable_name)
+        || executable_path.components().count() != 1
+    {
+        return None;
+    }
+    Some(bundle.join("Contents").join("MacOS").join(executable_name))
 }
 
-/// 如果路径位于 Codex.app 内部，返回对应 bundle 路径，便于使用 macOS `open` 启动。
+/// 读取 macOS bundle 的 Info.plist 字段；使用系统绝对路径，避免 GUI PATH 差异。
+#[cfg(target_os = "macos")]
+fn macos_bundle_info_value(bundle: &Path, key: &str) -> Option<String> {
+    let info_plist = bundle.join("Contents").join("Info.plist");
+    command_stdout_trimmed(
+        Command::new("/usr/bin/plutil")
+            .arg("-extract")
+            .arg(key)
+            .arg("raw")
+            .arg("-o")
+            .arg("-")
+            .arg(info_plist),
+    )
+    .map(|value| value.trim().to_string())
+    .filter(|value| !value.is_empty())
+}
+
+/// 从 macOS `.app` 的真实元数据解析 Desktop 主二进制路径。
+#[cfg(target_os = "macos")]
+fn macos_codex_bundle_executable(bundle: &Path) -> Option<PathBuf> {
+    let bundle_identifier = macos_bundle_info_value(bundle, "CFBundleIdentifier")?;
+    let executable_name = macos_bundle_info_value(bundle, "CFBundleExecutable")?;
+    macos_codex_bundle_executable_from_metadata(bundle, &bundle_identifier, &executable_name)
+}
+
+/// 找到受支持的顶层包装；Framework 内部 Service.app 不会提前截断搜索。
+#[cfg(any(target_os = "macos", test))]
+fn macos_codex_bundle_ancestor(executable: &Path) -> Option<PathBuf> {
+    executable.ancestors().find_map(|path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| *name == "Codex.app" || *name == "ChatGPT.app")
+            .map(|_| path.to_path_buf())
+    })
+}
+
+/// 如果路径属于 bundle 元数据声明的主程序，返回对应 bundle，便于使用 `open` 启动。
 #[cfg(target_os = "macos")]
 fn macos_codex_bundle_for_executable(executable: &Path) -> Option<PathBuf> {
-    let mut current = executable.parent();
-    while let Some(path) = current {
-        if path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name == "Codex.app")
-        {
-            return Some(path.to_path_buf());
-        }
-        current = path.parent();
-    }
-    None
+    let bundle = macos_codex_bundle_ancestor(executable)?;
+    let declared_executable = macos_codex_bundle_executable(&bundle)?;
+    (declared_executable == executable).then_some(bundle)
 }
 
 /// 查找 Linux 常见 Desktop/AppImage 安装位置，避免把小写 CLI `codex` 当成 Desktop。
@@ -2162,13 +2213,82 @@ JSON.stringify({
         assert!(loaded.ends_with(desktop_test_executable_name()));
     }
 
-    /// 验证 macOS `.app` bundle 会解析到内部 Desktop 主二进制。
+    /// 旧 Codex.app 和统一 ChatGPT.app 都必须按 bundle 元数据解析主程序，不能硬编码壳名称。
     #[test]
-    fn macos_codex_bundle_candidate_points_to_internal_binary() {
+    fn macos_codex_bundle_metadata_accepts_legacy_and_unified_shells() {
         assert_eq!(
-            macos_codex_bundle_executable(Path::new("/Applications/Codex.app")),
-            PathBuf::from("/Applications/Codex.app/Contents/MacOS/Codex")
+            macos_codex_bundle_executable_from_metadata(
+                Path::new("/Applications/Codex.app"),
+                "com.openai.codex",
+                "Codex",
+            ),
+            Some(PathBuf::from(
+                "/Applications/Codex.app/Contents/MacOS/Codex"
+            ))
         );
+        assert_eq!(
+            macos_codex_bundle_executable_from_metadata(
+                Path::new("/Applications/ChatGPT.app"),
+                "com.openai.codex",
+                "ChatGPT",
+            ),
+            Some(PathBuf::from(
+                "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"
+            ))
+        );
+    }
+
+    /// 独立 ChatGPT 即使目录和主程序同名，也不能进入 Codex Desktop/CDP 链路。
+    #[test]
+    fn macos_chatgpt_bundle_rejects_non_codex_identity_and_unsafe_executable_names() {
+        assert_eq!(
+            macos_codex_bundle_executable_from_metadata(
+                Path::new("/Applications/ChatGPT.app"),
+                "com.openai.chat",
+                "ChatGPT",
+            ),
+            None
+        );
+        assert_eq!(
+            macos_codex_bundle_executable_from_metadata(
+                Path::new("/Applications/ChatGPT.app"),
+                "com.openai.codex",
+                "../Codex",
+            ),
+            None
+        );
+    }
+
+    /// 反查 bundle 时兼容两代包装，但拒绝 Framework 内部 Service.app 和无关应用。
+    #[test]
+    fn macos_codex_bundle_ancestor_accepts_only_supported_top_level_shells() {
+        assert_eq!(
+            macos_codex_bundle_ancestor(Path::new("/Applications/Codex.app/Contents/MacOS/Codex")),
+            Some(PathBuf::from("/Applications/Codex.app"))
+        );
+        assert_eq!(
+            macos_codex_bundle_ancestor(Path::new(
+                "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"
+            )),
+            Some(PathBuf::from("/Applications/ChatGPT.app"))
+        );
+        assert_eq!(
+            macos_codex_bundle_ancestor(Path::new("/Applications/Other.app/Contents/MacOS/Other")),
+            None
+        );
+    }
+
+    /// Spotlight 不可用时也必须从系统和用户 Applications 目录发现统一壳。
+    #[test]
+    fn macos_common_candidates_include_legacy_and_unified_bundles() {
+        let candidates = macos_codex_common_bundle_candidates();
+        assert!(candidates.contains(&PathBuf::from("/Applications/Codex.app")));
+        assert!(candidates.contains(&PathBuf::from("/Applications/ChatGPT.app")));
+        if let Some(home) = std::env::var_os("HOME") {
+            let applications = PathBuf::from(home).join("Applications");
+            assert!(candidates.contains(&applications.join("Codex.app")));
+            assert!(candidates.contains(&applications.join("ChatGPT.app")));
+        }
     }
 
     /// 验证 Linux desktop entry 只提取绝对路径 Exec，忽略包装命令。

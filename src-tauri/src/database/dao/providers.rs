@@ -2,7 +2,7 @@ use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 use crate::provider::{Provider, ProviderMeta};
 use indexmap::IndexMap;
-use rusqlite::params;
+use rusqlite::{params, TransactionBehavior};
 use std::collections::{HashMap, HashSet};
 
 /// 将持久化的供应商配置规范化为 JSON 对象。
@@ -347,6 +347,69 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
         Ok(())
+    }
+
+    /// Atomically replace only `settingsConfig.codexRouting.subagentV2` in the latest Codex
+    /// provider row. The read and write share one IMMEDIATE transaction so an editor snapshot
+    /// can never overwrite catalog, alias, route, credential, or future-field refreshes that
+    /// committed before this operation acquired the writer boundary.
+    pub fn update_codex_subagent_v2<M, V>(
+        &self,
+        provider_id: &str,
+        mutate: M,
+        validate: V,
+    ) -> Result<serde_json::Value, AppError>
+    where
+        M: FnOnce(&serde_json::Value) -> Result<serde_json::Value, AppError>,
+        V: FnOnce(&serde_json::Value) -> Result<(), AppError>,
+    {
+        let mut conn = lock_conn!(self.conn);
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        let settings_config_str = tx
+            .query_row(
+                "SELECT settings_config FROM providers WHERE id = ?1 AND app_type = 'codex'",
+                params![provider_id],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    AppError::InvalidInput("Codex provider does not exist".to_string())
+                }
+                other => AppError::Database(other.to_string()),
+            })?;
+        let mut settings_config = parse_provider_settings_config(&settings_config_str);
+        let subagent_v2 = mutate(&settings_config)?;
+        let settings = settings_config.as_object_mut().ok_or_else(|| {
+            AppError::Database("Provider settings normalization failed".to_string())
+        })?;
+        let routing = settings
+            .entry("codexRouting".to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        if !routing.is_object() {
+            *routing = serde_json::json!({});
+        }
+        routing
+            .as_object_mut()
+            .ok_or_else(|| AppError::Database("Codex routing normalization failed".to_string()))?
+            .insert("subagentV2".to_string(), subagent_v2);
+        validate(&settings_config)?;
+        let serialized = serde_json::to_string(&settings_config)
+            .map_err(|e| AppError::Database(format!("Failed to serialize settings_config: {e}")))?;
+        let changed = tx
+            .execute(
+                "UPDATE providers SET settings_config = ?1 WHERE id = ?2 AND app_type = 'codex'",
+                params![serialized, provider_id],
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        if changed != 1 {
+            return Err(AppError::Database(
+                "Focused Codex subagent V2 update changed an unexpected row count".to_string(),
+            ));
+        }
+        tx.commit().map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(settings_config)
     }
 
     pub fn add_custom_endpoint(
@@ -793,6 +856,109 @@ mod tests {
             )
             .expect("read normalized stored config");
         assert_eq!(stored_config, "{}");
+    }
+
+    /// Deterministic TOCTOU regression: the editor's stale snapshot is read first, then a
+    /// catalog/alias refresh lands, and finally the focused V2 write must merge into that latest
+    /// row instead of replacing it with the stale snapshot.
+    #[test]
+    fn codex_subagent_v2_atomic_update_preserves_interleaved_catalog_alias_refresh() {
+        let db = Database::memory().expect("create in-memory database");
+        let original = Provider::with_id(
+            "router".to_string(),
+            "Codex MultiRouter".to_string(),
+            json!({
+                "auth": { "apiKey": "credential-must-survive" },
+                "modelCatalog": {
+                    "models": [{ "model": "deepseek-v4-flash" }],
+                    "aliases": { "flash": "deepseek-v4-flash" }
+                },
+                "codexRouting": {
+                    "routes": [{ "id": "route-before-refresh" }],
+                    "qwen": { "enabled": true },
+                    "subagentVersion": "v2",
+                    "subagentV2": {
+                        "schemaVersion": 1,
+                        "selectionPolicy": "balanced",
+                        "profiles": {}
+                    },
+                    "futureRoutingField": { "preserve": true }
+                },
+                "futureProviderField": { "preserve": true }
+            }),
+            None,
+        );
+        db.save_provider("codex", &original).expect("seed provider");
+
+        let stale_snapshot = db
+            .get_provider_by_id("router", "codex")
+            .expect("read stale editor snapshot")
+            .expect("provider exists");
+
+        let mut refreshed_settings = stale_snapshot.settings_config.clone();
+        refreshed_settings["modelCatalog"]["aliases"]["flash"] = json!("deepseek-v4-flash-live");
+        refreshed_settings["codexRouting"]["routes"] = json!([{ "id": "route-after-refresh" }]);
+        refreshed_settings["codexRouting"]["catalogAliases"] =
+            json!({ "flash": "deepseek-v4-flash-live" });
+        db.update_provider_settings_config("codex", "router", &refreshed_settings)
+            .expect("interleaved catalog/alias refresh");
+
+        let edited_v2 = json!({
+            "schemaVersion": 1,
+            "selectionPolicy": "official_first",
+            "profiles": {
+                "deepseek-v4-flash": {
+                    "model": "deepseek-v4-flash",
+                    "enabled": true,
+                    "questionnaire": {
+                        "taskStrengths": ["repository_exploration"],
+                        "optimization": "speed",
+                        "writeScope": "read_only",
+                        "preference": "eligible",
+                        "reasoningEffort": "medium"
+                    }
+                }
+            }
+        });
+        db.update_codex_subagent_v2("router", |_| Ok(edited_v2.clone()), |_| Ok(()))
+            .expect("atomically merge V2 into latest provider row");
+
+        let saved = db
+            .get_provider_by_id("router", "codex")
+            .expect("read merged provider")
+            .expect("provider still exists");
+        assert_eq!(
+            saved.settings_config["codexRouting"]["subagentV2"],
+            edited_v2
+        );
+        assert_eq!(
+            saved.settings_config["modelCatalog"]["aliases"]["flash"],
+            json!("deepseek-v4-flash-live")
+        );
+        assert_eq!(
+            saved.settings_config["codexRouting"]["routes"],
+            json!([{ "id": "route-after-refresh" }])
+        );
+        assert_eq!(
+            saved.settings_config["codexRouting"]["catalogAliases"],
+            json!({ "flash": "deepseek-v4-flash-live" })
+        );
+        assert_eq!(
+            saved.settings_config["codexRouting"]["qwen"],
+            json!({ "enabled": true })
+        );
+        assert_eq!(
+            saved.settings_config["codexRouting"]["futureRoutingField"],
+            json!({ "preserve": true })
+        );
+        assert_eq!(
+            saved.settings_config["auth"]["apiKey"],
+            json!("credential-must-survive")
+        );
+        assert_eq!(
+            saved.settings_config["futureProviderField"],
+            json!({ "preserve": true })
+        );
     }
 }
 

@@ -541,7 +541,8 @@ describe("useProviderActions", () => {
   });
 
   it("handles mutation errors when plugin sync is skipped", async () => {
-    switchProviderMutateAsync.mockRejectedValueOnce(new Error("switch failed"));
+    const error = new Error("switch failed");
+    switchProviderMutateAsync.mockRejectedValueOnce(error);
     const { wrapper } = createWrapper();
     const provider = createProvider();
 
@@ -549,9 +550,10 @@ describe("useProviderActions", () => {
       wrapper,
     });
 
-    await expect(
-      result.current.switchProvider(provider),
-    ).resolves.toBeUndefined();
+    await expect(result.current.switchProvider(provider)).resolves.toEqual({
+      ok: false,
+      error,
+    });
     expect(settingsApiGetMock).not.toHaveBeenCalled();
     expect(settingsApiApplyMock).not.toHaveBeenCalled();
   });

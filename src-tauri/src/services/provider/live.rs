@@ -568,16 +568,45 @@ pub(crate) fn provider_uses_common_config(
     provider: &Provider,
     snippet: Option<&str>,
 ) -> bool {
+    let has_snippet = snippet.is_some_and(|value| !value.trim().is_empty());
     match provider
         .meta
         .as_ref()
         .and_then(|meta| meta.common_config_enabled)
     {
-        Some(explicit) => explicit && snippet.is_some_and(|value| !value.trim().is_empty()),
+        Some(explicit) => explicit && has_snippet,
+        None if matches!(app_type, AppType::Codex)
+            && codex_provider_has_enabled_routing(provider) =>
+        {
+            // MultiRouter stores route/catalog state instead of a materialized
+            // `settings_config.config`. Its live config is synthesized later, so
+            // legacy subset inference can never see the Common Config in the
+            // provider snapshot. Treat the shared snippet as the user-owned base
+            // for routed providers; an explicit `common_config_enabled = false`
+            // above still opts out.
+            has_snippet
+        }
         None => snippet.is_some_and(|value| {
             settings_contain_common_config(app_type, &provider.settings_config, value)
         }),
     }
+}
+
+fn codex_provider_has_enabled_routing(provider: &Provider) -> bool {
+    let Some(routing) = provider.settings_config.get("codexRouting") else {
+        return false;
+    };
+    if routing
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .is_some_and(|enabled| !enabled)
+    {
+        return false;
+    }
+    routing
+        .get("routes")
+        .and_then(Value::as_array)
+        .is_some_and(|routes| !routes.is_empty())
 }
 
 pub(crate) fn remove_common_config_from_settings(
@@ -748,6 +777,11 @@ pub(crate) fn write_live_with_common_config(
         return Ok(());
     }
 
+    if matches!(app_type, AppType::Codex) {
+        let provider_context = crate::codex_config::codex_provider_classification_context(db)?;
+        return write_codex_live_snapshot(&effective_provider, Some(&provider_context));
+    }
+
     write_live_snapshot(app_type, &effective_provider)
 }
 
@@ -788,7 +822,8 @@ pub(crate) fn write_codex_config_only_with_common_config(
         .ok_or_else(|| AppError::Config("Codex 供应商配置必须是 JSON 对象".to_string()))?;
     let config_text = settings.get("config").and_then(|value| value.as_str());
 
-    crate::codex_config::write_codex_provider_config_only_with_catalog(
+    let provider_context = crate::codex_config::codex_provider_classification_context(db)?;
+    crate::codex_config::write_codex_provider_config_only_with_catalog_and_provider_context(
         &settings_for_live,
         effective_provider.category.as_deref(),
         config_text,
@@ -798,6 +833,7 @@ pub(crate) fn write_codex_config_only_with_common_config(
                 .as_ref()
                 .and_then(|meta| meta.api_format.as_deref()),
         ),
+        &provider_context,
     )
 }
 
@@ -1131,28 +1167,7 @@ pub(crate) fn write_live_snapshot(app_type: &AppType, provider: &Provider) -> Re
             ));
         }
         AppType::Codex => {
-            let settings_for_live = codex_settings_for_live_projection(provider);
-            let obj = settings_for_live
-                .as_object()
-                .ok_or_else(|| AppError::Config("Codex 供应商配置必须是 JSON 对象".to_string()))?;
-            let auth = obj
-                .get("auth")
-                .ok_or_else(|| AppError::Config("Codex 供应商配置缺少 'auth' 字段".to_string()))?;
-            let config_str = obj.get("config").and_then(|v| v.as_str());
-
-            // Native (direct) Responses and Anthropic providers must suppress Codex's
-            // freeform apply_patch custom tool via the generated catalog; chat/proxy
-            // providers keep the default tool set. Uses the same Anthropic detection as
-            // the proxy router (apiFormat meta/settings + TOML wire_api).
-            let profile = crate::proxy::providers::resolve_codex_catalog_tool_profile(provider);
-
-            crate::codex_config::write_codex_provider_live_with_catalog(
-                &settings_for_live,
-                provider.category.as_deref(),
-                auth,
-                config_str,
-                profile,
-            )?;
+            write_codex_live_snapshot(provider, None)?;
         }
         AppType::Gemini => {
             // Delegate to write_gemini_live which handles env file writing correctly
@@ -1267,6 +1282,47 @@ pub(crate) fn write_live_snapshot(app_type: &AppType, provider: &Provider) -> Re
         }
     }
     Ok(())
+}
+
+fn write_codex_live_snapshot(
+    provider: &Provider,
+    provider_context: Option<&crate::codex_config::ProviderClassificationContext>,
+) -> Result<(), AppError> {
+    let settings_for_live = codex_settings_for_live_projection(provider);
+    let obj = settings_for_live
+        .as_object()
+        .ok_or_else(|| AppError::Config("Codex 供应商配置必须是 JSON 对象".to_string()))?;
+    let auth = obj
+        .get("auth")
+        .ok_or_else(|| AppError::Config("Codex 供应商配置缺少 'auth' 字段".to_string()))?;
+    let config_str = obj.get("config").and_then(|v| v.as_str());
+
+    // Native (direct) Responses and Anthropic providers must suppress Codex's
+    // freeform apply_patch custom tool via the generated catalog; chat/proxy
+    // providers keep the default tool set. Uses the same Anthropic detection as
+    // the proxy router (apiFormat meta/settings + TOML wire_api).
+    let profile = crate::proxy::providers::resolve_codex_catalog_tool_profile(provider);
+
+    if let Some(provider_context) = provider_context {
+        crate::codex_config::write_codex_provider_live_with_catalog_and_provider_context(
+            &settings_for_live,
+            provider.category.as_deref(),
+            auth,
+            config_str,
+            profile,
+            provider_context,
+        )
+    } else {
+        // `write_live_snapshot` is the legacy no-DB utility boundary. Normal provider switching
+        // enters through `write_live_with_common_config` and always supplies current DB context.
+        crate::codex_config::write_codex_provider_live_with_catalog_without_provider_context(
+            &settings_for_live,
+            provider.category.as_deref(),
+            auth,
+            config_str,
+            profile,
+        )
+    }
 }
 
 /// Sync all providers to live configuration (for additive mode apps)
@@ -2840,6 +2896,104 @@ web_search = true
                 Some(r#"{ "includeCoAuthoredBy": false }"#),
             ),
             "explicit false should win over legacy subset detection"
+        );
+    }
+
+    #[test]
+    fn codex_multirouter_uses_common_config_without_materialized_provider_toml() {
+        let provider = Provider::with_id(
+            "codex-multirouter".to_string(),
+            "Router".to_string(),
+            json!({
+                "auth": {},
+                "modelCatalog": { "models": [{ "model": "qwen" }] },
+                "codexRouting": {
+                    "enabled": true,
+                    "routes": [{ "id": "qwen", "enabled": true }]
+                }
+            }),
+            None,
+        );
+
+        assert!(provider.settings_config.get("config").is_none());
+        assert!(provider_uses_common_config(
+            &AppType::Codex,
+            &provider,
+            Some("model_reasoning_effort = \"medium\"\n[mcp_servers.matrix]\ncommand = \"node\"\n"),
+        ));
+    }
+
+    #[test]
+    fn codex_multirouter_explicit_common_config_opt_out_still_wins() {
+        let mut provider = Provider::with_id(
+            "codex-multirouter".to_string(),
+            "Router".to_string(),
+            json!({
+                "codexRouting": {
+                    "enabled": true,
+                    "routes": [{ "id": "qwen", "enabled": true }]
+                }
+            }),
+            None,
+        );
+        provider.meta = Some(crate::provider::ProviderMeta {
+            common_config_enabled: Some(false),
+            ..Default::default()
+        });
+
+        assert!(!provider_uses_common_config(
+            &AppType::Codex,
+            &provider,
+            Some("model_reasoning_effort = \"medium\"\n"),
+        ));
+    }
+
+    #[test]
+    fn codex_multirouter_effective_settings_start_from_common_config() {
+        let db = Database::memory().expect("init db");
+        db.set_config_snippet(
+            "codex",
+            Some(
+                "model_reasoning_effort = \"medium\"\n[mcp_servers.matrix]\ncommand = \"node\"\n"
+                    .to_string(),
+            ),
+        )
+        .expect("set common config");
+        let provider = Provider::with_id(
+            "codex-multirouter".to_string(),
+            "Router".to_string(),
+            json!({
+                "auth": {},
+                "codexRouting": {
+                    "enabled": true,
+                    "routes": [{ "id": "qwen", "enabled": true }]
+                }
+            }),
+            None,
+        );
+
+        let effective =
+            build_effective_settings_with_common_config(&db, &AppType::Codex, &provider)
+                .expect("build effective settings");
+        let config = effective
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("materialized common config");
+        let parsed: toml::Value = toml::from_str(config).expect("parse effective TOML");
+
+        assert_eq!(
+            parsed
+                .get("model_reasoning_effort")
+                .and_then(toml::Value::as_str),
+            Some("medium")
+        );
+        assert_eq!(
+            parsed
+                .get("mcp_servers")
+                .and_then(|value| value.get("matrix"))
+                .and_then(|value| value.get("command"))
+                .and_then(toml::Value::as_str),
+            Some("node")
         );
     }
 

@@ -30,6 +30,30 @@ struct UpdateDownloadProgress {
     total: Option<u64>,
 }
 
+/// Release metadata consumed by the shared frontend update context.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppUpdateInfo {
+    pub current_version: String,
+    pub available_version: String,
+    pub notes: Option<String>,
+    pub pub_date: Option<String>,
+}
+
+fn build_app_update_info(
+    current_version: String,
+    available_version: String,
+    notes: Option<String>,
+    pub_date: Option<String>,
+) -> AppUpdateInfo {
+    AppUpdateInfo {
+        current_version,
+        available_version,
+        notes,
+        pub_date,
+    }
+}
+
 fn merge_settings_for_save(
     mut incoming: crate::settings::AppSettings,
     existing: &crate::settings::AppSettings,
@@ -303,6 +327,28 @@ pub async fn check_app_update_available(app: AppHandle) -> Result<Option<String>
     Ok(update.map(|u| u.version))
 }
 
+/// Check for an application update through the same proxy-aware updater used
+/// for download and installation, and return the metadata needed by the UI.
+#[tauri::command]
+pub async fn check_app_update(app: AppHandle) -> Result<Option<AppUpdateInfo>, String> {
+    let updater = updater_builder_with_runtime_proxy(&app)
+        .build()
+        .map_err(|e| format!("初始化更新器失败: {e}"))?;
+    let update = updater
+        .check()
+        .await
+        .map_err(|e| format!("检查更新失败: {e}"))?;
+
+    Ok(update.map(|update| {
+        build_app_update_info(
+            update.current_version,
+            update.version,
+            update.body,
+            update.date.map(|date| date.to_string()),
+        )
+    }))
+}
+
 /// 获取 app_config_dir 覆盖配置 (从 Store)
 #[tauri::command]
 pub async fn get_app_config_dir_override(app: AppHandle) -> Result<Option<String>, String> {
@@ -333,12 +379,33 @@ pub async fn set_auto_launch(enabled: bool) -> Result<bool, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::merge_settings_for_save;
+    use super::{build_app_update_info, merge_settings_for_save};
     use crate::settings::{
         AppSettings, CodexOfficialHistoryUnifyMigration, CodexProviderTemplateMigration,
         CodexThirdPartyHistoryProviderBucketMigration, LocalMigrations, S3SyncSettings,
         WebDavSyncSettings,
     };
+
+    #[test]
+    fn check_app_update_info_preserves_release_metadata() {
+        let info = build_app_update_info(
+            "3.19.1-19".to_string(),
+            "3.19.1-20".to_string(),
+            Some("Fix updater routing".to_string()),
+            Some("2026-08-11T08:00:00Z".to_string()),
+        );
+
+        assert_eq!(info.current_version, "3.19.1-19");
+        assert_eq!(info.available_version, "3.19.1-20");
+        assert_eq!(info.notes.as_deref(), Some("Fix updater routing"));
+        assert_eq!(info.pub_date.as_deref(), Some("2026-08-11T08:00:00Z"));
+
+        let json = serde_json::to_value(info).expect("serialize app update info");
+        assert_eq!(json["currentVersion"], "3.19.1-19");
+        assert_eq!(json["availableVersion"], "3.19.1-20");
+        assert_eq!(json["notes"], "Fix updater routing");
+        assert_eq!(json["pubDate"], "2026-08-11T08:00:00Z");
+    }
 
     #[test]
     fn save_settings_should_preserve_existing_webdav_when_payload_omits_it() {
