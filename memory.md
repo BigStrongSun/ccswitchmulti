@@ -1,11 +1,11 @@
 # CC Switch Repository Memory
 
-## 2026-08-16 Qwen/vLLM `reasoning.effort=none` 仍输出英文思考根因
+## 2026-08-16 Qwen 任务错误继承 `reasoning_effort=none` 的两层根因
 
-- 用户安装 `v3.19.2-4` 后，任务 `01a00996-28d6-7aa0-a303-d0a5d6939245` 仍产生大段英文 reasoning。rollout 证明 reasoning item 完整到达 Codex，且每个重复段落属于不同工具回合，不是 Desktop 截断或 CCSM 把累计 SSE 当增量重复追加。
-- 该任务的 Codex turn context 明确为 `reasoning_effort=none`，但 Qwen 仍思考。根因是 Qwen/vLLM 自动能力推断把关闭开关配置为顶层 `enable_thinking`；vLLM 的 Qwen chat template 实际读取 `chat_template_kwargs.enable_thinking`，因此顶层 false 被忽略。
-- Qwen/vLLM 推断现统一使用 `chat_template_kwargs.enable_thinking`，并在 merge 阶段把已有自动/旧版顶层 `enable_thinking` 升级为嵌套路径，同时保留用户配置的更大输出预算。通用 Qwen/DashScope 与 SiliconFlow 仍保留各自平台的顶层参数语义。
-- 回归覆盖路由显式配置、自动推断、旧配置迁移、退役预算清理和更大预算保留；Qwen/vLLM 定向测试 4/4 通过。转换层既有 nested-none 测试证明 `reasoning.effort=none` 会生成 `chat_template_kwargs.enable_thinking=false`。
+- 用户安装 `v3.19.2-4` 后，任务 `01a00996-28d6-7aa0-a303-d0a5d6939245` 仍产生大段英文 reasoning。rollout 证明 reasoning item 完整到达 Codex，且重复段落属于不同工具回合，不是 Desktop 截断或 CCSM 把累计 SSE 当增量重复追加。
+- 不得把 Codex/OpenAI 的 `reasoning.effort=none` 在缺少 Provider 明示关闭契约时擅自翻译成 Qwen `enable_thinking=false`。Qwen/vLLM 自动推断改为不发送 thinking 开关；显式声明 vendor 参数的 Provider 仍按其契约转换。
+- 现场数据库 `settings.common_config_codex` 为 `model_reasoning_effort="medium"`，所有 Codex Provider 自身均未配置 effort；但 live `~/.codex/config.toml` 为 `none`，任务的 `state_5.sqlite.threads.reasoning_effort` 也持久化为 `none`。该任务创建于 live 漂移期间，安装新版不会追溯改写已有线程设置；恢复任务时 `thread_settings_applied` 因而继续使用 `none`。
+- `v3.19.2-4` 在 19:02:16 已把 Common Config 的 `medium` 正确写入 `proxy_live_backup`，而 live 文件在 19:02:40 又变成 `none`。这说明剩余问题位于 Codex Desktop 恢复旧线程设置后的 live/config 生命周期，不是 MultiRouter effective-settings 缺少 Common Config。后续验收必须区分新线程默认值与旧线程持久化 override。
 
 ## 2026-08-16 Qwen original image detail 完整适配与 Codex Live TOML 生命周期根修
 
