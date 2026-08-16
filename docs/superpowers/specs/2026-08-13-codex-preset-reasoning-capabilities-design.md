@@ -108,6 +108,22 @@ interface CodexModelReasoningCapability {
 
 ## 数据流
 
+### 两层责任边界
+
+推理强度适配必须明确拆成两个层面：
+
+1. **CCS/CCSM 的多模型能力层**：维护每个“平台 + 精确模型”的真实能力，生成 Codex 可消费的模型目录，并在 Responses 转 Chat/Anthropic 等协议边界把 Codex effort 转为上游实际字段。该层负责能力证据、开关协议、档位映射和 fail-closed；不能要求 Codex 理解 Qwen、DeepSeek、OpenRouter 等厂商方言。
+2. **Codex 的选择与发送层**：从 `ModelInfo.supported_reasoning_levels` 构造可选项，从 `default_reasoning_level` 与 `model_reasoning_effort` 解析当前线程值，最终统一发送 Responses `reasoning.effort`。Codex 只理解自己的 effort 枚举和每模型 catalog，不负责把它翻译成第三方参数。
+
+因此“让 CCSM 正确认识模型能力”和“让 Codex 正确显示、保存并发送该模型的 effort”必须分别验收。前者正确但 catalog 投影错误，会导致 Codex 菜单错误；后者正确但代理映射错误，会导致菜单选择合法、上游请求却错误。
+
+Codex catalog 是两层之间的正式契约：
+
+- `supported_reasoning_levels` 是 Codex 可展示、继承和校验的集合；无分档模型必须明确为 `[]`。
+- `default_reasoning_level` 只在存在合法默认档位时设置。
+- `model_reasoning_effort` 是用户/线程/角色的选择，不是模型能力声明，也不能反向创造 catalog 中不存在的能力。
+- Codex 发出的 `reasoning.effort` 仍是 Codex/Responses 语义；CCS/CCSM 只能在已经声明明确上游契约时翻译它。
+
 ### 预设保存
 
 选择内置预设时，将预设 ID 和模型能力快照保存到 Provider 设置。预设升级后，未覆盖的内置能力可以随应用升级更新；用户覆盖只保存差异，不复制整份内置数据。
@@ -253,3 +269,5 @@ TOML、MultiRouter route 物化和请求转换均从这一 resolved capability �
 设计依据来自 xAI、智谱、StepFun、OpenRouter 和 OpenAI 官方文档，并通过 Codex 内置 Web Search 与 Matrix WebSearch 两条独立链核对。Matrix 搜索索引查询未返回结果，但 Matrix 对官方 URL 的直接读取成功，内容与内置搜索一致。
 
 Qwen 等平台的档位随具体模型和 API 形态变化，不能在缺少具体模型证据时写成厂商级固定枚举。该不确定性通过保守兜底和模型级能力声明解决，而不是继续使用通用档位。
+
+2026-08-16 复核补充：Codex 当前源码把模型目录中的 `supported_reasoning_levels` 与可选菜单/换模校验绑定，把显式或默认 effort 序列化为 Responses `reasoning.effort`；`ultra` 在请求边界降为 `max`。CCS 官方当前已提供逐模型 `reasoningLevels/defaultReasoningLevel` 和多平台出站映射，但仍把空数组过滤成“未声明”，并保留模板档位，因此不能表达“已确认支持 reasoning、但无 graded effort”的完整能力；其目录声明与运行时 `codexChatReasoning` 也仍是两个数据结构。CCSM 的结构化单一 capability 方向更完整，但所有投影必须真正共用它，不能在 inline TOML 再引入通用默认值。

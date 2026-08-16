@@ -3607,3 +3607,6 @@
 - 能返回 reasoning、能开关 reasoning、能分档控制 reasoning 是三个独立能力。Qwen/vLLM 在没有明确强度或关闭契约时显示“支持推理、服务端默认、无强度分档”，不得伪造 GPT 通用档位。
 - `CodexModelReasoningCapability` 是唯一事实源，catalog、inline TOML、route 物化和出站转换均从 resolved capability 派生。明确 `supportedEfforts=[]` 不得回退通用档位，无合法分档时不得生成默认 `medium`。
 - 设计已补充到 `docs/superpowers/specs/2026-08-13-codex-preset-reasoning-capabilities-design.md`；下一步独立核对 CCS 官方的第三方适配逻辑与 Codex 自身的目录、设置和请求构造逻辑。
+- CCS 官方 `upstream/main@d4fefefc` 已有逐模型 `reasoningLevels/defaultReasoningLevel`、平台/模型推断和 Responses→Chat effort 映射，但目录解析会把空数组过滤为未声明，模板档位继续保留；同时目录字段与运行时 `CodexChatReasoningConfig` 是两套结构，仍不能完整表达并统一驱动“有 reasoning、无 graded effort”。
+- OpenAI Codex `origin/main@9ded177ce7` 以 catalog `ModelInfo.supported_reasoning_levels` 驱动可选值和换模协调，以 `default_reasoning_level` 补缺，最终构造 Responses `reasoning.effort`；Codex 不理解第三方厂商参数。当前请求边界把 Codex 专用 `ultra` 降为 API `max`。
+- 两层责任已经写入同一设计：CCS/CCSM 负责真实模型能力与厂商方言转换，Codex 负责依据 catalog 展示、保存、线程继承、校验并发送统一 Responses effort。两层必须分别验收，catalog 是正式边界契约。
