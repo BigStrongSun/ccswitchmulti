@@ -3549,3 +3549,12 @@
 - 用户明确选择采用官方无名 tool call 行为：当 Chat 上游返回缺失/空白 `function.name` 的调用，响应本应为 `completed`，且丢弃坏调用后没有任何可用 tool call 时，Responses 转换返回 `TransformError`，避免 Codex 把空成功回合当作 Agent 完成并静默停住。混有合法 tool call 时只丢坏调用并继续；`finish_reason=length` 保持 `incomplete/max_output_tokens`，不得误报无名调用错误。实现提交为 `52b0fee4`。
 - v3.19.2 的响应体预算必须在所有传输上逐块执行：Hyper、reqwest 和自定义 Streamed 统一经 `bytes_stream()` 累积并在超限时立即断开，Buffered 在返回前比较已有长度；不能先 `collect()`/`bytes()` 收满再检查。读取中途失败仍按 CCSwitchMulti 既有契约归类为 `ResponsePending`，避免成功记账和重试诊断漂移。根修提交为 `0776cff3`，分类兼容提交为 `c7b47c06`。
 - Windows 普通进程可能因 `ERROR_PRIVILEGE_NOT_HELD (1314)` 无法创建测试 symlink；两个 symlink 专项测试仅在该错误下提前返回，其他错误仍失败，有权限的平台仍执行完整安全断言。最终 Rust library 为 `3098 passed / 0 failed / 5 ignored`；前端为 `137 files / 1115 tests` 全通过；`cargo check --tests`、typecheck、Prettier、rustfmt、`git diff --check` 均通过。前端复跑前曾发现 Vite 文件缺失，使用 `pnpm install --frozen-lockfile --force` 按 lock 重建依赖后恢复，不能把损坏的 node_modules 启动错误归因于产品代码。
+# 2026-08-16 Codex 真实 HTTP 429 自动续传热修
+
+- 用户现场截图显示 Codex 先出现“正在重新连接 1/5”，随后以 `exceeded retry limit, last status: 429 Too Many Requests` 终止当前 turn；点击“继续”仍能沿用同一线程，说明线程持久化未丢失，但 turn 被 429 打断。
+- 根因边界：现行 Codex Rust 客户端在 `ModelProviderInfo::to_api_provider()` 中固定 `retry_429=false`，直接 HTTP 429 可能一次都未重试便被包装成 `RetryLimit`；OpenAI issue `#30471` 仍在跟踪该误导文案和不可配置重试问题。CCSM 的 `ResponsePending/429` 则表示请求可能已经在途，必须继续禁止重放，不能与真实上游拒绝混为一类。
+- 提交 `4b6c8e59` 先加入 RED 回归，`d70e0193` 实现代理内自动续传：只对上游明确返回的真实 HTTP 429 重发完全相同的 headers/body，最多 5 次；优先遵循 `Retry-After`，单次最多 60 秒、累计等待最多 180 秒，无头时按 1/2/4/8/16 秒退避。
+- 确定性额度耗尽 `usage_limit_reached`、`insufficient_quota`、`billing_hard_limit_reached` 不在同账号空转，立即交给既有 Codex 账号池/MultiRouter 降级或返回客户端。终态 429 会重建响应并保留 `Retry-After`；ResponsePending、连接分类和语义输出后的流恢复边界均未改变。
+- 验证：正确的 `3.19.2-1` 源码线上 `codex_rate_limit_retry_` 3/3、`upstream_transport_retry_` 3/3 通过，release 构建成功；仅有既存 `openai_cache_read_tokens` dead-code warning。
+- 运行态采用不中断当前 Codex 流的磁盘热替换：安装路径 `C:\Users\sunda\AppData\Local\CCSwitchMulti\cc-switch.exe` 已是 `3.19.2-1`，SHA-256 `CB16F3830786369388222CA66F0F18E87F3C74BC949DFA0E1908B47F03111F50`；PID 35064 仍运行原映射文件且 15721 health 为 200，下次正常重启才加载补丁。回滚备份为 `backups\cc-switch.exe.pre-429-hotfix-20260816-1350.bak`，运行中旧映射文件为 `cc-switch.exe.running-old`。
+- 联网前置使用 Codex 内置 Web Search、GitHub 官方 CLI/API 与 Matrix WebSearch 独立链。内置搜索和 GitHub 源码/issue 交叉确认 `retry_429=false`、issue `#30471` 与旧 TypeScript PR `#506`；Matrix 仅返回 MDN 429 定义和低相关结果，未提供 Codex 实现的第二份正证据。
