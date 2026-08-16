@@ -5,3 +5,4 @@
 - CCSwitchMulti 的正确产品边界是控制五模型宣传窗口，而不是删除其它模型：`settingsConfig.modelCatalog.spawnAgentModels` 决定 catalog 的优先顺序；V2 managed roles 仍从完整可路由 profile/catalog 生成。
 - V2 工作台顺序固定为：第一步配置 V2 模型与能力；第二步选择并排序 `spawn_agent` 工具说明宣传的前五模型。V1 与 V2 共用并保留同一 `spawnAgentModels` 顺序，切换协议不能清空它。
 - 现场 `qwen3.8` 未出现的根因不是模型不可路由：它已存在于九模型完整目录中，但原前五全是 GPT。2026-08-16 本机已事务备份数据库，并将生效 MultiRouter 与两个 live catalog 的前五统一为 `deepseek-v4-flash / gpt-5.6-sol / qwen3.8 / gpt-5.6-luna / gpt-5.6-terra`；新 Codex 会话才能读取新的工具说明。
+- 新任务 `01a00954-710a-76b1-a6ae-dffa57eeb621` 证明只调整 JSON 数组顺序仍无效：Codex 会按每条模型的数值 `priority` 再排序。CCSM 的同 slug 官方元数据合并此前把官方 GPT 的 `priority=1/2/3` 当成权威字段，覆盖了路由目录生成的 `1000+index`；Qwen/DeepSeek 因而仍排在五个 GPT 后面。根修边界是让路由目录拥有 `priority`，同时继续保留官方 transport、reasoning、service tier 与展示元数据；端到端 cache 测试必须同时断言模型数组顺序和连续 priority。
