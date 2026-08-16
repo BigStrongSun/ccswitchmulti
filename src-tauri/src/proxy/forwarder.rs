@@ -59,7 +59,11 @@ const CODEX_RESPONSES_LITE_FALLBACK_TTL: Duration = Duration::from_secs(24 * 60 
 ///
 /// Codex 端 `request_max_retries` 是从客户端重新 POST；这里是在代理内直接复用
 /// 已转换好的请求体重试，减少不稳定网络下“一次 send 失败就整轮失败”的概率。
-const UPSTREAM_TRANSPORT_RETRY_LIMIT: usize = 2;
+// Keep pre-dispatch/connect failures inside CCSM long enough that a short TLS or edge outage
+// does not consume Codex's own five reconnect attempts. `ForwardFailed` is restricted below to
+// failures for which no upstream execution is possible; ambiguous in-flight requests remain
+// `ResponsePending` and never enter this loop.
+const UPSTREAM_TRANSPORT_RETRY_LIMIT: usize = 5;
 /// 真实上游在尚未建立成功响应时明确返回 429，等价于拒绝接收本次采样请求，
 /// 因而可以安全重放同一份 headers/body。次数与 Codex 默认流恢复预算对齐。
 const CODEX_RATE_LIMIT_RETRY_LIMIT: usize = 5;
@@ -6400,7 +6404,9 @@ fn upstream_transport_retry_backoff(attempt: usize) -> Duration {
     match attempt {
         0 => Duration::from_millis(200),
         1 => Duration::from_millis(600),
-        _ => Duration::from_millis(1500),
+        2 => Duration::from_millis(1500),
+        3 => Duration::from_millis(3000),
+        _ => Duration::from_millis(6000),
     }
 }
 
