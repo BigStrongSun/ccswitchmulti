@@ -91,7 +91,7 @@ pub(crate) async fn read_decoded_body(
         bytes_future.await?
     } else {
         super::response_grace::await_with_response_grace(
-            response.bytes(),
+            bytes_future,
             body_timeout,
             super::response_grace::RESPONSE_PENDING_GRACE,
             || {

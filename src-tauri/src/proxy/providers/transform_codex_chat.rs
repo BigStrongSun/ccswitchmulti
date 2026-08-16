@@ -2052,11 +2052,9 @@ pub(crate) fn chat_completion_to_response_with_context(
     if let Some(message_item) = chat_message_to_response_output_item(message, &response_id) {
         output.push(message_item);
     }
-    output.extend(chat_tool_calls_to_response_output_items(
-        message,
-        reasoning.as_deref(),
-        tool_context,
-    ));
+    let tool_calls =
+        chat_tool_calls_to_response_output_items(message, reasoning.as_deref(), tool_context);
+    output.extend(tool_calls.items);
     if output
         .iter()
         .all(|item| item.get("type").and_then(|v| v.as_str()) == Some("reasoning"))
@@ -2195,6 +2193,12 @@ fn empty_assistant_message_output_item(response_id: &str) -> Value {
             "annotations": []
         }]
     })
+}
+
+struct ChatToolCallItems {
+    items: Vec<Value>,
+    #[allow(dead_code)]
+    dropped: usize,
 }
 
 fn chat_tool_calls_to_response_output_items(

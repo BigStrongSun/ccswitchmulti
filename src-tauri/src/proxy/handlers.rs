@@ -451,7 +451,7 @@ pub async fn handle_models(
     State(state): State<ProxyState>,
     headers: HeaderMap,
 ) -> Result<axum::response::Response, ProxyError> {
-    let generated_path = crate::codex_config::get_codex_model_catalog_path();
+    let config_dir = crate::codex_config::get_codex_config_dir();
     let active_catalog_path = match crate::codex_config::read_codex_config_text() {
         Ok(config_text) => {
             crate::codex_config::resolve_cc_switch_catalog_path(&config_text, &config_dir)
@@ -463,7 +463,8 @@ pub async fn handle_models(
         let catalog = if let Some(catalog_path) =
             active_catalog_path.as_ref().filter(|path| path.exists())
         {
-            let text = std::fs::read_to_string(catalog_path).unwrap_or_default();
+            let text = crate::codex_config::read_codex_model_catalog_text(catalog_path)
+                .unwrap_or_default();
             serde_json::from_str(&text).unwrap_or(json!({"models": []}))
         } else {
             if active_catalog_path.is_none() {

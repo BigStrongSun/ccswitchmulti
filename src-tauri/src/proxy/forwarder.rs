@@ -2,7 +2,7 @@
 //!
 //! 负责将请求转发到上游Provider，支持故障转移
 
-use super::hyper_client::ProxyResponse;
+use super::hyper_client::{ProxyResponse, MAX_RESPONSE_BODY_BYTES};
 use super::providers::{
     hosted_tools::bridge::{
         append_tool_outputs_to_chat_request, execute_hosted_tool_calls, scan_hosted_tool_calls,
@@ -4595,7 +4595,7 @@ impl RequestForwarder {
         let headers = response.headers().clone();
         let body_timeout = self.non_streaming_timeout;
         let body = super::response_grace::await_with_response_grace(
-            response.bytes(),
+            response.bytes_with_limit(MAX_RESPONSE_BODY_BYTES),
             body_timeout,
             super::response_grace::RESPONSE_PENDING_GRACE,
             || {
@@ -6029,15 +6029,17 @@ async fn read_decoded_proxy_response(
     let status = response.status();
     let mut headers = response.headers().clone();
     let encoding = get_content_encoding(&headers);
-    let raw = response.bytes().await?;
+    let raw = response.bytes_with_limit(MAX_RESPONSE_BODY_BYTES).await?;
     let decoded = match encoding {
-        Some(encoding) => match decompress_body(&encoding, &raw) {
-            Ok(Some(decompressed)) => {
-                strip_proxy_response_entity_headers(&mut headers);
-                Bytes::from(decompressed)
+        Some(encoding) => {
+            match decompress_body_with_limit(&encoding, &raw, MAX_RESPONSE_BODY_BYTES) {
+                Ok(Some(decompressed)) => {
+                    strip_proxy_response_entity_headers(&mut headers);
+                    Bytes::from(decompressed)
+                }
+                _ => raw,
             }
-            _ => raw,
-        },
+        }
         None => raw,
     };
 
@@ -6280,12 +6282,14 @@ fn upstream_transport_retry_backoff(attempt: usize) -> Duration {
 /// 读取并解压上游错误响应体，保留可读错误摘要给日志、fallback 判断和客户端。
 async fn read_decoded_error_body(response: ProxyResponse) -> Result<Option<String>, ProxyError> {
     let encoding = get_content_encoding(response.headers());
-    let raw = response.bytes().await?;
+    let raw = response.bytes_with_limit(MAX_RESPONSE_BODY_BYTES).await?;
     let decoded = match encoding {
-        Some(encoding) => match decompress_body(&encoding, &raw) {
-            Ok(Some(decompressed)) => decompressed,
-            _ => raw.to_vec(),
-        },
+        Some(encoding) => {
+            match decompress_body_with_limit(&encoding, &raw, MAX_RESPONSE_BODY_BYTES) {
+                Ok(Some(decompressed)) => decompressed,
+                _ => raw.to_vec(),
+            }
+        }
         None => raw.to_vec(),
     };
     Ok(String::from_utf8(decoded).ok())
