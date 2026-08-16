@@ -179,7 +179,10 @@ impl ProxyResponse {
                 let mut body = bytes::BytesMut::new();
                 while let Some(chunk) = stream.next().await {
                     let chunk = chunk.map_err(|e| {
-                        ProxyError::ForwardFailed(format!("Failed to read response body: {e}"))
+                        let chain = super::error::error_chain_message(&e);
+                        ProxyError::ResponsePending(format!(
+                            "Failed to read response body: {chain}"
+                        ))
                     })?;
                     if body.len() + chunk.len() > max_bytes {
                         return Err(ProxyError::ResponseBodyTooLarge(body.len() + chunk.len()));
