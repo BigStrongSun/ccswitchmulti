@@ -28,6 +28,7 @@ import {
 } from "lucide-react";
 import { useCodexOauth } from "./hooks/useCodexOauth";
 import { copyText } from "@/lib/clipboard";
+import CodexOauthAccountQuota from "@/components/CodexOauthAccountQuota";
 import {
   authApi,
   type CodexAccountPoolPolicy,

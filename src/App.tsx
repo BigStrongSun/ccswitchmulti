@@ -27,6 +27,8 @@ import {
   LayoutDashboard,
   Network,
   Route as RouteIcon,
+  Loader2,
+  RefreshCw,
 } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { Provider, VisibleApps } from "@/types";

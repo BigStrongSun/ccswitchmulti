@@ -1152,8 +1152,7 @@ export function CodexSubagentProfileEditor({
                           // （unroutable）"：未启用 profile 的后端编译状态是 Disabled，
                           // routable=false 会把它误判成不可路由，导致永远无法启用。
                           disabled={
-                            status?.status === "unroutable" &&
-                            !profile.enabled
+                            status?.status === "unroutable" && !profile.enabled
                           }
                           onCheckedChange={(checked) =>
                             updateProfile(profileKey, (current) => ({
