@@ -3569,3 +3569,8 @@
 - `ResponsePending -> 429 + Retry-After` 是用户看到 `Too Many Requests` 的直接本地原因；它不是上游 HTTP 状态。`v3.19.2-3` 改为 `424 Failed Dependency`、`cc_switch_response_result_unknown`、`retryable=false`，并移除 `Retry-After`。
 - 三类路径不得混合：确认未送达的 `ForwardFailed` 走 5 次安全连接重试；上游明确 HTTP 429 才走限流等待；发送后结果未知禁止盲重放。Hyper 的 IncompleteMessage 无法证明请求是否已被服务端执行，没有上游幂等键/response id 时不能承诺无损恢复。
 - RED `82eb04a` 稳定证明旧实现仍返回 429；GREEN `14863cb2` 完成状态、错误码、retryable 和消息语义收口，聚焦回归 7/7 通过。因为 `v3.19.2-2` 已推 tag 并启动构建，此修复使用新版本 `v3.19.2-3`，不得移动旧 tag。
+# 2026-08-16 v3.19.2-3 Windows 本地安装包构建
+
+- 在 `ccswitch-qwen38-stream-fix` 执行 `pnpm tauri build`，Windows x64 release 编译与两个 bundle 均成功；随后仅 updater 签名阶段因本机未设置 `TAURI_SIGNING_PRIVATE_KEY` 返回 exit 1。不得把这个退出码描述成 installer 构建失败，也不得声称本地产物具备正式 updater 签名。
+- NSIS：`src-tauri/target/release/bundle/nsis/CCSwitchMulti_3.19.2-3_x64-setup.exe`，11,728,717 bytes，FileVersion/ProductVersion 均为 `3.19.2-3`，SHA-256 `0C6237DF14BB4A550498217462CFD820A62D49CB78C6786A522980822AA0A8B8`。
+- MSI：`src-tauri/target/release/bundle/msi/CCSwitchMulti_3.19.2-3_x64_en-US.msi`，15,761,408 bytes，SHA-256 `359F4A6B0B043722C3428EAE0059A780F514B03AC5903675B1F94A7E4D22290A`。Explorer VersionInfo 不解析 MSI 产品版本，版本由 bundle 文件名和 Tauri 构建配置确认；正式分发仍以 GitHub Actions 签名资产为准。
