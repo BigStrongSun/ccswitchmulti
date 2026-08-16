@@ -89,15 +89,13 @@ describe("CodexMultiRouterWizard", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "启用并验证" }));
 
-    expect(
-      screen.getByRole("button", { name: "保存并发布" }),
-    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "保存并发布" })).toBeVisible();
     expect(
       screen.getByRole("button", { name: "启用这个多路路由" }),
     ).toBeVisible();
   });
 
-  it("explains the first step with user-facing guidance before technical details", () => {
+  it("keeps the first step focused on selecting model sources", () => {
     renderWithQueryClient(
       <CodexMultiRouterWizard
         open
@@ -109,12 +107,9 @@ describe("CodexMultiRouterWizard", () => {
       />,
     );
 
-    expect(screen.getByText("这套向导会帮你完成 6 件事")).toBeInTheDocument();
+    expect(screen.getByText("这里只选择模型源")).toBeInTheDocument();
     expect(screen.queryByText("子 Agent 候选")).not.toBeInTheDocument();
-    expect(screen.getByText(/你不用手动改配置文件/)).toBeInTheDocument();
-    expect(
-      screen.getByText(/技术备注：Codex 最后仍只连接本机/),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/凭据、模型目录、API 协议/)).toBeInTheDocument();
   });
 
   it("keeps the wizard controls inside small app windows", () => {
@@ -194,7 +189,7 @@ describe("CodexMultiRouterWizard", () => {
     ).toBeInTheDocument();
   });
 
-  it("guides official Codex sources to configure ChatGPT OAuth in provider config step", () => {
+  it("keeps official Codex source configuration on the Provider page", () => {
     renderWithQueryClient(
       <CodexMultiRouterWizard
         open
@@ -213,13 +208,10 @@ describe("CodexMultiRouterWizard", () => {
       />,
     );
 
-    expect(screen.getByText(/必须先完成 ChatGPT OAuth/)).toBeInTheDocument();
-    expect(screen.getByText("需要 ChatGPT OAuth")).toBeInTheDocument();
+    expect(screen.getAllByText("OpenAI Official").length).toBeGreaterThan(0);
+    expect(screen.getByText("配置 Provider")).toBeInTheDocument();
     expect(
-      screen.getByTestId("wizard-codex-oauth-section"),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByLabelText("OpenAI Official API 格式"),
+      screen.queryByTestId("wizard-codex-oauth-section"),
     ).not.toBeInTheDocument();
   });
 
@@ -268,7 +260,7 @@ describe("CodexMultiRouterWizard", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("keeps a manually selected Chat draft and route when a stale provider refetch arrives", async () => {
+  it("keeps the selected source when a stale provider refetch arrives", async () => {
     const queryClient = new QueryClient({
       defaultOptions: { queries: { retry: false } },
     });
@@ -299,24 +291,22 @@ describe("CodexMultiRouterWizard", () => {
     const { rerender } = render(renderWizard(staleQwen));
 
     fireEvent.click(screen.getByRole("button", { name: "选择模型源" }));
-    fireEvent.click(screen.getByLabelText("Qwen Local API 格式"));
-    fireEvent.click(screen.getByRole("option", { name: "Chat Completions" }));
-
-    expect(screen.getByLabelText("Qwen Local API 格式")).toHaveTextContent(
-      "Chat Completions",
-    );
-    expect(screen.getByText(/协议选择：用户已锁定/)).toBeInTheDocument();
+    expect(screen.getByText("Qwen Local")).toBeInTheDocument();
+    expect(
+      screen.getByRole("checkbox", { name: "使用 Qwen Local 作为模型源" }),
+    ).toBeChecked();
 
     // 模拟后台 provider query 在用户选择之后返回数据库里的旧 Responses 快照。
     rerender(renderWizard({ ...staleQwen }));
 
     await waitFor(() => {
-      expect(screen.getByLabelText("Qwen Local API 格式")).toHaveTextContent(
-        "Chat Completions",
-      );
+      expect(
+        screen.getByRole("checkbox", { name: "使用 Qwen Local 作为模型源" }),
+      ).toBeChecked();
     });
-    fireEvent.click(screen.getByRole("button", { name: "选择模型并预览路由" }));
-    expect(screen.getByText("openai_chat")).toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("Qwen Local API 格式"),
+    ).not.toBeInTheDocument();
   });
 
   it("marks catalog-only providers as continuable instead of requiring full config", () => {
@@ -341,8 +331,7 @@ describe("CodexMultiRouterWizard", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "选择模型源" }));
 
-    expect(screen.getByText("已有模型目录，可继续")).toBeInTheDocument();
-    expect(screen.getByText(/仍会重新尝试/)).toBeInTheDocument();
+    expect(screen.getByText("1 个模型")).toBeInTheDocument();
     expect(screen.queryByText(/未配置在线获取参数/)).not.toBeInTheDocument();
     expect(screen.queryByText("需补全配置")).not.toBeInTheDocument();
   });
@@ -629,7 +618,7 @@ describe("CodexMultiRouterWizard", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "选择模型源" }));
-    expect(screen.getByText("可自动获取模型")).toBeInTheDocument();
+    expect(screen.getByText("1 个模型")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
     fireEvent.click(
@@ -678,7 +667,7 @@ describe("CodexMultiRouterWizard", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "选择模型源" }));
-    expect(screen.getByText("缺在线凭据，使用内置目录")).toBeInTheDocument();
+    expect(screen.getByText("1 个模型")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
     fireEvent.click(
@@ -731,7 +720,7 @@ describe("CodexMultiRouterWizard", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "选择模型源" }));
-    expect(screen.getByText("可通过火山 OpenAPI 获取模型")).toBeInTheDocument();
+    expect(screen.getByText("1 个模型")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
     fireEvent.click(
@@ -834,7 +823,7 @@ describe("CodexMultiRouterWizard", () => {
     expect(onOpenProviderConfig).toHaveBeenCalledWith(source);
   });
 
-  it("shows inferred Responses format for official OpenAI sources with stale chat metadata", () => {
+  it("keeps source selection separate from Provider protocol metadata", () => {
     renderWithQueryClient(
       <CodexMultiRouterWizard
         open
@@ -863,13 +852,10 @@ describe("CodexMultiRouterWizard", () => {
     expect(
       screen.getAllByText(/OpenAI Official Backup/).length,
     ).toBeGreaterThan(0);
+    expect(screen.getByText("配置 Provider")).toBeInTheDocument();
     expect(
-      screen.getByText(/API 格式：Responses API（向导推断/),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(/已覆盖旧配置里的 Chat Completions/),
-    ).toBeInTheDocument();
-    expect(screen.queryByText(/默认 Chat Completions/)).not.toBeInTheDocument();
+      screen.queryByText(/API 格式：Responses API/),
+    ).not.toBeInTheDocument();
   });
 
   it("saves manually locked chat protocol instead of probe recommendations", async () => {
@@ -1075,7 +1061,11 @@ describe("CodexMultiRouterWizard", () => {
       screen.getByRole("button", { name: "测试 Chat / Responses 连通性" }),
     );
     expect(screen.getByText("确认开始连通性测试")).toBeInTheDocument();
-    expect(screen.getByRole("dialog")).toHaveClass("z-[200]");
+    expect(
+      screen
+        .getAllByRole("dialog")
+        .find((dialog) => dialog.className.includes("z-[200]")),
+    ).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
 
     expect(
