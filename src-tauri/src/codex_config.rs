@@ -4358,6 +4358,7 @@ fn codex_official_picker_metadata_field(
         | "contextWindow"
         | "is_default"
         | "isDefault"
+        | "priority"
         | "visibility"
         | "show_in_picker"
         | "showInPicker"
@@ -13050,10 +13051,12 @@ model_catalog_json = "cc-switch-model-catalog.json"
     }
 
     #[test]
-    /// GPT-5.6 同 slug 合并必须保留官方 max/ultra 推理档、速度档和展示名。
+    /// GPT-5.6 同 slug 合并必须保留官方 max/ultra 推理档、速度档和展示名，
+    /// 但 picker priority 必须使用路由目录的最终顺序，否则用户选择的前五会被官方优先级覆盖。
     fn merge_codex_models_preserves_official_gpt56_picker_metadata() {
         let official_models = json!([{
             "slug": "gpt-5.6-sol",
+            "priority": 1,
             "display_name": "GPT-5.6-Sol",
             "default_reasoning_level": "medium",
             "supported_reasoning_levels": [
@@ -13069,6 +13072,7 @@ model_catalog_json = "cc-switch-model-catalog.json"
         }]);
         let routed_models = json!([{
             "model": "gpt-5.6-sol",
+            "priority": 1004,
             "display_name": "gpt-5.6-sol",
             "default_reasoning_level": "medium",
             "supported_reasoning_levels": [
@@ -13097,6 +13101,11 @@ model_catalog_json = "cc-switch-model-catalog.json"
         assert_eq!(
             model.get("display_name").and_then(Value::as_str),
             Some("GPT-5.6-Sol")
+        );
+        assert_eq!(
+            model.get("priority").and_then(Value::as_u64),
+            Some(1004),
+            "routed picker priority must override the official same-slug priority"
         );
         assert_eq!(
             efforts,
@@ -13143,12 +13152,14 @@ model_catalog_json = "cc-switch-model-catalog.json"
         let _home = TestHomeGuard::new();
         seed_codex_models_cache(json!([{
             "slug": "gpt-5.5",
+            "priority": 1,
             "display_name": "GPT-5.5",
             "model_messages": { "instructions_template": "template" },
             "context_window": 128000
         }]));
         let settings = json!({
             "modelCatalog": {
+                "spawnAgentModels": ["qwen3.6", "deepseek-v4-flash", "gpt-5.5"],
                 "models": [
                     { "model": "gpt-5.5", "displayName": "GPT-5.5" },
                     { "model": "qwen3.6", "displayName": "Qwen 3.6" },
@@ -13237,6 +13248,23 @@ base_url = "http://127.0.0.1:15721/v1"
         assert!(slugs.contains(&"deepseek-v4-flash"));
         assert!(model_fields.contains(&"qwen3.6"));
         assert!(model_fields.contains(&"deepseek-v4-flash"));
+        assert_eq!(
+            &slugs[..3],
+            ["qwen3.6", "deepseek-v4-flash", "gpt-5.5"],
+            "cache order must follow the configured spawn_agent promotion order"
+        );
+        let priorities = cache["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .take(3)
+            .filter_map(|model| model.get("priority").and_then(Value::as_u64))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            priorities,
+            vec![1000, 1001, 1002],
+            "official same-slug priority must not jump ahead of routed Qwen/DeepSeek"
+        );
     }
 
     #[test]

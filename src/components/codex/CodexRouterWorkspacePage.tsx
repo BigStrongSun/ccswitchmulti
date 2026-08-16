@@ -5354,18 +5354,76 @@ function SpawnAgentCandidatesPanel({
 
       {activeSubagentVersion === "v2" && selectedPlan ? (
         <div className="mt-3">
+          <div className="mb-2">
+            <div className="text-sm font-semibold text-emerald-800 dark:text-emerald-100">
+              第一步：配置 V2 子 Agent 模型与能力
+            </div>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              先从完整可路由目录添加模型并配置角色能力；保存能力配置后，再在下方选择
+              Codex 工具说明优先展示的前 {spawnAgentVisibleLimit} 个模型。
+            </p>
+          </div>
           <CodexSubagentProfileEditor provider={selectedPlan} />
         </div>
       ) : null}
 
-      {activeSubagentVersion === "v1" ? (
+      {activeSubagentVersion === "v2" ? (
+        <div className="mt-3 grid gap-2 lg:grid-cols-2">
+          <div className="rounded-md border border-emerald-200 bg-background/75 p-3 dark:border-emerald-700/50 dark:bg-slate-950/30">
+            <div className="flex items-center justify-between gap-2">
+              <code className="text-xs font-semibold">deepseek-flash</code>
+              <Badge
+                className={cn(
+                  "border",
+                  hasFlashRoleModel
+                    ? "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-500/40 dark:bg-emerald-500/10 dark:text-emerald-100"
+                    : "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-100",
+                )}
+              >
+                {hasFlashRoleModel ? "可路由" : "目录中缺失"}
+              </Badge>
+            </div>
+            <p className="mt-2 text-xs leading-5 text-muted-foreground">
+              长上下文阅读、代码库扫描、架构追踪、并行证据收集和轻量验证。
+            </p>
+          </div>
+          <div className="rounded-md border border-emerald-200 bg-background/75 p-3 dark:border-emerald-700/50 dark:bg-slate-950/30">
+            <div className="flex items-center justify-between gap-2">
+              <code className="text-xs font-semibold">deepseek-pro</code>
+              <Badge
+                className={cn(
+                  "border",
+                  hasProRoleModel
+                    ? "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-500/40 dark:bg-emerald-500/10 dark:text-emerald-100"
+                    : "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-100",
+                )}
+              >
+                {hasProRoleModel ? "可路由" : "目录中缺失"}
+              </Badge>
+            </div>
+            <p className="mt-2 text-xs leading-5 text-muted-foreground">
+              复杂调试、跨模块推理、架构决策、高风险审查和复杂实现。
+            </p>
+          </div>
+          <p className="text-xs leading-5 text-violet-700/80 dark:text-violet-200/80 lg:col-span-2">
+            V2 managed roles 仍从完整可路由模型目录生成；下方前五顺序只决定
+            spawn_agent 工具向父 Agent 优先宣传哪些 direct model
+            override，不会删除其余角色或模型。
+          </p>
+        </div>
+      ) : null}
+
+      {selectedPlan ? (
         <div className="mt-3 rounded-md border border-amber-200 bg-background/70 p-3 dark:border-amber-700/50 dark:bg-slate-950/30">
           <div className="text-sm font-semibold text-amber-800 dark:text-amber-100">
-            V1 direct model override
+            {activeSubagentVersion === "v2"
+              ? "第二步：选择 V2 工具说明的前五模型"
+              : "V1 direct model override"}
           </div>
           <p className="mt-1 text-xs text-amber-700/80 dark:text-amber-200/80">
-            此排序只用于 V1 的 direct model override 可见窗口，并保留在当前
-            MultiRouter 配置中。
+            {activeSubagentVersion === "v2"
+              ? "Codex Multi-agent V2 当前也只在 spawn_agent 工具说明中展示前五个模型；其余可路由模型仍可被显式调用。这里保存 V1/V2 共用的宣传顺序。"
+              : "此排序用于 V1 的 direct model override 可见窗口，并保留在当前 MultiRouter 配置中；切换到 V2 后会继续复用。"}
           </p>
           <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
             <div className="flex flex-wrap gap-2">
@@ -5615,50 +5673,7 @@ function SpawnAgentCandidatesPanel({
             </div>
           ) : null}
         </div>
-      ) : (
-        <div className="mt-3 grid gap-2 lg:grid-cols-2">
-          <div className="rounded-md border border-emerald-200 bg-background/75 p-3 dark:border-emerald-700/50 dark:bg-slate-950/30">
-            <div className="flex items-center justify-between gap-2">
-              <code className="text-xs font-semibold">deepseek-flash</code>
-              <Badge
-                className={cn(
-                  "border",
-                  hasFlashRoleModel
-                    ? "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-500/40 dark:bg-emerald-500/10 dark:text-emerald-100"
-                    : "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-100",
-                )}
-              >
-                {hasFlashRoleModel ? "可路由" : "目录中缺失"}
-              </Badge>
-            </div>
-            <p className="mt-2 text-xs leading-5 text-muted-foreground">
-              长上下文阅读、代码库扫描、架构追踪、并行证据收集和轻量验证。
-            </p>
-          </div>
-          <div className="rounded-md border border-emerald-200 bg-background/75 p-3 dark:border-emerald-700/50 dark:bg-slate-950/30">
-            <div className="flex items-center justify-between gap-2">
-              <code className="text-xs font-semibold">deepseek-pro</code>
-              <Badge
-                className={cn(
-                  "border",
-                  hasProRoleModel
-                    ? "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-500/40 dark:bg-emerald-500/10 dark:text-emerald-100"
-                    : "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-100",
-                )}
-              >
-                {hasProRoleModel ? "可路由" : "目录中缺失"}
-              </Badge>
-            </div>
-            <p className="mt-2 text-xs leading-5 text-muted-foreground">
-              复杂调试、跨模块推理、架构决策、高风险审查和复杂实现。
-            </p>
-          </div>
-          <p className="text-xs leading-5 text-violet-700/80 dark:text-violet-200/80 lg:col-span-2">
-            V2 managed roles 从完整的可路由模型目录生成，不受 V1
-            前五候选排序限制；用户手写的同名 role 会保留并使用安全别名。
-          </p>
-        </div>
-      )}
+      ) : null}
     </section>
   );
 }
