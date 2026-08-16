@@ -3634,3 +3634,12 @@
 - 当前不是从零实现：Rust 已有完整 effort 枚举、`CodexModelReasoningCapability`、`ResolvedSubagentReasoningCapability`、catalog 投影、请求转换、Sub-Agent schema v2 和模型级 UI 基础。首要改动是把持久化 bool 演进为三态/控制类型，扩展来源证据，并用 fingerprint 证明四个消费者同源。
 - Provider metadata adapter 必须返回 Found/NotAdvertised/Unavailable/Invalid；后三者不能变成 confirmed_unsupported。常用模型能力库按平台、API 格式、canonical model、revision 匹配，前端不得维护副本。动态结果先缓存，用户采用后才固化。
 - P6 真实矩阵至少覆盖 Qwen/vLLM 无元数据、Qwen 用户声明档位、DeepSeek 维护映射、OpenAI 官方和 unknown 自定义网关，并保存同一 trace 的 capability fingerprint、Codex model list、脱敏请求结构、Provider 结果和 Sub-Agent effort。P6 前不改版本号、不发版。
+
+## 2026-08-17 推理能力产品决策确认
+
+- 用户模型级配置最高优先级；Provider 检测到差异时不覆盖，模型行显示小叹号，再次进入时展示旧值、新值、来源和时间，用户可主动采用。能力库确定为独立版本化 JSON，禁止编译进 Rust；第一阶段随应用打包，未来支持用户点击下载签名更新包、差异预览和失败回退，并允许社区 PR。
+- 首版只读取原始元数据，不发送 low/high/none 真实推理请求主动探测。Discovery 不限于 `/v1/models`：OpenRouter 可读 reasoning 对象；vLLM 可组合 `/v1/models`、`/version`、`/server_info?config_format=json` 和 OpenAPI/实例配置摘要。统一输出可扩展 `ProviderCapabilitySnapshot`，同时服务 reasoning、工具、结构化输出、模态和端点等能力；敏感实例字段只做 allowlist 提取。
+- 公共控制词表为 `none/minimal/low/medium/high/xhigh/max/ultra/custom`，具体模型只显示 resolved 子集；控制形态还包括 server-default、boolean、graded effort 和 token budget，以便服务非 Codex Agent。所有非恒等映射保存前必须可见。
+- CCSM 可配置 Codex 根级新任务默认 `model_reasoning_effort`，不强改当前线程，已有任务不追溯变化。Sub-Agent V2 新 profile 默认 delegated；CCSM 可安全配置单个全局 `[agents].default_subagent_reasoning_effort`，但单次 spawn effort 由父 Agent 运行时决定，CCSM 不改 reserved schema。V1 保留兼容读取、运行、导出和迁移，不复制新 reasoning 写逻辑。
+- 模型能力 schema 采用读旧写新；不要与 Sub-Agent V1/V2 混称。unknown + legacy fixed 保留两个稳定版本。CLI 暂定 `ccsm`、默认 JSON；mutation 需要人工确认或 planToken + expectedRevision；首版不做 MCP，本地 HTTP API 保留 TBD；JSON 为权威格式，YAML 可选。
+- 允许 AI 通过 JSON/stdin 等安全输入直接写密钥，但禁止命令行参数、输出、日志、审计和回读出现明文；只返回 hasSecret/脱敏摘要。审计保留 180 天或 10,000 条 mutation，不记录密钥、Prompt、响应或 reasoning 正文。

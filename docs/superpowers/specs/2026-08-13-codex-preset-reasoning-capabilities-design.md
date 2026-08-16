@@ -190,6 +190,15 @@ interface CodexModelReasoningCapability {
 5. 旧 `codexChatReasoning` 迁移结果。
 6. 保守 `unknown`。
 
+用户覆盖优先不代表忽略 Provider 更新。动态元数据与当前用户配置不一致时，resolver 继续使用用户
+配置，但保存一份候选差异；模型列表显示小叹号，用户再次进入模型编辑器时看到旧配置、新检测、
+来源与时间，并可主动采用。检测结果不得静默改写用户选择。
+
+能力发现不局限于 `/v1/models`。平台 adapter 可以读取模型详情、协议/端点能力、OpenAPI、服务
+版本和受信任的实例配置摘要，并统一生成 `ProviderCapabilitySnapshot`。该快照同时容纳 reasoning、
+工具调用、结构化输出、模态等能力；推理 resolver 只消费 reasoning 子对象。首版禁止通过发送
+low/high/none 真实推理请求来试错。
+
 保守兜底规则：
 
 - 未知 Native Responses 模型不自动继承 `none/high`；没有明确能力时不展示档位，也不覆盖上游默认值。
@@ -300,6 +309,11 @@ Provider 编辑页的“Codex 推理能力”区域承担模型能力摘要与�
 高级自定义使用结构化控件编辑上游参数类型、参数路径、支持档位、默认档位、
 关闭能力、档位映射和推理输出字段。原始 JSON 仅作为专家路径，并在保存时执行相同校验。
 
+公共控制词表贴近 Codex：`none/minimal/low/medium/high/xhigh/max/ultra`，并提供 `custom`。某个模型
+只能显示 resolved capability 中真实存在的子集。控制形态同时支持服务端默认、boolean 开关、
+graded effort、token budget 和自定义值，以便同一模型能力层服务非 Codex Agent；各 Agent adapter
+负责把公共意图投影为自身协议，不得假设所有 Agent 都接受 Codex 字符串。
+
 所有模式最终只生成一个 `CodexModelReasoningCapability`。JSON catalog、provider inline
 TOML、MultiRouter route 物化和请求转换均从这一 resolved capability 派生，不允许 UI 或
 兼容投影维护第二份默认档位。尤其必须区分“字段缺失”和“明确空数组”：
@@ -312,10 +326,12 @@ TOML、MultiRouter route 物化和请求转换均从这一 resolved capability �
 
 ### 8. 主模型与 Sub-Agent 配置
 
-主模型的用户选择继续由 Codex 线程设置承担，CCSM 负责让 catalog 只暴露合法集合，并把 Codex
-effort 翻译为 Provider 原生字段。CCSM 不应另造一个与 Codex 线程状态竞争的“当前主模型强度”。
+主模型设置拆成三层：模型能力默认值是 Provider 事实；CCSM 可以在 Codex 设置页配置根级
+`model_reasoning_effort`，作为新任务默认强度；当前任务的选择仍由 Codex 线程状态持有，CCSM
+不从外部强改。已有任务不会因修改全局默认而追溯变化。切换到不支持当前默认的模型时必须提示
+用户选择合法值或“模型默认”，不能静默钳制。
 
-Sub-Agent 编辑器在每个目标模型下只提供四种运行策略：
+Sub-Agent V2 编辑器在每个目标模型下只提供四种运行策略：
 
 - `delegated`：省略角色 TOML effort，让 Codex 继承父线程、单次 spawn 或全局默认；
 - `model_default`：解析并固定目标模型默认值，适合希望角色行为稳定的用户；
@@ -330,6 +346,12 @@ CCSM 还应显示“最终控制来源”：父线程、全局 Sub-Agent 默认�
 固定值。这样可以解释为何同一个模型在主 Agent 与 Sub-Agent 中表现不同，而不要求用户理解
 Codex 内部配置层。
 
+新 V2 profile 默认 `delegated`。CCSM 可以配置 Codex 的
+`[agents].default_subagent_reasoning_effort`，但这是跨目标模型的单个全局默认，只有全部可选目标
+都支持时才允许写入。单次 `spawn_agent.reasoning_effort` 是父 Agent 在运行时选择的参数，不是
+CCSM 预生成字段，CCSM 不改写 reserved spawn schema。Sub-Agent V1 保留读取、运行、导出和迁移，
+但不为本轮能力改造复制一套新的 reasoning 写入逻辑。
+
 ### 9. AI、CLI 与配置文件接口
 
 Reasoning 不能只有 GUI 入口。它必须作为 CCSM 全局 AI Configuration Plane 的一个领域，和
@@ -337,7 +359,7 @@ Provider、MultiRouter、Sub-Agent、MCP 等其他配置共用同一套后端查
 审计服务。不得为 AI 再实现一套模型推断规则，也不得把直接编辑 SQLite、生成的 `config.toml`、
 model catalog 或角色 TOML 作为推荐自动化接口。
 
-Reasoning 领域至少提供以下稳定操作：
+Reasoning 领域至少提供以下稳定操作；CLI 暂定名为 `ccsm`，默认输出版本化 JSON：
 
 ```text
 ccsm reasoning inspect  --provider <id> --model <id> --output json
@@ -360,6 +382,9 @@ ccsm reasoning reset    --provider <id> --model <id> --expected-revision <n> --o
 - 所有输出默认脱敏，禁止返回 API key、OAuth token、Cookie 或原始凭据；
 - mutation 返回 `changed`、新 revision、最终 resolved 结果、派生产物验证、是否需要重启 Codex、
   warnings 和 rollback/恢复标识；重复提交相同目标状态应幂等。
+- mutation 必须经过用户确认；非交互自动化至少携带 `planToken`、`expectedRevision` 和显式确认。
+- AI 可以通过 JSON/stdin 等安全输入直接写入密钥，但密钥不得出现在命令行参数、输出、日志或
+  回读中；接口只返回 `hasSecret` 和脱敏摘要，永远不能读取已有明文。
 
 公开声明文件使用独立、版本化 schema，不直接暴露数据库行结构。例如：
 
@@ -384,10 +409,11 @@ AI 在没有 Provider 证据、维护库匹配或用户声明时只能保留 `un
 写成 `confirmed_supported`。若用户希望 fixed effort，AI 应先 `inspect`，再提交模型能力声明的
 `plan`，最后在 revision 未变化时 `apply`；随后才能配置 Sub-Agent fixed 策略。
 
-CLI、未来本地 MCP/JSON-RPC、配置文件导入和 GUI 都只是 transport adapter。它们必须调用同一个
+CLI、配置文件导入和 GUI 都只是 transport adapter。它们必须调用同一个
 Reasoning Application Service；最终成功以数据库回读、resolver 结果和派生 Codex 配置验证为准，
 不能以命令返回 0 或文件写入成功代替。全局 AI Configuration Plane 的范围、权限、命令树和分期
-实施由独立设计文档进一步定义，本设计只约束 reasoning 领域契约。
+实施由独立设计文档进一步定义，本设计只约束 reasoning 领域契约。首版不实施 MCP；本地 HTTP
+API 保留为 TBD。权威配置文件为 JSON + JSON Schema，YAML 只作为可选输入。
 
 ### 10. 兼容与迁移
 
@@ -395,6 +421,9 @@ Reasoning Application Service；最终成功以数据库回读、resolver 结果
 - 重新保存内置预设时写入 preset identity 和用户差异，不把 legacy 推断固化成新官方事实。
 - 保留旧字段读取至少一个稳定发布周期；新写入以模型能力 schema 为准。
 - 现有用户手写 `config.toml` 不被 CCSwitchMulti 接管时保持不变。
+- 模型推理能力 schema 与 Sub-Agent V1/V2 是两件事：前者采用读旧写新的版本迁移；后者优先完整
+  支持 V2，V1 保留兼容读取、运行、导出和迁移。
+- unknown + legacy fixed 保留两个稳定版本并显示警告；用户重新保存时必须建立能力声明或改为 delegated。
 
 ### 11. 错误处理
 
@@ -450,6 +479,12 @@ Reasoning Application Service；最终成功以数据库回读、resolver 结果
 Qwen 等平台的档位随具体模型和 API 形态变化，不能在缺少具体模型证据时写成厂商级固定枚举。该不确定性通过保守兜底和模型级能力声明解决，而不是继续使用通用档位。
 
 2026-08-16 复核补充：Codex 当前源码把模型目录中的 `supported_reasoning_levels` 与可选菜单/换模校验绑定，把显式或默认 effort 序列化为 Responses `reasoning.effort`；`ultra` 在请求边界降为 `max`。CCS 官方当前已提供逐模型 `reasoningLevels/defaultReasoningLevel` 和多平台出站映射，但仍把空数组过滤成“未声明”，并保留模板档位，因此不能表达“已确认支持 reasoning、但无 graded effort”的完整能力；其目录声明与运行时 `codexChatReasoning` 也仍是两个数据结构。CCSM 的结构化单一 capability 方向更完整，但所有投影必须真正共用它，不能在 inline TOML 再引入通用默认值。
+
+2026-08-17 决策与证据补充：用户显式配置最高优先级，Provider 新元数据仅产生可见差异通知；能力库
+确定为独立版本化 JSON，并预留用户主动下载签名更新包。首版只读原始元数据，不发送 effort 试探。
+OpenRouter 已能逐模型返回 reasoning 档位、默认、mandatory 与 budget 支持；vLLM 可暴露模型、版本、
+服务实例和 reasoning parser/config 信息，但这些信息的缺失仍不能证明模型不支持。公共控制词表采用
+Codex 并集并增加 custom，具体模型只显示真实子集，同时保留 boolean 与 token budget 形态。
 
 ## 可实施修正计划
 
