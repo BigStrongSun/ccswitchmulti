@@ -2054,6 +2054,20 @@ pub(crate) fn chat_completion_to_response_with_context(
     }
     let tool_calls =
         chat_tool_calls_to_response_output_items(message, reasoning.as_deref(), tool_context);
+
+    // A completed turn that contained only unusable unnamed calls would otherwise
+    // look successful to Codex and terminate the agent loop silently. Truncated
+    // (`finish_reason=length`) turns remain incomplete and keep their true cause.
+    if response_status_from_finish_reason(finish_reason) == "completed"
+        && tool_calls.dropped > 0
+        && tool_calls.items.is_empty()
+    {
+        return Err(ProxyError::TransformError(format!(
+            "Upstream returned {} tool call(s) without a function name, \
+             leaving no usable tool call in this turn",
+            tool_calls.dropped
+        )));
+    }
     output.extend(tool_calls.items);
     if output
         .iter()
@@ -2197,7 +2211,6 @@ fn empty_assistant_message_output_item(response_id: &str) -> Value {
 
 struct ChatToolCallItems {
     items: Vec<Value>,
-    #[allow(dead_code)]
     dropped: usize,
 }
 
