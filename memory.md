@@ -3610,3 +3610,12 @@
 - CCS 官方 `upstream/main@d4fefefc` 已有逐模型 `reasoningLevels/defaultReasoningLevel`、平台/模型推断和 Responses→Chat effort 映射，但目录解析会把空数组过滤为未声明，模板档位继续保留；同时目录字段与运行时 `CodexChatReasoningConfig` 是两套结构，仍不能完整表达并统一驱动“有 reasoning、无 graded effort”。
 - OpenAI Codex `origin/main@9ded177ce7` 以 catalog `ModelInfo.supported_reasoning_levels` 驱动可选值和换模协调，以 `default_reasoning_level` 补缺，最终构造 Responses `reasoning.effort`；Codex 不理解第三方厂商参数。当前请求边界把 Codex 专用 `ultra` 降为 API `max`。
 - 两层责任已经写入同一设计：CCS/CCSM 负责真实模型能力与厂商方言转换，Codex 负责依据 catalog 展示、保存、线程继承、校验并发送统一 Responses effort。两层必须分别验收，catalog 是正式边界契约。
+
+## 2026-08-16 推理能力设计重构与 Sub-Agent 复核
+
+- 主推理设计文档已重构为“已确认知识”和“CCSM 修正计划”两部分。推理支持必须使用 `confirmed_supported/confirmed_unsupported/unknown` 三态；reasoning 产出、开关、graded effort、budget 和输出格式是独立维度。Provider 未返回能力或探测失败只能得到 unknown，不能推断为不支持。
+- 自动解析顺序确定为：用户模型级覆盖 → Provider 返回的精确模型能力 → CCSM 维护的“平台 + API 格式 + 精确模型 + revision”能力库 → 平台协议/Provider 级声明 → legacy → unknown。动态元数据必须携带 source、confidence、fetchedAt 和匹配键，一次失败探测不得覆盖用户声明或已确认快照。
+- Codex 只消费 catalog 的 `supported_reasoning_levels/default_reasoning_level` 并最终发送 Responses `reasoning.effort`；CCSM 负责第三方参数翻译。模型原生档位优先，额外 Codex 档位只能来自显式映射，禁止静默 clamp。GPT-5.6 与 GPT-5.4 Pro 的不同官方集合再次证明不能使用通用 effort 全集。
+- 当前 Codex 主线 Sub-Agent 顺序复核为：先继承父线程 effort/父模型默认；单次 spawn effort 优先于 `[agents].default_subagent_reasoning_effort`；显式换模型且无 effort 时使用目标模型默认；角色 TOML 显式 effort 最后覆盖；最终按目标 catalog 校验。字段暴露还受 Multi-Agent 版本、fork 模式和隐藏元数据影响。
+- CCSM schema v2 的 `delegated/model_default/fixed/disabled` 方向保持不变。unknown 模型默认 delegated；新 fixed 配置必须先建立模型级手动能力声明，不能直接写通用 medium/high。现有 unknown + legacy fixed 的信任路径只能作为带警告的迁移兼容，不得成为新配置绕过能力校验的入口。
+- 本轮仅更新设计与知识，不实施生产代码。主文档为 `docs/superpowers/specs/2026-08-13-codex-preset-reasoning-capabilities-design.md`；后续实现需先审计 resolver 的动态元数据输入、能力库版本、前端结构化入口、主模型 catalog 投影、Sub-Agent compiler 和 legacy 隔离。
