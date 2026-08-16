@@ -3586,3 +3586,10 @@
 
 - `main` 已包含 MultiRouter 向导修复与测试收口；随后合入 `bigstrongsun/fix-qwen38-tool-loop-streaming-v30`。该分支不仅包含两个 Qwen thinking 修复（`11ee53b8`、`f391f3d7`），还包含 hosted-tools 流式修复、V2 nickname/能力收口和 v3.19.2 主线合并，不能误称为只合入两个 Qwen commit。
 - v30 的前置/子集分支 `fix-qwen38-tool-loop-streaming-v14-base` 与 `fix-qwen38-v2-nickname` 已由 v30 历史覆盖，不再重复合并。备份、发布验证和实验分支不属于本次产品主线合并范围。
+
+# 2026-08-16 Git worktree 清理复核
+
+- 逐个复核此前保留的 worktree 后，`pr36-red@76084550`、`fix-qwen38-tool-loop-streaming-v30@f391f3d7` 和 `upstream/codex-history-repair-session-manager@f2c5fe18` 的提交 tip 均已被 `main@486dd1fd` 包含；前者未提交的 1M preference 测试已被主线更完整的同语义回归替代，后两者的剩余内容分别是 Rust `target-429-hotfix` 与 history-tool `.venv/build/__pycache__` 生成物。
+- `bigstrongsun/subagent-v1-v2@412e9b39` 的未提交测试仍要求旧的固定 `model_reasoning_effort=medium`，与主线 delegated/native reasoning 契约冲突；其唯一未合入提交是 v3.19.1-21 发布验收记忆，主线已有 v3.19.1-22 及后续发布证据。已移除本地 worktree/branch，远端 fork ref 作为历史引用保留。
+- `bigstrongsun/subagent-v2-capability-injection@b00c43e1` 仍包含未进入主线的学术课件、论文资料和设计资产，因此保留为唯一 linked worktree；其中误生成的 `artifacts/design-audit/subagent-theme-2026-08-11/05-light-after.png` 已删除。主工作树中的三个旧诊断 diff 快照也已清理。
+- 清理后 `git worktree list` 只剩 `main` 与上述 Sub-Agent V2 资料 worktree，两个工作树均无脏文件；删除前使用 `git worktree remove`/`prune`，生成物先经 `git clean -n` 预览再清理。Git 官方文档与 Matrix WebSearch 独立检索均确认：linked worktree 应用 `git worktree remove`，手工消失的管理记录用 `git worktree prune`。
