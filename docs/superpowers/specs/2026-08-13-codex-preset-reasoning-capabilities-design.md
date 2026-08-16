@@ -153,14 +153,52 @@ Kimi、Qwen、MiniMax、MiMo、SiliconFlow 等当前只有开关或不发送 eff
 
 ## 配置界面
 
-Provider 编辑页增加“Codex 推理能力”区域：
+推理能力属于模型，不属于整个 Provider。唯一普通用户入口固定为：
+
+```text
+Provider 编辑 → 模型列表 → 编辑模型 → 推理能力
+```
+
+普通用户不需要理解 `supportsThinking`、`supportsEffort`、`thinkingParam`、
+`effortParam`、`effortValueMode` 或 `outputFormat`。模型编辑器只提供以下互斥模式：
+
+1. **自动检测（推荐）**：采用 CCSwitchMulti 对“平台 + 精确模型”的已验证预设；证据不足时进入保守模式，不猜测 GPT 通用档位。
+2. **不支持推理**：不展示推理强度，也不发送 reasoning 参数。
+3. **支持推理开关**：只允许“跟随服务端 / 开启 / 关闭”；只有存在明确上游关闭契约时才展示关闭。
+4. **支持推理强度分档**：只展示该模型真实支持的档位和合法默认值。
+5. **高级自定义**：为自定义网关或已验证的特殊部署编辑协议字段。
+
+模型卡片必须显示最终生效摘要，例如：
+
+```text
+Qwen3.8 / vLLM
+推理能力：支持推理，但上游未声明强度分档
+控制方式：使用服务端默认行为
+推理输出：reasoning_content
+```
+
+这种模型在 Codex 中不得出现 `low/medium/high/xhigh` 菜单。能返回 reasoning、
+能开关 reasoning、能分档控制 reasoning 是三个独立能力，不能互相推导。
+
+Provider 编辑页的“Codex 推理能力”区域承担模型能力摘要与批量诊断，不作为第二套配置源：
 
 - 内置预设默认展示只读的模型能力摘要与来源。
-- “高级覆盖”开启后可以编辑支持档位、默认档位、允许关闭、上游参数与映射。
+- 点击某个模型的“编辑”动作进入上述唯一入口。
 - 自定义 Provider 默认可编辑，并提供兼容模板选择。
 - 显示最终生效配置，而不只显示用户差异。
 - 保存前进行 schema 和语义校验。
-- 提供“恢复内置默认值”和 JSON 导入/导出。
+- 提供“恢复内置默认值”；JSON 导入/导出只放在专家模式。
+
+高级自定义使用结构化控件编辑上游参数类型、参数路径、支持档位、默认档位、
+关闭能力、档位映射和推理输出字段。原始 JSON 仅作为专家路径，并在保存时执行相同校验。
+
+所有模式最终只生成一个 `CodexModelReasoningCapability`。JSON catalog、provider inline
+TOML、MultiRouter route 物化和请求转换均从这一 resolved capability 派生，不允许 UI 或
+兼容投影维护第二份默认档位。尤其必须区分“字段缺失”和“明确空数组”：
+
+- 缺失可以进入兼容迁移或保守推断；
+- `supportedEfforts=[]` 是明确的无分档声明，任何投影都不得回退到通用档位；
+- 没有合法分档时不得生成 `default_reasoning_effort=medium`。
 
 首版不做在线自动探测写入；探测结果容易受临时网关、账号权限和模型版本影响。在线刷新可以作为后续功能，必须经过用户确认后才覆盖配置。
 

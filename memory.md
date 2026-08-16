@@ -3600,3 +3600,10 @@
 - GitHub Actions Release run `31948794630` 的五个平台构建、`Publish GitHub Release` 与 `Assemble latest.json` 共七个 job 全部 success。Release `CCSwitchMulti v3.19.2-5` 非 draft、非 prerelease，并由 `/releases/latest` 返回为 Latest。
 - Release 共 19 个资产。六个平台 updater key（darwin-aarch64、darwin-x86_64、windows-x86_64、windows-aarch64、linux-x86_64、linux-aarch64）齐全；逐项下载 `.sig` 后与 `latest.json` signature 精确一致，签名长度为 412/428/432 字符。
 - 19 个资产分四批使用 GitHub 下载 URL 的 Range 请求验证可访问，均返回 HTTP 206；下载的 `latest.json` SHA-256 为 `e61b5aaeca124027d423932726608313024a9f78e0cd288e8355c74a4d4d9eb1`，与 GitHub asset digest 精确一致。
+
+## 2026-08-16 推理强度用户入口设计补充
+
+- 推理能力配置的唯一普通用户入口固定为 `Provider 编辑 → 模型列表 → 编辑模型 → 推理能力`。普通用户只选择自动检测、不支持、开关型、分档型或高级自定义，不直接理解内部 `thinkingParam` / `effortParam` / `effortValueMode`。
+- 能返回 reasoning、能开关 reasoning、能分档控制 reasoning 是三个独立能力。Qwen/vLLM 在没有明确强度或关闭契约时显示“支持推理、服务端默认、无强度分档”，不得伪造 GPT 通用档位。
+- `CodexModelReasoningCapability` 是唯一事实源，catalog、inline TOML、route 物化和出站转换均从 resolved capability 派生。明确 `supportedEfforts=[]` 不得回退通用档位，无合法分档时不得生成默认 `medium`。
+- 设计已补充到 `docs/superpowers/specs/2026-08-13-codex-preset-reasoning-capabilities-design.md`；下一步独立核对 CCS 官方的第三方适配逻辑与 Codex 自身的目录、设置和请求构造逻辑。
