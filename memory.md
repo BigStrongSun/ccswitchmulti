@@ -3564,3 +3564,8 @@
 - `v3.19.2-1` 的真实 HTTP 429 重试逻辑本身生效，缺口是确认未发出的传输错误窗口太短。`v3.19.2-2` 将仅针对 `ForwardFailed` 的同 Provider 重试从 2 次增至 5 次，退避为 200ms/600ms/1.5s/3s/6s；结合连接握手时间覆盖现场约一分钟波动，避免过早占用 Codex 客户端重连额度。
 - `ResponsePending` 仍不可自动重放。Hyper 官方定义 `IncompleteMessage` 可能是请求已写入后读取 EOF，也可能是消息传输未完成；reqwest 的 `SendRequest` 包装不足以可靠证明是否执行，不能仅凭错误字符串改为可重试。
 - RED `a84a2322`，GREEN `1a6c1994`；传输回归 4/4、真实 429 回归 3/3 通过。发布版本必须使用新 tag `v3.19.2-2`，不能覆盖已发布的 `v3.19.2-1`。
+# 2026-08-16 CCSwitchMulti v3.19.2-3 消除 ResponsePending 假 429
+
+- `ResponsePending -> 429 + Retry-After` 是用户看到 `Too Many Requests` 的直接本地原因；它不是上游 HTTP 状态。`v3.19.2-3` 改为 `424 Failed Dependency`、`cc_switch_response_result_unknown`、`retryable=false`，并移除 `Retry-After`。
+- 三类路径不得混合：确认未送达的 `ForwardFailed` 走 5 次安全连接重试；上游明确 HTTP 429 才走限流等待；发送后结果未知禁止盲重放。Hyper 的 IncompleteMessage 无法证明请求是否已被服务端执行，没有上游幂等键/response id 时不能承诺无损恢复。
+- RED `82eb04a` 稳定证明旧实现仍返回 429；GREEN `14863cb2` 完成状态、错误码、retryable 和消息语义收口，聚焦回归 7/7 通过。因为 `v3.19.2-2` 已推 tag 并启动构建，此修复使用新版本 `v3.19.2-3`，不得移动旧 tag。
