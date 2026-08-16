@@ -459,3 +459,35 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_opencode_models, OpenCodeModelRef};
+
+    #[test]
+    fn parses_sorts_and_deduplicates_models() {
+        assert_eq!(
+            parse_opencode_models(
+                "openrouter/vendor/model\nopencode/free-model\ninvalid\nopencode/free-model\n"
+            ),
+            vec![
+                OpenCodeModelRef {
+                    provider_id: "opencode".to_string(),
+                    model_id: "free-model".to_string(),
+                },
+                OpenCodeModelRef {
+                    provider_id: "openrouter".to_string(),
+                    model_id: "vendor/model".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn skips_malformed_output_lines() {
+        assert!(parse_opencode_models(
+            "notice: loading models\n/model\nprovider/\nbad provider/model\nprovider/bad model\nprovider/bad\u{1b}[0m\n"
+        )
+        .is_empty());
+    }
+}

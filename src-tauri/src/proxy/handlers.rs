@@ -454,7 +454,7 @@ pub async fn handle_models(
     let generated_path = crate::codex_config::get_codex_model_catalog_path();
     let active_catalog_path = match crate::codex_config::read_codex_config_text() {
         Ok(config_text) => {
-            crate::codex_config::resolve_cc_switch_catalog_path(&config_text, &generated_path)
+            crate::codex_config::resolve_cc_switch_catalog_path(&config_text, &config_dir)
         }
         Err(_) => None,
     };
@@ -4374,7 +4374,8 @@ fn codex_proxy_error_code(error: &ProxyError) -> &'static str {
         | ProxyError::NotRunning
         | ProxyError::BindFailed(_)
         | ProxyError::StopTimeout
-        | ProxyError::StopFailed(_) => "cc_switch_proxy_error",
+        | ProxyError::StopFailed(_)
+        | ProxyError::ResponseBodyTooLarge(_) => "cc_switch_proxy_error",
     }
 }
 
