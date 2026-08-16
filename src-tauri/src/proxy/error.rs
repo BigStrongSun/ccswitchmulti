@@ -159,7 +159,7 @@ impl IntoResponse for ProxyError {
                     ProxyError::InvalidRequest(_) => (StatusCode::BAD_REQUEST, self.to_string()),
                     ProxyError::Timeout(_) => (StatusCode::GATEWAY_TIMEOUT, self.to_string()),
                     ProxyError::ResponsePending(_) => {
-                        (StatusCode::TOO_MANY_REQUESTS, self.to_string())
+                        (StatusCode::FAILED_DEPENDENCY, self.to_string())
                     }
                     ProxyError::StreamIdleTimeout(_) => {
                         (StatusCode::GATEWAY_TIMEOUT, self.to_string())
@@ -196,15 +196,11 @@ impl IntoResponse for ProxyError {
 }
 
 impl ProxyError {
-    /// 建议客户端等待多久后再手动重试。
+    /// 建议客户端等待多久后重试。
     ///
-    /// 目前只有“请求可能已在途中”的错误返回该提示；这类错误不能让客户端
-    /// 自动重发，否则上游可能已经收到并正在执行同一请求。
+    /// `ResponsePending` 的结果未知，不能用 `Retry-After` 暗示客户端自动重放。
     pub fn retry_after_secs(&self) -> Option<u64> {
-        match self {
-            ProxyError::ResponsePending(_) => Some(RESPONSE_PENDING_GRACE_SECS),
-            _ => None,
-        }
+        None
     }
 }
 

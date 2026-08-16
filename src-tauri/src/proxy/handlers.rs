@@ -4196,8 +4196,8 @@ fn build_codex_proxy_error_response(
     })
 }
 
-fn codex_proxy_error_status(endpoint: &str, error: &ProxyError) -> axum::http::StatusCode {
-    if codex_image_result_unknown(endpoint, error) {
+fn codex_proxy_error_status(_endpoint: &str, error: &ProxyError) -> axum::http::StatusCode {
+    if codex_response_result_unknown(error) {
         return axum::http::StatusCode::FAILED_DEPENDENCY;
     }
     axum::http::StatusCode::from_u16(map_proxy_error_to_status(error))
@@ -4205,7 +4205,11 @@ fn codex_proxy_error_status(endpoint: &str, error: &ProxyError) -> axum::http::S
 }
 
 fn codex_image_result_unknown(endpoint: &str, error: &ProxyError) -> bool {
-    matches!(error, ProxyError::ResponsePending(_)) && codex_image_endpoint(endpoint)
+    codex_response_result_unknown(error) && codex_image_endpoint(endpoint)
+}
+
+fn codex_response_result_unknown(error: &ProxyError) -> bool {
+    matches!(error, ProxyError::ResponsePending(_))
 }
 
 fn codex_image_endpoint(endpoint: &str) -> bool {
@@ -4219,7 +4223,8 @@ fn codex_proxy_error_json(
     endpoint: &str,
     error: &ProxyError,
 ) -> Value {
-    let image_result_unknown = codex_image_result_unknown(endpoint, error);
+    let result_unknown = codex_response_result_unknown(error);
+    let image_result_unknown = result_unknown && codex_image_endpoint(endpoint);
     let (mut body, upstream_status) = match error {
         ProxyError::UpstreamError { status, body } => {
             let parsed_body = body
@@ -4237,6 +4242,8 @@ fn codex_proxy_error_json(
                     "type": "proxy_error",
                     "code": if image_result_unknown {
                         "cc_switch_image_result_unknown"
+                    } else if result_unknown {
+                        "cc_switch_response_result_unknown"
                     } else {
                         codex_proxy_error_code(error)
                     },
@@ -4287,6 +4294,10 @@ fn codex_proxy_error_json(
             format!(
                 "The OpenAI image request was sent, but the connection closed before a final result was received. Provider: {provider_name}; model: {request_model}; endpoint: {endpoint}; cause: {cause}. The result state is unknown and this request must not be replayed automatically."
             )
+        } else if result_unknown {
+            format!(
+                "The upstream request entered the send phase, but the connection closed before a final response was received. Provider: {provider_name}; model: {request_model}; endpoint: {endpoint}; cause: {cause}. This is not a rate limit. The result state is unknown and this request must not be replayed automatically."
+            )
         } else if matches!(error, ProxyError::ForwardFailed(_)) {
             let failure = if provider_name.eq_ignore_ascii_case("OpenAI Official") {
                 "OpenAI Codex upstream connection failed"
@@ -4317,10 +4328,17 @@ fn codex_proxy_error_json(
         error_obj.insert("type".to_string(), Value::String("proxy_error".to_string()));
     }
 
-    if image_result_unknown {
+    if result_unknown {
         error_obj.insert(
             "code".to_string(),
-            Value::String("cc_switch_image_result_unknown".to_string()),
+            Value::String(
+                if image_result_unknown {
+                    "cc_switch_image_result_unknown"
+                } else {
+                    "cc_switch_response_result_unknown"
+                }
+                .to_string(),
+            ),
         );
         error_obj.insert("retryable".to_string(), Value::Bool(false));
     } else if error_obj.get("code").map(Value::is_null).unwrap_or(true) {

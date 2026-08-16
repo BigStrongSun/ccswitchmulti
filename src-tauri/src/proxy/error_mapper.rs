@@ -28,8 +28,8 @@ pub fn map_proxy_error_to_status(error: &ProxyError) -> u16 {
         // 超时错误：504 Gateway Timeout
         ProxyError::Timeout(_) | ProxyError::StreamIdleTimeout(_) => 504,
 
-        // 请求可能已在上游处理中：不让 Codex 自动重发，用 429 停止重试风暴。
-        ProxyError::ResponsePending(_) => 429,
+        // 请求可能已到达上游但结果未知：不是限流，也不能诱导客户端自动重放。
+        ProxyError::ResponsePending(_) => 424,
 
         // 转发失败/连接失败：502 Bad Gateway
         ProxyError::ForwardFailed(_) => 502,
