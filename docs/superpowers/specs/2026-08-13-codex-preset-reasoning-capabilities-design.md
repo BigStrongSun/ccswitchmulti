@@ -180,7 +180,8 @@ interface CodexModelReasoningCapability {
 
 ### 4. 能力解析与优先级
 
-新增后端唯一入口 `resolve_codex_model_capability(provider, model)`，按以下顺序解析：
+将现有后端 reasoning resolver 演进为唯一入口
+`resolve_codex_model_capability(provider, model)`，按以下顺序解析：
 
 1. 模型级用户覆盖。
 2. Provider 返回的精确模型能力元数据。
@@ -449,3 +450,13 @@ Reasoning Application Service；最终成功以数据库回读、resolver 结果
 Qwen 等平台的档位随具体模型和 API 形态变化，不能在缺少具体模型证据时写成厂商级固定枚举。该不确定性通过保守兜底和模型级能力声明解决，而不是继续使用通用档位。
 
 2026-08-16 复核补充：Codex 当前源码把模型目录中的 `supported_reasoning_levels` 与可选菜单/换模校验绑定，把显式或默认 effort 序列化为 Responses `reasoning.effort`；`ultra` 在请求边界降为 `max`。CCS 官方当前已提供逐模型 `reasoningLevels/defaultReasoningLevel` 和多平台出站映射，但仍把空数组过滤成“未声明”，并保留模板档位，因此不能表达“已确认支持 reasoning、但无 graded effort”的完整能力；其目录声明与运行时 `codexChatReasoning` 也仍是两个数据结构。CCSM 的结构化单一 capability 方向更完整，但所有投影必须真正共用它，不能在 inline TOML 再引入通用默认值。
+
+## 可实施修正计划
+
+详细工作包、依赖关系、可视化路线图和验收门禁已经拆分到：
+
+`docs/superpowers/plans/2026-08-17-codex-reasoning-capability-correction.md`
+
+实施顺序固定为：契约与 RED 测试 → 三态 resolver 与来源链 → catalog/request/Sub-Agent 同源 →
+结构化 UI 与只读 AI 接口 → detect/plan/apply mutation → 真实 Provider/Codex canary → 发布迁移。
+在真实 canary 之前不得以源码测试宣称完成，也不得提前发版。

@@ -3626,3 +3626,11 @@
 - Reasoning 正式接口覆盖 inspect/detect/plan/apply/validate/export/reset。detect 默认只缓存；plan/dry-run 与 apply 使用相同校验；apply/reset 使用 revision 乐观并发，完成原子保存、派生产物重建和写后回读。机器模式使用版本化 JSON、稳定错误码/退出码、stdout/stderr 分离、默认脱敏和幂等目标状态。
 - 公开导入文件是独立版本化 schema，不等同数据库结构。AI 在没有证据时只能保留 unknown/server_default；配置 Sub-Agent fixed 前必须先 inspect 并建立有效模型能力声明。CLI、未来本地 MCP/JSON-RPC、配置导入和 GUI 只是同一 Application Service 的 transport adapter。
 - 已另建独立 Codex 任务研究 CCSM 全面的 AI 可配置方案；其范围包括所有配置域、现有写入路径、统一命令/API、权限与凭据边界、dry-run/并发/回滚/审计、测试验收和分阶段实施。本推理设计只定义 reasoning 领域实例，不提前替代全局设计结论。
+
+## 2026-08-17 推理能力修正可实施路线图
+
+- 独立 AI Configuration Plane 任务因响应流断开未完成，只留下可验证的配置域、写入路径、SSOT 和敏感边界盘点；不得把其未完成草稿描述为正式全局设计或已提交成果。有效结论是 GUI、同步、deeplink、SQL 导入和 live 文件构成多写者，全面 AI 配置必须统一 revision、plan/apply、回读、审计和脱敏。
+- 推理设计新增独立实施计划 `docs/superpowers/plans/2026-08-17-codex-reasoning-capability-correction.md`。路线固定为 P0 契约/RED、P1 三态 resolver/来源链、P2 catalog/request/Sub-Agent 同源、P3 结构化 UI、P4 AI/CLI 只读、P5 detect/plan/apply、P6 真实 canary、P7 发布迁移。
+- 当前不是从零实现：Rust 已有完整 effort 枚举、`CodexModelReasoningCapability`、`ResolvedSubagentReasoningCapability`、catalog 投影、请求转换、Sub-Agent schema v2 和模型级 UI 基础。首要改动是把持久化 bool 演进为三态/控制类型，扩展来源证据，并用 fingerprint 证明四个消费者同源。
+- Provider metadata adapter 必须返回 Found/NotAdvertised/Unavailable/Invalid；后三者不能变成 confirmed_unsupported。常用模型能力库按平台、API 格式、canonical model、revision 匹配，前端不得维护副本。动态结果先缓存，用户采用后才固化。
+- P6 真实矩阵至少覆盖 Qwen/vLLM 无元数据、Qwen 用户声明档位、DeepSeek 维护映射、OpenAI 官方和 unknown 自定义网关，并保存同一 trace 的 capability fingerprint、Codex model list、脱敏请求结构、Provider 结果和 Sub-Agent effort。P6 前不改版本号、不发版。
