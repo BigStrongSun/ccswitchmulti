@@ -329,21 +329,80 @@ CCSM 还应显示“最终控制来源”：父线程、全局 Sub-Agent 默认�
 固定值。这样可以解释为何同一个模型在主 Agent 与 Sub-Agent 中表现不同，而不要求用户理解
 Codex 内部配置层。
 
-### 9. 兼容与迁移
+### 9. AI、CLI 与配置文件接口
+
+Reasoning 不能只有 GUI 入口。它必须作为 CCSM 全局 AI Configuration Plane 的一个领域，和
+Provider、MultiRouter、Sub-Agent、MCP 等其他配置共用同一套后端查询、校验、mutation、回读与
+审计服务。不得为 AI 再实现一套模型推断规则，也不得把直接编辑 SQLite、生成的 `config.toml`、
+model catalog 或角色 TOML 作为推荐自动化接口。
+
+Reasoning 领域至少提供以下稳定操作：
+
+```text
+ccsm reasoning inspect  --provider <id> --model <id> --output json
+ccsm reasoning detect   --provider <id> --model <id> --output json
+ccsm reasoning plan     --file <declaration.json> --output json
+ccsm reasoning apply    --file <declaration.json> --expected-revision <n> --output json
+ccsm reasoning validate --provider <id> --output json
+ccsm reasoning export   --provider <id> --output json
+ccsm reasoning reset    --provider <id> --model <id> --expected-revision <n> --output json
+```
+
+接口语义：
+
+- `inspect` 同时返回 persisted declaration、resolved capability、Codex catalog projection、
+  Provider-native projection、来源与警告；
+- `detect` 默认只探测和缓存，不持久化；只有显式 `apply/accept` 才能把结果固化为用户确认配置；
+- `plan`/`--dry-run` 执行与真实写入完全相同的 schema 和语义校验，输出将发生的差异但不写状态；
+- `apply/reset` 使用 revision 或等价乐观并发条件，执行原子保存、派生产物重建和写后回读；
+- stdout 在机器模式只输出版本化 JSON，诊断写 stderr，退出码和错误码保持稳定；
+- 所有输出默认脱敏，禁止返回 API key、OAuth token、Cookie 或原始凭据；
+- mutation 返回 `changed`、新 revision、最终 resolved 结果、派生产物验证、是否需要重启 Codex、
+  warnings 和 rollback/恢复标识；重复提交相同目标状态应幂等。
+
+公开声明文件使用独立、版本化 schema，不直接暴露数据库行结构。例如：
+
+```json
+{
+  "schemaVersion": 1,
+  "kind": "ccsm.reasoning-capability",
+  "providerId": "my-vllm",
+  "model": "qwen3.8",
+  "spec": {
+    "supportStatus": "confirmed_supported",
+    "controlKind": "graded",
+    "supportedEfforts": ["low", "medium", "high"],
+    "defaultEffort": "medium",
+    "disableAllowed": false,
+    "source": "user"
+  }
+}
+```
+
+AI 在没有 Provider 证据、维护库匹配或用户声明时只能保留 `unknown/server_default`，不能把猜测
+写成 `confirmed_supported`。若用户希望 fixed effort，AI 应先 `inspect`，再提交模型能力声明的
+`plan`，最后在 revision 未变化时 `apply`；随后才能配置 Sub-Agent fixed 策略。
+
+CLI、未来本地 MCP/JSON-RPC、配置文件导入和 GUI 都只是 transport adapter。它们必须调用同一个
+Reasoning Application Service；最终成功以数据库回读、resolver 结果和派生 Codex 配置验证为准，
+不能以命令返回 0 或文件写入成功代替。全局 AI Configuration Plane 的范围、权限、命令树和分期
+实施由独立设计文档进一步定义，本设计只约束 reasoning 领域契约。
+
+### 10. 兼容与迁移
 
 - 旧 Provider 没有模型级 `reasoning` 时，读取已有 `codexChatReasoning` 形成 `source=legacy` 的运行时能力。
 - 重新保存内置预设时写入 preset identity 和用户差异，不把 legacy 推断固化成新官方事实。
 - 保留旧字段读取至少一个稳定发布周期；新写入以模型能力 schema 为准。
 - 现有用户手写 `config.toml` 不被 CCSwitchMulti 接管时保持不变。
 
-### 10. 错误处理
+### 11. 错误处理
 
 - 保存时拒绝默认档位不在支持列表、不可关闭却含 `none`、映射不完整、未知参数格式组合。
 - 内置预设能力缺失视为开发期测试失败；发行构建不应把该模型作为“完全支持”展示。
 - 用户覆盖无效时不回退到内置值并悄悄运行，而是保留原配置、显示具体校验错误。
 - 运行时发现目录和请求能力摘要 hash 不一致时记录诊断，并以 effective Provider 的 resolver 结果拒绝非法请求。
 
-### 11. 测试与验收
+### 12. 测试与验收
 
 #### 单元测试
 
@@ -367,6 +426,14 @@ Codex 内部配置层。
 - 自定义 Provider 编辑和校验。
 - 最终生效配置与保存后的后端解析结果一致。
 
+#### AI/CLI 契约测试
+
+- `inspect` 的 persisted/resolved/Codex/Provider 四层输出与 GUI 使用的后端结果完全一致。
+- `detect` 默认无持久化副作用，显式接受后写入且不会被下一次失败探测覆盖。
+- `plan` 与 `apply` 使用同一校验；过期 revision 拒绝写入并返回稳定冲突错误码。
+- 相同目标状态重复 apply 幂等，敏感字段在 stdout、stderr 和审计日志中均被脱敏。
+- mutation 成功必须包含数据库回读、catalog/inline model 投影以及受影响角色文件验证。
+
 #### 完成标准
 
 - 已收录预设不再依赖 GPT/Native 通用 reasoning 档位。
@@ -375,7 +442,7 @@ Codex 内部配置层。
 - 用户能够配置自定义 Provider，且能对内置预设进行明确标记的高级覆盖。
 - 专项 Rust/前端测试、完整相关测试、typecheck、format check 和 `git diff --check` 全部通过。
 
-### 12. 官方依据与不确定性
+### 13. 官方依据与不确定性
 
 设计依据来自 xAI、智谱、StepFun、OpenRouter 和 OpenAI 官方文档，并通过 Codex 内置 Web Search 与 Matrix WebSearch 两条独立链核对。Matrix 搜索索引查询未返回结果，但 Matrix 对官方 URL 的直接读取成功，内容与内置搜索一致。
 

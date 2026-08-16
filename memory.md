@@ -3619,3 +3619,10 @@
 - 当前 Codex 主线 Sub-Agent 顺序复核为：先继承父线程 effort/父模型默认；单次 spawn effort 优先于 `[agents].default_subagent_reasoning_effort`；显式换模型且无 effort 时使用目标模型默认；角色 TOML 显式 effort 最后覆盖；最终按目标 catalog 校验。字段暴露还受 Multi-Agent 版本、fork 模式和隐藏元数据影响。
 - CCSM schema v2 的 `delegated/model_default/fixed/disabled` 方向保持不变。unknown 模型默认 delegated；新 fixed 配置必须先建立模型级手动能力声明，不能直接写通用 medium/high。现有 unknown + legacy fixed 的信任路径只能作为带警告的迁移兼容，不得成为新配置绕过能力校验的入口。
 - 本轮仅更新设计与知识，不实施生产代码。主文档为 `docs/superpowers/specs/2026-08-13-codex-preset-reasoning-capabilities-design.md`；后续实现需先审计 resolver 的动态元数据输入、能力库版本、前端结构化入口、主模型 catalog 投影、Sub-Agent compiler 和 legacy 隔离。
+
+## 2026-08-16 Reasoning AI 配置接口与全局配置平面边界
+
+- Reasoning 不能只有 GUI；它必须作为 CCSM 全局 AI Configuration Plane 的一个领域，与 Provider、MultiRouter、Sub-Agent、MCP 等配置共用后端领域服务、校验、事务、回读和审计。AI 不应直接修改 SQLite、生成的 `config.toml`、model catalog 或角色 TOML。
+- Reasoning 正式接口覆盖 inspect/detect/plan/apply/validate/export/reset。detect 默认只缓存；plan/dry-run 与 apply 使用相同校验；apply/reset 使用 revision 乐观并发，完成原子保存、派生产物重建和写后回读。机器模式使用版本化 JSON、稳定错误码/退出码、stdout/stderr 分离、默认脱敏和幂等目标状态。
+- 公开导入文件是独立版本化 schema，不等同数据库结构。AI 在没有证据时只能保留 unknown/server_default；配置 Sub-Agent fixed 前必须先 inspect 并建立有效模型能力声明。CLI、未来本地 MCP/JSON-RPC、配置导入和 GUI 只是同一 Application Service 的 transport adapter。
+- 已另建独立 Codex 任务研究 CCSM 全面的 AI 可配置方案；其范围包括所有配置域、现有写入路径、统一命令/API、权限与凭据边界、dry-run/并发/回滚/审计、测试验收和分阶段实施。本推理设计只定义 reasoning 领域实例，不提前替代全局设计结论。
