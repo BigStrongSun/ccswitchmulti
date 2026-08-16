@@ -9090,7 +9090,10 @@ mod tests {
             .await
             .expect("normal first SSE event should be replayed");
 
-        let body = prepared.bytes().await.unwrap();
+        let body = prepared
+            .bytes_with_limit(MAX_RESPONSE_BODY_BYTES)
+            .await
+            .unwrap();
         assert!(String::from_utf8_lossy(&body).contains("response.created"));
         assert!(String::from_utf8_lossy(&body).contains("response.completed"));
     }
@@ -9605,8 +9608,13 @@ mod tests {
         assert!(final_response
             .headers()
             .contains_key(HOSTED_TOOL_LOOP_HEADER));
-        let final_body = serde_json::from_slice::<Value>(&final_response.bytes().await.unwrap())
-            .expect("final chat response json");
+        let final_body = serde_json::from_slice::<Value>(
+            &final_response
+                .bytes_with_limit(MAX_RESPONSE_BODY_BYTES)
+                .await
+                .unwrap(),
+        )
+        .expect("final chat response json");
         assert_eq!(
             final_body["choices"][0]["message"]["content"],
             "Search was unavailable."
@@ -9717,8 +9725,13 @@ mod tests {
         assert!(final_response
             .headers()
             .contains_key(HOSTED_TOOL_LOOP_HEADER));
-        let final_body = serde_json::from_slice::<Value>(&final_response.bytes().await.unwrap())
-            .expect("final chat response json");
+        let final_body = serde_json::from_slice::<Value>(
+            &final_response
+                .bytes_with_limit(MAX_RESPONSE_BODY_BYTES)
+                .await
+                .unwrap(),
+        )
+        .expect("final chat response json");
         assert_eq!(
             final_body["choices"][0]["message"]["content"],
             "Image generation was unavailable."

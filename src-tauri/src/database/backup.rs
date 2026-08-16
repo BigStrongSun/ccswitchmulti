@@ -1131,7 +1131,6 @@ mod tests {
     };
     use crate::error::AppError;
     use crate::settings::{update_settings, AppSettings};
-    use rusqlite::Connection;
     use serial_test::serial;
 
     struct TestHomeGuard {
@@ -1279,6 +1278,54 @@ mod tests {
                 "INSERT INTO providers (id, app_type, name, settings_config, meta)
                  VALUES ('target-sentinel', 'claude', 'Must Be Replaced', '{}', '{}')",
                 [],
+            )?;
+        }
+        target.import_sql(&backup_path)?;
+
+        let conn = crate::database::lock_conn!(target.conn);
+        let providers = conn
+            .prepare("SELECT id FROM providers ORDER BY id")?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(providers, vec!["file-provider"]);
+        let request_exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM proxy_request_logs WHERE request_id = 'file-request')",
+            [],
+            |row| row.get(0),
+        )?;
+        assert!(request_exists, "文件 API 必须完整恢复导出数据");
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn sync_import_preserves_local_only_tables() -> Result<(), AppError> {
+        let _test_home = TestHomeGuard::new();
+        let remote_db = Database::memory()?;
+        {
+            let conn = crate::database::lock_conn!(remote_db.conn);
+            conn.execute_batch(
+                "INSERT INTO providers (id, app_type, name, settings_config, meta)
+                 VALUES ('remote-provider', 'claude', 'Remote Provider', '{}', '{}');
+                 INSERT INTO proxy_request_logs (
+                     request_id, provider_id, app_type, model,
+                     input_tokens, output_tokens, total_cost_usd,
+                     latency_ms, status_code, created_at
+                 ) VALUES ('remote-request', 'remote-provider', 'claude', 'remote-model', 1, 1, '1', 1, 200, 1);
+                 INSERT INTO usage_daily_rollups (
+                     date, app_type, provider_id, model, request_count, success_count,
+                     input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+                     total_cost_usd, avg_latency_ms
+                 ) VALUES ('2099-01-01', 'claude', 'remote-provider', 'remote-model', 1, 1, 1, 1, 0, 0, '1', 1);
+                 INSERT INTO stream_check_logs (
+                     provider_id, provider_name, app_type, status, success, message,
+                     response_time_ms, http_status, model_used, retry_count, tested_at
+                 ) VALUES ('remote-provider', 'Remote Provider', 'claude', 'failed', 0, 'remote', 1, 500, 'remote-model', 0, 1);
+                 INSERT INTO proxy_live_backup (app_type, original_config, backed_up_at)
+                 VALUES ('claude', 'remote-live', '2099-01-01');
+                 INSERT INTO provider_health (
+                     provider_id, app_type, is_healthy, consecutive_failures, updated_at
+                 ) VALUES ('remote-provider', 'claude', 0, 9, '2099-01-01');",
             )?;
         }
         let remote_sql = remote_db.export_sql_string_for_sync(true)?;
@@ -1652,7 +1699,7 @@ mod tests {
             );
         }
 
-        let sync_sql = source.export_sql_string_for_sync()?;
+        let sync_sql = source.export_sql_string_for_sync(true)?;
         println!("sync payload: {} bytes", sync_sql.len());
 
         // 同步导入的耗时大头在“保留本机日志表”——本机库必须带同样规模的日志行。

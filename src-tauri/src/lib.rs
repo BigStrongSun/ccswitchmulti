@@ -1485,6 +1485,7 @@ pub fn run() {
             commands::apply_profile,
             // model list fetch (OpenAI-compatible /v1/models)
             commands::fetch_models_for_config,
+            commands::get_opencode_models,
             commands::probe_codex_chat_for_config,
             commands::probe_codex_responses_for_config,
             // ours: endpoint speed test + custom endpoint management

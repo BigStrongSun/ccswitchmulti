@@ -5,7 +5,84 @@
 use crate::services::model_fetch::{self, FetchedModel};
 use reqwest::header::{HeaderValue, CONTENT_TYPE, USER_AGENT};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::time::Duration;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenCodeModelRef {
+    pub provider_id: String,
+    pub model_id: String,
+}
+
+const OPENCODE_MODELS_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// 获取 OpenCode 当前运行时实际可用的模型，而不局限于静态配置文件。
+#[tauri::command]
+pub async fn get_opencode_models() -> Result<Vec<OpenCodeModelRef>, String> {
+    tokio::task::spawn_blocking(|| {
+        let config_dir = crate::opencode_config::get_opencode_dir();
+        let config_dir_env = config_dir.to_string_lossy().into_owned();
+        let extra_env = [
+            ("OPENCODE_CONFIG_DIR", config_dir_env),
+            ("OPENCODE_DISABLE_PROJECT_CONFIG", "true".to_string()),
+        ];
+        let output = super::misc::run_detected_tool_command_with_timeout(
+            "opencode",
+            &["models"],
+            Some(OPENCODE_MODELS_TIMEOUT),
+            &extra_env,
+            &config_dir,
+        )?;
+        if !output.status.success() {
+            let stderr = super::misc::decode_command_output(&output.stderr);
+            let stdout = super::misc::decode_command_output(&output.stdout);
+            let detail = if stderr.trim().is_empty() {
+                stdout.trim()
+            } else {
+                stderr.trim()
+            };
+            return Err(if detail.is_empty() {
+                "Failed to load OpenCode models".to_string()
+            } else {
+                format!("Failed to load OpenCode models: {detail}")
+            });
+        }
+
+        Ok(parse_opencode_models(&super::misc::decode_command_output(
+            &output.stdout,
+        )))
+    })
+    .await
+    .map_err(|e| format!("OpenCode model discovery task failed: {e}"))?
+}
+
+fn parse_opencode_models(output: &str) -> Vec<OpenCodeModelRef> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let (provider_id, model_id) = line.trim().split_once('/')?;
+            if provider_id.is_empty()
+                || model_id.is_empty()
+                || !provider_id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+                || model_id
+                    .chars()
+                    .any(|c| c.is_whitespace() || c.is_control())
+            {
+                return None;
+            }
+            Some((provider_id.to_string(), model_id.to_string()))
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|(provider_id, model_id)| OpenCodeModelRef {
+            provider_id,
+            model_id,
+        })
+        .collect()
+}
 
 /// 前端模型列表刷新命令的完整请求体。
 ///
@@ -352,7 +429,9 @@ fn truncate_probe_body(body: String) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_chat_probe_url, build_responses_probe_url};
+    use super::{
+        build_chat_probe_url, build_responses_probe_url, parse_opencode_models, OpenCodeModelRef,
+    };
 
     #[test]
     fn responses_probe_url_appends_v1_responses_to_root_base_url() {
@@ -458,12 +537,6 @@ mod tests {
             "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
         );
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{parse_opencode_models, OpenCodeModelRef};
-
     #[test]
     fn parses_sorts_and_deduplicates_models() {
         assert_eq!(
