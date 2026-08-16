@@ -60,6 +60,11 @@ const CODEX_RESPONSES_LITE_FALLBACK_TTL: Duration = Duration::from_secs(24 * 60 
 /// Codex 端 `request_max_retries` 是从客户端重新 POST；这里是在代理内直接复用
 /// 已转换好的请求体重试，减少不稳定网络下“一次 send 失败就整轮失败”的概率。
 const UPSTREAM_TRANSPORT_RETRY_LIMIT: usize = 2;
+/// 真实上游在尚未建立成功响应时明确返回 429，等价于拒绝接收本次采样请求，
+/// 因而可以安全重放同一份 headers/body。次数与 Codex 默认流恢复预算对齐。
+const CODEX_RATE_LIMIT_RETRY_LIMIT: usize = 5;
+const CODEX_RATE_LIMIT_MAX_SINGLE_DELAY: Duration = Duration::from_secs(60);
+const CODEX_RATE_LIMIT_TOTAL_DELAY_BUDGET: Duration = Duration::from_secs(180);
 
 fn validate_codex_official_authorization(headers: &http::HeaderMap) -> Result<(), ProxyError> {
     let authorization = headers
@@ -3528,10 +3533,16 @@ impl RequestForwarder {
             }
         };
 
-        let mut response = send_upstream_request_with_transport_retry(adapter.name(), || {
-            send_upstream_request(ordered_headers.clone(), body_bytes.clone())
-        })
-        .await
+        let send_once = || {
+            send_upstream_request_with_transport_retry(adapter.name(), || {
+                send_upstream_request(ordered_headers.clone(), body_bytes.clone())
+            })
+        };
+        let mut response = if matches!(app_type, AppType::Codex) {
+            send_codex_request_with_rate_limit_retry(adapter.name(), send_once).await
+        } else {
+            send_once().await
+        }
         .inspect_err(|err| {
             if let Some(trace_id) = codex_trace_id.as_deref() {
                 let transport = if is_socks_proxy || !preserve_exact_header_case {
@@ -6269,6 +6280,120 @@ where
             Err(error) => return Err(error),
         }
     }
+}
+
+/// 对真实上游 HTTP 429 做有界、可等待的同请求重放。
+///
+/// 这里与 `ResponsePending` 严格分离：只有已经拿到上游明确 HTTP 429 的请求才会
+/// 进入本循环；请求是否到达上游仍不确定的 send/header/body timeout 继续禁止重放。
+/// HTTP 429 表示服务端拒绝处理当前请求，因此复用完全相同的 headers/body 不会重复
+/// 已开始的模型采样或工具调用。明确的订阅/余额耗尽则立即交回外层账号池或路由降级，
+/// 避免在同一账号上等待和空转。
+async fn send_codex_request_with_rate_limit_retry<F, Fut>(
+    app_tag: &str,
+    mut send: F,
+) -> Result<ProxyResponse, ProxyError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<ProxyResponse, ProxyError>>,
+{
+    let mut retry_count = 0usize;
+    let mut total_delay = Duration::ZERO;
+
+    loop {
+        let response = send().await?;
+        if response.status() != http::StatusCode::TOO_MANY_REQUESTS {
+            return Ok(response);
+        }
+
+        let mut response_headers = response.headers().clone();
+        let retry_after = parse_retry_after_delay(&response_headers);
+        let body_text = read_decoded_error_body(response).await?;
+        let terminal_quota = is_terminal_codex_quota_429(body_text.as_deref());
+
+        if terminal_quota || retry_count >= CODEX_RATE_LIMIT_RETRY_LIMIT {
+            return Ok(rebuild_consumed_error_response(
+                http::StatusCode::TOO_MANY_REQUESTS,
+                &mut response_headers,
+                body_text,
+            ));
+        }
+
+        let requested_delay = retry_after.unwrap_or_else(|| codex_rate_limit_backoff(retry_count));
+        let remaining_budget = CODEX_RATE_LIMIT_TOTAL_DELAY_BUDGET.saturating_sub(total_delay);
+        if remaining_budget.is_zero() {
+            return Ok(rebuild_consumed_error_response(
+                http::StatusCode::TOO_MANY_REQUESTS,
+                &mut response_headers,
+                body_text,
+            ));
+        }
+        let delay = requested_delay
+            .min(CODEX_RATE_LIMIT_MAX_SINGLE_DELAY)
+            .min(remaining_budget);
+        log::warn!(
+            "[{app_tag}] 上游明确返回 HTTP 429，CCSM 将重发同一 Codex 请求 {}/{}（等待 {}ms，Retry-After={}）",
+            retry_count + 1,
+            CODEX_RATE_LIMIT_RETRY_LIMIT,
+            delay.as_millis(),
+            retry_after
+                .map(|value| format!("{}ms", value.as_millis()))
+                .unwrap_or_else(|| "missing".to_string())
+        );
+        tokio::time::sleep(delay).await;
+        total_delay += delay;
+        retry_count += 1;
+    }
+}
+
+fn parse_retry_after_delay(headers: &http::HeaderMap) -> Option<Duration> {
+    let value = headers
+        .get(http::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(Duration::from_secs(seconds));
+    }
+
+    let retry_at = chrono::DateTime::parse_from_rfc2822(value)
+        .ok()?
+        .with_timezone(&chrono::Utc);
+    let delay = retry_at.signed_duration_since(chrono::Utc::now());
+    delay.to_std().ok()
+}
+
+fn codex_rate_limit_backoff(retry_count: usize) -> Duration {
+    Duration::from_secs(1u64 << retry_count.min(5))
+}
+
+fn is_terminal_codex_quota_429(body: Option<&str>) -> bool {
+    let Some(body) = body else {
+        return false;
+    };
+    let normalized = body.to_ascii_lowercase();
+    [
+        "usage_limit_reached",
+        "insufficient_quota",
+        "billing_hard_limit_reached",
+        "the usage limit has been reached",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
+}
+
+fn rebuild_consumed_error_response(
+    status: http::StatusCode,
+    headers: &mut http::HeaderMap,
+    body: Option<String>,
+) -> ProxyResponse {
+    headers.remove(http::header::CONTENT_ENCODING);
+    headers.remove(http::header::CONTENT_LENGTH);
+    ProxyResponse::buffered(
+        status,
+        headers.clone(),
+        Bytes::from(body.unwrap_or_default()),
+    )
 }
 
 fn upstream_transport_retry_backoff(attempt: usize) -> Duration {
@@ -11393,7 +11518,10 @@ mod tests {
         .await;
 
         assert!(result.is_ok());
-        assert_eq!(tokio::time::Instant::now() - started_at, Duration::from_secs(17));
+        assert_eq!(
+            tokio::time::Instant::now() - started_at,
+            Duration::from_secs(17)
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -11416,10 +11544,10 @@ mod tests {
         })
         .await;
 
-        assert!(matches!(
-            result,
-            Err(ProxyError::UpstreamError { status: 429, .. })
-        ));
+        assert_eq!(
+            result.unwrap().status(),
+            http::StatusCode::TOO_MANY_REQUESTS
+        );
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }
