@@ -7748,6 +7748,96 @@ base_url = "https://codex.example/v1"
 
     #[tokio::test]
     #[serial]
+    async fn update_live_backup_from_multirouter_combines_common_and_user_config() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        db.set_config_snippet(
+            "codex",
+            Some(
+                "model_reasoning_effort = \"medium\"\n[mcp_servers.matrix]\ncommand = \"node\"\n"
+                    .to_string(),
+            ),
+        )
+        .expect("set common config");
+        db.save_live_backup(
+            "codex",
+            &serde_json::to_string(&json!({
+                "auth": { "OPENAI_API_KEY": "original-token" },
+                "config": "approval_policy = \"on-request\"\n[desktop]\nshow_context_window_usage = true\n"
+            }))
+            .expect("serialize seed backup"),
+        )
+        .await
+        .expect("seed backup");
+
+        let service = ProxyService::new(db.clone());
+        let provider = Provider::with_id(
+            "codex-multirouter".to_string(),
+            "Router".to_string(),
+            json!({
+                "auth": {},
+                "modelCatalog": { "models": [{ "model": "qwen" }] },
+                "codexRouting": {
+                    "enabled": true,
+                    "routes": [{ "id": "qwen", "enabled": true }]
+                }
+            }),
+            None,
+        );
+
+        service
+            .update_live_backup_from_provider("codex", &provider)
+            .await
+            .expect("update multirouter backup");
+
+        let backup = db
+            .get_live_backup("codex")
+            .await
+            .expect("read backup")
+            .expect("backup exists");
+        let stored: Value =
+            serde_json::from_str(&backup.original_config).expect("parse backup json");
+        let config = stored
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("config string");
+        let parsed: toml::Value = toml::from_str(config).expect("parse backup TOML");
+
+        assert_eq!(
+            parsed.get("approval_policy").and_then(toml::Value::as_str),
+            Some("on-request"),
+            "user-owned backup fields must survive"
+        );
+        assert_eq!(
+            parsed
+                .get("desktop")
+                .and_then(|value| value.get("show_context_window_usage"))
+                .and_then(toml::Value::as_bool),
+            Some(true),
+            "unknown desktop fields must survive"
+        );
+        assert_eq!(
+            parsed
+                .get("model_reasoning_effort")
+                .and_then(toml::Value::as_str),
+            Some("medium"),
+            "authoritative Common Config must be materialized"
+        );
+        assert_eq!(
+            parsed
+                .get("mcp_servers")
+                .and_then(|value| value.get("matrix"))
+                .and_then(|value| value.get("command"))
+                .and_then(toml::Value::as_str),
+            Some("node"),
+            "Common Config MCP entries must not be lost"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn update_live_backup_from_provider_preserves_codex_mcp_servers() {
         let _home = TempHome::new();
         crate::settings::reload_settings().expect("reload settings");

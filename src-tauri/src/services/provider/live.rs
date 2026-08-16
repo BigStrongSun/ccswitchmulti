@@ -568,16 +568,45 @@ pub(crate) fn provider_uses_common_config(
     provider: &Provider,
     snippet: Option<&str>,
 ) -> bool {
+    let has_snippet = snippet.is_some_and(|value| !value.trim().is_empty());
     match provider
         .meta
         .as_ref()
         .and_then(|meta| meta.common_config_enabled)
     {
-        Some(explicit) => explicit && snippet.is_some_and(|value| !value.trim().is_empty()),
+        Some(explicit) => explicit && has_snippet,
+        None if matches!(app_type, AppType::Codex)
+            && codex_provider_has_enabled_routing(provider) =>
+        {
+            // MultiRouter stores route/catalog state instead of a materialized
+            // `settings_config.config`. Its live config is synthesized later, so
+            // legacy subset inference can never see the Common Config in the
+            // provider snapshot. Treat the shared snippet as the user-owned base
+            // for routed providers; an explicit `common_config_enabled = false`
+            // above still opts out.
+            has_snippet
+        }
         None => snippet.is_some_and(|value| {
             settings_contain_common_config(app_type, &provider.settings_config, value)
         }),
     }
+}
+
+fn codex_provider_has_enabled_routing(provider: &Provider) -> bool {
+    let Some(routing) = provider.settings_config.get("codexRouting") else {
+        return false;
+    };
+    if routing
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .is_some_and(|enabled| !enabled)
+    {
+        return false;
+    }
+    routing
+        .get("routes")
+        .and_then(Value::as_array)
+        .is_some_and(|routes| !routes.is_empty())
 }
 
 pub(crate) fn remove_common_config_from_settings(
@@ -2867,6 +2896,104 @@ web_search = true
                 Some(r#"{ "includeCoAuthoredBy": false }"#),
             ),
             "explicit false should win over legacy subset detection"
+        );
+    }
+
+    #[test]
+    fn codex_multirouter_uses_common_config_without_materialized_provider_toml() {
+        let provider = Provider::with_id(
+            "codex-multirouter".to_string(),
+            "Router".to_string(),
+            json!({
+                "auth": {},
+                "modelCatalog": { "models": [{ "model": "qwen" }] },
+                "codexRouting": {
+                    "enabled": true,
+                    "routes": [{ "id": "qwen", "enabled": true }]
+                }
+            }),
+            None,
+        );
+
+        assert!(provider.settings_config.get("config").is_none());
+        assert!(provider_uses_common_config(
+            &AppType::Codex,
+            &provider,
+            Some("model_reasoning_effort = \"medium\"\n[mcp_servers.matrix]\ncommand = \"node\"\n"),
+        ));
+    }
+
+    #[test]
+    fn codex_multirouter_explicit_common_config_opt_out_still_wins() {
+        let mut provider = Provider::with_id(
+            "codex-multirouter".to_string(),
+            "Router".to_string(),
+            json!({
+                "codexRouting": {
+                    "enabled": true,
+                    "routes": [{ "id": "qwen", "enabled": true }]
+                }
+            }),
+            None,
+        );
+        provider.meta = Some(crate::provider::ProviderMeta {
+            common_config_enabled: Some(false),
+            ..Default::default()
+        });
+
+        assert!(!provider_uses_common_config(
+            &AppType::Codex,
+            &provider,
+            Some("model_reasoning_effort = \"medium\"\n"),
+        ));
+    }
+
+    #[test]
+    fn codex_multirouter_effective_settings_start_from_common_config() {
+        let db = Database::memory().expect("init db");
+        db.set_config_snippet(
+            "codex",
+            Some(
+                "model_reasoning_effort = \"medium\"\n[mcp_servers.matrix]\ncommand = \"node\"\n"
+                    .to_string(),
+            ),
+        )
+        .expect("set common config");
+        let provider = Provider::with_id(
+            "codex-multirouter".to_string(),
+            "Router".to_string(),
+            json!({
+                "auth": {},
+                "codexRouting": {
+                    "enabled": true,
+                    "routes": [{ "id": "qwen", "enabled": true }]
+                }
+            }),
+            None,
+        );
+
+        let effective =
+            build_effective_settings_with_common_config(&db, &AppType::Codex, &provider)
+                .expect("build effective settings");
+        let config = effective
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("materialized common config");
+        let parsed: toml::Value = toml::from_str(config).expect("parse effective TOML");
+
+        assert_eq!(
+            parsed
+                .get("model_reasoning_effort")
+                .and_then(toml::Value::as_str),
+            Some("medium")
+        );
+        assert_eq!(
+            parsed
+                .get("mcp_servers")
+                .and_then(|value| value.get("matrix"))
+                .and_then(|value| value.get("command"))
+                .and_then(toml::Value::as_str),
+            Some("node")
         );
     }
 
