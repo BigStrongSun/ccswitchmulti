@@ -3558,3 +3558,9 @@
 - 验证：正确的 `3.19.2-1` 源码线上 `codex_rate_limit_retry_` 3/3、`upstream_transport_retry_` 3/3 通过，release 构建成功；仅有既存 `openai_cache_read_tokens` dead-code warning。
 - 运行态采用不中断当前 Codex 流的磁盘热替换：安装路径 `C:\Users\sunda\AppData\Local\CCSwitchMulti\cc-switch.exe` 已是 `3.19.2-1`，SHA-256 `CB16F3830786369388222CA66F0F18E87F3C74BC949DFA0E1908B47F03111F50`；PID 35064 仍运行原映射文件且 15721 health 为 200，下次正常重启才加载补丁。回滚备份为 `backups\cc-switch.exe.pre-429-hotfix-20260816-1350.bak`，运行中旧映射文件为 `cc-switch.exe.running-old`。
 - 联网前置使用 Codex 内置 Web Search、GitHub 官方 CLI/API 与 Matrix WebSearch 独立链。内置搜索和 GitHub 源码/issue 交叉确认 `retry_429=false`、issue `#30471` 与旧 TypeScript PR `#506`；Matrix 仅返回 MDN 429 定义和低相关结果，未提供 Codex 实现的第二份正证据。
+# 2026-08-16 CCSwitchMulti v3.19.2-2 Codex 长网络波动续传根修
+
+- 用户任务 `01a008f6-4db8-7042-8091-8981857ad6cf` 的最终错误虽显示 HTTP 429，但 `codex-router.log` 证明上游没有返回 429：多个并发任务先连续遭遇 `Connect: unexpected EOF during handshake`；目标任务内部每次只重试 2 次，随后消耗 Codex 自身五次重连预算；最后一次为 `SendRequest: connection_closed_before_message_completed`，被本地 `ResponsePending -> 429` 兼容映射显示成 429。
+- `v3.19.2-1` 的真实 HTTP 429 重试逻辑本身生效，缺口是确认未发出的传输错误窗口太短。`v3.19.2-2` 将仅针对 `ForwardFailed` 的同 Provider 重试从 2 次增至 5 次，退避为 200ms/600ms/1.5s/3s/6s；结合连接握手时间覆盖现场约一分钟波动，避免过早占用 Codex 客户端重连额度。
+- `ResponsePending` 仍不可自动重放。Hyper 官方定义 `IncompleteMessage` 可能是请求已写入后读取 EOF，也可能是消息传输未完成；reqwest 的 `SendRequest` 包装不足以可靠证明是否执行，不能仅凭错误字符串改为可重试。
+- RED `a84a2322`，GREEN `1a6c1994`；传输回归 4/4、真实 429 回归 3/3 通过。发布版本必须使用新 tag `v3.19.2-2`，不能覆盖已发布的 `v3.19.2-1`。
