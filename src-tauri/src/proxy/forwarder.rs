@@ -11457,6 +11457,33 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn upstream_transport_retry_survives_five_safe_connect_failures() {
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts_for_send = attempts.clone();
+
+        let result = send_upstream_request_with_transport_retry("test", || {
+            let attempts = attempts_for_send.clone();
+            async move {
+                if attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 5 {
+                    Err(ProxyError::ForwardFailed(
+                        "上游连接失败: unexpected EOF during handshake".to_string(),
+                    ))
+                } else {
+                    Ok(ProxyResponse::buffered(
+                        http::StatusCode::OK,
+                        http::HeaderMap::new(),
+                        Bytes::new(),
+                    ))
+                }
+            }
+        })
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 6);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn codex_rate_limit_retry_recovers_same_request_after_transient_429() {
         let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let attempts_for_send = attempts.clone();
