@@ -3593,3 +3593,10 @@
 - `bigstrongsun/subagent-v1-v2@412e9b39` 的未提交测试仍要求旧的固定 `model_reasoning_effort=medium`，与主线 delegated/native reasoning 契约冲突；其唯一未合入提交是 v3.19.1-21 发布验收记忆，主线已有 v3.19.1-22 及后续发布证据。已移除本地 worktree/branch，远端 fork ref 作为历史引用保留。
 - `bigstrongsun/subagent-v2-capability-injection@b00c43e1` 仍包含未进入主线的学术课件、论文资料和设计资产，因此保留为唯一 linked worktree；其中误生成的 `artifacts/design-audit/subagent-theme-2026-08-11/05-light-after.png` 已删除。主工作树中的三个旧诊断 diff 快照也已清理。
 - 清理后 `git worktree list` 只剩 `main` 与上述 Sub-Agent V2 资料 worktree，两个工作树均无脏文件；删除前使用 `git worktree remove`/`prune`，生成物先经 `git clean -n` 预览再清理。Git 官方文档与 Matrix WebSearch 独立检索均确认：linked worktree 应用 `git worktree remove`，手工消失的管理记录用 `git worktree prune`。
+
+# 2026-08-16 CCSwitchMulti v3.19.2-5 GitHub 正式发布
+
+- 发布提交为 `704530b0d1892ef6f3cc7a94d0695c009983db94`，四处权威版本源统一为 `3.19.2-5`；annotated tag `v3.19.2-5` 已推送到 `fork`（`BigStrongSun/ccswitchmulti`），未移动既有 `v3.19.2-4`。
+- GitHub Actions Release run `31948794630` 的五个平台构建、`Publish GitHub Release` 与 `Assemble latest.json` 共七个 job 全部 success。Release `CCSwitchMulti v3.19.2-5` 非 draft、非 prerelease，并由 `/releases/latest` 返回为 Latest。
+- Release 共 19 个资产。六个平台 updater key（darwin-aarch64、darwin-x86_64、windows-x86_64、windows-aarch64、linux-x86_64、linux-aarch64）齐全；逐项下载 `.sig` 后与 `latest.json` signature 精确一致，签名长度为 412/428/432 字符。
+- 19 个资产分四批使用 GitHub 下载 URL 的 Range 请求验证可访问，均返回 HTTP 206；下载的 `latest.json` SHA-256 为 `e61b5aaeca124027d423932726608313024a9f78e0cd288e8355c74a4d4d9eb1`，与 GitHub asset digest 精确一致。
