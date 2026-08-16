@@ -168,26 +168,18 @@ impl ProxyResponse {
     /// 而不是先收满再比较——否则超大明文 body 仍会完整进入内存，限制形同虚设。
     pub async fn bytes_with_limit(self, max_bytes: usize) -> Result<Bytes, ProxyError> {
         match self {
-            Self::Hyper(r) => {
-                let collected = r.into_body().collect().await.map_err(|e| {
-                    let chain = super::error::error_chain_message(&e);
-                    ProxyError::ResponsePending(format!("Failed to read response body: {chain}"))
-                })?;
-                Ok(collected.to_bytes())
+            Self::Buffered { body, .. } => {
+                if body.len() > max_bytes {
+                    return Err(ProxyError::ResponseBodyTooLarge(body.len()));
+                }
+                Ok(body)
             }
-            Self::Reqwest(r) => r.bytes().await.map_err(|e| {
-                let chain = super::error::error_chain_message(&e);
-                ProxyError::ResponsePending(format!("Failed to read response body: {chain}"))
-            }),
-            Self::Buffered { body, .. } => Ok(body),
-            Self::Streamed { mut stream, .. } => {
+            response => {
+                let mut stream = response.bytes_stream();
                 let mut body = bytes::BytesMut::new();
                 while let Some(chunk) = stream.next().await {
                     let chunk = chunk.map_err(|e| {
-                        let chain = super::error::error_chain_message(&e);
-                        ProxyError::ResponsePending(format!(
-                            "Failed to read response body: {chain}"
-                        ))
+                        ProxyError::ForwardFailed(format!("Failed to read response body: {e}"))
                     })?;
                     if body.len() + chunk.len() > max_bytes {
                         return Err(ProxyError::ResponseBodyTooLarge(body.len() + chunk.len()));
