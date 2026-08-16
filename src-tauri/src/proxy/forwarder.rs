@@ -11330,4 +11330,96 @@ mod tests {
             UPSTREAM_TRANSPORT_RETRY_LIMIT + 1
         );
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn codex_rate_limit_retry_recovers_same_request_after_transient_429() {
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts_for_send = attempts.clone();
+
+        let result = send_codex_request_with_rate_limit_retry("test", || {
+            let attempts = attempts_for_send.clone();
+            async move {
+                let attempt = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if attempt == 0 {
+                    Ok(ProxyResponse::buffered(
+                        http::StatusCode::TOO_MANY_REQUESTS,
+                        http::HeaderMap::new(),
+                        Bytes::from_static(
+                            br#"{"error":{"type":"rate_limit_exceeded","message":"slow down"}}"#,
+                        ),
+                    ))
+                } else {
+                    Ok(ProxyResponse::buffered(
+                        http::StatusCode::OK,
+                        http::HeaderMap::new(),
+                        Bytes::new(),
+                    ))
+                }
+            }
+        })
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn codex_rate_limit_retry_honors_retry_after_seconds() {
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts_for_send = attempts.clone();
+        let started_at = tokio::time::Instant::now();
+
+        let result = send_codex_request_with_rate_limit_retry("test", || {
+            let attempts = attempts_for_send.clone();
+            async move {
+                let attempt = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if attempt == 0 {
+                    let mut headers = http::HeaderMap::new();
+                    headers.insert(http::header::RETRY_AFTER, "17".parse().unwrap());
+                    Ok(ProxyResponse::buffered(
+                        http::StatusCode::TOO_MANY_REQUESTS,
+                        headers,
+                        Bytes::from_static(br#"{"error":{"type":"rate_limit_exceeded"}}"#),
+                    ))
+                } else {
+                    Ok(ProxyResponse::buffered(
+                        http::StatusCode::OK,
+                        http::HeaderMap::new(),
+                        Bytes::new(),
+                    ))
+                }
+            }
+        })
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(tokio::time::Instant::now() - started_at, Duration::from_secs(17));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn codex_rate_limit_retry_does_not_spin_on_usage_limit_reached() {
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts_for_send = attempts.clone();
+
+        let result = send_codex_request_with_rate_limit_retry("test", || {
+            let attempts = attempts_for_send.clone();
+            async move {
+                attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(ProxyResponse::buffered(
+                    http::StatusCode::TOO_MANY_REQUESTS,
+                    http::HeaderMap::new(),
+                    Bytes::from_static(
+                        br#"{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached"}}"#,
+                    ),
+                ))
+            }
+        })
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(ProxyError::UpstreamError { status: 429, .. })
+        ));
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
 }
