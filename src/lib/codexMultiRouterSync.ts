@@ -335,7 +335,12 @@ function rebuildPlanModelCatalog(
     }
   }
 
-  const models = Array.from(byModel.values());
+  // 路由同步会重建模型元数据，但全量菜单排序属于 MultiRouter 自身的用户偏好，
+  // 不能因模型源刷新或规则保存而被覆盖。
+  const models = Array.from(byModel.entries()).map(([id, model]) => {
+    const sortIndex = planCatalogByModel.get(id)?.sortIndex;
+    return sortIndex === undefined ? model : { ...model, sortIndex };
+  });
   const existingSpawnAgentModels = Array.isArray(
     plan.settingsConfig?.modelCatalog?.spawnAgentModels,
   )

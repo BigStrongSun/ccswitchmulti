@@ -140,6 +140,7 @@ export type WorkspaceTab =
   | "overview"
   | "sources"
   | "routes"
+  | "model-order"
   | "subagents"
   | "status"
   | "test";
@@ -462,6 +463,7 @@ type CodexCatalogModelDraft = {
   supportsImage?: boolean;
   supports_image?: boolean;
   vision?: boolean;
+  sortIndex?: number;
   capabilities?: CodexRouteCapabilities;
 };
 
@@ -716,6 +718,7 @@ function providerWithFetchedModelCatalog(
         ? { supports_image: model.supports_image }
         : {}),
       ...(model.vision !== undefined ? { vision: model.vision } : {}),
+      ...(model.sortIndex !== undefined ? { sortIndex: model.sortIndex } : {}),
       // 模型目录刷新必须保留已有 reasoning 声明（用户手动声明的档位/能力）。
       // 否则 /models 拉取重建会把声明清空，导致档位消失（K3/Qwen 均受影响）。
       ...(model.reasoning ? { reasoning: model.reasoning } : {}),
@@ -1307,6 +1310,7 @@ function catalogDraftFromSourceModel(
       ? { supports_image: source.supports_image }
       : {}),
     ...(source?.vision !== undefined ? { vision: source.vision } : {}),
+    ...(source?.sortIndex !== undefined ? { sortIndex: source.sortIndex } : {}),
     ...(capabilities ? { capabilities } : {}),
   };
 }
@@ -1786,8 +1790,12 @@ export function buildModelCatalogForRoutes(
       modelIds.filter((model) => !existingSpawnAgentModels.includes(model)),
     )
     .slice(0, 5);
+  const orderedModels = Array.from(byModel.entries()).map(([id, model]) => {
+    const sortIndex = existingModelById.get(id)?.sortIndex;
+    return sortIndex === undefined ? model : { ...model, sortIndex };
+  });
   return {
-    models: Array.from(byModel.values()),
+    models: orderedModels,
     spawnAgentModels,
   };
 }
@@ -3072,7 +3080,7 @@ export function CodexRouterWorkspacePage({
           onValueChange={(value) => setActiveTab(value as WorkspaceTab)}
         >
           <div className="sticky top-0 z-10 -mx-1 bg-background/95 px-1 py-2 backdrop-blur">
-            <TabsList className="grid w-full grid-cols-3 bg-muted p-1 dark:bg-slate-950/40 lg:grid-cols-6">
+            <TabsList className="grid w-full grid-cols-3 bg-muted p-1 dark:bg-slate-950/40 lg:grid-cols-7">
               <WorkspaceTabTrigger
                 value="overview"
                 icon={Layers3}
@@ -3087,6 +3095,11 @@ export function CodexRouterWorkspacePage({
                 value="routes"
                 icon={Route}
                 label="路由规则"
+              />
+              <WorkspaceTabTrigger
+                value="model-order"
+                icon={GripVertical}
+                label="模型排序"
               />
               <WorkspaceTabTrigger
                 value="subagents"
@@ -3159,6 +3172,13 @@ export function CodexRouterWorkspacePage({
               routePickerMessage={routePickerMessage}
               routePickerError={routePickerError}
               onRoutePickerOpenChange={setIsRoutePickerOpen}
+            />
+          </TabsContent>
+
+          <TabsContent value="model-order" className="mt-3">
+            <ModelOrderTab
+              selectedPlan={selectedPlan}
+              onCreatePlan={handleCreatePlan}
             />
           </TabsContent>
 
@@ -3617,6 +3637,210 @@ function SubagentsTab({
         selectedRoutes={selectedRoutes}
       />
     </div>
+  );
+}
+
+function ModelOrderTab({
+  selectedPlan,
+  onCreatePlan,
+}: {
+  selectedPlan: Provider | null;
+  onCreatePlan: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const [draftModels, setDraftModels] = useState<CodexCatalogModel[]>([]);
+  const [isSaving, setIsSaving] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const sensors = useSensors(
+    useSensor(PointerSensor),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    }),
+  );
+  const catalog = readCodexModelCatalog(selectedPlan);
+  const catalogKey = catalog.models
+    .map((model) => `${model.model ?? ""}:${model.sortIndex ?? ""}`)
+    .join("\n");
+  const hasCustomOrder = catalog.models.some(
+    (model) => model.sortIndex !== undefined,
+  );
+  const hasChanges =
+    draftModels.map((model) => model.model).join("\n") !==
+      catalog.models
+        .slice()
+        .sort(
+          (left, right) =>
+            (left.sortIndex ?? Number.MAX_SAFE_INTEGER) -
+            (right.sortIndex ?? Number.MAX_SAFE_INTEGER),
+        )
+        .map((model) => model.model)
+        .join("\n");
+
+  useEffect(() => {
+    setDraftModels(
+      catalog.models
+        .slice()
+        .sort(
+          (left, right) =>
+            (left.sortIndex ?? Number.MAX_SAFE_INTEGER) -
+            (right.sortIndex ?? Number.MAX_SAFE_INTEGER),
+        ),
+    );
+    setMessage(null);
+    setError(null);
+  }, [selectedPlan?.id, catalogKey]);
+
+  function handleDragEnd(event: DragEndEvent) {
+    const activeModel = String(event.active.id);
+    const overModel = event.over ? String(event.over.id) : "";
+    if (!overModel || activeModel === overModel) return;
+    setDraftModels((current) => {
+      const activeIndex = current.findIndex(
+        (model) => model.model?.trim() === activeModel,
+      );
+      const overIndex = current.findIndex(
+        (model) => model.model?.trim() === overModel,
+      );
+      if (activeIndex < 0 || overIndex < 0) return current;
+      const next = [...current];
+      const [moved] = next.splice(activeIndex, 1);
+      next.splice(overIndex, 0, moved);
+      return next;
+    });
+    setMessage(null);
+    setError(null);
+  }
+
+  async function saveOrder(reset = false) {
+    if (!selectedPlan) return;
+    setIsSaving(true);
+    setMessage(null);
+    setError(null);
+    try {
+      const currentModelCatalog =
+        selectedPlan.settingsConfig?.modelCatalog &&
+        typeof selectedPlan.settingsConfig.modelCatalog === "object"
+          ? selectedPlan.settingsConfig.modelCatalog
+          : {};
+      const models = (reset ? catalog.models : draftModels).map(
+        (model, index) => {
+          const rest = { ...model };
+          delete rest.sortIndex;
+          return reset ? rest : { ...rest, sortIndex: index };
+        },
+      );
+      const nextProvider: Provider = {
+        ...selectedPlan,
+        settingsConfig: {
+          ...selectedPlan.settingsConfig,
+          modelCatalog: {
+            ...currentModelCatalog,
+            models,
+          },
+        },
+      };
+      await providersApi.update(nextProvider, "codex");
+      setDraftModels(models);
+      setMessage(
+        reset
+          ? "已恢复默认模型顺序；重启 Codex Desktop 后生效。"
+          : `已保存 ${models.length} 个模型的展示顺序；重启 Codex Desktop 后生效。`,
+      );
+      await queryClient.invalidateQueries({ queryKey: ["providers", "codex"] });
+    } catch (saveError) {
+      setError(`保存模型顺序失败：${workspaceErrorMessage(saveError)}`);
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  if (!selectedPlan) {
+    return (
+      <EmptyState
+        icon={GripVertical}
+        title="还没有可排序的 MultiRouter"
+        detail="先创建或选择一个多路路由方案，再调整 Codex 模型选择器中的全量模型顺序。"
+        actionLabel="创建多路路由"
+        onAction={onCreatePlan}
+      />
+    );
+  }
+
+  if (catalog.models.length === 0) {
+    return (
+      <EmptyState
+        icon={GripVertical}
+        title="当前方案没有模型目录"
+        detail="先在“路由规则”中接入模型源并保存，模型目录生成后即可在这里排序。"
+        actionLabel="前往路由规则"
+      />
+    );
+  }
+
+  return (
+    <section className="rounded-lg border border-blue-200 bg-blue-50/50 p-4 dark:border-blue-700/40 dark:bg-blue-950/10">
+      <SectionHeader
+        icon={GripVertical}
+        title="Codex 模型排序"
+        detail="拖动调整所有自定义模型在 Codex 模型选择器中的顺序。子 Agent 候选、路由规则和默认模型不会因此改变。"
+        action={
+          <div className="flex gap-2">
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={isSaving || !hasCustomOrder}
+              onClick={() => void saveOrder(true)}
+            >
+              恢复默认
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              disabled={isSaving || !hasChanges}
+              onClick={() => void saveOrder()}
+              className="gap-2 bg-blue-600 hover:bg-blue-500"
+            >
+              <Save className="h-4 w-4" />
+              保存顺序
+            </Button>
+          </div>
+        }
+      />
+
+      <DndContext
+        sensors={sensors}
+        collisionDetection={closestCenter}
+        onDragEnd={handleDragEnd}
+      >
+        <SortableContext
+          items={draftModels
+            .map((model) => model.model?.trim())
+            .filter((model): model is string => Boolean(model))}
+          strategy={verticalListSortingStrategy}
+        >
+          <div className="mt-4 space-y-2">
+            {draftModels.map((model, index) => (
+              <SortableCatalogModel
+                key={model.model}
+                model={model}
+                index={index}
+              />
+            ))}
+          </div>
+        </SortableContext>
+      </DndContext>
+
+      {message ? (
+        <p className="mt-3 text-xs text-emerald-700 dark:text-emerald-200">
+          {message}
+        </p>
+      ) : null}
+      {error ? (
+        <p className="mt-3 text-xs text-rose-700 dark:text-rose-200">{error}</p>
+      ) : null}
+    </section>
   );
 }
 
@@ -7359,6 +7583,64 @@ function SortableSpawnAgentCandidate({
       >
         <Trash2 className="h-4 w-4" />
       </Button>
+    </div>
+  );
+}
+
+function SortableCatalogModel({
+  model,
+  index,
+}: {
+  model: CodexCatalogModel;
+  index: number;
+}) {
+  const modelId = model.model?.trim() ?? "";
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: modelId });
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={{
+        transform: CSS.Transform.toString(transform),
+        transition,
+      }}
+      className={cn(
+        "flex min-h-11 items-center gap-3 rounded-md border border-blue-200 bg-background px-3 py-2 dark:border-blue-800/60 dark:bg-slate-950/50",
+        isDragging ? "opacity-60 shadow-lg shadow-blue-950/30" : "",
+      )}
+    >
+      <button
+        type="button"
+        className="grid h-7 w-7 shrink-0 place-items-center rounded border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 dark:border-blue-700/60 dark:bg-blue-500/10 dark:text-blue-200 dark:hover:bg-blue-500/20"
+        {...attributes}
+        {...listeners}
+        aria-label={`拖动 ${modelId}`}
+      >
+        <GripVertical className="h-4 w-4" />
+      </button>
+      <span className="w-7 shrink-0 text-right font-mono text-xs text-muted-foreground dark:text-slate-400">
+        {index + 1}
+      </span>
+      <div className="min-w-0 flex-1">
+        <div
+          className="truncate text-sm font-medium text-foreground dark:text-slate-100"
+          title={catalogModelLabel(model)}
+        >
+          {catalogModelLabel(model)}
+        </div>
+        {model.upstreamModel || model.upstream_model ? (
+          <div className="mt-0.5 truncate font-mono text-xs text-muted-foreground dark:text-slate-400">
+            {model.upstreamModel ?? model.upstream_model}
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }
