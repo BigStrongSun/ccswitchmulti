@@ -2124,7 +2124,13 @@ fn merge_qwen_vllm_reasoning_defaults(
         .unwrap_or("")
         .trim()
         .to_ascii_lowercase();
-    if thinking_param.is_empty() || thinking_param == "thinking" {
+    let inferred_requires_nested_qwen_flag = inferred.thinking_param.as_deref()
+        == Some("chat_template_kwargs.enable_thinking")
+        && thinking_param == "enable_thinking";
+    if thinking_param.is_empty()
+        || thinking_param == "thinking"
+        || inferred_requires_nested_qwen_flag
+    {
         explicit.thinking_param = inferred.thinking_param;
     }
     if explicit.effort_param.is_none() {
@@ -2165,8 +2171,10 @@ fn merge_qwen_vllm_reasoning_defaults(
 
 /// 判断推断结果是否是 Qwen/vLLM 专用默认值。
 fn is_qwen_vllm_reasoning_defaults(config: &CodexChatReasoningConfig) -> bool {
-    config.thinking_param.as_deref() == Some("enable_thinking")
-        && config.effort_param.as_deref() == Some("none")
+    matches!(
+        config.thinking_param.as_deref(),
+        Some("enable_thinking" | "chat_template_kwargs.enable_thinking")
+    ) && config.effort_param.as_deref() == Some("none")
         && config.min_output_tokens == Some(QWEN_VLLM_MIN_OUTPUT_TOKENS)
         && config.output_format.as_deref() == Some("reasoning_content")
 }
@@ -2262,7 +2270,10 @@ fn infer_codex_chat_reasoning_config(
         });
     }
 
-    // 本地 / vLLM 托管的 Qwen 兼容端点会先输出 reasoning；Codex 小
+    // 本地 / vLLM 托管的 Qwen 兼容端点通过 chat template 控制思考，参数必须放在
+    // `chat_template_kwargs` 内。顶层 `enable_thinking` 会被 vLLM 忽略，导致 Codex
+    // 已明确发送 `reasoning.effort=none` 时模型仍输出长篇 reasoning_content。
+    // 此类端点会先输出 reasoning；Codex 小
     // `max_output_tokens` 请求容易被思考内容吃满，因此只声明显式预算的最小下限。
     // Codex 完全缺省时应继续交给 vLLM 自身默认策略，不能在路由层强行截断输出长度。
     if haystack.contains("qwen")
@@ -2271,7 +2282,7 @@ fn infer_codex_chat_reasoning_config(
         return Some(CodexChatReasoningConfig {
             supports_thinking: Some(true),
             supports_effort: Some(false),
-            thinking_param: Some("enable_thinking".to_string()),
+            thinking_param: Some("chat_template_kwargs.enable_thinking".to_string()),
             effort_param: Some("none".to_string()),
             effort_value_mode: None,
             min_output_tokens: Some(QWEN_VLLM_MIN_OUTPUT_TOKENS),
@@ -3556,7 +3567,10 @@ experimental_bearer_token = "PROXY_MANAGED"
 
         assert_eq!(config.supports_thinking, Some(true));
         assert_eq!(config.supports_effort, Some(false));
-        assert_eq!(config.thinking_param.as_deref(), Some("enable_thinking"));
+        assert_eq!(
+            config.thinking_param.as_deref(),
+            Some("chat_template_kwargs.enable_thinking")
+        );
         assert_eq!(config.effort_param.as_deref(), Some("none"));
         assert_eq!(config.min_output_tokens, Some(QWEN_VLLM_MIN_OUTPUT_TOKENS));
         assert_eq!(config.default_output_tokens, None);
@@ -3624,7 +3638,10 @@ experimental_bearer_token = "PROXY_MANAGED"
 
         assert_eq!(config.supports_thinking, Some(true));
         assert_eq!(config.supports_effort, Some(false));
-        assert_eq!(config.thinking_param.as_deref(), Some("enable_thinking"));
+        assert_eq!(
+            config.thinking_param.as_deref(),
+            Some("chat_template_kwargs.enable_thinking")
+        );
         assert_eq!(config.effort_param.as_deref(), Some("none"));
         assert_eq!(config.min_output_tokens, Some(QWEN_VLLM_MIN_OUTPUT_TOKENS));
         assert_eq!(config.default_output_tokens, None);
@@ -3662,7 +3679,10 @@ wire_api = "chat"
 
         assert_eq!(config.supports_thinking, Some(true));
         assert_eq!(config.supports_effort, Some(false));
-        assert_eq!(config.thinking_param.as_deref(), Some("enable_thinking"));
+        assert_eq!(
+            config.thinking_param.as_deref(),
+            Some("chat_template_kwargs.enable_thinking")
+        );
         assert_eq!(config.effort_param.as_deref(), Some("none"));
         assert_eq!(config.min_output_tokens, Some(QWEN_VLLM_MIN_OUTPUT_TOKENS));
         assert_eq!(config.default_output_tokens, None);
@@ -3698,7 +3718,10 @@ wire_api = "chat"
         let config = resolve_codex_chat_reasoning_config(&provider, &json!({ "model": "qwen3.6" }))
             .expect("qwen vllm reasoning config");
 
-        assert_eq!(config.thinking_param.as_deref(), Some("enable_thinking"));
+        assert_eq!(
+            config.thinking_param.as_deref(),
+            Some("chat_template_kwargs.enable_thinking")
+        );
         assert_eq!(config.min_output_tokens, Some(QWEN_VLLM_MIN_OUTPUT_TOKENS));
         assert_eq!(config.default_output_tokens, None);
     }
@@ -3733,7 +3756,10 @@ wire_api = "chat"
         let config = resolve_codex_chat_reasoning_config(&provider, &json!({ "model": "qwen3.6" }))
             .expect("qwen vllm reasoning config");
 
-        assert_eq!(config.thinking_param.as_deref(), Some("enable_thinking"));
+        assert_eq!(
+            config.thinking_param.as_deref(),
+            Some("chat_template_kwargs.enable_thinking")
+        );
         assert_eq!(config.min_output_tokens, Some(4096));
         assert_eq!(config.default_output_tokens, Some(65_536));
     }

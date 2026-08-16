@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-08-16 Qwen/vLLM `reasoning.effort=none` 仍输出英文思考根因
+
+- 用户安装 `v3.19.2-4` 后，任务 `01a00996-28d6-7aa0-a303-d0a5d6939245` 仍产生大段英文 reasoning。rollout 证明 reasoning item 完整到达 Codex，且每个重复段落属于不同工具回合，不是 Desktop 截断或 CCSM 把累计 SSE 当增量重复追加。
+- 该任务的 Codex turn context 明确为 `reasoning_effort=none`，但 Qwen 仍思考。根因是 Qwen/vLLM 自动能力推断把关闭开关配置为顶层 `enable_thinking`；vLLM 的 Qwen chat template 实际读取 `chat_template_kwargs.enable_thinking`，因此顶层 false 被忽略。
+- Qwen/vLLM 推断现统一使用 `chat_template_kwargs.enable_thinking`，并在 merge 阶段把已有自动/旧版顶层 `enable_thinking` 升级为嵌套路径，同时保留用户配置的更大输出预算。通用 Qwen/DashScope 与 SiliconFlow 仍保留各自平台的顶层参数语义。
+- 回归覆盖路由显式配置、自动推断、旧配置迁移、退役预算清理和更大预算保留；Qwen/vLLM 定向测试 4/4 通过。转换层既有 nested-none 测试证明 `reasoning.effort=none` 会生成 `chat_template_kwargs.enable_thinking=false`。
+
 ## 2026-08-16 Qwen original image detail 完整适配与 Codex Live TOML 生命周期根修
 
 - `supports_image_detail_original` / `supportsImageDetailOriginal` 表达的是 Codex 经 Adapter 后能否获得 original-image-detail 能力，不是第三方 Chat 上游能否原样接受 Responses 的 `original` 枚举。视觉第三方模型必须继续投影 `true`，Responses 到 Chat 的共享媒体边界把 `original` 映射为上游最高可用的 `high`；纯文本模型保持 `false`，官方 Native Responses 保持原生语义。
