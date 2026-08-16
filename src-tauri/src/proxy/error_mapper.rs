@@ -112,8 +112,8 @@ mod tests {
     #[test]
     fn test_map_response_pending_error() {
         let error = ProxyError::ResponsePending("model is still reasoning".to_string());
-        assert_eq!(map_proxy_error_to_status(&error), 429);
-        assert_eq!(error.retry_after_secs(), Some(30));
+        assert_eq!(map_proxy_error_to_status(&error), 424);
+        assert_eq!(error.retry_after_secs(), None);
     }
 
     #[test]

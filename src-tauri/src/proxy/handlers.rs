@@ -6593,6 +6593,22 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_deepseek\",\"
             .contains("must not be replayed automatically"));
     }
 
+    #[test]
+    fn codex_responses_pending_is_result_unknown_not_fake_rate_limit() {
+        let error = ProxyError::ResponsePending(
+            "connection_closed_before_message_completed after request upload".to_string(),
+        );
+        let endpoint = "/responses";
+        let body = codex_proxy_error_json("OpenAI Official", "gpt-5.6-sol", endpoint, &error);
+
+        assert_eq!(
+            codex_proxy_error_status(endpoint, &error),
+            StatusCode::FAILED_DEPENDENCY
+        );
+        assert_eq!(body["error"]["code"], "cc_switch_response_result_unknown");
+        assert_eq!(body["error"]["retryable"], false);
+    }
+
     /// 验证 MultiRouter 请求失败时，usage/error 归因回到已命中的 route provider。
     #[test]
     fn codex_forward_error_logging_resolves_multirouter_route_provider() {
