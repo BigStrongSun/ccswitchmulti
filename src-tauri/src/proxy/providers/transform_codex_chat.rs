@@ -109,31 +109,41 @@ pub(crate) fn response_message_item_id(response_id: &str) -> String {
     format!("msg_{suffix}")
 }
 
-/// Normalize safely rewriteable item IDs created by third-party Responses
-/// implementations before replaying mixed-provider history to an OpenAI official
-/// Responses endpoint. Existing canonical OpenAI IDs remain untouched. Invalid
-/// vendor IDs are mapped deterministically so retries and prompt-cache prefixes
-/// stay stable. Encrypted reasoning is deliberately excluded because its opaque
-/// payload can be bound to the original provider/item identity.
+/// Normalize replay metadata created by third-party Responses implementations
+/// before replaying mixed-provider history to an OpenAI official Responses
+/// endpoint. Plain reasoning is inlined by removing its synthetic ID: OpenAI
+/// otherwise treats any `rs_*` ID as stored server state and rejects it under
+/// `store: false`. Other invalid vendor IDs are mapped deterministically so
+/// retries and prompt-cache prefixes stay stable. Encrypted reasoning is left
+/// untouched because its opaque payload can be bound to the original provider
+/// and item identity.
 pub(crate) fn normalize_replayed_item_ids_for_openai(body: &mut Value) -> usize {
     let Some(input) = body.get_mut("input").and_then(Value::as_array_mut) else {
         return 0;
     };
     let mut changed = 0;
     for item in input {
+        let is_plain_reasoning = item.get("type").and_then(Value::as_str) == Some("reasoning")
+            && !item
+                .get("encrypted_content")
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.is_empty());
+        if is_plain_reasoning {
+            if let Some(object) = item.as_object_mut() {
+                let removed_id = object.remove("id").is_some();
+                let removed_status = object.remove("status").is_some();
+                if removed_id || removed_status {
+                    changed += 1;
+                }
+            }
+            continue;
+        }
+
         let Some(required_prefix) =
             item.get("type")
                 .and_then(Value::as_str)
                 .and_then(|item_type| match item_type {
                     "message" => Some("msg_"),
-                    "reasoning"
-                        if !item
-                            .get("encrypted_content")
-                            .and_then(Value::as_str)
-                            .is_some_and(|value| !value.is_empty()) =>
-                    {
-                        Some("rs_")
-                    }
                     "function_call" => Some("fc_"),
                     "custom_tool_call" => Some("ctc_"),
                     "web_search_call" => Some("ws_"),
@@ -489,6 +499,7 @@ pub(crate) fn build_codex_tool_context_from_request(body: &Value) -> CodexToolCo
     }
 
     if let Some(input) = body.get("input") {
+        collect_additional_tools(input, &mut context);
         collect_tool_search_output_tools(input, &mut context);
     }
 
@@ -596,7 +607,7 @@ pub fn responses_to_chat_completions_with_reasoning_text_only_and_cache(
         }
     }
 
-    apply_reasoning_options(&mut result, &body, model, reasoning_config);
+    apply_reasoning_options(&mut result, &body, model, reasoning_config)?;
 
     let tools = tool_context.chat_tools();
     if !tools.is_empty() {
@@ -764,14 +775,14 @@ fn apply_reasoning_options(
     body: &Value,
     model: &str,
     config: Option<&CodexChatReasoningConfig>,
-) {
+) -> Result<(), ProxyError> {
     let Some(config) = config else {
         if super::transform::supports_reasoning_effort(model) {
             if let Some(effort) = body.pointer("/reasoning/effort") {
                 result["reasoning_effort"] = effort.clone();
             }
         }
-        return;
+        return Ok(());
     };
 
     let supports_effort = config.supports_effort.unwrap_or(false);
@@ -791,7 +802,7 @@ fn apply_reasoning_options(
     }
 
     let Some(reasoning_enabled) = reasoning_requested(body) else {
-        return;
+        return Ok(());
     };
 
     if supports_thinking {
@@ -833,18 +844,24 @@ fn apply_reasoning_options(
         if effort_param == "reasoning.effort" {
             result["reasoning"] = json!({ "effort": "none" });
         }
-        return;
+        return Ok(());
     }
 
     if !supports_effort {
-        return;
+        return Ok(());
     }
 
     let Some(effort) = body.pointer("/reasoning/effort").and_then(|v| v.as_str()) else {
-        return;
+        return Ok(());
     };
-    let Some(mapped) = map_reasoning_effort(effort, config.effort_value_mode.as_deref()) else {
-        return;
+    let effort_mode = config.effort_value_mode.as_deref();
+    let mapped = if effort_mode.is_some_and(|mode| mode.starts_with("capability|")) {
+        map_capability_reasoning_effort(effort, effort_mode.unwrap())?
+    } else {
+        let Some(mapped) = map_reasoning_effort(effort, config.effort_value_mode.as_deref()) else {
+            return Ok(());
+        };
+        mapped
     };
 
     match effort_param.as_str() {
@@ -861,6 +878,27 @@ fn apply_reasoning_options(
         }
         _ => {}
     }
+    Ok(())
+}
+
+fn map_capability_reasoning_effort<'a>(
+    effort: &'a str,
+    mode: &'a str,
+) -> Result<&'a str, ProxyError> {
+    let mut sections = mode.splitn(3, '|');
+    let _kind = sections.next();
+    let allowed = sections.next().unwrap_or_default();
+    let mappings = sections.next().unwrap_or_default();
+    if !allowed.split(',').any(|candidate| candidate == effort) {
+        return Err(ProxyError::TransformError(format!(
+            "reasoning effort `{effort}` is not supported; allowed=[{allowed}]"
+        )));
+    }
+    Ok(mappings
+        .split(',')
+        .filter_map(|mapping| mapping.split_once('='))
+        .find_map(|(source, target)| (source == effort).then_some(target))
+        .unwrap_or(effort))
 }
 
 /// 写入 vLLM/HF chat template 常用的嵌套 thinking 开关，同时保留已有 kwargs。
@@ -1187,6 +1225,10 @@ fn append_responses_item_as_chat_message(
             // 到达时回溯附挂，见 attach_pending_reasoning_to_previous_assistant。
             append_pending_reasoning(pending_reasoning, responses_reasoning_item_text(item));
         }
+        // Responses Lite carries dynamically available tools as a structural
+        // input item. Its `role=developer` describes ownership, not a Chat
+        // message, and the item intentionally has no `content` field.
+        Some("additional_tools") => {}
         Some("input_text" | "input_image" | "input_file" | "input_audio") => {
             flush_pending_tool_calls(
                 messages,
@@ -1356,10 +1398,13 @@ fn responses_message_item_to_chat_message(
 ) -> Value {
     let role = item.get("role").and_then(|v| v.as_str()).unwrap_or("user");
     let chat_role = responses_role_to_chat_role(role);
-    let content = item
+    let mut content = item
         .get("content")
         .map(|value| responses_content_to_chat_content(chat_role, value, text_only_model))
         .unwrap_or(Value::Null);
+    if chat_role != "assistant" && content.is_null() {
+        content = Value::String(String::new());
+    }
 
     let mut message = json!({
         "role": chat_role,
@@ -1685,6 +1730,29 @@ fn responses_content_to_chat_content(_role: &str, content: &Value, text_only_mod
 
 fn responses_input_file_to_chat_file(part: &Value) -> Option<Value> {
     chat_file_from_input_file(part)
+}
+
+fn collect_additional_tools(value: &Value, context: &mut CodexToolContext) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                collect_additional_tools(item, context);
+            }
+        }
+        Value::Object(obj) => {
+            if obj.get("type").and_then(Value::as_str) == Some("additional_tools") {
+                if let Some(tools) = obj.get("tools").and_then(Value::as_array) {
+                    for tool in tools {
+                        context.add_response_tool(tool);
+                    }
+                }
+            }
+            for child in obj.values() {
+                collect_additional_tools(child, context);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn collect_tool_search_output_tools(value: &Value, context: &mut CodexToolContext) {
@@ -3431,6 +3499,49 @@ mod tests {
     }
 
     #[test]
+    fn responses_request_to_chat_uses_declared_capability_effort_map() {
+        let input = json!({
+            "model": "glm-5.2",
+            "input": "hello",
+            "reasoning": {"effort": "medium"}
+        });
+        let config = CodexChatReasoningConfig {
+            supports_thinking: Some(true),
+            supports_effort: Some(true),
+            thinking_param: Some("thinking".to_string()),
+            effort_param: Some("reasoning_effort".to_string()),
+            effort_value_mode: Some("capability|none,minimal,low,medium,high,xhigh,max|none=none,minimal=none,low=high,medium=high,high=high,xhigh=max,max=max".to_string()),
+            min_output_tokens: None,
+            default_output_tokens: None,
+            output_format: Some("reasoning_content".to_string()),
+        };
+        let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
+        assert_eq!(result["reasoning_effort"], "high");
+    }
+
+    #[test]
+    fn responses_request_to_chat_rejects_effort_hidden_by_capability() {
+        let input = json!({
+            "model": "step-3.5-flash-2603",
+            "input": "hello",
+            "reasoning": {"effort": "medium"}
+        });
+        let config = CodexChatReasoningConfig {
+            supports_thinking: Some(true),
+            supports_effort: Some(true),
+            thinking_param: Some("none".to_string()),
+            effort_param: Some("reasoning_effort".to_string()),
+            effort_value_mode: Some("capability|low,high|low=low,high=high".to_string()),
+            min_output_tokens: None,
+            default_output_tokens: None,
+            output_format: Some("reasoning".to_string()),
+        };
+        let error = responses_to_chat_completions_with_reasoning(input, Some(&config))
+            .expect_err("medium must be rejected");
+        assert!(error.to_string().contains("allowed=[low,high]"));
+    }
+
+    #[test]
     fn responses_request_to_chat_maps_openrouter_to_native_reasoning_object() {
         // OpenRouter 平台形态：原生 reasoning:{effort} 对象 + "openrouter" 值映射
         // （与 infer_aggregator_platform_config 推断出的配置保持一致）。
@@ -3920,6 +4031,148 @@ mod tests {
         assert!(head_content.contains("You are Codex."));
         assert!(head_content.contains("Permissions block"));
         assert!(head_content.contains("Collaboration Mode: Default"));
+    }
+
+    #[test]
+    fn responses_lite_additional_tools_preserves_tools_without_creating_a_message() {
+        let input = json!({
+            "model": "qwen3.6",
+            "input": [
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [{
+                        "type": "function",
+                        "name": "read_workspace_file",
+                        "description": "Read a file from the active workspace.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"]
+                        }
+                    }]
+                },
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": [{"type": "input_text", "text": "You are Codex."}]
+                }
+            ]
+        });
+
+        let result = responses_to_chat_completions_with_reasoning_text_only_and_cache(
+            input, None, None, None,
+        )
+        .unwrap();
+        let messages = result["messages"].as_array().unwrap();
+        let tools = result["tools"].as_array().expect("additional tools");
+
+        assert_eq!(
+            messages,
+            &vec![json!({
+                "role": "system",
+                "content": "You are Codex."
+            })]
+        );
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["function"]["name"], "read_workspace_file");
+    }
+
+    #[test]
+    fn responses_lite_additional_tools_reuses_custom_namespace_and_deduplication_rules() {
+        let input = json!({
+            "model": "qwen3.6",
+            "tools": [{
+                "type": "function",
+                "name": "lookup",
+                "parameters": {"type": "object", "properties": {}}
+            }],
+            "input": [{
+                "type": "additional_tools",
+                "role": "developer",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "lookup",
+                        "parameters": {"type": "object", "properties": {}}
+                    },
+                    {
+                        "type": "custom",
+                        "name": "apply_patch",
+                        "description": "Apply a free-form patch."
+                    },
+                    {
+                        "type": "namespace",
+                        "name": "mcp__mail",
+                        "tools": [{
+                            "type": "function",
+                            "name": "search",
+                            "parameters": {"type": "object", "properties": {}}
+                        }]
+                    }
+                ]
+            }]
+        });
+
+        let result = responses_to_chat_completions_with_reasoning_text_only_and_cache(
+            input, None, None, None,
+        )
+        .unwrap();
+        let names = result["tools"]
+            .as_array()
+            .expect("converted tools")
+            .iter()
+            .filter_map(|tool| tool.pointer("/function/name").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, vec!["lookup", "apply_patch", "mcp__mail__search"]);
+        assert_eq!(
+            result["tools"][1]["function"]["parameters"]["required"][0],
+            "input"
+        );
+    }
+
+    #[test]
+    fn responses_non_assistant_null_content_becomes_a_string_but_assistant_tool_call_stays_null() {
+        let input = json!({
+            "model": "qwen3.6",
+            "input": [
+                {"type": "message", "role": "system"},
+                {"type": "message", "role": "developer", "content": null},
+                {"type": "message", "role": "user"},
+                {"type": "message", "role": "user", "content": null},
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "lookup",
+                    "arguments": "{}"
+                }
+            ]
+        });
+
+        let result = responses_to_chat_completions_with_reasoning_text_only_and_cache(
+            input, None, None, None,
+        )
+        .unwrap();
+        let messages = result["messages"].as_array().unwrap();
+
+        assert!(messages
+            .iter()
+            .all(|message| { message["role"] == "assistant" || message["content"].is_string() }));
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message["role"] == "user")
+                .map(|message| message["content"].as_str())
+                .collect::<Vec<_>>(),
+            vec![Some(""), Some("")]
+        );
+        let assistant = messages
+            .iter()
+            .find(|message| message["role"] == "assistant")
+            .expect("synthetic assistant tool-call message");
+        assert!(assistant["content"].is_null());
+        assert_eq!(assistant["tool_calls"][0]["id"], "call_1");
     }
 
     #[test]
@@ -5378,7 +5631,29 @@ mod tests {
     }
 
     #[test]
-    fn openai_request_normalizes_replayed_plain_reasoning_and_tool_call_ids() {
+    fn openai_request_inlines_synthetic_plain_reasoning_without_id() {
+        let mut body = json!({
+            "model": "gpt-5.6-sol",
+            "input": [{
+                "id": "rs_resp_chatcmpl-b4d3bcf7f34003ac",
+                "type": "reasoning",
+                "summary": [{
+                    "type": "summary_text",
+                    "text": "plain Qwen reasoning survives the provider switch"
+                }]
+            }]
+        });
+
+        assert_eq!(normalize_replayed_item_ids_for_openai(&mut body), 1);
+        assert!(body["input"][0].get("id").is_none());
+        assert_eq!(
+            body["input"][0]["summary"][0]["text"],
+            "plain Qwen reasoning survives the provider switch"
+        );
+    }
+
+    #[test]
+    fn openai_request_inlines_plain_reasoning_and_normalizes_tool_call_ids() {
         let mut body = json!({
             "model": "gpt-5.6-sol",
             "input": [
@@ -5407,9 +5682,7 @@ mod tests {
         });
 
         assert_eq!(normalize_replayed_item_ids_for_openai(&mut body), 3);
-        assert!(body["input"][0]["id"]
-            .as_str()
-            .is_some_and(|id| id.starts_with("rs_")));
+        assert!(body["input"][0].get("id").is_none());
         assert!(body["input"][1]["id"]
             .as_str()
             .is_some_and(|id| id.starts_with("fc_")));

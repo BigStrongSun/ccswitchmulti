@@ -1378,7 +1378,7 @@ mod tests {
 
     fn send_response(stream: &mut TcpStream, status: &str, content_type: &str, body: &[u8]) {
         let resp = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\r\n",
+            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             body.len()
         );
         let mut buf = resp.into_bytes();

@@ -12,7 +12,6 @@ use crate::proxy::{
     },
     sse::{append_utf8_safe, strip_sse_field, take_sse_block},
 };
-use base64::Engine as _;
 use bytes::Bytes;
 use futures::stream::{Stream, StreamExt};
 use serde_json::{json, Map, Value};
@@ -141,22 +140,23 @@ pub(crate) fn normalize_codex_oauth_responses_request(
     body.remove("temperature");
     body.remove("top_p");
 
-    Value::Object(body)
+    let mut normalized = Value::Object(body);
+    super::transform_codex_chat::normalize_replayed_item_ids_for_openai(&mut normalized);
+    normalized
 }
 
-/// 让混合 MultiRouter 的 V2 协作消息使用明文 function argument。
+/// Remove the private encrypted marker from non-reserved `agents.*` V2 messages.
 ///
-/// Codex 在三个协作工具的 `message` schema 上设置 Responses 私有 `encrypted: true`，
-/// official backend 因此返回密文参数。移除该单一标记后仍是原生 V2 function call，
-/// 但 Codex 会把 message 渲染成第三方上游也能读取的明文 `agent_message`。
-pub(crate) fn make_codex_v2_collaboration_messages_plaintext(body: &mut Value) -> usize {
+/// Reserved `collaboration.*` tools are deliberately excluded: newer OpenAI
+/// backends validate those schemas exactly and reject any proxy-side mutation.
+pub(crate) fn make_codex_v2_agents_messages_plaintext(body: &mut Value) -> usize {
     let Some(object) = body.as_object_mut() else {
         return 0;
     };
     let mut changed = object
         .get_mut("tools")
         .and_then(Value::as_array_mut)
-        .map_or(0, |tools| make_collaboration_tool_messages_plaintext(tools));
+        .map_or(0, |tools| make_agents_tool_messages_plaintext(tools, false));
 
     if let Some(input) = object.get_mut("input").and_then(Value::as_array_mut) {
         for item in input {
@@ -164,24 +164,44 @@ pub(crate) fn make_codex_v2_collaboration_messages_plaintext(body: &mut Value) -
                 continue;
             }
             if let Some(tools) = item.get_mut("tools").and_then(Value::as_array_mut) {
-                changed += make_collaboration_tool_messages_plaintext(tools);
+                changed += make_agents_tool_messages_plaintext(tools, false);
             }
         }
     }
     changed
 }
 
-fn make_collaboration_tool_messages_plaintext(tools: &mut [Value]) -> usize {
+fn make_agents_tool_messages_plaintext(tools: &mut [Value], inside_agents: bool) -> usize {
     let mut changed = 0;
     for tool in tools {
+        if tool.get("type").and_then(Value::as_str) == Some("namespace") {
+            let namespace_is_agents = tool
+                .get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|name| name.eq_ignore_ascii_case("agents"));
+            if namespace_is_agents {
+                let children_key = if tool.get("tools").is_some() {
+                    "tools"
+                } else {
+                    "children"
+                };
+                changed += tool
+                    .get_mut(children_key)
+                    .and_then(Value::as_array_mut)
+                    .map_or(0, |children| {
+                        make_agents_tool_messages_plaintext(children, true)
+                    });
+            }
+            continue;
+        }
         if tool.get("type").and_then(Value::as_str) != Some("function") {
             continue;
         }
-        if tool
+        let explicit_agents = tool
             .get("namespace")
             .and_then(Value::as_str)
-            .is_some_and(|namespace| !namespace.eq_ignore_ascii_case("collaboration"))
-        {
+            .is_some_and(|namespace| namespace.eq_ignore_ascii_case("agents"));
+        if !inside_agents && !explicit_agents {
             continue;
         }
         if !tool
@@ -522,7 +542,7 @@ fn normalize_codex_oauth_agent_message(object: &mut Map<String, Value>) {
         else {
             continue;
         };
-        if looks_like_codex_encrypted_content(&value) {
+        if super::codex_multi_agent::looks_like_codex_opaque_encrypted_content(&value) {
             continue;
         }
 
@@ -530,23 +550,6 @@ fn normalize_codex_oauth_agent_message(object: &mut Map<String, Value>) {
         part.insert("type".to_string(), Value::String("input_text".to_string()));
         part.insert("text".to_string(), Value::String(value));
     }
-}
-
-fn looks_like_codex_encrypted_content(value: &str) -> bool {
-    if value.len() < 64 || !value.is_ascii() {
-        return false;
-    }
-    [
-        &base64::engine::general_purpose::STANDARD,
-        &base64::engine::general_purpose::URL_SAFE,
-        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-    ]
-    .into_iter()
-    .any(|engine| {
-        engine
-            .decode(value)
-            .is_ok_and(|decoded| decoded.len() >= 32)
-    })
 }
 
 /// 判断 input item 是否是 Codex 内部控制消息。
@@ -1661,15 +1664,17 @@ fn normalize_error_object(error: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
     use futures::{stream, StreamExt};
 
     #[test]
-    fn mixed_router_keeps_v2_but_makes_collaboration_messages_plaintext() {
+    fn mixed_router_plaintext_rewrite_targets_only_non_reserved_agents_tools() {
         let mut request = json!({
             "input": [{
                 "type": "additional_tools",
                 "tools": [{
                     "type": "function",
+                    "namespace": "agents",
                     "name": "send_message",
                     "parameters": {
                         "properties": {"message": {"type": "string", "encrypted": true}}
@@ -1678,76 +1683,80 @@ mod tests {
             }],
             "tools": [
                 {
-                    "type": "function",
-                    "name": "spawn_agent",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "task_name": {"type": "string"},
-                            "message": {"type": "string", "encrypted": true},
-                            "private_note": {"type": "string", "encrypted": true}
+                    "type": "namespace",
+                    "name": "agents",
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "spawn_agent",
+                            "parameters": {
+                                "properties": {
+                                    "message": {"type": "string", "encrypted": true},
+                                    "private_note": {"type": "string", "encrypted": true}
+                                }
+                            }
+                        },
+                        {
+                            "type": "function",
+                            "name": "followup_task",
+                            "parameters": {
+                                "properties": {"message": {"type": "string", "encrypted": true}}
+                            }
+                        },
+                        {
+                            "type": "function",
+                            "name": "lookup",
+                            "parameters": {
+                                "properties": {"message": {"type": "string", "encrypted": true}}
+                            }
                         }
-                    }
+                    ]
                 },
                 {
-                    "type": "function",
-                    "namespace": "collaboration",
-                    "name": "send_message",
-                    "parameters": {
-                        "properties": {"message": {"type": "string", "encrypted": true}}
-                    }
-                },
-                {
-                    "type": "function",
-                    "name": "followup_task",
-                    "parameters": {
-                        "properties": {"message": {"type": "string", "encrypted": true}}
-                    }
-                },
-                {
-                    "type": "function",
-                    "name": "lookup",
-                    "parameters": {
-                        "properties": {"message": {"type": "string", "encrypted": true}}
-                    }
-                },
-                {
-                    "type": "function",
-                    "namespace": "other",
-                    "name": "spawn_agent",
-                    "parameters": {
-                        "properties": {"message": {"type": "string", "encrypted": true}}
-                    }
+                    "type": "namespace",
+                    "name": "collaboration",
+                    "tools": [{
+                        "type": "function",
+                        "name": "spawn_agent",
+                        "parameters": {
+                            "properties": {"message": {"type": "string", "encrypted": true}}
+                        }
+                    }]
                 }
             ]
         });
 
-        let changed = make_codex_v2_collaboration_messages_plaintext(&mut request);
+        let changed = make_codex_v2_agents_messages_plaintext(&mut request);
 
-        assert_eq!(changed, 4);
-        for index in 0..3 {
-            assert!(
-                request["tools"][index]["parameters"]["properties"]["message"]
-                    .get("encrypted")
-                    .is_none()
-            );
-        }
-        assert_eq!(
-            request["tools"][0]["parameters"]["properties"]["private_note"]["encrypted"],
-            true
+        assert_eq!(changed, 3);
+        assert!(
+            request["tools"][0]["tools"][0]["parameters"]["properties"]["message"]
+                .get("encrypted")
+                .is_none()
         );
-        assert_eq!(
-            request["tools"][3]["parameters"]["properties"]["message"]["encrypted"],
-            true
-        );
-        assert_eq!(
-            request["tools"][4]["parameters"]["properties"]["message"]["encrypted"],
-            true
+        assert!(
+            request["tools"][0]["tools"][1]["parameters"]["properties"]["message"]
+                .get("encrypted")
+                .is_none()
         );
         assert!(
             request["input"][0]["tools"][0]["parameters"]["properties"]["message"]
                 .get("encrypted")
                 .is_none()
+        );
+        assert_eq!(
+            request["tools"][0]["tools"][0]["parameters"]["properties"]["private_note"]
+                ["encrypted"],
+            true
+        );
+        assert_eq!(
+            request["tools"][0]["tools"][2]["parameters"]["properties"]["message"]["encrypted"],
+            true
+        );
+        assert_eq!(
+            request["tools"][1]["tools"][0]["parameters"]["properties"]["message"]["encrypted"],
+            true,
+            "reserved collaboration schema must remain byte/schema preserving"
         );
     }
 
@@ -1935,6 +1944,59 @@ mod tests {
                 .filter(|value| value.as_str() == Some("reasoning.encrypted_content"))
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn codex_oauth_responses_normalizer_rewrites_third_party_web_search_id_for_official_replay() {
+        // A managed Codex OAuth route is materialized with a temporary route ID,
+        // so the later built-in-provider gate does not run. The OAuth boundary
+        // itself must canonicalize replay metadata before ChatGPT validates it.
+        let normalized = normalize_codex_oauth_responses_request(
+            json!({
+                "model": "gpt-5.6-sol",
+                "input": [{
+                    "type": "web_search_call",
+                    "id": "call_00_JYFDjhEPbdA9SmnfBXkC9250",
+                    "status": "completed",
+                    "action": {"type": "search", "queries": ["redacted fixture"]}
+                }]
+            }),
+            false,
+        );
+
+        let id = normalized["input"][0]["id"]
+            .as_str()
+            .expect("web search item ID");
+        assert!(id.starts_with("ws_ccswitch_"), "unexpected ID: {id}");
+        assert_eq!(normalized["input"][0]["type"], "web_search_call");
+        assert_eq!(normalized["input"][0]["status"], "completed");
+        assert_eq!(normalized["input"][0]["action"]["type"], "search");
+    }
+
+    #[test]
+    fn codex_oauth_responses_normalizer_strips_third_party_plain_reasoning_replay_metadata() {
+        // DeepSeek native Responses emits response-only id/status metadata on
+        // reasoning output items. ChatGPT accepts the inline summary but rejects
+        // status and treats an ID as stored server state under store=false.
+        let normalized = normalize_codex_oauth_responses_request(
+            json!({
+                "model": "gpt-5.6-sol",
+                "input": [{
+                    "type": "reasoning",
+                    "id": "0809ed03-b717-4b92-9e58-6cc019b16486",
+                    "status": "completed",
+                    "summary": [{"type": "summary_text", "text": "portable summary"}]
+                }]
+            }),
+            false,
+        );
+
+        assert!(normalized["input"][0].get("id").is_none());
+        assert!(normalized["input"][0].get("status").is_none());
+        assert_eq!(
+            normalized["input"][0]["summary"],
+            json!([{"type": "summary_text", "text": "portable summary"}])
         );
     }
 

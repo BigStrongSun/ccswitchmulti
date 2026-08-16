@@ -3,6 +3,7 @@
 //! 提供代理服务器的启动、停止和配置管理
 
 use crate::app_config::AppType;
+use crate::codex_guardian::{self, GuardianHandle};
 use crate::config::{get_claude_settings_path, read_json_file, write_json_file};
 use crate::database::Database;
 use crate::provider::Provider;
@@ -16,7 +17,7 @@ use serde_json::{json, Map, Value};
 use std::str::FromStr;
 use std::sync::Arc;
 use tauri::Emitter;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use toml_edit::{DocumentMut, Item, TableLike};
 
 /// 用于接管 Live 配置时的占位符（避免客户端提示缺少 key，同时不泄露真实 Token）
@@ -65,6 +66,8 @@ pub struct ProxyService {
     /// AppHandle，用于传递给 ProxyServer 以支持故障转移时的 UI 更新
     app_handle: Arc<RwLock<Option<tauri::AppHandle>>>,
     switch_locks: SwitchLockManager,
+    pub(crate) codex_guardian: Arc<Mutex<Option<GuardianHandle>>>,
+    pub(crate) codex_guardian_status: Arc<Mutex<codex_guardian::CodexGuardianStatus>>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -90,6 +93,16 @@ impl ProxyService {
             external_openai_api_server: Arc::new(RwLock::new(None)),
             app_handle: Arc::new(RwLock::new(None)),
             switch_locks: SwitchLockManager::new(),
+            codex_guardian: Arc::new(Mutex::new(None)),
+            codex_guardian_status: Arc::new(Mutex::new(codex_guardian::CodexGuardianStatus {
+                active: false,
+                codex_running: false,
+                cdp_available: false,
+                injected_target_count: 0,
+                injected: false,
+                last_event: String::new(),
+                message: String::new(),
+            })),
         }
     }
 
@@ -764,7 +777,10 @@ impl ProxyService {
 
         // 5. 启动代理服务器
         match self.start().await {
-            Ok(info) => Ok(info),
+            Ok(info) => {
+                self.ensure_codex_guardian_started();
+                Ok(info)
+            }
             Err(e) => {
                 // 启动失败，恢复原始配置
                 log::error!("代理启动失败，尝试恢复原始配置: {e}");
@@ -872,6 +888,7 @@ impl ProxyService {
                 if has_backup && live_matches_current_proxy {
                     self.refresh_active_target_from_current_provider(&app).await;
                     if app == AppType::Codex {
+                        self.ensure_codex_guardian_started();
                         self.try_repair_codex_model_picker_after_takeover();
                     }
                     return Ok(());
@@ -954,6 +971,7 @@ impl ProxyService {
             }
 
             if app == AppType::Codex {
+                self.ensure_codex_guardian_started();
                 self.try_repair_codex_model_picker_after_takeover();
             }
 
@@ -968,6 +986,9 @@ impl ProxyService {
             .map_err(|e| format!("获取 {app_type_str} 配置失败: {e}"))?;
 
         if !current_config.enabled {
+            if app == AppType::Codex {
+                self.stop_codex_guardian();
+            }
             return Ok(()); // 未接管，幂等返回
         }
 
@@ -3770,6 +3791,43 @@ impl ProxyService {
         });
     }
 
+    fn ensure_codex_guardian_started(&self) {
+        let handle_arc = self.codex_guardian.clone();
+        let status_arc = self.codex_guardian_status.clone();
+        tauri::async_runtime::spawn(async move {
+            let mut guard = handle_arc.lock().await;
+            if guard.is_none() {
+                let handle = codex_guardian::start_codex_guardian();
+                log::info!("Codex 守护: 已启动生命周期监测");
+                // 定期同步状态到 ProxyService 字段，供 Tauri command 读取
+                let handle_status = handle.status.clone();
+                let s = status_arc.clone();
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        let status = handle_status.lock().await.clone();
+                        if !status.active {
+                            *s.lock().await = status;
+                            break;
+                        }
+                        *s.lock().await = status;
+                    }
+                });
+                *guard = Some(handle);
+            }
+        });
+    }
+
+    fn stop_codex_guardian(&self) {
+        let handle_arc = self.codex_guardian.clone();
+        tauri::async_runtime::spawn(async move {
+            let mut guard = handle_arc.lock().await;
+            if let Some(handle) = guard.take() {
+                handle.stop();
+                log::info!("Codex 守护: 已停止生命周期监测");
+            }
+        });
+    }
     fn write_codex_live_verbatim(&self, config: &Value) -> Result<(), String> {
         self.write_codex_live_snapshot(config, true)
     }

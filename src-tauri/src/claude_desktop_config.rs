@@ -1001,6 +1001,7 @@ fn apply_provider_to_paths_inner(
             build_gateway_profile(&base_url, &api_key, Some(model_specs.as_slice()))
         }
     };
+    let profile = merge_existing_profile_extras(&paths.profile_path, profile)?;
 
     write_deployment_mode(&paths.normal_config_path, "3p")?;
     write_deployment_mode(&paths.threep_config_path, "3p")?;
@@ -1008,6 +1009,62 @@ fn apply_provider_to_paths_inner(
     write_meta(&paths.meta_path, Some(PROFILE_ID))?;
 
     Ok(())
+}
+
+fn merge_existing_profile_extras(path: &Path, generated_profile: Value) -> Result<Value, AppError> {
+    let existing_profile = read_json_or_empty(path)?;
+    let Value::Object(mut generated) = generated_profile else {
+        return Ok(generated_profile);
+    };
+    let Value::Object(existing) = existing_profile else {
+        return Ok(Value::Object(generated));
+    };
+
+    preserve_inference_model_extras(&mut generated, &existing);
+    for (key, value) in existing {
+        generated.entry(key).or_insert(value);
+    }
+
+    Ok(Value::Object(generated))
+}
+
+/// 把既有 `inferenceModels` 条目里、新重建条目中没有的字段并回（按 `name` 匹配）。
+/// 只处理对象条目；纯字符串条目没有可保留的额外字段。
+fn preserve_inference_model_extras(
+    generated_profile: &mut serde_json::Map<String, Value>,
+    existing_profile: &serde_json::Map<String, Value>,
+) {
+    let Some(new_models) = generated_profile
+        .get_mut("inferenceModels")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    let Some(existing_models) = existing_profile
+        .get("inferenceModels")
+        .and_then(Value::as_array)
+    else {
+        return;
+    };
+    for new_entry in new_models.iter_mut() {
+        let Some(new_obj) = new_entry.as_object_mut() else {
+            continue;
+        };
+        let Some(new_name) = new_obj.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(existing_obj) = existing_models.iter().find_map(|item| {
+            item.as_object()
+                .filter(|obj| obj.get("name").and_then(Value::as_str) == Some(new_name))
+        }) else {
+            continue;
+        };
+        for (key, value) in existing_obj {
+            if !new_obj.contains_key(key) {
+                new_obj.insert(key.clone(), value.clone());
+            }
+        }
+    }
 }
 
 fn restore_official_at_paths_inner(paths: &ClaudeDesktopPaths) -> Result<(), AppError> {
@@ -1520,6 +1577,35 @@ mod tests {
     }
 
     #[test]
+    fn claude_desktop_apply_preserves_user_profile_extra_fields() {
+        let temp = TempDir::new().expect("tempdir");
+        let paths = test_paths(temp.path());
+        let provider = direct_provider("direct");
+        let db = test_db();
+        write_json_file(
+            &paths.profile_path,
+            &json!({
+                "inferenceGatewayBaseUrl": "https://stale.example.com",
+                "autoModeEnabled": true,
+                "toolSearchEnabled": true,
+                "prefer1m": false
+            }),
+        )
+        .expect("write existing profile");
+
+        apply_provider_to_paths(&db, &provider, &paths).expect("apply provider");
+
+        let profile: Value = read_json_file(&paths.profile_path).expect("read profile");
+        assert_eq!(
+            profile["inferenceGatewayBaseUrl"],
+            json!("https://gateway.example.com")
+        );
+        assert_eq!(profile["autoModeEnabled"], json!(true));
+        assert_eq!(profile["toolSearchEnabled"], json!(true));
+        assert_eq!(profile["prefer1m"], json!(false));
+    }
+
+    #[test]
     fn claude_desktop_direct_can_write_optional_safe_model_ids() {
         let temp = TempDir::new().expect("tempdir");
         let paths = test_paths(temp.path());
@@ -1581,6 +1667,41 @@ mod tests {
             json!([{ "name": "claude-sonnet-4-6", "labelOverride": "Kimi K2", "supports1m": true }])
         );
         assert!(!profile.to_string().contains("kimi-k2"));
+    }
+
+    #[test]
+    fn claude_desktop_apply_preserves_per_model_1m_preference() {
+        let temp = TempDir::new().expect("tempdir");
+        let paths = test_paths(temp.path());
+        let provider = proxy_provider("proxy");
+        let db = test_db();
+
+        // 首次应用写入托管字段
+        apply_provider_to_paths(&db, &provider, &paths).expect("apply proxy provider");
+
+        // 用户在 Claude Desktop 里勾选「Default to 1M context」：给默认模型条目加 prefer1m
+        let mut profile: Value = read_json_file(&paths.profile_path).expect("read profile");
+        let models = profile["inferenceModels"]
+            .as_array_mut()
+            .expect("inferenceModels array");
+        models[0]
+            .as_object_mut()
+            .expect("model entry")
+            .insert("prefer1m".to_string(), json!(true));
+        write_json_file(&paths.profile_path, &profile).expect("write user extras");
+
+        // 再次切换（cc-switch 重写 profile）必须保留条目内的 prefer1m
+        apply_provider_to_paths(&db, &provider, &paths).expect("re-apply proxy provider");
+
+        let rewritten: Value = read_json_file(&paths.profile_path).expect("read profile");
+        let models = rewritten["inferenceModels"]
+            .as_array()
+            .expect("inferenceModels array");
+        assert_eq!(models[0]["name"], json!("claude-sonnet-4-6"));
+        assert_eq!(models[0]["prefer1m"], json!(true));
+        // 托管字段仍是 cc-switch 的值
+        assert_eq!(models[0]["labelOverride"], json!("Kimi K2"));
+        assert_eq!(models[0]["supports1m"], json!(true));
     }
 
     #[test]

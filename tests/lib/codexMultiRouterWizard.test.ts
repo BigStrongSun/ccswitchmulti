@@ -545,6 +545,35 @@ describe("codexMultiRouterWizard helpers", () => {
     expect(plan.settingsConfig.base_url).toBe("http://127.0.0.1:15721/v1");
   });
 
+  it("copies maintained reasoning capabilities into a newly generated MultiRouter plan", () => {
+    const reasoning = {
+      supported: true as const,
+      supportedEfforts: ["low", "high"] as const,
+      defaultEffort: "high" as const,
+      disableAllowed: false,
+      upstream: {
+        format: "string" as const,
+        parameter: "reasoning_effort",
+      },
+      source: "builtin" as const,
+    };
+    const step = provider({
+      id: "step",
+      name: "StepFun",
+      settingsConfig: {
+        modelCatalog: {
+          models: [{ model: "step-3.5-flash", reasoning }],
+        },
+      },
+    });
+
+    const { plan } = buildCodexMultiRouterWizardPlan([step], [step]);
+
+    expect(plan.settingsConfig.modelCatalog.models[0].reasoning).toEqual(
+      reasoning,
+    );
+  });
+
   it("applies wizard plan name, final catalog order, and spawn agent order", () => {
     const relay = provider({
       id: "relay",

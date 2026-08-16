@@ -32,7 +32,7 @@ use super::streaming_responses::{
 use crate::proxy::error::ProxyError;
 use crate::proxy::hyper_client::ProxyResponse;
 use crate::proxy::sse::{strip_sse_field, take_sse_block};
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use futures::stream::{Stream, StreamExt};
 use serde_json::{json, Value};
 use std::future::Future;
@@ -101,6 +101,177 @@ impl StreamReconnector {
 /// Codex CLI 的标称退避序列（无抖动）：200/400/800/1600/3200ms。
 fn backoff_delay(attempt: u32) -> Duration {
     Duration::from_millis(200u64 << attempt.saturating_sub(1).min(4))
+}
+
+/// 从原始 Responses SSE 字节缓冲中取出一个完整事件（连同分隔空行）。
+///
+/// 不在 chunk 边界上作 UTF-8 解码，避免上游刚好在中文字符中间切块时篡改
+/// passthrough 字节；只有取得完整 SSE block 后才用 UTF-8 读取事件名。
+fn take_raw_sse_block(buffer: &mut BytesMut) -> Option<Bytes> {
+    let bytes = buffer.as_ref();
+    let boundary = bytes
+        .windows(2)
+        .position(|window| window == b"\n\n")
+        .map(|index| index + 2)
+        .or_else(|| {
+            bytes
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .map(|index| index + 4)
+        })?;
+    Some(buffer.split_to(boundary).freeze())
+}
+
+/// 读取原始 Responses SSE block 的事件名；注释或不含事件名的 block 返回 `None`。
+fn raw_responses_sse_event_name(block: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(block).ok()?;
+    for line in text.lines() {
+        if let Some(event) = strip_sse_field(line, "event") {
+            return Some(event.trim().to_string());
+        }
+        if let Some(data) = strip_sse_field(line, "data") {
+            if let Ok(value) = serde_json::from_str::<Value>(data) {
+                if let Some(kind) = value.get("type").and_then(Value::as_str) {
+                    return Some(kind.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn raw_sse_block_is_comment(block: &[u8]) -> bool {
+    block
+        .iter()
+        .copied()
+        .find(|byte| !byte.is_ascii_whitespace())
+        == Some(b':')
+}
+
+/// 原生 Codex Responses 的安全 SSE 重连。
+///
+/// 与 Anthropic 转换路径不同，这里不重写协议字节。只有 `response.created` 和
+/// SSE 注释已被发出时，重新执行同一上游请求仍可对客户端透明；任何其它事件
+/// （包括 malformed block）都可能已经进入 Codex 持久化/工具状态机，立即封死
+/// 重放路径。这样中途异常只会作为一次普通断流交给 Codex，而不会造成重复调用。
+pub fn create_resilient_responses_sse_stream(
+    initial: ByteStream,
+    reconnector: Option<StreamReconnector>,
+) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
+    async_stream::stream! {
+        let Some(reconnector) = reconnector else {
+            let mut stream = initial;
+            while let Some(item) = stream.next().await {
+                yield item;
+            }
+            return;
+        };
+
+        let mut attempt = 0;
+        let mut created_forwarded = false;
+        let mut semantic_output_forwarded = false;
+        let mut current = Some(initial);
+
+        'attempts: loop {
+            let Some(mut stream) = current.take() else { break };
+            let mut buffer = BytesMut::new();
+            let mut terminal = false;
+            let mut failure: Option<String> = None;
+            let mut silence = Duration::ZERO;
+
+            loop {
+                let item = match tokio::time::timeout(KEEPALIVE_INTERVAL, stream.next()).await {
+                    Ok(item) => {
+                        silence = Duration::ZERO;
+                        item
+                    }
+                    Err(_) => {
+                        silence += KEEPALIVE_INTERVAL;
+                        if created_forwarded && silence <= UPSTREAM_SILENCE_KEEPALIVE_LIMIT {
+                            yield Ok(Bytes::from_static(b": ping\n\n"));
+                        }
+                        continue;
+                    }
+                };
+
+                let Some(item) = item else {
+                    if !buffer.is_empty() {
+                        // 不能验证残块是否只是脚手架；原样发出并关闭重放通道。
+                        semantic_output_forwarded = true;
+                        yield Ok(buffer.split().freeze());
+                    }
+                    if !terminal && !semantic_output_forwarded {
+                        failure = Some("upstream Responses SSE ended before semantic output".into());
+                    }
+                    break;
+                };
+
+                let chunk = match item {
+                    Ok(chunk) => chunk,
+                    Err(error) => {
+                        if semantic_output_forwarded {
+                            yield Err(error);
+                            break 'attempts;
+                        }
+                        failure = Some(format!("upstream Responses SSE transport error: {error}"));
+                        break;
+                    }
+                };
+                buffer.extend_from_slice(&chunk);
+
+                while let Some(block) = take_raw_sse_block(&mut buffer) {
+                    let event_name = raw_responses_sse_event_name(&block);
+                    match event_name.as_deref() {
+                        Some("response.created") if created_forwarded => {
+                            // 新连接会再次宣告 response.created；客户端已经见过它。
+                        }
+                        Some("response.created") => {
+                            created_forwarded = true;
+                            yield Ok(block);
+                        }
+                        None if raw_sse_block_is_comment(&block) => {
+                            yield Ok(block);
+                        }
+                        Some("response.completed" | "response.failed" | "error") => {
+                            semantic_output_forwarded = true;
+                            terminal = true;
+                            yield Ok(block);
+                        }
+                        _ => {
+                            semantic_output_forwarded = true;
+                            yield Ok(block);
+                        }
+                    }
+                }
+            }
+
+            let Some(mut reason) = failure else { break 'attempts };
+            loop {
+                if attempt >= RESPONSES_STREAM_MAX_RETRIES {
+                    yield Err(std::io::Error::other(format!(
+                        "Responses upstream stream failed after {attempt} reconnect attempt(s): {reason}"
+                    )));
+                    break 'attempts;
+                }
+                attempt += 1;
+                log::warn!(
+                    "[Codex/Responses] upstream stream dropped before semantic output ({reason}); reconnecting (attempt {attempt}/{RESPONSES_STREAM_MAX_RETRIES})"
+                );
+                if created_forwarded {
+                    yield Ok(Bytes::from_static(b": ping\n\n"));
+                }
+                tokio::time::sleep(backoff_delay(attempt)).await;
+                match reconnector.connect().await {
+                    Ok(response) if response.status().is_success() => {
+                        current = Some(Box::pin(response.bytes_stream()));
+                        continue 'attempts;
+                    }
+                    Ok(response) => reason = format!("reconnect got HTTP {} from upstream", response.status().as_u16()),
+                    Err(error) => reason = format!("reconnect failed: {error}"),
+                }
+            }
+        }
+    }
 }
 
 /// 单个转换器输出块里解析出的 Anthropic SSE 事件。
@@ -533,6 +704,65 @@ mod tests {
         assert!(out.contains("hello"));
         assert!(out.contains("event: message_stop"));
         assert!(!out.contains("event: error"), "unexpected error in: {out}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_responses_reconnects_after_created_before_semantic_output() {
+        let retry_body = [created(), text_delta("hello"), completed()].concat();
+        let (reconnector, calls) =
+            scripted_reconnector(vec![Ok(streamed_response(&[retry_body.as_str()]))]);
+        let first = chunks_then_error(&[created().as_str()]);
+
+        let out = collect(create_resilient_responses_sse_stream(
+            first,
+            Some(reconnector),
+        ))
+        .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(out.matches("event: response.created").count(), 1);
+        assert!(out.contains("hello"));
+        assert!(out.contains("event: response.completed"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_responses_never_reconnects_after_output_item_done() {
+        let (reconnector, calls) = scripted_reconnector(vec![]);
+        let item_done = sse(
+            "response.output_item.done",
+            json!({"type":"response.output_item.done","item":{"type":"function_call","name":"write_file"}}),
+        );
+        let first = ok_chunks(&[[created(), item_done].concat().as_str()]);
+
+        let out = collect(create_resilient_responses_sse_stream(
+            first,
+            Some(reconnector),
+        ))
+        .await;
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "must not replay a completed item"
+        );
+        assert!(out.contains("response.output_item.done"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_responses_reconnects_after_comment_keepalive() {
+        let retry_body = [created(), text_delta("recovered"), completed()].concat();
+        let (reconnector, calls) =
+            scripted_reconnector(vec![Ok(streamed_response(&[retry_body.as_str()]))]);
+        let first = chunks_then_error(&[created().as_str(), ": upstream-ping\n\n"]);
+
+        let out = collect(create_resilient_responses_sse_stream(
+            first,
+            Some(reconnector),
+        ))
+        .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(out.contains("recovered"));
     }
 
     #[tokio::test(start_paused = true)]

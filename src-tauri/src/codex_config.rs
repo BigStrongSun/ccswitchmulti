@@ -25,14 +25,14 @@ pub const CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME: &str = "cc-switch-model-catalo
 ///
 /// `request_max_retries` 只覆盖流建立前的传输/HTTP 5xx 重试；`error sending request`
 /// 这类连接/构造失败必须允许 Codex 重试，否则网络短暂恢复后当前 turn 已经直接失败。
-/// `stream_max_retries` 保持 0：Codex 在收到 `response.output_item.done` 时会立即
-/// 通过 `record_conversation_items` 写入会话历史，流级重试在再次请求前用
-/// `clone_history` 重建 input；因此任何已完成的部分 message/tool call 都会进入
-/// 重试 prompt，形成重复或半截历史。当前 Codex 没有“流未 completed 就回滚已写
-/// item”的机制，故这里不允许流级整轮重放。对可能已在途的响应体读取/超时错误，
-/// CCSM 映射为 429 + Retry-After，而 Codex 的 provider retry policy 明确不重试 429。
+/// `stream_max_retries` 与 Codex 官方默认值 5 对齐：CCSM 只在尚未向客户端发出
+/// 语义事件时做透明 SSE 重连；一旦正文、reasoning 或工具事件已经交付，代理封死
+/// 自身重放通道，把缺少 `response.completed` 的流错误交还 Codex。只有 Codex 拥有
+/// session/turn 历史和工具执行状态，流已开始后的 sampling retry 必须由客户端负责。
+/// 对可能已在途的响应体读取/超时错误，CCSM 仍映射为 429 + Retry-After，而 Codex
+/// 的 provider retry policy 明确不重试 429，避免把未知结果的请求误归为普通断流。
 pub(crate) const CODEX_MANAGED_REQUEST_MAX_RETRIES: u64 = 2;
-pub(crate) const CODEX_MANAGED_STREAM_MAX_RETRIES: u64 = 0;
+pub(crate) const CODEX_MANAGED_STREAM_MAX_RETRIES: u64 = 5;
 const CODEX_MODELS_CACHE_FILENAME: &str = "models_cache.json";
 const CODEX_MODELS_CACHE_BACKUP_FILENAME: &str = "models_cache.cc-switch-backup.json";
 const CC_SWITCH_CODEX_MODELS_CACHE_ETAG: &str = "cc-switch-model-catalog";
@@ -852,7 +852,7 @@ fn codex_catalog_capabilities_for_model<'a>(settings: &'a Value, model: &str) ->
 /// `supportedReasoningEfforts[].reasoningEffort`。这里保留 snake_case 源字段，
 /// 额外投影 camelCase 别名，避免 app-server 或 renderer 只认其中一种形态。
 fn codex_desktop_reasoning_efforts_from_levels(levels: Option<&Value>) -> Value {
-    let mut efforts = levels
+    let efforts = levels
         .and_then(|value| value.as_array())
         .map(|levels| {
             levels
@@ -879,19 +879,49 @@ fn codex_desktop_reasoning_efforts_from_levels(levels: Option<&Value>) -> Value 
         })
         .unwrap_or_default();
 
-    if efforts.is_empty() {
-        efforts = CODEX_REASONING_EFFORTS
-            .iter()
-            .map(|(effort, description)| {
-                json!({
-                    "reasoningEffort": effort,
-                    "description": description,
-                })
-            })
-            .collect();
-    }
-
     Value::Array(efforts)
+}
+
+/// 返回模型厂商声明的 reasoning capability，而不是 Codex/GPT 通用兜底档位。
+///
+/// DeepSeek V4 的 `max` 会选择厂商独立的 Think Max 模式；`medium` / `xhigh`
+/// 不是其官方 Codex catalog 枚举，因此 MultiRouter 也不能从 GPT 模板继承它们。
+fn apply_codex_model_reasoning_capability(
+    entry_obj: &mut serde_json::Map<String, Value>,
+    capability: Option<&crate::proxy::providers::codex_reasoning::CodexModelReasoningCapability>,
+) {
+    for field in [
+        "default_reasoning_level",
+        "default_reasoning_effort",
+        "defaultReasoningEffort",
+        "supported_reasoning_levels",
+        "supported_reasoning_efforts",
+        "supportedReasoningEfforts",
+    ] {
+        entry_obj.remove(field);
+    }
+    entry_obj.insert(
+        "supported_reasoning_levels".to_string(),
+        Value::Array(Vec::new()),
+    );
+    let Some(capability) = capability.filter(|capability| capability.supported) else {
+        return;
+    };
+    if let Some(default_effort) = capability.default_effort.as_deref() {
+        entry_obj.insert("default_reasoning_level".to_string(), json!(default_effort));
+    }
+    entry_obj.insert(
+        "supported_reasoning_levels".to_string(),
+        Value::Array(
+            capability
+                .supported_efforts
+                .iter()
+                .map(
+                    |effort| json!({ "effort": effort, "description": format!("{effort} effort") }),
+                )
+                .collect(),
+        ),
+    );
 }
 
 /// 为最新版 Codex `ModelInfo` 保留 snake_case reasoning levels。
@@ -945,8 +975,7 @@ fn project_codex_desktop_model_fields(
         .and_then(|value| value.as_str())
         .map(str::trim)
         .filter(|effort| !effort.is_empty())
-        .unwrap_or(CODEX_DEFAULT_REASONING_EFFORT)
-        .to_string();
+        .map(ToString::to_string);
     let supported_reasoning_efforts =
         codex_desktop_reasoning_efforts_from_levels(entry_obj.get("supported_reasoning_levels"));
     let supported_reasoning_levels =
@@ -956,22 +985,29 @@ fn project_codex_desktop_model_fields(
     entry_obj.insert("displayName".to_string(), json!(spec.display_name));
     entry_obj.insert("contextWindow".to_string(), json!(spec.context_window));
     entry_obj.insert("maxContextWindow".to_string(), json!(spec.context_window));
-    entry_obj.insert(
-        "default_reasoning_level".to_string(),
-        json!(default_reasoning_effort.clone()),
-    );
-    entry_obj.insert(
-        "defaultReasoningEffort".to_string(),
-        json!(default_reasoning_effort),
-    );
-    entry_obj.insert(
-        "supported_reasoning_levels".to_string(),
-        supported_reasoning_levels,
-    );
-    entry_obj.insert(
-        "supportedReasoningEfforts".to_string(),
-        supported_reasoning_efforts,
-    );
+    if let Some(default_reasoning_effort) = default_reasoning_effort {
+        entry_obj.insert(
+            "default_reasoning_level".to_string(),
+            json!(default_reasoning_effort.clone()),
+        );
+        entry_obj.insert(
+            "defaultReasoningEffort".to_string(),
+            json!(default_reasoning_effort),
+        );
+    }
+    if supported_reasoning_efforts
+        .as_array()
+        .is_some_and(|efforts| !efforts.is_empty())
+    {
+        entry_obj.insert(
+            "supported_reasoning_levels".to_string(),
+            supported_reasoning_levels,
+        );
+        entry_obj.insert(
+            "supportedReasoningEfforts".to_string(),
+            supported_reasoning_efforts,
+        );
+    }
     entry_obj.insert("visibility".to_string(), json!("list"));
     entry_obj.insert("show_in_picker".to_string(), json!(true));
     entry_obj.insert("supported_in_api".to_string(), json!(true));
@@ -1048,6 +1084,7 @@ fn codex_catalog_model_entry(
         entry_obj.insert("web_search_tool_type".to_string(), json!("text"));
         entry_obj.insert("webSearchToolType".to_string(), json!("text"));
     }
+    apply_codex_model_reasoning_capability(entry_obj, spec.reasoning.as_ref());
     project_codex_desktop_model_fields(entry_obj, spec);
 
     if profile != CodexCatalogToolProfile::ProxyChat {
@@ -1092,6 +1129,7 @@ struct CodexCatalogModelSpec {
     supports_parallel_tool_calls: Option<bool>,
     input_modalities: Option<Vec<String>>,
     base_instructions: Option<String>,
+    reasoning: Option<crate::proxy::providers::codex_reasoning::CodexModelReasoningCapability>,
 }
 
 /// 为 Codex 多 Agent 工具的模型说明生成稳定排序键。
@@ -1273,6 +1311,10 @@ fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCa
             .map(str::trim)
             .filter(|text| !text.is_empty())
             .map(ToString::to_string);
+        let reasoning =
+            crate::proxy::providers::codex_reasoning::reasoning_capability_from_model_entry(
+                model_config,
+            );
 
         specs.push(CodexCatalogModelSpec {
             model: model.to_string(),
@@ -1286,6 +1328,7 @@ fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCa
             supports_parallel_tool_calls,
             input_modalities,
             base_instructions,
+            reasoning,
         });
     }
 
@@ -2056,7 +2099,7 @@ fn set_codex_model_catalog_projection_fields(
             doc["model_catalog_json"] = toml_edit::value(CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME);
             set_active_codex_provider_models(&mut doc, specs, catalog);
             ensure_codex_agents_defaults(&mut doc);
-            ensure_codex_multi_agent_reserved_schema_compatible(&mut doc);
+            ensure_codex_multi_agent_reserved_schema_compatible(&mut doc, false);
         }
         _ => {
             let should_remove = doc
@@ -2097,10 +2140,9 @@ fn codex_multi_router_is_enabled(settings: &Value) -> bool {
 
 /// 判断当前 MultiRouter 是否包含需要跨 provider 投递的启用 route。
 ///
-/// 混合路由仍保留 Multi-Agent V2；代理会在 official parent 出站时移除协作工具
-/// message 参数的加密标记，让 Codex 生成 V2 明文 agent_message。这里仅负责确保整个
-/// 混合任务的模型目录都声明 V2。旧 route 没有认证来源时按跨 provider 处理。
-fn codex_multi_router_requires_plaintext_multi_agent(settings: &Value) -> bool {
+/// 混合路由仍保留 Multi-Agent V2，并通过非保留工具 namespace 让 Codex 直接向
+/// 第三方 child 投递明文任务。旧 route 没有认证来源时按跨 provider 处理。
+fn codex_multi_router_requires_non_reserved_agent_namespace(settings: &Value) -> bool {
     let Some(routing) = settings.get("codexRouting") else {
         return false;
     };
@@ -2152,7 +2194,7 @@ fn codex_route_uses_official_backend_agent_delivery(route: &Value) -> bool {
 /// Codex 会在任务首轮锁定协议版本。官方 parent 与第三方 child 必须都留在 V2 候选
 /// 集合中，正文是否加密由出站工具 schema 单独控制，不能再把混合目录降为 V1。
 fn apply_codex_multi_agent_transport_policy(catalog: &mut Value, settings: &Value) {
-    if !codex_multi_router_requires_plaintext_multi_agent(settings) {
+    if !codex_multi_router_requires_non_reserved_agent_namespace(settings) {
         return;
     }
     let Some(models) = catalog.get_mut("models").and_then(Value::as_array_mut) else {
@@ -2207,17 +2249,21 @@ fn set_codex_native_web_search_field(config_text: &str, disable: bool) -> Result
     Ok(doc.to_string())
 }
 
-/// 让 Codex multi_agent_v2 使用新版模型认可的保留工具 schema。
+/// 让 Codex multi_agent_v2 使用与当前路由拓扑兼容的工具 schema。
 ///
 /// 新版 GPT/Codex 后端把 `collaboration.spawn_agent` 视为保留函数工具，
 /// 并要求客户端提交的 schema 与后端配置完全一致。旧版 CCSwitchMulti 曾通过
 /// `hide_spawn_agent_metadata=false` 暴露 `model` / `reasoning_effort` /
 /// `service_tier` 参数；这些额外字段会让新模型直接拒绝请求。
 ///
-/// CCSwitchMulti 现在通过 `~/.codex/agents/*.toml` 托管 role 文件固定子 Agent
-/// 模型，因此这里只保留用户原本的启用状态，并强制隐藏 metadata，让工具 schema
-/// 回到 Codex 官方保留形态。
-fn ensure_codex_multi_agent_reserved_schema_compatible(doc: &mut DocumentMut) {
+/// CCSwitchMulti 通过 `~/.codex/agents/*.toml` 托管 role 文件固定子 Agent 模型，
+/// 因此始终隐藏 metadata。混合官方/第三方路由不能使用后端保留的
+/// `collaboration` namespace：若用户没有选择 namespace，或仍使用该保留名，改用
+/// Codex 原生支持的 `agents`。用户已有其它非保留 namespace 时保持不变。
+fn ensure_codex_multi_agent_reserved_schema_compatible(
+    doc: &mut DocumentMut,
+    mixed_provider_delivery: bool,
+) {
     if doc.get("features").is_none() {
         doc["features"] = toml_edit::table();
     }
@@ -2244,6 +2290,16 @@ fn ensure_codex_multi_agent_reserved_schema_compatible(doc: &mut DocumentMut) {
             multi_agent_v2["enabled"] = enabled;
         }
         multi_agent_v2["hide_spawn_agent_metadata"] = toml_edit::value(true);
+        let namespace_requires_replacement = multi_agent_v2
+            .get("tool_namespace")
+            .and_then(|item| item.as_str())
+            .map(str::trim)
+            .is_none_or(|namespace| {
+                namespace.is_empty() || namespace.eq_ignore_ascii_case("collaboration")
+            });
+        if mixed_provider_delivery && namespace_requires_replacement {
+            multi_agent_v2["tool_namespace"] = toml_edit::value("agents");
+        }
     }
 }
 
@@ -2306,10 +2362,10 @@ fn codex_agent_description_for_model(model: &str) -> String {
         return "Low-cost Qwen worker for read-heavy exploration, summaries, and bounded helper tasks.".to_string();
     }
     if lower.contains("deepseek-v4-flash") {
-        return "DeepSeek V4 Flash worker for long-context code reading, architecture tracing, and implementation support.".to_string();
+        return "DeepSeek V4 Flash worker for long-context code reading, read-heavy exploration, architecture tracing, parallel evidence collection, and lightweight verification.".to_string();
     }
     if lower.contains("deepseek-v4-pro") {
-        return "DeepSeek V4 Pro worker for higher-depth debugging, review, and complex code changes.".to_string();
+        return "DeepSeek V4 Pro worker for complex debugging, cross-module reasoning, architecture decisions, high-risk review, and complex implementation.".to_string();
     }
     if lower.contains("codex-spark") || lower.contains("spark") {
         return "Codex Spark worker for fast, focused edits, formatting, and quick verification."
@@ -2326,6 +2382,9 @@ fn codex_agent_reasoning_effort_for_model(model: &str) -> Option<&'static str> {
     let lower = model.to_ascii_lowercase();
     if lower.starts_with("qwen") {
         return None;
+    }
+    if lower.contains("deepseek-v4-flash") || lower.contains("deepseek-v4-pro") {
+        return Some("high");
     }
     if lower.contains("spark") {
         Some("low")
@@ -2423,7 +2482,7 @@ fn sync_codex_managed_agent_files(specs: &[CodexCatalogModelSpec]) -> Result<(),
 
     let mut seen_roles = HashSet::new();
     let mut desired_paths = HashSet::new();
-    for spec in specs.iter().take(5) {
+    for spec in specs {
         let base_role = codex_agent_role_name_for_model(&spec.model);
         if base_role.is_empty() {
             continue;
@@ -2449,7 +2508,7 @@ fn sync_codex_managed_agent_files(specs: &[CodexCatalogModelSpec]) -> Result<(),
     Ok(())
 }
 
-/// 删除已经不属于当前前五候选窗口的 CCSwitchMulti 托管 agent 文件。
+/// 删除已经不属于当前可路由模型目录的 CCSwitchMulti 托管 agent 文件。
 ///
 /// 只清理带托管标记的文件，用户手写 role、旧版未标记文件和其它扩展 agent 都保留。
 fn prune_stale_codex_managed_agent_files(
@@ -2848,6 +2907,10 @@ pub fn prepare_codex_config_text_with_model_catalog(
         let mut doc = config_text
             .parse::<DocumentMut>()
             .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
+        ensure_codex_multi_agent_reserved_schema_compatible(
+            &mut doc,
+            codex_multi_router_requires_non_reserved_agent_namespace(settings),
+        );
         let config_text =
             if codex_multi_router_is_enabled(settings) || codex_document_uses_multi_router(&doc) {
                 remove_multi_router_context_overrides(&mut doc);
@@ -4287,9 +4350,9 @@ mod tests {
     use serial_test::serial;
 
     #[test]
-    fn managed_codex_retry_budget_allows_pre_stream_but_not_in_flight_stream_retry() {
-        assert!(CODEX_MANAGED_REQUEST_MAX_RETRIES > 0);
-        assert_eq!(CODEX_MANAGED_STREAM_MAX_RETRIES, 0);
+    fn managed_codex_retry_budget_preserves_codex_stream_recovery() {
+        assert_eq!(CODEX_MANAGED_REQUEST_MAX_RETRIES, 2);
+        assert_eq!(CODEX_MANAGED_STREAM_MAX_RETRIES, 5);
     }
 
     #[test]
@@ -5975,6 +6038,7 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             supports_parallel_tool_calls: None,
             input_modalities: None,
             base_instructions: None,
+            reasoning: None,
         }];
         let catalog = codex_model_catalog_from_specs(
             &specs,
@@ -6362,6 +6426,7 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             supports_parallel_tool_calls: None,
             input_modalities: None,
             base_instructions: None,
+            reasoning: None,
         };
         let entry = codex_catalog_model_entry(
             &template,
@@ -6412,6 +6477,7 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             supports_parallel_tool_calls: Some(false),
             input_modalities: Some(vec!["text".to_string(), "image".to_string()]),
             base_instructions: Some("base".to_string()),
+            reasoning: None,
         };
 
         let entry = codex_catalog_model_entry(
@@ -6569,7 +6635,9 @@ openai_base_url = "http://127.0.0.1:15721/v1"
     }
 
     #[test]
-    /// 生成 catalog 时同时满足新版 Codex `ModelInfo` 和旧 renderer 的字段形态。
+    /// 未声明 reasoning 的第三方模型不能继承 GPT 档位，但仍必须保留
+    /// Codex `ModelInfo` 反序列化所需的空 reasoning 数组。缺失该字段会让
+    /// `windowsSandbox/setupStart` 在启动 UAC helper 前因 invalid_config 失败。
     fn codex_model_catalog_projects_spawn_agent_model_info_fields() {
         let template = json!({
             "slug": "gpt-5.5",
@@ -6594,6 +6662,7 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             supports_parallel_tool_calls: None,
             input_modalities: None,
             base_instructions: None,
+            reasoning: None,
         };
         let entry = codex_catalog_model_entry(
             &template,
@@ -6619,21 +6688,210 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             Some(true),
             "non-ChatGPT auth filters must not remove MultiRouter models"
         );
+        assert!(entry.get("default_reasoning_level").is_none());
+        assert_eq!(entry.get("supported_reasoning_levels"), Some(&json!([])));
+    }
+
+    #[test]
+    /// DeepSeek V4 的原生 effort 枚举不能继承通用 GPT ProxyChat 模板。
+    fn codex_model_catalog_uses_deepseek_v4_reasoning_capabilities() {
+        let template = json!({
+            "slug": "gpt-5.5",
+            "display_name": "GPT-5.5",
+            "supported_reasoning_levels": [
+                { "effort": "low", "description": "Low" },
+                { "effort": "medium", "description": "Medium" },
+                { "effort": "high", "description": "High" },
+                { "effort": "xhigh", "description": "Extra high" }
+            ],
+            "default_reasoning_level": "medium"
+        });
+        let spec = CodexCatalogModelSpec {
+            model: "deepseek-v4-flash".to_string(),
+            upstream_model: None,
+            display_name: "DeepSeek V4 Flash".to_string(),
+            context_window: 1_048_576,
+            text_only: true,
+            is_default: true,
+            supports_parallel_tool_calls: Some(true),
+            input_modalities: Some(vec!["text".to_string()]),
+            base_instructions: None,
+            reasoning: Some(
+                crate::proxy::providers::codex_reasoning::CodexModelReasoningCapability {
+                    supported: true,
+                    supported_efforts: vec!["low".into(), "high".into(), "max".into()],
+                    default_effort: Some("high".into()),
+                    disable_allowed: false,
+                    upstream:
+                        crate::proxy::providers::codex_reasoning::CodexModelReasoningUpstream {
+                            format: "reasoning_object".into(),
+                            parameter: "reasoning.effort".into(),
+                            effort_map: Default::default(),
+                        },
+                    output_format: None,
+                    source: Some("builtin".into()),
+                },
+            ),
+        };
+
+        let entry = codex_catalog_model_entry(
+            &template,
+            &spec,
+            0,
+            CodexCatalogToolProfile::ProxyChat,
+            128_000,
+        );
+        let levels = entry["supported_reasoning_levels"]
+            .as_array()
+            .expect("reasoning levels")
+            .iter()
+            .filter_map(|level| level.get("effort").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        let desktop_levels = entry["supportedReasoningEfforts"]
+            .as_array()
+            .expect("desktop reasoning levels")
+            .iter()
+            .filter_map(|level| level.get("reasoningEffort").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+
+        assert_eq!(entry["default_reasoning_level"], "high");
+        assert_eq!(entry["defaultReasoningEffort"], "high");
+        assert_eq!(levels, vec!["low", "high", "max"]);
+        assert_eq!(desktop_levels, vec!["low", "high", "max"]);
+    }
+
+    #[test]
+    fn codex_model_catalog_projects_declared_glm_reasoning_capability() {
+        let settings = json!({
+            "modelCatalog": { "models": [{
+                "model": "glm-5.2",
+                "reasoning": {
+                    "supported": true,
+                    "supportedEfforts": ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+                    "defaultEffort": "max",
+                    "disableAllowed": true,
+                    "upstream": { "format": "string", "parameter": "reasoning_effort" }
+                }
+            }]}
+        });
+        let catalog = codex_model_catalog_from_settings(
+            &settings,
+            "model = \"glm-5.2\"",
+            CodexCatalogToolProfile::ProxyChat,
+        )
+        .expect("build catalog")
+        .expect("catalog");
+        let entry = &catalog["models"][0];
+        let efforts = entry["supported_reasoning_levels"]
+            .as_array()
+            .expect("levels")
+            .iter()
+            .filter_map(|level| level["effort"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(entry["default_reasoning_level"], "max");
         assert_eq!(
-            entry
-                .get("default_reasoning_level")
-                .and_then(|v| v.as_str()),
-            Some("medium")
+            efforts,
+            vec!["none", "minimal", "low", "medium", "high", "xhigh", "max"]
         );
-        assert!(
-            entry
-                .get("supported_reasoning_levels")
-                .and_then(|v| v.as_array())
-                .is_some_and(|levels| levels.iter().any(|level| {
-                    level.get("effort").and_then(|v| v.as_str()) == Some("medium")
-                })),
-            "spawn_agent runtime validation reads supported_reasoning_levels"
-        );
+    }
+
+    #[test]
+    fn codex_model_catalog_projects_grok_reasoning_without_none() {
+        let settings = json!({
+            "modelCatalog": { "models": [{
+                "model": "grok-4.5",
+                "reasoning": {
+                    "supported": true,
+                    "supportedEfforts": ["low", "medium", "high"],
+                    "defaultEffort": "high",
+                    "disableAllowed": false,
+                    "upstream": { "format": "reasoning_object", "parameter": "reasoning.effort" }
+                }
+            }]}
+        });
+        let catalog = codex_model_catalog_from_settings(
+            &settings,
+            "model = \"grok-4.5\"",
+            CodexCatalogToolProfile::NativeResponses,
+        )
+        .expect("build catalog")
+        .expect("catalog");
+        let entry = &catalog["models"][0];
+        let efforts = entry["supported_reasoning_levels"]
+            .as_array()
+            .expect("levels")
+            .iter()
+            .filter_map(|level| level["effort"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(entry["default_reasoning_level"], "high");
+        assert_eq!(efforts, vec!["low", "medium", "high"]);
+        assert!(!efforts.contains(&"none"));
+    }
+
+    #[test]
+    fn codex_model_catalog_projects_distinct_step_model_efforts() {
+        let settings = json!({
+            "modelCatalog": { "models": [
+                {
+                    "model": "step-3.7-flash",
+                    "reasoning": {
+                        "supported": true,
+                        "supportedEfforts": ["low", "medium", "high"],
+                        "defaultEffort": "medium",
+                        "disableAllowed": false,
+                        "upstream": { "format": "string", "parameter": "reasoning_effort" }
+                    }
+                },
+                {
+                    "model": "step-3.5-flash-2603",
+                    "reasoning": {
+                        "supported": true,
+                        "supportedEfforts": ["low", "high"],
+                        "defaultEffort": "high",
+                        "disableAllowed": false,
+                        "upstream": { "format": "string", "parameter": "reasoning_effort" }
+                    }
+                }
+            ]}
+        });
+        let catalog = codex_model_catalog_from_settings(
+            &settings,
+            "model = \"step-3.7-flash\"",
+            CodexCatalogToolProfile::ProxyChat,
+        )
+        .expect("build catalog")
+        .expect("catalog");
+        let models = catalog["models"].as_array().expect("models");
+        let efforts = |index: usize| {
+            models[index]["supported_reasoning_levels"]
+                .as_array()
+                .expect("levels")
+                .iter()
+                .filter_map(|level| level["effort"].as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(efforts(0), vec!["low", "medium", "high"]);
+        assert_eq!(models[0]["default_reasoning_level"], "medium");
+        assert_eq!(efforts(1), vec!["low", "high"]);
+        assert_eq!(models[1]["default_reasoning_level"], "high");
+    }
+
+    #[test]
+    fn unknown_third_party_model_does_not_inherit_template_reasoning() {
+        let settings = json!({
+            "modelCatalog": { "models": [{ "model": "private-model" }] }
+        });
+        let catalog = codex_model_catalog_from_settings(
+            &settings,
+            "model = \"private-model\"",
+            CodexCatalogToolProfile::ProxyChat,
+        )
+        .expect("build catalog")
+        .expect("catalog");
+        let entry = &catalog["models"][0];
+        assert!(entry.get("default_reasoning_level").is_none());
+        assert_eq!(entry.get("supported_reasoning_levels"), Some(&json!([])));
+        assert!(entry.get("supportedReasoningEfforts").is_none());
     }
 
     #[test]
@@ -6648,6 +6906,7 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             supports_parallel_tool_calls: None,
             input_modalities: None,
             base_instructions: None,
+            reasoning: None,
         }];
         let config = r#"model_provider = "codex_model_router_v2"
 
@@ -6691,6 +6950,7 @@ base_url = "http://127.0.0.1:15721/v1"
             supports_parallel_tool_calls: None,
             input_modalities: None,
             base_instructions: None,
+            reasoning: None,
         }];
         let catalog = json!({
             "models": [{
@@ -6747,6 +7007,94 @@ base_url = "http://127.0.0.1:15721/v1"
     }
 
     #[test]
+    fn codex_provider_inline_models_keep_deepseek_v4_reasoning_capabilities() {
+        let specs = vec![CodexCatalogModelSpec {
+            model: "deepseek-v4-pro".to_string(),
+            upstream_model: None,
+            display_name: "DeepSeek V4 Pro".to_string(),
+            context_window: 1_048_576,
+            text_only: true,
+            is_default: true,
+            supports_parallel_tool_calls: Some(true),
+            input_modalities: Some(vec!["text".to_string()]),
+            base_instructions: None,
+            reasoning: Some(
+                crate::proxy::providers::codex_reasoning::CodexModelReasoningCapability {
+                    supported: true,
+                    supported_efforts: vec!["low".into(), "high".into(), "max".into()],
+                    default_effort: Some("high".into()),
+                    disable_allowed: false,
+                    upstream:
+                        crate::proxy::providers::codex_reasoning::CodexModelReasoningUpstream {
+                            format: "reasoning_object".into(),
+                            parameter: "reasoning.effort".into(),
+                            effort_map: Default::default(),
+                        },
+                    output_format: None,
+                    source: Some("builtin".into()),
+                },
+            ),
+        }];
+        let catalog = codex_model_catalog_from_specs(
+            &specs,
+            &json!({
+                "slug": "gpt-5.5",
+                "display_name": "GPT-5.5",
+                "default_reasoning_level": "medium",
+                "supported_reasoning_levels": [
+                    { "effort": "low" },
+                    { "effort": "medium" },
+                    { "effort": "high" },
+                    { "effort": "xhigh" }
+                ]
+            }),
+            CodexCatalogToolProfile::ProxyChat,
+            128_000,
+        );
+        let config = r#"model_provider = "codex_model_router_v2"
+
+[model_providers.codex_model_router_v2]
+base_url = "http://127.0.0.1:15721/v1"
+"#;
+
+        let projected = set_codex_model_catalog_projection_fields(
+            config,
+            Some(Path::new("catalog")),
+            Some(&specs),
+            Some(&catalog),
+        )
+        .expect("project catalog fields");
+        let parsed: toml::Value = toml::from_str(&projected).expect("parse projected config");
+        let model = parsed["model_providers"]["codex_model_router_v2"]["models"]
+            .as_array()
+            .and_then(|models| models.first())
+            .expect("inline model");
+
+        for field in [
+            "supported_reasoning_levels",
+            "supported_reasoning_efforts",
+            "supportedReasoningEfforts",
+        ] {
+            let efforts = model[field]
+                .as_array()
+                .expect("inline reasoning levels")
+                .iter()
+                .filter_map(|level| {
+                    level
+                        .get("effort")
+                        .or_else(|| level.get("reasoning_effort"))
+                        .or_else(|| level.get("reasoningEffort"))
+                        .and_then(|effort| effort.as_str())
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(efforts, vec!["low", "high", "max"], "field {field}");
+        }
+        assert_eq!(model["default_reasoning_level"].as_str(), Some("high"));
+        assert_eq!(model["default_reasoning_effort"].as_str(), Some("high"));
+        assert_eq!(model["defaultReasoningEffort"].as_str(), Some("high"));
+    }
+
+    #[test]
     fn codex_multi_agent_v2_keeps_spawn_agent_reserved_schema_compatible() {
         let specs = vec![CodexCatalogModelSpec {
             model: "qwen3.6".to_string(),
@@ -6758,6 +7106,7 @@ base_url = "http://127.0.0.1:15721/v1"
             supports_parallel_tool_calls: None,
             input_modalities: None,
             base_instructions: None,
+            reasoning: None,
         }];
         let config = r#"model_provider = "codex_model_router_v2"
 
@@ -6792,6 +7141,134 @@ base_url = "http://127.0.0.1:15721/v1"
                 .and_then(|v| v.as_bool()),
             Some(true),
             "new Codex models reject reserved collaboration.spawn_agent when CCSwitchMulti adds extra schema fields"
+        );
+    }
+
+    fn prepared_router_multi_agent_v2_config(
+        settings: &Value,
+        multi_agent_v2_body: &str,
+    ) -> toml::Value {
+        let _guard = TestHomeGuard::new();
+        let config = format!(
+            r#"model_provider = "codex_model_router_v2"
+
+[features.multi_agent_v2]
+enabled = true
+{multi_agent_v2_body}
+
+[model_providers.codex_model_router_v2]
+base_url = "http://127.0.0.1:15721/v1"
+"#
+        );
+        let prepared = prepare_codex_config_text_with_model_catalog(
+            settings,
+            &config,
+            CodexCatalogToolProfile::ProxyChat,
+        )
+        .expect("prepare router config");
+        toml::from_str::<toml::Value>(&prepared).expect("parse prepared router config")["features"]
+            ["multi_agent_v2"]
+            .clone()
+    }
+
+    #[test]
+    #[serial]
+    fn mixed_router_uses_non_reserved_agents_tool_namespace() {
+        let multi_agent_v2 = prepared_router_multi_agent_v2_config(
+            &json!({
+                "modelCatalog": {
+                    "models": [
+                        { "model": "gpt-5.6-sol", "displayName": "GPT-5.6-Sol" },
+                        { "model": "qwen3.6", "displayName": "Qwen 3.6" }
+                    ]
+                },
+                "codexRouting": {
+                    "enabled": true,
+                    "routes": [
+                        {
+                            "id": "official",
+                            "match": { "models": ["gpt-5.6-sol"] },
+                            "upstream": { "auth": { "source": "managed_codex_oauth" } }
+                        },
+                        {
+                            "id": "qwen",
+                            "match": { "models": ["qwen3.6"] },
+                            "upstream": { "auth": { "source": "provider_config" } }
+                        }
+                    ]
+                }
+            }),
+            "tool_namespace = \"collaboration\"",
+        );
+
+        assert_eq!(
+            multi_agent_v2
+                .get("tool_namespace")
+                .and_then(toml::Value::as_str),
+            Some("agents"),
+            "mixed routing must avoid the backend-reserved collaboration namespace"
+        );
+        assert_eq!(
+            multi_agent_v2
+                .get("hide_spawn_agent_metadata")
+                .and_then(toml::Value::as_bool),
+            Some(true)
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn mixed_router_preserves_custom_non_reserved_tool_namespace() {
+        let multi_agent_v2 = prepared_router_multi_agent_v2_config(
+            &json!({
+                "modelCatalog": {
+                    "models": [{ "model": "qwen3.6", "displayName": "Qwen 3.6" }]
+                },
+                "codexRouting": {
+                    "enabled": true,
+                    "routes": [{
+                        "id": "qwen",
+                        "match": { "models": ["qwen3.6"] },
+                        "upstream": { "auth": { "source": "provider_config" } }
+                    }]
+                }
+            }),
+            "tool_namespace = \"team_agents\"",
+        );
+
+        assert_eq!(
+            multi_agent_v2
+                .get("tool_namespace")
+                .and_then(toml::Value::as_str),
+            Some("team_agents")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn official_only_router_does_not_force_non_reserved_tool_namespace() {
+        let multi_agent_v2 = prepared_router_multi_agent_v2_config(
+            &json!({
+                "modelCatalog": {
+                    "models": [{ "model": "gpt-5.6-sol", "displayName": "GPT-5.6-Sol" }]
+                },
+                "codexRouting": {
+                    "enabled": true,
+                    "routes": [{
+                        "id": "official",
+                        "match": { "models": ["gpt-5.6-sol"] },
+                        "upstream": { "auth": { "source": "managed_codex_oauth" } }
+                    }]
+                }
+            }),
+            "tool_namespace = \"collaboration\"",
+        );
+
+        assert_eq!(
+            multi_agent_v2
+                .get("tool_namespace")
+                .and_then(toml::Value::as_str),
+            Some("collaboration")
         );
     }
 
@@ -6967,6 +7444,7 @@ model_provider = "codex_model_router"
             supports_parallel_tool_calls: None,
             input_modalities: None,
             base_instructions: None,
+            reasoning: None,
         }];
 
         sync_codex_managed_agent_files(&specs).expect("sync managed agents");
@@ -7012,6 +7490,7 @@ model_provider = "custom"
             supports_parallel_tool_calls: None,
             input_modalities: None,
             base_instructions: None,
+            reasoning: None,
         }];
 
         sync_codex_managed_agent_files(&specs).expect("sync managed agents");
@@ -7029,6 +7508,67 @@ model_provider = "custom"
             "managed qwen agents should not pin an effort in fallback role files"
         );
         assert!(managed.contains(r#"nickname_candidates = ["Qwen Local""#));
+    }
+
+    #[test]
+    #[serial]
+    fn managed_agent_files_include_deepseek_roles_beyond_direct_override_window() {
+        let _guard = TestHomeGuard::new();
+        let specs = [
+            ("deepseek-v4-flash", "DeepSeek V4 Flash", 1_000_000),
+            ("gpt-5.6-sol", "GPT-5.6 Sol", 400_000),
+            ("qwen3.6", "Qwen 3.6", 262_144),
+            ("gpt-5.6-luna", "GPT-5.6 Luna", 400_000),
+            ("gpt-5.6-terra", "GPT-5.6 Terra", 400_000),
+            ("deepseek-v4-pro", "DeepSeek V4 Pro", 1_000_000),
+        ]
+        .into_iter()
+        .map(
+            |(model, display_name, context_window)| CodexCatalogModelSpec {
+                model: model.to_string(),
+                upstream_model: None,
+                display_name: display_name.to_string(),
+                context_window,
+                text_only: false,
+                is_default: false,
+                supports_parallel_tool_calls: None,
+                input_modalities: None,
+                base_instructions: None,
+                reasoning: None,
+            },
+        )
+        .collect::<Vec<_>>();
+
+        sync_codex_managed_agent_files(&specs).expect("sync managed agents");
+
+        let mut reordered_specs = specs.clone();
+        reordered_specs.rotate_left(1);
+        sync_codex_managed_agent_files(&reordered_specs)
+            .expect("changing direct override order must not change managed roles");
+
+        let agents_dir = get_codex_agents_dir();
+        let flash = std::fs::read_to_string(agents_dir.join("deepseek-flash.toml"))
+            .expect("Flash role should be generated from the full routable catalog");
+        let pro = std::fs::read_to_string(agents_dir.join("deepseek-pro.toml")).expect(
+            "Pro role should be generated even when it is outside the direct override top five",
+        );
+
+        assert!(flash.contains(r#"name = "deepseek-flash""#));
+        assert!(flash.contains(r#"model = "deepseek-v4-flash""#));
+        assert!(flash.contains(r#"model_provider = "codex_model_router_v2""#));
+        assert!(flash.contains(r#"model_reasoning_effort = "high""#));
+        assert!(flash.contains("read-heavy exploration"));
+        assert!(flash.contains("lightweight verification"));
+        assert!(!flash.contains("architecture decisions"));
+
+        assert!(pro.contains(r#"name = "deepseek-pro""#));
+        assert!(pro.contains(r#"model = "deepseek-v4-pro""#));
+        assert!(pro.contains(r#"model_provider = "codex_model_router_v2""#));
+        assert!(pro.contains(r#"model_reasoning_effort = "high""#));
+        assert!(pro.contains("cross-module reasoning"));
+        assert!(pro.contains("architecture decisions"));
+        assert!(pro.contains("complex implementation"));
+        assert!(!pro.contains("routine scanning"));
     }
 
     #[test]
@@ -7066,6 +7606,7 @@ model = "handwritten"
             supports_parallel_tool_calls: None,
             input_modalities: None,
             base_instructions: None,
+            reasoning: None,
         }];
 
         sync_codex_managed_agent_files(&specs).expect("sync managed agents");
@@ -7208,6 +7749,7 @@ model = "qwen3.6"
             supports_parallel_tool_calls: None,
             input_modalities: None,
             base_instructions: None,
+            reasoning: None,
         };
         let entry = codex_catalog_model_entry(
             &template,
@@ -7261,6 +7803,7 @@ model = "qwen3.6"
             supports_parallel_tool_calls: None,
             input_modalities: None,
             base_instructions: None,
+            reasoning: None,
         };
         let entry = codex_catalog_model_entry(
             &template,

@@ -1,5 +1,102 @@
 # CC Switch Repository Memory
 
+## 2026-08-15 提示词缓存路由（prompt_cache_key）功能归属与支持面核实
+
+- 用户问 Codex 表单高级选项里的「提示词缓存路由」是不是 Codex 提供的。结论：UI 开关是 CCSwitchMulti 本地代理自己的功能（v3.17.0 引入，commit `a078b4b2`，作者 Jason/farion1231，2026-07-11），不是 Codex 官方功能。底层 `prompt_cache_key` 是 OpenAI API 参数：OpenAI 按 `prompt_cache_key` + 前缀 hash 把请求路由到同一台缓存机器，GPT-5.6 起必须设置该 key 才能用更可靠的隐式/显式缓存匹配（官方文档 developers.openai.com/api/docs/guides/prompt-caching）。
+- Codex CLI 原生行为：Responses 请求默认带 `prompt_cache_key`（默认 thread id，见 docs/codex-oauth-native-diff.md）。问题出在 CCSM 把 Responses 转 Chat Completions 时把这个字段丢了，导致按 key 路由缓存的上游（如 Kimi Coding）会话缓存亲和性断裂；v3.17.0 在转换后按 provider 感知地重新注入。相关前史：#2218（@majiayu000，v3.14.1）把客户端 session ID 用作 prompt_cache_key 和 Codex session header。
+- 本轮修改前，自动模式白名单（`should_send_codex_chat_prompt_cache_key`，src-tauri/src/proxy/providers/codex.rs）只有 `api.openai.com` 和 `api.kimi.com/coding`；本轮按已确认的网关能力扩展为 OpenAI、`*.openai.azure.com`、OpenRouter 和 Kimi Coding。Kimi For Coding 预设（base_url `https://api.kimi.com/coding/v1`）仍显式设置 `promptCacheRouting: "enabled"`。
+- 联网交叉验证（matrix-websearch MCP，searxng 后端；Codex 内置 web_search 本环境不可用，返回 unsupported call）：Azure OpenAI 官方文档确认 GPT-5.6+ 的 Chat Completions/Responses 支持 `prompt_cache_key`，且 Codex v1 endpoint 使用 `<resource>.openai.azure.com/openai/v1`；OpenRouter 官方 prompt caching 文档确认未设 `session_id`/`x-session-id` 时会回退用 OpenAI 风格 `prompt_cache_key` 作为 sticky routing key。因此两者加入自动白名单，不再要求手动开启。
+- Kimi 官方文档（platform.kimi.com K3 quickstart）确认 Kimi 有自动前缀缓存（prompt tokens > 256 才能命中，< 256 丢弃）；「Kimi Coding 按 key 路由」的说法来自 CCSM 维护者 commit message，Kimi 文档站是 SPA，context-caching 页无法被无 JS 抓取器直接读取，未能从 Kimi 官方文档直接证实 prompt_cache_key 字段本身。
+- 其他主流上游不用 OpenAI 私有 cache 参数：DeepSeek/GLM(Z.AI)/Gemini 走自动前缀缓存，Anthropic/Qwen 显式缓存用 `cache_control`；对严格 schema 网关（commit 里点名 Fireworks）注入未知字段会 400，所以默认 auto 对未知网关保持关闭。该开关针对的是上游网关能力而非具体模型；DeepSeek/GLM/Qwen 等模型在各自网关上自动缓存，无需也不应开启此开关。
+- Codex Provider 表单现在实际渲染四语说明：稳定会话标识只是帮助重复且稳定的提示词前缀获得缓存亲和性，不能保证命中；列出自动支持的四类网关，提示未知字段 400 时关闭，并要求以 `usage.cached_tokens` 验证真实命中。Rust 单测覆盖已知网关、Kimi 路径限制、DeepSeek/GLM 默认关闭、Azure 伪装域名拒绝，以及显式开启/关闭优先于自动判断。
+
+## 2026-08-14 CCSwitchMulti 3.19.1-24 阻断 Codex Windows setup 根修
+
+- 用户与多名使用者看到 Codex Desktop `Finish Windows setup` / `Windows setup didn't finish`，点击重试不弹 UAC。同机把 CCSwitchMulti 从 `3.19.1-24` 降回 `3.19.1-23` 后立即恢复；这不是 UAC helper、`[windows] sandbox` 或 Codex MSIX ACL 本身损坏。
+- MODT 的 Codex Desktop `0.147.0-alpha.6.6` 日志给出完整调用链：`cc-switch-model-catalog.json` 的未知第三方模型缺少 `supported_reasoning_levels`，令 `config/read` 失败；点击重试时 `windowsSandbox/setupStart` 也在读取配置阶段返回 `invalid_config`，因此 `codex-windows-sandbox-setup.exe` 根本没有启动，UAC 自然不会出现。
+- 根因来自 `3.19.1-24` 的推理能力收口：为了不让未知第三方模型继承 GPT effort，`apply_codex_model_reasoning_capability()` 删除了模板的 reasoning 字段后直接返回。Codex `ModelInfo.default_reasoning_level` 是可选字段，但 `supported_reasoning_levels: Vec<_>` 没有 serde default，是 JSON 必填字段；官方源码的无 reasoning 示例也使用空数组而不是省略字段。
+- 正确语义是：未知或明确不支持 reasoning 的模型写 `supported_reasoning_levels: []`，同时省略默认 effort 和 Desktop reasoning aliases；声明能力的 DeepSeek/GLM/Grok/Step 等继续覆盖各自真实档位。禁止用恢复 GPT 通用档位来规避解析错误。
+- RED 提交 `ca80b7b9` 在旧实现稳定得到 `left=None / right=Some(Array [])`；GREEN 提交 `01cbbce3` 只补必填空数组，两个现场回归测试与 `codex_model_catalog` 聚焦套件 24/24 通过。验证时应额外检查真实 Codex `config/read` 和 `windowsSandbox/setupStart`，不能只看 catalog JSON 能被通用 JSON parser 读取。
+
+## 2026-08-13 Codex 内置预设推理能力统一实现
+
+- CCSwitchMulti 的 Codex 内置 Provider 现以 `modelCatalog.models[].reasoning` 作为逐模型能力契约；能力维度包含支持档位、默认档位、是否允许关闭、上游参数形态、effortMap、输出格式和来源。首批维护 DeepSeek V4 Flash/Pro、Grok 4.5、GLM-5.2、Step 3.7/3.5/2603；未知第三方模型不再继承 GPT/Native Responses 通用档位。
+- 同一能力对象由 Rust resolver 校验后投影到外部 catalog 的 snake_case、Desktop camelCase aliases 和 `config.toml` inline models，并驱动 Responses→Chat 请求转换。GLM 的兼容档位映射到 none/high/max；Step 2603 拒绝未声明的 medium；DeepSeek 使用 low/high/max 且默认 high。旧 Provider 仅在缺少模型级能力时保留 `codexChatReasoning` legacy fallback。
+- MultiRouter 向导、Provider 更新同步和已有 Provider 表单读回都保留 reasoning；visible alias 与 upstream model 均可解析。`codexSpawnAgentCandidates` 不再维护第二份 `CodexCatalogModel` 接口，统一复用 `src/types.ts`，避免新增能力字段在同步中被静默剥离。
+- Provider 模型目录的“Codex 推理能力”高级区域支持 JSON 覆盖：内置值标为 `builtin`，编辑后标为 `user`，空白/清除进入保守未声明；重新选择内置预设恢复维护值。保存前拒绝默认值不在列表、不可关闭却含 none、以及显式 effortMap 覆盖不完整的配置，不再静默回退。
+- 新鲜验证：Rust library `2842 passed / 0 failed / 2 ignored`；完整前端首次为 `115 files passed / 1 App integration file flaky, 830 passed / 2 timed out`，同一既有不稳定文件独立重跑 `8/8` 通过；`cargo check --lib`、`pnpm typecheck`、rustfmt、changed-file Prettier 和 `git diff --check` 通过。Rust 只保留既有 `openai_cache_read_tokens` dead-code warning；前端全集必须继续排除 `.worktrees/**` 并串行文件执行。
+- 设计与计划分别位于 `docs/superpowers/specs/2026-08-13-codex-preset-reasoning-capabilities-design.md` 和 `docs/superpowers/plans/2026-08-13-codex-preset-reasoning-capabilities.md`。官方事实由 Codex 内置 Web Search 与 Matrix WebSearch 独立链交叉核对；Matrix 索引无结果但直接读取 xAI/GLM/Step 官方页面成功。Qwen 等随模型/API 变化的能力证据不足时继续采用保守未声明，不写成厂商级通用枚举。
+
+## 2026-08-13 DeepSeek V4 reasoning effort 目录污染根修
+
+- 用户反馈 MultiRouter 保存后会把 `deepseek-v4-flash` / `deepseek-v4-pro` 的官方 `low/high/max`、默认 `high` 覆盖为 `low/medium/high/xhigh`、默认 `medium`。根因不是 DeepSeek 官方模板缺失：`src-tauri/src/resources/codex_deepseek_catalog_template.json` 本来就是正确的官方目录；问题只发生在 MultiRouter 的 `ProxyChat` 聚合目录，它克隆通用 GPT 模板并把同一组全局 effort 枚举套给所有第三方模型。
+- `src-tauri/src/codex_config.rs` 新增按模型识别的 reasoning capability 单一源。DeepSeek V4 Flash/Pro 无论经官方直连还是 MultiRouter 生成，都强制投影 `low/high/max`、默认 `high`，并同步覆盖外部 JSON catalog 的 `supported_reasoning_levels` / `supportedReasoningEfforts`，以及 `config.toml` inline models 的 `supported_reasoning_levels` / `supported_reasoning_efforts` / `supportedReasoningEfforts` 与三个默认字段。
+- 同源修正托管 custom agent role：`deepseek-flash.toml` 不再硬编码非法的 `medium`，而是与模型默认一致写 `high`；`deepseek-pro` 保持 `high`。Qwen 等其它模型仍维持原策略，没有被全局改成 DeepSeek 枚举。
+- 参数边界：Codex 模型目录决定 UI/运行时允许选择哪些 effort 以及省略显式配置时的默认值；Codex 随后在 Responses 请求体发送 `reasoning: { effort: ... }`。DeepSeek 网关/模型实际解释该值并分配 High 或独立 Think Max 推理模式，因此这是“Codex 选择和传参、模型供应商执行”的两段式能力，不是 Codex 本地模拟，也不是各模型可接受任意通用档位。
+- 官方交叉验证：DeepSeek 官方 Codex 集成页的完整 `models.json` 对两模型都列出 `low/high/max`、默认 `high`；官方 Copilot 集成页列出 None/High/Max 且 High 默认。OpenAI 官方文档表明 `reasoning.effort` 是请求字段且不同 OpenAI 模型支持集合也不同；本地 `codex-official` 源码测试确认 catalog 默认 effort 会写入请求体的 `reasoning.effort`。Codex 内置 Web 与 Matrix WebSearch 两条独立链均成功打开 DeepSeek 官方资料，结论一致。
+- TDD 证据：新增测试先在旧实现真实失败（catalog 得到 `medium`，Flash role 仍为 `medium`），修复后 DeepSeek 定向 29/29 通过，inline 三变体回归通过，完整 Rust library `2833 passed / 0 failed / 2 ignored`。仅保留既有 `openai_cache_read_tokens` dead-code warning。
+
+## 2026-08-09 Codex Sub-Agent V1/V2 双模式设置设计
+
+- 用户确认 MultiRouter 应同时保留 `Sub-Agent V1（兼容）` 与 `Sub-Agent V2（推荐）` 两套配置，并由每个方案选择当前生效版本；同一方案、同一会话只运行一种协议。新方案和缺少版本字段的旧方案默认 V2，现有 `modelCatalog.spawnAgentModels` 保留为 V1 direct override 前五顺序，切换版本不删除另一套数据。
+- 方案级单一数据源定为 `settingsConfig.codexRouting.subagentVersion: "v1" | "v2"`。向导左侧在路由与发布之间同时加入 V1/V2 两步；MultiRouter 工作台把模糊的高级覆盖面板改为完整 Sub-Agent 设置区。V1 强调显式控制和旧工具兼容，V2 强调 task path、follow-up、mailbox 与 DeepSeek Flash/Pro managed roles 自动选型。
+- 上游源码证明选择 V1 不能只改 catalog：Codex 的 `features.multi_agent_v2` override 优先于模型 `multi_agent_version`。V1 投影必须统一写 V1 metadata 并显式设置 `multi_agent_v2.enabled=false`；V2 统一写 V2、启用 feature、保留混合路由 `tool_namespace=agents` 和 reserved schema 边界。
+- V2 managed roles 只在 V2 激活时由完整可路由 catalog 生成；V1 激活时清理 CCSM 自己带 marker 的托管 role，用户手写 role 永远保留。direct override 前五与 managed role 全目录继续彻底解耦。
+- 批准规格位于 `docs/superpowers/specs/2026-08-09-codex-subagent-v1-v2-settings-design.md`。实现必须 TDD RED/GREEN 分提交，最终构建 `3.19.1-15`、安装并重启 CCSM/Codex，用 V1 direct override 和 V2 无模型名 Flash/Pro 两条真实 canary 验收。Matrix WebSearch 本轮仍为 HTTP 521，未提供正证据。
+
+## 2026-08-07 DeepSeek Pro Chat 路由被启动迁移反复改写为 Flash Responses
+
+- 用户反馈在官方 DeepSeek 选择 Chat 后，Codex 只“一问一答”而不继续工具循环；改选 Responses 后，大对话又会因官方端点实现边界报错。本机 3.19.1-10 的真实 SQLite 显示：`DeepSeek-chat` Provider 自身仍是 `openai_chat` 且目录只有 `deepseek-v4-pro`，但 MultiRouter 中引用它的 route 已被改成 `openai_responses`，匹配窗口也变成 `deepseek-v4-flash`。因此 UI 选择与实际出站协议发生漂移，不能把症状归因于 DeepSeek 不支持工具。
+- 根因位于 `Database::repair_deepseek_native_responses_on_conn`：旧实现对每个 Provider/Router 直接在整份 `settings_config` 字符串上计算 `has_flash`。MultiRouter 只要有任意一个 Flash sibling route，就会在后续每次启动时把所有官方 DeepSeek Chat route 改写成 Flash/Responses；即使 route 明确 `targetProviderId` 指向独立的 Pro/Chat Provider 也不例外。原“幂等”测试第二次运行只检查 route 数量，没有复核协议与模型窗口，所以漏掉了反复污染。
+- 修复先提交失败测试 `fdd9ab76`，再在 `4d62e500` 中按 route 的 `targetProviderId` 解析官方 DeepSeek Provider 的真实模型归属：Flash-only 规范为 `deepseek-v4-flash + openai_responses`，Pro-only 规范为 `deepseek-v4-pro + openai_chat`，同 Provider 同时拥有两种模型时继续保留旧版拆分迁移。该逻辑也会自愈已经污染的 route，并同时收敛 `match.models`、`match.prefixes` 与 route `modelMap`。
+- 实网交叉验证：DeepSeek 官方 Chat Completions 文档仍声明 `tool_calls` / `finish_reason=tool_calls`；直接对官方 `/v1/chat/completions` 的 V4 Flash 工具场景返回了合法流式 `tool_calls`。OpenAI Codex 当前源码已移除原生 `wire_api=chat`，所以 CCSM 必须继续对外维持 Responses、只在内部将目标 Chat route 转换到 `/chat/completions`。这与本次“修路由归属而非绕开工具循环”的边界一致。
+- 回归命令：`cargo test --manifest-path src-tauri/Cargo.toml repair_deepseek_native_responses -- --nocapture`（2 passed）；`cargo fmt --manifest-path src-tauri/Cargo.toml --check` 与 `git diff --check` 通过。运行中安装版仍是 3.19.1-10，源码修复尚未构建/安装，不能把源码通过等同于现场已经生效。
+
+## 2026-08-05 Codex Multi-Agent V2 跨 Provider 双阶段 payload 根修
+
+- 2026-08-05 21:21 重装并完全重启后的真实验收通过：运行中 `C:\Users\sunda\AppData\Local\CCSwitchMulti\cc-switch.exe` 文件/产品版本均为 `3.19.1-6`，进程与 Codex app-server 均在 21:18 后新建；父 task `019fcf70-03a2-7791-a383-45b5a88e1e4e` 的 `turn_context` 为 `gpt-5.6-sol`，router log 同时证明 effective provider 为 `OpenAI_Official` 且官方请求 HTTP 200。
+- 使用 `fork_turns=none` 做两个不可从父上下文猜测的唯一 nonce canary：Qwen child `019fd216-51fc-7b21-b372-8bd408763a2c` 命中 `qwen3.6 -> Qwen`，DeepSeek child `019fd216-703a-7ca1-8803-7ee0ccd1b623` 命中 `deepseek-v4-flash -> DeepSeek-responses`，各自正确回传 nonce、只读 `Get-Location` 与 `git rev-parse --short HEAD` 的真实结果 `54f0040b`；router log 对两条第三方上游请求均记录 HTTP 200。
+- 两个 child rollout 的任务仍由 Codex 持久化为 `agent_message[input_text, encrypted_content]`，但 `encrypted_content` 分别为 461/465 字符的可打印明文，包含 nonce 和命令，既不以 `gAAAAA` 开头也不符合 Base64 密文形态；Stage B 的 legacy-plaintext 恢复路径将其投影为普通 user input 后，Qwen 产生 2 组 shell call/output、DeepSeek 产生 1 组 shell call/output，最终 assistant 输出与 nonce 完全一致。旧版现场的 228 字符 opaque Fernet 与空 Payload 已不再出现。
+- 本地交付构建版本为 `3.19.1-6`，版本提交 `f4a89fd8`；完整 post-commit 发布流水线在 `2026-08-05 17:16:32 +08:00` 成功结束，随后以 `-SkipBuild` 把该已成功构建独立导出到 `C:\Users\sunda\Documents\LLMservice\CCSwitchMulti-3.19.1-6-local`。NSIS 安装器 `CCSwitchMulti_3.19.1-6_x64-setup.exe` 为 11,499,096 bytes，文件/产品版本均为 `3.19.1-6`，SHA-256 `DF4A03AC834A04B9CCFF4CB41A463AEC37691BCEF365CFCE17184CFFD09F0509`；updater `.sig` 非空。portable ZIP SHA-256 `8D1FAED02CA118D6D48BA9C8F21E08D7667287C5E4AE0E6B6379A14D93F74946`，raw EXE SHA-256 `B3A134CF3530BAFB77E311B22FB113776F506B89831346BFBE263D93D40C46D4`。
+- 仓库 `post-commit` hook 会在每次提交后异步启动本地发布；连续提交可能在上一条 pipeline 进入 build 后因锁文件被其它失败调用的 `finally` 提前删除而出现多个并发 pipeline，并在 Cargo artifact lock 上排队。验收时必须以明确的 `Local release pipeline completed`、`RELEASE-METADATA.md` commit/version 和独立导出目录哈希为准，不能用仍在变化的 `最新版ccswitchmulti` 目录或单纯“安装器文件存在”作为成功证据。
+- 2026-08-05 重新交叉验证上游：Codex 内置 Web 搜索、GitHub API/源码 diff 均确认 `openai/codex#36376` 与 `#36586` 仍为 open；已合并 `#35845` 只在 `encrypted_function_args=[]` 时走 `DirectPlaintextMessage`，不能恢复官方 parent 已经返回的 `gAAAAA...`。Matrix `matrix-websearch` MCP 已通过 stdio JSON-RPC 独立初始化并检索三组 GitHub 限定查询，但均返回 0 结果，因此不作为正证据。
+- 旧 `a22c5f8b` 只把混合 Router 的 `tool_namespace` 改成非保留 `agents`，消除了 `collaboration.*` reserved schema HTTP 400，却同时删除了 Stage A 的明文化入口；真实 child rollout 随后证明 namespace 成功不等于 payload 可读。正确修复不是恢复旧的 `collaboration.*` 改写，而是只改非保留 `agents.*`。
+- Stage A RED 提交 `aa64e5bf`，生产提交 `4c2854ac`：混合 Router 的跨 provider V2 策略以 request-local `codexRouterPlaintextV2Collaboration=true` 穿过 route 解析和 target provider 物化；仅当 app=Codex、effective parent 为 official OAuth、该策略为 true 时，删除标准 `tools` 与 Responses Lite `additional_tools` 中 `agents.spawn_agent/send_message/followup_task` 的 `parameters.properties.message.encrypted`。`collaboration.*`、普通工具、其它 `encrypted` 字段、第三方 parent、其它 app 与纯官方 Router均保持不变。
+- Stage B RED 提交 `c47f6b4f`，生产提交 `8990f746`：effective provider 已确定为第三方且 endpoint 为 Codex Responses 时，在 native Responses/Chat/Anthropic 转换前把 plaintext `agent_message` 投影成标准 `type=message, role=user`；旧版误把普通明文塞进 `encrypted_content` 时恢复为 `input_text`。若仍包含可解码为 32+ bytes 的 opaque base64/Fernet 内容（现场 `gAAAAA...`），立即返回不含密文和任务正文的 `InvalidRequest`，不再把空 Payload 当成功。
+- 安全边界：CCSM 不解密 OpenAI ciphertext；新日志只记录改写/投影数量与 provider id，不记录 message、Payload 或密文；没有新增数据库、sidecar 或请求体持久化。纯官方 child 不经过 Stage B，继续保留官方加密。
+- 验证：Stage A 两个 RED 分别稳定得到 `changed=0` 和 route marker `None`；Stage B 三个 RED 分别稳定失败于未投影、未恢复和未拒绝。生产实现后 targeted 回归全绿；完整 `cargo test --lib -- --test-threads=1` 为 `2814 passed / 0 failed / 2 ignored`，`cargo check --lib`、rustfmt、`git diff --check` 通过。当前只证明源码/转换边界，仍须安装新包并完全重启 CCSM/Codex 后，以 OpenAI->Qwen/DeepSeek 唯一 nonce + 真实只读工具输出 + child rollout 可读 Payload 做最终验收。
+
+## 2026-08-05 Codex 0.146 Multi-Agent V2 第三方子 Agent 空正文与 reserved schema 根修
+
+- 本机 Codex Desktop `0.146.0-alpha.9.2` 在 `codex_model_router_v2` 下真实派生 `qwen3.6` 与 `deepseek-v4-flash` child：两条路由都命中第三方上游并返回 HTTP 200，但 `collaboration` namespace 会让 official parent 把任务正文持久化为第三方无法解密的 `encrypted_content`，Qwen 因而报告 `empty payload`。
+- 2026-08-01 至 08-05 的错误方案在发往官方 OAuth backend 前删除 `spawn_agent`、`send_message`、`followup_task` 的 `message.encrypted`，并在 route 物化时传播 `codexRouterPlaintextV2Collaboration`。session `019fc293-3b9c-7c43-9f61-a29350ce24a3` 证明该方案会让新版官方 backend 以 HTTP 400 拒绝：`Function 'collaboration.followup_task' is reserved for use by this model and must match the configured schema`。删除 `encrypted` 已经改变保留工具 schema；三个保留函数都不得由代理改写。
+- 用户回滚 CCSM 后，同一官方 Sol 路由由 400 恢复 HTTP 200。进一步用 Codex `multi_agent_v2.tool_namespace="agents"` 做 A/B，确认官方 parent 正常返回、第三方 child 能创建且路由 HTTP 200、reserved schema 400 消失；但当时仅凭 child/parent 返回 `CHILD_OK/PARENT_OK` 就判断正文可读是过早结论，可能受继承上下文、模型猜测或旧进程影响，不能作为 payload 验收。
+- CCSM 对包含启用第三方或来源歧义 route 的 MultiRouter 投影 `tool_namespace="agents"`，但保留用户已有的其它非保留自定义 namespace；纯官方 Router 不强制切换 namespace。`hide_spawn_agent_metadata=true` 和 catalog 的 `multi_agent_version=v2` 保持不变。
+- 代理层彻底删除 collaboration schema 改写、request-local 明文策略 marker、route 物化传播和对应旧测试。以后官方 OAuth 出站的 reserved tool schema 必须原样透传；非保留 namespace 只解决工具名冲突，不自动提供第三方可读正文。安装新构建并完全重启 CCSwitchMulti/Codex app-server 后，必须用 Desktop 对 Sol -> Qwen/DeepSeek 做唯一 nonce + 真实工具动作 + child rollout 三重验收。
+- 2026-08-05 最新验收使用 Codex Desktop embedded CLI `0.147.0-alpha.1.2`、CCSM `3.19.1-5` 和有效配置 `hide_spawn_agent_metadata=true/tool_namespace="agents"`：Qwen 与 DeepSeek child 都正确命中 `codex_model_router_v2`，但首个 `agent_message` 仍为 `[input_text 空 Payload 信封, encrypted_content gAAAAA...]`，两个密文长度均为 228；这证明 namespace、路由和 task delivery 是三个独立验收层。
+- 完整问题、脱敏 TOML、官方 `#26210/#35845`、上游 `#36376/#36586`、所有失败方案、双阶段设计与验收矩阵已提交为 `BigStrongSun/ccswitchmulti#31`：https://github.com/BigStrongSun/ccswitchmulti/issues/31 。该 Issue 与 `#18` 相邻但不同：`#31` 是 parent->child 合法 OpenAI ciphertext 导致第三方空 payload；`#18` 是 child->parent 明文被错误标为 encrypted_content 后污染官方 replay。
+
+## 2026-08-04 Codex `--ephemeral resume` 污染真实会话与恢复边界
+
+- 现场会话 `019fbd59-0c1a-7592-87d3-1e2ad654fd0d` 无法加载并提示 `Model provider 'capture' not found`，不是全局 `config.toml` 或 CCSM 正常路由错误。另一排障任务为抓取真实 Responses 请求体，对该生产 session 执行了两次 `codex exec resume ... --ephemeral -c model_provider="capture"`；临时 provider 随子进程退出，但 resume 仍把 `thread_settings_applied(model_provider_id="capture")` 和诊断 turn 写入原 rollout，并把 `state_5.sqlite.threads` 对应行同步成 capture/medium/CCSwitch cwd。
+- OpenAI Codex 官方 issue `openai/codex#20084` 与本机 `codex-cli 0.146.0-alpha.9.2` 现场共同证明：resume 路径会忽略 `--ephemeral` 的不持久化语义。以后不得用生产 session ID 做请求捕获；必须使用新建/复制/分叉的诊断 session，并在捕获前后比较原 rollout 的长度与哈希。
+- 恢复不能只改 `~/.codex/config.toml`，也不能永久补一个假的 capture provider。安全边界是：先用 SHA-256 备份原 rollout，并用 SQLite backup API 备份包含 WAL 的一致数据库；以第一条 capture `thread_settings_applied` 为字节边界构造原文件精确前缀候选；验证所有 JSONL、session ID、最后合法 provider/cwd/reasoning 和无 capture 后，再原子替换 rollout，并在事务中只恢复 `threads` 表该 session 一行。
+- 本次原 rollout 为 293,142,176 字节、SHA-256 `F216A17E...E408`；修复后为 293,102,773 字节、23,399 行、SHA-256 `EB8C75F9...8101`，只移除 39,403 字节的两个 capture 诊断 turn。数据库恢复为 `openai / gpt-5.6-luna / xhigh / ACPs跨物种视频`，`quick_check=ok`；Codex Desktop 实际导航后 task 状态由 `notLoaded` 变为 `idle`。完整回滚证据保存在 `~/.codex/session-repair-backups/019fbd59-0c1a-7592-87d3-1e2ad654fd0d-20260804-235449/`。
+
+## 2026-08-04 CCSwitchMulti v3.19.1-5 正式发布
+
+- 正式 Release：`https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.19.1-5`，非 draft、非 prerelease；发布时间 `2026-08-04T15:46:16Z`，共 19 个资产。
+- annotated tag `v3.19.1-5` 的 tag 对象为 `56945293e20f3ba02a696ca8df43dd01ceec2e55`，远端解引用到已验证提交 `ce6f88b53db339591efa996195bbdaf6fc62eeef`；发布后记忆提交不得移动该标签。
+- GitHub Actions run `30922685914`（`https://github.com/BigStrongSun/ccswitchmulti/actions/runs/30922685914`）最终 `completed/success`：macOS、Windows x64、Windows ARM64、Linux x64、Linux ARM64、Publish GitHub Release、Assemble latest.json 七个作业全部成功。
+- 远端 `latest.json` 版本为 `3.19.1-5`，包含 `darwin-aarch64`、`darwin-x86_64`、`linux-aarch64`、`linux-x86_64`、`windows-aarch64`、`windows-x86_64` 六个平台键；各项 URL 均指向 `BigStrongSun/ccswitchmulti/releases/download/v3.19.1-5/` 且 updater signature 非空。GitHub Latest Release API 已返回 `v3.19.1-5`。
+
+## 2026-08-04 v3.19.1-5 发布前测试边界与 DeepSeek context 断言修正
+
+- 仓库根目录包含 `.worktrees/*` 时，当前 Vitest 默认发现规则会把旧 worktree 的测试和多套 React 依赖一起加载；本地发布验证必须显式使用 `--exclude '**/.worktrees/**'`。指定单个测试文件本身仍不足以阻止旧 worktree 被发现。
+- 前端全集并行执行时 `tests/integration/App.test.tsx` 偶发因共享 MSW/DOM 状态超时；该文件在排除 worktree 后独立运行 8/8 通过。发布门槛应使用排除 worktree、关闭文件并行的根源码全集，不能用混入旧 worktree 的失败或单文件通过替代全集。
+- `tests/utils/codexModelContext.test.ts` 的 DeepSeek V4 Flash 预设断言仍期望旧值 `1000000`，但上游 `8ae1ce85` 已把业务预设对齐 DeepSeek 官方 catalog 为 `1048576`。Codex 内置搜索与 Matrix 直接读取 DeepSeek 官方 Crush 配置均确认 `context_window=1048576`；因此只修正陈旧测试契约，不改业务值。
+- WebDAV mock 的 `start_mock_webdav` 每个 TCP 连接只处理一次请求并立即关闭，但原响应没有 `Connection: close`。HTTP/1.1 默认持久连接，reqwest 因此会偶发复用 mock 已关闭的连接，使完整串行测试随机在不同的多请求 WebDAV 用例报 `request build failed`；单测重复通过不能排除该竞态。RFC 9112 与 Codex 内置搜索、Matrix 直读结论一致：不支持持久连接的服务器必须在每个非 1xx 响应声明 `Connection: close`。修正后 WebDAV 四用例组连续 20 轮全部通过，随后两轮 Rust 全量串行测试均为核心库 `2803 passed / 0 failed / 2 ignored`，其余集成目标全绿。
+
 ## 2026-08-03 上游 #6078 Windows 集成测试不得写真实 Claude Desktop 配置
 
 - 上游 `farion1231/cc-switch#6077/#6078` 的根因成立：共享集成测试 helper 只覆盖
@@ -177,11 +274,12 @@
 - 账号池原有 `pool_cooldowns`、`pool_session_bindings`、`pool_remaining_percent`、`pool_quota_checked_at` 四张独立表已迁入 `src-tauri/src/proxy/providers/codex_oauth_pool.rs` 的单一 `CodexPoolRuntimeState`，manager 只保留一把 `Arc<tokio::sync::Mutex<_>>`。候选读取、quota 快照、固定 cooldown、binding 和 lifecycle purge 现在在同一临界区完成，不再由调用方分别操作四把锁。
 - `remove_account`、`clear_auth`、明确 `invalid_grant` 隔离、同 ID 重新登录和 pool policy 禁用/移除都经过统一 purge/reconcile；重新启用或重登不会恢复旧 binding、cooldown 或 quota 快照。`normalized_pool_policy` 和只读投影也只接受 `CodexAccountData::is_usable()` 的托管账号，已持久化 `invalidated_at` 的账号不再进入候选。
 - TDD 证据：生产修改前，删除后重加、invalidated、禁用后重启、clear 后重登四个测试均因旧运行态残留而断言失败；统一运行态接入后四项与原 `account_pool_honors_order_reserve_cooldown_and_session_binding` 均通过。本提交刻意仍使用 generation `0`；24 小时 TTL、2048 LRU 和凭据代际校验由下一个 TDD 提交实现。
+
 ## 2026-08-02 Codex 超时与重试放大修复
 
 - 现象：OpenClash 节点 `🇺🇸美国2-IEPL-GPT` 丢 6.6MB POST 时，CCSM 把“可能已在途”的转发/超时错误按 502/504 返回，Codex 默认 `stream_max_retries=5`、`request_max_retries=4` 又自动重发整轮采样请求，造成流量和时延放大。
 - 修复：`auto_failover_enabled=false` 时不再把超时全部置 0，首个 SSE 字节改用 `non_streaming_timeout`（默认 600s）作为硬上限，静默超时继续生效；新增 `ProxyError::ResponsePending`，请求体已写入、上游已返回响应头、响应体/首字节超时等可能已在途的失败映射为 429 + `Retry-After: 30` + `cc_switch_response_pending`，不参与 retry/failover；连接阶段失败仍保留 502/可重试语义。
-- CCSM 托管的 Codex provider 显式写 `request_max_retries=0`、`stream_max_retries=0`，关闭 Codex 端整轮采样请求自动重发；CCSM failover 只对明确未发送的 connect 错误切换下一家。
+- 当时 CCSM 托管的 Codex provider 显式写 `request_max_retries=0`、`stream_max_retries=0`，关闭 Codex 端整轮采样请求自动重发；该决定后来分两步纠正：先恢复 request budget=2，再于 2026-08-04 恢复 stream budget=5。ResponsePending/429 仍负责阻止未知结果的请求重发，CCSM failover 仍只对明确未发送的 connect 错误切换下一家。
 - 验证：`cargo check --lib`、新增回归测试、`cargo fmt --check`、`git diff --check` 通过；`cargo test --lib` 2688 passed / 2 ignored / 1 failed，唯一失败是本机 15721 被运行中 CCSM 占用。
 - 构建补漏：Tauri `--bundles msi` 报 `light.exe ICE38: Component codex_history_repairer installs to user profile. It must use a registry key under HKCU as its KeyPath, not a file.` 根因是自定义 `wix/per-user-main.wxs` 的 `binaries` 循环仍用 `<File KeyPath="yes"/>`；per-user 安装目录下额外 binary 必须改用 HKCU `RegistryValue KeyPath="yes"`，文件 `KeyPath="no"`。已按此修复模板。
 
@@ -533,7 +631,7 @@
 
 - 完整实测报告见 `docs/guides/gpt-app-thread-subagent-mechanism-2026-07-10.md`。Windows 新桌面包为 `OpenAI.Codex`，实际运行链是 `ChatGPT.exe -> resources/codex.exe app-server -> code-mode/tool runtimes`；历史的原始事件在 `~/.codex/sessions/**/rollout-*.jsonl`，`state_5.sqlite` 提供 thread 元数据和 `thread_spawn_edges` 父子关系。修复历史必须离线备份并把 JSONL、SQLite 与子线程 edge 当成整体，不能只改轻量 `session_index.jsonl` 或伪造 `local_thread_catalog`。
 - 新版 multi-agent 的当前 live 保留工具契约为 `collaboration.spawn_agent(task_name, message, fork_turns)`；历史 v1 的 `model/reasoning_effort/service_tier` 与历史 v2 的可选 `agent_type` 绝不可重新硬编码。截图的 `reserved for use by this model and must match configured schema` 根因是旧 CCSwitchMulti 扩展了保留 schema；`ensure_codex_multi_agent_reserved_schema_compatible` 必须保持 `hide_spawn_agent_metadata=true`，子 Agent 模型改由 `~/.codex/agents/*.toml` role 选择。
-- 角色、模型、推理强度、provider 路由和 `spawnAgentModels` 前五候选是不同层。当前 Codex 内置角色为 `default/worker/explorer`；custom role 可 pin `model`/`model_reasoning_effort`，缺省继承父会话。前五候选仅影响 picker/CCSwitchMulti role 投影，不改实际路由或服务端最终调度。本机 5.6 已进总目录且有历史子线程使用；没有出现在特定候选卡片是旧人工前五被保留，需手动排进前五保存。
+- 角色、模型、推理强度、provider 路由和 `spawnAgentModels` 前五 direct override 是不同层。custom role 可 pin `model`/`model_provider`/`model_reasoning_effort`，缺省继承父会话。前五仅影响 `spawn_agent.model` 描述窗口，不控制 CCSwitchMulti managed role 投影；managed roles 必须从完整可路由目录生成。
 - 官方依据：`https://learn.chatgpt.com/docs/agent-configuration/subagents`、`https://learn.chatgpt.com/docs/app-server`。本机当前 config 为 `agents.max_threads=10`、`max_depth=1`；实际运行并发还需取产品会话资源上限与该配置的最小值。写密集任务仍需串行或 worktree 隔离，独立 Agent thread 不等于自动独立文件系统。
 
 ## 2026-07-10 MultiRouter 长模型摘要换行
@@ -667,6 +765,7 @@
 - 回归测试新增 `test_codex_subagent_usage_stats_repairs_zero_token_db_rows_from_rollout`：模拟 `gpt-5.5` 子 Agent 已有两条 `codex_session` 请求但 token 全 0，同时 rollout JSONL 有 `total_token_usage`，最终 agent/model 统计必须显示 1550 tokens 且 request_count 保持 2。
 - 验证命令：`cargo fmt --manifest-path src-tauri/Cargo.toml --check`、`cargo test --manifest-path src-tauri/Cargo.toml codex_subagent_usage_stats --lib`、`cargo test --manifest-path src-tauri/Cargo.toml test_sync_codex_subagent_uses_rollout_thread_id --lib`、`git diff --check`。
 - 另一个相邻但未纳入本次 token 修复的发现：`gpt-5.3-codex-spark` 等 spark 变体如果 token 已有但 cost 为 0，可能是 `model_pricing` 种子缺少对应模型定价和历史成本回填，应该作为单独成本统计任务处理，避免和 token 修复混在一个提交里。
+
 ## 2026-07-07 Codex Hosted Web Search Bridge MVP
 
 - 本轮在隔离 worktree `C:\Users\sunda\.codex\worktrees\aec9\LLMservice\cc-switch` 的 `codex/hosted-tool-bridge` 分支实现 Phase 1 MVP：Codex `/v1/responses` 入站的 hosted `{ "type": "web_search" }` 不再原样交给第三方 Chat 上游，而是在 `transform_codex_chat.rs` 中映射成普通 function tool `web_search(query,count)`；`tool_search` 仍保持 Codex client-side tool 语义，二者不能混淆。
@@ -983,7 +1082,7 @@
 ## 2026-07-01 Codex MultiRouter Wizard Catalog Curation Flow
 
 - Codex 单 provider 表单 `CodexFormFields` 的模型映射表第一列语义是“保留这个模型进入该 provider 的 modelCatalog”，不是子 Agent 候选。取消勾选会删除该模型行；上下箭头移动的是 catalog 行顺序。不要再在单 provider 获取 `/models` 后自动写 `spawnAgentModels` 前 5 个。
-- MultiRouter 设置向导的正确顺序是：模型源 -> MultiRouter 命名 -> 配置检查 -> 获取/测试模型 -> 重名别名 -> 汇总模型排序/剔除 -> 路由预览 -> 子 Agent 候选排序 -> 保存发布。最终汇总页决定 `modelCatalog.models` 和 route `match.models` 保留哪些模型；子 Agent 页只从最终保留模型中选择最多 5 个并写入 `modelCatalog.spawnAgentModels`。
+- MultiRouter 设置向导的正确顺序是：模型源 -> MultiRouter 命名 -> 配置检查 -> 获取/测试模型 -> 重名别名 -> 汇总模型排序/剔除 -> 路由预览 -> 保存发布。最终汇总页决定 `modelCatalog.models` 和 route `match.models` 保留哪些模型；`spawnAgentModels` 兼容编辑器留在 RoutesTab 的折叠高级设置中，不再作为主向导必经步骤。
 - `buildCodexMultiRouterWizardPlan` 支持可选 `planName`、`catalogModelOrder`、`spawnAgentModels`。传入 `catalogModelOrder` 时必须同时过滤 routes 和 final catalog，避免 UI 剔除模型但路由仍命中；传入 `spawnAgentModels` 时要过滤掉已剔除模型并限制最多 5 个。
 - MultiRouter 向导进入“获取模型列表”步骤后必须逐个普通 Codex provider 重新调用 `/models`，不能因为已有 `modelCatalog` 自动跳过。每个 provider 卡片要显示读取中、成功有更新、成功无更新、跳过或失败状态；失败文案统一为“获取模型列表失败，请检查当前 provider 配置”，并同时进入向导问题面板。刷新后要保留“整理模型”里用户已取消/保留的勾选，只追加新增模型；`displayName` 缺省和显式等于模型 ID 在更新判断里等价，不应误报“有模型列表更新”。卡片点击应关闭向导并打开对应 provider 配置页。
 - 普通 Codex provider 保存后需要同步引用它的已保存 MultiRouter 方案：route `match.models`、route `upstream.modelMap`、聚合 `modelCatalog.models` 和 `spawnAgentModels` 都要从 provider 最新 `modelCatalog` 重建。但同步时必须保留已保存 route 的可见别名和 `modelMap`，只用目标 provider 的最新目录补上下文、多模态等能力字段；不能直接用目标 provider 原始模型名覆盖 route，否则官方源和第三方中转暴露同名上游模型时会丢失路由区分。若同步导致 `spawnAgentModels` 中的模型被删除，只剪枝旧候选并提示用户点“处理”进入对应 MultiRouter routes 页人工补选，不要自动按 catalog 前 5 个补齐。
@@ -1493,7 +1592,7 @@
 
 - 新增用户向说明书 `docs/guides/codex-multirouter-guide-zh.md`，定位为把 Codex Desktop 登录、CCSwitchMulti OAuth 授权、第三方模型源、本地路由映射、MultiRouter 工作台、子 Agent 前 5 候选排序、路由启动、Debug 检查、Codex 重启和历史修复串成完整流程的中文 Markdown。
 - 文档只引用仓库已有真实截图：`docs/images/codex-official-auth-preservation/01-codex-app-enhancement-setting.png`、`docs/images/codex-deepseek-routing/01-codex-providers-require-routing.png`、`02-deepseek-codex-routing-form.png`、`03-local-route-codex-takeover.png`。MultiRouter 工作台、子 Agent 排序、状态 Debug、会话管理历史修复等新页面尚无真实截图，文档末尾列出待补路径，后续应补真实 UI 截图，不要伪造。
-- 使用规则固化：先登录 Codex Desktop，再在 CCSwitchMulti `设置 → 认证` 完成 ChatGPT/Codex OAuth；额外模型源如 DeepSeek/GLM/本地模型通常要开启 `需要本地路由映射`，在高级选项 `模型映射` 中点击 `获取模型列表` 并配置上下文窗口；MultiRouter 的 `子 Agent 候选模型` 必须手动把目标模型排入前 5 并 `保存排序`；保存/切换/模型目录变化后必须完全退出并重启 Codex Desktop。
+- 使用规则固化：先登录 Codex Desktop，再在 CCSwitchMulti `设置 → 认证` 完成 ChatGPT/Codex OAuth；额外模型源如 DeepSeek/GLM/本地模型通常要开启 `需要本地路由映射`，在高级选项 `模型映射` 中点击 `获取模型列表` 并配置上下文窗口；V4 Pro/Flash managed roles 自动从完整可路由目录注册，只有 direct model override 展示排序需要手工展开高级设置；保存/切换/模型目录变化后必须完全退出并重启 Codex Desktop。
 - 历史修复说明保持当前产品边界：历史入口在右上角时钟/会话管理页的 `Codex 历史修复`，流程是 `加载历史`、按需全选当前页、`预览修复`、确认计数后 `确认写入`，完成后再次重启 Codex。该功能修复 provider bucket 可见性，不应表述为会话正文丢失修复。
 - 主 `README.md` 前部的 CCSwitchMulti 分支说明后新增 `Codex 多路由配置说明书` 小节，直接链接 `docs/guides/codex-multirouter-guide-zh.md`，让首次配置用户先读完整流程而不是只看功能截图。
 - 2026-06-22 用户补齐 MultiRouter 教程真实 UI 截图，稳定保存到 `docs/images/codex-multirouter/`：`01-settings-auth-oauth.png`、`02-add-provider-entry.png`、`03-configure-provider-local-routing.png`、`04-fetch-models-context-window.png`、`05-multirouter-entry.png`、`06-create-multirouter.png`、`07-configure-route-rules.png`、`08-save-route-rules.png`、`09-subagent-model-order.png`、`10-enable-routing-settings.png`、`11-debug-entry.png`、`12-13-history-repair-panel.png`、`13-codex-model-picker-validation.png`。这些图对应用户指定的 1-13 步及重启后 Codex 模型候选验证，不要再把这些场景列为待补截图。
@@ -2533,7 +2632,7 @@
 
 - 用户截图中的错误 `Invalid Value: 'tools'. Function 'collaboration.spawn_agent' is reserved for use by this model and must match the configured schema.` 指向新版 GPT/Codex 后端对保留工具名的 schema 校验变严格；本机 live `~/.codex/config.toml` 当时存在 `[features.multi_agent_v2] hide_spawn_agent_metadata = false`，会让 Codex 给 `collaboration.spawn_agent` 追加 `model`、`reasoning_effort`、`service_tier` 等 metadata 字段，从而和新版模型的保留 schema 不一致。
 - 旧修复思路是为了让 `spawn_agent` 参数里可直接覆盖模型；新版路径已经有 `~/.codex/agents/*.toml` custom agent role 文件承载子 Agent 的 `model`、`model_provider`、`model_reasoning_effort`，因此不应再通过扩展保留函数 schema 选择模型。
-- `src-tauri/src/codex_config.rs` 的 Codex catalog/config 投影改为 `ensure_codex_multi_agent_reserved_schema_compatible`：保留用户原本 `multi_agent_v2` 启用状态，但写入 `hide_spawn_agent_metadata = true`，让 `collaboration.spawn_agent` 回到官方保留工具形态；文档 `docs/codex-spawn-agent-model-candidates.md` 同步说明子模型选择走 managed role 文件。
+- `src-tauri/src/codex_config.rs` 的 Codex catalog/config 投影使用 `ensure_codex_multi_agent_reserved_schema_compatible`：保留用户原本 `multi_agent_v2` 启用状态并写入 `hide_spawn_agent_metadata = true`。本机 `0.147.0-alpha.6.5` 实测仍暴露 `agent_type`、`model`、`reasoning_effort`，只隐藏 `service_tier`；默认自动选型走 managed custom roles。
 - 现场快速恢复可以把 `~/.codex/config.toml` 里的 `[features.multi_agent_v2] hide_spawn_agent_metadata = false` 改为 `true` 后重启 Codex/GPT app；长期修复依赖新版 CCSwitchMulti 重新投影配置。
 
 ## 2026-07-17 MultiRouter spawn_agent 保留 schema 二次根因
@@ -2792,13 +2891,279 @@
 ## 2026-08-02 Codex 502 后无法重试根因：Managed retry 预算被写成 0
 
 - 现场 session `019fc255-dd60-7a62-bbc2-99d5206f2487` 在 19:58 连续两次 `upstream_send_error` 后直接 `task_complete`，用户手动发“继续”也只再失败一次，没有自动等待网络恢复后重试。JSONL 显示 `codex_error_info=other`，不是流断开后的 5 次重试。
-- 直接根因：`72c8ca22` 为防“可能已在途”的 502/504 重放，把 CCSM 托管 provider 写成 `request_max_retries=0`、`stream_max_retries=0`；当前 `~/.codex/config.toml` 的 `[model_providers.codex_model_router_v2]` 正是这两个值。Codex 源码 `codex-api/src/endpoint/session.rs` 用 `request_max_retries` 驱动流建立前的 transport/HTTP 5xx 重试，`core/src/session/turn.rs` 再用 `stream_max_retries` 驱动采样重试；两层都为 0 时，即使 `error sending request` 是明确未发送的连接/构造失败，也会立即终止。
-- 修复边界：恢复 `request_max_retries=2`，只允许流建立前的安全重试；`stream_max_retries` 保持 0，避免流建立后整轮采样在途重放。`hyper_client.rs` 的响应体读取失败从 `ForwardFailed/502` 改为 `ResponsePending/429`，Codex retry policy 不重试 429，因此不会因为恢复请求级重试而重新放大 body 读取阶段。
+- 直接根因：`72c8ca22` 为防“可能已在途”的 502/504 重放，把 CCSM 托管 provider 写成 `request_max_retries=0`、`stream_max_retries=0`；该次现场 `~/.codex/config.toml` 的 `[model_providers.codex_model_router_v2]` 正是这两个值。Codex 源码 `codex-api/src/endpoint/session.rs` 用 `request_max_retries` 驱动流建立前的 transport/HTTP 5xx 重试，`core/src/session/turn.rs` 再用 `stream_max_retries` 驱动采样重试；两层都为 0 时，即使 `error sending request` 是明确未发送的连接/构造失败，也会立即终止。
+- 当时修复只恢复 `request_max_retries=2`，并继续把 `stream_max_retries` 保持为 0；2026-08-04 的版本对比证明这留下了新的恢复缺口。`v3.16.5-22` 未覆盖该字段、实际使用 Codex 默认 5 次流重试；`72c8ca22` 才在其后把托管 provider 强制改为 0。`hyper_client.rs` 将未知结果的响应体读取失败映射为 `ResponsePending/429` 仍然正确，因为这类请求不能伪装成普通断流。
 - 验证：`cargo check --lib`、`cargo fmt --check`、`managed_codex_retry_budget` 与 `hyper_client::tests` 通过。
 
 ## 2026-08-02 ResponsePending grace：超时后保留上游 future 再等 30s
 
 - 用户继续追问“上游已经成功但响应迟到”的场景。复核结论：`72c8ca22` 的 `ResponsePending/429` 只阻止自动重发，并不能回收迟到结果；旧实现用 `tokio::time::timeout`，超时即丢弃上游 future，后来即使返回结果也没有客户端可接收。Codex 对普通 429 会映射成 `RetryLimit`，不会按 `Retry-After` 自动等待。
 - 新增 `src-tauri/src/proxy/response_grace.rs`：`await_with_response_grace` 用 `tokio::select!` 保留原 future，常规超时到期后再等 `RESPONSE_PENDING_GRACE_SECS=30`；宽限期内收到结果就正常返回，仍无结果才返回 `ResponsePending/429`。
-- 接入点：reqwest 首包前等待、非流式整包 body 读取、Responses 语义首包预读、普通流式首包预读、hyper raw/fallback 的响应等待。已向客户端返回流头之后的中途断流仍不可逆，继续保持 `stream_max_retries=0` 并在文档中说明。
+- 接入点：reqwest 首包前等待、非流式整包 body 读取、Responses 语义首包预读、普通流式首包预读、hyper raw/fallback 的响应等待。已向客户端返回流头之后，CCSM 自己的透明重放仍不可逆；但不完整 Responses 流必须交给拥有 session/turn 状态的 Codex，用客户端 `stream_max_retries=5` 恢复。
 - 回归：`response_grace::tests` 覆盖宽限期内恢复与宽限期后 429；`response_` 127 tests、`streaming_first` 3 tests、`hyper_client::tests` 通过。全量 `cargo test --lib -- --skip update_current_claude_desktop_provider_syncs_profile_when_proxy_takeover_is_active` 为 2735 passed / 2 failed，2 个失败均为当前分支既有 `transform_codex_anthropic` 断言，与本次改动无关。
+
+## 2026-08-03 Codex 原生 Responses SSE 安全恢复（v3.19.1-4）
+
+- 旧结论“managed Codex 的 `stream_max_retries` 必须保持 0”过度保守，已于 2026-08-04 纠正。当前官方 Codex 默认值为 5，`core/src/session/turn.rs` 对所有可重试的 incomplete stream 重跑 sampling request；官方 `stream_no_completed` 测试明确覆盖第一次流已经产生 `response.output_item.done` 后断开、第二次请求完成的场景。CCSM 不应在语义输出后自行重放，但也不能禁用 Codex 自己的状态机。
+- 新增 `providers/streaming_retry.rs::create_resilient_responses_sse_stream`，仅用于 native Codex `/responses` 直通。它在只下发 `response.created` 或 SSE 注释后发生 transport error / 未终止 EOF 时，对同一 provider、同一 URL、headers、body 最多重连 5 次；重连后的重复 `response.created` 被抑制。静默期间发送 `: ping` 注释，以保活下游 watchdog。
+- 一旦任何非 `response.created` 的实际事件、终止事件，或不能安全识别的残块已下发，就永久关闭重放通道；显式 `response.failed`/`error` 逐字透传。这是协议安全分界，不承诺 HTTP SSE 在语义输出后可无感续传。
+- `Forwarder` 现在为 native Codex Responses streaming 建立 reconnect factory；`handle_responses_for_app` 只在成功且非 JSON 的 native passthrough 分支包装流。Responses→Chat/Anthropic、namespace restore、compaction 分支仍沿用各自语义，避免双重转换或错误重放。
+- 公开 OpenAI Codex 源码/配置确认 `stream_max_retries` 是 dropped stream reconnect 次数，Responses transport 支持 WebSocket 并在不支持时回退 HTTP。当前本地 GET `/responses` 有意返回 HTTP 426，`supports_websockets=false` 保持不变：旧 relay 曾出现 upstream 101 后首帧前 close，尚无真实官方端到端证明时不能翻开该开关。
+- TDD 证据：先验证缺少 native wrapper / reconnect-factory selector 的编译失败，再通过 `native_responses_*`（created 去重、comment keepalive、output_item.done 禁止重放）、`streaming_retry` 20 tests、handler 与 forwarder selector tests。后续必须在真实官方账户的 WebSocket handshake、首帧、断开、HTTP fallback 全链路通过后，才能新立任务启用 Responses WS relay。
+
+## 2026-08-04 恢复 Codex 客户端流重试，修复 3.16.5-22 之后的长任务回归
+
+- 对比 tag 和 Git 历史确认：`v3.16.5-22`（`b4b784f1`，2026-07-28）没有生成 `stream_max_retries`，继承 Codex 默认 5；`72c8ca22`（2026-08-02）为防 502/504 放大才首次写成 0。后来 `461dc35c` 只补齐 CCSM 语义输出前的透明重连，没有恢复 Codex 语义输出后的 sampling retry，因此用户观察到旧版能跑长任务、后续版本会直接断开是真实回归。
+- 当前官方源码 main `9873cba8` 与本机 Codex `0.146.0-alpha.3.1` 核验：provider 默认 `stream_max_retries=5`；`turn.rs` 的 retry loop 不以是否已输出语义事件为禁用条件；官方 `stream_no_completed::retries_on_early_close` 用 `response.output_item.done` 后提前 EOF 验证第二次请求。Matrix 直接读取官方 raw 源码与 Codex 内置检索/最新手册结论一致。
+- 根修提交把 `CODEX_MANAGED_STREAM_MAX_RETRIES` 从 0 恢复为 5，`request_max_retries` 保持 2。两层所有权为：CCSM 仅在 `response.created`/注释之后、语义事件之前透明重连；正文、Reasoning、output item 或工具事件之后的 incomplete stream 交给 Codex 自己重试。未知结果的 ResponsePending 仍保持 429 不重试，代理不新增语义事件去重状态机。
+- TDD RED 明确为新契约测试得到 `left=0/right=5`；GREEN 后该测试、`codex_config` 114/114 和 `services::proxy` 75/75 通过。指南和 2026-08-03 历史计划已标明新旧边界，不能再用旧文档声称托管 Codex 必须禁用流重试。
+
+## 2026-08-04 session 019fbd59 的 encrypted/502 根因取证
+
+- 该 session 全程命中 `codex-multirouter::route::router-codex-official`，上游固定为 `https://chatgpt.com/backend-api/codex/responses`、`CodexOAuth`、native Responses，无第三方格式转换。历史中存在官方 `reasoning.encrypted_content`，但这是正常官方 replay 数据；不能以字段存在本身判断 `invalid_encrypted_content`。
+- 证据链：早期 request 约 423 KB；同一 session 后续逐步增长到 7.8 MB、12.9 MB、16.8 MB。16.8 MB 请求在 2026-08-03 13:40 首次发送 119.5 s 后 `upstream_send_error=error_sending_request`，重试在 8.2 s 后也失败；再下一次相同约 16.8 MB 请求在 119.9 s 后收到 HTTP 200。此前多次包含 encrypted history 的请求也均返回 HTTP 200。
+- 已证实但尚不能定根因：该 session 的 385 次官方请求均经 CCSM `reqwest` 出站，且显式 CCSM 上游代理为 false；104 次（27.0%）在收到 HTTP 状态前失败。失败中 96 次的请求体在 5–10 MB，仍有同区间请求成功；16 MB 也曾成功。全量 router 日志中 `router-codex-official` 为 5,873 次里 827 次失败（14.1%），其它路由约 12,291 次仅 2 次失败。因此它是 CCSM 官方出站路径的传输不稳定，不能归因为单纯 body 大小、encrypted 字段，或官方协议 400。
+- `invalid_encrypted_content` 的官方表现应为带该 code 的 HTTP 400；本 session 已抽取到的最终错误是本地 502 映射的 `error sending request`，没有该 code。encrypted 历史仍可能与请求大小/服务端处理时间有关，但不是已证实的断连根因。
+- v3.19.1-4 的“首个语义输出前 SSE 重连”不能覆盖响应头尚未到达的请求阶段。为取得真正根因，`map_reqwest_send_error` 现在会在去掉 URL 后展开底层 source 错误链；只记录安全的传输分类，不记录请求、密文或凭据。下一次复现需据此区分 TLS/HTTP2/连接复用/对端关闭/超时，再决定是否应调整 transport、重连或请求体传输策略；禁止盲目删除 encrypted reasoning 或重放可能在途的请求。
+- 2026-08-04 后续证据先把故障边界定位到官方：切回原生 `model_provider=openai` 后，该 session 的新 turn（`019fc88a-89fb-72b1-84d7-c39b98d9af7c`，`gpt-5.6-luna`）完全没有进入 CCSM router，却在 5 次重连后收到官方 `{"detail":"Bad Request"}`；请求 ID 为 `b4d7b16e-d132-45b7-8f76-42141447a75f`。同机同账号的其它原生 OpenAI session 同时连续成功，因此不是 CCSM 502 包装、账号或全局网络故障；但没有 OpenAI 内部日志时，不能再把这个 generic 400 直接解释成某一个请求字段错误。
+- 最后一次有效 compaction（rollout line 23154）约 0.11 MB/108 items；其后又积累 148 个 replay item。最终有效历史含 29 张内联图片，原始 JSON 约 15.97 MiB、Zstd 约 11.82 MiB；40 个 `custom_tool_call_output` 占绝大多数。字段级审计确认 29 张均为 Base64 合法且文件头正确的 PNG，49 个 reasoning 密文都具备合法编码形态，44 组工具调用/输出全部一一配对，4 个 function arguments 都是合法 JSON。
+- Codex 源码仍证明存在“历史无界放大”缺口：`ContextManager::for_prompt()` 只在模型不支持图片时替换图片；支持图片时 `truncate_function_output_items_with_policy()` 对 `InputImage` 无条件 clone。它会让每次重试都携带同一批旧图片，是超时/断连概率的重要放大因素，但不能单独证明 generic 400 的根因。
+- 反事实实测否定了“该 session 已被图片或 encrypted 永久污染”：使用同一账号、同一 Luna、同一 compaction、全部 29 张图片和全部 49 段 reasoning 密文构造的 16,726,173 字节明文请求、10,832,709 字节 Zstd 请求均返回官方 HTTP 200；再用 Codex CLI `resume --ephemeral` 捕获完整 Responses-Lite 请求（262 input items、4 个嵌套工具、16,823,558 字节原文、10,874,984 字节 Zstd）原样发送，仍返回 HTTP 200。故截图中的 generic 400 是官方边缘/后端的一次瞬态终止；精确内部故障点只有 OpenAI 能通过上述 request ID 查询。
+- CCSM 持续断连仍有一个已证实的传输差异：原生 Codex 对官方登录态默认使用 Zstd，而 `decode_codex_request_body()` 会解压并删除 `content-encoding`，`forwarder` 再把 JSON 序列化成未压缩 `body_bytes` 发往官方。现场同一请求因此从约 10.87 MB 的原生 wire 体膨胀为 16,788,941 字节的 reqwest 上游体；它曾两次在收到响应状态前失败，第三次相同字节请求返回 200。下一步根修应先恢复官方上游 Zstd 语义并保留请求阶段的安全重试/诊断；历史图片有界化只能作为独立的上下文治理，不能伪装成这次 400 的确定修复。
+- 根修已在 `forwarder` 落地：最终 JSON 变换完成后，仅对 Codex POST 到 ChatGPT 官方 `/backend-api/codex/responses` 或 `/responses/compact`、且使用 managed/native official auth、未进入 Chat/Anthropic 转换的请求重新做 Zstd level 0 编码，并同步写 `content-encoding: zstd`、移除旧实体长度头。普通发送、Responses-Lite fallback 缓存和 Lite 去头重试共用同一编码边界；请求级 transport retry 继续 clone 同一不可变 wire body。第三方/转换请求保持明文。TDD 先得到缺少编码与选择函数的编译失败，再通过 4 个定向回归；forwarder 137/137、content-encoding 9/9、`cargo check --lib`、rustfmt 与 `git diff --check` 通过。现有 `openai_cache_read_tokens` dead-code warning 与本次无关。
+
+## 2026-08-03 Codex 第三方 Reasoning 可移植桥设计
+
+- 用户确认的硬约束：第三方 reasoning 必须实时显示；prompt、response 和 reasoning 不得复制到 CCSM 数据库或旁路文件；恢复内置 OpenAI 后 CCSM 完全退出请求链路，Codex 直接走官方 Provider 与 WebSocket；以后仍可重新启用 MultiRouter。
+- DeepSeek 原生 Responses 的 `reasoning.content[].reasoning_text` 本来就是 Codex 支持的 raw reasoning，不是非法格式；现场失败来自 ChatGPT Codex 私有 backend 回放时要求该 `content` 为空。OpenAI 官方通常用可读 `summary` 加 provider 专属 `encrypted_content`，CCSM 不能伪造后者。
+- 上游 CC Switch `v3.19.1` 对原生 `openai_responses` 基本透传，但 Chat -> Responses 转换器已经把第三方 reasoning 合成为 `summary_text` 并流式发送 summary delta，因此两条第三方路径当前不一致。
+- 已批准进入实验的设计：仅对显式启用能力的非官方原生 Responses route，把 raw reasoning SSE/最终 item 无状态转换成可识别的 `rs_ccswitch_...` summary；Codex仍逐delta实时显示并只在自身 rollout 持久化。再次请求同一第三方时，CCSM从 marker summary反向恢复目标上游要求的 raw reasoning。官方响应、官方WebSocket、官方encrypted reasoning原样不动。
+- 该设计承认完整raw reasoning承载于summary存在语义、长度、配对和压缩风险；必须先做短/中/长summary、工具调用、官方直连、官方压缩、切回DeepSeek的真实闭环。若官方A/B失败，停止堆叠CCSM兼容，转向Codex provider-aware history projection。
+- 设计文档：`docs/superpowers/specs/2026-08-03-codex-portable-third-party-reasoning-design.md`。第一阶段不处理已污染的旧rollout，存量迁移必须在新桥验证后另立任务。
+
+## 2026-08-05 Responses 转 Chat 的 system content=null 根因与归属
+
+- session `019fbd59-0c1a-7592-87d3-1e2ad654fd0d` 在 `pre_turn compaction`（`comp_hash_changed`）切到 Qwen `qwen3.6` 后，CCSM 将 `/responses` 转成 `/chat/completions`；366,973 字节请求连续收到 HTTP 400。上游 Pydantic 的 19 条 validation errors 是同一个 `messages[1]` 在联合消息类型上的分支校验结果，实际坏值是 `{"role":"system","content":null}`，不是 19 条坏消息。
+- 转换根因有三段：`responses_message_item_to_chat_message` 对缺失 `content` 使用 `Value::Null`；`responses_content_to_chat_content` 对显式 null 原样返回；`collapse_system_messages_to_head` 只消费字符串 system content，null system 被保留进 `rest` 并发送。assistant 的 `content:null` 在 tool call 场景可能合法，修复必须按角色和消息语义处理，不能全局删除 null。
+- 归属复核：2026-08-05 fetch 后的上游 `main=0345fad6`、上游 tag `v3.19.1`、fork tag/运行版 `v3.19.1-5` 与当前 HEAD 在上述三段均保留相同逻辑；当前 HEAD 与 `v3.19.1-5` 的整个 `transform_codex_chat.rs` blob 相同。故不是 BigStrongSun 后续改动新引入，而是上游原版缺陷被 fork 继承；上游最新 main 截至该提交也未修复。现有 system-collapse 测试只覆盖字符串内容，缺少 missing/null system/developer 回归。
+
+## 2026-08-05 Responses Lite `additional_tools` 转 Chat 根修
+
+- 目标 session `019fbd59-0c1a-7592-87d3-1e2ad654fd0d` 的 HTTP 400 不是 Codex 在普通 message 上主动发送 `content:null`。Codex `0.146.0-alpha.3.1` 的 Responses Lite 请求会动态插入 `{"type":"additional_tools","role":"developer","tools":[...]}`；该结构项协议上没有 `content`，且按官方 rollout policy 不持久化到 session JSONL。
+- 原始错误链在 `src-tauri/src/proxy/providers/transform_codex_chat.rs`：工具上下文只收集顶层 `tools` 和 `tool_search_output.tools`；未知 item 兜底又把带 `role` 的 `additional_tools` 当 message，developer 映射为 system，missing content 变为 null，最终被严格 Chat/vLLM 校验拒绝。同时 `additional_tools.tools` 被静默丢失。
+- 根修提交 `b14e3db` 采用双层契约：递归收集 `input` 内 `additional_tools.tools` 并复用 `CodexToolContext::add_response_tool` 的 function/custom/namespace/hosted tool/去重逻辑；message 投影时显式消费 `additional_tools` 而不生成消息。对真实非 assistant message 的 missing/null content 输出空字符串，已有 system collapse 会消费空 system；assistant synthetic tool-call 的合法 `content:null` 保持不变。
+- TDD 提交 `509646eb` 先锁定三个 RED 场景：Lite 工具丢失和 null system、custom/namespace 与跨来源去重、system/developer/user missing/null 和 assistant null 例外。GREEN 后定向 3 项通过，`transform_codex_chat` 122 项通过；最终 `cargo check --lib`、`cargo fmt --check`、`git diff --check` 通过，全量库测试 `2808 passed, 0 failed, 2 ignored`。
+- 上游贡献从 `farion1231/cc-switch main@0345fad6` 建立干净分支 `bigstrongsun/fix-responses-lite-additional-tools`，只含 RED 测试 `a0d7b47b` 和 GREEN 实现 `31d8a937`，已推送到 `BigStrongSun/ccswitchmulti`。去敏 Issue 为 `farion1231/cc-switch#6158`，ready-for-review PR 为 `#6159`；PR 可合并、仅改 `transform_codex_chat.rs`，GitHub Actions 当前为 `action_required` 且没有 job，表示需上游维护者先批准 fork workflow，并非测试执行失败。
+- 上游分支的 3 个新增回归及 `transform_codex_chat` 84 项全部通过，`cargo check --lib`、`cargo fmt --check`、`git diff --check` 通过。上游全量库测试为 `2334 passed, 3 failed, 4 ignored`；两个失败是 Windows symlink 权限错误 1314，一个是运行中的 CCSwitchMulti 占用代理测试端口导致 10048，均不在唯一变更文件路径内，PR 中已如实披露。
+- 以后处理 Responses input 新结构项时，必须先判断它是消息还是协议元数据；不能仅凭 `role` 字段进入 message 兜底。也不能用全局删除 null 的方式修复 Chat schema，因为 assistant tool-call 允许且依赖 `content:null`。
+- 上述根修已经按 RED→GREEN 完成；session JSONL/SQLite 和 Qwen 配置均未修改，也没有增加 provider 特判。
+
+## 2026-08-05 Codex Multi-Agent V2 第三方 Provider 加密任务 Issue/PR 现状
+
+- 官方 `openai/codex#36586` 精确报告自定义非 OpenAI Provider（DeepSeek）收到 `agent_message` 时，真实任务只存在于 `encrypted_content`，可见 `Payload:` 为空；Issue 仍为 open，标签包含 `bug`、`custom-model`、`subagent`。`#36321`、`#36493` 是同类空 payload 复现；`#36387` 记录 OpenAI 父模型到 DeepSeek 子模型的同一问题，后以 duplicate 关闭。
+- 最关键的跨 Provider 证据在 open Issue `#36376`：即使官方 `#35845` 已随 `0.147.0-alpha.4` 落地，OpenAI 父模型仍返回真实密文 `message="gAAAAA..."` 且 `encrypted_function_args=null`；非 OpenAI 子模型因此仍收到 `[input_text header, encrypted_content]`，不能执行任务。
+- 已合并 PR `#35845`（commit `03edf16f0bce2c454fc9a8ddb382e9c23c114f7f`）新增 `DirectPlaintextMessage`：仅当 function call 带 `encrypted_function_args=[]` 时，把 `spawn_agent`、`send_message`、`followup_task` 投递为结构化明文；否则继续加密。它是必要的 plaintext 通道，但不是 OpenAI 父模型到第三方子模型的完整修复。
+- GitHub connector 与 `gh api search/issues` 均未找到关联 `#36376` 或 `#36586` 的官方修复 PR；搜索 `encrypted_content subagent provider` 也没有结果。当前唯一直接相关的上游 PR 是已合并但覆盖不完整的 `#35845`。
+- `#36586` 评论中的真实线级验证补充了一个重要边界：DeepSeek 对 `agent_message` item 本身也可能忽略，即使其中改成明文 `input_text`；非 OpenAI→非 OpenAI 场景的社区验证方案是把 V2 任务降级投影为普通 `user` message。OpenAI→非 OpenAI 场景则不能仅在子请求侧转换，因为 CCSM/Codex 已经只拿到无法解密的 `gAAAAA...`。
+- 因此 CCSM 下一步不能只做 child-side `encrypted_content -> input_text`。可行根方向是：保留 `agents` namespace；在父请求的非保留 `agents.spawn_agent/send_message/followup_task` schema 边界让官方父模型产生 plaintext/`encrypted_function_args=[]`，再按目标 Provider 能力将第三方子任务投影为普通 user input；官方父子链仍保留加密。实现前必须捕获父响应的 `arguments.message` 与 `encrypted_function_args`，并分别做 OpenAI→OpenAI、OpenAI→DeepSeek/Qwen、DeepSeek/Qwen→同类第三方的真实端到端 canary。
+- 搜索渠道：GitHub connector 和 Codex 内置 Web 均找到相同 Issue 簇与 `#35845`；Matrix MCP 已通过 stdio JSON-RPC 成功初始化并调用三次搜索，但相关 GitHub 限定查询均返回 0 结果，其中一次中国搜索链超时，因此 Matrix 没有提供额外正证据。
+
+## 2026-08-06 Codex 跨 Provider Responses 回放根修与 v3.19.1-9 真实验收
+
+- 用户现场的三个表象属于同一类“第三方 response item 回放到 ChatGPT Codex 私有 Responses 边界”问题，但坏字段来源不同，不能笼统归因为 Qwen、DeepSeek 或 Responses/Chat 某一端：Qwen Chat 合成的 plain reasoning 带 synthetic `rs_resp_chatcmpl-*` ID，官方在 `store=false` 下将它当作服务端持久化引用并返回 404；DeepSeek native Responses 的 plain reasoning 带 UUID `id` 和 response-only `status=completed`，官方拒绝 `input[*].status`；DeepSeek 返回的 `web_search_call` 使用 `call_*` ID，而官方回放输入要求 `ws_*`。
+- 根修边界是按目标 transport 做 replay projection，而不是给第三方 Provider 打补丁：回放到 ChatGPT Codex OAuth 时，未加密的 plain reasoning 删除 `id` 与 `status`、保留可读 `summary`；带官方 `encrypted_content` 的 reasoning 原样保留。第三方 `web_search_call call_*` 稳定映射成 `ws_ccswitch_<hash>`。这些归一化必须位于 `normalize_codex_oauth_responses_request()`，因为 MultiRouter route 物化后 Provider ID 是临时 route ID、认证来源是 `managed_codex_oauth`，只用 `is_codex_official_provider()` 会漏掉真实官方 transport。
+- TDD 提交链：`f891f168`/`4eb154d7` 锁定并修复 synthetic reasoning 404；`f6268f3c`/`063b45dc` 锁定并修复 managed OAuth route 的 `call_* -> ws_*` 漏执行；`b8b63f52`/`1393e3fd` 锁定并修复 DeepSeek plain reasoning `status` 回放；`9fd663a7` 将完整修复升至 `3.19.1-9`。源码验证为 OpenAI OAuth compatibility 26/26、`transform_codex_chat` 123/123、全量库测试 2817 passed / 0 failed / 2 ignored、`cargo check --lib` 与 rustfmt 通过；仅保留既有 `openai_cache_read_tokens` dead-code warning。
+- 最终 Windows 导出从固定 HEAD `9fd663a78edbb90dcde86d37d131c908c37e3de8` 串行执行，`latest.json`、文件名、PE ProductVersion 与 `RELEASE-METADATA.md` 均为 `3.19.1-9`，15 个导出文件逐项通过 `SHA256SUMS.txt`；raw EXE SHA256 为 `B95EA1EA163508C1533348B288EA8D019ECD51619C312854BCEDA7E40E4DD599`。运行版旧 `3.19.1-8` 已备份为 `cc-switch.exe.pre-3.19.1-9-responses-replay-20260806-020446.bak`，其 SHA256 为 `8441AE34949622E33ABE3A298E55660F7793506A02EABAD5061274C46805AF4B`。
+- 安装后的真实代理验收 session `fe9cfd1c-0d85-4ed7-a981-2b71812c6bf4` 完成六步：官方 `gpt-5.6-sol` -> Qwen `qwen3.6` -> 连续 Qwen -> 官方，以及 DeepSeek `deepseek-v4-flash` -> 官方。Qwen 实际 reasoning ID 为 `rs_resp_chatcmpl-*` 且无密文；DeepSeek 实际 reasoning 为 UUID、`status=completed`、无密文，并额外加入现场同形 `web_search_call id=call_00_JYFDjhEPbdA9SmnfBXkC9250`。六次均为 HTTP 200 + `response.completed`，router log 为 6 个 upstream 200、0 个 upstream error，未出现 `rs_* not found`、`Expected an ID that begins with ws`、`input[*].status` 或提前断流。安装进程 PID `51672` 监听 `127.0.0.1:15721`，二进制版本和 SHA256 与导出工件一致。
+
+## 2026-08-06 CCSwitchMulti v3.19.1-9 GitHub Release 发布结果
+
+- annotated tag `v3.19.1-9` 解引用到发布说明提交 `f2b207fbef7e66dc530470fb4df24e5879b79127`，远端分支 `bigstrongsun/fix-portable-third-party-reasoning` 同步到该提交。发布说明为 `docs/release-notes/v3.19.1-9-zh.md`，覆盖跨 Provider Responses 回放修复、协议边界、真实验证、升级方式和下载能力边界。
+- GitHub Release workflow run `31037635625` 完整成功：Windows x64、Windows ARM64、Linux x64、Linux ARM64、macOS 五个平台矩阵，`Publish GitHub Release` 与 `Assemble latest.json` 全部为 `completed/success`。正式 Release 为 `draft=false`、`prerelease=false`，地址为 `https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.19.1-9`。
+- Release 共 19 个资产并全部带 GitHub 服务端 SHA256 digest。远端 `latest.json` 为 `version=3.19.1-9`，包含 `darwin-aarch64`、`darwin-x86_64`、`windows-x86_64`、`windows-aarch64`、`linux-x86_64`、`linux-aarch64` 六个平台；各平台 signature 非空，六个 updater URL 均实测 HTTP 200，返回 Content-Length 与 Release 资产一致。GitHub `/releases/latest` 已指向 `v3.19.1-9`。
+- 发布前重新运行完整 Rust library 测试：`2817 passed, 0 failed, 2 ignored`；只有既有 `openai_cache_read_tokens` dead-code warning。Codex 内置搜索、Matrix WebSearch 与 GitHub API 都未发现预先存在的同名 tag/Release，避免覆盖远端状态。
+- fork 的 R2 workflow 未被 `release: released` 自动触发，手动 recovery run `31040703867` 虽显示 success，但日志明确 `R2 secrets not configured; skipping download mirror sync`，所有下载/上传/manifest step 均 skipped。因此本次确认的是 GitHub Release 与 GitHub updater manifest 已发布，不能声称 `https://dl.ccswitch.io` R2 镜像已同步；没有凭据时不应重试或伪造 R2 成功。
+
+## 2026-08-06 v3.19.1-9 主线程误报 third-party encrypted payload 根因与 v3.19.1-10 修复
+
+- 同批用户反馈还包含另一条独立错误：从 DeepSeek V4 Flash 切回顶层 `OpenAI Official` 后，代理显示 `model: deepseek-v4-flash`，ChatGPT backend 返回 `Invalid 'input[10].content': array too long`。`model` 保留旧线程值不代表请求仍路由到 DeepSeek；`Provider: OpenAI Official` 说明 top-level provider 已切换。DeepSeek native Responses 实测会返回 `type=reasoning,status=completed,content=[reasoning_text]`，这是第三方合法输出，但不能原样回放给严格的 ChatGPT Codex input schema。
+- 根因位于 `should_normalize_codex_oauth_responses_passthrough_body()`：旧 predicate 只接受 `provider.is_codex_oauth()`，而内置 `codex-official` 是 native auth passthrough，虽然最终同样访问 `https://chatgpt.com/backend-api/codex/responses`，却绕过了已有的 raw content -> summary、plain reasoning id/status、tool content 和 replay ID 归一化。RED `96a593f1` 锁定 native official 漏判，GREEN `3f351514` 让 managed OAuth 与内置 official 共用同一目标 transport replay boundary；不修改公开第三方 Responses 路径。
+- 本机诊断 session `423cb92e-d144-4b92-bf9b-c8fbbfdf29b1` 通过 `v3.19.1-9` managed OAuth route 生成了真实 DeepSeek reasoning（UUID id、completed status、1 条 reasoning_text content、无 summary/encrypted_content），随后回放官方为 HTTP 200；这反证已有 normalizer 本身有效，缺口确实是 top-level native official 没进入它。正式验收必须安装 `3.19.1-10` 后再覆盖 top-level DeepSeek -> OpenAI Official，而不能只重跑 managed route。
+- 现场报错为 `Provider: OpenAI Official; model: gpt-5.6-sol; cause: third-party child cannot read encrypted Codex agent payload`。该文案不是 OpenAI 或第三方模型返回，而是 `codex_multi_agent.rs` 在本地 Stage B 投影中主动生成；错误发生在发上游之前，因此不会进入 `proxy_request_logs` 的 upstream error 行。
+- 矛盾 Provider 标签的根因是 ownership 判定分裂：MultiRouter 的 OpenAI route 物化后使用 request-local route ID，并以 `provider_type=codex_oauth` 表示托管官方 transport；`should_project_codex_agent_messages_for_provider()` 却只排除狭义 `is_codex_official_provider()`，没有排除 `provider.is_codex_oauth()`。于是合法的官方加密 `agent_message` 回放被误分类为第三方 child，在主会话本地 400；handler 又用外层 route 名输出 `OpenAI Official`。
+- TDD RED 提交 `180b5735` 用真实 predicate 锁定 managed OAuth 被错误投影；GREEN 提交 `8d721273` 同时排除 managed Codex OAuth 与原生 official。Qwen、DeepSeek、xAI 和其它真正第三方 Responses route 仍进入投影，opaque 密文仍 fail closed，未放宽密文泄漏边界。
+- `3f351514` 解决的是 native official replay normalizer 范围，不是本次 Stage B ownership 误分类；两者都应保留。版本提交 `969fec5c` 升到 `3.19.1-10` 并新增中文发布说明，当前运行中的 `3.19.1-9` 未替换。
+
+## 2026-08-07 v3.19.1-9 主线程误通知用户反馈复核
+
+- 用户转述的通知原文与 2026-08-06 已定位问题逐字一致：`Provider: OpenAI Official; model: gpt-5.6-sol; cause: third-party child cannot read encrypted Codex agent payload`。重新核对提交链确认，`180b5735` 先用 RED 测试复现 `provider_type=codex_oauth` 被误投影为第三方 child，`8d721273` 再让 `should_project_codex_agent_messages_for_provider()` 同时排除 managed Codex OAuth 与 native official ownership；不是新增根因，也不需要在 `v3.19.1-10` 上叠加补丁。
+- 当前本机运行进程 `C:\Users\sunda\AppData\Local\CCSwitchMulti\cc-switch.exe` 的 PE ProductVersion/FileVersion 均为 `3.19.1-10`，监听 `127.0.0.1:15721`；源码定向回归 `proxy::forwarder::tests::agent_message_projection_runs_only_for_third_party_codex_responses` 为 1 passed / 0 failed，本地日志未再检出该错误文本。用户现场仍使用 `-9` 时，直接升级 `3.19.1-10` 才会生效。
+- 联网交叉验证：Codex 内置 Web 搜索命中 OpenAI Codex issue `#34833`、`#33551`，确认 Multi-Agent V2 的 encrypted `agent_message` 对非 OpenAI provider 是真实的 provider-boundary 问题；Matrix WebSearch 独立搜索未稳定召回 issue，但直接打开 `https://github.com/openai/codex/issues/34833` 得到相同正文和 same-provider OpenAI control。外部来源支持“加密 payload 必须按 provider ownership 分流”这一背景；CCSM 主线程误通知的精确 ownership 漏判仍以本仓库源码、RED 测试和提交 diff 为权威证据。
+- 验证：RED 在旧逻辑稳定失败、GREEN 通过；Multi-Agent payload 5/5、OAuth Responses 14/14、完整 Rust library `2818 passed / 0 failed / 2 ignored`；`cargo check --lib`、rustfmt、diff check 通过，仅保留既有 `openai_cache_read_tokens` dead-code warning。官方文档只确认 GPT-5.6 multi-agent 仍为 beta，未公开这种私有 envelope；Codex 内置官方搜索与 Matrix 独立搜索都没有找到该精确错误，进一步证明它属于 CCSM 本地诊断文案。
+
+## 2026-08-06 v3.19.1-10 本地发布与发布锁根修
+
+- Windows 本地发布最终固定在提交 `906a2b7b1d568ef0989fdc50c267c73f935d07a1`，目录为 `C:\Users\sunda\Documents\LLMservice\ccswitchmulti-release-v3.19.1-10`。安装包 SHA256 为 `FFD40C76CD890078B7C48D47C9183A0D28EE3B731D3BB5F22641F5DDC6800279`，portable ZIP 为 `A757104273F380ED36BA6485A6853792310492A7F842DE253E167E819F9FA820`，raw EXE 为 `947167B74B5D70D3599F652E54DE020240D5B920010737E1F4C34C493BB654D1`。
+- 最终验收为 15 个导出文件、15 个 checksum entry、0 个缺失/哈希错误；setup 与 raw EXE 的 PE ProductVersion 均为 `3.19.1-10`，portable 内含 `CCSwitchMulti.exe`，`latest.json` 版本正确且 updater signature 与 `.sig` 完全一致。
+- 收尾运行态复核时，`127.0.0.1:15721` 已变成 PID `71064` 的已安装 `3.19.1-10`，安装目录文件 LastWriteTime 为 `16:20:35`、进程启动于 `16:22:55`，早于本轮最终成功打包完成时间 `16:42:43`，也早于发布脚本提交；本轮没有执行 installer、AppData 复制或进程重启。该已安装 EXE 的 SHA256 为 `05F3A6DE4F70518E72D8B6B2DC1E0CEDB29AFDA37DD9CF76D2E4D1CB462B353C`，与最终验收 raw EXE 不同，因此仍应由用户用最终目录内 setup 自行重装，不能把当前运行版当作最终包安装验收。现有本地证据无法恢复已退出 parent PID `60456`，故不能断言是谁触发了 16:20 的替换。
+- 首轮打包曾在 NSIS 阶段触发 Windows OS 32。更深根因不是 Rust/Tauri 编译失败，而是旧 `local-release-pipeline.ps1` 在竞争者获取锁失败后仍由 `finally` 无条件删除活跃流水线的锁，使第三条流水线能并发进入并争写 `target/release/cc-switch.exe`。提交 `906a2b7b` 改为原子 `CreateNew`、每进程 token 和 owner-only release；Windows PowerShell 5.1 回归确认竞争者失败后锁仍属原 owner，错误 token 不能释放，owner 可以释放。
+- 带重复反斜杠的 `ReleaseRoot` 还暴露了 `SHA256SUMS.txt` 相对路径按未经规范化字符串长度截取的问题。提交 `434541de` 在两个 checksum writer 中先 `Path.GetFullPath` 再截取，保持 PowerShell 5.1 兼容；实际 duplicated-separator `-SkipBuild` 导出得到 15 条清单、0 条无效相对路径。
+
+# 2026-08-07 Codex Desktop 国际化占位符原样显示根修与 3.19.1-12 本地交付
+
+- 用户截图中的 `已处理 {time}`、`正在运行 {command}`、`<projectSelect>{projectName}</projectSelect>` 不是 Codex 中文语言包漏翻译，也不是用户项目数据问题。当前本机同样可复现：Appx `OpenAI.Codex_26.730.8199.0`（包内版本 `26.730.61639`）的 renderer DOM 在 `lang=zh-CN` 下实际包含 `Worked for {time}`。
+- 现场运行的 CCSwitchMulti `3.19.1-10` 已注入 `window.__ccSwitchCodexAppCompatibilityV5`，其 1.5 秒 interval 持续执行 `patchReactState()`。`src-tauri/src/codex_desktop.rs::patchObjectGraph()` 遍历 React Fiber 对象图，`patchModelContainer()` 的 `if (value.defaultModel == null)` 对任何没有 `defaultModel` 的普通对象都写入模型 descriptor，而不是只写模型容器。
+- 该无边界写入污染了 React Intl context：实测 `intl.formats`、`intl.defaultFormats` 和 `intl.formatters` 都被追加 `defaultModel/useHiddenModels/use_hidden_models`。污染后的 `defaultModel.model_messages` 与宿主对象形成循环引用；React Intl 创建/缓存 MessageFormat 时序列化 formats 参数，抛出 `TypeError: Converting circular structure to JSON`。
+- React Intl 随后按官方 fallback 算法返回消息 source（不做替换），所以普通 ICU 参数 `{time}`、`{command}` 和 rich-text 标签都会原样出现。直接调用底层 `intl.formatters.getMessageFormat(message, locale, {})` 能正常得到 `Hello World`，但调用受污染 context 的 `intl.formatMessage(...)` 返回 `Hello {name}`，证明 parser、语言包和调用点传参都正常，坏点在被注入脚本污染的 Intl 配置/cache。
+- 截图 2 的当前 Codex 调用点已正确传入 `projectName/projectSelect`，时间调用点也正确传入 `values.time`；React Fiber 现场显示 `localConversation.workedFor.v2` 的 `values.time` 为有效中文时长字符串。不能把问题误修成补翻译或手工字符串替换。
+- 危险逻辑最初由提交 `3eeb39dc423d0679981af456d59e36b3de62295a`（2026-06-14，`fix: unlock Codex Desktop multirouter models`）引入。当前 Codex renderer 的对象图使污染稳定到达 Intl context，因此近期用户反馈集中出现并不等于近期才引入源码。
+- 后续在当前 Codex Desktop `26.803.5235.0` 与已安装 CCSwitchMulti `3.19.1-11` 上再次只读复现：DOM 同时出现 `{fileCount, plural, ...}`、`{linesAdded}`、`{linesRemoved}`、`{time}` 与 `{command}`；三个 React Intl 对象仍含模型门字段，说明 `3.19.1-11` 只包含 DeepSeek 路由修复，并未包含本问题的生产修复。
+- RED 提交 `d57b0e05` 把 renderer 真正执行的模型 patch 核心提取为 QuickJS 可直接运行的契约，并稳定复现 Intl 普通对象会被修改；GREEN 提交 `e7aacf26` 从源头删除全局 `Response.prototype.json` 劫持和 React Fiber 通用对象图改写。`patchModelContainer` 现在要求对象本身存在明确模型门字段，只修改已经存在的 camelCase/snake_case 控制字段；模型列表只在 app-server model-list、已关联的 MCP `model/list` 与 Statsig 模型配置三个已知边界处理。登录态兼容继续使用独立的 `setAuthMethod + authMethod` 定向 context 查找。
+- 行为回归直接执行与 renderer 共用的同一段 JavaScript：React Intl 的 `formats/defaultFormats/formatters` 四次 patch 前后字节等价，同时显式模型门仍能加入 Qwen/DeepSeek、解除隐藏并设置默认模型。定向 QuickJS 为 `2 passed`，`codex_desktop` 模块为 `20 passed / 0 failed`；完整 Rust library 为 `2821 passed / 0 failed / 2 ignored`，`cargo check --lib`、`cargo fmt --check`、`git diff --check` 均通过，仅保留既有 `openai_cache_read_tokens` 未使用警告。
+- 版本提交 `04d25cfe` 将本地交付提升到 `3.19.1-12`；中文 release note 后续按实际提交范围修正为累计说明，明确列出 DeepSeek Pro/Chat、React Intl、发布锁 ownership 和 checksum 路径规范化四项修复，并区分“源码/安装包已包含”与“安装后现场验收仍待完成”。首轮完整 post-commit pipeline 在 `2026-08-07 17:28:01 +08:00` 成功结束；导出目录 `C:\Users\sunda\Documents\LLMservice\最新版ccswitchmulti` 的 15 条 checksum 全部匹配。NSIS setup 为 11,500,092 bytes、PE File/ProductVersion 均为 `3.19.1-12`、SHA-256 `89E18249952E9A97C1018C516A8F373D5DE5DC634136ED82729EADC5B15A54AD`；portable ZIP 为 13,939,974 bytes、SHA-256 `D7B3D5F4F5760EE8F6521976DE2462C50D63B77C862CA7D0144940F5345E47C6`；raw EXE SHA-256 `CEFBA457604A3D339110F6C8749512B35D8FBD74BF247E0A3DF112C5356C3614`。Tauri updater `.sig` 非空且与 `latest.json` 完全一致；Windows Authenticode 仍为 `NotSigned`，不能把 updater 签名误报成微软代码签名。
+- 当前运行中的已安装版仍是 `3.19.1-11`（PID 11200，启动于 16:36），Codex Desktop 仍是旧 renderer；本轮没有停止、安装或重启任何进程。只有用户完全退出 Codex Desktop 与 CCSwitchMulti、安装 `3.19.1-12` 并从 CCSwitchMulti 重启后，才能以 Intl 对象无注入键、DOM 无未解析 ICU/tag、模型菜单仍含 Qwen/DeepSeek 三项做最终现场验收；在此之前不能宣称用户当前 UI 已修复。
+
+## 2026-08-07 CCSwitchMulti v3.19.1-12 GitHub 正式发布
+
+- `v3.19.1-12` annotated tag 精确解引用到累计发布说明提交 `06600a4ae1835905bfc512608bc464baf8fe1386`，而不是当时已经包含后续 Codex Desktop 模型菜单 lifecycle guardian 的分支 HEAD；因此正式包只包含本版声明的 DeepSeek Pro/Chat 路由、React Intl、发布锁 ownership 与 checksum 路径规范化修复，没有混入后续功能。
+- 精确候选提交在隔离 worktree 重新通过 `pnpm typecheck`、完整 Rust library `2821 passed / 0 failed / 2 ignored`、`cargo check --lib`、`cargo fmt --check` 与 `git diff --check`；仅有既存 `openai_cache_read_tokens` dead-code warning。
+- GitHub Actions run `31175685456` 完整成功：Windows x64、Windows ARM64、Linux x64、Linux ARM64、macOS 五个平台矩阵，以及 `Publish GitHub Release`、`Assemble latest.json` 均为 `completed/success`。正式 Release 地址为 `https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.19.1-12`，`draft=false`、`prerelease=false`，GitHub `/releases/latest` 已指向该版本。
+- Release 共 19 个资产。远端 `latest.json` 为 `version=3.19.1-12`，包含 `darwin-aarch64`、`darwin-x86_64`、`windows-x86_64`、`windows-aarch64`、`linux-x86_64`、`linux-aarch64` 六个平台键；每个平台 signature 非空，URL 全部指向 `v3.19.1-12`。下载后的 `latest.json` SHA-256 为 `79ad6d65c4abca7987c8b58eec501a52fa3566aa21592cec487a25a6738e3be7`，Windows x64 setup SHA-256 为 `3cdeff6c74fe3c403e2bcbff4b3e6a1d8ebfd41aa0da07be956a594bbdf85c0a`，均与 GitHub 服务端 digest 一致。
+- 联网事实核对使用了 Codex 内置搜索与 GitHub 官方 API/CLI；Matrix WebSearch 独立链路本轮返回 HTTP 521，未能提供第二份正证据，因此版本、tag 和发布状态以 GitHub 一手数据与本地精确提交验证为准，并保留该搜索通道不确定性。
+
+# 2026-08-08 GitHub 未关闭 Issue 真实性审计（20 项）
+
+- 以 GitHub 当前 open 列表、Issue 正文/评论、最新正式发布 `v3.19.1-12`（tag `06600a4a`）、本地当前源码和 Release Actions 日志交叉核验；不能把 tag 之后的本地提交算作已发布修复。
+- 建议继续保留并处理 7 项：`#3`（v3.19.1-12 Actions 明确发布 unsigned/notarization skipped，文档 PR #4 仍 draft）、`#6`（发送错误已分类/重试，但当前错误包装仍写 `CC Switch local proxy failed`）、`#16`（OMP/Pi 尚无实现）、`#28`（所列 compaction 裁剪/空 choices 等提交不在当前主线）、`#32`（v3.19.1-9 可复现；lifecycle guardian 提交 `cfe3028e` 在 v3.19.1-12 tag 之后，尚未发布）、`#34`（LM Studio Responses 要求 `text.format`，当前转发源码没有补齐/移除逻辑）、`#35`（`apply_provider_to_paths_inner` 仍直接全量写 profile，非托管字段确会丢失）。
+- 建议关闭或在让报告者用最新版复测后关闭 11 项：`#1`（spawnAgentModels 前五排序已发布）、`#5`（15721 是本地 takeover 端口，属咨询）、`#8`（MiMo preset 能力字段修复自 v3.16.4-13 已发布；原“中途停”根因未被单独证明）、`#10`（评论已确认模型列表恢复，当前 auth/catalog 路径已有实现）、`#11`（visible alias + upstreamModel 已实现并发布）、`#17`（历史 v13/v12 降级不兼容，当前 schema v16 可迁移 v13）、`#18`（坏明文 encrypted_content 自愈已发布）、`#21`（reserved collaboration schema 兼容与 agents namespace 已发布）、`#23`（DeepSeek low/high/max 官方目录已发布）、`#26`（跨 provider replay ID 规整已在 v3.19.1-2 起发布）、`#31`（双阶段跨 Provider V2 投递修复已在 v3.19.1-9 发布，并有 OpenAI->Qwen/DeepSeek nonce+真实 shell 的 live 验收）。
+- 两项不能按现有标题直接判定为当前真实 Bug：`#2` 只有泛化浅色模式描述、无当前截图/路径，源码已大量使用 light/dark theme tokens，应该改成带页面截图的视觉 QA 清单；`#7` 的 400 现场是真实历史信号，但“developer.content[3] 被拆成 input[3]”没有 raw request body 支持，且当前 official Responses 归一化已有多轮修复，应要求最新版最小复现或关闭/重写根因。
+- 联网交叉验证：Codex 内置 Web 搜索命中 Apple 官方 Gatekeeper/Notarization 说明及 OpenAI Codex 跨 Provider encrypted `agent_message` issues；GitHub connector、`gh`、源码/tag/Actions 日志提供项目当前事实。Matrix `matrix-websearch` 按独立查询链调用，但连续返回 HTTP 521，未能提供第二条正证据，因此对项目状态不使用 Matrix 结果背书。
+
+# 2026-08-08 已处理 GitHub Issue 关闭执行
+
+- 按上一轮真实性审计结论，通过 GitHub connector 将 `BigStrongSun/ccswitchmulti` 的 `#1/#5/#8/#10/#11/#17/#18/#21/#23/#26/#31` 统一关闭为 `state=closed`、`state_reason=completed`；逐项远端回读确认 11 项全部成功关闭。
+- 关闭后再次检索远端 open 列表，数量从 20 降为 9，精确剩余 `#2/#3/#6/#7/#16/#28/#32/#34/#35`。其中 `#2/#7` 仍等待当前版本复测或重写证据，其余 7 项仍有明确未完成工作，未误关。
+- 本轮联网仍执行两条独立链：Codex 内置搜索返回 GitHub 官方 Issue 状态筛选文档；Matrix `matrix-websearch` 再次返回 HTTP 521。最终关闭结果以 GitHub connector 的写入响应和关闭后的逐项/列表回读为权威证据。
+
+# 2026-08-08 Open Issue 修复批次（#35 / #34 / #6 / #3）
+
+- 设计和计划分别提交为 `185f788c`、`d12c9b33`，四个 Issue 保持独立提交和独立验收边界；当前工作分支 `bigstrongsun/fix-portable-third-party-reasoning` 尚未推送这些提交，因此不能把本地实现当作 GitHub 可见完成或已发布修复。
+- `#35` 根因是 `apply_provider_to_paths_inner` 生成完整 Claude Desktop profile 后直接覆盖 `configLibrary/*.json`，没有区分 CCSM 托管字段与用户扩展字段。提交 `b96c3a4c` 在写入前合并现有对象中生成 profile 未包含的键；生成值继续覆盖 `inferenceGatewayBaseUrl` 等托管键，`autoModeEnabled`、`toolSearchEnabled`、`prefer1m` 等用户键保留。RED 测试因 `autoModeEnabled` 实际为 `Null` 失败，GREEN 后定向 1/1、模块 24/24 通过。
+- `#34` 的现场请求包含 `text.verbosity` 但缺少 LM Studio Responses 要求的 `text.format`。提交 `f9ed9bb0` 在最终 native Responses 请求边界增加 LM Studio 专属归一化：仅 Codex + Responses + 未走 Chat/Anthropic 转换 + effective provider 的 type/id/name 可识别为 LM Studio 时，在缺失键时补 `{"type":"text"}`；显式格式、非 LM Studio 和转换路径不变。RED 因归一化函数不存在而编译失败，GREEN 范围测试 2/2、邻近 passthrough 3/3 通过。
+- `#6` 根因是 `codex_proxy_error_json` 对已解析 route/auth 后的 `ProxyError::ForwardFailed` 仍统一包装成 `CC Switch local proxy failed`。提交 `a1b83163` 将该阶段改为 upstream connection 分类，官方 route 使用 `OpenAI Codex upstream connection failed`，同时保留 502/status code、provider/model/endpoint/cause 和既有重试语义；`ProxyError::Internal` 仍保留 local proxy 分类。RED 在旧文案断言失败，GREEN 两项定向测试通过，`codex_proxy_` 10/10、error mapper 7/7 通过。
+- `#3` 的 draft PR `#4` 使用了已过期的 `CCSwitchMulti_<version>_aarch64.*` 资产名且当前显示 mergeable=false，不能直接合并。当前 `v3.19.1-12` Release 和 workflow 实际资产是 `CCSwitchMulti-v3.19.1-12-macOS.dmg/.zip`。提交 `c5440fa8` 在当前精简 README 中加入中英文 unsigned/unnotarized 说明、Apple `Open Anyway` 流程和仅针对 `/Applications/CCSwitchMulti.app` 的 quarantine 删除命令，并明确不会全局关闭 Gatekeeper；资产名和安全禁用命令检查通过。
+- 批次新鲜验证：完整 Rust library `2825 passed / 0 failed / 2 ignored`，`cargo check --lib` exit 0；本批次三份 Rust 文件独立 rustfmt check、README 语义检查、`git diff --check` 均通过。全仓 `cargo fmt --check` 仍因此前 `cfe3028e` 附近已提交的 `codex_desktop.rs`、`codex_guardian.rs`、`commands/proxy.rs`、`services/proxy.rs` 格式差异失败，这些文件不属于本批次，未混入修复提交。
+- 联网交叉验证：Codex 内置 Web 搜索命中 LM Studio 官方 Responses 文档，GitHub connector/`gh`/workflow/Release 资产用于核验 Issue、PR 和当前 macOS 文件名；Matrix `matrix-websearch` 独立查询继续返回 HTTP 521，因此没有作为正证据。仍需在推送/合并后处理 `#3/#6/#34/#35` 的 GitHub 状态；需要运行时或发布验收的行为不得因本地测试提前宣称已发布。
+
+# 2026-08-08 CCSwitchMulti v3.19.1-13 GitHub 正式发布
+
+- `v3.19.1-13` 使用 annotated tag；远端 tag object 为 `25b34680ddc612197511bb902a2ba92134baf3de`，peeled commit 精确指向候选 `c022d821d70f0935a641951648c99cd8cf658f31`。候选包含 Codex Desktop lifecycle guardian（#32）、LM Studio Responses `text.format`（#34）、上游连接错误归因（#6）、Claude Desktop profile 用户字段保留（#35）和 macOS 未签名安装说明（#3）。
+- 本地最终门禁：前端 Vitest `112 passed / 818 passed`；首次完整运行的 App 集成用例发生一次 10 秒时序超时，隔离重跑 `8/8` 通过，随后完整重跑 `818/818` 通过；Rust library `2825 passed / 0 failed / 2 ignored`，`cargo check --lib`、`cargo fmt --check`、TypeScript typecheck 和 `git diff --check` 全部通过，仅保留既有 `openai_cache_read_tokens` dead-code warning。
+- GitHub Actions Release run `31252533548` 完整成功：macOS、Linux x64、Linux ARM64、Windows x64、Windows ARM64 五个平台，以及 `Publish GitHub Release`、`Assemble latest.json` 均为 `completed/success`。
+- 正式 Release 为 `https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.19.1-13`，`draft=false`、`prerelease=false`，共 19 个资产。`latest.json` 为 `version=3.19.1-13`，包含 `darwin-aarch64`、`darwin-x86_64`、`windows-x86_64`、`windows-aarch64`、`linux-x86_64`、`linux-aarch64` 六个平台；全部 signature 非空并与下载的对应 `.sig` 内容一致，URL 全部指向本 tag。
+- 下载验证：`latest.json` SHA-256 为 `532d2a2dd85bd866d300c864702cb0c0d35992980dbc8945710a6f29fa3cec61`；Windows x64 setup SHA-256 为 `f5c5b03617e41a973ce59c0c081fbd45e9525e7ff3eeba85a310b104df74e529`；两者均与 GitHub 服务端 digest 一致。发布成功只证明远端构建与资产完整，不等同于已经在用户机器安装和完成运行态验收。
+- 联网事实核对继续使用 Codex 内置搜索和 GitHub 官方 API/CLI；Matrix `matrix-websearch` 独立链路仍为 HTTP 521，不能提供第二份正证据，因此 tag、Actions、Release、清单和哈希结论以 GitHub 一手数据及本地下载复核为准，并保留 Matrix 通道不可用这一不确定性。
+
+# 2026-08-08 v3.19.1-13 发布后 Issue 与旧 PR 收尾
+
+- 在正式 Release、Actions 和 updater 资产验证通过后，先逐项回读远端 open 状态，再给 `#3/#6/#32/#34/#35` 添加 `v3.19.1-13` 修复说明并关闭为 `state=closed`、`state_reason=completed`；关闭后再次逐项回读，五项均为 completed。
+- macOS 文档 draft PR `#4` 的目标已由当前分支实现并发布，且旧草稿资产名过时、`mergeable=false`；添加替代说明后关闭，最终 `state=closed`、`merged=false`、`draft=true`，没有合并旧补丁。
+- 收尾远端 open Issue 精确剩余 `#2/#7/#16/#28/#37`；其中 `#37` 是协助仓库脱离 fork network 的协调事项，本轮没有将其误判为产品 Bug 或关闭。open PR 仍为 `#13/#22/#25/#27/#36`，本轮仅按既定范围关闭 `#4`，未扩大到其他 PR。
+
+# 2026-08-09 PR #36 审查、干净移植与 Windows 自启根修
+
+- `zhushihao` 的 PR `#36` 标题为“保留 Claude profile 用户字段 + 消除 powershell 弹窗 + 修复开机自启”，但 head `d18d1b49107f1d879b91a1dba3fcd47eb6860b07` 基于长期未更新的远端 `main@f13fea48`，相对该 base 混入 94 commits / 53 files；相对实际发布分支仍 ahead 12 / behind 16。不能直接 merge，否则会把旧 release、Codex 路由、workflow、版本和冲突解决历史带入当前发布线。
+- 真正相关提交只有 `e48510fb`（顶层 Claude profile extras）、`0fd46f7d`（模型条目 `prefer1m`）、`bb7d8dee`（后台 PowerShell `CREATE_NO_WINDOW`）和 `dbfe6273`（Windows 自启注册表）。顶层 extras 已由当前线 `b96c3a4c` 独立实现，因此不重复吸收；其余贡献在隔离 worktree 审查后映射为干净提交 `27ba2724`、`9482e057`、`15770e31`，作者保留为 Shawn Pro，提交者为 BigStrongSun。
+- `27ba2724` 在现有 `merge_existing_profile_extras` 上按模型 `name` 合并 `inferenceModels` 条目中生成配置未包含的字段。回归测试先在无实现分支真实失败：`prefer1m` 由 `Bool(true)` 变为 `Null`；实现后目标 1/1、完整 Claude Desktop config 模块 25/25 通过。
+- `9482e057` 给剩余三处后台直接 PowerShell 调用补 `CREATE_NO_WINDOW`：Codex guardian 主进程探测、Windows 安装候选 JSON 探测和代理诊断进程探测。历史迁移路径原本已有同一标志；用户主动安装器和终端流程不在本次隐藏窗口范围。Windows `cargo check --lib` 通过。
+- 原 `dbfe6273` 不能原样吸收：它的 `is_enabled()` 只看 Run 值，会忽略用户在 Task Manager 中写入的 `StartupApproved` 禁用状态；路径比较大小写敏感；`StartupApproved` 写入/删除错误被静默吞掉。`15770e31` 保留其“引用含空格 exe 路径并同步维护两处注册表”的核心，增加 Windows 路径大小写不敏感匹配、StartupApproved override 判断、仅忽略 NotFound 的错误语义，并在 StartupApproved 启用写入失败时回滚 Run 值。两条 RED 先因 Windows 状态模块不存在而编译失败，GREEN 后 2/2 通过。
+- 合并前定向回归为 Claude profile 25/25、自启 2/2、Codex 主进程探测 1/1、代理诊断 10/10；`cargo check --lib`、rustfmt 和 `git diff --check` 通过。仅保留既有 `openai_cache_read_tokens` dead-code warning。
+- 联网交叉验证使用 Codex 内置搜索的 Microsoft Run/RunOnce 官方文档、Rust `CommandExt` 官方文档，以及本地 `auto-launch 0.5.0` Windows 源码；官方文档确认 Run 值是 command line，路径含空格时应正确引用，Rust API 确认 `creation_flags` 传给 CreateProcess。`StartupApproved` 是未公开稳定契约，因此精确 marker 语义以当前 crate 源码和本机 Windows 行为为依据。Matrix WebSearch 独立查询仍返回 HTTP 521，没有提供正证据。
+- 干净提交与首次记忆提交已推送到 `bigstrongsun/fix-portable-third-party-reasoning@332c6a4d`；PR 评论为 `https://github.com/BigStrongSun/ccswitchmulti/pull/36#issuecomment-5226946143`。随后将 PR `#36` 关闭，远端回读为 `state=CLOSED`、`mergedAt=null`，表示贡献已手工集成而原 PR 未被 merge。
+
+# 2026-08-09 CCSwitchMulti v3.19.1-14 GitHub 正式发布
+
+- `v3.19.1-14` 使用 annotated tag：远端 tag object 为 `b4a3e173e9858d3968a6563f261320c7170621f8`，peeled commit 精确指向发布候选 `832d3f09076b0f4d61dbb5ddc67d6fc5753c1490`。本地先删除仅属于 PR #36 贡献者分支、未存在于 BigStrongSun 远端且不在当前发布历史中的轻量 `v3.19.1-14/-15/-16`，再在正式候选上重建本 tag；发布后记忆提交不得移动该标签。
+- 本版发布内容包括：Claude Desktop 每模型 `prefer1m` 用户字段保留、Windows 后台 PowerShell `CREATE_NO_WINDOW`、Windows 开机自启 Run/StartupApproved 状态修复，并在发布说明中感谢贡献者 `@zhushihao`。版本号已同步到 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock` 和 `src-tauri/tauri.conf.json`，中文发布说明位于 `docs/release-notes/v3.19.1-14-zh.md`。
+- 发布前新鲜门禁：Rust library `2828 passed / 0 failed / 2 ignored`，前端在显式排除 `.worktrees/**` 后为 `112 files / 818 passed`；`cargo check --lib`、`cargo fmt --check`、`pnpm typecheck`、发布说明 Prettier 和 `git diff --check` 均通过。只保留既有 `openai_cache_read_tokens` dead-code warning；直接运行未排除 `.worktrees/**` 的 Vitest 会扫描旧 worktree 并引入重复 React/旧断言污染，不能作为当前根源码结果。
+- GitHub Actions run `31272882703`（`https://github.com/BigStrongSun/ccswitchmulti/actions/runs/31272882703`）最终 `completed/success`：Windows x64、Windows ARM64、Linux x64、Linux ARM64、macOS、`Publish GitHub Release` 和 `Assemble latest.json` 七个作业全部成功。
+- 正式 Release 为 `https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.19.1-14`，`draft=false`、`prerelease=false`，发布时间 `2026-08-08T19:22:46Z`，共 19 个资产。远端 `latest.json` 为 `version=3.19.1-14`，包含 `darwin-aarch64`、`darwin-x86_64`、`windows-x86_64`、`windows-aarch64`、`linux-x86_64`、`linux-aarch64` 六个平台键；全部 signature 非空，URL 全部指向本 tag。
+- 下载哈希验证：Windows x64 setup SHA-256 为 `773b71152a69e16f576a3159d6300beb02f56d0d25675edacc25c14974e39330`，`latest.json` SHA-256 为 `fc017ce6ea9b3e179933093fe9d3cb51932f517e37ae02b4e1d8c6de81c72fa2`，两者均与 GitHub 服务端 digest 完全一致。发布成功只证明远端构建与资产完整，不等同于已在用户机器安装并完成运行态验收。
+- 联网事实核对使用了 Codex 内置搜索和 GitHub 官方 API/CLI；Matrix `matrix-websearch` 独立链路仍返回 HTTP 521，不能提供第二份正证据。因此 tag、Actions、Release、清单和哈希结论以 GitHub 一手数据及本地下载复核为准，并保留 Matrix 通道不可用这一不确定性。
+
+# 2026-08-09 Multi-Agent V2 本机真实链路复测
+
+- 用户反馈 `v3.19.1-14` 的 V2 子 Agent 仍不可用，但本机现场实际运行的是 `C:\Users\sunda\AppData\Local\CCSwitchMulti\cc-switch.exe` `3.19.1-12`（PID 28552，2026-08-08 23:10 启动，监听 `127.0.0.1:15721`），Codex Desktop 为 `26.803.5235.0`，当前命令环境报告 `codex-cli 0.146.0-alpha.3.1`。因此本轮是当前机器链路验收，不是 `v3.19.1-14` 已安装验收。
+- 当前有效配置为 `model_provider=codex_model_router_v2`、父模型 `gpt-5.6-sol`、`multi_agent_version=v2`、`tool_namespace=agents`。SQLite 当前 MultiRouter 的 `spawnAgentModels` 明确为 `deepseek-v4-flash / gpt-5.6-sol / qwen3.6 / gpt-5.6-luna / gpt-5.6-terra`，五份 managed Agent profile 也都存在。
+- 同源无上下文 canary 成功：child session `019fe5fc-036b-77a2-811f-a0cd77c71561` 准确接收 `SAMEPROVIDER_V2_20260809_1805_A7K9`，执行 `Get-Location` 与 `git rev-parse --short HEAD`，返回 `C:\Users\sunda\Documents\LLMservice | eb79da20`；随后 `followup_task` 又准确接收 `FOLLOWUP_V2_20260809_1810_R8T3`，执行分支查询并返回 `master`。rollout 明确为 V2，初始与 follow-up 各有一条 `agent_message` 和一组真实 custom tool call/output。
+- 跨 Provider DeepSeek canary 也完整成功：`deepseek-flash` profile 生成 child session `019fe604-1c1f-7110-9633-36bc1cac86a9`，nonce `DEEPSEEK_V2_20260809_1812_D6N1` 可见；CCSM 两轮请求真实命中 `https://api.deepseek.com/v1/responses` 并均返回 HTTP 200。child rollout 为 `model=deepseek-v4-flash / multi_agent_version=v2`，包含 2 次 function call、2 次 function output，最终返回正确路径与提交。
+- Qwen profile 能正确创建 child、选中 `qwen3.6` 并命中 Qwen route；child rollout 中 `QWEN_V2_20260809_1807_M4P2` 位于 166 字节可打印载荷，不是旧版 `gAAAAA...` opaque Fernet，说明任务已经进入 V2/CCSM 投递链。但 Qwen 上游 `https://www.matrixminecraft.cn:24443/vllm/v1/chat/completions` 持续返回 HTTP 521，模型没有机会消费任务，因此中止重试；不能把这次失败归因于 V2 payload。
+- 当前 `spawn_agent` 的直接动态 `model=` schema 只接受 `gpt-5.6-sol / gpt-5.6-terra`，所以 `model=qwen3.6` 在 Codex 本地直接报 `Unknown model`，没有到达 CCSM；改用注册 profile `agent_type=qwen-local` 后才真实命中 Qwen。该现象与 SQLite 的五模型候选不一致，是独立的 Codex 工具 schema/目录暴露问题；本机尚未安装带 lifecycle guardian 的 `v3.19.1-13/14`，不能声称新版仍同样失败。
+- `v3.19.1-12..v3.19.1-14` 的 `codex_config.rs` 完全一致；`forwarder.rs` 只在 V2 明文化逻辑前新增 LM Studio `text.format` 归一化，V2 明文化、第三方 `agent_message` 投影和 ownership 判断本身没有变化。当前 `v3.19.1-14` 源码定向回归为 `codex_multi_agent 5/5`、mixed-router plaintext 1/1、third-party projection ownership 1/1、materialized official policy 1/1，合计 8/8，通过时仅有既存 `openai_cache_read_tokens` warning。
+- 结论：本机无法复现“V2 子 Agent 整体不可用”；官方同源 spawn/follow-up 与 OpenAI 父模型到 DeepSeek 子模型都可用。可复现的两个局部问题是 Qwen 服务端 HTTP 521，以及直接动态模型覆盖只暴露 Sol/Terra。若外部用户反馈的是 DeepSeek/profile 路径，仍需对方提供 Codex 版本、实际 child model/provider、错误文本和 child rollout 形态才能与本机差异对齐。
+- 上游交叉验证：`openai/codex#34833`、`#33551`、`#35932`、`#32705`、`#32988`、`#33314` 截至本轮仍为 open；`#32749`（暴露 V2 model overrides）已 merged。Codex 内置搜索与 GitHub 官方 API/CLI 结论一致；Matrix WebSearch 与本机 Qwen 共用的 Matrix 服务本轮均返回 HTTP 521，因此 Matrix 没有提供第二份正证据。
+
+# 2026-08-09 Multi-Agent V2 第三方子 Agent 自动选型根修
+
+- Codex V2 的 `model` direct override 与 `agent_type` custom role 是两条独立选择路径。`spawnAgentModels` 只负责 direct override 工具描述中的前 5 个展示顺序；默认“用户不选模型，由 Codex 按任务选择 Flash/Pro”必须通过带互斥 `description` 的 managed custom roles 实现。
+- 直接根因位于 `src-tauri/src/codex_config.rs::sync_codex_managed_agent_files`：旧实现 `specs.iter().take(5)` 把 managed role 注册错误耦合到 direct override 前五窗口。本机目录中 `deepseek-v4-pro` 排第 6，因此没有 `deepseek-pro.toml`。修复后遍历完整当前可路由 catalog；stale prune 的 desired set 同样来自完整目录，不会再因模型掉出前五删除有效 role。
+- `deepseek-flash` 固定 `deepseek-v4-flash`、`codex_model_router_v2` 和 medium reasoning，用于长上下文阅读、read-heavy exploration、架构追踪、并行证据收集和轻量验证；`deepseek-pro` 固定 `deepseek-v4-pro`、同一 provider 和 high reasoning，用于复杂调试、跨模块推理、架构决策、高风险审查和复杂实现。用户同名 role 继续保留，CCSwitchMulti 回退写入 `ccswitch-<role>`。
+- MultiRouter 主向导已删除“子 Agent 候选”必经步骤；既有 `modelCatalog.spawnAgentModels` 继续读取、过滤和保存，RoutesTab 编辑器改为默认折叠的 `高级：子 Agent 模型覆盖`，明确其只控制 direct override 排序。Qwen 行为、`hide_spawn_agent_metadata=true`、混合路由 `tool_namespace=agents` 和 proxy 请求参数均未改变。
+- TDD RED 提交 `9dc9c68f`：Rust 因第 6 位 Pro role 文件不存在而失败，前端分别因旧向导步骤仍存在和工作台没有高级折叠入口而失败。GREEN 定向结果为 managed agent 4/4、direct override priority 1/1、前端 workspace/wizard 49/49；完整 Rust library 为 2831/2831，完整前端在排除 `.worktrees/**` 后为 113 files / 820 tests，`cargo check --lib`、typecheck、rustfmt 和 `git diff --check` 通过。全仓 `pnpm format:check` 仍只报告本次未修改的 `src/lib/api/proxy.ts` 与 `src/types/proxy.ts` 两个既有格式差异。
+- 当前 Codex `0.147.0-alpha.6.5` 选择 custom role 时需 `fork_turns=none` 或正整数；`rust-v0.148.0-alpha.1` 起上游 PR `#37252` 允许 role 应用于 full-history fork。CCSwitchMulti 不固定改写 `fork_turns`，由各版本 Codex 的工具描述指导父模型。`hide_spawn_agent_metadata=true` 在当前版本只隐藏 `service_tier`，仍保留 `agent_type`、`model` 和 `reasoning_effort`。
+- Vitest 必须显式 `--exclude ".worktrees/**"`：仓库内旧 worktree 会被默认 glob 扫描并加载不同 React 实例，导致 `Invalid hook call / useState null` 的假失败；不能用业务补丁规避测试发现污染。
+- 联网复核使用 Codex 内置搜索交叉验证 OpenAI 官方 Subagents 文档、当前 `multi_agents_spec.rs` 和 PR `#37252`。Matrix WebSearch 按独立链路重试仍返回 HTTP 521，没有提供第二条正证据；版本和机制结论以官方一手来源、本机运行态与当前源码为依据。
+
+# 2026-08-13 Codex 预设模型推理能力统一设计
+
+- 根因不是 DeepSeek 单点枚举错误，而是 `codexProviderPresets.ts`、`codex_config.rs` catalog 生成与 `proxy/providers/codex.rs` 请求转换分别维护能力，导致菜单、默认值和真实出站参数漂移。
+- 产品边界已确认：CCSwitchMulti 内置预设是受维护的 Codex 适配器，必须按“Provider + API 协议 + 具体模型”提供准确能力；自定义 Provider 才默认开放编辑，内置预设只允许带偏离标记的高级覆盖。
+- 统一设计以一个 resolved capability 同时驱动 catalog、Desktop aliases、inline TOML、MultiRouter route 物化和出站转换。未知第三方模型采用不展示档位、不覆盖上游默认值的保守策略，禁止继续继承 GPT/Native Responses 通用 reasoning 档位。
+- 设计规范位于 `docs/superpowers/specs/2026-08-13-codex-preset-reasoning-capabilities-design.md`；首批校准 DeepSeek V4、Grok 4.5、GLM-5.2、StepFun 与 OpenRouter，并显式处理 Kimi/Qwen/MiniMax/MiMo/SiliconFlow 只有开关或不支持 effort 的路径。
+- 官方检索使用 Codex 内置 Web Search 与 Matrix WebSearch 两条独立链：Matrix 索引查询无结果，但直接读取 xAI、智谱、StepFun 官方 URL 成功并与内置搜索结论一致。Qwen 能力随模型和 API 变化，证据不足时不得写成厂商级固定枚举。
+
+# 2026-08-13 Codex 预设推理覆盖与完整 catalog 收口
+
+- 内置预设能力不能直接编辑：默认只读，用户必须点击“创建高级覆盖”后才进入 `source=user`，界面明确显示“已偏离内置预设”，并能一键恢复当前版本的内置能力。`ProviderMeta.codexPresetId` 保存稳定 `presetKey`，不得保存会随数组顺序变化的 `codex-N`；旧 `codex-N` 只保留兼容读取。
+- 本轮发现目录受控状态的根因：`catalogRowsMatchModels()` 在模型级 reasoning schema 加入后没有比较 `reasoning`，所以覆盖按钮虽更新了子组件状态，子到父 effect 却误判为未变化。修复是把完整 reasoning 纳入统一相等性边界，不是在按钮或测试里绕过同步。
+- `modelCatalog()` 现在保证每个内置目录模型都有显式 reasoning capability。有官方 effort 的 DeepSeek/Grok/GLM/Step 按模型枚举；Kimi、Qwen、MiniMax、MiMo、SiliconFlow 只声明 boolean thinking 且 `supportedEfforts=[]`，不展示虚假强度；其余证据不足模型显式 `supported=false`，不继承 GPT/Native Responses 通用档位。
+- 聚合平台能力仍必须优先于模型原厂能力，例如 SiliconFlow 的 `enable_thinking` 和 OpenRouter 的 `reasoning.effort`；未知模型或平台证据不足时保持不展示、不注入 effort 的保守策略。
+- 提交 `ba927d22` 完成只读/覆盖/恢复、预设身份持久化、全 catalog 显式能力和 reasoning 同步根修。验证：Rust library `2842 passed / 0 failed / 2 ignored`；前端 `116 files / 841 tests` 全通过；`cargo check --lib`、typecheck、rustfmt、变更文件 Prettier 和 `git diff --check` 通过。仅保留既有 `openai_cache_read_tokens` dead-code warning 及测试夹具预期 stderr。
+
+# 2026-08-14 Codex Provider 菜单投影与旧路由入口收口
+
+- 普通 Codex Provider 表单不再显示旧“Codex 多模型路由”编辑器；唯一可见的多路路由编辑入口收口到 `CodexRouterWorkspacePage`。这只是 UI 收口，历史 `settingsConfig.codexRouting` 数据、前端 normalize/save、迁移 schema、Rust resolver 和实际代理路由全部保留，禁止后续把隐藏入口误解为可删除兼容层。
+- `meta.codexLocalModelMapping` 的产品语义是“把该 Provider 的模型目录投射到 Codex `/model` 菜单”，不是启用 MultiRouter。新建 Codex Provider、自定义模板和内置预设默认开启；编辑已有 Provider 时继续尊重显式 `false`，避免覆盖用户选择。
+- “在 Codex `/model` 菜单中显示”移入默认折叠的高级选项，并从 `shouldShowSpeedTest` 门控中拆出：即使某类 Provider 不显示测速/协议探测，该菜单投影设置仍可独立编辑。xAI OAuth 托管预设继续隐藏该开关。
+- 默认开启菜单投影不能计入 `hasAnyAdvancedValue`，否则高级区会因默认值自动展开，违背“移到高级”的交互意图。空模型目录即使开关为 true 也不会生成无效菜单项。
+- TDD 定向覆盖包括：旧路由入口不可见但传入 routing state 保持不变；菜单开关在折叠高级区内；新 Provider 默认 enabled；已有显式 false 保存不变。定向 28/28、MultiRouter state/sync 14/14、App 集成隔离重跑 8/8、typecheck 通过。App 与其他文件并行运行曾出现 2 项 DOM/时序污染，隔离重跑全过；全仓 format check 仍只剩既有 `src/lib/api/proxy.ts`、`src/types/proxy.ts` 两处差异。
+- 后续产品边界收紧：带稳定 `codexPresetId` 的 CCSwitchMulti 维护预设始终使用 `effectiveCodexMenuProjection=true`，不再显示可关闭开关；历史预设若误存 `codexLocalModelMapping=false`，下次保存会纠正为 true。MultiRouter 的后端强制投影规则保持不变。
+- 只有自定义 Provider 保留退出目录管理的能力：新建或从预设切换到自定义时默认开启，编辑既有自定义 Provider 时继续尊重显式 false。开关位于高级选项最后，并明确说明它只控制 Codex 启动时加载的 `model_catalog_json`、`/model` 模型/别名/上下文/推理档位，不控制 Provider、代理或 MultiRouter 是否可用；仅自行维护目录的用户应关闭。
+- 收紧后的 TDD 先得到 4 项预期失败，随后定向 30/30、路由状态同步 14/14、App 集成隔离重跑 8/8、typecheck 和变更文件 Prettier 检查通过。App 首轮仍出现既有异步 DOM/时序超时，完全相同命令重跑通过；测试夹具仍有既存 Tauri window metadata stderr 与 React act warning。
+
+# 2026-08-14 Codex Provider 与 MultiRouter 配置体验审计
+
+- 当前配置体验的根因是三代结构叠加：Provider 内旧 route editor、把自动过程拆成 10 步的旧向导、以及已经具备模型源/规则/状态/发布能力的新 MultiRouter 工作台。不要继续以“高级设置”技术分组掩盖职责冲突。
+- 产品边界确定为：单 Provider 页只把一个上游变成健康、可路由的模型源；MultiRouter 工作台负责组合模型源、选择暴露模型、自动处理重名、生成/调整路由、官方认证策略、启用和真实请求验证；状态页集中链路、协议、分流、流量和 Debug。
+- Provider 推荐按任务排列为“模型源身份、连接凭据、模型与兼容性、就绪状态、高级自定义”。同步模型、默认模型、自动协议探测/连接验证、探测结果和可路由状态必须从高级提升到主流程；Goal mode 和应用/编辑通用配置移到全局 Codex 设置。
+- 维护预设的协议、catalog、上下文、reasoning 和 `/model` 投影应自动且只读展示；正常流程只需凭据与连接验证。自定义 Provider 保存前自动尝试 `/models` 和双协议探测，失败时才开放手动协议；未知能力保持未声明，不套用 GPT 档位。
+- 真正高级仅包括手动协议覆盖、reasoning 能力覆盖、prompt cache routing、User-Agent、Header/Body 覆盖、远程压缩、raw auth/config、计费覆盖，以及高级最后的自定义 catalog opt-out。Provider 内旧路由入口继续隐藏，但历史数据和后端兼容层不可删除。
+- MultiRouter 向导应从 10 步收敛为 4 步：选择/添加模型源；自动准备与验证；选择模型并预览路由（含方案名）；启用并用真实请求验证。删除所有历史迁移/历史修复跳转和文案，正常自动结果只显示摘要，只有失败项要求用户处理。
+- 审计文档与九张真实 UI 证据位于 `docs/audits/2026-08-14-provider-configuration-ux/README.md`。安装版截图仍含当前源码已经隐藏的旧 Provider route editor，因此后续判断必须同时核对当前分支源码，不能按旧截图恢复入口。
+- 联网核对使用 Codex 内置搜索命中 OpenAI 官方配置参考、官方源码和模型目录；Matrix WebSearch 独立链返回 HTTP 521，未提供正证据。产品结论由官方资料、本地源码与真实 UI 三者交叉支持。
+
+# 2026-08-14 Codex Provider 与 MultiRouter 配置体验实施
+
+- Provider 页面最终按五段职责收口：模型源身份、连接凭据、常显的“模型与兼容性”、就绪状态、默认折叠的专家配置。同步模型、验证连接、模型数、默认模型、上游协议和可路由状态属于正常配置流程；raw auth/config、手动协议、reasoning 覆盖、User-Agent 与 Header/Body 覆盖留在专家配置。Goal mode 和公共 TOML 编辑统一迁入设置页高级区末尾的“Codex 全局配置”。
+- CCSwitchMulti 维护预设必须按稳定 `codexPresetId` 自动应用准确 catalog、上下文、协议、reasoning 和 `/model` 投影；正常用户只填凭据并验证。自定义 Provider 才允许高级覆盖与 catalog opt-out。“在 Codex /model 菜单中显示”只控制目录投影，不控制 Provider、代理或 MultiRouter 可用性，并位于高级选项最后。
+- MultiRouter 可见状态机正式收敛为 `sources / prepare / review / activate` 四步：选择模型源；自动同步、双协议探测与重名处理；选择模型、方案名、官方认证和路由预览；保存启用并用真实请求验证。旧十步按钮和 Provider 内旧 route editor 不再可见，历史 schema、normalize/save 和后端 resolver 继续保留兼容。
+- MultiRouter 成功后不再跳转 Sessions 或自动打开历史修复；独立 Sessions 历史修复工具仍保留。状态工作台在当前方案真实转发成功时原地显示“MultiRouter 已通过真实请求验证”。
+- 前端定向回归：四步向导相关 109/109，工作台/向导/Session 92/92，Provider 表单及关联预设/就绪/推理能力 36/36，App 集成隔离 8/8。完整 Vitest 为 118 files / 849 tests，其中 117 files / 845 tests 通过；唯一 App 文件在全量并发时出现 3 个超时和 1 个重复 DOM 污染，隔离重跑 8/8，不能误判为生产回归。`pnpm typecheck` 与 renderer build 通过，Vite 转换 3331 modules；仅保留既有 Browserslist、动态/静态 import 和大 chunk 警告。
+- 真实桌面截图没有在实现后强行补造：纯 Vite 因缺少 Tauri 注入为空白；独立 identifier 的 Tauri dev 仍会通过旧数据库兼容逻辑回退到真实 `C:\Users\sunda\.cc-switch`，且启动恢复会与正在运行的 15721 实例争用。发现后立即停止开发实例并删除临时配置。已安装实例 PID 65888 继续监听 `127.0.0.1:15721`，`/health` 返回 200；现有九张审计截图保留为改前证据，实现后验收以 DOM 交互测试、集成测试和源码边界为准。
+- 本轮联网前置仍为双链：Codex 内置搜索命中 OpenAI 官方配置参考、源码与模型目录；Matrix WebSearch 独立链 HTTP 521，无第二份正证据。关键协议和目录结论以 OpenAI 一手资料、当前源码和本地回归交叉确认，Matrix 不作背书。
+
+# 2026-08-16 MultiRouter 向导无方案空白页根修并合入 main
+
+- 根因是历史向导修复提交 `3777bd65` 未进入当前主线：入口没有在无 MultiRouter 时明确进入 create 模式，向导也无法区分 create/edit，导致最后页在没有现有方案时缺少可执行的保存与启用收尾；同时 Provider 配置职责和旧十步向导 UI 发生漂移。
+- 修复提交 `34a72ce2` 将入口改为显式 create/edit 与精确 `planId`，无方案时显示“创建新配置”，向导收敛为四步并恢复 Provider 配置入口、方案身份和保存/启用状态收尾；新建方案保存后直接使用返回的 `result.plan` 进入启用流程。新增回归测试覆盖无已有 MultiRouter 时最后页必须显示“保存并发布”和“启用这个多路路由”。
+- 用户要求停止功能分支分叉后，已把 `bigstrongsun/fix-portable-third-party-reasoning` 合并到本地 `main` worktree `integrate-pr6078-main`；后续只在 `main` 上继续验证和提交，不再创建新的功能树杈。合并冲突 `memory.md` 采用包含双方历史记录的版本并保留本条根因与交付记录。

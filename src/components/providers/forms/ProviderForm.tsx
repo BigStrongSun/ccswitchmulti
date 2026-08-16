@@ -166,6 +166,7 @@ const codexCatalogCountFromSettings = (settingsConfig: unknown): number => {
 const codexLocalModelMappingFromInitialData = (
   initialData: ProviderFormProps["initialData"] | undefined,
 ): boolean => {
+  if (!initialData) return true;
   if (typeof initialData?.meta?.codexLocalModelMapping === "boolean") {
     return initialData.meta.codexLocalModelMapping;
   }
@@ -201,6 +202,36 @@ export const normalizeCodexCatalogModelsForSave = (
     );
 
     const baseInstructions = item.baseInstructions?.trim();
+    const reasoning = item.reasoning;
+    if (
+      reasoning?.defaultEffort &&
+      !reasoning.supportedEfforts.includes(reasoning.defaultEffort)
+    ) {
+      throw new Error(
+        `${model}: reasoning.defaultEffort must be present in supportedEfforts`,
+      );
+    }
+    if (
+      reasoning &&
+      !reasoning.disableAllowed &&
+      reasoning.supportedEfforts.includes("none")
+    ) {
+      throw new Error(`${model}: reasoning none requires disableAllowed=true`);
+    }
+    if (
+      reasoning?.supported &&
+      reasoning.upstream.format !== "none" &&
+      reasoning.upstream.format !== "boolean"
+    ) {
+      for (const effort of reasoning.supportedEfforts) {
+        if (
+          reasoning.upstream.effortMap &&
+          !reasoning.upstream.effortMap[effort]
+        ) {
+          throw new Error(`${model}: reasoning effortMap is missing ${effort}`);
+        }
+      }
+    }
 
     normalized.push({
       model,
@@ -215,6 +246,7 @@ export const normalizeCodexCatalogModelsForSave = (
         ? { inputModalities }
         : {}),
       ...(baseInstructions ? { baseInstructions } : {}),
+      ...(reasoning ? { reasoning } : {}),
     });
   }
 
@@ -434,6 +466,7 @@ function ProviderFormFull({
   );
   const [activePreset, setActivePreset] = useState<{
     id: string;
+    presetKey?: string;
     category?: ProviderCategory;
     isPartner?: boolean;
     partnerPromotionKey?: string;
@@ -763,7 +796,7 @@ function ProviderFormFull({
 
   useEffect(() => {
     if (appId !== "codex") {
-      setCodexTakeoverEnabled(false);
+      setCodexTakeoverEnabled(true);
       return;
     }
     setCodexTakeoverEnabled(codexLocalModelMappingFromInitialData(initialData));
@@ -821,7 +854,7 @@ function ProviderFormFull({
       resetCodexConfig(template.auth, template.config);
       setCodexChatReasoning({});
       setCodexRouting({ enabled: false, defaultRouteId: "", routes: [] });
-      setCodexTakeoverEnabled(false);
+      setCodexTakeoverEnabled(true);
       setPromptCacheRouting("auto");
     }
   }, [appId, initialData, selectedPresetId, resetCodexConfig, setCodexRouting]);
@@ -895,6 +928,33 @@ function ProviderFormFull({
     return preset && "providerType" in preset ? preset.providerType : undefined;
   }, [presetEntries, selectedPresetId]);
 
+  const maintainedCodexPreset = useMemo(() => {
+    if (appId !== "codex") return undefined;
+    const selectedPreset = selectedPresetId
+      ? (presetEntries.find((entry) => entry.id === selectedPresetId)
+          ?.preset as CodexProviderPreset | undefined)
+      : undefined;
+    const identity =
+      selectedPreset?.presetKey ?? initialData?.meta?.codexPresetId;
+    if (!identity) return undefined;
+    return identity.startsWith("codex-")
+      ? (presetEntries.find((entry) => entry.id === identity)?.preset as
+          | CodexProviderPreset
+          | undefined)
+      : codexProviderPresets.find(
+          (candidate) => candidate.presetKey === identity,
+        );
+  }, [
+    appId,
+    initialData?.meta?.codexPresetId,
+    presetEntries,
+    selectedPresetId,
+  ]);
+  const codexPresetBaseline = maintainedCodexPreset?.modelCatalog ?? [];
+  const isMaintainedCodexPreset = Boolean(maintainedCodexPreset);
+  const effectiveCodexMenuProjection =
+    isMaintainedCodexPreset || codexTakeoverEnabled;
+
   const {
     templateValues,
     templateValueEntries,
@@ -928,13 +988,8 @@ function ProviderFormFull({
 
   const {
     useCommonConfig: useCodexCommonConfigFlag,
-    commonConfigSnippet: codexCommonConfigSnippet,
     commonConfigError: codexCommonConfigError,
     handleCommonConfigToggle: handleCodexCommonConfigToggle,
-    handleCommonConfigSnippetChange: handleCodexCommonConfigSnippetChange,
-    isExtracting: isCodexExtracting,
-    handleExtract: handleCodexExtract,
-    clearCommonConfigError: clearCodexCommonConfigError,
   } = useCodexCommonConfig({
     codexConfig,
     onConfigChange: handleCodexConfigChange,
@@ -1592,6 +1647,10 @@ function ProviderFormFull({
         }
         settingsConfig = JSON.stringify(configObj);
       } catch (err) {
+        if (err instanceof Error && err.message.includes("reasoning")) {
+          toast.error(`Codex 推理能力配置无效：${err.message}`);
+          return;
+        }
         settingsConfig = values.settingsConfig.trim();
       }
     } else if (appId === "gemini") {
@@ -1774,7 +1833,7 @@ function ProviderFormFull({
       codexChatReasoning:
         appId === "codex" &&
         category !== "official" &&
-        codexTakeoverEnabled &&
+        effectiveCodexMenuProjection &&
         localCodexApiFormat === "openai_chat"
           ? normalizeCodexChatReasoningForSave(codexChatReasoning, {
               providerName: form.getValues("name"),
@@ -1782,9 +1841,15 @@ function ProviderFormFull({
               models: codexCatalogModels,
             })
           : undefined,
+      codexPresetId:
+        appId === "codex"
+          ? selectedPresetId === "custom"
+            ? undefined
+            : (activePreset?.presetKey ?? initialData?.meta?.codexPresetId)
+          : undefined,
       codexLocalModelMapping:
         appId === "codex" && category !== "official"
-          ? codexTakeoverEnabled
+          ? effectiveCodexMenuProjection
           : undefined,
       promptCacheRouting:
         appId === "codex" &&
@@ -1988,8 +2053,8 @@ function ProviderFormFull({
           codexApiFormatFromWireApi(extractCodexWireApi(template.config)) ??
             "openai_responses",
         );
-        // 自定义模板无模型映射，路由默认关闭
-        setCodexTakeoverEnabled(false);
+        // 新建自定义 Provider 默认投射模型目录；目录为空时不会生成无效菜单项。
+        setCodexTakeoverEnabled(true);
       }
       if (shouldScrollDetails) {
         scrollCodexProviderDetailsIntoView();
@@ -2018,6 +2083,10 @@ function ProviderFormFull({
 
     setActivePreset({
       id: value,
+      presetKey:
+        appId === "codex"
+          ? (entry.preset as CodexProviderPreset).presetKey
+          : undefined,
       category: entry.preset.category,
       isPartner: entry.preset.isPartner,
       partnerPromotionKey: entry.preset.partnerPromotionKey,
@@ -2037,8 +2106,8 @@ function ProviderFormFull({
           codexApiFormatFromWireApi(extractCodexWireApi(config)) ??
           "openai_responses",
       );
-      // 路由开关与格式无关，仅按预设是否带模型映射决定
-      setCodexTakeoverEnabled((preset.modelCatalog?.length ?? 0) > 0);
+      // 预设 Provider 默认加入 Codex 模型菜单；空目录在用户获取模型前不会产生菜单项。
+      setCodexTakeoverEnabled(true);
 
       form.reset({
         name: preset.nameKey ? t(preset.nameKey) : preset.name,
@@ -2527,6 +2596,7 @@ function ProviderFormFull({
                   presetProviderType === "xai_oauth" ||
                   initialData?.meta?.providerType === "xai_oauth"
                 }
+                isMaintainedPreset={isMaintainedCodexPreset}
                 isXaiOauthAuthenticated={isXaiOauthAuthenticated}
                 selectedXaiAccountId={selectedXaiAccountId}
                 onXaiAccountSelect={setSelectedXaiAccountId}
@@ -2553,8 +2623,9 @@ function ProviderFormFull({
                 }
                 autoSelect={endpointAutoSelect}
                 onAutoSelectChange={setEndpointAutoSelect}
-                takeoverEnabled={codexTakeoverEnabled}
+                takeoverEnabled={effectiveCodexMenuProjection}
                 onTakeoverEnabledChange={setCodexTakeoverEnabled}
+                allowModelMenuProjectionToggle={!isMaintainedCodexPreset}
                 codexModel={codexModel}
                 onModelChange={handleCodexModelChange}
                 apiFormat={localCodexApiFormat}
@@ -2572,6 +2643,7 @@ function ProviderFormFull({
                 promptCacheRouting={promptCacheRouting}
                 onPromptCacheRoutingChange={setPromptCacheRouting}
                 catalogModels={codexCatalogModels}
+                presetCatalogModels={codexPresetBaseline}
                 onCatalogModelsChange={setCodexCatalogModels}
                 spawnAgentModels={codexSpawnAgentModels}
                 onSpawnAgentModelsChange={setCodexSpawnAgentModels}
@@ -2726,16 +2798,9 @@ function ProviderFormFull({
                 onConfigChange={handleCodexConfigChange}
                 useCommonConfig={useCodexCommonConfigFlag}
                 onCommonConfigToggle={handleCodexCommonConfigToggle}
-                commonConfigSnippet={codexCommonConfigSnippet}
-                onCommonConfigSnippetChange={
-                  handleCodexCommonConfigSnippetChange
-                }
-                onCommonConfigErrorClear={clearCodexCommonConfigError}
                 commonConfigError={codexCommonConfigError}
                 authError={codexAuthError}
                 configError={codexConfigError}
-                onExtract={handleCodexExtract}
-                isExtracting={isCodexExtracting}
               />
               {settingsConfigErrorField}
             </>

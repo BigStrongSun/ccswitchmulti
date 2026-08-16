@@ -31,7 +31,7 @@ describe("Codex model context inference", () => {
         { id: "deepseek-v4-flash" },
         { providerName: "DeepSeek", baseUrl: "https://api.deepseek.com" },
       ),
-    ).toBe(1000000);
+    ).toBe(1048576);
   });
 
   it("fills DeepSeek compatible alias contexts from local provider knowledge", () => {

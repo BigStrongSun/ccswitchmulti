@@ -1,7 +1,13 @@
 import React, { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { ChevronDown, ChevronRight } from "lucide-react";
 import { CodexAuthSection, CodexConfigSection } from "./CodexConfigSections";
-import { CodexCommonConfigModal } from "./CodexCommonConfigModal";
+import { Button } from "@/components/ui/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 
 interface CodexConfigEditorProps {
   authValue: string;
@@ -24,21 +30,11 @@ interface CodexConfigEditorProps {
 
   onCommonConfigToggle: (checked: boolean) => void | Promise<void>;
 
-  commonConfigSnippet: string;
-
-  onCommonConfigSnippetChange: (value: string) => boolean | Promise<boolean>;
-
-  onCommonConfigErrorClear: () => void;
-
   commonConfigError: string;
 
   authError: string;
 
   configError: string; // config.toml 错误提示
-
-  onExtract?: () => void;
-
-  isExtracting?: boolean;
 }
 
 const CodexConfigEditor: React.FC<CodexConfigEditorProps> = ({
@@ -52,67 +48,68 @@ const CodexConfigEditor: React.FC<CodexConfigEditorProps> = ({
   onAuthBlur,
   useCommonConfig,
   onCommonConfigToggle,
-  commonConfigSnippet,
-  onCommonConfigSnippetChange,
-  onCommonConfigErrorClear,
   commonConfigError,
   authError,
   configError,
-  onExtract,
-  isExtracting,
 }) => {
   const { t } = useTranslation();
-  const [isCommonConfigModalOpen, setIsCommonConfigModalOpen] = useState(false);
-
-  const handleCloseCommonConfigModal = () => {
-    onCommonConfigErrorClear();
-    setIsCommonConfigModalOpen(false);
-  };
+  const [isExpertOpen, setIsExpertOpen] = useState(false);
 
   return (
-    <div className="space-y-6">
-      {isProxyTakeover && (
-        <div className="p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 rounded-lg">
-          <p className="text-xs text-amber-600 dark:text-amber-400">
-            {t("codexConfig.proxyTakeoverStorageNotice")}
-          </p>
-        </div>
+    <Collapsible
+      open={isExpertOpen}
+      onOpenChange={setIsExpertOpen}
+      className="rounded-lg border border-border-default p-4"
+    >
+      <CollapsibleTrigger asChild>
+        <Button
+          type="button"
+          variant={null}
+          size="sm"
+          className="h-8 w-full justify-start gap-1.5 px-0 text-sm font-medium text-foreground hover:opacity-70"
+        >
+          {isExpertOpen ? (
+            <ChevronDown className="h-4 w-4" />
+          ) : (
+            <ChevronRight className="h-4 w-4" />
+          )}
+          专家配置
+        </Button>
+      </CollapsibleTrigger>
+      {!isExpertOpen && (
+        <p className="mt-1 ml-1 text-xs text-muted-foreground">
+          手工编辑 auth.json、config.toml、远程压缩和 Provider
+          级通用配置应用；正常接入无需展开。
+        </p>
       )}
-
-      {/* Auth JSON Section */}
-      <CodexAuthSection
-        value={authValue}
-        onChange={onAuthChange}
-        onBlur={onAuthBlur}
-        error={authError}
-        isProxyTakeover={isProxyTakeover}
-      />
-
-      {/* Config TOML Section */}
-      <CodexConfigSection
-        value={configValue}
-        onChange={onConfigChange}
-        providerName={providerName}
-        showRemoteCompaction={showRemoteCompaction}
-        useCommonConfig={useCommonConfig}
-        onCommonConfigToggle={onCommonConfigToggle}
-        onEditCommonConfig={() => setIsCommonConfigModalOpen(true)}
-        commonConfigError={commonConfigError}
-        configError={configError}
-        isProxyTakeover={isProxyTakeover}
-      />
-
-      {/* Common Config Modal */}
-      <CodexCommonConfigModal
-        isOpen={isCommonConfigModalOpen}
-        onClose={handleCloseCommonConfigModal}
-        value={commonConfigSnippet}
-        onSave={onCommonConfigSnippetChange}
-        error={commonConfigError}
-        onExtract={onExtract}
-        isExtracting={isExtracting}
-      />
-    </div>
+      <CollapsibleContent className="space-y-6 pt-4">
+        {isProxyTakeover && (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 dark:border-amber-700 dark:bg-amber-900/20">
+            <p className="text-xs text-amber-600 dark:text-amber-400">
+              {t("codexConfig.proxyTakeoverStorageNotice")}
+            </p>
+          </div>
+        )}
+        <CodexAuthSection
+          value={authValue}
+          onChange={onAuthChange}
+          onBlur={onAuthBlur}
+          error={authError}
+          isProxyTakeover={isProxyTakeover}
+        />
+        <CodexConfigSection
+          value={configValue}
+          onChange={onConfigChange}
+          providerName={providerName}
+          showRemoteCompaction={showRemoteCompaction}
+          useCommonConfig={useCommonConfig}
+          onCommonConfigToggle={onCommonConfigToggle}
+          commonConfigError={commonConfigError}
+          configError={configError}
+          isProxyTakeover={isProxyTakeover}
+        />
+      </CollapsibleContent>
+    </Collapsible>
   );
 };
 

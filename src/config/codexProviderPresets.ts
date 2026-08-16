@@ -6,12 +6,16 @@ import type {
   CodexApiFormat,
   CodexCatalogModel,
   CodexChatReasoning,
+  CodexModelReasoningCapability,
   PromptCacheRoutingMode,
 } from "../types";
 import type { PresetTheme } from "./claudeProviderPresets";
 
 export interface CodexProviderPreset {
   name: string;
+  // Stable persistence identity; unlike the UI's codex-N index this must not
+  // change when presets are inserted or reordered.
+  presetKey?: string;
   nameKey?: string; // i18n key for localized display name
   websiteUrl: string;
   // 第三方供应商可提供单独的获取 API Key 链接
@@ -103,6 +107,41 @@ base_url = ${tomlString(baseUrl)}
 wire_api = "responses"`;
 }
 
+const unsupportedBuiltinReasoning: CodexModelReasoningCapability = {
+  supported: false,
+  supportedEfforts: [],
+  disableAllowed: false,
+  upstream: { format: "none", parameter: "none" },
+  source: "builtin",
+};
+
+function booleanBuiltinReasoning(
+  parameter: "thinking" | "enable_thinking" | "reasoning_split",
+  outputFormat: "reasoning_content" | "reasoning_details",
+): CodexModelReasoningCapability {
+  return {
+    supported: true,
+    supportedEfforts: [],
+    disableAllowed: true,
+    upstream: { format: "boolean", parameter },
+    outputFormat,
+    source: "builtin",
+  };
+}
+
+const thinkingBooleanReasoning = booleanBuiltinReasoning(
+  "thinking",
+  "reasoning_content",
+);
+const enableThinkingBooleanReasoning = booleanBuiltinReasoning(
+  "enable_thinking",
+  "reasoning_content",
+);
+const reasoningSplitBooleanReasoning = booleanBuiltinReasoning(
+  "reasoning_split",
+  "reasoning_details",
+);
+
 function modelCatalog(
   models: Array<
     | string
@@ -122,12 +161,13 @@ function modelCatalog(
         // Vendor's OFFICIAL base_instructions; omit to inherit the neutral
         // template default. Required by Codex, so the backend always emits one.
         baseInstructions?: string;
+        reasoning?: CodexModelReasoningCapability;
       }
   >,
 ): CodexCatalogModel[] {
   return models.map((entry) =>
     typeof entry === "string"
-      ? { model: entry }
+      ? { model: entry, reasoning: unsupportedBuiltinReasoning }
       : {
           model: entry.model,
           displayName: entry.displayName,
@@ -135,6 +175,7 @@ function modelCatalog(
           ...(entry.inputModalities
             ? { inputModalities: entry.inputModalities }
             : {}),
+          reasoning: entry.reasoning ?? unsupportedBuiltinReasoning,
           ...(entry.textOnly !== undefined ? { textOnly: entry.textOnly } : {}),
           ...(entry.supportsImage !== undefined
             ? { supportsImage: entry.supportsImage }
@@ -149,6 +190,70 @@ function modelCatalog(
         },
   );
 }
+
+const deepSeekV4Reasoning: CodexModelReasoningCapability = {
+  supported: true,
+  supportedEfforts: ["low", "high", "max"],
+  defaultEffort: "high",
+  disableAllowed: false,
+  upstream: { format: "reasoning_object", parameter: "reasoning.effort" },
+  source: "builtin",
+};
+
+const grok45Reasoning: CodexModelReasoningCapability = {
+  supported: true,
+  supportedEfforts: ["low", "medium", "high"],
+  defaultEffort: "high",
+  disableAllowed: false,
+  upstream: { format: "reasoning_object", parameter: "reasoning.effort" },
+  source: "builtin",
+};
+
+const glm52Reasoning: CodexModelReasoningCapability = {
+  supported: true,
+  supportedEfforts: [
+    "none",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+  ],
+  defaultEffort: "max",
+  disableAllowed: true,
+  upstream: {
+    format: "string",
+    parameter: "reasoning_effort",
+    effortMap: {
+      none: "none",
+      minimal: "none",
+      low: "high",
+      medium: "high",
+      high: "high",
+      xhigh: "max",
+      max: "max",
+    },
+  },
+  outputFormat: "reasoning_content",
+  source: "builtin",
+};
+
+const stepThreeLevelReasoning: CodexModelReasoningCapability = {
+  supported: true,
+  supportedEfforts: ["low", "medium", "high"],
+  defaultEffort: "medium",
+  disableAllowed: false,
+  upstream: { format: "string", parameter: "reasoning_effort" },
+  outputFormat: "reasoning",
+  source: "builtin",
+};
+
+const step2603Reasoning: CodexModelReasoningCapability = {
+  ...stepThreeLevelReasoning,
+  supportedEfforts: ["low", "high"],
+  defaultEffort: "high",
+};
 
 export const codexProviderPresets: CodexProviderPreset[] = [
   {
@@ -185,11 +290,13 @@ export const codexProviderPresets: CodexProviderPreset[] = [
         model: "kimi-k2.7-code",
         displayName: "Kimi K2.7 Code",
         contextWindow: 262144,
+        reasoning: thinkingBooleanReasoning,
       },
       {
         model: "kimi-k3",
         displayName: "Kimi K3",
         contextWindow: 1048576,
+        reasoning: thinkingBooleanReasoning,
       },
     ]),
     codexChatReasoning: {
@@ -222,6 +329,7 @@ export const codexProviderPresets: CodexProviderPreset[] = [
         model: "kimi-for-coding",
         displayName: "Kimi For Coding",
         contextWindow: 262144,
+        reasoning: thinkingBooleanReasoning,
       },
     ]),
     codexChatReasoning: {
@@ -609,6 +717,7 @@ requires_openai_auth = true`,
         model: "Pro/MiniMaxAI/MiniMax-M2.7",
         displayName: "Pro / MiniMax M2.7",
         contextWindow: 200000,
+        reasoning: enableThinkingBooleanReasoning,
       },
     ]),
     category: "aggregator",
@@ -634,6 +743,7 @@ requires_openai_auth = true`,
         model: "MiniMaxAI/MiniMax-M2.7",
         displayName: "MiniMax M2.7",
         contextWindow: 200000,
+        reasoning: enableThinkingBooleanReasoning,
       },
     ]),
     category: "aggregator",
@@ -990,6 +1100,7 @@ wire_api = "responses"`,
   },
   {
     name: "DeepSeek",
+    presetKey: "deepseek",
     websiteUrl: "https://platform.deepseek.com",
     apiKeyUrl: "https://platform.deepseek.com/api_keys",
     auth: generateThirdPartyAuth(""),
@@ -1014,6 +1125,7 @@ wire_api = "responses"`,
         inputModalities: ["text"],
         textOnly: true,
         supportsImage: false,
+        reasoning: deepSeekV4Reasoning,
       },
       // 官方预计 2026-08 初开通 pro 的 Codex 集成（官方 models.json 已含该条目），
       // 在那之前切到 pro 会上游报错
@@ -1024,6 +1136,7 @@ wire_api = "responses"`,
         inputModalities: ["text"],
         textOnly: true,
         supportsImage: false,
+        reasoning: deepSeekV4Reasoning,
       },
     ]),
     category: "cn_official",
@@ -1032,6 +1145,7 @@ wire_api = "responses"`,
   },
   {
     name: "Zhipu GLM",
+    presetKey: "zhipu-glm-cn",
     websiteUrl: "https://open.bigmodel.cn",
     apiKeyUrl: "https://www.bigmodel.cn/claude-code?ic=RRVJPB5SII",
     auth: generateThirdPartyAuth(""),
@@ -1050,6 +1164,7 @@ wire_api = "responses"`,
         inputModalities: ["text"],
         textOnly: true,
         supportsImage: false,
+        reasoning: glm52Reasoning,
       },
     ]),
     codexChatReasoning: {
@@ -1066,6 +1181,7 @@ wire_api = "responses"`,
   },
   {
     name: "Zhipu GLM en",
+    presetKey: "zhipu-glm-en",
     websiteUrl: "https://z.ai",
     apiKeyUrl: "https://z.ai/subscribe?ic=8JVLJQFSKB",
     auth: generateThirdPartyAuth(""),
@@ -1084,6 +1200,7 @@ wire_api = "responses"`,
         inputModalities: ["text"],
         textOnly: true,
         supportsImage: false,
+        reasoning: glm52Reasoning,
       },
     ]),
     codexChatReasoning: {
@@ -1141,6 +1258,7 @@ wire_api = "responses"`,
         model: "qwen3-coder-plus",
         displayName: "Qwen3 Coder Plus",
         contextWindow: 1048576,
+        reasoning: enableThinkingBooleanReasoning,
       },
     ]),
     category: "cn_official",
@@ -1193,6 +1311,7 @@ wire_api = "responses"`,
   },
   {
     name: "StepFun",
+    presetKey: "stepfun-cn",
     websiteUrl: "https://platform.stepfun.com/step-plan",
     apiKeyUrl: "https://platform.stepfun.com/interface-key",
     auth: generateThirdPartyAuth(""),
@@ -1208,16 +1327,19 @@ wire_api = "responses"`,
         model: "step-3.7-flash",
         displayName: "Step 3.7 Flash",
         contextWindow: 262144,
+        reasoning: stepThreeLevelReasoning,
       },
       {
         model: "step-3.5-flash-2603",
         displayName: "Step 3.5 Flash 2603",
         contextWindow: 262144,
+        reasoning: step2603Reasoning,
       },
       {
         model: "step-3.5-flash",
         displayName: "Step 3.5 Flash",
         contextWindow: 262144,
+        reasoning: stepThreeLevelReasoning,
       },
     ]),
     category: "cn_official",
@@ -1226,6 +1348,7 @@ wire_api = "responses"`,
   },
   {
     name: "StepFun en",
+    presetKey: "stepfun-en",
     websiteUrl: "https://platform.stepfun.ai/step-plan",
     apiKeyUrl: "https://platform.stepfun.ai/interface-key",
     auth: generateThirdPartyAuth(""),
@@ -1241,16 +1364,19 @@ wire_api = "responses"`,
         model: "step-3.7-flash",
         displayName: "Step 3.7 Flash",
         contextWindow: 262144,
+        reasoning: stepThreeLevelReasoning,
       },
       {
         model: "step-3.5-flash-2603",
         displayName: "Step 3.5 Flash 2603",
         contextWindow: 262144,
+        reasoning: step2603Reasoning,
       },
       {
         model: "step-3.5-flash",
         displayName: "Step 3.5 Flash",
         contextWindow: 262144,
+        reasoning: stepThreeLevelReasoning,
       },
     ]),
     category: "cn_official",
@@ -1337,6 +1463,7 @@ wire_api = "responses"`,
         inputModalities: ["text", "image"],
         baseInstructions:
           "You are Codex, a coding agent based on MiniMax-M3. You and the user share the same workspace and collaborate to achieve the user's goals.",
+        reasoning: reasoningSplitBooleanReasoning,
       },
     ]),
     category: "cn_official",
@@ -1372,6 +1499,7 @@ wire_api = "responses"`,
         inputModalities: ["text", "image"],
         baseInstructions:
           "You are Codex, a coding agent based on MiniMax-M3. You and the user share the same workspace and collaborate to achieve the user's goals.",
+        reasoning: reasoningSplitBooleanReasoning,
       },
     ]),
     category: "cn_official",
@@ -1427,6 +1555,7 @@ wire_api = "responses"`,
         inputModalities: ["text"],
         baseInstructions:
           "You are MiMo, an AI assistant developed by Xiaomi. Today's date: {date} {week}. Your knowledge cutoff date is December 2024.",
+        reasoning: thinkingBooleanReasoning,
       },
       {
         model: "mimo-v2.5",
@@ -1435,6 +1564,7 @@ wire_api = "responses"`,
         inputModalities: ["text", "image"],
         baseInstructions:
           "You are MiMo, an AI assistant developed by Xiaomi. Today's date: {date} {week}. Your knowledge cutoff date is December 2024.",
+        reasoning: thinkingBooleanReasoning,
       },
     ]),
     category: "cn_official",
@@ -1464,6 +1594,7 @@ wire_api = "responses"`,
         inputModalities: ["text"],
         baseInstructions:
           "You are MiMo, an AI assistant developed by Xiaomi. Today's date: {date} {week}. Your knowledge cutoff date is December 2024.",
+        reasoning: thinkingBooleanReasoning,
       },
       {
         model: "mimo-v2.5",
@@ -1472,6 +1603,7 @@ wire_api = "responses"`,
         inputModalities: ["text", "image"],
         baseInstructions:
           "You are MiMo, an AI assistant developed by Xiaomi. Today's date: {date} {week}. Your knowledge cutoff date is December 2024.",
+        reasoning: thinkingBooleanReasoning,
       },
     ]),
     category: "cn_official",
@@ -1510,6 +1642,7 @@ wire_api = "responses"`,
   },
   {
     name: "xAI (Grok)",
+    presetKey: "xai-grok",
     websiteUrl: "https://x.ai/api",
     apiKeyUrl: "https://console.x.ai",
     auth: generateThirdPartyAuth(""),
@@ -1526,6 +1659,7 @@ wire_api = "responses"`,
         contextWindow: 500000,
         supportsParallelToolCalls: true,
         inputModalities: ["text", "image"],
+        reasoning: grok45Reasoning,
       },
     ]),
     category: "third_party",
@@ -1534,6 +1668,7 @@ wire_api = "responses"`,
   },
   {
     name: "xAI (Grok) OAuth",
+    presetKey: "xai-grok-oauth",
     websiteUrl: "https://x.ai/grok",
     auth: generateThirdPartyAuth(""),
     // 托管 OAuth：真实 token 由本地代理按请求注入，CodexAdapter 硬定向
@@ -1549,6 +1684,7 @@ wire_api = "responses"`,
         contextWindow: 500000,
         supportsParallelToolCalls: true,
         inputModalities: ["text", "image"],
+        reasoning: grok45Reasoning,
       },
     ]),
     category: "third_party",

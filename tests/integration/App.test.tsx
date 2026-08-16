@@ -114,8 +114,15 @@ vi.mock("@/components/codex/CodexRouterWorkspacePage", async () => {
   );
   return {
     ...actual,
-    CodexRouterWorkspacePage: ({ initialProviderId, initialTab }: any) => (
-      <div data-testid="codex-router-workspace">
+    CodexRouterWorkspacePage: ({
+      initialProviderId,
+      initialTab,
+      onRuntimeReady,
+    }: any) => (
+      <div
+        data-testid="codex-router-workspace"
+        data-runtime-ready-wired={String(Boolean(onRuntimeReady))}
+      >
         <span data-testid="codex-router-target">{initialProviderId}</span>
         <span data-testid="codex-router-tab">{initialTab}</span>
       </div>
@@ -128,9 +135,13 @@ vi.mock("@/components/codex/CodexUsagePage", () => ({
 }));
 
 vi.mock("@/components/codex/CodexMultiRouterWizard", () => ({
-  CodexMultiRouterWizard: ({ open, onOpenChange }: any) =>
+  CodexMultiRouterWizard: ({ open, mode, planId, onOpenChange }: any) =>
     open ? (
-      <div data-testid="codex-multirouter-wizard">
+      <div
+        data-testid="codex-multirouter-wizard"
+        data-mode={mode}
+        data-plan-id={planId ?? ""}
+      >
         <button onClick={() => onOpenChange(false)}>close-wizard</button>
       </div>
     ) : null,
@@ -398,7 +409,7 @@ describe("App integration with MSW", () => {
     expect(screen.getByTestId("codex-router-tab").textContent).toBe("routes");
   });
 
-  it("lets the Codex MultiRouter entry choose whether to start the guide", async () => {
+  it("starts a new Codex MultiRouter draft explicitly from the refreshed entry", async () => {
     const { default: App } = await import("@/App");
     renderApp(App);
 
@@ -411,17 +422,59 @@ describe("App integration with MSW", () => {
 
     fireEvent.click(screen.getByText("open-multirouter-entry"));
 
-    expect(screen.getByText("配置多路模型")).toBeInTheDocument();
-    expect(screen.getByText("开始引导配置")).toBeInTheDocument();
+    expect(await screen.findByText("配置多路模型")).toBeInTheDocument();
+    expect(screen.getByText("创建新配置")).toBeInTheDocument();
+    expect(screen.getByText("编辑旧配置")).toBeInTheDocument();
+    expect(
+      screen.getByText("暂无已有 MultiRouter，请先创建新配置。"),
+    ).toBeInTheDocument();
     expect(screen.getByText("直接打开工作台")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByText("开始引导"));
+    fireEvent.click(screen.getByText("创建新配置"));
 
+    const wizard = await screen.findByTestId("codex-multirouter-wizard");
+    expect(wizard).toHaveAttribute("data-mode", "create");
+    expect(wizard).toHaveAttribute("data-plan-id", "");
+  });
+
+  it("edits the exact MultiRouter selected from multiple saved plans", async () => {
+    setProviders("codex", {
+      "router-primary": {
+        id: "router-primary",
+        name: "主路由",
+        settingsConfig: { codexRouting: { enabled: true, routes: [] } },
+        category: "aggregator",
+        sortIndex: 0,
+        createdAt: Date.now(),
+      },
+      "router-lab": {
+        id: "router-lab",
+        name: "实验路由",
+        settingsConfig: { codexRouting: { enabled: true, routes: [] } },
+        category: "aggregator",
+        sortIndex: 1,
+        createdAt: Date.now() + 1,
+      },
+    });
+    setCurrentProviderId("codex", "router-primary");
+
+    const { default: App } = await import("@/App");
+    renderApp(App);
+    fireEvent.click(screen.getByText("switch-codex"));
     await waitFor(() =>
-      expect(
-        screen.getByTestId("codex-multirouter-wizard"),
-      ).toBeInTheDocument(),
+      expect(screen.getByTestId("provider-list").textContent).toContain(
+        "router-lab",
+      ),
     );
+
+    fireEvent.click(screen.getByText("open-multirouter-entry"));
+    expect(await screen.findByText("主路由")).toBeInTheDocument();
+    expect(screen.getByText("实验路由")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("实验路由"));
+
+    const wizard = await screen.findByTestId("codex-multirouter-wizard");
+    expect(wizard).toHaveAttribute("data-mode", "edit");
+    expect(wizard).toHaveAttribute("data-plan-id", "router-lab");
   });
 
   it("opens the MultiRouter status workspace directly from the entry choice", async () => {
@@ -453,7 +506,7 @@ describe("App integration with MSW", () => {
     );
 
     fireEvent.click(screen.getByText("open-multirouter-entry"));
-    fireEvent.click(screen.getByText("直接打开工作台"));
+    fireEvent.click(await screen.findByText("直接打开工作台"));
 
     await waitFor(() =>
       expect(screen.getByTestId("codex-router-workspace")).toBeInTheDocument(),
@@ -462,6 +515,10 @@ describe("App integration with MSW", () => {
       "codex-router",
     );
     expect(screen.getByTestId("codex-router-tab").textContent).toBe("status");
+    expect(screen.getByTestId("codex-router-workspace")).toHaveAttribute(
+      "data-runtime-ready-wired",
+      "false",
+    );
   });
 
   it("opens the Codex usage page from the Codex toolbar", async () => {

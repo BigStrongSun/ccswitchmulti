@@ -582,6 +582,20 @@ pub async fn diagnose_codex_multirouter(
 ///
 /// CLI/app-server 不是这个 CDP 入口的启动目标；它们通过 live `config.toml`、
 /// `model_catalog_json`、本地 `/v1/models` 和 MultiRouter 转发链路继续受支持。
+
+#[tauri::command]
+pub async fn get_codex_guardian_status(
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::codex_guardian::CodexGuardianStatus, String> {
+    let status = state
+        .proxy_service
+        .codex_guardian_status
+        .lock()
+        .await
+        .clone();
+    Ok(status)
+}
+
 #[tauri::command]
 pub async fn unlock_codex_model_picker() -> Result<CodexModelPickerUnlockResult, String> {
     crate::codex_desktop::unlock_codex_model_picker().await
@@ -1074,6 +1088,8 @@ struct RawWindowsCodexProcess {
 fn query_codex_processes() -> (Vec<CodexAppServerProcessDiagnostics>, Option<String>) {
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
         let script = r#"
 Get-CimInstance Win32_Process -Filter "Name = 'Codex.exe' OR Name = 'codex.exe'" |
   Select-Object ProcessId,Name,ExecutablePath,CommandLine,@{Name='StartedAt';Expression={$_.CreationDate.ToLocalTime().ToString('o')}} |
@@ -1081,6 +1097,7 @@ Get-CimInstance Win32_Process -Filter "Name = 'Codex.exe' OR Name = 'codex.exe'"
 "#;
         let output = match Command::new("powershell")
             .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .creation_flags(CREATE_NO_WINDOW)
             .output()
         {
             Ok(output) => output,

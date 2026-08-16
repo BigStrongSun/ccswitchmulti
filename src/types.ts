@@ -244,6 +244,8 @@ export interface ProviderMeta {
   codexFastMode?: boolean;
   // Codex Responses -> Chat Completions reasoning capability metadata
   codexChatReasoning?: CodexChatReasoning;
+  // Stable CCSwitchMulti preset identity used to resolve maintained model capabilities.
+  codexPresetId?: string;
   // Codex 单供应商模型目录是否投射为 /model 菜单映射；关闭时 modelCatalog 只作为目录/上下文元数据保存。
   codexLocalModelMapping?: boolean;
   // Codex -> Anthropic provider options.
@@ -285,14 +287,39 @@ export type CodexApiFormat =
   | "openai_messages"
   | "anthropic";
 
+export type CodexReasoningEffort =
+  | "none"
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max";
+
+export interface CodexModelReasoningCapability {
+  supported: boolean;
+  supportedEfforts: CodexReasoningEffort[];
+  defaultEffort?: CodexReasoningEffort;
+  disableAllowed: boolean;
+  upstream: {
+    format: "none" | "boolean" | "string" | "reasoning_object";
+    parameter: CodexChatThinkingParam | CodexChatEffortParam;
+    effortMap?: Partial<Record<CodexReasoningEffort, CodexReasoningEffort>>;
+  };
+  outputFormat?: CodexChatReasoningOutputFormat;
+  source?: "builtin" | "user" | "legacy";
+}
+
 export interface CodexCatalogModel {
   model: string;
   upstreamModel?: string;
   upstream_model?: string;
   displayName?: string;
+  display_name?: string;
   contextWindow?: string | number;
-  inputModalities?: Array<"text" | "image">;
-  input_modalities?: Array<"text" | "image">;
+  context_window?: string | number;
+  inputModalities?: string[];
+  input_modalities?: string[];
   textOnly?: boolean;
   text_only?: boolean;
   supportsImage?: boolean;
@@ -300,7 +327,10 @@ export interface CodexCatalogModel {
   vision?: boolean;
   // Native Responses profile overrides for generated Codex model catalogs.
   supportsParallelToolCalls?: boolean;
+  supports_parallel_tool_calls?: boolean;
   baseInstructions?: string;
+  base_instructions?: string;
+  reasoning?: CodexModelReasoningCapability;
 }
 
 export type CodexCacheMode =

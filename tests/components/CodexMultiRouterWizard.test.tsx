@@ -74,6 +74,29 @@ beforeEach(() => {
 });
 
 describe("CodexMultiRouterWizard", () => {
+  it("renders the publish and enable page for a new plan with no existing MultiRouter", () => {
+    renderWithQueryClient(
+      <CodexMultiRouterWizard
+        open
+        mode="create"
+        providers={[provider()]}
+        onOpenChange={vi.fn()}
+        onCreateProvider={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+        onEnablePlan={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "启用并验证" }));
+
+    expect(
+      screen.getByRole("button", { name: "保存并发布" }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "启用这个多路路由" }),
+    ).toBeVisible();
+  });
+
   it("explains the first step with user-facing guidance before technical details", () => {
     renderWithQueryClient(
       <CodexMultiRouterWizard
@@ -86,7 +109,8 @@ describe("CodexMultiRouterWizard", () => {
       />,
     );
 
-    expect(screen.getByText("这套向导会帮你完成 7 件事")).toBeInTheDocument();
+    expect(screen.getByText("这套向导会帮你完成 6 件事")).toBeInTheDocument();
+    expect(screen.queryByText("子 Agent 候选")).not.toBeInTheDocument();
     expect(screen.getByText(/你不用手动改配置文件/)).toBeInTheDocument();
     expect(
       screen.getByText(/技术备注：Codex 最后仍只连接本机/),
@@ -129,10 +153,10 @@ describe("CodexMultiRouterWizard", () => {
       />,
     );
 
-    expect(screen.getAllByText("理解 MultiRouter").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("选择模型源").length).toBeGreaterThan(0);
 
     fireEvent.click(screen.getByRole("button", { name: "下一步" }));
-    expect(screen.getAllByText("创建模型源").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("自动准备与验证").length).toBeGreaterThan(0);
 
     fireEvent.click(screen.getByRole("button", { name: "跳过" }));
     expect(localStorage.getItem(CODEX_MULTI_ROUTER_WIZARD_DISMISSED_KEY)).toBe(
@@ -166,7 +190,7 @@ describe("CodexMultiRouterWizard", () => {
     );
 
     expect(
-      screen.getByRole("heading", { name: "理解 MultiRouter" }),
+      screen.getByRole("heading", { name: "选择模型源" }),
     ).toBeInTheDocument();
   });
 
@@ -188,10 +212,6 @@ describe("CodexMultiRouterWizard", () => {
         onEnablePlan={vi.fn()}
       />,
     );
-
-    fireEvent.click(screen.getByRole("button", { name: "下一步" }));
-    fireEvent.click(screen.getByRole("button", { name: "下一步" }));
-    fireEvent.click(screen.getByRole("button", { name: "下一步" }));
 
     expect(screen.getByText(/必须先完成 ChatGPT OAuth/)).toBeInTheDocument();
     expect(screen.getByText("需要 ChatGPT OAuth")).toBeInTheDocument();
@@ -218,7 +238,7 @@ describe("CodexMultiRouterWizard", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "下一步" }));
     expect(
-      screen.getByText(/已选择 1 \/ 1 个 Codex provider/),
+      screen.getByRole("heading", { name: "自动准备与验证" }),
     ).toBeInTheDocument();
 
     rerender(
@@ -241,7 +261,7 @@ describe("CodexMultiRouterWizard", () => {
     );
 
     expect(
-      screen.getByText(/已选择 1 \/ 1 个 Codex provider/),
+      screen.getByRole("heading", { name: "自动准备与验证" }),
     ).toBeInTheDocument();
     expect(
       screen.queryByText("这套向导会帮你完成 7 件事"),
@@ -278,7 +298,7 @@ describe("CodexMultiRouterWizard", () => {
     );
     const { rerender } = render(renderWizard(staleQwen));
 
-    fireEvent.click(screen.getByRole("button", { name: "配置核心参数" }));
+    fireEvent.click(screen.getByRole("button", { name: "选择模型源" }));
     fireEvent.click(screen.getByLabelText("Qwen Local API 格式"));
     fireEvent.click(screen.getByRole("option", { name: "Chat Completions" }));
 
@@ -295,7 +315,7 @@ describe("CodexMultiRouterWizard", () => {
         "Chat Completions",
       );
     });
-    fireEvent.click(screen.getByRole("button", { name: "生成路由规则" }));
+    fireEvent.click(screen.getByRole("button", { name: "选择模型并预览路由" }));
     expect(screen.getByText("openai_chat")).toBeInTheDocument();
   });
 
@@ -319,7 +339,7 @@ describe("CodexMultiRouterWizard", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "配置核心参数" }));
+    fireEvent.click(screen.getByRole("button", { name: "选择模型源" }));
 
     expect(screen.getByText("已有模型目录，可继续")).toBeInTheDocument();
     expect(screen.getByText(/仍会重新尝试/)).toBeInTheDocument();
@@ -344,7 +364,7 @@ describe("CodexMultiRouterWizard", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
+    fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
     fireEvent.click(
       screen.getByRole("button", { name: "自动获取并写入模型列表" }),
     );
@@ -387,7 +407,7 @@ describe("CodexMultiRouterWizard", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
+    fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
     fireEvent.click(
       screen.getByRole("button", { name: "自动获取并写入模型列表" }),
     );
@@ -430,7 +450,7 @@ describe("CodexMultiRouterWizard", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
+    fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
     fireEvent.click(
       screen.getByRole("button", { name: "自动获取并写入模型列表" }),
     );
@@ -470,7 +490,7 @@ describe("CodexMultiRouterWizard", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
+    fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
     fireEvent.click(
       screen.getByRole("button", { name: "自动获取并写入模型列表" }),
     );
@@ -511,9 +531,8 @@ describe("CodexMultiRouterWizard", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "下一步" }));
     fireEvent.click(screen.getByLabelText("使用 Qwen Local 作为模型源"));
-    fireEvent.click(screen.getByRole("button", { name: "保存并发布" }));
+    fireEvent.click(screen.getByRole("button", { name: "启用并验证" }));
     fireEvent.click(
       screen.getAllByRole("button", { name: "保存并发布" }).at(-1)!,
     );
@@ -561,7 +580,7 @@ describe("CodexMultiRouterWizard", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
+    fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
     fireEvent.click(
       screen.getByRole("button", { name: "自动获取并写入模型列表" }),
     );
@@ -609,10 +628,10 @@ describe("CodexMultiRouterWizard", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "配置核心参数" }));
+    fireEvent.click(screen.getByRole("button", { name: "选择模型源" }));
     expect(screen.getByText("可自动获取模型")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
+    fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
     fireEvent.click(
       screen.getByRole("button", { name: "自动获取并写入模型列表" }),
     );
@@ -658,10 +677,10 @@ describe("CodexMultiRouterWizard", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "配置核心参数" }));
+    fireEvent.click(screen.getByRole("button", { name: "选择模型源" }));
     expect(screen.getByText("缺在线凭据，使用内置目录")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
+    fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
     fireEvent.click(
       screen.getByRole("button", { name: "自动获取并写入模型列表" }),
     );
@@ -711,10 +730,10 @@ describe("CodexMultiRouterWizard", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "配置核心参数" }));
+    fireEvent.click(screen.getByRole("button", { name: "选择模型源" }));
     expect(screen.getByText("可通过火山 OpenAPI 获取模型")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
+    fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
     fireEvent.click(
       screen.getByRole("button", { name: "自动获取并写入模型列表" }),
     );
@@ -773,11 +792,11 @@ describe("CodexMultiRouterWizard", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "整理模型" }));
+    fireEvent.click(screen.getByRole("button", { name: "选择模型并预览路由" }));
     fireEvent.click(screen.getByLabelText("保留 model-b"));
     expect(screen.getByLabelText("保留 model-b")).not.toBeChecked();
 
-    fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
+    fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
     fireEvent.click(
       screen.getByRole("button", { name: "自动获取并写入模型列表" }),
     );
@@ -785,7 +804,7 @@ describe("CodexMultiRouterWizard", () => {
     expect(await screen.findByText("无模型列表更新")).toBeInTheDocument();
     expect(screen.queryByText(/新增 1: model-c/)).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "整理模型" }));
+    fireEvent.click(screen.getByRole("button", { name: "选择模型并预览路由" }));
     expect(screen.getByLabelText("保留 model-a")).toBeChecked();
     expect(screen.getByLabelText("保留 model-b")).not.toBeChecked();
     expect(screen.queryByLabelText("保留 model-c")).not.toBeInTheDocument();
@@ -807,7 +826,7 @@ describe("CodexMultiRouterWizard", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
+    fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
     fireEvent.click(
       screen.getByRole("button", { name: "打开 DeepSeek 配置页" }),
     );
@@ -839,9 +858,11 @@ describe("CodexMultiRouterWizard", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "配置核心参数" }));
+    fireEvent.click(screen.getByRole("button", { name: "选择模型源" }));
 
-    expect(screen.getByText(/OpenAI Official Backup/)).toBeInTheDocument();
+    expect(
+      screen.getAllByText(/OpenAI Official Backup/).length,
+    ).toBeGreaterThan(0);
     expect(
       screen.getByText(/API 格式：Responses API（向导推断/),
     ).toBeInTheDocument();
@@ -892,7 +913,7 @@ describe("CodexMultiRouterWizard", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
+    fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
     fireEvent.click(
       screen.getByRole("button", { name: "测试 Chat / Responses 连通性" }),
     );
@@ -901,7 +922,7 @@ describe("CodexMultiRouterWizard", () => {
       await screen.findByText("状态机：connectivityPassed"),
     ).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "保存并发布" }));
+    fireEvent.click(screen.getByRole("button", { name: "启用并验证" }));
     fireEvent.click(
       screen.getAllByRole("button", { name: "保存并发布" }).at(-1)!,
     );
@@ -949,7 +970,7 @@ describe("CodexMultiRouterWizard", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "保存并发布" }));
+    fireEvent.click(screen.getByRole("button", { name: "启用并验证" }));
     const publishButtons = screen.getAllByRole("button", {
       name: "保存并发布",
     });
@@ -960,7 +981,7 @@ describe("CodexMultiRouterWizard", () => {
     expect(screen.getAllByText("db locked").length).toBeGreaterThan(0);
   });
 
-  it("saves renamed plan with curated catalog and ordered spawn agent models", async () => {
+  it("saves a renamed curated plan without requiring manual subagent selection", async () => {
     const onOpenChange = vi.fn();
     const source = provider({
       id: "relay",
@@ -989,24 +1010,16 @@ describe("CodexMultiRouterWizard", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "命名方案" }));
+    fireEvent.click(screen.getByRole("button", { name: "选择模型并预览路由" }));
     fireEvent.change(screen.getByLabelText("MultiRouter 名称"), {
       target: { value: "Work MultiRouter" },
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "整理模型" }));
+    fireEvent.click(screen.getByRole("button", { name: "选择模型并预览路由" }));
     fireEvent.click(screen.getByLabelText("保留 model-b"));
     fireEvent.click(screen.getAllByTitle("上移")[1]);
 
-    fireEvent.click(screen.getByRole("button", { name: "子 Agent 候选" }));
-    fireEvent.click(screen.getByLabelText("model-c"));
-    fireEvent.click(screen.getByLabelText("model-a"));
-    const enabledMoveUp = screen
-      .getAllByTitle("上移")
-      .find((button) => !(button as HTMLButtonElement).disabled);
-    fireEvent.click(enabledMoveUp!);
-
-    fireEvent.click(screen.getByRole("button", { name: "保存并发布" }));
+    fireEvent.click(screen.getByRole("button", { name: "启用并验证" }));
     fireEvent.click(
       screen.getAllByRole("button", { name: "保存并发布" }).at(-1)!,
     );
@@ -1022,8 +1035,8 @@ describe("CodexMultiRouterWizard", () => {
       ),
     ).toEqual(["model-c", "model-a"]);
     expect(savedProvider.settingsConfig.modelCatalog.spawnAgentModels).toEqual([
-      "model-a",
       "model-c",
+      "model-a",
     ]);
     expect(
       savedProvider.settingsConfig.codexRouting.routes[0].match.models,
@@ -1057,7 +1070,7 @@ describe("CodexMultiRouterWizard", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
+    fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
     fireEvent.click(
       screen.getByRole("button", { name: "测试 Chat / Responses 连通性" }),
     );
@@ -1103,7 +1116,7 @@ describe("CodexMultiRouterWizard", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
+    fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
     fireEvent.click(
       screen.getByRole("button", { name: "自动获取并写入模型列表" }),
     );
@@ -1130,7 +1143,7 @@ describe("CodexMultiRouterWizard", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
+    fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
     fireEvent.click(
       screen.getByRole("button", { name: "测试 Chat / Responses 连通性" }),
     );
@@ -1157,7 +1170,7 @@ describe("CodexMultiRouterWizard", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "保存并发布" }));
+    fireEvent.click(screen.getByRole("button", { name: "启用并验证" }));
     const publishButtons = screen.getAllByRole("button", {
       name: "保存并发布",
     });

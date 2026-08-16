@@ -9,8 +9,8 @@ use serde_json::{json, Value};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
-const DEFAULT_CODEX_DEBUG_PORT: u16 = 9229;
-const CDP_HTTP_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const DEFAULT_CODEX_DEBUG_PORT: u16 = 9229;
+pub(crate) const CDP_HTTP_TIMEOUT: Duration = Duration::from_secs(2);
 const CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
 const CDP_COMMAND_TIMEOUT: Duration = Duration::from_secs(4);
 const MODEL_PICKER_PATCH_KEY: &str = "__ccSwitchCodexAppCompatibilityV5";
@@ -37,7 +37,7 @@ pub struct CodexModelPickerUnlockResult {
 
 /// renderer 脚本返回的新版历史目录同步证据。
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct CodexAppCompatibilityEvidence {
+pub(crate) struct CodexAppCompatibilityEvidence {
     history_sync_requested: bool,
     history_catalog_complete: Option<bool>,
     history_catalog_count: Option<usize>,
@@ -46,7 +46,7 @@ struct CodexAppCompatibilityEvidence {
 /// 注入脚本需要的模型目录投影，避免把整个 catalog 私有字段泄漏到 renderer。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CodexModelCatalogProjection {
+pub(crate) struct CodexModelCatalogProjection {
     default_model: Option<String>,
     model_names: Vec<String>,
     models: Vec<Value>,
@@ -65,16 +65,16 @@ impl CodexModelCatalogProjection {
 
 /// Chrome DevTools Protocol `/json` 返回的页面 target 摘要。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-struct CdpTarget {
-    id: String,
+pub(crate) struct CdpTarget {
+    pub(crate) id: String,
     #[serde(rename = "type")]
-    target_type: String,
+    pub(crate) target_type: String,
     #[serde(default)]
-    title: String,
+    pub(crate) title: String,
     #[serde(default)]
-    url: String,
+    pub(crate) url: String,
     #[serde(default, rename = "webSocketDebuggerUrl")]
-    web_socket_debugger_url: Option<String>,
+    pub(crate) web_socket_debugger_url: Option<String>,
 }
 
 /// 尝试为当前或新启动的 Codex App 安装 renderer 兼容层。
@@ -189,7 +189,8 @@ fn codex_desktop_executable_not_found_message() -> String {
 }
 
 /// 从 cc-switch 生成的 catalog 中读取模型名和 renderer 需要的最小描述。
-fn load_cc_switch_model_catalog_projection() -> Result<CodexModelCatalogProjection, String> {
+pub(crate) fn load_cc_switch_model_catalog_projection(
+) -> Result<CodexModelCatalogProjection, String> {
     let catalog_path = crate::codex_config::get_codex_model_catalog_path();
     let default_model = read_current_codex_default_model();
     let mut candidates = Vec::new();
@@ -345,7 +346,7 @@ fn read_current_codex_default_model() -> Option<String> {
 }
 
 /// 在候选 CDP 端口中寻找 Codex renderer 并安装模型白名单补丁。
-async fn try_inject_on_candidate_ports(
+pub(crate) async fn try_inject_on_candidate_ports(
     catalog: &CodexModelCatalogProjection,
     ports: &[u16],
 ) -> Option<CodexModelPickerUnlockResult> {
@@ -401,7 +402,7 @@ async fn try_inject_on_candidate_ports(
 }
 
 /// 生成去重后的 CDP 端口探测列表。
-fn candidate_debug_ports(preferred: u16) -> Vec<u16> {
+pub(crate) fn candidate_debug_ports(preferred: u16) -> Vec<u16> {
     let mut ports = vec![preferred, DEFAULT_CODEX_DEBUG_PORT, 9222, 9223, 9230, 9231];
     ports.sort_unstable();
     ports.dedup();
@@ -409,7 +410,7 @@ fn candidate_debug_ports(preferred: u16) -> Vec<u16> {
 }
 
 /// 查询 CDP 页面 target。
-async fn list_cdp_targets(debug_port: u16) -> Result<Vec<CdpTarget>, String> {
+pub(crate) async fn list_cdp_targets(debug_port: u16) -> Result<Vec<CdpTarget>, String> {
     let client = reqwest::Client::builder()
         .no_proxy()
         .timeout(CDP_HTTP_TIMEOUT)
@@ -440,7 +441,7 @@ async fn list_cdp_targets(debug_port: u16) -> Result<Vec<CdpTarget>, String> {
 /// 共享调试端口如 9222 可能属于 Chrome 或其它 Electron 应用，必须看到 Codex
 /// 标识才注入；CCSwitchMulti 自己启动的默认 9229 允许在标题还没初始化时退回
 /// 到第一个 page target。
-fn pick_codex_page_targets(
+pub(crate) fn pick_codex_page_targets(
     targets: &[CdpTarget],
     debug_port: u16,
 ) -> Result<Vec<CdpTarget>, String> {
@@ -475,7 +476,7 @@ fn target_matches_codex_desktop(target: &CdpTarget) -> bool {
 }
 
 /// 使用 CDP 同时安装新文档脚本并立即 patch 当前页面。
-async fn install_script(
+pub(crate) async fn install_script(
     websocket_url: &str,
     script: &str,
 ) -> Result<CodexAppCompatibilityEvidence, String> {
@@ -612,26 +613,18 @@ fn cdp_command_result(response: Value, method: &str) -> Result<Value, String> {
     }
 }
 
-/// 构造 renderer 注入脚本：触发新版本地历史目录同步，并修复模型白名单和缓存。
-fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> String {
-    let payload = serde_json::to_string(catalog).unwrap_or_else(|_| "{}".to_string());
-    format!(
-        r#"
-(async () => {{
-  const payload = {payload};
-  const patchKey = "{MODEL_PICKER_PATCH_KEY}";
-  const state = window[patchKey] || {{}};
-  state.payload = payload;
-  state.requestIds = state.requestIds || new Set();
-  state.modulePromises = state.modulePromises || new Map();
-  state.failures = state.failures || [];
-  window[patchKey] = state;
-
-  const reasoningEfforts = () => ["low", "medium", "high", "xhigh"].map((reasoningEffort) => ({{ reasoningEffort, description: `${{reasoningEffort}} effort` }}));
+/// 模型目录 patch 的可执行 JavaScript 核心。
+///
+/// 这段逻辑会同时嵌入 Codex renderer，并由 QuickJS 回归直接执行。任何字段写入都必须
+/// 先通过明确的模型门特征；不能把 React Fiber、Intl context 或普通 API 对象当成模型
+/// 容器遍历和改写。
+fn model_picker_patch_core_script() -> &'static str {
+    r#"
+  const reasoningEfforts = () => ["low", "medium", "high", "xhigh"].map((reasoningEffort) => ({ reasoningEffort, description: `${reasoningEffort} effort` }));
   const modelNames = () => Array.from(new Set([payload.defaultModel, ...(payload.modelNames || [])].filter((name) => typeof name === "string" && name.trim()).map((name) => name.trim())));
-  const descriptorFor = (name) => {{
+  const descriptorFor = (name) => {
     const existing = (payload.models || []).find((model) => model && model.model === name);
-    return {{
+    return {
       model: name,
       id: name,
       slug: name,
@@ -640,64 +633,66 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
       hidden: false,
       defaultReasoningEffort: "medium",
       supportedReasoningEfforts: reasoningEfforts(),
-      ...(existing || {{}}),
+      ...(existing || {}),
       hidden: false,
-    }};
-  }};
+    };
+  };
   const stringArray = (value) => Array.isArray(value) && value.every((item) => typeof item === "string");
   const modelArray = (value, allowEmpty = false) => Array.isArray(value) && (allowEmpty || value.length > 0) && value.every((item) => item && typeof item === "object" && typeof item.model === "string");
-  const patchModelNameArray = (models) => {{
+  const patchModelNameArray = (models) => {
     if (!stringArray(models)) return false;
     let changed = false;
-    for (const name of modelNames()) {{
-      if (!models.includes(name)) {{
+    for (const name of modelNames()) {
+      if (!models.includes(name)) {
         models.push(name);
         changed = true;
-      }}
-    }}
+      }
+    }
     return changed;
-  }};
-  const patchModelArray = (models, allowEmpty = false) => {{
+  };
+  const patchModelArray = (models, allowEmpty = false) => {
     if (!modelArray(models, allowEmpty)) return false;
     const names = modelNames();
     const existing = new Map(models.map((model) => [model.model, model]));
     let changed = false;
-    for (const model of models) {{
-      if (names.includes(model.model) && model.hidden !== false) {{
+    for (const model of models) {
+      if (names.includes(model.model) && model.hidden !== false) {
         model.hidden = false;
         changed = true;
-      }}
-    }}
-    for (const name of names) {{
-      if (!existing.has(name)) {{
+      }
+    }
+    for (const name of names) {
+      if (!existing.has(name)) {
         models.push(descriptorFor(name));
         changed = true;
-      }}
-    }}
+      }
+    }
     return changed;
-  }};
-  const removeHiddenNames = (container, key) => {{
+  };
+  const removeHiddenNames = (container, key) => {
     if (!Array.isArray(container?.[key])) return false;
     const names = new Set(modelNames());
     const before = container[key].length;
     container[key] = container[key].filter((name) => !names.has(name));
     return before !== container[key].length;
-  }};
-  const patchNameSet = (setLike) => {{
+  };
+  const patchNameSet = (setLike) => {
     if (!(setLike instanceof Set)) return false;
     let changed = false;
-    for (const name of modelNames()) {{
-      if (!setLike.has(name)) {{
+    for (const name of modelNames()) {
+      if (!setLike.has(name)) {
         setLike.add(name);
         changed = true;
-      }}
-    }}
+      }
+    }
     return changed;
-  }};
-  const patchModelContainer = (value) => {{
+  };
+  const patchModelContainer = (value) => {
     if (!value || typeof value !== "object") return false;
-    let changed = false;
     const looksLikeModelGate = "availableModels" in value || "available_models" in value || "useHiddenModels" in value || "use_hidden_models" in value || "defaultModel" in value || "default_model" in value;
+    if (!looksLikeModelGate) return false;
+
+    let changed = false;
     if (patchModelArray(value.models, "defaultModel" in value || "availableModels" in value || "available_models" in value)) changed = true;
     if (patchModelNameArray(value.models)) changed = true;
     if (patchModelArray(value.data)) changed = true;
@@ -713,37 +708,43 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
     if (patchModelNameArray(value.available_models)) changed = true;
     if (removeHiddenNames(value, "hiddenModels")) changed = true;
     if (removeHiddenNames(value, "hidden_models")) changed = true;
-    if (looksLikeModelGate && value.useHiddenModels !== false) {{
+    if ("useHiddenModels" in value && value.useHiddenModels !== false) {
       value.useHiddenModels = false;
       changed = true;
-    }}
-    if (looksLikeModelGate && value.use_hidden_models !== false) {{
+    }
+    if ("use_hidden_models" in value && value.use_hidden_models !== false) {
       value.use_hidden_models = false;
       changed = true;
-    }}
-    if (typeof value.default_model === "string" && modelNames().length && !modelNames().includes(value.default_model)) {{
+    }
+    if ("default_model" in value && typeof value.default_model === "string" && modelNames().length && !modelNames().includes(value.default_model)) {
       value.default_model = modelNames()[0];
       changed = true;
-    }}
-    if (value.defaultModel == null && modelNames().length > 0) {{
+    }
+    if ("defaultModel" in value && value.defaultModel == null && modelNames().length > 0) {
       value.defaultModel = descriptorFor(modelNames()[0]);
       changed = true;
-    }}
+    }
     return changed;
-  }};
-  const patchObjectGraph = (root, visited = new WeakSet(), depth = 0) => {{
-    if (!root || typeof root !== "object" || visited.has(root) || depth > 5) return false;
-    visited.add(root);
-    let changed = patchModelContainer(root);
-    if (root instanceof Element || root === window || root === document || root === document.body || root === document.documentElement) return changed;
-    for (const key of Object.keys(root)) {{
-      if (["ownerDocument", "parentElement", "parentNode", "children", "childNodes"].includes(key)) continue;
-      try {{
-        if (patchObjectGraph(root[key], visited, depth + 1)) changed = true;
-      }} catch {{}}
-    }}
-    return changed;
-  }};
+  };
+"#
+}
+
+/// 构造 renderer 注入脚本：触发新版本地历史目录同步，并修复模型白名单和缓存。
+fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> String {
+    let payload = serde_json::to_string(catalog).unwrap_or_else(|_| "{}".to_string());
+    let model_patch_core = model_picker_patch_core_script();
+    format!(
+        r#"
+(async () => {{
+  const payload = {payload};
+  const patchKey = "{MODEL_PICKER_PATCH_KEY}";
+  const state = window[patchKey] || {{}};
+  state.payload = payload;
+  state.requestIds = state.requestIds || new Set();
+  state.modulePromises = state.modulePromises || new Map();
+  state.failures = state.failures || [];
+  window[patchKey] = state;
+{model_patch_core}
   const patchStatsigConfig = (config) => {{
     const value = config?.value;
     if (!value || typeof value !== "object") return config;
@@ -849,8 +850,13 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
     if (Array.isArray(result) && patchModelArray(result, true)) changed = true;
     if (Array.isArray(result?.data) && patchModelArray(result.data, true)) changed = true;
     if (Array.isArray(result?.models) && patchModelArray(result.models, true)) changed = true;
+    if (Array.isArray(result?.result) && patchModelArray(result.result, true)) changed = true;
+    if (Array.isArray(result?.result?.data) && patchModelArray(result.result.data, true)) changed = true;
+    if (Array.isArray(result?.result?.models) && patchModelArray(result.result.models, true)) changed = true;
+    if (Array.isArray(result?.pages?.[0]?.data) && patchModelArray(result.pages[0].data, true)) changed = true;
+    if (Array.isArray(result?.message?.result?.data) && patchModelArray(result.message.result.data, true)) changed = true;
+    if (Array.isArray(result?.message?.result?.models) && patchModelArray(result.message.result.models, true)) changed = true;
     if (patchModelContainer(result)) changed = true;
-    if (patchObjectGraph(result)) changed = true;
     return changed;
   }};
   const patchAppServerResult = (method, result) => {{
@@ -913,16 +919,6 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
       try {{ patchMcpModelResponseData(event?.data); }} catch (error) {{ state.failures.push(String(error?.message || error)); }}
     }}, true);
   }};
-  const installResponsePatch = () => {{
-    if (state.responsePatchInstalled || typeof Response === "undefined") return;
-    state.responsePatchInstalled = true;
-    const originalJson = Response.prototype.json;
-    Response.prototype.json = async function ccSwitchPatchedResponseJson(...args) {{
-      const data = await originalJson.apply(this, args);
-      try {{ patchModelContainer(data); patchObjectGraph(data); }} catch (error) {{ state.failures.push(String(error?.message || error)); }}
-      return data;
-    }};
-  }};
   const reactFiberKeys = (element) => Object.keys(element || {{}}).filter((key) => key.startsWith("__reactFiber") || key.startsWith("__reactInternalInstance") || key.startsWith("__reactProps"));
   // Codex app-server 会根据 requires_openai_auth 暴露 OAuth 状态；旧配置或缓存状态
   // 可能把 renderer 留在非 chatgpt 模式，这里只修复前端 context，不改请求路由。
@@ -948,15 +944,12 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
     }}
   }};
   const patchReactState = () => {{
-    const visited = new WeakSet();
     const nodes = [document.body, ...document.querySelectorAll("button, [role='menu'], [role='dialog'], [data-radix-popper-content-wrapper]")].filter(Boolean);
     for (const node of nodes.slice(0, 220)) {{
       spoofChatGPTAuthMethod(node);
-      for (const key of reactFiberKeys(node)) patchObjectGraph(node[key], visited);
     }}
   }};
   const run = async () => {{
-    installResponsePatch();
     installMessagePatch();
     await installAppServerPatch();
     void triggerLocalThreadCatalogSync();
@@ -1032,12 +1025,15 @@ Get-CimInstance Win32_Process -Filter "Name = 'Codex.exe' OR Name = 'ChatGPT.exe
 "#;
 
 /// 查找 Codex Desktop 主进程路径；已运行但未开放 CDP 时不能原地注入。
-fn detect_running_codex_main_process() -> Option<PathBuf> {
+pub(crate) fn detect_running_codex_main_process() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
         let script = DETECT_CODEX_MAIN_PROCESS_SCRIPT;
         let output = Command::new("powershell")
             .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .creation_flags(CREATE_NO_WINDOW)
             .output()
             .ok()?;
         if !output.status.success() {
@@ -1756,8 +1752,11 @@ fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 /// 执行 PowerShell 并解析 JSON 输出，统一处理空输出和脚本失败。
 #[cfg(target_os = "windows")]
 fn powershell_json_value(script: &str) -> Option<Value> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
     let output = Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .ok()?;
     if !output.status.success() {
@@ -1870,6 +1869,81 @@ mod tests {
             vec!["gpt-5.6-sol".to_string(), "qwen3.6".to_string()]
         );
         assert_eq!(projection.default_model.as_deref(), Some("qwen3.6"));
+    }
+
+    fn run_model_picker_patch_core_probe(probe: &str) -> serde_json::Value {
+        let runtime = rquickjs::Runtime::new().expect("create JavaScript runtime");
+        let context = rquickjs::Context::full(&runtime).expect("create JavaScript context");
+        let payload = json!({
+            "defaultModel": "qwen3.6",
+            "modelNames": ["qwen3.6", "deepseek-v4-flash"],
+            "models": [
+                {"model": "qwen3.6", "displayName": "Qwen 3.6", "hidden": false},
+                {"model": "deepseek-v4-flash", "displayName": "DeepSeek V4 Flash", "hidden": false}
+            ]
+        });
+        let script = format!(
+            "const payload = {};\n{}\n{}",
+            payload,
+            model_picker_patch_core_script(),
+            probe
+        );
+
+        context.with(|ctx| {
+            let json_text: String = ctx.eval(script).expect("execute model picker patch core");
+            serde_json::from_str(&json_text).expect("parse model picker patch probe result")
+        })
+    }
+
+    /// 回归：模型解锁器不能再给 React Intl 的 formats/defaultFormats/formatters
+    /// 写入 defaultModel/useHiddenModels，否则 MessageFormat 缓存会因循环引用失败并回退
+    /// 为未插值的 ICU source。
+    #[test]
+    fn model_picker_patch_core_does_not_pollute_react_intl_objects() {
+        let result = run_model_picker_patch_core_probe(
+            r#"
+const intl = {
+  formats: {number: {compact: {notation: "compact"}}},
+  defaultFormats: {date: {short: {year: "numeric"}}},
+  formatters: {cache: {message: {}}},
+};
+const before = JSON.stringify(intl);
+const changed = [intl, intl.formats, intl.defaultFormats, intl.formatters]
+  .map((value) => patchModelContainer(value));
+JSON.stringify({before, after: JSON.stringify(intl), changed});
+"#,
+        );
+
+        assert_eq!(result["before"], result["after"]);
+        assert_eq!(result["changed"], json!([false, false, false, false]));
+    }
+
+    /// 已验证的模型门仍应补齐目录、解除隐藏并设置已有的默认模型字段；同时不能
+    /// 凭空向 camelCase 容器追加 snake_case 控制字段。
+    #[test]
+    fn model_picker_patch_core_still_unlocks_explicit_model_gate() {
+        let result = run_model_picker_patch_core_probe(
+            r#"
+const gate = {availableModels: ["gpt-5.6-sol"], useHiddenModels: true, defaultModel: null};
+const changed = patchModelContainer(gate);
+JSON.stringify({
+  changed,
+  availableModels: gate.availableModels,
+  useHiddenModels: gate.useHiddenModels,
+  defaultModel: gate.defaultModel?.model,
+  hasSnakeCaseFlag: Object.prototype.hasOwnProperty.call(gate, "use_hidden_models"),
+});
+"#,
+        );
+
+        assert_eq!(result["changed"], true);
+        assert_eq!(
+            result["availableModels"],
+            json!(["gpt-5.6-sol", "qwen3.6", "deepseek-v4-flash"])
+        );
+        assert_eq!(result["useHiddenModels"], false);
+        assert_eq!(result["defaultModel"], "qwen3.6");
+        assert_eq!(result["hasSnakeCaseFlag"], false);
     }
 
     #[test]

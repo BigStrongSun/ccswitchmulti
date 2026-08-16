@@ -1575,6 +1575,52 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     );
   });
 
+  it("keeps direct subagent model overrides collapsed as an advanced setting", async () => {
+    const source: Provider = {
+      id: "codex-deepseek",
+      name: "DeepSeek",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: {
+          models: [
+            { model: "deepseek-v4-flash" },
+            { model: "deepseek-v4-pro" },
+          ],
+        },
+      },
+    };
+    const plan = createDraftRoutingPlan([source], [source]);
+
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [source, plan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: plan.id,
+        initialProviderId: plan.id,
+        initialTab: "routes",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+
+    const advancedTrigger = screen.getByRole("button", {
+      name: /高级：子 Agent 模型覆盖/,
+    });
+    expect(screen.queryByText("可拖拽排序的前五候选")).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/V4 Pro\/Flash custom roles 会自动注册/),
+    ).toBeInTheDocument();
+
+    await userEvent.setup().click(advancedTrigger);
+
+    expect(screen.getByText("可拖拽排序的前五候选")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "保存排序" }),
+    ).toBeInTheDocument();
+  });
+
   it("exposes a delete action for routing plans inside the workspace", async () => {
     const source: Provider = {
       id: "codex-qwen",
@@ -2599,9 +2645,9 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     });
   });
 
-  // onRuntimeReady 测试：当本地代理运行、Codex 接管激活、当前 MultiRouter 已发布并启用路由、
-  // 且最新请求转发成功（statusCode 200-399）时，onRuntimeReady 回调应被调用。
-  it("calls onRuntimeReady when config is ready and latest request forward succeeds", async () => {
+  // 当本地代理、Codex 接管、当前方案路由和最新真实转发都成功时，
+  // 状态页应在原地给出完成结果，不再触发 App 进入历史修复。
+  it("shows runtime validation success in the workspace without a post-setup callback", async () => {
     const source: Provider = {
       id: "codex-online-source",
       name: "Online Source",
@@ -2635,8 +2681,6 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
         },
       },
     };
-    const onRuntimeReady = vi.fn();
-
     requestLogsFixture.value = {
       data: {
         data: [
@@ -2664,12 +2708,13 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
         onEditProvider: vi.fn(),
         onDeletePlan: vi.fn(),
         onCreateProvider: vi.fn(),
-        onRuntimeReady,
       }),
     );
 
     await waitFor(() =>
-      expect(onRuntimeReady).toHaveBeenCalledWith(routedPlan),
+      expect(
+        screen.getByText("MultiRouter 已通过真实请求验证"),
+      ).toBeInTheDocument(),
     );
   });
 
@@ -2914,9 +2959,9 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     ).not.toBeInTheDocument();
   });
 
-  // onRuntimeReady 负向测试：即使最近一条 Codex 代理日志成功，只要它没有命中当前
-  // MultiRouter 方案的 route，就不能提前进入“配置成功 -> 历史修复”收尾流程。
-  it("does not call onRuntimeReady when latest successful request is outside the selected route", async () => {
+  // 即使最近一条 Codex 代理日志成功，只要它没有命中当前 MultiRouter 方案的 route，
+  // 就不能显示当前方案已通过真实请求验证。
+  it("does not show runtime validation success when the latest request is outside the selected route", async () => {
     const source: Provider = {
       id: "codex-online-source",
       name: "Online Source",
@@ -2960,8 +3005,6 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
         },
       },
     };
-    const onRuntimeReady = vi.fn();
-
     requestLogsFixture.value = {
       data: {
         data: [
@@ -2991,7 +3034,6 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
         onEditProvider: vi.fn(),
         onDeletePlan: vi.fn(),
         onCreateProvider: vi.fn(),
-        onRuntimeReady,
       }),
     );
 
@@ -2999,6 +3041,8 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       expect(screen.getByText("成功 200")).toBeInTheDocument(),
     );
     expect(screen.queryByText("当前方案成功")).not.toBeInTheDocument();
-    expect(onRuntimeReady).not.toHaveBeenCalled();
+    expect(
+      screen.queryByText("MultiRouter 已通过真实请求验证"),
+    ).not.toBeInTheDocument();
   });
 });

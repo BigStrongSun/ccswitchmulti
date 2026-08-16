@@ -132,6 +132,9 @@ function renderCatalogHarness(
     planAccessKeyId?: string;
     planSecretAccessKey?: string;
     takeoverEnabled?: boolean;
+    allowModelMenuProjectionToggle?: boolean;
+    openAdvancedOptions?: boolean;
+    presetCatalogModels?: CodexCatalogModel[];
     onProviderSplitSuggestionChange?: ReturnType<typeof vi.fn>;
   } = {},
 ) {
@@ -172,9 +175,13 @@ function renderCatalogHarness(
         onAutoSelectChange={vi.fn()}
         takeoverEnabled={options.takeoverEnabled ?? true}
         onTakeoverEnabledChange={vi.fn()}
+        allowModelMenuProjectionToggle={
+          options.allowModelMenuProjectionToggle ?? true
+        }
         apiFormat="openai_chat"
         onApiFormatChange={onApiFormatChange}
         catalogModels={catalog}
+        presetCatalogModels={options.presetCatalogModels}
         onCatalogModelsChange={handleCatalogChange}
         spawnAgentModels={[]}
         onSpawnAgentModelsChange={vi.fn()}
@@ -193,8 +200,13 @@ function renderCatalogHarness(
     );
   }
 
+  const renderResult = render(<Harness />);
+  if (options.openAdvancedOptions ?? true) {
+    fireEvent.click(screen.getByRole("button", { name: "高级选项" }));
+  }
+
   return {
-    ...render(<Harness />),
+    ...renderResult,
     onCatalogChange,
     onApiFormatChange,
     latestCatalog: () => latestCatalog,
@@ -268,8 +280,11 @@ function renderAutoSplitHarness() {
     );
   }
 
+  const renderResult = render(<Harness />);
+  fireEvent.click(screen.getByRole("button", { name: "高级选项" }));
+
   return {
-    ...render(<Harness />),
+    ...renderResult,
     latestRouting: () => latestRouting,
     onCatalogChange,
     onRoutingChange,
@@ -280,6 +295,48 @@ function renderAutoSplitHarness() {
 }
 
 describe("CodexFormFields local model routing", () => {
+  it("keeps built-in reasoning read-only until an explicit override and restores the preset", async () => {
+    const builtinReasoning: NonNullable<CodexCatalogModel["reasoning"]> = {
+      supported: true as const,
+      supportedEfforts: ["low", "high", "max"],
+      defaultEffort: "high" as const,
+      disableAllowed: false,
+      upstream: {
+        format: "reasoning_object" as const,
+        parameter: "reasoning.effort" as const,
+      },
+      source: "builtin" as const,
+    };
+    const { latestCatalog } = renderCatalogHarness(
+      [{ model: "deepseek-v4-pro", reasoning: builtinReasoning }],
+      {
+        presetCatalogModels: [
+          { model: "deepseek-v4-pro", reasoning: builtinReasoning },
+        ],
+      },
+    );
+
+    const textarea = screen.getByLabelText("deepseek-v4-pro推理能力 JSON");
+    expect(textarea).toHaveAttribute("readonly");
+    expect(screen.getByText(/内置预设，只读/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "创建高级覆盖" }));
+    await waitFor(() => {
+      expect(latestCatalog()[0].reasoning?.source).toBe("user");
+    });
+    expect(
+      screen.getByLabelText("deepseek-v4-pro推理能力 JSON"),
+    ).not.toHaveAttribute("readonly");
+    expect(screen.getByText(/已偏离内置预设/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "恢复内置默认" }));
+    await waitFor(() => {
+      expect(latestCatalog()[0].reasoning).toEqual(builtinReasoning);
+    });
+    expect(
+      screen.getByLabelText("deepseek-v4-pro推理能力 JSON"),
+    ).toHaveAttribute("readonly");
+  });
   it("classifies fetched relay models into Responses and Chat groups", () => {
     expect(
       splitFetchedModelsByLikelyCodexProtocol([
@@ -323,9 +380,7 @@ describe("CodexFormFields local model routing", () => {
       onProviderSplitSuggestionChange,
     } = renderAutoSplitHarness();
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "providerForm.fetchModels" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "同步模型" }));
 
     expect(await screen.findByText("检测到混合协议模型")).toBeInTheDocument();
     expect(screen.getByText("Relay-responses")).toBeInTheDocument();
@@ -365,9 +420,7 @@ describe("CodexFormFields local model routing", () => {
       onProviderSplitSuggestionChange,
     } = renderAutoSplitHarness();
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "providerForm.fetchModels" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "同步模型" }));
 
     expect(await screen.findByText("检测到混合协议模型")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "暂不拆分" }));
@@ -421,9 +474,7 @@ describe("CodexFormFields local model routing", () => {
       { shouldShowSpeedTest: true },
     );
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "测试 Chat / Responses" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "验证连接" }));
     expect(screen.getByText("确认测试 Chat / Responses")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
 
@@ -505,9 +556,7 @@ describe("CodexFormFields local model routing", () => {
       },
     );
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "测试 Chat / Responses" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "验证连接" }));
     fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
 
     await waitFor(() => {
@@ -572,9 +621,7 @@ describe("CodexFormFields local model routing", () => {
       { shouldShowSpeedTest: true },
     );
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "测试 Chat / Responses" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "验证连接" }));
     fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
 
     await waitFor(() => {
@@ -614,13 +661,8 @@ describe("CodexFormFields local model routing", () => {
       shouldShowSpeedTest: true,
     });
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "测试 Chat / Responses" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "验证连接" }));
 
-    expect(
-      screen.getByText("已打开测试确认框；如果没有看到弹窗，请按 Esc 后重试。"),
-    ).toBeInTheDocument();
     expect(screen.getByRole("dialog")).toHaveClass("z-[200]");
     expect(screen.getByText("确认测试 Chat / Responses")).toBeInTheDocument();
   });
@@ -629,15 +671,16 @@ describe("CodexFormFields local model routing", () => {
     renderCatalogHarness([], {
       shouldShowSpeedTest: true,
       takeoverEnabled: false,
+      openAdvancedOptions: false,
     });
 
     fireEvent.click(screen.getByRole("button", { name: "高级选项" }));
 
     const fetchButton = screen.getByRole("button", {
-      name: "providerForm.fetchModels",
+      name: "同步模型",
     });
     const probeButton = screen.getByRole("button", {
-      name: "测试 Chat / Responses",
+      name: "验证连接",
     });
 
     expect(fetchButton).toBeVisible();
@@ -665,10 +708,7 @@ describe("CodexFormFields local model routing", () => {
       takeoverEnabled: false,
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "高级选项" }));
-    fireEvent.click(
-      screen.getByRole("button", { name: "providerForm.fetchModels" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "同步模型" }));
 
     await waitFor(() => {
       expect(latestCatalog()).toEqual([
@@ -685,16 +725,14 @@ describe("CodexFormFields local model routing", () => {
   it("points users to fetch models when protocol probing has no catalog", async () => {
     renderCatalogHarness([], { shouldShowSpeedTest: true });
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "测试 Chat / Responses" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "验证连接" }));
     fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
 
     expect(await screen.findByRole("status")).toHaveTextContent(
-      "请先在上方“模型目录与上下文”点击“获取模型列表”，或手动添加模型后再测试。",
+      "请先在“模型与兼容性”同步模型，或在高级设置中手动添加至少一个模型后再验证。",
     );
     const fetchButton = screen.getByRole("button", {
-      name: "providerForm.fetchModels",
+      name: "同步模型",
     });
     expect(fetchButton).toHaveClass("border-blue-500");
     expect(Element.prototype.scrollIntoView).toHaveBeenCalled();
@@ -710,17 +748,13 @@ describe("CodexFormFields local model routing", () => {
       shouldShowSpeedTest: true,
     });
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "测试 Chat / Responses" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "验证连接" }));
     fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "协议测试中断：backend timeout",
     );
-    expect(
-      screen.getByRole("button", { name: "测试 Chat / Responses" }),
-    ).toBeEnabled();
+    expect(screen.getByRole("button", { name: "验证连接" })).toBeEnabled();
   });
 
   it("merges fetched models by upstream model without overwriting a visible alias", async () => {
@@ -735,9 +769,7 @@ describe("CodexFormFields local model routing", () => {
       },
     ]);
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "providerForm.fetchModels" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "同步模型" }));
 
     await waitFor(() => {
       expect(latestCatalog()).toEqual([
@@ -765,9 +797,7 @@ describe("CodexFormFields local model routing", () => {
       },
     );
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "providerForm.fetchModels" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "同步模型" }));
 
     await waitFor(() => {
       expect(fetchModelsForConfig).toHaveBeenCalledWith(
@@ -796,9 +826,7 @@ describe("CodexFormFields local model routing", () => {
       },
     );
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "providerForm.fetchModels" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "同步模型" }));
 
     expect(fetchModelsForConfig).not.toHaveBeenCalled();
     expect(latestCatalog()).toEqual([
@@ -821,9 +849,7 @@ describe("CodexFormFields local model routing", () => {
       },
     );
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "providerForm.fetchModels" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "同步模型" }));
 
     await waitFor(() => {
       expect(fetchModelsForConfig).toHaveBeenCalledWith(
@@ -871,78 +897,10 @@ describe("CodexFormFields local model routing", () => {
     });
   });
 
-  it("shows local model routing even when endpoint speed tools are hidden", () => {
-    renderRoutingHarness(
-      { enabled: false, defaultRouteId: "", routes: [] },
-      { shouldShowSpeedTest: false },
-    );
-
-    expect(screen.getByText("Codex 多模型路由")).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "添加路由" }),
-    ).toBeInTheDocument();
-  });
-
-  it("adds and edits a route through the dialog without persisting rowId", async () => {
-    const { latestRouting } = renderRoutingHarness();
-
-    fireEvent.click(screen.getByRole("button", { name: "添加路由" }));
-
-    await waitFor(() => {
-      expect(screen.getByRole("dialog")).toBeInTheDocument();
-      expect(latestRouting().routes).toHaveLength(1);
-    });
-
-    fireEvent.change(screen.getByPlaceholderText("路由 ID"), {
-      target: { value: "deepseek" },
-    });
-    fireEvent.change(screen.getByPlaceholderText("路由名称"), {
-      target: { value: "DeepSeek" },
-    });
-    fireEvent.change(
-      screen.getByPlaceholderText("匹配模型，多个用英文逗号分隔"),
-      {
-        target: { value: "deepseek-v4-flash, deepseek-v4-pro" },
-      },
-    );
-    fireEvent.change(
-      screen.getByPlaceholderText("匹配前缀，多个用英文逗号分隔"),
-      {
-        target: { value: "deepseek-" },
-      },
-    );
-    fireEvent.change(screen.getByPlaceholderText("上游 Base URL"), {
-      target: { value: "https://api.deepseek.example" },
-    });
-    fireEvent.change(screen.getByPlaceholderText("路由 API Key"), {
-      target: { value: "sk-route" },
-    });
-    fireEvent.change(screen.getByPlaceholderText("codex模型=上游模型"), {
-      target: { value: "deepseek-v4-flash=deepseek-chat" },
-    });
-
-    await waitFor(() => {
-      expect(latestRouting().routes?.[0]).toMatchObject({
-        id: "deepseek",
-        label: "DeepSeek",
-        match: {
-          models: ["deepseek-v4-flash", "deepseek-v4-pro"],
-          prefixes: ["deepseek-"],
-        },
-        upstream: {
-          baseUrl: "https://api.deepseek.example",
-          apiKey: "sk-route",
-          modelMap: { "deepseek-v4-flash": "deepseek-chat" },
-        },
-      });
-    });
-    expect(latestRouting().routes?.[0]).not.toHaveProperty("rowId");
-  });
-
-  it("removes a route from the list and writes the shortened routing config", async () => {
-    const { latestRouting, container } = renderRoutingHarness({
+  it("hides the legacy route editor while retaining the supplied routing state", () => {
+    const { latestRouting } = renderRoutingHarness({
       enabled: true,
-      defaultRouteId: "",
+      defaultRouteId: "deepseek",
       routes: [
         {
           id: "deepseek",
@@ -959,12 +917,55 @@ describe("CodexFormFields local model routing", () => {
       ],
     });
 
-    const deleteButton = container.querySelector('button[title="删除"]');
-    expect(deleteButton).not.toBeNull();
-    fireEvent.click(deleteButton!);
-
-    await waitFor(() => {
-      expect(latestRouting().routes).toEqual([]);
+    expect(screen.queryByText("Codex 多模型路由")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "添加路由" }),
+    ).not.toBeInTheDocument();
+    expect(latestRouting()).toMatchObject({
+      enabled: true,
+      defaultRouteId: "deepseek",
+      routes: [{ id: "deepseek" }],
     });
+  });
+
+  it("places the explained custom menu projection control last in advanced options", () => {
+    renderCatalogHarness([], {
+      shouldShowSpeedTest: false,
+      takeoverEnabled: true,
+      openAdvancedOptions: false,
+    });
+
+    expect(
+      screen.queryByText("在 Codex /model 菜单中显示"),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "高级选项" }));
+
+    const overrides = screen.getByText("本地代理请求覆盖");
+    const projection = screen.getByText("在 Codex /model 菜单中显示");
+    expect(projection).toBeInTheDocument();
+    expect(
+      overrides.compareDocumentPosition(projection) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      screen.getByText(/它不控制 Provider、代理或 MultiRouter 是否可用/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/仅当你要使用自己维护的 model_catalog_json 时关闭/),
+    ).toBeInTheDocument();
+  });
+
+  it("does not offer a menu projection opt-out for maintained presets", () => {
+    renderCatalogHarness([], {
+      allowModelMenuProjectionToggle: false,
+      openAdvancedOptions: false,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "高级选项" }));
+
+    expect(
+      screen.queryByText("在 Codex /model 菜单中显示"),
+    ).not.toBeInTheDocument();
   });
 });

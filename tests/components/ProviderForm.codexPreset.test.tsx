@@ -66,13 +66,23 @@ vi.mock("@/components/providers/forms/CodexFormFields", () => ({
     codexApiKey,
     codexBaseUrl,
     catalogModels,
+    presetCatalogModels,
     takeoverEnabled,
+    allowModelMenuProjectionToggle,
+    onApiKeyChange,
     onCatalogModelsChange,
   }: {
     codexApiKey: string;
     codexBaseUrl: string;
-    catalogModels?: Array<{ model: string; contextWindow?: number | string }>;
+    catalogModels?: Array<{
+      model: string;
+      contextWindow?: number | string;
+      reasoning?: unknown;
+    }>;
+    presetCatalogModels?: Array<{ model: string; reasoning?: unknown }>;
     takeoverEnabled: boolean;
+    allowModelMenuProjectionToggle?: boolean;
+    onApiKeyChange?: (value: string) => void;
     onCatalogModelsChange?: (
       models: Array<{ model: string; contextWindow?: number | string }>,
     ) => void;
@@ -83,8 +93,17 @@ vi.mock("@/components/providers/forms/CodexFormFields", () => ({
       <div data-testid="codex-takeover">
         {takeoverEnabled ? "enabled" : "disabled"}
       </div>
+      <div data-testid="codex-menu-projection-editability">
+        {allowModelMenuProjectionToggle ? "editable" : "managed"}
+      </div>
       <div data-testid="codex-catalog">
         {(catalogModels ?? []).map((model) => model.model).join(",")}
+      </div>
+      <div data-testid="codex-preset-reasoning-models">
+        {(presetCatalogModels ?? [])
+          .filter((model) => model.reasoning)
+          .map((model) => model.model)
+          .join(",")}
       </div>
       <button
         type="button"
@@ -93,6 +112,9 @@ vi.mock("@/components/providers/forms/CodexFormFields", () => ({
         }
       >
         mock-set-catalog
+      </button>
+      <button type="button" onClick={() => onApiKeyChange?.("sk-test")}>
+        mock-set-api-key
       </button>
     </section>
   ),
@@ -124,6 +146,50 @@ function renderProviderForm(
 }
 
 describe("ProviderForm Codex preset selection", () => {
+  it("defaults new Codex providers to model menu projection", async () => {
+    renderProviderForm();
+
+    await waitFor(() => {
+      expect(screen.getByTestId("codex-takeover")).toHaveTextContent("enabled");
+    });
+  });
+
+  it("forces a saved maintained preset back to model menu projection", async () => {
+    const onSubmit = vi.fn();
+    renderProviderForm({
+      showButtons: true,
+      submitLabel: "保存",
+      onSubmit,
+      initialData: {
+        name: "Zhipu legacy opt-out",
+        category: "custom",
+        settingsConfig: {
+          auth: { OPENAI_API_KEY: "sk-test" },
+          config:
+            'model_provider = "zhipu"\nmodel = "glm-5.2"\n[model_providers.zhipu]\nbase_url = "https://open.bigmodel.cn/api/coding/paas/v4"\nwire_api = "responses"\n',
+          modelCatalog: { models: [{ model: "glm-5.2" }] },
+        },
+        meta: {
+          apiFormat: "openai_responses",
+          codexLocalModelMapping: false,
+          codexPresetId: "zhipu-glm-cn",
+        },
+      },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("codex-takeover")).toHaveTextContent("enabled");
+      expect(
+        screen.getByTestId("codex-menu-projection-editability"),
+      ).toHaveTextContent("managed");
+    });
+    fireEvent.click(screen.getByRole("button", { name: "mock-set-api-key" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+    expect(onSubmit.mock.calls[0][0].meta.codexLocalModelMapping).toBe(true);
+  });
+
   it("does not scroll when applying the default Codex source preset on mount", async () => {
     const scrollIntoView = vi.fn();
     Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
@@ -156,6 +222,9 @@ describe("ProviderForm Codex preset selection", () => {
       expect(screen.getByTestId("codex-base-url")).toHaveTextContent(
         "https://api.deepseek.com",
       );
+      expect(
+        screen.getByTestId("codex-menu-projection-editability"),
+      ).toHaveTextContent("managed");
     });
     expect(scrollIntoView).toHaveBeenCalledWith({
       behavior: "smooth",
@@ -205,6 +274,7 @@ describe("ProviderForm Codex preset selection", () => {
     await waitFor(() => {
       expect(screen.getByTestId("codex-catalog")).toHaveTextContent("gpt-5.5");
     });
+    fireEvent.click(screen.getByRole("button", { name: "mock-set-api-key" }));
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
 
     await waitFor(() => {
@@ -216,5 +286,109 @@ describe("ProviderForm Codex preset selection", () => {
     expect(savedSettings.modelCatalog.models).toEqual([
       { model: "gpt-5.5", contextWindow: 272000 },
     ]);
+  });
+
+  it("persists maintained reasoning capabilities after selecting a built-in provider", async () => {
+    const onSubmit = vi.fn();
+    renderProviderForm({ showButtons: true, submitLabel: "保存", onSubmit });
+
+    fireEvent.click(screen.getByRole("button", { name: /Zhipu GLM$/ }));
+    await waitFor(() => {
+      expect(screen.getByTestId("codex-catalog")).toHaveTextContent("glm-5.2");
+    });
+    fireEvent.click(screen.getByRole("button", { name: "mock-set-api-key" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+    const savedSettings = JSON.parse(onSubmit.mock.calls[0][0].settingsConfig);
+    expect(onSubmit.mock.calls[0][0].meta.codexPresetId).toBe("zhipu-glm-cn");
+    expect(
+      screen.getByTestId("codex-preset-reasoning-models"),
+    ).toHaveTextContent("glm-5.2");
+    expect(savedSettings.modelCatalog.models).toHaveLength(1);
+    for (const model of savedSettings.modelCatalog.models) {
+      expect(model.reasoning).toMatchObject({
+        supportedEfforts: [
+          "none",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max",
+        ],
+        defaultEffort: "max",
+        source: "builtin",
+      });
+    }
+  });
+
+  it("restores the maintained preset baseline when reopening a saved override", async () => {
+    renderProviderForm({
+      initialData: {
+        name: "Zhipu override",
+        category: "custom",
+        settingsConfig: {
+          auth: { OPENAI_API_KEY: "sk-test" },
+          config:
+            'model_provider = "zhipu"\nmodel = "glm-5.2"\n[model_providers.zhipu]\nbase_url = "https://open.bigmodel.cn/api/coding/paas/v4"\nwire_api = "responses"\n',
+          modelCatalog: {
+            models: [
+              {
+                model: "glm-5.2",
+                reasoning: {
+                  supported: true,
+                  supportedEfforts: ["low", "high"],
+                  defaultEffort: "high",
+                  disableAllowed: false,
+                  upstream: {
+                    format: "reasoning_object",
+                    parameter: "reasoning.effort",
+                  },
+                  source: "user",
+                },
+              },
+            ],
+          },
+        },
+        meta: {
+          apiFormat: "openai_responses",
+          codexLocalModelMapping: true,
+          codexPresetId: "zhipu-glm-cn",
+        },
+      },
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("codex-preset-reasoning-models"),
+      ).toHaveTextContent("glm-5.2");
+    });
+  });
+
+  it("clears the maintained preset identity after switching to a custom source", async () => {
+    const onSubmit = vi.fn();
+    renderProviderForm({ showButtons: true, submitLabel: "保存", onSubmit });
+
+    fireEvent.click(screen.getByRole("button", { name: /Zhipu GLM$/ }));
+    await waitFor(() => {
+      expect(screen.getByTestId("codex-catalog")).toHaveTextContent("glm-5.2");
+    });
+    fireEvent.click(screen.getByRole("button", { name: "自定义模型源" }));
+    expect(screen.getByTestId("codex-takeover")).toHaveTextContent("enabled");
+    expect(
+      screen.getByTestId("codex-menu-projection-editability"),
+    ).toHaveTextContent("editable");
+    fireEvent.change(screen.getByRole("textbox", { name: "provider.name" }), {
+      target: { value: "Custom source" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "mock-set-api-key" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    fireEvent.click(await screen.findByRole("button", { name: "仍要保存" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+    expect(onSubmit.mock.calls[0][0].meta.codexPresetId).toBeUndefined();
+    expect(
+      screen.getByTestId("codex-preset-reasoning-models"),
+    ).toBeEmptyDOMElement();
   });
 });

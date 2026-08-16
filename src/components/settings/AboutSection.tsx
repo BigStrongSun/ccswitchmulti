@@ -42,6 +42,10 @@ import { isWindows } from "@/lib/platform";
 import { isUpdateAvailable } from "@/lib/version";
 import { ToolUpgradeConfirmDialog } from "./ToolUpgradeConfirmDialog";
 import { ToolInstallRow } from "./ToolInstallRow";
+import {
+  CCSWITCHMULTI_REPOSITORY_URL,
+  CCSWITCHMULTI_RELEASES_URL,
+} from "@/config/productLinks";
 
 interface AboutSectionProps {
   isPortable: boolean;
@@ -79,9 +83,6 @@ type WslShellPreference = {
 const WSL_SHELL_OPTIONS = ["sh", "bash", "zsh", "fish", "dash"] as const;
 // UI-friendly order: login shell first.
 const WSL_SHELL_FLAG_OPTIONS = ["-lic", "-lc", "-c"] as const;
-const CCSWITCHMULTI_REPO_URL = "https://github.com/BigStrongSun/ccswitchmulti";
-const CCSWITCHMULTI_RELEASES_URL = `${CCSWITCHMULTI_REPO_URL}/releases`;
-
 const ENV_BADGE_CONFIG: Record<
   string,
   { labelKey: string; className: string }
@@ -867,7 +868,9 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
               type="button"
               variant="outline"
               size="sm"
-              onClick={() => settingsApi.openExternal("https://ccswitch.io")}
+              onClick={() =>
+                settingsApi.openExternal(CCSWITCHMULTI_REPOSITORY_URL)
+              }
               className="h-8 gap-1.5 text-xs"
             >
               <Globe className="h-3.5 w-3.5" />
@@ -877,7 +880,9 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
               type="button"
               variant="outline"
               size="sm"
-              onClick={() => settingsApi.openExternal(CCSWITCHMULTI_REPO_URL)}
+              onClick={() =>
+                settingsApi.openExternal(CCSWITCHMULTI_REPOSITORY_URL)
+              }
               className="h-8 gap-1.5 text-xs"
             >
               <Github className="h-3.5 w-3.5" />

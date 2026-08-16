@@ -1,4 +1,4 @@
-import type { SessionMessage } from "@/types";
+﻿import type { SessionMessage } from "@/types";
 
 export interface ProxyConfig {
   listen_address: string;
@@ -140,7 +140,16 @@ export interface CodexRouterLogDiagnostics {
   recentEvents: CodexRouterLogEvent[];
 }
 
-export interface CodexModelPickerUnlockResult {
+
+export interface CodexGuardianStatus {
+  active: boolean;
+  codexRunning: boolean;
+  cdpAvailable: boolean;
+  injectedTargetCount: number;
+  injected: boolean;
+  lastEvent: string;
+  message: string;
+}export interface CodexModelPickerUnlockResult {
   attemptedPorts: number[];
   debugPort: number | null;
   targetId: string | null;

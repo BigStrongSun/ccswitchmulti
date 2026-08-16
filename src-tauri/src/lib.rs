@@ -1,4 +1,4 @@
-mod app_config;
+﻿mod app_config;
 mod app_exit_monitor;
 mod app_store;
 mod auto_launch;
@@ -7,6 +7,7 @@ mod claude_mcp;
 mod claude_plugin;
 mod codex_config;
 mod codex_desktop;
+mod codex_guardian;
 pub mod codex_history_migration;
 mod codex_state_db;
 mod commands;
@@ -498,6 +499,13 @@ pub fn run() {
                     previous.marker.started_at,
                     previous.marker.pid,
                     previous.crash_log_modified_at
+                );
+            }
+
+            let launch_on_startup = crate::settings::get_settings().launch_on_startup;
+            if let Err(error) = crate::auto_launch::reconcile_auto_launch(launch_on_startup) {
+                log::warn!(
+                    "开机自启状态对账失败: desired={launch_on_startup}, error={error}"
                 );
             }
 
@@ -1552,6 +1560,7 @@ pub fn run() {
             commands::get_proxy_status,
             commands::diagnose_codex_multirouter,
             commands::unlock_codex_model_picker,
+            commands::get_codex_guardian_status,
             commands::sync_codex_history_to_multirouter,
             commands::repair_codex_history_visibility,
             commands::list_codex_history_sessions,

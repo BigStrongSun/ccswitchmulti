@@ -19,6 +19,7 @@ use toml::Value as TomlValue;
 
 const CODEX_ROUTER_PARENT_PROVIDER_ID: &str = "codexRouterParentProviderId";
 const CODEX_ROUTER_PARENT_PROVIDER_NAME: &str = "codexRouterParentProviderName";
+const CODEX_ROUTER_PLAINTEXT_V2_COLLABORATION: &str = "codexRouterPlaintextV2Collaboration";
 const CODEX_RESOLVED_TARGET_PROVIDER_ID: &str = "codexResolvedTargetProviderId";
 const CODEX_RESOLVED_UPSTREAM_MODEL_OVERRIDE: &str = "codexResolvedUpstreamModelOverride";
 const CODEX_NATIVE_AUTH_PASSTHROUGH: &str = "codexNativeAuthPassthrough";
@@ -106,39 +107,7 @@ pub fn classify_codex_multirouter_auth_facade(
     }
 }
 
-/// 判断 MultiRouter 是否需要让官方 V2 协作消息保持明文。
-///
-/// 官方 route 的子 Agent 能由 ChatGPT Codex backend 解密；任一启用的第三方或来源
-/// 不明 route 都可能成为子 Agent，因此 official parent 的协作工具参数必须改为 V2
-/// 明文。禁用 route 不影响当前任务的传输策略。
-pub fn codex_multirouter_needs_plaintext_v2_collaboration(provider: &Provider) -> bool {
-    let Some(routing) = provider.settings_config.get("codexRouting") else {
-        return false;
-    };
-    if routing
-        .get("enabled")
-        .and_then(JsonValue::as_bool)
-        .is_some_and(|enabled| !enabled)
-    {
-        return false;
-    }
-    let Some(routes) = routing
-        .get("routes")
-        .and_then(JsonValue::as_array)
-        .or_else(|| routing.as_array())
-    else {
-        return false;
-    };
-
-    routes.iter().any(|route| {
-        route
-            .get("enabled")
-            .and_then(JsonValue::as_bool)
-            .unwrap_or(true)
-            && !codex_route_uses_official_agent_backend(route)
-    })
-}
-
+/// 判断 route 是否由 ChatGPT Codex 官方 backend 提供原生能力。
 fn codex_route_uses_official_agent_backend(route: &JsonValue) -> bool {
     let upstream = route.get("upstream").unwrap_or(route);
     let auth = upstream
@@ -347,6 +316,49 @@ pub fn codex_route_supports_responses_compaction(provider: &Provider) -> bool {
     false
 }
 
+/// Whether an official parent in this MultiRouter must emit plaintext V2 agent tasks.
+///
+/// A future child may use any enabled route. If one route is third-party or its
+/// credential ownership is ambiguous, OpenAI-only encrypted task arguments are
+/// not portable. Resolved providers retain the request-local marker so retry-layer
+/// materialization cannot erase this decision.
+pub fn codex_multirouter_needs_plaintext_v2_collaboration(provider: &Provider) -> bool {
+    if provider
+        .settings_config
+        .get(CODEX_ROUTER_PLAINTEXT_V2_COLLABORATION)
+        .and_then(JsonValue::as_bool)
+        == Some(true)
+    {
+        return true;
+    }
+
+    let Some(routing) = provider.settings_config.get("codexRouting") else {
+        return false;
+    };
+    if routing
+        .get("enabled")
+        .and_then(JsonValue::as_bool)
+        .is_some_and(|enabled| !enabled)
+    {
+        return false;
+    }
+    let Some(routes) = routing
+        .get("routes")
+        .and_then(JsonValue::as_array)
+        .or_else(|| routing.as_array())
+    else {
+        return false;
+    };
+
+    routes.iter().any(|route| {
+        route
+            .get("enabled")
+            .and_then(JsonValue::as_bool)
+            .unwrap_or(true)
+            && !codex_route_uses_official_agent_backend(route)
+    })
+}
+
 /// Whether this provider should expose the OpenAI provider name to Codex.
 ///
 /// Codex decides remote vs local compaction from the model provider `name`
@@ -535,6 +547,7 @@ pub fn materialize_codex_routed_provider_from_target(
         "codexResolvedCapabilities",
         CODEX_ROUTER_PARENT_PROVIDER_ID,
         CODEX_ROUTER_PARENT_PROVIDER_NAME,
+        CODEX_ROUTER_PLAINTEXT_V2_COLLABORATION,
         CODEX_RESOLVED_TARGET_PROVIDER_ID,
         CODEX_ACCOUNT_POOL_ENABLED,
         "apiFormat",
@@ -1123,7 +1136,12 @@ fn build_codex_routed_provider(
         .as_object()
         .cloned()
         .unwrap_or_else(Map::new);
-
+    if codex_multirouter_needs_plaintext_v2_collaboration(provider) {
+        settings.insert(
+            CODEX_ROUTER_PLAINTEXT_V2_COLLABORATION.to_string(),
+            JsonValue::Bool(true),
+        );
+    }
     if let Some(base_url) = upstream
         .get("baseUrl")
         .or_else(|| upstream.get("base_url"))
@@ -1561,9 +1579,20 @@ pub fn should_send_codex_chat_prompt_cache_key(provider: &Provider) -> bool {
         return false;
     };
 
-    match url.host_str() {
-        Some("api.openai.com") => true,
-        Some("api.kimi.com") => {
+    let host = url.host_str().unwrap_or("");
+    match host {
+        "api.openai.com" => true,
+        // Azure OpenAI: per-resource host <resource>.openai.azure.com. The
+        // Chat Completions API accepts prompt_cache_key on GPT-5.6+ models
+        // (Microsoft Foundry prompt-caching docs), same request shape as
+        // OpenAI.
+        _ if host.ends_with(".openai.azure.com") => true,
+        // OpenRouter: falls back to the OpenAI-style prompt_cache_key field
+        // as its sticky-routing key when session_id/x-session-id are absent
+        // (OpenRouter prompt-caching docs), so the field is accepted and
+        // improves provider-pinned cache affinity.
+        "openrouter.ai" => true,
+        "api.kimi.com" => {
             let path = url.path().trim_end_matches('/');
             path == "/coding" || path.starts_with("/coding/")
         }
@@ -1863,6 +1892,18 @@ pub fn resolve_codex_chat_reasoning_config(
     provider: &Provider,
     body: &JsonValue,
 ) -> Option<CodexChatReasoningConfig> {
+    let requested_model = body
+        .get("model")
+        .and_then(JsonValue::as_str)
+        .map(ToString::to_string)
+        .or_else(|| codex_provider_upstream_model(provider))
+        .unwrap_or_default();
+    if let Some(capability) = super::codex_reasoning::resolve_reasoning_capability_from_settings(
+        &provider.settings_config,
+        &requested_model,
+    ) {
+        return Some(codex_chat_reasoning_config_from_capability(capability));
+    }
     let inferred = infer_codex_chat_reasoning_config(provider, body);
     if let Some(config) = provider
         .meta
@@ -1877,6 +1918,52 @@ pub fn resolve_codex_chat_reasoning_config(
     }
 
     inferred
+}
+
+fn codex_chat_reasoning_config_from_capability(
+    capability: super::codex_reasoning::CodexModelReasoningCapability,
+) -> CodexChatReasoningConfig {
+    let has_efforts = capability.supported && !capability.supported_efforts.is_empty();
+    let boolean_thinking = capability.upstream.format == "boolean";
+    CodexChatReasoningConfig {
+        supports_thinking: Some(capability.supported),
+        supports_effort: Some(has_efforts && !boolean_thinking),
+        thinking_param: Some(if boolean_thinking {
+            capability.upstream.parameter.clone()
+        } else if capability.disable_allowed {
+            "thinking".to_string()
+        } else {
+            "none".to_string()
+        }),
+        effort_param: Some(if has_efforts && !boolean_thinking {
+            capability.upstream.parameter
+        } else {
+            "none".to_string()
+        }),
+        effort_value_mode: Some(encode_codex_capability_effort_mode(
+            &capability.supported_efforts,
+            &capability.upstream.effort_map,
+        )),
+        min_output_tokens: None,
+        default_output_tokens: None,
+        output_format: capability.output_format,
+    }
+}
+
+fn encode_codex_capability_effort_mode(
+    supported_efforts: &[String],
+    effort_map: &std::collections::HashMap<String, String>,
+) -> String {
+    let allowed = supported_efforts.join(",");
+    let mappings = supported_efforts
+        .iter()
+        .map(|effort| {
+            let mapped = effort_map.get(effort).unwrap_or(effort);
+            format!("{effort}={mapped}")
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("capability|{allowed}|{mappings}")
 }
 
 /// 解析 Codex provider 当前请求应采用的缓存能力。
@@ -2946,69 +3033,6 @@ context_window = 500000
             classify_codex_multirouter_auth_facade(&ambiguous, None),
             CodexMultiRouterAuthFacade::LegacyPreserved
         );
-    }
-
-    #[test]
-    fn codex_multirouter_plaintext_v2_delivery_depends_on_enabled_route_ownership() {
-        let mixed = multirouter_with_routes(
-            json!([
-                {
-                    "id": "official",
-                    "enabled": true,
-                    "upstream": { "auth": { "source": "managed_codex_oauth" } }
-                },
-                {
-                    "id": "third-party",
-                    "enabled": true,
-                    "upstream": { "auth": { "source": "provider_config" } }
-                }
-            ]),
-            None,
-        );
-        assert!(codex_multirouter_needs_plaintext_v2_collaboration(&mixed));
-
-        let official_only = multirouter_with_routes(
-            json!([{
-                "id": "official",
-                "enabled": true,
-                "upstream": { "auth": { "source": "account_pool" } }
-            }]),
-            None,
-        );
-        assert!(!codex_multirouter_needs_plaintext_v2_collaboration(
-            &official_only
-        ));
-
-        let disabled_third_party = multirouter_with_routes(
-            json!([
-                {
-                    "id": "official",
-                    "enabled": true,
-                    "upstream": { "auth": { "source": "native_codex_auth" } }
-                },
-                {
-                    "id": "third-party",
-                    "enabled": false,
-                    "upstream": { "auth": { "source": "provider_config" } }
-                }
-            ]),
-            None,
-        );
-        assert!(!codex_multirouter_needs_plaintext_v2_collaboration(
-            &disabled_third_party
-        ));
-
-        let ambiguous = multirouter_with_routes(
-            json!([{
-                "id": "legacy",
-                "enabled": true,
-                "upstream": { "apiFormat": "openai_responses" }
-            }]),
-            None,
-        );
-        assert!(codex_multirouter_needs_plaintext_v2_collaboration(
-            &ambiguous
-        ));
     }
 
     #[test]
@@ -5435,6 +5459,33 @@ wire_api = "chat"
     }
 
     #[test]
+    fn declared_glm_capability_drives_request_mapping_config() {
+        let provider = create_provider(json!({
+            "modelCatalog": {"models": [{
+                "model": "glm-5.2",
+                "reasoning": {
+                    "supported": true,
+                    "supportedEfforts": ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+                    "defaultEffort": "max",
+                    "disableAllowed": true,
+                    "upstream": {
+                        "format": "string", "parameter": "reasoning_effort",
+                        "effortMap": {"none":"none","minimal":"none","low":"high","medium":"high","high":"high","xhigh":"max","max":"max"}
+                    },
+                    "outputFormat": "reasoning_content"
+                }
+            }]}
+        }));
+        let config = resolve_codex_chat_reasoning_config(&provider, &json!({"model":"glm-5.2"}))
+            .expect("reasoning config");
+        assert_eq!(config.effort_param.as_deref(), Some("reasoning_effort"));
+        assert!(config
+            .effort_value_mode
+            .as_deref()
+            .is_some_and(|mode| mode.contains("medium=high") && mode.contains("xhigh=max")));
+    }
+
+    #[test]
     fn test_resolve_codex_chat_reasoning_explicit_meta_overrides_inference() {
         let mut provider = create_provider(json!({
             "config": r#"
@@ -5849,5 +5900,71 @@ wire_api = "responses"
             "config": "base_url = \"https://api.x.ai/v1\"\nwire_api = \"responses\""
         }));
         assert!(!provider_needs_responses_namespace_flatten(&plain));
+    }
+
+    fn provider_with_base_url_and_routing(base_url: &str, routing: Option<&str>) -> Provider {
+        let mut provider = create_provider(json!({ "base_url": base_url }));
+        if let Some(routing) = routing {
+            provider.meta = Some(crate::provider::ProviderMeta {
+                prompt_cache_routing: Some(routing.to_string()),
+                ..Default::default()
+            });
+        }
+        provider
+    }
+
+    #[test]
+    fn codex_chat_prompt_cache_key_auto_allowlist_covers_known_gateways() {
+        // OpenAI official endpoint.
+        assert!(should_send_codex_chat_prompt_cache_key(
+            &provider_with_base_url_and_routing("https://api.openai.com/v1", None)
+        ));
+        // Azure OpenAI per-resource host.
+        assert!(should_send_codex_chat_prompt_cache_key(
+            &provider_with_base_url_and_routing(
+                "https://my-resource.openai.azure.com/openai/v1",
+                None
+            )
+        ));
+        // OpenRouter accepts prompt_cache_key as a sticky-routing fallback.
+        assert!(should_send_codex_chat_prompt_cache_key(
+            &provider_with_base_url_and_routing("https://openrouter.ai/api/v1", None)
+        ));
+        // Kimi Coding path only.
+        assert!(should_send_codex_chat_prompt_cache_key(
+            &provider_with_base_url_and_routing("https://api.kimi.com/coding/v1", None)
+        ));
+        // Kimi non-coding path must stay off.
+        assert!(!should_send_codex_chat_prompt_cache_key(
+            &provider_with_base_url_and_routing("https://api.kimi.com/v1", None)
+        ));
+        // Unknown strict gateways stay off to avoid 400 on unknown fields.
+        assert!(!should_send_codex_chat_prompt_cache_key(
+            &provider_with_base_url_and_routing("https://api.deepseek.com/v1", None)
+        ));
+        assert!(!should_send_codex_chat_prompt_cache_key(
+            &provider_with_base_url_and_routing("https://open.bigmodel.cn/api/paas/v4", None)
+        ));
+        // Lookalike hosts must not match: a sibling domain that ends with
+        // "openai.azure.com" but is not a subdomain of it, and a host that
+        // merely contains the suffix followed by another domain.
+        assert!(!should_send_codex_chat_prompt_cache_key(
+            &provider_with_base_url_and_routing("https://xopenai.azure.com/v1", None)
+        ));
+        assert!(!should_send_codex_chat_prompt_cache_key(
+            &provider_with_base_url_and_routing("https://evil.openai.azure.com.example/v1", None)
+        ));
+    }
+
+    #[test]
+    fn codex_chat_prompt_cache_key_explicit_override_wins_over_host() {
+        // Explicit enabled forces the key even on an unknown gateway.
+        assert!(should_send_codex_chat_prompt_cache_key(
+            &provider_with_base_url_and_routing("https://api.deepseek.com/v1", Some("enabled"))
+        ));
+        // Explicit disabled suppresses the key even on a known gateway.
+        assert!(!should_send_codex_chat_prompt_cache_key(
+            &provider_with_base_url_and_routing("https://api.openai.com/v1", Some("disabled"))
+        ));
     }
 }
