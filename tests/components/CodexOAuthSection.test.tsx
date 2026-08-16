@@ -1,4 +1,6 @@
 import { render, screen } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import type { ReactElement } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CodexOAuthSection } from "@/components/providers/forms/CodexOAuthSection";
 import { AuthCenterPanel } from "@/components/settings/AuthCenterPanel";
@@ -28,6 +30,15 @@ vi.mock("@/components/providers/forms/XaiOAuthSection", () => ({
 }));
 
 describe("CodexOAuthSection", () => {
+  const renderWithQueryClient = (ui: ReactElement) => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    return render(
+      <QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>,
+    );
+  };
+
   beforeEach(() => {
     mocks.useCodexOauth.mockReturnValue({
       accounts: [
@@ -59,14 +70,14 @@ describe("CodexOAuthSection", () => {
   });
 
   it("does not render account quota by default", () => {
-    render(<CodexOAuthSection />);
+    renderWithQueryClient(<CodexOAuthSection />);
 
     expect(mocks.renderAccountQuota).not.toHaveBeenCalled();
     expect(screen.queryByTestId("account-quota")).not.toBeInTheDocument();
   });
 
   it("renders account quota in Auth Center", () => {
-    render(<AuthCenterPanel />);
+    renderWithQueryClient(<AuthCenterPanel />);
 
     expect(mocks.renderAccountQuota).toHaveBeenCalledWith("account-1");
     expect(screen.getByTestId("account-quota")).toHaveTextContent("account-1");
