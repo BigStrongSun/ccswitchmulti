@@ -1699,6 +1699,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
           models: [
             { model: "deepseek-v4-flash" },
             { model: "deepseek-v4-pro" },
+            { model: "qwen3.8" },
           ],
         },
       },
@@ -1822,6 +1823,46 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     expect(
       screen.getByRole("button", { name: "保存排序" }),
     ).toBeInTheDocument();
+  });
+
+  it("configures V2 capabilities before selecting and saving the shared advertised model order", async () => {
+    const { source, plan } = createSubagentWorkspaceFixture();
+    const existingRouting = plan.settingsConfig?.codexRouting;
+    const existingCatalogModels = plan.settingsConfig?.modelCatalog?.models;
+    renderSubagentWorkspace(source, plan);
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole("tab", { name: "子 Agent" }));
+
+    const configureHeading = screen.getByText(
+      "第一步：配置 V2 子 Agent 模型与能力",
+    );
+    const orderHeading = screen.getByText("第二步：选择 V2 工具说明的前五模型");
+    expect(
+      configureHeading.compareDocumentPosition(orderHeading) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(screen.getByText("可拖拽排序的前五候选")).toBeInTheDocument();
+
+    expect(
+      screen.getByRole("button", { name: "拖动 qwen3.8" }),
+    ).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "deepseek-v4-flash 前五 #2" }),
+    );
+    await user.click(screen.getByRole("button", { name: "保存排序" }));
+
+    await waitFor(() => expect(providersApi.update).toHaveBeenCalledOnce());
+    const [savedProvider, appType] = vi.mocked(providersApi.update).mock
+      .calls[0];
+    expect(appType).toBe("codex");
+    expect(
+      savedProvider.settingsConfig?.modelCatalog?.spawnAgentModels,
+    ).toEqual(["deepseek-v4-pro", "qwen3.8"]);
+    expect(savedProvider.settingsConfig?.modelCatalog?.models).toEqual(
+      existingCatalogModels,
+    );
+    expect(savedProvider.settingsConfig?.codexRouting).toEqual(existingRouting);
   });
 
   it("disables protocol actions while switching and keeps the previous protocol after failure", async () => {
