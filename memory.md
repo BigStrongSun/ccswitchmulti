@@ -3541,3 +3541,11 @@
 - annotated tag object 为 `9d6a8d95f36adaabcb5563eba0cf577c1e24f1cf`，本地和远端 peeled commit 均精确为可信构建提交 `a94210a8e3be0ca7e0bfd5f8f4bc20621f006a94`；后续发布证据提交不得移动 v28 tag。
 - GitHub Actions run `31865535416` 最终为 success，Linux x64/ARM64、Windows x64/ARM64、macOS、Publish GitHub Release、Assemble `latest.json` 七个 jobs 全部完成。Release id `370966917`，非 draft、非 prerelease，`releases/latest` 返回 `v3.19.1-28`。
 - Release 共 19 个实际资产。全部下载到独立临时目录后逐项使用 SHA-256 对照 GitHub 服务端 `digest`，`DigestMismatchCount=0`；`latest.json` 版本为 `3.19.1-28`，六个平台键齐全，URL 全部指向 v28，签名全部非空且与对应 `.sig` 精确一致。
+
+## 2026-08-16 合并官方 v3.19.2 与 CCSwitchMulti 3.19.2-1
+
+- 官方正式 release/tag `v3.19.2` 指向 `43eaf07355af145aebfee301801779e824d4c221`；没有合并比 tag 多 52 个未发布提交的官方 `main`。合并前备份分支为 `backup/qwen38-v31-before-upstream-v3.19.2-merge-20260816`，merge commit 为 `d3b78e09`。四处权威版本源 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock`、`src-tauri/tauri.conf.json` 统一为 `3.19.2-1`，继续保留 `cc-switch-multi`、`CCSwitchMulti`、`com.ccswitchmulti.desktop` 和 BigStrongSun 仓库身份。
+- `-X ours` 只解决同一 hunk 的文本冲突，不能保证语义完整。此次实际发现并修复了 UI import 缺失、`ChatToolCallItems` 半合入、响应读取调用仍用旧 API、OpenCode 模型发现只有前端与测试而没有后端命令、重复测试模块、备份测试函数边界错位、OAuth 测试缺少 QueryClient 上下文等问题。以后合并官方 tag 后必须至少跑 `cargo check --tests` 和全量测试，不能以 `cargo check --lib` 作为完成证明。
+- 用户明确选择采用官方无名 tool call 行为：当 Chat 上游返回缺失/空白 `function.name` 的调用，响应本应为 `completed`，且丢弃坏调用后没有任何可用 tool call 时，Responses 转换返回 `TransformError`，避免 Codex 把空成功回合当作 Agent 完成并静默停住。混有合法 tool call 时只丢坏调用并继续；`finish_reason=length` 保持 `incomplete/max_output_tokens`，不得误报无名调用错误。实现提交为 `52b0fee4`。
+- v3.19.2 的响应体预算必须在所有传输上逐块执行：Hyper、reqwest 和自定义 Streamed 统一经 `bytes_stream()` 累积并在超限时立即断开，Buffered 在返回前比较已有长度；不能先 `collect()`/`bytes()` 收满再检查。读取中途失败仍按 CCSwitchMulti 既有契约归类为 `ResponsePending`，避免成功记账和重试诊断漂移。根修提交为 `0776cff3`，分类兼容提交为 `c7b47c06`。
+- Windows 普通进程可能因 `ERROR_PRIVILEGE_NOT_HELD (1314)` 无法创建测试 symlink；两个 symlink 专项测试仅在该错误下提前返回，其他错误仍失败，有权限的平台仍执行完整安全断言。最终 Rust library 为 `3098 passed / 0 failed / 5 ignored`；前端为 `137 files / 1115 tests` 全通过；`cargo check --tests`、typecheck、Prettier、rustfmt、`git diff --check` 均通过。前端复跑前曾发现 Vite 文件缺失，使用 `pnpm install --frozen-lockfile --force` 按 lock 重建依赖后恢复，不能把损坏的 node_modules 启动错误归因于产品代码。
