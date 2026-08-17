@@ -1881,6 +1881,45 @@ mod tests {
         }
     }
 
+    /// 按当前平台构造一个能通过 Desktop 主程序校验的测试文件。
+    ///
+    /// Windows/Linux 是文件名级校验，直接写文件即可；macOS 要求 bundle 元数据
+    /// （CFBundleIdentifier=com.openai.codex + CFBundleExecutable），构造最小
+    /// Codex.app 结构（44b9de42 起 macOS 校验以 bundle 身份为准）。
+    fn write_desktop_test_executable(dir: &Path) -> PathBuf {
+        let name = desktop_test_executable_name();
+        if cfg!(target_os = "macos") {
+            let bundle = dir.join("Codex.app");
+            let contents = bundle.join("Contents");
+            let macos_dir = contents.join("MacOS");
+            std::fs::create_dir_all(&macos_dir).expect("create fake bundle MacOS dir");
+            std::fs::write(
+                contents.join("Info.plist"),
+                format!(
+                    r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>{name}</string>
+    <key>CFBundleIdentifier</key>
+    <string>{CODEX_DESKTOP_BUNDLE_IDENTIFIER}</string>
+</dict>
+</plist>
+"#
+                ),
+            )
+            .expect("write fake bundle Info.plist");
+            let executable = macos_dir.join(name);
+            std::fs::write(&executable, "").expect("write fake bundle executable");
+            executable
+        } else {
+            let executable = dir.join(name);
+            std::fs::write(&executable, "").expect("write desktop exe");
+            executable
+        }
+    }
+
     #[test]
     fn catalog_projection_accepts_model_and_slug_fields() {
         let value = json!({
@@ -2147,8 +2186,7 @@ JSON.stringify({
     #[test]
     fn codex_desktop_executable_validation_rejects_cli_launcher() {
         let desktop_dir = tempfile::tempdir().expect("create desktop temp dir");
-        let desktop = desktop_dir.path().join(desktop_test_executable_name());
-        std::fs::write(&desktop, "").expect("write desktop exe");
+        let desktop = write_desktop_test_executable(desktop_dir.path());
         let resolved = canonical_codex_desktop_executable_path(&desktop)
             .expect("platform Desktop executable should be accepted");
         assert!(resolved.ends_with(desktop_test_executable_name()));
@@ -2197,8 +2235,7 @@ JSON.stringify({
     #[test]
     fn remembered_codex_desktop_executable_round_trips_confirmed_path() {
         let desktop_dir = tempfile::tempdir().expect("create confirmed desktop temp dir");
-        let desktop = desktop_dir.path().join(desktop_test_executable_name());
-        std::fs::write(&desktop, "").expect("write desktop exe");
+        let desktop = write_desktop_test_executable(desktop_dir.path());
         let state_dir = tempfile::tempdir().expect("create state temp dir");
         let state_path = state_dir
             .path()
