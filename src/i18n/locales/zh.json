@@ -1547,6 +1547,7 @@
     "modelStats": "模型统计",
     "time": "时间",
     "provider": "供应商",
+    "supplier": "供应商",
     "billingModel": "计费模型",
     "inputTokens": "输入",
     "outputTokens": "输出",
