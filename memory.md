@@ -1,5 +1,14 @@
 # CC Switch Repository Memory
 
+## 2026-08-17 合入用户 PR #18 模型排序（Codex 模型选择器用户自定义顺序）
+
+- 用户 GaoHu1997 的 PR `BigStrongSun/ccswitchmulti#18`（head `sort`，commit `5cde9425`）已审查并合入 main：merge commit `b40d914c` + 修复 commit `962d42d4`，已 push fork main，GitHub 状态 MERGED。
+- 功能：MultiRouter 工作台新增“模型排序”tab（@dnd-kit 拖拽，grid 6→7 列），全量模型写入 `modelCatalog.models[].sortIndex`（0 起）；“恢复默认”删除全部 sortIndex。后端 `codex_config.rs` 的 `CodexCatalogModelSpec` 增加 `sort_index: Option<u32>`（读 `sortIndex`/`sort_index`），`sort_codex_catalog_specs_for_picker` 优先级改为用户 sortIndex(0) > spawn_agent_model_priority(1) > 默认供应商排序(provider_rank+2)。前端同步路径（`buildModelCatalogForRoutes`、`rebuildPlanModelCatalog`、`providerWithFetchedModelCatalog`、`catalogDraftFromSourceModel`）均保留 sortIndex，防止路由保存/`/models` 拉取覆盖用户排序。
+- 审查发现并根修两处 PR 缺陷：(1) E0063 编译错误——PR 漏改 3 处测试夹具的 `sort_index` 字段（codex_config.rs 约 8196/8261/10841 行），按 PR 自身模式补 `sort_index: None`；(2) Prettier 缩进不符（`hasChanges` 链式调用），`prettier --write` 修正（纯格式）。PR 作者 checklist 的 typecheck/clippy 均未勾选，且未跑 Rust 测试构建。
+- 门禁（worktree `.worktrees/pr18-model-sort`，main+PR）：`pnpm typecheck` 通过；`pnpm format:check` 通过；`CodexRouterWorkspacePage.test.ts` 54/54；`codexMultiRouterSync.test.ts`+`CodexMultiRouterWizard.test.tsx` 43/43；`cargo test --lib codex_config::` 178/178（含新增 `codex_model_catalog_uses_user_model_sort_index_for_picker_order`）；`cargo test --lib` 全量 3108 passed / 0 failed / 5 ignored；`cargo fmt --check` 通过。worktree 已清理（git worktree remove 因 Windows 长路径失败但注册已解除，目录用 `cmd /c rmdir /s /q` 删除）。
+- 行为边界：用户 sortIndex 现在优先于 spawn_agent_model_priority（此前 priority 列表排最前）；这是 PR 的有意设计（测试注释“全量模型菜单的用户排序优先于子 Agent 候选和历史默认排序”）。sortIndex 只影响 picker 展示顺序，不改路由/子 Agent 候选/默认模型。生效需重启 Codex Desktop（catalog 重新生成）。
+- 注意：push 时远端 fork/main 原在 `6c184547`（PR base），本地 main 领先的 7 个 docs 提交（config-plane/reasoning 设计）随本次一并推送。
+
 ## 2026-08-17 第三方父模型（官方中转）→ 第三方子模型 V2 加密任务失败：根因定位
 
 - 现场：CCSM 3.19.2-5、V2 启用、`tool_namespace="agents"`；父 `gpt-5.6-sol-longnows-5.6`（Longnows 中转，背后是官方 backend）→ 子 Longnows Luna 失败，child rollout 的 `agent_message.encrypted_content` 为 228 字符真实 Fernet（`gAAAAA...`），Stage B `opaque_agent_payload_error` 拒绝。同条件 A/B：官方 Luna 父 → Longnows 子成功（child 收到的是可打印明文，走 Stage B legacy-plaintext 恢复）。
