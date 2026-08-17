@@ -17,14 +17,13 @@ because the official backend rejects any deviation with HTTP 400.
 
 The compatibility layer has two independent stages.
 
-Stage A runs only for an OpenAI-official parent request that belongs to a
-MultiRouter with at least one enabled third-party or ownership-ambiguous route.
-It removes only `parameters.properties.message.encrypted` from the non-reserved
+Stage A runs for any Codex parent request that belongs to a MultiRouter with at
+least one enabled third-party or ownership-ambiguous route. It removes only
+`parameters.properties.message.encrypted` from the non-reserved
 `agents.spawn_agent`, `agents.send_message`, and `agents.followup_task` schemas.
 It handles both top-level `tools` and Responses Lite `additional_tools`, including
 nested namespace containers. It never changes `collaboration.*`, unrelated
-functions, unrelated `encrypted` fields, third-party parent requests, or pure
-official routers.
+functions, unrelated `encrypted` fields, or pure official routers.
 
 Stage B runs only after the effective child route is known to be third-party. It
 projects every plaintext `agent_message` into a standard Responses
@@ -53,11 +52,10 @@ retain OpenAI encryption.
 ## Acceptance
 
 - Reserved `collaboration.*` schemas are byte/schema preserving.
-- Mixed-router official parents produce plaintext arguments only for `agents.*`.
+- Mixed-router parents produce plaintext arguments only for `agents.*`.
 - Top-level tools and Lite `additional_tools` behave identically.
 - Third-party child inputs contain ordinary user messages with readable payloads.
 - Opaque child ciphertext returns an explicit compatibility error.
-- OpenAI-to-OpenAI remains encrypted.
+- Pure OpenAI-to-OpenAI routers remain encrypted.
 - OpenAI-to-Qwen and OpenAI-to-DeepSeek children return a unique nonce plus real
   tool output in live tests after a full CCSwitchMulti and Codex restart.
-
