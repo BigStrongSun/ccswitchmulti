@@ -3718,3 +3718,29 @@
 - 已用 `codex debug prompt-input` 取得 37,111 字符的真实新任务输入，并按 CCSM 的规则将 developer/system 合并为约 30,112 字符的首部 system 后直连 vLLM 重放。语言策略保持 system 开头时，reasoning 为 1,111 字符、中文汉字 28 个、英文字母 840 个；把同一策略移动到 system 末尾时，reasoning 为 1,134 字符、中文汉字 28 个、英文字母 864 个。两者都以 `The user is asking in Chinese...` 开始，否定了“只要尾置 system 约束即可修复”的假设。
 - 即使把“必须使用中文进行内部思考、进度说明和最终回答”直接追加到当前中文用户消息，真实 Codex 长提示重放仍以英文 reasoning 开始（1,064 字符中中文汉字 91 个、英文字母 764 个）。因此当前剩余问题是 Qwen 在大型、以英文为主的 Codex Agent 上下文中不能可靠遵循 reasoning 语言约束，而不是 Responses→Chat 角色合并、策略位置或 vLLM parser 的 bug。
 - 产品边界必须区分 raw reasoning 与用户可见 commentary/final：新任务的后两者已由现有语言策略修复；raw reasoning 若继续开启显示，语言无法由 CCSM 提示词确定性保证。CCSM 不应在协议转换层静默翻译、改写或伪造模型 reasoning。可接受的产品选择只有保留原始英文 reasoning、隐藏 raw reasoning，或另行设计明确标注且有额外成本/延迟的翻译展示层；不得把后两者包装成模型已经用中文思考。
+
+## 2026-08-18 v3.19.2-6 发布核验与未合分支审计
+
+- 上一会话在 GitHub 网络中断前已完成：`bigstrongsun/fix-responses-chat-turn-coalescing`（含 `5b820624` commentary 合并与 `29072912` 第三方中转父级 V2 `message.encrypted` 剥离）合入 main，`bigstrongsun/release-v3.19.2-6` 合入 main，发布提交 `f07b5b8a`，tag `v3.19.2-6` 已推 fork。
+- 本轮核验：Release run `32059546738` 七 job 全 success（42m36s）；Release `CCSwitchMulti v3.19.2-6` 非 draft/prerelease、为 Latest，19 资产；Windows x64 Setup 11,720,812 bytes，SHA-256 `02924e15d2e9d9d3387f3f3dbc1a359dc64a7948551e183f9b426b62eb85f1a2` 与 GitHub digest 精确一致。
+- 未合分支审计（`git cherry` 判定 patch 是否已在 main）：
+  - 已在 main（无需合并）：`fix-qwen38-tool-loop-streaming-v14-base`（v30 覆盖）、`v2-subagent-top-five`（线性合入 v3.19.2-4）、`fix-responses-lite-additional-tools`（`collect_additional_tools` 已在 main）、`release-v3.19.1-25` 的 subagent 写校验/模态（`codex_subagent_v2_write_verification` 已在 main）、`fix-v3.19-codex-pool-session-affinity` 的 in-flight 超时（`effective_streaming_timeout` 已在 main）、GPT-Live `/v1/live` 路由（已在 main）。
+  - 不合并：实验分支（`commentary-reasoning-experiment` 85、`portable-reasoning-experiment-nogo` 36）、学术资料（`subagent-v2-capability-injection`）、备份分支、旧 release 分支（`release-v3.19.1-25` 余下为 docs）。
+  - 真实缺失（v29 分支，见下节）：5 项产品改动。
+  - 上游同步（`fix-responses-commentary-tool-calls` 含约 60 个 2026-08-06~17 上游 commit + 与 `5b820624` 重复的 commentary 修复）：属独立的上游同步决策，本轮未做，留待专门评估。
+
+## 2026-08-18 v3.19.1-29 丢失修复回收与 v3.19.2-7 发布
+
+- 根因：`bigstrongsun/fix-v29-codex-force-repair`（v3.19.1-29，tag `ba318934`）从 `f6f37e93`（v28 证据）分叉；而 v3.19.1-31（tag `12272a31`）与整个 v3.19.2 线从另一条基线（main + qwen38 v30 PR + PR#9 reasoning 直接合并）构建，未包含 v29 分支的修复。用户从 v3.19.1-29 升级到 v3.19.1-31/v3.19.2-x 时这些修复发生回归。
+- 回收的 5 项（均带 RED 回归测试，cherry-pick 到 `bigstrongsun/merge-v29-lost-fixes` 再 `--no-ff` 合入 main，merge commit `557b467a`）：
+  1. `32e7eb4e` fix(codex) 可回滚配置强制覆盖（`force_repair_and_switch_codex_provider` 等 4 函数）+ `23156fee` 测试。
+  2. `dafdfd1f` fix(installer) 事务安装重复实例竞态根修（`Resolve-CcsmReplacementListenerAction` 身份校验接管）+ `3b62ea87` 测试。
+  3. `51187729` fix(release) 导出 NSIS 安装态二进制哈希 + `46146769` 测试。
+  4. `066ecfb9` fix(release) 统一 worktree 发布目录解析 + `5d1fa8f4` 测试。
+  5. `fe527833` fix(codex) Live 写入前归一化 Windows project key（`repair_projects_windows_path_table_line`）+ `67e2e2f5`/`e2865c0b` 测试。
+- 冲突处理：`memory.md`/release-notes 一律保留 main 版本（v29 的 v3.19.1-29 发布说明描述的是被取代的同版本号发布，不并入）；`codex_config.rs` 的 `normalize_codex_config_text_for_live_read` 为语义冲突——main 已重构为 `root_scope`+`in_basic_multiline` 的 notify 恢复，v29 新增 project-key 修复。合并逻辑：outside-multiline 先试 project-key 修复，再按 `root_scope` 试 notify 修复；`in_basic_multiline`（developer_instructions 内）仍做 notify 修复。两类行（`[projects."..."]` 表头 vs `notify = [...]`）互不重叠，顺序安全。
+- 跳过：`271451e7`（选择性吸收 PR#9 reasoning，已被 main 直接合并 PR#9 取代）、`6cde9d28`（v3.19.1-29 版本号 bump）、各 docs/memory 提交。
+- 测试基建修复：`vitest.config.ts` 增加 `exclude: ["**/.worktrees/**", ...]`。此前 `.worktrees/` 下 linked worktree（自带 src/ 与 node_modules）被 vitest 默认 include 命中，主树前端跑测出现 270 文件/2208 用例的假失败；排除后主树为 138 文件/1119 用例全绿。
+- 门禁：`cargo check --tests` 通过；Rust lib 3117 passed / 0 failed / 5 ignored（较基线 3098 新增 19 个回归全过）；前端 138 文件/1119 用例全过；typecheck、Prettier（CI 范围 js/jsx/ts/tsx/css/json）、`cargo fmt --check`、`git diff --check` 全绿。`src/index.html` 的 Prettier 告警为 main 既存问题且不在 CI 检查范围，未处理。
+- 发布：四处版本源统一 `3.19.2-7`（`53a3f124`）；annotated tag `v3.19.2-7`（peel `557b467a`）推 fork。Release run `32077460561` 七 job 全 success（macOS 51m18s 含 notarization，Windows x64 30m45s，Windows arm64 28m49s，Linux x64/arm64 约 20m）。Release 非 draft/prerelease、19 资产；Windows x64 Setup 11,746,930 bytes，SHA-256 `03f7c4e3c6ea91849efc094d642281e793fdf57f84bb4ffef81b681c01ab74ee` 与 GitHub digest 精确一致；`latest.json` 版本 `3.19.2-7`。
+- 环境注意：本机经 Tailscale CGNAT（198.18.0.x）访问 GitHub，API 间歇性 `connectex` 超时，重试即可恢复；`git rev-parse <tag>^{commit}` 的 `^{commit}` 会被 PowerShell 破坏，改用 `git for-each-ref --format=%(*objectname)` 取 peeled commit。
