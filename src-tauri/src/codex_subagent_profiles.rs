@@ -833,11 +833,11 @@ fn compile_reasoning_policy(
                     if capability.codex_selectable_efforts.contains(resolved) {
                         Ok(Some(effort))
                     } else {
-                        return Err(validation_error(
+                        Err(validation_error(
                             "unsupported_reasoning_effort",
                             Some(profile_key),
                             "fixed reasoning effort is not supported by the target model",
-                        ));
+                        ))
                     }
                 }
                 // 能力未知（Unknown）：无法验证档位合法性，但 Unknown ≠ Unsupported。

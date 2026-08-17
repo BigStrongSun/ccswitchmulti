@@ -124,10 +124,10 @@ pub(crate) fn normalize_replayed_item_ids_for_openai(body: &mut Value) -> usize 
     let mut changed = 0;
     for item in input {
         let is_plain_reasoning = item.get("type").and_then(Value::as_str) == Some("reasoning")
-            && !item
+            && item
                 .get("encrypted_content")
                 .and_then(Value::as_str)
-                .is_some_and(|value| !value.is_empty());
+                .is_none_or(|value| value.is_empty());
         if is_plain_reasoning {
             if let Some(object) = item.as_object_mut() {
                 let removed_id = object.remove("id").is_some();
@@ -1016,16 +1016,29 @@ fn instruction_text(value: &Value) -> String {
     }
 }
 
+/// 转换 Responses input 为 Chat messages 期间累积的 pending 状态。
+///
+/// 四个字段对应原先散落的四个 `&mut` 参数，收敛后
+/// `append_responses_item_as_chat_message` 不再超过 7 个参数。
+struct PendingChatItems {
+    tool_calls: Vec<Value>,
+    media: Vec<Value>,
+    reasoning: Option<String>,
+    last_assistant_index: Option<usize>,
+}
+
 fn append_responses_input_as_chat_messages(
     input: &Value,
     messages: &mut Vec<Value>,
     tool_context: &CodexToolContext,
     text_only_model: bool,
 ) -> Result<(), ProxyError> {
-    let mut pending_tool_calls = Vec::new();
-    let mut pending_media = Vec::new();
-    let mut pending_reasoning: Option<String> = None;
-    let mut last_assistant_index: Option<usize> = None;
+    let mut pending = PendingChatItems {
+        tool_calls: Vec::new(),
+        media: Vec::new(),
+        reasoning: None,
+        last_assistant_index: None,
+    };
 
     match input {
         Value::String(text) => {
@@ -1039,10 +1052,7 @@ fn append_responses_input_as_chat_messages(
                 append_responses_item_as_chat_message(
                     item,
                     messages,
-                    &mut pending_tool_calls,
-                    &mut pending_media,
-                    &mut pending_reasoning,
-                    &mut last_assistant_index,
+                    &mut pending,
                     tool_context,
                     text_only_model,
                 )?;
@@ -1052,10 +1062,7 @@ fn append_responses_input_as_chat_messages(
             append_responses_item_as_chat_message(
                 input,
                 messages,
-                &mut pending_tool_calls,
-                &mut pending_media,
-                &mut pending_reasoning,
-                &mut last_assistant_index,
+                &mut pending,
                 tool_context,
                 text_only_model,
             )?;
@@ -1066,13 +1073,13 @@ fn append_responses_input_as_chat_messages(
     // If a later assistant tool-call batch was accumulated after an earlier
     // media-bearing result, the synthetic user media belongs before that next
     // assistant turn.
-    flush_pending_chat_tool_media(messages, &mut pending_media);
+    flush_pending_chat_tool_media(messages, &mut pending.media);
     flush_pending_tool_calls(
         messages,
-        &mut pending_tool_calls,
-        &mut pending_media,
-        &mut pending_reasoning,
-        &mut last_assistant_index,
+        &mut pending.tool_calls,
+        &mut pending.media,
+        &mut pending.reasoning,
+        &mut pending.last_assistant_index,
     );
     // 整个 input 处理完毕后仍剩余的 pending reasoning 属于「真正的尾部」思考
     // （其后已没有任何可前向附挂的 message / function_call），回溯附挂到最后一条
@@ -1080,8 +1087,8 @@ fn append_responses_input_as_chat_messages(
     // reasoning 与 trailing reasoning。
     attach_pending_reasoning_to_previous_assistant(
         messages,
-        last_assistant_index,
-        &mut pending_reasoning,
+        pending.last_assistant_index,
+        &mut pending.reasoning,
     );
     backfill_tool_call_reasoning_placeholders(messages);
     Ok(())
@@ -1090,37 +1097,49 @@ fn append_responses_input_as_chat_messages(
 fn append_responses_item_as_chat_message(
     item: &Value,
     messages: &mut Vec<Value>,
-    pending_tool_calls: &mut Vec<Value>,
-    pending_media: &mut Vec<Value>,
-    pending_reasoning: &mut Option<String>,
-    last_assistant_index: &mut Option<usize>,
+    pending: &mut PendingChatItems,
     tool_context: &CodexToolContext,
     text_only_model: bool,
 ) -> Result<(), ProxyError> {
     let item_type = item.get("type").and_then(|v| v.as_str());
     match item_type {
         Some("function_call") => {
-            append_unique_pending_reasoning(pending_reasoning, responses_item_reasoning_text(item));
-            pending_tool_calls.push(responses_function_call_to_chat_tool_call(
-                item,
-                tool_context,
-            ));
+            append_unique_pending_reasoning(
+                &mut pending.reasoning,
+                responses_item_reasoning_text(item),
+            );
+            pending
+                .tool_calls
+                .push(responses_function_call_to_chat_tool_call(
+                    item,
+                    tool_context,
+                ));
         }
         Some("custom_tool_call") => {
-            append_unique_pending_reasoning(pending_reasoning, responses_item_reasoning_text(item));
-            pending_tool_calls.push(responses_custom_tool_call_to_chat_tool_call(item));
+            append_unique_pending_reasoning(
+                &mut pending.reasoning,
+                responses_item_reasoning_text(item),
+            );
+            pending
+                .tool_calls
+                .push(responses_custom_tool_call_to_chat_tool_call(item));
         }
         Some("tool_search_call") => {
-            append_unique_pending_reasoning(pending_reasoning, responses_item_reasoning_text(item));
-            pending_tool_calls.push(responses_tool_search_call_to_chat_tool_call(item));
+            append_unique_pending_reasoning(
+                &mut pending.reasoning,
+                responses_item_reasoning_text(item),
+            );
+            pending
+                .tool_calls
+                .push(responses_tool_search_call_to_chat_tool_call(item));
         }
         Some("function_call_output") => {
             flush_pending_tool_calls(
                 messages,
-                pending_tool_calls,
-                pending_media,
-                pending_reasoning,
-                last_assistant_index,
+                &mut pending.tool_calls,
+                &mut pending.media,
+                &mut pending.reasoning,
+                &mut pending.last_assistant_index,
             );
             let call_id = item.get("call_id").and_then(|v| v.as_str()).unwrap_or("");
             let output = if text_only_model {
@@ -1156,7 +1175,7 @@ fn append_responses_item_as_chat_message(
                 .cloned()
                 .and_then(plan_chat_tool_output_media)
             {
-                queue_chat_tool_output_media(pending_media, call_id, media_plan.media_parts);
+                queue_chat_tool_output_media(&mut pending.media, call_id, media_plan.media_parts);
                 media_plan.tool_content
             } else {
                 // Cache-sensitive no-media fallback: keep these expressions
@@ -1176,10 +1195,10 @@ fn append_responses_item_as_chat_message(
         Some("custom_tool_call_output") | Some("tool_search_output") => {
             flush_pending_tool_calls(
                 messages,
-                pending_tool_calls,
-                pending_media,
-                pending_reasoning,
-                last_assistant_index,
+                &mut pending.tool_calls,
+                &mut pending.media,
+                &mut pending.reasoning,
+                &mut pending.last_assistant_index,
             );
             let call_id = item.get("call_id").and_then(|v| v.as_str()).unwrap_or("");
             let mut transformed_item = item.clone();
@@ -1207,7 +1226,7 @@ fn append_responses_item_as_chat_message(
                 .unwrap_or(0);
             let output = if replaced > 0 {
                 if !text_only_model {
-                    queue_chat_tool_output_media(pending_media, call_id, media_parts);
+                    queue_chat_tool_output_media(&mut pending.media, call_id, media_parts);
                 }
                 canonical_json_string(&transformed_item)
             } else {
@@ -1228,7 +1247,7 @@ fn append_responses_item_as_chat_message(
             // reasoning_content，思考型模型（kimi 等）多轮对话因此中途"断片"。
             // 真正的尾部剩余由 input 结束时的收尾逻辑、或回合边界消息（user 等）
             // 到达时回溯附挂，见 attach_pending_reasoning_to_previous_assistant。
-            append_pending_reasoning(pending_reasoning, responses_reasoning_item_text(item));
+            append_pending_reasoning(&mut pending.reasoning, responses_reasoning_item_text(item));
         }
         // Responses Lite carries dynamically available tools as a structural
         // input item. Its `role=developer` describes ownership, not a Chat
@@ -1237,15 +1256,15 @@ fn append_responses_item_as_chat_message(
         Some("input_text" | "input_image" | "input_file" | "input_audio") => {
             flush_pending_tool_calls(
                 messages,
-                pending_tool_calls,
-                pending_media,
-                pending_reasoning,
-                last_assistant_index,
+                &mut pending.tool_calls,
+                &mut pending.media,
+                &mut pending.reasoning,
+                &mut pending.last_assistant_index,
             );
             // `flush_pending_tool_calls` intentionally returns early when
             // there is no new assistant batch. A previous tool result may
             // still have media waiting, so flush it before this new message.
-            flush_pending_chat_tool_media(messages, pending_media);
+            flush_pending_chat_tool_media(messages, &mut pending.media);
             let role = item
                 .get("role")
                 .and_then(|v| v.as_str())
@@ -1261,8 +1280,8 @@ fn append_responses_item_as_chat_message(
             });
             if role == "assistant" {
                 let mut message = message;
-                attach_pending_reasoning_to_assistant(&mut message, pending_reasoning);
-                update_last_assistant_index(messages, &message, last_assistant_index);
+                attach_pending_reasoning_to_assistant(&mut message, &mut pending.reasoning);
+                update_last_assistant_index(messages, &message, &mut pending.last_assistant_index);
                 messages.push(message);
                 return Ok(());
             } else {
@@ -1272,53 +1291,53 @@ fn append_responses_item_as_chat_message(
                 // assistant 消息；无上一条 assistant 可附挂时自然丢弃（等同原行为）。
                 attach_pending_reasoning_to_previous_assistant(
                     messages,
-                    *last_assistant_index,
-                    pending_reasoning,
+                    pending.last_assistant_index,
+                    &mut pending.reasoning,
                 );
             }
-            update_last_assistant_index(messages, &message, last_assistant_index);
+            update_last_assistant_index(messages, &message, &mut pending.last_assistant_index);
             messages.push(message);
         }
         Some("message") | None => {
             if item.get("role").is_some() || item.get("content").is_some() {
                 flush_pending_tool_calls(
                     messages,
-                    pending_tool_calls,
-                    pending_media,
-                    pending_reasoning,
-                    last_assistant_index,
+                    &mut pending.tool_calls,
+                    &mut pending.media,
+                    &mut pending.reasoning,
+                    &mut pending.last_assistant_index,
                 );
-                flush_pending_chat_tool_media(messages, pending_media);
+                flush_pending_chat_tool_media(messages, &mut pending.media);
                 let message = responses_message_item_to_chat_message(
                     item,
-                    pending_reasoning,
+                    &mut pending.reasoning,
                     text_only_model,
                     messages,
-                    *last_assistant_index,
+                    pending.last_assistant_index,
                 );
-                update_last_assistant_index(messages, &message, last_assistant_index);
+                update_last_assistant_index(messages, &message, &mut pending.last_assistant_index);
                 messages.push(message);
-            } else if pending_media.is_empty() {
+            } else if pending.media.is_empty() {
                 // Preserve legacy no-media ordering: inert message-like items
                 // used to close a pending tool-call batch.
                 flush_pending_tool_calls(
                     messages,
-                    pending_tool_calls,
-                    pending_media,
-                    pending_reasoning,
-                    last_assistant_index,
+                    &mut pending.tool_calls,
+                    &mut pending.media,
+                    &mut pending.reasoning,
+                    &mut pending.last_assistant_index,
                 );
             }
         }
         Some("compaction") => {
             flush_pending_tool_calls(
                 messages,
-                pending_tool_calls,
-                pending_media,
-                pending_reasoning,
-                last_assistant_index,
+                &mut pending.tool_calls,
+                &mut pending.media,
+                &mut pending.reasoning,
+                &mut pending.last_assistant_index,
             );
-            flush_pending_chat_tool_media(messages, pending_media);
+            flush_pending_chat_tool_media(messages, &mut pending.media);
 
             let summary = item
                 .get("encrypted_content")
@@ -1337,30 +1356,30 @@ fn append_responses_item_as_chat_message(
             if item.get("role").is_some() || item.get("content").is_some() {
                 flush_pending_tool_calls(
                     messages,
-                    pending_tool_calls,
-                    pending_media,
-                    pending_reasoning,
-                    last_assistant_index,
+                    &mut pending.tool_calls,
+                    &mut pending.media,
+                    &mut pending.reasoning,
+                    &mut pending.last_assistant_index,
                 );
-                flush_pending_chat_tool_media(messages, pending_media);
+                flush_pending_chat_tool_media(messages, &mut pending.media);
                 let message = responses_message_item_to_chat_message(
                     item,
-                    pending_reasoning,
+                    &mut pending.reasoning,
                     text_only_model,
                     messages,
-                    *last_assistant_index,
+                    pending.last_assistant_index,
                 );
-                update_last_assistant_index(messages, &message, last_assistant_index);
+                update_last_assistant_index(messages, &message, &mut pending.last_assistant_index);
                 messages.push(message);
-            } else if pending_media.is_empty() {
+            } else if pending.media.is_empty() {
                 // Preserve legacy no-media ordering without letting an inert
                 // unknown item flush a media-bearing result batch.
                 flush_pending_tool_calls(
                     messages,
-                    pending_tool_calls,
-                    pending_media,
-                    pending_reasoning,
-                    last_assistant_index,
+                    &mut pending.tool_calls,
+                    &mut pending.media,
+                    &mut pending.reasoning,
+                    &mut pending.last_assistant_index,
                 );
             }
         }

@@ -906,7 +906,7 @@ impl RequestForwarder {
                 Err(error) => {
                     self.record_codex_pool_attempt(provider, classify_codex_pool_attempt(&error))
                         .await;
-                    let category = self.categorize_proxy_error(&error, &provider);
+                    let category = self.categorize_proxy_error(&error, provider);
                     if matches!(category, ErrorCategory::NonRetryable) {
                         self.router
                             .release_permit_neutral(
@@ -5961,8 +5961,10 @@ fn source_codex_oauth_credentials(headers: &http::HeaderMap) -> Option<(String, 
 /// - `send_chat_request`: 复用 forwarder 已完成认证/代理/超时配置的发送闭包。
 /// - `trace_id`: 可选 Codex 路由 trace id，只写脱敏诊断日志。
 /// - `force_response_header`: 原始请求可能是流式，强制非流式上游时需要标记给 handler。
+///
 /// 返回:
 /// - 最终 Chat response，仍交给现有 Chat→Responses 转换器处理。
+///
 /// 副作用:
 /// - 可能调用 OpenAI hosted tools，并可能向同一第三方 Chat 上游追加多轮请求。
 async fn run_hosted_tool_chat_loop<F, Fut>(
@@ -6034,8 +6036,10 @@ where
 ///
 /// 参数:
 /// - `response`: 待消费的上游响应。
+///
 /// 返回:
 /// - HTTP 状态、已清理实体头的 headers，以及明文字节。
+///
 /// 副作用:
 /// - 消费 response body；如果执行了解压，会移除 content-encoding/content-length。
 async fn read_decoded_proxy_response(

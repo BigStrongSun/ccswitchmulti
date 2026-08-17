@@ -9,15 +9,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-fn openai_cache_read_tokens(usage: &Value) -> u32 {
-    usage
-        .get("cache_read_input_tokens")
-        .or_else(|| usage.pointer("/input_tokens_details/cached_tokens"))
-        .or_else(|| usage.pointer("/prompt_tokens_details/cached_tokens"))
-        .and_then(Value::as_u64)
-        .unwrap_or(0) as u32
-}
-
 fn openai_cache_write_tokens(usage: &Value) -> u32 {
     usage
         .get("cache_creation_input_tokens")

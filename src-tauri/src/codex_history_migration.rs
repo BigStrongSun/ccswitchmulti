@@ -3219,10 +3219,7 @@ fn insert_missing_thread_rows(
         add!("approval_mode", String::new());
         add!("cli_version", String::new());
         add!("history_mode", "legacy".to_string());
-        let placeholders = std::iter::repeat("?")
-            .take(names.len())
-            .collect::<Vec<_>>()
-            .join(", ");
+        let placeholders = vec!["?"; names.len()].join(", ");
         let sql = format!(
             "INSERT INTO threads ({}) VALUES ({}) ON CONFLICT(id) DO NOTHING",
             names.join(", "),

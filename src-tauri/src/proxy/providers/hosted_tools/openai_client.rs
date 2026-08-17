@@ -146,8 +146,10 @@ impl OpenAiHostedToolClient {
     /// 参数:
     /// - `args`: 第三方模型发出的搜索参数。
     /// - `config`: Codex 原始 hosted tool 配置。
+    ///
     /// 返回:
     /// - 成功时返回可回填给第三方模型的稳定结果。
+    ///
     /// 副作用:
     /// - 通过网络请求 OpenAI Responses API；不会记录 API key 或完整搜索正文。
     pub(crate) async fn run_web_search(

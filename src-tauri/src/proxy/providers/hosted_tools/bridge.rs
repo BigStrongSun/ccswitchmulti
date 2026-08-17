@@ -130,6 +130,7 @@ pub(crate) fn scan_hosted_tool_calls(chat_response: &Value) -> HostedToolCallSca
 ///
 /// 返回:
 /// - `true` 表示成功追加；`false` 表示缺少 messages 或 assistant message。
+///
 /// 副作用:
 /// - 修改 `chat_request.messages`，并确保后续请求为非流式。
 pub(crate) fn append_tool_outputs_to_chat_request(

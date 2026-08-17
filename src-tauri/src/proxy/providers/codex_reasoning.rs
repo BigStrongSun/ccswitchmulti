@@ -291,9 +291,7 @@ pub fn builtin_reasoning_capability_for_model(
 pub fn reasoning_capability_from_model_entry(
     model_entry: &Value,
 ) -> Option<CodexModelReasoningCapability> {
-    let Some(value) = model_entry.get("reasoning") else {
-        return None;
-    };
+    let value = model_entry.get("reasoning")?;
     if value.is_null() {
         // reasoning: null 与缺失等价，均视为"未声明"
         return None;

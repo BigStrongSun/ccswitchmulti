@@ -57,8 +57,10 @@ pub(crate) struct WebSearchResult {
 ///
 /// 参数:
 /// - `tool`: Codex 原始 `{"type":"web_search"}` tool 定义。
+///
 /// 返回:
 /// - 去除未知字段后的本地执行配置。
+///
 /// 副作用:
 /// - 无。
 pub(crate) fn config_from_tool(tool: &Value) -> HostedWebSearchConfig {
@@ -95,6 +97,7 @@ pub(crate) fn config_from_tool(tool: &Value) -> HostedWebSearchConfig {
 ///
 /// 返回:
 /// - OpenAI Chat Completions `tools[]` 条目。
+///
 /// 副作用:
 /// - 无。
 pub(crate) fn chat_tool_definition() -> Value {
@@ -126,8 +129,10 @@ pub(crate) fn chat_tool_definition() -> Value {
 ///
 /// 参数:
 /// - `arguments`: Chat tool call 中的 JSON 字符串参数；非 JSON 时按 query 兜底。
+///
 /// 返回:
 /// - 已裁剪结果数量的搜索参数。
+///
 /// 副作用:
 /// - 无。
 pub(crate) fn parse_arguments(arguments: &str) -> WebSearchArguments {
@@ -159,8 +164,10 @@ pub(crate) fn parse_arguments(arguments: &str) -> WebSearchArguments {
 /// 参数:
 /// - `query`: 本次搜索 query，用于回填和日志关联。
 /// - `response`: OpenAI hosted `web_search` Responses JSON。
+///
 /// 返回:
 /// - 裁剪后的搜索结果。
+///
 /// 副作用:
 /// - 无。
 pub(crate) fn result_from_openai_response(query: &str, response: &Value) -> WebSearchResult {
@@ -183,8 +190,10 @@ pub(crate) fn result_from_openai_response(query: &str, response: &Value) -> WebS
 ///
 /// 参数:
 /// - `result`: 已规整的搜索结果。
+///
 /// 返回:
 /// - JSON 字符串，适合放入 Chat `role=tool` 的 `content` 字段。
+///
 /// 副作用:
 /// - 无。
 pub(crate) fn result_to_tool_content(result: &WebSearchResult) -> String {
@@ -207,8 +216,10 @@ pub(crate) fn result_to_tool_content(result: &WebSearchResult) -> String {
 /// 参数:
 /// - `query`: 原始搜索 query。
 /// - `message`: 安全错误摘要，不应包含 API key 或完整网页正文。
+///
 /// 返回:
 /// - JSON 字符串，适合放入 Chat `role=tool` 的 `content` 字段。
+///
 /// 副作用:
 /// - 无。
 pub(crate) fn error_tool_content(query: &str, message: &str) -> String {
@@ -225,8 +236,10 @@ pub(crate) fn error_tool_content(query: &str, message: &str) -> String {
 ///
 /// 参数:
 /// - `query`: 原始搜索 query。
+///
 /// 返回:
 /// - 短 SHA-256 十六进制摘要。
+///
 /// 副作用:
 /// - 无。
 pub(crate) fn query_hash(query: &str) -> String {

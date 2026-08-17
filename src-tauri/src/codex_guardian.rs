@@ -171,7 +171,7 @@ async fn run_guardian_cycle(
         let s = &mut *status.lock().await;
         s.codex_running = true;
         s.cdp_available = true;
-        s.injected = guard.injected_target_ids.len() > 0;
+        s.injected = !guard.injected_target_ids.is_empty();
         s.injected_target_count = guard.injected_target_ids.len();
         s.last_event = "CDP target 无变化".into();
         if s.injected {
