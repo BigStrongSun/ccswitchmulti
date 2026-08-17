@@ -63,6 +63,12 @@ export function UsageTrendChart({
     trends?.map((stat) => {
       const pointDate = new Date(stat.date);
       const cost = parseFiniteNumber(stat.totalCost);
+      const cacheableInput =
+        stat.totalInputTokens +
+        stat.totalCacheCreationTokens +
+        stat.totalCacheReadTokens;
+      const cacheHitRate =
+        cacheableInput > 0 ? stat.totalCacheReadTokens / cacheableInput : 0;
       return {
         rawDate: stat.date,
         label: isHourly
@@ -81,6 +87,7 @@ export function UsageTrendChart({
         outputTokens: stat.totalOutputTokens,
         cacheCreationTokens: stat.totalCacheCreationTokens,
         cacheReadTokens: stat.totalCacheReadTokens,
+        cacheHitRate,
         cost: cost ?? null,
       };
     }) || [];
@@ -106,7 +113,9 @@ export function UsageTrendChart({
               <span>
                 {entry.dataKey === "cost"
                   ? fmtUsd(entry.value, 6)
-                  : fmtInt(entry.value, dateLocale)}
+                  : entry.dataKey === "cacheHitRate"
+                    ? `${(Number(entry.value) * 100).toFixed(1)}%`
+                    : fmtInt(entry.value, dateLocale)}
               </span>
             </div>
           ))}
@@ -150,8 +159,14 @@ export function UsageTrendChart({
                 <stop offset="5%" stopColor="#f97316" stopOpacity={0.2} />
                 <stop offset="95%" stopColor="#f97316" stopOpacity={0} />
               </linearGradient>
-              <linearGradient id="colorCacheRead" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor="#a855f7" stopOpacity={0.2} />
+              <linearGradient
+                id="colorCacheHitRate"
+                x1="0"
+                y1="0"
+                x2="0"
+                y2="1"
+              >
+                <stop offset="5%" stopColor="#a855f7" stopOpacity={0.18} />
                 <stop offset="95%" stopColor="#a855f7" stopOpacity={0} />
               </linearGradient>
             </defs>
@@ -182,6 +197,15 @@ export function UsageTrendChart({
               tickLine={false}
               tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 12 }}
               tickFormatter={(value) => `$${value}`}
+            />
+            <YAxis
+              yAxisId="percent"
+              orientation="right"
+              domain={[0, 1]}
+              axisLine={false}
+              tickLine={false}
+              tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 12 }}
+              tickFormatter={(value) => `${(value * 100).toFixed(0)}%`}
             />
             <Tooltip content={<CustomTooltip />} />
             <Legend />
@@ -216,13 +240,13 @@ export function UsageTrendChart({
               strokeWidth={2}
             />
             <Area
-              yAxisId="tokens"
+              yAxisId="percent"
               type="monotone"
-              dataKey="cacheReadTokens"
-              name={t("usage.cacheReadTokens", "缓存命中")}
+              dataKey="cacheHitRate"
+              name={t("usage.cacheHitRate", "缓存命中率")}
               stroke="#a855f7"
               fillOpacity={1}
-              fill="url(#colorCacheRead)"
+              fill="url(#colorCacheHitRate)"
               strokeWidth={2}
             />
             <Area

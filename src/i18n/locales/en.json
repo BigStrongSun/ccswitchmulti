@@ -1547,6 +1547,7 @@
     "modelStats": "Model Stats",
     "time": "Time",
     "provider": "Provider",
+    "supplier": "Supplier",
     "billingModel": "Billing Model",
     "inputTokens": "Input",
     "outputTokens": "Output",

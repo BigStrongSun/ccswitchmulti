@@ -100,6 +100,7 @@ pub struct ProviderStats {
 #[serde(rename_all = "camelCase")]
 pub struct ModelStats {
     pub model: String,
+    pub provider_name: String,
     pub request_count: u64,
     pub total_tokens: u64,
     pub total_cost: String,
@@ -281,6 +282,192 @@ fn provider_name_coalesce(log_alias: &str, provider_alias: &str) -> String {
     )
 }
 
+fn session_provider_readable_name(provider_id: &str) -> Option<&'static str> {
+    match provider_id {
+        "_session" => Some("Claude (Session)"),
+        "_codex_session" => Some("Codex (Session)"),
+        "_gemini_session" => Some("Gemini (Session)"),
+        "_opencode_session" => Some("OpenCode (Session)"),
+        "_grok_session" => Some("Grok Build (Session)"),
+        _ => None,
+    }
+}
+
+/// 解析数据库里持久化但可能是旧格式字符串的 provider settings_config。
+fn parse_persisted_provider_settings(raw: &str) -> serde_json::Value {
+    serde_json::from_str(raw).unwrap_or(serde_json::Value::Null)
+}
+
+/// `codex-multirouter::route::router-...` 由父供应商 ID 和 route ID 拼接而来。
+///
+/// 该运行期 provider 不会写入 `providers` 表，因此展示名称不能在联表时得到；
+/// 拆出父 ID 后，再从其 `codexRouting` 配置中找到 route 的真实目标供应商。
+fn codex_route_provider_id_parts(provider_id: &str) -> Option<(&str, &str)> {
+    provider_id.split_once("::route::")
+}
+
+/// 读取某个运行时 route provider 对应的真实目标供应商名。
+fn codex_route_target_provider_name(
+    conn: &Connection,
+    provider_id: &str,
+    app_type: &str,
+) -> Result<Option<String>, AppError> {
+    let Some((parent_provider_id, route_id)) = codex_route_provider_id_parts(provider_id) else {
+        return Ok(None);
+    };
+
+    let settings_raw: Option<String> = conn
+        .query_row(
+            "SELECT settings_config FROM providers WHERE id = ?1 AND app_type = ?2",
+            params![parent_provider_id, app_type],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(settings_raw) = settings_raw else {
+        return Ok(None);
+    };
+
+    let settings = parse_persisted_provider_settings(&settings_raw);
+    let Some(routes) = settings
+        .get("codexRouting")
+        .and_then(|routing| routing.get("routes"))
+        .and_then(|routes| routes.as_array())
+    else {
+        return Ok(None);
+    };
+
+    for route in routes {
+        let Some(configured_route_id) = route
+            .get("id")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        if configured_route_id != route_id {
+            continue;
+        }
+
+        if let Some(target_id) =
+            crate::proxy::providers::codex_route_target_provider_id_from_route(route)
+        {
+            let target_name: Option<String> = conn
+                .query_row(
+                    "SELECT name FROM providers WHERE id = ?1 AND app_type = ?2",
+                    params![target_id, app_type],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(name) = target_name.filter(|name| !name.trim().is_empty()) {
+                return Ok(Some(name));
+            }
+        }
+
+        let fallback_name = route
+            .get("label")
+            .or_else(|| route.get("name"))
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        return Ok(fallback_name.map(str::to_string));
+    }
+
+    Ok(None)
+}
+
+fn codex_route_provider_ids_matching_name(
+    conn: &Connection,
+    provider_name: &str,
+) -> Result<Vec<String>, AppError> {
+    let mut codex_provider_names = HashMap::new();
+    {
+        let mut stmt = conn.prepare("SELECT id, name FROM providers WHERE app_type = 'codex'")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (id, name) = row?;
+            codex_provider_names.insert(id, name);
+        }
+    }
+
+    let mut route_ids = Vec::new();
+    {
+        let mut stmt =
+            conn.prepare("SELECT id, settings_config FROM providers WHERE app_type = 'codex'")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (parent_provider_id, settings_raw) = row?;
+            let settings = parse_persisted_provider_settings(&settings_raw);
+            let Some(routes) = settings
+                .get("codexRouting")
+                .and_then(|routing| routing.get("routes"))
+                .and_then(|routes| routes.as_array())
+            else {
+                continue;
+            };
+
+            for route in routes {
+                let Some(route_id) = route
+                    .get("id")
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                else {
+                    continue;
+                };
+
+                let matches_name = if let Some(target_id) =
+                    crate::proxy::providers::codex_route_target_provider_id_from_route(route)
+                {
+                    codex_provider_names.get(target_id).map(String::as_str) == Some(provider_name)
+                } else {
+                    route
+                        .get("label")
+                        .or_else(|| route.get("name"))
+                        .and_then(|value| value.as_str())
+                        .map(str::trim)
+                        == Some(provider_name)
+                };
+                if matches_name {
+                    route_ids.push(format!("{parent_provider_id}::route::{route_id}"));
+                }
+            }
+        }
+    }
+
+    Ok(route_ids)
+}
+
+fn resolve_provider_display_name(
+    conn: &Connection,
+    provider_id: &str,
+    app_type: &str,
+) -> Result<String, AppError> {
+    if let Some(name) = session_provider_readable_name(provider_id) {
+        return Ok(name.to_string());
+    }
+
+    let direct_name: Option<String> = conn
+        .query_row(
+            "SELECT name FROM providers WHERE id = ?1 AND app_type = ?2",
+            params![provider_id, app_type],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(name) = direct_name.filter(|name| !name.trim().is_empty()) {
+        return Ok(name);
+    }
+
+    if let Some(name) = codex_route_target_provider_name(conn, provider_id, app_type)? {
+        return Ok(name);
+    }
+
+    Ok(provider_id.to_string())
+}
 pub(crate) const SESSION_PROXY_DEDUP_WINDOW_SECONDS: i64 = 10 * 60;
 
 /// SQL 片段：把指定别名的 `data_source` 包成 COALESCE，NULL 视作 'proxy'。
@@ -343,6 +530,7 @@ fn effective_model_sql(alias: &str) -> String {
 /// 注意：传入 `provider_name` 时调用方必须把 [`providers_join`] 拼进 FROM，
 /// 否则 `{provider_alias}.name` 无法解析。
 fn push_provider_model_filters(
+    conn: &Connection,
     conditions: &mut Vec<String>,
     params: &mut Vec<Box<dyn rusqlite::ToSql>>,
     log_alias: &str,
@@ -351,18 +539,33 @@ fn push_provider_model_filters(
     model: Option<&str>,
 ) {
     if let Some(name) = provider_name {
-        conditions.push(format!(
-            "{} = ?",
-            provider_name_coalesce(log_alias, provider_alias)
-        ));
+        let display_name_sql = provider_name_coalesce(log_alias, provider_alias);
+        let route_ids =
+            codex_route_provider_ids_matching_name(conn, name).unwrap_or_else(|error| {
+                log::warn!("解析 Codex MultiRouter route 供应商名失败: {error}");
+                Vec::new()
+            });
+        if route_ids.is_empty() {
+            conditions.push(format!("{display_name_sql} = ?"));
+        } else {
+            let placeholders = std::iter::repeat("?")
+                .take(route_ids.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            conditions.push(format!(
+                "({display_name_sql} = ? OR {log_alias}.provider_id IN ({placeholders}))"
+            ));
+        }
         params.push(Box::new(name.to_string()));
+        for route_id in route_ids {
+            params.push(Box::new(route_id));
+        }
     }
     if let Some(m) = model {
         conditions.push(format!("{} = ?", effective_model_sql(log_alias)));
         params.push(Box::new(m.to_string()));
     }
 }
-
 pub(crate) fn effective_usage_log_filter(log_alias: &str) -> String {
     let data_source = data_source_expr(log_alias);
     let proxy_data_source = data_source_expr("proxy_dedup");
@@ -1289,7 +1492,7 @@ fn build_codex_subagent_usage_stats_from_history(
                 && !codex_subagent_usage_has_tokens(&usage_by_model)
             {
                 let rollout_usage = parse_codex_subagent_usage_from_rollout(
-                    conn,
+                    &conn,
                     item.rollout_path.as_deref(),
                     start_date,
                     end_date,
@@ -1472,6 +1675,7 @@ impl Database {
             params_vec.push(Box::new(at.to_string()));
         }
         push_provider_model_filters(
+            &conn,
             &mut conditions,
             &mut params_vec,
             "l",
@@ -1507,6 +1711,7 @@ impl Database {
             rollup_params.push(Box::new(at.to_string()));
         }
         push_provider_model_filters(
+            &conn,
             &mut rollup_conditions,
             &mut rollup_params,
             "r",
@@ -1626,6 +1831,7 @@ impl Database {
             detail_params.push(Box::new(end));
         }
         push_provider_model_filters(
+            &conn,
             &mut detail_conditions,
             &mut detail_params,
             "l",
@@ -1650,6 +1856,7 @@ impl Database {
             &rollup_bounds,
         );
         push_provider_model_filters(
+            &conn,
             &mut rollup_conditions,
             &mut rollup_params,
             "r",
@@ -1806,6 +2013,7 @@ impl Database {
                 extra_params.push(Box::new(at.to_string()));
             }
             push_provider_model_filters(
+                &conn,
                 &mut extra_conditions,
                 &mut extra_params,
                 "l",
@@ -1919,6 +2127,7 @@ impl Database {
             extra_params.push(Box::new(at.to_string()));
         }
         push_provider_model_filters(
+            &conn,
             &mut extra_conditions,
             &mut extra_params,
             "l",
@@ -2002,6 +2211,7 @@ impl Database {
             rollup_params.push(Box::new(at.to_string()));
         }
         push_provider_model_filters(
+            &conn,
             &mut rollup_conditions,
             &mut rollup_params,
             "r",
@@ -2134,6 +2344,7 @@ impl Database {
             detail_params.push(Box::new(at.to_string()));
         }
         push_provider_model_filters(
+            &conn,
             &mut detail_conditions,
             &mut detail_params,
             "l",
@@ -2161,6 +2372,7 @@ impl Database {
             rollup_params.push(Box::new(at.to_string()));
         }
         push_provider_model_filters(
+            &conn,
             &mut rollup_conditions,
             &mut rollup_params,
             "r",
@@ -2174,24 +2386,18 @@ impl Database {
             format!("WHERE {}", rollup_conditions.join(" AND "))
         };
 
-        // UNION detail logs + rollup data, then aggregate
-        let detail_pname = provider_name_coalesce("l", "p");
-        let rollup_pname = provider_name_coalesce("r", "p2");
         let fresh_input_detail = fresh_input_sql("l");
         let fresh_input_rollup = fresh_input_sql("r");
         let sql = format!(
             "SELECT
-                provider_id, app_type, provider_name,
+                provider_id, app_type,
                 SUM(request_count) as request_count,
                 SUM(total_tokens) as total_tokens,
                 SUM(total_cost) as total_cost,
                 SUM(success_count) as success_count,
-                CASE WHEN SUM(request_count) > 0
-                    THEN SUM(latency_sum) / SUM(request_count)
-                    ELSE 0 END as avg_latency
+                SUM(latency_sum) as latency_sum
             FROM (
                 SELECT l.provider_id, l.app_type,
-                    {detail_pname} as provider_name,
                     COUNT(*) as request_count,
                     COALESCE(SUM({fresh_input_detail} + l.output_tokens), 0) as total_tokens,
                     COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0) as total_cost,
@@ -2203,7 +2409,6 @@ impl Database {
                 GROUP BY l.provider_id, l.app_type
                 UNION ALL
                 SELECT r.provider_id, r.app_type,
-                    {rollup_pname} as provider_name,
                     COALESCE(SUM(r.request_count), 0),
                     COALESCE(SUM({fresh_input_rollup} + r.output_tokens), 0),
                     COALESCE(SUM(CAST(r.total_cost_usd AS REAL)), 0),
@@ -2222,37 +2427,88 @@ impl Database {
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = detail_params;
         params.extend(rollup_params);
         let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-        let row_mapper = |row: &rusqlite::Row| {
-            let request_count: i64 = row.get(3)?;
-            let success_count: i64 = row.get(6)?;
-            let success_rate = if request_count > 0 {
-                (success_count as f32 / request_count as f32) * 100.0
-            } else {
-                0.0
-            };
+        let rows = stmt.query_map(param_refs.as_slice(), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, f64>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, f64>(6)?,
+            ))
+        })?;
 
-            Ok(ProviderStats {
-                provider_id: row.get(0)?,
-                provider_name: row.get(2)?,
-                request_count: request_count as u64,
-                total_tokens: row.get::<_, i64>(4)? as u64,
-                total_cost: format!("{:.6}", row.get::<_, f64>(5)?),
-                success_rate,
-                avg_latency_ms: row.get::<_, f64>(7)? as u64,
-            })
-        };
-
-        let rows = stmt.query_map(param_refs.as_slice(), row_mapper)?;
-
-        let mut stats = Vec::new();
-        for row in rows {
-            stats.push(row?);
+        #[derive(Default)]
+        struct ProviderAggregate {
+            request_count: u64,
+            total_tokens: u64,
+            total_cost: f64,
+            success_count: u64,
+            latency_sum: f64,
+            raw_ids: Vec<String>,
         }
+
+        let mut by_name: HashMap<String, ProviderAggregate> = HashMap::new();
+        for row in rows {
+            let (
+                provider_id,
+                app_type,
+                request_count,
+                total_tokens,
+                total_cost,
+                success_count,
+                latency_sum,
+            ) = row?;
+            let display_name = resolve_provider_display_name(&conn, &provider_id, &app_type)?;
+            let aggregate = by_name.entry(display_name.clone()).or_default();
+            aggregate.raw_ids.push(provider_id);
+            aggregate.request_count += request_count.max(0) as u64;
+            aggregate.total_tokens += total_tokens.max(0) as u64;
+            aggregate.total_cost += total_cost;
+            aggregate.success_count += success_count.max(0) as u64;
+            aggregate.latency_sum += latency_sum.max(0.0);
+        }
+
+        let mut stats: Vec<ProviderStats> = by_name
+            .into_iter()
+            .map(|(display_name, aggregate)| {
+                let success_rate = if aggregate.request_count > 0 {
+                    (aggregate.success_count as f32 / aggregate.request_count as f32) * 100.0
+                } else {
+                    0.0
+                };
+                let avg_latency_ms = if aggregate.request_count > 0 {
+                    (aggregate.latency_sum / aggregate.request_count as f64) as u64
+                } else {
+                    0
+                };
+                let provider_id = if aggregate.raw_ids.len() == 1 {
+                    aggregate.raw_ids.into_iter().next().expect("single raw id")
+                } else {
+                    display_name.clone()
+                };
+                Ok(ProviderStats {
+                    provider_id,
+                    provider_name: display_name,
+                    request_count: aggregate.request_count,
+                    total_tokens: aggregate.total_tokens,
+                    total_cost: format!("{:.6}", aggregate.total_cost),
+                    success_rate,
+                    avg_latency_ms,
+                })
+            })
+            .collect::<Result<Vec<_>, AppError>>()?;
+        stats.sort_by(|a, b| {
+            b.total_cost
+                .parse::<f64>()
+                .unwrap_or(0.0)
+                .partial_cmp(&a.total_cost.parse::<f64>().unwrap_or(0.0))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         Ok(stats)
     }
-
-    /// 获取模型统计
     pub fn get_model_stats(
         &self,
         start_date: Option<i64>,
@@ -2278,6 +2534,7 @@ impl Database {
             detail_params.push(Box::new(at.to_string()));
         }
         push_provider_model_filters(
+            &conn,
             &mut detail_conditions,
             &mut detail_params,
             "l",
@@ -2310,6 +2567,7 @@ impl Database {
             rollup_params.push(Box::new(at.to_string()));
         }
         push_provider_model_filters(
+            &conn,
             &mut rollup_conditions,
             &mut rollup_params,
             "r",
@@ -2328,42 +2586,36 @@ impl Database {
             String::new()
         };
 
-        // UNION detail logs + rollup data
-        //
-        // 分组键用「有效计价模型」：pricing_model 非空时优先（成本就是按它的
-        // 定价算的，金额与定价表自洽），NULL/'' 回落 model。默认 response 计价
-        // 模式下两者相同，行为不变；request 模式 + 路由接管下，钱挂在实际计价
-        // 基准名下，而不是上游回显/客户端别名名下。
         let fresh_input_detail = fresh_input_sql("l");
         let fresh_input_rollup = fresh_input_sql("r");
         let detail_model = effective_model_sql("l");
         let rollup_model = effective_model_sql("r");
         let sql = format!(
             "SELECT
-                model,
+                model, provider_id, app_type,
                 SUM(request_count) as request_count,
                 SUM(total_tokens) as total_tokens,
                 SUM(total_cost) as total_cost
             FROM (
-                SELECT {detail_model} as model,
+                SELECT {detail_model} as model, l.provider_id, l.app_type,
                     COUNT(*) as request_count,
                     COALESCE(SUM({fresh_input_detail} + l.output_tokens), 0) as total_tokens,
                     COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0) as total_cost
                 FROM proxy_request_logs l
                 {detail_join}
                 {detail_where}
-                GROUP BY {detail_model}
+                GROUP BY {detail_model}, l.provider_id, l.app_type
                 UNION ALL
-                SELECT {rollup_model},
+                SELECT {rollup_model}, r.provider_id, r.app_type,
                     COALESCE(SUM(r.request_count), 0),
                     COALESCE(SUM({fresh_input_rollup} + r.output_tokens), 0),
                     COALESCE(SUM(CAST(r.total_cost_usd AS REAL)), 0)
                 FROM usage_daily_rollups r
                 {rollup_join}
                 {rollup_where}
-                GROUP BY {rollup_model}
+                GROUP BY {rollup_model}, r.provider_id, r.app_type
             )
-            GROUP BY model
+            GROUP BY model, provider_id, app_type
             ORDER BY total_cost DESC"
         );
 
@@ -2371,34 +2623,62 @@ impl Database {
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = detail_params;
         params.extend(rollup_params);
         let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-        let row_mapper = |row: &rusqlite::Row| {
-            let request_count: i64 = row.get(1)?;
-            let total_cost: f64 = row.get(3)?;
-            let avg_cost = if request_count > 0 {
-                total_cost / request_count as f64
-            } else {
-                0.0
-            };
+        let rows = stmt.query_map(param_refs.as_slice(), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, f64>(5)?,
+            ))
+        })?;
 
-            Ok(ModelStats {
-                model: row.get(0)?,
-                request_count: request_count as u64,
-                total_tokens: row.get::<_, i64>(2)? as u64,
-                total_cost: format!("{total_cost:.6}"),
-                avg_cost_per_request: format!("{avg_cost:.6}"),
-            })
-        };
-
-        let rows = stmt.query_map(param_refs.as_slice(), row_mapper)?;
-
-        let mut stats = Vec::new();
-        for row in rows {
-            stats.push(row?);
+        #[derive(Default)]
+        struct ModelAggregate {
+            request_count: u64,
+            total_tokens: u64,
+            total_cost: f64,
         }
+
+        let mut by_model_provider: HashMap<(String, String), ModelAggregate> = HashMap::new();
+        for row in rows {
+            let (model, provider_id, app_type, request_count, total_tokens, total_cost) = row?;
+            let display_name = resolve_provider_display_name(&conn, &provider_id, &app_type)?;
+            let aggregate = by_model_provider.entry((model, display_name)).or_default();
+            aggregate.request_count += request_count.max(0) as u64;
+            aggregate.total_tokens += total_tokens.max(0) as u64;
+            aggregate.total_cost += total_cost;
+        }
+
+        let mut stats: Vec<ModelStats> = by_model_provider
+            .into_iter()
+            .map(|((model, provider_name), aggregate)| {
+                let avg_cost_per_request = if aggregate.request_count > 0 {
+                    aggregate.total_cost / aggregate.request_count as f64
+                } else {
+                    0.0
+                };
+                ModelStats {
+                    model,
+                    provider_name,
+                    request_count: aggregate.request_count,
+                    total_tokens: aggregate.total_tokens,
+                    total_cost: format!("{:.6}", aggregate.total_cost),
+                    avg_cost_per_request: format!("{avg_cost_per_request:.6}"),
+                }
+            })
+            .collect();
+        stats.sort_by(|a, b| {
+            b.total_cost
+                .parse::<f64>()
+                .unwrap_or(0.0)
+                .partial_cmp(&a.total_cost.parse::<f64>().unwrap_or(0.0))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         Ok(stats)
     }
-
     /// 获取请求日志列表（分页）
     pub fn get_request_logs(
         &self,
@@ -2420,6 +2700,7 @@ impl Database {
         // 与 Dashboard 顶部下拉筛选同口径：Provider 按展示名精确匹配（会话占位
         // 行如 "Claude (Session)" 也能命中），模型按有效计价模型匹配。
         push_provider_model_filters(
+            &conn,
             &mut conditions,
             &mut params,
             "l",
@@ -2488,6 +2769,11 @@ impl Database {
         for row in rows {
             let mut log = row?;
             Self::maybe_backfill_log_costs(&conn, &mut log, &mut pricing_cache)?;
+            log.provider_name = Some(resolve_provider_display_name(
+                &conn,
+                &log.provider_id,
+                &log.app_type,
+            )?);
             logs.push(log);
         }
 
@@ -2525,6 +2811,11 @@ impl Database {
             Ok(mut detail) => {
                 let mut pricing_cache = HashMap::new();
                 Self::maybe_backfill_log_costs(&conn, &mut detail, &mut pricing_cache)?;
+                detail.provider_name = Some(resolve_provider_display_name(
+                    &conn,
+                    &detail.provider_id,
+                    &detail.app_type,
+                )?);
                 Ok(Some(detail))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),

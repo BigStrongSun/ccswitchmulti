@@ -45,6 +45,7 @@ export function ModelStatsTable({
         <TableHeader>
           <TableRow>
             <TableHead>{t("usage.model", "模型")}</TableHead>
+            <TableHead>{t("usage.supplier", "供应商")}</TableHead>
             <TableHead className="text-right">
               {t("usage.requests", "请求数")}
             </TableHead>
@@ -63,7 +64,7 @@ export function ModelStatsTable({
           {stats?.length === 0 ? (
             <TableRow>
               <TableCell
-                colSpan={5}
+                colSpan={6}
                 className="text-center text-muted-foreground"
               >
                 {t("usage.noData", "暂无数据")}
@@ -71,10 +72,11 @@ export function ModelStatsTable({
             </TableRow>
           ) : (
             stats?.map((stat) => (
-              <TableRow key={stat.model}>
+              <TableRow key={`${stat.model}:${stat.providerName}`}>
                 <TableCell className="font-mono text-sm">
                   {stat.model}
                 </TableCell>
+                <TableCell>{stat.providerName}</TableCell>
                 <TableCell className="text-right">
                   {stat.requestCount.toLocaleString()}
                 </TableCell>

@@ -123,6 +123,7 @@ export interface ProviderStats {
 
 export interface ModelStats {
   model: string;
+  providerName: string;
   requestCount: number;
   totalTokens: number;
   totalCost: string;
