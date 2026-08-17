@@ -1,11 +1,27 @@
 # CC Switch Repository Memory
 
+## 2026-08-17 第三方父模型（官方中转）→ 第三方子模型 V2 加密任务失败：根因定位
+
+- 现场：CCSM 3.19.2-5、V2 启用、`tool_namespace="agents"`；父 `gpt-5.6-sol-longnows-5.6`（Longnows 中转，背后是官方 backend）→ 子 Longnows Luna 失败，child rollout 的 `agent_message.encrypted_content` 为 228 字符真实 Fernet（`gAAAAA...`），Stage B `opaque_agent_payload_error` 拒绝。同条件 A/B：官方 Luna 父 → Longnows 子成功（child 收到的是可打印明文，走 Stage B legacy-plaintext 恢复）。
+- 根因（已用最新 openai/codex 源码 `c6058cc`（2026-08-17）一手验证）：Stage A `forwarder.rs::should_make_codex_v2_agents_plaintext` 要求 `official_oauth_request`（即 `normalize_codex_oauth_responses`，父出站必须是官方 ChatGPT Codex backend 原生透传）。父出站为第三方中转时条件为 false，`message.encrypted` 不被剥离；中转背后的官方 backend 仍按 schema 加密 `message` 参数并返回 Fernet 密文。Codex 客户端 `core/src/tools/router.rs::ToolCall::direct_source()` 只在 `namespace=="collaboration"` 且 `encrypted_function_args==Some([])` 时返回 `DirectPlaintextMessage`；非保留 `agents` 命名空间恒为 `Direct`，`multi_agents_v2.rs::communication_from_tool_message` 对 `Direct` 一律 `InterAgentCommunication::new_encrypted(raw_argument)`，child 收到 `encrypted_content=<原始参数>`。所以官方父成功路径实际也是靠 Stage B 把明文从 `encrypted_content` 恢复，而不是 `DirectPlaintextMessage`。
+- 关键修正：给非保留 `agents.*` 响应补 `encrypted_function_args=[]` 对当前客户端无效（`direct_source()` 不认非 collaboration 命名空间），不是本问题的关键修复；关键修复是请求侧 Stage A 扩围。
+- 方案（待实施）：`should_make_codex_v2_agents_plaintext` 去掉 `official_oauth_request` 参数与条件，只保留 `app_type==Codex && codex_multirouter_needs_plaintext_v2_collaboration(router_provider)`。效果：混合/纯第三方 Router 下，无论父出站是官方 OAuth 还是第三方中转，都剥离非保留 `agents.spawn_agent/send_message/followup_task` 的 `message.encrypted`；纯官方 Router 与非 Router provider 行为不变。`make_codex_v2_agents_messages_plaintext` 对 Chat/Anthropic 转换后的 body 是 no-op（结构不匹配），无需额外处理。RED：现有测试 `should_make_codex_v2_agents_plaintext(Codex, mixed, false)` 断言 false 需改为 true；GREEN 后补第三方父→第三方子真实 canary（nonce + child rollout 可读）。
+- 搜索渠道：Codex 内置 web_search 本环境不可用（unsupported call）；matrix-websearch 链经 grep.app 独立命中 `encrypted_function_args` 字段与 `function_call_preserves_empty_encrypted_function_args` 测试；最终定性以克隆的 openai/codex 最新源码为准（`codex-source-latest`，commit `c6058cc`）。
+
 ## 2026-08-17 Responses commentary/tool-call 合并上游定性与官方 PR
 
 - 安装态真实验收确认 `5b820624` 根修有效：ROG 透明代理在 13:58:51、14:01:14 等后续请求中记录同一 assistant 同时具有 commentary `content` 与 `has_tool_calls=true`，不再生成两条连续 assistant；task `01a00e49-e614-7251-a91f-96a9e8889104` 持续完成多轮工具调用并成功创建 Issue #17，没有再以进度播报 `finish_reason=stop` 提前结束。长时间静默来自 90k+ 输入上下文下 80-223 秒的模型生成，不是调度链丢失。
 - CCS 官方最新 `upstream/main@3d126f45` 仍有同一根因：`transform_codex_chat.rs::flush_pending_tool_calls()` 无条件新建 `content:null + tool_calls` assistant，未识别直接相邻 commentary message 与 function_call 属于同一 Responses model turn。Codex 内置搜索、matrix-websearch 独立链和 GitHub API 实时 issue/PR 搜索均未发现精确重复项；Matrix 结果弱，最终以 GitHub API 与最新源码为准。
 - 上游 TDD：新增 Qwen 形状真实转换回归后，未改生产代码时 RED 为 `left: 3, right: 2`；最小 GREEN 将 pending calls 合入直接相邻且尚无 `tool_calls` 的 assistant，并去重已经附挂的 `reasoning_content`，user/tool 边界与原 fallback 不变。聚焦 1/1、整个 `transform_codex_chat` 90/90、fmt/diff/严格 UTF-8 均通过。
 - 官方分支 `bigstrongsun/fix-responses-commentary-tool-calls`，提交 `246a475f`；Issue `farion1231/cc-switch#6529`，Draft PR `farion1231/cc-switch#6530`。PR 仅 1 个文件、1 个提交，目标 `main`，基础 label check 已通过。因 `BigStrongSun/ccswitchmulti` 已脱离 fork 网络，使用真正的官方 fork `BigStrongSun/ccswitchmulti-fork-archive` 推送；该 fork 原为 archived，只读阻止 push，已解除归档并需在 PR 开放期间保持可写以便响应 review。
+
+## 2026-08-17 第三方模型无法调用官方 Web 搜索：Issue #17 与根因定位
+
+- 用户反馈“第三方模型好像还是无法调用官方搜索”，已提交 Issue `BigStrongSun/ccswitchmulti#17`（labels: bug/proxy/multirouter/codex）。本轮只做定位与记录，不改生产代码。
+- 现场证据：安装版 `3.19.2-5`（`127.0.0.1:15721/health` 200）；MultiRouter `New Codex MultiRouter` 的 `settings_config.hostedTools = {"webSearch":{"enabled":true},"imageGeneration":{"enabled":true}}`，开关已开；`~/.cc-switch/logs/codex-router.log`（2026-07-31 至 2026-08-17，194MB）中 `web_search` 与 `hosted` 出现次数均为 0，即 hosted tool 桥接从未实际执行过搜索。官方路由（router-codex-official）原生透传不受影响。
+- 根因链：官方 web search 是 OpenAI Responses API 的 hosted tool，执行点在 OpenAI-hosted 服务端，第三方 Chat Completions 上游无法原生执行（官方文档 https://developers.openai.com/api/docs/guides/tools-web-search 确认；Chat Completions 仅支持专用搜索模型）。CCSwitchMulti 桥接（`src-tauri/src/proxy/providers/hosted_tools/`，MVP `03afd497`、OAuth 复用 `35e87971`）本应解决该问题，但 v31 流式修复 `c45d0dfa`（fix(proxy): preserve streaming for automatic hosted tools）后，`forwarder.rs::should_enable_hosted_tool_loop()` 对 `tool_choice=auto`（或缺省）的流式请求返回 false——正是 Codex Desktop 默认 Agent 流程形态（`stream=true`、`tool_choice="auto"`、tools 含 hosted `web_search`）。loop 关闭时 `apply_hosted_tool_switches(false, ...)` 把 `web_search` function tool 从 Chat 投影移除，第三方模型看不到该工具。桥接目前仅对非流式请求或显式 hosted `tool_choice` 生效，两者在正常 Agent 流程中都不出现。
+- 权衡背景：v31 之前凡带 hosted tools 的 Responses→Chat 请求一律强制 `stream=false`，长上下文表现为持续“正在思考”；v31 优先增量流式，在 streaming auto 路径移除 hosted-only 工具，搜索能力被完全牺牲。Issue #17 列出四个候选方向：流式+按需缓冲（模型实际调用才转 buffered loop）、流中工具循环（暂停 SSE 执行桥接后续接）、按 route 的搜索策略设置、或至少 UI/文档明示限制且 catalog `supports_search_tool=true` 不得暗示 hosted 搜索可用。
+- 检索说明：内置 `web_search` 本会话不可用（`unsupported call`，环境限制）；matrix-websearch 链 A（searxng 搜索）仅返回弱二手结果，链 B 直读 OpenAI 官方文档成功，关键事实以官方一手文档 + 本地源码 + 现场日志为准，无来源冲突。
 
 ## 2026-08-17 CCSM 全面 AI 可配置接口（AI Configuration Plane）设计
 
