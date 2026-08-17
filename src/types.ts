@@ -334,6 +334,8 @@ export interface CodexCatalogModel {
   baseInstructions?: string;
   base_instructions?: string;
   reasoning?: CodexModelReasoningCapability;
+  // User-defined picker order. Lower values appear first in Codex.
+  sortIndex?: number;
 }
 
 export type CodexCacheMode =

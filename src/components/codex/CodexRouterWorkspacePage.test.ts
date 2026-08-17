@@ -1763,7 +1763,15 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       within(screen.getByRole("tablist"))
         .getAllByRole("tab")
         .map((tab) => tab.textContent?.trim()),
-    ).toEqual(["总览", "模型源", "路由规则", "子 Agent", "状态", "测试发布"]);
+    ).toEqual([
+      "总览",
+      "模型源",
+      "路由规则",
+      "模型排序",
+      "子 Agent",
+      "状态",
+      "测试发布",
+    ]);
     expect(screen.queryByText("Sub-Agent 设置")).not.toBeInTheDocument();
 
     await userEvent
@@ -2721,6 +2729,51 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     );
 
     expect(rebuilt.models.map((model) => model.model)).toEqual(["qwen3.6"]);
+  });
+
+  it("preserves the full picker order when routes rebuild the model catalog", () => {
+    const source: Provider = {
+      id: "sorted-source",
+      name: "Sorted Source",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: {
+          models: [{ model: "model-a" }, { model: "model-b" }],
+        },
+      },
+    };
+    const plan: Provider = {
+      ...createDraftRoutingPlan([source], [source]),
+      settingsConfig: {
+        modelCatalog: {
+          models: [
+            { model: "model-a", sortIndex: 1 },
+            { model: "model-b", sortIndex: 0 },
+          ],
+          spawnAgentModels: ["model-a"],
+        },
+      },
+    };
+
+    const rebuilt = buildModelCatalogForRoutes(
+      plan,
+      [
+        {
+          id: "sorted-route",
+          enabled: true,
+          targetProviderId: source.id,
+          match: { models: ["model-a", "model-b"], prefixes: [] },
+          upstream: { apiFormat: "openai_responses" },
+        },
+      ],
+      new Map([[source.id, source]]),
+    );
+
+    expect(rebuilt.models).toEqual([
+      { model: "model-a", sortIndex: 1 },
+      { model: "model-b", sortIndex: 0 },
+    ]);
+    expect(rebuilt.spawnAgentModels).toEqual(["model-a", "model-b"]);
   });
 
   it("keeps unsaved route picker enabled draft state across candidate refreshes", () => {

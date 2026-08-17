@@ -1291,6 +1291,7 @@ struct CodexCatalogModelSpec {
     input_modalities: Option<Vec<String>>,
     base_instructions: Option<String>,
     reasoning: Option<crate::proxy::providers::codex_reasoning::CodexModelReasoningCapability>,
+    sort_index: Option<u32>,
 }
 
 /// 为 Codex 多 Agent 工具的模型说明生成稳定排序键。
@@ -1361,16 +1362,23 @@ fn sort_codex_catalog_specs_for_picker(
 ) -> Vec<CodexCatalogModelSpec> {
     let mut indexed_specs = specs.into_iter().enumerate().collect::<Vec<_>>();
     indexed_specs.sort_by_key(|(original_index, spec)| {
+        // 优先级1: 用户设置的 sortIndex（数字越小越靠前）
+        if let Some(sort_idx) = spec.sort_index {
+            return (0_u8, sort_idx as usize, *original_index);
+        }
+
+        // 优先级2: spawn_agent_model_priority 列表
         if let Some(priority_index) =
             codex_spawn_agent_model_priority_index(spawn_agent_model_priority, &spec.model)
         {
-            return (0_u8, priority_index, *original_index);
+            return (1_u8, priority_index, *original_index);
         }
 
+        // 优先级3: 默认供应商排序逻辑
         let (provider_rank, fallback_index) =
             codex_catalog_model_priority_key(spec, *original_index);
         (
-            provider_rank.saturating_add(1),
+            provider_rank.saturating_add(2),
             fallback_index,
             *original_index,
         )
@@ -1577,6 +1585,12 @@ fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCa
             })
             .or_else(|| official_reasoning_capability_for_model(model, &official_models));
 
+        let sort_index = model_config
+            .get("sortIndex")
+            .or_else(|| model_config.get("sort_index"))
+            .and_then(|value| value.as_u64())
+            .and_then(|value| u32::try_from(value).ok());
+
         specs.push(CodexCatalogModelSpec {
             model: model.to_string(),
             upstream_model,
@@ -1590,6 +1604,7 @@ fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCa
             input_modalities,
             base_instructions,
             reasoning,
+            sort_index,
         });
     }
 
@@ -6399,6 +6414,7 @@ mod tests {
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            sort_index: None,
         }
     }
 
@@ -6625,6 +6641,7 @@ mod tests {
                 input_modalities: None,
                 base_instructions: None,
                 reasoning: None,
+                sort_index: None,
             },
             CodexCatalogModelSpec {
                 model: "model-b".to_string(),
@@ -6637,6 +6654,7 @@ mod tests {
                 input_modalities: None,
                 base_instructions: None,
                 reasoning: None,
+                sort_index: None,
             },
         ];
         sync_codex_managed_agent_files_with_settings(
@@ -8048,6 +8066,7 @@ mod tests {
             input_modalities: None,
             base_instructions: None,
             reasoning: Some(deepseek_reasoning_capability()),
+            sort_index: None,
         }];
 
         sync_codex_managed_agent_files_with_settings(
@@ -8337,6 +8356,7 @@ mod tests {
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            sort_index: None,
         };
         let path = agents_dir.join("stable-role.toml");
 
@@ -8401,6 +8421,7 @@ mod tests {
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            sort_index: None,
         }];
         sync_codex_managed_agent_files_with_settings(
             &specs,
@@ -10109,6 +10130,7 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            sort_index: None,
         }];
         let catalog = codex_model_catalog_from_specs(
             &specs,
@@ -10504,6 +10526,7 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            sort_index: None,
         };
         let entry = codex_catalog_model_entry(
             &template,
@@ -10555,6 +10578,7 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             input_modalities: Some(vec!["text".to_string(), "image".to_string()]),
             base_instructions: Some("base".to_string()),
             reasoning: None,
+            sort_index: None,
         };
 
         let entry = codex_catalog_model_entry(
@@ -10712,6 +10736,36 @@ openai_base_url = "http://127.0.0.1:15721/v1"
     }
 
     #[test]
+    /// 全量模型菜单的用户排序优先于子 Agent 候选和历史默认排序。
+    fn codex_model_catalog_uses_user_model_sort_index_for_picker_order() {
+        let settings = json!({
+            "modelCatalog": {
+                "spawnAgentModels": [
+                    "deepseek-v4-pro",
+                    "qwen3.6"
+                ],
+                "models": [
+                    { "model": "gpt-5.5", "sortIndex": 2 },
+                    { "model": "qwen3.6", "sortIndex": 1 },
+                    { "model": "deepseek-v4-pro", "sort_index": 0 },
+                    { "model": "gpt-5.4" }
+                ]
+            }
+        });
+
+        let ordered = codex_catalog_model_specs(&settings, r#"model = "gpt-5.5""#)
+            .into_iter()
+            .map(|spec| spec.model)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            ordered,
+            vec!["deepseek-v4-pro", "qwen3.6", "gpt-5.5", "gpt-5.4"],
+            "sortIndex must control the complete picker order and leave unranked models available"
+        );
+    }
+
+    #[test]
     /// 未声明 reasoning 的第三方模型不能继承 GPT 档位，但仍必须保留
     /// Codex `ModelInfo` 反序列化所需的空 reasoning 数组。缺失该字段会让
     /// `windowsSandbox/setupStart` 在启动 UAC helper 前因 invalid_config 失败。
@@ -10740,6 +10794,7 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            sort_index: None,
         };
         let entry = codex_catalog_model_entry(
             &template,
@@ -11125,6 +11180,7 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            sort_index: None,
         }];
         let config = r#"model_provider = "codex_model_router_v2"
 
@@ -11172,6 +11228,7 @@ base_url = "http://127.0.0.1:15721/v1"
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            sort_index: None,
         }];
         let catalog = json!({
             "models": [{
@@ -11255,6 +11312,7 @@ base_url = "http://127.0.0.1:15721/v1"
                     source: Some("builtin".into()),
                 },
             ),
+            sort_index: None,
         }];
         let catalog = codex_model_catalog_from_specs(
             &specs,
@@ -11328,6 +11386,7 @@ base_url = "http://127.0.0.1:15721/v1"
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            sort_index: None,
         }];
         let config = r#"model_provider = "codex_model_router_v2"
 
@@ -11763,6 +11822,7 @@ model_context_window = 262144
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            sort_index: None,
         }];
 
         sync_codex_managed_agent_files(&specs, CodexSubagentVersion::V2)
@@ -11870,6 +11930,7 @@ model_provider = "custom"
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            sort_index: None,
         }];
 
         sync_codex_managed_agent_files(&specs, CodexSubagentVersion::V2)
@@ -11926,6 +11987,7 @@ model_provider = "custom"
                 input_modalities: None,
                 base_instructions: None,
                 reasoning: None,
+                sort_index: None,
             },
         )
         .collect::<Vec<_>>();
@@ -11985,6 +12047,7 @@ model_provider = "custom"
                 input_modalities: None,
                 base_instructions: None,
                 reasoning: None,
+                sort_index: None,
             },
         )
         .collect::<Vec<_>>();
@@ -12109,6 +12172,7 @@ model = "handwritten"
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            sort_index: None,
         }];
 
         sync_codex_managed_agent_files(&specs, CodexSubagentVersion::V2)
@@ -12254,6 +12318,7 @@ model_provider = "codex_model_router_v2"
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            sort_index: None,
         };
         let entry = codex_catalog_model_entry(
             &template,
@@ -12308,6 +12373,7 @@ model_provider = "codex_model_router_v2"
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            sort_index: None,
         };
         let entry = codex_catalog_model_entry(
             &template,
@@ -12491,6 +12557,7 @@ max_depth = 2
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            sort_index: None,
         }];
         let catalog_path = get_codex_model_catalog_path();
 
