@@ -1474,6 +1474,127 @@ fn official_reasoning_capability_for_model(
     Some(capability)
 }
 
+/// 从 provider `config.toml` 的 inline model 定义读取 reasoning 能力。
+///
+/// MultiRouter 的可见 alias 往往只保存在 `modelCatalog`，而真实上游模型及其
+/// reasoning 字段保存在 `[model_providers.*].models[]`。旧版只读取前者，导致
+/// 切换到另一个 MultiRouter 后 catalog 丢失 reasoning 档位，外部守护脚本只能
+/// 事后把字段拷回去。这里在 catalog 生成时同时读取两处，并按 model/id/slug/
+/// upstreamModel 建立不区分大小写的索引。
+fn codex_config_reasoning_capability_from_model(
+    model_entry: &Value,
+) -> Option<crate::proxy::providers::codex_reasoning::CodexModelReasoningCapability> {
+    use crate::proxy::providers::codex_reasoning::{
+        CodexModelReasoningCapability, CodexModelReasoningUpstream,
+    };
+
+    if let Some(capability) =
+        crate::proxy::providers::codex_reasoning::reasoning_capability_from_model_entry(
+            model_entry,
+        )
+    {
+        return Some(capability);
+    }
+
+    let levels = model_entry
+        .get("supported_reasoning_levels")
+        .or_else(|| model_entry.get("supported_reasoning_efforts"))
+        .or_else(|| model_entry.get("supportedReasoningEfforts"))
+        .and_then(Value::as_array)?;
+    let supported_efforts = levels
+        .iter()
+        .filter_map(|level| {
+            level
+                .as_str()
+                .or_else(|| level.get("effort").and_then(Value::as_str))
+                .or_else(|| level.get("reasoning_effort").and_then(Value::as_str))
+                .or_else(|| level.get("reasoningEffort").and_then(Value::as_str))
+                .map(str::trim)
+                .filter(|effort| !effort.is_empty())
+                .map(ToString::to_string)
+        })
+        .collect::<Vec<_>>();
+    if supported_efforts.is_empty() {
+        return None;
+    }
+
+    let default_effort = model_entry
+        .get("default_reasoning_level")
+        .or_else(|| model_entry.get("default_reasoning_effort"))
+        .or_else(|| model_entry.get("defaultReasoningEffort"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|effort| !effort.is_empty())
+        .map(ToString::to_string);
+    let effort_map = supported_efforts
+        .iter()
+        .map(|effort| (effort.clone(), effort.clone()))
+        .collect();
+    let capability = CodexModelReasoningCapability {
+        supported: true,
+        disable_allowed: supported_efforts.iter().any(|effort| effort == "none"),
+        supported_efforts,
+        default_effort,
+        upstream: CodexModelReasoningUpstream {
+            format: "string".to_string(),
+            parameter: model_entry
+                .get("reasoning_parameter")
+                .or_else(|| model_entry.get("reasoningParameter"))
+                .and_then(Value::as_str)
+                .unwrap_or("reasoning_effort")
+                .to_string(),
+            effort_map,
+        },
+        output_format: model_entry
+            .get("reasoning_output_format")
+            .or_else(|| model_entry.get("reasoningOutputFormat"))
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        source: Some("provider_config".to_string()),
+    };
+    capability.validate().ok()?;
+    Some(capability)
+}
+
+fn codex_config_reasoning_capabilities(
+    config_text: &str,
+) -> std::collections::HashMap<String, crate::proxy::providers::codex_reasoning::CodexModelReasoningCapability>
+{
+    let Ok(config) = toml::from_str::<toml::Value>(config_text) else {
+        return std::collections::HashMap::new();
+    };
+    let Some(providers) = config.get("model_providers").and_then(toml::Value::as_table) else {
+        return std::collections::HashMap::new();
+    };
+
+    let mut capabilities = std::collections::HashMap::new();
+    for provider in providers.values() {
+        let Some(models) = provider.get("models").and_then(toml::Value::as_array) else {
+            continue;
+        };
+        for model in models {
+            let Ok(model_json) = serde_json::to_value(model) else {
+                continue;
+            };
+            let Some(capability) = codex_config_reasoning_capability_from_model(&model_json) else {
+                continue;
+            };
+            for field in ["model", "id", "slug", "upstreamModel", "upstream_model"] {
+                let Some(identifier) = model_json
+                    .get(field)
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|identifier| !identifier.is_empty())
+                else {
+                    continue;
+                };
+                capabilities.insert(identifier.to_ascii_lowercase(), capability.clone());
+            }
+        }
+    }
+    capabilities
+}
+
 fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCatalogModelSpec> {
     let Some(models) = settings
         .get("modelCatalog")
@@ -1490,6 +1611,7 @@ fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCa
     let mut seen = std::collections::HashSet::new();
     let mut specs = Vec::new();
     let official_models = codex_official_models_cache().unwrap_or_default();
+    let configured_reasoning = codex_config_reasoning_capabilities(config_text);
 
     for model_config in models {
         let Some(model) = model_config
@@ -1582,6 +1704,15 @@ fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCa
                 upstream_model.as_deref().and_then(
                     crate::proxy::providers::codex_reasoning::builtin_reasoning_capability_for_model,
                 )
+            })
+            .or_else(|| {
+                configured_reasoning.get(&model.to_ascii_lowercase()).cloned()
+            })
+            .or_else(|| {
+                upstream_model
+                    .as_deref()
+                    .and_then(|upstream| configured_reasoning.get(&upstream.to_ascii_lowercase()))
+                    .cloned()
             })
             .or_else(|| official_reasoning_capability_for_model(model, &official_models));
 
@@ -10824,6 +10955,41 @@ openai_base_url = "http://127.0.0.1:15721/v1"
         );
         assert!(entry.get("default_reasoning_level").is_none());
         assert_eq!(entry.get("supported_reasoning_levels"), Some(&json!([])));
+    }
+
+    #[test]
+    fn codex_catalog_reasoning_falls_back_to_provider_config_for_aliases() {
+        let settings = json!({
+            "modelCatalog": {
+                "models": [{
+                    "model": "vendor-router-alias",
+                    "upstreamModel": "gpt-5.6-terra"
+                }]
+            }
+        });
+        let config = r#"
+            [model_providers.custom]
+            models = [{
+                model = "gpt-5.6-terra",
+                supported_reasoning_levels = [
+                    { effort = "low", description = "Fast" },
+                    { effort = "high", description = "Deep" }
+                ],
+                default_reasoning_level = "high"
+            }]
+        "#;
+
+        let specs = codex_catalog_model_specs(&settings, config);
+        let reasoning = specs
+            .first()
+            .and_then(|spec| spec.reasoning.as_ref())
+            .expect("provider config reasoning should resolve through upstreamModel");
+        assert_eq!(reasoning.default_effort.as_deref(), Some("high"));
+        assert_eq!(
+            reasoning.supported_efforts,
+            vec!["low".to_string(), "high".to_string()]
+        );
+        assert_eq!(reasoning.source.as_deref(), Some("provider_config"));
     }
 
     #[test]
