@@ -166,6 +166,24 @@ pub async fn switch_provider(
     .map_err(|e| format!("供应商切换任务执行失败: {e}"))?
 }
 
+/// Explicitly repair legacy Codex configuration and retry the requested provider switch.
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn force_repair_and_switch_codex_provider(
+    app_handle: tauri::AppHandle,
+    providerId: String,
+) -> Result<crate::services::CodexForceRepairOutcome, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle
+            .try_state::<AppState>()
+            .ok_or_else(|| "应用状态不可用".to_string())?;
+        ProviderService::force_repair_and_switch_codex_provider(state.inner(), &providerId)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("Codex 强制覆盖任务执行失败: {error}"))?
+}
+
 /// 一键退出 Codex 接管、切回内建 OpenAI，并尽量把全部历史归并到 `openai` 桶。
 ///
 /// 官方切换复用既有链路以保留 OAuth `auth.json`。历史归桶仍要求

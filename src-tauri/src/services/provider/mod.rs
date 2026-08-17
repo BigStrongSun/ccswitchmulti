@@ -268,6 +268,17 @@ pub struct SwitchResult {
     pub warnings: Vec<String>,
 }
 
+/// Outcome of the explicit Codex recovery action shown after a failed switch.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexForceRepairOutcome {
+    pub provider_id: String,
+    pub backup_directory: String,
+    pub repaired_fields: Vec<String>,
+    pub repaired_models: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -934,6 +945,121 @@ mod tests {
                 matches!(result, Err(AppError::InvalidInput(_) | AppError::Message(_))),
                 "reserved roleName must be rejected by the compiler before persistence, got {result:?}"
             );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn force_repair_switch_backs_up_and_repairs_live_alias_and_provider_reasoning() {
+        with_test_home(|state, _| {
+            let live = r#"[agents]
+max_threads = 10
+max_concurrent_threads_per_session = 8
+max_depth = 2
+
+[mcp_servers.user_owned]
+command = "example-mcp"
+"#;
+            crate::config::write_text_file(&crate::codex_config::get_codex_config_path(), live)
+                .expect("seed legacy live config");
+
+            let settings = json!({
+                "auth": { "OPENAI_API_KEY": "sk-test" },
+                "config": "model = \"deepseek-v4-flash\"\nmodel_provider = \"custom\"\n[model_providers.custom]\nname = \"DeepSeek\"\nbase_url = \"https://example.test/v1\"\nwire_api = \"responses\"\n",
+                "modelCatalog": { "models": [{
+                    "model": "deepseek-v4-flash",
+                    "reasoning": {
+                        "supported": true,
+                        "supportedEfforts": ["low", "high", "max"],
+                        "defaultEffort": "medium",
+                        "disableAllowed": true,
+                        "upstream": { "format": "string", "parameter": "reasoning_effort" },
+                        "source": "builtin"
+                    }
+                }]}
+            });
+            let mut provider = Provider::with_id(
+                "force-repair-target".to_string(),
+                "Force repair target".to_string(),
+                settings,
+                None,
+            );
+            provider.meta = Some(ProviderMeta {
+                api_format: Some("openai_responses".to_string()),
+                ..Default::default()
+            });
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &provider)
+                .expect("seed provider");
+
+            let outcome =
+                ProviderService::force_repair_and_switch_codex_provider(state, &provider.id)
+                    .expect("force repair should succeed");
+
+            assert!(Path::new(&outcome.backup_directory)
+                .join("config.toml")
+                .exists());
+            let repaired_live = crate::codex_config::read_and_validate_codex_config_text()
+                .expect("read repaired live config");
+            let parsed: toml::Value = toml::from_str(&repaired_live).expect("parse repaired live");
+            assert!(parsed["agents"].get("max_threads").is_none());
+            assert_eq!(
+                parsed["agents"]["max_concurrent_threads_per_session"].as_integer(),
+                Some(8)
+            );
+            assert_eq!(
+                parsed["mcp_servers"]["user_owned"]["command"].as_str(),
+                Some("example-mcp")
+            );
+            let stored = state
+                .db
+                .get_provider_by_id(&provider.id, AppType::Codex.as_str())
+                .expect("read repaired provider")
+                .expect("provider exists");
+            assert_eq!(
+                stored.settings_config["modelCatalog"]["models"][0]["reasoning"]["defaultEffort"],
+                json!("high")
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn force_repair_switch_restores_exact_live_and_provider_when_retry_fails() {
+        with_test_home(|state, _| {
+            let live = "[agents]\nmax_threads = 7\n";
+            crate::config::write_text_file(&crate::codex_config::get_codex_config_path(), live)
+                .expect("seed legacy live config");
+            let provider = Provider::with_id(
+                "force-repair-invalid".to_string(),
+                "Invalid target".to_string(),
+                json!({
+                    "auth": { "OPENAI_API_KEY": "sk-test" },
+                    "config": "this is not valid TOML = ["
+                }),
+                None,
+            );
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &provider)
+                .expect("seed invalid provider");
+
+            let error =
+                ProviderService::force_repair_and_switch_codex_provider(state, &provider.id)
+                    .expect_err("invalid target must fail after recovery preparation");
+            assert!(error.to_string().contains("已恢复原配置"));
+            assert_eq!(
+                crate::codex_config::read_codex_config_text().expect("read rolled back live"),
+                live,
+                "rollback must restore the exact original TOML text"
+            );
+            let stored = state
+                .db
+                .get_provider_by_id(&provider.id, AppType::Codex.as_str())
+                .expect("read rolled back provider")
+                .expect("provider exists");
+            assert_eq!(stored.settings_config, provider.settings_config);
         });
     }
 
@@ -4616,6 +4742,134 @@ impl ProviderService {
 
         // Normal mode: full switch with Live config write
         Self::switch_normal(state, app_type, id, &providers)
+    }
+
+    /// Back up, narrowly repair, and retry one failed Codex provider switch.
+    ///
+    /// This is deliberately separate from normal switching: users must explicitly choose the
+    /// recovery action. The original Provider row and exact Live TOML bytes are restored if any
+    /// later projection or switch step fails.
+    pub fn force_repair_and_switch_codex_provider(
+        state: &AppState,
+        provider_id: &str,
+    ) -> Result<CodexForceRepairOutcome, AppError> {
+        let original_provider = state
+            .db
+            .get_provider_by_id(provider_id, AppType::Codex.as_str())?
+            .ok_or_else(|| AppError::Message(format!("Codex 供应商 {provider_id} 不存在")))?;
+        let original_current_provider = Self::current(state, AppType::Codex)?;
+        let original_live = crate::codex_config::read_codex_config_text()?;
+        let live_repair =
+            crate::codex_config::repair_codex_live_config_text_for_force_switch(&original_live)?;
+
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let backup_directory = crate::config::get_home_dir()
+            .join(".cc-switch")
+            .join("backups")
+            .join("codex-force-repair")
+            .join(format!(
+                "{timestamp}-{}",
+                crate::config::sanitize_provider_name(provider_id)
+            ));
+        std::fs::create_dir_all(&backup_directory)
+            .map_err(|error| AppError::io(&backup_directory, error))?;
+        crate::config::write_text_file(&backup_directory.join("config.toml"), &original_live)?;
+        let provider_backup = serde_json::to_string_pretty(&original_provider)
+            .map_err(|error| AppError::Message(format!("序列化 Codex 供应商备份失败: {error}")))?;
+        crate::config::write_text_file(&backup_directory.join("provider.json"), &provider_backup)?;
+
+        let restore_original_state = || -> Result<(), AppError> {
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &original_provider)?;
+            state.db.set_current_provider(
+                AppType::Codex.as_str(),
+                original_current_provider.as_str(),
+            )?;
+            crate::settings::set_current_provider(
+                &AppType::Codex,
+                (!original_current_provider.is_empty())
+                    .then_some(original_current_provider.as_str()),
+            )?;
+            crate::config::write_text_file(
+                &crate::codex_config::get_codex_config_path(),
+                &original_live,
+            )
+        };
+
+        let mut repaired_provider = original_provider.clone();
+        let reasoning_repair =
+            crate::proxy::providers::codex_reasoning::repair_invalid_reasoning_capabilities(
+                &mut repaired_provider.settings_config,
+            );
+        state
+            .db
+            .save_provider(AppType::Codex.as_str(), &repaired_provider)?;
+        if let Err(error) =
+            crate::codex_config::write_codex_live_config_atomic(Some(&live_repair.config_text))
+        {
+            return match restore_original_state() {
+                Ok(()) => Err(error),
+                Err(restore_error) => Err(AppError::Message(format!(
+                    "强制覆盖写入前迁移失败: {error}; 自动回滚也失败: {restore_error}; 备份位于 {}",
+                    backup_directory.display()
+                ))),
+            };
+        }
+
+        let switch_result = match Self::switch(state, AppType::Codex, provider_id) {
+            Ok(result) => result,
+            Err(error) => {
+                if let Err(restore_error) = restore_original_state() {
+                    return Err(AppError::Message(format!(
+                        "强制覆盖失败: {error}; 自动回滚也失败: {restore_error}; 备份位于 {}",
+                        backup_directory.display()
+                    )));
+                }
+                return Err(AppError::Message(format!(
+                    "强制覆盖失败，已恢复原配置: {error}; 备份位于 {}",
+                    backup_directory.display()
+                )));
+            }
+        };
+
+        let finalize = || -> Result<(), AppError> {
+            let final_live = crate::codex_config::read_and_validate_codex_config_text()?;
+            let final_live =
+                crate::codex_config::restore_codex_user_owned_tables_after_force_switch(
+                    &live_repair.config_text,
+                    &final_live,
+                )?;
+            let final_repair =
+                crate::codex_config::repair_codex_live_config_text_for_force_switch(&final_live)?;
+            crate::codex_config::write_codex_live_config_atomic(Some(&final_repair.config_text))
+        };
+        if let Err(error) = finalize() {
+            return match restore_original_state() {
+                Ok(()) => Err(AppError::Message(format!(
+                    "强制覆盖最终校验失败，已恢复原配置: {error}; 备份位于 {}",
+                    backup_directory.display()
+                ))),
+                Err(restore_error) => Err(AppError::Message(format!(
+                    "强制覆盖最终校验失败: {error}; 自动回滚也失败: {restore_error}; 备份位于 {}",
+                    backup_directory.display()
+                ))),
+            };
+        }
+
+        let mut warnings = live_repair.warnings;
+        warnings.extend(reasoning_repair.warnings);
+        warnings.extend(switch_result.warnings);
+        Ok(CodexForceRepairOutcome {
+            provider_id: provider_id.to_string(),
+            backup_directory: backup_directory.to_string_lossy().into_owned(),
+            repaired_fields: live_repair.repaired_fields,
+            repaired_models: reasoning_repair.repaired_models,
+            warnings,
+        })
     }
 
     /// Normal switch flow (non-proxy mode)

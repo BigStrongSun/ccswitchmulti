@@ -26,6 +26,52 @@ import {
   GROKBUILD_OFFICIAL_PROVIDER_ID,
 } from "@/utils/providerCapabilities";
 
+interface ProviderSwitchFailureToastAction {
+  label: string;
+  onClick: () => void | Promise<void>;
+}
+
+interface ProviderSwitchFailureToastOptions {
+  action: ProviderSwitchFailureToastAction;
+  cancel?: ProviderSwitchFailureToastAction;
+}
+
+interface CreateProviderSwitchFailureToastOptionsInput {
+  appId: AppId;
+  providerId: string;
+  detail: string;
+  copy: (detail: string) => void;
+  forceRepair: (providerId: string) => void | Promise<void>;
+  t: (key: string, fallback: string) => string;
+}
+
+/** Build recovery actions without losing the failed provider identity. */
+export function createProviderSwitchFailureToastOptions({
+  appId,
+  providerId,
+  detail,
+  copy,
+  forceRepair,
+  t,
+}: CreateProviderSwitchFailureToastOptionsInput): ProviderSwitchFailureToastOptions {
+  return {
+    action: {
+      label: t("common.copy", "复制"),
+      onClick: () => copy(detail),
+    },
+    ...(appId === "codex"
+      ? {
+          cancel: {
+            label: t("notifications.forceRepair", "强制覆盖"),
+            onClick: () => forceRepair(providerId),
+          },
+        }
+      : {}),
+  };
+}
+
+const codexForceRepairInFlight = new Set<string>();
+
 export const useAddProviderMutation = (appId: AppId) => {
   const queryClient = useQueryClient();
   const { t } = useTranslation();
@@ -368,8 +414,72 @@ export const useSwitchProviderMutation = (appId: AppId) => {
         );
       }
     },
-    onError: (error: Error) => {
+    onError: (error: Error, providerId: string) => {
       const detail = extractErrorMessage(error) || t("common.unknown");
+
+      const recoveryActions = createProviderSwitchFailureToastOptions({
+        appId,
+        providerId,
+        detail,
+        copy: (text) => {
+          navigator.clipboard?.writeText(text).catch(() => undefined);
+        },
+        forceRepair: async (failedProviderId) => {
+          if (codexForceRepairInFlight.has(failedProviderId)) return;
+          const confirmed = window.confirm(
+            t("notifications.forceRepairConfirm", {
+              defaultValue:
+                "将先备份当前 Codex 配置，再修复旧字段并用该供应商重建 CCSM 托管配置。MCP、项目和用户自定义配置会保留。是否继续？",
+            }),
+          );
+          if (!confirmed) return;
+
+          codexForceRepairInFlight.add(failedProviderId);
+          try {
+            const outcome =
+              await providersApi.forceRepairAndSwitchCodexProvider(
+                failedProviderId,
+              );
+            await queryClient.invalidateQueries({
+              queryKey: ["providers", appId],
+            });
+            await queryClient.invalidateQueries({ queryKey: ["proxyStatus"] });
+            await queryClient.invalidateQueries({ queryKey: ["proxyRunning"] });
+            await queryClient.invalidateQueries({
+              queryKey: ["proxyTakeoverStatus"],
+            });
+            await queryClient.invalidateQueries({
+              queryKey: ["liveTakeoverActive"],
+            });
+            toast.success(
+              t("notifications.forceRepairSuccess", {
+                defaultValue: "Codex 配置已修复并切换成功",
+              }),
+              {
+                description: t("notifications.forceRepairBackup", {
+                  defaultValue: "原配置已备份到：{{path}}",
+                  path: outcome.backupDirectory,
+                }),
+                duration: 10000,
+              },
+            );
+          } catch (repairError) {
+            toast.error(
+              t("notifications.forceRepairFailed", {
+                defaultValue: "强制覆盖失败",
+              }),
+              {
+                description:
+                  extractErrorMessage(repairError) || t("common.unknown"),
+                duration: 12000,
+              },
+            );
+          } finally {
+            codexForceRepairInFlight.delete(failedProviderId);
+          }
+        },
+        t: (key, fallback) => t(key, { defaultValue: fallback }),
+      });
 
       toast.error(
         t("notifications.switchFailedTitle", { defaultValue: "切换失败" }),
@@ -378,13 +488,8 @@ export const useSwitchProviderMutation = (appId: AppId) => {
             defaultValue: "切换失败：{{error}}",
             error: detail,
           }),
-          duration: 6000,
-          action: {
-            label: t("common.copy", { defaultValue: "复制" }),
-            onClick: () => {
-              navigator.clipboard?.writeText(detail).catch(() => undefined);
-            },
-          },
+          duration: 12000,
+          ...recoveryActions,
         },
       );
     },

@@ -262,7 +262,7 @@ pub fn write_codex_live_atomic(
 
     // 准备写入内容
     let cfg_text = match config_text_opt {
-        Some(s) => s.to_string(),
+        Some(s) => normalize_codex_config_text_for_live_read(s)?,
         None => String::new(),
     };
     if !cfg_text.trim().is_empty() {
@@ -381,6 +381,37 @@ fn repair_root_notify_windows_path_line(line: &str) -> Option<String> {
     Some(output)
 }
 
+fn repair_projects_windows_path_table_line(line: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    let prefix = "[projects.\"";
+    let path_start_in_trimmed = prefix.len();
+    if !trimmed.starts_with(prefix) {
+        return None;
+    }
+
+    let suffix_start_in_trimmed =
+        trimmed[path_start_in_trimmed..].find("\"]")? + path_start_in_trimmed;
+    let path = &trimmed[path_start_in_trimmed..suffix_start_in_trimmed];
+    if !looks_like_windows_path(path) {
+        return None;
+    }
+    let escaped = escape_unescaped_toml_windows_path(path)?;
+    let indentation_len = line.len() - trimmed.len();
+    let path_start = indentation_len + path_start_in_trimmed;
+    let path_end = indentation_len + suffix_start_in_trimmed;
+
+    let mut output = String::with_capacity(line.len() + escaped.len() - path.len());
+    output.push_str(&line[..path_start]);
+    output.push_str(&escaped);
+    output.push_str(&line[path_end..]);
+    Some(output)
+}
+
+fn looks_like_windows_path(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\'
+}
+
 /// Codex Desktop 的 Windows Computer Use 初始化器曾生成过裸反斜杠的根级
 /// `notify = ["C:\Users\...", ...]`。在 TOML basic string 中 `\U` 会被解释为
 /// 8 位 Unicode 转义并使整个 Live 配置不可解析。这里只在原文本确实无效时，
@@ -403,8 +434,21 @@ fn normalize_codex_config_text_for_live_read(text: &str) -> Result<String, AppEr
             root_scope = false;
         }
 
-        let recoverable_notify_line = (outside_multiline && root_scope) || in_basic_multiline;
-        if recoverable_notify_line {
+        if outside_multiline {
+            if let Some(next) = repair_projects_windows_path_table_line(line) {
+                output.push_str(&next);
+                repaired = true;
+            } else if root_scope {
+                if let Some(next) = repair_root_notify_windows_path_line(line) {
+                    output.push_str(&next);
+                    repaired = true;
+                } else {
+                    output.push_str(line);
+                }
+            } else {
+                output.push_str(line);
+            }
+        } else if in_basic_multiline {
             if let Some(next) = repair_root_notify_windows_path_line(line) {
                 output.push_str(&next);
                 repaired = true;
@@ -425,9 +469,7 @@ fn normalize_codex_config_text_for_live_read(text: &str) -> Result<String, AppEr
 
     if repaired {
         validate_config_toml(&output)?;
-        log::warn!(
-            "Normalized an invalid unescaped Windows path in Codex Live notify configuration"
-        );
+        log::warn!("Normalized an invalid unescaped Windows path in Codex Live configuration");
         return Ok(output);
     }
 
@@ -465,7 +507,7 @@ pub(crate) fn is_custom_codex_model_provider_id(id: &str) -> bool {
 pub fn write_codex_live_config_atomic(config_text_opt: Option<&str>) -> Result<(), AppError> {
     let config_path = get_codex_config_path();
     let cfg_text = match config_text_opt {
-        Some(config_text) => config_text.to_string(),
+        Some(config_text) => normalize_codex_config_text_for_live_read(config_text)?,
         None => String::new(),
     };
 
@@ -2616,6 +2658,98 @@ fn ensure_codex_agents_defaults(doc: &mut DocumentMut) {
     if !agents.contains_key("max_depth") {
         agents["max_depth"] = toml_edit::value(CC_SWITCH_CODEX_AGENT_DEPTH);
     }
+}
+
+/// Result of the narrow, format-preserving repair used before a forced Codex switch.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexLiveConfigRepairOutcome {
+    pub config_text: String,
+    pub repaired_fields: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+/// Canonicalize legacy Codex fields without replacing the user's configuration document.
+///
+/// The caller is responsible for backing up and atomically writing the returned text. This
+/// function intentionally edits only schema aliases CCSwitchMulti knows how to migrate. MCP,
+/// projects, plugins, memories and user-authored agent configuration remain untouched.
+pub fn repair_codex_live_config_text_for_force_switch(
+    config_text: &str,
+) -> Result<CodexLiveConfigRepairOutcome, AppError> {
+    let normalized = normalize_codex_config_text_for_live_read(config_text)?;
+    let mut doc = if normalized.trim().is_empty() {
+        DocumentMut::new()
+    } else {
+        normalized
+            .parse::<DocumentMut>()
+            .map_err(|error| AppError::Message(format!("Invalid Codex config.toml: {error}")))?
+    };
+    let had_legacy_threads = doc
+        .get("agents")
+        .and_then(|item| item.as_table())
+        .is_some_and(|agents| agents.contains_key("max_threads"));
+    let had_canonical_threads = doc
+        .get("agents")
+        .and_then(|item| item.as_table())
+        .is_some_and(|agents| agents.contains_key("max_concurrent_threads_per_session"));
+
+    ensure_codex_agents_defaults(&mut doc);
+
+    let mut repaired_fields = Vec::new();
+    let mut warnings = Vec::new();
+    if had_legacy_threads {
+        repaired_fields.push("agents.max_threads".to_string());
+        if had_canonical_threads {
+            warnings.push(
+                "Removed duplicate agents.max_threads alias; preserved max_concurrent_threads_per_session"
+                    .to_string(),
+            );
+        }
+    }
+    if normalized != config_text {
+        repaired_fields.push("notify".to_string());
+        warnings.push("Escaped a legacy Windows notify path so the TOML remains valid".to_string());
+    }
+
+    let repaired = doc.to_string();
+    validate_config_toml(&repaired)?;
+    Ok(CodexLiveConfigRepairOutcome {
+        config_text: repaired,
+        repaired_fields,
+        warnings,
+    })
+}
+
+/// Restore user-owned root tables after the normal switch pipeline has projected CCSM state.
+///
+/// Existing post-switch values win; entries that disappeared solely because they are not in
+/// CCSwitchMulti's database are filled from the pre-switch document. Provider/model routing is
+/// deliberately excluded so stale endpoints or bearer tokens cannot be resurrected.
+pub fn restore_codex_user_owned_tables_after_force_switch(
+    before_switch: &str,
+    after_switch: &str,
+) -> Result<String, AppError> {
+    let before = before_switch
+        .parse::<DocumentMut>()
+        .map_err(|error| AppError::Message(format!("Invalid pre-switch Codex config: {error}")))?;
+    let mut after = after_switch
+        .parse::<DocumentMut>()
+        .map_err(|error| AppError::Message(format!("Invalid post-switch Codex config: {error}")))?;
+
+    for key in ["mcp_servers", "projects", "plugins", "memories"] {
+        let Some(original) = before.get(key) else {
+            continue;
+        };
+        match after.as_table_mut().get_mut(key) {
+            Some(current) => merge_missing_codex_toml_item(current, original),
+            None => {
+                after.as_table_mut().insert(key, original.clone());
+            }
+        }
+    }
+
+    Ok(after.to_string())
 }
 
 /// 根据模型 slug 生成官方 custom agent 的稳定角色名。
@@ -5355,12 +5489,15 @@ pub(crate) fn merge_codex_provider_config_texts(
     live_config_text: &str,
     provider_config_text: &str,
 ) -> Result<String, AppError> {
+    let live_config_text = normalize_codex_config_text_for_live_read(live_config_text)?;
+    let provider_config_text = normalize_codex_config_text_for_live_read(provider_config_text)?;
+
     if provider_config_text.trim().is_empty() {
-        return strip_codex_provider_owned_fields_from_live(live_config_text);
+        return strip_codex_provider_owned_fields_from_live(&live_config_text);
     }
 
     if live_config_text.trim().is_empty() {
-        return Ok(provider_config_text.to_string());
+        return Ok(provider_config_text);
     }
 
     let mut live_doc = live_config_text
@@ -7946,6 +8083,54 @@ mod tests {
                 "notify = ['C:\\Users\\sunda\\AppData\\Local\\OpenAI\\Codex\\runtimes\\cua_node\\bin\\codex-computer-use.exe', \"turn-ended\"]\n",
                 "Keep this user instruction.\n",
             ))
+        );
+    }
+
+    #[test]
+    fn codex_live_read_repairs_unescaped_windows_project_basic_key() {
+        let invalid = concat!(
+            "model = \"gpt-5.6-sol\"\n",
+            "[projects.\"C:\\Users\\sunda\\Documents\\LLMservice\"]\n",
+            "trust_level = \"trusted\"\n",
+        );
+        assert!(validate_config_toml(invalid).is_err());
+
+        let normalized = normalize_codex_config_text_for_live_read(invalid)
+            .expect("the generated Windows project key should be recoverable");
+        validate_config_toml(&normalized).expect("normalized live config must be valid TOML");
+        let parsed: toml::Value = toml::from_str(&normalized).expect("parse normalized project");
+        assert_eq!(
+            parsed["projects"][r"C:\Users\sunda\Documents\LLMservice"]["trust_level"].as_str(),
+            Some("trusted")
+        );
+        assert!(normalized.contains(concat!(
+            "[projects.\"C:\\\\Users\\\\sunda\\\\Documents\\\\LLMservice\"]"
+        )));
+    }
+
+    #[test]
+    #[serial]
+    fn codex_atomic_write_repairs_unescaped_windows_project_basic_key() {
+        let _home = TestHomeGuard::new();
+        let invalid = concat!(
+            "model = \"gpt-5.6-sol\"\n",
+            "[projects.\"C:\\Users\\sunda\\Documents\\LLMservice\"]\n",
+            "trust_level = \"trusted\"\n",
+        );
+
+        write_codex_live_config_atomic(Some(invalid))
+            .expect("config-only restore should repair the project key before writing");
+        let config_only = read_codex_config_text().expect("read config-only output");
+        validate_config_toml(&config_only).expect("config-only output must stay valid");
+
+        write_codex_live_atomic(&json!({"auth_mode": "chatgpt"}), Some(invalid))
+            .expect("auth plus config restore should repair the project key before writing");
+        let auth_and_config = read_codex_config_text().expect("read atomic output");
+        let parsed: toml::Value =
+            toml::from_str(&auth_and_config).expect("parse atomic write output");
+        assert_eq!(
+            parsed["projects"][r"C:\Users\sunda\Documents\LLMservice"]["trust_level"].as_str(),
+            Some("trusted")
         );
     }
 
@@ -12589,6 +12774,56 @@ max_depth = 2
             agents.get("max_depth").and_then(|value| value.as_integer()),
             Some(2)
         );
+    }
+
+    #[test]
+    fn force_repair_canonicalizes_agent_aliases_and_preserves_user_config() {
+        let input = r#"model_provider = "codex_model_router_v2"
+
+[agents]
+max_threads = 10
+max_concurrent_threads_per_session = 8
+max_depth = 2
+
+[mcp_servers.user_owned]
+command = "example-mcp"
+
+[projects.'C:\Users\example\repo']
+trust_level = "trusted"
+"#;
+
+        let outcome = repair_codex_live_config_text_for_force_switch(input)
+            .expect("force repair should accept valid legacy TOML");
+        let parsed: toml::Value =
+            toml::from_str(&outcome.config_text).expect("repaired config should remain valid TOML");
+        let agents = parsed.get("agents").expect("agents table");
+
+        assert_eq!(
+            agents
+                .get("max_concurrent_threads_per_session")
+                .and_then(toml::Value::as_integer),
+            Some(8),
+            "canonical value must win when both spellings exist"
+        );
+        assert!(agents.get("max_threads").is_none());
+        assert_eq!(
+            agents.get("max_depth").and_then(toml::Value::as_integer),
+            Some(2)
+        );
+        assert_eq!(
+            parsed["mcp_servers"]["user_owned"]["command"].as_str(),
+            Some("example-mcp"),
+            "force repair must preserve user-owned MCP config"
+        );
+        assert_eq!(
+            parsed["projects"][r"C:\Users\example\repo"]["trust_level"].as_str(),
+            Some("trusted"),
+            "force repair must preserve user-owned project config"
+        );
+        assert!(outcome
+            .repaired_fields
+            .iter()
+            .any(|field| field == "agents.max_threads"));
     }
 
     #[test]

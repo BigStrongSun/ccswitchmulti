@@ -14,23 +14,6 @@ function Get-RepoRoot {
     return (Resolve-Path (Join-Path $scriptDir "..")).Path
 }
 
-# Build the requested Chinese export directory name without relying on source-file encoding.
-function Get-DefaultExportFolderName {
-    return @([char]0x6700, [char]0x65B0, [char]0x7248, "ccswitchmulti") -join ""
-}
-
-# Resolve the final export directory. By default it sits under the LLMservice root.
-function Get-ExportRoot {
-    param([string]$RepoRoot, [string]$RequestedRoot)
-
-    if (-not [string]::IsNullOrWhiteSpace($RequestedRoot)) {
-        return $RequestedRoot
-    }
-
-    $workspaceRoot = Split-Path -Parent $RepoRoot
-    return Join-Path $workspaceRoot (Get-DefaultExportFolderName)
-}
-
 # Copy matched build artifacts and return the copied file count.
 function Copy-Artifacts {
     param(
@@ -91,6 +74,29 @@ function Copy-RawExe {
         Set-Content -LiteralPath (Join-Path $Destination "RAW_EXE_ALIAS_LOCKED.txt") -Value $note -Encoding UTF8
         Write-Warning $note
     }
+}
+
+# Export the exact hash of the executable embedded by the NSIS bundle. Tauri temporarily replaces
+# its restored UNK bundle marker with NSS while packaging, then restores the raw release binary.
+# The installed executable therefore intentionally differs from windows/raw-exe by this marker.
+function Write-NsisInstalledExeHash {
+    param(
+        [string]$SourceExe,
+        [string]$Destination,
+        [string]$Version
+    )
+
+    if (-not (Test-Path -LiteralPath $SourceExe -PathType Leaf)) {
+        throw "raw executable is missing while deriving NSIS installed hash: $SourceExe"
+    }
+    New-Item -ItemType Directory -Force -Path $Destination | Out-Null
+    $hash = Get-TauriNsisInstalledExeSha256 -Path $SourceExe
+    $path = Join-Path $Destination "CCSwitchMulti_$Version`_x64-installed-exe.sha256"
+    [System.IO.File]::WriteAllText(
+        $path,
+        "$hash`r`n",
+        [System.Text.UTF8Encoding]::new($false)
+    )
 }
 
 # Copy the standalone Codex history repair Python tool.
@@ -297,7 +303,7 @@ function Write-LatestJson {
 }
 
 $repoRoot = Get-RepoRoot
-$exportRoot = Get-ExportRoot -RepoRoot $repoRoot -RequestedRoot $ReleaseRoot
+$exportRoot = Resolve-CcswitchmultiReleaseRoot -RepoRoot $repoRoot -RequestedRoot $ReleaseRoot
 $tauriDir = Join-Path $repoRoot "src-tauri"
 $releaseDir = Join-Path $tauriDir "target\release"
 $bundleDir = Join-Path $releaseDir "bundle"
@@ -351,6 +357,7 @@ if (Test-Path -LiteralPath $sourceExe) {
 }
 
 Copy-RawExe -SourceExe $sourceExe -Destination $windowsRawExe -Version $version
+Write-NsisInstalledExeHash -SourceExe $sourceExe -Destination $windowsInstaller -Version $version
 Copy-HistoryRepairPythonTool -SourceDir (Join-Path $repoRoot "scripts\codex-history-tool") -Destination $historyTool
 
 Write-PlatformNote -Path (Join-Path $exportRoot "linux") -Platform "Linux" -Reason "Run pnpm tauri build on a Linux host with Rust, Node/pnpm, and Tauri WebKit/GTK dependencies installed, then run this export script."
