@@ -2548,11 +2548,7 @@ impl RequestForwarder {
                 && !codex_responses_to_anthropic,
             request_body,
         );
-        if should_make_codex_v2_agents_plaintext(
-            app_type,
-            codex_router_provider,
-            normalize_codex_oauth_responses,
-        ) {
+        if should_make_codex_v2_agents_plaintext(app_type, codex_router_provider) {
             let changed = super::providers::openai_compat::make_codex_v2_agents_messages_plaintext(
                 &mut request_body,
             );
@@ -7143,13 +7139,15 @@ fn codex_provider_has_routing_config(provider: &Provider) -> bool {
         || provider.settings_config.get("modelRoutes").is_some()
 }
 
-fn should_make_codex_v2_agents_plaintext(
-    app_type: &AppType,
-    router_provider: &Provider,
-    official_oauth_request: bool,
-) -> bool {
+/// 判断本次 Codex 请求是否应把非保留 `agents.*` V2 协作工具的 `message.encrypted`
+/// 剥离为明文投递。
+///
+/// 只要 Router 含启用的第三方/来源歧义路由（`codex_multirouter_needs_plaintext_v2_collaboration`），
+/// 无论父出站是官方 OAuth 还是第三方中转，都必须剥离：第三方中转背后的官方 backend
+/// 仍会按 schema 加密 `message`，不剥离则 child 收到不可解密的 Fernet 密文。
+/// 纯官方 Router 与非 Router provider 返回 false，行为不变。
+fn should_make_codex_v2_agents_plaintext(app_type: &AppType, router_provider: &Provider) -> bool {
     matches!(app_type, AppType::Codex)
-        && official_oauth_request
         && super::providers::codex_multirouter_needs_plaintext_v2_collaboration(router_provider)
 }
 
@@ -8381,7 +8379,7 @@ mod tests {
     }
 
     #[test]
-    fn agents_plaintext_rewrite_requires_codex_mixed_router_and_official_parent() {
+    fn agents_plaintext_rewrite_requires_codex_mixed_router() {
         let mut mixed = test_provider_with_type(None);
         mixed.settings_config = json!({
             "codexRouting": {
@@ -8394,18 +8392,32 @@ mod tests {
         });
         assert!(should_make_codex_v2_agents_plaintext(
             &AppType::Codex,
-            &mixed,
-            true
+            &mixed
         ));
-        assert!(!should_make_codex_v2_agents_plaintext(
+        // 第三方父（官方中转）也必须剥离 message.encrypted，否则中转背后的
+        // 官方 backend 会按 schema 加密 message，child 收到不可解密的 Fernet 密文。
+        assert!(should_make_codex_v2_agents_plaintext(
             &AppType::Codex,
-            &mixed,
-            false
+            &mixed
         ));
         assert!(!should_make_codex_v2_agents_plaintext(
             &AppType::Claude,
-            &mixed,
-            true
+            &mixed
+        ));
+
+        // 纯第三方 Router：所有路由都非官方，第三方父同样需要明文投递。
+        let mut third_party_only = test_provider_with_type(None);
+        third_party_only.settings_config = json!({
+            "codexRouting": {
+                "enabled": true,
+                "routes": [
+                    {"enabled": true, "upstream": {"auth": {"source": "provider_config"}}}
+                ]
+            }
+        });
+        assert!(should_make_codex_v2_agents_plaintext(
+            &AppType::Codex,
+            &third_party_only
         ));
 
         let mut official_only = test_provider_with_type(None);
@@ -8420,8 +8432,7 @@ mod tests {
         });
         assert!(!should_make_codex_v2_agents_plaintext(
             &AppType::Codex,
-            &official_only,
-            true
+            &official_only
         ));
     }
 
