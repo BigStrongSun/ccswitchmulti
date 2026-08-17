@@ -3667,15 +3667,15 @@ function ModelOrderTab({
   );
   const hasChanges =
     draftModels.map((model) => model.model).join("\n") !==
-      catalog.models
-        .slice()
-        .sort(
-          (left, right) =>
-            (left.sortIndex ?? Number.MAX_SAFE_INTEGER) -
-            (right.sortIndex ?? Number.MAX_SAFE_INTEGER),
-        )
-        .map((model) => model.model)
-        .join("\n");
+    catalog.models
+      .slice()
+      .sort(
+        (left, right) =>
+          (left.sortIndex ?? Number.MAX_SAFE_INTEGER) -
+          (right.sortIndex ?? Number.MAX_SAFE_INTEGER),
+      )
+      .map((model) => model.model)
+      .join("\n");
 
   useEffect(() => {
     setDraftModels(

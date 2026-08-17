@@ -8207,6 +8207,7 @@ mod tests {
                 crate::proxy::providers::codex_reasoning::builtin_reasoning_capability_for_model(
                     "deepseek-v4-flash",
                 ),
+            sort_index: None,
         }];
         let make_settings = |description: &str| {
             json!({
@@ -8272,6 +8273,7 @@ mod tests {
                 crate::proxy::providers::codex_reasoning::builtin_reasoning_capability_for_model(
                     "deepseek-v4-flash",
                 ),
+            sort_index: None,
         }];
         let persisted_settings = json!({
             "codexRouting": {
@@ -10872,6 +10874,7 @@ openai_base_url = "http://127.0.0.1:15721/v1"
                     source: Some("builtin".into()),
                 },
             ),
+            sort_index: None,
         };
 
         let entry = codex_catalog_model_entry(
