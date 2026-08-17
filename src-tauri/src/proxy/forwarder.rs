@@ -2551,7 +2551,6 @@ impl RequestForwarder {
         if should_make_codex_v2_agents_plaintext(
             app_type,
             codex_router_provider,
-            normalize_codex_oauth_responses,
         ) {
             let changed = super::providers::openai_compat::make_codex_v2_agents_messages_plaintext(
                 &mut request_body,
@@ -7150,10 +7149,8 @@ fn codex_provider_has_routing_config(provider: &Provider) -> bool {
 fn should_make_codex_v2_agents_plaintext(
     app_type: &AppType,
     router_provider: &Provider,
-    official_oauth_request: bool,
 ) -> bool {
     matches!(app_type, AppType::Codex)
-        && official_oauth_request
         && super::providers::codex_multirouter_needs_plaintext_v2_collaboration(router_provider)
 }
 
@@ -8385,7 +8382,7 @@ mod tests {
     }
 
     #[test]
-    fn agents_plaintext_rewrite_requires_codex_mixed_router_and_official_parent() {
+    fn agents_plaintext_rewrite_applies_to_any_codex_mixed_router() {
         let mut mixed = test_provider_with_type(None);
         mixed.settings_config = json!({
             "codexRouting": {
@@ -8398,18 +8395,11 @@ mod tests {
         });
         assert!(should_make_codex_v2_agents_plaintext(
             &AppType::Codex,
-            &mixed,
-            true
-        ));
-        assert!(!should_make_codex_v2_agents_plaintext(
-            &AppType::Codex,
-            &mixed,
-            false
+            &mixed
         ));
         assert!(!should_make_codex_v2_agents_plaintext(
             &AppType::Claude,
-            &mixed,
-            true
+            &mixed
         ));
 
         let mut official_only = test_provider_with_type(None);
@@ -8424,8 +8414,22 @@ mod tests {
         });
         assert!(!should_make_codex_v2_agents_plaintext(
             &AppType::Codex,
-            &official_only,
-            true
+            &official_only
+        ));
+
+        let mut third_party_only = test_provider_with_type(None);
+        third_party_only.settings_config = json!({
+            "codexRouting": {
+                "enabled": true,
+                "routes": [{
+                    "enabled": true,
+                    "upstream": {"auth": {"source": "provider_config"}}
+                }]
+            }
+        });
+        assert!(should_make_codex_v2_agents_plaintext(
+            &AppType::Codex,
+            &third_party_only
         ));
     }
 
