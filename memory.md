@@ -3676,3 +3676,11 @@
 - 分支 `bigstrongsun/fix-responses-chat-turn-coalescing`、提交 `5b820624` 在 Chat 所有权边界把直接相邻的 commentary assistant 与 pending tool calls 合并为一条 `{content, tool_calls}` assistant 消息，并对跨 item 重复的 `reasoning_content` 去重。工具输出、媒体边界和没有 commentary 的 tool-call 消息保持原语义。
 - 新 Qwen 形状回归覆盖 `reasoning → assistant commentary → function_call(重复 reasoning) → function_call_output`；聚焦测试 1/1、全部 Responses→Chat 相关测试 87/87、`cargo fmt --check`、`git diff --check` 和严格 UTF-8 解码均通过。
 - 本地 NSIS 测试包为 `C:\Users\sunda\Documents\LLMservice\最新版ccswitchmulti\CCSwitchMulti_3.19.2-5_5b820624_x64-setup-unsigned.exe`，SHA-256 `AF3301EED778DE0778B9745CBA6EF498C4749E307F766E679568923A057517D6`。bundle 已成功生成，但构建末尾因本机只有 Tauri 公钥、没有私钥而返回签名错误，所以该测试包明确标记为 unsigned，不能当正式 release 资产。当前已安装 exe 因进程锁未被替换，仍是原 `v3.19.2-5`；回滚副本位于 `C:\Users\sunda\AppData\Local\CCSwitchMulti\cc-switch.exe.before-turn-coalescing-20260817-061522.bak`。
+
+## 2026-08-17 Qwen3.8 英文 raw reasoning 的最终边界
+
+- 截图任务 `01a00e49-e614-7251-a91f-96a9e8889104` 创建于语言策略写入 `~/.codex/config.toml` 之前；任务创建时冻结的 developer instructions 没有新策略，所以该旧任务中的英文 commentary 不能用来判定新配置失效。新建的受控 Codex CLI 任务 `01a00e9c-4b41-7263-86a9-3b14a7b4cb07` 已证明边界：三个 `type=reasoning` item 仍为英文，但两个进度 `agent_message` 和最终 `agent_message` 全为中文。
+- vLLM 与 parser 没有把中文 reasoning 转成英文。直接对 roglinux `127.0.0.1:5001/v1/chat/completions` 发送流式请求，在短 Agent 提示并明确要求中文思考时，服务原生 `delta.reasoning` 持续输出中文；因此编码、SSE 映射和 CCSM Chat→Responses 适配都不是该语言现象的起点。
+- 已用 `codex debug prompt-input` 取得 37,111 字符的真实新任务输入，并按 CCSM 的规则将 developer/system 合并为约 30,112 字符的首部 system 后直连 vLLM 重放。语言策略保持 system 开头时，reasoning 为 1,111 字符、中文汉字 28 个、英文字母 840 个；把同一策略移动到 system 末尾时，reasoning 为 1,134 字符、中文汉字 28 个、英文字母 864 个。两者都以 `The user is asking in Chinese...` 开始，否定了“只要尾置 system 约束即可修复”的假设。
+- 即使把“必须使用中文进行内部思考、进度说明和最终回答”直接追加到当前中文用户消息，真实 Codex 长提示重放仍以英文 reasoning 开始（1,064 字符中中文汉字 91 个、英文字母 764 个）。因此当前剩余问题是 Qwen 在大型、以英文为主的 Codex Agent 上下文中不能可靠遵循 reasoning 语言约束，而不是 Responses→Chat 角色合并、策略位置或 vLLM parser 的 bug。
+- 产品边界必须区分 raw reasoning 与用户可见 commentary/final：新任务的后两者已由现有语言策略修复；raw reasoning 若继续开启显示，语言无法由 CCSM 提示词确定性保证。CCSM 不应在协议转换层静默翻译、改写或伪造模型 reasoning。可接受的产品选择只有保留原始英文 reasoning、隐藏 raw reasoning，或另行设计明确标注且有额外成本/延迟的翻译展示层；不得把后两者包装成模型已经用中文思考。
