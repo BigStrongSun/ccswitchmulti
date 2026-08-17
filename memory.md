@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-08-17 Responses commentary/tool-call 合并上游定性与官方 PR
+
+- 安装态真实验收确认 `5b820624` 根修有效：ROG 透明代理在 13:58:51、14:01:14 等后续请求中记录同一 assistant 同时具有 commentary `content` 与 `has_tool_calls=true`，不再生成两条连续 assistant；task `01a00e49-e614-7251-a91f-96a9e8889104` 持续完成多轮工具调用并成功创建 Issue #17，没有再以进度播报 `finish_reason=stop` 提前结束。长时间静默来自 90k+ 输入上下文下 80-223 秒的模型生成，不是调度链丢失。
+- CCS 官方最新 `upstream/main@3d126f45` 仍有同一根因：`transform_codex_chat.rs::flush_pending_tool_calls()` 无条件新建 `content:null + tool_calls` assistant，未识别直接相邻 commentary message 与 function_call 属于同一 Responses model turn。Codex 内置搜索、matrix-websearch 独立链和 GitHub API 实时 issue/PR 搜索均未发现精确重复项；Matrix 结果弱，最终以 GitHub API 与最新源码为准。
+- 上游 TDD：新增 Qwen 形状真实转换回归后，未改生产代码时 RED 为 `left: 3, right: 2`；最小 GREEN 将 pending calls 合入直接相邻且尚无 `tool_calls` 的 assistant，并去重已经附挂的 `reasoning_content`，user/tool 边界与原 fallback 不变。聚焦 1/1、整个 `transform_codex_chat` 90/90、fmt/diff/严格 UTF-8 均通过。
+- 官方分支 `bigstrongsun/fix-responses-commentary-tool-calls`，提交 `246a475f`；Issue `farion1231/cc-switch#6529`，Draft PR `farion1231/cc-switch#6530`。PR 仅 1 个文件、1 个提交，目标 `main`，基础 label check 已通过。因 `BigStrongSun/ccswitchmulti` 已脱离 fork 网络，使用真正的官方 fork `BigStrongSun/ccswitchmulti-fork-archive` 推送；该 fork 原为 archived，只读阻止 push，已解除归档并需在 PR 开放期间保持可写以便响应 review。
+
 ## 2026-08-17 CCSM 全面 AI 可配置接口（AI Configuration Plane）设计
 
 - 设计文档：`docs/superpowers/specs/2026-08-17-ccsm-ai-configuration-plane-design.md`（1098 行，设计评审稿；本轮只做研究与设计，不实施生产代码、不改版本号、不 push）。承接 2026-08-16/17 中断任务留下的可验证盘点结论，重新做了完整源码审计，不引用任何未提交草稿。
