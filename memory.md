@@ -3661,3 +3661,11 @@
 - CCSM 可配置 Codex 根级新任务默认 `model_reasoning_effort`，不强改当前线程，已有任务不追溯变化。Sub-Agent V2 新 profile 默认 delegated；CCSM 可安全配置单个全局 `[agents].default_subagent_reasoning_effort`，但单次 spawn effort 由父 Agent 运行时决定，CCSM 不改 reserved schema。V1 保留兼容读取、运行、导出和迁移，不复制新 reasoning 写逻辑。
 - 模型能力 schema 采用读旧写新；不要与 Sub-Agent V1/V2 混称。unknown + legacy fixed 保留两个稳定版本。CLI 暂定 `ccsm`、默认 JSON；mutation 需要人工确认或 planToken + expectedRevision；首版不做 MCP，本地 HTTP API 保留 TBD；JSON 为权威格式，YAML 可选。
 - 允许 AI 通过 JSON/stdin 等安全输入直接写密钥，但禁止命令行参数、输出、日志、审计和回读出现明文；只返回 hasSecret/脱敏摘要。审计保留 180 天或 10,000 条 mutation，不记录密钥、Prompt、响应或 reasoning 正文。
+## 2026-08-17 Qwen3.8 工具结果后纯进度 stop 的 Responses→Chat 根因
+
+- task `01a00c24-1fec-7410-aaec-d93416db98ce` 的四个短轮不是超时或断流：末次 vLLM 请求均为 HTTP 200、`finish_reason=stop`、无 tool-call delta，内容是“Appending sections ...”等未完成进度句；其上一请求均正常完成工具调用。
+- 真实捕获的约 933–1016 KB Chat 请求暴露了协议级根因：同一次 Codex Responses 输出中的 commentary `message` 与随后的 `function_call` 被 `transform_codex_chat.rs` 转成两条连续的 assistant 历史消息。Qwen 因而反复看到“纯进度 assistant 消息 → 下一条 assistant 才调用工具”的错误示范；但 Chat Completions 当前采样在第一条 assistant 的 `stop` 就结束，不会自动进入第二条 assistant。相同 reasoning 还会被重复附挂到两条消息。
+- 该拆分行为来自原始 Responses→Chat 桥接提交 `693c3872`（2026-06-02），截至 CCS 官方 `origin/main@d4fefefc` 仍存在，不是 Qwen、vLLM 或 CCSwitchMulti 独有分叉。远端透明代理已经注入“未完成时不要只播报进度”的系统提示，但现场仍复现，说明继续加强提示或伪造 finish reason 不是根修。
+- 分支 `bigstrongsun/fix-responses-chat-turn-coalescing`、提交 `5b820624` 在 Chat 所有权边界把直接相邻的 commentary assistant 与 pending tool calls 合并为一条 `{content, tool_calls}` assistant 消息，并对跨 item 重复的 `reasoning_content` 去重。工具输出、媒体边界和没有 commentary 的 tool-call 消息保持原语义。
+- 新 Qwen 形状回归覆盖 `reasoning → assistant commentary → function_call(重复 reasoning) → function_call_output`；聚焦测试 1/1、全部 Responses→Chat 相关测试 87/87、`cargo fmt --check`、`git diff --check` 和严格 UTF-8 解码均通过。
+- 本地 NSIS 测试包为 `C:\Users\sunda\Documents\LLMservice\最新版ccswitchmulti\CCSwitchMulti_3.19.2-5_5b820624_x64-setup-unsigned.exe`，SHA-256 `AF3301EED778DE0778B9745CBA6EF498C4749E307F766E679568923A057517D6`。bundle 已成功生成，但构建末尾因本机只有 Tauri 公钥、没有私钥而返回签名错误，所以该测试包明确标记为 unsigned，不能当正式 release 资产。当前已安装 exe 因进程锁未被替换，仍是原 `v3.19.2-5`；回滚副本位于 `C:\Users\sunda\AppData\Local\CCSwitchMulti\cc-switch.exe.before-turn-coalescing-20260817-061522.bak`。
