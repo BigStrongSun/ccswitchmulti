@@ -1171,16 +1171,22 @@ describe("CodexFormFields local model routing", () => {
     await waitFor(() => {
       expect(latestCatalog().map((model) => model.model)).toEqual([
         "model-a",
+        "model-b",
         "model-c",
       ]);
+      expect(latestCatalog()[1]).toMatchObject({
+        model: "model-b",
+        enabled: false,
+      });
     });
 
-    fireEvent.click(screen.getAllByTitle("上移")[1]);
+    fireEvent.click(screen.getAllByTitle("上移")[2]);
 
     await waitFor(() => {
       expect(latestCatalog().map((model) => model.model)).toEqual([
-        "model-c",
         "model-a",
+        "model-c",
+        "model-b",
       ]);
     });
   });
