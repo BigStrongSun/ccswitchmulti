@@ -3784,6 +3784,65 @@ mod tests {
         assert!(result.get("reasoning").is_none());
     }
 
+    // ===== P0 RED：无关闭契约时 none 不得翻译成厂商关闭信号 =====
+
+    #[test]
+    fn none_without_disable_contract_omits_vendor_disable_signal() {
+        // 推断配置（无显式关闭契约）：Codex 的 reasoning.effort=none 是 Responses
+        // 语义，不得翻译成上游 enable_thinking=false；省略厂商字段、保留服务端默认。
+        let config = CodexChatReasoningConfig {
+            supports_thinking: Some(true),
+            supports_effort: Some(false),
+            thinking_param: Some("enable_thinking".to_string()),
+            effort_param: Some("none".to_string()),
+            effort_value_mode: None,
+            min_output_tokens: None,
+            default_output_tokens: None,
+            output_format: Some("reasoning_content".to_string()),
+        };
+
+        let input = json!({
+            "model": "qwen3-max",
+            "input": "hello",
+            "reasoning": {"effort": "none"}
+        });
+        let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
+
+        assert!(
+            result.get("enable_thinking").is_none(),
+            "inferred config must not translate none into enable_thinking=false, got {result}"
+        );
+        assert!(result.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn none_with_explicit_disable_contract_emits_disable_signal() {
+        // 能力派生配置：模型显式声明 disableAllowed=true（等价 thinking 关闭契约），
+        // none 翻译为上游关闭信号。
+        let config = CodexChatReasoningConfig {
+            supports_thinking: Some(true),
+            supports_effort: Some(true),
+            thinking_param: Some("thinking".to_string()),
+            effort_param: Some("reasoning_effort".to_string()),
+            effort_value_mode: Some(
+                "capability|low,high,max|low=low,high=high,max=max".to_string(),
+            ),
+            min_output_tokens: None,
+            default_output_tokens: None,
+            output_format: Some("reasoning_content".to_string()),
+        };
+
+        let input = json!({
+            "model": "deepseek-v4-flash",
+            "input": "hello",
+            "reasoning": {"effort": "none"}
+        });
+        let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
+
+        assert_eq!(result["thinking"]["type"], "disabled");
+        assert!(result.get("reasoning_effort").is_none());
+    }
+
     #[test]
     fn responses_request_to_chat_maps_thinking_only_provider_without_effort() {
         let input = json!({

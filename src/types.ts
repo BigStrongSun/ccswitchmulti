@@ -299,8 +299,50 @@ export type CodexReasoningEffort =
   | "max"
   | "ultra";
 
+/**
+ * 三态支持状态（模型推理能力 schema v2）。
+ *
+ * 只有明确否定证据才能写 confirmed_unsupported；字段缺失、探测失败或
+ * 不在维护库中都只能得到 unknown。
+ */
+export type CodexReasoningSupportStatus =
+  | "confirmed_supported"
+  | "confirmed_unsupported"
+  | "unknown";
+
+/**
+ * 控制形态（模型推理能力 schema v2）。
+ *
+ * 与支持状态相互独立，不能互相推导。
+ */
+export type CodexReasoningControlKind =
+  | "none"
+  | "boolean"
+  | "graded"
+  | "budget"
+  | "unknown";
+
+/** 能力声明的证据等级（模型推理能力 schema v2）。 */
+export type CodexReasoningConfidence =
+  | "authoritative"
+  | "verified"
+  | "maintained"
+  | "inferred";
+
 export interface CodexModelReasoningCapability {
-  supported: boolean;
+  /**
+   * 能力 schema 版本。缺失表示 legacy v1；新写入固定为 2。
+   *
+   * 注意：这是模型推理能力 schema 的版本，与 Codex Sub-Agent V1/V2 无关，
+   * 代码、错误码与 UI 文案中禁止混用简称。
+   */
+  schemaVersion?: number;
+  /** 三态支持状态（schema v2）。 */
+  supportStatus?: CodexReasoningSupportStatus;
+  /** 控制形态（schema v2）。 */
+  controlKind?: CodexReasoningControlKind;
+  /** Legacy 字段：仅用于读取旧数据；新写入不得包含。 */
+  supported?: boolean;
   supportedEfforts: CodexReasoningEffort[];
   defaultEffort?: CodexReasoningEffort;
   disableAllowed: boolean;
@@ -310,7 +352,15 @@ export interface CodexModelReasoningCapability {
     effortMap?: Partial<Record<CodexReasoningEffort, CodexReasoningEffort>>;
   };
   outputFormat?: CodexChatReasoningOutputFormat;
-  source?: "builtin" | "user" | "legacy";
+  source?: "provider" | "builtin" | "user" | "legacy" | "protocol";
+  /** 证据等级（schema v2）。易变元数据，不进入能力指纹。 */
+  confidence?: CodexReasoningConfidence;
+  /** 检测时间（schema v2）。易变元数据，不进入能力指纹。 */
+  fetchedAt?: string;
+  /** Provider 身份（schema v2）。易变元数据，不进入能力指纹。 */
+  providerKey?: string;
+  /** 模型 revision（schema v2）。易变元数据，不进入能力指纹。 */
+  modelRevision?: string;
 }
 
 export interface CodexCatalogModel {

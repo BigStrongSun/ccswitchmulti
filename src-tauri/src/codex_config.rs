@@ -1466,7 +1466,8 @@ fn official_reasoning_capability_for_model(
     official_models: &[Value],
 ) -> Option<crate::proxy::providers::codex_reasoning::CodexModelReasoningCapability> {
     use crate::proxy::providers::codex_reasoning::{
-        CodexModelReasoningCapability, CodexModelReasoningUpstream,
+        CapabilityConfidence, CodexModelReasoningCapability, CodexModelReasoningUpstream,
+        ReasoningControlKind, ReasoningSupportStatus,
     };
     let entry = official_models.iter().find(|entry| {
         entry
@@ -1497,7 +1498,10 @@ fn official_reasoning_capability_for_model(
         .filter(|level| !level.is_empty())
         .map(ToString::to_string);
     let capability = CodexModelReasoningCapability {
-        supported: true,
+        schema_version: Some(2),
+        support_status: Some(ReasoningSupportStatus::ConfirmedSupported),
+        control_kind: Some(ReasoningControlKind::Graded),
+        supported: None,
         supported_efforts: levels.clone(),
         default_effort,
         disable_allowed: false,
@@ -1511,6 +1515,10 @@ fn official_reasoning_capability_for_model(
         },
         output_format: None,
         source: Some("official".to_string()),
+        confidence: Some(CapabilityConfidence::Authoritative),
+        fetched_at: None,
+        provider_key: None,
+        model_revision: None,
     };
     capability.validate().ok()?;
     Some(capability)
@@ -6558,7 +6566,10 @@ mod tests {
     fn deepseek_reasoning_capability(
     ) -> crate::proxy::providers::codex_reasoning::CodexModelReasoningCapability {
         crate::proxy::providers::codex_reasoning::CodexModelReasoningCapability {
-            supported: true,
+            schema_version: None,
+            support_status: None,
+            control_kind: None,
+            supported: Some(true),
             supported_efforts: vec!["low".into(), "high".into(), "max".into()],
             default_effort: Some("high".into()),
             disable_allowed: true,
@@ -6577,6 +6588,10 @@ mod tests {
             },
             output_format: Some("reasoning_content".into()),
             source: Some("builtin".into()),
+            confidence: None,
+            fetched_at: None,
+            provider_key: None,
+            model_revision: None,
         }
     }
 
@@ -6625,7 +6640,8 @@ mod tests {
                         "high": "high",
                         "xhigh": "high",
                         "max": "max"
-                    }
+                    },
+                    "fingerprint": "8d5aeff0f2c9743effd90da1cc89b10ec0335e2e2766e8161a9bf0325360abf9"
                 }
             })
         );
@@ -6721,7 +6737,8 @@ mod tests {
                     "high": "high",
                     "xhigh": "high",
                     "max": "max"
-                }
+                },
+                "fingerprint": "8d5aeff0f2c9743effd90da1cc89b10ec0335e2e2766e8161a9bf0325360abf9"
             })
         );
         let serialized = serde_json::to_string(&value).expect("serialize safe preview");
@@ -7480,8 +7497,9 @@ mod tests {
                             "medium": "high",
                             "high": "high",
                             "xhigh": "high",
-                            "max": "max"
-                        }
+                        "max": "max"
+                        },
+                        "fingerprint": "8d5aeff0f2c9743effd90da1cc89b10ec0335e2e2766e8161a9bf0325360abf9"
                     },
                     "status": "generated",
                     "warnings": []
@@ -11037,7 +11055,10 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             base_instructions: None,
             reasoning: Some(
                 crate::proxy::providers::codex_reasoning::CodexModelReasoningCapability {
-                    supported: true,
+                    schema_version: None,
+                    support_status: None,
+                    control_kind: None,
+                    supported: Some(true),
                     supported_efforts: vec!["low".into(), "high".into(), "max".into()],
                     default_effort: Some("high".into()),
                     disable_allowed: true,
@@ -11057,6 +11078,10 @@ openai_base_url = "http://127.0.0.1:15721/v1"
                         },
                     output_format: None,
                     source: Some("builtin".into()),
+                    confidence: None,
+                    fetched_at: None,
+                    provider_key: None,
+                    model_revision: None,
                 },
             ),
             sort_index: None,
@@ -11355,6 +11380,69 @@ openai_base_url = "http://127.0.0.1:15721/v1"
         assert!(entry.get("supportedReasoningEfforts").is_none());
     }
 
+    // ===== P0 契约：三态 schema 的 catalog 投影 =====
+
+    #[test]
+    fn new_schema_unknown_model_does_not_inherit_template_reasoning() {
+        // schema v2 显式 unknown：不得被当作解析失败丢弃，也不得继承模板档位。
+        let settings = json!({
+            "modelCatalog": { "models": [{
+                "model": "private-model",
+                "reasoning": {
+                    "schemaVersion": 2,
+                    "supportStatus": "unknown",
+                    "controlKind": "unknown",
+                    "supportedEfforts": [],
+                    "disableAllowed": false,
+                    "upstream": {"format": "none", "parameter": "none"},
+                    "source": "provider"
+                }
+            }]}
+        });
+        let catalog = codex_model_catalog_from_settings(
+            &settings,
+            "model = \"private-model\"",
+            CodexCatalogToolProfile::ProxyChat,
+        )
+        .expect("build catalog")
+        .expect("catalog");
+        let entry = &catalog["models"][0];
+        assert!(entry.get("default_reasoning_level").is_none());
+        assert_eq!(entry.get("supported_reasoning_levels"), Some(&json!([])));
+        assert!(entry.get("supportedReasoningEfforts").is_none());
+    }
+
+    #[test]
+    fn explicit_empty_efforts_model_is_not_filled_by_template() {
+        // 明确的 supportedEfforts=[]（boolean 开关）：任何投影都不得回退到通用档位。
+        let settings = json!({
+            "modelCatalog": { "models": [{
+                "model": "private-model",
+                "reasoning": {
+                    "schemaVersion": 2,
+                    "supportStatus": "confirmed_supported",
+                    "controlKind": "boolean",
+                    "supportedEfforts": [],
+                    "disableAllowed": true,
+                    "upstream": {"format": "boolean", "parameter": "enable_thinking"},
+                    "outputFormat": "reasoning_content",
+                    "source": "user"
+                }
+            }]}
+        });
+        let catalog = codex_model_catalog_from_settings(
+            &settings,
+            "model = \"private-model\"",
+            CodexCatalogToolProfile::ProxyChat,
+        )
+        .expect("build catalog")
+        .expect("catalog");
+        let entry = &catalog["models"][0];
+        assert!(entry.get("default_reasoning_level").is_none());
+        assert_eq!(entry.get("supported_reasoning_levels"), Some(&json!([])));
+        assert!(entry.get("supportedReasoningEfforts").is_none());
+    }
+
     #[test]
     fn codex_agent_defaults_migrate_legacy_alias_without_overwriting_user_limits() {
         let specs = vec![CodexCatalogModelSpec {
@@ -11486,7 +11574,10 @@ base_url = "http://127.0.0.1:15721/v1"
             base_instructions: None,
             reasoning: Some(
                 crate::proxy::providers::codex_reasoning::CodexModelReasoningCapability {
-                    supported: true,
+                    schema_version: None,
+                    support_status: None,
+                    control_kind: None,
+                    supported: Some(true),
                     supported_efforts: vec!["low".into(), "high".into(), "max".into()],
                     default_effort: Some("high".into()),
                     disable_allowed: false,
@@ -11498,6 +11589,10 @@ base_url = "http://127.0.0.1:15721/v1"
                         },
                     output_format: None,
                     source: Some("builtin".into()),
+                    confidence: None,
+                    fetched_at: None,
+                    provider_key: None,
+                    model_revision: None,
                 },
             ),
             sort_index: None,

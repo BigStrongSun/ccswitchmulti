@@ -37,7 +37,9 @@ describe("Codex preset reasoning capabilities", () => {
     (providerName, modelName, parameter) => {
       expect(presetModel(providerName, modelName).reasoning).toEqual(
         expect.objectContaining({
-          supported: true,
+          schemaVersion: 2,
+          supportStatus: "confirmed_supported",
+          controlKind: "boolean",
           supportedEfforts: [],
           upstream: expect.objectContaining({
             format: "boolean",
@@ -48,13 +50,19 @@ describe("Codex preset reasoning capabilities", () => {
       expect(presetModel(providerName, modelName).reasoning).not.toHaveProperty(
         "defaultEffort",
       );
+      // 新写入不得包含 legacy supported 字段。
+      expect(presetModel(providerName, modelName).reasoning).not.toHaveProperty(
+        "supported",
+      );
     },
   );
 
   it("declares DeepSeek V4 official efforts", () => {
     expect(presetModel("DeepSeek", "deepseek-v4-flash").reasoning).toEqual(
       expect.objectContaining({
-        supported: true,
+        schemaVersion: 2,
+        supportStatus: "confirmed_supported",
+        controlKind: "graded",
         supportedEfforts: ["low", "high", "max"],
         defaultEffort: "high",
         disableAllowed: true,

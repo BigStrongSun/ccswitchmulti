@@ -1891,8 +1891,10 @@ fn codex_chat_reasoning_config_from_capability(
     let has_efforts =
         resolved.support_kind == super::codex_reasoning::ReasoningSupportKind::EffortLevels;
     let boolean_thinking = capability.upstream.format == "boolean";
+    let supported = capability.effective_support_status()
+        == super::codex_reasoning::ReasoningSupportStatus::ConfirmedSupported;
     CodexChatReasoningConfig {
-        supports_thinking: Some(capability.supported),
+        supports_thinking: Some(supported),
         supports_effort: Some(has_efforts && !boolean_thinking),
         thinking_param: Some(if boolean_thinking {
             capability.upstream.parameter.clone()

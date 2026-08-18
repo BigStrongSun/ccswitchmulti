@@ -220,7 +220,11 @@ export const normalizeCodexCatalogModelsForSave = (
       throw new Error(`${model}: reasoning none requires disableAllowed=true`);
     }
     if (
-      reasoning?.supported &&
+      reasoning &&
+      // schema v2 用 supportStatus；legacy 数据用 supported。两者取生效值。
+      (reasoning.supportStatus !== undefined
+        ? reasoning.supportStatus === "confirmed_supported"
+        : reasoning.supported === true) &&
       reasoning.upstream.format !== "none" &&
       reasoning.upstream.format !== "boolean"
     ) {

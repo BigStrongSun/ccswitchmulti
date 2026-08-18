@@ -110,7 +110,9 @@ export function applyCodexReasoningCapabilitySource(
   const seed = current ?? maintained;
   if (seed) return { ...structuredClone(seed), source: "user" };
   return {
-    supported: true,
+    schemaVersion: 2,
+    supportStatus: "confirmed_supported",
+    controlKind: "none",
     supportedEfforts: [],
     disableAllowed: false,
     upstream: { format: "none", parameter: "none" },
@@ -138,6 +140,21 @@ export function validateCodexReasoningCapabilityDraft(
     capability.supportedEfforts.some((effort) => !allowed.has(effort))
   ) {
     throw new Error("supportedEfforts contains an unknown Provider effort");
+  }
+  // schema v2 用 supportStatus；legacy 数据用 supported。至少声明其一，
+  // 同时存在时不得矛盾。
+  if (
+    capability.supportStatus === undefined &&
+    typeof capability.supported !== "boolean"
+  ) {
+    throw new Error("supportStatus or supported must be declared");
+  }
+  if (
+    capability.supportStatus !== undefined &&
+    typeof capability.supported === "boolean" &&
+    (capability.supportStatus === "confirmed_supported") !== capability.supported
+  ) {
+    throw new Error("supportStatus contradicts legacy supported field");
   }
   if (
     capability.defaultEffort !== undefined &&

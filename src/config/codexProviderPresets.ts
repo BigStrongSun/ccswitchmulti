@@ -107,8 +107,12 @@ base_url = ${tomlString(baseUrl)}
 wire_api = "responses"`;
 }
 
+// 内置预设是 CCSwitchMulti 维护的能力声明：新写入统一使用 schema v2
+// （supportStatus + controlKind），不再写 legacy supported 字段。
 const unsupportedBuiltinReasoning: CodexModelReasoningCapability = {
-  supported: false,
+  schemaVersion: 2,
+  supportStatus: "confirmed_unsupported",
+  controlKind: "none",
   supportedEfforts: [],
   disableAllowed: false,
   upstream: { format: "none", parameter: "none" },
@@ -120,7 +124,9 @@ function booleanBuiltinReasoning(
   outputFormat: "reasoning_content" | "reasoning_details",
 ): CodexModelReasoningCapability {
   return {
-    supported: true,
+    schemaVersion: 2,
+    supportStatus: "confirmed_supported",
+    controlKind: "boolean",
     supportedEfforts: [],
     disableAllowed: true,
     upstream: { format: "boolean", parameter },
@@ -192,7 +198,9 @@ function modelCatalog(
 }
 
 const deepSeekV4Reasoning: CodexModelReasoningCapability = {
-  supported: true,
+  schemaVersion: 2,
+  supportStatus: "confirmed_supported",
+  controlKind: "graded",
   supportedEfforts: ["low", "high", "max"],
   defaultEffort: "high",
   disableAllowed: true,
@@ -211,7 +219,9 @@ const deepSeekV4Reasoning: CodexModelReasoningCapability = {
 };
 
 const grok45Reasoning: CodexModelReasoningCapability = {
-  supported: true,
+  schemaVersion: 2,
+  supportStatus: "confirmed_supported",
+  controlKind: "graded",
   supportedEfforts: ["low", "medium", "high"],
   defaultEffort: "high",
   disableAllowed: false,
@@ -220,7 +230,9 @@ const grok45Reasoning: CodexModelReasoningCapability = {
 };
 
 const glm52Reasoning: CodexModelReasoningCapability = {
-  supported: true,
+  schemaVersion: 2,
+  supportStatus: "confirmed_supported",
+  controlKind: "graded",
   supportedEfforts: [
     "none",
     "minimal",
@@ -250,7 +262,9 @@ const glm52Reasoning: CodexModelReasoningCapability = {
 };
 
 const stepThreeLevelReasoning: CodexModelReasoningCapability = {
-  supported: true,
+  schemaVersion: 2,
+  supportStatus: "confirmed_supported",
+  controlKind: "graded",
   supportedEfforts: ["low", "medium", "high"],
   defaultEffort: "medium",
   disableAllowed: false,
