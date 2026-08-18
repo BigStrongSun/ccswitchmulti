@@ -806,19 +806,22 @@ fn apply_reasoning_options(
     };
 
     if supports_thinking {
+        // Codex 的 reasoning.effort=none 是 Responses 语义：只有上游存在显式关闭契约
+        // （disable_contract）时才翻译为上游关闭信号；否则省略厂商字段、保留服务端默认。
+        let emit_switch = reasoning_enabled || config.disable_contract;
         match thinking_param.as_str() {
-            "thinking" => {
+            "thinking" if emit_switch => {
                 result["thinking"] = json!({
                     "type": if reasoning_enabled { "enabled" } else { "disabled" }
                 });
             }
-            "enable_thinking" => {
+            "enable_thinking" if emit_switch => {
                 result["enable_thinking"] = json!(reasoning_enabled);
             }
-            "chat_template_kwargs.enable_thinking" => {
+            "chat_template_kwargs.enable_thinking" if emit_switch => {
                 set_chat_template_enable_thinking(result, reasoning_enabled);
             }
-            "reasoning_split" => {
+            "reasoning_split" if emit_switch => {
                 result["reasoning_split"] = json!(reasoning_enabled);
             }
             _ => {}
@@ -3633,6 +3636,7 @@ mod tests {
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: false,
         };
 
         let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
@@ -3657,6 +3661,7 @@ mod tests {
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: false,
         };
         let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
         assert_eq!(result["reasoning_effort"], "high");
@@ -3678,6 +3683,7 @@ mod tests {
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("reasoning".to_string()),
+            disable_contract: false,
         };
         let error = responses_to_chat_completions_with_reasoning(input, Some(&config))
             .expect_err("medium must be rejected");
@@ -3697,6 +3703,7 @@ mod tests {
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("auto".to_string()),
+            disable_contract: false,
         };
 
         // max 不在 OpenRouter 枚举内（见 openclaw#77350），必须钳成 xhigh，
@@ -3740,6 +3747,7 @@ mod tests {
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("auto".to_string()),
+            disable_contract: false,
         };
 
         let input = json!({
@@ -3769,6 +3777,7 @@ mod tests {
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: true,
         };
 
         let input = json!({
@@ -3799,6 +3808,7 @@ mod tests {
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: false,
         };
 
         let input = json!({
@@ -3830,6 +3840,7 @@ mod tests {
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: true,
         };
 
         let input = json!({
@@ -3859,6 +3870,7 @@ mod tests {
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: false,
         };
 
         let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
@@ -3883,6 +3895,7 @@ mod tests {
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: false,
         };
 
         let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
@@ -3908,6 +3921,7 @@ mod tests {
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: false,
         };
 
         let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
@@ -3934,6 +3948,7 @@ mod tests {
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: true,
         };
 
         let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
@@ -3959,6 +3974,7 @@ mod tests {
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: false,
         };
 
         let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
@@ -3985,6 +4001,7 @@ mod tests {
             min_output_tokens: Some(1024),
             default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: false,
         };
 
         let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
@@ -4023,6 +4040,7 @@ mod tests {
             min_output_tokens: None,
             default_output_tokens: Some(4096),
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: false,
         };
 
         let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
@@ -4047,6 +4065,7 @@ mod tests {
             min_output_tokens: Some(2048),
             default_output_tokens: Some(32_768),
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: false,
         };
 
         let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
@@ -4072,6 +4091,7 @@ mod tests {
             min_output_tokens: Some(2048),
             default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: false,
         };
 
         let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
@@ -4099,6 +4119,7 @@ mod tests {
             min_output_tokens: Some(2048),
             default_output_tokens: Some(32_768),
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: false,
         };
 
         let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
@@ -4125,6 +4146,7 @@ mod tests {
             min_output_tokens: Some(2048),
             default_output_tokens: Some(32_768),
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: false,
         };
 
         let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();

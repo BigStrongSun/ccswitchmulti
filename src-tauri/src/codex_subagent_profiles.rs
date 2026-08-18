@@ -817,18 +817,23 @@ fn normalize_role_name(value: &str) -> String {
 fn compile_reasoning_policy(
     policy: &CodexSubagentReasoningPolicy,
     capability: &ResolvedSubagentReasoningCapability,
+    origin: ReasoningPolicyOrigin,
     profile_key: &str,
-) -> Result<Option<CodexReasoningEffort>, CompileError> {
+) -> Result<(Option<CodexReasoningEffort>, Vec<String>), CompileError> {
     match policy.policy {
-        ReasoningRuntimePolicy::Delegated => Ok(None),
+        ReasoningRuntimePolicy::Delegated => Ok((None, Vec::new())),
         ReasoningRuntimePolicy::ModelDefault => {
-            capability.provider_default_effort.map(Some).ok_or_else(|| {
-                validation_error(
-                    "missing_default_reasoning_effort",
-                    Some(profile_key),
-                    "target model has no resolved default reasoning effort",
-                )
-            })
+            let effort = capability
+                .provider_default_effort
+                .map(Some)
+                .ok_or_else(|| {
+                    validation_error(
+                        "missing_default_reasoning_effort",
+                        Some(profile_key),
+                        "target model has no resolved default reasoning effort",
+                    )
+                })?;
+            Ok((effort, Vec::new()))
         }
         ReasoningRuntimePolicy::Fixed => {
             let effort = policy.effort.ok_or_else(|| {
@@ -849,7 +854,7 @@ fn compile_reasoning_policy(
                 | ReasoningSupportKind::Unsupported => {
                     let resolved = capability.effort_map.get(&effort).unwrap_or(&effort);
                     if capability.codex_selectable_efforts.contains(resolved) {
-                        Ok(Some(effort))
+                        Ok((Some(effort), Vec::new()))
                     } else {
                         Err(validation_error(
                             "unsupported_reasoning_effort",
@@ -859,9 +864,23 @@ fn compile_reasoning_policy(
                     }
                 }
                 // 能力未知（Unknown）：无法验证档位合法性，但 Unknown ≠ Unsupported。
-                // 信任用户显式声明的 Fixed effort，避免 schema1 旧配置（legacy effort
-                // 迁移为 Fixed）在模型目录未声明能力时直接编译失败（v27/v28 回归）。
-                ReasoningSupportKind::Unknown => Ok(Some(effort)),
+                // legacy（schema1 迁移）：迁移窗口内信任用户显式 Fixed effort 并保留，
+                // 但必须携带警告，引导用户重新保存以声明模型能力（v27/v28 回归防护）。
+                // declared（schema2 新声明）：fail-closed，必须先声明模型推理能力
+                // 或改用 delegated，防止新配置借 legacy 通道绕过能力校验。
+                ReasoningSupportKind::Unknown => match origin {
+                    ReasoningPolicyOrigin::Legacy => Ok((
+                        Some(effort),
+                        vec![
+                            "legacy fixed reasoning effort retained for unknown capability; re-save to declare the model capability or switch to delegated".to_string(),
+                        ],
+                    )),
+                    ReasoningPolicyOrigin::Declared => Err(validation_error(
+                        "unknown_capability_fixed_requires_declaration",
+                        Some(profile_key),
+                        "fixed reasoning effort requires a declared model capability; use delegated or declare the model reasoning capability first",
+                    )),
+                },
             }
         }
         ReasoningRuntimePolicy::Disabled => {
@@ -876,7 +895,7 @@ fn compile_reasoning_policy(
                     "target model does not support disabling reasoning",
                 ));
             }
-            Ok(Some(CodexReasoningEffort::None))
+            Ok((Some(CodexReasoningEffort::None), Vec::new()))
         }
     }
 }
@@ -1366,8 +1385,8 @@ pub fn compile_subagent_v2_profiles(request: &CompileRequest) -> CompileResult {
             .nickname_candidates
             .clone()
             .unwrap_or_else(|| vec![default_nickname(&p)]);
-        let effort = compile_reasoning_policy(&p.reasoning, &catalog.reasoning, &p.key)?;
-        let warnings = Vec::new();
+        let (effort, warnings) =
+            compile_reasoning_policy(&p.reasoning, &catalog.reasoning, p.reasoning_origin, &p.key)?;
         output.generated_roles.push(GeneratedRole {
             requested_role_name: requested,
             effective_role_name: effective,
@@ -2806,16 +2825,31 @@ mod tests {
             compile_reasoning_policy(
                 &fixed_reasoning(CodexReasoningEffort::High),
                 &capability,
+                ReasoningPolicyOrigin::Legacy,
                 "legacy-model",
             )
+            .map(|(effort, _)| effort)
             .expect("Unknown capability + Fixed must compile"),
             Some(CodexReasoningEffort::High)
+        );
+        // legacy 通道保留档位的同时必须携带警告，引导用户重新保存声明能力。
+        let (_, warnings) = compile_reasoning_policy(
+            &fixed_reasoning(CodexReasoningEffort::High),
+            &capability,
+            ReasoningPolicyOrigin::Legacy,
+            "legacy-model",
+        )
+        .expect("Unknown capability + Fixed must compile");
+        assert!(
+            warnings.iter().any(|warning| warning.contains("legacy")),
+            "legacy fixed with unknown capability must carry a warning, got {warnings:?}"
         );
         // EffortLevels 能力下 Ultra 仍被拒绝（能力明确时不放行）
         let deepseek = deepseek_reasoning();
         assert!(compile_reasoning_policy(
             &fixed_reasoning(CodexReasoningEffort::Ultra),
             &deepseek,
+            ReasoningPolicyOrigin::Declared,
             "flash",
         )
         .is_err());

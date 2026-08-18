@@ -1874,7 +1874,9 @@ pub fn resolve_codex_chat_reasoning_config(
         .as_ref()
         .and_then(|meta| meta.codex_chat_reasoning.clone())
     {
-        let config = normalize_codex_chat_reasoning_config(config);
+        let mut config = normalize_codex_chat_reasoning_config(config);
+        // 用户显式声明了厂商参数：声明本身即关闭契约，none 可翻译为上游关闭信号。
+        config.disable_contract = true;
         if let Some(inferred) = inferred {
             return Some(merge_qwen_vllm_reasoning_defaults(config, inferred));
         }
@@ -1915,6 +1917,8 @@ fn codex_chat_reasoning_config_from_capability(
         min_output_tokens: None,
         default_output_tokens: None,
         output_format: capability.output_format,
+        // 能力声明显式携带关闭契约：disableAllowed=true 时 none 才翻译为关闭信号。
+        disable_contract: capability.disable_allowed,
     }
 }
 
@@ -2226,6 +2230,7 @@ fn infer_codex_chat_reasoning_config(
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: false,
         });
     }
 
@@ -2242,6 +2247,7 @@ fn infer_codex_chat_reasoning_config(
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("reasoning".to_string()),
+            disable_contract: false,
         });
     }
 
@@ -2255,6 +2261,7 @@ fn infer_codex_chat_reasoning_config(
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: false,
         });
     }
 
@@ -2268,6 +2275,7 @@ fn infer_codex_chat_reasoning_config(
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: false,
         });
     }
 
@@ -2288,6 +2296,7 @@ fn infer_codex_chat_reasoning_config(
             min_output_tokens: Some(QWEN_VLLM_MIN_OUTPUT_TOKENS),
             default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: false,
         });
     }
 
@@ -2301,6 +2310,7 @@ fn infer_codex_chat_reasoning_config(
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: false,
         });
     }
 
@@ -2314,6 +2324,7 @@ fn infer_codex_chat_reasoning_config(
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("reasoning_details".to_string()),
+            disable_contract: false,
         });
     }
 
@@ -2327,6 +2338,7 @@ fn infer_codex_chat_reasoning_config(
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: false,
         });
     }
 
@@ -2358,6 +2370,7 @@ fn infer_aggregator_platform_config(
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("auto".to_string()),
+            disable_contract: false,
         });
     }
 
@@ -2374,6 +2387,7 @@ fn infer_aggregator_platform_config(
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: false,
         });
     }
 
@@ -3664,6 +3678,7 @@ wire_api = "chat"
                 min_output_tokens: None,
                 default_output_tokens: None,
                 output_format: Some("reasoning_content".to_string()),
+                disable_contract: false,
             }),
             ..Default::default()
         });
@@ -3702,6 +3717,7 @@ wire_api = "chat"
                 min_output_tokens: Some(QWEN_VLLM_MIN_OUTPUT_TOKENS),
                 default_output_tokens: Some(RETIRED_QWEN_VLLM_DEFAULT_OUTPUT_TOKENS),
                 output_format: Some("reasoning_content".to_string()),
+                disable_contract: false,
             }),
             ..Default::default()
         });
@@ -3737,6 +3753,7 @@ wire_api = "chat"
                 min_output_tokens: Some(4096),
                 default_output_tokens: Some(65_536),
                 output_format: Some("reasoning_content".to_string()),
+                disable_contract: false,
             }),
             ..Default::default()
         });
@@ -5548,6 +5565,7 @@ wire_api = "chat"
                 min_output_tokens: None,
                 default_output_tokens: None,
                 output_format: Some("auto".to_string()),
+                disable_contract: false,
             }),
             ..Default::default()
         });
