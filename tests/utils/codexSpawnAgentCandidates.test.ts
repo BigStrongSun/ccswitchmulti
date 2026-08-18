@@ -83,10 +83,7 @@ describe("codexSpawnAgentCandidates", () => {
       "qwen3.6",
       "deepseek-v4-pro",
     ]);
-    expect(visible.spawnAgentModels).toEqual([
-      "qwen3.6",
-      "deepseek-v4-pro",
-    ]);
+    expect(visible.spawnAgentModels).toEqual(["qwen3.6", "deepseek-v4-pro"]);
 
     expect(
       readRawCodexModelCatalogModels(provider).map((model) => model.model),
