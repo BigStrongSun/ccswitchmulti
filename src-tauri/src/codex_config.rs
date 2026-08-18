@@ -1333,6 +1333,10 @@ struct CodexCatalogModelSpec {
     input_modalities: Option<Vec<String>>,
     base_instructions: Option<String>,
     reasoning: Option<crate::proxy::providers::codex_reasoning::CodexModelReasoningCapability>,
+    /// P2：reasoning 能力指纹（与请求/Sub-Agent/inspect 同源，四层一致）。
+    reasoning_fingerprint: String,
+    /// P2：reasoning 能力来源（user_config/detection/library/builtin/official/unknown）。
+    reasoning_source: String,
     sort_index: Option<u32>,
 }
 
@@ -1434,7 +1438,9 @@ fn sort_codex_catalog_specs_for_picker(
 /// 官方原始档位在 backup 文件里。此处与 enrich_codex_catalog_with_official_metadata
 /// 保持同一选择逻辑：缓存被 CC Switch 拥有时优先读 backup。
 /// 任何读取/解析失败都返回 None（静默降级，不阻断投影）。
-fn codex_official_models_cache() -> Option<Vec<Value>> {
+///
+/// P2：公开给 reasoning resolver 作为 official 来源（仅未知平台生效）。
+pub fn codex_official_models_cache() -> Option<Vec<Value>> {
     let cache_path = get_codex_models_cache_path();
     let backup_path = get_codex_models_cache_backup_path();
     let existing_cache = read_json_file_if_exists(&cache_path).ok().flatten();
@@ -1452,76 +1458,6 @@ fn codex_official_models_cache() -> Option<Vec<Value>> {
         .and_then(Value::as_array)?
         .clone();
     Some(models)
-}
-
-/// 从 Codex 官方缓存为指定 slug 构造 reasoning capability。
-///
-/// 官方缓存字段是 snake_case，`supported_reasoning_levels` 可能是字符串数组
-/// （["low","medium",...]）或对象数组（[{"effort":"low","description":...},...]）：
-/// CCSM 写入的 cache 为字符串数组，官方 backup 为对象数组，两种都兼容。
-/// 官方 GPT 模型走 OpenAI 顶层 `reasoning_effort` 字段，effort_map 用 identity。
-/// 任何校验失败都返回 None（保守降级为 Unknown，不产生虚假档位）。
-fn official_reasoning_capability_for_model(
-    model: &str,
-    official_models: &[Value],
-) -> Option<crate::proxy::providers::codex_reasoning::CodexModelReasoningCapability> {
-    use crate::proxy::providers::codex_reasoning::{
-        CapabilityConfidence, CodexModelReasoningCapability, CodexModelReasoningUpstream,
-        ReasoningControlKind, ReasoningSupportStatus,
-    };
-    let entry = official_models.iter().find(|entry| {
-        entry
-            .get("slug")
-            .and_then(Value::as_str)
-            .is_some_and(|slug| slug.eq_ignore_ascii_case(model))
-    })?;
-    let levels: Vec<String> = entry
-        .get("supported_reasoning_levels")
-        .and_then(Value::as_array)?
-        .iter()
-        .filter_map(|level| {
-            level
-                .as_str()
-                .or_else(|| level.get("effort").and_then(Value::as_str))
-                .map(str::trim)
-                .map(ToString::to_string)
-        })
-        .filter(|level| !level.is_empty())
-        .collect();
-    if levels.is_empty() {
-        return None;
-    }
-    let default_effort = entry
-        .get("default_reasoning_level")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|level| !level.is_empty())
-        .map(ToString::to_string);
-    let capability = CodexModelReasoningCapability {
-        schema_version: Some(2),
-        support_status: Some(ReasoningSupportStatus::ConfirmedSupported),
-        control_kind: Some(ReasoningControlKind::Graded),
-        supported: None,
-        supported_efforts: levels.clone(),
-        default_effort,
-        disable_allowed: false,
-        upstream: CodexModelReasoningUpstream {
-            format: "string".to_string(),
-            parameter: "reasoning_effort".to_string(),
-            effort_map: levels
-                .into_iter()
-                .map(|level| (level.clone(), level))
-                .collect(),
-        },
-        output_format: None,
-        source: Some("official".to_string()),
-        confidence: Some(CapabilityConfidence::Authoritative),
-        fetched_at: None,
-        provider_key: None,
-        model_revision: None,
-    };
-    capability.validate().ok()?;
-    Some(capability)
 }
 
 fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCatalogModelSpec> {
@@ -1619,21 +1555,38 @@ fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCa
             .map(str::trim)
             .filter(|text| !text.is_empty())
             .map(ToString::to_string);
-        let reasoning =
-            crate::proxy::providers::codex_reasoning::reasoning_capability_from_model_entry(
-                model_config,
-            )
-            .or_else(|| {
-                crate::proxy::providers::codex_reasoning::builtin_reasoning_capability_for_model(
-                    model,
-                )
-            })
-            .or_else(|| {
-                upstream_model.as_deref().and_then(
-                    crate::proxy::providers::codex_reasoning::builtin_reasoning_capability_for_model,
-                )
-            })
-            .or_else(|| official_reasoning_capability_for_model(model, &official_models));
+        // P2：catalog 投影与请求/Sub-Agent/inspect 走同一 resolver 核心，保证同一模型
+        // 四层 fingerprint 一致。catalog 是 provider-agnostic 投影：platform=None
+        // （official 来源生效）、detection=None（静态投影不读 TTL 检测缓存）。
+        // 若 catalog 模型名是别名、上游模型名命中不同来源，则用上游名重试一次。
+        let library = crate::reasoning_capabilities::catalog::global_library();
+        let mut resolved = crate::reasoning_capabilities::resolve_codex_model_capability_core(
+            settings,
+            None,
+            model,
+            None,
+            library.as_ref(),
+            &official_models,
+        );
+        if resolved.capability.is_none() {
+            if let Some(upstream) = upstream_model.as_deref() {
+                let upstream_resolved =
+                    crate::reasoning_capabilities::resolve_codex_model_capability_core(
+                        settings,
+                        None,
+                        upstream,
+                        None,
+                        library.as_ref(),
+                        &official_models,
+                    );
+                if upstream_resolved.capability.is_some() {
+                    resolved = upstream_resolved;
+                }
+            }
+        }
+        let reasoning = resolved.capability;
+        let reasoning_fingerprint = resolved.fingerprint;
+        let reasoning_source = resolved.source.as_str().to_string();
 
         let sort_index = model_config
             .get("sortIndex")
@@ -1654,6 +1607,8 @@ fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCa
             input_modalities,
             base_instructions,
             reasoning,
+            reasoning_fingerprint,
+            reasoning_source,
             sort_index,
         });
     }
@@ -6529,7 +6484,11 @@ mod tests {
             "default_reasoning_level": "medium"
         }]);
         let models = official.as_array().unwrap().clone();
-        let capability = official_reasoning_capability_for_model("gpt-5.6-luna", &models)
+        let capability =
+            crate::proxy::providers::codex_reasoning::official_reasoning_capability_for_model(
+                "gpt-5.6-luna",
+                &models,
+            )
             .expect("luna official capability");
         assert_eq!(
             capability.supported_efforts,
@@ -6544,13 +6503,23 @@ mod tests {
             "default_reasoning_level": "low"
         }]);
         let sol_models = sol.as_array().unwrap().clone();
-        let sol_capability = official_reasoning_capability_for_model("gpt-5.6-sol", &sol_models)
+        let sol_capability =
+            crate::proxy::providers::codex_reasoning::official_reasoning_capability_for_model(
+                "gpt-5.6-sol",
+                &sol_models,
+            )
             .expect("sol official capability");
         assert!(sol_capability
             .supported_efforts
             .contains(&"ultra".to_string()));
         // 不匹配的 slug 返回 None
-        assert!(official_reasoning_capability_for_model("gpt-5.6-sol", &models).is_none());
+        assert!(
+            crate::proxy::providers::codex_reasoning::official_reasoning_capability_for_model(
+                "gpt-5.6-sol",
+                &models
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -6569,7 +6538,11 @@ mod tests {
             "default_reasoning_level": "medium"
         }]);
         let models = official.as_array().unwrap().clone();
-        let capability = official_reasoning_capability_for_model("gpt-5.6-luna", &models)
+        let capability =
+            crate::proxy::providers::codex_reasoning::official_reasoning_capability_for_model(
+                "gpt-5.6-luna",
+                &models,
+            )
             .expect("object levels must resolve");
         assert_eq!(
             capability.supported_efforts,
@@ -6634,6 +6607,8 @@ mod tests {
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
             sort_index: None,
         }
     }
@@ -6870,6 +6845,8 @@ mod tests {
                 input_modalities: None,
                 base_instructions: None,
                 reasoning: None,
+                reasoning_fingerprint: String::new(),
+                reasoning_source: "unknown".to_string(),
                 sort_index: None,
             },
             CodexCatalogModelSpec {
@@ -6883,6 +6860,8 @@ mod tests {
                 input_modalities: None,
                 base_instructions: None,
                 reasoning: None,
+                reasoning_fingerprint: String::new(),
+                reasoning_source: "unknown".to_string(),
                 sort_index: None,
             },
         ];
@@ -8448,6 +8427,8 @@ mod tests {
             input_modalities: None,
             base_instructions: None,
             reasoning: Some(deepseek_reasoning_capability()),
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
             sort_index: None,
         }];
 
@@ -8589,6 +8570,8 @@ mod tests {
                 crate::proxy::providers::codex_reasoning::builtin_reasoning_capability_for_model(
                     "deepseek-v4-flash",
                 ),
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
             sort_index: None,
         }];
         let make_settings = |description: &str| {
@@ -8655,6 +8638,8 @@ mod tests {
                 crate::proxy::providers::codex_reasoning::builtin_reasoning_capability_for_model(
                     "deepseek-v4-flash",
                 ),
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
             sort_index: None,
         }];
         let persisted_settings = json!({
@@ -8740,6 +8725,8 @@ mod tests {
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
             sort_index: None,
         };
         let path = agents_dir.join("stable-role.toml");
@@ -8805,6 +8792,8 @@ mod tests {
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
             sort_index: None,
         }];
         sync_codex_managed_agent_files_with_settings(
@@ -10514,6 +10503,8 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
             sort_index: None,
         }];
         let catalog = codex_model_catalog_from_specs(
@@ -10910,6 +10901,8 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
             sort_index: None,
         };
         let entry = codex_catalog_model_entry(
@@ -10962,6 +10955,8 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             input_modalities: Some(vec!["text".to_string(), "image".to_string()]),
             base_instructions: Some("base".to_string()),
             reasoning: None,
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
             sort_index: None,
         };
 
@@ -11178,6 +11173,8 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
             sort_index: None,
         };
         let entry = codex_catalog_model_entry(
@@ -11263,6 +11260,8 @@ openai_base_url = "http://127.0.0.1:15721/v1"
                     model_revision: None,
                 },
             ),
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
             sort_index: None,
         };
 
@@ -11559,6 +11558,77 @@ openai_base_url = "http://127.0.0.1:15721/v1"
         assert!(entry.get("supportedReasoningEfforts").is_none());
     }
 
+    #[test]
+    fn catalog_spec_carries_reasoning_fingerprint_and_source_builtin() {
+        // P2：catalog 投影携带 fingerprint 与 source（builtin 来源）。
+        let settings = json!({
+            "modelCatalog": { "models": [{ "model": "deepseek-v4-flash" }] }
+        });
+        let specs = codex_catalog_model_specs(&settings, "");
+        let spec = specs
+            .iter()
+            .find(|spec| spec.model == "deepseek-v4-flash")
+            .expect("deepseek-v4-flash spec");
+        assert!(spec.reasoning.is_some());
+        assert!(!spec.reasoning_fingerprint.is_empty());
+        assert_eq!(spec.reasoning_source, "builtin");
+    }
+
+    #[test]
+    fn catalog_spec_carries_reasoning_fingerprint_and_source_user_config() {
+        // P2：catalog 投影携带 fingerprint 与 source（user_config 来源）。
+        let settings = json!({
+            "modelCatalog": { "models": [{
+                "model": "private-model",
+                "reasoning": {
+                    "schemaVersion": 2,
+                    "supportStatus": "confirmed_supported",
+                    "controlKind": "graded",
+                    "supportedEfforts": ["low", "high"],
+                    "defaultEffort": "high",
+                    "disableAllowed": false,
+                    "upstream": {"format": "string", "parameter": "reasoning_effort"},
+                    "source": "user"
+                }
+            }]}
+        });
+        let specs = codex_catalog_model_specs(&settings, "");
+        let spec = specs
+            .iter()
+            .find(|spec| spec.model == "private-model")
+            .expect("private-model spec");
+        assert!(spec.reasoning.is_some());
+        assert!(!spec.reasoning_fingerprint.is_empty());
+        assert_eq!(spec.reasoning_source, "user_config");
+    }
+
+    #[test]
+    fn catalog_spec_fingerprint_matches_resolver_core() {
+        // P2：catalog 投影的 fingerprint 与 resolver 核心（同一输入）一致，
+        // 保证四层（catalog/请求/Sub-Agent/inspect）同源。
+        let settings = json!({
+            "modelCatalog": { "models": [{ "model": "deepseek-v4-flash" }] }
+        });
+        let specs = codex_catalog_model_specs(&settings, "");
+        let spec = specs
+            .iter()
+            .find(|spec| spec.model == "deepseek-v4-flash")
+            .expect("deepseek-v4-flash spec");
+        // 用同一输入直接调用 resolver 核心（platform=None、detection=None、
+        // library=全局、official=空缓存），fingerprint 必须与 catalog 投影一致。
+        let library = crate::reasoning_capabilities::catalog::global_library();
+        let resolved = crate::reasoning_capabilities::resolve_codex_model_capability_core(
+            &settings,
+            None,
+            "deepseek-v4-flash",
+            None,
+            library.as_ref(),
+            &[],
+        );
+        assert_eq!(spec.reasoning_fingerprint, resolved.fingerprint);
+        assert_eq!(spec.reasoning_source, resolved.source.as_str());
+    }
+
     // ===== P0 契约：三态 schema 的 catalog 投影 =====
 
     #[test]
@@ -11635,6 +11705,8 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
             sort_index: None,
         }];
         let config = r#"model_provider = "codex_model_router_v2"
@@ -11683,6 +11755,8 @@ base_url = "http://127.0.0.1:15721/v1"
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
             sort_index: None,
         }];
         let catalog = json!({
@@ -11774,6 +11848,8 @@ base_url = "http://127.0.0.1:15721/v1"
                     model_revision: None,
                 },
             ),
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
             sort_index: None,
         }];
         let catalog = codex_model_catalog_from_specs(
@@ -11848,6 +11924,8 @@ base_url = "http://127.0.0.1:15721/v1"
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
             sort_index: None,
         }];
         let config = r#"model_provider = "codex_model_router_v2"
@@ -12284,6 +12362,8 @@ model_context_window = 262144
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
             sort_index: None,
         }];
 
@@ -12392,6 +12472,8 @@ model_provider = "custom"
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
             sort_index: None,
         }];
 
@@ -12449,6 +12531,8 @@ model_provider = "custom"
                 input_modalities: None,
                 base_instructions: None,
                 reasoning: None,
+                reasoning_fingerprint: String::new(),
+                reasoning_source: "unknown".to_string(),
                 sort_index: None,
             },
         )
@@ -12509,6 +12593,8 @@ model_provider = "custom"
                 input_modalities: None,
                 base_instructions: None,
                 reasoning: None,
+                reasoning_fingerprint: String::new(),
+                reasoning_source: "unknown".to_string(),
                 sort_index: None,
             },
         )
@@ -12634,6 +12720,8 @@ model = "handwritten"
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
             sort_index: None,
         }];
 
@@ -12780,6 +12868,8 @@ model_provider = "codex_model_router_v2"
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
             sort_index: None,
         };
         let entry = codex_catalog_model_entry(
@@ -12835,6 +12925,8 @@ model_provider = "codex_model_router_v2"
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
             sort_index: None,
         };
         let entry = codex_catalog_model_entry(
@@ -13019,6 +13111,8 @@ max_depth = 2
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
             sort_index: None,
         }];
         let catalog_path = get_codex_model_catalog_path();

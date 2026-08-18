@@ -9,7 +9,8 @@
 //! 2. 动态检测候选快照（TTL、只读元数据、禁止主动推理试探）；
 //! 3. CCSM 维护的版本化能力库（随应用打包的独立 JSON 资源）；
 //! 4. 内置清单（deepseek-v4 / k3）；
-//! 5. Unknown（fail-closed）。
+//! 5. Codex 官方模型缓存（仅未知平台生效；OpenRouter/vLLM 等聚合平台不套用）；
+//! 6. Unknown（fail-closed）。
 //!
 //! 核心原则：缺失证据不是不存在的证据。`NotAdvertised`/`Unavailable`/`Invalid`
 //! 以及库/内置未命中，都只能得到 `unknown`，绝不自动生成 `confirmed_unsupported`。
@@ -20,11 +21,12 @@ pub mod provider_metadata;
 use crate::provider::Provider;
 use crate::proxy::providers::codex_reasoning::{
     builtin_reasoning_capability_for_model, capability_fingerprint,
-    resolve_reasoning_capability_from_settings, CapabilityConfidence,
-    CodexModelReasoningCapability, CodexModelReasoningUpstream, ReasoningControlKind,
-    ReasoningSupportStatus,
+    official_reasoning_capability_for_model, resolve_reasoning_capability_from_settings,
+    CapabilityConfidence, CodexModelReasoningCapability, CodexModelReasoningUpstream,
+    ReasoningControlKind, ReasoningSupportStatus,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
@@ -42,6 +44,8 @@ pub enum CapabilitySource {
     Library,
     /// 内置清单。
     Builtin,
+    /// Codex 官方模型缓存（仅未知平台生效；OpenRouter/vLLM 等聚合平台不套用）。
+    Official,
     /// 无来源命中，fail-closed unknown。
     Unknown,
 }
@@ -53,6 +57,7 @@ impl CapabilitySource {
             Self::Detection => "detection",
             Self::Library => "library",
             Self::Builtin => "builtin",
+            Self::Official => "official",
             Self::Unknown => "unknown",
         }
     }
@@ -175,36 +180,71 @@ pub fn resource_dir() -> Option<PathBuf> {
     RESOURCE_DIR.get().cloned()
 }
 
-/// 单一 resolver 入口（同步、纯函数、无网络）。
+/// 单一 resolver 入口（请求路径用；同步、无网络）。
 ///
 /// `detection` 为当前 TTL 候选快照（可为 None）；用户配置始终最高优先级。
-/// 能力库读取自全局懒加载缓存。
+/// 能力库读取自全局懒加载缓存，official 来源读取 Codex 官方模型缓存。
 pub fn resolve_codex_model_capability(
     provider: &Provider,
     model: &str,
     detection: Option<&ProviderCapabilitySnapshot>,
 ) -> ResolvedModelCapability {
-    resolve_codex_model_capability_with_library(
-        provider,
+    let platform = provider_metadata::detect_platform(provider);
+    let official_models = crate::codex_config::codex_official_models_cache().unwrap_or_default();
+    resolve_codex_model_capability_core(
+        &provider.settings_config,
+        platform,
         model,
         detection,
         catalog::global_library().as_ref(),
+        &official_models,
     )
 }
 
-/// 单一 resolver 入口（可注入能力库，便于测试）。
+/// 测试用 resolver 入口（可注入能力库；不加载 official 缓存，保持确定性）。
 ///
-/// 来源优先级（高 → 低）：用户配置 > 检测候选 > 能力库 > 内置 > unknown。
+/// 来源优先级（高 → 低）：用户配置 > 检测候选 > 能力库 > 内置 > official（仅未知平台）> unknown。
 pub fn resolve_codex_model_capability_with_library(
     provider: &Provider,
     model: &str,
     detection: Option<&ProviderCapabilitySnapshot>,
     library: Option<&catalog::CapabilityLibrary>,
 ) -> ResolvedModelCapability {
+    let platform = provider_metadata::detect_platform(provider);
+    resolve_codex_model_capability_core(
+        &provider.settings_config,
+        platform,
+        model,
+        detection,
+        library,
+        &[],
+    )
+}
+
+/// Resolver 核心（settings-based、纯函数、无网络、无全局状态）。
+///
+/// 所有消费者（catalog 投影、请求转换、Sub-Agent policy、GUI/CLI inspect）
+/// 必须经由该核心，保证同一模型四层 fingerprint 一致。任何一层绕过该核心
+/// 重新按模型名猜测档位都视为实现失败。
+///
+/// 来源优先级（高 → 低）：
+/// 1. 用户模型级声明（始终最高优先级）；
+/// 2. 动态检测候选快照（TTL、只读元数据）；
+/// 3. CCSM 维护的版本化能力库；
+/// 4. 内置清单（deepseek-v4 / k3）；
+/// 5. Codex 官方模型缓存（仅 `platform=None` 即未知平台生效；OpenRouter/vLLM
+///    等已知聚合平台有自己的推理接口，不得套用官方 OpenAI 形态）；
+/// 6. Unknown（fail-closed）。
+pub fn resolve_codex_model_capability_core(
+    settings: &Value,
+    platform: Option<&str>,
+    model: &str,
+    detection: Option<&ProviderCapabilitySnapshot>,
+    library: Option<&catalog::CapabilityLibrary>,
+    official_models: &[Value],
+) -> ResolvedModelCapability {
     // 1. 用户模型级声明（始终最高优先级）
-    if let Some(capability) =
-        resolve_reasoning_capability_from_settings(&provider.settings_config, model)
-    {
+    if let Some(capability) = resolve_reasoning_capability_from_settings(settings, model) {
         return ResolvedModelCapability {
             fingerprint: capability_fingerprint(&capability),
             capability: Some(capability),
@@ -225,11 +265,7 @@ pub fn resolve_codex_model_capability_with_library(
 
     // 3. CCSM 维护的版本化能力库
     if let Some(library) = library {
-        if let Some(capability) = catalog::lookup_library_capability(
-            library,
-            provider_metadata::detect_platform(provider),
-            model,
-        ) {
+        if let Some(capability) = catalog::lookup_library_capability(library, platform, model) {
             return ResolvedModelCapability {
                 fingerprint: capability_fingerprint(&capability),
                 capability: Some(capability),
@@ -247,7 +283,18 @@ pub fn resolve_codex_model_capability_with_library(
         };
     }
 
-    // 5. Unknown（fail-closed）
+    // 5. Codex 官方模型缓存（仅未知平台生效）
+    if platform.is_none() {
+        if let Some(capability) = official_reasoning_capability_for_model(model, official_models) {
+            return ResolvedModelCapability {
+                fingerprint: capability_fingerprint(&capability),
+                capability: Some(capability),
+                source: CapabilitySource::Official,
+            };
+        }
+    }
+
+    // 6. Unknown（fail-closed）
     ResolvedModelCapability {
         capability: None,
         source: CapabilitySource::Unknown,
@@ -603,5 +650,105 @@ mod tests {
             from_detection.fingerprint, from_library.fingerprint,
             "same execution semantics must produce the same fingerprint"
         );
+    }
+
+    fn official_models_fixture() -> Vec<serde_json::Value> {
+        vec![json!({
+            "slug": "gpt-5.4",
+            "supported_reasoning_levels": ["low", "medium", "high", "xhigh", "max"],
+            "default_reasoning_level": "medium"
+        })]
+    }
+
+    #[test]
+    fn resolver_core_official_source_for_unknown_platform() {
+        // platform=None（未知平台，含 OpenAI 直连与 catalog 投影）命中 official 来源。
+        let settings = json!({});
+        let official = official_models_fixture();
+        let resolved = resolve_codex_model_capability_core(
+            &settings,
+            None,
+            "gpt-5.4",
+            None,
+            None,
+            &official,
+        );
+        assert_eq!(resolved.source, CapabilitySource::Official);
+        assert!(!resolved.fingerprint.is_empty());
+        let capability = resolved.capability.expect("official capability");
+        assert_eq!(capability.source.as_deref(), Some("official"));
+        assert_eq!(
+            capability.supported_efforts,
+            vec!["low", "medium", "high", "xhigh", "max"]
+        );
+        assert_eq!(capability.default_effort.as_deref(), Some("medium"));
+        // 官方 GPT 走 OpenAI 顶层 reasoning_effort 字段，effort_map 用 identity。
+        assert_eq!(capability.upstream.format, "string");
+        assert_eq!(capability.upstream.parameter, "reasoning_effort");
+    }
+
+    #[test]
+    fn resolver_core_official_source_skipped_for_known_platform() {
+        // platform=openrouter（已知聚合平台）不套用官方 OpenAI 形态，落到 unknown。
+        let settings = json!({});
+        let official = official_models_fixture();
+        let resolved = resolve_codex_model_capability_core(
+            &settings,
+            Some("openrouter"),
+            "gpt-5.4",
+            None,
+            None,
+            &official,
+        );
+        assert_eq!(resolved.source, CapabilitySource::Unknown);
+        assert!(resolved.capability.is_none());
+    }
+
+    #[test]
+    fn resolver_core_user_config_beats_official() {
+        // 用户模型级声明始终最高优先级，覆盖 official 来源。
+        let settings = json!({
+            "modelCatalog": {"models": [{
+                "model": "gpt-5.4",
+                "reasoning": {
+                    "schemaVersion": 2,
+                    "supportStatus": "confirmed_supported",
+                    "controlKind": "graded",
+                    "supportedEfforts": ["low", "high"],
+                    "defaultEffort": "high",
+                    "disableAllowed": false,
+                    "upstream": {"format": "string", "parameter": "reasoning_effort"},
+                    "source": "user"
+                }
+            }]}
+        });
+        let official = official_models_fixture();
+        let resolved = resolve_codex_model_capability_core(
+            &settings,
+            None,
+            "gpt-5.4",
+            None,
+            None,
+            &official,
+        );
+        assert_eq!(resolved.source, CapabilitySource::UserConfig);
+        let capability = resolved.capability.expect("user capability");
+        assert_eq!(capability.supported_efforts, vec!["low", "high"]);
+    }
+
+    #[test]
+    fn resolver_core_official_empty_cache_falls_to_unknown() {
+        // 官方缓存为空（fresh install）时，GPT 模型落到 unknown（fail-closed）。
+        let settings = json!({});
+        let resolved = resolve_codex_model_capability_core(
+            &settings,
+            None,
+            "gpt-5.4",
+            None,
+            None,
+            &[],
+        );
+        assert_eq!(resolved.source, CapabilitySource::Unknown);
+        assert!(resolved.capability.is_none());
     }
 }

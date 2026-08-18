@@ -487,6 +487,9 @@ pub fn resolve_subagent_reasoning_capability(
     let selectable_set = provider_effort_set.iter().copied().collect::<HashSet<_>>();
     let codex_selectable_efforts = CodexReasoningEffort::ORDERED
         .into_iter()
+        // P2：none 先按 disable capability 处理，不作为普通正向 effort 暴露给
+        // Codex 选择（UI/spawn_agent 的可选档位不含 none；关闭走 disable 路径）。
+        .filter(|effort| *effort != CodexReasoningEffort::None)
         .filter(|effort| selectable_set.contains(effort))
         .collect();
     let support_kind = match capability.effective_support_status() {
@@ -628,6 +631,75 @@ pub fn resolve_reasoning_capability_from_settings(
                 .any(|candidate| candidate.trim().eq_ignore_ascii_case(model.trim()))
         })
         .and_then(reasoning_capability_from_model_entry)
+}
+
+/// 从 Codex 官方模型缓存为指定 slug 构造 reasoning capability（P2：official 来源）。
+///
+/// 官方缓存字段是 snake_case，`supported_reasoning_levels` 可能是字符串数组
+/// （["low","medium",...]）或对象数组（[{"effort":"low","description":...},...]）：
+/// CCSM 写入的 cache 为字符串数组，官方 backup 为对象数组，两种都兼容。
+/// 官方 GPT 模型走 OpenAI 顶层 `reasoning_effort` 字段，effort_map 用 identity。
+/// 任何校验失败都返回 None（保守降级为 Unknown，不产生虚假档位）。
+///
+/// 该来源只适用于未知平台（platform=None，含 OpenAI 直连与 catalog 投影）；
+/// OpenRouter/vLLM 等已知聚合平台有自己的推理接口，不得套用官方 OpenAI 形态。
+pub fn official_reasoning_capability_for_model(
+    model: &str,
+    official_models: &[Value],
+) -> Option<CodexModelReasoningCapability> {
+    let entry = official_models.iter().find(|entry| {
+        entry
+            .get("slug")
+            .and_then(Value::as_str)
+            .is_some_and(|slug| slug.eq_ignore_ascii_case(model))
+    })?;
+    let levels: Vec<String> = entry
+        .get("supported_reasoning_levels")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(|level| {
+            level
+                .as_str()
+                .or_else(|| level.get("effort").and_then(Value::as_str))
+                .map(str::trim)
+                .map(ToString::to_string)
+        })
+        .filter(|level| !level.is_empty())
+        .collect();
+    if levels.is_empty() {
+        return None;
+    }
+    let default_effort = entry
+        .get("default_reasoning_level")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|level| !level.is_empty())
+        .map(ToString::to_string);
+    let capability = CodexModelReasoningCapability {
+        schema_version: Some(2),
+        support_status: Some(ReasoningSupportStatus::ConfirmedSupported),
+        control_kind: Some(ReasoningControlKind::Graded),
+        supported: None,
+        supported_efforts: levels.clone(),
+        default_effort,
+        disable_allowed: false,
+        upstream: CodexModelReasoningUpstream {
+            format: "string".to_string(),
+            parameter: "reasoning_effort".to_string(),
+            effort_map: levels
+                .into_iter()
+                .map(|level| (level.clone(), level))
+                .collect(),
+        },
+        output_format: None,
+        source: Some("official".to_string()),
+        confidence: Some(CapabilityConfidence::Authoritative),
+        fetched_at: None,
+        provider_key: None,
+        model_revision: None,
+    };
+    capability.validate().ok()?;
+    Some(capability)
 }
 
 #[cfg(test)]

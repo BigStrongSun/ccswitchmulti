@@ -607,7 +607,7 @@ pub fn responses_to_chat_completions_with_reasoning_text_only_and_cache(
         }
     }
 
-    apply_reasoning_options(&mut result, &body, model, reasoning_config)?;
+    apply_reasoning_options(&mut result, &body, reasoning_config)?;
 
     let tools = tool_context.chat_tools();
     if !tools.is_empty() {
@@ -646,6 +646,65 @@ pub fn responses_to_chat_completions_with_reasoning_text_only_and_cache(
     super::transform::inject_openai_stream_include_usage(&mut result);
 
     Ok(result)
+}
+
+/// 把 forwarder 侧已决策的 hosted tool 开关同步到已转换的 Chat body。
+///
+/// `responses_to_chat_completions_with_reasoning_text_only_and_cache` 内部会基于
+/// 原始 body 重新构建一份 `CodexToolContext`，因此 forwarder 对
+/// `codex_chat_tool_context` 调用的 `apply_hosted_tool_switches` 不会作用到真正
+/// 发给上游的 Chat body。这里在转换完成后按同一份 context 的开关移除被禁用的
+/// hosted tool 定义，保证「模型可见的工具」与「hosted tool loop 是否接管」一致，
+/// 避免模型调用一个不会被本地执行的 hosted tool 而得到 `unsupported call`。
+pub(crate) fn apply_hosted_tool_switches_to_chat_body(
+    chat_body: &mut Value,
+    context: &CodexToolContext,
+) {
+    let mut removed_any = false;
+    if context.hosted_web_search_config().is_none() {
+        removed_any |= remove_chat_tool_from_body(chat_body, web_search::WEB_SEARCH_FUNCTION_NAME);
+    }
+    if context.hosted_image_generation_config().is_none() {
+        removed_any |=
+            remove_chat_tool_from_body(chat_body, image_generation::IMAGE_GENERATION_FUNCTION_NAME);
+    }
+    if removed_any {
+        drop_orphaned_hosted_tool_choice(chat_body);
+    }
+}
+
+fn remove_chat_tool_from_body(chat_body: &mut Value, name: &str) -> bool {
+    let Some(tools) = chat_body.get_mut("tools").and_then(Value::as_array_mut) else {
+        return false;
+    };
+    let before = tools.len();
+    tools.retain(|tool| tool.pointer("/function/name").and_then(Value::as_str) != Some(name));
+    tools.len() != before
+}
+
+/// 若 tool_choice 指向一个已被移除的 hosted tool，则丢弃该 tool_choice，
+/// 避免上游因引用不存在的工具而报错。
+fn drop_orphaned_hosted_tool_choice(chat_body: &mut Value) {
+    let Some(tool_choice) = chat_body
+        .get("tool_choice")
+        .filter(|value| value.is_object())
+    else {
+        return;
+    };
+    let choice_type = tool_choice.get("type").and_then(Value::as_str);
+    let choice_name = tool_choice.get("name").and_then(Value::as_str).or_else(|| {
+        tool_choice
+            .pointer("/function/name")
+            .and_then(Value::as_str)
+    });
+    let references_hosted = matches!(choice_type, Some("web_search" | "image_generation"))
+        || (choice_type == Some("function")
+            && matches!(choice_name, Some("web_search" | "generate_image")));
+    if references_hosted {
+        if let Some(obj) = chat_body.as_object_mut() {
+            obj.remove("tool_choice");
+        }
+    }
 }
 
 /// 按 provider/route 明确声明的能力透传 OpenAI prompt cache 参数。
@@ -773,15 +832,12 @@ fn apply_min_output_tokens(
 fn apply_reasoning_options(
     result: &mut Value,
     body: &Value,
-    model: &str,
     config: Option<&CodexChatReasoningConfig>,
 ) -> Result<(), ProxyError> {
     let Some(config) = config else {
-        if super::transform::supports_reasoning_effort(model) {
-            if let Some(effort) = body.pointer("/reasoning/effort") {
-                result["reasoning_effort"] = effort.clone();
-            }
-        }
+        // P2：通用 GPT reasoning fallback 已封闭。GPT 模型统一经 resolver 的
+        // official 来源（未知平台）或平台推断（聚合平台）解析；config 为 None
+        // 表示该模型推理能力未知，不得再按模型名猜测档位注入 reasoning_effort。
         return Ok(());
     };
 
@@ -3002,7 +3058,10 @@ mod tests {
         assert_eq!(result["tool_choice"]["function"]["name"], "get_weather");
         assert_eq!(result["max_completion_tokens"], 100);
         assert!(result.get("max_tokens").is_none());
-        assert_eq!(result["reasoning_effort"], "high");
+        // P2：通用 GPT reasoning fallback 已封闭。无 reasoning config 的简单转换
+        // 不再按模型名猜测档位注入 reasoning_effort；GPT 模型统一经 resolver
+        // 的 official 来源解析（请求路径始终携带 config，不会走到此分支）。
+        assert!(result.get("reasoning_effort").is_none());
     }
 
     #[test]
@@ -3527,6 +3586,94 @@ mod tests {
         );
         assert!(context.hosted_web_search_config().is_some());
         assert!(context.hosted_image_generation_config().is_none());
+    }
+
+    /// 复现 streaming auto 下 hosted tool 泄漏：转换函数内部重建 context，
+    /// forwarder 的 apply_hosted_tool_switches 不会作用到 Chat body。修复后
+    /// apply_hosted_tool_switches_to_chat_body 必须把被禁用的 hosted tool 从
+    /// 真正发给上游的 Chat body 中移除，同时保留普通 client tool。
+    #[test]
+    fn hosted_tool_switches_apply_to_converted_chat_body() {
+        let request = json!({
+            "model": "qwen3.8",
+            "tools": [
+                { "type": "web_search" },
+                { "type": "image_generation" },
+                {
+                    "type": "function",
+                    "name": "lookup",
+                    "description": "Look up a value.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": { "id": { "type": "string" } },
+                        "required": ["id"]
+                    }
+                }
+            ],
+            "input": "Use tools.",
+            "tool_choice": "auto"
+        });
+
+        // 模拟 forwarder：先转换，再按 loop 关闭的开关同步 Chat body。
+        let mut chat_body = responses_to_chat_completions_with_reasoning_text_only_and_cache(
+            request.clone(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // 转换后（未同步开关）Chat body 仍会暴露 hosted tool —— 这是 bug 现象。
+        let names_before: Vec<&str> = chat_body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t.pointer("/function/name").and_then(Value::as_str))
+            .collect();
+        assert!(names_before.contains(&"web_search"));
+        assert!(names_before.contains(&"generate_image"));
+
+        let mut context = build_codex_tool_context_from_request(&request);
+        context.apply_hosted_tool_switches(false, false);
+        apply_hosted_tool_switches_to_chat_body(&mut chat_body, &context);
+
+        let names_after: Vec<&str> = chat_body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t.pointer("/function/name").and_then(Value::as_str))
+            .collect();
+        assert!(!names_after.contains(&"web_search"));
+        assert!(!names_after.contains(&"generate_image"));
+        assert!(names_after.contains(&"lookup"));
+    }
+
+    /// 当 tool_choice 指向被移除的 hosted tool 时，应丢弃孤儿 tool_choice。
+    #[test]
+    fn hosted_tool_switches_drop_orphaned_tool_choice() {
+        let request = json!({
+            "model": "qwen3.8",
+            "tools": [{ "type": "web_search" }],
+            "input": "Search.",
+            "tool_choice": { "type": "web_search" }
+        });
+
+        let mut chat_body = responses_to_chat_completions_with_reasoning_text_only_and_cache(
+            request.clone(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let mut context = build_codex_tool_context_from_request(&request);
+        context.apply_hosted_tool_switches(false, false);
+        apply_hosted_tool_switches_to_chat_body(&mut chat_body, &context);
+
+        assert!(
+            chat_body.get("tools").is_none() || chat_body["tools"].as_array().unwrap().is_empty()
+        );
+        assert!(chat_body.get("tool_choice").is_none());
     }
 
     #[test]

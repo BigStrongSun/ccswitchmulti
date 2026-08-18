@@ -2369,6 +2369,17 @@ impl RequestForwarder {
                 text_only_override,
                 Some(&cache_config),
             )?;
+            // 转换函数内部会重建一份 CodexToolContext，因此上面的
+            // apply_hosted_tool_switches 不会作用到真正发给上游的 Chat body。
+            // 这里按同一份 context 的开关同步移除被禁用的 hosted tool 定义，
+            // 保证模型可见工具与 hosted tool loop 接管范围一致（避免
+            // streaming auto 下模型调用 web_search 得到 unsupported call）。
+            if let Some(context) = codex_chat_tool_context.as_ref() {
+                super::providers::transform_codex_chat::apply_hosted_tool_switches_to_chat_body(
+                    &mut chat_body,
+                    context,
+                );
+            }
             super::providers::inject_codex_chat_prompt_cache_key(
                 provider,
                 &mut chat_body,
