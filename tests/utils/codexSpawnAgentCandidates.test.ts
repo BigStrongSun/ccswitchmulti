@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   normalizeSpawnAgentCandidateSelection,
   readCodexModelCatalog,
+  readRawCodexModelCatalogModels,
   reorderSpawnAgentCandidates,
   validateSpawnAgentCandidates,
   type CodexCatalogModel,
@@ -65,6 +66,28 @@ describe("codexSpawnAgentCandidates", () => {
       "gpt-5.4-mini",
       "deepseek-v4-pro",
     ]);
+  });
+
+  it("读取模型目录时过滤停用模型，但保留原始读取用于持久化", () => {
+    const provider = providerWithModelCatalog({
+      models: [
+        { model: "qwen3.6" },
+        { model: "deepseek-v4-flash", enabled: false },
+        { model: "deepseek-v4-pro", enabled: true },
+      ],
+      spawnAgentModels: ["qwen3.6", "deepseek-v4-flash"],
+    });
+
+    const visible = readCodexModelCatalog(provider);
+    expect(visible.models.map((model) => model.model)).toEqual([
+      "qwen3.6",
+      "deepseek-v4-pro",
+    ]);
+    expect(visible.spawnAgentModels).toEqual(["qwen3.6", "deepseek-v4-pro"]);
+
+    expect(
+      readRawCodexModelCatalogModels(provider).map((model) => model.model),
+    ).toEqual(["qwen3.6", "deepseek-v4-flash", "deepseek-v4-pro"]);
   });
 
   it("规整选择时去掉未知模型和重复模型", () => {

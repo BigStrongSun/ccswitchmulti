@@ -99,6 +99,7 @@ import {
   normalizeCodexSpawnAgentModels,
   normalizeSpawnAgentCandidateSelection,
   readCodexModelCatalog,
+  readRawCodexModelCatalogModels,
   reorderSpawnAgentCandidates,
   validateSpawnAgentCandidates,
   type CodexCatalogModel,
@@ -450,6 +451,7 @@ type ProxyListenDraftValidation =
 
 type CodexCatalogModelDraft = {
   model: string;
+  enabled?: boolean;
   upstreamModel?: string;
   upstream_model?: string;
   displayName?: string;
@@ -691,7 +693,11 @@ function providerWithFetchedModelCatalog(
   provider: Provider,
   fetchedModels: FetchedModel[],
 ): Provider {
-  const currentCatalog = readCodexModelCatalog(provider);
+  const visibleCatalog = readCodexModelCatalog(provider);
+  const currentCatalog = {
+    models: readRawCodexModelCatalogModels(provider),
+    spawnAgentModels: visibleCatalog.spawnAgentModels,
+  };
   const fetchConfig = getProviderModelFetchConfig(provider);
   const models = currentCatalog.models.map((model) => {
     const id = model.model?.trim();
@@ -719,6 +725,7 @@ function providerWithFetchedModelCatalog(
         : {}),
       ...(model.vision !== undefined ? { vision: model.vision } : {}),
       ...(model.sortIndex !== undefined ? { sortIndex: model.sortIndex } : {}),
+      ...(model.enabled !== undefined ? { enabled: model.enabled } : {}),
       // 模型目录刷新必须保留已有 reasoning 声明（用户手动声明的档位/能力）。
       // 否则 /models 拉取重建会把声明清空，导致档位消失（K3/Qwen 均受影响）。
       ...(model.reasoning ? { reasoning: model.reasoning } : {}),
@@ -802,7 +809,7 @@ function providerWithFetchedModelCatalog(
         models,
         spawnAgentModels: normalizeCodexSpawnAgentModels(
           currentCatalog.spawnAgentModels,
-          models,
+          models.filter((model) => model.enabled !== false),
         ),
       },
     },
@@ -1292,6 +1299,7 @@ function catalogDraftFromSourceModel(
   );
   return {
     model: id,
+    ...(source?.enabled !== undefined ? { enabled: source.enabled } : {}),
     ...(upstreamModel && upstreamModel !== id ? { upstreamModel } : {}),
     ...(displayName ? { displayName } : {}),
     ...(contextWindow ? { contextWindow } : {}),

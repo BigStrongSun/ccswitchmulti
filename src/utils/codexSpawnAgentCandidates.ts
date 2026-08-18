@@ -57,30 +57,41 @@ export function normalizeCodexSpawnAgentModels(
   return normalized;
 }
 
-// 读取 MultiRouter provider 私有配置中的模型目录和 spawn_agent 候选顺序。
-export function readCodexModelCatalog(
+function readCodexCatalogModels(
   provider: Pick<Provider, "settingsConfig"> | null,
-): CodexModelCatalog {
+  enabledOnly: boolean,
+): CodexCatalogModel[] {
   const catalog = provider?.settingsConfig?.modelCatalog;
   if (!catalog || typeof catalog !== "object") {
-    return { models: [], spawnAgentModels: [] };
+    return [];
   }
 
   const catalogObject = catalog as Record<string, unknown>;
   const rawModels: unknown[] = Array.isArray(catalogObject.models)
     ? catalogObject.models
     : [];
-  const models = rawModels
+  return rawModels
     .filter(
       (item: unknown): item is CodexCatalogModel =>
         !!item && typeof item === "object",
     )
+    .filter((item) => !enabledOnly || item.enabled !== false)
     .filter((item) => typeof item.model === "string" && item.model.trim());
+}
+
+// 读取 MultiRouter provider 私有配置中的模型目录和 spawn_agent 候选顺序。
+// 默认只返回启用的模型，避免停用行泄漏到模型排序、候选选择等界面。
+export function readCodexModelCatalog(
+  provider: Pick<Provider, "settingsConfig"> | null,
+): CodexModelCatalog {
+  const models = readCodexCatalogModels(provider, true);
+  const catalog = provider?.settingsConfig?.modelCatalog;
+  const catalogObject = catalog as Record<string, unknown> | undefined;
   const rawSpawnAgentModels: unknown[] = Array.isArray(
-    catalogObject.spawnAgentModels,
+    catalogObject?.spawnAgentModels,
   )
     ? catalogObject.spawnAgentModels
-    : Array.isArray(catalogObject.spawn_agent_models)
+    : Array.isArray(catalogObject?.spawn_agent_models)
       ? catalogObject.spawn_agent_models
       : [];
   const spawnAgentModels = rawSpawnAgentModels
@@ -92,6 +103,13 @@ export function readCodexModelCatalog(
     models,
     spawnAgentModels: normalizeCodexSpawnAgentModels(spawnAgentModels, models),
   };
+}
+
+// 持久化和同步路径需要完整保留停用行，供用户后续重新启用；这些路径不应复用上面的展示过滤。
+export function readRawCodexModelCatalogModels(
+  provider: Pick<Provider, "settingsConfig"> | null,
+): CodexCatalogModel[] {
+  return readCodexCatalogModels(provider, false);
 }
 
 // 展示模型名称时优先使用 catalog 的 displayName，保留 slug 方便用户复制。

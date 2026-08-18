@@ -1159,28 +1159,34 @@ describe("CodexFormFields local model routing", () => {
     });
   });
 
-  it("uses model mapping checkboxes and arrows for catalog retention and order", async () => {
+  it("uses model mapping checkboxes and arrows for catalog enablement and order", async () => {
     const { latestCatalog } = renderCatalogHarness([
       { model: "model-a", upstreamModel: "model-a" },
       { model: "model-b", upstreamModel: "model-b" },
       { model: "model-c", upstreamModel: "model-c" },
     ]);
 
-    fireEvent.click(screen.getByLabelText("保留 model-b"));
+    fireEvent.click(screen.getByLabelText("启用 model-b"));
 
     await waitFor(() => {
       expect(latestCatalog().map((model) => model.model)).toEqual([
         "model-a",
+        "model-b",
         "model-c",
       ]);
+      expect(latestCatalog()[1]).toMatchObject({
+        model: "model-b",
+        enabled: false,
+      });
     });
 
-    fireEvent.click(screen.getAllByTitle("上移")[1]);
+    fireEvent.click(screen.getAllByTitle("上移")[2]);
 
     await waitFor(() => {
       expect(latestCatalog().map((model) => model.model)).toEqual([
-        "model-c",
         "model-a",
+        "model-c",
+        "model-b",
       ]);
     });
   });

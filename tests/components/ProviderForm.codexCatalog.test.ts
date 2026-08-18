@@ -152,4 +152,16 @@ describe("ProviderForm Codex catalog helpers", () => {
       { model: "text-explicit", supportsImage: false },
     ]);
   });
+
+  it("preserves enabled=false while omitting the implicit enabled default", () => {
+    expect(
+      normalizeCodexCatalogModelsForSave([
+        { model: "deepseek-v4-flash", enabled: false },
+        { model: "kimi-k2", enabled: true },
+      ]),
+    ).toEqual([
+      { model: "deepseek-v4-flash", enabled: false },
+      { model: "kimi-k2" },
+    ]);
+  });
 });

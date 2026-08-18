@@ -130,6 +130,56 @@ describe("codexMultiRouterSync", () => {
     ]);
   });
 
+  it("同步时排除 provider 目录中停用的模型", () => {
+    const target = provider({
+      id: "qwen",
+      settingsConfig: {
+        modelCatalog: {
+          models: [
+            { model: "qwen3.6" },
+            { model: "disabled-model", enabled: false },
+          ],
+        },
+      },
+    });
+    const plan = provider({
+      id: "router",
+      settingsConfig: {
+        modelCatalog: {
+          models: [{ model: "qwen3.6" }, { model: "disabled-model" }],
+        },
+        codexRouting: {
+          enabled: true,
+          routes: [
+            {
+              id: "qwen-route",
+              targetProviderId: target.id,
+              match: { models: ["qwen3.6", "disabled-model"] },
+              upstream: { apiFormat: "openai_chat" },
+            },
+          ],
+        },
+      },
+    });
+
+    const synced = syncCodexMultiRouterPlanWithProviders(
+      plan,
+      new Map([
+        [target.id, target],
+        [plan.id, plan],
+      ]),
+    );
+
+    expect(
+      synced?.plan.settingsConfig.codexRouting.routes[0].match.models,
+    ).toEqual(["qwen3.6"]);
+    expect(
+      synced?.plan.settingsConfig.modelCatalog.models.map(
+        (model: { model: string }) => model.model,
+      ),
+    ).toEqual(["qwen3.6"]);
+  });
+
   it("把旧版内联默认 OAuth route 迁移到 canonical provider 并同步 5.6", () => {
     const official = provider({
       id: "codex-official",
