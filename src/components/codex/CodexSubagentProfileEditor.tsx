@@ -677,7 +677,9 @@ export function CodexSubagentProfileEditor({
           ? "已添加第三方可配置模型；已有设置保持不变"
           : action === "remove_all_invalid"
             ? "无效能力配置已删除"
-            : "无效能力配置已从模型目录恢复";
+            : action === "prune_unroutable"
+              ? "已删除模型目录中不存在的失效配置"
+              : "无效能力配置已从模型目录恢复";
       setSaveMessage(
         `${actionMessage}；${evaluateMutationResult(nextProvider)}`,
       );
@@ -841,6 +843,11 @@ export function CodexSubagentProfileEditor({
     invalidProfileEntries.length,
     backendReconciliableProfileCount,
   );
+  // parse-valid 但模型已离开可路由 catalog 的 profile（“失效”配置），
+  // 与“无效能力配置”（parse-invalid/collision）区分开，供“与目录同步”按钮使用。
+  const unroutableProfileCount = (statuses?.profiles ?? []).filter(
+    ({ status }) => status === "unroutable",
+  ).length;
   const usableProfileKeys = new Set(
     profileEntries.map(([profileKey]) => profileKey),
   );
@@ -1025,6 +1032,22 @@ export function CodexSubagentProfileEditor({
                 从模型目录恢复全部无效能力配置（
                 {reconciliableProfileCount} 项）
               </Button>
+            </div>
+          ) : null}
+          {unroutableProfileCount > 0 ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                className="border-amber-300 bg-background/85 text-amber-800 hover:bg-amber-100 dark:border-amber-500/40 dark:bg-amber-950/30 dark:text-amber-100 dark:hover:bg-amber-500/20"
+                onClick={() => reconcile("prune_unroutable", draft)}
+              >
+                与目录同步：删除已失效模型（{unroutableProfileCount} 项）
+              </Button>
+              <p className="max-w-2xl text-xs leading-5 text-amber-900/75 dark:text-amber-100/75">
+                这些配置的模型已不在当前 MultiRouter
+                模型目录中。同步后会删除它们；若模型重新加入目录，可再次添加。
+              </p>
             </div>
           ) : null}
         </div>

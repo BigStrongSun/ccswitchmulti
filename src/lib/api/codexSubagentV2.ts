@@ -34,7 +34,8 @@ export type CodexSubagentV2MutationProvider = Provider & {
 export type CodexSubagentV2ReconcileAction =
   | "sync_catalog"
   | "remove_all_invalid"
-  | "recover_all_invalid_from_catalog";
+  | "recover_all_invalid_from_catalog"
+  | "prune_unroutable";
 
 export const codexSubagentV2Api = {
   getReasoningCapabilities(

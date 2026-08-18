@@ -3429,6 +3429,7 @@ pub enum CodexSubagentV2ReconcileAction {
     SyncCatalog,
     RemoveAllInvalid,
     RecoverAllInvalidFromCatalog,
+    PruneUnroutable,
 }
 
 fn codex_subagent_profile_input_modalities(spec: &CodexCatalogModelSpec) -> Option<Vec<String>> {
@@ -3703,11 +3704,85 @@ pub(crate) fn reconcile_codex_subagent_v2_for_candidate(
                 profiles.insert(identity, recovered);
             }
         }
+        CodexSubagentV2ReconcileAction::PruneUnroutable => {
+            // 删除模型已离开可路由 catalog 的 profile（parse-valid 但 unroutable）。
+            // 这是显式“与目录同步”动作：用户主动要求让 V2 列表跟随 MultiRouter 模型库。
+            let keys: Vec<String> = profiles.keys().cloned().collect();
+            for key in keys {
+                let identity = profiles
+                    .get(&key)
+                    .and_then(|raw| raw.get("model"))
+                    .and_then(Value::as_str)
+                    .map(normalize_profile_key)
+                    .filter(|identity| !identity.is_empty())
+                    .unwrap_or_else(|| normalize_profile_key(&key));
+                if !routable_by_identity.contains_key(&identity) {
+                    profiles.shift_remove(&key);
+                }
+            }
+        }
     }
     Ok(hydrate_codex_subagent_v2_input_modalities(
         settings,
         &reconciled,
     ))
+}
+
+/// Best-effort auto-prune of DISABLED V2 profiles whose model is no longer present in the
+/// MultiRouter catalog (`modelCatalog.models`). This lets the V2 profile list follow the
+/// catalog when the user removes a model, without touching ENABLED profiles (active
+/// configurations are never auto-removed) or parse-invalid profiles (handled by the
+/// explicit RemoveAllInvalid / RecoverAllInvalidFromCatalog actions).
+///
+/// Returns `Some(pruned_subagent_v2)` when at least one stale disabled profile was removed,
+/// otherwise `None`. The prune is idempotent: once a stale disabled profile is removed it
+/// stays removed; if the model re-enters the catalog, the SyncCatalog action re-creates a
+/// fresh draft. Uses catalog membership (not routability) so a model that is present in the
+/// catalog but temporarily missing a route is never auto-pruned.
+pub(crate) fn auto_prune_disabled_stale_subagent_v2(
+    settings: &Value,
+) -> Result<Option<Value>, AppError> {
+    let Some(subagent_v2) = settings
+        .get("codexRouting")
+        .and_then(|routing| routing.get("subagentV2"))
+    else {
+        return Ok(None);
+    };
+    let catalog_identities: HashSet<String> = codex_catalog_model_specs(settings, "")
+        .iter()
+        .map(|spec| normalize_profile_key(&spec.model))
+        .filter(|identity| !identity.is_empty())
+        .collect();
+    let mut pruned = subagent_v2.clone();
+    let Some(profiles) = pruned.get_mut("profiles").and_then(Value::as_object_mut) else {
+        return Ok(None);
+    };
+    let keys: Vec<String> = profiles.keys().cloned().collect();
+    let mut removed = 0usize;
+    for key in keys {
+        let Some(raw) = profiles.get(&key) else {
+            continue;
+        };
+        // Only prune profiles that are explicitly DISABLED; enabled or missing-enabled
+        // profiles are never auto-removed (conservative: no active-config data loss).
+        if raw.get("enabled").and_then(Value::as_bool) != Some(false) {
+            continue;
+        }
+        let identity = raw
+            .get("model")
+            .and_then(Value::as_str)
+            .map(normalize_profile_key)
+            .filter(|identity| !identity.is_empty())
+            .unwrap_or_else(|| normalize_profile_key(&key));
+        if !catalog_identities.contains(&identity) {
+            profiles.shift_remove(&key);
+            removed += 1;
+        }
+    }
+    if removed == 0 {
+        return Ok(None);
+    }
+    Ok(Some(pruned))
 }
 
 pub(crate) fn validate_codex_subagent_v2_candidate(
@@ -7392,6 +7467,110 @@ mod tests {
         assert!(recovered["profiles"].get("LEGACY_ALIAS_SENTINEL").is_none());
         parse_persisted_subagent_v2(&recovered)
             .expect("re-keyed alias recovery must be strict-storage valid");
+    }
+
+    #[test]
+    fn codex_subagent_v2_prune_unroutable_removes_stale_and_keeps_routable() {
+        let settings = codex_subagent_profile_status_settings(
+            "v2",
+            json!({
+                "repository-scout": codex_subagent_profile_status_profile("repository-scout", true),
+                "deepseek-v4-pro": codex_subagent_profile_status_profile("deepseek-v4-pro", false),
+                "qwen3.6": codex_subagent_profile_status_profile("qwen3.6", false),
+                "stale-disabled": codex_subagent_profile_status_profile("stale-disabled", false),
+                "stale-enabled": codex_subagent_profile_status_profile("stale-enabled", true)
+            }),
+            json!([
+                { "model": "repository-scout", "contextWindow": 128000 },
+                { "model": "deepseek-v4-pro", "contextWindow": 1000000 },
+                { "model": "qwen3.6", "contextWindow": 262144 }
+            ]),
+            json!([{
+                "id": "all-models",
+                "match": { "models": ["repository-scout", "deepseek-v4-pro", "qwen3.6"] },
+                "upstream": { "auth": { "source": "provider_config" } }
+            }]),
+        );
+        let draft = settings["codexRouting"]["subagentV2"].clone();
+
+        let pruned = reconcile_codex_subagent_v2_for_candidate(
+            &settings,
+            CodexSubagentV2ReconcileAction::PruneUnroutable,
+            Some(&draft),
+            None,
+        )
+        .expect("prune unroutable profiles in backend");
+
+        // Routable profiles (in catalog + routed) are kept, regardless of enabled state.
+        assert!(pruned["profiles"].get("repository-scout").is_some());
+        assert!(pruned["profiles"].get("deepseek-v4-pro").is_some());
+        assert!(pruned["profiles"].get("qwen3.6").is_some());
+        // Unroutable profiles (not in catalog) are removed, regardless of enabled state.
+        assert!(pruned["profiles"].get("stale-disabled").is_none());
+        assert!(pruned["profiles"].get("stale-enabled").is_none());
+        parse_persisted_subagent_v2(&pruned)
+            .expect("prune must produce strict-storage valid output");
+    }
+
+    #[test]
+    fn codex_subagent_v2_auto_prune_removes_disabled_stale_only() {
+        let settings = codex_subagent_profile_status_settings(
+            "v2",
+            json!({
+                "repository-scout": codex_subagent_profile_status_profile("repository-scout", true),
+                "deepseek-v4-pro": codex_subagent_profile_status_profile("deepseek-v4-pro", false),
+                "stale-disabled": codex_subagent_profile_status_profile("stale-disabled", false),
+                "stale-enabled": codex_subagent_profile_status_profile("stale-enabled", true)
+            }),
+            json!([
+                { "model": "repository-scout", "contextWindow": 128000 },
+                { "model": "deepseek-v4-pro", "contextWindow": 1000000 }
+            ]),
+            json!([{
+                "id": "all-models",
+                "match": { "models": ["repository-scout", "deepseek-v4-pro"] },
+                "upstream": { "auth": { "source": "provider_config" } }
+            }]),
+        );
+
+        let pruned = auto_prune_disabled_stale_subagent_v2(&settings)
+            .expect("auto-prune must succeed")
+            .expect("auto-prune must remove the stale disabled profile");
+
+        // In-catalog profiles are kept (even if disabled).
+        assert!(pruned["profiles"].get("repository-scout").is_some());
+        assert!(pruned["profiles"].get("deepseek-v4-pro").is_some());
+        // Disabled + not-in-catalog is removed.
+        assert!(pruned["profiles"].get("stale-disabled").is_none());
+        // Enabled + not-in-catalog is kept (enabled profiles are never auto-removed).
+        assert!(pruned["profiles"].get("stale-enabled").is_some());
+    }
+
+    #[test]
+    fn codex_subagent_v2_auto_prune_is_noop_when_no_stale_disabled() {
+        let settings = codex_subagent_profile_status_settings(
+            "v2",
+            json!({
+                "repository-scout": codex_subagent_profile_status_profile("repository-scout", true),
+                "deepseek-v4-pro": codex_subagent_profile_status_profile("deepseek-v4-pro", false)
+            }),
+            json!([
+                { "model": "repository-scout", "contextWindow": 128000 },
+                { "model": "deepseek-v4-pro", "contextWindow": 1000000 }
+            ]),
+            json!([{
+                "id": "all-models",
+                "match": { "models": ["repository-scout", "deepseek-v4-pro"] },
+                "upstream": { "auth": { "source": "provider_config" } }
+            }]),
+        );
+
+        let pruned =
+            auto_prune_disabled_stale_subagent_v2(&settings).expect("auto-prune must succeed");
+        assert!(
+            pruned.is_none(),
+            "no stale disabled profile means no change"
+        );
     }
 
     #[test]
