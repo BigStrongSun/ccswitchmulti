@@ -2729,8 +2729,8 @@ export function CodexFormFields({
                     {/* 列头：md+ 显示 */}
                     <div className="hidden grid-cols-[88px_1fr_1fr_1fr_132px_76px_36px] gap-2 px-1 text-xs font-medium text-muted-foreground md:grid">
                       <span>
-                        {t("codexConfig.keepCatalogModelColumn", {
-                          defaultValue: "保留",
+                        {t("codexConfig.enableCatalogModelColumn", {
+                          defaultValue: "启用",
                         })}
                       </span>
                       <span>
@@ -2802,18 +2802,18 @@ export function CodexFormFields({
                                   enabled: event.target.checked,
                                 });
                               }}
-                              aria-label={t("codexConfig.keepCatalogModel", {
+                              aria-label={t("codexConfig.enableCatalogModel", {
                                 model: row.model || row.displayName || "",
-                                defaultValue: `保留 ${row.model || row.displayName || "这个模型"}`,
+                                defaultValue: `启用 ${row.model || row.displayName || "这个模型"}`,
                               })}
                             />
                             <span>
                               {row.enabled === false
-                                ? t("codexConfig.keepCatalogModelDisabled", {
-                                    defaultValue: "未使用",
+                                ? t("codexConfig.enableCatalogModelDisabled", {
+                                    defaultValue: "未启用",
                                   })
-                                : t("codexConfig.keepCatalogModelColumn", {
-                                    defaultValue: "保留",
+                                : t("codexConfig.enableCatalogModelColumn", {
+                                    defaultValue: "启用",
                                   })}
                             </span>
                           </label>

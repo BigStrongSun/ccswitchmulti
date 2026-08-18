@@ -47,24 +47,25 @@ function renderCodexFormFields(catalogModels: CodexCatalogModel[]) {
   return { onCatalogModelsChange };
 }
 
-describe("CodexFormFields keep column", () => {
-  it("keeps the catalog row and disables the model when keep is unchecked", async () => {
+describe("CodexFormFields enable column", () => {
+  it("keeps the catalog row and disables the model when enable is unchecked", async () => {
     const { onCatalogModelsChange } = renderCodexFormFields([
       { model: "deepseek-v4-flash" },
     ]);
 
     fireEvent.click(screen.getByRole("button", { name: "高级选项" }));
 
-    const keepCheckbox = screen.getByRole("checkbox", {
-      name: "保留 deepseek-v4-flash",
+    expect(screen.getAllByText("启用").length).toBeGreaterThan(0);
+    const enableCheckbox = screen.getByRole("checkbox", {
+      name: "启用 deepseek-v4-flash",
     });
-    expect(keepCheckbox).toBeChecked();
+    expect(enableCheckbox).toBeChecked();
 
-    fireEvent.click(keepCheckbox);
+    fireEvent.click(enableCheckbox);
 
     await waitFor(() => {
-      expect(keepCheckbox).not.toBeChecked();
-      expect(screen.getByText("未使用")).toBeInTheDocument();
+      expect(enableCheckbox).not.toBeChecked();
+      expect(screen.getByText("未启用")).toBeInTheDocument();
     });
     expect(
       screen.getAllByDisplayValue("deepseek-v4-flash").length,
@@ -77,23 +78,24 @@ describe("CodexFormFields keep column", () => {
     ]);
   });
 
-  it("re-enables the model when the kept row is checked again", async () => {
+  it("re-enables the model when the disabled row is checked again", async () => {
     const { onCatalogModelsChange } = renderCodexFormFields([
       { model: "deepseek-v4-flash", enabled: false },
     ]);
 
     fireEvent.click(screen.getByRole("button", { name: "高级选项" }));
 
-    const keepCheckbox = screen.getByRole("checkbox", {
-      name: "保留 deepseek-v4-flash",
+    const enableCheckbox = screen.getByRole("checkbox", {
+      name: "启用 deepseek-v4-flash",
     });
-    expect(keepCheckbox).not.toBeChecked();
+    expect(enableCheckbox).not.toBeChecked();
+    expect(screen.getByText("未启用")).toBeInTheDocument();
 
-    fireEvent.click(keepCheckbox);
+    fireEvent.click(enableCheckbox);
 
     await waitFor(() => {
-      expect(keepCheckbox).toBeChecked();
-      expect(screen.queryByText("未使用")).not.toBeInTheDocument();
+      expect(enableCheckbox).toBeChecked();
+      expect(screen.queryByText("未启用")).not.toBeInTheDocument();
     });
     expect(onCatalogModelsChange).toHaveBeenLastCalledWith([
       expect.objectContaining({
