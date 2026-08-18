@@ -277,6 +277,13 @@ fn codex_model_entries_from_catalog_value(catalog: &Value) -> (Vec<String>, Vec<
     let mut projected = Vec::new();
 
     for entry in entries {
+        if entry
+            .get("enabled")
+            .and_then(Value::as_bool)
+            == Some(false)
+        {
+            continue;
+        }
         let Some(model_name) = codex_model_name(entry) else {
             continue;
         };

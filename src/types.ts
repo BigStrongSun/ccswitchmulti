@@ -315,6 +315,9 @@ export interface CodexModelReasoningCapability {
 
 export interface CodexCatalogModel {
   model: string;
+  // false keeps the catalog row for later reuse but excludes it from Codex
+  // menu/catalog projection; missing means enabled.
+  enabled?: boolean;
   upstreamModel?: string;
   upstream_model?: string;
   displayName?: string;

@@ -194,18 +194,31 @@ function isWizardNativeCodexAuthSource(provider: Provider): boolean {
 // 读取 Codex provider 的真实持久化模型目录；缺失或结构异常时返回空目录，不能伪造 OAuth 模型权限。
 export function readWizardModelCatalog(
   provider: Provider,
+  options: { enabledOnly?: boolean } = { enabledOnly: true },
 ): CodexCatalogModel[] {
   const models = provider.settingsConfig?.modelCatalog?.models;
   if (!Array.isArray(models)) {
     return [];
   }
-  return models.filter(
-    (model): model is CodexCatalogModel =>
-      typeof model === "object" &&
-      model !== null &&
-      typeof (model as CodexCatalogModel).model === "string" &&
-      Boolean((model as CodexCatalogModel).model.trim()),
-  );
+  return models
+    .filter(
+      (model): model is CodexCatalogModel =>
+        typeof model === "object" &&
+        model !== null &&
+        typeof (model as CodexCatalogModel).model === "string" &&
+        Boolean((model as CodexCatalogModel).model.trim()),
+    )
+    .filter(
+      (model) =>
+        (options.enabledOnly ?? true) === false || model.enabled !== false,
+    );
+}
+
+// 持久化/合并路径需要保留停用行；这些路径单独读取原始目录，避免刷新后丢失用户保留的停用模型。
+export function readRawWizardModelCatalog(
+  provider: Provider,
+): CodexCatalogModel[] {
+  return readWizardModelCatalog(provider, { enabledOnly: false });
 }
 
 // 判断 provider 是否是 MultiRouter 方案；向导只把普通 provider 当作上游模型源。
@@ -396,7 +409,7 @@ export function mergeFetchedModelsIntoWizardProvider(
   fetchedModels: FetchedModel[],
   options: MergeFetchedWizardModelsOptions = {},
 ): Provider {
-  const existingModels = readWizardModelCatalog(provider);
+  const existingModels = readRawWizardModelCatalog(provider);
   const byModel = new Map<string, CodexCatalogModel>();
   const byFetchedModel = new Map<string, string>();
   for (const model of existingModels) {
@@ -448,7 +461,11 @@ export function mergeFetchedModelsIntoWizardProvider(
     });
   }
   const models = Array.from(byModel.values());
-  const allowedModels = new Set(models.map((model) => model.model));
+  const allowedModels = new Set(
+    models
+      .filter((model) => model.enabled !== false)
+      .map((model) => model.model),
+  );
   const rawSpawnAgentModels =
     provider.settingsConfig?.modelCatalog?.spawnAgentModels;
   const spawnAgentModels = Array.isArray(rawSpawnAgentModels)

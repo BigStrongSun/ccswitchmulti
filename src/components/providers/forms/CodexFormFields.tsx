@@ -419,6 +419,7 @@ function createCatalogRow(seed?: Partial<CodexCatalogModel>): CodexCatalogRow {
   return {
     rowId: crypto.randomUUID(),
     model: seed?.model ?? "",
+    ...(seed?.enabled !== undefined ? { enabled: seed.enabled } : {}),
     upstreamModel: seed?.upstreamModel ?? seed?.upstream_model ?? "",
     displayName: seed?.displayName ?? "",
     contextWindow: seed?.contextWindow ?? "",
@@ -515,6 +516,7 @@ function catalogRowsMatchModels(
     Pick<
       CodexCatalogRow,
       | "model"
+      | "enabled"
       | "upstreamModel"
       | "upstream_model"
       | "displayName"
@@ -533,6 +535,7 @@ function catalogRowsMatchModels(
     const incoming = models[i];
     return (
       row.model === (incoming.model ?? "") &&
+      (row.enabled ?? true) === (incoming.enabled ?? true) &&
       catalogRowUpstreamModel(row) === catalogRowUpstreamModel(incoming) &&
       (row.displayName ?? "") === (incoming.displayName ?? "") &&
       String(row.contextWindow ?? "") ===
@@ -1213,8 +1216,8 @@ export function CodexFormFields({
     const planModelListAction = codexPlanModelListAction(planFetchSource);
     const isCatalogOnlyPlan = isCodexCatalogOnlyPlanModelFetch(planFetchSource);
     if (isCatalogOnlyPlan) {
-      const hasModelCatalog = catalogRowsRef.current.some((row) =>
-        row.model.trim(),
+      const hasModelCatalog = catalogRowsRef.current.some(
+        (row) => row.enabled !== false && row.model.trim(),
       );
       const message = codexCatalogOnlyPlanModelFetchMessage(
         hasModelCatalog,
@@ -1337,7 +1340,9 @@ export function CodexFormFields({
     const models = Array.from(
       new Set(
         [
-          ...catalogRowsRef.current.map((row) => catalogRowUpstreamModel(row)),
+          ...catalogRowsRef.current
+            .filter((row) => row.enabled !== false)
+            .map((row) => catalogRowUpstreamModel(row)),
           ...fetchedModels.map((model) => model.id.trim()),
         ].filter(Boolean),
       ),
@@ -2782,27 +2787,34 @@ export function CodexFormFields({
                       return (
                         <div
                           key={row.rowId}
-                          className="grid grid-cols-1 gap-2 rounded-md border border-transparent p-1 md:grid-cols-[88px_1fr_1fr_1fr_132px_76px_36px]"
+                          className={cn(
+                            "grid grid-cols-1 gap-2 rounded-md border border-transparent p-1 md:grid-cols-[88px_1fr_1fr_1fr_132px_76px_36px]",
+                            row.enabled === false && "opacity-60",
+                          )}
                         >
                           <label className="flex h-9 items-center gap-2 text-xs text-muted-foreground">
                             <input
                               type="checkbox"
                               className="h-4 w-4 rounded border-border-default"
-                              checked
+                              checked={row.enabled !== false}
                               onChange={(event) => {
-                                if (!event.target.checked) {
-                                  handleRemoveCatalogRow(index);
-                                }
+                                handleUpdateCatalogRow(index, {
+                                  enabled: event.target.checked,
+                                });
                               }}
                               aria-label={t("codexConfig.keepCatalogModel", {
                                 model: row.model || row.displayName || "",
                                 defaultValue: `保留 ${row.model || row.displayName || "这个模型"}`,
                               })}
                             />
-                            <span className="md:hidden">
-                              {t("codexConfig.keepCatalogModelColumn", {
-                                defaultValue: "保留",
-                              })}
+                            <span>
+                              {row.enabled === false
+                                ? t("codexConfig.keepCatalogModelDisabled", {
+                                    defaultValue: "未使用",
+                                  })
+                                : t("codexConfig.keepCatalogModelColumn", {
+                                    defaultValue: "保留",
+                                  })}
                             </span>
                           </label>
                           <Input

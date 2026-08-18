@@ -11,7 +11,7 @@ import {
   readWizardCodexOAuthAccountId,
   resolveWizardModelNameCollisions,
 } from "@/lib/codexMultiRouterWizard";
-import { readCodexModelCatalog } from "@/utils/codexSpawnAgentCandidates";
+import { readRawCodexModelCatalogModels } from "@/utils/codexSpawnAgentCandidates";
 
 // MultiRouter 同步返回写回后的 plan，以及需要用户人工补选的子 Agent 候选删减。
 export interface CodexMultiRouterPlanSyncResult {
@@ -124,8 +124,8 @@ function catalogModelUpstreamId(model: CodexCatalogModel): string {
 function readStrictProviderCatalogModels(
   provider: Provider,
 ): CodexCatalogModel[] {
-  return readCodexModelCatalog(provider)
-    .models.map((model) => {
+  return readRawCodexModelCatalogModels(provider)
+    .map((model) => {
       const id = model.model?.trim();
       if (!id) return null;
       return {
@@ -158,6 +158,7 @@ function readStrictProviderCatalogModels(
           ? { supports_image: model.supports_image }
           : {}),
         ...(model.vision !== undefined ? { vision: model.vision } : {}),
+        ...(model.enabled !== undefined ? { enabled: model.enabled } : {}),
         ...(model.reasoning ? { reasoning: model.reasoning } : {}),
       } satisfies CodexCatalogModel;
     })
@@ -225,6 +226,7 @@ function buildSyncedRouteModels(
     planCatalogByModel,
   );
   return targetModels
+    .filter((sourceModel) => sourceModel.enabled !== false)
     .map((sourceModel) => {
       const upstream = catalogModelUpstreamId(sourceModel);
       const existingVisible = visibleByUpstream.get(upstream);

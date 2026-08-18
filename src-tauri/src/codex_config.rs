@@ -1543,6 +1543,14 @@ fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCa
             continue;
         };
 
+        let enabled = model_config
+            .get("enabled")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true);
+        if !enabled {
+            continue;
+        }
+
         if !seen.insert(model.to_string()) {
             continue;
         }
@@ -10330,6 +10338,37 @@ openai_base_url = "http://127.0.0.1:15721/v1"
                 .get("supports_reasoning_summaries")
                 .and_then(Value::as_bool),
             Some(true)
+        );
+    }
+
+    #[test]
+    fn codex_model_catalog_skips_models_disabled_in_provider_catalog() {
+        let settings = json!({
+            "modelCatalog": {
+                "models": [
+                    { "model": "deepseek-v4-flash" },
+                    { "model": "kimi-k2", "enabled": false }
+                ]
+            }
+        });
+        let specs = codex_catalog_model_specs(&settings, "");
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].model, "deepseek-v4-flash");
+
+        let catalog = codex_model_catalog_from_specs(
+            &specs,
+            &json!({}),
+            CodexCatalogToolProfile::ProxyChat,
+            128_000,
+        );
+        let models = catalog
+            .get("models")
+            .and_then(Value::as_array)
+            .expect("models should be an array");
+        assert_eq!(models.len(), 1);
+        assert_eq!(
+            models[0].get("slug").and_then(Value::as_str),
+            Some("deepseek-v4-flash")
         );
     }
 

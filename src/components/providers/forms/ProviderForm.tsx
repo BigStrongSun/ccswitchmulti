@@ -254,6 +254,7 @@ export const normalizeCodexCatalogModelsForSave = (
 
     normalized.push({
       model,
+      ...(item.enabled === false ? { enabled: false } : {}),
       ...(upstreamModel && upstreamModel !== model ? { upstreamModel } : {}),
       ...(displayName ? { displayName } : {}),
       ...(contextWindow && contextWindow > 0 ? { contextWindow } : {}),
@@ -280,6 +281,7 @@ const normalizeCodexSpawnAgentModelsForSave = (
   catalogModels: CodexCatalogModel[],
 ): string[] => {
   const catalogModelIds = catalogModels
+    .filter((item) => item.enabled !== false)
     .map((item) => item.model.trim())
     .filter(Boolean);
   const availableModels = new Set(catalogModelIds);
@@ -1635,17 +1637,36 @@ function ProviderFormFull({
                 normalizedCatalogModels,
               )
             : [];
+        const enabledCatalogModels = normalizedCatalogModels.filter(
+          (item) => item.enabled !== false,
+        );
+        const currentDefaultModel = extractCodexModelName(
+          normalizedCodexConfig,
+        )?.trim();
         // The default-model field writes the top-level `model` into the TOML
         // as the user types; only when it was left empty fall back to the
-        // first catalog row so "fill mapping only" keeps its old behavior.
-        if (
-          normalizedCatalogModels.length > 0 &&
-          !extractCodexModelName(normalizedCodexConfig)
-        ) {
-          normalizedCodexConfig = setCodexModelNameInConfig(
-            normalizedCodexConfig,
-            normalizedCatalogModels[0].model,
+        // first enabled catalog row so "fill mapping only" keeps its old
+        // behavior. A model disabled in the catalog is never kept as default.
+        if (enabledCatalogModels.length > 0) {
+          const firstEnabledModel = enabledCatalogModels[0].model;
+          const defaultModelDisabled = normalizedCatalogModels.some(
+            (item) =>
+              item.enabled === false && item.model === currentDefaultModel,
           );
+          if (!currentDefaultModel) {
+            normalizedCodexConfig = setCodexModelNameInConfig(
+              normalizedCodexConfig,
+              firstEnabledModel,
+            );
+          } else if (defaultModelDisabled) {
+            normalizedCodexConfig = setCodexModelNameInConfig(
+              normalizedCodexConfig,
+              firstEnabledModel,
+            );
+            toast.info(
+              `默认模型 ${currentDefaultModel} 已停用，已自动改用 ${firstEnabledModel}。`,
+            );
+          }
         }
         const configObj = {
           auth: authJson,
