@@ -1,0 +1,50 @@
+{
+  "libraryVersion": 1,
+  "verifiedAt": "2026-08-18",
+  "entries": [
+    {
+      "platform": "openrouter",
+      "model": "deepseek/deepseek-v4-pro",
+      "reasoning": {
+        "schemaVersion": 2,
+        "supportStatus": "confirmed_supported",
+        "controlKind": "graded",
+        "supportedEfforts": ["max", "high", "low"],
+        "defaultEffort": "high",
+        "disableAllowed": false,
+        "upstream": {
+          "format": "object",
+          "parameter": "reasoning.effort",
+          "effortMap": {}
+        },
+        "outputFormat": "auto",
+        "source": "library"
+      },
+      "sourceUrl": "https://openrouter.ai/api/v1/models",
+      "verifiedAt": "2026-08-18",
+      "evidenceLevel": "platform_api"
+    },
+    {
+      "platform": "openrouter",
+      "model": "deepseek/deepseek-v4-flash",
+      "reasoning": {
+        "schemaVersion": 2,
+        "supportStatus": "confirmed_supported",
+        "controlKind": "graded",
+        "supportedEfforts": ["max", "high", "low"],
+        "defaultEffort": "high",
+        "disableAllowed": false,
+        "upstream": {
+          "format": "object",
+          "parameter": "reasoning.effort",
+          "effortMap": {}
+        },
+        "outputFormat": "auto",
+        "source": "library"
+      },
+      "sourceUrl": "https://openrouter.ai/api/v1/models",
+      "verifiedAt": "2026-08-18",
+      "evidenceLevel": "platform_api"
+    }
+  ]
+}

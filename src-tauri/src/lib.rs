@@ -33,6 +33,7 @@ mod prompt;
 mod prompt_files;
 mod provider;
 mod proxy;
+pub mod reasoning_capabilities;
 mod services;
 mod session_manager;
 mod settings;
@@ -420,6 +421,11 @@ pub fn run() {
         )
         .setup(|app| {
             let _ = rustls::crypto::ring::default_provider().install_default();
+
+            // 初始化推理能力库资源目录（随应用打包的 reasoning-capabilities.json）。
+            if let Ok(resource_dir) = app.path().resource_dir() {
+                crate::reasoning_capabilities::init_resource_dir(resource_dir);
+            }
 
             // 预先刷新 Store 覆盖配置，确保后续路径读取正确（日志/数据库等）
             app_store::refresh_app_config_dir_override(app.handle());
