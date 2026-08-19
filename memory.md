@@ -3818,3 +3818,23 @@
 - 四层 fingerprint 一致性：catalog spec（`reasoning_fingerprint`）、请求路径（resolver 核心）、Sub-Agent capability（`resolve_subagent_reasoning_capability` 的 `fingerprint`）均源自同一 resolver 核心，fingerprint 一致。GUI/CLI inspect（P4）将读取 spec 的 fingerprint/source。
 - 验证：`cargo test --lib` 3162 passed / 0 failed / 5 ignored（新增 4 个 resolver 核心 official 测试 + 3 个 catalog 投影 fingerprint 测试 + 1 个 none-as-disable 测试）；`npx vitest run` 138 文件 / 1120 用例全过；`npx tsc --noEmit` 干净；`cargo fmt` 已执行；`git diff --check` 干净。
 - 下一步（P3，计划 §5）：模型编辑器最终生效视图——用户无需编辑 JSON 即可完成安全配置；GUI 展示 fingerprint + source summary。
+
+## 2026-08-19 V2 Sub-Agent 输入能力（纯文本/多模态）判定链溯源与前端呈现
+
+- 背景：Sub-Agent V2 角色生成依赖模型输入能力（纯文本 vs 文本+图像），但最终结论此前来自 profile > route > catalog > 名字注册表 的隐式判定链，用户遇到问题时无法知道“这个结论是哪一段给的”，也无法发现各来源声明之间的冲突。本次把“输入模态溯源（input modality provenance）”做进 V2 profile status，逐段呈现判定链 + 冲突。
+- 提交 `b42c08ec`（分支 `bigstrongsun/reasoning-capability-p0`），4 文件 / 471 insertions：
+  - `codex_config.rs` 新增三个类型：
+    - `CodexSubagentInputModalitySource`（serde snake_case）：`ProfileExplicit | Route | Catalog | NameRegistry | Unknown`，最终结论的来源。
+    - `CodexSubagentModalityDeclaration`：`{ source, declared: Option<Vec<String>> (skip none), adopted: bool }`，判定链中单个来源的声明 + 是否被采纳。
+    - `CodexSubagentInputModalityInfo`：`{ modalities: Option<Vec<String>> (skip none), source, declarations: Vec<...>, conflict: Option<String> (skip none) }`。
+  - `CodexSubagentProfileStatus` 新增 `input_modality: Option<...>` 字段（紧跟 `field_sources` 之后）；在 configured 状态构造处填充，legacy / 无 profile 处保持 None。
+- 判定链与来源归属（`resolve_input_modality_provenance(settings, profile)`）：
+  - 最终模态 = profile 显式声明（与 catalog 推导值不同视为用户覆盖 → ProfileExplicit），否则回退 catalog 推导值。
+  - 来源归属优先级：profile 显式 > route 能力 > 模型目录 > 内置名字注册表 > 未知。
+  - `declared_modalities_from_capabilities(&Value)`：从能力对象提取正向模态声明——`inputModalities` 数组 > `supportsImage`/`vision` 布尔 > `textOnly=true`；`textOnly=false` 是否定声明，不视为对模态的正向声明（返回 None）。
+  - `detect_modality_conflict(route, catalog, name)`：route / catalog / 名字注册表 三者声明不一致时生成人类可读冲突说明（如“输入能力声明冲突：route 声明纯文本，模型目录声明文本+图像”）。
+- 既有判定链（未改动，本次仅使其可见）：`text_only` = route caps > catalog caps > `is_confirmed_text_only_model`（名字注册表，`model_capabilities.rs`）；`input_modalities` = catalog entry（inputModalities > supportsImage/vision）。最终 V2 = profile 显式 > (text_only?["text"]:input_modalities) > unknown。
+- 各消费者 Unknown 策略（有意为之，记录于 `model_capabilities.rs` 的 `ImageInputCapability` 枚举）：Desktop catalog fail-open（按可生图处理）、V2 fail-closed（不派图像任务）、media rectifier no-op。
+- 前端：`CodexSubagentProfileEditor.tsx` 的 ProfileBackendOutput 呈现输入能力（纯文本/文本+图像）+ 来源 + 琥珀色冲突行；`codexSubagentV2.ts` 补对应类型；`CodexSubagentV2ProfileEditor.test.tsx` 新增 “renders input modality provenance and conflict in the profile status”。
+- 验证：`cargo test --lib` 3168 passed / 0 failed / 5 ignored（新增 5 个 provenance 测试）；`pnpm vitest run` 138 文件 / 1121 用例全过；`pnpm typecheck`、`cargo fmt --check`、`git diff --check` 均干净。
+- 注意：本提交由并行会话落盘（当时 P2/P3 reasoning 工作也在并行提交）。已核验提交内容仅含本功能（不含 P3 的 `resolve_codex_model_reasoning_capability`/`trigger_codex_model_reasoning_detection`）；P3 工作仍留在工作区未暂存，勿误提交。
