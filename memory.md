@@ -3892,3 +3892,4 @@
 
 - 截图中 `supports_websockets=false`、TCP 可达、live 接管一致，红色项却是 `本地代理 WebSocket 探针失败：error sending request for url (http://127.0.0.1:15721/v1/responses)`。源码 `src-tauri/src/commands/proxy.rs` 的 `diagnose_codex_multirouter` 无条件执行 `codex_probe_websocket_fallback`，即使 live config 已禁用 WebSocket；该探针只验证本地 GET + Upgrade 是否能收到预期 HTTP 426，不是模型请求，也不是上游连通性证明。
 - 代理服务器的设计契约是 `/v1/responses` 的 GET/Upgrade 始终返回 HTTP 426，要求 Codex 走 HTTP Responses；因此 `supports_websockets=false` 与“探针失败”并不矛盾。Mac 现场更可能是旧安装包未包含该 426 路由、请求在本机代理/VPN 环境被 reset，或探针请求未收到 HTTP 响应；仅凭截图不能区分三者。需在 Mac 上用 curl/route log/版本哈希复核，不能把这项直接归因到模型或路由规则。
+- 追加确认：Mac 使用 `v3.19.2-7`，该 tag 已包含 `5526855c fix codex multi router official websocket relay`。此版本的 `/v1/responses` GET + Upgrade 已从“固定返回 426”改成真实 `WebSocketUpgrade` relay；但 `diagnose_codex_multirouter` 仍无条件把同类请求当作“应返回 426”的 fallback probe。因此截图中的 `error sending request` 是诊断探针与 3.19.2-7 新 WS relay 契约不一致导致的版本内回归，不能据此判断路由或模型请求失败。
