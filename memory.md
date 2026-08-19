@@ -3907,3 +3907,10 @@
 - 根因：`handle_responses_for_app` 通过 `should_handle_as_codex_client` 判断 `/v1/responses` 是否为 Codex。旧实现把 Codex User-Agent 含 `codex` 作为必要条件；该 Desktop 请求没有满足该条件，于是误入 External OpenAI API 分支，在 MultiRouter 之前返回错误，因此不会写 `codex-router.log`。
 - 修复：本地代理入口默认按 Codex 处理；只有显式 External API marker 或 `ccsw_` key 才强制走 External API。这样仍保留第三方 External API 的显式鉴权边界，不依赖不稳定的 User-Agent。
 - 回归：新增无 User-Agent 仍走本地 Codex context 的测试；`cargo test --lib proxy::handlers::tests::` 82/82 通过。
+
+## 2026-08-20 main 合并与 Windows 测试安装包
+
+- `main` 已从 `c2d87eb7` 快进合入 `bigstrongsun/qwen-vllm-default-output` 的 `89b410d7`，保留无 User-Agent 的 Codex Desktop 兼容修复；此前明确否决的通用 Qwen 默认输出上限和 hosted/function tool 并行兜底没有重新引入。
+- 对入口判定做了回归收口：无 User-Agent 不能单独等价于 Codex，否则普通无认证 `/v1/models`、`/v1/responses` 和 `/v1/images/generations` 会绕过 External API 鉴权。现在要求官方 Codex User-Agent 或稳定指纹头（`originator`、session/thread、`x-codex-*`、Responses 客户端头）；显式 External marker/API key 仍优先走外部 API。覆盖了“无 UA + x-codex-turn-metadata”与“完全无身份头”两条回归。
+- 合并后验证：`cargo test --lib` 为 3185 passed / 0 failed / 5 ignored；`pnpm test:unit` 为 140 files / 1128 tests 全部通过；`pnpm tauri build --bundles nsis --config '{"bundle":{"createUpdaterArtifacts":false}}'` 返回码 0。
+- 本地测试安装包（未安装、未上传、未推送）为 `src-tauri/target/release/bundle/nsis/CCSwitchMulti_3.19.2-7_x64-setup.exe`，SHA-256 `FE56DEE7D0DE64D852666CE3009E2DB83B4C3E9142A968FD812B12BF3914EA11`，未签名是预期结果（仅关闭 updater artifact 的本地测试构建）。运行中的 CCSM PID 67512 未停止或替换。

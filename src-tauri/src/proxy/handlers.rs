@@ -547,12 +547,44 @@ pub async fn handle_external_models(
 /// 判断请求是否应按 Codex 自身客户端处理。
 ///
 /// 本地 15721 是 Codex takeover 的专用入口，Desktop 的 Responses 请求并不
-/// 保证携带稳定的 User-Agent（部分版本甚至不带）。因此不能把 User-Agent
-/// 当成进入 Codex 路径的必要条件；只有显式的 External API marker 或
-/// `ccsw_` key 才应强制走 External API 分支。
+/// 保证携带稳定的 User-Agent（部分版本甚至不带）。因此 User-Agent 不能是
+/// 唯一的 Codex 信号；同时也不能把“完全没有身份头”的普通 OpenAI 请求默认
+/// 放进本地 Codex 路径，否则会绕过 External API 鉴权。无 UA 的官方请求必须
+/// 至少带有一个稳定的 Codex 指纹头（`originator`、session/thread、`x-codex-*`
+/// 或 Responses 客户端头）。
+fn is_codex_model_catalog_client(headers: &HeaderMap) -> bool {
+    headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .map(|user_agent| user_agent.to_ascii_lowercase().contains("codex"))
+        .unwrap_or(false)
+}
+
 fn should_handle_as_codex_client(headers: &HeaderMap) -> bool {
     !headers.contains_key(FORCE_EXTERNAL_OPENAI_API_HEADER)
         && !external_openai_api::has_external_api_key(headers)
+        && (is_codex_model_catalog_client(headers) || has_codex_client_fingerprint(headers))
+}
+
+fn has_codex_client_fingerprint(headers: &HeaderMap) -> bool {
+    headers.keys().any(|name| {
+        let key = name.as_str();
+        matches!(
+            key,
+            "originator"
+                | "session_id"
+                | "session-id"
+                | "thread-id"
+                | "conversation_id"
+                | "chatgpt-account-id"
+                | "x-openai-subagent"
+                | "x-client-request-id"
+                | "openai-beta"
+                | "openai-organization"
+                | "openai-project"
+        ) || key.starts_with("x-stainless-")
+            || key.starts_with("x-codex-")
+    })
 }
 
 fn mark_external_openai_headers(headers: &mut HeaderMap) {
@@ -6152,11 +6184,20 @@ data: [DONE]\n\n";
     }
 
     #[test]
-    /// Codex Desktop 某些 Responses 请求不带 User-Agent，仍必须进入本地 Codex 路径。
+    /// Codex Desktop 某些 Responses 请求不带 User-Agent，但会带官方指纹头。
     fn missing_user_agent_uses_local_client_context() {
-        let headers = HeaderMap::new();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-codex-turn-metadata",
+            HeaderValue::from_static(r#"{"request_kind":"turn"}"#),
+        );
 
         assert!(should_handle_as_codex_client(&headers));
+    }
+
+    #[test]
+    fn missing_identity_headers_still_require_external_api_auth() {
+        assert!(!should_handle_as_codex_client(&HeaderMap::new()));
     }
 
     #[test]
