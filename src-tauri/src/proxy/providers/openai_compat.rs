@@ -140,6 +140,15 @@ pub(crate) fn normalize_codex_oauth_responses_request(
     body.remove("temperature");
     body.remove("top_p");
 
+    // ChatGPT's Codex backend no longer accepts the legacy top-level
+    // `prompt_cache_retention` field for newer models (for example
+    // gpt-5.6-luna). The field can arrive from the Codex client during a
+    // model switch or compaction even when the provider/model catalog does
+    // not declare it. Keep the native official boundary defensive here;
+    // `prompt_cache_options` is intentionally preserved for the newer wire
+    // shape.
+    body.remove("prompt_cache_retention");
+
     let mut normalized = Value::Object(body);
     super::transform_codex_chat::normalize_replayed_item_ids_for_openai(&mut normalized);
     normalized
@@ -1945,6 +1954,27 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn codex_oauth_responses_normalizer_drops_legacy_prompt_cache_retention() {
+        let normalized = normalize_codex_oauth_responses_request(
+            json!({
+                "model": "gpt-5.6-luna",
+                "instructions": "existing instructions",
+                "input": [{
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "hello" }]
+                }],
+                "prompt_cache_retention": "24h",
+                "prompt_cache_options": { "ttl": "30m" }
+            }),
+            false,
+        );
+
+        assert!(normalized.get("prompt_cache_retention").is_none());
+        assert_eq!(normalized["prompt_cache_options"]["ttl"], "30m");
     }
 
     #[test]
