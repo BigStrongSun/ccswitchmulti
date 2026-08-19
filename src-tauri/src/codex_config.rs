@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use crate::app_config::AppType;
 use crate::codex_subagent_profiles::{
     compile_subagent_v2_profiles, initialize_legacy_subagent_v2, normalize_profile_key,
     parse_persisted_subagent_v2, parse_persisted_subagent_v2_tolerant, render_generated_role_toml,
@@ -19,11 +20,15 @@ use crate::config::{
 use crate::error::AppError;
 use crate::model_capabilities::{image_input_capability_from_modalities, ImageInputCapability};
 use crate::provider::Provider;
-use crate::proxy::providers::codex_reasoning::ResolvedSubagentReasoningCapability;
+use crate::proxy::providers::codex_reasoning::{
+    ReasoningSupportKind, ResolvedSubagentReasoningCapability,
+};
 use crate::proxy::providers::{
     codex_route_target_provider_id_from_route, codex_route_uses_official_agent_backend,
     is_codex_official_provider, resolve_codex_primary_route_from_settings,
 };
+use crate::services::ProviderService;
+use crate::store::AppState;
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -1333,6 +1338,10 @@ struct CodexCatalogModelSpec {
     input_modalities: Option<Vec<String>>,
     base_instructions: Option<String>,
     reasoning: Option<crate::proxy::providers::codex_reasoning::CodexModelReasoningCapability>,
+    /// P2：reasoning 能力指纹（与请求/Sub-Agent/inspect 同源，四层一致）。
+    reasoning_fingerprint: String,
+    /// P2：reasoning 能力来源（user_config/detection/library/builtin/official/unknown）。
+    reasoning_source: String,
     sort_index: Option<u32>,
 }
 
@@ -1434,7 +1443,9 @@ fn sort_codex_catalog_specs_for_picker(
 /// 官方原始档位在 backup 文件里。此处与 enrich_codex_catalog_with_official_metadata
 /// 保持同一选择逻辑：缓存被 CC Switch 拥有时优先读 backup。
 /// 任何读取/解析失败都返回 None（静默降级，不阻断投影）。
-fn codex_official_models_cache() -> Option<Vec<Value>> {
+///
+/// P2：公开给 reasoning resolver 作为 official 来源（仅未知平台生效）。
+pub fn codex_official_models_cache() -> Option<Vec<Value>> {
     let cache_path = get_codex_models_cache_path();
     let backup_path = get_codex_models_cache_backup_path();
     let existing_cache = read_json_file_if_exists(&cache_path).ok().flatten();
@@ -1452,68 +1463,6 @@ fn codex_official_models_cache() -> Option<Vec<Value>> {
         .and_then(Value::as_array)?
         .clone();
     Some(models)
-}
-
-/// 从 Codex 官方缓存为指定 slug 构造 reasoning capability。
-///
-/// 官方缓存字段是 snake_case，`supported_reasoning_levels` 可能是字符串数组
-/// （["low","medium",...]）或对象数组（[{"effort":"low","description":...},...]）：
-/// CCSM 写入的 cache 为字符串数组，官方 backup 为对象数组，两种都兼容。
-/// 官方 GPT 模型走 OpenAI 顶层 `reasoning_effort` 字段，effort_map 用 identity。
-/// 任何校验失败都返回 None（保守降级为 Unknown，不产生虚假档位）。
-fn official_reasoning_capability_for_model(
-    model: &str,
-    official_models: &[Value],
-) -> Option<crate::proxy::providers::codex_reasoning::CodexModelReasoningCapability> {
-    use crate::proxy::providers::codex_reasoning::{
-        CodexModelReasoningCapability, CodexModelReasoningUpstream,
-    };
-    let entry = official_models.iter().find(|entry| {
-        entry
-            .get("slug")
-            .and_then(Value::as_str)
-            .is_some_and(|slug| slug.eq_ignore_ascii_case(model))
-    })?;
-    let levels: Vec<String> = entry
-        .get("supported_reasoning_levels")
-        .and_then(Value::as_array)?
-        .iter()
-        .filter_map(|level| {
-            level
-                .as_str()
-                .or_else(|| level.get("effort").and_then(Value::as_str))
-                .map(str::trim)
-                .map(ToString::to_string)
-        })
-        .filter(|level| !level.is_empty())
-        .collect();
-    if levels.is_empty() {
-        return None;
-    }
-    let default_effort = entry
-        .get("default_reasoning_level")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|level| !level.is_empty())
-        .map(ToString::to_string);
-    let capability = CodexModelReasoningCapability {
-        supported: true,
-        supported_efforts: levels.clone(),
-        default_effort,
-        disable_allowed: false,
-        upstream: CodexModelReasoningUpstream {
-            format: "string".to_string(),
-            parameter: "reasoning_effort".to_string(),
-            effort_map: levels
-                .into_iter()
-                .map(|level| (level.clone(), level))
-                .collect(),
-        },
-        output_format: None,
-        source: Some("official".to_string()),
-    };
-    capability.validate().ok()?;
-    Some(capability)
 }
 
 fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCatalogModelSpec> {
@@ -1611,21 +1560,38 @@ fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCa
             .map(str::trim)
             .filter(|text| !text.is_empty())
             .map(ToString::to_string);
-        let reasoning =
-            crate::proxy::providers::codex_reasoning::reasoning_capability_from_model_entry(
-                model_config,
-            )
-            .or_else(|| {
-                crate::proxy::providers::codex_reasoning::builtin_reasoning_capability_for_model(
-                    model,
-                )
-            })
-            .or_else(|| {
-                upstream_model.as_deref().and_then(
-                    crate::proxy::providers::codex_reasoning::builtin_reasoning_capability_for_model,
-                )
-            })
-            .or_else(|| official_reasoning_capability_for_model(model, &official_models));
+        // P2：catalog 投影与请求/Sub-Agent/inspect 走同一 resolver 核心，保证同一模型
+        // 四层 fingerprint 一致。catalog 是 provider-agnostic 投影：platform=None
+        // （official 来源生效）、detection=None（静态投影不读 TTL 检测缓存）。
+        // 若 catalog 模型名是别名、上游模型名命中不同来源，则用上游名重试一次。
+        let library = crate::reasoning_capabilities::catalog::global_library();
+        let mut resolved = crate::reasoning_capabilities::resolve_codex_model_capability_core(
+            settings,
+            None,
+            model,
+            None,
+            library.as_ref(),
+            &official_models,
+        );
+        if resolved.capability.is_none() {
+            if let Some(upstream) = upstream_model.as_deref() {
+                let upstream_resolved =
+                    crate::reasoning_capabilities::resolve_codex_model_capability_core(
+                        settings,
+                        None,
+                        upstream,
+                        None,
+                        library.as_ref(),
+                        &official_models,
+                    );
+                if upstream_resolved.capability.is_some() {
+                    resolved = upstream_resolved;
+                }
+            }
+        }
+        let reasoning = resolved.capability;
+        let reasoning_fingerprint = resolved.fingerprint;
+        let reasoning_source = resolved.source.as_str().to_string();
 
         let sort_index = model_config
             .get("sortIndex")
@@ -1646,6 +1612,8 @@ fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCa
             input_modalities,
             base_instructions,
             reasoning,
+            reasoning_fingerprint,
+            reasoning_source,
             sort_index,
         });
     }
@@ -3291,13 +3259,38 @@ fn compile_configured_codex_subagent_roles(
         .iter()
         .map(|model| (model.model.to_ascii_lowercase(), model.reasoning.clone()))
         .collect();
+    let mut compile_persisted = persisted.clone();
+    for entry in &mut compile_persisted.profiles {
+        let crate::codex_subagent_profiles::ParsedProfileEntry::Valid(profile) = entry else {
+            continue;
+        };
+        if profile.input_modalities.is_some() {
+            continue;
+        }
+        profile.input_modalities = specs
+            .iter()
+            .find(|spec| {
+                normalize_profile_key(&spec.model) == normalize_profile_key(&profile.model)
+            })
+            .and_then(codex_subagent_profile_input_modalities)
+            .map(|modalities| {
+                modalities
+                    .into_iter()
+                    .filter_map(|value| match value.as_str() {
+                        "text" => Some(crate::codex_subagent_profiles::InputModality::Text),
+                        "image" => Some(crate::codex_subagent_profiles::InputModality::Image),
+                        _ => None,
+                    })
+                    .collect()
+            });
+    }
     let output = compile_subagent_v2_profiles(&SubagentCompileRequest {
         subagent_version: if version == CodexSubagentVersion::V1 {
             ProfileSubagentVersion::V1
         } else {
             ProfileSubagentVersion::V2
         },
-        persisted_subagent_v2: Some(persisted.clone()),
+        persisted_subagent_v2: Some(compile_persisted),
         catalog_models,
         occupied_role_names: occupied_user_codex_agent_names(&get_codex_agents_dir())?,
     })
@@ -3308,6 +3301,35 @@ fn compile_configured_codex_subagent_roles(
         route_classifications,
         reasoning_capabilities,
     }))
+}
+
+fn validate_codex_subagent_reasoning_completeness(
+    compilation: &ConfiguredCodexSubagentCompilation,
+) -> Result<(), AppError> {
+    for (entry, compiled_status) in compilation
+        .persisted
+        .profiles
+        .iter()
+        .zip(compilation.output.profile_statuses.iter())
+    {
+        let crate::codex_subagent_profiles::ParsedProfileEntry::Valid(profile) = entry else {
+            continue;
+        };
+        if !profile.enabled || compiled_status.status != SubagentProfileStatusCode::Routable {
+            continue;
+        }
+        let capability = compilation
+            .reasoning_capabilities
+            .get(&profile.model.to_ascii_lowercase());
+        if capability.is_none()
+            || capability.is_some_and(|value| value.support_kind == ReasoningSupportKind::Unknown)
+        {
+            return Err(AppError::InvalidInput(
+                "Codex subagent V2 configuration is incomplete (unknown_reasoning_capability_requires_declaration)".to_string(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn strip_codex_subagent_v2_policy_block(value: &str) -> String {
@@ -3421,6 +3443,7 @@ pub enum CodexSubagentV2ReconcileAction {
     SyncCatalog,
     RemoveAllInvalid,
     RecoverAllInvalidFromCatalog,
+    PruneUnroutable,
 }
 
 fn codex_subagent_profile_input_modalities(spec: &CodexCatalogModelSpec) -> Option<Vec<String>> {
@@ -3464,33 +3487,11 @@ pub(crate) fn hydrate_codex_subagent_v2_input_modalities(
     settings: &Value,
     raw_subagent_v2: &Value,
 ) -> Value {
-    let mut hydrated = raw_subagent_v2.clone();
-    let Some(profiles) = hydrated.get_mut("profiles").and_then(Value::as_object_mut) else {
-        return hydrated;
-    };
-    let modalities_by_model = codex_catalog_model_specs(settings, "")
-        .into_iter()
-        .filter_map(|spec| {
-            let modalities = codex_subagent_profile_input_modalities(&spec)?;
-            Some((normalize_profile_key(&spec.model), modalities))
-        })
-        .collect::<HashMap<_, _>>();
-    for profile in profiles.values_mut().filter_map(Value::as_object_mut) {
-        if profile.contains_key("inputModalities") {
-            continue;
-        }
-        let Some(identity) = profile
-            .get("model")
-            .and_then(Value::as_str)
-            .map(normalize_profile_key)
-        else {
-            continue;
-        };
-        if let Some(modalities) = modalities_by_model.get(&identity) {
-            profile.insert("inputModalities".to_string(), json!(modalities));
-        }
-    }
-    hydrated
+    // Catalog-derived input modalities are runtime metadata, not profile state.
+    // Keeping them out of persistence prevents a stale catalog snapshot from
+    // being mistaken for a user override after MultiRouter refreshes a model.
+    let _ = settings;
+    raw_subagent_v2.clone()
 }
 
 fn catalog_profile_draft(
@@ -3511,12 +3512,10 @@ fn catalog_profile_draft(
         if !enabled_preferred {
             preset["questionnaire"]["preference"] = Value::String("eligible".to_string());
         }
-        if let Some(input_modalities) = input_modalities {
-            preset["inputModalities"] = json!(input_modalities);
-        }
+        let _ = input_modalities;
         return Ok(preset);
     }
-    let mut profile = json!({
+    let profile = json!({
         "model": model,
         "enabled": false,
         "questionnaire": {
@@ -3527,9 +3526,7 @@ fn catalog_profile_draft(
         },
         "reasoning": { "policy": "delegated" }
     });
-    if let Some(input_modalities) = input_modalities {
-        profile["inputModalities"] = json!(input_modalities);
-    }
+    let _ = input_modalities;
     Ok(profile)
 }
 
@@ -3695,11 +3692,85 @@ pub(crate) fn reconcile_codex_subagent_v2_for_candidate(
                 profiles.insert(identity, recovered);
             }
         }
+        CodexSubagentV2ReconcileAction::PruneUnroutable => {
+            // 删除模型已离开可路由 catalog 的 profile（parse-valid 但 unroutable）。
+            // 这是显式“与目录同步”动作：用户主动要求让 V2 列表跟随 MultiRouter 模型库。
+            let keys: Vec<String> = profiles.keys().cloned().collect();
+            for key in keys {
+                let identity = profiles
+                    .get(&key)
+                    .and_then(|raw| raw.get("model"))
+                    .and_then(Value::as_str)
+                    .map(normalize_profile_key)
+                    .filter(|identity| !identity.is_empty())
+                    .unwrap_or_else(|| normalize_profile_key(&key));
+                if !routable_by_identity.contains_key(&identity) {
+                    profiles.shift_remove(&key);
+                }
+            }
+        }
     }
     Ok(hydrate_codex_subagent_v2_input_modalities(
         settings,
         &reconciled,
     ))
+}
+
+/// Best-effort auto-prune of DISABLED V2 profiles whose model is no longer present in the
+/// MultiRouter catalog (`modelCatalog.models`). This lets the V2 profile list follow the
+/// catalog when the user removes a model, without touching ENABLED profiles (active
+/// configurations are never auto-removed) or parse-invalid profiles (handled by the
+/// explicit RemoveAllInvalid / RecoverAllInvalidFromCatalog actions).
+///
+/// Returns `Some(pruned_subagent_v2)` when at least one stale disabled profile was removed,
+/// otherwise `None`. The prune is idempotent: once a stale disabled profile is removed it
+/// stays removed; if the model re-enters the catalog, the SyncCatalog action re-creates a
+/// fresh draft. Uses catalog membership (not routability) so a model that is present in the
+/// catalog but temporarily missing a route is never auto-pruned.
+pub(crate) fn auto_prune_disabled_stale_subagent_v2(
+    settings: &Value,
+) -> Result<Option<Value>, AppError> {
+    let Some(subagent_v2) = settings
+        .get("codexRouting")
+        .and_then(|routing| routing.get("subagentV2"))
+    else {
+        return Ok(None);
+    };
+    let catalog_identities: HashSet<String> = codex_catalog_model_specs(settings, "")
+        .iter()
+        .map(|spec| normalize_profile_key(&spec.model))
+        .filter(|identity| !identity.is_empty())
+        .collect();
+    let mut pruned = subagent_v2.clone();
+    let Some(profiles) = pruned.get_mut("profiles").and_then(Value::as_object_mut) else {
+        return Ok(None);
+    };
+    let keys: Vec<String> = profiles.keys().cloned().collect();
+    let mut removed = 0usize;
+    for key in keys {
+        let Some(raw) = profiles.get(&key) else {
+            continue;
+        };
+        // Only prune profiles that are explicitly DISABLED; enabled or missing-enabled
+        // profiles are never auto-removed (conservative: no active-config data loss).
+        if raw.get("enabled").and_then(Value::as_bool) != Some(false) {
+            continue;
+        }
+        let identity = raw
+            .get("model")
+            .and_then(Value::as_str)
+            .map(normalize_profile_key)
+            .filter(|identity| !identity.is_empty())
+            .unwrap_or_else(|| normalize_profile_key(&key));
+        if !catalog_identities.contains(&identity) {
+            profiles.shift_remove(&key);
+            removed += 1;
+        }
+    }
+    if removed == 0 {
+        return Ok(None);
+    }
+    Ok(Some(pruned))
 }
 
 pub(crate) fn validate_codex_subagent_v2_candidate(
@@ -3720,12 +3791,15 @@ pub(crate) fn validate_codex_subagent_v2_candidate(
             .map_err(|error| codex_subagent_validation_error(&error))?;
     }
     let specs = codex_catalog_model_specs(settings, "");
-    compile_configured_codex_subagent_roles(
+    let compilation = compile_configured_codex_subagent_roles(
         settings,
         &specs,
         codex_subagent_version(settings),
         provider_context,
     )?;
+    if let Some(compilation) = compilation.as_ref() {
+        validate_codex_subagent_reasoning_completeness(compilation)?;
+    }
     Ok(())
 }
 
@@ -3782,6 +3856,52 @@ pub struct CodexSubagentProfileFieldSources {
     model_reasoning_effort: CodexSubagentFieldSource,
 }
 
+/// 输入能力（纯文本 vs 多模态）判定链中，最终结论的来源。
+///
+/// 用户遇到问题时不需要理解整条判定链，只需要知道"这个结论是哪一段给的"。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexSubagentInputModalitySource {
+    /// profile 里显式声明的 inputModalities（与 catalog 推导值不同，视为用户覆盖）
+    ProfileExplicit,
+    /// route 能力声明（MultiRouter 规则侧覆盖项）
+    Route,
+    /// 模型 catalog 条目声明（inputModalities/supportsImage/textOnly）
+    Catalog,
+    /// 内置"已确认纯文本"模型名注册表
+    NameRegistry,
+    /// 没有任何来源声明，结论为未知
+    Unknown,
+}
+
+/// 判定链中单个来源的声明，用于把整条链逐段呈现给用户。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexSubagentModalityDeclaration {
+    source: CodexSubagentInputModalitySource,
+    /// 该来源声明的模态：["text"] / ["text","image"]；None 表示该来源未声明
+    #[serde(skip_serializing_if = "Option::is_none")]
+    declared: Option<Vec<String>>,
+    /// 该来源的声明是否被采纳（赢得判定）
+    adopted: bool,
+}
+
+/// 输入能力判定链的完整呈现：最终结论 + 来源 + 逐段声明 + 冲突。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexSubagentInputModalityInfo {
+    /// 最终模态：["text"] / ["text","image"]；None 表示未知
+    #[serde(skip_serializing_if = "Option::is_none")]
+    modalities: Option<Vec<String>>,
+    /// 最终结论的来源
+    source: CodexSubagentInputModalitySource,
+    /// 判定链逐段声明（按优先级：profile > route > catalog > 名字注册表）
+    declarations: Vec<CodexSubagentModalityDeclaration>,
+    /// 各来源声明不一致时的人类可读冲突说明
+    #[serde(skip_serializing_if = "Option::is_none")]
+    conflict: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexSubagentProfileStatus {
@@ -3796,6 +3916,8 @@ pub struct CodexSubagentProfileStatus {
     routable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     field_sources: Option<CodexSubagentProfileFieldSources>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input_modality: Option<CodexSubagentInputModalityInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     requested_role_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3872,6 +3994,177 @@ fn configured_profile_field_sources(
     }
 }
 
+/// 从能力对象（route capabilities 或 catalog 条目）提取其正向声明的模态。
+/// 优先级：inputModalities 数组 > supportsImage/vision 布尔 > textOnly 布尔（仅 true 视为声明）。
+/// textOnly=false 是否定声明（"非纯文本"），不视为对模态的正向声明，返回 None。
+fn declared_modalities_from_capabilities(capabilities: &Value) -> Option<Vec<String>> {
+    if let Some(items) = capabilities
+        .get("inputModalities")
+        .or_else(|| capabilities.get("input_modalities"))
+        .and_then(Value::as_array)
+    {
+        let normalized: Vec<String> = items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(ToString::to_string)
+            .collect();
+        if !normalized.is_empty() {
+            return Some(normalized);
+        }
+    }
+    if let Some(supports) = capabilities
+        .get("supportsImage")
+        .or_else(|| capabilities.get("supports_image"))
+        .or_else(|| capabilities.get("vision"))
+        .and_then(Value::as_bool)
+    {
+        return Some(if supports {
+            vec!["text".to_string(), "image".to_string()]
+        } else {
+            vec!["text".to_string()]
+        });
+    }
+    if capabilities
+        .get("textOnly")
+        .or_else(|| capabilities.get("text_only"))
+        .and_then(Value::as_bool)
+        .is_some_and(|text_only| text_only)
+    {
+        return Some(vec!["text".to_string()]);
+    }
+    None
+}
+
+/// 把 profile 的 InputModality 枚举转成字符串列表（["text"] / ["text","image"]）。
+fn profile_input_modalities_as_strings(
+    modalities: Option<&[SubagentInputModality]>,
+) -> Option<Vec<String>> {
+    let items = modalities?;
+    let normalized: Vec<String> = items
+        .iter()
+        .map(|modality| match modality {
+            SubagentInputModality::Text => "text".to_string(),
+            SubagentInputModality::Image => "image".to_string(),
+        })
+        .collect();
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+fn format_modality_label(modalities: &[String]) -> &'static str {
+    if modalities.iter().any(|m| m.eq_ignore_ascii_case("image")) {
+        "文本+图像"
+    } else {
+        "纯文本"
+    }
+}
+
+/// 检测 route / catalog / 名字注册表 之间的模态声明冲突，返回人类可读说明。
+fn detect_modality_conflict(
+    route: Option<&[String]>,
+    catalog: Option<&[String]>,
+    name: Option<&[String]>,
+) -> Option<String> {
+    let sources: [(&str, Option<&[String]>); 3] = [
+        ("route", route),
+        ("模型目录", catalog),
+        ("内置注册表", name),
+    ];
+    let declared: Vec<(&str, &[String])> = sources
+        .into_iter()
+        .filter_map(|(label, value)| value.map(|value| (label, value)))
+        .collect();
+    if declared.len() < 2 {
+        return None;
+    }
+    let first = declared[0].1;
+    if declared.iter().all(|(_, value)| *value == first) {
+        return None;
+    }
+    let parts: Vec<String> = declared
+        .iter()
+        .map(|(label, value)| format!("{label} 声明{}", format_modality_label(value)))
+        .collect();
+    Some(format!("输入能力声明冲突：{}", parts.join("，")))
+}
+
+/// 解析输入能力判定链：最终结论 + 来源 + 逐段声明 + 冲突。
+///
+/// 最终模态 = profile 的 inputModalities（hydration 后，即实际用于角色生成的值）；
+/// 若 profile 未声明则回退到 catalog 推导值。来源归属：profile 值与 catalog 推导值
+/// 不同视为用户覆盖（ProfileExplicit），否则按 route > catalog > 名字注册表 > 未知归属。
+fn resolve_input_modality_provenance(
+    settings: &Value,
+    profile: &crate::codex_subagent_profiles::ParsedCodexSubagentProfile,
+) -> CodexSubagentInputModalityInfo {
+    let model = &profile.model;
+    let profile_declared = profile_input_modalities_as_strings(profile.input_modalities.as_deref());
+
+    let route_caps = codex_routing_capabilities_for_model(settings, model);
+    let route_declared = route_caps.and_then(declared_modalities_from_capabilities);
+    let catalog_caps = codex_catalog_capabilities_for_model(settings, model);
+    let catalog_declared = catalog_caps.and_then(declared_modalities_from_capabilities);
+    let name_declared = crate::model_capabilities::is_confirmed_text_only_model(model)
+        .then(|| vec!["text".to_string()]);
+
+    // catalog 推导值（hydration 会写入 profile 的值）
+    let catalog_derived = codex_catalog_model_specs(settings, "")
+        .into_iter()
+        .find(|spec| spec.model == *model)
+        .and_then(|spec| codex_subagent_profile_input_modalities(&spec));
+
+    let modalities = profile_declared.clone().or(catalog_derived.clone());
+
+    let source = if profile_declared.is_some() && profile_declared != catalog_derived {
+        CodexSubagentInputModalitySource::ProfileExplicit
+    } else if route_declared.is_some() {
+        CodexSubagentInputModalitySource::Route
+    } else if catalog_declared.is_some() {
+        CodexSubagentInputModalitySource::Catalog
+    } else if name_declared.is_some() {
+        CodexSubagentInputModalitySource::NameRegistry
+    } else {
+        CodexSubagentInputModalitySource::Unknown
+    };
+
+    let conflict = detect_modality_conflict(
+        route_declared.as_deref(),
+        catalog_declared.as_deref(),
+        name_declared.as_deref(),
+    );
+
+    let declarations = vec![
+        CodexSubagentModalityDeclaration {
+            source: CodexSubagentInputModalitySource::ProfileExplicit,
+            declared: profile_declared,
+            adopted: source == CodexSubagentInputModalitySource::ProfileExplicit,
+        },
+        CodexSubagentModalityDeclaration {
+            source: CodexSubagentInputModalitySource::Route,
+            declared: route_declared,
+            adopted: source == CodexSubagentInputModalitySource::Route,
+        },
+        CodexSubagentModalityDeclaration {
+            source: CodexSubagentInputModalitySource::Catalog,
+            declared: catalog_declared,
+            adopted: source == CodexSubagentInputModalitySource::Catalog,
+        },
+        CodexSubagentModalityDeclaration {
+            source: CodexSubagentInputModalitySource::NameRegistry,
+            declared: name_declared,
+            adopted: source == CodexSubagentInputModalitySource::NameRegistry,
+        },
+    ];
+
+    CodexSubagentInputModalityInfo {
+        modalities,
+        source,
+        declarations,
+        conflict,
+    }
+}
+
 fn absolute_codex_role_path(path: &Path) -> Result<String, AppError> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
@@ -3892,6 +4185,7 @@ fn push_unique_warning(warnings: &mut Vec<String>, warning: &str) {
 }
 
 fn configured_codex_subagent_profile_statuses(
+    settings: &Value,
     compilation: ConfiguredCodexSubagentCompilation,
     agents_dir: &Path,
 ) -> Result<(Vec<CodexSubagentProfileStatus>, Vec<String>), AppError> {
@@ -3919,6 +4213,7 @@ fn configured_codex_subagent_profile_statuses(
                 enabled: None,
                 routable: false,
                 field_sources: None,
+                input_modality: None,
                 requested_role_name: None,
                 effective_role_name: None,
                 role_file_path: None,
@@ -3948,6 +4243,7 @@ fn configured_codex_subagent_profile_statuses(
             enabled: Some(profile.enabled),
             routable: false,
             field_sources: Some(configured_profile_field_sources(profile)),
+            input_modality: Some(resolve_input_modality_provenance(settings, profile)),
             requested_role_name: None,
             effective_role_name: None,
             role_file_path: None,
@@ -4032,6 +4328,7 @@ fn legacy_codex_subagent_profile_statuses(
             enabled: None,
             routable: classification.is_some(),
             field_sources: None,
+            input_modality: None,
             requested_role_name: Some(role.requested_role_name),
             effective_role_name: Some(role.effective_role_name),
             role_file_path: Some(absolute_codex_role_path(&role.path)?),
@@ -4065,8 +4362,11 @@ fn get_codex_subagent_profile_statuses_with_context(
         provider_context,
     )? {
         Some(compilation) => {
-            let (profiles, warnings) =
-                configured_codex_subagent_profile_statuses(compilation, &get_codex_agents_dir())?;
+            let (profiles, warnings) = configured_codex_subagent_profile_statuses(
+                &settings_config,
+                compilation,
+                &get_codex_agents_dir(),
+            )?;
             Ok(CodexSubagentProfileStatuses {
                 mode,
                 generation_source: if version == CodexSubagentVersion::V1 {
@@ -4128,6 +4428,554 @@ pub fn get_codex_subagent_reasoning_capabilities(
     settingsConfig: Value,
 ) -> BTreeMap<String, ResolvedSubagentReasoningCapability> {
     get_codex_subagent_reasoning_capabilities_from_settings(&settingsConfig)
+}
+
+/// P3：单模型推理能力解析结果（与 catalog/请求/Sub-Agent 同源）。
+///
+/// 返回 resolved capability + 来源 + 指纹 + 当前检测候选状态，供模型卡片
+/// 展示与 unknown 状态动作（重新检测/采用检测结果）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexModelReasoningResolution {
+    pub model: String,
+    pub capability: Option<crate::proxy::providers::codex_reasoning::CodexModelReasoningCapability>,
+    pub source: String,
+    pub fingerprint: String,
+    pub resolved: ResolvedSubagentReasoningCapability,
+    /// 是否存在有效 TTL 检测候选快照（供「采用检测结果」动作）。
+    pub has_detection_candidate: bool,
+    pub detection: Option<crate::reasoning_capabilities::ProviderCapabilitySnapshot>,
+}
+
+fn resolve_codex_model_reasoning_capability_value(
+    settings_config: &Value,
+    provider_id: &str,
+    model: &str,
+) -> CodexModelReasoningResolution {
+    let model = model.trim().to_string();
+    let detection = crate::reasoning_capabilities::current_detection(provider_id, &model);
+    let library = crate::reasoning_capabilities::catalog::global_library();
+    let official_models = codex_official_models_cache().unwrap_or_default();
+    let resolved = crate::reasoning_capabilities::resolve_codex_model_capability_core(
+        settings_config,
+        None,
+        &model,
+        detection.as_ref(),
+        library.as_ref(),
+        &official_models,
+    );
+    let resolved_capability =
+        crate::proxy::providers::codex_reasoning::resolve_subagent_reasoning_capability(
+            resolved.capability.as_ref(),
+        );
+    CodexModelReasoningResolution {
+        model,
+        capability: resolved.capability,
+        source: resolved.source.as_str().to_string(),
+        fingerprint: resolved.fingerprint,
+        resolved: resolved_capability,
+        has_detection_candidate: detection.is_some(),
+        detection,
+    }
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn resolve_codex_model_reasoning_capability(
+    settingsConfig: Value,
+    providerId: String,
+    model: String,
+) -> CodexModelReasoningResolution {
+    resolve_codex_model_reasoning_capability_value(&settingsConfig, &providerId, &model)
+}
+
+/// P3：触发单模型只读检测（异步，调用发现适配器并写入 TTL 缓存）。
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn trigger_codex_model_reasoning_detection(
+    provider: crate::provider::Provider,
+    model: String,
+) -> Result<crate::reasoning_capabilities::DiscoveryOutcome, String> {
+    let model = model.trim().to_string();
+    let outcome = crate::reasoning_capabilities::provider_metadata::discover_provider_capability(
+        &provider, &model,
+    )
+    .await;
+    if let crate::reasoning_capabilities::DiscoveryOutcome::Found(snapshot) = &outcome {
+        let mut cache = crate::reasoning_capabilities::detection_cache()
+            .lock()
+            .expect("detection cache poisoned");
+        cache.insert(snapshot.clone());
+    }
+    Ok(outcome)
+}
+
+/// P4：只读 reasoning inspect 的稳定诊断项。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexReasoningDiagnostic {
+    pub level: String,
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexReasoningProviderSummary {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexReasoningInspectResponse {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub revision: String,
+    pub provider: CodexReasoningProviderSummary,
+    pub model: String,
+    pub persisted: Value,
+    pub resolved: CodexModelReasoningResolution,
+    pub codex_projection: Value,
+    pub provider_projection: Value,
+    pub diagnostics: Vec<CodexReasoningDiagnostic>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexReasoningListItem {
+    pub model: String,
+    pub source: String,
+    pub fingerprint: String,
+    pub resolved: ResolvedSubagentReasoningCapability,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexReasoningProviderList {
+    pub provider: CodexReasoningProviderSummary,
+    pub revision: String,
+    pub items: Vec<CodexReasoningListItem>,
+    pub diagnostics: Vec<CodexReasoningDiagnostic>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexReasoningListResponse {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub providers: Vec<CodexReasoningProviderList>,
+    pub diagnostics: Vec<CodexReasoningDiagnostic>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexReasoningValidationResponse {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub revision: String,
+    pub provider: CodexReasoningProviderSummary,
+    pub valid: bool,
+    pub model_count: usize,
+    pub diagnostics: Vec<CodexReasoningDiagnostic>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexReasoningExportResponse {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub revision: String,
+    pub redacted: bool,
+    pub provider: CodexReasoningProviderSummary,
+    pub models: Vec<Value>,
+    pub provider_reasoning: Option<crate::provider::CodexChatReasoningConfig>,
+    pub diagnostics: Vec<CodexReasoningDiagnostic>,
+}
+
+fn reasoning_provider_summary(provider: &Provider) -> CodexReasoningProviderSummary {
+    CodexReasoningProviderSummary {
+        id: provider.id.clone(),
+        name: provider.name.clone(),
+    }
+}
+
+fn reasoning_request_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+fn reasoning_revision(provider: &Provider) -> String {
+    use sha2::{Digest, Sha256};
+
+    let input = json!({
+        "providerId": provider.id,
+        "providerName": provider.name,
+        "models": provider
+            .settings_config
+            .get("modelCatalog")
+            .and_then(|catalog| catalog.get("models"))
+            .cloned()
+            .unwrap_or_else(|| Value::Array(Vec::new())),
+        "providerReasoning": provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.codex_chat_reasoning.clone()),
+    });
+    let mut hasher = Sha256::new();
+    hasher.update(serde_json::to_vec(&input).unwrap_or_default());
+    format!("{:x}", hasher.finalize())
+}
+
+fn codex_catalog_spec_for_model(settings: &Value, model: &str) -> Option<CodexCatalogModelSpec> {
+    codex_catalog_model_specs(settings, "")
+        .into_iter()
+        .find(|spec| spec.model.eq_ignore_ascii_case(model.trim()))
+}
+
+fn reasoning_persisted_projection(
+    spec: Option<&CodexCatalogModelSpec>,
+    provider: &Provider,
+) -> Value {
+    json!({
+        "model": spec.map(|spec| json!({
+            "model": spec.model,
+            "displayName": spec.display_name,
+            "upstreamModel": spec.upstream_model,
+            "reasoning": spec.reasoning,
+        })),
+        "providerReasoning": provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.codex_chat_reasoning.clone()),
+    })
+}
+
+fn reasoning_diagnostics(
+    spec: Option<&CodexCatalogModelSpec>,
+    resolution: &CodexModelReasoningResolution,
+) -> Vec<CodexReasoningDiagnostic> {
+    let mut diagnostics = Vec::new();
+    if spec.is_none() {
+        diagnostics.push(CodexReasoningDiagnostic {
+            level: "warning".into(),
+            code: "model_not_in_catalog".into(),
+            message: "模型不在当前 Provider 的 modelCatalog 中，解析结果仅供诊断。".into(),
+        });
+    }
+    if resolution.source == "unknown" {
+        diagnostics.push(CodexReasoningDiagnostic {
+            level: "warning".into(),
+            code: "unknown_capability".into(),
+            message: "没有足够的模型能力证据，将使用服务端默认且不注入推理参数。".into(),
+        });
+    }
+    diagnostics
+}
+
+fn build_codex_reasoning_inspect(
+    provider: &Provider,
+    model: &str,
+) -> CodexReasoningInspectResponse {
+    let model = model.trim().to_string();
+    let spec = codex_catalog_spec_for_model(&provider.settings_config, &model);
+    let resolved = resolve_codex_model_reasoning_capability_value(
+        &provider.settings_config,
+        &provider.id,
+        &model,
+    );
+    let provider_reasoning = crate::proxy::providers::resolve_codex_chat_reasoning_config(
+        provider,
+        &json!({ "model": model }),
+    );
+    let diagnostics = reasoning_diagnostics(spec.as_ref(), &resolved);
+
+    CodexReasoningInspectResponse {
+        schema_version: 1,
+        request_id: reasoning_request_id(),
+        revision: reasoning_revision(provider),
+        provider: reasoning_provider_summary(provider),
+        model: model.clone(),
+        persisted: reasoning_persisted_projection(spec.as_ref(), provider),
+        codex_projection: json!({
+            "source": resolved.source,
+            "fingerprint": resolved.fingerprint,
+            "resolved": resolved.resolved,
+        }),
+        provider_projection: json!({
+            "platform": crate::reasoning_capabilities::provider_metadata::detect_platform(provider),
+            "model": model,
+            "reasoning": provider_reasoning,
+        }),
+        resolved,
+        diagnostics,
+    }
+}
+
+fn build_codex_reasoning_provider_list(provider: &Provider) -> CodexReasoningProviderList {
+    let specs = codex_catalog_model_specs(&provider.settings_config, "");
+    let items = specs
+        .iter()
+        .map(|spec| {
+            let resolved = resolve_codex_model_reasoning_capability_value(
+                &provider.settings_config,
+                &provider.id,
+                &spec.model,
+            );
+            CodexReasoningListItem {
+                model: spec.model.clone(),
+                source: resolved.source,
+                fingerprint: resolved.fingerprint,
+                resolved: resolved.resolved,
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut diagnostics = Vec::new();
+    if specs.is_empty() {
+        diagnostics.push(CodexReasoningDiagnostic {
+            level: "warning".into(),
+            code: "no_models".into(),
+            message: "Provider 没有可检查的 modelCatalog 模型。".into(),
+        });
+    }
+    if items.iter().any(|item| item.source == "unknown") {
+        diagnostics.push(CodexReasoningDiagnostic {
+            level: "warning".into(),
+            code: "unknown_capability".into(),
+            message: "至少一个模型的推理能力未知。".into(),
+        });
+    }
+    CodexReasoningProviderList {
+        provider: reasoning_provider_summary(provider),
+        revision: reasoning_revision(provider),
+        items,
+        diagnostics,
+    }
+}
+
+fn build_codex_reasoning_validation(provider: &Provider) -> CodexReasoningValidationResponse {
+    let models = provider
+        .settings_config
+        .get("modelCatalog")
+        .and_then(|catalog| catalog.get("models"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut diagnostics = Vec::new();
+    for model in &models {
+        let model_name = model
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or("<missing>");
+        if let Some(reasoning) = model.get("reasoning") {
+            let parsed = serde_json::from_value::<
+                crate::proxy::providers::codex_reasoning::CodexModelReasoningCapability,
+            >(reasoning.clone())
+            .ok()
+            .and_then(|capability| capability.validate().ok().map(|_| capability));
+            if parsed.is_none() {
+                diagnostics.push(CodexReasoningDiagnostic {
+                    level: "error".into(),
+                    code: "invalid_reasoning_declaration".into(),
+                    message: format!("模型 {model_name} 的 reasoning 声明无法通过 schema 校验。"),
+                });
+            }
+        }
+    }
+    let listing = build_codex_reasoning_provider_list(provider);
+    diagnostics.extend(listing.diagnostics);
+    CodexReasoningValidationResponse {
+        schema_version: 1,
+        request_id: reasoning_request_id(),
+        revision: reasoning_revision(provider),
+        provider: reasoning_provider_summary(provider),
+        valid: !diagnostics.iter().any(|item| item.level == "error"),
+        model_count: models.len(),
+        diagnostics,
+    }
+}
+
+fn build_codex_reasoning_export(provider: &Provider) -> CodexReasoningExportResponse {
+    let models = codex_catalog_model_specs(&provider.settings_config, "")
+        .iter()
+        .map(|spec| {
+            json!({
+                "model": spec.model,
+                "displayName": spec.display_name,
+                "upstreamModel": spec.upstream_model,
+                "reasoning": spec.reasoning,
+            })
+        })
+        .collect::<Vec<_>>();
+    CodexReasoningExportResponse {
+        schema_version: 1,
+        request_id: reasoning_request_id(),
+        revision: reasoning_revision(provider),
+        redacted: true,
+        provider: reasoning_provider_summary(provider),
+        models,
+        provider_reasoning: provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.codex_chat_reasoning.clone()),
+        diagnostics: Vec::new(),
+    }
+}
+
+fn codex_provider_for_readonly(state: &AppState, provider_id: &str) -> Result<Provider, String> {
+    let providers =
+        ProviderService::list(state, AppType::Codex).map_err(|error| error.to_string())?;
+    providers
+        .get(provider_id.trim())
+        .cloned()
+        .ok_or_else(|| format!("Codex Provider 不存在: {}", provider_id.trim()))
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn inspect_codex_reasoning_capability(
+    appState: State<'_, AppState>,
+    providerId: String,
+    model: String,
+) -> Result<CodexReasoningInspectResponse, String> {
+    let provider = codex_provider_for_readonly(appState.inner(), &providerId)?;
+    Ok(build_codex_reasoning_inspect(&provider, &model))
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn list_codex_reasoning_capabilities(
+    appState: State<'_, AppState>,
+    providerId: Option<String>,
+) -> Result<CodexReasoningListResponse, String> {
+    let providers = ProviderService::list(appState.inner(), AppType::Codex)
+        .map_err(|error| error.to_string())?;
+    let selected = providerId
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+    let mut provider_lists = Vec::new();
+    for provider in providers.values() {
+        if selected.is_some_and(|id| id != provider.id) {
+            continue;
+        }
+        provider_lists.push(build_codex_reasoning_provider_list(provider));
+    }
+    Ok(CodexReasoningListResponse {
+        schema_version: 1,
+        request_id: reasoning_request_id(),
+        providers: provider_lists,
+        diagnostics: Vec::new(),
+    })
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn validate_codex_reasoning_provider(
+    appState: State<'_, AppState>,
+    providerId: String,
+) -> Result<CodexReasoningValidationResponse, String> {
+    let provider = codex_provider_for_readonly(appState.inner(), &providerId)?;
+    Ok(build_codex_reasoning_validation(&provider))
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn export_codex_reasoning_provider(
+    appState: State<'_, AppState>,
+    providerId: String,
+    #[allow(dead_code)] _redacted: Option<bool>,
+) -> Result<CodexReasoningExportResponse, String> {
+    let provider = codex_provider_for_readonly(appState.inner(), &providerId)?;
+    // 即使调用方不传 --redacted，也只返回 allowlist 投影；绝不回读或输出凭据。
+    Ok(build_codex_reasoning_export(&provider))
+}
+
+fn cli_flag_value(args: &[String], flag: &str) -> Option<String> {
+    args.windows(2)
+        .find(|pair| pair[0] == flag)
+        .map(|pair| pair[1].clone())
+}
+
+fn cli_required_flag(args: &[String], flag: &str) -> Result<String, String> {
+    cli_flag_value(args, flag)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("missing_required_argument: {flag}"))
+}
+
+/// P4：`ccsm reasoning` 的只读 JSON transport。
+///
+/// 该入口只使用 `Database::init_readonly`，因此不会触发应用启动迁移、live 投影、
+/// Provider 切换或任何配置写入。写入型 `detect/plan/apply/reset` 保留给 P5。
+pub fn run_reasoning_cli(args: &[String]) -> Result<Value, String> {
+    if args.first().map(String::as_str) != Some("reasoning") {
+        return Err("invalid_command: expected `reasoning`".into());
+    }
+    let command = args.get(1).map(String::as_str).ok_or_else(|| {
+        "missing_command: expected list, inspect, validate, or export".to_string()
+    })?;
+    if args.iter().any(|arg| arg == "--human") {
+        return Err("unsupported_output: only versioned JSON output is supported".into());
+    }
+    if let Some(output) = cli_flag_value(args, "--output") {
+        if output != "json" {
+            return Err("unsupported_output: --output must be json".into());
+        }
+    }
+    if matches!(command, "detect" | "plan" | "apply" | "reset") {
+        return Err("read_only_boundary: detect/plan/apply/reset are reserved for P5".into());
+    }
+
+    let db = std::sync::Arc::new(
+        crate::database::Database::init_readonly().map_err(|error| error.to_string())?,
+    );
+    let state = crate::store::AppState::new(db);
+    let providers =
+        ProviderService::list(&state, AppType::Codex).map_err(|error| error.to_string())?;
+
+    match command {
+        "list" => serde_json::to_value(CodexReasoningListResponse {
+            schema_version: 1,
+            request_id: reasoning_request_id(),
+            providers: providers
+                .values()
+                .filter(|provider| {
+                    cli_flag_value(args, "--provider").is_none_or(|id| id.trim() == provider.id)
+                })
+                .map(build_codex_reasoning_provider_list)
+                .collect(),
+            diagnostics: Vec::new(),
+        })
+        .map_err(|error| format!("serialize_error: {error}")),
+        "inspect" => {
+            let provider_id = cli_required_flag(args, "--provider")?;
+            let model = cli_required_flag(args, "--model")?;
+            let provider = providers
+                .get(&provider_id)
+                .ok_or_else(|| format!("provider_not_found: {provider_id}"))?;
+            serde_json::to_value(build_codex_reasoning_inspect(provider, &model))
+                .map_err(|error| format!("serialize_error: {error}"))
+        }
+        "validate" => {
+            let provider_id = cli_required_flag(args, "--provider")?;
+            let provider = providers
+                .get(&provider_id)
+                .ok_or_else(|| format!("provider_not_found: {provider_id}"))?;
+            serde_json::to_value(build_codex_reasoning_validation(provider))
+                .map_err(|error| format!("serialize_error: {error}"))
+        }
+        "export" => {
+            let provider_id = cli_required_flag(args, "--provider")?;
+            let provider = providers
+                .get(&provider_id)
+                .ok_or_else(|| format!("provider_not_found: {provider_id}"))?;
+            serde_json::to_value(build_codex_reasoning_export(provider))
+                .map_err(|error| format!("serialize_error: {error}"))
+        }
+        _ => Err(format!(
+            "unknown_command: unsupported reasoning command `{command}`"
+        )),
+    }
 }
 
 #[tauri::command]
@@ -6438,6 +7286,79 @@ pub fn remove_codex_toml_base_url_if(toml_str: &str, predicate: impl Fn(&str) ->
 mod tests {
     use super::*;
 
+    fn reasoning_inspect_provider() -> Provider {
+        Provider::with_id(
+            "provider-qwen".into(),
+            "Qwen vLLM".into(),
+            serde_json::json!({
+                "base_url": "https://vllm.example/v1",
+                "api_key": "sk-test-secret",
+                "modelCatalog": {
+                    "models": [{
+                        "model": "qwen3.8",
+                        "displayName": "Qwen 3.8",
+                        "reasoning": {
+                            "schemaVersion": 2,
+                            "supportStatus": "confirmed_supported",
+                            "controlKind": "graded",
+                            "supportedEfforts": ["low", "high"],
+                            "defaultEffort": "high",
+                            "disableAllowed": false,
+                            "upstream": {
+                                "format": "string",
+                                "parameter": "reasoning.effort",
+                                "effortMap": {}
+                            }
+                        }
+                    }]
+                }
+            }),
+            None,
+        )
+    }
+
+    #[test]
+    fn reasoning_inspect_response_is_versioned_and_redacted() {
+        let response = build_codex_reasoning_inspect(&reasoning_inspect_provider(), "qwen3.8");
+        let value = serde_json::to_value(response).expect("serialize inspect response");
+
+        assert_eq!(value["schemaVersion"], 1);
+        assert!(value["requestId"].as_str().is_some_and(|id| !id.is_empty()));
+        assert!(value["revision"]
+            .as_str()
+            .is_some_and(|revision| !revision.is_empty()));
+        assert_eq!(value["persisted"]["model"]["model"], "qwen3.8");
+        assert_eq!(value["resolved"]["source"], "user_config");
+        assert_eq!(
+            value["codexProjection"]["fingerprint"],
+            value["resolved"]["fingerprint"]
+        );
+        assert_eq!(value["providerProjection"]["platform"], "vllm");
+        assert!(!value.to_string().contains("sk-test-secret"));
+    }
+
+    #[test]
+    fn reasoning_inspect_reports_model_missing_from_catalog() {
+        let response =
+            build_codex_reasoning_inspect(&reasoning_inspect_provider(), "missing-model");
+        let value = serde_json::to_value(response).expect("serialize inspect response");
+        assert_eq!(value["resolved"]["source"], "unknown");
+        assert!(value["diagnostics"].as_array().is_some_and(|items| {
+            items
+                .iter()
+                .any(|item| item["code"] == "model_not_in_catalog")
+        }));
+    }
+
+    #[test]
+    fn reasoning_cli_rejects_mutation_commands_before_opening_database() {
+        let args = vec!["reasoning".into(), "detect".into()];
+        assert_eq!(
+            run_reasoning_cli(&args).expect_err("P4 must not execute detect"),
+            "read_only_boundary: detect/plan/apply/reset are reserved for P5"
+        );
+    }
+
     #[test]
     fn official_reasoning_capability_reads_snake_case_levels() {
         let official = serde_json::json!([{
@@ -6446,7 +7367,11 @@ mod tests {
             "default_reasoning_level": "medium"
         }]);
         let models = official.as_array().unwrap().clone();
-        let capability = official_reasoning_capability_for_model("gpt-5.6-luna", &models)
+        let capability =
+            crate::proxy::providers::codex_reasoning::official_reasoning_capability_for_model(
+                "gpt-5.6-luna",
+                &models,
+            )
             .expect("luna official capability");
         assert_eq!(
             capability.supported_efforts,
@@ -6461,13 +7386,23 @@ mod tests {
             "default_reasoning_level": "low"
         }]);
         let sol_models = sol.as_array().unwrap().clone();
-        let sol_capability = official_reasoning_capability_for_model("gpt-5.6-sol", &sol_models)
+        let sol_capability =
+            crate::proxy::providers::codex_reasoning::official_reasoning_capability_for_model(
+                "gpt-5.6-sol",
+                &sol_models,
+            )
             .expect("sol official capability");
         assert!(sol_capability
             .supported_efforts
             .contains(&"ultra".to_string()));
         // 不匹配的 slug 返回 None
-        assert!(official_reasoning_capability_for_model("gpt-5.6-sol", &models).is_none());
+        assert!(
+            crate::proxy::providers::codex_reasoning::official_reasoning_capability_for_model(
+                "gpt-5.6-sol",
+                &models
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -6486,7 +7421,11 @@ mod tests {
             "default_reasoning_level": "medium"
         }]);
         let models = official.as_array().unwrap().clone();
-        let capability = official_reasoning_capability_for_model("gpt-5.6-luna", &models)
+        let capability =
+            crate::proxy::providers::codex_reasoning::official_reasoning_capability_for_model(
+                "gpt-5.6-luna",
+                &models,
+            )
             .expect("object levels must resolve");
         assert_eq!(
             capability.supported_efforts,
@@ -6539,6 +7478,57 @@ mod tests {
         })
     }
 
+    #[test]
+    fn codex_subagent_v2_save_rejects_unknown_reasoning_for_enabled_routable_profile() {
+        let settings = codex_subagent_profile_status_settings(
+            "v2",
+            json!({ "private-model": codex_subagent_profile_status_profile("private-model", true) }),
+            json!([{ "model": "private-model", "contextWindow": 128000 }]),
+            json!([{
+                "id": "private-route",
+                "match": { "models": ["private-model"] },
+                "upstream": { "auth": { "source": "provider_config" } }
+            }]),
+        );
+
+        let error = validate_codex_subagent_v2_candidate(&settings, None, true)
+            .expect_err("unknown reasoning capability must block provider save");
+        assert!(error
+            .to_string()
+            .contains("unknown_reasoning_capability_requires_declaration"));
+    }
+
+    #[test]
+    fn codex_subagent_v2_save_does_not_block_unknown_reasoning_for_disabled_or_unroutable_profile()
+    {
+        let disabled = codex_subagent_profile_status_settings(
+            "v2",
+            json!({ "private-model": codex_subagent_profile_status_profile("private-model", false) }),
+            json!([{ "model": "private-model", "contextWindow": 128000 }]),
+            json!([{
+                "id": "private-route",
+                "match": { "models": ["private-model"] },
+                "upstream": { "auth": { "source": "provider_config" } }
+            }]),
+        );
+        validate_codex_subagent_v2_candidate(&disabled, None, true)
+            .expect("disabled profiles do not generate roles");
+
+        let unroutable = codex_subagent_profile_status_settings(
+            "v2",
+            json!({ "private-model": codex_subagent_profile_status_profile("private-model", true) }),
+            json!([{ "model": "private-model", "contextWindow": 128000 }]),
+            json!([{
+                "id": "private-route",
+                "enabled": false,
+                "match": { "models": ["private-model"] },
+                "upstream": { "auth": { "source": "provider_config" } }
+            }]),
+        );
+        validate_codex_subagent_v2_candidate(&unroutable, None, true)
+            .expect("unroutable profiles do not generate roles");
+    }
+
     fn review_codex_catalog_spec(model: &str) -> CodexCatalogModelSpec {
         CodexCatalogModelSpec {
             model: model.to_string(),
@@ -6551,6 +7541,8 @@ mod tests {
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
             sort_index: None,
         }
     }
@@ -6558,7 +7550,10 @@ mod tests {
     fn deepseek_reasoning_capability(
     ) -> crate::proxy::providers::codex_reasoning::CodexModelReasoningCapability {
         crate::proxy::providers::codex_reasoning::CodexModelReasoningCapability {
-            supported: true,
+            schema_version: None,
+            support_status: None,
+            control_kind: None,
+            supported: Some(true),
             supported_efforts: vec!["low".into(), "high".into(), "max".into()],
             default_effort: Some("high".into()),
             disable_allowed: true,
@@ -6577,6 +7572,10 @@ mod tests {
             },
             output_format: Some("reasoning_content".into()),
             source: Some("builtin".into()),
+            confidence: None,
+            fetched_at: None,
+            provider_key: None,
+            model_revision: None,
         }
     }
 
@@ -6625,7 +7624,8 @@ mod tests {
                         "high": "high",
                         "xhigh": "high",
                         "max": "max"
-                    }
+                    },
+                    "fingerprint": "8d5aeff0f2c9743effd90da1cc89b10ec0335e2e2766e8161a9bf0325360abf9"
                 }
             })
         );
@@ -6721,7 +7721,8 @@ mod tests {
                     "high": "high",
                     "xhigh": "high",
                     "max": "max"
-                }
+                },
+                "fingerprint": "8d5aeff0f2c9743effd90da1cc89b10ec0335e2e2766e8161a9bf0325360abf9"
             })
         );
         let serialized = serde_json::to_string(&value).expect("serialize safe preview");
@@ -6778,6 +7779,8 @@ mod tests {
                 input_modalities: None,
                 base_instructions: None,
                 reasoning: None,
+                reasoning_fingerprint: String::new(),
+                reasoning_source: "unknown".to_string(),
                 sort_index: None,
             },
             CodexCatalogModelSpec {
@@ -6791,6 +7794,8 @@ mod tests {
                 input_modalities: None,
                 base_instructions: None,
                 reasoning: None,
+                reasoning_fingerprint: String::new(),
+                reasoning_source: "unknown".to_string(),
                 sort_index: None,
             },
         ];
@@ -7369,12 +8374,315 @@ mod tests {
         )
         .expect("backend recovery should re-key a structurally valid alias");
 
-        let mut expected_profile = aliased_profile;
-        expected_profile["inputModalities"] = json!(["text"]);
+        let expected_profile = aliased_profile;
         assert_eq!(recovered["profiles"]["deepseek-v4-flash"], expected_profile);
         assert!(recovered["profiles"].get("LEGACY_ALIAS_SENTINEL").is_none());
         parse_persisted_subagent_v2(&recovered)
             .expect("re-keyed alias recovery must be strict-storage valid");
+    }
+
+    #[test]
+    fn codex_subagent_v2_prune_unroutable_removes_stale_and_keeps_routable() {
+        let settings = codex_subagent_profile_status_settings(
+            "v2",
+            json!({
+                "repository-scout": codex_subagent_profile_status_profile("repository-scout", true),
+                "deepseek-v4-pro": codex_subagent_profile_status_profile("deepseek-v4-pro", false),
+                "qwen3.6": codex_subagent_profile_status_profile("qwen3.6", false),
+                "stale-disabled": codex_subagent_profile_status_profile("stale-disabled", false),
+                "stale-enabled": codex_subagent_profile_status_profile("stale-enabled", true)
+            }),
+            json!([
+                { "model": "repository-scout", "contextWindow": 128000 },
+                { "model": "deepseek-v4-pro", "contextWindow": 1000000 },
+                { "model": "qwen3.6", "contextWindow": 262144 }
+            ]),
+            json!([{
+                "id": "all-models",
+                "match": { "models": ["repository-scout", "deepseek-v4-pro", "qwen3.6"] },
+                "upstream": { "auth": { "source": "provider_config" } }
+            }]),
+        );
+        let draft = settings["codexRouting"]["subagentV2"].clone();
+
+        let pruned = reconcile_codex_subagent_v2_for_candidate(
+            &settings,
+            CodexSubagentV2ReconcileAction::PruneUnroutable,
+            Some(&draft),
+            None,
+        )
+        .expect("prune unroutable profiles in backend");
+
+        // Routable profiles (in catalog + routed) are kept, regardless of enabled state.
+        assert!(pruned["profiles"].get("repository-scout").is_some());
+        assert!(pruned["profiles"].get("deepseek-v4-pro").is_some());
+        assert!(pruned["profiles"].get("qwen3.6").is_some());
+        // Unroutable profiles (not in catalog) are removed, regardless of enabled state.
+        assert!(pruned["profiles"].get("stale-disabled").is_none());
+        assert!(pruned["profiles"].get("stale-enabled").is_none());
+        parse_persisted_subagent_v2(&pruned)
+            .expect("prune must produce strict-storage valid output");
+    }
+
+    #[test]
+    fn codex_subagent_v2_auto_prune_removes_disabled_stale_only() {
+        let settings = codex_subagent_profile_status_settings(
+            "v2",
+            json!({
+                "repository-scout": codex_subagent_profile_status_profile("repository-scout", true),
+                "deepseek-v4-pro": codex_subagent_profile_status_profile("deepseek-v4-pro", false),
+                "stale-disabled": codex_subagent_profile_status_profile("stale-disabled", false),
+                "stale-enabled": codex_subagent_profile_status_profile("stale-enabled", true)
+            }),
+            json!([
+                { "model": "repository-scout", "contextWindow": 128000 },
+                { "model": "deepseek-v4-pro", "contextWindow": 1000000 }
+            ]),
+            json!([{
+                "id": "all-models",
+                "match": { "models": ["repository-scout", "deepseek-v4-pro"] },
+                "upstream": { "auth": { "source": "provider_config" } }
+            }]),
+        );
+
+        let pruned = auto_prune_disabled_stale_subagent_v2(&settings)
+            .expect("auto-prune must succeed")
+            .expect("auto-prune must remove the stale disabled profile");
+
+        // In-catalog profiles are kept (even if disabled).
+        assert!(pruned["profiles"].get("repository-scout").is_some());
+        assert!(pruned["profiles"].get("deepseek-v4-pro").is_some());
+        // Disabled + not-in-catalog is removed.
+        assert!(pruned["profiles"].get("stale-disabled").is_none());
+        // Enabled + not-in-catalog is kept (enabled profiles are never auto-removed).
+        assert!(pruned["profiles"].get("stale-enabled").is_some());
+    }
+
+    #[test]
+    fn codex_subagent_v2_auto_prune_is_noop_when_no_stale_disabled() {
+        let settings = codex_subagent_profile_status_settings(
+            "v2",
+            json!({
+                "repository-scout": codex_subagent_profile_status_profile("repository-scout", true),
+                "deepseek-v4-pro": codex_subagent_profile_status_profile("deepseek-v4-pro", false)
+            }),
+            json!([
+                { "model": "repository-scout", "contextWindow": 128000 },
+                { "model": "deepseek-v4-pro", "contextWindow": 1000000 }
+            ]),
+            json!([{
+                "id": "all-models",
+                "match": { "models": ["repository-scout", "deepseek-v4-pro"] },
+                "upstream": { "auth": { "source": "provider_config" } }
+            }]),
+        );
+
+        let pruned =
+            auto_prune_disabled_stale_subagent_v2(&settings).expect("auto-prune must succeed");
+        assert!(
+            pruned.is_none(),
+            "no stale disabled profile means no change"
+        );
+    }
+
+    fn parse_test_profile(
+        model: &str,
+        input_modalities: Option<Value>,
+    ) -> crate::codex_subagent_profiles::ParsedCodexSubagentProfile {
+        let mut profile_json = json!({
+            "model": model,
+            "enabled": true,
+            "questionnaire": {
+                "taskStrengths": ["repository_exploration"],
+                "optimization": "speed",
+                "writeScope": "read_only",
+                "preference": "eligible"
+            },
+            "reasoning": { "policy": "delegated" }
+        });
+        if let Some(modalities) = input_modalities {
+            profile_json["inputModalities"] = modalities;
+        }
+        let v2 = json!({
+            "schemaVersion": 2,
+            "selectionPolicy": "balanced",
+            "profiles": { model: profile_json }
+        });
+        let parsed = parse_persisted_subagent_v2(&v2).expect("parse test profile");
+        parsed
+            .profiles
+            .iter()
+            .find_map(|entry| match entry {
+                ParsedProfileEntry::Valid(profile) => Some(profile),
+                _ => None,
+            })
+            .cloned()
+            .expect("valid profile")
+    }
+
+    #[test]
+    fn input_modality_provenance_catalog_declares_multimodal() {
+        let settings = codex_subagent_profile_status_settings(
+            "v2",
+            json!({}),
+            json!([{
+                "model": "vision-model",
+                "contextWindow": 128000,
+                "inputModalities": ["text", "image"]
+            }]),
+            json!([{
+                "id": "r",
+                "match": { "models": ["vision-model"] },
+                "upstream": { "auth": { "source": "provider_config" } }
+            }]),
+        );
+        let profile = parse_test_profile("vision-model", None);
+        let info = resolve_input_modality_provenance(&settings, &profile);
+        assert_eq!(info.modalities, Some(vec!["text".into(), "image".into()]));
+        assert_eq!(info.source, CodexSubagentInputModalitySource::Catalog);
+        assert!(info.conflict.is_none());
+    }
+
+    #[test]
+    fn input_modality_provenance_detects_route_catalog_conflict() {
+        let settings = codex_subagent_profile_status_settings(
+            "v2",
+            json!({}),
+            json!([{
+                "model": "conflict-model",
+                "contextWindow": 128000,
+                "inputModalities": ["text", "image"]
+            }]),
+            json!([{
+                "id": "r",
+                "match": { "models": ["conflict-model"] },
+                "capabilities": { "textOnly": true },
+                "upstream": { "auth": { "source": "provider_config" } }
+            }]),
+        );
+        let profile = parse_test_profile("conflict-model", None);
+        let info = resolve_input_modality_provenance(&settings, &profile);
+        // route 声明 textOnly=true 优先 → 最终纯文本；route 与 catalog 声明冲突
+        assert_eq!(info.modalities, Some(vec!["text".into()]));
+        assert_eq!(info.source, CodexSubagentInputModalitySource::Route);
+        let conflict = info.conflict.expect("route/catalog 声明不一致必须报告冲突");
+        assert!(conflict.contains("冲突"), "conflict: {conflict}");
+    }
+
+    #[test]
+    fn input_modality_provenance_name_registry_text_only() {
+        let settings = codex_subagent_profile_status_settings(
+            "v2",
+            json!({}),
+            json!([{ "model": "deepseek-v4-flash", "contextWindow": 128000 }]),
+            json!([{
+                "id": "r",
+                "match": { "models": ["deepseek-v4-flash"] },
+                "upstream": { "auth": { "source": "provider_config" } }
+            }]),
+        );
+        let profile = parse_test_profile("deepseek-v4-flash", None);
+        let info = resolve_input_modality_provenance(&settings, &profile);
+        // deepseek-v4-flash 在内置"已确认纯文本"注册表
+        assert_eq!(info.modalities, Some(vec!["text".into()]));
+        assert_eq!(info.source, CodexSubagentInputModalitySource::NameRegistry);
+        assert!(info.conflict.is_none());
+    }
+
+    #[test]
+    fn input_modality_provenance_unknown_when_no_declaration() {
+        let settings = codex_subagent_profile_status_settings(
+            "v2",
+            json!({}),
+            json!([{ "model": "mystery-model", "contextWindow": 128000 }]),
+            json!([{
+                "id": "r",
+                "match": { "models": ["mystery-model"] },
+                "upstream": { "auth": { "source": "provider_config" } }
+            }]),
+        );
+        let profile = parse_test_profile("mystery-model", None);
+        let info = resolve_input_modality_provenance(&settings, &profile);
+        assert_eq!(info.modalities, None);
+        assert_eq!(info.source, CodexSubagentInputModalitySource::Unknown);
+        assert!(info.conflict.is_none());
+    }
+
+    #[test]
+    fn input_modality_provenance_profile_explicit_override() {
+        let settings = codex_subagent_profile_status_settings(
+            "v2",
+            json!({}),
+            json!([{
+                "model": "override-model",
+                "contextWindow": 128000,
+                "inputModalities": ["text", "image"]
+            }]),
+            json!([{
+                "id": "r",
+                "match": { "models": ["override-model"] },
+                "upstream": { "auth": { "source": "provider_config" } }
+            }]),
+        );
+        // profile 显式声明纯文本，与 catalog 的 text+image 不同 → 用户覆盖
+        let profile = parse_test_profile("override-model", Some(json!(["text"])));
+        let info = resolve_input_modality_provenance(&settings, &profile);
+        assert_eq!(info.modalities, Some(vec!["text".into()]));
+        assert_eq!(
+            info.source,
+            CodexSubagentInputModalitySource::ProfileExplicit
+        );
+    }
+
+    #[test]
+    fn catalog_refresh_replaces_automatic_profile_modality_without_persisting_it() {
+        let settings = codex_subagent_profile_status_settings(
+            "v2",
+            json!({}),
+            json!([{
+                "model": "refresh-model",
+                "contextWindow": 128000,
+                "inputModalities": ["text", "image"]
+            }]),
+            json!([{
+                "id": "r",
+                "match": { "models": ["refresh-model"] },
+                "upstream": { "auth": { "source": "provider_config" } }
+            }]),
+        );
+        let raw = json!({
+            "schemaVersion": 2,
+            "selectionPolicy": "balanced",
+            "profiles": {
+                "refresh-model": {
+                    "model": "refresh-model",
+                    "enabled": true,
+                    "questionnaire": {
+                        "taskStrengths": ["repository_exploration"],
+                        "optimization": "speed",
+                        "writeScope": "read_only",
+                        "preference": "eligible"
+                    },
+                    "reasoning": { "policy": "delegated" }
+                }
+            }
+        });
+        let hydrated = hydrate_codex_subagent_v2_input_modalities(&settings, &raw);
+        assert!(hydrated["profiles"]["refresh-model"]
+            .get("inputModalities")
+            .is_none());
+        let profile = parse_persisted_subagent_v2(&hydrated)
+            .expect("catalog-derived modality must not be required in persisted profile")
+            .profiles
+            .into_iter()
+            .find_map(|entry| match entry {
+                ParsedProfileEntry::Valid(profile) => Some(profile),
+                _ => None,
+            })
+            .expect("valid profile");
+        let info = resolve_input_modality_provenance(&settings, &profile);
+        assert_eq!(info.modalities, Some(vec!["text".into(), "image".into()]));
+        assert_eq!(info.source, CodexSubagentInputModalitySource::Catalog);
     }
 
     #[test]
@@ -7386,6 +8694,17 @@ mod tests {
             "the read-only status command must be registered independently from preview"
         );
         assert!(lib_source.contains("codex_config::preview_codex_subagent_profile,"));
+        for command in [
+            "codex_config::inspect_codex_reasoning_capability,",
+            "codex_config::list_codex_reasoning_capabilities,",
+            "codex_config::validate_codex_reasoning_provider,",
+            "codex_config::export_codex_reasoning_provider,",
+        ] {
+            assert!(
+                lib_source.contains(command),
+                "missing P4 command registration: {command}"
+            );
+        }
     }
 
     #[test]
@@ -7461,6 +8780,15 @@ mod tests {
                         "nicknameCandidates": "override",
                         "modelReasoningEffort": "override"
                     },
+                    "inputModality": {
+                        "source": "unknown",
+                        "declarations": [
+                            { "source": "profile_explicit", "adopted": false },
+                            { "source": "route", "adopted": false },
+                            { "source": "catalog", "adopted": false },
+                            { "source": "name_registry", "adopted": false }
+                        ]
+                    },
                     "requestedRoleName": "Analysis Role",
                     "effectiveRoleName": "ccswitch-analysis-role-2",
                     "roleFilePath": expected_path.to_string_lossy(),
@@ -7480,8 +8808,9 @@ mod tests {
                             "medium": "high",
                             "high": "high",
                             "xhigh": "high",
-                            "max": "max"
-                        }
+                        "max": "max"
+                        },
+                        "fingerprint": "8d5aeff0f2c9743effd90da1cc89b10ec0335e2e2766e8161a9bf0325360abf9"
                     },
                     "status": "generated",
                     "warnings": []
@@ -8251,6 +9580,8 @@ mod tests {
             input_modalities: None,
             base_instructions: None,
             reasoning: Some(deepseek_reasoning_capability()),
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
             sort_index: None,
         }];
 
@@ -8392,6 +9723,8 @@ mod tests {
                 crate::proxy::providers::codex_reasoning::builtin_reasoning_capability_for_model(
                     "deepseek-v4-flash",
                 ),
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
             sort_index: None,
         }];
         let make_settings = |description: &str| {
@@ -8458,6 +9791,8 @@ mod tests {
                 crate::proxy::providers::codex_reasoning::builtin_reasoning_capability_for_model(
                     "deepseek-v4-flash",
                 ),
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
             sort_index: None,
         }];
         let persisted_settings = json!({
@@ -8543,6 +9878,8 @@ mod tests {
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
             sort_index: None,
         };
         let path = agents_dir.join("stable-role.toml");
@@ -8608,6 +9945,8 @@ mod tests {
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
             sort_index: None,
         }];
         sync_codex_managed_agent_files_with_settings(
@@ -10317,6 +11656,8 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
             sort_index: None,
         }];
         let catalog = codex_model_catalog_from_specs(
@@ -10713,6 +12054,8 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
             sort_index: None,
         };
         let entry = codex_catalog_model_entry(
@@ -10765,6 +12108,8 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             input_modalities: Some(vec!["text".to_string(), "image".to_string()]),
             base_instructions: Some("base".to_string()),
             reasoning: None,
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
             sort_index: None,
         };
 
@@ -10981,6 +12326,8 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
             sort_index: None,
         };
         let entry = codex_catalog_model_entry(
@@ -11037,7 +12384,10 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             base_instructions: None,
             reasoning: Some(
                 crate::proxy::providers::codex_reasoning::CodexModelReasoningCapability {
-                    supported: true,
+                    schema_version: None,
+                    support_status: None,
+                    control_kind: None,
+                    supported: Some(true),
                     supported_efforts: vec!["low".into(), "high".into(), "max".into()],
                     default_effort: Some("high".into()),
                     disable_allowed: true,
@@ -11057,8 +12407,14 @@ openai_base_url = "http://127.0.0.1:15721/v1"
                         },
                     output_format: None,
                     source: Some("builtin".into()),
+                    confidence: None,
+                    fetched_at: None,
+                    provider_key: None,
+                    model_revision: None,
                 },
             ),
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
             sort_index: None,
         };
 
@@ -11250,9 +12606,11 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             .filter_map(|level| level["effort"].as_str())
             .collect::<Vec<_>>();
         assert_eq!(entry["default_reasoning_level"], "max");
+        // P2：none 先按 disable capability 处理，不作为普通正向 effort 投影到
+        // supported_reasoning_levels（关闭走 disable 路径，不在可选档位里）。
         assert_eq!(
             efforts,
-            vec!["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+            vec!["minimal", "low", "medium", "high", "xhigh", "max"]
         );
     }
 
@@ -11356,6 +12714,140 @@ openai_base_url = "http://127.0.0.1:15721/v1"
     }
 
     #[test]
+    fn catalog_spec_carries_reasoning_fingerprint_and_source_builtin() {
+        // P2：catalog 投影携带 fingerprint 与 source（builtin 来源）。
+        let settings = json!({
+            "modelCatalog": { "models": [{ "model": "deepseek-v4-flash" }] }
+        });
+        let specs = codex_catalog_model_specs(&settings, "");
+        let spec = specs
+            .iter()
+            .find(|spec| spec.model == "deepseek-v4-flash")
+            .expect("deepseek-v4-flash spec");
+        assert!(spec.reasoning.is_some());
+        assert!(!spec.reasoning_fingerprint.is_empty());
+        assert_eq!(spec.reasoning_source, "builtin");
+    }
+
+    #[test]
+    fn catalog_spec_carries_reasoning_fingerprint_and_source_user_config() {
+        // P2：catalog 投影携带 fingerprint 与 source（user_config 来源）。
+        let settings = json!({
+            "modelCatalog": { "models": [{
+                "model": "private-model",
+                "reasoning": {
+                    "schemaVersion": 2,
+                    "supportStatus": "confirmed_supported",
+                    "controlKind": "graded",
+                    "supportedEfforts": ["low", "high"],
+                    "defaultEffort": "high",
+                    "disableAllowed": false,
+                    "upstream": {"format": "string", "parameter": "reasoning_effort"},
+                    "source": "user"
+                }
+            }]}
+        });
+        let specs = codex_catalog_model_specs(&settings, "");
+        let spec = specs
+            .iter()
+            .find(|spec| spec.model == "private-model")
+            .expect("private-model spec");
+        assert!(spec.reasoning.is_some());
+        assert!(!spec.reasoning_fingerprint.is_empty());
+        assert_eq!(spec.reasoning_source, "user_config");
+    }
+
+    #[test]
+    fn catalog_spec_fingerprint_matches_resolver_core() {
+        // P2：catalog 投影的 fingerprint 与 resolver 核心（同一输入）一致，
+        // 保证四层（catalog/请求/Sub-Agent/inspect）同源。
+        let settings = json!({
+            "modelCatalog": { "models": [{ "model": "deepseek-v4-flash" }] }
+        });
+        let specs = codex_catalog_model_specs(&settings, "");
+        let spec = specs
+            .iter()
+            .find(|spec| spec.model == "deepseek-v4-flash")
+            .expect("deepseek-v4-flash spec");
+        // 用同一输入直接调用 resolver 核心（platform=None、detection=None、
+        // library=全局、official=空缓存），fingerprint 必须与 catalog 投影一致。
+        let library = crate::reasoning_capabilities::catalog::global_library();
+        let resolved = crate::reasoning_capabilities::resolve_codex_model_capability_core(
+            &settings,
+            None,
+            "deepseek-v4-flash",
+            None,
+            library.as_ref(),
+            &[],
+        );
+        assert_eq!(spec.reasoning_fingerprint, resolved.fingerprint);
+        assert_eq!(spec.reasoning_source, resolved.source.as_str());
+    }
+
+    // ===== P0 契约：三态 schema 的 catalog 投影 =====
+
+    #[test]
+    fn new_schema_unknown_model_does_not_inherit_template_reasoning() {
+        // schema v2 显式 unknown：不得被当作解析失败丢弃，也不得继承模板档位。
+        let settings = json!({
+            "modelCatalog": { "models": [{
+                "model": "private-model",
+                "reasoning": {
+                    "schemaVersion": 2,
+                    "supportStatus": "unknown",
+                    "controlKind": "unknown",
+                    "supportedEfforts": [],
+                    "disableAllowed": false,
+                    "upstream": {"format": "none", "parameter": "none"},
+                    "source": "provider"
+                }
+            }]}
+        });
+        let catalog = codex_model_catalog_from_settings(
+            &settings,
+            "model = \"private-model\"",
+            CodexCatalogToolProfile::ProxyChat,
+        )
+        .expect("build catalog")
+        .expect("catalog");
+        let entry = &catalog["models"][0];
+        assert!(entry.get("default_reasoning_level").is_none());
+        assert_eq!(entry.get("supported_reasoning_levels"), Some(&json!([])));
+        assert!(entry.get("supportedReasoningEfforts").is_none());
+    }
+
+    #[test]
+    fn explicit_empty_efforts_model_is_not_filled_by_template() {
+        // 明确的 supportedEfforts=[]（boolean 开关）：任何投影都不得回退到通用档位。
+        let settings = json!({
+            "modelCatalog": { "models": [{
+                "model": "private-model",
+                "reasoning": {
+                    "schemaVersion": 2,
+                    "supportStatus": "confirmed_supported",
+                    "controlKind": "boolean",
+                    "supportedEfforts": [],
+                    "disableAllowed": true,
+                    "upstream": {"format": "boolean", "parameter": "enable_thinking"},
+                    "outputFormat": "reasoning_content",
+                    "source": "user"
+                }
+            }]}
+        });
+        let catalog = codex_model_catalog_from_settings(
+            &settings,
+            "model = \"private-model\"",
+            CodexCatalogToolProfile::ProxyChat,
+        )
+        .expect("build catalog")
+        .expect("catalog");
+        let entry = &catalog["models"][0];
+        assert!(entry.get("default_reasoning_level").is_none());
+        assert_eq!(entry.get("supported_reasoning_levels"), Some(&json!([])));
+        assert!(entry.get("supportedReasoningEfforts").is_none());
+    }
+
+    #[test]
     fn codex_agent_defaults_migrate_legacy_alias_without_overwriting_user_limits() {
         let specs = vec![CodexCatalogModelSpec {
             model: "qwen3.6".to_string(),
@@ -11368,6 +12860,8 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
             sort_index: None,
         }];
         let config = r#"model_provider = "codex_model_router_v2"
@@ -11416,6 +12910,8 @@ base_url = "http://127.0.0.1:15721/v1"
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
             sort_index: None,
         }];
         let catalog = json!({
@@ -11486,7 +12982,10 @@ base_url = "http://127.0.0.1:15721/v1"
             base_instructions: None,
             reasoning: Some(
                 crate::proxy::providers::codex_reasoning::CodexModelReasoningCapability {
-                    supported: true,
+                    schema_version: None,
+                    support_status: None,
+                    control_kind: None,
+                    supported: Some(true),
                     supported_efforts: vec!["low".into(), "high".into(), "max".into()],
                     default_effort: Some("high".into()),
                     disable_allowed: false,
@@ -11498,8 +12997,14 @@ base_url = "http://127.0.0.1:15721/v1"
                         },
                     output_format: None,
                     source: Some("builtin".into()),
+                    confidence: None,
+                    fetched_at: None,
+                    provider_key: None,
+                    model_revision: None,
                 },
             ),
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
             sort_index: None,
         }];
         let catalog = codex_model_catalog_from_specs(
@@ -11574,6 +13079,8 @@ base_url = "http://127.0.0.1:15721/v1"
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
             sort_index: None,
         }];
         let config = r#"model_provider = "codex_model_router_v2"
@@ -12010,6 +13517,8 @@ model_context_window = 262144
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
             sort_index: None,
         }];
 
@@ -12118,6 +13627,8 @@ model_provider = "custom"
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
             sort_index: None,
         }];
 
@@ -12175,6 +13686,8 @@ model_provider = "custom"
                 input_modalities: None,
                 base_instructions: None,
                 reasoning: None,
+                reasoning_fingerprint: String::new(),
+                reasoning_source: "unknown".to_string(),
                 sort_index: None,
             },
         )
@@ -12235,6 +13748,8 @@ model_provider = "custom"
                 input_modalities: None,
                 base_instructions: None,
                 reasoning: None,
+                reasoning_fingerprint: String::new(),
+                reasoning_source: "unknown".to_string(),
                 sort_index: None,
             },
         )
@@ -12360,6 +13875,8 @@ model = "handwritten"
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
             sort_index: None,
         }];
 
@@ -12506,6 +14023,8 @@ model_provider = "codex_model_router_v2"
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
             sort_index: None,
         };
         let entry = codex_catalog_model_entry(
@@ -12561,6 +14080,8 @@ model_provider = "codex_model_router_v2"
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
             sort_index: None,
         };
         let entry = codex_catalog_model_entry(
@@ -12745,6 +14266,8 @@ max_depth = 2
             input_modalities: None,
             base_instructions: None,
             reasoning: None,
+            reasoning_fingerprint: String::new(),
+            reasoning_source: "unknown".to_string(),
             sort_index: None,
         }];
         let catalog_path = get_codex_model_catalog_path();
@@ -13766,7 +15289,8 @@ model_catalog_json = "cc-switch-model-catalog.json"
     }
 
     #[test]
-    fn subagent_v2_hydration_uses_catalog_modalities_and_preserves_explicit_overrides() {
+    fn subagent_v2_hydration_does_not_persist_catalog_modalities_and_preserves_explicit_overrides()
+    {
         let settings = json!({
             "modelCatalog": { "models": [
                 {
@@ -13806,14 +15330,12 @@ model_catalog_json = "cc-switch-model-catalog.json"
 
         let hydrated = hydrate_codex_subagent_v2_input_modalities(&settings, &raw);
 
-        assert_eq!(
-            hydrated["profiles"]["deepseek-v4-flash"]["inputModalities"],
-            json!(["text"])
-        );
-        assert_eq!(
-            hydrated["profiles"]["gpt-vision"]["inputModalities"],
-            json!(["text", "image"])
-        );
+        assert!(hydrated["profiles"]["deepseek-v4-flash"]
+            .get("inputModalities")
+            .is_none());
+        assert!(hydrated["profiles"]["gpt-vision"]
+            .get("inputModalities")
+            .is_none());
         assert_eq!(
             hydrated["profiles"]["manual"]["inputModalities"],
             json!(["text"]),

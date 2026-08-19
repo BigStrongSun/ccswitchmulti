@@ -1260,11 +1260,12 @@ command = "example-mcp"
                 CodexSubagentV2RoleFilesStatus::Verified
             );
             assert_eq!(result.verification.role_files.len(), 1);
-            assert_eq!(
+            assert!(
                 result.provider.settings_config["codexRouting"]["subagentV2"]["profiles"]
-                    ["deepseek-v4-flash"]["inputModalities"],
-                json!(["text"]),
-                "the focused mutation must persist catalog-derived capability explicitly"
+                    ["deepseek-v4-flash"]
+                    .get("inputModalities")
+                    .is_none(),
+                "catalog-derived capability must remain runtime metadata"
             );
             let file = &result.verification.role_files[0];
             assert!(file.exists);
@@ -1297,7 +1298,21 @@ command = "example-mcp"
 
             let target_settings = json!({
                 "modelCatalog": { "models": [
-                    { "model": "repository-scout", "contextWindow": 128000 },
+                    {
+                        "model": "repository-scout",
+                        "contextWindow": 128000,
+                        "reasoning": {
+                            "supported": true,
+                            "supportedEfforts": ["low", "medium", "high"],
+                            "defaultEffort": "medium",
+                            "disableAllowed": true,
+                            "upstream": {
+                                "format": "string",
+                                "parameter": "reasoning_effort"
+                            },
+                            "source": "builtin"
+                        }
+                    },
                     { "model": "qwen3.6", "contextWindow": 262144 }
                 ] },
                 "codexRouting": {
@@ -4245,6 +4260,40 @@ impl ProviderService {
 
         // Save to database
         state.db.save_provider(app_type.as_str(), &provider)?;
+
+        // Best-effort auto-prune of disabled stale V2 profiles (model left the catalog).
+        // Runs after the main save so a prune failure never fails the save. Only Codex
+        // providers with a subagentV2 are affected; enabled profiles are never removed.
+        // No live projection is needed: disabled profiles generate no role files, so the
+        // live config is unchanged by this prune.
+        if app_type == AppType::Codex {
+            if let Ok(Some(pruned)) = crate::codex_config::auto_prune_disabled_stale_subagent_v2(
+                &provider.settings_config,
+            ) {
+                let provider_context =
+                    crate::codex_config::codex_provider_classification_context(state.db.as_ref());
+                let persist = state.db.update_codex_subagent_v2(
+                    &provider.id,
+                    move |settings| {
+                        Ok(
+                            crate::codex_config::hydrate_codex_subagent_v2_input_modalities(
+                                settings, &pruned,
+                            ),
+                        )
+                    },
+                    |settings| {
+                        crate::codex_config::validate_codex_subagent_v2_candidate(
+                            settings,
+                            provider_context.as_ref().ok(),
+                            true,
+                        )
+                    },
+                );
+                if let Err(err) = persist {
+                    log::warn!("Codex V2 auto-prune persist failed (main save succeeded): {err}");
+                }
+            }
+        }
 
         // For other apps: Check if this is current provider (use effective current, not just DB)
         let effective_current =

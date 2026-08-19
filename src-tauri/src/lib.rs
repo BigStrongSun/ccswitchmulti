@@ -5,7 +5,7 @@ mod auto_launch;
 mod claude_desktop_config;
 mod claude_mcp;
 mod claude_plugin;
-mod codex_config;
+pub mod codex_config;
 mod codex_desktop;
 mod codex_guardian;
 pub mod codex_history_migration;
@@ -33,6 +33,7 @@ mod prompt;
 mod prompt_files;
 mod provider;
 mod proxy;
+pub mod reasoning_capabilities;
 mod services;
 mod session_manager;
 mod settings;
@@ -420,6 +421,11 @@ pub fn run() {
         )
         .setup(|app| {
             let _ = rustls::crypto::ring::default_provider().install_default();
+
+            // 初始化推理能力库资源目录（随应用打包的 reasoning-capabilities.json）。
+            if let Ok(resource_dir) = app.path().resource_dir() {
+                crate::reasoning_capabilities::init_resource_dir(resource_dir);
+            }
 
             // 预先刷新 Store 覆盖配置，确保后续路径读取正确（日志/数据库等）
             app_store::refresh_app_config_dir_override(app.handle());
@@ -1410,6 +1416,12 @@ pub fn run() {
             commands::read_live_provider_settings,
             commands::get_settings,
             codex_config::get_codex_subagent_reasoning_capabilities,
+            codex_config::resolve_codex_model_reasoning_capability,
+            codex_config::trigger_codex_model_reasoning_detection,
+            codex_config::inspect_codex_reasoning_capability,
+            codex_config::list_codex_reasoning_capabilities,
+            codex_config::validate_codex_reasoning_provider,
+            codex_config::export_codex_reasoning_provider,
             codex_config::get_codex_subagent_profile_statuses,
             codex_config::preview_codex_subagent_profile,
             commands::save_settings,

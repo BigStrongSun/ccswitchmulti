@@ -324,6 +324,7 @@ vi.mock("@tauri-apps/api/core", () => ({
             "sync_catalog",
             "remove_all_invalid",
             "recover_all_invalid_from_catalog",
+            "prune_unroutable",
           ].includes(String(args.action))
         ) {
           throw new Error(
@@ -387,6 +388,10 @@ vi.mock("@tauri-apps/api/core", () => ({
             },
             reasoning: { policy: "delegated" },
           };
+        } else if (args.action === "prune_unroutable") {
+          // The explicit "sync with catalog" action removes every unroutable
+          // profile (model left the routable catalog), regardless of enabled state.
+          delete config.profiles["offline-writer"];
         }
         ipcState.providers[savedProvider.id] = savedProvider;
         return JSON.parse(JSON.stringify(mutationResult(savedProvider)));
@@ -1336,6 +1341,35 @@ describe("Codex Sub-Agent V2 review round 1 regressions", () => {
     ).toBeVisible();
   });
 
+  it("renders input modality provenance and conflict in the profile status", async () => {
+    ipcState.statusResponse = {
+      ...statusFixture,
+      profiles: [
+        {
+          ...statusFixture.profiles[0],
+          inputModality: {
+            modalities: ["text"],
+            source: "route",
+            declarations: [
+              { source: "profile_explicit", adopted: false },
+              { source: "route", declared: ["text"], adopted: true },
+              { source: "catalog", declared: ["text", "image"], adopted: false },
+              { source: "name_registry", adopted: false },
+            ],
+            conflict:
+              "输入能力声明冲突：route 声明纯文本，模型目录 声明文本+图像",
+          },
+        },
+        statusFixture.profiles[1],
+      ],
+    };
+    const user = userEvent.setup();
+    await renderWorkspace();
+    const flash = within(await openGeneratedOutput(user));
+    expect(await flash.findByText(/输入能力：纯文本/)).toBeVisible();
+    expect(flash.getByText(/输入能力声明冲突/)).toBeVisible();
+  });
+
   it("disables draft controls while a save transaction is pending", async () => {
     const gate = createDeferred();
     ipcState.updateGate = gate.promise;
@@ -1941,6 +1975,37 @@ describe("Codex Sub-Agent V2 backend-owned catalog reconciliation", () => {
     expect(document.body.textContent).not.toContain(
       "RAW_INVALID_PROFILE_KEY_BETA",
     );
+  });
+
+  it("offers a backend-owned sync action that removes every unroutable profile", async () => {
+    const user = userEvent.setup();
+    await mountWorkspaceFromPersistedPlan();
+
+    // The status fixture marks "offline-writer" (deepseek-v4-pro, no route) as
+    // unroutable, so the sync button is offered with a count of 1.
+    const syncButton = await screen.findByRole("button", {
+      name: "与目录同步：删除已失效模型（1 项）",
+    });
+    expect(syncButton).toBeInTheDocument();
+
+    await user.click(syncButton);
+
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith(
+        "reconcile_codex_subagent_v2_profiles",
+        expect.objectContaining({
+          providerId: "router",
+          action: "prune_unroutable",
+        }),
+      ),
+    );
+
+    // The unroutable profile is removed from the persisted draft; the routable
+    // profile is kept.
+    const profilesAfterPrune =
+      ipcState.providers.router.settingsConfig.codexRouting.subagentV2.profiles;
+    expect(Object.keys(profilesAfterPrune)).toEqual(["repository-scout"]);
+    expect(profilesAfterPrune["offline-writer"]).toBeUndefined();
   });
 
   it("offers backend re-key recovery for a structurally usable canonical key mismatch", async () => {

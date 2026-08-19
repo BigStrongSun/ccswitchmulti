@@ -250,6 +250,9 @@ pub(crate) struct CodexToolContext {
     namespace_name_to_chat_name: HashMap<(String, String), String>,
     hosted_web_search: Option<HostedWebSearchConfig>,
     hosted_image_generation: Option<HostedImageGenerationConfig>,
+    /// Responses tool types that CCSM cannot project to Chat safely.
+    /// Keep these visible so callers fail loudly instead of silently dropping them.
+    unsupported_response_tools: Vec<String>,
 }
 
 impl CodexToolContext {
@@ -269,6 +272,20 @@ impl CodexToolContext {
             .is_some_and(|spec| matches!(&spec.kind, CodexToolKind::Custom))
     }
 
+    /// Whether a Chat function name is a CCSM-hosted tool projection.
+    ///
+    /// The streaming Responses converter uses this classification to keep
+    /// hosted calls inside the proxy loop instead of exposing them as ordinary
+    /// client-executed function calls.
+    pub(crate) fn is_hosted_tool_chat_name(&self, chat_name: &str) -> bool {
+        self.lookup_chat_name(chat_name).is_some_and(|spec| {
+            matches!(
+                &spec.kind,
+                CodexToolKind::HostedWebSearch | CodexToolKind::HostedImageGeneration
+            )
+        })
+    }
+
     /// 返回 Codex 原始 hosted `web_search` 的安全配置子集。
     pub(crate) fn hosted_web_search_config(&self) -> Option<&HostedWebSearchConfig> {
         self.hosted_web_search.as_ref()
@@ -277,6 +294,10 @@ impl CodexToolContext {
     /// 返回 Codex 原始 hosted `image_generation` 的安全配置子集。
     pub(crate) fn hosted_image_generation_config(&self) -> Option<&HostedImageGenerationConfig> {
         self.hosted_image_generation.as_ref()
+    }
+
+    pub(crate) fn unsupported_response_tools(&self) -> &[String] {
+        &self.unsupported_response_tools
     }
 
     /// 按 MultiRouter 开关移除已禁用的 hosted tools。
@@ -482,9 +503,14 @@ impl CodexToolContext {
                 Some("web_search") => self.add_hosted_web_search_tool(tool),
                 Some("image_generation") => self.add_hosted_image_generation_tool(tool),
                 Some("namespace") => self.add_namespace_tool(tool),
-                _ => {}
+                Some(tool_type) => self.unsupported_response_tools.push(tool_type.to_string()),
+                None => self
+                    .unsupported_response_tools
+                    .push("<missing type>".to_string()),
             },
-            _ => {}
+            _ => self
+                .unsupported_response_tools
+                .push("<non-object tool>".to_string()),
         }
     }
 }
@@ -552,6 +578,15 @@ pub fn responses_to_chat_completions_with_reasoning_text_only_and_cache(
 ) -> Result<Value, ProxyError> {
     let mut result = json!({});
     let tool_context = build_codex_tool_context_from_request(&body);
+    if !tool_context.unsupported_response_tools().is_empty() {
+        let mut types = tool_context.unsupported_response_tools().to_vec();
+        types.sort();
+        types.dedup();
+        return Err(ProxyError::TransformError(format!(
+            "Unsupported Responses tool type(s) for Chat upstream: {}",
+            types.join(", ")
+        )));
+    }
     let text_only_model = text_only_override.unwrap_or(false)
         || body
             .get("model")
@@ -607,7 +642,7 @@ pub fn responses_to_chat_completions_with_reasoning_text_only_and_cache(
         }
     }
 
-    apply_reasoning_options(&mut result, &body, model, reasoning_config)?;
+    apply_reasoning_options(&mut result, &body, reasoning_config)?;
 
     let tools = tool_context.chat_tools();
     if !tools.is_empty() {
@@ -623,6 +658,7 @@ pub fn responses_to_chat_completions_with_reasoning_text_only_and_cache(
             result[*key] = value.clone();
         }
     }
+
     apply_openai_prompt_cache_options(&mut result, &body, cache_config);
 
     // Strict OpenAI-compatible upstreams (vLLM, enterprise gateways) reject
@@ -646,6 +682,65 @@ pub fn responses_to_chat_completions_with_reasoning_text_only_and_cache(
     super::transform::inject_openai_stream_include_usage(&mut result);
 
     Ok(result)
+}
+
+/// 把 forwarder 侧已决策的 hosted tool 开关同步到已转换的 Chat body。
+///
+/// `responses_to_chat_completions_with_reasoning_text_only_and_cache` 内部会基于
+/// 原始 body 重新构建一份 `CodexToolContext`，因此 forwarder 对
+/// `codex_chat_tool_context` 调用的 `apply_hosted_tool_switches` 不会作用到真正
+/// 发给上游的 Chat body。这里在转换完成后按同一份 context 的开关移除被禁用的
+/// hosted tool 定义，保证「模型可见的工具」与「hosted tool loop 是否接管」一致，
+/// 避免模型调用一个不会被本地执行的 hosted tool 而得到 `unsupported call`。
+pub(crate) fn apply_hosted_tool_switches_to_chat_body(
+    chat_body: &mut Value,
+    context: &CodexToolContext,
+) {
+    let mut removed_any = false;
+    if context.hosted_web_search_config().is_none() {
+        removed_any |= remove_chat_tool_from_body(chat_body, web_search::WEB_SEARCH_FUNCTION_NAME);
+    }
+    if context.hosted_image_generation_config().is_none() {
+        removed_any |=
+            remove_chat_tool_from_body(chat_body, image_generation::IMAGE_GENERATION_FUNCTION_NAME);
+    }
+    if removed_any {
+        drop_orphaned_hosted_tool_choice(chat_body);
+    }
+}
+
+fn remove_chat_tool_from_body(chat_body: &mut Value, name: &str) -> bool {
+    let Some(tools) = chat_body.get_mut("tools").and_then(Value::as_array_mut) else {
+        return false;
+    };
+    let before = tools.len();
+    tools.retain(|tool| tool.pointer("/function/name").and_then(Value::as_str) != Some(name));
+    tools.len() != before
+}
+
+/// 若 tool_choice 指向一个已被移除的 hosted tool，则丢弃该 tool_choice，
+/// 避免上游因引用不存在的工具而报错。
+fn drop_orphaned_hosted_tool_choice(chat_body: &mut Value) {
+    let Some(tool_choice) = chat_body
+        .get("tool_choice")
+        .filter(|value| value.is_object())
+    else {
+        return;
+    };
+    let choice_type = tool_choice.get("type").and_then(Value::as_str);
+    let choice_name = tool_choice.get("name").and_then(Value::as_str).or_else(|| {
+        tool_choice
+            .pointer("/function/name")
+            .and_then(Value::as_str)
+    });
+    let references_hosted = matches!(choice_type, Some("web_search" | "image_generation"))
+        || (choice_type == Some("function")
+            && matches!(choice_name, Some("web_search" | "generate_image")));
+    if references_hosted {
+        if let Some(obj) = chat_body.as_object_mut() {
+            obj.remove("tool_choice");
+        }
+    }
 }
 
 /// 按 provider/route 明确声明的能力透传 OpenAI prompt cache 参数。
@@ -773,15 +868,12 @@ fn apply_min_output_tokens(
 fn apply_reasoning_options(
     result: &mut Value,
     body: &Value,
-    model: &str,
     config: Option<&CodexChatReasoningConfig>,
 ) -> Result<(), ProxyError> {
     let Some(config) = config else {
-        if super::transform::supports_reasoning_effort(model) {
-            if let Some(effort) = body.pointer("/reasoning/effort") {
-                result["reasoning_effort"] = effort.clone();
-            }
-        }
+        // P2：通用 GPT reasoning fallback 已封闭。GPT 模型统一经 resolver 的
+        // official 来源（未知平台）或平台推断（聚合平台）解析；config 为 None
+        // 表示该模型推理能力未知，不得再按模型名猜测档位注入 reasoning_effort。
         return Ok(());
     };
 
@@ -806,19 +898,22 @@ fn apply_reasoning_options(
     };
 
     if supports_thinking {
+        // Codex 的 reasoning.effort=none 是 Responses 语义：只有上游存在显式关闭契约
+        // （disable_contract）时才翻译为上游关闭信号；否则省略厂商字段、保留服务端默认。
+        let emit_switch = reasoning_enabled || config.disable_contract;
         match thinking_param.as_str() {
-            "thinking" => {
+            "thinking" if emit_switch => {
                 result["thinking"] = json!({
                     "type": if reasoning_enabled { "enabled" } else { "disabled" }
                 });
             }
-            "enable_thinking" => {
+            "enable_thinking" if emit_switch => {
                 result["enable_thinking"] = json!(reasoning_enabled);
             }
-            "chat_template_kwargs.enable_thinking" => {
+            "chat_template_kwargs.enable_thinking" if emit_switch => {
                 set_chat_template_enable_thinking(result, reasoning_enabled);
             }
-            "reasoning_split" => {
+            "reasoning_split" if emit_switch => {
                 result["reasoning_split"] = json!(reasoning_enabled);
             }
             _ => {}
@@ -2999,7 +3094,10 @@ mod tests {
         assert_eq!(result["tool_choice"]["function"]["name"], "get_weather");
         assert_eq!(result["max_completion_tokens"], 100);
         assert!(result.get("max_tokens").is_none());
-        assert_eq!(result["reasoning_effort"], "high");
+        // P2：通用 GPT reasoning fallback 已封闭。无 reasoning config 的简单转换
+        // 不再按模型名猜测档位注入 reasoning_effort；GPT 模型统一经 resolver
+        // 的 official 来源解析（请求路径始终携带 config，不会走到此分支）。
+        assert!(result.get("reasoning_effort").is_none());
     }
 
     #[test]
@@ -3526,6 +3624,94 @@ mod tests {
         assert!(context.hosted_image_generation_config().is_none());
     }
 
+    /// 复现 streaming auto 下 hosted tool 泄漏：转换函数内部重建 context，
+    /// forwarder 的 apply_hosted_tool_switches 不会作用到 Chat body。修复后
+    /// apply_hosted_tool_switches_to_chat_body 必须把被禁用的 hosted tool 从
+    /// 真正发给上游的 Chat body 中移除，同时保留普通 client tool。
+    #[test]
+    fn hosted_tool_switches_apply_to_converted_chat_body() {
+        let request = json!({
+            "model": "qwen3.8",
+            "tools": [
+                { "type": "web_search" },
+                { "type": "image_generation" },
+                {
+                    "type": "function",
+                    "name": "lookup",
+                    "description": "Look up a value.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": { "id": { "type": "string" } },
+                        "required": ["id"]
+                    }
+                }
+            ],
+            "input": "Use tools.",
+            "tool_choice": "auto"
+        });
+
+        // 模拟 forwarder：先转换，再按 loop 关闭的开关同步 Chat body。
+        let mut chat_body = responses_to_chat_completions_with_reasoning_text_only_and_cache(
+            request.clone(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // 转换后（未同步开关）Chat body 仍会暴露 hosted tool —— 这是 bug 现象。
+        let names_before: Vec<&str> = chat_body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t.pointer("/function/name").and_then(Value::as_str))
+            .collect();
+        assert!(names_before.contains(&"web_search"));
+        assert!(names_before.contains(&"generate_image"));
+
+        let mut context = build_codex_tool_context_from_request(&request);
+        context.apply_hosted_tool_switches(false, false);
+        apply_hosted_tool_switches_to_chat_body(&mut chat_body, &context);
+
+        let names_after: Vec<&str> = chat_body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t.pointer("/function/name").and_then(Value::as_str))
+            .collect();
+        assert!(!names_after.contains(&"web_search"));
+        assert!(!names_after.contains(&"generate_image"));
+        assert!(names_after.contains(&"lookup"));
+    }
+
+    /// 当 tool_choice 指向被移除的 hosted tool 时，应丢弃孤儿 tool_choice。
+    #[test]
+    fn hosted_tool_switches_drop_orphaned_tool_choice() {
+        let request = json!({
+            "model": "qwen3.8",
+            "tools": [{ "type": "web_search" }],
+            "input": "Search.",
+            "tool_choice": { "type": "web_search" }
+        });
+
+        let mut chat_body = responses_to_chat_completions_with_reasoning_text_only_and_cache(
+            request.clone(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let mut context = build_codex_tool_context_from_request(&request);
+        context.apply_hosted_tool_switches(false, false);
+        apply_hosted_tool_switches_to_chat_body(&mut chat_body, &context);
+
+        assert!(
+            chat_body.get("tools").is_none() || chat_body["tools"].as_array().unwrap().is_empty()
+        );
+        assert!(chat_body.get("tool_choice").is_none());
+    }
+
     #[test]
     fn responses_request_to_chat_leaves_non_hosted_function_tool_unchanged() {
         let input = json!({
@@ -3554,6 +3740,25 @@ mod tests {
             "Look up a value."
         );
         assert_eq!(result["tool_choice"]["function"]["name"], "lookup");
+    }
+
+    #[test]
+    fn unsupported_responses_tool_type_fails_loudly_instead_of_being_dropped() {
+        let error = responses_to_chat_completions_with_reasoning_text_only_and_cache(
+            json!({
+                "model": "third-party",
+                "input": "use the hosted file index",
+                "tools": [{ "type": "file_search" }]
+            }),
+            None,
+            None,
+            None,
+        )
+        .expect_err("unsupported hosted tools must not disappear silently");
+
+        assert!(
+            matches!(error, ProxyError::TransformError(message) if message.contains("file_search"))
+        );
     }
 
     #[test]
@@ -3633,6 +3838,7 @@ mod tests {
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: false,
         };
 
         let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
@@ -3657,6 +3863,7 @@ mod tests {
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: false,
         };
         let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
         assert_eq!(result["reasoning_effort"], "high");
@@ -3678,6 +3885,7 @@ mod tests {
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("reasoning".to_string()),
+            disable_contract: false,
         };
         let error = responses_to_chat_completions_with_reasoning(input, Some(&config))
             .expect_err("medium must be rejected");
@@ -3697,6 +3905,7 @@ mod tests {
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("auto".to_string()),
+            disable_contract: false,
         };
 
         // max 不在 OpenRouter 枚举内（见 openclaw#77350），必须钳成 xhigh，
@@ -3740,6 +3949,7 @@ mod tests {
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("auto".to_string()),
+            disable_contract: false,
         };
 
         let input = json!({
@@ -3769,6 +3979,7 @@ mod tests {
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: true,
         };
 
         let input = json!({
@@ -3782,6 +3993,67 @@ mod tests {
         assert_eq!(result["thinking"]["type"], "disabled");
         assert!(result.get("reasoning_effort").is_none());
         assert!(result.get("reasoning").is_none());
+    }
+
+    // ===== P0 RED：无关闭契约时 none 不得翻译成厂商关闭信号 =====
+
+    #[test]
+    fn none_without_disable_contract_omits_vendor_disable_signal() {
+        // 推断配置（无显式关闭契约）：Codex 的 reasoning.effort=none 是 Responses
+        // 语义，不得翻译成上游 enable_thinking=false；省略厂商字段、保留服务端默认。
+        let config = CodexChatReasoningConfig {
+            supports_thinking: Some(true),
+            supports_effort: Some(false),
+            thinking_param: Some("enable_thinking".to_string()),
+            effort_param: Some("none".to_string()),
+            effort_value_mode: None,
+            min_output_tokens: None,
+            default_output_tokens: None,
+            output_format: Some("reasoning_content".to_string()),
+            disable_contract: false,
+        };
+
+        let input = json!({
+            "model": "qwen3-max",
+            "input": "hello",
+            "reasoning": {"effort": "none"}
+        });
+        let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
+
+        assert!(
+            result.get("enable_thinking").is_none(),
+            "inferred config must not translate none into enable_thinking=false, got {result}"
+        );
+        assert!(result.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn none_with_explicit_disable_contract_emits_disable_signal() {
+        // 能力派生配置：模型显式声明 disableAllowed=true（等价 thinking 关闭契约），
+        // none 翻译为上游关闭信号。
+        let config = CodexChatReasoningConfig {
+            supports_thinking: Some(true),
+            supports_effort: Some(true),
+            thinking_param: Some("thinking".to_string()),
+            effort_param: Some("reasoning_effort".to_string()),
+            effort_value_mode: Some(
+                "capability|low,high,max|low=low,high=high,max=max".to_string(),
+            ),
+            min_output_tokens: None,
+            default_output_tokens: None,
+            output_format: Some("reasoning_content".to_string()),
+            disable_contract: true,
+        };
+
+        let input = json!({
+            "model": "deepseek-v4-flash",
+            "input": "hello",
+            "reasoning": {"effort": "none"}
+        });
+        let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
+
+        assert_eq!(result["thinking"]["type"], "disabled");
+        assert!(result.get("reasoning_effort").is_none());
     }
 
     #[test]
@@ -3800,6 +4072,7 @@ mod tests {
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: false,
         };
 
         let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
@@ -3824,6 +4097,7 @@ mod tests {
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: false,
         };
 
         let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
@@ -3849,6 +4123,7 @@ mod tests {
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: false,
         };
 
         let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
@@ -3875,6 +4150,7 @@ mod tests {
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: true,
         };
 
         let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
@@ -3900,6 +4176,7 @@ mod tests {
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: false,
         };
 
         let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
@@ -3926,6 +4203,7 @@ mod tests {
             min_output_tokens: Some(1024),
             default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: false,
         };
 
         let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
@@ -3964,6 +4242,7 @@ mod tests {
             min_output_tokens: None,
             default_output_tokens: Some(4096),
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: false,
         };
 
         let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
@@ -3988,6 +4267,7 @@ mod tests {
             min_output_tokens: Some(2048),
             default_output_tokens: Some(32_768),
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: false,
         };
 
         let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
@@ -4013,6 +4293,7 @@ mod tests {
             min_output_tokens: Some(2048),
             default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: false,
         };
 
         let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
@@ -4040,6 +4321,7 @@ mod tests {
             min_output_tokens: Some(2048),
             default_output_tokens: Some(32_768),
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: false,
         };
 
         let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
@@ -4066,6 +4348,7 @@ mod tests {
             min_output_tokens: Some(2048),
             default_output_tokens: Some(32_768),
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: false,
         };
 
         let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();

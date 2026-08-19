@@ -1,5 +1,15 @@
 # CC Switch Repository Memory
 
+## 2026-08-19 恢复 Qwen/vLLM 缺省输出上限 131072（对齐 Qwen3.8-27B 官方最大输出）
+
+- 实况：Codex 任务 `01a01722-ca39-77f1-b7da-9d3a9d5fe023` 的 vLLM 透明代理记录出现单条请求 `prompt_tokens=136269 / completion_tokens=125875 / total_tokens=262144 / finish_reasons=["length"]`。根因不是上下文压缩也不是 KV cache，而是 Codex Responses 请求没有显式输出预算、CCSM 转换成 Chat Completions 时也没有补 `max_tokens`，vLLM 把剩余上下文窗口都当成默认输出预算。
+- 2026-07-09 提交 `8b6b3b7e` 曾按“CCSM 不应替用户截断”关掉 Qwen/vLLM 的隐式 `defaultOutputTokens`；本次真实生产样本证明完全缺省时 vLLM 会把剩余上下文窗口当成默认输出预算，长 Agent 单轮可能一直生成到 `max-model-len` 被 `length` 截断。Qwen3.8-27B 官方最大输出长度是 `131072`（阿里云百炼模型页同时标注思考/非思考模式最大输出 131072），但该模型级上限应由本部署 vLLM 原生配置承担，不能写死在 CCSM 通用代码里影响所有 qwen/vLLM 用户。
+- CCSM 通用代码已撤销全局 qwen `defaultOutputTokens` 推断（曾临时改过 `131072`，用户明确反对“让所有用户配置都变成 qwen default”）。CCSM 只保留已有的显式 `defaultOutputTokens` 用户配置能力；缺省输出策略由部署侧 vLLM `qwen38-generation/generation_config.json` 的 `max_new_tokens=131072` 承担。
+- 远端透明代理曾做运行态兜底：`vllm_dashboard/vllm_transparent_proxy.py` 对 `model=qwen3.8` 注入/钳制 `max_tokens`，但用户明确“代理层不应该接管”，相关代理改动已全部撤销。当前代理只负责透明转发、日志与既有 tool guard，不再修改 qwen 请求输出/推理参数。
+- vLLM 原生侧同时加了模型级上限：`linux/env/qwen38-generation/generation_config.json` 设置 `max_new_tokens=131072`，`VLLM_GENERATION_CONFIG` 指向该目录；vLLM 启动日志确认 `Default vLLM sampling parameters ... {'max_tokens': 131072}`，因此直连 raw `/v1/chat/completions` 缺省输出也按官方模型上限收敛，不依赖代理。
+- 为防止“xhigh reasoning 把输出额度耗到 length 后突然结束”，曾尝试在代理层注入 `thinking_token_budget=16384` 并把默认 effort 改为 medium（`58468b50c`），但用户明确“代理层不应该接管”。该代理改动已由 `5c052a1d2` 撤销：代理恢复透明转发，输出上限与 medium reasoning 默认都下沉到 vLLM 原生配置（`qwen38-generation/generation_config.json` 的 `max_new_tokens=131072` + `--default-chat-template-kwargs '{"reasoning_effort":"medium"}'`）。
+- CCSM 流式收尾根修：`streaming_codex_chat.rs` 和 `streaming_codex_anthropic.rs` 对 `finish_reason=length`/`max_tokens` 现在发 `response.incomplete`，不再把 `status=incomplete` 包装成 `response.completed`。Codex 原生 SSE 解析器会把 `response.incomplete` 当作流错误，避免“任务显示完成但 `last_agent_message=null`”的静默收尾；普通完成仍发 `response.completed`。
+
 ## 2026-08-17/18 main CI 转绿：28 个 Clippy lint + unix 死导入 + macOS 测试夹具（三连根修）
 
 - 背景：main 自 08-16 起 CI 连续 40+ 次红，全部卡在 Clippy 步骤（`cargo clippy -- -D warnings`，CI 用 `dtolnay/rust-toolchain@stable` 即各 runner 最新 stable，本地 1.95 与 CI stable 的 lint 集合对 Windows 代码一致）。三个提交根修后 CI run `32049307104` 四 job 全绿（Frontend + ubuntu/windows/macos Backend）。
@@ -3744,3 +3754,170 @@
 - 门禁：`cargo check --tests` 通过；Rust lib 3117 passed / 0 failed / 5 ignored（较基线 3098 新增 19 个回归全过）；前端 138 文件/1119 用例全过；typecheck、Prettier（CI 范围 js/jsx/ts/tsx/css/json）、`cargo fmt --check`、`git diff --check` 全绿。`src/index.html` 的 Prettier 告警为 main 既存问题且不在 CI 检查范围，未处理。
 - 发布：四处版本源统一 `3.19.2-7`（`53a3f124`）；annotated tag `v3.19.2-7`（peel `557b467a`）推 fork。Release run `32077460561` 七 job 全 success（macOS 51m18s 含 notarization，Windows x64 30m45s，Windows arm64 28m49s，Linux x64/arm64 约 20m）。Release 非 draft/prerelease、19 资产；Windows x64 Setup 11,746,930 bytes，SHA-256 `03f7c4e3c6ea91849efc094d642281e793fdf57f84bb4ffef81b681c01ab74ee` 与 GitHub digest 精确一致；`latest.json` 版本 `3.19.2-7`。
 - 环境注意：本机经 Tailscale CGNAT（198.18.0.x）访问 GitHub，API 间歇性 `connectex` 超时，重试即可恢复；`git rev-parse <tag>^{commit}` 的 `^{commit}` 会被 PowerShell 破坏，改用 `git for-each-ref --format=%(*objectname)` 取 peeled commit。
+
+## 2026-08-18 V2 Sub-Agent 能力来源与模型列表跟随 MultiRouter 排查
+
+- 用户报告两个问题：(1) V2 Sub-Agent 的能力字段（任务优势/输入能力/写入范围）能否基于模型 catalog（API 可读的能力声明）自动得出，至少多模态 vs 纯文本、是否支持图像生成应可查询并设置；(2) V2 agent 列表同时出现 `qwen3.6` 与 `qwen3.8`，但 3.6 已随部署切换为 3.8 而不再存在，列表未跟随当前 MultiRouter 模型库。
+- 数据链（已核对源码 + 现场 DB `~/.cc-switch/cc-switch.db`）：模型列表唯一来源是 `settingsConfig.modelCatalog.models`（MultiRouter 聚合 catalog SSOT）。`codex_catalog_model_specs()` 读该数组生成 `CodexCatalogModelSpec`（含 `input_modalities`/`text_only`/`reasoning`/`context_window`）；主 catalog 与 V2 `SubagentCatalogModel` 共用同一 `specs`，因此 V2 列表本应跟随 MultiRouter。
+- 问题 2 根因（已定位）：当前 `codex-multirouter`（is_current=1）的 `modelCatalog.models` 为 9 个（含 `qwen3.8`、无 `qwen3.6`，catalog 正确）；但 `codexRouting.subagentV2.profiles` 有 10 个 key，含残留的 `qwen3.6`（enabled=false、通用问卷，是 3.6 在 catalog 时由 `SyncCatalog`/初始化生成的草稿）。V2 前端列表由 `readRawProfiles(draft)`（已配置 profile）驱动，而非 catalog；`reconcile` 的 `SyncCatalog` 只新增第三方 catalog 模型、`RemoveAllInvalid` 只删 parse-invalid profile，**没有任何动作删除 parse-valid 但 unroutable（模型已离开 catalog）的 profile**。对比：V1 的 `modelCatalog.spawnAgentModels` 在模型离开 catalog 时会被剪枝（memory 1085 行），V2 profiles 没有对应剪枝——这是不一致点。live `cc-switch-model-catalog.json` 9 模型无 3.6，进一步证明是 V2 profile 残留而非 catalog 未更新。
+- 问题 1 现状：输入模态（多模态 vs 纯文本）已实现 catalog 推导（commit `c3e7311c`，memory 114 行）：优先级 profile 显式 > `modelCatalog` 的 `inputModalities/textOnly/supportsImage/vision` > 后端保守识别；`codex_subagent_profile_input_modalities()` 由 spec 的 `text_only`/`input_modalities` 得出 `["text"]`/`["text","image"]`；`hydrate_codex_subagent_v2_input_modalities()` 在保存/初始化/目录同步/恢复时把已知 catalog 能力写回 V2 JSON。但现场 `qwen3.8` 的 catalog 条目**未声明任何能力字段**（无 inputModalities/textOnly/supportsImage），故其模态非 catalog 推导（profile 里的 `[text,image]` 为早期/手工写入）。catalog 条目能力字段并集：`inputModalities`(8)/`textOnly`(8)/`supportsImage`(6)，**无图像生成（image generation）能力字段**。
+- 问题 1 结论：输入模态（多模态 vs 纯文本）可且已基于 catalog 推导，前提是 catalog 条目声明了能力（`qwen3.8` 未声明是数据缺口，需在模型源/`/models` 拉取时补齐能力字段）；任务优势（taskStrengths）与写入范围（writeScope）是语义/策略选择，模型能力 catalog 无法推导，只能人工/预设；图像生成当前不是 catalog 能力字段，若要支持需新增能力字段并在拉取时填充。
+- 修复方向（问题 2，遵循“跟随 MultiRouter、不另维护列表”）：(a) 新增 reconcile 动作 `PruneUnroutable`，删除模型已离开可路由 catalog 的 profile；(b) provider 更新路径在 catalog 变化时自动剪枝 disabled 的 unroutable profile（enabled 的保留并标记，避免误删用户配置）；(c) 前端把 unroutable profile 明确标为“已失效/不可路由”并提供“与目录同步”按钮。保留“临时离开 catalog 不生成 role、canonical model 重现按 profile.model 恢复”的既有边界，仅对已永久离开 catalog 的模型剪枝。
+- 修复实现（2026-08-19，已落地）：(a) `CodexSubagentV2ReconcileAction::PruneUnroutable`（codex_config.rs）删除模型已离开可路由 catalog 的 profile（parse-valid 但 unroutable），显式“与目录同步”动作，用户主动触发，删除全部 unroutable（含 enabled）；(b) `auto_prune_disabled_stale_subagent_v2()`（codex_config.rs）保守自动剪枝：仅删 `enabled==false` 且模型不在 `modelCatalog.models`（catalog 成员判定，非 routability）的 profile，enabled 与 parse-invalid 一律保留；在 `ProviderService::update` 非 additive 路径 `save_provider` 之后 best-effort 调用（Codex only），失败仅 `log::warn` 不影响主保存，无需 live 投影（disabled profile 不生成 role 文件）；(c) 前端 `CodexSubagentProfileEditor.tsx` 新增 `unroutableProfileCount`（status==unroutable 计数）与琥珀色“与目录同步：删除已失效模型（N 项）”按钮，调用 `reconcile("prune_unroutable", draft)`；`codexSubagentV2.ts` 类型加 `prune_unroutable`。
+- 验证：`cargo test --lib` 3152 passed / 0 failed / 5 ignored（新增 3 个测试：`codex_subagent_v2_prune_unroutable_removes_stale_and_keeps_routable`、`codex_subagent_v2_auto_prune_removes_disabled_stale_only`、`codex_subagent_v2_auto_prune_is_noop_when_no_stale_disabled`）；`pnpm vitest run` 138 文件 / 1120 用例全过（新增 1 个前端测试）；`pnpm typecheck`、`cargo check --tests`、`cargo fmt --check`、`git diff --check` 全干净。
+- 边界保留：显式 `PruneUnroutable` 用 routability 判定（用户主动，可激进）；自动剪枝用 catalog 成员判定 + disabled-only（保守，避免误删）。“临时离开 catalog 不生成 role、canonical model 重现按 profile.model 恢复”边界对 enabled profile 完全保留；disabled profile 若模型重新加入 catalog，由 `SyncCatalog` 重建草稿。
+
+## 2026-08-18 Codex Reasoning Capability P0（三态 schema v2 + disable_contract 关闭契约）
+
+- 计划/规格：`docs/superpowers/plans/2026-08-17-codex-reasoning-capability-correction.md` / `docs/superpowers/specs/2026-08-13-codex-preset-reasoning-capabilities-design.md`；分支 `bigstrongsun/reasoning-capability-p0`（基于 main tip `cac48db4`，v3.19.2-7 线）。P0 = 契约冻结 RED（`efbc78c2`）+ GREEN（`e0d4bbea`）+ 本知识提交。
+- 三态 schema v2（`CodexModelReasoningCapability`，Rust `proxy/providers/codex_reasoning.rs` + TS `src/types.ts`）：`supported: bool` → `Option<bool>`（legacy 只读）；新增 `schemaVersion?/supportStatus?/controlKind?/confidence?/fetchedAt?/providerKey?/modelRevision?`。枚举：`ReasoningSupportStatus`（confirmed_supported/confirmed_unsupported/unknown）、`ReasoningControlKind`（none/boolean/graded/budget/unknown）、`CapabilityConfidence`。辅助函数 `effective_support_status()`/`effective_control_kind()`。legacy 派生：Some(true)→ConfirmedSupported、Some(false)→ConfirmedUnsupported、None→Unknown。
+- 能力指纹 `capability_fingerprint()`（codex_reasoning.rs:301）：对归一化执行字段做 sha256（effective status/kind、排序去重 efforts、default、disableAllowed、upstream format/parameter/effortMap、outputFormat）；易变元数据（fetchedAt/confidence 等）排除。builtin deepseek-v4 指纹 = `8d5aeff0f2c9743effd90da1cc89b10ec0335e2e2766e8161a9bf0325360abf9`（`codex_config.rs` 6662/6759/7520 三处 exact-contract oracle 硬编码）。`ResolvedSubagentReasoningCapability` 新增 `fingerprint: String`（unknown fallback 为空串）。
+- `validate()` 三态一致性：supportStatus↔supported 矛盾拒绝；confirmed_unsupported 不得 advertise efforts/disable；controlKind 一致性（graded 需非空 efforts；boolean/none 不得 advertise efforts）。非法声明 fail-closed 到 Unknown（绝不信任为 confirmed_unsupported）。
+- disable_contract 关闭契约（P0 核心语义）：`CodexChatReasoningConfig.disable_contract: bool`（serde `disableContract`，default false，false 时不序列化）。仅当 true 时 Codex 的 `reasoning.effort=none`（Responses 语义）才翻译为上游厂商关闭信号（thinking=disabled / enable_thinking=false / chat_template_kwargs.enable_thinking=false / reasoning_split=false）；false 时省略厂商字段、保留服务端默认。三条来源路径：能力路径 = `capability.disable_allowed`；用户 meta 显式声明路径 = true（声明本身即关闭契约）；推断路径 = false（10 个推断字面量全部）。
+- `apply_reasoning_options` 门控（transform_codex_chat.rs）：`emit_switch = reasoning_enabled || config.disable_contract`。provider 级「明确不支持 thinking 时强制写 false」既有分支（`!supports_thinking`）不变；OpenRouter `reasoning.effort=none` 透传不变。
+- subagent fixed 能力门禁：`compile_reasoning_policy(policy, capability, origin, key) -> (Option<Effort>, Vec<String>)`。Fixed + Unknown 能力：Legacy（schema1 迁移）保留档位 + 警告「legacy fixed reasoning effort retained for unknown capability; re-save to declare the model capability or switch to delegated」；Declared（schema2 新声明）fail-closed 报 `unknown_capability_fixed_requires_declaration`。`ReasoningPolicyOrigin` 由 raw persisted schemaVersion 判定（1→Legacy、2→Declared），警告并入 `GeneratedRole.warnings`。
+- 验证：`cargo test --lib` 3130 passed / 0 failed / 5 ignored（3 个 RED 锁转绿：`declared_fixed_with_unknown_capability_is_rejected`、`legacy_fixed_with_unknown_capability_is_retained_with_warning`、`none_without_disable_contract_omits_vendor_disable_signal`）；`npx vitest run` 138 文件 / 1119 用例全过；`npx tsc --noEmit` 干净；`cargo fmt --check` 干净；`git diff --check` 干净。
+- 下一步（P1，计划 §5）：`src-tauri/src/reasoning_capabilities/{mod,catalog,provider_metadata}.rs`；单一 resolver 入口 `resolve_codex_model_capability(provider, model)`；只读发现适配器（OpenRouter `/api/v1/models` reasoning 字段；vLLM `/v1/models`+`/version`+`/server_info?config_format=json`+OpenAPI，仅 allowlist 字段、无 secrets）；`ProviderCapabilitySnapshot`；适配器结果 `Found/NotAdvertised/Unavailable/Invalid`（后三者绝不 → confirmed_unsupported）；禁止用真实推理请求做主动探测；版本化 JSON 能力库（不编译进 Rust、无前端副本；匹配 platform+API format+canonical model+revision；第一阶段随应用打包）；动态读取 → 仅 TTL 候选快照；用户配置永远最高优先级；diff 以 warning 呈现，用户采纳 → `source=user_confirmed_detection`。
+- 约束：P0–P5 不 bump 版本；P6 安装 canary 通过前不发 release。
+
+## 2026-08-19 Codex Reasoning Capability P1（统一来源链 + 只读发现适配器 + 版本化能力库）
+
+- 计划/规格同 P0；分支 `bigstrongsun/reasoning-capability-p0`。P1 交付：单一 resolver 入口、OpenRouter/vLLM 只读发现适配器、随应用打包的版本化能力库。
+- 新模块 `src-tauri/src/reasoning_capabilities/`：
+  - `mod.rs`：`CapabilitySource`（user_config/detection/library/builtin/unknown）、`ProviderCapabilitySnapshot`（通用可扩展，首版只填 reasoning 子对象）、`ReasoningCapabilitySnapshot`（allowlist 字段）、`DiscoveryOutcome`（Found/NotAdvertised/Unavailable/Invalid）、`ResolvedModelCapability`（capability+source+fingerprint）、`DetectionCache`（内存 TTL=1h）、`resolve_codex_model_capability`（公开入口，读全局库）与 `resolve_codex_model_capability_with_library`（可注入库，测试用）。
+  - `catalog.rs`：`CapabilityLibrary`/`LibraryEntry`（platform+api_format+model+revision_range+reasoning+source_url+verified_at+evidence_level）；`lookup` 平台精确匹配优先于 any、api_format 精确优先；`revision_range` 支持 `>=x.y.z`/`<=x.y.z`/精确/缺省，有范围但拿不到 revision 时保守不匹配；`load_library_from_str` 校验每条 entry 的 schema v2；全局懒加载 `global_library()`（OnceLock，加载失败保持 None 降级）。
+  - `provider_metadata.rs`：`detect_platform`（仅 name+base_url，绝不掺 model 名）；`discover_openrouter`（GET {base}/api/v1/models 公共端点，提取 reasoning.{supported_efforts,default_effort,mandatory,default_enabled,supports_max_tokens}）；`discover_vllm`（GET /version + /v1/models + /server_info?config_format=json，只提取 allowlist 字段，reasoning 子对象保持 None——vLLM 不声明逐模型 effort，逐模型能力由库提供）。
+- 单一 resolver 优先级（高→低）：用户模型级声明（modelCatalog）> 检测候选（TTL）> 能力库 > 内置 > unknown。请求路径 `resolve_codex_chat_reasoning_config` 的完整优先级：用户模型级声明 > 用户 provider 级显式声明（meta）> 检测/能力库/内置 > 平台/模型推断。请求路径只读 TTL 缓存，不发起网络请求。
+- 关键语义：`NotAdvertised`/`Unavailable`/`Invalid` 与库/内置未命中都只能得到 unknown，绝不自动生成 confirmed_unsupported（缺失证据不是不存在的证据）。`snapshot_to_capability` 对非法快照（如 default_effort 不在 supported_efforts）返回 None 落到库/内置。
+- `apply_qwen_vllm_safety_defaults`：能力派生配置同样需要 Qwen/vLLM 输出预算安全下限（min_output_tokens=2048），但只补预算、不纠正 thinking_param（能力声明是 thinking 开关的权威来源，不得被推断覆盖）。与 `merge_qwen_vllm_reasoning_defaults`（meta 路径用，会纠正 thinking_param）区分。
+- 内置清单进入请求路径：deepseek-v4-pro/flash、k3、k3-256k 无用户声明/meta 时由内置能力派生请求配置（effort_value_mode=capability 形态，精确档位+映射），而非通用推断模式。这是 P1 的行为变化（更精确），已更新对应测试。
+- 联网核验（2026-08-18/19，matrix-websearch，内置 web_search 不可用）：
+  - OpenRouter `GET /api/v1/models`（公共、无需鉴权）live 数据：`reasoning.{mandatory, default_enabled, supported_efforts, default_effort, supports_max_tokens}`；effort 值域 minimal/none/low/medium/high/xhigh/max；`none` 可出现在 supported_efforts（如 sakana/namazu）表示支持显式关闭。deepseek/deepseek-v4-pro 与 deepseek-v4-flash 均为 `supported_efforts=["max","high","low"], default_effort="high", mandatory=false`。
+  - vLLM（v0.13.0 源码）：`GET /version` → `{"version": VLLM_VERSION}`（恒可用）；`GET /v1/models`（恒可用）；`GET /server_info?config_format=json` → `{"vllm_config": {...}}`，但受 `VLLM_SERVER_DEV_MODE` 门控（开发端点，生产部署通常 404）→ 适配器按 Unavailable 降级，不是错误。
+- 第一阶段能力库 `src-tauri/resources/reasoning-capabilities.json`（libraryVersion=1）：仅含 OpenRouter deepseek-v4-pro/flash 两条（platform_api 证据，2026-08-18 核验）。vLLM qwen 条目推迟到 P6（需 min_output_tokens 交互 + 实际部署参数形态验证）。
+- 库路径解析：环境变量 `CCSM_REASONING_LIBRARY` 覆盖 > Tauri 资源目录（setup hook `init_resource_dir`）> 开发回退（`resources/reasoning-capabilities.json` 相对 CWD）。tauri.conf.json bundle.resources 已加 `resources/reasoning-capabilities.json`。
+- 验证：`cargo test --lib` 3149 passed / 0 failed / 5 ignored（新增 21 个 reasoning_capabilities 测试 + 1 个内置 deepseek 请求路径测试）；`npx vitest run` 138 文件 / 1119 用例全过；`npx tsc --noEmit` 干净；`cargo fmt` 已执行；`git diff --check` 干净。
+- 下一步（P2，计划 §5）：四个消费者（Codex catalog/Desktop aliases/inline TOML、Responses→Chat/Anthropic 请求转换、Sub-Agent capability API/profile compiler/角色 TOML、GUI/CLI inspect）改为同源；删除/封闭每个消费者内部的通用 GPT reasoning fallback；每个投影携带 fingerprint 和 source summary；catalog 接受值必须是 codexSelectableEfforts，请求转换目标必须在 providerAcceptedEfforts；none 先按 disable capability 处理；MultiRouter 在 route model map 后用 effective Provider + upstream model 解析。
+
+## 2026-08-19 Codex Reasoning Capability P2（四个消费者同源 + official 来源 + 封闭 GPT fallback）
+
+- 计划/规格同 P0/P1；分支 `bigstrongsun/reasoning-capability-p0`。P2 交付：resolver 核心 settings-based 化、official 来源、catalog 投影走同一 resolver、封闭通用 GPT reasoning fallback、none 按 disable 处理。
+- resolver 核心重构（`reasoning_capabilities/mod.rs`）：
+  - 新增 `resolve_codex_model_capability_core(settings, platform, model, detection, library, official_models)`——纯函数、无网络、无全局状态，所有消费者必须经由它。
+  - `resolve_codex_model_capability`（`&Provider` 包装，请求路径用）：加载 platform（`detect_platform`）+ official 缓存（`codex_official_models_cache`）+ 全局库，调用核心。
+  - `resolve_codex_model_capability_with_library`（测试用）：加载 platform，official 缓存传空（保持确定性）。
+  - 来源优先级（高→低）：用户配置 > 检测候选 > 能力库 > 内置 > **official（仅 platform=None 即未知平台生效）** > unknown。
+- official 来源（P2 新增）：
+  - `official_reasoning_capability_for_model` 从 `codex_config.rs` 移到 `codex_reasoning.rs`（纯函数，共享）。
+  - `codex_official_models_cache` 改 `pub`（供 resolver 读取）。
+  - 仅 `platform=None`（未知平台，含 OpenAI 直连与 catalog 投影）生效；OpenRouter/vLLM 等已知聚合平台不套用官方 OpenAI 形态（它们有自己的推理接口，走平台推断）。
+  - 官方 GPT 模型走 OpenAI 顶层 `reasoning_effort` 字段，effort_map 用 identity，`disable_allowed=false`。
+- catalog 投影改走 resolver 核心（`codex_config.rs`）：
+  - `codex_catalog_model_specs` 的 reasoning 链改为调用 `resolve_codex_model_capability_core`（platform=None、detection=None、library=全局、official=官方缓存）。
+  - 若 catalog 模型名是别名、上游模型名命中不同来源，用上游名重试一次。
+  - `CodexCatalogModelSpec` 新增 `reasoning_fingerprint` + `reasoning_source` 字段（25 个测试构造点同步更新）。
+- 封闭通用 GPT reasoning fallback（`transform_codex_chat.rs`）：
+  - `apply_reasoning_options` 的 `config:None` 分支删除 `supports_reasoning_effort` 模型名启发式；config 为 None 表示能力未知，不得按模型名猜测档位注入 `reasoning_effort`。
+  - `model` 参数不再使用，从签名移除（唯一调用点同步更新）。
+  - 注意：`transform.rs:215` 与 `transform_responses.rs:373` 的 `supports_reasoning_effort` 是 Claude Code→OpenAI 路径（非 Codex 路径），不在 P2 范围，保留。
+- none 按 disable 处理（`codex_reasoning.rs`）：
+  - `resolve_subagent_reasoning_capability` 的 `codex_selectable_efforts` 排除 `none`（none 是关闭，不是可选正向档位；UI/spawn_agent 可选档位不含 none，关闭走 disable 路径）。
+  - `provider_accepted_efforts` 仍含 none（关闭契约需要）；`effort_map` 把 none 映射到 none（identity，即关闭）。
+  - `validate()` 已强制 `none` 必须 `disableAllowed=true`（否则拒绝）。
+- MultiRouter：请求路径已在 `apply_codex_chat_upstream_model`（route model map）后调用 `resolve_codex_chat_reasoning_config`（effective Provider + upstream model），P2 无需额外改动。
+- 四层 fingerprint 一致性：catalog spec（`reasoning_fingerprint`）、请求路径（resolver 核心）、Sub-Agent capability（`resolve_subagent_reasoning_capability` 的 `fingerprint`）均源自同一 resolver 核心，fingerprint 一致。GUI/CLI inspect（P4）将读取 spec 的 fingerprint/source。
+- 验证：`cargo test --lib` 3162 passed / 0 failed / 5 ignored（新增 4 个 resolver 核心 official 测试 + 3 个 catalog 投影 fingerprint 测试 + 1 个 none-as-disable 测试）；`npx vitest run` 138 文件 / 1120 用例全过；`npx tsc --noEmit` 干净；`cargo fmt` 已执行；`git diff --check` 干净。
+- 下一步（P3，计划 §5）：模型编辑器最终生效视图——用户无需编辑 JSON 即可完成安全配置；GUI 展示 fingerprint + source summary。
+
+## 2026-08-19 V2 Sub-Agent 输入能力（纯文本/多模态）判定链溯源与前端呈现
+
+- 背景：Sub-Agent V2 角色生成依赖模型输入能力（纯文本 vs 文本+图像），但最终结论此前来自 profile > route > catalog > 名字注册表 的隐式判定链，用户遇到问题时无法知道“这个结论是哪一段给的”，也无法发现各来源声明之间的冲突。本次把“输入模态溯源（input modality provenance）”做进 V2 profile status，逐段呈现判定链 + 冲突。
+- 提交 `b42c08ec`（分支 `bigstrongsun/reasoning-capability-p0`），4 文件 / 471 insertions：
+  - `codex_config.rs` 新增三个类型：
+    - `CodexSubagentInputModalitySource`（serde snake_case）：`ProfileExplicit | Route | Catalog | NameRegistry | Unknown`，最终结论的来源。
+    - `CodexSubagentModalityDeclaration`：`{ source, declared: Option<Vec<String>> (skip none), adopted: bool }`，判定链中单个来源的声明 + 是否被采纳。
+    - `CodexSubagentInputModalityInfo`：`{ modalities: Option<Vec<String>> (skip none), source, declarations: Vec<...>, conflict: Option<String> (skip none) }`。
+  - `CodexSubagentProfileStatus` 新增 `input_modality: Option<...>` 字段（紧跟 `field_sources` 之后）；在 configured 状态构造处填充，legacy / 无 profile 处保持 None。
+- 判定链与来源归属（`resolve_input_modality_provenance(settings, profile)`）：
+  - 最终模态 = profile 显式声明（与 catalog 推导值不同视为用户覆盖 → ProfileExplicit），否则回退 catalog 推导值。
+  - 来源归属优先级：profile 显式 > route 能力 > 模型目录 > 内置名字注册表 > 未知。
+  - `declared_modalities_from_capabilities(&Value)`：从能力对象提取正向模态声明——`inputModalities` 数组 > `supportsImage`/`vision` 布尔 > `textOnly=true`；`textOnly=false` 是否定声明，不视为对模态的正向声明（返回 None）。
+  - `detect_modality_conflict(route, catalog, name)`：route / catalog / 名字注册表 三者声明不一致时生成人类可读冲突说明（如“输入能力声明冲突：route 声明纯文本，模型目录声明文本+图像”）。
+- 既有判定链（未改动，本次仅使其可见）：`text_only` = route caps > catalog caps > `is_confirmed_text_only_model`（名字注册表，`model_capabilities.rs`）；`input_modalities` = catalog entry（inputModalities > supportsImage/vision）。最终 V2 = profile 显式 > (text_only?["text"]:input_modalities) > unknown。
+- 各消费者 Unknown 策略（有意为之，记录于 `model_capabilities.rs` 的 `ImageInputCapability` 枚举）：Desktop catalog fail-open（按可生图处理）、V2 fail-closed（不派图像任务）、media rectifier no-op。
+- 前端：`CodexSubagentProfileEditor.tsx` 的 ProfileBackendOutput 呈现输入能力（纯文本/文本+图像）+ 来源 + 琥珀色冲突行；`codexSubagentV2.ts` 补对应类型；`CodexSubagentV2ProfileEditor.test.tsx` 新增 “renders input modality provenance and conflict in the profile status”。
+- 验证：`cargo test --lib` 3168 passed / 0 failed / 5 ignored（新增 5 个 provenance 测试）；`pnpm vitest run` 138 文件 / 1121 用例全过；`pnpm typecheck`、`cargo fmt --check`、`git diff --check` 均干净。
+- 注意：本提交由并行会话落盘（当时 P2/P3 reasoning 工作也在并行提交）。已核验提交内容仅含本功能（不含 P3 的 `resolve_codex_model_reasoning_capability`/`trigger_codex_model_reasoning_detection`）；P3 工作仍留在工作区未暂存，勿误提交。
+
+## 2026-08-19 V2 输入模态来源审计：发现自动值与用户覆盖语义混用
+
+- 审计结论：当前 `inputModalities` 同时表示 catalog 自动推导值和用户手动覆盖值，字段本身没有来源标记。
+- 证据链：`hydrate_codex_subagent_v2_input_modalities` 会把 catalog 推导的 `inputModalities` 写回 profile；`catalog_profile_draft` / `initialize_legacy_subagent_v2` 也会直接写入该字段；之后 `parse_persisted_subagent_v2` 无法区分这两类值。
+- 影响：当 MultiRouter catalog 后续把同一模型从纯文本改成文本+图像（或反向变化）时，旧 profile 字段仍会被 `resolve_input_modality_provenance`、`preview_codex_subagent_profile_with_context` 和角色生成逻辑当作显式 profile 值，阻止新 catalog 能力生效；前端 `inferredInputModalities` 也优先返回旧 profile 值。
+- 当前测试缺口：现有 5 个 provenance 测试只覆盖单次解析、route/catalog 冲突和显式覆盖，没有覆盖“catalog 刷新后旧自动值”的跨版本场景；因此测试全绿不能证明该隐患已消除。
+- 修复边界：不能只改来源文案或冲突提示。应把“用户覆盖”和“catalog 自动值”分离（优先采用不持久化自动值；若必须兼容既有数据，则增加受控来源标记和一次性迁移），并为 catalog 能力变更补充回归测试。现有未提交的 reasoning P3 工作不应与该修复混合提交。
+
+## 2026-08-19 V2 输入模态持久化语义根修
+
+- 根修提交：`inputModalities` 只保留用户显式覆盖；catalog 推导值不再由 hydration、catalog draft 或默认 profile 写回持久化配置。
+- 运行时：编译角色时若 profile 没有显式模态，按当前 `CodexCatalogModelSpec` 补齐文本/图像能力；preview 继续按同一 catalog 规则补齐。这样 MultiRouter catalog 刷新后，新能力会自动进入角色说明和 TOML。
+- 兼容：历史配置中已经存在 `inputModalities` 的值仍按显式覆盖处理，不擅自猜测用户意图；新建/同步 profile 不再制造这类伪覆盖。
+- 产品形态：UI 的默认 profile 不再预填“纯文本”；未声明时展示 catalog 的当前结果，用户选择“仅文本/文本与图像”才形成持久化覆盖。来源提示保留最终来源和冲突，但不要求用户理解内部多段优先级。
+- 回归：新增 `catalog_refresh_replaces_automatic_profile_modality_without_persisting_it`；更新 hydration、初始化、catalog re-key 和 focused mutation 断言。相关 Rust 3175/3175 通过，TypeScript typecheck 通过；Vitest 本轮受 Windows 并发 worker/线程池环境影响未得到稳定完整输出，需在单一干净进程中复验。
+
+## 2026-08-19 Codex Reasoning Capability P3（模型编辑器结构化最终生效视图）
+
+- 前端提交仍在 `bigstrongsun/reasoning-capability-p0` 分支；模型目录编辑页现在为每个模型显示 `CodexModelReasoningCard`，其数据来自 P3 后端的 `resolve_codex_model_reasoning_capability`，因此不再单独复制能力判断逻辑。
+- 卡片展示三态（支持推理/不支持推理/未知且使用服务端默认）、控制类型、能力来源、稳定指纹、Provider 原生档位、Codex 可选档位、默认值、关闭能力、effort 映射和最终上游行为；未知状态不静默转成不支持。
+- 模型编辑器以当前 `catalogRows` 投影为 `settingsConfig.modelCatalog.models`，异步解析有请求序号和取消保护；空模型不请求，后端解析失败只保留“正在读取/未知”而不猜测。
+- “重新检测”调用只读 `trigger_codex_model_reasoning_detection`，仅 `Found` 写 TTL 检测缓存；“采用检测结果”把带 reasoning 子对象的快照转成用户声明；没有 reasoning 的 vLLM 服务快照不可采纳；手动声明和恢复内置值复用既有 capability source mutation。
+- 检测 Provider 使用当前草稿的 provider id/name/base URL，仅用于平台识别和只读元数据发现，不把 API key 送入检测请求；Tauri IPC 仍按官方命名参数调用。
+- 新增 `CodexModelReasoningCard.test.tsx` 覆盖 unknown/unsupported 三态区分与 graded 行为描述。验证：`npx tsc --noEmit` 通过；`npx vitest run` 139 文件/1123 用例全过；`cargo test --lib` 3171 passed / 0 failed / 5 ignored；仅存在与本轮无关的 `streaming_codex_chat.rs` 未提交改动，提交时不得混入。
+- 异常边界：解析 IPC 失败时前端生成不带能力声明的 unknown resolution，卡片明确显示“未知（使用服务端默认）”，不永久显示加载态，也不把通信失败误判为 confirmed_unsupported。
+
+## 2026-08-19 V2 Sub-Agent unknown reasoning 保存门禁
+
+- 根因：`validate_codex_subagent_v2_candidate` 过去只调用编译器，`delegated` 在 reasoning 未知时仍可生成 role 并保存；前端也只阻塞 `invalid/collision`。
+- 修复：保存校验在编译后遍历 persisted profile 与 compiler status，仅对 `enabled=true` 且 `Routable`（实际会生成 role）的 profile 要求 reasoning capability 不是 `unknown`。disabled、unroutable、invalid 不因无关能力缺失阻塞保存。
+- 错误码：`unknown_reasoning_capability_requires_declaration`；unknown 不允许通过 delegated 绕过，用户必须在模型目录声明能力或采用只读检测结果后再保存。
+- 前端保存前用同一状态条件拦截，并显示 profile/model 名称和“推理能力未配置，当前可路由角色无法保存”；能力摘要同步强调这是保存阻塞，而非普通黄色提醒。
+- 验证状态：`cargo fmt` 与 `git diff --check` 通过；Rust 全量测试当前被工作区已有的 `forwarder.rs` 缺少 `json!` 导入和 `handlers.rs` 缺少 `streaming_codex_chat` 导入阻塞，非本次修改引入；TypeScript 全量检查仍受现有依赖缺失（vitest、@dnd-kit）阻塞，目标文件无新增类型错误。
+
+## 2026-08-19 Codex Reasoning Capability P3 收口
+
+- 根因修复提交 `760de2d8`：`createCatalogRow()` 对新模型把 `upstreamModel` 初始化为空字符串，而 reasoning resolution effect 只读取该字段，导致模型编辑器虽有可见 `row.model`，却永远不触发能力解析，P3 卡片一直不显示。解析模型现在使用 `catalogRowUpstreamModel(row) || row.model.trim()`，空模型仍不会发起请求。
+- 交互闭环测试覆盖：unknown 三态文案与服务端默认说明、手动声明、采用只读检测结果、重新检测；重新检测验证使用当前草稿 provider id/name/base URL，未把 API key 送入只读能力请求。
+- 验证：`npx vitest run tests/components/CodexFormFields.test.tsx --pool=forks --poolOptions.forks.singleFork=true` 28/28 通过；`npx tsc --noEmit` 通过；`cargo check --lib`（`src-tauri`）通过；`git diff --check` 通过。测试仍有既有 Radix `act(...)` warning，不影响通过结果。
+- P3 边界：模型编辑器结构化最终生效视图和交互闭环已收口；未停止、替换、安装或覆盖运行中的 CCSM；P4（GUI/CLI inspect 等独立投影）尚未开始，不因 P3 提前发布 release。
+
+## 2026-08-19 Mac Codex MultiRouter Debug 红色 WebSocket 探针
+
+- 截图中 `supports_websockets=false`、TCP 可达、live 接管一致，红色项却是 `本地代理 WebSocket 探针失败：error sending request for url (http://127.0.0.1:15721/v1/responses)`。源码 `src-tauri/src/commands/proxy.rs` 的 `diagnose_codex_multirouter` 无条件执行 `codex_probe_websocket_fallback`，即使 live config 已禁用 WebSocket；该探针只验证本地 GET + Upgrade 是否能收到预期 HTTP 426，不是模型请求，也不是上游连通性证明。
+- 代理服务器的设计契约是 `/v1/responses` 的 GET/Upgrade 始终返回 HTTP 426，要求 Codex 走 HTTP Responses；因此 `supports_websockets=false` 与“探针失败”并不矛盾。Mac 现场更可能是旧安装包未包含该 426 路由、请求在本机代理/VPN 环境被 reset，或探针请求未收到 HTTP 响应；仅凭截图不能区分三者。需在 Mac 上用 curl/route log/版本哈希复核，不能把这项直接归因到模型或路由规则。
+- 追加确认：Mac 使用 `v3.19.2-7`，该 tag 已包含 `5526855c fix codex multi router official websocket relay`。此版本的 `/v1/responses` GET + Upgrade 已从“固定返回 426”改成真实 `WebSocketUpgrade` relay；但 `diagnose_codex_multirouter` 仍无条件把同类请求当作“应返回 426”的 fallback probe。因此截图中的 `error sending request` 是诊断探针与 3.19.2-7 新 WS relay 契约不一致导致的版本内回归，不能据此判断路由或模型请求失败。
+- 修复提交 `fa5a2651`：Debug 先读取 live config；`supports_websockets=false` 时跳过探针并报告 HTTP Responses 正常路径，启用/未知时仍保留真实探针失败。回归测试覆盖 HTTP-only 不阻塞与 WebSocket 启用时仍显示失败。
+- 用户补充“接管开启但请求到不了 CCSM，怀疑 Mac 梯子冲突”后，排障边界应先看 `codex-router.log`：无新 request/route 事件=Codex -> 127.0.0.1:15721 入站被系统代理/TUN/NO_PROXY 处理阻断；有 `request_prepared` 但 `upstream_send_error`=已到 CCSM，冲突在 CCSM -> 真实上游出站。Mac 梯子应对 `127.0.0.1, localhost, ::1` 做直连/绕过，不能只改远端域名规则。
+- 2026-08-20 Mac 现场补充：代理配置修好后，`codex-router.log` 显示官方 route 已进入 CCSM（`route_id=router-codex-official`、`upstream_url=https://chatgpt.com/backend-api/codex/responses`），但 `auth_prepared` 为 `auth_strategy=none auth_header_count=0 oauth_session_header_count=0`。CCSM OAuth 登录后可用、仅 Desktop OAuth 不可用，说明当前“Desktop OAuth 透传”边界没有把 Desktop 登录材料变成入站 Authorization 或 CCSM 可解析凭据；这不是梯子问题，而是 native Desktop OAuth 与 MultiRouter effective official provider 之间的认证契约回归。
+- 2026-08-20 附件日志复核：23:41 的 `gpt-5.4` 与 `gpt-5.6-luna` 请求均已进入官方 route，但 `upstream_send` 明确 `uses_upstream_proxy=false`；23:41:49-23:43:22 的 CCSM 日志连续报 `client error (Connect): operation timed out` / `tcp connect error: deadline has elapsed`，根因是 CCSM 到 `chatgpt.com` 的出站直连失败，不是 Codex 未到 15721，也不是 CCSM 进程崩溃。23:53:38 才应用 `http://127.0.0.1:6528` 全局代理，23:57:52-53 OAuth Device Code 授权并保存成功。`app-exit-events.jsonl` 只有 `clean_exit`（`event_loop_exit`、`user_requested_exit`），没有 panic/crash 证据；前端 `unhandledrejection` 是次要 UI 错误。
+- 修复提交 `30fa2315`：`materialize_codex_routed_provider_from_target` 对旧版 `provider_config` 官方 route，若目标是内置 `codex-official` 且没有明确 `codex_oauth`/托管账号绑定，恢复 `codexNativeAuthPassthrough=true`，使 Desktop OAuth 走 native 路径；显式 managed OAuth、账号池和污染/托管 route 仍保持原有托管认证。新增回归测试，先 RED 后 GREEN；Codex provider 单元测试 101/101、`cargo check --lib` 通过。
+
+## 2026-08-20 Mac Codex Responses 无 User-Agent 导致本地路由误判
+
+- 现象：重启后 Codex Desktop 请求报 `unexpected status 502 Bad Gateway: Unknown error`，但 `codex-router.log` 没有新事件；`~/.codex/config.toml` 仍正确指向 `http://127.0.0.1:15721/v1`，15721 `/health` 和 `/status` 正常。
+- 根因：`handle_responses_for_app` 通过 `should_handle_as_codex_client` 判断 `/v1/responses` 是否为 Codex。旧实现把 Codex User-Agent 含 `codex` 作为必要条件；该 Desktop 请求没有满足该条件，于是误入 External OpenAI API 分支，在 MultiRouter 之前返回错误，因此不会写 `codex-router.log`。
+- 修复：本地代理入口默认按 Codex 处理；只有显式 External API marker 或 `ccsw_` key 才强制走 External API。这样仍保留第三方 External API 的显式鉴权边界，不依赖不稳定的 User-Agent。
+- 回归：新增无 User-Agent 仍走本地 Codex context 的测试；`cargo test --lib proxy::handlers::tests::` 82/82 通过。
+
+## 2026-08-20 Mac 与 Windows Codex 对照证据
+
+- Windows 当前机器也运行 CCSwitchMulti `3.19.2-7`、Codex takeover `http://127.0.0.1:15721/v1`、`multi_agent_v2`、`supports_websockets=false` 和 `requires_openai_auth=true`，因此这些功能组合不能解释 Mac 独有故障。
+- Windows Codex Desktop 安装包为 `OpenAI.Codex_26.814.5167.0_x64`；Mac 为 `ChatGPT.app 26.814.41407`（arm64）。两者同属 `26.814` 系列但不是同一构建。
+- Windows `codex-router.log` 在 01:06-01:09 连续出现 `route_resolved -> upstream_status status=200`；Mac 失败请求在同一旧 CCSM 逻辑下没有任何 router 事件，并在 Codex logs 记录 `502 Bad Gateway: Unknown error`。
+- 因旧逻辑只有满足 Codex 请求分类才会产生 `route_resolved`，该对照证明真正差异在入站请求元数据/客户端行为，而非 takeover 或 MultiRouter 开关本身；具体字段仍需在 handler 入口做脱敏观测。Mac 无 sudo，无法用 tcpdump 抓 loopback 原始请求头。
+
+## 2026-08-20 Codex 请求分类诊断字段
+
+- 在 `/v1/responses` 的 Codex handler 入口新增 `request_classified` 事件，发生在请求体解析前，确保分类/解析失败也能留下证据。
+- 仅记录 `has_user_agent`、`user_agent_contains_codex`、`has_external_api_key`、`force_external_marker`、`selected_path`、`method`、`endpoint`；不记录 User-Agent 原文、Authorization、Cookie、请求体或 Token。
+- 旧逻辑的误分类修复和该诊断共存：无显式 External API marker/`ccsw_` key 时选择 `codex`；显式外部凭据仍选择 `external_openai_api`。
+- 回归验证：`cargo test --lib proxy::handlers::tests::` 83/83 通过，`cargo fmt --all -- --check` 和 `git diff --check` 通过。

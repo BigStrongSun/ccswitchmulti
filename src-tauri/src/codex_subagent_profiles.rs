@@ -249,7 +249,20 @@ pub(crate) struct ParsedCodexSubagentProfile {
     pub write_scope: WriteScope,
     pub preference: Preference,
     pub reasoning: CodexSubagentReasoningPolicy,
+    /// 推理策略来源：schema 1 迁移为 Legacy，schema 2 显式声明为 Declared。
+    ///
+    /// 能力未知时，Legacy fixed 在迁移窗口内保留（带警告），Declared fixed
+    /// 必须被拒绝，禁止新配置借 legacy 通道绕过能力校验。
+    pub reasoning_origin: ReasoningPolicyOrigin,
     pub overrides: CodexSubagentProfileOverrides,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReasoningPolicyOrigin {
+    /// 由 schema 1 legacy 配置迁移而来。
+    Legacy,
+    /// schema 2 显式声明。
+    Declared,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -616,7 +629,7 @@ pub fn parse_persisted_subagent_v2(raw: &Value) -> Result<CodexSubagentV2, Compi
             "questionnaire.preference is required",
             "preference is not an allowed enum member",
         )?;
-        let (reasoning, overrides) = if schema == 1 {
+        let (reasoning, overrides, reasoning_origin) = if schema == 1 {
             let legacy_effort: LegacyQuestionnaireReasoningEffort = enum_field(
                 q.get("reasoningEffort"),
                 "missing_reasoning_effort",
@@ -656,7 +669,11 @@ pub fn parse_persisted_subagent_v2(raw: &Value) -> Result<CodexSubagentV2, Compi
                     effort: None,
                 },
             };
-            (reasoning, legacy_overrides.into_current())
+            (
+                reasoning,
+                legacy_overrides.into_current(),
+                ReasoningPolicyOrigin::Legacy,
+            )
         } else {
             if q.contains_key("reasoningEffort") {
                 return Err(validation_error(
@@ -689,7 +706,7 @@ pub fn parse_persisted_subagent_v2(raw: &Value) -> Result<CodexSubagentV2, Compi
                 }
                 None => CodexSubagentProfileOverrides::default(),
             };
-            (reasoning, overrides)
+            (reasoning, overrides, ReasoningPolicyOrigin::Declared)
         };
         if key != normalize_profile_key(model) {
             return Err(validation_error(
@@ -708,6 +725,7 @@ pub fn parse_persisted_subagent_v2(raw: &Value) -> Result<CodexSubagentV2, Compi
             write_scope,
             preference,
             reasoning,
+            reasoning_origin,
             overrides,
         }));
     }
@@ -799,18 +817,23 @@ fn normalize_role_name(value: &str) -> String {
 fn compile_reasoning_policy(
     policy: &CodexSubagentReasoningPolicy,
     capability: &ResolvedSubagentReasoningCapability,
+    origin: ReasoningPolicyOrigin,
     profile_key: &str,
-) -> Result<Option<CodexReasoningEffort>, CompileError> {
+) -> Result<(Option<CodexReasoningEffort>, Vec<String>), CompileError> {
     match policy.policy {
-        ReasoningRuntimePolicy::Delegated => Ok(None),
+        ReasoningRuntimePolicy::Delegated => Ok((None, Vec::new())),
         ReasoningRuntimePolicy::ModelDefault => {
-            capability.provider_default_effort.map(Some).ok_or_else(|| {
-                validation_error(
-                    "missing_default_reasoning_effort",
-                    Some(profile_key),
-                    "target model has no resolved default reasoning effort",
-                )
-            })
+            let effort = capability
+                .provider_default_effort
+                .map(Some)
+                .ok_or_else(|| {
+                    validation_error(
+                        "missing_default_reasoning_effort",
+                        Some(profile_key),
+                        "target model has no resolved default reasoning effort",
+                    )
+                })?;
+            Ok((effort, Vec::new()))
         }
         ReasoningRuntimePolicy::Fixed => {
             let effort = policy.effort.ok_or_else(|| {
@@ -831,7 +854,7 @@ fn compile_reasoning_policy(
                 | ReasoningSupportKind::Unsupported => {
                     let resolved = capability.effort_map.get(&effort).unwrap_or(&effort);
                     if capability.codex_selectable_efforts.contains(resolved) {
-                        Ok(Some(effort))
+                        Ok((Some(effort), Vec::new()))
                     } else {
                         Err(validation_error(
                             "unsupported_reasoning_effort",
@@ -841,9 +864,23 @@ fn compile_reasoning_policy(
                     }
                 }
                 // 能力未知（Unknown）：无法验证档位合法性，但 Unknown ≠ Unsupported。
-                // 信任用户显式声明的 Fixed effort，避免 schema1 旧配置（legacy effort
-                // 迁移为 Fixed）在模型目录未声明能力时直接编译失败（v27/v28 回归）。
-                ReasoningSupportKind::Unknown => Ok(Some(effort)),
+                // legacy（schema1 迁移）：迁移窗口内信任用户显式 Fixed effort 并保留，
+                // 但必须携带警告，引导用户重新保存以声明模型能力（v27/v28 回归防护）。
+                // declared（schema2 新声明）：fail-closed，必须先声明模型推理能力
+                // 或改用 delegated，防止新配置借 legacy 通道绕过能力校验。
+                ReasoningSupportKind::Unknown => match origin {
+                    ReasoningPolicyOrigin::Legacy => Ok((
+                        Some(effort),
+                        vec![
+                            "legacy fixed reasoning effort retained for unknown capability; re-save to declare the model capability or switch to delegated".to_string(),
+                        ],
+                    )),
+                    ReasoningPolicyOrigin::Declared => Err(validation_error(
+                        "unknown_capability_fixed_requires_declaration",
+                        Some(profile_key),
+                        "fixed reasoning effort requires a declared model capability; use delegated or declare the model reasoning capability first",
+                    )),
+                },
             }
         }
         ReasoningRuntimePolicy::Disabled => {
@@ -858,7 +895,7 @@ fn compile_reasoning_policy(
                     "target model does not support disabling reasoning",
                 ));
             }
-            Ok(Some(CodexReasoningEffort::None))
+            Ok((Some(CodexReasoningEffort::None), Vec::new()))
         }
     }
 }
@@ -1348,8 +1385,8 @@ pub fn compile_subagent_v2_profiles(request: &CompileRequest) -> CompileResult {
             .nickname_candidates
             .clone()
             .unwrap_or_else(|| vec![default_nickname(&p)]);
-        let effort = compile_reasoning_policy(&p.reasoning, &catalog.reasoning, &p.key)?;
-        let warnings = Vec::new();
+        let (effort, warnings) =
+            compile_reasoning_policy(&p.reasoning, &catalog.reasoning, p.reasoning_origin, &p.key)?;
         output.generated_roles.push(GeneratedRole {
             requested_role_name: requested,
             effective_role_name: effective,
@@ -1393,7 +1430,7 @@ pub fn initialize_legacy_subagent_v2() -> Result<CodexSubagentV2, CompileError> 
         key: "deepseek-v4-flash".into(),
         model: "deepseek-v4-flash".into(),
         enabled: true,
-        input_modalities: Some(vec![InputModality::Text]),
+        input_modalities: None,
         strengths: vec![
             TaskStrength::LongContextReading,
             TaskStrength::RepositoryExploration,
@@ -1408,6 +1445,7 @@ pub fn initialize_legacy_subagent_v2() -> Result<CodexSubagentV2, CompileError> 
             policy: ReasoningRuntimePolicy::Delegated,
             effort: None,
         },
+        reasoning_origin: ReasoningPolicyOrigin::Declared,
         overrides: CodexSubagentProfileOverrides::default(),
     };
     let mut pro = flash.clone();
@@ -1462,6 +1500,7 @@ mod tests {
                 policy: ReasoningRuntimePolicy::Delegated,
                 effort: None,
             },
+            reasoning_origin: ReasoningPolicyOrigin::Declared,
             overrides: CodexSubagentProfileOverrides::default(),
         }
     }
@@ -1514,6 +1553,7 @@ mod tests {
                 (CodexReasoningEffort::XHigh, CodexReasoningEffort::High),
                 (CodexReasoningEffort::Max, CodexReasoningEffort::Max),
             ]),
+            fingerprint: s("test-fixture"),
         }
     }
 
@@ -1760,6 +1800,8 @@ mod tests {
     fn expected_valid_profile_with_strengths(strengths: Vec<TaskStrength>) -> CodexSubagentV2 {
         let mut p = profile("deepseek-v4-flash", "DeepSeek-V4-Flash");
         p.strengths = strengths;
+        // 夹具是 schema 1 原始数据，解析出的策略来源必须是 Legacy。
+        p.reasoning_origin = ReasoningPolicyOrigin::Legacy;
         config(SelectionPolicy::Balanced, vec![valid(p)])
     }
 
@@ -1954,6 +1996,8 @@ mod tests {
             nickname_candidates: Some(vec![s("Flash Reader")]),
         };
         p.reasoning = fixed_reasoning(CodexReasoningEffort::XHigh);
+        // schema 1 夹具：策略来源为 Legacy。
+        p.reasoning_origin = ReasoningPolicyOrigin::Legacy;
         assert_parse(
             json!({"schemaVersion":1,"profiles":{"deepseek-v4-flash":{"model":"DeepSeek-V4-Flash","enabled":true,"questionnaire":{"taskStrengths":["repository_exploration"],"optimization":"speed","writeScope":"read_only","preference":"eligible","reasoningEffort":"auto"},"overrides":{"roleName":"flash-reader","description":"Manual.","developerInstructions":"Read only.","nicknameCandidates":["Flash Reader"],"modelReasoningEffort":"xhigh"}}}}),
             Ok(config(SelectionPolicy::Balanced, vec![valid(p)])),
@@ -2775,24 +2819,103 @@ mod tests {
             provider_default_effort: None,
             disable_allowed: false,
             effort_map: BTreeMap::new(),
+            fingerprint: String::new(),
         };
         assert_eq!(
             compile_reasoning_policy(
                 &fixed_reasoning(CodexReasoningEffort::High),
                 &capability,
+                ReasoningPolicyOrigin::Legacy,
                 "legacy-model",
             )
+            .map(|(effort, _)| effort)
             .expect("Unknown capability + Fixed must compile"),
             Some(CodexReasoningEffort::High)
+        );
+        // legacy 通道保留档位的同时必须携带警告，引导用户重新保存声明能力。
+        let (_, warnings) = compile_reasoning_policy(
+            &fixed_reasoning(CodexReasoningEffort::High),
+            &capability,
+            ReasoningPolicyOrigin::Legacy,
+            "legacy-model",
+        )
+        .expect("Unknown capability + Fixed must compile");
+        assert!(
+            warnings.iter().any(|warning| warning.contains("legacy")),
+            "legacy fixed with unknown capability must carry a warning, got {warnings:?}"
         );
         // EffortLevels 能力下 Ultra 仍被拒绝（能力明确时不放行）
         let deepseek = deepseek_reasoning();
         assert!(compile_reasoning_policy(
             &fixed_reasoning(CodexReasoningEffort::Ultra),
             &deepseek,
+            ReasoningPolicyOrigin::Declared,
             "flash",
         )
         .is_err());
+    }
+
+    // ===== P0 RED：新 fixed 不得借 legacy 通道绕过能力校验 =====
+
+    fn unknown_capability_request(profiles: Vec<ParsedProfileEntry>) -> CompileRequest {
+        CompileRequest {
+            subagent_version: SubagentVersion::V2,
+            persisted_subagent_v2: Some(config(SelectionPolicy::Balanced, profiles)),
+            catalog_models: vec![CatalogModel {
+                model: s("DeepSeek-V4-Flash"),
+                provider_kind: ProviderKind::ThirdParty,
+                routable: true,
+                context_window: 1_000_000,
+                reasoning: ResolvedSubagentReasoningCapability {
+                    support_kind: ReasoningSupportKind::Unknown,
+                    source: None,
+                    confidence: ReasoningConfidence::Unverified,
+                    codex_selectable_efforts: vec![],
+                    provider_accepted_efforts: vec![],
+                    provider_default_effort: None,
+                    disable_allowed: false,
+                    effort_map: BTreeMap::new(),
+                    fingerprint: String::new(),
+                },
+            }],
+            occupied_role_names: vec![],
+        }
+    }
+
+    #[test]
+    fn declared_fixed_with_unknown_capability_is_rejected() {
+        // schema 2 新 fixed：目标模型能力 unknown 时必须拒绝，
+        // 引导用户先声明模型推理能力或改用 delegated。
+        let mut p = profile("flash", "DeepSeek-V4-Flash");
+        p.reasoning = fixed_reasoning(CodexReasoningEffort::High);
+        let result = compile_subagent_v2_profiles(&unknown_capability_request(vec![valid(p)]));
+        assert!(
+            matches!(
+                result,
+                Err(CompileError::Validation { ref code, .. })
+                    if code == "unknown_capability_fixed_requires_declaration"
+            ),
+            "declared fixed with unknown capability must be rejected, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn legacy_fixed_with_unknown_capability_is_retained_with_warning() {
+        // schema 1 legacy fixed：迁移窗口内保留可运行，但必须携带警告。
+        let raw = legacy_reasoning_profile("high", None);
+        let parsed = parse_persisted_subagent_v2(&raw).expect("legacy profile must parse");
+        let output =
+            compile_subagent_v2_profiles(&unknown_capability_request(parsed.profiles.clone()))
+                .expect("legacy fixed must be retained during migration window");
+        let role = output.generated_roles.first().expect("one generated role");
+        assert_eq!(role.effort, Some(CodexReasoningEffort::High));
+        assert!(
+            role.warnings
+                .iter()
+                .any(|warning| warning.contains("legacy")),
+            "legacy fixed with unknown capability must carry a warning, got {:?}",
+            role.warnings
+        );
     }
 
     #[test]
@@ -3461,7 +3584,6 @@ mod tests {
             TaskStrength::Testing,
         ];
         flash.preference = Preference::Preferred;
-        flash.input_modalities = Some(vec![InputModality::Text]);
         let mut pro = profile("deepseek-v4-pro", "deepseek-v4-pro");
         pro.strengths = vec![
             TaskStrength::ComplexDebugging,
@@ -3473,7 +3595,6 @@ mod tests {
         pro.optimization = Optimization::Quality;
         pro.write_scope = WriteScope::ComplexChanges;
         pro.preference = Preference::Preferred;
-        pro.input_modalities = Some(vec![InputModality::Text]);
         assert_eq!(
             initialize_legacy_subagent_v2(),
             Ok(config(

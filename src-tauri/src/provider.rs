@@ -443,6 +443,18 @@ pub struct CodexChatReasoningConfig {
     /// 靠穷举字段提取、并不读取本字段；保留作文档说明与未来按格式分发（如 think_tags）的预留。
     #[serde(rename = "outputFormat", skip_serializing_if = "Option::is_none")]
     pub output_format: Option<String>,
+    /// 上游是否存在显式“关闭推理”契约。
+    ///
+    /// 只有为 true 时，Codex 的 `reasoning.effort=none` 才能翻译成上游关闭信号
+    /// （thinking disabled / enable_thinking=false 等）；否则省略厂商字段、保留
+    /// 服务端默认。自动推断配置恒为 false；用户显式声明的配置与
+    /// disableAllowed=true 的能力声明为 true。
+    #[serde(
+        rename = "disableContract",
+        default,
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub disable_contract: bool,
 }
 
 /// Codex 路由的缓存能力描述。

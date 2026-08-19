@@ -6,10 +6,14 @@ use super::hyper_client::{ProxyResponse, MAX_RESPONSE_BODY_BYTES};
 use super::providers::{
     hosted_tools::bridge::{
         append_tool_outputs_to_chat_request, execute_hosted_tool_calls, scan_hosted_tool_calls,
-        HostedToolCallScan, HostedToolLoopConfig, HOSTED_TOOL_LOOP_HEADER,
-        MAX_HOSTED_TOOL_ITERATIONS,
+        HostedToolCall, HostedToolCallKind, HostedToolCallScan, HostedToolLoopConfig,
+        HOSTED_TOOL_LOOP_HEADER, MAX_HOSTED_TOOL_ITERATIONS,
     },
     hosted_tools::openai_client::OpenAiHostedToolClient,
+    streaming_codex_chat::{
+        create_responses_sse_stream_from_chat_with_hosted_loop, ChatSseStream,
+        CompletedChatToolCall, HOSTED_TOOL_STREAM_RESPONSE_HEADER,
+    },
     transform_codex_chat::CodexToolContext,
 };
 use super::{
@@ -44,8 +48,8 @@ use crate::{
 };
 use bytes::Bytes;
 use futures::StreamExt;
-use http::Extensions;
-use serde_json::Value;
+use http::{Extensions, StatusCode};
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -2321,7 +2325,11 @@ impl RequestForwarder {
         let client_requested_streaming =
             is_streaming_request(&effective_endpoint, &mapped_body, headers);
         let hosted_tool_loop_allowed = !codex_responses_to_chat
-            || should_enable_hosted_tool_loop(&mapped_body, client_requested_streaming);
+            || should_enable_hosted_tool_loop(
+                &mapped_body,
+                client_requested_streaming,
+                &codex_router_provider.settings_config,
+            );
         let mut request_body = if codex_responses_to_chat || codex_responses_to_messages {
             let mut mapped_body = mapped_body;
             let explicit_prompt_cache_key = mapped_body
@@ -2369,6 +2377,17 @@ impl RequestForwarder {
                 text_only_override,
                 Some(&cache_config),
             )?;
+            // 转换函数内部会重建一份 CodexToolContext，因此上面的
+            // apply_hosted_tool_switches 不会作用到真正发给上游的 Chat body。
+            // 这里按同一份 context 的开关同步移除被禁用的 hosted tool 定义，
+            // 保证模型可见工具与 hosted tool loop 接管范围一致（避免
+            // streaming auto 下模型调用 web_search 得到 unsupported call）。
+            if let Some(context) = codex_chat_tool_context.as_ref() {
+                super::providers::transform_codex_chat::apply_hosted_tool_switches_to_chat_body(
+                    &mut chat_body,
+                    context,
+                );
+            }
             super::providers::inject_codex_chat_prompt_cache_key(
                 provider,
                 &mut chat_body,
@@ -2593,8 +2612,9 @@ impl RequestForwarder {
                     image_generation: context.hosted_image_generation_config().cloned(),
                 });
         let hosted_tool_loop_config = hosted_tool_loop_config.filter(|config| !config.is_empty());
-        let hosted_tools_forced_non_stream =
-            codex_responses_to_chat && hosted_tool_loop_config.is_some();
+        let hosted_tools_forced_non_stream = codex_responses_to_chat
+            && hosted_tool_loop_config.is_some()
+            && !client_requested_streaming;
         if hosted_tools_forced_non_stream {
             if let Some(obj) = filtered_body.as_object_mut() {
                 obj.insert("stream".to_string(), serde_json::json!(false));
@@ -3724,45 +3744,188 @@ impl RequestForwarder {
             let response = if let Some(config) = hosted_tool_loop_config.as_ref() {
                 let hosted_tool_client =
                     resolve_hosted_tool_client(self.app_handle.as_ref(), provider, headers).await;
-                run_hosted_tool_chat_loop(
-                    response,
-                    &mut filtered_body,
-                    config,
-                    &hosted_tool_client,
-                    |body| {
+                if request_is_streaming && codex_responses_to_chat {
+                    let context = codex_chat_tool_context.clone().ok_or_else(|| {
+                        ProxyError::Internal("missing Codex tool context".to_string())
+                    })?;
+                    let request_state = Arc::new(tokio::sync::Mutex::new(filtered_body.clone()));
+                    let original_stream_options = filtered_body.get("stream_options").cloned();
+                    let callback_trace_id = codex_trace_id.clone();
+                    let callback_model = request_model_for_log.clone();
+                    let callback_provider_id = provider.id.clone();
+                    let callback_method = method.to_owned();
+                    let callback_extensions = (*extensions).clone();
+                    let callback_non_streaming_timeout = self.non_streaming_timeout;
+                    let callback_streaming_first_byte_timeout = self.streaming_first_byte_timeout;
+                    let callback_session_id = self.session_id.clone();
+                    let callback_provider_config = (*config).clone();
+                    let mut hosted_rounds = 0usize;
+                    let callback = move |calls: Vec<CompletedChatToolCall>, assistant| {
+                        let request_state = request_state.clone();
+                        let original_stream_options = original_stream_options.clone();
+                        let config = callback_provider_config.clone();
+                        let hosted_tool_client = hosted_tool_client.clone();
+                        let trace_id = callback_trace_id.clone();
                         let headers = ordered_headers.clone();
-                        let body_bytes = serde_json::to_vec(body).map_err(|e| {
-                            ProxyError::Internal(format!(
-                                "Failed to serialize hosted tool loop request body: {e}"
-                            ))
-                        });
-                        let trace_id = codex_trace_id.clone();
-                        let session_id = self.session_id.clone();
-                        let model = request_model_for_log.clone();
-                        let provider_id = provider.id.clone();
+                        let method = callback_method.clone();
+                        let url = url.clone();
+                        let extensions = callback_extensions.clone();
+                        let target_for_log = target_for_log.clone();
+                        let upstream_proxy_url = upstream_proxy_url.clone();
+                        let timeout = timeout;
+                        let non_streaming_timeout = callback_non_streaming_timeout;
+                        let streaming_first_byte_timeout = callback_streaming_first_byte_timeout;
+                        let is_socks_proxy = is_socks_proxy;
+                        let preserve_exact_header_case = preserve_exact_header_case;
+                        let session_id = callback_session_id.clone();
+                        let model = callback_model.clone();
+                        let provider_id = callback_provider_id.clone();
+                        hosted_rounds += 1;
+                        let round = hosted_rounds;
                         async move {
-                            let body_bytes = body_bytes?;
-                            let body_len = body_bytes.len();
+                            if round > MAX_HOSTED_TOOL_ITERATIONS {
+                                return Err(
+                                    "hosted tool loop reached maximum streaming rounds".to_string()
+                                );
+                            }
+                            let hosted_calls = calls
+                                .iter()
+                                .filter_map(|call| {
+                                    let kind = match call.name.as_str() {
+                                        "web_search" => HostedToolCallKind::WebSearch,
+                                        "generate_image" => HostedToolCallKind::ImageGeneration,
+                                        _ => return None,
+                                    };
+                                    Some(HostedToolCall {
+                                        kind,
+                                        id: call.call_id.clone(),
+                                        arguments: call.arguments.clone(),
+                                    })
+                                })
+                                .collect::<Vec<_>>();
+                            let tool_messages = execute_hosted_tool_calls(
+                                &hosted_calls,
+                                &config,
+                                &hosted_tool_client,
+                                trace_id.as_deref(),
+                            )
+                            .await;
+                            let body_bytes = {
+                                let mut body = request_state.lock().await;
+                                let chat_response = json!({
+                                    "choices": [{ "message": assistant }]
+                                });
+                                if !append_tool_outputs_to_chat_request(
+                                    &mut body,
+                                    &chat_response,
+                                    tool_messages,
+                                ) {
+                                    return Err(
+                                        "hosted tool loop could not append assistant/tool messages"
+                                            .to_string(),
+                                    );
+                                }
+                                body["stream"] = serde_json::json!(true);
+                                if let Some(options) = original_stream_options {
+                                    body["stream_options"] = options;
+                                }
+                                serde_json::to_vec(&*body).map_err(|error| error.to_string())?
+                            };
                             if let Some(trace_id) = trace_id.as_deref() {
                                 super::codex_router_log::append_event(
-                                    "hosted_tool_loop_upstream_send",
+                                    "hosted_tool_stream_continuation",
                                     &[
                                         ("trace", trace_id.to_string()),
-                                        ("session", session_id.clone()),
-                                        ("model", model.clone()),
-                                        ("provider", provider_id.clone()),
-                                        ("request_bytes", body_len.to_string()),
+                                        ("session", session_id),
+                                        ("model", model),
+                                        ("provider", provider_id),
+                                        ("round", round.to_string()),
                                     ],
                                 );
                             }
-                            let send = send_upstream_request(headers, body_bytes);
-                            send.await
+                            let response = send_forwarder_upstream_request(
+                                method,
+                                url,
+                                target_for_log,
+                                headers,
+                                extensions,
+                                body_bytes,
+                                timeout,
+                                true,
+                                non_streaming_timeout,
+                                streaming_first_byte_timeout,
+                                is_socks_proxy,
+                                preserve_exact_header_case,
+                                upstream_proxy_url.as_deref(),
+                            )
+                            .await
+                            .map_err(|error| error.to_string())?;
+                            Ok(Some(Box::pin(
+                                response
+                                    .bytes_stream()
+                                    .map(|item| item.map_err(|error| std::io::Error::other(error))),
+                            ) as ChatSseStream))
                         }
-                    },
-                    codex_trace_id.as_deref(),
-                    hosted_tools_forced_non_stream,
-                )
-                .await?
+                    };
+                    let mut response_headers = response.headers().clone();
+                    response_headers.insert(
+                        http::header::CONTENT_TYPE,
+                        http::HeaderValue::from_static("text/event-stream"),
+                    );
+                    response_headers.insert(
+                        http::HeaderName::from_static(HOSTED_TOOL_STREAM_RESPONSE_HEADER),
+                        http::HeaderValue::from_static("true"),
+                    );
+                    response_headers.remove(http::header::CONTENT_LENGTH);
+                    response_headers.remove(http::header::CONTENT_ENCODING);
+                    let initial_stream: ChatSseStream = Box::pin(response.bytes_stream());
+                    let stream = create_responses_sse_stream_from_chat_with_hosted_loop(
+                        initial_stream,
+                        context,
+                        callback,
+                    );
+                    ProxyResponse::streamed(StatusCode::OK, response_headers, stream)
+                } else {
+                    run_hosted_tool_chat_loop(
+                        response,
+                        &mut filtered_body,
+                        config,
+                        &hosted_tool_client,
+                        |body| {
+                            let headers = ordered_headers.clone();
+                            let body_bytes = serde_json::to_vec(body).map_err(|e| {
+                                ProxyError::Internal(format!(
+                                    "Failed to serialize hosted tool loop request body: {e}"
+                                ))
+                            });
+                            let trace_id = codex_trace_id.clone();
+                            let session_id = self.session_id.clone();
+                            let model = request_model_for_log.clone();
+                            let provider_id = provider.id.clone();
+                            async move {
+                                let body_bytes = body_bytes?;
+                                let body_len = body_bytes.len();
+                                if let Some(trace_id) = trace_id.as_deref() {
+                                    super::codex_router_log::append_event(
+                                        "hosted_tool_loop_upstream_send",
+                                        &[
+                                            ("trace", trace_id.to_string()),
+                                            ("session", session_id.clone()),
+                                            ("model", model.clone()),
+                                            ("provider", provider_id.clone()),
+                                            ("request_bytes", body_len.to_string()),
+                                        ],
+                                    );
+                                }
+                                let send = send_upstream_request(headers, body_bytes);
+                                send.await
+                            }
+                        },
+                        codex_trace_id.as_deref(),
+                        hosted_tools_forced_non_stream,
+                    )
+                    .await?
+                }
             } else {
                 response
             };
@@ -5855,18 +6018,25 @@ fn hosted_tool_bridge_enabled(settings: &Value, tool: &str) -> bool {
 
 /// Decide whether the buffered Chat hosted-tool loop owns this request.
 ///
-/// Streaming `auto` requests prioritize incremental agent progress: hosted
-/// tools are omitted from the Chat projection, while ordinary client tools
-/// remain available. An explicit hosted selection is safe to buffer because
-/// the caller requested that exact bridge. Non-streaming requests retain the
-/// existing automatic hosted-tool loop.
-fn should_enable_hosted_tool_loop(request: &Value, client_requested_streaming: bool) -> bool {
+/// 非流式请求始终接管。流式请求默认也接管（`hostedTools.streamingAuto.enabled`
+/// 默认 true），让第三方模型在流式 auto 下也能用官方 web_search / image_generation；
+/// 代价是该请求会被缓冲（强制 stream=false），可能重新触发 Qwen 长上下文
+/// blank-thinking 回归——若复发，把 `hostedTools.streamingAuto.enabled` 设为 false
+/// 即可回退到「流式 auto 不接管、托管工具从投影中省略」的旧行为。
+/// 显式 tool_choice 指向 hosted tool 时无论开关都接管（调用方明确要这个桥）。
+fn should_enable_hosted_tool_loop(
+    request: &Value,
+    client_requested_streaming: bool,
+    settings: &Value,
+) -> bool {
     if !client_requested_streaming {
         return true;
     }
 
+    // 显式 tool_choice 指向 hosted tool：调用方明确要这个桥，始终接管。
     let Some(choice) = request.get("tool_choice").and_then(Value::as_object) else {
-        return false;
+        // 非显式（auto / 字符串 tool_choice）：由 streamingAuto 开关决定。
+        return hosted_tool_streaming_auto_enabled(settings);
     };
     let choice_type = choice.get("type").and_then(Value::as_str);
     if matches!(choice_type, Some("web_search" | "image_generation")) {
@@ -5877,6 +6047,14 @@ fn should_enable_hosted_tool_loop(request: &Value, client_requested_streaming: b
             choice.get("name").and_then(Value::as_str),
             Some("web_search" | "generate_image")
         )
+}
+
+/// 读取流式 auto 下是否接管 hosted tool loop；未配置时默认开启。
+fn hosted_tool_streaming_auto_enabled(settings: &Value) -> bool {
+    settings
+        .pointer("/hostedTools/streamingAuto/enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
 }
 
 /// 解析 hosted tool 调用凭据：优先显式 API Key，再回退请求自带的 Codex OAuth，最后用 CCSM 托管 OAuth。
@@ -9631,7 +9809,7 @@ mod tests {
     }
 
     #[test]
-    fn streaming_auto_tool_choice_preserves_upstream_stream_instead_of_hosted_loop() {
+    fn streaming_auto_tool_choice_enables_hosted_loop_by_default() {
         let request = serde_json::json!({
             "stream": true,
             "tool_choice": "auto",
@@ -9641,7 +9819,49 @@ mod tests {
             ]
         });
 
-        assert!(!should_enable_hosted_tool_loop(&request, true));
+        // 默认（未配置 streamingAuto）：流式 auto 也接管 hosted loop，
+        // 让第三方模型在流式下能用官方 web_search / image_generation。
+        let default_settings = serde_json::json!({});
+        assert!(should_enable_hosted_tool_loop(
+            &request,
+            true,
+            &default_settings
+        ));
+    }
+
+    #[test]
+    fn streaming_auto_disabled_via_settings_omits_hosted_loop() {
+        let request = serde_json::json!({
+            "stream": true,
+            "tool_choice": "auto",
+            "tools": [
+                {"type": "web_search"},
+                {"type": "function", "name": "shell", "parameters": {"type": "object"}}
+            ]
+        });
+
+        // 显式关闭 streamingAuto：回退到「流式 auto 不接管」，托管工具从投影省略，
+        // 用于规避 Qwen 长上下文 blank-thinking 回归。
+        let disabled_settings = serde_json::json!({
+            "hostedTools": { "streamingAuto": { "enabled": false } }
+        });
+        assert!(!should_enable_hosted_tool_loop(
+            &request,
+            true,
+            &disabled_settings
+        ));
+
+        // 关闭后，显式 tool_choice 指向 hosted tool 仍接管（调用方明确要这个桥）。
+        let explicit_request = serde_json::json!({
+            "stream": true,
+            "tool_choice": {"type": "web_search"},
+            "tools": [{"type": "web_search"}]
+        });
+        assert!(should_enable_hosted_tool_loop(
+            &explicit_request,
+            true,
+            &disabled_settings
+        ));
     }
 
     #[test]
@@ -9653,7 +9873,8 @@ mod tests {
                 "tools": [{"type": hosted_type}]
             });
 
-            assert!(should_enable_hosted_tool_loop(&request, true));
+            let settings = serde_json::json!({});
+            assert!(should_enable_hosted_tool_loop(&request, true, &settings));
         }
     }
 
@@ -9665,7 +9886,8 @@ mod tests {
             "tools": [{"type": "web_search"}]
         });
 
-        assert!(should_enable_hosted_tool_loop(&request, false));
+        let settings = serde_json::json!({});
+        assert!(should_enable_hosted_tool_loop(&request, false, &settings));
     }
 
     /// 验证 hosted web_search loop 会消费第一轮工具调用、回灌 tool output 并返回最终 Chat 响应。

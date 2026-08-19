@@ -278,11 +278,17 @@ pub async fn diagnose_codex_multirouter(
     } else {
         proxy_config.listen_port
     };
-    let (socket_ok, socket_detail) = codex_probe_tcp(&probe_host, probe_port).await;
-    let (websocket_status, websocket_detail) =
-        codex_probe_websocket_fallback(&probe_host, probe_port).await;
-
     let live_config = codex_live_config_diagnostics(probe_port);
+    let (socket_ok, socket_detail) = codex_probe_tcp(&probe_host, probe_port).await;
+    let (websocket_status, websocket_detail) = if live_config.supports_websockets == Some(false) {
+        codex_websocket_probe_result(Some(false), Err("probe skipped".to_string()))
+    } else {
+        codex_websocket_probe_result(
+            live_config.supports_websockets,
+            Ok(codex_probe_websocket_fallback(&probe_host, probe_port).await),
+        )
+    };
+
     let route_plan = codex_route_plan_diagnostics(&state, provider_id.as_deref())?;
     let router_log = codex_router_log_diagnostics(route_plan.provider_id.as_deref());
     let desktop_runtime = codex_desktop_runtime_diagnostics(&live_config);
@@ -783,6 +789,31 @@ async fn codex_probe_websocket_fallback(host: &str, port: u16) -> (CodexDiagnost
                 response.status().as_u16()
             ),
         ),
+        Err(err) => (
+            CodexDiagnosticStatus::Fail,
+            format!("本地代理 WebSocket 探针失败：{err}"),
+        ),
+    }
+}
+
+/// 将 WebSocket 探针结果与 live config 的传输策略合并。
+///
+/// HTTP-only provider 不需要探测 WebSocket；即使旧版探针或本地 relay 返回错误，
+/// 也不能把它报告成阻塞项，因为 Codex 应直接走 HTTP Responses。
+fn codex_websocket_probe_result(
+    supports_websockets: Option<bool>,
+    probe: Result<(CodexDiagnosticStatus, String), String>,
+) -> (CodexDiagnosticStatus, String) {
+    if supports_websockets == Some(false) {
+        return (
+            CodexDiagnosticStatus::Pass,
+            "live config 已禁用 Responses WebSocket，已跳过 WebSocket 探针，Codex 应直接走 HTTP Responses。"
+                .to_string(),
+        );
+    }
+
+    match probe {
+        Ok(result) => result,
         Err(err) => (
             CodexDiagnosticStatus::Fail,
             format!("本地代理 WebSocket 探针失败：{err}"),
@@ -1688,6 +1719,24 @@ fn codex_router_log_protocol_from_path(value: &str) -> Option<&'static str> {
 mod codex_router_log_diagnostics_tests {
     use super::*;
     use std::sync::{Mutex, OnceLock};
+
+    #[test]
+    fn disabled_websocket_transport_does_not_report_probe_failure() {
+        let (status, detail) =
+            codex_websocket_probe_result(Some(false), Err("probe failed".to_string()));
+
+        assert_eq!(status, CodexDiagnosticStatus::Pass);
+        assert!(detail.contains("已禁用"));
+    }
+
+    #[test]
+    fn enabled_websocket_transport_keeps_probe_failure_visible() {
+        let (status, detail) =
+            codex_websocket_probe_result(Some(true), Err("probe failed".to_string()));
+
+        assert_eq!(status, CodexDiagnosticStatus::Fail);
+        assert!(detail.contains("probe failed"));
+    }
 
     /// 返回测试专用的环境变量锁，避免并行测试互相污染代理变量。
     fn proxy_env_test_lock() -> &'static Mutex<()> {

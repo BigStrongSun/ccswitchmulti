@@ -18,6 +18,11 @@ use bytes::Bytes;
 use futures::stream::{Stream, StreamExt};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+use std::future::Future;
+use std::pin::Pin;
+
+pub(crate) const HOSTED_TOOL_STREAM_RESPONSE_HEADER: &str =
+    "x-cc-switch-hosted-tool-stream-response";
 
 #[derive(Debug, Default)]
 struct TextItemState {
@@ -63,6 +68,21 @@ struct ToolCallState {
     done: bool,
 }
 
+/// A completed Chat tool call observed by the Responses streaming state machine.
+///
+/// This is intentionally a transport-neutral snapshot. The hosted-tool
+/// coordinator can consume it at the argument-finalized boundary without
+/// reaching into the converter's internal accumulation maps.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CompletedChatToolCall {
+    pub(crate) chat_index: usize,
+    pub(crate) call_id: String,
+    pub(crate) name: String,
+    pub(crate) arguments: String,
+}
+
+pub(crate) type ChatSseStream = Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>;
+
 #[derive(Debug)]
 struct ChatToResponsesState {
     response_started: bool,
@@ -82,6 +102,7 @@ struct ChatToResponsesState {
     tool_context: CodexToolContext,
     /// 本回合因缺少合法函数名而被丢弃的工具调用数（见 `finalize_tools`）。
     dropped_tool_calls: usize,
+    response_identity_locked: bool,
 }
 
 impl Default for ChatToResponsesState {
@@ -103,6 +124,7 @@ impl Default for ChatToResponsesState {
             finish_reason: None,
             tool_context: CodexToolContext::default(),
             dropped_tool_calls: 0,
+            response_identity_locked: false,
         }
     }
 }
@@ -115,11 +137,92 @@ impl ChatToResponsesState {
         }
     }
 
+    fn completed_tool_calls(&self) -> Vec<CompletedChatToolCall> {
+        self.tools
+            .iter()
+            .filter_map(|(chat_index, state)| {
+                let name = state.name.trim();
+                let call_id = state.call_id.trim();
+                if name.is_empty() || call_id.is_empty() || state.arguments.trim().is_empty() {
+                    return None;
+                }
+                Some(CompletedChatToolCall {
+                    chat_index: *chat_index,
+                    call_id: call_id.to_string(),
+                    name: name.to_string(),
+                    arguments: state.arguments.clone(),
+                })
+            })
+            .collect()
+    }
+
+    fn hosted_tool_calls_ready(&self) -> Option<Vec<CompletedChatToolCall>> {
+        if self.finish_reason.as_deref() != Some("tool_calls") {
+            return None;
+        }
+        let calls = self.completed_tool_calls();
+        if calls.is_empty()
+            || calls.len() != self.tools.len()
+            || calls
+                .iter()
+                .any(|call| !self.tool_context.is_hosted_tool_chat_name(&call.name))
+        {
+            return None;
+        }
+        Some(calls)
+    }
+
+    fn has_mixed_hosted_tool_calls(&self) -> bool {
+        if self.finish_reason.as_deref() != Some("tool_calls") {
+            return false;
+        }
+        let calls = self.completed_tool_calls();
+        let hosted = calls
+            .iter()
+            .filter(|call| self.tool_context.is_hosted_tool_chat_name(&call.name))
+            .count();
+        hosted > 0 && hosted < calls.len()
+    }
+
+    fn assistant_message_for_hosted_tools(&self, calls: &[CompletedChatToolCall]) -> Value {
+        let tool_calls = calls
+            .iter()
+            .map(|call| {
+                json!({
+                    "id": call.call_id,
+                    "type": "function",
+                    "function": {
+                        "name": call.name,
+                        "arguments": call.arguments
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut message = json!({
+            "role": "assistant",
+            "tool_calls": tool_calls
+        });
+        if !self.text.text.is_empty() {
+            message["content"] = Value::String(self.text.text.clone());
+        }
+        message
+    }
+
+    fn begin_hosted_continuation(&mut self) {
+        self.tools.clear();
+        self.next_tool_index_to_add = 0;
+        self.finish_reason = None;
+        self.dropped_tool_calls = 0;
+        self.completed = false;
+    }
+
     fn handle_chat_chunk(&mut self, chunk: &Value) -> Vec<Bytes> {
         let mut events = Vec::new();
 
-        if let Some(id) = chunk.get("id").and_then(|v| v.as_str()) {
-            self.response_id = response_id_from_chat_id(Some(id));
+        if !self.response_identity_locked {
+            if let Some(id) = chunk.get("id").and_then(|v| v.as_str()) {
+                self.response_id = response_id_from_chat_id(Some(id));
+            }
         }
         if let Some(model) = chunk.get("model").and_then(|v| v.as_str()) {
             if !model.is_empty() {
@@ -131,6 +234,7 @@ impl ChatToResponsesState {
         }
 
         events.extend(self.ensure_response_started());
+        self.response_identity_locked = true;
 
         if let Some(usage) = chunk.get("usage").filter(|v| !v.is_null()) {
             self.latest_usage = Some(chat_usage_to_responses_usage(Some(usage)));
@@ -421,9 +525,10 @@ impl ChatToResponsesState {
         }
 
         let is_custom_tool = self.tool_context.is_custom_tool_chat_name(&current_name);
+        let is_hosted_tool = self.tool_context.is_hosted_tool_chat_name(&current_name);
         let mut events = Vec::new();
 
-        if !args_delta.is_empty() && !is_custom_tool {
+        if !args_delta.is_empty() && !is_custom_tool && !is_hosted_tool {
             if let Some(output_index) = output_index {
                 events.push(sse::function_call_arguments_delta(
                     output_index,
@@ -465,6 +570,13 @@ impl ChatToResponsesState {
                 &state.name,
                 &self.tool_context,
             );
+
+            if self.tool_context.is_hosted_tool_chat_name(&state.name) {
+                // Hosted calls are consumed by the proxy coordinator. Do not
+                // expose them as ordinary client-executed function calls.
+                self.next_tool_index_to_add += 1;
+                continue;
+            }
 
             let item = response_tool_call_item_from_chat_name(
                 &state.item_id,
@@ -569,7 +681,11 @@ impl ChatToResponsesState {
             response["incomplete_details"] = json!({ "reason": "max_output_tokens" });
         }
 
-        events.push(sse::response_completed(&response));
+        if status == "incomplete" {
+            events.push(sse::response_incomplete(&response));
+        } else {
+            events.push(sse::response_completed(&response));
+        }
         self.completed = true;
         events
     }
@@ -909,6 +1025,152 @@ pub fn create_responses_sse_stream_from_chat_with_context<E: std::error::Error +
     }
 }
 
+/// Convert Chat SSE to Responses SSE while allowing the proxy to execute
+/// hosted tool calls between upstream rounds. Hosted tool output items are
+/// intentionally withheld from the client; ordinary text continues through
+/// the same response lifecycle before and after the tool round.
+pub(crate) fn create_responses_sse_stream_from_chat_with_hosted_loop<F, Fut>(
+    initial_stream: ChatSseStream,
+    tool_context: CodexToolContext,
+    mut on_hosted_tools: F,
+) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send
+where
+    F: FnMut(Vec<CompletedChatToolCall>, Value) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<Option<ChatSseStream>, String>> + Send,
+{
+    async_stream::stream! {
+        let mut current_stream = initial_stream;
+        let mut state = ChatToResponsesState::with_tool_context(tool_context);
+        let mut buffer = String::new();
+        let mut utf8_remainder: Vec<u8> = Vec::new();
+        let mut stream_failed = false;
+
+        'rounds: loop {
+            while let Some(chunk) = current_stream.next().await {
+                match chunk {
+                    Ok(bytes) => {
+                        crate::proxy::sse::append_utf8_safe(
+                            &mut buffer,
+                            &mut utf8_remainder,
+                            &bytes,
+                        );
+
+                        while let Some(block) = take_sse_block(&mut buffer) {
+                            if block.trim().is_empty() {
+                                continue;
+                            }
+                            let mut event_name: Option<String> = None;
+                            let mut data_parts: Vec<String> = Vec::new();
+                            for line in block.lines() {
+                                if let Some(event) = strip_sse_field(line, "event") {
+                                    event_name = Some(event.trim().to_string());
+                                }
+                                if let Some(data) = strip_sse_field(line, "data") {
+                                    data_parts.push(data.to_string());
+                                }
+                            }
+                            if data_parts.is_empty() {
+                                continue;
+                            }
+                            let data = data_parts.join("\n");
+                            if data.trim() == "[DONE]" {
+                                for event in state.finalize() {
+                                    yield Ok(event);
+                                }
+                                continue;
+                            }
+                            let chunk: Value = match serde_json::from_str(&data) {
+                                Ok(value) => value,
+                                Err(_) => continue,
+                            };
+                            if event_name.as_deref() == Some("error") || chunk.get("error").is_some() {
+                                let (message, error_type) = extract_chat_sse_error(&chunk);
+                                yield Ok(state.failed_event(message, error_type));
+                                stream_failed = true;
+                                break;
+                            }
+
+                            let events = state.handle_chat_chunk(&chunk);
+                            for event in events {
+                                yield Ok(event);
+                            }
+
+                            if state.has_mixed_hosted_tool_calls() {
+                                yield Ok(state.failed_event(
+                                    "Mixed hosted and ordinary function tool calls are not supported in one streaming turn".to_string(),
+                                    Some("mixed_hosted_tool_calls".to_string()),
+                                ));
+                                stream_failed = true;
+                                break;
+                            }
+
+                            if let Some(calls) = state.hosted_tool_calls_ready() {
+                                let assistant = state.assistant_message_for_hosted_tools(&calls);
+                                match on_hosted_tools(calls, assistant).await {
+                                    Ok(Some(next_stream)) => {
+                                        state.begin_hosted_continuation();
+                                        current_stream = next_stream;
+                                        buffer.clear();
+                                        utf8_remainder.clear();
+                                        continue 'rounds;
+                                    }
+                                    Ok(None) => {
+                                        yield Ok(state.failed_event(
+                                            "Hosted tool coordinator ended without a continuation stream".to_string(),
+                                            Some("hosted_tool_continuation_missing".to_string()),
+                                        ));
+                                        stream_failed = true;
+                                        break;
+                                    }
+                                    Err(error) => {
+                                        yield Ok(state.failed_event(
+                                            error,
+                                            Some("hosted_tool_coordinator_failed".to_string()),
+                                        ));
+                                        stream_failed = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if stream_failed {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        yield Ok(state.failed_event(
+                            format!("Stream error: {error}"),
+                            Some("stream_error".to_string()),
+                        ));
+                        stream_failed = true;
+                        break;
+                    }
+                }
+            }
+
+            if stream_failed || state.completed {
+                break;
+            }
+            if state.finish_reason.is_some() {
+                for event in state.finalize() {
+                    yield Ok(event);
+                }
+            } else if state.has_substantive_output() {
+                yield Ok(state.failed_event(
+                    "Upstream Chat Completions stream ended after partial output but before sending finish_reason".to_string(),
+                    Some("stream_truncated".to_string()),
+                ));
+            } else {
+                yield Ok(state.failed_event(
+                    "Upstream Chat Completions stream ended before sending finish_reason".to_string(),
+                    Some("stream_truncated".to_string()),
+                ));
+            }
+            break;
+        }
+    }
+}
+
 fn extract_chat_sse_error(value: &Value) -> (String, Option<String>) {
     let error = value.get("error").unwrap_or(value);
     let message = error
@@ -949,6 +1211,88 @@ mod tests {
         let converted = create_responses_sse_stream_from_chat_with_context(upstream, tool_context);
         let bytes: Vec<Bytes> = converted.map(|item| item.unwrap()).collect().await;
         String::from_utf8(bytes.concat()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn hosted_tool_stream_pauses_executes_and_continues_same_response() {
+        let context = super::super::transform_codex_chat::build_codex_tool_context_from_request(
+            &json!({ "tools": [{ "type": "web_search" }] }),
+        );
+        let initial = vec![
+            Ok(Bytes::from_static(b"data: {\"id\":\"chatcmpl_hosted\",\"model\":\"m\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"web_search\"}}]}}]}\n\n")),
+            Ok(Bytes::from_static(b"data: {\"id\":\"chatcmpl_hosted\",\"model\":\"m\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"query\\\":\\\"rust\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n")),
+        ];
+        let continuation = vec![
+            Bytes::from_static(b"data: {\"id\":\"chatcmpl_final\",\"model\":\"m\",\"choices\":[{\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}\n\n"),
+            Bytes::from_static(b"data: [DONE]\n\n"),
+        ];
+        let initial_stream: ChatSseStream = Box::pin(stream::iter(initial));
+        let output = create_responses_sse_stream_from_chat_with_hosted_loop(
+            initial_stream,
+            context,
+            move |calls, assistant| {
+                let continuation = continuation.clone();
+                async move {
+                    assert_eq!(calls.len(), 1);
+                    assert_eq!(calls[0].name, "web_search");
+                    assert_eq!(assistant["tool_calls"][0]["id"], "call_1");
+                    let next = continuation.into_iter().map(Ok::<Bytes, std::io::Error>);
+                    Ok(Some(Box::pin(stream::iter(next)) as ChatSseStream))
+                }
+            },
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let output = String::from_utf8(
+            output
+                .into_iter()
+                .map(|item| item.unwrap())
+                .collect::<Vec<_>>()
+                .concat(),
+        )
+        .unwrap();
+
+        assert!(output.contains("done"));
+        assert!(output.contains("response.completed"));
+        assert!(!output.contains("function_call_arguments"));
+        assert!(!output.contains("web_search"));
+    }
+
+    #[tokio::test]
+    async fn mixed_hosted_and_ordinary_streaming_tools_fail_explicitly() {
+        let context =
+            super::super::transform_codex_chat::build_codex_tool_context_from_request(&json!({
+                "tools": [
+                    { "type": "web_search" },
+                    { "type": "function", "function": { "name": "lookup" } }
+                ]
+            }));
+        let chunks = vec![
+            Ok(Bytes::from_static(b"data: {\"id\":\"chatcmpl_mixed\",\"model\":\"m\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_hosted\",\"type\":\"function\",\"function\":{\"name\":\"web_search\"}},{\"index\":1,\"id\":\"call_fn\",\"type\":\"function\",\"function\":{\"name\":\"lookup\"}}]}}]}\n\n")),
+            Ok(Bytes::from_static(b"data: {\"id\":\"chatcmpl_mixed\",\"model\":\"m\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{}\"}},{\"index\":1,\"function\":{\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n")),
+        ];
+        let stream: ChatSseStream = Box::pin(stream::iter(chunks));
+        let output = create_responses_sse_stream_from_chat_with_hosted_loop(
+            stream,
+            context,
+            |_calls, _assistant| async {
+                panic!("mixed tool calls must not invoke hosted coordinator")
+            },
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let output = String::from_utf8(
+            output
+                .into_iter()
+                .map(|item| item.unwrap())
+                .collect::<Vec<_>>()
+                .concat(),
+        )
+        .unwrap();
+
+        assert!(output.contains("mixed_hosted_tool_calls"));
+        assert!(output.contains("Mixed hosted and ordinary function tool calls"));
+        assert!(!output.contains("response.completed"));
     }
 
     fn parse_sse_events(output: &str) -> Vec<Value> {
@@ -1152,8 +1496,9 @@ mod tests {
         ])
         .await;
 
-        assert!(output.contains("event: response.completed"));
+        assert!(output.contains("event: response.incomplete"));
         assert!(output.contains("\"status\":\"incomplete\""));
+        assert!(!output.contains("event: response.completed"));
         assert!(!output.contains("event: response.failed"));
     }
 

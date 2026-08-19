@@ -32,7 +32,9 @@ use super::{
             create_responses_sse_stream_from_anthropic_with_context,
             responses_sse_events_from_anthropic_message,
         },
-        streaming_codex_chat::create_responses_sse_stream_from_chat_with_context,
+        streaming_codex_chat::{
+            create_responses_sse_stream_from_chat_with_context, HOSTED_TOOL_STREAM_RESPONSE_HEADER,
+        },
         streaming_gemini::create_anthropic_sse_stream_from_gemini,
         streaming_retry::{
             create_resilient_anthropic_sse_stream_from_responses,
@@ -542,22 +544,42 @@ pub async fn handle_external_models(
     handle_models(State(state), headers).await
 }
 
-fn is_codex_model_catalog_client(headers: &HeaderMap) -> bool {
-    headers
-        .get(axum::http::header::USER_AGENT)
-        .and_then(|value| value.to_str().ok())
-        .map(|user_agent| user_agent.to_ascii_lowercase().contains("codex"))
-        .unwrap_or(false)
-}
-
 /// 判断请求是否应按 Codex 自身客户端处理。
 ///
-/// External API key 优先级高于 User-Agent，避免第三方 agent 名称中包含
-/// `codex` 时绕过 External API profile。
+/// 本地 15721 是 Codex takeover 的专用入口，Desktop 的 Responses 请求并不
+/// 保证携带稳定的 User-Agent（部分版本甚至不带）。因此不能把 User-Agent
+/// 当成进入 Codex 路径的必要条件；只有显式的 External API marker 或
+/// `ccsw_` key 才应强制走 External API 分支。
 fn should_handle_as_codex_client(headers: &HeaderMap) -> bool {
     !headers.contains_key(FORCE_EXTERNAL_OPENAI_API_HEADER)
-        && is_codex_model_catalog_client(headers)
         && !external_openai_api::has_external_api_key(headers)
+}
+
+fn codex_request_classification_fields(headers: &HeaderMap) -> Vec<(&'static str, String)> {
+    let user_agent = headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let has_user_agent = !user_agent.is_empty();
+    let user_agent_contains_codex = user_agent.to_ascii_lowercase().contains("codex");
+    let has_external_api_key = external_openai_api::has_external_api_key(headers);
+    let force_external_marker = headers.contains_key(FORCE_EXTERNAL_OPENAI_API_HEADER);
+    let selected_path = if should_handle_as_codex_client(headers) {
+        "codex"
+    } else {
+        "external_openai_api"
+    };
+
+    vec![
+        ("has_user_agent", has_user_agent.to_string()),
+        (
+            "user_agent_contains_codex",
+            user_agent_contains_codex.to_string(),
+        ),
+        ("has_external_api_key", has_external_api_key.to_string()),
+        ("force_external_marker", force_external_marker.to_string()),
+        ("selected_path", selected_path.to_string()),
+    ]
 }
 
 fn mark_external_openai_headers(headers: &mut HeaderMap) {
@@ -2639,6 +2661,14 @@ async fn handle_responses_for_app(
     let uri = parts.uri;
     let mut headers = parts.headers;
     let extensions = parts.extensions;
+
+    if app_type == AppType::Codex {
+        let mut fields = codex_request_classification_fields(&headers);
+        fields.push(("method", method.to_string()));
+        fields.push(("endpoint", endpoint_with_query(&uri, "/responses")));
+        super::codex_router_log::append_event("request_classified", &fields);
+    }
+
     let body_bytes = req_body
         .collect()
         .await
@@ -3169,12 +3199,98 @@ async fn handle_codex_chat_to_responses_transform(
 ) -> Result<axum::response::Response, ProxyError> {
     let status = response.status();
     let hosted_tool_loop_response = response.headers().contains_key(HOSTED_TOOL_LOOP_HEADER);
+    let hosted_tool_stream_response = response
+        .headers()
+        .contains_key(HOSTED_TOOL_STREAM_RESPONSE_HEADER);
 
     if !status.is_success() {
         // 上游 Chat 错误体形状与 Responses 不一致（如 MiniMax 的 base_resp、自定义 detail 字段）；
         // 直接透传会让 Codex 客户端无法识别错误码。这里统一转换为 Responses 风格
         // `{"error": {message, type, code, param}}`，保留原始 HTTP 状态码。
         return handle_codex_chat_error_response(response, ctx, status).await;
+    }
+
+    if is_stream && hosted_tool_stream_response {
+        let mut headers = response.headers().clone();
+        headers.remove(HOSTED_TOOL_STREAM_RESPONSE_HEADER);
+        headers.remove(HOSTED_TOOL_LOOP_HEADER);
+        headers.remove(axum::http::header::CONTENT_LENGTH);
+        headers.remove(axum::http::header::CONTENT_ENCODING);
+        headers.remove(axum::http::header::TRANSFER_ENCODING);
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("text/event-stream"),
+        );
+        headers.insert(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-cache"),
+        );
+        let stream =
+            record_responses_sse_stream(response.bytes_stream(), state.codex_chat_history.clone());
+        let usage_collector = if usage_logging_enabled(state) {
+            let state = state.clone();
+            let provider_id = ctx.provider.id.clone();
+            let request_model = ctx.request_model.clone();
+            let fallback_model = ctx
+                .outbound_model
+                .clone()
+                .unwrap_or_else(|| ctx.request_model.clone());
+            let app_type_str = ctx.app_type_str;
+            let start_time = ctx.start_time;
+            let session_id = ctx.session_id.clone();
+
+            Some(SseUsageCollector::new(
+                start_time,
+                Some(codex_stream_usage_event_filter),
+                move |events, first_token_ms| {
+                    let usage =
+                        TokenUsage::from_codex_stream_events_auto(&events).unwrap_or_default();
+                    if !usage.has_billable_tokens() {
+                        log::debug!("[Codex] hosted 流式响应 usage 全 0 或缺失，跳过消费记录");
+                        return;
+                    }
+                    let model = usage
+                        .model
+                        .clone()
+                        .filter(|m| !m.is_empty())
+                        .unwrap_or_else(|| fallback_model.clone());
+                    let latency_ms = start_time.elapsed().as_millis() as u64;
+                    let state = state.clone();
+                    let provider_id = provider_id.clone();
+                    let request_model = request_model.clone();
+                    let outbound_model = fallback_model.clone();
+                    let session_id = session_id.clone();
+                    tokio::spawn(async move {
+                        log_usage(
+                            &state,
+                            &provider_id,
+                            app_type_str,
+                            &model,
+                            &request_model,
+                            &outbound_model,
+                            usage,
+                            latency_ms,
+                            first_token_ms,
+                            true,
+                            status.as_u16(),
+                            Some(session_id),
+                        )
+                        .await;
+                    });
+                },
+            ))
+        } else {
+            None
+        };
+        let logged_stream = create_logged_passthrough_stream(
+            stream,
+            ctx.tag,
+            usage_collector,
+            ctx.streaming_timeout_config(),
+            connection_guard,
+        );
+        let body = axum::body::Body::from_stream(logged_stream);
+        return Ok((headers, body).into_response());
     }
 
     if is_compaction {
@@ -5287,14 +5403,15 @@ mod tests {
     use super::{
         body_looks_like_sse, build_external_codex_official_oauth_provider,
         chat_sse_to_response_value, classify_body_for_diagnostics, codex_catalog_models_response,
-        codex_proxy_error_json, codex_proxy_error_status, external_openai_api_models_response,
-        external_openai_api_unsupported_response, mark_external_openai_headers,
-        resolve_codex_image_generation_provider, resolve_external_codex_router_target,
-        resolve_forward_error_provider_for_logging, resolve_forward_error_route_provider,
-        responses_response_to_compaction_sse, responses_response_to_completed_sse,
-        responses_response_to_full_sse, responses_sse_to_response_value,
-        should_handle_as_codex_client, should_use_claude_transform_streaming,
-        should_wrap_native_codex_responses_stream, transform, upstream_body_parse_error,
+        codex_proxy_error_json, codex_proxy_error_status, codex_request_classification_fields,
+        external_openai_api_models_response, external_openai_api_unsupported_response,
+        mark_external_openai_headers, resolve_codex_image_generation_provider,
+        resolve_external_codex_router_target, resolve_forward_error_provider_for_logging,
+        resolve_forward_error_route_provider, responses_response_to_compaction_sse,
+        responses_response_to_completed_sse, responses_response_to_full_sse,
+        responses_sse_to_response_value, should_handle_as_codex_client,
+        should_use_claude_transform_streaming, should_wrap_native_codex_responses_stream,
+        transform, upstream_body_parse_error,
     };
     use crate::{
         app_config::AppType,
@@ -6068,6 +6185,30 @@ data: [DONE]\n\n";
         );
 
         assert!(should_handle_as_codex_client(&headers));
+    }
+
+    #[test]
+    /// Codex Desktop 某些 Responses 请求不带 User-Agent，仍必须进入本地 Codex 路径。
+    fn missing_user_agent_uses_local_client_context() {
+        let headers = HeaderMap::new();
+
+        assert!(should_handle_as_codex_client(&headers));
+    }
+
+    #[test]
+    fn classification_diagnostics_are_boolean_and_secret_free() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::USER_AGENT,
+            HeaderValue::from_static("codex_cli/0.148.0"),
+        );
+
+        let fields = codex_request_classification_fields(&headers);
+        assert!(fields.contains(&("has_user_agent", "true".to_string())));
+        assert!(fields.contains(&("user_agent_contains_codex", "true".to_string())));
+        assert!(fields.contains(&("has_external_api_key", "false".to_string())));
+        assert!(fields.contains(&("force_external_marker", "false".to_string())));
+        assert!(fields.contains(&("selected_path", "codex".to_string())));
     }
 
     #[test]

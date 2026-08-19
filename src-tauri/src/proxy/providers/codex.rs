@@ -582,11 +582,30 @@ pub fn materialize_codex_routed_provider_from_target(
         );
     }
 
-    let native_codex_auth = route_provider
+    let route_native_codex_auth = route_provider
         .settings_config
         .get(CODEX_NATIVE_AUTH_PASSTHROUGH)
-        .and_then(JsonValue::as_bool)
-        .unwrap_or(false);
+        .and_then(JsonValue::as_bool);
+    // The built-in `codex-official` seed is the Desktop OAuth facade. Older
+    // router plans serialized it as `provider_config` and omitted the native
+    // marker, which incorrectly sent the request through the CCSM-managed
+    // OAuth classifier. Preserve an explicit route choice, but recover the
+    // native Desktop ownership for the empty built-in seed.
+    let route_is_managed_codex_oauth = route_provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.provider_type.as_deref())
+        == Some("codex_oauth");
+    let native_codex_auth = route_native_codex_auth.unwrap_or_else(|| {
+        !route_is_managed_codex_oauth
+            && is_codex_official_provider(target_provider)
+            && target_provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.provider_type.as_deref())
+                != Some("codex_oauth")
+            && !provider_has_managed_codex_oauth_auth(target_provider)
+    });
     let account_pool = route_provider
         .settings_config
         .get(CODEX_ACCOUNT_POOL_ENABLED)
@@ -1862,26 +1881,80 @@ pub fn resolve_codex_chat_reasoning_config(
         .map(ToString::to_string)
         .or_else(|| codex_provider_upstream_model(provider))
         .unwrap_or_default();
-    if let Some(capability) = super::codex_reasoning::resolve_reasoning_capability_from_settings(
-        &provider.settings_config,
+    // P1：单一 resolver 入口——用户模型级声明 > 检测候选（TTL）> 能力库 > 内置 > unknown。
+    // 请求路径只读 TTL 缓存，不发起网络请求；检测由 UI/目录层异步触发。
+    // 优先级：用户模型级声明 > 用户 provider 级显式声明（meta）> 检测/能力库/内置 > 推断。
+    let detection =
+        crate::reasoning_capabilities::current_detection(&provider.id, &requested_model);
+    let resolved = crate::reasoning_capabilities::resolve_codex_model_capability(
+        provider,
         &requested_model,
-    ) {
-        return Some(codex_chat_reasoning_config_from_capability(capability));
-    }
+        detection.as_ref(),
+    );
     let inferred = infer_codex_chat_reasoning_config(provider, body);
+
+    // 1. 用户模型级声明最高优先级。
+    if resolved.source == crate::reasoning_capabilities::CapabilitySource::UserConfig {
+        let config = codex_chat_reasoning_config_from_capability(resolved.capability.unwrap());
+        // Qwen/vLLM 输出预算安全下限与能力来源正交：能力派生配置同样需要。
+        // 注意：这里只补预算下限，不纠正 thinking_param——能力声明是 thinking
+        // 开关的权威来源，不得被推断覆盖（见 apply_qwen_vllm_safety_defaults）。
+        return Some(match inferred {
+            Some(inferred) => apply_qwen_vllm_safety_defaults(config, &inferred),
+            None => config,
+        });
+    }
+
+    // 2. 用户 provider 级显式声明（meta）次之。
     if let Some(config) = provider
         .meta
         .as_ref()
         .and_then(|meta| meta.codex_chat_reasoning.clone())
     {
-        let config = normalize_codex_chat_reasoning_config(config);
-        if let Some(inferred) = inferred {
-            return Some(merge_qwen_vllm_reasoning_defaults(config, inferred));
-        }
-        return Some(config);
+        let mut config = normalize_codex_chat_reasoning_config(config);
+        // 用户显式声明了厂商参数：声明本身即关闭契约，none 可翻译为上游关闭信号。
+        config.disable_contract = true;
+        return Some(match inferred {
+            Some(inferred) => merge_qwen_vllm_reasoning_defaults(config, inferred),
+            None => config,
+        });
     }
 
+    // 3. 检测/能力库/内置第三优先级。
+    if let Some(capability) = resolved.capability {
+        let config = codex_chat_reasoning_config_from_capability(capability);
+        return Some(match inferred {
+            Some(inferred) => apply_qwen_vllm_safety_defaults(config, &inferred),
+            None => config,
+        });
+    }
+
+    // 4. 平台/模型推断。
     inferred
+}
+
+/// 把 Qwen/vLLM 运行时安全默认（输出预算下限）应用到能力派生配置。
+///
+/// 与 [`merge_qwen_vllm_reasoning_defaults`] 不同：不纠正 `thinking_param`——
+/// 能力声明是 thinking 开关的权威来源，不得被推断覆盖。仅当推断结果明确识别
+/// 为 Qwen/vLLM 时，才抬高缺失或过小的 `min_output_tokens`。
+fn apply_qwen_vllm_safety_defaults(
+    mut config: CodexChatReasoningConfig,
+    inferred: &CodexChatReasoningConfig,
+) -> CodexChatReasoningConfig {
+    if !is_qwen_vllm_reasoning_defaults(inferred) {
+        return config;
+    }
+    if let Some(min) = inferred.min_output_tokens {
+        if config
+            .min_output_tokens
+            .map(|current| current < min)
+            .unwrap_or(true)
+        {
+            config.min_output_tokens = Some(min);
+        }
+    }
+    config
 }
 
 fn codex_chat_reasoning_config_from_capability(
@@ -1891,8 +1964,10 @@ fn codex_chat_reasoning_config_from_capability(
     let has_efforts =
         resolved.support_kind == super::codex_reasoning::ReasoningSupportKind::EffortLevels;
     let boolean_thinking = capability.upstream.format == "boolean";
+    let supported = capability.effective_support_status()
+        == super::codex_reasoning::ReasoningSupportStatus::ConfirmedSupported;
     CodexChatReasoningConfig {
-        supports_thinking: Some(capability.supported),
+        supports_thinking: Some(supported),
         supports_effort: Some(has_efforts && !boolean_thinking),
         thinking_param: Some(if boolean_thinking {
             capability.upstream.parameter.clone()
@@ -1913,6 +1988,8 @@ fn codex_chat_reasoning_config_from_capability(
         min_output_tokens: None,
         default_output_tokens: None,
         output_format: capability.output_format,
+        // 能力声明显式携带关闭契约：disableAllowed=true 时 none 才翻译为关闭信号。
+        disable_contract: capability.disable_allowed,
     }
 }
 
@@ -2224,6 +2301,7 @@ fn infer_codex_chat_reasoning_config(
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: false,
         });
     }
 
@@ -2240,6 +2318,7 @@ fn infer_codex_chat_reasoning_config(
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("reasoning".to_string()),
+            disable_contract: false,
         });
     }
 
@@ -2253,6 +2332,7 @@ fn infer_codex_chat_reasoning_config(
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: false,
         });
     }
 
@@ -2266,6 +2346,7 @@ fn infer_codex_chat_reasoning_config(
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: false,
         });
     }
 
@@ -2286,6 +2367,7 @@ fn infer_codex_chat_reasoning_config(
             min_output_tokens: Some(QWEN_VLLM_MIN_OUTPUT_TOKENS),
             default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: false,
         });
     }
 
@@ -2299,6 +2381,7 @@ fn infer_codex_chat_reasoning_config(
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: false,
         });
     }
 
@@ -2312,6 +2395,7 @@ fn infer_codex_chat_reasoning_config(
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("reasoning_details".to_string()),
+            disable_contract: false,
         });
     }
 
@@ -2325,6 +2409,7 @@ fn infer_codex_chat_reasoning_config(
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: false,
         });
     }
 
@@ -2356,6 +2441,7 @@ fn infer_aggregator_platform_config(
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("auto".to_string()),
+            disable_contract: false,
         });
     }
 
@@ -2372,6 +2458,7 @@ fn infer_aggregator_platform_config(
             min_output_tokens: None,
             default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
+            disable_contract: false,
         });
     }
 
@@ -3339,7 +3426,7 @@ experimental_bearer_token = "PROXY_MANAGED"
     }
 
     #[test]
-    fn test_codex_route_target_provider_infers_empty_official_seed_as_managed_oauth() {
+    fn test_codex_route_target_provider_uses_desktop_oauth_for_empty_official_seed() {
         let adapter = CodexAdapter::new();
         let router = create_provider(json!({
             "codexRouting": {
@@ -3372,21 +3459,58 @@ experimental_bearer_token = "PROXY_MANAGED"
             .expect("official route");
         let materialized = materialize_codex_routed_provider_from_target(&routed, &target);
 
-        assert_eq!(
-            materialized
-                .meta
-                .as_ref()
-                .and_then(|meta| meta.provider_type.as_deref()),
-            Some("codex_oauth")
-        );
+        assert!(materialized
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.provider_type.as_deref())
+            .is_none());
         assert_eq!(
             adapter.extract_base_url(&materialized).unwrap(),
             "https://chatgpt.com/backend-api/codex"
         );
-        assert_eq!(
-            adapter.extract_auth(&materialized).unwrap().strategy,
-            AuthStrategy::CodexOAuth
+        assert!(adapter.extract_auth(&materialized).is_none());
+    }
+
+    #[test]
+    fn test_codex_route_target_provider_uses_desktop_oauth_for_builtin_official_seed() {
+        let router = create_provider(json!({
+            "codexRouting": {
+                "enabled": true,
+                "routes": [{
+                    "id": "router-codex-official",
+                    "label": "OpenAI Official",
+                    "targetProviderId": "codex-official",
+                    "match": { "models": ["gpt-5.6"] },
+                    "upstream": {
+                        "apiFormat": "openai_responses",
+                        "auth": { "source": "provider_config" }
+                    }
+                }],
+                "defaultRouteId": "router-codex-official"
+            }
+        }));
+        let mut target = Provider::with_id(
+            "codex-official".to_string(),
+            "OpenAI Official".to_string(),
+            json!({ "auth": {}, "config": "" }),
+            None,
         );
+        target.category = Some("official".to_string());
+
+        let routed = resolve_codex_model_routed_provider(&router, &json!({ "model": "gpt-5.6" }))
+            .expect("official route");
+        let materialized = materialize_codex_routed_provider_from_target(&routed, &target);
+
+        assert_eq!(
+            materialized.settings_config["codexNativeAuthPassthrough"],
+            true
+        );
+        assert!(materialized
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.provider_type.as_deref())
+            .is_none());
+        assert!(CodexAdapter::new().extract_auth(&materialized).is_none());
     }
 
     #[test]
@@ -3662,6 +3786,7 @@ wire_api = "chat"
                 min_output_tokens: None,
                 default_output_tokens: None,
                 output_format: Some("reasoning_content".to_string()),
+                disable_contract: false,
             }),
             ..Default::default()
         });
@@ -3700,6 +3825,7 @@ wire_api = "chat"
                 min_output_tokens: Some(QWEN_VLLM_MIN_OUTPUT_TOKENS),
                 default_output_tokens: Some(RETIRED_QWEN_VLLM_DEFAULT_OUTPUT_TOKENS),
                 output_format: Some("reasoning_content".to_string()),
+                disable_contract: false,
             }),
             ..Default::default()
         });
@@ -3735,6 +3861,7 @@ wire_api = "chat"
                 min_output_tokens: Some(4096),
                 default_output_tokens: Some(65_536),
                 output_format: Some("reasoning_content".to_string()),
+                disable_contract: false,
             }),
             ..Default::default()
         });
@@ -5451,6 +5578,34 @@ wire_api = "responses"
 
     #[test]
     fn test_resolve_codex_chat_reasoning_infers_deepseek_effort_support() {
+        // 使用非内置清单模型（deepseek-chat），验证平台/模型推断分支。
+        // deepseek-v4-pro/flash 在内置清单中，会走能力派生路径（见
+        // test_resolve_codex_chat_reasoning_builtin_deepseek_v4_pro）。
+        let provider = create_provider(json!({
+            "config": r#"
+model_provider = "deepseek"
+model = "deepseek-chat"
+
+[model_providers.deepseek]
+name = "DeepSeek"
+base_url = "https://api.deepseek.com"
+wire_api = "chat"
+"#
+        }));
+
+        let config =
+            resolve_codex_chat_reasoning_config(&provider, &json!({ "model": "deepseek-chat" }))
+                .unwrap();
+
+        assert_eq!(config.supports_thinking, Some(true));
+        assert_eq!(config.supports_effort, Some(true));
+        assert_eq!(config.effort_value_mode.as_deref(), Some("deepseek"));
+    }
+
+    #[test]
+    fn test_resolve_codex_chat_reasoning_builtin_deepseek_v4_pro() {
+        // deepseek-v4-pro 在内置清单中：无用户声明/meta 时，请求配置由内置能力派生，
+        // effort_value_mode 为 capability 形态（精确档位 + 映射），而非通用 deepseek 模式。
         let provider = create_provider(json!({
             "config": r#"
 model_provider = "deepseek"
@@ -5469,7 +5624,17 @@ wire_api = "chat"
 
         assert_eq!(config.supports_thinking, Some(true));
         assert_eq!(config.supports_effort, Some(true));
-        assert_eq!(config.effort_value_mode.as_deref(), Some("deepseek"));
+        assert_eq!(config.effort_param.as_deref(), Some("reasoning_effort"));
+        assert!(
+            config
+                .effort_value_mode
+                .as_deref()
+                .is_some_and(|mode| mode.starts_with("capability|") && mode.contains("max=max")),
+            "builtin deepseek-v4-pro should use capability effort mode, got {:?}",
+            config.effort_value_mode
+        );
+        // 内置声明 disableAllowed=true → 关闭契约成立。
+        assert!(config.disable_contract);
     }
 
     #[test]
@@ -5546,6 +5711,7 @@ wire_api = "chat"
                 min_output_tokens: None,
                 default_output_tokens: None,
                 output_format: Some("auto".to_string()),
+                disable_contract: false,
             }),
             ..Default::default()
         });

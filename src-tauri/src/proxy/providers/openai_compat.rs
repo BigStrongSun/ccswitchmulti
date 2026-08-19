@@ -140,6 +140,15 @@ pub(crate) fn normalize_codex_oauth_responses_request(
     body.remove("temperature");
     body.remove("top_p");
 
+    // ChatGPT's Codex backend no longer accepts the legacy top-level
+    // `prompt_cache_retention` field for newer models (for example
+    // gpt-5.6-luna). The field can arrive from the Codex client during a
+    // model switch or compaction even when the provider/model catalog does
+    // not declare it. Keep the native official boundary defensive here;
+    // `prompt_cache_options` is intentionally preserved for the newer wire
+    // shape.
+    body.remove("prompt_cache_retention");
+
     let mut normalized = Value::Object(body);
     super::transform_codex_chat::normalize_replayed_item_ids_for_openai(&mut normalized);
     normalized
@@ -508,8 +517,25 @@ fn normalize_codex_oauth_input_item(item: Value) -> Value {
         .get("type")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    if item_type == "compaction"
+        && object
+            .get("encrypted_content")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .is_some_and(|value| !looks_like_openai_codex_encrypted_content(value))
+    {
+        return json!({
+            "type": "message",
+            "role": "user",
+            "content": [{
+                "type": "input_text",
+                "text": "Earlier conversation was compacted, but its details are not readable by this provider."
+            }]
+        });
+    }
     if item_type == "reasoning" {
         normalize_codex_oauth_reasoning_item(&mut object);
+        normalize_foreign_encrypted_reasoning_item(&mut object);
     } else if item_type == "agent_message" {
         normalize_codex_oauth_agent_message(&mut object);
     } else if codex_oauth_input_item_forbids_content(item_type) {
@@ -517,6 +543,32 @@ fn normalize_codex_oauth_input_item(item: Value) -> Value {
     }
 
     Value::Object(object)
+}
+
+/// Official OpenAI replay can only decrypt its own opaque reasoning payloads.
+/// Third-party Responses providers may return a same-shaped `encrypted_content`
+/// item with a short/UUID-like payload; retaining it poisons the next official
+/// request after a provider switch. Keep plausible Codex ciphertext, but turn
+/// foreign payloads into summary-only reasoning so the conversation remains
+/// portable.
+fn normalize_foreign_encrypted_reasoning_item(object: &mut Map<String, Value>) {
+    let Some(value) = object
+        .get("encrypted_content")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+    else {
+        return;
+    };
+    if looks_like_openai_codex_encrypted_content(value) {
+        return;
+    }
+    object.remove("encrypted_content");
+    object.remove("id");
+    object.remove("status");
+}
+
+fn looks_like_openai_codex_encrypted_content(value: &str) -> bool {
+    value.len() >= 64 && value.starts_with("gAAAAA") && value.is_ascii()
 }
 
 /// Codex Multi-Agent V2 can persist a third-party agent's plaintext reply in an
@@ -1948,6 +2000,27 @@ mod tests {
     }
 
     #[test]
+    fn codex_oauth_responses_normalizer_drops_legacy_prompt_cache_retention() {
+        let normalized = normalize_codex_oauth_responses_request(
+            json!({
+                "model": "gpt-5.6-luna",
+                "instructions": "existing instructions",
+                "input": [{
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "hello" }]
+                }],
+                "prompt_cache_retention": "24h",
+                "prompt_cache_options": { "ttl": "30m" }
+            }),
+            false,
+        );
+
+        assert!(normalized.get("prompt_cache_retention").is_none());
+        assert_eq!(normalized["prompt_cache_options"]["ttl"], "30m");
+    }
+
+    #[test]
     fn codex_oauth_responses_normalizer_rewrites_third_party_web_search_id_for_official_replay() {
         // A managed Codex OAuth route is materialized with a temporary route ID,
         // so the later built-in-provider gate does not run. The OAuth boundary
@@ -2317,7 +2390,7 @@ mod tests {
                 {
                     "type": "reasoning",
                     "summary": [{ "type": "summary_text", "text": "Need to inspect files." }],
-                    "encrypted_content": "enc_reasoning",
+                    "encrypted_content": "gAAAAAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                     "content": [{ "type": "reasoning_text", "text": "raw hidden reasoning" }]
                 }
             ]
@@ -2328,7 +2401,50 @@ mod tests {
 
         assert!(input[1].get("content").is_none());
         assert_eq!(input[1]["summary"][0]["text"], "Need to inspect files.");
-        assert_eq!(input[1]["encrypted_content"], "enc_reasoning");
+        assert_eq!(
+            input[1]["encrypted_content"],
+            "gAAAAAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+    }
+
+    #[test]
+    fn codex_oauth_responses_normalizer_drops_foreign_encrypted_reasoning() {
+        let body = json!({
+            "model": "gpt-5.6-luna",
+            "input": [{
+                "type": "reasoning",
+                "id": "7672...fd-0",
+                "summary": [{"type": "summary_text", "text": "DeepSeek summary"}],
+                "encrypted_content": "7672...fd-0"
+            }]
+        });
+
+        let normalized = normalize_codex_oauth_responses_request(body, false);
+        let item = &normalized["input"][0];
+
+        assert!(item.get("encrypted_content").is_none());
+        assert!(item.get("id").is_none());
+        assert_eq!(item["summary"][0]["text"], "DeepSeek summary");
+    }
+
+    #[test]
+    fn codex_oauth_responses_normalizer_projects_foreign_compaction_to_message() {
+        let body = json!({
+            "model": "gpt-5.6-luna",
+            "input": [{
+                "type": "compaction",
+                "encrypted_content": "7672...fd-0"
+            }]
+        });
+
+        let normalized = normalize_codex_oauth_responses_request(body, false);
+        let item = &normalized["input"][0];
+
+        assert_eq!(item["type"], "message");
+        assert!(item.get("encrypted_content").is_none());
+        assert!(item["content"][0]["text"]
+            .as_str()
+            .is_some_and(|text| { text.contains("not readable by this provider") }));
     }
 
     #[test]
