@@ -286,17 +286,6 @@ impl CodexToolContext {
         })
     }
 
-    pub(crate) fn has_hosted_tools(&self) -> bool {
-        self.hosted_web_search.is_some() || self.hosted_image_generation.is_some()
-    }
-
-    pub(crate) fn has_ordinary_tools(&self) -> bool {
-        self.chat_tools.iter().any(|tool| {
-            let name = tool.pointer("/function/name").and_then(Value::as_str);
-            name.is_some_and(|name| !self.is_hosted_tool_chat_name(name))
-        })
-    }
-
     /// 返回 Codex 原始 hosted `web_search` 的安全配置子集。
     pub(crate) fn hosted_web_search_config(&self) -> Option<&HostedWebSearchConfig> {
         self.hosted_web_search.as_ref()
@@ -670,16 +659,6 @@ pub fn responses_to_chat_completions_with_reasoning_text_only_and_cache(
         }
     }
 
-    // Hosted calls are continued inside CCSM, whereas ordinary function calls
-    // are returned to Codex for client-side execution. Disable parallel tool
-    // batches when both ownership classes are present so a Qwen/vLLM Chat
-    // upstream cannot emit an unresumable mixed batch.
-    if tool_context.has_hosted_tools()
-        && tool_context.has_ordinary_tools()
-        && result.get("parallel_tool_calls").is_some()
-    {
-        result["parallel_tool_calls"] = Value::Bool(false);
-    }
     apply_openai_prompt_cache_options(&mut result, &body, cache_config);
 
     // Strict OpenAI-compatible upstreams (vLLM, enterprise gateways) reject
@@ -3586,23 +3565,6 @@ mod tests {
         );
         assert_eq!(result["tool_choice"]["type"], "function");
         assert_eq!(result["tool_choice"]["function"]["name"], "web_search");
-    }
-
-    #[test]
-    fn responses_request_to_chat_serializes_mixed_hosted_and_ordinary_tools() {
-        let request = json!({
-            "model": "qwen3.8",
-            "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "search"}]}],
-            "tools": [
-                {"type": "web_search"},
-                {"type": "function", "name": "lookup", "parameters": {"type": "object"}}
-            ],
-            "parallel_tool_calls": true
-        });
-
-        let result = responses_to_chat_completions(request).expect("conversion should succeed");
-
-        assert_eq!(result["parallel_tool_calls"], false);
     }
 
     #[test]
