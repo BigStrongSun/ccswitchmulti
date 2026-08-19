@@ -2415,7 +2415,10 @@ fn chat_tool_calls_to_response_output_items(
                 tool_context,
             ));
         }
-    } else if let Some(function_call) = message.get("function_call") {
+    } else if let Some(function_call) = message
+        .get("function_call")
+        .filter(|value| value.is_object())
+    {
         match chat_legacy_function_call_to_response_item(function_call, reasoning, tool_context) {
             Some(item) => output.push(item),
             None => dropped += 1,
@@ -6550,6 +6553,35 @@ mod tests {
         let err = chat_completion_to_response_with_context(chat, &CodexToolContext::default())
             .unwrap_err();
         assert!(matches!(err, ProxyError::TransformError(_)));
+    }
+
+    #[test]
+    fn chat_response_with_null_legacy_function_call_is_ignored() {
+        // OpenAI-compatible servers, including vLLM, may serialize the
+        // optional legacy field as `function_call: null` on every response.
+        // That is absence of a call, not an unnamed call.
+        let chat = json!({
+            "id": "chatcmpl_null_legacy",
+            "object": "chat.completion",
+            "created": 123,
+            "model": "qwen3.8",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "OK",
+                    "tool_calls": null,
+                    "function_call": null
+                },
+                "finish_reason": "stop"
+            }]
+        });
+
+        let result =
+            chat_completion_to_response_with_context(chat, &CodexToolContext::default()).unwrap();
+
+        assert_eq!(result["status"], "completed");
+        assert_eq!(result["output"][0]["type"], "message");
+        assert_eq!(result["output"][0]["content"][0]["text"], "OK");
     }
 
     /// `finish_reason=length` 是截断，不是"上游发了畸形数据"——归因必须保持
