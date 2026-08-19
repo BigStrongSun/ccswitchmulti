@@ -53,6 +53,14 @@ pub(crate) fn response_completed(response: &Value) -> Bytes {
     )
 }
 
+/// `response.incomplete`.
+pub(crate) fn response_incomplete(response: &Value) -> Bytes {
+    sse_event(
+        "response.incomplete",
+        json!({ "type": "response.incomplete", "response": response }),
+    )
+}
+
 /// `response.failed`.
 pub(crate) fn response_failed(response: &Value) -> Bytes {
     sse_event(

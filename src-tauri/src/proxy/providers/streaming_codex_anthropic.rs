@@ -490,7 +490,11 @@ impl AnthropicToResponsesState {
             response["incomplete_details"] = json!({ "reason": reason });
         }
 
-        events.push(sse::response_completed(&response));
+        if status == "incomplete" {
+            events.push(sse::response_incomplete(&response));
+        } else {
+            events.push(sse::response_completed(&response));
+        }
         self.completed = true;
         events
     }
@@ -939,7 +943,8 @@ mod tests {
         );
         let merged = run(input).await;
         assert!(merged.contains("\"delta\":\"partial\""));
-        assert!(merged.contains("event: response.completed"));
+        assert!(merged.contains("event: response.incomplete"));
+        assert!(!merged.contains("event: response.completed"));
         // The top-level response is incomplete (message output items keep their own
         // "completed" status, but the response status must not be "completed").
         assert!(merged.contains("\"status\":\"incomplete\""));
@@ -959,6 +964,8 @@ mod tests {
 
         let merged = run(input).await;
         assert!(merged.contains("\"status\":\"incomplete\""));
+        assert!(merged.contains("event: response.incomplete"));
+        assert!(!merged.contains("event: response.completed"));
         assert!(!merged.contains("event: response.function_call_arguments.done"));
         assert!(merged.contains("\"reason\":\"max_output_tokens\""));
     }
@@ -1116,6 +1123,8 @@ mod tests {
         let merged = run(input).await;
         assert!(merged.contains("\"status\":\"incomplete\""));
         assert!(merged.contains("\"reason\":\"max_output_tokens\""));
+        assert!(merged.contains("event: response.incomplete"));
+        assert!(!merged.contains("event: response.completed"));
     }
 
     #[tokio::test]
@@ -1194,6 +1203,8 @@ mod tests {
         let merged = run(input).await;
         assert!(merged.contains("\"delta\":\"tail\""));
         assert!(merged.contains("\"status\":\"incomplete\""));
+        assert!(merged.contains("event: response.incomplete"));
+        assert!(!merged.contains("event: response.completed"));
     }
 
     #[tokio::test]

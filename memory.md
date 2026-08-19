@@ -7,6 +7,8 @@
 - CCSM 根修：Qwen + vLLM/matrixminecraft 推断分支重新设置 `defaultOutputTokens=131072`，`apply_qwen_vllm_safety_defaults` 对能力派生配置也补同一下限，前端 ProviderForm 保存 Qwen/vLLM reasoning meta 时同样写 131072。
 - 远端透明代理已先做运行态兜底：`vllm_dashboard/vllm_transparent_proxy.py` 对 `model=qwen3.8` 注入/钳制 `max_tokens=131072`，环境变量 `VLLM_PROXY_QWEN_MAX_OUTPUT_TOKENS` 可调；真实请求日志 `qwen_output_limit_applied=true / max_tokens=131072`。该代理兜底属于运行态防线，CCSM 转换层恢复模型级默认输出上限才是跨协议根修；后续安装/构建新版 CCSM 后应复测 `max_tokens=131072` 且不需要代理补丁。
 - vLLM 原生侧同时加了模型级上限：`linux/env/qwen38-generation/generation_config.json` 设置 `max_new_tokens=131072`，`VLLM_GENERATION_CONFIG` 指向该目录；vLLM 启动日志确认 `Default vLLM sampling parameters ... {'max_tokens': 131072}`，因此直连 raw `/v1/chat/completions` 缺省输出也按官方模型上限收敛，不依赖代理。
+- 为防止“xhigh reasoning 把输出额度耗到 length 后突然结束”，代理层新增 `VLLM_PROXY_QWEN_THINKING_TOKEN_BUDGET`（默认 16384）并在 qwen3.8 Chat Completions 缺省时注入 `thinking_token_budget`；同时 `VLLM_PROXY_DEFAULT_REASONING_EFFORT` 从 `xhigh` 改为 `medium`。远端提交 `58468b50c`，真实代理请求日志显示 `reasoning_effort=medium / thinking_token_budget=16384 / max_tokens=131072`。
+- CCSM 流式收尾根修：`streaming_codex_chat.rs` 和 `streaming_codex_anthropic.rs` 对 `finish_reason=length`/`max_tokens` 现在发 `response.incomplete`，不再把 `status=incomplete` 包装成 `response.completed`。Codex 原生 SSE 解析器会把 `response.incomplete` 当作流错误，避免“任务显示完成但 `last_agent_message=null`”的静默收尾；普通完成仍发 `response.completed`。
 
 ## 2026-08-17/18 main CI 转绿：28 个 Clippy lint + unix 死导入 + macOS 测试夹具（三连根修）
 
