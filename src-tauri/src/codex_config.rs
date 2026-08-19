@@ -11453,9 +11453,11 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             .filter_map(|level| level["effort"].as_str())
             .collect::<Vec<_>>();
         assert_eq!(entry["default_reasoning_level"], "max");
+        // P2：none 先按 disable capability 处理，不作为普通正向 effort 投影到
+        // supported_reasoning_levels（关闭走 disable 路径，不在可选档位里）。
         assert_eq!(
             efforts,
-            vec!["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+            vec!["minimal", "low", "medium", "high", "xhigh", "max"]
         );
     }
 

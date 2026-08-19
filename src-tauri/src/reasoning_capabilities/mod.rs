@@ -665,14 +665,8 @@ mod tests {
         // platform=None（未知平台，含 OpenAI 直连与 catalog 投影）命中 official 来源。
         let settings = json!({});
         let official = official_models_fixture();
-        let resolved = resolve_codex_model_capability_core(
-            &settings,
-            None,
-            "gpt-5.4",
-            None,
-            None,
-            &official,
-        );
+        let resolved =
+            resolve_codex_model_capability_core(&settings, None, "gpt-5.4", None, None, &official);
         assert_eq!(resolved.source, CapabilitySource::Official);
         assert!(!resolved.fingerprint.is_empty());
         let capability = resolved.capability.expect("official capability");
@@ -723,14 +717,8 @@ mod tests {
             }]}
         });
         let official = official_models_fixture();
-        let resolved = resolve_codex_model_capability_core(
-            &settings,
-            None,
-            "gpt-5.4",
-            None,
-            None,
-            &official,
-        );
+        let resolved =
+            resolve_codex_model_capability_core(&settings, None, "gpt-5.4", None, None, &official);
         assert_eq!(resolved.source, CapabilitySource::UserConfig);
         let capability = resolved.capability.expect("user capability");
         assert_eq!(capability.supported_efforts, vec!["low", "high"]);
@@ -740,14 +728,8 @@ mod tests {
     fn resolver_core_official_empty_cache_falls_to_unknown() {
         // 官方缓存为空（fresh install）时，GPT 模型落到 unknown（fail-closed）。
         let settings = json!({});
-        let resolved = resolve_codex_model_capability_core(
-            &settings,
-            None,
-            "gpt-5.4",
-            None,
-            None,
-            &[],
-        );
+        let resolved =
+            resolve_codex_model_capability_core(&settings, None, "gpt-5.4", None, None, &[]);
         assert_eq!(resolved.source, CapabilitySource::Unknown);
         assert!(resolved.capability.is_none());
     }

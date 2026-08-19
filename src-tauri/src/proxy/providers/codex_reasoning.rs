@@ -1122,4 +1122,45 @@ mod tests {
             capability_fingerprint(&different_parameter)
         );
     }
+
+    #[test]
+    fn none_is_disable_not_positive_effort() {
+        // P2：none 先按 disable capability 处理，不能作为普通正向 effort 映射。
+        // provider_accepted_efforts 含 none（关闭契约），codex_selectable_efforts 不含
+        // none（UI/spawn_agent 可选档位不含 none），effort_map 把 none 映射到 none。
+        let capability: CodexModelReasoningCapability = serde_json::from_value(json!({
+            "schemaVersion": 2,
+            "supportStatus": "confirmed_supported",
+            "controlKind": "graded",
+            "supportedEfforts": ["none", "low", "high", "max"],
+            "defaultEffort": "high",
+            "disableAllowed": true,
+            "upstream": {"format": "string", "parameter": "reasoning_effort"}
+        }))
+        .expect("parse");
+        let resolved = resolve_subagent_reasoning_capability(Some(&capability));
+        // provider_accepted_efforts 含 none（关闭契约需要）。
+        assert!(resolved
+            .provider_accepted_efforts
+            .contains(&CodexReasoningEffort::None));
+        // codex_selectable_efforts 不含 none（none 是关闭，不是可选正向档位）。
+        assert!(!resolved
+            .codex_selectable_efforts
+            .contains(&CodexReasoningEffort::None));
+        assert_eq!(
+            resolved.codex_selectable_efforts,
+            vec![
+                CodexReasoningEffort::Low,
+                CodexReasoningEffort::High,
+                CodexReasoningEffort::Max
+            ]
+        );
+        // effort_map 把 none 映射到 none（identity，即关闭）。
+        assert_eq!(
+            resolved.effort_map.get(&CodexReasoningEffort::None),
+            Some(&CodexReasoningEffort::None)
+        );
+        // disable_allowed 为 true（能力声明显式携带关闭契约）。
+        assert!(resolved.disable_allowed);
+    }
 }

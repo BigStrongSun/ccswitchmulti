@@ -3788,3 +3788,33 @@
 - 库路径解析：环境变量 `CCSM_REASONING_LIBRARY` 覆盖 > Tauri 资源目录（setup hook `init_resource_dir`）> 开发回退（`resources/reasoning-capabilities.json` 相对 CWD）。tauri.conf.json bundle.resources 已加 `resources/reasoning-capabilities.json`。
 - 验证：`cargo test --lib` 3149 passed / 0 failed / 5 ignored（新增 21 个 reasoning_capabilities 测试 + 1 个内置 deepseek 请求路径测试）；`npx vitest run` 138 文件 / 1119 用例全过；`npx tsc --noEmit` 干净；`cargo fmt` 已执行；`git diff --check` 干净。
 - 下一步（P2，计划 §5）：四个消费者（Codex catalog/Desktop aliases/inline TOML、Responses→Chat/Anthropic 请求转换、Sub-Agent capability API/profile compiler/角色 TOML、GUI/CLI inspect）改为同源；删除/封闭每个消费者内部的通用 GPT reasoning fallback；每个投影携带 fingerprint 和 source summary；catalog 接受值必须是 codexSelectableEfforts，请求转换目标必须在 providerAcceptedEfforts；none 先按 disable capability 处理；MultiRouter 在 route model map 后用 effective Provider + upstream model 解析。
+
+## 2026-08-19 Codex Reasoning Capability P2（四个消费者同源 + official 来源 + 封闭 GPT fallback）
+
+- 计划/规格同 P0/P1；分支 `bigstrongsun/reasoning-capability-p0`。P2 交付：resolver 核心 settings-based 化、official 来源、catalog 投影走同一 resolver、封闭通用 GPT reasoning fallback、none 按 disable 处理。
+- resolver 核心重构（`reasoning_capabilities/mod.rs`）：
+  - 新增 `resolve_codex_model_capability_core(settings, platform, model, detection, library, official_models)`——纯函数、无网络、无全局状态，所有消费者必须经由它。
+  - `resolve_codex_model_capability`（`&Provider` 包装，请求路径用）：加载 platform（`detect_platform`）+ official 缓存（`codex_official_models_cache`）+ 全局库，调用核心。
+  - `resolve_codex_model_capability_with_library`（测试用）：加载 platform，official 缓存传空（保持确定性）。
+  - 来源优先级（高→低）：用户配置 > 检测候选 > 能力库 > 内置 > **official（仅 platform=None 即未知平台生效）** > unknown。
+- official 来源（P2 新增）：
+  - `official_reasoning_capability_for_model` 从 `codex_config.rs` 移到 `codex_reasoning.rs`（纯函数，共享）。
+  - `codex_official_models_cache` 改 `pub`（供 resolver 读取）。
+  - 仅 `platform=None`（未知平台，含 OpenAI 直连与 catalog 投影）生效；OpenRouter/vLLM 等已知聚合平台不套用官方 OpenAI 形态（它们有自己的推理接口，走平台推断）。
+  - 官方 GPT 模型走 OpenAI 顶层 `reasoning_effort` 字段，effort_map 用 identity，`disable_allowed=false`。
+- catalog 投影改走 resolver 核心（`codex_config.rs`）：
+  - `codex_catalog_model_specs` 的 reasoning 链改为调用 `resolve_codex_model_capability_core`（platform=None、detection=None、library=全局、official=官方缓存）。
+  - 若 catalog 模型名是别名、上游模型名命中不同来源，用上游名重试一次。
+  - `CodexCatalogModelSpec` 新增 `reasoning_fingerprint` + `reasoning_source` 字段（25 个测试构造点同步更新）。
+- 封闭通用 GPT reasoning fallback（`transform_codex_chat.rs`）：
+  - `apply_reasoning_options` 的 `config:None` 分支删除 `supports_reasoning_effort` 模型名启发式；config 为 None 表示能力未知，不得按模型名猜测档位注入 `reasoning_effort`。
+  - `model` 参数不再使用，从签名移除（唯一调用点同步更新）。
+  - 注意：`transform.rs:215` 与 `transform_responses.rs:373` 的 `supports_reasoning_effort` 是 Claude Code→OpenAI 路径（非 Codex 路径），不在 P2 范围，保留。
+- none 按 disable 处理（`codex_reasoning.rs`）：
+  - `resolve_subagent_reasoning_capability` 的 `codex_selectable_efforts` 排除 `none`（none 是关闭，不是可选正向档位；UI/spawn_agent 可选档位不含 none，关闭走 disable 路径）。
+  - `provider_accepted_efforts` 仍含 none（关闭契约需要）；`effort_map` 把 none 映射到 none（identity，即关闭）。
+  - `validate()` 已强制 `none` 必须 `disableAllowed=true`（否则拒绝）。
+- MultiRouter：请求路径已在 `apply_codex_chat_upstream_model`（route model map）后调用 `resolve_codex_chat_reasoning_config`（effective Provider + upstream model），P2 无需额外改动。
+- 四层 fingerprint 一致性：catalog spec（`reasoning_fingerprint`）、请求路径（resolver 核心）、Sub-Agent capability（`resolve_subagent_reasoning_capability` 的 `fingerprint`）均源自同一 resolver 核心，fingerprint 一致。GUI/CLI inspect（P4）将读取 spec 的 fingerprint/source。
+- 验证：`cargo test --lib` 3162 passed / 0 failed / 5 ignored（新增 4 个 resolver 核心 official 测试 + 3 个 catalog 投影 fingerprint 测试 + 1 个 none-as-disable 测试）；`npx vitest run` 138 文件 / 1120 用例全过；`npx tsc --noEmit` 干净；`cargo fmt` 已执行；`git diff --check` 干净。
+- 下一步（P3，计划 §5）：模型编辑器最终生效视图——用户无需编辑 JSON 即可完成安全配置；GUI 展示 fingerprint + source summary。
