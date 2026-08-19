@@ -582,11 +582,30 @@ pub fn materialize_codex_routed_provider_from_target(
         );
     }
 
-    let native_codex_auth = route_provider
+    let route_native_codex_auth = route_provider
         .settings_config
         .get(CODEX_NATIVE_AUTH_PASSTHROUGH)
-        .and_then(JsonValue::as_bool)
-        .unwrap_or(false);
+        .and_then(JsonValue::as_bool);
+    // The built-in `codex-official` seed is the Desktop OAuth facade. Older
+    // router plans serialized it as `provider_config` and omitted the native
+    // marker, which incorrectly sent the request through the CCSM-managed
+    // OAuth classifier. Preserve an explicit route choice, but recover the
+    // native Desktop ownership for the empty built-in seed.
+    let route_is_managed_codex_oauth = route_provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.provider_type.as_deref())
+        == Some("codex_oauth");
+    let native_codex_auth = route_native_codex_auth.unwrap_or_else(|| {
+        !route_is_managed_codex_oauth
+            && is_codex_official_provider(target_provider)
+            && target_provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.provider_type.as_deref())
+                != Some("codex_oauth")
+            && !provider_has_managed_codex_oauth_auth(target_provider)
+    });
     let account_pool = route_provider
         .settings_config
         .get(CODEX_ACCOUNT_POOL_ENABLED)
@@ -3403,7 +3422,7 @@ experimental_bearer_token = "PROXY_MANAGED"
     }
 
     #[test]
-    fn test_codex_route_target_provider_infers_empty_official_seed_as_managed_oauth() {
+    fn test_codex_route_target_provider_uses_desktop_oauth_for_empty_official_seed() {
         let adapter = CodexAdapter::new();
         let router = create_provider(json!({
             "codexRouting": {
@@ -3436,21 +3455,58 @@ experimental_bearer_token = "PROXY_MANAGED"
             .expect("official route");
         let materialized = materialize_codex_routed_provider_from_target(&routed, &target);
 
-        assert_eq!(
-            materialized
-                .meta
-                .as_ref()
-                .and_then(|meta| meta.provider_type.as_deref()),
-            Some("codex_oauth")
-        );
+        assert!(materialized
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.provider_type.as_deref())
+            .is_none());
         assert_eq!(
             adapter.extract_base_url(&materialized).unwrap(),
             "https://chatgpt.com/backend-api/codex"
         );
-        assert_eq!(
-            adapter.extract_auth(&materialized).unwrap().strategy,
-            AuthStrategy::CodexOAuth
+        assert!(adapter.extract_auth(&materialized).is_none());
+    }
+
+    #[test]
+    fn test_codex_route_target_provider_uses_desktop_oauth_for_builtin_official_seed() {
+        let router = create_provider(json!({
+            "codexRouting": {
+                "enabled": true,
+                "routes": [{
+                    "id": "router-codex-official",
+                    "label": "OpenAI Official",
+                    "targetProviderId": "codex-official",
+                    "match": { "models": ["gpt-5.6"] },
+                    "upstream": {
+                        "apiFormat": "openai_responses",
+                        "auth": { "source": "provider_config" }
+                    }
+                }],
+                "defaultRouteId": "router-codex-official"
+            }
+        }));
+        let mut target = Provider::with_id(
+            "codex-official".to_string(),
+            "OpenAI Official".to_string(),
+            json!({ "auth": {}, "config": "" }),
+            None,
         );
+        target.category = Some("official".to_string());
+
+        let routed = resolve_codex_model_routed_provider(&router, &json!({ "model": "gpt-5.6" }))
+            .expect("official route");
+        let materialized = materialize_codex_routed_provider_from_target(&routed, &target);
+
+        assert_eq!(
+            materialized.settings_config["codexNativeAuthPassthrough"],
+            true
+        );
+        assert!(materialized
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.provider_type.as_deref())
+            .is_none());
+        assert!(CodexAdapter::new().extract_auth(&materialized).is_none());
     }
 
     #[test]
