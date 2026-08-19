@@ -3863,3 +3863,4 @@
 - “重新检测”调用只读 `trigger_codex_model_reasoning_detection`，仅 `Found` 写 TTL 检测缓存；“采用检测结果”把带 reasoning 子对象的快照转成用户声明；没有 reasoning 的 vLLM 服务快照不可采纳；手动声明和恢复内置值复用既有 capability source mutation。
 - 检测 Provider 使用当前草稿的 provider id/name/base URL，仅用于平台识别和只读元数据发现，不把 API key 送入检测请求；Tauri IPC 仍按官方命名参数调用。
 - 新增 `CodexModelReasoningCard.test.tsx` 覆盖 unknown/unsupported 三态区分与 graded 行为描述。验证：`npx tsc --noEmit` 通过；`npx vitest run` 139 文件/1123 用例全过；`cargo test --lib` 3171 passed / 0 failed / 5 ignored；仅存在与本轮无关的 `streaming_codex_chat.rs` 未提交改动，提交时不得混入。
+- 异常边界：解析 IPC 失败时前端生成不带能力声明的 unknown resolution，卡片明确显示“未知（使用服务端默认）”，不永久显示加载态，也不把通信失败误判为 confirmed_unsupported。
