@@ -6,10 +6,14 @@ use super::hyper_client::{ProxyResponse, MAX_RESPONSE_BODY_BYTES};
 use super::providers::{
     hosted_tools::bridge::{
         append_tool_outputs_to_chat_request, execute_hosted_tool_calls, scan_hosted_tool_calls,
-        HostedToolCallScan, HostedToolLoopConfig, HOSTED_TOOL_LOOP_HEADER,
-        MAX_HOSTED_TOOL_ITERATIONS,
+        HostedToolCall, HostedToolCallKind, HostedToolCallScan, HostedToolLoopConfig,
+        HOSTED_TOOL_LOOP_HEADER, MAX_HOSTED_TOOL_ITERATIONS,
     },
     hosted_tools::openai_client::OpenAiHostedToolClient,
+    streaming_codex_chat::{
+        create_responses_sse_stream_from_chat_with_hosted_loop, ChatSseStream,
+        CompletedChatToolCall, HOSTED_TOOL_STREAM_RESPONSE_HEADER,
+    },
     transform_codex_chat::CodexToolContext,
 };
 use super::{
@@ -44,8 +48,8 @@ use crate::{
 };
 use bytes::Bytes;
 use futures::StreamExt;
-use http::Extensions;
-use serde_json::Value;
+use http::{Extensions, StatusCode};
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -2608,8 +2612,9 @@ impl RequestForwarder {
                     image_generation: context.hosted_image_generation_config().cloned(),
                 });
         let hosted_tool_loop_config = hosted_tool_loop_config.filter(|config| !config.is_empty());
-        let hosted_tools_forced_non_stream =
-            codex_responses_to_chat && hosted_tool_loop_config.is_some();
+        let hosted_tools_forced_non_stream = codex_responses_to_chat
+            && hosted_tool_loop_config.is_some()
+            && !client_requested_streaming;
         if hosted_tools_forced_non_stream {
             if let Some(obj) = filtered_body.as_object_mut() {
                 obj.insert("stream".to_string(), serde_json::json!(false));
@@ -3739,45 +3744,188 @@ impl RequestForwarder {
             let response = if let Some(config) = hosted_tool_loop_config.as_ref() {
                 let hosted_tool_client =
                     resolve_hosted_tool_client(self.app_handle.as_ref(), provider, headers).await;
-                run_hosted_tool_chat_loop(
-                    response,
-                    &mut filtered_body,
-                    config,
-                    &hosted_tool_client,
-                    |body| {
+                if request_is_streaming && codex_responses_to_chat {
+                    let context = codex_chat_tool_context.clone().ok_or_else(|| {
+                        ProxyError::Internal("missing Codex tool context".to_string())
+                    })?;
+                    let request_state = Arc::new(tokio::sync::Mutex::new(filtered_body.clone()));
+                    let original_stream_options = filtered_body.get("stream_options").cloned();
+                    let callback_trace_id = codex_trace_id.clone();
+                    let callback_model = request_model_for_log.clone();
+                    let callback_provider_id = provider.id.clone();
+                    let callback_method = method.to_owned();
+                    let callback_extensions = (*extensions).clone();
+                    let callback_non_streaming_timeout = self.non_streaming_timeout;
+                    let callback_streaming_first_byte_timeout = self.streaming_first_byte_timeout;
+                    let callback_session_id = self.session_id.clone();
+                    let callback_provider_config = (*config).clone();
+                    let mut hosted_rounds = 0usize;
+                    let callback = move |calls: Vec<CompletedChatToolCall>, assistant| {
+                        let request_state = request_state.clone();
+                        let original_stream_options = original_stream_options.clone();
+                        let config = callback_provider_config.clone();
+                        let hosted_tool_client = hosted_tool_client.clone();
+                        let trace_id = callback_trace_id.clone();
                         let headers = ordered_headers.clone();
-                        let body_bytes = serde_json::to_vec(body).map_err(|e| {
-                            ProxyError::Internal(format!(
-                                "Failed to serialize hosted tool loop request body: {e}"
-                            ))
-                        });
-                        let trace_id = codex_trace_id.clone();
-                        let session_id = self.session_id.clone();
-                        let model = request_model_for_log.clone();
-                        let provider_id = provider.id.clone();
+                        let method = callback_method.clone();
+                        let url = url.clone();
+                        let extensions = callback_extensions.clone();
+                        let target_for_log = target_for_log.clone();
+                        let upstream_proxy_url = upstream_proxy_url.clone();
+                        let timeout = timeout;
+                        let non_streaming_timeout = callback_non_streaming_timeout;
+                        let streaming_first_byte_timeout = callback_streaming_first_byte_timeout;
+                        let is_socks_proxy = is_socks_proxy;
+                        let preserve_exact_header_case = preserve_exact_header_case;
+                        let session_id = callback_session_id.clone();
+                        let model = callback_model.clone();
+                        let provider_id = callback_provider_id.clone();
+                        hosted_rounds += 1;
+                        let round = hosted_rounds;
                         async move {
-                            let body_bytes = body_bytes?;
-                            let body_len = body_bytes.len();
+                            if round > MAX_HOSTED_TOOL_ITERATIONS {
+                                return Err(
+                                    "hosted tool loop reached maximum streaming rounds".to_string()
+                                );
+                            }
+                            let hosted_calls = calls
+                                .iter()
+                                .filter_map(|call| {
+                                    let kind = match call.name.as_str() {
+                                        "web_search" => HostedToolCallKind::WebSearch,
+                                        "generate_image" => HostedToolCallKind::ImageGeneration,
+                                        _ => return None,
+                                    };
+                                    Some(HostedToolCall {
+                                        kind,
+                                        id: call.call_id.clone(),
+                                        arguments: call.arguments.clone(),
+                                    })
+                                })
+                                .collect::<Vec<_>>();
+                            let tool_messages = execute_hosted_tool_calls(
+                                &hosted_calls,
+                                &config,
+                                &hosted_tool_client,
+                                trace_id.as_deref(),
+                            )
+                            .await;
+                            let body_bytes = {
+                                let mut body = request_state.lock().await;
+                                let chat_response = json!({
+                                    "choices": [{ "message": assistant }]
+                                });
+                                if !append_tool_outputs_to_chat_request(
+                                    &mut body,
+                                    &chat_response,
+                                    tool_messages,
+                                ) {
+                                    return Err(
+                                        "hosted tool loop could not append assistant/tool messages"
+                                            .to_string(),
+                                    );
+                                }
+                                body["stream"] = serde_json::json!(true);
+                                if let Some(options) = original_stream_options {
+                                    body["stream_options"] = options;
+                                }
+                                serde_json::to_vec(&*body).map_err(|error| error.to_string())?
+                            };
                             if let Some(trace_id) = trace_id.as_deref() {
                                 super::codex_router_log::append_event(
-                                    "hosted_tool_loop_upstream_send",
+                                    "hosted_tool_stream_continuation",
                                     &[
                                         ("trace", trace_id.to_string()),
-                                        ("session", session_id.clone()),
-                                        ("model", model.clone()),
-                                        ("provider", provider_id.clone()),
-                                        ("request_bytes", body_len.to_string()),
+                                        ("session", session_id),
+                                        ("model", model),
+                                        ("provider", provider_id),
+                                        ("round", round.to_string()),
                                     ],
                                 );
                             }
-                            let send = send_upstream_request(headers, body_bytes);
-                            send.await
+                            let response = send_forwarder_upstream_request(
+                                method,
+                                url,
+                                target_for_log,
+                                headers,
+                                extensions,
+                                body_bytes,
+                                timeout,
+                                true,
+                                non_streaming_timeout,
+                                streaming_first_byte_timeout,
+                                is_socks_proxy,
+                                preserve_exact_header_case,
+                                upstream_proxy_url.as_deref(),
+                            )
+                            .await
+                            .map_err(|error| error.to_string())?;
+                            Ok(Some(Box::pin(
+                                response
+                                    .bytes_stream()
+                                    .map(|item| item.map_err(|error| std::io::Error::other(error))),
+                            ) as ChatSseStream))
                         }
-                    },
-                    codex_trace_id.as_deref(),
-                    hosted_tools_forced_non_stream,
-                )
-                .await?
+                    };
+                    let mut response_headers = response.headers().clone();
+                    response_headers.insert(
+                        http::header::CONTENT_TYPE,
+                        http::HeaderValue::from_static("text/event-stream"),
+                    );
+                    response_headers.insert(
+                        http::HeaderName::from_static(HOSTED_TOOL_STREAM_RESPONSE_HEADER),
+                        http::HeaderValue::from_static("true"),
+                    );
+                    response_headers.remove(http::header::CONTENT_LENGTH);
+                    response_headers.remove(http::header::CONTENT_ENCODING);
+                    let initial_stream: ChatSseStream = Box::pin(response.bytes_stream());
+                    let stream = create_responses_sse_stream_from_chat_with_hosted_loop(
+                        initial_stream,
+                        context,
+                        callback,
+                    );
+                    ProxyResponse::streamed(StatusCode::OK, response_headers, stream)
+                } else {
+                    run_hosted_tool_chat_loop(
+                        response,
+                        &mut filtered_body,
+                        config,
+                        &hosted_tool_client,
+                        |body| {
+                            let headers = ordered_headers.clone();
+                            let body_bytes = serde_json::to_vec(body).map_err(|e| {
+                                ProxyError::Internal(format!(
+                                    "Failed to serialize hosted tool loop request body: {e}"
+                                ))
+                            });
+                            let trace_id = codex_trace_id.clone();
+                            let session_id = self.session_id.clone();
+                            let model = request_model_for_log.clone();
+                            let provider_id = provider.id.clone();
+                            async move {
+                                let body_bytes = body_bytes?;
+                                let body_len = body_bytes.len();
+                                if let Some(trace_id) = trace_id.as_deref() {
+                                    super::codex_router_log::append_event(
+                                        "hosted_tool_loop_upstream_send",
+                                        &[
+                                            ("trace", trace_id.to_string()),
+                                            ("session", session_id.clone()),
+                                            ("model", model.clone()),
+                                            ("provider", provider_id.clone()),
+                                            ("request_bytes", body_len.to_string()),
+                                        ],
+                                    );
+                                }
+                                let send = send_upstream_request(headers, body_bytes);
+                                send.await
+                            }
+                        },
+                        codex_trace_id.as_deref(),
+                        hosted_tools_forced_non_stream,
+                    )
+                    .await?
+                }
             } else {
                 response
             };

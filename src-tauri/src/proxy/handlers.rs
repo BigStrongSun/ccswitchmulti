@@ -32,7 +32,9 @@ use super::{
             create_responses_sse_stream_from_anthropic_with_context,
             responses_sse_events_from_anthropic_message,
         },
-        streaming_codex_chat::create_responses_sse_stream_from_chat_with_context,
+        streaming_codex_chat::{
+            create_responses_sse_stream_from_chat_with_context, HOSTED_TOOL_STREAM_RESPONSE_HEADER,
+        },
         streaming_gemini::create_anthropic_sse_stream_from_gemini,
         streaming_retry::{
             create_resilient_anthropic_sse_stream_from_responses,
@@ -3169,12 +3171,31 @@ async fn handle_codex_chat_to_responses_transform(
 ) -> Result<axum::response::Response, ProxyError> {
     let status = response.status();
     let hosted_tool_loop_response = response.headers().contains_key(HOSTED_TOOL_LOOP_HEADER);
+    let hosted_tool_stream_response = response
+        .headers()
+        .contains_key(HOSTED_TOOL_STREAM_RESPONSE_HEADER);
 
     if !status.is_success() {
         // 上游 Chat 错误体形状与 Responses 不一致（如 MiniMax 的 base_resp、自定义 detail 字段）；
         // 直接透传会让 Codex 客户端无法识别错误码。这里统一转换为 Responses 风格
         // `{"error": {message, type, code, param}}`，保留原始 HTTP 状态码。
         return handle_codex_chat_error_response(response, ctx, status).await;
+    }
+
+    if is_stream && hosted_tool_stream_response {
+        let mut headers = response.headers().clone();
+        headers.remove(HOSTED_TOOL_STREAM_RESPONSE_HEADER);
+        headers.remove(HOSTED_TOOL_LOOP_HEADER);
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("text/event-stream"),
+        );
+        headers.insert(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-cache"),
+        );
+        let body = axum::body::Body::from_stream(response.bytes_stream());
+        return Ok((headers, body).into_response());
     }
 
     if is_compaction {
