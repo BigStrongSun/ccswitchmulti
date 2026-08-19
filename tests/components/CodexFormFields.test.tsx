@@ -22,6 +22,22 @@ import type {
   CodexCatalogModel,
   CodexRoutingConfig,
 } from "@/types";
+import type {
+  CodexModelReasoningResolution,
+  CodexReasoningDiscoveryOutcome,
+} from "@/types/codexSubagentV2";
+
+const reasoningApiMocks = vi.hoisted(() => ({
+  resolve: vi.fn(),
+  trigger: vi.fn(),
+}));
+
+vi.mock("@/lib/api/codexSubagentV2", () => ({
+  codexSubagentV2Api: {
+    resolveModelReasoningCapability: reasoningApiMocks.resolve,
+    triggerModelReasoningDetection: reasoningApiMocks.trigger,
+  },
+}));
 
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
@@ -48,7 +64,54 @@ beforeEach(() => {
   vi.mocked(probeCodexChatForConfig).mockReset();
   vi.mocked(probeCodexResponsesForConfig).mockReset();
   Element.prototype.scrollIntoView = vi.fn();
+  reasoningApiMocks.resolve.mockReset();
+  reasoningApiMocks.trigger.mockReset();
+  reasoningApiMocks.resolve.mockImplementation(
+    async (_settings, _provider, model) =>
+      createUnknownReasoningResolution(model),
+  );
 });
+
+function createUnknownReasoningResolution(
+  model: string,
+): CodexModelReasoningResolution {
+  return {
+    model,
+    capability: null,
+    source: "unknown",
+    fingerprint: "",
+    resolved: {
+      supportKind: "unknown",
+      confidence: "unverified",
+      codexSelectableEfforts: [],
+      providerAcceptedEfforts: [],
+      providerDefaultEffort: null,
+      disableAllowed: false,
+      effortMap: {},
+    },
+    hasDetectionCandidate: false,
+    detection: null,
+  };
+}
+
+function createDetectedReasoningOutcome(
+  model: string,
+): Extract<CodexReasoningDiscoveryOutcome, { found: unknown }> {
+  return {
+    found: {
+      providerKey: "codex-thirdparty",
+      model,
+      fetchedAt: 1_700_000_000_000,
+      source: "openrouter_api",
+      reasoning: {
+        supportedEfforts: ["low", "high"],
+        defaultEffort: "high",
+        mandatory: false,
+        defaultEnabled: true,
+      },
+    },
+  };
+}
 
 // 构造协议探测的成功返回，供并发池测试精确控制每个模型的完成顺序。
 function createProbeResult(
@@ -424,6 +487,111 @@ function renderAutoSplitHarness() {
 }
 
 describe("CodexFormFields local model routing", () => {
+  it("renders the resolved reasoning card and lets the user declare an unknown model", async () => {
+    renderCatalogHarness([{ model: "qwen3.8" }]);
+    fireEvent.click(screen.getByText(/Codex 推理能力（未声明/));
+    await waitFor(() => expect(reasoningApiMocks.resolve).toHaveBeenCalled());
+
+    expect(
+      await screen.findByText("未知（使用服务端默认）"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("使用服务端默认（不发送推理参数）。"),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "手动声明" }));
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("qwen3.8推理能力 JSON")).not.toHaveValue("");
+    });
+  });
+
+  it("adopts a detected reasoning snapshot into the catalog declaration", async () => {
+    const detected = createDetectedReasoningOutcome("qwen3.8");
+    reasoningApiMocks.resolve.mockImplementation(
+      async (_settings, _provider, model) => ({
+        ...createUnknownReasoningResolution(model),
+        hasDetectionCandidate: true,
+        detection: detected.found,
+      }),
+    );
+    const { latestCatalog } = renderCatalogHarness([{ model: "qwen3.8" }]);
+    fireEvent.click(screen.getByText(/Codex 推理能力（未声明/));
+
+    expect(await screen.findByText("采用检测结果")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "采用检测结果" }));
+
+    await waitFor(() => {
+      expect(latestCatalog()[0].reasoning).toEqual(
+        expect.objectContaining({
+          source: "user",
+          supportedEfforts: ["low", "high"],
+          defaultEffort: "high",
+          disableAllowed: true,
+        }),
+      );
+    });
+  });
+
+  it("re-detects a model through the read-only capability command", async () => {
+    const detected = createDetectedReasoningOutcome("qwen3.8");
+    let redetected = false;
+    reasoningApiMocks.resolve.mockImplementation(
+      async (_settings, _provider, model) =>
+        redetected
+          ? {
+              ...createUnknownReasoningResolution(model),
+              source: "detection",
+              capability: {
+                schemaVersion: 2,
+                supportStatus: "confirmed_supported",
+                controlKind: "graded",
+                supportedEfforts: ["low", "high"],
+                defaultEffort: "high",
+                disableAllowed: true,
+                upstream: {
+                  format: "reasoning_object",
+                  parameter: "reasoning.effort",
+                },
+              },
+              resolved: {
+                supportKind: "effort_levels",
+                confidence: "confirmed",
+                codexSelectableEfforts: ["low", "high"],
+                providerAcceptedEfforts: ["low", "high"],
+                providerDefaultEffort: "high",
+                disableAllowed: true,
+                effortMap: { low: "low", high: "high" },
+              },
+              hasDetectionCandidate: true,
+              detection: detected.found,
+            }
+          : createUnknownReasoningResolution(model),
+    );
+    reasoningApiMocks.trigger.mockImplementationOnce(async () => {
+      redetected = true;
+      return detected;
+    });
+    renderCatalogHarness([{ model: "qwen3.8" }]);
+    fireEvent.click(screen.getByText(/Codex 推理能力（未声明/));
+
+    expect(
+      await screen.findByRole("button", { name: "重新检测" }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "重新检测" }));
+
+    await waitFor(() => {
+      expect(reasoningApiMocks.trigger).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: "codex-thirdparty",
+          settingsConfig: { base_url: "https://api.thirdparty.example/v1" },
+        }),
+        "qwen3.8",
+      );
+    });
+    expect(await screen.findByText("支持推理")).toBeInTheDocument();
+  });
+
   it("keeps built-in reasoning read-only until an explicit override and restores the preset", async () => {
     const builtinReasoning: NonNullable<CodexCatalogModel["reasoning"]> = {
       supported: true as const,

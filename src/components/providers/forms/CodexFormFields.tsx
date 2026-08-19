@@ -1028,7 +1028,7 @@ export function CodexFormFields({
 
   useEffect(() => {
     const models = catalogRows
-      .map((row) => catalogRowUpstreamModel(row))
+      .map((row) => catalogRowUpstreamModel(row) || row.model.trim())
       .filter(Boolean);
     if (models.length === 0) {
       setReasoningResolutions({});
