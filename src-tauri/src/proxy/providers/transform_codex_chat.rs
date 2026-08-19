@@ -250,6 +250,9 @@ pub(crate) struct CodexToolContext {
     namespace_name_to_chat_name: HashMap<(String, String), String>,
     hosted_web_search: Option<HostedWebSearchConfig>,
     hosted_image_generation: Option<HostedImageGenerationConfig>,
+    /// Responses tool types that CCSM cannot project to Chat safely.
+    /// Keep these visible so callers fail loudly instead of silently dropping them.
+    unsupported_response_tools: Vec<String>,
 }
 
 impl CodexToolContext {
@@ -277,6 +280,10 @@ impl CodexToolContext {
     /// 返回 Codex 原始 hosted `image_generation` 的安全配置子集。
     pub(crate) fn hosted_image_generation_config(&self) -> Option<&HostedImageGenerationConfig> {
         self.hosted_image_generation.as_ref()
+    }
+
+    pub(crate) fn unsupported_response_tools(&self) -> &[String] {
+        &self.unsupported_response_tools
     }
 
     /// 按 MultiRouter 开关移除已禁用的 hosted tools。
@@ -482,9 +489,14 @@ impl CodexToolContext {
                 Some("web_search") => self.add_hosted_web_search_tool(tool),
                 Some("image_generation") => self.add_hosted_image_generation_tool(tool),
                 Some("namespace") => self.add_namespace_tool(tool),
-                _ => {}
+                Some(tool_type) => self.unsupported_response_tools.push(tool_type.to_string()),
+                None => self
+                    .unsupported_response_tools
+                    .push("<missing type>".to_string()),
             },
-            _ => {}
+            _ => self
+                .unsupported_response_tools
+                .push("<non-object tool>".to_string()),
         }
     }
 }
@@ -552,6 +564,15 @@ pub fn responses_to_chat_completions_with_reasoning_text_only_and_cache(
 ) -> Result<Value, ProxyError> {
     let mut result = json!({});
     let tool_context = build_codex_tool_context_from_request(&body);
+    if !tool_context.unsupported_response_tools().is_empty() {
+        let mut types = tool_context.unsupported_response_tools().to_vec();
+        types.sort();
+        types.dedup();
+        return Err(ProxyError::TransformError(format!(
+            "Unsupported Responses tool type(s) for Chat upstream: {}",
+            types.join(", ")
+        )));
+    }
     let text_only_model = text_only_override.unwrap_or(false)
         || body
             .get("model")
@@ -3704,6 +3725,25 @@ mod tests {
             "Look up a value."
         );
         assert_eq!(result["tool_choice"]["function"]["name"], "lookup");
+    }
+
+    #[test]
+    fn unsupported_responses_tool_type_fails_loudly_instead_of_being_dropped() {
+        let error = responses_to_chat_completions_with_reasoning_text_only_and_cache(
+            json!({
+                "model": "third-party",
+                "input": "use the hosted file index",
+                "tools": [{ "type": "file_search" }]
+            }),
+            None,
+            None,
+            None,
+        )
+        .expect_err("unsupported hosted tools must not disappear silently");
+
+        assert!(
+            matches!(error, ProxyError::TransformError(message) if message.contains("file_search"))
+        );
     }
 
     #[test]
