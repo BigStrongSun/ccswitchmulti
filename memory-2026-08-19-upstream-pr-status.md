@@ -32,3 +32,10 @@ The exact commits for #6159 (`31d8a937`) and #6530 (`246a475f`) are not ancestor
 ## Outreach
 
 On 2026-08-19 a single bilingual, focused-maintainer comment was posted to PR #5990, asking the maintainer to review #6159/#6530 first and then the smaller focused PRs. No comment was posted to the already-closed #4727.
+
+## New protocol-conversion PR
+
+- PR #6615 was created accidentally against `BigStrongSun/ccswitchmulti`, which is outside the official fork network; GitHub showed 0 commits and 0 files. It was closed immediately.
+- The same commit was pushed to `BigStrongSun/ccswitchmulti-fork-archive` and correctly submitted as [PR #6616](https://github.com/farion1231/cc-switch/pull/6616).
+- #6616 changes only `transform_codex_chat.rs`: unsupported or malformed Responses tool entries are recorded and rejected with a deterministic `TransformError` instead of being silently dropped. Full `transform_codex_chat` tests pass: 90/90.
+- The PR body is bilingual and explains scope, root cause, observable effect, and validation. A maintainer comment was added because reviewer-request API returned 403.
