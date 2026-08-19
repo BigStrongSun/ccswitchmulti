@@ -3872,3 +3872,10 @@
 - 错误码：`unknown_reasoning_capability_requires_declaration`；unknown 不允许通过 delegated 绕过，用户必须在模型目录声明能力或采用只读检测结果后再保存。
 - 前端保存前用同一状态条件拦截，并显示 profile/model 名称和“推理能力未配置，当前可路由角色无法保存”；能力摘要同步强调这是保存阻塞，而非普通黄色提醒。
 - 验证状态：`cargo fmt` 与 `git diff --check` 通过；Rust 全量测试当前被工作区已有的 `forwarder.rs` 缺少 `json!` 导入和 `handlers.rs` 缺少 `streaming_codex_chat` 导入阻塞，非本次修改引入；TypeScript 全量检查仍受现有依赖缺失（vitest、@dnd-kit）阻塞，目标文件无新增类型错误。
+
+## 2026-08-19 Codex Reasoning Capability P3 收口
+
+- 根因修复提交 `760de2d8`：`createCatalogRow()` 对新模型把 `upstreamModel` 初始化为空字符串，而 reasoning resolution effect 只读取该字段，导致模型编辑器虽有可见 `row.model`，却永远不触发能力解析，P3 卡片一直不显示。解析模型现在使用 `catalogRowUpstreamModel(row) || row.model.trim()`，空模型仍不会发起请求。
+- 交互闭环测试覆盖：unknown 三态文案与服务端默认说明、手动声明、采用只读检测结果、重新检测；重新检测验证使用当前草稿 provider id/name/base URL，未把 API key 送入只读能力请求。
+- 验证：`npx vitest run tests/components/CodexFormFields.test.tsx --pool=forks --poolOptions.forks.singleFork=true` 28/28 通过；`npx tsc --noEmit` 通过；`cargo check --lib`（`src-tauri`）通过；`git diff --check` 通过。测试仍有既有 Radix `act(...)` warning，不影响通过结果。
+- P3 边界：模型编辑器结构化最终生效视图和交互闭环已收口；未停止、替换、安装或覆盖运行中的 CCSM；P4（GUI/CLI inspect 等独立投影）尚未开始，不因 P3 提前发布 release。
