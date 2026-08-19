@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-08-19 恢复 Qwen/vLLM 缺省输出上限 131072（对齐 Qwen3.8-27B 官方最大输出）
+
+- 实况：Codex 任务 `01a01722-ca39-77f1-b7da-9d3a9d5fe023` 的 vLLM 透明代理记录出现单条请求 `prompt_tokens=136269 / completion_tokens=125875 / total_tokens=262144 / finish_reasons=["length"]`。根因不是上下文压缩也不是 KV cache，而是 Codex Responses 请求没有显式输出预算、CCSM 转换成 Chat Completions 时也没有补 `max_tokens`，vLLM 把剩余上下文窗口都当成默认输出预算。
+- 2026-07-09 提交 `8b6b3b7e` 曾按“CCSM 不应替用户截断”关掉 Qwen/vLLM 的隐式 `defaultOutputTokens`；本次真实生产样本证明完全缺省时 vLLM 会把剩余上下文窗口当成默认输出预算，长 Agent 单轮可能一直生成到 `max-model-len` 被 `length` 截断。恢复的默认值不是 32768，而是 Qwen3.8-27B 官方最大输出长度 `131072`（阿里云百炼模型页同时标注思考/非思考模式最大输出 131072），避免“输入少、输出多”的合法场景被 32k 砍掉。
+- CCSM 根修：Qwen + vLLM/matrixminecraft 推断分支重新设置 `defaultOutputTokens=131072`，`apply_qwen_vllm_safety_defaults` 对能力派生配置也补同一下限，前端 ProviderForm 保存 Qwen/vLLM reasoning meta 时同样写 131072。
+- 远端透明代理已先做运行态兜底：`vllm_dashboard/vllm_transparent_proxy.py` 对 `model=qwen3.8` 注入/钳制 `max_tokens=131072`，环境变量 `VLLM_PROXY_QWEN_MAX_OUTPUT_TOKENS` 可调；真实请求日志 `qwen_output_limit_applied=true / max_tokens=131072`。该代理兜底属于运行态防线，CCSM 转换层恢复模型级默认输出上限才是跨协议根修；后续安装/构建新版 CCSM 后应复测 `max_tokens=131072` 且不需要代理补丁。
+
 ## 2026-08-17/18 main CI 转绿：28 个 Clippy lint + unix 死导入 + macOS 测试夹具（三连根修）
 
 - 背景：main 自 08-16 起 CI 连续 40+ 次红，全部卡在 Clippy 步骤（`cargo clippy -- -D warnings`，CI 用 `dtolnay/rust-toolchain@stable` 即各 runner 最新 stable，本地 1.95 与 CI stable 的 lint 集合对 Windows 代码一致）。三个提交根修后 CI run `32049307104` 四 job 全绿（Frontend + ubuntu/windows/macos Backend）。
