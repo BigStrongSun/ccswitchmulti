@@ -3186,6 +3186,9 @@ async fn handle_codex_chat_to_responses_transform(
         let mut headers = response.headers().clone();
         headers.remove(HOSTED_TOOL_STREAM_RESPONSE_HEADER);
         headers.remove(HOSTED_TOOL_LOOP_HEADER);
+        headers.remove(axum::http::header::CONTENT_LENGTH);
+        headers.remove(axum::http::header::CONTENT_ENCODING);
+        headers.remove(axum::http::header::TRANSFER_ENCODING);
         headers.insert(
             axum::http::header::CONTENT_TYPE,
             axum::http::HeaderValue::from_static("text/event-stream"),
@@ -3194,7 +3197,71 @@ async fn handle_codex_chat_to_responses_transform(
             axum::http::header::CACHE_CONTROL,
             axum::http::HeaderValue::from_static("no-cache"),
         );
-        let body = axum::body::Body::from_stream(response.bytes_stream());
+        let stream =
+            record_responses_sse_stream(response.bytes_stream(), state.codex_chat_history.clone());
+        let usage_collector = if usage_logging_enabled(state) {
+            let state = state.clone();
+            let provider_id = ctx.provider.id.clone();
+            let request_model = ctx.request_model.clone();
+            let fallback_model = ctx
+                .outbound_model
+                .clone()
+                .unwrap_or_else(|| ctx.request_model.clone());
+            let app_type_str = ctx.app_type_str;
+            let start_time = ctx.start_time;
+            let session_id = ctx.session_id.clone();
+
+            Some(SseUsageCollector::new(
+                start_time,
+                Some(codex_stream_usage_event_filter),
+                move |events, first_token_ms| {
+                    let usage =
+                        TokenUsage::from_codex_stream_events_auto(&events).unwrap_or_default();
+                    if !usage.has_billable_tokens() {
+                        log::debug!("[Codex] hosted 流式响应 usage 全 0 或缺失，跳过消费记录");
+                        return;
+                    }
+                    let model = usage
+                        .model
+                        .clone()
+                        .filter(|m| !m.is_empty())
+                        .unwrap_or_else(|| fallback_model.clone());
+                    let latency_ms = start_time.elapsed().as_millis() as u64;
+                    let state = state.clone();
+                    let provider_id = provider_id.clone();
+                    let request_model = request_model.clone();
+                    let outbound_model = fallback_model.clone();
+                    let session_id = session_id.clone();
+                    tokio::spawn(async move {
+                        log_usage(
+                            &state,
+                            &provider_id,
+                            app_type_str,
+                            &model,
+                            &request_model,
+                            &outbound_model,
+                            usage,
+                            latency_ms,
+                            first_token_ms,
+                            true,
+                            status.as_u16(),
+                            Some(session_id),
+                        )
+                        .await;
+                    });
+                },
+            ))
+        } else {
+            None
+        };
+        let logged_stream = create_logged_passthrough_stream(
+            stream,
+            ctx.tag,
+            usage_collector,
+            ctx.streaming_timeout_config(),
+            connection_guard,
+        );
+        let body = axum::body::Body::from_stream(logged_stream);
         return Ok((headers, body).into_response());
     }
 
