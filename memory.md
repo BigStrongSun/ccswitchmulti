@@ -3887,3 +3887,8 @@
 - 交互闭环测试覆盖：unknown 三态文案与服务端默认说明、手动声明、采用只读检测结果、重新检测；重新检测验证使用当前草稿 provider id/name/base URL，未把 API key 送入只读能力请求。
 - 验证：`npx vitest run tests/components/CodexFormFields.test.tsx --pool=forks --poolOptions.forks.singleFork=true` 28/28 通过；`npx tsc --noEmit` 通过；`cargo check --lib`（`src-tauri`）通过；`git diff --check` 通过。测试仍有既有 Radix `act(...)` warning，不影响通过结果。
 - P3 边界：模型编辑器结构化最终生效视图和交互闭环已收口；未停止、替换、安装或覆盖运行中的 CCSM；P4（GUI/CLI inspect 等独立投影）尚未开始，不因 P3 提前发布 release。
+
+## 2026-08-19 Mac Codex MultiRouter Debug 红色 WebSocket 探针
+
+- 截图中 `supports_websockets=false`、TCP 可达、live 接管一致，红色项却是 `本地代理 WebSocket 探针失败：error sending request for url (http://127.0.0.1:15721/v1/responses)`。源码 `src-tauri/src/commands/proxy.rs` 的 `diagnose_codex_multirouter` 无条件执行 `codex_probe_websocket_fallback`，即使 live config 已禁用 WebSocket；该探针只验证本地 GET + Upgrade 是否能收到预期 HTTP 426，不是模型请求，也不是上游连通性证明。
+- 代理服务器的设计契约是 `/v1/responses` 的 GET/Upgrade 始终返回 HTTP 426，要求 Codex 走 HTTP Responses；因此 `supports_websockets=false` 与“探针失败”并不矛盾。Mac 现场更可能是旧安装包未包含该 426 路由、请求在本机代理/VPN 环境被 reset，或探针请求未收到 HTTP 响应；仅凭截图不能区分三者。需在 Mac 上用 curl/route log/版本哈希复核，不能把这项直接归因到模型或路由规则。
