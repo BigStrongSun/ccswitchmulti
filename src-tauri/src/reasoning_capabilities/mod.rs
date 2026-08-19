@@ -102,7 +102,8 @@ pub struct ReasoningCapabilitySnapshot {
 
 /// 适配器结果。`NotAdvertised`/`Unavailable`/`Invalid` 均不能自动生成
 /// `confirmed_unsupported`——缺失证据不是不存在的证据。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DiscoveryOutcome {
     Found(ProviderCapabilitySnapshot),
     /// 端点可达，但模型/字段未声明。

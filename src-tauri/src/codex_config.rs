@@ -4394,6 +4394,78 @@ pub fn get_codex_subagent_reasoning_capabilities(
     get_codex_subagent_reasoning_capabilities_from_settings(&settingsConfig)
 }
 
+/// P3：单模型推理能力解析结果（与 catalog/请求/Sub-Agent 同源）。
+///
+/// 返回 resolved capability + 来源 + 指纹 + 当前检测候选状态，供模型卡片
+/// 展示与 unknown 状态动作（重新检测/采用检测结果）。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexModelReasoningResolution {
+    pub model: String,
+    pub capability: Option<crate::proxy::providers::codex_reasoning::CodexModelReasoningCapability>,
+    pub source: String,
+    pub fingerprint: String,
+    pub resolved: ResolvedSubagentReasoningCapability,
+    /// 是否存在有效 TTL 检测候选快照（供「采用检测结果」动作）。
+    pub has_detection_candidate: bool,
+    pub detection: Option<crate::reasoning_capabilities::ProviderCapabilitySnapshot>,
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn resolve_codex_model_reasoning_capability(
+    settingsConfig: Value,
+    providerId: String,
+    model: String,
+) -> CodexModelReasoningResolution {
+    let model = model.trim().to_string();
+    let detection = crate::reasoning_capabilities::current_detection(&providerId, &model);
+    let library = crate::reasoning_capabilities::catalog::global_library();
+    let official_models = codex_official_models_cache().unwrap_or_default();
+    let resolved = crate::reasoning_capabilities::resolve_codex_model_capability_core(
+        &settingsConfig,
+        None,
+        &model,
+        detection.as_ref(),
+        library.as_ref(),
+        &official_models,
+    );
+    let resolved_capability =
+        crate::proxy::providers::codex_reasoning::resolve_subagent_reasoning_capability(
+            resolved.capability.as_ref(),
+        );
+    CodexModelReasoningResolution {
+        model,
+        capability: resolved.capability,
+        source: resolved.source.as_str().to_string(),
+        fingerprint: resolved.fingerprint,
+        resolved: resolved_capability,
+        has_detection_candidate: detection.is_some(),
+        detection,
+    }
+}
+
+/// P3：触发单模型只读检测（异步，调用发现适配器并写入 TTL 缓存）。
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn trigger_codex_model_reasoning_detection(
+    provider: crate::provider::Provider,
+    model: String,
+) -> Result<crate::reasoning_capabilities::DiscoveryOutcome, String> {
+    let model = model.trim().to_string();
+    let outcome = crate::reasoning_capabilities::provider_metadata::discover_provider_capability(
+        &provider, &model,
+    )
+    .await;
+    if let crate::reasoning_capabilities::DiscoveryOutcome::Found(snapshot) = &outcome {
+        let mut cache = crate::reasoning_capabilities::detection_cache()
+            .lock()
+            .expect("detection cache poisoned");
+        cache.insert(snapshot.clone());
+    }
+    Ok(outcome)
+}
+
 #[tauri::command]
 #[allow(non_snake_case)]
 pub fn get_codex_subagent_profile_statuses(

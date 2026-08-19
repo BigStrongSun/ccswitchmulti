@@ -1416,6 +1416,8 @@ pub fn run() {
             commands::read_live_provider_settings,
             commands::get_settings,
             codex_config::get_codex_subagent_reasoning_capabilities,
+            codex_config::resolve_codex_model_reasoning_capability,
+            codex_config::trigger_codex_model_reasoning_detection,
             codex_config::get_codex_subagent_profile_statuses,
             codex_config::preview_codex_subagent_profile,
             commands::save_settings,
