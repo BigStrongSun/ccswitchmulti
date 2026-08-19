@@ -23,3 +23,11 @@
 ## 后续架构注意
 
 当前保留官方密文使用外观启发式；更稳妥的长期方案是给历史 item 持久化 provider/ownership metadata，在 provider 边界按所有权清理，而不是仅依赖密文前缀。
+
+## 为什么现在才暴露
+
+这不是 8 月 6 日 replay-ID 修复的直接回归。旧修复覆盖了 plain reasoning 的 `rs_*` ID、DeepSeek reasoning status 和 `web_search_call` ID，但当时保留了 `encrypted_content`，默认它来自 OpenAI 同源历史。
+
+本次日志显示：DeepSeek 在 20:12--20:13 连续返回 200；切回 GPT-5.6 Luna 后，20:14:06 开始自动 `compaction`（`compaction_reason=comp_hash_changed`、`compaction_transport=responses_compact`），同一个会话连续收到 400。也就是说，新的 Codex runtime/历史 compaction 分支把此前隐藏在会话中的 opaque item 真正送进了官方 compaction 请求，才把旧盲点放大成可见错误。
+
+同期上游 Codex 0.147/0.148 的 Multi-Agent V2 与第三方 Responses 兼容性也发生变化：OpenAI 专用 `agent_message`/encrypted payload 会进入非 OpenAI provider。故“以前没有”更准确地说是该组合路径尚未触发，并非密文协议从未存在；CCSM 旧逻辑只覆盖了先前已观察到的字段变体。
