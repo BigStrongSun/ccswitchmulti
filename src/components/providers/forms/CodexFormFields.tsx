@@ -450,6 +450,28 @@ function capabilityFromReasoningDetection(
   };
 }
 
+function unknownReasoningResolution(
+  model: string,
+): CodexModelReasoningResolution {
+  return {
+    model,
+    capability: null,
+    source: "unknown",
+    fingerprint: "",
+    resolved: {
+      supportKind: "unknown",
+      confidence: "unverified",
+      codexSelectableEfforts: [],
+      providerAcceptedEfforts: [],
+      providerDefaultEffort: null,
+      disableAllowed: false,
+      effortMap: {},
+    },
+    hasDetectionCandidate: false,
+    detection: null,
+  };
+}
+
 type CodexCatalogRow = CodexCatalogModel & { rowId: string };
 
 type CodexRoutingRow = CodexRoutingRoute & { rowId: string };
@@ -1030,7 +1052,7 @@ export function CodexFormFields({
             model,
             error,
           });
-          return null;
+          return [model, unknownReasoningResolution(model)] as const;
         }
       }),
     ).then((results) => {
