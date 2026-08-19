@@ -1430,7 +1430,7 @@ pub fn initialize_legacy_subagent_v2() -> Result<CodexSubagentV2, CompileError> 
         key: "deepseek-v4-flash".into(),
         model: "deepseek-v4-flash".into(),
         enabled: true,
-        input_modalities: Some(vec![InputModality::Text]),
+        input_modalities: None,
         strengths: vec![
             TaskStrength::LongContextReading,
             TaskStrength::RepositoryExploration,
@@ -3584,7 +3584,6 @@ mod tests {
             TaskStrength::Testing,
         ];
         flash.preference = Preference::Preferred;
-        flash.input_modalities = Some(vec![InputModality::Text]);
         let mut pro = profile("deepseek-v4-pro", "deepseek-v4-pro");
         pro.strengths = vec![
             TaskStrength::ComplexDebugging,
@@ -3596,7 +3595,6 @@ mod tests {
         pro.optimization = Optimization::Quality;
         pro.write_scope = WriteScope::ComplexChanges;
         pro.preference = Preference::Preferred;
-        pro.input_modalities = Some(vec![InputModality::Text]);
         assert_eq!(
             initialize_legacy_subagent_v2(),
             Ok(config(

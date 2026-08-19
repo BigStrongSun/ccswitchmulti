@@ -1260,11 +1260,12 @@ command = "example-mcp"
                 CodexSubagentV2RoleFilesStatus::Verified
             );
             assert_eq!(result.verification.role_files.len(), 1);
-            assert_eq!(
+            assert!(
                 result.provider.settings_config["codexRouting"]["subagentV2"]["profiles"]
-                    ["deepseek-v4-flash"]["inputModalities"],
-                json!(["text"]),
-                "the focused mutation must persist catalog-derived capability explicitly"
+                    ["deepseek-v4-flash"]
+                    .get("inputModalities")
+                    .is_none(),
+                "catalog-derived capability must remain runtime metadata"
             );
             let file = &result.verification.role_files[0];
             assert!(file.exists);

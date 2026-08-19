@@ -3254,13 +3254,38 @@ fn compile_configured_codex_subagent_roles(
         .iter()
         .map(|model| (model.model.to_ascii_lowercase(), model.reasoning.clone()))
         .collect();
+    let mut compile_persisted = persisted.clone();
+    for entry in &mut compile_persisted.profiles {
+        let crate::codex_subagent_profiles::ParsedProfileEntry::Valid(profile) = entry else {
+            continue;
+        };
+        if profile.input_modalities.is_some() {
+            continue;
+        }
+        profile.input_modalities = specs
+            .iter()
+            .find(|spec| {
+                normalize_profile_key(&spec.model) == normalize_profile_key(&profile.model)
+            })
+            .and_then(codex_subagent_profile_input_modalities)
+            .map(|modalities| {
+                modalities
+                    .into_iter()
+                    .filter_map(|value| match value.as_str() {
+                        "text" => Some(crate::codex_subagent_profiles::InputModality::Text),
+                        "image" => Some(crate::codex_subagent_profiles::InputModality::Image),
+                        _ => None,
+                    })
+                    .collect()
+            });
+    }
     let output = compile_subagent_v2_profiles(&SubagentCompileRequest {
         subagent_version: if version == CodexSubagentVersion::V1 {
             ProfileSubagentVersion::V1
         } else {
             ProfileSubagentVersion::V2
         },
-        persisted_subagent_v2: Some(persisted.clone()),
+        persisted_subagent_v2: Some(compile_persisted),
         catalog_models,
         occupied_role_names: occupied_user_codex_agent_names(&get_codex_agents_dir())?,
     })
@@ -3428,33 +3453,11 @@ pub(crate) fn hydrate_codex_subagent_v2_input_modalities(
     settings: &Value,
     raw_subagent_v2: &Value,
 ) -> Value {
-    let mut hydrated = raw_subagent_v2.clone();
-    let Some(profiles) = hydrated.get_mut("profiles").and_then(Value::as_object_mut) else {
-        return hydrated;
-    };
-    let modalities_by_model = codex_catalog_model_specs(settings, "")
-        .into_iter()
-        .filter_map(|spec| {
-            let modalities = codex_subagent_profile_input_modalities(&spec)?;
-            Some((normalize_profile_key(&spec.model), modalities))
-        })
-        .collect::<HashMap<_, _>>();
-    for profile in profiles.values_mut().filter_map(Value::as_object_mut) {
-        if profile.contains_key("inputModalities") {
-            continue;
-        }
-        let Some(identity) = profile
-            .get("model")
-            .and_then(Value::as_str)
-            .map(normalize_profile_key)
-        else {
-            continue;
-        };
-        if let Some(modalities) = modalities_by_model.get(&identity) {
-            profile.insert("inputModalities".to_string(), json!(modalities));
-        }
-    }
-    hydrated
+    // Catalog-derived input modalities are runtime metadata, not profile state.
+    // Keeping them out of persistence prevents a stale catalog snapshot from
+    // being mistaken for a user override after MultiRouter refreshes a model.
+    let _ = settings;
+    raw_subagent_v2.clone()
 }
 
 fn catalog_profile_draft(
@@ -3475,12 +3478,10 @@ fn catalog_profile_draft(
         if !enabled_preferred {
             preset["questionnaire"]["preference"] = Value::String("eligible".to_string());
         }
-        if let Some(input_modalities) = input_modalities {
-            preset["inputModalities"] = json!(input_modalities);
-        }
+        let _ = input_modalities;
         return Ok(preset);
     }
-    let mut profile = json!({
+    let profile = json!({
         "model": model,
         "enabled": false,
         "questionnaire": {
@@ -3491,9 +3492,7 @@ fn catalog_profile_draft(
         },
         "reasoning": { "policy": "delegated" }
     });
-    if let Some(input_modalities) = input_modalities {
-        profile["inputModalities"] = json!(input_modalities);
-    }
+    let _ = input_modalities;
     Ok(profile)
 }
 
@@ -7738,8 +7737,7 @@ mod tests {
         )
         .expect("backend recovery should re-key a structurally valid alias");
 
-        let mut expected_profile = aliased_profile;
-        expected_profile["inputModalities"] = json!(["text"]);
+        let expected_profile = aliased_profile;
         assert_eq!(recovered["profiles"]["deepseek-v4-flash"], expected_profile);
         assert!(recovered["profiles"].get("LEGACY_ALIAS_SENTINEL").is_none());
         parse_persisted_subagent_v2(&recovered)
@@ -7997,6 +7995,57 @@ mod tests {
             info.source,
             CodexSubagentInputModalitySource::ProfileExplicit
         );
+    }
+
+    #[test]
+    fn catalog_refresh_replaces_automatic_profile_modality_without_persisting_it() {
+        let settings = codex_subagent_profile_status_settings(
+            "v2",
+            json!({}),
+            json!([{
+                "model": "refresh-model",
+                "contextWindow": 128000,
+                "inputModalities": ["text", "image"]
+            }]),
+            json!([{
+                "id": "r",
+                "match": { "models": ["refresh-model"] },
+                "upstream": { "auth": { "source": "provider_config" } }
+            }]),
+        );
+        let raw = json!({
+            "schemaVersion": 2,
+            "selectionPolicy": "balanced",
+            "profiles": {
+                "refresh-model": {
+                    "model": "refresh-model",
+                    "enabled": true,
+                    "questionnaire": {
+                        "taskStrengths": ["repository_exploration"],
+                        "optimization": "speed",
+                        "writeScope": "read_only",
+                        "preference": "eligible"
+                    },
+                    "reasoning": { "policy": "delegated" }
+                }
+            }
+        });
+        let hydrated = hydrate_codex_subagent_v2_input_modalities(&settings, &raw);
+        assert!(hydrated["profiles"]["refresh-model"]
+            .get("inputModalities")
+            .is_none());
+        let profile = parse_persisted_subagent_v2(&hydrated)
+            .expect("catalog-derived modality must not be required in persisted profile")
+            .profiles
+            .into_iter()
+            .find_map(|entry| match entry {
+                ParsedProfileEntry::Valid(profile) => Some(profile),
+                _ => None,
+            })
+            .expect("valid profile");
+        let info = resolve_input_modality_provenance(&settings, &profile);
+        assert_eq!(info.modalities, Some(vec!["text".into(), "image".into()]));
+        assert_eq!(info.source, CodexSubagentInputModalitySource::Catalog);
     }
 
     #[test]
@@ -14592,7 +14641,8 @@ model_catalog_json = "cc-switch-model-catalog.json"
     }
 
     #[test]
-    fn subagent_v2_hydration_uses_catalog_modalities_and_preserves_explicit_overrides() {
+    fn subagent_v2_hydration_does_not_persist_catalog_modalities_and_preserves_explicit_overrides()
+    {
         let settings = json!({
             "modelCatalog": { "models": [
                 {
@@ -14632,14 +14682,12 @@ model_catalog_json = "cc-switch-model-catalog.json"
 
         let hydrated = hydrate_codex_subagent_v2_input_modalities(&settings, &raw);
 
-        assert_eq!(
-            hydrated["profiles"]["deepseek-v4-flash"]["inputModalities"],
-            json!(["text"])
-        );
-        assert_eq!(
-            hydrated["profiles"]["gpt-vision"]["inputModalities"],
-            json!(["text", "image"])
-        );
+        assert!(hydrated["profiles"]["deepseek-v4-flash"]
+            .get("inputModalities")
+            .is_none());
+        assert!(hydrated["profiles"]["gpt-vision"]
+            .get("inputModalities")
+            .is_none());
         assert_eq!(
             hydrated["profiles"]["manual"]["inputModalities"],
             json!(["text"]),

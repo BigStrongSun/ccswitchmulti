@@ -3846,3 +3846,11 @@
 - 影响：当 MultiRouter catalog 后续把同一模型从纯文本改成文本+图像（或反向变化）时，旧 profile 字段仍会被 `resolve_input_modality_provenance`、`preview_codex_subagent_profile_with_context` 和角色生成逻辑当作显式 profile 值，阻止新 catalog 能力生效；前端 `inferredInputModalities` 也优先返回旧 profile 值。
 - 当前测试缺口：现有 5 个 provenance 测试只覆盖单次解析、route/catalog 冲突和显式覆盖，没有覆盖“catalog 刷新后旧自动值”的跨版本场景；因此测试全绿不能证明该隐患已消除。
 - 修复边界：不能只改来源文案或冲突提示。应把“用户覆盖”和“catalog 自动值”分离（优先采用不持久化自动值；若必须兼容既有数据，则增加受控来源标记和一次性迁移），并为 catalog 能力变更补充回归测试。现有未提交的 reasoning P3 工作不应与该修复混合提交。
+
+## 2026-08-19 V2 输入模态持久化语义根修
+
+- 根修提交：`inputModalities` 只保留用户显式覆盖；catalog 推导值不再由 hydration、catalog draft 或默认 profile 写回持久化配置。
+- 运行时：编译角色时若 profile 没有显式模态，按当前 `CodexCatalogModelSpec` 补齐文本/图像能力；preview 继续按同一 catalog 规则补齐。这样 MultiRouter catalog 刷新后，新能力会自动进入角色说明和 TOML。
+- 兼容：历史配置中已经存在 `inputModalities` 的值仍按显式覆盖处理，不擅自猜测用户意图；新建/同步 profile 不再制造这类伪覆盖。
+- 产品形态：UI 的默认 profile 不再预填“纯文本”；未声明时展示 catalog 的当前结果，用户选择“仅文本/文本与图像”才形成持久化覆盖。来源提示保留最终来源和冲突，但不要求用户理解内部多段优先级。
+- 回归：新增 `catalog_refresh_replaces_automatic_profile_modality_without_persisting_it`；更新 hydration、初始化、catalog re-key 和 focused mutation 断言。相关 Rust 3175/3175 通过，TypeScript typecheck 通过；Vitest 本轮受 Windows 并发 worker/线程池环境影响未得到稳定完整输出，需在单一干净进程中复验。
