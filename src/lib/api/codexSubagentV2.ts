@@ -2,7 +2,11 @@ import { invoke } from "@tauri-apps/api/core";
 import type { Provider } from "@/types";
 import type {
   CodexModelReasoningResolution,
+  CodexReasoningExportResponse,
   CodexReasoningDiscoveryOutcome,
+  CodexReasoningInspectResponse,
+  CodexReasoningListResponse,
+  CodexReasoningValidationResponse,
   CodexSubagentProfilePreview,
   CodexSubagentProfileStatuses,
   CodexSubagentReasoningCapabilities,
@@ -75,6 +79,44 @@ export const codexSubagentV2Api = {
     return invoke("trigger_codex_model_reasoning_detection", {
       provider,
       model,
+    });
+  },
+
+  /**
+   * P4：返回版本化、脱敏的四层 reasoning inspect 结果。
+   * 该查询与模型卡片调用同一后端 resolver，不接受前端自行推断的能力结论。
+   */
+  inspectReasoningCapability(
+    providerId: string,
+    model: string,
+  ): Promise<CodexReasoningInspectResponse> {
+    return invoke("inspect_codex_reasoning_capability", {
+      providerId,
+      model,
+    });
+  },
+
+  /** P4：列出一个或全部 Codex Provider 的 reasoning 摘要。 */
+  listReasoningCapabilities(
+    providerId?: string,
+  ): Promise<CodexReasoningListResponse> {
+    return invoke("list_codex_reasoning_capabilities", { providerId });
+  },
+
+  /** P4：只读校验 Provider 的能力声明，不执行网络探测或写入。 */
+  validateReasoningProvider(
+    providerId: string,
+  ): Promise<CodexReasoningValidationResponse> {
+    return invoke("validate_codex_reasoning_provider", { providerId });
+  },
+
+  /** P4：导出 allowlist 投影；后端始终返回 redacted=true。 */
+  exportReasoningProvider(
+    providerId: string,
+  ): Promise<CodexReasoningExportResponse> {
+    return invoke("export_codex_reasoning_provider", {
+      providerId,
+      redacted: true,
     });
   },
 

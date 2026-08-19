@@ -139,6 +139,73 @@ export interface CodexModelReasoningResolution {
   detection: CodexModelReasoningDetection | null;
 }
 
+/** P4：AI/CLI 只读 inspect/list/validate/export JSON 契约。 */
+export interface CodexReasoningDiagnostic {
+  level: "info" | "warning" | "error";
+  code: string;
+  message: string;
+}
+
+export interface CodexReasoningProviderSummary {
+  id: string;
+  name: string;
+}
+
+export interface CodexReasoningInspectResponse {
+  schemaVersion: 1;
+  requestId: string;
+  revision: string;
+  provider: CodexReasoningProviderSummary;
+  model: string;
+  persisted: Record<string, unknown>;
+  resolved: CodexModelReasoningResolution;
+  codexProjection: Record<string, unknown>;
+  providerProjection: Record<string, unknown>;
+  diagnostics: CodexReasoningDiagnostic[];
+}
+
+export interface CodexReasoningListItem {
+  model: string;
+  source: string;
+  fingerprint: string;
+  resolved: CodexSubagentReasoningCapability;
+}
+
+export interface CodexReasoningProviderList {
+  provider: CodexReasoningProviderSummary;
+  revision: string;
+  items: CodexReasoningListItem[];
+  diagnostics: CodexReasoningDiagnostic[];
+}
+
+export interface CodexReasoningListResponse {
+  schemaVersion: 1;
+  requestId: string;
+  providers: CodexReasoningProviderList[];
+  diagnostics: CodexReasoningDiagnostic[];
+}
+
+export interface CodexReasoningValidationResponse {
+  schemaVersion: 1;
+  requestId: string;
+  revision: string;
+  provider: CodexReasoningProviderSummary;
+  valid: boolean;
+  modelCount: number;
+  diagnostics: CodexReasoningDiagnostic[];
+}
+
+export interface CodexReasoningExportResponse {
+  schemaVersion: 1;
+  requestId: string;
+  revision: string;
+  redacted: true;
+  provider: CodexReasoningProviderSummary;
+  models: Array<Record<string, unknown>>;
+  providerReasoning?: Record<string, unknown> | null;
+  diagnostics: CodexReasoningDiagnostic[];
+}
+
 /** 只读检测适配器结果（对应后端 DiscoveryOutcome，snake_case 外部标签）。 */
 export type CodexReasoningDiscoveryOutcome =
   | { found: CodexModelReasoningDetection }

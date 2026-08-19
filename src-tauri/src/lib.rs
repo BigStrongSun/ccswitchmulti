@@ -5,7 +5,7 @@ mod auto_launch;
 mod claude_desktop_config;
 mod claude_mcp;
 mod claude_plugin;
-mod codex_config;
+pub mod codex_config;
 mod codex_desktop;
 mod codex_guardian;
 pub mod codex_history_migration;
@@ -1418,6 +1418,10 @@ pub fn run() {
             codex_config::get_codex_subagent_reasoning_capabilities,
             codex_config::resolve_codex_model_reasoning_capability,
             codex_config::trigger_codex_model_reasoning_detection,
+            codex_config::inspect_codex_reasoning_capability,
+            codex_config::list_codex_reasoning_capabilities,
+            codex_config::validate_codex_reasoning_provider,
+            codex_config::export_codex_reasoning_provider,
             codex_config::get_codex_subagent_profile_statuses,
             codex_config::preview_codex_subagent_profile,
             commands::save_settings,

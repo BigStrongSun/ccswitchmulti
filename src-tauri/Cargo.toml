@@ -26,6 +26,10 @@ name = "codex-history-repairer"
 path = "src/bin/codex-history-repairer.rs"
 required-features = ["history-repairer"]
 
+[[bin]]
+name = "ccsm"
+path = "src/bin/ccsm.rs"
+
 [features]
 default = []
 history-repairer = []

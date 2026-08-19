@@ -45,7 +45,7 @@ pub use dao::Profile;
 
 use crate::config::get_app_config_dir;
 use crate::error::AppError;
-use rusqlite::{hooks::Action, Connection};
+use rusqlite::{hooks::Action, Connection, OpenFlags};
 use serde::Serialize;
 use std::sync::Mutex;
 
@@ -168,6 +168,28 @@ impl Database {
         }
 
         Ok(db)
+    }
+
+    /// 以只读模式打开现有数据库，供 `ccsm reasoning` 等诊断命令使用。
+    ///
+    /// 与应用启动的 [`Database::init`] 明确分离：不创建目录、不迁移 schema、
+    /// 不修复数据、不清理日志，也不执行任何写入型启动任务。
+    pub fn init_readonly() -> Result<Self, AppError> {
+        let db_path = get_app_config_dir().join("cc-switch.db");
+        if !db_path.exists() {
+            return Err(AppError::Database(format!(
+                "数据库不存在: {}",
+                db_path.display()
+            )));
+        }
+        let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        conn.execute("PRAGMA foreign_keys = ON;", [])
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        register_db_change_hook(&conn);
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     /// 读取磁盘上数据库的 `user_version`；仅当它比应用支持的 [`SCHEMA_VERSION`]

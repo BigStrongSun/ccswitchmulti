@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use crate::app_config::AppType;
 use crate::codex_subagent_profiles::{
     compile_subagent_v2_profiles, initialize_legacy_subagent_v2, normalize_profile_key,
     parse_persisted_subagent_v2, parse_persisted_subagent_v2_tolerant, render_generated_role_toml,
@@ -26,6 +27,8 @@ use crate::proxy::providers::{
     codex_route_target_provider_id_from_route, codex_route_uses_official_agent_backend,
     is_codex_official_provider, resolve_codex_primary_route_from_settings,
 };
+use crate::services::ProviderService;
+use crate::store::AppState;
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -4431,7 +4434,7 @@ pub fn get_codex_subagent_reasoning_capabilities(
 ///
 /// 返回 resolved capability + 来源 + 指纹 + 当前检测候选状态，供模型卡片
 /// 展示与 unknown 状态动作（重新检测/采用检测结果）。
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexModelReasoningResolution {
     pub model: String,
@@ -4444,19 +4447,17 @@ pub struct CodexModelReasoningResolution {
     pub detection: Option<crate::reasoning_capabilities::ProviderCapabilitySnapshot>,
 }
 
-#[tauri::command]
-#[allow(non_snake_case)]
-pub fn resolve_codex_model_reasoning_capability(
-    settingsConfig: Value,
-    providerId: String,
-    model: String,
+fn resolve_codex_model_reasoning_capability_value(
+    settings_config: &Value,
+    provider_id: &str,
+    model: &str,
 ) -> CodexModelReasoningResolution {
     let model = model.trim().to_string();
-    let detection = crate::reasoning_capabilities::current_detection(&providerId, &model);
+    let detection = crate::reasoning_capabilities::current_detection(provider_id, &model);
     let library = crate::reasoning_capabilities::catalog::global_library();
     let official_models = codex_official_models_cache().unwrap_or_default();
     let resolved = crate::reasoning_capabilities::resolve_codex_model_capability_core(
-        &settingsConfig,
+        settings_config,
         None,
         &model,
         detection.as_ref(),
@@ -4478,6 +4479,16 @@ pub fn resolve_codex_model_reasoning_capability(
     }
 }
 
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn resolve_codex_model_reasoning_capability(
+    settingsConfig: Value,
+    providerId: String,
+    model: String,
+) -> CodexModelReasoningResolution {
+    resolve_codex_model_reasoning_capability_value(&settingsConfig, &providerId, &model)
+}
+
 /// P3：触发单模型只读检测（异步，调用发现适配器并写入 TTL 缓存）。
 #[tauri::command]
 #[allow(non_snake_case)]
@@ -4497,6 +4508,474 @@ pub async fn trigger_codex_model_reasoning_detection(
         cache.insert(snapshot.clone());
     }
     Ok(outcome)
+}
+
+/// P4：只读 reasoning inspect 的稳定诊断项。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexReasoningDiagnostic {
+    pub level: String,
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexReasoningProviderSummary {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexReasoningInspectResponse {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub revision: String,
+    pub provider: CodexReasoningProviderSummary,
+    pub model: String,
+    pub persisted: Value,
+    pub resolved: CodexModelReasoningResolution,
+    pub codex_projection: Value,
+    pub provider_projection: Value,
+    pub diagnostics: Vec<CodexReasoningDiagnostic>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexReasoningListItem {
+    pub model: String,
+    pub source: String,
+    pub fingerprint: String,
+    pub resolved: ResolvedSubagentReasoningCapability,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexReasoningProviderList {
+    pub provider: CodexReasoningProviderSummary,
+    pub revision: String,
+    pub items: Vec<CodexReasoningListItem>,
+    pub diagnostics: Vec<CodexReasoningDiagnostic>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexReasoningListResponse {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub providers: Vec<CodexReasoningProviderList>,
+    pub diagnostics: Vec<CodexReasoningDiagnostic>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexReasoningValidationResponse {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub revision: String,
+    pub provider: CodexReasoningProviderSummary,
+    pub valid: bool,
+    pub model_count: usize,
+    pub diagnostics: Vec<CodexReasoningDiagnostic>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexReasoningExportResponse {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub revision: String,
+    pub redacted: bool,
+    pub provider: CodexReasoningProviderSummary,
+    pub models: Vec<Value>,
+    pub provider_reasoning: Option<crate::provider::CodexChatReasoningConfig>,
+    pub diagnostics: Vec<CodexReasoningDiagnostic>,
+}
+
+fn reasoning_provider_summary(provider: &Provider) -> CodexReasoningProviderSummary {
+    CodexReasoningProviderSummary {
+        id: provider.id.clone(),
+        name: provider.name.clone(),
+    }
+}
+
+fn reasoning_request_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+fn reasoning_revision(provider: &Provider) -> String {
+    use sha2::{Digest, Sha256};
+
+    let input = json!({
+        "providerId": provider.id,
+        "providerName": provider.name,
+        "models": provider
+            .settings_config
+            .get("modelCatalog")
+            .and_then(|catalog| catalog.get("models"))
+            .cloned()
+            .unwrap_or_else(|| Value::Array(Vec::new())),
+        "providerReasoning": provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.codex_chat_reasoning.clone()),
+    });
+    let mut hasher = Sha256::new();
+    hasher.update(serde_json::to_vec(&input).unwrap_or_default());
+    format!("{:x}", hasher.finalize())
+}
+
+fn codex_catalog_spec_for_model(settings: &Value, model: &str) -> Option<CodexCatalogModelSpec> {
+    codex_catalog_model_specs(settings, "")
+        .into_iter()
+        .find(|spec| spec.model.eq_ignore_ascii_case(model.trim()))
+}
+
+fn reasoning_persisted_projection(
+    spec: Option<&CodexCatalogModelSpec>,
+    provider: &Provider,
+) -> Value {
+    json!({
+        "model": spec.map(|spec| json!({
+            "model": spec.model,
+            "displayName": spec.display_name,
+            "upstreamModel": spec.upstream_model,
+            "reasoning": spec.reasoning,
+        })),
+        "providerReasoning": provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.codex_chat_reasoning.clone()),
+    })
+}
+
+fn reasoning_diagnostics(
+    spec: Option<&CodexCatalogModelSpec>,
+    resolution: &CodexModelReasoningResolution,
+) -> Vec<CodexReasoningDiagnostic> {
+    let mut diagnostics = Vec::new();
+    if spec.is_none() {
+        diagnostics.push(CodexReasoningDiagnostic {
+            level: "warning".into(),
+            code: "model_not_in_catalog".into(),
+            message: "模型不在当前 Provider 的 modelCatalog 中，解析结果仅供诊断。".into(),
+        });
+    }
+    if resolution.source == "unknown" {
+        diagnostics.push(CodexReasoningDiagnostic {
+            level: "warning".into(),
+            code: "unknown_capability".into(),
+            message: "没有足够的模型能力证据，将使用服务端默认且不注入推理参数。".into(),
+        });
+    }
+    diagnostics
+}
+
+fn build_codex_reasoning_inspect(
+    provider: &Provider,
+    model: &str,
+) -> CodexReasoningInspectResponse {
+    let model = model.trim().to_string();
+    let spec = codex_catalog_spec_for_model(&provider.settings_config, &model);
+    let resolved = resolve_codex_model_reasoning_capability_value(
+        &provider.settings_config,
+        &provider.id,
+        &model,
+    );
+    let provider_reasoning = crate::proxy::providers::resolve_codex_chat_reasoning_config(
+        provider,
+        &json!({ "model": model }),
+    );
+    let diagnostics = reasoning_diagnostics(spec.as_ref(), &resolved);
+
+    CodexReasoningInspectResponse {
+        schema_version: 1,
+        request_id: reasoning_request_id(),
+        revision: reasoning_revision(provider),
+        provider: reasoning_provider_summary(provider),
+        model: model.clone(),
+        persisted: reasoning_persisted_projection(spec.as_ref(), provider),
+        codex_projection: json!({
+            "source": resolved.source,
+            "fingerprint": resolved.fingerprint,
+            "resolved": resolved.resolved,
+        }),
+        provider_projection: json!({
+            "platform": crate::reasoning_capabilities::provider_metadata::detect_platform(provider),
+            "model": model,
+            "reasoning": provider_reasoning,
+        }),
+        resolved,
+        diagnostics,
+    }
+}
+
+fn build_codex_reasoning_provider_list(provider: &Provider) -> CodexReasoningProviderList {
+    let specs = codex_catalog_model_specs(&provider.settings_config, "");
+    let items = specs
+        .iter()
+        .map(|spec| {
+            let resolved = resolve_codex_model_reasoning_capability_value(
+                &provider.settings_config,
+                &provider.id,
+                &spec.model,
+            );
+            CodexReasoningListItem {
+                model: spec.model.clone(),
+                source: resolved.source,
+                fingerprint: resolved.fingerprint,
+                resolved: resolved.resolved,
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut diagnostics = Vec::new();
+    if specs.is_empty() {
+        diagnostics.push(CodexReasoningDiagnostic {
+            level: "warning".into(),
+            code: "no_models".into(),
+            message: "Provider 没有可检查的 modelCatalog 模型。".into(),
+        });
+    }
+    if items.iter().any(|item| item.source == "unknown") {
+        diagnostics.push(CodexReasoningDiagnostic {
+            level: "warning".into(),
+            code: "unknown_capability".into(),
+            message: "至少一个模型的推理能力未知。".into(),
+        });
+    }
+    CodexReasoningProviderList {
+        provider: reasoning_provider_summary(provider),
+        revision: reasoning_revision(provider),
+        items,
+        diagnostics,
+    }
+}
+
+fn build_codex_reasoning_validation(provider: &Provider) -> CodexReasoningValidationResponse {
+    let models = provider
+        .settings_config
+        .get("modelCatalog")
+        .and_then(|catalog| catalog.get("models"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut diagnostics = Vec::new();
+    for model in &models {
+        let model_name = model
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or("<missing>");
+        if let Some(reasoning) = model.get("reasoning") {
+            let parsed = serde_json::from_value::<
+                crate::proxy::providers::codex_reasoning::CodexModelReasoningCapability,
+            >(reasoning.clone())
+            .ok()
+            .and_then(|capability| capability.validate().ok().map(|_| capability));
+            if parsed.is_none() {
+                diagnostics.push(CodexReasoningDiagnostic {
+                    level: "error".into(),
+                    code: "invalid_reasoning_declaration".into(),
+                    message: format!("模型 {model_name} 的 reasoning 声明无法通过 schema 校验。"),
+                });
+            }
+        }
+    }
+    let listing = build_codex_reasoning_provider_list(provider);
+    diagnostics.extend(listing.diagnostics);
+    CodexReasoningValidationResponse {
+        schema_version: 1,
+        request_id: reasoning_request_id(),
+        revision: reasoning_revision(provider),
+        provider: reasoning_provider_summary(provider),
+        valid: !diagnostics.iter().any(|item| item.level == "error"),
+        model_count: models.len(),
+        diagnostics,
+    }
+}
+
+fn build_codex_reasoning_export(provider: &Provider) -> CodexReasoningExportResponse {
+    let models = codex_catalog_model_specs(&provider.settings_config, "")
+        .iter()
+        .map(|spec| {
+            json!({
+                "model": spec.model,
+                "displayName": spec.display_name,
+                "upstreamModel": spec.upstream_model,
+                "reasoning": spec.reasoning,
+            })
+        })
+        .collect::<Vec<_>>();
+    CodexReasoningExportResponse {
+        schema_version: 1,
+        request_id: reasoning_request_id(),
+        revision: reasoning_revision(provider),
+        redacted: true,
+        provider: reasoning_provider_summary(provider),
+        models,
+        provider_reasoning: provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.codex_chat_reasoning.clone()),
+        diagnostics: Vec::new(),
+    }
+}
+
+fn codex_provider_for_readonly(state: &AppState, provider_id: &str) -> Result<Provider, String> {
+    let providers =
+        ProviderService::list(state, AppType::Codex).map_err(|error| error.to_string())?;
+    providers
+        .get(provider_id.trim())
+        .cloned()
+        .ok_or_else(|| format!("Codex Provider 不存在: {}", provider_id.trim()))
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn inspect_codex_reasoning_capability(
+    appState: State<'_, AppState>,
+    providerId: String,
+    model: String,
+) -> Result<CodexReasoningInspectResponse, String> {
+    let provider = codex_provider_for_readonly(appState.inner(), &providerId)?;
+    Ok(build_codex_reasoning_inspect(&provider, &model))
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn list_codex_reasoning_capabilities(
+    appState: State<'_, AppState>,
+    providerId: Option<String>,
+) -> Result<CodexReasoningListResponse, String> {
+    let providers = ProviderService::list(appState.inner(), AppType::Codex)
+        .map_err(|error| error.to_string())?;
+    let selected = providerId
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+    let mut provider_lists = Vec::new();
+    for provider in providers.values() {
+        if selected.is_some_and(|id| id != provider.id) {
+            continue;
+        }
+        provider_lists.push(build_codex_reasoning_provider_list(provider));
+    }
+    Ok(CodexReasoningListResponse {
+        schema_version: 1,
+        request_id: reasoning_request_id(),
+        providers: provider_lists,
+        diagnostics: Vec::new(),
+    })
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn validate_codex_reasoning_provider(
+    appState: State<'_, AppState>,
+    providerId: String,
+) -> Result<CodexReasoningValidationResponse, String> {
+    let provider = codex_provider_for_readonly(appState.inner(), &providerId)?;
+    Ok(build_codex_reasoning_validation(&provider))
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn export_codex_reasoning_provider(
+    appState: State<'_, AppState>,
+    providerId: String,
+    #[allow(dead_code)] _redacted: Option<bool>,
+) -> Result<CodexReasoningExportResponse, String> {
+    let provider = codex_provider_for_readonly(appState.inner(), &providerId)?;
+    // 即使调用方不传 --redacted，也只返回 allowlist 投影；绝不回读或输出凭据。
+    Ok(build_codex_reasoning_export(&provider))
+}
+
+fn cli_flag_value(args: &[String], flag: &str) -> Option<String> {
+    args.windows(2)
+        .find(|pair| pair[0] == flag)
+        .map(|pair| pair[1].clone())
+}
+
+fn cli_required_flag(args: &[String], flag: &str) -> Result<String, String> {
+    cli_flag_value(args, flag)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("missing_required_argument: {flag}"))
+}
+
+/// P4：`ccsm reasoning` 的只读 JSON transport。
+///
+/// 该入口只使用 `Database::init_readonly`，因此不会触发应用启动迁移、live 投影、
+/// Provider 切换或任何配置写入。写入型 `detect/plan/apply/reset` 保留给 P5。
+pub fn run_reasoning_cli(args: &[String]) -> Result<Value, String> {
+    if args.first().map(String::as_str) != Some("reasoning") {
+        return Err("invalid_command: expected `reasoning`".into());
+    }
+    let command = args.get(1).map(String::as_str).ok_or_else(|| {
+        "missing_command: expected list, inspect, validate, or export".to_string()
+    })?;
+    if args.iter().any(|arg| arg == "--human") {
+        return Err("unsupported_output: only versioned JSON output is supported".into());
+    }
+    if let Some(output) = cli_flag_value(args, "--output") {
+        if output != "json" {
+            return Err("unsupported_output: --output must be json".into());
+        }
+    }
+    if matches!(command, "detect" | "plan" | "apply" | "reset") {
+        return Err("read_only_boundary: detect/plan/apply/reset are reserved for P5".into());
+    }
+
+    let db = std::sync::Arc::new(
+        crate::database::Database::init_readonly().map_err(|error| error.to_string())?,
+    );
+    let state = crate::store::AppState::new(db);
+    let providers =
+        ProviderService::list(&state, AppType::Codex).map_err(|error| error.to_string())?;
+
+    match command {
+        "list" => serde_json::to_value(CodexReasoningListResponse {
+            schema_version: 1,
+            request_id: reasoning_request_id(),
+            providers: providers
+                .values()
+                .filter(|provider| {
+                    cli_flag_value(args, "--provider").is_none_or(|id| id.trim() == provider.id)
+                })
+                .map(build_codex_reasoning_provider_list)
+                .collect(),
+            diagnostics: Vec::new(),
+        })
+        .map_err(|error| format!("serialize_error: {error}")),
+        "inspect" => {
+            let provider_id = cli_required_flag(args, "--provider")?;
+            let model = cli_required_flag(args, "--model")?;
+            let provider = providers
+                .get(&provider_id)
+                .ok_or_else(|| format!("provider_not_found: {provider_id}"))?;
+            serde_json::to_value(build_codex_reasoning_inspect(provider, &model))
+                .map_err(|error| format!("serialize_error: {error}"))
+        }
+        "validate" => {
+            let provider_id = cli_required_flag(args, "--provider")?;
+            let provider = providers
+                .get(&provider_id)
+                .ok_or_else(|| format!("provider_not_found: {provider_id}"))?;
+            serde_json::to_value(build_codex_reasoning_validation(provider))
+                .map_err(|error| format!("serialize_error: {error}"))
+        }
+        "export" => {
+            let provider_id = cli_required_flag(args, "--provider")?;
+            let provider = providers
+                .get(&provider_id)
+                .ok_or_else(|| format!("provider_not_found: {provider_id}"))?;
+            serde_json::to_value(build_codex_reasoning_export(provider))
+                .map_err(|error| format!("serialize_error: {error}"))
+        }
+        _ => Err(format!(
+            "unknown_command: unsupported reasoning command `{command}`"
+        )),
+    }
 }
 
 #[tauri::command]
@@ -6807,6 +7286,79 @@ pub fn remove_codex_toml_base_url_if(toml_str: &str, predicate: impl Fn(&str) ->
 mod tests {
     use super::*;
 
+    fn reasoning_inspect_provider() -> Provider {
+        Provider::with_id(
+            "provider-qwen".into(),
+            "Qwen vLLM".into(),
+            serde_json::json!({
+                "base_url": "https://vllm.example/v1",
+                "api_key": "sk-test-secret",
+                "modelCatalog": {
+                    "models": [{
+                        "model": "qwen3.8",
+                        "displayName": "Qwen 3.8",
+                        "reasoning": {
+                            "schemaVersion": 2,
+                            "supportStatus": "confirmed_supported",
+                            "controlKind": "graded",
+                            "supportedEfforts": ["low", "high"],
+                            "defaultEffort": "high",
+                            "disableAllowed": false,
+                            "upstream": {
+                                "format": "string",
+                                "parameter": "reasoning.effort",
+                                "effortMap": {}
+                            }
+                        }
+                    }]
+                }
+            }),
+            None,
+        )
+    }
+
+    #[test]
+    fn reasoning_inspect_response_is_versioned_and_redacted() {
+        let response = build_codex_reasoning_inspect(&reasoning_inspect_provider(), "qwen3.8");
+        let value = serde_json::to_value(response).expect("serialize inspect response");
+
+        assert_eq!(value["schemaVersion"], 1);
+        assert!(value["requestId"].as_str().is_some_and(|id| !id.is_empty()));
+        assert!(value["revision"]
+            .as_str()
+            .is_some_and(|revision| !revision.is_empty()));
+        assert_eq!(value["persisted"]["model"]["model"], "qwen3.8");
+        assert_eq!(value["resolved"]["source"], "user_config");
+        assert_eq!(
+            value["codexProjection"]["fingerprint"],
+            value["resolved"]["fingerprint"]
+        );
+        assert_eq!(value["providerProjection"]["platform"], "vllm");
+        assert!(!value.to_string().contains("sk-test-secret"));
+    }
+
+    #[test]
+    fn reasoning_inspect_reports_model_missing_from_catalog() {
+        let response =
+            build_codex_reasoning_inspect(&reasoning_inspect_provider(), "missing-model");
+        let value = serde_json::to_value(response).expect("serialize inspect response");
+        assert_eq!(value["resolved"]["source"], "unknown");
+        assert!(value["diagnostics"].as_array().is_some_and(|items| {
+            items
+                .iter()
+                .any(|item| item["code"] == "model_not_in_catalog")
+        }));
+    }
+
+    #[test]
+    fn reasoning_cli_rejects_mutation_commands_before_opening_database() {
+        let args = vec!["reasoning".into(), "detect".into()];
+        assert_eq!(
+            run_reasoning_cli(&args).expect_err("P4 must not execute detect"),
+            "read_only_boundary: detect/plan/apply/reset are reserved for P5"
+        );
+    }
+
     #[test]
     fn official_reasoning_capability_reads_snake_case_levels() {
         let official = serde_json::json!([{
@@ -8142,6 +8694,17 @@ mod tests {
             "the read-only status command must be registered independently from preview"
         );
         assert!(lib_source.contains("codex_config::preview_codex_subagent_profile,"));
+        for command in [
+            "codex_config::inspect_codex_reasoning_capability,",
+            "codex_config::list_codex_reasoning_capabilities,",
+            "codex_config::validate_codex_reasoning_provider,",
+            "codex_config::export_codex_reasoning_provider,",
+        ] {
+            assert!(
+                lib_source.contains(command),
+                "missing P4 command registration: {command}"
+            );
+        }
     }
 
     #[test]
