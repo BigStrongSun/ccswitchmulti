@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { Provider } from "@/types";
 import type {
+  CodexModelReasoningResolution,
+  CodexReasoningDiscoveryOutcome,
   CodexSubagentProfilePreview,
   CodexSubagentProfileStatuses,
   CodexSubagentReasoningCapabilities,
@@ -43,6 +45,36 @@ export const codexSubagentV2Api = {
   ): Promise<CodexSubagentReasoningCapabilities> {
     return invoke("get_codex_subagent_reasoning_capabilities", {
       settingsConfig,
+    });
+  },
+
+  /**
+   * P3：解析单模型最终生效的推理能力（与 catalog / 请求 / Sub-Agent 同源）。
+   * 供模型卡片展示状态 / 来源 / 指纹 / 档位 / 映射 / 最终行为。
+   */
+  resolveModelReasoningCapability(
+    settingsConfig: Record<string, unknown>,
+    providerId: string,
+    model: string,
+  ): Promise<CodexModelReasoningResolution> {
+    return invoke("resolve_codex_model_reasoning_capability", {
+      settingsConfig,
+      providerId,
+      model,
+    });
+  },
+
+  /**
+   * P3：触发单模型只读检测（异步）。仅 Found 会写入 TTL 检测缓存；
+   * NotAdvertised / Unavailable / Invalid 不写缓存（缺失证据不是不存在的证据）。
+   */
+  triggerModelReasoningDetection(
+    provider: Provider,
+    model: string,
+  ): Promise<CodexReasoningDiscoveryOutcome> {
+    return invoke("trigger_codex_model_reasoning_detection", {
+      provider,
+      model,
     });
   },
 

@@ -50,6 +50,7 @@ import {
 import { CustomUserAgentField } from "./CustomUserAgentField";
 import { LocalProxyRequestOverridesField } from "./LocalProxyRequestOverridesField";
 import { CodexProviderReadinessSection } from "./CodexProviderReadinessSection";
+import { CodexModelReasoningCard } from "./CodexModelReasoningCard";
 import { cn } from "@/lib/utils";
 import { resolveFetchedCodexModelContextWindow } from "@/utils/codexModelContext";
 import {
@@ -68,9 +69,15 @@ import type {
   CodexRoutingRoute,
   CodexRoutingAuthSource,
   PromptCacheRoutingMode,
+  Provider,
   ProviderCategory,
 } from "@/types";
 import type { AppId } from "@/lib/api";
+import { codexSubagentV2Api } from "@/lib/api/codexSubagentV2";
+import type {
+  CodexModelReasoningResolution,
+  CodexReasoningDiscoveryOutcome,
+} from "@/types/codexSubagentV2";
 
 interface EndpointCandidate {
   url: string;
@@ -152,7 +159,8 @@ export function validateCodexReasoningCapabilityDraft(
   if (
     capability.supportStatus !== undefined &&
     typeof capability.supported === "boolean" &&
-    (capability.supportStatus === "confirmed_supported") !== capability.supported
+    (capability.supportStatus === "confirmed_supported") !==
+      capability.supported
   ) {
     throw new Error("supportStatus contradicts legacy supported field");
   }
@@ -412,6 +420,34 @@ interface CodexFormFieldsProps {
   onLocalProxyHeadersOverrideChange: (value: string) => void;
   localProxyBodyOverride: string;
   onLocalProxyBodyOverrideChange: (value: string) => void;
+}
+
+function capabilityFromReasoningDetection(
+  outcome: CodexReasoningDiscoveryOutcome,
+): CodexModelReasoningCapability | undefined {
+  if (typeof outcome !== "object" || !("found" in outcome)) return undefined;
+  const reasoning = outcome.found.reasoning;
+  if (!reasoning) return undefined;
+  const supportedEfforts = reasoning.supportedEfforts.filter(
+    (effort): effort is CodexReasoningEffort =>
+      ["none", ...CODEX_REASONING_EFFORT_CHOICES].includes(effort),
+  );
+  return {
+    schemaVersion: 2,
+    supportStatus: "confirmed_supported",
+    controlKind: supportedEfforts.length > 0 ? "graded" : "boolean",
+    supportedEfforts,
+    defaultEffort: supportedEfforts.includes(
+      reasoning.defaultEffort as CodexReasoningEffort,
+    )
+      ? (reasoning.defaultEffort as CodexReasoningEffort)
+      : supportedEfforts[0],
+    disableAllowed: !reasoning.mandatory,
+    upstream: { format: "reasoning_object", parameter: "reasoning.effort" },
+    outputFormat: "auto",
+    source: "user",
+    confidence: "authoritative",
+  };
 }
 
 type CodexCatalogRow = CodexCatalogModel & { rowId: string };
@@ -860,6 +896,13 @@ export function CodexFormFields({
 
   const [fetchedModels, setFetchedModels] = useState<FetchedModel[]>([]);
   const [isFetchingModels, setIsFetchingModels] = useState(false);
+  const [reasoningResolutions, setReasoningResolutions] = useState<
+    Record<string, CodexModelReasoningResolution>
+  >({});
+  const [redetectingReasoningModel, setRedetectingReasoningModel] = useState<
+    string | null
+  >(null);
+  const reasoningResolutionRequestRef = useRef(0);
   const [isProtocolProbeConfirmOpen, setIsProtocolProbeConfirmOpen] =
     useState(false);
   const [isProbingProtocol, setIsProbingProtocol] = useState(false);
@@ -906,6 +949,7 @@ export function CodexFormFields({
   const isChatFormat = apiFormat === "openai_chat";
   const isAnthropicFormat = apiFormat === "anthropic";
   const canEditCatalog = Boolean(onCatalogModelsChange);
+
   // 普通 Provider 表单只消费并原样回传历史 codexRouting；可见编辑入口统一收口到
   // CodexRouterWorkspacePage，避免与完整 MultiRouter 工作台形成两套配置界面。
   const canEditRouting = false;
@@ -943,6 +987,66 @@ export function CodexFormFields({
   const [catalogRows, setCatalogRows] = useState<CodexCatalogRow[]>(() =>
     catalogModels.map((m) => createCatalogRow(m)),
   );
+
+  const reasoningSettingsConfig = useMemo(
+    () => ({ modelCatalog: { models: catalogRows } }),
+    [catalogRows],
+  );
+  const reasoningDetectionProvider = useMemo<Provider>(
+    () => ({
+      id: providerId ?? "codex-draft",
+      name: providerName?.trim() || "Codex provider",
+      settingsConfig: {
+        base_url: codexBaseUrl.trim(),
+      },
+      category,
+    }),
+    [providerId, providerName, codexBaseUrl, category],
+  );
+
+  useEffect(() => {
+    const models = catalogRows
+      .map((row) => catalogRowUpstreamModel(row))
+      .filter(Boolean);
+    if (models.length === 0) {
+      setReasoningResolutions({});
+      return;
+    }
+    const requestId = ++reasoningResolutionRequestRef.current;
+    let cancelled = false;
+    void Promise.all(
+      models.map(async (model) => {
+        try {
+          return [
+            model,
+            await codexSubagentV2Api.resolveModelReasoningCapability(
+              reasoningSettingsConfig,
+              providerId ?? "codex-draft",
+              model,
+            ),
+          ] as const;
+        } catch (error) {
+          console.warn("[CodexFormFields] reasoning resolution failed", {
+            model,
+            error,
+          });
+          return null;
+        }
+      }),
+    ).then((results) => {
+      if (cancelled || requestId !== reasoningResolutionRequestRef.current) {
+        return;
+      }
+      const next: Record<string, CodexModelReasoningResolution> = {};
+      for (const result of results) {
+        if (result) next[result[0]] = result[1];
+      }
+      setReasoningResolutions(next);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [catalogRows, providerId, reasoningSettingsConfig]);
   const catalogRowsRef = useRef<CodexCatalogRow[]>(catalogRows);
   const modelMappingSectionRef = useRef<HTMLDivElement | null>(null);
   const fetchModelsButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -2776,6 +2880,8 @@ export function CodexFormFields({
                     {catalogRows.map((row, index) => {
                       const probeModel =
                         catalogRowUpstreamModel(row) || row.model.trim();
+                      const reasoningResolution =
+                        reasoningResolutions[probeModel];
                       const probeBadge = getProtocolProbeBadge(
                         protocolProbeOutcomesByModel[probeModel],
                       );
@@ -2980,6 +3086,98 @@ export function CodexFormFields({
                                     : "（未声明，使用保守模式）"}
                             </summary>
                             <div className="mt-2 space-y-3 rounded-md border p-3 text-xs">
+                              {reasoningResolution ? (
+                                <CodexModelReasoningCard
+                                  resolution={reasoningResolution}
+                                  hasBuiltinPreset={Boolean(presetReasoning)}
+                                  redetecting={
+                                    redetectingReasoningModel === probeModel
+                                  }
+                                  onRedetect={async () => {
+                                    setRedetectingReasoningModel(probeModel);
+                                    try {
+                                      const outcome =
+                                        await codexSubagentV2Api.triggerModelReasoningDetection(
+                                          reasoningDetectionProvider,
+                                          probeModel,
+                                        );
+                                      if (
+                                        typeof outcome === "object" &&
+                                        "found" in outcome
+                                      ) {
+                                        const next =
+                                          await codexSubagentV2Api.resolveModelReasoningCapability(
+                                            reasoningSettingsConfig,
+                                            providerId ?? "codex-draft",
+                                            probeModel,
+                                          );
+                                        setReasoningResolutions((current) => ({
+                                          ...current,
+                                          [probeModel]: next,
+                                        }));
+                                        toast.success(
+                                          "已更新模型推理能力检测结果",
+                                        );
+                                      } else {
+                                        toast.info(
+                                          "未获得可采纳的模型推理能力声明，继续使用服务端默认。",
+                                        );
+                                      }
+                                    } catch (error) {
+                                      console.error(
+                                        "[CodexFormFields] reasoning detection failed",
+                                        error,
+                                      );
+                                      toast.error("模型推理能力检测失败");
+                                    } finally {
+                                      setRedetectingReasoningModel(null);
+                                    }
+                                  }}
+                                  onAdoptDetection={() => {
+                                    const detected =
+                                      reasoningResolution.detection
+                                        ? capabilityFromReasoningDetection({
+                                            found:
+                                              reasoningResolution.detection,
+                                          })
+                                        : undefined;
+                                    if (!detected) {
+                                      toast.info(
+                                        "当前检测结果没有可采纳的推理档位声明。",
+                                      );
+                                      return;
+                                    }
+                                    handleUpdateCatalogRow(index, {
+                                      reasoning: detected,
+                                    });
+                                    toast.success("已采用检测到的推理能力");
+                                  }}
+                                  onManualDeclare={() =>
+                                    handleUpdateCatalogRow(index, {
+                                      reasoning:
+                                        applyCodexReasoningCapabilitySource(
+                                          "manual",
+                                          row.reasoning,
+                                          presetReasoning,
+                                        ),
+                                    })
+                                  }
+                                  onRestoreBuiltin={() =>
+                                    handleUpdateCatalogRow(index, {
+                                      reasoning:
+                                        applyCodexReasoningCapabilitySource(
+                                          "builtin",
+                                          row.reasoning,
+                                          presetReasoning,
+                                        ),
+                                    })
+                                  }
+                                />
+                              ) : (
+                                <p className="text-muted-foreground">
+                                  正在读取该模型的统一推理能力解析结果…
+                                </p>
+                              )}
                               <label className="grid gap-1">
                                 <span>能力来源</span>
                                 <select
