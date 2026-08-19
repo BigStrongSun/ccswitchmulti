@@ -3907,3 +3907,10 @@
 - 根因：`handle_responses_for_app` 通过 `should_handle_as_codex_client` 判断 `/v1/responses` 是否为 Codex。旧实现把 Codex User-Agent 含 `codex` 作为必要条件；该 Desktop 请求没有满足该条件，于是误入 External OpenAI API 分支，在 MultiRouter 之前返回错误，因此不会写 `codex-router.log`。
 - 修复：本地代理入口默认按 Codex 处理；只有显式 External API marker 或 `ccsw_` key 才强制走 External API。这样仍保留第三方 External API 的显式鉴权边界，不依赖不稳定的 User-Agent。
 - 回归：新增无 User-Agent 仍走本地 Codex context 的测试；`cargo test --lib proxy::handlers::tests::` 82/82 通过。
+
+## 2026-08-20 Mac 与 Windows Codex 对照证据
+
+- Windows 当前机器也运行 CCSwitchMulti `3.19.2-7`、Codex takeover `http://127.0.0.1:15721/v1`、`multi_agent_v2`、`supports_websockets=false` 和 `requires_openai_auth=true`，因此这些功能组合不能解释 Mac 独有故障。
+- Windows Codex Desktop 安装包为 `OpenAI.Codex_26.814.5167.0_x64`；Mac 为 `ChatGPT.app 26.814.41407`（arm64）。两者同属 `26.814` 系列但不是同一构建。
+- Windows `codex-router.log` 在 01:06-01:09 连续出现 `route_resolved -> upstream_status status=200`；Mac 失败请求在同一旧 CCSM 逻辑下没有任何 router 事件，并在 Codex logs 记录 `502 Bad Gateway: Unknown error`。
+- 因旧逻辑只有满足 Codex 请求分类才会产生 `route_resolved`，该对照证明真正差异在入站请求元数据/客户端行为，而非 takeover 或 MultiRouter 开关本身；具体字段仍需在 handler 入口做脱敏观测。Mac 无 sudo，无法用 tcpdump 抓 loopback 原始请求头。
