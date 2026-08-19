@@ -2321,7 +2321,11 @@ impl RequestForwarder {
         let client_requested_streaming =
             is_streaming_request(&effective_endpoint, &mapped_body, headers);
         let hosted_tool_loop_allowed = !codex_responses_to_chat
-            || should_enable_hosted_tool_loop(&mapped_body, client_requested_streaming);
+            || should_enable_hosted_tool_loop(
+                &mapped_body,
+                client_requested_streaming,
+                &codex_router_provider.settings_config,
+            );
         let mut request_body = if codex_responses_to_chat || codex_responses_to_messages {
             let mut mapped_body = mapped_body;
             let explicit_prompt_cache_key = mapped_body
@@ -5866,18 +5870,25 @@ fn hosted_tool_bridge_enabled(settings: &Value, tool: &str) -> bool {
 
 /// Decide whether the buffered Chat hosted-tool loop owns this request.
 ///
-/// Streaming `auto` requests prioritize incremental agent progress: hosted
-/// tools are omitted from the Chat projection, while ordinary client tools
-/// remain available. An explicit hosted selection is safe to buffer because
-/// the caller requested that exact bridge. Non-streaming requests retain the
-/// existing automatic hosted-tool loop.
-fn should_enable_hosted_tool_loop(request: &Value, client_requested_streaming: bool) -> bool {
+/// 非流式请求始终接管。流式请求默认也接管（`hostedTools.streamingAuto.enabled`
+/// 默认 true），让第三方模型在流式 auto 下也能用官方 web_search / image_generation；
+/// 代价是该请求会被缓冲（强制 stream=false），可能重新触发 Qwen 长上下文
+/// blank-thinking 回归——若复发，把 `hostedTools.streamingAuto.enabled` 设为 false
+/// 即可回退到「流式 auto 不接管、托管工具从投影中省略」的旧行为。
+/// 显式 tool_choice 指向 hosted tool 时无论开关都接管（调用方明确要这个桥）。
+fn should_enable_hosted_tool_loop(
+    request: &Value,
+    client_requested_streaming: bool,
+    settings: &Value,
+) -> bool {
     if !client_requested_streaming {
         return true;
     }
 
+    // 显式 tool_choice 指向 hosted tool：调用方明确要这个桥，始终接管。
     let Some(choice) = request.get("tool_choice").and_then(Value::as_object) else {
-        return false;
+        // 非显式（auto / 字符串 tool_choice）：由 streamingAuto 开关决定。
+        return hosted_tool_streaming_auto_enabled(settings);
     };
     let choice_type = choice.get("type").and_then(Value::as_str);
     if matches!(choice_type, Some("web_search" | "image_generation")) {
@@ -5888,6 +5899,14 @@ fn should_enable_hosted_tool_loop(request: &Value, client_requested_streaming: b
             choice.get("name").and_then(Value::as_str),
             Some("web_search" | "generate_image")
         )
+}
+
+/// 读取流式 auto 下是否接管 hosted tool loop；未配置时默认开启。
+fn hosted_tool_streaming_auto_enabled(settings: &Value) -> bool {
+    settings
+        .pointer("/hostedTools/streamingAuto/enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
 }
 
 /// 解析 hosted tool 调用凭据：优先显式 API Key，再回退请求自带的 Codex OAuth，最后用 CCSM 托管 OAuth。
@@ -9642,7 +9661,7 @@ mod tests {
     }
 
     #[test]
-    fn streaming_auto_tool_choice_preserves_upstream_stream_instead_of_hosted_loop() {
+    fn streaming_auto_tool_choice_enables_hosted_loop_by_default() {
         let request = serde_json::json!({
             "stream": true,
             "tool_choice": "auto",
@@ -9652,7 +9671,49 @@ mod tests {
             ]
         });
 
-        assert!(!should_enable_hosted_tool_loop(&request, true));
+        // 默认（未配置 streamingAuto）：流式 auto 也接管 hosted loop，
+        // 让第三方模型在流式下能用官方 web_search / image_generation。
+        let default_settings = serde_json::json!({});
+        assert!(should_enable_hosted_tool_loop(
+            &request,
+            true,
+            &default_settings
+        ));
+    }
+
+    #[test]
+    fn streaming_auto_disabled_via_settings_omits_hosted_loop() {
+        let request = serde_json::json!({
+            "stream": true,
+            "tool_choice": "auto",
+            "tools": [
+                {"type": "web_search"},
+                {"type": "function", "name": "shell", "parameters": {"type": "object"}}
+            ]
+        });
+
+        // 显式关闭 streamingAuto：回退到「流式 auto 不接管」，托管工具从投影省略，
+        // 用于规避 Qwen 长上下文 blank-thinking 回归。
+        let disabled_settings = serde_json::json!({
+            "hostedTools": { "streamingAuto": { "enabled": false } }
+        });
+        assert!(!should_enable_hosted_tool_loop(
+            &request,
+            true,
+            &disabled_settings
+        ));
+
+        // 关闭后，显式 tool_choice 指向 hosted tool 仍接管（调用方明确要这个桥）。
+        let explicit_request = serde_json::json!({
+            "stream": true,
+            "tool_choice": {"type": "web_search"},
+            "tools": [{"type": "web_search"}]
+        });
+        assert!(should_enable_hosted_tool_loop(
+            &explicit_request,
+            true,
+            &disabled_settings
+        ));
     }
 
     #[test]
@@ -9664,7 +9725,8 @@ mod tests {
                 "tools": [{"type": hosted_type}]
             });
 
-            assert!(should_enable_hosted_tool_loop(&request, true));
+            let settings = serde_json::json!({});
+            assert!(should_enable_hosted_tool_loop(&request, true, &settings));
         }
     }
 
@@ -9676,7 +9738,8 @@ mod tests {
             "tools": [{"type": "web_search"}]
         });
 
-        assert!(should_enable_hosted_tool_loop(&request, false));
+        let settings = serde_json::json!({});
+        assert!(should_enable_hosted_tool_loop(&request, false, &settings));
     }
 
     /// 验证 hosted web_search loop 会消费第一轮工具调用、回灌 tool output 并返回最终 Chat 响应。
