@@ -806,9 +806,29 @@ export function CodexSubagentProfileEditor({
       setStatusError(null);
       const blocking = authoritativeStatuses.profiles.filter(
         (profile) =>
-          profile.status === "collision" || profile.status === "invalid",
+          profile.status === "collision" ||
+          profile.status === "invalid" ||
+          (profile.status === "generated" &&
+            profile.enabled === true &&
+            profile.routable &&
+            profile.reasoningCapability?.supportKind === "unknown"),
       );
       if (blocking.length > 0) {
+        const incompleteReasoning = blocking.filter(
+          (profile) =>
+            profile.reasoningCapability?.supportKind === "unknown" &&
+            profile.status === "generated",
+        );
+        if (incompleteReasoning.length > 0) {
+          throw new Error(
+            incompleteReasoning
+              .map(
+                (profile) =>
+                  `${profile.profileKey ?? profile.model ?? "V2 profile"}：推理能力未配置，请先在模型目录中声明能力后再保存。`,
+              )
+              .join("；"),
+          );
+        }
         if (
           Object.values(rawProfiles).some(
             (profile) => !isUsableProfile(profile),
@@ -1785,7 +1805,10 @@ function ReasoningCapabilitySummary({
       {mappings ? <p>映射：{mappings}</p> : null}
       <p className="font-medium">{behavior}</p>
       {capability.supportKind === "unknown" ? (
-        <p>请先在 Provider 模型目录中手动声明能力，再选择固定档位。</p>
+        <p className="font-medium text-rose-700 dark:text-rose-300">
+          推理能力未配置，当前可路由角色无法保存。请先在 Provider
+          模型目录中声明能力，或完成只读能力检测并采用检测结果。
+        </p>
       ) : null}
     </div>
   );

@@ -3864,3 +3864,11 @@
 - 检测 Provider 使用当前草稿的 provider id/name/base URL，仅用于平台识别和只读元数据发现，不把 API key 送入检测请求；Tauri IPC 仍按官方命名参数调用。
 - 新增 `CodexModelReasoningCard.test.tsx` 覆盖 unknown/unsupported 三态区分与 graded 行为描述。验证：`npx tsc --noEmit` 通过；`npx vitest run` 139 文件/1123 用例全过；`cargo test --lib` 3171 passed / 0 failed / 5 ignored；仅存在与本轮无关的 `streaming_codex_chat.rs` 未提交改动，提交时不得混入。
 - 异常边界：解析 IPC 失败时前端生成不带能力声明的 unknown resolution，卡片明确显示“未知（使用服务端默认）”，不永久显示加载态，也不把通信失败误判为 confirmed_unsupported。
+
+## 2026-08-19 V2 Sub-Agent unknown reasoning 保存门禁
+
+- 根因：`validate_codex_subagent_v2_candidate` 过去只调用编译器，`delegated` 在 reasoning 未知时仍可生成 role 并保存；前端也只阻塞 `invalid/collision`。
+- 修复：保存校验在编译后遍历 persisted profile 与 compiler status，仅对 `enabled=true` 且 `Routable`（实际会生成 role）的 profile 要求 reasoning capability 不是 `unknown`。disabled、unroutable、invalid 不因无关能力缺失阻塞保存。
+- 错误码：`unknown_reasoning_capability_requires_declaration`；unknown 不允许通过 delegated 绕过，用户必须在模型目录声明能力或采用只读检测结果后再保存。
+- 前端保存前用同一状态条件拦截，并显示 profile/model 名称和“推理能力未配置，当前可路由角色无法保存”；能力摘要同步强调这是保存阻塞，而非普通黄色提醒。
+- 验证状态：`cargo fmt` 与 `git diff --check` 通过；Rust 全量测试当前被工作区已有的 `forwarder.rs` 缺少 `json!` 导入和 `handlers.rs` 缺少 `streaming_codex_chat` 导入阻塞，非本次修改引入；TypeScript 全量检查仍受现有依赖缺失（vitest、@dnd-kit）阻塞，目标文件无新增类型错误。

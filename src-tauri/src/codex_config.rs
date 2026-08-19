@@ -19,7 +19,9 @@ use crate::config::{
 use crate::error::AppError;
 use crate::model_capabilities::{image_input_capability_from_modalities, ImageInputCapability};
 use crate::provider::Provider;
-use crate::proxy::providers::codex_reasoning::ResolvedSubagentReasoningCapability;
+use crate::proxy::providers::codex_reasoning::{
+    ReasoningSupportKind, ResolvedSubagentReasoningCapability,
+};
 use crate::proxy::providers::{
     codex_route_target_provider_id_from_route, codex_route_uses_official_agent_backend,
     is_codex_official_provider, resolve_codex_primary_route_from_settings,
@@ -3298,6 +3300,35 @@ fn compile_configured_codex_subagent_roles(
     }))
 }
 
+fn validate_codex_subagent_reasoning_completeness(
+    compilation: &ConfiguredCodexSubagentCompilation,
+) -> Result<(), AppError> {
+    for (entry, compiled_status) in compilation
+        .persisted
+        .profiles
+        .iter()
+        .zip(compilation.output.profile_statuses.iter())
+    {
+        let crate::codex_subagent_profiles::ParsedProfileEntry::Valid(profile) = entry else {
+            continue;
+        };
+        if !profile.enabled || compiled_status.status != SubagentProfileStatusCode::Routable {
+            continue;
+        }
+        let capability = compilation
+            .reasoning_capabilities
+            .get(&profile.model.to_ascii_lowercase());
+        if capability.is_none()
+            || capability.is_some_and(|value| value.support_kind == ReasoningSupportKind::Unknown)
+        {
+            return Err(AppError::InvalidInput(
+                "Codex subagent V2 configuration is incomplete (unknown_reasoning_capability_requires_declaration)".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn strip_codex_subagent_v2_policy_block(value: &str) -> String {
     let Some(begin) = value.find(CC_SWITCH_SUBAGENT_V2_POLICY_BEGIN) else {
         return value.to_string();
@@ -3757,12 +3788,15 @@ pub(crate) fn validate_codex_subagent_v2_candidate(
             .map_err(|error| codex_subagent_validation_error(&error))?;
     }
     let specs = codex_catalog_model_specs(settings, "");
-    compile_configured_codex_subagent_roles(
+    let compilation = compile_configured_codex_subagent_roles(
         settings,
         &specs,
         codex_subagent_version(settings),
         provider_context,
     )?;
+    if let Some(compilation) = compilation.as_ref() {
+        validate_codex_subagent_reasoning_completeness(compilation)?;
+    }
     Ok(())
 }
 
@@ -6890,6 +6924,57 @@ mod tests {
             },
             "reasoning": { "policy": "delegated" }
         })
+    }
+
+    #[test]
+    fn codex_subagent_v2_save_rejects_unknown_reasoning_for_enabled_routable_profile() {
+        let settings = codex_subagent_profile_status_settings(
+            "v2",
+            json!({ "private-model": codex_subagent_profile_status_profile("private-model", true) }),
+            json!([{ "model": "private-model", "contextWindow": 128000 }]),
+            json!([{
+                "id": "private-route",
+                "match": { "models": ["private-model"] },
+                "upstream": { "auth": { "source": "provider_config" } }
+            }]),
+        );
+
+        let error = validate_codex_subagent_v2_candidate(&settings, None, true)
+            .expect_err("unknown reasoning capability must block provider save");
+        assert!(error
+            .to_string()
+            .contains("unknown_reasoning_capability_requires_declaration"));
+    }
+
+    #[test]
+    fn codex_subagent_v2_save_does_not_block_unknown_reasoning_for_disabled_or_unroutable_profile()
+    {
+        let disabled = codex_subagent_profile_status_settings(
+            "v2",
+            json!({ "private-model": codex_subagent_profile_status_profile("private-model", false) }),
+            json!([{ "model": "private-model", "contextWindow": 128000 }]),
+            json!([{
+                "id": "private-route",
+                "match": { "models": ["private-model"] },
+                "upstream": { "auth": { "source": "provider_config" } }
+            }]),
+        );
+        validate_codex_subagent_v2_candidate(&disabled, None, true)
+            .expect("disabled profiles do not generate roles");
+
+        let unroutable = codex_subagent_profile_status_settings(
+            "v2",
+            json!({ "private-model": codex_subagent_profile_status_profile("private-model", true) }),
+            json!([{ "model": "private-model", "contextWindow": 128000 }]),
+            json!([{
+                "id": "private-route",
+                "enabled": false,
+                "match": { "models": ["private-model"] },
+                "upstream": { "auth": { "source": "provider_config" } }
+            }]),
+        );
+        validate_codex_subagent_v2_candidate(&unroutable, None, true)
+            .expect("unroutable profiles do not generate roles");
     }
 
     fn review_codex_catalog_spec(model: &str) -> CodexCatalogModelSpec {
