@@ -544,21 +544,14 @@ pub async fn handle_external_models(
     handle_models(State(state), headers).await
 }
 
-fn is_codex_model_catalog_client(headers: &HeaderMap) -> bool {
-    headers
-        .get(axum::http::header::USER_AGENT)
-        .and_then(|value| value.to_str().ok())
-        .map(|user_agent| user_agent.to_ascii_lowercase().contains("codex"))
-        .unwrap_or(false)
-}
-
 /// 判断请求是否应按 Codex 自身客户端处理。
 ///
-/// External API key 优先级高于 User-Agent，避免第三方 agent 名称中包含
-/// `codex` 时绕过 External API profile。
+/// 本地 15721 是 Codex takeover 的专用入口，Desktop 的 Responses 请求并不
+/// 保证携带稳定的 User-Agent（部分版本甚至不带）。因此不能把 User-Agent
+/// 当成进入 Codex 路径的必要条件；只有显式的 External API marker 或
+/// `ccsw_` key 才应强制走 External API 分支。
 fn should_handle_as_codex_client(headers: &HeaderMap) -> bool {
     !headers.contains_key(FORCE_EXTERNAL_OPENAI_API_HEADER)
-        && is_codex_model_catalog_client(headers)
         && !external_openai_api::has_external_api_key(headers)
 }
 
@@ -6154,6 +6147,14 @@ data: [DONE]\n\n";
             axum::http::header::USER_AGENT,
             HeaderValue::from_static("codex_vscode/0.144.2"),
         );
+
+        assert!(should_handle_as_codex_client(&headers));
+    }
+
+    #[test]
+    /// Codex Desktop 某些 Responses 请求不带 User-Agent，仍必须进入本地 Codex 路径。
+    fn missing_user_agent_uses_local_client_context() {
+        let headers = HeaderMap::new();
 
         assert!(should_handle_as_codex_client(&headers));
     }

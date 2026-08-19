@@ -3900,3 +3900,10 @@
 - 2026-08-20 Mac 现场补充：代理配置修好后，`codex-router.log` 显示官方 route 已进入 CCSM（`route_id=router-codex-official`、`upstream_url=https://chatgpt.com/backend-api/codex/responses`），但 `auth_prepared` 为 `auth_strategy=none auth_header_count=0 oauth_session_header_count=0`。CCSM OAuth 登录后可用、仅 Desktop OAuth 不可用，说明当前“Desktop OAuth 透传”边界没有把 Desktop 登录材料变成入站 Authorization 或 CCSM 可解析凭据；这不是梯子问题，而是 native Desktop OAuth 与 MultiRouter effective official provider 之间的认证契约回归。
 - 2026-08-20 附件日志复核：23:41 的 `gpt-5.4` 与 `gpt-5.6-luna` 请求均已进入官方 route，但 `upstream_send` 明确 `uses_upstream_proxy=false`；23:41:49-23:43:22 的 CCSM 日志连续报 `client error (Connect): operation timed out` / `tcp connect error: deadline has elapsed`，根因是 CCSM 到 `chatgpt.com` 的出站直连失败，不是 Codex 未到 15721，也不是 CCSM 进程崩溃。23:53:38 才应用 `http://127.0.0.1:6528` 全局代理，23:57:52-53 OAuth Device Code 授权并保存成功。`app-exit-events.jsonl` 只有 `clean_exit`（`event_loop_exit`、`user_requested_exit`），没有 panic/crash 证据；前端 `unhandledrejection` 是次要 UI 错误。
 - 修复提交 `30fa2315`：`materialize_codex_routed_provider_from_target` 对旧版 `provider_config` 官方 route，若目标是内置 `codex-official` 且没有明确 `codex_oauth`/托管账号绑定，恢复 `codexNativeAuthPassthrough=true`，使 Desktop OAuth 走 native 路径；显式 managed OAuth、账号池和污染/托管 route 仍保持原有托管认证。新增回归测试，先 RED 后 GREEN；Codex provider 单元测试 101/101、`cargo check --lib` 通过。
+
+## 2026-08-20 Mac Codex Responses 无 User-Agent 导致本地路由误判
+
+- 现象：重启后 Codex Desktop 请求报 `unexpected status 502 Bad Gateway: Unknown error`，但 `codex-router.log` 没有新事件；`~/.codex/config.toml` 仍正确指向 `http://127.0.0.1:15721/v1`，15721 `/health` 和 `/status` 正常。
+- 根因：`handle_responses_for_app` 通过 `should_handle_as_codex_client` 判断 `/v1/responses` 是否为 Codex。旧实现把 Codex User-Agent 含 `codex` 作为必要条件；该 Desktop 请求没有满足该条件，于是误入 External OpenAI API 分支，在 MultiRouter 之前返回错误，因此不会写 `codex-router.log`。
+- 修复：本地代理入口默认按 Codex 处理；只有显式 External API marker 或 `ccsw_` key 才强制走 External API。这样仍保留第三方 External API 的显式鉴权边界，不依赖不稳定的 User-Agent。
+- 回归：新增无 User-Agent 仍走本地 Codex context 的测试；`cargo test --lib proxy::handlers::tests::` 82/82 通过。
