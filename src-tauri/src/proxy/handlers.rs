@@ -555,6 +555,33 @@ fn should_handle_as_codex_client(headers: &HeaderMap) -> bool {
         && !external_openai_api::has_external_api_key(headers)
 }
 
+fn codex_request_classification_fields(headers: &HeaderMap) -> Vec<(&'static str, String)> {
+    let user_agent = headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let has_user_agent = !user_agent.is_empty();
+    let user_agent_contains_codex = user_agent.to_ascii_lowercase().contains("codex");
+    let has_external_api_key = external_openai_api::has_external_api_key(headers);
+    let force_external_marker = headers.contains_key(FORCE_EXTERNAL_OPENAI_API_HEADER);
+    let selected_path = if should_handle_as_codex_client(headers) {
+        "codex"
+    } else {
+        "external_openai_api"
+    };
+
+    vec![
+        ("has_user_agent", has_user_agent.to_string()),
+        (
+            "user_agent_contains_codex",
+            user_agent_contains_codex.to_string(),
+        ),
+        ("has_external_api_key", has_external_api_key.to_string()),
+        ("force_external_marker", force_external_marker.to_string()),
+        ("selected_path", selected_path.to_string()),
+    ]
+}
+
 fn mark_external_openai_headers(headers: &mut HeaderMap) {
     headers.insert(
         FORCE_EXTERNAL_OPENAI_API_HEADER,
@@ -2634,6 +2661,14 @@ async fn handle_responses_for_app(
     let uri = parts.uri;
     let mut headers = parts.headers;
     let extensions = parts.extensions;
+
+    if app_type == AppType::Codex {
+        let mut fields = codex_request_classification_fields(&headers);
+        fields.push(("method", method.to_string()));
+        fields.push(("endpoint", endpoint_with_query(&uri, "/responses")));
+        super::codex_router_log::append_event("request_classified", &fields);
+    }
+
     let body_bytes = req_body
         .collect()
         .await
@@ -5368,14 +5403,15 @@ mod tests {
     use super::{
         body_looks_like_sse, build_external_codex_official_oauth_provider,
         chat_sse_to_response_value, classify_body_for_diagnostics, codex_catalog_models_response,
-        codex_proxy_error_json, codex_proxy_error_status, external_openai_api_models_response,
-        external_openai_api_unsupported_response, mark_external_openai_headers,
-        resolve_codex_image_generation_provider, resolve_external_codex_router_target,
-        resolve_forward_error_provider_for_logging, resolve_forward_error_route_provider,
-        responses_response_to_compaction_sse, responses_response_to_completed_sse,
-        responses_response_to_full_sse, responses_sse_to_response_value,
-        should_handle_as_codex_client, should_use_claude_transform_streaming,
-        should_wrap_native_codex_responses_stream, transform, upstream_body_parse_error,
+        codex_proxy_error_json, codex_proxy_error_status, codex_request_classification_fields,
+        external_openai_api_models_response, external_openai_api_unsupported_response,
+        mark_external_openai_headers, resolve_codex_image_generation_provider,
+        resolve_external_codex_router_target, resolve_forward_error_provider_for_logging,
+        resolve_forward_error_route_provider, responses_response_to_compaction_sse,
+        responses_response_to_completed_sse, responses_response_to_full_sse,
+        responses_sse_to_response_value, should_handle_as_codex_client,
+        should_use_claude_transform_streaming, should_wrap_native_codex_responses_stream,
+        transform, upstream_body_parse_error,
     };
     use crate::{
         app_config::AppType,
@@ -6157,6 +6193,22 @@ data: [DONE]\n\n";
         let headers = HeaderMap::new();
 
         assert!(should_handle_as_codex_client(&headers));
+    }
+
+    #[test]
+    fn classification_diagnostics_are_boolean_and_secret_free() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::USER_AGENT,
+            HeaderValue::from_static("codex_cli/0.148.0"),
+        );
+
+        let fields = codex_request_classification_fields(&headers);
+        assert!(fields.contains(&("has_user_agent", "true".to_string())));
+        assert!(fields.contains(&("user_agent_contains_codex", "true".to_string())));
+        assert!(fields.contains(&("has_external_api_key", "false".to_string())));
+        assert!(fields.contains(&("force_external_marker", "false".to_string())));
+        assert!(fields.contains(&("selected_path", "codex".to_string())));
     }
 
     #[test]

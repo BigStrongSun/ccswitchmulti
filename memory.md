@@ -3914,3 +3914,10 @@
 - Windows Codex Desktop 安装包为 `OpenAI.Codex_26.814.5167.0_x64`；Mac 为 `ChatGPT.app 26.814.41407`（arm64）。两者同属 `26.814` 系列但不是同一构建。
 - Windows `codex-router.log` 在 01:06-01:09 连续出现 `route_resolved -> upstream_status status=200`；Mac 失败请求在同一旧 CCSM 逻辑下没有任何 router 事件，并在 Codex logs 记录 `502 Bad Gateway: Unknown error`。
 - 因旧逻辑只有满足 Codex 请求分类才会产生 `route_resolved`，该对照证明真正差异在入站请求元数据/客户端行为，而非 takeover 或 MultiRouter 开关本身；具体字段仍需在 handler 入口做脱敏观测。Mac 无 sudo，无法用 tcpdump 抓 loopback 原始请求头。
+
+## 2026-08-20 Codex 请求分类诊断字段
+
+- 在 `/v1/responses` 的 Codex handler 入口新增 `request_classified` 事件，发生在请求体解析前，确保分类/解析失败也能留下证据。
+- 仅记录 `has_user_agent`、`user_agent_contains_codex`、`has_external_api_key`、`force_external_marker`、`selected_path`、`method`、`endpoint`；不记录 User-Agent 原文、Authorization、Cookie、请求体或 Token。
+- 旧逻辑的误分类修复和该诊断共存：无显式 External API marker/`ccsw_` key 时选择 `codex`；显式外部凭据仍选择 `external_openai_api`。
+- 回归验证：`cargo test --lib proxy::handlers::tests::` 83/83 通过，`cargo fmt --all -- --check` 和 `git diff --check` 通过。
