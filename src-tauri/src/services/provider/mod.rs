@@ -1298,7 +1298,21 @@ command = "example-mcp"
 
             let target_settings = json!({
                 "modelCatalog": { "models": [
-                    { "model": "repository-scout", "contextWindow": 128000 },
+                    {
+                        "model": "repository-scout",
+                        "contextWindow": 128000,
+                        "reasoning": {
+                            "supported": true,
+                            "supportedEfforts": ["low", "medium", "high"],
+                            "defaultEffort": "medium",
+                            "disableAllowed": true,
+                            "upstream": {
+                                "format": "string",
+                                "parameter": "reasoning_effort"
+                            },
+                            "source": "builtin"
+                        }
+                    },
                     { "model": "qwen3.6", "contextWindow": 262144 }
                 ] },
                 "codexRouting": {
