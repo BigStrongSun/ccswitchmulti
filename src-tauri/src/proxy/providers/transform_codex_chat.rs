@@ -272,6 +272,20 @@ impl CodexToolContext {
             .is_some_and(|spec| matches!(&spec.kind, CodexToolKind::Custom))
     }
 
+    /// Whether a Chat function name is a CCSM-hosted tool projection.
+    ///
+    /// The streaming Responses converter uses this classification to keep
+    /// hosted calls inside the proxy loop instead of exposing them as ordinary
+    /// client-executed function calls.
+    pub(crate) fn is_hosted_tool_chat_name(&self, chat_name: &str) -> bool {
+        self.lookup_chat_name(chat_name).is_some_and(|spec| {
+            matches!(
+                &spec.kind,
+                CodexToolKind::HostedWebSearch | CodexToolKind::HostedImageGeneration
+            )
+        })
+    }
+
     /// 返回 Codex 原始 hosted `web_search` 的安全配置子集。
     pub(crate) fn hosted_web_search_config(&self) -> Option<&HostedWebSearchConfig> {
         self.hosted_web_search.as_ref()

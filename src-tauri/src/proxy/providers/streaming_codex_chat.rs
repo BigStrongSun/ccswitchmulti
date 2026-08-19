@@ -63,6 +63,19 @@ struct ToolCallState {
     done: bool,
 }
 
+/// A completed Chat tool call observed by the Responses streaming state machine.
+///
+/// This is intentionally a transport-neutral snapshot. The hosted-tool
+/// coordinator can consume it at the argument-finalized boundary without
+/// reaching into the converter's internal accumulation maps.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CompletedChatToolCall {
+    pub(crate) chat_index: usize,
+    pub(crate) call_id: String,
+    pub(crate) name: String,
+    pub(crate) arguments: String,
+}
+
 #[derive(Debug)]
 struct ChatToResponsesState {
     response_started: bool,
@@ -113,6 +126,25 @@ impl ChatToResponsesState {
             tool_context,
             ..Self::default()
         }
+    }
+
+    fn completed_tool_calls(&self) -> Vec<CompletedChatToolCall> {
+        self.tools
+            .iter()
+            .filter_map(|(chat_index, state)| {
+                let name = state.name.trim();
+                let call_id = state.call_id.trim();
+                if name.is_empty() || call_id.is_empty() || !state.done {
+                    return None;
+                }
+                Some(CompletedChatToolCall {
+                    chat_index: *chat_index,
+                    call_id: call_id.to_string(),
+                    name: name.to_string(),
+                    arguments: state.arguments.clone(),
+                })
+            })
+            .collect()
     }
 
     fn handle_chat_chunk(&mut self, chunk: &Value) -> Vec<Bytes> {
