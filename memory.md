@@ -3854,3 +3854,12 @@
 - 兼容：历史配置中已经存在 `inputModalities` 的值仍按显式覆盖处理，不擅自猜测用户意图；新建/同步 profile 不再制造这类伪覆盖。
 - 产品形态：UI 的默认 profile 不再预填“纯文本”；未声明时展示 catalog 的当前结果，用户选择“仅文本/文本与图像”才形成持久化覆盖。来源提示保留最终来源和冲突，但不要求用户理解内部多段优先级。
 - 回归：新增 `catalog_refresh_replaces_automatic_profile_modality_without_persisting_it`；更新 hydration、初始化、catalog re-key 和 focused mutation 断言。相关 Rust 3175/3175 通过，TypeScript typecheck 通过；Vitest 本轮受 Windows 并发 worker/线程池环境影响未得到稳定完整输出，需在单一干净进程中复验。
+
+## 2026-08-19 Codex Reasoning Capability P3（模型编辑器结构化最终生效视图）
+
+- 前端提交仍在 `bigstrongsun/reasoning-capability-p0` 分支；模型目录编辑页现在为每个模型显示 `CodexModelReasoningCard`，其数据来自 P3 后端的 `resolve_codex_model_reasoning_capability`，因此不再单独复制能力判断逻辑。
+- 卡片展示三态（支持推理/不支持推理/未知且使用服务端默认）、控制类型、能力来源、稳定指纹、Provider 原生档位、Codex 可选档位、默认值、关闭能力、effort 映射和最终上游行为；未知状态不静默转成不支持。
+- 模型编辑器以当前 `catalogRows` 投影为 `settingsConfig.modelCatalog.models`，异步解析有请求序号和取消保护；空模型不请求，后端解析失败只保留“正在读取/未知”而不猜测。
+- “重新检测”调用只读 `trigger_codex_model_reasoning_detection`，仅 `Found` 写 TTL 检测缓存；“采用检测结果”把带 reasoning 子对象的快照转成用户声明；没有 reasoning 的 vLLM 服务快照不可采纳；手动声明和恢复内置值复用既有 capability source mutation。
+- 检测 Provider 使用当前草稿的 provider id/name/base URL，仅用于平台识别和只读元数据发现，不把 API key 送入检测请求；Tauri IPC 仍按官方命名参数调用。
+- 新增 `CodexModelReasoningCard.test.tsx` 覆盖 unknown/unsupported 三态区分与 graded 行为描述。验证：`npx tsc --noEmit` 通过；`npx vitest run` 139 文件/1123 用例全过；`cargo test --lib` 3171 passed / 0 failed / 5 ignored；仅存在与本轮无关的 `streaming_codex_chat.rs` 未提交改动，提交时不得混入。
