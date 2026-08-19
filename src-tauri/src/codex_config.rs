@@ -3820,6 +3820,52 @@ pub struct CodexSubagentProfileFieldSources {
     model_reasoning_effort: CodexSubagentFieldSource,
 }
 
+/// 输入能力（纯文本 vs 多模态）判定链中，最终结论的来源。
+///
+/// 用户遇到问题时不需要理解整条判定链，只需要知道"这个结论是哪一段给的"。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexSubagentInputModalitySource {
+    /// profile 里显式声明的 inputModalities（与 catalog 推导值不同，视为用户覆盖）
+    ProfileExplicit,
+    /// route 能力声明（MultiRouter 规则侧覆盖项）
+    Route,
+    /// 模型 catalog 条目声明（inputModalities/supportsImage/textOnly）
+    Catalog,
+    /// 内置"已确认纯文本"模型名注册表
+    NameRegistry,
+    /// 没有任何来源声明，结论为未知
+    Unknown,
+}
+
+/// 判定链中单个来源的声明，用于把整条链逐段呈现给用户。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexSubagentModalityDeclaration {
+    source: CodexSubagentInputModalitySource,
+    /// 该来源声明的模态：["text"] / ["text","image"]；None 表示该来源未声明
+    #[serde(skip_serializing_if = "Option::is_none")]
+    declared: Option<Vec<String>>,
+    /// 该来源的声明是否被采纳（赢得判定）
+    adopted: bool,
+}
+
+/// 输入能力判定链的完整呈现：最终结论 + 来源 + 逐段声明 + 冲突。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexSubagentInputModalityInfo {
+    /// 最终模态：["text"] / ["text","image"]；None 表示未知
+    #[serde(skip_serializing_if = "Option::is_none")]
+    modalities: Option<Vec<String>>,
+    /// 最终结论的来源
+    source: CodexSubagentInputModalitySource,
+    /// 判定链逐段声明（按优先级：profile > route > catalog > 名字注册表）
+    declarations: Vec<CodexSubagentModalityDeclaration>,
+    /// 各来源声明不一致时的人类可读冲突说明
+    #[serde(skip_serializing_if = "Option::is_none")]
+    conflict: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexSubagentProfileStatus {
@@ -3834,6 +3880,8 @@ pub struct CodexSubagentProfileStatus {
     routable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     field_sources: Option<CodexSubagentProfileFieldSources>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input_modality: Option<CodexSubagentInputModalityInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     requested_role_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3910,6 +3958,177 @@ fn configured_profile_field_sources(
     }
 }
 
+/// 从能力对象（route capabilities 或 catalog 条目）提取其正向声明的模态。
+/// 优先级：inputModalities 数组 > supportsImage/vision 布尔 > textOnly 布尔（仅 true 视为声明）。
+/// textOnly=false 是否定声明（"非纯文本"），不视为对模态的正向声明，返回 None。
+fn declared_modalities_from_capabilities(capabilities: &Value) -> Option<Vec<String>> {
+    if let Some(items) = capabilities
+        .get("inputModalities")
+        .or_else(|| capabilities.get("input_modalities"))
+        .and_then(Value::as_array)
+    {
+        let normalized: Vec<String> = items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(ToString::to_string)
+            .collect();
+        if !normalized.is_empty() {
+            return Some(normalized);
+        }
+    }
+    if let Some(supports) = capabilities
+        .get("supportsImage")
+        .or_else(|| capabilities.get("supports_image"))
+        .or_else(|| capabilities.get("vision"))
+        .and_then(Value::as_bool)
+    {
+        return Some(if supports {
+            vec!["text".to_string(), "image".to_string()]
+        } else {
+            vec!["text".to_string()]
+        });
+    }
+    if capabilities
+        .get("textOnly")
+        .or_else(|| capabilities.get("text_only"))
+        .and_then(Value::as_bool)
+        .is_some_and(|text_only| text_only)
+    {
+        return Some(vec!["text".to_string()]);
+    }
+    None
+}
+
+/// 把 profile 的 InputModality 枚举转成字符串列表（["text"] / ["text","image"]）。
+fn profile_input_modalities_as_strings(
+    modalities: Option<&[SubagentInputModality]>,
+) -> Option<Vec<String>> {
+    let items = modalities?;
+    let normalized: Vec<String> = items
+        .iter()
+        .map(|modality| match modality {
+            SubagentInputModality::Text => "text".to_string(),
+            SubagentInputModality::Image => "image".to_string(),
+        })
+        .collect();
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+fn format_modality_label(modalities: &[String]) -> &'static str {
+    if modalities.iter().any(|m| m.eq_ignore_ascii_case("image")) {
+        "文本+图像"
+    } else {
+        "纯文本"
+    }
+}
+
+/// 检测 route / catalog / 名字注册表 之间的模态声明冲突，返回人类可读说明。
+fn detect_modality_conflict(
+    route: Option<&[String]>,
+    catalog: Option<&[String]>,
+    name: Option<&[String]>,
+) -> Option<String> {
+    let sources: [(&str, Option<&[String]>); 3] = [
+        ("route", route),
+        ("模型目录", catalog),
+        ("内置注册表", name),
+    ];
+    let declared: Vec<(&str, &[String])> = sources
+        .into_iter()
+        .filter_map(|(label, value)| value.map(|value| (label, value)))
+        .collect();
+    if declared.len() < 2 {
+        return None;
+    }
+    let first = declared[0].1;
+    if declared.iter().all(|(_, value)| *value == first) {
+        return None;
+    }
+    let parts: Vec<String> = declared
+        .iter()
+        .map(|(label, value)| format!("{label} 声明{}", format_modality_label(value)))
+        .collect();
+    Some(format!("输入能力声明冲突：{}", parts.join("，")))
+}
+
+/// 解析输入能力判定链：最终结论 + 来源 + 逐段声明 + 冲突。
+///
+/// 最终模态 = profile 的 inputModalities（hydration 后，即实际用于角色生成的值）；
+/// 若 profile 未声明则回退到 catalog 推导值。来源归属：profile 值与 catalog 推导值
+/// 不同视为用户覆盖（ProfileExplicit），否则按 route > catalog > 名字注册表 > 未知归属。
+fn resolve_input_modality_provenance(
+    settings: &Value,
+    profile: &crate::codex_subagent_profiles::ParsedCodexSubagentProfile,
+) -> CodexSubagentInputModalityInfo {
+    let model = &profile.model;
+    let profile_declared = profile_input_modalities_as_strings(profile.input_modalities.as_deref());
+
+    let route_caps = codex_routing_capabilities_for_model(settings, model);
+    let route_declared = route_caps.and_then(declared_modalities_from_capabilities);
+    let catalog_caps = codex_catalog_capabilities_for_model(settings, model);
+    let catalog_declared = catalog_caps.and_then(declared_modalities_from_capabilities);
+    let name_declared = crate::model_capabilities::is_confirmed_text_only_model(model)
+        .then(|| vec!["text".to_string()]);
+
+    // catalog 推导值（hydration 会写入 profile 的值）
+    let catalog_derived = codex_catalog_model_specs(settings, "")
+        .into_iter()
+        .find(|spec| spec.model == *model)
+        .and_then(|spec| codex_subagent_profile_input_modalities(&spec));
+
+    let modalities = profile_declared.clone().or(catalog_derived.clone());
+
+    let source = if profile_declared.is_some() && profile_declared != catalog_derived {
+        CodexSubagentInputModalitySource::ProfileExplicit
+    } else if route_declared.is_some() {
+        CodexSubagentInputModalitySource::Route
+    } else if catalog_declared.is_some() {
+        CodexSubagentInputModalitySource::Catalog
+    } else if name_declared.is_some() {
+        CodexSubagentInputModalitySource::NameRegistry
+    } else {
+        CodexSubagentInputModalitySource::Unknown
+    };
+
+    let conflict = detect_modality_conflict(
+        route_declared.as_deref(),
+        catalog_declared.as_deref(),
+        name_declared.as_deref(),
+    );
+
+    let declarations = vec![
+        CodexSubagentModalityDeclaration {
+            source: CodexSubagentInputModalitySource::ProfileExplicit,
+            declared: profile_declared,
+            adopted: source == CodexSubagentInputModalitySource::ProfileExplicit,
+        },
+        CodexSubagentModalityDeclaration {
+            source: CodexSubagentInputModalitySource::Route,
+            declared: route_declared,
+            adopted: source == CodexSubagentInputModalitySource::Route,
+        },
+        CodexSubagentModalityDeclaration {
+            source: CodexSubagentInputModalitySource::Catalog,
+            declared: catalog_declared,
+            adopted: source == CodexSubagentInputModalitySource::Catalog,
+        },
+        CodexSubagentModalityDeclaration {
+            source: CodexSubagentInputModalitySource::NameRegistry,
+            declared: name_declared,
+            adopted: source == CodexSubagentInputModalitySource::NameRegistry,
+        },
+    ];
+
+    CodexSubagentInputModalityInfo {
+        modalities,
+        source,
+        declarations,
+        conflict,
+    }
+}
+
 fn absolute_codex_role_path(path: &Path) -> Result<String, AppError> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
@@ -3930,6 +4149,7 @@ fn push_unique_warning(warnings: &mut Vec<String>, warning: &str) {
 }
 
 fn configured_codex_subagent_profile_statuses(
+    settings: &Value,
     compilation: ConfiguredCodexSubagentCompilation,
     agents_dir: &Path,
 ) -> Result<(Vec<CodexSubagentProfileStatus>, Vec<String>), AppError> {
@@ -3957,6 +4177,7 @@ fn configured_codex_subagent_profile_statuses(
                 enabled: None,
                 routable: false,
                 field_sources: None,
+                input_modality: None,
                 requested_role_name: None,
                 effective_role_name: None,
                 role_file_path: None,
@@ -3986,6 +4207,7 @@ fn configured_codex_subagent_profile_statuses(
             enabled: Some(profile.enabled),
             routable: false,
             field_sources: Some(configured_profile_field_sources(profile)),
+            input_modality: Some(resolve_input_modality_provenance(settings, profile)),
             requested_role_name: None,
             effective_role_name: None,
             role_file_path: None,
@@ -4070,6 +4292,7 @@ fn legacy_codex_subagent_profile_statuses(
             enabled: None,
             routable: classification.is_some(),
             field_sources: None,
+            input_modality: None,
             requested_role_name: Some(role.requested_role_name),
             effective_role_name: Some(role.effective_role_name),
             role_file_path: Some(absolute_codex_role_path(&role.path)?),
@@ -4103,8 +4326,11 @@ fn get_codex_subagent_profile_statuses_with_context(
         provider_context,
     )? {
         Some(compilation) => {
-            let (profiles, warnings) =
-                configured_codex_subagent_profile_statuses(compilation, &get_codex_agents_dir())?;
+            let (profiles, warnings) = configured_codex_subagent_profile_statuses(
+                &settings_config,
+                compilation,
+                &get_codex_agents_dir(),
+            )?;
             Ok(CodexSubagentProfileStatuses {
                 mode,
                 generation_source: if version == CodexSubagentVersion::V1 {
@@ -7552,6 +7778,155 @@ mod tests {
         );
     }
 
+    fn parse_test_profile(
+        model: &str,
+        input_modalities: Option<Value>,
+    ) -> crate::codex_subagent_profiles::ParsedCodexSubagentProfile {
+        let mut profile_json = json!({
+            "model": model,
+            "enabled": true,
+            "questionnaire": {
+                "taskStrengths": ["repository_exploration"],
+                "optimization": "speed",
+                "writeScope": "read_only",
+                "preference": "eligible"
+            },
+            "reasoning": { "policy": "delegated" }
+        });
+        if let Some(modalities) = input_modalities {
+            profile_json["inputModalities"] = modalities;
+        }
+        let v2 = json!({
+            "schemaVersion": 2,
+            "selectionPolicy": "balanced",
+            "profiles": { model: profile_json }
+        });
+        let parsed = parse_persisted_subagent_v2(&v2).expect("parse test profile");
+        parsed
+            .profiles
+            .iter()
+            .find_map(|entry| match entry {
+                ParsedProfileEntry::Valid(profile) => Some(profile),
+                _ => None,
+            })
+            .cloned()
+            .expect("valid profile")
+    }
+
+    #[test]
+    fn input_modality_provenance_catalog_declares_multimodal() {
+        let settings = codex_subagent_profile_status_settings(
+            "v2",
+            json!({}),
+            json!([{
+                "model": "vision-model",
+                "contextWindow": 128000,
+                "inputModalities": ["text", "image"]
+            }]),
+            json!([{
+                "id": "r",
+                "match": { "models": ["vision-model"] },
+                "upstream": { "auth": { "source": "provider_config" } }
+            }]),
+        );
+        let profile = parse_test_profile("vision-model", None);
+        let info = resolve_input_modality_provenance(&settings, &profile);
+        assert_eq!(info.modalities, Some(vec!["text".into(), "image".into()]));
+        assert_eq!(info.source, CodexSubagentInputModalitySource::Catalog);
+        assert!(info.conflict.is_none());
+    }
+
+    #[test]
+    fn input_modality_provenance_detects_route_catalog_conflict() {
+        let settings = codex_subagent_profile_status_settings(
+            "v2",
+            json!({}),
+            json!([{
+                "model": "conflict-model",
+                "contextWindow": 128000,
+                "inputModalities": ["text", "image"]
+            }]),
+            json!([{
+                "id": "r",
+                "match": { "models": ["conflict-model"] },
+                "capabilities": { "textOnly": true },
+                "upstream": { "auth": { "source": "provider_config" } }
+            }]),
+        );
+        let profile = parse_test_profile("conflict-model", None);
+        let info = resolve_input_modality_provenance(&settings, &profile);
+        // route 声明 textOnly=true 优先 → 最终纯文本；route 与 catalog 声明冲突
+        assert_eq!(info.modalities, Some(vec!["text".into()]));
+        assert_eq!(info.source, CodexSubagentInputModalitySource::Route);
+        let conflict = info.conflict.expect("route/catalog 声明不一致必须报告冲突");
+        assert!(conflict.contains("冲突"), "conflict: {conflict}");
+    }
+
+    #[test]
+    fn input_modality_provenance_name_registry_text_only() {
+        let settings = codex_subagent_profile_status_settings(
+            "v2",
+            json!({}),
+            json!([{ "model": "deepseek-v4-flash", "contextWindow": 128000 }]),
+            json!([{
+                "id": "r",
+                "match": { "models": ["deepseek-v4-flash"] },
+                "upstream": { "auth": { "source": "provider_config" } }
+            }]),
+        );
+        let profile = parse_test_profile("deepseek-v4-flash", None);
+        let info = resolve_input_modality_provenance(&settings, &profile);
+        // deepseek-v4-flash 在内置"已确认纯文本"注册表
+        assert_eq!(info.modalities, Some(vec!["text".into()]));
+        assert_eq!(info.source, CodexSubagentInputModalitySource::NameRegistry);
+        assert!(info.conflict.is_none());
+    }
+
+    #[test]
+    fn input_modality_provenance_unknown_when_no_declaration() {
+        let settings = codex_subagent_profile_status_settings(
+            "v2",
+            json!({}),
+            json!([{ "model": "mystery-model", "contextWindow": 128000 }]),
+            json!([{
+                "id": "r",
+                "match": { "models": ["mystery-model"] },
+                "upstream": { "auth": { "source": "provider_config" } }
+            }]),
+        );
+        let profile = parse_test_profile("mystery-model", None);
+        let info = resolve_input_modality_provenance(&settings, &profile);
+        assert_eq!(info.modalities, None);
+        assert_eq!(info.source, CodexSubagentInputModalitySource::Unknown);
+        assert!(info.conflict.is_none());
+    }
+
+    #[test]
+    fn input_modality_provenance_profile_explicit_override() {
+        let settings = codex_subagent_profile_status_settings(
+            "v2",
+            json!({}),
+            json!([{
+                "model": "override-model",
+                "contextWindow": 128000,
+                "inputModalities": ["text", "image"]
+            }]),
+            json!([{
+                "id": "r",
+                "match": { "models": ["override-model"] },
+                "upstream": { "auth": { "source": "provider_config" } }
+            }]),
+        );
+        // profile 显式声明纯文本，与 catalog 的 text+image 不同 → 用户覆盖
+        let profile = parse_test_profile("override-model", Some(json!(["text"])));
+        let info = resolve_input_modality_provenance(&settings, &profile);
+        assert_eq!(info.modalities, Some(vec!["text".into()]));
+        assert_eq!(
+            info.source,
+            CodexSubagentInputModalitySource::ProfileExplicit
+        );
+    }
+
     #[test]
     fn codex_subagent_profile_status_command_is_registered_without_changing_preview_ipc() {
         let lib_source = include_str!("lib.rs");
@@ -7635,6 +8010,15 @@ mod tests {
                         "developerInstructions": "automatic",
                         "nicknameCandidates": "override",
                         "modelReasoningEffort": "override"
+                    },
+                    "inputModality": {
+                        "source": "unknown",
+                        "declarations": [
+                            { "source": "profile_explicit", "adopted": false },
+                            { "source": "route", "adopted": false },
+                            { "source": "catalog", "adopted": false },
+                            { "source": "name_registry", "adopted": false }
+                        ]
                     },
                     "requestedRoleName": "Analysis Role",
                     "effectiveRoleName": "ccswitch-analysis-role-2",

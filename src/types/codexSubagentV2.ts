@@ -117,6 +117,26 @@ export type CodexSubagentNonGenerationReason = Exclude<
 >;
 export type CodexSubagentFieldSource = "automatic" | "override";
 
+export type CodexSubagentInputModalitySource =
+  | "profile_explicit"
+  | "route"
+  | "catalog"
+  | "name_registry"
+  | "unknown";
+
+export interface CodexSubagentModalityDeclaration {
+  source: CodexSubagentInputModalitySource;
+  declared?: string[];
+  adopted: boolean;
+}
+
+export interface CodexSubagentInputModalityInfo {
+  modalities?: string[];
+  source: CodexSubagentInputModalitySource;
+  declarations: CodexSubagentModalityDeclaration[];
+  conflict?: string;
+}
+
 export interface CodexSubagentProfileFieldSources {
   roleName: CodexSubagentFieldSource;
   description: CodexSubagentFieldSource;
@@ -132,6 +152,7 @@ export interface CodexSubagentProfileStatus {
   enabled?: boolean;
   routable: boolean;
   fieldSources?: CodexSubagentProfileFieldSources;
+  inputModality?: CodexSubagentInputModalityInfo;
   requestedRoleName?: string;
   effectiveRoleName?: string;
   roleFilePath?: string;

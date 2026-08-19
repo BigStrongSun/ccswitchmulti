@@ -26,6 +26,7 @@ import type { Provider } from "@/types";
 import {
   createDefaultCodexSubagentV2Config,
   type CodexSubagentExplicitReasoningEffort,
+  type CodexSubagentInputModalitySource,
   type CodexSubagentProfilePreview,
   type CodexSubagentReasoningCapabilities,
   type CodexSubagentReasoningCapability,
@@ -340,6 +341,27 @@ function inferredInputModalities(
   if (supportsImage === true) return ["text", "image"];
   if (supportsImage === false) return ["text"];
   return undefined;
+}
+
+function formatInputModalities(modalities?: string[]): string {
+  if (!modalities || modalities.length === 0) return "未知";
+  if (modalities.some((m) => m.toLowerCase() === "image")) return "文本+图像";
+  return "纯文本";
+}
+
+function formatModalitySource(source: CodexSubagentInputModalitySource): string {
+  switch (source) {
+    case "profile_explicit":
+      return "profile 显式声明";
+    case "route":
+      return "路由能力";
+    case "catalog":
+      return "模型目录";
+    case "name_registry":
+      return "内置模型名注册表";
+    case "unknown":
+      return "未知（无来源声明）";
+  }
 }
 
 function settingsWithConfig(
@@ -1915,6 +1937,19 @@ function ProfileBackendOutput({
                 模型推理强度来源：
                 {status.fieldSources.modelReasoningEffort}
               </p>
+            </>
+          ) : null}
+          {status.inputModality ? (
+            <>
+              <p>
+                输入能力：{formatInputModalities(status.inputModality.modalities)}
+                （来源：{formatModalitySource(status.inputModality.source)}）
+              </p>
+              {status.inputModality.conflict ? (
+                <p className="text-amber-600 dark:text-amber-400">
+                  {status.inputModality.conflict}
+                </p>
+              ) : null}
             </>
           ) : null}
           {status.roleFilePath ? <p>{status.roleFilePath}</p> : null}

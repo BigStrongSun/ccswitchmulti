@@ -1341,6 +1341,35 @@ describe("Codex Sub-Agent V2 review round 1 regressions", () => {
     ).toBeVisible();
   });
 
+  it("renders input modality provenance and conflict in the profile status", async () => {
+    ipcState.statusResponse = {
+      ...statusFixture,
+      profiles: [
+        {
+          ...statusFixture.profiles[0],
+          inputModality: {
+            modalities: ["text"],
+            source: "route",
+            declarations: [
+              { source: "profile_explicit", adopted: false },
+              { source: "route", declared: ["text"], adopted: true },
+              { source: "catalog", declared: ["text", "image"], adopted: false },
+              { source: "name_registry", adopted: false },
+            ],
+            conflict:
+              "输入能力声明冲突：route 声明纯文本，模型目录 声明文本+图像",
+          },
+        },
+        statusFixture.profiles[1],
+      ],
+    };
+    const user = userEvent.setup();
+    await renderWorkspace();
+    const flash = within(await openGeneratedOutput(user));
+    expect(await flash.findByText(/输入能力：纯文本/)).toBeVisible();
+    expect(flash.getByText(/输入能力声明冲突/)).toBeVisible();
+  });
+
   it("disables draft controls while a save transaction is pending", async () => {
     const gate = createDeferred();
     ipcState.updateGate = gate.promise;
