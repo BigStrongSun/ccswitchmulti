@@ -172,6 +172,18 @@ impl ChatToResponsesState {
         Some(calls)
     }
 
+    fn has_mixed_hosted_tool_calls(&self) -> bool {
+        if self.finish_reason.as_deref() != Some("tool_calls") {
+            return false;
+        }
+        let calls = self.completed_tool_calls();
+        let hosted = calls
+            .iter()
+            .filter(|call| self.tool_context.is_hosted_tool_chat_name(&call.name))
+            .count();
+        hosted > 0 && hosted < calls.len()
+    }
+
     fn assistant_message_for_hosted_tools(&self, calls: &[CompletedChatToolCall]) -> Value {
         let tool_calls = calls
             .iter()
@@ -1079,6 +1091,15 @@ where
                                 yield Ok(event);
                             }
 
+                            if state.has_mixed_hosted_tool_calls() {
+                                yield Ok(state.failed_event(
+                                    "Mixed hosted and ordinary function tool calls are not supported in one streaming turn".to_string(),
+                                    Some("mixed_hosted_tool_calls".to_string()),
+                                ));
+                                stream_failed = true;
+                                break;
+                            }
+
                             if let Some(calls) = state.hosted_tool_calls_ready() {
                                 let assistant = state.assistant_message_for_hosted_tools(&calls);
                                 match on_hosted_tools(calls, assistant).await {
@@ -1231,6 +1252,43 @@ mod tests {
         assert!(output.contains("response.completed"));
         assert!(!output.contains("function_call_arguments"));
         assert!(!output.contains("web_search"));
+    }
+
+    #[tokio::test]
+    async fn mixed_hosted_and_ordinary_streaming_tools_fail_explicitly() {
+        let context =
+            super::super::transform_codex_chat::build_codex_tool_context_from_request(&json!({
+                "tools": [
+                    { "type": "web_search" },
+                    { "type": "function", "function": { "name": "lookup" } }
+                ]
+            }));
+        let chunks = vec![
+            Ok(Bytes::from_static(b"data: {\"id\":\"chatcmpl_mixed\",\"model\":\"m\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_hosted\",\"type\":\"function\",\"function\":{\"name\":\"web_search\"}},{\"index\":1,\"id\":\"call_fn\",\"type\":\"function\",\"function\":{\"name\":\"lookup\"}}]}}]}\n\n")),
+            Ok(Bytes::from_static(b"data: {\"id\":\"chatcmpl_mixed\",\"model\":\"m\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{}\"}},{\"index\":1,\"function\":{\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n")),
+        ];
+        let stream: ChatSseStream = Box::pin(stream::iter(chunks));
+        let output = create_responses_sse_stream_from_chat_with_hosted_loop(
+            stream,
+            context,
+            |_calls, _assistant| async {
+                panic!("mixed tool calls must not invoke hosted coordinator")
+            },
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let output = String::from_utf8(
+            output
+                .into_iter()
+                .map(|item| item.unwrap())
+                .collect::<Vec<_>>()
+                .concat(),
+        )
+        .unwrap();
+
+        assert!(output.contains("mixed_hosted_tool_calls"));
+        assert!(output.contains("Mixed hosted and ordinary function tool calls"));
+        assert!(!output.contains("response.completed"));
     }
 
     fn parse_sse_events(output: &str) -> Vec<Value> {
