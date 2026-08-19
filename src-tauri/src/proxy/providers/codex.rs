@@ -25,7 +25,7 @@ const CODEX_RESOLVED_UPSTREAM_MODEL_OVERRIDE: &str = "codexResolvedUpstreamModel
 const CODEX_NATIVE_AUTH_PASSTHROUGH: &str = "codexNativeAuthPassthrough";
 pub(crate) const CODEX_ACCOUNT_POOL_ENABLED: &str = "codexAccountPoolEnabled";
 const QWEN_VLLM_MIN_OUTPUT_TOKENS: u64 = 2_048;
-const QWEN_VLLM_DEFAULT_OUTPUT_TOKENS: u64 = 131_072;
+const RETIRED_QWEN_VLLM_DEFAULT_OUTPUT_TOKENS: u64 = 32_768;
 
 /// Codex Desktop 看到的 MultiRouter 认证门面。
 ///
@@ -1933,11 +1933,11 @@ pub fn resolve_codex_chat_reasoning_config(
     inferred
 }
 
-/// 把 Qwen/vLLM 运行时安全默认（输出预算下限和缺省上限）应用到能力派生配置。
+/// 把 Qwen/vLLM 运行时安全默认（输出预算下限）应用到能力派生配置。
 ///
 /// 与 [`merge_qwen_vllm_reasoning_defaults`] 不同：不纠正 `thinking_param`——
 /// 能力声明是 thinking 开关的权威来源，不得被推断覆盖。仅当推断结果明确识别
-/// 为 Qwen/vLLM 时，才抬高缺失或过小的 `min_output_tokens`，并补缺省上限。
+/// 为 Qwen/vLLM 时，才抬高缺失或过小的 `min_output_tokens`。
 fn apply_qwen_vllm_safety_defaults(
     mut config: CodexChatReasoningConfig,
     inferred: &CodexChatReasoningConfig,
@@ -1952,11 +1952,6 @@ fn apply_qwen_vllm_safety_defaults(
             .unwrap_or(true)
         {
             config.min_output_tokens = Some(min);
-        }
-    }
-    if let Some(default_output_tokens) = inferred.default_output_tokens {
-        if config.default_output_tokens.is_none() {
-            config.default_output_tokens = Some(default_output_tokens);
         }
     }
     config
@@ -2233,10 +2228,20 @@ fn merge_qwen_vllm_reasoning_defaults(
         }
     }
     if let Some(inferred_default_output_tokens) = inferred.default_output_tokens {
-        if explicit.default_output_tokens.is_none() {
+        if explicit
+            .default_output_tokens
+            .map(|current| current < inferred_default_output_tokens)
+            .unwrap_or(true)
+        {
             explicit.default_output_tokens = Some(inferred_default_output_tokens);
         }
     }
+    if explicit.default_output_tokens == Some(RETIRED_QWEN_VLLM_DEFAULT_OUTPUT_TOKENS)
+        && inferred.default_output_tokens.is_none()
+    {
+        explicit.default_output_tokens = None;
+    }
+
     normalize_codex_chat_reasoning_config(explicit)
 }
 
@@ -2346,9 +2351,8 @@ fn infer_codex_chat_reasoning_config(
     }
 
     // 本地 / vLLM 托管的 Qwen 兼容端点会先输出 reasoning；Codex 小
-    // `max_output_tokens` 请求容易被思考内容吃满，因此保留显式预算的最小下限。
-    // Qwen3.8-27B 官方 API 的最大输出长度是 131072（思考/非思考模式一致）。
-    // vLLM 缺省只用剩余上下文当输出预算，缺少该模型级上限时会生成远超官方能力。
+    // `max_output_tokens` 请求容易被思考内容吃满，因此只声明显式预算的最小下限。
+    // Codex 完全缺省时应继续交给 vLLM 自身默认策略，不能在路由层强行截断输出长度。
     if haystack.contains("qwen")
         && (haystack.contains("vllm") || haystack.contains("matrixminecraft"))
     {
@@ -2361,7 +2365,7 @@ fn infer_codex_chat_reasoning_config(
             effort_param: Some("none".to_string()),
             effort_value_mode: None,
             min_output_tokens: Some(QWEN_VLLM_MIN_OUTPUT_TOKENS),
-            default_output_tokens: Some(QWEN_VLLM_DEFAULT_OUTPUT_TOKENS),
+            default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
             disable_contract: false,
         });
@@ -3688,10 +3692,7 @@ experimental_bearer_token = "PROXY_MANAGED"
         assert_eq!(config.thinking_param.as_deref(), Some("none"));
         assert_eq!(config.effort_param.as_deref(), Some("none"));
         assert_eq!(config.min_output_tokens, Some(QWEN_VLLM_MIN_OUTPUT_TOKENS));
-        assert_eq!(
-            config.default_output_tokens,
-            Some(QWEN_VLLM_DEFAULT_OUTPUT_TOKENS)
-        );
+        assert_eq!(config.default_output_tokens, None);
     }
 
     #[test]
@@ -3736,7 +3737,7 @@ experimental_bearer_token = "PROXY_MANAGED"
     }
 
     #[test]
-    fn test_qwen_vllm_route_infers_thinking_with_default_output_budget() {
+    fn test_qwen_vllm_route_infers_thinking_without_default_output_budget() {
         let provider = create_provider(json!({
             "modelRoutes": [
                 {
@@ -3759,10 +3760,7 @@ experimental_bearer_token = "PROXY_MANAGED"
         assert_eq!(config.thinking_param.as_deref(), Some("none"));
         assert_eq!(config.effort_param.as_deref(), Some("none"));
         assert_eq!(config.min_output_tokens, Some(QWEN_VLLM_MIN_OUTPUT_TOKENS));
-        assert_eq!(
-            config.default_output_tokens,
-            Some(QWEN_VLLM_DEFAULT_OUTPUT_TOKENS)
-        );
+        assert_eq!(config.default_output_tokens, None);
     }
 
     #[test]
@@ -3801,14 +3799,11 @@ wire_api = "chat"
         assert_eq!(config.thinking_param.as_deref(), Some("none"));
         assert_eq!(config.effort_param.as_deref(), Some("none"));
         assert_eq!(config.min_output_tokens, Some(QWEN_VLLM_MIN_OUTPUT_TOKENS));
-        assert_eq!(
-            config.default_output_tokens,
-            Some(QWEN_VLLM_DEFAULT_OUTPUT_TOKENS)
-        );
+        assert_eq!(config.default_output_tokens, None);
     }
 
     #[test]
-    fn test_qwen_vllm_explicit_default_output_budget_is_preserved() {
+    fn test_qwen_vllm_retired_auto_default_budget_is_cleared() {
         let mut provider = create_provider(json!({
             "config": r#"
 model_provider = "qwen_local"
@@ -3828,7 +3823,7 @@ wire_api = "chat"
                 effort_param: Some("none".to_string()),
                 effort_value_mode: None,
                 min_output_tokens: Some(QWEN_VLLM_MIN_OUTPUT_TOKENS),
-                default_output_tokens: Some(QWEN_VLLM_DEFAULT_OUTPUT_TOKENS),
+                default_output_tokens: Some(RETIRED_QWEN_VLLM_DEFAULT_OUTPUT_TOKENS),
                 output_format: Some("reasoning_content".to_string()),
                 disable_contract: false,
             }),
@@ -3840,10 +3835,7 @@ wire_api = "chat"
 
         assert_eq!(config.thinking_param.as_deref(), Some("none"));
         assert_eq!(config.min_output_tokens, Some(QWEN_VLLM_MIN_OUTPUT_TOKENS));
-        assert_eq!(
-            config.default_output_tokens,
-            Some(QWEN_VLLM_DEFAULT_OUTPUT_TOKENS)
-        );
+        assert_eq!(config.default_output_tokens, None);
     }
 
     #[test]

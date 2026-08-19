@@ -65,7 +65,7 @@ describe("ProviderForm Codex catalog helpers", () => {
     });
   });
 
-  it("applies Qwen vLLM Codex Chat defaults with output cap", () => {
+  it("applies Qwen vLLM Codex Chat defaults without implicit output cap", () => {
     expect(
       normalizeCodexChatReasoningForSave(
         {
@@ -87,7 +87,6 @@ describe("ProviderForm Codex catalog helpers", () => {
       thinkingParam: "enable_thinking",
       effortParam: "none",
       minOutputTokens: 2048,
-      defaultOutputTokens: 131072,
       outputFormat: "reasoning_content",
     });
     expect(
@@ -105,7 +104,7 @@ describe("ProviderForm Codex catalog helpers", () => {
           models: [{ model: "qwen3.6" }],
         },
       ),
-    ).toHaveProperty("defaultOutputTokens", 131072);
+    ).not.toHaveProperty("defaultOutputTokens");
   });
 
   it("preserves native-profile overrides (parallel tool calls + input modalities + base instructions)", () => {
