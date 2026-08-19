@@ -3838,3 +3838,11 @@
 - 前端：`CodexSubagentProfileEditor.tsx` 的 ProfileBackendOutput 呈现输入能力（纯文本/文本+图像）+ 来源 + 琥珀色冲突行；`codexSubagentV2.ts` 补对应类型；`CodexSubagentV2ProfileEditor.test.tsx` 新增 “renders input modality provenance and conflict in the profile status”。
 - 验证：`cargo test --lib` 3168 passed / 0 failed / 5 ignored（新增 5 个 provenance 测试）；`pnpm vitest run` 138 文件 / 1121 用例全过；`pnpm typecheck`、`cargo fmt --check`、`git diff --check` 均干净。
 - 注意：本提交由并行会话落盘（当时 P2/P3 reasoning 工作也在并行提交）。已核验提交内容仅含本功能（不含 P3 的 `resolve_codex_model_reasoning_capability`/`trigger_codex_model_reasoning_detection`）；P3 工作仍留在工作区未暂存，勿误提交。
+
+## 2026-08-19 V2 输入模态来源审计：发现自动值与用户覆盖语义混用
+
+- 审计结论：当前 `inputModalities` 同时表示 catalog 自动推导值和用户手动覆盖值，字段本身没有来源标记。
+- 证据链：`hydrate_codex_subagent_v2_input_modalities` 会把 catalog 推导的 `inputModalities` 写回 profile；`catalog_profile_draft` / `initialize_legacy_subagent_v2` 也会直接写入该字段；之后 `parse_persisted_subagent_v2` 无法区分这两类值。
+- 影响：当 MultiRouter catalog 后续把同一模型从纯文本改成文本+图像（或反向变化）时，旧 profile 字段仍会被 `resolve_input_modality_provenance`、`preview_codex_subagent_profile_with_context` 和角色生成逻辑当作显式 profile 值，阻止新 catalog 能力生效；前端 `inferredInputModalities` 也优先返回旧 profile 值。
+- 当前测试缺口：现有 5 个 provenance 测试只覆盖单次解析、route/catalog 冲突和显式覆盖，没有覆盖“catalog 刷新后旧自动值”的跨版本场景；因此测试全绿不能证明该隐患已消除。
+- 修复边界：不能只改来源文案或冲突提示。应把“用户覆盖”和“catalog 自动值”分离（优先采用不持久化自动值；若必须兼容既有数据，则增加受控来源标记和一次性迁移），并为 catalog 能力变更补充回归测试。现有未提交的 reasoning P3 工作不应与该修复混合提交。
