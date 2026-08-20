@@ -65,4 +65,3 @@ v1 继续只读兼容。首次编辑、启用或显式迁移时执行 `preview -
 ## 验收
 
 修改 Provider 或模型协议后，不重写 route 即影响下一次请求。混合协议、能力、OAuth、别名、精确/前缀优先级与 spawn-agent 目录保持正确。删除/重命名无悬空引用，迁移无秘密泄露，文件失败无半同步。发布前必须在受影响 Mac 上完成 Qwen Chat/Responses 双向 canary。
-

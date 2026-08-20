@@ -7,6 +7,9 @@
 - Sub-Agent 编辑器不能再从 Router 的历史 `modelCatalog` 推断输入能力；工作台把由目标 Provider/Route 即时投影出的 catalog 作为只读视图传入编辑器，持久化仍只写 Sub-Agent policy。
 - Wizard 的模型勾选不能靠裁剪临时 Provider catalog 后保存 Route `all`：这会在下一次读取 Provider 全量目录时把取消的模型重新纳入。若只选择子集，Route 必须写 canonical `include`；碰撞产生的可见别名只写 `aliases`，`include` 保存原 Provider 模型 ID。全选才写 `all`。
 - Rust 全量首次失败的 3 个 External OpenAI API 测试是夹具错误：15721 上无稳定 UA/无 external marker 的请求按 Codex Desktop 处理；声称模拟非 Codex 客户端的测试必须发送现有 `x-cc-switch-external-openai-api` marker。修正后 Rust 全量 3232 passed / 0 failed / 5 ignored，Clippy 在仅豁免既有 `redundant_closure`、`manual_find`、`large_enum_variant` 后以 `-D warnings` 通过。
+- 2026-08-20 最终本机复验：`pnpm vitest run` 为 139 files / 1125 tests、`cargo test --lib --no-fail-fast` 为 3232 passed / 0 failed / 5 ignored；`pnpm typecheck`、`pnpm format:check`、`cargo fmt --check` 通过。严格 UTF-8 检查发现计划和规格各多一个 EOF 空行，已修正；提交后必须再用 `git diff --check main...HEAD` 复验。
+- 正式本地发布流水线使用项目保存的 Tauri updater 私钥完成 `3.19.2-9` NSIS 构建与导出。权威安装包是 `C:\Users\sunda\Documents\LLMservice\最新版ccswitchmulti\windows\installer\CCSwitchMulti_3.19.2-9_x64-setup.exe`，12,343,527 bytes，SHA-256 `ffb1391fec12a90d2df918b70230e6a5968ddfa88bab42c819e67c62c7800c78`；`latest.json` 的 signature 与相邻 `.sig` 精确一致，metadata commit 为 `7dc67223dc67401201a8b45f45b39e6a8fb08856`。裸 `pnpm build` 会尝试本机 WiX MSI 并在 `light.exe` 失败；裸 `pnpm tauri build --bundles nsis` 虽生成 bundle，但因没有注入私钥在 updater 签名门禁退出 1，不能用它覆盖正式导出产物。
+- 受影响 Mac 的最终 canary 尚未完成：`ssh -i ~/.ssh/mac_codex -p 22222 zhangjinghan@127.0.0.1` 返回 `Connection refused`，Windows 上 22222 无监听，Tailscale 无在线 macOS peer，SSH config 无备用入口。恢复该隧道后仍必须在同一 Qwen Route 上做 Chat→Responses→Chat，核对同 trace 的 `route_resolved`、`request_prepared`、`effective_endpoint`、转换标志、`upstream_status=200` 与完成事件；canary 前不得发布 GitHub release。
 
 ## 2026-08-20 MultiRouter Provider SSOT v2 schema 与统一 compiler
 

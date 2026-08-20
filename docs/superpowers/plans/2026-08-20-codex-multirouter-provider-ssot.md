@@ -175,4 +175,3 @@
 - [ ] Build an installable artifact and deploy transactionally to the affected Mac with rollback retained.
 - [ ] On the Mac, change Qwen Chat→Responses and Responses→Chat without recreating the route; verify matching `route_resolved`, `request_prepared`, `effective_endpoint`, conversion flags, upstream status, and response completion for the same trace.
 - [ ] Update `memory.md` with final architecture, migration, test counts, canary evidence, unresolved limitations, and commit IDs; commit acceptance documentation.
-
