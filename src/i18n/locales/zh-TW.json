@@ -1616,6 +1616,7 @@
     "displayNamePlaceholder": "例如: Claude 3.5 Sonnet",
     "appType": "應用程式類型",
     "statusCode": "狀態碼",
+    "otherStatusCodes": "其他",
     "allSources": "全部來源",
     "allModels": "全部模型",
     "filterBySource": "依來源篩選",

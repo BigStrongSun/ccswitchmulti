@@ -1618,6 +1618,7 @@
     "displayNamePlaceholder": "e.g., Claude 3.5 Sonnet",
     "appType": "App Type",
     "statusCode": "Status Code",
+    "otherStatusCodes": "Other",
     "allSources": "All Sources",
     "allModels": "All Models",
     "filterBySource": "Filter by source",

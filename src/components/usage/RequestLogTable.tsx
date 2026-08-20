@@ -57,6 +57,9 @@ export function RequestLogTable({
   // 应用/Provider/模型筛选已上移到 Dashboard 顶栏（全局生效）；
   // 这里只保留日志特有的状态码筛选。
   const [statusCode, setStatusCode] = useState<number | undefined>(undefined);
+  const [statusGroup, setStatusGroup] = useState<"other" | undefined>(
+    undefined,
+  );
   const [page, setPage] = useState(0);
   const [pageInput, setPageInput] = useState("");
   const pageSize = 20;
@@ -69,6 +72,7 @@ export function RequestLogTable({
     providerName,
     model,
     statusCode,
+    statusGroup,
   };
 
   const { data: result, isLoading } = useRequestLogs({
@@ -114,12 +118,19 @@ export function RequestLogTable({
         <div className="flex flex-wrap items-center gap-1.5">
           {/* Status code */}
           <Select
-            value={statusCode?.toString() || "all"}
+            value={statusGroup || statusCode?.toString() || "all"}
             onValueChange={(v) => {
+              if (v === "other") {
+                setStatusCode(undefined);
+                setStatusGroup("other");
+                setPage(0);
+                return;
+              }
               const parsed = Number.parseInt(v, 10);
               setStatusCode(
                 v === "all" || !Number.isFinite(parsed) ? undefined : parsed,
               );
+              setStatusGroup(undefined);
               setPage(0);
             }}
           >
@@ -133,6 +144,9 @@ export function RequestLogTable({
               <SelectItem value="401">401</SelectItem>
               <SelectItem value="429">429</SelectItem>
               <SelectItem value="500">500</SelectItem>
+              <SelectItem value="other">
+                {t("usage.otherStatusCodes")}
+              </SelectItem>
             </SelectContent>
           </Select>
 

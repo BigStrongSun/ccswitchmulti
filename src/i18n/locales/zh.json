@@ -1623,6 +1623,7 @@
     "displayNamePlaceholder": "例如: Claude 3.5 Sonnet",
     "appType": "应用类型",
     "statusCode": "状态码",
+    "otherStatusCodes": "其他",
     "allSources": "全部来源",
     "allModels": "全部模型",
     "filterBySource": "按来源筛选",

@@ -1615,6 +1615,7 @@
     "displayNamePlaceholder": "例: Claude 3.5 Sonnet",
     "appType": "アプリ種別",
     "statusCode": "ステータスコード",
+    "otherStatusCodes": "その他",
     "allSources": "すべてのソース",
     "allModels": "すべてのモデル",
     "filterBySource": "ソースで絞り込む",

@@ -212,6 +212,7 @@ export interface LogFilters {
   providerName?: string;
   model?: string;
   statusCode?: number;
+  statusGroup?: "other";
   startDate?: number;
   endDate?: number;
 }

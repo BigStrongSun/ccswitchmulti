@@ -1,3 +1,4 @@
+import { Children, cloneElement } from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { RequestLogTable } from "@/components/usage/RequestLogTable";
@@ -35,15 +36,35 @@ vi.mock("@/components/ui/input", () => ({
 }));
 
 vi.mock("@/components/ui/select", () => ({
-  Select: ({ children }: any) => <div>{children}</div>,
-  SelectTrigger: ({ children, ...props }: any) => (
+  Select: ({ children, onValueChange }: any) => (
+    <div>
+      {Children.map(children, (child) =>
+        cloneElement(child, { onValueChange }),
+      )}
+    </div>
+  ),
+  SelectTrigger: ({
+    children,
+    onValueChange: _onValueChange,
+    ...props
+  }: any) => (
     <button type="button" {...props}>
       {children}
     </button>
   ),
   SelectValue: ({ placeholder }: any) => <span>{placeholder ?? null}</span>,
-  SelectContent: () => null,
-  SelectItem: () => null,
+  SelectContent: ({ children, onValueChange }: any) => (
+    <div>
+      {Children.map(children, (child) =>
+        cloneElement(child, { onValueChange }),
+      )}
+    </div>
+  ),
+  SelectItem: ({ value, children, onValueChange }: any) => (
+    <button type="button" onClick={() => onValueChange(value)}>
+      {children}
+    </button>
+  ),
 }));
 
 vi.mock("@/components/ui/table", () => ({
@@ -154,6 +175,34 @@ describe("RequestLogTable", () => {
         expect.objectContaining({
           page: 0,
           range,
+        }),
+      );
+    });
+  });
+
+  it("sends the other status group to the request log query", async () => {
+    const range: UsageRangeSelection = { preset: "today" };
+
+    render(
+      <RequestLogTable
+        range={range}
+        rangeLabel="Today"
+        appType="all"
+        refreshIntervalMs={0}
+      />,
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "usage.otherStatusCodes" }),
+    );
+
+    await waitFor(() => {
+      expect(useRequestLogsMock).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          filters: expect.objectContaining({
+            statusCode: undefined,
+            statusGroup: "other",
+          }),
         }),
       );
     });

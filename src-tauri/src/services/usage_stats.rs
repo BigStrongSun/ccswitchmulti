@@ -168,8 +168,16 @@ pub struct LogFilters {
     pub provider_name: Option<String>,
     pub model: Option<String>,
     pub status_code: Option<u16>,
+    pub status_group: Option<LogStatusGroup>,
     pub start_date: Option<i64>,
     pub end_date: Option<i64>,
+}
+
+/// 请求日志状态筛选的非固定码分组。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LogStatusGroup {
+    Other,
 }
 
 /// 分页请求日志响应
@@ -265,13 +273,79 @@ fn row_to_request_log_detail(row: &rusqlite::Row<'_>) -> rusqlite::Result<Reques
     })
 }
 
-/// SQL fragment: resolve provider_name with fallback for session-based entries.
-/// Session logs use placeholder provider_ids (e.g., `_session`, `_<app>_session`)
-/// that don't exist in the providers table — the CASE expression below is the
-/// authoritative mapping from placeholder to readable name.
+/// SQL fragment: resolve the human-readable provider name for a usage row.
+///
+/// A Codex MultiRouter request uses a request-local provider id such as
+/// `codex-multirouter::route::router-codex-official`. That id is deliberately
+/// not persisted in `providers`, so a normal `(provider_id, app_type)` join
+/// falls back to the opaque route id. The correlated route lookup below keeps
+/// the persisted id intact while resolving the route's target Provider name.
+/// Session placeholders remain handled by the CASE fallback.
 fn provider_name_coalesce(log_alias: &str, provider_alias: &str) -> String {
     format!(
-        "COALESCE({provider_alias}.name, CASE {log_alias}.provider_id \
+        "COALESCE({provider_alias}.name, (
+            SELECT COALESCE(
+                target.name,
+                NULLIF(json_extract(route.value, '$.label'), ''),
+                NULLIF(json_extract(route.value, '$.name'), '')
+            )
+            FROM providers parent
+            JOIN json_each(
+                CASE
+                    WHEN json_valid(parent.settings_config) = 0
+                        THEN '[]'
+                    WHEN json_type(parent.settings_config, '$.codexRouting.routes') = 'array'
+                        THEN json_extract(parent.settings_config, '$.codexRouting.routes')
+                    WHEN json_type(parent.settings_config, '$.codexRouting') = 'array'
+                        THEN json_extract(parent.settings_config, '$.codexRouting')
+                    WHEN json_type(parent.settings_config, '$.codexModelRoutes') = 'array'
+                        THEN json_extract(parent.settings_config, '$.codexModelRoutes')
+                    WHEN json_type(parent.settings_config, '$.modelRoutes') = 'array'
+                        THEN json_extract(parent.settings_config, '$.modelRoutes')
+                    ELSE '[]'
+                END
+            ) AS route
+            LEFT JOIN providers target
+                ON target.id = COALESCE(
+                    json_extract(route.value, '$.targetProviderId'),
+                    json_extract(route.value, '$.target_provider_id'),
+                    json_extract(route.value, '$.upstream.targetProviderId'),
+                    json_extract(route.value, '$.upstream.target_provider_id'),
+                    json_extract(route.value, '$.upstream.providerId'),
+                    json_extract(route.value, '$.upstream.provider_id')
+                )
+                AND target.app_type = {log_alias}.app_type
+            WHERE parent.app_type = {log_alias}.app_type
+              AND instr({log_alias}.provider_id, parent.id || '::route::') = 1
+              AND COALESCE(
+                    json_extract(route.value, '$.id'),
+                    json_extract(route.value, '$.routeId'),
+                    json_extract(route.value, '$.route_id')
+                  ) IS NOT NULL
+              AND substr(
+                    {log_alias}.provider_id,
+                    -length(
+                        '::route::' || COALESCE(
+                            json_extract(route.value, '$.id'),
+                            json_extract(route.value, '$.routeId'),
+                            json_extract(route.value, '$.route_id')
+                        )
+                    )
+                  ) = '::route::' || COALESCE(
+                        json_extract(route.value, '$.id'),
+                        json_extract(route.value, '$.routeId'),
+                        json_extract(route.value, '$.route_id')
+                    )
+            ORDER BY length(parent.id) DESC
+            LIMIT 1
+         ), (
+            SELECT parent.name
+            FROM providers parent
+            WHERE parent.app_type = {log_alias}.app_type
+              AND instr({log_alias}.provider_id, parent.id || '::route::') = 1
+            ORDER BY length(parent.id) DESC
+            LIMIT 1
+         ), CASE {log_alias}.provider_id \
          WHEN '_session' THEN 'Claude (Session)' \
          WHEN '_codex_session' THEN 'Codex (Session)' \
          WHEN '_gemini_session' THEN 'Gemini (Session)' \
@@ -360,6 +434,23 @@ fn push_provider_model_filters(
     if let Some(m) = model {
         conditions.push(format!("{} = ?", effective_model_sql(log_alias)));
         params.push(Box::new(m.to_string()));
+    }
+}
+
+fn push_status_filter(
+    conditions: &mut Vec<String>,
+    params: &mut Vec<Box<dyn rusqlite::ToSql>>,
+    log_alias: &str,
+    status_code: Option<u16>,
+    status_group: Option<LogStatusGroup>,
+) {
+    if matches!(status_group, Some(LogStatusGroup::Other)) {
+        conditions.push(format!(
+            "{log_alias}.status_code NOT IN (200, 400, 401, 429, 500)"
+        ));
+    } else if let Some(status) = status_code {
+        conditions.push(format!("{log_alias}.status_code = ?"));
+        params.push(Box::new(status as i64));
     }
 }
 
@@ -2427,10 +2518,13 @@ impl Database {
             filters.provider_name.as_deref(),
             filters.model.as_deref(),
         );
-        if let Some(status) = filters.status_code {
-            conditions.push("l.status_code = ?".to_string());
-            params.push(Box::new(status as i64));
-        }
+        push_status_filter(
+            &mut conditions,
+            &mut params,
+            "l",
+            filters.status_code,
+            filters.status_group,
+        );
         if let Some(start) = filters.start_date {
             conditions.push("l.created_at >= ?".to_string());
             params.push(Box::new(start));
@@ -3987,6 +4081,146 @@ mod tests {
         // ④ 折叠不外溢：codex 过滤为空。
         let codex_summary = db.get_usage_summary(None, None, Some("codex"), None, None)?;
         assert_eq!(codex_summary.total_requests, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_request_logs_resolve_codex_route_target_name_and_other_statuses() -> Result<(), AppError>
+    {
+        let db = Database::memory()?;
+        let route_provider_id = "codex-multirouter::route::router-codex-official";
+        let nested_route_provider_id =
+            "codex-multirouter::route::router-codex-official::route::router-codex-official";
+
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute(
+                "INSERT INTO providers (id, app_type, name, settings_config)
+                 VALUES (?1, 'codex', 'OpenAI Official', '{}')",
+                params!["codex-official"],
+            )?;
+            conn.execute(
+                "INSERT INTO providers (id, app_type, name, settings_config)
+                 VALUES (?1, 'codex', 'New Codex MultiRouter', ?2)",
+                params![
+                    "codex-multirouter",
+                    r#"{"codexRouting":{"routes":[{"id":"router-codex-official","label":"OpenAI Official","targetProviderId":"codex-official"}]}}"#,
+                ],
+            )?;
+
+            for (request_id, status_code) in [
+                ("route-201", 201),
+                ("route-502", 502),
+                ("route-500", 500),
+                ("route-429", 429),
+            ] {
+                insert_usage_log(
+                    &conn,
+                    request_id,
+                    "codex",
+                    route_provider_id,
+                    "gpt-5.5",
+                    "proxy",
+                    1000 + status_code,
+                    10,
+                    5,
+                    0,
+                    0,
+                    status_code,
+                    "0",
+                )?;
+            }
+            insert_usage_log(
+                &conn,
+                "route-nested-204",
+                "codex",
+                nested_route_provider_id,
+                "gpt-5.5",
+                "proxy",
+                1204,
+                10,
+                5,
+                0,
+                0,
+                204,
+                "0",
+            )?;
+            insert_usage_log(
+                &conn,
+                "route-legacy-unknown",
+                "codex",
+                "codex-multirouter::route::router-legacy-removed",
+                "gpt-5.5",
+                "proxy",
+                1300,
+                10,
+                5,
+                0,
+                0,
+                400,
+                "0",
+            )?;
+        }
+
+        let logs = db.get_request_logs(&LogFilters::default(), 0, 20)?;
+        assert_eq!(
+            logs.data
+                .iter()
+                .filter(|log| {
+                    log.provider_id == route_provider_id
+                        || log.provider_id == nested_route_provider_id
+                })
+                .map(|log| log.provider_name.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("OpenAI Official"); 5]
+        );
+        assert_eq!(
+            logs.data
+                .iter()
+                .find(|log| log.request_id == "route-legacy-unknown")
+                .and_then(|log| log.provider_name.as_deref()),
+            Some("New Codex MultiRouter")
+        );
+
+        let provider_filtered = db.get_request_logs(
+            &LogFilters {
+                provider_name: Some("OpenAI Official".to_string()),
+                ..Default::default()
+            },
+            0,
+            20,
+        )?;
+        assert_eq!(provider_filtered.total, 5);
+
+        let other = db.get_request_logs(
+            &LogFilters {
+                status_group: Some(LogStatusGroup::Other),
+                ..Default::default()
+            },
+            0,
+            20,
+        )?;
+        let other_ids: Vec<&str> = other
+            .data
+            .iter()
+            .map(|log| log.request_id.as_str())
+            .collect();
+        assert_eq!(other.total, 3);
+        assert!(other_ids.contains(&"route-201"));
+        assert!(other_ids.contains(&"route-502"));
+        assert!(other_ids.contains(&"route-nested-204"));
+
+        let fixed = db.get_request_logs(
+            &LogFilters {
+                status_code: Some(500),
+                ..Default::default()
+            },
+            0,
+            20,
+        )?;
+        assert_eq!(fixed.total, 1);
+        assert_eq!(fixed.data[0].request_id, "route-500");
 
         Ok(())
     }
