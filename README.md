@@ -57,7 +57,7 @@ CCSwitchMulti 是面向 Codex 多模型工作流维护的桌面工具。它提�
 
 ![Codex 多模型路由规则](assets/screenshots/ccswitchmulti/multirouter-routes.png)
 
-路由规则页可以把同一个 Codex 入口拆成多个上游规则：例如 `gpt-*` 走官方 OpenAI/Codex，`qwen3.6` 走本地或远端 vLLM，`deepseek-*` 走 DeepSeek API。规则启用后，Codex 侧只需要按模型名选择即可。
+路由规则页可以把同一个 Codex 入口拆成多个上游规则：例如 `gpt-*` 走官方 OpenAI/Codex，`qwen3.8` 走本地或远端 vLLM，`deepseek-*` 走 DeepSeek API。schema v2 Route 只选择目标 Provider、canonical 模型范围、匹配前缀、可见别名和认证策略引用；地址、凭据、协议与模型能力都在目标 Provider/模型条目中维护。
 
 #### Codex Desktop 中的模型选择
 
@@ -74,8 +74,10 @@ CCSwitchMulti 是面向 Codex 多模型工作流维护的桌面工具。它提�
 ### 本分支额外提供的能力
 
 - **Codex MultiRouter Provider**：提供一个通常名为 `OpenAI Multi-Model Router` 的 Codex Provider，可在同一个 Codex 模型选择器里展示并路由官方 OpenAI/Codex、Codex Spark、Qwen、DeepSeek 等模型来源。
-- **模型目录投影**：在 CC Switch Provider 配置中维护路由模型目录，并写出 Codex 可读取的 `model_catalog_json`、`cc-switch-model-catalog.json` 和 CC Switch 接管的 `models_cache.json`，让 Codex 能发现合并后的候选模型。
-- **按模型分流**：通过 `settings_config.codexRouting` 保存路由规则；Rust 本地代理会读取每次请求里的 `model`，选择匹配的上游，注入对应凭据，并在需要时把 OpenAI Responses 请求桥接到 Chat Completions 后端。
+- **模型目录投影**：Provider 模型条目是模型 ID、协议覆盖、上下文窗口、输入模态、推理和缓存能力的事实源。统一 compiler 从最新 Provider 和 Route policy 写出 Codex 可读取的 `model_catalog_json`、`cc-switch-model-catalog.json` 和接管用 `models_cache.json`；这些文件可随时重建，不是配置真值。
+- **按模型分流**：`settings_config.codexRouting.schemaVersion = 2` 只保存目标 Provider、`all/include` canonical 模型选择、前缀、显式别名和无密钥认证策略引用。Rust 本地代理为每次请求读取最新 Provider/模型条目、编译 effective Provider，并在需要时完成 Responses、Chat Completions 或 Anthropic 协议转换。
+- **Provider 单一事实源**：修改 Provider 默认协议或某个模型的协议/能力后，不需要删除或重建 Route；下一次请求直接使用新配置。`all` Route 自动接收新增模型，`include` Route 保持用户选定集合。
+- **可诊断投影生命周期**：聚合目录、精确匹配索引、自动同名别名和 spawn-agent 可路由状态均由 compiler 生成并带 dependency fingerprint。投影写入失败会保留数据库真值并标记 pending，诊断只展示最终 Provider、canonical/upstream model、协议/认证/能力来源，不返回 Key 或 Token。
 - **稳定的 Codex 运行桶**：MultiRouter 使用 `codex_model_router_v2` 作为运行时 provider bucket，而不是 Codex 内置 `openai` 或易漂移的通用 custom bucket，从而避免重新触发官方 OpenAI WebSocket 语义，并减少 Codex 历史记录分桶混乱。
 - **Codex Desktop 模型菜单解锁**：包含运行时诊断和基于 CDP 的 renderer 注入，用于处理 Codex Desktop 里 Statsig 模型白名单导致本地/路由模型被隐藏的问题。
 - **Codex 历史显示修复**：提供独立的历史修复工作区，可先 dry-run，再修复 provider bucket、session index、project hints、user-event 标记和当前 Desktop sqlite 位置等问题。
@@ -89,8 +91,9 @@ Codex MultiRouter 不是简单地把 Codex 切到某一个第三方 Provider。C
 
 - Codex live config 中的 MultiRouter 运行桶是 `model_provider = "codex_model_router_v2"`。
 - Codex config 顶层写入 `model_catalog_json = "cc-switch-model-catalog.json"`，同时在用户 Codex 配置目录下生成 catalog/cache 文件。
-- `settings_config.modelCatalog` 是 CC Switch 侧维护可见模型的事实来源。
-- `settings_config.codexRouting` 是 CC Switch 侧维护模型到上游路由规则的事实来源。
+- 普通 Provider 的 `settings_config.modelCatalog.models` 是该 Provider 模型声明的事实来源；其中可按模型覆盖协议和缓存配置。
+- MultiRouter 的 `settings_config.codexRouting` 使用 schema v2，只维护引用与无密钥 Route policy；MultiRouter 自身不再复制 Provider 地址、凭据、协议或能力，也不持久化聚合 `modelCatalog`。
+- 可见 catalog、自动别名、精确匹配和 spawn-agent 候选由统一 compiler 投影。dependency fingerprint 不匹配时必须立即重建，运行时不会继续信任陈旧投影。
 - 本地 router provider 写入 `supports_websockets = false`，让 Codex 走 HTTP Responses 路径，避免回到内置 OpenAI WebSocket 行为。
 - Desktop 集成保留 `requires_openai_auth = true`，这样 ChatGPT OAuth 账号和额度状态仍可在 Codex Desktop 中显示，但实际请求仍由本地 MultiRouter 接管。
 
@@ -99,6 +102,8 @@ Codex MultiRouter 不是简单地把 Codex 切到某一个第三方 Provider。C
 - 需要 CCSwitchMulti 能力时，请使用 [BigStrongSun/ccswitchmulti](https://github.com/BigStrongSun/ccswitchmulti/releases) 的发布版本。
 - Codex 使用 `OpenAI Multi-Model Router` 时必须保持 CCSwitchMulti 运行，因为 Codex 请求会经过本地 takeover 代理。
 - 修改 router 模型目录、路由规则或 takeover 状态后，需要完整退出并重新打开 Codex Desktop；已经运行的 Codex app-server 可能继续持有旧的模型管理器缓存。
+- 修改目标 Provider 的协议、地址或模型能力不需要重新创建 Route；保存 Provider 后可直接发起下一次请求，并在诊断或 `codex-router.log` 中核对新的 `effective_endpoint`。模型菜单本身仍可能需要重启 Codex Desktop 才刷新。
+- schema v1 方案只读兼容；第一次编辑或启用时必须先查看迁移预览，再用 revision/token 原子应用。迁移会列出 Provider 克隆、引用变化、冗余字段删除、冲突与警告，不会把 API Key/Token 放进 Route、预览或日志。
 - 如果诊断显示 catalog 已完整，但 Codex Desktop 模型菜单仍只显示官方模型，请通过 CCSwitchMulti 的模型菜单解锁流程启动 Codex，让 renderer 带 remote debugging 端口运行并接受运行时补丁。
 - CCSwitchMulti 不会修改 Codex Desktop 磁盘上的 `app.asar`；模型菜单解锁是针对当前 Desktop 会话的运行时 renderer 注入。
 - 不要把 router TOML、`model_catalog_json` 或 `127.0.0.1:<port>` 写进共享的 Codex common config。这些是 Provider takeover 私有字段，应由 CCSwitchMulti 写入。
