@@ -426,6 +426,44 @@ mod tests {
         })
     }
 
+    fn codex_settings_with_unknown_subagent(base_url: &str, api_key: &str) -> Value {
+        let mut settings = codex_settings(base_url, api_key);
+        settings["modelCatalog"] = json!({
+            "models": [{
+                "model": "private-model",
+                "contextWindow": 128000
+            }]
+        });
+        settings["codexRouting"] = json!({
+            "enabled": true,
+            "subagentVersion": "v2",
+            "routes": [{
+                "id": "private-route",
+                "enabled": true,
+                "match": { "models": ["private-model"] },
+                "upstream": { "auth": { "source": "provider_config" } }
+            }],
+            "subagentV2": {
+                "schemaVersion": 2,
+                "selectionPolicy": "balanced",
+                "profiles": {
+                    "private-model": {
+                        "model": "private-model",
+                        "enabled": true,
+                        "questionnaire": {
+                            "taskStrengths": ["repository_exploration"],
+                            "optimization": "speed",
+                            "writeScope": "read_only",
+                            "preference": "eligible"
+                        },
+                        "reasoning": { "policy": "delegated" }
+                    }
+                }
+            }
+        });
+        settings
+    }
+
     fn usage_script_with_credentials(
         api_key: Option<&str>,
         base_url: Option<&str>,
@@ -945,6 +983,64 @@ mod tests {
                 matches!(result, Err(AppError::InvalidInput(_) | AppError::Message(_))),
                 "reserved roleName must be rejected by the compiler before persistence, got {result:?}"
             );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn add_rejects_unknown_reasoning_before_provider_persistence() {
+        with_test_home(|state, _| {
+            let provider = Provider::with_id(
+                "codex-unknown-reasoning-add".to_string(),
+                "Unknown reasoning add".to_string(),
+                codex_settings_with_unknown_subagent("https://api.example.com/v1", "sk-test"),
+                None,
+            );
+
+            let result = ProviderService::add(state, AppType::Codex, provider, false);
+
+            assert!(result
+                .expect_err("provider add must reject incomplete subagent capability")
+                .to_string()
+                .contains("unknown_reasoning_capability_requires_declaration"));
+            assert!(state
+                .db
+                .get_provider_by_id("codex-unknown-reasoning-add", AppType::Codex.as_str())
+                .expect("query rejected provider")
+                .is_none());
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn update_rejects_unknown_reasoning_before_provider_persistence() {
+        with_test_home(|state, _| {
+            let provider = Provider::with_id(
+                "codex-unknown-reasoning-update".to_string(),
+                "Unknown reasoning update".to_string(),
+                codex_settings("https://api.example.com/v1", "sk-old"),
+                None,
+            );
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &provider)
+                .expect("seed provider");
+
+            let mut updated = provider.clone();
+            updated.settings_config =
+                codex_settings_with_unknown_subagent("https://api.example.com/v1", "sk-new");
+            let result = ProviderService::update(state, AppType::Codex, None, updated);
+
+            assert!(result
+                .expect_err("provider update must reject incomplete subagent capability")
+                .to_string()
+                .contains("unknown_reasoning_capability_requires_declaration"));
+            let saved = state
+                .db
+                .get_provider_by_id("codex-unknown-reasoning-update", AppType::Codex.as_str())
+                .expect("query provider after rejected update")
+                .expect("seed provider remains persisted");
+            assert_eq!(saved.settings_config, provider.settings_config);
         });
     }
 
@@ -4072,6 +4168,7 @@ impl ProviderService {
         Self::validate_provider_settings(&app_type, &provider)?;
         normalize_provider_common_config_for_storage(state.db.as_ref(), &app_type, &mut provider)?;
         Self::normalize_usage_script_credential_overrides(&app_type, &mut provider);
+        Self::validate_codex_subagent_v2_provider_candidate(state, &provider)?;
         if app_type.is_additive_mode() {
             Self::set_provider_live_config_managed(&mut provider, add_to_live);
         }
@@ -4127,6 +4224,7 @@ impl ProviderService {
         Self::validate_provider_settings(&app_type, &provider)?;
         normalize_provider_common_config_for_storage(state.db.as_ref(), &app_type, &mut provider)?;
         Self::normalize_usage_script_credential_overrides(&app_type, &mut provider);
+        Self::validate_codex_subagent_v2_provider_candidate(state, &provider)?;
 
         if provider_id_changed {
             if !app_type.is_additive_mode() {
@@ -6364,6 +6462,26 @@ impl ProviderService {
                 Ok((api_key, base_url))
             }
         }
+    }
+
+    fn validate_codex_subagent_v2_provider_candidate(
+        state: &AppState,
+        provider: &Provider,
+    ) -> Result<(), AppError> {
+        if provider
+            .settings_config
+            .pointer("/codexRouting/subagentV2")
+            .is_none()
+        {
+            return Ok(());
+        }
+        let provider_context =
+            crate::codex_config::codex_provider_classification_context(state.db.as_ref())?;
+        crate::codex_config::validate_codex_subagent_v2_candidate(
+            &provider.settings_config,
+            Some(&provider_context),
+            true,
+        )
     }
 }
 

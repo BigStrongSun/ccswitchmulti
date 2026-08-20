@@ -37,6 +37,17 @@ const deepseekReasoningCapability: CodexSubagentReasoningCapability = {
   },
 };
 
+const unknownReasoningCapability: CodexSubagentReasoningCapability = {
+  supportKind: "unknown",
+  source: null,
+  confidence: "unverified",
+  codexSelectableEfforts: [],
+  providerAcceptedEfforts: [],
+  providerDefaultEffort: null,
+  disableAllowed: false,
+  effortMap: {},
+};
+
 const previewFixture = {
   providerKind: "third_party" as const,
   requestedRoleName: "repository-scout",
@@ -1108,6 +1119,39 @@ describe("Codex Sub-Agent V2 review round 1 regressions", () => {
     expect(screen.getByRole("alert")).toHaveTextContent(/collision/i);
   });
 
+  it("blocks persistence when an enabled routable profile has unknown reasoning capability", async () => {
+    ipcState.statusResponse = {
+      ...statusFixture,
+      profiles: [
+        {
+          ...statusFixture.profiles[0],
+          reasoningCapability: unknownReasoningCapability,
+        },
+        statusFixture.profiles[1],
+      ],
+    };
+    const user = userEvent.setup();
+    await mountWorkspaceFromPersistedPlan();
+
+    await chooseOption(
+      user,
+      screen.getByLabelText("第三方子 Agent 选择策略"),
+      "官方优先",
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "保存 V2 子 Agent 配置" }),
+    );
+
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "repository-scout：推理能力未配置，请先在模型目录中声明能力后再保存。",
+      ),
+    );
+    expect(v2PersistenceCalls()).toHaveLength(0);
+    expect(updateProviderCalls()).toHaveLength(0);
+  });
+
   it("allows saving while an enabled retained profile is authoritatively unroutable", async () => {
     ipcState.previewErrors["deepseek-v4-pro"] =
       "No enabled route resolves this model.";
@@ -1353,7 +1397,11 @@ describe("Codex Sub-Agent V2 review round 1 regressions", () => {
             declarations: [
               { source: "profile_explicit", adopted: false },
               { source: "route", declared: ["text"], adopted: true },
-              { source: "catalog", declared: ["text", "image"], adopted: false },
+              {
+                source: "catalog",
+                declared: ["text", "image"],
+                adopted: false,
+              },
               { source: "name_registry", adopted: false },
             ],
             conflict:

@@ -3961,3 +3961,10 @@
 - `useDeleteProviderMutation("codex")` 删除成功后重新读取 Provider 集合，移除所有引用被删 Provider 的 MultiRouter route，并逐个回写同步后的 plan；非 Codex 应用不进入这条同步路径。该行为不改变 route/modelMap、Sub-Agent 候选剪枝和默认排序的既有边界。
 - TDD 证据：当前 main 在只改期望后，`codexMultiRouterSync.test.ts` 明确 RED（`qwen3.6` 从原第二位掉到末尾）；应用实现后目录排序、MultiRouter 同步和删除 mutation 聚焦测试 18/18 GREEN。`pnpm typecheck` 通过，PR 六个变更文件 Prettier 通过；全量 Vitest 首轮 1140/1142，两个 `tests/integration/App.test.tsx` UI wait 超时在隔离单进程重跑为 11/11，通过，属于全量并发/DOM 污染而非本 PR 稳定回归。仓库全量 `format:check` 仍被本轮未改的 `CodexSubagentProfileEditor.tsx` 与 `CodexSubagentV2ProfileEditor.test.tsx` 两个既有格式漂移阻塞。
 - 本轮仅合入本地 main，不推送、不发布、不构建、不安装，也不停止或替换正在运行的 CCSM。
+
+## 2026-08-21 Sub-Agent reasoning 保存门禁接入普通 Provider 保存入口
+
+- 主分支审计发现：`e8c19353` 已在 `validate_codex_subagent_v2_candidate` 和 V2 专用 mutation 中阻止 unknown reasoning，但普通 `ProviderService::add/update` 只执行通用 Codex settings 校验，仍可绕过该门禁保存整个 Provider。
+- 根修：`ProviderService::add` 与 `ProviderService::update` 在所有数据库/Live 写入前调用同一 `validate_codex_subagent_v2_provider_candidate`；无 `codexRouting.subagentV2` 的普通 Provider 不受影响，有 V2 文档则执行严格解析、编译和 `enabled + Routable + reasoning != unknown` 校验。
+- 回归：新增 add/update 两条测试，先确认 RED（两条路径都错误返回 true），接入统一保存校验后 GREEN；断言 rejected add 不入库、rejected update 保留旧 settings。前端新增 unknown 保存阻止测试，断言不调用 `update_codex_subagent_v2`/`update_provider`。
+- 当前验证：Rust `cargo test --lib` 3197 passed / 0 failed / 5 ignored；V2 前端文件 126/126；全量 Vitest 143 files / 1144 tests；TypeScript、rustfmt、diff check 通过。测试中仍有既有 React act、MSW 未处理请求和 Tauri window mock 警告，不影响通过。
