@@ -3929,3 +3929,12 @@
 - 已证实根因：Codex Desktop 配置热重载会读取 provider inline `models`，而 CCSM 从 2026-07-13 引入 inline reasoning 投影时只同步了推理字段，没有同步 picker 的速度/服务字段。保存动作使 Desktop 从完整 JSON/cache 路径切到不完整 inline 模型定义，形成同一模型在三份数据源中的元数据分叉，足以稳定解释并复现速度入口消失。
 - 修复：`codex_provider_models_toml_array` 现在从已经完成官方同 slug merge 的 catalog 条目同步 `additional_speed_tiers`/`additionalSpeedTiers`、`service_tiers`/`serviceTiers`、`default_service_tier`/`defaultServiceTier`。第三方模型继续投影空 service tier 数组，不能从官方模板继承 fast/priority。
 - TDD：完整 `settings -> catalog -> config.toml inline models -> cache` 回归先确认 RED（官方 inline speed/service 字段缺失），再 GREEN；同时断言官方推理档位仍完整、第三方 service tiers 为 0。当前磁盘三份数据和当前 Codex 任务中的官方 reasoning 已恢复，未能再次复现“推理强度不可用”，因此不能把它单独归因为已证实；新构建安装后仍需做真实 Desktop 点击验收。验证：Rust lib 3187 passed / 0 failed / 5 ignored；Vitest 141 files / 1136 tests；TypeScript、rustfmt、diff check 全通过。未停止、替换、安装或覆盖运行中的 CCSM。
+
+## 2026-08-20 Codex 模型元数据投影一致性审计
+
+- 完整 `cc-switch-model-catalog.json` 与 CCSM-owned `models_cache.json` 当前使用 enriched catalog，同一模型的 reasoning、service tier、input modalities、multi-agent 等关键字段一致；真正的结构性分叉集中在 active provider inline `models` 和 CDP 缺条目 fallback descriptor。
+- inline 在 `811433d6` 后已有 reasoning + speed/service/default service tier，但仍缺 `input_modalities`/`inputModalities` 与 `multi_agent_version`/`multiAgentVersion`。前两份 JSON 不可读时 Desktop 会退到 inline；官方 schema 对缺失 input modalities 默认文本+图像，可能把纯文本第三方错误声明为可接图，multi-agent 版本缺失则可能使 V1/V2 transport 降级。
+- CDP `descriptorFor()` 找不到 payload entry 时硬编码 `medium` 和 `low/medium/high/xhigh`，Rust projection 也为缺值补 `medium`；这违反 unknown 不是 supported 的既定原则。正常 payload 中 modelNames/models 同源，主要风险在 default model 不在 routed entry、异常 payload 或未来名字-only 调用方。
+- 同 slug 官方对象在完整 catalog/cache 中保留权威 transport 元数据；CCSM 显式创建的官方 V2 profile 与第三方 profile 当前都可编辑，但 picker 故障不是 profile 编辑器直接改坏官方能力，而是多份投影完备度不同。第三方同样遗漏，且模态、多 Agent、unknown reasoning 后果更高。
+- `upgrade`/`upgradeInfo`/`availabilityNux` 属官方发布状态，应继续有意清空，不能复制到第三方；personality/specialty 属 picker-public 候选字段，需结合 app-server schema统一 alias 白名单，不能把全部内部 `ModelInfo` 无差别塞入 inline。
+- 修正必须先建立单一 PickerModelProjection 契约和跨层 RED 快照测试，再统一 JSON/cache/inline/CDP；审计文档为 `docs/audits/2026-08-20-codex-model-metadata-projection-audit.md`。本轮只审计，未修改、停止或替换运行中 CCSM。
