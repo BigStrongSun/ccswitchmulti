@@ -83,11 +83,11 @@ impl CapabilityLibrary {
                 )
             })
             .and_then(|entry| {
-                entry
+                let capability = entry
                     .reasoning
-                    .validate()
-                    .ok()
-                    .map(|_| entry.reasoning.clone())
+                    .clone()
+                    .complete_identity_effort_map_for_read();
+                capability.validate().ok().map(|_| capability)
             })
     }
 }
@@ -144,12 +144,16 @@ fn version_tuple(value: &str) -> (u64, u64, u64) {
 
 /// 从 JSON 文本解析能力库。
 pub fn load_library_from_str(json: &str) -> Result<CapabilityLibrary, String> {
-    let library: CapabilityLibrary = serde_json::from_str(json)
+    let mut library: CapabilityLibrary = serde_json::from_str(json)
         .map_err(|error| format!("invalid capability library: {error}"))?;
     if library.library_version == 0 {
         return Err("capability library requires a nonzero libraryVersion".to_string());
     }
-    for entry in &library.entries {
+    for entry in &mut library.entries {
+        entry.reasoning = entry
+            .reasoning
+            .clone()
+            .complete_identity_effort_map_for_read();
         entry
             .reasoning
             .validate()

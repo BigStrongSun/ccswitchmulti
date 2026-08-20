@@ -487,9 +487,25 @@ function renderAutoSplitHarness() {
 }
 
 describe("CodexFormFields local model routing", () => {
+  it("shows model reasoning as a standalone section before advanced catalog details", () => {
+    renderCatalogHarness([{ model: "qwen3.8" }]);
+
+    expect(
+      screen.getByRole("heading", { name: "模型推理能力" }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("qwen3.8推理能力来源")).toBeInTheDocument();
+    expect(screen.getByText("模型目录明细")).toBeInTheDocument();
+    expect(screen.queryByText(/Codex 推理能力（/)).not.toBeInTheDocument();
+    expect(
+      screen
+        .getByRole("heading", { name: "模型推理能力" })
+        .compareDocumentPosition(screen.getByText("模型目录明细")) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
   it("renders the resolved reasoning card and lets the user declare an unknown model", async () => {
     renderCatalogHarness([{ model: "qwen3.8" }]);
-    fireEvent.click(screen.getByText(/Codex 推理能力（未声明/));
     await waitFor(() => expect(reasoningApiMocks.resolve).toHaveBeenCalled());
 
     expect(
@@ -516,7 +532,6 @@ describe("CodexFormFields local model routing", () => {
       }),
     );
     const { latestCatalog } = renderCatalogHarness([{ model: "qwen3.8" }]);
-    fireEvent.click(screen.getByText(/Codex 推理能力（未声明/));
 
     expect(await screen.findByText("采用检测结果")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "采用检测结果" }));
@@ -573,7 +588,6 @@ describe("CodexFormFields local model routing", () => {
       return detected;
     });
     renderCatalogHarness([{ model: "qwen3.8" }]);
-    fireEvent.click(screen.getByText(/Codex 推理能力（未声明/));
 
     expect(
       await screen.findByRole("button", { name: "重新检测" }),

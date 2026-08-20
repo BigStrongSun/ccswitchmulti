@@ -51,6 +51,7 @@ import { CustomUserAgentField } from "./CustomUserAgentField";
 import { LocalProxyRequestOverridesField } from "./LocalProxyRequestOverridesField";
 import { CodexProviderReadinessSection } from "./CodexProviderReadinessSection";
 import { CodexModelReasoningCard } from "./CodexModelReasoningCard";
+import { CodexModelReasoningEditor } from "./CodexModelReasoningEditor";
 import { cn } from "@/lib/utils";
 import { resolveFetchedCodexModelContextWindow } from "@/utils/codexModelContext";
 import {
@@ -180,6 +181,23 @@ export function validateCodexReasoningCapabilityDraft(
   for (const target of Object.values(capability.upstream.effortMap ?? {})) {
     if (target && !capability.supportedEfforts.includes(target)) {
       throw new Error(`mapping target ${target} is not Provider-supported`);
+    }
+  }
+  const requiresEffortMap =
+    (capability.supportStatus !== undefined
+      ? capability.supportStatus === "confirmed_supported"
+      : capability.supported === true) &&
+    (capability.controlKind ??
+      (capability.supportedEfforts.length > 0 ? "graded" : "unknown")) ===
+      "graded" &&
+    capability.upstream.format !== "none" &&
+    capability.upstream.format !== "boolean";
+  if (requiresEffortMap) {
+    const missing = capability.supportedEfforts.filter(
+      (effort) => !capability.upstream.effortMap?.[effort],
+    );
+    if (missing.length > 0) {
+      throw new Error(`effortMap is missing ${missing.join(", ")}`);
     }
   }
 }
@@ -2587,7 +2605,263 @@ export function CodexFormFields({
         />
       )}
 
-      {/* 高级选项只保留手动协议与模型能力覆盖、请求覆盖和目录明细。 */}
+      {category !== "official" && canEditCatalog && (
+        <section
+          aria-labelledby="codex-model-reasoning-title"
+          className="space-y-4 rounded-lg border border-border-default bg-muted/10 p-4"
+        >
+          <div className="space-y-1">
+            <h3
+              id="codex-model-reasoning-title"
+              className="text-sm font-semibold text-foreground"
+            >
+              模型推理能力
+            </h3>
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              每个模型独立配置。这里决定 Codex
+              可以选择哪些推理档位，以及请求最终如何发送给
+              Provider；能力不完整时会在保存 Provider 前阻止并指出缺失项。
+            </p>
+          </div>
+
+          {catalogRows.length === 0 ? (
+            <p className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">
+              暂无模型。请先在上方同步模型，或在高级选项的模型目录明细中添加模型。
+            </p>
+          ) : (
+            <div className="space-y-3">
+              {catalogRows.map((row, index) => {
+                const model = row.model.trim();
+                const probeModel = catalogRowUpstreamModel(row) || model;
+                const reasoningResolution = reasoningResolutions[probeModel];
+                const presetReasoning =
+                  presetReasoningByModel.get(model) ??
+                  presetReasoningByModel.get(catalogRowUpstreamModel(row));
+                const isBuiltinReasoning = row.reasoning?.source === "builtin";
+                const isUserPresetOverride =
+                  Boolean(presetReasoning) && row.reasoning?.source === "user";
+                const reasoningSourceMode: CodexReasoningCapabilitySourceMode =
+                  isBuiltinReasoning
+                    ? "builtin"
+                    : row.reasoning
+                      ? "manual"
+                      : "automatic";
+
+                return (
+                  <article
+                    key={`reasoning:${row.rowId}`}
+                    className="space-y-3 rounded-md border bg-background p-3 text-xs"
+                  >
+                    <div className="flex flex-wrap items-start justify-between gap-2">
+                      <div>
+                        <p className="font-medium text-foreground">
+                          {row.displayName?.trim() || model || "未命名模型"}
+                        </p>
+                        {row.displayName?.trim() && model ? (
+                          <p className="text-muted-foreground">{model}</p>
+                        ) : null}
+                        <p className="text-muted-foreground">
+                          {isBuiltinReasoning
+                            ? "内置预设，只读"
+                            : isUserPresetOverride
+                              ? "已偏离内置预设"
+                              : row.reasoning
+                                ? "用户手动声明"
+                                : "自动发现或服务端默认"}
+                        </p>
+                      </div>
+                      <label className="grid min-w-52 gap-1">
+                        <span className="font-medium">能力来源</span>
+                        <select
+                          className="rounded-md border bg-background px-3 py-2"
+                          value={reasoningSourceMode}
+                          aria-label={`${model || "模型"}推理能力来源`}
+                          onChange={(event) =>
+                            handleUpdateCatalogRow(index, {
+                              reasoning: applyCodexReasoningCapabilitySource(
+                                event.target
+                                  .value as CodexReasoningCapabilitySourceMode,
+                                row.reasoning,
+                                presetReasoning,
+                              ),
+                            })
+                          }
+                        >
+                          <option value="automatic">自动发现</option>
+                          <option value="builtin" disabled={!presetReasoning}>
+                            使用 CCSM 受维护声明
+                          </option>
+                          <option value="manual">手动声明</option>
+                        </select>
+                      </label>
+                    </div>
+
+                    {reasoningResolution ? (
+                      <CodexModelReasoningCard
+                        resolution={reasoningResolution}
+                        hasBuiltinPreset={Boolean(presetReasoning)}
+                        redetecting={redetectingReasoningModel === probeModel}
+                        onRedetect={async () => {
+                          setRedetectingReasoningModel(probeModel);
+                          try {
+                            const outcome =
+                              await codexSubagentV2Api.triggerModelReasoningDetection(
+                                reasoningDetectionProvider,
+                                probeModel,
+                              );
+                            if (
+                              typeof outcome === "object" &&
+                              "found" in outcome
+                            ) {
+                              const next =
+                                await codexSubagentV2Api.resolveModelReasoningCapability(
+                                  reasoningSettingsConfig,
+                                  providerId ?? "codex-draft",
+                                  probeModel,
+                                );
+                              setReasoningResolutions((current) => ({
+                                ...current,
+                                [probeModel]: next,
+                              }));
+                              toast.success("已更新模型推理能力检测结果");
+                            } else {
+                              toast.info(
+                                "未获得可采纳的模型推理能力声明，继续使用服务端默认。",
+                              );
+                            }
+                          } catch (error) {
+                            console.error(
+                              "[CodexFormFields] reasoning detection failed",
+                              error,
+                            );
+                            toast.error("模型推理能力检测失败");
+                          } finally {
+                            setRedetectingReasoningModel(null);
+                          }
+                        }}
+                        onAdoptDetection={() => {
+                          const detected = reasoningResolution.detection
+                            ? capabilityFromReasoningDetection({
+                                found: reasoningResolution.detection,
+                              })
+                            : undefined;
+                          if (!detected) {
+                            toast.info(
+                              "当前检测结果没有可采纳的推理档位声明。",
+                            );
+                            return;
+                          }
+                          handleUpdateCatalogRow(index, {
+                            reasoning: detected,
+                          });
+                          toast.success("已采用检测到的推理能力");
+                        }}
+                        onManualDeclare={() =>
+                          handleUpdateCatalogRow(index, {
+                            reasoning: applyCodexReasoningCapabilitySource(
+                              "manual",
+                              row.reasoning,
+                              presetReasoning,
+                            ),
+                          })
+                        }
+                        onRestoreBuiltin={() =>
+                          handleUpdateCatalogRow(index, {
+                            reasoning: applyCodexReasoningCapabilitySource(
+                              "builtin",
+                              row.reasoning,
+                              presetReasoning,
+                            ),
+                          })
+                        }
+                      />
+                    ) : (
+                      <p className="text-muted-foreground">
+                        正在读取该模型的统一推理能力解析结果…
+                      </p>
+                    )}
+
+                    {isUserPresetOverride ? (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() =>
+                          handleUpdateCatalogRow(index, {
+                            reasoning: applyCodexReasoningCapabilitySource(
+                              "builtin",
+                              row.reasoning,
+                              presetReasoning,
+                            ),
+                          })
+                        }
+                      >
+                        恢复内置默认
+                      </Button>
+                    ) : null}
+                    {isBuiltinReasoning && row.reasoning ? (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() =>
+                          handleUpdateCatalogRow(index, {
+                            reasoning: applyCodexReasoningCapabilitySource(
+                              "manual",
+                              row.reasoning,
+                              presetReasoning,
+                            ),
+                          })
+                        }
+                      >
+                        创建高级覆盖
+                      </Button>
+                    ) : null}
+
+                    {row.reasoning ? (
+                      <CodexModelReasoningEditor
+                        model={model || "模型"}
+                        capability={row.reasoning}
+                        readOnly={isBuiltinReasoning}
+                        onChange={(reasoning) =>
+                          handleUpdateCatalogRow(index, { reasoning })
+                        }
+                      />
+                    ) : null}
+
+                    <details>
+                      <summary className="cursor-pointer text-muted-foreground">
+                        专家 JSON
+                      </summary>
+                      <Textarea
+                        key={`reasoning-json:${row.rowId}:${JSON.stringify(row.reasoning)}`}
+                        className="mt-2 min-h-28 font-mono text-xs"
+                        defaultValue={
+                          row.reasoning
+                            ? JSON.stringify(row.reasoning, null, 2)
+                            : ""
+                        }
+                        onBlur={(event) => {
+                          if (!isBuiltinReasoning) {
+                            handleUpdateCatalogReasoningJson(
+                              index,
+                              event.target.value,
+                            );
+                          }
+                        }}
+                        readOnly={isBuiltinReasoning}
+                        aria-label={`${model || "模型"}推理能力 JSON`}
+                      />
+                    </details>
+                  </article>
+                );
+              })}
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* 高级选项只保留手动协议、请求覆盖和模型目录明细。 */}
       {category !== "official" && (
         <Collapsible
           open={advancedExpanded}
@@ -2899,27 +3173,9 @@ export function CodexFormFields({
                     {catalogRows.map((row, index) => {
                       const probeModel =
                         catalogRowUpstreamModel(row) || row.model.trim();
-                      const reasoningResolution =
-                        reasoningResolutions[probeModel];
                       const probeBadge = getProtocolProbeBadge(
                         protocolProbeOutcomesByModel[probeModel],
                       );
-                      const presetReasoning =
-                        presetReasoningByModel.get(row.model.trim()) ??
-                        presetReasoningByModel.get(
-                          catalogRowUpstreamModel(row),
-                        );
-                      const isBuiltinReasoning =
-                        row.reasoning?.source === "builtin";
-                      const isUserPresetOverride =
-                        Boolean(presetReasoning) &&
-                        row.reasoning?.source === "user";
-                      const reasoningSourceMode: CodexReasoningCapabilitySourceMode =
-                        isBuiltinReasoning
-                          ? "builtin"
-                          : row.reasoning
-                            ? "manual"
-                            : "automatic";
 
                       return (
                         <div
@@ -3093,415 +3349,6 @@ export function CodexFormFields({
                           >
                             <Trash2 className="h-4 w-4" />
                           </Button>
-                          <details className="md:col-span-7">
-                            <summary className="cursor-pointer text-xs text-muted-foreground">
-                              Codex 推理能力
-                              {isBuiltinReasoning
-                                ? "（内置预设，只读）"
-                                : isUserPresetOverride
-                                  ? "（已偏离内置预设）"
-                                  : row.reasoning
-                                    ? "（用户覆盖）"
-                                    : "（未声明，使用保守模式）"}
-                            </summary>
-                            <div className="mt-2 space-y-3 rounded-md border p-3 text-xs">
-                              {reasoningResolution ? (
-                                <CodexModelReasoningCard
-                                  resolution={reasoningResolution}
-                                  hasBuiltinPreset={Boolean(presetReasoning)}
-                                  redetecting={
-                                    redetectingReasoningModel === probeModel
-                                  }
-                                  onRedetect={async () => {
-                                    setRedetectingReasoningModel(probeModel);
-                                    try {
-                                      const outcome =
-                                        await codexSubagentV2Api.triggerModelReasoningDetection(
-                                          reasoningDetectionProvider,
-                                          probeModel,
-                                        );
-                                      if (
-                                        typeof outcome === "object" &&
-                                        "found" in outcome
-                                      ) {
-                                        const next =
-                                          await codexSubagentV2Api.resolveModelReasoningCapability(
-                                            reasoningSettingsConfig,
-                                            providerId ?? "codex-draft",
-                                            probeModel,
-                                          );
-                                        setReasoningResolutions((current) => ({
-                                          ...current,
-                                          [probeModel]: next,
-                                        }));
-                                        toast.success(
-                                          "已更新模型推理能力检测结果",
-                                        );
-                                      } else {
-                                        toast.info(
-                                          "未获得可采纳的模型推理能力声明，继续使用服务端默认。",
-                                        );
-                                      }
-                                    } catch (error) {
-                                      console.error(
-                                        "[CodexFormFields] reasoning detection failed",
-                                        error,
-                                      );
-                                      toast.error("模型推理能力检测失败");
-                                    } finally {
-                                      setRedetectingReasoningModel(null);
-                                    }
-                                  }}
-                                  onAdoptDetection={() => {
-                                    const detected =
-                                      reasoningResolution.detection
-                                        ? capabilityFromReasoningDetection({
-                                            found:
-                                              reasoningResolution.detection,
-                                          })
-                                        : undefined;
-                                    if (!detected) {
-                                      toast.info(
-                                        "当前检测结果没有可采纳的推理档位声明。",
-                                      );
-                                      return;
-                                    }
-                                    handleUpdateCatalogRow(index, {
-                                      reasoning: detected,
-                                    });
-                                    toast.success("已采用检测到的推理能力");
-                                  }}
-                                  onManualDeclare={() =>
-                                    handleUpdateCatalogRow(index, {
-                                      reasoning:
-                                        applyCodexReasoningCapabilitySource(
-                                          "manual",
-                                          row.reasoning,
-                                          presetReasoning,
-                                        ),
-                                    })
-                                  }
-                                  onRestoreBuiltin={() =>
-                                    handleUpdateCatalogRow(index, {
-                                      reasoning:
-                                        applyCodexReasoningCapabilitySource(
-                                          "builtin",
-                                          row.reasoning,
-                                          presetReasoning,
-                                        ),
-                                    })
-                                  }
-                                />
-                              ) : (
-                                <p className="text-muted-foreground">
-                                  正在读取该模型的统一推理能力解析结果…
-                                </p>
-                              )}
-                              <label className="grid gap-1">
-                                <span>能力来源</span>
-                                <select
-                                  className="rounded-md border bg-background px-3 py-2"
-                                  value={reasoningSourceMode}
-                                  aria-label={`${row.model || "模型"}推理能力来源`}
-                                  onChange={(event) =>
-                                    handleUpdateCatalogRow(index, {
-                                      reasoning:
-                                        applyCodexReasoningCapabilitySource(
-                                          event.target
-                                            .value as CodexReasoningCapabilitySourceMode,
-                                          row.reasoning,
-                                          presetReasoning,
-                                        ),
-                                    })
-                                  }
-                                >
-                                  <option value="automatic">自动发现</option>
-                                  <option
-                                    value="builtin"
-                                    disabled={!presetReasoning}
-                                  >
-                                    使用 CCSM 受维护声明
-                                  </option>
-                                  <option value="manual">手动声明</option>
-                                </select>
-                              </label>
-                              <div className="flex flex-wrap gap-2">
-                                {isBuiltinReasoning && row.reasoning ? (
-                                  <Button
-                                    type="button"
-                                    variant="outline"
-                                    size="sm"
-                                    onClick={() =>
-                                      handleUpdateCatalogRow(index, {
-                                        reasoning:
-                                          applyCodexReasoningCapabilitySource(
-                                            "manual",
-                                            row.reasoning,
-                                            presetReasoning,
-                                          ),
-                                      })
-                                    }
-                                  >
-                                    创建高级覆盖
-                                  </Button>
-                                ) : null}
-                                {isUserPresetOverride && presetReasoning ? (
-                                  <Button
-                                    type="button"
-                                    variant="ghost"
-                                    size="sm"
-                                    onClick={() =>
-                                      handleUpdateCatalogRow(index, {
-                                        reasoning:
-                                          applyCodexReasoningCapabilitySource(
-                                            "builtin",
-                                            row.reasoning,
-                                            presetReasoning,
-                                          ),
-                                      })
-                                    }
-                                  >
-                                    恢复内置默认
-                                  </Button>
-                                ) : null}
-                              </div>
-                              <p className="text-muted-foreground">
-                                自动发现只读取可验证的模型能力；证据不足时保持未声明，不会套用
-                                GPT 通用档位。
-                              </p>
-
-                              {row.reasoning ? (
-                                <div className="grid gap-3 md:grid-cols-2">
-                                  <fieldset className="space-y-2 rounded-md border p-2">
-                                    <legend className="px-1">
-                                      Provider 原生档位
-                                    </legend>
-                                    <div className="flex flex-wrap gap-2">
-                                      {CODEX_REASONING_EFFORT_CHOICES.map(
-                                        (effort) => (
-                                          <label
-                                            key={effort}
-                                            className="flex items-center gap-1"
-                                          >
-                                            <input
-                                              type="checkbox"
-                                              checked={row.reasoning!.supportedEfforts.includes(
-                                                effort,
-                                              )}
-                                              disabled={isBuiltinReasoning}
-                                              onChange={(event) => {
-                                                const checked =
-                                                  event.target.checked;
-                                                const supportedEfforts = checked
-                                                  ? [
-                                                      ...row.reasoning!
-                                                        .supportedEfforts,
-                                                      effort,
-                                                    ]
-                                                  : row.reasoning!.supportedEfforts.filter(
-                                                      (item) => item !== effort,
-                                                    );
-                                                const defaultEffort =
-                                                  supportedEfforts.includes(
-                                                    row.reasoning!
-                                                      .defaultEffort as CodexReasoningEffort,
-                                                  )
-                                                    ? row.reasoning!
-                                                        .defaultEffort
-                                                    : supportedEfforts[0];
-                                                // 取消勾选时同步清理 effortMap 中指向被移除档位的孤儿映射，
-                                                // 否则保存后后端 validate（target 必须在 supportedEfforts）
-                                                // 会拒绝整份声明并被静默清空（v27/v28 回归）。
-                                                const nextEffortMap: Record<
-                                                  string,
-                                                  CodexReasoningEffort
-                                                > = {
-                                                  ...(row.reasoning!.upstream
-                                                    .effortMap ?? {}),
-                                                };
-                                                if (!checked) {
-                                                  for (const [
-                                                    source,
-                                                    target,
-                                                  ] of Object.entries(
-                                                    nextEffortMap,
-                                                  )) {
-                                                    if (target === effort) {
-                                                      delete nextEffortMap[
-                                                        source
-                                                      ];
-                                                    }
-                                                  }
-                                                }
-                                                handleUpdateCatalogRow(index, {
-                                                  reasoning: {
-                                                    ...row.reasoning!,
-                                                    supportedEfforts,
-                                                    defaultEffort,
-                                                    upstream: {
-                                                      ...row.reasoning!
-                                                        .upstream,
-                                                      effortMap: nextEffortMap,
-                                                    },
-                                                    source: "user",
-                                                  },
-                                                });
-                                              }}
-                                            />
-                                            {effort}
-                                          </label>
-                                        ),
-                                      )}
-                                    </div>
-                                  </fieldset>
-                                  <label className="grid gap-1">
-                                    <span>Provider 默认档位</span>
-                                    <select
-                                      className="rounded-md border bg-background px-3 py-2"
-                                      value={row.reasoning.defaultEffort ?? ""}
-                                      disabled={isBuiltinReasoning}
-                                      onChange={(event) =>
-                                        handleUpdateCatalogRow(index, {
-                                          reasoning: {
-                                            ...row.reasoning!,
-                                            defaultEffort: event.target
-                                              .value as CodexReasoningEffort,
-                                            source: "user",
-                                          },
-                                        })
-                                      }
-                                    >
-                                      <option value="">未声明</option>
-                                      {row.reasoning.supportedEfforts.map(
-                                        (effort) => (
-                                          <option key={effort} value={effort}>
-                                            {effort}
-                                          </option>
-                                        ),
-                                      )}
-                                    </select>
-                                  </label>
-                                  <label className="flex items-center gap-2">
-                                    <input
-                                      type="checkbox"
-                                      checked={row.reasoning.disableAllowed}
-                                      disabled={isBuiltinReasoning}
-                                      onChange={(event) =>
-                                        handleUpdateCatalogRow(index, {
-                                          reasoning: {
-                                            ...row.reasoning!,
-                                            disableAllowed:
-                                              event.target.checked,
-                                            source: "user",
-                                          },
-                                        })
-                                      }
-                                    />
-                                    Provider 支持关闭推理
-                                  </label>
-                                  <label className="grid gap-1">
-                                    <span>上游参数</span>
-                                    <Input
-                                      value={row.reasoning.upstream.parameter}
-                                      readOnly={isBuiltinReasoning}
-                                      onChange={(event) =>
-                                        handleUpdateCatalogRow(index, {
-                                          reasoning: {
-                                            ...row.reasoning!,
-                                            upstream: {
-                                              ...row.reasoning!.upstream,
-                                              parameter: event.target
-                                                .value as CodexModelReasoningCapability["upstream"]["parameter"],
-                                            },
-                                            source: "user",
-                                          },
-                                        })
-                                      }
-                                    />
-                                  </label>
-                                  <div className="md:col-span-2 space-y-2">
-                                    <span>Codex → Provider 映射</span>
-                                    <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                                      {CODEX_REASONING_EFFORT_CHOICES.map(
-                                        (effort) => (
-                                          <label
-                                            key={effort}
-                                            className="grid grid-cols-[1fr_auto_1fr] items-center gap-1"
-                                          >
-                                            <span>{effort}</span>
-                                            <span>→</span>
-                                            <select
-                                              className="rounded border bg-background px-2 py-1"
-                                              value={
-                                                row.reasoning!.upstream
-                                                  .effortMap?.[effort] ?? ""
-                                              }
-                                              disabled={isBuiltinReasoning}
-                                              onChange={(event) =>
-                                                handleUpdateCatalogRow(index, {
-                                                  reasoning: {
-                                                    ...row.reasoning!,
-                                                    upstream: {
-                                                      ...row.reasoning!
-                                                        .upstream,
-                                                      effortMap: {
-                                                        ...row.reasoning!
-                                                          .upstream.effortMap,
-                                                        [effort]: event.target
-                                                          .value as CodexReasoningEffort,
-                                                      },
-                                                    },
-                                                    source: "user",
-                                                  },
-                                                })
-                                              }
-                                            >
-                                              <option value="">未映射</option>
-                                              {row.reasoning!.supportedEfforts.map(
-                                                (target) => (
-                                                  <option
-                                                    key={target}
-                                                    value={target}
-                                                  >
-                                                    {target}
-                                                  </option>
-                                                ),
-                                              )}
-                                            </select>
-                                          </label>
-                                        ),
-                                      )}
-                                    </div>
-                                  </div>
-                                </div>
-                              ) : null}
-
-                              <details>
-                                <summary className="cursor-pointer text-muted-foreground">
-                                  专家 JSON
-                                </summary>
-                                <Textarea
-                                  key={`${row.rowId}:${JSON.stringify(row.reasoning)}`}
-                                  className="mt-2 min-h-28 font-mono text-xs"
-                                  defaultValue={
-                                    row.reasoning
-                                      ? JSON.stringify(row.reasoning, null, 2)
-                                      : ""
-                                  }
-                                  onBlur={(event) => {
-                                    if (!isBuiltinReasoning) {
-                                      handleUpdateCatalogReasoningJson(
-                                        index,
-                                        event.target.value,
-                                      );
-                                    }
-                                  }}
-                                  readOnly={isBuiltinReasoning}
-                                  aria-label={`${row.model || "模型"}推理能力 JSON`}
-                                />
-                              </details>
-                            </div>
-                          </details>
                         </div>
                       );
                     })}

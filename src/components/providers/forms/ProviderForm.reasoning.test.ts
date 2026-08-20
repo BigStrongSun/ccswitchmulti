@@ -6,6 +6,7 @@ import {
   applyCodexReasoningCapabilitySource,
   validateCodexReasoningCapabilityDraft,
 } from "./CodexFormFields";
+import { completeCodexReasoningEffortMap } from "./codexReasoningCapability";
 
 describe("Codex catalog reasoning capability persistence", () => {
   it("separates automatic, maintained and manual capability sources", () => {
@@ -120,5 +121,78 @@ describe("Codex catalog reasoning capability persistence", () => {
         source: "user",
       }),
     ).toThrow(/mapping target max/);
+  });
+
+  it("automatically fills identity mappings for every Provider-native effort", () => {
+    expect(
+      completeCodexReasoningEffortMap({
+        supportedEfforts: ["low", "medium", "high"],
+        effortMap: { xhigh: "high" },
+      }),
+    ).toEqual({
+      low: "low",
+      medium: "medium",
+      high: "high",
+      xhigh: "high",
+    });
+  });
+
+  it("rejects incomplete expert JSON but completes identity mappings on save", () => {
+    expect(() =>
+      validateCodexReasoningCapabilityDraft({
+        schemaVersion: 2,
+        supportStatus: "confirmed_supported",
+        controlKind: "graded",
+        supportedEfforts: ["low", "medium", "high"],
+        defaultEffort: "medium",
+        disableAllowed: false,
+        upstream: {
+          format: "string",
+          parameter: "reasoning_effort",
+        },
+        source: "user",
+      }),
+    ).toThrow(/effortMap is missing low, medium, high/);
+
+    const [saved] = normalizeCodexCatalogModelsForSave([
+      {
+        model: "qwen3.8",
+        reasoning: {
+          schemaVersion: 2,
+          supportStatus: "confirmed_supported",
+          controlKind: "graded",
+          supportedEfforts: ["low", "medium", "high"],
+          defaultEffort: "medium",
+          disableAllowed: false,
+          upstream: {
+            format: "string",
+            parameter: "reasoning_effort",
+          },
+          source: "user",
+        },
+      },
+    ]);
+    expect(saved.reasoning?.upstream.effortMap).toEqual({
+      low: "low",
+      medium: "medium",
+      high: "high",
+    });
+  });
+
+  it("does not require effort mappings for boolean controls", () => {
+    expect(() =>
+      validateCodexReasoningCapabilityDraft({
+        schemaVersion: 2,
+        supportStatus: "confirmed_supported",
+        controlKind: "boolean",
+        supportedEfforts: [],
+        disableAllowed: true,
+        upstream: {
+          format: "boolean",
+          parameter: "enable_thinking",
+        },
+        source: "user",
+      }),
+    ).not.toThrow();
   });
 });

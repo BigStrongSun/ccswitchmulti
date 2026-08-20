@@ -3914,3 +3914,11 @@
 - 对入口判定做了回归收口：无 User-Agent 不能单独等价于 Codex，否则普通无认证 `/v1/models`、`/v1/responses` 和 `/v1/images/generations` 会绕过 External API 鉴权。现在要求官方 Codex User-Agent 或稳定指纹头（`originator`、session/thread、`x-codex-*`、Responses 客户端头）；显式 External marker/API key 仍优先走外部 API。覆盖了“无 UA + x-codex-turn-metadata”与“完全无身份头”两条回归。
 - 合并后验证：`cargo test --lib` 为 3185 passed / 0 failed / 5 ignored；`pnpm test:unit` 为 140 files / 1128 tests 全部通过；`pnpm tauri build --bundles nsis --config '{"bundle":{"createUpdaterArtifacts":false}}'` 返回码 0。
 - 本地测试安装包（未安装、未上传、未推送）为 `src-tauri/target/release/bundle/nsis/CCSwitchMulti_3.19.2-7_x64-setup.exe`，SHA-256 `FE56DEE7D0DE64D852666CE3009E2DB83B4C3E9142A968FD812B12BF3914EA11`，未签名是预期结果（仅关闭 updater artifact 的本地测试构建）。运行中的 CCSM PID 67512 未停止或替换。
+
+## 2026-08-20 推理能力配置入口、映射门禁与官方投影兼容根修
+
+- Provider 表单新增默认可见的独立“模型推理能力”模块，位于模型就绪区与高级选项之间；模型目录明细仍在高级选项，但旧的目录行折叠推理入口已删除。每个模型卡片统一展示最终解析、能力来源、检测/采纳/手动/恢复动作、结构化编辑器和折叠专家 JSON。
+- 结构化编辑器按“控制方式 / Provider 原生能力 / Provider 默认档位 / 上游传参 / Codex 到 Provider 映射 / 是否可关闭”分组解释。正常视图只显示当前模型已确认的原生档位；完整公共词表只在“添加 Provider 档位”下拉中出现。映射区也只显示当前模型档位，Qwen `low/medium/high` 不再暴露无关的 `xhigh/max/ultra` 行。
+- 持久化契约：`graded + confirmed_supported + string/reasoning_object` 的每个正向 Provider 原生档位都必须有映射，目标必须属于 Provider 支持集合；`none` 是关闭能力，不是正向档位，不要求映射；boolean/none/budget 不要求 effort 映射。专家 JSON 缺映射立即拒绝，结构化表单保存前自动补齐同名映射并显式落库。
+- 兼容策略为 read old / write complete：历史内置声明、能力库和旧 Provider 数据允许省略同名映射，Rust 消费入口先补恒等映射再严格校验；新写入仍直接走严格 `validate()`。这修复了官方/内置能力因新门禁被误判后退回通用 `low/medium/high/xhigh` 的回归；官方、DeepSeek、GLM、检测快照和 Sub-Agent 投影测试均恢复通过。
+- 前端补图 helper 独立在 `codexReasoningCapability.ts`，避免 ProviderForm 从可被测试替换的 UI 模块导入领域逻辑。验证：Vitest 141 files / 1136 tests 全过；Rust lib 3187 passed / 0 failed / 5 ignored；TypeScript、rustfmt、diff check 均通过。未停止、替换、安装或覆盖运行中的 CCSM。

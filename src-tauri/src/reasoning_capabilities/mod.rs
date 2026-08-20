@@ -337,7 +337,7 @@ pub fn snapshot_to_capability(
         return None;
     };
 
-    let mut supported_efforts = graded_efforts;
+    let mut supported_efforts = graded_efforts.clone();
     if disable_allowed {
         supported_efforts.insert(0, "none".to_string());
     }
@@ -359,7 +359,10 @@ pub fn snapshot_to_capability(
                 .upstream_parameter
                 .clone()
                 .unwrap_or_else(|| "reasoning.effort".to_string()),
-            effort_map: Default::default(),
+            effort_map: graded_efforts
+                .iter()
+                .map(|effort| (effort.clone(), effort.clone()))
+                .collect(),
         },
         output_format: reasoning.output_format.clone(),
         source: Some("detection".to_string()),

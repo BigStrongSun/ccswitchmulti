@@ -84,6 +84,7 @@ import {
   CodexFormFields,
   type CodexProviderSplitSuggestion,
 } from "./CodexFormFields";
+import { completeCodexReasoningEffortMap } from "./codexReasoningCapability";
 import { GrokBuildProviderForm } from "./GrokBuildProviderForm";
 import { GeminiFormFields } from "./GeminiFormFields";
 import { OmoFormFields } from "./OmoFormFields";
@@ -203,7 +204,25 @@ export const normalizeCodexCatalogModelsForSave = (
     );
 
     const baseInstructions = item.baseInstructions?.trim();
-    const reasoning = item.reasoning;
+    const rawReasoning = item.reasoning;
+    const reasoning =
+      rawReasoning &&
+      (rawReasoning.supportStatus !== undefined
+        ? rawReasoning.supportStatus === "confirmed_supported"
+        : rawReasoning.supported === true) &&
+      rawReasoning.upstream.format !== "none" &&
+      rawReasoning.upstream.format !== "boolean"
+        ? {
+            ...rawReasoning,
+            upstream: {
+              ...rawReasoning.upstream,
+              effortMap: completeCodexReasoningEffortMap({
+                supportedEfforts: rawReasoning.supportedEfforts,
+                effortMap: rawReasoning.upstream.effortMap,
+              }),
+            },
+          }
+        : rawReasoning;
     if (
       reasoning?.defaultEffort &&
       !reasoning.supportedEfforts.includes(reasoning.defaultEffort)
@@ -229,10 +248,7 @@ export const normalizeCodexCatalogModelsForSave = (
       reasoning.upstream.format !== "boolean"
     ) {
       for (const effort of reasoning.supportedEfforts) {
-        if (
-          reasoning.upstream.effortMap &&
-          !reasoning.upstream.effortMap[effort]
-        ) {
+        if (!reasoning.upstream.effortMap?.[effort]) {
           throw new Error(`${model}: reasoning effortMap is missing ${effort}`);
         }
       }

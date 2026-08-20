@@ -200,6 +200,27 @@ pub struct ReasoningCapabilityRepairOutcome {
 }
 
 impl CodexModelReasoningCapability {
+    /// 兼容读取旧能力声明：历史 schema 允许省略同名映射。
+    ///
+    /// 仅在读取/解析消费者入口调用；新写入仍必须直接通过 `validate()`，
+    /// 从而维持“read old, write complete”的持久化契约。
+    pub fn complete_identity_effort_map_for_read(mut self) -> Self {
+        if self.effective_support_status() == ReasoningSupportStatus::ConfirmedSupported
+            && self.effective_control_kind() == ReasoningControlKind::Graded
+            && !matches!(self.upstream.format.as_str(), "none" | "boolean")
+        {
+            for effort in &self.supported_efforts {
+                if effort != "none" {
+                    self.upstream
+                        .effort_map
+                        .entry(effort.clone())
+                        .or_insert_with(|| effort.clone());
+                }
+            }
+        }
+        self
+    }
+
     /// 生效三态状态：`supportStatus` 优先；legacy `supported` 仅用于读旧数据。
     pub fn effective_support_status(&self) -> ReasoningSupportStatus {
         if let Some(status) = self.support_status {
@@ -288,6 +309,24 @@ impl CodexModelReasoningCapability {
                 .any(|supported| supported == target)
         }) {
             return Err("effortMap target must be present in supportedEfforts".to_string());
+        }
+        if self.effective_support_status() == ReasoningSupportStatus::ConfirmedSupported
+            && self.effective_control_kind() == ReasoningControlKind::Graded
+            && !matches!(self.upstream.format.as_str(), "none" | "boolean")
+        {
+            let missing = self
+                .supported_efforts
+                .iter()
+                .filter(|effort| effort.as_str() != "none")
+                .filter(|effort| !self.upstream.effort_map.contains_key(effort.as_str()))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                return Err(format!(
+                    "effortMap is missing Provider effort(s): {}",
+                    missing.join(", ")
+                ));
+            }
         }
         Ok(())
     }
@@ -440,7 +479,10 @@ pub fn repair_invalid_reasoning_capabilities(
 pub fn resolve_subagent_reasoning_capability(
     capability: Option<&CodexModelReasoningCapability>,
 ) -> ResolvedSubagentReasoningCapability {
-    let Some(capability) = capability.filter(|value| value.validate().is_ok()) else {
+    let normalized = capability
+        .cloned()
+        .map(CodexModelReasoningCapability::complete_identity_effort_map_for_read);
+    let Some(capability) = normalized.as_ref().filter(|value| value.validate().is_ok()) else {
         return ResolvedSubagentReasoningCapability {
             support_kind: ReasoningSupportKind::Unknown,
             source: None,
@@ -595,7 +637,10 @@ pub fn reasoning_capability_from_model_entry(
         .get("model")
         .and_then(Value::as_str)
         .unwrap_or("?");
-    let capability: CodexModelReasoningCapability = match serde_json::from_value(value.clone()) {
+    let capability: CodexModelReasoningCapability = match serde_json::from_value::<
+        CodexModelReasoningCapability,
+    >(value.clone())
+    {
         Ok(capability) => capability,
         Err(error) => {
             // 声明存在但无法解析：打日志暴露问题，避免用户手动声明
@@ -605,7 +650,8 @@ pub fn reasoning_capability_from_model_entry(
             );
             return None;
         }
-    };
+    }
+    .complete_identity_effort_map_for_read();
     if let Err(error) = capability.validate() {
         log::warn!(
             "Codex reasoning declaration for model {model} is invalid and will be ignored: {error}"
@@ -828,6 +874,32 @@ mod tests {
             capability.validate(),
             Err("effortMap target must be present in supportedEfforts".to_string())
         );
+    }
+
+    #[test]
+    fn rejects_incomplete_graded_effort_mapping() {
+        let mut capability = deepseek_capability();
+        capability.upstream.effort_map.remove("low");
+        capability.upstream.effort_map.remove("high");
+        capability.upstream.effort_map.remove("max");
+        assert_eq!(
+            capability.validate(),
+            Err("effortMap is missing Provider effort(s): low, high, max".to_string())
+        );
+    }
+
+    #[test]
+    fn boolean_control_does_not_require_effort_mapping() {
+        let capability: CodexModelReasoningCapability = serde_json::from_value(json!({
+            "schemaVersion": 2,
+            "supportStatus": "confirmed_supported",
+            "controlKind": "boolean",
+            "supportedEfforts": [],
+            "disableAllowed": true,
+            "upstream": {"format": "boolean", "parameter": "enable_thinking"}
+        }))
+        .expect("boolean capability");
+        assert!(capability.validate().is_ok());
     }
 
     #[test]
