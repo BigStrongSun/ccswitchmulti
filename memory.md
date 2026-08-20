@@ -3952,3 +3952,11 @@
 - DeepSeek Responses 网关没有 Codex `tool_search` 协议能力。错误的 true 会让 MCP 工具不再内联，而模型又无法通过 tool_search 发现它们；`web_search_tool_type` 与 provider web-search capability 是独立门控，改成 false 不会关闭 DeepSeek hosted web search。
 - 本地集成采用 PR 的两处模板修正，并新增覆盖 bundled `deepseek-v4-pro` 与 `deepseek-v4-flash` 全部条目的回归测试。测试先 RED（实际读到 true），再改为 false 转 GREEN；不能只测试一个模型，否则另一个条目未来仍可能漂移。
 - 本轮只合入本地 main，不推送、不发布、不构建或安装，也不替换运行中的 CCSM。
+
+## 2026-08-20 合入 CCSM PR #26：删除 Provider 后保留 MultiRouter 模型顺序
+
+- CCSM PR `BigStrongSun/ccswitchmulti#26`（作者 GaoHu1997，原提交 `6cc2a301`）修复删除 Provider 后 MultiRouter 聚合模型目录重建导致剩余模型重新排序。根因有两层：删除 mutation 过去只删除 Provider，没有移除引用它的 route 并回写聚合目录；普通 provider/route 同步重建目录时又完全采用当前 route/provider 遍历顺序，使已有模型跳位。
+- 新增 `codexModelCatalogOrder.ts` 作为前端目录顺序 SSOT：按上一版目录的 `sortIndex`（缺失时按数组位置）保留现存模型相对顺序，真正新增模型追加到末尾；存在自定义排序时把剩余模型压缩为连续 `sortIndex`，恢复默认状态下则清除上游 Provider 可能携带的 `sortIndex`，不把默认排序污染成用户排序。
+- `useDeleteProviderMutation("codex")` 删除成功后重新读取 Provider 集合，移除所有引用被删 Provider 的 MultiRouter route，并逐个回写同步后的 plan；非 Codex 应用不进入这条同步路径。该行为不改变 route/modelMap、Sub-Agent 候选剪枝和默认排序的既有边界。
+- TDD 证据：当前 main 在只改期望后，`codexMultiRouterSync.test.ts` 明确 RED（`qwen3.6` 从原第二位掉到末尾）；应用实现后目录排序、MultiRouter 同步和删除 mutation 聚焦测试 18/18 GREEN。`pnpm typecheck` 通过，PR 六个变更文件 Prettier 通过；全量 Vitest 首轮 1140/1142，两个 `tests/integration/App.test.tsx` UI wait 超时在隔离单进程重跑为 11/11，通过，属于全量并发/DOM 污染而非本 PR 稳定回归。仓库全量 `format:check` 仍被本轮未改的 `CodexSubagentProfileEditor.tsx` 与 `CodexSubagentV2ProfileEditor.test.tsx` 两个既有格式漂移阻塞。
+- 本轮仅合入本地 main，不推送、不发布、不构建、不安装，也不停止或替换正在运行的 CCSM。
