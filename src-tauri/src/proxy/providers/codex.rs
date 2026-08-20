@@ -596,21 +596,26 @@ pub fn materialize_codex_routed_provider_from_target(
         .as_ref()
         .and_then(|meta| meta.provider_type.as_deref())
         == Some("codex_oauth");
-    let native_codex_auth = route_native_codex_auth.unwrap_or_else(|| {
-        !route_is_managed_codex_oauth
-            && is_codex_official_provider(target_provider)
-            && target_provider
-                .meta
-                .as_ref()
-                .and_then(|meta| meta.provider_type.as_deref())
-                != Some("codex_oauth")
-            && !provider_has_managed_codex_oauth_auth(target_provider)
-    });
-    let account_pool = route_provider
+    let route_account_pool = route_provider
         .settings_config
         .get(CODEX_ACCOUNT_POOL_ENABLED)
         .and_then(JsonValue::as_bool)
         .unwrap_or(false);
+    let legacy_builtin_native = !route_is_managed_codex_oauth
+        && !route_account_pool
+        && is_codex_official_provider(target_provider)
+        && target_provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.provider_type.as_deref())
+            != Some("codex_oauth")
+        && !provider_has_managed_codex_oauth_auth(target_provider);
+    let native_codex_auth = if legacy_builtin_native {
+        true
+    } else {
+        route_native_codex_auth.unwrap_or(false)
+    };
+    let account_pool = route_account_pool;
     let managed_codex_oauth = !native_codex_auth
         && !account_pool
         && should_treat_target_as_managed_codex_oauth(
@@ -3474,6 +3479,7 @@ experimental_bearer_token = "PROXY_MANAGED"
     #[test]
     fn test_codex_route_target_provider_uses_desktop_oauth_for_builtin_official_seed() {
         let router = create_provider(json!({
+            "codexNativeAuthPassthrough": false,
             "codexRouting": {
                 "enabled": true,
                 "routes": [{
