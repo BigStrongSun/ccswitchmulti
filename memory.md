@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-08-20 MultiRouter Provider SSOT v2 schema 与统一 compiler
+
+- 分支 `bigstrongsun/codex-multirouter-ssot-v2` 使用隔离 worktree `.worktrees/codex-multirouter-ssot-v2` 实施已评审设计；规格与计划分别位于 `docs/superpowers/specs/2026-08-20-codex-multirouter-provider-ssot-design.md` 和 `docs/superpowers/plans/2026-08-20-codex-multirouter-provider-ssot.md`。目标不是继续同步 Route 字段，而是让 Provider/Provider 模型条目成为协议、连接、认证材料和能力的事实源。
+- schema v2 已落在 `codex_multirouter/schema.rs`：Route 只保存目标 Provider、`all/include` canonical 模型选择、前缀、显式 aliases 和无密钥 auth policy；解析器保持 v1 `Legacy(Value)` 只读兼容，并拒绝 Route 中的 Base URL、API Key、协议与能力快照。
+- 统一 compiler 位于 `codex_multirouter/compiler.rs`：协议优先级为 Provider 模型条目 `apiFormat` > Provider `meta/settings` 默认 > `openai_chat`；`all` 每次从最新 Provider catalog 展开，`include` 保持闭集；显式 alias 优先，重名模型按 canonical 官方源/Provider 名称生成稳定可见名。
+- compiler 的 `dependencyFingerprint` 使用 canonical JSON + SHA-256 短摘要，覆盖声明式 plan、非秘密 Provider 连接/认证所有者、effective 模型协议/能力与 `upstreamModel`；HashMap 插入顺序不影响结果。API Key、Token、密码、Cookie、Authorization、prompt cache key 等不会进入 compiled/diagnostic 序列化，未知能力对象也递归删除敏感字段。
+- Task 2 TDD 当前覆盖 10 个行为：Provider 协议继承、单 Provider 模型级混合协议、`all/include`、显式/自动 alias、未知 alias target、模型上下文/模态/推理/缓存、map 顺序稳定、协议/能力/upstream 变更 fingerprint、嵌套秘密脱敏。全库 Clippy 在 Rust 1.95 上仍有 3 个与本分支无关的基线 lint；仅命令行豁免这 3 项后，本模块 `-D warnings` 通过，未修改无关代码。
+
 ## 2026-08-19 恢复 Qwen/vLLM 缺省输出上限 131072（对齐 Qwen3.8-27B 官方最大输出）
 
 - 实况：Codex 任务 `01a01722-ca39-77f1-b7da-9d3a9d5fe023` 的 vLLM 透明代理记录出现单条请求 `prompt_tokens=136269 / completion_tokens=125875 / total_tokens=262144 / finish_reasons=["length"]`。根因不是上下文压缩也不是 KV cache，而是 Codex Responses 请求没有显式输出预算、CCSM 转换成 Chat Completions 时也没有补 `max_tokens`，vLLM 把剩余上下文窗口都当成默认输出预算。
