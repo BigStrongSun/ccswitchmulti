@@ -9,6 +9,7 @@ pub mod codex_config;
 mod codex_desktop;
 mod codex_guardian;
 pub mod codex_history_migration;
+pub mod codex_multirouter;
 mod codex_state_db;
 pub(crate) mod codex_subagent_profiles;
 mod commands;
@@ -1384,6 +1385,11 @@ pub fn run() {
             commands::update_codex_subagent_v2,
             commands::initialize_codex_subagent_v2,
             commands::reconcile_codex_subagent_v2_profiles,
+            commands::inspect_codex_multirouter_projection,
+            commands::retry_codex_multirouter_projection,
+            commands::get_codex_multirouter_revision,
+            commands::preview_codex_multirouter_migration,
+            commands::apply_codex_multirouter_migration,
             commands::delete_provider,
             commands::remove_provider_from_live_config,
             commands::switch_provider,

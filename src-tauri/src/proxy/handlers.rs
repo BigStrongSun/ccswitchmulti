@@ -588,6 +588,33 @@ fn has_codex_client_fingerprint(headers: &HeaderMap) -> bool {
     })
 }
 
+fn codex_request_classification_fields(headers: &HeaderMap) -> Vec<(&'static str, String)> {
+    let user_agent = headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let has_user_agent = !user_agent.is_empty();
+    let user_agent_contains_codex = user_agent.to_ascii_lowercase().contains("codex");
+    let has_external_api_key = external_openai_api::has_external_api_key(headers);
+    let force_external_marker = headers.contains_key(FORCE_EXTERNAL_OPENAI_API_HEADER);
+    let selected_path = if should_handle_as_codex_client(headers) {
+        "codex"
+    } else {
+        "external_openai_api"
+    };
+
+    vec![
+        ("has_user_agent", has_user_agent.to_string()),
+        (
+            "user_agent_contains_codex",
+            user_agent_contains_codex.to_string(),
+        ),
+        ("has_external_api_key", has_external_api_key.to_string()),
+        ("force_external_marker", force_external_marker.to_string()),
+        ("selected_path", selected_path.to_string()),
+    ]
+}
+
 fn mark_external_openai_headers(headers: &mut HeaderMap) {
     headers.insert(
         FORCE_EXTERNAL_OPENAI_API_HEADER,
@@ -1492,6 +1519,25 @@ fn resolve_codex_image_generation_provider(
     for model in codex_image_generation_route_probe_models(provider, body) {
         let mut probe_body = body.clone();
         probe_body["model"] = json!(model);
+        let v2_routing = codex_provider_has_v2_routing(provider);
+        if let Some(candidate) =
+            resolve_codex_v2_runtime_provider_from_db(state, provider, &probe_body, None)?
+        {
+            if provider_is_codex_image_generation_oauth_target(&candidate) {
+                return Ok(Some(sanitize_codex_image_generation_provider(candidate)));
+            }
+            if request_model
+                .as_deref()
+                .is_some_and(|request_model| request_model.eq_ignore_ascii_case(&model))
+                && codex_route_provider_matched_request_model(&candidate)
+            {
+                return Ok(None);
+            }
+            continue;
+        }
+        if v2_routing {
+            continue;
+        }
         let Some(route_provider) =
             super::providers::resolve_codex_model_routed_provider(provider, &probe_body)
         else {
@@ -1515,6 +1561,46 @@ fn resolve_codex_image_generation_provider(
     resolve_codex_image_generation_official_route_by_identity(state, provider)
 }
 
+fn resolve_codex_v2_runtime_provider_from_db(
+    state: &ProxyState,
+    provider: &crate::provider::Provider,
+    body: &Value,
+    explicit_route_id: Option<&str>,
+) -> Result<Option<crate::provider::Provider>, ProxyError> {
+    if provider
+        .settings_config
+        .pointer("/codexRouting/schemaVersion")
+        .and_then(Value::as_u64)
+        != Some(2)
+    {
+        return Ok(None);
+    }
+    let providers = state
+        .db
+        .get_all_providers("codex")
+        .map_err(|error| ProxyError::DatabaseError(error.to_string()))?
+        .into_iter()
+        .collect::<std::collections::HashMap<_, _>>();
+    let resolved = if explicit_route_id.is_some() {
+        super::providers::resolve_codex_v2_raw_passthrough_provider(
+            provider,
+            body,
+            &providers,
+            explicit_route_id,
+        )
+    } else {
+        super::providers::resolve_codex_v2_routed_provider(provider, body, &providers)
+    };
+    resolved
+        .map(|resolved| resolved.map(super::providers::ResolvedCodexRoute::into_effective_provider))
+        .map_err(|error| {
+            ProxyError::ConfigError(format!(
+                "Codex MultiRouter v2 编译失败 [{}]: {}",
+                error.code, error.message
+            ))
+        })
+}
+
 /// 判断 provider 是否显式包含 Codex router 配置。
 ///
 /// 兼容 `codexRouting` 新 schema 以及旧版 `codexModelRoutes` / `modelRoutes`，
@@ -1526,6 +1612,14 @@ fn codex_provider_has_routing_config(provider: &crate::provider::Provider) -> bo
         .or_else(|| provider.settings_config.get("codexModelRoutes"))
         .or_else(|| provider.settings_config.get("modelRoutes"))
         .is_some()
+}
+
+fn codex_provider_has_v2_routing(provider: &crate::provider::Provider) -> bool {
+    provider
+        .settings_config
+        .pointer("/codexRouting/schemaVersion")
+        .and_then(Value::as_u64)
+        == Some(2)
 }
 
 /// 生成用于探测 official route 的模型列表。
@@ -1919,6 +2013,26 @@ fn resolve_external_codex_router_target(
         if !codex_router_contains_route(provider, profile.route_id.as_deref()) {
             continue;
         }
+        if let Some(resolved) = resolve_codex_v2_runtime_provider_from_db(
+            state,
+            provider,
+            body,
+            profile.route_id.as_deref(),
+        )? {
+            if profile.route_id.is_some()
+                && resolved
+                    .settings_config
+                    .get("codexResolvedRouteId")
+                    .and_then(Value::as_str)
+                    != profile.route_id.as_deref()
+            {
+                continue;
+            }
+            return Ok(Some(resolved));
+        }
+        if codex_provider_has_v2_routing(provider) {
+            continue;
+        }
         if let Some(resolved) =
             super::providers::resolve_codex_model_routed_provider(provider, body)
         {
@@ -1962,7 +2076,7 @@ fn resolve_external_codex_router_target(
 /// 让 forwarder 的 raw resolver 负责“显式模型命中 -> official -> default”的统一策略。
 fn resolve_external_codex_router_raw_target(
     state: &ProxyState,
-    _body: &Value,
+    body: &Value,
     profile: &ExternalOpenAiApiProfile,
 ) -> Result<Option<crate::provider::Provider>, ProxyError> {
     let providers = state
@@ -1987,6 +2101,14 @@ fn resolve_external_codex_router_raw_target(
         let Some(route_id) = profile.route_id.as_deref() else {
             return Ok(Some(provider.clone()));
         };
+        if let Some(resolved) =
+            resolve_codex_v2_runtime_provider_from_db(state, provider, body, Some(route_id))?
+        {
+            return Ok(Some(resolved));
+        }
+        if codex_provider_has_v2_routing(provider) {
+            continue;
+        }
         let Some(route) = codex_router_route_by_id(provider, route_id) else {
             continue;
         };
@@ -2666,6 +2788,14 @@ async fn handle_responses_for_app(
     let uri = parts.uri;
     let mut headers = parts.headers;
     let extensions = parts.extensions;
+
+    if app_type == AppType::Codex {
+        let mut fields = codex_request_classification_fields(&headers);
+        fields.push(("method", method.to_string()));
+        fields.push(("endpoint", endpoint_with_query(&uri, "/responses")));
+        super::codex_router_log::append_event("request_classified", &fields);
+    }
+
     let body_bytes = req_body
         .collect()
         .await
@@ -5404,9 +5534,10 @@ mod tests {
     use super::{
         body_looks_like_sse, build_external_codex_official_oauth_provider,
         chat_sse_to_response_value, classify_body_for_diagnostics, codex_catalog_models_response,
-        codex_proxy_error_json, codex_proxy_error_status, external_openai_api_models_response,
-        external_openai_api_unsupported_response, mark_external_openai_headers,
-        resolve_codex_image_generation_provider, resolve_external_codex_router_target,
+        codex_proxy_error_json, codex_proxy_error_status, codex_request_classification_fields,
+        external_openai_api_models_response, external_openai_api_unsupported_response,
+        mark_external_openai_headers, resolve_codex_image_generation_provider,
+        resolve_external_codex_router_raw_target, resolve_external_codex_router_target,
         resolve_forward_error_provider_for_logging, resolve_forward_error_route_provider,
         responses_response_to_compaction_sse, responses_response_to_completed_sse,
         responses_response_to_full_sse, responses_sse_to_response_value,
@@ -6194,6 +6325,22 @@ data: [DONE]\n\n";
     #[test]
     fn missing_identity_headers_still_require_external_api_auth() {
         assert!(!should_handle_as_codex_client(&HeaderMap::new()));
+    }
+
+    #[test]
+    fn classification_diagnostics_are_boolean_and_secret_free() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::USER_AGENT,
+            HeaderValue::from_static("codex_cli/0.148.0"),
+        );
+
+        let fields = codex_request_classification_fields(&headers);
+        assert!(fields.contains(&("has_user_agent", "true".to_string())));
+        assert!(fields.contains(&("user_agent_contains_codex", "true".to_string())));
+        assert!(fields.contains(&("has_external_api_key", "false".to_string())));
+        assert!(fields.contains(&("force_external_marker", "false".to_string())));
+        assert!(fields.contains(&("selected_path", "codex".to_string())));
     }
 
     #[test]
@@ -7462,6 +7609,87 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_deepseek\",\"
                 .and_then(|value| value.as_str()),
             Some("deepseek")
         );
+    }
+
+    #[test]
+    fn external_v2_raw_route_id_uses_compiler_and_latest_target_provider() {
+        let db = Arc::new(Database::memory().expect("memory db"));
+        db.save_provider(
+            "codex",
+            &Provider::with_id(
+                "codex-router".to_string(),
+                "Codex Router".to_string(),
+                json!({
+                    "codexRouting": {
+                        "schemaVersion": 2,
+                        "enabled": true,
+                        "defaultRouteId": "qwen",
+                        "routes": [{
+                            "id": "qwen",
+                            "label": "Qwen",
+                            "enabled": true,
+                            "targetProviderId": "qwen-target",
+                            "modelSelection": {"mode": "all"},
+                            "authPolicy": {"source": "provider_config"}
+                        }]
+                    }
+                }),
+                None,
+            ),
+        )
+        .expect("save router");
+        let mut target = Provider::with_id(
+            "qwen-target".to_string(),
+            "Qwen Target".to_string(),
+            json!({
+                "base_url": "https://qwen-latest.example/v1",
+                "modelCatalog": {"models": [{"model": "qwen3.8"}]}
+            }),
+            None,
+        );
+        target.meta = Some(ProviderMeta {
+            api_format: Some("openai_responses".to_string()),
+            ..Default::default()
+        });
+        db.save_provider("codex", &target).expect("save target");
+        let state = build_state(db);
+        let profile = ExternalOpenAiApiProfile {
+            enabled: true,
+            backend_type: ExternalOpenAiApiBackendType::CodexRouterRoute,
+            app_type: Some("codex".to_string()),
+            provider_id: Some("codex-router".to_string()),
+            route_id: Some("qwen".to_string()),
+            default_model: Some("qwen3.8".to_string()),
+            listen_address: None,
+            listen_port: None,
+            api_key_hash: None,
+            api_key_prefix: None,
+            api_keys: Vec::new(),
+            updated_at: None,
+        };
+
+        let resolved = resolve_external_codex_router_raw_target(&state, &json!({}), &profile)
+            .expect("resolve")
+            .expect("compiled v2 route");
+
+        assert_eq!(resolved.settings_config["codexResolvedRouteId"], "qwen");
+        assert_eq!(
+            resolved.settings_config["base_url"],
+            "https://qwen-latest.example/v1"
+        );
+        assert!(resolved
+            .settings_config
+            .get("codexRoutingDependencyFingerprint")
+            .and_then(Value::as_str)
+            .is_some());
+        assert!(resolved
+            .settings_config
+            .get("codexResolvedUpstreamModelOverride")
+            .is_none());
+        assert!(!should_convert_codex_responses_to_chat(
+            &resolved,
+            "/v1/responses"
+        ));
     }
 
     #[test]

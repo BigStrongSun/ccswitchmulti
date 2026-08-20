@@ -1,7 +1,8 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { Provider } from "@/types";
+import { providersApi } from "@/lib/api/providers";
 import { CodexMultiRouterWizard } from "./CodexMultiRouterWizard";
 
 vi.mock("@/components/providers/forms/hooks/useCodexOauth", () => ({
@@ -10,6 +11,29 @@ vi.mock("@/components/providers/forms/hooks/useCodexOauth", () => ({
     hasAnyAccount: false,
     isLoadingStatus: false,
   }),
+}));
+
+vi.mock("@/lib/api/providers", () => ({
+  providersApi: {
+    getCodexMultiRouterRevision: vi.fn().mockResolvedValue("revision-1"),
+    previewCodexMultiRouterMigration: vi.fn().mockResolvedValue({
+      schemaVersion: 2,
+      providerId: "router-b",
+      expectedRevision: "revision-1",
+      planToken: "opaque-token",
+      diff: {
+        removedRouteFields: ["upstream.apiFormat"],
+        createdProviderIds: [],
+        changedRouteIds: ["router-b-route"],
+      },
+      warnings: [],
+      generatedProviders: [],
+    }),
+    applyCodexMultiRouterMigration: vi.fn(),
+    getAll: vi.fn(),
+    update: vi.fn(),
+    add: vi.fn(),
+  },
 }));
 
 function renderWizard(
@@ -156,6 +180,45 @@ describe("CodexMultiRouterWizard", () => {
     expect(screen.queryByText("正在编辑：旧方案 A")).not.toBeInTheDocument();
   });
 
+  it("requires an explicit redacted migration preview before editing a v1 plan", async () => {
+    const legacyPlan: Provider = {
+      id: "legacy-plan",
+      name: "Legacy Plan",
+      category: "custom",
+      settingsConfig: {
+        auth: { OPENAI_API_KEY: "must-not-render" },
+        codexRouting: {
+          enabled: true,
+          routes: [
+            {
+              id: "legacy-route",
+              targetProviderId: "qwen",
+              match: { models: ["qwen3.8"] },
+              upstream: {
+                apiFormat: "openai_chat",
+                apiKey: "legacy-secret",
+                auth: { source: "provider_config" },
+              },
+            },
+          ],
+        },
+      },
+    };
+
+    renderWizard([legacyPlan], { mode: "edit", planId: legacyPlan.id });
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "编辑前迁移旧 MultiRouter",
+      }),
+    ).toBeVisible();
+    expect(providersApi.getCodexMultiRouterRevision).toHaveBeenCalledWith(
+      legacyPlan.id,
+    );
+    expect(screen.queryByText("legacy-secret")).not.toBeInTheDocument();
+    expect(screen.queryByText("must-not-render")).not.toBeInTheDocument();
+  });
+
   it("keeps provider-owned protocol and hosted-tool controls out of source selection", () => {
     renderWizard([
       {
@@ -177,5 +240,40 @@ describe("CodexMultiRouterWizard", () => {
     expect(
       screen.getByRole("button", { name: "配置 Third party source" }),
     ).toBeVisible();
+  });
+
+  it("reviews schema v2 route policy without inherited endpoint, protocol, or capabilities", () => {
+    renderWizard([
+      {
+        id: "qwen-provider",
+        name: "Qwen Provider",
+        category: "custom",
+        settingsConfig: {
+          baseUrl: "https://secret-upstream.invalid/v1",
+          apiFormat: "openai_chat",
+          auth: { OPENAI_API_KEY: "must-not-render" },
+          modelCatalog: {
+            models: [
+              {
+                model: "qwen3.8",
+                apiFormat: "openai_responses",
+                codexCache: { cacheMode: "qwen_context_cache" },
+              },
+            ],
+          },
+        },
+      },
+    ]);
+
+    fireEvent.click(screen.getByRole("button", { name: "选择模型并预览路由" }));
+
+    expect(screen.getByText("qwen-provider")).toBeVisible();
+    expect(screen.getByText(/Route 不保存这些字段/)).toBeVisible();
+    expect(screen.queryByText("openai_chat")).not.toBeInTheDocument();
+    expect(screen.queryByText("openai_responses")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("https://secret-upstream.invalid/v1"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("must-not-render")).not.toBeInTheDocument();
   });
 });

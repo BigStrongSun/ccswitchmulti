@@ -487,6 +487,18 @@ vi.mock("@tauri-apps/api/core", () => ({
   }),
 }));
 
+function currentV2Route() {
+  return {
+    id: "flash-route",
+    enabled: true,
+    targetProviderId: "third-party",
+    modelSelection: { mode: "all" as const },
+    matchPrefixes: [] as string[],
+    aliases: {},
+    authPolicy: { source: "provider_config" as const },
+  };
+}
+
 function plan(withV2 = true): Provider {
   return {
     id: "router",
@@ -494,16 +506,9 @@ function plan(withV2 = true): Provider {
     category: "custom",
     settingsConfig: {
       codexRouting: {
+        schemaVersion: 2,
         enabled: true,
-        routes: [
-          {
-            id: "flash-route",
-            enabled: true,
-            targetProviderId: "third-party",
-            match: { models: ["deepseek-v4-flash"], prefixes: [] },
-            upstream: {},
-          },
-        ],
+        routes: [currentV2Route()],
         ...(withV2
           ? {
               subagentV2: {
@@ -540,12 +545,6 @@ function plan(withV2 = true): Provider {
               },
             }
           : {}),
-      },
-      modelCatalog: {
-        models: [
-          { model: "deepseek-v4-flash", contextWindow: 128000 },
-          { model: "deepseek-v4-pro", contextWindow: 128000 },
-        ],
       },
     },
   };
@@ -615,7 +614,8 @@ function preservedValidProfile(): CodexSubagentV2Profile {
 }
 
 function seedMalformedProfiles() {
-  const catalog = ipcState.providers.router.settingsConfig.modelCatalog.models;
+  const catalog =
+    ipcState.providers["third-party"].settingsConfig.modelCatalog.models;
   catalog.push({
     model: "qwen3.6",
     displayName: "Qwen 3.6",
@@ -1444,13 +1444,12 @@ describe("Codex Sub-Agent V2 review round 1 regressions", () => {
     );
   });
 
-  it("merges a concurrent provider catalog refresh instead of rolling it back", async () => {
+  it("merges a concurrent plan metadata refresh instead of rolling it back", async () => {
     const user = userEvent.setup();
     await renderWorkspace();
     ipcState.beforeV2Persistence = () => {
-      ipcState.providers.router.settingsConfig.modelCatalog = {
-        ...ipcState.providers.router.settingsConfig.modelCatalog,
-        refreshedAlias: { "deepseek-v4-flash": "flash-live" },
+      ipcState.providers.router.settingsConfig.concurrentMetadata = {
+        source: "live-refresh",
       };
       ipcState.providers.router.settingsConfig.codexRouting.catalogAliases = {
         flash: "deepseek-v4-flash-live",
@@ -1466,11 +1465,9 @@ describe("Codex Sub-Agent V2 review round 1 regressions", () => {
 
     await waitFor(() => expect(v2PersistenceCalls()).toHaveLength(1));
     expect(updateProviderCalls()).toHaveLength(0);
-    expect(latestSavedPlan()?.settingsConfig.modelCatalog).toEqual(
-      expect.objectContaining({
-        refreshedAlias: { "deepseek-v4-flash": "flash-live" },
-      }),
-    );
+    expect(latestSavedPlan()?.settingsConfig.concurrentMetadata).toEqual({
+      source: "live-refresh",
+    });
     expect(
       latestSavedPlan()?.settingsConfig.codexRouting.subagentV2.selectionPolicy,
     ).toBe("official_first");
@@ -1573,9 +1570,7 @@ describe("Codex Sub-Agent V2 new-plan capability defaults", () => {
 
     const persisted = (addProviderCalls()[0][1] as { provider: Provider })
       .provider;
-    expect(persisted.settingsConfig.codexRouting).not.toHaveProperty(
-      "subagentV2",
-    );
+    expect(persisted.settingsConfig.codexRouting.subagentV2).toBeUndefined();
     await waitFor(() =>
       expect(invoke).toHaveBeenCalledWith("initialize_codex_subagent_v2", {
         providerId: persisted.id,
@@ -1623,9 +1618,7 @@ describe("Codex Sub-Agent V2 new-plan capability defaults", () => {
 
     const persisted = (addProviderCalls()[0][1] as { provider: Provider })
       .provider;
-    expect(persisted.settingsConfig.codexRouting).not.toHaveProperty(
-      "subagentV2",
-    );
+    expect(persisted.settingsConfig.codexRouting.subagentV2).toBeUndefined();
     await waitFor(() =>
       expect(invoke).toHaveBeenCalledWith("initialize_codex_subagent_v2", {
         providerId: persisted.id,
@@ -1639,7 +1632,7 @@ describe("Codex Sub-Agent V2 new-plan capability defaults", () => {
     });
   });
 
-  it("keeps an existing legacy V2 plan uninitialized through an ordinary wizard save", async () => {
+  it("keeps an existing uninitialized schema v2 plan uninitialized through an ordinary wizard save", async () => {
     seedPersistedPlan(false);
     ipcState.providers.router.settingsConfig.codexRouting.subagentVersion =
       "v2";
@@ -1663,9 +1656,9 @@ describe("Codex Sub-Agent V2 new-plan capability defaults", () => {
     const savedProvider = (
       updateProviderCalls()[0][1] as { provider: Provider }
     ).provider;
-    expect(savedProvider.settingsConfig.codexRouting).not.toHaveProperty(
-      "subagentV2",
-    );
+    expect(
+      savedProvider.settingsConfig.codexRouting.subagentV2,
+    ).toBeUndefined();
     expect(
       vi
         .mocked(invoke)
@@ -1755,7 +1748,8 @@ describe("Codex Sub-Agent V2 backend-owned catalog reconciliation", () => {
   });
 
   it("synchronizes every catalog model as a backend-keyed disabled draft", async () => {
-    const models = ipcState.providers.router.settingsConfig.modelCatalog.models;
+    const models =
+      ipcState.providers["third-party"].settingsConfig.modelCatalog.models;
     models.push({
       model: "qwen3.6",
       displayName: "Qwen 3.6",
@@ -2476,8 +2470,9 @@ describe("Codex Sub-Agent V2 searchable Accordion workspace", () => {
 describe("Codex Sub-Agent V2 shared editor accessible areas", () => {
   it("shows catalog-derived text-only capability before the legacy profile is resaved", async () => {
     seedPersistedPlan(true);
-    ipcState.providers.router.settingsConfig.modelCatalog.models[0] = {
-      ...ipcState.providers.router.settingsConfig.modelCatalog.models[0],
+    ipcState.providers["third-party"].settingsConfig.modelCatalog.models[0] = {
+      ...ipcState.providers["third-party"].settingsConfig.modelCatalog
+        .models[0],
       inputModalities: ["text"],
       textOnly: true,
       supportsImage: false,
@@ -2684,16 +2679,9 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
       await saveV2(user);
       await expectSavedSettingsConfig({
         codexRouting: {
+          schemaVersion: 2,
           enabled: true,
-          routes: [
-            {
-              id: "flash-route",
-              enabled: true,
-              targetProviderId: "third-party",
-              match: { models: ["deepseek-v4-flash"], prefixes: [] },
-              upstream: {},
-            },
-          ],
+          routes: [currentV2Route()],
           subagentV2: {
             schemaVersion: 2,
             selectionPolicy: persistedValue,
@@ -2727,12 +2715,6 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
             },
           },
         },
-        modelCatalog: {
-          models: [
-            { model: "deepseek-v4-flash", contextWindow: 128000 },
-            { model: "deepseek-v4-pro", contextWindow: 128000 },
-          ],
-        },
       });
     },
   );
@@ -2748,16 +2730,9 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
     await saveV2(user);
     await expectSavedSettingsConfig({
       codexRouting: {
+        schemaVersion: 2,
         enabled: true,
-        routes: [
-          {
-            id: "flash-route",
-            enabled: true,
-            targetProviderId: "third-party",
-            match: { models: ["deepseek-v4-flash"], prefixes: [] },
-            upstream: {},
-          },
-        ],
+        routes: [currentV2Route()],
         subagentV2: {
           schemaVersion: 2,
           selectionPolicy: "balanced",
@@ -2790,12 +2765,6 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
             },
           },
         },
-      },
-      modelCatalog: {
-        models: [
-          { model: "deepseek-v4-flash", contextWindow: 128000 },
-          { model: "deepseek-v4-pro", contextWindow: 128000 },
-        ],
       },
     });
   });

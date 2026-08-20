@@ -98,7 +98,7 @@ describe("useUpdateProviderMutation", () => {
     });
   });
 
-  it("syncs affected Codex MultiRouter plans and returns removed subagent candidates", async () => {
+  it("submits one Codex Provider mutation without rewriting MultiRouter plans in the frontend", async () => {
     const { wrapper } = createWrapper();
     const provider = createProvider({
       id: "provider-b",
@@ -106,67 +106,17 @@ describe("useUpdateProviderMutation", () => {
         modelCatalog: { models: [{ model: "new-model" }] },
       },
     });
-    const plan = createProvider({
-      id: "router",
-      name: "Codex MultiRouter",
-      settingsConfig: {
-        modelCatalog: {
-          models: [{ model: "old-model" }],
-          spawnAgentModels: ["old-model"],
-        },
-        codexRouting: {
-          enabled: true,
-          routes: [
-            {
-              id: "route-provider-b",
-              targetProviderId: "provider-b",
-              match: { models: ["old-model"] },
-              upstream: {
-                apiFormat: "openai_chat",
-                auth: { source: "provider_config" },
-              },
-            },
-          ],
-        },
-      },
-    });
-    apiMocks.getAll.mockResolvedValue({
-      [provider.id]: provider,
-      [plan.id]: plan,
-    });
     const { result } = renderHook(() => useUpdateProviderMutation("codex"), {
       wrapper,
     });
 
-    let mutationResult:
-      | Awaited<ReturnType<typeof result.current.mutateAsync>>
-      | undefined;
     await act(async () => {
-      mutationResult = await result.current.mutateAsync({ provider });
+      await result.current.mutateAsync({ provider });
     });
 
-    expect(apiMocks.getAll).toHaveBeenCalledWith("codex");
-    expect(apiMocks.update).toHaveBeenNthCalledWith(
-      1,
-      provider,
-      "codex",
-      undefined,
-    );
-    expect(apiMocks.update).toHaveBeenNthCalledWith(
-      2,
-      expect.objectContaining({
-        id: "router",
-        settingsConfig: expect.objectContaining({
-          modelCatalog: expect.objectContaining({
-            spawnAgentModels: [],
-          }),
-        }),
-      }),
-      "codex",
-    );
-    expect(
-      mutationResult?.codexMultiRouterSyncResults?.[0]?.removedSpawnAgentModels,
-    ).toEqual(["old-model"]);
+    expect(apiMocks.getAll).not.toHaveBeenCalled();
+    expect(apiMocks.update).toHaveBeenCalledTimes(1);
+    expect(apiMocks.update).toHaveBeenCalledWith(provider, "codex", undefined);
   });
 
   it("also invalidates the previous usage query when provider id changes", async () => {

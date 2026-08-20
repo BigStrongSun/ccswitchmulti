@@ -216,6 +216,37 @@ fn provider_requests_codex_account_pool(provider: &Provider) -> bool {
         .unwrap_or(false)
 }
 
+fn materialize_codex_account_pool_candidate(
+    provider: &Provider,
+    entry: &super::providers::codex_oauth_auth::CodexAccountPoolEntry,
+    credential_generation: u64,
+) -> Provider {
+    let mut candidate = provider.clone();
+    candidate.settings_config["codexPoolCredentialGeneration"] = Value::from(credential_generation);
+    if entry.account_id == NATIVE_CODEX_ACCOUNT_ID {
+        candidate.settings_config["codexNativeAuthPassthrough"] = Value::Bool(true);
+        candidate.settings_config["codexPoolAccountId"] =
+            Value::String(NATIVE_CODEX_ACCOUNT_ID.to_string());
+        if let Some(meta) = candidate.meta.as_mut() {
+            meta.provider_type = None;
+            meta.auth_binding = None;
+        }
+    } else {
+        candidate.settings_config["codexNativeAuthPassthrough"] = Value::Bool(false);
+        candidate.settings_config["codexPoolAccountId"] = Value::String(entry.account_id.clone());
+        let meta = candidate.meta.get_or_insert_with(Default::default);
+        meta.provider_type = Some("codex_oauth".to_string());
+        meta.auth_binding = Some(crate::provider::AuthBinding {
+            source: crate::provider::AuthBindingSource::ManagedAccount,
+            auth_provider: Some("codex_oauth".to_string()),
+            account_id: Some(entry.account_id.clone()),
+        });
+    }
+    candidate.id = format!("{}::account::{}", candidate.id, entry.account_id);
+    candidate.name = format!("{} [{}]", candidate.name, entry.account_id);
+    candidate
+}
+
 fn provider_codex_pool_account(provider: &Provider) -> Option<(&str, u64)> {
     let account_id = provider
         .settings_config
@@ -275,9 +306,23 @@ impl RequestForwarder {
         &self,
         app_type: &AppType,
         provider: &Provider,
+        body: &Value,
     ) -> Result<Provider, ProxyError> {
         if !matches!(app_type, AppType::Codex) {
             return Ok(provider.clone());
+        }
+        if codex_provider_has_v2_routing(provider) {
+            return self
+                .resolve_codex_v2_route(provider, body)?
+                .map(super::providers::ResolvedCodexRoute::into_effective_provider)
+                .ok_or_else(|| {
+                    ProxyError::ConfigError(format!(
+                        "Codex MultiRouter v2 did not resolve model `{}`",
+                        body.get("model")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown")
+                    ))
+                });
         }
         let Some(target_provider_id) = super::providers::codex_route_target_provider_id(provider)
         else {
@@ -302,6 +347,91 @@ impl RequestForwarder {
                 &target_provider,
             ),
         )
+    }
+
+    fn resolve_codex_v2_route(
+        &self,
+        provider: &Provider,
+        body: &Value,
+    ) -> Result<Option<super::providers::ResolvedCodexRoute>, ProxyError> {
+        if !codex_provider_has_v2_routing(provider) {
+            return Ok(None);
+        }
+        let providers = self.load_codex_v2_target_providers(provider)?;
+        super::providers::resolve_codex_v2_routed_provider(provider, body, &providers).map_err(
+            |error| {
+                ProxyError::ConfigError(format!(
+                    "Codex MultiRouter v2 编译失败 [{}]: {}",
+                    error.code, error.message
+                ))
+            },
+        )
+    }
+
+    fn resolve_codex_v2_raw_route(
+        &self,
+        provider: &Provider,
+        body: &Value,
+        explicit_route_id: Option<&str>,
+    ) -> Result<Option<super::providers::ResolvedCodexRoute>, ProxyError> {
+        if !codex_provider_has_v2_routing(provider) {
+            return Ok(None);
+        }
+        let providers = self.load_codex_v2_target_providers(provider)?;
+        super::providers::resolve_codex_v2_raw_passthrough_provider(
+            provider,
+            body,
+            &providers,
+            explicit_route_id,
+        )
+        .map_err(|error| {
+            ProxyError::ConfigError(format!(
+                "Codex MultiRouter v2 raw 编译失败 [{}]: {}",
+                error.code, error.message
+            ))
+        })
+    }
+
+    fn load_codex_v2_target_providers(
+        &self,
+        provider: &Provider,
+    ) -> Result<HashMap<String, Provider>, ProxyError> {
+        let routes = provider
+            .settings_config
+            .pointer("/codexRouting/routes")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                ProxyError::ConfigError(
+                    "Codex MultiRouter v2 routing.routes is not an array".to_string(),
+                )
+            })?;
+        let mut providers = HashMap::new();
+        for target_provider_id in routes
+            .iter()
+            .filter_map(|route| route.get("targetProviderId"))
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            if providers.contains_key(target_provider_id) {
+                continue;
+            }
+            let target_provider = self
+                .router
+                .get_provider_by_id(target_provider_id, AppType::Codex.as_str())
+                .map_err(|error| {
+                    ProxyError::ConfigError(format!(
+                        "读取 Codex MultiRouter v2 目标供应商 '{target_provider_id}' 失败: {error}"
+                    ))
+                })?
+                .ok_or_else(|| {
+                    ProxyError::ConfigError(format!(
+                        "Codex MultiRouter v2 引用了不存在的目标供应商 '{target_provider_id}'"
+                    ))
+                })?;
+            providers.insert(target_provider_id.to_string(), target_provider);
+        }
+        Ok(providers)
     }
 
     async fn expand_codex_account_pool(
@@ -405,34 +535,11 @@ impl RequestForwarder {
             }
             for pool_candidate in &entries {
                 let entry = &pool_candidate.entry;
-                let mut candidate = provider.clone();
-                candidate.settings_config["codexPoolCredentialGeneration"] =
-                    Value::from(pool_candidate.credential_generation);
-                if entry.account_id == NATIVE_CODEX_ACCOUNT_ID {
-                    candidate.settings_config["codexNativeAuthPassthrough"] = Value::Bool(true);
-                    candidate.settings_config["codexPoolAccountId"] =
-                        Value::String(NATIVE_CODEX_ACCOUNT_ID.to_string());
-                    if let Some(meta) = candidate.meta.as_mut() {
-                        meta.provider_type = None;
-                        meta.auth_binding = None;
-                        meta.api_format = Some("openai_responses".to_string());
-                    }
-                } else {
-                    candidate.settings_config["codexNativeAuthPassthrough"] = Value::Bool(false);
-                    candidate.settings_config["codexPoolAccountId"] =
-                        Value::String(entry.account_id.clone());
-                    let meta = candidate.meta.get_or_insert_with(Default::default);
-                    meta.provider_type = Some("codex_oauth".to_string());
-                    meta.api_format = Some("openai_responses".to_string());
-                    meta.auth_binding = Some(crate::provider::AuthBinding {
-                        source: crate::provider::AuthBindingSource::ManagedAccount,
-                        auth_provider: Some("codex_oauth".to_string()),
-                        account_id: Some(entry.account_id.clone()),
-                    });
-                }
-                candidate.id = format!("{}::account::{}", candidate.id, entry.account_id);
-                candidate.name = format!("{} [{}]", candidate.name, entry.account_id);
-                expanded.push(candidate);
+                expanded.push(materialize_codex_account_pool_candidate(
+                    &provider,
+                    entry,
+                    pool_candidate.credential_generation,
+                ));
             }
         }
         expanded
@@ -1037,7 +1144,9 @@ impl RequestForwarder {
             );
         let attempt_providers = route_attempt_providers
             .iter()
-            .map(|provider| self.materialize_codex_forward_attempt_provider(app_type, provider))
+            .map(|provider| {
+                self.materialize_codex_forward_attempt_provider(app_type, provider, &body)
+            })
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| ForwardError {
                 error,
@@ -4016,13 +4125,24 @@ impl RequestForwarder {
             .is_some();
         let codex_router_configured =
             matches!(app_type, AppType::Codex) && codex_provider_has_routing_config(provider);
-        let routed_provider =
-            if matches!(app_type, AppType::Codex) && !provider_is_resolved_codex_route {
-                resolve_codex_raw_passthrough_route_provider(provider, route_body)
-            } else {
-                None
-            };
-        let routed_provider = if let Some(route_provider) = routed_provider {
+        let v2_routed_provider = if matches!(app_type, AppType::Codex)
+            && !provider_is_resolved_codex_route
+            && codex_provider_has_v2_routing(provider)
+        {
+            self.resolve_codex_v2_raw_route(provider, route_body, None)?
+                .map(super::providers::ResolvedCodexRoute::into_effective_provider)
+        } else {
+            None
+        };
+        let legacy_routed_provider = if matches!(app_type, AppType::Codex)
+            && !provider_is_resolved_codex_route
+            && !codex_provider_has_v2_routing(provider)
+        {
+            resolve_codex_raw_passthrough_route_provider(provider, route_body)
+        } else {
+            None
+        };
+        let legacy_routed_provider = if let Some(route_provider) = legacy_routed_provider {
             if let Some(target_provider_id) =
                 super::providers::codex_route_target_provider_id(&route_provider)
             {
@@ -4051,6 +4171,7 @@ impl RequestForwarder {
         } else {
             None
         };
+        let routed_provider = v2_routed_provider.or(legacy_routed_provider);
         let codex_route_missed = codex_router_configured
             && !provider_is_resolved_codex_route
             && routed_provider.is_none();
@@ -7178,6 +7299,13 @@ fn build_forward_attempt_providers_preserving_codex_router_context(
                 .get("codexResolvedRouteId")
                 .is_none()
         {
+            if codex_provider_has_v2_routing(provider) {
+                // v2 must load the latest target Providers before compiling. Keep the parent
+                // router intact here; RequestForwarder::materialize_codex_forward_attempt_provider
+                // performs the state-aware resolution immediately after this expansion step.
+                expanded.push(provider.clone());
+                continue;
+            }
             let routes = super::providers::resolve_codex_model_routed_providers(provider, body);
             if routes.is_empty() {
                 expanded.push(provider.clone());
@@ -7319,6 +7447,14 @@ fn codex_provider_has_routing_config(provider: &Provider) -> bool {
     provider.settings_config.get("codexRouting").is_some()
         || provider.settings_config.get("codexModelRoutes").is_some()
         || provider.settings_config.get("modelRoutes").is_some()
+}
+
+fn codex_provider_has_v2_routing(provider: &Provider) -> bool {
+    provider
+        .settings_config
+        .pointer("/codexRouting/schemaVersion")
+        .and_then(Value::as_u64)
+        == Some(2)
 }
 
 /// 判断本次 Codex 请求是否应把非保留 `agents.*` V2 协作工具的 `message.encrypted`
@@ -7769,7 +7905,8 @@ fn codex_realtime_multipart_field_name(headers: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::database::Database;
-    use crate::provider::LocalProxyRequestOverrides;
+    use crate::provider::{LocalProxyRequestOverrides, ProviderMeta};
+    use crate::proxy::providers::codex_oauth_auth::CodexAccountPoolEntry;
     use axum::http::header::{HeaderValue, ACCEPT};
     use axum::http::HeaderMap;
     use bytes::Bytes;
@@ -7823,6 +7960,36 @@ mod tests {
         let mut pooled = test_codex_official_provider();
         pooled.settings_config[CODEX_ACCOUNT_POOL_ENABLED] = Value::Bool(true);
         assert!(provider_requests_codex_account_pool(&pooled));
+    }
+
+    #[test]
+    fn account_pool_auth_materialization_does_not_override_resolved_protocol() {
+        let mut provider = test_provider_with_type(None);
+        provider.meta = Some(ProviderMeta {
+            api_format: Some("openai_chat".to_string()),
+            ..Default::default()
+        });
+        provider.settings_config = json!({
+            "apiFormat": "openai_chat",
+            "codexAccountPool": true
+        });
+        let entry = CodexAccountPoolEntry {
+            account_id: "managed-account".to_string(),
+            enabled: true,
+            reserve_percent: 5.0,
+        };
+
+        let managed = materialize_codex_account_pool_candidate(&provider, &entry, 7);
+
+        assert_eq!(
+            managed
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.api_format.as_deref()),
+            Some("openai_chat"),
+            "auth ownership must not rewrite the compiler-resolved protocol"
+        );
+        assert_eq!(managed.settings_config["apiFormat"], "openai_chat");
     }
 
     #[test]
@@ -8466,7 +8633,11 @@ mod tests {
         };
 
         let effective = forwarder
-            .materialize_codex_forward_attempt_provider(&AppType::Codex, &route_attempts[0])
+            .materialize_codex_forward_attempt_provider(
+                &AppType::Codex,
+                &route_attempts[0],
+                &json!({ "model": "deepseek-v4-flash" }),
+            )
             .expect("materialize target provider");
 
         assert_eq!(
@@ -8481,6 +8652,95 @@ mod tests {
         assert_eq!(
             effective.settings_config["codexResolvedTargetProviderId"],
             "deepseek-target"
+        );
+    }
+
+    #[test]
+    fn v2_forwarder_reads_provider_protocol_again_for_each_request() {
+        let db = Arc::new(Database::memory().expect("memory db"));
+        let mut target = Provider::with_id(
+            "qwen-target".to_string(),
+            "Qwen Target".to_string(),
+            json!({
+                "base_url": "https://qwen.example/v1",
+                "modelCatalog": {"models": [{"model": "qwen3.8"}]}
+            }),
+            None,
+        );
+        target.meta = Some(ProviderMeta {
+            api_format: Some("openai_chat".to_string()),
+            ..Default::default()
+        });
+        db.save_provider("codex", &target)
+            .expect("save chat target");
+        let forwarder = RequestForwarder {
+            router: Arc::new(ProviderRouter::new(db.clone())),
+            status: Arc::new(RwLock::new(ProxyStatus::default())),
+            current_providers: Arc::new(RwLock::new(HashMap::new())),
+            gemini_shadow: Arc::new(GeminiShadowStore::new()),
+            codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
+            failover_manager: Arc::new(FailoverSwitchManager::new(db.clone())),
+            app_handle: None,
+            current_provider_id_at_start: String::new(),
+            session_id: String::new(),
+            session_client_provided: false,
+            preserve_codex_client_originator: false,
+            rectifier_config: RectifierConfig::default(),
+            optimizer_config: OptimizerConfig::default(),
+            copilot_optimizer_config: CopilotOptimizerConfig::default(),
+            codex_responses_lite_fallbacks: Arc::new(RwLock::new(HashMap::new())),
+            non_streaming_timeout: Duration::ZERO,
+            streaming_first_byte_timeout: Duration::ZERO,
+            max_attempts: 1,
+        };
+        let mut router = test_provider_with_type(None);
+        router.id = "codex-multirouter".to_string();
+        router.settings_config = json!({
+            "codexRouting": {
+                "schemaVersion": 2,
+                "enabled": true,
+                "defaultRouteId": "qwen",
+                "routes": [{
+                    "id": "qwen",
+                    "enabled": true,
+                    "targetProviderId": "qwen-target",
+                    "modelSelection": {"mode": "all"},
+                    "authPolicy": {"source": "provider_config"}
+                }]
+            }
+        });
+        let body = json!({"model": "qwen3.8"});
+
+        let chat = forwarder
+            .materialize_codex_forward_attempt_provider(&AppType::Codex, &router, &body)
+            .expect("materialize chat request");
+        let chat_fingerprint = chat.settings_config["codexRoutingDependencyFingerprint"]
+            .as_str()
+            .expect("chat fingerprint")
+            .to_string();
+        assert!(
+            crate::proxy::providers::should_convert_codex_responses_to_chat(&chat, "/v1/responses")
+        );
+
+        target.meta = Some(ProviderMeta {
+            api_format: Some("openai_responses".to_string()),
+            ..Default::default()
+        });
+        db.save_provider("codex", &target)
+            .expect("update target to responses");
+        let responses = forwarder
+            .materialize_codex_forward_attempt_provider(&AppType::Codex, &router, &body)
+            .expect("materialize responses request");
+
+        assert!(
+            !crate::proxy::providers::should_convert_codex_responses_to_chat(
+                &responses,
+                "/v1/responses"
+            )
+        );
+        assert_ne!(
+            chat_fingerprint,
+            responses.settings_config["codexRoutingDependencyFingerprint"]
         );
     }
 
@@ -8547,7 +8807,11 @@ mod tests {
         };
 
         let effective = forwarder
-            .materialize_codex_forward_attempt_provider(&AppType::Codex, &route_attempts[0])
+            .materialize_codex_forward_attempt_provider(
+                &AppType::Codex,
+                &route_attempts[0],
+                &json!({ "model": "gpt-5.6-sol" }),
+            )
             .expect("materialize official target provider");
 
         assert_eq!(

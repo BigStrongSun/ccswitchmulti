@@ -300,7 +300,7 @@ describe("CodexMultiRouterWizard", () => {
             id: "existing-plan",
             name: "Existing Plan",
             settingsConfig: {
-              codexRouting: { enabled: true, routes: [] },
+              codexRouting: { schemaVersion: 2, enabled: true, routes: [] },
               modelCatalog: {
                 models: [null, "stale", { model: "deepseek-chat" }],
               },
@@ -440,7 +440,10 @@ describe("CodexMultiRouterWizard", () => {
       ).toBeInTheDocument(),
     );
     fireEvent.click(screen.getByRole("button", { name: "选择模型并预览路由" }));
-    expect(screen.getByText("openai_responses")).toBeInTheDocument();
+    expect(screen.queryByText("openai_responses")).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/协议、连接地址、凭据和模型能力始终读取目标/),
+    ).toBeInTheDocument();
   });
 
   it("marks catalog-only providers as continuable instead of requiring full config", () => {
@@ -665,11 +668,7 @@ describe("CodexMultiRouterWizard", () => {
         (route: { id: string }) => route.id,
       ),
     ).not.toContain("qwen-local");
-    expect(
-      savedProvider.settingsConfig.modelCatalog.models.map(
-        (model: { model: string }) => model.model,
-      ),
-    ).not.toContain("qwen3.6");
+    expect(savedProvider.settingsConfig).not.toHaveProperty("modelCatalog");
   });
 
   it("keeps provider curated models when wizard refresh sees extra upstream models", async () => {
@@ -981,7 +980,7 @@ describe("CodexMultiRouterWizard", () => {
     ).toBeInTheDocument();
   });
 
-  it("saves manually locked chat protocol instead of probe recommendations", async () => {
+  it("keeps manually locked chat protocol on the Provider instead of a Route snapshot", async () => {
     vi.mocked(probeCodexResponsesForConfig).mockResolvedValueOnce({
       ok: true,
       status: 200,
@@ -1040,11 +1039,12 @@ describe("CodexMultiRouterWizard", () => {
       expect(providersApi.add).toHaveBeenCalledTimes(1);
     });
     const savedProvider = vi.mocked(providersApi.add).mock.calls[0][0];
-    expect(
-      savedProvider.settingsConfig.codexRouting.routes[0].upstream,
-    ).toMatchObject({
-      apiFormat: "openai_chat",
+    expect(savedProvider.settingsConfig.codexRouting.routes[0]).toMatchObject({
+      targetProviderId: "relay",
     });
+    expect(
+      savedProvider.settingsConfig.codexRouting.routes[0],
+    ).not.toHaveProperty("upstream");
   });
 
   it("stays in needSources state when advancing without model sources", () => {
@@ -1138,18 +1138,13 @@ describe("CodexMultiRouterWizard", () => {
     });
     const savedProvider = vi.mocked(providersApi.add).mock.calls[0][0];
     expect(savedProvider.name).toBe("Work MultiRouter");
+    expect(savedProvider.settingsConfig).not.toHaveProperty("modelCatalog");
     expect(
-      savedProvider.settingsConfig.modelCatalog.models.map(
-        (model: { model: string }) => model.model,
-      ),
-    ).toEqual(["model-c", "model-a"]);
-    expect(savedProvider.settingsConfig.modelCatalog.spawnAgentModels).toEqual([
-      "model-c",
-      "model-a",
-    ]);
+      savedProvider.settingsConfig.codexRouting.spawnAgentModels,
+    ).toEqual([]);
     expect(
-      savedProvider.settingsConfig.codexRouting.routes[0].match.models,
-    ).toEqual(["model-c", "model-a"]);
+      savedProvider.settingsConfig.codexRouting.routes[0].modelSelection,
+    ).toEqual({ mode: "include", models: ["model-c", "model-a"] });
   });
 
   it("confirms and probes both Chat and Responses connectivity before recording pass state", async () => {

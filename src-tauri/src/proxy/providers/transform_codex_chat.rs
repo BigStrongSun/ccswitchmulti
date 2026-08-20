@@ -278,12 +278,32 @@ impl CodexToolContext {
     /// hosted calls inside the proxy loop instead of exposing them as ordinary
     /// client-executed function calls.
     pub(crate) fn is_hosted_tool_chat_name(&self, chat_name: &str) -> bool {
-        self.lookup_chat_name(chat_name).is_some_and(|spec| {
+        self.canonical_hosted_tool_chat_name(chat_name).is_some()
+    }
+
+    /// Normalize common model-emitted aliases to the function name CCSM sent.
+    /// Aliases are accepted only when this request actually declared the
+    /// corresponding hosted tool, so an ordinary user function is unaffected.
+    pub(crate) fn canonical_hosted_tool_chat_name(&self, chat_name: &str) -> Option<&'static str> {
+        let trimmed = chat_name.trim();
+        if self.lookup_chat_name(trimmed).is_some_and(|spec| {
             matches!(
                 &spec.kind,
                 CodexToolKind::HostedWebSearch | CodexToolKind::HostedImageGeneration
             )
-        })
+        }) {
+            return match trimmed {
+                "web_search" => Some("web_search"),
+                IMAGE_GENERATION_FUNCTION_NAME => Some(IMAGE_GENERATION_FUNCTION_NAME),
+                _ => None,
+            };
+        }
+        if self.hosted_image_generation.is_some()
+            && matches!(trimmed, "image_gen" | "image_generation")
+        {
+            return Some(IMAGE_GENERATION_FUNCTION_NAME);
+        }
+        None
     }
 
     /// 返回 Codex 原始 hosted `web_search` 的安全配置子集。
@@ -2415,7 +2435,10 @@ fn chat_tool_calls_to_response_output_items(
                 tool_context,
             ));
         }
-    } else if let Some(function_call) = message.get("function_call") {
+    } else if let Some(function_call) = message
+        .get("function_call")
+        .filter(|value| value.is_object())
+    {
         match chat_legacy_function_call_to_response_item(function_call, reasoning, tool_context) {
             Some(item) => output.push(item),
             None => dropped += 1,
@@ -6550,6 +6573,35 @@ mod tests {
         let err = chat_completion_to_response_with_context(chat, &CodexToolContext::default())
             .unwrap_err();
         assert!(matches!(err, ProxyError::TransformError(_)));
+    }
+
+    #[test]
+    fn chat_response_with_null_legacy_function_call_is_ignored() {
+        // OpenAI-compatible servers, including vLLM, may serialize the
+        // optional legacy field as `function_call: null` on every response.
+        // That is absence of a call, not an unnamed call.
+        let chat = json!({
+            "id": "chatcmpl_null_legacy",
+            "object": "chat.completion",
+            "created": 123,
+            "model": "qwen3.8",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "OK",
+                    "tool_calls": null,
+                    "function_call": null
+                },
+                "finish_reason": "stop"
+            }]
+        });
+
+        let result =
+            chat_completion_to_response_with_context(chat, &CodexToolContext::default()).unwrap();
+
+        assert_eq!(result["status"], "completed");
+        assert_eq!(result["output"][0]["type"], "message");
+        assert_eq!(result["output"][0]["content"][0]["text"], "OK");
     }
 
     /// `finish_reason=length` 是截断，不是"上游发了畸形数据"——归因必须保持

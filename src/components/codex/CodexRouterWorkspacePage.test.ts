@@ -26,6 +26,7 @@ import {
   normalizeCodexRoutesForVisibleModelAliases,
   readCodexRouting,
   resolveCodexRouterAuthFacadeLabel,
+  serializeCodexRouteV2,
   validateProxyListenDraft,
 } from "./CodexRouterWorkspacePage";
 
@@ -73,6 +74,10 @@ vi.mock("@/lib/api", () => ({
   providersApi: {
     add: vi.fn(),
     update: vi.fn(),
+    getAll: vi.fn(),
+    getCodexMultiRouterRevision: vi.fn(),
+    previewCodexMultiRouterMigration: vi.fn(),
+    applyCodexMultiRouterMigration: vi.fn(),
   },
 }));
 
@@ -209,6 +214,7 @@ function withEnabledProviderRoute(
       label: provider.name,
       enabled: true,
       targetProviderId: provider.id,
+      modelSelection: { mode: "all" },
       match: {
         models: models.map((model: { model: string }) => model.model),
         prefixes: [],
@@ -223,9 +229,13 @@ function withEnabledProviderRoute(
     settingsConfig: {
       ...plan.settingsConfig,
       codexRouting: {
+        schemaVersion: 2,
         enabled: true,
         defaultRouteId: route.id,
-        routes: [route],
+        spawnAgentModels: models
+          .map((model: { model: string }) => model.model)
+          .slice(0, 5),
+        routes: [serializeCodexRouteV2(route, 0)],
       },
     },
   };
@@ -275,6 +285,10 @@ beforeEach(() => {
   vi.mocked(proxyApi.unlockCodexModelPicker).mockReset();
   vi.mocked(providersApi.add).mockResolvedValue(true);
   vi.mocked(providersApi.update).mockResolvedValue(true);
+  vi.mocked(providersApi.getAll).mockResolvedValue({});
+  vi.mocked(providersApi.getCodexMultiRouterRevision).mockReset();
+  vi.mocked(providersApi.previewCodexMultiRouterMigration).mockReset();
+  vi.mocked(providersApi.applyCodexMultiRouterMigration).mockReset();
 });
 
 afterEach(() => {
@@ -304,6 +318,274 @@ it("没有 MultiRouter 方案时打开工作台不会读取 null settingsConfig"
 });
 
 describe("Codex MultiRouter workspace route persistence helpers", () => {
+  it("serializes only schema v2 route policy and drops inherited secrets and capabilities", () => {
+    const route = serializeCodexRouteV2(
+      {
+        id: "qwen-route",
+        label: "Qwen",
+        enabled: true,
+        targetProviderId: "qwen-provider",
+        modelSelection: { mode: "include", models: ["qwen3.8"] },
+        match: { models: ["Qwen 3.8"], prefixes: ["qwen"] },
+        aliases: { "Qwen 3.8": "qwen3.8" },
+        authPolicy: {
+          source: "managed_codex_oauth",
+          authProvider: "codex_oauth",
+          accountId: "account-1",
+        },
+        upstream: {
+          baseUrl: "https://must-not-persist.invalid/v1",
+          apiFormat: "openai_chat",
+          auth: { source: "provider_config" },
+          modelMap: { "Qwen 3.8": "qwen3.8" },
+        },
+        capabilities: {
+          textOnly: true,
+          supportsReasoning: true,
+        },
+      },
+      0,
+    );
+
+    expect(route).toEqual({
+      id: "qwen-route",
+      label: "Qwen",
+      enabled: true,
+      targetProviderId: "qwen-provider",
+      modelSelection: { mode: "include", models: ["qwen3.8"] },
+      matchPrefixes: ["qwen"],
+      aliases: { "Qwen 3.8": "qwen3.8" },
+      authPolicy: {
+        source: "managed_codex_oauth",
+        accountId: "account-1",
+      },
+    });
+    expect(route).not.toHaveProperty("upstream");
+    expect(route).not.toHaveProperty("capabilities");
+  });
+
+  it("edits and saves only schema v2 route policy with canonical include models", async () => {
+    const qwen: Provider = {
+      id: "codex-qwen-policy",
+      name: "Qwen Policy",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: {
+          models: [
+            { model: "qwen-visible", upstreamModel: "qwen3.8" },
+            { model: "qwen3.8-coder" },
+          ],
+        },
+      },
+    };
+    const plan = withEnabledProviderRoute(
+      createDraftRoutingPlan([qwen], [qwen]),
+      qwen,
+    );
+
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [qwen, plan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: plan.id,
+        initialProviderId: plan.id,
+        initialTab: "routes",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "编辑匹配规则" }));
+    await user.selectOptions(
+      screen.getByLabelText("模型选择范围：Qwen Policy"),
+      "include",
+    );
+    expect(
+      screen.getByLabelText("选择 canonical 模型 qwen-visible"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("选择 canonical 模型 qwen3.8"),
+    ).not.toBeInTheDocument();
+    await user.click(
+      screen.getByLabelText("选择 canonical 模型 qwen3.8-coder"),
+    );
+    await user.clear(screen.getByLabelText("匹配前缀：Qwen Policy"));
+    await user.type(screen.getByLabelText("匹配前缀：Qwen Policy"), "qwen, qw");
+    await user.clear(screen.getByLabelText("可见别名映射：Qwen Policy"));
+    await user.type(
+      screen.getByLabelText("可见别名映射：Qwen Policy"),
+      "Qwen Latest=qwen-visible",
+    );
+    await user.selectOptions(
+      screen.getByLabelText("认证策略：Qwen Policy"),
+      "managed_codex_oauth",
+    );
+    await user.type(
+      screen.getByLabelText("托管 OAuth 账号 ID：Qwen Policy"),
+      "oauth-account-1",
+    );
+
+    expect(screen.queryByLabelText(/Base URL/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/API Key/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/上游协议/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/能力开关/i)).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "保存规则" }));
+
+    await waitFor(() => expect(providersApi.update).toHaveBeenCalled());
+    const savedPlan = vi.mocked(providersApi.update).mock.calls.at(-1)?.[0];
+    const savedRoute = (
+      savedPlan?.settingsConfig.codexRouting as { routes?: unknown[] }
+    )?.routes?.[0] as Record<string, unknown> | undefined;
+    expect(savedRoute).toMatchObject({
+      label: "Qwen Policy",
+      targetProviderId: qwen.id,
+      modelSelection: { mode: "include", models: ["qwen-visible"] },
+      matchPrefixes: ["qwen", "qw"],
+      aliases: { "Qwen Latest": "qwen-visible" },
+      authPolicy: {
+        source: "managed_codex_oauth",
+        accountId: "oauth-account-1",
+      },
+    });
+    expect(savedRoute).not.toHaveProperty("upstream");
+    expect(savedRoute).not.toHaveProperty("capabilities");
+  });
+
+  it("blocks saving when an alias target is not a canonical provider model", async () => {
+    const qwen: Provider = {
+      id: "codex-qwen-invalid-alias",
+      name: "Qwen Invalid Alias",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "qwen3.8" }] },
+      },
+    };
+    const plan = withEnabledProviderRoute(
+      createDraftRoutingPlan([qwen], [qwen]),
+      qwen,
+    );
+
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [qwen, plan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: plan.id,
+        initialProviderId: plan.id,
+        initialTab: "routes",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "编辑匹配规则" }));
+    await user.type(
+      screen.getByLabelText("可见别名映射：Qwen Invalid Alias"),
+      "Broken=missing-model",
+    );
+    await user.click(screen.getByRole("button", { name: "保存规则" }));
+
+    expect(
+      screen.getByText(
+        "别名目标 missing-model 不属于目标 Provider 的 canonical 模型",
+      ),
+    ).toBeInTheDocument();
+    expect(providersApi.update).not.toHaveBeenCalled();
+  });
+
+  it("shows a redacted migration preview before editing a schema v1 plan", async () => {
+    const source: Provider = {
+      id: "qwen",
+      name: "Qwen",
+      category: "custom",
+      settingsConfig: {
+        baseUrl: "https://private.invalid/v1",
+        auth: { OPENAI_API_KEY: "must-not-render" },
+        modelCatalog: { models: [{ model: "qwen3.8" }] },
+      },
+    };
+    const legacyPlan: Provider = {
+      id: "legacy-router",
+      name: "Legacy Router",
+      category: "custom",
+      settingsConfig: {
+        codexRouting: {
+          enabled: true,
+          routes: [
+            {
+              id: "qwen-route",
+              targetProviderId: "qwen",
+              match: { models: ["qwen3.8"] },
+              upstream: {
+                apiFormat: "openai_chat",
+                apiKey: "legacy-secret",
+                auth: { source: "provider_config" },
+              },
+            },
+          ],
+        },
+      },
+    };
+    vi.mocked(providersApi.getCodexMultiRouterRevision).mockResolvedValue(
+      "revision-1",
+    );
+    vi.mocked(providersApi.previewCodexMultiRouterMigration).mockResolvedValue({
+      schemaVersion: 2,
+      providerId: legacyPlan.id,
+      expectedRevision: "revision-1",
+      planToken: "opaque-plan-token",
+      diff: {
+        removedRouteFields: ["upstream.apiFormat", "upstream.apiKey"],
+        createdProviderIds: ["qwen-migrated"],
+        changedRouteIds: ["qwen-route"],
+      },
+      warnings: ["需要创建迁移 Provider"],
+      generatedProviders: [
+        {
+          id: "qwen-migrated",
+          name: "Qwen migrated",
+          migrationGenerated: true,
+          sourceProviderId: "qwen",
+        },
+      ],
+    });
+
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [source, legacyPlan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: legacyPlan.id,
+        initialProviderId: legacyPlan.id,
+        initialTab: "routes",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "编辑匹配规则" }));
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "迁移旧 MultiRouter 到 schema v2",
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("需要创建迁移 Provider")).toBeInTheDocument();
+    expect(screen.getByText(/Qwen migrated/)).toBeInTheDocument();
+    expect(screen.queryByText("legacy-secret")).not.toBeInTheDocument();
+    expect(screen.queryByText("must-not-render")).not.toBeInTheDocument();
+    expect(providersApi.update).not.toHaveBeenCalled();
+  });
+
   it("normalizes missing and invalid subagent versions to V2 while preserving V1", () => {
     const planWith = (subagentVersion?: unknown): Provider => ({
       id: `router-${String(subagentVersion)}`,
@@ -369,7 +651,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     );
   });
 
-  it("refreshes an official OAuth catalog with the bound account and syncs new models into its route", async () => {
+  it("refreshes an official OAuth Provider without rewriting its MultiRouter route", async () => {
     vi.mocked(fetchCodexOauthModels).mockResolvedValue([
       { id: "gpt-5.5", ownedBy: "openai", contextWindow: 272000 },
       { id: "gpt-5.6-sol", ownedBy: "openai", contextWindow: 272000 },
@@ -447,18 +729,11 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
         ),
       ).toEqual(["gpt-5.5", "gpt-5.6-sol"]);
 
-      const savedPlan = vi
-        .mocked(providersApi.update)
-        .mock.calls.map(([updated]) => updated)
-        .find((updated) => updated.id === plan.id);
       expect(
-        savedPlan?.settingsConfig?.codexRouting?.routes[0].match.models,
-      ).toEqual(["gpt-5.5", "gpt-5.6-sol"]);
-      expect(
-        savedPlan?.settingsConfig?.modelCatalog?.models.map(
-          (model: { model: string }) => model.model,
-        ),
-      ).toEqual(["gpt-5.5", "gpt-5.6-sol"]);
+        vi
+          .mocked(providersApi.update)
+          .mock.calls.some(([updated]) => updated.id === plan.id),
+      ).toBe(false);
     });
     expect(fetchModelsForConfig).not.toHaveBeenCalled();
   });
@@ -667,7 +942,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       expect(savedPlan).toBeDefined();
       if (!savedPlan) throw new Error("未捕获到停用 route 的保存请求");
       expect(readCodexRouting(savedPlan)?.routes?.[0]?.enabled).toBe(false);
-      expect(savedPlan.settingsConfig?.modelCatalog?.models).toEqual([]);
+      expect(savedPlan.settingsConfig).not.toHaveProperty("modelCatalog");
     });
 
     await act(async () => {
@@ -688,7 +963,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     });
   });
 
-  it("refreshes and migrates a legacy inline OAuth route without targetProviderId", async () => {
+  it("keeps a legacy inline OAuth route read-only during Provider catalog refresh", async () => {
     vi.mocked(fetchCodexOauthModels).mockResolvedValue([
       { id: "gpt-5.5", ownedBy: "openai", contextWindow: 272000 },
       { id: "gpt-5.6-luna", ownedBy: "openai", contextWindow: 272000 },
@@ -746,23 +1021,18 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       }),
     );
 
-    await waitFor(() => {
-      const savedPlan = vi
+    await waitFor(() =>
+      expect(
+        vi
+          .mocked(providersApi.update)
+          .mock.calls.some(([updated]) => updated.id === official.id),
+      ).toBe(true),
+    );
+    expect(
+      vi
         .mocked(providersApi.update)
-        .mock.calls.map(([updated]) => updated)
-        .find((updated) => updated.id === legacyPlan.id);
-      expect(
-        savedPlan?.settingsConfig?.codexRouting?.routes[0].targetProviderId,
-      ).toBe(official.id);
-      expect(
-        savedPlan?.settingsConfig?.codexRouting?.routes[0].match.models,
-      ).toEqual(["gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"]);
-      expect(
-        savedPlan?.settingsConfig?.modelCatalog?.models.map(
-          (model: { model: string }) => model.model,
-        ),
-      ).toEqual(["gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"]);
-    });
+        .mock.calls.some(([updated]) => updated.id === legacyPlan.id),
+    ).toBe(false);
   });
 
   it("finishes later provider refreshes after an earlier refresh rerenders the routes page", async () => {
@@ -1249,7 +1519,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("does not restore removed provider models during routes refresh", async () => {
+  it("updates the Provider catalog without mutating a stale MultiRouter projection", async () => {
     vi.mocked(fetchModelsForConfig).mockResolvedValueOnce([
       { id: "kept-model", ownedBy: null, contextWindow: 128000 },
       { id: "removed-model", ownedBy: null, contextWindow: 64000 },
@@ -1321,25 +1591,11 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       "kept-model",
     ]);
 
-    await waitFor(() =>
-      expect(
-        vi
-          .mocked(providersApi.update)
-          .mock.calls.some(([saved]) => saved.id === stalePlan.id),
-      ).toBe(true),
-    );
-    const savedPlan = vi
-      .mocked(providersApi.update)
-      .mock.calls.map(([saved]) => saved)
-      .find((saved) => saved.id === stalePlan.id)!;
     expect(
-      savedPlan.settingsConfig.modelCatalog.models.map(
-        (model: { model: string }) => model.model,
-      ),
-    ).toEqual(["kept-model"]);
-    expect(savedPlan.settingsConfig.modelCatalog.spawnAgentModels).toEqual([]);
-    const savedRoutes = readCodexRouting(savedPlan)?.routes ?? [];
-    expect(savedRoutes[0]?.match?.models).toEqual(["kept-model"]);
+      vi
+        .mocked(providersApi.update)
+        .mock.calls.some(([saved]) => saved.id === stalePlan.id),
+    ).toBe(false);
   });
 
   it("opens the Codex add-source flow when route picker has no model sources", async () => {
@@ -1704,18 +1960,18 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
         },
       },
     };
-    const draftPlan = createDraftRoutingPlan([source], [source]);
+    const draftPlan = withEnabledProviderRoute(
+      createDraftRoutingPlan([source], [source]),
+      source,
+    );
     const plan: Provider = {
       ...draftPlan,
       settingsConfig: {
         ...draftPlan.settingsConfig,
-        modelCatalog: {
-          ...draftPlan.settingsConfig?.modelCatalog,
-          spawnAgentModels: ["deepseek-v4-pro", "deepseek-v4-flash"],
-        },
         codexRouting: {
           ...draftPlan.settingsConfig?.codexRouting,
           subagentVersion: "v2",
+          spawnAgentModels: ["deepseek-v4-pro", "deepseek-v4-flash"],
           subagentV2: {
             schemaVersion: 1,
             selectionPolicy: "balanced",
@@ -1818,8 +2074,9 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       routes: existingRoutes,
       subagentV2: existingV2,
     });
+    expect(updatedProvider.settingsConfig).not.toHaveProperty("modelCatalog");
     expect(
-      updatedProvider.settingsConfig?.modelCatalog?.spawnAgentModels,
+      updatedProvider.settingsConfig?.codexRouting?.spawnAgentModels,
     ).toEqual(["deepseek-v4-pro", "deepseek-v4-flash"]);
     expect(screen.getByRole("button", { name: "已启用 V1" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "启用 V2" })).toBeEnabled();
@@ -1836,7 +2093,6 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
   it("configures V2 capabilities before selecting and saving the shared advertised model order", async () => {
     const { source, plan } = createSubagentWorkspaceFixture();
     const existingRouting = plan.settingsConfig?.codexRouting;
-    const existingCatalogModels = plan.settingsConfig?.modelCatalog?.models;
     renderSubagentWorkspace(source, plan);
     const user = userEvent.setup();
 
@@ -1864,13 +2120,11 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     const [savedProvider, appType] = vi.mocked(providersApi.update).mock
       .calls[0];
     expect(appType).toBe("codex");
-    expect(
-      savedProvider.settingsConfig?.modelCatalog?.spawnAgentModels,
-    ).toEqual(["deepseek-v4-pro", "qwen3.8"]);
-    expect(savedProvider.settingsConfig?.modelCatalog?.models).toEqual(
-      existingCatalogModels,
-    );
-    expect(savedProvider.settingsConfig?.codexRouting).toEqual(existingRouting);
+    expect(savedProvider.settingsConfig).not.toHaveProperty("modelCatalog");
+    expect(savedProvider.settingsConfig?.codexRouting).toMatchObject({
+      ...existingRouting,
+      spawnAgentModels: ["deepseek-v4-pro", "qwen3.8"],
+    });
   });
 
   it("disables protocol actions while switching and keeps the previous protocol after failure", async () => {
@@ -1907,7 +2161,10 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
         },
       },
     };
-    const plan = createDraftRoutingPlan([source], [source]);
+    const plan = withEnabledProviderRoute(
+      createDraftRoutingPlan([source], [source]),
+      source,
+    );
 
     renderWorkspace(
       React.createElement(CodexRouterWorkspacePage, {
@@ -2006,14 +2263,11 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     expect(plan.settingsConfig.baseUrl).toBe("http://127.0.0.1:15721/v1");
     expect(readCodexRouting(plan)?.enabled).toBe(true);
     expect(readCodexRouting(plan)?.routes).toEqual([]);
-    expect(plan.settingsConfig.modelCatalog.models).toEqual([
-      {
-        model: "gpt-5.4-mini",
-        displayName: "GPT 5.4 Mini",
-        contextWindow: 128000,
-      },
-      { model: "qwen3.6", displayName: "Qwen 3.6", contextWindow: 262144 },
-    ]);
+    expect(plan.settingsConfig).not.toHaveProperty("modelCatalog");
+    expect(plan.settingsConfig.codexRouting).toMatchObject({
+      schemaVersion: 2,
+      spawnAgentModels: ["gpt-5.4-mini", "qwen3.6"],
+    });
   });
 
   it("preserves catalog upstream models when creating and rebuilding routing plans", () => {
@@ -2049,14 +2303,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       ),
     ];
 
-    expect(plan.settingsConfig.modelCatalog.models).toEqual([
-      {
-        model: "gpt-5.5-thirdparty",
-        upstreamModel: "gpt-5.5",
-        displayName: "Third-party GPT",
-        contextWindow: 272000,
-      },
-    ]);
+    expect(plan.settingsConfig).not.toHaveProperty("modelCatalog");
     expect(
       buildModelCatalogForRoutes(
         plan,
@@ -2116,8 +2363,14 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       settingsConfig: {
         ...plan.settingsConfig,
         codexRouting: {
+          schemaVersion: 2,
           enabled: true,
-          routes: [officialRoute],
+          routes: [
+            serializeCodexRouteV2(
+              { ...officialRoute, modelSelection: { mode: "all" } },
+              0,
+            ),
+          ],
         },
       },
     };
@@ -2149,16 +2402,9 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       (route) => route.targetProviderId === relay.id,
     );
 
-    expect(savedPlan.settingsConfig.modelCatalog.models).toEqual([
-      { model: "gpt-5.5" },
-      {
-        model: "gpt-5.5-relay-gpt",
-        displayName: "Relay GPT 5.5",
-        upstreamModel: "gpt-5.5",
-      },
-    ]);
-    expect(relayRoute?.match?.models).toEqual(["gpt-5.5-relay-gpt"]);
-    expect(relayRoute?.upstream?.modelMap).toEqual({
+    expect(savedPlan.settingsConfig).not.toHaveProperty("modelCatalog");
+    expect(relayRoute?.modelSelection).toEqual({ mode: "all" });
+    expect(relayRoute?.aliases).toEqual({
       "gpt-5.5-relay-gpt": "gpt-5.5",
     });
   });
@@ -2531,8 +2777,14 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       settingsConfig: {
         ...plan.settingsConfig,
         codexRouting: {
+          schemaVersion: 2,
           enabled: true,
-          routes: [openaiRoute],
+          routes: [
+            serializeCodexRouteV2(
+              { ...openaiRoute, modelSelection: { mode: "all" } },
+              0,
+            ),
+          ],
         },
       },
     };
@@ -2566,7 +2818,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
 
     expect(savedRoutes).toHaveLength(2);
     expect(qwenRoute?.enabled).toBe(true);
-    expect(qwenRoute?.match?.models).toContain("qwen3.6");
+    expect(qwenRoute?.modelSelection).toEqual({ mode: "all" });
   });
 
   it("rebuilds route catalog from current targets instead of keeping stale fallback models", () => {
@@ -2640,8 +2892,8 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
 
     const plan = createDraftRoutingPlan([officialBackup], [officialBackup]);
 
-    expect(plan.settingsConfig.modelCatalog.models).toEqual([]);
-    expect(plan.settingsConfig.modelCatalog.spawnAgentModels ?? []).toEqual([]);
+    expect(plan.settingsConfig).not.toHaveProperty("modelCatalog");
+    expect(plan.settingsConfig.codexRouting.spawnAgentModels ?? []).toEqual([]);
   });
 
   it("rebuilds an official route from the dynamically persisted OAuth catalog", () => {

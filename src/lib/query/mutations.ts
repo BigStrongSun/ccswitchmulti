@@ -11,16 +11,9 @@ import { openclawKeys } from "@/hooks/useOpenClaw";
 import { invalidateHermesProviderCaches } from "@/hooks/useHermes";
 import { proxyKeys } from "@/lib/query/proxy";
 import { usageKeys } from "@/lib/query/usage";
-import {
-  syncCodexMultiRouterPlansAfterProviderChange,
-  syncCodexMultiRouterPlansAfterProviderDelete,
-  type CodexMultiRouterPlanSyncResult,
-} from "@/lib/codexMultiRouterSync";
 
-// Provider 保存结果需要携带 Codex MultiRouter 同步报告，供上层决定是否提示用户补选子 Agent 模型。
 export interface UpdateProviderMutationResult {
   provider: Provider;
-  codexMultiRouterSyncResults?: CodexMultiRouterPlanSyncResult[];
 }
 import {
   CODEX_OFFICIAL_PROVIDER_ID,
@@ -226,22 +219,7 @@ export const useUpdateProviderMutation = (appId: AppId) => {
       originalId?: string;
     }) => {
       await providersApi.update(provider, appId, originalId);
-      let codexMultiRouterSyncResults:
-        | CodexMultiRouterPlanSyncResult[]
-        | undefined;
-      if (appId === "codex") {
-        const providerMap = await providersApi.getAll(appId);
-        codexMultiRouterSyncResults =
-          syncCodexMultiRouterPlansAfterProviderChange(
-            Object.values(providerMap),
-            provider,
-            originalId,
-          );
-        for (const result of codexMultiRouterSyncResults) {
-          await providersApi.update(result.plan, appId);
-        }
-      }
-      return { provider, codexMultiRouterSyncResults };
+      return { provider };
     },
     onSuccess: async (result, variables) => {
       const provider = result.provider;
@@ -290,16 +268,6 @@ export const useDeleteProviderMutation = (appId: AppId) => {
   return useMutation({
     mutationFn: async (providerId: string) => {
       await providersApi.delete(providerId, appId);
-      if (appId === "codex") {
-        const providerMap = await providersApi.getAll(appId);
-        const syncResults = syncCodexMultiRouterPlansAfterProviderDelete(
-          Object.values(providerMap),
-          providerId,
-        );
-        for (const result of syncResults) {
-          await providersApi.update(result.plan, appId);
-        }
-      }
     },
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["providers", appId] });

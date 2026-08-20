@@ -73,9 +73,10 @@ pub use codex::{
     materialize_codex_routed_provider_from_target, provider_needs_responses_namespace_flatten,
     resolve_codex_cache_config, resolve_codex_catalog_tool_profile,
     resolve_codex_chat_reasoning_config, resolve_codex_model_routed_provider,
-    resolve_codex_model_routed_providers, should_convert_codex_responses_to_anthropic,
+    resolve_codex_model_routed_providers, resolve_codex_v2_raw_passthrough_provider,
+    resolve_codex_v2_routed_provider, should_convert_codex_responses_to_anthropic,
     should_convert_codex_responses_to_chat, should_convert_codex_responses_to_messages,
-    CodexMultiRouterAuthFacade,
+    CodexMultiRouterAuthFacade, ResolvedCodexRoute,
 };
 pub(crate) use codex::{
     codex_provider_remote_compaction_enabled, codex_route_supports_responses_compaction,

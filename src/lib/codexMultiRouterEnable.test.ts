@@ -9,7 +9,9 @@ const provider = {
   id: "codex-multirouter",
   name: "Test MultiRouter",
   category: "custom",
-  settingsConfig: {},
+  settingsConfig: {
+    codexRouting: { schemaVersion: 2, enabled: true, routes: [] },
+  },
 } as Provider;
 
 describe("enableCodexMultiRouterPlan", () => {
@@ -35,5 +37,23 @@ describe("enableCodexMultiRouterPlan", () => {
     await expect(
       enableCodexMultiRouterPlan(provider, switchProvider),
     ).rejects.toBe(error);
+  });
+
+  it("refuses to enable a schema v1 plan before explicit migration", async () => {
+    const legacyProvider = {
+      ...provider,
+      settingsConfig: {
+        codexRouting: {
+          enabled: true,
+          routes: [{ id: "legacy-route", upstream: { apiKey: "secret" } }],
+        },
+      },
+    } as Provider;
+    const switchProvider = vi.fn();
+
+    await expect(
+      enableCodexMultiRouterPlan(legacyProvider, switchProvider),
+    ).rejects.toThrow("codex_multirouter_migration_required");
+    expect(switchProvider).not.toHaveBeenCalled();
   });
 });

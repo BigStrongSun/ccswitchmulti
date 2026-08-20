@@ -28,7 +28,7 @@ describe("buildCodexMultiRouterWizardPlan subagent version", () => {
     );
 
     expect(plan.settingsConfig.codexRouting.subagentVersion).toBe("v1");
-    expect(plan.settingsConfig.modelCatalog.spawnAgentModels).toEqual([
+    expect(plan.settingsConfig.codexRouting.spawnAgentModels).toEqual([
       "deepseek-v4-pro",
     ]);
   });
@@ -54,7 +54,7 @@ describe("buildCodexMultiRouterWizardPlan subagent version", () => {
     );
 
     expect(plan.settingsConfig.codexRouting.subagentVersion).toBe("v2");
-    expect(plan.settingsConfig.modelCatalog.spawnAgentModels).toEqual([
+    expect(plan.settingsConfig.codexRouting.spawnAgentModels).toEqual([
       "deepseek-v4-pro",
     ]);
   });
