@@ -2152,6 +2152,45 @@ fn codex_provider_reasoning_efforts_toml_array(
     toml_edit::Value::Array(array)
 }
 
+/// 把 catalog 中的字符串数组投影到 provider inline model。
+fn codex_provider_string_toml_array(value: Option<&Value>) -> Option<toml_edit::Value> {
+    let values = value?.as_array()?;
+    let mut array = Array::default();
+    for value in values {
+        let value = value.as_str()?.trim();
+        if !value.is_empty() {
+            array.push(value);
+        }
+    }
+    Some(toml_edit::Value::Array(array))
+}
+
+/// 把官方 service tier 对象数组无损投影到 provider inline model。
+///
+/// Codex 当前字段均为标量；遇到未来新增的复合字段时返回 None，让 JSON catalog
+/// 继续作为权威来源，避免生成一个结构错误的 TOML 条目。
+fn codex_provider_service_tiers_toml_array(value: Option<&Value>) -> Option<toml_edit::Value> {
+    let tiers = value?.as_array()?;
+    let mut array = Array::default();
+    for tier in tiers {
+        let tier = tier.as_object()?;
+        let mut inline = InlineTable::new();
+        for (field, value) in tier {
+            let value = match value {
+                Value::String(value) => value.as_str().into(),
+                Value::Bool(value) => (*value).into(),
+                Value::Number(value) if value.is_i64() => value.as_i64()?.into(),
+                Value::Number(value) if value.is_f64() => value.as_f64()?.into(),
+                Value::Null => continue,
+                _ => return None,
+            };
+            inline.insert(field, value);
+        }
+        array.push(toml_edit::Value::InlineTable(inline));
+    }
+    Some(toml_edit::Value::Array(array))
+}
+
 fn codex_model_catalog_from_settings(
     settings: &Value,
     config_text: &str,
@@ -2274,6 +2313,25 @@ fn codex_provider_models_toml_array(
                 "reasoningEffort",
             ),
         );
+        if let Some(speed_tiers) = codex_provider_string_toml_array(
+            catalog_entry.and_then(|entry| entry.get("additional_speed_tiers")),
+        ) {
+            model.insert("additional_speed_tiers", speed_tiers.clone());
+            model.insert("additionalSpeedTiers", speed_tiers);
+        }
+        if let Some(service_tiers) = codex_provider_service_tiers_toml_array(
+            catalog_entry.and_then(|entry| entry.get("service_tiers")),
+        ) {
+            model.insert("service_tiers", service_tiers.clone());
+            model.insert("serviceTiers", service_tiers);
+        }
+        if let Some(default_service_tier) = catalog_entry
+            .and_then(|entry| entry.get("default_service_tier"))
+            .and_then(Value::as_str)
+        {
+            model.insert("default_service_tier", default_service_tier.into());
+            model.insert("defaultServiceTier", default_service_tier.into());
+        }
         model.insert("visibility", "list".into());
         model.insert("show_in_picker", true.into());
         model.insert("supported_in_api", true.into());
@@ -14983,7 +15041,13 @@ model_catalog_json = "cc-switch-model-catalog.json"
             "priority": 1,
             "display_name": "GPT-5.5",
             "model_messages": { "instructions_template": "template" },
-            "context_window": 128000
+            "context_window": 128000,
+            "additional_speed_tiers": ["fast"],
+            "service_tiers": [{
+                "id": "priority",
+                "name": "Fast",
+                "description": "1.5x speed, increased usage"
+            }]
         }]));
         let settings = json!({
             "modelCatalog": {
@@ -15045,6 +15109,46 @@ base_url = "http://127.0.0.1:15721/v1"
         assert!(
             provider_model_ids.contains(&"deepseek-v4-flash"),
             "inline provider models must include DeepSeek so the Desktop menu can enumerate it"
+        );
+        let inline_official_model = provider_models
+            .iter()
+            .find(|model| model.get("model").and_then(|value| value.as_str()) == Some("gpt-5.5"))
+            .expect("inline provider models should include the routed official model");
+        assert_eq!(
+            inline_official_model
+                .get("supported_reasoning_levels")
+                .and_then(|value| value.as_array())
+                .map(Vec::len),
+            Some(4),
+            "inline official models must retain the same reasoning choices as the merged catalog"
+        );
+        assert_eq!(
+            inline_official_model
+                .get("additional_speed_tiers")
+                .and_then(|value| value.as_array())
+                .map(Vec::len),
+            Some(1),
+            "inline official models must retain speed tiers when Desktop reloads provider models"
+        );
+        assert_eq!(
+            inline_official_model
+                .get("service_tiers")
+                .and_then(|value| value.as_array())
+                .map(Vec::len),
+            Some(1),
+            "inline official models must retain service tiers together with reasoning levels"
+        );
+        let inline_qwen_model = provider_models
+            .iter()
+            .find(|model| model.get("model").and_then(|value| value.as_str()) == Some("qwen3.6"))
+            .expect("inline provider models should include Qwen");
+        assert_eq!(
+            inline_qwen_model
+                .get("service_tiers")
+                .and_then(|value| value.as_array())
+                .map(Vec::len),
+            Some(0),
+            "third-party models must not inherit OpenAI service tiers from the template"
         );
 
         let cache: Value = read_json_file(&get_codex_models_cache_path()).expect("read cache");

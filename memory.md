@@ -3922,3 +3922,10 @@
 - 持久化契约：`graded + confirmed_supported + string/reasoning_object` 的每个正向 Provider 原生档位都必须有映射，目标必须属于 Provider 支持集合；`none` 是关闭能力，不是正向档位，不要求映射；boolean/none/budget 不要求 effort 映射。专家 JSON 缺映射立即拒绝，结构化表单保存前自动补齐同名映射并显式落库。
 - 兼容策略为 read old / write complete：历史内置声明、能力库和旧 Provider 数据允许省略同名映射，Rust 消费入口先补恒等映射再严格校验；新写入仍直接走严格 `validate()`。这修复了官方/内置能力因新门禁被误判后退回通用 `low/medium/high/xhigh` 的回归；官方、DeepSeek、GLM、检测快照和 Sub-Agent 投影测试均恢复通过。
 - 前端补图 helper 独立在 `codexReasoningCapability.ts`，避免 ProviderForm 从可被测试替换的 UI 模块导入领域逻辑。验证：Vitest 141 files / 1136 tests 全过；Rust lib 3187 passed / 0 failed / 5 ignored；TypeScript、rustfmt、diff check 均通过。未停止、替换、安装或覆盖运行中的 CCSM。
+
+## 2026-08-20 官方模型配置热重载后推理/速度入口失效根修
+
+- 用户点击推理能力配置并保存后，Codex Desktop 的官方模型推理强度不可用、推理速度消失。现场逐层核对三份模型信息源：`~/.codex/cc-switch-model-catalog.json`、`models_cache.json`/`models_cache.cc-switch-backup.json` 都完整保留 GPT-5.6 的 `supported_reasoning_levels`、`additional_speed_tiers` 和 `service_tiers`；但 `config.toml` 的 custom provider inline `models` 只有 reasoning 字段，完全缺少速度/服务档。
+- 已证实根因：Codex Desktop 配置热重载会读取 provider inline `models`，而 CCSM 从 2026-07-13 引入 inline reasoning 投影时只同步了推理字段，没有同步 picker 的速度/服务字段。保存动作使 Desktop 从完整 JSON/cache 路径切到不完整 inline 模型定义，形成同一模型在三份数据源中的元数据分叉，足以稳定解释并复现速度入口消失。
+- 修复：`codex_provider_models_toml_array` 现在从已经完成官方同 slug merge 的 catalog 条目同步 `additional_speed_tiers`/`additionalSpeedTiers`、`service_tiers`/`serviceTiers`、`default_service_tier`/`defaultServiceTier`。第三方模型继续投影空 service tier 数组，不能从官方模板继承 fast/priority。
+- TDD：完整 `settings -> catalog -> config.toml inline models -> cache` 回归先确认 RED（官方 inline speed/service 字段缺失），再 GREEN；同时断言官方推理档位仍完整、第三方 service tiers 为 0。当前磁盘三份数据和当前 Codex 任务中的官方 reasoning 已恢复，未能再次复现“推理强度不可用”，因此不能把它单独归因为已证实；新构建安装后仍需做真实 Desktop 点击验收。验证：Rust lib 3187 passed / 0 failed / 5 ignored；Vitest 141 files / 1136 tests；TypeScript、rustfmt、diff check 全通过。未停止、替换、安装或覆盖运行中的 CCSM。
