@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-08-20 MultiRouter Provider SSOT v2 全量回归收口
+
+- 全量前端回归暴露的旧 fixture 不能通过放宽 v1 门禁解决：当前可编辑/可启用计划必须使用 `schemaVersion: 2`，Provider 模型目录保留在目标 Provider，Router 不再保存 `modelCatalog`、`match/upstream` 或协议快照。最终前端全量为 139 files / 1125 tests，`pnpm typecheck`、`pnpm build:renderer` 和 Prettier 均通过。
+- Wizard 重建 v2 routing 时必须先保留现有 v2 的未知扩展字段，再由当前受管字段覆盖；否则普通保存会静默丢掉未来 schema 数据。v1 不参与该 spread，仍必须走显式 preview/apply 迁移。
+- Sub-Agent 编辑器不能再从 Router 的历史 `modelCatalog` 推断输入能力；工作台把由目标 Provider/Route 即时投影出的 catalog 作为只读视图传入编辑器，持久化仍只写 Sub-Agent policy。
+- Wizard 的模型勾选不能靠裁剪临时 Provider catalog 后保存 Route `all`：这会在下一次读取 Provider 全量目录时把取消的模型重新纳入。若只选择子集，Route 必须写 canonical `include`；碰撞产生的可见别名只写 `aliases`，`include` 保存原 Provider 模型 ID。全选才写 `all`。
+- Rust 全量首次失败的 3 个 External OpenAI API 测试是夹具错误：15721 上无稳定 UA/无 external marker 的请求按 Codex Desktop 处理；声称模拟非 Codex 客户端的测试必须发送现有 `x-cc-switch-external-openai-api` marker。修正后 Rust 全量 3232 passed / 0 failed / 5 ignored，Clippy 在仅豁免既有 `redundant_closure`、`manual_find`、`large_enum_variant` 后以 `-D warnings` 通过。
+
 ## 2026-08-20 MultiRouter Provider SSOT v2 schema 与统一 compiler
 
 - 分支 `bigstrongsun/codex-multirouter-ssot-v2` 使用隔离 worktree `.worktrees/codex-multirouter-ssot-v2` 实施已评审设计；规格与计划分别位于 `docs/superpowers/specs/2026-08-20-codex-multirouter-provider-ssot-design.md` 和 `docs/superpowers/plans/2026-08-20-codex-multirouter-provider-ssot.md`。目标不是继续同步 Route 字段，而是让 Provider/Provider 模型条目成为协议、连接、认证材料和能力的事实源。
