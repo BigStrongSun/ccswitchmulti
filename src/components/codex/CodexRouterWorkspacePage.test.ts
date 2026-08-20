@@ -369,7 +369,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     );
   });
 
-  it("refreshes an official OAuth catalog with the bound account and syncs new models into its route", async () => {
+  it("refreshes an official OAuth Provider without rewriting its MultiRouter route", async () => {
     vi.mocked(fetchCodexOauthModels).mockResolvedValue([
       { id: "gpt-5.5", ownedBy: "openai", contextWindow: 272000 },
       { id: "gpt-5.6-sol", ownedBy: "openai", contextWindow: 272000 },
@@ -447,18 +447,11 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
         ),
       ).toEqual(["gpt-5.5", "gpt-5.6-sol"]);
 
-      const savedPlan = vi
-        .mocked(providersApi.update)
-        .mock.calls.map(([updated]) => updated)
-        .find((updated) => updated.id === plan.id);
       expect(
-        savedPlan?.settingsConfig?.codexRouting?.routes[0].match.models,
-      ).toEqual(["gpt-5.5", "gpt-5.6-sol"]);
-      expect(
-        savedPlan?.settingsConfig?.modelCatalog?.models.map(
-          (model: { model: string }) => model.model,
-        ),
-      ).toEqual(["gpt-5.5", "gpt-5.6-sol"]);
+        vi
+          .mocked(providersApi.update)
+          .mock.calls.some(([updated]) => updated.id === plan.id),
+      ).toBe(false);
     });
     expect(fetchModelsForConfig).not.toHaveBeenCalled();
   });
@@ -688,7 +681,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     });
   });
 
-  it("refreshes and migrates a legacy inline OAuth route without targetProviderId", async () => {
+  it("keeps a legacy inline OAuth route read-only during Provider catalog refresh", async () => {
     vi.mocked(fetchCodexOauthModels).mockResolvedValue([
       { id: "gpt-5.5", ownedBy: "openai", contextWindow: 272000 },
       { id: "gpt-5.6-luna", ownedBy: "openai", contextWindow: 272000 },
@@ -746,23 +739,18 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       }),
     );
 
-    await waitFor(() => {
-      const savedPlan = vi
+    await waitFor(() =>
+      expect(
+        vi
+          .mocked(providersApi.update)
+          .mock.calls.some(([updated]) => updated.id === official.id),
+      ).toBe(true),
+    );
+    expect(
+      vi
         .mocked(providersApi.update)
-        .mock.calls.map(([updated]) => updated)
-        .find((updated) => updated.id === legacyPlan.id);
-      expect(
-        savedPlan?.settingsConfig?.codexRouting?.routes[0].targetProviderId,
-      ).toBe(official.id);
-      expect(
-        savedPlan?.settingsConfig?.codexRouting?.routes[0].match.models,
-      ).toEqual(["gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"]);
-      expect(
-        savedPlan?.settingsConfig?.modelCatalog?.models.map(
-          (model: { model: string }) => model.model,
-        ),
-      ).toEqual(["gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"]);
-    });
+        .mock.calls.some(([updated]) => updated.id === legacyPlan.id),
+    ).toBe(false);
   });
 
   it("finishes later provider refreshes after an earlier refresh rerenders the routes page", async () => {
@@ -1249,7 +1237,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("does not restore removed provider models during routes refresh", async () => {
+  it("updates the Provider catalog without mutating a stale MultiRouter projection", async () => {
     vi.mocked(fetchModelsForConfig).mockResolvedValueOnce([
       { id: "kept-model", ownedBy: null, contextWindow: 128000 },
       { id: "removed-model", ownedBy: null, contextWindow: 64000 },
@@ -1321,25 +1309,11 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       "kept-model",
     ]);
 
-    await waitFor(() =>
-      expect(
-        vi
-          .mocked(providersApi.update)
-          .mock.calls.some(([saved]) => saved.id === stalePlan.id),
-      ).toBe(true),
-    );
-    const savedPlan = vi
-      .mocked(providersApi.update)
-      .mock.calls.map(([saved]) => saved)
-      .find((saved) => saved.id === stalePlan.id)!;
     expect(
-      savedPlan.settingsConfig.modelCatalog.models.map(
-        (model: { model: string }) => model.model,
-      ),
-    ).toEqual(["kept-model"]);
-    expect(savedPlan.settingsConfig.modelCatalog.spawnAgentModels).toEqual([]);
-    const savedRoutes = readCodexRouting(savedPlan)?.routes ?? [];
-    expect(savedRoutes[0]?.match?.models).toEqual(["kept-model"]);
+      vi
+        .mocked(providersApi.update)
+        .mock.calls.some(([saved]) => saved.id === stalePlan.id),
+    ).toBe(false);
   });
 
   it("opens the Codex add-source flow when route picker has no model sources", async () => {

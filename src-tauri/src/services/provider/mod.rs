@@ -4076,8 +4076,10 @@ impl ProviderService {
             Self::set_provider_live_config_managed(&mut provider, add_to_live);
         }
 
-        // Save to database
-        state.db.save_provider(app_type.as_str(), &provider)?;
+        // Codex mutations compile all affected schema-v2 plans before committing the Provider,
+        // then refresh their derived projections from the database truth. Other applications keep
+        // their existing persistence path.
+        Self::persist_provider_mutation(state, &app_type, &provider)?;
 
         // Additive mode apps (OpenCode, OpenClaw): optionally write to live config.
         if app_type.is_additive_mode() {
@@ -4103,7 +4105,9 @@ impl ProviderService {
             state
                 .db
                 .set_current_provider(app_type.as_str(), &provider.id)?;
-            write_live_with_common_config(state.db.as_ref(), &app_type, &provider)?;
+            if !Self::is_codex_schema_v2_router(&app_type, &provider) {
+                write_live_with_common_config(state.db.as_ref(), &app_type, &provider)?;
+            }
         }
 
         Ok(true)
@@ -4258,8 +4262,9 @@ impl ProviderService {
             return Ok(true);
         }
 
-        // Save to database
-        state.db.save_provider(app_type.as_str(), &provider)?;
+        // Save through the Codex domain mutation so Provider edits, catalog refreshes and
+        // MultiRouter plan saves all share the same compiler/projection lifecycle.
+        Self::persist_provider_mutation(state, &app_type, &provider)?;
 
         // Best-effort auto-prune of disabled stale V2 profiles (model left the catalog).
         // Runs after the main save so a prune failure never fails the save. Only Codex
@@ -4300,7 +4305,7 @@ impl ProviderService {
             crate::settings::get_effective_current_provider(&state.db, &app_type)?;
         let is_current = effective_current.as_deref() == Some(provider.id.as_str());
 
-        if is_current {
+        if is_current && !Self::is_codex_schema_v2_router(&app_type, &provider) {
             // 如果 Claude 代理接管处于激活状态，并且代理服务正在运行：
             // - 不直接走普通 Live 写入逻辑
             // - 改为更新 Live 备份，并在 Claude 下同步代理安全的 Live 配置
@@ -4368,6 +4373,49 @@ impl ProviderService {
         }
 
         Ok(true)
+    }
+
+    fn persist_provider_mutation(
+        state: &AppState,
+        app_type: &AppType,
+        provider: &Provider,
+    ) -> Result<(), AppError> {
+        if *app_type != AppType::Codex {
+            return state.db.save_provider(app_type.as_str(), provider);
+        }
+
+        let outcome = crate::codex_multirouter::mutation::apply_codex_provider_mutation(
+            state.db.as_ref(),
+            provider.clone(),
+        )?;
+        for projection in outcome.projections {
+            if projection.state == crate::codex_multirouter::projection::ProjectionState::Pending {
+                log::warn!(
+                    "Codex MultiRouter projection pending after Provider mutation: router={} code={}",
+                    projection.router_provider_id,
+                    projection.last_error_code.as_deref().unwrap_or("projection_pending")
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn is_codex_schema_v2_router(app_type: &AppType, provider: &Provider) -> bool {
+        if *app_type != AppType::Codex {
+            return false;
+        }
+        provider
+            .settings_config
+            .get("codexRouting")
+            .and_then(|routing| {
+                crate::codex_multirouter::schema::CodexRoutingDocument::parse(routing).ok()
+            })
+            .is_some_and(|routing| {
+                matches!(
+                    routing,
+                    crate::codex_multirouter::schema::CodexRoutingDocument::V2(_)
+                )
+            })
     }
 
     fn finish_codex_subagent_v2_mutation(

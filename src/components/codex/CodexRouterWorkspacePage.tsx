@@ -1,4 +1,4 @@
-﻿import {
+import {
   useEffect,
   useMemo,
   useRef,
@@ -79,7 +79,6 @@ import {
   readWizardCodexOAuthAccountId,
   resolveWizardModelNameCollisions,
 } from "@/lib/codexMultiRouterWizard";
-import { syncCodexMultiRouterPlanWithProviders } from "@/lib/codexMultiRouterSync";
 import {
   DEFAULT_HOSTED_TOOLS_CONFIG,
   readHostedToolsConfig,
@@ -419,7 +418,6 @@ type ProviderModelRefreshResult =
       status: "updated";
       models: FetchedModel[];
       nextProvider: Provider;
-      affectedPlans: Provider[];
       usedCodexCache?: boolean;
       onlineErrorMessage?: string;
     };
@@ -2596,40 +2594,10 @@ export function CodexRouterWorkspacePage({
           return { status: "stale" };
         }
 
-        const updatedProvidersById = new Map(providersById);
-        updatedProvidersById.set(nextProvider.id, nextProvider);
-        const updatedRoutableSources = resolveWizardModelNameCollisions(
-          modelSources.map((source) =>
-            source.id === nextProvider.id ? nextProvider : source,
-          ),
-        );
-        const updatedRoutableProvidersById = new Map(updatedProvidersById);
-        for (const source of updatedRoutableSources) {
-          updatedRoutableProvidersById.set(source.id, source);
-        }
-        const affectedPlans: Provider[] = [];
-        for (const plan of routingPlans) {
-          // 每个 plan 都交给同步层判定是否变化：旧版内联 OAuth route 没有
-          // targetProviderId，若在页面层提前过滤，就会出现 provider 已刷新而旧
-          // MultiRouter 永远停在旧模型目录的断层。同步层返回 null 时不会写库。
-          const syncResult = syncCodexMultiRouterPlanWithProviders(
-            plan,
-            updatedRoutableProvidersById,
-          );
-          if (!syncResult) continue;
-          const nextPlan = syncResult.plan;
-          await providersApi.update(nextPlan, "codex");
-          if (!isCurrentAttempt()) {
-            return { status: "stale" };
-          }
-          affectedPlans.push(nextPlan);
-        }
-
         return {
           status: "updated",
           models,
           nextProvider,
-          affectedPlans,
           usedCodexCache,
           onlineErrorMessage,
         };
@@ -2664,17 +2632,8 @@ export function CodexRouterWorkspacePage({
               ...Object.fromEntries(providersById),
               ...(current?.providers ?? {}),
               [result.nextProvider.id]: result.nextProvider,
-              ...Object.fromEntries(
-                result.affectedPlans.map((plan) => [plan.id, plan]),
-              ),
             },
           }));
-          const selectedAffectedPlan = result.affectedPlans.find(
-            (plan) => plan.id === selectedPlanId,
-          );
-          if (selectedAffectedPlan) {
-            setOptimisticRoutingPlan(selectedAffectedPlan);
-          }
           setProviderModelRefreshStates((current) => ({
             ...current,
             [provider.id]: {

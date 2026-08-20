@@ -23,6 +23,13 @@
 - live 发布复用现有 `write_json_file`/`write_codex_live_config_atomic` 原子写入链：compiler 生成临时 modelCatalog 投影，catalog 顶层写 `ccSwitchRoutingDependencyFingerprint`，同步 Codex models cache/managed roles，再原子发布 config；随后回读 catalog fingerprint、`model_catalog_json` 指针和 CCSM-owned cache，三项一致才标 ready。
 - 新 Tauri/API：`inspect_codex_multirouter_projection`、`retry_codex_multirouter_projection`，TypeScript 暴露结构化状态与 route diagnostics。TDD：projection 5/5（fingerprint mismatch rebuild、pending/retry、read-back mismatch、秘密脱敏、只读 inspect），真实 catalog/config/cache publish 1/1；`codex_config::tests` 201/201、typecheck、Prettier、cargo check、fmt、diff check 通过；仅豁免三项既有 Clippy 基线后 `-D warnings` 通过。
 
+## 2026-08-20 MultiRouter Provider SSOT v2 统一 Provider mutation
+
+- Task 5 新增 `codex_multirouter/mutation.rs`，Provider 保存前把候选 Provider 放入最新 Provider 图并只编译直接依赖它的 schema-v2 plan；编译失败不落库。保存成功后按依赖 fingerprint 仅重建受影响投影，发布失败由 Task 4 状态机记录 pending，Route 声明不做字段同步。
+- `ProviderService::add/update` 的 Codex 路径统一进入该领域 mutation，因此普通 Provider 编辑、模型目录刷新和 MultiRouter plan 保存共享同一后端入口。当前 schema-v2 Router 的 live catalog/config/cache 只由 compiler projection 发布，旧的 current-provider live 写入被跳过，避免刚生成的投影又被 Router 内旧 `modelCatalog` 覆盖。
+- 前端删除 `syncCodexMultiRouterPlanWithProviders`、`syncCodexMultiRouterPlansAfterProviderChange` 及整个 `codexMultiRouterSync.ts`；Provider 保存和工作台 `/models` 刷新都只提交目标 Provider 一次，不再逐个改写引用 plan。v1 内联 OAuth route 在显式迁移前保持只读。
+- TDD 先观察统一 mutation 函数缺失，再验证 Chat→Responses 更新只发布直接依赖的 Router、未改 Route JSON；补充 RED/GREEN 证明无关损坏 Router 不会阻塞 Provider 更新。前端契约回归改为“一次 Provider mutation、零 plan 重写”。
+
 ## 2026-08-19 恢复 Qwen/vLLM 缺省输出上限 131072（对齐 Qwen3.8-27B 官方最大输出）
 
 - 实况：Codex 任务 `01a01722-ca39-77f1-b7da-9d3a9d5fe023` 的 vLLM 透明代理记录出现单条请求 `prompt_tokens=136269 / completion_tokens=125875 / total_tokens=262144 / finish_reasons=["length"]`。根因不是上下文压缩也不是 KV cache，而是 Codex Responses 请求没有显式输出预算、CCSM 转换成 Chat Completions 时也没有补 `max_tokens`，vLLM 把剩余上下文窗口都当成默认输出预算。
