@@ -3497,6 +3497,9 @@ impl ProxyService {
             doc["model"] = toml_edit::value(upstream_model);
         }
 
+        crate::codex_config::ensure_codex_respect_system_proxy(&mut doc)
+            .map_err(|error| format!("生成 Codex 系统代理策略失败: {error}"))?;
+
         Ok(doc.to_string())
     }
 
@@ -6565,6 +6568,36 @@ wire_api = "chat"
         assert!(
             parsed.get("openai_base_url").is_none(),
             "takeover live config must not use the reserved built-in OpenAI base URL override"
+        );
+        assert_eq!(
+            parsed
+                .get("features")
+                .and_then(|v| v.get("respect_system_proxy"))
+                .and_then(|v| v.as_bool()),
+            Some(true),
+            "Codex takeover must use native system proxy resolution so loopback stays direct"
+        );
+    }
+
+    #[test]
+    fn apply_codex_proxy_toml_config_preserves_existing_features() {
+        let input = r#"
+model = "gpt-5.1-codex"
+[features]
+multi_agent_v2 = true
+respect_system_proxy = false
+"#;
+        let output = ProxyService::apply_codex_proxy_toml_config_for_provider(
+            input,
+            "http://127.0.0.1:15721/v1",
+            None,
+        )
+        .expect("apply proxy config");
+        let parsed: toml::Value = toml::from_str(&output).expect("parse output");
+        assert_eq!(parsed["features"]["multi_agent_v2"].as_bool(), Some(true));
+        assert_eq!(
+            parsed["features"]["respect_system_proxy"].as_bool(),
+            Some(true)
         );
     }
 

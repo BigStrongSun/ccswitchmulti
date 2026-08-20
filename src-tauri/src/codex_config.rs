@@ -6839,7 +6839,25 @@ pub fn apply_codex_official_proxy_route(
         toml_edit::Item::Table(table),
     );
     doc["model_providers"] = toml_edit::Item::Table(providers);
+    ensure_codex_respect_system_proxy(&mut doc)?;
     Ok(doc.to_string())
+}
+
+/// During CCSM takeover Codex must resolve the host's proxy policy itself.
+/// This keeps requests to the local CCSM listener direct while allowing CCSM
+/// to use its configured upstream proxy for internet egress.
+pub fn ensure_codex_respect_system_proxy(doc: &mut DocumentMut) -> Result<(), AppError> {
+    if doc.get("features").is_none() {
+        doc["features"] = toml_edit::table();
+    }
+    let features = doc
+        .get_mut("features")
+        .and_then(|item| item.as_table_mut())
+        .ok_or_else(|| {
+            AppError::Message("Invalid Codex config.toml: features must be a table".to_string())
+        })?;
+    features["respect_system_proxy"] = toml_edit::value(true);
+    Ok(())
 }
 
 /// Whether a live Codex config is the official route projected by CC Switch.
@@ -10330,6 +10348,10 @@ command = "example"
                 .get("stream_max_retries")
                 .and_then(toml::Value::as_integer),
             Some(CODEX_MANAGED_STREAM_MAX_RETRIES as i64)
+        );
+        assert_eq!(
+            doc["features"]["respect_system_proxy"].as_bool(),
+            Some(true)
         );
         assert!(codex_config_has_official_proxy_route(&output));
     }
