@@ -1,5 +1,11 @@
 # CC Switch Repository Memory
 
+## 2026-08-21 reasoning 保存门禁合并后复核
+
+- 当前 `main` 为 `b7865131`（`Merge MultiRouter Provider SSOT v2 into main`），`1c593285` 的 Provider add/update reasoning completeness 门禁仍在祖先链中。聚焦验证通过：Rust `provider_persistence` 2/2、V2 profile editor 126/126；Rust 全量 `3246 passed / 0 failed / 5 ignored`；TypeScript、cargo fmt、Prettier 和 diff check 通过。
+- 合并后全量 Vitest 当前为 `140 files passed / 2 failed`（`1143 passed / 2 failed`）。两个失败来自仍未提交的 MultiRouter SSOT 工作树：`useDeleteProviderMutation.test.tsx` 期待删除 Codex provider 后同步更新 MultiRouter，但实际 update 未调用；`CodexMultiRouterWizard.test.tsx` 期待 model source card 显示 provider-owned readiness（认证/目录/协议），当前渲染未提供对应文本。不得把这两个失败归因于 reasoning gate，也不得在本轮回滚或混入这些 dirty files。
+- 因主树验证尚未全绿，不能发布新 release。收口顺序：先由 SSOT 改动所有者定位并修复这两项行为/测试，再在干净工作树重跑 Vitest、Rust、typecheck、fmt；随后从最终 HEAD 重新构建并做安装态 canary，最后才审计 tag/release 资产。
+
 ## 2026-08-19 恢复 Qwen/vLLM 缺省输出上限 131072（对齐 Qwen3.8-27B 官方最大输出）
 
 - 实况：Codex 任务 `01a01722-ca39-77f1-b7da-9d3a9d5fe023` 的 vLLM 透明代理记录出现单条请求 `prompt_tokens=136269 / completion_tokens=125875 / total_tokens=262144 / finish_reasons=["length"]`。根因不是上下文压缩也不是 KV cache，而是 Codex Responses 请求没有显式输出预算、CCSM 转换成 Chat Completions 时也没有补 `max_tokens`，vLLM 把剩余上下文窗口都当成默认输出预算。
@@ -3968,3 +3974,11 @@
 - 根修：`ProviderService::add` 与 `ProviderService::update` 在所有数据库/Live 写入前调用同一 `validate_codex_subagent_v2_provider_candidate`；无 `codexRouting.subagentV2` 的普通 Provider 不受影响，有 V2 文档则执行严格解析、编译和 `enabled + Routable + reasoning != unknown` 校验。
 - 回归：新增 add/update 两条测试，先确认 RED（两条路径都错误返回 true），接入统一保存校验后 GREEN；断言 rejected add 不入库、rejected update 保留旧 settings。前端新增 unknown 保存阻止测试，断言不调用 `update_codex_subagent_v2`/`update_provider`。
 - 当前验证：Rust `cargo test --lib` 3197 passed / 0 failed / 5 ignored；V2 前端文件 126/126；全量 Vitest 143 files / 1144 tests；TypeScript、rustfmt、diff check 通过。测试中仍有既有 React act、MSW 未处理请求和 Tauri window mock 警告，不影响通过。
+# 2026-08-21（MultiRouter Provider SSOT v2 合入 main 与向导回归）
+
+- `bigstrongsun/codex-multirouter-ssot-v2` 已在 `main` 以合并提交 `b7865131` 合入；旧的前端 `codexMultiRouterSync` 快照同步已删除，Provider/模型目录、Rust v2 compiler、mutation coordinator、projection 和迁移预览成为主线基础。
+- 向导保存重复创建的根因是保存函数没有组件级 in-flight Promise 门禁，且每次构建新方案都用 `Date.now()`/Provider 展示名重新生成 ID。修复为打开向导时稳定生成一次 plan ID、同一轮保存立即复用 in-flight Promise、保存成功后把返回 Provider 作为当前编辑目标；后端 `save_provider` 按 `(id, app_type)` 更新已存在行，因此重复请求不会新增第二条方案。
+- 别名漂移根因是前端 `resolveWizardModelNameCollisions` 把展示别名写回 Provider 模型目录，并按 Provider 名称每次重算。现在 Provider 保持 canonical 模型，Route 首次物化 alias；编辑已有 schema-v2 方案时优先保留 Route 已持久化的 alias。别名目标若不在当前 Provider 目录或 `all/include` selection，向导显示处理错误并禁止保存，Rust compiler 仍做最终校验。
+- 向导最终页即使没有模型源也保留保存入口并显示可操作说明；模型源卡展示认证、模型目录、协议、能力、OAuth、工具和 projection 状态，Provider 详细配置仍由 Provider 页面维护。保存前 v1 继续要求脱敏迁移预览并显式应用。
+- 本轮回归：`src/components/codex/CodexMultiRouterWizard.test.tsx`、`tests/lib/codexMultiRouterWizard.test.ts`、Rust compiler rename test；已验证 `pnpm typecheck`、定向 Vitest、Rust 定向 compiler test。React/Radix 测试仍有既有 `act(...)`/window mock 警告，不是失败。
+- 搜索渠道：Codex WebSearch 命中 React 官方 `Managing State`/`Reacting to Input with State`，确认 submitting 状态应禁用提交；Matrix WebSearch 已独立尝试同一官方页面但 relay 返回 `fetch failed`，因此第二条链本轮没有可用正文，不能把它当作交叉来源。
