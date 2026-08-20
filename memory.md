@@ -3921,3 +3921,10 @@
 - 仅记录 `has_user_agent`、`user_agent_contains_codex`、`has_external_api_key`、`force_external_marker`、`selected_path`、`method`、`endpoint`；不记录 User-Agent 原文、Authorization、Cookie、请求体或 Token。
 - 旧逻辑的误分类修复和该诊断共存：无显式 External API marker/`ccsw_` key 时选择 `codex`；显式外部凭据仍选择 `external_openai_api`。
 - 回归验证：`cargo test --lib proxy::handlers::tests::` 83/83 通过，`cargo fmt --all -- --check` 和 `git diff --check` 通过。
+
+## 2026-08-20 Qwen Provider Responses 与 MultiRouter 路由协议快照失同步
+
+- 现场数据库只读核对确认：Qwen Provider `274cfc2c-e4eb-4572-ba6f-7fdcc0b6008c` 已保存 `meta.apiFormat=openai_responses`，但 `codex-multirouter` 内引用它的 `router-274cfc2c-e4eb-4572-ba6f-7fdcc0b6008c` 仍保存 `upstream.apiFormat=openai_chat`。
+- 运行日志与配置吻合：线程 `01a01ca6-9c9b-7fb1-bc4c-62c7bb308f7c` 入站为 `/responses`，命中 Qwen route 后实际为 `effective_endpoint=/chat/completions`、`responses_to_chat=true`，上游是 vLLM `/v1/chat/completions`。
+- 根因：`createRouteFromProvider` 在创建 route 时复制 Provider 的 `apiFormat`；Provider 更新后，`syncCodexMultiRouterPlanWithProviders` 只同步 route 模型列表和 `modelMap`，未同步 `route.upstream.apiFormat`。运行时 `build_codex_routed_provider` 又把 route 的显式协议写入 effective provider，覆盖已更新的目标 Provider 协议。
+- 临时恢复：在 MultiRouter 路由规则中移除旧 Qwen route 并保存，再重新加入 Qwen 并保存，使新 route 从 Provider 复制 `openai_responses`。根修应让引用 Provider 的 route 协议随 Provider 更新，或移除引用型 route 的冗余协议快照并让运行时以目标 Provider 为单一事实源；实施前需用 TDD 覆盖 Chat→Responses 和 Responses→Chat 双向更新。
