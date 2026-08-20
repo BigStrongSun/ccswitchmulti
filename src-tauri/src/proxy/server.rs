@@ -668,6 +668,7 @@ mod tests {
                 Request::builder()
                     .method(Method::GET)
                     .uri("/v1/models")
+                    .header("x-cc-switch-external-openai-api", "1")
                     .body(Body::empty())
                     .expect("request"),
             )
@@ -689,6 +690,7 @@ mod tests {
                 Request::builder()
                     .method(Method::POST)
                     .uri("/v1/images/generations")
+                    .header("x-cc-switch-external-openai-api", "1")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(r#"{"model":"gpt-image-1","prompt":"ping"}"#))
                     .expect("request"),
@@ -1366,6 +1368,7 @@ base_url = "http://127.0.0.1:15721/v1"
                 Request::builder()
                     .method(Method::POST)
                     .uri("/v1/responses")
+                    .header("x-cc-switch-external-openai-api", "1")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         json!({
