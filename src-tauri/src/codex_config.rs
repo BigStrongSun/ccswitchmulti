@@ -5674,6 +5674,15 @@ fn prepare_codex_config_text_with_model_catalog_impl(
         let generated_catalog = codex_model_catalog_from_settings(settings, config_text, profile)?
             .unwrap_or_else(|| json!({ "models": [] }));
         let mut catalog = enrich_codex_catalog_with_official_metadata(&generated_catalog)?;
+        if let Some(fingerprint) = settings
+            .pointer("/codexRoutingProjection/dependencyFingerprint")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|fingerprint| !fingerprint.is_empty())
+        {
+            catalog["ccSwitchRoutingDependencyFingerprint"] =
+                Value::String(fingerprint.to_string());
+        }
         apply_codex_multi_agent_transport_policy(&mut catalog, settings);
         let config_text = set_codex_model_catalog_projection_fields(
             config_text,
@@ -5736,6 +5745,63 @@ fn prepare_codex_config_text_with_model_catalog_impl(
             provider_context,
         )
     }
+}
+
+/// Publish a schema-v2 MultiRouter catalog/config/cache projection and prove the atomic files can
+/// be read back. The caller persists `projection_pending` when this function or its proof fails;
+/// Provider/route declarations remain the database truth throughout.
+pub(crate) fn publish_codex_multirouter_projection(
+    projection_settings: &Value,
+) -> Result<crate::codex_multirouter::projection::ProjectionReadBack, AppError> {
+    let expected_fingerprint = projection_settings
+        .pointer("/codexRoutingProjection/dependencyFingerprint")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|fingerprint| !fingerprint.is_empty())
+        .ok_or_else(|| {
+            AppError::Message(
+                "Codex MultiRouter projection dependency fingerprint is missing".to_string(),
+            )
+        })?;
+    let live_config = read_codex_config_text()?;
+    let prepared = prepare_codex_config_text_with_model_catalog_without_provider_context(
+        projection_settings,
+        &live_config,
+        CodexCatalogToolProfile::NativeResponses,
+    )?;
+    write_codex_live_config_atomic(Some(&prepared))?;
+
+    let catalog: Value = read_json_file(&get_codex_model_catalog_path())?;
+    let read_fingerprint = catalog
+        .get("ccSwitchRoutingDependencyFingerprint")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let catalog_verified = read_fingerprint == expected_fingerprint;
+    let live_after = read_codex_config_text()?;
+    let config_verified = live_after
+        .parse::<DocumentMut>()
+        .ok()
+        .and_then(|document| {
+            document
+                .get("model_catalog_json")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
+        .is_some_and(|path| {
+            Path::new(&path) == get_codex_model_catalog_path()
+                || codex_model_catalog_path_is_cc_switch_owned(&path)
+        });
+    let cache_verified = read_json_file_if_exists(&get_codex_models_cache_path())?
+        .as_ref()
+        .is_some_and(codex_models_cache_is_cc_switch_owned);
+
+    Ok(crate::codex_multirouter::projection::ProjectionReadBack {
+        dependency_fingerprint: read_fingerprint,
+        catalog_verified,
+        config_verified,
+        cache_verified,
+    })
 }
 
 /// Reverse of the model-catalog prepare pipeline: read the
@@ -15340,6 +15406,51 @@ model_catalog_json = "cc-switch-model-catalog.json"
             hydrated["profiles"]["manual"]["inputModalities"],
             json!(["text"]),
             "an explicit per-profile override must remain authoritative"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn multirouter_projection_publish_writes_and_reads_back_dependency_fingerprint() {
+        let _guard = TestHomeGuard::new();
+        write_codex_live_config_atomic(Some(
+            r#"model_provider = "codex_model_router_v2"
+
+[model_providers.codex_model_router_v2]
+base_url = "http://127.0.0.1:15721/v1"
+wire_api = "responses"
+"#,
+        ))
+        .expect("seed live config");
+        seed_codex_models_cache(json!([]));
+        let settings = json!({
+            "modelCatalog": {"models": [{
+                "model": "qwen3.8",
+                "upstreamModel": "qwen3.8",
+                "contextWindow": 262144,
+                "inputModalities": ["text"]
+            }]},
+            "codexRouting": {
+                "schemaVersion": 2,
+                "enabled": true,
+                "routes": []
+            },
+            "codexRoutingProjection": {
+                "dependencyFingerprint": "fingerprint-v2"
+            }
+        });
+
+        let read_back = publish_codex_multirouter_projection(&settings)
+            .expect("publish projection with read-back");
+
+        assert_eq!(read_back.dependency_fingerprint, "fingerprint-v2");
+        assert!(read_back.catalog_verified);
+        assert!(read_back.config_verified);
+        assert!(read_back.cache_verified);
+        let catalog: Value = read_json_file(&get_codex_model_catalog_path()).expect("read catalog");
+        assert_eq!(
+            catalog["ccSwitchRoutingDependencyFingerprint"],
+            "fingerprint-v2"
         );
     }
 }

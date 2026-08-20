@@ -16,6 +16,13 @@
 - 账号池展开只切换 native/managed 认证所有者并维护账号代际，不再把 `meta.api_format` 强制重写为 `openai_responses`；协议仍由模型条目 > Provider 决定。数据库集成测试证明同一未变 Route 下把 Qwen Provider 从 Chat 改为 Responses，下一次 materialization 的转换行为和 fingerprint 立即变化。
 - 本阶段 TDD 新增/覆盖 10 个 v2 runtime 行为；三个补充边界先观察到函数缺失/空模型覆盖失败，再转绿。聚焦回归：Codex Provider 109/109、handlers 84/84、forwarder 153/153、compiler 10/10、schema 5/5；`cargo fmt --check`、`git diff --check` 通过。Clippy 仅报告 3 个既有基线 lint（`redundant_closure`、`manual_find`、`large_enum_variant`），命令行只豁免这三项后 `-D warnings` 通过。
 
+## 2026-08-20 MultiRouter Provider SSOT v2 投影与诊断
+
+- Task 4 新增 `codex_multirouter/projection.rs`。DB `settings` 使用 `codex_multirouter_projection:<routerProviderId>` 独立保存派生状态，不把 fingerprint/pending/error 写回 schema v2 Route 声明。状态包含 `ready|pending`、当前 dependency fingerprint、生成时间、compiler warnings，以及目标 Provider/canonical/upstream model、协议与来源、认证所有者、能力来源；不包含 Base URL、Key、Token 或 auth 配置。
+- `ensure_projection_with_publisher` 的状态机：ready 且 fingerprint 相同直接复用；依赖变化或强制 retry 才发布；catalog/config/cache 任一发布失败或 read-back fingerprint/文件证明不一致时，保存 `projection_pending`，返回稳定错误码和不含原始异常/秘密的说明；数据库 Provider/Route 继续是运行时真值。`inspect` 是只读的：missing/stale 只报告 pending，不隐式改 live 文件；`retry` 才强制重新生成。Task 5 的统一 Provider mutation 将调用 ensure，使 Provider 更新后立即重建。
+- live 发布复用现有 `write_json_file`/`write_codex_live_config_atomic` 原子写入链：compiler 生成临时 modelCatalog 投影，catalog 顶层写 `ccSwitchRoutingDependencyFingerprint`，同步 Codex models cache/managed roles，再原子发布 config；随后回读 catalog fingerprint、`model_catalog_json` 指针和 CCSM-owned cache，三项一致才标 ready。
+- 新 Tauri/API：`inspect_codex_multirouter_projection`、`retry_codex_multirouter_projection`，TypeScript 暴露结构化状态与 route diagnostics。TDD：projection 5/5（fingerprint mismatch rebuild、pending/retry、read-back mismatch、秘密脱敏、只读 inspect），真实 catalog/config/cache publish 1/1；`codex_config::tests` 201/201、typecheck、Prettier、cargo check、fmt、diff check 通过；仅豁免三项既有 Clippy 基线后 `-D warnings` 通过。
+
 ## 2026-08-19 恢复 Qwen/vLLM 缺省输出上限 131072（对齐 Qwen3.8-27B 官方最大输出）
 
 - 实况：Codex 任务 `01a01722-ca39-77f1-b7da-9d3a9d5fe023` 的 vLLM 透明代理记录出现单条请求 `prompt_tokens=136269 / completion_tokens=125875 / total_tokens=262144 / finish_reasons=["length"]`。根因不是上下文压缩也不是 KV cache，而是 Codex Responses 请求没有显式输出预算、CCSM 转换成 Chat Completions 时也没有补 `max_tokens`，vLLM 把剩余上下文窗口都当成默认输出预算。

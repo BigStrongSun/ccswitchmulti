@@ -109,6 +109,33 @@ pub fn reconcile_codex_subagent_v2_profiles(
 }
 
 #[tauri::command]
+#[allow(non_snake_case)]
+pub fn inspect_codex_multirouter_projection(
+    state: State<'_, AppState>,
+    providerId: String,
+) -> Result<crate::codex_multirouter::projection::CodexRoutingProjectionStatus, String> {
+    crate::codex_multirouter::projection::inspect_codex_multirouter_projection(
+        &state.db,
+        &providerId,
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn retry_codex_multirouter_projection(
+    state: State<'_, AppState>,
+    providerId: String,
+) -> Result<crate::codex_multirouter::projection::CodexRoutingProjectionStatus, String> {
+    crate::codex_multirouter::projection::ensure_codex_multirouter_projection(
+        &state.db,
+        &providerId,
+        true,
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub fn delete_provider(
     state: State<'_, AppState>,
     app: String,

@@ -41,6 +41,41 @@ export interface CodexOfficialRestoreOutcome {
   };
 }
 
+export type CodexRoutingProjectionState = "ready" | "pending";
+
+export interface CodexRoutingProjectionCapabilitySources {
+  contextWindow: string;
+  inputModalities: string;
+  reasoning: string;
+  codexCache: string;
+}
+
+export interface CodexRoutingProjectionRouteDiagnostic {
+  routeId: string;
+  routeLabel?: string | null;
+  targetProviderId: string;
+  targetProviderName: string;
+  visibleModel: string;
+  canonicalModel: string;
+  upstreamModel: string;
+  apiFormat: string;
+  apiFormatSource: string;
+  authOwner: string;
+  capabilitySources: CodexRoutingProjectionCapabilitySources;
+}
+
+export interface CodexRoutingProjectionStatus {
+  schemaVersion: number;
+  routerProviderId: string;
+  state: CodexRoutingProjectionState;
+  dependencyFingerprint: string;
+  generatedAt: string;
+  warnings: string[];
+  routes: CodexRoutingProjectionRouteDiagnostic[];
+  lastErrorCode?: string | null;
+  lastError?: string | null;
+}
+
 export interface OpenTerminalOptions {
   cwd?: string;
 }
@@ -155,6 +190,18 @@ export const providersApi = {
       app: appId,
       originalId,
     });
+  },
+
+  async inspectCodexMultiRouterProjection(
+    providerId: string,
+  ): Promise<CodexRoutingProjectionStatus> {
+    return await invoke("inspect_codex_multirouter_projection", { providerId });
+  },
+
+  async retryCodexMultiRouterProjection(
+    providerId: string,
+  ): Promise<CodexRoutingProjectionStatus> {
+    return await invoke("retry_codex_multirouter_projection", { providerId });
   },
 
   async delete(id: string, appId: AppId): Promise<boolean> {

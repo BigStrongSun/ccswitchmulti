@@ -1385,6 +1385,8 @@ pub fn run() {
             commands::update_codex_subagent_v2,
             commands::initialize_codex_subagent_v2,
             commands::reconcile_codex_subagent_v2_profiles,
+            commands::inspect_codex_multirouter_projection,
+            commands::retry_codex_multirouter_projection,
             commands::delete_provider,
             commands::remove_provider_from_live_config,
             commands::switch_provider,
