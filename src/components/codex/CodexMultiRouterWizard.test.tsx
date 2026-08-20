@@ -1,9 +1,19 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { Provider } from "@/types";
 import { providersApi } from "@/lib/api/providers";
 import { CodexMultiRouterWizard } from "./CodexMultiRouterWizard";
+
+const { initializeProviderConfig } = vi.hoisted(() => ({
+  initializeProviderConfig: vi.fn(),
+}));
+
+vi.mock("@/lib/api/codexSubagentV2", () => ({
+  codexSubagentV2Api: {
+    initializeProviderConfig,
+  },
+}));
 
 vi.mock("@/components/providers/forms/hooks/useCodexOauth", () => ({
   useCodexOauth: () => ({
@@ -131,6 +141,52 @@ describe("CodexMultiRouterWizard", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("keeps the final save entry visible when no model source exists", () => {
+    renderWizard([]);
+
+    fireEvent.click(screen.getByRole("button", { name: "启用并验证" }));
+
+    expect(screen.getByRole("button", { name: "保存并发布" })).toBeVisible();
+    expect(screen.getByText(/尚未选择模型源，保存入口仍保留/)).toBeVisible();
+  });
+
+  it("coalesces rapid saves and updates the same plan after the first save", async () => {
+    let resolveAdd: ((value: boolean) => void) | undefined;
+    const addPromise = new Promise<boolean>((resolve) => {
+      resolveAdd = resolve;
+    });
+    vi.mocked(providersApi.add).mockImplementationOnce(() => addPromise);
+    initializeProviderConfig.mockResolvedValue({
+      id: "codex-multirouter",
+      name: "Codex MultiRouter",
+    });
+    const source: Provider = {
+      id: "relay",
+      name: "Relay",
+      category: "custom",
+      settingsConfig: {
+        baseUrl: "https://example.invalid/v1",
+        auth: { OPENAI_API_KEY: "test-only" },
+        modelCatalog: { models: [{ model: "relay-model" }] },
+      },
+    };
+
+    renderWizard([source]);
+    fireEvent.click(screen.getByRole("button", { name: "启用并验证" }));
+    const saveButton = screen.getByRole("button", { name: "保存并发布" });
+
+    fireEvent.click(saveButton);
+    fireEvent.click(saveButton);
+    expect(providersApi.add).toHaveBeenCalledTimes(1);
+
+    resolveAdd?.(true);
+    await waitFor(() => expect(initializeProviderConfig).toHaveBeenCalled());
+
+    fireEvent.click(screen.getByRole("button", { name: "保存并发布" }));
+    expect(providersApi.add).toHaveBeenCalledTimes(1);
+    expect(providersApi.update).toHaveBeenCalled();
+  });
+
   it("does not require users to choose subagent models in the main wizard", () => {
     renderWizard([
       {
@@ -240,6 +296,37 @@ describe("CodexMultiRouterWizard", () => {
     expect(
       screen.getByRole("button", { name: "配置 Third party source" }),
     ).toBeVisible();
+  });
+
+  it("shows provider-owned readiness details in the model source card", () => {
+    renderWizard([
+      {
+        id: "ready-source",
+        name: "Ready source",
+        category: "custom",
+        settingsConfig: {
+          baseUrl: "https://example.invalid/v1",
+          apiFormat: "openai_responses",
+          auth: { OPENAI_API_KEY: "test-only" },
+          modelCatalog: {
+            models: [
+              {
+                model: "ready-model",
+                contextWindow: 128000,
+                supportsImage: true,
+              },
+            ],
+          },
+        },
+      },
+    ]);
+
+    fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
+    expect(screen.getByText(/认证：API Key 已配置/)).toBeVisible();
+    expect(screen.getByText(/模型目录：1 个/)).toBeVisible();
+    expect(screen.getByText(/协议：openai_responses/)).toBeVisible();
+    expect(screen.getByText(/能力：1\/1 个模型有能力摘要/)).toBeVisible();
+    expect(screen.getByText(/工具\/投影：/)).toBeVisible();
   });
 
   it("reviews schema v2 route policy without inherited endpoint, protocol, or capabilities", () => {

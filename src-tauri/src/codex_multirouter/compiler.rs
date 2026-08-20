@@ -883,6 +883,25 @@ mod tests {
     }
 
     #[test]
+    fn persisted_alias_does_not_follow_provider_rename() {
+        let relay = provider(
+            "relay",
+            "Renamed Relay",
+            "openai_responses",
+            json!([{"model": "shared-model"}]),
+        );
+        let mut relay_route = route("relay-route", "relay", CodexModelSelection::All);
+        relay_route
+            .aliases
+            .insert("shared-model-relay".to_string(), "shared-model".to_string());
+
+        let compiled = compile(&plan(vec![relay_route]), [relay]);
+
+        assert_eq!(compiled.visible_models, vec!["shared-model-relay"]);
+        assert_eq!(compiled.model_catalog[0].canonical_model, "shared-model");
+    }
+
+    #[test]
     fn capability_summary_comes_from_the_canonical_model_entry() {
         let provider = provider(
             "qwen",

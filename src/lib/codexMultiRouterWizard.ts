@@ -48,6 +48,7 @@ export interface WizardPlanBuildResult {
 }
 
 export interface WizardPlanBuildOptions {
+  planId?: string;
   planName?: string;
   catalogModelOrder?: string[];
   spawnAgentModels?: string[];
@@ -921,13 +922,92 @@ function canonicalWizardModelIds(provider: Provider): string[] {
   );
 }
 
+export interface WizardRouteAliasSelectionIssue {
+  routeId: string;
+  alias: string;
+  canonicalModel: string;
+  reason: string;
+}
+
+export function collectWizardRouteAliasSelectionIssues(
+  routes: Array<
+    Pick<
+      CodexRoutingRouteV2,
+      "id" | "targetProviderId" | "modelSelection" | "aliases"
+    >
+  >,
+  providers: Provider[],
+): WizardRouteAliasSelectionIssue[] {
+  const providersById = new Map(
+    providers.map((provider) => [provider.id, provider]),
+  );
+  const issues: WizardRouteAliasSelectionIssue[] = [];
+  for (const route of routes) {
+    const provider = providersById.get(route.targetProviderId);
+    if (!provider) continue;
+    const canonicalIds = canonicalWizardModelIds(provider);
+    const canonicalSet = new Set(
+      canonicalIds.map((model) => model.toLowerCase()),
+    );
+    const selectedSet =
+      route.modelSelection.mode === "all"
+        ? canonicalSet
+        : new Set(
+            route.modelSelection.models.map((model) =>
+              model.trim().toLowerCase(),
+            ),
+          );
+    for (const [alias, target] of Object.entries(route.aliases ?? {})) {
+      const canonicalModel = target.trim();
+      if (!canonicalModel) continue;
+      const canonicalKey = canonicalModel.toLowerCase();
+      if (!canonicalSet.has(canonicalKey)) {
+        issues.push({
+          routeId: route.id,
+          alias,
+          canonicalModel,
+          reason: "别名目标已从 Provider 模型目录移除或重命名。",
+        });
+      } else if (!selectedSet.has(canonicalKey)) {
+        issues.push({
+          routeId: route.id,
+          alias,
+          canonicalModel,
+          reason: "别名目标不在当前 Route 的 canonical selection 中。",
+        });
+      }
+    }
+  }
+  return issues;
+}
+
 // 为模型源生成 provider 分组 route；只引用 targetProviderId，不复制第三方 bearer 密钥。
 export function buildWizardRoutesFromSources(
   providers: Provider[],
   officialAuth?: CodexOfficialAuthConfig,
+  existingRoutes: CodexRoutingRouteV2[] = [],
 ): CodexRoutingRouteV2[] {
   return providers.map((provider) => {
     const modelMap = buildWizardRouteModelMap(provider);
+    const existingRoute = existingRoutes.find(
+      (route) => route.targetProviderId === provider.id,
+    );
+    const canonicalModels = new Set(canonicalWizardModelIds(provider));
+    const aliases = { ...(modelMap ?? {}) };
+    // A generated collision alias becomes part of the route contract on first
+    // save. Keep that persisted spelling when the Provider is renamed later.
+    for (const [visible, canonical] of Object.entries(
+      existingRoute?.aliases ?? {},
+    )) {
+      const target = canonical.trim();
+      if (!target || !canonicalModels.has(target)) continue;
+      for (const [generatedVisible, generatedTarget] of Object.entries(
+        aliases,
+      )) {
+        if (generatedTarget === target) delete aliases[generatedVisible];
+      }
+      aliases[visible] = target;
+    }
     const oauthAccountId = isWizardCodexOAuthSource(provider)
       ? readWizardCodexOAuthAccountId(provider)
       : undefined;
@@ -938,13 +1018,13 @@ export function buildWizardRoutesFromSources(
       targetProviderId: provider.id,
       modelSelection: { mode: "all" },
       matchPrefixes: inferWizardRoutePrefixes(provider),
-      aliases: modelMap
-        ? Object.fromEntries(
-            Object.entries(modelMap).filter(
-              ([visible, canonical]) => visible !== canonical,
-            ),
-          )
-        : {},
+      aliases: Object.fromEntries(
+        Object.entries(aliases).filter(
+          ([visible, canonical]) =>
+            visible.trim() !== canonical.trim() &&
+            canonicalModels.has(canonical.trim()),
+        ),
+      ),
       authPolicy:
         officialAuth && isWizardCodexOAuthSource(provider)
           ? codexOfficialAuthRouteBinding(officialAuth)
@@ -1068,6 +1148,33 @@ export function buildCodexMultiRouterWizardPlan(
     collisionResolvedSources,
     options.catalogModelOrder,
   );
+  const selectedCanonicalByProvider = new Map(
+    resolvedSources.map((provider) => [
+      provider.id,
+      new Set(canonicalWizardModelIds(provider)),
+    ]),
+  );
+  const canonicalSourceProviders = sourceProviders
+    .map((provider) => {
+      const selected = selectedCanonicalByProvider.get(provider.id);
+      if (!selected) return provider;
+      const models = readWizardModelCatalog(provider).filter((model) =>
+        selected.has(
+          (model.upstreamModel ?? model.upstream_model ?? model.model).trim(),
+        ),
+      );
+      return {
+        ...provider,
+        settingsConfig: {
+          ...provider.settingsConfig,
+          modelCatalog: {
+            ...(provider.settingsConfig?.modelCatalog ?? {}),
+            models,
+          },
+        },
+      };
+    })
+    .filter((provider) => readWizardModelCatalog(provider).length > 0);
   const existingRouting = existingPlan?.settingsConfig?.codexRouting as
     | CodexRoutingConfig
     | undefined;
@@ -1086,6 +1193,7 @@ export function buildCodexMultiRouterWizardPlan(
   const routes: CodexRoutingRouteV2[] = buildWizardRoutesFromSources(
     resolvedSources,
     officialAuth,
+    existingRoutingV2?.routes ?? [],
   ).map((route) => {
     if (!options.catalogModelOrder) return route;
     const selectedSource = resolvedSources.find(
@@ -1135,6 +1243,7 @@ export function buildCodexMultiRouterWizardPlan(
   const existingIds = new Set(allProviders.map((provider) => provider.id));
   const planId =
     existingPlan?.id ??
+    options.planId ??
     (existingIds.has(CODEX_MULTI_ROUTER_DEFAULT_ID)
       ? `${CODEX_MULTI_ROUTER_DEFAULT_ID}-${Date.now()}`
       : CODEX_MULTI_ROUTER_DEFAULT_ID);
@@ -1161,5 +1270,5 @@ export function buildCodexMultiRouterWizardPlan(
       hostedTools,
     },
   };
-  return { plan, sourceProviders: resolvedSources };
+  return { plan, sourceProviders: canonicalSourceProviders };
 }

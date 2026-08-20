@@ -54,6 +54,7 @@ import {
 } from "@/lib/api/model-fetch";
 import {
   CODEX_MULTI_ROUTER_DEFAULT_NAME,
+  CODEX_MULTI_ROUTER_DEFAULT_ID,
   CODEX_MULTI_ROUTER_WIZARD_DISMISSED_KEY,
   DEFAULT_CODEX_OFFICIAL_AUTH,
   applyWizardConnectivityApiFormatOverrides,
@@ -63,6 +64,7 @@ import {
   classifyWizardDualProtocolConnectivityResult,
   classifyWizardConnectivityResult,
   collectWizardModelNameCollisions,
+  collectWizardRouteAliasSelectionIssues,
   defaultWizardModelSources,
   getWizardConnectivityProbeModels,
   getWizardConfigIssues,
@@ -70,6 +72,7 @@ import {
   isWizardCatalogOnlyModelSource,
   isWizardCodexOAuthSource,
   inferCodexOfficialAuth,
+  inferWizardApiFormat,
   isCodexMultiRouterPlan,
   mergeFetchedModelsIntoWizardProvider,
   readWizardCodexOAuthAccountId,
@@ -345,6 +348,38 @@ function modelSourceSummary(provider: Provider): string {
   const models = readWizardModelCatalog(provider);
   if (models.length === 0) return "尚未获取模型";
   return `${models.length} 个模型`;
+}
+
+function modelSourceStatusDetails(provider: Provider): string[] {
+  const models = readWizardModelCatalog(provider);
+  const fetchConfig = getWizardModelFetchConfig(provider);
+  const auth = isWizardCodexOAuthSource(provider)
+    ? "OAuth 已绑定"
+    : fetchConfig?.apiKey
+      ? "API Key 已配置"
+      : "凭据待补全";
+  const protocol = inferWizardApiFormat(provider);
+  const capabilityCount = models.filter(
+    (model) =>
+      model.contextWindow !== undefined ||
+      model.supportsImage === true ||
+      model.vision === true ||
+      model.textOnly !== undefined,
+  ).length;
+  const tools = provider.settingsConfig?.hostedTools
+    ? "工具配置已声明"
+    : "工具配置由 Provider 维护";
+  const projection = provider.settingsConfig?.codexRouting
+    ? "已有路由投影"
+    : "待写入 Route 投影";
+  return [
+    `认证：${auth}`,
+    `模型目录：${models.length} 个`,
+    `协议：${protocol}`,
+    `能力：${capabilityCount}/${models.length} 个模型有能力摘要`,
+    `OAuth：${isWizardCodexOAuthSource(provider) ? "是" : "否"}`,
+    `工具/投影：${tools}；${projection}`,
+  ];
 }
 
 // 生成模型目录对比签名；只比较会影响路由、展示、上下文和多模态能力的字段。
@@ -651,6 +686,8 @@ export function CodexMultiRouterWizard({
   const [isLoadingMigration, setIsLoadingMigration] = useState(false);
   const [isApplyingMigration, setIsApplyingMigration] = useState(false);
   const initializedOpenRef = useRef(false);
+  const createPlanIdRef = useRef<string | null>(null);
+  const saveInFlightRef = useRef<Promise<void> | null>(null);
 
   const resolvedMode =
     mode ??
@@ -667,6 +704,7 @@ export function CodexMultiRouterWizard({
       : providers.find((provider) => isCodexMultiRouterPlan(provider));
   }, [planId, providers, resolvedMode]);
   const existingPlan = migratedPlanOverride ?? storedExistingPlan;
+  const activePlan = savedPlan ?? existingPlan;
   const editingTargetMissing = resolvedMode === "edit" && !existingPlan;
   const providerModelSources = useMemo(
     () => defaultWizardModelSources(providers),
@@ -784,11 +822,23 @@ export function CodexMultiRouterWizard({
   useEffect(() => {
     if (!open) {
       initializedOpenRef.current = false;
+      createPlanIdRef.current = null;
+      saveInFlightRef.current = null;
       return;
     }
     if (initializedOpenRef.current) return;
 
     initializedOpenRef.current = true;
+    if (existingPlan) {
+      createPlanIdRef.current = existingPlan.id;
+    } else if (!createPlanIdRef.current) {
+      const defaultId = CODEX_MULTI_ROUTER_DEFAULT_ID;
+      createPlanIdRef.current = providers.some(
+        (provider) => provider.id === defaultId,
+      )
+        ? `${defaultId}-${Date.now()}`
+        : defaultId;
+    }
     setSavedPlan(existingPlan ?? null);
     setDraftSources(providerModelSources);
     setSelectedSourceIds(providerModelSources.map((provider) => provider.id));
@@ -842,7 +892,7 @@ export function CodexMultiRouterWizard({
   // 因此打开期间不需要用父层快照覆盖当前草稿。
   useEffect(() => {
     if (!open || !initializedOpenRef.current) return;
-    setSavedPlan(existingPlan ?? null);
+    setSavedPlan((currentPlan) => existingPlan ?? currentPlan);
     setDraftSources((currentSources) => {
       const nextSourceById = new Map(
         providerModelSources.map((provider) => [provider.id, provider]),
@@ -1012,7 +1062,6 @@ export function CodexMultiRouterWizard({
           );
           return;
         }
-        setDraftSources(resolveWizardModelNameCollisions(draftSources));
         dispatchFlow({
           type: "NEXT",
           nextStatus: "routePreview",
@@ -1474,65 +1523,76 @@ export function CodexMultiRouterWizard({
   };
 
   // 保存 MultiRouter provider；这里才真正写入 DB，不会静默切换当前 Codex provider。
-  const saveMultiRouterPlan = async () => {
-    dispatchFlow({ type: "SAVE_START" });
-    clearWizardIssuesForStage("activate");
-    try {
-      const routeReadySources = applyWizardConnectivityApiFormatOverrides(
-        draftSources,
-        connectivityResults,
-      );
-      const result = buildCodexMultiRouterWizardPlan(
-        providers,
-        routeReadySources,
-        existingPlan,
-        {
-          planName: draftPlanName,
-          catalogModelOrder: activeCatalogModelOrder,
-          spawnAgentModels: activeSpawnAgentModels,
-          officialAuth: draftOfficialAuth,
-          hostedTools: {
-            webSearch: { enabled: webSearchEnabled },
-            imageGeneration: { enabled: imageGenerationEnabled },
-          },
-        },
-      );
-      for (const source of routeReadySources) {
-        const draftSource = draftSources.find((item) => item.id === source.id);
-        if (
-          draftSource &&
-          JSON.stringify(draftSource.settingsConfig?.modelCatalog ?? null) !==
-            JSON.stringify(source.settingsConfig?.modelCatalog ?? null)
-        ) {
-          await providersApi.update(source, "codex");
-        }
-      }
-      let savedProvider = result.plan;
-      if (existingPlan) {
-        await providersApi.update(result.plan, "codex");
-      } else {
-        await providersApi.add(result.plan, "codex", false);
-        savedProvider = await codexSubagentV2Api.initializeProviderConfig(
-          result.plan.id,
+  const saveMultiRouterPlan = () => {
+    if (saveInFlightRef.current) return;
+    const saveOperation = (async () => {
+      dispatchFlow({ type: "SAVE_START" });
+      clearWizardIssuesForStage("activate");
+      try {
+        const routeReadySources = applyWizardConnectivityApiFormatOverrides(
+          draftSources,
+          connectivityResults,
         );
+        const result = buildCodexMultiRouterWizardPlan(
+          providers,
+          routeReadySources,
+          activePlan,
+          {
+            planId: activePlan?.id ?? createPlanIdRef.current ?? undefined,
+            planName: draftPlanName,
+            catalogModelOrder: activeCatalogModelOrder,
+            spawnAgentModels: activeSpawnAgentModels,
+            officialAuth: draftOfficialAuth,
+            hostedTools: {
+              webSearch: { enabled: webSearchEnabled },
+              imageGeneration: { enabled: imageGenerationEnabled },
+            },
+          },
+        );
+        for (const source of routeReadySources) {
+          const draftSource = draftSources.find(
+            (item) => item.id === source.id,
+          );
+          if (
+            draftSource &&
+            JSON.stringify(draftSource.settingsConfig?.modelCatalog ?? null) !==
+              JSON.stringify(source.settingsConfig?.modelCatalog ?? null)
+          ) {
+            await providersApi.update(source, "codex");
+          }
+        }
+        let savedProvider = result.plan;
+        if (activePlan) {
+          await providersApi.update(result.plan, "codex");
+        } else {
+          await providersApi.add(result.plan, "codex", false);
+          savedProvider = await codexSubagentV2Api.initializeProviderConfig(
+            result.plan.id,
+          );
+        }
+        setSavedPlan(savedProvider);
+        setDraftSources(result.sourceProviders);
+        await queryClient.invalidateQueries({
+          queryKey: ["providers", "codex"],
+        });
+        toast.success("MultiRouter 方案已保存。", { closeButton: true });
+        dispatchFlow({ type: "SAVE_SUCCESS" });
+      } catch (error) {
+        const message = formatWizardError(error);
+        recordWizardIssue({
+          stage: "activate",
+          severity: "error",
+          title: "MultiRouter 保存失败",
+          detail: message,
+          canContinue: false,
+        });
+        dispatchFlow({ type: "SAVE_ERROR", error: message });
+        toast.error(`MultiRouter 保存失败：${message}`, { closeButton: true });
       }
-      setSavedPlan(savedProvider);
-      setDraftSources(result.sourceProviders);
-      await queryClient.invalidateQueries({ queryKey: ["providers", "codex"] });
-      toast.success("MultiRouter 方案已保存。", { closeButton: true });
-      dispatchFlow({ type: "SAVE_SUCCESS" });
-    } catch (error) {
-      const message = formatWizardError(error);
-      recordWizardIssue({
-        stage: "activate",
-        severity: "error",
-        title: "MultiRouter 保存失败",
-        detail: message,
-        canContinue: false,
-      });
-      dispatchFlow({ type: "SAVE_ERROR", error: message });
-      toast.error(`MultiRouter 保存失败：${message}`, { closeButton: true });
-    }
+    })();
+    saveInFlightRef.current = saveOperation.finally(() => {
+      saveInFlightRef.current = null;
+    });
   };
 
   // 启用动作复用 App 里的 switchProvider 路径，保证 Codex 接管和 OAuth 保留逻辑保持一致。
@@ -1570,8 +1630,9 @@ export function CodexMultiRouterWizard({
   const planPreviewResult = buildCodexMultiRouterWizardPlan(
     providers,
     routeReadySources,
-    existingPlan,
+    activePlan,
     {
+      planId: activePlan?.id ?? createPlanIdRef.current ?? undefined,
       planName: draftPlanName,
       catalogModelOrder: activeCatalogModelOrder,
       spawnAgentModels: activeSpawnAgentModels,
@@ -1582,9 +1643,13 @@ export function CodexMultiRouterWizard({
   const previewRoutes = (planPreview.settingsConfig.codexRouting?.routes ??
     []) as CodexRoutingRouteV2[];
   const previewModels = buildWizardModelCatalog(
-    planPreviewResult.sourceProviders,
+    resolveWizardModelNameCollisions(planPreviewResult.sourceProviders),
     { catalogModelOrder: activeCatalogModelOrder },
   ).models;
+  const aliasSelectionIssues = collectWizardRouteAliasSelectionIssues(
+    previewRoutes,
+    routeReadySources,
+  );
   const availableModelByName = new Map(
     availableCatalogModels.map((model) => [model.model, model]),
   );
@@ -1671,18 +1736,18 @@ export function CodexMultiRouterWizard({
             >
               <div>
                 <div className="text-sm font-semibold">
-                  {resolvedMode === "edit" && existingPlan
-                    ? `正在编辑：${existingPlan.name}`
+                  {activePlan
+                    ? `正在编辑：${activePlan.name}`
                     : "正在创建：新的 MultiRouter 配置"}
                 </div>
                 <div className="mt-1 text-xs text-muted-foreground">
-                  {resolvedMode === "edit" && existingPlan
-                    ? existingPlan.id
+                  {activePlan
+                    ? activePlan.id
                     : "新配置不会覆盖已有 MultiRouter；保存后将生成独立方案。"}
                 </div>
               </div>
               <Badge variant="outline">
-                {resolvedMode === "edit" ? "编辑旧配置" : "创建新配置"}
+                {activePlan ? "编辑当前方案" : "创建新配置"}
               </Badge>
             </div>
             {editingTargetMissing ? (
@@ -1911,6 +1976,13 @@ export function CodexMultiRouterWizard({
                             </div>
                             <div className="mt-2 text-sm text-muted-foreground">
                               {cardState.modelCount} 个模型
+                            </div>
+                            <div className="mt-2 space-y-0.5 text-xs leading-5 text-muted-foreground">
+                              {modelSourceStatusDetails(provider).map(
+                                (detail) => (
+                                  <div key={detail}>{detail}</div>
+                                ),
+                              )}
                             </div>
                           </div>
                           <Badge
@@ -2239,6 +2311,19 @@ export function CodexMultiRouterWizard({
                     </div>
                   </div>
                 ))}
+                {aliasSelectionIssues.length > 0 ? (
+                  <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
+                    <div className="font-medium">别名需要处理</div>
+                    <div className="mt-1 space-y-1 text-xs leading-5">
+                      {aliasSelectionIssues.map((issue) => (
+                        <div key={`${issue.routeId}:${issue.alias}`}>
+                          Route {issue.routeId} 的“{issue.alias}”→“
+                          {issue.canonicalModel}”：{issue.reason}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
               </div>
             )}
 
@@ -2247,14 +2332,21 @@ export function CodexMultiRouterWizard({
                 <div className="rounded-lg border p-4 text-sm text-muted-foreground">
                   将保存 {previewRoutes.length} 条路由和 {previewModels.length}{" "}
                   个可见模型到{" "}
-                  {existingPlan ? existingPlan.name : "新的 MultiRouter"}。
+                  {activePlan ? activePlan.name : "新的 MultiRouter"}。
                 </div>
+                {draftSources.length === 0 ? (
+                  <div className="rounded-lg border border-dashed border-amber-500/40 bg-amber-500/10 p-4 text-sm leading-6 text-amber-900 dark:text-amber-100">
+                    尚未选择模型源，保存入口仍保留；请回到“选择模型源”添加并配置至少一个
+                    Provider 后再保存。
+                  </div>
+                ) : null}
                 <Button
                   onClick={saveMultiRouterPlan}
                   disabled={
                     isSavingPlan ||
                     editingTargetMissing ||
                     draftSources.length === 0 ||
+                    aliasSelectionIssues.length > 0 ||
                     (connectivityResults.length > 0 &&
                       !canContinueAfterConnectivity(connectivityResults))
                   }

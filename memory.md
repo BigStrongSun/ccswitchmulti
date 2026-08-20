@@ -1,10 +1,12 @@
 # CC Switch Repository Memory
 
-## 2026-08-21 reasoning 保存门禁合并后复核
+## 2026-08-21 MultiRouter Provider SSOT v2 向导回归收口
 
-- 当前 `main` 为 `b7865131`（`Merge MultiRouter Provider SSOT v2 into main`），`1c593285` 的 Provider add/update reasoning completeness 门禁仍在祖先链中。聚焦验证通过：Rust `provider_persistence` 2/2、V2 profile editor 126/126；Rust 全量 `3246 passed / 0 failed / 5 ignored`；TypeScript、cargo fmt、Prettier 和 diff check 通过。
-- 合并后全量 Vitest 当前为 `140 files passed / 2 failed`（`1143 passed / 2 failed`）。两个失败来自仍未提交的 MultiRouter SSOT 工作树：`useDeleteProviderMutation.test.tsx` 期待删除 Codex provider 后同步更新 MultiRouter，但实际 update 未调用；`CodexMultiRouterWizard.test.tsx` 期待 model source card 显示 provider-owned readiness（认证/目录/协议），当前渲染未提供对应文本。不得把这两个失败归因于 reasoning gate，也不得在本轮回滚或混入这些 dirty files。
-- 因主树验证尚未全绿，不能发布新 release。收口顺序：先由 SSOT 改动所有者定位并修复这两项行为/测试，再在干净工作树重跑 Vitest、Rust、typecheck、fmt；随后从最终 HEAD 重新构建并做安装态 canary，最后才审计 tag/release 资产。
+- 当前 `main` 已包含 `b7865131`（`Merge MultiRouter Provider SSOT v2 into main`）及本轮向导回归修复。根因是旧向导仍依赖前端逐个重建路由快照，导致无方案最终页为空、Provider 状态不完整、别名随 Provider 改名漂移，以及重复点击保存创建多个方案；修复已统一到 Provider-owned catalog + Route policy 的 SSOT coordinator。
+- 向导现在在无 MultiRouter/无模型源/迁移中/保存后都显示可执行内容；模型源状态卡展示认证、目录、协议、能力、OAuth、工具和投影状态，并保留跳转 Provider 详细配置入口。保存使用稳定 plan ID、in-flight Promise 门禁和保存后绑定当前编辑目标，重复点击只更新同一方案。
+- Alias 只持久化 Route 的显式 visible→canonical 映射；Provider 改名不会漂移，alias target 不在 canonical/all/include selection 时拒绝保存并显示错误。Rust compiler 回归覆盖 Provider 改名保留 alias。
+- 门禁结果：Vitest `142 files passed / 1146 passed`；Rust `3246 passed / 0 failed / 5 ignored`；`pnpm typecheck`、本轮 TS/TSX Prettier、`cargo fmt --check`、`git diff --check` 均通过。测试输出仍有既有 React act、Radix、MSW/Tauri mock 警告，但无失败。
+- 仍未完成真实 UI 验收、安装态 canary 和 Mac canary，因此当前只可称为代码与测试收口，不能宣称正式 release。
 
 ## 2026-08-19 恢复 Qwen/vLLM 缺省输出上限 131072（对齐 Qwen3.8-27B 官方最大输出）
 

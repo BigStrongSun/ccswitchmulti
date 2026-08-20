@@ -7,6 +7,7 @@ import {
   canContinueAfterConnectivity,
   classifyWizardConnectivityResult,
   collectWizardModelNameCollisions,
+  collectWizardRouteAliasSelectionIssues,
   defaultWizardModelSources,
   getWizardConfigIssues,
   getWizardModelFetchConfig,
@@ -928,6 +929,92 @@ describe("codexMultiRouterWizard helpers", () => {
         targetProviderId: "relay",
         modelSelection: { mode: "include", models: ["gpt-5.5"] },
         aliases: { "gpt-5.5-relay": "gpt-5.5" },
+      }),
+    ]);
+  });
+
+  it("keeps a materialized route alias stable after the provider is renamed", () => {
+    const official = provider({
+      id: "openai-official",
+      name: "OpenAI Official",
+      category: "official",
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "gpt-5.5" }] },
+      },
+    });
+    const renamedRelay = provider({
+      id: "relay",
+      name: "Renamed Relay",
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "gpt-5.5" }] },
+      },
+    });
+    const existingPlan = provider({
+      id: "router",
+      name: "Router",
+      settingsConfig: {
+        codexRouting: {
+          schemaVersion: 2,
+          enabled: true,
+          routes: [
+            {
+              id: "router-relay",
+              label: "Old Relay",
+              enabled: true,
+              targetProviderId: "relay",
+              modelSelection: { mode: "include", models: ["gpt-5.5"] },
+              matchPrefixes: [],
+              aliases: { "gpt-5.5-relay": "gpt-5.5" },
+            },
+          ],
+        },
+      },
+    });
+
+    const { plan, sourceProviders } = buildCodexMultiRouterWizardPlan(
+      [official, renamedRelay, existingPlan],
+      [official, renamedRelay],
+      existingPlan,
+    );
+
+    expect(
+      plan.settingsConfig.codexRouting.routes.find(
+        (route: { targetProviderId?: string }) =>
+          route.targetProviderId === "relay",
+      ),
+    ).toEqual(
+      expect.objectContaining({
+        targetProviderId: "relay",
+        aliases: { "gpt-5.5-relay": "gpt-5.5" },
+      }),
+    );
+    expect(sourceProviders[1].settingsConfig.modelCatalog.models).toEqual([
+      { model: "gpt-5.5" },
+    ]);
+  });
+
+  it("reports aliases whose canonical target is no longer selected", () => {
+    const relay = provider({
+      id: "relay",
+      name: "Relay",
+      settingsConfig: {
+        modelCatalog: {
+          models: [{ model: "kept" }, { model: "removed" }],
+        },
+      },
+    });
+    const route = {
+      id: "relay-route",
+      targetProviderId: "relay",
+      modelSelection: { mode: "include" as const, models: ["kept"] },
+      aliases: { "removed-alias": "removed" },
+    };
+
+    expect(collectWizardRouteAliasSelectionIssues([route], [relay])).toEqual([
+      expect.objectContaining({
+        routeId: "relay-route",
+        alias: "removed-alias",
+        canonicalModel: "removed",
       }),
     ]);
   });
