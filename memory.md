@@ -3945,3 +3945,10 @@
 - Rust `project_codex_model_descriptor` 不再为缺声明模型补 `defaultReasoningEffort=medium`；CDP `descriptorFor()` 也移除硬编码四档和 medium，只负责 identity/display/visibility 和保留现有完整 entry。因此 unknown reasoning 保持 unknown，不会因 Desktop fallback 被升级成 confirmed supported。
 - TDD RED 证据：inline Qwen 缺模态断言失败；unknown Rust projection 出现 medium 断言失败；CDP fallback 出现默认/四档断言失败；官方 personality/specialty inline 断言失败。实现后聚焦 inline 1/1、Desktop 25/25、Rust lib 3189 passed / 0 failed / 5 ignored、Vitest 141 files / 1136 tests 全过。
 - 当前只是源码与测试收口，未构建、安装、停止或替换运行中的 CCSM。真实验收仍需新安装包后检查官方推理/service tier、第三方档位、纯文本图片入口和 Sub-Agent V1/V2。
+
+## 2026-08-20 DeepSeek MCP tool_search 能力声明根修（upstream PR #6653）
+
+- 官方仓库 PR `farion1231/cc-switch#6653` 指出 bundled DeepSeek catalog 把 `supports_search_tool` 错写为 `true`。OpenAI Codex 的 `search_tool_enabled` 实际用该字段与 provider namespace capability 一起决定是否把 MCP 工具从 direct exposure 延迟到 `tool_search`；它不是 hosted web search 的总开关。
+- DeepSeek Responses 网关没有 Codex `tool_search` 协议能力。错误的 true 会让 MCP 工具不再内联，而模型又无法通过 tool_search 发现它们；`web_search_tool_type` 与 provider web-search capability 是独立门控，改成 false 不会关闭 DeepSeek hosted web search。
+- 本地集成采用 PR 的两处模板修正，并新增覆盖 bundled `deepseek-v4-pro` 与 `deepseek-v4-flash` 全部条目的回归测试。测试先 RED（实际读到 true），再改为 false 转 GREEN；不能只测试一个模型，否则另一个条目未来仍可能漂移。
+- 本轮只合入本地 main，不推送、不发布、不构建或安装，也不替换运行中的 CCSM。

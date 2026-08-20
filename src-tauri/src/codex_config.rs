@@ -7387,6 +7387,23 @@ pub fn remove_codex_toml_base_url_if(toml_str: &str, predicate: impl Fn(&str) ->
 mod tests {
     use super::*;
 
+    #[test]
+    fn deepseek_vendor_catalog_keeps_mcp_tools_directly_visible() {
+        let models = load_codex_deepseek_official_catalog_models();
+        assert!(
+            !models.is_empty(),
+            "bundled DeepSeek catalog must have models"
+        );
+
+        for model in models {
+            assert_eq!(
+                model.get("supports_search_tool"),
+                Some(&json!(false)),
+                "DeepSeek cannot consume Codex tool_search; MCP tools must remain inline"
+            );
+        }
+    }
+
     fn reasoning_inspect_provider() -> Provider {
         Provider::with_id(
             "provider-qwen".into(),
