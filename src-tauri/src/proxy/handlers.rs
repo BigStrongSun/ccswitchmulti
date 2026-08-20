@@ -38,7 +38,8 @@ use super::{
         streaming_gemini::create_anthropic_sse_stream_from_gemini,
         streaming_retry::{
             create_resilient_anthropic_sse_stream_from_responses,
-            create_resilient_responses_sse_stream, StreamReconnector,
+            create_resilient_responses_sse_stream_with_context, StreamLogContext,
+            StreamReconnector,
         },
         transform, transform_codex_anthropic, transform_codex_chat,
         transform_codex_responses_namespace, transform_gemini, transform_responses,
@@ -2635,9 +2636,8 @@ pub async fn handle_responses(
 fn should_wrap_native_codex_responses_stream(
     request_is_streaming: bool,
     response: &super::hyper_client::ProxyResponse,
-    has_reconnector: bool,
 ) -> bool {
-    request_is_streaming && has_reconnector && response.status().is_success() && !response.is_json()
+    request_is_streaming && response.status().is_success() && !response.is_json()
 }
 
 pub async fn handle_grokbuild_responses(
@@ -2829,19 +2829,23 @@ async fn handle_responses_for_app(
             .await;
     }
 
-    let response = if should_wrap_native_codex_responses_stream(
-        is_stream,
-        &response,
-        stream_reconnect.is_some(),
-    ) {
+    let response = if should_wrap_native_codex_responses_stream(is_stream, &response) {
         let status = response.status();
         let response_headers = response.headers().clone();
         super::hyper_client::ProxyResponse::streamed(
             status,
             response_headers,
-            create_resilient_responses_sse_stream(
+            create_resilient_responses_sse_stream_with_context(
                 Box::pin(response.bytes_stream()),
                 stream_reconnect,
+                Some(StreamLogContext {
+                    session_id: ctx.session_id.clone(),
+                    model: ctx
+                        .outbound_model
+                        .clone()
+                        .unwrap_or_else(|| ctx.request_model.clone()),
+                    provider_id: ctx.provider.id.clone(),
+                }),
             ),
         )
     } else {
@@ -5463,15 +5467,8 @@ mod tests {
             HeaderMap::new(),
             futures::stream::empty::<Result<bytes::Bytes, std::io::Error>>(),
         );
-        assert!(should_wrap_native_codex_responses_stream(
-            true, &response, true
-        ));
-        assert!(!should_wrap_native_codex_responses_stream(
-            false, &response, true
-        ));
-        assert!(!should_wrap_native_codex_responses_stream(
-            true, &response, false
-        ));
+        assert!(should_wrap_native_codex_responses_stream(true, &response));
+        assert!(!should_wrap_native_codex_responses_stream(false, &response));
 
         let mut json_headers = HeaderMap::new();
         json_headers.insert("content-type", HeaderValue::from_static("application/json"));
@@ -5482,8 +5479,7 @@ mod tests {
         );
         assert!(!should_wrap_native_codex_responses_stream(
             true,
-            &json_response,
-            true
+            &json_response
         ));
     }
 

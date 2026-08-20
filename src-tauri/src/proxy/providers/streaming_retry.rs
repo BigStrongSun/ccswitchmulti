@@ -35,6 +35,7 @@ use crate::proxy::sse::{strip_sse_field, take_sse_block};
 use bytes::{Bytes, BytesMut};
 use futures::stream::{Stream, StreamExt};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
@@ -72,6 +73,17 @@ pub(crate) type ConnectFn = Box<dyn Fn() -> ConnectFuture + Send + Sync>;
 pub struct StreamReconnector {
     connect: ConnectFn,
     first_byte_timeout: Duration,
+}
+
+/// 上游原生 Responses SSE 的最小排障关联信息。
+///
+/// 这里只保留本地 session/provider/model 标识，不携带请求正文、header 或完整
+/// 上游错误消息；错误消息只会以固定类别和短 hash 进入 router log。
+#[derive(Clone, Debug)]
+pub(crate) struct StreamLogContext {
+    pub(crate) session_id: String,
+    pub(crate) model: String,
+    pub(crate) provider_id: String,
 }
 
 impl StreamReconnector {
@@ -140,6 +152,152 @@ fn raw_responses_sse_event_name(block: &[u8]) -> Option<String> {
     None
 }
 
+struct NativeResponsesSseErrorDiagnostic {
+    event_name: String,
+    error_type: String,
+    message_class: &'static str,
+    message_hash: String,
+}
+
+/// 从原生 Responses SSE 错误事件提取不含正文的诊断摘要。
+///
+/// 上游可能把错误放在 `/error`、`/response/error`，也可能只给事件名。日志只
+/// 保存固定类别、受限 error type 和消息 hash，避免把 prompt、策略文本或 token
+/// 写入本机日志。
+fn native_responses_sse_error_diagnostic(
+    block: &[u8],
+) -> Option<NativeResponsesSseErrorDiagnostic> {
+    let text = std::str::from_utf8(block).ok()?;
+    let mut event_name = None;
+    let mut data_lines = Vec::new();
+    for line in text.lines() {
+        if let Some(event) = strip_sse_field(line, "event") {
+            event_name = Some(event.trim().to_string());
+        } else if let Some(data) = strip_sse_field(line, "data") {
+            data_lines.push(data);
+        }
+    }
+
+    let value = serde_json::from_str::<Value>(&data_lines.join("\n")).ok();
+    let event_name = event_name.or_else(|| {
+        value
+            .as_ref()
+            .and_then(|value| value.get("type"))
+            .and_then(Value::as_str)
+            .map(ToString::to_string)
+    })?;
+    if !matches!(
+        event_name.as_str(),
+        "response.failed" | "error" | "response.error"
+    ) {
+        return None;
+    }
+
+    let error = value.as_ref().and_then(|value| {
+        value
+            .pointer("/response/error")
+            .or_else(|| value.get("error"))
+    });
+    let error_type = error
+        .and_then(|error| {
+            error
+                .get("type")
+                .and_then(Value::as_str)
+                .or_else(|| error.get("code").and_then(Value::as_str))
+        })
+        .map(sanitize_diagnostic_token)
+        .unwrap_or_else(|| "upstream_error".to_string());
+    let message = error
+        .and_then(|error| error.get("message").and_then(Value::as_str))
+        .or_else(|| {
+            value
+                .as_ref()
+                .and_then(|value| value.get("message"))
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("");
+    let lower = format!("{} {}", error_type, message).to_ascii_lowercase();
+    let message_class = if lower.contains("policy")
+        || lower.contains("safety")
+        || lower.contains("moderation")
+        || lower.contains("violat")
+        || lower.contains("invalid prompt")
+    {
+        "policy_or_safety"
+    } else {
+        "upstream_error"
+    };
+    let digest = Sha256::digest(message.as_bytes());
+    let message_hash = format!("{digest:x}")[..16].to_string();
+
+    Some(NativeResponsesSseErrorDiagnostic {
+        event_name,
+        error_type,
+        message_class,
+        message_hash,
+    })
+}
+
+fn sanitize_diagnostic_token(value: &str) -> String {
+    let token: String = value
+        .chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
+        })
+        .take(64)
+        .collect();
+    if token.is_empty() {
+        "upstream_error".to_string()
+    } else {
+        token
+    }
+}
+
+fn log_native_responses_sse_error(context: &StreamLogContext, block: &[u8], attempt: u32) {
+    let Some(diagnostic) = native_responses_sse_error_diagnostic(block) else {
+        return;
+    };
+    crate::proxy::codex_router_log::append_event(
+        "upstream_sse_error",
+        &[
+            ("stage", "native_responses".to_string()),
+            ("session", context.session_id.clone()),
+            ("model", context.model.clone()),
+            ("provider", context.provider_id.clone()),
+            ("event", diagnostic.event_name),
+            ("error_type", diagnostic.error_type),
+            ("message_class", diagnostic.message_class.to_string()),
+            ("message_hash", diagnostic.message_hash),
+            ("attempt", attempt.to_string()),
+        ],
+    );
+}
+
+fn observe_native_responses_sse_stream(
+    initial: ByteStream,
+    context: StreamLogContext,
+) -> ByteStream {
+    const MAX_OBSERVATION_BUFFER: usize = 256 * 1024;
+    Box::pin(async_stream::stream! {
+        let mut stream = initial;
+        let mut buffer = BytesMut::new();
+        while let Some(item) = stream.next().await {
+            if let Ok(chunk) = &item {
+                buffer.extend_from_slice(chunk);
+                while let Some(block) = take_raw_sse_block(&mut buffer) {
+                    log_native_responses_sse_error(&context, &block, 0);
+                }
+                // A malformed upstream stream must not make the diagnostic observer
+                // retain unbounded bytes; the original chunk is still forwarded.
+                if buffer.len() > MAX_OBSERVATION_BUFFER {
+                    buffer.clear();
+                }
+            }
+            yield item;
+        }
+    })
+}
+
 fn raw_sse_block_is_comment(block: &[u8]) -> bool {
     block
         .iter()
@@ -179,13 +337,31 @@ fn native_responses_transport_error_sse(message: &str) -> Bytes {
 /// SSE 注释已被发出时，重新执行同一上游请求仍可对客户端透明；任何其它事件
 /// （包括 malformed block）都可能已经进入 Codex 持久化/工具状态机，立即封死
 /// 重放路径。这样中途异常只会作为一次普通断流交给 Codex，而不会造成重复调用。
+#[allow(dead_code)]
 pub fn create_resilient_responses_sse_stream(
     initial: ByteStream,
     reconnector: Option<StreamReconnector>,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
+    create_resilient_responses_sse_stream_with_context(initial, reconnector, None)
+}
+
+/// 原生 Responses SSE 透传的可观测版本：在不记录正文的前提下，把中途
+/// `response.failed`/`error` 事件写入 CCSM router log，并保留原有重连语义。
+pub(crate) fn create_resilient_responses_sse_stream_with_context(
+    initial: ByteStream,
+    reconnector: Option<StreamReconnector>,
+    log_context: Option<StreamLogContext>,
+) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
     async_stream::stream! {
         let Some(reconnector) = reconnector else {
-            let mut stream = initial;
+            let Some(context) = log_context else {
+                let mut stream = initial;
+                while let Some(item) = stream.next().await {
+                    yield item;
+                }
+                return;
+            };
+            let mut stream = observe_native_responses_sse_stream(initial, context);
             while let Some(item) = stream.next().await {
                 yield item;
             }
@@ -263,6 +439,9 @@ pub fn create_resilient_responses_sse_stream(
                             yield Ok(block);
                         }
                         Some("response.completed" | "response.failed" | "error") => {
+                            if let Some(context) = log_context.as_ref() {
+                                log_native_responses_sse_error(context, &block, attempt);
+                            }
                             semantic_output_forwarded = true;
                             terminal = true;
                             yield Ok(block);
@@ -688,6 +867,20 @@ mod tests {
             http::HeaderMap::new(),
             stream::iter(items),
         )
+    }
+
+    #[test]
+    fn native_responses_sse_error_diagnostic_is_redacted_and_classified() {
+        let block = b"event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"type\":\"policy_violation\",\"message\":\"secret prompt text\"}}}\n\n";
+
+        let diagnostic = native_responses_sse_error_diagnostic(block)
+            .expect("response.failed should produce a diagnostic");
+
+        assert_eq!(diagnostic.event_name, "response.failed");
+        assert_eq!(diagnostic.error_type, "policy_violation");
+        assert_eq!(diagnostic.message_class, "policy_or_safety");
+        assert_eq!(diagnostic.message_hash.len(), 16);
+        assert!(!diagnostic.message_hash.contains("secret"));
     }
 
     /// 每次 connect 弹出脚本队列里的下一个结果。
