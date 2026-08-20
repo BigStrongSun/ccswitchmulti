@@ -384,6 +384,12 @@ export interface CodexCatalogModel {
   baseInstructions?: string;
   base_instructions?: string;
   reasoning?: CodexModelReasoningCapability;
+  // MultiRouter schema v2: model-specific transport/caching overrides.
+  // Provider defaults remain authoritative when these fields are absent.
+  apiFormat?: CodexApiFormat;
+  api_format?: CodexApiFormat;
+  codexCache?: CodexCacheConfig;
+  codex_cache?: CodexCacheConfig;
   // User-defined picker order. Lower values appear first in Codex.
   sortIndex?: number;
 }
@@ -472,6 +478,34 @@ export interface CodexRoutingConfig {
   subagentV2?: CodexSubagentV2Config;
   routes?: CodexRoutingRoute[];
 }
+
+export type CodexModelSelectionV2 =
+  | { mode: "all" }
+  | { mode: "include"; models: string[] };
+
+export interface CodexRoutingRouteV2 {
+  id: string;
+  label?: string;
+  enabled?: boolean;
+  targetProviderId: string;
+  modelSelection: CodexModelSelectionV2;
+  matchPrefixes?: string[];
+  aliases?: Record<string, string>;
+  authPolicy?: CodexRoutingAuth;
+}
+
+export interface CodexRoutingConfigV2 {
+  schemaVersion: 2;
+  enabled?: boolean;
+  defaultRouteId?: string;
+  subagentVersion?: CodexSubagentVersion;
+  subagentV2?: CodexSubagentV2Config;
+  routes: CodexRoutingRouteV2[];
+}
+
+export type CodexRoutingConfigDocument =
+  | CodexRoutingConfig
+  | CodexRoutingConfigV2;
 
 // Claude 认证字段类型
 export type ClaudeApiKeyField = "ANTHROPIC_AUTH_TOKEN" | "ANTHROPIC_API_KEY";

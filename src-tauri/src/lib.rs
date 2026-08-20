@@ -9,6 +9,7 @@ pub mod codex_config;
 mod codex_desktop;
 mod codex_guardian;
 pub mod codex_history_migration;
+pub mod codex_multirouter;
 mod codex_state_db;
 pub(crate) mod codex_subagent_profiles;
 mod commands;
