@@ -6,6 +6,7 @@ import type {
   Provider,
 } from "@/types";
 import {
+  inferWizardApiFormat,
   isCodexMultiRouterPlan,
   isWizardCodexOAuthSource,
   readWizardCodexOAuthAccountId,
@@ -263,6 +264,49 @@ function isDeepSeekSplitRoute(route: CodexRoutingRoute): boolean {
   );
 }
 
+// 普通 targetProviderId route 的协议跟随目标 Provider。旧版 route 没有来源标记，
+// 默认按继承处理；DeepSeek Flash/Pro 历史拆分中，与 Provider 协议不同的 route
+// 是有意的模型窗口覆盖，迁移为显式 route_override，避免同步时被抹平。
+function syncRouteApiFormatFromProvider(
+  route: CodexRoutingRoute,
+  targetProvider: Provider,
+): { route: CodexRoutingRoute; changed: boolean } {
+  const providerApiFormat = inferWizardApiFormat(targetProvider);
+  const source = route.upstream.apiFormatSource;
+  const isLegacyDeepSeekOverride =
+    !source &&
+    isDeepSeekSplitRoute(route) &&
+    route.upstream.apiFormat !== providerApiFormat;
+  if (source === "route_override" || isLegacyDeepSeekOverride) {
+    if (source === "route_override") return { route, changed: false };
+    return {
+      route: {
+        ...route,
+        upstream: {
+          ...route.upstream,
+          apiFormatSource: "route_override",
+        },
+      },
+      changed: true,
+    };
+  }
+
+  if (route.upstream.apiFormat === providerApiFormat && source === "provider") {
+    return { route, changed: false };
+  }
+  return {
+    route: {
+      ...route,
+      upstream: {
+        ...route.upstream,
+        apiFormat: providerApiFormat,
+        apiFormatSource: "provider",
+      },
+    },
+    changed: true,
+  };
+}
+
 // route 能力是 MultiRouter 规则侧的覆盖项，重建 catalog 时继续投影到对应模型上。
 function applyRouteCapabilities(
   model: CodexCatalogModel,
@@ -418,17 +462,25 @@ export function syncCodexMultiRouterPlanWithProviders(
       : undefined;
     if (!targetProvider) return route;
 
+    const apiFormatSync = syncRouteApiFormatFromProvider(route, targetProvider);
+    const routeWithSyncedApiFormat = apiFormatSync.route;
+
     const targetModels = readStrictProviderCatalogModels(targetProvider);
     // 目标 provider 当前没有可用 catalog 时不能把已保存 route 当成“用户删除了所有模型”。
     // `/models` 失败、刚创建 provider 或旧配置缺少 modelCatalog 都会走到这里；保留旧
     // match/modelMap，避免第三方中转 alias 被清空后 GPT 请求回落到官方 route。
     if (targetModels.length === 0) {
-      return route;
+      changed ||= apiFormatSync.changed;
+      return routeWithSyncedApiFormat;
     }
-    const nextRouteModels = buildSyncedRouteModels(plan, route, targetModels);
-    const syncedRouteModels = isDeepSeekSplitRoute(route)
+    const nextRouteModels = buildSyncedRouteModels(
+      plan,
+      routeWithSyncedApiFormat,
+      targetModels,
+    );
+    const syncedRouteModels = isDeepSeekSplitRoute(routeWithSyncedApiFormat)
       ? nextRouteModels.filter((model) =>
-          route.match.models?.some(
+          routeWithSyncedApiFormat.match.models?.some(
             (visible) =>
               visible === model.model ||
               visible === catalogModelUpstreamId(model),
@@ -438,19 +490,21 @@ export function syncCodexMultiRouterPlanWithProviders(
     const nextSyncedModelIds = syncedRouteModels
       .map((model) => model.model?.trim())
       .filter((model): model is string => Boolean(model));
-    const previousModelIds = route.match.models ?? [];
+    const previousModelIds = routeWithSyncedApiFormat.match.models ?? [];
     const nextModelMap = buildRouteModelMap(syncedRouteModels);
-    const previousModelMap = route.upstream.modelMap;
+    const previousModelMap = routeWithSyncedApiFormat.upstream.modelMap;
     const routeChanged =
+      apiFormatSync.changed ||
       previousModelIds.join("\n") !== nextSyncedModelIds.join("\n") ||
       JSON.stringify(previousModelMap ?? null) !==
         JSON.stringify(nextModelMap ?? null);
     if (!routeChanged) return route;
 
     changed = true;
-    const { modelMap: _modelMap, ...upstreamWithoutModelMap } = route.upstream;
+    const { modelMap: _modelMap, ...upstreamWithoutModelMap } =
+      routeWithSyncedApiFormat.upstream;
     return {
-      ...route,
+      ...routeWithSyncedApiFormat,
       targetProviderId: targetId,
       match: {
         ...route.match,

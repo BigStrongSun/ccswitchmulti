@@ -951,6 +951,8 @@ export function buildWizardRoutesFromSources(
       },
       upstream: {
         apiFormat: routeApiFormat,
+        apiFormatSource:
+          routeApiFormat === apiFormat ? "provider" : "route_override",
         auth:
           officialAuth && isWizardCodexOAuthSource(provider)
             ? codexOfficialAuthRouteBinding(officialAuth)

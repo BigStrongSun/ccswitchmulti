@@ -474,6 +474,12 @@ describe("codexMultiRouterSync", () => {
     expect(
       synced?.plan.settingsConfig.codexRouting.routes[1].match.models,
     ).toEqual(["deepseek-v4-pro"]);
+    expect(
+      synced?.plan.settingsConfig.codexRouting.routes.map(
+        (route: { upstream: { apiFormat: string } }) =>
+          route.upstream.apiFormat,
+      ),
+    ).toEqual(["openai_responses", "openai_chat"]);
   });
 
   it("同步 provider 模型变更时保留已保存 route 的别名 modelMap", () => {
@@ -812,6 +818,104 @@ describe("codexMultiRouterSync", () => {
       upstreamModel: "gpt-5.5",
       displayName: "LongNows GPT",
       contextWindow: 272000,
+    });
+  });
+
+  it.each([
+    ["openai_chat", "openai_responses"],
+    ["openai_responses", "openai_chat"],
+  ] as const)(
+    "provider 协议从 %s 改为 %s 时同步普通引用 route",
+    (routeApiFormat, providerApiFormat) => {
+      const qwen = provider({
+        id: "qwen",
+        name: "Qwen",
+        meta: { apiFormat: providerApiFormat },
+        settingsConfig: {
+          modelCatalog: { models: [{ model: "qwen3.8" }] },
+        },
+      });
+      const plan = provider({
+        id: "router",
+        settingsConfig: {
+          modelCatalog: { models: [{ model: "qwen3.8" }] },
+          codexRouting: {
+            enabled: true,
+            routes: [
+              {
+                id: "router-qwen",
+                targetProviderId: qwen.id,
+                match: { models: ["qwen3.8"] },
+                upstream: {
+                  apiFormat: routeApiFormat,
+                  auth: { source: "provider_config" },
+                },
+              },
+            ],
+          },
+        },
+      });
+
+      const synced = syncCodexMultiRouterPlanWithProviders(
+        plan,
+        new Map([
+          [qwen.id, qwen],
+          [plan.id, plan],
+        ]),
+      );
+
+      expect(
+        synced?.plan.settingsConfig.codexRouting.routes[0].upstream,
+      ).toMatchObject({
+        apiFormat: providerApiFormat,
+        apiFormatSource: "provider",
+      });
+    },
+  );
+
+  it("保留显式 route 协议覆盖，不跟随 Provider 协议同步", () => {
+    const mixed = provider({
+      id: "mixed",
+      meta: { apiFormat: "openai_responses" },
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "special-chat-model" }] },
+      },
+    });
+    const plan = provider({
+      id: "router",
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "special-chat-model" }] },
+        codexRouting: {
+          enabled: true,
+          routes: [
+            {
+              id: "router-special-chat",
+              targetProviderId: mixed.id,
+              match: { models: ["special-chat-model"] },
+              upstream: {
+                apiFormat: "openai_chat",
+                apiFormatSource: "route_override",
+                auth: { source: "provider_config" },
+              },
+            },
+          ],
+        },
+      },
+    });
+
+    const synced = syncCodexMultiRouterPlanWithProviders(
+      plan,
+      new Map([
+        [mixed.id, mixed],
+        [plan.id, plan],
+      ]),
+    );
+    const nextPlan = synced?.plan ?? plan;
+    expect(
+      nextPlan.settingsConfig.codexRouting.routes[0].upstream,
+    ).toMatchObject({
+      apiFormat: "openai_chat",
+      apiFormatSource: "route_override",
     });
   });
 

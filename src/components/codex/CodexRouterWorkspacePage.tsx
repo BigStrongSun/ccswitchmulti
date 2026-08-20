@@ -176,6 +176,7 @@ type CodexRoute = {
     baseUrl?: string;
     base_url?: string;
     apiFormat?: string;
+    apiFormatSource?: "provider" | "route_override";
     wireApi?: string;
     wire_api?: string;
     targetProviderId?: string;
@@ -1416,6 +1417,7 @@ function createRouteFromProvider(
         (isWizardCodexOAuthSource(provider)
           ? "openai_responses"
           : "openai_chat"),
+      apiFormatSource: "provider",
       auth: isWizardCodexOAuthSource(provider)
         ? codexOfficialAuthRouteBinding(officialAuth)
         : { source: "provider_config" },

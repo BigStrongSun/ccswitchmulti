@@ -2374,6 +2374,7 @@ export function CodexFormFields({
                       upstream: {
                         ...editingRoute.upstream,
                         apiFormat: value as CodexApiFormat,
+                        apiFormatSource: "route_override",
                       },
                     })
                   }

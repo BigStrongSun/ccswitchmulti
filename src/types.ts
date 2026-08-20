@@ -456,6 +456,7 @@ export interface CodexRoutingRoute {
   upstream: {
     baseUrl?: string;
     apiFormat: CodexApiFormat;
+    apiFormatSource?: "provider" | "route_override";
     auth: CodexRoutingAuth;
     apiKey?: string;
     modelMap?: Record<string, string>;
