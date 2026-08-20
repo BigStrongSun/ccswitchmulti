@@ -8,6 +8,14 @@
 - compiler 的 `dependencyFingerprint` 使用 canonical JSON + SHA-256 短摘要，覆盖声明式 plan、非秘密 Provider 连接/认证所有者、effective 模型协议/能力与 `upstreamModel`；HashMap 插入顺序不影响结果。API Key、Token、密码、Cookie、Authorization、prompt cache key 等不会进入 compiled/diagnostic 序列化，未知能力对象也递归删除敏感字段。
 - Task 2 TDD 当前覆盖 10 个行为：Provider 协议继承、单 Provider 模型级混合协议、`all/include`、显式/自动 alias、未知 alias target、模型上下文/模态/推理/缓存、map 顺序稳定、协议/能力/upstream 变更 fingerprint、嵌套秘密脱敏。全库 Clippy 在 Rust 1.95 上仍有 3 个与本分支无关的基线 lint；仅命令行豁免这 3 项后，本模块 `-D warnings` 通过，未修改无关代码。
 
+## 2026-08-20 MultiRouter Provider SSOT v2 运行时解析
+
+- Task 3 将常规 Responses、raw passthrough、图片/外部 OpenAI API 与固定 `routeId` 全部接到 schema v2 compiler；retry 展开阶段保留父 Router，发送前按本次请求从数据库加载最新目标 Provider。v1 继续走原只读 resolver/materializer，二者由 `schemaVersion` 明确分流。
+- `ResolvedCodexRoute` 记录 route/target、visible/canonical/upstream model、effective protocol 及来源、认证所有者、匹配来源和 dependency fingerprint；effective Provider 从最新目标 Provider 开始物化，模型级 `apiFormat`/reasoning/cache/input capability 覆盖 Provider 默认，Route 只应用无密钥认证策略。
+- raw endpoint 不使用 `defaultRouteId`：显式 `routeId` > exact/prefix 模型命中 > official 身份兜底。无 `model` 时不生成空的 model/upstream override，避免 GPT Live/files/images 之类原生 endpoint 被伪模型污染。外部 API 固定 v2 route 同样使用 compiler 和最新目标 Provider，不再调用 `build_codex_route_probe_provider`。
+- 账号池展开只切换 native/managed 认证所有者并维护账号代际，不再把 `meta.api_format` 强制重写为 `openai_responses`；协议仍由模型条目 > Provider 决定。数据库集成测试证明同一未变 Route 下把 Qwen Provider 从 Chat 改为 Responses，下一次 materialization 的转换行为和 fingerprint 立即变化。
+- 本阶段 TDD 新增/覆盖 10 个 v2 runtime 行为；三个补充边界先观察到函数缺失/空模型覆盖失败，再转绿。聚焦回归：Codex Provider 109/109、handlers 84/84、forwarder 153/153、compiler 10/10、schema 5/5；`cargo fmt --check`、`git diff --check` 通过。Clippy 仅报告 3 个既有基线 lint（`redundant_closure`、`manual_find`、`large_enum_variant`），命令行只豁免这三项后 `-D warnings` 通过。
+
 ## 2026-08-19 恢复 Qwen/vLLM 缺省输出上限 131072（对齐 Qwen3.8-27B 官方最大输出）
 
 - 实况：Codex 任务 `01a01722-ca39-77f1-b7da-9d3a9d5fe023` 的 vLLM 透明代理记录出现单条请求 `prompt_tokens=136269 / completion_tokens=125875 / total_tokens=262144 / finish_reasons=["length"]`。根因不是上下文压缩也不是 KV cache，而是 Codex Responses 请求没有显式输出预算、CCSM 转换成 Chat Completions 时也没有补 `max_tokens`，vLLM 把剩余上下文窗口都当成默认输出预算。

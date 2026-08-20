@@ -6,6 +6,13 @@
 //! 支持检测官方 Codex 客户端 (codex_vscode, codex_cli_rs)
 
 use super::{AuthInfo, AuthStrategy, ProviderAdapter};
+use crate::codex_multirouter::compiler::{
+    compile_v2, CodexRoutingCompileError, CompiledCodexModel, CompiledCodexRoute,
+    CompiledCodexRoutingPlan,
+};
+use crate::codex_multirouter::schema::{
+    CodexRouteAuthPolicy, CodexRouteAuthSource, CodexRoutingConfigV2, CodexRoutingDocument,
+};
 use crate::provider::{
     AuthBinding, AuthBindingSource, CodexCacheConfig, CodexChatReasoningConfig, Provider,
     ProviderMeta,
@@ -14,7 +21,7 @@ use crate::proxy::error::ProxyError;
 use crate::proxy::providers::codex_oauth_auth::{CodexAccountPoolPolicy, NATIVE_CODEX_ACCOUNT_ID};
 use regex::Regex;
 use serde_json::{Map, Value as JsonValue};
-use std::sync::LazyLock;
+use std::{collections::HashMap, sync::LazyLock};
 use toml::Value as TomlValue;
 
 const CODEX_ROUTER_PARENT_PROVIDER_ID: &str = "codexRouterParentProviderId";
@@ -113,6 +120,8 @@ pub(crate) fn codex_route_uses_official_agent_backend(route: &JsonValue) -> bool
     let auth = upstream
         .get("auth")
         .or_else(|| route.get("auth"))
+        .or_else(|| route.get("authPolicy"))
+        .or_else(|| route.get("auth_policy"))
         .unwrap_or(upstream);
     auth.get("source")
         .and_then(JsonValue::as_str)
@@ -468,6 +477,526 @@ pub fn resolve_codex_model_routed_provider(
     resolve_codex_model_routed_providers(provider, body)
         .into_iter()
         .next()
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedCodexRoute {
+    pub route_id: String,
+    pub target_provider_id: String,
+    pub visible_model: String,
+    pub canonical_model: String,
+    pub upstream_model: String,
+    pub api_format: String,
+    pub api_format_source: String,
+    pub auth_owner: String,
+    pub dependency_fingerprint: String,
+    pub matched_by: &'static str,
+    pub effective_provider: Provider,
+}
+
+impl ResolvedCodexRoute {
+    pub fn into_effective_provider(mut self) -> Provider {
+        let settings = self
+            .effective_provider
+            .settings_config
+            .as_object_mut()
+            .expect("effective Codex provider settings must be an object");
+        settings.insert(
+            "codexRoutingDependencyFingerprint".to_string(),
+            JsonValue::String(self.dependency_fingerprint),
+        );
+        if !self.visible_model.is_empty() {
+            settings.insert(
+                "codexResolvedVisibleModel".to_string(),
+                JsonValue::String(self.visible_model),
+            );
+        }
+        if !self.canonical_model.is_empty() {
+            settings.insert(
+                "codexResolvedCanonicalModel".to_string(),
+                JsonValue::String(self.canonical_model),
+            );
+        }
+        if !self.upstream_model.is_empty() {
+            settings.insert(
+                CODEX_RESOLVED_UPSTREAM_MODEL_OVERRIDE.to_string(),
+                JsonValue::String(self.upstream_model),
+            );
+        }
+        settings.insert(
+            CODEX_RESOLVED_TARGET_PROVIDER_ID.to_string(),
+            JsonValue::String(self.target_provider_id),
+        );
+        settings.insert(
+            "codexResolvedRouteId".to_string(),
+            JsonValue::String(self.route_id),
+        );
+        settings.insert(
+            "codexResolvedApiFormat".to_string(),
+            JsonValue::String(self.api_format),
+        );
+        settings.insert(
+            "codexResolvedApiFormatSource".to_string(),
+            JsonValue::String(self.api_format_source),
+        );
+        settings.insert(
+            "codexResolvedAuthOwner".to_string(),
+            JsonValue::String(self.auth_owner),
+        );
+        settings.insert(
+            "codexResolvedMatchedBy".to_string(),
+            JsonValue::String(self.matched_by.to_string()),
+        );
+        self.effective_provider
+    }
+}
+
+/// Resolve a schema-v2 route exclusively from the declarative plan and the latest target
+/// Providers. Legacy plans return `Ok(None)` so callers can keep using the read-only v1 path.
+pub fn resolve_codex_v2_routed_provider(
+    router_provider: &Provider,
+    body: &JsonValue,
+    providers: &HashMap<String, Provider>,
+) -> Result<Option<ResolvedCodexRoute>, CodexRoutingCompileError> {
+    let Some((plan, compiled)) = compile_codex_v2_runtime_plan(router_provider, providers)? else {
+        return Ok(None);
+    };
+    let request_model = body
+        .get("model")
+        .and_then(JsonValue::as_str)
+        .map(str::trim)
+        .filter(|model| !model.is_empty());
+    let Some(request_model) = request_model else {
+        return Ok(None);
+    };
+    let exact_model = compiled
+        .model_catalog
+        .iter()
+        .find(|model| model.visible_model.eq_ignore_ascii_case(request_model));
+    let (route, matched_by) = if let Some(model) = exact_model {
+        (
+            compiled
+                .routes
+                .iter()
+                .find(|route| route.id == model.route_id)
+                .expect("compiled model route must exist"),
+            "exact",
+        )
+    } else if let Some(route) = compiled.routes.iter().find(|route| {
+        route.enabled
+            && route.match_prefixes.iter().any(|prefix| {
+                let prefix = prefix.trim();
+                !prefix.is_empty()
+                    && request_model
+                        .to_ascii_lowercase()
+                        .starts_with(&prefix.to_ascii_lowercase())
+            })
+    }) {
+        (route, "prefix")
+    } else {
+        let Some(default_route_id) = plan.default_route_id.as_deref() else {
+            return Ok(None);
+        };
+        let Some(route) = compiled
+            .routes
+            .iter()
+            .find(|route| route.enabled && route.id.eq_ignore_ascii_case(default_route_id))
+        else {
+            return Ok(None);
+        };
+        (route, "default")
+    };
+
+    build_resolved_codex_v2_route(
+        router_provider,
+        &compiled,
+        route,
+        Some(request_model),
+        matched_by,
+        providers,
+    )
+    .map(Some)
+}
+
+/// Resolve raw OpenAI-compatible endpoints through schema v2 without falling back to legacy
+/// route probes. An explicit route id wins; otherwise an exact/prefix model match wins and the
+/// first official-auth route is the endpoint fallback. `defaultRouteId` is intentionally ignored
+/// for raw endpoints so a text-only third-party default cannot consume files/images/live calls.
+pub fn resolve_codex_v2_raw_passthrough_provider(
+    router_provider: &Provider,
+    body: &JsonValue,
+    providers: &HashMap<String, Provider>,
+    explicit_route_id: Option<&str>,
+) -> Result<Option<ResolvedCodexRoute>, CodexRoutingCompileError> {
+    let Some((_plan, compiled)) = compile_codex_v2_runtime_plan(router_provider, providers)? else {
+        return Ok(None);
+    };
+    let request_model = body
+        .get("model")
+        .and_then(JsonValue::as_str)
+        .map(str::trim)
+        .filter(|model| !model.is_empty());
+
+    let (route, matched_by) = if let Some(route_id) = explicit_route_id {
+        let Some(route) = compiled
+            .routes
+            .iter()
+            .find(|route| route.enabled && route.id.eq_ignore_ascii_case(route_id.trim()))
+        else {
+            return Ok(None);
+        };
+        (route, "explicit_route_id")
+    } else if let Some(request_model) = request_model {
+        let exact = compiled
+            .model_catalog
+            .iter()
+            .find(|model| model.visible_model.eq_ignore_ascii_case(request_model))
+            .and_then(|model| {
+                compiled
+                    .routes
+                    .iter()
+                    .find(|route| route.enabled && route.id == model.route_id)
+            });
+        let prefix = compiled.routes.iter().find(|route| {
+            route.enabled
+                && route.match_prefixes.iter().any(|prefix| {
+                    let prefix = prefix.trim();
+                    !prefix.is_empty()
+                        && request_model
+                            .to_ascii_lowercase()
+                            .starts_with(&prefix.to_ascii_lowercase())
+                })
+        });
+        if let Some(route) = exact {
+            (route, "exact")
+        } else if let Some(route) = prefix {
+            (route, "prefix")
+        } else {
+            let Some(route) = compiled
+                .routes
+                .iter()
+                .find(|route| codex_v2_route_is_official(route, providers))
+            else {
+                return Ok(None);
+            };
+            (route, "official_raw_fallback")
+        }
+    } else {
+        let Some(route) = compiled
+            .routes
+            .iter()
+            .find(|route| codex_v2_route_is_official(route, providers))
+        else {
+            return Ok(None);
+        };
+        (route, "official_raw_fallback")
+    };
+
+    build_resolved_codex_v2_route(
+        router_provider,
+        &compiled,
+        route,
+        request_model,
+        matched_by,
+        providers,
+    )
+    .map(Some)
+}
+
+fn compile_codex_v2_runtime_plan(
+    router_provider: &Provider,
+    providers: &HashMap<String, Provider>,
+) -> Result<Option<(CodexRoutingConfigV2, CompiledCodexRoutingPlan)>, CodexRoutingCompileError> {
+    let Some(routing) = router_provider.settings_config.get("codexRouting") else {
+        return Ok(None);
+    };
+    let document =
+        CodexRoutingDocument::parse(routing).map_err(|error| CodexRoutingCompileError {
+            code: error.code,
+            message: error.message,
+        })?;
+    let CodexRoutingDocument::V2(plan) = document else {
+        return Ok(None);
+    };
+    if !plan.enabled {
+        return Ok(None);
+    }
+    let compiled = compile_v2(&plan, providers)?;
+    Ok(Some((plan, compiled)))
+}
+
+fn build_resolved_codex_v2_route(
+    router_provider: &Provider,
+    compiled: &CompiledCodexRoutingPlan,
+    route: &CompiledCodexRoute,
+    request_model: Option<&str>,
+    matched_by: &'static str,
+    providers: &HashMap<String, Provider>,
+) -> Result<ResolvedCodexRoute, CodexRoutingCompileError> {
+    let target_provider =
+        providers
+            .get(&route.target_provider_id)
+            .ok_or_else(|| CodexRoutingCompileError {
+                code: "target_provider_missing".to_string(),
+                message: format!(
+                    "route `{}` target provider `{}` does not exist",
+                    route.id, route.target_provider_id
+                ),
+            })?;
+    let compiled_model = request_model.and_then(|request_model| {
+        compiled.model_catalog.iter().find(|model| {
+            model.route_id == route.id && model.visible_model.eq_ignore_ascii_case(request_model)
+        })
+    });
+    let visible_model = request_model.unwrap_or_default().to_string();
+    let canonical_model = compiled_model
+        .map(|model| model.canonical_model.clone())
+        .unwrap_or_else(|| visible_model.clone());
+    let upstream_model = compiled_model
+        .map(|model| model.upstream_model.clone())
+        .unwrap_or_else(|| visible_model.clone());
+    let mut effective_provider = materialize_codex_v2_provider(
+        router_provider,
+        route,
+        target_provider,
+        &visible_model,
+        &canonical_model,
+        &upstream_model,
+        compiled_model,
+        matched_by,
+    );
+    let protocol = explain_codex_responses_upstream_protocol(&effective_provider);
+    let (api_format, api_format_source) = compiled_model
+        .map(|model| (model.api_format.clone(), model.api_format_source.clone()))
+        .unwrap_or_else(|| {
+            (
+                protocol.protocol.api_format().to_string(),
+                "provider".to_string(),
+            )
+        });
+    // The auth policy may change provider classification, but never owns protocol. Reapply the
+    // compiler's effective model/provider format after auth materialization.
+    let meta = effective_provider
+        .meta
+        .get_or_insert_with(ProviderMeta::default);
+    meta.api_format = Some(api_format.clone());
+
+    Ok(ResolvedCodexRoute {
+        route_id: route.id.clone(),
+        target_provider_id: route.target_provider_id.clone(),
+        visible_model,
+        canonical_model,
+        upstream_model,
+        api_format,
+        api_format_source,
+        auth_owner: codex_v2_auth_owner(&route.auth_policy),
+        dependency_fingerprint: compiled.dependency_fingerprint.clone(),
+        matched_by,
+        effective_provider,
+    })
+}
+
+fn codex_v2_route_is_official(
+    route: &CompiledCodexRoute,
+    providers: &HashMap<String, Provider>,
+) -> bool {
+    if matches!(
+        route.auth_policy.source,
+        CodexRouteAuthSource::NativeCodexAuth | CodexRouteAuthSource::ManagedCodexOauth
+    ) || route
+        .target_provider_id
+        .eq_ignore_ascii_case("codex-official")
+    {
+        return true;
+    }
+    providers
+        .get(&route.target_provider_id)
+        .is_some_and(|provider| {
+            provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.provider_type.as_deref())
+                .is_some_and(|provider_type| provider_type.eq_ignore_ascii_case("codex_oauth"))
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn materialize_codex_v2_provider(
+    router_provider: &Provider,
+    route: &CompiledCodexRoute,
+    target_provider: &Provider,
+    request_model: &str,
+    canonical_model: &str,
+    upstream_model: &str,
+    compiled_model: Option<&CompiledCodexModel>,
+    matched_by: &str,
+) -> Provider {
+    let mut materialized = target_provider.clone();
+    materialized.id = format!("{}::route::{}", router_provider.id, route.id);
+    materialized.name = route
+        .label
+        .clone()
+        .unwrap_or_else(|| target_provider.name.clone());
+    let mut settings = target_provider
+        .settings_config
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    settings.insert(
+        CODEX_ROUTER_PARENT_PROVIDER_ID.to_string(),
+        JsonValue::String(router_provider.id.clone()),
+    );
+    settings.insert(
+        CODEX_ROUTER_PARENT_PROVIDER_NAME.to_string(),
+        JsonValue::String(router_provider.name.clone()),
+    );
+    settings.insert(
+        CODEX_RESOLVED_TARGET_PROVIDER_ID.to_string(),
+        JsonValue::String(target_provider.id.clone()),
+    );
+    settings.insert(
+        "codexResolvedRouteId".to_string(),
+        JsonValue::String(route.id.clone()),
+    );
+    settings.insert(
+        "codexResolvedRouteMatched".to_string(),
+        JsonValue::Bool(matched_by != "default"),
+    );
+    if !canonical_model.is_empty() {
+        settings.insert(
+            "codexResolvedCanonicalModel".to_string(),
+            JsonValue::String(canonical_model.to_string()),
+        );
+    }
+    if !upstream_model.is_empty() {
+        settings.insert(
+            "model".to_string(),
+            JsonValue::String(upstream_model.to_string()),
+        );
+        settings.insert(
+            CODEX_RESOLVED_UPSTREAM_MODEL_OVERRIDE.to_string(),
+            JsonValue::String(upstream_model.to_string()),
+        );
+    }
+    if codex_multirouter_needs_plaintext_v2_collaboration(router_provider) {
+        settings.insert(
+            CODEX_ROUTER_PLAINTEXT_V2_COLLABORATION.to_string(),
+            JsonValue::Bool(true),
+        );
+    }
+
+    let mut meta = materialized.meta.clone().unwrap_or_default();
+    if let Some(model) = compiled_model {
+        settings.insert(
+            "apiFormat".to_string(),
+            JsonValue::String(model.api_format.clone()),
+        );
+        let mut capabilities = Map::new();
+        if let Some(context_window) = model.capability_summary.context_window {
+            capabilities.insert("contextWindow".to_string(), JsonValue::from(context_window));
+        }
+        if !model.capability_summary.input_modalities.is_empty() {
+            capabilities.insert(
+                "inputModalities".to_string(),
+                JsonValue::from(model.capability_summary.input_modalities.clone()),
+            );
+        }
+        if let Some(reasoning) = model.capability_summary.reasoning.clone() {
+            capabilities.insert("reasoning".to_string(), reasoning.clone());
+            if let Ok(capability) = serde_json::from_value(reasoning) {
+                meta.codex_chat_reasoning =
+                    Some(codex_chat_reasoning_config_from_capability(capability));
+            }
+        }
+        if let Some(cache) = model.capability_summary.codex_cache.clone() {
+            capabilities.insert("codexCache".to_string(), cache.clone());
+            if let Ok(cache) = serde_json::from_value(cache) {
+                meta.codex_cache = Some(normalize_codex_cache_config(cache));
+            }
+        }
+        if !capabilities.is_empty() {
+            settings.insert(
+                "codexResolvedCapabilities".to_string(),
+                JsonValue::Object(capabilities),
+            );
+        }
+        meta.api_format = Some(model.api_format.clone());
+    }
+
+    apply_codex_v2_auth_policy(&route.auth_policy, &mut settings, &mut meta);
+    materialized.settings_config = JsonValue::Object(settings);
+    materialized.meta = Some(meta);
+
+    // Keep the original visible model available to diagnostics even though the actual outbound
+    // model is pinned by CODEX_RESOLVED_UPSTREAM_MODEL_OVERRIDE.
+    if !request_model.is_empty() {
+        materialized.settings_config["codexResolvedVisibleModel"] =
+            JsonValue::String(request_model.to_string());
+    }
+    materialized
+}
+
+fn apply_codex_v2_auth_policy(
+    policy: &CodexRouteAuthPolicy,
+    settings: &mut Map<String, JsonValue>,
+    meta: &mut ProviderMeta,
+) {
+    match policy.source {
+        CodexRouteAuthSource::ProviderConfig => {}
+        CodexRouteAuthSource::ManagedAccount => {
+            remove_materialized_api_credentials(settings);
+            meta.auth_binding = Some(AuthBinding {
+                source: AuthBindingSource::ManagedAccount,
+                auth_provider: None,
+                account_id: policy.account_id.clone(),
+            });
+        }
+        CodexRouteAuthSource::ManagedCodexOauth => {
+            sanitize_materialized_managed_codex_oauth_settings(settings);
+            settings.remove("auth");
+            meta.provider_type = Some("codex_oauth".to_string());
+            meta.auth_binding = Some(AuthBinding {
+                source: AuthBindingSource::ManagedAccount,
+                auth_provider: Some("codex_oauth".to_string()),
+                account_id: policy.account_id.clone(),
+            });
+        }
+        CodexRouteAuthSource::NativeCodexAuth => {
+            remove_materialized_api_credentials(settings);
+            settings.insert(
+                CODEX_NATIVE_AUTH_PASSTHROUGH.to_string(),
+                JsonValue::Bool(true),
+            );
+            meta.provider_type = None;
+            meta.auth_binding = None;
+        }
+        CodexRouteAuthSource::AccountPool => {
+            remove_materialized_api_credentials(settings);
+            settings.insert(
+                CODEX_ACCOUNT_POOL_ENABLED.to_string(),
+                JsonValue::Bool(true),
+            );
+            meta.provider_type = None;
+            meta.auth_binding = None;
+        }
+    }
+}
+
+fn remove_materialized_api_credentials(settings: &mut Map<String, JsonValue>) {
+    settings.remove("auth");
+    settings.remove("apiKey");
+    settings.remove("api_key");
+}
+
+fn codex_v2_auth_owner(policy: &CodexRouteAuthPolicy) -> String {
+    match policy.source {
+        CodexRouteAuthSource::ProviderConfig => "provider_config",
+        CodexRouteAuthSource::ManagedAccount => "managed_account",
+        CodexRouteAuthSource::ManagedCodexOauth => "managed_codex_oauth",
+        CodexRouteAuthSource::NativeCodexAuth => "native_codex_auth",
+        CodexRouteAuthSource::AccountPool => "account_pool",
+    }
+    .to_string()
 }
 
 /// 解析 Codex router 的唯一命中 route。
@@ -2886,6 +3415,7 @@ mod tests {
         CodexAccountPoolEntry, CodexAccountPoolPolicy, NATIVE_CODEX_ACCOUNT_ID,
     };
     use serde_json::json;
+    use std::collections::HashMap;
 
     #[test]
     fn capability_effort_mode_keeps_wide_mappings_for_narrow_selectable() {
@@ -6104,5 +6634,412 @@ wire_api = "responses"
             "config": "base_url = \"https://api.x.ai/v1\"\nwire_api = \"responses\""
         }));
         assert!(!provider_needs_responses_namespace_flatten(&plain));
+    }
+
+    fn v2_target_provider(id: &str, api_format: &str, models: serde_json::Value) -> Provider {
+        let mut provider = Provider::with_id(
+            id.to_string(),
+            id.to_string(),
+            json!({
+                "base_url": format!("https://{id}.example/v1"),
+                "auth": {"OPENAI_API_KEY": format!("secret-{id}")},
+                "modelCatalog": {"models": models}
+            }),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            api_format: Some(api_format.to_string()),
+            ..Default::default()
+        });
+        provider
+    }
+
+    fn v2_router(routes: serde_json::Value, default_route_id: &str) -> Provider {
+        Provider::with_id(
+            "router".to_string(),
+            "Router".to_string(),
+            json!({
+                "codexRouting": {
+                    "schemaVersion": 2,
+                    "enabled": true,
+                    "defaultRouteId": default_route_id,
+                    "routes": routes
+                }
+            }),
+            None,
+        )
+    }
+
+    fn v2_route(
+        id: &str,
+        target_provider_id: &str,
+        selection: serde_json::Value,
+    ) -> serde_json::Value {
+        json!({
+            "id": id,
+            "label": id,
+            "enabled": true,
+            "targetProviderId": target_provider_id,
+            "modelSelection": selection,
+            "authPolicy": {"source": "provider_config"}
+        })
+    }
+
+    fn v2_providers(items: impl IntoIterator<Item = Provider>) -> HashMap<String, Provider> {
+        items
+            .into_iter()
+            .map(|provider| (provider.id.clone(), provider))
+            .collect()
+    }
+
+    #[test]
+    fn v2_runtime_uses_latest_provider_protocol_without_route_mutation() {
+        let router = v2_router(
+            json!([v2_route("qwen", "qwen", json!({"mode": "all"}))]),
+            "qwen",
+        );
+        let chat = v2_target_provider("qwen", "openai_chat", json!([{"model": "qwen3.8"}]));
+        let responses =
+            v2_target_provider("qwen", "openai_responses", json!([{"model": "qwen3.8"}]));
+
+        let first = resolve_codex_v2_routed_provider(
+            &router,
+            &json!({"model": "qwen3.8"}),
+            &v2_providers([chat]),
+        )
+        .expect("compile chat")
+        .expect("chat route");
+        let second = resolve_codex_v2_routed_provider(
+            &router,
+            &json!({"model": "qwen3.8"}),
+            &v2_providers([responses]),
+        )
+        .expect("compile responses")
+        .expect("responses route");
+
+        assert!(codex_provider_uses_chat_completions(
+            &first.effective_provider
+        ));
+        assert!(!codex_provider_uses_chat_completions(
+            &second.effective_provider
+        ));
+        assert_eq!(first.api_format_source, "provider");
+        assert_eq!(second.api_format_source, "provider");
+        assert_ne!(first.dependency_fingerprint, second.dependency_fingerprint);
+    }
+
+    #[test]
+    fn v2_runtime_resolves_mixed_model_protocols_from_one_provider() {
+        let router = v2_router(
+            json!([v2_route("mixed", "mixed", json!({"mode": "all"}))]),
+            "mixed",
+        );
+        let target = v2_target_provider(
+            "mixed",
+            "openai_chat",
+            json!([
+                {"model": "chat-model"},
+                {"model": "responses-model", "apiFormat": "openai_responses"}
+            ]),
+        );
+        let providers = v2_providers([target]);
+
+        let chat =
+            resolve_codex_v2_routed_provider(&router, &json!({"model": "chat-model"}), &providers)
+                .expect("compile chat")
+                .expect("chat route");
+        let responses = resolve_codex_v2_routed_provider(
+            &router,
+            &json!({"model": "responses-model"}),
+            &providers,
+        )
+        .expect("compile responses")
+        .expect("responses route");
+
+        assert!(codex_provider_uses_chat_completions(
+            &chat.effective_provider
+        ));
+        assert!(!codex_provider_uses_chat_completions(
+            &responses.effective_provider
+        ));
+        assert_eq!(responses.api_format_source, "provider_model");
+    }
+
+    #[test]
+    fn v2_runtime_prefers_exact_then_prefix_then_default() {
+        let mut prefix = v2_route("prefix", "prefix", json!({"mode": "all"}));
+        prefix["matchPrefixes"] = json!(["qwen"]);
+        let router = v2_router(
+            json!([
+                prefix,
+                v2_route("exact", "exact", json!({"mode": "all"})),
+                v2_route("default", "default", json!({"mode": "all"}))
+            ]),
+            "default",
+        );
+        let providers = v2_providers([
+            v2_target_provider("prefix", "openai_chat", json!([{"model": "qwen-other"}])),
+            v2_target_provider(
+                "exact",
+                "openai_responses",
+                json!([{"model": "qwen-special"}]),
+            ),
+            v2_target_provider(
+                "default",
+                "openai_responses",
+                json!([{"model": "default-model"}]),
+            ),
+        ]);
+
+        let exact = resolve_codex_v2_routed_provider(
+            &router,
+            &json!({"model": "qwen-special"}),
+            &providers,
+        )
+        .expect("compile exact")
+        .expect("exact route");
+        let prefix =
+            resolve_codex_v2_routed_provider(&router, &json!({"model": "qwen-new"}), &providers)
+                .expect("compile prefix")
+                .expect("prefix route");
+        let fallback = resolve_codex_v2_routed_provider(
+            &router,
+            &json!({"model": "unknown-model"}),
+            &providers,
+        )
+        .expect("compile default")
+        .expect("default route");
+
+        assert_eq!(exact.route_id, "exact");
+        assert_eq!(prefix.route_id, "prefix");
+        assert_eq!(prefix.canonical_model, "qwen-new");
+        assert_eq!(fallback.route_id, "default");
+    }
+
+    #[test]
+    fn v2_runtime_applies_alias_and_secret_free_auth_policies() {
+        let mut native = v2_route("native", "official", json!({"mode": "all"}));
+        native["aliases"] = json!({"gpt-visible": "gpt-canonical"});
+        native["authPolicy"] = json!({"source": "native_codex_auth"});
+        let mut managed = v2_route("managed", "managed", json!({"mode": "all"}));
+        managed["authPolicy"] = json!({"source": "managed_codex_oauth", "accountId": "account-1"});
+        let mut pool = v2_route("pool", "pool", json!({"mode": "all"}));
+        pool["authPolicy"] = json!({"source": "account_pool"});
+        let router = v2_router(json!([native, managed, pool]), "native");
+        let providers = v2_providers([
+            v2_target_provider(
+                "official",
+                "openai_responses",
+                json!([{"model": "gpt-canonical", "upstreamModel": "gpt-upstream"}]),
+            ),
+            v2_target_provider(
+                "managed",
+                "openai_responses",
+                json!([{"model": "managed-model"}]),
+            ),
+            v2_target_provider("pool", "openai_responses", json!([{"model": "pool-model"}])),
+        ]);
+
+        let native =
+            resolve_codex_v2_routed_provider(&router, &json!({"model": "gpt-visible"}), &providers)
+                .expect("compile native")
+                .expect("native route");
+        let managed = resolve_codex_v2_routed_provider(
+            &router,
+            &json!({"model": "managed-model"}),
+            &providers,
+        )
+        .expect("compile managed")
+        .expect("managed route");
+        let pool =
+            resolve_codex_v2_routed_provider(&router, &json!({"model": "pool-model"}), &providers)
+                .expect("compile pool")
+                .expect("pool route");
+
+        assert_eq!(native.canonical_model, "gpt-canonical");
+        assert_eq!(native.upstream_model, "gpt-upstream");
+        assert_eq!(
+            native
+                .effective_provider
+                .settings_config
+                .get(CODEX_NATIVE_AUTH_PASSTHROUGH)
+                .and_then(JsonValue::as_bool),
+            Some(true)
+        );
+        assert!(native
+            .effective_provider
+            .settings_config
+            .get("auth")
+            .is_none());
+        assert_eq!(
+            managed
+                .effective_provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.provider_type.as_deref()),
+            Some("codex_oauth")
+        );
+        assert_eq!(
+            managed
+                .effective_provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.auth_binding.as_ref())
+                .and_then(|binding| binding.account_id.as_deref()),
+            Some("account-1")
+        );
+        assert_eq!(
+            pool.effective_provider
+                .settings_config
+                .get(CODEX_ACCOUNT_POOL_ENABLED)
+                .and_then(JsonValue::as_bool),
+            Some(true)
+        );
+        assert!(pool
+            .effective_provider
+            .settings_config
+            .get("auth")
+            .is_none());
+    }
+
+    #[test]
+    fn v2_runtime_projects_model_input_reasoning_and_cache_capabilities() {
+        let router = v2_router(
+            json!([v2_route("qwen", "qwen", json!({"mode": "all"}))]),
+            "qwen",
+        );
+        let target = v2_target_provider(
+            "qwen",
+            "openai_chat",
+            json!([{
+                "model": "qwen3.8",
+                "inputModalities": ["text"],
+                "reasoning": {
+                    "schemaVersion": 2,
+                    "supportStatus": "confirmed_supported",
+                    "controlKind": "graded",
+                    "supportedEfforts": ["low", "high"],
+                    "defaultEffort": "high",
+                    "disableAllowed": false,
+                    "upstream": {"format": "string", "parameter": "reasoning_effort"}
+                },
+                "codexCache": {
+                    "cacheMode": "qwen_context_cache",
+                    "usageFields": ["usage.cached_tokens"]
+                }
+            }]),
+        );
+        let resolved = resolve_codex_v2_routed_provider(
+            &router,
+            &json!({"model": "qwen3.8"}),
+            &v2_providers([target]),
+        )
+        .expect("compile capabilities")
+        .expect("capability route");
+
+        assert_eq!(
+            codex_provider_text_only_input(&resolved.effective_provider),
+            Some(true)
+        );
+        assert_eq!(
+            resolve_codex_chat_reasoning_config(
+                &resolved.effective_provider,
+                &json!({"model": "qwen3.8"})
+            )
+            .and_then(|config| config.supports_effort),
+            Some(true)
+        );
+        assert_eq!(
+            resolve_codex_cache_config(&resolved.effective_provider, &json!({"model": "qwen3.8"}))
+                .cache_mode
+                .as_deref(),
+            Some("qwen_context_cache")
+        );
+    }
+
+    #[test]
+    fn v2_collaboration_policy_distinguishes_official_only_from_mixed_routes() {
+        let mut official = v2_route("official", "official", json!({"mode": "all"}));
+        official["authPolicy"] = json!({"source": "native_codex_auth"});
+        let official_only = v2_router(json!([official.clone()]), "official");
+        assert!(!codex_multirouter_needs_plaintext_v2_collaboration(
+            &official_only
+        ));
+
+        let third_party = v2_route("qwen", "qwen", json!({"mode": "all"}));
+        let mixed = v2_router(json!([official, third_party]), "official");
+        assert!(codex_multirouter_needs_plaintext_v2_collaboration(&mixed));
+    }
+
+    #[test]
+    fn v2_raw_passthrough_without_model_uses_latest_official_provider() {
+        let mut official = v2_route("official", "official", json!({"mode": "all"}));
+        official["authPolicy"] = json!({"source": "native_codex_auth"});
+        let router = v2_router(
+            json!([official, v2_route("qwen", "qwen", json!({"mode": "all"}))]),
+            "qwen",
+        );
+        let providers = v2_providers([
+            v2_target_provider(
+                "official",
+                "openai_responses",
+                json!([{"model": "gpt-5.6-sol"}]),
+            ),
+            v2_target_provider("qwen", "openai_chat", json!([{"model": "qwen3.8"}])),
+        ]);
+
+        let resolved =
+            resolve_codex_v2_raw_passthrough_provider(&router, &json!({}), &providers, None)
+                .expect("compile raw route")
+                .expect("official raw route");
+
+        assert_eq!(resolved.route_id, "official");
+        assert_eq!(resolved.api_format, "openai_responses");
+        assert_eq!(resolved.matched_by, "official_raw_fallback");
+        assert_eq!(
+            resolved.effective_provider.settings_config["base_url"],
+            "https://official.example/v1"
+        );
+        assert!(resolved
+            .effective_provider
+            .settings_config
+            .get(CODEX_RESOLVED_UPSTREAM_MODEL_OVERRIDE)
+            .is_none());
+    }
+
+    #[test]
+    fn v2_raw_passthrough_explicit_route_id_uses_that_latest_provider() {
+        let router = v2_router(
+            json!([
+                v2_route("official", "official", json!({"mode": "all"})),
+                v2_route("qwen", "qwen", json!({"mode": "all"}))
+            ]),
+            "official",
+        );
+        let providers = v2_providers([
+            v2_target_provider(
+                "official",
+                "openai_responses",
+                json!([{"model": "gpt-5.6-sol"}]),
+            ),
+            v2_target_provider("qwen", "openai_chat", json!([{"model": "qwen3.8"}])),
+        ]);
+
+        let resolved = resolve_codex_v2_raw_passthrough_provider(
+            &router,
+            &json!({}),
+            &providers,
+            Some("qwen"),
+        )
+        .expect("compile explicit raw route")
+        .expect("qwen raw route");
+
+        assert_eq!(resolved.route_id, "qwen");
+        assert_eq!(resolved.api_format, "openai_chat");
+        assert_eq!(resolved.matched_by, "explicit_route_id");
+        assert_eq!(
+            resolved.effective_provider.settings_config["base_url"],
+            "https://qwen.example/v1"
+        );
     }
 }
