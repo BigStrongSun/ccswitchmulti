@@ -500,6 +500,7 @@ export interface CodexRoutingConfigV2 {
   defaultRouteId?: string;
   subagentVersion?: CodexSubagentVersion;
   subagentV2?: CodexSubagentV2Config;
+  spawnAgentModels?: string[];
   routes: CodexRoutingRouteV2[];
 }
 

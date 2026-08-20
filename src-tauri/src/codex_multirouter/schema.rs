@@ -85,6 +85,8 @@ pub struct CodexRoutingConfigV2 {
     pub subagent_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_v2: Option<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spawn_agent_models: Vec<String>,
     #[serde(default, flatten)]
     pub extensions: BTreeMap<String, Value>,
 }

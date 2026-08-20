@@ -1053,6 +1053,22 @@ function App() {
     openCodexRouterWorkspace(provider, "status");
   };
 
+  // Provider 列表也是启用入口。schema v1 必须先进入带 preview/token/revision
+  // 的编辑向导，不能绕过显式迁移直接 switch；schema v2 才允许原子启用。
+  const handleSwitchProviderFromList = (provider: Provider) => {
+    if (activeApp === "codex" && isRoutingPlan(provider)) {
+      const routing = provider.settingsConfig?.codexRouting as
+        | { schemaVersion?: number }
+        | undefined;
+      if (routing?.schemaVersion !== 2) {
+        handleEditCodexMultiRouter(provider);
+        return;
+      }
+      return handleEnableCodexMultiRouterPlan(provider);
+    }
+    return switchProvider(provider);
+  };
+
   // 历史修复写入完成后，先提示重启 Codex，再征求点赞并用默认浏览器打开 CCSwitchMulti 仓库。
   const handleCodexHistoryRepairCompleted = async () => {
     toast.success("历史记录修复已完成。请完整重启 Codex 后再继续使用。", {
@@ -1257,7 +1273,7 @@ function App() {
                         isProxyRunning && isCurrentAppTakeoverActive
                       }
                       activeProviderId={activeProviderId}
-                      onSwitch={switchProvider}
+                      onSwitch={handleSwitchProviderFromList}
                       onEdit={(provider) => {
                         if (activeApp === "codex" && isRoutingPlan(provider)) {
                           openCodexRouterWorkspace(provider, "routes");

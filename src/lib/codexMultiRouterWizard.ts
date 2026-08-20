@@ -5,8 +5,10 @@ import type {
   CodexModelCatalogConfig,
   CodexOfficialAuthConfig,
   CodexRoutingConfig,
+  CodexRoutingConfigV2,
   CodexRoutingAuth,
   CodexRoutingRoute,
+  CodexRoutingRouteV2,
   CodexSubagentVersion,
   Provider,
 } from "@/types";
@@ -844,46 +846,31 @@ export function applyWizardConnectivityApiFormatOverrides(
     if (provider.meta?.apiFormatSource === "manual") {
       return provider;
     }
-    const recommendedFormats = providerResults
-      .map((result) => result.recommendedApiFormat)
-      .filter((format): format is CodexApiFormat => Boolean(format));
-    const hasResponsesRecommendation =
-      recommendedFormats.includes("openai_responses");
-    const hasChatRecommendation = recommendedFormats.includes("openai_chat");
-    const hasResponsesPass = providerResults.some(
-      (result) =>
-        result.status === "pass" ||
-        result.recommendedApiFormat === "openai_responses",
-    );
-    const hasBlockingFailure = providerResults.some(
-      (result) => result.status === "fail",
-    );
-    if (hasBlockingFailure) return provider;
-    if (hasChatRecommendation && !hasResponsesRecommendation) {
-      return {
-        ...provider,
-        meta: {
-          ...(provider.meta ?? {}),
-          apiFormat: "openai_chat",
-          apiFormatSource: "probe",
-        },
-        settingsConfig: {
-          ...(provider.settingsConfig ?? {}),
-          apiFormat: "openai_chat",
-        },
-      };
+    const formatByCanonicalModel = new Map<string, CodexApiFormat>();
+    for (const result of providerResults) {
+      if (result.status === "fail" || result.status === "skipped") continue;
+      const format =
+        result.recommendedApiFormat ??
+        (result.status === "pass" ? "openai_responses" : undefined);
+      if (format) formatByCanonicalModel.set(result.model, format);
     }
-    if (!hasResponsesPass) return provider;
+    if (formatByCanonicalModel.size === 0) return provider;
+    const models = readWizardModelCatalog(provider).map((model) => {
+      const canonicalModel =
+        model.upstreamModel ?? model.upstream_model ?? model.model;
+      const apiFormat =
+        formatByCanonicalModel.get(canonicalModel) ??
+        formatByCanonicalModel.get(model.model);
+      return apiFormat ? { ...model, apiFormat } : model;
+    });
     return {
       ...provider,
-      meta: {
-        ...(provider.meta ?? {}),
-        apiFormat: "openai_responses",
-        apiFormatSource: "probe",
-      },
       settingsConfig: {
         ...(provider.settingsConfig ?? {}),
-        apiFormat: "openai_responses",
+        modelCatalog: {
+          ...(provider.settingsConfig?.modelCatalog ?? {}),
+          models,
+        },
       },
     };
   });
@@ -926,94 +913,38 @@ export function filterWizardProvidersByModelOrder(
 export function buildWizardRoutesFromSources(
   providers: Provider[],
   officialAuth?: CodexOfficialAuthConfig,
-): CodexRoutingRoute[] {
-  return providers.flatMap((provider) => {
-    const models = readWizardModelCatalog(provider).map((model) => model.model);
+): CodexRoutingRouteV2[] {
+  return providers.map((provider) => {
     const modelMap = buildWizardRouteModelMap(provider);
     const oauthAccountId = isWizardCodexOAuthSource(provider)
       ? readWizardCodexOAuthAccountId(provider)
       : undefined;
-    const apiFormat = inferWizardApiFormat(provider);
-    const buildRoute = (
-      routeModels: string[],
-      routeApiFormat: CodexApiFormat,
-      routeId: string,
-      label: string,
-      prefixes: string[] = inferWizardRoutePrefixes(provider),
-    ): CodexRoutingRoute => ({
-      id: routeId,
-      label,
+    return {
+      id: `router-${provider.id}`,
+      label: provider.name,
       enabled: true,
       targetProviderId: provider.id,
-      match: {
-        models: routeModels,
-        prefixes,
-      },
-      upstream: {
-        apiFormat: routeApiFormat,
-        apiFormatSource:
-          routeApiFormat === apiFormat ? "provider" : "route_override",
-        auth:
-          officialAuth && isWizardCodexOAuthSource(provider)
-            ? codexOfficialAuthRouteBinding(officialAuth)
-            : isWizardNativeCodexAuthSource(provider)
-              ? { source: "native_codex_auth" }
-              : isWizardCodexOAuthSource(provider)
-                ? {
-                    source: "managed_codex_oauth",
-                    authProvider: "codex_oauth",
-                    ...(oauthAccountId ? { accountId: oauthAccountId } : {}),
-                  }
-                : { source: "provider_config" },
-        ...(modelMap
-          ? {
-              modelMap: Object.fromEntries(
-                Object.entries(modelMap).filter(([model]) =>
-                  routeModels.includes(model),
-                ),
-              ),
-            }
-          : {}),
-      },
-      capabilities: {
-        codexCache: inferWizardCacheConfig(provider),
-      },
-    });
-
-    const providerText = `${provider.id} ${provider.name} ${
-      provider.category ?? ""
-    }`.toLowerCase();
-    const isDeepSeekSource =
-      providerText.includes("deepseek") ||
-      models.some((model) => model.toLowerCase().includes("deepseek"));
-    const flashModels = models.filter((model) => model === "deepseek-v4-flash");
-    const otherModels = models.filter((model) => model !== "deepseek-v4-flash");
-    if (
-      isDeepSeekSource &&
-      apiFormat === "openai_responses" &&
-      flashModels.length > 0 &&
-      otherModels.length > 0
-    ) {
-      return [
-        buildRoute(
-          flashModels,
-          "openai_responses",
-          `router-${provider.id}`,
-          provider.name,
-          ["deepseek-v4-flash"],
-        ),
-        buildRoute(
-          otherModels,
-          "openai_chat",
-          `router-${provider.id}-chat`,
-          `${provider.name} Chat`,
-          ["deepseek-v4-pro"],
-        ),
-      ];
-    }
-    return [
-      buildRoute(models, apiFormat, `router-${provider.id}`, provider.name),
-    ];
+      modelSelection: { mode: "all" },
+      matchPrefixes: inferWizardRoutePrefixes(provider),
+      aliases: modelMap
+        ? Object.fromEntries(
+            Object.entries(modelMap).filter(
+              ([visible, canonical]) => visible !== canonical,
+            ),
+          )
+        : {},
+      authPolicy:
+        officialAuth && isWizardCodexOAuthSource(provider)
+          ? codexOfficialAuthRouteBinding(officialAuth)
+          : isWizardNativeCodexAuthSource(provider)
+            ? { source: "native_codex_auth" }
+            : isWizardCodexOAuthSource(provider)
+              ? {
+                  source: "managed_codex_oauth",
+                  ...(oauthAccountId ? { accountId: oauthAccountId } : {}),
+                }
+              : { source: "provider_config" },
+    };
   });
 }
 
@@ -1134,15 +1065,27 @@ export function buildCodexMultiRouterWizardPlan(
     options.hostedTools ??
     normalizeHostedToolsConfig(existingPlan?.settingsConfig?.hostedTools);
   const routes = buildWizardRoutesFromSources(resolvedSources, officialAuth);
+  const selectedVisibleModels = new Set(
+    resolvedSources.flatMap((provider) =>
+      readWizardModelCatalog(provider).map((model) => model.model),
+    ),
+  );
+  const requestedSpawnAgentModels: string[] =
+    options.spawnAgentModels ??
+    existingPlan?.settingsConfig?.modelCatalog?.spawnAgentModels ??
+    [];
   const subagentVersion = normalizeCodexSubagentVersion(
     options.subagentVersion ?? existingRouting?.subagentVersion,
   );
-  const routing: CodexRoutingConfig = {
-    ...existingRouting,
+  const routing: CodexRoutingConfigV2 = {
+    schemaVersion: 2,
     enabled: true,
     defaultRouteId: routes[0]?.id,
-    officialAuth,
     subagentVersion,
+    subagentV2: existingRouting?.subagentV2,
+    spawnAgentModels: requestedSpawnAgentModels.filter((model) =>
+      selectedVisibleModels.has(model),
+    ),
     routes,
   };
   const existingIds = new Set(allProviders.map((provider) => provider.id));
@@ -1170,12 +1113,6 @@ export function buildCodexMultiRouterWizardPlan(
       base_url: CODEX_MULTI_ROUTER_PROXY_BASE_URL,
       baseUrl: CODEX_MULTI_ROUTER_PROXY_BASE_URL,
       config: existingPlan?.settingsConfig?.config ?? null,
-      modelCatalog: buildWizardModelCatalog(resolvedSources, {
-        ...options,
-        spawnAgentModels:
-          options.spawnAgentModels ??
-          existingPlan?.settingsConfig?.modelCatalog?.spawnAgentModels,
-      }),
       codexRouting: routing,
       hostedTools,
     },

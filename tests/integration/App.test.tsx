@@ -442,6 +442,45 @@ describe("App integration with MSW", () => {
     expect(screen.getByTestId("codex-router-tab").textContent).toBe("routes");
   });
 
+  it("opens explicit migration instead of directly enabling a schema v1 MultiRouter", async () => {
+    setProviders("codex", {
+      "legacy-codex-router": {
+        id: "legacy-codex-router",
+        name: "Legacy MultiRouter",
+        settingsConfig: {
+          codexRouting: {
+            enabled: true,
+            routes: [
+              {
+                id: "legacy-route",
+                upstream: { apiFormat: "openai_chat", apiKey: "secret" },
+              },
+            ],
+          },
+        },
+        category: "aggregator",
+        sortIndex: 0,
+        createdAt: Date.now(),
+      },
+    });
+    setCurrentProviderId("codex", "legacy-codex-router");
+
+    const { default: App } = await import("@/App");
+    renderApp(App);
+    fireEvent.click(screen.getByText("switch-codex"));
+    await waitFor(() =>
+      expect(screen.getByTestId("provider-list").textContent).toContain(
+        "legacy-codex-router",
+      ),
+    );
+
+    fireEvent.click(screen.getByText("switch"));
+
+    const wizard = await screen.findByTestId("codex-multirouter-wizard");
+    expect(wizard).toHaveAttribute("data-mode", "edit");
+    expect(wizard).toHaveAttribute("data-plan-id", "legacy-codex-router");
+  }, 30_000);
+
   it("starts a new Codex MultiRouter draft explicitly from the refreshed entry", async () => {
     const { default: App } = await import("@/App");
     renderApp(App);

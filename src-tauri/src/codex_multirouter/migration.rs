@@ -478,6 +478,19 @@ fn build_migration(
         }
     }
 
+    let spawn_agent_models = router
+        .settings_config
+        .get("modelCatalog")
+        .and_then(|catalog| catalog.get("spawnAgentModels"))
+        .and_then(Value::as_array)
+        .map(|models| {
+            models
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     let plan = CodexRoutingConfigV2 {
         schema_version: CODEX_ROUTING_SCHEMA_V2,
         enabled: legacy
@@ -494,6 +507,7 @@ fn build_migration(
             .and_then(Value::as_str)
             .map(str::to_string),
         subagent_v2: legacy.get("subagentV2").cloned(),
+        spawn_agent_models,
         extensions: BTreeMap::new(),
     };
     let mut migrated_router = router.clone();
@@ -782,7 +796,10 @@ mod tests {
             "Legacy Router".to_string(),
             json!({
                 "auth": {},
-                "modelCatalog": {"models": [{"model": "qwen3.8"}]},
+                "modelCatalog": {
+                    "models": [{"model": "qwen3.8"}],
+                    "spawnAgentModels": ["qwen3.8"]
+                },
                 "codexRouting": {
                     "enabled": true,
                     "defaultRouteId": "qwen-route",
@@ -840,6 +857,10 @@ mod tests {
         assert_eq!(
             migrated.settings_config["codexRouting"]["routes"][0]["modelSelection"]["mode"],
             "all"
+        );
+        assert_eq!(
+            migrated.settings_config["codexRouting"]["spawnAgentModels"],
+            json!(["qwen3.8"])
         );
     }
 

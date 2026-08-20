@@ -60,10 +60,15 @@ vi.mock("@/components/ui/form", () => ({
 }));
 
 beforeEach(() => {
+  vi.useRealTimers();
   vi.mocked(fetchModelsForConfig).mockReset();
   vi.mocked(probeCodexChatForConfig).mockReset();
   vi.mocked(probeCodexResponsesForConfig).mockReset();
-  Element.prototype.scrollIntoView = vi.fn();
+  Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+    configurable: true,
+    writable: true,
+    value: vi.fn(),
+  });
   reasoningApiMocks.resolve.mockReset();
   reasoningApiMocks.trigger.mockReset();
   reasoningApiMocks.resolve.mockImplementation(
@@ -1191,7 +1196,9 @@ describe("CodexFormFields local model routing", () => {
       name: "同步模型",
     });
     expect(fetchButton).toHaveClass("border-blue-500");
-    expect(Element.prototype.scrollIntoView).toHaveBeenCalled();
+    await waitFor(() =>
+      expect(HTMLElement.prototype.scrollIntoView).toHaveBeenCalled(),
+    );
     expect(probeCodexResponsesForConfig).not.toHaveBeenCalled();
     expect(probeCodexChatForConfig).not.toHaveBeenCalled();
   });

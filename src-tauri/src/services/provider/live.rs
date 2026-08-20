@@ -1399,6 +1399,22 @@ fn sync_current_provider_for_app_respecting_takeover(
         return Ok(());
     };
 
+    if matches!(app_type, AppType::Codex)
+        && provider
+            .settings_config
+            .get("codexRouting")
+            .and_then(|routing| routing.get("schemaVersion"))
+            .and_then(Value::as_u64)
+            == Some(2)
+    {
+        crate::codex_multirouter::projection::ensure_codex_multirouter_projection(
+            state.db.as_ref(),
+            &provider.id,
+            true,
+        )?;
+        return Ok(());
+    }
+
     let has_live_backup = block_on_tauri_runtime(state.db.get_live_backup(app_type.as_str()))
         .ok()
         .flatten()

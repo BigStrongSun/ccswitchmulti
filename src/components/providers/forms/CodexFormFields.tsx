@@ -31,7 +31,6 @@ import {
   ChevronRight,
   ArrowDown,
   ArrowUp,
-  Pencil,
   Plus,
   Trash2,
 } from "lucide-react";
@@ -66,8 +65,6 @@ import type {
   CodexModelReasoningCapability,
   CodexReasoningEffort,
   CodexRoutingConfig,
-  CodexRoutingRoute,
-  CodexRoutingAuthSource,
   PromptCacheRoutingMode,
   Provider,
   ProviderCategory,
@@ -474,8 +471,6 @@ function unknownReasoningResolution(
 
 type CodexCatalogRow = CodexCatalogModel & { rowId: string };
 
-type CodexRoutingRow = CodexRoutingRoute & { rowId: string };
-
 export interface CodexProviderSplitSuggestion {
   providerName: string;
   responsesModels: string[];
@@ -518,67 +513,6 @@ function catalogRowUpstreamModel(
   row: Pick<CodexCatalogModel, "model" | "upstreamModel" | "upstream_model">,
 ): string {
   return (row.upstreamModel ?? row.upstream_model ?? row.model ?? "").trim();
-}
-
-// 将逗号或换行分隔的字符串整理成 route 匹配列表。
-function parseRoutingList(value: string): string[] {
-  return value
-    .split(/[,\n]/)
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
-
-// 将 modelMap 的轻量文本编辑格式转成对象；格式为 `codexModel=upstreamModel`。
-function parseModelMap(value: string): Record<string, string> | undefined {
-  const entries = parseRoutingList(value)
-    .map((item) => item.split("="))
-    .map(([from, to]) => [from?.trim(), to?.trim()] as const)
-    .filter(([from, to]) => from && to);
-  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
-}
-
-// 将 modelMap 对象转成表单里便于扫描和编辑的单行文本。
-function formatModelMap(modelMap?: Record<string, string>): string {
-  return modelMap
-    ? Object.entries(modelMap)
-        .map(([from, to]) => `${from}=${to}`)
-        .join(", ")
-    : "";
-}
-
-function createRoutingRow(seed?: Partial<CodexRoutingRoute>): CodexRoutingRow {
-  return {
-    rowId: crypto.randomUUID(),
-    id: seed?.id ?? `route-${Math.random().toString(36).slice(2, 8)}`,
-    label: seed?.label ?? "",
-    enabled: seed?.enabled ?? true,
-    targetProviderId: seed?.targetProviderId,
-    match: {
-      models: seed?.match?.models ?? [],
-      prefixes: seed?.match?.prefixes ?? [],
-    },
-    upstream: {
-      baseUrl: seed?.upstream?.baseUrl ?? "",
-      apiFormat: seed?.upstream?.apiFormat ?? "openai_chat",
-      auth: seed?.upstream?.auth ?? { source: "provider_config" },
-      apiKey: seed?.upstream?.apiKey ?? "",
-      modelMap: seed?.upstream?.modelMap,
-    },
-    capabilities: seed?.capabilities,
-  };
-}
-
-// 比较路由数据时忽略 rowId，避免父子状态同步造成重复刷新。
-function routingRowsMatchConfig(
-  rows: CodexRoutingRow[],
-  config?: CodexRoutingConfig,
-): boolean {
-  const routes = config?.routes ?? [];
-  if (rows.length !== routes.length) return false;
-  return rows.every((row, index) => {
-    const { rowId: _rowId, ...route } = row;
-    return JSON.stringify(route) === JSON.stringify(routes[index]);
-  });
 }
 
 // Compares rows (with rowId) to incoming models (without) by data fields only,
@@ -903,8 +837,6 @@ export function CodexFormFields({
   catalogModels = [],
   presetCatalogModels = [],
   onCatalogModelsChange,
-  codexRouting = { enabled: false, defaultRouteId: "", routes: [] },
-  onCodexRoutingChange,
   onProviderSplitSuggestionChange,
   speedTestEndpoints,
   customUserAgent,
@@ -943,9 +875,6 @@ export function CodexFormFields({
     useState(false);
   const [pendingSplitRoutingState, setPendingSplitRoutingState] =
     useState<PendingCodexProviderSplitRouting | null>(null);
-  const [editingRouteIndex, setEditingRouteIndex] = useState<number | null>(
-    null,
-  );
   // takeoverEnabled 现在只表示“Codex 菜单映射”开关；模型目录和上下文元数据可独立编辑。
   // isChatFormat 仅在选了 Chat Completions 上游格式时为真（思考能力是 Chat 专属）。
   // 拉取请求序号：请求身份（Base URL / 完整地址开关 / API Key / 自定义 UA）
@@ -974,7 +903,6 @@ export function CodexFormFields({
 
   // 普通 Provider 表单只消费并原样回传历史 codexRouting；可见编辑入口统一收口到
   // CodexRouterWorkspacePage，避免与完整 MultiRouter 工作台形成两套配置界面。
-  const canEditRouting = false;
   const canEditReasoning = Boolean(onCodexChatReasoningChange);
   const supportsThinking =
     codexChatReasoning.supportsThinking === true ||
@@ -1072,17 +1000,10 @@ export function CodexFormFields({
   const catalogRowsRef = useRef<CodexCatalogRow[]>(catalogRows);
   const modelMappingSectionRef = useRef<HTMLDivElement | null>(null);
   const fetchModelsButtonRef = useRef<HTMLButtonElement | null>(null);
-  const [routingRows, setRoutingRows] = useState<CodexRoutingRow[]>(() =>
-    (codexRouting.routes ?? []).map((route) => createRoutingRow(route)),
-  );
-
   // 记录上次发送给父组件的数据，避免重复触发
   const lastSentModelsRef = useRef<CodexCatalogModel[]>(catalogModels);
-  const lastSentRoutingRef = useRef<CodexRoutingConfig>(codexRouting);
   const catalogPropKeyRef = useRef(JSON.stringify(catalogModels));
-  const routingPropKeyRef = useRef(JSON.stringify(codexRouting));
   const skipCatalogEchoRef = useRef(false);
-  const skipRoutingEchoRef = useRef(false);
 
   // 保留最新的模型映射行给异步刷新回调用，避免点击“获取模型列表”时合并到旧闭包里的 catalogRows。
   useEffect(() => {
@@ -1217,52 +1138,6 @@ export function CodexFormFields({
     // 同步更新 ref，避免父组件传入新数据时子→父 effect 误判为本地修改
     lastSentModelsRef.current = catalogModels;
   }, [catalogModels]);
-
-  // 父 → 子：外部加载或 preset 切换时同步 route 列表，保留编辑过程中的 rowId 稳定性。
-  useEffect(() => {
-    const incomingRoutingKey = JSON.stringify(codexRouting);
-    const isExternalRoutingChange =
-      incomingRoutingKey !== routingPropKeyRef.current;
-    routingPropKeyRef.current = incomingRoutingKey;
-
-    setRoutingRows((current) => {
-      if (routingRowsMatchConfig(current, codexRouting)) return current;
-      if (isExternalRoutingChange) {
-        skipRoutingEchoRef.current = true;
-      }
-      return (codexRouting.routes ?? []).map((route) =>
-        createRoutingRow(route),
-      );
-    });
-    lastSentRoutingRef.current = codexRouting;
-  }, [codexRouting]);
-
-  // 子 → 父：route rowId 不进入持久化，只把真正配置写回父组件。
-  useEffect(() => {
-    if (!onCodexRoutingChange) return;
-    // 外部 provider 刚加载时，本地 routingRows 仍可能是上一帧的空数组；
-    // 这一帧必须跳过反向回写，避免把刚加载出的路由覆盖为空。
-    if (skipRoutingEchoRef.current) {
-      if (!routingRowsMatchConfig(routingRows, codexRouting)) return;
-      skipRoutingEchoRef.current = false;
-    }
-    const next: CodexRoutingConfig = {
-      enabled: codexRouting.enabled ?? false,
-      defaultRouteId: codexRouting.defaultRouteId ?? "",
-      officialAuth: codexRouting.officialAuth,
-      routes: routingRows.map(({ rowId: _rowId, ...route }) => route),
-    };
-    if (JSON.stringify(next) === JSON.stringify(lastSentRoutingRef.current))
-      return;
-    lastSentRoutingRef.current = next;
-    onCodexRoutingChange(next);
-  }, [
-    routingRows,
-    codexRouting.enabled,
-    codexRouting.defaultRouteId,
-    codexRouting,
-    onCodexRoutingChange,
-  ]);
 
   // 子 → 父：rowId 是视图层概念，不应进入持久化数据；剥离后再回传。
   // 注意：依赖数组不包含 catalogModels，避免父→子更新触发子→父回调形成循环。
@@ -1414,9 +1289,7 @@ export function CodexFormFields({
           setCatalogRows(mergedRows);
         }
         const shouldAutoSplitRouting =
-          models.length > 0 &&
-          onProviderSplitSuggestionChange &&
-          (codexRouting.routes?.length ?? 0) === 0;
+          models.length > 0 && Boolean(onProviderSplitSuggestionChange);
         if (shouldAutoSplitRouting) {
           const splitRouting =
             buildSplitCodexProviderSuggestionForFetchedModels({
@@ -1462,7 +1335,6 @@ export function CodexFormFields({
     websiteUrl,
     onCatalogModelsChange,
     onProviderSplitSuggestionChange,
-    codexRouting.routes,
     isXaiOauthPreset,
     isXaiOauthAuthenticated,
     selectedXaiAccountId,
@@ -1802,93 +1674,6 @@ export function CodexFormFields({
     onProviderSplitSuggestionChange?.(null);
   }, [onProviderSplitSuggestionChange]);
 
-  // 路由行的增删改必须同步写回父表单，避免用户切换开关后立即保存时仍提交上一帧旧值。
-  const publishRoutingRows = useCallback(
-    (
-      rows: CodexRoutingRow[],
-      patch: Partial<Omit<CodexRoutingConfig, "routes">> = {},
-    ) => {
-      if (!onCodexRoutingChange) return;
-      const next: CodexRoutingConfig = {
-        enabled: codexRouting.enabled ?? false,
-        defaultRouteId: codexRouting.defaultRouteId ?? "",
-        officialAuth: codexRouting.officialAuth,
-        ...patch,
-        routes: rows.map(({ rowId: _rowId, ...route }) => route),
-      };
-      lastSentRoutingRef.current = next;
-      onCodexRoutingChange(next);
-    },
-    [
-      codexRouting.defaultRouteId,
-      codexRouting.enabled,
-      codexRouting.officialAuth,
-      onCodexRoutingChange,
-    ],
-  );
-
-  const handleRoutingEnabledChange = useCallback(
-    (checked: boolean) => {
-      publishRoutingRows(routingRows, { enabled: checked });
-    },
-    [publishRoutingRows, routingRows],
-  );
-
-  const handleAddRoute = useCallback(() => {
-    setRoutingRows((current) => {
-      const next = [...current, createRoutingRow()];
-      setEditingRouteIndex(current.length);
-      publishRoutingRows(next);
-      return next;
-    });
-  }, [publishRoutingRows]);
-
-  const handleUpdateRoute = useCallback(
-    (index: number, patch: Partial<CodexRoutingRoute>) => {
-      setRoutingRows((current) => {
-        const next = current.map((row, i) =>
-          i === index ? { ...row, ...patch } : row,
-        );
-        publishRoutingRows(next);
-        return next;
-      });
-    },
-    [publishRoutingRows],
-  );
-
-  const handleRemoveRoute = useCallback(
-    (index: number) => {
-      setRoutingRows((current) => {
-        const next = current.filter((_, i) => i !== index);
-        publishRoutingRows(next);
-        return next;
-      });
-      setEditingRouteIndex((current) => {
-        if (current === null) return current;
-        if (current === index) return null;
-        return current > index ? current - 1 : current;
-      });
-    },
-    [publishRoutingRows],
-  );
-
-  const editingRoute =
-    editingRouteIndex !== null ? routingRows[editingRouteIndex] : undefined;
-  const editingRouteModelsText = editingRoute
-    ? (editingRoute.match.models ?? []).join(", ")
-    : "";
-  const editingRoutePrefixesText = editingRoute
-    ? (editingRoute.match.prefixes ?? []).join(", ")
-    : "";
-  const editingRouteModelMapText = editingRoute
-    ? formatModelMap(editingRoute.upstream.modelMap)
-    : "";
-  const editingRouteAuthSource =
-    editingRoute?.upstream.auth.source ?? "provider_config";
-  const editingRouteTextOnly = editingRoute?.capabilities?.textOnly === true;
-  const editingRouteSupportsImage =
-    editingRoute?.capabilities?.inputModalities?.includes("image") ??
-    !editingRouteTextOnly;
   const splitRoutingProviderName = providerName?.trim() || "provider";
   const pendingResponsesModels = pendingSplitRouting?.responsesModels ?? [];
   const pendingChatModels = pendingSplitRouting?.chatModels ?? [];
@@ -2029,166 +1814,6 @@ export function CodexFormFields({
         </div>
       )}
 
-      {canEditRouting && (
-        <div className="space-y-4 rounded-lg border border-border-default p-4">
-          <div className="flex items-center justify-between gap-4">
-            <div className="space-y-1">
-              <FormLabel>
-                {t("codexConfig.localModelRoutingTitle", {
-                  defaultValue: "Codex 多模型路由",
-                })}
-              </FormLabel>
-              <p className="text-xs leading-relaxed text-muted-foreground">
-                {t("codexConfig.localModelRoutingHint", {
-                  defaultValue:
-                    "只在一个 provider 内配置多条 route 时使用：Codex 仍进入 CC Switch，本地再按 body.model 分流到不同上游；它不同于下方的 Codex 菜单映射。",
-                })}
-              </p>
-            </div>
-            <Switch
-              checked={codexRouting.enabled ?? false}
-              onCheckedChange={handleRoutingEnabledChange}
-              aria-label={t("codexConfig.localModelRoutingTitle", {
-                defaultValue: "Codex 多模型路由",
-              })}
-            />
-          </div>
-
-          <div className="flex items-center justify-between gap-3">
-            <Input
-              value={codexRouting.defaultRouteId ?? ""}
-              onChange={(event) =>
-                onCodexRoutingChange?.({
-                  ...codexRouting,
-                  defaultRouteId: event.target.value.trim(),
-                })
-              }
-              placeholder={t("codexConfig.defaultRoutePlaceholder", {
-                defaultValue: "默认路由 ID",
-              })}
-              className="max-w-xs"
-            />
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={handleAddRoute}
-              className="h-8 gap-1"
-            >
-              <Plus className="h-3.5 w-3.5" />
-              {t("codexConfig.addRoute", { defaultValue: "添加路由" })}
-            </Button>
-          </div>
-
-          <div className="min-h-[72px] space-y-3">
-            {routingRows.length === 0 ? (
-              <div className="rounded-md border border-dashed border-border-default bg-muted/10 px-3 py-4 text-xs text-muted-foreground">
-                {t("codexConfig.noRoutesConfigured", {
-                  defaultValue:
-                    "还没有路由。添加 route 后，Codex 会按模型名分流到对应上游。",
-                })}
-              </div>
-            ) : (
-              routingRows.map((route, index) => {
-                const matchedModels = route.match.models?.join(", ") || "-";
-                const matchedPrefixes = route.match.prefixes?.join(", ") || "-";
-                const capabilityLabels = [
-                  route.capabilities?.textOnly ? "仅文本" : "图文",
-                  route.capabilities?.supportsReasoning ? "推理" : null,
-                ].filter(Boolean);
-
-                return (
-                  <div
-                    key={route.rowId}
-                    className={cn(
-                      "flex items-center justify-between gap-3 rounded-md border p-3 transition-colors",
-                      route.enabled === false
-                        ? "border-amber-500/45 bg-amber-500/10"
-                        : "border-emerald-500/45 bg-emerald-500/10",
-                    )}
-                  >
-                    <div className="min-w-0 space-y-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="font-medium text-sm">
-                          {route.label || route.id || "路由"}
-                        </span>
-                        <span className="rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground">
-                          {route.targetProviderId
-                            ? `目标: ${route.targetProviderId}`
-                            : route.upstream.apiFormat}
-                        </span>
-                        <span
-                          className={cn(
-                            "rounded border px-1.5 py-0.5 text-[11px] font-medium",
-                            route.enabled === false
-                              ? "border-amber-500/50 bg-amber-500/15 text-amber-200"
-                              : "border-emerald-500/50 bg-emerald-500/15 text-emerald-200",
-                          )}
-                        >
-                          {route.enabled === false ? "已停用" : "已启用"}
-                        </span>
-                        {capabilityLabels.map((label) => (
-                          <span
-                            key={label}
-                            className="rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground"
-                          >
-                            {label}
-                          </span>
-                        ))}
-                      </div>
-                      <p className="truncate text-xs text-muted-foreground">
-                        匹配模型：{matchedModels}；匹配前缀：{matchedPrefixes}
-                      </p>
-                      <p className="truncate text-xs text-muted-foreground">
-                        {route.targetProviderId
-                          ? `复用供应商配置：${route.targetProviderId}`
-                          : route.upstream.baseUrl || "尚未填写上游 Base URL"}
-                      </p>
-                    </div>
-                    <div className="flex shrink-0 items-center gap-2">
-                      <label className="flex items-center gap-2 rounded-md border border-border-default bg-background/60 px-2 py-1 text-xs text-foreground">
-                        <Switch
-                          checked={route.enabled !== false}
-                          onCheckedChange={(checked) =>
-                            handleUpdateRoute(index, { enabled: checked })
-                          }
-                          aria-label={t("codexConfig.routeEnabled", {
-                            defaultValue: "启用路由",
-                          })}
-                        />
-                        {route.enabled === false ? "已停用" : "已启用"}
-                      </label>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon"
-                        className="h-9 w-9 text-foreground/80 hover:text-foreground"
-                        onClick={() => setEditingRouteIndex(index)}
-                        title={t("codexConfig.editRoute", {
-                          defaultValue: "编辑路由",
-                        })}
-                      >
-                        <Pencil className="h-4 w-4" />
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon"
-                        className="h-9 w-9 text-foreground/80 hover:text-destructive"
-                        onClick={() => handleRemoveRoute(index)}
-                        title={t("common.delete", { defaultValue: "删除" })}
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
-                    </div>
-                  </div>
-                );
-              })
-            )}
-          </div>
-        </div>
-      )}
-
       <Dialog
         open={Boolean(pendingSplitRouting)}
         onOpenChange={(open) => {
@@ -2248,313 +1873,6 @@ export function CodexFormFields({
             </Button>
             <Button type="button" onClick={handleConfirmSplitRouting}>
               确认生成两个 provider
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog
-        open={Boolean(editingRoute)}
-        onOpenChange={(open) => {
-          if (!open) setEditingRouteIndex(null);
-        }}
-      >
-        <DialogContent className="max-w-3xl max-h-[90vh] overflow-hidden">
-          <DialogHeader>
-            <DialogTitle>
-              {t("codexConfig.editRoute", { defaultValue: "编辑路由" })}
-            </DialogTitle>
-            <DialogDescription>
-              {t("codexConfig.editRouteHint", {
-                defaultValue:
-                  "配置这条路由的匹配规则、上游 API 格式、认证方式、模型映射和能力标记。",
-              })}
-            </DialogDescription>
-          </DialogHeader>
-
-          {editingRoute && editingRouteIndex !== null && (
-            <div className="flex-1 min-h-0 space-y-4 overflow-y-auto px-6 py-5">
-              <div className="grid grid-cols-1 gap-2 md:grid-cols-[1fr_1fr_auto]">
-                <Input
-                  value={editingRoute.id}
-                  onChange={(event) =>
-                    handleUpdateRoute(editingRouteIndex, {
-                      id: event.target.value.trim(),
-                    })
-                  }
-                  placeholder={t("codexConfig.routeIdPlaceholder", {
-                    defaultValue: "路由 ID",
-                  })}
-                />
-                <Input
-                  value={editingRoute.label ?? ""}
-                  onChange={(event) =>
-                    handleUpdateRoute(editingRouteIndex, {
-                      label: event.target.value,
-                    })
-                  }
-                  placeholder={t("codexConfig.routeLabelPlaceholder", {
-                    defaultValue: "路由名称",
-                  })}
-                />
-                <label className="flex items-center justify-end gap-2 text-xs text-muted-foreground">
-                  <Switch
-                    checked={editingRoute.enabled !== false}
-                    onCheckedChange={(checked) =>
-                      handleUpdateRoute(editingRouteIndex, { enabled: checked })
-                    }
-                  />
-                  {editingRoute.enabled === false ? "已停用" : "已启用"}
-                </label>
-              </div>
-
-              <Input
-                value={editingRoute.targetProviderId ?? ""}
-                onChange={(event) =>
-                  handleUpdateRoute(editingRouteIndex, {
-                    targetProviderId: event.target.value.trim() || undefined,
-                  })
-                }
-                placeholder={t("codexConfig.targetProviderIdPlaceholder", {
-                  defaultValue:
-                    "目标供应商 ID（可选；填写后复用该供应商的 Base URL、认证和转换配置）",
-                })}
-              />
-
-              <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
-                <Input
-                  value={editingRouteModelsText}
-                  onChange={(event) =>
-                    handleUpdateRoute(editingRouteIndex, {
-                      match: {
-                        ...editingRoute.match,
-                        models: parseRoutingList(event.target.value),
-                      },
-                    })
-                  }
-                  placeholder={t("codexConfig.matchModelsPlaceholder", {
-                    defaultValue: "匹配模型，多个用英文逗号分隔",
-                  })}
-                />
-                <Input
-                  value={editingRoutePrefixesText}
-                  onChange={(event) =>
-                    handleUpdateRoute(editingRouteIndex, {
-                      match: {
-                        ...editingRoute.match,
-                        prefixes: parseRoutingList(event.target.value),
-                      },
-                    })
-                  }
-                  placeholder={t("codexConfig.matchPrefixesPlaceholder", {
-                    defaultValue: "匹配前缀，多个用英文逗号分隔",
-                  })}
-                />
-              </div>
-
-              <div className="grid grid-cols-1 gap-2 md:grid-cols-[1fr_180px_180px]">
-                <Input
-                  value={editingRoute.upstream.baseUrl ?? ""}
-                  onChange={(event) =>
-                    handleUpdateRoute(editingRouteIndex, {
-                      upstream: {
-                        ...editingRoute.upstream,
-                        baseUrl: event.target.value.trim(),
-                      },
-                    })
-                  }
-                  placeholder={t("codexConfig.routeBaseUrlPlaceholder", {
-                    defaultValue: "上游 Base URL",
-                  })}
-                />
-                <Select
-                  value={editingRoute.upstream.apiFormat}
-                  onValueChange={(value) =>
-                    handleUpdateRoute(editingRouteIndex, {
-                      upstream: {
-                        ...editingRoute.upstream,
-                        apiFormat: value as CodexApiFormat,
-                        apiFormatSource: "route_override",
-                      },
-                    })
-                  }
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="openai_responses">
-                      OpenAI Responses
-                    </SelectItem>
-                    <SelectItem value="openai_chat">
-                      OpenAI Chat Completions
-                    </SelectItem>
-                    <SelectItem value="openai_messages">
-                      OpenAI Messages
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
-                <Select
-                  value={editingRouteAuthSource}
-                  onValueChange={(value) =>
-                    handleUpdateRoute(editingRouteIndex, {
-                      upstream: {
-                        ...editingRoute.upstream,
-                        apiKey:
-                          value === "provider_config"
-                            ? editingRoute.upstream.apiKey
-                            : "",
-                        auth: {
-                          source: value as CodexRoutingAuthSource,
-                          authProvider:
-                            value === "managed_account" ||
-                            value === "managed_codex_oauth"
-                              ? "codex_oauth"
-                              : undefined,
-                          accountId:
-                            value === "managed_account" ||
-                            value === "managed_codex_oauth"
-                              ? editingRoute.upstream.auth.accountId
-                              : undefined,
-                        },
-                      },
-                    })
-                  }
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="provider_config">
-                      使用路由 API Key
-                    </SelectItem>
-                    <SelectItem value="managed_codex_oauth">
-                      托管 Codex OAuth
-                    </SelectItem>
-                    <SelectItem value="native_codex_auth">
-                      Codex Desktop 当前登录
-                    </SelectItem>
-                    <SelectItem value="account_pool">OAuth 账号池</SelectItem>
-                    <SelectItem value="managed_account">托管账号</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
-                {editingRouteAuthSource === "provider_config" ? (
-                  <Input
-                    type="password"
-                    value={editingRoute.upstream.apiKey ?? ""}
-                    onChange={(event) =>
-                      handleUpdateRoute(editingRouteIndex, {
-                        upstream: {
-                          ...editingRoute.upstream,
-                          apiKey: event.target.value.trim(),
-                        },
-                      })
-                    }
-                    placeholder={t("codexConfig.routeApiKeyPlaceholder", {
-                      defaultValue: "路由 API Key",
-                    })}
-                  />
-                ) : (
-                  <Input
-                    value={editingRoute.upstream.auth.accountId ?? ""}
-                    onChange={(event) =>
-                      handleUpdateRoute(editingRouteIndex, {
-                        upstream: {
-                          ...editingRoute.upstream,
-                          auth: {
-                            ...editingRoute.upstream.auth,
-                            authProvider: "codex_oauth",
-                            accountId: event.target.value.trim(),
-                          },
-                        },
-                      })
-                    }
-                    placeholder={t("codexConfig.routeAccountPlaceholder", {
-                      defaultValue: "托管账号 ID（可选）",
-                    })}
-                  />
-                )}
-                <Input
-                  value={editingRouteModelMapText}
-                  onChange={(event) =>
-                    handleUpdateRoute(editingRouteIndex, {
-                      upstream: {
-                        ...editingRoute.upstream,
-                        modelMap: parseModelMap(event.target.value),
-                      },
-                    })
-                  }
-                  placeholder={t("codexConfig.modelMapPlaceholder", {
-                    defaultValue: "codex模型=上游模型",
-                  })}
-                />
-              </div>
-
-              <div className="flex flex-wrap items-center gap-4 border-t border-border-default pt-3">
-                <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <Switch
-                    checked={editingRouteTextOnly}
-                    onCheckedChange={(checked) =>
-                      handleUpdateRoute(editingRouteIndex, {
-                        capabilities: {
-                          ...editingRoute.capabilities,
-                          textOnly: checked,
-                          inputModalities: checked
-                            ? ["text"]
-                            : ["text", "image"],
-                        },
-                      })
-                    }
-                  />
-                  {t("codexConfig.textOnlyCapability", {
-                    defaultValue: "仅文本",
-                  })}
-                </label>
-                <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <Switch
-                    checked={editingRouteSupportsImage}
-                    onCheckedChange={(checked) =>
-                      handleUpdateRoute(editingRouteIndex, {
-                        capabilities: {
-                          ...editingRoute.capabilities,
-                          textOnly: !checked,
-                          inputModalities: checked
-                            ? ["text", "image"]
-                            : ["text"],
-                        },
-                      })
-                    }
-                  />
-                  {t("codexConfig.imageCapability", { defaultValue: "图文" })}
-                </label>
-                <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <Switch
-                    checked={
-                      editingRoute.capabilities?.supportsReasoning === true
-                    }
-                    onCheckedChange={(checked) =>
-                      handleUpdateRoute(editingRouteIndex, {
-                        capabilities: {
-                          ...editingRoute.capabilities,
-                          supportsReasoning: checked,
-                        },
-                      })
-                    }
-                  />
-                  {t("codexConfig.reasoningCapability", {
-                    defaultValue: "推理",
-                  })}
-                </label>
-              </div>
-            </div>
-          )}
-
-          <DialogFooter>
-            <Button type="button" onClick={() => setEditingRouteIndex(null)}>
-              {t("common.done", { defaultValue: "完成" })}
             </Button>
           </DialogFooter>
         </DialogContent>

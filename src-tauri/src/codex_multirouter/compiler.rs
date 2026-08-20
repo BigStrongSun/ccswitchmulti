@@ -13,6 +13,7 @@ pub struct CompiledCodexRoutingPlan {
     pub routes: Vec<CompiledCodexRoute>,
     pub visible_models: Vec<String>,
     pub model_catalog: Vec<CompiledCodexModel>,
+    pub spawn_agent_models: Vec<String>,
     pub dependency_fingerprint: String,
     pub warnings: Vec<CompilerWarning>,
 }
@@ -182,12 +183,20 @@ pub fn compile_v2(
         .iter()
         .map(|model| model.visible_model.clone())
         .collect::<Vec<_>>();
+    let visible_model_set = visible_models.iter().collect::<HashSet<_>>();
+    let spawn_agent_models = plan
+        .spawn_agent_models
+        .iter()
+        .filter(|model| visible_model_set.contains(model))
+        .cloned()
+        .collect::<Vec<_>>();
     let dependency_fingerprint = dependency_fingerprint(plan, providers, &model_catalog)?;
 
     Ok(CompiledCodexRoutingPlan {
         routes,
         visible_models,
         model_catalog,
+        spawn_agent_models,
         dependency_fingerprint,
         warnings,
     })
@@ -712,6 +721,7 @@ mod tests {
             routes,
             subagent_version: None,
             subagent_v2: None,
+            spawn_agent_models: Vec::new(),
             extensions: BTreeMap::new(),
         }
     }
@@ -742,6 +752,21 @@ mod tests {
 
         assert_eq!(compiled.model_catalog[0].api_format, "openai_responses");
         assert_eq!(compiled.model_catalog[0].api_format_source, "provider");
+    }
+
+    #[test]
+    fn spawn_agent_selection_is_filtered_by_compiled_visible_models() {
+        let provider = provider(
+            "qwen",
+            "Qwen",
+            "openai_responses",
+            json!([{"model": "qwen3.8"}, {"model": "qwen3.9"}]),
+        );
+        let mut plan = plan(vec![route("router-qwen", "qwen", CodexModelSelection::All)]);
+        plan.spawn_agent_models = vec!["qwen3.9".to_string(), "removed".to_string()];
+        let compiled = compile(&plan, [provider]);
+
+        assert_eq!(compiled.spawn_agent_models, vec!["qwen3.9"]);
     }
 
     #[test]

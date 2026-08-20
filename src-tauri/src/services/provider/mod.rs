@@ -602,6 +602,39 @@ mod tests {
     }
 
     #[test]
+    fn switch_rejects_schema_v1_codex_multirouter_before_explicit_migration() {
+        let db = Arc::new(Database::memory().expect("init db"));
+        let state = AppState::new(db.clone());
+        let provider = Provider::with_id(
+            "legacy-router".to_string(),
+            "Legacy Router".to_string(),
+            json!({
+                "codexRouting": {
+                    "enabled": true,
+                    "routes": [{
+                        "id": "legacy-route",
+                        "upstream": {
+                            "apiFormat": "openai_chat",
+                            "apiKey": "must-not-log"
+                        }
+                    }]
+                }
+            }),
+            None,
+        );
+        db.save_provider(AppType::Codex.as_str(), &provider)
+            .expect("save legacy router");
+
+        let error = ProviderService::switch(&state, AppType::Codex, "legacy-router")
+            .expect_err("schema v1 activation must require explicit migration");
+
+        assert!(error
+            .to_string()
+            .contains("codex_multirouter_migration_required"));
+        assert!(!error.to_string().contains("must-not-log"));
+    }
+
+    #[test]
     #[serial]
     fn add_clears_usage_credentials_that_match_provider_config() {
         with_test_home(|state, _| {
@@ -2430,7 +2463,20 @@ model = "gpt-5.4-mini"
             "OpenAI".to_string(),
             json!({
                 "auth": { "OPENAI_API_KEY": "old-openai-key" },
+                "base_url": "https://chatgpt.com/backend-api/codex",
+                "apiFormat": "openai_responses",
                 "config": current_config,
+                "modelCatalog": {
+                    "models": [
+                        { "model": "gpt-5.5", "displayName": "GPT-5.5", "contextWindow": 272000 },
+                        { "model": "gpt-5.4", "displayName": "GPT-5.4", "contextWindow": 272000 },
+                        { "model": "gpt-5.4-mini", "displayName": "GPT-5.4 Mini", "contextWindow": 128000 },
+                        { "model": "gpt-5.3-codex-spark", "displayName": "Codex Spark", "contextWindow": 128000 },
+                        { "model": "qwen3.6", "displayName": "Qwen 3.6", "contextWindow": 262144 },
+                        { "model": "deepseek-v4-flash", "displayName": "DeepSeek V4 Flash", "contextWindow": 1000000 },
+                        { "model": "deepseek-v4-pro", "displayName": "DeepSeek V4 Pro", "contextWindow": 1000000 }
+                    ]
+                }
             }),
             None,
         );
@@ -2443,33 +2489,17 @@ model = "gpt-5.4-mini"
 model_provider = "openai"
 openai_base_url = "http://127.0.0.1:15721/v1"
 "#,
-                "modelCatalog": {
-                    "models": [
-                        { "model": "gpt-5.5", "displayName": "GPT-5.5", "contextWindow": 272000 },
-                        { "model": "gpt-5.4", "displayName": "GPT-5.4", "contextWindow": 272000 },
-                        { "model": "gpt-5.4-mini", "displayName": "GPT-5.4 Mini", "contextWindow": 128000 },
-                        { "model": "gpt-5.3-codex-spark", "displayName": "Codex Spark", "contextWindow": 128000 },
-                        { "model": "qwen3.6", "displayName": "Qwen 3.6", "contextWindow": 262144 },
-                        { "model": "deepseek-v4-flash", "displayName": "DeepSeek V4 Flash", "contextWindow": 1000000 },
-                        { "model": "deepseek-v4-pro", "displayName": "DeepSeek V4 Pro", "contextWindow": 1000000 }
-                    ]
-                },
                 "codexRouting": {
+                    "schemaVersion": 2,
                     "enabled": true,
                     "routes": [
                         {
                             "id": "openai-official",
                             "enabled": true,
-                            "match": {
-                                "models": ["gpt-5.5"],
-                                "prefixes": ["gpt-"]
-                            },
-                            "upstream": {
-                                "baseUrl": "https://chatgpt.com/backend-api/codex",
-                                "apiFormat": "openai_responses",
-                                "auth": { "source": "managed_codex_oauth" },
-                                "modelMap": { "gpt-5.5": "gpt-5.5" }
-                            }
+                            "targetProviderId": "openai",
+                            "modelSelection": { "mode": "all" },
+                            "matchPrefixes": ["gpt-"],
+                            "authPolicy": { "source": "managed_codex_oauth" }
                         }
                     ]
                 }
@@ -2480,15 +2510,40 @@ openai_base_url = "http://127.0.0.1:15721/v1"
 
         db.save_provider("codex", &current)
             .expect("save current provider");
-        db.save_provider("codex", &router)
-            .expect("save router provider");
+        ProviderService::add(&state, AppType::Codex, router.clone(), false)
+            .expect("save and compile schema v2 router provider");
         db.set_current_provider("codex", "openai")
             .expect("set current provider");
         crate::settings::set_current_provider(&AppType::Codex, Some("openai"))
             .expect("set local current provider");
+        assert_eq!(
+            db.get_provider_by_id("openai", "codex")
+                .expect("read target before switch")
+                .expect("target exists before switch")
+                .settings_config["modelCatalog"]["models"]
+                .as_array()
+                .map(Vec::len),
+            Some(7),
+            "target Provider catalog is the compiler SSOT before activation"
+        );
 
-        ProviderService::switch(&state, AppType::Codex, "codex-openai-router")
+        let switch_result = ProviderService::switch(&state, AppType::Codex, "codex-openai-router")
             .expect("switch router through local proxy takeover");
+        assert_eq!(
+            db.get_provider_by_id("openai", "codex")
+                .expect("read target after switch")
+                .expect("target exists after switch")
+                .settings_config["modelCatalog"]["models"]
+                .as_array()
+                .map(Vec::len),
+            Some(7),
+            "activation must not erase the target Provider catalog SSOT"
+        );
+        assert!(
+            switch_result.warnings.is_empty(),
+            "schema v2 projection must publish during activation: {:?}",
+            switch_result.warnings
+        );
 
         let live_config = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
             .expect("read Codex live config");
@@ -2703,8 +2758,8 @@ experimental_bearer_token = "PROXY_MANAGED"
                 .expect("router facade");
             assert_eq!(
                 router_facade.get("name").and_then(|value| value.as_str()),
-                Some("OpenAI"),
-                "{label}: managed OAuth must retain OpenAI capabilities"
+                Some("CCSwitch MultiRouter"),
+                "{label}: projection must retain the stable MultiRouter facade"
             );
             assert_eq!(
                 router_facade
@@ -4305,6 +4360,25 @@ impl ProviderService {
             crate::settings::get_effective_current_provider(&state.db, &app_type)?;
         let is_current = effective_current.as_deref() == Some(provider.id.as_str());
 
+        if is_current && Self::is_codex_schema_v2_router(&app_type, &provider) {
+            let status = crate::codex_multirouter::projection::ensure_codex_multirouter_projection(
+                state.db.as_ref(),
+                &provider.id,
+                true,
+            )?;
+            if status.state == crate::codex_multirouter::projection::ProjectionState::Pending {
+                log::warn!(
+                    "Codex MultiRouter projection pending after current Provider update: router={} code={}",
+                    provider.id,
+                    status
+                        .last_error_code
+                        .as_deref()
+                        .unwrap_or("projection_pending")
+                );
+            }
+            return Ok(true);
+        }
+
         if is_current && !Self::is_codex_schema_v2_router(&app_type, &provider) {
             // 如果 Claude 代理接管处于激活状态，并且代理服务正在运行：
             // - 不直接走普通 Live 写入逻辑
@@ -4416,6 +4490,58 @@ impl ProviderService {
                     crate::codex_multirouter::schema::CodexRoutingDocument::V2(_)
                 )
             })
+    }
+
+    fn ensure_codex_multirouter_activation_schema(
+        app_type: &AppType,
+        provider: &Provider,
+    ) -> Result<(), AppError> {
+        if *app_type != AppType::Codex {
+            return Ok(());
+        }
+        let Some(routing) = provider
+            .settings_config
+            .get("codexRouting")
+            .and_then(Value::as_object)
+        else {
+            return Ok(());
+        };
+        let enabled = routing
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let has_routes = routing
+            .get("routes")
+            .and_then(Value::as_array)
+            .is_some_and(|routes| !routes.is_empty());
+        if !enabled && !has_routes {
+            return Ok(());
+        }
+        if routing.get("schemaVersion").and_then(Value::as_u64) == Some(2) {
+            return Ok(());
+        }
+        Err(AppError::Message(
+            "codex_multirouter_migration_required".to_string(),
+        ))
+    }
+
+    fn refresh_codex_multirouter_projection_after_activation(
+        state: &AppState,
+        app_type: &AppType,
+        provider: &Provider,
+    ) -> Result<Vec<String>, AppError> {
+        if !Self::is_codex_schema_v2_router(app_type, provider) {
+            return Ok(Vec::new());
+        }
+        let status = crate::codex_multirouter::projection::ensure_codex_multirouter_projection(
+            state.db.as_ref(),
+            &provider.id,
+            true,
+        )?;
+        if status.state == crate::codex_multirouter::projection::ProjectionState::Pending {
+            return Ok(vec!["codex_multirouter_projection_pending".to_string()]);
+        }
+        Ok(Vec::new())
     }
 
     fn finish_codex_subagent_v2_mutation(
@@ -4765,6 +4891,7 @@ impl ProviderService {
         let _provider = providers
             .get(id)
             .ok_or_else(|| AppError::Message(format!("供应商 {id} 不存在")))?;
+        Self::ensure_codex_multirouter_activation_schema(&app_type, _provider)?;
 
         // OMO providers are switched through their own exclusive path.
         if matches!(app_type, AppType::OpenCode) && _provider.category.as_deref() == Some("omo") {
@@ -4858,7 +4985,11 @@ impl ProviderService {
             )
             .map_err(|e| AppError::Message(format!("启用 Codex 本地代理接管失败: {e}")))?;
 
-            return Ok(SwitchResult::default());
+            return Ok(SwitchResult {
+                warnings: Self::refresh_codex_multirouter_projection_after_activation(
+                    state, &app_type, _provider,
+                )?,
+            });
         }
 
         if should_hot_switch {
@@ -4880,7 +5011,11 @@ impl ProviderService {
 
             // The proxy server will route requests to the new provider via is_current.
             // MCP sync is intentionally skipped while Live config is owned by takeover.
-            return Ok(SwitchResult::default());
+            return Ok(SwitchResult {
+                warnings: Self::refresh_codex_multirouter_projection_after_activation(
+                    state, &app_type, _provider,
+                )?,
+            });
         }
 
         // Normal mode: full switch with Live config write
@@ -5221,6 +5356,15 @@ impl ProviderService {
         let Some(provider) = providers.get(&current_id) else {
             return Ok(());
         };
+
+        if Self::is_codex_schema_v2_router(&app_type, provider) {
+            crate::codex_multirouter::projection::ensure_codex_multirouter_projection(
+                state.db.as_ref(),
+                &provider.id,
+                true,
+            )?;
+            return Ok(());
+        }
 
         let has_live_backup = block_on_tauri_runtime(state.db.get_live_backup(app_type.as_str()))
             .ok()

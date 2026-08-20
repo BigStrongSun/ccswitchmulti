@@ -54,6 +54,14 @@ import {
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Tooltip,
@@ -62,6 +70,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { providersApi } from "@/lib/api";
+import type { CodexMultiRouterMigrationPreview } from "@/lib/api/providers";
 import { authApi, type CodexAccountPoolPolicy } from "@/lib/api/auth";
 import {
   fetchCodexOauthCachedModels,
@@ -119,6 +128,9 @@ import type {
   CodexOfficialAuthConfig,
   CodexOfficialAuthMode,
   CodexRoutingConfig,
+  CodexRoutingAuth,
+  CodexRoutingConfigV2,
+  CodexRoutingRouteV2,
   CodexSubagentVersion,
   Provider,
 } from "@/types";
@@ -171,6 +183,10 @@ type CodexRoute = {
     models?: string[];
     prefixes?: string[];
   };
+  modelSelection?: { mode: "all" } | { mode: "include"; models: string[] };
+  matchPrefixes?: string[];
+  aliases?: Record<string, string>;
+  authPolicy?: CodexRoutingAuth;
   upstream?: {
     baseUrl?: string;
     base_url?: string;
@@ -202,10 +218,13 @@ type CodexRoute = {
 type CodexRouteCapabilities = NonNullable<CodexRoute["capabilities"]>;
 
 type CodexRouting = {
+  schemaVersion?: 2;
   enabled?: boolean;
   defaultRouteId?: string;
   officialAuth?: CodexOfficialAuthConfig;
   subagentVersion?: CodexSubagentVersion;
+  subagentV2?: CodexRoutingConfigV2["subagentV2"];
+  spawnAgentModels?: string[];
   routes?: CodexRoute[];
 };
 
@@ -251,10 +270,87 @@ type RouteCandidate = {
   id: string;
   route: CodexRoute;
   provider?: Provider;
+  canonicalProvider?: Provider;
   isExisting: boolean;
   matchModels: string[];
   matchPrefixes: string[];
 };
+
+type RoutePolicyDraft = {
+  route: CodexRoute;
+  prefixesText: string;
+  aliasesText: string;
+};
+
+function parseRoutePolicyList(value: string): string[] {
+  return Array.from(
+    new Set(
+      value
+        .split(/[,\n]/)
+        .map((item) => item.trim())
+        .filter(Boolean),
+    ),
+  );
+}
+
+function parseRouteAliases(value: string): {
+  aliases: Record<string, string>;
+  error?: string;
+} {
+  const aliases: Record<string, string> = {};
+  for (const entry of value.split(/[,\n]/)) {
+    const trimmed = entry.trim();
+    if (!trimmed) continue;
+    const separator = trimmed.indexOf("=");
+    if (separator <= 0 || separator === trimmed.length - 1) {
+      return {
+        aliases,
+        error: `别名格式无效：${trimmed}，请使用 visible=canonical`,
+      };
+    }
+    const visible = trimmed.slice(0, separator).trim();
+    const canonical = trimmed.slice(separator + 1).trim();
+    if (!visible || !canonical) {
+      return {
+        aliases,
+        error: `别名格式无效：${trimmed}，请使用 visible=canonical`,
+      };
+    }
+    aliases[visible] = canonical;
+  }
+  return { aliases };
+}
+
+function routeAliasesText(aliases?: Record<string, string>): string {
+  return Object.entries(aliases ?? {})
+    .map(([visible, canonical]) => `${visible}=${canonical}`)
+    .join("\n");
+}
+
+function collectProviderCanonicalModelIds(provider?: Provider): string[] {
+  return provider ? collectProviderModelIds(provider) : [];
+}
+
+function createRoutePolicyDraft(candidate: RouteCandidate): RoutePolicyDraft {
+  const route = candidate.route;
+  return {
+    route: {
+      ...route,
+      label: route.label ?? candidate.provider?.name ?? "",
+      modelSelection: route.modelSelection ?? { mode: "all" },
+      matchPrefixes: route.matchPrefixes ?? route.match?.prefixes ?? [],
+      aliases: route.aliases ?? route.upstream?.modelMap ?? {},
+      authPolicy: route.authPolicy ??
+        (route.upstream?.auth as CodexRoutingAuth | undefined) ?? {
+          source: "provider_config",
+        },
+    },
+    prefixesText: (route.matchPrefixes ?? route.match?.prefixes ?? []).join(
+      ", ",
+    ),
+    aliasesText: routeAliasesText(route.aliases ?? route.upstream?.modelMap),
+  };
+}
 
 /// 将用于人眼识别的 route/provider 文本规整成稳定 key，供旧配置和新 provider 做语义匹配。
 function normalizedRouteIdentityText(value?: string | null): string {
@@ -961,6 +1057,31 @@ export function readCodexRouting(
       routes: routing.map(normalizeLegacyCodexRoutingRoute),
     };
   }
+  if ((routing as { schemaVersion?: unknown }).schemaVersion === 2) {
+    const v2 = routing as CodexRoutingConfigV2;
+    return {
+      schemaVersion: 2,
+      enabled: v2.enabled,
+      defaultRouteId: v2.defaultRouteId,
+      subagentVersion: normalizeCodexSubagentVersion(v2.subagentVersion),
+      subagentV2: v2.subagentV2,
+      spawnAgentModels: v2.spawnAgentModels ?? [],
+      routes: v2.routes.map((route) => ({
+        ...route,
+        match: {
+          models:
+            route.modelSelection.mode === "include"
+              ? route.modelSelection.models
+              : [],
+          prefixes: route.matchPrefixes ?? [],
+        },
+        upstream: {
+          auth: route.authPolicy,
+          modelMap: route.aliases,
+        },
+      })),
+    };
+  }
   return {
     ...(routing as Omit<CodexRouting, "subagentVersion">),
     subagentVersion: normalizeCodexSubagentVersion(
@@ -1398,30 +1519,27 @@ function createRouteFromProvider(
 ): CodexRoute {
   const modelIds = collectProviderModelIds(provider);
   const prefixes = inferProviderPrefixes(provider, modelIds);
-  const capabilities = inferRouteCapabilitiesFromProvider(provider, modelIds);
   const modelMap = buildRouteModelMapFromProvider(provider);
+  const authPolicy = isWizardCodexOAuthSource(provider)
+    ? codexOfficialAuthRouteBinding(officialAuth)
+    : { source: "provider_config" as const };
   return {
     id: uniqueRouteId(`router-${provider.id}`, usedIds),
     label: provider.name,
     enabled: true,
     targetProviderId: provider.id,
+    modelSelection: { mode: "all" },
+    matchPrefixes: prefixes,
+    aliases: modelMap,
+    authPolicy,
     match: {
       models: modelIds,
       prefixes,
     },
     upstream: {
-      apiFormat:
-        provider.meta?.apiFormat ??
-        (isWizardCodexOAuthSource(provider)
-          ? "openai_responses"
-          : "openai_chat"),
-      apiFormatSource: "provider",
-      auth: isWizardCodexOAuthSource(provider)
-        ? codexOfficialAuthRouteBinding(officialAuth)
-        : { source: "provider_config" },
+      auth: authPolicy,
       ...(modelMap ? { modelMap } : {}),
     },
-    ...(capabilities ? { capabilities } : {}),
   };
 }
 
@@ -1455,6 +1573,9 @@ function buildRouteCandidates(
         ? routableModelSources.find((source) => source.id === targetProviderId)
         : undefined) ??
       findSemanticRouteProvider(normalizedRoute, routableModelSources);
+    const canonicalProvider = provider
+      ? modelSources.find((source) => source.id === provider.id)
+      : findSemanticRouteProvider(normalizedRoute, modelSources);
     const routeWithInferredMatch = enrichRouteMatchFromProvider(
       normalizedRoute,
       provider,
@@ -1465,6 +1586,7 @@ function buildRouteCandidates(
       id,
       route: routeWithInferredCapabilities,
       provider,
+      canonicalProvider,
       isExisting: true,
       matchModels: routeWithInferredCapabilities.match?.models ?? [],
       matchPrefixes: routeWithInferredCapabilities.match?.prefixes ?? [],
@@ -1486,6 +1608,9 @@ function buildRouteCandidates(
       id: route.id!,
       route,
       provider,
+      canonicalProvider: modelSources.find(
+        (source) => source.id === provider.id,
+      ),
       isExisting: false,
       matchModels: route.match?.models ?? [],
       matchPrefixes: route.match?.prefixes ?? [],
@@ -1570,6 +1695,77 @@ export function normalizeCodexRouteForSave(
       apiFormat: routeApiFormat(route),
       auth: route.upstream?.auth ?? { source: "provider_config" },
     },
+  };
+}
+
+/// 将工作台内部兼容视图收敛为 schema v2 Route；任何地址、密钥、协议和能力字段都会在此边界被丢弃。
+export function serializeCodexRouteV2(
+  route: CodexRoute,
+  index: number,
+): CodexRoutingRouteV2 {
+  const targetProviderId = routeTargetProviderId(route);
+  if (!targetProviderId) {
+    throw new Error(`route_target_provider_required:${route.id ?? index}`);
+  }
+  const aliases = route.aliases ?? route.upstream?.modelMap ?? {};
+  const requestedModels = route.match?.models ?? [];
+  const canonicalModels = Array.from(
+    new Set(
+      requestedModels
+        .map((model) => aliases[model] ?? model)
+        .map((model) => model.trim())
+        .filter(Boolean),
+    ),
+  );
+  const modelSelection =
+    route.modelSelection?.mode === "all"
+      ? ({ mode: "all" } as const)
+      : ({
+          mode: "include" as const,
+          models:
+            route.modelSelection?.mode === "include"
+              ? route.modelSelection.models
+              : canonicalModels,
+        } as const);
+  const authPolicy: CodexRoutingAuth = route.authPolicy ??
+    (route.upstream?.auth as CodexRoutingAuth | undefined) ?? {
+      source: "provider_config",
+    };
+  return {
+    id: route.id ?? `route-${index + 1}`,
+    ...(route.label ? { label: route.label } : {}),
+    enabled: route.enabled !== false,
+    targetProviderId,
+    modelSelection,
+    matchPrefixes: route.matchPrefixes ?? route.match?.prefixes ?? [],
+    aliases: Object.fromEntries(
+      Object.entries(aliases).filter(
+        ([visible, canonical]) =>
+          visible.trim() !== "" &&
+          canonical.trim() !== "" &&
+          visible !== canonical,
+      ),
+    ),
+    authPolicy: {
+      source: authPolicy.source,
+      ...(authPolicy.accountId?.trim()
+        ? { accountId: authPolicy.accountId.trim() }
+        : {}),
+    },
+  };
+}
+
+function serializeCodexRoutingV2(routing: CodexRouting): CodexRoutingConfigV2 {
+  return {
+    schemaVersion: 2,
+    enabled: routing.enabled,
+    ...(routing.defaultRouteId
+      ? { defaultRouteId: routing.defaultRouteId }
+      : {}),
+    subagentVersion: routing.subagentVersion,
+    subagentV2: routing.subagentV2,
+    spawnAgentModels: routing.spawnAgentModels ?? [],
+    routes: (routing.routes ?? []).map(serializeCodexRouteV2),
   };
 }
 
@@ -1677,11 +1873,16 @@ export function normalizeCodexRoutesForVisibleModelAliases(
       nextModelMapEntries.length > 0
         ? Object.fromEntries(nextModelMapEntries)
         : undefined;
+    const nextAliases = {
+      ...(nextModelMap ?? {}),
+      ...(route.aliases ?? {}),
+    };
     const { modelMap: _modelMap, ...upstreamWithoutModelMap } =
       route.upstream ?? {};
 
     return {
       ...route,
+      aliases: nextAliases,
       match: {
         ...(route.match ?? {}),
         models: nextModels,
@@ -1751,9 +1952,12 @@ export function buildModelCatalogForRoutes(
     const targetCatalogModels = targetProvider
       ? readCodexModelCatalog(targetProvider).models
       : [];
-    const routableCatalogModels = targetCatalogModels.filter((catalogModel) =>
-      routeCanMatchVisibleCatalogModel(route, catalogModel.model ?? ""),
-    );
+    const routableCatalogModels =
+      route.modelSelection?.mode === "all"
+        ? targetCatalogModels
+        : targetCatalogModels.filter((catalogModel) =>
+            routeCanMatchVisibleCatalogModel(route, catalogModel.model ?? ""),
+          );
     for (const catalogModel of routableCatalogModels) {
       const id = catalogModel.model?.trim();
       if (!id || byModel.has(id)) continue;
@@ -1778,11 +1982,12 @@ export function buildModelCatalogForRoutes(
     }
   }
 
-  const existingSpawnAgentModels = Array.isArray(
-    existingCatalog?.spawnAgentModels,
-  )
-    ? (existingCatalog.spawnAgentModels as string[])
-    : [];
+  const routingSpawnAgentModels = readCodexRouting(plan)?.spawnAgentModels;
+  const existingSpawnAgentModels = Array.isArray(routingSpawnAgentModels)
+    ? routingSpawnAgentModels
+    : Array.isArray(existingCatalog?.spawnAgentModels)
+      ? (existingCatalog.spawnAgentModels as string[])
+      : [];
   const modelIds = Array.from(byModel.keys());
   const spawnAgentModels = existingSpawnAgentModels
     .filter((model) => byModel.has(model))
@@ -1800,6 +2005,19 @@ export function buildModelCatalogForRoutes(
   };
 }
 
+/// 工作台只读使用 compiler 等价投影，不把聚合 catalog 写回 Router Provider。
+export function projectCodexModelCatalog(
+  plan: Provider | null,
+  providersById: Map<string, Provider>,
+): CodexModelCatalogDraft {
+  if (!plan) return { models: [], spawnAgentModels: [] };
+  return buildModelCatalogForRoutes(
+    plan,
+    readCodexRouting(plan)?.routes ?? [],
+    providersById,
+  );
+}
+
 /// 生成工作台专用的新 MultiRouter provider；它只承载路由配置，不再让用户填写无关的上游密钥表单。
 export function createDraftRoutingPlan(
   providers: Provider[],
@@ -1810,10 +2028,6 @@ export function createDraftRoutingPlan(
   const id = uniqueRouteId("codex-multirouter", existingIds);
   const catalogModels = buildModelCatalogDraftFromSources(routableModelSources);
   const sourceModels = catalogModels.map((model) => model.model);
-  const modelCatalog: CodexModelCatalogDraft = {
-    models: catalogModels,
-    spawnAgentModels: Array.from(new Set(sourceModels)).slice(0, 5),
-  };
   return {
     id,
     name: "New Codex MultiRouter",
@@ -1829,10 +2043,11 @@ export function createDraftRoutingPlan(
         DEFAULT_CODEX_PROXY_LISTEN_PORT,
       ),
       config: null,
-      modelCatalog,
       codexRouting: {
+        schemaVersion: 2,
         enabled: true,
         subagentVersion: "v2",
+        spawnAgentModels: Array.from(new Set(sourceModels)).slice(0, 5),
         routes: [],
       },
       hostedTools: DEFAULT_HOSTED_TOOLS_CONFIG,
@@ -1848,22 +2063,40 @@ export function applyMultiRouterSettingsDraft(
 ): Provider {
   const currentRouting = readCodexRouting(plan) ?? {};
   const officialBinding = codexOfficialAuthRouteBinding(draft.officialAuth);
-  const nextRouting: CodexRouting = {
-    ...currentRouting,
-    enabled: draft.enabled,
-    officialAuth: draft.officialAuth,
-    routes: (currentRouting.routes ?? []).map((route) =>
-      codexRouteUsesOfficialAuthentication(route)
-        ? {
-            ...route,
-            upstream: {
-              ...route.upstream,
-              auth: officialBinding,
-            },
-          }
-        : route,
-    ),
-  };
+  const nextRouting: CodexRouting =
+    currentRouting.schemaVersion === 2
+      ? {
+          ...currentRouting,
+          enabled: draft.enabled,
+          routes: (currentRouting.routes ?? []).map((route) =>
+            codexRouteUsesOfficialAuthentication(route)
+              ? {
+                  ...route,
+                  authPolicy: officialBinding,
+                  upstream: {
+                    ...route.upstream,
+                    auth: officialBinding,
+                  },
+                }
+              : route,
+          ),
+        }
+      : {
+          ...currentRouting,
+          enabled: draft.enabled,
+          officialAuth: draft.officialAuth,
+          routes: (currentRouting.routes ?? []).map((route) =>
+            codexRouteUsesOfficialAuthentication(route)
+              ? {
+                  ...route,
+                  upstream: {
+                    ...route.upstream,
+                    auth: officialBinding,
+                  },
+                }
+              : route,
+          ),
+        };
   const defaultRouteId = draft.defaultRouteId?.trim();
   if (
     defaultRouteId &&
@@ -1896,7 +2129,10 @@ export function applyMultiRouterSettingsDraft(
             DEFAULT_CODEX_PROXY_LISTEN_PORT,
           ),
         config: plan.settingsConfig?.config ?? null,
-        codexRouting: nextRouting,
+        codexRouting:
+          nextRouting.schemaVersion === 2
+            ? serializeCodexRoutingV2(nextRouting)
+            : nextRouting,
       },
       {
         webSearch: { enabled: draft.hostedTools.webSearch },
@@ -2402,6 +2638,16 @@ export function CodexRouterWorkspacePage({
   const [routePickerError, setRoutePickerError] = useState<string | null>(null);
   const [isSavingRoutes, setIsSavingRoutes] = useState(false);
   const [isSavingPlanSettings, setIsSavingPlanSettings] = useState(false);
+  const [migrationPreview, setMigrationPreview] =
+    useState<CodexMultiRouterMigrationPreview | null>(null);
+  const [migrationTargetPlan, setMigrationTargetPlan] =
+    useState<Provider | null>(null);
+  const [migrationPendingAction, setMigrationPendingAction] = useState<
+    "routes" | "settings" | null
+  >(null);
+  const [isLoadingMigration, setIsLoadingMigration] = useState(false);
+  const [isApplyingMigration, setIsApplyingMigration] = useState(false);
+  const [migrationError, setMigrationError] = useState<string | null>(null);
   const [routePickerSelectAll, setRoutePickerSelectAll] = useState(false);
   const [optimisticRoutingPlan, setOptimisticRoutingPlan] =
     useState<Provider | null>(null);
@@ -2697,6 +2943,10 @@ export function CodexRouterWorkspacePage({
     routingPlans[0] ??
     null;
   const selectedRouting = selectedPlan ? readCodexRouting(selectedPlan) : null;
+  const selectedProjectedCatalog = useMemo(
+    () => projectCodexModelCatalog(selectedPlan, routableProvidersById),
+    [selectedPlan, routableProvidersById],
+  );
   const selectedPlanRouteEntries = selectedPlan
     ? routeEntries.filter(({ provider }) => provider.id === selectedPlan.id)
     : routeEntries;
@@ -2897,6 +3147,7 @@ export function CodexRouterWorkspacePage({
       : (enabledRouteIds[0] ?? normalizedRoutes[0]?.id);
     const nextRouting: CodexRouting = {
       ...currentRouting,
+      schemaVersion: 2,
       enabled: currentRouting.enabled ?? true,
       routes: normalizedRoutes,
     };
@@ -2909,14 +3160,10 @@ export function CodexRouterWorkspacePage({
       ...plan,
       settingsConfig: {
         ...plan.settingsConfig,
-        modelCatalog: buildModelCatalogForRoutes(
-          plan,
-          normalizedRoutes,
-          routableProvidersById,
-        ),
-        codexRouting: nextRouting,
+        codexRouting: serializeCodexRoutingV2(nextRouting),
       },
     };
+    delete nextProvider.settingsConfig.modelCatalog;
     const nextEnabledProviderIds = new Set<string>();
     for (const route of normalizedRoutes) {
       if (route.enabled === false) continue;
@@ -2984,14 +3231,91 @@ export function CodexRouterWorkspacePage({
     setActiveTab("routes");
   }
 
+  async function previewLegacyPlanMigration(
+    plan: Provider,
+    action: "routes" | "settings",
+  ) {
+    setMigrationTargetPlan(plan);
+    setMigrationPendingAction(action);
+    setMigrationPreview(null);
+    setMigrationError(null);
+    setIsLoadingMigration(true);
+    try {
+      const revision = await providersApi.getCodexMultiRouterRevision(plan.id);
+      const preview = await providersApi.previewCodexMultiRouterMigration(
+        plan.id,
+        revision,
+      );
+      setMigrationPreview(preview);
+    } catch (error) {
+      setMigrationError(workspaceErrorMessage(error));
+    } finally {
+      setIsLoadingMigration(false);
+    }
+  }
+
+  async function applyLegacyPlanMigration() {
+    if (!migrationPreview || !migrationTargetPlan) return;
+    setIsApplyingMigration(true);
+    setMigrationError(null);
+    try {
+      await providersApi.applyCodexMultiRouterMigration(
+        migrationTargetPlan.id,
+        migrationPreview.expectedRevision,
+        migrationPreview.planToken,
+      );
+      const refreshedProviders = await providersApi.getAll("codex");
+      const migratedPlan = refreshedProviders[migrationTargetPlan.id];
+      if (
+        !migratedPlan ||
+        readCodexRouting(migratedPlan)?.schemaVersion !== 2
+      ) {
+        throw new Error("migration_readback_failed");
+      }
+      setOptimisticRoutingPlan(migratedPlan);
+      setSelectedPlanId(migratedPlan.id);
+      const action = migrationPendingAction;
+      setMigrationPreview(null);
+      setMigrationTargetPlan(null);
+      setMigrationPendingAction(null);
+      if (action === "routes") {
+        setActiveTab("routes");
+        setRoutePickerError(null);
+        setRoutePickerMessage("旧方案已迁移为 schema v2，请检查后再保存规则。");
+        setRoutePickerSelectAll(false);
+        setIsRoutePickerOpen(true);
+      } else if (action === "settings") {
+        setIsPlanSettingsOpen(true);
+      }
+      await queryClient.invalidateQueries({ queryKey: ["providers", "codex"] });
+    } catch (error) {
+      setMigrationError(workspaceErrorMessage(error));
+    } finally {
+      setIsApplyingMigration(false);
+    }
+  }
+
   /// 从任何规则入口打开候选选择器时，先切到规则页并清理上一次保存提示。
   function handleOpenRoutePicker(provider?: Provider | null) {
-    if (provider) setSelectedPlanId(provider.id);
+    const targetPlan = provider ?? selectedPlan;
+    if (targetPlan && readCodexRouting(targetPlan)?.schemaVersion !== 2) {
+      void previewLegacyPlanMigration(targetPlan, "routes");
+      return;
+    }
+    if (targetPlan) setSelectedPlanId(targetPlan.id);
     setActiveTab("routes");
     setRoutePickerError(null);
     setRoutePickerMessage(null);
     setRoutePickerSelectAll(false);
     setIsRoutePickerOpen(true);
+  }
+
+  function handlePlanSettingsOpenChange(open: boolean) {
+    if (open && selectedPlan && selectedRouting?.schemaVersion !== 2) {
+      void previewLegacyPlanMigration(selectedPlan, "settings");
+      return;
+    }
+    setIsPlanSettingsOpen(open);
   }
 
   /// 页面内测试只做规则匹配预览，不发真实上游请求，避免误触发计费或账号请求。
@@ -3115,6 +3439,7 @@ export function CodexRouterWorkspacePage({
               onSaveRoutes={handleSaveRoutingRoutes}
               onSelectPlan={handleSelectPlan}
               onSelectRoute={handleSelectRoute}
+              onEditProvider={onEditProvider}
               onEditPlan={handleEditPlan}
               onDeletePlan={onDeletePlan}
               providersById={providersById}
@@ -3127,7 +3452,7 @@ export function CodexRouterWorkspacePage({
               isSavingRoutes={isSavingRoutes}
               isPlanSettingsOpen={isPlanSettingsOpen}
               isSavingPlanSettings={isSavingPlanSettings}
-              onPlanSettingsOpenChange={setIsPlanSettingsOpen}
+              onPlanSettingsOpenChange={handlePlanSettingsOpenChange}
               onSavePlanSettings={handleSavePlanSettings}
               routePickerSelectAll={routePickerSelectAll}
               routePickerMessage={routePickerMessage}
@@ -3139,6 +3464,9 @@ export function CodexRouterWorkspacePage({
           <TabsContent value="model-order" className="mt-3">
             <ModelOrderTab
               selectedPlan={selectedPlan}
+              catalog={selectedProjectedCatalog}
+              selectedRoutes={selectedPlanRouteEntries}
+              providersById={providersById}
               onCreatePlan={handleCreatePlan}
             />
           </TabsContent>
@@ -3147,6 +3475,7 @@ export function CodexRouterWorkspacePage({
             <SubagentsTab
               selectedPlan={selectedPlan}
               selectedRoutes={selectedPlanRouteEntries}
+              catalog={selectedProjectedCatalog}
               onCreatePlan={handleCreatePlan}
             />
           </TabsContent>
@@ -3180,6 +3509,101 @@ export function CodexRouterWorkspacePage({
           </TabsContent>
         </Tabs>
       </div>
+      <Dialog
+        open={Boolean(migrationTargetPlan)}
+        onOpenChange={(open) => {
+          if (open || isApplyingMigration) return;
+          setMigrationTargetPlan(null);
+          setMigrationPreview(null);
+          setMigrationPendingAction(null);
+          setMigrationError(null);
+        }}
+      >
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>迁移旧 MultiRouter 到 schema v2</DialogTitle>
+            <DialogDescription>
+              编辑或启用旧方案前必须显式迁移。预览只展示引用变化和字段类别，不会展示
+              API Key、Token 或 OAuth 凭据。
+            </DialogDescription>
+          </DialogHeader>
+          {isLoadingMigration ? (
+            <div className="rounded-md border p-3 text-sm text-muted-foreground">
+              正在生成迁移预览…
+            </div>
+          ) : migrationPreview ? (
+            <div className="space-y-3 text-sm">
+              <div className="grid gap-2 sm:grid-cols-3">
+                <DetailRow
+                  label="删除冗余字段"
+                  value={String(
+                    migrationPreview.diff.removedRouteFields.length,
+                  )}
+                />
+                <DetailRow
+                  label="引用变化 Route"
+                  value={String(migrationPreview.diff.changedRouteIds.length)}
+                />
+                <DetailRow
+                  label="迁移生成 Provider"
+                  value={String(migrationPreview.generatedProviders.length)}
+                />
+              </div>
+              {migrationPreview.generatedProviders.length > 0 ? (
+                <div className="rounded-md border p-3">
+                  <div className="font-medium">将创建的 Provider</div>
+                  <ul className="mt-2 list-disc space-y-1 pl-5 text-muted-foreground">
+                    {migrationPreview.generatedProviders.map((provider) => (
+                      <li key={provider.id}>
+                        {provider.name} ({provider.id})，来源{" "}
+                        {provider.sourceProviderId}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+              {migrationPreview.warnings.length > 0 ? (
+                <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-amber-900 dark:border-amber-700/60 dark:bg-amber-950/30 dark:text-amber-100">
+                  <div className="font-medium">迁移警告</div>
+                  <ul className="mt-2 list-disc space-y-1 pl-5">
+                    {migrationPreview.warnings.map((warning) => (
+                      <li key={warning}>{warning}</li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+          {migrationError ? (
+            <div
+              role="alert"
+              className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive"
+            >
+              {migrationError}
+            </div>
+          ) : null}
+          <DialogFooter>
+            <Button
+              variant="outline"
+              disabled={isApplyingMigration}
+              onClick={() => {
+                setMigrationTargetPlan(null);
+                setMigrationPreview(null);
+                setMigrationPendingAction(null);
+                setMigrationError(null);
+              }}
+            >
+              取消
+            </Button>
+            <Button
+              disabled={!migrationPreview || isApplyingMigration}
+              onClick={() => void applyLegacyPlanMigration()}
+            >
+              {isApplyingMigration ? "正在应用…" : "应用迁移并继续"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -3563,10 +3987,12 @@ function SourcesTab({
 function SubagentsTab({
   selectedPlan,
   selectedRoutes,
+  catalog,
   onCreatePlan,
 }: {
   selectedPlan: Provider | null;
   selectedRoutes: RouteEntry[];
+  catalog: CodexModelCatalogDraft;
   onCreatePlan: () => void;
 }) {
   if (!selectedPlan) {
@@ -3596,6 +4022,7 @@ function SubagentsTab({
       <SpawnAgentCandidatesPanel
         selectedPlan={selectedPlan}
         selectedRoutes={selectedRoutes}
+        catalog={catalog}
       />
     </div>
   );
@@ -3603,9 +4030,15 @@ function SubagentsTab({
 
 function ModelOrderTab({
   selectedPlan,
+  catalog,
+  selectedRoutes,
+  providersById,
   onCreatePlan,
 }: {
   selectedPlan: Provider | null;
+  catalog: CodexModelCatalogDraft;
+  selectedRoutes: RouteEntry[];
+  providersById: Map<string, Provider>;
   onCreatePlan: () => void;
 }) {
   const queryClient = useQueryClient();
@@ -3619,7 +4052,6 @@ function ModelOrderTab({
       coordinateGetter: sortableKeyboardCoordinates,
     }),
   );
-  const catalog = readCodexModelCatalog(selectedPlan);
   const catalogKey = catalog.models
     .map((model) => `${model.model ?? ""}:${model.sortIndex ?? ""}`)
     .join("\n");
@@ -3679,11 +4111,6 @@ function ModelOrderTab({
     setMessage(null);
     setError(null);
     try {
-      const currentModelCatalog =
-        selectedPlan.settingsConfig?.modelCatalog &&
-        typeof selectedPlan.settingsConfig.modelCatalog === "object"
-          ? selectedPlan.settingsConfig.modelCatalog
-          : {};
       const models = (reset ? catalog.models : draftModels).map(
         (model, index) => {
           const rest = { ...model };
@@ -3691,22 +4118,62 @@ function ModelOrderTab({
           return reset ? rest : { ...rest, sortIndex: index };
         },
       );
-      const nextProvider: Provider = {
-        ...selectedPlan,
-        settingsConfig: {
-          ...selectedPlan.settingsConfig,
-          modelCatalog: {
-            ...currentModelCatalog,
-            models,
-          },
-        },
-      };
-      await providersApi.update(nextProvider, "codex");
+      const updates = new Map<string, Provider>();
+      for (const [sortIndex, projectedModel] of models.entries()) {
+        const visibleModel = projectedModel.model?.trim();
+        if (!visibleModel) continue;
+        for (const { route } of selectedRoutes) {
+          if (route.enabled === false) continue;
+          const targetProviderId = routeTargetProviderId(route);
+          if (!targetProviderId) continue;
+          const aliases = route.aliases ?? route.upstream?.modelMap ?? {};
+          const canonicalModel = aliases[visibleModel] ?? visibleModel;
+          if (
+            route.modelSelection?.mode === "include" &&
+            !route.modelSelection.models.includes(canonicalModel)
+          ) {
+            continue;
+          }
+          const source =
+            updates.get(targetProviderId) ??
+            providersById.get(targetProviderId);
+          if (!source) continue;
+          const sourceModels = readCodexModelCatalog(source).models;
+          const sourceIndex = sourceModels.findIndex(
+            (model) =>
+              model.model?.trim() === canonicalModel ||
+              model.upstreamModel?.trim() === canonicalModel ||
+              model.upstream_model?.trim() === canonicalModel,
+          );
+          if (sourceIndex < 0) continue;
+          const nextModels = sourceModels.map((model, index) => {
+            if (index !== sourceIndex) return model;
+            const next = { ...model };
+            if (reset) delete next.sortIndex;
+            else next.sortIndex = sortIndex;
+            return next;
+          });
+          updates.set(targetProviderId, {
+            ...source,
+            settingsConfig: {
+              ...source.settingsConfig,
+              modelCatalog: {
+                ...(source.settingsConfig?.modelCatalog ?? {}),
+                models: nextModels,
+              },
+            },
+          });
+          break;
+        }
+      }
+      for (const provider of updates.values()) {
+        await providersApi.update(provider, "codex");
+      }
       setDraftModels(models);
       setMessage(
         reset
-          ? "已恢复默认模型顺序；重启 Codex Desktop 后生效。"
-          : `已保存 ${models.length} 个模型的展示顺序；重启 Codex Desktop 后生效。`,
+          ? "已从目标 Provider 模型条目移除自定义顺序；投影刷新后生效。"
+          : `已把 ${models.length} 个模型的展示顺序保存到目标 Provider 模型条目；投影刷新后生效。`,
       );
       await queryClient.invalidateQueries({ queryKey: ["providers", "codex"] });
     } catch (saveError) {
@@ -3819,6 +4286,7 @@ function RoutesTab({
   onSaveRoutes,
   onSelectPlan,
   onSelectRoute,
+  onEditProvider,
   onEditPlan,
   onDeletePlan,
   proxyStatus,
@@ -3849,6 +4317,7 @@ function RoutesTab({
   onSaveRoutes: (plan: Provider, routes: CodexRoute[]) => Promise<void>;
   onSelectPlan: (provider: Provider) => void;
   onSelectRoute: (entry: RouteEntry) => void;
+  onEditProvider: (provider: Provider) => void;
   onEditPlan: (provider: Provider, detail?: string) => void;
   onDeletePlan: (provider: Provider) => void;
   proxyStatus?: ProxyStatus;
@@ -4047,6 +4516,7 @@ function RoutesTab({
             selectedPlan={selectedPlan}
             providersById={providersById}
             onOpenRoutePicker={onOpenRoutePicker}
+            onEditProvider={onEditProvider}
           />
         </section>
       </div>
@@ -4835,6 +5305,17 @@ function RouteCandidatePicker({
   const [enabledIds, setEnabledIds] = useState<Set<string>>(() =>
     buildInitialRoutePickerEnabledIds(candidates, selectAllByDefault),
   );
+  const [routeDraftsById, setRouteDraftsById] = useState<
+    Record<string, RoutePolicyDraft>
+  >(() =>
+    Object.fromEntries(
+      candidates.map((candidate) => [
+        candidate.id,
+        createRoutePolicyDraft(candidate),
+      ]),
+    ),
+  );
+  const [routePolicyError, setRoutePolicyError] = useState<string | null>(null);
 
   useEffect(() => {
     const currentPlanId = selectedPlan?.id ?? null;
@@ -4850,6 +5331,14 @@ function RouteCandidatePicker({
     if (previousPlanId !== currentPlanId) {
       setSelectedIds(new Set(selectedDefaults));
       setEnabledIds(new Set(enabledDefaults));
+      setRouteDraftsById(
+        Object.fromEntries(
+          candidates.map((candidate) => [
+            candidate.id,
+            createRoutePolicyDraft(candidate),
+          ]),
+        ),
+      );
     } else {
       setSelectedIds((current) =>
         mergeRoutePickerDraftIds(
@@ -4867,7 +5356,17 @@ function RouteCandidatePicker({
           enabledDefaults,
         ),
       );
+      setRouteDraftsById((current) =>
+        Object.fromEntries(
+          candidates.map((candidate) => [
+            candidate.id,
+            current[candidate.id] ?? createRoutePolicyDraft(candidate),
+          ]),
+        ),
+      );
     }
+
+    setRoutePolicyError(null);
 
     draftPlanIdRef.current = currentPlanId;
     draftCandidateIdsRef.current = candidateIds;
@@ -4886,14 +5385,58 @@ function RouteCandidatePicker({
     });
   }
 
+  function updateRoutePolicyDraft(
+    id: string,
+    update: (draft: RoutePolicyDraft) => RoutePolicyDraft,
+  ) {
+    setRoutePolicyError(null);
+    setRouteDraftsById((current) => {
+      const candidate = candidates.find((item) => item.id === id);
+      if (!candidate) return current;
+      const draft = current[id] ?? createRoutePolicyDraft(candidate);
+      return { ...current, [id]: update(draft) };
+    });
+  }
+
   /// 保存前只保留勾选项，并把启用状态同步到 route.enabled；取消勾选即删除该 route。
   async function handleSave() {
-    const routes = candidates
-      .filter((candidate) => selectedIds.has(candidate.id))
-      .map((candidate) => ({
-        ...candidate.route,
+    const routes: CodexRoute[] = [];
+    for (const candidate of candidates) {
+      if (!selectedIds.has(candidate.id)) continue;
+      const draft =
+        routeDraftsById[candidate.id] ?? createRoutePolicyDraft(candidate);
+      const canonicalModels = collectProviderCanonicalModelIds(
+        candidate.canonicalProvider,
+      );
+      const canonicalSet = new Set(canonicalModels);
+      const aliasesResult = parseRouteAliases(draft.aliasesText);
+      if (aliasesResult.error) {
+        setRoutePolicyError(aliasesResult.error);
+        return;
+      }
+      for (const canonical of Object.values(aliasesResult.aliases)) {
+        if (!canonicalSet.has(canonical)) {
+          setRoutePolicyError(
+            `别名目标 ${canonical} 不属于目标 Provider 的 canonical 模型`,
+          );
+          return;
+        }
+      }
+      if (
+        draft.route.modelSelection?.mode === "include" &&
+        draft.route.modelSelection.models.length === 0
+      ) {
+        setRoutePolicyError("include 模式至少选择一个 canonical 模型");
+        return;
+      }
+      routes.push({
+        ...draft.route,
         enabled: enabledIds.has(candidate.id),
-      }));
+        matchPrefixes: parseRoutePolicyList(draft.prefixesText),
+        aliases: aliasesResult.aliases,
+      });
+    }
+    setRoutePolicyError(null);
     await onSaveRoutes(selectedPlan, routes);
   }
 
@@ -4968,6 +5511,12 @@ function RouteCandidatePicker({
         }
       />
 
+      {routePolicyError ? (
+        <div className="mt-2 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700 dark:border-rose-700/50 dark:bg-rose-950/30 dark:text-rose-100">
+          {routePolicyError}
+        </div>
+      ) : null}
+
       <div className="mt-2 grid gap-2 md:grid-cols-2">
         {candidates.map((candidate) => {
           const checked = selectedIds.has(candidate.id);
@@ -4979,6 +5528,15 @@ function RouteCandidatePicker({
           const refreshState = candidate.provider
             ? providerModelRefreshStates[candidate.provider.id]
             : undefined;
+          const draft =
+            routeDraftsById[candidate.id] ?? createRoutePolicyDraft(candidate);
+          const canonicalModels = collectProviderCanonicalModelIds(
+            candidate.canonicalProvider,
+          );
+          const modelSelection = draft.route.modelSelection ?? { mode: "all" };
+          const authPolicy = draft.route.authPolicy ?? {
+            source: "provider_config" as const,
+          };
           return (
             <div
               key={candidate.id}
@@ -5059,6 +5617,217 @@ function RouteCandidatePicker({
                   {!checked ? "启用" : enabled ? "已启用" : "已停用"}
                 </Button>
               </div>
+              {checked ? (
+                <div className="mt-3 space-y-3 rounded-md border border-emerald-200/80 bg-background/80 p-2.5 dark:border-emerald-700/40 dark:bg-slate-950/50">
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <label className="space-y-1 text-xs text-muted-foreground">
+                      <span>路由名称</span>
+                      <input
+                        aria-label={`路由名称：${targetLabel}`}
+                        value={draft.route.label ?? ""}
+                        onChange={(event) =>
+                          updateRoutePolicyDraft(candidate.id, (current) => ({
+                            ...current,
+                            route: {
+                              ...current.route,
+                              label: event.target.value,
+                            },
+                          }))
+                        }
+                        className="h-8 w-full rounded-md border border-input bg-background px-2 text-sm text-foreground"
+                      />
+                    </label>
+                    <label className="space-y-1 text-xs text-muted-foreground">
+                      <span>模型选择范围</span>
+                      <select
+                        aria-label={`模型选择范围：${targetLabel}`}
+                        value={modelSelection.mode}
+                        onChange={(event) =>
+                          updateRoutePolicyDraft(candidate.id, (current) => ({
+                            ...current,
+                            route: {
+                              ...current.route,
+                              modelSelection:
+                                event.target.value === "include"
+                                  ? {
+                                      mode: "include",
+                                      models: collectProviderCanonicalModelIds(
+                                        candidate.canonicalProvider,
+                                      ),
+                                    }
+                                  : { mode: "all" },
+                            },
+                          }))
+                        }
+                        className="h-8 w-full rounded-md border border-input bg-background px-2 text-sm text-foreground"
+                      >
+                        <option value="all">全部模型（自动接收新增）</option>
+                        <option value="include">仅选中的 canonical 模型</option>
+                      </select>
+                    </label>
+                  </div>
+
+                  {modelSelection.mode === "include" ? (
+                    <div className="space-y-1">
+                      <div className="text-xs text-muted-foreground">
+                        canonical Provider 模型
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {canonicalModels.map((model) => (
+                          <label
+                            key={model}
+                            className="flex items-center gap-1.5 rounded-md border border-border bg-muted/50 px-2 py-1 text-xs text-foreground"
+                          >
+                            <input
+                              type="checkbox"
+                              aria-label={`选择 canonical 模型 ${model}`}
+                              checked={modelSelection.models.includes(model)}
+                              onChange={(event) =>
+                                updateRoutePolicyDraft(
+                                  candidate.id,
+                                  (current) => {
+                                    const selection =
+                                      current.route.modelSelection?.mode ===
+                                      "include"
+                                        ? current.route.modelSelection.models
+                                        : [];
+                                    const models = event.target.checked
+                                      ? Array.from(
+                                          new Set([...selection, model]),
+                                        )
+                                      : selection.filter(
+                                          (item) => item !== model,
+                                        );
+                                    return {
+                                      ...current,
+                                      route: {
+                                        ...current.route,
+                                        modelSelection: {
+                                          mode: "include",
+                                          models,
+                                        },
+                                      },
+                                    };
+                                  },
+                                )
+                              }
+                            />
+                            {model}
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <label className="space-y-1 text-xs text-muted-foreground">
+                      <span>匹配前缀（逗号或换行分隔）</span>
+                      <textarea
+                        aria-label={`匹配前缀：${targetLabel}`}
+                        value={draft.prefixesText}
+                        onChange={(event) =>
+                          updateRoutePolicyDraft(candidate.id, (current) => ({
+                            ...current,
+                            prefixesText: event.target.value,
+                          }))
+                        }
+                        rows={2}
+                        className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm text-foreground"
+                      />
+                    </label>
+                    <label className="space-y-1 text-xs text-muted-foreground">
+                      <span>可见别名（visible=canonical）</span>
+                      <textarea
+                        aria-label={`可见别名映射：${targetLabel}`}
+                        value={draft.aliasesText}
+                        onChange={(event) =>
+                          updateRoutePolicyDraft(candidate.id, (current) => ({
+                            ...current,
+                            aliasesText: event.target.value,
+                          }))
+                        }
+                        rows={2}
+                        className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm text-foreground"
+                      />
+                    </label>
+                  </div>
+
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <label className="space-y-1 text-xs text-muted-foreground">
+                      <span>认证策略引用</span>
+                      <select
+                        aria-label={`认证策略：${targetLabel}`}
+                        value={authPolicy.source}
+                        onChange={(event) => {
+                          const source = event.target
+                            .value as CodexRoutingAuth["source"];
+                          updateRoutePolicyDraft(candidate.id, (current) => ({
+                            ...current,
+                            route: {
+                              ...current.route,
+                              authPolicy: {
+                                source,
+                                ...(source === "managed_codex_oauth" ||
+                                source === "managed_account" ||
+                                source === "account_pool"
+                                  ? {
+                                      accountId:
+                                        current.route.authPolicy?.accountId,
+                                    }
+                                  : {}),
+                              },
+                            },
+                          }));
+                        }}
+                        className="h-8 w-full rounded-md border border-input bg-background px-2 text-sm text-foreground"
+                      >
+                        <option value="provider_config">
+                          Provider 配置认证
+                        </option>
+                        <option value="native_codex_auth">
+                          Codex Desktop 当前登录
+                        </option>
+                        <option value="managed_codex_oauth">
+                          托管 Codex OAuth
+                        </option>
+                        <option value="account_pool">OAuth 账号池</option>
+                      </select>
+                    </label>
+                    {authPolicy.source === "managed_codex_oauth" ||
+                    authPolicy.source === "managed_account" ||
+                    authPolicy.source === "account_pool" ? (
+                      <label className="space-y-1 text-xs text-muted-foreground">
+                        <span>账号/策略引用 ID（不保存 Token）</span>
+                        <input
+                          aria-label={`${
+                            authPolicy.source === "managed_codex_oauth"
+                              ? "托管 OAuth 账号 ID"
+                              : "账号池策略 ID"
+                          }：${targetLabel}`}
+                          value={authPolicy.accountId ?? ""}
+                          onChange={(event) =>
+                            updateRoutePolicyDraft(candidate.id, (current) => ({
+                              ...current,
+                              route: {
+                                ...current.route,
+                                authPolicy: {
+                                  source: authPolicy.source,
+                                  accountId: event.target.value,
+                                },
+                              },
+                            }))
+                          }
+                          className="h-8 w-full rounded-md border border-input bg-background px-2 text-sm text-foreground"
+                        />
+                      </label>
+                    ) : null}
+                  </div>
+                  <p className="text-xs leading-5 text-muted-foreground">
+                    地址、API Key、协议、上下文和能力由目标
+                    Provider/模型条目维护；这里仅保存无密钥 Route policy。
+                  </p>
+                </div>
+              ) : null}
               <div className="mt-2 flex flex-wrap gap-1.5 text-xs">
                 {candidate.matchModels.slice(0, 6).map((model) => (
                   <span
@@ -5122,9 +5891,11 @@ function RouteCandidatePicker({
 function SpawnAgentCandidatesPanel({
   selectedPlan,
   selectedRoutes,
+  catalog,
 }: {
   selectedPlan: Provider | null;
   selectedRoutes: RouteEntry[];
+  catalog: CodexModelCatalogDraft;
 }) {
   const [diagnostics, setDiagnostics] =
     useState<CodexMultiRouterDiagnostics | null>(null);
@@ -5164,7 +5935,10 @@ function SpawnAgentCandidatesPanel({
       coordinateGetter: sortableKeyboardCoordinates,
     }),
   );
-  const selectedCatalog = readCodexModelCatalog(selectedPlan);
+  const selectedCatalog = {
+    ...catalog,
+    spawnAgentModels: catalog.spawnAgentModels ?? [],
+  };
   const selectedCatalogModelKey = selectedCatalog.models
     .map((model) => model.model?.trim() ?? "")
     .join("\n");
@@ -5298,7 +6072,7 @@ function SpawnAgentCandidatesPanel({
     );
   }
 
-  /// 写回 provider 时只更新 cc-switch 私有的 modelCatalog.spawnAgentModels，避免破坏 auth、routing 和统计归属。
+  /// schema v2 只保存用户选择的 spawn-agent policy；可见 catalog 由 compiler 重建。
   async function saveSpawnAgentCandidates() {
     if (!selectedPlan) return;
     setIsSavingCandidates(true);
@@ -5310,21 +6084,21 @@ function SpawnAgentCandidatesPanel({
         selectedCatalog.models,
         spawnAgentVisibleLimit,
       );
-      const currentModelCatalog =
-        selectedPlan.settingsConfig?.modelCatalog &&
-        typeof selectedPlan.settingsConfig.modelCatalog === "object"
-          ? selectedPlan.settingsConfig.modelCatalog
-          : {};
+      const currentRouting = readCodexRouting(selectedPlan);
+      if (currentRouting?.schemaVersion !== 2) {
+        throw new Error("legacy_route_requires_migration");
+      }
       const nextProvider: Provider = {
         ...selectedPlan,
         settingsConfig: {
           ...selectedPlan.settingsConfig,
-          modelCatalog: {
-            ...currentModelCatalog,
+          codexRouting: serializeCodexRoutingV2({
+            ...currentRouting,
             spawnAgentModels: normalized,
-          },
+          }),
         },
       };
+      delete nextProvider.settingsConfig.modelCatalog;
       await providersApi.update(nextProvider, "codex");
       setDraftSpawnAgentModels(normalized);
       setCandidateSaveMessage(
@@ -5340,7 +6114,7 @@ function SpawnAgentCandidatesPanel({
     }
   }
 
-  /// V1/V2 是当前 MultiRouter 的会话级协议选择；切换时保留完整 routing 和 modelCatalog。
+  /// V1/V2 是当前 MultiRouter 的会话级协议选择；切换时保留完整 schema v2 routing policy。
   async function saveSubagentVersion(version: CodexSubagentVersion) {
     if (!selectedPlan || version === activeSubagentVersion) return;
     setIsSavingSubagentVersion(true);
@@ -5348,23 +6122,18 @@ function SpawnAgentCandidatesPanel({
     setSubagentVersionError(null);
     setSubagentVersionMessage(null);
     try {
-      const rawRouting =
-        selectedPlan.settingsConfig?.codexRouting &&
-        typeof selectedPlan.settingsConfig.codexRouting === "object" &&
-        !Array.isArray(selectedPlan.settingsConfig.codexRouting)
-          ? selectedPlan.settingsConfig.codexRouting
-          : (readCodexRouting(selectedPlan) ?? {
-              enabled: true,
-              routes: [],
-            });
+      const currentRouting = readCodexRouting(selectedPlan);
+      if (currentRouting?.schemaVersion !== 2) {
+        throw new Error("legacy_route_requires_migration");
+      }
       const nextProvider: Provider = {
         ...selectedPlan,
         settingsConfig: {
           ...selectedPlan.settingsConfig,
-          codexRouting: {
-            ...rawRouting,
+          codexRouting: serializeCodexRoutingV2({
+            ...currentRouting,
             subagentVersion: version,
-          },
+          }),
         },
       };
       await providersApi.update(nextProvider, "codex");
@@ -7695,7 +8464,10 @@ function RouteListButton({
           {targetProvider ? "复用供应商配置" : apiFormatLabel(format)}
         </span>
         <span className="rounded-full border border-border bg-muted px-2 py-0.5 text-muted-foreground dark:border-slate-600 dark:bg-slate-900 dark:text-slate-300">
-          {authSourceLabel(entry.route.upstream?.auth?.source)}
+          {authSourceLabel(
+            entry.route.authPolicy?.source ??
+              entry.route.upstream?.auth?.source,
+          )}
         </span>
       </div>
       <div className="mt-1.5 min-w-0 break-words whitespace-normal text-xs leading-5 text-muted-foreground dark:text-slate-400">
@@ -7711,11 +8483,13 @@ function RouteDetailPanel({
   selectedPlan,
   providersById,
   onOpenRoutePicker,
+  onEditProvider,
 }: {
   selectedRoute?: RouteEntry;
   selectedPlan: Provider | null;
   providersById: Map<string, Provider>;
   onOpenRoutePicker: (provider?: Provider | null) => void;
+  onEditProvider: (provider: Provider) => void;
 }) {
   if (!selectedRoute) {
     return (
@@ -7766,20 +8540,18 @@ function RouteDetailPanel({
           />
         ) : null}
         <DetailRow
-          label="上游地址"
-          value={routeBaseUrl(route, providersById)}
-        />
-        <DetailRow
-          label="接口类型"
+          label="模型选择"
           value={
-            targetProvider
-              ? "跟随目标供应商"
-              : apiFormatLabel(routeApiFormat(route))
+            route.modelSelection?.mode === "all"
+              ? "目标 Provider 的全部模型（自动接收新增模型）"
+              : `${matchedModels.length} 个 canonical 模型`
           }
         />
         <DetailRow
           label="认证方式"
-          value={authSourceLabel(route.upstream?.auth?.source)}
+          value={authSourceLabel(
+            route.authPolicy?.source ?? route.upstream?.auth?.source,
+          )}
         />
         {codexRouteUsesOfficialAuthentication(route) ? (
           <DetailRow
@@ -7788,16 +8560,21 @@ function RouteDetailPanel({
           />
         ) : null}
         <DetailRow
-          label="能力"
-          value={[
-            route.capabilities?.textOnly ? "仅文本" : "图文",
-            route.capabilities?.supportsReasoning ? "推理" : null,
-          ]
-            .filter(Boolean)
-            .join(" / ")}
+          label="配置所有权"
+          value="地址、凭据、协议和模型能力由目标 Provider/模型条目维护；Route 只保存选择、前缀、别名和认证策略。"
         />
       </div>
       <div className="mt-3 grid gap-2">
+        {targetProvider ? (
+          <Button
+            variant="outline"
+            className="justify-start gap-2"
+            onClick={() => onEditProvider(targetProvider)}
+          >
+            <Settings2 className="h-4 w-4" />
+            编辑目标 Provider/模型配置
+          </Button>
+        ) : null}
         <Button
           variant="outline"
           className="justify-start gap-2"

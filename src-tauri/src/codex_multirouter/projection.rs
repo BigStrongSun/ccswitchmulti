@@ -251,7 +251,8 @@ fn build_projection_artifact(
 fn projection_settings(router: &Provider, compiled: &CompiledCodexRoutingPlan) -> Value {
     let mut settings = router.settings_config.clone();
     settings["modelCatalog"] = json!({
-        "models": compiled.model_catalog.iter().map(projected_model_entry).collect::<Vec<_>>()
+        "models": compiled.model_catalog.iter().map(projected_model_entry).collect::<Vec<_>>(),
+        "spawnAgentModels": compiled.spawn_agent_models
     });
     settings["codexRoutingProjection"] = json!({
         "dependencyFingerprint": compiled.dependency_fingerprint
@@ -399,6 +400,7 @@ mod tests {
                 "codexRouting": {
                     "schemaVersion": 2,
                     "enabled": true,
+                    "spawnAgentModels": ["qwen3.8", "removed"],
                     "defaultRouteId": "qwen",
                     "routes": [{
                         "id": "qwen",
@@ -456,6 +458,18 @@ mod tests {
         assert_eq!(changed.state, ProjectionState::Ready);
         assert_ne!(changed.dependency_fingerprint, first.dependency_fingerprint);
         assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn projection_keeps_only_routable_spawn_agent_models() {
+        let db = Database::memory().expect("memory db");
+        save_fixture(&db, "openai_chat");
+        let artifact = build_projection_artifact(&db, "router").expect("projection artifact");
+
+        assert_eq!(
+            artifact.projection_settings["modelCatalog"]["spawnAgentModels"],
+            json!(["qwen3.8"])
+        );
     }
 
     #[test]

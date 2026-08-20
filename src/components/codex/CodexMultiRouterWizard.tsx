@@ -19,11 +19,10 @@ import {
 import { toast } from "sonner";
 import type { Provider } from "@/types";
 import type {
-  CodexCacheConfig,
   CodexCatalogModel,
   CodexOfficialAuthConfig,
   CodexOfficialAuthMode,
-  CodexRoutingRoute,
+  CodexRoutingRouteV2,
 } from "@/types";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -44,6 +43,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { providersApi } from "@/lib/api/providers";
+import type { CodexMultiRouterMigrationPreview } from "@/lib/api/providers";
 import { codexSubagentV2Api } from "@/lib/api/codexSubagentV2";
 import {
   fetchCodexOauthCachedModels,
@@ -464,27 +464,6 @@ function fetchConfigSummary(config: WizardModelFetchConfig | null): string {
   return `${config.baseUrl}${config.isFullUrl ? " (完整 URL)" : ""}`;
 }
 
-// 将 route 的缓存能力转换成向导里的说明，强调缓存验证看真实 usage，而不是基础连通性。
-function cacheCapabilitySummary(cache?: CodexCacheConfig): string {
-  switch (cache?.cacheMode) {
-    case "openai_prompt_cache":
-      return "OpenAI Prompt Cache：保留原生前缀缓存；支持时会透传 prompt_cache_key/retention，真实命中看 cached_tokens。";
-    case "deepseek_context_cache":
-      return "DeepSeek Context Cache：不注入 OpenAI 私有参数；真实命中看 prompt_cache_hit_tokens / miss_tokens。";
-    case "glm_context_cache":
-    case "zai_context_cache":
-      return "GLM/Z.AI 自动上下文缓存：保持稳定前缀，不注入 OpenAI 私有参数；真实命中看 cached_tokens。";
-    case "qwen_context_cache":
-      return "Qwen/DashScope 上下文缓存：按协议保持请求形态；真实命中看 cached_tokens / cache_creation_input_tokens。";
-    case "anthropic_cache_control":
-      return "Anthropic cache_control：只适用于 Anthropic/Bedrock 风格消息块。";
-    case "auto_prefix_cache":
-      return "自动前缀缓存：保持稳定前缀，不额外注入 OpenAI cache 参数。";
-    default:
-      return "缓存能力未知：只做基础连通性与路由验证，真实命中需看上游 usage。";
-  }
-}
-
 // 生成官方 Codex OAuth 动态目录读取文案；失败时保留最后一次成功目录，不清空用户配置。
 function codexOAuthModelFetchMessage(
   hasModelCatalog: boolean,
@@ -664,6 +643,13 @@ export function CodexMultiRouterWizard({
   const [modelFetchCards, setModelFetchCards] = useState<
     Record<string, ModelFetchCardState>
   >({});
+  const [migratedPlanOverride, setMigratedPlanOverride] =
+    useState<Provider | null>(null);
+  const [migrationPreview, setMigrationPreview] =
+    useState<CodexMultiRouterMigrationPreview | null>(null);
+  const [migrationError, setMigrationError] = useState<string | null>(null);
+  const [isLoadingMigration, setIsLoadingMigration] = useState(false);
+  const [isApplyingMigration, setIsApplyingMigration] = useState(false);
   const initializedOpenRef = useRef(false);
 
   const resolvedMode =
@@ -671,7 +657,7 @@ export function CodexMultiRouterWizard({
     (planId || providers.some((provider) => isCodexMultiRouterPlan(provider))
       ? "edit"
       : "create");
-  const existingPlan = useMemo(() => {
+  const storedExistingPlan = useMemo(() => {
     if (resolvedMode !== "edit") return undefined;
     return planId
       ? providers.find(
@@ -680,6 +666,7 @@ export function CodexMultiRouterWizard({
         )
       : providers.find((provider) => isCodexMultiRouterPlan(provider));
   }, [planId, providers, resolvedMode]);
+  const existingPlan = migratedPlanOverride ?? storedExistingPlan;
   const editingTargetMissing = resolvedMode === "edit" && !existingPlan;
   const providerModelSources = useMemo(
     () => defaultWizardModelSources(providers),
@@ -727,6 +714,72 @@ export function CodexMultiRouterWizard({
   const isSavingPlan = flowState.status === "savingPlan";
   const isEnablingPlan = flowState.status === "enabling";
 
+  useEffect(() => {
+    if (!open) {
+      setMigratedPlanOverride(null);
+      setMigrationPreview(null);
+      setMigrationError(null);
+      return;
+    }
+    if (
+      resolvedMode !== "edit" ||
+      !storedExistingPlan ||
+      storedExistingPlan.settingsConfig?.codexRouting?.schemaVersion === 2 ||
+      migratedPlanOverride
+    ) {
+      return;
+    }
+    let cancelled = false;
+    setIsLoadingMigration(true);
+    setMigrationError(null);
+    void providersApi
+      .getCodexMultiRouterRevision(storedExistingPlan.id)
+      .then((revision) =>
+        providersApi.previewCodexMultiRouterMigration(
+          storedExistingPlan.id,
+          revision,
+        ),
+      )
+      .then((preview) => {
+        if (!cancelled) setMigrationPreview(preview);
+      })
+      .catch((error) => {
+        if (!cancelled) setMigrationError(formatWizardError(error));
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoadingMigration(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [migratedPlanOverride, open, resolvedMode, storedExistingPlan]);
+
+  const applyLegacyMigration = async () => {
+    if (!migrationPreview || !storedExistingPlan) return;
+    setIsApplyingMigration(true);
+    setMigrationError(null);
+    try {
+      await providersApi.applyCodexMultiRouterMigration(
+        storedExistingPlan.id,
+        migrationPreview.expectedRevision,
+        migrationPreview.planToken,
+      );
+      const refreshed = await providersApi.getAll("codex");
+      const migrated = refreshed[storedExistingPlan.id];
+      if (migrated?.settingsConfig?.codexRouting?.schemaVersion !== 2) {
+        throw new Error("migration_readback_failed");
+      }
+      initializedOpenRef.current = false;
+      setMigratedPlanOverride(migrated);
+      setMigrationPreview(null);
+      await queryClient.invalidateQueries({ queryKey: ["providers", "codex"] });
+    } catch (error) {
+      setMigrationError(formatWizardError(error));
+    } finally {
+      setIsApplyingMigration(false);
+    }
+  };
+
   // 每次打开向导只初始化一次。父组件 rerender 会传入新的 providers 数组，不能因此把用户从第 2 步重置回第 1 步。
   useEffect(() => {
     if (!open) {
@@ -751,15 +804,20 @@ export function CodexMultiRouterWizard({
     setImageGenerationEnabled(hostedTools.imageGeneration.enabled);
     // 复用统一的安全目录读取，历史方案中混入 null/原始值时不能让整个窗口白屏。
     setCatalogModelOrder(
-      existingPlan
+      existingPlan?.settingsConfig?.modelCatalog
         ? readWizardModelCatalog(existingPlan).map((model) => model.model)
         : null,
     );
     setDraftSpawnAgentModels(
-      existingPlan?.settingsConfig?.modelCatalog?.spawnAgentModels?.slice(
-        0,
-        5,
-      ) ?? [],
+      existingPlan?.settingsConfig?.codexRouting?.schemaVersion === 2
+        ? (existingPlan.settingsConfig.codexRouting.spawnAgentModels?.slice(
+            0,
+            5,
+          ) ?? [])
+        : (existingPlan?.settingsConfig?.modelCatalog?.spawnAgentModels?.slice(
+            0,
+            5,
+          ) ?? []),
     );
     setConnectivityResults([]);
     setWizardIssues([]);
@@ -1439,6 +1497,16 @@ export function CodexMultiRouterWizard({
           },
         },
       );
+      for (const source of routeReadySources) {
+        const draftSource = draftSources.find((item) => item.id === source.id);
+        if (
+          draftSource &&
+          JSON.stringify(draftSource.settingsConfig?.modelCatalog ?? null) !==
+            JSON.stringify(source.settingsConfig?.modelCatalog ?? null)
+        ) {
+          await providersApi.update(source, "codex");
+        }
+      }
       let savedProvider = result.plan;
       if (existingPlan) {
         await providersApi.update(result.plan, "codex");
@@ -1499,7 +1567,7 @@ export function CodexMultiRouterWizard({
 
   if (!open) return null;
 
-  const planPreview = buildCodexMultiRouterWizardPlan(
+  const planPreviewResult = buildCodexMultiRouterWizardPlan(
     providers,
     routeReadySources,
     existingPlan,
@@ -1509,11 +1577,14 @@ export function CodexMultiRouterWizard({
       spawnAgentModels: activeSpawnAgentModels,
       officialAuth: draftOfficialAuth,
     },
-  ).plan;
+  );
+  const planPreview = planPreviewResult.plan;
   const previewRoutes = (planPreview.settingsConfig.codexRouting?.routes ??
-    []) as CodexRoutingRoute[];
-  const previewModels = (planPreview.settingsConfig.modelCatalog?.models ??
-    []) as CodexCatalogModel[];
+    []) as CodexRoutingRouteV2[];
+  const previewModels = buildWizardModelCatalog(
+    planPreviewResult.sourceProviders,
+    { catalogModelOrder: activeCatalogModelOrder },
+  ).models;
   const availableModelByName = new Map(
     availableCatalogModels.map((model) => [model.model, model]),
   );
@@ -2130,10 +2201,11 @@ export function CodexMultiRouterWizard({
                         : "官方 route 复用 Codex Desktop 当前登录。三种方式都通过 CCSM 的 HTTP Responses 接管链路，WebSocket 不参与选路。"}
                   </div>
                   {existingPlan &&
-                  !existingPlan.settingsConfig?.codexRouting?.officialAuth ? (
+                  existingPlan.settingsConfig?.codexRouting?.schemaVersion !==
+                    2 ? (
                     <div className="rounded-md border border-amber-300 bg-amber-50 p-2 text-xs leading-5 text-amber-900 dark:border-amber-700/60 dark:bg-amber-950/30 dark:text-amber-100 md:col-span-2">
                       这是升级前的方案，当前选择由原 route
-                      绑定推断。只有点击“保存并发布”后才会写入 Router 级策略。
+                      绑定推断。编辑前需要先预览并显式应用 schema v2 迁移。
                     </div>
                   ) : null}
                 </div>
@@ -2141,27 +2213,29 @@ export function CodexMultiRouterWizard({
                   <div key={route.id} className="rounded-lg border p-4">
                     <div className="flex items-center justify-between gap-3">
                       <div className="font-medium">{route.label}</div>
-                      <Badge variant="outline">
-                        {route.upstream.apiFormat}
-                      </Badge>
+                      <Badge variant="outline">{route.targetProviderId}</Badge>
                     </div>
                     <div className="mt-2 text-sm text-muted-foreground">
-                      模型 {route.match.models?.length ?? 0} 个；前缀{" "}
-                      {(route.match.prefixes ?? []).join(", ") || "无"}
+                      模型范围：
+                      {route.modelSelection.mode === "all"
+                        ? "目标 Provider 的全部模型"
+                        : `${route.modelSelection.models.length} 个 canonical 模型`}
+                      ；前缀 {(route.matchPrefixes ?? []).join(", ") || "无"}
                     </div>
                     <div className="mt-2 text-xs leading-5 text-muted-foreground">
                       认证：
-                      {route.upstream.auth.source === "native_codex_auth"
+                      {route.authPolicy?.source === "native_codex_auth"
                         ? "Codex Desktop 当前登录"
-                        : route.upstream.auth.source === "account_pool"
+                        : route.authPolicy?.source === "account_pool"
                           ? "OAuth 账号池"
-                          : route.upstream.auth.source === "managed_codex_oauth"
+                          : route.authPolicy?.source === "managed_codex_oauth"
                             ? "CCSM OAuth"
                             : "模型源凭据"}
                       ；客户端传输：HTTP Responses
                     </div>
                     <div className="mt-2 rounded-md bg-muted px-3 py-2 text-xs leading-5 text-muted-foreground">
-                      {cacheCapabilitySummary(route.capabilities?.codexCache)}
+                      协议、连接地址、凭据和模型能力始终读取目标
+                      Provider/模型条目的最新配置；Route 不保存这些字段。
                     </div>
                   </div>
                 ))}
@@ -2261,6 +2335,87 @@ export function CodexMultiRouterWizard({
               </Button>
               <Button type="button" onClick={probeResponsesConnectivity}>
                 确认测试
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        <Dialog
+          open={
+            resolvedMode === "edit" &&
+            Boolean(storedExistingPlan) &&
+            storedExistingPlan?.settingsConfig?.codexRouting?.schemaVersion !==
+              2 &&
+            !migratedPlanOverride
+          }
+          onOpenChange={(nextOpen) => {
+            if (!nextOpen && !isApplyingMigration) closeWizard(false);
+          }}
+        >
+          <DialogContent className="max-w-2xl" zIndex="top">
+            <DialogHeader>
+              <DialogTitle>编辑前迁移旧 MultiRouter</DialogTitle>
+              <DialogDescription>
+                schema v1
+                保持只读兼容。继续编辑或启用前，需要先检查迁移预览并显式应用；预览不会展示密钥或
+                Token。
+              </DialogDescription>
+            </DialogHeader>
+            {isLoadingMigration ? (
+              <div className="rounded-md border p-3 text-sm text-muted-foreground">
+                正在生成迁移预览…
+              </div>
+            ) : migrationPreview ? (
+              <div className="space-y-3 text-sm">
+                <div className="grid gap-2 sm:grid-cols-3">
+                  <div className="rounded-md border p-3">
+                    删除冗余字段：
+                    {migrationPreview.diff.removedRouteFields.length}
+                  </div>
+                  <div className="rounded-md border p-3">
+                    引用变化：{migrationPreview.diff.changedRouteIds.length}
+                  </div>
+                  <div className="rounded-md border p-3">
+                    新建 Provider：{migrationPreview.generatedProviders.length}
+                  </div>
+                </div>
+                {migrationPreview.generatedProviders.map((provider) => (
+                  <div key={provider.id} className="rounded-md border p-3">
+                    {provider.name} ({provider.id})，来源{" "}
+                    {provider.sourceProviderId}
+                  </div>
+                ))}
+                {migrationPreview.warnings.map((warning) => (
+                  <div
+                    key={warning}
+                    className="rounded-md border border-amber-300 bg-amber-50 p-3 text-amber-900 dark:border-amber-700/60 dark:bg-amber-950/30 dark:text-amber-100"
+                  >
+                    {warning}
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            {migrationError ? (
+              <div
+                role="alert"
+                className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive"
+              >
+                {migrationError}
+              </div>
+            ) : null}
+            <DialogFooter>
+              <Button
+                variant="outline"
+                disabled={isApplyingMigration}
+                onClick={() => closeWizard(false)}
+              >
+                取消编辑
+              </Button>
+              <Button
+                disabled={!migrationPreview || isApplyingMigration}
+                onClick={() => void applyLegacyMigration()}
+              >
+                {isApplyingMigration ? "正在应用…" : "应用迁移并继续编辑"}
               </Button>
             </DialogFooter>
           </DialogContent>
