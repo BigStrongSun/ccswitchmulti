@@ -37,6 +37,14 @@
 - 删除命令返回结构化 outcome：`deletedProviderId`、`affectedPlanIds`、`disabledPlanIds`、`removedCandidates` 和无密钥 projection 状态。被 schema-v1 Route 引用的 Provider 禁止直接删除并返回 `legacy_route_requires_migration`，避免只读兼容配置被静默破坏。
 - TDD 覆盖删空当前 plan 的官方恢复/级联/空投影、恢复失败零数据库改动，以及 v1 引用必须先显式迁移。
 
+## 2026-08-20 MultiRouter Provider SSOT v1→v2 显式迁移
+
+- Task 7 新增 `codex_multirouter/migration.rs`：revision 是完整 Provider 序列化后的 SHA-256（只返回摘要），preview 必须匹配 `expectedRevision`，生成 15 分钟内有效且绑定 provider/revision/精确迁移结果的内存 `planToken`；apply 再验 token 与 revision，并支持同 token 同结果幂等重放。
+- 迁移生成 v2 Route 时只保留 target Provider、all/include canonical 选择、非 identity aliases、prefix、label/enabled 和无密钥 auth policy。Qwen `apiFormatSource=provider` 的陈旧协议快照删除为继承；DeepSeek disjoint route override 显式写入对应 Provider 模型条目的 `apiFormat`；输入模态、推理支持和缓存声明迁入模型条目。
+- Route 内联 Base URL/API Key 或同一 canonical 模型的冲突协议/能力会克隆 migration-generated Provider 并让 Route 引用克隆；秘密只存在 apply token 的进程内计划和最终 Provider，不进入 preview/diff/日志。自动 identity `modelMap` 删除，非 identity 映射保留为 aliases；选中集合等于 Provider catalog 时迁为 `all`，否则为 canonical `include`。
+- apply 在一个 SQLite transaction 中插入迁移 Provider、更新目标 Provider 模型条目并写入 v2 Router；命令随后调用统一 projection ensure。稳定错误覆盖 revision conflict、invalid/expired/mismatched token、missing/ambiguous target、未知认证和模型目录缺失。
+- TDD 覆盖 Qwen stale snapshot/secret-free preview、内联凭据 clone、幂等 apply、DeepSeek 模型协议拆分、能力迁移和 preview 后 revision 冲突。
+
 ## 2026-08-19 恢复 Qwen/vLLM 缺省输出上限 131072（对齐 Qwen3.8-27B 官方最大输出）
 
 - 实况：Codex 任务 `01a01722-ca39-77f1-b7da-9d3a9d5fe023` 的 vLLM 透明代理记录出现单条请求 `prompt_tokens=136269 / completion_tokens=125875 / total_tokens=262144 / finish_reasons=["length"]`。根因不是上下文压缩也不是 KV cache，而是 Codex Responses 请求没有显式输出预算、CCSM 转换成 Chat Completions 时也没有补 `max_tokens`，vLLM 把剩余上下文窗口都当成默认输出预算。

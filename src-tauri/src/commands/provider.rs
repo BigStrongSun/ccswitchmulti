@@ -136,6 +136,55 @@ pub fn retry_codex_multirouter_projection(
 }
 
 #[tauri::command]
+#[allow(non_snake_case)]
+pub fn get_codex_multirouter_revision(
+    state: State<'_, AppState>,
+    providerId: String,
+) -> Result<String, String> {
+    crate::codex_multirouter::migration::codex_multirouter_revision(&state.db, &providerId)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn preview_codex_multirouter_migration(
+    state: State<'_, AppState>,
+    providerId: String,
+    expectedRevision: String,
+) -> Result<crate::codex_multirouter::migration::CodexMultiRouterMigrationPreview, String> {
+    crate::codex_multirouter::migration::preview_codex_multirouter_migration(
+        &state.db,
+        &providerId,
+        &expectedRevision,
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn apply_codex_multirouter_migration(
+    state: State<'_, AppState>,
+    providerId: String,
+    expectedRevision: String,
+    planToken: String,
+) -> Result<crate::codex_multirouter::migration::CodexMultiRouterMigrationApplyOutcome, String> {
+    let outcome = crate::codex_multirouter::migration::apply_codex_multirouter_migration(
+        &state.db,
+        &providerId,
+        &expectedRevision,
+        &planToken,
+    )
+    .map_err(|error| error.to_string())?;
+    crate::codex_multirouter::projection::ensure_codex_multirouter_projection(
+        &state.db,
+        &providerId,
+        false,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(outcome)
+}
+
+#[tauri::command]
 pub fn delete_provider(
     state: State<'_, AppState>,
     app: String,

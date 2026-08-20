@@ -17,10 +17,15 @@ export * as configApi from "./config";
 export * as authApi from "./auth";
 export * as copilotApi from "./copilot";
 export type {
+  CodexMultiRouterGeneratedProviderSummary,
+  CodexMultiRouterMigrationApplyOutcome,
+  CodexMultiRouterMigrationDiff,
+  CodexMultiRouterMigrationPreview,
   CodexRoutingProjectionCapabilitySources,
   CodexRoutingProjectionRouteDiagnostic,
   CodexRoutingProjectionState,
   CodexRoutingProjectionStatus,
+  ProviderDeleteOutcome,
   ProviderSwitchEvent,
 } from "./providers";
 export type { Prompt } from "./prompts";
