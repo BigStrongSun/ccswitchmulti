@@ -30,6 +30,13 @@
 - 前端删除 `syncCodexMultiRouterPlanWithProviders`、`syncCodexMultiRouterPlansAfterProviderChange` 及整个 `codexMultiRouterSync.ts`；Provider 保存和工作台 `/models` 刷新都只提交目标 Provider 一次，不再逐个改写引用 plan。v1 内联 OAuth route 在显式迁移前保持只读。
 - TDD 先观察统一 mutation 函数缺失，再验证 Chat→Responses 更新只发布直接依赖的 Router、未改 Route JSON；补充 RED/GREEN 证明无关损坏 Router 不会阻塞 Provider 更新。前端契约回归改为“一次 Provider mutation、零 plan 重写”。
 
+## 2026-08-20 MultiRouter Provider SSOT v2 删除生命周期
+
+- Task 6 的 Codex Provider 删除先只读编译受影响 schema-v2 plan，收集受影响 plan、被移除的可见模型候选和删空后的 plan。若当前 plan 会失去最后一条 Route，先切换到内建 `codex-official` 并强制恢复官方 live 配置；恢复失败时 Provider/Route 数据库变更不提交。
+- 官方恢复成功后，所有 Route 级联、空 plan 的 `routing.enabled=false`/默认 Route 清除/派生 catalog 清空、目标 Provider 删除和目标 Provider 的孤立 projection setting 在同一 SQLite 事务提交。提交后 compiler 为剩余或空 plan 发布新投影；发布失败仍进入可重试 pending。
+- 删除命令返回结构化 outcome：`deletedProviderId`、`affectedPlanIds`、`disabledPlanIds`、`removedCandidates` 和无密钥 projection 状态。被 schema-v1 Route 引用的 Provider 禁止直接删除并返回 `legacy_route_requires_migration`，避免只读兼容配置被静默破坏。
+- TDD 覆盖删空当前 plan 的官方恢复/级联/空投影、恢复失败零数据库改动，以及 v1 引用必须先显式迁移。
+
 ## 2026-08-19 恢复 Qwen/vLLM 缺省输出上限 131072（对齐 Qwen3.8-27B 官方最大输出）
 
 - 实况：Codex 任务 `01a01722-ca39-77f1-b7da-9d3a9d5fe023` 的 vLLM 透明代理记录出现单条请求 `prompt_tokens=136269 / completion_tokens=125875 / total_tokens=262144 / finish_reasons=["length"]`。根因不是上下文压缩也不是 KV cache，而是 Codex Responses 请求没有显式输出预算、CCSM 转换成 Chat Completions 时也没有补 `max_tokens`，vLLM 把剩余上下文窗口都当成默认输出预算。

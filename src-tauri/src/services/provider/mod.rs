@@ -4578,7 +4578,11 @@ impl ProviderService {
     ///
     /// 同时检查本地 settings 和数据库的当前供应商，防止删除任一端正在使用的供应商。
     /// 对于累加模式应用（OpenCode, OpenClaw），可以随时删除任意供应商，同时从 live 配置中移除。
-    pub fn delete(state: &AppState, app_type: AppType, id: &str) -> Result<(), AppError> {
+    pub fn delete(
+        state: &AppState,
+        app_type: AppType,
+        id: &str,
+    ) -> Result<crate::codex_multirouter::mutation::CodexProviderDeleteOutcome, AppError> {
         // Additive mode apps - no current provider concept
         if app_type.is_additive_mode() {
             // Single DB read shared across all additive-mode sub-paths below.
@@ -4601,7 +4605,7 @@ impl ProviderService {
                     if was_current {
                         crate::services::OmoService::delete_config_file(variant)?;
                     }
-                    return Ok(());
+                    return Ok(Self::empty_provider_delete_outcome(id));
                 }
             }
 
@@ -4624,7 +4628,7 @@ impl ProviderService {
                 }
             }
             state.db.delete_provider(app_type.as_str(), id)?;
-            return Ok(());
+            return Ok(Self::empty_provider_delete_outcome(id));
         }
 
         // For other apps: Check both local settings and database
@@ -4637,7 +4641,49 @@ impl ProviderService {
             ));
         }
 
-        state.db.delete_provider(app_type.as_str(), id)
+        if app_type != AppType::Codex {
+            state.db.delete_provider(app_type.as_str(), id)?;
+            return Ok(Self::empty_provider_delete_outcome(id));
+        }
+
+        let current_provider_id =
+            crate::settings::get_effective_current_provider(state.db.as_ref(), &AppType::Codex)?;
+        crate::codex_multirouter::mutation::apply_codex_provider_delete_with_hooks(
+            state.db.as_ref(),
+            id,
+            current_provider_id.as_deref(),
+            || {
+                state.db.ensure_official_seed_by_id(
+                    crate::database::CODEX_OFFICIAL_PROVIDER_ID,
+                    AppType::Codex,
+                )?;
+                Self::switch(
+                    state,
+                    AppType::Codex,
+                    crate::database::CODEX_OFFICIAL_PROVIDER_ID,
+                )?;
+                crate::codex_config::force_codex_builtin_openai_live_provider()?;
+                Ok(())
+            },
+            |artifact| {
+                crate::codex_config::publish_codex_multirouter_projection(
+                    &artifact.projection_settings,
+                )
+                .map_err(|error| error.to_string())
+            },
+        )
+    }
+
+    fn empty_provider_delete_outcome(
+        id: &str,
+    ) -> crate::codex_multirouter::mutation::CodexProviderDeleteOutcome {
+        crate::codex_multirouter::mutation::CodexProviderDeleteOutcome {
+            deleted_provider_id: id.to_string(),
+            affected_plan_ids: Vec::new(),
+            disabled_plan_ids: Vec::new(),
+            removed_candidates: Vec::new(),
+            projections: Vec::new(),
+        }
     }
 
     /// Remove provider from live config only (for additive mode apps like OpenCode, OpenClaw)

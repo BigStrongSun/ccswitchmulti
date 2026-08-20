@@ -41,6 +41,14 @@ export interface CodexOfficialRestoreOutcome {
   };
 }
 
+export interface ProviderDeleteOutcome {
+  deletedProviderId: string;
+  affectedPlanIds: string[];
+  disabledPlanIds: string[];
+  removedCandidates: string[];
+  projections: CodexRoutingProjectionStatus[];
+}
+
 export type CodexRoutingProjectionState = "ready" | "pending";
 
 export interface CodexRoutingProjectionCapabilitySources {
@@ -204,7 +212,7 @@ export const providersApi = {
     return await invoke("retry_codex_multirouter_projection", { providerId });
   },
 
-  async delete(id: string, appId: AppId): Promise<boolean> {
+  async delete(id: string, appId: AppId): Promise<ProviderDeleteOutcome> {
     return await invoke("delete_provider", { id, app: appId });
   },
 

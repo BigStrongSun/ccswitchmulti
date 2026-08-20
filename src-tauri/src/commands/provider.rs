@@ -140,11 +140,9 @@ pub fn delete_provider(
     state: State<'_, AppState>,
     app: String,
     id: String,
-) -> Result<bool, String> {
+) -> Result<crate::codex_multirouter::mutation::CodexProviderDeleteOutcome, String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
-    ProviderService::delete(state.inner(), app_type, &id)
-        .map(|_| true)
-        .map_err(|e| e.to_string())
+    ProviderService::delete(state.inner(), app_type, &id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
