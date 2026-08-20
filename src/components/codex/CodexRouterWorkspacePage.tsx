@@ -6317,7 +6317,10 @@ function SpawnAgentCandidatesPanel({
               Codex 工具说明优先展示的前 {spawnAgentVisibleLimit} 个模型。
             </p>
           </div>
-          <CodexSubagentProfileEditor provider={selectedPlan} />
+          <CodexSubagentProfileEditor
+            provider={selectedPlan}
+            modelCatalog={selectedCatalog}
+          />
         </div>
       ) : null}
 

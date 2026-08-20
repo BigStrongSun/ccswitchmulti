@@ -909,6 +909,18 @@ export function filterWizardProvidersByModelOrder(
     .filter((provider) => readWizardModelCatalog(provider).length > 0);
 }
 
+function canonicalWizardModelIds(provider: Provider): string[] {
+  return Array.from(
+    new Set(
+      readWizardModelCatalog(provider)
+        .map((model) =>
+          (model.upstreamModel ?? model.upstream_model ?? model.model).trim(),
+        )
+        .filter(Boolean),
+    ),
+  );
+}
+
 // 为模型源生成 provider 分组 route；只引用 targetProviderId，不复制第三方 bearer 密钥。
 export function buildWizardRoutesFromSources(
   providers: Provider[],
@@ -1050,13 +1062,20 @@ export function buildCodexMultiRouterWizardPlan(
   existingPlan?: Provider | null,
   options: WizardPlanBuildOptions = {},
 ): WizardPlanBuildResult {
+  const collisionResolvedSources =
+    resolveWizardModelNameCollisions(sourceProviders);
   const resolvedSources = filterWizardProvidersByModelOrder(
-    resolveWizardModelNameCollisions(sourceProviders),
+    collisionResolvedSources,
     options.catalogModelOrder,
   );
   const existingRouting = existingPlan?.settingsConfig?.codexRouting as
     | CodexRoutingConfig
     | undefined;
+  const existingRoutingV2 =
+    (existingRouting as { schemaVersion?: unknown } | undefined)
+      ?.schemaVersion === 2
+      ? (existingRouting as unknown as CodexRoutingConfigV2)
+      : undefined;
   const officialAuth =
     options.officialAuth ??
     inferCodexOfficialAuth(existingRouting) ??
@@ -1064,7 +1083,31 @@ export function buildCodexMultiRouterWizardPlan(
   const hostedTools =
     options.hostedTools ??
     normalizeHostedToolsConfig(existingPlan?.settingsConfig?.hostedTools);
-  const routes = buildWizardRoutesFromSources(resolvedSources, officialAuth);
+  const routes: CodexRoutingRouteV2[] = buildWizardRoutesFromSources(
+    resolvedSources,
+    officialAuth,
+  ).map((route) => {
+    if (!options.catalogModelOrder) return route;
+    const selectedSource = resolvedSources.find(
+      (provider) => provider.id === route.targetProviderId,
+    );
+    const fullSource = collisionResolvedSources.find(
+      (provider) => provider.id === route.targetProviderId,
+    );
+    if (!selectedSource || !fullSource) return route;
+    const selectedModels = canonicalWizardModelIds(selectedSource);
+    const fullModels = canonicalWizardModelIds(fullSource);
+    const selectedSet = new Set(selectedModels);
+    const includesEveryProviderModel =
+      selectedSet.size === fullModels.length &&
+      fullModels.every((model) => selectedSet.has(model));
+    return {
+      ...route,
+      modelSelection: includesEveryProviderModel
+        ? ({ mode: "all" } as const)
+        : ({ mode: "include", models: selectedModels } as const),
+    };
+  });
   const selectedVisibleModels = new Set(
     resolvedSources.flatMap((provider) =>
       readWizardModelCatalog(provider).map((model) => model.model),
@@ -1078,6 +1121,7 @@ export function buildCodexMultiRouterWizardPlan(
     options.subagentVersion ?? existingRouting?.subagentVersion,
   );
   const routing: CodexRoutingConfigV2 = {
+    ...(existingRoutingV2 ?? {}),
     schemaVersion: 2,
     enabled: true,
     defaultRouteId: routes[0]?.id,

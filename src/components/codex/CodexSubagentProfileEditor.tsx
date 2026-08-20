@@ -308,11 +308,14 @@ function readPersistedConfig(provider: Provider): CodexSubagentV2Config | null {
 function inferredInputModalities(
   provider: Provider,
   profile: CodexSubagentV2Profile,
+  projectedModelCatalog?: unknown,
 ): CodexSubagentV2Profile["inputModalities"] {
   if (profile.inputModalities) return profile.inputModalities;
-  const catalog = isRecord(provider.settingsConfig?.modelCatalog)
-    ? provider.settingsConfig.modelCatalog
-    : null;
+  const catalog = isRecord(projectedModelCatalog)
+    ? projectedModelCatalog
+    : isRecord(provider.settingsConfig?.modelCatalog)
+      ? provider.settingsConfig.modelCatalog
+      : null;
   const models = catalog && Array.isArray(catalog.models) ? catalog.models : [];
   const entry = models.find(
     (candidate) =>
@@ -349,7 +352,9 @@ function formatInputModalities(modalities?: string[]): string {
   return "纯文本";
 }
 
-function formatModalitySource(source: CodexSubagentInputModalitySource): string {
+function formatModalitySource(
+  source: CodexSubagentInputModalitySource,
+): string {
   switch (source) {
     case "profile_explicit":
       return "profile 显式声明";
@@ -448,9 +453,11 @@ function strengthError(profiles: Record<string, unknown>) {
 
 export function CodexSubagentProfileEditor({
   provider,
+  modelCatalog,
   onPersisted,
 }: {
   provider: Provider;
+  modelCatalog?: unknown;
   onPersisted?: (provider: Provider) => void;
 }) {
   const queryClient = useQueryClient();
@@ -1164,6 +1171,7 @@ export function CodexSubagentProfileEditor({
                 const effectiveInputModalities = inferredInputModalities(
                   provider,
                   profile,
+                  modelCatalog,
                 );
                 const nicknameValue =
                   nicknameDrafts[profileKey] ??
@@ -1965,7 +1973,8 @@ function ProfileBackendOutput({
           {status.inputModality ? (
             <>
               <p>
-                输入能力：{formatInputModalities(status.inputModality.modalities)}
+                输入能力：
+                {formatInputModalities(status.inputModality.modalities)}
                 （来源：{formatModalitySource(status.inputModality.source)}）
               </p>
               {status.inputModality.conflict ? (

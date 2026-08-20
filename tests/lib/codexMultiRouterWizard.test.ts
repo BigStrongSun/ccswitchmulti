@@ -614,7 +614,8 @@ describe("codexMultiRouterWizard helpers", () => {
       "model-c",
     ]);
     expect(plan.settingsConfig.codexRouting.routes[0].modelSelection).toEqual({
-      mode: "all",
+      mode: "include",
+      models: ["model-c", "model-a"],
     });
   });
 
@@ -893,6 +894,41 @@ describe("codexMultiRouterWizard helpers", () => {
         providerIds: ["openai-official", "relay"],
         canonicalProviderIds: ["openai-official"],
       },
+    ]);
+  });
+
+  it("stores canonical include models when a visible collision alias is selected", () => {
+    const official = provider({
+      id: "openai-official",
+      name: "OpenAI Official",
+      category: "official",
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "gpt-5.5" }] },
+      },
+    });
+    const relay = provider({
+      id: "relay",
+      name: "Relay",
+      settingsConfig: {
+        modelCatalog: {
+          models: [{ model: "gpt-5.5" }, { model: "relay-only" }],
+        },
+      },
+    });
+
+    const { plan } = buildCodexMultiRouterWizardPlan(
+      [official, relay],
+      [official, relay],
+      null,
+      { catalogModelOrder: ["gpt-5.5-relay"] },
+    );
+
+    expect(plan.settingsConfig.codexRouting.routes).toEqual([
+      expect.objectContaining({
+        targetProviderId: "relay",
+        modelSelection: { mode: "include", models: ["gpt-5.5"] },
+        aliases: { "gpt-5.5-relay": "gpt-5.5" },
+      }),
     ]);
   });
 
