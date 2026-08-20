@@ -9,6 +9,7 @@ import {
   Loader2,
   Zap,
   Power,
+  Globe2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
@@ -307,6 +308,33 @@ export function ProxyPanel({
                       "选择要接管的应用，启用后该应用的请求将通过本地代理转发",
                   })}
                 </p>
+                <div className="border-t border-primary/15 pt-3">
+                  <ToggleRow
+                    icon={<Globe2 className="h-4 w-4 text-blue-500" />}
+                    title={t("proxy.takeover.codexSystemProxy.title", {
+                      defaultValue: "Codex 使用系统代理规则",
+                    })}
+                    description={t(
+                      "proxy.takeover.codexSystemProxy.description",
+                      {
+                        defaultValue:
+                          "遇到 Codex 把 127.0.0.1:15721 错误送进梯子时开启；开启后本机地址按系统规则直连。",
+                      },
+                    )}
+                    checked={globalConfig?.codexRespectSystemProxy ?? false}
+                    onCheckedChange={async (checked) => {
+                      if (!globalConfig) return;
+                      try {
+                        await updateGlobalConfig.mutateAsync({
+                          ...globalConfig,
+                          codexRespectSystemProxy: checked,
+                        });
+                      } catch {
+                        // Mutation hook already reports the localized error.
+                      }
+                    }}
+                  />
+                </div>
               </div>
             </motion.div>
           )}

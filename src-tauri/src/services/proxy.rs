@@ -160,6 +160,7 @@ impl ProxyService {
         settings: &mut Value,
         proxy_base_url: &str,
         provider: &Provider,
+        respect_system_proxy: bool,
     ) -> Result<(), String> {
         if !crate::proxy::providers::is_codex_official_provider(provider) {
             if let Some(auth) = settings.get_mut("auth").and_then(Value::as_object_mut) {
@@ -177,10 +178,11 @@ impl ProxyService {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        let projected = Self::apply_codex_proxy_toml_config_for_provider(
+        let projected = Self::apply_codex_proxy_toml_config_for_provider_with_system_proxy_policy(
             &config_text,
             proxy_base_url,
             Some(provider),
+            respect_system_proxy,
         )?;
         settings["config"] = json!(projected);
         Self::sync_codex_model_catalog_projection_flag(settings, Some(provider));
@@ -451,6 +453,7 @@ impl ProxyService {
             &mut effective_settings,
             &proxy_codex_base_url,
             provider,
+            self.codex_respect_system_proxy_enabled(),
         )?;
 
         self.write_codex_takeover_live_for_provider(&effective_settings, Some(provider))?;
@@ -1894,11 +1897,13 @@ impl ProxyService {
                 .get_current_provider_for_app(&AppType::Codex)
                 .ok()
                 .flatten();
-            let updated_config = Self::apply_codex_proxy_toml_config_for_provider(
-                config_str,
-                &proxy_codex_base_url,
-                codex_provider.as_ref(),
-            )?;
+            let updated_config =
+                Self::apply_codex_proxy_toml_config_for_provider_with_system_proxy_policy(
+                    config_str,
+                    &proxy_codex_base_url,
+                    codex_provider.as_ref(),
+                    self.codex_respect_system_proxy_enabled(),
+                )?;
             live_config["config"] = json!(updated_config);
             Self::sync_codex_model_catalog_projection_flag(
                 &mut live_config,
@@ -1965,6 +1970,7 @@ impl ProxyService {
                     &mut live_config,
                     &proxy_codex_base_url,
                     &codex_provider,
+                    self.codex_respect_system_proxy_enabled(),
                 )?;
 
                 self.write_codex_takeover_live_for_provider(&live_config, Some(&codex_provider))?;
@@ -2050,11 +2056,13 @@ impl ProxyService {
                         .get_current_provider_for_app(&AppType::Codex)
                         .ok()
                         .flatten();
-                    let updated_config = Self::apply_codex_proxy_toml_config_for_provider(
-                        config_str,
-                        &proxy_codex_base_url,
-                        codex_provider.as_ref(),
-                    )?;
+                    let updated_config =
+                        Self::apply_codex_proxy_toml_config_for_provider_with_system_proxy_policy(
+                            config_str,
+                            &proxy_codex_base_url,
+                            codex_provider.as_ref(),
+                            self.codex_respect_system_proxy_enabled(),
+                        )?;
                     live_config["config"] = json!(updated_config);
                     Self::sync_codex_model_catalog_projection_flag(
                         &mut live_config,
@@ -3345,11 +3353,12 @@ impl ProxyService {
         let current = Self::legacy_codex_multirouter_auth_facade(&current_doc, provider_id);
         let base_url = crate::codex_config::extract_codex_base_url(config_text)
             .ok_or_else(|| "当前 MultiRouter 接管配置缺少本地 base_url".to_string())?;
-        let updated = Self::apply_codex_proxy_toml_config_with_pool_policy(
+        let updated = Self::apply_codex_proxy_toml_config_with_pool_policy_and_system_proxy_policy(
             config_text,
             &base_url,
             Some(&provider),
             Some(pool_policy),
+            self.codex_respect_system_proxy_enabled(),
         )?;
         live["config"] = json!(updated);
         self.write_codex_takeover_live_for_provider(&live, Some(&provider))?;
@@ -3372,6 +3381,35 @@ impl ProxyService {
 
     // ==================== Live 配置读写辅助方法 ====================
 
+    fn codex_respect_system_proxy_enabled(&self) -> bool {
+        self.db.get_codex_respect_system_proxy().unwrap_or(false)
+    }
+
+    /// Apply the user-selected Codex system-proxy policy immediately when the
+    /// local Codex config is already owned by takeover.
+    pub(crate) fn sync_codex_system_proxy_policy_while_takeover_active(
+        &self,
+    ) -> Result<(), String> {
+        if !self.detect_takeover_in_live_config_for_app(&AppType::Codex) {
+            return Ok(());
+        }
+        let mut live = self.read_codex_live()?;
+        let config_text = live
+            .get("config")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "Codex Live 配置缺少 config 字段".to_string())?;
+        let mut doc = config_text
+            .parse::<DocumentMut>()
+            .map_err(|error| format!("解析 Codex Live config.toml 失败: {error}"))?;
+        crate::codex_config::set_codex_respect_system_proxy(
+            &mut doc,
+            self.codex_respect_system_proxy_enabled(),
+        )
+        .map_err(|error| format!("更新 Codex 系统代理策略失败: {error}"))?;
+        live["config"] = json!(doc.to_string());
+        self.write_codex_live_verbatim(&live)
+    }
+
     /// 更新 TOML 字符串中的 base_url（委托给 codex_config 共享实现）
     #[cfg(test)]
     fn update_toml_base_url(toml_str: &str, new_url: &str) -> String {
@@ -3385,10 +3423,22 @@ impl ProxyService {
     /// 并继承 OpenAI/ChatGPT 专用的登录、WebSocket 和 attestation 能力。多路由的
     /// 正确边界是：Codex 只看到一个本地 Responses 入口，真实上游 provider、
     /// API 格式和转换层都由 CC Switch 后端路由规则决定。
+    #[cfg(test)]
     fn apply_codex_proxy_toml_config_for_provider(
         toml_str: &str,
         proxy_url: &str,
         provider: Option<&Provider>,
+    ) -> Result<String, String> {
+        Self::apply_codex_proxy_toml_config_for_provider_with_system_proxy_policy(
+            toml_str, proxy_url, provider, true,
+        )
+    }
+
+    fn apply_codex_proxy_toml_config_for_provider_with_system_proxy_policy(
+        toml_str: &str,
+        proxy_url: &str,
+        provider: Option<&Provider>,
+        respect_system_proxy: bool,
     ) -> Result<String, String> {
         let pool_policy = if provider.is_some_and(Self::codex_provider_uses_account_pool) {
             match crate::proxy::providers::codex_oauth_auth::read_persisted_account_pool_policy(
@@ -3403,23 +3453,45 @@ impl ProxyService {
         } else {
             None
         };
-        Self::apply_codex_proxy_toml_config_with_pool_policy(
+        Self::apply_codex_proxy_toml_config_with_pool_policy_and_system_proxy_policy(
             toml_str,
             proxy_url,
             provider,
             pool_policy.as_ref(),
+            respect_system_proxy,
         )
     }
 
+    #[cfg(test)]
     fn apply_codex_proxy_toml_config_with_pool_policy(
         toml_str: &str,
         proxy_url: &str,
         provider: Option<&Provider>,
         pool_policy: Option<&crate::proxy::providers::codex_oauth_auth::CodexAccountPoolPolicy>,
     ) -> Result<String, String> {
+        Self::apply_codex_proxy_toml_config_with_pool_policy_and_system_proxy_policy(
+            toml_str,
+            proxy_url,
+            provider,
+            pool_policy,
+            true,
+        )
+    }
+
+    fn apply_codex_proxy_toml_config_with_pool_policy_and_system_proxy_policy(
+        toml_str: &str,
+        proxy_url: &str,
+        provider: Option<&Provider>,
+        pool_policy: Option<&crate::proxy::providers::codex_oauth_auth::CodexAccountPoolPolicy>,
+        respect_system_proxy: bool,
+    ) -> Result<String, String> {
         if provider.is_some_and(crate::proxy::providers::is_codex_official_provider) {
-            return crate::codex_config::apply_codex_official_proxy_route(toml_str, proxy_url)
-                .map_err(|error| format!("生成 Codex 官方接管配置失败: {error}"));
+            return crate::codex_config::apply_codex_official_proxy_route_with_system_proxy_policy(
+                toml_str,
+                proxy_url,
+                respect_system_proxy,
+            )
+            .map_err(|error| format!("生成 Codex 官方接管配置失败: {error}"));
         }
 
         let mut doc = toml_str
@@ -3497,7 +3569,7 @@ impl ProxyService {
             doc["model"] = toml_edit::value(upstream_model);
         }
 
-        crate::codex_config::ensure_codex_respect_system_proxy(&mut doc)
+        crate::codex_config::set_codex_respect_system_proxy(&mut doc, respect_system_proxy)
             .map_err(|error| format!("生成 Codex 系统代理策略失败: {error}"))?;
 
         Ok(doc.to_string())

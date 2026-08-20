@@ -6805,6 +6805,14 @@ pub fn apply_codex_official_proxy_route(
     config_text: &str,
     proxy_base_url: &str,
 ) -> Result<String, AppError> {
+    apply_codex_official_proxy_route_with_system_proxy_policy(config_text, proxy_base_url, true)
+}
+
+pub fn apply_codex_official_proxy_route_with_system_proxy_policy(
+    config_text: &str,
+    proxy_base_url: &str,
+    respect_system_proxy: bool,
+) -> Result<String, AppError> {
     let mut doc = config_text
         .parse::<DocumentMut>()
         .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
@@ -6839,7 +6847,7 @@ pub fn apply_codex_official_proxy_route(
         toml_edit::Item::Table(table),
     );
     doc["model_providers"] = toml_edit::Item::Table(providers);
-    ensure_codex_respect_system_proxy(&mut doc)?;
+    set_codex_respect_system_proxy(&mut doc, respect_system_proxy)?;
     Ok(doc.to_string())
 }
 
@@ -6847,6 +6855,13 @@ pub fn apply_codex_official_proxy_route(
 /// This keeps requests to the local CCSM listener direct while allowing CCSM
 /// to use its configured upstream proxy for internet egress.
 pub fn ensure_codex_respect_system_proxy(doc: &mut DocumentMut) -> Result<(), AppError> {
+    set_codex_respect_system_proxy(doc, true)
+}
+
+pub fn set_codex_respect_system_proxy(
+    doc: &mut DocumentMut,
+    enabled: bool,
+) -> Result<(), AppError> {
     if doc.get("features").is_none() {
         doc["features"] = toml_edit::table();
     }
@@ -6856,7 +6871,11 @@ pub fn ensure_codex_respect_system_proxy(doc: &mut DocumentMut) -> Result<(), Ap
         .ok_or_else(|| {
             AppError::Message("Invalid Codex config.toml: features must be a table".to_string())
         })?;
-    features["respect_system_proxy"] = toml_edit::value(true);
+    if enabled {
+        features["respect_system_proxy"] = toml_edit::value(true);
+    } else {
+        features.remove("respect_system_proxy");
+    }
     Ok(())
 }
 
@@ -10354,6 +10373,19 @@ command = "example"
             Some(true)
         );
         assert!(codex_config_has_official_proxy_route(&output));
+    }
+
+    #[test]
+    fn official_proxy_route_can_leave_system_proxy_policy_disabled() {
+        let output = apply_codex_official_proxy_route_with_system_proxy_policy(
+            "[features]\nmulti_agent_v2 = true\n",
+            "http://127.0.0.1:15721/v1",
+            false,
+        )
+        .expect("apply official proxy route");
+        let doc: toml::Value = toml::from_str(&output).expect("parse output");
+        assert_eq!(doc["features"]["multi_agent_v2"].as_bool(), Some(true));
+        assert!(doc["features"].get("respect_system_proxy").is_none());
     }
 
     #[test]

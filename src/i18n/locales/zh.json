@@ -2736,6 +2736,10 @@
     "switchFailed": "切换失败: {{error}}",
     "takeover": {
       "hint": "选择要路由的应用，启用后该应用的请求将通过本地路由转发",
+      "codexSystemProxy": {
+        "title": "Codex 使用系统代理规则",
+        "description": "遇到 Codex 把 127.0.0.1:15721 错误送进梯子时开启；开启后本机地址按系统规则直连。"
+      },
       "enabled": "{{app}} 路由已启用",
       "disabled": "{{app}} 路由已关闭",
       "failed": "切换路由状态失败: {{detail}}",

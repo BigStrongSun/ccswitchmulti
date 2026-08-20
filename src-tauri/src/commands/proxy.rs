@@ -2363,6 +2363,10 @@ pub async fn update_global_proxy_config(
     config: GlobalProxyConfig,
 ) -> Result<(), String> {
     let db = &state.db;
+    let previous_config = db
+        .get_global_proxy_config()
+        .await
+        .map_err(|e| e.to_string())?;
     // 全局开关只控制本地服务是否应运行，不能绕过 per-app takeover 的恢复流程。
     // 如果直接在接管中关掉总开关，Codex/Claude/Gemini 的 live 配置会继续指向
     // 127.0.0.1，但代理服务不再启动，客户端侧表现就是所有模型请求超时。
@@ -2379,9 +2383,23 @@ pub async fn update_global_proxy_config(
         }
     }
 
+    let codex_proxy_policy_changed =
+        previous_config.codex_respect_system_proxy != config.codex_respect_system_proxy;
     db.update_global_proxy_config(config)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    if codex_proxy_policy_changed {
+        if let Err(error) = state
+            .proxy_service
+            .sync_codex_system_proxy_policy_while_takeover_active()
+        {
+            let _ = db.update_global_proxy_config(previous_config).await;
+            return Err(error);
+        }
+    }
+
+    Ok(())
 }
 
 /// 获取指定应用的代理配置

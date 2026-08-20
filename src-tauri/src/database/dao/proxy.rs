@@ -67,19 +67,29 @@ impl Database {
                  FROM proxy_config WHERE app_type = 'claude'",
                 [],
                 |row| {
-                    Ok(GlobalProxyConfig {
-                        proxy_enabled: row.get::<_, i32>(0)? != 0,
-                        listen_address: row.get(1)?,
-                        listen_port: row.get::<_, i32>(2)? as u16,
-                        enable_logging: row.get::<_, i32>(3)? != 0,
-                    })
+                    Ok((
+                        row.get::<_, i32>(0)? != 0,
+                        row.get(1)?,
+                        row.get::<_, i32>(2)? as u16,
+                        row.get::<_, i32>(3)? != 0,
+                    ))
                 },
             )
         };
         // conn 已在 block 结束时释放
 
         match result {
-            Ok(config) => Ok(config),
+            Ok((proxy_enabled, listen_address, listen_port, enable_logging)) => {
+                Ok(GlobalProxyConfig {
+                    proxy_enabled,
+                    listen_address,
+                    listen_port,
+                    enable_logging,
+                    codex_respect_system_proxy: self
+                        .get_codex_respect_system_proxy()
+                        .unwrap_or(false),
+                })
+            }
             Err(rusqlite::Error::QueryReturnedNoRows) => {
                 // 如果不存在，创建默认配置
                 self.init_proxy_config_rows().await?;
@@ -88,6 +98,7 @@ impl Database {
                     listen_address: "127.0.0.1".to_string(),
                     listen_port: 15721,
                     enable_logging: true,
+                    codex_respect_system_proxy: false,
                 })
             }
             Err(e) => Err(AppError::Database(e.to_string())),
@@ -99,25 +110,45 @@ impl Database {
         &self,
         config: GlobalProxyConfig,
     ) -> Result<(), AppError> {
-        let conn = lock_conn!(self.conn);
+        {
+            let conn = lock_conn!(self.conn);
+            conn.execute(
+                "UPDATE proxy_config SET
+                    proxy_enabled = ?1,
+                    listen_address = ?2,
+                    listen_port = ?3,
+                    enable_logging = ?4,
+                    updated_at = datetime('now')",
+                rusqlite::params![
+                    if config.proxy_enabled { 1 } else { 0 },
+                    config.listen_address,
+                    config.listen_port as i32,
+                    if config.enable_logging { 1 } else { 0 },
+                ],
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        }
 
-        conn.execute(
-            "UPDATE proxy_config SET
-                proxy_enabled = ?1,
-                listen_address = ?2,
-                listen_port = ?3,
-                enable_logging = ?4,
-                updated_at = datetime('now')",
-            rusqlite::params![
-                if config.proxy_enabled { 1 } else { 0 },
-                config.listen_address,
-                config.listen_port as i32,
-                if config.enable_logging { 1 } else { 0 },
-            ],
-        )
-        .map_err(|e| AppError::Database(e.to_string()))?;
+        self.set_codex_respect_system_proxy(config.codex_respect_system_proxy)?;
 
         Ok(())
+    }
+
+    const CODEX_RESPECT_SYSTEM_PROXY_KEY: &'static str = "codex_respect_system_proxy";
+
+    pub fn get_codex_respect_system_proxy(&self) -> Result<bool, AppError> {
+        Ok(matches!(
+            self.get_setting(Self::CODEX_RESPECT_SYSTEM_PROXY_KEY)?
+                .as_deref(),
+            Some("true") | Some("1")
+        ))
+    }
+
+    pub fn set_codex_respect_system_proxy(&self, enabled: bool) -> Result<(), AppError> {
+        self.set_setting(
+            Self::CODEX_RESPECT_SYSTEM_PROXY_KEY,
+            if enabled { "true" } else { "false" },
+        )
     }
 
     /// 获取默认成本倍率
@@ -977,6 +1008,25 @@ mod tests {
             }
         ));
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_global_proxy_config_round_trips_codex_system_proxy_preference(
+    ) -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let mut config = db.get_global_proxy_config().await?;
+        assert!(!config.codex_respect_system_proxy);
+
+        config.codex_respect_system_proxy = true;
+        db.update_global_proxy_config(config).await?;
+
+        assert!(db.get_codex_respect_system_proxy()?);
+        assert!(
+            db.get_global_proxy_config()
+                .await?
+                .codex_respect_system_proxy
+        );
         Ok(())
     }
 }

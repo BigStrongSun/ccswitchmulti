@@ -154,6 +154,9 @@ pub struct GlobalProxyConfig {
     pub listen_port: u16,
     /// 是否启用日志
     pub enable_logging: bool,
+    /// Codex 接管时是否让 Codex 使用系统代理规则解析 loopback/外网地址
+    #[serde(default)]
+    pub codex_respect_system_proxy: bool,
 }
 
 /// 应用级代理配置（每个 app 独立）
