@@ -69,7 +69,7 @@ OpenAI Codex 当前 `ModelInfo`/app-server `model/list` 不只包含模型名和
 
 `qwen3.8` 当前 catalog 声明 `text,image`，这只能证明当前配置最终值，不能仅凭模型名判断其部署实际支持图片；应继续由 provider capability/用户声明校验，而不是在本次审计中改写。
 
-## 修正计划（尚未实施）
+## 修正计划与实施状态
 
 1. 定义单一 `PickerModelProjection` 契约，明确字段分组：identity、reasoning、service、modalities、multi-agent、personality/specialty、visibility；JSON、cache、inline、CDP 均从它投影。
 2. 先写 RED 测试：纯文本第三方经 inline/CDP fallback 仍为 `['text']`；V2 模型保留 `multiAgentVersion='v2'`；unknown reasoning 不出现伪造四档；官方 service/personality 字段不丢；第三方不继承官方 Fast/upgrade/NUX。
@@ -77,6 +77,15 @@ OpenAI Codex 当前 `ModelInfo`/app-server `model/list` 不只包含模型名和
 4. 把 CDP `descriptorFor()` 降为身份/可见性兜底；能力字段只能来自 payload 中经过 resolver 的明确结果。
 5. 增加跨层快照测试，比较同一模型在 generated catalog、enriched JSON、cache、inline、CDP result 的等价字段，而不是分别维护零散断言。
 6. 新构建安装后做真实 Desktop 验收：官方推理档、service tier/速度、第三方档位、纯文本图片入口、Sub-Agent V1/V2；验收前不得宣称运行态修复完成。
+
+2026-08-20 后续实现已完成步骤 2–4 的高风险字段收口：
+
+- provider inline 现在从 enriched catalog 同步 `input_modalities`/`inputModalities`、`multi_agent_version`/`multiAgentVersion`、`supports_personality`/`supportsPersonality` 和 `model_specialty`/`modelSpecialty`；没有来源字段时不制造默认值。
+- Rust renderer projection 不再为缺少声明的模型补 `defaultReasoningEffort=medium`。
+- CDP `descriptorFor()` 不再为 payload 中缺少完整 entry 的模型伪造 `medium` 与 `low/medium/high/xhigh`，只补 identity/display/visibility。
+- TDD 先观察到三个预期 RED：inline 缺失模态、Rust unknown 被补 medium、CDP unknown 被补四档；再完成 GREEN。Rust 全量 3189 passed / 0 failed / 5 ignored，Vitest 141 files / 1136 tests 全过。
+
+步骤 1 的“单一类型对象”没有额外引入平行数据库或第二套 resolver；当前实现直接复用已经 enrichment 和 capability resolution 完成的 catalog entry 作为 inline/CDP 的唯一能力来源。步骤 5 的跨层断言已覆盖同一 prepare 流程生成 inline 与 cache 的关键 picker 字段，但仍可在后续扩展成独立快照工具。步骤 6 必须等新构建安装窗口执行，本轮未停止或替换运行中的 CCSM。
 
 ## 搜索与证据质量
 

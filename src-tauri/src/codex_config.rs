@@ -2332,6 +2332,49 @@ fn codex_provider_models_toml_array(
             model.insert("default_service_tier", default_service_tier.into());
             model.insert("defaultServiceTier", default_service_tier.into());
         }
+        if let Some(input_modalities) =
+            codex_provider_string_toml_array(catalog_entry.and_then(|entry| {
+                entry
+                    .get("input_modalities")
+                    .or_else(|| entry.get("inputModalities"))
+            }))
+        {
+            model.insert("input_modalities", input_modalities.clone());
+            model.insert("inputModalities", input_modalities);
+        }
+        if let Some(multi_agent_version) = catalog_entry
+            .and_then(|entry| {
+                entry
+                    .get("multi_agent_version")
+                    .or_else(|| entry.get("multiAgentVersion"))
+            })
+            .and_then(Value::as_str)
+        {
+            model.insert("multi_agent_version", multi_agent_version.into());
+            model.insert("multiAgentVersion", multi_agent_version.into());
+        }
+        if let Some(supports_personality) = catalog_entry
+            .and_then(|entry| {
+                entry
+                    .get("supports_personality")
+                    .or_else(|| entry.get("supportsPersonality"))
+            })
+            .and_then(Value::as_bool)
+        {
+            model.insert("supports_personality", supports_personality.into());
+            model.insert("supportsPersonality", supports_personality.into());
+        }
+        if let Some(model_specialty) = catalog_entry
+            .and_then(|entry| {
+                entry
+                    .get("model_specialty")
+                    .or_else(|| entry.get("modelSpecialty"))
+            })
+            .and_then(Value::as_str)
+        {
+            model.insert("model_specialty", model_specialty.into());
+            model.insert("modelSpecialty", model_specialty.into());
+        }
         model.insert("visibility", "list".into());
         model.insert("show_in_picker", true.into());
         model.insert("supported_in_api", true.into());
@@ -15047,7 +15090,9 @@ model_catalog_json = "cc-switch-model-catalog.json"
                 "id": "priority",
                 "name": "Fast",
                 "description": "1.5x speed, increased usage"
-            }]
+            }],
+            "supports_personality": true,
+            "model_specialty": "coding"
         }]));
         let settings = json!({
             "modelCatalog": {
@@ -15138,6 +15183,20 @@ base_url = "http://127.0.0.1:15721/v1"
             Some(1),
             "inline official models must retain service tiers together with reasoning levels"
         );
+        assert_eq!(
+            inline_official_model
+                .get("supportsPersonality")
+                .and_then(toml::Value::as_bool),
+            Some(true),
+            "inline official models must retain personality support"
+        );
+        assert_eq!(
+            inline_official_model
+                .get("modelSpecialty")
+                .and_then(toml::Value::as_str),
+            Some("coding"),
+            "inline official models must retain picker specialty"
+        );
         let inline_qwen_model = provider_models
             .iter()
             .find(|model| model.get("model").and_then(|value| value.as_str()) == Some("qwen3.6"))
@@ -15149,6 +15208,27 @@ base_url = "http://127.0.0.1:15721/v1"
                 .map(Vec::len),
             Some(0),
             "third-party models must not inherit OpenAI service tiers from the template"
+        );
+
+        let inline_qwen_modalities = inline_qwen_model
+            .get("input_modalities")
+            .expect("inline provider models must retain explicit input modalities");
+        assert_eq!(
+            inline_qwen_model.get("inputModalities"),
+            Some(inline_qwen_modalities),
+            "inline snake/camel modality aliases must stay equivalent"
+        );
+        assert_eq!(
+            inline_qwen_model
+                .get("multi_agent_version")
+                .and_then(toml::Value::as_str),
+            Some("v2"),
+            "inline models must retain the active Sub-Agent transport version"
+        );
+        assert_eq!(
+            inline_qwen_model.get("multiAgentVersion"),
+            inline_qwen_model.get("multi_agent_version"),
+            "inline snake/camel multi-agent aliases must stay equivalent"
         );
 
         let cache: Value = read_json_file(&get_codex_models_cache_path()).expect("read cache");

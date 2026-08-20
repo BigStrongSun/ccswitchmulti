@@ -329,9 +329,6 @@ fn project_codex_model_descriptor(entry: &Value, model_name: &str) -> Value {
         );
     }
     object.insert("hidden".to_string(), Value::Bool(false));
-    object
-        .entry("defaultReasoningEffort".to_string())
-        .or_insert_with(|| Value::String("medium".to_string()));
     Value::Object(object)
 }
 
@@ -622,7 +619,6 @@ fn cdp_command_result(response: Value, method: &str) -> Result<Value, String> {
 /// 容器遍历和改写。
 fn model_picker_patch_core_script() -> &'static str {
     r#"
-  const reasoningEfforts = () => ["low", "medium", "high", "xhigh"].map((reasoningEffort) => ({ reasoningEffort, description: `${reasoningEffort} effort` }));
   const modelNames = () => Array.from(new Set([payload.defaultModel, ...(payload.modelNames || [])].filter((name) => typeof name === "string" && name.trim()).map((name) => name.trim())));
   const descriptorFor = (name) => {
     const existing = (payload.models || []).find((model) => model && model.model === name);
@@ -633,8 +629,6 @@ fn model_picker_patch_core_script() -> &'static str {
       name,
       displayName: name,
       hidden: false,
-      defaultReasoningEffort: "medium",
-      supportedReasoningEfforts: reasoningEfforts(),
       ...(existing || {}),
       hidden: false,
     };
@@ -1936,6 +1930,17 @@ mod tests {
     }
 
     #[test]
+    fn catalog_projection_does_not_invent_unknown_reasoning_defaults() {
+        let value = json!({
+            "models": [{ "model": "unknown-third-party", "display_name": "Unknown" }]
+        });
+        let (_, models) = codex_model_entries_from_catalog_value(&value);
+
+        assert!(models[0].get("defaultReasoningEffort").is_none());
+        assert!(models[0].get("supportedReasoningEfforts").is_none());
+    }
+
+    #[test]
     /// 主目录为空时，投影 helper 应允许调用方继续使用 models cache 或内联目录回退。
     fn catalog_projection_skips_empty_source_and_accepts_fallback_source() {
         let empty = json!({ "models": [] });
@@ -1962,16 +1967,25 @@ mod tests {
     }
 
     fn run_model_picker_patch_core_probe(probe: &str) -> serde_json::Value {
+        run_model_picker_patch_core_probe_with_payload(
+            json!({
+                "defaultModel": "qwen3.6",
+                "modelNames": ["qwen3.6", "deepseek-v4-flash"],
+                "models": [
+                    {"model": "qwen3.6", "displayName": "Qwen 3.6", "hidden": false},
+                    {"model": "deepseek-v4-flash", "displayName": "DeepSeek V4 Flash", "hidden": false}
+                ]
+            }),
+            probe,
+        )
+    }
+
+    fn run_model_picker_patch_core_probe_with_payload(
+        payload: Value,
+        probe: &str,
+    ) -> serde_json::Value {
         let runtime = rquickjs::Runtime::new().expect("create JavaScript runtime");
         let context = rquickjs::Context::full(&runtime).expect("create JavaScript context");
-        let payload = json!({
-            "defaultModel": "qwen3.6",
-            "modelNames": ["qwen3.6", "deepseek-v4-flash"],
-            "models": [
-                {"model": "qwen3.6", "displayName": "Qwen 3.6", "hidden": false},
-                {"model": "deepseek-v4-flash", "displayName": "DeepSeek V4 Flash", "hidden": false}
-            ]
-        });
         let script = format!(
             "const payload = {};\n{}\n{}",
             payload,
@@ -1983,6 +1997,27 @@ mod tests {
             let json_text: String = ctx.eval(script).expect("execute model picker patch core");
             serde_json::from_str(&json_text).expect("parse model picker patch probe result")
         })
+    }
+
+    #[test]
+    fn model_picker_fallback_descriptor_does_not_invent_reasoning_capability() {
+        let result = run_model_picker_patch_core_probe_with_payload(
+            json!({
+                "defaultModel": "unknown-third-party",
+                "modelNames": ["unknown-third-party"],
+                "models": []
+            }),
+            r#"
+const descriptor = descriptorFor("unknown-third-party");
+JSON.stringify({
+  hasDefault: Object.prototype.hasOwnProperty.call(descriptor, "defaultReasoningEffort"),
+  hasEfforts: Object.prototype.hasOwnProperty.call(descriptor, "supportedReasoningEfforts"),
+});
+"#,
+        );
+
+        assert_eq!(result["hasDefault"], false);
+        assert_eq!(result["hasEfforts"], false);
     }
 
     /// 回归：模型解锁器不能再给 React Intl 的 formats/defaultFormats/formatters

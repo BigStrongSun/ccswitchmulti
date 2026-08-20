@@ -3938,3 +3938,10 @@
 - 同 slug 官方对象在完整 catalog/cache 中保留权威 transport 元数据；CCSM 显式创建的官方 V2 profile 与第三方 profile 当前都可编辑，但 picker 故障不是 profile 编辑器直接改坏官方能力，而是多份投影完备度不同。第三方同样遗漏，且模态、多 Agent、unknown reasoning 后果更高。
 - `upgrade`/`upgradeInfo`/`availabilityNux` 属官方发布状态，应继续有意清空，不能复制到第三方；personality/specialty 属 picker-public 候选字段，需结合 app-server schema统一 alias 白名单，不能把全部内部 `ModelInfo` 无差别塞入 inline。
 - 修正必须先建立单一 PickerModelProjection 契约和跨层 RED 快照测试，再统一 JSON/cache/inline/CDP；审计文档为 `docs/audits/2026-08-20-codex-model-metadata-projection-audit.md`。本轮只审计，未修改、停止或替换运行中 CCSM。
+
+## 2026-08-20 Codex 模型元数据投影一致性根修
+
+- provider inline 现在以 enriched catalog entry 为唯一能力来源，新增同步 `input_modalities`/`inputModalities`、`multi_agent_version`/`multiAgentVersion`、`supports_personality`/`supportsPersonality`、`model_specialty`/`modelSpecialty`；字段未知时保持缺失，不制造默认能力。已有 reasoning、speed/service/default service tier 投影继续保留。
+- Rust `project_codex_model_descriptor` 不再为缺声明模型补 `defaultReasoningEffort=medium`；CDP `descriptorFor()` 也移除硬编码四档和 medium，只负责 identity/display/visibility 和保留现有完整 entry。因此 unknown reasoning 保持 unknown，不会因 Desktop fallback 被升级成 confirmed supported。
+- TDD RED 证据：inline Qwen 缺模态断言失败；unknown Rust projection 出现 medium 断言失败；CDP fallback 出现默认/四档断言失败；官方 personality/specialty inline 断言失败。实现后聚焦 inline 1/1、Desktop 25/25、Rust lib 3189 passed / 0 failed / 5 ignored、Vitest 141 files / 1136 tests 全过。
+- 当前只是源码与测试收口，未构建、安装、停止或替换运行中的 CCSM。真实验收仍需新安装包后检查官方推理/service tier、第三方档位、纯文本图片入口和 Sub-Agent V1/V2。
