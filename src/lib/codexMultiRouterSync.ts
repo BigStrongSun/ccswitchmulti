@@ -12,6 +12,7 @@ import {
   resolveWizardModelNameCollisions,
 } from "@/lib/codexMultiRouterWizard";
 import { readCodexModelCatalog } from "@/utils/codexSpawnAgentCandidates";
+import { applyCodexCatalogModelOrder } from "@/lib/codexModelCatalogOrder";
 
 // MultiRouter 同步返回写回后的 plan，以及需要用户人工补选的子 Agent 候选删减。
 export interface CodexMultiRouterPlanSyncResult {
@@ -305,6 +306,7 @@ function rebuildPlanModelCatalog(
 } {
   const byModel = new Map<string, CodexCatalogModel>();
   const planCatalogByModel = buildPlanCatalogByModel(plan);
+  const previousModels = readCodexModelCatalog(plan).models;
   for (const route of routes) {
     if (route.enabled === false) continue;
     const targetId = routeTargetProviderId(route);
@@ -337,10 +339,10 @@ function rebuildPlanModelCatalog(
 
   // 路由同步会重建模型元数据，但全量菜单排序属于 MultiRouter 自身的用户偏好，
   // 不能因模型源刷新或规则保存而被覆盖。
-  const models = Array.from(byModel.entries()).map(([id, model]) => {
-    const sortIndex = planCatalogByModel.get(id)?.sortIndex;
-    return sortIndex === undefined ? model : { ...model, sortIndex };
-  });
+  const models = applyCodexCatalogModelOrder(
+    Array.from(byModel.values()),
+    previousModels,
+  );
   const existingSpawnAgentModels = Array.isArray(
     plan.settingsConfig?.modelCatalog?.spawnAgentModels,
   )
@@ -528,6 +530,56 @@ export function syncCodexMultiRouterPlansAfterProviderChange(
           }
         : plan;
       return syncCodexMultiRouterPlanWithProviders(rewiredPlan, providersById);
+    })
+    .filter((result): result is CodexMultiRouterPlanSyncResult =>
+      Boolean(result),
+    );
+}
+
+// provider 删除后同步所有引用它的 MultiRouter：route 一并移除，聚合目录只删除
+// 该供应商贡献的模型，剩余模型沿用上一次目录的相对顺序补位。
+export function syncCodexMultiRouterPlansAfterProviderDelete(
+  providers: Provider[],
+  deletedProviderId: string,
+): CodexMultiRouterPlanSyncResult[] {
+  const providersById = new Map(
+    providers
+      .filter((provider) => provider.id !== deletedProviderId)
+      .map((provider) => [provider.id, provider]),
+  );
+
+  return providers
+    .filter((provider) => provider.id !== deletedProviderId)
+    .filter(isCodexMultiRouterPlan)
+    .map((plan) => {
+      const routing = plan.settingsConfig?.codexRouting as
+        | CodexRoutingConfig
+        | undefined;
+      const routes = routing?.routes ?? [];
+      if (
+        !routes.some(
+          (route) => routeTargetProviderId(route) === deletedProviderId,
+        )
+      ) {
+        return null;
+      }
+
+      const planWithoutDeletedRoute: Provider = {
+        ...plan,
+        settingsConfig: {
+          ...plan.settingsConfig,
+          codexRouting: {
+            ...routing,
+            routes: routes.filter(
+              (route) => routeTargetProviderId(route) !== deletedProviderId,
+            ),
+          },
+        },
+      };
+      return syncCodexMultiRouterPlanWithProviders(
+        planWithoutDeletedRoute,
+        providersById,
+      );
     })
     .filter((result): result is CodexMultiRouterPlanSyncResult =>
       Boolean(result),
