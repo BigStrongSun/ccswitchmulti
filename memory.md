@@ -45,6 +45,14 @@
 - apply 在一个 SQLite transaction 中插入迁移 Provider、更新目标 Provider 模型条目并写入 v2 Router；命令随后调用统一 projection ensure。稳定错误覆盖 revision conflict、invalid/expired/mismatched token、missing/ambiguous target、未知认证和模型目录缺失。
 - TDD 覆盖 Qwen stale snapshot/secret-free preview、内联凭据 clone、幂等 apply、DeepSeek 模型协议拆分、能力迁移和 preview 后 revision 冲突。
 
+## 2026-08-20 MultiRouter Provider SSOT v2 配置编写与 live 生命周期
+
+- Task 8 将新建向导和工作台统一为 schema v2：Route 编辑器只维护 label、`all/include` canonical 模型选择、`matchPrefixes`、显式 aliases 和无密钥 `authPolicy` 引用；普通 Provider 表单的旧 Route 编辑入口及 Base URL/API Key/协议/能力控件全部删除。协议探测结果写回 Provider 模型条目，Router 不再持久化聚合 `modelCatalog`。
+- 同名模型候选必须同时保留两种视图：collision-resolved Provider 只用于生成稳定可见 alias，原始 Provider catalog 的 `model` 才是 include/alias 校验使用的 canonical ID；`upstreamModel` 只是出站模型名。若把 collision 投影当 canonical，会错误拒绝自动 alias（例如 `gpt-5.5-relay-gpt=gpt-5.5`）。
+- `codexRouting.spawnAgentModels` 现在作为 schema v2 Route policy 保存，并由 compiler/projection 过滤成可路由目录。v1 MultiRouter 的列表点击、统一 enable helper 和 Rust `ProviderService::switch` 均拒绝直接启用，必须先 preview/apply 显式迁移，防止托盘、deep link 或 Profile 绕过前端门禁。
+- schema v2 Router 激活、保存当前 Router、单应用同步及全局 live 同步都会强制 compiler 重投影，避免旧 Provider live writer 用 Router 内陈旧/缺失 catalog 覆盖绝对 `model_catalog_json`。投影失败返回无秘密 warning 并保留 pending 状态；运行时继续从最新 Provider SSOT 解析。
+- Task 8 验证：前端联合 6 files / 139 tests、`pnpm typecheck`；Rust `codex_multirouter` 48/48、`services::provider::tests` 56/56、`cargo check --lib`、`cargo fmt --check` 全通过。联合测试曾暴露 `HTMLElement.prototype.scrollIntoView` 跨文件 mock 污染，目标测试现用同层可写 property 和 real timers 建立隔离，不再依赖文件运行顺序。
+
 ## 2026-08-19 恢复 Qwen/vLLM 缺省输出上限 131072（对齐 Qwen3.8-27B 官方最大输出）
 
 - 实况：Codex 任务 `01a01722-ca39-77f1-b7da-9d3a9d5fe023` 的 vLLM 透明代理记录出现单条请求 `prompt_tokens=136269 / completion_tokens=125875 / total_tokens=262144 / finish_reasons=["length"]`。根因不是上下文压缩也不是 KV cache，而是 Codex Responses 请求没有显式输出预算、CCSM 转换成 Chat Completions 时也没有补 `max_tokens`，vLLM 把剩余上下文窗口都当成默认输出预算。
