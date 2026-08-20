@@ -139,9 +139,6 @@ export function validateCodexReasoningCapabilityDraft(
     "max",
     "ultra",
   ]);
-  if (typeof capability?.supported !== "boolean") {
-    throw new Error("supported must be boolean");
-  }
   if (
     !Array.isArray(capability.supportedEfforts) ||
     capability.supportedEfforts.some((effort) => !allowed.has(effort))

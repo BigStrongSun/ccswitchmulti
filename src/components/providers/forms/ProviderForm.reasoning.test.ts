@@ -64,6 +64,30 @@ describe("Codex catalog reasoning capability persistence", () => {
     );
   });
 
+  it("accepts schema v2 expert JSON without the legacy supported field", () => {
+    expect(() =>
+      validateCodexReasoningCapabilityDraft({
+        schemaVersion: 2,
+        supportStatus: "confirmed_supported",
+        controlKind: "graded",
+        supportedEfforts: ["low", "medium", "xhigh"],
+        defaultEffort: "medium",
+        disableAllowed: false,
+        upstream: {
+          format: "string",
+          parameter: "reasoning_effort",
+          effortMap: {
+            low: "low",
+            medium: "medium",
+            xhigh: "xhigh",
+          },
+        },
+        outputFormat: "reasoning_content",
+        source: "user",
+      }),
+    ).not.toThrow();
+  });
+
   it("rejects a default effort outside the supported list", () => {
     expect(() =>
       normalizeCodexCatalogModelsForSave([
