@@ -278,12 +278,32 @@ impl CodexToolContext {
     /// hosted calls inside the proxy loop instead of exposing them as ordinary
     /// client-executed function calls.
     pub(crate) fn is_hosted_tool_chat_name(&self, chat_name: &str) -> bool {
-        self.lookup_chat_name(chat_name).is_some_and(|spec| {
+        self.canonical_hosted_tool_chat_name(chat_name).is_some()
+    }
+
+    /// Normalize common model-emitted aliases to the function name CCSM sent.
+    /// Aliases are accepted only when this request actually declared the
+    /// corresponding hosted tool, so an ordinary user function is unaffected.
+    pub(crate) fn canonical_hosted_tool_chat_name(&self, chat_name: &str) -> Option<&'static str> {
+        let trimmed = chat_name.trim();
+        if self.lookup_chat_name(trimmed).is_some_and(|spec| {
             matches!(
                 &spec.kind,
                 CodexToolKind::HostedWebSearch | CodexToolKind::HostedImageGeneration
             )
-        })
+        }) {
+            return match trimmed {
+                "web_search" => Some("web_search"),
+                IMAGE_GENERATION_FUNCTION_NAME => Some(IMAGE_GENERATION_FUNCTION_NAME),
+                _ => None,
+            };
+        }
+        if self.hosted_image_generation.is_some()
+            && matches!(trimmed, "image_gen" | "image_generation")
+        {
+            return Some(IMAGE_GENERATION_FUNCTION_NAME);
+        }
+        None
     }
 
     /// 返回 Codex 原始 hosted `web_search` 的安全配置子集。

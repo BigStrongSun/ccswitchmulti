@@ -146,10 +146,15 @@ impl ChatToResponsesState {
                 if name.is_empty() || call_id.is_empty() || state.arguments.trim().is_empty() {
                     return None;
                 }
+                let name = self
+                    .tool_context
+                    .canonical_hosted_tool_chat_name(name)
+                    .unwrap_or(name)
+                    .to_string();
                 Some(CompletedChatToolCall {
                     chat_index: *chat_index,
                     call_id: call_id.to_string(),
-                    name: name.to_string(),
+                    name,
                     arguments: state.arguments.clone(),
                 })
             })
@@ -1293,6 +1298,41 @@ mod tests {
         assert!(output.contains("mixed_hosted_tool_calls"));
         assert!(output.contains("Mixed hosted and ordinary function tool calls"));
         assert!(!output.contains("response.completed"));
+    }
+
+    #[tokio::test]
+    async fn image_gen_alias_is_normalized_when_hosted_image_tool_is_declared() {
+        let context = super::super::transform_codex_chat::build_codex_tool_context_from_request(
+            &json!({ "tools": [{ "type": "image_generation" }] }),
+        );
+        let chunks = vec![
+            Ok(Bytes::from_static(b"data: {\"id\":\"chatcmpl_image_alias\",\"model\":\"m\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_image\",\"type\":\"function\",\"function\":{\"name\":\"image_gen\"}}]}}]}\n\n")),
+            Ok(Bytes::from_static(b"data: {\"id\":\"chatcmpl_image_alias\",\"model\":\"m\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"prompt\\\":\\\"test\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n")),
+        ];
+        let stream: ChatSseStream = Box::pin(stream::iter(chunks));
+        let output = create_responses_sse_stream_from_chat_with_hosted_loop(
+            stream,
+            context,
+            |calls, assistant| async move {
+                assert_eq!(calls[0].name, "generate_image");
+                assert_eq!(
+                    assistant["tool_calls"][0]["function"]["name"],
+                    "generate_image"
+                );
+                Ok(None)
+            },
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let output = String::from_utf8(
+            output
+                .into_iter()
+                .map(|item| item.unwrap())
+                .collect::<Vec<_>>()
+                .concat(),
+        )
+        .unwrap();
+        assert!(output.contains("hosted_tool_continuation_missing"));
     }
 
     fn parse_sse_events(output: &str) -> Vec<Value> {
