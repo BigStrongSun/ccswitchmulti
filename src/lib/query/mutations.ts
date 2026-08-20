@@ -13,6 +13,7 @@ import { proxyKeys } from "@/lib/query/proxy";
 import { usageKeys } from "@/lib/query/usage";
 import {
   syncCodexMultiRouterPlansAfterProviderChange,
+  syncCodexMultiRouterPlansAfterProviderDelete,
   type CodexMultiRouterPlanSyncResult,
 } from "@/lib/codexMultiRouterSync";
 
@@ -289,6 +290,16 @@ export const useDeleteProviderMutation = (appId: AppId) => {
   return useMutation({
     mutationFn: async (providerId: string) => {
       await providersApi.delete(providerId, appId);
+      if (appId === "codex") {
+        const providerMap = await providersApi.getAll(appId);
+        const syncResults = syncCodexMultiRouterPlansAfterProviderDelete(
+          Object.values(providerMap),
+          providerId,
+        );
+        for (const result of syncResults) {
+          await providersApi.update(result.plan, appId);
+        }
+      }
     },
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["providers", appId] });

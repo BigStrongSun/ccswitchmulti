@@ -401,9 +401,9 @@ describe("codexMultiRouterSync", () => {
       ),
     ).toEqual([
       "deepseek-chat",
+      "qwen3.6",
       "deepseek-reasoner",
       "deepseek-v4-flash",
-      "qwen3.6",
     ]);
     expect(synced?.plan.settingsConfig.modelCatalog.spawnAgentModels).toEqual([
       "qwen3.6",
