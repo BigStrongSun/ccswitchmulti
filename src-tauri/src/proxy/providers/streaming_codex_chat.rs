@@ -186,27 +186,27 @@ impl ChatToResponsesState {
             return None;
         }
         let calls = self.completed_tool_calls();
-        if calls.is_empty()
-            || calls.len() != self.tools.len()
-            || calls
-                .iter()
-                .any(|call| !self.tool_context.is_hosted_tool_chat_name(&call.name))
-        {
+        if calls.is_empty() || calls.len() != self.tools.len() {
             return None;
         }
-        Some(calls)
+        let hosted = calls
+            .into_iter()
+            .filter(|call| self.tool_context.is_hosted_tool_chat_name(&call.name))
+            .collect::<Vec<_>>();
+        if hosted.is_empty() {
+            return None;
+        }
+        Some(hosted)
     }
 
-    fn has_mixed_hosted_tool_calls(&self) -> bool {
-        if self.finish_reason.as_deref() != Some("tool_calls") {
-            return false;
-        }
-        let calls = self.completed_tool_calls();
-        let hosted = calls
+    fn finalize_non_hosted_tools(&mut self) -> Vec<Bytes> {
+        self.finalize_tools_filtered(true)
+    }
+
+    fn has_non_hosted_tool_calls(&self) -> bool {
+        self.completed_tool_calls()
             .iter()
-            .filter(|call| self.tool_context.is_hosted_tool_chat_name(&call.name))
-            .count();
-        hosted > 0 && hosted < calls.len()
+            .any(|call| !self.tool_context.is_hosted_tool_chat_name(&call.name))
     }
 
     fn assistant_message_for_hosted_tools(&self, calls: &[CompletedChatToolCall]) -> Value {
@@ -744,10 +744,22 @@ impl ChatToResponsesState {
     }
 
     fn finalize_tools(&mut self) -> Vec<Bytes> {
+        self.finalize_tools_filtered(false)
+    }
+
+    fn finalize_tools_filtered(&mut self, non_hosted_only: bool) -> Vec<Bytes> {
         let mut events = Vec::new();
         let keys: Vec<usize> = self.tools.keys().copied().collect();
 
         for key in keys {
+            if non_hosted_only
+                && self
+                    .tools
+                    .get(&key)
+                    .is_some_and(|state| self.tool_context.is_hosted_tool_chat_name(&state.name))
+            {
+                continue;
+            }
             let mut add_event: Option<Bytes> = None;
             if self.tools.get(&key).map(|state| state.done).unwrap_or(true) {
                 continue;
@@ -1121,16 +1133,12 @@ where
                                 yield Ok(event);
                             }
 
-                            if state.has_mixed_hosted_tool_calls() {
-                                yield Ok(state.failed_event(
-                                    "Mixed hosted and ordinary function tool calls are not supported in one streaming turn".to_string(),
-                                    Some("mixed_hosted_tool_calls".to_string()),
-                                ));
-                                stream_failed = true;
-                                break;
-                            }
-
                             if let Some(calls) = state.hosted_tool_calls_ready() {
+                                if state.has_non_hosted_tool_calls() {
+                                    for event in state.finalize_non_hosted_tools() {
+                                        yield Ok(event);
+                                    }
+                                }
                                 let assistant = state.assistant_message_for_hosted_tools(&calls);
                                 match on_hosted_tools(calls, assistant).await {
                                     Ok(Some(next_stream)) => {
@@ -1317,25 +1325,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mixed_hosted_and_ordinary_streaming_tools_fail_explicitly() {
+    async fn mixed_hosted_and_ordinary_streaming_tools_execute_hosted_and_emit_ordinary() {
         let context =
             super::super::transform_codex_chat::build_codex_tool_context_from_request(&json!({
                 "tools": [
                     { "type": "web_search" },
-                    { "type": "function", "function": { "name": "lookup" } }
+                    { "type": "function", "function": { "name": "image_gen__imagegen" } }
                 ]
             }));
         let chunks = vec![
-            Ok(Bytes::from_static(b"data: {\"id\":\"chatcmpl_mixed\",\"model\":\"m\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_hosted\",\"type\":\"function\",\"function\":{\"name\":\"web_search\"}},{\"index\":1,\"id\":\"call_fn\",\"type\":\"function\",\"function\":{\"name\":\"lookup\"}}]}}]}\n\n")),
+            Ok(Bytes::from_static(b"data: {\"id\":\"chatcmpl_mixed\",\"model\":\"m\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_hosted\",\"type\":\"function\",\"function\":{\"name\":\"web_search\"}},{\"index\":1,\"id\":\"call_fn\",\"type\":\"function\",\"function\":{\"name\":\"image_gen__imagegen\"}}]}}]}\n\n")),
             Ok(Bytes::from_static(b"data: {\"id\":\"chatcmpl_mixed\",\"model\":\"m\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{}\"}},{\"index\":1,\"function\":{\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n")),
+        ];
+        let continuation = vec![
+            Bytes::from_static(b"data: {\"id\":\"chatcmpl_mixed_final\",\"model\":\"m\",\"choices\":[{\"delta\":{\"content\":\"search complete\"},\"finish_reason\":\"stop\"}]}\n\n"),
+            Bytes::from_static(b"data: [DONE]\n\n"),
         ];
         let stream: ChatSseStream = Box::pin(stream::iter(chunks));
         let output = create_responses_sse_stream_from_chat_with_hosted_loop(
             stream,
             context,
             None,
-            |_calls, _assistant| async {
-                panic!("mixed tool calls must not invoke hosted coordinator")
+            move |calls, assistant| {
+                let continuation = continuation.clone();
+                async move {
+                    assert_eq!(calls.len(), 1);
+                    assert_eq!(calls[0].name, "web_search");
+                    assert_eq!(assistant["tool_calls"].as_array().unwrap().len(), 1);
+                    let next = continuation.into_iter().map(Ok::<Bytes, std::io::Error>);
+                    Ok(Some(Box::pin(stream::iter(next)) as ChatSseStream))
+                }
             },
         )
         .collect::<Vec<_>>()
@@ -1349,9 +1368,12 @@ mod tests {
         )
         .unwrap();
 
-        assert!(output.contains("mixed_hosted_tool_calls"));
-        assert!(output.contains("Mixed hosted and ordinary function tool calls"));
-        assert!(!output.contains("response.completed"));
+        assert!(output.contains("search complete"));
+        assert!(output.contains("\"name\":\"image_gen__imagegen\""));
+        assert!(output.contains("response.function_call_arguments.done"));
+        assert!(output.contains("response.completed"));
+        assert!(!output.contains("mixed_hosted_tool_calls"));
+        assert!(!output.contains("\"name\":\"web_search\""));
     }
 
     #[tokio::test]

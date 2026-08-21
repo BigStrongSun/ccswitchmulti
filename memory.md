@@ -1,5 +1,23 @@
 # CC Switch Repository Memory
 
+## 2026-08-21 混合 hosted 与普通 function tool 流式调用仍报错
+
+- 用户当前安装实例为 `C:\Users\sunda\AppData\Local\CCSwitchMulti\cc-switch.exe`，
+  文件版本 `3.19.2-10`，进程 PID `85528`，`127.0.0.1:15721/health` 返回 200。
+- 该安装包仍包含 `streaming_codex_chat.rs` 的旧拒绝逻辑：当同一 Chat 流式回合同时
+  出现 CCSM hosted tool（如 `web_search`）和普通 function tool 时，主动返回
+  `mixed_hosted_tool_calls` / `Mixed hosted and ordinary function tool calls are not
+  supported in one streaming turn`。
+- 根修提交为 `ffb118bea5815ecb2ce6ba34cf7e42ebf1ff9f54`，但它只在旧的
+  `release/v3.19.2-8` 分支，既不在 `v3.19.2-10`，也不在当时的当前 `main`；
+  因此“源码历史上有修复”不等于“安装包已修复”。
+- 本轮已将根修移植到当前 `main`：保留普通 function call 的 Responses 事件，
+  只把 hosted call 交给 CCSM coordinator，再续接同一 Responses stream；删除旧的
+  混合调用硬失败分支，并新增真实 `web_search + image_gen__imagegen` 回归测试。
+- 验证：`cargo test --manifest-path src-tauri/Cargo.toml streaming_codex_chat --lib`
+  为 `31 passed / 0 failed`；`cargo fmt --manifest-path src-tauri/Cargo.toml --check`
+  和 `git diff --check` 通过。当前安装版仍需后续新构建/安装后才会包含该修复。
+
 ## 2026-08-21 其他分支与开放 PR 审计、用量统计回归
 
 - 本地 `main` 当前为 `482e67de`，远端 `fork/main` 为 `91b5f69e`（`v3.19.2-11`）；本轮未推送。GitHub API 快照显示开放 PR 为 #1-#5、#13、#14、#19、#21、#24、#26；#20、#22 已关闭。
