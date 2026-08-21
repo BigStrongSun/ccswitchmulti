@@ -2601,6 +2601,68 @@ fn apply_codex_multi_agent_transport_policy(catalog: &mut Value, settings: &Valu
         };
         model.insert("multi_agent_version".to_string(), json!(version));
         model.insert("multiAgentVersion".to_string(), json!(version));
+        // Ultra 的主动委派语义仅存在于 V2。V1 中它只会被 Codex 降为 max，
+        // 因此不要把 Ultra 暴露为可选入口，避免用户以为会自动调用 Sub-Agent。
+        if version == "v1" {
+            for field in [
+                "supported_reasoning_levels",
+                "supported_reasoning_efforts",
+                "supportedReasoningEfforts",
+            ] {
+                if let Some(levels) = model.get_mut(field).and_then(Value::as_array_mut) {
+                    levels.retain(|level| {
+                        level
+                            .as_str()
+                            .or_else(|| level.get("effort").and_then(Value::as_str))
+                            .or_else(|| level.get("reasoning_effort").and_then(Value::as_str))
+                            .or_else(|| level.get("reasoningEffort").and_then(Value::as_str))
+                            != Some("ultra")
+                    });
+                }
+            }
+            let fallback_default = [
+                "supported_reasoning_levels",
+                "supported_reasoning_efforts",
+                "supportedReasoningEfforts",
+            ]
+            .iter()
+            .find_map(|field| model.get(*field).and_then(Value::as_array))
+            .and_then(|levels| {
+                levels
+                    .iter()
+                    .find_map(|level| {
+                        level
+                            .as_str()
+                            .or_else(|| level.get("effort").and_then(Value::as_str))
+                            .or_else(|| level.get("reasoning_effort").and_then(Value::as_str))
+                            .or_else(|| level.get("reasoningEffort").and_then(Value::as_str))
+                            .filter(|effort| *effort == "max")
+                    })
+                    .or_else(|| {
+                        levels.iter().find_map(|level| {
+                            level
+                                .as_str()
+                                .or_else(|| level.get("effort").and_then(Value::as_str))
+                                .or_else(|| level.get("reasoning_effort").and_then(Value::as_str))
+                                .or_else(|| level.get("reasoningEffort").and_then(Value::as_str))
+                        })
+                    })
+                    .map(ToString::to_string)
+            });
+            for field in [
+                "default_reasoning_level",
+                "default_reasoning_effort",
+                "defaultReasoningEffort",
+            ] {
+                if model.get(field).and_then(Value::as_str) == Some("ultra") {
+                    if let Some(default_effort) = &fallback_default {
+                        model.insert(field.to_string(), json!(default_effort));
+                    } else {
+                        model.remove(field);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -7675,6 +7737,63 @@ mod tests {
             .filter_map(|level| level["effort"].as_str())
             .collect::<Vec<_>>();
         assert_eq!(efforts, vec!["low", "high", "ultra"]);
+    }
+
+    #[test]
+    fn subagent_v1_hides_ultra_because_it_cannot_enable_proactive_delegation() {
+        let mut catalog = json!({
+            "models": [{
+                "default_reasoning_level": "ultra",
+                "default_reasoning_effort": "ultra",
+                "defaultReasoningEffort": "ultra",
+                "supported_reasoning_levels": [{"effort": "max"}, {"effort": "ultra"}],
+                "supported_reasoning_efforts": [{"reasoning_effort": "max"}, {"reasoning_effort": "ultra"}],
+                "supportedReasoningEfforts": [{"reasoningEffort": "max"}, {"reasoningEffort": "ultra"}]
+            }]
+        });
+        let settings = json!({
+            "codexRouting": {
+                "enabled": true,
+                "subagentVersion": "v1",
+                "routes": [{
+                    "match": {"models": ["third-party-model"]},
+                    "upstream": {"auth": {"source": "provider_config"}}
+                }]
+            }
+        });
+
+        apply_codex_multi_agent_transport_policy(&mut catalog, &settings);
+
+        for field in [
+            "supported_reasoning_levels",
+            "supported_reasoning_efforts",
+            "supportedReasoningEfforts",
+        ] {
+            let values = catalog["models"][0][field]
+                .as_array()
+                .expect("levels")
+                .iter()
+                .filter_map(|value| {
+                    value
+                        .get("effort")
+                        .or_else(|| value.get("reasoning_effort"))
+                        .or_else(|| value.get("reasoningEffort"))
+                        .and_then(Value::as_str)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(values, vec!["max"], "field {field}");
+        }
+        for field in [
+            "default_reasoning_level",
+            "default_reasoning_effort",
+            "defaultReasoningEffort",
+        ] {
+            assert_eq!(
+                catalog["models"][0][field].as_str(),
+                Some("max"),
+                "V1 default must remain selectable after hiding Ultra: {field}"
+            );
+        }
     }
 
     #[test]

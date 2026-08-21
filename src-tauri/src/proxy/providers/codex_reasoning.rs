@@ -9,9 +9,8 @@ use std::{
 
 /// `ultra` 是 Codex 产品层的编排开关，绝不能由 Provider capability 持久化为
 /// 原生 effort，也不能作为持久化映射的输入/输出。
-const VALID_PROVIDER_EFFORTS: &[&str] = &[
-    "none", "minimal", "low", "medium", "high", "xhigh", "max",
-];
+const VALID_PROVIDER_EFFORTS: &[&str] =
+    &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 /// Codex resolver 的内部词表。只有 resolver 在已验证 max 路径上才能生成 Ultra。
 const VALID_CODEX_EFFORTS: &[&str] = &[
@@ -292,9 +291,7 @@ impl CodexModelReasoningCapability {
             .iter()
             .any(|effort| !VALID_PROVIDER_EFFORTS.contains(&effort.as_str()))
         {
-            return Err(
-                "supportedEfforts contains an unknown or Codex-only effort".to_string(),
-            );
+            return Err("supportedEfforts contains an unknown or Codex-only effort".to_string());
         }
         if let Some(default_effort) = self.default_effort.as_deref() {
             if !self
@@ -331,9 +328,7 @@ impl CodexModelReasoningCapability {
             !VALID_PROVIDER_EFFORTS.contains(&source.as_str())
                 || !VALID_PROVIDER_EFFORTS.contains(&target.as_str())
         }) {
-            return Err(
-                "effortMap contains an unknown or Codex-only effort".to_string(),
-            );
+            return Err("effortMap contains an unknown or Codex-only effort".to_string());
         }
         if self.upstream.effort_map.values().any(|target| {
             !self
@@ -1012,9 +1007,8 @@ mod tests {
             "default_reasoning_level": "ultra"
         })];
 
-        let capability =
-            official_reasoning_capability_for_model("gpt-5.6-sol", &official_models)
-                .expect("official Ultra model capability");
+        let capability = official_reasoning_capability_for_model("gpt-5.6-sol", &official_models)
+            .expect("official Ultra model capability");
         assert_eq!(capability.supported_efforts, vec!["low", "high", "max"]);
         assert_eq!(capability.default_effort.as_deref(), Some("max"));
         assert_eq!(
