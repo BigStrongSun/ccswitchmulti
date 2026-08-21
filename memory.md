@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-08-21 Hosted web_search OAuth 协议修复与 v3.19.2-11 发布准备
+
+- `main` 的 `ebe5ccad` 已修复第三方 hosted web/image 工具调用官方 Codex OAuth 后端时的协议错误：OAuth 请求必须使用 Responses `input` 数组和 `stream=true`，响应是 SSE；现已复用 `responses_sse_to_response_value` 聚合，并补充顶层 `detail` 错误摘要。
+- 现场 A/B 证据：旧请求依次返回 `Input must be a list`、`Stream must be set to true`；数组输入加 `stream=true` 后 HTTP 200，包含 `response.web_search_call.completed` 与 `response.completed`。该结论来自本机 OAuth 实测，不记录 token 或完整 query。
+- `v3.19.2-10` tag/Release/安装实例仍指向旧 commit；版本源已统一为 `3.19.2-11`，发布说明为 `docs/release-notes/v3.19.2-11-zh.md`。发布前 `cargo check --lib`、`pnpm typecheck`、UTF-8 和定向测试均通过；全量 Rust 验证为 3262 passed / 0 failed / 5 ignored。
+- 发布后必须重启安装实例，运行 `scripts/verify_third_party_hosted_web_search.py`，并在日志中确认 `hosted_tool_call status=ok`；健康检查 200 不能替代真实 canary。
+
 ## 2026-08-21 Codex Ultra 主线移植与边界收口
 
 - `bigstrongsun/ultra-orchestration` 不能直接 merge：它从 `475cd008` 分叉，而
