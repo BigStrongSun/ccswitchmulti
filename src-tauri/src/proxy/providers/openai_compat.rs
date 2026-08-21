@@ -270,6 +270,125 @@ pub(crate) fn normalize_codex_responses_passthrough_request_for_transport(
     Value::Object(body)
 }
 
+/// 归一化第三方原生 Responses 上游的 reasoning input item。
+///
+/// 参数:
+/// - `request_body`: Codex Responses 请求体（已按 transport 归一化）。
+///   返回:
+/// - 所有 `type=reasoning` input item 都符合第三方 Responses schema 的请求体。
+///   副作用:
+/// - 无。函数只转换传入 JSON 值。
+///   边界:
+/// - 只用于第三方原生 Responses 透传路径；official OAuth backend 依赖
+///   `summary` / `encrypted_content` 回放 reasoning，绝不能套用本归一化。
+/// - DeepSeek 等第三方 Responses 实现要求 reasoning 历史以 `content` 中的
+///   `reasoning_text` part 回传，不接受 official backend 私有的 `summary` /
+///   `encrypted_content` 回放字段。Codex 历史里的 reasoning 大多只存 summary +
+///   官方密文（无 content），原样透传会被上游 400 拒绝
+///   （reasoning_text must be passed back to the API）。
+/// - 可读文本优先级：`content`（字符串或带 text 的 parts）> `summary`；
+///   两者都无可读文本（只剩不透明密文）时直接丢弃该 item——密文对任何第三方
+///   都不可用，保留只会招致拒绝。
+pub(crate) fn normalize_third_party_responses_reasoning_items(request_body: Value) -> Value {
+    let Value::Object(mut body) = request_body else {
+        return request_body;
+    };
+
+    let Some(items) = body.get_mut("input").and_then(Value::as_array_mut) else {
+        return Value::Object(body);
+    };
+
+    let mut normalized_items = Vec::with_capacity(items.len());
+    for item in items.drain(..) {
+        if let Some(normalized) = normalize_third_party_responses_reasoning_item(item) {
+            normalized_items.push(normalized);
+        }
+    }
+
+    *items = normalized_items;
+    Value::Object(body)
+}
+
+/// 归一化单个 reasoning input item 以适配第三方原生 Responses 上游。
+///
+/// 参数:
+/// - `item`: 一条 Responses input item。
+///   返回:
+/// - `Some(item)`: 归一化后的 item，`content` 保证携带可读 reasoning_text。
+/// - `None`: item 没有任何可读 reasoning 文本（只有不透明密文），应丢弃。
+///   副作用:
+/// - 无。
+fn normalize_third_party_responses_reasoning_item(item: Value) -> Option<Value> {
+    let Value::Object(mut object) = item else {
+        return Some(item);
+    };
+    if object.get("type").and_then(Value::as_str) != Some("reasoning") {
+        return Some(Value::Object(object));
+    }
+
+    let Some(text) = third_party_reasoning_readable_text(&object) else {
+        return None;
+    };
+
+    object.insert(
+        "content".to_string(),
+        Value::Array(vec![json!({ "type": "reasoning_text", "text": text })]),
+    );
+    object.remove("summary");
+    object.remove("encrypted_content");
+    object.remove("internal_chat_message_metadata_passthrough");
+
+    Some(Value::Object(object))
+}
+
+/// 提取 reasoning input item 中可读的 reasoning 文本。
+///
+/// 参数:
+/// - `object`: `type=reasoning` 的 Responses input item。
+///   返回:
+/// - 拼接后的可读文本；只有不透明密文时返回 `None`。
+///   副作用:
+/// - 无。
+///   边界:
+/// - `encrypted_content` 是不透明密文，任何第三方都无法解密，不算可读文本。
+fn third_party_reasoning_readable_text(object: &Map<String, Value>) -> Option<String> {
+    if let Some(text) = third_party_reasoning_field_text(object.get("content")) {
+        return Some(text);
+    }
+    third_party_reasoning_field_text(object.get("summary"))
+}
+
+/// 从 reasoning 的 `content` / `summary` 字段提取文本（字符串或 parts 数组）。
+///
+/// 参数:
+/// - `value`: reasoning item 的 `content` 或 `summary` 字段。
+///   返回:
+/// - 拼接后的非空文本；无可读文本时返回 `None`。
+///   副作用:
+/// - 无。
+fn third_party_reasoning_field_text(value: Option<&Value>) -> Option<String> {
+    let value = value?;
+    if let Some(text) = value.as_str() {
+        return (!text.trim().is_empty()).then(|| text.to_string());
+    }
+
+    let parts = value.as_array()?;
+    let text = parts
+        .iter()
+        .filter_map(|part| {
+            part.get("text")
+                .and_then(Value::as_str)
+                .or_else(|| part.get("content").and_then(Value::as_str))
+                .or_else(|| part.as_str())
+        })
+        .filter(|text| !text.trim().is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    (!text.is_empty()).then_some(text)
+}
+
 /// 归一化所有 Responses transport 都可安全处理的 input item 字段。
 ///
 /// 参数:
@@ -2518,6 +2637,146 @@ mod tests {
         assert_eq!(input.len(), 1);
         assert_eq!(input[0]["role"], "user");
         assert_eq!(input[0]["content"][0]["text"], "continue");
+    }
+
+    #[test]
+    fn third_party_responses_reasoning_summary_only_becomes_reasoning_text_content() {
+        // 从官方模型切到 DeepSeek 后，历史 reasoning 大多只有 summary + 官方密文、
+        // 没有 content；第三方原生 Responses 上游要求回传 reasoning_text，否则 400。
+        let body = json!({
+            "model": "deepseek-v4-flash",
+            "input": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_02002c5e",
+                    "summary": [{ "type": "summary_text", "text": "Summarizing final handoff details" }],
+                    "encrypted_content": "gAAAAAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "internal_chat_message_metadata_passthrough": { "kind": "desktop" }
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "continue" }]
+                }
+            ]
+        });
+
+        let normalized = normalize_third_party_responses_reasoning_items(body);
+        let input = normalized["input"].as_array().expect("input array");
+
+        assert_eq!(input.len(), 2);
+        let item = &input[0];
+        assert_eq!(item["type"], "reasoning");
+        assert_eq!(
+            item["content"],
+            json!([{ "type": "reasoning_text", "text": "Summarizing final handoff details" }])
+        );
+        assert!(item.get("summary").is_none());
+        assert!(item.get("encrypted_content").is_none());
+        assert!(item.get("internal_chat_message_metadata_passthrough").is_none());
+        // 非 reasoning item 不受影响
+        assert_eq!(input[1]["role"], "user");
+    }
+
+    #[test]
+    fn third_party_responses_reasoning_content_kept_and_private_fields_stripped() {
+        let body = json!({
+            "model": "deepseek-v4-flash",
+            "input": [{
+                "type": "reasoning",
+                "id": "f7edc5f8-06fd-46b6-bb89-e83c270c2b15",
+                "summary": [],
+                "content": [{ "type": "reasoning_text", "text": "We have an interrupted context." }],
+                "encrypted_content": "gAAAAAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }]
+        });
+
+        let normalized = normalize_third_party_responses_reasoning_items(body);
+        let item = &normalized["input"][0];
+
+        assert_eq!(
+            item["content"],
+            json!([{ "type": "reasoning_text", "text": "We have an interrupted context." }])
+        );
+        assert!(item.get("summary").is_none());
+        assert!(item.get("encrypted_content").is_none());
+        assert_eq!(item["id"], "f7edc5f8-06fd-46b6-bb89-e83c270c2b15");
+    }
+
+    #[test]
+    fn third_party_responses_reasoning_encrypted_only_item_dropped() {
+        // 只有官方密文、没有任何可读文本的 reasoning item 对第三方毫无价值，
+        // 保留只会招致拒绝，直接丢弃。
+        let body = json!({
+            "model": "deepseek-v4-flash",
+            "input": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_0496949a",
+                    "summary": [],
+                    "encrypted_content": "gAAAAAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "continue" }]
+                }
+            ]
+        });
+
+        let normalized = normalize_third_party_responses_reasoning_items(body);
+        let input = normalized["input"].as_array().expect("input array");
+
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["role"], "user");
+    }
+
+    #[test]
+    fn third_party_responses_reasoning_normalization_is_idempotent_and_joins_summary_parts() {
+        let body = json!({
+            "model": "deepseek-v4-flash",
+            "input": [{
+                "type": "reasoning",
+                "summary": [
+                    { "type": "summary_text", "text": "First part." },
+                    { "type": "summary_text", "text": "Second part." }
+                ]
+            }]
+        });
+
+        let once = normalize_third_party_responses_reasoning_items(body);
+        let twice = normalize_third_party_responses_reasoning_items(once.clone());
+
+        assert_eq!(once, twice);
+        assert_eq!(
+            once["input"][0]["content"],
+            json!([{ "type": "reasoning_text", "text": "First part.\n\nSecond part." }])
+        );
+    }
+
+    #[test]
+    fn official_oauth_reasoning_keeps_summary_and_encrypted_content() {
+        // official OAuth backend 依赖 summary / encrypted_content 回放 reasoning，
+        // 第三方 reasoning 归一化绝不能影响该路径。
+        let body = json!({
+            "model": "gpt-5.6-luna",
+            "input": [{
+                "type": "reasoning",
+                "id": "rs_02002c5e",
+                "summary": [{ "type": "summary_text", "text": "Summarizing final handoff details" }],
+                "encrypted_content": "gAAAAAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }]
+        });
+
+        let normalized = normalize_codex_oauth_responses_request(body, false);
+        let item = &normalized["input"][0];
+
+        assert_eq!(item["summary"][0]["text"], "Summarizing final handoff details");
+        assert_eq!(
+            item["encrypted_content"],
+            "gAAAAAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert!(item.get("content").is_none());
     }
 
     #[test]
