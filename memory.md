@@ -1,5 +1,24 @@
 # CC Switch Repository Memory
 
+## 2026-08-22 官方模型切到 DeepSeek V4 Flash 首个请求 400（reasoning_text）根因与修复
+
+- 现象：从官方模型切到 DeepSeek V4 Flash（原生 /v1/responses 透传）后，第一条请求被上游 400
+  `The 'reasoning_text' in the thinking mode must be passed back to the API.`；点“继续”后重试
+  成功（请求体大 244 字节，说明客户端在两次请求之间改写了历史）。证据：codex-router.log
+  2026-08-22 02:58:05 session=01a00e49 status=400，02:58:31 status=200。
+- 根因：Codex 历史里的 reasoning item 大多只有 summary + 官方 gAAAAA 密文、没有 content
+  （rollout 统计 3883 个中 3775 个无可读 content）；第三方原生透传路径把 reasoning 原样转发，
+  而 DeepSeek 要求 reasoning 以 reasoning_text content parts 回传、不接受
+  summary/encrypted_content。官方 OAuth 路径有专门 reasoning 归一化，第三方路径没有。
+- 修复（384b6159，合并入 main 为 567f94b8）：openai_compat.rs 新增
+  normalize_third_party_responses_reasoning_items，只挂在 forwarder.rs 第三方原生透传分支：
+  content 可读则保留并剥离 summary/encrypted_content/internal 字段；content 不可读但 summary
+  可读则用 summary 重建 content；只剩密文则丢弃 item。official OAuth 路径不受影响；归一化幂等，
+  Lite 降级重试天然覆盖。
+- 验证：新增 5 个回归测试；cargo test --lib 全量 3279 passed / 0 failed / 5 ignored；UTF-8 严格 /
+  无 BOM / git diff --check 通过。当前安装实例尚不包含该修复，需下次构建/安装后生效。
+- “官方模型速度档/推理档丢失”问题（Bug 1）是另一条线，本次只修了 DeepSeek 400（Bug 2）。
+
 ## 2026-08-21 混合 hosted 与普通 function tool 流式调用仍报错
 
 - 用户当前安装实例为 `C:\Users\sunda\AppData\Local\CCSwitchMulti\cc-switch.exe`，
