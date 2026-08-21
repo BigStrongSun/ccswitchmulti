@@ -32,8 +32,23 @@ appropriate for user-facing text.
 
 ## Runtime/release boundary
 
-The installed app remains `3.19.2-12` at
-`C:\Users\sunda\AppData\Local\CCSwitchMulti\cc-switch.exe`. The latest local
-release raw executable has a different SHA-256, so this source fix is not yet
-installed or runtime-verified. Do not claim the installed app contains this
-panel until a new release is built and the transactional installer completes.
+The release and installation boundary was closed on 2026-08-21:
+
+- Release metadata points to commit `687f503b` and version `3.19.2-13`.
+- The transactional installer completed with `Status=Success`; rollback was
+  not needed.
+- Installed
+  `C:\Users\sunda\AppData\Local\CCSwitchMulti\cc-switch.exe` reports
+  `3.19.2-13`, runs from the product directory, and owns listener
+  `127.0.0.1:15721`.
+- Installed SHA-256
+  `27B36758C27F5079F4D90F156E402719A9E6FA3A2CEAA976CB6C70D13FD28`
+  matches the exported NSIS installed-exe manifest.
+- `/health` returned HTTP 200. A direct unauthenticated `/v1/models` request
+  returned HTTP 403 because the external OpenAI API profile is disabled; this
+  is expected and is not the Codex router canary.
+- The live Codex router log recorded recent `/responses` requests through
+  `router-codex-official` with upstream HTTP 200.
+- The live Codex catalog contains 9 models including `qwen3.8` and no
+  `qwen3.6`; the current DB route labels are readable Provider names rather
+  than opaque UUIDs.
