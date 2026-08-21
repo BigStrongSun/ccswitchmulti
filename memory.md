@@ -1,5 +1,30 @@
 # CC Switch Repository Memory
 
+## 2026-08-21 v3.19.2-10 安装态诊断收口
+
+- 主分支审计确认认证修复 `2c41f638`、hosted tool 诊断 `168a3fc6` 和版本发布提交
+  `15c92b88` 为同一条线性历史；远端 fork/main 当时落后 103 个提交，没有分叉冲突。
+- 首次安装 `3.19.2-10` 后，Qwen3.8 真实 streaming canary 返回 HTTP 200、工具已投影，
+  但没有写 `hosted_tool_not_called`。根因是
+  `streaming_codex_chat.rs` 在 `state.completed == true` 时先 `break`，诊断只在后续
+  `finish_reason` 分支执行，正常 `response.completed` 流因此漏记。
+- 提交 `e3a8e5ea` 把诊断条件抽成 `should_log_hosted_tool_not_called`，在 streaming
+  完成/finish 分支共同检查，并新增完成态回归测试。TDD 先红（函数不存在）后绿，
+  streaming 定向测试 `31/31`、`cargo fmt --check` 和 `git diff --check` 通过。
+- 重新构建并事务安装后，安装事务
+  `ccsm-20260821-151643-9b3d4aa953d04fe98083120b728341c1` 成功，运行 PID `85528`，
+  安装 EXE 期望哈希为
+  `53515696D0EA2778227DDD6FECE83D990FF0023681BDFE712D4100A76E5021FA`，
+  `/health` 保持 HTTP 200。
+- 修复后 Qwen3.8 canary 仍按预期不产生 hosted function call，但真实日志出现
+  `hosted_tool_not_called`，字段包含 `model=qwen3.8`、路由 provider、`tool=web_search`、
+  `streaming=true` 和 `reason=upstream_returned_success_without_hosted_tool_call`。
+  DeepSeek V4 Pro canary 通过，产生 `response.web_search_call.in_progress/searching/completed`
+  并返回 `CCSM_THIRD_PARTY_HOSTED_SEARCH_OK`。
+- 本机 release 构建仍因没有 `TAURI_SIGNING_PRIVATE_KEY` 在签名阶段退出；NSIS 包已生成但
+  不能作为正式 Release 资产。正式发布仍需推送 main/tag，并由 GitHub Actions 完成六平台签名和
+  `latest.json` digest 验收。
+
 ## 2026-08-21 Codex Ultra 分支合入审计
 
 - `bigstrongsun/ultra-orchestration` 当前只包含 `0c8869c7` 与 `39d8f44` 两个
