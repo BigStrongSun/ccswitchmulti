@@ -4092,3 +4092,9 @@
 - GitHub Actions run `32458164107` 的 Linux x64/ARM64 job 已成功，但 Windows x64、Windows ARM64 和 macOS job 从 `2026-08-21T07:20Z` 长时间停在构建步骤，明显超过上一版 `v3.19.2-9` 约 56 分钟的完整耗时；当时 Release 尚未创建，`/releases/latest` 仍为 `v3.19.2-9`。
 - 已提交取消旧 run，并通过 `gh run rerun ... --failed` 请求重跑；GitHub API 随后出现连接超时，重跑 attempt、Release 资产和 `latest.json` 仍需网络恢复后确认。若只重跑失败 job 导致汇总 job 被跳过，应改为完整 rerun 或重新推送同一 tag 的等价 release 流程。
 - 发布完成的必要验收顺序：五个构建 job 全部成功 -> `Publish GitHub Release` 成功 -> Release 为非 draft/非 prerelease 且 latest 切到 `v3.19.2-10` -> 六个平台 updater 资产及 `.sig` 存在且 `latest.json` 覆盖全部平台 -> 对 Windows 安装包/运行态健康端口和第三方 hosted-search canary 做最终确认。未完成这些步骤前不能宣称 release 已交付。
+
+# 2026-08-21 Provider 模型级推理能力 UI 收口
+
+- `CodexFormFields` 的正常入口现在只呈现模型级“模型推理能力”：每个 catalog 模型先显示模型名、能力来源、Codex 可选档位、默认档位和 Ultra 编排状态，点击“配置推理能力”才展开该模型的来源选择、探测、映射、编辑器和专家 JSON。展开状态按 `rowId` 保存，更新仍通过既有 `handleUpdateCatalogRow(index, { reasoning })`，不会改写其他模型。
+- 原 Provider 级 `codexChatReasoning` 不再作为普通“思考能力”配置显示；只有既有对象非空时才出现折叠的“旧版兼容兜底”，文案明确它影响所有没有模型级声明的模型。新模型级流程不写 Provider 级配置；本轮没有改运行时优先级或存储迁移语义。
+- 新增 `CodexModelReasoningSummary` 及测试；模型摘要、既有编辑器、能力卡和持久化回归共 17 条通过，`pnpm typecheck`、Prettier、`git diff --check` 通过。Vite Browser 页面能加载但没有 Tauri bridge，不能读取真实 Provider 数据，安装后仍必须在 Desktop 中验证多模型摘要、单卡展开和旧版兼容区交互。
