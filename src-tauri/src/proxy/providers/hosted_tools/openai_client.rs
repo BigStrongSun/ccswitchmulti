@@ -174,12 +174,13 @@ impl OpenAiHostedToolClient {
         })?;
 
         let status = response.status();
-        let value: Value = response.json().await.map_err(|e| {
+        let body = response.bytes().await.map_err(|e| {
             ProxyError::ForwardFailed(format!(
-                "Failed to parse OpenAI hosted web_search response: {e}"
+                "Failed to read OpenAI hosted web_search response: {e}"
             ))
         })?;
         if !status.is_success() {
+            let value = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
             return Err(ProxyError::UpstreamError {
                 status: status.as_u16(),
                 body: Some(summarize_error_body(
@@ -189,6 +190,7 @@ impl OpenAiHostedToolClient {
             });
         }
 
+        let value = decode_hosted_response(&body, self.uses_codex_oauth_stream())?;
         Ok(result_from_openai_response(&args.query, &value))
     }
 
@@ -217,12 +219,13 @@ impl OpenAiHostedToolClient {
         })?;
 
         let status = response.status();
-        let value: Value = response.json().await.map_err(|e| {
+        let body = response.bytes().await.map_err(|e| {
             ProxyError::ForwardFailed(format!(
-                "Failed to parse OpenAI hosted image_generation response: {e}"
+                "Failed to read OpenAI hosted image_generation response: {e}"
             ))
         })?;
         if !status.is_success() {
+            let value = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
             return Err(ProxyError::UpstreamError {
                 status: status.as_u16(),
                 body: Some(summarize_error_body(
@@ -232,6 +235,7 @@ impl OpenAiHostedToolClient {
             });
         }
 
+        let value = decode_hosted_response(&body, self.uses_codex_oauth_stream())?;
         image_result_from_openai_response(args, &value)
     }
 
@@ -251,15 +255,18 @@ impl OpenAiHostedToolClient {
 
         json!({
             "model": self.model,
-            "input": format!(
-                "Search the web for: {}. Return concise source-backed results. Use at most {} result(s).",
-                args.query,
-                args.count
-            ),
+            "input": [{
+                "role": "user",
+                "content": format!(
+                    "Search the web for: {}. Return concise source-backed results. Use at most {} result(s).",
+                    args.query,
+                    args.count
+                )
+            }],
             "tools": [tool],
             "tool_choice": "auto",
             "store": false,
-            "stream": false
+            "stream": self.uses_codex_oauth_stream()
         })
     }
 
@@ -285,13 +292,33 @@ impl OpenAiHostedToolClient {
 
         json!({
             "model": self.model,
-            "input": format!("Generate an image: {}", args.prompt),
+            "input": [{
+                "role": "user",
+                "content": format!("Generate an image: {}", args.prompt)
+            }],
             "tools": [tool],
             "tool_choice": { "type": "image_generation" },
             "store": false,
-            "stream": false
+            "stream": self.uses_codex_oauth_stream()
         })
     }
+
+    fn uses_codex_oauth_stream(&self) -> bool {
+        matches!(&self.auth, HostedToolAuth::CodexOAuth { .. })
+    }
+}
+
+fn decode_hosted_response(body: &[u8], expects_sse: bool) -> Result<Value, ProxyError> {
+    if expects_sse {
+        let body = std::str::from_utf8(body).map_err(|e| {
+            ProxyError::TransformError(format!("OpenAI hosted tool returned non-UTF-8 SSE: {e}"))
+        })?;
+        return crate::proxy::handlers::responses_sse_to_response_value(body);
+    }
+
+    serde_json::from_slice(body).map_err(|e| {
+        ProxyError::ForwardFailed(format!("Failed to parse OpenAI hosted tool response: {e}"))
+    })
 }
 
 /// 判断布尔环境变量是否显式关闭。
@@ -312,6 +339,7 @@ fn summarize_error_body(value: &Value, fallback: &str) -> String {
     let message = value
         .pointer("/error/message")
         .or_else(|| value.get("message"))
+        .or_else(|| value.get("detail"))
         .and_then(Value::as_str)
         .unwrap_or(fallback);
     if message.chars().count() <= 500 {
@@ -349,7 +377,34 @@ mod tests {
         assert_eq!(request["model"], "gpt-test");
         assert_eq!(request["tools"][0]["type"], "web_search");
         assert_eq!(request["tools"][0]["search_content_types"][0], "image");
+        assert!(request["input"].is_array());
+        assert_eq!(request["stream"], false);
         assert_eq!(request["store"], false);
+    }
+
+    #[test]
+    fn build_web_search_request_uses_codex_oauth_stream_shape() {
+        let client = OpenAiHostedToolClient {
+            auth: HostedToolAuth::CodexOAuth {
+                access_token: "oauth-test".to_string(),
+                account_id: Some("acct-test".to_string()),
+            },
+            base_url: CODEX_OAUTH_BASE_URL.to_string(),
+            model: DEFAULT_CODE_OAUTH_MODEL.to_string(),
+            timeout: Duration::from_millis(DEFAULT_TIMEOUT_MS),
+        };
+
+        let request = client.build_web_search_request(
+            &WebSearchArguments {
+                query: "Codex hosted tools".to_string(),
+                count: 2,
+            },
+            &HostedWebSearchConfig::default(),
+        );
+
+        assert!(request["input"].is_array());
+        assert_eq!(request["input"][0]["role"], "user");
+        assert_eq!(request["stream"], true);
     }
 
     #[test]
@@ -398,5 +453,30 @@ mod tests {
             client.auth,
             HostedToolAuth::CodexOAuth { account_id: Some(ref id), .. } if id == "acct_1"
         ));
+    }
+
+    #[test]
+    fn decode_hosted_response_accepts_codex_oauth_sse() {
+        let body = br#"event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"search result"}]}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[]}}
+
+"#;
+
+        let response = decode_hosted_response(body, true).expect("SSE response");
+
+        assert_eq!(response["status"], "completed");
+        assert_eq!(response["output"][0]["type"], "message");
+        assert_eq!(response["output"][0]["content"][0]["text"], "search result");
+    }
+
+    #[test]
+    fn summarize_error_body_includes_codex_detail() {
+        let summary =
+            summarize_error_body(&json!({ "detail": "Input must be a list" }), "fallback");
+
+        assert_eq!(summary, "Input must be a list");
     }
 }
