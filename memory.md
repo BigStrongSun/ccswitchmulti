@@ -4117,3 +4117,21 @@
 - PR #21 的 `07bbed8f` 仍未被当前 main 等价吸收。它尝试从真实 `config.toml` 的 `[model_providers.*].models[]` inline 定义读取 reasoning 能力，为 MultiRouter routed alias 补齐 modelCatalog 缺失的档位。不能直接 cherry-pick：旧实现绕过当前 `reasoning_capabilities::resolve_codex_model_capability_core` 的统一来源/指纹链，并引入旧的 `provider_config` 来源语义。后续应把 inline 声明作为同一 resolver 的用户拥有配置输入，补充 alias/upstreamModel 回归后再移植。
 - PR #19 只改 usage 统计与筛选，不阻断本轮 hosted-search/reasoning 发布；PR #13/#14 是高风险大批量依赖升级，不与功能发布混合。`bigstrongsun/ccsm-agent-mesh`、`fix-unsupported-responses-tools`、portable reasoning 实验和旧 Sub-Agent 发布分支也未合入当前 main，但分别属于独立功能、官方大分叉或实验/历史发布线，不应误并入本轮。
 - 当前测试适配了模型推理卡片默认折叠后的交互；定向 Vitest `CodexFormFields`、`ProviderForm.codexCatalog`、`codexSpawnAgentCandidates` 为 41/41 通过，保留既有 React `act(...)` 警告。
+
+# 2026-08-21 CCSM 其他分支与开放 PR 复核（HEAD 34dfbb1b）
+
+- 本轮审计基准为 `cc-switch` 子仓库 `main`，HEAD 为 `34dfbb1b`；工作树只有用户原有未跟踪目录 `.tmp/`。GitHub API 受匿名 rate limit 限制，PR 状态以 `gh pr` 读取结果和本地 refs/提交对照为准，并用 Codex WebSearch 与 Matrix WebSearch 独立检索；Matrix relay 没有返回可用 GitHub 正文，不能把它当作状态证据。
+- BigStrongSun fork 当前仍开放：#21（`codex/reasoning-model-catalog-fix`，`DIRTY/CONFLICTING`）、#24（`checkbox`，`DIRTY/CONFLICTING`）、#26（`sort_bug`，`DIRTY/CONFLICTING`）、#19（`provider_total`，`DIRTY/CONFLICTING`）、#13（Cargo 52 项依赖升级，`MERGEABLE/UNSTABLE`）、#14（前端 56 项依赖升级，`MERGEABLE/UNSTABLE`）及 Actions Dependabot #1-#5。#20/#22 已关闭，#18 已合入。
+- #21 原提交 `07bbed8f` 仍不是当前 main 的等价 patch，价值是“从真实 `config.toml` inline model 定义为 routed alias 补 reasoning”。但旧实现绕过现行 `reasoning_capabilities::resolve_codex_model_capability_core` 来源链和指纹语义，不能 cherry-pick；应将 inline 声明接入现有 resolver，并补 alias/upstreamModel RED/GREEN 回归后再单独移植。
+- #24 核心行为已由 main 的 `bd5da4c2` 及后续主线提交覆盖：`enabled=false` 停用行保留，但 Codex catalog、Desktop inline models、Sub-Agent 候选和 MultiRouter 同步全部过滤。PR 后续提交只是格式、测试和“保留”改为“启用”文案，不能整枝合并。
+- #26 的原排序提交 `6cc2a301`、删除 Provider 后的 `dab41928` 已由 main 的 `codexModelCatalogOrder.ts`、MultiRouter 删除级联和 Rust projection 承接；当前 `main` 的 Rust projection 使用 Provider `sortIndex`，前端 helper 注释已明确聚合目录不直接消费 Provider sortIndex，新增测试覆盖该语义，不能整枝回合。
+- #19 的 usage provider 名称解析、筛选、模型统计供应商列和缓存命中百分比已由 `475cd008`、`2905ce2e` 等主线提交覆盖；不应以开放 PR 状态误判为功能遗漏。
+- 上游 `farion1231/cc-switch` 的 #6530 仍开放，但其核心 patch 与 main 的 `5b820624` patch-id 等价；#6616 仍开放，但主线 `6dc7e007` 已覆盖 unsupported Responses tools 的拒绝逻辑，PR 分支还混入 Ultra/Zen/缓存等其他提交，不能整枝合；#6653 仍开放，但 DeepSeek MCP catalog 修正已由 `255a6771` 本地承接。
+- 本地其他 BigStrongSun 分支分类：
+  - `bigstrongsun/ccsm-agent-mesh`（`a68b803a`）仍是未接入现有代理生命周期的独立 AgentMesh 后端原型，属于未合入的独立功能，不是本轮 hosted-search/reasoning 缺口。
+  - `bigstrongsun/ultra-orchestration` 的 `0c8869c7`/`39d8f44` 虽在该分支上仍为 unique commits，但功能已通过 `5036705f`、`b45235d3` 和合并提交 `77d011c8` 进入 main，不应回合旧分支。
+  - `fork/bigstrongsun/fix-responses-lite-additional-tools` 的 `a0d7b47b`/`31d8a937` 仍是 unique commits，但行为已重构落在当前 `transform_codex_chat` 与 `openai_compat` additional_tools 处理；当前测试 `responses_lite_additional_tools_preserves_tools_without_creating_a_message`、`...reuses_custom_namespace_and_deduplication_rules` 均通过，不应 cherry-pick。
+  - `fix-responses-commentary-tool-calls` 与 `fix-unsupported-responses-tools` 都是混入大量历史主线提交的长分支；前者只取 `5b820624` 等价行为，后者只取 `6dc7e007` 的拒绝逻辑，整枝合并会重复旧 release/重构并引入无关变更。
+  - `commentary-reasoning-experiment`、`portable-reasoning-experiment-nogo`、`subagent-v2-capability-injection` 和旧 `release-v3.19.*` refs 主要是实验、学术材料或发布证据；没有本轮应回合的生产代码。
+- 当前实跑验证：Rust `unsupported_responses_tool_type_fails_loudly_instead_of_being_dropped`、两个 Responses Lite additional_tools 测试、`codex_catalog_reasoning_resolves_provider_inline_model_alias` 各 1/1 通过；前端 `codexModelCatalogOrder`、`codexMultiRouterWizard`、`CodexFormFields.keepColumn`、`ProviderForm.codexCatalog` 定向套件 45/45 通过。之前带 `--exact` 的 Rust 命令筛到 0 tests，已改为非 exact 过滤重新执行，不能把那次 0 tests 当作验证。
+- 结论：当前确实未合入的生产代码只有 AgentMesh 原型和 #21 的“inline reasoning alias 接入现行 resolver”候选；其余用户此前关注的搜索、unsupported tools、DeepSeek catalog、排序、停用模型、usage 统计、Ultra 和 Responses Lite 均已在 main 有等价或更完整实现。依赖 PR #13/#14 不属于功能修复，应与本轮功能 release 分开评估，尤其 #14 同时跨 React/Vite/Vitest/Tailwind/TypeScript 大版本。
