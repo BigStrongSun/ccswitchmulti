@@ -7615,7 +7615,8 @@ mod tests {
         );
         assert_eq!(capability.default_effort.as_deref(), Some("medium"));
         assert_eq!(capability.source.as_deref(), Some("official"));
-        // 官方档位含 ultra 的模型（sol/terra）也能通过 validate
+        // 官方档位含 ultra 的模型（sol/terra）将它保存为 Codex 编排能力，
+        // 不再伪装为 Provider 原生 effort。
         let sol = serde_json::json!([{
             "slug": "gpt-5.6-sol",
             "supported_reasoning_levels": ["low", "medium", "high", "xhigh", "max", "ultra"],
@@ -7628,9 +7629,13 @@ mod tests {
                 &sol_models,
             )
             .expect("sol official capability");
-        assert!(sol_capability
+        assert!(!sol_capability
             .supported_efforts
             .contains(&"ultra".to_string()));
+        assert!(sol_capability
+            .codex_ultra_orchestration
+            .as_ref()
+            .is_some_and(|ultra| ultra.enabled));
         // 不匹配的 slug 返回 None
         assert!(
             crate::proxy::providers::codex_reasoning::official_reasoning_capability_for_model(
@@ -7639,6 +7644,37 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn ultra_orchestration_projects_ultra_into_codex_catalog_levels() {
+        let mut entry = serde_json::Map::new();
+        let capability = serde_json::from_value(json!({
+            "schemaVersion": 2,
+            "supportStatus": "confirmed_supported",
+            "controlKind": "graded",
+            "supportedEfforts": ["low", "high"],
+            "defaultEffort": "high",
+            "disableAllowed": false,
+            "upstream": {
+                "format": "string",
+                "parameter": "reasoning_effort",
+                "effortMap": {"low": "low", "high": "high", "max": "high"}
+            },
+            "codexUltraOrchestration": {"enabled": true},
+            "source": "user"
+        }))
+        .expect("valid third-party Ultra capability");
+
+        apply_codex_model_reasoning_capability(&mut entry, Some(&capability));
+
+        let efforts = entry["supported_reasoning_levels"]
+            .as_array()
+            .expect("projected levels")
+            .iter()
+            .filter_map(|level| level["effort"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(efforts, vec!["low", "high", "ultra"]);
     }
 
     #[test]
@@ -7812,6 +7848,7 @@ mod tests {
             fetched_at: None,
             provider_key: None,
             model_revision: None,
+            codex_ultra_orchestration: None,
         }
     }
 
@@ -12664,6 +12701,7 @@ openai_base_url = "http://127.0.0.1:15721/v1"
                     fetched_at: None,
                     provider_key: None,
                     model_revision: None,
+                    codex_ultra_orchestration: None,
                 },
             ),
             reasoning_fingerprint: String::new(),
@@ -13254,6 +13292,7 @@ base_url = "http://127.0.0.1:15721/v1"
                     fetched_at: None,
                     provider_key: None,
                     model_revision: None,
+                    codex_ultra_orchestration: None,
                 },
             ),
             reasoning_fingerprint: String::new(),

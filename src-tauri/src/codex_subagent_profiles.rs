@@ -1553,6 +1553,7 @@ mod tests {
                 (CodexReasoningEffort::XHigh, CodexReasoningEffort::High),
                 (CodexReasoningEffort::Max, CodexReasoningEffort::Max),
             ]),
+            codex_ultra_orchestration_enabled: false,
             fingerprint: s("test-fixture"),
         }
     }
@@ -2805,6 +2806,42 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_policy_fixed_ultra_round_trips_when_codex_orchestration_is_enabled() {
+        let mut compile_request = request(Some(config(
+            SelectionPolicy::Balanced,
+            vec![valid(profile("flash", "DeepSeek-V4-Flash"))],
+        )));
+        let capability = &mut compile_request.catalog_models[0].reasoning;
+        capability
+            .codex_selectable_efforts
+            .push(CodexReasoningEffort::Ultra);
+        capability
+            .effort_map
+            .insert(CodexReasoningEffort::Ultra, CodexReasoningEffort::Max);
+        let profile = match compile_request
+            .persisted_subagent_v2
+            .as_mut()
+            .expect("persisted config")
+            .profiles
+            .first_mut()
+            .expect("fixture profile")
+        {
+            ParsedProfileEntry::Valid(profile) => profile,
+            ParsedProfileEntry::Invalid { .. } => panic!("fixture profile must be valid"),
+        };
+        profile.reasoning = fixed_reasoning(CodexReasoningEffort::Ultra);
+
+        let output = compile_subagent_v2_profiles(&compile_request)
+            .expect("Ultra-enabled third-party role must compile");
+        let toml = render_generated_role_toml(
+            output.generated_roles.first().expect("generated role"),
+            "# managed",
+        )
+        .expect("render role");
+        assert!(toml.contains("model_reasoning_effort = \"ultra\""));
+    }
+
+    #[test]
     fn reasoning_policy_fixed_unknown_capability_trusts_declared_effort() {
         // schema1 旧配置（legacy reasoningEffort）迁移为 Fixed 后，目标模型能力
         // Unknown 时不得编译失败——Unknown ≠ Unsupported，信任用户显式声明。
@@ -2819,6 +2856,7 @@ mod tests {
             provider_default_effort: None,
             disable_allowed: false,
             effort_map: BTreeMap::new(),
+            codex_ultra_orchestration_enabled: false,
             fingerprint: String::new(),
         };
         assert_eq!(
@@ -2875,6 +2913,7 @@ mod tests {
                     provider_default_effort: None,
                     disable_allowed: false,
                     effort_map: BTreeMap::new(),
+                    codex_ultra_orchestration_enabled: false,
                     fingerprint: String::new(),
                 },
             }],

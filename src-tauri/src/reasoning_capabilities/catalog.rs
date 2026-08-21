@@ -266,6 +266,7 @@ mod tests {
                 fetched_at: None,
                 provider_key: None,
                 model_revision: None,
+                codex_ultra_orchestration: None,
             },
             source_url: "https://example.com".into(),
             verified_at: "2026-08-18".into(),

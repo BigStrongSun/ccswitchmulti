@@ -88,14 +88,16 @@ interface CodexProtocolProbeOutcome {
 }
 
 const CODEX_PROTOCOL_PROBE_MODEL_CONCURRENCY = 3;
-const CODEX_REASONING_EFFORT_CHOICES: CodexReasoningEffort[] = [
+// `ultra` is a Codex V2 orchestration mode, not a Provider-native effort.
+// Provider capability declarations can enable it only through
+// `codexUltraOrchestration`, after a verified max mapping is configured.
+const PROVIDER_REASONING_EFFORT_CHOICES: CodexReasoningEffort[] = [
   "minimal",
   "low",
   "medium",
   "high",
   "xhigh",
   "max",
-  "ultra",
 ];
 
 export type CodexReasoningCapabilitySourceMode =
@@ -128,20 +130,16 @@ export function applyCodexReasoningCapabilitySource(
 export function validateCodexReasoningCapabilityDraft(
   capability: CodexModelReasoningCapability,
 ): void {
-  const allowed = new Set<CodexReasoningEffort>([
-    "minimal",
-    "low",
-    "medium",
-    "high",
-    "xhigh",
-    "max",
-    "ultra",
-  ]);
+  const allowed = new Set<CodexReasoningEffort>(
+    PROVIDER_REASONING_EFFORT_CHOICES,
+  );
   if (
     !Array.isArray(capability.supportedEfforts) ||
     capability.supportedEfforts.some((effort) => !allowed.has(effort))
   ) {
-    throw new Error("supportedEfforts contains an unknown Provider effort");
+    throw new Error(
+      "supportedEfforts contains an unknown or Codex-only Provider effort",
+    );
   }
   // schema v2 用 supportStatus；legacy 数据用 supported。至少声明其一，
   // 同时存在时不得矛盾。
@@ -195,6 +193,14 @@ export function validateCodexReasoningCapabilityDraft(
     );
     if (missing.length > 0) {
       throw new Error(`effortMap is missing ${missing.join(", ")}`);
+    }
+  }
+  if (capability.codexUltraOrchestration?.enabled) {
+    const ultraTarget = capability.upstream.effortMap?.max;
+    if (!ultraTarget || !capability.supportedEfforts.includes(ultraTarget)) {
+      throw new Error(
+        "Codex Ultra orchestration requires a valid max → Provider mapping",
+      );
     }
   }
 }
@@ -442,7 +448,7 @@ function capabilityFromReasoningDetection(
   if (!reasoning) return undefined;
   const supportedEfforts = reasoning.supportedEfforts.filter(
     (effort): effort is CodexReasoningEffort =>
-      ["none", ...CODEX_REASONING_EFFORT_CHOICES].includes(effort),
+      ["none", ...PROVIDER_REASONING_EFFORT_CHOICES].includes(effort),
   );
   return {
     schemaVersion: 2,
