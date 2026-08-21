@@ -319,6 +319,79 @@ it("没有 MultiRouter 方案时打开工作台不会读取 null settingsConfig"
 });
 
 describe("Codex MultiRouter workspace route persistence helpers", () => {
+  it("uses the target Provider name in the default-route settings option for legacy UUID labels", async () => {
+    const relay: Provider = {
+      id: "relay-provider",
+      name: "DeepSeek Relay",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "deepseek-v4-flash" }] },
+      },
+    };
+    const legacyRouteId = "router-5626e6b9-33cb-4c3b-8d16-af8176e16209";
+    const plan: Provider = {
+      id: "legacy-router",
+      name: "Legacy Router",
+      category: "custom",
+      settingsConfig: {
+        codexRouting: {
+          schemaVersion: 2,
+          enabled: true,
+          defaultRouteId: legacyRouteId,
+          routes: [
+            {
+              id: legacyRouteId,
+              label: legacyRouteId,
+              enabled: true,
+              targetProviderId: relay.id,
+              modelSelection: { mode: "all" },
+              match: { models: ["deepseek-v4-flash"], prefixes: [] },
+            },
+          ],
+        },
+      },
+    };
+
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [relay, plan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: plan.id,
+        initialProviderId: plan.id,
+        initialTab: "routes",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+
+    const user = userEvent.setup();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "编辑匹配规则" }),
+      ).toBeInTheDocument(),
+    );
+    await user.click(screen.getByRole("button", { name: "改名" }));
+
+    const defaultRouteLabel = screen.getByText("默认路由", {
+      selector: "label",
+    });
+    const defaultRoute =
+      defaultRouteLabel.parentElement?.querySelector("select");
+    expect(defaultRoute).not.toBeNull();
+    expect(
+      within(defaultRoute as HTMLElement).getByRole("option", {
+        name: "DeepSeek Relay",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      within(defaultRoute as HTMLElement).queryByRole("option", {
+        name: legacyRouteId,
+      }),
+    ).not.toBeInTheDocument();
+  });
+
   it("uses the target Provider name when a legacy route label is only its UUID", () => {
     expect(
       routeSummaryDisplayName(

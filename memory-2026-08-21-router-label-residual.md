@@ -15,3 +15,18 @@
   adding a regression assertion for a UUID label falling back to `Relay`.
 - Focused verification after the fix: 103 Vitest tests passed, TypeScript
   typecheck passed, Prettier check passed, and `git diff --check` passed.
+
+## Follow-up audit
+
+- The suspected remaining settings-panel defect was rechecked against the
+  actual JSX. `routeOptions` already stores the resolved
+  `routeDisplayName(route, providersById)` value, and the `<option>` renders
+  that mapped `route.label`; it does not render the persisted UUID label.
+- Added an end-to-end workspace regression test proving a legacy
+  `router-<UUID>` label appears as the target Provider name in the “默认路由”
+  select.
+- The installed executable is still not the local e6 release: its timestamp
+  is 2026-08-21 20:06, while the e6 local release was generated at 22:48, and
+  their SHA-256 hashes differ. A user running that installed binary can still
+  reproduce the v3.19.2-10 behavior even though current source and the staged
+  e6 artifact contain the fix.
