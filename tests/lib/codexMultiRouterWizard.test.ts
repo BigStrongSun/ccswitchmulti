@@ -1005,6 +1005,7 @@ describe("codexMultiRouterWizard helpers", () => {
     });
     const route = {
       id: "relay-route",
+      label: "relay-route",
       targetProviderId: "relay",
       modelSelection: { mode: "include" as const, models: ["kept"] },
       aliases: { "removed-alias": "removed" },
@@ -1015,6 +1016,7 @@ describe("codexMultiRouterWizard helpers", () => {
         routeId: "relay-route",
         alias: "removed-alias",
         canonicalModel: "removed",
+        routeLabel: "Relay",
       }),
     ]);
   });

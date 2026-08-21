@@ -938,6 +938,18 @@ export interface WizardRouteAliasSelectionIssue {
   reason: string;
 }
 
+export function wizardRouteDisplayLabel(
+  route: Pick<CodexRoutingRouteV2, "id" | "label">,
+  providerName?: string | null,
+): string {
+  const label = route.label?.trim();
+  const routeId = route.id.trim();
+  if (label && label.toLowerCase() !== routeId.toLowerCase()) {
+    return label;
+  }
+  return providerName?.trim() || label || routeId;
+}
+
 export function collectWizardRouteAliasSelectionIssues(
   routes: Array<
     Pick<
@@ -954,6 +966,7 @@ export function collectWizardRouteAliasSelectionIssues(
   for (const route of routes) {
     const provider = providersById.get(route.targetProviderId);
     if (!provider) continue;
+    const routeLabel = wizardRouteDisplayLabel(route, provider.name);
     const canonicalIds = canonicalWizardModelIds(provider);
     const canonicalSet = new Set(
       canonicalIds.map((model) => model.toLowerCase()),
@@ -973,7 +986,7 @@ export function collectWizardRouteAliasSelectionIssues(
       if (!canonicalSet.has(canonicalKey)) {
         issues.push({
           routeId: route.id,
-          routeLabel: route.label || provider.name,
+          routeLabel,
           providerName: provider.name,
           alias,
           canonicalModel,
@@ -982,7 +995,7 @@ export function collectWizardRouteAliasSelectionIssues(
       } else if (!selectedSet.has(canonicalKey)) {
         issues.push({
           routeId: route.id,
-          routeLabel: route.label || provider.name,
+          routeLabel,
           providerName: provider.name,
           alias,
           canonicalModel,

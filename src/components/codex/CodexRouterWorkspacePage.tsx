@@ -4626,6 +4626,7 @@ function RoutesTab({
           <MultiRouterSettingsPanel
             selectedPlan={selectedPlan}
             selectedRoutes={selectedPlanRoutes}
+            providersById={providersById}
             onSave={onSavePlanSettings}
             onClose={() => onPlanSettingsOpenChange(false)}
             isSaving={isSavingPlanSettings}
@@ -4782,12 +4783,14 @@ function StatusInlineItem({
 function MultiRouterSettingsPanel({
   selectedPlan,
   selectedRoutes,
+  providersById,
   onSave,
   onClose,
   isSaving,
 }: {
   selectedPlan: Provider;
   selectedRoutes: RouteEntry[];
+  providersById: Map<string, Provider>;
   onSave: (plan: Provider, draft: MultiRouterSettingsDraft) => Promise<void>;
   onClose: () => void;
   isSaving: boolean;
@@ -4941,13 +4944,10 @@ function MultiRouterSettingsPanel({
     setIsSavingListener(false);
   }
 
-  const routeProvidersById = new Map(
-    selectedRoutes.map(({ provider }) => [provider.id, provider]),
-  );
   const routeOptions = selectedRoutes
     .map(({ route }) => ({
       id: route.id,
-      label: routeDisplayName(route, routeProvidersById),
+      label: routeDisplayName(route, providersById),
       enabled: route.enabled !== false,
     }))
     .filter((route): route is { id: string; label: string; enabled: boolean } =>

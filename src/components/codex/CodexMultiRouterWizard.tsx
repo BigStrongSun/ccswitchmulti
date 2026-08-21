@@ -80,6 +80,7 @@ import {
   readWizardProviderBaseUrl,
   resolveWizardModelNameCollisions,
   skippedWizardConnectivityResult,
+  wizardRouteDisplayLabel,
   type WizardConnectivityResult,
   type WizardModelFetchConfig,
 } from "@/lib/codexMultiRouterWizard";
@@ -2287,7 +2288,13 @@ export function CodexMultiRouterWizard({
                 {previewRoutes.map((route) => (
                   <div key={route.id} className="rounded-lg border p-4">
                     <div className="flex items-center justify-between gap-3">
-                      <div className="font-medium">{route.label}</div>
+                      <div className="font-medium">
+                        {wizardRouteDisplayLabel(
+                          route,
+                          previewProvidersById.get(route.targetProviderId)
+                            ?.name,
+                        )}
+                      </div>
                       <Badge
                         variant="outline"
                         title={`Provider ID: ${route.targetProviderId}`}
