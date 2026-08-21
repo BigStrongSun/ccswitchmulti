@@ -40,6 +40,8 @@ pub struct CompiledCodexModel {
     pub route_id: String,
     pub api_format: String,
     pub api_format_source: String,
+    #[serde(skip)]
+    pub sort_index: Option<usize>,
     pub capability_summary: CodexModelCapabilitySummary,
 }
 
@@ -160,6 +162,7 @@ pub fn compile_v2(
                 route_id: candidate.route_id.to_string(),
                 api_format,
                 api_format_source,
+                sort_index: model_sort_index(candidate.model_entry),
                 capability_summary,
             });
         }
@@ -308,6 +311,12 @@ fn upstream_model(model_entry: &Value, canonical_model: &str) -> String {
     string_field(model_entry, &["upstreamModel", "upstream_model"])
         .unwrap_or(canonical_model)
         .to_string()
+}
+
+fn model_sort_index(model_entry: &Value) -> Option<usize> {
+    value_field(model_entry, &["sortIndex", "sort_index"])
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
 }
 
 fn canonical_collision_counts(candidates: &[ModelCandidate<'_>]) -> HashMap<String, usize> {
@@ -619,10 +628,21 @@ fn dependency_fingerprint(
             code: "compiler_serialization_failed".to_string(),
             message: error.to_string(),
         })?;
+    let effective_model_order = model_catalog
+        .iter()
+        .map(|model| {
+            json!({
+                "model": model.visible_model,
+                "targetProviderId": model.target_provider_id,
+                "sortIndex": model.sort_index,
+            })
+        })
+        .collect::<Vec<_>>();
     let input = json!({
         "plan": safe_plan,
         "providers": provider_dependencies,
         "effectiveModels": effective_models,
+        "effectiveModelOrder": effective_model_order,
     });
     Ok(short_sha256_hex(canonical_json_string(&input).as_bytes()))
 }
@@ -969,12 +989,12 @@ mod tests {
             "openai_responses",
             json!([{"model": "second-model"}]),
         );
-        let plan = plan(vec![
+        let routing_plan = plan(vec![
             route("first-route", "first", CodexModelSelection::All),
             route("second-route", "second", CodexModelSelection::All),
         ]);
-        let forward = compile(&plan, [first.clone(), second.clone()]);
-        let reverse = compile(&plan, [second.clone(), first.clone()]);
+        let forward = compile(&routing_plan, [first.clone(), second.clone()]);
+        let reverse = compile(&routing_plan, [second.clone(), first.clone()]);
         assert_eq!(
             forward.dependency_fingerprint,
             reverse.dependency_fingerprint
@@ -986,7 +1006,7 @@ mod tests {
             "openai_chat",
             json!([{"model": "second-model"}]),
         );
-        let protocol_compiled = compile(&plan, [first.clone(), protocol_changed]);
+        let protocol_compiled = compile(&routing_plan, [first.clone(), protocol_changed]);
         assert_ne!(
             forward.dependency_fingerprint,
             protocol_compiled.dependency_fingerprint
@@ -998,10 +1018,37 @@ mod tests {
             "openai_responses",
             json!([{"model": "second-model", "inputModalities": ["text", "image"]}]),
         );
-        let model_compiled = compile(&plan, [first, model_changed]);
+        let model_compiled = compile(&routing_plan, [first, model_changed]);
         assert_ne!(
             forward.dependency_fingerprint,
             model_compiled.dependency_fingerprint
+        );
+
+        let sort_changed = provider(
+            "second",
+            "Second",
+            "openai_responses",
+            json!([{"model": "second-model", "sortIndex": 1}]),
+        );
+        let sort_plan = plan(vec![
+            route("first-route", "first", CodexModelSelection::All),
+            route("second-route", "second", CodexModelSelection::All),
+        ]);
+        let sort_compiled = compile(
+            &sort_plan,
+            [
+                provider(
+                    "first",
+                    "First",
+                    "openai_chat",
+                    json!([{"model": "first-model"}]),
+                ),
+                sort_changed,
+            ],
+        );
+        assert_ne!(
+            forward.dependency_fingerprint,
+            sort_compiled.dependency_fingerprint
         );
     }
 

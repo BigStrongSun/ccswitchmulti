@@ -5,7 +5,7 @@ use crate::error::AppError;
 use crate::provider::Provider;
 use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 
 const PROJECTION_SETTING_PREFIX: &str = "codex_multirouter_projection:";
@@ -250,8 +250,9 @@ fn build_projection_artifact(
 
 fn projection_settings(router: &Provider, compiled: &CompiledCodexRoutingPlan) -> Value {
     let mut settings = router.settings_config.clone();
+    let models = projected_model_entries(router, compiled);
     settings["modelCatalog"] = json!({
-        "models": compiled.model_catalog.iter().map(projected_model_entry).collect::<Vec<_>>(),
+        "models": models,
         "spawnAgentModels": compiled.spawn_agent_models
     });
     settings["codexRoutingProjection"] = json!({
@@ -260,12 +261,96 @@ fn projection_settings(router: &Provider, compiled: &CompiledCodexRoutingPlan) -
     settings
 }
 
-fn projected_model_entry(model: &CompiledCodexModel) -> Value {
-    let mut entry = serde_json::Map::new();
+fn projected_model_entries(router: &Provider, compiled: &CompiledCodexRoutingPlan) -> Vec<Value> {
+    let previous_models = router
+        .settings_config
+        .get("modelCatalog")
+        .or_else(|| router.settings_config.get("model_catalog"))
+        .and_then(|catalog| catalog.get("models"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let previous_rank = model_ranks(&previous_models);
+    let has_previous_custom_order = previous_models
+        .iter()
+        .any(|model| model_sort_index_value(model).is_some());
+    let has_source_custom_order = compiled
+        .model_catalog
+        .iter()
+        .any(|model| model.sort_index.is_some());
+    let use_custom_order = has_previous_custom_order || has_source_custom_order;
+
+    let mut indexed = compiled
+        .model_catalog
+        .iter()
+        .enumerate()
+        .collect::<Vec<_>>();
+    if has_previous_custom_order {
+        indexed.sort_by_key(|(index, model)| {
+            (
+                previous_rank
+                    .get(&model.visible_model.to_ascii_lowercase())
+                    .copied()
+                    .unwrap_or(usize::MAX),
+                *index,
+            )
+        });
+    } else if has_source_custom_order {
+        indexed.sort_by_key(|(index, model)| (model.sort_index.unwrap_or(usize::MAX), *index));
+    }
+
+    indexed
+        .into_iter()
+        .enumerate()
+        .map(|(sort_index, (_, model))| {
+            projected_model_entry(model, use_custom_order.then_some(sort_index))
+        })
+        .collect()
+}
+
+fn model_ranks(models: &[Value]) -> HashMap<String, usize> {
+    let mut ranked = models
+        .iter()
+        .enumerate()
+        .filter_map(|(index, model)| {
+            let name = model
+                .get("model")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())?;
+            Some((
+                name.to_ascii_lowercase(),
+                (model_sort_index_value(model), index),
+            ))
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by_key(|(_, (sort_index, index))| (sort_index.unwrap_or(usize::MAX), *index));
+
+    let mut ranks = HashMap::new();
+    for (name, _) in ranked {
+        let next_rank = ranks.len();
+        ranks.entry(name).or_insert(next_rank);
+    }
+    ranks
+}
+
+fn model_sort_index_value(model: &Value) -> Option<usize> {
+    model
+        .get("sortIndex")
+        .or_else(|| model.get("sort_index"))
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+}
+
+fn projected_model_entry(model: &CompiledCodexModel, sort_index: Option<usize>) -> Value {
+    let mut entry = Map::new();
     entry.insert(
         "model".to_string(),
         Value::String(model.visible_model.clone()),
     );
+    if let Some(sort_index) = sort_index {
+        entry.insert("sortIndex".to_string(), Value::from(sort_index));
+    }
     entry.insert(
         "upstreamModel".to_string(),
         Value::String(model.upstream_model.clone()),
@@ -470,6 +555,111 @@ mod tests {
             artifact.projection_settings["modelCatalog"]["spawnAgentModels"],
             json!(["qwen3.8"])
         );
+    }
+
+    #[test]
+    fn projection_preserves_custom_model_order_and_sort_indexes() {
+        let db = Database::memory().expect("memory db");
+        let mut router = router();
+        router.settings_config["modelCatalog"] = json!({
+            "models": [
+                {"model": "qwen-b", "sortIndex": 0},
+                {"model": "qwen-a", "sortIndex": 1}
+            ],
+            "spawnAgentModels": ["qwen-b"]
+        });
+        let target = Provider::with_id(
+            "qwen".to_string(),
+            "Qwen".to_string(),
+            json!({
+                "base_url": "https://qwen.example/v1",
+                "modelCatalog": {"models": [
+                    {"model": "qwen-a", "sortIndex": 1},
+                    {"model": "qwen-b", "sortIndex": 0}
+                ]}
+            }),
+            None,
+        );
+        db.save_provider("codex", &router)
+            .expect("save router with custom order");
+        db.save_provider("codex", &target)
+            .expect("save target with custom order");
+
+        let artifact = build_projection_artifact(&db, "router").expect("projection artifact");
+        let models = artifact.projection_settings["modelCatalog"]["models"]
+            .as_array()
+            .expect("projected models");
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model["model"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["qwen-b", "qwen-a"]
+        );
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model["sortIndex"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+    }
+
+    #[test]
+    fn projection_uses_source_sort_indexes_when_router_has_no_custom_order() {
+        let db = Database::memory().expect("memory db");
+        let router = router();
+        let target = Provider::with_id(
+            "qwen".to_string(),
+            "Qwen".to_string(),
+            json!({
+                "base_url": "https://qwen.example/v1",
+                "modelCatalog": {"models": [
+                    {"model": "qwen-a", "sortIndex": 1},
+                    {"model": "qwen-b", "sortIndex": 0}
+                ]}
+            }),
+            None,
+        );
+        db.save_provider("codex", &router)
+            .expect("save router without custom order");
+        db.save_provider("codex", &target)
+            .expect("save target with source order");
+
+        let artifact = build_projection_artifact(&db, "router").expect("projection artifact");
+        let models = artifact.projection_settings["modelCatalog"]["models"]
+            .as_array()
+            .expect("projected models");
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model["model"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["qwen-b", "qwen-a"]
+        );
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model["sortIndex"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+    }
+
+    #[test]
+    fn projection_drops_sort_indexes_when_custom_order_is_reset() {
+        let db = Database::memory().expect("memory db");
+        save_fixture(&db, "openai_chat");
+        let artifact = build_projection_artifact(&db, "router").expect("projection artifact");
+        let models = artifact.projection_settings["modelCatalog"]["models"]
+            .as_array()
+            .expect("projected models");
+
+        assert!(models.iter().all(|model| {
+            model
+                .as_object()
+                .is_some_and(|entry| !entry.contains_key("sortIndex"))
+        }));
     }
 
     #[test]
