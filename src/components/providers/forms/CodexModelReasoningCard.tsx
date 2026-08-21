@@ -154,6 +154,8 @@ export interface CodexModelReasoningCardProps {
   onRedetect: () => void;
   onAdoptDetection: () => void;
   onManualDeclare: () => void;
+  /** 将当前自动解析的能力复制为用户声明，之后可编辑档位、映射与 Ultra。 */
+  onCustomizeEffective?: () => void;
   onRestoreBuiltin: () => void;
 }
 
@@ -164,6 +166,7 @@ export function CodexModelReasoningCard({
   onRedetect,
   onAdoptDetection,
   onManualDeclare,
+  onCustomizeEffective,
   onRestoreBuiltin,
 }: CodexModelReasoningCardProps) {
   const status = reasoningCardStatus(resolution);
@@ -241,6 +244,23 @@ export function CodexModelReasoningCard({
         <div className="text-muted-foreground">最终行为</div>
         <div>{describeFinalBehavior(resolution)}</div>
       </div>
+
+      {onCustomizeEffective ? (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-primary/30 bg-primary/5 p-2">
+          <p className="text-muted-foreground">
+            当前是自动发现的结果。创建用户覆盖后可编辑映射并单独开启
+            Ultra；未创建前，自动发现会随来源变化。
+          </p>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={onCustomizeEffective}
+          >
+            按当前结果自定义
+          </Button>
+        </div>
+      ) : null}
 
       {isUnknown ? (
         <div className="space-y-2">

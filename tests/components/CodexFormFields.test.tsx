@@ -492,9 +492,12 @@ function renderAutoSplitHarness() {
 }
 
 describe("CodexFormFields local model routing", () => {
-  it("shows model reasoning as a standalone section before advanced catalog details", () => {
-    renderCatalogHarness([{ model: "qwen3.8" }]);
+  it("keeps the model catalog in normal settings before model reasoning", () => {
+    renderCatalogHarness([{ model: "qwen3.8" }], {
+      openAdvancedOptions: false,
+    });
 
+    expect(screen.getByText("模型目录明细")).toBeInTheDocument();
     expect(
       screen.getByRole("heading", { name: "模型推理能力" }),
     ).toBeInTheDocument();
@@ -502,14 +505,71 @@ describe("CodexFormFields local model routing", () => {
       screen.getByRole("button", { name: "配置 qwen3.8 的推理能力" }),
     );
     expect(screen.getByLabelText("qwen3.8推理能力来源")).toBeInTheDocument();
-    expect(screen.getByText("模型目录明细")).toBeInTheDocument();
     expect(screen.queryByText(/Codex 推理能力（/)).not.toBeInTheDocument();
+  });
+
+  it("lets automatic discovery become an editable user override for Ultra", async () => {
+    reasoningApiMocks.resolve.mockImplementation(
+      async (_settings, _provider, model) => ({
+        model,
+        source: "library",
+        fingerprint: "library-deepseek",
+        capability: {
+          schemaVersion: 2,
+          supportStatus: "confirmed_supported",
+          controlKind: "graded",
+          supportedEfforts: ["low", "high"],
+          defaultEffort: "high",
+          disableAllowed: false,
+          upstream: {
+            format: "string",
+            parameter: "reasoning_effort",
+            effortMap: { low: "low", high: "high", max: "high" },
+          },
+          source: "provider",
+        },
+        resolved: {
+          supportKind: "effort_levels",
+          confidence: "maintained",
+          codexSelectableEfforts: ["low", "high", "max"],
+          providerAcceptedEfforts: ["low", "high"],
+          providerDefaultEffort: "high",
+          disableAllowed: false,
+          effortMap: { low: "low", high: "high", max: "high" },
+        },
+        hasDetectionCandidate: false,
+        detection: null,
+      }),
+    );
+    const { latestCatalog } = renderCatalogHarness([
+      { model: "deepseek-v4-flash" },
+    ]);
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "配置 deepseek-v4-flash 的推理能力",
+      }),
+    );
+
     expect(
-      screen
-        .getByRole("heading", { name: "模型推理能力" })
-        .compareDocumentPosition(screen.getByText("模型目录明细")) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
+      await screen.findByText(/自动发现会按当前 Provider、模型和已验证声明/),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "按当前结果自定义" }));
+
+    await waitFor(() => {
+      expect(latestCatalog()[0].reasoning).toEqual(
+        expect.objectContaining({
+          source: "user",
+          supportedEfforts: ["low", "high"],
+          upstream: expect.objectContaining({
+            effortMap: expect.objectContaining({ max: "high" }),
+          }),
+        }),
+      );
+    });
+    expect(
+      screen.getByRole("checkbox", { name: "启用 Codex Ultra 编排" }),
+    ).toBeEnabled();
   });
 
   it("renders the resolved reasoning card and lets the user declare an unknown model", async () => {
@@ -660,7 +720,9 @@ describe("CodexFormFields local model routing", () => {
     expect(
       screen.getByLabelText("deepseek-v4-pro推理能力 JSON"),
     ).not.toHaveAttribute("readonly");
-    expect(screen.getByText("能力来源：用户声明（已覆盖维护值）")).toBeInTheDocument();
+    expect(
+      screen.getByText("能力来源：用户声明（已覆盖维护值）"),
+    ).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "恢复内置默认" }));
     await waitFor(() => {
