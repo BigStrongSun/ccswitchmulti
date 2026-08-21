@@ -92,6 +92,17 @@ pub(crate) struct HostedToolDiagnosticContext {
     pub(crate) tool: Option<&'static str>,
 }
 
+fn should_log_hosted_tool_not_called(
+    state: &ChatToResponsesState,
+    diagnostic_context: Option<&HostedToolDiagnosticContext>,
+) -> bool {
+    (state.completed || state.finish_reason.is_some())
+        && state.completed_tool_calls().is_empty()
+        && diagnostic_context
+            .and_then(|context| context.tool)
+            .is_some()
+}
+
 #[derive(Debug)]
 struct ChatToResponsesState {
     response_started: bool,
@@ -1163,27 +1174,23 @@ where
                 }
             }
 
+            if should_log_hosted_tool_not_called(&state, diagnostic_context.as_ref()) {
+                if let Some(context) = diagnostic_context.as_ref() {
+                    crate::proxy::providers::hosted_tools::bridge::log_hosted_tool_not_called(
+                        context.trace_id.as_deref(),
+                        &context.session_id,
+                        &context.model,
+                        &context.provider,
+                        context.tool.expect("checked above"),
+                        true,
+                    );
+                }
+            }
+
             if stream_failed || state.completed {
                 break;
             }
             if state.finish_reason.is_some() {
-                if state.completed_tool_calls().is_empty()
-                    && diagnostic_context
-                        .as_ref()
-                        .and_then(|context| context.tool)
-                        .is_some()
-                {
-                    if let Some(context) = diagnostic_context.as_ref() {
-                        crate::proxy::providers::hosted_tools::bridge::log_hosted_tool_not_called(
-                            context.trace_id.as_deref(),
-                            &context.session_id,
-                            &context.model,
-                            &context.provider,
-                            context.tool.expect("checked above"),
-                            true,
-                        );
-                    }
-                }
                 for event in state.finalize() {
                     yield Ok(event);
                 }
@@ -1289,6 +1296,24 @@ mod tests {
         assert!(output.contains("response.completed"));
         assert!(!output.contains("function_call_arguments"));
         assert!(!output.contains("web_search"));
+    }
+
+    #[test]
+    fn completed_stream_without_tool_call_requires_hosted_tool_diagnostic() {
+        let mut state = ChatToResponsesState::with_tool_context(CodexToolContext::default());
+        state.completed = true;
+        let diagnostic_context = HostedToolDiagnosticContext {
+            trace_id: Some("trace".to_string()),
+            session_id: "session".to_string(),
+            model: "qwen3.8".to_string(),
+            provider: "provider".to_string(),
+            tool: Some("web_search"),
+        };
+
+        assert!(should_log_hosted_tool_not_called(
+            &state,
+            Some(&diagnostic_context)
+        ));
     }
 
     #[tokio::test]
