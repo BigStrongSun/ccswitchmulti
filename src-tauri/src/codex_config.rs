@@ -71,6 +71,8 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 // CODEX_HOME and seed different model templates.
 #[cfg(not(test))]
 static CODEX_MODEL_CATALOG_TEMPLATE_CACHE: OnceCell<Value> = OnceCell::new();
+#[cfg(not(test))]
+static CODEX_BUNDLED_MODELS_CACHE: OnceCell<Option<Vec<Value>>> = OnceCell::new();
 
 /// Top-level `config.toml` key that controls Codex's built-in web-search tool.
 pub(crate) const CODEX_WEB_SEARCH_FIELD: &str = "web_search";
@@ -1442,6 +1444,8 @@ fn sort_codex_catalog_specs_for_picker(
 /// CC Switch 接管后会把路由目录写进 models_cache.json（etag 标记为 CC_SWITCH 拥有），
 /// 官方原始档位在 backup 文件里。此处与 enrich_codex_catalog_with_official_metadata
 /// 保持同一选择逻辑：缓存被 CC Switch 拥有时优先读 backup。
+/// backup 缺失或为空时再读取 Codex CLI 的 bundled 官方目录；这是新模型也能自动
+/// 获得官方服务档/推理档的来源，不依赖维护模型名单。
 /// 任何读取/解析失败都返回 None（静默降级，不阻断投影）。
 ///
 /// P2：公开给 reasoning resolver 作为 official 来源（仅未知平台生效）。
@@ -1449,20 +1453,48 @@ pub fn codex_official_models_cache() -> Option<Vec<Value>> {
     let cache_path = get_codex_models_cache_path();
     let backup_path = get_codex_models_cache_backup_path();
     let existing_cache = read_json_file_if_exists(&cache_path).ok().flatten();
-    let official_cache = match existing_cache.as_ref() {
-        Some(cache) if codex_models_cache_is_cc_switch_owned(cache) => {
-            read_json_file_if_exists(&backup_path)
-                .ok()
-                .flatten()
-                .or_else(|| existing_cache.clone())
-        }
+    let backup_cache = read_json_file_if_exists(&backup_path).ok().flatten();
+    official_models_with_bundled_fallback(
+        existing_cache.as_ref(),
+        backup_cache.as_ref(),
+        load_codex_bundled_models().as_deref(),
+    )
+}
+
+fn official_models_with_bundled_fallback(
+    existing_cache: Option<&Value>,
+    backup_cache: Option<&Value>,
+    bundled_models: Option<&[Value]>,
+) -> Option<Vec<Value>> {
+    let official_cache = match existing_cache {
+        Some(cache) if codex_models_cache_is_cc_switch_owned(cache) => backup_cache.or(Some(cache)),
         _ => existing_cache,
-    }?;
-    let models = official_cache
-        .get("models")
-        .and_then(Value::as_array)?
-        .clone();
-    Some(models)
+    };
+    let mut models = official_cache
+        .and_then(|cache| cache.get("models"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut model_indexes = HashMap::new();
+    for (index, model) in models.iter().enumerate() {
+        if let Some(model_id) = codex_model_stable_id(model) {
+            model_indexes.insert(model_id, index);
+        }
+    }
+    if let Some(bundled_models) = bundled_models {
+        for bundled in bundled_models {
+            let Some(model_id) = codex_model_stable_id(bundled) else {
+                continue;
+            };
+            if let Some(index) = model_indexes.get(&model_id).copied() {
+                models[index] = bundled.clone();
+            } else {
+                model_indexes.insert(model_id, models.len());
+                models.push(bundled.clone());
+            }
+        }
+    }
+    (!models.is_empty()).then_some(models)
 }
 
 fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCatalogModelSpec> {
@@ -1842,7 +1874,8 @@ fn codex_bundled_models_command(candidate: &Path) -> Command {
     command
 }
 
-fn load_codex_model_template_from_bundled() -> Result<Option<Value>, AppError> {
+#[cfg(not(test))]
+fn load_codex_bundled_models_uncached() -> Option<Vec<Value>> {
     for candidate in codex_cli_candidates() {
         let candidate_label = candidate.to_string_lossy();
         let output = match codex_bundled_models_command(&candidate).output() {
@@ -1868,12 +1901,34 @@ fn load_codex_model_template_from_bundled() -> Result<Option<Value>, AppError> {
                 continue;
             }
         };
-        if let Some(template) = find_codex_model_template(&catalog) {
-            return Ok(Some(template));
+        let models = catalog
+            .get("models")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if !models.is_empty() {
+            return Some(models);
         }
     }
 
-    Ok(None)
+    None
+}
+
+#[cfg(not(test))]
+fn load_codex_bundled_models() -> Option<Vec<Value>> {
+    CODEX_BUNDLED_MODELS_CACHE
+        .get_or_init(load_codex_bundled_models_uncached)
+        .clone()
+}
+
+#[cfg(test)]
+fn load_codex_bundled_models() -> Option<Vec<Value>> {
+    None
+}
+
+fn load_codex_model_template_from_bundled() -> Result<Option<Value>, AppError> {
+    let models = load_codex_bundled_models();
+    Ok(models.and_then(|models| find_codex_model_template(&json!({ "models": models }))))
 }
 
 fn load_codex_model_template_static() -> Option<Value> {
@@ -5683,27 +5738,13 @@ fn enrich_codex_catalog_with_official_metadata(catalog: &Value) -> Result<Value,
     let Some(routed_models) = catalog.get("models").and_then(Value::as_array) else {
         return Ok(catalog.clone());
     };
-    let cache_path = get_codex_models_cache_path();
-    let backup_path = get_codex_models_cache_backup_path();
-    let existing_cache = read_json_file_if_exists(&cache_path)?;
-    let official_cache = match existing_cache.as_ref() {
-        Some(cache) if codex_models_cache_is_cc_switch_owned(cache) => {
-            read_json_file_if_exists(&backup_path)?.or_else(|| existing_cache.clone())
-        }
-        _ => existing_cache,
-    };
-    let official_models = official_cache
-        .as_ref()
-        .and_then(|cache| cache.get("models"))
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_default();
+    let official_models = codex_official_models_cache().unwrap_or_default();
 
     let mut enriched = catalog.clone();
     if let Some(object) = enriched.as_object_mut() {
         object.insert(
             "models".to_string(),
-            Value::Array(merge_codex_models(official_models, routed_models)),
+            Value::Array(merge_codex_models(&official_models, routed_models)),
         );
     }
     Ok(enriched)
@@ -5724,17 +5765,11 @@ fn sync_codex_models_cache_with_cc_switch_catalog(catalog: &Value) -> Result<(),
     let cache_path = get_codex_models_cache_path();
     let backup_path = get_codex_models_cache_backup_path();
     let existing_cache = read_json_file_if_exists(&cache_path)?;
-    // 当前缓存若已被 CCSM 接管，必须从接管前备份读取官方同 slug 元数据；
-    // official-only 模型仍不能越过 routed catalog 边界重新进入选择器。
-    let official_cache = match existing_cache.as_ref() {
-        Some(cache) if codex_models_cache_is_cc_switch_owned(cache) => {
-            read_json_file_if_exists(&backup_path)?.or_else(|| existing_cache.clone())
-        }
-        _ => existing_cache.clone(),
-    };
+    // 官方同 slug 元数据优先来自接管前 backup；backup 为空时使用 Codex 自带
+    // bundled 官方目录，因此新模型不会被旧缓存/空 backup 卡住。
+    let official_models = codex_official_models_cache().unwrap_or_default();
     let client_version = existing_cache
         .as_ref()
-        .or(official_cache.as_ref())
         .and_then(|cache| cache.get("client_version"))
         .and_then(|version| version.as_str())
         .map(ToString::to_string);
@@ -5751,7 +5786,17 @@ fn sync_codex_models_cache_with_cc_switch_catalog(catalog: &Value) -> Result<(),
     };
 
     if let Some(cache) = existing_cache.as_ref() {
-        if !codex_models_cache_is_cc_switch_owned(cache) && !backup_path.exists() {
+        if codex_models_cache_is_cc_switch_owned(cache) {
+            let backup_models_empty = read_json_file_if_exists(&backup_path)?
+                .and_then(|backup| backup.get("models").cloned())
+                .and_then(|models| models.as_array().cloned())
+                .is_none_or(|models| models.is_empty());
+            if backup_models_empty && !official_models.is_empty() {
+                let mut restored = cache.clone();
+                restored["models"] = Value::Array(official_models.clone());
+                write_json_file(&backup_path, &restored)?;
+            }
+        } else if !backup_path.exists() {
             if let Some(parent) = backup_path.parent() {
                 fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
             }
@@ -5759,13 +5804,7 @@ fn sync_codex_models_cache_with_cc_switch_catalog(catalog: &Value) -> Result<(),
         }
     }
 
-    let official_models = official_cache
-        .as_ref()
-        .and_then(|cache| cache.get("models"))
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_default();
-    let mut merged_models = merge_codex_models(official_models, models);
+    let mut merged_models = merge_codex_models(&official_models, models);
     let routed_models_by_id = models
         .iter()
         .filter_map(|model| codex_model_stable_id(model).map(|model_id| (model_id, model)))
@@ -5790,9 +5829,9 @@ fn sync_codex_models_cache_with_cc_switch_catalog(catalog: &Value) -> Result<(),
         }
     }
 
-    // 以官方缓存对象为底稿还能保留新版 App 可能新增的顶层元数据；这里只覆盖
+    // 以现有缓存对象为底稿还能保留新版 App 可能新增的顶层元数据；这里只覆盖
     // CCSM 必须维护的刷新时间、所有权标记、客户端版本和合并后的模型数组。
-    let mut cache = official_cache.unwrap_or_else(|| json!({}));
+    let mut cache = existing_cache.unwrap_or_else(|| json!({}));
     if !cache.is_object() {
         cache = json!({});
     }
@@ -15440,6 +15479,75 @@ model_catalog_json = "cc-switch-model-catalog.json"
                 .and_then(Value::as_array)
                 .map(Vec::len),
             Some(6)
+        );
+    }
+
+    #[test]
+    fn official_models_use_bundled_catalog_when_backup_is_empty() {
+        let owned_cache = json!({
+            "etag": CC_SWITCH_CODEX_MODELS_CACHE_ETAG,
+            "models": []
+        });
+        let empty_backup = json!({ "models": [] });
+        let bundled = json!([{
+            "slug": "gpt-5.6-terra",
+            "default_reasoning_level": "medium",
+            "supported_reasoning_levels": [
+                { "effort": "low" },
+                { "effort": "medium" },
+                { "effort": "high" },
+                { "effort": "xhigh" },
+                { "effort": "max" }
+            ],
+            "additional_speed_tiers": ["fast"],
+            "service_tiers": [{ "id": "priority", "name": "Fast" }]
+        }]);
+
+        let models = official_models_with_bundled_fallback(
+            Some(&owned_cache),
+            Some(&empty_backup),
+            bundled.as_array().map(Vec::as_slice),
+        )
+        .expect("bundled official models must be used when the local backup is empty");
+        assert_eq!(
+            models[0].get("slug").and_then(Value::as_str),
+            Some("gpt-5.6-terra")
+        );
+        assert_eq!(
+            models[0].get("service_tiers"),
+            Some(&json!([{ "id": "priority", "name": "Fast" }]))
+        );
+    }
+
+    #[test]
+    fn official_models_overlay_bundled_catalog_over_stale_backup() {
+        let owned_cache = json!({
+            "etag": CC_SWITCH_CODEX_MODELS_CACHE_ETAG,
+            "models": [{"slug": "gpt-5.4", "service_tiers": []}]
+        });
+        let backup = json!({
+            "models": [{"slug": "gpt-5.4", "service_tiers": [{ "id": "priority" }]}]
+        });
+        let bundled = json!([
+            {"slug": "gpt-5.4", "service_tiers": [{ "id": "new_tier" }]},
+            {"slug": "gpt-5.6-terra", "service_tiers": [{ "id": "priority" }]}
+        ]);
+
+        let models = official_models_with_bundled_fallback(
+            Some(&owned_cache),
+            Some(&backup),
+            bundled.as_array().map(Vec::as_slice),
+        )
+        .expect("bundled models must overlay a stale backup");
+        let ids = models
+            .iter()
+            .filter_map(codex_model_stable_id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["gpt-5.4", "gpt-5.6-terra"]);
+        assert_eq!(
+            models[0].get("service_tiers"),
+            Some(&json!([{ "id": "new_tier" }])),
+            "the current bundled official entry must override the stale backup field"
         );
     }
 
