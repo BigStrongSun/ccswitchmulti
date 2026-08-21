@@ -5,6 +5,14 @@ All notable changes to CC Switch will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.19.2-12] - 2026-08-21
+
+This patch release completes the third-party hosted-tool streaming bridge.
+
+### Fixed
+
+- **Mixed Hosted and Ordinary Function Calls**: A streaming Chat turn can now contain a CCSwitchMulti-hosted tool such as `web_search` together with an ordinary client function tool. CCSwitchMulti executes the hosted call, preserves the ordinary function-call events for Codex, and resumes the same Responses stream instead of returning `mixed_hosted_tool_calls`.
+
 ## [3.19.2-10] - 2026-08-21
 
 This patch release closes the third-party hosted web-search authentication path and makes the remaining upstream function-calling boundary visible instead of silently presenting a successful but search-free turn.
