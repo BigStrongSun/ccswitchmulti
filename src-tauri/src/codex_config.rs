@@ -4303,10 +4303,7 @@ fn resolve_input_modality_provenance(
     } else if let Some(value) = catalog_effective.clone() {
         (Some(value), CodexSubagentInputModalitySource::Catalog)
     } else if let Some(value) = name_declared.clone() {
-        (
-            Some(value),
-            CodexSubagentInputModalitySource::NameRegistry,
-        )
+        (Some(value), CodexSubagentInputModalitySource::NameRegistry)
     } else {
         (None, CodexSubagentInputModalitySource::Unknown)
     };
