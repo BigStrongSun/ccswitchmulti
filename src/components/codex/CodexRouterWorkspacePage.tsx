@@ -70,7 +70,10 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { providersApi } from "@/lib/api";
-import type { CodexMultiRouterMigrationPreview } from "@/lib/api/providers";
+import type {
+  CodexMultiRouterMigrationPreview,
+  CodexRoutingProjectionStatus,
+} from "@/lib/api/providers";
 import { authApi, type CodexAccountPoolPolicy } from "@/lib/api/auth";
 import {
   fetchCodexOauthCachedModels,
@@ -6730,6 +6733,97 @@ function SpawnAgentCandidatesPanel({
   );
 }
 
+function CodexProjectionStatusPanel({
+  status,
+  queryError,
+  retryError,
+  isRefreshing,
+  onRetry,
+}: {
+  status?: CodexRoutingProjectionStatus;
+  queryError: Error | null;
+  retryError: string | null;
+  isRefreshing: boolean;
+  onRetry: () => void;
+}) {
+  const pending = Boolean(queryError) || status?.state === "pending" || !status;
+  const errorMessage =
+    retryError ||
+    status?.lastError ||
+    (queryError instanceof Error ? queryError.message : null);
+  const routeRows = (status?.routes ?? []).slice(0, 8);
+
+  return (
+    <div
+      role="status"
+      className={cn(
+        "mt-3 rounded-lg border p-3 text-xs leading-5",
+        pending
+          ? "border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-700/50 dark:bg-amber-950/25 dark:text-amber-100"
+          : "border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-700/50 dark:bg-emerald-950/25 dark:text-emerald-100",
+      )}
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="font-semibold">
+          MultiRouter 目录投影：{pending ? "待同步" : "已同步"}
+        </div>
+        {pending ? (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={onRetry}
+            disabled={isRefreshing}
+            className="h-8 gap-1.5 border-amber-300 bg-background/70 text-amber-800 hover:bg-amber-100 dark:border-amber-500/50 dark:bg-amber-500/10 dark:text-amber-100 dark:hover:bg-amber-500/20"
+          >
+            <RefreshCw
+              className={cn("h-3.5 w-3.5", isRefreshing && "animate-spin")}
+            />
+            {isRefreshing ? "同步中…" : "重新同步目录"}
+          </Button>
+        ) : null}
+      </div>
+      <div className="mt-1">
+        {pending
+          ? "当前 Provider/模型目录与 Codex live 投影可能不一致；先重新同步，再发送请求。"
+          : `已确认 ${status?.routes.length ?? 0} 条模型映射与当前 Provider 目录一致。`}
+      </div>
+      {errorMessage ? (
+        <div className="mt-1">
+          原因：{errorMessage}
+          {status?.lastErrorCode ? `（${status.lastErrorCode}）` : ""}
+        </div>
+      ) : null}
+      {routeRows.length > 0 ? (
+        <div className="mt-2 space-y-1 border-t border-current/15 pt-2">
+          <div className="font-medium">当前有效映射</div>
+          {routeRows.map((route) => {
+            const routeLabel = routeSummaryDisplayName(
+              route.routeLabel,
+              route.routeId,
+              route.targetProviderName,
+            );
+            return (
+              <div
+                key={`${route.routeId}:${route.visibleModel}`}
+                title={`Route ID: ${route.routeId}; Provider ID: ${route.targetProviderId}`}
+                className="font-mono text-[11px]"
+              >
+                {routeLabel} / {route.targetProviderName}: {route.visibleModel}{" "}
+                → {route.upstreamModel}
+              </div>
+            );
+          })}
+          {status && status.routes.length > routeRows.length ? (
+            <div>
+              其余 {status.routes.length - routeRows.length} 条映射已省略。
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 /// 状态页把代理运行态、Codex 接管态、路由配置态和最近流量放在同一视图里。
 function StatusTab({
   selectedPlan,
@@ -6782,6 +6876,22 @@ function StatusTab({
     queryFn: () => proxyApi.getCodexGuardianStatus(),
     refetchInterval: 10_000,
   });
+  const {
+    data: projectionStatus,
+    error: projectionError,
+    isFetching: isRefreshingProjection,
+  } = useQuery<CodexRoutingProjectionStatus>({
+    queryKey: ["codexMultiRouterProjection", selectedPlan?.id],
+    queryFn: () =>
+      providersApi.inspectCodexMultiRouterProjection(selectedPlan!.id),
+    enabled: Boolean(selectedPlan?.id),
+    retry: false,
+    refetchInterval: 15_000,
+  });
+  const [projectionRetryError, setProjectionRetryError] = useState<
+    string | null
+  >(null);
+  const [isRetryingProjection, setIsRetryingProjection] = useState(false);
   const [modelPickerUnlockError, setModelPickerUnlockError] = useState<
     string | null
   >(null);
@@ -6932,6 +7042,28 @@ function StatusTab({
       );
     } finally {
       setIsRefreshingValidation(false);
+    }
+  }
+
+  async function retryProjection() {
+    if (!selectedPlan) return;
+    setIsRetryingProjection(true);
+    setProjectionRetryError(null);
+    try {
+      const refreshed = await providersApi.retryCodexMultiRouterProjection(
+        selectedPlan.id,
+      );
+      queryClient.setQueryData(
+        ["codexMultiRouterProjection", selectedPlan.id],
+        refreshed,
+      );
+      await queryClient.invalidateQueries({ queryKey: ["providers", "codex"] });
+    } catch (error) {
+      setProjectionRetryError(
+        error instanceof Error ? error.message : String(error),
+      );
+    } finally {
+      setIsRetryingProjection(false);
     }
   }
 
@@ -7181,6 +7313,15 @@ function StatusTab({
                 接管、路由入口和最近一次路由转发均正常。你可以继续留在状态页观察流量或调整路由。
               </div>
             </div>
+          ) : null}
+          {selectedPlan ? (
+            <CodexProjectionStatusPanel
+              status={projectionStatus}
+              queryError={projectionError}
+              retryError={projectionRetryError}
+              isRefreshing={isRefreshingProjection || isRetryingProjection}
+              onRetry={retryProjection}
+            />
           ) : null}
           {validationRefreshMessage ? (
             <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs leading-5 text-slate-700 dark:border-slate-600/50 dark:bg-slate-900/60 dark:text-slate-200">

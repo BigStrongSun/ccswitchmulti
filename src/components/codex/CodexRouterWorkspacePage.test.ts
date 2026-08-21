@@ -9,6 +9,7 @@ import {
   fetchModelsForConfig,
   type FetchedModel,
 } from "@/lib/api/model-fetch";
+import type { CodexRoutingProjectionStatus } from "@/lib/api/providers";
 import { proxyApi } from "@/lib/api/proxy";
 import type { Provider } from "@/types";
 import type { PaginatedLogs, RequestLog } from "@/types/usage";
@@ -76,6 +77,8 @@ vi.mock("@/lib/api", () => ({
     add: vi.fn(),
     update: vi.fn(),
     getAll: vi.fn(),
+    inspectCodexMultiRouterProjection: vi.fn(),
+    retryCodexMultiRouterProjection: vi.fn(),
     getCodexMultiRouterRevision: vi.fn(),
     previewCodexMultiRouterMigration: vi.fn(),
     applyCodexMultiRouterMigration: vi.fn(),
@@ -287,6 +290,28 @@ beforeEach(() => {
   vi.mocked(providersApi.add).mockResolvedValue(true);
   vi.mocked(providersApi.update).mockResolvedValue(true);
   vi.mocked(providersApi.getAll).mockResolvedValue({});
+  vi.mocked(providersApi.inspectCodexMultiRouterProjection).mockResolvedValue({
+    schemaVersion: 1,
+    routerProviderId: "codex-multirouter",
+    state: "ready",
+    dependencyFingerprint: "test-fingerprint",
+    generatedAt: "2026-08-21T00:00:00Z",
+    warnings: [],
+    routes: [],
+    lastErrorCode: null,
+    lastError: null,
+  } satisfies CodexRoutingProjectionStatus);
+  vi.mocked(providersApi.retryCodexMultiRouterProjection).mockResolvedValue({
+    schemaVersion: 1,
+    routerProviderId: "codex-multirouter",
+    state: "ready",
+    dependencyFingerprint: "test-fingerprint",
+    generatedAt: "2026-08-21T00:00:00Z",
+    warnings: [],
+    routes: [],
+    lastErrorCode: null,
+    lastError: null,
+  } satisfies CodexRoutingProjectionStatus);
   vi.mocked(providersApi.getCodexMultiRouterRevision).mockReset();
   vi.mocked(providersApi.previewCodexMultiRouterMigration).mockReset();
   vi.mocked(providersApi.applyCodexMultiRouterMigration).mockReset();
@@ -3410,6 +3435,115 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     await waitFor(() =>
       expect(
         screen.getByText("MultiRouter 已通过真实请求验证"),
+      ).toBeInTheDocument(),
+    );
+  });
+
+  it("shows stale projection details and lets the user resync with readable provider names", async () => {
+    const source: Provider = {
+      id: "5626e6b9-33cb-4c3b-8d16-af8176e16209",
+      name: "DeepSeek Relay",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: {
+          models: [
+            {
+              model: "deepseek-v4-flash",
+              upstreamModel: "deepseek-v4-flash-0731",
+            },
+          ],
+        },
+      },
+    };
+    const plan = createDraftRoutingPlan([source], [source]);
+    const staleStatus: CodexRoutingProjectionStatus = {
+      schemaVersion: 1,
+      routerProviderId: plan.id,
+      state: "pending",
+      dependencyFingerprint: "stale-fingerprint",
+      generatedAt: "2026-08-21T00:00:00Z",
+      warnings: [],
+      routes: [
+        {
+          routeId: `router-${source.id}`,
+          routeLabel: `router-${source.id}`,
+          targetProviderId: source.id,
+          targetProviderName: source.name,
+          visibleModel: "deepseek-v4-flash",
+          canonicalModel: "deepseek-v4-flash",
+          upstreamModel: "deepseek-v4-flash-0731",
+          apiFormat: "openai_responses",
+          apiFormatSource: "provider",
+          authOwner: "provider_config",
+          capabilitySources: {
+            contextWindow: "provider_model",
+            inputModalities: "provider_model",
+            reasoning: "provider_model",
+            codexCache: "provider_model",
+          },
+        },
+      ],
+      lastErrorCode: "projection_stale",
+      lastError:
+        "Codex MultiRouter projection dependencies changed and regeneration is required",
+    };
+    vi.mocked(
+      providersApi.inspectCodexMultiRouterProjection,
+    ).mockResolvedValueOnce(staleStatus);
+    vi.mocked(
+      providersApi.retryCodexMultiRouterProjection,
+    ).mockResolvedValueOnce({
+      ...staleStatus,
+      state: "ready",
+      dependencyFingerprint: "fresh-fingerprint",
+      lastErrorCode: null,
+      lastError: null,
+    });
+
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [source, plan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: plan.id,
+        initialProviderId: plan.id,
+        initialTab: "status",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.getByText("MultiRouter 目录投影：待同步"),
+      ).toBeInTheDocument(),
+    );
+    await waitFor(() =>
+      expect(screen.getByText("当前有效映射")).toBeInTheDocument(),
+    );
+    expect(
+      screen.getByText(/DeepSeek Relay \/ DeepSeek Relay/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/deepseek-v4-flash → deepseek-v4-flash-0731/),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(`router-${source.id}`, { exact: true }),
+    ).not.toBeInTheDocument();
+
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "重新同步目录" }));
+
+    await waitFor(() =>
+      expect(providersApi.retryCodexMultiRouterProjection).toHaveBeenCalledWith(
+        plan.id,
+      ),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByText("MultiRouter 目录投影：已同步"),
       ).toBeInTheDocument(),
     );
   });
