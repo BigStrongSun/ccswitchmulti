@@ -11,6 +11,14 @@ This patch release completes the third-party hosted-tool streaming bridge.
 
 ### Fixed
 
+- **MultiRouter Alias Identity Mismatch**: Provider catalog entries that expose a
+  visible `model` together with a distinct `upstreamModel` no longer fail with
+  `alias_target_missing`; selection and alias validation now resolve both names
+  through the same catalog entry while preserving the outbound upstream model.
+- **Router Diagnostics Show Provider Names**: Legacy routes without a label no
+  longer expose `router-UUID` as the only user-facing name in the wizard,
+  diagnostics, or workspace. The route label or target Provider name is shown
+  first, with the stable ID retained only as diagnostic metadata.
 - **Mixed Hosted and Ordinary Function Calls**: A streaming Chat turn can now contain a CCSwitchMulti-hosted tool such as `web_search` together with an ordinary client function tool. CCSwitchMulti executes the hosted call, preserves the ordinary function-call events for Codex, and resumes the same Responses stream instead of returning `mixed_hosted_tool_calls`.
 
 ## [3.19.2-10] - 2026-08-21

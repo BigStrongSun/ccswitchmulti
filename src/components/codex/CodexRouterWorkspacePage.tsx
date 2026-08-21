@@ -1204,6 +1204,19 @@ function routeTargetProvider(
   return targetProviderId ? providersById.get(targetProviderId) : undefined;
 }
 
+/// 规则名称优先使用用户可读 label；历史 route 缺少 label 时跟随目标 Provider 名称，最后才暴露稳定 ID。
+function routeDisplayName(
+  route: CodexRoute,
+  providersById: Map<string, Provider>,
+  fallback = "未命名规则",
+): string {
+  const label = route.label?.trim();
+  const routeId = route.id?.trim();
+  if (label && label !== routeId) return label;
+  const providerName = routeTargetProvider(route, providersById)?.name?.trim();
+  return providerName || label || routeId || fallback;
+}
+
 /// 把 provider 或 route 标识清理成稳定的路由 ID 片段；空值回退到 fallback，避免保存后出现不可选规则。
 function safeRouteIdPart(value: string | undefined, fallback: string): string {
   const normalized = (value ?? "")
@@ -1954,14 +1967,13 @@ export function buildModelCatalogForRoutes(
       : [];
     const routableCatalogModels =
       route.modelSelection?.mode === "all"
-        ? targetCatalogModels.filter((catalogModel) => catalogModel.enabled !== false)
+        ? targetCatalogModels.filter(
+            (catalogModel) => catalogModel.enabled !== false,
+          )
         : targetCatalogModels.filter(
             (catalogModel) =>
               catalogModel.enabled !== false &&
-              routeCanMatchVisibleCatalogModel(
-                route,
-                catalogModel.model ?? "",
-              ),
+              routeCanMatchVisibleCatalogModel(route, catalogModel.model ?? ""),
           );
     for (const catalogModel of routableCatalogModels) {
       const id = catalogModel.model?.trim();
@@ -3343,13 +3355,17 @@ export function CodexRouterWorkspacePage({
     });
 
     if (matched) {
-      const result = `${model} 会命中「${matched.route.label || matched.route.id || "未命名规则"}」，上游为 ${routeBaseUrl(matched.route, providersById)}。`;
+      const result = `${model} 会命中「${routeDisplayName(matched.route, providersById)}」，上游为 ${routeBaseUrl(matched.route, providersById)}。`;
       setTestResult(result);
       return;
     }
 
-    const fallback = selectedRouting?.defaultRouteId
-      ? `没有精确命中，会走默认路由 ${selectedRouting.defaultRouteId}。`
+    const defaultRouteId = selectedRouting?.defaultRouteId;
+    const defaultRoute = defaultRouteId
+      ? enabledRoutes.find(({ route }) => route.id === defaultRouteId)
+      : undefined;
+    const fallback = defaultRouteId
+      ? `没有精确命中，会走默认路由 ${defaultRoute ? routeDisplayName(defaultRoute.route, providersById) : defaultRouteId}。`
       : "没有命中任何启用规则，且当前方案没有默认路由。";
     setTestResult(fallback);
   }
@@ -4859,10 +4875,13 @@ function MultiRouterSettingsPanel({
     setIsSavingListener(false);
   }
 
+  const routeProvidersById = new Map(
+    selectedRoutes.map(({ provider }) => [provider.id, provider]),
+  );
   const routeOptions = selectedRoutes
     .map(({ route }) => ({
       id: route.id,
-      label: route.label || route.id || "未命名规则",
+      label: routeDisplayName(route, routeProvidersById),
       enabled: route.enabled !== false,
     }))
     .filter((route): route is { id: string; label: string; enabled: boolean } =>
@@ -7343,7 +7362,7 @@ function StatusTab({
                         {targetProvider?.name ?? targetProviderId ?? "内联上游"}
                       </div>
                       <div className="mt-1 truncate text-xs text-muted-foreground dark:text-slate-400">
-                        {entry.route.label || entry.route.id || "未命名规则"}
+                        {routeDisplayName(entry.route, providersById)}
                       </div>
                     </div>
                     <Badge
@@ -8027,7 +8046,10 @@ function DiagnosticsPanel({
                   className="grid grid-cols-[1fr_1fr_1fr_1fr_0.8fr] gap-2 border-t border-border px-3 py-2 text-xs text-foreground dark:border-slate-800 dark:text-slate-300"
                 >
                   <span className="truncate">
-                    {route.label ?? route.id ?? `规则 ${index + 1}`}
+                    {route.label ??
+                      route.targetProviderName ??
+                      route.id ??
+                      `规则 ${index + 1}`}
                     {route.enabled ? "" : "（停用）"}
                   </span>
                   <span className="truncate">
@@ -8457,7 +8479,7 @@ function RouteListButton({
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="min-w-0">
           <div className="truncate text-sm font-semibold text-foreground dark:text-slate-100">
-            {entry.route.label || entry.route.id || "未命名规则"}
+            {routeDisplayName(entry.route, providersById)}
           </div>
           <div className="mt-1 truncate text-xs text-muted-foreground dark:text-slate-400">
             所属多路路由：{entry.provider.name}
@@ -8529,7 +8551,7 @@ function RouteDetailPanel({
     <section className="rounded-lg border border-emerald-200 bg-emerald-50/70 p-3 dark:border-emerald-700/40 dark:bg-slate-950/50">
       <SectionHeader
         icon={Database}
-        title={route.label || route.id || "规则详情"}
+        title={routeDisplayName(route, providersById, "规则详情")}
         detail="这里是当前规则的只读摘要；修改接入范围请打开候选 router 选择器。"
         action={
           <Button

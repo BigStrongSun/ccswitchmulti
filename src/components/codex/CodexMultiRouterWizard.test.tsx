@@ -354,7 +354,8 @@ describe("CodexMultiRouterWizard", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "选择模型并预览路由" }));
 
-    expect(screen.getByText("qwen-provider")).toBeVisible();
+    const providerBadge = screen.getByTitle("Provider ID: qwen-provider");
+    expect(providerBadge).toHaveTextContent("Qwen Provider");
     expect(screen.getByText(/Route 不保存这些字段/)).toBeVisible();
     expect(screen.queryByText("openai_chat")).not.toBeInTheDocument();
     expect(screen.queryByText("openai_responses")).not.toBeInTheDocument();

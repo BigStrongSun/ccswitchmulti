@@ -354,8 +354,8 @@ export function CodexModelReasoningEditor({
                 ))}
               </select>
               <span className="text-muted-foreground">
-                即使 Provider 没有名为 max 的原生档位，也可将 Codex 的最大推理映射到
-                它确认支持的最高档位。
+                即使 Provider 没有名为 max 的原生档位，也可将 Codex
+                的最大推理映射到 它确认支持的最高档位。
               </span>
             </label>
             <label className="flex items-center gap-2 font-medium">
@@ -377,8 +377,8 @@ export function CodexModelReasoningEditor({
             </label>
             <p className="text-muted-foreground">
               这是 Codex V2 的编排模式，不是 Provider 原生推理档位。选择 Ultra
-              后，Codex 会主动决定是否委派 Sub-Agent；Provider 实际收到的是 max，
-              并使用上面的 max 映射。
+              后，Codex 会主动决定是否委派 Sub-Agent；Provider 实际收到的是
+              max， 并使用上面的 max 映射。
             </p>
             {completedMap.max ? (
               <p className="text-muted-foreground">

@@ -35,9 +35,13 @@ export function cacheHitRatePercent(
   cacheCreationTokens: number,
 ): number {
   const cacheableInput =
-    Math.max(inputTokens, 0) + Math.max(cacheCreationTokens, 0) + Math.max(cacheReadTokens, 0);
+    Math.max(inputTokens, 0) +
+    Math.max(cacheCreationTokens, 0) +
+    Math.max(cacheReadTokens, 0);
   if (cacheableInput <= 0) return 0;
-  return Number(((Math.max(cacheReadTokens, 0) / cacheableInput) * 100).toFixed(2));
+  return Number(
+    ((Math.max(cacheReadTokens, 0) / cacheableInput) * 100).toFixed(2),
+  );
 }
 
 export function UsageTrendChart({
