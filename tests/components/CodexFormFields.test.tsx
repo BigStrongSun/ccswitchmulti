@@ -506,6 +506,13 @@ describe("CodexFormFields local model routing", () => {
     );
     expect(screen.getByLabelText("qwen3.8推理能力来源")).toBeInTheDocument();
     expect(screen.queryByText(/Codex 推理能力（/)).not.toBeInTheDocument();
+    expect(
+      screen
+        .getByText("模型目录明细")
+        .compareDocumentPosition(
+          screen.getByRole("heading", { name: "模型推理能力" }),
+        ) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 
   it("lets automatic discovery become an editable user override for Ultra", async () => {
