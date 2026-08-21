@@ -71,3 +71,12 @@ python -X utf8 scripts/verify_third_party_hosted_web_search.py
 ## 当前不确定性
 
 当前日志只保留字段级脱敏摘要，不记录工具描述、参数、prompt 或密钥；这足以证明 CCSM 的工具投影边界，但不能证明 Qwen 服务端内部是否启用了 tool calling。后者需要 Qwen/vLLM 侧的服务日志或独立上游 function-call 对照。
+
+## 认证根因修复后的安装态复核（2026-08-21）
+
+- 提交 `2c41f638` 修复 hosted tool 凭据来源：只有 native Codex 官方路由允许复用入站真实 Bearer；第三方路由拒绝 `PROXY_MANAGED`/第三方 API key 作为 ChatGPT OAuth，并回退 CCSM 托管 OAuth。
+- 新构建 `CCSwitchMulti_3.19.2-9_x64-setup.exe` 的 SHA-256 为 `EF80037B1E5662C7DE9051F8067F588E59ADCF3ADD9F66202D2E7DD95B23DB33`；事务 `ccsm-20260821-135500-70ff5151640c4a70bbb62be77f60f5e9` 成功，新 PID `5952`，无回滚错误，`127.0.0.1:15721/health` 返回 `200`。
+- Qwen canary 仍为 HTTP `200`、无 `response.web_search_call.*`、无最终 marker；其 CCSM 日志只显示第三方上游请求成功（`upstream_status=200`），未再出现 hosted tool 对 OpenAI 的 `401`。
+- DeepSeek V4 Pro canary 通过，仍包含 `response.web_search_call.in_progress/searching/completed` 和最终 marker `CCSM_THIRD_PARTY_HOSTED_SEARCH_OK`。
+
+因此，认证修复已在安装态生效；当前剩余的 Qwen 失败不能再归因于 CCSM 误用 `PROXY_MANAGED`，而是 Qwen/vLLM 没有实际发起 function call。正式 release 仍需新版本号和 macOS/Linux 产物验收。

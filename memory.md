@@ -4001,3 +4001,5 @@
 - 根修：`source_codex_oauth_credentials` 现在只允许 `provider_uses_native_codex_auth(provider)` 的本机官方 Codex 路由复用入站真实 Bearer，并过滤 `PROXY_MANAGED`；第三方路由不再复用入站认证，直接回退 CCSM 托管 Codex OAuth（或显式环境 API key）。
 - 回归证据：新增“官方 native Bearer 可复用”“`PROXY_MANAGED` 被拒绝”“第三方 Bearer 不复用”三条测试；Rust 全量 `3254` tests 中 `3249 passed / 0 failed / 5 ignored`，`pnpm typecheck`、`cargo fmt --check`、`git diff --check` 均通过。
 - 仍需完成：提交后构建并事务安装新 canary，重跑真实 Qwen/DeepSeek hosted-search；版本号仍为 `3.19.2-9`，正式 release 还需新版本号、跨平台 macOS/Linux 产物和对应运行态验收。不能复用上游已有的官方 `v3.20.0` 标签。
+
+- 追加运行态证据：提交 `2c41f638` 构建的安装包 SHA-256 为 `EF80037B1E5662C7DE9051F8067F588E59ADCF3ADD9F66202D2E7DD95B23DB33`；事务 `ccsm-20260821-135500-70ff5151640c4a70bbb62be77f60f5e9` 成功，新 PID `5952`，`15721/health` 为 `200`。DeepSeek V4 Pro hosted-search canary 通过；Qwen3.8 仍无 function call，但日志确认上游 HTTP `200` 且未再出现 OpenAI hosted tool `401`，剩余问题属于 Qwen/vLLM 工具调用触发边界。
