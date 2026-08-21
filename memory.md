@@ -4058,3 +4058,10 @@
 - 仍需完成：提交后构建并事务安装新 canary，重跑真实 Qwen/DeepSeek hosted-search；版本号仍为 `3.19.2-9`，正式 release 还需新版本号、跨平台 macOS/Linux 产物和对应运行态验收。不能复用上游已有的官方 `v3.20.0` 标签。
 
 - 追加运行态证据：提交 `2c41f638` 构建的安装包 SHA-256 为 `EF80037B1E5662C7DE9051F8067F588E59ADCF3ADD9F66202D2E7DD95B23DB33`；事务 `ccsm-20260821-135500-70ff5151640c4a70bbb62be77f60f5e9` 成功，新 PID `5952`，`15721/health` 为 `200`。DeepSeek V4 Pro hosted-search canary 通过；Qwen3.8 仍无 function call，但日志确认上游 HTTP `200` 且未再出现 OpenAI hosted tool `401`，剩余问题属于 Qwen/vLLM 工具调用触发边界。
+
+# 2026-08-21 v3.19.2-10 发布链路卡住后的处理
+
+- `main`/`fork/main` 与 tag `v3.19.2-10` 均指向 `fef82c8f`，版本提交包含 hosted-search 认证根修和“成功但未产生 hosted tool call”诊断；本地工作树仅有未跟踪 `.tmp/`。
+- GitHub Actions run `32458164107` 的 Linux x64/ARM64 job 已成功，但 Windows x64、Windows ARM64 和 macOS job 从 `2026-08-21T07:20Z` 长时间停在构建步骤，明显超过上一版 `v3.19.2-9` 约 56 分钟的完整耗时；当时 Release 尚未创建，`/releases/latest` 仍为 `v3.19.2-9`。
+- 已提交取消旧 run，并通过 `gh run rerun ... --failed` 请求重跑；GitHub API 随后出现连接超时，重跑 attempt、Release 资产和 `latest.json` 仍需网络恢复后确认。若只重跑失败 job 导致汇总 job 被跳过，应改为完整 rerun 或重新推送同一 tag 的等价 release 流程。
+- 发布完成的必要验收顺序：五个构建 job 全部成功 -> `Publish GitHub Release` 成功 -> Release 为非 draft/非 prerelease 且 latest 切到 `v3.19.2-10` -> 六个平台 updater 资产及 `.sig` 存在且 `latest.json` 覆盖全部平台 -> 对 Windows 安装包/运行态健康端口和第三方 hosted-search canary 做最终确认。未完成这些步骤前不能宣称 release 已交付。
