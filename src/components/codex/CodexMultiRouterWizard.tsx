@@ -2317,8 +2317,16 @@ export function CodexMultiRouterWizard({
                     <div className="mt-1 space-y-1 text-xs leading-5">
                       {aliasSelectionIssues.map((issue) => (
                         <div key={`${issue.routeId}:${issue.alias}`}>
-                          Route {issue.routeId} 的“{issue.alias}”→“
-                          {issue.canonicalModel}”：{issue.reason}
+                          Route {issue.routeLabel || issue.routeId}
+                          {issue.routeLabel &&
+                          issue.routeLabel !== issue.routeId
+                            ? `（${issue.routeId}）`
+                            : ""}
+                          {issue.providerName
+                            ? ` / Provider ${issue.providerName}`
+                            : ""}
+                          的“{issue.alias}”→“{issue.canonicalModel}”：
+                          {issue.reason}
                         </div>
                       ))}
                     </div>

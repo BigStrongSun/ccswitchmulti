@@ -1,5 +1,6 @@
 use crate::codex_multirouter::schema::{
     validate_v2, CodexModelSelection, CodexRouteAuthPolicy, CodexRoutingConfigV2,
+    CodexRoutingRouteV2,
 };
 use crate::proxy::json_canonical::{canonical_json_string, short_sha256_hex};
 use crate::Provider;
@@ -90,6 +91,7 @@ struct ModelCandidate<'a> {
     route_index: usize,
     route_id: &'a str,
     provider: &'a Provider,
+    visible_model: String,
     canonical_model: String,
     model_entry: &'a Value,
 }
@@ -121,7 +123,10 @@ pub fn compile_v2(
         let explicit_aliases = route
             .aliases
             .iter()
-            .filter(|(_, target)| target.eq_ignore_ascii_case(&candidate.canonical_model))
+            .filter(|(_, target)| {
+                target.eq_ignore_ascii_case(&candidate.canonical_model)
+                    || target.eq_ignore_ascii_case(&candidate.visible_model)
+            })
             .map(|(alias, _)| alias.trim().to_string())
             .filter(|alias| !alias.is_empty())
             .collect::<Vec<_>>();
@@ -220,8 +225,9 @@ fn collect_candidates<'a>(
                 .ok_or_else(|| CodexRoutingCompileError {
                     code: "target_provider_missing".to_string(),
                     message: format!(
-                        "target provider `{}` does not exist",
-                        route.target_provider_id
+                        "route {} targets provider `{}` which does not exist",
+                        route_display(route),
+                        route.target_provider_id,
                     ),
                 })?;
         let entries = provider_model_entries(provider);
@@ -235,24 +241,29 @@ fn collect_candidates<'a>(
             ),
         };
         let mut found = HashSet::new();
+        let mut seen_canonical = HashSet::new();
         for model_entry in entries {
-            let Some(canonical_model) = model_name(model_entry) else {
+            let Some(visible_model) = model_name(model_entry) else {
                 continue;
             };
+            let canonical_model = upstream_model(model_entry, &visible_model);
+            let visible_key = visible_model.to_ascii_lowercase();
             let canonical_key = canonical_model.to_ascii_lowercase();
-            if selected
-                .as_ref()
-                .is_some_and(|models| !models.contains(&canonical_key))
-            {
+            if selected.as_ref().is_some_and(|models| {
+                !models.contains(&canonical_key) && !models.contains(&visible_key)
+            }) {
                 continue;
             }
-            if !found.insert(canonical_key) {
+            if !seen_canonical.insert(canonical_key.clone()) {
                 continue;
             }
+            found.insert(visible_key);
+            found.insert(canonical_key);
             candidates.push(ModelCandidate {
                 route_index,
                 route_id: &route.id,
                 provider,
+                visible_model,
                 canonical_model,
                 model_entry,
             });
@@ -263,8 +274,9 @@ fn collect_candidates<'a>(
                 return Err(CodexRoutingCompileError {
                     code: "selected_model_missing".to_string(),
                     message: format!(
-                        "route `{}` selects model `{missing}` which is not in provider `{}`",
-                        route.id, provider.id
+                        "route {} selects model `{missing}` which is not in provider {}",
+                        route_display(route),
+                        provider_display(provider),
                     ),
                 });
             }
@@ -278,13 +290,37 @@ fn collect_candidates<'a>(
             return Err(CodexRoutingCompileError {
                 code: "alias_target_missing".to_string(),
                 message: format!(
-                    "route `{}` aliases model `{missing_target}` which is not selected from provider `{}`",
-                    route.id, provider.id
+                    "route {} aliases model `{missing_target}` which is not selected from provider {}",
+                    route_display(route),
+                    provider_display(provider),
                 ),
             });
         }
     }
     Ok(candidates)
+}
+
+fn route_display(route: &CodexRoutingRouteV2) -> String {
+    match route
+        .label
+        .as_deref()
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+    {
+        Some(label) if !label.eq_ignore_ascii_case(route.id.trim()) => {
+            format!("`{label}` (id `{}`)", route.id)
+        }
+        _ => format!("`{}`", route.id),
+    }
+}
+
+fn provider_display(provider: &Provider) -> String {
+    match provider.name.trim() {
+        name if !name.is_empty() && !name.eq_ignore_ascii_case(provider.id.trim()) => {
+            format!("`{name}` (id `{}`)", provider.id)
+        }
+        _ => format!("`{}`", provider.id),
+    }
 }
 
 fn provider_model_entries(provider: &Provider) -> Vec<&Value> {
@@ -349,11 +385,11 @@ fn automatic_visible_model(
     if collision_count <= 1
         || (canonical_owner_count == 1 && is_canonical_provider(candidate.provider))
     {
-        return candidate.canonical_model.clone();
+        return candidate.visible_model.clone();
     }
     format!(
         "{}-{}",
-        candidate.canonical_model,
+        candidate.visible_model,
         provider_name_suffix(candidate.provider)
     )
 }
@@ -903,6 +939,43 @@ mod tests {
     }
 
     #[test]
+    fn aliases_accept_upstream_model_ids_from_provider_catalog() {
+        let relay = provider(
+            "5626e6b9-33cb-4c3b-8d16-af8176e16209",
+            "DeepSeek Relay",
+            "openai_responses",
+            json!([{
+                "model": "deepseek-v4-flash",
+                "upstreamModel": "deepseek-v4-flash-0731"
+            }]),
+        );
+        let mut relay_route = route(
+            "router-5626e6b9-33cb-4c3b-8d16-af8176e16209",
+            &relay.id,
+            CodexModelSelection::All,
+        );
+        relay_route.aliases.insert(
+            "deepseek-v4-flash-0731".to_string(),
+            "deepseek-v4-flash-0731".to_string(),
+        );
+
+        let compiled = compile(&plan(vec![relay_route]), [relay]);
+
+        assert_eq!(
+            compiled.model_catalog[0].visible_model,
+            "deepseek-v4-flash-0731"
+        );
+        assert_eq!(
+            compiled.model_catalog[0].canonical_model,
+            "deepseek-v4-flash-0731"
+        );
+        assert_eq!(
+            compiled.model_catalog[0].upstream_model,
+            "deepseek-v4-flash-0731"
+        );
+    }
+
+    #[test]
     fn persisted_alias_does_not_follow_provider_rename() {
         let relay = provider(
             "relay",
@@ -1081,6 +1154,7 @@ mod tests {
             json!([{"model": "qwen3.8"}]),
         );
         let mut route = route("router-qwen", "qwen", CodexModelSelection::All);
+        route.label = Some("Qwen relay".to_string());
         route
             .aliases
             .insert("ghost".to_string(), "missing-model".to_string());
@@ -1090,6 +1164,8 @@ mod tests {
             .expect_err("unknown alias target must not be discarded");
 
         assert_eq!(error.code, "alias_target_missing");
+        assert!(error.message.contains("Qwen relay"));
+        assert!(error.message.contains("Qwen"));
     }
 
     #[test]

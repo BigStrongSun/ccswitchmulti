@@ -204,7 +204,20 @@ pub fn validate_v2(
                 );
             }
             for target in route.aliases.values() {
-                if !selected.contains(target.trim()) {
+                let Some(provider) = providers.get(route.target_provider_id.trim()) else {
+                    if !selected.contains(target.trim()) {
+                        push_issue(
+                            &mut issues,
+                            "alias_target_not_selected",
+                            Some(route.id.clone()),
+                            "alias target is outside the include selection",
+                        );
+                    }
+                    continue;
+                };
+                if !selected.iter().any(|selected_model| {
+                    provider_models_equivalent(provider, selected_model, target)
+                }) {
                     push_issue(
                         &mut issues,
                         "alias_target_not_selected",
@@ -236,6 +249,36 @@ pub fn validate_v2(
     } else {
         Err(issues)
     }
+}
+
+fn provider_models_equivalent(provider: &Provider, left: &str, right: &str) -> bool {
+    let left = left.trim().to_ascii_lowercase();
+    let right = right.trim().to_ascii_lowercase();
+    if left.is_empty() || right.is_empty() {
+        return false;
+    }
+    if left == right {
+        return true;
+    }
+    let Some(models) = provider
+        .settings_config
+        .get("modelCatalog")
+        .or_else(|| provider.settings_config.get("model_catalog"))
+        .and_then(|catalog| catalog.get("models"))
+        .and_then(Value::as_array)
+    else {
+        return false;
+    };
+    models.iter().any(|model| {
+        let identities = ["model", "upstreamModel", "upstream_model"]
+            .into_iter()
+            .filter_map(|field| model.get(field).and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_ascii_lowercase)
+            .collect::<HashSet<_>>();
+        identities.contains(&left) && identities.contains(&right)
+    })
 }
 
 fn push_issue(
@@ -355,6 +398,44 @@ mod tests {
 
         assert!(codes.contains(&"route_id_duplicate".to_string()));
         assert!(codes.contains(&"default_route_missing".to_string()));
+    }
+
+    #[test]
+    fn validation_accepts_visible_selection_with_upstream_alias_target() {
+        let relay = Provider::with_id(
+            "qwen".to_string(),
+            "Qwen".to_string(),
+            json!({
+                "modelCatalog": {
+                    "models": [{
+                        "model": "deepseek-v4-flash",
+                        "upstreamModel": "deepseek-v4-flash-0731"
+                    }]
+                }
+            }),
+            None,
+        );
+        let providers = [("qwen".to_string(), relay)].into_iter().collect();
+        let value = valid_plan(json!({
+            "id": "router-qwen",
+            "targetProviderId": "qwen",
+            "modelSelection": {
+                "mode": "include",
+                "models": ["deepseek-v4-flash"]
+            },
+            "aliases": {
+                "deepseek-v4-flash-0731": "deepseek-v4-flash-0731"
+            },
+            "authPolicy": {"source": "provider_config"}
+        }));
+        let CodexRoutingDocument::V2(plan) = CodexRoutingDocument::parse(&value).expect("parse v2")
+        else {
+            panic!("expected v2");
+        };
+
+        validate_v2(&plan, &providers).expect(
+            "visible catalog selection and upstream alias target should refer to the same model",
+        );
     }
 
     #[test]

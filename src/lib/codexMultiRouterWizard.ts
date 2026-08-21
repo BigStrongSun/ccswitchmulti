@@ -623,7 +623,7 @@ export function inferWizardRoutePrefixes(provider: Provider): string[] {
   const models = readWizardModelCatalog(provider)
     .filter(isWizardModelEnabled)
     .map((model) =>
-    model.model.toLowerCase(),
+      model.model.toLowerCase(),
     );
   const has = (value: string) =>
     text.includes(value) || models.some((model) => model.startsWith(value));
@@ -933,6 +933,8 @@ function canonicalWizardModelIds(provider: Provider): string[] {
 
 export interface WizardRouteAliasSelectionIssue {
   routeId: string;
+  routeLabel?: string;
+  providerName?: string;
   alias: string;
   canonicalModel: string;
   reason: string;
@@ -942,7 +944,7 @@ export function collectWizardRouteAliasSelectionIssues(
   routes: Array<
     Pick<
       CodexRoutingRouteV2,
-      "id" | "targetProviderId" | "modelSelection" | "aliases"
+      "id" | "label" | "targetProviderId" | "modelSelection" | "aliases"
     >
   >,
   providers: Provider[],
@@ -973,6 +975,8 @@ export function collectWizardRouteAliasSelectionIssues(
       if (!canonicalSet.has(canonicalKey)) {
         issues.push({
           routeId: route.id,
+          routeLabel: route.label,
+          providerName: provider.name,
           alias,
           canonicalModel,
           reason: "别名目标已从 Provider 模型目录移除或重命名。",
@@ -980,6 +984,8 @@ export function collectWizardRouteAliasSelectionIssues(
       } else if (!selectedSet.has(canonicalKey)) {
         issues.push({
           routeId: route.id,
+          routeLabel: route.label,
+          providerName: provider.name,
           alias,
           canonicalModel,
           reason: "别名目标不在当前 Route 的 canonical selection 中。",
