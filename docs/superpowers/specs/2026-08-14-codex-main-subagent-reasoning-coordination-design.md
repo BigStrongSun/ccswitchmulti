@@ -131,10 +131,22 @@ CCSM 当前 V2 与此原生模型冲突：其问卷 `auto_effort()` 根据任务
 
 - Codex 协议枚举接受 `ultra`，部分 Codex 模型 catalog 也会声明它；
 - `ultra` 还与 Codex 主动多 Agent 行为有关；
-- DeepSeek 当前官方映射只覆盖 low/medium/high/xhigh/max，没有声明 ultra；
-- 因此不能预设 `ultra -> max`。只有 Provider 官方声明、Codex 原生目录或经过真实请求验证的 Adapter 映射才能把 ultra 加入该模型的 `supported_reasoning_levels`。
+- Codex 官方请求边界将内部 `ultra` 固定编码为 `reasoning.effort=max`；只有
+  `multi_agent_version=v2` 时，Ultra 同时进入 proactive mode，注入允许主动
+  委派 Sub-Agent 的 developer context；V1 的 Ultra 只会产生 `max`，不会主动委派；
+- 因此 `ultra -> max` 是 Codex 产品层的固定转换，不是 Provider 原生映射；
+- DeepSeek、Qwen/vLLM 等第三方 Provider 的能力声明只记录实际接受的
+  `low/high/max`（或其它）值，绝不因启用 Ultra 而把 `ultra` 写进
+  `providerAcceptedEfforts`；
+- CCSM 另以 `codexUltraOrchestration.enabled` 表示用户已确认希望该模型参与
+  Codex V2 Ultra 编排。启用的前提是存在经过校验的 `max -> Provider` 映射；
+  它会把 `ultra` 加入 Codex catalog 的 `supported_reasoning_levels`，并在解析
+  结果中记录 `ultra -> max/最高兼容目标`。
 
-是否为第三方模型提供“Codex Ultra 编排 + Provider 最高 effort”的组合能力，是后续产品策略，不是自动获取出的 Provider 原生能力。
+这使第三方模型可以使用“Codex Ultra 编排 + Provider 最高兼容 effort”，但它是
+用户显式配置的 Codex 产品能力，不是自动发现出的 Provider 原生能力。界面必须把
+它显示为独立的「Ultra（最大推理 + 主动 Sub-Agent 委派）」入口，并展示实际出站
+路径；不得把它混入 Provider 原生档位复选框。
 
 ## 7. UI 设计
 

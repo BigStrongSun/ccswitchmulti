@@ -361,6 +361,11 @@ export interface CodexModelReasoningCapability {
   providerKey?: string;
   /** 模型 revision（schema v2）。易变元数据，不进入能力指纹。 */
   modelRevision?: string;
+  /**
+   * Codex V2 产品层的复合模式：最大推理 + 主动 Sub-Agent 委派。
+   * 它不会把 literal `ultra` 传给 Provider；Codex 出站固定使用 `max`。
+   */
+  codexUltraOrchestration?: { enabled: boolean };
 }
 
 export interface CodexCatalogModel {

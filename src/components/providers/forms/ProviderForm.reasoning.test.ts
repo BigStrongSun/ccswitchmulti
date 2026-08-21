@@ -195,4 +195,39 @@ describe("Codex catalog reasoning capability persistence", () => {
       }),
     ).not.toThrow();
   });
+
+  it("rejects Codex Ultra orchestration when the Provider cannot receive max", () => {
+    expect(() =>
+      validateCodexReasoningCapabilityDraft({
+        supported: true,
+        supportedEfforts: ["low", "high"],
+        defaultEffort: "high",
+        disableAllowed: false,
+        upstream: {
+          format: "string",
+          parameter: "reasoning_effort",
+          effortMap: { low: "low", high: "high" },
+        },
+        source: "user",
+        codexUltraOrchestration: { enabled: true },
+      } as unknown as CodexModelReasoningCapability),
+    ).toThrow(/Ultra.*max/i);
+  });
+
+  it("rejects Ultra as a Provider-native effort", () => {
+    expect(() =>
+      validateCodexReasoningCapabilityDraft({
+        supported: true,
+        supportedEfforts: ["high", "ultra"],
+        defaultEffort: "high",
+        disableAllowed: false,
+        upstream: {
+          format: "string",
+          parameter: "reasoning_effort",
+          effortMap: { high: "high", ultra: "high" },
+        },
+        source: "user",
+      }),
+    ).toThrow(/Codex-only/i);
+  });
 });

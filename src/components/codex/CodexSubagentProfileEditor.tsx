@@ -1794,6 +1794,7 @@ function ReasoningCapabilitySummary({
         : policy.policy === "fixed"
           ? `固定 ${policy.effort}；主 Agent 无法覆盖`
           : "关闭推理；上游将使用已确认的 Provider 关闭语义";
+  const ultraEnabled = capability.codexUltraOrchestrationEnabled;
 
   return (
     <div className="space-y-1 rounded-md border border-indigo-200 bg-indigo-50/70 p-3 text-xs text-indigo-950 dark:border-indigo-500/35 dark:bg-indigo-950/20 dark:text-indigo-100">
@@ -1811,6 +1812,18 @@ function ReasoningCapabilitySummary({
       <p>模型默认：{capability.providerDefaultEffort ?? "未声明"}</p>
       <p>允许关闭：{capability.disableAllowed ? "是" : "否"}</p>
       {mappings ? <p>映射：{mappings}</p> : null}
+      {ultraEnabled ? (
+        <p>
+          Ultra 已启用：这是 Codex V2 的“最大推理 + 主动 Sub-Agent 委派”模式；
+          第三方 Provider 实际接收 {capability.effortMap.ultra ?? "max"}。
+        </p>
+      ) : (
+        <p>
+          Ultra 未启用：若父 Agent 使用
+          Ultra，当前角色应使用模型默认或固定兼容档位，
+          或在该模型的推理能力中启用 Codex Ultra 编排。
+        </p>
+      )}
       <p className="font-medium">{behavior}</p>
       {capability.supportKind === "unknown" ? (
         <p className="font-medium text-rose-700 dark:text-rose-300">

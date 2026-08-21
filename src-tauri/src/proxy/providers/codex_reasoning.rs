@@ -7,9 +7,19 @@ use std::{
     str::FromStr,
 };
 
-const VALID_EFFORTS: &[&str] = &[
+/// `ultra` 是 Codex 产品层的编排开关，绝不能由 Provider capability 持久化为
+/// 原生 effort，也不能作为持久化映射的输入/输出。
+const VALID_PROVIDER_EFFORTS: &[&str] =
+    &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/// Codex resolver 的内部词表。只有 resolver 在已验证 max 路径上才能生成 Ultra。
+const VALID_CODEX_EFFORTS: &[&str] = &[
     "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
 ];
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -137,6 +147,9 @@ pub struct ResolvedSubagentReasoningCapability {
     pub provider_default_effort: Option<CodexReasoningEffort>,
     pub disable_allowed: bool,
     pub effort_map: BTreeMap<CodexReasoningEffort, CodexReasoningEffort>,
+    /// 仅在 Codex V2 中有编排语义；Provider 请求仍使用 max。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub codex_ultra_orchestration_enabled: bool,
     /// 来源能力的稳定指纹；无来源（unknown 兜底）时为空串。
     ///
     /// P2 起 catalog / 请求转换 / Sub-Agent 各层投影必须携带同一指纹，
@@ -151,6 +164,17 @@ pub struct CodexModelReasoningUpstream {
     pub parameter: String,
     #[serde(default)]
     pub effort_map: HashMap<String, String>,
+}
+
+/// Codex 产品层的 Ultra 编排能力。
+///
+/// Ultra 不会作为字符串传给第三方 Provider：Codex 在出站 Responses 请求前
+/// 将它固定降为 `max`，同时（仅 V2）启用主动 Sub-Agent 委派。因此它与
+/// Provider 原生 reasoning effort 必须分开持久化。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexUltraOrchestrationCapability {
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -190,6 +214,9 @@ pub struct CodexModelReasoningCapability {
     /// 模型 revision（schema v2）。易变元数据，不进入能力指纹。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_revision: Option<String>,
+    /// 可选的 Codex V2 Ultra 编排开关；不改变 Provider 原生能力声明。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_ultra_orchestration: Option<CodexUltraOrchestrationCapability>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -262,9 +289,9 @@ impl CodexModelReasoningCapability {
         if self
             .supported_efforts
             .iter()
-            .any(|effort| !VALID_EFFORTS.contains(&effort.as_str()))
+            .any(|effort| !VALID_PROVIDER_EFFORTS.contains(&effort.as_str()))
         {
-            return Err("supportedEfforts contains an unknown effort".to_string());
+            return Err("supportedEfforts contains an unknown or Codex-only effort".to_string());
         }
         if let Some(default_effort) = self.default_effort.as_deref() {
             if !self
@@ -298,9 +325,10 @@ impl CodexModelReasoningCapability {
             }
         }
         if self.upstream.effort_map.iter().any(|(source, target)| {
-            !VALID_EFFORTS.contains(&source.as_str()) || !VALID_EFFORTS.contains(&target.as_str())
+            !VALID_PROVIDER_EFFORTS.contains(&source.as_str())
+                || !VALID_PROVIDER_EFFORTS.contains(&target.as_str())
         }) {
-            return Err("effortMap contains an unknown effort".to_string());
+            return Err("effortMap contains an unknown or Codex-only effort".to_string());
         }
         if self.upstream.effort_map.values().any(|target| {
             !self
@@ -309,6 +337,21 @@ impl CodexModelReasoningCapability {
                 .any(|supported| supported == target)
         }) {
             return Err("effortMap target must be present in supportedEfforts".to_string());
+        }
+        if self
+            .codex_ultra_orchestration
+            .as_ref()
+            .is_some_and(|ultra| ultra.enabled)
+        {
+            let max_target = self.upstream.effort_map.get("max").map(String::as_str);
+            let has_usable_max_path = max_target
+                .is_some_and(|target| self.supported_efforts.iter().any(|effort| effort == target));
+            if !has_usable_max_path {
+                return Err(
+                    "Codex Ultra orchestration requires a valid max-to-Provider effortMap path"
+                        .to_string(),
+                );
+            }
         }
         if self.effective_support_status() == ReasoningSupportStatus::ConfirmedSupported
             && self.effective_control_kind() == ReasoningControlKind::Graded
@@ -351,7 +394,7 @@ pub fn capability_fingerprint(capability: &CodexModelReasoningCapability) -> Str
         .iter()
         .map(|(source, target)| (source.as_str(), target.as_str()))
         .collect();
-    let canonical = serde_json::json!({
+    let mut canonical = serde_json::json!({
         "supportStatus": capability.effective_support_status(),
         "controlKind": capability.effective_control_kind(),
         "supportedEfforts": efforts,
@@ -364,6 +407,12 @@ pub fn capability_fingerprint(capability: &CodexModelReasoningCapability) -> Str
         },
         "outputFormat": capability.output_format,
     });
+    // 缺省 Ultra 配置与旧 schema 的运行语义相同，必须保持既有指纹，避免
+    // 仅升级 CCSM 就触发无意义的 catalog / role 重写。
+    if let Some(ultra) = &capability.codex_ultra_orchestration {
+        canonical["codexUltraOrchestration"] =
+            serde_json::to_value(ultra).expect("Ultra orchestration capability must serialize");
+    }
     let digest = Sha256::digest(canonical.to_string().as_bytes());
     format!("{digest:x}")
 }
@@ -421,7 +470,7 @@ pub fn repair_invalid_reasoning_capabilities(
                 values
                     .iter()
                     .filter_map(Value::as_str)
-                    .filter(|effort| VALID_EFFORTS.contains(effort))
+                    .filter(|effort| VALID_PROVIDER_EFFORTS.contains(effort))
                     .filter(|effort| seen.insert((*effort).to_string()))
                     .map(|effort| Value::String(effort.to_string()))
                     .collect::<Vec<_>>()
@@ -442,7 +491,7 @@ pub fn repair_invalid_reasoning_capabilities(
             if let Some(first) = supported_names
                 .iter()
                 .min_by_key(|effort| {
-                    VALID_EFFORTS
+                    VALID_PROVIDER_EFFORTS
                         .iter()
                         .position(|candidate| candidate == &effort.as_str())
                         .unwrap_or(usize::MAX)
@@ -461,7 +510,7 @@ pub fn repair_invalid_reasoning_capabilities(
             .and_then(Value::as_object_mut)
         {
             effort_map.retain(|source, target| {
-                VALID_EFFORTS.contains(&source.as_str())
+                VALID_PROVIDER_EFFORTS.contains(&source.as_str())
                     && target
                         .as_str()
                         .is_some_and(|target| supported_names.contains(target))
@@ -492,6 +541,7 @@ pub fn resolve_subagent_reasoning_capability(
             provider_default_effort: None,
             disable_allowed: false,
             effort_map: BTreeMap::new(),
+            codex_ultra_orchestration_enabled: false,
             fingerprint: String::new(),
         };
     };
@@ -527,13 +577,28 @@ pub fn resolve_subagent_reasoning_capability(
     }
 
     let selectable_set = provider_effort_set.iter().copied().collect::<HashSet<_>>();
-    let codex_selectable_efforts = CodexReasoningEffort::ORDERED
+    let codex_selectable_efforts: Vec<_> = CodexReasoningEffort::ORDERED
         .into_iter()
         // P2：none 先按 disable capability 处理，不作为普通正向 effort 暴露给
         // Codex 选择（UI/spawn_agent 的可选档位不含 none；关闭走 disable 路径）。
         .filter(|effort| *effort != CodexReasoningEffort::None)
         .filter(|effort| selectable_set.contains(effort))
         .collect();
+    let mut codex_selectable_efforts = codex_selectable_efforts;
+    if capability
+        .codex_ultra_orchestration
+        .as_ref()
+        .is_some_and(|ultra| ultra.enabled)
+    {
+        // Codex emits `max` at the Provider boundary for internal Ultra. Keep
+        // the mapping explicit in the resolved contract so UI, catalog and
+        // generated roles can explain the same behavior without claiming the
+        // Provider accepts a literal `ultra` effort.
+        if let Some(max_target) = effort_map.get(&CodexReasoningEffort::Max).copied() {
+            effort_map.insert(CodexReasoningEffort::Ultra, max_target);
+            codex_selectable_efforts.push(CodexReasoningEffort::Ultra);
+        }
+    }
     let support_kind = match capability.effective_support_status() {
         ReasoningSupportStatus::ConfirmedUnsupported => ReasoningSupportKind::Unsupported,
         ReasoningSupportStatus::Unknown => ReasoningSupportKind::Unknown,
@@ -567,6 +632,10 @@ pub fn resolve_subagent_reasoning_capability(
             .and_then(|value| value.parse().ok()),
         disable_allowed: capability.disable_allowed,
         effort_map,
+        codex_ultra_orchestration_enabled: capability
+            .codex_ultra_orchestration
+            .as_ref()
+            .is_some_and(|ultra| ultra.enabled),
         fingerprint: capability_fingerprint(capability),
     }
 }
@@ -622,6 +691,7 @@ pub fn builtin_reasoning_capability_for_model(
         fetched_at: None,
         provider_key: None,
         model_revision: None,
+        codex_ultra_orchestration: None,
     })
 }
 
@@ -699,7 +769,7 @@ pub fn official_reasoning_capability_for_model(
             .and_then(Value::as_str)
             .is_some_and(|slug| slug.eq_ignore_ascii_case(model))
     })?;
-    let levels: Vec<String> = entry
+    let mut levels: Vec<String> = entry
         .get("supported_reasoning_levels")
         .and_then(Value::as_array)?
         .iter()
@@ -711,16 +781,28 @@ pub fn official_reasoning_capability_for_model(
                 .map(ToString::to_string)
         })
         .filter(|level| !level.is_empty())
+        .filter(|level| VALID_CODEX_EFFORTS.contains(&level.as_str()))
         .collect();
     if levels.is_empty() {
         return None;
     }
+    // 官方目录里的 ultra 同样是 Codex 产品层的编排语义：请求边界仍会变成
+    // max。因此将其从 Provider 原生档位剥离，避免下游把 ultra 透传给 API。
+    let codex_ultra_enabled = levels.iter().any(|level| level == "ultra");
+    levels.retain(|level| level != "ultra");
     let default_effort = entry
         .get("default_reasoning_level")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|level| !level.is_empty())
-        .map(ToString::to_string);
+        .map(ToString::to_string)
+        .and_then(|default_effort| {
+            if default_effort == "ultra" {
+                Some("max".to_string())
+            } else {
+                levels.contains(&default_effort).then_some(default_effort)
+            }
+        });
     let capability = CodexModelReasoningCapability {
         schema_version: Some(2),
         support_status: Some(ReasoningSupportStatus::ConfirmedSupported),
@@ -743,6 +825,8 @@ pub fn official_reasoning_capability_for_model(
         fetched_at: None,
         provider_key: None,
         model_revision: None,
+        codex_ultra_orchestration: codex_ultra_enabled
+            .then_some(CodexUltraOrchestrationCapability { enabled: true }),
     };
     capability.validate().ok()?;
     Some(capability)
@@ -793,7 +877,7 @@ mod tests {
                 "model": "private-model",
                 "reasoning": {
                     "supported": true,
-                    "supportedEfforts": ["low"],
+                    "supportedEfforts": ["low", "ultra"],
                     "defaultEffort": "high",
                     "disableAllowed": false,
                     "upstream": {"format": "string", "parameter": "reasoning_effort"},
@@ -852,6 +936,86 @@ mod tests {
         assert!(!resolved
             .codex_selectable_efforts
             .contains(&CodexReasoningEffort::Ultra));
+    }
+
+    #[test]
+    fn codex_ultra_orchestration_adds_ultra_without_claiming_provider_support() {
+        let mut capability = deepseek_capability();
+        let mut value = serde_json::to_value(&capability).expect("serialize fixture");
+        value["codexUltraOrchestration"] = json!({ "enabled": true });
+        capability = serde_json::from_value(value).expect("parse ultra-enabled fixture");
+
+        let resolved = resolve_subagent_reasoning_capability(Some(&capability));
+
+        assert_eq!(
+            resolved.provider_accepted_efforts,
+            efforts(&["low", "high", "max"]),
+            "Ultra is a Codex orchestration mode, not a Provider-native effort"
+        );
+        assert!(resolved
+            .codex_selectable_efforts
+            .contains(&CodexReasoningEffort::Ultra));
+        assert_eq!(
+            resolved.effort_map.get(&CodexReasoningEffort::Ultra),
+            Some(&CodexReasoningEffort::Max),
+            "Ultra must reach a third-party Provider through the verified max path"
+        );
+    }
+
+    #[test]
+    fn codex_ultra_orchestration_requires_a_usable_max_path() {
+        let mut capability = deepseek_capability();
+        capability.supported_efforts = vec!["low".to_string(), "high".to_string()];
+        capability.default_effort = Some("high".to_string());
+        capability.upstream.effort_map.remove("max");
+        let mut value = serde_json::to_value(&capability).expect("serialize fixture");
+        value["codexUltraOrchestration"] = json!({ "enabled": true });
+        let capability: CodexModelReasoningCapability =
+            serde_json::from_value(value).expect("parse ultra-enabled fixture");
+
+        assert!(
+            capability.validate().is_err(),
+            "enabling Codex Ultra without a Provider max path must be rejected before save"
+        );
+    }
+
+    #[test]
+    fn rejects_ultra_as_a_provider_native_effort_or_persisted_mapping() {
+        let mut capability = deepseek_capability();
+        capability.supported_efforts.push("ultra".to_string());
+        assert!(
+            capability.validate().is_err(),
+            "Ultra must be represented only by codexUltraOrchestration"
+        );
+
+        let mut capability = deepseek_capability();
+        capability
+            .upstream
+            .effort_map
+            .insert("ultra".to_string(), "max".to_string());
+        assert!(
+            capability.validate().is_err(),
+            "persisted Provider mappings must not accept Codex-only Ultra"
+        );
+    }
+
+    #[test]
+    fn official_ultra_default_is_normalized_to_max_before_provider_validation() {
+        let official_models = vec![json!({
+            "slug": "gpt-5.6-sol",
+            "supported_reasoning_levels": ["low", "high", "max", "ultra"],
+            "default_reasoning_level": "ultra"
+        })];
+
+        let capability = official_reasoning_capability_for_model("gpt-5.6-sol", &official_models)
+            .expect("official Ultra model capability");
+        assert_eq!(capability.supported_efforts, vec!["low", "high", "max"]);
+        assert_eq!(capability.default_effort.as_deref(), Some("max"));
+        assert_eq!(
+            capability.codex_ultra_orchestration,
+            Some(CodexUltraOrchestrationCapability { enabled: true })
+        );
+        assert!(capability.validate().is_ok());
     }
 
     #[test]

@@ -1,5 +1,25 @@
 # CC Switch Repository Memory
 
+## 2026-08-21 Codex Ultra 主线移植与边界收口
+
+- `bigstrongsun/ultra-orchestration` 不能直接 merge：它从 `475cd008` 分叉，而
+  `main` 已有后续 reasoning capability 和 MultiRouter SSOT 改动。实现改为从最新
+  main 选择性移植到 `bigstrongsun/ultra-main-integration`，避免回退主线校验。
+- `ultra` 仅是 Codex V2 的产品层编排：启用
+  `reasoning.codexUltraOrchestration.enabled` 后，Codex 可选 Ultra；Provider
+  边界仍固定使用 Codex `max`，再通过经验证的 `max -> Provider` 映射发送。没有
+  有效 max 映射时，前后端均拒绝保存；Provider 永远不会收到 literal `ultra`。
+- Provider 原生 capability 与持久化 effortMap 现在禁止 `ultra`，旧的手动声明或
+  探测快照会在修复路径中被移除。官方 catalog 的 `default_reasoning_level=ultra`
+  在生成 capability 时规范化为 `max`，因此不会因默认值脱离 Provider 原生集合而
+  降级为 unknown。
+- MultiRouter V1 从三个 reasoning catalog 字段剥离 Ultra，并将三个对应的
+  default 字段由 Ultra 规范化为仍可选的 max（没有可选档位时清除 default）。V1
+  不会对用户展示无法触发 proactive Sub-Agent 的 Ultra；V2 保留完整编排入口。
+- 验证：Rust `codex_reasoning` 23/23、V1 catalog 1/1、`codex_config` 205/205，
+  前端 reasoning 14/14、`pnpm typecheck`、`cargo fmt --check`、`git diff --check`
+  全部通过。当前未安装、未替换或停止正在运行的 CCSM，未发布 release。
+
 ## 2026-08-21 v3.19.2-10 安装态诊断收口
 
 - 主分支审计确认认证修复 `2c41f638`、hosted tool 诊断 `168a3fc6` 和版本发布提交

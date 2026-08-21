@@ -370,6 +370,7 @@ pub fn snapshot_to_capability(
         fetched_at: Some(snapshot.fetched_at.to_string()),
         provider_key: Some(snapshot.provider_key.clone()),
         model_revision: None,
+        codex_ultra_orchestration: None,
     };
 
     capability.validate().ok().map(|_| capability)
