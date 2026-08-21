@@ -336,7 +336,12 @@ function createRoutePolicyDraft(candidate: RouteCandidate): RoutePolicyDraft {
   return {
     route: {
       ...route,
-      label: route.label ?? candidate.provider?.name ?? "",
+      label: routeSummaryDisplayName(
+        route.label,
+        route.id,
+        candidate.provider?.name,
+        "",
+      ),
       modelSelection: route.modelSelection ?? { mode: "all" },
       matchPrefixes: route.matchPrefixes ?? route.match?.prefixes ?? [],
       aliases: route.aliases ?? route.upstream?.modelMap ?? {},
@@ -1212,9 +1217,40 @@ function routeDisplayName(
 ): string {
   const label = route.label?.trim();
   const routeId = route.id?.trim();
-  if (label && label !== routeId) return label;
+  if (label && (!routeId || label.toLowerCase() !== routeId.toLowerCase())) {
+    return label;
+  }
   const providerName = routeTargetProvider(route, providersById)?.name?.trim();
   return providerName || label || routeId || fallback;
+}
+
+export function routeSummaryDisplayName(
+  label: string | null | undefined,
+  routeId: string | null | undefined,
+  providerName: string | null | undefined,
+  fallback = "未命名规则",
+): string {
+  const normalizedLabel = label?.trim();
+  const normalizedRouteId = routeId?.trim();
+  if (
+    normalizedLabel &&
+    (!normalizedRouteId ||
+      normalizedLabel.toLowerCase() !== normalizedRouteId.toLowerCase())
+  ) {
+    return normalizedLabel;
+  }
+  return (
+    providerName?.trim() || normalizedLabel || normalizedRouteId || fallback
+  );
+}
+
+function routeDisplayTitle(
+  routeName: string,
+  routeId: string | null | undefined,
+): string | undefined {
+  const normalizedRouteId = routeId?.trim();
+  if (!normalizedRouteId || routeName === normalizedRouteId) return undefined;
+  return `${routeName}（ID: ${normalizedRouteId}）`;
 }
 
 /// 把 provider 或 route 标识清理成稳定的路由 ID 片段；空值回退到 fallback，避免保存后出现不可选规则。
@@ -2419,7 +2455,12 @@ function applyRouteProtocolMetadata(
 ) {
   if (!entry) return;
   row.routeId = entry.route.id?.trim() || null;
-  row.routeLabel = entry.route.label?.trim() || null;
+  row.routeLabel = routeSummaryDisplayName(
+    entry.route.label,
+    entry.route.id,
+    entry.provider.name,
+    "",
+  );
   const summary = routeSummaries.get(routeEntryStatusKey(entry));
   if (!summary) return;
   row.configuredProtocol ??= summary.configuredProtocol;
@@ -3759,7 +3800,10 @@ function OverviewTab({
                 key={provider.id}
                 className="group rounded-lg border border-blue-200 bg-card p-4 text-left transition hover:border-blue-400 hover:bg-blue-50 hover:shadow-[0_0_0_1px_rgba(96,165,250,0.25)] dark:border-blue-600/40 dark:bg-slate-950/40 dark:hover:bg-blue-950/30 dark:hover:shadow-[0_0_0_1px_rgba(96,165,250,0.35)]"
               >
-                <PlanCardContent provider={provider} />
+                <PlanCardContent
+                  provider={provider}
+                  providersById={providersById}
+                />
                 <div className="mt-3 flex flex-wrap gap-2">
                   <Button
                     type="button"
@@ -3877,6 +3921,12 @@ function SourcesTab({
   onEditPlan: (provider: Provider, detail?: string) => void;
   onSelectPlan: (provider: Provider) => void;
 }) {
+  const providersById = new Map(
+    [...routingPlans, ...modelSources].map((provider) => [
+      provider.id,
+      provider,
+    ]),
+  );
   return (
     <div className="grid gap-4 xl:grid-cols-[0.8fr_1.2fr]">
       <section className="rounded-lg border border-blue-200 bg-blue-50/70 p-4 dark:border-blue-700/40 dark:bg-blue-950/15">
@@ -3901,7 +3951,11 @@ function SourcesTab({
               key={provider.id}
               className="rounded-lg border border-blue-200 bg-card p-3 text-left transition hover:border-blue-400 hover:bg-blue-50 dark:border-blue-700/40 dark:bg-slate-950/40 dark:hover:bg-blue-950/30"
             >
-              <PlanCardContent provider={provider} compact />
+              <PlanCardContent
+                provider={provider}
+                providersById={providersById}
+                compact
+              />
               <div className="mt-3 flex flex-wrap gap-2">
                 <Button
                   type="button"
@@ -4038,7 +4092,15 @@ function SubagentsTab({
           <Bot className="h-4 w-4" />
           当前 MultiRouter
         </div>
-        <PlanCardContent provider={selectedPlan} compact />
+        <PlanCardContent
+          provider={selectedPlan}
+          providersById={
+            new Map(
+              selectedRoutes.map(({ provider }) => [provider.id, provider]),
+            )
+          }
+          compact
+        />
       </section>
       <SpawnAgentCandidatesPanel
         selectedPlan={selectedPlan}
@@ -4442,7 +4504,11 @@ function RoutesTab({
                       : "border-border bg-card text-foreground hover:border-blue-400 hover:bg-blue-50 dark:border-slate-700 dark:bg-slate-950/40 dark:hover:border-blue-500 dark:hover:bg-blue-950/20",
                   )}
                 >
-                  <PlanCardContent provider={provider} compact />
+                  <PlanCardContent
+                    provider={provider}
+                    providersById={providersById}
+                    compact
+                  />
                   <div className="mt-2 flex flex-wrap gap-2">
                     <Button
                       type="button"
@@ -5590,7 +5656,12 @@ function RouteCandidatePicker({
                   <span className="min-w-0">
                     <span className="flex min-w-0 flex-wrap items-center gap-2">
                       <span className="truncate text-sm font-semibold text-foreground dark:text-slate-100">
-                        {candidate.route.label || targetLabel}
+                        {routeSummaryDisplayName(
+                          candidate.route.label,
+                          candidate.route.id,
+                          candidate.provider?.name,
+                          targetLabel,
+                        )}
                       </span>
                       <Badge
                         className={cn(
@@ -7276,7 +7347,11 @@ function StatusTab({
                   <div className="min-w-0">
                     <div className="truncate">{row.providerName}</div>
                     <div className="truncate text-[11px] text-muted-foreground dark:text-slate-500">
-                      {row.routeLabel || row.routeId || "未命名规则"}
+                      {routeSummaryDisplayName(
+                        row.routeLabel,
+                        row.routeId,
+                        row.providerName,
+                      )}
                     </div>
                   </div>
                   <span className="truncate font-mono">{row.model}</span>
@@ -7992,7 +8067,19 @@ function DiagnosticsPanel({
                 />
                 <DetailRow
                   label="默认路由"
-                  value={diagnostics.routePlan.defaultRouteId ?? "未设置"}
+                  value={(() => {
+                    const defaultRoute =
+                      diagnostics.routePlan.routeSummaries.find(
+                        (route) =>
+                          route.id === diagnostics.routePlan.defaultRouteId,
+                      );
+                    return routeSummaryDisplayName(
+                      defaultRoute?.label,
+                      diagnostics.routePlan.defaultRouteId,
+                      defaultRoute?.targetProviderName,
+                      "未设置",
+                    );
+                  })()}
                 />
               </div>
             </div>
@@ -8046,10 +8133,12 @@ function DiagnosticsPanel({
                   className="grid grid-cols-[1fr_1fr_1fr_1fr_0.8fr] gap-2 border-t border-border px-3 py-2 text-xs text-foreground dark:border-slate-800 dark:text-slate-300"
                 >
                   <span className="truncate">
-                    {route.label ??
-                      route.targetProviderName ??
-                      route.id ??
-                      `规则 ${index + 1}`}
+                    {routeSummaryDisplayName(
+                      route.label,
+                      route.id,
+                      route.targetProviderName,
+                      `规则 ${index + 1}`,
+                    )}
                     {route.enabled ? "" : "（停用）"}
                   </span>
                   <span className="truncate">
@@ -8415,13 +8504,21 @@ function SortableCatalogModel({
 /// 路由方案卡片内容；外层决定是按钮还是静态容器。
 function PlanCardContent({
   provider,
+  providersById,
   compact = false,
 }: {
   provider: Provider;
+  providersById?: Map<string, Provider>;
   compact?: boolean;
 }) {
   const routing = readCodexRouting(provider);
   const routes = routing?.routes ?? [];
+  const defaultRoute = routing?.defaultRouteId
+    ? routes.find((route) => route.id === routing.defaultRouteId)
+    : undefined;
+  const defaultRouteName = defaultRoute
+    ? routeDisplayName(defaultRoute, providersById ?? new Map())
+    : undefined;
 
   return (
     <div className="min-w-0">
@@ -8442,7 +8539,16 @@ function PlanCardContent({
       </div>
       <div className="mt-2 flex flex-wrap gap-2 text-xs text-muted-foreground dark:text-slate-400">
         <span>规则 {routes.length} 条</span>
-        {routing?.defaultRouteId && <span>默认 {routing.defaultRouteId}</span>}
+        {routing?.defaultRouteId && (
+          <span
+            title={routeDisplayTitle(
+              defaultRouteName ?? "默认路由",
+              routing.defaultRouteId,
+            )}
+          >
+            默认 {defaultRouteName ?? routing.defaultRouteId}
+          </span>
+        )}
         {!compact && <span>ID {provider.id}</span>}
       </div>
     </div>

@@ -26,6 +26,7 @@ import {
   normalizeCodexRoutesForVisibleModelAliases,
   readCodexRouting,
   resolveCodexRouterAuthFacadeLabel,
+  routeSummaryDisplayName,
   serializeCodexRouteV2,
   validateProxyListenDraft,
 } from "./CodexRouterWorkspacePage";
@@ -318,6 +319,23 @@ it("没有 MultiRouter 方案时打开工作台不会读取 null settingsConfig"
 });
 
 describe("Codex MultiRouter workspace route persistence helpers", () => {
+  it("uses the target Provider name when a legacy route label is only its UUID", () => {
+    expect(
+      routeSummaryDisplayName(
+        "router-5626e6b9-33cb-4c3b-8d16-af8176e16209",
+        "router-5626e6b9-33cb-4c3b-8d16-af8176e16209",
+        "DeepSeek Relay",
+      ),
+    ).toBe("DeepSeek Relay");
+    expect(
+      routeSummaryDisplayName(
+        undefined,
+        "router-5626e6b9-33cb-4c3b-8d16-af8176e16209",
+        undefined,
+      ),
+    ).toBe("router-5626e6b9-33cb-4c3b-8d16-af8176e16209");
+  });
+
   it("serializes only schema v2 route policy and drops inherited secrets and capabilities", () => {
     const route = serializeCodexRouteV2(
       {
