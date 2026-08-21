@@ -93,6 +93,7 @@ struct ModelCandidate<'a> {
     provider: &'a Provider,
     visible_model: String,
     canonical_model: String,
+    upstream_model: String,
     model_entry: &'a Value,
 }
 
@@ -125,7 +126,7 @@ pub fn compile_v2(
             .iter()
             .filter(|(_, target)| {
                 target.eq_ignore_ascii_case(&candidate.canonical_model)
-                    || target.eq_ignore_ascii_case(&candidate.visible_model)
+                    || target.eq_ignore_ascii_case(&candidate.upstream_model)
             })
             .map(|(alias, _)| alias.trim().to_string())
             .filter(|alias| !alias.is_empty())
@@ -162,7 +163,7 @@ pub fn compile_v2(
             model_catalog.push(CompiledCodexModel {
                 visible_model,
                 canonical_model: candidate.canonical_model.clone(),
-                upstream_model: upstream_model(candidate.model_entry, &candidate.canonical_model),
+                upstream_model: candidate.upstream_model.clone(),
                 target_provider_id: candidate.provider.id.clone(),
                 route_id: candidate.route_id.to_string(),
                 api_format,
@@ -246,11 +247,13 @@ fn collect_candidates<'a>(
             let Some(visible_model) = model_name(model_entry) else {
                 continue;
             };
-            let canonical_model = upstream_model(model_entry, &visible_model);
+            let canonical_model = visible_model.clone();
+            let upstream_model = upstream_model(model_entry, &canonical_model);
             let visible_key = visible_model.to_ascii_lowercase();
             let canonical_key = canonical_model.to_ascii_lowercase();
+            let upstream_key = upstream_model.to_ascii_lowercase();
             if selected.as_ref().is_some_and(|models| {
-                !models.contains(&canonical_key) && !models.contains(&visible_key)
+                !models.contains(&canonical_key) && !models.contains(&upstream_key)
             }) {
                 continue;
             }
@@ -259,12 +262,14 @@ fn collect_candidates<'a>(
             }
             found.insert(visible_key);
             found.insert(canonical_key);
+            found.insert(upstream_key);
             candidates.push(ModelCandidate {
                 route_index,
                 route_id: &route.id,
                 provider,
                 visible_model,
                 canonical_model,
+                upstream_model,
                 model_entry,
             });
         }
@@ -967,7 +972,43 @@ mod tests {
         );
         assert_eq!(
             compiled.model_catalog[0].canonical_model,
+            "deepseek-v4-flash"
+        );
+        assert_eq!(
+            compiled.model_catalog[0].upstream_model,
             "deepseek-v4-flash-0731"
+        );
+    }
+
+    #[test]
+    fn include_selection_accepts_alias_target_upstream_model_id() {
+        let relay = provider(
+            "5626e6b9-33cb-4c3b-8d16-af8176e16209",
+            "DeepSeek Relay",
+            "openai_responses",
+            json!([{
+                "model": "deepseek-v4-flash",
+                "upstreamModel": "deepseek-v4-flash-0731"
+            }]),
+        );
+        let mut relay_route = route(
+            "router-5626e6b9-33cb-4c3b-8d16-af8176e16209",
+            &relay.id,
+            CodexModelSelection::Include {
+                models: vec!["deepseek-v4-flash".to_string()],
+            },
+        );
+        relay_route.aliases.insert(
+            "deepseek-v4-flash-0731".to_string(),
+            "deepseek-v4-flash-0731".to_string(),
+        );
+
+        let compiled = compile(&plan(vec![relay_route]), [relay]);
+
+        assert_eq!(compiled.visible_models, vec!["deepseek-v4-flash-0731"]);
+        assert_eq!(
+            compiled.model_catalog[0].canonical_model,
+            "deepseek-v4-flash"
         );
         assert_eq!(
             compiled.model_catalog[0].upstream_model,

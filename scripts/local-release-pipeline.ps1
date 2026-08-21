@@ -93,24 +93,25 @@ function Exit-PipelineLock {
 function Write-ReleaseMetadata {
     param(
         [string]$Root,
-        [string]$RepoRoot,
-        [string]$Reason
+        [string]$Reason,
+        [Parameter(Mandatory = $true)][psobject]$Identity
     )
 
-    $commit = (& git -C $RepoRoot rev-parse HEAD).Trim()
-    $branch = (& git -C $RepoRoot rev-parse --abbrev-ref HEAD).Trim()
-    $packageJson = Get-Content -LiteralPath (Join-Path $RepoRoot "package.json") -Raw | ConvertFrom-Json
     $metadata = @(
         "# Local Release Metadata",
         "",
         "Reason: $Reason",
-        "Branch: $branch",
-        "Commit: $commit",
-        "Version: $($packageJson.version)",
+        "Branch: $($Identity.Branch)",
+        "Commit: $($Identity.Commit)",
+        "Version: $($Identity.Version)",
         "GeneratedAt: $(Get-Date -Format o)"
     ) -join "`r`n"
 
-    Set-Content -LiteralPath (Join-Path $Root "RELEASE-METADATA.md") -Value $metadata -Encoding UTF8
+    [System.IO.File]::WriteAllText(
+        (Join-Path $Root "RELEASE-METADATA.md"),
+        $metadata,
+        [System.Text.UTF8Encoding]::new($false)
+    )
 }
 
 # Recompute checksums after metadata is written.
@@ -127,25 +128,41 @@ function Write-Checksums {
         $relative = $file.FullName.Substring($normalizedRoot.Length).TrimStart([char[]]@([char]92, [char]47))
         $lines.Add("$hash  $relative")
     } | Out-Null
-    Set-Content -LiteralPath (Join-Path $normalizedRoot "SHA256SUMS.txt") -Value ($lines.ToArray() -join "`r`n") -Encoding UTF8
+    [System.IO.File]::WriteAllText(
+        (Join-Path $normalizedRoot "SHA256SUMS.txt"),
+        ($lines.ToArray() -join "`r`n"),
+        [System.Text.UTF8Encoding]::new($false)
+    )
 }
 
 $repoRoot = Get-RepoRoot
-$releaseRoot = Resolve-CcswitchmultiReleaseRoot -RepoRoot $repoRoot -RequestedRoot $ReleaseRoot
+$releaseRoot = [System.IO.Path]::GetFullPath(
+    (Resolve-CcswitchmultiReleaseRoot -RepoRoot $repoRoot -RequestedRoot $ReleaseRoot)
+)
 $logDir = Join-Path $repoRoot "scripts\logs"
 $lockPath = Join-Path $logDir "local-release.lock"
 
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
 $pipelineLockToken = $null
+$stageRoot = $null
 try {
     $pipelineLockToken = Enter-PipelineLock -LockPath $lockPath
     Push-Location $repoRoot
 
     Write-Log "Local release pipeline started. reason=$Reason target=$releaseRoot"
+    $sourceIdentity = Get-ReleaseSourceIdentity -RepoRoot $repoRoot
+    if ($sourceIdentity.TrackedWorktree -ne "clean") {
+        throw "local release requires a clean tracked worktree; commit or stash tracked changes before building"
+    }
+    $stageRoot = New-ReleaseStageRoot -ReleaseRoot $releaseRoot
+    Assert-ReleaseStagePair -StageRoot $stageRoot -ReleaseRoot $releaseRoot
 
     Invoke-CheckedCommand -FilePath "pnpm" -Arguments @("install", "--frozen-lockfile", "--force")
     Assert-LocalTauriCliVersion -RepoRoot $repoRoot
+    Assert-ReleaseSourceIdentity `
+        -Expected $sourceIdentity `
+        -Actual (Get-ReleaseSourceIdentity -RepoRoot $repoRoot)
 
     if (-not $NoTypecheck) {
         Invoke-CheckedCommand -FilePath "pnpm" -Arguments @("typecheck")
@@ -158,18 +175,29 @@ try {
         "-File",
         "scripts/export-latest-ccswitchmulti.ps1",
         "-ReleaseRoot",
-        $releaseRoot
+        $stageRoot
     )
     if ($SkipBuild) {
         $exportArgs += "-SkipBuild"
     }
 
     Invoke-CheckedCommand -FilePath "powershell" -Arguments $exportArgs
-    Write-ReleaseMetadata -Root $releaseRoot -RepoRoot $repoRoot -Reason $Reason
-    Write-Checksums -Root $releaseRoot
+    Assert-ReleaseSourceIdentity `
+        -Expected $sourceIdentity `
+        -Actual (Get-ReleaseSourceIdentity -RepoRoot $repoRoot)
+    Write-ReleaseMetadata -Root $stageRoot -Reason $Reason -Identity $sourceIdentity
+    Write-Checksums -Root $stageRoot
+    Assert-ReleaseSourceIdentity `
+        -Expected $sourceIdentity `
+        -Actual (Get-ReleaseSourceIdentity -RepoRoot $repoRoot)
+    Replace-ReleaseRootFromStage -StageRoot $stageRoot -ReleaseRoot $releaseRoot
+    $stageRoot = $null
 
     Write-Log "Local release pipeline completed. Artifacts exported to: $releaseRoot"
 } finally {
     Pop-Location -ErrorAction SilentlyContinue
+    if ($stageRoot -and (Test-Path -LiteralPath $stageRoot)) {
+        Remove-Item -LiteralPath $stageRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
     Exit-PipelineLock -LockPath $lockPath -Token $pipelineLockToken
 }

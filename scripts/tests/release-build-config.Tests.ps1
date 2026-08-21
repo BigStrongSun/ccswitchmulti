@@ -99,6 +99,99 @@ Describe "CCSwitchMulti local release build config" {
         $exportOffset | Should BeGreaterThan $assertOffset
     }
 
+    It "captures source identity and exports to staging before replacing the final release root" {
+        $pipelinePath = Join-Path (Split-Path -Parent $helperPath) "local-release-pipeline.ps1"
+        $pipeline = [System.IO.File]::ReadAllText($pipelinePath)
+        $captureOffset = $pipeline.IndexOf('$sourceIdentity = Get-ReleaseSourceIdentity -RepoRoot $repoRoot')
+        $stageOffset = $pipeline.IndexOf('"-ReleaseRoot",')
+        $stageVariableOffset = $pipeline.IndexOf('$stageRoot', $stageOffset)
+        $postExportGuardOffset = $pipeline.IndexOf('Assert-ReleaseSourceIdentity', $pipeline.IndexOf('Invoke-CheckedCommand -FilePath "powershell"'))
+        $swapOffset = $pipeline.IndexOf('Replace-ReleaseRootFromStage')
+
+        $captureOffset | Should BeGreaterThan -1
+        $stageOffset | Should BeGreaterThan $captureOffset
+        $stageVariableOffset | Should BeGreaterThan $stageOffset
+        $postExportGuardOffset | Should BeGreaterThan $stageVariableOffset
+        $swapOffset | Should BeGreaterThan $postExportGuardOffset
+    }
+
+    It "rejects a release when the tracked source identity changes during the build" {
+        . $helperPath
+
+        $expected = [pscustomobject]@{
+            Commit = "commit-a"
+            Branch = "main"
+            Version = "3.19.2-12"
+            TrackedWorktree = "clean"
+        }
+        $actual = [pscustomobject]@{
+            Commit = "commit-b"
+            Branch = "main"
+            Version = "3.19.2-12"
+            TrackedWorktree = "clean"
+        }
+
+        { Assert-ReleaseSourceIdentity -Expected $expected -Actual $actual } |
+            Should Throw "release source identity changed"
+    }
+
+    It "accepts an unchanged release source identity" {
+        . $helperPath
+
+        $identity = [pscustomobject]@{
+            Commit = "commit-a"
+            Branch = "main"
+            Version = "3.19.2-12"
+            TrackedWorktree = "clean"
+        }
+
+        { Assert-ReleaseSourceIdentity -Expected $identity -Actual $identity } |
+            Should Not Throw
+    }
+
+    It "swaps a validated sibling release staging directory into place" {
+        . $helperPath
+
+        $fixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("ccsm-release-swap-" + [guid]::NewGuid().ToString("N"))
+        $releaseRoot = Join-Path $fixtureRoot "final"
+        $stageRoot = Join-Path $fixtureRoot "stage"
+        New-Item -ItemType Directory -Force -Path $releaseRoot, $stageRoot | Out-Null
+        try {
+            [System.IO.File]::WriteAllText((Join-Path $releaseRoot "marker.txt"), "old")
+            [System.IO.File]::WriteAllText((Join-Path $stageRoot "marker.txt"), "new")
+
+            Replace-ReleaseRootFromStage -StageRoot $stageRoot -ReleaseRoot $releaseRoot
+
+            [System.IO.File]::ReadAllText((Join-Path $releaseRoot "marker.txt")) |
+                Should Be "new"
+            (Test-Path -LiteralPath $stageRoot) | Should Be $false
+        } finally {
+            if (Test-Path -LiteralPath $fixtureRoot) {
+                Remove-Item -LiteralPath $fixtureRoot -Recurse -Force
+            }
+        }
+    }
+
+    It "rejects a release staging directory outside the final release parent" {
+        . $helperPath
+
+        $fixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("ccsm-release-path-" + [guid]::NewGuid().ToString("N"))
+        $releaseRoot = Join-Path $fixtureRoot "final"
+        $stageRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("ccsm-stage-" + [guid]::NewGuid().ToString("N"))
+        New-Item -ItemType Directory -Force -Path $releaseRoot, $stageRoot | Out-Null
+        try {
+            {
+                Assert-ReleaseStagePair -StageRoot $stageRoot -ReleaseRoot $releaseRoot
+            } | Should Throw "release staging path must be a sibling"
+        } finally {
+            foreach ($path in @($fixtureRoot, $stageRoot)) {
+                if (Test-Path -LiteralPath $path) {
+                    Remove-Item -LiteralPath $path -Recurse -Force
+                }
+            }
+        }
+    }
+
     It "creates a BOM-free Tauri override without PowerShell utility cmdlets and always supports cleanup" {
         $helperExists = Test-Path -LiteralPath $helperPath
         $helperExists | Should Be $true
@@ -175,7 +268,9 @@ Describe "CCSwitchMulti local release build config" {
                 [System.Text.Encoding]::ASCII.GetBytes("no bundle marker")
             )
 
-            { Get-TauriNsisInstalledExeSha256 -Path $filePath } | Should Throw
+            {
+                Get-TauriNsisInstalledExeSha256 -Path $filePath
+            } | Should Throw "raw Tauri executable must contain exactly one restored UNK bundle marker"
         } finally {
             [System.IO.File]::Delete($filePath)
         }

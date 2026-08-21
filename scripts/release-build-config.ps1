@@ -128,6 +128,128 @@ function Assert-LocalTauriCliVersion {
     }
 }
 
+function Get-ReleaseSourceIdentity {
+    param([Parameter(Mandatory = $true)][string]$RepoRoot)
+
+    $commit = ((& git -C $RepoRoot rev-parse HEAD 2>$null) | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($commit)) {
+        throw "cannot resolve release source commit from $RepoRoot"
+    }
+
+    $branch = ((& git -C $RepoRoot rev-parse --abbrev-ref HEAD 2>$null) | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($branch)) {
+        throw "cannot resolve release source branch from $RepoRoot"
+    }
+
+    $status = ((& git -C $RepoRoot status --porcelain=v1 --untracked-files=no 2>$null) | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0) {
+        throw "cannot inspect tracked release source state in $RepoRoot"
+    }
+
+    $packageJsonPath = Join-Path $RepoRoot "package.json"
+    if (-not (Test-Path -LiteralPath $packageJsonPath -PathType Leaf)) {
+        throw "package.json is missing while resolving release source identity: $packageJsonPath"
+    }
+    $packageJson = [System.IO.File]::ReadAllText($packageJsonPath) | ConvertFrom-Json -ErrorAction Stop
+    $version = [string]$packageJson.version
+    if ([string]::IsNullOrWhiteSpace($version)) {
+        throw "package.json version is empty while resolving release source identity"
+    }
+
+    [pscustomobject]@{
+        Commit = $commit
+        Branch = $branch
+        Version = $version
+        TrackedWorktree = if ([string]::IsNullOrWhiteSpace($status)) { "clean" } else { "dirty" }
+    }
+}
+
+function Assert-ReleaseSourceIdentity {
+    param(
+        [Parameter(Mandatory = $true)][psobject]$Expected,
+        [Parameter(Mandatory = $true)][psobject]$Actual
+    )
+
+    $differences = @(
+        "Commit",
+        "Branch",
+        "Version",
+        "TrackedWorktree"
+    ) | Where-Object {
+        [string]$Expected.$_ -ne [string]$Actual.$_
+    }
+    if ($differences.Count -gt 0) {
+        $details = $differences | ForEach-Object {
+            "$_='$($Expected.$_)' -> '$($Actual.$_)'"
+        }
+        throw "release source identity changed: $($details -join '; ')"
+    }
+}
+
+function New-ReleaseStageRoot {
+    param([Parameter(Mandatory = $true)][string]$ReleaseRoot)
+
+    $releaseFull = [System.IO.Path]::GetFullPath($ReleaseRoot)
+    $parent = Split-Path -Parent $releaseFull
+    New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    return Join-Path $parent (".ccswitchmulti-release-staging-$PID-$([guid]::NewGuid().ToString('N'))")
+}
+
+function Assert-ReleaseStagePair {
+    param(
+        [Parameter(Mandatory = $true)][string]$StageRoot,
+        [Parameter(Mandatory = $true)][string]$ReleaseRoot
+    )
+
+    $stageFull = [System.IO.Path]::GetFullPath($StageRoot)
+    $releaseFull = [System.IO.Path]::GetFullPath($ReleaseRoot)
+    $stageParent = [System.IO.Path]::GetFullPath((Split-Path -Parent $stageFull))
+    $releaseParent = [System.IO.Path]::GetFullPath((Split-Path -Parent $releaseFull))
+    if (-not [string]::Equals($stageParent, $releaseParent, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "release staging path must be a sibling of the final release root"
+    }
+    if ([string]::Equals($stageFull, $releaseFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "release staging path must differ from the final release root"
+    }
+}
+
+function Replace-ReleaseRootFromStage {
+    param(
+        [Parameter(Mandatory = $true)][string]$StageRoot,
+        [Parameter(Mandatory = $true)][string]$ReleaseRoot
+    )
+
+    Assert-ReleaseStagePair -StageRoot $StageRoot -ReleaseRoot $ReleaseRoot
+    $stageFull = [System.IO.Path]::GetFullPath($StageRoot)
+    $releaseFull = [System.IO.Path]::GetFullPath($ReleaseRoot)
+    if (-not (Test-Path -LiteralPath $stageFull -PathType Container)) {
+        throw "release staging root is missing: $stageFull"
+    }
+
+    $backupFull = "$releaseFull.previous-$PID-$([guid]::NewGuid().ToString('N'))"
+    $movedPrevious = $false
+    try {
+        if (Test-Path -LiteralPath $releaseFull) {
+            Move-Item -LiteralPath $releaseFull -Destination $backupFull -ErrorAction Stop
+            $movedPrevious = $true
+        }
+        Move-Item -LiteralPath $stageFull -Destination $releaseFull -ErrorAction Stop
+    } catch {
+        if ($movedPrevious -and -not (Test-Path -LiteralPath $releaseFull) -and (Test-Path -LiteralPath $backupFull)) {
+            Move-Item -LiteralPath $backupFull -Destination $releaseFull -ErrorAction SilentlyContinue
+        }
+        throw
+    }
+
+    if (Test-Path -LiteralPath $backupFull) {
+        try {
+            Remove-Item -LiteralPath $backupFull -Recurse -Force -ErrorAction Stop
+        } catch {
+            Write-Warning "release backup could not be removed: $backupFull. The new release root is active."
+        }
+    }
+}
+
 function Get-TauriNsisInstalledExeSha256 {
     param([Parameter(Mandatory = $true)][string]$Path)
 

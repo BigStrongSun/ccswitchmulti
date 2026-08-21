@@ -264,7 +264,7 @@ impl OpenAiHostedToolClient {
                 )
             }],
             "tools": [tool],
-            "tool_choice": "auto",
+            "tool_choice": { "type": "web_search" },
             "store": false,
             "stream": self.uses_codex_oauth_stream()
         })
@@ -377,6 +377,7 @@ mod tests {
         assert_eq!(request["model"], "gpt-test");
         assert_eq!(request["tools"][0]["type"], "web_search");
         assert_eq!(request["tools"][0]["search_content_types"][0], "image");
+        assert_eq!(request["tool_choice"], json!({"type": "web_search"}));
         assert!(request["input"].is_array());
         assert_eq!(request["stream"], false);
         assert_eq!(request["store"], false);
