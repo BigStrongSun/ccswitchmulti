@@ -119,8 +119,10 @@ pub struct CodexRouterLogEvent {
     pub actual_protocol: Option<String>,
     pub responses_to_chat: Option<bool>,
     pub responses_to_messages: Option<bool>,
+    pub tool: Option<String>,
     pub status: Option<String>,
     pub error: Option<String>,
+    pub reason: Option<String>,
     pub line: String,
 }
 
@@ -135,6 +137,7 @@ pub struct CodexRouterLogDiagnostics {
     pub has_recent_request: bool,
     pub latest_request_at: Option<String>,
     pub latest_error: Option<String>,
+    pub latest_hosted_tool_warning: Option<String>,
     pub recent_events: Vec<CodexRouterLogEvent>,
 }
 
@@ -536,6 +539,28 @@ pub async fn diagnose_codex_multirouter(
         ],
     ));
     checks.push(codex_network_proxy_diagnostic_check());
+    checks.push(codex_check(
+        "hosted_tool_not_called",
+        "Hosted tool 调用",
+        if router_log.latest_hosted_tool_warning.is_some() {
+            CodexDiagnosticStatus::Warn
+        } else {
+            CodexDiagnosticStatus::Info
+        },
+        router_log
+            .latest_hosted_tool_warning
+            .clone()
+            .unwrap_or_else(|| {
+                "未观察到“已投影 hosted tool 但上游未发起调用”的近期事件。".to_string()
+            }),
+        vec![
+            format!(
+                "latest_hosted_tool_warning={:?}",
+                router_log.latest_hosted_tool_warning
+            ),
+            "仅在显式 tool_choice 指向 CCSM hosted tool 时记录".to_string(),
+        ],
+    ));
     checks.push(codex_check(
         "recent_router_error",
         "近期路由错误",
@@ -1442,6 +1467,7 @@ fn codex_router_log_diagnostics(provider_id: Option<&str>) -> CodexRouterLogDiag
                 has_recent_request: false,
                 latest_request_at: None,
                 latest_error: None,
+                latest_hosted_tool_warning: None,
                 recent_events: Vec::new(),
             };
         }
@@ -1489,6 +1515,8 @@ fn codex_router_log_diagnostics_from_text_at(
         .find(|event| codex_router_log_is_request_event(event))
         .map(|event| event.timestamp.clone());
     let latest_error = latest_unresolved_router_error(&recent_events, now, recent_window);
+    let latest_hosted_tool_warning =
+        latest_hosted_tool_not_called_warning(&recent_events, now, recent_window);
     let has_recent_request = recent_events
         .iter()
         .filter(|event| codex_router_log_event_is_recent(event, now, recent_window))
@@ -1503,6 +1531,7 @@ fn codex_router_log_diagnostics_from_text_at(
         has_recent_request,
         latest_request_at,
         latest_error,
+        latest_hosted_tool_warning,
         recent_events,
     }
 }
@@ -1584,6 +1613,26 @@ fn latest_unresolved_router_error(
     None
 }
 
+/// 找出近期“hosted tool 已投影但上游未调用”的诊断事件。
+fn latest_hosted_tool_not_called_warning(
+    events_newest_first: &[CodexRouterLogEvent],
+    now: chrono::NaiveDateTime,
+    window: chrono::Duration,
+) -> Option<String> {
+    events_newest_first
+        .iter()
+        .find(|event| {
+            event.event == "hosted_tool_not_called"
+                && codex_router_log_event_is_recent(event, now, window)
+        })
+        .map(|event| {
+            let tool = event.tool.as_deref().unwrap_or("hosted tool");
+            format!(
+                "上游已收到 {tool} hosted tool，但返回成功响应时没有发起 function call；优先检查该模型或网关的 function calling 支持。"
+            )
+        })
+}
+
 /// 判断日志事件是否代表该 route/provider/model 已恢复成功。
 fn codex_router_log_event_is_success(event: &CodexRouterLogEvent) -> bool {
     if event.event == "response_ready" {
@@ -1658,8 +1707,10 @@ fn codex_parse_router_log_line(line: &str) -> Option<CodexRouterLogEvent> {
         actual_protocol,
         responses_to_chat,
         responses_to_messages,
+        tool: fields.get("tool").cloned(),
         status: fields.get("status").cloned(),
         error,
+        reason: fields.get("reason").cloned(),
         line: line.to_string(),
     })
 }
@@ -1836,6 +1887,49 @@ mod codex_router_log_diagnostics_tests {
             diagnostics.latest_error.as_deref(),
             Some("qwen_gateway_error")
         );
+    }
+
+    #[test]
+    fn hosted_tool_not_called_is_reported_only_inside_recent_window() {
+        let text = concat!(
+            "2026-06-13 00:20:00.000 event=hosted_tool_not_called trace=a model=qwen3.8 provider=codex-openai-router::route::qwen-local tool=web_search status=not_called reason=upstream_returned_success_without_hosted_tool_call streaming=false\n",
+        );
+        let recent_now = chrono::NaiveDateTime::parse_from_str(
+            "2026-06-13 00:24:36.000",
+            "%Y-%m-%d %H:%M:%S%.f",
+        )
+        .expect("valid test time");
+        let recent = codex_router_log_diagnostics_from_text_at(
+            "codex-router.log".to_string(),
+            true,
+            text,
+            Some("codex-openai-router"),
+            recent_now,
+        );
+        assert_eq!(
+            recent.latest_hosted_tool_warning.as_deref(),
+            Some(
+                "上游已收到 web_search hosted tool，但返回成功响应时没有发起 function call；优先检查该模型或网关的 function calling 支持。"
+            )
+        );
+        assert_eq!(
+            recent.recent_events[0].reason.as_deref(),
+            Some("upstream_returned_success_without_hosted_tool_call")
+        );
+
+        let stale_now = chrono::NaiveDateTime::parse_from_str(
+            "2026-06-13 01:00:00.000",
+            "%Y-%m-%d %H:%M:%S%.f",
+        )
+        .expect("valid test time");
+        let stale = codex_router_log_diagnostics_from_text_at(
+            "codex-router.log".to_string(),
+            true,
+            text,
+            Some("codex-openai-router"),
+            stale_now,
+        );
+        assert_eq!(stale.latest_hosted_tool_warning, None);
     }
 
     #[test]
@@ -2247,6 +2341,9 @@ fn codex_next_action(
             "recent_router_error" => {
                 "请求已经进入 MultiRouter，优先展开近期 router 日志定位上游或转换层错误。"
                     .to_string()
+            }
+            "hosted_tool_not_called" => {
+                "CCSM 已把 hosted tool 投影给上游；请检查该模型/网关是否支持 OpenAI-compatible function calling，不能由 CCSM 代替模型强行生成调用。".to_string()
             }
             _ => check.detail.clone(),
         };

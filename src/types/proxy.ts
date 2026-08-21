@@ -124,8 +124,10 @@ export interface CodexRouterLogEvent {
   actualProtocol: string | null;
   responsesToChat: boolean | null;
   responsesToMessages: boolean | null;
+  tool: string | null;
   status: string | null;
   error: string | null;
+  reason: string | null;
   line: string;
 }
 
@@ -137,6 +139,7 @@ export interface CodexRouterLogDiagnostics {
   hasRecentRequest: boolean;
   latestRequestAt: string | null;
   latestError: string | null;
+  latestHostedToolWarning: string | null;
   recentEvents: CodexRouterLogEvent[];
 }
 

@@ -1,5 +1,13 @@
 # 第三方模型 hosted web_search 真实链路审计（2026-08-21）
 
+## 诊断能力补齐（当前工作树）
+
+- 当请求显式 `tool_choice` 指向 CCSM 自有 hosted tool，且上游以成功状态返回但没有任何 hosted function call 时，router 现在追加脱敏事件 `hosted_tool_not_called`。
+- 事件只记录 trace/session/model/provider/tool/status/reason/streaming，不记录 prompt、工具 schema、响应正文或凭据；普通 `tool_choice=auto` 不产生该告警。
+- Codex MultiRouter Debug 检查新增“Hosted tool 调用”告警、最近未调用摘要和事件表字段，用户可直接区分“已投影但模型未调用”与“路由/认证/上游 HTTP 失败”。
+- 该实现只负责边界诊断，不会根据用户 prompt 猜搜索词，也不会在代理层替上游模型伪造 function call。
+- 定向验证：Rust hosted streaming 30/30、router diagnostics 13/13、explicit choice 1/1；全量 Rust `3251 passed / 0 failed / 5 ignored`，TypeScript、fmt 和 diff check 通过。
+
 ## 结论
 
 当前 CCSwitchMulti 的第三方 hosted `web_search` 桥接不是全局失效：

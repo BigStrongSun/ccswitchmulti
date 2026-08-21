@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-08-21 hosted tool 未调用诊断补齐（当前提交前）
+
+- 根因边界已产品化：认证错误、路由/转换错误和“上游成功但没有发起 function call”必须分开显示。新增脱敏 router 事件 `hosted_tool_not_called`，只在显式 `tool_choice` 指向 CCSM 自有 `web_search`/`generate_image` 时记录；普通 `tool_choice=auto` 不误报。
+- 事件字段仅包含 `trace/session/model/provider/tool/status/reason/streaming`，不写 prompt、工具 schema、响应正文或凭据。buffered 与 streaming Chat→Responses 两条路径都覆盖。
+- `diagnose_codex_multirouter` 新增 Hosted tool 调用检查和 `latestHostedToolWarning`，Debug 面板显示最近告警和事件摘要，明确提示“优先检查模型/网关的 OpenAI-compatible function calling”，不在代理层猜 prompt 或伪造 tool call。
+- 门禁：Rust 全量 `3251 passed / 0 failed / 5 ignored`；streaming 定向 `30/30`、router diagnostics `13/13`、显式选择识别 `1/1`；TypeScript、cargo fmt、git diff check 通过。
+- 这只是诊断能力补齐，Qwen/vLLM 仍需上游支持 function calling 才能真正搜索；正式 release 仍需 bump 新版本（不能复用已存在的 `3.19.2-9`）并完成 macOS/Linux 构建与产物验收。
+
 ## 2026-08-21 本轮 Sub-Agent 保存门禁与第三方 hosted 搜索安装态收口
 
 - 提交 `789b91e0d1793fc1716b22e3b62c7035cc587fcd` 将普通 Codex ProviderForm 的保存前校验接入 `validate_codex_subagent_v2_provider_candidate`，与 Provider add/update 共用同一严格 compiler/route/reasoning gate；未知 reasoning 的 enabled+routable profile 在前端保存前即被阻断，后端仍保留最终权威门禁。新增 hosted Chat 出站 `hosted_tool_projection` 脱敏摘要，只允许记录 CCSM 自有 `web_search`/`generate_image` 名称和 tool choice 形状。

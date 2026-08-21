@@ -3993,13 +3993,23 @@ impl RequestForwarder {
                     response_headers.remove(http::header::CONTENT_LENGTH);
                     response_headers.remove(http::header::CONTENT_ENCODING);
                     let initial_stream: ChatSseStream = Box::pin(response.bytes_stream());
+                    let hosted_tool_diagnostic_context =
+                        super::providers::streaming_codex_chat::HostedToolDiagnosticContext {
+                            trace_id: codex_trace_id.clone(),
+                            session_id: self.session_id.clone(),
+                            model: request_model_for_log.clone(),
+                            provider: provider.id.clone(),
+                            tool: hosted_tool_choice_name(&filtered_body),
+                        };
                     let stream = create_responses_sse_stream_from_chat_with_hosted_loop(
                         initial_stream,
                         context,
+                        Some(hosted_tool_diagnostic_context),
                         callback,
                     );
                     ProxyResponse::streamed(StatusCode::OK, response_headers, stream)
                 } else {
+                    let hosted_tool_choice = hosted_tool_choice_name(&filtered_body);
                     run_hosted_tool_chat_loop(
                         response,
                         &mut filtered_body,
@@ -4037,6 +4047,11 @@ impl RequestForwarder {
                         },
                         codex_trace_id.as_deref(),
                         hosted_tools_forced_non_stream,
+                        hosted_tool_choice,
+                        &self.session_id,
+                        &request_model_for_log,
+                        &provider.id,
+                        false,
                     )
                     .await?
                 }
@@ -6175,6 +6190,31 @@ fn should_enable_hosted_tool_loop(
         )
 }
 
+/// 返回显式要求执行的 CCSM hosted tool 名称。
+///
+/// 只识别 `web_search`/`image_generation` 这两个 CCSM 自有工具；普通
+/// `auto`、`required` 或用户自定义 function 不应触发“未调用”诊断。
+fn hosted_tool_choice_name(body: &Value) -> Option<&'static str> {
+    let choice = body.get("tool_choice")?.as_object()?;
+    let choice_type = choice.get("type").and_then(Value::as_str)?;
+    match choice_type {
+        "web_search" => Some("web_search"),
+        "image_generation" => Some("generate_image"),
+        "function" => match choice.get("name").and_then(Value::as_str).or_else(|| {
+            choice
+                .get("function")
+                .and_then(Value::as_object)
+                .and_then(|function| function.get("name"))
+                .and_then(Value::as_str)
+        }) {
+            Some("web_search") => Some("web_search"),
+            Some("generate_image" | "image_generation" | "image_gen") => Some("generate_image"),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// 读取流式 auto 下是否接管 hosted tool loop；未配置时默认开启。
 fn hosted_tool_streaming_auto_enabled(settings: &Value) -> bool {
     settings
@@ -6285,6 +6325,11 @@ async fn run_hosted_tool_chat_loop<F, Fut>(
     mut send_chat_request: F,
     trace_id: Option<&str>,
     force_response_header: bool,
+    hosted_tool_choice: Option<&'static str>,
+    session_id: &str,
+    model: &str,
+    provider_id: &str,
+    streaming: bool,
 ) -> Result<ProxyResponse, ProxyError>
 where
     F: FnMut(&Value) -> Fut,
@@ -6311,6 +6356,16 @@ where
 
         let calls = match scan_hosted_tool_calls(&chat_response) {
             HostedToolCallScan::NoToolCalls => {
+                if let Some(tool) = hosted_tool_choice {
+                    super::providers::hosted_tools::bridge::log_hosted_tool_not_called(
+                        trace_id,
+                        session_id,
+                        model,
+                        provider_id,
+                        tool,
+                        streaming,
+                    );
+                }
                 return Ok(ProxyResponse::buffered(status, headers, body_bytes));
             }
             HostedToolCallScan::ContainsUnsupportedToolCalls => {
@@ -10196,6 +10251,40 @@ mod tests {
     }
 
     #[test]
+    fn hosted_tool_choice_name_only_matches_explicit_ccsm_tools() {
+        assert_eq!(
+            hosted_tool_choice_name(&serde_json::json!({
+                "tool_choice": {"type": "web_search"}
+            })),
+            Some("web_search")
+        );
+        assert_eq!(
+            hosted_tool_choice_name(&serde_json::json!({
+                "tool_choice": {
+                    "type": "function",
+                    "function": {"name": "web_search"}
+                }
+            })),
+            Some("web_search")
+        );
+        assert_eq!(
+            hosted_tool_choice_name(&serde_json::json!({
+                "tool_choice": "auto"
+            })),
+            None
+        );
+        assert_eq!(
+            hosted_tool_choice_name(&serde_json::json!({
+                "tool_choice": {
+                    "type": "function",
+                    "function": {"name": "lookup"}
+                }
+            })),
+            None
+        );
+    }
+
+    #[test]
     fn streaming_auto_disabled_via_settings_omits_hosted_loop() {
         let request = serde_json::json!({
             "stream": true,
@@ -10334,6 +10423,11 @@ mod tests {
             },
             None,
             true,
+            None,
+            "session",
+            "deepseek-v4-flash",
+            "provider",
+            false,
         )
         .await
         .expect("hosted web_search loop should finish");
@@ -10451,6 +10545,11 @@ mod tests {
             },
             None,
             true,
+            None,
+            "session",
+            "kimi-k3",
+            "provider",
+            false,
         )
         .await
         .expect("hosted image_generation loop should finish");

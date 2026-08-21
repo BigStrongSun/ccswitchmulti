@@ -83,6 +83,15 @@ pub(crate) struct CompletedChatToolCall {
 
 pub(crate) type ChatSseStream = Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>;
 
+#[derive(Debug, Clone)]
+pub(crate) struct HostedToolDiagnosticContext {
+    pub(crate) trace_id: Option<String>,
+    pub(crate) session_id: String,
+    pub(crate) model: String,
+    pub(crate) provider: String,
+    pub(crate) tool: Option<&'static str>,
+}
+
 #[derive(Debug)]
 struct ChatToResponsesState {
     response_started: bool,
@@ -1037,6 +1046,7 @@ pub fn create_responses_sse_stream_from_chat_with_context<E: std::error::Error +
 pub(crate) fn create_responses_sse_stream_from_chat_with_hosted_loop<F, Fut>(
     initial_stream: ChatSseStream,
     tool_context: CodexToolContext,
+    diagnostic_context: Option<HostedToolDiagnosticContext>,
     mut on_hosted_tools: F,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send
 where
@@ -1157,6 +1167,23 @@ where
                 break;
             }
             if state.finish_reason.is_some() {
+                if state.completed_tool_calls().is_empty()
+                    && diagnostic_context
+                        .as_ref()
+                        .and_then(|context| context.tool)
+                        .is_some()
+                {
+                    if let Some(context) = diagnostic_context.as_ref() {
+                        crate::proxy::providers::hosted_tools::bridge::log_hosted_tool_not_called(
+                            context.trace_id.as_deref(),
+                            &context.session_id,
+                            &context.model,
+                            &context.provider,
+                            context.tool.expect("checked above"),
+                            true,
+                        );
+                    }
+                }
                 for event in state.finalize() {
                     yield Ok(event);
                 }
@@ -1235,6 +1262,7 @@ mod tests {
         let output = create_responses_sse_stream_from_chat_with_hosted_loop(
             initial_stream,
             context,
+            None,
             move |calls, assistant| {
                 let continuation = continuation.clone();
                 async move {
@@ -1280,6 +1308,7 @@ mod tests {
         let output = create_responses_sse_stream_from_chat_with_hosted_loop(
             stream,
             context,
+            None,
             |_calls, _assistant| async {
                 panic!("mixed tool calls must not invoke hosted coordinator")
             },
@@ -1313,6 +1342,7 @@ mod tests {
         let output = create_responses_sse_stream_from_chat_with_hosted_loop(
             stream,
             context,
+            None,
             |calls, assistant| async move {
                 assert_eq!(calls[0].name, "generate_image");
                 assert_eq!(

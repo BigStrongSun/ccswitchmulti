@@ -7999,6 +7999,10 @@ function DiagnosticsPanel({
                   label="最近错误"
                   value={diagnostics.routerLog.latestError ?? "无"}
                 />
+                <DetailRow
+                  label="Hosted tool 未调用"
+                  value={diagnostics.routerLog.latestHostedToolWarning ?? "无"}
+                />
               </div>
             </div>
           </div>
@@ -8088,6 +8092,9 @@ function DiagnosticsPanel({
                     title={event.upstreamUrl ?? event.line}
                   >
                     {event.error ??
+                      (event.event === "hosted_tool_not_called"
+                        ? `${event.tool ?? "hosted tool"}：${event.reason ?? "上游未发起调用"}`
+                        : null) ??
                       event.upstreamUrl ??
                       event.model ??
                       event.line}
