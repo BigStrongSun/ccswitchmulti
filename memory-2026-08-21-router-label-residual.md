@@ -30,3 +30,17 @@
   their SHA-256 hashes differ. A user running that installed binary can still
   reproduce the v3.19.2-10 behavior even though current source and the staged
   e6 artifact contain the fix.
+
+## Installation closure
+
+- Post-commit local release completed at 2026-08-21 23:18:58 and is bound to
+  `93da81dd3ee5d821d20b69b34a1142b9635acb3b`, still version `3.19.2-12`.
+- The transactional installer completed with `Status=Success`,
+  transaction `ccsm-20260821-232301-bb0368348140488c9c1a30b0f880a0ab`,
+  replacing the old runtime without a rollback error.
+- Installed runtime verification passed: version/file version `3.19.2-12`,
+  PID `33808`, listener path is the product-owned
+  `C:\Users\sunda\AppData\Local\CCSwitchMulti\cc-switch.exe`, health endpoint
+  returned HTTP 200, and installed hash
+  `C14927EB6C800A7C3F50B6D1CC35D0D773399D20756D539308181FBCC08BFF22` matches
+  the exported NSIS installed-executable hash.
