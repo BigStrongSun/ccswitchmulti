@@ -622,9 +622,7 @@ export function inferWizardRoutePrefixes(provider: Provider): string[] {
   }`.toLowerCase();
   const models = readWizardModelCatalog(provider)
     .filter(isWizardModelEnabled)
-    .map((model) =>
-      model.model.toLowerCase(),
-    );
+    .map((model) => model.model.toLowerCase());
   const has = (value: string) =>
     text.includes(value) || models.some((model) => model.startsWith(value));
   const prefixes = new Set<string>();
@@ -975,7 +973,7 @@ export function collectWizardRouteAliasSelectionIssues(
       if (!canonicalSet.has(canonicalKey)) {
         issues.push({
           routeId: route.id,
-          routeLabel: route.label,
+          routeLabel: route.label || provider.name,
           providerName: provider.name,
           alias,
           canonicalModel,
@@ -984,7 +982,7 @@ export function collectWizardRouteAliasSelectionIssues(
       } else if (!selectedSet.has(canonicalKey)) {
         issues.push({
           routeId: route.id,
-          routeLabel: route.label,
+          routeLabel: route.label || provider.name,
           providerName: provider.name,
           alias,
           canonicalModel,

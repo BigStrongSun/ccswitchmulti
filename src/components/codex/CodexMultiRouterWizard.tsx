@@ -1650,6 +1650,9 @@ export function CodexMultiRouterWizard({
     previewRoutes,
     routeReadySources,
   );
+  const previewProvidersById = new Map(
+    routeReadySources.map((provider) => [provider.id, provider]),
+  );
   const availableModelByName = new Map(
     availableCatalogModels.map((model) => [model.model, model]),
   );
@@ -2285,7 +2288,13 @@ export function CodexMultiRouterWizard({
                   <div key={route.id} className="rounded-lg border p-4">
                     <div className="flex items-center justify-between gap-3">
                       <div className="font-medium">{route.label}</div>
-                      <Badge variant="outline">{route.targetProviderId}</Badge>
+                      <Badge
+                        variant="outline"
+                        title={`Provider ID: ${route.targetProviderId}`}
+                      >
+                        {previewProvidersById.get(route.targetProviderId)
+                          ?.name ?? route.targetProviderId}
+                      </Badge>
                     </div>
                     <div className="mt-2 text-sm text-muted-foreground">
                       模型范围：

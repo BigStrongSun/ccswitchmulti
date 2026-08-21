@@ -180,7 +180,12 @@ pub fn compile_v2(
         .enumerate()
         .map(|(index, route)| CompiledCodexRoute {
             id: route.id.clone(),
-            label: route.label.clone(),
+            label: route.label.clone().or_else(|| {
+                providers
+                    .get(&route.target_provider_id)
+                    .map(|provider| provider.name.trim().to_string())
+                    .filter(|name| !name.is_empty())
+            }),
             enabled: route.enabled,
             target_provider_id: route.target_provider_id.clone(),
             match_prefixes: route.match_prefixes.clone(),
@@ -227,7 +232,7 @@ fn collect_candidates<'a>(
                     code: "target_provider_missing".to_string(),
                     message: format!(
                         "route {} targets provider `{}` which does not exist",
-                        route_display(route),
+                        route_display(route, None),
                         route.target_provider_id,
                     ),
                 })?;
@@ -280,7 +285,7 @@ fn collect_candidates<'a>(
                     code: "selected_model_missing".to_string(),
                     message: format!(
                         "route {} selects model `{missing}` which is not in provider {}",
-                        route_display(route),
+                        route_display(route, Some(provider)),
                         provider_display(provider),
                     ),
                 });
@@ -296,7 +301,7 @@ fn collect_candidates<'a>(
                 code: "alias_target_missing".to_string(),
                 message: format!(
                     "route {} aliases model `{missing_target}` which is not selected from provider {}",
-                    route_display(route),
+                    route_display(route, Some(provider)),
                     provider_display(provider),
                 ),
             });
@@ -305,13 +310,18 @@ fn collect_candidates<'a>(
     Ok(candidates)
 }
 
-fn route_display(route: &CodexRoutingRouteV2) -> String {
-    match route
+fn route_display(route: &CodexRoutingRouteV2, provider: Option<&Provider>) -> String {
+    let label = route
         .label
         .as_deref()
         .map(str::trim)
         .filter(|label| !label.is_empty())
-    {
+        .or_else(|| {
+            provider.and_then(|provider| {
+                (!provider.name.trim().is_empty()).then_some(provider.name.trim())
+            })
+        });
+    match label {
         Some(label) if !label.eq_ignore_ascii_case(route.id.trim()) => {
             format!("`{label}` (id `{}`)", route.id)
         }
@@ -1207,6 +1217,22 @@ mod tests {
         assert_eq!(error.code, "alias_target_missing");
         assert!(error.message.contains("Qwen relay"));
         assert!(error.message.contains("Qwen"));
+    }
+
+    #[test]
+    fn route_without_label_uses_provider_name_for_compiled_display() {
+        let provider = provider(
+            "qwen",
+            "Qwen",
+            "openai_responses",
+            json!([{"model": "qwen3.8"}]),
+        );
+        let mut route = route("router-qwen", "qwen", CodexModelSelection::All);
+        route.label = None;
+
+        let compiled = compile(&plan(vec![route]), [provider]);
+
+        assert_eq!(compiled.routes[0].label.as_deref(), Some("Qwen"));
     }
 
     #[test]

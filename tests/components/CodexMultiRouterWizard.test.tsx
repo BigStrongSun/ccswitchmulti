@@ -157,6 +157,31 @@ describe("CodexMultiRouterWizard", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("shows provider names in route previews while keeping IDs in tooltips", () => {
+    const source = provider({
+      id: "5626e6b9-33cb-4c3b-8d16-af8176e16209",
+      name: "DeepSeek Relay",
+    });
+    renderWithQueryClient(
+      <CodexMultiRouterWizard
+        open
+        providers={[source]}
+        onOpenChange={vi.fn()}
+        onCreateProvider={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+        onEnablePlan={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+    fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+
+    const providerBadge = screen.getByTitle(
+      "Provider ID: 5626e6b9-33cb-4c3b-8d16-af8176e16209",
+    );
+    expect(providerBadge).toHaveTextContent("DeepSeek Relay");
+  });
+
   it("keeps V1 and V2 settings out of the four routing stages", () => {
     renderWithQueryClient(
       <CodexMultiRouterWizard
@@ -1139,9 +1164,9 @@ describe("CodexMultiRouterWizard", () => {
     const savedProvider = vi.mocked(providersApi.add).mock.calls[0][0];
     expect(savedProvider.name).toBe("Work MultiRouter");
     expect(savedProvider.settingsConfig).not.toHaveProperty("modelCatalog");
-    expect(
-      savedProvider.settingsConfig.codexRouting.spawnAgentModels,
-    ).toEqual([]);
+    expect(savedProvider.settingsConfig.codexRouting.spawnAgentModels).toEqual(
+      [],
+    );
     expect(
       savedProvider.settingsConfig.codexRouting.routes[0].modelSelection,
     ).toEqual({ mode: "include", models: ["model-c", "model-a"] });
