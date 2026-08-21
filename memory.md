@@ -3993,3 +3993,11 @@
 - 向导最终页即使没有模型源也保留保存入口并显示可操作说明；模型源卡展示认证、模型目录、协议、能力、OAuth、工具和 projection 状态，Provider 详细配置仍由 Provider 页面维护。保存前 v1 继续要求脱敏迁移预览并显式应用。
 - 本轮回归：`src/components/codex/CodexMultiRouterWizard.test.tsx`、`tests/lib/codexMultiRouterWizard.test.ts`、Rust compiler rename test；已验证 `pnpm typecheck`、定向 Vitest、Rust 定向 compiler test。React/Radix 测试仍有既有 `act(...)`/window mock 警告，不是失败。
 - 搜索渠道：Codex WebSearch 命中 React 官方 `Managing State`/`Reacting to Input with State`，确认 submitting 状态应禁用提交；Matrix WebSearch 已独立尝试同一官方页面但 relay 返回 `fetch failed`，因此第二条链本轮没有可用正文，不能把它当作交叉来源。
+
+# 2026-08-21 第三方 hosted web search 401 根修
+
+- 已证实 Qwen/vLLM 不是根因：真实上游对精确 `web_search` function schema 在 `tool_choice=auto`、强制 function choice 和流式请求均返回 HTTP 200 的 `tool_calls`。CCSM 也已正确完成 Responses hosted tool 到 Chat function 的投影，并进入 hosted loop。
+- 真正根因是 `resolve_hosted_tool_client` 无条件把入站 `Authorization: Bearer ...` 当成 ChatGPT OAuth。第三方 Provider 的入站值实际可能是 `PROXY_MANAGED` 占位符或第三方 API key，导致官方 hosted `web_search` 请求使用错误凭据并返回 401，后续循环只能返回无搜索结果的响应。
+- 根修：`source_codex_oauth_credentials` 现在只允许 `provider_uses_native_codex_auth(provider)` 的本机官方 Codex 路由复用入站真实 Bearer，并过滤 `PROXY_MANAGED`；第三方路由不再复用入站认证，直接回退 CCSM 托管 Codex OAuth（或显式环境 API key）。
+- 回归证据：新增“官方 native Bearer 可复用”“`PROXY_MANAGED` 被拒绝”“第三方 Bearer 不复用”三条测试；Rust 全量 `3254` tests 中 `3249 passed / 0 failed / 5 ignored`，`pnpm typecheck`、`cargo fmt --check`、`git diff --check` 均通过。
+- 仍需完成：提交后构建并事务安装新 canary，重跑真实 Qwen/DeepSeek hosted-search；版本号仍为 `3.19.2-9`，正式 release 还需新版本号、跨平台 macOS/Linux 产物和对应运行态验收。不能复用上游已有的官方 `v3.20.0` 标签。

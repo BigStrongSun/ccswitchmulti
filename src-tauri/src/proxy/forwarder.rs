@@ -6196,7 +6196,7 @@ async fn resolve_hosted_tool_client(
         return Ok(client);
     }
 
-    if let Some((token, account_id)) = source_codex_oauth_credentials(source_headers) {
+    if let Some((token, account_id)) = source_codex_oauth_credentials(provider, source_headers) {
         return Ok(OpenAiHostedToolClient::from_codex_oauth(token, account_id));
     }
 
@@ -6235,13 +6235,23 @@ async fn resolve_hosted_tool_client(
     )
 }
 
-/// 从当前 Codex 请求头提取 native OAuth 凭据，避免为 hosted tools 单独配置 API Key。
-fn source_codex_oauth_credentials(headers: &http::HeaderMap) -> Option<(String, Option<String>)> {
+/// 仅从本机官方 Codex 路由的请求头提取 native OAuth 凭据。
+///
+/// 第三方 Provider 的 `Authorization` 可能是 API key，也可能只是
+/// `PROXY_MANAGED` 这个本地代理占位符，不能把它当成 ChatGPT OAuth
+/// 转发给 hosted tools。第三方路由应继续回退到 CCSM 托管 OAuth。
+fn source_codex_oauth_credentials(
+    provider: &Provider,
+    headers: &http::HeaderMap,
+) -> Option<(String, Option<String>)> {
+    if !super::providers::provider_uses_native_codex_auth(provider) {
+        return None;
+    }
     let authorization = headers
         .get(http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())?;
     let token = authorization.strip_prefix("Bearer ")?.trim();
-    if token.is_empty() {
+    if token.is_empty() || token.eq_ignore_ascii_case(PROXY_AUTH_PLACEHOLDER) {
         return None;
     }
     let account_id = headers
@@ -10124,7 +10134,8 @@ mod tests {
     }
 
     #[test]
-    fn source_codex_oauth_credentials_reads_request_bearer() {
+    fn source_codex_oauth_credentials_reads_native_codex_request_bearer() {
+        let provider = test_codex_official_provider();
         let mut headers = HeaderMap::new();
         headers.insert(
             "authorization",
@@ -10133,10 +10144,34 @@ mod tests {
         headers.insert("chatgpt-account-id", HeaderValue::from_static("acct_1"));
 
         let (token, account_id) =
-            source_codex_oauth_credentials(&headers).expect("oauth credentials");
+            source_codex_oauth_credentials(&provider, &headers).expect("oauth credentials");
 
         assert_eq!(token, "token-from-codex");
         assert_eq!(account_id.as_deref(), Some("acct_1"));
+    }
+
+    #[test]
+    fn source_codex_oauth_credentials_rejects_proxy_placeholder() {
+        let provider = test_codex_official_provider();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            HeaderValue::from_static("Bearer PROXY_MANAGED"),
+        );
+
+        assert!(source_codex_oauth_credentials(&provider, &headers).is_none());
+    }
+
+    #[test]
+    fn source_codex_oauth_credentials_does_not_reuse_third_party_bearer() {
+        let provider = test_provider_with_type(None);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            HeaderValue::from_static("Bearer third-party-api-key"),
+        );
+
+        assert!(source_codex_oauth_credentials(&provider, &headers).is_none());
     }
 
     #[test]
