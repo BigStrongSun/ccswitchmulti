@@ -110,6 +110,15 @@ export const codexSubagentV2Api = {
     return invoke("validate_codex_reasoning_provider", { providerId });
   },
 
+  /** 校验尚未落库的 Provider 草稿；只读，不执行任何持久化。 */
+  validateProviderCandidate(
+    settingsConfig: Record<string, unknown>,
+  ): Promise<void> {
+    return invoke("validate_codex_subagent_v2_provider_candidate", {
+      settingsConfig,
+    });
+  },
+
   /** P4：导出 allowlist 投影；后端始终返回 redacted=true。 */
   exportReasoningProvider(
     providerId: string,

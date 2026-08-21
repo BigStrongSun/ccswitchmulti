@@ -48,4 +48,24 @@ describe("codexSubagentV2Api P4 reasoning read-only transport", () => {
       { providerId: "provider-qwen", redacted: true },
     );
   });
+
+  it("validates an unsaved provider candidate without a provider id", async () => {
+    invokeMock.mockResolvedValueOnce(undefined);
+    const settingsConfig = {
+      codexRouting: {
+        subagentV2: {
+          schemaVersion: 2,
+          selectionPolicy: "balanced",
+          profiles: {},
+        },
+      },
+    };
+
+    await codexSubagentV2Api.validateProviderCandidate(settingsConfig);
+
+    expect(invokeMock).toHaveBeenCalledWith(
+      "validate_codex_subagent_v2_provider_candidate",
+      { settingsConfig },
+    );
+  });
 });

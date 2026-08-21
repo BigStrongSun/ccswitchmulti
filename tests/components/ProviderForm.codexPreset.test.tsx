@@ -4,6 +4,10 @@ import { describe, expect, it, vi } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ProviderForm } from "@/components/providers/forms/ProviderForm";
 
+const codexCandidateApiMocks = vi.hoisted(() => ({
+  validateProviderCandidate: vi.fn(),
+}));
+
 vi.mock("@/lib/query", () => ({
   useSettingsQuery: () => ({ data: null }),
 }));
@@ -36,6 +40,11 @@ vi.mock("@/lib/api", async () => {
       getCommonConfigSnippet: vi.fn().mockResolvedValue(null),
       saveCommonConfigSnippet: vi.fn(),
       deleteCommonConfigSnippet: vi.fn(),
+    },
+    codexSubagentV2Api: {
+      ...actual.codexSubagentV2Api,
+      validateProviderCandidate: (...args: unknown[]) =>
+        codexCandidateApiMocks.validateProviderCandidate(...args),
     },
   };
 });
@@ -146,6 +155,12 @@ function renderProviderForm(
 }
 
 describe("ProviderForm Codex preset selection", () => {
+  beforeEach(() => {
+    codexCandidateApiMocks.validateProviderCandidate
+      .mockReset()
+      .mockResolvedValue(undefined);
+  });
+
   it("defaults new Codex providers to model menu projection", async () => {
     renderProviderForm();
 
@@ -340,6 +355,64 @@ describe("ProviderForm Codex preset selection", () => {
     const savedSettings = JSON.parse(onSubmit.mock.calls[0][0].settingsConfig);
     expect(savedSettings.codexRouting.subagentVersion).toBe("v2");
     expect(savedSettings.codexRouting.subagentV2).toEqual(subagentV2);
+  });
+
+  it("blocks an ordinary provider save before persistence when reasoning is unknown", async () => {
+    const onSubmit = vi.fn();
+    codexCandidateApiMocks.validateProviderCandidate.mockRejectedValueOnce(
+      new Error("unknown_reasoning_capability_requires_declaration"),
+    );
+    renderProviderForm({
+      showButtons: true,
+      submitLabel: "保存",
+      onSubmit,
+      initialData: {
+        name: "Incomplete MultiRouter",
+        category: "custom",
+        settingsConfig: {
+          auth: { OPENAI_API_KEY: "sk-test" },
+          config:
+            'model_provider = "codex_model_router_v2"\nmodel = "unknown-model"\n[model_providers.codex_model_router_v2]\nbase_url = "http://127.0.0.1:15721/v1"\nwire_api = "responses"\n',
+          modelCatalog: { models: [{ model: "unknown-model" }] },
+          codexRouting: {
+            enabled: true,
+            defaultRouteId: "unknown-route",
+            subagentVersion: "v2",
+            subagentV2: {
+              schemaVersion: 2,
+              selectionPolicy: "balanced",
+              profiles: {
+                "unknown-model": {
+                  model: "unknown-model",
+                  enabled: true,
+                  questionnaire: {
+                    taskStrengths: ["repository_exploration"],
+                    optimization: "balanced",
+                    writeScope: "read_only",
+                    preference: "eligible",
+                  },
+                  reasoning: { policy: "delegated" },
+                },
+              },
+            },
+            routes: [],
+          },
+        },
+        meta: {
+          apiFormat: "openai_responses",
+          codexLocalModelMapping: true,
+        },
+      },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => {
+      expect(
+        codexCandidateApiMocks.validateProviderCandidate,
+      ).toHaveBeenCalledTimes(1);
+    });
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 
   it("persists maintained reasoning capabilities after selecting a built-in provider", async () => {

@@ -2763,6 +2763,8 @@ impl RequestForwarder {
 
         let codex_chat_request_shape =
             codex_responses_to_chat.then(|| summarize_codex_chat_request_shape(&filtered_body));
+        let hosted_chat_tool_projection =
+            codex_responses_to_chat.then(|| summarize_hosted_chat_tool_projection(&filtered_body));
         if let Some(trace_id) = codex_trace_id.as_deref() {
             let mut fields = vec![
                 ("trace", trace_id.to_string()),
@@ -2819,6 +2821,9 @@ impl RequestForwarder {
             }
             if let Some(shape) = codex_chat_request_shape.as_ref() {
                 fields.push(("request_shape", shape.clone()));
+            }
+            if let Some(projection) = hosted_chat_tool_projection.as_ref() {
+                fields.push(("hosted_tool_projection", projection.clone()));
             }
             super::codex_router_log::append_event("request_prepared", &fields);
         }
@@ -7261,6 +7266,32 @@ fn summarize_codex_chat_request_shape(body: &Value) -> String {
     parts.join(";")
 }
 
+/// 生成 hosted 工具在最终 Chat 出站 body 中的脱敏投影摘要。
+///
+/// 只允许记录 CCSM 自己托管的固定工具名，不记录自定义函数名、描述、参数或消息正文。
+/// 该字段用于区分“工具没有投影给上游”和“上游看到了工具但没有发起调用”。
+fn summarize_hosted_chat_tool_projection(body: &Value) -> String {
+    let mut hosted_names = body
+        .get("tools")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|tool| {
+            let name = tool.pointer("/function/name").and_then(Value::as_str)?;
+            matches!(name, "web_search" | "generate_image").then_some(name)
+        })
+        .collect::<Vec<_>>();
+    hosted_names.sort_unstable();
+    hosted_names.dedup();
+    format!(
+        "hosted_tools=[{}];hosted_tool_choice={}",
+        hosted_names.join(","),
+        body.get("tool_choice")
+            .map(value_for_shape_log)
+            .unwrap_or_else(|| "absent".to_string())
+    )
+}
+
 /// 把 JSON 值压缩成不含正文内容的形态描述。
 fn value_for_shape_log(value: &Value) -> String {
     match value {
@@ -8391,6 +8422,42 @@ mod tests {
         assert!(summary.contains("stream_options=object(keys=[include_usage])"));
         assert!(!summary.contains("secret prompt"));
         assert!(!summary.contains("read_secret"));
+    }
+
+    #[test]
+    fn hosted_chat_tool_projection_only_reports_ccsm_owned_tools_and_choice_shape() {
+        let body = json!({
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "web_search",
+                        "description": "secret description",
+                        "parameters": {"type": "object"}
+                    }
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "user_owned_tool",
+                        "parameters": {"type": "object"}
+                    }
+                }
+            ],
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": "web_search"}
+            }
+        });
+
+        let summary = summarize_hosted_chat_tool_projection(&body);
+
+        assert_eq!(
+            summary,
+            "hosted_tools=[web_search];hosted_tool_choice=object(keys=[function,type])"
+        );
+        assert!(!summary.contains("secret"));
+        assert!(!summary.contains("user_owned_tool"));
     }
 
     #[test]

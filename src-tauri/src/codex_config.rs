@@ -4979,6 +4979,21 @@ pub fn validate_codex_reasoning_provider(
     Ok(build_codex_reasoning_validation(&provider))
 }
 
+/// Validate an unsaved Codex Provider candidate before the generic provider
+/// form submits it. This uses the same strict compiler/route/reasoning gate as
+/// `ProviderService::add` and `ProviderService::update`, but never writes.
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn validate_codex_subagent_v2_provider_candidate(
+    appState: State<'_, AppState>,
+    settingsConfig: Value,
+) -> Result<(), String> {
+    let provider_context = codex_provider_classification_context(appState.db.as_ref())
+        .map_err(|error| error.to_string())?;
+    validate_codex_subagent_v2_candidate(&settingsConfig, Some(&provider_context), true)
+        .map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 #[allow(non_snake_case)]
 pub fn export_codex_reasoning_provider(

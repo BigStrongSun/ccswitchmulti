@@ -1427,6 +1427,7 @@ pub fn run() {
             codex_config::inspect_codex_reasoning_capability,
             codex_config::list_codex_reasoning_capabilities,
             codex_config::validate_codex_reasoning_provider,
+            codex_config::validate_codex_subagent_v2_provider_candidate,
             codex_config::export_codex_reasoning_provider,
             codex_config::get_codex_subagent_profile_statuses,
             codex_config::preview_codex_subagent_profile,

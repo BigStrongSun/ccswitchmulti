@@ -12,7 +12,12 @@ import {
   buildLocalProxyRequestOverrides,
   formatRequestOverrideObject,
 } from "@/lib/requestOverrides";
-import { providersApi, settingsApi, type AppId } from "@/lib/api";
+import {
+  codexSubagentV2Api,
+  providersApi,
+  settingsApi,
+  type AppId,
+} from "@/lib/api";
 import { useDarkMode } from "@/hooks/useDarkMode";
 import type {
   ProviderCategory,
@@ -130,6 +135,7 @@ import { HERMES_DEFAULT_CONFIG } from "./hooks/useHermesFormState";
 import { resolveManagedAccountId } from "@/lib/authBinding";
 import { useOpenClawLiveProviderIds } from "@/hooks/useOpenClaw";
 import { useHermesLiveProviderIds } from "@/hooks/useHermes";
+import { extractErrorMessage } from "@/utils/errorUtils";
 
 type PresetEntry = {
   id: string;
@@ -1733,6 +1739,34 @@ function ProviderFormFull({
       settingsConfig = JSON.stringify(omoConfig);
     } else {
       settingsConfig = values.settingsConfig.trim();
+    }
+
+    // Ordinary ProviderForm saves must surface the same strict Sub-Agent V2
+    // gate before calling the persistence mutation. The backend keeps the
+    // identical gate as the final authority, so this is an early UX check,
+    // not a second capability resolver.
+    if (appId === "codex") {
+      try {
+        const candidate = JSON.parse(settingsConfig) as Record<string, unknown>;
+        const hasSubagentV2 =
+          candidate.codexRouting &&
+          typeof candidate.codexRouting === "object" &&
+          (candidate.codexRouting as Record<string, unknown>).subagentV2 &&
+          typeof (candidate.codexRouting as Record<string, unknown>)
+            .subagentV2 === "object";
+        if (hasSubagentV2) {
+          await codexSubagentV2Api.validateProviderCandidate(candidate);
+        }
+      } catch (error) {
+        const detail = extractErrorMessage(error);
+        const message = detail.includes(
+          "unknown_reasoning_capability_requires_declaration",
+        )
+          ? "Codex 子 Agent 配置未完成：存在已启用且可路由的模型没有声明推理能力，请先在模型目录中配置后再保存。"
+          : `Codex 子 Agent 配置校验失败：${detail || "请检查模型目录和 Sub-Agent 配置。"}`;
+        toast.error(message);
+        return;
+      }
     }
 
     const payload: ProviderFormValues = {
