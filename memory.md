@@ -1,5 +1,27 @@
 # CC Switch Repository Memory
 
+## 2026-08-21 Codex Ultra 分支合入审计
+
+- `bigstrongsun/ultra-orchestration` 当前只包含 `0c8869c7` 与 `39d8f44` 两个
+  未合入 `main` 的提交；分支基点为 `475cd008`，而当前 `main` 已前进 39 个
+  提交。直接 merge 会在 `memory.md`、`src-tauri/src/codex_config.rs`、
+  `CodexFormFields.tsx` 和 `CodexSubagentProfileEditor.tsx` 产生冲突。
+- 主线已有 `ultra` 枚举、能力映射和请求转换基础，但尚未有
+  `codexUltraOrchestration` 的完整产品语义。Ultra 分支不能整枝合入，必须在
+  最新 `main` 上选择性移植并补齐回归。
+- 审计发现的分支缺口：V1 投影只删除 supported-reasoning 列表而不清理
+  default effort；解析器对旧的 Provider-native `ultra` 声明可能重复暴露；
+  探测/手工能力校验仍允许把 `ultra` 当作 Provider 原生档位；官方目录默认
+  `ultra` 的模型可能因 default 不在剥离后的 supported 集合而被丢弃。
+- 上游公开问题 #37858/#37859 已报告：普通 API-key `model_providers.*` 上
+  reasoning effort 与完整 Ultra/multi-agent 产品能力不是同一件事，后者可能
+  失败或降级。因此第三方 Provider 不能在未做真实 transport/UI canary 前
+  宣称“主动 Sub-Agent 委派”；需要显式区分 max 映射、client-local spawn 和
+  first-party/ChatGPT backend 能力。
+- 本轮只读验证：当前 `main` 的 reasoning 前端定向测试 11/11、Rust
+  `codex_reasoning` 定向测试 19/19 通过；这些测试尚未覆盖 Ultra，故不能作为
+  Ultra 合入或 release 证据。
+
 ## 2026-08-21 hosted tool 未调用诊断补齐（当前提交前）
 
 - 根因边界已产品化：认证错误、路由/转换错误和“上游成功但没有发起 function call”必须分开显示。新增脱敏 router 事件 `hosted_tool_not_called`，只在显式 `tool_choice` 指向 CCSM 自有 `web_search`/`generate_image` 时记录；普通 `tool_choice=auto` 不误报。
