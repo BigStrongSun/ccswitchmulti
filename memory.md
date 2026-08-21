@@ -4098,3 +4098,13 @@
 - `CodexFormFields` 的正常入口现在只呈现模型级“模型推理能力”：每个 catalog 模型先显示模型名、能力来源、Codex 可选档位、默认档位和 Ultra 编排状态，点击“配置推理能力”才展开该模型的来源选择、探测、映射、编辑器和专家 JSON。展开状态按 `rowId` 保存，更新仍通过既有 `handleUpdateCatalogRow(index, { reasoning })`，不会改写其他模型。
 - 原 Provider 级 `codexChatReasoning` 不再作为普通“思考能力”配置显示；只有既有对象非空时才出现折叠的“旧版兼容兜底”，文案明确它影响所有没有模型级声明的模型。新模型级流程不写 Provider 级配置；本轮没有改运行时优先级或存储迁移语义。
 - 新增 `CodexModelReasoningSummary` 及测试；模型摘要、既有编辑器、能力卡和持久化回归共 17 条通过，`pnpm typecheck`、Prettier、`git diff --check` 通过。Vite Browser 页面能加载但没有 Tauri bridge，不能读取真实 Provider 数据，安装后仍必须在 Desktop 中验证多模型摘要、单卡展开和旧版兼容区交互。
+
+# 2026-08-21 CCSM 分支与开放 PR 再审计
+
+- 审计基准是 `cc-switch` 子仓库 `main`，当前 HEAD 为 `8d92a8fd`；外层 `LLMservice/master` 是聚合工作区，不能用来判断 CCSM 分支是否合入。
+- GitHub 当前开放 PR：#21（`codex/reasoning-model-catalog-fix`）、#24（`checkbox`）、#26（`sort_bug`）、#19（usage route 名称）、#13/#14 和 Dependabot Actions PR #1-#5。#22、#20 已关闭；#18 已合入。
+- PR #26 的原提交 `6cc2a301` 及删除 Provider 后的补充修复 `dab41928` 已在当前 main；当前已有 `src/lib/codexModelCatalogOrder.ts`、MultiRouter 删除同步和排序回归，不能再次合入旧 PR。
+- PR #24 的核心功能提交 `bd5da4c2` 已在当前 main：catalog `enabled=false` 会在 Codex catalog、Desktop inline models、Sub-Agent 候选和 MultiRouter 同步中被过滤，同时保留原始停用行供重新启用。PR #24 后续 `2fc8d56d`、`146d3e22`、`1cd6342e`、`74a3c875`、`24ca5b4a` 只有格式、测试和“保留”改为“启用”的文案变化，功能未漏合；当前 UI 仍使用旧“保留”文案，是否单独采纳属于后续 UX 决策。
+- PR #21 的 `07bbed8f` 仍未被当前 main 等价吸收。它尝试从真实 `config.toml` 的 `[model_providers.*].models[]` inline 定义读取 reasoning 能力，为 MultiRouter routed alias 补齐 modelCatalog 缺失的档位。不能直接 cherry-pick：旧实现绕过当前 `reasoning_capabilities::resolve_codex_model_capability_core` 的统一来源/指纹链，并引入旧的 `provider_config` 来源语义。后续应把 inline 声明作为同一 resolver 的用户拥有配置输入，补充 alias/upstreamModel 回归后再移植。
+- PR #19 只改 usage 统计与筛选，不阻断本轮 hosted-search/reasoning 发布；PR #13/#14 是高风险大批量依赖升级，不与功能发布混合。`bigstrongsun/ccsm-agent-mesh`、`fix-unsupported-responses-tools`、portable reasoning 实验和旧 Sub-Agent 发布分支也未合入当前 main，但分别属于独立功能、官方大分叉或实验/历史发布线，不应误并入本轮。
+- 当前测试适配了模型推理卡片默认折叠后的交互；定向 Vitest `CodexFormFields`、`ProviderForm.codexCatalog`、`codexSpawnAgentCandidates` 为 41/41 通过，保留既有 React `act(...)` 警告。

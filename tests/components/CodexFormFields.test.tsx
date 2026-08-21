@@ -498,6 +498,9 @@ describe("CodexFormFields local model routing", () => {
     expect(
       screen.getByRole("heading", { name: "模型推理能力" }),
     ).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "配置 qwen3.8 的推理能力" }),
+    );
     expect(screen.getByLabelText("qwen3.8推理能力来源")).toBeInTheDocument();
     expect(screen.getByText("模型目录明细")).toBeInTheDocument();
     expect(screen.queryByText(/Codex 推理能力（/)).not.toBeInTheDocument();
@@ -512,6 +515,9 @@ describe("CodexFormFields local model routing", () => {
   it("renders the resolved reasoning card and lets the user declare an unknown model", async () => {
     renderCatalogHarness([{ model: "qwen3.8" }]);
     await waitFor(() => expect(reasoningApiMocks.resolve).toHaveBeenCalled());
+    fireEvent.click(
+      screen.getByRole("button", { name: "配置 qwen3.8 的推理能力" }),
+    );
 
     expect(
       await screen.findByText("未知（使用服务端默认）"),
@@ -537,6 +543,9 @@ describe("CodexFormFields local model routing", () => {
       }),
     );
     const { latestCatalog } = renderCatalogHarness([{ model: "qwen3.8" }]);
+    fireEvent.click(
+      screen.getByRole("button", { name: "配置 qwen3.8 的推理能力" }),
+    );
 
     expect(await screen.findByText("采用检测结果")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "采用检测结果" }));
@@ -593,6 +602,9 @@ describe("CodexFormFields local model routing", () => {
       return detected;
     });
     renderCatalogHarness([{ model: "qwen3.8" }]);
+    fireEvent.click(
+      screen.getByRole("button", { name: "配置 qwen3.8 的推理能力" }),
+    );
 
     expect(
       await screen.findByRole("button", { name: "重新检测" }),
@@ -632,9 +644,14 @@ describe("CodexFormFields local model routing", () => {
       },
     );
 
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "配置 deepseek-v4-pro 的推理能力",
+      }),
+    );
     const textarea = screen.getByLabelText("deepseek-v4-pro推理能力 JSON");
     expect(textarea).toHaveAttribute("readonly");
-    expect(screen.getByText(/内置预设，只读/)).toBeInTheDocument();
+    expect(screen.getByText("能力来源：CCSM 受维护声明")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "创建高级覆盖" }));
     await waitFor(() => {
@@ -643,7 +660,7 @@ describe("CodexFormFields local model routing", () => {
     expect(
       screen.getByLabelText("deepseek-v4-pro推理能力 JSON"),
     ).not.toHaveAttribute("readonly");
-    expect(screen.getByText(/已偏离内置预设/)).toBeInTheDocument();
+    expect(screen.getByText("能力来源：用户声明（已覆盖维护值）")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "恢复内置默认" }));
     await waitFor(() => {
