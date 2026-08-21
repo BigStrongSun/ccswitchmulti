@@ -184,6 +184,28 @@ jobs:
       - name: Install frontend deps
         run: pnpm install --frozen-lockfile
 
+      - name: Verify release version sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          export EXPECTED="${GITHUB_REF_NAME#v}"
+          node <<'NODE'
+          const fs = require("node:fs");
+          const expected = process.env.EXPECTED;
+          const packageVersion = JSON.parse(fs.readFileSync("package.json", "utf8")).version;
+          const tauriVersion = JSON.parse(fs.readFileSync("src-tauri/tauri.conf.json", "utf8")).version;
+          const cargoText = fs.readFileSync("src-tauri/Cargo.toml", "utf8");
+          const cargoVersion = cargoText.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
+          const lockText = fs.readFileSync("src-tauri/Cargo.lock", "utf8");
+          const lockVersion = lockText.match(/\[\[package\]\]\s+name = "cc-switch"\s+version = "([^"]+)"/m)?.[1];
+          const versions = { packageVersion, cargoVersion, tauriVersion, lockVersion };
+          if (!Object.values(versions).every((value) => value === expected)) {
+            console.error({ expected, versions });
+            process.exit(1);
+          }
+          console.log(`Release version sources agree on ${expected}`);
+          NODE
+
       - name: Prepare Tauri signing key
         shell: bash
         run: |
@@ -592,8 +614,6 @@ jobs:
             if (Test-Path $sigPath) {
               Copy-Item $sigPath (Join-Path release-assets ("$dest.sig"))
               Write-Host "Signature copied: $dest.sig"
-            } elseif (-not $isArm64) {
-              Write-Warning "Signature not found for $($nsis.Name)"
             } else {
               throw "Signature not found for $($nsis.Name)"
             }
@@ -678,10 +698,15 @@ jobs:
           if [ -n "$APPIMAGE" ]; then
             NEW_APPIMAGE="CCSwitchMulti-${VERSION}-Linux-${ARCH}.AppImage"
             cp "$APPIMAGE" "release-assets/$NEW_APPIMAGE"
-            [ -f "$APPIMAGE.sig" ] && cp "$APPIMAGE.sig" "release-assets/$NEW_APPIMAGE.sig" || echo ".sig for AppImage not found"
+            if [ ! -s "$APPIMAGE.sig" ]; then
+              echo "Missing updater signature for $APPIMAGE" >&2
+              exit 1
+            fi
+            cp "$APPIMAGE.sig" "release-assets/$NEW_APPIMAGE.sig"
             echo "AppImage copied: $NEW_APPIMAGE"
           else
             echo "No AppImage found under target/release/bundle" >&2
+            exit 1
           fi
           # 额外上传 .deb（用于手动安装，不参与 Updater）
           DEB=$(find src-tauri/target/release/bundle -name "*.deb" | head -1 || true)
@@ -704,6 +729,33 @@ jobs:
         shell: bash
         run: |
           ls -la release-assets || true
+
+      - name: Validate updater asset and signature
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$GITHUB_REF_NAME"
+          case "$RUNNER_OS" in
+            Windows)
+              suffix=""
+              if [ "${{ matrix.arch || '' }}" = "arm64" ]; then suffix="-arm64"; fi
+              test -s "release-assets/CCSwitchMulti-${VERSION}-Windows${suffix}-Setup.exe"
+              test -s "release-assets/CCSwitchMulti-${VERSION}-Windows${suffix}-Setup.exe.sig"
+              ;;
+            Linux)
+              arch="${{ matrix.arch || 'x86_64' }}"
+              test -s "release-assets/CCSwitchMulti-${VERSION}-Linux-${arch}.AppImage"
+              test -s "release-assets/CCSwitchMulti-${VERSION}-Linux-${arch}.AppImage.sig"
+              ;;
+            macOS)
+              test -s "release-assets/CCSwitchMulti-${VERSION}-macOS.tar.gz"
+              test -s "release-assets/CCSwitchMulti-${VERSION}-macOS.tar.gz.sig"
+              ;;
+            *)
+              echo "Unsupported runner OS: $RUNNER_OS" >&2
+              exit 1
+              ;;
+          esac
 
       - name: Collect Signatures
         shell: bash
@@ -759,6 +811,31 @@ jobs:
         run: |
           set -euo pipefail
           ls -la release-assets
+
+      - name: Validate cross-platform release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="$GITHUB_REF_NAME"
+          required=(
+            "CCSwitchMulti-${TAG}-macOS.tar.gz"
+            "CCSwitchMulti-${TAG}-macOS.tar.gz.sig"
+            "CCSwitchMulti-${TAG}-Windows-Setup.exe"
+            "CCSwitchMulti-${TAG}-Windows-Setup.exe.sig"
+            "CCSwitchMulti-${TAG}-Windows-arm64-Setup.exe"
+            "CCSwitchMulti-${TAG}-Windows-arm64-Setup.exe.sig"
+            "CCSwitchMulti-${TAG}-Linux-x86_64.AppImage"
+            "CCSwitchMulti-${TAG}-Linux-x86_64.AppImage.sig"
+            "CCSwitchMulti-${TAG}-Linux-arm64.AppImage"
+            "CCSwitchMulti-${TAG}-Linux-arm64.AppImage.sig"
+          )
+          for file in "${required[@]}"; do
+            test -s "release-assets/$file" || {
+              echo "Missing required release asset: $file" >&2
+              exit 1
+            }
+          done
+          echo "All six updater platforms and signatures are present."
 
       - name: Generate release body
         shell: bash
@@ -918,6 +995,31 @@ jobs:
           } > "$tmp_json"
           echo "Generated latest.json:" && cat "$tmp_json"
           mv "$tmp_json" latest.json
+      - name: Validate latest.json platform coverage
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require("node:fs");
+          const latest = JSON.parse(fs.readFileSync("latest.json", "utf8"));
+          const required = [
+            "darwin-aarch64",
+            "darwin-x86_64",
+            "windows-x86_64",
+            "windows-aarch64",
+            "linux-x86_64",
+            "linux-aarch64",
+          ];
+          const missing = required.filter((key) => {
+            const value = latest.platforms?.[key];
+            return !value?.url || !value?.signature;
+          });
+          if (missing.length) {
+            console.error("latest.json missing updater platforms:", missing);
+            process.exit(1);
+          }
+          console.log("latest.json contains all six signed updater platforms.");
+          NODE
       - name: Upload latest.json to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
