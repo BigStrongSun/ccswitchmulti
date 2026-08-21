@@ -2659,9 +2659,16 @@ impl RequestForwarder {
             codex_responses_to_chat,
             codex_responses_to_messages,
         ) {
-            super::providers::openai_compat::normalize_codex_responses_passthrough_request_for_transport(
-                request_body,
-                codex_responses_lite_requested,
+            let normalized =
+                super::providers::openai_compat::normalize_codex_responses_passthrough_request_for_transport(
+                    request_body,
+                    codex_responses_lite_requested,
+                );
+            // 第三方原生 Responses 上游（DeepSeek 等）要求 reasoning 历史以
+            // reasoning_text content 回传；official 的 summary/encrypted_content
+            // 回放字段必须在这里转成可读 content 或丢弃，否则上游 400。
+            super::providers::openai_compat::normalize_third_party_responses_reasoning_items(
+                normalized,
             )
         } else {
             request_body
