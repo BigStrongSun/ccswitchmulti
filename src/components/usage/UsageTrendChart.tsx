@@ -29,6 +29,17 @@ interface UsageTrendChartProps {
   refreshIntervalMs: number;
 }
 
+export function cacheHitRatePercent(
+  cacheReadTokens: number,
+  inputTokens: number,
+  cacheCreationTokens: number,
+): number {
+  const cacheableInput =
+    Math.max(inputTokens, 0) + Math.max(cacheCreationTokens, 0) + Math.max(cacheReadTokens, 0);
+  if (cacheableInput <= 0) return 0;
+  return Number(((Math.max(cacheReadTokens, 0) / cacheableInput) * 100).toFixed(2));
+}
+
 export function UsageTrendChart({
   range,
   rangeLabel,
@@ -81,6 +92,11 @@ export function UsageTrendChart({
         outputTokens: stat.totalOutputTokens,
         cacheCreationTokens: stat.totalCacheCreationTokens,
         cacheReadTokens: stat.totalCacheReadTokens,
+        cacheHitRate: cacheHitRatePercent(
+          stat.totalCacheReadTokens,
+          stat.totalInputTokens,
+          stat.totalCacheCreationTokens,
+        ),
         cost: cost ?? null,
       };
     }) || [];
@@ -110,6 +126,14 @@ export function UsageTrendChart({
               </span>
             </div>
           ))}
+          {payload[0]?.payload?.cacheHitRate !== undefined && (
+            <div className="mt-2 border-t pt-2 text-sm">
+              <span className="font-medium">
+                {t("usage.cacheHitRate", "缓存命中率")}:
+              </span>{" "}
+              {payload[0].payload.cacheHitRate.toFixed(2)}%
+            </div>
+          )}
         </div>
       );
     }

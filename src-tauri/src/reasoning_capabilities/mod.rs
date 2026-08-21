@@ -21,9 +21,10 @@ pub mod provider_metadata;
 use crate::provider::Provider;
 use crate::proxy::providers::codex_reasoning::{
     builtin_reasoning_capability_for_model, capability_fingerprint,
-    official_reasoning_capability_for_model, resolve_reasoning_capability_from_settings,
-    CapabilityConfidence, CodexModelReasoningCapability, CodexModelReasoningUpstream,
-    ReasoningControlKind, ReasoningSupportStatus,
+    official_reasoning_capability_for_model, reasoning_capability_from_provider_model_entry,
+    resolve_reasoning_capability_from_settings, CapabilityConfidence,
+    CodexModelReasoningCapability, CodexModelReasoningUpstream, ReasoningControlKind,
+    ReasoningSupportStatus,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -38,6 +39,8 @@ use std::time::{Duration, Instant};
 pub enum CapabilitySource {
     /// 用户模型级显式声明（含 `user_confirmed_detection` 采用后的覆盖）。
     UserConfig,
+    /// Reasoning declared in Codex's inline provider model definition.
+    ProviderConfig,
     /// 动态只读检测（TTL 候选快照）。
     Detection,
     /// CCSM 维护的版本化能力库。
@@ -54,6 +57,7 @@ impl CapabilitySource {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::UserConfig => "user_config",
+            Self::ProviderConfig => "provider_config",
             Self::Detection => "detection",
             Self::Library => "library",
             Self::Builtin => "builtin",
@@ -253,7 +257,16 @@ pub fn resolve_codex_model_capability_core(
         };
     }
 
-    // 2. 动态检测候选（只读元数据，TTL）
+    // 2. Codex inline provider model declaration.
+    if let Some(capability) = resolve_reasoning_capability_from_provider_config(settings, model) {
+        return ResolvedModelCapability {
+            fingerprint: capability_fingerprint(&capability),
+            capability: Some(capability),
+            source: CapabilitySource::ProviderConfig,
+        };
+    }
+
+    // 3. 动态检测候选（只读元数据，TTL）
     if let Some(snapshot) = detection {
         if let Some(capability) = snapshot_to_capability(snapshot) {
             return ResolvedModelCapability {
@@ -264,7 +277,7 @@ pub fn resolve_codex_model_capability_core(
         }
     }
 
-    // 3. CCSM 维护的版本化能力库
+    // 4. CCSM 维护的版本化能力库
     if let Some(library) = library {
         if let Some(capability) = catalog::lookup_library_capability(library, platform, model) {
             return ResolvedModelCapability {
@@ -275,7 +288,7 @@ pub fn resolve_codex_model_capability_core(
         }
     }
 
-    // 4. 内置清单
+    // 5. 内置清单
     if let Some(capability) = builtin_reasoning_capability_for_model(model) {
         return ResolvedModelCapability {
             fingerprint: capability_fingerprint(&capability),
@@ -284,7 +297,7 @@ pub fn resolve_codex_model_capability_core(
         };
     }
 
-    // 5. Codex 官方模型缓存（仅未知平台生效）
+    // 6. Codex 官方模型缓存（仅未知平台生效）
     if platform.is_none() {
         if let Some(capability) = official_reasoning_capability_for_model(model, official_models) {
             return ResolvedModelCapability {
@@ -295,12 +308,43 @@ pub fn resolve_codex_model_capability_core(
         }
     }
 
-    // 6. Unknown（fail-closed）
+    // 7. Unknown（fail-closed）
     ResolvedModelCapability {
         capability: None,
         source: CapabilitySource::Unknown,
         fingerprint: String::new(),
     }
+}
+
+fn resolve_reasoning_capability_from_provider_config(
+    settings: &Value,
+    model: &str,
+) -> Option<CodexModelReasoningCapability> {
+    let config_text = settings.get("config").and_then(Value::as_str)?;
+    let config = toml::from_str::<toml::Value>(config_text).ok()?;
+    let providers = config.get("model_providers")?.as_table()?;
+
+    for provider in providers.values() {
+        let Some(models) = provider.get("models").and_then(toml::Value::as_array) else {
+            continue;
+        };
+        for model_entry in models {
+            let Ok(model_json) = serde_json::to_value(model_entry) else {
+                continue;
+            };
+            let matches_model = ["model", "id", "slug", "upstreamModel", "upstream_model"]
+                .into_iter()
+                .filter_map(|field| model_json.get(field).and_then(Value::as_str))
+                .any(|candidate| candidate.trim().eq_ignore_ascii_case(model.trim()));
+            if !matches_model {
+                continue;
+            }
+            if let Some(capability) = reasoning_capability_from_provider_model_entry(&model_json) {
+                return Some(capability);
+            }
+        }
+    }
+    None
 }
 
 /// 把检测快照转换为已校验的能力。

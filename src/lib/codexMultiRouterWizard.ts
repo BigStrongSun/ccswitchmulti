@@ -211,6 +211,10 @@ export function readWizardModelCatalog(
   );
 }
 
+function isWizardModelEnabled(model: CodexCatalogModel): boolean {
+  return model.enabled !== false;
+}
+
 // 判断 provider 是否是 MultiRouter 方案；向导只把普通 provider 当作上游模型源。
 export function isCodexMultiRouterPlan(provider: Provider): boolean {
   const routing = provider.settingsConfig?.codexRouting;
@@ -486,7 +490,9 @@ export function collectWizardModelNameCollisions(
 ): WizardModelNameCollision[] {
   const ownersByUpstream = new Map<string, Provider[]>();
   for (const provider of providers) {
-    for (const model of readWizardModelCatalog(provider)) {
+    for (const model of readWizardModelCatalog(provider).filter(
+      isWizardModelEnabled,
+    )) {
       const upstream =
         model.upstreamModel ?? model.upstream_model ?? model.model;
       if (!upstream) continue;
@@ -614,9 +620,11 @@ export function inferWizardRoutePrefixes(provider: Provider): string[] {
   const text = `${provider.id} ${provider.name} ${provider.category ?? ""} ${
     provider.meta?.providerType ?? ""
   }`.toLowerCase();
-  const models = readWizardModelCatalog(provider).map((model) =>
+  const models = readWizardModelCatalog(provider)
+    .filter(isWizardModelEnabled)
+    .map((model) =>
     model.model.toLowerCase(),
-  );
+    );
   const has = (value: string) =>
     text.includes(value) || models.some((model) => model.startsWith(value));
   const prefixes = new Set<string>();
@@ -914,6 +922,7 @@ function canonicalWizardModelIds(provider: Provider): string[] {
   return Array.from(
     new Set(
       readWizardModelCatalog(provider)
+        .filter(isWizardModelEnabled)
         .map((model) =>
           (model.upstreamModel ?? model.upstream_model ?? model.model).trim(),
         )
@@ -1050,7 +1059,9 @@ export function buildWizardModelCatalog(
 ): CodexModelCatalogConfig {
   const byModel = new Map<string, CodexCatalogModel>();
   for (const provider of providers) {
-    for (const model of readWizardModelCatalog(provider)) {
+    for (const model of readWizardModelCatalog(provider).filter(
+      isWizardModelEnabled,
+    )) {
       if (!byModel.has(model.model)) {
         byModel.set(model.model, model);
       }

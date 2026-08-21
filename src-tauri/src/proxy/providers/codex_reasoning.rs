@@ -731,6 +731,96 @@ pub fn reasoning_capability_from_model_entry(
     Some(capability)
 }
 
+/// Parse a reasoning declaration embedded in a Codex provider's inline
+/// `model_providers.*.models[]` entry.
+///
+/// Codex stores these entries in TOML rather than CCSM's model catalog schema,
+/// so accept both the native `reasoning` object and the lightweight
+/// `supported_reasoning_levels`/`default_reasoning_level` form used by routed
+/// model definitions. The returned capability is normalized to the same
+/// validated shape consumed by the shared resolver.
+pub fn reasoning_capability_from_provider_model_entry(
+    model_entry: &Value,
+) -> Option<CodexModelReasoningCapability> {
+    if let Some(mut capability) = reasoning_capability_from_model_entry(model_entry) {
+        capability.source = Some("provider_config".to_string());
+        capability.confidence = Some(CapabilityConfidence::Authoritative);
+        return capability.validate().ok().map(|_| capability);
+    }
+
+    let levels = model_entry
+        .get("supported_reasoning_levels")
+        .or_else(|| model_entry.get("supported_reasoning_efforts"))
+        .or_else(|| model_entry.get("supportedReasoningEfforts"))
+        .and_then(Value::as_array)?;
+    let supported_efforts = levels
+        .iter()
+        .filter_map(|level| {
+            level
+                .as_str()
+                .or_else(|| level.get("effort").and_then(Value::as_str))
+                .or_else(|| level.get("reasoning_effort").and_then(Value::as_str))
+                .or_else(|| level.get("reasoningEffort").and_then(Value::as_str))
+        })
+        .map(str::trim)
+        .filter(|effort| !effort.is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    if supported_efforts.is_empty() {
+        return None;
+    }
+
+    let default_effort = model_entry
+        .get("default_reasoning_level")
+        .or_else(|| model_entry.get("default_reasoning_effort"))
+        .or_else(|| model_entry.get("defaultReasoningEffort"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|effort| !effort.is_empty())
+        .map(ToString::to_string);
+    let format = model_entry
+        .get("reasoning_format")
+        .or_else(|| model_entry.get("reasoningFormat"))
+        .and_then(Value::as_str)
+        .unwrap_or("string")
+        .to_string();
+    let parameter = model_entry
+        .get("reasoning_parameter")
+        .or_else(|| model_entry.get("reasoningParameter"))
+        .and_then(Value::as_str)
+        .unwrap_or("reasoning_effort")
+        .to_string();
+    let capability = CodexModelReasoningCapability {
+        schema_version: Some(2),
+        support_status: Some(ReasoningSupportStatus::ConfirmedSupported),
+        control_kind: Some(ReasoningControlKind::Graded),
+        supported: None,
+        supported_efforts: supported_efforts.clone(),
+        default_effort,
+        disable_allowed: supported_efforts.iter().any(|effort| effort == "none"),
+        upstream: CodexModelReasoningUpstream {
+            format,
+            parameter,
+            effort_map: supported_efforts
+                .iter()
+                .map(|effort| (effort.clone(), effort.clone()))
+                .collect(),
+        },
+        output_format: model_entry
+            .get("reasoning_output_format")
+            .or_else(|| model_entry.get("reasoningOutputFormat"))
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        source: Some("provider_config".to_string()),
+        confidence: Some(CapabilityConfidence::Authoritative),
+        fetched_at: None,
+        provider_key: None,
+        model_revision: None,
+        codex_ultra_orchestration: None,
+    };
+    capability.validate().ok().map(|_| capability)
+}
+
 pub fn resolve_reasoning_capability_from_settings(
     settings: &Value,
     model: &str,

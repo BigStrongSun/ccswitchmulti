@@ -204,9 +204,12 @@ function extractCodexCatalogModels(modelCatalog: any): CodexCatalogModel[] {
         item?.reasoning && typeof item.reasoning === "object"
           ? item.reasoning
           : undefined;
+      const enabled =
+        typeof item?.enabled === "boolean" ? item.enabled : undefined;
 
       return {
         model: typeof item?.model === "string" ? item.model : "",
+        ...(enabled !== undefined ? { enabled } : {}),
         ...(upstreamModel ? { upstreamModel } : {}),
         ...(displayName ? { displayName } : {}),
         ...(contextWindow ? { contextWindow } : {}),

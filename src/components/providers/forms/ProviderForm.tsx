@@ -280,6 +280,7 @@ export const normalizeCodexCatalogModelsForSave = (
 
     normalized.push({
       model,
+      ...(item.enabled === false ? { enabled: false } : {}),
       ...(upstreamModel && upstreamModel !== model ? { upstreamModel } : {}),
       ...(displayName ? { displayName } : {}),
       ...(contextWindow && contextWindow > 0 ? { contextWindow } : {}),
@@ -306,6 +307,7 @@ const normalizeCodexSpawnAgentModelsForSave = (
   catalogModels: CodexCatalogModel[],
 ): string[] => {
   const catalogModelIds = catalogModels
+    .filter((item) => item.enabled !== false)
     .map((item) => item.model.trim())
     .filter(Boolean);
   const availableModels = new Set(catalogModelIds);
@@ -1654,23 +1656,33 @@ function ProviderFormFull({
         const normalizedCatalogModels = shouldPersistCodexCatalog
           ? normalizeCodexCatalogModelsForSave(codexCatalogModels)
           : [];
+        const enabledCatalogModels = normalizedCatalogModels.filter(
+          (item) => item.enabled !== false,
+        );
         const normalizedSpawnAgentModels =
           normalizedCatalogModels.length > 0
             ? normalizeCodexSpawnAgentModelsForSave(
                 codexSpawnAgentModels,
-                normalizedCatalogModels,
+                enabledCatalogModels,
               )
             : [];
         // The default-model field writes the top-level `model` into the TOML
         // as the user types; only when it was left empty fall back to the
         // first catalog row so "fill mapping only" keeps its old behavior.
+        const currentDefaultModel = extractCodexModelName(
+          normalizedCodexConfig,
+        )?.trim();
+        const defaultModelDisabled = normalizedCatalogModels.some(
+          (item) =>
+            item.enabled === false && item.model === currentDefaultModel,
+        );
         if (
-          normalizedCatalogModels.length > 0 &&
-          !extractCodexModelName(normalizedCodexConfig)
+          enabledCatalogModels.length > 0 &&
+          (!currentDefaultModel || defaultModelDisabled)
         ) {
           normalizedCodexConfig = setCodexModelNameInConfig(
             normalizedCodexConfig,
-            normalizedCatalogModels[0].model,
+            enabledCatalogModels[0].model,
           );
         }
         const configObj = {

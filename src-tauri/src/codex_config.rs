@@ -1481,6 +1481,10 @@ fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCa
     let mut seen = std::collections::HashSet::new();
     let mut specs = Vec::new();
     let official_models = codex_official_models_cache().unwrap_or_default();
+    let mut resolver_settings = settings.clone();
+    if !config_text.trim().is_empty() {
+        resolver_settings["config"] = json!(config_text);
+    }
 
     for model_config in models {
         let Some(model) = model_config
@@ -1491,6 +1495,14 @@ fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCa
         else {
             continue;
         };
+
+        if model_config
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .is_some_and(|enabled| !enabled)
+        {
+            continue;
+        }
 
         if !seen.insert(model.to_string()) {
             continue;
@@ -1566,7 +1578,7 @@ fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCa
         // 若 catalog 模型名是别名、上游模型名命中不同来源，则用上游名重试一次。
         let library = crate::reasoning_capabilities::catalog::global_library();
         let mut resolved = crate::reasoning_capabilities::resolve_codex_model_capability_core(
-            settings,
+            &resolver_settings,
             None,
             model,
             None,
@@ -1577,7 +1589,7 @@ fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCa
             if let Some(upstream) = upstream_model.as_deref() {
                 let upstream_resolved =
                     crate::reasoning_capabilities::resolve_codex_model_capability_core(
-                        settings,
+                        &resolver_settings,
                         None,
                         upstream,
                         None,
@@ -12222,6 +12234,36 @@ openai_base_url = "http://127.0.0.1:15721/v1"
                 .is_some_and(|value| value.is_null()),
             "generated third-party entries should not inherit GPT-5.5 launch messaging"
         );
+    }
+
+    #[test]
+    fn codex_catalog_reasoning_resolves_provider_inline_model_alias() {
+        let settings = json!({
+            "modelCatalog": {
+                "models": [{
+                    "model": "router-alias",
+                    "upstreamModel": "vendor-reasoning-model"
+                }]
+            }
+        });
+        let config = r#"
+            [[model_providers.vendor.models]]
+            id = "vendor-reasoning-model"
+            supported_reasoning_levels = [{ effort = "low" }, { effort = "high" }]
+            default_reasoning_level = "high"
+        "#;
+
+        let specs = codex_catalog_model_specs(&settings, config);
+        let reasoning = specs
+            .first()
+            .and_then(|spec| spec.reasoning.as_ref())
+            .expect("inline provider model reasoning must reach the catalog resolver");
+        assert_eq!(
+            reasoning.supported_efforts,
+            vec!["low".to_string(), "high".to_string()]
+        );
+        assert_eq!(reasoning.default_effort.as_deref(), Some("high"));
+        assert_eq!(specs[0].reasoning_source, "provider_config");
     }
 
     #[test]

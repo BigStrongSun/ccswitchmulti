@@ -370,6 +370,8 @@ export interface CodexModelReasoningCapability {
 
 export interface CodexCatalogModel {
   model: string;
+  /** false keeps the row for editing/re-enabling but excludes it from runtime projections. */
+  enabled?: boolean;
   upstreamModel?: string;
   upstream_model?: string;
   displayName?: string;

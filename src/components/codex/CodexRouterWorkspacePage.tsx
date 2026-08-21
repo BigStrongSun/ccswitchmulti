@@ -1954,9 +1954,14 @@ export function buildModelCatalogForRoutes(
       : [];
     const routableCatalogModels =
       route.modelSelection?.mode === "all"
-        ? targetCatalogModels
-        : targetCatalogModels.filter((catalogModel) =>
-            routeCanMatchVisibleCatalogModel(route, catalogModel.model ?? ""),
+        ? targetCatalogModels.filter((catalogModel) => catalogModel.enabled !== false)
+        : targetCatalogModels.filter(
+            (catalogModel) =>
+              catalogModel.enabled !== false &&
+              routeCanMatchVisibleCatalogModel(
+                route,
+                catalogModel.model ?? "",
+              ),
           );
     for (const catalogModel of routableCatalogModels) {
       const id = catalogModel.model?.trim();

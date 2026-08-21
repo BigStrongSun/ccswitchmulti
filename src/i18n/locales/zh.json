@@ -1547,6 +1547,7 @@
     "realTotalHint": "Input + Output + 缓存写入 + 缓存命中",
     "freshInput": "新增输入",
     "cacheHitRate": "缓存命中率",
+    "provider": "供应商",
     "requestLogs": "请求日志",
     "providerStats": "Provider 统计",
     "modelStats": "模型统计",

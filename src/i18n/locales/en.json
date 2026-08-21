@@ -1542,6 +1542,7 @@
     "realTotalHint": "Input + Output + Cache Write + Cache Read",
     "freshInput": "Fresh Input",
     "cacheHitRate": "Cache Hit Rate",
+    "provider": "Provider",
     "requestLogs": "Request Logs",
     "providerStats": "Provider Stats",
     "modelStats": "Model Stats",

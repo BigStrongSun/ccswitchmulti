@@ -100,6 +100,7 @@ pub struct ProviderStats {
 #[serde(rename_all = "camelCase")]
 pub struct ModelStats {
     pub model: String,
+    pub provider_name: String,
     pub request_count: u64,
     pub total_tokens: u64,
     pub total_cost: String,
@@ -2381,11 +2382,7 @@ impl Database {
         } else {
             format!("WHERE {}", detail_conditions.join(" AND "))
         };
-        let detail_join = if provider_name.is_some() {
-            providers_join("l", "p")
-        } else {
-            String::new()
-        };
+        let detail_join = providers_join("l", "p");
 
         let mut rollup_conditions = Vec::new();
         let mut rollup_params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -2413,11 +2410,7 @@ impl Database {
         } else {
             format!("WHERE {}", rollup_conditions.join(" AND "))
         };
-        let rollup_join = if provider_name.is_some() {
-            providers_join("r", "p2")
-        } else {
-            String::new()
-        };
+        let rollup_join = providers_join("r", "p2");
 
         // UNION detail logs + rollup data
         //
@@ -2429,32 +2422,37 @@ impl Database {
         let fresh_input_rollup = fresh_input_sql("r");
         let detail_model = effective_model_sql("l");
         let rollup_model = effective_model_sql("r");
+        let detail_provider = provider_name_coalesce("l", "p");
+        let rollup_provider = provider_name_coalesce("r", "p2");
         let sql = format!(
             "SELECT
                 model,
+                provider_name,
                 SUM(request_count) as request_count,
                 SUM(total_tokens) as total_tokens,
                 SUM(total_cost) as total_cost
             FROM (
                 SELECT {detail_model} as model,
+                    {detail_provider} as provider_name,
                     COUNT(*) as request_count,
                     COALESCE(SUM({fresh_input_detail} + l.output_tokens), 0) as total_tokens,
                     COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0) as total_cost
                 FROM proxy_request_logs l
                 {detail_join}
                 {detail_where}
-                GROUP BY {detail_model}
+                GROUP BY {detail_model}, {detail_provider}
                 UNION ALL
                 SELECT {rollup_model},
+                    {rollup_provider},
                     COALESCE(SUM(r.request_count), 0),
                     COALESCE(SUM({fresh_input_rollup} + r.output_tokens), 0),
                     COALESCE(SUM(CAST(r.total_cost_usd AS REAL)), 0)
                 FROM usage_daily_rollups r
                 {rollup_join}
                 {rollup_where}
-                GROUP BY {rollup_model}
+                GROUP BY {rollup_model}, {rollup_provider}
             )
-            GROUP BY model
+            GROUP BY model, provider_name
             ORDER BY total_cost DESC"
         );
 
@@ -2463,8 +2461,8 @@ impl Database {
         params.extend(rollup_params);
         let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
         let row_mapper = |row: &rusqlite::Row| {
-            let request_count: i64 = row.get(1)?;
-            let total_cost: f64 = row.get(3)?;
+            let request_count: i64 = row.get(2)?;
+            let total_cost: f64 = row.get(4)?;
             let avg_cost = if request_count > 0 {
                 total_cost / request_count as f64
             } else {
@@ -2473,8 +2471,9 @@ impl Database {
 
             Ok(ModelStats {
                 model: row.get(0)?,
+                provider_name: row.get(1)?,
                 request_count: request_count as u64,
-                total_tokens: row.get::<_, i64>(2)? as u64,
+                total_tokens: row.get::<_, i64>(3)? as u64,
                 total_cost: format!("{total_cost:.6}"),
                 avg_cost_per_request: format!("{avg_cost:.6}"),
             })
@@ -5408,6 +5407,61 @@ mod tests {
         assert_eq!(stats.len(), 1);
         assert_eq!(stats[0].model, "claude-3-sonnet");
         assert_eq!(stats[0].request_count, 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_model_stats_keeps_provider_dimension_for_same_model() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute(
+                "INSERT INTO providers (id, app_type, name, settings_config)
+                 VALUES (?, ?, ?, ?)",
+                params!["provider-a", "claude", "Provider A", "{}"],
+            )?;
+            conn.execute(
+                "INSERT INTO providers (id, app_type, name, settings_config)
+                 VALUES (?, ?, ?, ?)",
+                params!["provider-b", "claude", "Provider B", "{}"],
+            )?;
+            for (request_id, provider_id, cost) in [
+                ("same-model-a", "provider-a", "0.01"),
+                ("same-model-b", "provider-b", "0.02"),
+            ] {
+                conn.execute(
+                    "INSERT INTO proxy_request_logs (
+                        request_id, provider_id, app_type, model,
+                        input_tokens, output_tokens, total_cost_usd,
+                        latency_ms, status_code, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    params![
+                        request_id,
+                        provider_id,
+                        "claude",
+                        "shared-model",
+                        100,
+                        50,
+                        cost,
+                        100,
+                        200,
+                        1000
+                    ],
+                )?;
+            }
+        }
+
+        let stats = db.get_model_stats(None, None, Some("claude"), None, None)?;
+        assert_eq!(stats.len(), 2);
+        assert_eq!(
+            stats
+                .iter()
+                .map(|stat| stat.provider_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Provider B", "Provider A"]
+        );
+        assert!(stats.iter().all(|stat| stat.model == "shared-model"));
 
         Ok(())
     }

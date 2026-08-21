@@ -152,4 +152,16 @@ describe("ProviderForm Codex catalog helpers", () => {
       { model: "text-explicit", supportsImage: false },
     ]);
   });
+
+  it("keeps disabled catalog rows instead of dropping their enabled:false marker", () => {
+    expect(
+      normalizeCodexCatalogModelsForSave([
+        { model: "enabled-model" },
+        { model: "disabled-model", enabled: false },
+      ]),
+    ).toEqual([
+      { model: "enabled-model" },
+      { model: "disabled-model", enabled: false },
+    ]);
+  });
 });

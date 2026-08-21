@@ -1,5 +1,14 @@
 # CC Switch Repository Memory
 
+## 2026-08-21 其他分支与开放 PR 审计、用量统计回归
+
+- 本地 `main` 为 `462efd9f`，远端 `fork/main` 为 `91b5f69e`（`v3.19.2-11`）；本轮未推送。GitHub API 快照显示开放 PR 为 #1-#5、#13、#14、#19、#21、#24、#26；#20、#22 已关闭。
+- 依赖升级 PR #1-#5、#13、#14 与功能修复线无关，不应混入本轮。
+- #21 的 inline `model_providers.*.models[]` reasoning 读取已被当前统一 resolver 覆盖并继续增强；#24 的 `enabled:false` 停用模型语义已由 `bd5da4c2` 及后续 SSOT 投影覆盖；#26 的旧前端排序实现已由 `dab41928` 选择性移植，但 SSOT 重构删除了旧 `codexMultiRouterSync`，后端 `projected_model_entry` 当前不输出 `sortIndex`，删除 Provider 后的排序保留仍需单独补投影级回归证明，不能只看旧分支提交已存在。
+- #19 的 route 供应商解析已在 `475cd008` 进入主线；本轮继续实现模型统计的 `model + provider_name` 聚合、模型表供应商列、趋势缓存命中率百分比，并修复 `get_model_stats()` 在无 provider 筛选时引用 `p2.name` 却未 JOIN 的 SQL 根因。
+- `bigstrongsun/ultra-orchestration` 的提交未按整枝祖先合入，但语义已由 `5036705f`、`b45235d3`、`77d011c8` 选择性移植；不要整枝合并。`ccsm-agent-mesh`、`portable-reasoning-experiment-nogo`、`subagent-v2-capability-injection` 属于独立实验/资料线，不是当前功能待合分支。
+- 验证：`cargo test --manifest-path src-tauri/Cargo.toml --lib test_get_model_stats` 3/3；inline reasoning 定向 Rust 测试 1/1；Provider catalog、UsageTrend、model catalog order 前端测试 13/13；`pnpm typecheck`、`cargo fmt --check`、`git diff --check` 通过。
+
 ## 2026-08-21 Hosted web_search OAuth 协议修复与 v3.19.2-11 发布准备
 
 - `main` 的 `ebe5ccad` 已修复第三方 hosted web/image 工具调用官方 Codex OAuth 后端时的协议错误：OAuth 请求必须使用 Responses `input` 数组和 `stream=true`，响应是 SSE；现已复用 `responses_sse_to_response_value` 聚合，并补充顶层 `detail` 错误摘要。

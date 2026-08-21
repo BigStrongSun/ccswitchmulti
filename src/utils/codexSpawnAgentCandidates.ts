@@ -24,6 +24,7 @@ export const CODEX_SPAWN_AGENT_PRIORITY_MODELS = [
 // 从当前 catalog 模型里提取稳定模型 ID，供 spawn_agent 候选兜底和校验复用。
 function catalogModelIds(models: CodexCatalogModel[]): string[] {
   return models
+    .filter((model) => model.enabled !== false)
     .map((model) => model.model?.trim())
     .filter((model): model is string => Boolean(model));
 }
