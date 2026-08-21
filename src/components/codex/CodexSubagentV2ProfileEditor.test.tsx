@@ -1415,6 +1415,9 @@ describe("Codex Sub-Agent V2 review round 1 regressions", () => {
     await renderWorkspace();
     const flash = within(await openGeneratedOutput(user));
     expect(await flash.findByText(/输入能力：纯文本/)).toBeVisible();
+    expect(flash.getByText("判定链")).toBeVisible();
+    expect(flash.getByText(/路由能力：纯文本（采用）/)).toBeVisible();
+    expect(flash.getByText(/模型目录：文本\+图像/)).toBeVisible();
     expect(flash.getByText(/输入能力声明冲突/)).toBeVisible();
   });
 

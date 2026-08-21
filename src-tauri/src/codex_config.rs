@@ -4235,13 +4235,15 @@ fn format_modality_label(modalities: &[String]) -> &'static str {
     }
 }
 
-/// 检测 route / catalog / 名字注册表 之间的模态声明冲突，返回人类可读说明。
+/// 检测判定链各来源之间的模态声明冲突，返回人类可读说明。
 fn detect_modality_conflict(
+    profile: Option<&[String]>,
     route: Option<&[String]>,
     catalog: Option<&[String]>,
     name: Option<&[String]>,
 ) -> Option<String> {
-    let sources: [(&str, Option<&[String]>); 3] = [
+    let sources: [(&str, Option<&[String]>); 4] = [
+        ("profile", profile),
         ("route", route),
         ("模型目录", catalog),
         ("内置注册表", name),
@@ -4283,29 +4285,36 @@ fn resolve_input_modality_provenance(
     let name_declared = crate::model_capabilities::is_confirmed_text_only_model(model)
         .then(|| vec!["text".to_string()]);
 
-    // catalog 推导值（hydration 会写入 profile 的值）
-    let catalog_derived = codex_catalog_model_specs(settings, "")
-        .into_iter()
-        .find(|spec| spec.model == *model)
-        .and_then(|spec| codex_subagent_profile_input_modalities(&spec));
+    // 这里只接受 catalog 自己的显式能力字段。不要把 catalog spec 中由
+    // 模型名注册表或 route 推导出的 text_only 再归属给 catalog，否则来源
+    // 展示会把 name_registry/route 的证据伪装成 catalog 声明。
+    let catalog_effective = catalog_declared;
 
-    let modalities = profile_declared.clone().or(catalog_derived.clone());
-
-    let source = if profile_declared.is_some() && profile_declared != catalog_derived {
-        CodexSubagentInputModalitySource::ProfileExplicit
-    } else if route_declared.is_some() {
-        CodexSubagentInputModalitySource::Route
-    } else if catalog_declared.is_some() {
-        CodexSubagentInputModalitySource::Catalog
-    } else if name_declared.is_some() {
-        CodexSubagentInputModalitySource::NameRegistry
+    // 唯一的生效优先级：用户显式 profile > route > catalog > 名字注册表。
+    // 即使 profile 恰好与 catalog 相同，它仍然是用户明确选择，不能因为
+    // route 发生冲突就把“来源”标成 route、却继续返回 profile 的值。
+    let (modalities, source) = if let Some(value) = profile_declared.clone() {
+        (
+            Some(value),
+            CodexSubagentInputModalitySource::ProfileExplicit,
+        )
+    } else if let Some(value) = route_declared.clone() {
+        (Some(value), CodexSubagentInputModalitySource::Route)
+    } else if let Some(value) = catalog_effective.clone() {
+        (Some(value), CodexSubagentInputModalitySource::Catalog)
+    } else if let Some(value) = name_declared.clone() {
+        (
+            Some(value),
+            CodexSubagentInputModalitySource::NameRegistry,
+        )
     } else {
-        CodexSubagentInputModalitySource::Unknown
+        (None, CodexSubagentInputModalitySource::Unknown)
     };
 
     let conflict = detect_modality_conflict(
+        profile_declared.as_deref(),
         route_declared.as_deref(),
-        catalog_declared.as_deref(),
+        catalog_effective.as_deref(),
         name_declared.as_deref(),
     );
 
@@ -4322,7 +4331,7 @@ fn resolve_input_modality_provenance(
         },
         CodexSubagentModalityDeclaration {
             source: CodexSubagentInputModalitySource::Catalog,
-            declared: catalog_declared,
+            declared: catalog_effective,
             adopted: source == CodexSubagentInputModalitySource::Catalog,
         },
         CodexSubagentModalityDeclaration {
@@ -9036,6 +9045,41 @@ mod tests {
             info.source,
             CodexSubagentInputModalitySource::ProfileExplicit
         );
+    }
+
+    #[test]
+    fn input_modality_provenance_profile_wins_and_reports_profile_route_catalog_conflict() {
+        let settings = codex_subagent_profile_status_settings(
+            "v2",
+            json!({}),
+            json!([{
+                "model": "explicit-text-model",
+                "contextWindow": 128000,
+                "inputModalities": ["text"]
+            }]),
+            json!([{
+                "id": "r",
+                "match": { "models": ["explicit-text-model"] },
+                "capabilities": { "supportsImage": true },
+                "upstream": { "auth": { "source": "provider_config" } }
+            }]),
+        );
+        // 即使 profile 与 catalog 恰好一致，profile 仍是用户明确选择，
+        // 应压过冲突的 route，并在诊断中列出全部声明来源。
+        let profile = parse_test_profile("explicit-text-model", Some(json!(["text"])));
+        let info = resolve_input_modality_provenance(&settings, &profile);
+        assert_eq!(info.modalities, Some(vec!["text".into()]));
+        assert_eq!(
+            info.source,
+            CodexSubagentInputModalitySource::ProfileExplicit
+        );
+        let conflict = info.conflict.expect("profile/route/catalog 冲突必须可见");
+        assert!(conflict.contains("profile"), "conflict: {conflict}");
+        assert!(conflict.contains("route"), "conflict: {conflict}");
+        assert!(conflict.contains("模型目录"), "conflict: {conflict}");
+        assert!(info.declarations[0].adopted);
+        assert!(!info.declarations[1].adopted);
+        assert!(!info.declarations[2].adopted);
     }
 
     #[test]

@@ -1990,6 +1990,18 @@ function ProfileBackendOutput({
                 {formatInputModalities(status.inputModality.modalities)}
                 （来源：{formatModalitySource(status.inputModality.source)}）
               </p>
+              {status.inputModality.declarations.length > 0 ? (
+                <div className="space-y-0.5 rounded-md border border-cyan-200/70 bg-background/45 px-2 py-1.5 text-xs dark:border-cyan-500/25 dark:bg-slate-950/25">
+                  <p className="font-medium">判定链</p>
+                  {status.inputModality.declarations.map((declaration) => (
+                    <p key={declaration.source}>
+                      {formatModalitySource(declaration.source)}：
+                      {formatInputModalities(declaration.declared)}
+                      {declaration.adopted ? "（采用）" : ""}
+                    </p>
+                  ))}
+                </div>
+              ) : null}
               {status.inputModality.conflict ? (
                 <p className="text-amber-600 dark:text-amber-400">
                   {status.inputModality.conflict}
