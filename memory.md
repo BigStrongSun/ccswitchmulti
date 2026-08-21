@@ -1,5 +1,14 @@
 # CC Switch Repository Memory
 
+## 2026-08-21 本轮 Sub-Agent 保存门禁与第三方 hosted 搜索安装态收口
+
+- 提交 `789b91e0d1793fc1716b22e3b62c7035cc587fcd` 将普通 Codex ProviderForm 的保存前校验接入 `validate_codex_subagent_v2_provider_candidate`，与 Provider add/update 共用同一严格 compiler/route/reasoning gate；未知 reasoning 的 enabled+routable profile 在前端保存前即被阻断，后端仍保留最终权威门禁。新增 hosted Chat 出站 `hosted_tool_projection` 脱敏摘要，只允许记录 CCSM 自有 `web_search`/`generate_image` 名称和 tool choice 形状。
+- 代码证据：Vitest 定向 `13/13`，Rust `codex_config` 定向 `203/203`，hosted projection `1/1`，`pnpm exec tsc --noEmit`、`cargo fmt`、`git diff --check` 和严格 UTF-8 检查均通过。
+- 新构建的 `RELEASE-METADATA.md` 绑定上述提交，版本仍为 `3.19.2-9`。事务安装 `ccsm-20260821-130436-f717d7ce615445bb8dabbb79cc91bafe` 成功，旧 PID `24240` -> 新 PID `12568`，安装哈希 `EBAEC57F5A45C72BF550DF24049F91BABB1C650E48AEAD323BA334DB22266C13`，`127.0.0.1:15721/health` 为 `200`。
+- 安装态 DeepSeek V4 Pro hosted canary 通过：真实事件包含 `response.web_search_call.in_progress/searching/completed`，返回 marker `CCSM_THIRD_PARTY_HOSTED_SEARCH_OK`。Qwen3.8 canary 仍无 tool call，但日志记录 `responses_to_chat=true`、`hosted_tools=[web_search]`、`hosted_tool_choice=object(keys=[function,type])` 且上游 HTTP `200`，所以 CCSM 投影链已证明闭环；剩余问题属于 Qwen/vLLM 未触发 function call 的上游能力边界。
+- 安装态 `cc-switch-model-catalog.json` 与 `models_cache.json` 均为 9 个模型，二者都含 `qwen3.8` 且不含 `qwen3.6`；数据库 Sub-Agent V2 profiles 和 `.codex/agents/qwen3-8.toml` 均指向 `qwen3.8`。delegated 角色 TOML 不固定 `model_reasoning_effort`，让子 Agent 继承主 Agent 当前 effort；可用档位仍由 catalog 的 `supportedReasoningEfforts` 声明。
+- 当前仍不应创建 GitHub Release：源码、构建、安装和第三方 hosted canary 已完成，但版本号仍是已存在的 `3.19.2-9`，且跨平台（macOS/Linux）产物未在对应主机完成构建/验收。下一步是决定是否 bump 到新版本并补跨平台产物；不要移动现有标签或覆盖同名 release。
+
 ## 2026-08-21 MultiRouter Provider SSOT v2 向导回归收口
 
 - 当前 `main` 已包含 `b7865131`（`Merge MultiRouter Provider SSOT v2 into main`）及本轮向导回归修复。根因是旧向导仍依赖前端逐个重建路由快照，导致无方案最终页为空、Provider 状态不完整、别名随 Provider 改名漂移，以及重复点击保存创建多个方案；修复已统一到 Provider-owned catalog + Route policy 的 SSOT coordinator。

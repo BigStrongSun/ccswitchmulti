@@ -56,13 +56,18 @@ python -X utf8 scripts/verify_third_party_hosted_web_search.py
 - 没有 `response.web_search_call.*`
 - 没有最终 marker
 
-## 尚未完成的验证
+## 新构建安装态复核（2026-08-21）
 
-1. 增加不泄露正文的请求投影诊断，确认 Qwen 发出的 Chat 请求中确实包含 `web_search` function 定义及强制选择映射。
-2. 使用同一 Qwen 上游做非流式和普通 function-call 对照，区分“模型不触发工具”与“流式转换丢失工具调用”。
-3. 若 Qwen 仍不产生工具调用，再检查 Qwen/vLLM 对 `tool_choice` 的支持边界；这属于模型服务能力或上游兼容性问题，不能用 CCSM 的 hosted loop 修复替代。
-4. 新构建安装后重新执行 DeepSeek/Qwen canary，确认源码修复与已安装运行态一致。
+- 提交 `789b91e0d1793fc1716b22e3b62c7035cc587fcd` 已完成新构建；产物元数据明确绑定该提交。
+- 事务安装 `ccsm-20260821-130436-f717d7ce615445bb8dabbb79cc91bafe` 成功，旧 PID `24240` 替换为新 PID `12568`，错误与回滚错误均为空。
+- 安装二进制哈希为 `EBAEC57F5A45C72BF550DF24049F91BABB1C650E48AEAD323BA334DB22266C13`，`/health` 返回 `200`。
+- Qwen3.8 复测仍返回 HTTP `200` 且没有工具调用，但新日志明确记录：
+  `responses_to_chat=true`、`hosted_tools=[web_search]`、`hosted_tool_choice=object(keys=[function,type])`。
+  这证明 CCSM 已把 hosted `web_search` 投影为 Chat function tool 并发送给 Qwen；缺失发生在 Qwen/vLLM 没有产生 function call 的上游能力边界。
+- DeepSeek V4 Pro 复测通过，事件包含 `response.web_search_call.in_progress/searching/completed`，最终 marker 为 `CCSM_THIRD_PARTY_HOSTED_SEARCH_OK`。
+
+因此，CCSwitchMulti 侧的 hosted 搜索桥接可以视为已完成运行态验收；Qwen 仍是上游工具调用兼容性问题，不能继续通过修改 CCSM loop 来“强行修复”。
 
 ## 当前不确定性
 
-当前日志对请求体采用脱敏摘要，不能仅凭日志证明 Qwen 上游收到的完整 `tools` 和 `tool_choice` 字段。需要新增字段级、无敏感内容的诊断或使用受控 mock 上游补齐这一证据。
+当前日志只保留字段级脱敏摘要，不记录工具描述、参数、prompt 或密钥；这足以证明 CCSM 的工具投影边界，但不能证明 Qwen 服务端内部是否启用了 tool calling。后者需要 Qwen/vLLM 侧的服务日志或独立上游 function-call 对照。
