@@ -4135,3 +4135,12 @@
   - `commentary-reasoning-experiment`、`portable-reasoning-experiment-nogo`、`subagent-v2-capability-injection` 和旧 `release-v3.19.*` refs 主要是实验、学术材料或发布证据；没有本轮应回合的生产代码。
 - 当前实跑验证：Rust `unsupported_responses_tool_type_fails_loudly_instead_of_being_dropped`、两个 Responses Lite additional_tools 测试、`codex_catalog_reasoning_resolves_provider_inline_model_alias` 各 1/1 通过；前端 `codexModelCatalogOrder`、`codexMultiRouterWizard`、`CodexFormFields.keepColumn`、`ProviderForm.codexCatalog` 定向套件 45/45 通过。之前带 `--exact` 的 Rust 命令筛到 0 tests，已改为非 exact 过滤重新执行，不能把那次 0 tests 当作验证。
 - 结论：当前确实未合入的生产代码只有 AgentMesh 原型和 #21 的“inline reasoning alias 接入现行 resolver”候选；其余用户此前关注的搜索、unsupported tools、DeepSeek catalog、排序、停用模型、usage 统计、Ultra 和 Responses Lite 均已在 main 有等价或更完整实现。依赖 PR #13/#14 不属于功能修复，应与本轮功能 release 分开评估，尤其 #14 同时跨 React/Vite/Vitest/Tailwind/TypeScript 大版本。
+
+# 2026-08-21 CCSM 分支审计更正（当前 HEAD 048961b3）
+
+- 重新 `git fetch --all --prune` 后，当前审计基准为 `main@048961b3`。活动仓库 `BigStrongSun/ccswitchmulti` 的开放功能 PR 仍为 #21、#24、#26、#19；#13/#14 和 Actions #1-#5 是独立依赖维护线。
+- PR #21 的 head `07bbed8f` 仍不在 `main` 祖先链，`git cherry` 也显示不是同 patch；但它解决的行为已经由主线 `reasoning_capabilities::resolve_codex_model_capability_core` 覆盖：catalog 会按 alias 失败后用 `upstreamModel` 重试统一 resolver，inline `model_providers.*.models[]` 作为 `UserConfig/provider_config` 输入参与能力解析。当前回归 `codex_catalog_reasoning_resolves_provider_inline_model_alias` 实跑 1/1 通过，因此不能再把 #21 列为待移植功能，也不能直接 cherry-pick 旧实现。
+- PR #24、#26、#19 的原提交仍因历史基线不同而在 `git cherry` 中显示 `+`，但行为分别已由停用模型 SSOT、MultiRouter 排序/删除级联/Rust projection、usage provider/model 聚合主线覆盖；开放状态不等于功能遗漏。
+- 当前真正未合入的生产代码只有 `bigstrongsun/ccsm-agent-mesh@a68b803a`：它仍是独立 AgentMesh gateway 原型，未接入现有 CCSM HTTP 代理、Provider 生命周期、凭据边界和运行态 canary，不能整枝合并。
+- `commentary-reasoning-experiment`、`portable-reasoning-experiment-nogo`、`subagent-v2-capability-injection`、旧 release/备份 refs 继续归类为实验、学术资料或历史发布证据；`ultra-orchestration`、Responses Lite、commentary/tool-call、unsupported-tools、DeepSeek catalog 等虽有 unique commits，但主线已有等价或更完整实现，不应回合旧分支。
+- 当前验证：inline reasoning Rust 1/1；usage stats Rust 3/3；`codexModelCatalogOrder` 4/4、`codexMultiRouterWizard` 34/34。首次 Vitest 命令误传不支持的 `--runInBand`，已改正后 38/38 通过；不存在的旧 `CodexFormFields.keepColumn.test.tsx` 未计入结果。
