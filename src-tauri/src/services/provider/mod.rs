@@ -4425,6 +4425,17 @@ impl ProviderService {
         // No live projection is needed: disabled profiles generate no role files, so the
         // live config is unchanged by this prune.
         if app_type == AppType::Codex {
+            // Best-effort 自愈：清理 modelCatalog reasoning 声明的历史脏数据
+            // （如被错误持久化的 Codex-only ultra 档位）。失败不阻塞主流程。
+            if let Ok(Some(cleaned)) = crate::codex_config::auto_sanitize_codex_reasoning_declarations(
+                &provider.settings_config,
+            ) {
+                let mut sanitized = provider.clone();
+                sanitized.settings_config = cleaned;
+                if let Err(err) = state.db.save_provider(app_type.as_str(), &sanitized) {
+                    log::warn!("Codex reasoning sanitize persist failed (main save succeeded): {err}");
+                }
+            }
             if let Ok(Some(pruned)) = crate::codex_config::auto_prune_disabled_stale_subagent_v2(
                 &provider.settings_config,
             ) {

@@ -260,6 +260,28 @@ impl CodexModelReasoningCapability {
         }
     }
 
+    /// 清理持久化声明中的历史脏数据（如被错误持久化的 Codex-only `ultra` 档位）。
+    ///
+    /// 移除：① `supportedEfforts` 中的非法档位；② `effortMap` 中 key/value 非法或
+    /// target 不在 `supportedEfforts` 内的条目。返回被移除的 effortMap 条目；
+    /// 无脏数据时返回空。调用方需在清理后重新 `validate()` 确认。
+    pub fn sanitize_persisted_efforts(&mut self) -> Vec<(String, String)> {
+        let valid_effort = |effort: &str| VALID_PROVIDER_EFFORTS.contains(&effort);
+        self.supported_efforts
+            .retain(|effort| valid_effort(effort));
+        let supported: HashSet<&str> = self.supported_efforts.iter().map(String::as_str).collect();
+        let mut removed = Vec::new();
+        self.upstream.effort_map.retain(|source, target| {
+            let keep =
+                valid_effort(source) && valid_effort(target) && supported.contains(target.as_str());
+            if !keep {
+                removed.push((source.clone(), target.clone()));
+            }
+            keep
+        });
+        removed
+    }
+
     /// 生效控制形态：`controlKind` 优先；legacy 数据从声明字段推导。
     pub fn effective_control_kind(&self) -> ReasoningControlKind {
         if let Some(kind) = self.control_kind {
@@ -707,7 +729,7 @@ pub fn reasoning_capability_from_model_entry(
         .get("model")
         .and_then(Value::as_str)
         .unwrap_or("?");
-    let capability: CodexModelReasoningCapability = match serde_json::from_value::<
+    let mut capability: CodexModelReasoningCapability = match serde_json::from_value::<
         CodexModelReasoningCapability,
     >(value.clone())
     {
@@ -723,6 +745,28 @@ pub fn reasoning_capability_from_model_entry(
     }
     .complete_identity_effort_map_for_read();
     if let Err(error) = capability.validate() {
+        // 自愈：历史版本可能持久化了 Codex-only 档位（如 ultra）等脏数据。
+        // 先自动移除非法/失效条目；若清理后声明恢复合法则警告并继续使用，
+        // 避免“单个坏声明卡死整个 sub-agent 编译/切换”（v27/v28 收紧后暴露）。
+        let removed = capability.sanitize_persisted_efforts();
+        if !removed.is_empty() {
+            match capability.validate() {
+                Ok(()) => {
+                    log::warn!(
+                        "Codex reasoning declaration for model {model} contained {} invalid persisted effort(s) ({:?}); removed them automatically: {error}",
+                        removed.len(),
+                        removed
+                    );
+                    return Some(capability);
+                }
+                Err(second_error) => {
+                    log::warn!(
+                        "Codex reasoning declaration for model {model} remains invalid after automatic cleanup and will be ignored: {second_error}"
+                    );
+                    return None;
+                }
+            }
+        }
         log::warn!(
             "Codex reasoning declaration for model {model} is invalid and will be ignored: {error}"
         );
@@ -932,6 +976,94 @@ mod tests {
             .iter()
             .map(|value| value.parse().expect("valid reasoning effort fixture"))
             .collect()
+    }
+
+    #[test]
+    fn sanitize_persisted_efforts_removes_ultra_entries_and_recovers() {
+        let mut capability = CodexModelReasoningCapability {
+            schema_version: Some(2),
+            support_status: None,
+            control_kind: None,
+            supported: Some(true),
+            supported_efforts: vec![
+                "low".to_string(),
+                "high".to_string(),
+                "max".to_string(),
+            ],
+            default_effort: Some("high".to_string()),
+            disable_allowed: false,
+            upstream: CodexModelReasoningUpstream {
+                format: "none".to_string(),
+                parameter: "none".to_string(),
+                effort_map: [
+                    ("low", "low"),
+                    ("high", "high"),
+                    ("ultra", "max"),
+                    ("max", "max"),
+                ]
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+            },
+            output_format: None,
+            source: None,
+            confidence: None,
+            fetched_at: None,
+            provider_key: None,
+            model_revision: None,
+            codex_ultra_orchestration: None,
+        };
+        assert!(
+            capability.validate().is_err(),
+            "持久化声明含 ultra 时应校验失败"
+        );
+        let removed = capability.sanitize_persisted_efforts();
+        assert_eq!(removed, vec![("ultra".to_string(), "max".to_string())]);
+        assert!(capability.validate().is_ok(), "清理后应恢复合法");
+        assert!(!capability.upstream.effort_map.contains_key("ultra"));
+        assert!(capability
+            .upstream
+            .effort_map
+            .contains_key("max"));
+    }
+
+    #[test]
+    fn sanitize_persisted_efforts_keeps_clean_declarations_untouched() {
+        let mut capability = CodexModelReasoningCapability {
+            schema_version: Some(2),
+            support_status: None,
+            control_kind: None,
+            supported: Some(true),
+            supported_efforts: vec![
+                "low".to_string(),
+                "high".to_string(),
+                "max".to_string(),
+            ],
+            default_effort: Some("max".to_string()),
+            disable_allowed: false,
+            upstream: CodexModelReasoningUpstream {
+                format: "none".to_string(),
+                parameter: "none".to_string(),
+                effort_map: [
+                    ("low", "low"),
+                    ("high", "high"),
+                    ("max", "max"),
+                ]
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+            },
+            output_format: None,
+            source: None,
+            confidence: None,
+            fetched_at: None,
+            provider_key: None,
+            model_revision: None,
+            codex_ultra_orchestration: None,
+        };
+        let removed = capability.sanitize_persisted_efforts();
+        assert!(removed.is_empty(), "干净声明不应被改动");
+        assert!(capability.validate().is_ok());
     }
 
     #[test]

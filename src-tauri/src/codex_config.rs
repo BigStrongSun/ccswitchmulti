@@ -4009,6 +4009,69 @@ pub(crate) fn auto_prune_disabled_stale_subagent_v2(
     Ok(Some(pruned))
 }
 
+/// 自愈：清理 modelCatalog 中 reasoning 声明的历史脏数据（如被错误持久化的
+/// Codex-only `ultra` 档位），并把清理后的声明序列化回 settings。
+///
+/// 返回 `Some(cleaned_settings)` 当有任何模型被修复；无脏数据返回 `None`。
+/// 供 Provider 保存/更新路径 best-effort 调用（失败不阻塞主流程）。
+pub(crate) fn auto_sanitize_codex_reasoning_declarations(
+    settings: &Value,
+) -> Result<Option<Value>, AppError> {
+    use crate::proxy::providers::codex_reasoning::CodexModelReasoningCapability;
+    if settings
+        .get("modelCatalog")
+        .and_then(|catalog| catalog.get("models"))
+        .and_then(Value::as_array)
+        .is_none()
+    {
+        return Ok(None);
+    }
+    let mut cleaned = settings.clone();
+    let Some(target) = cleaned
+        .pointer_mut("/modelCatalog/models")
+        .and_then(Value::as_array_mut)
+    else {
+        return Ok(None);
+    };
+    let mut any_removed = false;
+    for model in target.iter_mut() {
+        let Some(model_name) = model.get("model").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(reasoning) = model.get("reasoning") else {
+            continue;
+        };
+        if reasoning.is_null() {
+            continue;
+        }
+        let Ok(mut capability) =
+            serde_json::from_value::<CodexModelReasoningCapability>(reasoning.clone())
+        else {
+            continue;
+        };
+        capability = capability.complete_identity_effort_map_for_read();
+        let removed = capability.sanitize_persisted_efforts();
+        if !removed.is_empty() {
+            log::warn!(
+                "Codex reasoning declaration for model {model_name} contained {} invalid persisted effort(s) ({:?}); removed automatically",
+                removed.len(),
+                removed
+            );
+            let serialized = serde_json::to_value(&capability)
+                .map_err(|error| AppError::Message(format!("Failed to re-serialize sanitized reasoning declaration: {error}")))?;
+            *model
+                .get_mut("reasoning")
+                .expect("reasoning key exists by construction") = serialized;
+            any_removed = true;
+        }
+    }
+    if any_removed {
+        Ok(Some(cleaned))
+    } else {
+        Ok(None)
+    }
+}
+
 pub(crate) fn validate_codex_subagent_v2_candidate(
     settings: &Value,
     provider_context: Option<&ProviderClassificationContext>,
