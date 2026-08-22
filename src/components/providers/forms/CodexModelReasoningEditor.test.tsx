@@ -91,8 +91,7 @@ describe("CodexModelReasoningEditor", () => {
     );
   });
 
-  it("presents Ultra as a separate Codex V2 orchestration mode", () => {
-    const onChange = vi.fn();
+  it("keeps Ultra out of the Provider capability editor", () => {
     render(
       <CodexModelReasoningEditor
         model="qwen3.8"
@@ -110,26 +109,13 @@ describe("CodexModelReasoningEditor", () => {
           },
         }}
         readOnly={false}
-        onChange={onChange}
+        onChange={vi.fn()}
       />,
     );
 
     expect(
-      screen.getByRole("checkbox", { name: "启用 Codex Ultra 编排" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(/最大推理.*主动 Sub-Agent 委派/),
-    ).toBeInTheDocument();
-    expect(screen.getByText(/Provider 实际收到的是 max/)).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText("Codex max 出站映射"), {
-      target: { value: "high" },
-    });
-    expect(onChange).toHaveBeenCalledWith(
-      expect.objectContaining({
-        upstream: expect.objectContaining({
-          effortMap: expect.objectContaining({ max: "high" }),
-        }),
-      }),
-    );
+      screen.queryByRole("checkbox", { name: "启用 Codex Ultra 编排" }),
+    ).toBeNull();
+    expect(screen.queryByText("Codex Ultra 编排")).toBeNull();
   });
 });

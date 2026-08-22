@@ -277,6 +277,11 @@ export const normalizeCodexCatalogModelsForSave = (
         }
       }
     }
+    if (item.codexUltra?.enabled && !item.codexUltra.providerEffort) {
+      throw new Error(
+        `${model}: Codex Ultra requires an explicit Provider reasoning effort`,
+      );
+    }
 
     normalized.push({
       model,
@@ -296,6 +301,16 @@ export const normalizeCodexCatalogModelsForSave = (
         : {}),
       ...(baseInstructions ? { baseInstructions } : {}),
       ...(reasoning ? { reasoning } : {}),
+      ...(item.codexUltra
+        ? {
+            codexUltra: {
+              enabled: item.codexUltra.enabled,
+              ...(item.codexUltra.providerEffort
+                ? { providerEffort: item.codexUltra.providerEffort }
+                : {}),
+            },
+          }
+        : {}),
     });
   }
 

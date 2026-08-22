@@ -4,6 +4,7 @@ import type {
   CodexReasoningControlKind,
   CodexReasoningSupportStatus,
 } from "@/types/codexSubagentV2";
+import type { CodexReasoningEffort } from "@/types";
 
 /**
  * P3 模型卡片：展示单模型「最终生效」的推理能力（与 catalog / 请求 / Sub-Agent
@@ -154,10 +155,13 @@ export interface CodexModelReasoningCardProps {
   onRedetect: () => void;
   onAdoptDetection: () => void;
   onManualDeclare: () => void;
-  /** 将当前自动解析的能力复制为用户声明，之后可编辑档位、映射与 Ultra。 */
+  /** 将当前自动解析的能力复制为用户声明，之后可编辑档位与映射。 */
   onCustomizeEffective?: () => void;
-  /** 从自动解析结果创建用户覆盖，并立即开启 Ultra。 */
-  onEnableUltra?: () => void;
+  ultra?: { enabled: boolean; providerEffort?: CodexReasoningEffort };
+  onUltraChange?: (ultra: {
+    enabled: boolean;
+    providerEffort?: CodexReasoningEffort;
+  }) => void;
   onRestoreBuiltin: () => void;
 }
 
@@ -169,7 +173,8 @@ export function CodexModelReasoningCard({
   onAdoptDetection,
   onManualDeclare,
   onCustomizeEffective,
-  onEnableUltra,
+  ultra,
+  onUltraChange,
   onRestoreBuiltin,
 }: CodexModelReasoningCardProps) {
   const status = reasoningCardStatus(resolution);
@@ -251,25 +256,71 @@ export function CodexModelReasoningCard({
       {onCustomizeEffective ? (
         <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-primary/30 bg-primary/5 p-2">
           <p className="text-muted-foreground">
-            当前是自动发现的结果，会随来源变化。开启 Ultra
-            会按当前结果创建可编辑的用户覆盖；需要调整映射时可选择自定义。
+            当前是自动发现的结果，会随来源变化。需要调整 Provider
+            能力或档位映射时可创建用户覆盖。
           </p>
-          <div className="flex flex-wrap gap-2">
-            {onEnableUltra ? (
-              <Button type="button" size="sm" onClick={onEnableUltra}>
-                开启 Ultra
-              </Button>
-            ) : null}
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={onCustomizeEffective}
-            >
-              按当前结果自定义
-            </Button>
-          </div>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={onCustomizeEffective}
+          >
+            按当前结果自定义
+          </Button>
         </div>
+      ) : null}
+
+      {onUltraChange ? (
+        <fieldset className="space-y-2 rounded-md border border-primary/40 bg-primary/5 p-3">
+          <legend className="px-1 font-semibold">Codex Ultra</legend>
+          <label className="flex items-center gap-2 font-medium">
+            <input
+              type="checkbox"
+              aria-label="解锁 Ultra 档"
+              checked={ultra?.enabled ?? false}
+              disabled={
+                controlKind !== "graded" ||
+                resolved.providerAcceptedEfforts.length === 0
+              }
+              onChange={(event) =>
+                onUltraChange({
+                  enabled: event.target.checked,
+                  providerEffort: ultra?.providerEffort,
+                })
+              }
+            />
+            解锁 Ultra 档
+          </label>
+          <label className="grid max-w-sm gap-1">
+            <span className="font-medium">Ultra 对应的 Provider 推理强度</span>
+            <select
+              className="rounded border bg-background px-2 py-1"
+              aria-label="Ultra 对应的 Provider 推理强度"
+              value={ultra?.providerEffort ?? ""}
+              disabled={!ultra?.enabled}
+              onChange={(event) =>
+                onUltraChange({
+                  enabled: ultra?.enabled ?? false,
+                  providerEffort: (event.target.value || undefined) as
+                    | CodexReasoningEffort
+                    | undefined,
+                })
+              }
+            >
+              <option value="">请选择推理强度…</option>
+              {resolved.providerAcceptedEfforts.map((effort) => (
+                <option key={effort} value={effort}>
+                  {effort}
+                </option>
+              ))}
+            </select>
+          </label>
+          <p className="text-muted-foreground">
+            Ultra 是 Codex 的主动 Sub-Agent 编排档，不是 Provider
+            原生档位。解锁后必须明确其对应的 Provider
+            推理强度；自动发现只限制可选范围。
+          </p>
+        </fieldset>
       ) : null}
 
       {isUnknown ? (

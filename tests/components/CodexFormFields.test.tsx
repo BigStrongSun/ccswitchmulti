@@ -515,7 +515,7 @@ describe("CodexFormFields local model routing", () => {
     ).toBeTruthy();
   });
 
-  it("lets automatic discovery enable Ultra through a direct user action", async () => {
+  it("keeps Ultra independent from automatic reasoning discovery", async () => {
     reasoningApiMocks.resolve.mockImplementation(
       async (_settings, _provider, model) => ({
         model,
@@ -561,23 +561,22 @@ describe("CodexFormFields local model routing", () => {
     expect(
       await screen.findByText(/自动发现会按当前 Provider、模型和已验证声明/),
     ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "开启 Ultra" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "解锁 Ultra 档" }));
+    fireEvent.change(
+      screen.getByRole("combobox", {
+        name: "Ultra 对应的 Provider 推理强度",
+      }),
+      { target: { value: "high" } },
+    );
 
     await waitFor(() => {
-      expect(latestCatalog()[0].reasoning).toEqual(
+      expect(latestCatalog()[0]).toEqual(
         expect.objectContaining({
-          source: "user",
-          supportedEfforts: ["low", "high"],
-          upstream: expect.objectContaining({
-            effortMap: expect.objectContaining({ max: "high" }),
-          }),
-          codexUltraOrchestration: { enabled: true },
+          codexUltra: { enabled: true, providerEffort: "high" },
         }),
       );
     });
-    expect(
-      screen.getByRole("checkbox", { name: "启用 Codex Ultra 编排" }),
-    ).toBeEnabled();
+    expect(latestCatalog()[0].reasoning).toBeUndefined();
   });
 
   it("renders the resolved reasoning card and lets the user declare an unknown model", async () => {

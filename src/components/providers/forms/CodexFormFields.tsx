@@ -90,9 +90,6 @@ interface CodexProtocolProbeOutcome {
 }
 
 const CODEX_PROTOCOL_PROBE_MODEL_CONCURRENCY = 3;
-// `ultra` is a Codex V2 orchestration mode, not a Provider-native effort.
-// Provider capability declarations can enable it only through
-// `codexUltraOrchestration`, after a verified max mapping is configured.
 const PROVIDER_REASONING_EFFORT_CHOICES: CodexReasoningEffort[] = [
   "minimal",
   "low",
@@ -100,15 +97,6 @@ const PROVIDER_REASONING_EFFORT_CHOICES: CodexReasoningEffort[] = [
   "high",
   "xhigh",
   "max",
-];
-
-const PROVIDER_REASONING_EFFORT_DESCENDING: CodexReasoningEffort[] = [
-  "max",
-  "xhigh",
-  "high",
-  "medium",
-  "low",
-  "minimal",
 ];
 
 export type CodexReasoningCapabilitySourceMode =
@@ -136,39 +124,6 @@ export function applyCodexReasoningCapabilitySource(
     disableAllowed: false,
     upstream: { format: "none", parameter: "none" },
     source: "user",
-  };
-}
-
-/**
- * Ultra is a Codex orchestration switch. For an automatically discovered
- * graded model, persist an editable user override and map Codex max to the
- * strongest Provider effort that discovery has actually confirmed.
- */
-export function enableCodexUltraFromEffectiveCapability(
-  capability: CodexModelReasoningCapability,
-): CodexModelReasoningCapability | undefined {
-  if (
-    capability.controlKind !== "graded" ||
-    capability.supportStatus !== "confirmed_supported"
-  ) {
-    return undefined;
-  }
-  const maxTarget = PROVIDER_REASONING_EFFORT_DESCENDING.find((effort) =>
-    capability.supportedEfforts.includes(effort),
-  );
-  if (!maxTarget) return undefined;
-
-  const effortMap = { ...(capability.upstream.effortMap ?? {}) };
-  for (const effort of capability.supportedEfforts) {
-    effortMap[effort] ??= effort;
-  }
-  effortMap.max = maxTarget;
-  return {
-    ...structuredClone(capability),
-    schemaVersion: 2,
-    source: "user",
-    upstream: { ...capability.upstream, effortMap },
-    codexUltraOrchestration: { enabled: true },
   };
 }
 
@@ -571,6 +526,7 @@ function createCatalogRow(seed?: Partial<CodexCatalogModel>): CodexCatalogRow {
       ? { baseInstructions: seed.baseInstructions }
       : {}),
     ...(seed?.reasoning ? { reasoning: seed.reasoning } : {}),
+    ...(seed?.codexUltra ? { codexUltra: seed.codexUltra } : {}),
   };
 }
 
@@ -599,6 +555,7 @@ function catalogRowsMatchModels(
       | "inputModalities"
       | "supportsImage"
       | "reasoning"
+      | "codexUltra"
     >
   >,
   models: CodexCatalogModel[],
@@ -625,7 +582,9 @@ function catalogRowsMatchModels(
           incoming.vision ??
           null) &&
       JSON.stringify(row.reasoning ?? null) ===
-        JSON.stringify(incoming.reasoning ?? null)
+        JSON.stringify(incoming.reasoning ?? null) &&
+      JSON.stringify(row.codexUltra ?? null) ===
+        JSON.stringify(incoming.codexUltra ?? null)
     );
   });
 }
@@ -729,6 +688,7 @@ function buildCodexProviderReadinessIdentity({
       baseInstructions:
         model.baseInstructions ?? model.base_instructions ?? null,
       reasoning: model.reasoning ?? null,
+      codexUltra: model.codexUltra ?? null,
     })),
   });
 }
@@ -2061,9 +2021,7 @@ export function CodexFormFields({
                       source={reasoningSourceLabel}
                       selectableEfforts={selectableEfforts}
                       defaultEffort={defaultEffort}
-                      ultraEnabled={
-                        row.reasoning?.codexUltraOrchestration?.enabled === true
-                      }
+                      ultraEnabled={row.codexUltra?.enabled === true}
                       expanded={isReasoningEditorExpanded}
                       onToggle={() =>
                         setExpandedReasoningRowId((current) =>
@@ -2193,27 +2151,9 @@ export function CodexFormFields({
                                     })
                                 : undefined
                             }
-                            onEnableUltra={
-                              !row.reasoning && discoveredReasoning
-                                ? () => {
-                                    const ultraOverride =
-                                      enableCodexUltraFromEffectiveCapability(
-                                        discoveredReasoning,
-                                      );
-                                    if (!ultraOverride) {
-                                      toast.error(
-                                        "当前自动发现结果没有已确认的分档推理能力，无法自动开启 Ultra。请先手动声明模型档位。",
-                                      );
-                                      return;
-                                    }
-                                    handleUpdateCatalogRow(index, {
-                                      reasoning: ultraOverride,
-                                    });
-                                    toast.success(
-                                      `已开启 Ultra：Codex max 将映射到 Provider ${ultraOverride.upstream.effortMap?.max}。`,
-                                    );
-                                  }
-                                : undefined
+                            ultra={row.codexUltra}
+                            onUltraChange={(codexUltra) =>
+                              handleUpdateCatalogRow(index, { codexUltra })
                             }
                             onRestoreBuiltin={() =>
                               handleUpdateCatalogRow(index, {

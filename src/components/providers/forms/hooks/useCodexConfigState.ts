@@ -206,6 +206,10 @@ function extractCodexCatalogModels(modelCatalog: any): CodexCatalogModel[] {
           : undefined;
       const enabled =
         typeof item?.enabled === "boolean" ? item.enabled : undefined;
+      const codexUltra =
+        item?.codexUltra && typeof item.codexUltra === "object"
+          ? item.codexUltra
+          : undefined;
 
       return {
         model: typeof item?.model === "string" ? item.model : "",
@@ -220,6 +224,7 @@ function extractCodexCatalogModels(modelCatalog: any): CodexCatalogModel[] {
         ...(supportsImage !== undefined ? { supportsImage } : {}),
         ...(baseInstructions ? { baseInstructions } : {}),
         ...(reasoning ? { reasoning } : {}),
+        ...(codexUltra ? { codexUltra } : {}),
       };
     })
     .filter((item: CodexCatalogModel) => item.model.trim());
