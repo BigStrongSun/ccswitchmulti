@@ -2310,10 +2310,14 @@ fn external_codex_router_model_entries(
             }
             collect_string_array(&mut ids, route.pointer("/match/models"));
             collect_string_array(&mut ids, route.get("models"));
+            collect_string_array(&mut ids, route.pointer("/modelSelection/models"));
             collect_model_objects(&mut entries, route.pointer("/match/models"));
             collect_model_objects(&mut entries, route.get("models"));
+            collect_model_objects(&mut entries, route.pointer("/modelSelection/models"));
             if ids.is_empty() {
                 collect_string_array(&mut ids, route.pointer("/match/prefixes"));
+                collect_string_array(&mut ids, route.get("matchPrefixes"));
+                collect_string_array(&mut ids, route.get("match_prefixes"));
             }
         }
     }

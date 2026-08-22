@@ -2993,15 +2993,31 @@ impl Database {
         }
 
         fn route_matches_model(route: &serde_json::Value, model: &str) -> bool {
-            route
+            let exact = route
                 .pointer("/match/models")
+                .or_else(|| route.pointer("/modelSelection/models"))
                 .and_then(serde_json::Value::as_array)
                 .is_some_and(|models| {
                     models
                         .iter()
                         .filter_map(serde_json::Value::as_str)
                         .any(|candidate| candidate.eq_ignore_ascii_case(model))
-                })
+                });
+            let model_lower = model.to_ascii_lowercase();
+            let prefix = route
+                .pointer("/match/prefixes")
+                .or_else(|| route.get("matchPrefixes"))
+                .or_else(|| route.get("match_prefixes"))
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|prefixes| {
+                    prefixes
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(str::trim)
+                        .filter(|prefix| !prefix.is_empty())
+                        .any(|prefix| model_lower.starts_with(&prefix.to_ascii_lowercase()))
+                });
+            exact || prefix
         }
 
         fn canonicalize_deepseek_route(
