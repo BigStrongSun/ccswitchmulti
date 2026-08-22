@@ -2064,14 +2064,20 @@ impl ProxyService {
                             self.codex_respect_system_proxy_enabled(),
                         )?;
                     live_config["config"] = json!(updated_config);
+                    // 投影版 provider：sync_codex_model_catalog_projection_flag 会把
+                    // modelCatalog 塞进 live_config，后续 codex_settings_for_model_catalog_projection
+                    // 见 root 已有 modelCatalog 就不再替换——因此这里必须用含 sortIndex 排序的
+                    // 投影 modelCatalog，否则 Codex 模型菜单乱序。
+                    let projected_provider =
+                        self.codex_provider_with_projected_model_catalog(codex_provider.as_ref());
                     Self::sync_codex_model_catalog_projection_flag(
                         &mut live_config,
-                        codex_provider.as_ref(),
+                        projected_provider.as_ref(),
                     );
 
                     self.write_codex_takeover_live_for_provider(
                         &live_config,
-                        codex_provider.as_ref(),
+                        projected_provider.as_ref(),
                     )?;
                 }
             }
@@ -3020,8 +3026,15 @@ impl ProxyService {
                 let provider_context =
                     crate::codex_config::codex_provider_classification_context(self.db.as_ref())
                         .map_err(|e| format!("读取 Codex Provider 分类上下文失败: {e}"))?;
+                // schema-v2 router 必须用投影 settings（含 sortIndex 排序），否则
+                // catalog 生成链读不到 sortIndex → Codex 模型菜单乱序。
+                let settings_for_live =
+                    match self.codex_provider_with_projected_model_catalog(Some(&provider)) {
+                        Some(projected) => projected.settings_config,
+                        None => effective_settings.clone(),
+                    };
                 crate::codex_config::write_codex_provider_live_with_catalog_and_provider_context(
-                    &effective_settings,
+                    &settings_for_live,
                     provider.category.as_deref(),
                     auth,
                     config_str,
@@ -3833,6 +3846,17 @@ impl ProxyService {
         // 与 write_live_with_common_config 的 SSOT 恢复路径保持一致。
         let provider = self.codex_provider_with_projected_model_catalog(provider);
         let provider_ref = provider.as_ref();
+        // 调用方可能已用 sync_codex_model_catalog_projection_flag 往 live_config 塞过
+        // 原始 modelCatalog（无 sortIndex）；codex_settings_for_model_catalog_projection
+        // 见 root 已有 modelCatalog 就不再替换。因此这里强制用投影/当前 modelCatalog 覆盖，
+        // 保证任何 takeover 调用点（启动接管/热切换/回滚）都写出排序正确的 catalog。
+        let mut live_config = config.clone();
+        if let (Some(provider), Some(root)) = (provider_ref, live_config.as_object_mut()) {
+            if let Some(model_catalog) = provider.settings_config.get("modelCatalog").cloned() {
+                root.insert("modelCatalog".to_string(), model_catalog);
+            }
+        }
+        let config = &live_config;
         // 接管态的 `PROXY_MANAGED` 只是本地代理门面 token，不能写入 auth.json。
         // 否则 Codex Desktop 会失去原始 ChatGPT OAuth 登录材料，表现为切换
         // MultiRouter/本地代理后要求重新登录。这里不再依赖兼容设置开关：只要是
