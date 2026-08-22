@@ -967,6 +967,8 @@ fn codex_catalog_route_matches_model(route: &Value, model: &str) -> bool {
     let match_config = route.get("match").unwrap_or(route);
     if match_config
         .get("models")
+        .or_else(|| route.get("models"))
+        .or_else(|| route.pointer("/modelSelection/models"))
         .and_then(|value| value.as_array())
         .into_iter()
         .flatten()
@@ -979,8 +981,12 @@ fn codex_catalog_route_matches_model(route: &Value, model: &str) -> bool {
     let lower_model = model.to_ascii_lowercase();
     match_config
         .get("prefixes")
+        .or_else(|| match_config.get("matchPrefixes"))
+        .or_else(|| match_config.get("match_prefixes"))
         .or_else(|| match_config.get("modelPrefixes"))
         .or_else(|| match_config.get("model_prefixes"))
+        .or_else(|| route.get("matchPrefixes"))
+        .or_else(|| route.get("match_prefixes"))
         .and_then(|value| value.as_array())
         .into_iter()
         .flatten()

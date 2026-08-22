@@ -1588,8 +1588,9 @@ fn find_codex_route_by_match_priority<'a>(
 
 /// 判断单条 Codex route 是否匹配请求模型。
 ///
-/// 新 schema 使用 `match.models` / `match.prefixes`；旧 schema 使用顶层 `models` /
-/// `modelPrefixes`。两套字段都按大小写不敏感处理，避免 UI 显示大小写差异导致误路由。
+/// V2 schema 使用 `modelSelection` / `matchPrefixes`；旧 schema 使用 `match.models` /
+/// `match.prefixes` 或顶层 `models` / `modelPrefixes`。所有字段都按大小写不敏感处理，
+/// 避免 UI 显示大小写差异导致误路由。
 pub(crate) fn codex_route_matches_model(route: &JsonValue, request_model: &str) -> bool {
     codex_route_has_exact_model_match(route, request_model)
         || codex_route_has_prefix_model_match(route, request_model)
@@ -1601,6 +1602,10 @@ fn codex_route_has_exact_model_match(route: &JsonValue, request_model: &str) -> 
 
     match_config
         .get("models")
+        .or_else(|| route.get("models"))
+        // V2 `include` selection is an exact-model declaration. Raw settings
+        // consumers still need it while a live V2 plan is being compiled.
+        .or_else(|| route.pointer("/modelSelection/models"))
         .and_then(|value| value.as_array())
         .into_iter()
         .flatten()
@@ -1616,8 +1621,12 @@ fn codex_route_has_prefix_model_match(route: &JsonValue, request_model: &str) ->
 
     match_config
         .get("prefixes")
+        .or_else(|| match_config.get("matchPrefixes"))
+        .or_else(|| match_config.get("match_prefixes"))
         .or_else(|| match_config.get("modelPrefixes"))
         .or_else(|| match_config.get("model_prefixes"))
+        .or_else(|| route.get("matchPrefixes"))
+        .or_else(|| route.get("match_prefixes"))
         .or_else(|| route.get("modelPrefixes"))
         .or_else(|| route.get("model_prefixes"))
         .and_then(|prefixes| prefixes.as_array())
@@ -6820,6 +6829,34 @@ wire_api = "responses"
         assert_eq!(prefix.route_id, "prefix");
         assert_eq!(prefix.canonical_model, "qwen-new");
         assert_eq!(fallback.route_id, "default");
+    }
+
+    #[test]
+    fn raw_v2_routes_match_match_prefixes_and_include_models_before_official_fallback() {
+        let official = json!({
+            "id": "official",
+            "enabled": true,
+            "targetProviderId": "openai",
+            "modelSelection": {"mode": "all"},
+            "matchPrefixes": ["gpt-"]
+        });
+        let deepseek = json!({
+            "id": "deepseek",
+            "enabled": true,
+            "targetProviderId": "deepseek",
+            "modelSelection": {"mode": "include", "models": ["deepseek-v4-pro"]},
+            "matchPrefixes": ["deepseek-"]
+        });
+        let routes = vec![official, deepseek];
+
+        let prefix = find_codex_route_by_match_priority(&routes, "deepseek-v4-flash")
+            .expect("V2 matchPrefixes should select DeepSeek route");
+        assert_eq!(prefix["id"], "deepseek");
+
+        let exact = find_codex_route_by_match_priority(&routes, "deepseek-v4-pro")
+            .expect("V2 include selection should be an exact route match");
+        assert_eq!(exact["id"], "deepseek");
+        assert!(codex_route_matches_model(exact, "deepseek-v4-flash"));
     }
 
     #[test]

@@ -870,6 +870,8 @@ fn collect_route_models(route: &Value) -> Vec<String> {
     if ids.is_empty() {
         if let Some(prefixes) = route
             .pointer("/match/prefixes")
+            .or_else(|| route.get("matchPrefixes"))
+            .or_else(|| route.get("match_prefixes"))
             .or_else(|| route.get("modelPrefixes"))
             .or_else(|| route.get("model_prefixes"))
             .and_then(|value| value.as_array())
