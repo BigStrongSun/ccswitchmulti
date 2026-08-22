@@ -894,7 +894,7 @@ fn extract_codex_top_level_string(config_text: &str, field: &str) -> Option<Stri
 
 /// 判断模型是否只能按文本模型写入 Codex catalog。
 ///
-/// Spark 和 DeepSeek V4 兼容 Responses 文本工具调用，但 Codex 会根据
+/// Spark 和已确认的 DeepSeek V4 文本模型兼容 Responses 文本工具调用，但 Codex 会根据
 /// `input_modalities` 里的 `image` 自动注入 hosted `image_generation` 工具；
 /// 这些模型不支持该工具，所以生成 catalog 时必须覆盖模板里的图片模态。
 fn codex_catalog_model_name_is_text_only(model: &str) -> bool {
@@ -904,7 +904,10 @@ fn codex_catalog_model_name_is_text_only(model: &str) -> bool {
         .flat_map(|ch| ch.to_lowercase())
         .collect::<String>();
 
-    normalized == "gpt53codexspark" || normalized.starts_with("deepseekv4")
+    matches!(
+        normalized.as_str(),
+        "gpt53codexspark" | "deepseekv4flash" | "deepseekv4pro"
+    )
 }
 
 /// 判断生成 catalog 时是否保留 OpenAI 官方 GPT 的速度/服务档。
@@ -7645,6 +7648,46 @@ mod tests {
                 "DeepSeek cannot consume Codex tool_search; MCP tools must remain inline"
             );
         }
+    }
+
+    #[test]
+    fn deepseek_vision_catalog_preserves_official_modalities_and_reasoning() {
+        let models = load_codex_deepseek_official_catalog_models();
+        let vision = models
+            .iter()
+            .find(|model| {
+                model.get("slug").and_then(Value::as_str) == Some("deepseek-v4-flash-vision-exp")
+            })
+            .expect("bundled DeepSeek catalog must include Flash Vision");
+
+        assert_eq!(
+            vision.get("input_modalities"),
+            Some(&json!(["text", "image"]))
+        );
+        assert_eq!(
+            vision.get("supports_image_detail_original"),
+            Some(&json!(true))
+        );
+        assert_eq!(vision.get("context_window"), Some(&json!(1_048_576)));
+        assert_eq!(vision.get("max_context_window"), Some(&json!(1_048_576)));
+        assert_eq!(vision.get("default_reasoning_level"), Some(&json!("high")));
+        assert_eq!(
+            vision.get("supported_reasoning_levels"),
+            Some(&json!([
+                {"effort": "low", "description": "Fast responses with lighter reasoning"},
+                {"effort": "high", "description": "Extra high reasoning depth for complex problems"},
+                {"effort": "max", "description": "Maximum reasoning depth for the hardest problems"}
+            ]))
+        );
+    }
+
+    #[test]
+    fn only_known_deepseek_v4_text_models_are_forced_to_text() {
+        assert!(codex_catalog_model_name_is_text_only("deepseek-v4-flash"));
+        assert!(codex_catalog_model_name_is_text_only("deepseek-v4-pro"));
+        assert!(!codex_catalog_model_name_is_text_only(
+            "deepseek-v4-flash-vision-exp"
+        ));
     }
 
     fn reasoning_inspect_provider() -> Provider {

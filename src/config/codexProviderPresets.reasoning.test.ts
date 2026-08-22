@@ -85,6 +85,18 @@ describe("Codex preset reasoning capabilities", () => {
         defaultEffort: "high",
       }),
     );
+    expect(presetModel("DeepSeek", "deepseek-v4-flash-vision-exp")).toEqual(
+      expect.objectContaining({
+        contextWindow: 1048576,
+        inputModalities: ["text", "image"],
+        textOnly: false,
+        supportsImage: true,
+        reasoning: expect.objectContaining({
+          supportedEfforts: ["low", "high", "max"],
+          defaultEffort: "high",
+        }),
+      }),
+    );
   });
 
   it("declares Grok 4.5 efforts without a disable value", () => {

@@ -653,7 +653,7 @@ pub fn builtin_reasoning_capability_for_model(
     // 保持精确匹配，未知第三方模型不得继承 GPT 通用档位。
     if !matches!(
         normalized.as_str(),
-        "deepseek-v4-flash" | "deepseek-v4-pro" | "k3" | "k3-256k"
+        "deepseek-v4-flash" | "deepseek-v4-pro" | "deepseek-v4-flash-vision-exp" | "k3" | "k3-256k"
     ) {
         return None;
     }
@@ -1189,8 +1189,11 @@ mod tests {
             .expect("known Flash capability");
         let pro = builtin_reasoning_capability_for_model("DEEPSEEK-V4-PRO")
             .expect("known Pro capability");
+        let vision = builtin_reasoning_capability_for_model("deepseek-v4-flash-vision-exp")
+            .expect("known Flash Vision capability");
         assert_eq!(flash.supported_efforts, vec!["low", "high", "max"]);
         assert_eq!(pro.default_effort.as_deref(), Some("high"));
+        assert_eq!(vision.default_effort.as_deref(), Some("high"));
         assert!(builtin_reasoning_capability_for_model("deepseek-v4-flash-preview").is_none());
         assert!(builtin_reasoning_capability_for_model("vendor/deepseek-v4-pro").is_none());
     }
