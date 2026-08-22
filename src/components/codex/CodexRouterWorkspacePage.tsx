@@ -2807,6 +2807,7 @@ export function CodexRouterWorkspacePage({
   // 不能因缺少 targetProviderId 退回到刷新全部候选 Provider。
   const selectedPlanForModelRefresh =
     routingPlans.find((provider) => provider.id === selectedPlanId) ??
+    routingPlans.find((provider) => provider.id === activeProviderId) ??
     routingPlans[0] ??
     null;
   const enabledModelSourceIdsForRefresh = useMemo(() => {
@@ -3005,6 +3006,10 @@ export function CodexRouterWorkspacePage({
   const routeModels = collectRouteModels(routeEntries);
   const selectedPlan =
     routingPlans.find((provider) => provider.id === selectedPlanId) ??
+    // 未显式选中时优先当前激活的 Codex provider（个人版/公司版），
+    // 而不是 routingPlans[0]——后者顺序来自 Object.values(providers)，
+    // 键枚举顺序不稳定，会随机落到某个 plan（用户观察到总是公司版）。
+    routingPlans.find((provider) => provider.id === activeProviderId) ??
     routingPlans[0] ??
     null;
   const selectedRouting = selectedPlan ? readCodexRouting(selectedPlan) : null;
