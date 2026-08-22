@@ -16,3 +16,9 @@
 - Ultra 控件不再藏在“配置推理能力”展开卡中。能力来源、自动发现说明、映射和上游协议细节仍留在展开配置，避免把产品编排设置误当作 Provider 能力来源。
 - 模型行从 resolver 当前结果取得 `providerAcceptedEfforts`，因此无论能力来自自动发现、维护库、用户声明或官方目录，Ultra 下拉都只提供上游实际接受的强度；开启但未选择强度仍由 Provider 保存门禁拒绝。
 - 回归：`pnpm typecheck`、模型摘要/Provider 表单/编辑器 46 条定向 Vitest、Rust `catalog_ultra_setting_overlays_library_capability_without_changing_its_source`、`git diff --check` 均通过。定向前端测试仍会输出既有 React `act(...)` 警告，但退出码为 0。
+
+## 2026-08-22 本地 Windows 构建证据
+
+- 源码提交 `75f2149` 已通过仓库标准 `pnpm release:export` 流程构建；没有执行安装、停止服务或变更现有运行态。
+- 导出目录为 `C:\Users\sunda\Documents\LLMservice\最新版ccswitchmulti`，包含 `CCSwitchMulti_3.19.2-15_x64-setup.exe`、便携 ZIP、原始 EXE、NSIS installed-exe 哈希、`latest.json` 与 SHA-256 清单。
+- 安装包 SHA-256 为 `7B707FEE7E41D7D47F08E3A57217C917EAAA2D611F24D1FFE9FB99EE46411676`；`.sig` 存在。15 个清单条目全部重新计算匹配；EXE FileVersion/ProductVersion 均为 `3.19.2-15`，`latest.json` 仅包含本机可构建的 `windows-x86_64` 更新条目。
