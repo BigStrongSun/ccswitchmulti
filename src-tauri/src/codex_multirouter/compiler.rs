@@ -37,6 +37,7 @@ pub struct CompiledCodexModel {
     pub visible_model: String,
     pub canonical_model: String,
     pub upstream_model: String,
+    pub display_name: String,
     pub target_provider_id: String,
     pub route_id: String,
     pub api_format: String,
@@ -164,6 +165,7 @@ pub fn compile_v2(
                 visible_model,
                 canonical_model: candidate.canonical_model.clone(),
                 upstream_model: candidate.upstream_model.clone(),
+                display_name: model_display_name(candidate.model_entry, &candidate.canonical_model),
                 target_provider_id: candidate.provider.id.clone(),
                 route_id: candidate.route_id.to_string(),
                 api_format,
@@ -362,6 +364,14 @@ fn upstream_model(model_entry: &Value, canonical_model: &str) -> String {
     string_field(model_entry, &["upstreamModel", "upstream_model"])
         .unwrap_or(canonical_model)
         .to_string()
+}
+
+fn model_display_name(model_entry: &Value, canonical_model: &str) -> String {
+    string_field(model_entry, &["displayName", "display_name"])
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| canonical_model.to_string())
 }
 
 fn model_sort_index(model_entry: &Value) -> Option<usize> {

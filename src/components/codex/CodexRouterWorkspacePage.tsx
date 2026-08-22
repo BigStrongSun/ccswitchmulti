@@ -4194,6 +4194,12 @@ function ModelOrderTab({
 
   async function saveOrder(reset = false) {
     if (!selectedPlan) return;
+    console.error("[model-order] saveOrder start", {
+      reset,
+      planId: selectedPlan.id,
+      draftCount: draftModels.length,
+      selectedRoutes: selectedRoutes.length,
+    });
     setIsSaving(true);
     setMessage(null);
     setError(null);
@@ -4205,7 +4211,12 @@ function ModelOrderTab({
           return reset ? rest : { ...rest, sortIndex: index };
         },
       );
+      console.error(
+        "[model-order] models",
+        models.map((model) => `${model.model}:${model.sortIndex}`).join(","),
+      );
       const updates = new Map<string, Provider>();
+      let matchedCount = 0;
       for (const [sortIndex, projectedModel] of models.entries()) {
         const visibleModel = projectedModel.model?.trim();
         if (!visibleModel) continue;
@@ -4217,7 +4228,8 @@ function ModelOrderTab({
           const canonicalModel = aliases[visibleModel] ?? visibleModel;
           if (
             route.modelSelection?.mode === "include" &&
-            !route.modelSelection.models.includes(canonicalModel)
+            !route.modelSelection.models.includes(canonicalModel) &&
+            !route.modelSelection.models.includes(visibleModel)
           ) {
             continue;
           }
@@ -4228,6 +4240,7 @@ function ModelOrderTab({
           const sourceModels = readCodexModelCatalog(source).models;
           const sourceIndex = sourceModels.findIndex(
             (model) =>
+              model.model?.trim() === visibleModel ||
               model.model?.trim() === canonicalModel ||
               model.upstreamModel?.trim() === canonicalModel ||
               model.upstream_model?.trim() === canonicalModel,
@@ -4250,12 +4263,45 @@ function ModelOrderTab({
               },
             },
           });
+          matchedCount += 1;
+          console.error(
+            "[model-order] matched",
+            visibleModel,
+            "canonical=",
+            canonicalModel,
+            "->",
+            targetProviderId,
+            "sortIndex=",
+            sortIndex,
+          );
           break;
         }
       }
+      console.error(
+        "[model-order] updates size",
+        updates.size,
+        "matchedCount",
+        matchedCount,
+        "targets",
+        [...updates.keys()].join(","),
+      );
+      if (updates.size === 0) {
+        console.error("[model-order] save aborted: updates is empty");
+        setError(
+          "保存模型顺序失败：没有匹配到任何目标 Provider（updates 为空，请把诊断日志发我）",
+        );
+        return;
+      }
       for (const provider of updates.values()) {
+        console.error(
+          "[model-order] updating provider",
+          provider.id,
+          "catalog models",
+          readCodexModelCatalog(provider).models.length,
+        );
         await providersApi.update(provider, "codex");
       }
+      console.error("[model-order] save completed");
       setDraftModels(models);
       setMessage(
         reset

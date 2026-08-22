@@ -52,8 +52,20 @@ where
     let affected_router_ids = validate_and_collect_affected_router_ids(db, &provider)?;
     db.save_provider("codex", &provider)?;
 
+    // 多 MultiRouter 并存时（如个人版 + 公司版），只有当前激活的 router 拥有
+    // `.codex/cc-switch-model-catalog.json` 这个落盘文件的写入权。非激活 router
+    // 若也 publish，会用它的投影覆盖激活 router 的模型列表（竞态，后写者胜）。
+    // 因此这里只对激活 router 发布；非激活 router 跳过，等切换激活后再发布。
+    let active_router_id = active_codex_router_id(db)?;
+
     let mut projections = Vec::with_capacity(affected_router_ids.len());
     for router_id in affected_router_ids {
+        if active_router_id
+            .as_deref()
+            .is_some_and(|active| active != router_id)
+        {
+            continue;
+        }
         projections.push(ensure_projection_with_publisher(
             db,
             &router_id,
@@ -62,6 +74,33 @@ where
         )?);
     }
     Ok(CodexProviderMutationOutcome { projections })
+}
+
+/// 解析当前激活的 Codex MultiRouter provider id。
+///
+/// 从 profile 绑定解析：当前 profile（`current_profile_id_codex`）的
+/// `providers.codex` 字段。拿不到时回退到 DB 的 `is_current` 标记，两者都
+/// 没有时返回 None，此时所有 router 都发布（保持旧行为，避免单 router
+/// 场景退化）。
+fn active_codex_router_id(db: &Database) -> Result<Option<String>, AppError> {
+    if let Some(profile_id) = db.get_current_profile_id("codex")? {
+        let profiles = db.get_all_profiles()?;
+        if let Some(profile) = profiles.into_iter().find(|p| p.id == profile_id) {
+            let payload: serde_json::Value =
+                serde_json::from_str(&profile.payload).map_err(|error| {
+                    AppError::Database(format!("Failed to parse profile payload: {error}"))
+                })?;
+            if let Some(id) = payload
+                .get("providers")
+                .and_then(|v| v.get("codex"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|id| !id.is_empty())
+            {
+                return Ok(Some(id.to_string()));
+            }
+        }
+    }
+    db.get_current_provider("codex")
 }
 
 fn validate_and_collect_affected_router_ids(
@@ -537,5 +576,49 @@ mod tests {
             .get_provider_by_id("qwen", "codex")
             .expect("read target")
             .is_some());
+    }
+
+    #[test]
+    fn shared_provider_mutation_publishes_only_the_active_router() {
+        let db = Database::memory().expect("memory db");
+        db.save_provider("codex", &target("openai_chat"))
+            .expect("seed shared target");
+        db.save_provider("codex", &router("router-personal", "qwen"))
+            .expect("seed personal router");
+        db.save_provider("codex", &router("router-company", "qwen"))
+            .expect("seed company router sharing the same target");
+
+        // 当前 profile 绑定个人版 router
+        let profile_id = "profile-personal".to_string();
+        db.save_profile(&crate::database::Profile {
+            id: profile_id.clone(),
+            name: "个人".to_string(),
+            payload: r#"{"providers":{"codex":"router-personal"}}"#.to_string(),
+            sort_order: None,
+            created_at: Some(1),
+            updated_at: Some(1),
+        })
+        .expect("seed profile");
+        db.set_current_profile_id("codex", Some(&profile_id))
+            .expect("set active profile");
+
+        let published = RefCell::new(Vec::new());
+        apply_codex_provider_mutation_with_publisher(
+            &db,
+            target("openai_responses"),
+            |artifact| {
+                published.borrow_mut().push(artifact.router_provider_id.clone());
+                Ok(ProjectionReadBack::verified(
+                    artifact.dependency_fingerprint.clone(),
+                ))
+            },
+        )
+        .expect("apply shared provider mutation");
+
+        assert_eq!(
+            published.into_inner(),
+            vec!["router-personal".to_string()],
+            "only the active router must publish; the inactive one must not overwrite the shared catalog file"
+        );
     }
 }

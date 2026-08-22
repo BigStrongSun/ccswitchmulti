@@ -388,6 +388,14 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
         use std::os::windows::ffi::OsStrExt;
         use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
 
+        // 瞬时文件锁：目标文件被其他进程以不允许删除共享的方式短暂打开
+        // （Codex/extension-host 读配置、杀毒软件扫描、Windows Search 索引等）。
+        // 错误码 1175 = ERROR_UNABLE_TO_REMOVE_REPLACED、32 = ERROR_SHARING_VIOLATION、
+        // 5 = ERROR_ACCESS_DENIED。这类锁通常在数百毫秒内释放，等待重试即可穿越。
+        fn is_transient_replace_lock(error: &std::io::Error) -> bool {
+            matches!(error.raw_os_error(), Some(1175) | Some(32) | Some(5))
+        }
+
         let replaced: Vec<u16> = path
             .as_os_str()
             .encode_wide()
@@ -399,9 +407,9 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
             .chain(std::iter::once(0))
             .collect();
         let mut completed = false;
-        let mut last_error = None;
+        let mut transient_error = None;
 
-        for _ in 0..3 {
+        for attempt in 0..5 {
             // SAFETY: both path buffers are NUL-terminated UTF-16 and remain alive for the
             // duration of the call. Backup, exclusion, and reserved pointers are intentionally null.
             let replaced_ok = unsafe {
@@ -420,9 +428,21 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
             }
 
             let replace_error = std::io::Error::last_os_error();
+            if is_transient_replace_lock(&replace_error) {
+                // 瞬时锁：短暂等待后重试，避免热切换被外部读句柄一次打断。
+                transient_error = Some(replace_error);
+                if attempt < 4 {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                continue;
+            }
+
             if replace_error.kind() != std::io::ErrorKind::NotFound {
-                last_error = Some(replace_error);
-                break;
+                let _ = fs::remove_file(&tmp);
+                return Err(AppError::IoContext {
+                    context: format!("原子替换失败: {} -> {}", tmp.display(), path.display()),
+                    source: replace_error,
+                });
             }
 
             match fs::rename(&tmp, path) {
@@ -436,22 +456,40 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
                         std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::PermissionDenied
                     ) =>
                 {
-                    last_error = Some(source);
+                    transient_error = Some(source);
                 }
                 Err(source) => {
-                    last_error = Some(source);
-                    break;
+                    let _ = fs::remove_file(&tmp);
+                    return Err(AppError::IoContext {
+                        context: format!(
+                            "原子替换失败(rename 降级): {} -> {}",
+                            tmp.display(),
+                            path.display()
+                        ),
+                        source,
+                    });
                 }
             }
         }
 
         if !completed {
-            let source = last_error.unwrap_or_else(std::io::Error::last_os_error);
+            // 原子替换重试耗尽：降级为直接覆盖写目标文件，保证配置切换成功。
+            // 瞬时锁释放后覆盖写（需要写共享）通常可成功；若仍被独占写锁则如实报错。
+            if let Err(source) = fs::write(path, data) {
+                let _ = fs::remove_file(&tmp);
+                let transient_detail = transient_error
+                    .as_ref()
+                    .map(|error| format!("(最后一次瞬时锁错误: {error})"))
+                    .unwrap_or_default();
+                let context = format!(
+                    "原子替换失败(重试5次+降级覆盖写仍失败): {} -> {}{}",
+                    tmp.display(),
+                    path.display(),
+                    transient_detail
+                );
+                return Err(AppError::IoContext { context, source });
+            }
             let _ = fs::remove_file(&tmp);
-            return Err(AppError::IoContext {
-                context: format!("原子替换失败: {} -> {}", tmp.display(), path.display()),
-                source,
-            });
         }
     }
 
