@@ -3224,7 +3224,6 @@ export function CodexRouterWorkspacePage({
         codexRouting: serializeCodexRoutingV2(nextRouting),
       },
     };
-    delete nextProvider.settingsConfig.modelCatalog;
     const nextEnabledProviderIds = new Set<string>();
     for (const route of normalizedRoutes) {
       if (route.enabled === false) continue;
@@ -6196,7 +6195,6 @@ function SpawnAgentCandidatesPanel({
           }),
         },
       };
-      delete nextProvider.settingsConfig.modelCatalog;
       await providersApi.update(nextProvider, "codex");
       setDraftSpawnAgentModels(normalized);
       setCandidateSaveMessage(

@@ -79,6 +79,7 @@ const SYNC_SKIP_TABLES: &[&str] = &[
     "provider_health",
     "proxy_live_backup",
     "usage_daily_rollups",
+    "session_log_sync",
 ];
 
 /// Tables whose local data is preserved (restored from local snapshot) during WebDAV import.
@@ -88,6 +89,7 @@ const SYNC_PRESERVE_TABLES: &[&str] = &[
     "stream_check_logs",
     "proxy_live_backup",
     "usage_daily_rollups",
+    "session_log_sync",
 ];
 
 /// A database backup entry for the UI
@@ -258,6 +260,13 @@ impl Database {
         }
 
         for table in tables {
+            // 本地运行时状态表不参与跨设备同步：路径 portableize/localize 对它们
+            // 无意义且有害（如 session_log_sync.file_path 主键 localize 后可能撞键）。
+            if SYNC_SKIP_TABLES.contains(&table.as_str())
+                || SYNC_PRESERVE_TABLES.contains(&table.as_str())
+            {
+                continue;
+            }
             let text_columns = Self::get_text_columns(conn, &table)?;
             if text_columns.is_empty() {
                 continue;
