@@ -14799,6 +14799,46 @@ model_provider = "codex_model_router_v2"
     }
 
     #[test]
+    fn model_catalog_user_image_override_reaches_generated_catalog() {
+        let template = json!({
+            "slug": "gpt-5.5",
+            "display_name": "GPT-5.5",
+            "context_window": 272000,
+            "max_context_window": 272000,
+            "supports_image_detail_original": true,
+            "input_modalities": ["text", "image"],
+            "model_messages": []
+        });
+        let settings = json!({
+            "modelCatalog": {
+                "models": [{
+                    "model": "deepseek-v4-flash",
+                    "inputModalities": ["text", "image"],
+                    "supportsImage": true,
+                    "textOnly": false
+                }]
+            }
+        });
+
+        let specs = codex_catalog_model_specs(&settings, r#"model_context_window = 64000"#);
+        assert_eq!(specs.len(), 1);
+        assert!(
+            !specs[0].text_only,
+            "an explicit user image capability must override the text-model fallback"
+        );
+
+        let catalog = codex_model_catalog_from_specs(
+            &specs,
+            &template,
+            CodexCatalogToolProfile::ProxyChat,
+            128_000,
+        );
+        let model = &catalog["models"][0];
+        assert_eq!(model.get("input_modalities"), Some(&json!(["text", "image"])));
+        assert_eq!(model.get("inputModalities"), Some(&json!(["text", "image"])));
+    }
+
+    #[test]
     fn model_catalog_json_field_writes_absolute_path_required_by_codex() {
         let input = r#"model_provider = "any"
 
