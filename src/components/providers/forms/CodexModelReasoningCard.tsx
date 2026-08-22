@@ -154,7 +154,7 @@ export interface CodexModelReasoningCardProps {
   onRedetect: () => void;
   onAdoptDetection: () => void;
   onManualDeclare: () => void;
-  /** 将当前自动解析的能力复制为用户声明，之后可编辑档位、映射与 Ultra。 */
+  /** 将当前自动解析的能力复制为用户声明，之后可编辑档位与映射。 */
   onCustomizeEffective?: () => void;
   onRestoreBuiltin: () => void;
 }
@@ -248,8 +248,8 @@ export function CodexModelReasoningCard({
       {onCustomizeEffective ? (
         <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-primary/30 bg-primary/5 p-2">
           <p className="text-muted-foreground">
-            当前是自动发现的结果。创建用户覆盖后可编辑映射并单独开启
-            Ultra；未创建前，自动发现会随来源变化。
+            当前是自动发现的结果，会随来源变化。需要调整 Provider
+            能力或档位映射时可创建用户覆盖。
           </p>
           <Button
             type="button"

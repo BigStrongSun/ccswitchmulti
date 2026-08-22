@@ -226,6 +226,95 @@ pub fn resolve_codex_model_capability_with_library(
     )
 }
 
+/// Apply the model's product-level Ultra setting after the capability source
+/// has been resolved. This deliberately does not change the source or
+/// Provider-native capability declaration.
+fn apply_catalog_ultra_setting(
+    settings: &Value,
+    model: &str,
+    capability: CodexModelReasoningCapability,
+) -> CodexModelReasoningCapability {
+    let setting = settings
+        .get("modelCatalog")
+        .and_then(|catalog| catalog.get("models"))
+        .and_then(Value::as_array)
+        .and_then(|models| {
+            models.iter().find(|entry| {
+                ["model", "id", "slug", "upstreamModel", "upstream_model"]
+                    .into_iter()
+                    .filter_map(|field| entry.get(field).and_then(Value::as_str))
+                    .any(|candidate| candidate.trim().eq_ignore_ascii_case(model.trim()))
+            })
+        })
+        .and_then(|entry| entry.get("codexUltra"))
+        .and_then(Value::as_object);
+    let Some(setting) = setting else {
+        return capability;
+    };
+
+    let enabled = setting
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !enabled {
+        let mut capability = capability;
+        capability.codex_ultra_orchestration = None;
+        return capability;
+    }
+    let Some(provider_effort) = setting
+        .get("providerEffort")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        log::warn!("Codex Ultra for model {model} is enabled without providerEffort");
+        return capability;
+    };
+    if !capability
+        .supported_efforts
+        .iter()
+        .any(|effort| effort == provider_effort)
+    {
+        log::warn!(
+            "Codex Ultra for model {model} selects unsupported provider effort {provider_effort}"
+        );
+        return capability;
+    }
+
+    let original = capability.clone();
+    let mut capability = capability;
+    capability
+        .upstream
+        .effort_map
+        .insert("max".to_string(), provider_effort.to_string());
+    capability.codex_ultra_orchestration = Some(
+        crate::proxy::providers::codex_reasoning::CodexUltraOrchestrationCapability {
+            enabled: true,
+        },
+    );
+    capability
+        .validate()
+        .map(|_| capability)
+        .unwrap_or_else(|error| {
+            log::warn!("Codex Ultra for model {model} is invalid: {error}");
+            original
+        })
+}
+
+fn resolved_with_catalog_ultra_setting(
+    settings: &Value,
+    model: &str,
+    source: CapabilitySource,
+    capability: CodexModelReasoningCapability,
+) -> ResolvedModelCapability {
+    let capability = apply_catalog_ultra_setting(settings, model, capability);
+    ResolvedModelCapability {
+        fingerprint: capability_fingerprint(&capability),
+        capability: Some(capability),
+        source,
+    }
+}
+
 /// Resolver 核心（settings-based、纯函数、无网络、无全局状态）。
 ///
 /// 所有消费者（catalog 投影、请求转换、Sub-Agent policy、GUI/CLI inspect）
@@ -250,61 +339,67 @@ pub fn resolve_codex_model_capability_core(
 ) -> ResolvedModelCapability {
     // 1. 用户模型级声明（始终最高优先级）
     if let Some(capability) = resolve_reasoning_capability_from_settings(settings, model) {
-        return ResolvedModelCapability {
-            fingerprint: capability_fingerprint(&capability),
-            capability: Some(capability),
-            source: CapabilitySource::UserConfig,
-        };
+        return resolved_with_catalog_ultra_setting(
+            settings,
+            model,
+            CapabilitySource::UserConfig,
+            capability,
+        );
     }
 
     // 2. Codex inline provider model declaration.
     if let Some(capability) = resolve_reasoning_capability_from_provider_config(settings, model) {
-        return ResolvedModelCapability {
-            fingerprint: capability_fingerprint(&capability),
-            capability: Some(capability),
-            source: CapabilitySource::ProviderConfig,
-        };
+        return resolved_with_catalog_ultra_setting(
+            settings,
+            model,
+            CapabilitySource::ProviderConfig,
+            capability,
+        );
     }
 
     // 3. 动态检测候选（只读元数据，TTL）
     if let Some(snapshot) = detection {
         if let Some(capability) = snapshot_to_capability(snapshot) {
-            return ResolvedModelCapability {
-                fingerprint: capability_fingerprint(&capability),
-                capability: Some(capability),
-                source: CapabilitySource::Detection,
-            };
+            return resolved_with_catalog_ultra_setting(
+                settings,
+                model,
+                CapabilitySource::Detection,
+                capability,
+            );
         }
     }
 
     // 4. CCSM 维护的版本化能力库
     if let Some(library) = library {
         if let Some(capability) = catalog::lookup_library_capability(library, platform, model) {
-            return ResolvedModelCapability {
-                fingerprint: capability_fingerprint(&capability),
-                capability: Some(capability),
-                source: CapabilitySource::Library,
-            };
+            return resolved_with_catalog_ultra_setting(
+                settings,
+                model,
+                CapabilitySource::Library,
+                capability,
+            );
         }
     }
 
     // 5. 内置清单
     if let Some(capability) = builtin_reasoning_capability_for_model(model) {
-        return ResolvedModelCapability {
-            fingerprint: capability_fingerprint(&capability),
-            capability: Some(capability),
-            source: CapabilitySource::Builtin,
-        };
+        return resolved_with_catalog_ultra_setting(
+            settings,
+            model,
+            CapabilitySource::Builtin,
+            capability,
+        );
     }
 
     // 6. Codex 官方模型缓存（仅未知平台生效）
     if platform.is_none() {
         if let Some(capability) = official_reasoning_capability_for_model(model, official_models) {
-            return ResolvedModelCapability {
-                fingerprint: capability_fingerprint(&capability),
-                capability: Some(capability),
-                source: CapabilitySource::Official,
-            };
+            return resolved_with_catalog_ultra_setting(
+                settings,
+                model,
+                CapabilitySource::Official,
+                capability,
+            );
         }
     }
 
@@ -575,6 +670,36 @@ mod tests {
         // 指纹为 64 位十六进制 sha256（无前缀）。
         assert_eq!(resolved.fingerprint.len(), 64);
         assert!(resolved.fingerprint.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn catalog_ultra_setting_overlays_library_capability_without_changing_its_source() {
+        let mut provider = plain_provider("OpenRouter", "https://openrouter.ai/api/v1");
+        provider.settings_config = json!({
+            "base_url": "https://openrouter.ai/api/v1",
+            "modelCatalog": {"models": [{
+                "model": "deepseek/deepseek-v4-pro",
+                "codexUltra": {"enabled": true, "providerEffort": "high"}
+            }]}
+        });
+        let library = library_with_openrouter_deepseek();
+
+        let resolved = resolve_codex_model_capability_with_library(
+            &provider,
+            "deepseek/deepseek-v4-pro",
+            None,
+            Some(&library),
+        );
+        let capability = resolved.capability.expect("library capability");
+        assert_eq!(resolved.source, CapabilitySource::Library);
+        assert_eq!(capability.source.as_deref(), Some("library"));
+        assert_eq!(
+            capability.upstream.effort_map.get("max"),
+            Some(&"high".to_string())
+        );
+        assert!(capability
+            .codex_ultra_orchestration
+            .is_some_and(|ultra| ultra.enabled));
     }
 
     #[test]

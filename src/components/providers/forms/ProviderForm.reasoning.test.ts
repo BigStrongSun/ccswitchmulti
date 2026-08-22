@@ -38,6 +38,28 @@ describe("Codex catalog reasoning capability persistence", () => {
     ).toEqual(expect.objectContaining({ source: "user" }));
   });
 
+  it("requires a selected Provider effort when Ultra is unlocked", () => {
+    expect(() =>
+      normalizeCodexCatalogModelsForSave([
+        { model: "deepseek", codexUltra: { enabled: true } },
+      ]),
+    ).toThrow(/Ultra requires an explicit Provider reasoning effort/);
+
+    expect(
+      normalizeCodexCatalogModelsForSave([
+        {
+          model: "deepseek",
+          codexUltra: { enabled: true, providerEffort: "high" },
+        },
+      ]),
+    ).toEqual([
+      {
+        model: "deepseek",
+        codexUltra: { enabled: true, providerEffort: "high" },
+      },
+    ]);
+  });
+
   it("preserves a valid user model reasoning override", () => {
     const [model] = normalizeCodexCatalogModelsForSave([
       {

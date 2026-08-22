@@ -515,7 +515,55 @@ describe("CodexFormFields local model routing", () => {
     ).toBeTruthy();
   });
 
-  it("lets automatic discovery become an editable user override for Ultra", async () => {
+  it("lets users override and restore a preset model's input capability", async () => {
+    const preset: CodexCatalogModel = {
+      model: "deepseek-v4-flash-vision-exp",
+      inputModalities: ["text", "image"],
+      supportsImage: true,
+      textOnly: false,
+    };
+    const { latestCatalog } = renderCatalogHarness([preset], {
+      presetCatalogModels: [preset],
+    });
+
+    expect(
+      screen.getByRole("button", {
+        name: "deepseek-v4-flash-vision-exp 文本与图像",
+      }),
+    ).toHaveAttribute("aria-pressed", "true");
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "deepseek-v4-flash-vision-exp 仅文本",
+      }),
+    );
+    await waitFor(() => {
+      expect(latestCatalog()[0]).toEqual(
+        expect.objectContaining({
+          inputModalities: ["text"],
+          supportsImage: false,
+          textOnly: true,
+        }),
+      );
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "deepseek-v4-flash-vision-exp 恢复 CCSM 输入能力预设",
+      }),
+    );
+    await waitFor(() => {
+      expect(latestCatalog()[0]).toEqual(
+        expect.objectContaining({
+          inputModalities: ["text", "image"],
+          supportsImage: true,
+          textOnly: false,
+        }),
+      );
+    });
+  });
+
+  it("keeps Ultra independent from automatic reasoning discovery", async () => {
     reasoningApiMocks.resolve.mockImplementation(
       async (_settings, _provider, model) => ({
         model,
@@ -561,22 +609,26 @@ describe("CodexFormFields local model routing", () => {
     expect(
       await screen.findByText(/自动发现会按当前 Provider、模型和已验证声明/),
     ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "按当前结果自定义" }));
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: "解锁 deepseek-v4-flash 的 Ultra 档",
+      }),
+    );
+    fireEvent.change(
+      screen.getByRole("combobox", {
+        name: "deepseek-v4-flash Ultra 对应的 Provider 推理强度",
+      }),
+      { target: { value: "high" } },
+    );
 
     await waitFor(() => {
-      expect(latestCatalog()[0].reasoning).toEqual(
+      expect(latestCatalog()[0]).toEqual(
         expect.objectContaining({
-          source: "user",
-          supportedEfforts: ["low", "high"],
-          upstream: expect.objectContaining({
-            effortMap: expect.objectContaining({ max: "high" }),
-          }),
+          codexUltra: { enabled: true, providerEffort: "high" },
         }),
       );
     });
-    expect(
-      screen.getByRole("checkbox", { name: "启用 Codex Ultra 编排" }),
-    ).toBeEnabled();
+    expect(latestCatalog()[0].reasoning).toBeUndefined();
   });
 
   it("renders the resolved reasoning card and lets the user declare an unknown model", async () => {

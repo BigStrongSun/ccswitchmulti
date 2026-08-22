@@ -391,6 +391,11 @@ export interface CodexCatalogModel {
   baseInstructions?: string;
   base_instructions?: string;
   reasoning?: CodexModelReasoningCapability;
+  /** Codex 产品层设置，不属于 Provider capability 或其来源。 */
+  codexUltra?: {
+    enabled: boolean;
+    providerEffort?: CodexReasoningEffort;
+  };
   // MultiRouter schema v2: model-specific transport/caching overrides.
   // Provider defaults remain authoritative when these fields are absent.
   apiFormat?: CodexApiFormat;
