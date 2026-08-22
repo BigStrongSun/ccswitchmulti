@@ -2391,9 +2391,19 @@ fn openai_model_entry(id: &str, owner: &str) -> Value {
     })
 }
 
-/// 根据 catalog/source 对象构造 OpenAI model entry，透传明确的上下文窗口字段。
+/// 根据 catalog/source 对象构造 OpenAI model entry，透传明确的上下文窗口与显示名字段。
 fn openai_model_entry_with_source(id: &str, owner: &str, source: &Value) -> Value {
     let mut entry = openai_model_entry(id, owner);
+    if let Some(display_name) = extract_model_display_name(source) {
+        if let Some(object) = entry.as_object_mut() {
+            // Codex Desktop 的模型菜单以 `/v1/models` 的 data[] 为主来源，不同版本读取的
+            // 字段名不一致：同时投 snake_case/camelCase/name，renderer 才能用用户改的
+            // 显示名渲染菜单，而不是退化成原始模型 ID。
+            object.insert("display_name".to_string(), json!(display_name));
+            object.insert("displayName".to_string(), json!(display_name));
+            object.insert("name".to_string(), json!(display_name));
+        }
+    }
     if let Some(context_window) = extract_model_context_window(source) {
         if let Some(object) = entry.as_object_mut() {
             // Codex Desktop 不同版本在 `/v1/models` 的 data[] 分支上读取的字段名不完全一致；
@@ -2405,6 +2415,19 @@ fn openai_model_entry_with_source(id: &str, owner: &str, source: &Value) -> Valu
         }
     }
     entry
+}
+
+/// 从 model catalog 条目中读取用户声明的显示名，兼容 snake_case 与 camelCase。
+fn extract_model_display_name(value: &Value) -> Option<String> {
+    const KEYS: &[&str] = &["display_name", "displayName", "name", "title"];
+    KEYS.iter()
+        .filter_map(|key| value.get(*key))
+        .find_map(|name| {
+            name.as_str()
+                .map(str::trim)
+                .filter(|display| !display.is_empty())
+                .map(str::to_string)
+        })
 }
 
 /// 从 model catalog 条目中读取正整数上下文窗口，兼容 snake_case 与 camelCase。
@@ -5671,6 +5694,56 @@ mod tests {
         assert!(
             qwen.get("upstream_model").is_none(),
             "OpenAI-compatible data[] entries must not expose private upstream model aliases"
+        );
+    }
+
+    #[test]
+    fn codex_catalog_models_response_passes_through_display_name() {
+        let response = codex_catalog_models_response(json!({
+            "models": [
+                { "model": "deepseek-v4-flash-deepseek", "display_name": "Deepseek V4 Flash" },
+                { "model": "gpt-5.6-luna", "displayName": "GPT-5.6-Luna" },
+                { "model": "plain-id" }
+            ]
+        }));
+
+        let data = response["data"].as_array().expect("OpenAI data array");
+        let deepseek = data
+            .iter()
+            .find(|entry| entry.get("id").and_then(|id| id.as_str()) == Some("deepseek-v4-flash-deepseek"))
+            .expect("deepseek entry");
+        assert_eq!(
+            deepseek.get("display_name").and_then(|value| value.as_str()),
+            Some("Deepseek V4 Flash")
+        );
+        assert_eq!(
+            deepseek.get("displayName").and_then(|value| value.as_str()),
+            Some("Deepseek V4 Flash")
+        );
+        assert_eq!(
+            deepseek.get("name").and_then(|value| value.as_str()),
+            Some("Deepseek V4 Flash")
+        );
+        let luna = data
+            .iter()
+            .find(|entry| entry.get("id").and_then(|id| id.as_str()) == Some("gpt-5.6-luna"))
+            .expect("luna entry");
+        assert_eq!(
+            luna.get("display_name").and_then(|value| value.as_str()),
+            Some("GPT-5.6-Luna"),
+            "camelCase displayName source must also be projected"
+        );
+        let plain = data
+            .iter()
+            .find(|entry| entry.get("id").and_then(|id| id.as_str()) == Some("plain-id"))
+            .expect("plain entry");
+        assert!(
+            plain.get("display_name").is_none(),
+            "entries without a declared display name must stay id-only"
+        );
+        assert!(
+            deepseek.get("upstreamModel").is_none() && deepseek.get("upstream_model").is_none(),
+            "display-name projection must not leak upstream aliases"
         );
     }
 
