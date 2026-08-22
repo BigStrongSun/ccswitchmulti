@@ -6108,12 +6108,19 @@ function SpawnAgentCandidatesPanel({
     selectedCatalog.spawnAgentModels.join("\n");
   const spawnAgentMissingPriorityModels =
     diagnostics?.liveConfig.spawnAgentMissingPriorityModels ?? [];
-  const hasFlashRoleModel = selectedCatalog.models.some(
-    (model) => model.model?.trim() === "deepseek-v4-flash",
+  // flash/pro 角色模型可能以别名形态出现在目录中（如 deepseek-v4-flash-deepseek
+  // 由路由 alias 暴露），因此按基名前缀匹配，而非硬编码精确模型 ID。
+  // 注意排除 vision 变体（deepseek-v4-flash-vision-exp 是独立模型，不是 flash 角色）。
+  const isFlashRoleModel = (name: string) =>
+    (name === "deepseek-v4-flash" || name.startsWith("deepseek-v4-flash-")) &&
+    !name.includes("vision");
+  const hasFlashRoleModel = selectedCatalog.models.some((model) =>
+    isFlashRoleModel(model.model?.trim() ?? ""),
   );
-  const hasProRoleModel = selectedCatalog.models.some(
-    (model) => model.model?.trim() === "deepseek-v4-pro",
-  );
+  const hasProRoleModel = selectedCatalog.models.some((model) => {
+    const name = model.model?.trim() ?? "";
+    return name === "deepseek-v4-pro" || name.startsWith("deepseek-v4-pro-");
+  });
 
   useEffect(() => {
     setActiveSubagentVersion(persistedSubagentVersion);

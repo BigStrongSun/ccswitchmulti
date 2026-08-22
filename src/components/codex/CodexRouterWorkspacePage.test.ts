@@ -2302,6 +2302,46 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     expect(screen.getByText("目录中缺失")).toBeInTheDocument();
   });
 
+  it("recognizes alias-suffixed flash/pro role models as routable", async () => {
+    const source: Provider = {
+      id: "codex-deepseek-alias",
+      name: "DeepSeek alias",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: {
+          models: [
+            { model: "deepseek-v4-flash-deepseek" },
+            { model: "deepseek-v4-pro-deepseek" },
+            { model: "deepseek-v4-flash-vision-exp" },
+          ],
+        },
+      },
+    };
+    const plan = withEnabledProviderRoute(
+      createDraftRoutingPlan([source], [source]),
+      source,
+    );
+
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [source, plan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: plan.id,
+        initialProviderId: plan.id,
+        initialTab: "routes",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+
+    await userEvent.click(screen.getByRole("tab", { name: "子 Agent" }));
+
+    expect(screen.getAllByText("可路由")).toHaveLength(2);
+    expect(screen.queryByText("目录中缺失")).not.toBeInTheDocument();
+  });
+
   it("exposes a delete action for routing plans inside the workspace", async () => {
     const source: Provider = {
       id: "codex-qwen",
