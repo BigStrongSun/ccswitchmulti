@@ -779,6 +779,31 @@ pub(crate) fn write_live_with_common_config(
 
     if matches!(app_type, AppType::Codex) {
         let provider_context = crate::codex_config::codex_provider_classification_context(db)?;
+        // MultiRouter schema-v2 router 的 live 写入必须使用投影 settings（含 sortIndex
+        // 排序 + dependency fingerprint），而不是 router 的原始 settings_config：
+        // catalog 生成链（codex_catalog_model_specs → sort_codex_catalog_specs_for_picker）
+        // 依赖 modelCatalog 条目里的 sortIndex 决定展示顺序；router 原始 settings 的
+        // modelCatalog 是旧投影快照（无 sortIndex），会让 Codex 模型菜单按默认供应商
+        // 排序乱序展示。SSOT 恢复/启动接管等路径都经此写 live。
+        let is_v2_router = crate::codex_multirouter::schema::CodexRoutingDocument::parse(
+            effective_provider.settings_config.get("codexRouting").unwrap_or(&serde_json::Value::Null),
+        )
+        .map(|document| {
+            matches!(
+                document,
+                crate::codex_multirouter::schema::CodexRoutingDocument::V2(_)
+            )
+        })
+        .unwrap_or(false);
+        if is_v2_router {
+            let artifact = crate::codex_multirouter::projection::build_projection_artifact(
+                db,
+                &effective_provider.id,
+            )?;
+            let mut projected_provider = effective_provider.clone();
+            projected_provider.settings_config = artifact.projection_settings.clone();
+            return write_codex_live_snapshot(&projected_provider, Some(&provider_context));
+        }
         return write_codex_live_snapshot(&effective_provider, Some(&provider_context));
     }
 
