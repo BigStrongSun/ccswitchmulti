@@ -1078,6 +1078,8 @@ export function readCodexRouting(
       spawnAgentModels: v2.spawnAgentModels ?? [],
       routes: v2.routes.map((route) => ({
         ...route,
+        // 旧数据/跨设备同步可能缺失 modelSelection（schema v2 之前未强制），补默认值防止 undefined.mode 崩溃
+        modelSelection: route.modelSelection ?? { mode: "all" },
         match: {
           models:
             route.modelSelection.mode === "include"
