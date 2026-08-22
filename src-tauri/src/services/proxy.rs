@@ -3826,6 +3826,13 @@ impl ProxyService {
         config: &Value,
         provider: Option<&Provider>,
     ) -> Result<(), String> {
+        // MultiRouter schema-v2 router 的 live 写入必须使用投影 modelCatalog（含
+        // sortIndex 排序 + fingerprint），否则 catalog 生成链（codex_catalog_model_specs
+        // → sort_codex_catalog_specs_for_picker）读不到 sortIndex → Codex 模型菜单
+        // 按默认供应商排序乱序。这里是启动接管/热切换等 takeover 写 live 的统一出口，
+        // 与 write_live_with_common_config 的 SSOT 恢复路径保持一致。
+        let provider = self.codex_provider_with_projected_model_catalog(provider);
+        let provider_ref = provider.as_ref();
         // 接管态的 `PROXY_MANAGED` 只是本地代理门面 token，不能写入 auth.json。
         // 否则 Codex Desktop 会失去原始 ChatGPT OAuth 登录材料，表现为切换
         // MultiRouter/本地代理后要求重新登录。这里不再依赖兼容设置开关：只要是
@@ -3836,13 +3843,13 @@ impl ProxyService {
             .is_some()
         {
             let config_for_projection =
-                Self::codex_settings_for_model_catalog_projection(config, provider);
+                Self::codex_settings_for_model_catalog_projection(config, provider_ref);
             let config_str = config_for_projection
                 .get("config")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let profile = crate::codex_config::CodexCatalogToolProfile::from_api_format(
-                provider.and_then(|p| p.meta.as_ref()?.api_format.as_deref()),
+                provider_ref.and_then(|p| p.meta.as_ref()?.api_format.as_deref()),
             );
             let provider_context =
                 crate::codex_config::codex_provider_classification_context(self.db.as_ref())
@@ -3860,7 +3867,47 @@ impl ProxyService {
             return Ok(());
         }
 
-        self.write_codex_live_for_provider(config, provider)
+        self.write_codex_live_for_provider(config, provider_ref)
+    }
+
+    /// 若 provider 是 schema-v2 MultiRouter，把其 settings_config 的 modelCatalog
+    /// 替换为投影产物（含 sortIndex 排序 + fingerprint）。构建失败时降级用原始配置。
+    fn codex_provider_with_projected_model_catalog(
+        &self,
+        provider: Option<&Provider>,
+    ) -> Option<Provider> {
+        let provider = provider?;
+        let is_v2_router = crate::codex_multirouter::schema::CodexRoutingDocument::parse(
+            provider
+                .settings_config
+                .get("codexRouting")
+                .unwrap_or(&serde_json::Value::Null),
+        )
+        .map(|document| {
+            matches!(
+                document,
+                crate::codex_multirouter::schema::CodexRoutingDocument::V2(_)
+            )
+        })
+        .unwrap_or(false);
+        if !is_v2_router {
+            return Some(provider.clone());
+        }
+        match crate::codex_multirouter::projection::build_projection_artifact(
+            &self.db,
+            &provider.id,
+        ) {
+            Ok(artifact) => {
+                let mut projected = provider.clone();
+                if let Some(model_catalog) =
+                    artifact.projection_settings.get("modelCatalog").cloned()
+                {
+                    projected.settings_config["modelCatalog"] = model_catalog;
+                }
+                Some(projected)
+            }
+            Err(_) => Some(provider.clone()),
+        }
     }
 
     /// 根据 provider meta 决定 `modelCatalog` 是否参与 live 投射；目录元数据仍保存在 DB。
