@@ -2022,6 +2022,14 @@ export function CodexFormFields({
                       selectableEfforts={selectableEfforts}
                       defaultEffort={defaultEffort}
                       ultraEnabled={row.codexUltra?.enabled === true}
+                      ultraEffort={row.codexUltra?.providerEffort}
+                      ultraEfforts={
+                        reasoningResolution?.resolved.providerAcceptedEfforts ??
+                        []
+                      }
+                      onUltraChange={(codexUltra) =>
+                        handleUpdateCatalogRow(index, { codexUltra })
+                      }
                       expanded={isReasoningEditorExpanded}
                       onToggle={() =>
                         setExpandedReasoningRowId((current) =>
@@ -2150,10 +2158,6 @@ export function CodexFormFields({
                                         ),
                                     })
                                 : undefined
-                            }
-                            ultra={row.codexUltra}
-                            onUltraChange={(codexUltra) =>
-                              handleUpdateCatalogRow(index, { codexUltra })
                             }
                             onRestoreBuiltin={() =>
                               handleUpdateCatalogRow(index, {

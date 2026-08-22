@@ -561,10 +561,14 @@ describe("CodexFormFields local model routing", () => {
     expect(
       await screen.findByText(/自动发现会按当前 Provider、模型和已验证声明/),
     ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("checkbox", { name: "解锁 Ultra 档" }));
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: "解锁 deepseek-v4-flash 的 Ultra 档",
+      }),
+    );
     fireEvent.change(
       screen.getByRole("combobox", {
-        name: "Ultra 对应的 Provider 推理强度",
+        name: "deepseek-v4-flash Ultra 对应的 Provider 推理强度",
       }),
       { target: { value: "high" } },
     );
