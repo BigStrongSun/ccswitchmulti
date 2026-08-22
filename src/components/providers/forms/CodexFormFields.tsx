@@ -530,6 +530,26 @@ function createCatalogRow(seed?: Partial<CodexCatalogModel>): CodexCatalogRow {
   };
 }
 
+function catalogInputCapabilityPatch(
+  supportsImage: boolean,
+): Pick<CodexCatalogModel, "inputModalities" | "supportsImage" | "textOnly"> {
+  return {
+    inputModalities: supportsImage ? ["text", "image"] : ["text"],
+    supportsImage,
+    textOnly: !supportsImage,
+  };
+}
+
+function catalogSupportsImage(model: CodexCatalogModel): boolean {
+  const modalities = model.inputModalities ?? model.input_modalities ?? [];
+  return (
+    model.supportsImage === true ||
+    model.supports_image === true ||
+    model.vision === true ||
+    modalities.some((modality) => modality.toLowerCase() === "image")
+  );
+}
+
 // 读取 catalog 行的真实上游模型名；为空时回退到可见模型名，兼容旧配置。
 function catalogRowUpstreamModel(
   row: Pick<CodexCatalogModel, "model" | "upstreamModel" | "upstream_model">,
@@ -1628,6 +1648,17 @@ export function CodexFormFields({
     return new Map(entries);
   }, [presetCatalogModels]);
 
+  const presetCatalogByModel = useMemo(() => {
+    const entries = new Map<string, CodexCatalogModel>();
+    for (const model of presetCatalogModels) {
+      const visible = model.model.trim();
+      const upstream = catalogRowUpstreamModel(model);
+      if (visible) entries.set(visible, model);
+      if (upstream && upstream !== visible) entries.set(upstream, model);
+    }
+    return entries;
+  }, [presetCatalogModels]);
+
   const handleSelectFetchedCatalogModel = useCallback(
     (
       index: number,
@@ -2566,8 +2597,23 @@ export function CodexFormFields({
                     </div>
 
                     {catalogRows.map((row, index) => {
+                      const model = row.model.trim();
                       const probeModel =
-                        catalogRowUpstreamModel(row) || row.model.trim();
+                        catalogRowUpstreamModel(row) || model;
+                      const presetCatalogModel =
+                        presetCatalogByModel.get(model) ??
+                        presetCatalogByModel.get(catalogRowUpstreamModel(row));
+                      const supportsImage = catalogSupportsImage(row);
+                      const presetDeclaresInputCapability = Boolean(
+                        presetCatalogModel &&
+                          (presetCatalogModel.inputModalities !== undefined ||
+                            presetCatalogModel.input_modalities !== undefined ||
+                            presetCatalogModel.supportsImage !== undefined ||
+                            presetCatalogModel.supports_image !== undefined ||
+                            presetCatalogModel.vision !== undefined ||
+                            presetCatalogModel.textOnly !== undefined ||
+                            presetCatalogModel.text_only !== undefined),
+                      );
                       const probeBadge = getProtocolProbeBadge(
                         protocolProbeOutcomesByModel[probeModel],
                       );
@@ -2744,6 +2790,71 @@ export function CodexFormFields({
                           >
                             <Trash2 className="h-4 w-4" />
                           </Button>
+                          <fieldset
+                            className="col-span-full flex flex-wrap items-center gap-2 border-t border-border-default pt-2 text-xs"
+                            aria-label={`${model || "模型"} 输入能力`}
+                          >
+                            <legend className="mr-1 font-medium">输入能力</legend>
+                            <div
+                              className="inline-flex overflow-hidden rounded-md border"
+                              role="radiogroup"
+                              aria-label={`${model || "模型"} 输入能力选择`}
+                            >
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant={supportsImage ? "default" : "ghost"}
+                                className="rounded-none"
+                                aria-pressed={supportsImage}
+                                aria-label={`${model || "模型"} 文本与图像`}
+                                onClick={() =>
+                                  handleUpdateCatalogRow(
+                                    index,
+                                    catalogInputCapabilityPatch(true),
+                                  )
+                                }
+                              >
+                                文本与图像
+                              </Button>
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant={!supportsImage ? "default" : "ghost"}
+                                className="rounded-none border-l"
+                                aria-pressed={!supportsImage}
+                                aria-label={`${model || "模型"} 仅文本`}
+                                onClick={() =>
+                                  handleUpdateCatalogRow(
+                                    index,
+                                    catalogInputCapabilityPatch(false),
+                                  )
+                                }
+                              >
+                                仅文本
+                              </Button>
+                            </div>
+                            <span className="text-muted-foreground">
+                              保存后覆盖当前 Provider 的预设，不需要等待发布。
+                            </span>
+                            {presetDeclaresInputCapability && presetCatalogModel ? (
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                aria-label={`${model || "模型"} 恢复 CCSM 输入能力预设`}
+                                onClick={() =>
+                                  handleUpdateCatalogRow(
+                                    index,
+                                    catalogInputCapabilityPatch(
+                                      catalogSupportsImage(presetCatalogModel),
+                                    ),
+                                  )
+                                }
+                              >
+                                恢复 CCSM 预设
+                              </Button>
+                            ) : null}
+                          </fieldset>
                         </div>
                       );
                     })}

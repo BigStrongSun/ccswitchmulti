@@ -515,6 +515,54 @@ describe("CodexFormFields local model routing", () => {
     ).toBeTruthy();
   });
 
+  it("lets users override and restore a preset model's input capability", async () => {
+    const preset: CodexCatalogModel = {
+      model: "deepseek-v4-flash-vision-exp",
+      inputModalities: ["text", "image"],
+      supportsImage: true,
+      textOnly: false,
+    };
+    const { latestCatalog } = renderCatalogHarness([preset], {
+      presetCatalogModels: [preset],
+    });
+
+    expect(
+      screen.getByRole("button", {
+        name: "deepseek-v4-flash-vision-exp 文本与图像",
+      }),
+    ).toHaveAttribute("aria-pressed", "true");
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "deepseek-v4-flash-vision-exp 仅文本",
+      }),
+    );
+    await waitFor(() => {
+      expect(latestCatalog()[0]).toEqual(
+        expect.objectContaining({
+          inputModalities: ["text"],
+          supportsImage: false,
+          textOnly: true,
+        }),
+      );
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "deepseek-v4-flash-vision-exp 恢复 CCSM 输入能力预设",
+      }),
+    );
+    await waitFor(() => {
+      expect(latestCatalog()[0]).toEqual(
+        expect.objectContaining({
+          inputModalities: ["text", "image"],
+          supportsImage: true,
+          textOnly: false,
+        }),
+      );
+    });
+  });
+
   it("keeps Ultra independent from automatic reasoning discovery", async () => {
     reasoningApiMocks.resolve.mockImplementation(
       async (_settings, _provider, model) => ({
