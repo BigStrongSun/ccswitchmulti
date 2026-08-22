@@ -515,7 +515,7 @@ describe("CodexFormFields local model routing", () => {
     ).toBeTruthy();
   });
 
-  it("lets automatic discovery become an editable user override for Ultra", async () => {
+  it("lets automatic discovery enable Ultra through a direct user action", async () => {
     reasoningApiMocks.resolve.mockImplementation(
       async (_settings, _provider, model) => ({
         model,
@@ -561,7 +561,7 @@ describe("CodexFormFields local model routing", () => {
     expect(
       await screen.findByText(/自动发现会按当前 Provider、模型和已验证声明/),
     ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "按当前结果自定义" }));
+    fireEvent.click(screen.getByRole("button", { name: "开启 Ultra" }));
 
     await waitFor(() => {
       expect(latestCatalog()[0].reasoning).toEqual(
@@ -571,6 +571,7 @@ describe("CodexFormFields local model routing", () => {
           upstream: expect.objectContaining({
             effortMap: expect.objectContaining({ max: "high" }),
           }),
+          codexUltraOrchestration: { enabled: true },
         }),
       );
     });

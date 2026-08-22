@@ -156,6 +156,8 @@ export interface CodexModelReasoningCardProps {
   onManualDeclare: () => void;
   /** 将当前自动解析的能力复制为用户声明，之后可编辑档位、映射与 Ultra。 */
   onCustomizeEffective?: () => void;
+  /** 从自动解析结果创建用户覆盖，并立即开启 Ultra。 */
+  onEnableUltra?: () => void;
   onRestoreBuiltin: () => void;
 }
 
@@ -167,6 +169,7 @@ export function CodexModelReasoningCard({
   onAdoptDetection,
   onManualDeclare,
   onCustomizeEffective,
+  onEnableUltra,
   onRestoreBuiltin,
 }: CodexModelReasoningCardProps) {
   const status = reasoningCardStatus(resolution);
@@ -248,17 +251,24 @@ export function CodexModelReasoningCard({
       {onCustomizeEffective ? (
         <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-primary/30 bg-primary/5 p-2">
           <p className="text-muted-foreground">
-            当前是自动发现的结果。创建用户覆盖后可编辑映射并单独开启
-            Ultra；未创建前，自动发现会随来源变化。
+            当前是自动发现的结果，会随来源变化。开启 Ultra
+            会按当前结果创建可编辑的用户覆盖；需要调整映射时可选择自定义。
           </p>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={onCustomizeEffective}
-          >
-            按当前结果自定义
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            {onEnableUltra ? (
+              <Button type="button" size="sm" onClick={onEnableUltra}>
+                开启 Ultra
+              </Button>
+            ) : null}
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={onCustomizeEffective}
+            >
+              按当前结果自定义
+            </Button>
+          </div>
         </div>
       ) : null}
 

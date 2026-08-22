@@ -4,6 +4,7 @@ import type { CodexModelReasoningCapability } from "@/types";
 import { normalizeCodexCatalogModelsForSave } from "./ProviderForm";
 import {
   applyCodexReasoningCapabilitySource,
+  enableCodexUltraFromEffectiveCapability,
   validateCodexReasoningCapabilityDraft,
 } from "./CodexFormFields";
 import { completeCodexReasoningEffortMap } from "./codexReasoningCapability";
@@ -36,6 +37,36 @@ describe("Codex catalog reasoning capability persistence", () => {
     expect(
       applyCodexReasoningCapabilitySource("manual", maintained, maintained),
     ).toEqual(expect.objectContaining({ source: "user" }));
+  });
+
+  it("creates a valid enabled Ultra override from discovered graded capability", () => {
+    const override = enableCodexUltraFromEffectiveCapability({
+      schemaVersion: 2,
+      supportStatus: "confirmed_supported",
+      controlKind: "graded",
+      supportedEfforts: ["low", "high"],
+      defaultEffort: "high",
+      disableAllowed: false,
+      upstream: {
+        format: "string",
+        parameter: "reasoning_effort",
+        effortMap: { low: "low" },
+      },
+      source: "provider",
+    });
+
+    expect(override).toEqual(
+      expect.objectContaining({
+        source: "user",
+        codexUltraOrchestration: { enabled: true },
+        upstream: expect.objectContaining({
+          effortMap: { low: "low", high: "high", max: "high" },
+        }),
+      }),
+    );
+    expect(() =>
+      validateCodexReasoningCapabilityDraft(override!),
+    ).not.toThrow();
   });
 
   it("preserves a valid user model reasoning override", () => {

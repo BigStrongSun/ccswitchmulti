@@ -102,6 +102,15 @@ const PROVIDER_REASONING_EFFORT_CHOICES: CodexReasoningEffort[] = [
   "max",
 ];
 
+const PROVIDER_REASONING_EFFORT_DESCENDING: CodexReasoningEffort[] = [
+  "max",
+  "xhigh",
+  "high",
+  "medium",
+  "low",
+  "minimal",
+];
+
 export type CodexReasoningCapabilitySourceMode =
   | "automatic"
   | "builtin"
@@ -127,6 +136,39 @@ export function applyCodexReasoningCapabilitySource(
     disableAllowed: false,
     upstream: { format: "none", parameter: "none" },
     source: "user",
+  };
+}
+
+/**
+ * Ultra is a Codex orchestration switch. For an automatically discovered
+ * graded model, persist an editable user override and map Codex max to the
+ * strongest Provider effort that discovery has actually confirmed.
+ */
+export function enableCodexUltraFromEffectiveCapability(
+  capability: CodexModelReasoningCapability,
+): CodexModelReasoningCapability | undefined {
+  if (
+    capability.controlKind !== "graded" ||
+    capability.supportStatus !== "confirmed_supported"
+  ) {
+    return undefined;
+  }
+  const maxTarget = PROVIDER_REASONING_EFFORT_DESCENDING.find((effort) =>
+    capability.supportedEfforts.includes(effort),
+  );
+  if (!maxTarget) return undefined;
+
+  const effortMap = { ...(capability.upstream.effortMap ?? {}) };
+  for (const effort of capability.supportedEfforts) {
+    effortMap[effort] ??= effort;
+  }
+  effortMap.max = maxTarget;
+  return {
+    ...structuredClone(capability),
+    schemaVersion: 2,
+    source: "user",
+    upstream: { ...capability.upstream, effortMap },
+    codexUltraOrchestration: { enabled: true },
   };
 }
 
@@ -2149,6 +2191,28 @@ export function CodexFormFields({
                                           discoveredReasoning,
                                         ),
                                     })
+                                : undefined
+                            }
+                            onEnableUltra={
+                              !row.reasoning && discoveredReasoning
+                                ? () => {
+                                    const ultraOverride =
+                                      enableCodexUltraFromEffectiveCapability(
+                                        discoveredReasoning,
+                                      );
+                                    if (!ultraOverride) {
+                                      toast.error(
+                                        "当前自动发现结果没有已确认的分档推理能力，无法自动开启 Ultra。请先手动声明模型档位。",
+                                      );
+                                      return;
+                                    }
+                                    handleUpdateCatalogRow(index, {
+                                      reasoning: ultraOverride,
+                                    });
+                                    toast.success(
+                                      `已开启 Ultra：Codex max 将映射到 Provider ${ultraOverride.upstream.effortMap?.max}。`,
+                                    );
+                                  }
                                 : undefined
                             }
                             onRestoreBuiltin={() =>
