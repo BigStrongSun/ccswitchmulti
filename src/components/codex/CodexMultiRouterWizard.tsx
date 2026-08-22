@@ -2305,9 +2305,9 @@ export function CodexMultiRouterWizard({
                     </div>
                     <div className="mt-2 text-sm text-muted-foreground">
                       模型范围：
-                      {route.modelSelection.mode === "all"
+                      {route.modelSelection?.mode === "all"
                         ? "目标 Provider 的全部模型"
-                        : `${route.modelSelection.models.length} 个 canonical 模型`}
+                        : `${(route.modelSelection?.models ?? []).length} 个 canonical 模型`}
                       ；前缀 {(route.matchPrefixes ?? []).join(", ") || "无"}
                     </div>
                     <div className="mt-2 text-xs leading-5 text-muted-foreground">

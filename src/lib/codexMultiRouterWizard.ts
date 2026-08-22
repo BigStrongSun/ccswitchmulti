@@ -972,10 +972,10 @@ export function collectWizardRouteAliasSelectionIssues(
       canonicalIds.map((model) => model.toLowerCase()),
     );
     const selectedSet =
-      route.modelSelection.mode === "all"
+      route.modelSelection?.mode === "all"
         ? canonicalSet
         : new Set(
-            route.modelSelection.models.map((model) =>
+            (route.modelSelection?.models ?? []).map((model) =>
               model.trim().toLowerCase(),
             ),
           );
