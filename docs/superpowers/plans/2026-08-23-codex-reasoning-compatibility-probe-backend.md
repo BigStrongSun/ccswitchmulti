@@ -122,7 +122,7 @@ pub async fn capture_chat_probe(...) -> Result<CapturedProbeExchange, ProbeError
 pub fn classify_reasoning_shape(exchange: &CapturedProbeExchange) -> ClassifiedReasoningShape
 ```
 
-- [ ] **Step 1: Write fixtures and failing classifier tests** for streaming Qwen/vLLM `delta.reasoning_content`, `delta.reasoning` string/object, `reasoning_details`, `<think>` split across UTF-8 chunks, summary-only fields, empty fields, summary+raw mixed fields, opaque/encrypted fields, and no reasoning.
+- [ ] **Step 1: Write fixtures and failing classifier tests** for streaming Qwen/vLLM `delta.reasoning_content`, `delta.reasoning` string/object, `reasoning_details`, `<think>` split across UTF-8 chunks, summary-only fields, empty fields, summary+raw mixed fields, opaque/encrypted fields, and no reasoning. Add the captured Qwen shape: nonempty `delta.reasoning_content`, then nonempty ordinary `delta.content` before a `tool_calls` delta. Assert `pre_tool_visible_content=Present`, while reasoning source/semantic are derived only from the reasoning field.
 - [ ] **Step 2: Add failing capture tests** using a local `axum` fixture upstream to prove SSE framing, data-only events, `[DONE]`, non-streaming JSON, HTTP failure, timeout, and that capture never returns raw body text in `Debug` or persisted evidence.
 - [ ] **Step 3: Run RED tests.**
 
@@ -131,7 +131,7 @@ cargo test --manifest-path src-tauri/Cargo.toml reasoning_probe::capture --lib
 cargo test --manifest-path src-tauri/Cargo.toml reasoning_probe::classify --lib
 ```
 
-- [ ] **Step 4: Implement byte-safe SSE capture and semantic classifier.** Classification may produce `Readable` only from verified readable text paths; mixed or opaque data is `Summary`/`Opaque`, never raw. Keep raw bytes in a local non-serializable buffer that is dropped after the probe.
+- [ ] **Step 4: Implement byte-safe SSE capture and semantic classifier.** Classification may produce `Readable` only from verified readable reasoning paths; mixed or opaque data is `Summary`/`Opaque`, never raw. Capture ordinary nonempty `content` that precedes a tool call only as `PreToolVisibleContent::{Absent,Present}` plus redacted structural evidence; it must not be offered to `ReasoningSource`. Keep raw bytes in a local non-serializable buffer that is dropped after the probe.
 - [ ] **Step 5: Run GREEN tests and commit.**
 
 ```powershell
@@ -154,7 +154,7 @@ git commit -m "feat(codex): classify captured reasoning response shapes" -m "本
 pub async fn run_reasoning_compatibility_probe(target: ProbeTarget, client: &Client) -> ProbeRunRecord
 ```
 
-- [ ] **Step 1: Write failing local-upstream tests** for all four outcomes: full verified readable profile; summary-only profile; first-turn raw succeeds but forced-tool continuation fails; tool choice unsupported. Fixtures must assert the tool is named `ccsm_reasoning_probe`, takes a fixed `nonce`, and returns fixed JSON without touching filesystem/network.
+- [ ] **Step 1: Write failing local-upstream tests** for all four outcomes: full verified readable profile; summary-only profile; first-turn raw succeeds but forced-tool continuation fails; tool choice unsupported. Add a Qwen-style tool round where `reasoning_content` and ordinary `content` precede the forced call; assert the run records `PreToolVisibleContent::Present` without changing the selected reasoning semantic or replay policy. Fixtures must assert the tool is named `ccsm_reasoning_probe`, takes a fixed `nonce`, and returns fixed JSON without touching filesystem/network.
 - [ ] **Step 2: Add tests proving the runner constructs the second request through production `responses_to_chat_completions_with_reasoning*` code, preserves tool call order, and records `tool_turn_verified=false` when the second upstream request is rejected or ends before a continuation message.
 - [ ] **Step 3: Run RED tests.**
 
@@ -190,7 +190,7 @@ pub fn create_responses_sse_stream_from_chat_with_context_and_projection(..., pr
 pub fn chat_completion_to_response_with_context_and_projection(..., projection: ReasoningProjection) -> Result<Value, ProxyError>
 ```
 
-- [ ] **Step 1: Write failing tests** showing a verified Qwen target emits `response.reasoning_text.delta` and final `content:[reasoning_text]`; a verified summary target emits summary SSE and final summary; unknown target never emits raw; original `outputFormat` alone does not select semantic output.
+- [ ] **Step 1: Write failing tests** showing a verified Qwen target emits `response.reasoning_text.delta` and final `content:[reasoning_text]`; a verified summary target emits summary SSE and final summary; unknown target never emits raw; original `outputFormat` alone does not select semantic output. Add a Qwen-style reasoning-plus-pre-tool-content fixture: ordinary pre-tool `content` emits only `response.output_text.*`; its presence does not change the selected reasoning SSE family or replay input.
 - [ ] **Step 2: Add failed-path tests** proving raw/summary Responses history both replay as Chat `reasoning_content` only when `HistoryReplay::ChatReasoningContent`; opaque and official encrypted content remain untouched; V2 commentary/tool-call merge remains ordered.
 - [ ] **Step 3: Run RED tests.**
 
@@ -252,7 +252,7 @@ git commit -m "feat(codex): expose reasoning compatibility backend commands" -m 
 - Modify: targeted tests only
 - Modify: `memory.md` after real results exist
 
-- [ ] **Step 1: Add end-to-end fixture tests** that run Chat SSE capture → profile classification → projection → Responses-to-Chat replay, asserting readable Qwen yields multi-delta raw reasoning, summary gateway retains summary, and every persisted row lacks test prompt/reasoning/tool text.
+- [ ] **Step 1: Add end-to-end fixture tests** that run Chat SSE capture → profile classification → projection → Responses-to-Chat replay, asserting readable Qwen yields multi-delta raw reasoning, summary gateway retains summary, a Qwen tool round can record `pre_tool_visible_content=Present` without becoming raw reasoning, and every persisted row lacks test prompt/reasoning/tool text.
 - [ ] **Step 2: Add regression fixtures** for official OAuth encrypted reasoning, native third-party Responses normalization, V2 `message.encrypted` stripping, and commentary + tool-call merging.
 - [ ] **Step 3: Run verification.**
 

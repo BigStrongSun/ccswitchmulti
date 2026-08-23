@@ -57,9 +57,18 @@ struct VerifiedReasoningProfile {
     tested_at: i64,
     expires_at: i64,
 }
+
+enum PreToolVisibleContent { Absent, Present }
 ```
 
 `semantic=Readable` 才允许 Responses `reasoning_text`；`Summary` 只能输出 summary SSE；`Opaque` 永远不产生可读文本；`None` 不创建 reasoning item。
+
+`PreToolVisibleContent` 是探测 evidence 的结构字段，不是推理语义，也不进入
+`ReasoningProjection` 的判定。它专门表示同一 Chat 工具子回合中，模型在完成
+tool call 前是否还发送了非空普通 `delta.content`。该字段只能保存
+`Absent/Present`、字段路径、事件顺序、分片数、长度和哈希，绝不能保存正文。
+即使 `Present`，普通 content 仍按普通 `output_text` 转发；它不能把
+`reasoning_content`、`reasoning` 或任何未知字段升级为 raw reasoning。
 
 ### 4.3 手工覆盖
 
@@ -79,9 +88,9 @@ struct VerifiedReasoningProfile {
 
 1. **端点探测**：分别检查有效 transport 的流式与非流式请求，保留 HTTP 状态、content-type、SSE event type 集合、JSON 顶层 key 集合和字段长度/哈希。
 2. **推理形态探测**：发送固定的无敏感分析题，强制很短输出。分类器只能依据实际字段位置、分片顺序和明确的 `<think>` 边界决定来源；字段名存在但为空不算证据。
-3. **工具回合探测**：仅注入 `ccsm_reasoning_probe` 虚拟函数，返回固定 JSON；优先请求强制工具调用，不能强制时报告 `unsupported`，不能把模型自然回答误判为通过。
+3. **工具回合探测**：仅注入 `ccsm_reasoning_probe` 虚拟函数，返回固定 JSON；优先请求强制工具调用，不能强制时报告 `unsupported`，不能把模型自然回答误判为通过。捕获器必须独立记录 tool call 之前是否出现普通 `content`；该证据不得参与 reasoning semantic/source 分类。
 4. **历史续接探测**：将同一段已转换的 Responses 输出经过现有 Responses→Chat 转换器重放给同一上游，附固定工具结果；验证没有 400、不会漏掉 tool call、并得到后续 assistant 输出。
-5. **投影自检**：把捕获的 Chat SSE / JSON 分别通过与生产完全相同的转换器，断言 raw profile 产生完整 `response.reasoning_text.*` 生命周期，summary profile 产生完整 summary 生命周期，最终 item 与流中事件一致。
+5. **投影自检**：把捕获的 Chat SSE / JSON 分别通过与生产完全相同的转换器，断言 raw profile 产生完整 `response.reasoning_text.*` 生命周期，summary profile 产生完整 summary 生命周期，最终 item 与流中事件一致。若 tool 前出现普通 content，断言它只产生 `response.output_text.*`，且不改变 reasoning item 的 source/semantic。
 
 探测使用上游真实凭据，但请求体、响应正文和工具结果都只在内存中保留到本次命令结束。持久化 evidence 只含事件类型、JSON 路径 allowlist、状态码、字节数、分片数、SHA-256、耗时和失败阶段。
 
