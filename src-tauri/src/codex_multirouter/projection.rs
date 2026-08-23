@@ -100,6 +100,11 @@ pub fn ensure_codex_multirouter_projection(
     router_provider_id: &str,
     force: bool,
 ) -> Result<CodexRoutingProjectionStatus, AppError> {
+    if super::active_codex_router_id(db)?.as_deref() != Some(router_provider_id) {
+        return Err(AppError::InvalidInput(format!(
+            "codex_multirouter_projection_not_active: activate Router {router_provider_id} before publishing its shared live projection"
+        )));
+    }
     ensure_projection_with_publisher(db, router_provider_id, force, |artifact| {
         crate::codex_config::publish_codex_multirouter_projection(&artifact.projection_settings)
             .map_err(|error| error.to_string())
@@ -787,6 +792,21 @@ mod tests {
             inspect_codex_multirouter_projection(&db, "router").expect("inspect stale projection");
         assert_eq!(stale.state, ProjectionState::Pending);
         assert_eq!(stale.last_error_code.as_deref(), Some("projection_stale"));
+    }
+
+    #[test]
+    fn public_projection_publish_rejects_an_inactive_router() {
+        let db = Database::memory().expect("memory db");
+        save_fixture(&db, "openai_chat");
+        db.set_current_provider("codex", "qwen")
+            .expect("make target provider current instead of router");
+
+        let error = ensure_codex_multirouter_projection(&db, "router", true)
+            .expect_err("inactive router must not overwrite the shared live projection");
+
+        assert!(error
+            .to_string()
+            .contains("codex_multirouter_projection_not_active"));
     }
 
     #[test]

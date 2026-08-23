@@ -288,7 +288,9 @@ mod tests {
     use crate::database::Database;
     #[cfg(any(target_os = "macos", windows))]
     use crate::provider::{ClaudeDesktopMode, ClaudeDesktopModelRoute};
-    use crate::provider::{ProviderMeta, UsageScript};
+    use crate::provider::{
+        CodexModelConfig, ProviderMeta, UniversalProvider, UniversalProviderModels, UsageScript,
+    };
     use crate::proxy::types::ProxyConfig;
     use crate::store::AppState;
     use serde_json::json;
@@ -4040,6 +4042,76 @@ requires_openai_auth = true
             );
         });
     }
+
+    #[test]
+    fn deleting_universal_provider_cascades_its_generated_codex_route_dependencies() {
+        let db = Arc::new(Database::memory().expect("memory db"));
+        let state = AppState::new(db.clone());
+        let mut universal = UniversalProvider::new(
+            "shared".to_string(),
+            "Shared".to_string(),
+            "custom".to_string(),
+            "https://example.com".to_string(),
+            "secret".to_string(),
+        );
+        universal.apps.codex = true;
+        universal.models = UniversalProviderModels {
+            codex: Some(CodexModelConfig {
+                model: Some("shared-model".to_string()),
+                reasoning_effort: Some("high".to_string()),
+            }),
+            ..Default::default()
+        };
+        db.save_universal_provider(&universal)
+            .expect("save universal provider");
+
+        let mut generated = universal
+            .to_codex_provider()
+            .expect("generate Codex provider");
+        generated.settings_config["modelCatalog"] = json!({"models": [{"model": "shared-model"}]});
+        db.save_provider("codex", &generated)
+            .expect("save generated provider");
+        let router = Provider::with_id(
+            "router".to_string(),
+            "Router".to_string(),
+            json!({
+                "codexRouting": {
+                    "schemaVersion": 2,
+                    "enabled": true,
+                    "routes": [{
+                        "id": "shared-route",
+                        "enabled": true,
+                        "targetProviderId": "universal-codex-shared",
+                        "modelSelection": {"mode": "all"},
+                        "authPolicy": {"source": "provider_config"}
+                    }]
+                }
+            }),
+            None,
+        );
+        db.save_provider("codex", &router).expect("save router");
+        let official = Provider::with_id(
+            "codex-official".to_string(),
+            "Official".to_string(),
+            json!({}),
+            None,
+        );
+        db.save_provider("codex", &official).expect("save official");
+        db.set_current_provider("codex", "codex-official")
+            .expect("set non-router current provider");
+
+        ProviderService::delete_universal(&state, "shared").expect("delete universal provider");
+
+        let saved_router = db
+            .get_provider_by_id("router", "codex")
+            .expect("read router")
+            .expect("router remains");
+        assert_eq!(
+            saved_router.settings_config["codexRouting"]["routes"],
+            json!([]),
+            "generated Codex Provider deletion must not leave a dangling V2 route"
+        );
+    }
 }
 
 impl ProviderService {
@@ -6843,9 +6915,6 @@ impl ProviderService {
         // 获取统一供应商（用于删除生成的子供应商）
         let provider = state.db.get_universal_provider(id)?;
 
-        // 删除统一供应商
-        state.db.delete_universal_provider(id)?;
-
         // 删除生成的子供应商
         if let Some(p) = provider {
             if p.apps.claude {
@@ -6854,13 +6923,24 @@ impl ProviderService {
             }
             if p.apps.codex {
                 let codex_id = format!("universal-codex-{id}");
-                let _ = state.db.delete_provider("codex", &codex_id);
+                if state
+                    .db
+                    .get_provider_by_id(&codex_id, AppType::Codex.as_str())?
+                    .is_some()
+                {
+                    Self::delete(state, AppType::Codex, &codex_id)?;
+                }
             }
             if p.apps.gemini {
                 let gemini_id = format!("universal-gemini-{id}");
                 let _ = state.db.delete_provider("gemini", &gemini_id);
             }
         }
+
+        // Delete the universal definition only after every generated child has been handled.
+        // In particular, Codex deletion may need to cascade MultiRouter routes or reject deleting
+        // a currently active Provider; either outcome must leave the universal definition intact.
+        state.db.delete_universal_provider(id)?;
 
         Ok(true)
     }
@@ -6895,10 +6975,16 @@ impl ProviderService {
                 Self::merge_json(&mut merged, &codex_provider.settings_config);
                 codex_provider.settings_config = merged;
             }
-            state.db.save_provider("codex", &codex_provider)?;
+            Self::persist_provider_mutation(state, &AppType::Codex, &codex_provider)?;
         } else {
             let codex_id = format!("universal-codex-{id}");
-            let _ = state.db.delete_provider("codex", &codex_id);
+            if state
+                .db
+                .get_provider_by_id(&codex_id, AppType::Codex.as_str())?
+                .is_some()
+            {
+                Self::delete(state, AppType::Codex, &codex_id)?;
+            }
         }
 
         // 同步到 Gemini

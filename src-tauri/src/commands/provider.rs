@@ -175,12 +175,18 @@ pub fn apply_codex_multirouter_migration(
         &planToken,
     )
     .map_err(|error| error.to_string())?;
-    crate::codex_multirouter::projection::ensure_codex_multirouter_projection(
-        &state.db,
-        &providerId,
-        false,
-    )
-    .map_err(|error| error.to_string())?;
+    if crate::codex_multirouter::active_codex_router_id(&state.db)
+        .map_err(|error| error.to_string())?
+        .as_deref()
+        == Some(providerId.as_str())
+    {
+        crate::codex_multirouter::projection::ensure_codex_multirouter_projection(
+            &state.db,
+            &providerId,
+            false,
+        )
+        .map_err(|error| error.to_string())?;
+    }
     Ok(outcome)
 }
 

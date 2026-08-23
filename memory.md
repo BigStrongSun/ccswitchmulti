@@ -1,5 +1,19 @@
 # CC Switch Repository Memory
 
+## 2026-08-23 MultiRouter Provider SSOT v2 全链路与历史 PR 完整性复审
+
+- Provider SSOT v2 核心合并是 `b7865131`。它不在 `v3.19.2-9`，从 `v3.19.2-10` 开始才进入发布标签；`-14` 主要承载 Ultra/UI/DeepSeek reasoning 历史修复，`-15` 承载 V2 route 匹配兼容，不能把 SSOT 的首次引入归到 `-14/-15`。
+- GitHub 状态与本地 ancestry 双证据确认：此前真正标记 Merged 的 PR #9/#10/#11/#12/#18，其 head 提交全部在当前 `main` 祖先链，没有 Git 层面的“只合一部分”。开放 PR #19/#21/#24/#26 的行为已由现行主线等价或更完整覆盖；#13/#14 是依赖升级，不属于功能漏合。后续缺陷来自 SSOT 重构扩大了消费层后，认证、目录、排序、显示名、活动所有权、兼容读取等契约没有同时覆盖所有入口，而不是这些已合 PR 丢提交。
+- 公开 issue 的严格口径：#28、#29、#34、#36、#38、#40、#42、#46 共 8 个明确属于 Provider SSOT/Router compiler/shared projection 主链；扩展口径再计 #23、#25、#27（models_cache、能力来源、Ultra 迁移消费者）共 11 个。不要把一个 issue 中的多个调用点重复计数。
+- 本轮新增确认并根修 4 个未单独建 issue 的同类遗漏：
+  1. 活动 Router 解析只看 workspace/DB，漏掉设备本地 current provider，可能让旧 DB 标记拥有 shared live catalog；现统一为 workspace > device-local > DB fallback。
+  2. Provider 更新已按 #47 限制活动 Router 发布，但 Provider 删除级联仍逐个发布所有受影响 Router；现删除后只发布仍有效的活动 Router，无活动且多 Router 时不发布。
+  3. 手动 projection retry 与 v1->v2 migration 完成路径可直接发布非活动 Router；公共发布入口现 fail-closed 拒绝非活动 Router，非活动迁移只写 DB，切换时再发布。
+  4. Universal Provider 的 Codex 子 Provider 同步/删除直接调用 DAO，绕过 compiler、投影和 route cascade；现更新复用 `persist_provider_mutation`，删除复用 Codex Provider domain delete，并在子项成功后才删除 universal definition。
+- 运行时“直接读取 Provider”本身成立：每次 V2 请求在 `proxy/providers/codex.rs` 重新从 DB 收集 Provider 并调用 `compile_v2`，所以 endpoint/auth/protocol/canonical model 不依赖 Router 快照；shared catalog/config/cache 是派生投影。当前主要风险已从“请求还读旧快照”收敛为“哪个 mutation/restore/retry 有权发布唯一 live 投影”。
+- 新增回归覆盖 device-local ownership、共享 Provider 删除只发布 active Router、非活动公共投影拒绝、Universal Provider 删除级联。验证：Rust 全量 `3320 passed / 0 failed / 5 ignored`；定向 mutation 9/9、projection 12/12、Universal delete 1/1；`pnpm typecheck`、本次 Rust 文件 rustfmt、`git diff --check` 通过。仓库全局 `cargo fmt --all --check` 仍会报告本轮未改的 preset registry/openai_compat 既有格式漂移，未擅自改动。
+- 联网交叉验证：Codex 内置 WebSearch 与 GitHub CLI 检查仓库 README、SSOT/root-cause 文档、PR/issue 状态；Matrix WebSearch 独立搜索未返回索引结果，但直接打开 GitHub root-cause 文档成功。关键版本、ancestry 和调用路径结论最终以本地 tags、Git history、源码和实跑测试为准。
+
 ## 2026-08-23 PR #37-#49 拆分修复审计与 Windows 原子写锁处理
 
 - PR #37 修复 v2 `authPolicy.source` 未被认证门面读取导致官方 Codex route 被误判为

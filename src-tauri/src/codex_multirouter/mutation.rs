@@ -1,3 +1,4 @@
+use super::active_codex_router_id;
 use super::compiler::compile_v2;
 use super::projection::{
     ensure_projection_with_publisher, CodexRoutingProjectionArtifact, CodexRoutingProjectionStatus,
@@ -70,31 +71,6 @@ where
         )?);
     }
     Ok(CodexProviderMutationOutcome { projections })
-}
-
-/// 共享 live catalog 只允许当前激活的 Codex MultiRouter 发布。
-fn active_codex_router_id(db: &Database) -> Result<Option<String>, AppError> {
-    if let Some(profile_id) = db.get_current_profile_id("codex")? {
-        let profiles = db.get_all_profiles()?;
-        if let Some(profile) = profiles
-            .into_iter()
-            .find(|profile| profile.id == profile_id)
-        {
-            let payload: serde_json::Value =
-                serde_json::from_str(&profile.payload).map_err(|error| {
-                    AppError::Database(format!("Failed to parse profile payload: {error}"))
-                })?;
-            if let Some(id) = payload
-                .get("providers")
-                .and_then(|providers| providers.get("codex"))
-                .and_then(serde_json::Value::as_str)
-                .filter(|id| !id.is_empty())
-            {
-                return Ok(Some(id.to_string()));
-            }
-        }
-    }
-    db.get_current_provider("codex")
 }
 
 fn validate_and_collect_affected_router_ids(
@@ -240,6 +216,8 @@ where
     }
     prepared.sort_by(|left, right| left.router_id.cmp(&right.router_id));
 
+    let active_router_id = active_codex_router_id(db)?;
+
     let must_restore_official = current_provider_id.is_some_and(|current| {
         prepared
             .iter()
@@ -288,8 +266,14 @@ where
             .map_err(|error| AppError::Database(error.to_string()))?;
     }
 
+    let publish_without_active_router = active_router_id.is_none() && prepared.len() == 1;
     let mut projections = Vec::with_capacity(prepared.len());
     for router in &prepared {
+        let owns_shared_projection = active_router_id.as_deref() == Some(router.router_id.as_str())
+            || publish_without_active_router;
+        if !owns_shared_projection || (active_router_id.is_some() && router.disabled) {
+            continue;
+        }
         projections.push(ensure_projection_with_publisher(
             db,
             &router.router_id,
@@ -636,5 +620,127 @@ mod tests {
 
         assert!(published.into_inner().is_empty());
         assert!(outcome.projections.is_empty());
+    }
+
+    #[test]
+    fn device_local_router_selection_overrides_stale_database_current_provider() {
+        let db = Database::memory().expect("memory db");
+        db.save_provider("codex", &router("router-personal", "qwen"))
+            .expect("save personal router");
+        db.save_provider("codex", &router("router-company", "qwen"))
+            .expect("save company router");
+        db.set_current_provider("codex", "router-company")
+            .expect("seed stale database current provider");
+
+        assert_eq!(
+            super::super::active_codex_router_id_with_local(&db, Some("router-personal"))
+                .expect("resolve active router"),
+            Some("router-personal".to_string())
+        );
+    }
+
+    #[test]
+    fn shared_provider_delete_publishes_only_the_active_remaining_router() {
+        let db = Database::memory().expect("memory db");
+        db.save_provider("codex", &target("openai_chat"))
+            .expect("seed shared target");
+
+        let personal = Provider::with_id(
+            "router-personal".to_string(),
+            "Personal".to_string(),
+            json!({
+                "auth": {},
+                "codexRouting": {
+                    "schemaVersion": 2,
+                    "enabled": true,
+                    "routes": [
+                        {
+                            "id": "shared",
+                            "enabled": true,
+                            "targetProviderId": "qwen",
+                            "modelSelection": {"mode": "all"},
+                            "authPolicy": {"source": "provider_config"}
+                        },
+                        {
+                            "id": "personal-fallback",
+                            "enabled": true,
+                            "targetProviderId": "personal-only",
+                            "modelSelection": {"mode": "all"},
+                            "authPolicy": {"source": "provider_config"}
+                        }
+                    ]
+                }
+            }),
+            None,
+        );
+        let company = Provider::with_id(
+            "router-company".to_string(),
+            "Company".to_string(),
+            json!({
+                "auth": {},
+                "codexRouting": {
+                    "schemaVersion": 2,
+                    "enabled": true,
+                    "routes": [
+                        {
+                            "id": "shared",
+                            "enabled": true,
+                            "targetProviderId": "qwen",
+                            "modelSelection": {"mode": "all"},
+                            "authPolicy": {"source": "provider_config"}
+                        },
+                        {
+                            "id": "company-fallback",
+                            "enabled": true,
+                            "targetProviderId": "company-only",
+                            "modelSelection": {"mode": "all"},
+                            "authPolicy": {"source": "provider_config"}
+                        }
+                    ]
+                }
+            }),
+            None,
+        );
+        db.save_provider("codex", &personal)
+            .expect("save personal router");
+        db.save_provider("codex", &company)
+            .expect("save company router");
+        let personal_target = Provider::with_id(
+            "personal-only".to_string(),
+            "Personal only".to_string(),
+            json!({"modelCatalog": {"models": [{"model": "personal-model"}]}}),
+            None,
+        );
+        let company_target = Provider::with_id(
+            "company-only".to_string(),
+            "Company only".to_string(),
+            json!({"modelCatalog": {"models": [{"model": "company-model"}]}}),
+            None,
+        );
+        db.save_provider("codex", &personal_target)
+            .expect("save personal fallback target");
+        db.save_provider("codex", &company_target)
+            .expect("save company fallback target");
+        db.set_current_provider("codex", "router-personal")
+            .expect("set active router");
+
+        let published = RefCell::new(Vec::new());
+        apply_codex_provider_delete_with_hooks(
+            &db,
+            "qwen",
+            Some("router-personal"),
+            || Ok(()),
+            |artifact| {
+                published
+                    .borrow_mut()
+                    .push(artifact.router_provider_id.clone());
+                Ok(ProjectionReadBack::verified(
+                    artifact.dependency_fingerprint.clone(),
+                ))
+            },
+        )
+        .expect("delete shared target");
+
+        assert_eq!(published.into_inner(), vec!["router-personal".to_string()]);
     }
 }
