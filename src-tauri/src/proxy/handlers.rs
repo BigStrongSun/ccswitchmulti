@@ -33,7 +33,8 @@ use super::{
             responses_sse_events_from_anthropic_message,
         },
         streaming_codex_chat::{
-            create_responses_sse_stream_from_chat_with_context, HOSTED_TOOL_STREAM_RESPONSE_HEADER,
+            create_responses_sse_stream_from_chat_with_context_and_projection,
+            HOSTED_TOOL_STREAM_RESPONSE_HEADER,
         },
         streaming_gemini::create_anthropic_sse_stream_from_gemini,
         streaming_retry::{
@@ -3473,14 +3474,16 @@ async fn handle_codex_chat_to_responses_transform(
                 ));
             }
         };
-        let responses_response = transform_codex_chat::chat_completion_to_response_with_context(
-            chat_response,
-            &tool_context,
-        )
-        .map_err(|e| {
-            log::error!("[Codex] Chat → Responses 响应转换失败: {e}");
-            e
-        })?;
+        let responses_response =
+            transform_codex_chat::chat_completion_to_response_with_context_and_projection(
+                chat_response,
+                &tool_context,
+                crate::protocol_compatibility::ReasoningProjection::None,
+            )
+            .map_err(|e| {
+                log::error!("[Codex] Chat → Responses 响应转换失败: {e}");
+                e
+            })?;
         let compaction_response =
             transform_codex_chat::responses_to_compaction_response(responses_response)?;
         state
@@ -3542,9 +3545,22 @@ async fn handle_codex_chat_to_responses_transform(
         return Ok((headers, axum::body::Body::from(sse)).into_response());
     }
 
+    let upstream_model = ctx.outbound_model.as_deref().unwrap_or(&ctx.request_model);
+    let reasoning_projection = super::providers::resolve_codex_chat_reasoning_projection(
+        &ctx.provider,
+        &ctx.request_model,
+        upstream_model,
+        state.db.as_ref(),
+        chrono::Utc::now().timestamp(),
+    );
+
     if (is_stream || response.is_sse()) && !hosted_tool_loop_response {
         let stream = response.bytes_stream();
-        let sse_stream = create_responses_sse_stream_from_chat_with_context(stream, tool_context);
+        let sse_stream = create_responses_sse_stream_from_chat_with_context_and_projection(
+            stream,
+            tool_context,
+            reasoning_projection,
+        );
         let sse_stream = record_responses_sse_stream(sse_stream, state.codex_chat_history.clone());
 
         let usage_collector = if usage_logging_enabled(state) {
@@ -3671,14 +3687,16 @@ async fn handle_codex_chat_to_responses_transform(
             ));
         }
     };
-    let responses_response = transform_codex_chat::chat_completion_to_response_with_context(
-        chat_response,
-        &tool_context,
-    )
-    .map_err(|e| {
-        log::error!("[Codex] Chat → Responses 响应转换失败: {e}");
-        e
-    })?;
+    let responses_response =
+        transform_codex_chat::chat_completion_to_response_with_context_and_projection(
+            chat_response,
+            &tool_context,
+            reasoning_projection,
+        )
+        .map_err(|e| {
+            log::error!("[Codex] Chat → Responses 响应转换失败: {e}");
+            e
+        })?;
     state
         .codex_chat_history
         .record_response(&responses_response)

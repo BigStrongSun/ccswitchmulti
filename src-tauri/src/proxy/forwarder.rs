@@ -11,7 +11,7 @@ use super::providers::{
     },
     hosted_tools::openai_client::OpenAiHostedToolClient,
     streaming_codex_chat::{
-        create_responses_sse_stream_from_chat_with_hosted_loop, ChatSseStream,
+        create_responses_sse_stream_from_chat_with_hosted_loop_and_projection, ChatSseStream,
         CompletedChatToolCall, HOSTED_TOOL_STREAM_RESPONSE_HEADER,
     },
     transform_codex_chat::CodexToolContext,
@@ -4008,12 +4008,27 @@ impl RequestForwarder {
                             provider: provider.id.clone(),
                             tool: hosted_tool_choice_name(&filtered_body),
                         };
-                    let stream = create_responses_sse_stream_from_chat_with_hosted_loop(
-                        initial_stream,
-                        context,
-                        Some(hosted_tool_diagnostic_context),
-                        callback,
-                    );
+                    let upstream_model = filtered_body
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .filter(|model| !model.is_empty())
+                        .unwrap_or(&request_model_for_log);
+                    let reasoning_projection =
+                        super::providers::resolve_codex_chat_reasoning_projection(
+                            provider,
+                            &request_model_for_log,
+                            upstream_model,
+                            self.router.database(),
+                            chrono::Utc::now().timestamp(),
+                        );
+                    let stream =
+                        create_responses_sse_stream_from_chat_with_hosted_loop_and_projection(
+                            initial_stream,
+                            context,
+                            reasoning_projection,
+                            Some(hosted_tool_diagnostic_context),
+                            callback,
+                        );
                     ProxyResponse::streamed(StatusCode::OK, response_headers, stream)
                 } else {
                     let hosted_tool_choice = hosted_tool_choice_name(&filtered_body);

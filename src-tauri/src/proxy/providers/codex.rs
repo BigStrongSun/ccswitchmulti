@@ -19,6 +19,12 @@ use crate::provider::{
 };
 use crate::proxy::error::ProxyError;
 use crate::proxy::providers::codex_oauth_auth::{CodexAccountPoolPolicy, NATIVE_CODEX_ACCOUNT_ID};
+use crate::{
+    database::Database,
+    protocol_compatibility::{
+        endpoint::build_probe_url, ProbeTargetKey, ReasoningProjection, TransportKind,
+    },
+};
 use regex::Regex;
 use serde_json::{Map, Value as JsonValue};
 use std::{collections::HashMap, sync::LazyLock};
@@ -1217,6 +1223,79 @@ fn provider_codex_base_url(provider: &Provider) -> Option<String> {
                 .and_then(|value| value.as_str())
                 .and_then(extract_codex_base_url_from_toml)
         })
+}
+
+/// Resolves request-local reasoning projection exclusively from a verified Chat
+/// protocol profile for the effective upstream target. The persisted key keeps a
+/// MultiRouter route separate from a standalone provider even when they happen
+/// to share an endpoint and model mapping.
+pub(crate) fn resolve_codex_chat_reasoning_projection(
+    provider: &Provider,
+    public_model: &str,
+    upstream_model: &str,
+    db: &Database,
+    now: i64,
+) -> ReasoningProjection {
+    if public_model.trim().is_empty() || upstream_model.trim().is_empty() {
+        return ReasoningProjection::None;
+    }
+
+    let is_routed = provider
+        .settings_config
+        .get("codexResolvedRouteId")
+        .is_some();
+    let (provider_id, route_id) = if is_routed {
+        let Some(parent_provider_id) = provider
+            .settings_config
+            .get(CODEX_ROUTER_PARENT_PROVIDER_ID)
+            .and_then(JsonValue::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        else {
+            return ReasoningProjection::None;
+        };
+        let Some(route_id) = provider
+            .settings_config
+            .get("codexResolvedRouteId")
+            .and_then(JsonValue::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        else {
+            return ReasoningProjection::None;
+        };
+        (parent_provider_id, Some(route_id))
+    } else {
+        (provider.id.as_str(), None)
+    };
+
+    let Some(base_url) = provider_codex_base_url(provider) else {
+        return ReasoningProjection::None;
+    };
+    let is_full_url = provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.is_full_url)
+        .unwrap_or(false);
+    let Ok(endpoint) = build_probe_url(&base_url, TransportKind::OpenAiChat, is_full_url) else {
+        return ReasoningProjection::None;
+    };
+    let Ok(target) = ProbeTargetKey::new(
+        provider_id,
+        route_id,
+        public_model,
+        upstream_model,
+        TransportKind::OpenAiChat,
+        &endpoint,
+        "bearer",
+    ) else {
+        return ReasoningProjection::None;
+    };
+
+    db.get_protocol_compatibility_result(&target)
+        .ok()
+        .flatten()
+        .map(|record| record.automatic_reasoning_projection(now))
+        .unwrap_or(ReasoningProjection::None)
 }
 
 fn codex_base_url_points_to_local_proxy(url: &str) -> bool {
@@ -6996,6 +7075,150 @@ wire_api = "responses"
         assert_eq!(
             resolved.effective_provider.settings_config["base_url"],
             "https://qwen.example/v1"
+        );
+    }
+
+    fn save_verified_chat_profile(
+        db: &Database,
+        provider_id: &str,
+        route_id: Option<&str>,
+        public_model: &str,
+        upstream_model: &str,
+        endpoint: &str,
+        semantic: &str,
+        source: &str,
+    ) {
+        use crate::protocol_compatibility::{
+            ProbeReadiness, ProtocolCompatibilityProbeResult, ProtocolCompatibilityRecord,
+        };
+
+        let target = ProbeTargetKey::new(
+            provider_id,
+            route_id,
+            public_model,
+            upstream_model,
+            TransportKind::OpenAiChat,
+            endpoint,
+            "bearer",
+        )
+        .expect("profile target");
+        let result: ProtocolCompatibilityProbeResult = serde_json::from_value(json!({
+            "selected_transport": "open_ai_chat",
+            "readiness": "verified",
+            "branches": [{
+                "assessment": {
+                    "transport": "open_ai_chat",
+                    "baseline": "passed",
+                    "streaming": "passed",
+                    "forced_tool": "passed",
+                    "continuation": "passed"
+                },
+                "reasoning_shape": {
+                    "semantic": semantic,
+                    "source": source,
+                    "pre_tool_visible_content": "absent"
+                },
+                "evidence": []
+            }]
+        }))
+        .expect("verified profile result");
+        assert_eq!(result.readiness, ProbeReadiness::Verified);
+        db.save_protocol_compatibility_result(&ProtocolCompatibilityRecord::new(
+            target, result, 100, 200,
+        ))
+        .expect("save verified profile");
+    }
+
+    #[test]
+    fn resolves_exact_normal_chat_profile_only() {
+        let db = Database::memory().expect("memory database");
+        let mut provider = create_provider(json!({ "base_url": "https://qwen.example/v1" }));
+        provider.id = "qwen-provider".to_string();
+        save_verified_chat_profile(
+            &db,
+            "qwen-provider",
+            None,
+            "qwen-public",
+            "qwen-mapped",
+            "https://qwen.example/v1/chat/completions",
+            "readable",
+            "reasoning_content",
+        );
+
+        assert_eq!(
+            resolve_codex_chat_reasoning_projection(
+                &provider,
+                "qwen-public",
+                "qwen-mapped",
+                &db,
+                200,
+            ),
+            ReasoningProjection::RawReasoningText
+        );
+        assert_eq!(
+            resolve_codex_chat_reasoning_projection(
+                &provider,
+                "different-public-model",
+                "qwen-mapped",
+                &db,
+                200,
+            ),
+            ReasoningProjection::None
+        );
+
+        provider.settings_config["base_url"] = json!("https://other.example/v1");
+        assert_eq!(
+            resolve_codex_chat_reasoning_projection(
+                &provider,
+                "qwen-public",
+                "qwen-mapped",
+                &db,
+                200,
+            ),
+            ReasoningProjection::None
+        );
+    }
+
+    #[test]
+    fn routed_chat_profile_uses_parent_provider_and_route_identity() {
+        let db = Database::memory().expect("memory database");
+        let mut provider = create_provider(json!({
+            "base_url": "https://qwen.example/v1",
+            "codexRouterParentProviderId": "codex-router",
+            "codexResolvedRouteId": "qwen-route"
+        }));
+        provider.id = "effective-qwen-target".to_string();
+        save_verified_chat_profile(
+            &db,
+            "codex-router",
+            Some("qwen-route"),
+            "qwen-public",
+            "qwen-mapped",
+            "https://qwen.example/v1/chat/completions",
+            "summary",
+            "native_responses",
+        );
+
+        assert_eq!(
+            resolve_codex_chat_reasoning_projection(
+                &provider,
+                "qwen-public",
+                "qwen-mapped",
+                &db,
+                200,
+            ),
+            ReasoningProjection::ReasoningSummary
+        );
+        provider.settings_config["codexResolvedRouteId"] = json!("other-route");
+        assert_eq!(
+            resolve_codex_chat_reasoning_projection(
+                &provider,
+                "qwen-public",
+                "qwen-mapped",
+                &db,
+                200,
+            ),
+            ReasoningProjection::None
         );
     }
 }
