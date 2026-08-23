@@ -223,6 +223,36 @@ function Wait-CcsmOwnedProcessExit {
     return [int]$Process.ExitCode
 }
 
+function Get-CcsmTauriNsisPayloadHash {
+    param([Parameter(Mandatory = $true)][string]$ExecutablePath)
+
+    if (-not (Test-Path -LiteralPath $ExecutablePath -PathType Leaf)) {
+        throw "Tauri executable missing: $ExecutablePath"
+    }
+    $unknownMarker = "__TAURI_BUNDLE_TYPE_VAR_UNK"
+    $nsisMarker = "__TAURI_BUNDLE_TYPE_VAR_NSS"
+    if ($unknownMarker.Length -ne $nsisMarker.Length) {
+        throw "Tauri bundle markers must have equal length"
+    }
+
+    $bytes = [System.IO.File]::ReadAllBytes($ExecutablePath)
+    $ascii = [System.Text.Encoding]::ASCII.GetString($bytes)
+    $markerIndex = $ascii.IndexOf($unknownMarker, [System.StringComparison]::Ordinal)
+    if ($markerIndex -lt 0) { throw "Tauri unknown bundle marker not found" }
+    if ($ascii.IndexOf($unknownMarker, $markerIndex + 1, [System.StringComparison]::Ordinal) -ge 0) {
+        throw "multiple Tauri unknown bundle markers found"
+    }
+
+    $replacement = [System.Text.Encoding]::ASCII.GetBytes($nsisMarker)
+    [System.Array]::Copy($replacement, 0, $bytes, $markerIndex, $replacement.Length)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return [System.BitConverter]::ToString($sha.ComputeHash($bytes)).Replace("-", "")
+    } finally {
+        $sha.Dispose()
+    }
+}
+
 function Invoke-CcsmGuardianIteration {
     param(
         [Parameter(Mandatory = $true)]$State,

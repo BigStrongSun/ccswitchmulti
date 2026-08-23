@@ -209,6 +209,33 @@ $child = Start-Process -FilePath $powershell -WindowStyle Hidden -PassThru `
     }
 }
 
+Describe "CCSwitchMulti Tauri NSIS payload hash" {
+    It "hashes the packaged binary after the official bundle marker replacement" {
+        $testRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("ccsm-nsis-hash-" + [guid]::NewGuid().ToString("N"))
+        $binaryPath = Join-Path $testRoot "app.exe"
+        New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
+        try {
+            $source = [System.Text.Encoding]::ASCII.GetBytes(
+                "prefix-__TAURI_BUNDLE_TYPE_VAR_UNK-suffix"
+            )
+            $expected = [System.Text.Encoding]::ASCII.GetBytes(
+                "prefix-__TAURI_BUNDLE_TYPE_VAR_NSS-suffix"
+            )
+            [System.IO.File]::WriteAllBytes($binaryPath, $source)
+            $sha = [System.Security.Cryptography.SHA256]::Create()
+            try {
+                $expectedHash = [System.BitConverter]::ToString($sha.ComputeHash($expected)).Replace("-", "")
+            } finally {
+                $sha.Dispose()
+            }
+
+            Get-CcsmTauriNsisPayloadHash -ExecutablePath $binaryPath | Should Be $expectedHash
+        } finally {
+            if (Test-Path -LiteralPath $testRoot) { Remove-Item -LiteralPath $testRoot -Recurse -Force }
+        }
+    }
+}
+
 Describe "CCSwitchMulti guardian decision loop" {
     BeforeEach {
         $script:events = New-Object System.Collections.Generic.List[string]
