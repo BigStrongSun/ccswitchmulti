@@ -446,7 +446,8 @@ fn parse_volcengine_plan_model_entry(entry: &serde_json::Value) -> Option<Fetche
 /// 为缺失上下文窗口的模型执行分层补齐。
 ///
 /// 顺序保持保守：`/models` 显式 metadata 已在调用前解析完成；这里仅对仍为空的模型
-/// 先尝试 provider 官方来源，再尝试能按 API 前缀匹配的公共目录。
+/// 先查本地预设表（离线可用、WebDAV 同步），再尝试 provider 官方来源，
+/// 最后尝试能按 API 前缀匹配的公共目录。
 async fn enrich_missing_context_windows(
     client: &reqwest::Client,
     endpoint_url: &str,
@@ -456,8 +457,31 @@ async fn enrich_missing_context_windows(
         return;
     }
 
+    enrich_preset_catalog_context_windows(endpoint_url, models);
     enrich_zhipu_context_windows(client, endpoint_url, models).await;
     enrich_models_dev_context_windows(client, endpoint_url, models).await;
+}
+
+/// 用本地预设表（`~/.cc-switch/preset-table.json`）补齐上下文窗口。
+///
+/// 与远端 models.dev 兜底同一套防误配规则：只有 endpoint 落在 bundle 声明的
+/// 官方 API 前缀内才使用；只填充缺失值，不覆盖上游显式 metadata。
+/// 本地文件缺失或损坏时静默跳过，不影响后续远端补齐。
+fn enrich_preset_catalog_context_windows(endpoint_url: &str, models: &mut [FetchedModel]) {
+    if !models.iter().any(|model| model.context_window.is_none()) {
+        return;
+    }
+    let Some(bundle) = crate::services::preset_catalog::load_default_bundle() else {
+        return;
+    };
+    let Some(provider) =
+        crate::services::preset_catalog::find_provider_for_endpoint(&bundle, endpoint_url)
+    else {
+        return;
+    };
+    apply_missing_context_windows(models, |model_id| {
+        crate::services::preset_catalog::lookup_baseline_context(&bundle, provider, model_id)
+    });
 }
 
 /// 为智谱模型补齐官方文档里的上下文窗口。

@@ -58,6 +58,7 @@ import { isTextEditableTarget } from "@/utils/domUtils";
 import { deepClone } from "@/utils/deepClone";
 import { cn } from "@/lib/utils";
 import { enableCodexMultiRouterPlan } from "@/lib/codexMultiRouterEnable";
+import { loadPresetCatalog } from "@/lib/presetCatalog";
 import {
   isWindows,
   isLinux,
@@ -242,6 +243,12 @@ function App() {
   useEffect(() => {
     localStorage.setItem(VIEW_STORAGE_KEY, currentView);
   }, [currentView]);
+
+  // 启动时预加载本地预设表（WebDAV 同步的模型能力目录），供上下文推断同步查询。
+  // 失败静默：调用方回退内置硬编码预设。
+  useEffect(() => {
+    void loadPresetCatalog();
+  }, []);
 
   // Codex 专属工具页只在 Codex 应用语境下保留，避免切到其他应用后还停留在 Codex 工具。
   useEffect(() => {

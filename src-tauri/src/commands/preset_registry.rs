@@ -7,6 +7,8 @@
 use serde_json::{json, Value};
 
 use crate::error::AppError;
+use crate::services::preset_catalog as preset_catalog_service;
+use crate::services::preset_catalog::{PresetTableBundle, ResolvedPresetEntry};
 use crate::services::preset_registry as preset_registry_service;
 use crate::services::preset_registry::PresetRegistrySettings;
 use crate::settings;
@@ -84,4 +86,33 @@ pub async fn preset_registry_check_update(
                 &manifest.version,
             ),
     }))
+}
+
+/// 读取本地预设表 bundle（`~/.cc-switch/preset-table.json`）。
+///
+/// 供前端一次性加载后做同步查询（模型上下文推断）；文件缺失或损坏返回 `None`，
+/// 前端回退到内置硬编码预设。
+#[tauri::command]
+pub fn preset_catalog_get() -> Option<PresetTableBundle> {
+    preset_catalog_service::load_default_bundle()
+}
+
+/// 解析单个模型的能力条目：plan 覆盖 > 基线。
+///
+/// `plan` 为空时只查基线；未命中返回 `None`（前端回退既有逻辑）。
+#[tauri::command]
+pub fn preset_catalog_resolve(
+    provider: String,
+    model: String,
+    plan: Option<String>,
+) -> Result<Option<ResolvedPresetEntry>, String> {
+    let Some(bundle) = preset_catalog_service::load_default_bundle() else {
+        return Ok(None);
+    };
+    Ok(preset_catalog_service::resolve(
+        &bundle,
+        &provider,
+        &model,
+        plan.as_deref(),
+    ))
 }

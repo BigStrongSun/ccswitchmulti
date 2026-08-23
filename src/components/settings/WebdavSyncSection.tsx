@@ -33,6 +33,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { settingsApi } from "@/lib/api";
+import { loadPresetCatalog } from "@/lib/presetCatalog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import type { SettingsFormState } from "@/hooks/useSettings";
 import type {
@@ -645,6 +646,8 @@ export function WebdavSyncSection({
       await settingsApi.webdavSyncDownload();
       toast.success(t("settings.webdavSync.downloadSuccess"));
       await queryClient.invalidateQueries();
+      // 下载可能更新了 preset-table.json，强制重新加载预设表缓存。
+      void loadPresetCatalog(true);
     } catch (error) {
       toast.error(
         t("settings.webdavSync.downloadFailed", {

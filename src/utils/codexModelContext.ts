@@ -1,4 +1,5 @@
 import { codexProviderPresets } from "@/config/codexProviderPresets";
+import { resolvePresetCatalogContextWindow } from "@/lib/presetCatalog";
 
 export interface CodexContextInferenceSource {
   providerId?: string;
@@ -23,6 +24,22 @@ const DEEPSEEK_ALIAS_CONTEXT_WINDOWS: Record<string, number> = {
   "deepseek-chat": 1000000,
   "deepseek-reasoner": 1000000,
 };
+
+// 官方 Codex 订阅对应的预设表 plan 名（plans/openai-codex-plan）。
+const OPENAI_CODEX_PLAN = "openai-codex-plan";
+
+// 判断当前 provider 是否官方 Codex 订阅（→ 应用 openai-codex-plan 覆盖）。
+// 复用既有预设信号匹配：命中 "OpenAI Official"（chatgpt.com/codex）预设才算。
+function codexPlanForSource(source: CodexContextInferenceSource): string | undefined {
+  const official = codexProviderPresets.find(
+    (preset) => preset.isOfficial && preset.websiteUrl.includes("chatgpt.com/codex"),
+  );
+  if (!official) return undefined;
+  if (providerMatchesPreset(official.name, official.websiteUrl, source)) {
+    return OPENAI_CODEX_PLAN;
+  }
+  return undefined;
+}
 
 // 解析 UI/配置里可能出现的上下文窗口，允许保留旧数据中的 "128000 tokens" 形态。
 function parsePositiveContextWindow(value: unknown): number | undefined {
@@ -87,6 +104,14 @@ export function inferCodexModelContextWindow(
 ): number | undefined {
   const normalizedModel = modelId.trim();
   if (!normalizedModel) return undefined;
+
+  // 优先查本地预设表（WebDAV 同步、可配置）：官方 Codex 订阅走 plan 覆盖
+  // （272K × 95% = 258,400），其余走 API 基线。未加载/未命中时回退硬编码预设。
+  const presetContext = resolvePresetCatalogContextWindow(
+    normalizedModel,
+    codexPlanForSource(source),
+  );
+  if (presetContext !== undefined) return presetContext;
 
   const lowerModel = normalizedModel.toLowerCase();
   for (const preset of codexProviderPresets) {

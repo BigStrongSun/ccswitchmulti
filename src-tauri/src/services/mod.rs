@@ -9,6 +9,7 @@ pub mod model_fetch;
 pub mod model_pricing;
 pub mod omo;
 pub mod preset_registry;
+pub mod preset_catalog;
 pub mod profile;
 pub mod prompt;
 pub mod provider;

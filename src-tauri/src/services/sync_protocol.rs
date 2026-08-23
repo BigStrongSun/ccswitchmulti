@@ -1,6 +1,7 @@
 //! Transport-agnostic sync protocol layer.
 //!
-//! Shared by WebDAV, S3, and future transports. Artifact set: `db.sql` + `skills.zip`.
+//! Shared by WebDAV, S3, and future transports. Artifact set: `db.sql` +
+//! `skills.zip` + optional `preset-table.json`（模型能力预设表，本地存在才上传）。
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -28,6 +29,7 @@ pub(crate) const DB_COMPAT_VERSION: u32 = 6;
 pub(crate) const LEGACY_DB_COMPAT_VERSION: u32 = 5;
 pub(crate) const REMOTE_DB_SQL: &str = "db.sql";
 pub(crate) const REMOTE_SKILLS_ZIP: &str = "skills.zip";
+pub(crate) const REMOTE_PRESET_TABLE: &str = "preset-table.json";
 pub(crate) const REMOTE_MANIFEST: &str = "manifest.json";
 pub(crate) const MAX_DEVICE_NAME_LEN: usize = 64;
 pub(crate) const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
@@ -81,6 +83,9 @@ pub(crate) struct ArtifactMeta {
 pub(crate) struct LocalSnapshot {
     pub db_sql: Vec<u8>,
     pub skills_zip: Vec<u8>,
+    /// 本地预设表（`~/.cc-switch/preset-table.json`）；不存在时为 `None`，
+    /// 上传时跳过该 artifact，manifest 中也不登记。
+    pub preset_table: Option<Vec<u8>>,
     pub manifest_bytes: Vec<u8>,
     pub manifest_hash: String,
 }
@@ -123,6 +128,11 @@ pub(crate) fn build_local_snapshot(
     zip_skills_ssot(&skills_zip_path)?;
     let skills_zip = fs::read(&skills_zip_path).map_err(|e| AppError::io(&skills_zip_path, e))?;
 
+    // 预设表是可选 artifact：本地存在且非空才纳入快照（缺失不报错）。
+    let preset_table = fs::read(crate::config::get_app_config_dir().join(REMOTE_PRESET_TABLE))
+        .ok()
+        .filter(|bytes| !bytes.is_empty());
+
     // Build artifact map and compute hashes
     let mut artifacts = BTreeMap::new();
     artifacts.insert(
@@ -139,6 +149,15 @@ pub(crate) fn build_local_snapshot(
             size: skills_zip.len() as u64,
         },
     );
+    if let Some(preset_bytes) = &preset_table {
+        artifacts.insert(
+            REMOTE_PRESET_TABLE.to_string(),
+            ArtifactMeta {
+                sha256: sha256_hex(preset_bytes),
+                size: preset_bytes.len() as u64,
+            },
+        );
+    }
 
     let snapshot_id = compute_snapshot_id(&artifacts);
     let manifest = SyncManifest {
@@ -157,6 +176,7 @@ pub(crate) fn build_local_snapshot(
     Ok(LocalSnapshot {
         db_sql,
         skills_zip,
+        preset_table,
         manifest_bytes,
         manifest_hash,
     })
@@ -311,6 +331,7 @@ pub(crate) fn apply_snapshot(
     db: &crate::database::Database,
     db_sql: &[u8],
     skills_zip: &[u8],
+    preset_table: Option<&[u8]>,
 ) -> Result<(), AppError> {
     let sql_str = std::str::from_utf8(db_sql).map_err(|e| {
         localized(
@@ -337,6 +358,23 @@ pub(crate) fn apply_snapshot(
         return Err(db_err);
     }
 
+    // 预设表在 DB 导入成功后落地（原子写：临时文件 + rename）；远端没有该
+    // artifact 时保留本地现有文件，不删除。
+    if let Some(bytes) = preset_table {
+        write_preset_table_atomic(bytes)?;
+    }
+
+    Ok(())
+}
+
+/// 原子写入预设表到应用配置目录。
+fn write_preset_table_atomic(bytes: &[u8]) -> Result<(), AppError> {
+    let dir = crate::config::get_app_config_dir();
+    fs::create_dir_all(&dir).map_err(|e| AppError::io(&dir, e))?;
+    let target = dir.join(REMOTE_PRESET_TABLE);
+    let tmp = dir.join(format!(".{REMOTE_PRESET_TABLE}.tmp"));
+    fs::write(&tmp, bytes).map_err(|e| AppError::io(&tmp, e))?;
+    fs::rename(&tmp, &target).map_err(|e| AppError::io(&target, e))?;
     Ok(())
 }
 

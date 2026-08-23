@@ -1545,6 +1545,8 @@ pub fn run() {
             commands::preset_registry_get_settings,
             commands::preset_registry_save_settings,
             commands::preset_registry_check_update,
+            commands::preset_catalog_get,
+            commands::preset_catalog_resolve,
             commands::s3_test_connection,
             commands::s3_sync_upload,
             commands::s3_sync_download,

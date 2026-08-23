@@ -22,7 +22,7 @@ use super::sync_protocol::{
     persist_sync_success_best_effort, sha256_hex, validate_artifact_size_limit,
     validate_manifest_compat, verify_artifact, ArtifactMeta, RemoteLayout, SyncManifest,
     DB_COMPAT_VERSION, MAX_MANIFEST_BYTES, MAX_SYNC_ARTIFACT_BYTES, PROTOCOL_VERSION,
-    REMOTE_DB_SQL, REMOTE_MANIFEST, REMOTE_SKILLS_ZIP,
+    REMOTE_DB_SQL, REMOTE_MANIFEST, REMOTE_PRESET_TABLE, REMOTE_SKILLS_ZIP,
 };
 
 pub(crate) mod archive;
@@ -78,6 +78,13 @@ pub async fn upload(
 
     let skills_url = remote_file_url(settings, RemoteLayout::Current, REMOTE_SKILLS_ZIP)?;
     put_bytes(&skills_url, &auth, snapshot.skills_zip, "application/zip").await?;
+
+    // 预设表是可选 artifact：本地存在才上传（manifest 已登记其 hash/size）。
+    if let Some(preset_bytes) = &snapshot.preset_table {
+        let preset_url =
+            remote_file_url(settings, RemoteLayout::Current, REMOTE_PRESET_TABLE)?;
+        put_bytes(&preset_url, &auth, preset_bytes.clone(), "application/json").await?;
+    }
 
     let manifest_url = remote_file_url(settings, RemoteLayout::Current, REMOTE_MANIFEST)?;
     put_bytes(
@@ -143,8 +150,24 @@ pub async fn download(
     )
     .await?;
 
+    // 预设表是可选 artifact：远端 manifest 没有时跳过（保留本地现有文件）。
+    let preset_table = if snapshot.manifest.artifacts.contains_key(REMOTE_PRESET_TABLE) {
+        Some(
+            download_and_verify(
+                settings,
+                &auth,
+                snapshot.layout,
+                REMOTE_PRESET_TABLE,
+                &snapshot.manifest.artifacts,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
     // Apply snapshot
-    apply_snapshot(db, &db_sql, &skills_zip)?;
+    apply_snapshot(db, &db_sql, &skills_zip, preset_table.as_deref())?;
 
     let manifest_hash = sha256_hex(&snapshot.manifest_bytes);
     let _persisted = persist_sync_success_best_effort(
