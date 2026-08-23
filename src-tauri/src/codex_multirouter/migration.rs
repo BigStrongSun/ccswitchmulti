@@ -6,6 +6,7 @@ use super::schema::{
 use crate::database::Database;
 use crate::error::AppError;
 use crate::provider::Provider;
+use crate::proxy::providers::codex_route_auth_source;
 use rusqlite::params;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -701,7 +702,7 @@ fn apply_model_capabilities(
 }
 
 fn infer_official_target(route: &Value) -> Option<String> {
-    let source = route.pointer("/upstream/auth/source")?.as_str()?;
+    let source = codex_route_auth_source(route)?;
     matches!(
         source,
         "managed_codex_oauth" | "native_codex_auth" | "account_pool"

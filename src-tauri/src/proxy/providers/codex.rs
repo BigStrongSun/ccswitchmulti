@@ -51,6 +51,23 @@ pub enum CodexMultiRouterAuthFacade {
     LegacyPreserved,
 }
 
+/// 统一提取 route 的 auth source，兼容新旧两种 schema。
+///
+/// v1 route 把认证声明放在 `upstream.auth.source`；v2 route（schema v2 迁移后）
+/// 顶层 `authPolicy.source` 是唯一声明位（保存时不再写 upstream）。其余函数
+/// （如 [`codex_route_uses_official_agent_backend`]）已支持多字段兜底，这里
+/// 收敛到同一提取逻辑，避免 `authPolicy` 缺失导致认证门面误判。
+pub(crate) fn codex_route_auth_source(route: &JsonValue) -> Option<&str> {
+    let upstream = route.get("upstream").unwrap_or(route);
+    let auth = upstream
+        .get("auth")
+        .or_else(|| route.get("auth"))
+        .or_else(|| route.get("authPolicy"))
+        .or_else(|| route.get("auth_policy"))
+        .unwrap_or(upstream);
+    auth.get("source").and_then(JsonValue::as_str)
+}
+
 /// 根据持久化 Router 配置和账号池策略判断本地认证门面。
 ///
 /// route 是运行时认证所有权的最终事实；`officialAuth` 由保存流程物化到 route，
@@ -86,9 +103,7 @@ pub fn classify_codex_multirouter_auth_facade(
             continue;
         }
         has_enabled_route = true;
-        let source = route
-            .pointer("/upstream/auth/source")
-            .and_then(JsonValue::as_str);
+        let source = codex_route_auth_source(route);
         match source {
             Some("native_codex_auth") => needs_native_auth = true,
             Some("account_pool") => match pool_policy {
@@ -123,19 +138,16 @@ pub(crate) fn codex_route_uses_official_agent_backend(route: &JsonValue) -> bool
         .or_else(|| route.get("authPolicy"))
         .or_else(|| route.get("auth_policy"))
         .unwrap_or(upstream);
-    auth.get("source")
+    codex_route_auth_source(route).is_some_and(|source| {
+        matches!(
+            source.to_ascii_lowercase().as_str(),
+            "native_codex_auth" | "managed_codex_oauth" | "managed_account" | "account_pool"
+        )
+    }) || auth
+        .get("authProvider")
+        .or_else(|| auth.get("auth_provider"))
         .and_then(JsonValue::as_str)
-        .is_some_and(|source| {
-            matches!(
-                source.to_ascii_lowercase().as_str(),
-                "native_codex_auth" | "managed_codex_oauth" | "managed_account" | "account_pool"
-            )
-        })
-        || auth
-            .get("authProvider")
-            .or_else(|| auth.get("auth_provider"))
-            .and_then(JsonValue::as_str)
-            .is_some_and(|provider| provider.eq_ignore_ascii_case("codex_oauth"))
+        .is_some_and(|provider| provider.eq_ignore_ascii_case("codex_oauth"))
 }
 
 /// 官方 Codex 客户端 User-Agent 正则
@@ -3596,6 +3608,113 @@ context_window = 500000
         );
         assert_eq!(
             classify_codex_multirouter_auth_facade(&provider_config, None),
+            CodexMultiRouterAuthFacade::FullyManaged
+        );
+    }
+
+    #[test]
+    fn codex_route_auth_source_reads_all_schema_variants() {
+        // v1：upstream.auth.source
+        assert_eq!(
+            codex_route_auth_source(&json!({
+                "id": "r1",
+                "upstream": { "auth": { "source": "native_codex_auth" } }
+            })),
+            Some("native_codex_auth")
+        );
+        // v2：顶层 authPolicy.source（本次 bug 关键形态）
+        assert_eq!(
+            codex_route_auth_source(&json!({
+                "id": "r2",
+                "authPolicy": { "source": "provider_config" }
+            })),
+            Some("provider_config")
+        );
+        // v2 变体：顶层 auth.source
+        assert_eq!(
+            codex_route_auth_source(&json!({
+                "id": "r3",
+                "auth": { "source": "managed_codex_oauth", "accountId": "a1" }
+            })),
+            Some("managed_codex_oauth")
+        );
+        // 兼容变体：顶层 auth_policy.source
+        assert_eq!(
+            codex_route_auth_source(&json!({
+                "id": "r4",
+                "auth_policy": { "source": "account_pool" }
+            })),
+            Some("account_pool")
+        );
+        // 无任何 auth 声明 → None（保留 ambiguous 判定路径）
+        assert_eq!(
+            codex_route_auth_source(&json!({ "id": "r5", "upstream": { "apiFormat": "openai_responses" } })),
+            None
+        );
+    }
+
+    #[test]
+    fn codex_multirouter_auth_facade_reads_v2_auth_policy_source() {
+        // 回归（母仓库 cd1e7c4b v2 schema 迁移遗漏）：v2 route 的认证声明
+        // 在顶层 authPolicy（保存时不再写 upstream.auth）。若 classify 只读
+        // /upstream/auth/source，官方 route 会漏判 native → 门面降级
+        // FullyManaged → live config 注入 PROXY_MANAGED → 官方 route 401。
+        let native = multirouter_with_routes(
+            json!([{
+                "id": "router-codex-official",
+                "enabled": true,
+                "targetProviderId": "codex-official",
+                "authPolicy": { "source": "native_codex_auth" }
+            }]),
+            Some(json!({ "mode": "desktop_current_login" })),
+        );
+        assert_eq!(
+            classify_codex_multirouter_auth_facade(&native, None),
+            CodexMultiRouterAuthFacade::NativeMixed
+        );
+
+        // v2 顶层 auth 字段同样兼容
+        let native_top_auth = multirouter_with_routes(
+            json!([{
+                "id": "router-codex-official",
+                "enabled": true,
+                "targetProviderId": "codex-official",
+                "auth": { "source": "native_codex_auth" }
+            }]),
+            Some(json!({ "mode": "desktop_current_login" })),
+        );
+        assert_eq!(
+            classify_codex_multirouter_auth_facade(&native_top_auth, None),
+            CodexMultiRouterAuthFacade::NativeMixed
+        );
+
+        // v2 authPolicy 第三方 provider_config 仍判 FullyManaged
+        let provider_config = multirouter_with_routes(
+            json!([{
+                "id": "router-kimi",
+                "enabled": true,
+                "targetProviderId": "kimi",
+                "authPolicy": { "source": "provider_config" }
+            }]),
+            None,
+        );
+        assert_eq!(
+            classify_codex_multirouter_auth_facade(&provider_config, None),
+            CodexMultiRouterAuthFacade::FullyManaged
+        );
+
+        // v2 authPolicy managed_codex_oauth 仍判 FullyManaged
+        let managed = multirouter_with_routes(
+            json!([{
+                "id": "router-official",
+                "enabled": true,
+                "targetProviderId": "codex-official",
+                "authPolicy": { "source": "managed_codex_oauth", "accountId": "managed-account" }
+            }]),
+            Some(json!({ "mode": "managed_oauth", "accountId": "managed-account" })),
+        );
+        assert_eq!(
+            classify_codex_multirouter_auth_facade(&managed, None),
             CodexMultiRouterAuthFacade::FullyManaged
         );
     }
