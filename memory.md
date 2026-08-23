@@ -4251,3 +4251,4 @@ supported in one streaming turn`。
 - `ProbeTargetKey` 规范化 endpoint 时移除 URL userinfo、query 和 fragment，再仅保存其 SHA-256 指纹；凭据、提示或正文不能进入目标键。`ProbeCandidate` 可在 Provider 尚未持久化时以 `provider_id=None` 编译，支持保存前探测。
 - 自动投影只允许 `ProbeReadiness::Verified`。手工覆盖必须验证已有证据：不透明证据不能升格为 readable，非 readable 不能要求 raw `reasoning_text`，readable 必须提供来源，原生 Responses 不得伪装为 Chat `reasoning_content` 回放。
 - 本轮 RED/GREEN：先观察到目标键/准入 API 缺失的编译失败，再完成 2/2；第二轮观察到候选与覆盖类型缺失的编译失败，补齐后 6/6 通过。后续仍须完成结构脱敏、持久化、capture/classifier、真实 probe transaction 和生产桥接，未可声称端到端功能完成。
+- 脱敏器现已实现为严格路径白名单：Chat JSON/SSE 只可生成 allowlisted reasoning/content/tool-arguments 字段的路径、值类型、字节长度、SHA-256 与 SSE event 名；`id`、Authorization、正文、nonce 与工具参数原文都不会进入序列化证据。两项 JSON/SSE RED/GREEN 测试已通过；数据库接入前仍需增加持久化层回归。
