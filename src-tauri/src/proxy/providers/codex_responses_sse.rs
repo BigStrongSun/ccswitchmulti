@@ -186,7 +186,7 @@ pub(crate) fn message_close(output_index: u32, item_id: &str, text: &str) -> (Ve
 }
 
 // ---------------------------------------------------------------------------
-// Reasoning (summary) lifecycle
+// Reasoning lifecycle
 // ---------------------------------------------------------------------------
 
 /// `response.output_item.added` for an in-progress reasoning item.
@@ -198,6 +198,24 @@ pub(crate) fn reasoning_item_added(output_index: u32, item_id: &str) -> Bytes {
             "type": "reasoning",
             "status": "in_progress",
             "summary": []
+        }),
+    )
+}
+
+/// `response.output_item.added` for an in-progress raw reasoning item.
+///
+/// Third-party Chat providers expose their reasoning as readable model output,
+/// rather than OpenAI-generated summary text. Keep that distinction in the
+/// Responses shape so Codex can render it as expandable raw reasoning.
+pub(crate) fn reasoning_text_item_added(output_index: u32, item_id: &str) -> Bytes {
+    output_item_added(
+        output_index,
+        &json!({
+            "id": item_id,
+            "type": "reasoning",
+            "status": "in_progress",
+            "summary": [],
+            "content": []
         }),
     )
 }
@@ -230,6 +248,20 @@ pub(crate) fn reasoning_summary_text_delta(output_index: u32, item_id: &str, del
     )
 }
 
+/// `response.reasoning_text.delta` for readable raw reasoning content.
+pub(crate) fn reasoning_text_delta(output_index: u32, item_id: &str, delta: &str) -> Bytes {
+    sse_event(
+        "response.reasoning_text.delta",
+        json!({
+            "type": "response.reasoning_text.delta",
+            "item_id": item_id,
+            "output_index": output_index,
+            "content_index": 0,
+            "delta": delta
+        }),
+    )
+}
+
 /// The completed reasoning item value (note: no `status` field, matching both converters).
 pub(crate) fn reasoning_item(item_id: &str, text: &str) -> Value {
     json!({
@@ -244,6 +276,34 @@ pub(crate) fn reasoning_item(item_id: &str, text: &str) -> Value {
 pub(crate) fn reasoning_close(output_index: u32, item_id: &str, text: &str) -> (Vec<Bytes>, Value) {
     let item = reasoning_item(item_id, text);
     let events = reasoning_close_with_item(output_index, item_id, text, &item, true);
+    (events, item)
+}
+
+/// Close a readable raw reasoning item and return its completed Responses shape.
+pub(crate) fn reasoning_text_close(
+    output_index: u32,
+    item_id: &str,
+    text: &str,
+) -> (Vec<Bytes>, Value) {
+    let item = json!({
+        "id": item_id,
+        "type": "reasoning",
+        "summary": [],
+        "content": [{ "type": "reasoning_text", "text": text }]
+    });
+    let events = vec![
+        sse_event(
+            "response.reasoning_text.done",
+            json!({
+                "type": "response.reasoning_text.done",
+                "item_id": item_id,
+                "output_index": output_index,
+                "content_index": 0,
+                "text": text
+            }),
+        ),
+        output_item_done(output_index, &item),
+    ];
     (events, item)
 }
 
@@ -386,6 +446,16 @@ mod tests {
         // The completed reasoning item intentionally carries no `status` field.
         assert!(item.get("status").is_none());
         assert_eq!(item["summary"][0]["text"], "because");
+    }
+
+    #[test]
+    fn reasoning_text_close_preserves_raw_content() {
+        let (events, item) = reasoning_text_close(0, "rs_1", "because");
+        assert_eq!(events.len(), 2);
+        assert!(body(&events[0]).contains("\"type\":\"response.reasoning_text.done\""));
+        assert!(body(&events[1]).contains("\"type\":\"response.output_item.done\""));
+        assert_eq!(item["content"][0]["type"], "reasoning_text");
+        assert_eq!(item["content"][0]["text"], "because");
     }
 
     #[test]

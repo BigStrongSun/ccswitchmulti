@@ -1794,7 +1794,24 @@ fn codex_chat_model_is_text_only(model: &str) -> bool {
 }
 
 fn responses_reasoning_item_text(item: &Value) -> Option<String> {
-    extract_reasoning_summary_text(item)
+    responses_reasoning_raw_content_text(item).or_else(|| extract_reasoning_summary_text(item))
+}
+
+fn responses_reasoning_raw_content_text(item: &Value) -> Option<String> {
+    let parts = item.get("content")?.as_array()?;
+    let text = parts
+        .iter()
+        .filter(|part| {
+            matches!(
+                part.get("type").and_then(|value| value.as_str()),
+                Some("reasoning_text" | "text")
+            )
+        })
+        .filter_map(|part| part.get("text").and_then(|value| value.as_str()))
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    (!text.is_empty()).then_some(text)
 }
 
 fn responses_content_to_chat_content(_role: &str, content: &Value, text_only_model: bool) -> Value {
@@ -5144,6 +5161,41 @@ mod tests {
         assert_eq!(messages[0]["role"], "assistant");
         assert_eq!(messages[0]["tool_calls"][0]["id"], "call_1");
         assert_eq!(messages[0]["reasoning_content"], "Need to read a file.");
+        assert_eq!(messages[1]["role"], "tool");
+    }
+
+    #[test]
+    fn responses_request_to_chat_replays_raw_reasoning_content_with_tool_call() {
+        let input = json!({
+            "model": "qwen3.8",
+            "input": [
+                {
+                    "type": "reasoning",
+                    "content": [{"type": "reasoning_text", "text": "Need to inspect the workspace."}]
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "read_file",
+                    "arguments": "{\"path\":\"README.md\"}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "Readme content"
+                }
+            ]
+        });
+
+        let result = responses_to_chat_completions(input).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+
+        assert_eq!(messages[0]["role"], "assistant");
+        assert_eq!(messages[0]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(
+            messages[0]["reasoning_content"],
+            "Need to inspect the workspace."
+        );
         assert_eq!(messages[1]["role"], "tool");
     }
 

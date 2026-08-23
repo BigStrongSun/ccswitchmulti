@@ -420,13 +420,12 @@ impl ChatToResponsesState {
             self.reasoning.item_id = item_id.clone();
             self.reasoning.added = true;
 
-            events.push(sse::reasoning_item_added(output_index, &item_id));
-            events.push(sse::reasoning_summary_part_added(output_index, &item_id));
+            events.push(sse::reasoning_text_item_added(output_index, &item_id));
         }
 
         self.reasoning.text.push_str(delta);
         let output_index = self.reasoning.output_index.unwrap_or(0);
-        events.push(sse::reasoning_summary_text_delta(
+        events.push(sse::reasoning_text_delta(
             output_index,
             &self.reasoning.item_id,
             delta,
@@ -723,7 +722,7 @@ impl ChatToResponsesState {
         let output_index = self.reasoning.output_index.unwrap_or(0);
         let item_id = self.reasoning.item_id.clone();
         let text = self.reasoning.text.clone();
-        let (events, item) = sse::reasoning_close(output_index, &item_id, &text);
+        let (events, item) = sse::reasoning_text_close(output_index, &item_id, &text);
         self.output_items.push((output_index, item));
         self.reasoning.done = true;
         events
@@ -1449,9 +1448,12 @@ mod tests {
         ])
         .await;
 
-        assert!(output.contains("event: response.reasoning_summary_part.added"));
-        assert!(output.contains("event: response.reasoning_summary_text.delta"));
-        assert!(output.contains("event: response.reasoning_summary_text.done"));
+        assert!(output.contains("event: response.reasoning_text.delta"));
+        assert!(output.contains("event: response.reasoning_text.done"));
+        assert!(output.contains(
+            "\"content\":[{\"type\":\"reasoning_text\",\"text\":\"Need context. Now answer. \"}]"
+        ));
+        assert!(!output.contains("event: response.reasoning_summary_text.delta"));
         assert!(output.contains("Need context. Now answer. "));
         assert!(output.contains("\"type\":\"reasoning\""));
         assert!(output.contains("\"text\":\"Done\""));
