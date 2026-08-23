@@ -4228,3 +4228,9 @@ supported in one streaming turn`。
 - 测试：`cargo test --lib preset_registry` 13 全绿（合法签名接受；坏签名/缺签名/过期/版本回退/坏 hash/坏 size/不支持 schema 拒绝；local 信任跳过签名但保留过期；manifest 路径布局；版本比较前导零归一）。settings 相关 40 测试回归通过。
 - 范围边界：本次仅“获取+校验”，不落地应用预设、不写 DB。P1（本地可移植预设+三方合并+diff+UI）、P2 完整（缓存/过期策略/检查更新 UI/TUF 多角色 root/targets/snapshot/timestamp）为后续。设计文档：`docs/superpowers/plans/2026-08-23-webdav-preset-registry-integration.md`。
 - 环境坑：本机 C 盘一度只剩 0.45GB，`target/debug/incremental` 占 107GB 导致 `cargo test` 报 `rustc-LLVM ERROR: IO failure on output stream: no space on device`。用 `cmd /c rmdir /s /q .../target/debug/incremental` 清掉增量缓存（可再生，不丢 deps）后恢复 88GB。注意：`Remove-Item -Recurse -Force` 被策略拦截，递归删除目录要用 `cmd /c rmdir /s /q`。
+
+# 2026-08-23 自启与 Codex Desktop 启动开关边界
+
+- Windows 系统自启的唯一注册入口仍是 `src-tauri/src/auto_launch.rs`：它只维护 `HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run\\CCSwitchMulti`，值为当前 CCSwitchMulti EXE 的带引号路径；不能向该链路加入 Codex Desktop。
+- `AppSettings.launch_codex_desktop_with_ccswitch` 是独立、默认关闭的设备级设置，前端字段为 `launchCodexDesktopWithCcswitch`。它只在 CCSwitchMulti 实际启动时调用 `codex_desktop::launch_codex_desktop_with_ccswitch`；仅开启 `launchOnStartup` 不会拉起 Codex。已运行时保持幂等，未找到 Desktop 可执行文件时只记录警告，不阻断 CCSwitchMulti。
+- 设置页在“开机自启”之后直接显示“启动 CCSwitchMulti 时启动 Codex Desktop”，文案明确其独立性。回归覆盖旧 settings 只有 `launchOnStartup=true` 时新开关仍为 false，以及启动判定的 disabled/running 四种组合。

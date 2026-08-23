@@ -174,6 +174,26 @@ pub async fn unlock_codex_model_picker() -> Result<CodexModelPickerUnlockResult,
     }))
 }
 
+/// 在用户显式开启的“随 CCSwitchMulti 启动 Codex Desktop”设置下启动 Codex。
+///
+/// 这个入口不属于系统自启注册流程；调用方必须先读取独立设置。已有 Codex
+/// 主进程时保持幂等，不重复拉起或干扰现有会话。
+pub(crate) fn launch_codex_desktop_with_ccswitch(enabled: bool) -> Result<bool, String> {
+    let codex_running = detect_running_codex_main_process().is_some();
+    if !should_launch_codex_desktop_with_ccswitch(enabled, codex_running) {
+        return Ok(false);
+    }
+
+    let executable =
+        resolve_codex_executable().ok_or_else(codex_desktop_executable_not_found_message)?;
+    launch_codex_with_debug_port(&executable, DEFAULT_CODEX_DEBUG_PORT)?;
+    Ok(true)
+}
+
+fn should_launch_codex_desktop_with_ccswitch(enabled: bool, codex_running: bool) -> bool {
+    enabled && !codex_running
+}
+
 /// 返回当前平台的 Desktop 可执行文件发现失败说明，避免 Windows-only 文案误导 macOS/Linux 用户。
 fn codex_desktop_executable_not_found_message() -> String {
     let platform_sources = if cfg!(target_os = "windows") {
@@ -1873,6 +1893,14 @@ mod tests {
         } else {
             "codex"
         }
+    }
+
+    #[test]
+    fn codex_startup_toggle_is_explicit_and_idempotent() {
+        assert!(!should_launch_codex_desktop_with_ccswitch(false, false));
+        assert!(!should_launch_codex_desktop_with_ccswitch(false, true));
+        assert!(should_launch_codex_desktop_with_ccswitch(true, false));
+        assert!(!should_launch_codex_desktop_with_ccswitch(true, true));
     }
 
     /// 按当前平台构造一个能通过 Desktop 主程序校验的测试文件。

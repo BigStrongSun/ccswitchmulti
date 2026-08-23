@@ -605,6 +605,8 @@ export interface Settings {
   skipClaudeOnboarding?: boolean;
   // 是否开机自启
   launchOnStartup?: boolean;
+  // 是否在 CCSwitchMulti 启动后启动 Codex Desktop（独立于开机自启）
+  launchCodexDesktopWithCcswitch?: boolean;
   // 静默启动（程序启动时不显示主窗口）
   silentStartup?: boolean;
   // 是否启用主页面本地代理功能（默认关闭）

@@ -686,6 +686,8 @@
     "windowBehaviorHint": "Configure window minimize and Claude plugin integration policies.",
     "launchOnStartup": "Launch on Startup",
     "launchOnStartupDescription": "Automatically run CC Switch when system starts",
+    "launchCodexDesktopWithCcswitch": "Launch Codex Desktop with CCSwitchMulti",
+    "launchCodexDesktopWithCcswitchDescription": "Independent and off by default. Enabling auto-launch alone never starts Codex Desktop.",
     "silentStartup": "Silent Startup",
     "silentStartupDescription": "Start in background mode without showing main window",
     "autoLaunchFailed": "Failed to set auto-launch",

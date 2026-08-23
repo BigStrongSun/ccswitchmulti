@@ -517,6 +517,21 @@ pub fn run() {
                 );
             }
 
+            // Codex Desktop 的启动是独立的显式设置，绝不能从系统自启设置推导。
+            // 启动失败只记录原因，不能阻断 CCSwitchMulti 自身启动。
+            let launch_codex_desktop_with_ccswitch = crate::settings::get_settings()
+                .launch_codex_desktop_with_ccswitch;
+            match crate::codex_desktop::launch_codex_desktop_with_ccswitch(
+                launch_codex_desktop_with_ccswitch,
+            ) {
+                Ok(true) => log::info!("已按独立设置启动 Codex Desktop"),
+                Ok(false) if launch_codex_desktop_with_ccswitch => {
+                    log::info!("Codex Desktop 已在运行，跳过独立启动")
+                }
+                Ok(false) => {}
+                Err(error) => log::warn!("按独立设置启动 Codex Desktop 失败: {error}"),
+            }
+
             // 初始化数据库
             let app_config_dir = crate::config::get_app_config_dir();
             let db_path = app_config_dir.join("cc-switch.db");

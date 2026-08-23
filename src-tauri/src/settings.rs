@@ -5,8 +5,8 @@ use std::sync::{OnceLock, RwLock};
 
 use crate::app_config::AppType;
 use crate::error::AppError;
-use crate::services::skill::{SkillStorageLocation, SyncMethod};
 use crate::services::preset_registry::PresetRegistrySettings;
+use crate::services::skill::{SkillStorageLocation, SyncMethod};
 
 /// 自定义端点配置（历史兼容，实际存储在 provider.meta.custom_endpoints）
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -430,6 +430,12 @@ pub struct AppSettings {
     /// 是否开机自启
     #[serde(default)]
     pub launch_on_startup: bool,
+    /// 是否在 CCSwitchMulti 启动后启动 Codex Desktop。
+    ///
+    /// 这是独立于系统开机自启的显式选择：仅开启 `launch_on_startup`
+    /// 绝不会拉起 Codex Desktop。
+    #[serde(default)]
+    pub launch_codex_desktop_with_ccswitch: bool,
     /// 静默启动（程序启动时不显示主窗口，仅托盘运行）
     #[serde(default)]
     pub silent_startup: bool,
@@ -592,6 +598,7 @@ impl Default for AppSettings {
             enable_claude_plugin_integration: false,
             skip_claude_onboarding: false,
             launch_on_startup: false,
+            launch_codex_desktop_with_ccswitch: false,
             silent_startup: false,
             enable_local_proxy: false,
             proxy_confirmed: None,
@@ -1325,5 +1332,22 @@ mod tests {
         .expect("visible apps");
 
         assert!(!visible.is_visible(&AppType::ClaudeDesktop));
+    }
+
+    #[test]
+    fn codex_desktop_startup_is_opt_in_and_independent_from_auto_launch() {
+        let defaults = AppSettings::default();
+        assert!(!defaults.launch_on_startup);
+        assert!(!defaults.launch_codex_desktop_with_ccswitch);
+
+        let decoded: AppSettings = serde_json::from_value(serde_json::json!({
+            "launchOnStartup": true,
+        }))
+        .expect("legacy settings remain readable");
+        assert!(decoded.launch_on_startup);
+        assert!(
+            !decoded.launch_codex_desktop_with_ccswitch,
+            "enabling CCSwitchMulti auto-launch must not implicitly start Codex Desktop"
+        );
     }
 }

@@ -683,6 +683,8 @@
     "windowBehaviorHint": "最小化動作や Claude プラグイン連携を設定します。",
     "launchOnStartup": "起動時に自動実行",
     "launchOnStartupDescription": "システム起動時に CC Switch を自動起動します",
+    "launchCodexDesktopWithCcswitch": "CCSwitchMulti の起動時に Codex Desktop を起動",
+    "launchCodexDesktopWithCcswitchDescription": "独立した既定でオフの設定です。自動起動を有効にしても Codex Desktop は起動しません。",
     "silentStartup": "サイレント起動",
     "silentStartupDescription": "起動時にメインウィンドウを表示せず、トレイのみで起動",
     "autoLaunchFailed": "自動起動の設定に失敗しました",

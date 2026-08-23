@@ -683,6 +683,8 @@
     "windowBehaviorHint": "設定視窗最小化與 Claude 外掛程式連動策略。",
     "launchOnStartup": "開機自動啟動",
     "launchOnStartupDescription": "隨系統啟動自動執行 CC Switch",
+    "launchCodexDesktopWithCcswitch": "啟動 CCSwitchMulti 時啟動 Codex Desktop",
+    "launchCodexDesktopWithCcswitchDescription": "獨立開關，預設關閉；僅開啟開機自動啟動不會啟動 Codex Desktop",
     "silentStartup": "靜默啟動",
     "silentStartupDescription": "程式啟動時不顯示主視窗，僅在系統匣執行",
     "autoLaunchFailed": "設定開機自動啟動失敗",
