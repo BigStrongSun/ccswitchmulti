@@ -443,7 +443,7 @@ fn parse_volcengine_plan_model_entry(entry: &serde_json::Value) -> Option<Fetche
     })
 }
 
-/// 为缺失上下文窗口的模型执行分层补齐。
+/// 为缺失模型目录事实执行分层补齐。
 ///
 /// 顺序保持保守：`/models` 显式 metadata 已在调用前解析完成；这里仅对仍为空的模型
 /// 先查本地预设表（离线可用、WebDAV 同步），再尝试 provider 官方来源，
@@ -453,7 +453,11 @@ async fn enrich_missing_context_windows(
     endpoint_url: &str,
     models: &mut [FetchedModel],
 ) {
-    if !models.iter().any(|model| model.context_window.is_none()) {
+    if !models.iter().any(|model| {
+        model.context_window.is_none()
+            || model.input_modalities.is_none()
+            || model.supports_image.is_none()
+    }) {
         return;
     }
 
@@ -462,13 +466,18 @@ async fn enrich_missing_context_windows(
     enrich_models_dev_context_windows(client, endpoint_url, models).await;
 }
 
-/// 用本地预设表（`~/.cc-switch/preset-table.json`）补齐上下文窗口。
+/// 用本地预设表（`~/.cc-switch/preset-table.json`）补齐安全的模型事实。
 ///
 /// 与远端 models.dev 兜底同一套防误配规则：只有 endpoint 落在 bundle 声明的
-/// 官方 API 前缀内才使用；只填充缺失值，不覆盖上游显式 metadata。
+/// 官方 API 前缀内才使用；只填充缺失值，不覆盖上游显式 metadata。调用方言、
+/// reasoning 参数和 agent 工具语义不在这里猜测，它们必须来自审核后的策略覆盖。
 /// 本地文件缺失或损坏时静默跳过，不影响后续远端补齐。
 fn enrich_preset_catalog_context_windows(endpoint_url: &str, models: &mut [FetchedModel]) {
-    if !models.iter().any(|model| model.context_window.is_none()) {
+    if !models.iter().any(|model| {
+        model.context_window.is_none()
+            || model.input_modalities.is_none()
+            || model.supports_image.is_none()
+    }) {
         return;
     }
     let Some(bundle) = crate::services::preset_catalog::load_default_bundle() else {
@@ -479,9 +488,48 @@ fn enrich_preset_catalog_context_windows(endpoint_url: &str, models: &mut [Fetch
     else {
         return;
     };
-    apply_missing_context_windows(models, |model_id| {
-        crate::services::preset_catalog::lookup_baseline_context(&bundle, provider, model_id)
+    apply_missing_catalog_facts(models, |model_id| {
+        crate::services::preset_catalog::lookup_baseline(&bundle, provider, model_id)
     });
+}
+
+fn entry_context_window(entry: &serde_json::Value) -> Option<u64> {
+    entry
+        .get("limit")
+        .and_then(|value| value.as_object())
+        .and_then(|limit| limit.get("context"))
+        .and_then(parse_positive_u64)
+}
+
+fn entry_input_modalities(entry: &serde_json::Value) -> Option<Vec<String>> {
+    entry
+        .get("modalities")
+        .and_then(|value| value.as_object())
+        .and_then(|modalities| modalities.get("input"))
+        .and_then(parse_input_modalities)
+}
+
+/// Applies only catalog facts whose semantics do not depend on API dialect.
+/// A declared `/models` value always has higher precedence than catalog data.
+fn apply_missing_catalog_facts<'a, F>(models: &mut [FetchedModel], mut lookup: F)
+where
+    F: FnMut(&str) -> Option<&'a serde_json::Value>,
+{
+    for model in models.iter_mut() {
+        let Some(entry) = lookup(&model.id) else {
+            continue;
+        };
+        if model.context_window.is_none() {
+            model.context_window = entry_context_window(entry);
+        }
+        if model.input_modalities.is_none() {
+            model.input_modalities = entry_input_modalities(entry);
+        }
+        if model.supports_image.is_none() {
+            model.supports_image = entry_input_modalities(entry)
+                .map(|modalities| modalities.iter().any(|modality| modality == "image"));
+        }
+    }
 }
 
 /// 为智谱模型补齐官方文档里的上下文窗口。
@@ -1536,6 +1584,47 @@ Coding 能力开源 SOTA，从代码生成走向工程交付 | 1M | 128K |
 
         assert_eq!(models[0].context_window, Some(123_456));
         assert_eq!(models[1].context_window, Some(200_000));
+    }
+
+    #[test]
+    fn test_apply_missing_catalog_facts_fills_capabilities_without_overwriting_upstream() {
+        let mut models = vec![
+            FetchedModel {
+                id: "gpt-5.5".to_string(),
+                owned_by: Some("openai".to_string()),
+                context_window: Some(123_456),
+                input_modalities: Some(vec!["text".to_string()]),
+                supports_image: Some(false),
+            },
+            FetchedModel {
+                id: "gpt-5.6".to_string(),
+                owned_by: Some("openai".to_string()),
+                context_window: None,
+                input_modalities: None,
+                supports_image: None,
+            },
+        ];
+        let entry = serde_json::json!({
+            "limit": { "context": 1_050_000 },
+            "modalities": { "input": ["text", "image"], "output": ["text"] }
+        });
+
+        apply_missing_catalog_facts(&mut models, |model_id| {
+            (model_id == "gpt-5.6").then_some(&entry)
+        });
+
+        assert_eq!(models[0].context_window, Some(123_456));
+        assert_eq!(
+            models[0].input_modalities.as_deref(),
+            Some(&["text".to_string()][..])
+        );
+        assert_eq!(models[0].supports_image, Some(false));
+        assert_eq!(models[1].context_window, Some(1_050_000));
+        assert_eq!(
+            models[1].input_modalities.as_deref(),
+            Some(&["text".to_string(), "image".to_string()][..])
+        );
+        assert_eq!(models[1].supports_image, Some(true));
     }
 
     #[test]

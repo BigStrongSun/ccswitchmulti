@@ -33,6 +33,13 @@ const bundle = {
       },
     },
   },
+  deployments: {
+    "shared/openai-enterprise": {
+      base_model: "openai/gpt-5.5",
+      model_alias: "gpt-5.5-enterprise",
+      transport: { api_format: "openai_responses" },
+    },
+  },
 };
 
 // 每个用例拿一个全新模块实例（模块级缓存随实例重置），避免跨用例串扰。
@@ -97,5 +104,25 @@ describe("resolvePresetCatalogContextWindow", () => {
     // 未加载（缓存为空）时同步查询必须安全返回 undefined。
     const mod = await freshModule(bundle);
     expect(mod.resolvePresetCatalogContextWindow("gpt-5.5")).toBeUndefined();
+  });
+});
+
+describe("resolvePresetCatalogEntry", () => {
+  it("exposes a fully merged shared deployment entry", async () => {
+    const mod = await freshModule(bundle);
+    await mod.loadPresetCatalog();
+
+    expect(
+      mod.resolvePresetCatalogEntry(
+        "openai",
+        "gpt-5.5",
+        "openai-codex-plan",
+        "shared/openai-enterprise",
+      ),
+    ).toMatchObject({
+      limit: { context: 272000, input: 922000 },
+      model_alias: "gpt-5.5-enterprise",
+      transport: { api_format: "openai_responses" },
+    });
   });
 });

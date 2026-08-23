@@ -4,8 +4,10 @@
 //! `~/.cc-switch/preset-table.json`。本模块负责加载与解析：
 //!
 //! - 基线条目（`baseline`）：API 通道事实，来自 models.dev 自动同步。
-//! - plan 条目（`plans`）：订阅通道薄覆盖，只存与基线的差异，用 `base_model`
+//! - plan 条目（`plans`）：审核后的订阅/调用策略薄覆盖，只存与基线的差异，用 `base_model`
 //!   指向基线继承其余字段。
+//! - deployment 条目（`deployments`）：共享的 Provider 部署薄覆盖；端点、凭据、探测和
+//!   配额观测不允许进入该层，保持设备私有。
 //!
 //! 解析优先级：plan 覆盖 > 基线 > `None`（调用方回退到既有硬编码逻辑）。
 //! 合并规则：对象递归深合并（plan 字段胜出），标量与列表整体替换。
@@ -15,10 +17,14 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::error::AppError;
+
 /// 应用配置目录下的预设表文件名（WebDAV artifact 同名）。
 pub const PRESET_TABLE_FILE_NAME: &str = "preset-table.json";
-/// 当前支持的 bundle schema 版本；不匹配时整体拒绝，回退硬编码兜底。
-pub const PRESET_TABLE_SCHEMA_VERSION: u32 = 1;
+/// 当前生成 bundle 的 schema 版本。
+pub const PRESET_TABLE_SCHEMA_VERSION: u32 = 2;
+/// 升级过程中仍接受的旧 bundle 版本，避免旧 WebDAV 快照导致目录整体失效。
+pub const PRESET_TABLE_LEGACY_SCHEMA_VERSION: u32 = 1;
 /// 预设表下载/加载上限：远大于当前 ~150KB 的体量，防止异常大文件。
 pub const MAX_PRESET_TABLE_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -29,13 +35,20 @@ pub struct PresetTableBundle {
     pub schema_version: u32,
     pub version: String,
     pub generated_at: String,
+    /// 编译时固化的外部来源锁与各共享层内容 hash。v1 bundle 没有该字段。
+    #[serde(default)]
+    pub manifest: serde_json::Value,
     /// 键为 provider 名（如 `openai`），值为官方 API 基址，用于按 endpoint 前缀匹配。
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderMeta>,
     /// 键为 `provider/model`（如 `openai/gpt-5.5`），值为自包含的完整模型条目。
     pub baseline: BTreeMap<String, serde_json::Value>,
     /// 键为 plan 名（如 `openai-codex-plan`），值为 `model -> 薄覆盖条目`。
+    #[serde(default)]
     pub plans: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
+    /// 键为共享部署 id（如 `shared/openai-enterprise`），值为薄覆盖条目。
+    #[serde(default)]
+    pub deployments: BTreeMap<String, serde_json::Value>,
 }
 
 /// provider 的官方 API 基址（endpoint 前缀匹配用）。
@@ -60,6 +73,8 @@ pub enum PresetCatalogSource {
 pub struct ResolvedPresetEntry {
     pub model: String,
     pub plan: Option<String>,
+    /// 命中的共享部署覆盖；设备私有观察值不在 bundle 中。
+    pub deployment: Option<String>,
     pub source: PresetCatalogSource,
     /// 合并后的总上下文窗口（`limit.context`）。
     pub context_window: Option<u64>,
@@ -78,6 +93,11 @@ pub fn bundle_path() -> std::path::PathBuf {
 /// 从指定路径加载并校验 bundle；任何失败（缺失/超限/坏 JSON/版本不符）返回 `None`。
 pub fn load_bundle(path: &Path) -> Option<PresetTableBundle> {
     let bytes = std::fs::read(path).ok()?;
+    parse_bundle_bytes(&bytes)
+}
+
+/// Parse and validate a bundle payload before any caller persists it.
+pub fn parse_bundle_bytes(bytes: &[u8]) -> Option<PresetTableBundle> {
     if bytes.len() as u64 > MAX_PRESET_TABLE_BYTES {
         log::warn!(
             "[PresetCatalog] bundle too large ({} bytes), ignoring",
@@ -86,15 +106,37 @@ pub fn load_bundle(path: &Path) -> Option<PresetTableBundle> {
         return None;
     }
     let bundle: PresetTableBundle = serde_json::from_slice(&bytes).ok()?;
-    if bundle.schema_version != PRESET_TABLE_SCHEMA_VERSION {
+    if !matches!(
+        bundle.schema_version,
+        PRESET_TABLE_LEGACY_SCHEMA_VERSION | PRESET_TABLE_SCHEMA_VERSION
+    ) {
         log::warn!(
-            "[PresetCatalog] unsupported schema_version {} (expected {}), ignoring",
+            "[PresetCatalog] unsupported schema_version {} (supported: {} or {}), ignoring",
             bundle.schema_version,
-            PRESET_TABLE_SCHEMA_VERSION
+            PRESET_TABLE_LEGACY_SCHEMA_VERSION,
+            PRESET_TABLE_SCHEMA_VERSION,
         );
         return None;
     }
     Some(bundle)
+}
+
+/// Atomically persist an already validated bundle at the standard app path.
+/// Registry downloads call this only after signature/hash and schema validation.
+pub fn write_default_bundle_atomic(bytes: &[u8]) -> Result<(), AppError> {
+    parse_bundle_bytes(bytes).ok_or_else(|| {
+        AppError::localized(
+            "preset.bundle.invalid",
+            "预设表格式或 schema 无效，未写入本地文件",
+            "Preset bundle format or schema is invalid; it was not written locally.",
+        )
+    })?;
+    let dir = crate::config::get_app_config_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| AppError::io(&dir, e))?;
+    let target = dir.join(PRESET_TABLE_FILE_NAME);
+    let tmp = dir.join(format!(".{PRESET_TABLE_FILE_NAME}.tmp"));
+    std::fs::write(&tmp, bytes).map_err(|e| AppError::io(&tmp, e))?;
+    std::fs::rename(&tmp, &target).map_err(|e| AppError::io(&target, e))
 }
 
 /// 加载应用配置目录下的默认预设表。
@@ -103,7 +145,10 @@ pub fn load_default_bundle() -> Option<PresetTableBundle> {
 }
 
 /// 深合并：对象递归合并（override 字段胜出），其余类型（标量/数组/null）整体替换。
-pub fn deep_merge(base: &serde_json::Value, override_value: &serde_json::Value) -> serde_json::Value {
+pub fn deep_merge(
+    base: &serde_json::Value,
+    override_value: &serde_json::Value,
+) -> serde_json::Value {
     match (base, override_value) {
         (serde_json::Value::Object(base_map), serde_json::Value::Object(override_map)) => {
             let mut merged = base_map.clone();
@@ -151,8 +196,23 @@ pub fn resolve(
     model: &str,
     plan: Option<&str>,
 ) -> Option<ResolvedPresetEntry> {
+    resolve_with_deployment(bundle, provider, model, plan, None)
+}
+
+/// 解析模型条目：共享 deployment 覆盖 > plan/policy 覆盖 > baseline。
+///
+/// 共享 deployment 必须显式以 `base_model` 绑定当前模型，避免相同短模型名被错误
+/// 套用到另一个供应商。该函数只处理已经由编译器审查过的共享数据；设备私有端点和
+/// 运行观测不属于 bundle，不能经此路径进入 WebDAV 同步。
+pub fn resolve_with_deployment(
+    bundle: &PresetTableBundle,
+    provider: &str,
+    model: &str,
+    plan: Option<&str>,
+    deployment: Option<&str>,
+) -> Option<ResolvedPresetEntry> {
     let base_key = format!("{provider}/{model}");
-    let (source, entry) = match plan {
+    let (source, mut entry) = match plan {
         Some(plan_name) if !plan_name.is_empty() => {
             let plan_entry = bundle.plans.get(plan_name)?.get(model)?;
             // plan 条目用 base_model 指向基线；缺省时按请求的 provider/model 找。
@@ -160,7 +220,7 @@ pub fn resolve(
                 .get("base_model")
                 .and_then(|value| value.as_str())
                 .map(str::to_string)
-                .unwrap_or(base_key);
+                .unwrap_or_else(|| base_key.clone());
             let base = bundle.baseline.get(&base_key)?;
             (PresetCatalogSource::Plan, deep_merge(base, plan_entry))
         }
@@ -169,6 +229,17 @@ pub fn resolve(
             (PresetCatalogSource::Baseline, base.clone())
         }
     };
+
+    if let Some(deployment_id) = deployment.filter(|value| !value.is_empty()) {
+        let deployment_entry = bundle.deployments.get(deployment_id)?;
+        let deployment_base = deployment_entry
+            .get("base_model")
+            .and_then(|value| value.as_str())?;
+        if deployment_base != base_key {
+            return None;
+        }
+        entry = deep_merge(&entry, deployment_entry);
+    }
 
     let context_window = entry_context_window(&entry);
     let effective_context_window = match (context_window, entry_effective_percent(&entry)) {
@@ -179,6 +250,9 @@ pub fn resolve(
     Some(ResolvedPresetEntry {
         model: model.to_string(),
         plan: plan.filter(|value| !value.is_empty()).map(str::to_string),
+        deployment: deployment
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
         source,
         context_window,
         effective_context_window,
@@ -187,12 +261,21 @@ pub fn resolve(
 }
 
 /// 仅基线查询（`/models` 补齐用，API 通道不涉及 plan）。
+pub fn lookup_baseline<'a>(
+    bundle: &'a PresetTableBundle,
+    provider: &str,
+    model: &str,
+) -> Option<&'a serde_json::Value> {
+    bundle.baseline.get(&format!("{provider}/{model}"))
+}
+
+/// 仅基线查询上下文窗口（`/models` 补齐用，API 通道不涉及 plan）。
 pub fn lookup_baseline_context(
     bundle: &PresetTableBundle,
     provider: &str,
     model: &str,
 ) -> Option<u64> {
-    let entry = bundle.baseline.get(&format!("{provider}/{model}"))?;
+    let entry = lookup_baseline(bundle, provider, model)?;
     entry_context_window(entry)
 }
 
@@ -261,11 +344,30 @@ mod tests {
             schema_version: PRESET_TABLE_SCHEMA_VERSION,
             version: "2026.08.23".to_string(),
             generated_at: "2026-08-23T00:00:00Z".to_string(),
+            manifest: serde_json::Value::Null,
             providers: BTreeMap::new(),
-            baseline: baseline.as_object().unwrap().iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-            plans: plans.as_object().unwrap().iter().map(|(k, v)| {
-                (k.clone(), v.as_object().unwrap().iter().map(|(mk, mv)| (mk.clone(), mv.clone())).collect())
-            }).collect(),
+            baseline: baseline
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            plans: plans
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        v.as_object()
+                            .unwrap()
+                            .iter()
+                            .map(|(mk, mv)| (mk.clone(), mv.clone()))
+                            .collect(),
+                    )
+                })
+                .collect(),
+            deployments: BTreeMap::new(),
         }
     }
 
@@ -298,6 +400,42 @@ mod tests {
     }
 
     #[test]
+    fn deployment_override_wins_after_policy_and_keeps_baseline_facts() {
+        let mut bundle = test_bundle();
+        bundle.deployments.insert(
+            "shared/openai-enterprise".to_string(),
+            serde_json::json!({
+                "base_model": "openai/gpt-5.5",
+                "model_alias": "gpt-5.5-enterprise",
+                "transport": { "api_format": "openai_responses" },
+                "capabilities": { "web_search": true }
+            }),
+        );
+
+        let resolved = resolve_with_deployment(
+            &bundle,
+            "openai",
+            "gpt-5.5",
+            Some("openai-codex-plan"),
+            Some("shared/openai-enterprise"),
+        )
+        .unwrap();
+
+        assert_eq!(resolved.source, PresetCatalogSource::Plan);
+        assert_eq!(
+            resolved.deployment.as_deref(),
+            Some("shared/openai-enterprise")
+        );
+        assert_eq!(resolved.entry["limit"]["context"], 272_000);
+        assert_eq!(
+            resolved.entry["transport"]["api_format"],
+            "openai_responses"
+        );
+        assert_eq!(resolved.entry["capabilities"]["web_search"], true);
+        assert_eq!(resolved.entry["reasoning"], true);
+    }
+
+    #[test]
     fn resolve_missing_plan_falls_back_to_baseline() {
         let bundle = test_bundle();
         let resolved = resolve(&bundle, "openai", "gpt-5.5", Some("no-such-plan"));
@@ -321,13 +459,19 @@ mod tests {
         let merged = deep_merge(&base, &override_value);
         assert_eq!(merged["a"], 1);
         assert_eq!(merged["list"], serde_json::json!([9]));
-        assert_eq!(merged["obj"], serde_json::json!({ "x": 1, "y": 20, "z": 30 }));
+        assert_eq!(
+            merged["obj"],
+            serde_json::json!({ "x": 1, "y": 20, "z": 30 })
+        );
     }
 
     #[test]
     fn lookup_baseline_context_ignores_plans() {
         let bundle = test_bundle();
-        assert_eq!(lookup_baseline_context(&bundle, "openai", "gpt-5.5"), Some(1_050_000));
+        assert_eq!(
+            lookup_baseline_context(&bundle, "openai", "gpt-5.5"),
+            Some(1_050_000)
+        );
         assert_eq!(lookup_baseline_context(&bundle, "openai", "gpt-9.9"), None);
     }
 
@@ -335,8 +479,18 @@ mod tests {
     fn find_provider_for_endpoint_matches_prefix_only() {
         let mut bundle = test_bundle();
         bundle.providers = BTreeMap::from([
-            ("openai".to_string(), ProviderMeta { api: "https://api.openai.com/v1".to_string() }),
-            ("anthropic".to_string(), ProviderMeta { api: "https://api.anthropic.com/v1".to_string() }),
+            (
+                "openai".to_string(),
+                ProviderMeta {
+                    api: "https://api.openai.com/v1".to_string(),
+                },
+            ),
+            (
+                "anthropic".to_string(),
+                ProviderMeta {
+                    api: "https://api.anthropic.com/v1".to_string(),
+                },
+            ),
         ]);
         assert_eq!(
             find_provider_for_endpoint(&bundle, "https://api.openai.com/v1/models"),
@@ -374,5 +528,15 @@ mod tests {
         let loaded = load_bundle(&path).unwrap();
         assert_eq!(loaded.baseline.len(), 2);
         assert_eq!(loaded.plans["openai-codex-plan"].len(), 1);
+    }
+
+    #[test]
+    fn load_bundle_accepts_v1_for_sync_backward_compatibility() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(PRESET_TABLE_FILE_NAME);
+        let mut bundle = test_bundle();
+        bundle.schema_version = 1;
+        std::fs::write(&path, serde_json::to_vec(&bundle).unwrap()).unwrap();
+        assert_eq!(load_bundle(&path).unwrap().schema_version, 1);
     }
 }

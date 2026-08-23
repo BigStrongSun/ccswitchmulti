@@ -15,6 +15,13 @@ export interface PresetTableBundle {
   providers: Record<string, { api: string }>;
   baseline: Record<string, Record<string, unknown>>;
   plans: Record<string, Record<string, Record<string, unknown>>>;
+  /** v2 source locks and deterministic hashes; absent on compatible v1 bundles. */
+  manifest?: {
+    sourceLocks?: Array<Record<string, unknown>>;
+    layerHashes?: Record<string, string>;
+  };
+  /** Shared deployments only. Device-local endpoints and observations never appear here. */
+  deployments?: Record<string, Record<string, unknown>>;
 }
 
 let cache: PresetTableBundle | null | undefined = undefined;
@@ -84,6 +91,44 @@ function deepMerge(
 }
 
 /**
+ * Resolve an entire catalog entry for a known provider/model. This deliberately
+ * does not invent request mappings: consumers may read transport or tool fields
+ * only when a reviewed policy/deployment entry explicitly provides them.
+ */
+export function resolvePresetCatalogEntry(
+  provider: string,
+  modelId: string,
+  plan?: string,
+  deployment?: string,
+): Record<string, unknown> | undefined {
+  const bundle = cache;
+  if (!bundle) return undefined;
+  const model = modelId.trim();
+  const providerId = provider.trim();
+  if (!model || !providerId) return undefined;
+
+  const baseKey = `${providerId}/${model}`;
+  let entry = bundle.baseline[baseKey];
+  if (!entry) return undefined;
+
+  if (plan) {
+    const policy = bundle.plans[plan]?.[model];
+    if (!policy) return undefined;
+    const policyBase = typeof policy.base_model === "string" ? policy.base_model : baseKey;
+    if (policyBase !== baseKey) return undefined;
+    entry = deepMerge(entry, policy);
+  }
+
+  if (deployment) {
+    const overlay = bundle.deployments?.[deployment];
+    if (!overlay || overlay.base_model !== baseKey) return undefined;
+    entry = deepMerge(entry, overlay);
+  }
+
+  return entry;
+}
+
+/**
  * 同步查询预设表（仅使用已加载的缓存；未加载时返回 undefined）。
  *
  * - 传 `plan`：只查该 plan 的覆盖条目（基线 + 覆盖深合并），未命中不回落基线
@@ -105,8 +150,7 @@ export function resolvePresetCatalogContextWindow(
     const baseKey =
       typeof planEntry.base_model === "string" ? planEntry.base_model : undefined;
     const base = baseKey ? bundle.baseline[baseKey] : undefined;
-    if (!base) return undefined;
-    return effectiveContext(deepMerge(base, planEntry));
+    return base ? effectiveContext(deepMerge(base, planEntry)) : undefined;
   }
 
   for (const [key, entry] of Object.entries(bundle.baseline)) {

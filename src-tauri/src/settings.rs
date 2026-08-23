@@ -1259,6 +1259,30 @@ pub fn set_preset_registry_settings(
     })
 }
 
+/// Mark one device-local registry source as having accepted a signed bundle.
+/// Registry credentials remain in settings and are deliberately not WebDAV
+/// profile data; only the shared compiled bundle is synchronized.
+pub fn mark_preset_registry_source_accepted(
+    source_id: &str,
+    version: &str,
+    checked_at: i64,
+) -> Result<(), AppError> {
+    let source_id = source_id.trim().to_string();
+    let version = version.trim().to_string();
+    mutate_settings(|current| {
+        if let Some(registry) = current.preset_registry.as_mut() {
+            if let Some(source) = registry
+                .sources
+                .iter_mut()
+                .find(|source| source.id == source_id)
+            {
+                source.last_accepted_version = version;
+                source.last_checked_at = checked_at;
+            }
+        }
+    })
+}
+
 /// 仅更新 WebDAV 同步状态，避免覆写 credentials/root/profile 等字段
 pub fn update_webdav_sync_status(status: WebDavSyncStatus) -> Result<(), AppError> {
     mutate_settings(|current| {

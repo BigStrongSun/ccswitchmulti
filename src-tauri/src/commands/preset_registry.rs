@@ -31,9 +31,7 @@ pub fn preset_registry_save_settings(
 ///
 /// 返回 manifest 元数据（版本、发布时间、过期时间、变更摘要）；校验失败返回错误。
 #[tauri::command]
-pub async fn preset_registry_check_update(
-    source_id: String,
-) -> Result<Value, String> {
+pub async fn preset_registry_check_update(source_id: String) -> Result<Value, String> {
     let registry = settings::get_preset_registry_settings().ok_or_else(|| {
         AppError::localized(
             "preset.registry.not_configured",
@@ -88,6 +86,69 @@ pub async fn preset_registry_check_update(
     }))
 }
 
+/// Download, verify and atomically install a registry bundle. The source's
+/// accepted version changes only after the signed bytes have passed hash,
+/// size and catalog-schema validation and the local file is safely written.
+#[tauri::command]
+pub async fn preset_registry_apply_update(source_id: String) -> Result<Value, String> {
+    let registry = settings::get_preset_registry_settings().ok_or_else(|| {
+        AppError::localized(
+            "preset.registry.not_configured",
+            "未配置预设注册表",
+            "Preset registry is not configured.",
+        )
+        .to_string()
+    })?;
+    let source = registry
+        .sources
+        .iter()
+        .find(|source| source.id == source_id)
+        .ok_or_else(|| {
+            AppError::localized(
+                "preset.source.not_found",
+                "预设源不存在",
+                "Preset source not found.",
+            )
+            .to_string()
+        })?
+        .clone();
+    if !source.enabled {
+        return Err(AppError::localized(
+            "preset.source.disabled",
+            "预设源已禁用",
+            "Preset source is disabled.",
+        )
+        .to_string());
+    }
+
+    let now_unix = chrono::Utc::now().timestamp();
+    let manifest = match source.kind {
+        preset_registry_service::PresetSourceKind::WebDav => {
+            preset_registry_service::fetch_preset_manifest_from_webdav(&source, now_unix).await?
+        }
+        preset_registry_service::PresetSourceKind::Https => {
+            return Err(AppError::localized(
+                "preset.source.https_not_implemented",
+                "HTTPS 预设源尚未实现（请使用已签名的 WebDAV 源）",
+                "HTTPS preset source is not implemented (use a signed WebDAV source).",
+            )
+            .to_string());
+        }
+    };
+    let bytes =
+        preset_registry_service::download_preset_bundle_from_webdav(&source, &manifest, now_unix)
+            .await?;
+    preset_catalog_service::write_default_bundle_atomic(&bytes)?;
+    settings::mark_preset_registry_source_accepted(&source.id, &manifest.version, now_unix)?;
+
+    Ok(json!({
+        "sourceId": source.id,
+        "version": manifest.version,
+        "installedBytes": bytes.len(),
+        "installedAt": now_unix,
+    }))
+}
+
 /// 读取本地预设表 bundle（`~/.cc-switch/preset-table.json`）。
 ///
 /// 供前端一次性加载后做同步查询（模型上下文推断）；文件缺失或损坏返回 `None`，
@@ -97,7 +158,7 @@ pub fn preset_catalog_get() -> Option<PresetTableBundle> {
     preset_catalog_service::load_default_bundle()
 }
 
-/// 解析单个模型的能力条目：plan 覆盖 > 基线。
+/// 解析单个模型的能力条目：共享 deployment 覆盖 > plan/policy 覆盖 > 基线。
 ///
 /// `plan` 为空时只查基线；未命中返回 `None`（前端回退既有逻辑）。
 #[tauri::command]
@@ -105,14 +166,16 @@ pub fn preset_catalog_resolve(
     provider: String,
     model: String,
     plan: Option<String>,
+    deployment: Option<String>,
 ) -> Result<Option<ResolvedPresetEntry>, String> {
     let Some(bundle) = preset_catalog_service::load_default_bundle() else {
         return Ok(None);
     };
-    Ok(preset_catalog_service::resolve(
+    Ok(preset_catalog_service::resolve_with_deployment(
         &bundle,
         &provider,
         &model,
         plan.as_deref(),
+        deployment.as_deref(),
     ))
 }

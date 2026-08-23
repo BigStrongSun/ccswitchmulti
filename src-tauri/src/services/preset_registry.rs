@@ -8,8 +8,8 @@
 //!
 //! 本模块只做“获取 + 校验”，不落地应用预设、不写 DB；应用与三方合并是 P1 后续工作。
 
-use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -78,8 +78,9 @@ pub struct PresetSource {
 impl PresetSource {
     /// WebDAV 预设 manifest 的远程路径段：`{remote_root}/presets/{profile}/manifest.json`。
     pub fn manifest_segments(&self) -> Vec<String> {
-        let mut segs: Vec<String> =
-            super::webdav::path_segments(&self.remote_root).map(|s| s.to_string()).collect();
+        let mut segs: Vec<String> = super::webdav::path_segments(&self.remote_root)
+            .map(|s| s.to_string())
+            .collect();
         segs.push("presets".to_string());
         let profile = self.profile.trim();
         if !profile.is_empty() {
@@ -87,6 +88,39 @@ impl PresetSource {
         }
         segs.push("manifest.json".to_string());
         segs
+    }
+
+    /// Resolve a signed manifest target under this source's preset root.
+    /// Targets are always relative paths; an absolute URL or traversal would
+    /// let an untrusted manifest escape the configured WebDAV namespace.
+    pub fn target_segments(&self, target: &str) -> Result<Vec<String>, AppError> {
+        let target = target.trim();
+        if target.is_empty()
+            || target.starts_with('/')
+            || target.contains("://")
+            || target.split('/').any(|part| matches!(part, "." | ".."))
+        {
+            return Err(AppError::localized(
+                "preset.target.invalid",
+                "预设 manifest 的 target 必须是预设目录内的相对路径",
+                "Preset manifest target must be a relative path inside the preset directory.",
+            ));
+        }
+
+        let mut segs: Vec<String> = super::webdav::path_segments(&self.remote_root)
+            .map(|s| s.to_string())
+            .collect();
+        segs.push("presets".to_string());
+        if !self.profile.trim().is_empty() {
+            segs.push(self.profile.trim().to_string());
+        }
+        segs.extend(
+            target
+                .split('/')
+                .filter(|part| !part.is_empty())
+                .map(str::to_string),
+        );
+        Ok(segs)
     }
 }
 
@@ -127,7 +161,8 @@ impl PresetRegistrySettings {
             s.profile = s.profile.trim().to_string();
             s.public_key = s.public_key.trim().to_string();
         }
-        self.sources.retain(|s| !s.id.trim().is_empty() && !s.base_url.is_empty());
+        self.sources
+            .retain(|s| !s.id.trim().is_empty() && !s.base_url.is_empty());
     }
 }
 
@@ -190,12 +225,18 @@ impl std::fmt::Display for ManifestRejectReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::UnsupportedSchema { version } => write!(f, "不支持的 schema 版本 {version}"),
-            Self::Expired { expires_at, now } => write!(f, "已过期 (expires_at={expires_at}, now={now})"),
+            Self::Expired { expires_at, now } => {
+                write!(f, "已过期 (expires_at={expires_at}, now={now})")
+            }
             Self::VersionRollback { current, incoming } => {
                 write!(f, "版本回退 (current={current}, incoming={incoming})")
             }
-            Self::SizeMismatch { expected, actual } => write!(f, "大小不匹配 (expected={expected}, actual={actual})"),
-            Self::HashMismatch { expected, actual } => write!(f, "SHA-256 不匹配 (expected={expected}, actual={actual})"),
+            Self::SizeMismatch { expected, actual } => {
+                write!(f, "大小不匹配 (expected={expected}, actual={actual})")
+            }
+            Self::HashMismatch { expected, actual } => {
+                write!(f, "SHA-256 不匹配 (expected={expected}, actual={actual})")
+            }
             Self::MissingSignature => write!(f, "pinned-key 源缺少签名"),
             Self::BadPublicKey => write!(f, "公钥缺失或非法"),
             Self::BadSignature => write!(f, "签名无效"),
@@ -373,6 +414,43 @@ pub async fn fetch_preset_manifest_from_webdav(
     }
 }
 
+/// Download the catalog payload announced by a previously accepted manifest.
+/// It is revalidated with the exact bytes, so a manifest may not be replayed
+/// for a different bundle after its metadata was accepted.
+pub async fn download_preset_bundle_from_webdav(
+    source: &PresetSource,
+    manifest: &PresetManifest,
+    now_unix: i64,
+) -> Result<Vec<u8>, AppError> {
+    let auth = super::webdav::auth_from_credentials(&source.username, &source.password);
+    let segments = source.target_segments(&manifest.target)?;
+    let url = super::webdav::build_remote_url(&source.base_url, &segments)?;
+    let max_bytes = usize::try_from(crate::services::preset_catalog::MAX_PRESET_TABLE_BYTES)
+        .unwrap_or(usize::MAX);
+    let Some((bytes, _etag)) = super::webdav::get_bytes(&url, &auth, max_bytes).await? else {
+        return Err(AppError::localized(
+            "preset.bundle.missing",
+            "预设 manifest 指向的包不存在",
+            "Preset bundle referenced by the manifest was not found.",
+        ));
+    };
+    match validate_manifest(
+        manifest,
+        source.trust,
+        &source.public_key,
+        &source.last_accepted_version,
+        now_unix,
+        Some(&bytes),
+    ) {
+        ManifestVerdict::Accepted => Ok(bytes),
+        ManifestVerdict::Rejected(reason) => Err(AppError::localized(
+            "preset.bundle.rejected",
+            format!("预设包被拒绝: {reason}"),
+            format!("Preset bundle was rejected: {reason}"),
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -472,8 +550,14 @@ mod tests {
         let mut m = base_manifest();
         m.version = "2026.08.01".to_string(); // 低于已接受的 2026.08.23
         m.signature = sign(&m, &sk);
-        let verdict =
-            validate_manifest(&m, PresetTrust::PinnedKey, &pub_b64, "2026.08.23", NOW, None);
+        let verdict = validate_manifest(
+            &m,
+            PresetTrust::PinnedKey,
+            &pub_b64,
+            "2026.08.23",
+            NOW,
+            None,
+        );
         assert!(matches!(
             verdict,
             ManifestVerdict::Rejected(ManifestRejectReason::VersionRollback { .. })
@@ -486,8 +570,14 @@ mod tests {
         let mut m = base_manifest();
         m.version = "2026.09.01".to_string();
         m.signature = sign(&m, &sk);
-        let verdict =
-            validate_manifest(&m, PresetTrust::PinnedKey, &pub_b64, "2026.08.23", NOW, None);
+        let verdict = validate_manifest(
+            &m,
+            PresetTrust::PinnedKey,
+            &pub_b64,
+            "2026.08.23",
+            NOW,
+            None,
+        );
         assert_eq!(verdict, ManifestVerdict::Accepted);
     }
 
@@ -583,13 +673,41 @@ mod tests {
         let segs = src.manifest_segments();
         assert_eq!(
             segs,
+            vec!["cc-switch-sync", "presets", "default", "manifest.json"]
+        );
+    }
+
+    #[test]
+    fn target_segments_stay_inside_the_configured_preset_root() {
+        let source = PresetSource {
+            id: "ccsm-official".to_string(),
+            kind: PresetSourceKind::WebDav,
+            trust: PresetTrust::Local,
+            enabled: true,
+            base_url: "https://dav.example.com".to_string(),
+            username: String::new(),
+            password: String::new(),
+            remote_root: "catalog".to_string(),
+            profile: "stable".to_string(),
+            public_key: String::new(),
+            last_checked_at: 0,
+            last_accepted_version: String::new(),
+        };
+
+        assert_eq!(
+            source.target_segments("bundles/preset-table.json").unwrap(),
             vec![
-                "cc-switch-sync",
+                "catalog",
                 "presets",
-                "default",
-                "manifest.json"
+                "stable",
+                "bundles",
+                "preset-table.json"
             ]
         );
+        assert!(source.target_segments("../other.json").is_err());
+        assert!(source
+            .target_segments("https://example.com/other.json")
+            .is_err());
     }
 
     #[test]
