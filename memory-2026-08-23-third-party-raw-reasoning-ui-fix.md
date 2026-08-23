@@ -46,3 +46,24 @@
   改动并释放足够构建空间，再运行流式转换、raw-replay、`streaming_codex_chat` 与
   `transform_codex_chat` 定向测试。
 - 仍需构建并安装新版本后，以新建的第三方 Codex 任务进行桌面端 UI 验收。
+
+## 复盘：为什么历史实现统一写成 summary
+
+- 最初的 Chat-to-Responses 桥接来自 2026-05-19 的 `79d6486e`（`Improve Codex Chat
+  reasoning conversion`）。其目标是从 `reasoning_content`、`reasoning` 等非标准 Chat
+  字段恢复一个能排序、能跨工具调用保存的 Responses reasoning item；当时的回归明确断言
+  `response.reasoning_summary_*`。这解决了“推理丢失/工具前后顺序错误”，不是专为隐藏
+  Qwen 推理设计的策略。
+- 2026-05-21 的 `44d9aabb` 为多厂商增加了 `outputFormat` 推断，同时把
+  `reasoning_content`、`reasoning`、对象内 `summary` 与 `reasoning_details` 统一送入一个
+  provider-agnostic 提取器。该提取器的注释明确“不依赖 provider meta 的 outputFormat”。
+  这提高了兼容性，却在源头抹掉了 raw/summary 的语义；流式转换函数也没有接收已解析的
+  `CodexChatReasoningConfig`，所以无法依据 `outputFormat` 分流。
+- 旧策略仍有合理边界：官方 OAuth 的 `summary/encrypted_content`、以及只给摘要的聚合网关
+  不能冒充 raw content；这样做会错误暴露/回放或破坏兼容。故 `d25ebe31` 的“所有 Chat
+  reasoning 一律 raw”是过宽的临时修复，不能视为最终设计。
+- Qwen/vLLM 是已可确认的 raw 个例：Qwen 官方文档说明 `reasoning_content` 包含模型生成的
+  thinking content，且该字段本就不是 OpenAI Chat 标准。正确的长期设计应把“输出字段”与
+  “输出语义”拆开，按已验证 Provider/模型声明为 `raw`、`summary` 或 `opaque`；仅 confirmed
+  raw（当前 Qwen/vLLM）发 `reasoning_text`，其余保留 summary/加密路径。该语义必须同时传入
+  流式与非流式转换、工具历史回放，并配实际 Provider 测试。
