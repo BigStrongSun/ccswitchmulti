@@ -8,7 +8,7 @@ use crate::app_config::AppType;
 use crate::database::Database;
 use crate::error::AppError;
 use crate::provider::Provider;
-use crate::proxy::providers::{CodexAdapter, ProviderAdapter};
+use crate::proxy::providers::{codex_route_auth_source, CodexAdapter, ProviderAdapter};
 use axum::http::HeaderMap;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -924,9 +924,7 @@ fn collect_model_array(ids: &mut BTreeSet<String>, value: Option<&Value>) {
 /// 判断 router route 是否交给 CC Switch 管理的 OAuth/账号认证。
 fn route_uses_managed_oauth(route: &Value) -> bool {
     matches!(
-        route
-            .pointer("/upstream/auth/source")
-            .and_then(|value| value.as_str()),
+        codex_route_auth_source(route),
         Some("managed_codex_oauth" | "managed_account")
     )
 }

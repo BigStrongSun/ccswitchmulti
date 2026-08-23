@@ -51,6 +51,21 @@ pub enum CodexMultiRouterAuthFacade {
     LegacyPreserved,
 }
 
+/// Read a route's authentication owner across the v1 and v2 schemas.
+///
+/// v1 stored this under `upstream.auth.source`; v2 stores it in the top-level
+/// `authPolicy.source` (with `auth`/`auth_policy` kept for compatibility).
+pub(crate) fn codex_route_auth_source(route: &JsonValue) -> Option<&str> {
+    let upstream = route.get("upstream").unwrap_or(route);
+    let auth = upstream
+        .get("auth")
+        .or_else(|| route.get("auth"))
+        .or_else(|| route.get("authPolicy"))
+        .or_else(|| route.get("auth_policy"))
+        .unwrap_or(upstream);
+    auth.get("source").and_then(JsonValue::as_str)
+}
+
 /// 根据持久化 Router 配置和账号池策略判断本地认证门面。
 ///
 /// route 是运行时认证所有权的最终事实；`officialAuth` 由保存流程物化到 route，
@@ -86,9 +101,7 @@ pub fn classify_codex_multirouter_auth_facade(
             continue;
         }
         has_enabled_route = true;
-        let source = route
-            .pointer("/upstream/auth/source")
-            .and_then(JsonValue::as_str);
+        let source = codex_route_auth_source(route);
         match source {
             Some("native_codex_auth") => needs_native_auth = true,
             Some("account_pool") => match pool_policy {
@@ -123,19 +136,16 @@ pub(crate) fn codex_route_uses_official_agent_backend(route: &JsonValue) -> bool
         .or_else(|| route.get("authPolicy"))
         .or_else(|| route.get("auth_policy"))
         .unwrap_or(upstream);
-    auth.get("source")
+    codex_route_auth_source(route).is_some_and(|source| {
+        matches!(
+            source.to_ascii_lowercase().as_str(),
+            "native_codex_auth" | "managed_codex_oauth" | "managed_account" | "account_pool"
+        )
+    }) || auth
+        .get("authProvider")
+        .or_else(|| auth.get("auth_provider"))
         .and_then(JsonValue::as_str)
-        .is_some_and(|source| {
-            matches!(
-                source.to_ascii_lowercase().as_str(),
-                "native_codex_auth" | "managed_codex_oauth" | "managed_account" | "account_pool"
-            )
-        })
-        || auth
-            .get("authProvider")
-            .or_else(|| auth.get("auth_provider"))
-            .and_then(JsonValue::as_str)
-            .is_some_and(|provider| provider.eq_ignore_ascii_case("codex_oauth"))
+        .is_some_and(|provider| provider.eq_ignore_ascii_case("codex_oauth"))
 }
 
 /// 官方 Codex 客户端 User-Agent 正则
@@ -3375,6 +3385,53 @@ mod tests {
             routing["officialAuth"] = official_auth;
         }
         create_provider(json!({ "codexRouting": routing }))
+    }
+
+    #[test]
+    fn codex_route_auth_source_supports_v1_and_v2_shapes() {
+        assert_eq!(
+            codex_route_auth_source(&json!({
+                "upstream": { "auth": { "source": "native_codex_auth" } }
+            })),
+            Some("native_codex_auth")
+        );
+        assert_eq!(
+            codex_route_auth_source(&json!({
+                "authPolicy": { "source": "provider_config" }
+            })),
+            Some("provider_config")
+        );
+        assert_eq!(
+            codex_route_auth_source(&json!({
+                "auth": { "source": "managed_codex_oauth" }
+            })),
+            Some("managed_codex_oauth")
+        );
+        assert_eq!(
+            codex_route_auth_source(&json!({
+                "auth_policy": { "source": "account_pool" }
+            })),
+            Some("account_pool")
+        );
+        assert_eq!(codex_route_auth_source(&json!({})), None);
+    }
+
+    #[test]
+    fn codex_multirouter_auth_facade_reads_v2_auth_policy() {
+        let provider = multirouter_with_routes(
+            json!([{
+                "id": "official-route",
+                "enabled": true,
+                "targetProviderId": "codex-official",
+                "authPolicy": { "source": "native_codex_auth" }
+            }]),
+            None,
+        );
+
+        assert_eq!(
+            classify_codex_multirouter_auth_facade(&provider, None),
+            CodexMultiRouterAuthFacade::NativeMixed
+        );
     }
 
     #[test]
