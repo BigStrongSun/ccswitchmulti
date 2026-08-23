@@ -29,6 +29,7 @@
 - Create: `src-tauri/src/protocol_compatibility/mod.rs`
 - Create: `src-tauri/src/protocol_compatibility/types.rs`
 - Create: `src-tauri/src/protocol_compatibility/redaction.rs`
+- Create: `src-tauri/src/protocol_compatibility/cases.rs`
 - Modify: `src-tauri/src/lib.rs`
 - Test: module tests in `src-tauri/src/protocol_compatibility/types.rs` and `redaction.rs`
 
@@ -46,26 +47,29 @@ pub struct VerifiedReasoningProfile { /* spec section 4.2 */ }
 pub struct ProtocolCompatibilityRecord { /* profile plus redacted structural evidence */ }
 pub struct ManualReasoningOverride { /* profile subset + revision + reason */ }
 pub struct ReasoningProjection { semantic: ReasoningSemantic, replay: HistoryReplay }
+pub enum ProbeCase { BaselineJson, BaselineSse, ForcedToolSse, ToolContinuationJson }
+pub struct ProbeBudget { max_requests: u8, connect_timeout: Duration, response_timeout: Duration, transaction_timeout: Duration, output_limit: u32 }
 ```
 
 - [ ] **Step 1: Write failing pure-type tests** for target-key determinism, candidate compilation without a persisted provider ID, endpoint credential stripping, endpoint fingerprint changes, profile expiry, readiness transitions, and validation rejection of `Opaque -> Readable`, `Summary -> raw`, missing source, and invalid native replay.
-- [ ] **Step 2: Write failing redaction tests** that feed representative Chat JSON/SSE records containing bearer headers, `reasoning_content`, `content`, tool arguments and tool outputs; assert the output contains only allowlisted JSON paths, counts, lengths, status, event names, and SHA-256 values.
-- [ ] **Step 3: Run RED tests.**
+- [ ] **Step 2: Write failing probe-case tests** that snapshot the exact logical baseline/tool/continuation bodies, random nonce placement, a single non-strict `nonce` tool schema, `max_output_tokens/max_tokens=128`, `store=false` for native Responses, and the complete ban list: caller-supplied user/system/developer content, `extra_body`, original tools, response format, history, thinking/effort, temperature, seed and top_p. Assert one configured transport makes at most four upstream calls; `Auto` adds one only for explicit protocol rejection.
+- [ ] **Step 3: Write failing redaction tests** that feed representative Chat JSON/SSE records containing bearer headers, `reasoning_content`, `content`, tool arguments and tool outputs; assert the output contains only allowlisted JSON paths, counts, lengths, status, event names, and SHA-256 values.
+- [ ] **Step 4: Run RED tests.**
 
 ```powershell
 cargo test --manifest-path src-tauri/Cargo.toml protocol_compatibility::types --lib
 cargo test --manifest-path src-tauri/Cargo.toml protocol_compatibility::redaction --lib
 ```
 
-- [ ] **Step 4: Implement immutable types, validation, canonical endpoint hashing, and redaction.** Do not import `Provider` or open a database in these files.
-- [ ] **Step 5: Run GREEN tests and format.**
+- [ ] **Step 5: Implement immutable types, the fixed probe corpus, validation, canonical endpoint hashing, and redaction.** Do not import `Provider` or open a database in these files. `cases.rs` must create logical Responses requests only; Chat bodies are produced later through the production transformer.
+- [ ] **Step 6: Run GREEN tests and format.**
 
 ```powershell
 cargo fmt --manifest-path src-tauri/Cargo.toml --check
 cargo test --manifest-path src-tauri/Cargo.toml protocol_compatibility --lib
 ```
 
-- [ ] **Step 6: Commit.**
+- [ ] **Step 7: Commit.**
 
 ```powershell
 git add src-tauri/src/protocol_compatibility src-tauri/src/lib.rs
@@ -158,15 +162,15 @@ git commit -m "feat(codex): classify protocol response shapes" -m "本次提交�
 pub async fn run_protocol_compatibility_probe(candidate: ProbeCandidate, client: &Client) -> ProtocolCompatibilityRecord
 ```
 
-- [ ] **Step 1: Write failing local-upstream tests** for endpoint/transport fallback plus all four response outcomes: full verified readable profile; summary-only profile; first-turn raw succeeds but forced-tool continuation fails; tool choice unsupported. Add a Qwen-style tool round where `reasoning_content` and ordinary `content` precede the forced call; assert the run records `PreToolVisibleContent::Present` without changing the selected reasoning semantic or replay policy. Fixtures must assert the tool is named `ccsm_protocol_compatibility_probe`, takes a fixed `nonce`, and returns fixed JSON without touching filesystem/network.
-- [ ] **Step 2: Add tests proving the runner constructs the second request through production `responses_to_chat_completions_with_reasoning*` code, preserves tool call order, and records `tool_turn_verified=false` when the second upstream request is rejected or ends before a continuation message.
+- [ ] **Step 1: Write failing local-upstream tests** for endpoint/transport fallback plus all four response outcomes: full verified readable profile; summary-only profile; first-turn raw succeeds but forced-tool continuation fails; tool choice unsupported. Add a Qwen-style tool round where `reasoning_content` and ordinary `content` precede the forced call; assert the run records `PreToolVisibleContent::Present` without changing the selected reasoning semantic or replay policy. Fixtures must assert the tool is named `ccsm_protocol_compatibility_probe`, receives a per-run random nonce, and gets an in-memory fixed tool result without touching filesystem/network.
+- [ ] **Step 2: Add tests proving the runner constructs every Chat wire request, including forced tool choice and the continuation history, through production `responses_to_chat_completions_with_reasoning*` code. Assert headers/body persistence exclude the prompt, nonce and tool result; a marker mismatch is diagnostic rather than a protocol failure; HTTP 401/403/429/timeouts do not trigger transport fallback; and the 5/15/60-second request/transaction deadlines abort the probe without retry.
 - [ ] **Step 3: Run RED tests.**
 
 ```powershell
 cargo test --manifest-path src-tauri/Cargo.toml protocol_compatibility::runner --lib
 ```
 
-- [ ] **Step 4: Implement endpoint negotiation plus the four-stage transaction.** Reuse the legacy URL derivation rules but replace the duplicate minimal HTTP request functions; use short bounded timeouts; report unsupported tool forcing separately from failed transport; call the same pure conversion functions that the proxy uses; persist only the final profile/evidence after all stages complete.
+- [ ] **Step 4: Implement endpoint negotiation plus the fixed four-case transaction.** Reuse the legacy URL derivation rules but replace the duplicate minimal HTTP request functions; use the 5/15/60-second budget with no retry or cross-origin redirect; report unsupported tool forcing separately from failed transport; call the same pure conversion functions that the proxy uses; persist only the final profile/evidence after all stages complete.
 - [ ] **Step 5: Run runner and Chat-transformer regressions; commit.**
 
 ```powershell

@@ -119,11 +119,30 @@ tool call 前是否还发送了非空普通 `delta.content`。该字段只能保
 
 探测由单一 `ProtocolCompatibilityProbeService` 执行，整个事务带一个随机 probe ID。每段都有独立状态：`passed`、`unsupported`、`failed`、`skipped`；总状态只有全部必要阶段通过才是 `verified`。原 `model_fetch` 的最小 Chat/Responses HTTP 检查迁入第一阶段，避免同一次保存发两套重复请求。
 
-1. **端点探测**：分别检查有效 transport 的流式与非流式请求，保留 HTTP 状态、content-type、SSE event type 集合、JSON 顶层 key 集合和字段长度/哈希。
-2. **推理形态探测**：发送固定的无敏感分析题，强制很短输出。分类器只能依据实际字段位置、分片顺序和明确的 `<think>` 边界决定来源；字段名存在但为空不算证据。
-3. **工具回合探测**：仅注入 `ccsm_protocol_compatibility_probe` 虚拟函数，返回固定 JSON；优先请求强制工具调用，不能强制时报告 `unsupported`，不能把模型自然回答误判为通过。捕获器必须独立记录 tool call 之前是否出现普通 `content`；该证据不得参与 reasoning semantic/source 分类。
+1. **端点/transport 探测**：用同一个 baseline 逻辑请求检查配置指定的 transport；`Auto` 才允许按固定顺序尝试另一个 transport。保留 HTTP 状态、content-type、SSE event type 集合、JSON 顶层 key 集合和字段长度/哈希。
+2. **推理形态探测**：发送固定的无敏感 baseline，分别做非流和流请求。分类器只能依据实际字段位置、分片顺序和明确的 `<think>` 边界决定来源；字段名存在但为空不算证据。
+3. **工具回合探测**：使用固定的虚拟函数并强制该函数调用；不能强制时报告 `unsupported`，不能把模型自然回答误判为通过。捕获器必须独立记录 tool call 之前是否出现普通 `content`；该证据不得参与 reasoning semantic/source 分类。
 4. **历史续接探测**：将同一段已转换的 Responses 输出经过现有 Responses→Chat 转换器重放给同一上游，附固定工具结果；验证没有 400、不会漏掉 tool call、并得到后续 assistant 输出。
 5. **投影自检**：把捕获的 Chat SSE / JSON 分别通过与生产完全相同的转换器，断言 raw profile 产生完整 `response.reasoning_text.*` 生命周期，summary profile 产生完整 summary 生命周期，最终 item 与流中事件一致。若 tool 前出现普通 content，断言它只产生 `response.output_text.*`，且不改变 reasoning item 的 source/semantic。
+
+### 5.1 探测用例契约：固定语义，不复用用户请求体
+
+探测器不把用户正在编辑的 message、system/developer prompt、`extra_body`、`tools`、`tool_choice`、`response_format`、`previous_response_id`、conversation 或 reasoning/effort 控制字段拼进请求。它只复用候选的 endpoint、认证、有效模型、transport、受维护的协议适配器和必要的自定义 User-Agent/认证头；所有自定义头只在发送时使用，永不记录。这样探测既不泄露用户内容，也不让用户自定义 prompt 改变测试语义。
+
+每个 `ProbeCase` 先构造**逻辑 Responses 请求**，再由生产级 Responses→Chat 转换器生成 Chat wire body；原生 Responses transport 发送原逻辑 body。不能为 probe 另写一套 Chat message/tool 序列化器。对于 `transport=Auto`，仅 baseline 可以按 `responses -> chat` 尝试第二种协议，且只有明确的端点/协议不支持（例如 404、405、415 或可识别 schema 不支持）才继续；401、403、429、超时、TLS/网络错误都停止并标为 `Unverified`，不得误判为另一协议。
+
+探测共有最多四次上游请求；`Auto` 在首选 transport 明确不支持时最多多一次 baseline。每次连接上限 5 秒、完整响应上限 15 秒，整个事务上限 60 秒；不做网络重试、不跟随跨 origin 重定向。每个请求必须携带可按协议使用的输出上限：Chat 为 `max_tokens=128`，Responses 为 `max_output_tokens=128`。上游明确拒绝该最小额度时记录 `output_limit_unsupported` 并降为 `Partial`，不退化为无上限或 1024 token 的隐式长请求。
+
+| Case | 逻辑用户输入（固定文本；`<nonce>` 每次随机） | stream | 工具/续接 | 通过证据 |
+|---|---|---:|---|---|
+| `baseline_json` | `CCSM protocol compatibility probe. Solve 17 + 25 internally. Reply only CCSM_PROTOCOL_BASELINE_OK.` | false | 无 | HTTP 成功且有完成的 assistant 输出；响应字段仅作形态分类，回复文字不决定 reasoning 语义。 |
+| `baseline_sse` | 与 `baseline_json` 相同 | true | 无 | 有合法 SSE 帧和终止帧/完成事件；收集 reasoning、普通 content 与事件顺序。 |
+| `forced_tool_sse` | `CCSM protocol compatibility probe. Call the provided function exactly once with nonce <nonce>. After its result, reply only CCSM_PROTOCOL_TOOL_DONE.` | true | 强制唯一虚拟工具 | 实际 function call 的 name 和 nonce 匹配；不因自然文本或工具前普通 content 视为工具通过。 |
+| `tool_continuation_json` | 不新增用户文本；重放上一步 assistant tool call 后加入固定 tool result | false | 工具结果后续接 | 生产转换后的历史被上游接受、调用 ID 未丢失，且返回完成的 assistant 输出。marker 不匹配仅记诊断，不把模型服从性误判为协议失败。 |
+
+虚拟工具的唯一 schema 为单个必填字符串 `nonce`，不启用 `strict`、`response_format`、`parallel_tool_calls`、temperature、top_p、seed 或任何 reasoning/effort 参数，以避免把厂商可选参数误测成协议不兼容。Chat 使用其标准的指定 function `tool_choice` 形态；Responses 使用其标准的指定 function tool choice。虚拟工具不注册到任何本地工具执行器，不访问文件、网络、系统命令或用户数据；验证通过后仅在内存构造 `{ "ok": true, "nonce": "<nonce>", "result": "CCSM_PROTOCOL_PROBE_TOOL_OK" }` 作为 tool output。
+
+探测提示从不要求模型展示、总结或解释思考过程；“internally”只提供一个稳定、极小的计算任务以自然触发部分推理模型。没有 reasoning 字段、工具前普通文本或 marker 文本都不能单独成为 raw reasoning 的证据。随机 nonce 防止上游缓存或复用旧测试结果；nonce、提示和 tool output 都不落库，持久化记录只保留 case ID、版本、字段路径、事件顺序、状态、长度、哈希和失败类别。
 
 探测使用上游真实凭据，但请求体、响应正文和工具结果都只在内存中保留到本次命令结束。持久化 evidence 只含事件类型、JSON 路径 allowlist、状态码、字节数、分片数、SHA-256、耗时和失败阶段。
 
