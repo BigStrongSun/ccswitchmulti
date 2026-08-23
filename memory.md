@@ -4244,3 +4244,10 @@ supported in one streaming turn`。
 - 该 turn 同时出现两种不同的上游 Chat 字段：`reasoning_content` 经桥接成为无 `content` 的 Responses reasoning summary（持续的单行闪烁）；Qwen 在工具调用前又间歇性发送普通 `content`，经桥接成为普通 assistant `message/output_text`。截图的 “Matrix chain is returning …” 是该 turn 的普通 message，紧邻后续 Matrix tool call，且没有 `phase=commentary`；它不是 raw reasoning，也不是 Codex 自行补出的说明。
 - 因而“后来显示几句白字”的直接原因是 Qwen 在少数工具子回合产生了非空 Chat `content`，而不是 reasoning 通道从 summary 切换为 raw。桥接正确把这个 `content` 按 `response.output_text.delta` 显示；与此同时 `reasoning_content` 仍未以 `reasoning_text` 形式暴露，原始“完整推理不可读”问题仍未解决。
 - 验收/探测必须把 `pre_tool_visible_content` 作为独立结构证据记录，不能把它误判为 raw reasoning 成功，也不能仅按它是否出现决定显示投影。
+
+## 2026-08-23 Codex 第三方协议兼容性自动探测：领域层实现进度
+
+- 隔离分支 `bigstrongsun/codex-reasoning-probe-backend` 已开始后端实施，前端、安装、发布与运行中服务均未触及。首个已提交切片 `c10cbabd` 固化四个探测用例的逻辑 Responses 请求壳；当前待提交切片补充目标身份与自动投影准入规则。
+- `ProbeTargetKey` 规范化 endpoint 时移除 URL userinfo、query 和 fragment，再仅保存其 SHA-256 指纹；凭据、提示或正文不能进入目标键。`ProbeCandidate` 可在 Provider 尚未持久化时以 `provider_id=None` 编译，支持保存前探测。
+- 自动投影只允许 `ProbeReadiness::Verified`。手工覆盖必须验证已有证据：不透明证据不能升格为 readable，非 readable 不能要求 raw `reasoning_text`，readable 必须提供来源，原生 Responses 不得伪装为 Chat `reasoning_content` 回放。
+- 本轮 RED/GREEN：先观察到目标键/准入 API 缺失的编译失败，再完成 2/2；第二轮观察到候选与覆盖类型缺失的编译失败，补齐后 6/6 通过。后续仍须完成结构脱敏、持久化、capture/classifier、真实 probe transaction 和生产桥接，未可声称端到端功能完成。
