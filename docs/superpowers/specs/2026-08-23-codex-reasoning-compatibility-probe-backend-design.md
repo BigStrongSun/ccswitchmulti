@@ -1,12 +1,12 @@
-# Codex 推理兼容性主动探测：后端设计
+# Codex 协议兼容性自动探测：后端设计
 
 - 状态：待实现评审稿；本文件只定义后端，不实现前端。
 - 日期：2026-08-23。
-- 范围：第三方 Chat Completions 上游经 CCSM 转成 Codex Responses 时，自动判定并安全投影 reasoning；同时为将来的高级模式提供手工覆盖接口。
+- 范围：第三方上游接入 Codex 时，自动判定 transport、流、工具、历史续接与响应投影；其中 reasoning 投影是协议档案的一个受验证子结论，同时为将来的高级模式提供手工覆盖接口。
 
 ## 1. 目标
 
-当用户保存一个包含 Codex 路由的 Provider 候选时，CCSM 必须默认以真实、无敏感数据的请求验证：端点、流式帧、可读推理字段、工具调用顺序，以及工具结果后的历史续接。测试成功后，CCSM 自动生成并应用该组合的推理投影档案；运行时只读取该档案，不再根据字段名把所有文本硬编码为 raw 或 summary。该前置测试不需要先连接 Codex Desktop 或发送真实用户任务。
+当用户保存一个包含 Codex 路由的 Provider 候选时，CCSM 必须默认以真实、无敏感数据的请求验证：端点、流式帧、工具调用顺序、工具结果后的历史续接与响应字段形态。测试成功后，CCSM 自动生成并应用该组合的**协议兼容性档案**；其中 reasoning 投影由同一档案中的已验证响应证据得出。运行时只读取该档案，不再根据字段名把所有文本硬编码为 raw 或 summary。该前置测试不需要先连接 Codex Desktop 或发送真实用户任务。
 
 普通模式没有 raw/summary/字段名选择器，也不要求用户理解探测协议；“保存并测试”是唯一默认动作。高级模式只调用同一套后端的手工覆盖接口，覆盖经过校验后优先于自动档案。
 
@@ -18,15 +18,15 @@
 - 不把 prompt、推理文本、API key、Authorization、Cookie、工具参数或工具结果写入 SQLite、日志、审计记录或探测结果。
 - 不重新设计 reasoning effort、Sub-Agent V2 加密消息清洗或官方 OAuth 续接；它们只作为回归边界。
 
-## 3. 两条能力链必须分离
+## 3. 统一协议探测，推理强度能力保持分离
 
-现有 `reasoning_capabilities` 是被动元数据发现：其结果可短期缓存，并用于 effort/thinking 参数。现有 `model_fetch` 只获取 `/v1/models`，不能验证流、推理字段、工具调用或历史续接。
+现有 `reasoning_capabilities` 是被动元数据发现：其结果可短期缓存，并只用于 effort/thinking 参数。它不读取协议探测结论，也不由一次真实响应反向推断档位。`model_fetch` 目前同时负责 `/v1/models` 获取和两个最小 Chat/Responses HTTP 探测；后者只报告端点是否返回成功，不能验证流、reasoning 字段、工具调用或历史续接。
 
-新 `reasoning_probe` 是由 Provider 保存默认触发、并可在失效后显式重测的主动兼容性事务。它消费真实响应形态，产出“响应投影”而不是 effort 能力；两者不可互相覆盖或复用同一 `outputFormat` 字段。
+新 `protocol_compatibility` 是由 Provider 保存默认触发、并可在失效后显式重测的主动兼容性事务。它收编上述最小 HTTP 探测作为第一阶段，并以真实响应形态产出 transport、流、工具、续接和响应投影的单一档案。`ReasoningProjection` 是该档案的子结论，不是 effort 能力；两者不可互相覆盖或复用同一 `outputFormat` 字段。
 
 ```text
 被动 metadata discovery  -> effort / enable-thinking 请求参数
-保存触发的 compatibility probe  -> reasoning 输出语义、SSE 事件、历史回放方式
+保存触发的 protocol compatibility probe -> transport、SSE、工具/续接、reasoning 输出语义与历史回放
 ```
 
 ### 3.1 自动化时机：配置前置为主、真实运行复核为辅
@@ -38,7 +38,7 @@
 前置测试分三层：
 
 1. **零网络编译**：验证候选配置、route/model alias 和请求形状能通过当前生产编译器；失败不发请求。
-2. **真实上游兼容性事务**：流/非流、强制虚拟工具、工具结果后的历史续接，以及对生产转换器的事件自检。虚拟工具是 `ccsm_reasoning_probe`，不访问用户文件、网络或真实 Codex 工具。
+2. **真实上游兼容性事务**：流/非流、强制虚拟工具、工具结果后的历史续接，以及对生产转换器的事件自检。虚拟工具是 `ccsm_protocol_compatibility_probe`，不访问用户文件、网络或真实 Codex 工具。
 3. **首次真实请求的被动结构复核**：仅比较无正文的字段路径、事件顺序、工具前普通 content 标记和目标指纹。匹配则延续档案；不匹配则使档案失效并对后续请求使用安全回退，记录需要重测。此步骤不自动追加第二次计费探测，也不读取/持久化正文。
 
 前置测试能验证 CCSM 与该上游的协议兼容性，不能保证模型在每个真实 prompt 都会产生 reasoning 或 tool call，也不能替代 Codex Desktop 的版本级视觉验收。因此“已验证”含义是已配置好可安全投影，不是承诺每次任务都会有可展示推理。
@@ -51,7 +51,7 @@
 
 配置、路由映射、模型名、endpoint 或认证类别变化时，现有结果不再匹配，自动失效。
 
-### 4.2 自动档案
+### 4.2 自动协议档案与 reasoning 子档案
 
 ```rust
 enum ReasoningSemantic { Readable, Summary, Opaque, None }
@@ -66,6 +66,21 @@ struct VerifiedReasoningProfile {
     non_stream_verified: bool,
     tool_turn_verified: bool,
     history_replay: HistoryReplay,
+    probe_version: u16,
+    evidence_fingerprint: String,
+    tested_at: i64,
+    expires_at: i64,
+}
+
+struct VerifiedProtocolCompatibilityProfile {
+    target: ProbeTargetKey,
+    readiness: ProbeReadiness,
+    chat_supported: bool,
+    responses_supported: bool,
+    stream_verified: bool,
+    tool_turn_verified: bool,
+    history_replay_verified: bool,
+    reasoning: Option<VerifiedReasoningProfile>,
     probe_version: u16,
     evidence_fingerprint: String,
     tested_at: i64,
@@ -102,11 +117,11 @@ tool call 前是否还发送了非空普通 `delta.content`。该字段只能保
 
 ## 5. 主动探测事务
 
-探测由单一 `ReasoningCompatibilityProbeService` 执行，整个事务带一个随机 probe ID。每段都有独立状态：`passed`、`unsupported`、`failed`、`skipped`；总状态只有全部必要阶段通过才是 `verified`。
+探测由单一 `ProtocolCompatibilityProbeService` 执行，整个事务带一个随机 probe ID。每段都有独立状态：`passed`、`unsupported`、`failed`、`skipped`；总状态只有全部必要阶段通过才是 `verified`。原 `model_fetch` 的最小 Chat/Responses HTTP 检查迁入第一阶段，避免同一次保存发两套重复请求。
 
 1. **端点探测**：分别检查有效 transport 的流式与非流式请求，保留 HTTP 状态、content-type、SSE event type 集合、JSON 顶层 key 集合和字段长度/哈希。
 2. **推理形态探测**：发送固定的无敏感分析题，强制很短输出。分类器只能依据实际字段位置、分片顺序和明确的 `<think>` 边界决定来源；字段名存在但为空不算证据。
-3. **工具回合探测**：仅注入 `ccsm_reasoning_probe` 虚拟函数，返回固定 JSON；优先请求强制工具调用，不能强制时报告 `unsupported`，不能把模型自然回答误判为通过。捕获器必须独立记录 tool call 之前是否出现普通 `content`；该证据不得参与 reasoning semantic/source 分类。
+3. **工具回合探测**：仅注入 `ccsm_protocol_compatibility_probe` 虚拟函数，返回固定 JSON；优先请求强制工具调用，不能强制时报告 `unsupported`，不能把模型自然回答误判为通过。捕获器必须独立记录 tool call 之前是否出现普通 `content`；该证据不得参与 reasoning semantic/source 分类。
 4. **历史续接探测**：将同一段已转换的 Responses 输出经过现有 Responses→Chat 转换器重放给同一上游，附固定工具结果；验证没有 400、不会漏掉 tool call、并得到后续 assistant 输出。
 5. **投影自检**：把捕获的 Chat SSE / JSON 分别通过与生产完全相同的转换器，断言 raw profile 产生完整 `response.reasoning_text.*` 生命周期，summary profile 产生完整 summary 生命周期，最终 item 与流中事件一致。若 tool 前出现普通 content，断言它只产生 `response.output_text.*`，且不改变 reasoning item 的 source/semantic。
 
@@ -117,7 +132,7 @@ tool call 前是否还发送了非空普通 `delta.content`。该字段只能保
 新增专用 SQLite 表，而不是滥用 `stream_check_logs`：
 
 ```sql
-codex_reasoning_probe_results(
+codex_protocol_compatibility_results(
   target_key TEXT PRIMARY KEY,
   provider_id TEXT NOT NULL,
   route_id TEXT,
@@ -152,8 +167,8 @@ codex_reasoning_probe_results(
 ## 8. 后端接口（供后续前端调用）
 
 ```rust
-probe_codex_reasoning_compatibility(request) -> ProbeRunResult
-get_codex_reasoning_compatibility(target) -> CompatibilityInspection
+probe_codex_protocol_compatibility(request) -> ProtocolCompatibilityResult
+get_codex_protocol_compatibility(target) -> ProtocolCompatibilityInspection
 plan_codex_reasoning_override(target, override_spec, expected_revision) -> OverridePlan
 apply_codex_reasoning_override(plan_token, expected_revision) -> CompatibilityInspection
 clear_codex_reasoning_override(target, expected_revision) -> CompatibilityInspection

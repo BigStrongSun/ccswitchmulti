@@ -1,10 +1,10 @@
-# Codex Reasoning Compatibility Probe Backend Implementation Plan
+# Codex Protocol Compatibility Probe Backend Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** During Provider save, automatically run an evidence-driven candidate probe that classifies each third-party Codex model's actual reasoning response and applies a safe Chat-to-Responses projection before any real Codex task, with a validated manual override for advanced mode.
+**Goal:** During Provider save, automatically run one evidence-driven protocol compatibility probe that verifies each third-party Codex model's transport, streaming, tool and replay behavior, then derives a safe Chat-to-Responses reasoning projection only when the response evidence supports it. Reasoning-strength/effort discovery remains a separate capability chain.
 
-**Architecture:** Keep passive `reasoning_capabilities` discovery and `/v1/models` fetching unchanged. Add a separate `reasoning_probe` domain that first compiles an unsaved `ProbeCandidate`, runs an explicit four-stage upstream transaction using the same production transformers, then atomically persists the Provider plus redacted target-bound profile. Runtime observes only structural shape for drift and invalidates mismatched profiles; it never starts a second billed probe. Manual override is a separate, revision-checked record; no frontend component is in scope.
+**Architecture:** Keep passive `reasoning_capabilities` discovery independent. Replace the current pair of minimal `model_fetch` HTTP probe paths with one `protocol_compatibility` domain: it first compiles an unsaved `ProbeCandidate`, performs endpoint negotiation plus the multi-stage upstream transaction using production transformers, and atomically persists the Provider plus a redacted target-bound protocol profile. The reasoning projection is one validated subprofile. Runtime observes only structural shape for drift and invalidates mismatched profiles; it never starts a second billed probe. Manual override is a separate, revision-checked record; no frontend component is in scope.
 
 **Tech Stack:** Rust 2021, Tauri 2 commands, reqwest, serde/serde_json, rusqlite, existing Chat/Responses transformers, tokio test fixtures.
 
@@ -15,6 +15,7 @@
 - Do not implement React/UI changes, installer changes, release changes, or Desktop config mutation in this branch.
 - Never persist or log API keys, headers, prompt text, reasoning text, tool arguments, tool results, or unredacted upstream bodies.
 - Provider save is the sole default authorization for one bounded active probe; re-test is explicit only after a failed/expired profile. Runtime request handling never starts an active probe.
+- `reasoning_capabilities` continues to resolve effort/thinking parameters from passive metadata and explicit configuration only; this probe must never create or overwrite those capability values.
 - A probe profile is keyed to provider, route, requested/effective model, transport, endpoint fingerprint, and auth kind; any mismatch invalidates it.
 - Manual override wins only after semantic validation; it cannot expose opaque or encrypted data as raw reasoning.
 - Official OAuth, native Responses, encrypted content, V2 subagent message projection, and tool-call ordering must remain unchanged.
@@ -25,11 +26,11 @@
 ### Task 1: Establish the profile and evidence domain as pure Rust types
 
 **Files:**
-- Create: `src-tauri/src/reasoning_probe/mod.rs`
-- Create: `src-tauri/src/reasoning_probe/types.rs`
-- Create: `src-tauri/src/reasoning_probe/redaction.rs`
+- Create: `src-tauri/src/protocol_compatibility/mod.rs`
+- Create: `src-tauri/src/protocol_compatibility/types.rs`
+- Create: `src-tauri/src/protocol_compatibility/redaction.rs`
 - Modify: `src-tauri/src/lib.rs`
-- Test: module tests in `src-tauri/src/reasoning_probe/types.rs` and `redaction.rs`
+- Test: module tests in `src-tauri/src/protocol_compatibility/types.rs` and `redaction.rs`
 
 **Interfaces:**
 
@@ -40,8 +41,9 @@ pub enum HistoryReplay { ChatReasoningContent, Omit, NativeOnly }
 pub struct ProbeTargetKey { /* canonical, hashable route identity */ }
 pub struct ProbeCandidate { /* unsaved effective provider + route + credentials held in memory */ }
 pub enum ProbeReadiness { Verified, Partial, Unverified }
+pub struct VerifiedProtocolCompatibilityProfile { /* endpoint, transport, stream, tool, replay and optional reasoning subprofile */ }
 pub struct VerifiedReasoningProfile { /* spec section 4.2 */ }
-pub struct ProbeEvidence { /* structural fields only */ }
+pub struct ProtocolCompatibilityRecord { /* profile plus redacted structural evidence */ }
 pub struct ManualReasoningOverride { /* profile subset + revision + reason */ }
 pub struct ReasoningProjection { semantic: ReasoningSemantic, replay: HistoryReplay }
 ```
@@ -51,8 +53,8 @@ pub struct ReasoningProjection { semantic: ReasoningSemantic, replay: HistoryRep
 - [ ] **Step 3: Run RED tests.**
 
 ```powershell
-cargo test --manifest-path src-tauri/Cargo.toml reasoning_probe::types --lib
-cargo test --manifest-path src-tauri/Cargo.toml reasoning_probe::redaction --lib
+cargo test --manifest-path src-tauri/Cargo.toml protocol_compatibility::types --lib
+cargo test --manifest-path src-tauri/Cargo.toml protocol_compatibility::redaction --lib
 ```
 
 - [ ] **Step 4: Implement immutable types, validation, canonical endpoint hashing, and redaction.** Do not import `Provider` or open a database in these files.
@@ -60,20 +62,20 @@ cargo test --manifest-path src-tauri/Cargo.toml reasoning_probe::redaction --lib
 
 ```powershell
 cargo fmt --manifest-path src-tauri/Cargo.toml --check
-cargo test --manifest-path src-tauri/Cargo.toml reasoning_probe --lib
+cargo test --manifest-path src-tauri/Cargo.toml protocol_compatibility --lib
 ```
 
 - [ ] **Step 6: Commit.**
 
 ```powershell
-git add src-tauri/src/reasoning_probe src-tauri/src/lib.rs
-git commit -m "feat(codex): define reasoning compatibility probe domain" -m "本次提交由BigStrongsSun完成"
+git add src-tauri/src/protocol_compatibility src-tauri/src/lib.rs
+git commit -m "feat(codex): define protocol compatibility probe domain" -m "本次提交由BigStrongsSun完成"
 ```
 
-### Task 2: Persist test profiles and manual overrides without reusing health logs
+### Task 2: Persist protocol profiles and reasoning overrides without reusing health logs
 
 **Files:**
-- Create: `src-tauri/src/database/dao/reasoning_probe.rs`
+- Create: `src-tauri/src/database/dao/protocol_compatibility.rs`
 - Modify: `src-tauri/src/database/dao/mod.rs`
 - Modify: `src-tauri/src/database/schema.rs`
 - Modify: `src-tauri/src/database/mod.rs`
@@ -83,11 +85,11 @@ git commit -m "feat(codex): define reasoning compatibility probe domain" -m "本
 **Interfaces:**
 
 ```rust
-Database::save_reasoning_probe_result(&ProbeRunRecord) -> Result<(), AppError>
-Database::get_reasoning_probe_result(&ProbeTargetKey) -> Result<Option<ProbeRunRecord>, AppError>
+Database::save_protocol_compatibility_result(&ProtocolCompatibilityRecord) -> Result<(), AppError>
+Database::get_protocol_compatibility_result(&ProbeTargetKey) -> Result<Option<ProtocolCompatibilityRecord>, AppError>
 Database::save_reasoning_manual_override(&ManualReasoningOverride, expected_revision: i64) -> Result<i64, AppError>
 Database::clear_reasoning_manual_override(&ProbeTargetKey, expected_revision: i64) -> Result<i64, AppError>
-Database::prune_reasoning_probe_results(now: i64) -> Result<u64, AppError>
+Database::prune_protocol_compatibility_results(now: i64) -> Result<u64, AppError>
 ```
 
 - [ ] **Step 1: Add failing migration tests** from schema v16 asserting both new tables, indexes, backup inclusion, 30-day verified retention, 7-day failure retention, and no automatic deletion of manual overrides.
@@ -95,7 +97,7 @@ Database::prune_reasoning_probe_results(now: i64) -> Result<u64, AppError>
 - [ ] **Step 3: Run RED tests.**
 
 ```powershell
-cargo test --manifest-path src-tauri/Cargo.toml reasoning_probe --lib
+cargo test --manifest-path src-tauri/Cargo.toml protocol_compatibility --lib
 cargo test --manifest-path src-tauri/Cargo.toml schema_migration --lib
 ```
 
@@ -103,24 +105,24 @@ cargo test --manifest-path src-tauri/Cargo.toml schema_migration --lib
 - [ ] **Step 5: Run targeted migration/DAO tests and commit.**
 
 ```powershell
-cargo test --manifest-path src-tauri/Cargo.toml reasoning_probe --lib
+cargo test --manifest-path src-tauri/Cargo.toml protocol_compatibility --lib
 cargo test --manifest-path src-tauri/Cargo.toml schema_migration --lib
 git add src-tauri/src/database
-git commit -m "feat(codex): persist verified reasoning probe profiles" -m "本次提交由BigStrongsSun完成"
+git commit -m "feat(codex): persist protocol compatibility profiles" -m "本次提交由BigStrongsSun完成"
 ```
 
 ### Task 3: Capture and classify real upstream response shapes
 
 **Files:**
-- Create: `src-tauri/src/reasoning_probe/capture.rs`
-- Create: `src-tauri/src/reasoning_probe/classify.rs`
-- Modify: `src-tauri/src/reasoning_probe/mod.rs`
+- Create: `src-tauri/src/protocol_compatibility/capture.rs`
+- Create: `src-tauri/src/protocol_compatibility/classify.rs`
+- Modify: `src-tauri/src/protocol_compatibility/mod.rs`
 - Test: module tests in `capture.rs` and `classify.rs`
 
 **Interfaces:**
 
 ```rust
-pub async fn capture_chat_probe(...) -> Result<CapturedProbeExchange, ProbeError>
+pub async fn capture_transport_probe(...) -> Result<CapturedProbeExchange, ProbeError>
 pub fn classify_reasoning_shape(exchange: &CapturedProbeExchange) -> ClassifiedReasoningShape
 ```
 
@@ -129,49 +131,49 @@ pub fn classify_reasoning_shape(exchange: &CapturedProbeExchange) -> ClassifiedR
 - [ ] **Step 3: Run RED tests.**
 
 ```powershell
-cargo test --manifest-path src-tauri/Cargo.toml reasoning_probe::capture --lib
-cargo test --manifest-path src-tauri/Cargo.toml reasoning_probe::classify --lib
+cargo test --manifest-path src-tauri/Cargo.toml protocol_compatibility::capture --lib
+cargo test --manifest-path src-tauri/Cargo.toml protocol_compatibility::classify --lib
 ```
 
 - [ ] **Step 4: Implement byte-safe SSE capture and semantic classifier.** Classification may produce `Readable` only from verified readable reasoning paths; mixed or opaque data is `Summary`/`Opaque`, never raw. Capture ordinary nonempty `content` that precedes a tool call only as `PreToolVisibleContent::{Absent,Present}` plus redacted structural evidence; it must not be offered to `ReasoningSource`. Keep raw bytes in a local non-serializable buffer that is dropped after the probe.
 - [ ] **Step 5: Run GREEN tests and commit.**
 
 ```powershell
-cargo test --manifest-path src-tauri/Cargo.toml reasoning_probe::capture --lib
-cargo test --manifest-path src-tauri/Cargo.toml reasoning_probe::classify --lib
-git add src-tauri/src/reasoning_probe
-git commit -m "feat(codex): classify captured reasoning response shapes" -m "本次提交由BigStrongsSun完成"
+cargo test --manifest-path src-tauri/Cargo.toml protocol_compatibility::capture --lib
+cargo test --manifest-path src-tauri/Cargo.toml protocol_compatibility::classify --lib
+git add src-tauri/src/protocol_compatibility
+git commit -m "feat(codex): classify protocol response shapes" -m "本次提交由BigStrongsSun完成"
 ```
 
 ### Task 4: Implement forced-tool and history-replay compatibility transactions
 
 **Files:**
-- Create: `src-tauri/src/reasoning_probe/runner.rs`
-- Modify: `src-tauri/src/reasoning_probe/mod.rs`
+- Create: `src-tauri/src/protocol_compatibility/runner.rs`
+- Modify: `src-tauri/src/protocol_compatibility/mod.rs`
 - Test: `runner.rs` module tests
 
 **Interfaces:**
 
 ```rust
-pub async fn run_reasoning_compatibility_probe(target: ProbeTarget, client: &Client) -> ProbeRunRecord
+pub async fn run_protocol_compatibility_probe(candidate: ProbeCandidate, client: &Client) -> ProtocolCompatibilityRecord
 ```
 
-- [ ] **Step 1: Write failing local-upstream tests** for all four outcomes: full verified readable profile; summary-only profile; first-turn raw succeeds but forced-tool continuation fails; tool choice unsupported. Add a Qwen-style tool round where `reasoning_content` and ordinary `content` precede the forced call; assert the run records `PreToolVisibleContent::Present` without changing the selected reasoning semantic or replay policy. Fixtures must assert the tool is named `ccsm_reasoning_probe`, takes a fixed `nonce`, and returns fixed JSON without touching filesystem/network.
+- [ ] **Step 1: Write failing local-upstream tests** for endpoint/transport fallback plus all four response outcomes: full verified readable profile; summary-only profile; first-turn raw succeeds but forced-tool continuation fails; tool choice unsupported. Add a Qwen-style tool round where `reasoning_content` and ordinary `content` precede the forced call; assert the run records `PreToolVisibleContent::Present` without changing the selected reasoning semantic or replay policy. Fixtures must assert the tool is named `ccsm_protocol_compatibility_probe`, takes a fixed `nonce`, and returns fixed JSON without touching filesystem/network.
 - [ ] **Step 2: Add tests proving the runner constructs the second request through production `responses_to_chat_completions_with_reasoning*` code, preserves tool call order, and records `tool_turn_verified=false` when the second upstream request is rejected or ends before a continuation message.
 - [ ] **Step 3: Run RED tests.**
 
 ```powershell
-cargo test --manifest-path src-tauri/Cargo.toml reasoning_probe::runner --lib
+cargo test --manifest-path src-tauri/Cargo.toml protocol_compatibility::runner --lib
 ```
 
-- [ ] **Step 4: Implement the four-stage transaction.** Use short bounded timeouts; report unsupported tool forcing separately from failed transport; call the same pure conversion functions that the proxy uses; persist only the final profile/evidence after all stages complete.
+- [ ] **Step 4: Implement endpoint negotiation plus the four-stage transaction.** Reuse the legacy URL derivation rules but replace the duplicate minimal HTTP request functions; use short bounded timeouts; report unsupported tool forcing separately from failed transport; call the same pure conversion functions that the proxy uses; persist only the final profile/evidence after all stages complete.
 - [ ] **Step 5: Run runner and Chat-transformer regressions; commit.**
 
 ```powershell
-cargo test --manifest-path src-tauri/Cargo.toml reasoning_probe::runner --lib
+cargo test --manifest-path src-tauri/Cargo.toml protocol_compatibility::runner --lib
 cargo test --manifest-path src-tauri/Cargo.toml transform_codex_chat --lib
-git add src-tauri/src/reasoning_probe
-git commit -m "feat(codex): verify reasoning tool-turn replay" -m "本次提交由BigStrongsSun完成"
+git add src-tauri/src/protocol_compatibility
+git commit -m "feat(codex): verify protocol tool-turn replay" -m "本次提交由BigStrongsSun完成"
 ```
 
 ### Task 5: Resolve a request-local projection and replace global raw behavior
@@ -216,8 +218,8 @@ git commit -m "fix(codex): project reasoning from verified compatibility evidenc
 ### Task 6: Run preflight on Provider save and observe runtime drift
 
 **Files:**
-- Create: `src-tauri/src/commands/reasoning_probe.rs`
-- Create: `src-tauri/src/reasoning_probe/runtime_observer.rs`
+- Create: `src-tauri/src/commands/protocol_compatibility.rs`
+- Create: `src-tauri/src/protocol_compatibility/runtime_observer.rs`
 - Modify: `src-tauri/src/commands/mod.rs`
 - Modify: `src-tauri/src/lib.rs`
 - Modify: `src-tauri/src/commands/provider.rs`
@@ -228,10 +230,10 @@ git commit -m "fix(codex): project reasoning from verified compatibility evidenc
 **Interfaces:**
 
 ```rust
-pub async fn probe_provider_candidate(candidate: ProbeCandidate, client: &Client) -> ProbeRunRecord
-pub fn observe_reasoning_profile_shape(profile: &VerifiedReasoningProfile, shape: &ObservedResponseShape) -> ProfileObservation
-probe_codex_reasoning_compatibility(request) -> ProbeRunResult
-get_codex_reasoning_compatibility(request) -> CompatibilityInspection
+pub async fn probe_provider_candidate(candidate: ProbeCandidate, client: &Client) -> ProtocolCompatibilityRecord
+pub fn observe_protocol_profile_shape(profile: &VerifiedProtocolCompatibilityProfile, shape: &ObservedResponseShape) -> ProfileObservation
+probe_codex_protocol_compatibility(request) -> ProtocolCompatibilityResult
+get_codex_protocol_compatibility(target) -> ProtocolCompatibilityInspection
 plan_codex_reasoning_override(request) -> OverridePlan
 apply_codex_reasoning_override(request) -> CompatibilityInspection
 clear_codex_reasoning_override(request) -> CompatibilityInspection
@@ -243,7 +245,7 @@ clear_codex_reasoning_override(request) -> CompatibilityInspection
 - [ ] **Step 4: Run RED tests.**
 
 ```powershell
-cargo test --manifest-path src-tauri/Cargo.toml reasoning_probe --lib
+cargo test --manifest-path src-tauri/Cargo.toml protocol_compatibility --lib
 cargo test --manifest-path src-tauri/Cargo.toml provider_service --lib
 cargo test --manifest-path src-tauri/Cargo.toml handlers --lib
 ```
@@ -254,10 +256,10 @@ cargo test --manifest-path src-tauri/Cargo.toml handlers --lib
 - [ ] **Step 8: Run command/domain tests and commit.**
 
 ```powershell
-cargo test --manifest-path src-tauri/Cargo.toml reasoning_probe --lib
+cargo test --manifest-path src-tauri/Cargo.toml protocol_compatibility --lib
 cargo check --manifest-path src-tauri/Cargo.toml --lib
-git add src-tauri/src/reasoning_probe src-tauri/src/services/provider src-tauri/src/commands src-tauri/src/proxy/handlers.rs src-tauri/src/lib.rs
-git commit -m "feat(codex): preflight provider reasoning compatibility" -m "本次提交由BigStrongsSun完成"
+git add src-tauri/src/protocol_compatibility src-tauri/src/services/provider src-tauri/src/commands src-tauri/src/proxy/handlers.rs src-tauri/src/lib.rs
+git commit -m "feat(codex): preflight provider protocol compatibility" -m "本次提交由BigStrongsSun完成"
 ```
 
 ### Task 7: Privacy, migration and cross-boundary regression gate
@@ -272,7 +274,7 @@ git commit -m "feat(codex): preflight provider reasoning compatibility" -m "本�
 
 ```powershell
 cargo fmt --manifest-path src-tauri/Cargo.toml --check
-cargo test --manifest-path src-tauri/Cargo.toml reasoning_probe --lib
+cargo test --manifest-path src-tauri/Cargo.toml protocol_compatibility --lib
 cargo test --manifest-path src-tauri/Cargo.toml streaming_codex_chat --lib
 cargo test --manifest-path src-tauri/Cargo.toml transform_codex_chat --lib
 cargo test --manifest-path src-tauri/Cargo.toml openai_compat --lib
@@ -285,7 +287,7 @@ git diff --check
 
 ```powershell
 git add memory.md src-tauri/src
-git commit -m "test(codex): verify reasoning compatibility probe boundaries" -m "本次提交由BigStrongsSun完成"
+git commit -m "test(codex): verify protocol compatibility probe boundaries" -m "本次提交由BigStrongsSun完成"
 ```
 
 ## Deferred Frontend Slice

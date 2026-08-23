@@ -4229,11 +4229,11 @@ supported in one streaming turn`。
 - 范围边界：本次仅“获取+校验”，不落地应用预设、不写 DB。P1（本地可移植预设+三方合并+diff+UI）、P2 完整（缓存/过期策略/检查更新 UI/TUF 多角色 root/targets/snapshot/timestamp）为后续。设计文档：`docs/superpowers/plans/2026-08-23-webdav-preset-registry-integration.md`。
 - 环境坑：本机 C 盘一度只剩 0.45GB，`target/debug/incremental` 占 107GB 导致 `cargo test` 报 `rustc-LLVM ERROR: IO failure on output stream: no space on device`。用 `cmd /c rmdir /s /q .../target/debug/incremental` 清掉增量缓存（可再生，不丢 deps）后恢复 88GB。注意：`Remove-Item -Recurse -Force` 被策略拦截，递归删除目录要用 `cmd /c rmdir /s /q`。
 
-# 2026-08-23 Codex 第三方推理兼容性主动探测：后端设计待实施
+# 2026-08-23 Codex 第三方协议兼容性自动探测：后端设计待实施
 
 - 用户确认的产品方向：普通模式不让用户选择 raw/summary/字段名；保存包含 Codex 路由的 Provider 时，CCSM 自动运行一次有界的真实兼容性测试，并在首次真实请求中只做无正文的结构复核，不追加计费探测。高级模式保留手工编辑/失效后重测，但必须是同一档案的受校验覆盖，而非另一套前端猜测。
-- 已核对现状：`commands/model_fetch.rs` 的 Chat/Responses probe 只发送非流式 `ping` 并返回 HTTP 成功/失败，不能判定 reasoning 字段、SSE、工具调用或续接；`reasoning_capabilities` 是 TTL 被动元数据发现，源码明确不应在运行时主动做推理试探。两者不能直接改名复用。
-- 后端设计在 `docs/superpowers/specs/2026-08-23-codex-reasoning-compatibility-probe-backend-design.md`，实施计划在 `docs/superpowers/plans/2026-08-23-codex-reasoning-compatibility-probe-backend.md`。新领域 `reasoning_probe` 在 Provider 保存阶段完成流式形态、推理字段、强制虚拟工具、历史续接、生产投影自检五个阶段；`ProbeCandidate` 必须由未落库的有效 route/model/transport 编译而来。只持久化脱敏结构证据/哈希，绝不持久化 prompt、推理正文、工具正文或凭据。
+- 已核对现状：`commands/model_fetch.rs` 的 Chat/Responses probe 只发送非流式 `ping` 并返回 HTTP 成功/失败，不能判定 reasoning 字段、SSE、工具调用或续接；应把它的 URL 推导与端点检查收编到统一的 `protocol_compatibility`，避免一次保存两次探测。`reasoning_capabilities` 是 TTL 被动元数据发现，只处理 effort/thinking 参数；它不读取协议探测结论，也不能被一次响应反向写入。
+- 后端设计在 `docs/superpowers/specs/2026-08-23-codex-reasoning-compatibility-probe-backend-design.md`，实施计划在 `docs/superpowers/plans/2026-08-23-codex-reasoning-compatibility-probe-backend.md`。新领域 `protocol_compatibility` 在 Provider 保存阶段完成端点/transport、流式形态、推理字段、强制虚拟工具、历史续接、生产投影自检；`ReasoningProjection` 只是 `VerifiedProtocolCompatibilityProfile` 的一个受验证子档案。`ProbeCandidate` 必须由未落库的有效 route/model/transport 编译而来。只持久化脱敏结构证据/哈希，绝不持久化 prompt、推理正文、工具正文或凭据。
 - 运行时必须用 `有效高级覆盖 > 指纹匹配且未过期的测试档案 > 安全回退` 解析 `ReasoningProjection`，一次性传给流式与非流式 Chat→Responses 转换；不得再让 `outputFormat` 或通用字段提取器单独决定 raw/summary。官方 OAuth 加密续接、原生 Responses 和 V2 agent-message 边界保持原路径。
 - 隔离工作树/分支：`bigstrongsun/codex-reasoning-probe-backend`，基线 `ee21cef1`。只添加设计与计划文档，未实施业务代码、未改前端、未安装或发布。起始 `cargo test ... model_fetch --lib` 受同机已有 Cargo 编译占用 artifact-directory 锁阻塞，不能计为通过或失败；不得中断其他工作树的 Cargo 进程。
 
