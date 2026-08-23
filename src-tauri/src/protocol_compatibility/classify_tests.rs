@@ -56,3 +56,15 @@ fn split_think_tags_are_readable_only_after_the_closing_boundary_arrives() {
     assert_eq!(shape.semantic, ReasoningSemantic::Readable);
     assert_eq!(shape.source, ReasoningSource::ThinkTags);
 }
+
+#[test]
+fn ordinary_baseline_content_is_not_labeled_as_pre_tool_content_without_a_tool_call() {
+    let shape = classify_reasoning_shape(&[json!({
+        "choices": [{"message": {"content": "ordinary final answer"}}]
+    })]);
+
+    assert_eq!(
+        shape.pre_tool_visible_content,
+        PreToolVisibleContent::Absent
+    );
+}

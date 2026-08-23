@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use super::{ReasoningSemantic, ReasoningSource};
+use super::{capture::CapturedProbeExchange, ReasoningSemantic, ReasoningSource};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreToolVisibleContent {
@@ -13,6 +13,40 @@ pub struct ClassifiedReasoningShape {
     pub semantic: ReasoningSemantic,
     pub source: ReasoningSource,
     pub pre_tool_visible_content: PreToolVisibleContent,
+}
+
+pub fn classify_captured_reasoning_shape(
+    exchange: &CapturedProbeExchange,
+) -> ClassifiedReasoningShape {
+    let payloads = exchange
+        .payloads()
+        .iter()
+        .map(|payload| payload.value.clone())
+        .collect::<Vec<_>>();
+    let mut shape = classify_reasoning_shape(&payloads);
+
+    let has_native_reasoning_text = exchange.payloads().iter().any(|payload| {
+        payload.event_type.as_deref() == Some("response.reasoning_text.delta")
+            && nonempty(payload.value.get("delta"))
+    });
+    let has_native_summary = exchange.payloads().iter().any(|payload| {
+        payload
+            .event_type
+            .as_deref()
+            .is_some_and(|event| event.starts_with("response.reasoning_summary"))
+            && (nonempty(payload.value.get("delta"))
+                || nonempty(payload.value.get("text"))
+                || nonempty(payload.value.get("part")))
+    });
+
+    if shape.semantic == ReasoningSemantic::None && has_native_summary {
+        shape.semantic = ReasoningSemantic::Summary;
+        shape.source = ReasoningSource::NativeResponses;
+    } else if shape.semantic == ReasoningSemantic::None && has_native_reasoning_text {
+        shape.semantic = ReasoningSemantic::Readable;
+        shape.source = ReasoningSource::NativeResponses;
+    }
+    shape
 }
 
 pub fn classify_reasoning_shape(payloads: &[Value]) -> ClassifiedReasoningShape {
@@ -64,7 +98,7 @@ pub fn classify_reasoning_shape(payloads: &[Value]) -> ClassifiedReasoningShape 
     ClassifiedReasoningShape {
         semantic,
         source,
-        pre_tool_visible_content: if evidence.pre_tool_visible_content {
+        pre_tool_visible_content: if evidence.pre_tool_visible_content && tool_seen {
             PreToolVisibleContent::Present
         } else {
             PreToolVisibleContent::Absent

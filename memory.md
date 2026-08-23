@@ -4260,3 +4260,5 @@ supported in one streaming turn`。
 - 每个 Provider/模型都必须枚举 CCSM 当前维护的 Chat Completions 与 Responses 两条候选分支。每条分支先独立做非流 baseline；baseline 明确不支持只终止该分支，baseline 可达则继续做 SSE、强制虚拟工具、工具结果续接，最坏每模型八次请求。
 - 运行协议从 baseline 可达分支中按 `续接通过 > 强制工具通过 > SSE 通过 > 同分时原生 Responses` 选择。选择到 Partial 分支仍可保留基础路由，但只有被选分支四阶段全通过才允许自动 reasoning 投影；否则必须安全回退。
 - 选择器的 TDD 已观察 RED 后实现，当前 5/5 选择测试与 21/21 `protocol_compatibility` 领域测试通过。runner 尚未接线，不能把领域测试通过表述成端到端探测已经完成。
+- capture 层使用 2 MiB 有界字节缓冲接收 JSON/SSE，先跨网络 chunk 合并字节再做 UTF-8/SSE frame 解析，因此 UTF-8 字符或 JSON 跨 chunk 不会被误切；支持 CRLF/LF、命名 event、data-only event 与 `[DONE]`。HTTP/网络/超时错误只返回结构类别和状态码，`CapturedProbeExchange` 自定义 `Debug` 只显示状态、格式、payload 数量和脱敏证据，不显示请求 URL、响应正文或密钥。
+- 分类器新增捕获事件语义：只有 `response.reasoning_text.delta` 且 `delta` 非空才把原生 Responses 流归为 readable；summary/opaque 证据仍优先，不能被 raw 事件升格。另修正 `pre_tool_visible_content`：普通 content 只有在后续实际出现 tool call 时才标记 Present，baseline 普通最终回答保持 Absent。capture 4/4、classifier 5/5 回归通过；runner 仍未接入。

@@ -6,7 +6,12 @@ mod redaction;
 pub use redaction::{redact_json_probe_response, redact_sse_probe_response};
 
 mod classify;
-pub use classify::{classify_reasoning_shape, PreToolVisibleContent};
+pub use classify::{
+    classify_captured_reasoning_shape, classify_reasoning_shape, PreToolVisibleContent,
+};
+
+mod capture;
+pub use capture::{capture_transport_probe, ProbeCaptureError};
 
 mod selection;
 pub use selection::{
@@ -256,6 +261,8 @@ fn probe_user_input(text: &str) -> Value {
     }])
 }
 
+#[cfg(test)]
+mod capture_tests;
 #[cfg(test)]
 mod cases;
 #[cfg(test)]
