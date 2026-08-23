@@ -68,4 +68,4 @@
 
 - [x] Generate the bundle and assert schema v2/source locks.
 - [x] Run Rust unit tests, TypeScript typecheck and focused Vitest suite.
-- [ ] Record operational boundaries and commit only owned files.
+- [x] Record operational boundaries and commit only owned files.
