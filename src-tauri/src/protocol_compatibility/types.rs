@@ -64,6 +64,28 @@ fn candidate_compiles_without_a_persisted_provider_id() {
 }
 
 #[test]
+fn candidate_keeps_probe_credentials_in_memory_without_exposing_them_in_debug() {
+    let candidate = ProbeCandidate::new(
+        None::<String>,
+        None::<String>,
+        "public-model",
+        "upstream-model",
+        TransportKind::OpenAiResponses,
+        "https://example.test/v1/responses",
+        "bearer",
+    )
+    .unwrap()
+    .with_bearer_token("candidate-secret-token")
+    .unwrap()
+    .with_full_url(true);
+
+    let debug = format!("{candidate:?}");
+    assert!(!debug.contains("candidate-secret-token"));
+    assert!(debug.contains("has_bearer_token"));
+    assert!(candidate.is_full_url());
+}
+
+#[test]
 fn target_key_changes_when_the_canonical_endpoint_changes() {
     let first = ProbeTargetKey::new(
         "provider-a",

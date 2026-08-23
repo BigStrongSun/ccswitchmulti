@@ -1,3 +1,6 @@
+use std::fmt;
+
+use reqwest::header::{HeaderValue, InvalidHeaderValue};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use url::Url;
@@ -18,6 +21,11 @@ pub use selection::{
     select_preferred_transport, select_transport_outcome, ProbeStageStatus,
     TransportProbeAssessment,
 };
+
+mod runner;
+pub use runner::run_protocol_compatibility_probe;
+
+pub(crate) mod endpoint;
 
 const BASELINE_PROMPT: &str =
     "CCSM protocol compatibility probe. Solve 17 + 25 internally. Reply only CCSM_PROTOCOL_BASELINE_OK.";
@@ -82,7 +90,7 @@ impl ProbeReadiness {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ProbeCandidate {
     pub provider_id: Option<String>,
     pub route_id: Option<String>,
@@ -91,6 +99,8 @@ pub struct ProbeCandidate {
     pub transport: TransportKind,
     endpoint: Url,
     pub authentication_kind: String,
+    is_full_url: bool,
+    bearer_token: Option<HeaderValue>,
 }
 
 impl ProbeCandidate {
@@ -112,11 +122,48 @@ impl ProbeCandidate {
             transport,
             endpoint: canonicalize_endpoint(endpoint)?,
             authentication_kind: authentication_kind.into(),
+            is_full_url: false,
+            bearer_token: None,
         })
     }
 
     pub fn canonical_endpoint(&self) -> String {
         self.endpoint.to_string()
+    }
+
+    pub fn with_full_url(mut self, is_full_url: bool) -> Self {
+        self.is_full_url = is_full_url;
+        self
+    }
+
+    pub fn is_full_url(&self) -> bool {
+        self.is_full_url
+    }
+
+    pub fn with_bearer_token(mut self, token: &str) -> Result<Self, InvalidHeaderValue> {
+        self.bearer_token = Some(HeaderValue::from_str(&format!("Bearer {}", token.trim()))?);
+        Ok(self)
+    }
+
+    pub(super) fn bearer_token(&self) -> Option<&HeaderValue> {
+        self.bearer_token.as_ref()
+    }
+}
+
+impl fmt::Debug for ProbeCandidate {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProbeCandidate")
+            .field("provider_id", &self.provider_id)
+            .field("route_id", &self.route_id)
+            .field("public_model", &self.public_model)
+            .field("upstream_model", &self.upstream_model)
+            .field("transport", &self.transport)
+            .field("endpoint", &self.endpoint)
+            .field("authentication_kind", &self.authentication_kind)
+            .field("is_full_url", &self.is_full_url)
+            .field("has_bearer_token", &self.bearer_token.is_some())
+            .finish()
     }
 }
 
@@ -269,6 +316,8 @@ mod cases;
 mod classify_tests;
 #[cfg(test)]
 mod redaction_tests;
+#[cfg(test)]
+mod runner_tests;
 #[cfg(test)]
 mod selection_tests;
 #[cfg(test)]
