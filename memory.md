@@ -4269,3 +4269,11 @@ supported in one streaming turn`。
 - 新 Tauri 后端命令 `probe_codex_protocol_compatibility` 接受尚未保存的 Provider/Route/模型/base URL/凭据，运行双协议 runner、选择 transport、生成最终 endpoint 目标键并保存档案。它使用保留 CCSM 当前代理语义的专用 client，同时强制 5 秒 connect、15 秒 request 与不跟随重定向；前端尚未调用该命令，也没有改写 Provider，因此当前是“保存前可调用的后端能力”，不是已完成的普通模式 UI/自动保存事务。
 - Provider 草稿现在可由 `compile_provider_probe_candidate` 从真实 Codex TOML、主模型 alias、modelCatalog、base URL、API key 和 `isFullUrl` 编译；历史 `wire_api/apiFormat` 只成为候选提示，runner 仍固定测试 Responses 与 Chat。选出的 transport 会同步写回 `meta.apiFormat`、`settingsConfig.apiFormat`、主模型 `modelCatalog.models[].apiFormat` 和 TOML `wire_api`，避免探测结论与实际运行配置分叉；两条 baseline 都不可达时不改原协议。
 - 新后端入口 `preflight_codex_provider_protocol_compatibility` 返回已应用选择的 Provider 草稿与档案；`save_codex_provider_with_protocol_preflight` 提供普通模式未来可直接调用的一步保存入口。网络/凭据导致 preflight 无法开始时仍保存原 Provider，并返回脱敏 `probeError`，不会把探测失败误当成禁止保存。Provider/domain 回归 6/6、protocol compatibility 39/39 通过；前端尚未改用新保存入口，安装态也未变。
+
+## 2026-08-24 Codex 第三方协议探测：跨边界验证
+
+- 相关实现链已依次落在 `c05138f4`（档案持久化）、`24a88b08`（探测选择应用）、`8d3feff1`/`e13801d2`（检测到的 reasoning 形态投影）、`b71a72af`（运行时应用 Verified 投影）与 `0d620136`（不完整 route identity 失配时 fail-closed），随后接本次仅补回归和陈旧测试契约的 verification commit；本次不修改这些生产实现。
+- `migrate_v15_to_v16_resets_only_codex_session_usage` 的生产 schema 已继续演进到 user_version 17；该测试所验证的仍是 v15→v16 清理语义，旧断言 16 是测试陈旧而非迁移实现倒退。已先复现真实 RED（选中 1 个测试：actual 17 / expected 16），随后仅将断言更新为 17。
+- 新的本地内存 fixture 用真实双协议 runner 让 Responses baseline 404、Chat 完成全部四阶段，因而实际选中且完全 Verified 的 Chat 分支。由该真实 result 构造 `ProtocolCompatibilityRecord` 后只得到 `RawReasoningText`；同一投影送入实际 Chat→Responses 非流转换时，Qwen/vLLM `reasoning_content` 映射为 `reasoning_text`、普通 `content` 映射为 message `output_text` 且 summary 为空；送入实际 SSE 转换时只出现 `response.reasoning_text.delta` 与 `response.output_text.delta`，不出现 summary 事件。fixture 正文仅存在内存中，未写入档案或日志。
+- 本轮 fresh 验证（共享 `target-protocol-probe`）：迁移 1、`protocol_compatibility` 44、`streaming_codex_chat` 36、`transform_codex_chat` 145、`openai_compat` 36、`forwarder` 160、`handlers` 87，均为 0 failed；`cargo check --tests` 成功但保留 7 条既有/并行工作树的 unused/dead-code warning；`git diff --check` 通过。
+- 本次仍是后端源代码与测试验收：前端调用、真实第三方 Provider、已安装应用与 live 配置均未修改，也未被本轮视为已验收。

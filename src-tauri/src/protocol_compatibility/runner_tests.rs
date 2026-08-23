@@ -8,12 +8,21 @@ use axum::{
     routing::post,
     Json, Router,
 };
+use bytes::Bytes;
+use futures::{stream, StreamExt};
 use serde_json::{json, Value};
 use tokio::{net::TcpListener, task::JoinHandle};
 
 use super::{
     run_protocol_compatibility_probe, PreToolVisibleContent, ProbeCandidate, ProbeReadiness,
-    ProbeStageStatus, TransportKind,
+    ProbeStageStatus, ProbeTargetKey, ProtocolCompatibilityRecord, ReasoningProjection,
+    TransportKind,
+};
+use crate::proxy::providers::{
+    streaming_codex_chat::create_responses_sse_stream_from_chat_with_context_and_projection,
+    transform_codex_chat::{
+        chat_completion_to_response_with_context_and_projection, CodexToolContext,
+    },
 };
 
 #[derive(Clone, Copy)]
@@ -366,4 +375,82 @@ async fn complete_chat_beats_responses_when_responses_cannot_force_tools() {
         chat.reasoning_shape.pre_tool_visible_content,
         PreToolVisibleContent::Present
     );
+}
+
+#[tokio::test]
+async fn verified_chat_probe_projects_qwen_reasoning_as_raw_for_streaming_and_json() {
+    let fixture = spawn_fixture(ResponsesMode::BaselineUnsupported).await;
+    let client = reqwest::Client::new();
+    let result = run_protocol_compatibility_probe(
+        candidate(&fixture.base_url, TransportKind::OpenAiResponses),
+        &client,
+    )
+    .await;
+
+    assert_eq!(result.selected_transport, Some(TransportKind::OpenAiChat));
+    assert_eq!(result.readiness, ProbeReadiness::Verified);
+
+    let target = ProbeTargetKey::new(
+        "fixture-provider",
+        None::<String>,
+        "qwen3.8",
+        "qwen3.8",
+        TransportKind::OpenAiChat,
+        &format!("{}/v1/chat/completions", fixture.base_url),
+        "bearer",
+    )
+    .unwrap();
+    let record = ProtocolCompatibilityRecord::new(target, result, 100, 200);
+    let projection = record.automatic_reasoning_projection(150);
+    assert_eq!(projection, ReasoningProjection::RawReasoningText);
+
+    let non_streaming = chat_completion_to_response_with_context_and_projection(
+        json!({
+            "id": "chatcmpl_fixture",
+            "model": "qwen3.8",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "reasoning_content": "fixture reasoning",
+                    "content": "fixture answer"
+                },
+                "finish_reason": "stop"
+            }]
+        }),
+        &CodexToolContext::default(),
+        projection,
+    )
+    .unwrap();
+    assert_eq!(non_streaming["output"][0]["type"], "reasoning");
+    assert_eq!(
+        non_streaming["output"][0]["content"][0]["type"],
+        "reasoning_text"
+    );
+    assert!(non_streaming["output"][0]
+        .get("summary")
+        .is_some_and(Value::is_array));
+    assert_eq!(non_streaming["output"][0]["summary"], json!([]));
+    assert_eq!(non_streaming["output"][1]["type"], "message");
+    assert_eq!(
+        non_streaming["output"][1]["content"][0]["type"],
+        "output_text"
+    );
+
+    let upstream = stream::iter(vec![
+        Ok::<Bytes, std::io::Error>(Bytes::from_static(b"data: {\"id\":\"chatcmpl_fixture\",\"model\":\"qwen3.8\",\"choices\":[{\"delta\":{\"reasoning_content\":\"fixture reasoning\"}}]}\n\n")),
+        Ok(Bytes::from_static(b"data: {\"id\":\"chatcmpl_fixture\",\"model\":\"qwen3.8\",\"choices\":[{\"delta\":{\"content\":\"fixture answer\"},\"finish_reason\":\"stop\"}]}\n\n")),
+        Ok(Bytes::from_static(b"data: [DONE]\n\n")),
+    ]);
+    let streaming = create_responses_sse_stream_from_chat_with_context_and_projection(
+        upstream,
+        CodexToolContext::default(),
+        projection,
+    )
+    .map(|chunk| chunk.unwrap())
+    .collect::<Vec<_>>()
+    .await;
+    let streaming = String::from_utf8(streaming.concat()).unwrap();
+    assert!(streaming.contains("event: response.reasoning_text.delta"));
+    assert!(streaming.contains("event: response.output_text.delta"));
+    assert!(!streaming.contains("response.reasoning_summary"));
 }
