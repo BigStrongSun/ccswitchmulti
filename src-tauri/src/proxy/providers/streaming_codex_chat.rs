@@ -1126,6 +1126,28 @@ pub(crate) fn create_responses_sse_stream_from_chat_with_hosted_loop<F, Fut>(
     initial_stream: ChatSseStream,
     tool_context: CodexToolContext,
     diagnostic_context: Option<HostedToolDiagnosticContext>,
+    on_hosted_tools: F,
+) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send
+where
+    F: FnMut(Vec<CompletedChatToolCall>, Value) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<Option<ChatSseStream>, String>> + Send,
+{
+    create_responses_sse_stream_from_chat_with_hosted_loop_and_projection(
+        initial_stream,
+        tool_context,
+        ReasoningProjection::ReasoningSummary,
+        diagnostic_context,
+        on_hosted_tools,
+    )
+}
+
+/// Convert Chat SSE to Responses SSE with hosted-tool continuation and an
+/// explicit detected reasoning shape.
+pub(crate) fn create_responses_sse_stream_from_chat_with_hosted_loop_and_projection<F, Fut>(
+    initial_stream: ChatSseStream,
+    tool_context: CodexToolContext,
+    reasoning_projection: ReasoningProjection,
+    diagnostic_context: Option<HostedToolDiagnosticContext>,
     mut on_hosted_tools: F,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send
 where
@@ -1134,7 +1156,10 @@ where
 {
     async_stream::stream! {
         let mut current_stream = initial_stream;
-        let mut state = ChatToResponsesState::with_tool_context(tool_context);
+        let mut state = ChatToResponsesState::with_tool_context_and_projection(
+            tool_context,
+            reasoning_projection,
+        );
         let mut buffer = String::new();
         let mut utf8_remainder: Vec<u8> = Vec::new();
         let mut stream_failed = false;
@@ -1425,6 +1450,64 @@ mod tests {
         assert!(output.contains("response.completed"));
         assert!(!output.contains("function_call_arguments"));
         assert!(!output.contains("web_search"));
+    }
+
+    async fn hosted_output_with_projection(projection: ReasoningProjection) -> String {
+        let context = super::super::transform_codex_chat::build_codex_tool_context_from_request(
+            &json!({ "tools": [{ "type": "web_search" }] }),
+        );
+        let initial = vec![
+            Ok(Bytes::from_static(b"data: {\"id\":\"chatcmpl_hosted_projection\",\"model\":\"m\",\"choices\":[{\"delta\":{\"reasoning_content\":\"Need search. \"}}]}\n\n")),
+            Ok(Bytes::from_static(b"data: {\"id\":\"chatcmpl_hosted_projection\",\"model\":\"m\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"web_search\"}}]}}]}\n\n")),
+            Ok(Bytes::from_static(b"data: {\"id\":\"chatcmpl_hosted_projection\",\"model\":\"m\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"query\\\":\\\"rust\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n")),
+        ];
+        let continuation = vec![
+            Bytes::from_static(b"data: {\"id\":\"chatcmpl_hosted_projection_final\",\"model\":\"m\",\"choices\":[{\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}\n\n"),
+            Bytes::from_static(b"data: [DONE]\n\n"),
+        ];
+        let output = create_responses_sse_stream_from_chat_with_hosted_loop_and_projection(
+            Box::pin(stream::iter(initial)) as ChatSseStream,
+            context,
+            projection,
+            None,
+            move |calls, _assistant| {
+                let continuation = continuation.clone();
+                async move {
+                    assert_eq!(calls.len(), 1);
+                    let next = continuation.into_iter().map(Ok::<Bytes, std::io::Error>);
+                    Ok(Some(Box::pin(stream::iter(next)) as ChatSseStream))
+                }
+            },
+        )
+        .collect::<Vec<_>>()
+        .await;
+
+        String::from_utf8(
+            output
+                .into_iter()
+                .map(|item| item.unwrap())
+                .collect::<Vec<_>>()
+                .concat(),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn hosted_loop_raw_projection_emits_raw_reasoning_events() {
+        let output = hosted_output_with_projection(ReasoningProjection::RawReasoningText).await;
+
+        assert!(output.contains("event: response.reasoning_text.delta"));
+        assert!(!output.contains("event: response.reasoning_summary_text.delta"));
+        assert!(output.contains("done"));
+    }
+
+    #[tokio::test]
+    async fn hosted_loop_none_projection_suppresses_reasoning_events() {
+        let output = hosted_output_with_projection(ReasoningProjection::None).await;
+
+        assert!(!output.contains("response.reasoning_text"));
+        assert!(!output.contains("response.reasoning_summary"));
+        assert!(output.contains("done"));
     }
 
     #[test]
