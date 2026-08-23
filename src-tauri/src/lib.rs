@@ -32,6 +32,7 @@ mod opencode_config;
 mod panic_hook;
 mod prompt;
 mod prompt_files;
+mod protocol_compatibility;
 mod provider;
 mod proxy;
 pub mod reasoning_capabilities;
