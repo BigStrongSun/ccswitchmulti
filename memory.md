@@ -2,6 +2,7 @@
 
 ## 2026-08-24 本地升级守护、维护租约与 MultiRouter 向导 Provider 初始化
 
+- 安装态只读验收发现 `codex_multirouter_projection:codex-multirouter` 仍记录 `ready / 90e471cee349546b`，但 `~/.codex/cc-switch-model-catalog.json` 已没有 `ccSwitchRoutingDependencyFingerprint`；按 `read_back_codex_multirouter_projection` 契约这实际属于 `projection_live_drift`。根因是接管刷新虽通过 `codex_provider_with_projected_model_catalog` 编译出 `modelCatalog + codexRoutingProjection`，但 `codex_settings_for_model_catalog_projection` 的投影白名单只合入 `modelCatalog + codexRouting`，最终目录生成拿不到指纹。现把 `codexRoutingProjection` 纳入同一只读派生合并；Router DB 仍不保存目录快照。失败用例先复现 `left=None / right=provider-fingerprint-v2`，修复后接管 9/9、目录投影 2/2、MultiRouter 投影 15/15 通过。安装态 `3.19.2-17` 尚未包含该源码修复，不得把数据库中的旧 `ready` 当作当前 live 已同步。
 - 升级结果契约补漏：事务脚本成功结果字段为 `NewPid`，外层 `invoke-ccswitchmulti-local-upgrade.ps1` 曾误读不存在的 `NewProcessId`，导致应用已经正确安装并健康启动后，包装层仍在最终结果格式化阶段报错。现统一读取 `NewPid` 并用 Pester 锁定契约。该错误与 Codex Desktop 自动化的 Electron 主进程 `Error: write EOF` 无关；后者是已关闭 IPC 管道被继续写入，发生后必须停止该自动化链，不能靠重复点击或重试解决。
 
 - 本机 Codex 当前依赖安装态 CCSwitchMulti `127.0.0.1:15721`，因此本地替换不能由当前交互进程直接停服后再继续。升级必须交给独立的 Windows PowerShell 事务：预检当前监听 PID、可执行文件路径、版本与 SHA-256，建立维护租约，备份配置和安装目录，等待旧进程及端口完全释放后卸载/安装，验证新 PID、版本、哈希、15721 与 `/health`；任一步失败必须使用保留的安装目录、配置和注册表备份回滚。

@@ -3933,7 +3933,7 @@ impl ProxyService {
         let mut next = config.clone();
         if should_project {
             if let Some(root) = next.as_object_mut() {
-                for key in ["modelCatalog", "codexRouting"] {
+                for key in ["modelCatalog", "codexRouting", "codexRoutingProjection"] {
                     if !root.contains_key(key) {
                         if let Some(value) = provider.settings_config.get(key) {
                             root.insert(key.to_string(), value.clone());
@@ -6772,6 +6772,9 @@ respect_system_proxy = false
                     "enabled": true,
                     "subagentVersion": "v2",
                     "routes": [{ "id": "sol", "enabled": true }]
+                },
+                "codexRoutingProjection": {
+                    "dependencyFingerprint": "provider-fingerprint-v2"
                 }
             }),
             None,
@@ -6793,6 +6796,11 @@ respect_system_proxy = false
             projected.get("modelCatalog"),
             provider.settings_config.get("modelCatalog"),
             "projection must retain the provider-owned model catalog"
+        );
+        assert_eq!(
+            projected.get("codexRoutingProjection"),
+            provider.settings_config.get("codexRoutingProjection"),
+            "projection must retain the Provider-derived dependency fingerprint"
         );
     }
 
