@@ -327,4 +327,14 @@ Describe "CCSwitchMulti local release build config" {
         $installedHashOffset | Should BeGreaterThan $sourceOffset
         $checksumsOffset | Should BeGreaterThan $installedHashOffset
     }
+
+    It "writes exported text through the BOM-free UTF-8 helper" {
+        $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+        $exportScript = [System.IO.File]::ReadAllText((Join-Path $repoRoot "scripts\export-latest-ccswitchmulti.ps1"))
+
+        $exportScript | Should Match "function Write-Utf8NoBom"
+        $exportScript | Should Match 'UTF8Encoding\]::new\(\$false\)'
+        $exportScript | Should Not Match "Set-Content[^\r\n]*-Encoding UTF8"
+        $exportScript.Contains('Write-Utf8NoBom -Path (Join-Path $Root "latest.json")') | Should Be $true
+    }
 }
