@@ -1243,7 +1243,11 @@ pub(crate) fn resolve_codex_chat_reasoning_projection(
     let is_routed = provider
         .settings_config
         .get("codexResolvedRouteId")
-        .is_some();
+        .is_some()
+        || provider
+            .settings_config
+            .get(CODEX_ROUTER_PARENT_PROVIDER_ID)
+            .is_some();
     let (provider_id, route_id) = if is_routed {
         let Some(parent_provider_id) = provider
             .settings_config
@@ -7219,6 +7223,54 @@ wire_api = "responses"
                 200,
             ),
             ReasoningProjection::None
+        );
+    }
+
+    #[test]
+    fn incomplete_route_identity_never_falls_back_to_a_standalone_profile() {
+        let db = Database::memory().expect("memory database");
+        let mut provider = create_provider(json!({
+            "base_url": "https://qwen.example/v1",
+            "codexRouterParentProviderId": "codex-router"
+        }));
+        provider.id = "effective-qwen-target".to_string();
+        save_verified_chat_profile(
+            &db,
+            "effective-qwen-target",
+            None,
+            "qwen-public",
+            "qwen-mapped",
+            "https://qwen.example/v1/chat/completions",
+            "readable",
+            "reasoning_content",
+        );
+
+        assert_eq!(
+            resolve_codex_chat_reasoning_projection(
+                &provider,
+                "qwen-public",
+                "qwen-mapped",
+                &db,
+                200,
+            ),
+            ReasoningProjection::None,
+            "a parent marker without a route ID must not borrow the effective provider profile"
+        );
+
+        provider.settings_config = json!({
+            "base_url": "https://qwen.example/v1",
+            "codexResolvedRouteId": "qwen-route"
+        });
+        assert_eq!(
+            resolve_codex_chat_reasoning_projection(
+                &provider,
+                "qwen-public",
+                "qwen-mapped",
+                &db,
+                200,
+            ),
+            ReasoningProjection::None,
+            "a route marker without a parent provider ID must fail closed"
         );
     }
 }

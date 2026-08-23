@@ -3344,6 +3344,52 @@ async fn handle_codex_responses_namespace_restore(
         })
 }
 
+fn create_codex_chat_sse_stream_from_verified_profile<E: std::error::Error + Send + 'static>(
+    stream: impl futures::Stream<Item = Result<Bytes, E>> + Send + 'static,
+    tool_context: transform_codex_chat::CodexToolContext,
+    provider: &crate::provider::Provider,
+    public_model: &str,
+    upstream_model: &str,
+    db: &crate::database::Database,
+    now: i64,
+) -> impl futures::Stream<Item = Result<Bytes, std::io::Error>> + Send {
+    let reasoning_projection = super::providers::resolve_codex_chat_reasoning_projection(
+        provider,
+        public_model,
+        upstream_model,
+        db,
+        now,
+    );
+    create_responses_sse_stream_from_chat_with_context_and_projection(
+        stream,
+        tool_context,
+        reasoning_projection,
+    )
+}
+
+fn chat_completion_to_response_from_verified_profile(
+    body: Value,
+    tool_context: &transform_codex_chat::CodexToolContext,
+    provider: &crate::provider::Provider,
+    public_model: &str,
+    upstream_model: &str,
+    db: &crate::database::Database,
+    now: i64,
+) -> Result<Value, ProxyError> {
+    let reasoning_projection = super::providers::resolve_codex_chat_reasoning_projection(
+        provider,
+        public_model,
+        upstream_model,
+        db,
+        now,
+    );
+    transform_codex_chat::chat_completion_to_response_with_context_and_projection(
+        body,
+        tool_context,
+        reasoning_projection,
+    )
+}
+
 async fn handle_codex_chat_to_responses_transform(
     response: super::hyper_client::ProxyResponse,
     ctx: &RequestContext,
@@ -3546,20 +3592,18 @@ async fn handle_codex_chat_to_responses_transform(
     }
 
     let upstream_model = ctx.outbound_model.as_deref().unwrap_or(&ctx.request_model);
-    let reasoning_projection = super::providers::resolve_codex_chat_reasoning_projection(
-        &ctx.provider,
-        &ctx.request_model,
-        upstream_model,
-        state.db.as_ref(),
-        chrono::Utc::now().timestamp(),
-    );
+    let projection_now = chrono::Utc::now().timestamp();
 
     if (is_stream || response.is_sse()) && !hosted_tool_loop_response {
         let stream = response.bytes_stream();
-        let sse_stream = create_responses_sse_stream_from_chat_with_context_and_projection(
+        let sse_stream = create_codex_chat_sse_stream_from_verified_profile(
             stream,
             tool_context,
-            reasoning_projection,
+            &ctx.provider,
+            &ctx.request_model,
+            upstream_model,
+            state.db.as_ref(),
+            projection_now,
         );
         let sse_stream = record_responses_sse_stream(sse_stream, state.codex_chat_history.clone());
 
@@ -3687,16 +3731,19 @@ async fn handle_codex_chat_to_responses_transform(
             ));
         }
     };
-    let responses_response =
-        transform_codex_chat::chat_completion_to_response_with_context_and_projection(
-            chat_response,
-            &tool_context,
-            reasoning_projection,
-        )
-        .map_err(|e| {
-            log::error!("[Codex] Chat → Responses 响应转换失败: {e}");
-            e
-        })?;
+    let responses_response = chat_completion_to_response_from_verified_profile(
+        chat_response,
+        &tool_context,
+        &ctx.provider,
+        &ctx.request_model,
+        upstream_model,
+        state.db.as_ref(),
+        projection_now,
+    )
+    .map_err(|e| {
+        log::error!("[Codex] Chat → Responses 响应转换失败: {e}");
+        e
+    })?;
     state
         .codex_chat_history
         .record_response(&responses_response)
@@ -5575,20 +5622,26 @@ async fn log_usage(
 mod tests {
     use super::{
         body_looks_like_sse, build_external_codex_official_oauth_provider,
-        chat_sse_to_response_value, classify_body_for_diagnostics, codex_catalog_models_response,
-        codex_proxy_error_json, codex_proxy_error_status, codex_request_classification_fields,
-        external_openai_api_models_response, external_openai_api_unsupported_response,
-        mark_external_openai_headers, resolve_codex_image_generation_provider,
-        resolve_external_codex_router_raw_target, resolve_external_codex_router_target,
-        resolve_forward_error_provider_for_logging, resolve_forward_error_route_provider,
-        responses_response_to_compaction_sse, responses_response_to_completed_sse,
-        responses_response_to_full_sse, responses_sse_to_response_value,
-        should_handle_as_codex_client, should_use_claude_transform_streaming,
-        should_wrap_native_codex_responses_stream, transform, upstream_body_parse_error,
+        chat_completion_to_response_from_verified_profile, chat_sse_to_response_value,
+        classify_body_for_diagnostics, codex_catalog_models_response, codex_proxy_error_json,
+        codex_proxy_error_status, codex_request_classification_fields,
+        create_codex_chat_sse_stream_from_verified_profile, external_openai_api_models_response,
+        external_openai_api_unsupported_response, mark_external_openai_headers,
+        resolve_codex_image_generation_provider, resolve_external_codex_router_raw_target,
+        resolve_external_codex_router_target, resolve_forward_error_provider_for_logging,
+        resolve_forward_error_route_provider, responses_response_to_compaction_sse,
+        responses_response_to_completed_sse, responses_response_to_full_sse,
+        responses_sse_to_response_value, should_handle_as_codex_client,
+        should_use_claude_transform_streaming, should_wrap_native_codex_responses_stream,
+        transform, upstream_body_parse_error,
     };
     use crate::{
         app_config::AppType,
         database::Database,
+        protocol_compatibility::{
+            ProbeReadiness, ProbeTargetKey, ProtocolCompatibilityProbeResult,
+            ProtocolCompatibilityRecord, TransportKind,
+        },
         provider::{Provider, ProviderMeta},
         proxy::{
             external_openai_api::{
@@ -5607,6 +5660,8 @@ mod tests {
         },
     };
     use axum::http::{HeaderMap, HeaderValue, StatusCode};
+    use bytes::Bytes;
+    use futures::StreamExt;
     use http_body_util::BodyExt;
     use serde_json::{json, Value};
     use std::{collections::HashMap, sync::Arc};
@@ -5631,6 +5686,123 @@ mod tests {
                 Some((event, payload))
             })
             .collect()
+    }
+
+    fn verified_qwen_chat_profile(db: &Database) -> Provider {
+        let provider = Provider {
+            id: "qwen-provider".to_string(),
+            name: "Qwen Chat".to_string(),
+            settings_config: json!({ "base_url": "https://qwen.example/v1" }),
+            website_url: None,
+            category: Some("codex".to_string()),
+            created_at: None,
+            sort_index: None,
+            notes: None,
+            meta: None,
+            icon: None,
+            icon_color: None,
+            in_failover_queue: false,
+        };
+        let target = ProbeTargetKey::new(
+            &provider.id,
+            None::<String>,
+            "qwen-public",
+            "qwen-mapped",
+            TransportKind::OpenAiChat,
+            "https://qwen.example/v1/chat/completions",
+            "bearer",
+        )
+        .expect("profile target");
+        let result: ProtocolCompatibilityProbeResult = serde_json::from_value(json!({
+            "selected_transport": "open_ai_chat",
+            "readiness": "verified",
+            "branches": [{
+                "assessment": {
+                    "transport": "open_ai_chat",
+                    "baseline": "passed",
+                    "streaming": "passed",
+                    "forced_tool": "passed",
+                    "continuation": "passed"
+                },
+                "reasoning_shape": {
+                    "semantic": "readable",
+                    "source": "reasoning_content",
+                    "pre_tool_visible_content": "absent"
+                },
+                "evidence": []
+            }]
+        }))
+        .expect("verified profile");
+        assert_eq!(result.readiness, ProbeReadiness::Verified);
+        db.save_protocol_compatibility_result(&ProtocolCompatibilityRecord::new(
+            target, result, 100, 200,
+        ))
+        .expect("save profile");
+        provider
+    }
+
+    #[tokio::test]
+    async fn ordinary_streaming_wiring_uses_verified_raw_reasoning_projection() {
+        let db = Database::memory().expect("memory database");
+        let provider = verified_qwen_chat_profile(&db);
+        let upstream = futures::stream::iter(vec![Ok::<_, std::io::Error>(Bytes::from_static(
+            b"data: {\"id\":\"chatcmpl_projection\",\"model\":\"qwen-mapped\",\"choices\":[{\"delta\":{\"reasoning_content\":\"Inspect route.\"}}]}\n\ndata: {\"id\":\"chatcmpl_projection\",\"model\":\"qwen-mapped\",\"choices\":[{\"delta\":{\"content\":\"Visible answer.\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+        ))]);
+
+        let bytes = create_codex_chat_sse_stream_from_verified_profile(
+            upstream,
+            super::transform_codex_chat::CodexToolContext::default(),
+            &provider,
+            "qwen-public",
+            "qwen-mapped",
+            &db,
+            200,
+        )
+        .map(|item| item.expect("converted SSE"))
+        .collect::<Vec<_>>()
+        .await;
+        let response = String::from_utf8(bytes.concat()).expect("UTF-8 SSE");
+
+        assert!(response.contains("event: response.reasoning_text.delta"));
+        assert!(!response.contains("event: response.reasoning_summary_text.delta"));
+        assert!(response.contains("Visible answer."));
+    }
+
+    #[test]
+    fn ordinary_non_streaming_wiring_uses_verified_raw_reasoning_projection() {
+        let db = Database::memory().expect("memory database");
+        let provider = verified_qwen_chat_profile(&db);
+        let response = chat_completion_to_response_from_verified_profile(
+            json!({
+                "id": "chatcmpl_projection",
+                "model": "qwen-mapped",
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "reasoning_content": "Inspect route.",
+                        "content": "Visible answer."
+                    },
+                    "finish_reason": "stop"
+                }]
+            }),
+            &super::transform_codex_chat::CodexToolContext::default(),
+            &provider,
+            "qwen-public",
+            "qwen-mapped",
+            &db,
+            200,
+        )
+        .expect("converted response");
+
+        assert_eq!(
+            response["output"][0]["content"][0]["type"],
+            "reasoning_text"
+        );
+        assert_eq!(response["output"][0]["summary"], json!([]));
+        assert_eq!(
+            response["output"][1]["content"][0]["text"],
+            "Visible answer."
+        );
     }
 
     #[test]

@@ -74,6 +74,37 @@ const CODEX_RATE_LIMIT_RETRY_LIMIT: usize = 5;
 const CODEX_RATE_LIMIT_MAX_SINGLE_DELAY: Duration = Duration::from_secs(60);
 const CODEX_RATE_LIMIT_TOTAL_DELAY_BUDGET: Duration = Duration::from_secs(180);
 
+fn create_hosted_codex_chat_sse_stream_from_verified_profile<F, Fut>(
+    initial_stream: ChatSseStream,
+    tool_context: CodexToolContext,
+    provider: &Provider,
+    public_model: &str,
+    upstream_model: &str,
+    db: &crate::database::Database,
+    now: i64,
+    diagnostic_context: Option<super::providers::streaming_codex_chat::HostedToolDiagnosticContext>,
+    on_hosted_tools: F,
+) -> impl futures::Stream<Item = Result<Bytes, std::io::Error>> + Send
+where
+    F: FnMut(Vec<CompletedChatToolCall>, Value) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<Option<ChatSseStream>, String>> + Send,
+{
+    let reasoning_projection = super::providers::resolve_codex_chat_reasoning_projection(
+        provider,
+        public_model,
+        upstream_model,
+        db,
+        now,
+    );
+    create_responses_sse_stream_from_chat_with_hosted_loop_and_projection(
+        initial_stream,
+        tool_context,
+        reasoning_projection,
+        diagnostic_context,
+        on_hosted_tools,
+    )
+}
+
 fn validate_codex_official_authorization(headers: &http::HeaderMap) -> Result<(), ProxyError> {
     let authorization = headers
         .get(http::header::AUTHORIZATION)
@@ -4013,22 +4044,17 @@ impl RequestForwarder {
                         .and_then(Value::as_str)
                         .filter(|model| !model.is_empty())
                         .unwrap_or(&request_model_for_log);
-                    let reasoning_projection =
-                        super::providers::resolve_codex_chat_reasoning_projection(
-                            provider,
-                            &request_model_for_log,
-                            upstream_model,
-                            self.router.database(),
-                            chrono::Utc::now().timestamp(),
-                        );
-                    let stream =
-                        create_responses_sse_stream_from_chat_with_hosted_loop_and_projection(
-                            initial_stream,
-                            context,
-                            reasoning_projection,
-                            Some(hosted_tool_diagnostic_context),
-                            callback,
-                        );
+                    let stream = create_hosted_codex_chat_sse_stream_from_verified_profile(
+                        initial_stream,
+                        context,
+                        provider,
+                        &request_model_for_log,
+                        upstream_model,
+                        self.router.database(),
+                        chrono::Utc::now().timestamp(),
+                        Some(hosted_tool_diagnostic_context),
+                        callback,
+                    );
                     ProxyResponse::streamed(StatusCode::OK, response_headers, stream)
                 } else {
                     let hosted_tool_choice = hosted_tool_choice_name(&filtered_body);
@@ -8022,13 +8048,19 @@ fn codex_realtime_multipart_field_name(headers: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::database::Database;
     use crate::provider::{LocalProxyRequestOverrides, ProviderMeta};
     use crate::proxy::providers::codex_oauth_auth::CodexAccountPoolEntry;
+    use crate::{
+        database::Database,
+        protocol_compatibility::{
+            ProbeReadiness, ProbeTargetKey, ProtocolCompatibilityProbeResult,
+            ProtocolCompatibilityRecord, TransportKind,
+        },
+    };
     use axum::http::header::{HeaderValue, ACCEPT};
     use axum::http::HeaderMap;
     use bytes::Bytes;
-    use futures::SinkExt;
+    use futures::{SinkExt, StreamExt};
     use http::StatusCode;
     use serde_json::json;
 
@@ -8068,6 +8100,79 @@ mod tests {
         provider.settings_config["codexPoolCredentialGeneration"] =
             Value::Number(generation.into());
         provider
+    }
+
+    fn verified_qwen_hosted_profile(db: &Database) -> Provider {
+        let mut provider = test_provider_with_type(None);
+        provider.id = "qwen-provider".to_string();
+        provider.settings_config = json!({ "base_url": "https://qwen.example/v1" });
+        let target = ProbeTargetKey::new(
+            &provider.id,
+            None::<String>,
+            "qwen-public",
+            "qwen-mapped",
+            TransportKind::OpenAiChat,
+            "https://qwen.example/v1/chat/completions",
+            "bearer",
+        )
+        .expect("profile target");
+        let result: ProtocolCompatibilityProbeResult = serde_json::from_value(json!({
+            "selected_transport": "open_ai_chat",
+            "readiness": "verified",
+            "branches": [{
+                "assessment": {
+                    "transport": "open_ai_chat",
+                    "baseline": "passed",
+                    "streaming": "passed",
+                    "forced_tool": "passed",
+                    "continuation": "passed"
+                },
+                "reasoning_shape": {
+                    "semantic": "readable",
+                    "source": "reasoning_content",
+                    "pre_tool_visible_content": "absent"
+                },
+                "evidence": []
+            }]
+        }))
+        .expect("verified profile");
+        assert_eq!(result.readiness, ProbeReadiness::Verified);
+        db.save_protocol_compatibility_result(&ProtocolCompatibilityRecord::new(
+            target, result, 100, 200,
+        ))
+        .expect("save profile");
+        provider
+    }
+
+    #[tokio::test]
+    async fn hosted_streaming_wiring_uses_verified_raw_reasoning_projection() {
+        let db = Database::memory().expect("memory database");
+        let provider = verified_qwen_hosted_profile(&db);
+        let initial: ChatSseStream = Box::pin(futures::stream::iter(vec![Ok::<_, std::io::Error>(
+            Bytes::from_static(
+                b"data: {\"id\":\"chatcmpl_hosted_projection\",\"model\":\"qwen-mapped\",\"choices\":[{\"delta\":{\"reasoning_content\":\"Need search.\"}}]}\n\ndata: {\"id\":\"chatcmpl_hosted_projection\",\"model\":\"qwen-mapped\",\"choices\":[{\"delta\":{\"content\":\"Visible answer.\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+            ),
+        )]));
+
+        let bytes = create_hosted_codex_chat_sse_stream_from_verified_profile(
+            initial,
+            CodexToolContext::default(),
+            &provider,
+            "qwen-public",
+            "qwen-mapped",
+            &db,
+            200,
+            None,
+            |_calls, _assistant| async { Ok::<Option<ChatSseStream>, String>(None) },
+        )
+        .map(|item| item.expect("converted hosted SSE"))
+        .collect::<Vec<_>>()
+        .await;
+        let response = String::from_utf8(bytes.concat()).expect("UTF-8 SSE");
+
+        assert!(response.contains("event: response.reasoning_text.delta"));
+        assert!(!response.contains("event: response.reasoning_summary_text.delta"));
+        assert!(response.contains("Visible answer."));
     }
 
     #[test]
