@@ -236,6 +236,26 @@ Describe "CCSwitchMulti Tauri NSIS payload hash" {
     }
 }
 
+Describe "CCSwitchMulti dependency-free file hash" {
+    It "hashes an ordinary file without Get-FileHash" {
+        $testRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("ccsm-file-hash-" + [guid]::NewGuid().ToString("N"))
+        $filePath = Join-Path $testRoot "artifact.bin"
+        New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
+        try {
+            [System.IO.File]::WriteAllText(
+                $filePath,
+                "ccsm-hash-contract",
+                [System.Text.UTF8Encoding]::new($false)
+            )
+
+            Get-CcsmGuardianFileSha256 -LiteralPath $filePath |
+                Should Be "BCA9833A47F154896A0B105E173390BC393E068BF5C3FB9AC45AAC2C580B1CE4"
+        } finally {
+            if (Test-Path -LiteralPath $testRoot) { Remove-Item -LiteralPath $testRoot -Recurse -Force }
+        }
+    }
+}
+
 Describe "CCSwitchMulti upgrade wrapper result contract" {
     It "reads the successful transaction PID from NewPid" {
         $wrapperPath = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) `
@@ -244,6 +264,8 @@ Describe "CCSwitchMulti upgrade wrapper result contract" {
 
         $wrapper | Should Match '\$transactionResult\.NewPid'
         $wrapper | Should Not Match '\$transactionResult\.NewProcessId'
+        $wrapper | Should Match 'Get-CcsmGuardianFileSha256'
+        $wrapper | Should Not Match 'Get-FileHash'
     }
 }
 

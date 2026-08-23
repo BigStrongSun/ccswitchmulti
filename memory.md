@@ -2,6 +2,7 @@
 
 ## 2026-08-24 本地升级守护、维护租约与 MultiRouter 向导 Provider 初始化
 
+- `d9d6d87a` 本地 NSIS 首次独立升级 runner 在维护租约和停服前 fail-closed：隐藏启动的 Windows PowerShell 5.1 未自动解析 `Get-FileHash`，因此没有修改安装态，PID 23760 与 15721 始终健康。根因是外层升级包装仍额外依赖 `Microsoft.PowerShell.Utility`，而事务核心已经使用 .NET SHA-256。现由 `ccswitchmulti-guardian-core.ps1` 提供 `Get-CcsmGuardianFileSha256`（只读共享打开、流式哈希、finally 释放），wrapper 和 runner 共用，完全移除关键升级入口的 `Get-FileHash` 依赖。RED 为普通文件哈希函数不存在且 wrapper 静态契约失败，GREEN 为 guardian 17/17、事务 49/49。
 - 安装态只读验收发现 `codex_multirouter_projection:codex-multirouter` 仍记录 `ready / 90e471cee349546b`，但 `~/.codex/cc-switch-model-catalog.json` 已没有 `ccSwitchRoutingDependencyFingerprint`；按 `read_back_codex_multirouter_projection` 契约这实际属于 `projection_live_drift`。根因是接管刷新虽通过 `codex_provider_with_projected_model_catalog` 编译出 `modelCatalog + codexRoutingProjection`，但 `codex_settings_for_model_catalog_projection` 的投影白名单只合入 `modelCatalog + codexRouting`，最终目录生成拿不到指纹。现把 `codexRoutingProjection` 纳入同一只读派生合并；Router DB 仍不保存目录快照。失败用例先复现 `left=None / right=provider-fingerprint-v2`，修复后接管 9/9、目录投影 2/2、MultiRouter 投影 15/15 通过。安装态 `3.19.2-17` 尚未包含该源码修复，不得把数据库中的旧 `ready` 当作当前 live 已同步。
 - 升级结果契约补漏：事务脚本成功结果字段为 `NewPid`，外层 `invoke-ccswitchmulti-local-upgrade.ps1` 曾误读不存在的 `NewProcessId`，导致应用已经正确安装并健康启动后，包装层仍在最终结果格式化阶段报错。现统一读取 `NewPid` 并用 Pester 锁定契约。该错误与 Codex Desktop 自动化的 Electron 主进程 `Error: write EOF` 无关；后者是已关闭 IPC 管道被继续写入，发生后必须停止该自动化链，不能靠重复点击或重试解决。
 

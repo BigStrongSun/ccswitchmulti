@@ -25,7 +25,7 @@ foreach ($requiredFile in @($transactionScript, $InstallerPath, $InstalledExecut
     if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) { throw "required file missing: $requiredFile" }
 }
 if (-not [string]::Equals(
-        (Get-FileHash -LiteralPath $InstallerPath -Algorithm SHA256).Hash,
+        (Get-CcsmGuardianFileSha256 -LiteralPath $InstallerPath),
         $ExpectedInstallerHash,
         [System.StringComparison]::OrdinalIgnoreCase
     )) {
@@ -45,7 +45,7 @@ if ([int]$health.StatusCode -ne 200) { throw "CCSwitchMulti preflight health fai
 
 $currentItem = Get-Item -LiteralPath $InstalledExecutable
 $currentVersion = [string]$currentItem.VersionInfo.ProductVersion
-$currentHash = (Get-FileHash -LiteralPath $InstalledExecutable -Algorithm SHA256).Hash
+$currentHash = Get-CcsmGuardianFileSha256 -LiteralPath $InstalledExecutable
 $transactionId = "ccsm-$(Get-Date -Format 'yyyyMMdd-HHmmss')-$([guid]::NewGuid().ToString('N'))"
 $backupRoot = Join-Path $BackupParent $transactionId
 New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null

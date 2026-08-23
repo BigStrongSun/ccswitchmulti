@@ -223,6 +223,24 @@ function Wait-CcsmOwnedProcessExit {
     return [int]$Process.ExitCode
 }
 
+function Get-CcsmGuardianFileSha256 {
+    param([Parameter(Mandatory = $true)][string]$LiteralPath)
+
+    $stream = [System.IO.File]::Open(
+        $LiteralPath,
+        [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read,
+        [System.IO.FileShare]::Read
+    )
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return [System.BitConverter]::ToString($sha.ComputeHash($stream)).Replace("-", "")
+    } finally {
+        $sha.Dispose()
+        $stream.Dispose()
+    }
+}
+
 function Get-CcsmTauriNsisPayloadHash {
     param([Parameter(Mandatory = $true)][string]$ExecutablePath)
 
