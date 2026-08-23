@@ -261,6 +261,16 @@ fn projection_settings(router: &Provider, compiled: &CompiledCodexRoutingPlan) -
     settings
 }
 
+/// Merge only fields owned by the compiled projection into effective/live settings.
+/// Common config, authentication, and other user-owned fields must stay untouched.
+pub(crate) fn apply_projection_owned_settings(target: &mut Value, projection: &Value) {
+    for key in ["modelCatalog", "codexRoutingProjection"] {
+        if let Some(value) = projection.get(key).cloned() {
+            target[key] = value;
+        }
+    }
+}
+
 fn projected_model_entries(router: &Provider, compiled: &CompiledCodexRoutingPlan) -> Vec<Value> {
     let previous_models = router
         .settings_config
@@ -809,5 +819,31 @@ mod tests {
             .as_array()
             .expect("projected models");
         assert_eq!(models[0]["displayName"].as_str(), Some("Qwen 3.8"));
+    }
+
+    #[test]
+    fn projection_owned_merge_keeps_effective_settings_and_carries_fingerprint() {
+        let mut target = json!({
+            "auth": {"type": "api_key"},
+            "config": "model_provider = \"router\"",
+            "modelCatalog": {"models": [{"model": "stale"}]},
+            "customUserField": true
+        });
+        let projection = json!({
+            "auth": {"type": "must-not-overwrite"},
+            "modelCatalog": {"models": [{"model": "projected", "sortIndex": 0}]},
+            "codexRoutingProjection": {"dependencyFingerprint": "fingerprint-v2"}
+        });
+
+        apply_projection_owned_settings(&mut target, &projection);
+
+        assert_eq!(target["auth"]["type"], "api_key");
+        assert_eq!(target["config"], "model_provider = \"router\"");
+        assert_eq!(target["customUserField"], true);
+        assert_eq!(target["modelCatalog"], projection["modelCatalog"]);
+        assert_eq!(
+            target["codexRoutingProjection"],
+            projection["codexRoutingProjection"]
+        );
     }
 }

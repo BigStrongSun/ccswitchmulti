@@ -796,9 +796,10 @@ pub(crate) fn write_live_with_common_config(
                 db,
                 &effective_provider.id,
             )?;
-            if let Some(model_catalog) = artifact.projection_settings.get("modelCatalog").cloned() {
-                effective_provider.settings_config["modelCatalog"] = model_catalog;
-            }
+            crate::codex_multirouter::projection::apply_projection_owned_settings(
+                &mut effective_provider.settings_config,
+                &artifact.projection_settings,
+            );
         }
         return write_codex_live_snapshot(&effective_provider, Some(&provider_context));
     }

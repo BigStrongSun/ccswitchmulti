@@ -3879,7 +3879,7 @@ impl ProxyService {
         self.write_codex_live_for_provider(config, provider)
     }
 
-    /// V2 MultiRouter 的 live catalog 必须来自当前 Provider 目录重新编译的投影。
+    /// V2 MultiRouter 的 live catalog 与依赖指纹必须来自当前 Provider 目录重新编译的投影。
     fn codex_provider_with_projected_model_catalog(
         &self,
         provider: Option<&Provider>,
@@ -3909,9 +3909,10 @@ impl ProxyService {
         )
         .map_err(|error| format!("构建 Codex MultiRouter 模型目录投影失败: {error}"))?;
         let mut projected = provider.clone();
-        if let Some(model_catalog) = artifact.projection_settings.get("modelCatalog").cloned() {
-            projected.settings_config["modelCatalog"] = model_catalog;
-        }
+        crate::codex_multirouter::projection::apply_projection_owned_settings(
+            &mut projected.settings_config,
+            &artifact.projection_settings,
+        );
         Ok(Some(projected))
     }
 
