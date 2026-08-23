@@ -267,7 +267,7 @@ pub(crate) fn build_projection_artifact(
 
 fn projection_settings(router: &Provider, compiled: &CompiledCodexRoutingPlan) -> Value {
     let mut settings = router.settings_config.clone();
-    let models = projected_model_entries(router, compiled);
+    let models = projected_model_entries(compiled);
     settings["modelCatalog"] = json!({
         "models": models,
         "spawnAgentModels": compiled.spawn_agent_models
@@ -288,41 +288,18 @@ pub(crate) fn apply_projection_owned_settings(target: &mut Value, projection: &V
     }
 }
 
-fn projected_model_entries(router: &Provider, compiled: &CompiledCodexRoutingPlan) -> Vec<Value> {
-    let previous_models = router
-        .settings_config
-        .get("modelCatalog")
-        .or_else(|| router.settings_config.get("model_catalog"))
-        .and_then(|catalog| catalog.get("models"))
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let previous_rank = model_ranks(&previous_models);
-    let has_previous_custom_order = previous_models
-        .iter()
-        .any(|model| model_sort_index_value(model).is_some());
+fn projected_model_entries(compiled: &CompiledCodexRoutingPlan) -> Vec<Value> {
     let has_source_custom_order = compiled
         .model_catalog
         .iter()
         .any(|model| model.sort_index.is_some());
-    let use_custom_order = has_previous_custom_order || has_source_custom_order;
 
     let mut indexed = compiled
         .model_catalog
         .iter()
         .enumerate()
         .collect::<Vec<_>>();
-    if has_previous_custom_order {
-        indexed.sort_by_key(|(index, model)| {
-            (
-                previous_rank
-                    .get(&model.visible_model.to_ascii_lowercase())
-                    .copied()
-                    .unwrap_or(usize::MAX),
-                *index,
-            )
-        });
-    } else if has_source_custom_order {
+    if has_source_custom_order {
         indexed.sort_by_key(|(index, model)| (model.sort_index.unwrap_or(usize::MAX), *index));
     }
 
@@ -330,43 +307,9 @@ fn projected_model_entries(router: &Provider, compiled: &CompiledCodexRoutingPla
         .into_iter()
         .enumerate()
         .map(|(sort_index, (_, model))| {
-            projected_model_entry(model, use_custom_order.then_some(sort_index))
+            projected_model_entry(model, has_source_custom_order.then_some(sort_index))
         })
         .collect()
-}
-
-fn model_ranks(models: &[Value]) -> HashMap<String, usize> {
-    let mut ranked = models
-        .iter()
-        .enumerate()
-        .filter_map(|(index, model)| {
-            let name = model
-                .get("model")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|name| !name.is_empty())?;
-            Some((
-                name.to_ascii_lowercase(),
-                (model_sort_index_value(model), index),
-            ))
-        })
-        .collect::<Vec<_>>();
-    ranked.sort_by_key(|(_, (sort_index, index))| (sort_index.unwrap_or(usize::MAX), *index));
-
-    let mut ranks = HashMap::new();
-    for (name, _) in ranked {
-        let next_rank = ranks.len();
-        ranks.entry(name).or_insert(next_rank);
-    }
-    ranks
-}
-
-fn model_sort_index_value(model: &Value) -> Option<usize> {
-    model
-        .get("sortIndex")
-        .or_else(|| model.get("sort_index"))
-        .and_then(Value::as_u64)
-        .and_then(|value| usize::try_from(value).ok())
 }
 
 fn projected_model_entry(model: &CompiledCodexModel, sort_index: Option<usize>) -> Value {
@@ -608,7 +551,7 @@ mod tests {
     }
 
     #[test]
-    fn projection_preserves_custom_model_order_and_sort_indexes() {
+    fn projection_ignores_stale_router_catalog_order_and_uses_provider_order() {
         let db = Database::memory().expect("memory db");
         let mut router = router();
         router.settings_config["modelCatalog"] = json!({
@@ -624,8 +567,8 @@ mod tests {
             json!({
                 "base_url": "https://qwen.example/v1",
                 "modelCatalog": {"models": [
-                    {"model": "qwen-a", "sortIndex": 1},
-                    {"model": "qwen-b", "sortIndex": 0}
+                    {"model": "qwen-a", "sortIndex": 0},
+                    {"model": "qwen-b", "sortIndex": 1}
                 ]}
             }),
             None,
@@ -644,7 +587,7 @@ mod tests {
                 .iter()
                 .map(|model| model["model"].as_str().unwrap())
                 .collect::<Vec<_>>(),
-            vec!["qwen-b", "qwen-a"]
+            vec!["qwen-a", "qwen-b"]
         );
         assert_eq!(
             models

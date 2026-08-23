@@ -4283,3 +4283,13 @@ supported in one streaming turn`。
 - Windows 系统自启的唯一注册入口仍是 `src-tauri/src/auto_launch.rs`：它只维护 `HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run\\CCSwitchMulti`，值为当前 CCSwitchMulti EXE 的带引号路径；不能向该链路加入 Codex Desktop。
 - `AppSettings.launch_codex_desktop_with_ccswitch` 是独立、默认关闭的设备级设置，前端字段为 `launchCodexDesktopWithCcswitch`。它只在 CCSwitchMulti 实际启动时调用 `codex_desktop::launch_codex_desktop_with_ccswitch`；仅开启 `launchOnStartup` 不会拉起 Codex。已运行时保持幂等，未找到 Desktop 可执行文件时只记录警告，不阻断 CCSwitchMulti。
 - 设置页在“开机自启”之后直接显示“启动 CCSwitchMulti 时启动 Codex Desktop”，文案明确其独立性。回归覆盖旧 settings 只有 `launchOnStartup=true` 时新开关仍为 false，以及启动判定的 disabled/running 四种组合。
+
+## 2026-08-24 MultiRouter 跟随 Provider 的同步边界补审
+
+- schema-v2 MultiRouter 的数据库事实只包含路由策略：`targetProviderId`、`modelSelection`、别名、认证策略、启停/顺序、`spawnAgentModels` 与 Sub-Agent 配置。目标 Provider 的 URL、认证内容、协议、模型清单、上下文、输入模态、推理档位、Ultra、缓存能力、显示名、启停和模型排序不得复制回 Router。
+- Provider 保存统一经过 `apply_codex_provider_mutation`；运行时和非运行时消费者都用当前 Provider 集合重新执行 `compile_provider_v2`。只有当前激活 Router 拥有共享 live 投影；非激活 Router 无需生成另一份运行文件，激活时会按当前 Provider 重算。
+- 真正需要同步的是可丢弃投影：`~/.codex/cc-switch-model-catalog.json`、`models_cache.json`、`config.toml` 的 catalog 指针/指纹、CCSwitchMulti 受管的 `~/.codex/agents/*.toml`、投影状态/依赖指纹，以及前端 `providers/codex` 查询缓存。`prepare_codex_config_text_with_model_catalog_impl` 已在同一条发布链内同步 catalog、cache 和受管 Agent 文件；写入失败会保留 Provider 数据并把投影标为 pending。
+- 本次发现并移除三个残留的 Router 派生目录读取：Rust 投影曾用 Router 旧 `modelCatalog.sortIndex` 压过 Provider 排序；工作台只读投影曾用旧 Router 排序和 `spawnAgentModels` 覆写当前 Provider/`codexRouting`；schema-v2 别名修复曾用 Router 旧 `upstreamModel` 猜测并改写 route policy。现在 schema-v2 只认 Provider 模型事实与 `codexRouting` 策略，旧 `modelCatalog` 仅保留在显式 legacy migration/read-only 路径。
+- schema-v2 Router 重新保存时，前后端都会移除遗留 `modelCatalog`/`model_catalog`，因此旧副本不只是“失去读取权”，还会在正常编辑生命周期内从数据库收敛掉；普通 Provider 和 legacy Router 的模型目录不受影响。
+- 模式语义：`modelSelection.mode=all` 自动跟随 Provider 模型增删/启停；`mode=include` 是 Router 明确白名单，不因 Provider 新增模型而扩容；`spawnAgentModels` 同样是独立策略，但最终投影会过滤为当前可路由模型。模型排序编辑器直接把 `sortIndex` 写回目标 Provider，不在 Router 维护第二份顺序。
+- TDD：后端“旧 Router 排序覆盖 Provider”“schema-v2 保存仍保留旧目录”与前端“旧 Router 目录覆盖排序/候选、猜测 alias、保存仍保留旧目录”均先 RED，再修到 GREEN。最终验证：Rust `3338 passed / 5 ignored`，前端 `146 files / 1184 tests`，TypeScript typecheck、涉及文件 Prettier/rustfmt、严格 UTF-8 无 BOM 与 `git diff --check` 全部通过。全局 `cargo fmt --check` 仍会报告主线上预设目录提交的既有格式差异，本次未改动那些文件。

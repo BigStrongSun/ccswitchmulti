@@ -1868,7 +1868,10 @@ export function normalizeCodexRoutesForVisibleModelAliases(
   routes: CodexRoute[],
   providersById: Map<string, Provider>,
 ): CodexRoute[] {
-  const existingModelById = buildExistingCatalogByModel(plan);
+  const legacyModelById =
+    readCodexRouting(plan)?.schemaVersion === 2
+      ? new Map<string, CodexCatalogModelDraft>()
+      : buildExistingCatalogByModel(plan);
   return routes.map((route) => {
     const targetProvider = routeTargetProvider(route, providersById);
     const targetCatalogModels = targetProvider
@@ -1901,7 +1904,7 @@ export function normalizeCodexRoutesForVisibleModelAliases(
       const upstream = routeModelUpstreamForAliasRepair(
         route,
         trimmedVisible,
-        existingModelById,
+        legacyModelById,
       );
       const targetModel =
         targetModelByUpstream.get(upstream) ??
@@ -1920,7 +1923,7 @@ export function normalizeCodexRoutesForVisibleModelAliases(
           : routeModelUpstreamForAliasRepair(
               route,
               visibleModel,
-              existingModelById,
+              legacyModelById,
             );
         return upstream && upstream !== visibleModel
           ? [visibleModel, upstream]
@@ -1999,8 +2002,12 @@ export function buildModelCatalogForRoutes(
   routes: CodexRoute[],
   providersById: Map<string, Provider>,
 ): CodexModelCatalogDraft {
+  const routing = readCodexRouting(plan);
+  const isSchemaV2 = routing?.schemaVersion === 2;
   const existingCatalog = plan.settingsConfig?.modelCatalog;
-  const existingModelById = buildExistingCatalogByModel(plan);
+  const legacyModelById = isSchemaV2
+    ? new Map<string, CodexCatalogModelDraft>()
+    : buildExistingCatalogByModel(plan);
 
   const byModel = new Map<string, CodexCatalogModelDraft>();
   for (const route of routes) {
@@ -2038,17 +2045,17 @@ export function buildModelCatalogForRoutes(
       byModel.set(
         id,
         applyRouteCapabilitiesToCatalogModel(
-          existingModelById.get(id) ?? { model: id },
+          legacyModelById.get(id) ?? { model: id },
           route,
         ),
       );
     }
   }
 
-  const routingSpawnAgentModels = readCodexRouting(plan)?.spawnAgentModels;
+  const routingSpawnAgentModels = routing?.spawnAgentModels;
   const existingSpawnAgentModels = Array.isArray(routingSpawnAgentModels)
     ? routingSpawnAgentModels
-    : Array.isArray(existingCatalog?.spawnAgentModels)
+    : !isSchemaV2 && Array.isArray(existingCatalog?.spawnAgentModels)
       ? (existingCatalog.spawnAgentModels as string[])
       : [];
   const modelIds = Array.from(byModel.keys());
@@ -2058,12 +2065,8 @@ export function buildModelCatalogForRoutes(
       modelIds.filter((model) => !existingSpawnAgentModels.includes(model)),
     )
     .slice(0, 5);
-  const orderedModels = Array.from(byModel.entries()).map(([id, model]) => {
-    const sortIndex = existingModelById.get(id)?.sortIndex;
-    return sortIndex === undefined ? model : { ...model, sortIndex };
-  });
   return {
-    models: orderedModels,
+    models: Array.from(byModel.values()),
     spawnAgentModels,
   };
 }
@@ -2119,6 +2122,15 @@ export function createDraftRoutingPlan(
   };
 }
 
+function withoutDerivedRouterCatalog(
+  settingsConfig: Record<string, any>,
+): Record<string, any> {
+  const next = { ...settingsConfig };
+  delete next.modelCatalog;
+  delete next.model_catalog;
+  return next;
+}
+
 /// MultiRouter 设置页只允许修改方案元信息和入口开关；路由规则、模型目录和本地代理接管配置都继续由工作台自动维护。
 export function applyMultiRouterSettingsDraft(
   plan: Provider,
@@ -2168,7 +2180,9 @@ export function applyMultiRouterSettingsDraft(
     notes: draft.notes?.trim() || undefined,
     settingsConfig: writeHostedToolsConfig(
       {
-        ...plan.settingsConfig,
+        ...(nextRouting.schemaVersion === 2
+          ? withoutDerivedRouterCatalog(plan.settingsConfig)
+          : plan.settingsConfig),
         auth: plan.settingsConfig?.auth ?? {},
         base_url:
           plan.settingsConfig?.base_url ??
@@ -3211,7 +3225,7 @@ export function CodexRouterWorkspacePage({
     const nextProvider: Provider = {
       ...plan,
       settingsConfig: {
-        ...plan.settingsConfig,
+        ...withoutDerivedRouterCatalog(plan.settingsConfig),
         codexRouting: serializeCodexRoutingV2(nextRouting),
       },
     };
@@ -6177,7 +6191,7 @@ function SpawnAgentCandidatesPanel({
       const nextProvider: Provider = {
         ...selectedPlan,
         settingsConfig: {
-          ...selectedPlan.settingsConfig,
+          ...withoutDerivedRouterCatalog(selectedPlan.settingsConfig),
           codexRouting: serializeCodexRoutingV2({
             ...currentRouting,
             spawnAgentModels: normalized,
@@ -6214,7 +6228,7 @@ function SpawnAgentCandidatesPanel({
       const nextProvider: Provider = {
         ...selectedPlan,
         settingsConfig: {
-          ...selectedPlan.settingsConfig,
+          ...withoutDerivedRouterCatalog(selectedPlan.settingsConfig),
           codexRouting: serializeCodexRoutingV2({
             ...currentRouting,
             subagentVersion: version,

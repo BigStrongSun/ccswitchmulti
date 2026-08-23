@@ -50,6 +50,8 @@ pub fn apply_codex_provider_mutation_with_publisher<F>(
 where
     F: FnMut(&CodexRoutingProjectionArtifact) -> Result<ProjectionReadBack, String>,
 {
+    let mut provider = provider;
+    remove_schema_v2_router_derived_catalog(&mut provider);
     let affected_router_ids = validate_and_collect_affected_router_ids(db, &provider)?;
     db.save_provider("codex", &provider)?;
 
@@ -71,6 +73,21 @@ where
         )?);
     }
     Ok(CodexProviderMutationOutcome { projections })
+}
+
+fn remove_schema_v2_router_derived_catalog(provider: &mut Provider) {
+    let is_schema_v2_router = provider
+        .settings_config
+        .pointer("/codexRouting/schemaVersion")
+        .and_then(serde_json::Value::as_u64)
+        == Some(2);
+    if !is_schema_v2_router {
+        return;
+    }
+    if let Some(settings) = provider.settings_config.as_object_mut() {
+        settings.remove("modelCatalog");
+        settings.remove("model_catalog");
+    }
 }
 
 fn validate_and_collect_affected_router_ids(
@@ -394,6 +411,32 @@ mod tests {
             saved_route, original_route,
             "Route declaration must not be synchronized with Provider fields"
         );
+    }
+
+    #[test]
+    fn schema_v2_router_save_removes_legacy_derived_catalog_storage() {
+        let db = Database::memory().expect("memory db");
+        db.save_provider("codex", &target("openai_chat"))
+            .expect("seed target");
+        let mut updated_router = router("router-a", "qwen");
+        updated_router.settings_config["modelCatalog"] = json!({
+            "models": [{"model": "stale-qwen"}],
+            "spawnAgentModels": ["stale-qwen"]
+        });
+
+        apply_codex_provider_mutation_with_publisher(&db, updated_router, |artifact| {
+            Ok(ProjectionReadBack::verified(
+                artifact.dependency_fingerprint.clone(),
+            ))
+        })
+        .expect("save schema v2 router");
+
+        let saved = db
+            .get_provider_by_id("router-a", "codex")
+            .expect("read router")
+            .expect("router exists");
+        assert!(saved.settings_config.get("modelCatalog").is_none());
+        assert!(saved.settings_config.get("model_catalog").is_none());
     }
 
     #[test]

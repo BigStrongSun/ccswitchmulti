@@ -2400,9 +2400,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       routes: existingRoutes,
       subagentV2: existingV2,
     });
-    expect(updatedProvider.settingsConfig?.modelCatalog).toEqual(
-      plan.settingsConfig?.modelCatalog,
-    );
+    expect(updatedProvider.settingsConfig).not.toHaveProperty("modelCatalog");
     expect(
       updatedProvider.settingsConfig?.codexRouting?.spawnAgentModels,
     ).toEqual(["deepseek-v4-pro", "deepseek-v4-flash"]);
@@ -2448,9 +2446,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     const [savedProvider, appType] = vi.mocked(providersApi.update).mock
       .calls[0];
     expect(appType).toBe("codex");
-    expect(savedProvider.settingsConfig?.modelCatalog).toEqual(
-      plan.settingsConfig?.modelCatalog,
-    );
+    expect(savedProvider.settingsConfig).not.toHaveProperty("modelCatalog");
     expect(savedProvider.settingsConfig?.codexRouting).toMatchObject({
       enabled: existingRouting?.enabled,
       routes: existingRouting?.routes,
@@ -2865,6 +2861,65 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       "gpt-5.5",
       "gpt-5.5-relay-gpt",
     ]);
+  });
+
+  it("does not use a stale Router catalog to rewrite schema v2 route policy", () => {
+    const source: Provider = {
+      id: "relay",
+      name: "Relay",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: {
+          models: [
+            {
+              model: "new-visible",
+              upstreamModel: "canonical-model",
+            },
+          ],
+        },
+      },
+    };
+    const plan: Provider = {
+      id: "router",
+      name: "Router",
+      category: "custom",
+      settingsConfig: {
+        codexRouting: {
+          schemaVersion: 2,
+          enabled: true,
+          routes: [],
+        },
+        modelCatalog: {
+          models: [
+            {
+              model: "old-visible",
+              upstreamModel: "canonical-model",
+            },
+          ],
+        },
+      },
+    };
+    const routes = [
+      {
+        id: "relay-route",
+        enabled: true,
+        targetProviderId: source.id,
+        modelSelection: { mode: "include", models: ["old-visible"] },
+        match: { models: ["old-visible"], prefixes: [] },
+      },
+    ] satisfies Parameters<
+      typeof normalizeCodexRoutesForVisibleModelAliases
+    >[1];
+
+    const normalized = normalizeCodexRoutesForVisibleModelAliases(
+      plan,
+      routes,
+      new Map([[source.id, source]]),
+    );
+
+    expect(normalized[0].match?.models).toEqual(["old-visible"]);
+    expect(normalized[0].aliases ?? {}).toEqual({});
+    expect(normalized[0].upstream?.modelMap).toBeUndefined();
   });
 
   it("preserves source reasoning capability through route catalog projection", () => {
@@ -3412,20 +3467,29 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     expect(rebuilt.models.map((model) => model.model)).toEqual(["qwen3.6"]);
   });
 
-  it("preserves the full picker order when routes rebuild the model catalog", () => {
+  it("ignores a stale Router catalog and follows Provider order and routing policy", () => {
     const source: Provider = {
       id: "sorted-source",
       name: "Sorted Source",
       category: "custom",
       settingsConfig: {
         modelCatalog: {
-          models: [{ model: "model-a" }, { model: "model-b" }],
+          models: [
+            { model: "model-a", sortIndex: 0 },
+            { model: "model-b", sortIndex: 1 },
+          ],
         },
       },
     };
     const plan: Provider = {
       ...createDraftRoutingPlan([source], [source]),
       settingsConfig: {
+        codexRouting: {
+          schemaVersion: 2,
+          enabled: true,
+          spawnAgentModels: ["model-b"],
+          routes: [],
+        },
         modelCatalog: {
           models: [
             { model: "model-a", sortIndex: 1 },
@@ -3451,10 +3515,10 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     );
 
     expect(rebuilt.models).toEqual([
-      { model: "model-a", sortIndex: 1 },
-      { model: "model-b", sortIndex: 0 },
+      { model: "model-a", sortIndex: 0 },
+      { model: "model-b", sortIndex: 1 },
     ]);
-    expect(rebuilt.spawnAgentModels).toEqual(["model-a", "model-b"]);
+    expect(rebuilt.spawnAgentModels).toEqual(["model-b", "model-a"]);
   });
 
   it("keeps unsaved route picker enabled draft state across candidate refreshes", () => {
@@ -3550,6 +3614,38 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       webSearch: { enabled: false },
       imageGeneration: { enabled: true },
     });
+  });
+
+  it("removes a stale derived catalog when saving schema v2 Router settings", () => {
+    const plan: Provider = {
+      id: "router-v2",
+      name: "Router V2",
+      category: "custom",
+      settingsConfig: {
+        codexRouting: {
+          schemaVersion: 2,
+          enabled: true,
+          routes: [],
+        },
+        modelCatalog: {
+          models: [{ model: "stale-model" }],
+          spawnAgentModels: ["stale-model"],
+        },
+      },
+    };
+
+    const updated = applyMultiRouterSettingsDraft(plan, {
+      name: plan.name,
+      enabled: true,
+      officialAuth: { mode: "desktop_current_login" },
+      hostedTools: {
+        webSearch: false,
+        imageGeneration: false,
+      },
+    });
+
+    expect(updated.settingsConfig).not.toHaveProperty("modelCatalog");
+    expect(updated.settingsConfig).not.toHaveProperty("model_catalog");
   });
 
   it("normalizes listener config into a usable Codex proxy base url", () => {
