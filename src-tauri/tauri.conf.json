@@ -67,7 +67,7 @@
       }
     },
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEFFRjYwQUIyRkRBRDUyNEUKUldST1VxMzlzZ3IycmlGQzBEeThsWGs4UkFUS0JnVWRQcEZoVnNzbSsrbDNoZGh2UkVHZkNTbTgK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNGODcyNjRGODNCODM5MEEKUldRS09iaURUeWFIUDMrNDdCZFh4TW5EWlh2VmZCUWxZRVhVbytrWlppM2tIWkROV3N5Z3ZkQ3IK",
       "endpoints": [
         "https://github.com/BigStrongSun/ccswitchmulti/releases/latest/download/latest.json"
       ]
