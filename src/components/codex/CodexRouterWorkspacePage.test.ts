@@ -2530,8 +2530,8 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       settingsConfig: {
         modelCatalog: {
           models: [
-            { model: "deepseek-v4-flash-deepseek" },
-            { model: "deepseek-v4-pro-deepseek" },
+            { model: "DeepSeek-V4-Flash-DeepSeek" },
+            { model: "DeepSeek-V4-Pro-DeepSeek" },
             { model: "deepseek-v4-flash-vision-exp" },
           ],
         },

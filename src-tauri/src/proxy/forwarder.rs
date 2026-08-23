@@ -7728,7 +7728,11 @@ fn codex_raw_route_is_official(route: &Value) -> bool {
     if codex_raw_route_auth_source(route).is_some_and(|source| {
         matches!(
             source,
-            "managed_codex_oauth" | "managed_account" | "chatgpt"
+            "native_codex_auth"
+                | "managed_codex_oauth"
+                | "managed_account"
+                | "account_pool"
+                | "chatgpt"
         )
     }) {
         return true;
@@ -7765,20 +7769,24 @@ fn codex_raw_route_string<'a>(route: &'a Value, keys: &[&str]) -> Option<&'a str
 
 /// 读取 route 的 auth.source，并兼容 managed account 的 authProvider。
 fn codex_raw_route_auth_source(route: &Value) -> Option<&str> {
-    let upstream = route.get("upstream").unwrap_or(route);
-    let auth = upstream.get("auth").or_else(|| route.get("auth"))?;
-    if auth
-        .get("authProvider")
-        .or_else(|| auth.get("auth_provider"))
-        .and_then(Value::as_str)
-        .is_some_and(|provider| provider.eq_ignore_ascii_case("codex_oauth"))
-    {
-        return Some("managed_codex_oauth");
-    }
-    auth.get("source")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|source| !source.is_empty())
+    super::providers::codex_route_auth_source(route).or_else(|| {
+        let upstream_auth = route.get("upstream").and_then(|value| value.get("auth"));
+        [
+            route.get("authPolicy"),
+            route.get("auth_policy"),
+            upstream_auth,
+            route.get("auth"),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|auth| {
+            auth.get("authProvider")
+                .or_else(|| auth.get("auth_provider"))
+                .and_then(Value::as_str)
+                .is_some_and(|provider| provider.eq_ignore_ascii_case("codex_oauth"))
+        })
+        .then_some("managed_codex_oauth")
+    })
 }
 
 /// 重建 raw passthrough 的上游请求头。
@@ -11573,6 +11581,31 @@ mod tests {
         assert_eq!(
             resolved.settings_config["codexResolvedRouteMatched"], false,
             "空 body 的 GPT-Live 端点不是模型显式命中"
+        );
+    }
+
+    #[test]
+    fn raw_passthrough_recognizes_v2_auth_policy_for_custom_official_target() {
+        let provider = provider_with_settings(json!({
+            "codexRouting": {
+                "schemaVersion": 2,
+                "enabled": true,
+                "routes": [{
+                    "id": "official-custom-id",
+                    "enabled": true,
+                    "targetProviderId": "desktop-account-provider",
+                    "modelSelection": {"mode": "all"},
+                    "authPolicy": {"source": "native_codex_auth"}
+                }]
+            }
+        }));
+
+        let resolved = resolve_codex_raw_passthrough_route_provider(&provider, &json!({}))
+            .expect("v2 native auth route must own raw official endpoints");
+
+        assert_eq!(
+            resolved.settings_config["codexResolvedRouteId"],
+            "official-custom-id"
         );
     }
 

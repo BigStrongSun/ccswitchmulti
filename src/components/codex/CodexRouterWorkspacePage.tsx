@@ -6085,14 +6085,19 @@ function SpawnAgentCandidatesPanel({
     selectedCatalog.spawnAgentModels.join("\n");
   const spawnAgentMissingPriorityModels =
     diagnostics?.liveConfig.spawnAgentMissingPriorityModels ?? [];
-  const isFlashRoleModel = (name: string) =>
-    (name === "deepseek-v4-flash" || name.startsWith("deepseek-v4-flash-")) &&
-    !name.includes("vision");
+  const isFlashRoleModel = (name: string) => {
+    const normalized = name.trim().toLowerCase();
+    return (
+      (normalized === "deepseek-v4-flash" ||
+        normalized.startsWith("deepseek-v4-flash-")) &&
+      !normalized.includes("vision")
+    );
+  };
   const hasFlashRoleModel = selectedCatalog.models.some((model) =>
     isFlashRoleModel(model.model?.trim() ?? ""),
   );
   const hasProRoleModel = selectedCatalog.models.some((model) => {
-    const name = model.model?.trim() ?? "";
+    const name = model.model?.trim().toLowerCase() ?? "";
     return name === "deepseek-v4-pro" || name.startsWith("deepseek-v4-pro-");
   });
 

@@ -324,8 +324,41 @@ pub fn write_text_file(path: &Path, data: &str) -> Result<(), AppError> {
 }
 
 #[cfg(windows)]
-fn is_transient_replace_lock(error: &std::io::Error) -> bool {
-    matches!(error.raw_os_error(), Some(1175) | Some(32) | Some(5))
+fn is_retryable_replace_error(error: &std::io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(1175) | Some(1176) | Some(32) | Some(5)
+    )
+}
+
+#[cfg(windows)]
+fn is_partial_replace_move(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(1177)
+}
+
+#[cfg(windows)]
+enum PartialReplaceRecovery {
+    Completed,
+    Restored(std::io::Error),
+    Unrecoverable(std::io::Error),
+}
+
+#[cfg(windows)]
+fn recover_partial_replace_move(tmp: &Path, path: &Path, backup: &Path) -> PartialReplaceRecovery {
+    match fs::rename(tmp, path) {
+        Ok(()) => {
+            let _ = fs::remove_file(backup);
+            PartialReplaceRecovery::Completed
+        }
+        Err(finish_error) => {
+            if !path.exists() && backup.exists() && fs::rename(backup, path).is_ok() {
+                let _ = fs::remove_file(tmp);
+                PartialReplaceRecovery::Restored(finish_error)
+            } else {
+                PartialReplaceRecovery::Unrecoverable(finish_error)
+            }
+        }
+    }
 }
 
 /// 原子写入：写入临时文件后 rename 替换，避免半写状态
@@ -403,6 +436,16 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
             .encode_wide()
             .chain(std::iter::once(0))
             .collect();
+        let backup = {
+            let mut path = tmp.as_os_str().to_os_string();
+            path.push(".backup");
+            PathBuf::from(path)
+        };
+        let backup_wide: Vec<u16> = backup
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
         let mut completed = false;
         let mut last_error = None;
 
@@ -413,19 +456,54 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
                 ReplaceFileW(
                     replaced.as_ptr(),
                     replacement.as_ptr(),
-                    std::ptr::null(),
+                    backup_wide.as_ptr(),
                     0,
                     std::ptr::null(),
                     std::ptr::null(),
                 )
             };
             if replaced_ok != 0 {
+                let _ = fs::remove_file(&backup);
                 completed = true;
                 break;
             }
 
             let replace_error = std::io::Error::last_os_error();
-            if is_transient_replace_lock(&replace_error) {
+            if is_partial_replace_move(&replace_error) {
+                // ReplaceFileW 1177 has already moved the old destination to the backup path
+                // while leaving the replacement at its temporary path. Finish the intended
+                // move when possible; otherwise restore the old destination before returning.
+                match recover_partial_replace_move(&tmp, path, &backup) {
+                    PartialReplaceRecovery::Completed => {
+                        completed = true;
+                        break;
+                    }
+                    PartialReplaceRecovery::Restored(finish_error) => {
+                        return Err(AppError::IoContext {
+                            context: format!(
+                                "原子替换部分完成后已恢复旧文件: {} -> {}",
+                                tmp.display(),
+                                path.display()
+                            ),
+                            source: finish_error,
+                        });
+                    }
+                    PartialReplaceRecovery::Unrecoverable(finish_error) => {
+                        return Err(AppError::IoContext {
+                            context: format!(
+                                "原子替换部分完成且自动恢复失败（保留临时与备份文件）: {} -> {}; backup={}",
+                                tmp.display(),
+                                path.display(),
+                                backup.display()
+                            ),
+                            source: finish_error,
+                        });
+                    }
+                }
+            }
+            if is_retryable_replace_error(&replace_error) {
+                // With an explicit backup path, 1176 also leaves both original names intact,
+                // so the same bounded retry is safe for that documented rename failure.
                 last_error = Some(replace_error);
                 if attempt < 4 {
                     std::thread::sleep(std::time::Duration::from_millis(100));
@@ -464,6 +542,7 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
         if !completed {
             let source = last_error.unwrap_or_else(std::io::Error::last_os_error);
             let _ = fs::remove_file(&tmp);
+            let _ = fs::remove_file(&backup);
             return Err(AppError::IoContext {
                 context: format!("原子替换失败: {} -> {}", tmp.display(), path.display()),
                 source,
@@ -513,15 +592,102 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn transient_replace_lock_recognizes_only_supported_windows_errors() {
-        for code in [1175, 32, 5] {
-            assert!(is_transient_replace_lock(
+    fn retryable_replace_error_recognizes_only_supported_windows_errors() {
+        for code in [1175, 1176, 32, 5] {
+            assert!(is_retryable_replace_error(
                 &std::io::Error::from_raw_os_error(code)
             ));
         }
-        assert!(!is_transient_replace_lock(
+        assert!(is_partial_replace_move(&std::io::Error::from_raw_os_error(
+            1177
+        )));
+        assert!(!is_retryable_replace_error(
+            &std::io::Error::from_raw_os_error(1177)
+        ));
+        assert!(!is_retryable_replace_error(
             &std::io::Error::from_raw_os_error(87)
         ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn partial_replace_recovery_finishes_install_when_target_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let tmp = dir.path().join("config.json.tmp");
+        let backup = dir.path().join("config.json.backup");
+        std::fs::write(&tmp, b"new contents").unwrap();
+        std::fs::write(&backup, b"old contents").unwrap();
+
+        assert!(matches!(
+            recover_partial_replace_move(&tmp, &path, &backup),
+            PartialReplaceRecovery::Completed
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), b"new contents");
+        assert!(!tmp.exists());
+        assert!(!backup.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn partial_replace_recovery_restores_old_file_when_new_file_is_locked() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let tmp = dir.path().join("config.json.tmp");
+        let backup = dir.path().join("config.json.backup");
+        std::fs::write(&tmp, b"new contents").unwrap();
+        std::fs::write(&backup, b"old contents").unwrap();
+        let held_tmp = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&tmp)
+            .unwrap();
+
+        assert!(matches!(
+            recover_partial_replace_move(&tmp, &path, &backup),
+            PartialReplaceRecovery::Restored(_)
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), b"old contents");
+        assert!(tmp.exists());
+        assert!(!backup.exists());
+        drop(held_tmp);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn partial_replace_recovery_keeps_both_files_when_install_and_restore_are_locked() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let tmp = dir.path().join("config.json.tmp");
+        let backup = dir.path().join("config.json.backup");
+        std::fs::write(&tmp, b"new contents").unwrap();
+        std::fs::write(&backup, b"old contents").unwrap();
+        let held_tmp = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&tmp)
+            .unwrap();
+        let held_backup = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&backup)
+            .unwrap();
+
+        assert!(matches!(
+            recover_partial_replace_move(&tmp, &path, &backup),
+            PartialReplaceRecovery::Unrecoverable(_)
+        ));
+        assert!(!path.exists());
+        assert_eq!(std::fs::read(&tmp).unwrap(), b"new contents");
+        assert_eq!(std::fs::read(&backup).unwrap(), b"old contents");
+        drop(held_tmp);
+        drop(held_backup);
     }
 
     #[test]

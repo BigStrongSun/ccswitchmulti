@@ -56,14 +56,40 @@ pub enum CodexMultiRouterAuthFacade {
 /// v1 stored this under `upstream.auth.source`; v2 stores it in the top-level
 /// `authPolicy.source` (with `auth`/`auth_policy` kept for compatibility).
 pub(crate) fn codex_route_auth_source(route: &JsonValue) -> Option<&str> {
-    let upstream = route.get("upstream").unwrap_or(route);
-    let auth = upstream
-        .get("auth")
-        .or_else(|| route.get("auth"))
-        .or_else(|| route.get("authPolicy"))
-        .or_else(|| route.get("auth_policy"))
-        .unwrap_or(upstream);
-    auth.get("source").and_then(JsonValue::as_str)
+    let upstream_auth = route.get("upstream").and_then(|value| value.get("auth"));
+    [
+        route.get("authPolicy"),
+        route.get("auth_policy"),
+        upstream_auth,
+        route.get("auth"),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|auth| {
+        auth.get("source")
+            .and_then(JsonValue::as_str)
+            .map(str::trim)
+            .filter(|source| !source.is_empty())
+    })
+}
+
+fn codex_route_auth_provider(route: &JsonValue) -> Option<&str> {
+    let upstream_auth = route.get("upstream").and_then(|value| value.get("auth"));
+    [
+        route.get("authPolicy"),
+        route.get("auth_policy"),
+        upstream_auth,
+        route.get("auth"),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|auth| {
+        auth.get("authProvider")
+            .or_else(|| auth.get("auth_provider"))
+            .and_then(JsonValue::as_str)
+            .map(str::trim)
+            .filter(|provider| !provider.is_empty())
+    })
 }
 
 /// 根据持久化 Router 配置和账号池策略判断本地认证门面。
@@ -129,22 +155,12 @@ pub fn classify_codex_multirouter_auth_facade(
 
 /// 判断 route 是否由 ChatGPT Codex 官方 backend 提供原生能力。
 pub(crate) fn codex_route_uses_official_agent_backend(route: &JsonValue) -> bool {
-    let upstream = route.get("upstream").unwrap_or(route);
-    let auth = upstream
-        .get("auth")
-        .or_else(|| route.get("auth"))
-        .or_else(|| route.get("authPolicy"))
-        .or_else(|| route.get("auth_policy"))
-        .unwrap_or(upstream);
     codex_route_auth_source(route).is_some_and(|source| {
         matches!(
             source.to_ascii_lowercase().as_str(),
             "native_codex_auth" | "managed_codex_oauth" | "managed_account" | "account_pool"
         )
-    }) || auth
-        .get("authProvider")
-        .or_else(|| auth.get("auth_provider"))
-        .and_then(JsonValue::as_str)
+    }) || codex_route_auth_provider(route)
         .is_some_and(|provider| provider.eq_ignore_ascii_case("codex_oauth"))
 }
 
@@ -3414,6 +3430,22 @@ mod tests {
             Some("account_pool")
         );
         assert_eq!(codex_route_auth_source(&json!({})), None);
+        assert_eq!(
+            codex_route_auth_source(&json!({
+                "upstream": {"auth": {}},
+                "authPolicy": {"source": "native_codex_auth"}
+            })),
+            Some("native_codex_auth"),
+            "an empty legacy container must not shadow the v2 declaration"
+        );
+        assert_eq!(
+            codex_route_auth_source(&json!({
+                "upstream": {"auth": {"source": "provider_config"}},
+                "authPolicy": {"source": "native_codex_auth"}
+            })),
+            Some("native_codex_auth"),
+            "the canonical v2 declaration owns auth when stale legacy data coexists"
+        );
     }
 
     #[test]

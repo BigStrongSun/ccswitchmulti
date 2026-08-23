@@ -100,6 +100,7 @@ pub struct CodexRoutingRouteV2 {
     #[serde(default = "default_true")]
     pub enabled: bool,
     pub target_provider_id: String,
+    #[serde(default)]
     pub model_selection: CodexModelSelection,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub match_prefixes: Vec<String>,
@@ -118,6 +119,12 @@ fn default_true() -> bool {
 pub enum CodexModelSelection {
     All,
     Include { models: Vec<String> },
+}
+
+impl Default for CodexModelSelection {
+    fn default() -> Self {
+        Self::All
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -345,6 +352,25 @@ mod tests {
 
         assert!(matches!(all, CodexRoutingDocument::V2(_)));
         assert!(matches!(include, CodexRoutingDocument::V2(_)));
+    }
+
+    #[test]
+    fn missing_model_selection_defaults_to_all_in_backend_schema() {
+        let value = valid_plan(json!({
+            "id": "router-qwen",
+            "targetProviderId": "qwen",
+            "authPolicy": {"source": "provider_config"}
+        }));
+        let CodexRoutingDocument::V2(plan) =
+            CodexRoutingDocument::parse(&value).expect("v2 plan without modelSelection")
+        else {
+            panic!("expected v2")
+        };
+
+        assert!(matches!(
+            plan.routes[0].model_selection,
+            CodexModelSelection::All
+        ));
     }
 
     #[test]

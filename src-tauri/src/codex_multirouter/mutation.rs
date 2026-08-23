@@ -53,12 +53,13 @@ where
     db.save_provider("codex", &provider)?;
 
     let active_router_id = active_codex_router_id(db)?;
+    let publish_without_active_router =
+        active_router_id.is_none() && affected_router_ids.len() == 1;
     let mut projections = Vec::with_capacity(affected_router_ids.len());
     for router_id in affected_router_ids {
-        if active_router_id
-            .as_deref()
-            .is_some_and(|active| active != router_id)
-        {
+        let owns_shared_projection = active_router_id.as_deref() == Some(router_id.as_str())
+            || publish_without_active_router;
+        if !owns_shared_projection {
             continue;
         }
         projections.push(ensure_projection_with_publisher(
@@ -606,5 +607,34 @@ mod tests {
         .expect("apply shared provider mutation");
 
         assert_eq!(published.into_inner(), vec!["router-personal".to_string()]);
+    }
+
+    #[test]
+    fn shared_provider_mutation_without_active_router_does_not_publish_ambiguous_projection() {
+        let db = Database::memory().expect("memory db");
+        db.save_provider("codex", &target("openai_chat"))
+            .expect("seed shared target");
+        db.save_provider("codex", &router("router-personal", "qwen"))
+            .expect("seed personal router");
+        db.save_provider("codex", &router("router-company", "qwen"))
+            .expect("seed company router");
+
+        let published = RefCell::new(Vec::new());
+        let outcome = apply_codex_provider_mutation_with_publisher(
+            &db,
+            target("openai_responses"),
+            |artifact| {
+                published
+                    .borrow_mut()
+                    .push(artifact.router_provider_id.clone());
+                Ok(ProjectionReadBack::verified(
+                    artifact.dependency_fingerprint.clone(),
+                ))
+            },
+        )
+        .expect("persist shared target without choosing a router");
+
+        assert!(published.into_inner().is_empty());
+        assert!(outcome.projections.is_empty());
     }
 }

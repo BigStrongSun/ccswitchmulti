@@ -3,18 +3,23 @@
 ## 2026-08-23 PR #37-#49 拆分修复审计与 Windows 原子写锁处理
 
 - PR #37 修复 v2 `authPolicy.source` 未被认证门面读取导致官方 Codex route 被误判为
-  `FullyManaged`、注入 `PROXY_MANAGED` 并触发 401；当前主线提交 `0fbb562f` 已统一读取
-  `upstream.auth`、`auth`、`authPolicy`、`auth_policy`，后端回归通过。
-- PR #39/#43/#47/#49 分别覆盖缺失 `modelSelection` 白屏、`displayName` 投影、多个 Router
-  共享 target 时非活动 Router 覆盖投影、DeepSeek alias 后缀角色误报缺失；这些行为已由
-  主线 `8b29949b` 的整合实现覆盖，不应再次合入旧分支提交。
+  `FullyManaged`、注入 `PROXY_MANAGED` 并触发 401。复审又发现 raw passthrough 的官方 route
+  识别仍只读旧 `upstream.auth`，且空旧容器会遮住有效 v2 声明；认证来源现统一以 v2
+  `authPolicy` 为权威并覆盖 raw endpoint 归属。
+- PR #39 的前端缺省值只避免了白屏，后端 schema 仍会拒绝缺失 `modelSelection` 的同步旧数据；
+  正确契约是在共享 v2 schema 中将缺失值定义为 `{mode:"all"}`，让读取、保存、编译和运行一致。
+- PR #43 的 `displayName` 已同时贯通 compiler 投影和 `/v1/models` 响应，复审未发现遗漏。
+- PR #47 原逻辑在活动 Router 存在时正确，但活动 Router 为空时会让所有受影响 Router 再次争写
+  共享 catalog；现仅在唯一候选 Router 时允许无活动态发布，多 Router 且归属不明时不发布。
+- PR #49 的后缀别名识别原先仍区分大小写；现先规范化模型 ID，再识别 Flash/Pro 并排除 Vision。
 - PR #41 的排序与活动工作区行为已由 `8b29949b` 覆盖，但复审发现主线 live 写路径只合并了
   `modelCatalog`，漏掉 `codexRoutingProjection.dependencyFingerprint`。后续修正为仅合并投影拥有的
   `modelCatalog` 与 `codexRoutingProjection`，既保持目录/指纹一致，也不覆盖认证、Common Config
   和用户字段；不能用“更小更安全”代替这项字段所有权契约。
-- PR #45 定位 Windows `ReplaceFileW` 瞬时失败（1175/32/5）。主线选择对明确错误做
-  5 次、每次 100ms 的有界重试；重试耗尽仍返回错误并保留旧文件，不采用 PR 原案的
-  `fs::write` 非原子覆盖，避免并发时出现截断配置。锁定文件与错误码回归测试均通过。
+- PR #45 定位 Windows `ReplaceFileW` 瞬时失败（1175/32/5）。主线保留有界重试并拒绝
+  `fs::write` 非原子覆盖；复审根据 Microsoft 文档补齐 1176/1177：调用时提供同卷备份路径，
+  1176 在原名均保留时可有界重试，1177 部分移动后优先完成新文件安装，失败则恢复旧文件，
+  自动恢复也失败时保留临时与备份文件供人工恢复，禁止继续清理恢复材料。
 
 ## 2026-08-22 官方模型切到 DeepSeek V4 Flash 首个请求 400（reasoning_text）根因与修复
 
