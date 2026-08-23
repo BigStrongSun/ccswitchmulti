@@ -1,6 +1,8 @@
 use super::{ProbeReadiness, TransportKind};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProbeStageStatus {
     Passed,
     Unsupported,
@@ -8,7 +10,7 @@ pub enum ProbeStageStatus {
     Skipped,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransportProbeAssessment {
     pub transport: TransportKind,
     pub baseline: ProbeStageStatus,
@@ -17,7 +19,7 @@ pub struct TransportProbeAssessment {
     pub continuation: ProbeStageStatus,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransportSelection {
     pub transport: TransportKind,
     pub readiness: ProbeReadiness,
@@ -54,6 +56,7 @@ impl TransportProbeAssessment {
     }
 }
 
+#[cfg(test)]
 pub fn select_preferred_transport(
     assessments: &[TransportProbeAssessment],
 ) -> Option<TransportKind> {

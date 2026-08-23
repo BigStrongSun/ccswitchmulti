@@ -1509,6 +1509,7 @@ pub fn run() {
             commands::get_opencode_models,
             commands::probe_codex_chat_for_config,
             commands::probe_codex_responses_for_config,
+            commands::probe_codex_protocol_compatibility,
             // ours: endpoint speed test + custom endpoint management
             commands::test_api_endpoints,
             commands::get_custom_endpoints,

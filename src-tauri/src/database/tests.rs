@@ -301,6 +301,76 @@ fn schema_migration_aligns_column_defaults_and_types() {
 }
 
 #[test]
+fn schema_v16_migration_creates_protocol_compatibility_profiles() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    Database::set_user_version(&conn, 16).expect("set user_version=16");
+
+    Database::apply_schema_migrations_on_conn(&conn).expect("apply migrations");
+
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='protocol_compatibility_profiles'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("query table");
+    assert_eq!(count, 1);
+    assert_eq!(
+        Database::get_user_version(&conn).expect("version after migration"),
+        SCHEMA_VERSION
+    );
+}
+
+#[test]
+fn protocol_compatibility_profile_round_trips_only_for_the_exact_target() {
+    use crate::protocol_compatibility::{
+        ProbeReadiness, ProbeTargetKey, ProtocolCompatibilityProbeResult,
+        ProtocolCompatibilityRecord, TransportKind,
+    };
+
+    let db = Database::memory().expect("create memory db");
+    let target = ProbeTargetKey::new(
+        "provider-a",
+        Some("route-a"),
+        "public-model",
+        "upstream-model",
+        TransportKind::OpenAiChat,
+        "https://example.test/v1/chat/completions",
+        "bearer",
+    )
+    .unwrap();
+    let result = ProtocolCompatibilityProbeResult {
+        selected_transport: Some(TransportKind::OpenAiChat),
+        readiness: ProbeReadiness::Verified,
+        branches: Vec::new(),
+    };
+    let record = ProtocolCompatibilityRecord::new(target.clone(), result, 1_000, 2_000);
+
+    db.save_protocol_compatibility_result(&record)
+        .expect("save profile");
+    assert_eq!(
+        db.get_protocol_compatibility_result(&target)
+            .expect("read exact profile"),
+        Some(record)
+    );
+
+    let changed_endpoint = ProbeTargetKey::new(
+        "provider-a",
+        Some("route-a"),
+        "public-model",
+        "upstream-model",
+        TransportKind::OpenAiChat,
+        "https://other.test/v1/chat/completions",
+        "bearer",
+    )
+    .unwrap();
+    assert!(db
+        .get_protocol_compatibility_result(&changed_endpoint)
+        .expect("read changed target")
+        .is_none());
+}
+
+#[test]
 fn schema_create_tables_include_pricing_model_columns() {
     let conn = Connection::open_in_memory().expect("open memory db");
     Database::create_tables_on_conn(&conn).expect("create tables");

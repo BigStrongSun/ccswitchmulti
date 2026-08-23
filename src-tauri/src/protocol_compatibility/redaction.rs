@@ -1,18 +1,18 @@
 use std::collections::BTreeSet;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RedactedFieldEvidence {
     pub path: String,
-    pub value_kind: &'static str,
+    pub value_kind: String,
     pub byte_length: usize,
     pub sha256: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RedactedProbeEvidence {
     pub status_code: u16,
     pub paths: Vec<String>,
@@ -140,7 +140,7 @@ fn redact_field(path: &str, value: &Value) -> RedactedFieldEvidence {
     };
     RedactedFieldEvidence {
         path: path.to_owned(),
-        value_kind,
+        value_kind: value_kind.to_string(),
         byte_length: bytes.len(),
         sha256: format!("{:x}", Sha256::digest(bytes)),
     }

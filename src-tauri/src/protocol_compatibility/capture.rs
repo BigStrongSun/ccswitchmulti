@@ -39,10 +39,12 @@ pub struct CapturedProbeExchange {
 }
 
 impl CapturedProbeExchange {
+    #[cfg(test)]
     pub fn status_code(&self) -> u16 {
         self.status_code
     }
 
+    #[cfg(test)]
     pub fn payload_count(&self) -> usize {
         self.payloads.len()
     }

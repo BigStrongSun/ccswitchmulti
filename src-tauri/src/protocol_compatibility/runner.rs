@@ -1,6 +1,7 @@
 use std::{collections::BTreeMap, fmt, time::Duration};
 
 use reqwest::Client;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -21,6 +22,7 @@ use super::{
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 const TRANSACTION_TIMEOUT: Duration = Duration::from_secs(120);
 
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransportBranchResult {
     pub assessment: TransportProbeAssessment,
     pub reasoning_shape: ClassifiedReasoningShape,
@@ -38,7 +40,7 @@ impl fmt::Debug for TransportBranchResult {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtocolCompatibilityProbeResult {
     pub selected_transport: Option<TransportKind>,
     pub readiness: ProbeReadiness,

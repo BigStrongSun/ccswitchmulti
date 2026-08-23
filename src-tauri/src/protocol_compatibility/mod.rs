@@ -1,6 +1,7 @@
 use std::fmt;
 
 use reqwest::header::{HeaderValue, InvalidHeaderValue};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use url::Url;
@@ -9,21 +10,24 @@ mod redaction;
 pub use redaction::{redact_json_probe_response, redact_sse_probe_response};
 
 mod classify;
-pub use classify::{
-    classify_captured_reasoning_shape, classify_reasoning_shape, PreToolVisibleContent,
-};
+#[cfg(test)]
+pub use classify::classify_reasoning_shape;
+pub use classify::{classify_captured_reasoning_shape, PreToolVisibleContent};
 
 mod capture;
+#[cfg(test)]
 pub use capture::{capture_transport_probe, ProbeCaptureError};
 
 mod selection;
-pub use selection::{
-    select_preferred_transport, select_transport_outcome, ProbeStageStatus,
-    TransportProbeAssessment,
-};
+#[cfg(test)]
+pub use selection::{select_preferred_transport, select_transport_outcome};
+pub use selection::{ProbeStageStatus, TransportProbeAssessment};
 
 mod runner;
-pub use runner::run_protocol_compatibility_probe;
+pub use runner::{run_protocol_compatibility_probe, ProtocolCompatibilityProbeResult};
+
+pub(crate) mod profile;
+pub use profile::ProtocolCompatibilityRecord;
 
 pub(crate) mod endpoint;
 
@@ -31,7 +35,8 @@ const BASELINE_PROMPT: &str =
     "CCSM protocol compatibility probe. Solve 17 + 25 internally. Reply only CCSM_PROTOCOL_BASELINE_OK.";
 const TOOL_NAME: &str = "ccsm_protocol_compatibility_probe";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProbeCase {
     BaselineJson,
     BaselineSse,
@@ -39,13 +44,15 @@ pub enum ProbeCase {
     ToolContinuationJson,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TransportKind {
     OpenAiChat,
     OpenAiResponses,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ReasoningSemantic {
     Readable,
     Summary,
@@ -53,7 +60,8 @@ pub enum ReasoningSemantic {
     None,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ReasoningSource {
     ReasoningContent,
     Reasoning,
@@ -63,21 +71,24 @@ pub enum ReasoningSource {
     None,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum HistoryReplay {
     ChatReasoningContent,
     Omit,
     NativeOnly,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ReasoningProjection {
     RawReasoningText,
     ReasoningSummary,
     None,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProbeReadiness {
     Verified,
     Partial,
@@ -212,14 +223,13 @@ impl ManualReasoningOverride {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProbeTargetKey {
     pub provider_id: String,
     pub route_id: Option<String>,
     pub public_model: String,
     pub upstream_model: String,
     pub transport: TransportKind,
-    pub canonical_endpoint: String,
     pub endpoint_fingerprint: String,
     pub authentication_kind: String,
 }
@@ -237,8 +247,7 @@ impl ProbeTargetKey {
     ) -> Result<Self, url::ParseError> {
         let parsed = canonicalize_endpoint(endpoint)?;
 
-        let canonical_endpoint = parsed.to_string();
-        let endpoint_fingerprint = format!("{:x}", Sha256::digest(canonical_endpoint.as_bytes()));
+        let endpoint_fingerprint = format!("{:x}", Sha256::digest(parsed.as_str().as_bytes()));
 
         Ok(Self {
             provider_id: provider_id.into(),
@@ -246,7 +255,6 @@ impl ProbeTargetKey {
             public_model: public_model.into(),
             upstream_model: upstream_model.into(),
             transport,
-            canonical_endpoint,
             endpoint_fingerprint,
             authentication_kind: authentication_kind.into(),
         })

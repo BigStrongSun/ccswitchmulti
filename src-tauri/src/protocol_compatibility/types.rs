@@ -27,12 +27,27 @@ fn target_key_fingerprint_removes_credentials_query_and_fragment() {
     .unwrap();
 
     assert_eq!(first.endpoint_fingerprint, second.endpoint_fingerprint);
-    assert_eq!(
-        first.canonical_endpoint,
-        "https://example.test/v1/chat/completions"
-    );
     assert!(!first.endpoint_fingerprint.contains("secret"));
     assert!(!first.endpoint_fingerprint.contains("leak"));
+}
+
+#[test]
+fn persisted_target_key_never_serializes_the_endpoint_or_path_credentials() {
+    let target = ProbeTargetKey::new(
+        "provider-a",
+        Some("route-a"),
+        "public-model",
+        "upstream-model",
+        TransportKind::OpenAiChat,
+        "https://example.test/account-secret/v1/chat/completions?api_key=query-secret",
+        "bearer",
+    )
+    .unwrap();
+
+    let serialized = serde_json::to_string(&target).unwrap();
+    assert!(!serialized.contains("https://"));
+    assert!(!serialized.contains("account-secret"));
+    assert!(!serialized.contains("query-secret"));
 }
 
 #[test]

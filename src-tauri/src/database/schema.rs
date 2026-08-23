@@ -258,6 +258,8 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
+        Self::create_protocol_compatibility_tables(conn)?;
+
         // 注意：circuit_breaker_config 已合并到 proxy_config 表中
 
         // 16. Proxy Live Backup 表 (Live 配置备份)
@@ -522,6 +524,11 @@ impl Database {
                         log::info!("迁移数据库从 v15 到 v16（重建 Codex 会话用量）");
                         Self::migrate_v15_to_v16(conn)?;
                         Self::set_user_version(conn, 16)?;
+                    }
+                    16 => {
+                        log::info!("迁移数据库从 v16 到 v17（添加协议兼容性探测档案）");
+                        Self::migrate_v16_to_v17(conn)?;
+                        Self::set_user_version(conn, 17)?;
                     }
                     _ => {
                         return Err(AppError::Database(format!(
@@ -1544,6 +1551,36 @@ impl Database {
     fn migrate_v15_to_v16(conn: &Connection) -> Result<(), AppError> {
         let codex_dir = crate::codex_config::get_codex_config_dir();
         crate::services::session_usage_codex::reset_codex_usage_on_conn(conn, &codex_dir)
+    }
+
+    fn migrate_v16_to_v17(conn: &Connection) -> Result<(), AppError> {
+        Self::create_protocol_compatibility_tables(conn)
+    }
+
+    fn create_protocol_compatibility_tables(conn: &Connection) -> Result<(), AppError> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS protocol_compatibility_profiles (
+                target_key TEXT PRIMARY KEY,
+                provider_id TEXT NOT NULL,
+                route_id TEXT,
+                public_model TEXT NOT NULL,
+                upstream_model TEXT NOT NULL,
+                transport TEXT NOT NULL,
+                endpoint_fingerprint TEXT NOT NULL,
+                authentication_kind TEXT NOT NULL,
+                readiness TEXT NOT NULL,
+                profile_json TEXT NOT NULL,
+                tested_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_protocol_compatibility_provider
+             ON protocol_compatibility_profiles(provider_id, route_id, public_model, tested_at DESC);
+             CREATE INDEX IF NOT EXISTS idx_protocol_compatibility_expiry
+             ON protocol_compatibility_profiles(expires_at);",
+        )
+        .map_err(|error| {
+            AppError::Database(format!("创建 protocol_compatibility_profiles 失败: {error}"))
+        })
     }
 
     /// 插入默认模型定价数据
