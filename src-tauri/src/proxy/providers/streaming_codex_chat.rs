@@ -1473,7 +1473,9 @@ mod tests {
         ])
         .await;
 
-        assert!(output.contains("event: response.reasoning_summary_text.delta"));
+        assert!(output.contains("event: response.reasoning_text.delta"));
+        assert!(output.contains("event: response.reasoning_text.done"));
+        assert!(!output.contains("event: response.reasoning_summary_text.delta"));
         assert!(output.contains("Need context."));
         assert!(output.contains("\"text\":\"pong\""));
         assert!(output.contains("\"reasoning_tokens\":3"));

@@ -8728,7 +8728,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_subagent_v2_initialization_includes_runtime_first_enabled_fallback_model() {
+    fn codex_subagent_v2_initialization_excludes_unmatched_model_without_route_fallback() {
         let settings = codex_subagent_profile_status_settings(
             "v2",
             json!({}),
@@ -8741,19 +8741,16 @@ mod tests {
             }]),
         );
 
-        assert_eq!(
-            resolve_codex_primary_route_from_settings(&settings, "unmatched-model")
-                .and_then(|route| route.get("id"))
-                .and_then(Value::as_str),
-            Some("first-enabled"),
-            "the backend helper must follow the runtime's historical first-enabled fallback"
+        assert!(
+            resolve_codex_primary_route_from_settings(&settings, "unmatched-model").is_none(),
+            "an unmatched model must fail closed instead of using the first enabled route"
         );
         let initialized = initialize_codex_subagent_v2_for_candidate(&settings, None)
             .expect("initialize from runtime-routable catalog models");
 
-        assert_eq!(
-            initialized["profiles"]["unmatched-model"]["enabled"], false,
-            "a catalog model routed by the runtime first-enabled fallback needs a disabled draft"
+        assert!(
+            initialized["profiles"].get("unmatched-model").is_none(),
+            "an unroutable catalog model must not produce a Sub-Agent draft"
         );
     }
 
@@ -9852,8 +9849,8 @@ mod tests {
         );
         assert_eq!(
             classify_subagent_route_with_provider_records(&generic_target, "gpt-5.6-sol", &[],),
-            Some(SubagentProviderKind::ThirdParty),
-            "an official-looking model name must never imply an official provider"
+            None,
+            "an unmatched official-looking model must fail closed instead of inheriting a route"
         );
     }
 
