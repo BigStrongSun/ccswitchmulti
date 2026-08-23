@@ -334,6 +334,60 @@ fn auth_for(settings: &WebDavSyncSettings) -> WebDavAuth {
 mod tests {
     use super::*;
 
+    /// Opt-in transport regression that exercises upload + download against a
+    /// disposable local WebDAV server. `CC_SWITCH_TEST_HOME` must point at an
+    /// isolated profile containing `webdavSync` and `preset-table.json`.
+    #[tokio::test]
+    #[ignore = "requires an explicitly started local WebDAV server and isolated CC_SWITCH_TEST_HOME"]
+    async fn e2e_round_trip_restores_preset_table_artifact() {
+        crate::proxy::http_client::init(None).expect("initialize direct HTTP client");
+
+        let mut settings = crate::settings::get_webdav_sync_settings()
+            .expect("isolated test profile must configure WebDAV sync");
+        let bundle_path = crate::config::get_app_config_dir().join(REMOTE_PRESET_TABLE);
+        let expected_bundle = std::fs::read(&bundle_path).expect("read seeded preset table");
+        let db = crate::database::Database::memory().expect("create test database");
+        let provider = crate::provider::Provider::with_id(
+            "webdav-e2e-provider".to_string(),
+            "WebDAV E2E Provider".to_string(),
+            serde_json::json!({}),
+            None,
+        );
+        db.save_provider("codex", &provider)
+            .expect("seed valid snapshot provider");
+
+        check_connection(&settings)
+            .await
+            .expect("local WebDAV must be reachable");
+        upload(&db, &mut settings)
+            .await
+            .expect("upload snapshot with preset table artifact");
+
+        let info = fetch_remote_info(&settings)
+            .await
+            .expect("read uploaded manifest")
+            .expect("uploaded manifest exists");
+        assert!(
+            info["artifacts"]
+                .as_array()
+                .expect("manifest artifacts array")
+                .iter()
+                .any(|name| name.as_str() == Some(REMOTE_PRESET_TABLE)),
+            "manifest must advertise preset-table.json"
+        );
+
+        std::fs::write(&bundle_path, b"locally-corrupted-preset-table")
+            .expect("corrupt only the isolated local preset table");
+        download(&db, &mut settings)
+            .await
+            .expect("download snapshot and restore preset table artifact");
+
+        assert_eq!(
+            std::fs::read(&bundle_path).expect("read restored preset table"),
+            expected_bundle
+        );
+    }
+
     #[test]
     fn remote_dir_segments_uses_current_layout() {
         let settings = WebDavSyncSettings {
