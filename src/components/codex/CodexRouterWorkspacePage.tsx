@@ -1962,17 +1962,25 @@ function routeCanMatchVisibleCatalogModel(
   const model = visibleModel.trim();
   if (!model) return false;
   const lowerModel = model.toLowerCase();
-  if (
-    (route.match?.models ?? []).some(
-      (matchedModel) => matchedModel.trim().toLowerCase() === lowerModel,
-    )
-  ) {
+  const exactModels = (route.match?.models ?? [])
+    .map((matchedModel) => matchedModel.trim().toLowerCase())
+    .filter(Boolean);
+  if (exactModels.includes(lowerModel)) {
     return true;
   }
-  return (route.match?.prefixes ?? []).some((prefix) => {
+  const prefixMatched = (route.match?.prefixes ?? []).some((prefix) => {
     const normalizedPrefix = prefix.trim().toLowerCase();
     return normalizedPrefix && lowerModel.startsWith(normalizedPrefix);
   });
+  if (!prefixMatched) return false;
+  // 与后端 codex.rs `codex_route_prefix_match_requires_include` 同语义：
+  // 仅当 route 是 V2 include 模式时，前缀命中必须同时 ∈ include——否则被 include
+  // 反选的模型（如官方 route 的 gpt-5.4）会通过粗粒度前缀 "gpt" 被重新放行。
+  // mode=all 或 legacy（无 modelSelection）时前缀照常生效。
+  if (route.modelSelection?.mode === "include") {
+    return exactModels.includes(lowerModel);
+  }
+  return true;
 }
 
 /// route 能力比 provider catalog 更接近最终路由结果；写入聚合 catalog，确保 Codex 看到的模型能力与规则一致。
@@ -2297,14 +2305,22 @@ function collectRouteModels(routes: RouteEntry[]): string[] {
 }
 
 /// 根据当前 MultiRouter 规则反查 catalog 中真实存在的模型，用于子 Agent 候选页的“路由命中”选项卡。
-function collectRoutedCatalogModels(
+export function collectRoutedCatalogModels(
   routes: RouteEntry[],
   catalogModels: CodexCatalogModel[],
 ): string[] {
   const exactModels = new Set<string>();
   const prefixes: string[] = [];
 
-  for (const { route } of routes) {
+  for (const { route, provider } of routes) {
+    // mode=all 的 route 接住 target provider 的全部模型（运行时编译层 exact 匹配
+    // 的就是这些模型）；无精确模型/前缀的 mode=all route（如 Kimi）不能被过滤成空。
+    if (route.modelSelection?.mode === "all") {
+      for (const model of readCodexModelCatalog(provider).models) {
+        const normalized = model.model?.trim();
+        if (normalized) exactModels.add(normalized);
+      }
+    }
     for (const model of route.match?.models ?? []) {
       const normalized = model.trim();
       if (normalized) exactModels.add(normalized);
@@ -3397,13 +3413,23 @@ export function CodexRouterWorkspacePage({
       return;
     }
 
-    const matched = enabledRoutes.find(({ route }) => {
+    const matched = enabledRoutes.find(({ route, provider }) => {
       const models = route.match?.models ?? [];
       const prefixes = route.match?.prefixes ?? [];
-      return (
+      if (
         models.includes(model) ||
         prefixes.some((prefix) => model.startsWith(prefix))
-      );
+      ) {
+        return true;
+      }
+      // mode=all：接住 target provider 全部模型（与 collectRoutedCatalogModels 同语义），
+      // 否则无 match 规则的 mode=all route（如 Kimi）在预览里永远"未命中"。
+      if (route.modelSelection?.mode === "all") {
+        return readCodexModelCatalog(provider).models.some(
+          (catalogModel) => catalogModel.model?.trim() === model,
+        );
+      }
+      return false;
     });
 
     if (matched) {

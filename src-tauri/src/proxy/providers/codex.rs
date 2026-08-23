@@ -558,7 +558,7 @@ pub fn resolve_codex_v2_routed_provider(
     body: &JsonValue,
     providers: &HashMap<String, Provider>,
 ) -> Result<Option<ResolvedCodexRoute>, CodexRoutingCompileError> {
-    let Some((plan, compiled)) = compile_codex_v2_runtime_plan(router_provider, providers)? else {
+    let Some((_plan, compiled)) = compile_codex_v2_runtime_plan(router_provider, providers)? else {
         return Ok(None);
     };
     let request_model = body
@@ -582,29 +582,11 @@ pub fn resolve_codex_v2_routed_provider(
                 .expect("compiled model route must exist"),
             "exact",
         )
-    } else if let Some(route) = compiled.routes.iter().find(|route| {
-        route.enabled
-            && route.match_prefixes.iter().any(|prefix| {
-                let prefix = prefix.trim();
-                !prefix.is_empty()
-                    && request_model
-                        .to_ascii_lowercase()
-                        .starts_with(&prefix.to_ascii_lowercase())
-            })
-    }) {
-        (route, "prefix")
     } else {
-        let Some(default_route_id) = plan.default_route_id.as_deref() else {
-            return Ok(None);
-        };
-        let Some(route) = compiled
-            .routes
-            .iter()
-            .find(|route| route.enabled && route.id.eq_ignore_ascii_case(default_route_id))
-        else {
-            return Ok(None);
-        };
-        (route, "default")
+        // 无匹配一律 fail-closed（unroutable）：不保留 prefix/default 兜底——
+        // 编译层 model_catalog 已是 include 精确过滤的结果，被反选的模型不能靠
+        // 粗粒度前缀"复活"，未勾选源的模型不能静默落到官方。
+        return Ok(None);
     };
 
     build_resolved_codex_v2_route(
@@ -657,39 +639,16 @@ pub fn resolve_codex_v2_raw_passthrough_provider(
                     .iter()
                     .find(|route| route.enabled && route.id == model.route_id)
             });
-        let prefix = compiled.routes.iter().find(|route| {
-            route.enabled
-                && route.match_prefixes.iter().any(|prefix| {
-                    let prefix = prefix.trim();
-                    !prefix.is_empty()
-                        && request_model
-                            .to_ascii_lowercase()
-                            .starts_with(&prefix.to_ascii_lowercase())
-                })
-        });
         if let Some(route) = exact {
             (route, "exact")
-        } else if let Some(route) = prefix {
-            (route, "prefix")
         } else {
-            let Some(route) = compiled
-                .routes
-                .iter()
-                .find(|route| codex_v2_route_is_official(route, providers))
-            else {
-                return Ok(None);
-            };
-            (route, "official_raw_fallback")
+            // 无匹配一律 fail-closed（unroutable）：不保留 prefix / official_raw_fallback——
+            // 编译层 model_catalog 已是 include 精确过滤的结果，被反选/未勾选的模型
+            // 不能靠粗粒度前缀或"官方兜底"静默路由到官方。
+            return Ok(None);
         }
     } else {
-        let Some(route) = compiled
-            .routes
-            .iter()
-            .find(|route| codex_v2_route_is_official(route, providers))
-        else {
-            return Ok(None);
-        };
-        (route, "official_raw_fallback")
+        return Ok(None);
     };
 
     build_resolved_codex_v2_route(
@@ -794,30 +753,6 @@ fn build_resolved_codex_v2_route(
         matched_by,
         effective_provider,
     })
-}
-
-fn codex_v2_route_is_official(
-    route: &CompiledCodexRoute,
-    providers: &HashMap<String, Provider>,
-) -> bool {
-    if matches!(
-        route.auth_policy.source,
-        CodexRouteAuthSource::NativeCodexAuth | CodexRouteAuthSource::ManagedCodexOauth
-    ) || route
-        .target_provider_id
-        .eq_ignore_ascii_case("codex-official")
-    {
-        return true;
-    }
-    providers
-        .get(&route.target_provider_id)
-        .is_some_and(|provider| {
-            provider
-                .meta
-                .as_ref()
-                .and_then(|meta| meta.provider_type.as_deref())
-                .is_some_and(|provider_type| provider_type.eq_ignore_ascii_case("codex_oauth"))
-        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1472,21 +1407,9 @@ fn resolve_codex_route_from_settings<'a>(
             return None;
         }
 
-        return routing
-            .get("defaultRouteId")
-            .or_else(|| routing.get("default_route_id"))
-            .and_then(|value| value.as_str())
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-            .and_then(|default_route_id| {
-                routes.iter().find(|route| {
-                    codex_route_is_enabled(route)
-                        && route
-                            .get("id")
-                            .and_then(|value| value.as_str())
-                            .is_some_and(|id| id.eq_ignore_ascii_case(default_route_id))
-                })
-            });
+        // 无匹配模型一律 fail-closed（unroutable），不再通过 defaultRouteId 兜底：
+        // 反选/未勾选的模型不能静默落到默认路由（常为官方）。
+        return None;
     }
 
     settings
@@ -1505,31 +1428,14 @@ fn resolve_codex_route_from_settings<'a>(
         })
 }
 
-/// Resolve the first route runtime will actually try. MultiRouter keeps its historical behavior:
-/// after exact/prefix/default selection, an otherwise unmatched model falls back to the first
-/// enabled candidate. A model explicitly declared only by disabled routes still fails closed.
+/// Resolve the first route runtime will actually try. 无匹配模型一律 fail-closed：
+/// 不保留历史"fallback 到第一条 enabled route"行为——未勾选源的第三方模型、
+/// 被 include 反选的模型都不能静默落到默认路由（常为官方）。
 pub(crate) fn resolve_codex_primary_route_from_settings<'a>(
     settings: &'a JsonValue,
     request_model: &str,
 ) -> Option<&'a JsonValue> {
-    if let Some(route) = resolve_codex_route_from_settings(settings, request_model) {
-        return Some(route);
-    }
-    let routing = settings.get("codexRouting")?;
-    if routing
-        .get("enabled")
-        .and_then(JsonValue::as_bool)
-        .is_some_and(|enabled| !enabled)
-    {
-        return None;
-    }
-    let routes = routing
-        .as_array()
-        .or_else(|| routing.get("routes").and_then(JsonValue::as_array))?;
-    if codex_model_is_declared_only_by_disabled_route(routes, request_model) {
-        return None;
-    }
-    routes.iter().find(|route| codex_route_is_enabled(route))
+    resolve_codex_route_from_settings(settings, request_model)
 }
 
 /// 判断 route 是否启用；字段缺省时按启用处理，减少手写配置的必填项。
@@ -1582,8 +1488,27 @@ fn find_codex_route_by_match_priority<'a>(
         routes.iter().find(|route| {
             codex_route_is_enabled(route)
                 && codex_route_has_prefix_model_match(route, request_model)
+                && codex_route_prefix_match_requires_include(route, request_model)
         })
     })
+}
+
+/// V2 include 模式下，前缀命中必须同时满足请求模型 ∈ include 列表。
+///
+/// 否则被 include 反选的模型会通过粗粒度前缀（如官方 route 的 `gpt`）被重新放行——
+/// "反选 = 精确白名单"的语义与"前缀 = 兜底新模型"的语义冲突，这里以 include 为准。
+/// mode=all 或 legacy 无 modelSelection 时前缀照常生效。
+fn codex_route_prefix_match_requires_include(route: &JsonValue, request_model: &str) -> bool {
+    let Some(models) = route
+        .pointer("/modelSelection/models")
+        .and_then(JsonValue::as_array)
+    else {
+        return true;
+    };
+    models
+        .iter()
+        .filter_map(JsonValue::as_str)
+        .any(|model| model.trim().eq_ignore_ascii_case(request_model))
 }
 
 /// 判断单条 Codex route 是否匹配请求模型。
@@ -1593,7 +1518,8 @@ fn find_codex_route_by_match_priority<'a>(
 /// 避免 UI 显示大小写差异导致误路由。
 pub(crate) fn codex_route_matches_model(route: &JsonValue, request_model: &str) -> bool {
     codex_route_has_exact_model_match(route, request_model)
-        || codex_route_has_prefix_model_match(route, request_model)
+        || (codex_route_has_prefix_model_match(route, request_model)
+            && codex_route_prefix_match_requires_include(route, request_model))
 }
 
 /// 判断 route 是否精确声明了请求模型。
@@ -4486,7 +4412,7 @@ wire_api = "chat"
     }
 
     #[test]
-    fn test_codex_route_default_route_is_used_when_no_match() {
+    fn test_codex_route_unmatched_model_no_longer_uses_default_route_fallback() {
         let provider = create_provider(json!({
             "codexRouting": {
                 "defaultRouteId": "fallback",
@@ -4512,19 +4438,16 @@ wire_api = "chat"
         let routed = resolve_codex_model_routed_provider(
             &provider,
             &json!({ "model": "deepseek-v4-flash" }),
-        )
-        .expect("default fallback route");
+        );
 
-        assert_eq!(routed.id, "test::route::fallback");
-        assert_eq!(routed.name, "Qwen Fallback");
-        assert_eq!(
-            routed.settings_config["base_url"],
-            "https://fallback.example"
+        assert!(
+            routed.is_none(),
+            "unmatched model must fail closed instead of falling back through defaultRouteId"
         );
     }
 
     #[test]
-    fn test_codex_route_unmatched_model_keeps_first_enabled_candidate_fallback() {
+    fn test_codex_route_unmatched_model_fails_closed_without_first_enabled_fallback() {
         let provider = create_provider(json!({
             "codexRouting": {
                 "enabled": true,
@@ -4550,14 +4473,49 @@ wire_api = "chat"
         }));
 
         let routed =
-            resolve_codex_model_routed_provider(&provider, &json!({ "model": "unmatched-model" }))
-                .expect("historical first-enabled candidate fallback");
+            resolve_codex_model_routed_provider(&provider, &json!({ "model": "unmatched-model" }));
 
-        assert_eq!(routed.id, "test::route::first-enabled");
-        assert_eq!(
-            routed.settings_config["base_url"],
-            "https://first-enabled.example"
+        assert!(
+            routed.is_none(),
+            "unmatched model must fail closed instead of falling back to the first enabled route"
         );
+    }
+
+    #[test]
+    fn include_route_prefix_match_does_not_escape_selection() {
+        // include [gpt-5.6-sol, gpt-5.6-luna] + matchPrefixes ["gpt"]：
+        // gpt-5.4 命中前缀但不在 include → 必须 fail-closed（不能靠粗粒度前缀"复活"被反选的模型）
+        let provider = create_provider(json!({
+            "codexRouting": {
+                "enabled": true,
+                "routes": [{
+                    "id": "official",
+                    "enabled": true,
+                    "matchPrefixes": ["gpt"],
+                    "modelSelection": {
+                        "mode": "include",
+                        "models": ["gpt-5.6-sol", "gpt-5.6-luna"]
+                    },
+                    "base_url": "https://official.example"
+                }]
+            }
+        }));
+
+        let excluded = resolve_codex_model_routed_provider(
+            &provider,
+            &json!({ "model": "gpt-5.4" }),
+        );
+        assert!(
+            excluded.is_none(),
+            "include-excluded model must not match the route via a coarse prefix"
+        );
+
+        let included = resolve_codex_model_routed_provider(
+            &provider,
+            &json!({ "model": "gpt-5.6-sol" }),
+        )
+        .expect("included model must route");
+        assert_eq!(included.id, "test::route::official");
     }
 
     #[test]
@@ -6781,7 +6739,7 @@ wire_api = "responses"
     }
 
     #[test]
-    fn v2_runtime_prefers_exact_then_prefix_then_default() {
+    fn v2_runtime_resolves_only_compiled_visible_models_and_fails_closed_otherwise() {
         let mut prefix = v2_route("prefix", "prefix", json!({"mode": "all"}));
         prefix["matchPrefixes"] = json!(["qwen"]);
         let router = v2_router(
@@ -6813,26 +6771,26 @@ wire_api = "responses"
         )
         .expect("compile exact")
         .expect("exact route");
+        assert_eq!(exact.route_id, "exact");
+
+        // 编译层只认编译后的可见模型集：qwen-new 不在任何 target catalog →
+        // fail-closed，不能靠前缀 "qwen" 或 defaultRouteId 兜底
         let prefix =
             resolve_codex_v2_routed_provider(&router, &json!({"model": "qwen-new"}), &providers)
-                .expect("compile prefix")
-                .expect("prefix route");
+                .expect("compile prefix");
+        assert!(prefix.is_none(), "uncompiled model must fail closed");
+
         let fallback = resolve_codex_v2_routed_provider(
             &router,
             &json!({"model": "unknown-model"}),
             &providers,
         )
-        .expect("compile default")
-        .expect("default route");
-
-        assert_eq!(exact.route_id, "exact");
-        assert_eq!(prefix.route_id, "prefix");
-        assert_eq!(prefix.canonical_model, "qwen-new");
-        assert_eq!(fallback.route_id, "default");
+        .expect("compile default");
+        assert!(fallback.is_none(), "unmatched model must fail closed");
     }
 
     #[test]
-    fn raw_v2_routes_match_match_prefixes_and_include_models_before_official_fallback() {
+    fn include_route_prefix_does_not_match_models_outside_selection() {
         let official = json!({
             "id": "official",
             "enabled": true,
@@ -6849,14 +6807,22 @@ wire_api = "responses"
         });
         let routes = vec![official, deepseek];
 
-        let prefix = find_codex_route_by_match_priority(&routes, "deepseek-v4-flash")
-            .expect("V2 matchPrefixes should select DeepSeek route");
-        assert_eq!(prefix["id"], "deepseek");
+        // include 模式下 prefix 不放行 include 外模型：deepseek-v4-flash ∉ include
+        // 不能靠粗粒度前缀 "deepseek-" 匹配到 deepseek route
+        let excluded = find_codex_route_by_match_priority(&routes, "deepseek-v4-flash");
+        assert!(
+            excluded.is_none(),
+            "include-excluded model must not match via prefix; got {excluded:?}"
+        );
 
         let exact = find_codex_route_by_match_priority(&routes, "deepseek-v4-pro")
             .expect("V2 include selection should be an exact route match");
         assert_eq!(exact["id"], "deepseek");
-        assert!(codex_route_matches_model(exact, "deepseek-v4-flash"));
+        assert!(codex_route_matches_model(exact, "deepseek-v4-pro"));
+        assert!(
+            !codex_route_matches_model(exact, "deepseek-v4-flash"),
+            "prefix must not rescue a model excluded from the include selection"
+        );
     }
 
     #[test]
@@ -7015,7 +6981,7 @@ wire_api = "responses"
     }
 
     #[test]
-    fn v2_raw_passthrough_without_model_uses_latest_official_provider() {
+    fn v2_raw_passthrough_without_model_fails_closed() {
         let mut official = v2_route("official", "official", json!({"mode": "all"}));
         official["authPolicy"] = json!({"source": "native_codex_auth"});
         let router = v2_router(
@@ -7031,23 +6997,11 @@ wire_api = "responses"
             v2_target_provider("qwen", "openai_chat", json!([{"model": "qwen3.8"}])),
         ]);
 
+        // 无 request_model 时不再 fallback 官方：无法路由 → fail-closed（unroutable）
         let resolved =
             resolve_codex_v2_raw_passthrough_provider(&router, &json!({}), &providers, None)
-                .expect("compile raw route")
-                .expect("official raw route");
-
-        assert_eq!(resolved.route_id, "official");
-        assert_eq!(resolved.api_format, "openai_responses");
-        assert_eq!(resolved.matched_by, "official_raw_fallback");
-        assert_eq!(
-            resolved.effective_provider.settings_config["base_url"],
-            "https://official.example/v1"
-        );
-        assert!(resolved
-            .effective_provider
-            .settings_config
-            .get(CODEX_RESOLVED_UPSTREAM_MODEL_OVERRIDE)
-            .is_none());
+                .expect("compile raw route");
+        assert!(resolved.is_none(), "model-less raw request must fail closed");
     }
 
     #[test]

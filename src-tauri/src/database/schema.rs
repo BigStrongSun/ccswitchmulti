@@ -3017,7 +3017,19 @@ impl Database {
                         .filter(|prefix| !prefix.is_empty())
                         .any(|prefix| model_lower.starts_with(&prefix.to_ascii_lowercase()))
                 });
-            exact || prefix
+            // include 模式下前缀命中须同时满足模型 ∈ include（与 codex.rs / codex_config.rs
+            // 同语义），否则被 include 反选的模型会通过粗粒度前缀被重新放行。
+            let include_allows = route
+                .pointer("/modelSelection/models")
+                .and_then(serde_json::Value::as_array)
+                .map(|models| {
+                    models
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .any(|candidate| candidate.eq_ignore_ascii_case(model))
+                })
+                .unwrap_or(true);
+            exact || (prefix && include_allows)
         }
 
         fn canonicalize_deepseek_route(

@@ -19,6 +19,7 @@ import {
   buildCodexProxyBaseUrl,
   buildModelCatalogForRoutes,
   CodexRouterWorkspacePage,
+  collectRoutedCatalogModels,
   createDraftRoutingPlan,
   dedupeCodexRoutesBySemanticProvider,
   isRoutingPlan,
@@ -2721,6 +2722,85 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     expect(
       catalog.models.find((model) => model.model === "gpt-5.5-longnows-gpt"),
     ).toBeUndefined();
+  });
+
+  it("excludes include-deselected models from projected catalog even when a coarse prefix matches", () => {
+    const official: Provider = {
+      id: "codex-official",
+      name: "OpenAI Official",
+      category: "official",
+      settingsConfig: {
+        modelCatalog: {
+          models: [
+            { model: "gpt-5.4" },
+            { model: "gpt-5.6-sol" },
+            { model: "gpt-5.6-luna" },
+          ],
+        },
+      },
+      meta: { apiFormat: "openai_responses" },
+    };
+    const plan = createDraftRoutingPlan([official], [official]);
+    const routes = [
+      normalizeCodexRouteForSave(
+        {
+          id: "router-codex-official",
+          label: official.name,
+          targetProviderId: official.id,
+          modelSelection: {
+            mode: "include",
+            models: ["gpt-5.6-sol", "gpt-5.6-luna"],
+          },
+          match: {
+            models: ["gpt-5.6-sol", "gpt-5.6-luna"],
+            prefixes: ["gpt"],
+          },
+          matchPrefixes: ["gpt"],
+          upstream: { apiFormat: "openai_responses" },
+        },
+        0,
+        new Set<string>(),
+      ),
+    ];
+
+    const catalog = buildModelCatalogForRoutes(
+      plan,
+      routes,
+      new Map([[official.id, official]]),
+    );
+
+    expect(catalog.models.map((model) => model.model).sort()).toEqual([
+      "gpt-5.6-luna",
+      "gpt-5.6-sol",
+    ]);
+  });
+
+  it("keeps mode=all route models in the routed view even without match rules", () => {
+    const kimi: Provider = {
+      id: "kimi",
+      name: "Kimi For Coding-chat",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "k3" }, { model: "k3-256k" }] },
+      },
+      meta: { apiFormat: "openai_chat" },
+    };
+    const routes = [
+      {
+        provider: kimi,
+        route: {
+          id: "router-kimi",
+          targetProviderId: "kimi",
+          modelSelection: { mode: "all" },
+          match: { models: [], prefixes: [] },
+        },
+        index: 0,
+      },
+    ] as never;
+    const catalogModels = [{ model: "k3" }, { model: "k3-256k" }] as never;
+
+    const routed = collectRoutedCatalogModels(routes, catalogModels);
+    expect(routed).toEqual(["k3", "k3-256k"]);
   });
 
   it("reads legacy array codexRouting without clearing routes", () => {
