@@ -334,17 +334,16 @@ function collectProviderCanonicalModelIds(provider?: Provider): string[] {
   return provider ? collectProviderModelIds(provider) : [];
 }
 
-function createRoutePolicyDraft(candidate: RouteCandidate): RoutePolicyDraft {
+// 编辑草稿必须保持持久化 route 的身份字段不变。展示名由渲染层解析，不能借
+// 创建草稿的机会写回 label，否则一次仅为查看/保存的 UI 操作会改变旧 route 的
+// 语义回退路径。
+export function createRoutePolicyDraft(
+  candidate: RouteCandidate,
+): RoutePolicyDraft {
   const route = candidate.route;
   return {
     route: {
       ...route,
-      label: routeSummaryDisplayName(
-        route.label,
-        route.id,
-        candidate.provider?.name,
-        "",
-      ),
       modelSelection: route.modelSelection ?? { mode: "all" },
       matchPrefixes: route.matchPrefixes ?? route.match?.prefixes ?? [],
       aliases: route.aliases ?? route.upstream?.modelMap ?? {},

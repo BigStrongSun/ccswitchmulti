@@ -19,6 +19,7 @@ import {
   buildCodexProxyBaseUrl,
   buildModelCatalogForRoutes,
   CodexRouterWorkspacePage,
+  createRoutePolicyDraft,
   createDraftRoutingPlan,
   dedupeCodexRoutesBySemanticProvider,
   isRoutingPlan,
@@ -432,6 +433,32 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
         undefined,
       ),
     ).toBe("router-5626e6b9-33cb-4c3b-8d16-af8176e16209");
+  });
+
+  it("keeps an opaque legacy route label out of the persisted edit draft", () => {
+    const routeId = "router-5626e6b9-33cb-4c3b-8d16-af8176e16209";
+    const draft = createRoutePolicyDraft({
+      id: routeId,
+      route: {
+        id: routeId,
+        label: routeId,
+        targetProviderId: "deepseek-relay",
+      },
+      provider: {
+        id: "deepseek-relay",
+        name: "DeepSeek Relay",
+      },
+      isExisting: true,
+      matchModels: [],
+      matchPrefixes: [],
+    } as any);
+
+    expect(draft.route.id).toBe(routeId);
+    expect(draft.route.label).toBe(routeId);
+    expect(serializeCodexRouteV2(draft.route, 0).label).toBe(routeId);
+    expect(
+      routeSummaryDisplayName(draft.route.label, routeId, "DeepSeek Relay"),
+    ).toBe("DeepSeek Relay");
   });
 
   it("serializes only schema v2 route policy and drops inherited secrets and capabilities", () => {
