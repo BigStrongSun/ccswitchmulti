@@ -1,4 +1,4 @@
-use super::compiler::compile_v2;
+use super::compiler::compile_v2_strict;
 use super::schema::{
     CodexModelSelection, CodexRouteAuthPolicy, CodexRouteAuthSource, CodexRoutingConfigV2,
     CodexRoutingDocument, CodexRoutingRouteV2, CODEX_ROUTING_SCHEMA_V2,
@@ -148,7 +148,7 @@ pub fn preview_codex_multirouter_migration(
             "migration_did_not_produce_v2".into(),
         ));
     };
-    compile_v2(&migrated_plan, &candidate_providers)
+    compile_v2_strict(&migrated_plan, &candidate_providers)
         .map_err(|error| AppError::InvalidInput(format!("{}: {}", error.code, error.message)))?;
     let token = format!("cmr_{}", uuid::Uuid::new_v4().simple());
     let stored = StoredMigration {

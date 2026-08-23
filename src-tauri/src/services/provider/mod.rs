@@ -1023,6 +1023,71 @@ mod tests {
 
     #[test]
     #[serial]
+    fn schema_v2_subagent_initialization_uses_provider_owned_catalog() {
+        with_test_home(|state, _| {
+            let target = Provider::with_id(
+                "qwen-source".to_string(),
+                "Qwen source".to_string(),
+                json!({
+                    "modelCatalog": {"models": [{
+                        "model": "qwen3.8",
+                        "inputModalities": ["text"],
+                        "contextWindow": 262144
+                    }]}
+                }),
+                None,
+            );
+            let router = Provider::with_id(
+                "router-provider-owned".to_string(),
+                "Provider-owned router".to_string(),
+                json!({
+                    "codexRouting": {
+                        "schemaVersion": 2,
+                        "enabled": true,
+                        "subagentVersion": "v2",
+                        "routes": [{
+                            "id": "qwen",
+                            "enabled": true,
+                            "targetProviderId": "qwen-source",
+                            "modelSelection": {"mode": "all"},
+                            "authPolicy": {"source": "provider_config"}
+                        }]
+                    }
+                }),
+                None,
+            );
+            state
+                .db
+                .save_provider("codex", &target)
+                .expect("save target");
+            state
+                .db
+                .save_provider("codex", &router)
+                .expect("save router without derived catalog");
+
+            let result =
+                ProviderService::initialize_codex_subagent_v2(state, "router-provider-owned")
+                    .expect("initialize from Provider-owned catalog");
+
+            let profiles = result
+                .provider
+                .settings_config
+                .pointer("/codexRouting/subagentV2/profiles")
+                .and_then(Value::as_object)
+                .expect("initialized profiles");
+            assert!(profiles.values().any(|profile| {
+                profile.get("model").and_then(Value::as_str) == Some("qwen3.8")
+            }));
+            assert!(result
+                .provider
+                .settings_config
+                .get("modelCatalog")
+                .is_none());
+        });
+    }
+
+    #[test]
+    #[serial]
     fn add_rejects_unknown_reasoning_before_provider_persistence() {
         with_test_home(|state, _| {
             let provider = Provider::with_id(
@@ -4491,40 +4556,6 @@ impl ProviderService {
         // MultiRouter plan saves all share the same compiler/projection lifecycle.
         Self::persist_provider_mutation(state, &app_type, &provider)?;
 
-        // Best-effort auto-prune of disabled stale V2 profiles (model left the catalog).
-        // Runs after the main save so a prune failure never fails the save. Only Codex
-        // providers with a subagentV2 are affected; enabled profiles are never removed.
-        // No live projection is needed: disabled profiles generate no role files, so the
-        // live config is unchanged by this prune.
-        if app_type == AppType::Codex {
-            if let Ok(Some(pruned)) = crate::codex_config::auto_prune_disabled_stale_subagent_v2(
-                &provider.settings_config,
-            ) {
-                let provider_context =
-                    crate::codex_config::codex_provider_classification_context(state.db.as_ref());
-                let persist = state.db.update_codex_subagent_v2(
-                    &provider.id,
-                    move |settings| {
-                        Ok(
-                            crate::codex_config::hydrate_codex_subagent_v2_input_modalities(
-                                settings, &pruned,
-                            ),
-                        )
-                    },
-                    |settings| {
-                        crate::codex_config::validate_codex_subagent_v2_candidate(
-                            settings,
-                            provider_context.as_ref().ok(),
-                            true,
-                        )
-                    },
-                );
-                if let Err(err) = persist {
-                    log::warn!("Codex V2 auto-prune persist failed (main save succeeded): {err}");
-                }
-            }
-        }
-
         // For other apps: Check if this is current provider (use effective current, not just DB)
         let effective_current =
             crate::settings::get_effective_current_provider(&state.db, &app_type)?;
@@ -4768,11 +4799,29 @@ impl ProviderService {
                 }
             }
         };
-        let verification = codex_subagent_v2_write_verification(
-            state,
-            &provider.settings_config,
-            projection.status,
-        );
+        let effective_settings = Self::codex_subagent_effective_settings(state, &provider, false);
+        let verification = match effective_settings {
+            Ok(settings) => {
+                codex_subagent_v2_write_verification(state, &settings, projection.status)
+            }
+            Err(error) => {
+                log::warn!(
+                    "Codex V2 子 Agent 无法重建 Provider-derived 验证目录，error_kind={}",
+                    app_error_diagnostic_kind(&error)
+                );
+                CodexSubagentV2WriteVerification {
+                    database_persisted: true,
+                    role_files_status: match projection.status {
+                        CodexSubagentV2ProjectionStatus::NotRequired => {
+                            CodexSubagentV2RoleFilesStatus::NotRequired
+                        }
+                        _ => CodexSubagentV2RoleFilesStatus::Failed,
+                    },
+                    role_files: Vec::new(),
+                    activation: CodexSubagentV2ActivationBoundary::RestartCodexAndStartNewSession,
+                }
+            }
+        };
         Ok(CodexSubagentV2MutationResult {
             provider,
             projection,
@@ -4788,21 +4837,26 @@ impl ProviderService {
         provider_id: &str,
         subagent_v2: Value,
     ) -> Result<CodexSubagentV2MutationResult, AppError> {
+        let effective_catalog = Self::codex_subagent_effective_catalog(state, provider_id)?;
         let provider_context =
             crate::codex_config::codex_provider_classification_context(state.db.as_ref())?;
+        let transform_catalog = effective_catalog.clone();
+        let validate_catalog = effective_catalog;
         let candidate = state.db.update_codex_subagent_v2(
             provider_id,
             move |settings| {
+                let effective = Self::with_codex_derived_catalog(settings, &transform_catalog);
                 Ok(
                     crate::codex_config::hydrate_codex_subagent_v2_input_modalities(
-                        settings,
+                        &effective,
                         &subagent_v2,
                     ),
                 )
             },
-            |settings| {
+            move |settings| {
+                let effective = Self::with_codex_derived_catalog(settings, &validate_catalog);
                 crate::codex_config::validate_codex_subagent_v2_candidate(
-                    settings,
+                    &effective,
                     Some(&provider_context),
                     true,
                 )
@@ -4815,19 +4869,25 @@ impl ProviderService {
         state: &AppState,
         provider_id: &str,
     ) -> Result<CodexSubagentV2MutationResult, AppError> {
+        let effective_catalog = Self::codex_subagent_effective_catalog(state, provider_id)?;
         let provider_context =
             crate::codex_config::codex_provider_classification_context(state.db.as_ref())?;
+        let transform_context = provider_context.clone();
+        let transform_catalog = effective_catalog.clone();
+        let validate_catalog = effective_catalog;
         let candidate = state.db.update_codex_subagent_v2(
             provider_id,
-            |settings| {
+            move |settings| {
+                let effective = Self::with_codex_derived_catalog(settings, &transform_catalog);
                 crate::codex_config::initialize_codex_subagent_v2_for_candidate(
-                    settings,
-                    Some(&provider_context),
+                    &effective,
+                    Some(&transform_context),
                 )
             },
-            |settings| {
+            move |settings| {
+                let effective = Self::with_codex_derived_catalog(settings, &validate_catalog);
                 crate::codex_config::validate_codex_subagent_v2_candidate(
-                    settings,
+                    &effective,
                     Some(&provider_context),
                     true,
                 )
@@ -4847,21 +4907,27 @@ impl ProviderService {
                 "Reconcile actions require the current subagentV2 draft".to_string(),
             ));
         }
+        let effective_catalog = Self::codex_subagent_effective_catalog(state, provider_id)?;
         let provider_context =
             crate::codex_config::codex_provider_classification_context(state.db.as_ref())?;
+        let transform_context = provider_context.clone();
+        let transform_catalog = effective_catalog.clone();
+        let validate_catalog = effective_catalog;
         let candidate = state.db.update_codex_subagent_v2(
             provider_id,
-            |settings| {
+            move |settings| {
+                let effective = Self::with_codex_derived_catalog(settings, &transform_catalog);
                 crate::codex_config::reconcile_codex_subagent_v2_for_candidate(
-                    settings,
+                    &effective,
                     action,
                     subagent_v2.as_ref(),
-                    Some(&provider_context),
+                    Some(&transform_context),
                 )
             },
-            |settings| {
+            move |settings| {
+                let effective = Self::with_codex_derived_catalog(settings, &validate_catalog);
                 crate::codex_config::validate_codex_subagent_v2_candidate(
-                    settings,
+                    &effective,
                     Some(&provider_context),
                     false,
                 )
@@ -6785,13 +6851,47 @@ impl ProviderService {
         {
             return Ok(());
         }
+        let effective_settings = Self::codex_subagent_effective_settings(state, provider, true)?;
         let provider_context =
             crate::codex_config::codex_provider_classification_context(state.db.as_ref())?;
         crate::codex_config::validate_codex_subagent_v2_candidate(
-            &provider.settings_config,
+            &effective_settings,
             Some(&provider_context),
             true,
         )
+    }
+
+    fn codex_subagent_effective_settings(
+        state: &AppState,
+        provider: &Provider,
+        strict_router_references: bool,
+    ) -> Result<Value, AppError> {
+        crate::codex_multirouter::projection::effective_settings_for_candidate(
+            state.db.as_ref(),
+            provider,
+            strict_router_references,
+        )
+    }
+
+    fn codex_subagent_effective_catalog(
+        state: &AppState,
+        provider_id: &str,
+    ) -> Result<Value, AppError> {
+        let provider = state
+            .db
+            .get_provider_by_id(provider_id, AppType::Codex.as_str())?
+            .ok_or_else(|| AppError::InvalidInput("Codex provider does not exist".to_string()))?;
+        let effective = Self::codex_subagent_effective_settings(state, &provider, false)?;
+        Ok(effective
+            .get("modelCatalog")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({"models": []})))
+    }
+
+    fn with_codex_derived_catalog(settings: &Value, catalog: &Value) -> Value {
+        let mut effective = settings.clone();
+        effective["modelCatalog"] = catalog.clone();
+        effective
     }
 }
 

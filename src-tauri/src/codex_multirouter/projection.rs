@@ -1,4 +1,6 @@
-use super::compiler::{compile_v2, CompiledCodexModel, CompiledCodexRoutingPlan};
+use super::compiler::{
+    compile_v2, compile_v2_strict, CompiledCodexModel, CompiledCodexRoutingPlan,
+};
 use super::schema::{CodexRouteAuthSource, CodexRoutingDocument};
 use crate::database::Database;
 use crate::error::AppError;
@@ -21,6 +23,7 @@ fn projection_publish_lock() -> &'static Mutex<()> {
 pub enum ProjectionState {
     Ready,
     Pending,
+    NotRequired,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +84,7 @@ pub struct ProjectionReadBack {
     pub catalog_verified: bool,
     pub config_verified: bool,
     pub cache_verified: bool,
+    pub agent_files_verified: bool,
 }
 
 impl ProjectionReadBack {
@@ -90,6 +94,7 @@ impl ProjectionReadBack {
             catalog_verified: true,
             config_verified: true,
             cache_verified: true,
+            agent_files_verified: true,
         }
     }
 
@@ -98,6 +103,7 @@ impl ProjectionReadBack {
             && self.catalog_verified
             && self.config_verified
             && self.cache_verified
+            && self.agent_files_verified
     }
 }
 
@@ -122,23 +128,53 @@ pub fn inspect_codex_multirouter_projection(
     router_provider_id: &str,
 ) -> Result<CodexRoutingProjectionStatus, AppError> {
     let artifact = build_projection_artifact(db, router_provider_id)?;
-    match read_projection_status(db, router_provider_id)? {
-        Some(status) if status.dependency_fingerprint == artifact.dependency_fingerprint => {
-            Ok(status)
-        }
-        Some(_) => Ok(projection_status(
+    if super::active_codex_router_id(db)?.as_deref() != Some(router_provider_id) {
+        return Ok(projection_status(
+            &artifact,
+            ProjectionState::NotRequired,
+            Some("projection_inactive"),
+            Some("This Router is inactive; its shared live projection will be generated when activated"),
+        ));
+    }
+    match crate::codex_config::read_back_codex_multirouter_projection(
+        &artifact.projection_settings,
+    ) {
+        Ok(read_back) if read_back.agrees_with(&artifact.dependency_fingerprint) => Ok(
+            projection_status(&artifact, ProjectionState::Ready, None, None),
+        ),
+        Ok(_) => Ok(projection_status(
             &artifact,
             ProjectionState::Pending,
-            Some("projection_stale"),
-            Some("Codex MultiRouter projection dependencies changed and regeneration is required"),
+            Some("projection_live_drift"),
+            Some("Codex live catalog, config, cache, or managed Agent files differ from the current Provider-derived projection"),
         )),
-        None => Ok(projection_status(
+        Err(_) => Ok(projection_status(
             &artifact,
             ProjectionState::Pending,
-            Some("projection_missing"),
-            Some("Codex MultiRouter projection has not been generated yet"),
+            Some("projection_readback_failed"),
+            Some("Codex live projection could not be read back; retry is available"),
         )),
     }
+}
+
+pub fn inspect_active_codex_multirouter_projection(
+    db: &Database,
+) -> Result<Option<CodexRoutingProjectionStatus>, AppError> {
+    let Some(provider_id) = super::active_codex_router_id(db)? else {
+        return Ok(None);
+    };
+    let Some(provider) = db.get_provider_by_id(&provider_id, "codex")? else {
+        return Ok(None);
+    };
+    let is_schema_v2_router = provider
+        .settings_config
+        .get("codexRouting")
+        .and_then(|value| super::schema::CodexRoutingDocument::parse(value).ok())
+        .is_some_and(|document| matches!(document, super::schema::CodexRoutingDocument::V2(_)));
+    if !is_schema_v2_router {
+        return Ok(None);
+    }
+    inspect_codex_multirouter_projection(db, &provider_id).map(Some)
 }
 
 pub fn ensure_projection_with_publisher<F>(
@@ -263,6 +299,35 @@ pub(crate) fn build_projection_artifact(
         compiled,
         target_provider_names,
     })
+}
+
+/// Materialize Provider-owned model facts for schema-v2 consumers without persisting the
+/// derived catalog back into the Router record.
+pub(crate) fn effective_settings_for_candidate(
+    db: &Database,
+    candidate: &Provider,
+    strict_router_references: bool,
+) -> Result<Value, AppError> {
+    let Some(routing) = candidate.settings_config.get("codexRouting") else {
+        return Ok(candidate.settings_config.clone());
+    };
+    let document = CodexRoutingDocument::parse(routing)
+        .map_err(|error| AppError::InvalidInput(format!("{}: {}", error.code, error.message)))?;
+    let CodexRoutingDocument::V2(plan) = document else {
+        return Ok(candidate.settings_config.clone());
+    };
+    let mut providers = db
+        .get_all_providers("codex")?
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+    providers.insert(candidate.id.clone(), candidate.clone());
+    let compiled = if strict_router_references {
+        compile_v2_strict(&plan, &providers)
+    } else {
+        compile_v2(&plan, &providers)
+    }
+    .map_err(|error| AppError::InvalidInput(format!("{}: {}", error.code, error.message)))?;
+    Ok(projection_settings(candidate, &compiled))
 }
 
 fn projection_settings(router: &Provider, compiled: &CompiledCodexRoutingPlan) -> Value {
@@ -492,6 +557,31 @@ mod tests {
             }),
             None,
         )
+    }
+
+    #[test]
+    fn effective_candidate_settings_compile_provider_catalog_without_router_snapshot() {
+        let db = Database::memory().expect("memory db");
+        db.save_provider("codex", &target("openai_responses"))
+            .expect("save target");
+        let router = router();
+        assert!(router.settings_config.get("modelCatalog").is_none());
+
+        let effective = effective_settings_for_candidate(&db, &router, true)
+            .expect("compile effective settings");
+
+        assert_eq!(
+            effective.pointer("/modelCatalog/models/0/model"),
+            Some(&json!("qwen3.8"))
+        );
+        assert_eq!(
+            effective.pointer("/modelCatalog/models/0/contextWindow"),
+            Some(&json!(262144))
+        );
+        assert_eq!(
+            effective.pointer("/modelCatalog/spawnAgentModels"),
+            Some(&json!(["qwen3.8"]))
+        );
     }
 
     fn save_fixture(db: &Database, api_format: &str) {
@@ -738,34 +828,32 @@ mod tests {
     }
 
     #[test]
-    fn inspect_is_read_only_and_reports_missing_or_stale_projection() {
+    fn inspect_reports_inactive_router_as_not_requiring_shared_projection() {
         let db = Database::memory().expect("memory db");
         save_fixture(&db, "openai_chat");
 
-        let missing = inspect_codex_multirouter_projection(&db, "router")
-            .expect("inspect missing projection");
-        assert_eq!(missing.state, ProjectionState::Pending);
+        let inactive = inspect_codex_multirouter_projection(&db, "router")
+            .expect("inspect inactive projection");
+        assert_eq!(inactive.state, ProjectionState::NotRequired);
         assert_eq!(
-            missing.last_error_code.as_deref(),
-            Some("projection_missing")
+            inactive.last_error_code.as_deref(),
+            Some("projection_inactive")
         );
         assert!(read_projection_status(&db, "router")
             .expect("read status")
             .is_none());
+    }
 
-        ensure_projection_with_publisher(&db, "router", false, |artifact| {
-            Ok(ProjectionReadBack::verified(
-                artifact.dependency_fingerprint.clone(),
-            ))
-        })
-        .expect("seed ready projection");
-        db.save_provider("codex", &target("openai_responses"))
-            .expect("change dependency");
+    #[test]
+    fn inspect_active_projection_returns_none_for_a_direct_provider() {
+        let db = Database::memory().expect("memory db");
+        save_fixture(&db, "openai_chat");
+        db.set_current_provider("codex", "qwen")
+            .expect("make direct provider current");
 
-        let stale =
-            inspect_codex_multirouter_projection(&db, "router").expect("inspect stale projection");
-        assert_eq!(stale.state, ProjectionState::Pending);
-        assert_eq!(stale.last_error_code.as_deref(), Some("projection_stale"));
+        assert!(inspect_active_codex_multirouter_projection(&db)
+            .expect("inspect current provider")
+            .is_none());
     }
 
     #[test]

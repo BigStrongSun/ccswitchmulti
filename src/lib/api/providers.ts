@@ -79,7 +79,7 @@ export interface CodexMultiRouterMigrationApplyOutcome {
   alreadyApplied: boolean;
 }
 
-export type CodexRoutingProjectionState = "ready" | "pending";
+export type CodexRoutingProjectionState = "ready" | "pending" | "not_required";
 
 export interface CodexRoutingProjectionCapabilitySources {
   contextWindow: string;
@@ -234,6 +234,10 @@ export const providersApi = {
     providerId: string,
   ): Promise<CodexRoutingProjectionStatus> {
     return await invoke("inspect_codex_multirouter_projection", { providerId });
+  },
+
+  async inspectActiveCodexMultiRouterProjection(): Promise<CodexRoutingProjectionStatus | null> {
+    return await invoke("inspect_active_codex_multirouter_projection");
   },
 
   async retryCodexMultiRouterProjection(

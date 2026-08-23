@@ -6747,6 +6747,7 @@ function CodexProjectionStatusPanel({
   isRefreshing: boolean;
   onRetry: () => void;
 }) {
+  const inactive = status?.state === "not_required";
   const pending = Boolean(queryError) || status?.state === "pending" || !status;
   const errorMessage =
     retryError ||
@@ -6761,14 +6762,17 @@ function CodexProjectionStatusPanel({
         "mt-3 rounded-lg border p-3 text-xs leading-5",
         pending
           ? "border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-700/50 dark:bg-amber-950/25 dark:text-amber-100"
-          : "border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-700/50 dark:bg-emerald-950/25 dark:text-emerald-100",
+          : inactive
+            ? "border-slate-200 bg-slate-50 text-slate-700 dark:border-slate-600/50 dark:bg-slate-900/60 dark:text-slate-200"
+            : "border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-700/50 dark:bg-emerald-950/25 dark:text-emerald-100",
       )}
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="font-semibold">
-          MultiRouter 目录投影：{pending ? "待同步" : "已同步"}
+          MultiRouter 目录投影：
+          {inactive ? "激活后生成" : pending ? "待同步" : "已同步"}
         </div>
-        {pending ? (
+        {pending && !inactive ? (
           <Button
             size="sm"
             variant="outline"
@@ -6784,14 +6788,24 @@ function CodexProjectionStatusPanel({
         ) : null}
       </div>
       <div className="mt-1">
-        {pending
-          ? "当前 Provider/模型目录与 Codex live 投影可能不一致；先重新同步，再发送请求。"
-          : `已确认 ${status?.routes.length ?? 0} 条模型映射与当前 Provider 目录一致。`}
+        {inactive
+          ? "当前不是正在使用的 MultiRouter；它不拥有共享 live 文件，激活时会按最新 Provider 配置自动生成。"
+          : pending
+            ? "当前 Provider/模型目录与 Codex live 投影可能不一致；先重新同步，再发送请求。"
+            : `已确认 ${status?.routes.length ?? 0} 条模型映射与当前 Provider 目录一致。`}
       </div>
       {errorMessage ? (
         <div className="mt-1">
           原因：{errorMessage}
           {status?.lastErrorCode ? `（${status.lastErrorCode}）` : ""}
+        </div>
+      ) : null}
+      {(status?.warnings ?? []).length > 0 ? (
+        <div className="mt-2 space-y-1 border-t border-current/15 pt-2">
+          <div className="font-medium">需要处理的策略引用</div>
+          {status!.warnings.map((warning) => (
+            <div key={warning}>{warning}</div>
+          ))}
         </div>
       ) : null}
       {routeRows.length > 0 ? (

@@ -160,6 +160,11 @@ export const handlers = [
   }),
 
   http.post(
+    `${TAURI_ENDPOINT}/inspect_active_codex_multirouter_projection`,
+    () => success(null),
+  ),
+
+  http.post(
     `${TAURI_ENDPOINT}/update_providers_sort_order`,
     async ({ request }) => {
       const { updates = [], app } = await withJson<{

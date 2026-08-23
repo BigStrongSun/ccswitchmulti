@@ -66,6 +66,21 @@ export function createProviderSwitchFailureToastOptions({
 
 const codexForceRepairInFlight = new Set<string>();
 
+async function warnIfActiveCodexProjectionPending(
+  appId: AppId,
+  warningMessage: string,
+): Promise<void> {
+  if (appId !== "codex") return;
+  try {
+    const status = await providersApi.inspectActiveCodexMultiRouterProjection();
+    if (status?.state === "pending") {
+      toast.warning(warningMessage, { closeButton: true });
+    }
+  } catch {
+    toast.warning(warningMessage, { closeButton: true });
+  }
+}
+
 export const useAddProviderMutation = (appId: AppId) => {
   const queryClient = useQueryClient();
   const { t } = useTranslation();
@@ -193,6 +208,13 @@ export const useAddProviderMutation = (appId: AppId) => {
           closeButton: true,
         },
       );
+      await warnIfActiveCodexProjectionPending(
+        appId,
+        t("notifications.codexProjectionPending", {
+          defaultValue:
+            "Provider 已保存，但当前 MultiRouter 尚未同步到 Codex。请到 MultiRouter 工作台查看并重试。",
+        }),
+      );
     },
     onError: (error: Error) => {
       const detail = extractErrorMessage(error) || t("common.unknown");
@@ -247,6 +269,13 @@ export const useUpdateProviderMutation = (appId: AppId) => {
         {
           closeButton: true,
         },
+      );
+      await warnIfActiveCodexProjectionPending(
+        appId,
+        t("notifications.codexProjectionPending", {
+          defaultValue:
+            "Provider 已保存，但当前 MultiRouter 尚未同步到 Codex。请到 MultiRouter 工作台查看并重试。",
+        }),
       );
     },
     onError: (error: Error) => {

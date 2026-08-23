@@ -4284,6 +4284,15 @@ supported in one streaming turn`。
 - `AppSettings.launch_codex_desktop_with_ccswitch` 是独立、默认关闭的设备级设置，前端字段为 `launchCodexDesktopWithCcswitch`。它只在 CCSwitchMulti 实际启动时调用 `codex_desktop::launch_codex_desktop_with_ccswitch`；仅开启 `launchOnStartup` 不会拉起 Codex。已运行时保持幂等，未找到 Desktop 可执行文件时只记录警告，不阻断 CCSwitchMulti。
 - 设置页在“开机自启”之后直接显示“启动 CCSwitchMulti 时启动 Codex Desktop”，文案明确其独立性。回归覆盖旧 settings 只有 `launchOnStartup=true` 时新开关仍为 false，以及启动判定的 disabled/running 四种组合。
 
+## 2026-08-24 MultiRouter Provider SSOT 验收前根修
+
+- schema-v2 Router 数据库只保留路由策略，所有 Provider 模型事实由 `compile_provider_v2` 现算。Router 删除 Provider 后不再回写空 `modelCatalog`；前后端 schema-v2 保存边界都会清理遗留 `modelCatalog/model_catalog`，但不会改动 legacy Router 或普通 Provider 的目录。
+- Provider 删除、停用或改名使 `include`/alias 暂时失效时，Provider 保存不再被 Router 反向阻塞：保留用户白名单策略，当前投影只编译 Provider 现存模型交集并显示结构化 warning；模型恢复后自动重新进入原白名单。用户主动保存新的无效 Router 引用仍严格拒绝，disabled Route 不参与依赖校验。
+- Sub-Agent V2 的初始化、校验、reconcile、模态 hydration 与 Agent TOML 回读统一使用内存态 Provider-derived effective settings；不再依赖 Router 旧目录，也不再隐式删除 disabled stale profiles。空 Agent 文件集合不能假报 Verified。
+- MultiRouter 向导从当前 Provider catalog 与 `routes[].modelSelection` 初始化，保留 `mode=all` 自动跟随语义；spawn candidates 的兼容读取顺序为 `options -> codexRouting.spawnAgentModels -> legacy modelCatalog`，schema-v2 保存不再把旧目录带回数据库。
+- 投影状态会真实回读 catalog、config、cache 和 CCSM 受管 Agent TOML；文件漂移/丢失返回 pending，非活动 Router 返回 `not_required` 并提示激活时生成。Provider 新增或保存后前端会只读检查当前激活 Router；pending 或检查失败时立即提示用户到工作台查看并重试，直接 Provider 模式返回空，不制造异常。
+- 最终验证：Rust `3343 passed / 0 failed / 6 ignored`；Vitest `146 files / 1187 tests`；`pnpm typecheck`、`pnpm build:renderer`、相关文件 Prettier/rustfmt、严格 UTF-8 无 BOM 与 `git diff --check` 通过。全局 `cargo fmt --check` 仍被本轮未改的 preset registry/catalog、sync 与 openai compatibility 文件既有格式漂移阻塞；本轮没有发布、安装、重启或替换运行中的 CCSM。
+
 ## 2026-08-24 MultiRouter 跟随 Provider 的同步边界补审
 
 - schema-v2 MultiRouter 的数据库事实只包含路由策略：`targetProviderId`、`modelSelection`、别名、认证策略、启停/顺序、`spawnAgentModels` 与 Sub-Agent 配置。目标 Provider 的 URL、认证内容、协议、模型清单、上下文、输入模态、推理档位、Ultra、缓存能力、显示名、启停和模型排序不得复制回 Router。

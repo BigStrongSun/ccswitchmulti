@@ -180,6 +180,9 @@ pub fn validate_v2(
                 "route id is duplicated",
             );
         }
+        if !route.enabled {
+            continue;
+        }
         if !providers.contains_key(route.target_provider_id.trim()) {
             push_issue(
                 &mut issues,

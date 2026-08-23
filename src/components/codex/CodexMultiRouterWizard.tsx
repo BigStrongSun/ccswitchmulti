@@ -59,6 +59,7 @@ import {
   DEFAULT_CODEX_OFFICIAL_AUTH,
   applyWizardConnectivityApiFormatOverrides,
   buildCodexMultiRouterWizardPlan,
+  initialWizardCatalogModelOrder,
   buildWizardModelCatalog,
   canContinueAfterConnectivity,
   classifyWizardDualProtocolConnectivityResult,
@@ -855,9 +856,7 @@ export function CodexMultiRouterWizard({
     setImageGenerationEnabled(hostedTools.imageGeneration.enabled);
     // 复用统一的安全目录读取，历史方案中混入 null/原始值时不能让整个窗口白屏。
     setCatalogModelOrder(
-      existingPlan?.settingsConfig?.modelCatalog
-        ? readWizardModelCatalog(existingPlan).map((model) => model.model)
-        : null,
+      initialWizardCatalogModelOrder(existingPlan, providerModelSources),
     );
     setDraftSpawnAgentModels(
       existingPlan?.settingsConfig?.codexRouting?.schemaVersion === 2
@@ -977,7 +976,7 @@ export function CodexMultiRouterWizard({
     });
   };
 
-  // 调整最终模型列表顺序；这个顺序会写入 MultiRouter modelCatalog。
+  // 调整最终模型选择与顺序；schema v2 只把 all/include 策略写入 Router。
   const moveCatalogModel = (model: string, direction: -1 | 1) => {
     setCatalogModelOrder((current) =>
       moveOrderedItem(
@@ -2090,9 +2089,10 @@ export function CodexMultiRouterWizard({
             {currentStep.key === "review" && (
               <div className="space-y-4">
                 <div className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
-                  这里决定最终写入 MultiRouter modelCatalog 和各 route
-                  的模型。取消勾选会把旧模型或不想暴露的模型从最终路由里剔除。V4
-                  Pro / Flash 子 Agent
+                  这里决定各 route 跟随 Provider
+                  的全部模型，还是只保留显式白名单。
+                  取消勾选会把旧模型或不想暴露的模型从最终路由里剔除。V4 Pro /
+                  Flash 子 Agent
                   角色会从可路由目录自动注册，无需在向导中手工选模型。
                 </div>
                 <div className="flex flex-wrap items-center gap-2">

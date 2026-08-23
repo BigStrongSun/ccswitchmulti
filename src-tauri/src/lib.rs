@@ -1401,6 +1401,7 @@ pub fn run() {
             commands::initialize_codex_subagent_v2,
             commands::reconcile_codex_subagent_v2_profiles,
             commands::inspect_codex_multirouter_projection,
+            commands::inspect_active_codex_multirouter_projection,
             commands::retry_codex_multirouter_projection,
             commands::get_codex_multirouter_revision,
             commands::preview_codex_multirouter_migration,

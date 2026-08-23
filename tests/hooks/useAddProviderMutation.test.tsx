@@ -10,7 +10,14 @@ const apiMocks = vi.hoisted(() => ({
   ensureClaudeDesktopOfficialProvider: vi.fn(),
   ensureCodexOfficialProvider: vi.fn(),
   getAll: vi.fn(),
+  inspectActiveCodexMultiRouterProjection: vi.fn(),
   updateTrayMenu: vi.fn(),
+}));
+
+const toastMocks = vi.hoisted(() => ({
+  success: vi.fn(),
+  error: vi.fn(),
+  warning: vi.fn(),
 }));
 
 const uuidMocks = vi.hoisted(() => ({
@@ -25,6 +32,8 @@ vi.mock("@/lib/api", () => ({
     ensureCodexOfficialProvider: (...args: unknown[]) =>
       apiMocks.ensureCodexOfficialProvider(...args),
     getAll: (...args: unknown[]) => apiMocks.getAll(...args),
+    inspectActiveCodexMultiRouterProjection: (...args: unknown[]) =>
+      apiMocks.inspectActiveCodexMultiRouterProjection(...args),
     updateTrayMenu: (...args: unknown[]) => apiMocks.updateTrayMenu(...args),
   },
   sessionsApi: {},
@@ -36,10 +45,7 @@ vi.mock("@/utils/uuid", () => ({
 }));
 
 vi.mock("sonner", () => ({
-  toast: {
-    success: vi.fn(),
-    error: vi.fn(),
-  },
+  toast: toastMocks,
 }));
 
 function createWrapper() {
@@ -64,7 +70,16 @@ beforeEach(() => {
     .mockResolvedValue(true);
   apiMocks.ensureCodexOfficialProvider.mockReset().mockResolvedValue(true);
   apiMocks.getAll.mockReset().mockResolvedValue({});
+  apiMocks.inspectActiveCodexMultiRouterProjection
+    .mockReset()
+    .mockResolvedValue({
+      routerProviderId: "router-active",
+      state: "ready",
+    });
   apiMocks.updateTrayMenu.mockReset().mockResolvedValue(true);
+  toastMocks.success.mockReset();
+  toastMocks.error.mockReset();
+  toastMocks.warning.mockReset();
   uuidMocks.generateUUID.mockReset().mockReturnValue("generated-uuid");
 });
 
@@ -166,5 +181,32 @@ describe("useAddProviderMutation", () => {
     expect(apiMocks.getAll).toHaveBeenCalledWith("codex");
     expect(apiMocks.add).not.toHaveBeenCalled();
     expect(persistedProvider).toEqual(seedProvider);
+  });
+
+  it("warns immediately when adding a Codex Provider leaves the active Router pending", async () => {
+    apiMocks.inspectActiveCodexMultiRouterProjection.mockResolvedValueOnce({
+      routerProviderId: "router-active",
+      state: "pending",
+      lastErrorCode: "projection_readback_failed",
+    });
+    const { wrapper } = createWrapper();
+    const { result } = renderHook(() => useAddProviderMutation("codex"), {
+      wrapper,
+    });
+
+    await act(async () => {
+      await result.current.mutateAsync({
+        name: "Third-party Codex",
+        settingsConfig: {},
+      });
+    });
+
+    expect(
+      apiMocks.inspectActiveCodexMultiRouterProjection,
+    ).toHaveBeenCalledTimes(1);
+    expect(toastMocks.warning).toHaveBeenCalledWith(
+      "Provider 已保存，但当前 MultiRouter 尚未同步到 Codex。请到 MultiRouter 工作台查看并重试。",
+      { closeButton: true },
+    );
   });
 });

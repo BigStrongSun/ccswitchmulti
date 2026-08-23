@@ -19,6 +19,7 @@ import { emitTauriEvent } from "../msw/tauriMocks";
 
 const toastSuccessMock = vi.fn();
 const toastErrorMock = vi.fn();
+const toastWarningMock = vi.fn();
 const skillsPanelMocks = vi.hoisted(() => ({
   checkUpdates: vi.fn(),
   openDiscovery: vi.fn(),
@@ -28,6 +29,7 @@ vi.mock("sonner", () => ({
   toast: {
     success: (...args: unknown[]) => toastSuccessMock(...args),
     error: (...args: unknown[]) => toastErrorMock(...args),
+    warning: (...args: unknown[]) => toastWarningMock(...args),
   },
 }));
 
@@ -247,6 +249,7 @@ describe("App integration with MSW", () => {
     resetProviderState();
     toastSuccessMock.mockReset();
     toastErrorMock.mockReset();
+    toastWarningMock.mockReset();
     skillsPanelMocks.checkUpdates.mockReset();
     skillsPanelMocks.openDiscovery.mockReset();
     localStorage.removeItem("cc-switch-last-view");

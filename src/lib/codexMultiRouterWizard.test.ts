@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { Provider } from "@/types";
-import { buildCodexMultiRouterWizardPlan } from "./codexMultiRouterWizard";
+import {
+  buildCodexMultiRouterWizardPlan,
+  initialWizardCatalogModelOrder,
+} from "./codexMultiRouterWizard";
 
 const deepseekSource: Provider = {
   id: "deepseek-source",
@@ -57,5 +60,68 @@ describe("buildCodexMultiRouterWizardPlan subagent version", () => {
     expect(plan.settingsConfig.codexRouting.spawnAgentModels).toEqual([
       "deepseek-v4-pro",
     ]);
+  });
+
+  it("derives schema-v2 all-selection from current Provider facts instead of stale Router catalog", () => {
+    const source: Provider = {
+      ...deepseekSource,
+      settingsConfig: {
+        ...deepseekSource.settingsConfig,
+        modelCatalog: {
+          models: [
+            { model: "deepseek-v4-flash" },
+            { model: "deepseek-v4-pro" },
+            { model: "deepseek-v4-vision" },
+          ],
+        },
+      },
+    };
+    const existingPlan: Provider = {
+      id: "router-v2",
+      name: "Router V2",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: {
+          models: [{ model: "deepseek-v4-flash" }],
+          spawnAgentModels: ["stale-router-candidate"],
+        },
+        codexRouting: {
+          schemaVersion: 2,
+          enabled: true,
+          spawnAgentModels: ["deepseek-v4-pro"],
+          routes: [
+            {
+              id: "deepseek",
+              enabled: true,
+              targetProviderId: source.id,
+              modelSelection: { mode: "all" },
+              authPolicy: { source: "provider_config" },
+            },
+          ],
+        },
+      },
+    };
+
+    const order = initialWizardCatalogModelOrder(existingPlan, [source]);
+    expect(order).toEqual([
+      "deepseek-v4-flash",
+      "deepseek-v4-pro",
+      "deepseek-v4-vision",
+    ]);
+    const { plan } = buildCodexMultiRouterWizardPlan(
+      [source, existingPlan],
+      [source],
+      existingPlan,
+      { catalogModelOrder: order ?? undefined },
+    );
+
+    expect(plan.settingsConfig.codexRouting.routes[0].modelSelection).toEqual({
+      mode: "all",
+    });
+    expect(plan.settingsConfig.codexRouting.spawnAgentModels).toEqual([
+      "deepseek-v4-pro",
+    ]);
+    expect(plan.settingsConfig).not.toHaveProperty("modelCatalog");
+    expect(plan.settingsConfig).not.toHaveProperty("model_catalog");
   });
 });

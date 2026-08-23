@@ -1,5 +1,5 @@
 use super::active_codex_router_id;
-use super::compiler::compile_v2;
+use super::compiler::{compile_v2, compile_v2_strict};
 use super::projection::{
     ensure_projection_with_publisher, CodexRoutingProjectionArtifact, CodexRoutingProjectionStatus,
     ProjectionReadBack,
@@ -84,7 +84,11 @@ fn remove_schema_v2_router_derived_catalog(provider: &mut Provider) {
     if !is_schema_v2_router {
         return;
     }
-    if let Some(settings) = provider.settings_config.as_object_mut() {
+    remove_derived_catalog_fields(&mut provider.settings_config);
+}
+
+fn remove_derived_catalog_fields(settings_config: &mut serde_json::Value) {
+    if let Some(settings) = settings_config.as_object_mut() {
         settings.remove("modelCatalog");
         settings.remove("model_catalog");
     }
@@ -126,7 +130,15 @@ fn validate_and_collect_affected_router_ids(
         let CodexRoutingDocument::V2(plan) = document else {
             continue;
         };
-        compile_v2(&plan, &providers).map_err(|error| {
+        if !plan.enabled {
+            continue;
+        }
+        let compile_result = if router.id == candidate.id {
+            compile_v2_strict(&plan, &providers)
+        } else {
+            compile_v2(&plan, &providers)
+        };
+        compile_result.map_err(|error| {
             AppError::InvalidInput(format!("{}: {}", error.code, error.message))
         })?;
         affected.push(router.id.clone());
@@ -219,12 +231,7 @@ where
                 "Failed to serialize cascaded Codex routes: {error}"
             ))
         })?;
-        if disabled {
-            settings_config["modelCatalog"] = serde_json::json!({
-                "models": [],
-                "spawnAgentModels": []
-            });
-        }
+        remove_derived_catalog_fields(&mut settings_config);
         prepared.push(PreparedRouterDeletion {
             router_id: router.id.clone(),
             settings_config,
@@ -499,6 +506,68 @@ mod tests {
     }
 
     #[test]
+    fn provider_model_removal_preserves_include_policy_and_publishes_current_intersection() {
+        let db = Database::memory().expect("memory db");
+        db.save_provider("codex", &target("openai_responses"))
+            .expect("seed target");
+        let mut router = router("router-a", "qwen");
+        router.settings_config["codexRouting"]["routes"][0]["modelSelection"] =
+            json!({"mode": "include", "models": ["qwen3.8"]});
+        db.save_provider("codex", &router).expect("seed router");
+        db.set_current_provider("codex", "router-a")
+            .expect("activate router");
+        let mut updated = target("openai_responses");
+        updated.settings_config["modelCatalog"]["models"] = json!([]);
+        let warning_seen = Cell::new(false);
+
+        apply_codex_provider_mutation_with_publisher(&db, updated, |artifact| {
+            assert!(artifact.compiled.model_catalog.is_empty());
+            warning_seen.set(
+                artifact
+                    .compiled
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.code == "selected_model_unavailable"),
+            );
+            Ok(ProjectionReadBack::verified(
+                artifact.dependency_fingerprint.clone(),
+            ))
+        })
+        .expect("Provider fact update must not be blocked by stale include policy");
+
+        assert!(warning_seen.get());
+        let saved_router = db
+            .get_provider_by_id("router-a", "codex")
+            .expect("read router")
+            .expect("router remains");
+        assert_eq!(
+            saved_router.settings_config["codexRouting"]["routes"][0]["modelSelection"],
+            json!({"mode": "include", "models": ["qwen3.8"]})
+        );
+    }
+
+    #[test]
+    fn router_save_strictly_rejects_new_unavailable_include_references() {
+        let db = Database::memory().expect("memory db");
+        db.save_provider("codex", &target("openai_responses"))
+            .expect("seed target");
+        let mut router = router("router-a", "qwen");
+        router.settings_config["codexRouting"]["routes"][0]["modelSelection"] =
+            json!({"mode": "include", "models": ["missing-model"]});
+
+        let error = apply_codex_provider_mutation_with_publisher(&db, router, |_| {
+            panic!("invalid Router must not publish")
+        })
+        .expect_err("new invalid Router policy must fail strict validation");
+
+        assert!(error.to_string().contains("selected_model_missing"));
+        assert!(db
+            .get_provider_by_id("router-a", "codex")
+            .expect("read rejected router")
+            .is_none());
+    }
+
+    #[test]
     fn unrelated_invalid_router_does_not_block_provider_mutation() {
         let db = Database::memory().expect("memory db");
         db.save_provider("codex", &target("openai_chat"))
@@ -588,6 +657,8 @@ mod tests {
         assert!(saved_router.settings_config["codexRouting"]
             .get("defaultRouteId")
             .is_none());
+        assert!(saved_router.settings_config.get("modelCatalog").is_none());
+        assert!(saved_router.settings_config.get("model_catalog").is_none());
         assert_eq!(outcome.affected_plan_ids, vec!["router-a"]);
         assert_eq!(outcome.disabled_plan_ids, vec!["router-a"]);
         assert_eq!(outcome.removed_candidates, vec!["qwen3.8"]);
@@ -747,7 +818,7 @@ mod tests {
         db.save_provider("codex", &target("openai_chat"))
             .expect("seed shared target");
 
-        let personal = Provider::with_id(
+        let mut personal = Provider::with_id(
             "router-personal".to_string(),
             "Personal".to_string(),
             json!({
@@ -775,7 +846,8 @@ mod tests {
             }),
             None,
         );
-        let company = Provider::with_id(
+        personal.settings_config["modelCatalog"] = json!({"models": [{"model": "stale-personal"}]});
+        let mut company = Provider::with_id(
             "router-company".to_string(),
             "Company".to_string(),
             json!({
@@ -803,6 +875,7 @@ mod tests {
             }),
             None,
         );
+        company.settings_config["model_catalog"] = json!({"models": [{"model": "stale-company"}]});
         db.save_provider("codex", &personal)
             .expect("save personal router");
         db.save_provider("codex", &company)
@@ -844,5 +917,13 @@ mod tests {
         .expect("delete shared target");
 
         assert_eq!(published.into_inner(), vec!["router-personal".to_string()]);
+        for router_id in ["router-personal", "router-company"] {
+            let saved = db
+                .get_provider_by_id(router_id, "codex")
+                .expect("read cascaded router")
+                .expect("cascaded router remains");
+            assert!(saved.settings_config.get("modelCatalog").is_none());
+            assert!(saved.settings_config.get("model_catalog").is_none());
+        }
     }
 }

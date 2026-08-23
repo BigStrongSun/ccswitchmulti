@@ -4023,63 +4023,6 @@ pub(crate) fn reconcile_codex_subagent_v2_for_candidate(
     ))
 }
 
-/// Best-effort auto-prune of DISABLED V2 profiles whose model is no longer present in the
-/// MultiRouter catalog (`modelCatalog.models`). This lets the V2 profile list follow the
-/// catalog when the user removes a model, without touching ENABLED profiles (active
-/// configurations are never auto-removed) or parse-invalid profiles (handled by the
-/// explicit RemoveAllInvalid / RecoverAllInvalidFromCatalog actions).
-///
-/// Returns `Some(pruned_subagent_v2)` when at least one stale disabled profile was removed,
-/// otherwise `None`. The prune is idempotent: once a stale disabled profile is removed it
-/// stays removed; if the model re-enters the catalog, the SyncCatalog action re-creates a
-/// fresh draft. Uses catalog membership (not routability) so a model that is present in the
-/// catalog but temporarily missing a route is never auto-pruned.
-pub(crate) fn auto_prune_disabled_stale_subagent_v2(
-    settings: &Value,
-) -> Result<Option<Value>, AppError> {
-    let Some(subagent_v2) = settings
-        .get("codexRouting")
-        .and_then(|routing| routing.get("subagentV2"))
-    else {
-        return Ok(None);
-    };
-    let catalog_identities: HashSet<String> = codex_catalog_model_specs(settings, "")
-        .iter()
-        .map(|spec| normalize_profile_key(&spec.model))
-        .filter(|identity| !identity.is_empty())
-        .collect();
-    let mut pruned = subagent_v2.clone();
-    let Some(profiles) = pruned.get_mut("profiles").and_then(Value::as_object_mut) else {
-        return Ok(None);
-    };
-    let keys: Vec<String> = profiles.keys().cloned().collect();
-    let mut removed = 0usize;
-    for key in keys {
-        let Some(raw) = profiles.get(&key) else {
-            continue;
-        };
-        // Only prune profiles that are explicitly DISABLED; enabled or missing-enabled
-        // profiles are never auto-removed (conservative: no active-config data loss).
-        if raw.get("enabled").and_then(Value::as_bool) != Some(false) {
-            continue;
-        }
-        let identity = raw
-            .get("model")
-            .and_then(Value::as_str)
-            .map(normalize_profile_key)
-            .filter(|identity| !identity.is_empty())
-            .unwrap_or_else(|| normalize_profile_key(&key));
-        if !catalog_identities.contains(&identity) {
-            profiles.shift_remove(&key);
-            removed += 1;
-        }
-    }
-    if removed == 0 {
-        return Ok(None);
-    }
-    Ok(Some(pruned))
-}
-
 pub(crate) fn validate_codex_subagent_v2_candidate(
     settings: &Value,
     provider_context: Option<&ProviderClassificationContext>,
@@ -6065,7 +6008,7 @@ fn prepare_codex_config_text_with_model_catalog_impl(
 pub(crate) fn publish_codex_multirouter_projection(
     projection_settings: &Value,
 ) -> Result<crate::codex_multirouter::projection::ProjectionReadBack, AppError> {
-    let expected_fingerprint = projection_settings
+    let _expected_fingerprint = projection_settings
         .pointer("/codexRoutingProjection/dependencyFingerprint")
         .and_then(Value::as_str)
         .map(str::trim)
@@ -6082,6 +6025,23 @@ pub(crate) fn publish_codex_multirouter_projection(
         CodexCatalogToolProfile::NativeResponses,
     )?;
     write_codex_live_config_atomic(Some(&prepared))?;
+
+    read_back_codex_multirouter_projection(projection_settings)
+}
+
+pub(crate) fn read_back_codex_multirouter_projection(
+    projection_settings: &Value,
+) -> Result<crate::codex_multirouter::projection::ProjectionReadBack, AppError> {
+    let expected_fingerprint = projection_settings
+        .pointer("/codexRoutingProjection/dependencyFingerprint")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|fingerprint| !fingerprint.is_empty())
+        .ok_or_else(|| {
+            AppError::Message(
+                "Codex MultiRouter projection dependency fingerprint is missing".to_string(),
+            )
+        })?;
 
     let catalog: Value = read_json_file(&get_codex_model_catalog_path())?;
     let read_fingerprint = catalog
@@ -6107,12 +6067,16 @@ pub(crate) fn publish_codex_multirouter_projection(
     let cache_verified = read_json_file_if_exists(&get_codex_models_cache_path())?
         .as_ref()
         .is_some_and(codex_models_cache_is_cc_switch_owned);
+    let agent_files_verified = verify_codex_subagent_role_files(projection_settings, None)?
+        .iter()
+        .all(|file| file.exists && file.content_matches);
 
     Ok(crate::codex_multirouter::projection::ProjectionReadBack {
         dependency_fingerprint: read_fingerprint,
         catalog_verified,
         config_verified,
         cache_verified,
+        agent_files_verified,
     })
 }
 
@@ -8985,67 +8949,6 @@ mod tests {
         assert!(pruned["profiles"].get("stale-enabled").is_none());
         parse_persisted_subagent_v2(&pruned)
             .expect("prune must produce strict-storage valid output");
-    }
-
-    #[test]
-    fn codex_subagent_v2_auto_prune_removes_disabled_stale_only() {
-        let settings = codex_subagent_profile_status_settings(
-            "v2",
-            json!({
-                "repository-scout": codex_subagent_profile_status_profile("repository-scout", true),
-                "deepseek-v4-pro": codex_subagent_profile_status_profile("deepseek-v4-pro", false),
-                "stale-disabled": codex_subagent_profile_status_profile("stale-disabled", false),
-                "stale-enabled": codex_subagent_profile_status_profile("stale-enabled", true)
-            }),
-            json!([
-                { "model": "repository-scout", "contextWindow": 128000 },
-                { "model": "deepseek-v4-pro", "contextWindow": 1000000 }
-            ]),
-            json!([{
-                "id": "all-models",
-                "match": { "models": ["repository-scout", "deepseek-v4-pro"] },
-                "upstream": { "auth": { "source": "provider_config" } }
-            }]),
-        );
-
-        let pruned = auto_prune_disabled_stale_subagent_v2(&settings)
-            .expect("auto-prune must succeed")
-            .expect("auto-prune must remove the stale disabled profile");
-
-        // In-catalog profiles are kept (even if disabled).
-        assert!(pruned["profiles"].get("repository-scout").is_some());
-        assert!(pruned["profiles"].get("deepseek-v4-pro").is_some());
-        // Disabled + not-in-catalog is removed.
-        assert!(pruned["profiles"].get("stale-disabled").is_none());
-        // Enabled + not-in-catalog is kept (enabled profiles are never auto-removed).
-        assert!(pruned["profiles"].get("stale-enabled").is_some());
-    }
-
-    #[test]
-    fn codex_subagent_v2_auto_prune_is_noop_when_no_stale_disabled() {
-        let settings = codex_subagent_profile_status_settings(
-            "v2",
-            json!({
-                "repository-scout": codex_subagent_profile_status_profile("repository-scout", true),
-                "deepseek-v4-pro": codex_subagent_profile_status_profile("deepseek-v4-pro", false)
-            }),
-            json!([
-                { "model": "repository-scout", "contextWindow": 128000 },
-                { "model": "deepseek-v4-pro", "contextWindow": 1000000 }
-            ]),
-            json!([{
-                "id": "all-models",
-                "match": { "models": ["repository-scout", "deepseek-v4-pro"] },
-                "upstream": { "auth": { "source": "provider_config" } }
-            }]),
-        );
-
-        let pruned =
-            auto_prune_disabled_stale_subagent_v2(&settings).expect("auto-prune must succeed");
-        assert!(
-            pruned.is_none(),
-            "no stale disabled profile means no change"
-        );
     }
 
     fn parse_test_profile(
@@ -16284,6 +16187,7 @@ wire_api = "responses"
         assert!(read_back.catalog_verified);
         assert!(read_back.config_verified);
         assert!(read_back.cache_verified);
+        assert!(read_back.agent_files_verified);
         let catalog: Value = read_json_file(&get_codex_model_catalog_path()).expect("read catalog");
         assert_eq!(
             catalog["ccSwitchRoutingDependencyFingerprint"],

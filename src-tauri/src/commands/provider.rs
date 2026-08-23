@@ -122,6 +122,14 @@ pub fn inspect_codex_multirouter_projection(
 }
 
 #[tauri::command]
+pub fn inspect_active_codex_multirouter_projection(
+    state: State<'_, AppState>,
+) -> Result<Option<crate::codex_multirouter::projection::CodexRoutingProjectionStatus>, String> {
+    crate::codex_multirouter::projection::inspect_active_codex_multirouter_projection(&state.db)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 #[allow(non_snake_case)]
 pub fn retry_codex_multirouter_projection(
     state: State<'_, AppState>,

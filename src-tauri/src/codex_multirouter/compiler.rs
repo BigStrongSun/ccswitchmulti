@@ -144,10 +144,10 @@ pub fn compile_v2(
         });
     }
 
-    let candidates = collect_candidates(plan, providers)?;
+    let mut warnings = Vec::new();
+    let candidates = collect_candidates(plan, providers, &mut warnings)?;
     let collision_counts = canonical_collision_counts(&candidates);
     let canonical_owners = canonical_owner_counts(&candidates);
-    let mut warnings = Vec::new();
     let mut used_visible = HashSet::new();
     let mut model_catalog = Vec::new();
     let mut route_visible_models = vec![Vec::new(); plan.routes.len()];
@@ -253,6 +253,7 @@ pub fn compile_v2(
 fn collect_candidates<'a>(
     plan: &'a CodexRoutingConfigV2,
     providers: &'a HashMap<String, Provider>,
+    warnings: &mut Vec<CompilerWarning>,
 ) -> Result<Vec<ModelCandidate<'a>>, CodexRoutingCompileError> {
     let mut candidates = Vec::new();
     for (route_index, route) in plan.routes.iter().enumerate() {
@@ -313,12 +314,14 @@ fn collect_candidates<'a>(
             });
         }
         if let Some(selected) = selected {
-            let missing = selected.difference(&found).next();
-            if let Some(missing) = missing {
-                return Err(CodexRoutingCompileError {
-                    code: "selected_model_missing".to_string(),
+            let mut missing = selected.difference(&found).cloned().collect::<Vec<_>>();
+            missing.sort();
+            for missing in missing {
+                warnings.push(CompilerWarning {
+                    code: "selected_model_unavailable".to_string(),
+                    route_id: Some(route.id.clone()),
                     message: format!(
-                        "route {} selects model `{missing}` which is not in provider {}",
+                        "route {} keeps unavailable selected model `{missing}` from provider {}; it is excluded from the current projection",
                         route_display(route, Some(provider)),
                         provider_display(provider),
                     ),
@@ -331,8 +334,9 @@ fn collect_candidates<'a>(
             .map(|target| target.trim())
             .find(|target| !found.contains(&target.to_ascii_lowercase()))
         {
-            return Err(CodexRoutingCompileError {
-                code: "alias_target_missing".to_string(),
+            warnings.push(CompilerWarning {
+                code: "alias_target_unavailable".to_string(),
+                route_id: Some(route.id.clone()),
                 message: format!(
                     "route {} aliases model `{missing_target}` which is not selected from provider {}",
                     route_display(route, Some(provider)),
@@ -342,6 +346,29 @@ fn collect_candidates<'a>(
         }
     }
     Ok(candidates)
+}
+
+pub fn compile_v2_strict(
+    plan: &CodexRoutingConfigV2,
+    providers: &HashMap<String, Provider>,
+) -> Result<CompiledCodexRoutingPlan, CodexRoutingCompileError> {
+    let compiled = compile_v2(plan, providers)?;
+    if let Some(warning) = compiled.warnings.iter().find(|warning| {
+        matches!(
+            warning.code.as_str(),
+            "selected_model_unavailable" | "alias_target_unavailable"
+        )
+    }) {
+        return Err(CodexRoutingCompileError {
+            code: match warning.code.as_str() {
+                "selected_model_unavailable" => "selected_model_missing",
+                _ => "alias_target_missing",
+            }
+            .to_string(),
+            message: warning.message.clone(),
+        });
+    }
+    Ok(compiled)
 }
 
 fn route_display(route: &CodexRoutingRouteV2, provider: Option<&Provider>) -> String {
@@ -938,6 +965,50 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_include_models_do_not_block_provider_fact_updates() {
+        let provider = provider(
+            "qwen",
+            "Qwen",
+            "openai_responses",
+            json!([{"model": "qwen3.9"}]),
+        );
+        let route = route(
+            "router-qwen",
+            "qwen",
+            CodexModelSelection::Include {
+                models: vec!["qwen3.8".to_string(), "qwen3.9".to_string()],
+            },
+        );
+
+        let compiled = compile(&plan(vec![route]), [provider]);
+
+        assert_eq!(compiled.visible_models, vec!["qwen3.9"]);
+        assert!(compiled.warnings.iter().any(|warning| {
+            warning.code == "selected_model_unavailable"
+                && warning.route_id.as_deref() == Some("router-qwen")
+                && warning.message.contains("qwen3.8")
+        }));
+    }
+
+    #[test]
+    fn disabled_routes_do_not_require_stale_provider_dependencies() {
+        let mut disabled = route(
+            "disabled-qwen",
+            "deleted-provider",
+            CodexModelSelection::Include {
+                models: vec!["deleted-model".to_string()],
+            },
+        );
+        disabled.enabled = false;
+
+        let compiled = compile_v2(&plan(vec![disabled]), &HashMap::new())
+            .expect("disabled route must not block the active plan");
+
+        assert!(compiled.visible_models.is_empty());
+        assert!(compiled.warnings.is_empty());
+    }
+
+    #[test]
     fn model_protocol_overrides_provider_default_per_canonical_model() {
         let provider = provider(
             "mixed",
@@ -1370,7 +1441,7 @@ mod tests {
     }
 
     #[test]
-    fn all_selection_rejects_alias_targets_missing_from_provider_catalog() {
+    fn unavailable_alias_target_is_reported_without_blocking_provider_updates() {
         let provider = provider(
             "qwen",
             "Qwen",
@@ -1384,12 +1455,16 @@ mod tests {
             .insert("ghost".to_string(), "missing-model".to_string());
         let providers = [(provider.id.clone(), provider)].into_iter().collect();
 
-        let error = compile_v2(&plan(vec![route]), &providers)
-            .expect_err("unknown alias target must not be discarded");
+        let compiled = compile_v2(&plan(vec![route]), &providers)
+            .expect("stale alias must not block the remaining provider catalog");
 
-        assert_eq!(error.code, "alias_target_missing");
-        assert!(error.message.contains("Qwen relay"));
-        assert!(error.message.contains("Qwen"));
+        assert_eq!(compiled.visible_models, vec!["qwen3.8"]);
+        assert!(compiled.warnings.iter().any(|warning| {
+            warning.code == "alias_target_unavailable"
+                && warning.route_id.as_deref() == Some("router-qwen")
+                && warning.message.contains("Qwen relay")
+                && warning.message.contains("Qwen")
+        }));
     }
 
     #[test]

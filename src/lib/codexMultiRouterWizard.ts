@@ -1163,6 +1163,53 @@ export function defaultWizardModelSources(providers: Provider[]): Provider[] {
   );
 }
 
+export function initialWizardCatalogModelOrder(
+  existingPlan: Provider | null | undefined,
+  sourceProviders: Provider[],
+): string[] | null {
+  const routing = existingPlan?.settingsConfig?.codexRouting as
+    | CodexRoutingConfigV2
+    | undefined;
+  if (routing?.schemaVersion !== 2) {
+    return existingPlan?.settingsConfig?.modelCatalog
+      ? readWizardModelCatalog(existingPlan).map((model) => model.model)
+      : null;
+  }
+
+  const sources = resolveWizardModelNameCollisions(sourceProviders);
+  const sourceById = new Map(
+    sources.map((provider) => [provider.id, provider]),
+  );
+  const ordered: string[] = [];
+  for (const route of routing.routes ?? []) {
+    if (route.enabled === false) continue;
+    const source = sourceById.get(route.targetProviderId);
+    if (!source) continue;
+    const selected =
+      route.modelSelection?.mode === "include"
+        ? new Set(
+            route.modelSelection.models.map((model) =>
+              model.trim().toLowerCase(),
+            ),
+          )
+        : null;
+    for (const model of readWizardModelCatalog(source)) {
+      const identities = [
+        model.model,
+        model.upstreamModel,
+        model.upstream_model,
+      ]
+        .filter((identity): identity is string => Boolean(identity?.trim()))
+        .map((identity) => identity.trim().toLowerCase());
+      if (selected && !identities.some((identity) => selected.has(identity))) {
+        continue;
+      }
+      if (!ordered.includes(model.model)) ordered.push(model.model);
+    }
+  }
+  return ordered;
+}
+
 // 创建或更新 MultiRouter provider；草稿只在用户点击保存发布时写入数据库。
 export function buildCodexMultiRouterWizardPlan(
   allProviders: Provider[],
@@ -1251,7 +1298,10 @@ export function buildCodexMultiRouterWizardPlan(
   );
   const requestedSpawnAgentModels: string[] =
     options.spawnAgentModels ??
-    existingPlan?.settingsConfig?.modelCatalog?.spawnAgentModels ??
+    existingRoutingV2?.spawnAgentModels ??
+    (existingRoutingV2
+      ? []
+      : existingPlan?.settingsConfig?.modelCatalog?.spawnAgentModels) ??
     [];
   const subagentVersion = normalizeCodexSubagentVersion(
     options.subagentVersion ?? existingRouting?.subagentVersion,
@@ -1274,6 +1324,9 @@ export function buildCodexMultiRouterWizardPlan(
     (existingIds.has(CODEX_MULTI_ROUTER_DEFAULT_ID)
       ? `${CODEX_MULTI_ROUTER_DEFAULT_ID}-${Date.now()}`
       : CODEX_MULTI_ROUTER_DEFAULT_ID);
+  const existingSettings = { ...(existingPlan?.settingsConfig ?? {}) };
+  delete existingSettings.modelCatalog;
+  delete existingSettings.model_catalog;
   const plan: Provider = {
     ...(existingPlan ?? {
       id: planId,
@@ -1288,7 +1341,7 @@ export function buildCodexMultiRouterWizardPlan(
       CODEX_MULTI_ROUTER_DEFAULT_NAME,
     category: existingPlan?.category ?? "custom",
     settingsConfig: {
-      ...(existingPlan?.settingsConfig ?? {}),
+      ...existingSettings,
       auth: existingPlan?.settingsConfig?.auth ?? {},
       base_url: CODEX_MULTI_ROUTER_PROXY_BASE_URL,
       baseUrl: CODEX_MULTI_ROUTER_PROXY_BASE_URL,
