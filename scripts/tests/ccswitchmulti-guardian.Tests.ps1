@@ -109,6 +109,104 @@ Describe "CCSwitchMulti guardian maintenance lease" {
 
         (Test-Path -LiteralPath $script:markerPath) | Should Be $false
     }
+
+    It "atomically replaces an expired lease file instead of blocking every future upgrade" {
+        Write-TestLease -Path $script:markerPath -Lease (
+            New-TestLease -ExpiresAtUtc ([datetime]"2000-01-01T00:00:00Z")
+        )
+
+        $leaseId = Enter-CcsmMaintenanceLease -MarkerPath $script:markerPath `
+            -Purpose "replacement-upgrade" -DurationSeconds 600
+        try {
+            $lease = [System.IO.File]::ReadAllText($script:markerPath, [System.Text.Encoding]::UTF8) |
+                ConvertFrom-Json
+            [string]$lease.leaseId | Should Be $leaseId
+            [string]$lease.purpose | Should Be "replacement-upgrade"
+            [int]$lease.ownerPid | Should Be $PID
+        } finally {
+            Exit-CcsmMaintenanceLease -MarkerPath $script:markerPath -LeaseId $leaseId
+        }
+    }
+
+    It "preserves an active lease owned by the matching live process" {
+        $owner = Get-CcsmGuardianProcessIdentity -ProcessId $PID
+        $active = New-CcsmMaintenanceLeaseRecord -OwnerIdentity $owner -LeaseId "active-owner" `
+            -NowUtc ([datetime]::UtcNow) -DurationSeconds 600 -Purpose "active-upgrade"
+        Write-TestLease -Path $script:markerPath -Lease $active
+
+        {
+            Enter-CcsmMaintenanceLease -MarkerPath $script:markerPath `
+                -Purpose "competing-upgrade" -DurationSeconds 600
+        } | Should Throw "active CCSwitchMulti maintenance lease"
+
+        $lease = [System.IO.File]::ReadAllText($script:markerPath, [System.Text.Encoding]::UTF8) |
+            ConvertFrom-Json
+        [string]$lease.leaseId | Should Be "active-owner"
+    }
+
+    It "atomically replaces malformed lease JSON" {
+        New-Item -ItemType Directory -Path $script:testRoot -Force | Out-Null
+        [System.IO.File]::WriteAllText(
+            $script:markerPath,
+            "not-json",
+            [System.Text.UTF8Encoding]::new($false)
+        )
+
+        $leaseId = Enter-CcsmMaintenanceLease -MarkerPath $script:markerPath `
+            -Purpose "repair-malformed" -DurationSeconds 600
+        try {
+            $lease = [System.IO.File]::ReadAllText($script:markerPath, [System.Text.Encoding]::UTF8) |
+                ConvertFrom-Json
+            [string]$lease.leaseId | Should Be $leaseId
+        } finally {
+            Exit-CcsmMaintenanceLease -MarkerPath $script:markerPath -LeaseId $leaseId
+        }
+    }
+}
+
+Describe "CCSwitchMulti owned child process wait" {
+    It "returns when the transaction owner exits without waiting for its long-running descendant" {
+        $testRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("ccsm-process-wait-" + [guid]::NewGuid().ToString("N"))
+        $spawnScript = Join-Path $testRoot "spawn-descendant.ps1"
+        $childPidPath = Join-Path $testRoot "child.pid"
+        $parent = $null
+        $childPid = 0
+        New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
+        [System.IO.File]::WriteAllText(
+            $spawnScript,
+            @'
+param([string]$ChildPidPath)
+$powershell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+$child = Start-Process -FilePath $powershell -WindowStyle Hidden -PassThru `
+    -ArgumentList @("-NoProfile", "-Command", "Start-Sleep -Seconds 30")
+[System.IO.File]::WriteAllText(
+    $ChildPidPath,
+    [string]$child.Id,
+    [System.Text.UTF8Encoding]::new($false)
+)
+'@,
+            [System.Text.UTF8Encoding]::new($false)
+        )
+        try {
+            $powershell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+            $parent = Start-Process -FilePath $powershell -WindowStyle Hidden -PassThru `
+                -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $spawnScript, $childPidPath)
+            $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+
+            $exitCode = Wait-CcsmOwnedProcessExit -Process $parent
+
+            $stopwatch.Stop()
+            $exitCode | Should Be 0
+            $stopwatch.Elapsed.TotalSeconds | Should BeLessThan 10
+            (Test-Path -LiteralPath $childPidPath -PathType Leaf) | Should Be $true
+            $childPid = [int][System.IO.File]::ReadAllText($childPidPath, [System.Text.Encoding]::UTF8)
+            (Get-Process -Id $childPid -ErrorAction SilentlyContinue) | Should Not BeNullOrEmpty
+        } finally {
+            if ($childPid -gt 0) { Stop-Process -Id $childPid -Force -ErrorAction SilentlyContinue }
+            if ($null -ne $parent -and -not $parent.HasExited) { Stop-Process -Id $parent.Id -Force -ErrorAction SilentlyContinue }
+            if (Test-Path -LiteralPath $testRoot) { Remove-Item -LiteralPath $testRoot -Recurse -Force }
+        }
+    }
 }
 
 Describe "CCSwitchMulti guardian decision loop" {

@@ -77,9 +77,10 @@ Invoke-CcsmMaintenanceLeaseScope -MarkerPath $MaintenanceMarker -Purpose "local-
         "-TimeoutSeconds", [string]$TimeoutSeconds,
         "-BackupRoot", $backupRoot
     )
-    $process = Start-Process powershell.exe -WindowStyle Hidden -Wait -PassThru -ArgumentList $arguments `
+    $process = Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList $arguments `
         -RedirectStandardOutput $transactionResultPath -RedirectStandardError $transactionStderrPath
-    if ($process.ExitCode -ne 0) { throw "install transaction failed with exit code $($process.ExitCode)" }
+    $exitCode = Wait-CcsmOwnedProcessExit -Process $process
+    if ($exitCode -ne 0) { throw "install transaction failed with exit code $exitCode" }
 
     $transactionResult = [System.IO.File]::ReadAllText($transactionResultPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
     if (-not [string]::Equals([string]$transactionResult.Status, "Success", [System.StringComparison]::Ordinal)) {

@@ -76,6 +76,38 @@ function New-CcsmMaintenanceLeaseRecord {
     }
 }
 
+function Test-CcsmMaintenanceLeaseRecord {
+    param(
+        [Parameter(Mandatory = $true)]$Lease,
+        [Parameter(Mandatory = $true)][datetime]$NowUtc,
+        [Parameter(Mandatory = $true)][scriptblock]$GetProcessIdentity
+    )
+
+    try {
+        if ([int]$Lease.schemaVersion -ne 1 -or
+            [string]::IsNullOrWhiteSpace([string]$Lease.leaseId) -or
+            [int]$Lease.ownerPid -lt 1 -or
+            [string]::IsNullOrWhiteSpace([string]$Lease.ownerExecutablePath) -or
+            [string]::IsNullOrWhiteSpace([string]$Lease.ownerStartTimeUtc) -or
+            [string]::IsNullOrWhiteSpace([string]$Lease.expiresAtUtc)) {
+            return $false
+        }
+        $expiresAt = ConvertTo-CcsmGuardianUtc -Value ([string]$Lease.expiresAtUtc)
+        if ($expiresAt -le [datetimeoffset]$NowUtc.ToUniversalTime()) { return $false }
+
+        $owner = & $GetProcessIdentity ([int]$Lease.ownerPid)
+        if ($null -eq $owner -or [int]$owner.ProcessId -ne [int]$Lease.ownerPid) { return $false }
+        if (-not (Test-CcsmGuardianSamePath -Left ([string]$owner.Path) -Right ([string]$Lease.ownerExecutablePath))) {
+            return $false
+        }
+        $expectedStart = ConvertTo-CcsmGuardianUtc -Value ([string]$Lease.ownerStartTimeUtc)
+        $actualStart = ConvertTo-CcsmGuardianUtc -Value ([string]$owner.StartTimeUtc)
+        return $expectedStart.UtcTicks -eq $actualStart.UtcTicks
+    } catch {
+        return $false
+    }
+}
+
 function Enter-CcsmMaintenanceLease {
     param(
         [Parameter(Mandatory = $true)][string]$MarkerPath,
@@ -83,20 +115,47 @@ function Enter-CcsmMaintenanceLease {
         [Parameter(Mandatory = $true)][int]$DurationSeconds
     )
 
+    $nowUtc = [datetime]::UtcNow
     $owner = Get-CcsmGuardianProcessIdentity -ProcessId $PID
     $leaseId = [guid]::NewGuid().ToString("N")
     $record = New-CcsmMaintenanceLeaseRecord -OwnerIdentity $owner -LeaseId $leaseId `
-        -NowUtc ([datetime]::UtcNow) -DurationSeconds $DurationSeconds -Purpose $Purpose
+        -NowUtc $nowUtc -DurationSeconds $DurationSeconds -Purpose $Purpose
     $directory = Split-Path -Parent $MarkerPath
     New-Item -ItemType Directory -Path $directory -Force | Out-Null
 
     $stream = [System.IO.File]::Open(
         $MarkerPath,
-        [System.IO.FileMode]::CreateNew,
-        [System.IO.FileAccess]::Write,
+        [System.IO.FileMode]::OpenOrCreate,
+        [System.IO.FileAccess]::ReadWrite,
         [System.IO.FileShare]::None
     )
     try {
+        $existingLease = $null
+        if ($stream.Length -gt 0 -and $stream.Length -le 65536) {
+            try {
+                $stream.Position = 0
+                $buffer = New-Object byte[] ([int]$stream.Length)
+                $offset = 0
+                while ($offset -lt $buffer.Length) {
+                    $count = $stream.Read($buffer, $offset, $buffer.Length - $offset)
+                    if ($count -le 0) { break }
+                    $offset += $count
+                }
+                if ($offset -eq $buffer.Length) {
+                    $existingLease = [System.Text.Encoding]::UTF8.GetString($buffer) | ConvertFrom-Json
+                }
+            } catch {
+                $existingLease = $null
+            }
+        }
+        if ($null -ne $existingLease -and (Test-CcsmMaintenanceLeaseRecord `
+                    -Lease $existingLease -NowUtc $nowUtc `
+                    -GetProcessIdentity { param($ProcessId) Get-CcsmGuardianProcessIdentity -ProcessId $ProcessId })) {
+            throw "an active CCSwitchMulti maintenance lease already owns $MarkerPath"
+        }
+
+        $stream.SetLength(0)
+        $stream.Position = 0
         $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes(($record | ConvertTo-Json -Depth 4))
         $stream.Write($bytes, 0, $bytes.Length)
         $stream.Flush($true)
@@ -116,25 +175,8 @@ function Test-CcsmMaintenanceLease {
     if (-not (Test-Path -LiteralPath $MarkerPath -PathType Leaf)) { return $false }
     try {
         $lease = [System.IO.File]::ReadAllText($MarkerPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
-        if ([int]$lease.schemaVersion -ne 1 -or
-            [string]::IsNullOrWhiteSpace([string]$lease.leaseId) -or
-            [int]$lease.ownerPid -lt 1 -or
-            [string]::IsNullOrWhiteSpace([string]$lease.ownerExecutablePath) -or
-            [string]::IsNullOrWhiteSpace([string]$lease.ownerStartTimeUtc) -or
-            [string]::IsNullOrWhiteSpace([string]$lease.expiresAtUtc)) {
-            return $false
-        }
-        $expiresAt = ConvertTo-CcsmGuardianUtc -Value ([string]$lease.expiresAtUtc)
-        if ($expiresAt -le [datetimeoffset]$NowUtc.ToUniversalTime()) { return $false }
-
-        $owner = & $GetProcessIdentity ([int]$lease.ownerPid)
-        if ($null -eq $owner -or [int]$owner.ProcessId -ne [int]$lease.ownerPid) { return $false }
-        if (-not (Test-CcsmGuardianSamePath -Left ([string]$owner.Path) -Right ([string]$lease.ownerExecutablePath))) {
-            return $false
-        }
-        $expectedStart = ConvertTo-CcsmGuardianUtc -Value ([string]$lease.ownerStartTimeUtc)
-        $actualStart = ConvertTo-CcsmGuardianUtc -Value ([string]$owner.StartTimeUtc)
-        return $expectedStart.UtcTicks -eq $actualStart.UtcTicks
+        return Test-CcsmMaintenanceLeaseRecord -Lease $lease -NowUtc $NowUtc `
+            -GetProcessIdentity $GetProcessIdentity
     } catch {
         return $false
     }
@@ -172,6 +214,13 @@ function Invoke-CcsmMaintenanceLeaseScope {
     } finally {
         Exit-CcsmMaintenanceLease -MarkerPath $MarkerPath -LeaseId $leaseId
     }
+}
+
+function Wait-CcsmOwnedProcessExit {
+    param([Parameter(Mandatory = $true)][System.Diagnostics.Process]$Process)
+
+    $Process.WaitForExit()
+    return [int]$Process.ExitCode
 }
 
 function Invoke-CcsmGuardianIteration {
