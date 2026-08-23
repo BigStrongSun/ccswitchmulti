@@ -982,7 +982,7 @@ fn codex_catalog_route_matches_model(route: &Value, model: &str) -> bool {
     }
 
     let lower_model = model.to_ascii_lowercase();
-    match_config
+    let prefix_match = match_config
         .get("prefixes")
         .or_else(|| match_config.get("matchPrefixes"))
         .or_else(|| match_config.get("match_prefixes"))
@@ -996,7 +996,21 @@ fn codex_catalog_route_matches_model(route: &Value, model: &str) -> bool {
         .filter_map(|value| value.as_str())
         .map(str::trim)
         .filter(|prefix| !prefix.is_empty())
-        .any(|prefix| lower_model.starts_with(&prefix.to_ascii_lowercase()))
+        .any(|prefix| lower_model.starts_with(&prefix.to_ascii_lowercase()));
+    prefix_match && codex_catalog_route_include_allows(route, model)
+}
+
+fn codex_catalog_route_include_allows(route: &Value, model: &str) -> bool {
+    let Some(models) = route
+        .pointer("/modelSelection/models")
+        .and_then(Value::as_array)
+    else {
+        return true;
+    };
+    models
+        .iter()
+        .filter_map(Value::as_str)
+        .any(|candidate| candidate.trim().eq_ignore_ascii_case(model))
 }
 
 /// 根据 route capability 判断 catalog 是否应写成 text-only。
@@ -3251,30 +3265,77 @@ fn sync_codex_managed_agent_files(
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ProviderClassificationContext {
     provider_kinds: HashMap<String, SubagentProviderKind>,
+    provider_models: HashMap<String, HashSet<String>>,
 }
 
 impl ProviderClassificationContext {
     pub(crate) fn from_providers<'a>(providers: impl IntoIterator<Item = &'a Provider>) -> Self {
-        Self {
-            provider_kinds: providers
+        let mut provider_kinds = HashMap::new();
+        let mut provider_models = HashMap::new();
+        for provider in providers {
+            provider_kinds.insert(
+                provider.id.clone(),
+                if codex_provider_record_is_official(provider) {
+                    SubagentProviderKind::Official
+                } else {
+                    SubagentProviderKind::ThirdParty
+                },
+            );
+            let models = provider
+                .settings_config
+                .get("modelCatalog")
+                .or_else(|| provider.settings_config.get("model_catalog"))
+                .and_then(|catalog| catalog.get("models"))
+                .and_then(Value::as_array)
                 .into_iter()
-                .map(|provider| {
-                    (
-                        provider.id.clone(),
-                        if codex_provider_record_is_official(provider) {
-                            SubagentProviderKind::Official
-                        } else {
-                            SubagentProviderKind::ThirdParty
-                        },
-                    )
-                })
-                .collect(),
+                .flatten()
+                .filter_map(|entry| entry.get("model").and_then(Value::as_str))
+                .map(|model| model.trim().to_ascii_lowercase())
+                .filter(|model| !model.is_empty())
+                .collect::<HashSet<_>>();
+            provider_models.insert(provider.id.clone(), models);
+        }
+        Self {
+            provider_kinds,
+            provider_models,
         }
     }
 
     fn get(&self, provider_id: &str) -> Option<SubagentProviderKind> {
         self.provider_kinds.get(provider_id).copied()
     }
+}
+
+fn codex_resolve_route_with_mode_all<'a>(
+    settings: &'a Value,
+    model: &str,
+    provider_context: Option<&ProviderClassificationContext>,
+) -> Option<&'a Value> {
+    if let Some(route) = resolve_codex_primary_route_from_settings(settings, model) {
+        return Some(route);
+    }
+    let model = model.trim().to_ascii_lowercase();
+    let context = provider_context?;
+    settings
+        .pointer("/codexRouting/routes")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|route| {
+            route
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(true)
+                && route
+                    .pointer("/modelSelection/mode")
+                    .and_then(Value::as_str)
+                    == Some("all")
+                && codex_route_target_provider_id_from_route(route).is_some_and(|provider_id| {
+                    context
+                        .provider_models
+                        .get(provider_id)
+                        .is_some_and(|models| models.contains(&model))
+                })
+        })
 }
 
 fn codex_provider_record_is_official(provider: &Provider) -> bool {
@@ -3313,7 +3374,7 @@ fn codex_subagent_route_classification_with_context(
     model: &str,
     provider_context: Option<&ProviderClassificationContext>,
 ) -> Option<RouteClassification> {
-    let route = resolve_codex_primary_route_from_settings(settings, model)?;
+    let route = codex_resolve_route_with_mode_all(settings, model, provider_context)?;
     if let Some(target_provider_id) = codex_route_target_provider_id_from_route(route) {
         if let Some(provider_kind) =
             provider_context.and_then(|context| context.get(target_provider_id))
@@ -3706,10 +3767,15 @@ fn codex_subagent_profile_input_modalities(spec: &CodexCatalogModelSpec) -> Opti
     })
 }
 
-fn routable_codex_subagent_catalog(settings: &Value) -> Vec<(String, String, Option<Vec<String>>)> {
+fn routable_codex_subagent_catalog(
+    settings: &Value,
+    provider_context: Option<&ProviderClassificationContext>,
+) -> Vec<(String, String, Option<Vec<String>>)> {
     codex_catalog_model_specs(settings, "")
         .into_iter()
-        .filter(|spec| resolve_codex_primary_route_from_settings(settings, &spec.model).is_some())
+        .filter(|spec| {
+            codex_resolve_route_with_mode_all(settings, &spec.model, provider_context).is_some()
+        })
         .map(|spec| {
             let input_modalities = codex_subagent_profile_input_modalities(&spec);
             (
@@ -3771,7 +3837,7 @@ fn catalog_profile_draft(
 
 pub(crate) fn initialize_codex_subagent_v2_for_candidate(
     settings: &Value,
-    _provider_context: Option<&ProviderClassificationContext>,
+    provider_context: Option<&ProviderClassificationContext>,
 ) -> Result<Value, AppError> {
     let mut initialized = json!({
         "schemaVersion": 2,
@@ -3782,7 +3848,9 @@ pub(crate) fn initialize_codex_subagent_v2_for_candidate(
         .get_mut("profiles")
         .and_then(Value::as_object_mut)
         .ok_or_else(|| AppError::Message("Initialized profiles are not an object".to_string()))?;
-    for (identity, model, input_modalities) in routable_codex_subagent_catalog(settings) {
+    for (identity, model, input_modalities) in
+        routable_codex_subagent_catalog(settings, provider_context)
+    {
         let preferred = matches!(identity.as_str(), "deepseek-v4-flash" | "deepseek-v4-pro");
         profiles.insert(
             identity,
@@ -3849,7 +3917,7 @@ pub(crate) fn reconcile_codex_subagent_v2_for_candidate(
         .get_mut("profiles")
         .and_then(Value::as_object_mut)
         .ok_or_else(|| AppError::Message("Reconciled profiles are not an object".to_string()))?;
-    let routable = routable_codex_subagent_catalog(settings);
+    let routable = routable_codex_subagent_catalog(settings, provider_context);
     let routable_by_identity = routable
         .iter()
         .map(|(identity, model, modalities)| {
@@ -9567,7 +9635,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_subagent_v2_route_classifier_uses_runtime_exact_prefix_and_default_order() {
+    fn codex_subagent_v2_route_classifier_uses_runtime_exact_prefix_and_fail_closed_order() {
         let classify = |settings: &Value, model: &str| {
             codex_subagent_route_classification_with_context(settings, model, None)
                 .map(|classification| classification.provider_kind)
@@ -9606,8 +9674,8 @@ mod tests {
         );
         assert_eq!(
             classify(&settings, "unknown-model"),
-            Some(SubagentProviderKind::Official),
-            "an unmatched request uses the enabled defaultRouteId in runtime order"
+            None,
+            "an unmatched request must not use defaultRouteId"
         );
         let fallback_settings = json!({
             "codexRouting": {
@@ -9621,8 +9689,66 @@ mod tests {
         });
         assert_eq!(
             classify(&fallback_settings, "unmatched-model"),
+            None,
+            "an unmatched request must not use the first enabled route"
+        );
+    }
+
+    #[test]
+    fn codex_subagent_v2_route_classifier_matches_mode_all_target_catalog() {
+        let settings = json!({
+            "codexRouting": {
+                "enabled": true,
+                "routes": [
+                    {
+                        "id": "official",
+                        "enabled": true,
+                        "targetProviderId": "codex-official",
+                        "modelSelection": { "mode": "include", "models": ["gpt-5.6-sol"] },
+                        "matchPrefixes": ["gpt"]
+                    },
+                    {
+                        "id": "kimi",
+                        "enabled": true,
+                        "targetProviderId": "kimi-target",
+                        "modelSelection": { "mode": "all" },
+                        "matchPrefixes": []
+                    }
+                ]
+            }
+        });
+        let kimi = Provider::with_id(
+            "kimi-target".to_string(),
+            "Kimi".to_string(),
+            json!({ "modelCatalog": { "models": [{ "model": "k3" }] } }),
+            None,
+        );
+        let official = Provider::with_id(
+            "codex-official".to_string(),
+            "OpenAI Official".to_string(),
+            json!({
+                "modelCatalog": { "models": [{ "model": "gpt-5.6-sol" }] },
+                "auth": { "auth_mode": "chatgpt" }
+            }),
+            None,
+        );
+        let context = ProviderClassificationContext::from_providers([&kimi, &official]);
+
+        assert_eq!(
+            codex_subagent_route_classification_with_context(&settings, "k3", Some(&context))
+                .map(|classification| classification.provider_kind),
             Some(SubagentProviderKind::ThirdParty),
-            "profile compilation must classify the same first enabled fallback candidate as runtime"
+            "mode=all must classify models from its target Provider catalog"
+        );
+        assert_eq!(
+            codex_subagent_route_classification_with_context(
+                &settings,
+                "unselected-model",
+                Some(&context),
+            )
+            .map(|classification| classification.provider_kind),
+            None,
+            "a model outside every selected target catalog must remain unroutable"
         );
     }
 
@@ -14834,8 +14960,14 @@ model_provider = "codex_model_router_v2"
             128_000,
         );
         let model = &catalog["models"][0];
-        assert_eq!(model.get("input_modalities"), Some(&json!(["text", "image"])));
-        assert_eq!(model.get("inputModalities"), Some(&json!(["text", "image"])));
+        assert_eq!(
+            model.get("input_modalities"),
+            Some(&json!(["text", "image"]))
+        );
+        assert_eq!(
+            model.get("inputModalities"),
+            Some(&json!(["text", "image"]))
+        );
     }
 
     #[test]
@@ -16160,5 +16292,29 @@ wire_api = "responses"
             catalog["ccSwitchRoutingDependencyFingerprint"],
             "fingerprint-v2"
         );
+    }
+
+    #[test]
+    fn codex_catalog_route_include_selection_blocks_coarse_prefix_escape() {
+        let route = json!({
+            "id": "official",
+            "enabled": true,
+            "modelSelection": {
+                "mode": "include",
+                "models": ["gpt-5.6-sol", "gpt-5.6-luna"]
+            },
+            "matchPrefixes": ["gpt"]
+        });
+
+        assert!(!codex_catalog_route_matches_model(&route, "gpt-5.4"));
+        assert!(codex_catalog_route_matches_model(&route, "gpt-5.6-sol"));
+
+        let all = json!({
+            "id": "official",
+            "enabled": true,
+            "modelSelection": { "mode": "all" },
+            "matchPrefixes": ["gpt"]
+        });
+        assert!(codex_catalog_route_matches_model(&all, "gpt-5.4"));
     }
 }

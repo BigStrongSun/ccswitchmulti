@@ -26,7 +26,7 @@
 - 该安装包仍包含 `streaming_codex_chat.rs` 的旧拒绝逻辑：当同一 Chat 流式回合同时
   出现 CCSM hosted tool（如 `web_search`）和普通 function tool 时，主动返回
   `mixed_hosted_tool_calls` / `Mixed hosted and ordinary function tool calls are not
-  supported in one streaming turn`。
+supported in one streaming turn`。
 - 根修提交为 `ffb118bea5815ecb2ce6ba34cf7e42ebf1ff9f54`，但它只在旧的
   `release/v3.19.2-8` 分支，既不在 `v3.19.2-10`，也不在当时的当前 `main`；
   因此“源码历史上有修复”不等于“安装包已修复”。
@@ -637,6 +637,7 @@
 - 账号池原有 `pool_cooldowns`、`pool_session_bindings`、`pool_remaining_percent`、`pool_quota_checked_at` 四张独立表已迁入 `src-tauri/src/proxy/providers/codex_oauth_pool.rs` 的单一 `CodexPoolRuntimeState`，manager 只保留一把 `Arc<tokio::sync::Mutex<_>>`。候选读取、quota 快照、固定 cooldown、binding 和 lifecycle purge 现在在同一临界区完成，不再由调用方分别操作四把锁。
 - `remove_account`、`clear_auth`、明确 `invalid_grant` 隔离、同 ID 重新登录和 pool policy 禁用/移除都经过统一 purge/reconcile；重新启用或重登不会恢复旧 binding、cooldown 或 quota 快照。`normalized_pool_policy` 和只读投影也只接受 `CodexAccountData::is_usable()` 的托管账号，已持久化 `invalidated_at` 的账号不再进入候选。
 - TDD 证据：生产修改前，删除后重加、invalidated、禁用后重启、clear 后重登四个测试均因旧运行态残留而断言失败；统一运行态接入后四项与原 `account_pool_honors_order_reserve_cooldown_and_session_binding` 均通过。本提交刻意仍使用 generation `0`；24 小时 TTL、2048 LRU 和凭据代际校验由下一个 TDD 提交实现。
+
 ## 2026-08-02 Codex 超时与重试放大修复
 
 - 现象：OpenClash 节点 `🇺🇸美国2-IEPL-GPT` 丢 6.6MB POST 时，CCSM 把“可能已在途”的转发/超时错误按 502/504 返回，Codex 默认 `stream_max_retries=5`、`request_max_retries=4` 又自动重发整轮采样请求，造成流量和时延放大。
@@ -1127,6 +1128,7 @@
 - 回归测试新增 `test_codex_subagent_usage_stats_repairs_zero_token_db_rows_from_rollout`：模拟 `gpt-5.5` 子 Agent 已有两条 `codex_session` 请求但 token 全 0，同时 rollout JSONL 有 `total_token_usage`，最终 agent/model 统计必须显示 1550 tokens 且 request_count 保持 2。
 - 验证命令：`cargo fmt --manifest-path src-tauri/Cargo.toml --check`、`cargo test --manifest-path src-tauri/Cargo.toml codex_subagent_usage_stats --lib`、`cargo test --manifest-path src-tauri/Cargo.toml test_sync_codex_subagent_uses_rollout_thread_id --lib`、`git diff --check`。
 - 另一个相邻但未纳入本次 token 修复的发现：`gpt-5.3-codex-spark` 等 spark 变体如果 token 已有但 cost 为 0，可能是 `model_pricing` 种子缺少对应模型定价和历史成本回填，应该作为单独成本统计任务处理，避免和 token 修复混在一个提交里。
+
 ## 2026-07-07 Codex Hosted Web Search Bridge MVP
 
 - 本轮在隔离 worktree `C:\Users\sunda\.codex\worktrees\aec9\LLMservice\cc-switch` 的 `codex/hosted-tool-bridge` 分支实现 Phase 1 MVP：Codex `/v1/responses` 入站的 hosted `{ "type": "web_search" }` 不再原样交给第三方 Chat 上游，而是在 `transform_codex_chat.rs` 中映射成普通 function tool `web_search(query,count)`；`tool_search` 仍保持 Codex client-side tool 语义，二者不能混淆。
@@ -3369,6 +3371,7 @@
 - 收尾运行态复核时，`127.0.0.1:15721` 已变成 PID `71064` 的已安装 `3.19.1-10`，安装目录文件 LastWriteTime 为 `16:20:35`、进程启动于 `16:22:55`，早于本轮最终成功打包完成时间 `16:42:43`，也早于发布脚本提交；本轮没有执行 installer、AppData 复制或进程重启。该已安装 EXE 的 SHA256 为 `05F3A6DE4F70518E72D8B6B2DC1E0CEDB29AFDA37DD9CF76D2E4D1CB462B353C`，与最终验收 raw EXE 不同，因此仍应由用户用最终目录内 setup 自行重装，不能把当前运行版当作最终包安装验收。现有本地证据无法恢复已退出 parent PID `60456`，故不能断言是谁触发了 16:20 的替换。
 - 首轮打包曾在 NSIS 阶段触发 Windows OS 32。更深根因不是 Rust/Tauri 编译失败，而是旧 `local-release-pipeline.ps1` 在竞争者获取锁失败后仍由 `finally` 无条件删除活跃流水线的锁，使第三条流水线能并发进入并争写 `target/release/cc-switch.exe`。提交 `906a2b7b` 改为原子 `CreateNew`、每进程 token 和 owner-only release；Windows PowerShell 5.1 回归确认竞争者失败后锁仍属原 owner，错误 token 不能释放，owner 可以释放。
 - 带重复反斜杠的 `ReleaseRoot` 还暴露了 `SHA256SUMS.txt` 相对路径按未经规范化字符串长度截取的问题。提交 `434541de` 在两个 checksum writer 中先 `Path.GetFullPath` 再截取，保持 PowerShell 5.1 兼容；实际 duplicated-separator `-SkipBuild` 导出得到 15 条清单、0 条无效相对路径。
+
 # 2026-08-07 Codex Desktop 国际化占位符原样显示根修与 3.19.1-12 本地交付
 
 - 用户截图中的 `已处理 {time}`、`正在运行 {command}`、`<projectSelect>{projectName}</projectSelect>` 不是 Codex 中文语言包漏翻译，也不是用户项目数据问题。当前本机同样可复现：Appx `OpenAI.Codex_26.730.8199.0`（包内版本 `26.730.61639`）的 renderer DOM 在 `lang=zh-CN` 下实际包含 `Worked for {time}`。
@@ -3722,6 +3725,7 @@
 - 固定构建前完整门禁：Rust library 2996/2996，Vitest 123 files / 1002 tests，原生 Windows PowerShell 5.1 下 release-build-config 6/6、事务安装 47/47；`cargo check --lib`、typecheck、Prettier、rustfmt 和 `git diff --check` 通过。Pester 3.4.0 的 `Should Throw` 在 PowerShell 7 下会误报，必须按仓库既定边界使用 Windows PowerShell 5.1，不能把运行器不兼容当生产失败或伪装成通过。
 - 第一次 v28 本地流水线虽 exit 0，但构建日志出现 `__TAURI_BUNDLE_TYPE variable not found`；事务 `ccsm-20260815-121651-5dd2541f85cc43c69cbdf94b84c45dae` 发现安装态哈希仍等于 raw EXE、没有完成 `UNK -> NSS` 标记，按设计回滚到 v27，`RollbackError=null`，回滚后 FileVersion/ProductVersion 为 `3.19.1-27`、哈希 `CD0ED804D3D1CABD10144E31CC674A84A7855889BCF9ECF49F58C140D5167BC4`、health 200。
 - 根因是 worktree 的 `node_modules` junction 指向主工作树：声明与 lock 已固定 `@tauri-apps/cli 2.10.1`，实际安装包仍为 `2.8.1` 且命令报告 `tauri-cli 2.8.0`，与 Rust `tauri-utils 2.8.3` marker 机制不匹配。普通 frozen install 在 junction 重建确认下可无变更返回 0，因此发布流水线必须先执行非交互 `pnpm install --frozen-lockfile --force`，再同时核对声明版本、实际安装 package 版本和 CLI 自报版本，之后才允许 typecheck/export；不能把事务 expected hash 改成 raw 来掩盖 updater bundle type 缺失。实际依赖重建后 package 与 CLI 均为 `2.10.1`。
+
 ## 2026-08-15 Qwen3.8 中途停顿与 Hosted Tools 流式根修
 
 - 目标会话约 189K prompt tokens、945 KB 请求体、139 条 Chat message 和 41 个工具，仍低于 Qwen3.8 的 262144 上下文；现场没有 429、5xx、context overflow 或转换丢失。长上下文只放大等待，不是根因。
@@ -3770,6 +3774,7 @@
 - 用户明确选择采用官方无名 tool call 行为：当 Chat 上游返回缺失/空白 `function.name` 的调用，响应本应为 `completed`，且丢弃坏调用后没有任何可用 tool call 时，Responses 转换返回 `TransformError`，避免 Codex 把空成功回合当作 Agent 完成并静默停住。混有合法 tool call 时只丢坏调用并继续；`finish_reason=length` 保持 `incomplete/max_output_tokens`，不得误报无名调用错误。实现提交为 `52b0fee4`。
 - v3.19.2 的响应体预算必须在所有传输上逐块执行：Hyper、reqwest 和自定义 Streamed 统一经 `bytes_stream()` 累积并在超限时立即断开，Buffered 在返回前比较已有长度；不能先 `collect()`/`bytes()` 收满再检查。读取中途失败仍按 CCSwitchMulti 既有契约归类为 `ResponsePending`，避免成功记账和重试诊断漂移。根修提交为 `0776cff3`，分类兼容提交为 `c7b47c06`。
 - Windows 普通进程可能因 `ERROR_PRIVILEGE_NOT_HELD (1314)` 无法创建测试 symlink；两个 symlink 专项测试仅在该错误下提前返回，其他错误仍失败，有权限的平台仍执行完整安全断言。最终 Rust library 为 `3098 passed / 0 failed / 5 ignored`；前端为 `137 files / 1115 tests` 全通过；`cargo check --tests`、typecheck、Prettier、rustfmt、`git diff --check` 均通过。前端复跑前曾发现 Vite 文件缺失，使用 `pnpm install --frozen-lockfile --force` 按 lock 重建依赖后恢复，不能把损坏的 node_modules 启动错误归因于产品代码。
+
 # 2026-08-16 Codex 真实 HTTP 429 自动续传热修
 
 - 用户现场截图显示 Codex 先出现“正在重新连接 1/5”，随后以 `exceeded retry limit, last status: 429 Too Many Requests` 终止当前 turn；点击“继续”仍能沿用同一线程，说明线程持久化未丢失，但 turn 被 429 打断。
@@ -3779,17 +3784,20 @@
 - 验证：正确的 `3.19.2-1` 源码线上 `codex_rate_limit_retry_` 3/3、`upstream_transport_retry_` 3/3 通过，release 构建成功；仅有既存 `openai_cache_read_tokens` dead-code warning。
 - 运行态采用不中断当前 Codex 流的磁盘热替换：安装路径 `C:\Users\sunda\AppData\Local\CCSwitchMulti\cc-switch.exe` 已是 `3.19.2-1`，SHA-256 `CB16F3830786369388222CA66F0F18E87F3C74BC949DFA0E1908B47F03111F50`；PID 35064 仍运行原映射文件且 15721 health 为 200，下次正常重启才加载补丁。回滚备份为 `backups\cc-switch.exe.pre-429-hotfix-20260816-1350.bak`，运行中旧映射文件为 `cc-switch.exe.running-old`。
 - 联网前置使用 Codex 内置 Web Search、GitHub 官方 CLI/API 与 Matrix WebSearch 独立链。内置搜索和 GitHub 源码/issue 交叉确认 `retry_429=false`、issue `#30471` 与旧 TypeScript PR `#506`；Matrix 仅返回 MDN 429 定义和低相关结果，未提供 Codex 实现的第二份正证据。
+
 # 2026-08-16 CCSwitchMulti v3.19.2-2 Codex 长网络波动续传根修
 
 - 用户任务 `01a008f6-4db8-7042-8091-8981857ad6cf` 的最终错误虽显示 HTTP 429，但 `codex-router.log` 证明上游没有返回 429：多个并发任务先连续遭遇 `Connect: unexpected EOF during handshake`；目标任务内部每次只重试 2 次，随后消耗 Codex 自身五次重连预算；最后一次为 `SendRequest: connection_closed_before_message_completed`，被本地 `ResponsePending -> 429` 兼容映射显示成 429。
 - `v3.19.2-1` 的真实 HTTP 429 重试逻辑本身生效，缺口是确认未发出的传输错误窗口太短。`v3.19.2-2` 将仅针对 `ForwardFailed` 的同 Provider 重试从 2 次增至 5 次，退避为 200ms/600ms/1.5s/3s/6s；结合连接握手时间覆盖现场约一分钟波动，避免过早占用 Codex 客户端重连额度。
 - `ResponsePending` 仍不可自动重放。Hyper 官方定义 `IncompleteMessage` 可能是请求已写入后读取 EOF，也可能是消息传输未完成；reqwest 的 `SendRequest` 包装不足以可靠证明是否执行，不能仅凭错误字符串改为可重试。
 - RED `a84a2322`，GREEN `1a6c1994`；传输回归 4/4、真实 429 回归 3/3 通过。发布版本必须使用新 tag `v3.19.2-2`，不能覆盖已发布的 `v3.19.2-1`。
+
 # 2026-08-16 CCSwitchMulti v3.19.2-3 消除 ResponsePending 假 429
 
 - `ResponsePending -> 429 + Retry-After` 是用户看到 `Too Many Requests` 的直接本地原因；它不是上游 HTTP 状态。`v3.19.2-3` 改为 `424 Failed Dependency`、`cc_switch_response_result_unknown`、`retryable=false`，并移除 `Retry-After`。
 - 三类路径不得混合：确认未送达的 `ForwardFailed` 走 5 次安全连接重试；上游明确 HTTP 429 才走限流等待；发送后结果未知禁止盲重放。Hyper 的 IncompleteMessage 无法证明请求是否已被服务端执行，没有上游幂等键/response id 时不能承诺无损恢复。
 - RED `82eb04a` 稳定证明旧实现仍返回 429；GREEN `14863cb2` 完成状态、错误码、retryable 和消息语义收口，聚焦回归 7/7 通过。因为 `v3.19.2-2` 已推 tag 并启动构建，此修复使用新版本 `v3.19.2-3`，不得移动旧 tag。
+
 # 2026-08-16 v3.19.2-3 Windows 本地安装包构建
 
 - 在 `ccswitch-qwen38-stream-fix` 执行 `pnpm tauri build`，Windows x64 release 编译与两个 bundle 均成功；随后仅 updater 签名阶段因本机未设置 `TAURI_SIGNING_PRIVATE_KEY` 返回 exit 1。不得把这个退出码描述成 installer 构建失败，也不得声称本地产物具备正式 updater 签名。
@@ -3857,6 +3865,7 @@
 - CCSM 可配置 Codex 根级新任务默认 `model_reasoning_effort`，不强改当前线程，已有任务不追溯变化。Sub-Agent V2 新 profile 默认 delegated；CCSM 可安全配置单个全局 `[agents].default_subagent_reasoning_effort`，但单次 spawn effort 由父 Agent 运行时决定，CCSM 不改 reserved schema。V1 保留兼容读取、运行、导出和迁移，不复制新 reasoning 写逻辑。
 - 模型能力 schema 采用读旧写新；不要与 Sub-Agent V1/V2 混称。unknown + legacy fixed 保留两个稳定版本。CLI 暂定 `ccsm`、默认 JSON；mutation 需要人工确认或 planToken + expectedRevision；首版不做 MCP，本地 HTTP API 保留 TBD；JSON 为权威格式，YAML 可选。
 - 允许 AI 通过 JSON/stdin 等安全输入直接写密钥，但禁止命令行参数、输出、日志、审计和回读出现明文；只返回 hasSecret/脱敏摘要。审计保留 180 天或 10,000 条 mutation，不记录密钥、Prompt、响应或 reasoning 正文。
+
 ## 2026-08-17 Qwen3.8 工具结果后纯进度 stop 的 Responses→Chat 根因
 
 - task `01a00c24-1fec-7410-aaec-d93416db98ce` 的四个短轮不是超时或断流：末次 vLLM 请求均为 HTTP 200、`finish_reason=stop`、无 tool-call delta，内容是“Appending sections ...”等未完成进度句；其上一请求均正常完成工具调用。
@@ -4113,6 +4122,7 @@
 - 根修：`ProviderService::add` 与 `ProviderService::update` 在所有数据库/Live 写入前调用同一 `validate_codex_subagent_v2_provider_candidate`；无 `codexRouting.subagentV2` 的普通 Provider 不受影响，有 V2 文档则执行严格解析、编译和 `enabled + Routable + reasoning != unknown` 校验。
 - 回归：新增 add/update 两条测试，先确认 RED（两条路径都错误返回 true），接入统一保存校验后 GREEN；断言 rejected add 不入库、rejected update 保留旧 settings。前端新增 unknown 保存阻止测试，断言不调用 `update_codex_subagent_v2`/`update_provider`。
 - 当前验证：Rust `cargo test --lib` 3197 passed / 0 failed / 5 ignored；V2 前端文件 126/126；全量 Vitest 143 files / 1144 tests；TypeScript、rustfmt、diff check 通过。测试中仍有既有 React act、MSW 未处理请求和 Tauri window mock 警告，不影响通过。
+
 # 2026-08-21（MultiRouter Provider SSOT v2 合入 main 与向导回归）
 
 - `bigstrongsun/codex-multirouter-ssot-v2` 已在 `main` 以合并提交 `b7865131` 合入；旧的前端 `codexMultiRouterSync` 快照同步已删除，Provider/模型目录、Rust v2 compiler、mutation coordinator、projection 和迁移预览成为主线基础。
@@ -4181,3 +4191,13 @@
 - 当前真正未合入的生产代码只有 `bigstrongsun/ccsm-agent-mesh@a68b803a`：它仍是独立 AgentMesh gateway 原型，未接入现有 CCSM HTTP 代理、Provider 生命周期、凭据边界和运行态 canary，不能整枝合并。
 - `commentary-reasoning-experiment`、`portable-reasoning-experiment-nogo`、`subagent-v2-capability-injection`、旧 release/备份 refs 继续归类为实验、学术资料或历史发布证据；`ultra-orchestration`、Responses Lite、commentary/tool-call、unsupported-tools、DeepSeek catalog 等虽有 unique commits，但主线已有等价或更完整实现，不应回合旧分支。
 - 当前验证：inline reasoning Rust 1/1；usage stats Rust 3/3；`codexModelCatalogOrder` 4/4、`codexMultiRouterWizard` 34/34。首次 Vitest 命令误传不支持的 `--runInBand`，已改正后 38/38 通过；不存在的旧 `CodexFormFields.keepColumn.test.tsx` 未计入结果。
+
+# 2026-08-23 PR #35 MultiRouter 严格路由与投影修复审计
+
+- PR `BigStrongSun/ccswitchmulti#35` 不能整包合并：它混有 release 版本/签名、公钥轮换、Windows 原子写降级、WebDAV 本地状态表和路由修复，并与当前 `main` 工作台测试冲突。本轮只移植可独立证明的路由与 catalog 根修；版本、签名和直接覆盖写降级明确排除。
+- V2 路由契约收敛为 fail-closed：`include` 是严格白名单，前缀不能让未勾选模型逃逸；`mode=all` 以目标 Provider 当前 catalog/alias 为模型集合；未知模型、无 model 的原始请求和未命中模型不再回退 `defaultRouteId` 或首条 enabled route。前端预览只检查当前选中方案，并使用相同 include/mode=all 语义。
+- `defaultRouteId` 只作为旧数据读取字段用于提示。统一 `serializeCodexRoutingV2` 不再写出该字段，因此设置、路由、协议切换、Sub-Agent 候选保存等任何新保存都会清理它；新向导不生成它。UI 检查项、诊断和方案摘要必须明确“旧版默认路由已停用/未匹配模型拒绝转发”，不能继续暗示 fallback。
+- 保存 Route 或 Sub-Agent 候选不得删除 Router Provider 的 `settingsConfig.modelCatalog`。它承载模型顺序、显示名、推理/输入能力和 Sub-Agent 候选，是数据库事实；live 投影不能替代数据库持久化源。
+- catalog 投影必须保留源模型 `reasoning` 与 `displayName`，`/v1/models data[]` 同时投射 `display_name/displayName/name`。V2 live 写入从 Provider 与 route 重新编译 projection，不读取 Router 中可能陈旧的 catalog 快照；多个 MultiRouter 共用目标 Provider 时，只有当前 profile/current provider 对应的激活 Router 可以发布共享 live catalog。
+- 兼容读取允许同步合并后的 V2 route 缺少 `modelSelection`，按 `mode=all` 规范化，避免工作台读取 `.mode` 崩溃。带 route alias 后缀的 `deepseek-v4-flash-*` / `deepseek-v4-pro-*` 可作为 V2 角色模型，但 Flash Vision 变体明确排除。
+- 搜索渠道：Codex 内置 WebSearch 检查 GitHub PR 页面与提交列表；Matrix WebSearch 独立检索但没有返回可用 GitHub 正文。关键结论最终以本地 PR head `1f362461`、当前 `main@f83a4145`、逐提交 diff 和 RED/GREEN 回归为准。

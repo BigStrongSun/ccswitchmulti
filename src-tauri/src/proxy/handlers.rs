@@ -2391,9 +2391,16 @@ fn openai_model_entry(id: &str, owner: &str) -> Value {
     })
 }
 
-/// 根据 catalog/source 对象构造 OpenAI model entry，透传明确的上下文窗口字段。
+/// 根据 catalog/source 对象构造 OpenAI model entry，透传明确的上下文窗口与显示名字段。
 fn openai_model_entry_with_source(id: &str, owner: &str, source: &Value) -> Value {
     let mut entry = openai_model_entry(id, owner);
+    if let Some(display_name) = extract_model_display_name(source) {
+        if let Some(object) = entry.as_object_mut() {
+            object.insert("display_name".to_string(), json!(display_name));
+            object.insert("displayName".to_string(), json!(display_name));
+            object.insert("name".to_string(), json!(display_name));
+        }
+    }
     if let Some(context_window) = extract_model_context_window(source) {
         if let Some(object) = entry.as_object_mut() {
             // Codex Desktop 不同版本在 `/v1/models` 的 data[] 分支上读取的字段名不完全一致；
@@ -2405,6 +2412,19 @@ fn openai_model_entry_with_source(id: &str, owner: &str, source: &Value) -> Valu
         }
     }
     entry
+}
+
+/// 从 model catalog 条目读取用户声明的显示名，兼容已有字段命名。
+fn extract_model_display_name(value: &Value) -> Option<String> {
+    const KEYS: &[&str] = &["display_name", "displayName", "name", "title"];
+    KEYS.iter()
+        .filter_map(|key| value.get(*key))
+        .find_map(|name| {
+            name.as_str()
+                .map(str::trim)
+                .filter(|display| !display.is_empty())
+                .map(str::to_string)
+        })
 }
 
 /// 从 model catalog 条目中读取正整数上下文窗口，兼容 snake_case 与 camelCase。
@@ -5663,6 +5683,18 @@ mod tests {
             qwen.get("maxContextWindow")
                 .and_then(|value| value.as_u64()),
             Some(262_144)
+        );
+        assert_eq!(
+            qwen.get("display_name").and_then(|value| value.as_str()),
+            Some("Qwen 3.6")
+        );
+        assert_eq!(
+            qwen.get("displayName").and_then(|value| value.as_str()),
+            Some("Qwen 3.6")
+        );
+        assert_eq!(
+            qwen.get("name").and_then(|value| value.as_str()),
+            Some("Qwen 3.6")
         );
         assert!(
             qwen.get("upstreamModel").is_none(),

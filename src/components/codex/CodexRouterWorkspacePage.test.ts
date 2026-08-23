@@ -345,7 +345,132 @@ it("没有 MultiRouter 方案时打开工作台不会读取 null settingsConfig"
 });
 
 describe("Codex MultiRouter workspace route persistence helpers", () => {
-  it("uses the target Provider name in the default-route settings option for legacy UUID labels", async () => {
+  it("previews include selection as a strict allowlist", async () => {
+    const official: Provider = {
+      id: "official-source",
+      name: "OpenAI Official",
+      category: "official",
+      settingsConfig: {
+        modelCatalog: {
+          models: [{ model: "gpt-5.4" }, { model: "gpt-5.6-sol" }],
+        },
+      },
+    };
+    const plan: Provider = {
+      id: "strict-router",
+      name: "Strict Router",
+      category: "custom",
+      settingsConfig: {
+        codexRouting: {
+          schemaVersion: 2,
+          enabled: true,
+          routes: [
+            {
+              id: "official-route",
+              enabled: true,
+              targetProviderId: official.id,
+              modelSelection: {
+                mode: "include",
+                models: ["gpt-5.6-sol"],
+              },
+              match: { models: ["gpt-5.6-sol"], prefixes: ["gpt"] },
+              matchPrefixes: ["gpt"],
+            },
+          ],
+        },
+      },
+    };
+
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [official, plan],
+        activeProviderId: plan.id,
+        initialProviderId: plan.id,
+        initialTab: "test",
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+
+    const user = userEvent.setup();
+    await user.type(screen.getByPlaceholderText(/gpt-5\.4-mini/), "gpt-5.4");
+    await user.click(screen.getByRole("button", { name: "预览命中" }));
+
+    expect(screen.getByText(/gpt-5\.4.*不可路由/)).toBeInTheDocument();
+  });
+
+  it("previews routes from the selected plan only", async () => {
+    const source: Provider = {
+      id: "shared-source",
+      name: "Shared Source",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "shared-model" }] },
+      },
+    };
+    const otherPlan: Provider = {
+      id: "other-router",
+      name: "Other Router",
+      category: "custom",
+      settingsConfig: {
+        codexRouting: {
+          schemaVersion: 2,
+          enabled: true,
+          routes: [
+            {
+              id: "other-route",
+              label: "Other Route",
+              enabled: true,
+              targetProviderId: source.id,
+              modelSelection: { mode: "include", models: ["shared-model"] },
+              match: { models: ["shared-model"], prefixes: [] },
+            },
+          ],
+        },
+      },
+    };
+    const selectedPlan: Provider = {
+      id: "selected-router",
+      name: "Selected Router",
+      category: "custom",
+      settingsConfig: {
+        codexRouting: {
+          schemaVersion: 2,
+          enabled: true,
+          routes: [],
+        },
+      },
+    };
+
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [source, otherPlan, selectedPlan],
+        activeProviderId: selectedPlan.id,
+        initialProviderId: selectedPlan.id,
+        initialTab: "test",
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+
+    const user = userEvent.setup();
+    await user.type(
+      screen.getByPlaceholderText(/gpt-5\.4-mini/),
+      "shared-model",
+    );
+    await user.click(screen.getByRole("button", { name: "预览命中" }));
+
+    expect(screen.getByText(/shared-model.*不可路由/)).toBeInTheDocument();
+    expect(screen.queryByText(/Other Route/)).not.toBeInTheDocument();
+  });
+
+  it("shows a readable warning instead of an active default-route control for legacy plans", async () => {
     const relay: Provider = {
       id: "relay-provider",
       name: "DeepSeek Relay",
@@ -400,22 +525,12 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     );
     await user.click(screen.getByRole("button", { name: "改名" }));
 
-    const defaultRouteLabel = screen.getByText("默认路由", {
-      selector: "label",
-    });
-    const defaultRoute =
-      defaultRouteLabel.parentElement?.querySelector("select");
-    expect(defaultRoute).not.toBeNull();
     expect(
-      within(defaultRoute as HTMLElement).getByRole("option", {
-        name: "DeepSeek Relay",
-      }),
-    ).toBeInTheDocument();
-    expect(
-      within(defaultRoute as HTMLElement).queryByRole("option", {
-        name: legacyRouteId,
-      }),
+      screen.queryByText("默认路由", { selector: "label" }),
     ).not.toBeInTheDocument();
+    expect(screen.getByText(/旧版默认路由已停用/)).toBeInTheDocument();
+    expect(screen.getByText(/旧配置指向.*DeepSeek Relay/)).toBeInTheDocument();
+    expect(screen.queryByText(legacyRouteId)).not.toBeInTheDocument();
   });
 
   it("uses the target Provider name when a legacy route label is only its UUID", () => {
@@ -505,6 +620,33 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     });
     expect(route).not.toHaveProperty("upstream");
     expect(route).not.toHaveProperty("capabilities");
+  });
+
+  it("normalizes merged v2 routes that are missing modelSelection", () => {
+    const plan = {
+      id: "merged-router",
+      name: "Merged Router",
+      category: "custom",
+      settingsConfig: {
+        codexRouting: {
+          schemaVersion: 2,
+          enabled: true,
+          routes: [
+            {
+              id: "merged-route",
+              enabled: true,
+              targetProviderId: "target-provider",
+              matchPrefixes: ["qwen"],
+            },
+          ],
+        },
+      },
+    } as Provider;
+
+    expect(readCodexRouting(plan)?.routes?.[0]).toMatchObject({
+      modelSelection: { mode: "all" },
+      match: { models: [], prefixes: ["qwen"] },
+    });
   });
 
   it("edits and saves only schema v2 route policy with canonical include models", async () => {
@@ -2144,6 +2286,14 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       ...draftPlan,
       settingsConfig: {
         ...draftPlan.settingsConfig,
+        modelCatalog: {
+          models: [
+            { model: "deepseek-v4-pro" },
+            { model: "deepseek-v4-flash" },
+            { model: "qwen3.8" },
+          ],
+          spawnAgentModels: ["deepseek-v4-pro", "deepseek-v4-flash"],
+        },
         codexRouting: {
           ...draftPlan.settingsConfig?.codexRouting,
           subagentVersion: "v2",
@@ -2250,7 +2400,9 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       routes: existingRoutes,
       subagentV2: existingV2,
     });
-    expect(updatedProvider.settingsConfig).not.toHaveProperty("modelCatalog");
+    expect(updatedProvider.settingsConfig?.modelCatalog).toEqual(
+      plan.settingsConfig?.modelCatalog,
+    );
     expect(
       updatedProvider.settingsConfig?.codexRouting?.spawnAgentModels,
     ).toEqual(["deepseek-v4-pro", "deepseek-v4-flash"]);
@@ -2296,11 +2448,19 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     const [savedProvider, appType] = vi.mocked(providersApi.update).mock
       .calls[0];
     expect(appType).toBe("codex");
-    expect(savedProvider.settingsConfig).not.toHaveProperty("modelCatalog");
+    expect(savedProvider.settingsConfig?.modelCatalog).toEqual(
+      plan.settingsConfig?.modelCatalog,
+    );
     expect(savedProvider.settingsConfig?.codexRouting).toMatchObject({
-      ...existingRouting,
+      enabled: existingRouting?.enabled,
+      routes: existingRouting?.routes,
+      subagentVersion: existingRouting?.subagentVersion,
+      subagentV2: existingRouting?.subagentV2,
       spawnAgentModels: ["deepseek-v4-pro", "qwen3.8"],
     });
+    expect(savedProvider.settingsConfig?.codexRouting).not.toHaveProperty(
+      "defaultRouteId",
+    );
   });
 
   it("disables protocol actions while switching and keeps the previous protocol after failure", async () => {
@@ -2360,6 +2520,46 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
 
     expect(screen.getByText("可路由")).toBeInTheDocument();
     expect(screen.getByText("目录中缺失")).toBeInTheDocument();
+  });
+
+  it("recognizes alias-suffixed flash/pro role models as routable", async () => {
+    const source: Provider = {
+      id: "codex-deepseek-alias",
+      name: "DeepSeek alias",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: {
+          models: [
+            { model: "deepseek-v4-flash-deepseek" },
+            { model: "deepseek-v4-pro-deepseek" },
+            { model: "deepseek-v4-flash-vision-exp" },
+          ],
+        },
+      },
+    };
+    const plan = withEnabledProviderRoute(
+      createDraftRoutingPlan([source], [source]),
+      source,
+    );
+
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [source, plan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: plan.id,
+        initialProviderId: plan.id,
+        initialTab: "routes",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+
+    await userEvent.click(screen.getByRole("tab", { name: "子 Agent" }));
+
+    expect(screen.getAllByText("可路由")).toHaveLength(2);
+    expect(screen.queryByText("目录中缺失")).not.toBeInTheDocument();
   });
 
   it("exposes a delete action for routing plans inside the workspace", async () => {
@@ -2665,6 +2865,59 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       "gpt-5.5",
       "gpt-5.5-relay-gpt",
     ]);
+  });
+
+  it("preserves source reasoning capability through route catalog projection", () => {
+    const official: Provider = {
+      id: "codex-official",
+      name: "OpenAI Official",
+      category: "official",
+      settingsConfig: {
+        modelCatalog: {
+          models: [
+            {
+              model: "gpt-5.6-luna",
+              reasoning: {
+                supported: true,
+                supportedEfforts: ["low", "medium", "high", "xhigh", "max"],
+                disableAllowed: false,
+                upstream: { format: "none", parameter: "none" },
+              },
+            },
+          ],
+        },
+      },
+      meta: { apiFormat: "openai_responses" },
+    };
+    const plan: Provider = {
+      id: "codex-multirouter",
+      name: "MultiRouter",
+      category: "custom",
+      settingsConfig: {
+        codexRouting: {
+          enabled: true,
+          routes: [
+            {
+              id: "official",
+              enabled: true,
+              targetProviderId: official.id,
+              modelSelection: { mode: "all" },
+            },
+          ],
+        },
+      },
+    };
+
+    const catalog = buildModelCatalogForRoutes(
+      plan,
+      readCodexRouting(plan)?.routes ?? [],
+      new Map([[official.id, official]]),
+    );
+
+    expect(
+      catalog.models.find((model) => model.model === "gpt-5.6-luna")?.reasoning
+        ?.supportedEfforts,
+    ).toContain("max");
   });
 
   it("does not expose provider catalog models that no saved route can match", () => {
@@ -3274,7 +3527,6 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       name: "Daily MultiRouter",
       notes: "primary plan",
       enabled: false,
-      defaultRouteId: "missing-route",
       officialAuth: { mode: "desktop_current_login" },
       hostedTools: {
         webSearch: false,

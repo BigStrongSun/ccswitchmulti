@@ -52,8 +52,15 @@ where
     let affected_router_ids = validate_and_collect_affected_router_ids(db, &provider)?;
     db.save_provider("codex", &provider)?;
 
+    let active_router_id = active_codex_router_id(db)?;
     let mut projections = Vec::with_capacity(affected_router_ids.len());
     for router_id in affected_router_ids {
+        if active_router_id
+            .as_deref()
+            .is_some_and(|active| active != router_id)
+        {
+            continue;
+        }
         projections.push(ensure_projection_with_publisher(
             db,
             &router_id,
@@ -62,6 +69,31 @@ where
         )?);
     }
     Ok(CodexProviderMutationOutcome { projections })
+}
+
+/// 共享 live catalog 只允许当前激活的 Codex MultiRouter 发布。
+fn active_codex_router_id(db: &Database) -> Result<Option<String>, AppError> {
+    if let Some(profile_id) = db.get_current_profile_id("codex")? {
+        let profiles = db.get_all_profiles()?;
+        if let Some(profile) = profiles
+            .into_iter()
+            .find(|profile| profile.id == profile_id)
+        {
+            let payload: serde_json::Value =
+                serde_json::from_str(&profile.payload).map_err(|error| {
+                    AppError::Database(format!("Failed to parse profile payload: {error}"))
+                })?;
+            if let Some(id) = payload
+                .get("providers")
+                .and_then(|providers| providers.get("codex"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|id| !id.is_empty())
+            {
+                return Ok(Some(id.to_string()));
+            }
+        }
+    }
+    db.get_current_provider("codex")
 }
 
 fn validate_and_collect_affected_router_ids(
@@ -537,5 +569,42 @@ mod tests {
             .get_provider_by_id("qwen", "codex")
             .expect("read target")
             .is_some());
+    }
+
+    #[test]
+    fn shared_provider_mutation_publishes_only_the_active_router() {
+        let db = Database::memory().expect("memory db");
+        db.save_provider("codex", &target("openai_chat"))
+            .expect("seed shared target");
+        db.save_provider("codex", &router("router-personal", "qwen"))
+            .expect("seed personal router");
+        db.save_provider("codex", &router("router-company", "qwen"))
+            .expect("seed company router");
+
+        let profile_id = "profile-personal".to_string();
+        db.save_profile(&crate::database::Profile {
+            id: profile_id.clone(),
+            name: "Personal".to_string(),
+            payload: r#"{"providers":{"codex":"router-personal"}}"#.to_string(),
+            sort_order: None,
+            created_at: Some(1),
+            updated_at: Some(1),
+        })
+        .expect("seed profile");
+        db.set_current_profile_id("codex", Some(&profile_id))
+            .expect("set active profile");
+
+        let published = RefCell::new(Vec::new());
+        apply_codex_provider_mutation_with_publisher(&db, target("openai_responses"), |artifact| {
+            published
+                .borrow_mut()
+                .push(artifact.router_provider_id.clone());
+            Ok(ProjectionReadBack::verified(
+                artifact.dependency_fingerprint.clone(),
+            ))
+        })
+        .expect("apply shared provider mutation");
+
+        assert_eq!(published.into_inner(), vec!["router-personal".to_string()]);
     }
 }

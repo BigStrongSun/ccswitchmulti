@@ -3004,12 +3004,21 @@ impl ProxyService {
             }
 
             if has_backup && !live_taken_over && matches!(app_type_enum, AppType::Codex) {
-                let effective_settings = build_effective_settings_with_common_config(
+                let mut effective_settings = build_effective_settings_with_common_config(
                     self.db.as_ref(),
                     &AppType::Codex,
                     &provider,
                 )
                 .map_err(|e| format!("构建 Codex 有效配置失败: {e}"))?;
+                if let Some(projected) =
+                    self.codex_provider_with_projected_model_catalog(Some(&provider))?
+                {
+                    if let Some(model_catalog) =
+                        projected.settings_config.get("modelCatalog").cloned()
+                    {
+                        effective_settings["modelCatalog"] = model_catalog;
+                    }
+                }
                 let auth = effective_settings
                     .get("auth")
                     .ok_or_else(|| "Codex 供应商缺少 auth 配置".to_string())?;
@@ -3826,6 +3835,15 @@ impl ProxyService {
         config: &Value,
         provider: Option<&Provider>,
     ) -> Result<(), String> {
+        let projected_provider = self.codex_provider_with_projected_model_catalog(provider)?;
+        let provider = projected_provider.as_ref();
+        let mut live_config = config.clone();
+        if let (Some(provider), Some(root)) = (provider, live_config.as_object_mut()) {
+            if let Some(model_catalog) = provider.settings_config.get("modelCatalog").cloned() {
+                root.insert("modelCatalog".to_string(), model_catalog);
+            }
+        }
+        let config = &live_config;
         // 接管态的 `PROXY_MANAGED` 只是本地代理门面 token，不能写入 auth.json。
         // 否则 Codex Desktop 会失去原始 ChatGPT OAuth 登录材料，表现为切换
         // MultiRouter/本地代理后要求重新登录。这里不再依赖兼容设置开关：只要是
@@ -3861,6 +3879,42 @@ impl ProxyService {
         }
 
         self.write_codex_live_for_provider(config, provider)
+    }
+
+    /// V2 MultiRouter 的 live catalog 必须来自当前 Provider 目录重新编译的投影。
+    fn codex_provider_with_projected_model_catalog(
+        &self,
+        provider: Option<&Provider>,
+    ) -> Result<Option<Provider>, String> {
+        let Some(provider) = provider else {
+            return Ok(None);
+        };
+        let is_v2_router = crate::codex_multirouter::schema::CodexRoutingDocument::parse(
+            provider
+                .settings_config
+                .get("codexRouting")
+                .unwrap_or(&serde_json::Value::Null),
+        )
+        .is_ok_and(|document| {
+            matches!(
+                document,
+                crate::codex_multirouter::schema::CodexRoutingDocument::V2(_)
+            )
+        });
+        if !is_v2_router {
+            return Ok(Some(provider.clone()));
+        }
+
+        let artifact = crate::codex_multirouter::projection::build_projection_artifact(
+            self.db.as_ref(),
+            &provider.id,
+        )
+        .map_err(|error| format!("构建 Codex MultiRouter 模型目录投影失败: {error}"))?;
+        let mut projected = provider.clone();
+        if let Some(model_catalog) = artifact.projection_settings.get("modelCatalog").cloned() {
+            projected.settings_config["modelCatalog"] = model_catalog;
+        }
+        Ok(Some(projected))
     }
 
     /// 根据 provider meta 决定 `modelCatalog` 是否参与 live 投射；目录元数据仍保存在 DB。

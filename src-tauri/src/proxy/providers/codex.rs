@@ -558,7 +558,7 @@ pub fn resolve_codex_v2_routed_provider(
     body: &JsonValue,
     providers: &HashMap<String, Provider>,
 ) -> Result<Option<ResolvedCodexRoute>, CodexRoutingCompileError> {
-    let Some((plan, compiled)) = compile_codex_v2_runtime_plan(router_provider, providers)? else {
+    let Some((_plan, compiled)) = compile_codex_v2_runtime_plan(router_provider, providers)? else {
         return Ok(None);
     };
     let request_model = body
@@ -582,29 +582,8 @@ pub fn resolve_codex_v2_routed_provider(
                 .expect("compiled model route must exist"),
             "exact",
         )
-    } else if let Some(route) = compiled.routes.iter().find(|route| {
-        route.enabled
-            && route.match_prefixes.iter().any(|prefix| {
-                let prefix = prefix.trim();
-                !prefix.is_empty()
-                    && request_model
-                        .to_ascii_lowercase()
-                        .starts_with(&prefix.to_ascii_lowercase())
-            })
-    }) {
-        (route, "prefix")
     } else {
-        let Some(default_route_id) = plan.default_route_id.as_deref() else {
-            return Ok(None);
-        };
-        let Some(route) = compiled
-            .routes
-            .iter()
-            .find(|route| route.enabled && route.id.eq_ignore_ascii_case(default_route_id))
-        else {
-            return Ok(None);
-        };
-        (route, "default")
+        return Ok(None);
     };
 
     build_resolved_codex_v2_route(
@@ -619,9 +598,8 @@ pub fn resolve_codex_v2_routed_provider(
 }
 
 /// Resolve raw OpenAI-compatible endpoints through schema v2 without falling back to legacy
-/// route probes. An explicit route id wins; otherwise an exact/prefix model match wins and the
-/// first official-auth route is the endpoint fallback. `defaultRouteId` is intentionally ignored
-/// for raw endpoints so a text-only third-party default cannot consume files/images/live calls.
+/// route probes. An explicit route id wins; otherwise only a model already present in the compiled
+/// catalog may select a route. Unknown or model-less requests fail closed.
 pub fn resolve_codex_v2_raw_passthrough_provider(
     router_provider: &Provider,
     body: &JsonValue,
@@ -657,39 +635,13 @@ pub fn resolve_codex_v2_raw_passthrough_provider(
                     .iter()
                     .find(|route| route.enabled && route.id == model.route_id)
             });
-        let prefix = compiled.routes.iter().find(|route| {
-            route.enabled
-                && route.match_prefixes.iter().any(|prefix| {
-                    let prefix = prefix.trim();
-                    !prefix.is_empty()
-                        && request_model
-                            .to_ascii_lowercase()
-                            .starts_with(&prefix.to_ascii_lowercase())
-                })
-        });
         if let Some(route) = exact {
             (route, "exact")
-        } else if let Some(route) = prefix {
-            (route, "prefix")
         } else {
-            let Some(route) = compiled
-                .routes
-                .iter()
-                .find(|route| codex_v2_route_is_official(route, providers))
-            else {
-                return Ok(None);
-            };
-            (route, "official_raw_fallback")
+            return Ok(None);
         }
     } else {
-        let Some(route) = compiled
-            .routes
-            .iter()
-            .find(|route| codex_v2_route_is_official(route, providers))
-        else {
-            return Ok(None);
-        };
-        (route, "official_raw_fallback")
+        return Ok(None);
     };
 
     build_resolved_codex_v2_route(
@@ -794,30 +746,6 @@ fn build_resolved_codex_v2_route(
         matched_by,
         effective_provider,
     })
-}
-
-fn codex_v2_route_is_official(
-    route: &CompiledCodexRoute,
-    providers: &HashMap<String, Provider>,
-) -> bool {
-    if matches!(
-        route.auth_policy.source,
-        CodexRouteAuthSource::NativeCodexAuth | CodexRouteAuthSource::ManagedCodexOauth
-    ) || route
-        .target_provider_id
-        .eq_ignore_ascii_case("codex-official")
-    {
-        return true;
-    }
-    providers
-        .get(&route.target_provider_id)
-        .is_some_and(|provider| {
-            provider
-                .meta
-                .as_ref()
-                .and_then(|meta| meta.provider_type.as_deref())
-                .is_some_and(|provider_type| provider_type.eq_ignore_ascii_case("codex_oauth"))
-        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1439,14 +1367,12 @@ pub fn codex_provider_text_only_input(provider: &Provider) -> Option<bool> {
 
 /// 从新旧配置中挑出本次请求应该使用的 route。
 ///
-/// 新配置允许显式关闭路由，并支持 `defaultRouteId` 兜底；旧配置没有开关语义，只要数组
-/// 存在就按旧规则匹配，保证已有本地数据库不会在升级后突然失效。
+/// 新配置允许显式关闭路由；旧配置没有开关语义，只要数组存在就按旧规则匹配。
 fn resolve_codex_route<'a>(provider: &'a Provider, request_model: &str) -> Option<&'a JsonValue> {
     resolve_codex_route_from_settings(&provider.settings_config, request_model)
 }
 
-/// Resolve an exact, prefix, or explicit default route without applying the runtime candidate
-/// fallback. This is the selection primitive used by both the single-route and candidate paths.
+/// Resolve an exact or prefix route without applying any implicit fallback.
 fn resolve_codex_route_from_settings<'a>(
     settings: &'a JsonValue,
     request_model: &str,
@@ -1468,25 +1394,7 @@ fn resolve_codex_route_from_settings<'a>(
         if let Some(route) = find_codex_route_by_match_priority(routes, request_model) {
             return Some(route);
         }
-        if codex_model_is_declared_only_by_disabled_route(routes, request_model) {
-            return None;
-        }
-
-        return routing
-            .get("defaultRouteId")
-            .or_else(|| routing.get("default_route_id"))
-            .and_then(|value| value.as_str())
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-            .and_then(|default_route_id| {
-                routes.iter().find(|route| {
-                    codex_route_is_enabled(route)
-                        && route
-                            .get("id")
-                            .and_then(|value| value.as_str())
-                            .is_some_and(|id| id.eq_ignore_ascii_case(default_route_id))
-                })
-            });
+        return None;
     }
 
     settings
@@ -1505,31 +1413,12 @@ fn resolve_codex_route_from_settings<'a>(
         })
 }
 
-/// Resolve the first route runtime will actually try. MultiRouter keeps its historical behavior:
-/// after exact/prefix/default selection, an otherwise unmatched model falls back to the first
-/// enabled candidate. A model explicitly declared only by disabled routes still fails closed.
+/// Resolve the route runtime will actually try. Unmatched models fail closed.
 pub(crate) fn resolve_codex_primary_route_from_settings<'a>(
     settings: &'a JsonValue,
     request_model: &str,
 ) -> Option<&'a JsonValue> {
-    if let Some(route) = resolve_codex_route_from_settings(settings, request_model) {
-        return Some(route);
-    }
-    let routing = settings.get("codexRouting")?;
-    if routing
-        .get("enabled")
-        .and_then(JsonValue::as_bool)
-        .is_some_and(|enabled| !enabled)
-    {
-        return None;
-    }
-    let routes = routing
-        .as_array()
-        .or_else(|| routing.get("routes").and_then(JsonValue::as_array))?;
-    if codex_model_is_declared_only_by_disabled_route(routes, request_model) {
-        return None;
-    }
-    routes.iter().find(|route| codex_route_is_enabled(route))
+    resolve_codex_route_from_settings(settings, request_model)
 }
 
 /// 判断 route 是否启用；字段缺省时按启用处理，减少手写配置的必填项。
@@ -1538,19 +1427,6 @@ fn codex_route_is_enabled(route: &JsonValue) -> bool {
         .get("enabled")
         .and_then(|value| value.as_bool())
         .unwrap_or(true)
-}
-
-/// 判断请求模型是否只存在于已停用 route 的精确模型列表中。
-///
-/// Codex Desktop 可能暂存旧 catalog；此时旧 alias 不能被当成未知模型再落到
-/// defaultRouteId，否则第三方模型切换会静默回到已耗尽的官方 route。
-fn codex_model_is_declared_only_by_disabled_route(
-    routes: &[JsonValue],
-    request_model: &str,
-) -> bool {
-    routes.iter().any(|route| {
-        !codex_route_is_enabled(route) && codex_route_has_exact_model_match(route, request_model)
-    })
 }
 
 /// 按全局优先级查找 route：所有精确模型匹配优先于任何前缀匹配。
@@ -1582,8 +1458,24 @@ fn find_codex_route_by_match_priority<'a>(
         routes.iter().find(|route| {
             codex_route_is_enabled(route)
                 && codex_route_has_prefix_model_match(route, request_model)
+                && codex_route_prefix_allows_model(route, request_model)
         })
     })
+}
+
+/// `include` is a strict allowlist. A coarse prefix may only extend a `mode=all`
+/// route or a legacy route without a model selection declaration.
+fn codex_route_prefix_allows_model(route: &JsonValue, request_model: &str) -> bool {
+    let Some(models) = route
+        .pointer("/modelSelection/models")
+        .and_then(JsonValue::as_array)
+    else {
+        return true;
+    };
+    models
+        .iter()
+        .filter_map(JsonValue::as_str)
+        .any(|model| model.trim().eq_ignore_ascii_case(request_model))
 }
 
 /// 判断单条 Codex route 是否匹配请求模型。
@@ -1593,7 +1485,8 @@ fn find_codex_route_by_match_priority<'a>(
 /// 避免 UI 显示大小写差异导致误路由。
 pub(crate) fn codex_route_matches_model(route: &JsonValue, request_model: &str) -> bool {
     codex_route_has_exact_model_match(route, request_model)
-        || codex_route_has_prefix_model_match(route, request_model)
+        || (codex_route_has_prefix_model_match(route, request_model)
+            && codex_route_prefix_allows_model(route, request_model))
 }
 
 /// 判断 route 是否精确声明了请求模型。
@@ -4486,7 +4379,7 @@ wire_api = "chat"
     }
 
     #[test]
-    fn test_codex_route_default_route_is_used_when_no_match() {
+    fn test_codex_route_unmatched_model_does_not_use_default_route() {
         let provider = create_provider(json!({
             "codexRouting": {
                 "defaultRouteId": "fallback",
@@ -4512,19 +4405,16 @@ wire_api = "chat"
         let routed = resolve_codex_model_routed_provider(
             &provider,
             &json!({ "model": "deepseek-v4-flash" }),
-        )
-        .expect("default fallback route");
+        );
 
-        assert_eq!(routed.id, "test::route::fallback");
-        assert_eq!(routed.name, "Qwen Fallback");
-        assert_eq!(
-            routed.settings_config["base_url"],
-            "https://fallback.example"
+        assert!(
+            routed.is_none(),
+            "an unmatched model must fail closed instead of using defaultRouteId"
         );
     }
 
     #[test]
-    fn test_codex_route_unmatched_model_keeps_first_enabled_candidate_fallback() {
+    fn test_codex_route_unmatched_model_does_not_use_first_enabled_candidate() {
         let provider = create_provider(json!({
             "codexRouting": {
                 "enabled": true,
@@ -4550,14 +4440,43 @@ wire_api = "chat"
         }));
 
         let routed =
-            resolve_codex_model_routed_provider(&provider, &json!({ "model": "unmatched-model" }))
-                .expect("historical first-enabled candidate fallback");
+            resolve_codex_model_routed_provider(&provider, &json!({ "model": "unmatched-model" }));
 
-        assert_eq!(routed.id, "test::route::first-enabled");
-        assert_eq!(
-            routed.settings_config["base_url"],
-            "https://first-enabled.example"
+        assert!(
+            routed.is_none(),
+            "an unmatched model must fail closed instead of using the first enabled route"
         );
+    }
+
+    #[test]
+    fn include_route_prefix_does_not_escape_selection() {
+        let provider = create_provider(json!({
+            "codexRouting": {
+                "enabled": true,
+                "routes": [{
+                    "id": "official",
+                    "enabled": true,
+                    "matchPrefixes": ["gpt"],
+                    "modelSelection": {
+                        "mode": "include",
+                        "models": ["gpt-5.6-sol", "gpt-5.6-luna"]
+                    },
+                    "base_url": "https://official.example"
+                }]
+            }
+        }));
+
+        let excluded =
+            resolve_codex_model_routed_provider(&provider, &json!({ "model": "gpt-5.4" }));
+        assert!(
+            excluded.is_none(),
+            "a coarse prefix must not route a model excluded by include selection"
+        );
+
+        let included =
+            resolve_codex_model_routed_provider(&provider, &json!({ "model": "gpt-5.6-sol" }))
+                .expect("an included model remains routable");
+        assert_eq!(included.id, "test::route::official");
     }
 
     #[test]
@@ -6781,7 +6700,7 @@ wire_api = "responses"
     }
 
     #[test]
-    fn v2_runtime_prefers_exact_then_prefix_then_default() {
+    fn v2_runtime_resolves_compiled_models_and_fails_closed_otherwise() {
         let mut prefix = v2_route("prefix", "prefix", json!({"mode": "all"}));
         prefix["matchPrefixes"] = json!(["qwen"]);
         let router = v2_router(
@@ -6815,24 +6734,24 @@ wire_api = "responses"
         .expect("exact route");
         let prefix =
             resolve_codex_v2_routed_provider(&router, &json!({"model": "qwen-new"}), &providers)
-                .expect("compile prefix")
-                .expect("prefix route");
+                .expect("compile prefix");
         let fallback = resolve_codex_v2_routed_provider(
             &router,
             &json!({"model": "unknown-model"}),
             &providers,
         )
-        .expect("compile default")
-        .expect("default route");
+        .expect("compile default");
 
         assert_eq!(exact.route_id, "exact");
-        assert_eq!(prefix.route_id, "prefix");
-        assert_eq!(prefix.canonical_model, "qwen-new");
-        assert_eq!(fallback.route_id, "default");
+        assert!(
+            prefix.is_none(),
+            "an uncompiled prefix model must fail closed"
+        );
+        assert!(fallback.is_none(), "an unmatched model must fail closed");
     }
 
     #[test]
-    fn raw_v2_routes_match_match_prefixes_and_include_models_before_official_fallback() {
+    fn include_route_prefix_does_not_match_models_outside_selection() {
         let official = json!({
             "id": "official",
             "enabled": true,
@@ -6849,14 +6768,17 @@ wire_api = "responses"
         });
         let routes = vec![official, deepseek];
 
-        let prefix = find_codex_route_by_match_priority(&routes, "deepseek-v4-flash")
-            .expect("V2 matchPrefixes should select DeepSeek route");
-        assert_eq!(prefix["id"], "deepseek");
+        let excluded = find_codex_route_by_match_priority(&routes, "deepseek-v4-flash");
+        assert!(
+            excluded.is_none(),
+            "an include-excluded model must not match through a prefix"
+        );
 
         let exact = find_codex_route_by_match_priority(&routes, "deepseek-v4-pro")
             .expect("V2 include selection should be an exact route match");
         assert_eq!(exact["id"], "deepseek");
-        assert!(codex_route_matches_model(exact, "deepseek-v4-flash"));
+        assert!(codex_route_matches_model(exact, "deepseek-v4-pro"));
+        assert!(!codex_route_matches_model(exact, "deepseek-v4-flash"));
     }
 
     #[test]
@@ -7015,7 +6937,7 @@ wire_api = "responses"
     }
 
     #[test]
-    fn v2_raw_passthrough_without_model_uses_latest_official_provider() {
+    fn v2_raw_passthrough_without_model_fails_closed() {
         let mut official = v2_route("official", "official", json!({"mode": "all"}));
         official["authPolicy"] = json!({"source": "native_codex_auth"});
         let router = v2_router(
@@ -7033,21 +6955,12 @@ wire_api = "responses"
 
         let resolved =
             resolve_codex_v2_raw_passthrough_provider(&router, &json!({}), &providers, None)
-                .expect("compile raw route")
-                .expect("official raw route");
+                .expect("compile raw route");
 
-        assert_eq!(resolved.route_id, "official");
-        assert_eq!(resolved.api_format, "openai_responses");
-        assert_eq!(resolved.matched_by, "official_raw_fallback");
-        assert_eq!(
-            resolved.effective_provider.settings_config["base_url"],
-            "https://official.example/v1"
+        assert!(
+            resolved.is_none(),
+            "a model-less raw request needs an explicit route and must fail closed otherwise"
         );
-        assert!(resolved
-            .effective_provider
-            .settings_config
-            .get(CODEX_RESOLVED_UPSTREAM_MODEL_OVERRIDE)
-            .is_none());
     }
 
     #[test]

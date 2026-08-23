@@ -779,6 +779,27 @@ pub(crate) fn write_live_with_common_config(
 
     if matches!(app_type, AppType::Codex) {
         let provider_context = crate::codex_config::codex_provider_classification_context(db)?;
+        let is_v2_router = crate::codex_multirouter::schema::CodexRoutingDocument::parse(
+            effective_provider
+                .settings_config
+                .get("codexRouting")
+                .unwrap_or(&serde_json::Value::Null),
+        )
+        .is_ok_and(|document| {
+            matches!(
+                document,
+                crate::codex_multirouter::schema::CodexRoutingDocument::V2(_)
+            )
+        });
+        if is_v2_router {
+            let artifact = crate::codex_multirouter::projection::build_projection_artifact(
+                db,
+                &effective_provider.id,
+            )?;
+            if let Some(model_catalog) = artifact.projection_settings.get("modelCatalog").cloned() {
+                effective_provider.settings_config["modelCatalog"] = model_catalog;
+            }
+        }
         return write_codex_live_snapshot(&effective_provider, Some(&provider_context));
     }
 

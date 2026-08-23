@@ -3017,7 +3017,17 @@ impl Database {
                         .filter(|prefix| !prefix.is_empty())
                         .any(|prefix| model_lower.starts_with(&prefix.to_ascii_lowercase()))
                 });
-            exact || prefix
+            let include_allows = route
+                .pointer("/modelSelection/models")
+                .and_then(serde_json::Value::as_array)
+                .map(|models| {
+                    models
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .any(|candidate| candidate.eq_ignore_ascii_case(model))
+                })
+                .unwrap_or(true);
+            exact || (prefix && include_allows)
         }
 
         fn canonicalize_deepseek_route(

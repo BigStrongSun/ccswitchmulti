@@ -206,7 +206,7 @@ fn projection_setting_key(router_provider_id: &str) -> String {
     format!("{PROJECTION_SETTING_PREFIX}{router_provider_id}")
 }
 
-fn build_projection_artifact(
+pub(crate) fn build_projection_artifact(
     db: &Database,
     router_provider_id: &str,
 ) -> Result<CodexRoutingProjectionArtifact, AppError> {
@@ -354,6 +354,10 @@ fn projected_model_entry(model: &CompiledCodexModel, sort_index: Option<usize>) 
     entry.insert(
         "upstreamModel".to_string(),
         Value::String(model.upstream_model.clone()),
+    );
+    entry.insert(
+        "displayName".to_string(),
+        Value::String(model.display_name.clone()),
     );
     entry.insert(
         "apiFormat".to_string(),
@@ -773,5 +777,37 @@ mod tests {
             inspect_codex_multirouter_projection(&db, "router").expect("inspect stale projection");
         assert_eq!(stale.state, ProjectionState::Pending);
         assert_eq!(stale.last_error_code.as_deref(), Some("projection_stale"));
+    }
+
+    #[test]
+    fn projected_models_preserve_display_name_from_source_catalog() {
+        let db = Database::memory().expect("memory db");
+        let router = router();
+        let mut target = Provider::with_id(
+            "qwen".to_string(),
+            "Qwen".to_string(),
+            json!({
+                "base_url": "https://qwen.example/v1",
+                "modelCatalog": {"models": [{
+                    "model": "qwen3.8",
+                    "displayName": "Qwen 3.8",
+                    "inputModalities": ["text"],
+                    "contextWindow": 262144
+                }]}
+            }),
+            None,
+        );
+        target.meta = Some(ProviderMeta {
+            api_format: Some("openai_responses".to_string()),
+            ..Default::default()
+        });
+        db.save_provider("codex", &router).expect("save router");
+        db.save_provider("codex", &target).expect("save target");
+
+        let artifact = build_projection_artifact(&db, "router").expect("projection artifact");
+        let models = artifact.projection_settings["modelCatalog"]["models"]
+            .as_array()
+            .expect("projected models");
+        assert_eq!(models[0]["displayName"].as_str(), Some("Qwen 3.8"));
     }
 }

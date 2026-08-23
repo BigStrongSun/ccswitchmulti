@@ -462,7 +462,6 @@ type MultiRouterSettingsDraft = {
   name: string;
   notes?: string;
   enabled: boolean;
-  defaultRouteId?: string;
   officialAuth: CodexOfficialAuthConfig;
   hostedTools: {
     webSearch: boolean;
@@ -571,6 +570,7 @@ type CodexCatalogModelDraft = {
   supports_image?: boolean;
   vision?: boolean;
   sortIndex?: number;
+  reasoning?: CodexCatalogModel["reasoning"];
   codexUltra?: CodexCatalogModel["codexUltra"];
   capabilities?: CodexRouteCapabilities;
 };
@@ -1080,20 +1080,22 @@ export function readCodexRouting(
       subagentVersion: normalizeCodexSubagentVersion(v2.subagentVersion),
       subagentV2: v2.subagentV2,
       spawnAgentModels: v2.spawnAgentModels ?? [],
-      routes: v2.routes.map((route) => ({
-        ...route,
-        match: {
-          models:
-            route.modelSelection.mode === "include"
-              ? route.modelSelection.models
-              : [],
-          prefixes: route.matchPrefixes ?? [],
-        },
-        upstream: {
-          auth: route.authPolicy,
-          modelMap: route.aliases,
-        },
-      })),
+      routes: v2.routes.map((route) => {
+        const modelSelection = route.modelSelection ?? { mode: "all" as const };
+        return {
+          ...route,
+          modelSelection,
+          match: {
+            models:
+              modelSelection.mode === "include" ? modelSelection.models : [],
+            prefixes: route.matchPrefixes ?? [],
+          },
+          upstream: {
+            auth: route.authPolicy,
+            modelMap: route.aliases,
+          },
+        };
+      }),
     };
   }
   return {
@@ -1473,6 +1475,7 @@ function catalogDraftFromSourceModel(
     ...(upstreamModel && upstreamModel !== id ? { upstreamModel } : {}),
     ...(displayName ? { displayName } : {}),
     ...(contextWindow ? { contextWindow } : {}),
+    ...(source?.reasoning ? { reasoning: source.reasoning } : {}),
     ...(source?.inputModalities
       ? { inputModalities: source.inputModalities }
       : {}),
@@ -1817,9 +1820,6 @@ function serializeCodexRoutingV2(routing: CodexRouting): CodexRoutingConfigV2 {
   return {
     schemaVersion: 2,
     enabled: routing.enabled,
-    ...(routing.defaultRouteId
-      ? { defaultRouteId: routing.defaultRouteId }
-      : {}),
     subagentVersion: routing.subagentVersion,
     subagentV2: routing.subagentV2,
     spawnAgentModels: routing.spawnAgentModels ?? [],
@@ -1964,17 +1964,18 @@ function routeCanMatchVisibleCatalogModel(
   const model = visibleModel.trim();
   if (!model) return false;
   const lowerModel = model.toLowerCase();
-  if (
-    (route.match?.models ?? []).some(
-      (matchedModel) => matchedModel.trim().toLowerCase() === lowerModel,
-    )
-  ) {
+  const exactModels = (route.match?.models ?? [])
+    .map((matchedModel) => matchedModel.trim().toLowerCase())
+    .filter(Boolean);
+  if (exactModels.includes(lowerModel)) {
     return true;
   }
-  return (route.match?.prefixes ?? []).some((prefix) => {
+  const prefixMatched = (route.match?.prefixes ?? []).some((prefix) => {
     const normalizedPrefix = prefix.trim().toLowerCase();
     return normalizedPrefix && lowerModel.startsWith(normalizedPrefix);
   });
+  if (!prefixMatched) return false;
+  return route.modelSelection?.mode !== "include";
 }
 
 /// route 能力比 provider catalog 更接近最终路由结果；写入聚合 catalog，确保 Codex 看到的模型能力与规则一致。
@@ -2159,15 +2160,7 @@ export function applyMultiRouterSettingsDraft(
               : route,
           ),
         };
-  const defaultRouteId = draft.defaultRouteId?.trim();
-  if (
-    defaultRouteId &&
-    (nextRouting.routes ?? []).some((route) => route.id === defaultRouteId)
-  ) {
-    nextRouting.defaultRouteId = defaultRouteId;
-  } else {
-    delete nextRouting.defaultRouteId;
-  }
+  delete nextRouting.defaultRouteId;
 
   return {
     ...plan,
@@ -2299,14 +2292,20 @@ function collectRouteModels(routes: RouteEntry[]): string[] {
 }
 
 /// 根据当前 MultiRouter 规则反查 catalog 中真实存在的模型，用于子 Agent 候选页的“路由命中”选项卡。
-function collectRoutedCatalogModels(
+export function collectRoutedCatalogModels(
   routes: RouteEntry[],
   catalogModels: CodexCatalogModel[],
 ): string[] {
   const exactModels = new Set<string>();
   const prefixes: string[] = [];
 
-  for (const { route } of routes) {
+  for (const { route, provider } of routes) {
+    if (route.modelSelection?.mode === "all") {
+      for (const model of readCodexModelCatalog(provider).models) {
+        const normalized = model.model?.trim();
+        if (normalized) exactModels.add(normalized);
+      }
+    }
     for (const model of route.match?.models ?? []) {
       const normalized = model.trim();
       if (normalized) exactModels.add(normalized);
@@ -2809,6 +2808,7 @@ export function CodexRouterWorkspacePage({
   // 不能因缺少 targetProviderId 退回到刷新全部候选 Provider。
   const selectedPlanForModelRefresh =
     routingPlans.find((provider) => provider.id === selectedPlanId) ??
+    routingPlans.find((provider) => provider.id === activeProviderId) ??
     routingPlans[0] ??
     null;
   const enabledModelSourceIdsForRefresh = useMemo(() => {
@@ -3001,12 +3001,10 @@ export function CodexRouterWorkspacePage({
       index,
     })),
   );
-  const enabledRoutes = routeEntries.filter(
-    ({ route }) => route.enabled !== false,
-  );
   const routeModels = collectRouteModels(routeEntries);
   const selectedPlan =
     routingPlans.find((provider) => provider.id === selectedPlanId) ??
+    routingPlans.find((provider) => provider.id === activeProviderId) ??
     routingPlans[0] ??
     null;
   const selectedRouting = selectedPlan ? readCodexRouting(selectedPlan) : null;
@@ -3203,26 +3201,13 @@ export function CodexRouterWorkspacePage({
       normalizedRouteDrafts,
       routableProvidersById,
     );
-    const enabledRouteIds = normalizedRoutes
-      .filter((route) => route.enabled !== false)
-      .map((route) => route.id)
-      .filter((id): id is string => Boolean(id));
-    const defaultRouteId = normalizedRoutes.some(
-      (route) => route.id && route.id === currentRouting.defaultRouteId,
-    )
-      ? currentRouting.defaultRouteId
-      : (enabledRouteIds[0] ?? normalizedRoutes[0]?.id);
     const nextRouting: CodexRouting = {
       ...currentRouting,
       schemaVersion: 2,
       enabled: currentRouting.enabled ?? true,
       routes: normalizedRoutes,
     };
-    if (defaultRouteId) {
-      nextRouting.defaultRouteId = defaultRouteId;
-    } else {
-      delete nextRouting.defaultRouteId;
-    }
+    delete nextRouting.defaultRouteId;
     const nextProvider: Provider = {
       ...plan,
       settingsConfig: {
@@ -3230,7 +3215,6 @@ export function CodexRouterWorkspacePage({
         codexRouting: serializeCodexRoutingV2(nextRouting),
       },
     };
-    delete nextProvider.settingsConfig.modelCatalog;
     const nextEnabledProviderIds = new Set<string>();
     for (const route of normalizedRoutes) {
       if (route.enabled === false) continue;
@@ -3395,12 +3379,30 @@ export function CodexRouterWorkspacePage({
       return;
     }
 
-    const matched = enabledRoutes.find(({ route }) => {
-      const models = route.match?.models ?? [];
-      const prefixes = route.match?.prefixes ?? [];
-      return (
-        models.includes(model) ||
-        prefixes.some((prefix) => model.startsWith(prefix))
+    const matched = selectedPlanRouteEntries.find(({ route }) => {
+      if (route.enabled === false) return false;
+      if (routeCanMatchVisibleCatalogModel(route, model)) return true;
+      if (route.modelSelection?.mode !== "all") return false;
+
+      const aliases = route.aliases ?? route.upstream?.modelMap ?? {};
+      if (
+        Object.keys(aliases).some(
+          (alias) => alias.trim().toLowerCase() === model.toLowerCase(),
+        )
+      ) {
+        return true;
+      }
+      const target = routeTargetProvider(route, providersById);
+      return readCodexModelCatalog(target ?? null).models.some(
+        (catalogModel) => {
+          const candidate = catalogModel.model?.trim();
+          const upstream = (
+            catalogModel.upstreamModel ?? catalogModel.upstream_model
+          )?.trim();
+          return [candidate, upstream].some(
+            (value) => value?.toLowerCase() === model.toLowerCase(),
+          );
+        },
       );
     });
 
@@ -3410,14 +3412,7 @@ export function CodexRouterWorkspacePage({
       return;
     }
 
-    const defaultRouteId = selectedRouting?.defaultRouteId;
-    const defaultRoute = defaultRouteId
-      ? enabledRoutes.find(({ route }) => route.id === defaultRouteId)
-      : undefined;
-    const fallback = defaultRouteId
-      ? `没有精确命中，会走默认路由 ${defaultRoute ? routeDisplayName(defaultRoute.route, providersById) : defaultRouteId}。`
-      : "没有命中任何启用规则，且当前方案没有默认路由。";
-    setTestResult(fallback);
+    setTestResult(`${model} 不可路由：未命中当前方案中的任何已启用模型规则。`);
   }
 
   return (
@@ -4812,9 +4807,6 @@ function MultiRouterSettingsPanel({
   const [name, setName] = useState(selectedPlan.name);
   const [notes, setNotes] = useState(selectedPlan.notes ?? "");
   const [enabled, setEnabled] = useState(selectedRouting.enabled !== false);
-  const [defaultRouteId, setDefaultRouteId] = useState(
-    selectedRouting.defaultRouteId ?? "",
-  );
   const [officialAuthMode, setOfficialAuthMode] =
     useState<CodexOfficialAuthMode>(initialOfficialAuth.mode);
   const [officialAccountId, setOfficialAccountId] = useState(
@@ -4853,7 +4845,6 @@ function MultiRouterSettingsPanel({
     setName(selectedPlan.name);
     setNotes(selectedPlan.notes ?? "");
     setEnabled(routing.enabled !== false);
-    setDefaultRouteId(routing.defaultRouteId ?? "");
     const officialAuth = readRouterOfficialAuth(routing);
     setOfficialAuthMode(officialAuth.mode);
     setOfficialAccountId(officialAuth.accountId ?? "");
@@ -4932,7 +4923,6 @@ function MultiRouterSettingsPanel({
       name,
       notes,
       enabled,
-      defaultRouteId,
       officialAuth: nextOfficialAuth,
       hostedTools: {
         webSearch: webSearchEnabled,
@@ -4953,15 +4943,14 @@ function MultiRouterSettingsPanel({
     setIsSavingListener(false);
   }
 
-  const routeOptions = selectedRoutes
-    .map(({ route }) => ({
-      id: route.id,
-      label: routeDisplayName(route, providersById),
-      enabled: route.enabled !== false,
-    }))
-    .filter((route): route is { id: string; label: string; enabled: boolean } =>
-      Boolean(route.id),
-    );
+  const legacyDefaultRoute = selectedRouting.defaultRouteId
+    ? selectedRoutes.find(
+        ({ route }) => route.id === selectedRouting.defaultRouteId,
+      )
+    : undefined;
+  const legacyDefaultRouteName = legacyDefaultRoute
+    ? routeDisplayName(legacyDefaultRoute.route, providersById)
+    : undefined;
   const listenerPreview = validateProxyListenDraft(listenAddress, listenPort);
   const previewBaseUrl = listenerPreview.ok
     ? listenerPreview.baseUrl
@@ -5003,7 +4992,7 @@ function MultiRouterSettingsPanel({
       <SectionHeader
         icon={Settings2}
         title="多路路由设置"
-        detail="这里配置 MultiRouter 方案名称、默认路由和本地代理监听入口；上游 API Key 仍由各 route 目标模型源维护。"
+        detail="这里配置 MultiRouter 方案名称和本地代理监听入口；上游 API Key 仍由各 route 目标模型源维护。"
         action={
           <div className="flex flex-wrap gap-2">
             <Button
@@ -5080,31 +5069,15 @@ function MultiRouterSettingsPanel({
             }}
             disabled={isSaving || isSavingListener}
           />
-          <div className="grid gap-2">
-            <label className="text-xs font-semibold text-muted-foreground dark:text-slate-300">
-              默认路由
-            </label>
-            <select
-              value={defaultRouteId}
-              onChange={(event) => setDefaultRouteId(event.target.value)}
-              className="h-10 rounded-md border border-blue-200 bg-background px-3 text-sm outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-500/20 dark:border-blue-700/50 dark:bg-slate-950/80 dark:focus:ring-blue-500/30"
-              disabled={
-                isSaving || isSavingListener || routeOptions.length === 0
-              }
-            >
-              <option value="">不设置默认路由</option>
-              {routeOptions.map((route) => (
-                <option key={route.id} value={route.id}>
-                  {route.label}
-                  {route.enabled ? "" : "（已停用）"}
-                </option>
-              ))}
-            </select>
-            <p className="text-xs leading-5 text-muted-foreground dark:text-slate-500">
-              没有精确命中 model
-              时才会使用默认路由；匹配规则仍在“编辑匹配规则”里选择。
-            </p>
-          </div>
+          {selectedRouting.defaultRouteId && (
+            <div className="grid gap-1 rounded-md border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-600/50 dark:bg-amber-950/20 dark:text-amber-100">
+              <span className="font-semibold">旧版默认路由已停用</span>
+              <span className="leading-5">
+                旧配置指向「{legacyDefaultRouteName ?? "已删除的路由"}」。
+                严格路由不会使用它；保存设置后会自动清除该兼容字段。
+              </span>
+            </div>
+          )}
           <div className="grid gap-3 rounded-lg border border-blue-200 bg-blue-50/70 p-3 dark:border-blue-700/40 dark:bg-blue-950/10">
             <div>
               <label className="text-xs font-semibold text-muted-foreground dark:text-slate-300">
@@ -6112,12 +6085,16 @@ function SpawnAgentCandidatesPanel({
     selectedCatalog.spawnAgentModels.join("\n");
   const spawnAgentMissingPriorityModels =
     diagnostics?.liveConfig.spawnAgentMissingPriorityModels ?? [];
-  const hasFlashRoleModel = selectedCatalog.models.some(
-    (model) => model.model?.trim() === "deepseek-v4-flash",
+  const isFlashRoleModel = (name: string) =>
+    (name === "deepseek-v4-flash" || name.startsWith("deepseek-v4-flash-")) &&
+    !name.includes("vision");
+  const hasFlashRoleModel = selectedCatalog.models.some((model) =>
+    isFlashRoleModel(model.model?.trim() ?? ""),
   );
-  const hasProRoleModel = selectedCatalog.models.some(
-    (model) => model.model?.trim() === "deepseek-v4-pro",
-  );
+  const hasProRoleModel = selectedCatalog.models.some((model) => {
+    const name = model.model?.trim() ?? "";
+    return name === "deepseek-v4-pro" || name.startsWith("deepseek-v4-pro-");
+  });
 
   useEffect(() => {
     setActiveSubagentVersion(persistedSubagentVersion);
@@ -6202,7 +6179,6 @@ function SpawnAgentCandidatesPanel({
           }),
         },
       };
-      delete nextProvider.settingsConfig.modelCatalog;
       await providersApi.update(nextProvider, "codex");
       setDraftSpawnAgentModels(normalized);
       setCandidateSaveMessage(
@@ -7863,10 +7839,7 @@ function TestTab({
             ok={selectedRouting?.enabled !== false}
             label="多路路由处于启用状态"
           />
-          <ChecklistItem
-            ok={Boolean(selectedRouting?.defaultRouteId)}
-            label="已设置默认路由"
-          />
+          <ChecklistItem ok label="未匹配模型会拒绝转发" />
           <ChecklistItem
             ok={(selectedRouting?.routes?.length ?? 0) > 0}
             label="至少有一条路由规则"
@@ -8213,19 +8186,22 @@ function DiagnosticsPanel({
                   value={`${diagnostics.routePlan.enabledRouteCount} / ${diagnostics.routePlan.routeCount}`}
                 />
                 <DetailRow
-                  label="默认路由"
+                  label="旧版默认路由（已停用）"
                   value={(() => {
                     const defaultRoute =
                       diagnostics.routePlan.routeSummaries.find(
                         (route) =>
                           route.id === diagnostics.routePlan.defaultRouteId,
                       );
-                    return routeSummaryDisplayName(
+                    const displayName = routeSummaryDisplayName(
                       defaultRoute?.label,
                       diagnostics.routePlan.defaultRouteId,
                       defaultRoute?.targetProviderName,
-                      "未设置",
+                      "无",
                     );
+                    return diagnostics.routePlan.defaultRouteId
+                      ? `${displayName}（不会参与转发）`
+                      : displayName;
                   })()}
                 />
               </div>
@@ -8693,7 +8669,7 @@ function PlanCardContent({
               routing.defaultRouteId,
             )}
           >
-            默认 {defaultRouteName ?? routing.defaultRouteId}
+            旧默认（已停用） {defaultRouteName ?? routing.defaultRouteId}
           </span>
         )}
         {!compact && <span>ID {provider.id}</span>}

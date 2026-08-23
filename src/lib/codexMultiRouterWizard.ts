@@ -972,10 +972,10 @@ export function collectWizardRouteAliasSelectionIssues(
       canonicalIds.map((model) => model.toLowerCase()),
     );
     const selectedSet =
-      route.modelSelection.mode === "all"
+      route.modelSelection?.mode === "all"
         ? canonicalSet
         : new Set(
-            route.modelSelection.models.map((model) =>
+            (route.modelSelection?.models ?? []).map((model) =>
               model.trim().toLowerCase(),
             ),
           );
@@ -1260,7 +1260,6 @@ export function buildCodexMultiRouterWizardPlan(
     ...(existingRoutingV2 ?? {}),
     schemaVersion: 2,
     enabled: true,
-    defaultRouteId: routes[0]?.id,
     subagentVersion,
     subagentV2: existingRouting?.subagentV2,
     spawnAgentModels: requestedSpawnAgentModels.filter((model) =>
