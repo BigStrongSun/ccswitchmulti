@@ -2717,6 +2717,37 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     expect(routing?.routes?.[1].match?.prefixes).toEqual(["deepseek-"]);
   });
 
+  it("does not crash when a schema v2 route is missing modelSelection (legacy/synced data)", () => {
+    const plan: Provider = {
+      id: "codex-multirouter",
+      name: "Legacy V2 Router",
+      category: "custom",
+      settingsConfig: {
+        codexRouting: {
+          schemaVersion: 2,
+          enabled: true,
+          routes: [
+            {
+              id: "router-kimi",
+              enabled: true,
+              targetProviderId: "kimi",
+              // modelSelection intentionally missing (pre-schema-v2 / cross-device sync data)
+              matchPrefixes: ["k3"],
+            },
+          ],
+        },
+      },
+    };
+
+    const routing = readCodexRouting(plan);
+
+    expect(routing?.enabled).toBe(true);
+    expect(routing?.routes).toHaveLength(1);
+    expect(routing?.routes?.[0].modelSelection).toEqual({ mode: "all" });
+    expect(routing?.routes?.[0].match?.models).toEqual([]);
+    expect(routing?.routes?.[0].match?.prefixes).toEqual(["k3"]);
+  });
+
   it("keeps legacy provider references and dedupes equivalent route candidates", () => {
     const deepseek: Provider = {
       id: "deepseek",

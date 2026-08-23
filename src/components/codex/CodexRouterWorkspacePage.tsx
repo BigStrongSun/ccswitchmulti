@@ -1076,22 +1076,25 @@ export function readCodexRouting(
       subagentVersion: normalizeCodexSubagentVersion(v2.subagentVersion),
       subagentV2: v2.subagentV2,
       spawnAgentModels: v2.spawnAgentModels ?? [],
-      routes: v2.routes.map((route) => ({
-        ...route,
+      routes: v2.routes.map((route) => {
         // 旧数据/跨设备同步可能缺失 modelSelection（schema v2 之前未强制），补默认值防止 undefined.mode 崩溃
-        modelSelection: route.modelSelection ?? { mode: "all" },
-        match: {
-          models:
-            route.modelSelection.mode === "include"
-              ? route.modelSelection.models
-              : [],
-          prefixes: route.matchPrefixes ?? [],
-        },
-        upstream: {
-          auth: route.authPolicy,
-          modelMap: route.aliases,
-        },
-      })),
+        const modelSelection = route.modelSelection ?? { mode: "all" };
+        return {
+          ...route,
+          modelSelection,
+          match: {
+            models:
+              modelSelection.mode === "include"
+                ? modelSelection.models
+                : [],
+            prefixes: route.matchPrefixes ?? [],
+          },
+          upstream: {
+            auth: route.authPolicy,
+            modelMap: route.aliases,
+          },
+        };
+      }),
     };
   }
   return {
