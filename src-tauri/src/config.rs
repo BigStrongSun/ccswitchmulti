@@ -323,6 +323,11 @@ pub fn write_text_file(path: &Path, data: &str) -> Result<(), AppError> {
     atomic_write(path, data.as_bytes())
 }
 
+#[cfg(windows)]
+fn is_transient_replace_lock(error: &std::io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(1175) | Some(32) | Some(5))
+}
+
 /// 原子写入：写入临时文件后 rename 替换，避免半写状态
 pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
     if let Some(parent) = path.parent() {
@@ -401,7 +406,7 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
         let mut completed = false;
         let mut last_error = None;
 
-        for _ in 0..3 {
+        for attempt in 0..5 {
             // SAFETY: both path buffers are NUL-terminated UTF-16 and remain alive for the
             // duration of the call. Backup, exclusion, and reserved pointers are intentionally null.
             let replaced_ok = unsafe {
@@ -420,6 +425,14 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
             }
 
             let replace_error = std::io::Error::last_os_error();
+            if is_transient_replace_lock(&replace_error) {
+                last_error = Some(replace_error);
+                if attempt < 4 {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                continue;
+            }
+
             if replace_error.kind() != std::io::ErrorKind::NotFound {
                 last_error = Some(replace_error);
                 break;
@@ -437,6 +450,9 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
                     ) =>
                 {
                     last_error = Some(source);
+                    if attempt < 4 {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
                 }
                 Err(source) => {
                     last_error = Some(source);
@@ -493,6 +509,19 @@ mod tests {
         drop(held_file);
         assert_eq!(std::fs::read(&path).unwrap(), b"old contents");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn transient_replace_lock_recognizes_only_supported_windows_errors() {
+        for code in [1175, 32, 5] {
+            assert!(is_transient_replace_lock(
+                &std::io::Error::from_raw_os_error(code)
+            ));
+        }
+        assert!(!is_transient_replace_lock(
+            &std::io::Error::from_raw_os_error(87)
+        ));
     }
 
     #[test]

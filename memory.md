@@ -1,5 +1,17 @@
 # CC Switch Repository Memory
 
+## 2026-08-23 PR #37-#49 拆分修复审计与 Windows 原子写锁处理
+
+- PR #37 修复 v2 `authPolicy.source` 未被认证门面读取导致官方 Codex route 被误判为
+  `FullyManaged`、注入 `PROXY_MANAGED` 并触发 401；当前主线提交 `0fbb562f` 已统一读取
+  `upstream.auth`、`auth`、`authPolicy`、`auth_policy`，后端回归通过。
+- PR #39/#41/#43/#47/#49 分别覆盖缺失 `modelSelection` 白屏、live catalog 排序/默认工作区、
+  `displayName` 投影、多个 Router 共享 target 时非活动 Router 覆盖投影、DeepSeek alias 后缀角色
+  误报缺失；这些行为已由主线 `8b29949b` 的整合实现覆盖，不应再次合入旧分支提交。
+- PR #45 定位 Windows `ReplaceFileW` 瞬时失败（1175/32/5）。主线选择对明确错误做
+  5 次、每次 100ms 的有界重试；重试耗尽仍返回错误并保留旧文件，不采用 PR 原案的
+  `fs::write` 非原子覆盖，避免并发时出现截断配置。锁定文件与错误码回归测试均通过。
+
 ## 2026-08-22 官方模型切到 DeepSeek V4 Flash 首个请求 400（reasoning_text）根因与修复
 
 - 现象：从官方模型切到 DeepSeek V4 Flash（原生 /v1/responses 透传）后，第一条请求被上游 400
