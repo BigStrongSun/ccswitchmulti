@@ -4236,3 +4236,10 @@ supported in one streaming turn`。
 - 后端设计在 `docs/superpowers/specs/2026-08-23-codex-reasoning-compatibility-probe-backend-design.md`，实施计划在 `docs/superpowers/plans/2026-08-23-codex-reasoning-compatibility-probe-backend.md`。新领域 `reasoning_probe` 将显式完成流式形态、推理字段、强制虚拟工具、历史续接、生产投影自检五个阶段；只持久化脱敏结构证据/哈希，绝不持久化 prompt、推理正文、工具正文或凭据。
 - 运行时必须用 `有效高级覆盖 > 指纹匹配且未过期的测试档案 > 安全回退` 解析 `ReasoningProjection`，一次性传给流式与非流式 Chat→Responses 转换；不得再让 `outputFormat` 或通用字段提取器单独决定 raw/summary。官方 OAuth 加密续接、原生 Responses 和 V2 agent-message 边界保持原路径。
 - 隔离工作树/分支：`bigstrongsun/codex-reasoning-probe-backend`，基线 `ee21cef1`。只添加设计与计划文档，未实施业务代码、未改前端、未安装或发布。起始 `cargo test ... model_fetch --lib` 受同机已有 Cargo 编译占用 artifact-directory 锁阻塞，不能计为通过或失败；不得中断其他工作树的 Cargo 进程。
+
+## 2026-08-23 截图中“Qwen 后来有白字”取证结论
+
+- 截图底部的 `qwen3.8` 只是下一回合的模型选择器状态。对应已完成的 thread `01a02da5-70c7-73e1-9587-9cd9fdaf3634` 在 `state_5.sqlite` 和四个 `turn_context` 中均记录为 `codex_model_router_v2 / gpt-5.6-terra / high`，不能据此声称 Qwen 已生成该段内容。
+- 该回合的 rollout 结构审计为 50 个 reasoning item：48 个是 `summary + encrypted_content`、2 个仅 `encrypted_content`，0 个具有 `content:[{type:"reasoning_text"}]`。因此真正的 reasoning 通道没有从 summary 切到 raw。
+- 截图内可见的英文进度句是普通 assistant `message` 的 `phase=commentary` / `final_answer`、内容类型 `output_text`；它们是在工具循环中模型主动写出的面向用户文本，Desktop 会照常显示。它与 `reasoning_text` 的展示能力是两个事件通道，不能作为第三方 raw reasoning 已经恢复的验收证据。
+- 该现象说明 UI 观感本身不稳定：某个回合是否主动产生 commentary 取决于模型和任务，不能驱动桥接策略。验收应采用独立 Qwen probe，按实际 wire event 和生成的 `VerifiedReasoningProfile` 判断。
