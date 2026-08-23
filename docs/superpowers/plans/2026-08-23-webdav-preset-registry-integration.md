@@ -79,6 +79,49 @@
 - 预设注册表 P1 的三方合并 / diff / UI、P2 的缓存与过期策略、检查更新 UI 为后续工作；
   本次联调交付**传输 + 配置 + manifest 校验**这一可验证地基。
 
+## 治理与维护模型（谁维护 / 条目怎么进 / 审核）
+
+联调方案只解决了“完整性”（签名保证 manifest 来自受信发布方且未被篡改），没解决“治理”
+（目录归谁、条目怎么进、变更要不要审）。这一节补齐。
+
+### 现状：已有基础设施，直接复用（不新建）
+
+- 已有 Cloudflare R2 桶 `cc-switch-releases` + `.github/workflows/sync-r2.yml`：release 晋升
+  （`released` 事件，**非** tag push）时把 release 资产 + Tauri updater manifest 镜像到 R2
+  （`dl.ccswitch.io`）。
+- updater 客户端用 **minisign** 验签；R2 镜像被显式当作**不可信**——信任来自签名，不来自传输。
+- 这套“不可信镜像 + 客户端验签 + release 晋升门控”正是预设目录需要的治理模型，直接复用。
+
+### G1：目录单独维护，但不新建基础设施
+
+- 目录源放 git（先放主仓库；要社区贡献再拆独立 `ccsm-model-catalog` 仓库）。
+- 内置 `codexProviderPresets.ts`（2021 行，29 个 modelCatalog）继续当离线兜底，现状不变。
+- 发布步骤：读目录源 → 校验（schema / 禁字段 / 无凭据 / 无可执行配置）→ 生成 manifest →
+  签名 → 传 R2/WebDAV。复用现有 R2 + minisign + release 门控，不另起炉灶。
+
+### G2：审核机制 = 你已有的 release 晋升门控 + PR 评审
+
+- 目录变更走 PR（人工评审 diff——这一步抓“合法但错误”的语义问题，如把纯文本模型标成支持图像、
+  上下文窗口填错）。
+- git 是审计轨迹。
+- release 晋升（prerelease 翻 stable）是最终发布门控，和 `sync-r2.yml` 同一道门。
+- **签名只保证完整性，不代替审核**：签名挡得住篡改 / 伪造发布方，挡不住发布方自己填错。
+  所以审核对“安全”（不只是质量）是必要的。
+
+### G3：谁维护 = 谁的密钥签名
+
+- 维护方 / 发布方 = BigStrongSun（你）。信任锚 = minisign 公钥（已在 Tauri updater 配置里）。
+- 客户端验签，所以“谁维护”编码为“谁的 key 签”：没有 key 就注入不了条目。
+- 要共享维护时：TUF 式多密钥阈值（如 2-of-3），避免单人可单方面发布。属 P3。
+
+### 待确认决策
+
+- 目录源位置：主仓库 vs 独立仓库（建议：先主仓库，要社区再拆）。
+- 签名格式：minisign（复用现有 key + 客户端验签 + 发布管线）vs 本次实现的裸 Ed25519。
+  建议：生产用 minisign，与现有 updater 一致；本次 Ed25519 地基仍有效，切换只是签名格式
+  drop-in（传输 + 校验逻辑不变）。
+- 单维护方 vs 社区（建议：先单维护方，审核 = 你的 PR 评审 + release 门控）。
+
 ## 本次交付（可验证地基）
 
 1. `services/preset_registry.rs`：
