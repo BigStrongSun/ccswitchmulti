@@ -14,7 +14,7 @@ use super::{
     classify_captured_reasoning_shape,
     endpoint::build_probe_url,
     redaction::RedactedProbeEvidence,
-    selection::select_transport_outcome,
+    selection::select_transport_outcome_with_reasoning,
     PreToolVisibleContent, ProbeCandidate, ProbeCase, ProbeReadiness, ProbeStageStatus,
     ReasoningSemantic, ReasoningSource, TransportKind, TransportProbeAssessment,
 };
@@ -77,11 +77,11 @@ async fn run_probe(candidate: ProbeCandidate, client: &Client) -> ProtocolCompat
         branches.push(run_branch(&candidate, client, transport, &nonce).await);
     }
 
-    let assessments = branches
+    let candidates = branches
         .iter()
-        .map(|branch| branch.assessment)
+        .map(|branch| (branch.assessment, branch.reasoning_shape.semantic))
         .collect::<Vec<_>>();
-    let selection = select_transport_outcome(&assessments);
+    let selection = select_transport_outcome_with_reasoning(&candidates);
     ProtocolCompatibilityProbeResult {
         selected_transport: selection.map(|selected| selected.transport),
         readiness: selection

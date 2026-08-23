@@ -28,6 +28,7 @@ use crate::proxy::providers::{
 #[derive(Clone, Copy)]
 enum ResponsesMode {
     Complete,
+    OpaqueReasoning,
     BaselineUnsupported,
     ToolUnsupported,
 }
@@ -164,9 +165,17 @@ async fn upstream(
 
     if is_stream {
         if is_responses {
+            let reasoning_event = match state.responses_mode {
+                ResponsesMode::OpaqueReasoning => {
+                    "event: response.reasoning_summary_text.delta\ndata: {\"delta\":\"opaque summary\"}\n\n"
+                }
+                _ => "event: response.reasoning_text.delta\ndata: {\"delta\":\"readable Responses reasoning\"}\n\n",
+            };
             return sse(
-                "event: response.output_text.delta\ndata: {\"delta\":\"baseline\"}\n\nevent: response.completed\ndata: {\"response\":{\"status\":\"completed\"}}\n\n"
-                    .to_string(),
+                format!(
+                    "{reasoning_event}{}",
+                    "event: response.output_text.delta\ndata: {\"delta\":\"baseline\"}\n\nevent: response.completed\ndata: {\"response\":{\"status\":\"completed\"}}\n\n"
+                ),
             );
         }
         return sse(
@@ -176,18 +185,33 @@ async fn upstream(
     }
 
     if is_responses {
+        let reasoning = match state.responses_mode {
+            ResponsesMode::OpaqueReasoning => vec![json!({
+                "type": "reasoning",
+                "encrypted_content": "fixture-encrypted-reasoning"
+            })],
+            _ => vec![json!({
+                "type": "reasoning",
+                "content": [{
+                    "type": "reasoning_text",
+                    "text": "readable Responses reasoning"
+                }]
+            })],
+        };
+        let mut output = reasoning;
+        output.push(json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [{
+                "type": "output_text",
+                "text": if is_continuation { "tool complete" } else { "baseline" }
+            }]
+        }));
         Json(json!({
             "id": "resp_fixture",
             "object": "response",
             "status": "completed",
-            "output": [{
-                "type": "message",
-                "role": "assistant",
-                "content": [{
-                    "type": "output_text",
-                    "text": if is_continuation { "tool complete" } else { "baseline" }
-                }]
-            }]
+            "output": output
         }))
         .into_response()
     } else {
@@ -319,6 +343,40 @@ async fn probes_all_four_stages_on_both_protocols_and_selects_responses_on_a_tie
         .unwrap()
         .iter()
         .any(|message| message.get("tool_calls").is_some()));
+}
+
+#[tokio::test]
+async fn runner_selects_readable_chat_from_real_branch_shapes_when_responses_is_opaque() {
+    let fixture = spawn_fixture(ResponsesMode::OpaqueReasoning).await;
+    let client = reqwest::Client::new();
+    let result = run_protocol_compatibility_probe(
+        candidate(&fixture.base_url, TransportKind::OpenAiResponses),
+        &client,
+    )
+    .await;
+
+    assert_eq!(result.selected_transport, Some(TransportKind::OpenAiChat));
+    assert_eq!(result.readiness, ProbeReadiness::Verified);
+    assert_eq!(
+        result
+            .branches
+            .iter()
+            .find(|branch| branch.assessment.transport == TransportKind::OpenAiResponses)
+            .unwrap()
+            .reasoning_shape
+            .semantic,
+        super::ReasoningSemantic::Opaque
+    );
+    assert_eq!(
+        result
+            .branches
+            .iter()
+            .find(|branch| branch.assessment.transport == TransportKind::OpenAiChat)
+            .unwrap()
+            .reasoning_shape
+            .semantic,
+        super::ReasoningSemantic::Readable
+    );
 }
 
 #[tokio::test]

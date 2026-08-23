@@ -1,4 +1,4 @@
-use super::{ProbeReadiness, TransportKind};
+use super::{ProbeReadiness, ReasoningSemantic, TransportKind};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,7 +43,7 @@ impl TransportProbeAssessment {
         )
     }
 
-    fn suitability_score(self) -> Option<(bool, bool, bool, bool)> {
+    fn capability_score(self) -> Option<(bool, bool, bool)> {
         if self.baseline != ProbeStageStatus::Passed {
             return None;
         }
@@ -51,7 +51,6 @@ impl TransportProbeAssessment {
             self.continuation == ProbeStageStatus::Passed,
             self.forced_tool == ProbeStageStatus::Passed,
             self.streaming == ProbeStageStatus::Passed,
-            self.transport == TransportKind::OpenAiResponses,
         ))
     }
 }
@@ -63,23 +62,51 @@ pub fn select_preferred_transport(
     select_transport_outcome(assessments).map(|selection| selection.transport)
 }
 
+#[cfg(test)]
 pub fn select_transport_outcome(
     assessments: &[TransportProbeAssessment],
 ) -> Option<TransportSelection> {
-    assessments
+    let candidates = assessments
         .iter()
-        .filter_map(|assessment| {
-            assessment
-                .suitability_score()
-                .map(|score| (score, assessment.transport))
+        .map(|assessment| (*assessment, ReasoningSemantic::None))
+        .collect::<Vec<_>>();
+    select_transport_outcome_with_reasoning(&candidates)
+}
+
+pub fn select_transport_outcome_with_reasoning(
+    candidates: &[(TransportProbeAssessment, ReasoningSemantic)],
+) -> Option<TransportSelection> {
+    candidates
+        .iter()
+        .filter_map(|(assessment, semantic)| {
+            assessment.capability_score().map(|capability| {
+                (
+                    (
+                        capability.0,
+                        capability.1,
+                        capability.2,
+                        reasoning_fidelity_rank(*semantic),
+                        assessment.transport == TransportKind::OpenAiResponses,
+                    ),
+                    *assessment,
+                )
+            })
         })
         .max_by_key(|(score, _)| *score)
-        .map(|(_, transport)| TransportSelection {
-            transport,
-            readiness: assessments
-                .iter()
-                .find(|assessment| assessment.transport == transport)
-                .filter(|assessment| assessment.is_complete())
-                .map_or(ProbeReadiness::Partial, |_| ProbeReadiness::Verified),
+        .map(|(_, assessment)| TransportSelection {
+            transport: assessment.transport,
+            readiness: if assessment.is_complete() {
+                ProbeReadiness::Verified
+            } else {
+                ProbeReadiness::Partial
+            },
         })
+}
+
+fn reasoning_fidelity_rank(semantic: ReasoningSemantic) -> u8 {
+    match semantic {
+        ReasoningSemantic::Readable => 2,
+        ReasoningSemantic::Summary => 1,
+        ReasoningSemantic::Opaque | ReasoningSemantic::None => 0,
+    }
 }

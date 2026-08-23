@@ -162,7 +162,7 @@ git commit -m "feat(codex): classify protocol response shapes" -m "本次提交�
 pub async fn run_protocol_compatibility_probe(candidate: ProbeCandidate, client: &Client) -> ProtocolCompatibilityRecord
 ```
 
-- [ ] **Step 1: Write failing local-upstream tests** for enumerating both Chat and Responses plus all four response outcomes: both complete selects native Responses; Responses partial plus Chat complete selects Chat; both partial selects the more capable reachable transport but keeps safe projection; neither baseline reachable is Unverified. Add full verified readable profile, summary-only profile, first-turn raw succeeds but forced-tool continuation fails, and tool choice unsupported. Add a Qwen-style tool round where `reasoning_content` and ordinary `content` precede the forced call; assert the run records `PreToolVisibleContent::Present` without changing the selected reasoning semantic or replay policy. Fixtures must assert the tool is named `ccsm_protocol_compatibility_probe`, receives a per-run random nonce, and gets an in-memory fixed tool result without touching filesystem/network.
+- [ ] **Step 1: Write failing local-upstream tests** for enumerating both Chat and Responses plus all four response outcomes: both complete and equally readable selects native Responses; equally capable Responses opaque/summary plus Chat readable selects Chat; Responses partial plus Chat complete selects Chat; stronger Responses capability stays selected even when its reasoning is opaque; neither baseline reachable is Unverified. Add full verified readable profile, summary-only profile, first-turn raw succeeds but forced-tool continuation fails, and tool choice unsupported. Add a Qwen-style tool round where `reasoning_content` and ordinary `content` precede the forced call; assert the run records `PreToolVisibleContent::Present` without changing the selected reasoning semantic or replay policy. Fixtures must assert the tool is named `ccsm_protocol_compatibility_probe`, receives a per-run random nonce, and gets an in-memory fixed tool result without touching filesystem/network.
 - [ ] **Step 2: Add tests proving the runner constructs every Chat wire request, including forced tool choice and the continuation history, through production `responses_to_chat_completions_with_reasoning*` code. Assert stored `wire_api` does not suppress either candidate; headers/body persistence exclude the prompt, nonce and tool result; a marker mismatch is diagnostic rather than a protocol failure; HTTP 401/403/429/timeouts are not protocol rejection and never retry; each branch obeys 5/15-second limits and the full dual-protocol transaction obeys a 120-second deadline.
 - [ ] **Step 3: Run RED tests.**
 
@@ -293,6 +293,12 @@ git diff --check
 git add memory.md src-tauri/src
 git commit -m "test(codex): verify protocol compatibility probe boundaries" -m "本次提交由BigStrongsSun完成"
 ```
+
+### Task 8: Make equal-capability transport selection reasoning-aware
+
+- [x] **Step 1: Add RED selection tests** proving `Readable > Summary > Opaque/None` only after continuation, forced-tool, and streaming capability all tie; retain the Responses fallback only when fidelity also ties and baseline-ineligible branches remain excluded.
+- [x] **Step 2: Pass each real `TransportBranchResult.reasoning_shape.semantic` into the single pure selector.** The runner must not fall back to an assessment-only selector. Readiness continues to be derived solely from the selected assessment, so fidelity never promotes `Partial` to `Verified`.
+- [x] **Step 3: Add a local-upstream runner regression** with opaque Responses and readable Chat shapes, and record the live canary motivation: DeepSeek chose opaque Responses over readable Chat, while both Kimi Providers chose summary Responses over readable Chat before this fix. The canary must be rerun after deployment; this code/test result is not live-provider success.
 
 ## Deferred Frontend Slice
 

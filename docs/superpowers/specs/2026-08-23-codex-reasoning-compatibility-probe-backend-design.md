@@ -135,7 +135,7 @@ tool call 前是否还发送了非空普通 `delta.content`。该字段只能保
 
 ### 5.2 协议选择与投影准入分离
 
-每个协议分支独立产出 `baseline / streaming / forced_tool / continuation` 四阶段状态。运行 transport 只从 baseline 可达的分支中选择，并按 `continuation 通过 > forced_tool 通过 > streaming 通过 > 原生 Responses 同分优先` 排序；这样 Qwen/vLLM 或 GLM 的 Chat 分支若比不完整的 Responses 分支更完整，会自动选择 Chat，而不是被表面 `wire_api=responses` 误导。
+每个协议分支独立产出 `baseline / streaming / forced_tool / continuation` 四阶段状态。运行 transport 只从 baseline 可达的分支中选择，并严格按五级顺序排序：`continuation 通过 > forced_tool 通过 > streaming 通过 > reasoning fidelity（Readable > Summary > Opaque/None）> 原生 Responses`。因此推理形态只在前三项能力完全并列时裁决：DeepSeek 的 Responses opaque 对 Chat readable、以及两个 Kimi Provider 的 Responses summary 对 Chat readable，均应选择 Chat；但 opaque Responses 只要在续接、工具或 SSE 任一能力更强，仍应优先保留该能力。仅五级均并列时才选择原生 Responses，避免由表面 `wire_api=responses` 误导。
 
 运行 transport 的选择不等于 reasoning 自动投影准入。只有被选分支四阶段全部通过时，档案才是 `Verified` 并可依据其响应证据启用自动 raw/summary 投影；选择到的 Partial 分支只用于保留基础路由能力，reasoning 必须安全回退。若两个分支 baseline 都不可达，则无自动选择并记为 `Unverified`。
 
