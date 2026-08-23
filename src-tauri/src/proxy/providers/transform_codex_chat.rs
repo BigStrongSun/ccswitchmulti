@@ -13,6 +13,7 @@ use super::hosted_tools::{
     image_generation::{self, HostedImageGenerationConfig, IMAGE_GENERATION_FUNCTION_NAME},
     web_search::{self, HostedWebSearchConfig},
 };
+use crate::protocol_compatibility::ReasoningProjection;
 use crate::provider::{CodexCacheConfig, CodexChatReasoningConfig};
 use crate::proxy::{
     error::ProxyError,
@@ -2223,6 +2224,20 @@ pub(crate) fn chat_completion_to_response_with_context(
     body: Value,
     tool_context: &CodexToolContext,
 ) -> Result<Value, ProxyError> {
+    chat_completion_to_response_with_context_and_projection(
+        body,
+        tool_context,
+        ReasoningProjection::ReasoningSummary,
+    )
+}
+
+/// Convert a non-streaming Chat Completions response into a Responses response
+/// with an explicit detected reasoning shape.
+pub(crate) fn chat_completion_to_response_with_context_and_projection(
+    body: Value,
+    tool_context: &CodexToolContext,
+    reasoning_projection: ReasoningProjection,
+) -> Result<Value, ProxyError> {
     let choices = body
         .get("choices")
         .and_then(|v| v.as_array())
@@ -2241,9 +2256,11 @@ pub(crate) fn chat_completion_to_response_with_context(
 
     let reasoning = chat_reasoning_text(message);
     let mut output = Vec::new();
-    if let Some(reasoning_item) =
-        chat_reasoning_to_response_output_item(reasoning.as_deref(), &response_id)
-    {
+    if let Some(reasoning_item) = chat_reasoning_to_response_output_item(
+        reasoning.as_deref(),
+        &response_id,
+        reasoning_projection,
+    ) {
         output.push(reasoning_item);
     }
     if let Some(message_item) = chat_message_to_response_output_item(message, &response_id) {
@@ -2294,20 +2311,33 @@ pub(crate) fn chat_completion_to_response_with_context(
 fn chat_reasoning_to_response_output_item(
     reasoning: Option<&str>,
     response_id: &str,
+    reasoning_projection: ReasoningProjection,
 ) -> Option<Value> {
     let reasoning = reasoning?;
     if reasoning.is_empty() {
         return None;
     }
 
-    Some(json!({
-        "id": format!("rs_{response_id}"),
-        "type": "reasoning",
-        "summary": [{
-            "type": "summary_text",
-            "text": reasoning
-        }]
-    }))
+    match reasoning_projection {
+        ReasoningProjection::RawReasoningText => Some(json!({
+            "id": format!("rs_{response_id}"),
+            "type": "reasoning",
+            "summary": [],
+            "content": [{
+                "type": "reasoning_text",
+                "text": reasoning
+            }]
+        })),
+        ReasoningProjection::ReasoningSummary => Some(json!({
+            "id": format!("rs_{response_id}"),
+            "type": "reasoning",
+            "summary": [{
+                "type": "summary_text",
+                "text": reasoning
+            }]
+        })),
+        ReasoningProjection::None => None,
+    }
 }
 
 fn chat_reasoning_text(message: &Value) -> Option<String> {
@@ -2822,6 +2852,67 @@ pub fn chat_error_to_response_error(body: Option<&Value>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol_compatibility::ReasoningProjection;
+
+    fn projected_chat_response(projection: ReasoningProjection) -> Value {
+        chat_completion_to_response_with_context_and_projection(
+            json!({
+                "id": "chatcmpl_projection",
+                "model": "qwen3.8",
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "reasoning_content": "Inspect the route.",
+                        "content": "Visible answer."
+                    },
+                    "finish_reason": "stop"
+                }]
+            }),
+            &CodexToolContext::default(),
+            projection,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn non_streaming_raw_projection_uses_reasoning_text_content() {
+        let response = projected_chat_response(ReasoningProjection::RawReasoningText);
+        assert_eq!(
+            response["output"][0]["content"][0]["type"],
+            "reasoning_text"
+        );
+        assert_eq!(
+            response["output"][0]["content"][0]["text"],
+            "Inspect the route."
+        );
+        assert_eq!(response["output"][0]["summary"], json!([]));
+        assert_eq!(
+            response["output"][1]["content"][0]["text"],
+            "Visible answer."
+        );
+    }
+
+    #[test]
+    fn non_streaming_summary_projection_keeps_summary_shape() {
+        let response = projected_chat_response(ReasoningProjection::ReasoningSummary);
+        assert_eq!(response["output"][0]["summary"][0]["type"], "summary_text");
+        assert_eq!(
+            response["output"][0]["summary"][0]["text"],
+            "Inspect the route."
+        );
+        assert!(response["output"][0].get("content").is_none());
+    }
+
+    #[test]
+    fn non_streaming_no_projection_omits_reasoning_and_keeps_visible_answer() {
+        let response = projected_chat_response(ReasoningProjection::None);
+        assert_eq!(response["output"].as_array().unwrap().len(), 1);
+        assert_eq!(response["output"][0]["type"], "message");
+        assert_eq!(
+            response["output"][0]["content"][0]["text"],
+            "Visible answer."
+        );
+    }
 
     #[test]
     fn capability_effort_mapping_narrow_display_wide_remap() {
