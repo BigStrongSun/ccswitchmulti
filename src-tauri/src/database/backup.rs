@@ -79,6 +79,7 @@ const SYNC_SKIP_TABLES: &[&str] = &[
     "provider_health",
     "proxy_live_backup",
     "usage_daily_rollups",
+    "session_log_sync",
 ];
 
 /// Tables whose local data is preserved (restored from local snapshot) during WebDAV import.
@@ -88,6 +89,7 @@ const SYNC_PRESERVE_TABLES: &[&str] = &[
     "stream_check_logs",
     "proxy_live_backup",
     "usage_daily_rollups",
+    "session_log_sync",
 ];
 
 /// A database backup entry for the UI
@@ -258,6 +260,11 @@ impl Database {
         }
 
         for table in tables {
+            if SYNC_SKIP_TABLES.contains(&table.as_str())
+                || SYNC_PRESERVE_TABLES.contains(&table.as_str())
+            {
+                continue;
+            }
             let text_columns = Self::get_text_columns(conn, &table)?;
             if text_columns.is_empty() {
                 continue;
@@ -1325,10 +1332,17 @@ mod tests {
                  VALUES ('claude', 'remote-live', '2099-01-01');
                  INSERT INTO provider_health (
                      provider_id, app_type, is_healthy, consecutive_failures, updated_at
-                 ) VALUES ('remote-provider', 'claude', 0, 9, '2099-01-01');",
+                 ) VALUES ('remote-provider', 'claude', 0, 9, '2099-01-01');
+                 INSERT INTO session_log_sync (
+                     file_path, last_modified, last_line_offset, last_synced_at
+                 ) VALUES ('C:\\Users\\remote\\.codex\\sessions\\remote.jsonl', 9, 90, 900);",
             )?;
         }
         let remote_sql = remote_db.export_sql_string_for_sync(true)?;
+        assert!(
+            !remote_sql.contains("remote.jsonl"),
+            "同步导出不得携带远端机器的 session_log_sync 路径状态"
+        );
 
         let local_db = Database::memory()?;
         {
@@ -1354,7 +1368,10 @@ mod tests {
                  VALUES ('claude', '{\"local\":true}', '2026-03-01');
                  INSERT INTO provider_health (
                      provider_id, app_type, is_healthy, consecutive_failures, updated_at
-                 ) VALUES ('local-provider', 'claude', 1, 0, '2026-03-01');",
+                 ) VALUES ('local-provider', 'claude', 1, 0, '2026-03-01');
+                 INSERT INTO session_log_sync (
+                     file_path, last_modified, last_line_offset, last_synced_at
+                 ) VALUES ('C:\\Users\\local\\.codex\\sessions\\local.jsonl', 1, 10, 100);",
             )?;
         }
 
@@ -1431,6 +1448,21 @@ mod tests {
         assert_eq!(
             provider_health_count, 0,
             "同步导入应清除可重建的本地 provider_health 状态"
+        );
+        let local_session_state: (String, i64, i64, i64) = conn.query_row(
+            "SELECT file_path, last_modified, last_line_offset, last_synced_at FROM session_log_sync",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        assert_eq!(
+            local_session_state,
+            (
+                r"C:\Users\local\.codex\sessions\local.jsonl".into(),
+                1,
+                10,
+                100,
+            ),
+            "同步导入必须保留本机 session_log_sync 进度"
         );
         Ok(())
     }

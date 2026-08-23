@@ -4201,3 +4201,9 @@ supported in one streaming turn`。
 - catalog 投影必须保留源模型 `reasoning` 与 `displayName`，`/v1/models data[]` 同时投射 `display_name/displayName/name`。V2 live 写入从 Provider 与 route 重新编译 projection，不读取 Router 中可能陈旧的 catalog 快照；多个 MultiRouter 共用目标 Provider 时，只有当前 profile/current provider 对应的激活 Router 可以发布共享 live catalog。
 - 兼容读取允许同步合并后的 V2 route 缺少 `modelSelection`，按 `mode=all` 规范化，避免工作台读取 `.mode` 崩溃。带 route alias 后缀的 `deepseek-v4-flash-*` / `deepseek-v4-pro-*` 可作为 V2 角色模型，但 Flash Vision 变体明确排除。
 - 搜索渠道：Codex 内置 WebSearch 检查 GitHub PR 页面与提交列表；Matrix WebSearch 独立检索但没有返回可用 GitHub 正文。关键结论最终以本地 PR head `1f362461`、当前 `main@f83a4145`、逐提交 diff 和 RED/GREEN 回归为准。
+
+# 2026-08-23 PR #35 WebDAV session_log_sync 本地状态隔离
+
+- `session_log_sync.file_path` 是本机 Codex 会话文件路径与增量读取进度，不是跨设备配置。旧同步导出会把它写进 SQL，portableize/localize 又会改写主键，可能与目标机器已有路径碰撞并导致 WebDAV/S3 导入失败。
+- 根修把 `session_log_sync` 同时加入 `SYNC_SKIP_TABLES` 与 `SYNC_PRESERVE_TABLES`，并让同步快照的 TEXT 路径/密钥重写统一跳过所有 skip/preserve 表。结果是远端 SQL 不含该表数据，导入时保留目标机器自己的进度，路径主键也不会进入跨设备改写链。
+- 回归 `sync_import_preserves_local_only_tables` 先 RED（远端 SQL 含 `remote.jsonl`），再 GREEN；测试同时断言远端状态不导出、本机四个进度字段完整保留。主工作树一度被并行 `preset_registry` 编译错误阻塞，等待对方修复后实跑 1/1 通过；隔离编译曾因磁盘不足失败，不计入成功证据。
