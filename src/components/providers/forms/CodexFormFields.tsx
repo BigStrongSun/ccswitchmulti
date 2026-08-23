@@ -522,11 +522,15 @@ function createCatalogRow(seed?: Partial<CodexCatalogModel>): CodexCatalogRow {
       ? { inputModalities: [...inputModalities] }
       : {}),
     ...(supportsImage !== undefined ? { supportsImage } : {}),
+    ...(seed?.textOnly !== undefined ? { textOnly: seed.textOnly } : {}),
     ...(seed?.baseInstructions
       ? { baseInstructions: seed.baseInstructions }
       : {}),
     ...(seed?.reasoning ? { reasoning: seed.reasoning } : {}),
     ...(seed?.codexUltra ? { codexUltra: seed.codexUltra } : {}),
+    ...(seed?.apiFormat ? { apiFormat: seed.apiFormat } : {}),
+    ...(seed?.codexCache ? { codexCache: seed.codexCache } : {}),
+    ...(seed?.sortIndex !== undefined ? { sortIndex: seed.sortIndex } : {}),
   };
 }
 
@@ -574,8 +578,12 @@ function catalogRowsMatchModels(
       | "baseInstructions"
       | "inputModalities"
       | "supportsImage"
+      | "textOnly"
       | "reasoning"
       | "codexUltra"
+      | "apiFormat"
+      | "codexCache"
+      | "sortIndex"
     >
   >,
   models: CodexCatalogModel[],
@@ -601,10 +609,17 @@ function catalogRowsMatchModels(
           incoming.supports_image ??
           incoming.vision ??
           null) &&
+      (row.textOnly ?? null) ===
+        (incoming.textOnly ?? incoming.text_only ?? null) &&
       JSON.stringify(row.reasoning ?? null) ===
         JSON.stringify(incoming.reasoning ?? null) &&
       JSON.stringify(row.codexUltra ?? null) ===
-        JSON.stringify(incoming.codexUltra ?? null)
+        JSON.stringify(incoming.codexUltra ?? null) &&
+      (row.apiFormat ?? null) ===
+        (incoming.apiFormat ?? incoming.api_format ?? null) &&
+      JSON.stringify(row.codexCache ?? null) ===
+        JSON.stringify(incoming.codexCache ?? incoming.codex_cache ?? null) &&
+      (row.sortIndex ?? null) === (incoming.sortIndex ?? null)
     );
   });
 }
@@ -709,6 +724,9 @@ function buildCodexProviderReadinessIdentity({
         model.baseInstructions ?? model.base_instructions ?? null,
       reasoning: model.reasoning ?? null,
       codexUltra: model.codexUltra ?? null,
+      apiFormat: model.apiFormat ?? model.api_format ?? null,
+      codexCache: model.codexCache ?? model.codex_cache ?? null,
+      sortIndex: model.sortIndex ?? null,
     })),
   });
 }

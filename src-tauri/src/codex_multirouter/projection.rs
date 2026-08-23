@@ -405,6 +405,23 @@ fn projected_model_entry(model: &CompiledCodexModel, sort_index: Option<usize>) 
     if let Some(cache) = model.capability_summary.codex_cache.clone() {
         entry.insert("codexCache".to_string(), cache);
     }
+    if let Some(supports_parallel_tool_calls) =
+        model.capability_summary.supports_parallel_tool_calls
+    {
+        entry.insert(
+            "supportsParallelToolCalls".to_string(),
+            Value::Bool(supports_parallel_tool_calls),
+        );
+    }
+    if let Some(base_instructions) = model.capability_summary.base_instructions.clone() {
+        entry.insert(
+            "baseInstructions".to_string(),
+            Value::String(base_instructions),
+        );
+    }
+    if let Some(codex_ultra) = model.capability_summary.codex_ultra.clone() {
+        entry.insert("codexUltra".to_string(), codex_ultra);
+    }
     Value::Object(entry)
 }
 
@@ -900,7 +917,20 @@ mod tests {
                     "model": "qwen3.8",
                     "displayName": "Qwen 3.8",
                     "inputModalities": ["text"],
-                    "contextWindow": 262144
+                    "contextWindow": 262144,
+                    "reasoning": {
+                        "schemaVersion": 2,
+                        "supportStatus": "confirmed_supported",
+                        "controlKind": "graded",
+                        "supportedEfforts": ["low", "high"],
+                        "defaultEffort": "high",
+                        "disableAllowed": false,
+                        "upstream": {"format": "string", "parameter": "reasoning_effort"}
+                    },
+                    "codexCache": {"cacheMode": "qwen_context_cache"},
+                    "supportsParallelToolCalls": true,
+                    "baseInstructions": "Use Qwen tools.",
+                    "codexUltra": {"enabled": true, "providerEffort": "high"}
                 }]}
             }),
             None,
@@ -917,6 +947,13 @@ mod tests {
             .as_array()
             .expect("projected models");
         assert_eq!(models[0]["displayName"].as_str(), Some("Qwen 3.8"));
+        assert_eq!(models[0]["contextWindow"].as_u64(), Some(262_144));
+        assert_eq!(models[0]["inputModalities"], json!(["text"]));
+        assert_eq!(models[0]["reasoning"]["defaultEffort"], "high");
+        assert_eq!(models[0]["codexCache"]["cacheMode"], "qwen_context_cache");
+        assert_eq!(models[0]["supportsParallelToolCalls"], true);
+        assert_eq!(models[0]["baseInstructions"], "Use Qwen tools.");
+        assert_eq!(models[0]["codexUltra"]["providerEffort"], "high");
     }
 
     #[test]

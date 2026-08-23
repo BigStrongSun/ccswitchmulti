@@ -296,11 +296,21 @@ export const normalizeCodexCatalogModelsForSave = (
       ...(typeof item.supportsImage === "boolean"
         ? { supportsImage: item.supportsImage }
         : {}),
+      ...(typeof item.textOnly === "boolean"
+        ? { textOnly: item.textOnly }
+        : {}),
       ...(inputModalities && inputModalities.length > 0
         ? { inputModalities }
         : {}),
       ...(baseInstructions ? { baseInstructions } : {}),
       ...(reasoning ? { reasoning } : {}),
+      ...(item.apiFormat ? { apiFormat: item.apiFormat } : {}),
+      ...(item.codexCache ? { codexCache: { ...item.codexCache } } : {}),
+      ...(typeof item.sortIndex === "number" &&
+      Number.isInteger(item.sortIndex) &&
+      item.sortIndex >= 0
+        ? { sortIndex: item.sortIndex }
+        : {}),
       ...(item.codexUltra
         ? {
             codexUltra: {

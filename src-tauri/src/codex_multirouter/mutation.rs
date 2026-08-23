@@ -397,6 +397,65 @@ mod tests {
     }
 
     #[test]
+    fn provider_model_capability_update_rebuilds_the_active_router_projection() {
+        let db = Database::memory().expect("memory db");
+        db.save_provider("codex", &target("openai_chat"))
+            .expect("seed target");
+        db.save_provider("codex", &router("router-a", "qwen"))
+            .expect("seed router");
+        db.set_current_provider("codex", "router-a")
+            .expect("activate router");
+
+        let mut updated = target("openai_responses");
+        updated.settings_config["modelCatalog"]["models"] = json!([{
+            "model": "qwen3.8",
+            "displayName": "Qwen 3.8 Updated",
+            "contextWindow": 524288,
+            "inputModalities": ["text", "image"],
+            "reasoning": {
+                "schemaVersion": 2,
+                "supportStatus": "confirmed_supported",
+                "controlKind": "graded",
+                "supportedEfforts": ["low", "high", "max"],
+                "defaultEffort": "max",
+                "disableAllowed": false,
+                "upstream": {
+                    "format": "string",
+                    "parameter": "reasoning_effort",
+                    "effortMap": {"low": "low", "high": "high", "max": "max"}
+                }
+            },
+            "codexUltra": {"enabled": true, "providerEffort": "max"}
+        }]);
+        let published_model = RefCell::new(None);
+
+        apply_codex_provider_mutation_with_publisher(&db, updated, |artifact| {
+            *published_model.borrow_mut() = artifact
+                .projection_settings
+                .pointer("/modelCatalog/models/0")
+                .cloned();
+            Ok(ProjectionReadBack::verified(
+                artifact.dependency_fingerprint.clone(),
+            ))
+        })
+        .expect("apply capability mutation");
+
+        let model = published_model
+            .into_inner()
+            .expect("active router projection model");
+        assert_eq!(model["displayName"], "Qwen 3.8 Updated");
+        assert_eq!(model["contextWindow"], 524_288);
+        assert_eq!(model["inputModalities"], json!(["text", "image"]));
+        assert_eq!(
+            model["reasoning"]["supportedEfforts"],
+            json!(["low", "high", "max"])
+        );
+        assert_eq!(model["reasoning"]["defaultEffort"], "max");
+        assert_eq!(model["codexUltra"]["providerEffort"], "max");
+        assert_eq!(model["apiFormat"], "openai_responses");
+    }
+
+    #[test]
     fn unrelated_invalid_router_does_not_block_provider_mutation() {
         let db = Database::memory().expect("memory db");
         db.save_provider("codex", &target("openai_chat"))

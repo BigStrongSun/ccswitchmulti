@@ -3,6 +3,7 @@ import {
   normalizeCodexCatalogModelsForSave,
   normalizeCodexChatReasoningForSave,
 } from "@/components/providers/forms/ProviderForm";
+import { extractCodexCatalogModels } from "@/components/providers/forms/hooks/useCodexConfigState";
 
 describe("ProviderForm Codex catalog helpers", () => {
   it("normalizes catalog rows and removes empty or duplicate models", () => {
@@ -162,6 +163,34 @@ describe("ProviderForm Codex catalog helpers", () => {
     ).toEqual([
       { model: "enabled-model" },
       { model: "disabled-model", enabled: false },
+    ]);
+  });
+
+  it("round-trips model transport, cache, and ordering metadata through provider editing", () => {
+    const loaded = extractCodexCatalogModels({
+      models: [
+        {
+          model: "qwen3.8",
+          api_format: "openai_chat",
+          codex_cache: {
+            cacheMode: "qwen_context_cache",
+            supportsPromptCacheKey: true,
+          },
+          sortIndex: 7,
+        },
+      ],
+    });
+
+    expect(normalizeCodexCatalogModelsForSave(loaded)).toEqual([
+      {
+        model: "qwen3.8",
+        apiFormat: "openai_chat",
+        codexCache: {
+          cacheMode: "qwen_context_cache",
+          supportsPromptCacheKey: true,
+        },
+        sortIndex: 7,
+      },
     ]);
   });
 });

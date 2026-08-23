@@ -58,6 +58,12 @@ pub struct CodexModelCapabilitySummary {
     pub reasoning: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub codex_cache: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_parallel_tool_calls: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_instructions: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codex_ultra: Option<Value>,
     pub context_window_source: String,
     pub input_modalities_source: String,
     pub reasoning_source: String,
@@ -373,7 +379,12 @@ fn provider_model_entries(provider: &Provider) -> Vec<&Value> {
         .or_else(|| provider.settings_config.get("model_catalog"))
         .and_then(|catalog| catalog.get("models"))
         .and_then(Value::as_array)
-        .map(|models| models.iter().collect())
+        .map(|models| {
+            models
+                .iter()
+                .filter(|model| model.get("enabled").and_then(Value::as_bool) != Some(false))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -562,7 +573,7 @@ fn effective_capability_summary(
         ),
     );
     let (input_modalities, input_modalities_source) = value_with_source(
-        string_array_field(model_entry, &["inputModalities", "input_modalities"]),
+        model_input_modalities(model_entry),
         string_array_field(
             &provider.settings_config,
             &["inputModalities", "input_modalities"],
@@ -603,11 +614,36 @@ fn effective_capability_summary(
         input_modalities: input_modalities.unwrap_or_default(),
         reasoning: reasoning.map(|value| sanitize_capability_value(&value)),
         codex_cache: codex_cache.map(|value| sanitize_capability_value(&value)),
+        supports_parallel_tool_calls: bool_field(
+            model_entry,
+            &["supportsParallelToolCalls", "supports_parallel_tool_calls"],
+        ),
+        base_instructions: string_field(model_entry, &["baseInstructions", "base_instructions"])
+            .map(ToString::to_string),
+        codex_ultra: value_field(model_entry, &["codexUltra", "codex_ultra"])
+            .map(sanitize_capability_value),
         context_window_source,
         input_modalities_source,
         reasoning_source,
         codex_cache_source,
     }
+}
+
+fn model_input_modalities(model_entry: &Value) -> Option<Vec<String>> {
+    if let Some(modalities) =
+        string_array_field(model_entry, &["inputModalities", "input_modalities"])
+    {
+        return Some(modalities);
+    }
+    if bool_field(model_entry, &["supportsImage", "supports_image", "vision"]) == Some(true) {
+        return Some(vec!["text".to_string(), "image".to_string()]);
+    }
+    if bool_field(model_entry, &["textOnly", "text_only"]) == Some(true)
+        || bool_field(model_entry, &["supportsImage", "supports_image", "vision"]) == Some(false)
+    {
+        return Some(vec!["text".to_string()]);
+    }
+    None
 }
 
 fn sanitize_capability_value(value: &Value) -> Value {
@@ -667,6 +703,10 @@ fn u64_field(value: &Value, names: &[&str]) -> Option<u64> {
     value_field(value, names)
         .and_then(Value::as_u64)
         .filter(|value| *value > 0)
+}
+
+fn bool_field(value: &Value, names: &[&str]) -> Option<bool> {
+    value_field(value, names).and_then(Value::as_bool)
 }
 
 fn string_array_field(value: &Value, names: &[&str]) -> Option<Vec<String>> {
@@ -874,6 +914,27 @@ mod tests {
         let compiled = compile(&plan, [provider]);
 
         assert_eq!(compiled.spawn_agent_models, vec!["qwen3.9"]);
+    }
+
+    #[test]
+    fn disabled_provider_models_are_excluded_from_v2_routes_and_spawn_agents() {
+        let provider = provider(
+            "qwen",
+            "Qwen",
+            "openai_responses",
+            json!([
+                {"model": "qwen-enabled"},
+                {"model": "qwen-disabled", "enabled": false}
+            ]),
+        );
+        let mut plan = plan(vec![route("router-qwen", "qwen", CodexModelSelection::All)]);
+        plan.spawn_agent_models = vec!["qwen-disabled".to_string(), "qwen-enabled".to_string()];
+
+        let compiled = compile(&plan, [provider]);
+
+        assert_eq!(compiled.visible_models, vec!["qwen-enabled"]);
+        assert_eq!(compiled.routes[0].visible_models, vec!["qwen-enabled"]);
+        assert_eq!(compiled.spawn_agent_models, vec!["qwen-enabled"]);
     }
 
     #[test]
@@ -1104,7 +1165,10 @@ mod tests {
                     "cacheMode": "auto_prefix_cache",
                     "supportsPromptCacheKey": false,
                     "usageFields": ["usage.cached_tokens"]
-                }
+                },
+                "supportsParallelToolCalls": true,
+                "baseInstructions": "Use the Provider model contract.",
+                "codexUltra": {"enabled": true, "providerEffort": "high"}
             }]),
         );
         let compiled = compile(
@@ -1133,6 +1197,18 @@ mod tests {
         assert_eq!(summary.input_modalities_source, "provider_model");
         assert_eq!(summary.reasoning_source, "provider_model");
         assert_eq!(summary.codex_cache_source, "provider_model");
+        assert_eq!(summary.supports_parallel_tool_calls, Some(true));
+        assert_eq!(
+            summary.base_instructions.as_deref(),
+            Some("Use the Provider model contract.")
+        );
+        assert_eq!(
+            summary
+                .codex_ultra
+                .as_ref()
+                .and_then(|value| value.get("providerEffort")),
+            Some(&json!("high"))
+        );
     }
 
     #[test]
@@ -1210,6 +1286,67 @@ mod tests {
             forward.dependency_fingerprint,
             sort_compiled.dependency_fingerprint
         );
+    }
+
+    #[test]
+    fn dependency_fingerprint_tracks_every_projected_provider_model_field() {
+        let plan = plan(vec![route("router-qwen", "qwen", CodexModelSelection::All)]);
+        let baseline = compile(
+            &plan,
+            [provider(
+                "qwen",
+                "Qwen",
+                "openai_responses",
+                json!([{"model": "qwen3.8"}]),
+            )],
+        );
+        let changes = [
+            json!([{"model": "qwen3.8", "displayName": "Qwen 3.8 Updated"}]),
+            json!([{"model": "qwen3.8", "contextWindow": 262144}]),
+            json!([{"model": "qwen3.8", "inputModalities": ["text", "image"]}]),
+            json!([{
+                "model": "qwen3.8",
+                "reasoning": {
+                    "schemaVersion": 2,
+                    "supportStatus": "confirmed_supported",
+                    "controlKind": "graded",
+                    "supportedEfforts": ["low", "high", "max"],
+                    "defaultEffort": "high",
+                    "disableAllowed": false,
+                    "upstream": {
+                        "format": "string",
+                        "parameter": "reasoning_effort",
+                        "effortMap": {"low": "low", "high": "high", "max": "max"}
+                    }
+                }
+            }]),
+            json!([{
+                "model": "qwen3.8",
+                "codexCache": {"cacheMode": "qwen_context_cache"}
+            }]),
+            json!([{"model": "qwen3.8", "supportsParallelToolCalls": true}]),
+            json!([{"model": "qwen3.8", "baseInstructions": "Updated instructions"}]),
+            json!([{
+                "model": "qwen3.8",
+                "codexUltra": {"enabled": true, "providerEffort": "high"}
+            }]),
+            json!([{"model": "qwen3.8", "apiFormat": "openai_chat"}]),
+            json!([{"model": "qwen3.8", "upstreamModel": "qwen3.8-202608"}]),
+            json!([{"model": "qwen3.8", "sortIndex": 4}]),
+            json!([{"model": "qwen3.8", "enabled": false}]),
+            json!([{"model": "qwen3.8"}, {"model": "qwen3.9"}]),
+        ];
+
+        for changed_models in changes {
+            let changed = compile(
+                &plan,
+                [provider("qwen", "Qwen", "openai_responses", changed_models)],
+            );
+            assert_ne!(
+                baseline.dependency_fingerprint, changed.dependency_fingerprint,
+                "every projected Provider model change must invalidate the MultiRouter projection"
+            );
+        }
     }
 
     #[test]
