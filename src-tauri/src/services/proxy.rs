@@ -7,6 +7,7 @@ use crate::codex_guardian::{self, GuardianHandle};
 use crate::config::{get_claude_settings_path, read_json_file, write_json_file};
 use crate::database::Database;
 use crate::provider::Provider;
+use crate::proxy::providers::codex_route_auth_source;
 use crate::proxy::switch_lock::SwitchLockManager;
 use crate::proxy::types::*;
 use crate::proxy::{external_openai_api, server::ProxyServer};
@@ -3599,10 +3600,7 @@ impl ProxyService {
                         .get("enabled")
                         .and_then(Value::as_bool)
                         .is_none_or(|enabled| enabled)
-                        && route
-                            .pointer("/upstream/auth/source")
-                            .and_then(Value::as_str)
-                            == Some("account_pool")
+                        && codex_route_auth_source(route) == Some("account_pool")
                 })
             })
     }
