@@ -236,6 +236,54 @@ describe("CodexMultiRouterWizard", () => {
     expect(screen.queryByText("正在编辑：旧方案 A")).not.toBeInTheDocument();
   });
 
+  it("selects only the Providers referenced by an existing schema-v2 plan", () => {
+    const source = (id: string, name: string): Provider => ({
+      id,
+      name,
+      category: "custom",
+      settingsConfig: {
+        baseUrl: "https://example.invalid/v1",
+        auth: { OPENAI_API_KEY: "test-only" },
+        modelCatalog: { models: [{ model: `${id}-model` }] },
+      },
+    });
+    const used = source("used-source", "Used source");
+    const unused = source("unused-source", "Unused source");
+    const plan: Provider = {
+      id: "router-v2",
+      name: "Router V2",
+      category: "custom",
+      settingsConfig: {
+        codexRouting: {
+          schemaVersion: 2,
+          enabled: true,
+          routes: [
+            {
+              id: "used-route",
+              targetProviderId: used.id,
+              modelSelection: { mode: "all" },
+              authPolicy: { source: "provider_config" },
+            },
+          ],
+        },
+      },
+    };
+
+    renderWizard([used, unused, plan], { mode: "edit", planId: plan.id });
+
+    expect(screen.getByText(/已选择 1 \/ 2/)).toBeVisible();
+    expect(
+      screen.getByRole("checkbox", {
+        name: "使用 Used source 作为模型源",
+      }),
+    ).toBeChecked();
+    expect(
+      screen.getByRole("checkbox", {
+        name: "使用 Unused source 作为模型源",
+      }),
+    ).not.toBeChecked();
+  });
+
   it("requires an explicit redacted migration preview before editing a v1 plan", async () => {
     const legacyPlan: Provider = {
       id: "legacy-plan",

@@ -1,5 +1,15 @@
 # CC Switch Repository Memory
 
+## 2026-08-24 本地升级守护、维护租约与 MultiRouter 向导 Provider 初始化
+
+- 本机 Codex 当前依赖安装态 CCSwitchMulti `127.0.0.1:15721`，因此本地替换不能由当前交互进程直接停服后再继续。升级必须交给独立的 Windows PowerShell 事务：预检当前监听 PID、可执行文件路径、版本与 SHA-256，建立维护租约，备份配置和安装目录，等待旧进程及端口完全释放后卸载/安装，验证新 PID、版本、哈希、15721 与 `/health`；任一步失败必须使用保留的安装目录、配置和注册表备份回滚。
+- 新增 `scripts/ccswitchmulti-guardian-core.ps1`、`scripts/watch-ccswitchmulti.ps1` 和 `scripts/invoke-ccswitchmulti-local-upgrade.ps1`。维护标记不再是永久哨兵文件，而是带 `leaseId`、owner PID、owner executable path、owner start time、创建/过期时间的结构化租约；PID、路径、启动时间和期限必须全部有效，坏 JSON、过期租约、PID 复用或 owner 消失都不会永久压住守护。租约 scope 在异常时只清理自己拥有的租约。
+- 守护每 5 秒检查一次；只有预期安装路径的 CCSM 连续失联 60 秒才恢复。恢复前再次检查维护状态，只停止路径和启动时间均核验通过的 CCSM 进程，拒绝误杀占用 15721 的其他程序，等待旧进程退出和端口释放后才隐藏启动安装态 EXE，并等待新 PID 的 `/health` 就绪。安装器、卸载器和事务脚本保留为二级维护识别。
+- 权威守护脚本已部署到 `%LOCALAPPDATA%\CCSwitchMultiGuardian`；2026-08-24 核验时守护 PID 40924、CCSM PID 57464，15721 监听属于该 CCSM，`/health` 为 200。不要使用旧的 `run-upgrade-416f9167.ps1`，新构建必须计算新 installer/installed EXE SHA-256，再调用仓库中的 `invoke-ccswitchmulti-local-upgrade.ps1`。
+- MultiRouter 向导修复：新建 Router 仍默认选择全部可用 Provider；编辑 schema-v2 Router 时只按 `codexRouting.routes[].targetProviderId` 初始化 Provider 勾选，并过滤已经不存在的 Provider。`draftSources`、checkbox、计数和 flow 初始化共用同一结果，避免编辑已有 Router 时错误显示“已选择全部 Provider”并把未引用 Provider 带入草稿。
+- 验证口径：向导定向 Vitest 16/16；前端全量 146 files、1191/1191；MultiRouter Rust 77/77；Rust lib 全量 3347 passed、6 ignored；Guardian Pester 10/10；系统 Windows PowerShell 5.1 下事务 Pester 49/49；TypeScript typecheck 和 renderer production build 通过。Codex 内置 PowerShell 运行事务测试会因它自己的虚拟 powershell/sqlite/StrictMode 环境产生 3 个假失败，不能替代系统 PowerShell 5.1 口径。
+- Codex Desktop 的 Computer Use/UI 自动化在本轮反复触发主进程 `Error: write EOF`。这是对已关闭 IPC 管道写入的 Desktop 主进程错误，不是 CCSM 健康或路由错误；发生后停止重复自动化，不重启 Codex。源代码、自动测试、数据库和运行日志验收先行，UI 只在升级稳定后做一次受控检查，若同样错误再次出现立即终止该验证链并记录阻断。
+
 ## 2026-08-23 MultiRouter Provider SSOT v2 全链路与历史 PR 完整性复审
 
 - Provider SSOT v2 核心合并是 `b7865131`。它不在 `v3.19.2-9`，从 `v3.19.2-10` 开始才进入发布标签；`-14` 主要承载 Ultra/UI/DeepSeek reasoning 历史修复，`-15` 承载 V2 route 匹配兼容，不能把 SSOT 的首次引入归到 `-14/-15`。

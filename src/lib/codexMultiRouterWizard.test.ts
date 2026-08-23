@@ -3,6 +3,7 @@ import type { Provider } from "@/types";
 import {
   buildCodexMultiRouterWizardPlan,
   initialWizardCatalogModelOrder,
+  initialWizardSelectedSourceIds,
 } from "./codexMultiRouterWizard";
 
 const deepseekSource: Provider = {
@@ -19,6 +20,59 @@ const deepseekSource: Provider = {
 };
 
 describe("buildCodexMultiRouterWizardPlan subagent version", () => {
+  it("initializes an existing schema-v2 plan from its route Provider ids", () => {
+    const unusedSource: Provider = {
+      ...deepseekSource,
+      id: "unused-source",
+      name: "Unused",
+    };
+    const existingPlan: Provider = {
+      id: "router-v2",
+      name: "Router V2",
+      category: "custom",
+      settingsConfig: {
+        codexRouting: {
+          schemaVersion: 2,
+          enabled: true,
+          routes: [
+            {
+              id: "deepseek",
+              enabled: true,
+              targetProviderId: deepseekSource.id,
+              modelSelection: { mode: "all" },
+              authPolicy: { source: "provider_config" },
+            },
+            {
+              id: "missing",
+              enabled: true,
+              targetProviderId: "missing-source",
+              modelSelection: { mode: "all" },
+              authPolicy: { source: "provider_config" },
+            },
+          ],
+        },
+      },
+    };
+
+    expect(
+      initialWizardSelectedSourceIds(existingPlan, [
+        deepseekSource,
+        unusedSource,
+      ]),
+    ).toEqual([deepseekSource.id]);
+  });
+
+  it("selects every available Provider when creating a new plan", () => {
+    const secondSource: Provider = {
+      ...deepseekSource,
+      id: "second-source",
+    };
+
+    expect(
+      initialWizardSelectedSourceIds(null, [deepseekSource, secondSource]),
+    ).toEqual([deepseekSource.id, secondSource.id]);
+  });
+
   it("persists an explicit V1 selection without dropping its direct model overrides", () => {
     const { plan } = buildCodexMultiRouterWizardPlan(
       [deepseekSource],

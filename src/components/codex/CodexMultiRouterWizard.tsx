@@ -60,6 +60,7 @@ import {
   applyWizardConnectivityApiFormatOverrides,
   buildCodexMultiRouterWizardPlan,
   initialWizardCatalogModelOrder,
+  initialWizardSelectedSourceIds,
   buildWizardModelCatalog,
   canContinueAfterConnectivity,
   classifyWizardDualProtocolConnectivityResult,
@@ -841,9 +842,18 @@ export function CodexMultiRouterWizard({
         ? `${defaultId}-${Date.now()}`
         : defaultId;
     }
+    const initialSourceIds = initialWizardSelectedSourceIds(
+      existingPlan,
+      providerModelSources,
+    );
+    const initialSourceIdSet = new Set(initialSourceIds);
     setSavedPlan(existingPlan ?? null);
-    setDraftSources(providerModelSources);
-    setSelectedSourceIds(providerModelSources.map((provider) => provider.id));
+    setDraftSources(
+      providerModelSources.filter((provider) =>
+        initialSourceIdSet.has(provider.id),
+      ),
+    );
+    setSelectedSourceIds(initialSourceIds);
     setDraftPlanName(existingPlan?.name ?? CODEX_MULTI_ROUTER_DEFAULT_NAME);
     setDraftOfficialAuth(
       inferCodexOfficialAuth(existingPlan?.settingsConfig?.codexRouting) ??
@@ -881,7 +891,7 @@ export function CodexMultiRouterWizard({
     );
     dispatchFlow({
       type: "INIT",
-      hasSources: providerModelSources.length > 0,
+      hasSources: initialSourceIds.length > 0,
     });
   }, [existingPlan, open, planId, providerModelSources, resolvedMode]);
 

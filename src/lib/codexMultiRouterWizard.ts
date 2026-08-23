@@ -1163,6 +1163,22 @@ export function defaultWizardModelSources(providers: Provider[]): Provider[] {
   );
 }
 
+export function initialWizardSelectedSourceIds(
+  existingPlan: Provider | null | undefined,
+  sourceProviders: Provider[],
+): string[] {
+  const availableIds = sourceProviders.map((provider) => provider.id);
+  const routing = existingPlan?.settingsConfig?.codexRouting as
+    | CodexRoutingConfigV2
+    | undefined;
+  if (routing?.schemaVersion !== 2) return availableIds;
+
+  const routedProviderIds = new Set(
+    (routing.routes ?? []).map((route) => route.targetProviderId),
+  );
+  return availableIds.filter((providerId) => routedProviderIds.has(providerId));
+}
+
 export function initialWizardCatalogModelOrder(
   existingPlan: Provider | null | undefined,
   sourceProviders: Provider[],
