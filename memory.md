@@ -4237,9 +4237,9 @@ supported in one streaming turn`。
 - 运行时必须用 `有效高级覆盖 > 指纹匹配且未过期的测试档案 > 安全回退` 解析 `ReasoningProjection`，一次性传给流式与非流式 Chat→Responses 转换；不得再让 `outputFormat` 或通用字段提取器单独决定 raw/summary。官方 OAuth 加密续接、原生 Responses 和 V2 agent-message 边界保持原路径。
 - 隔离工作树/分支：`bigstrongsun/codex-reasoning-probe-backend`，基线 `ee21cef1`。只添加设计与计划文档，未实施业务代码、未改前端、未安装或发布。起始 `cargo test ... model_fetch --lib` 受同机已有 Cargo 编译占用 artifact-directory 锁阻塞，不能计为通过或失败；不得中断其他工作树的 Cargo 进程。
 
-## 2026-08-23 截图中“Qwen 后来有白字”取证结论
+## 2026-08-23 截图中“Qwen 后来有白字”取证结论（已更正）
 
-- 截图底部的 `qwen3.8` 只是下一回合的模型选择器状态。对应已完成的 thread `01a02da5-70c7-73e1-9587-9cd9fdaf3634` 在 `state_5.sqlite` 和四个 `turn_context` 中均记录为 `codex_model_router_v2 / gpt-5.6-terra / high`，不能据此声称 Qwen 已生成该段内容。
-- 该回合的 rollout 结构审计为 50 个 reasoning item：48 个是 `summary + encrypted_content`、2 个仅 `encrypted_content`，0 个具有 `content:[{type:"reasoning_text"}]`。因此真正的 reasoning 通道没有从 summary 切到 raw。
-- 截图内可见的英文进度句是普通 assistant `message` 的 `phase=commentary` / `final_answer`、内容类型 `output_text`；它们是在工具循环中模型主动写出的面向用户文本，Desktop 会照常显示。它与 `reasoning_text` 的展示能力是两个事件通道，不能作为第三方 raw reasoning 已经恢复的验收证据。
-- 该现象说明 UI 观感本身不稳定：某个回合是否主动产生 commentary 取决于模型和任务，不能驱动桥接策略。验收应采用独立 Qwen probe，按实际 wire event 和生成的 `VerifiedReasoningProfile` 判断。
+- 先前把截图误关联到 thread `01a02da5-70c7-73e1-9587-9cd9fdaf3634`（Terra 官方路由）；这是错误的，不能据此判断截图。按截图英文句精确反查，真正的 rollout 是 `01a02d95-045f-72b1-a7e2-8bdb888c8abc`，目标 turn `01a02df1-e482-7df3-9d46-cc6ed918ee6f` 的 `turn_context` 明确为 `qwen3.8 / medium`。CCSM router 同时记录有效路由 `Qwen`，上游为 vLLM `/v1/chat/completions`，所以该段确实由 Qwen 生成。
+- 该 turn 同时出现两种不同的上游 Chat 字段：`reasoning_content` 经桥接成为无 `content` 的 Responses reasoning summary（持续的单行闪烁）；Qwen 在工具调用前又间歇性发送普通 `content`，经桥接成为普通 assistant `message/output_text`。截图的 “Matrix chain is returning …” 是该 turn 的普通 message，紧邻后续 Matrix tool call，且没有 `phase=commentary`；它不是 raw reasoning，也不是 Codex 自行补出的说明。
+- 因而“后来显示几句白字”的直接原因是 Qwen 在少数工具子回合产生了非空 Chat `content`，而不是 reasoning 通道从 summary 切换为 raw。桥接正确把这个 `content` 按 `response.output_text.delta` 显示；与此同时 `reasoning_content` 仍未以 `reasoning_text` 形式暴露，原始“完整推理不可读”问题仍未解决。
+- 验收/探测必须把 `pre_tool_visible_content` 作为独立结构证据记录，不能把它误判为 raw reasoning 成功，也不能仅按它是否出现决定显示投影。
