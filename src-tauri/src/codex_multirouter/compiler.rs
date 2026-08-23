@@ -87,6 +87,32 @@ impl std::fmt::Display for CodexRoutingCompileError {
 
 impl std::error::Error for CodexRoutingCompileError {}
 
+/// Compile a schema-v2 Router directly from the current Provider collection.
+/// Every non-runtime consumer must use this entry point instead of reading the
+/// Router's derived `modelCatalog` snapshot.
+pub fn compile_provider_v2(
+    router_provider: &Provider,
+    providers: &HashMap<String, Provider>,
+) -> Result<Option<(CodexRoutingConfigV2, CompiledCodexRoutingPlan)>, CodexRoutingCompileError> {
+    let Some(routing) = router_provider.settings_config.get("codexRouting") else {
+        return Ok(None);
+    };
+    let document = crate::codex_multirouter::schema::CodexRoutingDocument::parse(routing).map_err(
+        |error| CodexRoutingCompileError {
+            code: error.code,
+            message: error.message,
+        },
+    )?;
+    let crate::codex_multirouter::schema::CodexRoutingDocument::V2(plan) = document else {
+        return Ok(None);
+    };
+    if !plan.enabled {
+        return Ok(None);
+    }
+    let compiled = compile_v2(&plan, providers)?;
+    Ok(Some((plan, compiled)))
+}
+
 #[derive(Clone)]
 struct ModelCandidate<'a> {
     route_index: usize,

@@ -193,6 +193,16 @@ fn plan_toggles(
 pub struct ProfileService;
 
 impl ProfileService {
+    fn activate_projection_owner_before_apply(
+        state: &AppState,
+        profile_id: &str,
+        scope: ProfileScope,
+    ) -> Result<(), AppError> {
+        state
+            .db
+            .set_current_profile_id(scope.as_str(), Some(profile_id))
+    }
+
     /// 抓取分组内应用的当前配置状态生成快照（组外槽位保持默认值）
     pub fn snapshot_current(
         state: &AppState,
@@ -359,6 +369,13 @@ impl ProfileService {
             ));
         }
 
+        // Projection ownership follows the active workspace. Publish the new
+        // marker before Provider switches so the target Router, rather than the
+        // previous workspace Router, owns the shared Codex live catalog during
+        // the switch. Profile application is best-effort and marks the selected
+        // workspace current even when an individual component returns a warning.
+        Self::activate_projection_owner_before_apply(state, profile_id, scope)?;
+
         for app in scope.apps().iter() {
             let app_str = app.as_str();
 
@@ -466,10 +483,6 @@ impl ProfileService {
             }
         }
 
-        state
-            .db
-            .set_current_profile_id(scope.as_str(), Some(profile_id))?;
-
         // 当前分组内所有接管已关闭；若其它应用也无接管，可停止代理服务。
         let should_stop_proxy = !state.db.is_live_takeover_active_sync();
 
@@ -480,6 +493,8 @@ impl ProfileService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database::{Database, Profile};
+    use crate::provider::Provider;
 
     fn ids(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
@@ -516,6 +531,50 @@ mod tests {
         assert!(json.contains("\"codex\""));
         let back: ProfilePayload = serde_json::from_str(&json).unwrap();
         assert_eq!(back, payload);
+    }
+
+    #[test]
+    fn profile_apply_stages_new_codex_projection_owner_before_switch() {
+        let db = std::sync::Arc::new(Database::memory().expect("memory db"));
+        for id in ["router-old", "router-new"] {
+            db.save_provider(
+                "codex",
+                &Provider::with_id(id.to_string(), id.to_string(), serde_json::json!({}), None),
+            )
+            .expect("save router");
+        }
+        for (profile_id, router_id) in
+            [("profile-old", "router-old"), ("profile-new", "router-new")]
+        {
+            db.save_profile(&Profile {
+                id: profile_id.to_string(),
+                name: profile_id.to_string(),
+                payload: serde_json::json!({"providers": {"codex": router_id}}).to_string(),
+                sort_order: None,
+                created_at: Some(1),
+                updated_at: Some(1),
+            })
+            .expect("save profile");
+        }
+        db.set_current_profile_id("codex", Some("profile-old"))
+            .expect("activate old profile");
+        let state = AppState::new(db.clone());
+
+        ProfileService::activate_projection_owner_before_apply(
+            &state,
+            "profile-new",
+            ProfileScope::Codex,
+        )
+        .expect("stage new profile owner");
+
+        assert_eq!(
+            crate::codex_multirouter::active_codex_router_id_with_local(
+                db.as_ref(),
+                Some("router-old")
+            )
+            .expect("resolve active router"),
+            Some("router-new".to_string())
+        );
     }
 
     #[test]

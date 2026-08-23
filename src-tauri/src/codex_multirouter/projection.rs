@@ -7,8 +7,14 @@ use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
 const PROJECTION_SETTING_PREFIX: &str = "codex_multirouter_projection:";
+
+fn projection_publish_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -144,6 +150,12 @@ pub fn ensure_projection_with_publisher<F>(
 where
     F: FnMut(&CodexRoutingProjectionArtifact) -> Result<ProjectionReadBack, String>,
 {
+    // The catalog/config/cache files are one shared projection. Build, publish,
+    // read back and persist status under the same process-wide boundary so an
+    // older concurrent rebuild cannot finish after and overwrite newer state.
+    let _publish_guard = projection_publish_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let artifact = build_projection_artifact(db, router_provider_id)?;
     if !force {
         if let Some(status) = read_projection_status(db, router_provider_id)? {
@@ -473,6 +485,8 @@ mod tests {
     use crate::provider::{Provider, ProviderMeta};
     use serde_json::json;
     use std::cell::Cell;
+    use std::sync::{mpsc, Arc};
+    use std::time::Duration;
 
     fn target(api_format: &str) -> Provider {
         let mut provider = Provider::with_id(
@@ -807,6 +821,70 @@ mod tests {
         assert!(error
             .to_string()
             .contains("codex_multirouter_projection_not_active"));
+    }
+
+    #[test]
+    fn concurrent_projection_rebuilds_publish_in_database_order() {
+        let db = Arc::new(Database::memory().expect("memory db"));
+        save_fixture(&db, "openai_chat");
+        let (first_entered_tx, first_entered_rx) = mpsc::channel();
+        let (release_first_tx, release_first_rx) = mpsc::channel();
+        let (second_entered_tx, second_entered_rx) = mpsc::channel();
+
+        let first_db = db.clone();
+        let first = std::thread::spawn(move || {
+            ensure_projection_with_publisher(&first_db, "router", true, |artifact| {
+                first_entered_tx
+                    .send(artifact.dependency_fingerprint.clone())
+                    .expect("signal first publisher");
+                release_first_rx.recv().expect("release first publisher");
+                Ok(ProjectionReadBack::verified(
+                    artifact.dependency_fingerprint.clone(),
+                ))
+            })
+            .expect("first projection")
+        });
+
+        let first_fingerprint = first_entered_rx.recv().expect("first publisher entered");
+        db.save_provider("codex", &target("openai_responses"))
+            .expect("update target");
+
+        let second_db = db.clone();
+        let second = std::thread::spawn(move || {
+            ensure_projection_with_publisher(&second_db, "router", true, |artifact| {
+                second_entered_tx
+                    .send(artifact.dependency_fingerprint.clone())
+                    .expect("signal second publisher");
+                Ok(ProjectionReadBack::verified(
+                    artifact.dependency_fingerprint.clone(),
+                ))
+            })
+            .expect("second projection")
+        });
+
+        let second_published_before_first_released = second_entered_rx
+            .recv_timeout(Duration::from_millis(150))
+            .ok();
+        release_first_tx.send(()).expect("release first publisher");
+        let first_status = first.join().expect("join first publisher");
+        let second_status = second.join().expect("join second publisher");
+
+        assert!(
+            second_published_before_first_released.is_none(),
+            "a newer projection must wait until the older publisher has completed"
+        );
+        assert_eq!(first_status.dependency_fingerprint, first_fingerprint);
+        assert_ne!(
+            second_status.dependency_fingerprint,
+            first_status.dependency_fingerprint
+        );
+        assert_eq!(
+            read_projection_status(&db, "router")
+                .expect("read projection status")
+                .expect("projection status")
+                .dependency_fingerprint,
+            second_status.dependency_fingerprint
+        );
     }
 
     #[test]

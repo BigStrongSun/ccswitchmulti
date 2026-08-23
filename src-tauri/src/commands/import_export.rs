@@ -6,7 +6,8 @@ use tauri::State;
 use tauri_plugin_dialog::DialogExt;
 
 use crate::commands::sync_support::{
-    post_sync_warning_from_result, run_post_import_sync, success_payload_with_warning,
+    attach_warning, post_sync_warning_from_result, run_post_import_sync,
+    success_payload_with_warning,
 };
 use crate::database::backup::BackupEntry;
 use crate::database::Database;
@@ -147,17 +148,42 @@ pub fn list_db_backups() -> Result<Vec<BackupEntry>, String> {
     Database::list_backups().map_err(|e| e.to_string())
 }
 
+fn restore_db_backup_with_sync<R, S>(restore: R, sync: S) -> Result<Value, AppError>
+where
+    R: FnOnce() -> Result<String, AppError>,
+    S: FnOnce() -> Result<(), AppError>,
+{
+    let safety_backup_id = restore()?;
+    let warning = post_sync_warning_from_result(Ok(sync()));
+    if let Some(message) = warning.as_ref() {
+        log::warn!("[Restore] post-restore sync warning: {message}");
+    }
+    Ok(attach_warning(
+        json!({
+            "success": true,
+            "safetyBackupId": safety_backup_id
+        }),
+        warning,
+    ))
+}
+
 /// Restore database from a backup file
 #[tauri::command]
 pub async fn restore_db_backup(
     state: State<'_, AppState>,
     filename: String,
-) -> Result<String, String> {
+) -> Result<Value, String> {
     let db = state.db.clone();
-    tauri::async_runtime::spawn_blocking(move || db.restore_from_backup(&filename))
-        .await
-        .map_err(|e| format!("Restore failed: {e}"))?
-        .map_err(|e: AppError| e.to_string())
+    let db_for_sync = db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        restore_db_backup_with_sync(
+            || db.restore_from_backup(&filename),
+            || run_post_import_sync(db_for_sync),
+        )
+    })
+    .await
+    .map_err(|e| format!("Restore failed: {e}"))?
+    .map_err(|e: AppError| e.to_string())
 }
 
 /// Rename a database backup file
@@ -173,4 +199,50 @@ pub fn rename_db_backup(
 #[tauri::command]
 pub fn delete_db_backup(filename: String) -> Result<(), String> {
     Database::delete_backup(&filename).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::restore_db_backup_with_sync;
+    use crate::error::AppError;
+    use std::cell::Cell;
+
+    #[test]
+    fn database_restore_runs_derived_state_sync_after_replacement() {
+        let restored = Cell::new(false);
+        let synced = Cell::new(false);
+
+        let result = restore_db_backup_with_sync(
+            || {
+                restored.set(true);
+                Ok("safety-123".to_string())
+            },
+            || {
+                assert!(restored.get(), "sync must run after database replacement");
+                synced.set(true);
+                Ok(())
+            },
+        )
+        .expect("restore result");
+
+        assert!(synced.get());
+        assert_eq!(result["success"], true);
+        assert_eq!(result["safetyBackupId"], "safety-123");
+        assert!(result.get("warning").is_none());
+    }
+
+    #[test]
+    fn database_restore_reports_post_sync_failure_without_hiding_success() {
+        let result = restore_db_backup_with_sync(
+            || Ok("safety-456".to_string()),
+            || Err(AppError::Config("projection refresh failed".to_string())),
+        )
+        .expect("database replacement remains successful");
+
+        assert_eq!(result["success"], true);
+        assert_eq!(result["safetyBackupId"], "safety-456");
+        assert!(result["warning"]
+            .as_str()
+            .is_some_and(|warning| warning.contains("projection refresh failed")));
+    }
 }

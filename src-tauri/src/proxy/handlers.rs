@@ -1516,7 +1516,7 @@ fn resolve_codex_image_generation_provider(
         .map(str::trim)
         .filter(|model| !model.is_empty())
         .map(ToString::to_string);
-    for model in codex_image_generation_route_probe_models(provider, body) {
+    for model in codex_image_generation_route_probe_models(state, provider, body)? {
         let mut probe_body = body.clone();
         probe_body["model"] = json!(model);
         let v2_routing = codex_provider_has_v2_routing(provider);
@@ -1628,25 +1628,48 @@ fn codex_provider_has_v2_routing(provider: &crate::provider::Provider) -> bool {
 /// 里匹配 `gpt-5.5` / `gpt-5.4` 等文本模型；因此先尝试真实请求模型，再从
 /// catalog 和一组稳定 OpenAI/Codex 模型名里探测 official route。
 fn codex_image_generation_route_probe_models(
+    state: &ProxyState,
     provider: &crate::provider::Provider,
     body: &Value,
-) -> Vec<String> {
+) -> Result<Vec<String>, ProxyError> {
     let mut models = Vec::new();
     if let Some(model) = body.get("model").and_then(|value| value.as_str()) {
         push_unique_probe_model(&mut models, model);
     }
 
-    if let Some(entries) = provider
+    if codex_provider_has_v2_routing(provider) {
+        let providers = state
+            .db
+            .get_all_providers("codex")
+            .map_err(|error| ProxyError::DatabaseError(error.to_string()))?
+            .into_iter()
+            .collect::<std::collections::HashMap<_, _>>();
+        let compiled = crate::codex_multirouter::compiler::compile_provider_v2(
+            provider, &providers,
+        )
+        .map_err(|error| {
+            ProxyError::ConfigError(format!(
+                "Codex MultiRouter v2 compile failed [{}]: {}",
+                error.code, error.message
+            ))
+        })?;
+        if let Some((_, compiled)) = compiled {
+            for model in compiled.visible_models {
+                if model_looks_like_openai_codex_route(&model) {
+                    push_unique_probe_model(&mut models, &model);
+                }
+            }
+        }
+    } else if let Some(entries) = provider
         .settings_config
         .pointer("/modelCatalog/models")
         .and_then(|value| value.as_array())
     {
         for entry in entries {
-            let Some(model) = codex_catalog_model_id(entry) else {
-                continue;
-            };
-            if model_looks_like_openai_codex_route(&model) {
-                push_unique_probe_model(&mut models, &model);
+            if let Some(model) = codex_catalog_model_id(entry) {
+                if model_looks_like_openai_codex_route(&model) {
+                    push_unique_probe_model(&mut models, &model);
+                }
             }
         }
     }
@@ -1663,7 +1686,7 @@ fn codex_image_generation_route_probe_models(
         push_unique_probe_model(&mut models, model);
     }
 
-    models
+    Ok(models)
 }
 
 /// 向探测列表追加非空且不重复的模型名。
@@ -2290,6 +2313,56 @@ fn external_codex_router_model_entries(
     let Some(provider) = providers.get(provider_id) else {
         return Ok(Vec::new());
     };
+    if codex_provider_has_v2_routing(provider) {
+        let providers = providers
+            .iter()
+            .map(|(id, provider)| (id.clone(), provider.clone()))
+            .collect::<std::collections::HashMap<_, _>>();
+        let compiled = crate::codex_multirouter::compiler::compile_provider_v2(
+            provider, &providers,
+        )
+        .map_err(|error| {
+            ProxyError::ConfigError(format!(
+                "Codex MultiRouter v2 compile failed [{}]: {}",
+                error.code, error.message
+            ))
+        })?;
+        let Some((_, compiled)) = compiled else {
+            return Ok(Vec::new());
+        };
+        let entries = compiled
+            .model_catalog
+            .into_iter()
+            .filter(|model| {
+                profile
+                    .route_id
+                    .as_deref()
+                    .is_none_or(|route_id| model.route_id == route_id)
+            })
+            .map(|model| {
+                let mut source = serde_json::Map::new();
+                source.insert("displayName".to_string(), json!(model.display_name));
+                if let Some(context_window) = model.capability_summary.context_window {
+                    source.insert("contextWindow".to_string(), json!(context_window));
+                }
+                if !model.capability_summary.input_modalities.is_empty() {
+                    source.insert(
+                        "inputModalities".to_string(),
+                        json!(model.capability_summary.input_modalities),
+                    );
+                }
+                if let Some(reasoning) = model.capability_summary.reasoning {
+                    source.insert("reasoning".to_string(), reasoning);
+                }
+                openai_model_entry_with_source(
+                    &model.visible_model,
+                    "cc-switch",
+                    &Value::Object(source),
+                )
+            })
+            .collect::<Vec<_>>();
+        return Ok(dedup_openai_model_entries(entries));
+    }
     let mut ids = Vec::new();
     let mut entries = Vec::new();
     let catalog_sources =
@@ -7185,29 +7258,40 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_deepseek\",\"
         db.save_provider(
             "codex",
             &Provider::with_id(
+                "deepseek-provider".to_string(),
+                "DeepSeek".to_string(),
+                json!({
+                    "base_url": "https://api.deepseek.example/v1",
+                    "auth": { "OPENAI_API_KEY": "secret" },
+                    "modelCatalog": {
+                        "models": [
+                            { "model": "deepseek-v4-flash", "contextWindow": 1000000 },
+                            { "model": "deepseek-v4-pro", "contextWindow": 262144 }
+                        ]
+                    }
+                }),
+                None,
+            ),
+        )
+        .expect("save target provider");
+        db.save_provider(
+            "codex",
+            &Provider::with_id(
                 "codex-router".to_string(),
                 "Codex Router".to_string(),
                 json!({
                     "modelCatalog": {
-                        "models": [
-                            { "model": "deepseek-v4-flash", "contextWindow": 1000000 },
-                            { "model": "qwen3.6", "context_window": 262144 }
-                        ]
+                        "models": [{ "model": "stale-router-model", "contextWindow": 8192 }]
                     },
                     "codexRouting": {
+                        "schemaVersion": 2,
                         "enabled": true,
-                        "routes": [
-                            {
-                                "id": "deepseek",
-                                "label": "DeepSeek",
-                                "match": { "models": ["deepseek-v4-flash"] }
-                            },
-                            {
-                                "id": "qwen",
-                                "label": "Qwen",
-                                "match": { "models": [{ "model": "qwen3.6", "context_window": 262144 }] }
-                            }
-                        ]
+                        "routes": [{
+                            "id": "deepseek",
+                            "label": "DeepSeek",
+                            "targetProviderId": "deepseek-provider",
+                            "modelSelection": { "mode": "all" }
+                        }]
                     }
                 }),
                 None,
@@ -7237,10 +7321,10 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_deepseek\",\"
             .iter()
             .find(|model| model.get("id").and_then(|id| id.as_str()) == Some("deepseek-v4-flash"))
             .expect("deepseek entry");
-        let qwen = data
+        let deepseek_pro = data
             .iter()
-            .find(|model| model.get("id").and_then(|id| id.as_str()) == Some("qwen3.6"))
-            .expect("qwen entry");
+            .find(|model| model.get("id").and_then(|id| id.as_str()) == Some("deepseek-v4-pro"))
+            .expect("deepseek pro entry");
 
         assert_eq!(
             deepseek
@@ -7249,9 +7333,14 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_deepseek\",\"
             Some(1_000_000)
         );
         assert_eq!(
-            qwen.get("context_window").and_then(|value| value.as_u64()),
+            deepseek_pro
+                .get("context_window")
+                .and_then(|value| value.as_u64()),
             Some(262_144)
         );
+        assert!(data.iter().all(|model| {
+            model.get("id").and_then(|id| id.as_str()) != Some("stale-router-model")
+        }));
     }
 
     #[test]

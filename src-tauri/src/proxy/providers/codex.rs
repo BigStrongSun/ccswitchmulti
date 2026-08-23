@@ -7,11 +7,11 @@
 
 use super::{AuthInfo, AuthStrategy, ProviderAdapter};
 use crate::codex_multirouter::compiler::{
-    compile_v2, CodexRoutingCompileError, CompiledCodexModel, CompiledCodexRoute,
+    compile_provider_v2, CodexRoutingCompileError, CompiledCodexModel, CompiledCodexRoute,
     CompiledCodexRoutingPlan,
 };
 use crate::codex_multirouter::schema::{
-    CodexRouteAuthPolicy, CodexRouteAuthSource, CodexRoutingConfigV2, CodexRoutingDocument,
+    CodexRouteAuthPolicy, CodexRouteAuthSource, CodexRoutingConfigV2,
 };
 use crate::provider::{
     AuthBinding, AuthBindingSource, CodexCacheConfig, CodexChatReasoningConfig, Provider,
@@ -685,22 +685,7 @@ fn compile_codex_v2_runtime_plan(
     router_provider: &Provider,
     providers: &HashMap<String, Provider>,
 ) -> Result<Option<(CodexRoutingConfigV2, CompiledCodexRoutingPlan)>, CodexRoutingCompileError> {
-    let Some(routing) = router_provider.settings_config.get("codexRouting") else {
-        return Ok(None);
-    };
-    let document =
-        CodexRoutingDocument::parse(routing).map_err(|error| CodexRoutingCompileError {
-            code: error.code,
-            message: error.message,
-        })?;
-    let CodexRoutingDocument::V2(plan) = document else {
-        return Ok(None);
-    };
-    if !plan.enabled {
-        return Ok(None);
-    }
-    let compiled = compile_v2(&plan, providers)?;
-    Ok(Some((plan, compiled)))
+    compile_provider_v2(router_provider, providers)
 }
 
 fn build_resolved_codex_v2_route(

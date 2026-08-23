@@ -14,7 +14,7 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::str::FromStr;
 
 const PROFILE_SETTING_KEY: &str = "external_openai_api_profile_v1";
@@ -630,6 +630,8 @@ fn codex_router_provider_backend_option(
             None
         } else if route_options.is_empty() {
             Some("router has no enabled routes".to_string())
+        } else if let Some(error) = route_options.iter().find_map(|route| route.error.clone()) {
+            Some(error)
         } else {
             Some(
                 "router has no available routes with managed OAuth or provider credentials"
@@ -644,6 +646,7 @@ fn router_backend_options(
     provider: &Provider,
     providers: &IndexMap<String, Provider>,
 ) -> Vec<ExternalOpenAiApiBackendOptionView> {
+    let (compiled_route_models, compile_error) = compiled_v2_route_models(provider, providers);
     let mut options = Vec::new();
     for route in codex_router_routes(provider) {
         if route.get("enabled").and_then(|value| value.as_bool()) == Some(false) {
@@ -656,7 +659,15 @@ fn router_backend_options(
             .get("label")
             .and_then(|value| value.as_str())
             .unwrap_or(route_id);
-        let availability = route_backend_availability(provider, route, providers);
+        let availability = compile_error
+            .as_ref()
+            .map(|error| (false, Some(error.clone())))
+            .unwrap_or_else(|| route_backend_availability(provider, route, providers));
+        let models = compiled_route_models
+            .as_ref()
+            .and_then(|models| models.get(route_id))
+            .cloned()
+            .unwrap_or_else(|| collect_route_models(route));
         options.push(ExternalOpenAiApiBackendOptionView {
             key: build_backend_key(
                 ExternalOpenAiApiBackendType::CodexRouterRoute,
@@ -670,13 +681,51 @@ fn router_backend_options(
             route_id: Some(route_id.to_string()),
             label: format!("{} / {}", provider.name, label),
             description: "Codex router route".to_string(),
-            models: collect_route_models(route),
+            models,
             is_managed_oauth: route_uses_managed_oauth(route),
             available: availability.0,
             error: availability.1,
         });
     }
     options
+}
+
+fn compiled_v2_route_models(
+    provider: &Provider,
+    providers: &IndexMap<String, Provider>,
+) -> (Option<HashMap<String, Vec<String>>>, Option<String>) {
+    if provider
+        .settings_config
+        .pointer("/codexRouting/schemaVersion")
+        .and_then(Value::as_u64)
+        != Some(2)
+    {
+        return (None, None);
+    }
+    let providers = providers
+        .iter()
+        .map(|(id, provider)| (id.clone(), provider.clone()))
+        .collect::<HashMap<_, _>>();
+    match crate::codex_multirouter::compiler::compile_provider_v2(provider, &providers) {
+        Ok(Some((_, compiled))) => (
+            Some(
+                compiled
+                    .routes
+                    .into_iter()
+                    .map(|route| (route.id, route.visible_models))
+                    .collect(),
+            ),
+            None,
+        ),
+        Ok(None) => (Some(HashMap::new()), None),
+        Err(error) => (
+            Some(HashMap::new()),
+            Some(format!(
+                "Codex MultiRouter v2 compile failed [{}]: {}",
+                error.code, error.message
+            )),
+        ),
+    }
 }
 
 /// 判断普通 provider 能否安全作为 OpenAI-compatible 外部 API 后端。
@@ -1439,6 +1488,81 @@ mod tests {
                 && option.route_id.as_deref() == Some("qwen")
                 && option.available
         }));
+    }
+
+    #[test]
+    fn runtime_status_compiles_v2_route_models_from_target_provider() {
+        let db = Database::memory().expect("memory db");
+        db.save_provider(
+            "codex",
+            &Provider::with_id(
+                "deepseek-provider".to_string(),
+                "DeepSeek".to_string(),
+                json!({
+                    "base_url": "https://example.com/v1",
+                    "auth": { "OPENAI_API_KEY": "secret" },
+                    "modelCatalog": {
+                        "models": [
+                            { "model": "deepseek-v4-flash" },
+                            { "model": "deepseek-v4-pro" }
+                        ]
+                    }
+                }),
+                None,
+            ),
+        )
+        .expect("save target provider");
+        db.save_provider(
+            "codex",
+            &Provider::with_id(
+                "codex-router-v2".to_string(),
+                "Codex Router V2".to_string(),
+                json!({
+                    "modelCatalog": { "models": [{ "model": "stale-router-model" }] },
+                    "codexRouting": {
+                        "schemaVersion": 2,
+                        "enabled": true,
+                        "routes": [{
+                            "id": "deepseek",
+                            "targetProviderId": "deepseek-provider",
+                            "modelSelection": { "mode": "all" }
+                        }]
+                    }
+                }),
+                None,
+            ),
+        )
+        .expect("save router");
+
+        let options = list_backend_options(&db).expect("backend options");
+        let aggregate = options
+            .iter()
+            .find(|option| {
+                option.backend_type == ExternalOpenAiApiBackendType::Provider
+                    && option.provider_id == "codex-router-v2"
+            })
+            .expect("aggregate option");
+        let route = options
+            .iter()
+            .find(|option| {
+                option.backend_type == ExternalOpenAiApiBackendType::CodexRouterRoute
+                    && option.provider_id == "codex-router-v2"
+                    && option.route_id.as_deref() == Some("deepseek")
+            })
+            .expect("route option");
+
+        assert_eq!(
+            aggregate.models,
+            vec![
+                "deepseek-v4-flash".to_string(),
+                "deepseek-v4-pro".to_string()
+            ]
+        );
+        assert_eq!(route.models, aggregate.models);
+        assert!(!aggregate
+            .models
+            .iter()
+            .any(|model| model == "stale-router-model"));
     }
 
     #[test]

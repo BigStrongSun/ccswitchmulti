@@ -351,6 +351,12 @@ export interface BackupEntry {
   createdAt: string;
 }
 
+export interface DatabaseRestoreResult {
+  success: boolean;
+  safetyBackupId: string;
+  warning?: string;
+}
+
 export const backupsApi = {
   async createDbBackup(): Promise<string> {
     return await invoke("create_db_backup");
@@ -360,7 +366,7 @@ export const backupsApi = {
     return await invoke("list_db_backups");
   },
 
-  async restoreDbBackup(filename: string): Promise<string> {
+  async restoreDbBackup(filename: string): Promise<DatabaseRestoreResult> {
     return await invoke("restore_db_backup", { filename });
   },
 

@@ -35,7 +35,9 @@ pub(crate) fn active_codex_router_id_with_local(
                 .and_then(serde_json::Value::as_str)
                 .filter(|id| !id.is_empty())
             {
-                return Ok(Some(id.to_string()));
+                if db.get_provider_by_id(id, "codex")?.is_some() {
+                    return Ok(Some(id.to_string()));
+                }
             }
         }
     }
@@ -45,4 +47,43 @@ pub(crate) fn active_codex_router_id_with_local(
         }
     }
     db.get_current_provider("codex")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::database::Profile;
+    use crate::provider::Provider;
+
+    #[test]
+    fn stale_profile_provider_falls_back_to_device_local_provider() {
+        let db = Database::memory().expect("memory db");
+        db.save_provider(
+            "codex",
+            &Provider::with_id(
+                "router-local".to_string(),
+                "Local Router".to_string(),
+                serde_json::json!({}),
+                None,
+            ),
+        )
+        .expect("save local router");
+        db.save_profile(&Profile {
+            id: "workspace".to_string(),
+            name: "Workspace".to_string(),
+            payload: r#"{"providers":{"codex":"deleted-router"}}"#.to_string(),
+            sort_order: None,
+            created_at: Some(1),
+            updated_at: Some(1),
+        })
+        .expect("save profile");
+        db.set_current_profile_id("codex", Some("workspace"))
+            .expect("activate profile");
+
+        assert_eq!(
+            active_codex_router_id_with_local(&db, Some("router-local"))
+                .expect("resolve active router"),
+            Some("router-local".to_string())
+        );
+    }
 }
