@@ -4231,9 +4231,9 @@ supported in one streaming turn`。
 
 # 2026-08-23 Codex 第三方推理兼容性主动探测：后端设计待实施
 
-- 用户确认的产品方向：普通模式不让用户选择 raw/summary/字段名；用户显式运行真实兼容性测试，CCSM 根据实际响应自动生成并应用模型级桥接档案。高级模式保留手工编辑，但必须是同一档案的受校验覆盖，而非另一套前端猜测。
+- 用户确认的产品方向：普通模式不让用户选择 raw/summary/字段名；保存包含 Codex 路由的 Provider 时，CCSM 自动运行一次有界的真实兼容性测试，并在首次真实请求中只做无正文的结构复核，不追加计费探测。高级模式保留手工编辑/失效后重测，但必须是同一档案的受校验覆盖，而非另一套前端猜测。
 - 已核对现状：`commands/model_fetch.rs` 的 Chat/Responses probe 只发送非流式 `ping` 并返回 HTTP 成功/失败，不能判定 reasoning 字段、SSE、工具调用或续接；`reasoning_capabilities` 是 TTL 被动元数据发现，源码明确不应在运行时主动做推理试探。两者不能直接改名复用。
-- 后端设计在 `docs/superpowers/specs/2026-08-23-codex-reasoning-compatibility-probe-backend-design.md`，实施计划在 `docs/superpowers/plans/2026-08-23-codex-reasoning-compatibility-probe-backend.md`。新领域 `reasoning_probe` 将显式完成流式形态、推理字段、强制虚拟工具、历史续接、生产投影自检五个阶段；只持久化脱敏结构证据/哈希，绝不持久化 prompt、推理正文、工具正文或凭据。
+- 后端设计在 `docs/superpowers/specs/2026-08-23-codex-reasoning-compatibility-probe-backend-design.md`，实施计划在 `docs/superpowers/plans/2026-08-23-codex-reasoning-compatibility-probe-backend.md`。新领域 `reasoning_probe` 在 Provider 保存阶段完成流式形态、推理字段、强制虚拟工具、历史续接、生产投影自检五个阶段；`ProbeCandidate` 必须由未落库的有效 route/model/transport 编译而来。只持久化脱敏结构证据/哈希，绝不持久化 prompt、推理正文、工具正文或凭据。
 - 运行时必须用 `有效高级覆盖 > 指纹匹配且未过期的测试档案 > 安全回退` 解析 `ReasoningProjection`，一次性传给流式与非流式 Chat→Responses 转换；不得再让 `outputFormat` 或通用字段提取器单独决定 raw/summary。官方 OAuth 加密续接、原生 Responses 和 V2 agent-message 边界保持原路径。
 - 隔离工作树/分支：`bigstrongsun/codex-reasoning-probe-backend`，基线 `ee21cef1`。只添加设计与计划文档，未实施业务代码、未改前端、未安装或发布。起始 `cargo test ... model_fetch --lib` 受同机已有 Cargo 编译占用 artifact-directory 锁阻塞，不能计为通过或失败；不得中断其他工作树的 Cargo 进程。
 

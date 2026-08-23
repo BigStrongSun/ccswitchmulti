@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a user-triggered, evidence-driven backend probe that classifies each third-party Codex model's actual reasoning response and automatically applies a safe Chat-to-Responses projection, with a validated manual override for advanced mode.
+**Goal:** During Provider save, automatically run an evidence-driven candidate probe that classifies each third-party Codex model's actual reasoning response and applies a safe Chat-to-Responses projection before any real Codex task, with a validated manual override for advanced mode.
 
-**Architecture:** Keep passive `reasoning_capabilities` discovery and HTTP reachability probes unchanged. Add a separate `reasoning_probe` domain that runs an explicit four-stage upstream transaction, persists only redacted structural evidence and a target-bound profile, resolves projection at request time, and parameterizes both streaming and non-streaming Chat bridges with that projection. Manual override is a separate, revision-checked record; no frontend component is in scope.
+**Architecture:** Keep passive `reasoning_capabilities` discovery and `/v1/models` fetching unchanged. Add a separate `reasoning_probe` domain that first compiles an unsaved `ProbeCandidate`, runs an explicit four-stage upstream transaction using the same production transformers, then atomically persists the Provider plus redacted target-bound profile. Runtime observes only structural shape for drift and invalidates mismatched profiles; it never starts a second billed probe. Manual override is a separate, revision-checked record; no frontend component is in scope.
 
 **Tech Stack:** Rust 2021, Tauri 2 commands, reqwest, serde/serde_json, rusqlite, existing Chat/Responses transformers, tokio test fixtures.
 
@@ -14,7 +14,7 @@
 
 - Do not implement React/UI changes, installer changes, release changes, or Desktop config mutation in this branch.
 - Never persist or log API keys, headers, prompt text, reasoning text, tool arguments, tool results, or unredacted upstream bodies.
-- Probe runs only after an explicit command; runtime request handling never starts a probe.
+- Provider save is the sole default authorization for one bounded active probe; re-test is explicit only after a failed/expired profile. Runtime request handling never starts an active probe.
 - A probe profile is keyed to provider, route, requested/effective model, transport, endpoint fingerprint, and auth kind; any mismatch invalidates it.
 - Manual override wins only after semantic validation; it cannot expose opaque or encrypted data as raw reasoning.
 - Official OAuth, native Responses, encrypted content, V2 subagent message projection, and tool-call ordering must remain unchanged.
@@ -38,13 +38,15 @@ pub enum ReasoningSemantic { Readable, Summary, Opaque, None }
 pub enum ReasoningSource { ReasoningContent, Reasoning, ReasoningDetails, ThinkTags, NativeResponses, None }
 pub enum HistoryReplay { ChatReasoningContent, Omit, NativeOnly }
 pub struct ProbeTargetKey { /* canonical, hashable route identity */ }
+pub struct ProbeCandidate { /* unsaved effective provider + route + credentials held in memory */ }
+pub enum ProbeReadiness { Verified, Partial, Unverified }
 pub struct VerifiedReasoningProfile { /* spec section 4.2 */ }
 pub struct ProbeEvidence { /* structural fields only */ }
 pub struct ManualReasoningOverride { /* profile subset + revision + reason */ }
 pub struct ReasoningProjection { semantic: ReasoningSemantic, replay: HistoryReplay }
 ```
 
-- [ ] **Step 1: Write failing pure-type tests** for target-key determinism, endpoint credential stripping, endpoint fingerprint changes, profile expiry, and validation rejection of `Opaque -> Readable`, `Summary -> raw`, missing source, and invalid native replay.
+- [ ] **Step 1: Write failing pure-type tests** for target-key determinism, candidate compilation without a persisted provider ID, endpoint credential stripping, endpoint fingerprint changes, profile expiry, readiness transitions, and validation rejection of `Opaque -> Readable`, `Summary -> raw`, missing source, and invalid native replay.
 - [ ] **Step 2: Write failing redaction tests** that feed representative Chat JSON/SSE records containing bearer headers, `reasoning_content`, `content`, tool arguments and tool outputs; assert the output contains only allowlisted JSON paths, counts, lengths, status, event names, and SHA-256 values.
 - [ ] **Step 3: Run RED tests.**
 
@@ -211,17 +213,23 @@ git add src-tauri/src/proxy
 git commit -m "fix(codex): project reasoning from verified compatibility evidence" -m "本次提交由BigStrongsSun完成"
 ```
 
-### Task 6: Expose backend-only probe and advanced-override commands
+### Task 6: Run preflight on Provider save and observe runtime drift
 
 **Files:**
 - Create: `src-tauri/src/commands/reasoning_probe.rs`
+- Create: `src-tauri/src/reasoning_probe/runtime_observer.rs`
 - Modify: `src-tauri/src/commands/mod.rs`
 - Modify: `src-tauri/src/lib.rs`
-- Test: command and domain tests
+- Modify: `src-tauri/src/commands/provider.rs`
+- Modify: `src-tauri/src/services/provider/mod.rs`
+- Modify: `src-tauri/src/proxy/handlers.rs`
+- Test: command, provider-service, observer and handler tests
 
 **Interfaces:**
 
 ```rust
+pub async fn probe_provider_candidate(candidate: ProbeCandidate, client: &Client) -> ProbeRunRecord
+pub fn observe_reasoning_profile_shape(profile: &VerifiedReasoningProfile, shape: &ObservedResponseShape) -> ProfileObservation
 probe_codex_reasoning_compatibility(request) -> ProbeRunResult
 get_codex_reasoning_compatibility(request) -> CompatibilityInspection
 plan_codex_reasoning_override(request) -> OverridePlan
@@ -229,21 +237,27 @@ apply_codex_reasoning_override(request) -> CompatibilityInspection
 clear_codex_reasoning_override(request) -> CompatibilityInspection
 ```
 
-- [ ] **Step 1: Write failing command tests** for missing target, concurrent probe rejection, redacted result serialization, no raw evidence in errors, revision conflict, invalid override, and manual override precedence.
-- [ ] **Step 2: Run RED tests.**
+- [ ] **Step 1: Write failing provider-save tests** proving `ProviderService::add` and `ProviderService::update` compile the unsaved effective route/model candidate before live config publication; a verified preflight persists Provider plus profile atomically; an unavailable/unsupported upstream saves the Provider as `Partial/Unverified` with no automatic raw projection; and endpoint, credential, route, transport or effective-model changes invalidate the old profile.
+- [ ] **Step 2: Write failing observer tests** for matching Qwen structural shape, a changed reasoning field path, a changed event order, and `PreToolVisibleContent` drift. Assert no raw body is accepted by the observer and mismatch invalidates the existing profile without issuing upstream traffic.
+- [ ] **Step 3: Write failing command tests** for missing candidate, concurrent probe rejection, redacted result serialization, no raw evidence in errors, revision conflict, invalid override, and manual override precedence.
+- [ ] **Step 4: Run RED tests.**
 
 ```powershell
 cargo test --manifest-path src-tauri/Cargo.toml reasoning_probe --lib
+cargo test --manifest-path src-tauri/Cargo.toml provider_service --lib
+cargo test --manifest-path src-tauri/Cargo.toml handlers --lib
 ```
 
-- [ ] **Step 3: Implement thin Tauri commands over the domain service.** `probe` is the only command permitted to make upstream traffic; `get` is read-only; override `plan/apply/clear` use the database revision transaction. Do not add TypeScript API wrappers or UI imports.
-- [ ] **Step 4: Run command/domain tests and commit.**
+- [ ] **Step 5: Implement the save boundary.** Build `ProbeCandidate` from the in-memory Provider draft using the same MultiRouter route/model resolution used by production requests; run one bounded active probe before publication. A verified result commits the Provider, profile and live projection together. A failed/unsupported result commits the Provider only with `Partial/Unverified`; never make raw projection selectable from that state. Preserve the existing `add/update` return contract until a later frontend task consumes the richer inspection command.
+- [ ] **Step 6: Implement `runtime_observer`.** At the Chat→Responses boundary, pass only field paths, event kinds/order, counts, lengths, hashes and `PreToolVisibleContent` to it. On mismatch, atomically expire the profile and select the safe fallback for subsequent requests; it must not call `reqwest`, inspect body text, or re-probe.
+- [ ] **Step 7: Implement thin Tauri commands over the domain service.** `probe` is an explicit re-test command; `get` is read-only; override `plan/apply/clear` use the database revision transaction. Do not add TypeScript API wrappers or UI imports.
+- [ ] **Step 8: Run command/domain tests and commit.**
 
 ```powershell
 cargo test --manifest-path src-tauri/Cargo.toml reasoning_probe --lib
 cargo check --manifest-path src-tauri/Cargo.toml --lib
-git add src-tauri/src/commands src-tauri/src/lib.rs
-git commit -m "feat(codex): expose reasoning compatibility backend commands" -m "本次提交由BigStrongsSun完成"
+git add src-tauri/src/reasoning_probe src-tauri/src/services/provider src-tauri/src/commands src-tauri/src/proxy/handlers.rs src-tauri/src/lib.rs
+git commit -m "feat(codex): preflight provider reasoning compatibility" -m "本次提交由BigStrongsSun完成"
 ```
 
 ### Task 7: Privacy, migration and cross-boundary regression gate
@@ -276,4 +290,4 @@ git commit -m "test(codex): verify reasoning compatibility probe boundaries" -m 
 
 ## Deferred Frontend Slice
 
-Only after Tasks 1-7 pass, add a model-row status card that calls `get`, a single explicit `probe` button, result/failure-stage display, and an advanced editor that calls plan/apply/clear. It must not contain its own classifier or raw/summary default logic.
+Only after Tasks 1-7 pass, add a model-row status card that calls `get`, an explicit **re-test** button for failed or expired profiles, result/failure-stage display, and an advanced editor that calls plan/apply/clear. The ordinary save flow remains the sole default probe trigger. The UI must not contain its own classifier or raw/summary default logic.
