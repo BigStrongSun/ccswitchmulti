@@ -4252,3 +4252,4 @@ supported in one streaming turn`。
 - 自动投影只允许 `ProbeReadiness::Verified`。手工覆盖必须验证已有证据：不透明证据不能升格为 readable，非 readable 不能要求 raw `reasoning_text`，readable 必须提供来源，原生 Responses 不得伪装为 Chat `reasoning_content` 回放。
 - 本轮 RED/GREEN：先观察到目标键/准入 API 缺失的编译失败，再完成 2/2；第二轮观察到候选与覆盖类型缺失的编译失败，补齐后 6/6 通过。后续仍须完成结构脱敏、持久化、capture/classifier、真实 probe transaction 和生产桥接，未可声称端到端功能完成。
 - 脱敏器现已实现为严格路径白名单：Chat JSON/SSE 只可生成 allowlisted reasoning/content/tool-arguments 字段的路径、值类型、字节长度、SHA-256 与 SSE event 名；`id`、Authorization、正文、nonce 与工具参数原文都不会进入序列化证据。两项 JSON/SSE RED/GREEN 测试已通过；数据库接入前仍需增加持久化层回归。
+- 分类器现以实际 payload 形态作保守判定：Qwen/vLLM 非空 `choices[].delta.reasoning_content` 才是 `Readable/ReasoningContent`；工具前非空普通 `content` 仅为 `PreToolVisibleContent::Present`，不改变语义或来源；summary 为 `Summary`，encrypted 与 raw/summary 混合均不得为 `Readable`，跨分片 `<think>...</think>` 闭合后才可归为 `Readable/ThinkTags`。四项 RED/GREEN fixture 测试已通过。
