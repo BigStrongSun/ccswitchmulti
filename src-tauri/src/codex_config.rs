@@ -982,7 +982,7 @@ fn codex_catalog_route_matches_model(route: &Value, model: &str) -> bool {
     }
 
     let lower_model = model.to_ascii_lowercase();
-    match_config
+    let prefix_match = match_config
         .get("prefixes")
         .or_else(|| match_config.get("matchPrefixes"))
         .or_else(|| match_config.get("match_prefixes"))
@@ -996,7 +996,25 @@ fn codex_catalog_route_matches_model(route: &Value, model: &str) -> bool {
         .filter_map(|value| value.as_str())
         .map(str::trim)
         .filter(|prefix| !prefix.is_empty())
-        .any(|prefix| lower_model.starts_with(&prefix.to_ascii_lowercase()))
+        .any(|prefix| lower_model.starts_with(&prefix.to_ascii_lowercase()));
+    // include 模式下前缀命中须同时满足模型 ∈ include（与 codex.rs 同语义），
+    // 否则被 include 反选的模型会通过粗粒度前缀（如官方 "gpt"）被重新放行。
+    prefix_match && codex_catalog_route_include_allows(route, model)
+}
+
+/// V2 include 模式下，前缀命中必须同时满足模型 ∈ include 列表；mode=all 或 legacy 无
+/// modelSelection 时前缀照常生效。
+fn codex_catalog_route_include_allows(route: &Value, model: &str) -> bool {
+    let Some(models) = route
+        .pointer("/modelSelection/models")
+        .and_then(Value::as_array)
+    else {
+        return true;
+    };
+    models
+        .iter()
+        .filter_map(Value::as_str)
+        .any(|candidate| candidate.trim().eq_ignore_ascii_case(model))
 }
 
 /// 根据 route capability 判断 catalog 是否应写成 text-only。
@@ -3251,29 +3269,53 @@ fn sync_codex_managed_agent_files(
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ProviderClassificationContext {
     provider_kinds: HashMap<String, SubagentProviderKind>,
+    /// provider id → 小写模型名集合（来自 modelCatalog.models[].model）。
+    /// mode=all 的 route 需要靠 target provider 的真实模型列表判断归属，
+    /// 因为 raw settings 匹配只认 exact/prefix，无法表达"接住目标全部模型"。
+    provider_models: HashMap<String, HashSet<String>>,
 }
 
 impl ProviderClassificationContext {
     pub(crate) fn from_providers<'a>(providers: impl IntoIterator<Item = &'a Provider>) -> Self {
-        Self {
-            provider_kinds: providers
+        let providers: Vec<&Provider> = providers.into_iter().collect();
+        let mut provider_kinds: HashMap<String, SubagentProviderKind> = HashMap::new();
+        let mut provider_models: HashMap<String, HashSet<String>> = HashMap::new();
+        for provider in &providers {
+            provider_kinds.insert(
+                provider.id.clone(),
+                if codex_provider_record_is_official(provider) {
+                    SubagentProviderKind::Official
+                } else {
+                    SubagentProviderKind::ThirdParty
+                },
+            );
+            let models: HashSet<String> = provider
+                .settings_config
+                .get("modelCatalog")
+                .or_else(|| provider.settings_config.get("model_catalog"))
+                .and_then(|catalog| catalog.get("models"))
+                .and_then(Value::as_array)
                 .into_iter()
-                .map(|provider| {
-                    (
-                        provider.id.clone(),
-                        if codex_provider_record_is_official(provider) {
-                            SubagentProviderKind::Official
-                        } else {
-                            SubagentProviderKind::ThirdParty
-                        },
-                    )
-                })
-                .collect(),
+                .flatten()
+                .filter_map(|entry| entry.get("model").and_then(Value::as_str))
+                .map(|model| model.trim().to_ascii_lowercase())
+                .filter(|model| !model.is_empty())
+                .collect();
+            provider_models.insert(provider.id.clone(), models);
+        }
+        Self {
+            provider_kinds,
+            provider_models,
         }
     }
 
     fn get(&self, provider_id: &str) -> Option<SubagentProviderKind> {
         self.provider_kinds.get(provider_id).copied()
+    }
+
+    /// mode=all 兜底匹配用的"provider → 模型名集合"映射。
+    pub(crate) fn provider_models(&self) -> &HashMap<String, HashSet<String>> {
+        &self.provider_models
     }
 }
 
@@ -3308,12 +3350,70 @@ struct RouteClassification {
     warning: Option<&'static str>,
 }
 
+/// 解析模型所属 route：raw settings 匹配（exact/prefix，fail-closed）失败时，
+/// 用 mode=all route 的 target provider catalog 兜底。
+///
+/// mode=all 的语义是"接住目标 provider 的全部模型"，而 raw 匹配只认
+/// match.models / matchPrefixes；无前缀的 mode=all route（如向导不识别名称的
+/// Kimi）会漏掉自己的模型，导致角色被误判 unroutable。target catalog 判断
+/// 保证 k3 → Kimi（第三方），而 qwen3.8（未勾选源）仍 fail-closed。
+fn codex_resolve_route_with_mode_all<'a>(
+    settings: &'a Value,
+    model: &str,
+    provider_models: Option<&HashMap<String, HashSet<String>>>,
+) -> Option<&'a Value> {
+    if let Some(route) = resolve_codex_primary_route_from_settings(settings, model) {
+        return Some(route);
+    }
+    let Some(provider_models) = provider_models else {
+        return None;
+    };
+    let model_key = model.trim().to_ascii_lowercase();
+    if model_key.is_empty() {
+        return None;
+    }
+    let routes = settings
+        .get("codexRouting")
+        .and_then(|routing| routing.get("routes"))
+        .and_then(Value::as_array)?;
+    for route in routes {
+        let enabled = route
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        if !enabled {
+            continue;
+        }
+        if route
+            .pointer("/modelSelection/mode")
+            .and_then(Value::as_str)
+            != Some("all")
+        {
+            continue;
+        }
+        let Some(target_provider_id) = codex_route_target_provider_id_from_route(route) else {
+            continue;
+        };
+        if provider_models
+            .get(target_provider_id)
+            .is_some_and(|models| models.contains(&model_key))
+        {
+            return Some(route);
+        }
+    }
+    None
+}
+
 fn codex_subagent_route_classification_with_context(
     settings: &Value,
     model: &str,
     provider_context: Option<&ProviderClassificationContext>,
 ) -> Option<RouteClassification> {
-    let route = resolve_codex_primary_route_from_settings(settings, model)?;
+    let route = codex_resolve_route_with_mode_all(
+        settings,
+        model,
+        provider_context.map(|context| context.provider_models()),
+    )?;
     if let Some(target_provider_id) = codex_route_target_provider_id_from_route(route) {
         if let Some(provider_kind) =
             provider_context.and_then(|context| context.get(target_provider_id))
@@ -3706,10 +3806,15 @@ fn codex_subagent_profile_input_modalities(spec: &CodexCatalogModelSpec) -> Opti
     })
 }
 
-fn routable_codex_subagent_catalog(settings: &Value) -> Vec<(String, String, Option<Vec<String>>)> {
+fn routable_codex_subagent_catalog(
+    settings: &Value,
+    provider_models: Option<&HashMap<String, HashSet<String>>>,
+) -> Vec<(String, String, Option<Vec<String>>)> {
     codex_catalog_model_specs(settings, "")
         .into_iter()
-        .filter(|spec| resolve_codex_primary_route_from_settings(settings, &spec.model).is_some())
+        .filter(|spec| {
+            codex_resolve_route_with_mode_all(settings, &spec.model, provider_models).is_some()
+        })
         .map(|spec| {
             let input_modalities = codex_subagent_profile_input_modalities(&spec);
             (
@@ -3771,7 +3876,7 @@ fn catalog_profile_draft(
 
 pub(crate) fn initialize_codex_subagent_v2_for_candidate(
     settings: &Value,
-    _provider_context: Option<&ProviderClassificationContext>,
+    provider_context: Option<&ProviderClassificationContext>,
 ) -> Result<Value, AppError> {
     let mut initialized = json!({
         "schemaVersion": 2,
@@ -3782,7 +3887,9 @@ pub(crate) fn initialize_codex_subagent_v2_for_candidate(
         .get_mut("profiles")
         .and_then(Value::as_object_mut)
         .ok_or_else(|| AppError::Message("Initialized profiles are not an object".to_string()))?;
-    for (identity, model, input_modalities) in routable_codex_subagent_catalog(settings) {
+    for (identity, model, input_modalities) in
+        routable_codex_subagent_catalog(settings, provider_context.map(|context| context.provider_models()))
+    {
         let preferred = matches!(identity.as_str(), "deepseek-v4-flash" | "deepseek-v4-pro");
         profiles.insert(
             identity,
@@ -3849,7 +3956,8 @@ pub(crate) fn reconcile_codex_subagent_v2_for_candidate(
         .get_mut("profiles")
         .and_then(Value::as_object_mut)
         .ok_or_else(|| AppError::Message("Reconciled profiles are not an object".to_string()))?;
-    let routable = routable_codex_subagent_catalog(settings);
+    let routable =
+        routable_codex_subagent_catalog(settings, provider_context.map(|context| context.provider_models()));
     let routable_by_identity = routable
         .iter()
         .map(|(identity, model, modalities)| {
@@ -8723,7 +8831,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_subagent_v2_initialization_includes_runtime_first_enabled_fallback_model() {
+    fn codex_subagent_v2_initialization_excludes_unmatched_models_fail_closed() {
         let settings = codex_subagent_profile_status_settings(
             "v2",
             json!({}),
@@ -8736,19 +8844,15 @@ mod tests {
             }]),
         );
 
-        assert_eq!(
-            resolve_codex_primary_route_from_settings(&settings, "unmatched-model")
-                .and_then(|route| route.get("id"))
-                .and_then(Value::as_str),
-            Some("first-enabled"),
-            "the backend helper must follow the runtime's historical first-enabled fallback"
+        assert!(
+            resolve_codex_primary_route_from_settings(&settings, "unmatched-model").is_none(),
+            "unmatched model must fail closed instead of first-enabled fallback"
         );
         let initialized = initialize_codex_subagent_v2_for_candidate(&settings, None)
-            .expect("initialize from runtime-routable catalog models");
-
-        assert_eq!(
-            initialized["profiles"]["unmatched-model"]["enabled"], false,
-            "a catalog model routed by the runtime first-enabled fallback needs a disabled draft"
+            .expect("initialize without unmatched models");
+        assert!(
+            initialized["profiles"].get("unmatched-model").is_none(),
+            "an unroutable model must not receive a draft"
         );
     }
 
@@ -9669,8 +9773,8 @@ mod tests {
         );
         assert_eq!(
             classify(&settings, "unknown-model"),
-            Some(SubagentProviderKind::Official),
-            "an unmatched request uses the enabled defaultRouteId in runtime order"
+            None,
+            "an unmatched request must fail closed; no defaultRouteId fallback"
         );
         let fallback_settings = json!({
             "codexRouting": {
@@ -9684,8 +9788,85 @@ mod tests {
         });
         assert_eq!(
             classify(&fallback_settings, "unmatched-model"),
+            None,
+            "an unmatched model must fail closed; no first-enabled fallback"
+        );
+    }
+
+    #[test]
+    fn codex_subagent_v2_route_classifier_mode_all_matches_target_provider_catalog() {
+        let classify = |settings: &Value,
+                        model: &str,
+                        context: Option<&ProviderClassificationContext>| {
+            codex_subagent_route_classification_with_context(settings, model, context)
+                .map(|classification| classification.provider_kind)
+        };
+        let settings = json!({
+            "codexRouting": {
+                "enabled": true,
+                "routes": [
+                    {
+                        "id": "official",
+                        "enabled": true,
+                        "targetProviderId": "codex-official",
+                        "modelSelection": { "mode": "include", "models": ["gpt-5.6-sol"] },
+                        "matchPrefixes": ["gpt", "o"]
+                    },
+                    {
+                        "id": "kimi",
+                        "enabled": true,
+                        "targetProviderId": "kimi-target",
+                        "modelSelection": { "mode": "all" },
+                        "matchPrefixes": []
+                    }
+                ]
+            }
+        });
+        let kimi = Provider::with_id(
+            "kimi-target".to_string(),
+            "Kimi".to_string(),
+            json!({
+                "modelCatalog": {
+                    "models": [
+                        { "model": "k3" },
+                        { "model": "k3-256k" }
+                    ]
+                }
+            }),
+            None,
+        );
+        let official = Provider::with_id(
+            "codex-official".to_string(),
+            "OpenAI Official".to_string(),
+            json!({
+                "modelCatalog": {
+                    "models": [{ "model": "gpt-5.6-sol" }]
+                },
+                "auth": { "auth_mode": "chatgpt" }
+            }),
+            None,
+        );
+        let context = ProviderClassificationContext::from_providers([&kimi, &official]);
+
+        assert_eq!(
+            classify(&settings, "k3", Some(&context)),
             Some(SubagentProviderKind::ThirdParty),
-            "profile compilation must classify the same first enabled fallback candidate as runtime"
+            "mode=all route with empty matchPrefixes must match models from its target provider catalog"
+        );
+        assert_eq!(
+            classify(&settings, "k3-256k", Some(&context)),
+            Some(SubagentProviderKind::ThirdParty),
+            "k3-256k must also resolve through the mode=all target catalog"
+        );
+        assert_eq!(
+            classify(&settings, "qwen3.8", Some(&context)),
+            None,
+            "a model outside every route target catalog must stay unroutable"
+        );
+        assert_eq!(
+            classify(&settings, "gpt-5.6-sol", Some(&context)),
+            Some(SubagentProviderKind::Official),
+            "an include route must keep its exact match semantics"
         );
     }
 
@@ -9789,8 +9970,8 @@ mod tests {
         );
         assert_eq!(
             classify_subagent_route_with_provider_records(&generic_target, "gpt-5.6-sol", &[],),
-            Some(SubagentProviderKind::ThirdParty),
-            "an official-looking model name must never imply an official provider"
+            None,
+            "an unmatched model must fail closed; no first-enabled fallback"
         );
     }
 
@@ -16223,5 +16404,30 @@ wire_api = "responses"
             catalog["ccSwitchRoutingDependencyFingerprint"],
             "fingerprint-v2"
         );
+    }
+
+    #[test]
+    fn codex_catalog_route_include_selection_blocks_coarse_prefix_escape() {
+        let route = json!({
+            "id": "official",
+            "enabled": true,
+            "modelSelection": {"mode": "include", "models": ["gpt-5.6-sol", "gpt-5.6-luna"]},
+            "matchPrefixes": ["gpt"]
+        });
+        // 被 include 反选的模型（gpt-5.4）不能靠粗粒度前缀 "gpt" 命中
+        assert!(
+            !codex_catalog_route_matches_model(&route, "gpt-5.4"),
+            "include-excluded model must not match via coarse prefix"
+        );
+        // include 内模型正常命中（exact）
+        assert!(codex_catalog_route_matches_model(&route, "gpt-5.6-sol"));
+        // mode=all 时前缀照常生效
+        let all = json!({
+            "id": "official",
+            "enabled": true,
+            "modelSelection": {"mode": "all"},
+            "matchPrefixes": ["gpt"]
+        });
+        assert!(codex_catalog_route_matches_model(&all, "gpt-5.4"));
     }
 }
