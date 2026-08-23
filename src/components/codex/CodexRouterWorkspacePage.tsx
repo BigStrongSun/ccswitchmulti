@@ -567,6 +567,7 @@ type CodexCatalogModelDraft = {
   supports_image?: boolean;
   vision?: boolean;
   sortIndex?: number;
+  reasoning?: CodexCatalogModel["reasoning"];
   codexUltra?: CodexCatalogModel["codexUltra"];
   capabilities?: CodexRouteCapabilities;
 };
@@ -1471,6 +1472,10 @@ function catalogDraftFromSourceModel(
     ...(upstreamModel && upstreamModel !== id ? { upstreamModel } : {}),
     ...(displayName ? { displayName } : {}),
     ...(contextWindow ? { contextWindow } : {}),
+    // 保留源模型声明的推理能力（supportedEfforts/defaultEffort/upstream 等）；
+    // 否则 mode=all / include 投影重建时丢失 reasoning，工作台能力页显示模型
+    // 无档位（如 luna 的 max 消失）。
+    ...(source?.reasoning ? { reasoning: source.reasoning } : {}),
     ...(source?.inputModalities
       ? { inputModalities: source.inputModalities }
       : {}),

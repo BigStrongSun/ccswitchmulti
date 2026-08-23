@@ -2648,6 +2648,61 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     ]);
   });
 
+  it("preserves source model reasoning capability through route catalog projection", () => {
+    const official: Provider = {
+      id: "codex-official",
+      name: "OpenAI Official",
+      category: "official",
+      settingsConfig: {
+        modelCatalog: {
+          models: [
+            {
+              model: "gpt-5.6-luna",
+              reasoning: {
+                supported: true,
+                supportedEfforts: ["low", "medium", "high", "xhigh", "max"],
+                disableAllowed: false,
+                upstream: { format: "none", parameter: "none" },
+              },
+            },
+          ],
+        },
+      },
+      meta: { apiFormat: "openai_responses" },
+    };
+    const plan: Provider = {
+      id: "codex-multirouter",
+      name: "MultiRouter",
+      category: "custom",
+      settingsConfig: {
+        codexRouting: {
+          enabled: true,
+          routes: [
+            {
+              id: "official",
+              enabled: true,
+              targetProviderId: "codex-official",
+              modelSelection: { mode: "all" },
+            },
+          ],
+        },
+      },
+    };
+    const catalog = buildModelCatalogForRoutes(
+      plan,
+      readCodexRouting(plan)?.routes ?? [],
+      new Map([[official.id, official]]),
+    );
+    const luna = catalog.models.find(
+      (model) => model.model === "gpt-5.6-luna",
+    );
+    expect(luna?.reasoning).toBeDefined();
+    expect(
+      (luna?.reasoning as { supportedEfforts?: string[] } | undefined)
+        ?.supportedEfforts,
+    ).toContain("max");
+  });
+
   it("does not expose provider catalog models that no saved route can match", () => {
     const official: Provider = {
       id: "codex-official",
