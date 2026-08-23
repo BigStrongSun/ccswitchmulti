@@ -91,7 +91,7 @@ Invoke-CcsmMaintenanceLeaseScope -MarkerPath $MaintenanceMarker -Purpose "local-
         TransactionId = $transactionId
         BackupRoot = $backupRoot
         OldPid = [int]$listener.OwningProcess
-        NewPid = [int]$transactionResult.NewProcessId
+        NewPid = [int]$transactionResult.NewPid
         OldVersion = $currentVersion
         OldHash = $currentHash
         NewVersion = $ExpectedInstalledVersion

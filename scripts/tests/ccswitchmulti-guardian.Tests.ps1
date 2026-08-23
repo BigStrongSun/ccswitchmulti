@@ -236,6 +236,17 @@ Describe "CCSwitchMulti Tauri NSIS payload hash" {
     }
 }
 
+Describe "CCSwitchMulti upgrade wrapper result contract" {
+    It "reads the successful transaction PID from NewPid" {
+        $wrapperPath = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) `
+            "scripts\invoke-ccswitchmulti-local-upgrade.ps1"
+        $wrapper = [System.IO.File]::ReadAllText($wrapperPath, [System.Text.Encoding]::UTF8)
+
+        $wrapper | Should Match '\$transactionResult\.NewPid'
+        $wrapper | Should Not Match '\$transactionResult\.NewProcessId'
+    }
+}
+
 Describe "CCSwitchMulti guardian decision loop" {
     BeforeEach {
         $script:events = New-Object System.Collections.Generic.List[string]

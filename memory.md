@@ -2,6 +2,8 @@
 
 ## 2026-08-24 本地升级守护、维护租约与 MultiRouter 向导 Provider 初始化
 
+- 升级结果契约补漏：事务脚本成功结果字段为 `NewPid`，外层 `invoke-ccswitchmulti-local-upgrade.ps1` 曾误读不存在的 `NewProcessId`，导致应用已经正确安装并健康启动后，包装层仍在最终结果格式化阶段报错。现统一读取 `NewPid` 并用 Pester 锁定契约。该错误与 Codex Desktop 自动化的 Electron 主进程 `Error: write EOF` 无关；后者是已关闭 IPC 管道被继续写入，发生后必须停止该自动化链，不能靠重复点击或重试解决。
+
 - 本机 Codex 当前依赖安装态 CCSwitchMulti `127.0.0.1:15721`，因此本地替换不能由当前交互进程直接停服后再继续。升级必须交给独立的 Windows PowerShell 事务：预检当前监听 PID、可执行文件路径、版本与 SHA-256，建立维护租约，备份配置和安装目录，等待旧进程及端口完全释放后卸载/安装，验证新 PID、版本、哈希、15721 与 `/health`；任一步失败必须使用保留的安装目录、配置和注册表备份回滚。
 - 新增 `scripts/ccswitchmulti-guardian-core.ps1`、`scripts/watch-ccswitchmulti.ps1` 和 `scripts/invoke-ccswitchmulti-local-upgrade.ps1`。维护标记不再是永久哨兵文件，而是带 `leaseId`、owner PID、owner executable path、owner start time、创建/过期时间的结构化租约；PID、路径、启动时间和期限必须全部有效，坏 JSON、过期租约、PID 复用或 owner 消失都不会永久压住守护。租约 scope 在异常时只清理自己拥有的租约。
 - 守护每 5 秒检查一次；只有预期安装路径的 CCSM 连续失联 60 秒才恢复。恢复前再次检查维护状态，只停止路径和启动时间均核验通过的 CCSM 进程，拒绝误杀占用 15721 的其他程序，等待旧进程退出和端口释放后才隐藏启动安装态 EXE，并等待新 PID 的 `/health` 就绪。安装器、卸载器和事务脚本保留为二级维护识别。
