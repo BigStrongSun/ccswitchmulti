@@ -6,6 +6,7 @@ use std::sync::{OnceLock, RwLock};
 use crate::app_config::AppType;
 use crate::error::AppError;
 use crate::services::skill::{SkillStorageLocation, SyncMethod};
+use crate::services::preset_registry::PresetRegistrySettings;
 
 /// 自定义端点配置（历史兼容，实际存储在 provider.meta.custom_endpoints）
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -533,6 +534,10 @@ pub struct AppSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub webdav_sync: Option<WebDavSyncSettings>,
 
+    // ===== 预设注册表设置（设备级，不跨设备同步）=====
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset_registry: Option<PresetRegistrySettings>,
+
     // ===== S3 同步设置 =====
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub s3_sync: Option<S3SyncSettings>,
@@ -620,6 +625,7 @@ impl Default for AppSettings {
             skill_sync_method: SyncMethod::default(),
             skill_storage_location: SkillStorageLocation::default(),
             webdav_sync: None,
+            preset_registry: None,
             s3_sync: None,
             webdav_backup: None,
             backup_interval_hours: None,
@@ -702,6 +708,13 @@ impl AppSettings {
             sync.normalize();
             if sync.is_empty() {
                 self.webdav_sync = None;
+            }
+        }
+
+        if let Some(registry) = &mut self.preset_registry {
+            registry.normalize();
+            if registry.is_empty() {
+                self.preset_registry = None;
             }
         }
 
@@ -1222,6 +1235,20 @@ pub fn get_webdav_sync_settings() -> Option<WebDavSyncSettings> {
 pub fn set_webdav_sync_settings(settings: Option<WebDavSyncSettings>) -> Result<(), AppError> {
     mutate_settings(|current| {
         current.webdav_sync = settings;
+    })
+}
+
+/// 读取预设注册表设置（设备级，不跨设备同步）。
+pub fn get_preset_registry_settings() -> Option<PresetRegistrySettings> {
+    settings_store().read().ok()?.preset_registry.clone()
+}
+
+/// 保存预设注册表设置。
+pub fn set_preset_registry_settings(
+    settings: Option<PresetRegistrySettings>,
+) -> Result<(), AppError> {
+    mutate_settings(|current| {
+        current.preset_registry = settings;
     })
 }
 
