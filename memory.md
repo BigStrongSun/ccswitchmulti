@@ -4253,3 +4253,10 @@ supported in one streaming turn`。
 - 本轮 RED/GREEN：先观察到目标键/准入 API 缺失的编译失败，再完成 2/2；第二轮观察到候选与覆盖类型缺失的编译失败，补齐后 6/6 通过。后续仍须完成结构脱敏、持久化、capture/classifier、真实 probe transaction 和生产桥接，未可声称端到端功能完成。
 - 脱敏器现已实现为严格路径白名单：Chat JSON/SSE 只可生成 allowlisted reasoning/content/tool-arguments 字段的路径、值类型、字节长度、SHA-256 与 SSE event 名；`id`、Authorization、正文、nonce 与工具参数原文都不会进入序列化证据。两项 JSON/SSE RED/GREEN 测试已通过；数据库接入前仍需增加持久化层回归。
 - 分类器现以实际 payload 形态作保守判定：Qwen/vLLM 非空 `choices[].delta.reasoning_content` 才是 `Readable/ReasoningContent`；工具前非空普通 `content` 仅为 `PreToolVisibleContent::Present`，不改变语义或来源；summary 为 `Summary`，encrypted 与 raw/summary 混合均不得为 `Readable`，跨分片 `<think>...</think>` 闭合后才可归为 `Readable/ThinkTags`。四项 RED/GREEN fixture 测试已通过。
+
+## 2026-08-24 Codex 第三方协议探测更正：每个 Provider 全协议枚举
+
+- 用户纠正了旧的“按已配置 transport 探测，只有 Auto 才 fallback”逻辑。`wire_api` 可能正是历史误配置来源，例如把实际只支持 Chat Completions 的上游标成 Responses；因此它只能作为配置提示，不能删除候选、参与能力评分或直接作为探测结论。
+- 每个 Provider/模型都必须枚举 CCSM 当前维护的 Chat Completions 与 Responses 两条候选分支。每条分支先独立做非流 baseline；baseline 明确不支持只终止该分支，baseline 可达则继续做 SSE、强制虚拟工具、工具结果续接，最坏每模型八次请求。
+- 运行协议从 baseline 可达分支中按 `续接通过 > 强制工具通过 > SSE 通过 > 同分时原生 Responses` 选择。选择到 Partial 分支仍可保留基础路由，但只有被选分支四阶段全通过才允许自动 reasoning 投影；否则必须安全回退。
+- 选择器的 TDD 已观察 RED 后实现，当前 5/5 选择测试与 21/21 `protocol_compatibility` 领域测试通过。runner 尚未接线，不能把领域测试通过表述成端到端探测已经完成。

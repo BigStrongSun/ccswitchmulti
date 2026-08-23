@@ -8,6 +8,12 @@ pub use redaction::{redact_json_probe_response, redact_sse_probe_response};
 mod classify;
 pub use classify::{classify_reasoning_shape, PreToolVisibleContent};
 
+mod selection;
+pub use selection::{
+    select_preferred_transport, select_transport_outcome, ProbeStageStatus,
+    TransportProbeAssessment,
+};
+
 const BASELINE_PROMPT: &str =
     "CCSM protocol compatibility probe. Solve 17 + 25 internally. Reply only CCSM_PROTOCOL_BASELINE_OK.";
 const TOOL_NAME: &str = "ccsm_protocol_compatibility_probe";
@@ -256,5 +262,7 @@ mod cases;
 mod classify_tests;
 #[cfg(test)]
 mod redaction_tests;
+#[cfg(test)]
+mod selection_tests;
 #[cfg(test)]
 mod types;

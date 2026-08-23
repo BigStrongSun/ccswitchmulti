@@ -119,7 +119,7 @@ tool call 前是否还发送了非空普通 `delta.content`。该字段只能保
 
 探测由单一 `ProtocolCompatibilityProbeService` 执行，整个事务带一个随机 probe ID。每段都有独立状态：`passed`、`unsupported`、`failed`、`skipped`；总状态只有全部必要阶段通过才是 `verified`。原 `model_fetch` 的最小 Chat/Responses HTTP 检查迁入第一阶段，避免同一次保存发两套重复请求。
 
-1. **端点/transport 探测**：用同一个 baseline 逻辑请求检查配置指定的 transport；`Auto` 才允许按固定顺序尝试另一个 transport。保留 HTTP 状态、content-type、SSE event type 集合、JSON 顶层 key 集合和字段长度/哈希。
+1. **端点/transport 探测**：从同一个候选 base endpoint 枚举 CCSM 已维护的全部上游协议适配器；首版为 OpenAI Chat Completions 与 OpenAI Responses。数据库中的 `wire_api` 只作为历史配置提示，不能限制候选集合、参与能力评分或直接成为探测结论。每个候选先发送同一个 baseline 逻辑请求；明确不支持的协议停止该分支，可达协议继续完成流、工具和续接测试。保留 HTTP 状态、content-type、SSE event type 集合和字段长度/哈希。
 2. **推理形态探测**：发送固定的无敏感 baseline，分别做非流和流请求。分类器只能依据实际字段位置、分片顺序和明确的 `<think>` 边界决定来源；字段名存在但为空不算证据。
 3. **工具回合探测**：使用固定的虚拟函数并强制该函数调用；不能强制时报告 `unsupported`，不能把模型自然回答误判为通过。捕获器必须独立记录 tool call 之前是否出现普通 `content`；该证据不得参与 reasoning semantic/source 分类。
 4. **历史续接探测**：将同一段已转换的 Responses 输出经过现有 Responses→Chat 转换器重放给同一上游，附固定工具结果；验证没有 400、不会漏掉 tool call、并得到后续 assistant 输出。
@@ -129,9 +129,15 @@ tool call 前是否还发送了非空普通 `delta.content`。该字段只能保
 
 探测器不把用户正在编辑的 message、system/developer prompt、`extra_body`、`tools`、`tool_choice`、`response_format`、`previous_response_id`、conversation 或 reasoning/effort 控制字段拼进请求。它只复用候选的 endpoint、认证、有效模型、transport、受维护的协议适配器和必要的自定义 User-Agent/认证头；所有自定义头只在发送时使用，永不记录。这样探测既不泄露用户内容，也不让用户自定义 prompt 改变测试语义。
 
-每个 `ProbeCase` 先构造**逻辑 Responses 请求**，再由生产级 Responses→Chat 转换器生成 Chat wire body；原生 Responses transport 发送原逻辑 body。不能为 probe 另写一套 Chat message/tool 序列化器。对于 `transport=Auto`，仅 baseline 可以按 `responses -> chat` 尝试第二种协议，且只有明确的端点/协议不支持（例如 404、405、415 或可识别 schema 不支持）才继续；401、403、429、超时、TLS/网络错误都停止并标为 `Unverified`，不得误判为另一协议。
+每个 `ProbeCase` 先构造**逻辑 Responses 请求**，再由生产级 Responses→Chat 转换器生成 Chat wire body；原生 Responses transport 发送原逻辑 body。不能为 probe 另写一套 Chat message/tool 序列化器。Chat 与 Responses 各自是独立探测分支：某一分支的 404、405、415 或可识别 schema 不支持只终止该分支，不阻止另一分支；401、403、429、超时、TLS/网络错误是凭据、额度或可用性失败，不能据此宣称协议不支持，也不能触发同一分支重试。
 
-探测共有最多四次上游请求；`Auto` 在首选 transport 明确不支持时最多多一次 baseline。每次连接上限 5 秒、完整响应上限 15 秒，整个事务上限 60 秒；不做网络重试、不跟随跨 origin 重定向。每个请求必须携带可按协议使用的输出上限：Chat 为 `max_tokens=128`，Responses 为 `max_output_tokens=128`。上游明确拒绝该最小额度时记录 `output_limit_unsupported` 并降为 `Partial`，不退化为无上限或 1024 token 的隐式长请求。
+每个模型最多两个协议分支、每个分支最多四次上游请求，最坏共八次；baseline 明确不支持的分支只消耗一次。每次连接上限 5 秒、完整响应上限 15 秒，整个双协议事务上限 120 秒；不做网络重试、不跟随跨 origin 重定向。每个请求必须携带可按协议使用的输出上限：Chat 为 `max_tokens=128`，Responses 为 `max_output_tokens=128`。上游明确拒绝该最小额度时记录 `output_limit_unsupported` 并降为 `Partial`，不退化为无上限或 1024 token 的隐式长请求。
+
+### 5.2 协议选择与投影准入分离
+
+每个协议分支独立产出 `baseline / streaming / forced_tool / continuation` 四阶段状态。运行 transport 只从 baseline 可达的分支中选择，并按 `continuation 通过 > forced_tool 通过 > streaming 通过 > 原生 Responses 同分优先` 排序；这样 Qwen/vLLM 或 GLM 的 Chat 分支若比不完整的 Responses 分支更完整，会自动选择 Chat，而不是被表面 `wire_api=responses` 误导。
+
+运行 transport 的选择不等于 reasoning 自动投影准入。只有被选分支四阶段全部通过时，档案才是 `Verified` 并可依据其响应证据启用自动 raw/summary 投影；选择到的 Partial 分支只用于保留基础路由能力，reasoning 必须安全回退。若两个分支 baseline 都不可达，则无自动选择并记为 `Unverified`。
 
 | Case | 逻辑用户输入（固定文本；`<nonce>` 每次随机） | stream | 工具/续接 | 通过证据 |
 |---|---|---:|---|---|
