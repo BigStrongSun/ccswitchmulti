@@ -752,6 +752,39 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     );
   });
 
+  it("does not infer a legacy route target from an ambiguous shared model", () => {
+    const providerA = {
+      id: "relay-a",
+      name: "Relay A",
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "shared-model" }] },
+      },
+    } as Provider;
+    const providerB = {
+      id: "relay-b",
+      name: "Relay B",
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "shared-model" }] },
+      },
+    } as Provider;
+    const routes = [
+      {
+        id: "legacy-route",
+        label: "legacy-route",
+        match: { models: ["shared-model"] },
+      },
+      {
+        id: "relay-a-route",
+        targetProviderId: "relay-a",
+        match: { models: ["shared-model"] },
+      },
+    ];
+
+    expect(
+      dedupeCodexRoutesBySemanticProvider(routes, [providerA, providerB]),
+    ).toEqual(routes);
+  });
+
   it("按 Router 官方认证与账号池 Desktop 成员展示生成门面", () => {
     expect(
       resolveCodexRouterAuthFacadeLabel({ mode: "desktop_current_login" }),

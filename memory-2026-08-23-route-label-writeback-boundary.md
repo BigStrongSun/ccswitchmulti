@@ -14,6 +14,11 @@
   rendering continues to use `routeSummaryDisplayName()` for UUID fallback.
   Regression coverage locks this behavior, alongside V2 exact/prefix/default
   resolution tests.
+- A related legacy-recovery hazard existed in `findSemanticRouteProvider()`:
+  missing `targetProviderId` could be inferred from the first Provider sharing
+  a model name. Recovery now accepts a name or model match only when it is
+  unique; ambiguous legacy routes remain unresolved and cannot silently bind
+  to a different Provider during a later save.
 - Read-only local evidence on 2026-08-23: the installed configuration remains
   a legacy plan and its recent logs route `gpt-5.6-terra` to
   `router-codex-official` and `deepseek-v4-flash` to the DeepSeek route. This

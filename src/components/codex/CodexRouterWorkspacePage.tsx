@@ -406,22 +406,27 @@ function findSemanticRouteProvider(
     .map(normalizedRouteIdentityText)
     .filter(Boolean);
 
-  return modelSources.find((source) => {
+  const providerNameMatches = modelSources.filter((source) => {
     const providerNames = [source.id, source.name, source.meta?.providerType]
       .map((value) =>
         typeof value === "string" ? normalizedRouteIdentityText(value) : "",
       )
       .filter(Boolean);
-    if (
+    return (
       routeNames.some((name) => providerNames.includes(name)) ||
       providerNames.some((name) => routeNames.includes(name))
-    ) {
-      return true;
-    }
+    );
+  });
+  if (providerNameMatches.length === 1) return providerNameMatches[0];
+  if (providerNameMatches.length > 1) return undefined;
 
+  const providerModelMatches = modelSources.filter((source) => {
     const providerModels = providerRouteModelIdentitySet(source);
     return routeModels.some((model) => providerModels.has(model));
   });
+  return providerModelMatches.length === 1
+    ? providerModelMatches[0]
+    : undefined;
 }
 
 /// route 去重以真实目标 provider 优先；没有目标 provider 的旧 route 则退回到语义匹配出的 provider。
