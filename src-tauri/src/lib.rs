@@ -1510,6 +1510,8 @@ pub fn run() {
             commands::probe_codex_chat_for_config,
             commands::probe_codex_responses_for_config,
             commands::probe_codex_protocol_compatibility,
+            commands::preflight_codex_provider_protocol_compatibility,
+            commands::save_codex_provider_with_protocol_preflight,
             // ours: endpoint speed test + custom endpoint management
             commands::test_api_endpoints,
             commands::get_custom_endpoints,

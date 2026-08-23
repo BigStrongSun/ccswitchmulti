@@ -26,6 +26,12 @@ pub use selection::{ProbeStageStatus, TransportProbeAssessment};
 mod runner;
 pub use runner::{run_protocol_compatibility_probe, ProtocolCompatibilityProbeResult};
 
+mod provider;
+pub use provider::{
+    apply_probe_selection_to_provider, apply_selected_transport_to_provider,
+    compile_provider_probe_candidate,
+};
+
 pub(crate) mod profile;
 pub use profile::ProtocolCompatibilityRecord;
 
@@ -330,3 +336,5 @@ mod runner_tests;
 mod selection_tests;
 #[cfg(test)]
 mod types;
+#[cfg(test)]
+mod provider_tests;

@@ -1,12 +1,17 @@
 use chrono::Utc;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::{
+    app_config::AppType,
     protocol_compatibility::{
+        apply_probe_selection_to_provider, compile_provider_probe_candidate,
         endpoint::build_probe_url, run_protocol_compatibility_probe, ProbeCandidate,
-        ProbeReadiness, ProbeTargetKey, ProtocolCompatibilityRecord, TransportKind,
+        ProbeReadiness, ProbeTargetKey, ProtocolCompatibilityProbeResult,
+        ProtocolCompatibilityRecord, TransportKind,
     },
+    provider::Provider,
+    services::ProviderService,
     store::AppState,
 };
 
@@ -25,6 +30,24 @@ pub struct ProtocolCompatibilityProbeRequest {
     pub is_full_url: Option<bool>,
     pub configured_wire_api: Option<String>,
     pub authentication_kind: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexProviderProtocolPreflightOutcome {
+    pub provider: Provider,
+    pub record: ProtocolCompatibilityRecord,
+    pub protocol_applied: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexProviderProtocolSaveOutcome {
+    pub provider: Provider,
+    pub record: Option<ProtocolCompatibilityRecord>,
+    pub protocol_applied: bool,
+    pub probe_error: Option<String>,
+    pub saved: bool,
 }
 
 #[tauri::command]
@@ -60,18 +83,112 @@ pub async fn probe_codex_protocol_compatibility(
     .with_bearer_token(api_key)
     .map_err(|_| "apiKey cannot be represented as an HTTP authorization header".to_string())?;
 
+    run_candidate_and_persist(state.inner(), candidate).await
+}
+
+#[tauri::command]
+pub async fn preflight_codex_provider_protocol_compatibility(
+    state: State<'_, AppState>,
+    provider: Provider,
+) -> Result<CodexProviderProtocolPreflightOutcome, String> {
+    run_provider_preflight(state.inner(), provider).await
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn save_codex_provider_with_protocol_preflight(
+    state: State<'_, AppState>,
+    provider: Provider,
+    originalId: Option<String>,
+    addToLive: Option<bool>,
+) -> Result<CodexProviderProtocolSaveOutcome, String> {
+    let (provider, record, protocol_applied, probe_error) =
+        match run_provider_preflight(state.inner(), provider.clone()).await {
+            Ok(outcome) => (
+                outcome.provider,
+                Some(outcome.record),
+                outcome.protocol_applied,
+                None,
+            ),
+            Err(error) => (provider, None, false, Some(error)),
+        };
+
+    if let Some(original_id) = originalId.as_deref() {
+        ProviderService::update(
+            state.inner(),
+            AppType::Codex,
+            Some(original_id),
+            provider.clone(),
+        )
+    } else {
+        ProviderService::add(
+            state.inner(),
+            AppType::Codex,
+            provider.clone(),
+            addToLive.unwrap_or(true),
+        )
+    }
+    .map_err(|error| error.to_string())?;
+
+    Ok(CodexProviderProtocolSaveOutcome {
+        provider,
+        record,
+        protocol_applied,
+        probe_error,
+        saved: true,
+    })
+}
+
+async fn run_provider_preflight(
+    state: &AppState,
+    mut provider: Provider,
+) -> Result<CodexProviderProtocolPreflightOutcome, String> {
+    let candidate = compile_provider_probe_candidate(&provider)?;
+    let record = run_candidate_and_persist(state, candidate).await?;
+    let protocol_applied = apply_probe_selection_to_provider(&mut provider, &record.result)?;
+    Ok(CodexProviderProtocolPreflightOutcome {
+        provider,
+        record,
+        protocol_applied,
+    })
+}
+
+async fn run_candidate_and_persist(
+    state: &AppState,
+    candidate: ProbeCandidate,
+) -> Result<ProtocolCompatibilityRecord, String> {
     let client = crate::proxy::http_client::build_protocol_probe_client()?;
-    let result = run_protocol_compatibility_probe(candidate, &client).await;
-    let selected_transport = result.selected_transport.unwrap_or(configured_hint);
-    let effective_endpoint = build_probe_url(base_url, selected_transport, is_full_url)?;
+    let result = run_protocol_compatibility_probe(candidate.clone(), &client).await;
+    let record = build_record_for_result(&candidate, result)?;
+    state
+        .db
+        .save_protocol_compatibility_result(&record)
+        .map_err(|error| error.to_string())?;
+    Ok(record)
+}
+
+fn build_record_for_result(
+    candidate: &ProbeCandidate,
+    result: ProtocolCompatibilityProbeResult,
+) -> Result<ProtocolCompatibilityRecord, String> {
+    let selected_transport = result.selected_transport.unwrap_or(candidate.transport);
+    let effective_endpoint = build_probe_url(
+        &candidate.canonical_endpoint(),
+        selected_transport,
+        candidate.is_full_url(),
+    )?;
+    let provider_id = candidate
+        .provider_id
+        .as_deref()
+        .ok_or_else(|| "providerId is required before persisting probe evidence".to_string())?;
     let target = ProbeTargetKey::new(
         provider_id,
-        request.route_id.as_deref(),
-        public_model,
-        upstream_model,
+        candidate.route_id.as_deref(),
+        &candidate.public_model,
+        &candidate.upstream_model,
         selected_transport,
         &effective_endpoint,
-        authentication_kind,
+        &candidate.authentication_kind,
     )
     .map_err(|_| "effective probe endpoint is invalid".to_string())?;
     let tested_at = Utc::now().timestamp();
@@ -80,12 +197,12 @@ pub async fn probe_codex_protocol_compatibility(
     } else {
         UNVERIFIED_TTL_SECONDS
     };
-    let record = ProtocolCompatibilityRecord::new(target, result, tested_at, tested_at + ttl);
-    state
-        .db
-        .save_protocol_compatibility_result(&record)
-        .map_err(|error| error.to_string())?;
-    Ok(record)
+    Ok(ProtocolCompatibilityRecord::new(
+        target,
+        result,
+        tested_at,
+        tested_at + ttl,
+    ))
 }
 
 fn required<'a>(field: &str, value: &'a str) -> Result<&'a str, String> {
