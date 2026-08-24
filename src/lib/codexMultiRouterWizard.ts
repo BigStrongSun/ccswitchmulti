@@ -1192,6 +1192,16 @@ export function initialWizardCatalogModelOrder(
       : null;
   }
 
+  const enabledRoutes = (routing.routes ?? []).filter(
+    (route) => route.enabled !== false,
+  );
+  if (
+    enabledRoutes.length > 0 &&
+    enabledRoutes.every((route) => route.modelSelection?.mode !== "include")
+  ) {
+    return null;
+  }
+
   const sources = resolveWizardModelNameCollisions(sourceProviders);
   const sourceById = new Map(
     sources.map((provider) => [provider.id, provider]),

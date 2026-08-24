@@ -756,7 +756,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     expect(savedRoute).not.toHaveProperty("capabilities");
   });
 
-  it("shows Provider models excluded by a fixed route selection", () => {
+  it("lets a fixed route switch back to automatic Provider following immediately", async () => {
     const deepseek: Provider = {
       id: "codex-deepseek-vision",
       name: "DeepSeek Responses",
@@ -815,6 +815,16 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
         "已接入 2/3 个模型；尚未接入：deepseek-v4-flash-vision-exp",
       ),
     ).toBeInTheDocument();
+
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "改为自动跟随全部模型" }));
+
+    await waitFor(() => expect(providersApi.update).toHaveBeenCalledOnce());
+    const savedPlan = vi.mocked(providersApi.update).mock.calls[0]?.[0];
+    expect(
+      savedPlan.settingsConfig?.codexRouting?.routes?.[0]?.modelSelection,
+    ).toEqual({ mode: "all" });
   });
 
   it("does not block saving an inactive route whose fixed model selection is empty", async () => {

@@ -116,7 +116,7 @@ describe("buildCodexMultiRouterWizardPlan subagent version", () => {
     ]);
   });
 
-  it("derives schema-v2 all-selection from current Provider facts instead of stale Router catalog", () => {
+  it("keeps schema-v2 all-selection in automatic-follow mode instead of freezing Provider facts", () => {
     const source: Provider = {
       ...deepseekSource,
       settingsConfig: {
@@ -157,11 +157,7 @@ describe("buildCodexMultiRouterWizardPlan subagent version", () => {
     };
 
     const order = initialWizardCatalogModelOrder(existingPlan, [source]);
-    expect(order).toEqual([
-      "deepseek-v4-flash",
-      "deepseek-v4-pro",
-      "deepseek-v4-vision",
-    ]);
+    expect(order).toBeNull();
     const { plan } = buildCodexMultiRouterWizardPlan(
       [source, existingPlan],
       [source],

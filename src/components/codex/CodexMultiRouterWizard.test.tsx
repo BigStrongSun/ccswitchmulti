@@ -412,4 +412,74 @@ describe("CodexMultiRouterWizard", () => {
     ).not.toBeInTheDocument();
     expect(screen.queryByText("must-not-render")).not.toBeInTheDocument();
   });
+
+  it("updates the open wizard from the latest Provider model catalog", () => {
+    const source: Provider = {
+      id: "codex-deepseek",
+      name: "DeepSeek Responses",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: {
+          models: [
+            { model: "deepseek-v4-flash", contextWindow: 128000 },
+            { model: "deepseek-v4-pro", contextWindow: 128000 },
+          ],
+        },
+      },
+    };
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const wizard = (providers: Provider[]) => (
+      <QueryClientProvider client={queryClient}>
+        <CodexMultiRouterWizard
+          open
+          providers={providers}
+          mode="create"
+          onOpenChange={vi.fn()}
+          onCreateProvider={vi.fn()}
+          onOpenProviderConfig={vi.fn()}
+          onOpenWorkspace={vi.fn()}
+          onEnablePlan={vi.fn()}
+        />
+      </QueryClientProvider>
+    );
+    const view = render(wizard([source]));
+
+    fireEvent.click(screen.getByRole("button", { name: "选择模型并预览路由" }));
+    expect(
+      screen.queryByRole("checkbox", {
+        name: "保留 deepseek-v4-flash-vision-exp",
+      }),
+    ).not.toBeInTheDocument();
+
+    view.rerender(
+      wizard([
+        {
+          ...source,
+          settingsConfig: {
+            ...source.settingsConfig,
+            modelCatalog: {
+              models: [
+                { model: "deepseek-v4-flash", contextWindow: 1000000 },
+                {
+                  model: "deepseek-v4-flash-vision-exp",
+                  contextWindow: 1000000,
+                  inputModalities: ["text", "image"],
+                },
+                { model: "deepseek-v4-pro", contextWindow: 1000000 },
+              ],
+            },
+          },
+        },
+      ]),
+    );
+
+    expect(
+      screen.getByRole("checkbox", {
+        name: "保留 deepseek-v4-flash-vision-exp",
+      }),
+    ).toBeChecked();
+    expect(screen.getAllByText("1000000 ctx")).toHaveLength(3);
+  });
 });

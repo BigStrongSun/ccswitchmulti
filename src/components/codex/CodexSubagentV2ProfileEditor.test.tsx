@@ -809,7 +809,7 @@ async function runFocusedV2Mutation(operation: FocusedV2Mutation) {
       name:
         operation === "initialize"
           ? "初始化 V2 子 Agent 能力配置"
-          : "添加第三方可配置模型",
+          : "修复缺失的模型档案",
     }),
   );
 }
@@ -834,7 +834,7 @@ function appliedVerification(overrides: Record<string, unknown> = {}) {
 function focusedMutationSuccessPattern(operation: FocusedV2Mutation) {
   return operation === "initialize"
     ? /V2 子 Agent 能力配置已初始化/
-    : /已添加第三方可配置模型/;
+    : /已修复缺失的模型档案/;
 }
 
 async function chooseOption(
@@ -1778,7 +1778,7 @@ describe("Codex Sub-Agent V2 backend-owned catalog reconciliation", () => {
 
     await user.click(
       await screen.findByRole("button", {
-        name: "添加第三方可配置模型",
+        name: "修复缺失的模型档案",
       }),
     );
 
@@ -2345,11 +2345,11 @@ describe("Codex Sub-Agent V2 searchable Accordion workspace", () => {
 
     expect(
       screen.getByText(
-        "只加入当前可路由的第三方模型；新模型默认关闭，已有问卷和手工设置不会被覆盖。",
+        "正常情况下，新模型会在 Provider 保存时自动加入并默认关闭；这里只用于修复历史配置或异常中断造成的缺失，已有问卷和手工设置不会被覆盖。",
       ),
     ).toBeVisible();
     await user.click(
-      screen.getByRole("button", { name: "添加第三方可配置模型" }),
+      screen.getByRole("button", { name: "修复缺失的模型档案" }),
     );
 
     await waitFor(() =>
@@ -2364,7 +2364,7 @@ describe("Codex Sub-Agent V2 searchable Accordion workspace", () => {
     );
     expect(
       await screen.findByText(
-        "已添加第三方可配置模型；已有设置保持不变；数据库与 Codex Agent 文件均已写入并回读验证；重启 Codex/app-server 并新建会话后生效",
+        "已修复缺失的模型档案；已有设置保持不变；数据库与 Codex Agent 文件均已写入并回读验证；重启 Codex/app-server 并新建会话后生效",
       ),
     ).toBeVisible();
   });
@@ -2375,12 +2375,12 @@ describe("Codex Sub-Agent V2 searchable Accordion workspace", () => {
     await renderWorkspace();
 
     await user.click(
-      screen.getByRole("button", { name: "添加第三方可配置模型" }),
+      screen.getByRole("button", { name: "修复缺失的模型档案" }),
     );
 
     expect(
       await screen.findByText(
-        "已添加第三方可配置模型；已有设置保持不变；数据库已保存；当前方案未激活，因此未改写 Codex Agent 文件",
+        "已修复缺失的模型档案；已有设置保持不变；数据库已保存；当前方案未激活，因此未改写 Codex Agent 文件",
       ),
     ).toBeVisible();
     expect(screen.queryByText(/Codex Agent 文件均已写入并回读验证/)).toBeNull();

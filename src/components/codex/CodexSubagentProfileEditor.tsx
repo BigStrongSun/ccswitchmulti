@@ -703,7 +703,7 @@ export function CodexSubagentProfileEditor({
       await adoptBackendProvider(nextProvider);
       const actionMessage =
         action === "sync_catalog"
-          ? "已添加第三方可配置模型；已有设置保持不变"
+          ? "已修复缺失的模型档案；已有设置保持不变"
           : action === "remove_all_invalid"
             ? "无效能力配置已删除"
             : action === "prune_unroutable"
@@ -1056,10 +1056,11 @@ export function CodexSubagentProfileEditor({
               onClick={() => reconcile("sync_catalog", draft)}
             >
               <Database aria-hidden="true" className="h-4 w-4" />
-              添加第三方可配置模型
+              修复缺失的模型档案
             </Button>
             <p className="max-w-2xl text-xs leading-5 text-cyan-900/75 dark:text-cyan-100/75">
-              只加入当前可路由的第三方模型；新模型默认关闭，已有问卷和手工设置不会被覆盖。
+              正常情况下，新模型会在 Provider
+              保存时自动加入并默认关闭；这里只用于修复历史配置或异常中断造成的缺失，已有问卷和手工设置不会被覆盖。
             </p>
           </div>
           {reconciliableProfileCount > 0 ? (

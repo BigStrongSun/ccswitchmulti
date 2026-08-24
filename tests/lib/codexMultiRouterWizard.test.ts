@@ -14,6 +14,7 @@ import {
   inferCodexOfficialAuth,
   inferWizardApiFormat,
   inferWizardCacheConfig,
+  initialWizardCatalogModelOrder,
   isWizardCatalogOnlyModelSource,
   isWizardCodexOAuthSource,
   mergeFetchedModelsIntoWizardProvider,
@@ -33,6 +34,40 @@ function provider(overrides: Partial<Provider>): Provider {
 }
 
 describe("codexMultiRouterWizard helpers", () => {
+  it("keeps an existing all-model route in automatic-follow mode", () => {
+    const source = provider({
+      id: "deepseek",
+      settingsConfig: {
+        modelCatalog: {
+          models: [
+            { model: "deepseek-v4-flash" },
+            { model: "deepseek-v4-pro" },
+          ],
+        },
+      },
+    });
+    const plan = provider({
+      id: "router",
+      settingsConfig: {
+        codexRouting: {
+          schemaVersion: 2,
+          enabled: true,
+          routes: [
+            {
+              id: "deepseek-route",
+              enabled: true,
+              targetProviderId: source.id,
+              modelSelection: { mode: "all" },
+              authPolicy: { source: "provider_config" },
+            },
+          ],
+        },
+      },
+    });
+
+    expect(initialWizardCatalogModelOrder(plan, [source])).toBeNull();
+  });
+
   it("忽略历史目录中的空值和非对象条目，保留有效模型", () => {
     const source = provider({
       settingsConfig: {

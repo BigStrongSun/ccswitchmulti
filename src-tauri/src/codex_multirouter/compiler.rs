@@ -232,12 +232,22 @@ pub fn compile_v2(
         .map(|model| model.visible_model.clone())
         .collect::<Vec<_>>();
     let visible_model_set = visible_models.iter().collect::<HashSet<_>>();
-    let spawn_agent_models = plan
+    let mut spawn_agent_models = plan
         .spawn_agent_models
         .iter()
         .filter(|model| visible_model_set.contains(model))
         .cloned()
         .collect::<Vec<_>>();
+    // spawnAgentModels 只表达用户的优先顺序，不是另一份模型白名单。Provider
+    // 新增模型后，在保留有效显式顺序的前提下按当前可路由目录补满 Codex 的前五窗口。
+    for model in &visible_models {
+        if spawn_agent_models.len() >= 5 {
+            break;
+        }
+        if !spawn_agent_models.contains(model) {
+            spawn_agent_models.push(model.clone());
+        }
+    }
     let dependency_fingerprint = dependency_fingerprint(plan, providers, &model_catalog)?;
 
     Ok(CompiledCodexRoutingPlan {
@@ -940,7 +950,7 @@ mod tests {
         plan.spawn_agent_models = vec!["qwen3.9".to_string(), "removed".to_string()];
         let compiled = compile(&plan, [provider]);
 
-        assert_eq!(compiled.spawn_agent_models, vec!["qwen3.9"]);
+        assert_eq!(compiled.spawn_agent_models, vec!["qwen3.9", "qwen3.8"]);
     }
 
     #[test]

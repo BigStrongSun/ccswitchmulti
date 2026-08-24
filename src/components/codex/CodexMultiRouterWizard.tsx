@@ -895,26 +895,19 @@ export function CodexMultiRouterWizard({
     });
   }, [existingPlan, open, planId, providerModelSources, resolvedMode]);
 
-  // 向导打开后只同步 source 的增删；已存在 source 必须保留向导草稿。
-  // 父层 provider 查询可能在用户手动选择协议、刷新模型或处理别名后完成 refetch，
-  // 如果优先采用 refetch 快照，就会把这些尚未发布的草稿改动还原成数据库旧值。
-  // provider 配置页会先关闭向导，重新打开时由初始化 effect 读取最新数据库配置，
-  // 因此打开期间不需要用父层快照覆盖当前草稿。
+  // Provider 是模型事实的唯一来源。向导打开期间也必须采用父层查询的最新快照，
+  // 否则 Provider 新增模型、上下文或能力变化只会在关闭并重开向导后出现。
+  // 向导自己的协议探测结果保存在 connectivityResults，模型刷新又会先持久化 Provider，
+  // 因此这里不需要为完整 Provider 对象维护第二份长期草稿。
   useEffect(() => {
     if (!open || !initializedOpenRef.current) return;
     setSavedPlan((currentPlan) => existingPlan ?? currentPlan);
-    setDraftSources((currentSources) => {
+    setDraftSources(() => {
       const nextSourceById = new Map(
         providerModelSources.map((provider) => [provider.id, provider]),
       );
-      const currentById = new Map(
-        currentSources.map((provider) => [provider.id, provider]),
-      );
       return selectedSourceIds
-        .map(
-          (providerId) =>
-            currentById.get(providerId) ?? nextSourceById.get(providerId),
-        )
+        .map((providerId) => nextSourceById.get(providerId))
         .filter((provider): provider is Provider => Boolean(provider));
     });
     setSelectedSourceIds((currentIds) => {
@@ -2099,23 +2092,18 @@ export function CodexMultiRouterWizard({
             {currentStep.key === "review" && (
               <div className="space-y-4">
                 <div className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
-                  这里决定各 route 跟随 Provider
-                  的全部模型，还是只保留显式白名单。
-                  取消勾选会把旧模型或不想暴露的模型从最终路由里剔除。V4 Pro /
-                  Flash 子 Agent
+                  默认自动跟随 Provider 的全部可用模型；Provider
+                  新增模型、上下文和能力后会直接更新。只有取消某个模型时才进入固定筛选，
+                  固定筛选不会自动接收后续新模型。V4 Pro / Flash 子 Agent
                   角色会从可路由目录自动注册，无需在向导中手工选模型。
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
                   <Button
                     type="button"
                     variant="outline"
-                    onClick={() =>
-                      setCatalogModelOrder(
-                        availableCatalogModels.map((model) => model.model),
-                      )
-                    }
+                    onClick={() => setCatalogModelOrder(null)}
                   >
-                    全部保留
+                    自动跟随全部模型
                   </Button>
                   <Button
                     type="button"
@@ -2130,6 +2118,17 @@ export function CodexMultiRouterWizard({
                   <Badge variant="outline">
                     已保留 {activeCatalogModelOrder.length} /{" "}
                     {availableCatalogModels.length}
+                  </Badge>
+                  <Badge
+                    className={
+                      catalogModelOrder === null
+                        ? "border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-500/50 dark:bg-emerald-500/10 dark:text-emerald-100"
+                        : "border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-500/50 dark:bg-amber-500/10 dark:text-amber-100"
+                    }
+                  >
+                    {catalogModelOrder === null
+                      ? "自动跟随 Provider"
+                      : "固定模型筛选"}
                   </Badge>
                 </div>
                 <div className="max-h-[min(50vh,34rem)] overflow-auto rounded-lg border">

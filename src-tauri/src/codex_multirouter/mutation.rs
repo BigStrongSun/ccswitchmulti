@@ -1,8 +1,8 @@
 use super::active_codex_router_id;
 use super::compiler::{compile_v2, compile_v2_strict};
 use super::projection::{
-    ensure_projection_with_publisher, CodexRoutingProjectionArtifact, CodexRoutingProjectionStatus,
-    ProjectionReadBack,
+    build_projection_artifact, ensure_projection_with_publisher, CodexRoutingProjectionArtifact,
+    CodexRoutingProjectionStatus, ProjectionReadBack,
 };
 use super::schema::CodexRoutingDocument;
 use crate::database::Database;
@@ -32,6 +32,11 @@ struct PreparedRouterDeletion {
     disabled: bool,
 }
 
+struct AffectedRouterIds {
+    projection: Vec<String>,
+    subagent_profiles: Vec<String>,
+}
+
 pub fn apply_codex_provider_mutation(
     db: &Database,
     provider: Provider,
@@ -55,11 +60,18 @@ where
     let affected_router_ids = validate_and_collect_affected_router_ids(db, &provider)?;
     db.save_provider("codex", &provider)?;
 
+    // Router 的 V2 profile 是用户可编辑策略，但候选成员来自 Provider 目录。
+    // Provider 新增可路由第三方模型时自动补一个关闭的 profile，保留已有问卷和覆盖；
+    // 模型移除时不静默删除用户配置，仍由 unroutable 状态显式呈现。
+    for router_id in &affected_router_ids.subagent_profiles {
+        sync_router_subagent_profiles_from_provider_catalog(db, router_id)?;
+    }
+
     let active_router_id = active_codex_router_id(db)?;
     let publish_without_active_router =
-        active_router_id.is_none() && affected_router_ids.len() == 1;
-    let mut projections = Vec::with_capacity(affected_router_ids.len());
-    for router_id in affected_router_ids {
+        active_router_id.is_none() && affected_router_ids.projection.len() == 1;
+    let mut projections = Vec::with_capacity(affected_router_ids.projection.len());
+    for router_id in affected_router_ids.projection {
         let owns_shared_projection = active_router_id.as_deref() == Some(router_id.as_str())
             || publish_without_active_router;
         if !owns_shared_projection {
@@ -73,6 +85,35 @@ where
         )?);
     }
     Ok(CodexProviderMutationOutcome { projections })
+}
+
+fn sync_router_subagent_profiles_from_provider_catalog(
+    db: &Database,
+    router_id: &str,
+) -> Result<(), AppError> {
+    let mut router = db.get_provider_by_id(router_id, "codex")?.ok_or_else(|| {
+        AppError::Message(format!("Codex MultiRouter provider not found: {router_id}"))
+    })?;
+    let Some(current) = router
+        .settings_config
+        .pointer("/codexRouting/subagentV2")
+        .cloned()
+    else {
+        return Ok(());
+    };
+    let effective = build_projection_artifact(db, router_id)?.projection_settings;
+    let provider_context = crate::codex_config::codex_provider_classification_context(db)?;
+    let reconciled = crate::codex_config::reconcile_codex_subagent_v2_for_candidate(
+        &effective,
+        crate::codex_config::CodexSubagentV2ReconcileAction::SyncCatalog,
+        Some(&current),
+        Some(&provider_context),
+    )?;
+    if reconciled == current {
+        return Ok(());
+    }
+    router.settings_config["codexRouting"]["subagentV2"] = reconciled;
+    db.save_provider("codex", &router)
 }
 
 fn remove_schema_v2_router_derived_catalog(provider: &mut Provider) {
@@ -97,14 +138,15 @@ fn remove_derived_catalog_fields(settings_config: &mut serde_json::Value) {
 fn validate_and_collect_affected_router_ids(
     db: &Database,
     candidate: &Provider,
-) -> Result<Vec<String>, AppError> {
+) -> Result<AffectedRouterIds, AppError> {
     let mut providers = db
         .get_all_providers("codex")?
         .into_iter()
         .collect::<HashMap<_, _>>();
     providers.insert(candidate.id.clone(), candidate.clone());
 
-    let mut affected = Vec::new();
+    let mut projection = Vec::new();
+    let mut subagent_profiles = Vec::new();
     for router in providers.values() {
         let Some(routing) = router.settings_config.get("codexRouting") else {
             continue;
@@ -130,6 +172,9 @@ fn validate_and_collect_affected_router_ids(
         let CodexRoutingDocument::V2(plan) = document else {
             continue;
         };
+        if routing.get("subagentV2").is_some() {
+            subagent_profiles.push(router.id.clone());
+        }
         if !plan.enabled {
             continue;
         }
@@ -141,10 +186,14 @@ fn validate_and_collect_affected_router_ids(
         compile_result.map_err(|error| {
             AppError::InvalidInput(format!("{}: {}", error.code, error.message))
         })?;
-        affected.push(router.id.clone());
+        projection.push(router.id.clone());
     }
-    affected.sort();
-    Ok(affected)
+    projection.sort();
+    subagent_profiles.sort();
+    Ok(AffectedRouterIds {
+        projection,
+        subagent_profiles,
+    })
 }
 
 pub fn apply_codex_provider_delete_with_hooks<R, F>(
@@ -503,6 +552,86 @@ mod tests {
         assert_eq!(model["reasoning"]["defaultEffort"], "max");
         assert_eq!(model["codexUltra"]["providerEffort"], "max");
         assert_eq!(model["apiFormat"], "openai_responses");
+    }
+
+    #[test]
+    fn provider_model_addition_automatically_adds_a_disabled_v2_subagent_profile() {
+        let db = Database::memory().expect("memory db");
+        db.save_provider("codex", &target("openai_responses"))
+            .expect("seed target");
+        let mut router = router("router-a", "qwen");
+        router.settings_config["codexRouting"]["subagentVersion"] = json!("v2");
+        router.settings_config["codexRouting"]["subagentV2"] = json!({
+            "schemaVersion": 2,
+            "selectionPolicy": "balanced",
+            "profiles": {
+                "qwen3.8": {
+                    "model": "qwen3.8",
+                    "enabled": false,
+                    "questionnaire": {
+                        "taskStrengths": ["repository_exploration"],
+                        "optimization": "balanced",
+                        "writeScope": "read_only",
+                        "preference": "eligible"
+                    },
+                    "reasoning": {"policy": "delegated"}
+                }
+            }
+        });
+        db.save_provider("codex", &router).expect("seed router");
+
+        let mut updated = target("openai_responses");
+        updated.settings_config["modelCatalog"]["models"] =
+            json!([{"model": "qwen3.8"}, {"model": "qwen3.9"}]);
+        apply_codex_provider_mutation_with_publisher(&db, updated, |artifact| {
+            Ok(ProjectionReadBack::verified(
+                artifact.dependency_fingerprint.clone(),
+            ))
+        })
+        .expect("apply Provider model addition");
+
+        let saved = db
+            .get_provider_by_id("router-a", "codex")
+            .expect("read router")
+            .expect("router exists");
+        assert_eq!(
+            saved.settings_config["codexRouting"]["subagentV2"]["profiles"]["qwen3.9"]["enabled"],
+            false
+        );
+    }
+
+    #[test]
+    fn provider_model_addition_syncs_profiles_for_a_disabled_router_without_publishing() {
+        let db = Database::memory().expect("memory db");
+        db.save_provider("codex", &target("openai_responses"))
+            .expect("seed target");
+        let mut router = router("router-disabled", "qwen");
+        router.settings_config["codexRouting"]["enabled"] = json!(false);
+        router.settings_config["codexRouting"]["subagentVersion"] = json!("v2");
+        router.settings_config["codexRouting"]["subagentV2"] = json!({
+            "schemaVersion": 2,
+            "selectionPolicy": "balanced",
+            "profiles": {}
+        });
+        db.save_provider("codex", &router)
+            .expect("seed disabled router");
+
+        let mut updated = target("openai_responses");
+        updated.settings_config["modelCatalog"]["models"] =
+            json!([{"model": "qwen3.8"}, {"model": "qwen3.9"}]);
+        apply_codex_provider_mutation_with_publisher(&db, updated, |_| {
+            panic!("a disabled Router must not publish a live projection")
+        })
+        .expect("sync disabled Router profiles");
+
+        let saved = db
+            .get_provider_by_id("router-disabled", "codex")
+            .expect("read router")
+            .expect("router exists");
+        assert_eq!(
+            saved.settings_config["codexRouting"]["subagentV2"]["profiles"]["qwen3.9"]["enabled"],
+            false
+        );
     }
 
     #[test]

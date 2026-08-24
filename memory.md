@@ -4326,3 +4326,11 @@ supported in one streaming turn`。
 - schema-v2 Router 重新保存时，前后端都会移除遗留 `modelCatalog`/`model_catalog`，因此旧副本不只是“失去读取权”，还会在正常编辑生命周期内从数据库收敛掉；普通 Provider 和 legacy Router 的模型目录不受影响。
 - 模式语义：`modelSelection.mode=all` 自动跟随 Provider 模型增删/启停；`mode=include` 是 Router 明确白名单，不因 Provider 新增模型而扩容；`spawnAgentModels` 同样是独立策略，但最终投影会过滤为当前可路由模型。模型排序编辑器直接把 `sortIndex` 写回目标 Provider，不在 Router 维护第二份顺序。
 - TDD：后端“旧 Router 排序覆盖 Provider”“schema-v2 保存仍保留旧目录”与前端“旧 Router 目录覆盖排序/候选、猜测 alias、保存仍保留旧目录”均先 RED，再修到 GREEN。最终验证：Rust `3338 passed / 5 ignored`，前端 `146 files / 1184 tests`，TypeScript typecheck、涉及文件 Prettier/rustfmt、严格 UTF-8 无 BOM 与 `git diff --check` 全部通过。全局 `cargo fmt --check` 仍会报告主线上预设目录提交的既有格式差异，本次未改动那些文件。
+
+## 2026-08-24 MultiRouter 双前端与 Sub-Agent 自动跟随补全
+
+- MultiRouter 工作台和创建/编辑向导过去并未共享完整的实时 Provider 语义：工作台虽然能看到 Provider 新目录，但固定 `include` 规则缺少直接恢复自动跟随的入口；向导打开期间又优先保留完整 `draftSources`，Provider 查询刷新后仍显示旧模型、上下文和能力。本次向导打开时始终采用最新 Provider 快照，并明确区分“自动跟随 Provider”和“固定模型筛选”；默认/全部模型保存为 `mode=all`，只有用户取消模型才保存 `mode=include`。工作台的固定筛选详情会显示当前接入数、尚未接入模型，并可直接改为 `mode=all`。
+- `2/3 个模型尚未接入` 的准确含义是 Route 当前为 `mode=include` 固定白名单，只路由 3 个 Provider 模型中的 2 个，不是 Provider 列表未刷新。`mode=all` 才会在 Provider 增删、启停或能力变化后自动采用当前目录；显式 `include` 继续保持用户路由边界，不能擅自扩容。新向导不会再把“当前恰好全选”误存成固定白名单。
+- Sub-Agent 同步不再把 `spawnAgentModels` 当第二份模型白名单：它只保存用户优先顺序，Rust compiler 保留仍可路由的显式顺序后，从 Provider 实时目录自动补满 Codex 前五候选窗口。Provider 保存时还会自动 reconcile 所有引用它的 V2 Router profile，新第三方模型生成默认关闭档案，已有问卷、覆盖与顺序不变；删除模型保留为 `unroutable`，不会静默删除用户配置。
+- 补审又发现停用 Router 原先被投影 affected-list 过滤，导致其 V2 Agent 档案不跟随 Provider。现在“需要 live 投影的启用 Router”和“需要数据库档案同步的所有 Router”使用两份集合：停用 Router 会更新档案但绝不发布当前运行文件；手工“同步目录”按钮降级为历史/异常中断后的修复入口。
+- 检索交叉验证继续采用 Codex 内置搜索和 Matrix WebSearch 两条独立链；TanStack Query 官方文档确认 `invalidateQueries` 会使匹配查询 stale，并重取 active observer。具体缺陷和行为结论以本地源码及 RED/GREEN 回归为准。最终验证：Rust `3349 passed / 0 failed / 6 ignored`；Vitest `146 files / 1197 tests`；`pnpm typecheck`、`pnpm build:renderer`、涉及文件 Prettier/rustfmt、严格 UTF-8 无 BOM 与 `git diff --check` 全部通过。本轮未发布、安装、重启或替换运行中的 CCSM。

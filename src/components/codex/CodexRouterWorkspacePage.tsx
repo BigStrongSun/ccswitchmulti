@@ -4662,6 +4662,18 @@ function RoutesTab({
             providersById={providersById}
             onOpenRoutePicker={onOpenRoutePicker}
             onEditProvider={onEditProvider}
+            onFollowAllModels={async () => {
+              if (!selectedPlan || !selectedRoute) return;
+              const routes = readCodexRouting(selectedPlan)?.routes ?? [];
+              await onSaveRoutes(
+                selectedPlan,
+                routes.map((route, index) =>
+                  index === selectedRoute.index
+                    ? { ...route, modelSelection: { mode: "all" } }
+                    : route,
+                ),
+              );
+            }}
           />
         </section>
       </div>
@@ -8829,12 +8841,14 @@ function RouteDetailPanel({
   providersById,
   onOpenRoutePicker,
   onEditProvider,
+  onFollowAllModels,
 }: {
   selectedRoute?: RouteEntry;
   selectedPlan: Provider | null;
   providersById: Map<string, Provider>;
   onOpenRoutePicker: (provider?: Provider | null) => void;
   onEditProvider: (provider: Provider) => void;
+  onFollowAllModels: () => Promise<void>;
 }) {
   if (!selectedRoute) {
     return (
@@ -8913,6 +8927,15 @@ function RouteDetailPanel({
         />
       </div>
       <div className="mt-3 grid gap-2">
+        {route.modelSelection?.mode === "include" ? (
+          <Button
+            className="justify-start gap-2 bg-emerald-600 hover:bg-emerald-500"
+            onClick={() => void onFollowAllModels()}
+          >
+            <RefreshCw className="h-4 w-4" />
+            改为自动跟随全部模型
+          </Button>
+        ) : null}
         {targetProvider ? (
           <Button
             variant="outline"
