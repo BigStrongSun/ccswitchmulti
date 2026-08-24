@@ -500,6 +500,9 @@ pub fn run() {
             // 也能向前端推送 `usage-log-recorded`。
             // 放在日志系统初始化之后，确保 init 的日志能正常输出。
             usage_events::init(app.handle().clone());
+            // 恢复结果先持久化、再发事件；初始化句柄后，启动前后所有写入
+            // 都可以通知已准备好的 webview，错过事件时仍可用查询命令补拉。
+            crate::services::recovery_outcome::init(app.handle().clone());
 
             if let Some(previous) = app_exit_monitor::record_startup() {
                 log::warn!(
@@ -1428,6 +1431,7 @@ pub fn run() {
             commands::get_init_error,
             commands::get_migration_result,
             commands::get_skills_migration_result,
+            commands::get_last_recovery_outcome,
             commands::get_app_config_path,
             commands::open_app_config_folder,
             commands::get_claude_common_config_snippet,

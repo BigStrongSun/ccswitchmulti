@@ -14,6 +14,9 @@ use crate::proxy::{external_openai_api, server::ProxyServer};
 use crate::services::provider::{
     build_effective_settings_with_common_config, write_live_with_common_config,
 };
+use crate::services::recovery_outcome::{
+    record_recovery_outcome, RecoveryOutcome, RecoveryOutcomeKind,
+};
 use serde_json::{json, Map, Value};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -25,6 +28,34 @@ use toml_edit::{DocumentMut, Item, TableLike};
 const PROXY_TOKEN_PLACEHOLDER: &str = "PROXY_MANAGED";
 /// Codex 接管时暴露给官方客户端的本地代理入口名称。
 const CODEX_LOCAL_PROXY_PROVIDER_NAME: &str = "CCSwitch MultiRouter";
+
+fn persist_recovery_outcome(outcome: RecoveryOutcome) {
+    if let Err(error) = record_recovery_outcome(outcome) {
+        log::warn!("保存配置恢复结果失败: {error}");
+    }
+}
+
+fn record_app_recovery_outcome(
+    app_type: &AppType,
+    kind: RecoveryOutcomeKind,
+    kept_fields: &[&str],
+    lost_fields: &[&str],
+    next_step: Option<&str>,
+    details: Option<String>,
+) {
+    let mut outcome = RecoveryOutcome::for_app(kind, app_type.as_str());
+    outcome.kept_fields = kept_fields
+        .iter()
+        .map(|field| (*field).to_string())
+        .collect();
+    outcome.lost_fields = lost_fields
+        .iter()
+        .map(|field| (*field).to_string())
+        .collect();
+    outcome.next_step = next_step.map(str::to_string);
+    outcome.details = details;
+    persist_recovery_outcome(outcome);
+}
 
 fn should_run_codex_post_takeover(app_type: &AppType) -> bool {
     matches!(app_type, AppType::Codex)
@@ -2163,6 +2194,14 @@ impl ProxyService {
                 .restore_live_config_for_app_with_fallback(&app_type)
                 .await
             {
+                record_app_recovery_outcome(
+                    &app_type,
+                    RecoveryOutcomeKind::UnrecoverableUserTables,
+                    &[],
+                    &["liveConfig"],
+                    Some("openLogsOrRestoreUserBackup"),
+                    Some(e.clone()),
+                );
                 errors.push(e);
             }
         }
@@ -2208,6 +2247,14 @@ impl ProxyService {
                 );
             } else {
                 self.write_live_config_for_app(app_type, &config)?;
+                record_app_recovery_outcome(
+                    app_type,
+                    RecoveryOutcomeKind::HealthyBackupRestored,
+                    &["liveConfig"],
+                    &[],
+                    None,
+                    None,
+                );
                 log::info!("{app_type_str} Live 配置已从备份恢复");
                 return Ok(());
             }
@@ -2221,6 +2268,14 @@ impl ProxyService {
         // 2.1) 优先从 SSOT（当前供应商）重建 Live（比"清理字段"更可用）
         match self.restore_live_from_ssot_for_app(app_type) {
             Ok(true) => {
+                record_app_recovery_outcome(
+                    app_type,
+                    RecoveryOutcomeKind::LivePreservedProviderRepaired,
+                    &["provider"],
+                    &[],
+                    None,
+                    None,
+                );
                 log::info!("{app_type_str} Live 配置已从 SSOT 恢复（无备份兜底）");
                 return Ok(());
             }
@@ -2238,6 +2293,14 @@ impl ProxyService {
 
         // 2.2) 最后兜底：尽力清理占位符与本地代理地址，避免长期卡在代理占位符状态
         self.cleanup_takeover_placeholders_in_live_for_app(app_type)?;
+        record_app_recovery_outcome(
+            app_type,
+            RecoveryOutcomeKind::ProviderOnlyRestored,
+            &["provider"],
+            &["userTables"],
+            Some("restoreUserBackupOrOpenLogs"),
+            None,
+        );
         log::info!("{app_type_str} Live 接管占位符已清理（无备份兜底）");
         Ok(())
     }

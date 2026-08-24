@@ -134,6 +134,7 @@ pub fn get_last_recovery_outcome() -> Result<Option<RecoveryOutcome>, String> {
 /// outcomes are retained for the next frontend query.  The read/compare/remove
 /// sequence is serialized with writes and rechecks bytes before deleting so a
 /// newer in-process write wins over cleanup.
+#[allow(dead_code)]
 pub fn clear_transient_startup_outcome_if_not_active_or_planned() -> Result<(), String> {
     let _guard = outcome_lock()
         .lock()
@@ -153,8 +154,7 @@ pub fn clear_transient_startup_outcome_if_not_active_or_planned() -> Result<(), 
     };
     if !matches!(
         outcome.kind,
-        RecoveryOutcomeKind::ActivePreviousInstance
-            | RecoveryOutcomeKind::PlannedRestartOrUpdate
+        RecoveryOutcomeKind::ActivePreviousInstance | RecoveryOutcomeKind::PlannedRestartOrUpdate
     ) {
         return Ok(());
     }
@@ -238,10 +238,8 @@ mod tests {
     #[serial]
     fn recovery_outcome_persists_and_can_be_read_back() {
         let _home = TempHome::new();
-        let mut outcome = RecoveryOutcome::for_app(
-            RecoveryOutcomeKind::LivePreservedProviderRepaired,
-            "codex",
-        );
+        let mut outcome =
+            RecoveryOutcome::for_app(RecoveryOutcomeKind::LivePreservedProviderRepaired, "codex");
         outcome.kept_fields = vec!["desktop".to_string(), "plugins".to_string()];
         record_recovery_outcome(outcome.clone()).expect("record outcome");
 

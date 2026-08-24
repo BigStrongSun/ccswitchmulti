@@ -39,6 +39,7 @@ import {
   settingsApi,
   type AppId,
   type ProviderSwitchEvent,
+  type RecoveryOutcome,
 } from "@/lib/api";
 import { checkAllEnvConflicts, checkEnvConflicts } from "@/lib/api/env";
 import { useProviderActions } from "@/hooks/useProviderActions";
@@ -148,6 +149,13 @@ interface SyncStatusUpdatedPayload {
   error?: string;
 }
 
+function recoveryFieldSummary(
+  fields: string[] | undefined,
+  fallback: string,
+): string {
+  return fields && fields.length > 0 ? fields.join(", ") : fallback;
+}
+
 const DEFAULT_DRAG_BAR_HEIGHT = isWindows() || isLinux() ? 0 : 28; // px
 const HEADER_HEIGHT = 64; // px
 
@@ -204,6 +212,129 @@ function App() {
   useAdaptiveUiZoom();
   const { t } = useTranslation();
   const queryClient = useQueryClient();
+  const lastRecoveryOutcomeKeyRef = useRef<string | undefined>(undefined);
+
+  const showRecoveryOutcome = (outcome: RecoveryOutcome | null | undefined) => {
+    if (!outcome) return;
+    const key = `${outcome.kind}:${outcome.timestamp}`;
+    if (lastRecoveryOutcomeKeyRef.current === key) return;
+    lastRecoveryOutcomeKeyRef.current = key;
+
+    const kept = recoveryFieldSummary(
+      outcome.keptFields,
+      t("notifications.recoveryNoFields", {
+        defaultValue: "no user fields were confirmed",
+      }),
+    );
+    const lost = recoveryFieldSummary(
+      outcome.lostFields,
+      t("notifications.recoveryNoLostFields", {
+        defaultValue: "no specific lost fields were recorded",
+      }),
+    );
+    const nextStep = outcome.nextStep
+      ? t(`notifications.recoveryNextStep.${outcome.nextStep}`, {
+          defaultValue: outcome.nextStep,
+        })
+      : "";
+    const detailSuffix = nextStep ? ` ${nextStep}` : "";
+    const openLogsAction = {
+      label: t("notifications.recoveryOpenLogs", {
+        defaultValue: "Open log directory",
+      }),
+      onClick: () => {
+        void settingsApi.openLogDir();
+      },
+    };
+
+    switch (outcome.kind) {
+      case "providerOnlyRestored":
+        toast.warning(
+          t("notifications.recoveryProviderOnlyRestored", {
+            kept,
+            lost,
+            nextStep: detailSuffix,
+            defaultValue: `Configuration was restored, but only provider fields were available. Kept: ${kept}; not confirmed: ${lost}.${detailSuffix}`,
+          }),
+          { duration: 10000 },
+        );
+        break;
+      case "unrecoverableUserTables":
+        toast.error(
+          t("notifications.recoveryUnrecoverable", {
+            lost,
+            nextStep: detailSuffix,
+            defaultValue: `Configuration recovery could not be completed. Not recovered: ${lost}.${detailSuffix}`,
+          }),
+          { duration: 12000, action: openLogsAction },
+        );
+        break;
+      case "userBackupCandidateFound":
+        toast.warning(
+          t("notifications.recoveryBackupCandidate", {
+            nextStep: detailSuffix,
+            defaultValue: `A configuration backup candidate was found.${detailSuffix}`,
+          }),
+          { duration: 10000, action: openLogsAction },
+        );
+        break;
+      case "concurrentModificationDeferred":
+        toast.warning(
+          t("notifications.recoveryConcurrentDeferred", {
+            nextStep: detailSuffix,
+            defaultValue: `Another program is changing the configuration, so this write was deferred.${detailSuffix}`,
+          }),
+          { duration: 9000 },
+        );
+        break;
+      case "portOwnedByUnknownOwner":
+        toast.error(
+          t("notifications.recoveryPortUnknownOwner", {
+            nextStep: detailSuffix,
+            defaultValue: `The local proxy port is owned by another program. CCSwitchMulti did not terminate it.${detailSuffix}`,
+          }),
+          { duration: 10000 },
+        );
+        break;
+      case "activePreviousInstance":
+        toast.warning(
+          t("notifications.recoveryActivePreviousInstance", {
+            nextStep: detailSuffix,
+            defaultValue:
+              "Another CCSwitchMulti instance is still running. This launch will not take over or restore its configuration.",
+          }),
+          { duration: 10000 },
+        );
+        break;
+      case "noPreviousRun":
+      case "uncleanExit":
+      case "confirmedCrash":
+      case "plannedRestartOrUpdate":
+      case "healthyBackupRestored":
+      case "livePreservedProviderRepaired":
+      case "pluginRegistrationRepairAvailable":
+      case "pluginRegistrationRepairCompleted":
+      case "pluginRegistrationRepairFailed":
+      case "portOwnedByCompatibleInstance":
+        // These states either describe an internal startup classification or a
+        // successful/handled action.  They do not need a duplicate toast here.
+        break;
+    }
+  };
+
+  useTauriEvent<RecoveryOutcome | null | undefined>(
+    "codex-config-recovery-outcome",
+    showRecoveryOutcome,
+  );
+
+  useEffect(() => {
+    void settingsApi
+      .getLastRecoveryOutcome()
+      .then(showRecoveryOutcome)
+      .catch((error) => {
+        console.debug("[App] Failed to read last recovery outcome", error);
+      });
+  }, [t]);
 
   const [activeApp, setActiveApp] = useState<AppId>(getInitialApp);
   const sharedFeatureApp: AppId =
