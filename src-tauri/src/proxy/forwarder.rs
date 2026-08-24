@@ -2580,6 +2580,10 @@ impl RequestForwarder {
         } else {
             let mut mapped_body = mapped_body;
             if matches!(app_type, AppType::Codex) {
+                super::providers::apply_codex_native_responses_reasoning_effort(
+                    provider,
+                    &mut mapped_body,
+                )?;
                 super::providers::apply_codex_request_upstream_model(provider, &mut mapped_body);
             }
             mapped_body

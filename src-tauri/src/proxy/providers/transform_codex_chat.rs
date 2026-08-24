@@ -970,14 +970,8 @@ fn apply_reasoning_options(
     let Some(effort) = body.pointer("/reasoning/effort").and_then(|v| v.as_str()) else {
         return Ok(());
     };
-    let effort_mode = config.effort_value_mode.as_deref();
-    let mapped = if effort_mode.is_some_and(|mode| mode.starts_with("capability|")) {
-        map_capability_reasoning_effort(effort, effort_mode.unwrap())?
-    } else {
-        let Some(mapped) = map_reasoning_effort(effort, config.effort_value_mode.as_deref()) else {
-            return Ok(());
-        };
-        mapped
+    let Some(mapped) = map_codex_reasoning_effort(effort, config)? else {
+        return Ok(());
     };
 
     match effort_param.as_str() {
@@ -995,6 +989,20 @@ fn apply_reasoning_options(
         _ => {}
     }
     Ok(())
+}
+
+pub(crate) fn map_codex_reasoning_effort<'a>(
+    effort: &'a str,
+    config: &'a CodexChatReasoningConfig,
+) -> Result<Option<&'a str>, ProxyError> {
+    if !config.supports_effort.unwrap_or(false) {
+        return Ok(None);
+    }
+    let effort_mode = config.effort_value_mode.as_deref();
+    if effort_mode.is_some_and(|mode| mode.starts_with("capability|")) {
+        return map_capability_reasoning_effort(effort, effort_mode.unwrap()).map(Some);
+    }
+    Ok(map_reasoning_effort(effort, effort_mode))
 }
 
 fn map_capability_reasoning_effort<'a>(

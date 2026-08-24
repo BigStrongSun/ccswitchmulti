@@ -4362,3 +4362,9 @@ supported in one streaming turn`。
 - TDD/验证：非流 Chat 6 个 RED→GREEN；Chat SSE/假流式 6 个 RED→GREEN；原生 Responses 先有 6 个 RED（含无 reconnector 旁路），新增 compaction RED 后转 GREEN。最终完整 Rust library `3373 passed / 0 failed / 6 ignored`；其中 `codex_chat` 208/208、`streaming_retry` 32/32、compaction 邻近测试 2/2。实际改动文件 rustfmt 与 `git diff --check` 通过。全局 `cargo fmt --check` 仍被本轮未改的 `commands/mod.rs`、`openai_compat.rs`、preset/sync 文件既有格式漂移阻塞。
 - 联网交叉验证使用 Codex 内置 Web 与 Matrix WebSearch 两条独立链。OpenAI 官方 Responses Streaming 文档确认 `response.completed` 的 response.status 为 `completed`，截断使用独立 `response.incomplete` 事件；vLLM 官方 Qwen Responses 示例确认 Qwen reasoning 可走 `/v1/responses`。Matrix 能读取 vLLM 官方页面，但 OpenAI 页面被 403/JS challenge 阻断，因此 OpenAI 事件字段以 Codex 内置搜索抓取的官方 API Reference 为正证据。具体 CCSM 根因仍以本地源码、Git 历史和 RED/GREEN 回归为准。
 - 实施提交 `2b47d1ce`、`091ac061`、`2ac6e874`、`eeaf1c3e` 已通过 `--ff-only` 快进合入本地 `main`；合入后完整 Rust library 再次通过 `3373 passed / 0 failed / 6 ignored`。施工分支 `bigstrongsun/codex-terminal-semantics` 及其干净 worktree 已清理；未安装、重启、修改 live Provider/Router 配置或推送。Sub-Agent V2 只消费相同 Responses 事件，不是根因；协议选择决定走 Chat 还是 Responses 适配器，但两条路径必须遵守同一完成契约。
+
+## 2026-08-24 原生 Responses 推理档位映射闭环
+
+- Provider 模型能力声明中的 `upstream.effortMap` 是第三方上游真实档位的事实源。此前 Chat/Messages 转换会应用该映射，但原生 `/v1/responses` 直通只改写模型名，导致 Codex Ultra 的线级值 `max` 原样发给只接受 `xhigh` 的 Qwen/vLLM，并被上游 HTTP 400 拒绝。
+- 根修复用同一 `CodexChatReasoningConfig` resolver 和 capability 映射器，在原生 Responses 出站边界只改写 `reasoning.effort` 的值并保留 Responses 对象形态；不按模型名特判，不把 Provider 的 `reasoning_effort` Chat 参数形态错误搬进 Responses 请求。
+- 回归覆盖非 identity `max -> xhigh` 与 identity `high -> high`。未知能力不猜测，声明不支持 effort 时不擅自改写；声明映射中不允许的档位继续 fail closed。

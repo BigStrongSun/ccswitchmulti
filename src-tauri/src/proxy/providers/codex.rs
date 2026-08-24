@@ -2380,6 +2380,33 @@ pub fn resolve_codex_chat_reasoning_config(
     inferred
 }
 
+/// Apply the Provider capability map while keeping the native Responses shape.
+/// Codex uses `max` at the wire boundary for Ultra; third-party Providers may
+/// declare a different accepted value such as `xhigh`.
+pub fn apply_codex_native_responses_reasoning_effort(
+    provider: &Provider,
+    body: &mut JsonValue,
+) -> Result<(), ProxyError> {
+    let Some(requested_effort) = body
+        .pointer("/reasoning/effort")
+        .and_then(JsonValue::as_str)
+        .map(ToString::to_string)
+    else {
+        return Ok(());
+    };
+    let Some(config) = resolve_codex_chat_reasoning_config(provider, body) else {
+        return Ok(());
+    };
+    let Some(mapped) =
+        super::transform_codex_chat::map_codex_reasoning_effort(&requested_effort, &config)?
+    else {
+        return Ok(());
+    };
+
+    body["reasoning"]["effort"] = JsonValue::String(mapped.to_string());
+    Ok(())
+}
+
 /// 把 Qwen/vLLM 运行时安全默认（输出预算下限）应用到能力派生配置。
 ///
 /// 与 [`merge_qwen_vllm_reasoning_defaults`] 不同：不纠正 `thinking_param`——
@@ -6224,6 +6251,79 @@ wire_api = "chat"
             .effort_value_mode
             .as_deref()
             .is_some_and(|mode| mode.contains("medium=high") && mode.contains("xhigh=max")));
+    }
+
+    #[test]
+    fn native_responses_maps_codex_ultra_to_declared_provider_effort() {
+        let provider = create_provider(json!({
+            "modelCatalog": {"models": [{
+                "model": "qwen3.8",
+                "reasoning": {
+                    "schemaVersion": 2,
+                    "supportStatus": "confirmed_supported",
+                    "controlKind": "graded",
+                    "supportedEfforts": ["low", "medium", "xhigh"],
+                    "defaultEffort": "medium",
+                    "disableAllowed": false,
+                    "upstream": {
+                        "format": "string",
+                        "parameter": "reasoning_effort",
+                        "effortMap": {
+                            "low": "low",
+                            "medium": "medium",
+                            "high": "xhigh",
+                            "xhigh": "xhigh",
+                            "max": "xhigh"
+                        }
+                    },
+                    "codexUltraOrchestration": {"enabled": true},
+                    "outputFormat": "reasoning_text"
+                }
+            }]}
+        }));
+        let mut body = json!({
+            "model": "qwen3.8",
+            "input": "hello",
+            "reasoning": {"effort": "max"}
+        });
+
+        apply_codex_native_responses_reasoning_effort(&provider, &mut body)
+            .expect("declared effort map should apply");
+
+        assert_eq!(body["reasoning"]["effort"], "xhigh");
+    }
+
+    #[test]
+    fn native_responses_preserves_identity_effort_mapping() {
+        let provider = create_provider(json!({
+            "modelCatalog": {"models": [{
+                "model": "gpt-compatible",
+                "reasoning": {
+                    "schemaVersion": 2,
+                    "supportStatus": "confirmed_supported",
+                    "controlKind": "graded",
+                    "supportedEfforts": ["low", "high", "max"],
+                    "defaultEffort": "high",
+                    "disableAllowed": false,
+                    "upstream": {
+                        "format": "string",
+                        "parameter": "reasoning_effort",
+                        "effortMap": {"low": "low", "high": "high", "max": "max"}
+                    },
+                    "outputFormat": "reasoning_text"
+                }
+            }]}
+        }));
+        let mut body = json!({
+            "model": "gpt-compatible",
+            "input": "hello",
+            "reasoning": {"effort": "high"}
+        });
+
+        apply_codex_native_responses_reasoning_effort(&provider, &mut body)
+            .expect("identity effort map should apply");
+
+        assert_eq!(body["reasoning"]["effort"], "high");
     }
 
     #[test]
