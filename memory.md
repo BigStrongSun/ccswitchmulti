@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-08-25 v3.19.2-17 GitHub 正式发布
+
+- 最终发布提交为 `83f1a03e35e5fb66a28ae4dcca665dce4732e9b5`，四处版本源均为 `3.19.2-17`；annotated tag 对象为 `f3f9170137960b49cd75dbc474084f920034ea79`，本地与远端 peel 均精确指向该发布提交。旧 tag 原指向已取消流水线的 `54cb432d` 且没有 GitHub Release；按用户明确要求删除旧 tag 后基于当前候选重新创建，没有 force-push `main`。
+- GitHub Actions Release run `32766476007` 全部成功：macOS universal、Linux x64/ARM64、Windows x64/ARM64 五个平台构建，以及 `Publish GitHub Release`、`Assemble latest.json` 共七个 job 均为 success。Release `CCSwitchMulti v3.19.2-17` 非 draft、非 prerelease，并由 GitHub `/releases/latest` 返回为 Latest。
+- Release 共 19 个资产。`latest.json` 版本为 `3.19.2-17`，包含 `darwin-aarch64`、`darwin-x86_64`、`windows-x86_64`、`windows-aarch64`、`linux-x86_64`、`linux-aarch64` 六个平台，六项下载 URL 均指向本 tag 且 signature 全部非空；Windows x64 Setup SHA-256 为 `6dd5861536d3879e0225cece63a05e058fe3316f51b8b194c4838e6de23ed515`。
+- 本轮只完成 GitHub 发布，没有安装、替换、停止或重启本机 CCSwitchMulti/Codex。保留的 `.tmp/`、`docs/provider-settings-layout-preview.html`、`target-protocol-probe/`、`target/` 均未提交。发布前本地 NSIS 已生成，命令最终仅因本机没有 Tauri 私钥而在 updater 签名阶段返回非零；正式资产以 GitHub Actions 的签名构建为准。
+- 联网交叉验证使用 Codex WebSearch 与 Matrix WebSearch 两条独立链：前者命中 Tauri 官方 Windows installer 文档和 GitHub Releases 页面，确认 NSIS 与 MSI 是独立目标；Matrix 搜索服务正常但未索引到本次新 Release。当前发布状态、tag、assets 和 `latest.json` 最终以 Git refs、GitHub CLI/API 和 workflow 实跑为权威证据。
+
 ## 2026-08-25 PR #62/#64 启动身份与恢复结果按主线重做
 
 - 没有直接合入落后主线的 PR #62/#64。当前实现以 Windows `GetExtendedTcpTable` 取得真实监听 PID，再用 `OpenProcess + GetProcessTimes + QueryFullProcessImageNameW` 取得 PID、创建时间和可执行文件路径；端口只有在监听 PID、进程创建时间、当前可执行文件、路径指纹、配置目录指纹、实例 ID、主版本、共享运行协议版本和 `listenerRole=takeover` 全部一致时才可复用。External OpenAI API 使用同一 `ProxyServer`，但发布 `externalOpenAiApi` 角色，不能被误认成接管代理；未知监听一律 fail closed，不结束、不接管。
