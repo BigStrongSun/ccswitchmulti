@@ -2246,7 +2246,15 @@ export function applyMultiRouterSettingsDraft(
               : route,
           ),
         };
-  delete nextRouting.defaultRouteId;
+  const defaultRouteId = currentRouting.defaultRouteId?.trim();
+  if (
+    defaultRouteId &&
+    (nextRouting.routes ?? []).some((route) => route.id === defaultRouteId)
+  ) {
+    nextRouting.defaultRouteId = defaultRouteId;
+  } else {
+    delete nextRouting.defaultRouteId;
+  }
 
   return {
     ...plan,
@@ -3310,13 +3318,21 @@ export function CodexRouterWorkspacePage({
       normalizedRouteDrafts,
       routableProvidersById,
     );
+    const defaultRouteId = currentRouting.defaultRouteId?.trim();
     const nextRouting: CodexRouting = {
       ...currentRouting,
       schemaVersion: 2,
       enabled: currentRouting.enabled ?? true,
       routes: normalizedRoutes,
     };
-    delete nextRouting.defaultRouteId;
+    if (
+      defaultRouteId &&
+      normalizedRoutes.some((route) => route.id === defaultRouteId)
+    ) {
+      nextRouting.defaultRouteId = defaultRouteId;
+    } else {
+      delete nextRouting.defaultRouteId;
+    }
     const nextProvider: Provider = {
       ...plan,
       settingsConfig: {
@@ -5193,7 +5209,8 @@ function MultiRouterSettingsPanel({
               <span className="font-semibold">旧版默认路由已停用</span>
               <span className="leading-5">
                 旧配置指向「{legacyDefaultRouteName ?? "已删除的路由"}」。
-                严格路由不会使用它；保存设置后会自动清除该兼容字段。
+                严格路由不会使用它；保存设置和路由规则时会保留该兼容字段。
+                它只用于兼容展示，不参与当前转发。
               </span>
             </div>
           )}

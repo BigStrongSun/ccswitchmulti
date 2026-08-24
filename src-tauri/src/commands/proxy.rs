@@ -297,6 +297,17 @@ pub async fn diagnose_codex_multirouter(
     let desktop_runtime = codex_desktop_runtime_diagnostics(&live_config);
 
     let mut checks = Vec::new();
+    if let Some(warning) =
+        codex_legacy_default_route_warning(route_plan.default_route_id.as_deref())
+    {
+        checks.push(codex_check(
+            "default_route_legacy_ignored",
+            "旧版默认路由字段",
+            CodexDiagnosticStatus::Warn,
+            warning,
+            vec!["defaultRouteId 仅作为兼容字段读取".to_string()],
+        ));
+    }
     checks.push(codex_check(
         "proxy_running",
         "本地代理进程",
@@ -1239,6 +1250,20 @@ fn codex_url_points_to_local_proxy(url: &str, proxy_port: u16) -> bool {
     };
     let is_local_host = matches!(host, "127.0.0.1" | "localhost" | "::1");
     is_local_host && parsed.port_or_known_default() == Some(proxy_port)
+}
+
+/// Explain the compatibility-only status of a legacy default route field.
+///
+/// The current V2 resolver is fail-closed, so retaining this field must never
+/// be presented as an active fallback. Only the route id is echoed; credentials,
+/// endpoints and provider settings are intentionally excluded from diagnostics.
+fn codex_legacy_default_route_warning(default_route_id: Option<&str>) -> Option<String> {
+    let route_id = default_route_id?.trim();
+    (!route_id.is_empty()).then(|| {
+        format!(
+            "default_route_legacy_ignored: 当前版本未命中请求会被拒绝；defaultRouteId 仅作为旧版兼容字段保留（route id `{route_id}`）。"
+        )
+    })
 }
 
 /// 读取当前页面选择的 MultiRouter provider，并汇总 `codexRouting` 规则。
