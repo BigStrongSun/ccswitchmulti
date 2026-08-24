@@ -1,5 +1,14 @@
 # CC Switch Repository Memory
 
+## 2026-08-25 PR #62/#64 启动身份与恢复结果按主线重做
+
+- 没有直接合入落后主线的 PR #62/#64。当前实现以 Windows `GetExtendedTcpTable` 取得真实监听 PID，再用 `OpenProcess + GetProcessTimes + QueryFullProcessImageNameW` 取得 PID、创建时间和可执行文件路径；端口只有在监听 PID、进程创建时间、当前可执行文件、路径指纹、配置目录指纹、实例 ID、主版本、共享运行协议版本和 `listenerRole=takeover` 全部一致时才可复用。External OpenAI API 使用同一 `ProxyServer`，但发布 `externalOpenAiApi` 角色，不能被误认成接管代理；未知监听一律 fail closed，不结束、不接管。
+- 应用运行 marker 也使用完整进程身份，不能只凭 PID。检测到身份完整匹配的旧实例仍运行时，新实例不覆盖旧 marker、不启动代理恢复；正常/强制退出只删除属于当前 PID、可执行文件和创建时间的 marker，避免第二实例删除第一实例证据或旧实例退出时清掉新实例 marker。配置作用域在一次启动/端口探测中只快照一次再传给纯判断函数，避免并发测试或瞬时全局漂移造成前后不一致。
+- 恢复结果不再是单一全局状态：使用最多 64 条的按 generation、operation、app、severity 分离记录，后续成功不能覆盖另一应用的失败；Warning/Error 必须由用户关闭持久 toast 或打开日志后按同一 generation+ID 确认。记录只保存恢复类别、保留/丢失字段和下一步，不复制底层原始错误，避免把可能含 URL、认证材料或配置片段的字符串持久化到 `recovery-outcomes.json`。
+- 主提交为 `1d644834`（`fix(startup): verify proxy ownership and preserve recovery failures`）。Fresh 验证：进程身份 4/4、启动/marker 5/5、恢复结果 4/4、代理服务 84/84；Rust lib `3495 passed / 6 ignored`；前端 `147 files / 1202 tests`；`cargo check --tests --no-default-features`、`pnpm typecheck`、Prettier、rustfmt、`git diff --check`、20 个相关文件 UTF-8 strict/no-BOM/U+FFFD 均通过。
+- `pnpm build` 已完成 renderer 和 release `cc-switch.exe` 编译，但 WiX `light.exe` 在 MSI bundle 阶段无错误明细地以退出码 1 结束。因此本轮不能声称安装包构建成功；未发布、未安装、未停服务、未替换当前运行态，也未重复盲跑 bundler。
+- 联网依据沿用本轮开始时的双链审计：Codex WebSearch 命中 Microsoft 官方 `GetProcessTimes` 和 TCP owner API；Matrix WebSearch 独立调用返回 `fetch failed`，未作为事实证据。最终技术结论以 Microsoft API 契约、本地源码、PR refs、Git history 和 fresh 测试为准。
+
 ## 2026-08-24 v3.19.2-17 发布前本地分支与新 PR 复审
 
 - `main` 原候选为 `54cb432d`，annotated tag `v3.19.2-17` peel 到同一提交；对应 Release workflow `32715488426` 已取消，GitHub Release 不存在。审计期间不移动 tag、不发布、不安装。
