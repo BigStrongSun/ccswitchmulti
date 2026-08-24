@@ -2738,15 +2738,6 @@ pub(crate) fn response_id_from_chat_id(id: Option<&str>) -> String {
     }
 }
 
-// Streaming Chat keeps its legacy mapping until its own RED regressions are in
-// place. Task 2 replaces this compatibility helper with the shared classifier.
-pub(crate) fn response_status_from_finish_reason(finish_reason: Option<&str>) -> &'static str {
-    match finish_reason {
-        Some("length") => "incomplete",
-        _ => "completed",
-    }
-}
-
 /// 把 Chat Completions 上游的错误体规整成 OpenAI Responses API 风格的错误对象。
 ///
 /// 兼容三类输入：

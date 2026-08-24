@@ -5,11 +5,11 @@ use super::{
     codex_chat_common::{
         extract_reasoning_field_text, split_leading_think_block, strip_leading_think_open_tag,
     },
+    codex_terminal::{classify_chat_terminal, ChatTerminalEvidence, TerminalDisposition},
     transform_codex_chat::{
         chat_usage_to_responses_usage, custom_tool_input_from_chat_arguments,
-        response_id_from_chat_id, response_message_item_id, response_status_from_finish_reason,
-        response_tool_call_item_from_chat_name, response_tool_call_item_id_from_chat_name,
-        CodexToolContext,
+        response_id_from_chat_id, response_message_item_id, response_tool_call_item_from_chat_name,
+        response_tool_call_item_id_from_chat_name, CodexToolContext,
     },
 };
 use crate::proxy::json_canonical::canonicalize_tool_arguments_str;
@@ -282,6 +282,11 @@ impl ChatToResponsesState {
             if let Some(content) = delta.get("content").and_then(|v| v.as_str()) {
                 if !content.is_empty() {
                     events.extend(self.push_content_delta(content));
+                }
+            }
+            if let Some(refusal) = delta.get("refusal").and_then(|v| v.as_str()) {
+                if !refusal.is_empty() {
+                    events.extend(self.push_content_delta(refusal));
                 }
             }
 
@@ -657,14 +662,17 @@ impl ChatToResponsesState {
             })
     }
 
-    /// 本回合最终产出里是否至少有一个可被 Codex 识别的工具调用 item。
-    fn has_emitted_tool_call(&self) -> bool {
-        self.output_items.iter().any(|(_, item)| {
-            matches!(
-                item.get("type").and_then(|v| v.as_str()),
-                Some("function_call" | "custom_tool_call" | "tool_search_call")
-            )
-        })
+    /// 本回合最终产出里可被 Codex 识别的工具调用 item 数量。
+    fn emitted_tool_call_count(&self) -> usize {
+        self.output_items
+            .iter()
+            .filter(|(_, item)| {
+                matches!(
+                    item.get("type").and_then(|v| v.as_str()),
+                    Some("function_call" | "custom_tool_call" | "tool_search_call")
+                )
+            })
+            .count()
     }
 
     fn finalize(&mut self) -> Vec<Bytes> {
@@ -678,34 +686,25 @@ impl ChatToResponsesState {
         events.extend(self.finalize_text());
         events.extend(self.finalize_tools());
 
-        let status = response_status_from_finish_reason(self.finish_reason.as_deref());
-
-        // 丢弃过工具调用、且最终一个工具调用都没剩下时，Codex 会收到一个
-        // "status=completed 但 output 里没有任何工具调用" 的回合，agent loop 必然
-        // 静默收尾——这正是 #4341「答一句就停、零报错」的形态。此时如实报错，
-        // 而不是谎报成功。只要还剩下任何一个合法工具调用，Codex 本来就会继续，
-        // 判据不成立，行为保持不变。
-        //
-        // 🔴 只对本应 `completed` 的回合生效：`finish_reason=length`（含流提前断开后
-        // 合成的 length）有自己正当的终止解释，工具调用没拿到 name 是截断的后果而非
-        // 上游发了畸形数据——报成 tool_call_dropped 会给出错误的归因，而本修复的全部
-        // 意义就在于诊断信息的准确性。
-        if status == "completed" && self.dropped_tool_calls > 0 && !self.has_emitted_tool_call() {
-            let dropped = self.dropped_tool_calls;
-            let message = format!(
-                "Upstream returned {dropped} tool call(s) without a function name, \
-                 leaving no usable tool call in this turn"
-            );
-            events.push(self.failed_event(message, Some("upstream_tool_call_dropped".to_string())));
+        let terminal = classify_chat_terminal(
+            self.finish_reason.as_deref(),
+            ChatTerminalEvidence {
+                has_final_message: !self.text.text.trim().is_empty(),
+                valid_tool_calls: self.emitted_tool_call_count(),
+                dropped_tool_calls: self.dropped_tool_calls,
+            },
+        );
+        if let TerminalDisposition::Failed { code, message } = &terminal {
+            events.push(self.failed_event(message.clone(), Some((*code).to_string())));
             return events;
         }
 
-        let mut response = self.base_response(status, self.completed_output_items());
-        if status == "incomplete" {
-            response["incomplete_details"] = json!({ "reason": "max_output_tokens" });
+        let mut response = self.base_response(terminal.status(), self.completed_output_items());
+        if let TerminalDisposition::Incomplete { reason } = terminal {
+            response["incomplete_details"] = json!({ "reason": reason });
         }
 
-        if status == "incomplete" {
+        if response["status"] == "incomplete" {
             events.push(sse::response_incomplete(&response));
         } else {
             events.push(sse::response_completed(&response));
@@ -1003,9 +1002,8 @@ pub fn create_responses_sse_stream_from_chat_with_context<E: std::error::Error +
 
                         let data = data_parts.join("\n");
                         if data.trim() == "[DONE]" {
-                            for event in state.finalize() {
-                                yield Ok(event);
-                            }
+                            // Chat's [DONE] sentinel closes the SSE transport. It
+                            // does not carry the model's terminal semantics.
                             continue;
                         }
 
@@ -1111,9 +1109,8 @@ where
                             }
                             let data = data_parts.join("\n");
                             if data.trim() == "[DONE]" {
-                                for event in state.finalize() {
-                                    yield Ok(event);
-                                }
+                                // Transport closure is classified only after an
+                                // explicit finish_reason has been observed.
                                 continue;
                             }
                             let chunk: Value = match serde_json::from_str(&data) {
@@ -1930,6 +1927,98 @@ mod tests {
         assert!(output.contains("stream_truncated"));
         assert!(!output.contains("event: response.completed"));
         assert!(!output.contains("\"incomplete_details\":{\"reason\":\"max_output_tokens\"}"));
+    }
+
+    #[tokio::test]
+    async fn terminal_semantics_done_without_finish_reason_emits_failed() {
+        let output = collect(vec![
+            "data: {\"id\":\"chatcmpl_done_only\",\"model\":\"deepseek-v4-pro\",\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n",
+            "data: [DONE]\n\n",
+        ])
+        .await;
+
+        assert!(output.contains("event: response.failed"), "got: {output}");
+        assert!(output.contains("finish_reason"), "got: {output}");
+        assert!(
+            !output.contains("event: response.completed"),
+            "got: {output}"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_semantics_empty_tool_calls_emits_failed() {
+        let output = collect(vec![
+            "data: {\"id\":\"chatcmpl_empty_tools\",\"model\":\"deepseek-v4-pro\",\"choices\":[{\"delta\":{\"tool_calls\":[]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ])
+        .await;
+
+        assert!(output.contains("event: response.failed"), "got: {output}");
+        assert!(
+            output.contains("upstream_tool_call_missing"),
+            "got: {output}"
+        );
+        assert!(
+            !output.contains("event: response.completed"),
+            "got: {output}"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_semantics_reasoning_only_stop_emits_failed() {
+        let output = collect(vec![
+            "data: {\"id\":\"chatcmpl_reasoning_only\",\"model\":\"deepseek-v4-pro\",\"choices\":[{\"delta\":{\"reasoning_content\":\"Need another tool.\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ])
+        .await;
+
+        assert!(output.contains("event: response.failed"), "got: {output}");
+        assert!(
+            output.contains("upstream_final_output_missing"),
+            "got: {output}"
+        );
+        assert!(
+            !output.contains("event: response.completed"),
+            "got: {output}"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_semantics_content_filter_emits_incomplete() {
+        let output = collect(vec![
+            "data: {\"id\":\"chatcmpl_filtered\",\"model\":\"deepseek-v4-pro\",\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":\"content_filter\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ])
+        .await;
+
+        assert!(
+            output.contains("event: response.incomplete"),
+            "got: {output}"
+        );
+        assert!(
+            output.contains("\"reason\":\"content_filter\""),
+            "got: {output}"
+        );
+        assert!(
+            !output.contains("event: response.completed"),
+            "got: {output}"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_semantics_refusal_is_a_final_message() {
+        let output = collect(vec![
+            "data: {\"id\":\"chatcmpl_refusal\",\"model\":\"deepseek-v4-pro\",\"choices\":[{\"delta\":{\"refusal\":\"I cannot help with that.\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ])
+        .await;
+
+        assert!(
+            output.contains("event: response.completed"),
+            "got: {output}"
+        );
+        assert!(output.contains("I cannot help with that."), "got: {output}");
+        assert!(!output.contains("event: response.failed"), "got: {output}");
     }
 
     #[tokio::test]

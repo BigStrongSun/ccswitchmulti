@@ -5123,7 +5123,6 @@ fn chat_sse_to_response_value(body: &str) -> Result<Value, ProxyError> {
     let mut finish_reason = Value::Null;
     let mut usage = Value::Null;
     let mut saw_choice = false;
-    let mut saw_done = false;
 
     // strict=false 用于残余尾块：截断的半截 JSON 忽略而非报错，与
     // responses_sse_to_response_value 的残余处理对称（C2），否则一个被掐断的
@@ -5132,7 +5131,6 @@ fn chat_sse_to_response_value(body: &str) -> Result<Value, ProxyError> {
         |event_name: &str, data_str: &str, strict: bool| -> Result<(), ProxyError> {
             let trimmed = data_str.trim();
             if trimmed == "[DONE]" {
-                saw_done = true;
                 return Ok(());
             }
             if trimmed.is_empty() {
@@ -5294,12 +5292,11 @@ fn chat_sse_to_response_value(body: &str) -> Result<Value, ProxyError> {
             "No chat completion choices in upstream SSE".to_string(),
         ));
     }
-    // 完成性守卫：close-delimited 响应的中途截断在字节层不可检测，缺少
-    // finish_reason 与 [DONE] 两个完成证据时按截断处理，避免把半截内容
-    // 包装成"看起来成功"的响应静默返回（比 422 更难诊断的失败形态）。
-    if finish_reason.is_null() && !saw_done {
+    // [DONE] 只结束 SSE 传输，不能替代模型的 finish_reason。缺失语义终态时
+    // 一律按截断处理，避免把半截内容包装成成功响应。
+    if finish_reason.is_null() {
         return Err(ProxyError::TransformError(
-            "Upstream SSE stream appears truncated (no finish_reason or [DONE] marker)".to_string(),
+            "Upstream SSE stream appears truncated (no finish_reason)".to_string(),
         ));
     }
 
@@ -6135,18 +6132,15 @@ data: [DONE]\r\n\
     }
 
     #[test]
-    fn chat_sse_to_response_value_accepts_done_marker_without_finish_reason() {
-        // 非规范上游可能不发 finish_reason 但正常收尾 [DONE]：视为完成
+    fn chat_sse_to_response_value_terminal_semantics_rejects_done_without_finish_reason() {
+        // [DONE] 只证明 SSE 传输关闭，不能替代模型的 finish_reason。
         let sse = "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n\
 data: [DONE]\n\n";
 
-        let response = chat_sse_to_response_value(sse).unwrap();
+        let err = chat_sse_to_response_value(sse).unwrap_err();
 
-        assert_eq!(response["choices"][0]["message"]["content"], "hi");
-        assert_eq!(
-            response["choices"][0]["finish_reason"],
-            serde_json::Value::Null
-        );
+        assert!(matches!(err, ProxyError::TransformError(_)));
+        assert!(err.to_string().contains("finish_reason"));
     }
 
     #[test]
