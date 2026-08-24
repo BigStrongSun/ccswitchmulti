@@ -25,6 +25,9 @@
 //! 器（本代理 120s passthrough 超时、Claude Code 字节级 stream watchdog）把
 //! 长思考误判为断流。
 
+use super::codex_terminal::{
+    classify_native_responses_terminal, NativeResponsesEvidence, NativeResponsesTerminalDisposition,
+};
 use super::streaming_responses::{
     anthropic_error_sse, anthropic_sse, create_anthropic_sse_stream_from_responses,
     RETRYABLE_STREAM_MARKER,
@@ -152,6 +155,19 @@ fn raw_responses_sse_event_name(block: &[u8]) -> Option<String> {
     None
 }
 
+fn raw_responses_sse_payload(block: &[u8]) -> Option<Value> {
+    let text = std::str::from_utf8(block).ok()?;
+    let data = text
+        .lines()
+        .filter_map(|line| strip_sse_field(line, "data"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if data.trim().is_empty() || data.trim() == "[DONE]" {
+        return None;
+    }
+    serde_json::from_str(&data).ok()
+}
+
 struct NativeResponsesSseErrorDiagnostic {
     event_name: String,
     error_type: String,
@@ -273,31 +289,6 @@ fn log_native_responses_sse_error(context: &StreamLogContext, block: &[u8], atte
     );
 }
 
-fn observe_native_responses_sse_stream(
-    initial: ByteStream,
-    context: StreamLogContext,
-) -> ByteStream {
-    const MAX_OBSERVATION_BUFFER: usize = 256 * 1024;
-    Box::pin(async_stream::stream! {
-        let mut stream = initial;
-        let mut buffer = BytesMut::new();
-        while let Some(item) = stream.next().await {
-            if let Ok(chunk) = &item {
-                buffer.extend_from_slice(chunk);
-                while let Some(block) = take_raw_sse_block(&mut buffer) {
-                    log_native_responses_sse_error(&context, &block, 0);
-                }
-                // A malformed upstream stream must not make the diagnostic observer
-                // retain unbounded bytes; the original chunk is still forwarded.
-                if buffer.len() > MAX_OBSERVATION_BUFFER {
-                    buffer.clear();
-                }
-            }
-            yield item;
-        }
-    })
-}
-
 fn raw_sse_block_is_comment(block: &[u8]) -> bool {
     block
         .iter()
@@ -331,6 +322,18 @@ fn native_responses_transport_error_sse(message: &str) -> Bytes {
     Bytes::from(format!("event: error\ndata: {payload}\n\n"))
 }
 
+fn native_responses_protocol_error_sse(code: &str, message: &str) -> Bytes {
+    let payload = json!({
+        "type": "error",
+        "error": {
+            "type": "upstream_protocol_error",
+            "code": code,
+            "message": message,
+        }
+    });
+    Bytes::from(format!("event: error\ndata: {payload}\n\n"))
+}
+
 /// 原生 Codex Responses 的安全 SSE 重连。
 ///
 /// 与 Anthropic 转换路径不同，这里不重写协议字节。只有 `response.created` 和
@@ -353,34 +356,18 @@ pub(crate) fn create_resilient_responses_sse_stream_with_context(
     log_context: Option<StreamLogContext>,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
     async_stream::stream! {
-        let Some(reconnector) = reconnector else {
-            let Some(context) = log_context else {
-                let mut stream = initial;
-                while let Some(item) = stream.next().await {
-                    yield item;
-                }
-                return;
-            };
-            let mut stream = observe_native_responses_sse_stream(initial, context);
-            while let Some(item) = stream.next().await {
-                yield item;
-            }
-            return;
-        };
-
         let mut attempt = 0;
         let mut created_forwarded = false;
         let mut semantic_output_forwarded = false;
+        let mut evidence = NativeResponsesEvidence::default();
         let mut current = Some(initial);
 
         'attempts: loop {
             let Some(mut stream) = current.take() else { break };
             let mut buffer = BytesMut::new();
-            let mut terminal = false;
-            let mut failure: Option<String> = None;
             let mut silence = Duration::ZERO;
 
-            loop {
+            let mut reason = 'stream: loop {
                 let item = match tokio::time::timeout(KEEPALIVE_INTERVAL, stream.next()).await {
                     Ok(item) => {
                         silence = Duration::ZERO;
@@ -401,10 +388,16 @@ pub(crate) fn create_resilient_responses_sse_stream_with_context(
                         semantic_output_forwarded = true;
                         yield Ok(buffer.split().freeze());
                     }
-                    if !terminal && !semantic_output_forwarded {
-                        failure = Some("upstream Responses SSE ended before semantic output".into());
+                    if semantic_output_forwarded {
+                        let message = "Upstream Responses SSE ended without a terminal event after semantic output";
+                        log::error!("[Codex/Responses] {message}");
+                        yield Ok(native_responses_protocol_error_sse(
+                            "upstream_terminal_event_missing",
+                            message,
+                        ));
+                        break 'attempts;
                     }
-                    break;
+                    break 'stream "upstream Responses SSE ended before semantic output".into();
                 };
 
                 let chunk = match item {
@@ -419,32 +412,55 @@ pub(crate) fn create_resilient_responses_sse_stream_with_context(
                             yield Ok(native_responses_transport_error_sse(message));
                             break 'attempts;
                         }
-                        failure = Some(format!("upstream Responses SSE transport error: {error}"));
-                        break;
+                        break 'stream format!("upstream Responses SSE transport error: {error}");
                     }
                 };
                 buffer.extend_from_slice(&chunk);
 
                 while let Some(block) = take_raw_sse_block(&mut buffer) {
                     let event_name = raw_responses_sse_event_name(&block);
-                    match event_name.as_deref() {
-                        Some("response.created") if created_forwarded => {
+                    let payload = raw_responses_sse_payload(&block);
+                    let terminal_disposition =
+                        if let (Some(event_name), Some(payload)) =
+                            (event_name.as_deref(), payload.as_ref())
+                        {
+                            evidence.observe_event(event_name, payload);
+                            classify_native_responses_terminal(event_name, payload, evidence)
+                        } else {
+                            None
+                        };
+                    match (event_name.as_deref(), terminal_disposition) {
+                        (Some("response.created"), _) if created_forwarded => {
                             // 新连接会再次宣告 response.created；客户端已经见过它。
                         }
-                        Some("response.created") => {
+                        (Some("response.created"), _) => {
                             created_forwarded = true;
                             yield Ok(block);
                         }
-                        None if raw_sse_block_is_comment(&block) => {
+                        (None, _) if raw_sse_block_is_comment(&block) => {
                             yield Ok(block);
                         }
-                        Some("response.completed" | "response.failed" | "error") => {
+                        (Some(_), Some(disposition)) => {
                             if let Some(context) = log_context.as_ref() {
                                 log_native_responses_sse_error(context, &block, attempt);
                             }
-                            semantic_output_forwarded = true;
-                            terminal = true;
-                            yield Ok(block);
+                            match disposition {
+                                NativeResponsesTerminalDisposition::Completed
+                                | NativeResponsesTerminalDisposition::Incomplete
+                                | NativeResponsesTerminalDisposition::Failed => {
+                                    yield Ok(block);
+                                }
+                                NativeResponsesTerminalDisposition::ProtocolError {
+                                    code,
+                                    message,
+                                } => {
+                                    log::error!(
+                                        "[Codex/Responses] rejected invalid terminal event: code={code}; {message}"
+                                    );
+                                    yield Ok(native_responses_protocol_error_sse(code, &message));
+                                }
+                            }
+                            break 'attempts;
                         }
                         _ => {
                             semantic_output_forwarded = true;
@@ -452,10 +468,22 @@ pub(crate) fn create_resilient_responses_sse_stream_with_context(
                         }
                     }
                 }
-            }
+            };
 
-            let Some(mut reason) = failure else { break 'attempts };
             loop {
+                let Some(reconnector) = reconnector.as_ref() else {
+                    let message = if semantic_output_forwarded {
+                        "Upstream Responses SSE ended without a terminal event after semantic output"
+                    } else {
+                        "Upstream Responses SSE ended without a terminal event"
+                    };
+                    log::error!("[Codex/Responses] {message}: {reason}");
+                    yield Ok(native_responses_protocol_error_sse(
+                        "upstream_terminal_event_missing",
+                        message,
+                    ));
+                    break 'attempts;
+                };
                 if attempt >= RESPONSES_STREAM_MAX_RETRIES {
                     let message = "上游响应流在输出正文前反复中断，自动重连已耗尽，请检查网络或代理后重试";
                     log::error!(
@@ -1010,6 +1038,245 @@ mod tests {
         assert!(out.contains("上游响应流连接提前关闭"), "got: {out}");
         assert!(out.contains("HTTP 分块响应未完整结束"), "got: {out}");
         assert!(!out.contains("error decoding response body"), "got: {out}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_responses_terminal_semantic_output_eof_is_error_without_retry() {
+        let (reconnector, calls) = scripted_reconnector(vec![]);
+        let first = ok_chunks(&[[created(), text_delta("partial")].concat().as_str()]);
+
+        let out = collect(create_resilient_responses_sse_stream(
+            first,
+            Some(reconnector),
+        ))
+        .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "must not replay output");
+        assert!(out.contains("event: error"), "got: {out}");
+        assert!(out.contains("terminal event"), "got: {out}");
+        assert!(!out.contains("event: response.completed"), "got: {out}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_responses_terminal_without_reconnector_still_rejects_missing_terminal() {
+        let first = ok_chunks(&[[created(), text_delta("partial")].concat().as_str()]);
+
+        let out = collect(create_resilient_responses_sse_stream(first, None)).await;
+
+        assert!(out.contains("event: error"), "got: {out}");
+        assert!(out.contains("terminal event"), "got: {out}");
+        assert!(!out.contains("event: response.completed"), "got: {out}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_responses_terminal_completed_with_failed_status_is_error() {
+        let (reconnector, calls) = scripted_reconnector(vec![]);
+        let invalid_terminal = sse(
+            "response.completed",
+            json!({
+                "type": "response.completed",
+                "response": {
+                    "status": "failed",
+                    "output": [{
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "not complete"}]
+                    }]
+                }
+            }),
+        );
+        let first = ok_chunks(&[[created(), invalid_terminal].concat().as_str()]);
+
+        let out = collect(create_resilient_responses_sse_stream(
+            first,
+            Some(reconnector),
+        ))
+        .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(out.contains("event: error"), "got: {out}");
+        assert!(out.contains("status=failed"), "got: {out}");
+        assert!(!out.contains("event: response.completed"), "got: {out}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_responses_terminal_completed_with_incomplete_status_is_error() {
+        let (reconnector, calls) = scripted_reconnector(vec![]);
+        let invalid_terminal = sse(
+            "response.completed",
+            json!({
+                "type": "response.completed",
+                "response": {
+                    "status": "incomplete",
+                    "output": [{
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "cut off"}]
+                    }]
+                }
+            }),
+        );
+        let first = ok_chunks(&[[created(), invalid_terminal].concat().as_str()]);
+
+        let out = collect(create_resilient_responses_sse_stream(
+            first,
+            Some(reconnector),
+        ))
+        .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(out.contains("event: error"), "got: {out}");
+        assert!(out.contains("status=incomplete"), "got: {out}");
+        assert!(!out.contains("event: response.completed"), "got: {out}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_responses_terminal_reasoning_only_completed_is_error() {
+        let (reconnector, calls) = scripted_reconnector(vec![]);
+        let reasoning = sse(
+            "response.output_item.done",
+            json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "reasoning",
+                    "content": [{"type": "reasoning_text", "text": "Need another tool."}]
+                }
+            }),
+        );
+        let invalid_terminal = sse(
+            "response.completed",
+            json!({
+                "type": "response.completed",
+                "response": {
+                    "status": "completed",
+                    "output": [{
+                        "type": "reasoning",
+                        "content": [{"type": "reasoning_text", "text": "Need another tool."}]
+                    }]
+                }
+            }),
+        );
+        let first = ok_chunks(&[[created(), reasoning, invalid_terminal].concat().as_str()]);
+
+        let out = collect(create_resilient_responses_sse_stream(
+            first,
+            Some(reconnector),
+        ))
+        .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(out.contains("event: error"), "got: {out}");
+        assert!(out.contains("final output"), "got: {out}");
+        assert!(!out.contains("event: response.completed"), "got: {out}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_responses_terminal_completed_with_valid_tool_call_is_forwarded() {
+        let tool = json!({
+            "type": "function_call",
+            "status": "completed",
+            "call_id": "call_1",
+            "name": "read_file",
+            "arguments": "{\"path\":\"README.md\"}"
+        });
+        let item_done = sse(
+            "response.output_item.done",
+            json!({"type": "response.output_item.done", "item": tool.clone()}),
+        );
+        let terminal = sse(
+            "response.completed",
+            json!({
+                "type": "response.completed",
+                "response": {"status": "completed", "output": [tool]}
+            }),
+        );
+        let first = ok_chunks(&[[created(), item_done, terminal].concat().as_str()]);
+
+        let out = collect(create_resilient_responses_sse_stream(first, None)).await;
+
+        assert!(out.contains("event: response.completed"), "got: {out}");
+        assert!(!out.contains("event: error"), "got: {out}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_responses_terminal_completed_with_compaction_output_is_forwarded() {
+        let compaction = json!({
+            "type": "compaction",
+            "encrypted_content": "ocx1:YWJj"
+        });
+        let item_done = sse(
+            "response.output_item.done",
+            json!({"type": "response.output_item.done", "item": compaction.clone()}),
+        );
+        let terminal = sse(
+            "response.completed",
+            json!({
+                "type": "response.completed",
+                "response": {"status": "completed", "output": [compaction]}
+            }),
+        );
+        let first = ok_chunks(&[[created(), item_done, terminal].concat().as_str()]);
+
+        let out = collect(create_resilient_responses_sse_stream(first, None)).await;
+
+        assert!(out.contains("event: response.completed"), "got: {out}");
+        assert!(!out.contains("event: error"), "got: {out}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_responses_terminal_completed_with_incomplete_tool_call_is_error() {
+        let terminal = sse(
+            "response.completed",
+            json!({
+                "type": "response.completed",
+                "response": {
+                    "status": "completed",
+                    "output": [{
+                        "type": "function_call",
+                        "status": "completed",
+                        "call_id": "call_1",
+                        "name": "",
+                        "arguments": "{}"
+                    }]
+                }
+            }),
+        );
+        let first = ok_chunks(&[[created(), terminal].concat().as_str()]);
+
+        let out = collect(create_resilient_responses_sse_stream(first, None)).await;
+
+        assert!(out.contains("event: error"), "got: {out}");
+        assert!(out.contains("structurally incomplete"), "got: {out}");
+        assert!(!out.contains("event: response.completed"), "got: {out}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_responses_terminal_incomplete_stops_following_events() {
+        let (reconnector, calls) = scripted_reconnector(vec![]);
+        let incomplete = sse(
+            "response.incomplete",
+            json!({
+                "type": "response.incomplete",
+                "response": {
+                    "status": "incomplete",
+                    "incomplete_details": {"reason": "max_output_tokens"}
+                }
+            }),
+        );
+        let first = ok_chunks(&[[created(), incomplete, text_delta("must-not-leak")]
+            .concat()
+            .as_str()]);
+
+        let out = collect(create_resilient_responses_sse_stream(
+            first,
+            Some(reconnector),
+        ))
+        .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(out.contains("event: response.incomplete"), "got: {out}");
+        assert!(!out.contains("must-not-leak"), "got: {out}");
+        assert!(!out.contains("event: error"), "got: {out}");
     }
 
     #[test]
