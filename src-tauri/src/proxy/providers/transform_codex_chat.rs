@@ -9,6 +9,7 @@ use super::codex_chat_common::{
     response_function_call_item, response_function_call_item_with_namespace,
     split_leading_think_block,
 };
+use super::codex_terminal::{classify_chat_terminal, ChatTerminalEvidence, TerminalDisposition};
 use super::hosted_tools::{
     image_generation::{self, HostedImageGenerationConfig, IMAGE_GENERATION_FUNCTION_NAME},
     web_search::{self, HostedWebSearchConfig},
@@ -2246,24 +2247,23 @@ pub(crate) fn chat_completion_to_response_with_context(
     {
         output.push(reasoning_item);
     }
-    if let Some(message_item) = chat_message_to_response_output_item(message, &response_id) {
+    let message_item = chat_message_to_response_output_item(message, &response_id);
+    let has_final_message = message_item.is_some();
+    if let Some(message_item) = message_item {
         output.push(message_item);
     }
     let tool_calls =
         chat_tool_calls_to_response_output_items(message, reasoning.as_deref(), tool_context);
-
-    // A completed turn that contained only unusable unnamed calls would otherwise
-    // look successful to Codex and terminate the agent loop silently. Truncated
-    // (`finish_reason=length`) turns remain incomplete and keep their true cause.
-    if response_status_from_finish_reason(finish_reason) == "completed"
-        && tool_calls.dropped > 0
-        && tool_calls.items.is_empty()
-    {
-        return Err(ProxyError::TransformError(format!(
-            "Upstream returned {} tool call(s) without a function name, \
-             leaving no usable tool call in this turn",
-            tool_calls.dropped
-        )));
+    let terminal = classify_chat_terminal(
+        finish_reason,
+        ChatTerminalEvidence {
+            has_final_message,
+            valid_tool_calls: tool_calls.items.len(),
+            dropped_tool_calls: tool_calls.dropped,
+        },
+    );
+    if let TerminalDisposition::Failed { code, message } = &terminal {
+        return Err(ProxyError::TransformError(format!("[{code}] {message}")));
     }
     output.extend(tool_calls.items);
     if output
@@ -2278,14 +2278,14 @@ pub(crate) fn chat_completion_to_response_with_context(
         "id": response_id,
         "object": "response",
         "created_at": created_at,
-        "status": response_status_from_finish_reason(finish_reason),
+        "status": terminal.status(),
         "model": model,
         "output": output,
         "usage": chat_usage_to_responses_usage(body.get("usage"))
     });
 
-    if finish_reason == Some("length") {
-        response["incomplete_details"] = json!({ "reason": "max_output_tokens" });
+    if let TerminalDisposition::Incomplete { reason } = terminal {
+        response["incomplete_details"] = json!({ "reason": reason });
     }
 
     Ok(response)
@@ -2738,6 +2738,8 @@ pub(crate) fn response_id_from_chat_id(id: Option<&str>) -> String {
     }
 }
 
+// Streaming Chat keeps its legacy mapping until its own RED regressions are in
+// place. Task 2 replaces this compatibility helper with the shared classifier.
 pub(crate) fn response_status_from_finish_reason(finish_reason: Option<&str>) -> &'static str {
     match finish_reason {
         Some("length") => "incomplete",
@@ -6728,6 +6730,130 @@ mod tests {
         let result =
             chat_completion_to_response_with_context(chat, &CodexToolContext::default()).unwrap();
         assert_eq!(result["status"], "completed");
+    }
+
+    #[test]
+    fn chat_response_terminal_missing_finish_reason_is_an_error() {
+        let chat = json!({
+            "id": "chatcmpl_missing_finish",
+            "object": "chat.completion",
+            "created": 123,
+            "model": "deepseek-v4-pro",
+            "choices": [{
+                "message": {"role": "assistant", "content": "partial answer"},
+                "finish_reason": null
+            }]
+        });
+
+        let err = chat_completion_to_response_with_context(chat, &CodexToolContext::default())
+            .unwrap_err();
+
+        assert!(matches!(err, ProxyError::TransformError(_)));
+        assert!(err.to_string().contains("finish_reason"));
+    }
+
+    #[test]
+    fn chat_response_terminal_unknown_finish_reason_is_an_error() {
+        let chat = json!({
+            "id": "chatcmpl_unknown_finish",
+            "object": "chat.completion",
+            "created": 123,
+            "model": "deepseek-v4-pro",
+            "choices": [{
+                "message": {"role": "assistant", "content": "answer"},
+                "finish_reason": "vendor_done"
+            }]
+        });
+
+        let err = chat_completion_to_response_with_context(chat, &CodexToolContext::default())
+            .unwrap_err();
+
+        assert!(matches!(err, ProxyError::TransformError(_)));
+        assert!(err.to_string().contains("vendor_done"));
+    }
+
+    #[test]
+    fn chat_response_terminal_content_filter_is_incomplete() {
+        let chat = json!({
+            "id": "chatcmpl_filtered",
+            "object": "chat.completion",
+            "created": 123,
+            "model": "deepseek-v4-pro",
+            "choices": [{
+                "message": {"role": "assistant", "content": "partial"},
+                "finish_reason": "content_filter"
+            }]
+        });
+
+        let result =
+            chat_completion_to_response_with_context(chat, &CodexToolContext::default()).unwrap();
+
+        assert_eq!(result["status"], "incomplete");
+        assert_eq!(result["incomplete_details"]["reason"], "content_filter");
+    }
+
+    #[test]
+    fn chat_response_terminal_empty_tool_calls_is_an_error() {
+        let chat = json!({
+            "id": "chatcmpl_empty_tools",
+            "object": "chat.completion",
+            "created": 123,
+            "model": "deepseek-v4-pro",
+            "choices": [{
+                "message": {"role": "assistant", "content": null, "tool_calls": []},
+                "finish_reason": "tool_calls"
+            }]
+        });
+
+        let err = chat_completion_to_response_with_context(chat, &CodexToolContext::default())
+            .unwrap_err();
+
+        assert!(matches!(err, ProxyError::TransformError(_)));
+        assert!(err.to_string().contains("tool_calls"));
+    }
+
+    #[test]
+    fn chat_response_terminal_reasoning_only_stop_is_an_error() {
+        let chat = json!({
+            "id": "chatcmpl_reasoning_only",
+            "object": "chat.completion",
+            "created": 123,
+            "model": "deepseek-v4-pro",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning_content": "I still need to call a tool."
+                },
+                "finish_reason": "stop"
+            }]
+        });
+
+        let err = chat_completion_to_response_with_context(chat, &CodexToolContext::default())
+            .unwrap_err();
+
+        assert!(matches!(err, ProxyError::TransformError(_)));
+        assert!(err.to_string().contains("final output"));
+    }
+
+    #[test]
+    fn chat_response_terminal_empty_stop_is_an_error() {
+        let chat = json!({
+            "id": "chatcmpl_empty_stop",
+            "object": "chat.completion",
+            "created": 123,
+            "model": "deepseek-v4-pro",
+            "choices": [{
+                "message": {"role": "assistant", "content": null},
+                "finish_reason": "stop"
+            }]
+        });
+
+        let err = chat_completion_to_response_with_context(chat, &CodexToolContext::default())
+            .unwrap_err();
+
+        assert!(matches!(err, ProxyError::TransformError(_)));
+        assert!(err.to_string().contains("final output"));
     }
 
     #[test]

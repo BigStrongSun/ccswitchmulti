@@ -22,6 +22,7 @@ pub mod codex_oauth_auth;
 pub(crate) mod codex_oauth_pool;
 pub(crate) mod codex_reasoning;
 pub(crate) mod codex_responses_sse;
+pub(crate) mod codex_terminal;
 pub mod copilot_auth;
 pub mod copilot_model_map;
 mod gemini;
