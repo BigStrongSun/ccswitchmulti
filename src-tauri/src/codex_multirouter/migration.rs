@@ -395,7 +395,7 @@ fn build_migration(
             generated_providers.push(clone);
             target_id = clone_id;
             warnings.push(format!(
-                "route {route_id} uses a migration-generated Provider to preserve legacy overrides"
+                "route {route_id}：使用迁移生成的 Provider，以保留旧路由覆盖设置"
             ));
         } else if protocol_override {
             let format = api_format.expect("protocol override has a format");
@@ -420,13 +420,62 @@ fn build_migration(
         let model_map = upstream
             .and_then(|value| value.get("modelMap"))
             .and_then(Value::as_object);
-        let canonical_models = route_canonical_models;
+        let explicit_canonical_models = route_canonical_models;
+        let match_prefixes = legacy_route_match_prefixes(route);
+        let prefix_models = if match_prefixes.is_empty() {
+            BTreeSet::new()
+        } else {
+            legacy_prefix_selected_models(route, upstream, target, &match_prefixes)
+        };
+        let has_prefix_matches = !prefix_models.is_empty();
+        let has_explicit_models = !explicit_canonical_models.is_empty();
+        let has_prefix_additions = provider_catalog_entries(target)
+            .iter()
+            .filter(|(visible, _)| prefix_models.contains(visible))
+            .any(|(visible, upstream_model)| {
+                !explicit_canonical_models.iter().any(|explicit| {
+                    explicit.eq_ignore_ascii_case(visible)
+                        || explicit.eq_ignore_ascii_case(upstream_model)
+                })
+            });
+        let mut selected_models = explicit_canonical_models.clone();
+        selected_models.extend(prefix_models.iter().cloned());
+        if !match_prefixes.is_empty() {
+            let catalog_entries = provider_catalog_entries(target);
+            if catalog_entries.is_empty() && !has_explicit_models {
+                return Err(AppError::InvalidInput(format!(
+                    "prefix_selection_catalog_empty: 路由 `{route_id}` 的目标 Provider `{}` 没有可用的模型目录，无法根据 prefix [{}] 展开",
+                    target.id,
+                    match_prefixes.join(", ")
+                )));
+            }
+            if !has_prefix_matches && !has_explicit_models {
+                return Err(AppError::InvalidInput(format!(
+                    "prefix_selection_no_matches: 路由 `{route_id}` 的目标 Provider `{}` 当前目录没有可见模型或别名命中 prefix [{}]",
+                    target.id,
+                    match_prefixes.join(", ")
+                )));
+            }
+            warnings.push(format!(
+                "prefix_selection_frozen: route `{route_id}` 的 prefix 规则已按当前 catalog 展开为 {} 个精确模型；未来新增模型不会自动加入。刷新模型目录后，请在路由规则中重新勾选并保存。",
+                prefix_models.len()
+            ));
+            if !has_prefix_additions && has_explicit_models {
+                warnings.push(format!(
+                    "prefix_selection_no_current_matches: route `{route_id}` 的 prefix [{}] 当前没有命中额外 catalog 模型；本次只保留显式模型，未来新增模型不会自动加入。",
+                    match_prefixes.join(", ")
+                ));
+            }
+        }
         let target_catalog = provider_catalog_models(target);
-        let model_selection = if !target_catalog.is_empty() && canonical_models == target_catalog {
+        let model_selection = if match_prefixes.is_empty()
+            && !target_catalog.is_empty()
+            && selected_models == target_catalog
+        {
             CodexModelSelection::All
         } else {
             CodexModelSelection::Include {
-                models: canonical_models.iter().cloned().collect(),
+                models: selected_models.iter().cloned().collect(),
             }
         };
         let aliases = model_map
@@ -437,17 +486,6 @@ fn build_migration(
                         (visible != canonical).then(|| (visible.clone(), canonical.to_string()))
                     })
                     .collect::<BTreeMap<_, _>>()
-            })
-            .unwrap_or_default();
-        let match_prefixes = route
-            .pointer("/match/prefixes")
-            .and_then(Value::as_array)
-            .map(|prefixes| {
-                prefixes
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_string)
-                    .collect()
             })
             .unwrap_or_default();
         let auth_policy = legacy_auth_policy(upstream.and_then(|value| value.get("auth")))?;
@@ -535,20 +573,114 @@ fn build_migration(
 }
 
 fn provider_catalog_models(provider: &Provider) -> BTreeSet<String> {
+    provider_catalog_entries(provider)
+        .into_iter()
+        .map(|(_, upstream)| upstream)
+        .collect()
+}
+
+/// Read the visible and upstream identities from the current Provider catalog.
+///
+/// The visible `model` is the name Codex exposes to requests and therefore the
+/// name written by prefix migration. The upstream identity is retained only so
+/// legacy modelMap aliases can resolve to the same catalog entry.
+fn provider_catalog_entries(provider: &Provider) -> Vec<(String, String)> {
     provider
         .settings_config
-        .pointer("/modelCatalog/models")
+        .get("modelCatalog")
+        .or_else(|| provider.settings_config.get("model_catalog"))
+        .and_then(|catalog| catalog.get("models"))
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(|model| {
-            model
-                .get("upstreamModel")
-                .or_else(|| model.get("model"))
+            let visible = model
+                .get("model")
                 .and_then(Value::as_str)
-                .map(str::to_string)
+                .map(str::trim)
+                .filter(|model| !model.is_empty())?;
+            let upstream = model
+                .get("upstreamModel")
+                .or_else(|| model.get("upstream_model"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+                .unwrap_or(visible);
+            Some((visible.to_string(), upstream.to_string()))
         })
         .collect()
+}
+
+/// Normalize legacy prefix selectors while preserving the first spelling for
+/// migration provenance and user-facing warnings.
+fn legacy_route_match_prefixes(route: &Value) -> Vec<String> {
+    let mut prefixes = route
+        .pointer("/match/prefixes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|prefix| !prefix.is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    prefixes.sort_by_key(|prefix| prefix.to_ascii_lowercase());
+    prefixes.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+    prefixes
+}
+
+/// Expand old prefix selectors into the current catalog's visible model names.
+///
+/// Prefixes are compared case-insensitively against visible catalog names and
+/// legacy modelMap alias keys. An alias contributes only when its target maps
+/// to a visible/upstream identity in the current catalog; no other provider
+/// models are implicitly selected.
+fn legacy_prefix_selected_models(
+    _route: &Value,
+    upstream: Option<&serde_json::Map<String, Value>>,
+    target: &Provider,
+    prefixes: &[String],
+) -> BTreeSet<String> {
+    let normalized_prefixes = prefixes
+        .iter()
+        .map(|prefix| prefix.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let entries = provider_catalog_entries(target);
+    let mut selected = BTreeSet::new();
+    for (visible, _upstream_model) in &entries {
+        let visible_matches = normalized_prefixes
+            .iter()
+            .any(|prefix| visible.to_ascii_lowercase().starts_with(prefix));
+        if visible_matches {
+            selected.insert(visible.clone());
+        }
+    }
+
+    let Some(model_map) = upstream
+        .and_then(|value| value.get("modelMap"))
+        .and_then(Value::as_object)
+    else {
+        return selected;
+    };
+    for (alias, target_identity) in model_map {
+        let alias = alias.trim();
+        let target_identity = target_identity.as_str().map(str::trim).unwrap_or("");
+        if alias.is_empty()
+            || target_identity.is_empty()
+            || !normalized_prefixes
+                .iter()
+                .any(|prefix| alias.to_ascii_lowercase().starts_with(prefix))
+        {
+            continue;
+        }
+        if let Some((visible, _)) = entries.iter().find(|(visible, upstream_model)| {
+            visible.eq_ignore_ascii_case(target_identity)
+                || upstream_model.eq_ignore_ascii_case(target_identity)
+        }) {
+            selected.insert(visible.clone());
+        }
+    }
+    selected
 }
 
 fn legacy_route_canonical_models(
@@ -564,10 +696,14 @@ fn legacy_route_canonical_models(
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|visible| !visible.is_empty())
         .map(|visible| {
             model_map
                 .and_then(|map| map.get(visible))
                 .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|canonical| !canonical.is_empty())
                 .unwrap_or(visible)
                 .to_string()
         })
@@ -820,6 +956,357 @@ mod tests {
         })
     }
 
+    fn prefix_only_route(prefixes: &[&str], upstream: serde_json::Value) -> serde_json::Value {
+        let mut route = legacy_route(upstream);
+        route["match"]["models"] = json!([]);
+        route["match"]["prefixes"] = json!(prefixes);
+        route
+    }
+
+    fn target_with_models(models: serde_json::Value) -> Provider {
+        let mut provider = target();
+        provider.settings_config["modelCatalog"]["models"] = models;
+        provider
+    }
+
+    fn applied_plan(
+        db: &Database,
+        revision: &str,
+        preview: &CodexMultiRouterMigrationPreview,
+    ) -> CodexRoutingConfigV2 {
+        apply_codex_multirouter_migration(db, "router", revision, &preview.plan_token)
+            .expect("apply migration");
+        let migrated = db
+            .get_provider_by_id("router", "codex")
+            .expect("read router")
+            .expect("router exists");
+        match CodexRoutingDocument::parse(
+            migrated
+                .settings_config
+                .get("codexRouting")
+                .expect("codexRouting"),
+        )
+        .expect("parse migrated routing")
+        {
+            CodexRoutingDocument::V2(plan) => plan,
+            CodexRoutingDocument::Legacy(_) => panic!("migration must produce v2"),
+        }
+    }
+
+    #[test]
+    fn prefix_only_legacy_route_migration_expands_current_catalog_into_include() {
+        let db = Database::memory().expect("memory db");
+        db.save_provider(
+            "codex",
+            &target_with_models(json!([
+                {"model": "qwen3.8"},
+                {"model": "qwen3.9"},
+                {"model": "deepseek-v4"}
+            ])),
+        )
+        .expect("save target");
+        db.save_provider(
+            "codex",
+            &legacy_router(prefix_only_route(
+                &[" QWEN "],
+                json!({"auth": {"source": "provider_config"}}),
+            )),
+        )
+        .expect("save router");
+        let revision = codex_multirouter_revision(&db, "router").expect("revision");
+
+        let preview = preview_codex_multirouter_migration(&db, "router", &revision)
+            .expect("prefix-only preview");
+        assert!(preview
+            .warnings
+            .iter()
+            .any(|warning| warning.starts_with("prefix_selection_frozen:")));
+        let frozen_warning = preview
+            .warnings
+            .iter()
+            .find(|warning| warning.starts_with("prefix_selection_frozen:"))
+            .expect("prefix freeze warning");
+        assert!(frozen_warning.contains("未来新增模型不会自动加入"));
+        assert!(frozen_warning.contains("刷新模型目录后，请在路由规则中重新勾选并保存"));
+        let plan = applied_plan(&db, &revision, &preview);
+        let CodexModelSelection::Include { models } = &plan.routes[0].model_selection else {
+            panic!("prefix-only migration must produce an include selection");
+        };
+        assert_eq!(models, &vec!["qwen3.8".to_string(), "qwen3.9".to_string()]);
+        assert_eq!(plan.routes[0].match_prefixes, vec!["QWEN"]);
+    }
+
+    #[test]
+    fn prefix_only_legacy_route_migration_does_not_expand_to_unmatched_catalog_models() {
+        let db = Database::memory().expect("memory db");
+        db.save_provider(
+            "codex",
+            &target_with_models(json!([
+                {"model": "qwen3.8"},
+                {"model": "qwen3.9"},
+                {"model": "deepseek-v4"}
+            ])),
+        )
+        .expect("save target");
+        db.save_provider(
+            "codex",
+            &legacy_router(prefix_only_route(
+                &["qwen"],
+                json!({"auth": {"source": "provider_config"}}),
+            )),
+        )
+        .expect("save router");
+        let revision = codex_multirouter_revision(&db, "router").expect("revision");
+        let preview = preview_codex_multirouter_migration(&db, "router", &revision)
+            .expect("prefix-only preview");
+        let plan = applied_plan(&db, &revision, &preview);
+        let providers = db
+            .get_all_providers("codex")
+            .expect("providers")
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        let compiled = compile_v2(&plan, &providers).expect("compile migrated plan");
+        assert!(compiled
+            .model_catalog
+            .iter()
+            .all(|model| model.visible_model.starts_with("qwen")));
+        assert!(!compiled
+            .model_catalog
+            .iter()
+            .any(|model| model.visible_model == "deepseek-v4"));
+    }
+
+    #[test]
+    fn prefix_only_legacy_route_migration_rejects_empty_target_catalog() {
+        let db = Database::memory().expect("memory db");
+        db.save_provider("codex", &target_with_models(json!([])))
+            .expect("save target");
+        db.save_provider(
+            "codex",
+            &legacy_router(prefix_only_route(
+                &["qwen"],
+                json!({"auth": {"source": "provider_config"}}),
+            )),
+        )
+        .expect("save router");
+        let revision = codex_multirouter_revision(&db, "router").expect("revision");
+
+        let error = preview_codex_multirouter_migration(&db, "router", &revision)
+            .expect_err("empty catalog must reject prefix-only migration");
+        let message = error.to_string();
+        assert!(message.contains("prefix_selection_catalog_empty"));
+        assert!(!message.contains("include_models_empty"));
+    }
+
+    #[test]
+    fn prefix_only_legacy_route_migration_rejects_prefix_without_current_match() {
+        let db = Database::memory().expect("memory db");
+        db.save_provider(
+            "codex",
+            &target_with_models(json!([{ "model": "deepseek-v4" }])),
+        )
+        .expect("save target");
+        db.save_provider(
+            "codex",
+            &legacy_router(prefix_only_route(
+                &["qwen"],
+                json!({"auth": {"source": "provider_config"}}),
+            )),
+        )
+        .expect("save router");
+        let revision = codex_multirouter_revision(&db, "router").expect("revision");
+
+        let error = preview_codex_multirouter_migration(&db, "router", &revision)
+            .expect_err("unmatched prefix must reject prefix-only migration");
+        let message = error.to_string();
+        assert!(message.contains("prefix_selection_no_matches"));
+        assert!(!message.contains("include_models_empty"));
+    }
+
+    #[test]
+    fn prefix_only_legacy_route_migration_preserves_alias_and_canonical_mapping() {
+        let db = Database::memory().expect("memory db");
+        db.save_provider(
+            "codex",
+            &target_with_models(json!([
+                {"model": "flagship", "upstreamModel": "qwen3.8"},
+                {"model": "deepseek-v4"}
+            ])),
+        )
+        .expect("save target");
+        db.save_provider(
+            "codex",
+            &legacy_router(prefix_only_route(
+                &["qwen-"],
+                json!({
+                    "auth": {"source": "provider_config"},
+                    "modelMap": {"qwen-old": "flagship"}
+                }),
+            )),
+        )
+        .expect("save router");
+        let revision = codex_multirouter_revision(&db, "router").expect("revision");
+        let preview = preview_codex_multirouter_migration(&db, "router", &revision)
+            .expect("alias prefix preview");
+        let plan = applied_plan(&db, &revision, &preview);
+        let route = &plan.routes[0];
+        let CodexModelSelection::Include { models } = &route.model_selection else {
+            panic!("alias prefix migration must produce an include selection");
+        };
+        assert_eq!(models, &vec!["flagship".to_string()]);
+        assert_eq!(route.aliases.get("qwen-old"), Some(&"flagship".to_string()));
+        let providers = db
+            .get_all_providers("codex")
+            .expect("providers")
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        compile_v2(&plan, &providers).expect("alias target must remain selected");
+    }
+
+    #[test]
+    fn mixed_models_and_prefixes_keep_explicit_selection_and_warn_when_prefix_has_no_extra_match() {
+        let db = Database::memory().expect("memory db");
+        db.save_provider(
+            "codex",
+            &target_with_models(json!([
+                {"model": "deepseek-v4"},
+                {"model": "qwen3.8"}
+            ])),
+        )
+        .expect("save target");
+        let mut route = legacy_route(json!({"auth": {"source": "provider_config"}}));
+        route["match"]["models"] = json!(["deepseek-v4"]);
+        route["match"]["prefixes"] = json!(["qwen"]);
+        db.save_provider("codex", &legacy_router(route))
+            .expect("save router");
+        let revision = codex_multirouter_revision(&db, "router").expect("revision");
+        let preview = preview_codex_multirouter_migration(&db, "router", &revision)
+            .expect("mixed prefix preview");
+        let plan = applied_plan(&db, &revision, &preview);
+        let CodexModelSelection::Include { models } = &plan.routes[0].model_selection else {
+            panic!("mixed migration must produce an include selection");
+        };
+        assert_eq!(
+            models,
+            &vec!["deepseek-v4".to_string(), "qwen3.8".to_string()]
+        );
+        assert!(preview
+            .warnings
+            .iter()
+            .any(|warning| warning.starts_with("prefix_selection_frozen:")));
+
+        let db = Database::memory().expect("memory db");
+        db.save_provider(
+            "codex",
+            &target_with_models(json!([{ "model": "deepseek-v4" }])),
+        )
+        .expect("save target without prefix match");
+        let mut no_extra_route = legacy_route(json!({"auth": {"source": "provider_config"}}));
+        no_extra_route["match"]["models"] = json!(["deepseek-v4"]);
+        no_extra_route["match"]["prefixes"] = json!(["qwen"]);
+        db.save_provider("codex", &legacy_router(no_extra_route))
+            .expect("save router without prefix match");
+        let revision = codex_multirouter_revision(&db, "router").expect("revision");
+        let preview = preview_codex_multirouter_migration(&db, "router", &revision)
+            .expect("mixed preview without extra match");
+        assert!(preview
+            .warnings
+            .iter()
+            .any(|warning| warning.starts_with("prefix_selection_no_current_matches:")));
+        let no_match_warning = preview
+            .warnings
+            .iter()
+            .find(|warning| warning.starts_with("prefix_selection_no_current_matches:"))
+            .expect("no-current-match warning");
+        assert!(no_match_warning.contains("本次只保留显式模型"));
+        assert!(no_match_warning.contains("未来新增模型不会自动加入"));
+    }
+
+    #[test]
+    fn prefix_expanded_include_does_not_auto_include_future_catalog_models() {
+        let db = Database::memory().expect("memory db");
+        db.save_provider(
+            "codex",
+            &target_with_models(json!([{ "model": "qwen3.8" }])),
+        )
+        .expect("save target");
+        db.save_provider(
+            "codex",
+            &legacy_router(prefix_only_route(
+                &["qwen"],
+                json!({"auth": {"source": "provider_config"}}),
+            )),
+        )
+        .expect("save router");
+        let revision = codex_multirouter_revision(&db, "router").expect("revision");
+        let preview = preview_codex_multirouter_migration(&db, "router", &revision)
+            .expect("prefix-only preview");
+        let plan = applied_plan(&db, &revision, &preview);
+
+        let mut target = db
+            .get_provider_by_id("qwen", "codex")
+            .expect("read target")
+            .expect("target exists");
+        target.settings_config["modelCatalog"]["models"] = json!([
+            {"model": "qwen3.8"},
+            {"model": "qwen3.10"}
+        ]);
+        db.save_provider("codex", &target)
+            .expect("save refreshed target");
+        let providers = db
+            .get_all_providers("codex")
+            .expect("providers")
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        let compiled = compile_v2(&plan, &providers).expect("compile frozen include");
+        assert!(compiled
+            .model_catalog
+            .iter()
+            .any(|model| model.visible_model == "qwen3.8"));
+        assert!(!compiled
+            .model_catalog
+            .iter()
+            .any(|model| model.visible_model == "qwen3.10"));
+    }
+
+    #[test]
+    fn prefix_only_legacy_route_migration_apply_is_idempotent() {
+        let db = Database::memory().expect("memory db");
+        db.save_provider(
+            "codex",
+            &target_with_models(json!([{ "model": "qwen3.8" }])),
+        )
+        .expect("save target");
+        db.save_provider(
+            "codex",
+            &legacy_router(prefix_only_route(
+                &["qwen"],
+                json!({"auth": {"source": "provider_config"}}),
+            )),
+        )
+        .expect("save router");
+        let revision = codex_multirouter_revision(&db, "router").expect("revision");
+        let preview = preview_codex_multirouter_migration(&db, "router", &revision)
+            .expect("prefix-only preview");
+        let first =
+            apply_codex_multirouter_migration(&db, "router", &revision, &preview.plan_token)
+                .expect("first apply");
+        let second =
+            apply_codex_multirouter_migration(&db, "router", &revision, &preview.plan_token)
+                .expect("second apply");
+        assert!(!first.already_applied);
+        assert!(second.already_applied);
+        assert_eq!(first.revision, second.revision);
+        let migrated = db
+            .get_provider_by_id("router", "codex")
+            .expect("read router")
+            .expect("router exists");
+        assert_eq!(
+            migrated.settings_config["codexRouting"]["routes"][0]["modelSelection"]["models"],
+            json!(["qwen3.8"])
+        );
+    }
+
     #[test]
     fn preview_inherits_stale_provider_snapshot_and_is_secret_free() {
         let db = Database::memory().expect("memory db");
@@ -856,7 +1343,7 @@ mod tests {
             .expect("router exists");
         assert_eq!(
             migrated.settings_config["codexRouting"]["routes"][0]["modelSelection"]["mode"],
-            "all"
+            "include"
         );
         assert_eq!(
             migrated.settings_config["codexRouting"]["spawnAgentModels"],
