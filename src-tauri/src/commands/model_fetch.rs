@@ -410,6 +410,18 @@ mod tests {
     }
 
     #[test]
+    fn protocol_probe_url_preserves_query_parameters_when_switching_transport() {
+        assert_eq!(
+            build_chat_probe_url(
+                "https://azure.example/openai/v1/responses?api-version=2026-08-01&key=secret",
+                true
+            )
+            .unwrap(),
+            "https://azure.example/openai/v1/chat/completions?api-version=2026-08-01&key=secret"
+        );
+    }
+
+    #[test]
     fn responses_probe_url_respects_versioned_base_url() {
         assert_eq!(
             build_responses_probe_url("https://open.bigmodel.cn/api/coding/paas/v4", false)

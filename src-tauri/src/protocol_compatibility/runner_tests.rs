@@ -31,6 +31,9 @@ enum ResponsesMode {
     OpaqueReasoning,
     BaselineUnsupported,
     ToolUnsupported,
+    InvalidSuccessfulJson,
+    IncompleteContinuation,
+    MarkerMismatch,
 }
 
 #[derive(Clone)]
@@ -120,6 +123,23 @@ async fn upstream(
             })
     };
 
+    if is_responses && matches!(state.responses_mode, ResponsesMode::InvalidSuccessfulJson) {
+        return Json(json!({})).into_response();
+    }
+
+    if is_responses
+        && is_continuation
+        && matches!(state.responses_mode, ResponsesMode::IncompleteContinuation)
+    {
+        return Json(json!({
+            "id": "resp_incomplete",
+            "object": "response",
+            "status": "in_progress",
+            "output": []
+        }))
+        .into_response();
+    }
+
     if is_responses
         && is_forced_tool
         && matches!(state.responses_mode, ResponsesMode::ToolUnsupported)
@@ -131,9 +151,20 @@ async fn upstream(
         let nonce = extract_nonce(&body).unwrap();
         if is_responses {
             return sse(format!(
-                "event: response.output_item.done\ndata: {}\n\nevent: response.completed\ndata: {{\"response\":{{\"status\":\"completed\"}}}}\n\n",
+                "event: response.output_item.done\ndata: {}\n\nevent: response.output_item.done\ndata: {}\n\nevent: response.completed\ndata: {{\"response\":{{\"status\":\"completed\"}}}}\n\n",
                 json!({
                     "item": {
+                        "id": "rs_fixture",
+                        "type": "reasoning",
+                        "content": [{
+                            "type": "reasoning_text",
+                            "text": "private tool reasoning"
+                        }]
+                    }
+                }),
+                json!({
+                    "item": {
+                        "id": "fc_fixture",
                         "type": "function_call",
                         "call_id": "call_responses",
                         "name": "ccsm_protocol_compatibility_probe",
@@ -174,12 +205,12 @@ async fn upstream(
             return sse(
                 format!(
                     "{reasoning_event}{}",
-                    "event: response.output_text.delta\ndata: {\"delta\":\"baseline\"}\n\nevent: response.completed\ndata: {\"response\":{\"status\":\"completed\"}}\n\n"
+                    "event: response.output_text.delta\ndata: {\"delta\":\"CCSM_PROTOCOL_BASELINE_OK\"}\n\nevent: response.completed\ndata: {\"response\":{\"status\":\"completed\"}}\n\n"
                 ),
             );
         }
         return sse(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"baseline\"}}]}\n\ndata: [DONE]\n\n"
+            "data: {\"choices\":[{\"delta\":{\"content\":\"CCSM_PROTOCOL_BASELINE_OK\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
                 .to_string(),
         );
     }
@@ -199,12 +230,19 @@ async fn upstream(
             })],
         };
         let mut output = reasoning;
+        let completion_text = if matches!(state.responses_mode, ResponsesMode::MarkerMismatch) {
+            "MODEL_IGNORED_REQUESTED_MARKER"
+        } else if is_continuation {
+            "CCSM_PROTOCOL_TOOL_DONE"
+        } else {
+            "CCSM_PROTOCOL_BASELINE_OK"
+        };
         output.push(json!({
             "type": "message",
             "role": "assistant",
             "content": [{
                 "type": "output_text",
-                "text": if is_continuation { "tool complete" } else { "baseline" }
+                "text": completion_text
             }]
         }));
         Json(json!({
@@ -215,13 +253,20 @@ async fn upstream(
         }))
         .into_response()
     } else {
+        let completion_text = if matches!(state.responses_mode, ResponsesMode::MarkerMismatch) {
+            "MODEL_IGNORED_REQUESTED_MARKER"
+        } else if is_continuation {
+            "CCSM_PROTOCOL_TOOL_DONE"
+        } else {
+            "CCSM_PROTOCOL_BASELINE_OK"
+        };
         Json(json!({
             "id": "chatcmpl_fixture",
             "object": "chat.completion",
             "choices": [{
                 "message": {
                     "role": "assistant",
-                    "content": if is_continuation { "tool complete" } else { "baseline" }
+                    "content": completion_text
                 },
                 "finish_reason": "stop"
             }]
@@ -343,6 +388,78 @@ async fn probes_all_four_stages_on_both_protocols_and_selects_responses_on_a_tie
         .unwrap()
         .iter()
         .any(|message| message.get("tool_calls").is_some()));
+
+    let responses_continuation = requests
+        .iter()
+        .find(|(path, body)| {
+            path.ends_with("/responses")
+                && body
+                    .get("input")
+                    .and_then(Value::as_array)
+                    .is_some_and(|items| {
+                        items.iter().any(|item| {
+                            item.get("type").and_then(Value::as_str) == Some("function_call_output")
+                        })
+                    })
+        })
+        .unwrap();
+    let responses_input = responses_continuation.1["input"].as_array().unwrap();
+    assert!(responses_input
+        .iter()
+        .any(|item| item["id"] == "rs_fixture"));
+    assert!(responses_input
+        .iter()
+        .any(|item| item["id"] == "fc_fixture"));
+}
+
+#[tokio::test]
+async fn parseable_but_invalid_success_json_does_not_pass_responses_baseline() {
+    let fixture = spawn_fixture(ResponsesMode::InvalidSuccessfulJson).await;
+    let result = run_protocol_compatibility_probe(
+        candidate(&fixture.base_url, TransportKind::OpenAiResponses),
+        &reqwest::Client::new(),
+    )
+    .await;
+
+    let responses = result
+        .branches
+        .iter()
+        .find(|branch| branch.assessment.transport == TransportKind::OpenAiResponses)
+        .unwrap();
+    assert_eq!(responses.assessment.baseline, ProbeStageStatus::Failed);
+}
+
+#[tokio::test]
+async fn incomplete_success_json_does_not_pass_responses_continuation() {
+    let fixture = spawn_fixture(ResponsesMode::IncompleteContinuation).await;
+    let result = run_protocol_compatibility_probe(
+        candidate(&fixture.base_url, TransportKind::OpenAiResponses),
+        &reqwest::Client::new(),
+    )
+    .await;
+
+    let responses = result
+        .branches
+        .iter()
+        .find(|branch| branch.assessment.transport == TransportKind::OpenAiResponses)
+        .unwrap();
+    assert_eq!(responses.assessment.continuation, ProbeStageStatus::Failed);
+}
+
+#[tokio::test]
+async fn marker_mismatch_is_diagnostic_and_does_not_fail_protocol_capabilities() {
+    let fixture = spawn_fixture(ResponsesMode::MarkerMismatch).await;
+    let result = run_protocol_compatibility_probe(
+        candidate(&fixture.base_url, TransportKind::OpenAiResponses),
+        &reqwest::Client::new(),
+    )
+    .await;
+
+    assert_eq!(result.readiness, ProbeReadiness::Verified);
+    assert!(result.branches.iter().all(|branch| {
+        branch.assessment.baseline == ProbeStageStatus::Passed
+            && branch.assessment.continuation == ProbeStageStatus::Passed
+    }));
 }
 
 #[tokio::test]

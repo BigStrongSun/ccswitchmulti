@@ -3,12 +3,14 @@ use sha2::{Digest, Sha256};
 
 use super::{
     ProbeReadiness, ProbeTargetKey, ProtocolCompatibilityProbeResult, ReasoningProjection,
-    ReasoningSemantic, ReasoningSource,
+    ReasoningSemantic, ReasoningSource, PROBE_PROFILE_VERSION,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProtocolCompatibilityRecord {
+    #[serde(default)]
+    pub probe_version: u32,
     pub target: ProbeTargetKey,
     pub result: ProtocolCompatibilityProbeResult,
     pub tested_at: i64,
@@ -23,6 +25,7 @@ impl ProtocolCompatibilityRecord {
         expires_at: i64,
     ) -> Self {
         Self {
+            probe_version: PROBE_PROFILE_VERSION,
             target,
             result,
             tested_at,
@@ -35,7 +38,10 @@ impl ProtocolCompatibilityRecord {
     }
 
     pub fn automatic_reasoning_projection(&self, now: i64) -> ReasoningProjection {
-        if self.expires_at < now || self.result.readiness != ProbeReadiness::Verified {
+        if self.probe_version != PROBE_PROFILE_VERSION
+            || self.expires_at < now
+            || self.result.readiness != ProbeReadiness::Verified
+        {
             return ReasoningProjection::None;
         }
 
@@ -195,6 +201,26 @@ mod tests {
 
         assert_eq!(
             record.automatic_reasoning_projection(200),
+            ReasoningProjection::None
+        );
+    }
+
+    #[test]
+    fn stale_probe_classifier_version_never_projects_reasoning() {
+        let mut record = record(
+            Some(TransportKind::OpenAiChat),
+            ProbeReadiness::Verified,
+            json!([branch(
+                TransportKind::OpenAiChat,
+                "readable",
+                "reasoning_content"
+            )]),
+            200,
+        );
+        record.probe_version = 0;
+
+        assert_eq!(
+            record.automatic_reasoning_projection(150),
             ReasoningProjection::None
         );
     }

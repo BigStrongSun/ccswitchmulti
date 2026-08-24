@@ -259,6 +259,7 @@ impl Database {
         .map_err(|e| AppError::Database(e.to_string()))?;
 
         Self::create_protocol_compatibility_tables(conn)?;
+        Self::create_reasoning_manual_override_tables(conn)?;
 
         // 注意：circuit_breaker_config 已合并到 proxy_config 表中
 
@@ -529,6 +530,11 @@ impl Database {
                         log::info!("迁移数据库从 v16 到 v17（添加协议兼容性探测档案）");
                         Self::migrate_v16_to_v17(conn)?;
                         Self::set_user_version(conn, 17)?;
+                    }
+                    17 => {
+                        log::info!("迁移数据库从 v17 到 v18（添加 Codex reasoning 手工覆盖）");
+                        Self::migrate_v17_to_v18(conn)?;
+                        Self::set_user_version(conn, 18)?;
                     }
                     _ => {
                         return Err(AppError::Database(format!(
@@ -1557,6 +1563,10 @@ impl Database {
         Self::create_protocol_compatibility_tables(conn)
     }
 
+    fn migrate_v17_to_v18(conn: &Connection) -> Result<(), AppError> {
+        Self::create_reasoning_manual_override_tables(conn)
+    }
+
     fn create_protocol_compatibility_tables(conn: &Connection) -> Result<(), AppError> {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS protocol_compatibility_profiles (
@@ -1580,6 +1590,26 @@ impl Database {
         )
         .map_err(|error| {
             AppError::Database(format!("创建 protocol_compatibility_profiles 失败: {error}"))
+        })
+    }
+
+    fn create_reasoning_manual_override_tables(conn: &Connection) -> Result<(), AppError> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS codex_reasoning_manual_overrides (
+                target_key TEXT PRIMARY KEY,
+                target_json TEXT NOT NULL,
+                revision INTEGER NOT NULL,
+                override_json TEXT,
+                reason TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_codex_reasoning_manual_overrides_updated
+             ON codex_reasoning_manual_overrides(updated_at DESC);",
+        )
+        .map_err(|error| {
+            AppError::Database(format!(
+                "创建 codex_reasoning_manual_overrides 失败: {error}"
+            ))
         })
     }
 

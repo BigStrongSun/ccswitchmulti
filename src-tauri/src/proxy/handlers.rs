@@ -59,6 +59,10 @@ use super::{
 };
 use crate::app_config::AppType;
 use crate::database::PRICING_SOURCE_REQUEST;
+use crate::protocol_compatibility::{
+    capture_chat_json_shape, capture_chat_sse_stream,
+    runtime_observer::observe_and_expire_protocol_profile, ProtocolCompatibilityRecord,
+};
 use crate::proxy::json_canonical::short_sha256_hex;
 use axum::{
     extract::{
@@ -3350,16 +3354,24 @@ fn create_codex_chat_sse_stream_from_verified_profile<E: std::error::Error + Sen
     provider: &crate::provider::Provider,
     public_model: &str,
     upstream_model: &str,
-    db: &crate::database::Database,
+    db: std::sync::Arc<crate::database::Database>,
     now: i64,
 ) -> impl futures::Stream<Item = Result<Bytes, std::io::Error>> + Send {
     let reasoning_projection = super::providers::resolve_codex_chat_reasoning_projection(
         provider,
         public_model,
         upstream_model,
-        db,
+        db.as_ref(),
         now,
     );
+    let observation =
+        load_runtime_observation_profile(provider, public_model, upstream_model, db.as_ref(), now)
+            .map(|(target, profile)| (target, profile, db));
+    let stream = capture_chat_sse_stream(stream, move |observed| {
+        if let Some((target, profile, db)) = observation {
+            observe_and_expire_protocol_profile(db.as_ref(), &target, &profile, &observed, now);
+        }
+    });
     create_responses_sse_stream_from_chat_with_context_and_projection(
         stream,
         tool_context,
@@ -3376,6 +3388,7 @@ fn chat_completion_to_response_from_verified_profile(
     db: &crate::database::Database,
     now: i64,
 ) -> Result<Value, ProxyError> {
+    observe_codex_chat_json_profile(provider, public_model, upstream_model, db, &body, now);
     let reasoning_projection = super::providers::resolve_codex_chat_reasoning_projection(
         provider,
         public_model,
@@ -3388,6 +3401,53 @@ fn chat_completion_to_response_from_verified_profile(
         tool_context,
         reasoning_projection,
     )
+}
+
+fn load_runtime_observation_profile(
+    provider: &crate::provider::Provider,
+    public_model: &str,
+    upstream_model: &str,
+    db: &crate::database::Database,
+    now: i64,
+) -> Option<(
+    crate::protocol_compatibility::ProbeTargetKey,
+    ProtocolCompatibilityRecord,
+)> {
+    let target = super::providers::resolve_codex_chat_protocol_target(
+        provider,
+        public_model,
+        upstream_model,
+    )?;
+    let profile = db
+        .get_protocol_compatibility_result(&target)
+        .ok()
+        .flatten()?;
+    if profile.probe_version != crate::protocol_compatibility::PROBE_PROFILE_VERSION
+        || profile.expires_at < now
+        || profile.result.readiness != crate::protocol_compatibility::ProbeReadiness::Verified
+        || profile.result.selected_transport
+            != Some(crate::protocol_compatibility::TransportKind::OpenAiChat)
+    {
+        return None;
+    }
+    Some((target, profile))
+}
+
+fn observe_codex_chat_json_profile(
+    provider: &crate::provider::Provider,
+    public_model: &str,
+    upstream_model: &str,
+    db: &crate::database::Database,
+    body: &Value,
+    now: i64,
+) {
+    let Some((target, profile)) =
+        load_runtime_observation_profile(provider, public_model, upstream_model, db, now)
+    else {
+        return;
+    };
+    let observed = capture_chat_json_shape(body);
+    observe_and_expire_protocol_profile(db, &target, &profile, &observed, now);
 }
 
 async fn handle_codex_chat_to_responses_transform(
@@ -3602,7 +3662,7 @@ async fn handle_codex_chat_to_responses_transform(
             &ctx.provider,
             &ctx.request_model,
             upstream_model,
-            state.db.as_ref(),
+            state.db.clone(),
             projection_now,
         );
         let sse_stream = record_responses_sse_stream(sse_stream, state.codex_chat_history.clone());
@@ -5712,7 +5772,8 @@ mod tests {
             "https://qwen.example/v1/chat/completions",
             "bearer",
         )
-        .expect("profile target");
+        .expect("profile target")
+        .with_credential("");
         let result: ProtocolCompatibilityProbeResult = serde_json::from_value(json!({
             "selected_transport": "open_ai_chat",
             "readiness": "verified",
@@ -5755,7 +5816,7 @@ mod tests {
             &provider,
             "qwen-public",
             "qwen-mapped",
-            &db,
+            std::sync::Arc::new(db),
             200,
         )
         .map(|item| item.expect("converted SSE"))
@@ -5802,6 +5863,94 @@ mod tests {
         assert_eq!(
             response["output"][1]["content"][0]["text"],
             "Visible answer."
+        );
+    }
+
+    #[test]
+    fn non_streaming_runtime_reasoning_source_drift_expires_profile_before_projection() {
+        let db = Database::memory().expect("memory database");
+        let provider = verified_qwen_chat_profile(&db);
+        let response = chat_completion_to_response_from_verified_profile(
+            json!({
+                "id": "chatcmpl_projection_drift",
+                "model": "qwen-mapped",
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "reasoning": "Changed field.",
+                        "content": "Visible answer."
+                    },
+                    "finish_reason": "stop"
+                }]
+            }),
+            &super::transform_codex_chat::CodexToolContext::default(),
+            &provider,
+            "qwen-public",
+            "qwen-mapped",
+            &db,
+            150,
+        )
+        .expect("converted response");
+
+        assert_eq!(response["output"].as_array().unwrap().len(), 1);
+        assert_eq!(response["output"][0]["type"], "message");
+        let target = ProbeTargetKey::new(
+            "qwen-provider",
+            None::<String>,
+            "qwen-public",
+            "qwen-mapped",
+            TransportKind::OpenAiChat,
+            "https://qwen.example/v1/chat/completions",
+            "bearer",
+        )
+        .unwrap()
+        .with_credential("");
+        assert_eq!(
+            db.get_protocol_compatibility_result(&target)
+                .unwrap()
+                .unwrap()
+                .expires_at,
+            149
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_runtime_reasoning_source_drift_expires_profile_after_stream() {
+        let db = std::sync::Arc::new(Database::memory().expect("memory database"));
+        let provider = verified_qwen_chat_profile(db.as_ref());
+        let upstream = futures::stream::iter(vec![Ok::<_, std::io::Error>(Bytes::from_static(
+            b"data: {\"id\":\"chatcmpl_projection_drift\",\"model\":\"qwen-mapped\",\"choices\":[{\"delta\":{\"reasoning\":\"Changed field.\"}}]}\n\ndata: {\"id\":\"chatcmpl_projection_drift\",\"model\":\"qwen-mapped\",\"choices\":[{\"delta\":{\"content\":\"Visible answer.\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+        ))]);
+
+        let _ = create_codex_chat_sse_stream_from_verified_profile(
+            upstream,
+            super::transform_codex_chat::CodexToolContext::default(),
+            &provider,
+            "qwen-public",
+            "qwen-mapped",
+            db.clone(),
+            150,
+        )
+        .collect::<Vec<_>>()
+        .await;
+
+        let target = ProbeTargetKey::new(
+            "qwen-provider",
+            None::<String>,
+            "qwen-public",
+            "qwen-mapped",
+            TransportKind::OpenAiChat,
+            "https://qwen.example/v1/chat/completions",
+            "bearer",
+        )
+        .unwrap()
+        .with_credential("");
+        assert_eq!(
+            db.get_protocol_compatibility_result(&target)
+                .unwrap()
+                .unwrap()
+                .expires_at,
+            149
         );
     }
 

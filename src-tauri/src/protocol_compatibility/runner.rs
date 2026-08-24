@@ -40,6 +40,12 @@ impl fmt::Debug for TransportBranchResult {
     }
 }
 
+impl TransportBranchResult {
+    pub(crate) fn evidence(&self) -> &[RedactedProbeEvidence] {
+        &self.evidence
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtocolCompatibilityProbeResult {
     pub selected_transport: Option<TransportKind>,
@@ -130,9 +136,17 @@ async fn run_branch(
     )
     .await;
     let baseline_exchange = match baseline {
-        Ok(exchange) => {
+        Ok(exchange) if has_completed_assistant_turn(transport, &exchange) => {
             assessment.baseline = ProbeStageStatus::Passed;
             exchange
+        }
+        Ok(_) => {
+            assessment.baseline = ProbeStageStatus::Failed;
+            return TransportBranchResult {
+                assessment,
+                reasoning_shape,
+                evidence,
+            };
         }
         Err(error) => {
             assessment.baseline = baseline_failure_status(error);
@@ -185,7 +199,7 @@ async fn run_branch(
         None,
     )
     .await;
-    let tool_call = match forced {
+    let (tool_call, forced_exchange) = match forced {
         Ok(exchange) => {
             update_shape(
                 &mut reasoning_shape,
@@ -196,7 +210,7 @@ async fn run_branch(
             match call.filter(|call| valid_probe_tool_call(call, nonce)) {
                 Some(call) => {
                     assessment.forced_tool = ProbeStageStatus::Passed;
-                    call
+                    (call, exchange)
                 }
                 None => {
                     assessment.forced_tool = ProbeStageStatus::Unsupported;
@@ -225,12 +239,16 @@ async fn run_branch(
         &endpoint,
         ProbeCase::ToolContinuationJson,
         nonce,
-        Some(&tool_call),
+        Some((&tool_call, &forced_exchange)),
     )
     .await
     {
         Ok(exchange) => {
-            assessment.continuation = ProbeStageStatus::Passed;
+            assessment.continuation = if has_completed_assistant_turn(transport, &exchange) {
+                ProbeStageStatus::Passed
+            } else {
+                ProbeStageStatus::Failed
+            };
             update_shape(
                 &mut reasoning_shape,
                 classify_captured_reasoning_shape(&exchange),
@@ -255,10 +273,16 @@ async fn send_case(
     endpoint: &str,
     case: ProbeCase,
     nonce: &str,
-    tool_call: Option<&CapturedToolCall>,
+    continuation: Option<(&CapturedToolCall, &CapturedProbeExchange)>,
 ) -> Result<CapturedProbeExchange, ProbeCaptureError> {
-    let logical = match tool_call {
-        Some(tool_call) => build_continuation_request(&candidate.upstream_model, nonce, tool_call),
+    let logical = match continuation {
+        Some((tool_call, exchange)) => build_continuation_request(
+            &candidate.upstream_model,
+            nonce,
+            transport,
+            tool_call,
+            exchange,
+        ),
         None => build_logical_probe_request(case, &candidate.upstream_model, nonce),
     };
     let wire_body = match transport {
@@ -276,7 +300,13 @@ async fn send_case(
     capture_transport_probe(request, RESPONSE_TIMEOUT).await
 }
 
-fn build_continuation_request(model: &str, nonce: &str, tool_call: &CapturedToolCall) -> Value {
+fn build_continuation_request(
+    model: &str,
+    nonce: &str,
+    transport: TransportKind,
+    tool_call: &CapturedToolCall,
+    exchange: &CapturedProbeExchange,
+) -> Value {
     let mut request = build_logical_probe_request(ProbeCase::ForcedToolSse, model, nonce);
     request["stream"] = Value::Bool(false);
     if let Some(object) = request.as_object_mut() {
@@ -287,16 +317,20 @@ fn build_continuation_request(model: &str, nonce: &str, tool_call: &CapturedTool
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let mut function_call = json!({
-        "type": "function_call",
-        "call_id": tool_call.call_id,
-        "name": tool_call.name,
-        "arguments": tool_call.arguments
-    });
-    if !tool_call.reasoning_content.is_empty() {
-        function_call["reasoning_content"] = Value::String(tool_call.reasoning_content.clone());
+    if transport == TransportKind::OpenAiResponses {
+        input.extend(extract_responses_output_items(exchange));
+    } else {
+        let mut function_call = json!({
+            "type": "function_call",
+            "call_id": tool_call.call_id,
+            "name": tool_call.name,
+            "arguments": tool_call.arguments
+        });
+        if !tool_call.reasoning_content.is_empty() {
+            function_call["reasoning_content"] = Value::String(tool_call.reasoning_content.clone());
+        }
+        input.push(function_call);
     }
-    input.push(function_call);
     input.push(json!({
         "type": "function_call_output",
         "call_id": tool_call.call_id,
@@ -304,6 +338,24 @@ fn build_continuation_request(model: &str, nonce: &str, tool_call: &CapturedTool
     }));
     request["input"] = Value::Array(input);
     request
+}
+
+fn extract_responses_output_items(exchange: &CapturedProbeExchange) -> Vec<Value> {
+    if let Some(output) = exchange.payloads().iter().find_map(|payload| {
+        payload
+            .value
+            .pointer("/response/output")
+            .and_then(Value::as_array)
+    }) {
+        return output.clone();
+    }
+
+    exchange
+        .payloads()
+        .iter()
+        .filter(|payload| payload.event_type.as_deref() == Some("response.output_item.done"))
+        .filter_map(|payload| payload.value.get("item").cloned())
+        .collect()
 }
 
 fn extract_tool_call(
@@ -413,6 +465,82 @@ fn has_stream_terminal(transport: TransportKind, exchange: &CapturedProbeExchang
             .event_types
             .iter()
             .any(|event| event == "response.completed"),
+    }
+}
+
+fn has_completed_assistant_turn(
+    transport: TransportKind,
+    exchange: &CapturedProbeExchange,
+) -> bool {
+    match transport {
+        TransportKind::OpenAiChat => {
+            let mut text = String::new();
+            let mut completed = exchange.saw_done();
+            for payload in exchange.payloads() {
+                let choices = payload
+                    .value
+                    .get("choices")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten();
+                for choice in choices {
+                    completed |=
+                        choice.get("finish_reason").and_then(Value::as_str) == Some("stop");
+                    append_text_field(
+                        choice
+                            .get("message")
+                            .and_then(|message| message.get("content")),
+                        &mut text,
+                    );
+                    append_text_field(
+                        choice.get("delta").and_then(|delta| delta.get("content")),
+                        &mut text,
+                    );
+                }
+            }
+            completed && !text.trim().is_empty()
+        }
+        TransportKind::OpenAiResponses => {
+            let mut text = String::new();
+            let mut completed = false;
+            for payload in exchange.payloads() {
+                completed |= payload.value.get("status").and_then(Value::as_str)
+                    == Some("completed")
+                    || payload
+                        .value
+                        .pointer("/response/status")
+                        .and_then(Value::as_str)
+                        == Some("completed");
+                if payload.event_type.as_deref() == Some("response.output_text.delta") {
+                    append_text_field(payload.value.get("delta"), &mut text);
+                }
+                if let Some(output) = payload
+                    .value
+                    .get("output")
+                    .and_then(Value::as_array)
+                    .or_else(|| {
+                        payload
+                            .value
+                            .pointer("/response/output")
+                            .and_then(Value::as_array)
+                    })
+                {
+                    for item in output {
+                        if item.get("type").and_then(Value::as_str) != Some("message")
+                            || item.get("role").and_then(Value::as_str) != Some("assistant")
+                        {
+                            continue;
+                        }
+                        if let Some(content) = item.get("content").and_then(Value::as_array) {
+                            for part in content {
+                                append_text_field(part.get("text"), &mut text);
+                            }
+                        }
+                    }
+                }
+            }
+            completed && !text.trim().is_empty()
+        }
     }
 }
 

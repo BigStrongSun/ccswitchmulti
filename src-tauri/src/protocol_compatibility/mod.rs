@@ -10,9 +10,15 @@ mod redaction;
 pub use redaction::{redact_json_probe_response, redact_sse_probe_response};
 
 mod classify;
-#[cfg(test)]
-pub use classify::classify_reasoning_shape;
-pub use classify::{classify_captured_reasoning_shape, PreToolVisibleContent};
+pub(crate) use classify::classify_reasoning_shape;
+pub use classify::{
+    classify_captured_reasoning_shape, ClassifiedReasoningShape, PreToolVisibleContent,
+};
+
+pub mod runtime_observer;
+
+mod runtime_capture;
+pub(crate) use runtime_capture::{capture_chat_json_shape, capture_chat_sse_stream};
 
 mod capture;
 #[cfg(test)]
@@ -27,8 +33,10 @@ mod runner;
 pub use runner::{run_protocol_compatibility_probe, ProtocolCompatibilityProbeResult};
 
 mod provider;
+#[cfg(test)]
+pub(crate) use provider::apply_selected_transport_to_provider;
 pub use provider::{
-    apply_probe_selection_to_provider, apply_selected_transport_to_provider,
+    apply_probe_selection_to_provider, compile_codex_router_probe_candidates,
     compile_provider_probe_candidate,
 };
 
@@ -36,6 +44,8 @@ pub(crate) mod profile;
 pub use profile::ProtocolCompatibilityRecord;
 
 pub(crate) mod endpoint;
+
+pub const PROBE_PROFILE_VERSION: u32 = 1;
 
 const BASELINE_PROMPT: &str =
     "CCSM protocol compatibility probe. Solve 17 + 25 internally. Reply only CCSM_PROTOCOL_BASELINE_OK.";
@@ -137,7 +147,7 @@ impl ProbeCandidate {
             public_model: public_model.into(),
             upstream_model: upstream_model.into(),
             transport,
-            endpoint: canonicalize_endpoint(endpoint)?,
+            endpoint: parse_request_endpoint(endpoint)?,
             authentication_kind: authentication_kind.into(),
             is_full_url: false,
             bearer_token: None,
@@ -165,6 +175,24 @@ impl ProbeCandidate {
     pub(super) fn bearer_token(&self) -> Option<&HeaderValue> {
         self.bearer_token.as_ref()
     }
+
+    pub(crate) fn credential_fingerprint(&self) -> String {
+        self.bearer_token
+            .as_ref()
+            .map(|value| format!("{:x}", Sha256::digest(value.as_bytes())))
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn lease_key(&self) -> String {
+        let material = serde_json::json!({
+            "upstreamModel": self.upstream_model,
+            "endpoint": self.endpoint.as_str(),
+            "authenticationKind": self.authentication_kind,
+            "credentialFingerprint": self.credential_fingerprint(),
+            "isFullUrl": self.is_full_url,
+        });
+        format!("{:x}", Sha256::digest(material.to_string().as_bytes()))
+    }
 }
 
 impl fmt::Debug for ProbeCandidate {
@@ -176,7 +204,7 @@ impl fmt::Debug for ProbeCandidate {
             .field("public_model", &self.public_model)
             .field("upstream_model", &self.upstream_model)
             .field("transport", &self.transport)
-            .field("endpoint", &self.endpoint)
+            .field("endpoint", &redacted_endpoint_for_debug(&self.endpoint))
             .field("authentication_kind", &self.authentication_kind)
             .field("is_full_url", &self.is_full_url)
             .field("has_bearer_token", &self.bearer_token.is_some())
@@ -184,11 +212,23 @@ impl fmt::Debug for ProbeCandidate {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ManualReasoningOverride {
     pub semantic: ReasoningSemantic,
     pub source: ReasoningSource,
     pub history_replay: HistoryReplay,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReasoningManualOverrideRecord {
+    pub target: ProbeTargetKey,
+    pub revision: i64,
+    pub override_spec: ManualReasoningOverride,
+    pub projection: ReasoningProjection,
+    pub reason: String,
+    pub updated_at: i64,
 }
 
 impl ManualReasoningOverride {
@@ -238,6 +278,8 @@ pub struct ProbeTargetKey {
     pub transport: TransportKind,
     pub endpoint_fingerprint: String,
     pub authentication_kind: String,
+    #[serde(default)]
+    pub credential_fingerprint: String,
 }
 
 impl ProbeTargetKey {
@@ -251,7 +293,7 @@ impl ProbeTargetKey {
         endpoint: &str,
         authentication_kind: impl Into<String>,
     ) -> Result<Self, url::ParseError> {
-        let parsed = canonicalize_endpoint(endpoint)?;
+        let parsed = fingerprint_endpoint(endpoint)?;
 
         let endpoint_fingerprint = format!("{:x}", Sha256::digest(parsed.as_str().as_bytes()));
 
@@ -263,21 +305,44 @@ impl ProbeTargetKey {
             transport,
             endpoint_fingerprint,
             authentication_kind: authentication_kind.into(),
+            credential_fingerprint: String::new(),
         })
+    }
+
+    pub fn with_credential(mut self, credential: &str) -> Self {
+        self.credential_fingerprint = format!(
+            "{:x}",
+            Sha256::digest(format!("Bearer {}", credential.trim()).as_bytes())
+        );
+        self
+    }
+
+    pub(crate) fn with_credential_fingerprint(mut self, fingerprint: String) -> Self {
+        self.credential_fingerprint = fingerprint;
+        self
     }
 }
 
-fn canonicalize_endpoint(endpoint: &str) -> Result<Url, url::ParseError> {
+fn parse_request_endpoint(endpoint: &str) -> Result<Url, url::ParseError> {
     let mut parsed = Url::parse(endpoint)?;
-    parsed
-        .set_username("")
-        .expect("parsed URL username is mutable");
-    parsed
-        .set_password(None)
-        .expect("parsed URL password is mutable");
-    parsed.set_query(None);
     parsed.set_fragment(None);
     Ok(parsed)
+}
+
+fn fingerprint_endpoint(endpoint: &str) -> Result<Url, url::ParseError> {
+    parse_request_endpoint(endpoint)
+}
+
+fn redacted_endpoint_for_debug(endpoint: &Url) -> String {
+    let mut redacted = endpoint.clone();
+    redacted
+        .set_username("")
+        .expect("parsed URL username is mutable");
+    redacted
+        .set_password(None)
+        .expect("parsed URL password is mutable");
+    redacted.set_query(None);
+    redacted.to_string()
 }
 
 pub fn build_logical_probe_request(case: ProbeCase, model: &str, nonce: &str) -> Value {
@@ -329,6 +394,8 @@ mod cases;
 #[cfg(test)]
 mod classify_tests;
 #[cfg(test)]
+mod provider_tests;
+#[cfg(test)]
 mod redaction_tests;
 #[cfg(test)]
 mod runner_tests;
@@ -336,5 +403,3 @@ mod runner_tests;
 mod selection_tests;
 #[cfg(test)]
 mod types;
-#[cfg(test)]
-mod provider_tests;

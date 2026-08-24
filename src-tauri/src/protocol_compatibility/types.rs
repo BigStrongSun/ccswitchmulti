@@ -4,7 +4,7 @@ use super::{
 };
 
 #[test]
-fn target_key_fingerprint_removes_credentials_query_and_fragment() {
+fn target_key_fingerprint_binds_query_parameters_without_serializing_them() {
     let first = ProbeTargetKey::new(
         "provider-a",
         Some("route-a"),
@@ -26,9 +26,110 @@ fn target_key_fingerprint_removes_credentials_query_and_fragment() {
     )
     .unwrap();
 
-    assert_eq!(first.endpoint_fingerprint, second.endpoint_fingerprint);
+    assert_ne!(first.endpoint_fingerprint, second.endpoint_fingerprint);
     assert!(!first.endpoint_fingerprint.contains("secret"));
     assert!(!first.endpoint_fingerprint.contains("leak"));
+}
+
+#[test]
+fn candidate_preserves_the_exact_query_for_the_probe_request() {
+    let candidate = ProbeCandidate::new(
+        None::<String>,
+        None::<String>,
+        "public-model",
+        "upstream-model",
+        TransportKind::OpenAiResponses,
+        "https://example.test/v1/responses?api-version=2026-08-01&key=query-secret",
+        "query",
+    )
+    .unwrap();
+
+    assert_eq!(
+        candidate.canonical_endpoint(),
+        "https://example.test/v1/responses?api-version=2026-08-01&key=query-secret"
+    );
+    assert!(!format!("{candidate:?}").contains("query-secret"));
+}
+
+#[test]
+fn target_key_changes_when_the_bearer_credential_rotates() {
+    let first = ProbeTargetKey::new(
+        "provider-a",
+        None::<String>,
+        "public-model",
+        "upstream-model",
+        TransportKind::OpenAiChat,
+        "https://example.test/v1/chat/completions",
+        "bearer",
+    )
+    .unwrap()
+    .with_credential("first-secret");
+    let second = ProbeTargetKey::new(
+        "provider-a",
+        None::<String>,
+        "public-model",
+        "upstream-model",
+        TransportKind::OpenAiChat,
+        "https://example.test/v1/chat/completions",
+        "bearer",
+    )
+    .unwrap()
+    .with_credential("second-secret");
+
+    assert_ne!(first.credential_fingerprint, second.credential_fingerprint);
+    let serialized = serde_json::to_string(&first).unwrap();
+    assert!(!serialized.contains("first-secret"));
+}
+
+#[test]
+fn probe_lease_key_is_stable_for_the_same_target_and_rotates_with_credentials() {
+    let first = ProbeCandidate::new(
+        Some("provider-a"),
+        Some("route-a"),
+        "public-model",
+        "upstream-model",
+        TransportKind::OpenAiResponses,
+        "https://example.test/v1?api-version=2026-08-01",
+        "bearer",
+    )
+    .unwrap()
+    .with_bearer_token("first-secret")
+    .unwrap();
+    let same = first.clone();
+    let rotated = ProbeCandidate::new(
+        Some("provider-a"),
+        Some("route-a"),
+        "public-model",
+        "upstream-model",
+        TransportKind::OpenAiChat,
+        "https://example.test/v1?api-version=2026-08-01",
+        "bearer",
+    )
+    .unwrap()
+    .with_bearer_token("second-secret")
+    .unwrap();
+    let routed_alias = ProbeCandidate::new(
+        Some("router-b"),
+        Some("route-b"),
+        "different-public-alias",
+        "upstream-model",
+        TransportKind::OpenAiChat,
+        "https://example.test/v1?api-version=2026-08-01",
+        "bearer",
+    )
+    .unwrap()
+    .with_bearer_token("first-secret")
+    .unwrap();
+
+    assert_eq!(first.lease_key(), same.lease_key());
+    assert_eq!(
+        first.lease_key(),
+        routed_alias.lease_key(),
+        "aliases of one physical upstream target must share one paid probe"
+    );
+    assert_ne!(first.lease_key(), rotated.lease_key());
+    assert!(!first.lease_key().contains("first-secret"));
+    assert!(!first.lease_key().contains("api-version"));
 }
 
 #[test]

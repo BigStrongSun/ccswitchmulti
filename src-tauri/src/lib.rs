@@ -1512,6 +1512,10 @@ pub fn run() {
             commands::probe_codex_protocol_compatibility,
             commands::preflight_codex_provider_protocol_compatibility,
             commands::save_codex_provider_with_protocol_preflight,
+            commands::get_codex_protocol_compatibility,
+            commands::plan_codex_reasoning_override,
+            commands::apply_codex_reasoning_override,
+            commands::clear_codex_reasoning_override,
             // ours: endpoint speed test + custom endpoint management
             commands::test_api_endpoints,
             commands::get_custom_endpoints,

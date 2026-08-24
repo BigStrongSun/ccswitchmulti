@@ -15,6 +15,7 @@ use std::future::Future;
 use crate::app_config::AppType;
 use crate::database::{validate_cost_multiplier, validate_pricing_source};
 use crate::error::AppError;
+use crate::protocol_compatibility::ProtocolCompatibilityRecord;
 use crate::provider::{Provider, UsageResult};
 use crate::services::mcp::McpService;
 use crate::settings::CustomEndpoint;
@@ -4217,13 +4218,28 @@ impl ProviderService {
         provider: Provider,
         add_to_live: bool,
     ) -> Result<bool, AppError> {
-        let mut provider = provider;
-        // Normalize Claude model keys
-        Self::normalize_provider_if_claude(&app_type, &mut provider);
-        Self::validate_provider_settings(&app_type, &provider)?;
-        normalize_provider_common_config_for_storage(state.db.as_ref(), &app_type, &mut provider)?;
-        Self::normalize_usage_script_credential_overrides(&app_type, &mut provider);
-        Self::validate_codex_subagent_v2_provider_candidate(state, &provider)?;
+        Self::add_with_protocol_profile(state, app_type, provider, add_to_live, None)
+    }
+
+    pub(crate) fn add_with_protocol_profile(
+        state: &AppState,
+        app_type: AppType,
+        provider: Provider,
+        add_to_live: bool,
+        protocol_profile: Option<&ProtocolCompatibilityRecord>,
+    ) -> Result<bool, AppError> {
+        let profiles = protocol_profile.map(std::slice::from_ref).unwrap_or(&[]);
+        Self::add_with_protocol_profiles(state, app_type, provider, add_to_live, profiles)
+    }
+
+    pub(crate) fn add_with_protocol_profiles(
+        state: &AppState,
+        app_type: AppType,
+        provider: Provider,
+        add_to_live: bool,
+        protocol_profiles: &[ProtocolCompatibilityRecord],
+    ) -> Result<bool, AppError> {
+        let mut provider = Self::prepare_provider_for_mutation(state, &app_type, provider)?;
         if app_type.is_additive_mode() {
             Self::set_provider_live_config_managed(&mut provider, add_to_live);
         }
@@ -4231,7 +4247,7 @@ impl ProviderService {
         // Codex mutations compile all affected schema-v2 plans before committing the Provider,
         // then refresh their derived projections from the database truth. Other applications keep
         // their existing persistence path.
-        Self::persist_provider_mutation(state, &app_type, &provider)?;
+        Self::persist_provider_mutation(state, &app_type, &provider, protocol_profiles)?;
 
         // Additive mode apps (OpenCode, OpenClaw): optionally write to live config.
         if app_type.is_additive_mode() {
@@ -4272,18 +4288,33 @@ impl ProviderService {
         original_id: Option<&str>,
         provider: Provider,
     ) -> Result<bool, AppError> {
-        let mut provider = provider;
+        Self::update_with_protocol_profile(state, app_type, original_id, provider, None)
+    }
+
+    pub(crate) fn update_with_protocol_profile(
+        state: &AppState,
+        app_type: AppType,
+        original_id: Option<&str>,
+        provider: Provider,
+        protocol_profile: Option<&ProtocolCompatibilityRecord>,
+    ) -> Result<bool, AppError> {
+        let profiles = protocol_profile.map(std::slice::from_ref).unwrap_or(&[]);
+        Self::update_with_protocol_profiles(state, app_type, original_id, provider, profiles)
+    }
+
+    pub(crate) fn update_with_protocol_profiles(
+        state: &AppState,
+        app_type: AppType,
+        original_id: Option<&str>,
+        provider: Provider,
+        protocol_profiles: &[ProtocolCompatibilityRecord],
+    ) -> Result<bool, AppError> {
+        let mut provider = Self::prepare_provider_for_mutation(state, &app_type, provider)?;
         let original_id = original_id.unwrap_or(provider.id.as_str()).to_string();
         let provider_id_changed = original_id != provider.id;
         let existing_provider = state
             .db
             .get_provider_by_id(&original_id, app_type.as_str())?;
-        // Normalize Claude model keys
-        Self::normalize_provider_if_claude(&app_type, &mut provider);
-        Self::validate_provider_settings(&app_type, &provider)?;
-        normalize_provider_common_config_for_storage(state.db.as_ref(), &app_type, &mut provider)?;
-        Self::normalize_usage_script_credential_overrides(&app_type, &mut provider);
-        Self::validate_codex_subagent_v2_provider_candidate(state, &provider)?;
 
         if provider_id_changed {
             if !app_type.is_additive_mode() {
@@ -4417,7 +4448,7 @@ impl ProviderService {
 
         // Save through the Codex domain mutation so Provider edits, catalog refreshes and
         // MultiRouter plan saves all share the same compiler/projection lifecycle.
-        Self::persist_provider_mutation(state, &app_type, &provider)?;
+        Self::persist_provider_mutation(state, &app_type, &provider, protocol_profiles)?;
 
         // Best-effort auto-prune of disabled stale V2 profiles (model left the catalog).
         // Runs after the main save so a prune failure never fails the save. Only Codex
@@ -4547,19 +4578,41 @@ impl ProviderService {
         Ok(true)
     }
 
+    pub(crate) fn prepare_provider_for_mutation(
+        state: &AppState,
+        app_type: &AppType,
+        mut provider: Provider,
+    ) -> Result<Provider, AppError> {
+        Self::normalize_provider_if_claude(app_type, &mut provider);
+        Self::validate_provider_settings(app_type, &provider)?;
+        normalize_provider_common_config_for_storage(state.db.as_ref(), app_type, &mut provider)?;
+        Self::normalize_usage_script_credential_overrides(app_type, &mut provider);
+        Self::validate_codex_subagent_v2_provider_candidate(state, &provider)?;
+        Ok(provider)
+    }
+
     fn persist_provider_mutation(
         state: &AppState,
         app_type: &AppType,
         provider: &Provider,
+        protocol_profiles: &[ProtocolCompatibilityRecord],
     ) -> Result<(), AppError> {
         if *app_type != AppType::Codex {
             return state.db.save_provider(app_type.as_str(), provider);
         }
 
-        let outcome = crate::codex_multirouter::mutation::apply_codex_provider_mutation(
-            state.db.as_ref(),
-            provider.clone(),
-        )?;
+        let outcome = if protocol_profiles.is_empty() {
+            crate::codex_multirouter::mutation::apply_codex_provider_mutation(
+                state.db.as_ref(),
+                provider.clone(),
+            )?
+        } else {
+            crate::codex_multirouter::mutation::apply_codex_provider_mutation_with_profiles(
+                state.db.as_ref(),
+                provider.clone(),
+                protocol_profiles,
+            )?
+        };
         for projection in outcome.projections {
             if projection.state == crate::codex_multirouter::projection::ProjectionState::Pending {
                 log::warn!(

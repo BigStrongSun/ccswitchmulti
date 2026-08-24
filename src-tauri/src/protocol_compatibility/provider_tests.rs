@@ -1,11 +1,12 @@
 use serde_json::json;
+use std::collections::HashMap;
 
 use crate::provider::{Provider, ProviderMeta};
 
 use super::{
     apply_probe_selection_to_provider, apply_selected_transport_to_provider,
-    compile_provider_probe_candidate, ProbeReadiness, ProtocolCompatibilityProbeResult,
-    TransportKind,
+    compile_codex_router_probe_candidates, compile_provider_probe_candidate, ProbeReadiness,
+    ProtocolCompatibilityProbeResult, TransportKind,
 };
 
 fn codex_provider(config: &str, api_format: &str) -> Provider {
@@ -57,6 +58,27 @@ wire_api = "responses"
     assert_eq!(candidate.canonical_endpoint(), "https://vllm.example/v1");
     let debug = format!("{candidate:?}");
     assert!(!debug.contains("probe-secret"));
+}
+
+#[test]
+fn compiles_an_effective_router_target_with_the_parent_and_route_identity() {
+    let mut provider = codex_provider(
+        r#"model = "qwen-visible"
+model_provider = "qwen"
+[model_providers.qwen]
+base_url = "https://vllm.example/v1"
+wire_api = "chat"
+"#,
+        "openai_chat",
+    );
+    provider.id = "router::route::qwen".to_string();
+    provider.settings_config["codexRouterParentProviderId"] = json!("router");
+    provider.settings_config["codexResolvedRouteId"] = json!("qwen-route");
+
+    let candidate = compile_provider_probe_candidate(&provider).expect("compile routed candidate");
+
+    assert_eq!(candidate.provider_id.as_deref(), Some("router"));
+    assert_eq!(candidate.route_id.as_deref(), Some("qwen-route"));
 }
 
 #[test]
@@ -172,4 +194,58 @@ fn an_unreachable_probe_keeps_the_historical_transport_unchanged() {
 
     assert!(!apply_probe_selection_to_provider(&mut provider, &result).unwrap());
     assert_eq!(serde_json::to_value(&provider).unwrap(), before);
+}
+
+#[test]
+fn compiles_every_v2_router_model_from_the_real_effective_provider() {
+    let mut target = codex_provider(
+        r#"model = "qwen-visible"
+model_provider = "qwen"
+[model_providers.qwen]
+base_url = "https://vllm.example/v1"
+wire_api = "chat"
+"#,
+        "openai_chat",
+    );
+    target.id = "qwen-target".to_string();
+    target.settings_config["modelCatalog"] = json!({"models": [
+        {"model": "qwen-visible", "upstreamModel": "Qwen/Qwen3.8"},
+        {"model": "qwen-coder", "upstreamModel": "Qwen/Qwen3-Coder"}
+    ]});
+    let router = Provider::with_id(
+        "router".to_string(),
+        "Router".to_string(),
+        json!({
+            "auth": {},
+            "config": "",
+            "codexRouting": {
+                "schemaVersion": 2,
+                "enabled": true,
+                "defaultRouteId": "qwen-route",
+                "routes": [{
+                    "id": "qwen-route",
+                    "enabled": true,
+                    "targetProviderId": "qwen-target",
+                    "modelSelection": {"mode": "all"},
+                    "authPolicy": {"source": "provider_config"}
+                }]
+            }
+        }),
+        None,
+    );
+    let providers = HashMap::from([(target.id.clone(), target)]);
+
+    let candidates =
+        compile_codex_router_probe_candidates(&router, &providers).expect("compile candidates");
+
+    assert_eq!(candidates.len(), 2);
+    assert!(candidates.iter().all(|candidate| {
+        candidate.provider_id.as_deref() == Some("router")
+            && candidate.route_id.as_deref() == Some("qwen-route")
+            && candidate.canonical_endpoint() == "https://vllm.example/v1"
+    }));
+    assert_eq!(candidates[0].public_model, "qwen-visible");
+    assert_eq!(candidates[0].upstream_model, "Qwen/Qwen3.8");
+    assert_eq!(candidates[1].public_model, "qwen-coder");
+    assert_eq!(candidates[1].upstream_model, "Qwen/Qwen3-Coder");
 }

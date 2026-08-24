@@ -35,6 +35,10 @@ impl ProviderRouter {
         self.db.as_ref()
     }
 
+    pub(crate) fn database_arc(&self) -> Arc<Database> {
+        self.db.clone()
+    }
+
     /// 按应用和 ID 读取真实 provider 配置。
     ///
     /// Codex 多模型 route 可以引用一个已存在的 Codex provider；forwarder 需要在

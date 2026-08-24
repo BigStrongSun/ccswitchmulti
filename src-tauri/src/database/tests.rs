@@ -322,6 +322,27 @@ fn schema_v16_migration_creates_protocol_compatibility_profiles() {
 }
 
 #[test]
+fn schema_v17_migration_creates_reasoning_manual_overrides() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    Database::set_user_version(&conn, 17).expect("set user_version=17");
+
+    Database::apply_schema_migrations_on_conn(&conn).expect("apply migrations");
+
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='codex_reasoning_manual_overrides'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("query manual override table");
+    assert_eq!(count, 1);
+    assert_eq!(
+        Database::get_user_version(&conn).expect("version after migration"),
+        SCHEMA_VERSION
+    );
+}
+
+#[test]
 fn protocol_compatibility_profile_round_trips_only_for_the_exact_target() {
     use crate::protocol_compatibility::{
         ProbeReadiness, ProbeTargetKey, ProtocolCompatibilityProbeResult,
@@ -368,6 +389,254 @@ fn protocol_compatibility_profile_round_trips_only_for_the_exact_target() {
         .get_protocol_compatibility_result(&changed_endpoint)
         .expect("read changed target")
         .is_none());
+}
+
+#[test]
+fn runtime_shape_mismatch_expires_only_the_exact_protocol_profile() {
+    use crate::protocol_compatibility::{
+        ProbeReadiness, ProbeTargetKey, ProtocolCompatibilityProbeResult,
+        ProtocolCompatibilityRecord, TransportKind,
+    };
+
+    let db = Database::memory().expect("create memory db");
+    let target = ProbeTargetKey::new(
+        "provider-a",
+        None::<String>,
+        "public-model",
+        "upstream-model",
+        TransportKind::OpenAiChat,
+        "https://example.test/v1/chat/completions",
+        "bearer",
+    )
+    .unwrap();
+    let record = ProtocolCompatibilityRecord::new(
+        target.clone(),
+        ProtocolCompatibilityProbeResult {
+            selected_transport: Some(TransportKind::OpenAiChat),
+            readiness: ProbeReadiness::Verified,
+            branches: Vec::new(),
+        },
+        1_000,
+        2_000,
+    );
+    db.save_protocol_compatibility_result(&record)
+        .expect("save profile");
+
+    assert!(db
+        .expire_protocol_compatibility_result(&target, 1_500)
+        .expect("expire exact profile"));
+    let expired = db
+        .get_protocol_compatibility_result(&target)
+        .expect("read expired profile")
+        .expect("profile retained for diagnostics");
+    assert_eq!(expired.expires_at, 1_499);
+
+    let changed_target = ProbeTargetKey::new(
+        "provider-a",
+        None::<String>,
+        "other-public-model",
+        "upstream-model",
+        TransportKind::OpenAiChat,
+        "https://example.test/v1/chat/completions",
+        "bearer",
+    )
+    .unwrap();
+    assert!(!db
+        .expire_protocol_compatibility_result(&changed_target, 1_500)
+        .expect("unmatched target is a no-op"));
+}
+
+#[test]
+fn reasoning_manual_override_uses_target_bound_compare_and_swap_revisions() {
+    use crate::protocol_compatibility::{
+        HistoryReplay, ManualReasoningOverride, ProbeTargetKey, ReasoningProjection,
+        ReasoningSemantic, ReasoningSource, TransportKind,
+    };
+
+    let db = Database::memory().expect("create memory db");
+    let target = ProbeTargetKey::new(
+        "provider-a",
+        Some("route-a"),
+        "public-model",
+        "upstream-model",
+        TransportKind::OpenAiChat,
+        "https://example.test/v1/chat/completions",
+        "bearer",
+    )
+    .unwrap()
+    .with_credential("secret-a");
+    let override_spec = ManualReasoningOverride::new(
+        ReasoningSemantic::Readable,
+        ReasoningSource::ReasoningContent,
+        HistoryReplay::ChatReasoningContent,
+    );
+
+    let first = db
+        .save_reasoning_manual_override(
+            &target,
+            override_spec,
+            ReasoningProjection::RawReasoningText,
+            "verified against provider documentation",
+            100,
+            0,
+        )
+        .expect("create override");
+    assert_eq!(first.revision, 1);
+    assert_eq!(first.target, target);
+    assert_eq!(
+        db.get_reasoning_manual_override(&target)
+            .expect("read override"),
+        Some(first.clone())
+    );
+    let backup = db.export_sql_string().expect("export SQL backup");
+    assert!(backup.contains("codex_reasoning_manual_overrides"));
+    assert!(backup.contains("verified against provider documentation"));
+
+    let stale = db
+        .save_reasoning_manual_override(
+            &target,
+            override_spec,
+            ReasoningProjection::ReasoningSummary,
+            "stale update",
+            101,
+            0,
+        )
+        .expect_err("stale revision must fail");
+    assert!(stale.to_string().contains("revision_conflict"));
+
+    let cleared_revision = db
+        .clear_reasoning_manual_override(&target, 1, 102)
+        .expect("clear override");
+    assert_eq!(cleared_revision, 2);
+    assert!(db
+        .get_reasoning_manual_override(&target)
+        .expect("read cleared override")
+        .is_none());
+
+    let stale_after_clear = db
+        .save_reasoning_manual_override(
+            &target,
+            override_spec,
+            ReasoningProjection::RawReasoningText,
+            "stale create after clear",
+            103,
+            0,
+        )
+        .expect_err("clear tombstone must retain revision");
+    assert!(stale_after_clear.to_string().contains("revision_conflict"));
+
+    let recreated = db
+        .save_reasoning_manual_override(
+            &target,
+            override_spec,
+            ReasoningProjection::RawReasoningText,
+            "recreate from current revision",
+            104,
+            cleared_revision,
+        )
+        .expect("recreate override");
+    assert_eq!(recreated.revision, 3);
+}
+
+#[test]
+fn provider_and_protocol_profile_commit_together_or_not_at_all() {
+    use crate::protocol_compatibility::{
+        ProbeReadiness, ProbeTargetKey, ProtocolCompatibilityProbeResult,
+        ProtocolCompatibilityRecord, TransportKind,
+    };
+
+    let db = Database::memory().expect("memory database");
+    let provider = crate::provider::Provider::with_id(
+        "provider-a".to_string(),
+        "Provider A".to_string(),
+        serde_json::json!({"auth": {}, "config": ""}),
+        None,
+    );
+    let mismatched_target = ProbeTargetKey::new(
+        "provider-b",
+        None::<String>,
+        "model-a",
+        "model-a",
+        TransportKind::OpenAiChat,
+        "https://example.test/v1/chat/completions",
+        "bearer",
+    )
+    .unwrap();
+    let record = ProtocolCompatibilityRecord::new(
+        mismatched_target.clone(),
+        ProtocolCompatibilityProbeResult {
+            selected_transport: None,
+            readiness: ProbeReadiness::Unverified,
+            branches: Vec::new(),
+        },
+        100,
+        200,
+    );
+
+    assert!(db
+        .save_provider_with_protocol_profile("codex", &provider, &record)
+        .is_err());
+    assert!(db
+        .get_provider_by_id("provider-a", "codex")
+        .unwrap()
+        .is_none());
+    assert!(db
+        .get_protocol_compatibility_result(&mismatched_target)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn provider_and_every_routed_protocol_profile_commit_in_one_transaction() {
+    use crate::protocol_compatibility::{
+        ProbeReadiness, ProbeTargetKey, ProtocolCompatibilityProbeResult,
+        ProtocolCompatibilityRecord, TransportKind,
+    };
+
+    let db = Database::memory().expect("memory database");
+    let provider = crate::provider::Provider::with_id(
+        "router-a".to_string(),
+        "Router A".to_string(),
+        serde_json::json!({"auth": {}, "config": ""}),
+        None,
+    );
+    let records = ["route-a", "route-b"].map(|route_id| {
+        let target = ProbeTargetKey::new(
+            "router-a",
+            Some(route_id),
+            format!("public-{route_id}"),
+            "upstream-model",
+            TransportKind::OpenAiChat,
+            "https://example.test/v1/chat/completions",
+            "bearer",
+        )
+        .unwrap();
+        ProtocolCompatibilityRecord::new(
+            target,
+            ProtocolCompatibilityProbeResult {
+                selected_transport: Some(TransportKind::OpenAiChat),
+                readiness: ProbeReadiness::Partial,
+                branches: Vec::new(),
+            },
+            100,
+            200,
+        )
+    });
+
+    db.save_provider_with_protocol_profiles("codex", &provider, &records)
+        .expect("save provider and routed profiles");
+
+    assert!(db
+        .get_provider_by_id("router-a", "codex")
+        .unwrap()
+        .is_some());
+    for record in &records {
+        assert_eq!(
+            db.get_protocol_compatibility_result(&record.target)
+                .expect("read routed profile"),
+            Some(record.clone())
+        );
+    }
 }
 
 #[test]

@@ -80,7 +80,7 @@ fn create_hosted_codex_chat_sse_stream_from_verified_profile<F, Fut>(
     provider: &Provider,
     public_model: &str,
     upstream_model: &str,
-    db: &crate::database::Database,
+    db: Arc<crate::database::Database>,
     now: i64,
     diagnostic_context: Option<super::providers::streaming_codex_chat::HostedToolDiagnosticContext>,
     on_hosted_tools: F,
@@ -93,11 +93,45 @@ where
         provider,
         public_model,
         upstream_model,
-        db,
+        db.as_ref(),
         now,
     );
-    create_responses_sse_stream_from_chat_with_hosted_loop_and_projection(
+    let observation = super::providers::resolve_codex_chat_protocol_target(
+        provider,
+        public_model,
+        upstream_model,
+    )
+    .and_then(|target| {
+        db.get_protocol_compatibility_result(&target)
+            .ok()
+            .flatten()
+            .filter(|profile| {
+                profile.probe_version == crate::protocol_compatibility::PROBE_PROFILE_VERSION
+                    && profile.expires_at >= now
+                    && profile.result.readiness
+                        == crate::protocol_compatibility::ProbeReadiness::Verified
+                    && profile.result.selected_transport
+                        == Some(crate::protocol_compatibility::TransportKind::OpenAiChat)
+            })
+            .map(|profile| (target, profile))
+    });
+    let observer_db = db.clone();
+    let initial_stream = crate::protocol_compatibility::capture_chat_sse_stream(
         initial_stream,
+        move |observed| {
+            if let Some((target, profile)) = observation {
+                crate::protocol_compatibility::runtime_observer::observe_and_expire_protocol_profile(
+                    observer_db.as_ref(),
+                    &target,
+                    &profile,
+                    &observed,
+                    now,
+                );
+            }
+        },
+    );
+    create_responses_sse_stream_from_chat_with_hosted_loop_and_projection(
+        Box::pin(initial_stream),
         tool_context,
         reasoning_projection,
         diagnostic_context,
@@ -343,7 +377,7 @@ impl RequestForwarder {
             return Ok(provider.clone());
         }
         if codex_provider_has_v2_routing(provider) {
-            return self
+            let mut effective_provider = self
                 .resolve_codex_v2_route(provider, body)?
                 .map(super::providers::ResolvedCodexRoute::into_effective_provider)
                 .ok_or_else(|| {
@@ -353,7 +387,22 @@ impl RequestForwarder {
                             .and_then(Value::as_str)
                             .unwrap_or("unknown")
                     ))
-                });
+                })?;
+            let public_model = body
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let upstream_model =
+                super::providers::codex_provider_upstream_model(&effective_provider)
+                    .unwrap_or_else(|| public_model.to_string());
+            super::providers::apply_detected_codex_transport_to_effective_provider(
+                &mut effective_provider,
+                public_model,
+                &upstream_model,
+                self.router.database(),
+                chrono::Utc::now().timestamp(),
+            );
+            return Ok(effective_provider);
         }
         let Some(target_provider_id) = super::providers::codex_route_target_provider_id(provider)
         else {
@@ -2036,7 +2085,7 @@ impl RequestForwarder {
         } else {
             None
         };
-        let routed_provider = if let Some(route_provider) = routed_provider {
+        let mut routed_provider = if let Some(route_provider) = routed_provider {
             if let Some(target_provider_id) =
                 super::providers::codex_route_target_provider_id(&route_provider)
             {
@@ -2065,6 +2114,24 @@ impl RequestForwarder {
         } else {
             None
         };
+        if matches!(app_type, AppType::Codex) {
+            if let Some(effective_provider) = routed_provider.as_mut() {
+                let public_model = body
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let upstream_model =
+                    super::providers::codex_provider_upstream_model(effective_provider)
+                        .unwrap_or_else(|| public_model.to_string());
+                super::providers::apply_detected_codex_transport_to_effective_provider(
+                    effective_provider,
+                    public_model,
+                    &upstream_model,
+                    self.router.database(),
+                    chrono::Utc::now().timestamp(),
+                );
+            }
+        }
         let codex_route_missed = codex_router_configured
             && !provider_is_resolved_codex_route
             && routed_provider.is_none();
@@ -4050,7 +4117,7 @@ impl RequestForwarder {
                         provider,
                         &request_model_for_log,
                         upstream_model,
-                        self.router.database(),
+                        self.router.database_arc(),
                         chrono::Utc::now().timestamp(),
                         Some(hosted_tool_diagnostic_context),
                         callback,
@@ -8115,7 +8182,8 @@ mod tests {
             "https://qwen.example/v1/chat/completions",
             "bearer",
         )
-        .expect("profile target");
+        .expect("profile target")
+        .with_credential("");
         let result: ProtocolCompatibilityProbeResult = serde_json::from_value(json!({
             "selected_transport": "open_ai_chat",
             "readiness": "verified",
@@ -8160,7 +8228,7 @@ mod tests {
             &provider,
             "qwen-public",
             "qwen-mapped",
-            &db,
+            Arc::new(db),
             200,
             None,
             |_calls, _assistant| async { Ok::<Option<ChatSseStream>, String>(None) },

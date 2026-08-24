@@ -1,9 +1,14 @@
 use serde_json::Value;
+use std::collections::HashMap;
 
 use crate::{
     app_config::AppType,
+    codex_multirouter::{compiler::compile_v2, schema::CodexRoutingDocument},
     provider::Provider,
-    proxy::providers::{codex_provider_upstream_model, explain_codex_responses_upstream_protocol},
+    proxy::providers::{
+        codex_provider_upstream_model, explain_codex_responses_upstream_protocol,
+        resolve_codex_v2_routed_provider,
+    },
 };
 
 use super::{ProbeCandidate, ProtocolCompatibilityProbeResult, TransportKind};
@@ -49,9 +54,13 @@ pub fn compile_provider_probe_candidate(provider: &Provider) -> Result<ProbeCand
         .and_then(|meta| meta.is_full_url)
         .unwrap_or(false);
 
+    let provider_id = string_field(&provider.settings_config, &["codexRouterParentProviderId"])
+        .unwrap_or(provider.id.as_str());
+    let route_id = string_field(&provider.settings_config, &["codexResolvedRouteId"]);
+
     ProbeCandidate::new(
-        Some(provider.id.clone()),
-        None::<String>,
+        Some(provider_id.to_string()),
+        route_id.map(str::to_string),
         public_model,
         upstream_model,
         transport,
@@ -62,6 +71,46 @@ pub fn compile_provider_probe_candidate(provider: &Provider) -> Result<ProbeCand
     .with_full_url(is_full_url)
     .with_bearer_token(&api_key)
     .map_err(|_| "Codex provider API key cannot be represented as an HTTP header".to_string())
+}
+
+pub fn compile_codex_router_probe_candidates(
+    router: &Provider,
+    providers: &HashMap<String, Provider>,
+) -> Result<Vec<ProbeCandidate>, String> {
+    let Some(routing) = router.settings_config.get("codexRouting") else {
+        return Ok(Vec::new());
+    };
+    let document = CodexRoutingDocument::parse(routing)
+        .map_err(|error| format!("{}: {}", error.code, error.message))?;
+    let CodexRoutingDocument::V2(plan) = document else {
+        return Ok(Vec::new());
+    };
+    if !plan.enabled {
+        return Ok(Vec::new());
+    }
+    let compiled = compile_v2(&plan, providers)
+        .map_err(|error| format!("{}: {}", error.code, error.message))?;
+    let mut candidates = Vec::with_capacity(compiled.model_catalog.len());
+    for model in compiled.model_catalog {
+        let Some(resolved) = resolve_codex_v2_routed_provider(
+            router,
+            &serde_json::json!({"model": model.visible_model}),
+            providers,
+        )
+        .map_err(|error| format!("{}: {}", error.code, error.message))?
+        else {
+            continue;
+        };
+        let effective = resolved.into_effective_provider();
+        if effective.uses_manual_codex_protocol()
+            || effective.category.as_deref() == Some("official")
+            || effective.uses_managed_account_auth()
+        {
+            continue;
+        }
+        candidates.push(compile_provider_probe_candidate(&effective)?);
+    }
+    Ok(candidates)
 }
 
 pub fn apply_selected_transport_to_provider(

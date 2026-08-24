@@ -51,25 +51,25 @@ pub enum ProbeCase { BaselineJson, BaselineSse, ForcedToolSse, ToolContinuationJ
 pub struct ProbeBudget { max_requests: u8, connect_timeout: Duration, response_timeout: Duration, transaction_timeout: Duration, output_limit: u32 }
 ```
 
-- [ ] **Step 1: Write failing pure-type tests** for target-key determinism, candidate compilation without a persisted provider ID, endpoint credential stripping, endpoint fingerprint changes, profile expiry, readiness transitions, and validation rejection of `Opaque -> Readable`, `Summary -> raw`, missing source, and invalid native replay.
-- [ ] **Step 2: Write failing probe-case tests** that snapshot the exact logical baseline/tool/continuation bodies, random nonce placement, a single non-strict `nonce` tool schema, `max_output_tokens/max_tokens=128`, `store=false` for native Responses, and the complete ban list: caller-supplied user/system/developer content, `extra_body`, original tools, response format, history, thinking/effort, temperature, seed and top_p. Assert each maintained candidate transport makes at most four upstream calls, both Chat and Responses are enumerated regardless of stored `wire_api`, and a baseline-unsupported branch stops after one call.
-- [ ] **Step 3: Write failing redaction tests** that feed representative Chat JSON/SSE records containing bearer headers, `reasoning_content`, `content`, tool arguments and tool outputs; assert the output contains only allowlisted JSON paths, counts, lengths, status, event names, and SHA-256 values.
-- [ ] **Step 4: Run RED tests.**
+- [x] **Step 1: Write failing pure-type tests** for target-key determinism, candidate compilation without a persisted provider ID, endpoint credential stripping, endpoint fingerprint changes, profile expiry, readiness transitions, and validation rejection of `Opaque -> Readable`, `Summary -> raw`, missing source, and invalid native replay.
+- [x] **Step 2: Write failing probe-case tests** that snapshot the exact logical baseline/tool/continuation bodies, random nonce placement, a single non-strict `nonce` tool schema, `max_output_tokens/max_tokens=128`, `store=false` for native Responses, and the complete ban list: caller-supplied user/system/developer content, `extra_body`, original tools, response format, history, thinking/effort, temperature, seed and top_p. Assert each maintained candidate transport makes at most four upstream calls, both Chat and Responses are enumerated regardless of stored `wire_api`, and a baseline-unsupported branch stops after one call.
+- [x] **Step 3: Write failing redaction tests** that feed representative Chat JSON/SSE records containing bearer headers, `reasoning_content`, `content`, tool arguments and tool outputs; assert the output contains only allowlisted JSON paths, counts, lengths, status, event names, and SHA-256 values.
+- [x] **Step 4: Run RED tests.**
 
 ```powershell
 cargo test --manifest-path src-tauri/Cargo.toml protocol_compatibility::types --lib
 cargo test --manifest-path src-tauri/Cargo.toml protocol_compatibility::redaction --lib
 ```
 
-- [ ] **Step 5: Implement immutable types, the fixed probe corpus, validation, canonical endpoint hashing, and redaction.** Do not import `Provider` or open a database in these files. `cases.rs` must create logical Responses requests only; Chat bodies are produced later through the production transformer.
-- [ ] **Step 6: Run GREEN tests and format.**
+- [x] **Step 5: Implement immutable types, the fixed probe corpus, validation, canonical endpoint hashing, and redaction.** Do not import `Provider` or open a database in these files. `cases.rs` must create logical Responses requests only; Chat bodies are produced later through the production transformer.
+- [x] **Step 6: Run GREEN tests and format.**
 
 ```powershell
 cargo fmt --manifest-path src-tauri/Cargo.toml --check
 cargo test --manifest-path src-tauri/Cargo.toml protocol_compatibility --lib
 ```
 
-- [ ] **Step 7: Commit.**
+- [x] **Step 7: Commit.**
 
 ```powershell
 git add src-tauri/src/protocol_compatibility src-tauri/src/lib.rs
@@ -96,17 +96,17 @@ Database::clear_reasoning_manual_override(&ProbeTargetKey, expected_revision: i6
 Database::prune_protocol_compatibility_results(now: i64) -> Result<u64, AppError>
 ```
 
-- [ ] **Step 1: Add failing migration tests** from schema v16 asserting both new tables, indexes, backup inclusion, 30-day verified retention, 7-day failure retention, and no automatic deletion of manual overrides.
-- [ ] **Step 2: Add failing DAO tests** for exact target lookup, replacement only for the same target, endpoint mismatch miss, revision conflict, transactional override update, and serialized-evidence redaction.
-- [ ] **Step 3: Run RED tests.**
+- [x] **Step 1: Add failing migration tests** from schema v16 asserting both new tables, indexes, backup inclusion, 30-day verified retention, 7-day failure retention, and no automatic deletion of manual overrides.
+- [x] **Step 2: Add failing DAO tests** for exact target lookup, replacement only for the same target, endpoint mismatch miss, revision conflict, transactional override update, and serialized-evidence redaction.
+- [x] **Step 3: Run RED tests.**
 
 ```powershell
 cargo test --manifest-path src-tauri/Cargo.toml protocol_compatibility --lib
 cargo test --manifest-path src-tauri/Cargo.toml schema_migration --lib
 ```
 
-- [ ] **Step 4: Bump `SCHEMA_VERSION` and implement the two dedicated tables/DAO.** Use the existing migration savepoint convention. Add both tables to backup export/import, startup pruning, and database tests; do not alter `stream_check_logs`.
-- [ ] **Step 5: Run targeted migration/DAO tests and commit.**
+- [x] **Step 4: Bump `SCHEMA_VERSION` and implement the two dedicated tables/DAO.** Use the existing migration savepoint convention. Add both tables to backup export/import, startup pruning, and database tests; do not alter `stream_check_logs`.
+- [x] **Step 5: Run targeted migration/DAO tests and commit.**
 
 ```powershell
 cargo test --manifest-path src-tauri/Cargo.toml protocol_compatibility --lib
@@ -130,17 +130,17 @@ pub async fn capture_transport_probe(...) -> Result<CapturedProbeExchange, Probe
 pub fn classify_reasoning_shape(exchange: &CapturedProbeExchange) -> ClassifiedReasoningShape
 ```
 
-- [ ] **Step 1: Write fixtures and failing classifier tests** for streaming Qwen/vLLM `delta.reasoning_content`, `delta.reasoning` string/object, `reasoning_details`, `<think>` split across UTF-8 chunks, summary-only fields, empty fields, summary+raw mixed fields, opaque/encrypted fields, and no reasoning. Add the captured Qwen shape: nonempty `delta.reasoning_content`, then nonempty ordinary `delta.content` before a `tool_calls` delta. Assert `pre_tool_visible_content=Present`, while reasoning source/semantic are derived only from the reasoning field.
-- [ ] **Step 2: Add failing capture tests** using a local `axum` fixture upstream to prove SSE framing, data-only events, `[DONE]`, non-streaming JSON, HTTP failure, timeout, and that capture never returns raw body text in `Debug` or persisted evidence.
-- [ ] **Step 3: Run RED tests.**
+- [x] **Step 1: Write fixtures and failing classifier tests** for streaming Qwen/vLLM `delta.reasoning_content`, `delta.reasoning` string/object, `reasoning_details`, `<think>` split across UTF-8 chunks, summary-only fields, empty fields, summary+raw mixed fields, opaque/encrypted fields, and no reasoning. Add the captured Qwen shape: nonempty `delta.reasoning_content`, then nonempty ordinary `delta.content` before a `tool_calls` delta. Assert `pre_tool_visible_content=Present`, while reasoning source/semantic are derived only from the reasoning field.
+- [x] **Step 2: Add failing capture tests** using a local `axum` fixture upstream to prove SSE framing, data-only events, `[DONE]`, non-streaming JSON, HTTP failure, timeout, and that capture never returns raw body text in `Debug` or persisted evidence.
+- [x] **Step 3: Run RED tests.**
 
 ```powershell
 cargo test --manifest-path src-tauri/Cargo.toml protocol_compatibility::capture --lib
 cargo test --manifest-path src-tauri/Cargo.toml protocol_compatibility::classify --lib
 ```
 
-- [ ] **Step 4: Implement byte-safe SSE capture and semantic classifier.** Classification may produce `Readable` only from verified readable reasoning paths; mixed or opaque data is `Summary`/`Opaque`, never raw. Capture ordinary nonempty `content` that precedes a tool call only as `PreToolVisibleContent::{Absent,Present}` plus redacted structural evidence; it must not be offered to `ReasoningSource`. Keep raw bytes in a local non-serializable buffer that is dropped after the probe.
-- [ ] **Step 5: Run GREEN tests and commit.**
+- [x] **Step 4: Implement byte-safe SSE capture and semantic classifier.** Classification may produce `Readable` only from verified readable reasoning paths; mixed or opaque data is `Summary`/`Opaque`, never raw. Capture ordinary nonempty `content` that precedes a tool call only as `PreToolVisibleContent::{Absent,Present}` plus redacted structural evidence; it must not be offered to `ReasoningSource`. Keep raw bytes in a local non-serializable buffer that is dropped after the probe.
+- [x] **Step 5: Run GREEN tests and commit.**
 
 ```powershell
 cargo test --manifest-path src-tauri/Cargo.toml protocol_compatibility::capture --lib
@@ -162,16 +162,16 @@ git commit -m "feat(codex): classify protocol response shapes" -m "本次提交�
 pub async fn run_protocol_compatibility_probe(candidate: ProbeCandidate, client: &Client) -> ProtocolCompatibilityRecord
 ```
 
-- [ ] **Step 1: Write failing local-upstream tests** for enumerating both Chat and Responses plus all four response outcomes: both complete and equally readable selects native Responses; equally capable Responses opaque/summary plus Chat readable selects Chat; Responses partial plus Chat complete selects Chat; stronger Responses capability stays selected even when its reasoning is opaque; neither baseline reachable is Unverified. Add full verified readable profile, summary-only profile, first-turn raw succeeds but forced-tool continuation fails, and tool choice unsupported. Add a Qwen-style tool round where `reasoning_content` and ordinary `content` precede the forced call; assert the run records `PreToolVisibleContent::Present` without changing the selected reasoning semantic or replay policy. Fixtures must assert the tool is named `ccsm_protocol_compatibility_probe`, receives a per-run random nonce, and gets an in-memory fixed tool result without touching filesystem/network.
-- [ ] **Step 2: Add tests proving the runner constructs every Chat wire request, including forced tool choice and the continuation history, through production `responses_to_chat_completions_with_reasoning*` code. Assert stored `wire_api` does not suppress either candidate; headers/body persistence exclude the prompt, nonce and tool result; a marker mismatch is diagnostic rather than a protocol failure; HTTP 401/403/429/timeouts are not protocol rejection and never retry; each branch obeys 5/15-second limits and the full dual-protocol transaction obeys a 120-second deadline.
-- [ ] **Step 3: Run RED tests.**
+- [x] **Step 1: Write failing local-upstream tests** for enumerating both Chat and Responses plus all four response outcomes: both complete and equally readable selects native Responses; equally capable Responses opaque/summary plus Chat readable selects Chat; Responses partial plus Chat complete selects Chat; stronger Responses capability stays selected even when its reasoning is opaque; neither baseline reachable is Unverified. Add full verified readable profile, summary-only profile, first-turn raw succeeds but forced-tool continuation fails, and tool choice unsupported. Add a Qwen-style tool round where `reasoning_content` and ordinary `content` precede the forced call; assert the run records `PreToolVisibleContent::Present` without changing the selected reasoning semantic or replay policy. Fixtures must assert the tool is named `ccsm_protocol_compatibility_probe`, receives a per-run random nonce, and gets an in-memory fixed tool result without touching filesystem/network.
+- [x] **Step 2: Add tests proving the runner constructs every Chat wire request, including forced tool choice and the continuation history, through production `responses_to_chat_completions_with_reasoning*` code. Assert stored `wire_api` does not suppress either candidate; headers/body persistence exclude the prompt, nonce and tool result; a marker mismatch is diagnostic rather than a protocol failure; HTTP 401/403/429/timeouts are not protocol rejection and never retry; each branch obeys 5/15-second limits and the full dual-protocol transaction obeys a 120-second deadline.
+- [x] **Step 3: Run RED tests.**
 
 ```powershell
 cargo test --manifest-path src-tauri/Cargo.toml protocol_compatibility::runner --lib
 ```
 
-- [ ] **Step 4: Implement endpoint enumeration plus the fixed four-case transaction for every baseline-reachable protocol.** Reuse the legacy URL derivation rules but replace the duplicate minimal HTTP request functions; use at most eight calls with the 5/15/120-second budget, no retry or cross-origin redirect; report unsupported tool forcing separately from failed transport; call the same pure conversion functions that the proxy uses; select the most capable reachable transport while allowing automatic reasoning projection only for a fully verified selected branch; persist only the final profile/evidence after all stages complete.
-- [ ] **Step 5: Run runner and Chat-transformer regressions; commit.**
+- [x] **Step 4: Implement endpoint enumeration plus the fixed four-case transaction for every baseline-reachable protocol.** Reuse the legacy URL derivation rules but replace the duplicate minimal HTTP request functions; use at most eight calls with the 5/15/120-second budget, no retry or cross-origin redirect; report unsupported tool forcing separately from failed transport; call the same pure conversion functions that the proxy uses; select the most capable reachable transport while allowing automatic reasoning projection only for a fully verified selected branch; persist only the final profile/evidence after all stages complete.
+- [x] **Step 5: Run runner and Chat-transformer regressions; commit.**
 
 ```powershell
 cargo test --manifest-path src-tauri/Cargo.toml protocol_compatibility::runner --lib
@@ -198,9 +198,9 @@ pub fn create_responses_sse_stream_from_chat_with_context_and_projection(..., pr
 pub fn chat_completion_to_response_with_context_and_projection(..., projection: ReasoningProjection) -> Result<Value, ProxyError>
 ```
 
-- [ ] **Step 1: Write failing tests** showing a verified Qwen target emits `response.reasoning_text.delta` and final `content:[reasoning_text]`; a verified summary target emits summary SSE and final summary; unknown target never emits raw; original `outputFormat` alone does not select semantic output. Add a Qwen-style reasoning-plus-pre-tool-content fixture: ordinary pre-tool `content` emits only `response.output_text.*`; its presence does not change the selected reasoning SSE family or replay input.
-- [ ] **Step 2: Add failed-path tests** proving raw/summary Responses history both replay as Chat `reasoning_content` only when `HistoryReplay::ChatReasoningContent`; opaque and official encrypted content remain untouched; V2 commentary/tool-call merge remains ordered.
-- [ ] **Step 3: Run RED tests.**
+- [x] **Step 1: Write failing tests** showing a verified Qwen target emits `response.reasoning_text.delta` and final `content:[reasoning_text]`; a verified summary target emits summary SSE and final summary; unknown target never emits raw; original `outputFormat` alone does not select semantic output. Add a Qwen-style reasoning-plus-pre-tool-content fixture: ordinary pre-tool `content` emits only `response.output_text.*`; its presence does not change the selected reasoning SSE family or replay input.
+- [x] **Step 2: Add failed-path tests** proving raw/summary Responses history both replay as Chat `reasoning_content` only when `HistoryReplay::ChatReasoningContent`; opaque and official encrypted content remain untouched; V2 commentary/tool-call merge remains ordered.
+- [x] **Step 3: Run RED tests.**
 
 ```powershell
 cargo test --manifest-path src-tauri/Cargo.toml streaming_codex_chat --lib
@@ -208,8 +208,8 @@ cargo test --manifest-path src-tauri/Cargo.toml transform_codex_chat --lib
 cargo test --manifest-path src-tauri/Cargo.toml codex_chat_common --lib
 ```
 
-- [ ] **Step 4: Thread immutable projection through the handler and both conversion paths.** Replace `d25ebe31`'s unconditional `reasoning_text` emission. `extract_reasoning_field_text` remains a source extractor only; it cannot decide semantic type. Do not access SQLite inside the stream state machine; resolve once at request setup.
-- [ ] **Step 5: Run focused bridge regressions and commit.**
+- [x] **Step 4: Thread immutable projection through the handler and both conversion paths.** Replace `d25ebe31`'s unconditional `reasoning_text` emission. `extract_reasoning_field_text` remains a source extractor only; it cannot decide semantic type. Do not access SQLite inside the stream state machine; resolve once at request setup.
+- [x] **Step 5: Run focused bridge regressions and commit.**
 
 ```powershell
 cargo test --manifest-path src-tauri/Cargo.toml streaming_codex_chat --lib
@@ -243,10 +243,10 @@ apply_codex_reasoning_override(request) -> CompatibilityInspection
 clear_codex_reasoning_override(request) -> CompatibilityInspection
 ```
 
-- [ ] **Step 1: Write failing provider-save tests** proving `ProviderService::add` and `ProviderService::update` compile the unsaved effective route/model candidate before live config publication; a verified preflight persists Provider plus profile atomically; an unavailable/unsupported upstream saves the Provider as `Partial/Unverified` with no automatic raw projection; and endpoint, credential, route, transport or effective-model changes invalidate the old profile.
-- [ ] **Step 2: Write failing observer tests** for matching Qwen structural shape, a changed reasoning field path, a changed event order, and `PreToolVisibleContent` drift. Assert no raw body is accepted by the observer and mismatch invalidates the existing profile without issuing upstream traffic.
-- [ ] **Step 3: Write failing command tests** for missing candidate, concurrent probe rejection, redacted result serialization, no raw evidence in errors, revision conflict, invalid override, and manual override precedence.
-- [ ] **Step 4: Run RED tests.**
+- [x] **Step 1: Write failing provider-save tests** proving `ProviderService::add` and `ProviderService::update` compile the unsaved effective route/model candidate before live config publication; a verified preflight persists Provider plus profile atomically; an unavailable/unsupported upstream saves the Provider as `Partial/Unverified` with no automatic raw projection; and endpoint, credential, route, transport or effective-model changes invalidate the old profile.
+- [x] **Step 2: Write failing observer tests** for matching Qwen structural shape, a changed reasoning field path, a changed event order, and `PreToolVisibleContent` drift. Assert no raw body is accepted by the observer and mismatch invalidates the existing profile without issuing upstream traffic.
+- [x] **Step 3: Write failing command tests** for missing candidate, concurrent probe rejection, redacted result serialization, no raw evidence in errors, revision conflict, invalid override, and manual override precedence.
+- [x] **Step 4: Run RED tests.**
 
 ```powershell
 cargo test --manifest-path src-tauri/Cargo.toml protocol_compatibility --lib
@@ -254,10 +254,10 @@ cargo test --manifest-path src-tauri/Cargo.toml provider_service --lib
 cargo test --manifest-path src-tauri/Cargo.toml handlers --lib
 ```
 
-- [ ] **Step 5: Implement the save boundary.** Build `ProbeCandidate` from the in-memory Provider draft using the same MultiRouter route/model resolution used by production requests; run one bounded active probe before publication. A verified result commits the Provider, profile and live projection together. A failed/unsupported result commits the Provider only with `Partial/Unverified`; never make raw projection selectable from that state. Preserve the existing `add/update` return contract until a later frontend task consumes the richer inspection command.
-- [ ] **Step 6: Implement `runtime_observer`.** At the Chat→Responses boundary, pass only field paths, event kinds/order, counts, lengths, hashes and `PreToolVisibleContent` to it. On mismatch, atomically expire the profile and select the safe fallback for subsequent requests; it must not call `reqwest`, inspect body text, or re-probe.
-- [ ] **Step 7: Implement thin Tauri commands over the domain service.** `probe` is an explicit re-test command; `get` is read-only; override `plan/apply/clear` use the database revision transaction. Do not add TypeScript API wrappers or UI imports.
-- [ ] **Step 8: Run command/domain tests and commit.**
+- [x] **Step 5: Implement the save boundary.** Build `ProbeCandidate` from the in-memory Provider draft using the same MultiRouter route/model resolution used by production requests; run one bounded active probe before publication. A verified result commits the Provider, profile and live projection together. A failed/unsupported result commits the Provider only with `Partial/Unverified`; never make raw projection selectable from that state. Preserve the existing `add/update` return contract until a later frontend task consumes the richer inspection command.
+- [x] **Step 6: Implement `runtime_observer`.** At the Chat→Responses boundary, pass only field paths, event kinds/order, counts, lengths, hashes and `PreToolVisibleContent` to it. On mismatch, atomically expire the profile and select the safe fallback for subsequent requests; it must not call `reqwest`, inspect body text, or re-probe.
+- [x] **Step 7: Implement thin Tauri commands over the domain service.** `probe` is an explicit re-test command; `get` is read-only; override `plan/apply/clear` use the database revision transaction. Do not add TypeScript API wrappers or UI imports.
+- [x] **Step 8: Run command/domain tests and commit.**
 
 ```powershell
 cargo test --manifest-path src-tauri/Cargo.toml protocol_compatibility --lib
@@ -272,9 +272,9 @@ git commit -m "feat(codex): preflight provider protocol compatibility" -m "本�
 - Modify: targeted tests only
 - Modify: `memory.md` after real results exist
 
-- [ ] **Step 1: Add end-to-end fixture tests** that run Chat SSE capture → profile classification → projection → Responses-to-Chat replay, asserting readable Qwen yields multi-delta raw reasoning, summary gateway retains summary, a Qwen tool round can record `pre_tool_visible_content=Present` without becoming raw reasoning, and every persisted row lacks test prompt/reasoning/tool text.
-- [ ] **Step 2: Add regression fixtures** for official OAuth encrypted reasoning, native third-party Responses normalization, V2 `message.encrypted` stripping, and commentary + tool-call merging.
-- [ ] **Step 3: Run verification.**
+- [x] **Step 1: Add end-to-end fixture tests** that run Chat SSE capture → profile classification → projection → Responses-to-Chat replay, asserting readable Qwen yields multi-delta raw reasoning, summary gateway retains summary, a Qwen tool round can record `pre_tool_visible_content=Present` without becoming raw reasoning, and every persisted row lacks test prompt/reasoning/tool text.
+- [x] **Step 2: Add regression fixtures** for official OAuth encrypted reasoning, native third-party Responses normalization, V2 `message.encrypted` stripping, and commentary + tool-call merging.
+- [x] **Step 3: Run verification.**
 
 ```powershell
 cargo fmt --manifest-path src-tauri/Cargo.toml --check
@@ -287,7 +287,7 @@ cargo test --manifest-path src-tauri/Cargo.toml handlers --lib
 git diff --check
 ```
 
-- [ ] **Step 4: Record actual test results in root `memory.md`; validate UTF-8 no-BOM/no U+FFFD; commit.**
+- [x] **Step 4: Record actual test results in root `memory.md`; validate UTF-8 no-BOM/no U+FFFD; commit.**
 
 ```powershell
 git add memory.md src-tauri/src

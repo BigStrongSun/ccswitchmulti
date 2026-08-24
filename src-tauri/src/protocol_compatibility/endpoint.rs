@@ -9,43 +9,39 @@ pub(crate) fn build_probe_url(
         TransportKind::OpenAiChat => "/chat/completions",
         TransportKind::OpenAiResponses => "/responses",
     };
-    let trimmed = base_url.trim().trim_end_matches('/');
+    let trimmed = base_url.trim();
     if trimmed.is_empty() {
         return Err("Base URL is empty".to_string());
     }
-    if trimmed.ends_with(suffix) {
-        return Ok(trimmed.to_string());
+    let mut parsed = url::Url::parse(trimmed).map_err(|_| "Base URL is invalid".to_string())?;
+    let path = parsed.path().trim_end_matches('/').to_string();
+    if path.ends_with(suffix) {
+        parsed.set_path(&path);
+        return Ok(parsed.to_string());
     }
 
-    if is_full_url {
-        if let Some(index) = trimmed.find("/v1/") {
-            return Ok(format!("{}/v1{suffix}", &trimmed[..index]));
-        }
-        if ends_with_version_segment(trimmed) {
-            return Ok(format!("{trimmed}{suffix}"));
-        }
-        if let Some(other_suffix) = match transport {
-            TransportKind::OpenAiChat => Some("/responses"),
-            TransportKind::OpenAiResponses => Some("/chat/completions"),
+    let next_path = if is_full_url {
+        if let Some(index) = path.find("/v1/") {
+            format!("{}/v1{suffix}", &path[..index])
+        } else if ends_with_version_segment(&path) {
+            format!("{path}{suffix}")
+        } else if let Some(root) = match transport {
+            TransportKind::OpenAiChat => path.strip_suffix("/responses"),
+            TransportKind::OpenAiResponses => path.strip_suffix("/chat/completions"),
         } {
-            if let Some(root) = trimmed.strip_suffix(other_suffix) {
-                return Ok(format!("{root}{suffix}"));
-            }
+            format!("{root}{suffix}")
+        } else if let Some(index) = path.rfind('/') {
+            format!("{}{suffix}", &path[..index])
+        } else {
+            return Err(format!("Cannot derive {suffix} endpoint from full URL"));
         }
-        if let Some(index) = trimmed.rfind('/') {
-            let root = &trimmed[..index];
-            if root.contains("://") {
-                return Ok(format!("{root}{suffix}"));
-            }
-        }
-        return Err(format!("Cannot derive {suffix} endpoint from full URL"));
-    }
-
-    if ends_with_version_segment(trimmed) {
-        Ok(format!("{trimmed}{suffix}"))
+    } else if ends_with_version_segment(&path) {
+        format!("{path}{suffix}")
     } else {
-        Ok(format!("{trimmed}/v1{suffix}"))
-    }
+        format!("{path}/v1{suffix}")
+    };
+    parsed.set_path(&next_path);
+    Ok(parsed.to_string())
 }
 
 fn ends_with_version_segment(url: &str) -> bool {

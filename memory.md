@@ -4279,3 +4279,14 @@ supported in one streaming turn`。
 - 新的本地内存 fixture 用真实双协议 runner 让 Responses baseline 404、Chat 完成全部四阶段，因而实际选中且完全 Verified 的 Chat 分支。由该真实 result 构造 `ProtocolCompatibilityRecord` 后只得到 `RawReasoningText`；同一投影送入实际 Chat→Responses 非流转换时，Qwen/vLLM `reasoning_content` 映射为 `reasoning_text`、普通 `content` 映射为 message `output_text` 且 summary 为空；送入实际 SSE 转换时只出现 `response.reasoning_text.delta` 与 `response.output_text.delta`，不出现 summary 事件。fixture 正文仅存在内存中，未写入档案或日志。
 - 本轮 fresh 验证（共享 `target-protocol-probe`）：迁移 1、`protocol_compatibility` 44、`streaming_codex_chat` 36、`transform_codex_chat` 145、`openai_compat` 36、`forwarder` 160、`handlers` 87，均为 0 failed；`cargo check --tests` 成功但保留 7 条既有/并行工作树的 unused/dead-code warning；`git diff --check` 通过。
 - 本次仍是后端源代码与测试验收：前端调用、真实第三方 Provider、已安装应用与 live 配置均未修改，也未被本轮视为已验收。
+
+## 2026-08-24 Codex 第三方协议探测：自动保存、高级覆盖与运行时漂移收口
+
+- 最终生产规则不含 Qwen、GLM、DeepSeek、Kimi 等模型品牌特例。每个第三方 Codex Provider/有效 MultiRouter route-model 目标都固定枚举 Responses 与 Chat Completions；两条分支分别测试 baseline JSON、baseline SSE、强制虚拟工具 SSE、工具结果续接 JSON。历史 `wire_api` 只帮助编译候选和回写最终选择，不能限制被测协议集合。
+- 单一选择器严格按 `续接 > 强制工具 > SSE > Readable > Summary > Opaque/None > Responses 同分兜底` 排序。只有选中分支四阶段全通过才是 `Verified` 并可自动投影 reasoning；更高 fidelity 不得把 `Partial` 升为 `Verified`。marker 仅是诊断提示，模型返回完成且非空的 assistant 输出即满足 baseline/续接，不能因没有照抄 marker 把模型服从性误判为协议失败。
+- 普通 Provider 的既有 add/update 保存边界已接入自动 preflight：先从尚未落库的 Provider 草稿编译有效目标并探测，再将 Provider 与所有目标档案放入同一数据库事务，随后才发布 live projection。高级 `codexProtocolMode=manual` 保留用户协议选择；reasoning 高级覆盖另用完整 `ProbeTargetKey` 绑定的 plan/apply/clear、10 分钟一次性 token 与 CAS revision。clear 写 tombstone revision，防止旧 plan 在清除后复活。reasoning effort/推理强度继续走独立 capability 链。
+- 运行时新增无正文结构观察：只比较 transport、reasoning semantic/source、字段路径、事件顺序、工具存在标记和 `PreToolVisibleContent`。非流式失配在当前投影前使精确档案失效；流式失配在本轮结束后失效并影响后续请求。捕获上限 1 MiB，超限跳过观察；正常无 reasoning 的请求不会错误失效 readable 档案。Chat SSE 观察器现先在内存规范化 CRLF 再解析，原始字节仍原样转发且正文不落库。
+- 本轮另外发现并按 TDD 根修两个探测判定问题：CRLF SSE 原先因只按 `\n\n` 分帧而得到 `ReasoningSemantic::None`；marker 不匹配原先会把完成响应错误标成 Unverified。两项测试均先确认 RED，再作最小 GREEN 修复。
+- Fresh 回归：`protocol_compatibility` 65、数据库迁移/事务 25、普通 Provider 保存/手工模式 17、MultiRouter 58、`streaming_codex_chat` 36、`transform_codex_chat` 145、`openai_compat` 36、`forwarder` 160、`handlers` 89、Codex Provider 117，全部 0 failed；`cargo check --tests --no-default-features` 成功。最终 fmt/diff/UTF-8 检查与本地提交在同一收口轮执行。
+- 搜索交叉验证：Codex 内置搜索查到 vLLM Responses streaming/tool/reasoning parser 的真实未决或版本相关问题（例如 #36435、#37167、#43221），Matrix 独立链路返回官方 reasoning outputs、tool calling 文档及仓库入口。两条链一致支持“能力属于具体 endpoint/部署/版本，不能按模型品牌或 API 名称猜测”；Matrix 没提供足以替代真实双协议探测的更强证据。
+- 边界仍然明确：本分支不实现 React 设置页，不替换安装包、不重启服务、不修改 live Provider，也不声称已安装 Codex Desktop 或生产 Provider 验收。下一切片应只做前端：普通模式显示自动测试进度/结果/失败阶段和显式重测；高级模式调用现有 plan/apply/clear，不在前端复制 classifier 或默认规则。

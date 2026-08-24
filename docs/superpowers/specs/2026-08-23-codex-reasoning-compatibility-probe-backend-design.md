@@ -1,8 +1,16 @@
 # Codex 协议兼容性自动探测：后端设计
 
-- 状态：待实现评审稿；本文件只定义后端，不实现前端。
+- 状态：后端已实现并通过源码回归；前端、安装态与真实运行态验收仍待后续切片。
 - 日期：2026-08-23。
 - 范围：第三方上游接入 Codex 时，自动判定 transport、流、工具、历史续接与响应投影；其中 reasoning 投影是协议档案的一个受验证子结论，同时为将来的高级模式提供手工覆盖接口。
+
+## 0. 实施状态（2026-08-24）
+
+- 普通 Codex Provider 保存会在发布 live 配置前编译真实有效候选；MultiRouter 会按模型目录编译每个实际 route/model 目标。每个物理目标固定枚举 Responses 与 Chat Completions，不用 `wire_api` 裁剪候选。
+- 两条协议分别执行 baseline JSON、baseline SSE、强制虚拟工具 SSE、工具结果续接 JSON。统一选择顺序为：续接、强制工具、SSE、`Readable > Summary > Opaque/None`，全部同分才优先 Responses。
+- 高级模式通过目标绑定、revision 校验的 plan/apply/clear 接口手工覆盖；普通自动档案与高级覆盖都不修改 reasoning effort 能力链。
+- 运行时只观察脱敏结构。非流式漂移会在本轮投影前使精确档案失效；流式漂移在本轮结束后失效并影响后续请求，不会触发新的计费探测。
+- 当前后端源码与测试已收口，但没有 React 设置页、安装包替换、服务重启或 live Provider 改写；因此不得把本状态表述为桌面端或生产发布完成。
 
 ## 1. 目标
 
