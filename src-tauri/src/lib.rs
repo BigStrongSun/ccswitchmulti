@@ -30,6 +30,7 @@ mod model_capabilities;
 mod openclaw_config;
 mod opencode_config;
 mod panic_hook;
+mod process_identity;
 mod prompt;
 mod prompt_files;
 mod protocol_compatibility;
@@ -501,14 +502,52 @@ pub fn run() {
             // 也能向前端推送 `usage-log-recorded`。
             // 放在日志系统初始化之后，确保 init 的日志能正常输出。
             usage_events::init(app.handle().clone());
+            services::recovery_outcome::init(app.handle().clone());
+            if let Err(error) = services::recovery_outcome::begin_generation() {
+                log::warn!("初始化恢复结果代际失败: {error}");
+            }
 
-            if let Some(previous) = app_exit_monitor::record_startup() {
+            let startup_recovery = app_exit_monitor::record_startup_report();
+            if let Some(previous) = startup_recovery.previous.as_ref() {
                 log::warn!(
-                    "检测到上次应用未正常退出: started_at={}, pid={}, crash_log_modified_at={:?}",
+                    "检测到上次运行 marker: classification={:?}, started_at={}, pid={}, crash_log_modified_at={:?}",
+                    startup_recovery.classification,
                     previous.marker.started_at,
                     previous.marker.pid,
                     previous.crash_log_modified_at
                 );
+                use services::recovery_outcome::{
+                    record_best_effort, RecoveryOutcome, RecoveryOutcomeKind, RecoverySeverity,
+                };
+                let mapped = match startup_recovery.classification {
+                    app_exit_monitor::PreviousRunClassification::ActivePreviousInstance => Some((
+                        RecoveryOutcomeKind::ActivePreviousInstance,
+                        RecoverySeverity::Warning,
+                        "closeOtherInstanceOrInspectProcess",
+                    )),
+                    app_exit_monitor::PreviousRunClassification::ConfirmedCrash => Some((
+                        RecoveryOutcomeKind::ConfirmedCrash,
+                        RecoverySeverity::Warning,
+                        "reviewRecoveryResults",
+                    )),
+                    app_exit_monitor::PreviousRunClassification::UncleanExit => Some((
+                        RecoveryOutcomeKind::UncleanExit,
+                        RecoverySeverity::Warning,
+                        "reviewRecoveryResults",
+                    )),
+                    app_exit_monitor::PreviousRunClassification::PlannedRestartOrUpdate => Some((
+                        RecoveryOutcomeKind::PlannedRestartOrUpdate,
+                        RecoverySeverity::Info,
+                        "none",
+                    )),
+                    app_exit_monitor::PreviousRunClassification::NoPreviousRun => None,
+                };
+                if let Some((kind, severity, next_step)) = mapped {
+                    let mut outcome =
+                        RecoveryOutcome::for_app("startup_classification", kind, severity, "ccsm");
+                    outcome.next_step = Some(next_step.to_string());
+                    record_best_effort(outcome);
+                }
             }
 
             let launch_on_startup = crate::settings::get_settings().launch_on_startup;
@@ -1240,6 +1279,7 @@ pub fn run() {
 
             // 异常退出恢复 + 代理状态自动恢复
             let app_handle = app.handle().clone();
+            let startup_recovery_classification = startup_recovery.classification;
             tauri::async_runtime::spawn(async move {
                 let state = app_handle.state::<AppState>();
 
@@ -1254,12 +1294,31 @@ pub fn run() {
                 // 检查 Live 配置是否仍处于被接管状态（包含占位符）
                 let live_taken_over = state.proxy_service.detect_takeover_in_live_configs();
 
-                if has_backups || live_taken_over {
+                if (has_backups || live_taken_over)
+                    && startup_recovery_classification.allows_crash_recovery()
+                {
                     log::warn!("检测到上次异常退出（存在接管残留），正在恢复 Live 配置...");
                     if let Err(e) = state.proxy_service.recover_from_crash().await {
                         log::error!("恢复 Live 配置失败: {e}");
+                        let mut outcome = services::recovery_outcome::RecoveryOutcome::for_app(
+                            "startup_crash_recovery",
+                            services::recovery_outcome::RecoveryOutcomeKind::UnrecoverableUserTables,
+                            services::recovery_outcome::RecoverySeverity::Error,
+                            "all",
+                        );
+                        outcome.lost_fields = vec!["liveConfig".to_string()];
+                        outcome.next_step = Some("openLogsOrRestoreUserBackup".to_string());
+                        services::recovery_outcome::record_best_effort(outcome);
                     } else {
                         log::info!("Live 配置已恢复");
+                        let mut outcome = services::recovery_outcome::RecoveryOutcome::for_app(
+                            "startup_crash_recovery",
+                            services::recovery_outcome::RecoveryOutcomeKind::HealthyBackupRestored,
+                            services::recovery_outcome::RecoverySeverity::Info,
+                            "all",
+                        );
+                        outcome.kept_fields = vec!["liveConfig".to_string()];
+                        services::recovery_outcome::record_best_effort(outcome);
                     }
                 }
 
@@ -1277,7 +1336,13 @@ pub fn run() {
                 initialize_common_config_snippets(&state);
 
                 // 检查 settings 表中的代理状态，自动恢复代理服务
-                restore_proxy_state_on_startup(&state).await;
+                if startup_recovery_classification.allows_proxy_startup() {
+                    restore_proxy_state_on_startup(&state).await;
+                } else {
+                    log::warn!(
+                        "检测到身份完全匹配的旧 CCSwitchMulti 实例仍在运行；本实例跳过代理恢复与监听接管"
+                    );
+                }
 
                 // Periodic backup check (on startup)
                 if let Err(e) = state.db.periodic_backup_if_needed() {
@@ -1427,6 +1492,8 @@ pub fn run() {
             commands::pick_directory,
             commands::open_external,
             commands::get_init_error,
+            commands::get_pending_recovery_outcomes,
+            commands::acknowledge_recovery_outcomes,
             commands::get_migration_result,
             commands::get_skills_migration_result,
             commands::get_app_config_path,
@@ -2087,9 +2154,26 @@ async fn restore_proxy_state_on_startup(state: &store::AppState) {
         {
             Ok(()) => {
                 log::info!("✓ 已恢复 {app_type} 的代理接管状态");
+                let mut outcome = services::recovery_outcome::RecoveryOutcome::for_app(
+                    "startup_takeover_restore",
+                    services::recovery_outcome::RecoveryOutcomeKind::StartupTakeoverRestored,
+                    services::recovery_outcome::RecoverySeverity::Info,
+                    app_type,
+                );
+                outcome.kept_fields = vec!["takeover".to_string()];
+                services::recovery_outcome::record_best_effort(outcome);
             }
             Err(e) => {
                 log::error!("✗ 恢复 {app_type} 的代理接管状态失败: {e}");
+                let mut outcome = services::recovery_outcome::RecoveryOutcome::for_app(
+                    "startup_takeover_restore",
+                    services::recovery_outcome::RecoveryOutcomeKind::StartupTakeoverFailed,
+                    services::recovery_outcome::RecoverySeverity::Error,
+                    app_type,
+                );
+                outcome.lost_fields = vec!["takeover".to_string()];
+                outcome.next_step = Some("openLogsOrRetryTakeover".to_string());
+                services::recovery_outcome::record_best_effort(outcome);
                 // 失败时清除该应用的状态，避免下次启动再次尝试
                 if let Err(clear_err) = state
                     .proxy_service

@@ -1,5 +1,14 @@
 use serde::{Deserialize, Serialize};
 
+pub const PROXY_RUNTIME_API_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProxyListenerRole {
+    Takeover,
+    ExternalOpenAiApi,
+}
+
 /// 代理服务器配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProxyConfig {
@@ -89,6 +98,24 @@ pub struct ProxyStatus {
     /// 当前活跃的代理目标列表
     #[serde(default)]
     pub active_targets: Vec<ActiveTarget>,
+    #[serde(default)]
+    pub app: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub pid: Option<u32>,
+    #[serde(default)]
+    pub executable_identity: Option<String>,
+    #[serde(default)]
+    pub process_started_at_ticks: Option<u64>,
+    #[serde(default)]
+    pub instance_id: Option<String>,
+    #[serde(default)]
+    pub config_scope: Option<String>,
+    #[serde(default)]
+    pub runtime_api_version: Option<u32>,
+    #[serde(default)]
+    pub listener_role: Option<ProxyListenerRole>,
 }
 
 /// 活跃的代理目标信息

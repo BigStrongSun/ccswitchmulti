@@ -24,17 +24,60 @@ pub fn init_app_config_dir(dir: PathBuf) {
     let _ = APP_CONFIG_DIR.set(dir);
 }
 
-/// 记录应用启动，并检查上次是否存在未清理的运行 marker。
-///
-/// 返回 `Some` 表示上次进程没有走正常退出记录。调用方可以据此打 warn 日志或在 UI
-/// 层后续提示用户查看日志目录。
-pub fn record_startup() -> Option<PreviousRunReport> {
-    let previous = read_run_marker();
-    if let Some(marker) = previous.as_ref() {
-        let report = PreviousRunReport {
-            marker: marker.clone(),
-            crash_log_modified_at: file_modified_at(crash_log_path()),
-        };
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreviousRunClassification {
+    NoPreviousRun,
+    ActivePreviousInstance,
+    ConfirmedCrash,
+    PlannedRestartOrUpdate,
+    UncleanExit,
+}
+
+impl PreviousRunClassification {
+    pub fn allows_crash_recovery(self) -> bool {
+        matches!(self, Self::ConfirmedCrash | Self::UncleanExit)
+    }
+
+    pub fn allows_proxy_startup(self) -> bool {
+        !matches!(self, Self::ActivePreviousInstance)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartupRecoveryReport {
+    pub previous: Option<PreviousRunReport>,
+    pub classification: PreviousRunClassification,
+}
+
+/// 记录本次启动，并在写入 marker 前对旧 PID、可执行文件与创建时间做身份核验。
+pub fn record_startup_report() -> StartupRecoveryReport {
+    let previous_marker = read_run_marker();
+    let previous = previous_marker.as_ref().map(|marker| PreviousRunReport {
+        marker: marker.clone(),
+        crash_log_modified_at: file_modified_at(crash_log_path()),
+    });
+    let events = read_exit_events();
+    let crash_log_modified_after_marker = previous.as_ref().is_some_and(|report| {
+        report
+            .crash_log_modified_at
+            .as_deref()
+            .is_some_and(|modified| modified > report.marker.started_at.as_str())
+    });
+    let observed_process = previous
+        .as_ref()
+        .and_then(|report| crate::process_identity::process_identity(report.marker.pid));
+    let config_scope = crate::process_identity::config_scope_fingerprint();
+    let classification = classify_previous_run(
+        previous.as_ref().map(|report| &report.marker),
+        &events,
+        crash_log_modified_after_marker,
+        observed_process.as_ref(),
+        &config_scope,
+    );
+
+    if let Some(report) = previous.as_ref() {
         append_event(
             "abnormal_exit_detected",
             "previous run marker remained at startup",
@@ -42,10 +85,12 @@ pub fn record_startup() -> Option<PreviousRunReport> {
             Some(json!({
                 "previousRun": report.marker,
                 "crashLogModifiedAt": report.crash_log_modified_at,
+                "classification": classification,
             })),
         );
     }
 
+    let identity = crate::process_identity::current_process_identity();
     let marker = RunMarker {
         started_at: now_string(),
         pid: std::process::id(),
@@ -55,16 +100,28 @@ pub fn record_startup() -> Option<PreviousRunReport> {
         cwd: std::env::current_dir()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|_| "unknown".to_string()),
+        executable_path: identity
+            .as_ref()
+            .map(|identity| identity.executable_path.clone()),
+        process_started_at_ticks: identity.as_ref().map(|identity| identity.started_at_ticks),
+        config_scope: Some(config_scope),
     };
 
-    if let Err(err) = write_run_marker(&marker) {
-        log::warn!("写入应用运行 marker 失败: {err}");
+    if classification != PreviousRunClassification::ActivePreviousInstance {
+        if let Err(err) = write_run_marker(&marker) {
+            log::warn!("写入应用运行 marker 失败: {err}");
+        }
     }
 
-    previous.map(|marker| PreviousRunReport {
-        marker,
-        crash_log_modified_at: file_modified_at(crash_log_path()),
-    })
+    StartupRecoveryReport {
+        previous,
+        classification,
+    }
+}
+
+#[allow(dead_code)]
+pub fn record_startup() -> Option<PreviousRunReport> {
+    record_startup_report().previous
 }
 
 /// 记录一次正常退出，并清理运行 marker。
@@ -72,10 +129,8 @@ pub fn record_startup() -> Option<PreviousRunReport> {
 /// 退出原因由调用方传入，便于区分托盘退出、窗口关闭、设置重启和更新安装等不同路径。
 pub fn record_clean_exit(reason: &str, exit_code: i32) {
     append_event("clean_exit", reason, Some(exit_code), None);
-    if let Err(err) = fs::remove_file(run_marker_path()) {
-        if err.kind() != std::io::ErrorKind::NotFound {
-            log::warn!("清理应用运行 marker 失败: {err}");
-        }
+    if let Err(err) = remove_run_marker_if_owned() {
+        log::warn!("清理应用运行 marker 失败: {err}");
     }
 }
 
@@ -89,7 +144,7 @@ pub fn record_forced_exit(reason: &str, exit_code: i32, detail: impl Into<Option
         Some(exit_code),
         detail.into().map(|detail| json!({ "detail": detail })),
     );
-    let _ = fs::remove_file(run_marker_path());
+    let _ = remove_run_marker_if_owned();
 }
 
 /// 记录 panic hook 捕获到的崩溃摘要。
@@ -137,9 +192,15 @@ pub struct RunMarker {
     pub os: String,
     pub arch: String,
     pub cwd: String,
+    #[serde(default)]
+    pub executable_path: Option<String>,
+    #[serde(default)]
+    pub process_started_at_ticks: Option<u64>,
+    #[serde(default)]
+    pub config_scope: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ExitEvent {
     timestamp: String,
@@ -151,6 +212,75 @@ struct ExitEvent {
     arch: String,
     pid: u32,
     details: Option<Value>,
+}
+
+fn classify_previous_run(
+    marker: Option<&RunMarker>,
+    events: &[ExitEvent],
+    crash_log_modified_after_marker: bool,
+    observed_process: Option<&crate::process_identity::ProcessIdentity>,
+    expected_config_scope: &str,
+) -> PreviousRunClassification {
+    let Some(marker) = marker else {
+        return PreviousRunClassification::NoPreviousRun;
+    };
+    let marker_identity = marker
+        .executable_path
+        .as_ref()
+        .zip(marker.process_started_at_ticks)
+        .map(
+            |(executable_path, started_at_ticks)| crate::process_identity::ProcessIdentity {
+                pid: marker.pid,
+                executable_path: executable_path.clone(),
+                started_at_ticks,
+            },
+        );
+    let same_scope = marker.config_scope.as_deref() == Some(expected_config_scope);
+    if same_scope
+        && marker_identity
+            .as_ref()
+            .zip(observed_process)
+            .is_some_and(|(expected, observed)| expected.matches(observed))
+    {
+        return PreviousRunClassification::ActivePreviousInstance;
+    }
+
+    let same_pid_events = events
+        .iter()
+        .filter(|event| event.pid == marker.pid && event.timestamp >= marker.started_at);
+    let mut confirmed_crash = crash_log_modified_after_marker;
+    let mut planned_restart = false;
+    for event in same_pid_events {
+        if matches!(event.kind.as_str(), "panic" | "forced_exit") {
+            confirmed_crash = true;
+        }
+        if event.kind == "clean_exit" && is_planned_exit_reason(&event.reason) {
+            planned_restart = true;
+        }
+    }
+    if confirmed_crash {
+        PreviousRunClassification::ConfirmedCrash
+    } else if planned_restart {
+        PreviousRunClassification::PlannedRestartOrUpdate
+    } else {
+        PreviousRunClassification::UncleanExit
+    }
+}
+
+fn is_planned_exit_reason(reason: &str) -> bool {
+    let lower = reason.trim().to_ascii_lowercase();
+    lower.contains("restart") || lower.contains("update") || lower.contains("reload")
+}
+
+fn read_exit_events() -> Vec<ExitEvent> {
+    fs::read_to_string(exit_events_path())
+        .ok()
+        .map(|text| {
+            text.lines()
+                .filter_map(|line| serde_json::from_str::<ExitEvent>(line).ok())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn append_event(kind: &str, reason: &str, exit_code: Option<i32>, details: Option<Value>) {
@@ -193,6 +323,41 @@ fn write_run_marker(marker: &RunMarker) -> std::io::Result<()> {
     }
     let text = serde_json::to_string_pretty(marker).map_err(std::io::Error::other)?;
     fs::write(path, text)
+}
+
+fn marker_matches_process(
+    marker: &RunMarker,
+    process: &crate::process_identity::ProcessIdentity,
+) -> bool {
+    marker
+        .executable_path
+        .as_ref()
+        .zip(marker.process_started_at_ticks)
+        .is_some_and(|(executable_path, started_at_ticks)| {
+            crate::process_identity::ProcessIdentity {
+                pid: marker.pid,
+                executable_path: executable_path.clone(),
+                started_at_ticks,
+            }
+            .matches(process)
+        })
+}
+
+fn remove_run_marker_if_owned() -> std::io::Result<()> {
+    let Some(marker) = read_run_marker() else {
+        return Ok(());
+    };
+    let Some(current) = crate::process_identity::current_process_identity() else {
+        return Ok(());
+    };
+    if !marker_matches_process(&marker, &current) {
+        return Ok(());
+    }
+    match fs::remove_file(run_marker_path()) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 fn run_marker_path() -> PathBuf {
@@ -256,5 +421,110 @@ mod tests {
         let text = serde_json::to_string(&event).expect("serialize event");
         assert!(text.contains("\"kind\":\"clean_exit\""));
         assert!(text.contains("\"exitCode\":0"));
+    }
+
+    fn marker_with_identity() -> RunMarker {
+        RunMarker {
+            started_at: "2026-08-25 10:00:00.000".to_string(),
+            pid: 42,
+            version: "test".to_string(),
+            os: "test".to_string(),
+            arch: "test".to_string(),
+            cwd: "test".to_string(),
+            executable_path: Some(r"C:\Apps\cc-switch.exe".to_string()),
+            process_started_at_ticks: Some(100),
+            config_scope: Some(crate::process_identity::config_scope_fingerprint()),
+        }
+    }
+
+    #[test]
+    fn active_previous_instance_requires_the_complete_process_identity() {
+        let marker = marker_with_identity();
+        let exact = crate::process_identity::ProcessIdentity {
+            pid: marker.pid,
+            executable_path: marker.executable_path.clone().expect("marker executable"),
+            started_at_ticks: marker.process_started_at_ticks.expect("marker start"),
+        };
+        assert_eq!(
+            classify_previous_run(
+                Some(&marker),
+                &[],
+                false,
+                Some(&exact),
+                marker.config_scope.as_deref().expect("marker scope"),
+            ),
+            PreviousRunClassification::ActivePreviousInstance
+        );
+
+        let reused_pid = crate::process_identity::ProcessIdentity {
+            started_at_ticks: exact.started_at_ticks + 1,
+            ..exact.clone()
+        };
+        assert_eq!(
+            classify_previous_run(
+                Some(&marker),
+                &[],
+                false,
+                Some(&reused_pid),
+                marker.config_scope.as_deref().expect("marker scope"),
+            ),
+            PreviousRunClassification::UncleanExit
+        );
+        let wrong_executable = crate::process_identity::ProcessIdentity {
+            executable_path: r"C:\Other\cc-switch.exe".to_string(),
+            ..exact
+        };
+        assert_eq!(
+            classify_previous_run(
+                Some(&marker),
+                &[],
+                false,
+                Some(&wrong_executable),
+                marker.config_scope.as_deref().expect("marker scope"),
+            ),
+            PreviousRunClassification::UncleanExit
+        );
+    }
+
+    #[test]
+    fn legacy_pid_only_marker_is_never_treated_as_an_active_instance() {
+        let mut marker = marker_with_identity();
+        marker.executable_path = None;
+        marker.process_started_at_ticks = None;
+        let observed = crate::process_identity::ProcessIdentity {
+            pid: marker.pid,
+            executable_path: r"C:\Apps\cc-switch.exe".to_string(),
+            started_at_ticks: 100,
+        };
+
+        assert_eq!(
+            classify_previous_run(
+                Some(&marker),
+                &[],
+                false,
+                Some(&observed),
+                marker.config_scope.as_deref().expect("marker scope"),
+            ),
+            PreviousRunClassification::UncleanExit
+        );
+    }
+
+    #[test]
+    fn marker_ownership_requires_the_complete_current_process_identity() {
+        let current = crate::process_identity::current_process_identity()
+            .expect("current process identity must be queryable");
+        let owned = RunMarker {
+            pid: current.pid,
+            executable_path: Some(current.executable_path.clone()),
+            process_started_at_ticks: Some(current.started_at_ticks),
+            ..marker_with_identity()
+        };
+        assert!(marker_matches_process(&owned, &current));
+
+        let different_instance = RunMarker {
+            process_started_at_ticks: Some(current.started_at_ticks.saturating_add(1)),
+            ..owned
+        };
+        assert!(!marker_matches_process(&different_instance, &current));
     }
 }

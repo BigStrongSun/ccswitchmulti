@@ -57,6 +57,15 @@ pub enum ProxyServerMode {
     ExternalOpenAiApiOnly,
 }
 
+impl ProxyServerMode {
+    fn listener_role(self) -> ProxyListenerRole {
+        match self {
+            Self::FullProxy => ProxyListenerRole::Takeover,
+            Self::ExternalOpenAiApiOnly => ProxyListenerRole::ExternalOpenAiApi,
+        }
+    }
+}
+
 pub struct ProxyServer {
     config: ProxyConfig,
     mode: ProxyServerMode,
@@ -160,6 +169,19 @@ impl ProxyServer {
         status.running = true;
         status.address = self.config.listen_address.clone();
         status.port = actual_port;
+        status.app = Some("ccswitchmulti".to_string());
+        status.version = Some(env!("CARGO_PKG_VERSION").to_string());
+        if let Some(identity) = crate::process_identity::current_process_identity() {
+            status.pid = Some(identity.pid);
+            status.executable_identity = Some(crate::process_identity::executable_fingerprint(
+                &identity.executable_path,
+            ));
+            status.process_started_at_ticks = Some(identity.started_at_ticks);
+        }
+        status.instance_id = Some(uuid::Uuid::new_v4().to_string());
+        status.config_scope = Some(crate::process_identity::config_scope_fingerprint());
+        status.runtime_api_version = Some(PROXY_RUNTIME_API_VERSION);
+        status.listener_role = Some(self.mode.listener_role());
         drop(status);
 
         // 记录启动时间

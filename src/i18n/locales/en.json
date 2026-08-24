@@ -273,6 +273,28 @@
     "openclawNoModels": "No models configured",
     "backfillWarning": "Switched successfully, but failed to save changes back to the previous provider",
     "windowControlFailed": "Window control failed: {{error}}",
+    "recovery": {
+      "unknown": "A recovery issue needs attention",
+      "app": "Affected scope: {{app}}.",
+      "openLogs": "Open logs",
+      "kind": {
+        "activePreviousInstance": "Another CCSwitchMulti instance is still running, so proxy takeover was skipped",
+        "confirmedCrash": "The previous run crashed; review the configuration recovery result",
+        "uncleanExit": "The previous run did not exit cleanly; review the configuration recovery result",
+        "livePreservedProviderRepaired": "Runtime configuration was rebuilt from the provider; some user settings remain unconfirmed",
+        "providerOnlyRestored": "Only provider fields were restored; some user settings remain unconfirmed",
+        "unrecoverableUserTables": "Configuration recovery failed; user settings may not have been restored",
+        "portOwnedByUnknownOwner": "The proxy port has an unverified owner, so CCSwitchMulti refused takeover",
+        "startupTakeoverFailed": "Proxy takeover could not be restored at startup"
+      },
+      "nextStep": {
+        "closeOtherInstanceOrInspectProcess": "Close the other instance or inspect its process.",
+        "reviewRecoveryResults": "Open the logs and verify the recovery result.",
+        "openLogsOrRestoreUserBackup": "Open the logs and restore a user backup if needed.",
+        "changeProxyPortOrInspectOwner": "Inspect the port owner or choose another proxy port.",
+        "openLogsOrRetryTakeover": "Open the logs, then enable proxy takeover again."
+      }
+    },
     "officialBlockedByProxy": "Cannot switch to official provider while local routing is active. Using routing with official APIs may cause account bans.",
     "proxyOfficialWarning": "Current provider {{name}} is official. Consider switching to a third-party provider before using local routing.",
     "codexRouterRestartRequired": "Codex Multi Router is enabled. Fully quit all Codex Desktop/app-server processes, reopen Codex, and then check the model picker.",

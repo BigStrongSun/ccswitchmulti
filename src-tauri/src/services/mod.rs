@@ -15,6 +15,7 @@ pub mod prompt;
 pub mod provider;
 pub mod proxy;
 pub mod quota_collaboration;
+pub mod recovery_outcome;
 pub mod s3;
 pub mod s3_auto_sync;
 pub mod s3_sync;

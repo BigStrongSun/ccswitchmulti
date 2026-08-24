@@ -7,6 +7,36 @@ import type {
 } from "@/types";
 import type { AppId } from "./types";
 
+export type RecoverySeverity = "info" | "warning" | "error";
+
+export type RecoveryOutcomeKind =
+  | "activePreviousInstance"
+  | "confirmedCrash"
+  | "uncleanExit"
+  | "plannedRestartOrUpdate"
+  | "healthyBackupRestored"
+  | "livePreservedProviderRepaired"
+  | "providerOnlyRestored"
+  | "unrecoverableUserTables"
+  | "portOwnedByCompatibleInstance"
+  | "portOwnedByUnknownOwner"
+  | "startupTakeoverRestored"
+  | "startupTakeoverFailed";
+
+export interface RecoveryOutcome {
+  id: string;
+  generation: number;
+  operation: string;
+  kind: RecoveryOutcomeKind;
+  severity: RecoverySeverity;
+  appType?: string;
+  keptFields: string[];
+  lostFields: string[];
+  nextStep?: string;
+  timestamp: string;
+  acknowledgedAt?: string;
+}
+
 export interface ConfigTransferResult {
   success: boolean;
   message: string;
@@ -303,6 +333,17 @@ export const settingsApi = {
   /** 打开包含运行日志、异常退出记录和路由诊断的本地日志目录。 */
   async openLogDir(): Promise<boolean> {
     return await invoke("open_log_dir");
+  },
+
+  async getPendingRecoveryOutcomes(): Promise<RecoveryOutcome[]> {
+    return await invoke("get_pending_recovery_outcomes");
+  },
+
+  async acknowledgeRecoveryOutcomes(
+    generation: number,
+    ids: string[],
+  ): Promise<number> {
+    return await invoke("acknowledge_recovery_outcomes", { generation, ids });
   },
 };
 

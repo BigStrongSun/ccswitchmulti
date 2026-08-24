@@ -86,6 +86,7 @@ thiserror = "2.0"
 anyhow = "1.0"
 zip = "2.2"
 serde_yaml = "0.9"
+semver = "1"
 tempfile = "3"
 url = "2.5"
 auto-launch = "0.5"
@@ -119,8 +120,11 @@ windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Globalization",
     "Win32_Graphics_Gdi",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Networking_WinSock",
     "Win32_Storage_FileSystem",
     "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
     "Win32_UI_Controls",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",

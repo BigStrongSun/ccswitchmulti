@@ -14,6 +14,7 @@ use crate::proxy::{external_openai_api, server::ProxyServer};
 use crate::services::provider::{
     build_effective_settings_with_common_config, write_live_with_common_config,
 };
+use semver::Version;
 use serde_json::{json, Map, Value};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -23,8 +24,126 @@ use toml_edit::{DocumentMut, Item, TableLike};
 
 /// 用于接管 Live 配置时的占位符（避免客户端提示缺少 key，同时不泄露真实 Token）
 const PROXY_TOKEN_PLACEHOLDER: &str = "PROXY_MANAGED";
+const PORT_OWNERSHIP_GUARD_PREFIX: &str = "PORT_OWNERSHIP_GUARD";
 /// Codex 接管时暴露给官方客户端的本地代理入口名称。
 const CODEX_LOCAL_PROXY_PROVIDER_NAME: &str = "CCSwitch MultiRouter";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PortOwnership {
+    CompatibleInstance,
+    UnknownOwner,
+    Unreachable,
+}
+
+fn proxy_identity_matches_verified_process(
+    payload: &Value,
+    port: u16,
+    listener_pid: u32,
+    process: &crate::process_identity::ProcessIdentity,
+    expected_config_scope: &str,
+) -> bool {
+    let process_executable_identity =
+        crate::process_identity::executable_fingerprint(&process.executable_path);
+    let app_matches = payload
+        .get("app")
+        .and_then(Value::as_str)
+        .is_some_and(|app| app.trim().eq_ignore_ascii_case("ccswitchmulti"));
+    let version_matches = payload
+        .get("version")
+        .and_then(Value::as_str)
+        .and_then(|version| Version::parse(version.trim()).ok())
+        .zip(Version::parse(env!("CARGO_PKG_VERSION")).ok())
+        .is_some_and(|(remote, local)| remote.major == local.major);
+    let claimed_pid = payload
+        .get("pid")
+        .and_then(Value::as_u64)
+        .and_then(|pid| u32::try_from(pid).ok());
+    let claimed_start = payload
+        .get("process_started_at_ticks")
+        .and_then(Value::as_u64);
+    let claimed_executable = payload.get("executable_identity").and_then(Value::as_str);
+    let listener_matches = payload.get("port").and_then(Value::as_u64) == Some(u64::from(port))
+        && payload.get("running").and_then(Value::as_bool) == Some(true);
+    let instance_present = payload
+        .get("instance_id")
+        .and_then(Value::as_str)
+        .is_some_and(|instance| !instance.trim().is_empty());
+    let config_scope_matches =
+        payload.get("config_scope").and_then(Value::as_str) == Some(expected_config_scope);
+    let runtime_matches = payload.get("runtime_api_version").and_then(Value::as_u64)
+        == Some(u64::from(PROXY_RUNTIME_API_VERSION));
+    let role_matches = payload.get("listener_role").and_then(Value::as_str) == Some("takeover");
+
+    app_matches
+        && version_matches
+        && claimed_pid == Some(listener_pid)
+        && listener_pid == process.pid
+        && claimed_start == Some(process.started_at_ticks)
+        && crate::process_identity::executable_matches_current(&process.executable_path)
+        && claimed_executable == Some(process_executable_identity.as_str())
+        && listener_matches
+        && instance_present
+        && config_scope_matches
+        && runtime_matches
+        && role_matches
+}
+
+pub(crate) async fn probe_proxy_port(port: u16) -> PortOwnership {
+    if port == 0 {
+        return PortOwnership::Unreachable;
+    }
+    let Some(owner_before) = crate::process_identity::tcp_listener_owner_pid(port) else {
+        return PortOwnership::Unreachable;
+    };
+    let Some(process_before) = crate::process_identity::process_identity(owner_before) else {
+        return PortOwnership::UnknownOwner;
+    };
+
+    let client = match reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_millis(500))
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => return PortOwnership::UnknownOwner,
+    };
+    let response = match client
+        .get(format!("http://127.0.0.1:{port}/status"))
+        .send()
+        .await
+    {
+        Ok(response) if response.status().is_success() => response,
+        Ok(_) => return PortOwnership::UnknownOwner,
+        Err(_) => return PortOwnership::UnknownOwner,
+    };
+    let payload = match response.json::<Value>().await {
+        Ok(payload) => payload,
+        Err(_) => return PortOwnership::UnknownOwner,
+    };
+
+    let Some(owner_after) = crate::process_identity::tcp_listener_owner_pid(port) else {
+        return PortOwnership::UnknownOwner;
+    };
+    let Some(process_after) = crate::process_identity::process_identity(owner_after) else {
+        return PortOwnership::UnknownOwner;
+    };
+    if owner_before != owner_after || !process_before.matches(&process_after) {
+        return PortOwnership::UnknownOwner;
+    }
+
+    let expected_config_scope = crate::process_identity::config_scope_fingerprint();
+    if proxy_identity_matches_verified_process(
+        &payload,
+        port,
+        owner_after,
+        &process_after,
+        &expected_config_scope,
+    ) {
+        PortOwnership::CompatibleInstance
+    } else {
+        PortOwnership::UnknownOwner
+    }
+}
 
 fn should_run_codex_post_takeover(app_type: &AppType) -> bool {
     matches!(app_type, AppType::Codex)
@@ -708,6 +827,7 @@ impl ProxyService {
         ProxyStatus {
             address: external_openai_api::external_listen_address(&profile),
             port: external_openai_api::external_listen_port(&profile),
+            listener_role: Some(ProxyListenerRole::ExternalOpenAiApi),
             ..ProxyStatus::default()
         }
     }
@@ -862,7 +982,42 @@ impl ProxyService {
         if enabled {
             // 1) 代理服务未运行则自动启动
             if !self.is_running().await {
-                self.start().await?;
+                if let Err(start_error) = self.start().await {
+                    let listen_port = self
+                        .db
+                        .get_proxy_config()
+                        .await
+                        .map_err(|e| format!("获取代理端口失败: {e}"))?
+                        .listen_port;
+                    match probe_proxy_port(listen_port).await {
+                        PortOwnership::CompatibleInstance => {
+                            log::warn!(
+                                "端口 {listen_port} 已由同配置作用域、同运行协议的 CCSwitchMulti 实例占用；本实例仅复用该监听，不会终止其进程"
+                            );
+                            let mut outcome = crate::services::recovery_outcome::RecoveryOutcome::for_app(
+                                "proxy_listener_ownership",
+                                crate::services::recovery_outcome::RecoveryOutcomeKind::PortOwnedByCompatibleInstance,
+                                crate::services::recovery_outcome::RecoverySeverity::Info,
+                                app_type_str,
+                            );
+                            outcome.kept_fields = vec!["listener".to_string()];
+                            crate::services::recovery_outcome::record_best_effort(outcome);
+                        }
+                        PortOwnership::UnknownOwner | PortOwnership::Unreachable => {
+                            let mut outcome = crate::services::recovery_outcome::RecoveryOutcome::for_app(
+                                "proxy_listener_ownership",
+                                crate::services::recovery_outcome::RecoveryOutcomeKind::PortOwnedByUnknownOwner,
+                                crate::services::recovery_outcome::RecoverySeverity::Error,
+                                app_type_str,
+                            );
+                            outcome.next_step = Some("changeProxyPortOrInspectOwner".to_string());
+                            crate::services::recovery_outcome::record_best_effort(outcome);
+                            return Err(format!(
+                                "{PORT_OWNERSHIP_GUARD_PREFIX}: 代理端口 {listen_port} 的监听进程身份无法完整验证；CCSwitchMulti 不会结束或接管该进程（原始错误: {start_error}）"
+                            ));
+                        }
+                    }
+                }
             }
 
             // 2) 已接管则直接返回（幂等）；但如果缺少备份或占位符残留，需要重建接管
@@ -2163,6 +2318,15 @@ impl ProxyService {
                 .restore_live_config_for_app_with_fallback(&app_type)
                 .await
             {
+                let mut outcome = crate::services::recovery_outcome::RecoveryOutcome::for_app(
+                    "live_config_recovery",
+                    crate::services::recovery_outcome::RecoveryOutcomeKind::UnrecoverableUserTables,
+                    crate::services::recovery_outcome::RecoverySeverity::Error,
+                    app_type.as_str(),
+                );
+                outcome.lost_fields = vec!["liveConfig".to_string()];
+                outcome.next_step = Some("openLogsOrRestoreUserBackup".to_string());
+                crate::services::recovery_outcome::record_best_effort(outcome);
                 errors.push(e);
             }
         }
@@ -2208,6 +2372,14 @@ impl ProxyService {
                 );
             } else {
                 self.write_live_config_for_app(app_type, &config)?;
+                let mut outcome = crate::services::recovery_outcome::RecoveryOutcome::for_app(
+                    "live_config_recovery",
+                    crate::services::recovery_outcome::RecoveryOutcomeKind::HealthyBackupRestored,
+                    crate::services::recovery_outcome::RecoverySeverity::Info,
+                    app_type_str,
+                );
+                outcome.kept_fields = vec!["liveConfig".to_string()];
+                crate::services::recovery_outcome::record_best_effort(outcome);
                 log::info!("{app_type_str} Live 配置已从备份恢复");
                 return Ok(());
             }
@@ -2221,6 +2393,16 @@ impl ProxyService {
         // 2.1) 优先从 SSOT（当前供应商）重建 Live（比"清理字段"更可用）
         match self.restore_live_from_ssot_for_app(app_type) {
             Ok(true) => {
+                let mut outcome = crate::services::recovery_outcome::RecoveryOutcome::for_app(
+                    "live_config_recovery",
+                    crate::services::recovery_outcome::RecoveryOutcomeKind::LivePreservedProviderRepaired,
+                    crate::services::recovery_outcome::RecoverySeverity::Warning,
+                    app_type_str,
+                );
+                outcome.kept_fields = vec!["provider".to_string()];
+                outcome.lost_fields = vec!["userTables".to_string()];
+                outcome.next_step = Some("reviewRecoveryResults".to_string());
+                crate::services::recovery_outcome::record_best_effort(outcome);
                 log::info!("{app_type_str} Live 配置已从 SSOT 恢复（无备份兜底）");
                 return Ok(());
             }
@@ -2237,7 +2419,28 @@ impl ProxyService {
         }
 
         // 2.2) 最后兜底：尽力清理占位符与本地代理地址，避免长期卡在代理占位符状态
-        self.cleanup_takeover_placeholders_in_live_for_app(app_type)?;
+        if let Err(error) = self.cleanup_takeover_placeholders_in_live_for_app(app_type) {
+            let mut outcome = crate::services::recovery_outcome::RecoveryOutcome::for_app(
+                "live_config_recovery",
+                crate::services::recovery_outcome::RecoveryOutcomeKind::UnrecoverableUserTables,
+                crate::services::recovery_outcome::RecoverySeverity::Error,
+                app_type_str,
+            );
+            outcome.lost_fields = vec!["liveConfig".to_string()];
+            outcome.next_step = Some("openLogsOrRestoreUserBackup".to_string());
+            crate::services::recovery_outcome::record_best_effort(outcome);
+            return Err(error);
+        }
+        let mut outcome = crate::services::recovery_outcome::RecoveryOutcome::for_app(
+            "live_config_recovery",
+            crate::services::recovery_outcome::RecoveryOutcomeKind::ProviderOnlyRestored,
+            crate::services::recovery_outcome::RecoverySeverity::Warning,
+            app_type_str,
+        );
+        outcome.kept_fields = vec!["provider".to_string()];
+        outcome.lost_fields = vec!["userTables".to_string()];
+        outcome.next_step = Some("openLogsOrRestoreUserBackup".to_string());
+        crate::services::recovery_outcome::record_best_effort(outcome);
         log::info!("{app_type_str} Live 接管占位符已清理（无备份兜底）");
         Ok(())
     }
@@ -4162,6 +4365,7 @@ impl ProxyService {
             // 服务器未运行时返回默认状态
             Ok(ProxyStatus {
                 running: false,
+                listener_role: Some(ProxyListenerRole::Takeover),
                 ..Default::default()
             })
         }
@@ -4396,6 +4600,94 @@ mod tests {
         assert!(should_run_codex_post_takeover(&AppType::Codex));
         assert!(!should_run_codex_post_takeover(&AppType::Claude));
         assert!(!should_run_codex_post_takeover(&AppType::Gemini));
+    }
+
+    fn verified_proxy_identity_fixture() -> (Value, u16, crate::process_identity::ProcessIdentity) {
+        let process = crate::process_identity::current_process_identity()
+            .expect("current process identity must be queryable");
+        let port = 15721;
+        let payload = json!({
+            "running": true,
+            "port": port,
+            "app": "ccswitchmulti",
+            "version": env!("CARGO_PKG_VERSION"),
+            "pid": process.pid,
+            "executable_identity": crate::process_identity::executable_fingerprint(&process.executable_path),
+            "process_started_at_ticks": process.started_at_ticks,
+            "instance_id": "fixture-instance",
+            "config_scope": crate::process_identity::config_scope_fingerprint(),
+            "runtime_api_version": PROXY_RUNTIME_API_VERSION,
+            "listener_role": "takeover",
+        });
+        (payload, port, process)
+    }
+
+    #[test]
+    fn proxy_identity_requires_listener_pid_executable_start_time_and_scope() {
+        let (payload, port, process) = verified_proxy_identity_fixture();
+        let expected_config_scope = payload["config_scope"]
+            .as_str()
+            .expect("fixture config scope")
+            .to_string();
+        assert!(proxy_identity_matches_verified_process(
+            &payload,
+            port,
+            process.pid,
+            &process,
+            &expected_config_scope,
+        ));
+
+        let mut reused_pid = process.clone();
+        reused_pid.started_at_ticks += 1;
+        assert!(!proxy_identity_matches_verified_process(
+            &payload,
+            port,
+            process.pid,
+            &reused_pid,
+            &expected_config_scope,
+        ));
+        assert!(!proxy_identity_matches_verified_process(
+            &payload,
+            port,
+            process.pid.saturating_add(1),
+            &process,
+            &expected_config_scope,
+        ));
+
+        let mut wrong_role = payload.clone();
+        wrong_role["listener_role"] = Value::String("externalOpenAiApi".to_string());
+        assert!(!proxy_identity_matches_verified_process(
+            &wrong_role,
+            port,
+            process.pid,
+            &process,
+            &expected_config_scope,
+        ));
+
+        for field in [
+            "executable_identity",
+            "process_started_at_ticks",
+            "instance_id",
+            "config_scope",
+            "runtime_api_version",
+            "listener_role",
+        ] {
+            let mut incomplete = payload.clone();
+            incomplete
+                .as_object_mut()
+                .expect("payload object")
+                .remove(field);
+            assert!(
+                !proxy_identity_matches_verified_process(
+                    &incomplete,
+                    port,
+                    process.pid,
+                    &process,
+                    &expected_config_scope,
+                ),
+                "missing {field} must fail closed"
+            );
+        }
     }
 
     async fn running_codex_base_url(service: &ProxyService) -> String {

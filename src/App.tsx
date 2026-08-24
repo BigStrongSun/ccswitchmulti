@@ -39,6 +39,7 @@ import {
   settingsApi,
   type AppId,
   type ProviderSwitchEvent,
+  type RecoveryOutcome,
 } from "@/lib/api";
 import { checkAllEnvConflicts, checkEnvConflicts } from "@/lib/api/env";
 import { useProviderActions } from "@/hooks/useProviderActions";
@@ -204,6 +205,76 @@ function App() {
   useAdaptiveUiZoom();
   const { t } = useTranslation();
   const queryClient = useQueryClient();
+  const shownRecoveryOutcomeIds = useRef(new Set<string>());
+
+  const acknowledgeRecoveryOutcome = (outcome: RecoveryOutcome) => {
+    void settingsApi
+      .acknowledgeRecoveryOutcomes(outcome.generation, [outcome.id])
+      .catch((error) => {
+        console.debug("[App] Failed to acknowledge recovery outcome", error);
+      });
+  };
+
+  const showRecoveryOutcome = (outcome: RecoveryOutcome) => {
+    if (
+      outcome.severity === "info" ||
+      shownRecoveryOutcomeIds.current.has(outcome.id)
+    ) {
+      return;
+    }
+    shownRecoveryOutcomeIds.current.add(outcome.id);
+    const title = t(`notifications.recovery.kind.${outcome.kind}`, {
+      defaultValue: t("notifications.recovery.unknown"),
+    });
+    const nextStep = outcome.nextStep
+      ? t(`notifications.recovery.nextStep.${outcome.nextStep}`, {
+          defaultValue: t(
+            "notifications.recovery.nextStep.reviewRecoveryResults",
+          ),
+        })
+      : undefined;
+    const description = [
+      outcome.appType
+        ? t("notifications.recovery.app", { app: outcome.appType })
+        : undefined,
+      nextStep,
+    ]
+      .filter(Boolean)
+      .join(" ");
+    const options = {
+      id: `recovery-${outcome.id}`,
+      description,
+      duration: Infinity,
+      closeButton: true,
+      action: {
+        label: t("notifications.recovery.openLogs"),
+        onClick: () => {
+          acknowledgeRecoveryOutcome(outcome);
+          void settingsApi.openLogDir();
+        },
+      },
+      onDismiss: () => acknowledgeRecoveryOutcome(outcome),
+    };
+    if (outcome.severity === "error") {
+      toast.error(title, options);
+    } else {
+      toast.warning(title, options);
+    }
+  };
+
+  useTauriEvent<RecoveryOutcome>(
+    "recovery-outcome-recorded",
+    showRecoveryOutcome,
+  );
+
+  useEffect(() => {
+    void settingsApi
+      .getPendingRecoveryOutcomes()
+      .then((outcomes) => outcomes.forEach(showRecoveryOutcome))
+      .catch((error) => {
+        console.debug("[App] Failed to read recovery outcomes", error);
+      });
+  }, [t]);
 
   const [activeApp, setActiveApp] = useState<AppId>(getInitialApp);
   const sharedFeatureApp: AppId =
