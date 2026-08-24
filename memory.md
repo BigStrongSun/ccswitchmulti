@@ -4449,3 +4449,15 @@ supported in one streaming turn`。
 - 本轮只完成源码集成与后端回归，没有构建安装包、替换安装态、重启 CCSwitchMulti/Codex、修改 live Provider/Router 或重新对真实 Provider 发探测请求；前端状态页仍属于后续切片。
 - 主线集成后的 Provider mutation 调用链补审又发现一个真实旁路：`sync_universal_provider` 生成 Codex 子 Provider 时直接调用同步 `ProviderService::sync_universal_to_apps`，无法执行异步自动 preflight。现命令改为先从当前 Universal 定义和已有 Codex 子项编译完整草稿，调用与普通 Provider 相同的 `automatic_codex_provider_preflight`，再把探测后 Provider 与全部 profile 交给 profile-aware mutation 原子持久化；未启用 Codex 时不探测，探测无法开始时沿用普通保存的安全回退语义。
 - Universal Provider 回归先因缺少 preflight 路径明确 RED，再转 GREEN；新测试断言探测闭包只调用一次、选择后的 `openai_chat` 写入生成子 Provider、对应 profile 同事务可读。聚焦 `universal` 11/11、普通 Provider preflight 3/3、protocol compatibility 65/65；完整 Rust library 更新为 3470 passed、0 failed、6 ignored，`cargo check`、rustfmt 与 `git diff --check` 通过。
+
+## 2026-08-25 协议探测合入后 PR #37-#66 重新评估
+
+- 复审基线为 `main@ca545155`，已包含 `27a80890` 的自动协议探测集成和 `ca545155` 的 Universal Provider 探测旁路修复。#36 之后没有高于 #66 的新 PR；当前抓取的 PR head 为 #37/#39/#41/#43/#45/#47/#49/#57-#64/#66。
+- #37、#39、#41、#43、#45、#47、#49 的目标行为已经由当前主线等价或更强实现覆盖：v2 `authPolicy`、缺省 `modelSelection`、Provider 派生目录与活动 workspace、`displayName`、Windows 原子替换恢复、仅活动 Router 发布、Flash/Pro 后缀别名均已有源码和回归。旧 PR 分支落后且冲突，不应整枝合入，可关闭为 superseded。
+- #58 的 prefix-only legacy migration 修复真实且可干净合并，但其 `provider_catalog_entries` 没有过滤 `modelCatalog.models[].enabled=false`，会把停用模型固化进 `include`。应先补过滤和回归，再选择性移植。
+- #66 不能整包合入：它把 Provider 派生的聚合 `modelCatalog` 回写 Router DB，重新制造第二事实源，而且混入 41 个文件、22 个提交和无关冲突。但它暴露的上下文缺口真实存在：当前 `publish_codex_multirouter_projection` 仍调用无 `ProviderClassificationContext` 的目录准备函数；`mode=all` 需要 Provider 上下文判断目标 Provider 拥有的模型。profile reconciliation 已有上下文，Provider 更新、retry、activation/delete 等投影发布入口生成 Agent 文件时却可能无上下文，导致无前缀 `mode=all` route 的 Agent 文件遗漏或被清理。正确修复是只把 context-aware publishing 贯通全部 Provider 派生发布入口，Router DB 继续不持久化派生目录。
+- #57 的 live config 并发覆盖问题真实，但 PR 的最后 fingerprint check 到 replace 之间仍有 TOCTOU，并且早于协议档案事务；应在当前主线统一 live-config writer/ownership boundary 后重做。#63 的 MCP 修复也依赖同一 writer，且仅凭 DB 同名 ID 推断 Codex 所有权会误删用户配置；必须引入历史 ownership receipt，不能直接合。
+- #59 只恢复内存中的 legacy `defaultRouteId`，serializer 仍会丢字段，修复不闭环；还需明确“持续清除旧 fallback”还是“保留用于降级兼容”的产品策略。#60 是 53 项 Rust 依赖升级且含 major 变化，应独立发布和做兼容性验证。#61 的 plugin marketplace 路径/schema 未由当前 Codex 安装证实，另有字典序版本比较、错误 marketplace 选择、并发写和同步递归扫描等缺陷，应重做。
+- #62 的 startup/port ownership 只用 PID、进程存在和自报 `/status`，无法抵抗 PID 复用，也未证明 listener/可执行文件/start-time 所有权；不得据此复用或接管未知进程。#64 用单一全局 outcome，后续成功可覆盖先前失败，缺 acknowledgment/generation 生命周期；应改为有界、分 app/operation、按严重度保留的结果集合。
+- 因此当前没有任何一个 #36 之后的 PR 适合原样合并。可执行顺序是：先根修 #66 的 context-aware projection 缺口和 #58 的 enabled 过滤；再统一 #57/#63 的 live config writer 与 ownership receipt；随后分别重做 #62/#64；#59 先定兼容策略；#61 先确认官方/安装态 marketplace schema；#60 延后到依赖专版。
+- Fresh 证据：当前主线定向通过 v1/v2 auth source、active-router publication、mode-all Provider classifier、Windows atomic write 以及 `CodexRouterWorkspacePage` 73/73。GitHub CLI/API 与已抓取 PR refs、merge-tree、源码、CI 日志和本地测试作为当前状态权威；Codex WebSearch 的 GitHub 索引滞后，Matrix WebSearch 返回 `fetch failed`，因此未用搜索摘要替代仓库事实。
