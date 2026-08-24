@@ -7,6 +7,16 @@ import type {
 } from "@/types";
 import type { AppId } from "./types";
 
+export interface RepairableCodexPlugin {
+  id: string;
+  name: string;
+  version: string;
+  manifestPath: string;
+  sourcePath: string;
+  marketplacePath: string;
+  repairAction?: "registerMarketplace" | "enableAndRegister" | "enable";
+}
+
 export interface ConfigTransferResult {
   success: boolean;
   message: string;
@@ -303,6 +313,16 @@ export const settingsApi = {
   /** 打开包含运行日志、异常退出记录和路由诊断的本地日志目录。 */
   async openLogDir(): Promise<boolean> {
     return await invoke("open_log_dir");
+  },
+
+  async detectCodexPluginRegistration(): Promise<RepairableCodexPlugin[]> {
+    return await invoke("detect_codex_plugin_registration");
+  },
+
+  async repairCodexPluginRegistration(
+    pluginId: string,
+  ): Promise<RepairableCodexPlugin> {
+    return await invoke("repair_codex_plugin_registration", { pluginId });
   },
 };
 
