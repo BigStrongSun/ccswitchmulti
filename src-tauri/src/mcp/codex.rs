@@ -6,7 +6,11 @@
 //! - JSON 到 TOML 的转换逻辑
 
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
+
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
 
 use crate::app_config::{McpApps, McpConfig, McpServer, MultiAppConfig};
 use crate::error::AppError;
@@ -40,6 +44,82 @@ fn collect_enabled_servers(cfg: &McpConfig) -> HashMap<String, Value> {
         }
     }
     out
+}
+
+const CODEX_MCP_RECONCILE_MAX_ATTEMPTS: usize = 3;
+
+#[cfg(test)]
+static TEST_RECONCILE_MUTATIONS: OnceLock<Mutex<Vec<Vec<u8>>>> = OnceLock::new();
+
+#[cfg(test)]
+fn set_test_reconcile_mutations(contents: Vec<Vec<u8>>) {
+    *TEST_RECONCILE_MUTATIONS
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .expect("reconcile mutation lock") = contents;
+}
+
+fn read_codex_mcp_bytes(path: &Path) -> Result<Vec<u8>, AppError> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(AppError::io(path, error)),
+    }
+}
+
+fn codex_mcp_text(bytes: &[u8], path: &Path) -> Result<String, AppError> {
+    String::from_utf8(bytes.to_vec()).map_err(|error| {
+        AppError::McpValidation(format!(
+            "Codex config.toml 不是有效 UTF-8 ({}): {error}",
+            path.display()
+        ))
+    })
+}
+
+/// Apply a document-level MCP projection only when the file has not changed
+/// since the snapshot used to build it.  A bounded retry makes concurrent
+/// edits visible to the caller instead of silently replacing them.  The final
+/// write is atomic, so a failed reconcile never leaves a partial TOML file.
+fn write_codex_mcp_reconciled<F>(path: &Path, reconcile: F) -> Result<(), AppError>
+where
+    F: Fn(&str) -> Result<String, AppError>,
+{
+    for attempt in 0..CODEX_MCP_RECONCILE_MAX_ATTEMPTS {
+        let before = read_codex_mcp_bytes(path)?;
+        let base = codex_mcp_text(&before, path)?;
+        let candidate = reconcile(&base)?;
+
+        #[cfg(test)]
+        if let Some(next) = TEST_RECONCILE_MUTATIONS
+            .get_or_init(|| Mutex::new(Vec::new()))
+            .lock()
+            .expect("reconcile mutation lock")
+            .pop()
+        {
+            std::fs::write(path, next).map_err(|error| AppError::io(path, error))?;
+        }
+
+        let observed = read_codex_mcp_bytes(path)?;
+        if observed != before {
+            log::debug!(
+                "Codex MCP config changed during reconcile attempt {}/{}; retrying",
+                attempt + 1,
+                CODEX_MCP_RECONCILE_MAX_ATTEMPTS
+            );
+            continue;
+        }
+
+        if candidate.as_bytes() == before.as_slice() {
+            return Ok(());
+        }
+
+        crate::config::atomic_write(path, candidate.as_bytes())?;
+        return Ok(());
+    }
+
+    Err(AppError::McpValidation(
+        "Codex MCP 配置在有限重试后仍发生并发修改，已跳过写入".to_string(),
+    ))
 }
 
 /// 从 ~/.codex/config.toml 导入 MCP 到统一结构（v3.7.0+）
@@ -275,6 +355,127 @@ pub fn import_from_codex(config: &mut MultiAppConfig) -> Result<usize, AppError>
     Ok(changed_total)
 }
 
+fn legacy_codex_servers(
+    doc: &toml_edit::DocumentMut,
+) -> Result<(bool, Vec<(String, toml_edit::Item)>), AppError> {
+    let Some(mcp_item) = doc.get("mcp") else {
+        return Ok((false, Vec::new()));
+    };
+    let Some(mcp_table) = mcp_item.as_table_like() else {
+        return Err(AppError::McpValidation(
+            "config.toml 的 mcp 不是表结构".to_string(),
+        ));
+    };
+    let Some(servers_item) = mcp_table.get("servers") else {
+        return Ok((false, Vec::new()));
+    };
+    let Some(servers_table) = servers_item.as_table_like() else {
+        return Err(AppError::McpValidation(
+            "config.toml 的 mcp.servers 不是表结构".to_string(),
+        ));
+    };
+    Ok((
+        true,
+        servers_table
+            .iter()
+            .map(|(id, item)| (id.to_string(), item.clone()))
+            .collect(),
+    ))
+}
+
+/// 按数据库 ID 集合对账 Codex 的 live MCP。
+///
+/// 数据库中的 ID 是唯一的所有权证明。数据库没有拥有的 live-only 条目始终保留；
+/// 已拥有条目才会被数据库内容更新或在禁用时删除。旧的 `[mcp.servers]` 会先迁移，
+/// 再移除旧容器，避免把用户手工维护的条目一并清空。
+fn reconcile_codex_document(
+    doc: &mut toml_edit::DocumentMut,
+    owned_ids: &HashSet<String>,
+    enabled: &HashMap<String, Value>,
+) -> Result<(), AppError> {
+    let (has_legacy_table, legacy_entries) = legacy_codex_servers(doc)?;
+
+    // 先转换数据库条目，再借用 live 表。转换失败时调用方尚未写入文件，
+    // 因而可以保持原始字节不变。
+    let mut database_entries = Vec::new();
+    let mut enabled_ids: Vec<&String> = enabled.keys().collect();
+    enabled_ids.sort();
+    for id in enabled_ids {
+        let spec = enabled
+            .get(id)
+            .expect("enabled id must have a corresponding server spec");
+        database_entries.push((
+            id.clone(),
+            toml_edit::Item::Table(json_server_to_toml_table(spec)?),
+        ));
+    }
+
+    let has_live_table = doc.get("mcp_servers").is_some();
+    let needs_target_table = has_live_table || has_legacy_table || !database_entries.is_empty();
+    if needs_target_table {
+        if !has_live_table {
+            doc["mcp_servers"] = toml_edit::Item::Table(toml_edit::Table::new());
+        }
+        let servers = doc
+            .get_mut("mcp_servers")
+            .and_then(toml_edit::Item::as_table_like_mut)
+            .ok_or_else(|| {
+                AppError::McpValidation("config.toml 的 mcp_servers 不是表结构".to_string())
+            })?;
+
+        // 迁移旧格式时，新的规范表优先；数据库拥有的 ID 由数据库内容覆盖。
+        for (id, item) in legacy_entries {
+            if owned_ids.contains(&id) {
+                continue;
+            }
+            if !servers.contains_key(&id) {
+                servers.insert(&id, item);
+            }
+        }
+
+        for (id, item) in database_entries {
+            let should_update = servers
+                .get(&id)
+                .map(|existing| !mcp_items_semantically_equal(existing, &item))
+                .unwrap_or(true);
+            if should_update {
+                servers.insert(&id, item);
+            }
+        }
+
+        // 只有同时存在于数据库且未启用 Codex 的 ID 才能被自动删除。
+        let mut disabled_owned_ids: Vec<&String> = owned_ids
+            .iter()
+            .filter(|id| !enabled.contains_key(*id))
+            .collect();
+        disabled_owned_ids.sort();
+        for id in disabled_owned_ids {
+            servers.remove(id);
+        }
+    }
+
+    // 删除旧容器，但保留 [mcp] 下的其他用户字段。
+    if has_legacy_table {
+        if let Some(mcp_table) = doc.get_mut("mcp").and_then(|item| item.as_table_like_mut()) {
+            mcp_table.remove("servers");
+        }
+    }
+
+    Ok(())
+}
+
+fn mcp_items_semantically_equal(left: &toml_edit::Item, right: &toml_edit::Item) -> bool {
+    let left_text = left.to_string();
+    let right_text = right.to_string();
+    match (
+        left_text.parse::<toml::Value>(),
+        right_text.parse::<toml::Value>(),
+    ) {
+        (Ok(left_value), Ok(right_value)) => left_value == right_value,
+        _ => left_text == right_text,
+    }
+}
+
 /// 将 config.json 中 Codex 的 enabled==true 项以 TOML 形式写入 ~/.codex/config.toml
 ///
 /// 格式策略：
@@ -287,63 +488,31 @@ pub fn sync_enabled_to_codex(config: &MultiAppConfig) -> Result<(), AppError> {
     if !should_sync_codex_mcp() {
         return Ok(());
     }
-    use toml_edit::{Item, Table};
-
-    // 1) 收集启用项（Codex 维度）
     let enabled = collect_enabled_servers(&config.mcp.codex);
+    let owned_ids = config.mcp.codex.servers.keys().cloned().collect();
+    sync_enabled_to_codex_with_ownership(&owned_ids, &enabled)
+}
 
-    // 2) 读取现有 config.toml 文本；保持无效 TOML 的错误返回（不覆盖文件）
-    let base_text = crate::codex_config::read_and_validate_codex_config_text()?;
-
-    // 3) 使用 toml_edit 解析（允许空文件）
-    let mut doc = if base_text.trim().is_empty() {
-        toml_edit::DocumentMut::default()
-    } else {
-        base_text
-            .parse::<toml_edit::DocumentMut>()
-            .map_err(|e| AppError::McpValidation(format!("解析 config.toml 失败: {e}")))?
-    };
-
-    // 4) 清理可能存在的错误格式 [mcp.servers]
-    if let Some(mcp_item) = doc.get_mut("mcp") {
-        if let Some(tbl) = mcp_item.as_table_like_mut() {
-            if tbl.contains_key("servers") {
-                log::warn!("检测到错误的 MCP 格式 [mcp.servers]，正在清理并迁移到 [mcp_servers]");
-                tbl.remove("servers");
-            }
-        }
+/// 以数据库完整所有权集合对账 live MCP；空数据库不会删除 live-only 条目。
+pub fn sync_enabled_to_codex_with_ownership(
+    owned_ids: &HashSet<String>,
+    enabled: &HashMap<String, Value>,
+) -> Result<(), AppError> {
+    if !should_sync_codex_mcp() {
+        return Ok(());
     }
-
-    // 5) 构造目标 servers 表（稳定的键顺序）
-    if enabled.is_empty() {
-        // 无启用项：移除 mcp_servers 表
-        doc.as_table_mut().remove("mcp_servers");
-    } else {
-        // 构建 servers 表
-        let mut servers_tbl = Table::new();
-        let mut ids: Vec<_> = enabled.keys().cloned().collect();
-        ids.sort();
-        for id in ids {
-            let spec = enabled.get(&id).expect("spec must exist");
-            // 复用通用转换函数（已包含扩展字段支持）
-            match json_server_to_toml_table(spec) {
-                Ok(table) => {
-                    servers_tbl[&id[..]] = Item::Table(table);
-                }
-                Err(err) => {
-                    log::error!("跳过无效的 MCP 服务器 '{id}': {err}");
-                }
-            }
-        }
-        // 使用唯一正确的格式：[mcp_servers]
-        doc["mcp_servers"] = Item::Table(servers_tbl);
-    }
-
-    // 6) 写回（仅改 TOML，不触碰 auth.json）；toml_edit 会尽量保留未改区域的注释/空白/顺序
-    let new_text = doc.to_string();
     let path = crate::codex_config::get_codex_config_path();
-    crate::config::write_text_file(&path, &new_text)?;
-    Ok(())
+    write_codex_mcp_reconciled(&path, |base_text| {
+        let mut doc = if base_text.trim().is_empty() {
+            toml_edit::DocumentMut::default()
+        } else {
+            base_text
+                .parse::<toml_edit::DocumentMut>()
+                .map_err(|e| AppError::McpValidation(format!("解析 config.toml 失败: {e}")))?
+        };
+        reconcile_codex_document(&mut doc, owned_ids, enabled)?;
+        Ok(doc.to_string())
+    })
 }
 
 /// 将单个 MCP 服务器同步到 Codex live 配置
@@ -354,6 +523,7 @@ pub fn sync_enabled_to_codex(config: &MultiAppConfig) -> Result<(), AppError> {
 /// （如 `mcp_servers = "x"` / `[]`），仅判 `contains_key` 会跳过重建，随后的
 /// `doc["mcp_servers"][id] = …` 会触发 toml_edit 的 `IndexMut` panic
 /// （panic 发生在 Tauri command 内、跨 FFI 展开）。这里统一归一化后再插入。
+#[cfg(test)]
 fn upsert_mcp_server_table(
     doc: &mut toml_edit::DocumentMut,
     id: &str,
@@ -425,44 +595,20 @@ pub fn sync_single_server_to_codex(
         return Ok(());
     }
 
-    // 读取现有的 config.toml
     let config_path = crate::codex_config::get_codex_config_path();
-
-    let mut doc = if config_path.exists() {
-        let content =
-            std::fs::read_to_string(&config_path).map_err(|e| AppError::io(&config_path, e))?;
-        // 尝试解析现有配置；失败时直接返回错误，避免用只包含 MCP 的新文档覆盖用户配置。
-        match content.parse::<toml_edit::DocumentMut>() {
-            Ok(doc) => doc,
-            Err(e) => {
-                return Err(AppError::McpValidation(format!(
-                    "解析 config.toml 失败: {e}"
-                )))
-            }
-        }
-    } else {
-        toml_edit::DocumentMut::new()
-    };
-
-    // 清理可能存在的错误格式 [mcp.servers]
-    if let Some(mcp_item) = doc.get_mut("mcp") {
-        if let Some(tbl) = mcp_item.as_table_like_mut() {
-            if tbl.contains_key("servers") {
-                log::warn!("检测到错误的 MCP 格式 [mcp.servers]，正在清理并迁移到 [mcp_servers]");
-                tbl.remove("servers");
-            }
-        }
-    }
-
-    // 将 JSON 服务器规范转换为 TOML 表
-    let toml_table = json_server_to_toml_table(server_spec)?;
-    upsert_mcp_server_table(&mut doc, id, toml_table)?;
-
-    // 写回文件
-    let new_text = doc.to_string();
-    crate::config::write_text_file(&config_path, &new_text)?;
-
-    Ok(())
+    let owned_ids = HashSet::from([id.to_string()]);
+    let enabled = HashMap::from([(id.to_string(), server_spec.clone())]);
+    write_codex_mcp_reconciled(&config_path, |base_text| {
+        let mut doc = if base_text.trim().is_empty() {
+            toml_edit::DocumentMut::default()
+        } else {
+            base_text
+                .parse::<toml_edit::DocumentMut>()
+                .map_err(|e| AppError::McpValidation(format!("解析 config.toml 失败: {e}")))?
+        };
+        reconcile_codex_document(&mut doc, &owned_ids, &enabled)?;
+        Ok(doc.to_string())
+    })
 }
 
 /// 从 Codex live 配置中移除单个 MCP 服务器
@@ -477,25 +623,20 @@ pub fn remove_server_from_codex(id: &str) -> Result<(), AppError> {
         return Ok(()); // 文件不存在，无需删除
     }
 
-    let content =
-        std::fs::read_to_string(&config_path).map_err(|e| AppError::io(&config_path, e))?;
-
-    // 尝试解析现有配置，如果失败则直接返回（无法删除不存在的内容）
-    let mut doc = match content.parse::<toml_edit::DocumentMut>() {
-        Ok(doc) => doc,
-        Err(e) => {
-            log::warn!("解析 Codex config.toml 失败: {e}，跳过删除操作");
-            return Ok(());
-        }
-    };
-
-    remove_mcp_server_from_doc(&mut doc, id);
-
-    // 写回文件
-    let new_text = doc.to_string();
-    crate::config::write_text_file(&config_path, &new_text)?;
-
-    Ok(())
+    let no_owned_ids = HashSet::new();
+    let no_enabled = HashMap::new();
+    write_codex_mcp_reconciled(&config_path, |base_text| {
+        let mut doc = if base_text.trim().is_empty() {
+            toml_edit::DocumentMut::default()
+        } else {
+            base_text
+                .parse::<toml_edit::DocumentMut>()
+                .map_err(|e| AppError::McpValidation(format!("解析 config.toml 失败: {e}")))?
+        };
+        reconcile_codex_document(&mut doc, &no_owned_ids, &no_enabled)?;
+        remove_mcp_server_from_doc(&mut doc, id);
+        Ok(doc.to_string())
+    })
 }
 
 // ============================================================================
@@ -831,6 +972,55 @@ broken = [
             after, original,
             "single MCP sync must not replace invalid config.toml with a partial document"
         );
+    }
+
+    #[test]
+    #[serial]
+    fn optimistic_writer_retries_after_external_edit() {
+        let _home = TempHome::new();
+        let codex_dir = crate::codex_config::get_codex_config_dir();
+        std::fs::create_dir_all(&codex_dir).expect("create codex dir");
+        let config_path = crate::codex_config::get_codex_config_path();
+        std::fs::write(&config_path, "[desktop]\nkeep = true\n").expect("seed config.toml");
+
+        set_test_reconcile_mutations(vec![b"[external]\nchanged = true\n".to_vec()]);
+        sync_single_server_to_codex(
+            &MultiAppConfig::default(),
+            "echo",
+            &json!({"type": "stdio", "command": "node"}),
+        )
+        .expect("writer should retry after external edit");
+
+        let text = std::fs::read_to_string(&config_path).expect("read reconciled config");
+        assert!(text.contains("[external]"));
+        assert!(text.contains("[mcp_servers.echo]"));
+    }
+
+    #[test]
+    #[serial]
+    fn optimistic_writer_stops_after_bounded_conflicts() {
+        let _home = TempHome::new();
+        let codex_dir = crate::codex_config::get_codex_config_dir();
+        std::fs::create_dir_all(&codex_dir).expect("create codex dir");
+        let config_path = crate::codex_config::get_codex_config_path();
+        std::fs::write(&config_path, "[desktop]\nkeep = true\n").expect("seed config.toml");
+
+        set_test_reconcile_mutations(vec![
+            b"[external]\nversion = 1\n".to_vec(),
+            b"[external]\nversion = 2\n".to_vec(),
+            b"[external]\nversion = 3\n".to_vec(),
+        ]);
+        let err = sync_single_server_to_codex(
+            &MultiAppConfig::default(),
+            "echo",
+            &json!({"type": "stdio", "command": "node"}),
+        )
+        .expect_err("repeated external edits must fail closed");
+        assert!(err.to_string().contains("有限重试"));
+
+        let text = std::fs::read_to_string(&config_path).expect("read untouched external edit");
+        assert!(text.contains("version = 1"));
+        assert!(!text.contains("mcp_servers.echo"));
     }
 
     #[test]

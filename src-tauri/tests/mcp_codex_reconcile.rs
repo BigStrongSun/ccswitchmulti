@@ -3,9 +3,7 @@ use std::fs;
 
 use serde_json::json;
 
-use cc_switch_lib::{
-    sync_enabled_to_codex_with_ownership,
-};
+use cc_switch_lib::sync_enabled_to_codex_with_ownership;
 
 #[path = "support.rs"]
 mod support;
@@ -104,7 +102,10 @@ fn semantically_same_managed_entry_preserves_comments_and_formatting() {
 
     sync_enabled_to_codex_with_ownership(&owned, &enabled).expect("reconcile Codex MCP");
 
-    assert_eq!(fs::read_to_string(path).expect("read reconciled config"), initial);
+    assert_eq!(
+        fs::read_to_string(path).expect("read reconciled config"),
+        initial
+    );
 }
 
 #[test]

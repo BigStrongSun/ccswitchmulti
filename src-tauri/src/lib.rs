@@ -59,8 +59,8 @@ pub use mcp::{
     import_from_claude, import_from_codex, import_from_gemini, import_from_grokbuild,
     remove_server_from_claude, remove_server_from_codex, remove_server_from_gemini,
     remove_server_from_grokbuild, sync_enabled_to_claude, sync_enabled_to_codex,
-    sync_enabled_to_gemini, sync_single_server_to_claude, sync_single_server_to_codex,
-    sync_single_server_to_gemini, sync_single_server_to_grokbuild,
+    sync_enabled_to_codex_with_ownership, sync_enabled_to_gemini, sync_single_server_to_claude,
+    sync_single_server_to_codex, sync_single_server_to_gemini, sync_single_server_to_grokbuild,
 };
 pub use prompt::Prompt;
 pub use provider::{Provider, ProviderMeta};
