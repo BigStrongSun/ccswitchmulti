@@ -137,9 +137,7 @@ export function validateCodexReasoningCapabilityDraft(
     !Array.isArray(capability.supportedEfforts) ||
     capability.supportedEfforts.some((effort) => !allowed.has(effort))
   ) {
-    throw new Error(
-      "supportedEfforts contains an unknown or Codex-only Provider effort",
-    );
+    throw new Error("支持的推理强度包含未知档位，或包含仅供 Codex 使用的档位");
   }
   // schema v2 用 supportStatus；legacy 数据用 supported。至少声明其一，
   // 同时存在时不得矛盾。
@@ -147,7 +145,7 @@ export function validateCodexReasoningCapabilityDraft(
     capability.supportStatus === undefined &&
     typeof capability.supported !== "boolean"
   ) {
-    throw new Error("supportStatus or supported must be declared");
+    throw new Error("必须声明该模型是否支持推理");
   }
   if (
     capability.supportStatus !== undefined &&
@@ -155,27 +153,27 @@ export function validateCodexReasoningCapabilityDraft(
     (capability.supportStatus === "confirmed_supported") !==
       capability.supported
   ) {
-    throw new Error("supportStatus contradicts legacy supported field");
+    throw new Error("新旧推理支持状态相互冲突");
   }
   if (
     capability.defaultEffort !== undefined &&
     !capability.supportedEfforts.includes(capability.defaultEffort)
   ) {
-    throw new Error("defaultEffort must be Provider-supported");
+    throw new Error("默认推理强度不是供应商支持的档位");
   }
   if (typeof capability.disableAllowed !== "boolean") {
-    throw new Error("disableAllowed must be boolean");
+    throw new Error("是否允许关闭推理必须是布尔值");
   }
   if (
     !capability.upstream ||
     typeof capability.upstream.parameter !== "string" ||
     !capability.upstream.parameter.trim()
   ) {
-    throw new Error("upstream.parameter must be nonempty");
+    throw new Error("上游推理参数名不能为空");
   }
   for (const target of Object.values(capability.upstream.effortMap ?? {})) {
     if (target && !capability.supportedEfforts.includes(target)) {
-      throw new Error(`mapping target ${target} is not Provider-supported`);
+      throw new Error(`映射目标 ${target} 不是供应商支持的推理强度`);
     }
   }
   const requiresEffortMap =
@@ -192,15 +190,13 @@ export function validateCodexReasoningCapabilityDraft(
       (effort) => !capability.upstream.effortMap?.[effort],
     );
     if (missing.length > 0) {
-      throw new Error(`effortMap is missing ${missing.join(", ")}`);
+      throw new Error(`推理强度映射缺少 ${missing.join(", ")} 档`);
     }
   }
   if (capability.codexUltraOrchestration?.enabled) {
     const ultraTarget = capability.upstream.effortMap?.max;
     if (!ultraTarget || !capability.supportedEfforts.includes(ultraTarget)) {
-      throw new Error(
-        "Codex Ultra orchestration requires a valid max → Provider mapping",
-      );
+      throw new Error("解锁 Ultra 档需要有效的 max 到供应商推理强度映射");
     }
   }
 }
@@ -1635,7 +1631,7 @@ export function CodexFormFields({
       try {
         const reasoning = JSON.parse(trimmed) as CodexCatalogModel["reasoning"];
         if (!reasoning) {
-          throw new Error("reasoning capability must be an object");
+          throw new Error("推理能力配置必须是一个对象");
         }
         validateCodexReasoningCapabilityDraft(reasoning);
         handleUpdateCatalogRow(index, {
@@ -2616,8 +2612,7 @@ export function CodexFormFields({
 
                     {catalogRows.map((row, index) => {
                       const model = row.model.trim();
-                      const probeModel =
-                        catalogRowUpstreamModel(row) || model;
+                      const probeModel = catalogRowUpstreamModel(row) || model;
                       const presetCatalogModel =
                         presetCatalogByModel.get(model) ??
                         presetCatalogByModel.get(catalogRowUpstreamModel(row));
@@ -2812,7 +2807,9 @@ export function CodexFormFields({
                             className="col-span-full flex flex-wrap items-center gap-2 border-t border-border-default pt-2 text-xs"
                             aria-label={`${model || "模型"} 输入能力`}
                           >
-                            <legend className="mr-1 font-medium">输入能力</legend>
+                            <legend className="mr-1 font-medium">
+                              输入能力
+                            </legend>
                             <div
                               className="inline-flex overflow-hidden rounded-md border"
                               role="radiogroup"
@@ -2854,7 +2851,8 @@ export function CodexFormFields({
                             <span className="text-muted-foreground">
                               保存后覆盖当前 Provider 的预设，不需要等待发布。
                             </span>
-                            {presetDeclaresInputCapability && presetCatalogModel ? (
+                            {presetDeclaresInputCapability &&
+                            presetCatalogModel ? (
                               <Button
                                 type="button"
                                 variant="ghost"

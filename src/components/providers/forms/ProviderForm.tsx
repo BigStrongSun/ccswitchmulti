@@ -233,16 +233,14 @@ export const normalizeCodexCatalogModelsForSave = (
       reasoning?.defaultEffort &&
       !reasoning.supportedEfforts.includes(reasoning.defaultEffort)
     ) {
-      throw new Error(
-        `${model}: reasoning.defaultEffort must be present in supportedEfforts`,
-      );
+      throw new Error(`${model}：默认推理强度必须包含在该模型支持的推理强度中`);
     }
     if (
       reasoning &&
       !reasoning.disableAllowed &&
       reasoning.supportedEfforts.includes("none")
     ) {
-      throw new Error(`${model}: reasoning none requires disableAllowed=true`);
+      throw new Error(`${model}：包含“关闭推理”档时，必须允许关闭推理`);
     }
     if (
       reasoning &&
@@ -255,7 +253,7 @@ export const normalizeCodexCatalogModelsForSave = (
     ) {
       for (const effort of reasoning.supportedEfforts) {
         if (!reasoning.upstream.effortMap?.[effort]) {
-          throw new Error(`${model}: reasoning effortMap is missing ${effort}`);
+          throw new Error(`${model}：推理强度映射缺少 ${effort} 档`);
         }
       }
       // 与后端 CodexModelReasoningCapability::validate 对齐：
@@ -271,7 +269,7 @@ export const normalizeCodexCatalogModelsForSave = (
             !reasoning.supportedEfforts.includes(target as CodexReasoningEffort)
           ) {
             throw new Error(
-              `${model}: reasoning effortMap target "${target}" (source "${source}") is not in supportedEfforts`,
+              `${model}：${source} 档映射到的 ${target} 不在该模型支持的推理强度中`,
             );
           }
         }
@@ -279,7 +277,7 @@ export const normalizeCodexCatalogModelsForSave = (
     }
     if (item.codexUltra?.enabled && !item.codexUltra.providerEffort) {
       throw new Error(
-        `${model}: Codex Ultra requires an explicit Provider reasoning effort`,
+        `${model}：解锁 Ultra 档后，必须选择对应的供应商推理强度`,
       );
     }
 

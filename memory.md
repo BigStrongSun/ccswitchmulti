@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-08-24 Router 模型差异呈现、停用规则校验与 Ultra 解锁根修
+
+- DeepSeek Responses 的 Provider 目录已有 `deepseek-v4-flash`、`deepseek-v4-flash-vision-exp`、`deepseek-v4-pro` 三个模型；现有 Router route 使用 `modelSelection.mode=include` 且只选择 Flash/Pro。`include` 是固定白名单，不应在 Provider 新增模型后静默扩容；此前真正的前端缺陷是规则卡片只显示旧匹配项，用户看不到 Provider 当前目录和未接入模型。现规则列表、详情和编辑器按当前 Provider 目录显示已接入总数、尚未接入及已不存在项；`mode=all` 继续自动跟随 Provider。
+- 截图中的 `include 模式至少选择一个 canonical 模型` 来自前端 `RouteCandidatePicker.handleSave`，它错误地校验了已停用 route；后端 schema 已明确跳过 `enabled=false`。现前端只对启用 route 校验空白名单和别名目标，停用 route 保留配置但不阻止保存，并把 `canonical/include/visible` 用户文案改为“上游模型/仅选中的上游模型/可见模型”。MultiRouter 页面所有 catch 统一经过中文错误码翻译，未知英文异常不再原样混入 UI；Provider 推理能力及 Ultra 保存校验也已全部中文化。
+- Ultra 无法点击的根因是 `CodexModelReasoningSummary` 在 `ultraEfforts.length===0` 时直接禁用 checkbox，而该集合依赖异步能力解析；切换能力来源只是偶然触发了解析刷新。现“解锁 Ultra 档”始终可点：若尚无 Provider 可接收的推理强度，点击后自动展开该模型的推理能力配置并提示必须先确认强度；不会虚构档位，保存门禁仍拒绝“已解锁但未选择供应商强度”的不完整配置。
+- TDD 与验收：三个现场回归先在旧实现下 RED；定向 Router/Provider/Ultra `86/86`，全量前端 `146 files / 1195 tests`，`pnpm typecheck`、相关文件 Prettier、`git diff --check` 和 `pnpm build:renderer` 全部通过。没有构建安装包、安装、重启或替换当前运行中的 CCSM，也没有再次使用会触发 Codex Desktop `write EOF` 的 Computer Use。
+
 ## 2026-08-24 本地升级守护、维护租约与 MultiRouter 向导 Provider 初始化
 
 - `d9d6d87a` 本地 NSIS 首次独立升级 runner 在维护租约和停服前 fail-closed：隐藏启动的 Windows PowerShell 5.1 未自动解析 `Get-FileHash`，因此没有修改安装态，PID 23760 与 15721 始终健康。根因是外层升级包装仍额外依赖 `Microsoft.PowerShell.Utility`，而事务核心已经使用 .NET SHA-256。现由 `ccswitchmulti-guardian-core.ps1` 提供 `Get-CcsmGuardianFileSha256`（只读共享打开、流式哈希、finally 释放），wrapper 和 runner 共用，完全移除关键升级入口的 `Get-FileHash` 依赖。RED 为普通文件哈希函数不存在且 wrapper 静态契约失败，GREEN 为 guardian 17/17、事务 49/49。

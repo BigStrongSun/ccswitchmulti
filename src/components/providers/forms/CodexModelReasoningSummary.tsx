@@ -1,5 +1,6 @@
 import { Button } from "@/components/ui/button";
 import type { CodexReasoningEffort } from "@/types";
+import { useState } from "react";
 
 export interface CodexModelReasoningSummaryProps {
   model: string;
@@ -30,6 +31,7 @@ export function CodexModelReasoningSummary({
   onToggle,
 }: CodexModelReasoningSummaryProps) {
   const displayModel = model || "未命名模型";
+  const [requestedUltraSetup, setRequestedUltraSetup] = useState(false);
 
   return (
     <div className="grid gap-3 rounded-md border bg-background p-3 text-xs lg:grid-cols-[minmax(10rem,1fr)_minmax(12rem,1.2fr)_minmax(16rem,1.2fr)_auto] lg:items-center">
@@ -52,13 +54,22 @@ export function CodexModelReasoningSummary({
             type="checkbox"
             aria-label={`解锁 ${displayModel} 的 Ultra 档`}
             checked={ultraEnabled}
-            disabled={ultraEfforts.length === 0}
-            onChange={(event) =>
+            onChange={(event) => {
+              setRequestedUltraSetup(
+                event.target.checked && ultraEfforts.length === 0,
+              );
+              if (
+                event.target.checked &&
+                ultraEfforts.length === 0 &&
+                !expanded
+              ) {
+                onToggle();
+              }
               onUltraChange({
                 enabled: event.target.checked,
                 providerEffort: ultraEffort,
-              })
-            }
+              });
+            }}
           />
           解锁 Ultra 档
         </label>
@@ -66,7 +77,7 @@ export function CodexModelReasoningSummary({
           className="w-full rounded border bg-background px-2 py-1"
           aria-label={`${displayModel} Ultra 对应的 Provider 推理强度`}
           value={ultraEffort ?? ""}
-          disabled={!ultraEnabled}
+          disabled={!ultraEnabled || ultraEfforts.length === 0}
           onChange={(event) =>
             onUltraChange({
               enabled: ultraEnabled,
@@ -84,9 +95,11 @@ export function CodexModelReasoningSummary({
           ))}
         </select>
         <p className="text-muted-foreground">
-          {ultraEnabled && ultraEffort
-            ? `已解锁，使用 ${ultraEffort}`
-            : "独立于能力来源；解锁后请选择强度"}
+          {requestedUltraSetup || (ultraEnabled && ultraEfforts.length === 0)
+            ? "需要先确认该模型可接收的推理强度；已为你展开推理能力配置，完成后才能保存。"
+            : ultraEnabled && ultraEffort
+              ? `已解锁，使用 ${ultraEffort}`
+              : "独立于能力来源；解锁后请选择强度"}
         </p>
       </div>
       <Button

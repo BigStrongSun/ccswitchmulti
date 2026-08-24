@@ -308,7 +308,7 @@ function parseRouteAliases(value: string): {
     if (separator <= 0 || separator === trimmed.length - 1) {
       return {
         aliases,
-        error: `别名格式无效：${trimmed}，请使用 visible=canonical`,
+        error: `别名格式无效：${trimmed}，请使用“可见模型=上游模型”`,
       };
     }
     const visible = trimmed.slice(0, separator).trim();
@@ -316,7 +316,7 @@ function parseRouteAliases(value: string): {
     if (!visible || !canonical) {
       return {
         aliases,
-        error: `别名格式无效：${trimmed}，请使用 visible=canonical`,
+        error: `别名格式无效：${trimmed}，请使用“可见模型=上游模型”`,
       };
     }
     aliases[visible] = canonical;
@@ -638,7 +638,7 @@ function withModelRefreshTimeout<T>(
       onTimeout?.();
       reject(
         new Error(
-          `模型列表读取或写回超过 ${Math.round(timeoutMs / 1000)} 秒，请检查网络、provider /models 端点或本地配置写入状态。`,
+          `模型列表读取或写回超过 ${Math.round(timeoutMs / 1000)} 秒，请检查网络、供应商的 /models 接口或本地配置写入状态。`,
         ),
       );
     }, timeoutMs);
@@ -647,9 +647,30 @@ function withModelRefreshTimeout<T>(
   });
 }
 
-/// 将未知异常转成 UI 可展示文本，避免每个 catch 重复 `instanceof Error`。
-function workspaceErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+/// 将后端机器码集中翻译为用户可执行的中文信息；原始详情仍保留在后端日志中。
+export function workspaceErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const knownMessages: Array<[string, string]> = [
+    ["include_models_empty", "请至少选择一个上游模型"],
+    [
+      "include_models_duplicate_or_empty",
+      "上游模型列表包含空项或重复项，请重新选择",
+    ],
+    ["alias_target_not_selected", "别名目标必须是当前已选择的上游模型"],
+    ["route_target_provider_required", "该路由还没有选择目标供应商"],
+    [
+      "legacy_route_requires_migration",
+      "当前是旧版路由配置，请先完成迁移后再保存",
+    ],
+  ];
+  const matched = knownMessages.find(([code]) => message.includes(code));
+  if (matched) return matched[1];
+  if (/[^\x00-\x7f]/.test(message)) return message;
+
+  const errorCode = message.match(/\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/)?.[0];
+  return errorCode
+    ? `操作失败，请查看日志中的详细原因（错误代码：${errorCode}）`
+    : "操作失败，请检查当前配置或查看日志中的详细原因";
 }
 
 /// 读取 provider 模型列表；官方 OAuth 在线失败时回退到本地 Codex 模型缓存。
@@ -2296,6 +2317,31 @@ function routeMatchSummary(route: CodexRoute): string {
   return parts.join("；") || "尚未设置匹配条件";
 }
 
+/// 将固定白名单与 Provider 当前模型目录对照展示，避免 Provider 新增模型后看起来像“没有刷新”。
+function routeProviderModelSyncSummary(
+  route: CodexRoute,
+  provider?: Provider,
+): string | null {
+  if (!provider) return null;
+  const providerModels = collectProviderCanonicalModelIds(provider);
+  if (route.modelSelection?.mode !== "include") {
+    return `已接入 ${providerModels.length}/${providerModels.length} 个模型（自动跟随供应商）`;
+  }
+
+  const selected = new Set(
+    route.modelSelection.models.map((model) => model.trim()).filter(Boolean),
+  );
+  const connected = providerModels.filter((model) => selected.has(model));
+  const excluded = providerModels.filter((model) => !selected.has(model));
+  const stale = Array.from(selected).filter(
+    (model) => !providerModels.includes(model),
+  );
+  const parts = [`已接入 ${connected.length}/${providerModels.length} 个模型`];
+  if (excluded.length > 0) parts.push(`尚未接入：${excluded.join(", ")}`);
+  if (stale.length > 0) parts.push(`已不存在：${stale.join(", ")}`);
+  return parts.join("；");
+}
+
 /// 收集所有可被 Codex 请求命中的模型名，测试页会优先使用这些真实规则生成候选项。
 function collectRouteModels(routes: RouteEntry[]): string[] {
   const modelNames = routes.flatMap(({ route }) => [
@@ -2900,7 +2946,7 @@ export function CodexRouterWorkspacePage({
             status: "empty",
             message: onlineErrorMessage
               ? `OAuth 在线模型列表获取失败：${onlineErrorMessage}；本地缓存没有可恢复的官方模型目录。`
-              : "获取模型列表失败：远端返回空列表，请检查当前 provider 配置。",
+              : "获取模型列表失败：远端返回空列表，请检查当前供应商配置。",
           };
         }
 
@@ -2942,7 +2988,7 @@ export function CodexRouterWorkspacePage({
                 status: "error",
                 message:
                   result.message ??
-                  "获取模型列表失败：远端返回空列表，请检查当前 provider 配置。",
+                  "获取模型列表失败：远端返回空列表，请检查当前供应商配置。",
                 modelCount: 0,
               },
             }));
@@ -2990,7 +3036,7 @@ export function CodexRouterWorkspacePage({
             ...current,
             [provider.id]: {
               status: "error",
-              message: `获取模型列表失败，请检查当前 provider 配置：${workspaceErrorMessage(error)}`,
+              message: `获取模型列表失败，请检查当前供应商配置：${workspaceErrorMessage(error)}`,
             },
           }));
         });
@@ -3139,9 +3185,7 @@ export function CodexRouterWorkspacePage({
       setIsRoutePickerOpen(true);
       setRoutePickerMessage("已创建新的多路路由，请选择要接入的候选 router。");
     } catch (error) {
-      setRoutePickerError(
-        error instanceof Error ? error.message : String(error),
-      );
+      setRoutePickerError(workspaceErrorMessage(error));
     } finally {
       setIsSavingRoutes(false);
     }
@@ -3192,9 +3236,7 @@ export function CodexRouterWorkspacePage({
       setIsPlanSettingsOpen(false);
       setRoutePickerMessage("多路路由设置已保存，接管配置由系统继续自动维护。");
     } catch (error) {
-      setRoutePickerError(
-        error instanceof Error ? error.message : String(error),
-      );
+      setRoutePickerError(workspaceErrorMessage(error));
     } finally {
       setIsSavingPlanSettings(false);
     }
@@ -3273,9 +3315,7 @@ export function CodexRouterWorkspacePage({
     } catch (error) {
       // 保存失败时回滚原方案；启用集合恢复后刷新 effect 会重新读取被失效的 Provider。
       setOptimisticRoutingPlan(plan);
-      setRoutePickerError(
-        error instanceof Error ? error.message : String(error),
-      );
+      setRoutePickerError(workspaceErrorMessage(error));
     } finally {
       setIsSavingRoutes(false);
     }
@@ -4880,7 +4920,7 @@ function MultiRouterSettingsPanel({
 
   useEffect(() => {
     if (!globalProxyConfigError) return;
-    setListenerError(globalProxyConfigError.message);
+    setListenerError(workspaceErrorMessage(globalProxyConfigError));
   }, [globalProxyConfigError]);
 
   /// 保存前同时写回方案草稿和全局监听配置；API Key 仍不在 MultiRouter 页面直接编辑。
@@ -4912,7 +4952,7 @@ function MultiRouterSettingsPanel({
         queryClient.invalidateQueries({ queryKey: ["proxyStatus"] });
       }
     } catch (error) {
-      setListenerError(error instanceof Error ? error.message : String(error));
+      setListenerError(workspaceErrorMessage(error));
       setIsSavingListener(false);
       return;
     }
@@ -5489,6 +5529,7 @@ function RouteCandidatePicker({
     const routes: CodexRoute[] = [];
     for (const candidate of candidates) {
       if (!selectedIds.has(candidate.id)) continue;
+      const enabled = enabledIds.has(candidate.id);
       const draft =
         routeDraftsById[candidate.id] ?? createRoutePolicyDraft(candidate);
       const canonicalModels = collectProviderCanonicalModelIds(
@@ -5500,24 +5541,25 @@ function RouteCandidatePicker({
         setRoutePolicyError(aliasesResult.error);
         return;
       }
-      for (const canonical of Object.values(aliasesResult.aliases)) {
-        if (!canonicalSet.has(canonical)) {
+      for (const upstreamModel of Object.values(aliasesResult.aliases)) {
+        if (enabled && !canonicalSet.has(upstreamModel)) {
           setRoutePolicyError(
-            `别名目标 ${canonical} 不属于目标 Provider 的 canonical 模型`,
+            `别名目标“${upstreamModel}”不在目标供应商的上游模型列表中`,
           );
           return;
         }
       }
       if (
+        enabled &&
         draft.route.modelSelection?.mode === "include" &&
         draft.route.modelSelection.models.length === 0
       ) {
-        setRoutePolicyError("include 模式至少选择一个 canonical 模型");
+        setRoutePolicyError("请至少选择一个上游模型");
         return;
       }
       routes.push({
         ...draft.route,
-        enabled: enabledIds.has(candidate.id),
+        enabled,
         matchPrefixes: parseRoutePolicyList(draft.prefixesText),
         aliases: aliasesResult.aliases,
       });
@@ -5530,7 +5572,7 @@ function RouteCandidatePicker({
     <section className="rounded-lg border border-emerald-200 bg-card p-3 shadow-[0_0_0_1px_rgba(16,185,129,0.10)] dark:border-emerald-700/50 dark:bg-slate-950/70 dark:shadow-[0_0_0_1px_rgba(16,185,129,0.15)]">
       <SectionHeader
         icon={Route}
-        title="选择候选 router"
+        title="选择候选路由"
         detail="这里直接选择哪些模型源进入当前多路路由；取消勾选会从规则中移除，不再打开普通供应商编辑表单。"
         action={
           <div className="flex flex-wrap gap-2">
@@ -5598,7 +5640,10 @@ function RouteCandidatePicker({
       />
 
       {routePolicyError ? (
-        <div className="mt-2 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700 dark:border-rose-700/50 dark:bg-rose-950/30 dark:text-rose-100">
+        <div
+          role="alert"
+          className="mt-2 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700 dark:border-rose-700/50 dark:bg-rose-950/30 dark:text-rose-100"
+        >
           {routePolicyError}
         </div>
       ) : null}
@@ -5753,7 +5798,7 @@ function RouteCandidatePicker({
                         className="h-8 w-full rounded-md border border-input bg-background px-2 text-sm text-foreground"
                       >
                         <option value="all">全部模型（自动接收新增）</option>
-                        <option value="include">仅选中的 canonical 模型</option>
+                        <option value="include">仅选中的上游模型</option>
                       </select>
                     </label>
                   </div>
@@ -5761,7 +5806,13 @@ function RouteCandidatePicker({
                   {modelSelection.mode === "include" ? (
                     <div className="space-y-1">
                       <div className="text-xs text-muted-foreground">
-                        canonical Provider 模型
+                        供应商当前的上游模型
+                      </div>
+                      <div className="text-xs leading-5 text-muted-foreground">
+                        {routeProviderModelSyncSummary(
+                          draft.route,
+                          candidate.canonicalProvider,
+                        )}
                       </div>
                       <div className="flex flex-wrap gap-2">
                         {canonicalModels.map((model) => (
@@ -5771,7 +5822,7 @@ function RouteCandidatePicker({
                           >
                             <input
                               type="checkbox"
-                              aria-label={`选择 canonical 模型 ${model}`}
+                              aria-label={`选择上游模型 ${model}`}
                               checked={modelSelection.models.includes(model)}
                               onChange={(event) =>
                                 updateRoutePolicyDraft(
@@ -5827,7 +5878,7 @@ function RouteCandidatePicker({
                       />
                     </label>
                     <label className="space-y-1 text-xs text-muted-foreground">
-                      <span>可见别名（visible=canonical）</span>
+                      <span>可见别名（可见模型=上游模型）</span>
                       <textarea
                         aria-label={`可见别名映射：${targetLabel}`}
                         value={draft.aliasesText}
@@ -6205,9 +6256,7 @@ function SpawnAgentCandidatesPanel({
       );
       await queryClient.invalidateQueries({ queryKey: ["providers", "codex"] });
     } catch (error) {
-      setCandidateSaveError(
-        error instanceof Error ? error.message : String(error),
-      );
+      setCandidateSaveError(workspaceErrorMessage(error));
     } finally {
       setIsSavingCandidates(false);
     }
@@ -6242,9 +6291,7 @@ function SpawnAgentCandidatesPanel({
       );
       await queryClient.invalidateQueries({ queryKey: ["providers", "codex"] });
     } catch (error) {
-      setSubagentVersionError(
-        error instanceof Error ? error.message : String(error),
-      );
+      setSubagentVersionError(workspaceErrorMessage(error));
     } finally {
       setIsSavingSubagentVersion(false);
       setPendingSubagentVersion(null);
@@ -6279,7 +6326,7 @@ function SpawnAgentCandidatesPanel({
       );
     } catch (error) {
       setCandidateValidationMessage(
-        `校验失败：${error instanceof Error ? error.message : String(error)}`,
+        `校验失败：${workspaceErrorMessage(error)}`,
       );
     } finally {
       setIsValidatingCandidates(false);
@@ -7053,7 +7100,7 @@ function StatusTab({
       );
     } catch (error) {
       setValidationRefreshMessage(
-        `刷新校验失败：${error instanceof Error ? error.message : String(error)}`,
+        `刷新校验失败：${workspaceErrorMessage(error)}`,
       );
     } finally {
       setIsRefreshingValidation(false);
@@ -7074,9 +7121,7 @@ function StatusTab({
       );
       await queryClient.invalidateQueries({ queryKey: ["providers", "codex"] });
     } catch (error) {
-      setProjectionRetryError(
-        error instanceof Error ? error.message : String(error),
-      );
+      setProjectionRetryError(workspaceErrorMessage(error));
     } finally {
       setIsRetryingProjection(false);
     }
@@ -7095,9 +7140,7 @@ function StatusTab({
       );
       await queryClient.invalidateQueries({ queryKey: usageKeys.all });
     } catch (error) {
-      setSessionSyncMessage(
-        `同步失败：${error instanceof Error ? error.message : String(error)}`,
-      );
+      setSessionSyncMessage(`同步失败：${workspaceErrorMessage(error)}`);
     } finally {
       setIsSyncingSessionUsage(false);
     }
@@ -7114,7 +7157,7 @@ function StatusTab({
       );
       setDiagnostics(result);
     } catch (error) {
-      setDiagnoseError(error instanceof Error ? error.message : String(error));
+      setDiagnoseError(workspaceErrorMessage(error));
     } finally {
       setIsDiagnosing(false);
     }
@@ -7128,9 +7171,7 @@ function StatusTab({
       const result = await proxyApi.unlockCodexModelPicker();
       setModelPickerUnlockResult(result);
     } catch (error) {
-      setModelPickerUnlockError(
-        error instanceof Error ? error.message : String(error),
-      );
+      setModelPickerUnlockError(workspaceErrorMessage(error));
     } finally {
       setIsUnlockingModelPicker(false);
     }
@@ -8772,6 +8813,11 @@ function RouteListButton({
       <div className="mt-1.5 min-w-0 break-words whitespace-normal text-xs leading-5 text-muted-foreground dark:text-slate-400">
         {routeMatchSummary(entry.route)}
       </div>
+      {routeProviderModelSyncSummary(entry.route, targetProvider) ? (
+        <div className="mt-1 min-w-0 break-words whitespace-normal text-xs leading-5 text-amber-700 dark:text-amber-200">
+          {routeProviderModelSyncSummary(entry.route, targetProvider)}
+        </div>
+      ) : null}
     </button>
   );
 }
@@ -8805,7 +8851,10 @@ function RouteDetailPanel({
   }
 
   const route = selectedRoute.route;
-  const matchedModels = route.match?.models ?? [];
+  const matchedModels =
+    route.modelSelection?.mode === "include"
+      ? route.modelSelection.models
+      : (route.match?.models ?? []);
   const targetProviderId = routeTargetProviderId(route);
   const targetProvider = routeTargetProvider(route, providersById);
 
@@ -8842,8 +8891,8 @@ function RouteDetailPanel({
           label="模型选择"
           value={
             route.modelSelection?.mode === "all"
-              ? "目标 Provider 的全部模型（自动接收新增模型）"
-              : `${matchedModels.length} 个 canonical 模型`
+              ? "目标供应商的全部模型（自动接收新增模型）"
+              : `${matchedModels.length} 个上游模型；${routeProviderModelSyncSummary(route, targetProvider) ?? "无法读取供应商当前模型目录"}`
           }
         />
         <DetailRow

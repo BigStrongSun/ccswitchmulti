@@ -64,4 +64,40 @@ describe("CodexModelReasoningSummary", () => {
       providerEffort: undefined,
     });
   });
+
+  it("allows Ultra to be unlocked before Provider effort discovery and opens the required configuration", () => {
+    const onToggle = vi.fn();
+    const onUltraChange = vi.fn();
+
+    render(
+      <CodexModelReasoningSummary
+        model="glm-4.5"
+        source="自动发现或服务端默认"
+        selectableEfforts={[]}
+        ultraEnabled={false}
+        ultraEfforts={[]}
+        onUltraChange={onUltraChange}
+        expanded={false}
+        onToggle={onToggle}
+      />,
+    );
+
+    const unlock = screen.getByRole("checkbox", {
+      name: "解锁 glm-4.5 的 Ultra 档",
+    });
+    expect(unlock).toBeEnabled();
+
+    fireEvent.click(unlock);
+
+    expect(onUltraChange).toHaveBeenCalledWith({
+      enabled: true,
+      providerEffort: undefined,
+    });
+    expect(onToggle).toHaveBeenCalledOnce();
+    expect(
+      screen.getByText(
+        "需要先确认该模型可接收的推理强度；已为你展开推理能力配置，完成后才能保存。",
+      ),
+    ).toBeInTheDocument();
+  });
 });

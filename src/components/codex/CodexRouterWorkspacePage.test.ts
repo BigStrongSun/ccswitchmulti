@@ -31,6 +31,7 @@ import {
   routeSummaryDisplayName,
   serializeCodexRouteV2,
   validateProxyListenDraft,
+  workspaceErrorMessage,
 } from "./CodexRouterWorkspacePage";
 
 const requestLogsFixture = vi.hoisted(() => ({
@@ -345,6 +346,23 @@ it("没有 MultiRouter 方案时打开工作台不会读取 null settingsConfig"
 });
 
 describe("Codex MultiRouter workspace route persistence helpers", () => {
+  it("turns backend route validation codes into Chinese messages", () => {
+    expect(
+      workspaceErrorMessage(
+        new Error(
+          "include_models_empty: include selection requires at least one model",
+        ),
+      ),
+    ).toBe("请至少选择一个上游模型");
+    expect(
+      workspaceErrorMessage(
+        new Error(
+          "legacy_route_requires_migration: Provider p1 is referenced by legacy MultiRouter r1",
+        ),
+      ),
+    ).toBe("当前是旧版路由配置，请先完成迁移后再保存");
+  });
+
   it("previews include selection as a strict allowlist", async () => {
     const official: Provider = {
       id: "official-source",
@@ -689,14 +707,12 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       "include",
     );
     expect(
-      screen.getByLabelText("选择 canonical 模型 qwen-visible"),
+      screen.getByLabelText("选择上游模型 qwen-visible"),
     ).toBeInTheDocument();
     expect(
-      screen.queryByLabelText("选择 canonical 模型 qwen3.8"),
+      screen.queryByLabelText("选择上游模型 qwen3.8"),
     ).not.toBeInTheDocument();
-    await user.click(
-      screen.getByLabelText("选择 canonical 模型 qwen3.8-coder"),
-    );
+    await user.click(screen.getByLabelText("选择上游模型 qwen3.8-coder"));
     await user.clear(screen.getByLabelText("匹配前缀：Qwen Policy"));
     await user.type(screen.getByLabelText("匹配前缀：Qwen Policy"), "qwen, qw");
     await user.clear(screen.getByLabelText("可见别名映射：Qwen Policy"));
@@ -740,6 +756,120 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     expect(savedRoute).not.toHaveProperty("capabilities");
   });
 
+  it("shows Provider models excluded by a fixed route selection", () => {
+    const deepseek: Provider = {
+      id: "codex-deepseek-vision",
+      name: "DeepSeek Responses",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: {
+          models: [
+            { model: "deepseek-v4-flash" },
+            { model: "deepseek-v4-flash-vision-exp" },
+            { model: "deepseek-v4-pro" },
+          ],
+        },
+      },
+    };
+    const plan: Provider = {
+      id: "codex-multirouter",
+      name: "New Codex MultiRouter",
+      category: "custom",
+      settingsConfig: {
+        codexRouting: {
+          schemaVersion: 2,
+          enabled: true,
+          routes: [
+            {
+              id: "router-deepseek",
+              label: "DeepSeek Responses",
+              enabled: true,
+              targetProviderId: deepseek.id,
+              modelSelection: {
+                mode: "include",
+                models: ["deepseek-v4-flash", "deepseek-v4-pro"],
+              },
+              authPolicy: { source: "provider_config" },
+            },
+          ],
+        },
+      },
+    };
+
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [deepseek, plan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: plan.id,
+        initialProviderId: plan.id,
+        initialTab: "routes",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+
+    expect(
+      screen.getByText(
+        "已接入 2/3 个模型；尚未接入：deepseek-v4-flash-vision-exp",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("does not block saving an inactive route whose fixed model selection is empty", async () => {
+    const source: Provider = {
+      id: "default",
+      name: "default",
+      category: "custom",
+      settingsConfig: { modelCatalog: { models: [] } },
+    };
+    const plan: Provider = {
+      id: "codex-multirouter",
+      name: "New Codex MultiRouter",
+      category: "custom",
+      settingsConfig: {
+        codexRouting: {
+          schemaVersion: 2,
+          enabled: true,
+          routes: [
+            {
+              id: "router-default",
+              label: "default",
+              enabled: false,
+              targetProviderId: source.id,
+              modelSelection: { mode: "include", models: [] },
+              authPolicy: { source: "provider_config" },
+            },
+          ],
+        },
+      },
+    };
+
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [source, plan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: plan.id,
+        initialProviderId: plan.id,
+        initialTab: "routes",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "编辑匹配规则" }));
+    await user.click(screen.getByRole("button", { name: "保存规则" }));
+
+    await waitFor(() => expect(providersApi.update).toHaveBeenCalled());
+    expect(
+      screen.queryByText("请至少选择一个上游模型"),
+    ).not.toBeInTheDocument();
+  });
+
   it("blocks saving when an alias target is not a canonical provider model", async () => {
     const qwen: Provider = {
       id: "codex-qwen-invalid-alias",
@@ -777,9 +907,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     await user.click(screen.getByRole("button", { name: "保存规则" }));
 
     expect(
-      screen.getByText(
-        "别名目标 missing-model 不属于目标 Provider 的 canonical 模型",
-      ),
+      screen.getByText("别名目标“missing-model”不在目标供应商的上游模型列表中"),
     ).toBeInTheDocument();
     expect(providersApi.update).not.toHaveBeenCalled();
   });
@@ -1546,7 +1674,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     await waitFor(() =>
       expect(
         screen.getByText(
-          "获取模型列表失败，请检查当前 provider 配置：network timeout",
+          "获取模型列表失败，请检查当前供应商配置：操作失败，请检查当前配置或查看日志中的详细原因",
         ),
       ).toBeInTheDocument(),
     );
@@ -1705,7 +1833,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     });
     expect(
       screen.getByText(
-        "获取模型列表失败，请检查当前 provider 配置：模型列表读取或写回超过 30 秒，请检查网络、provider /models 端点或本地配置写入状态。",
+        "获取模型列表失败，请检查当前供应商配置：模型列表读取或写回超过 30 秒，请检查网络、供应商的 /models 接口或本地配置写入状态。",
       ),
     ).toBeInTheDocument();
   });
@@ -1761,7 +1889,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     });
     expect(
       screen.getByText(
-        "获取模型列表失败，请检查当前 provider 配置：模型列表读取或写回超过 30 秒，请检查网络、provider /models 端点或本地配置写入状态。",
+        "获取模型列表失败，请检查当前供应商配置：模型列表读取或写回超过 30 秒，请检查网络、供应商的 /models 接口或本地配置写入状态。",
       ),
     ).toBeInTheDocument();
 
@@ -2473,7 +2601,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
 
     switching.reject(new Error("persist failed"));
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "切换失败：persist failed",
+      "切换失败：操作失败，请检查当前配置或查看日志中的详细原因",
     );
     expect(screen.getByRole("button", { name: "已启用 V2" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "启用 V1" })).toBeEnabled();
