@@ -91,9 +91,9 @@ impl McpService {
     }
 
     /// 将 MCP 服务器同步到所有启用的应用
-    fn sync_server_to_apps(_state: &AppState, server: &McpServer) -> Result<(), AppError> {
+    fn sync_server_to_apps(state: &AppState, server: &McpServer) -> Result<(), AppError> {
         for app in server.apps.enabled_apps() {
-            Self::sync_server_to_app_no_config(server, &app)?;
+            Self::sync_server_to_app(state, server, &app)?;
         }
 
         Ok(())
@@ -101,10 +101,13 @@ impl McpService {
 
     /// 将 MCP 服务器同步到指定应用
     fn sync_server_to_app(
-        _state: &AppState,
+        state: &AppState,
         server: &McpServer,
         app: &AppType,
     ) -> Result<(), AppError> {
+        if matches!(app, AppType::Codex) {
+            return Self::sync_enabled_for_app(state, app);
+        }
         Self::sync_server_to_app_no_config(server, app)
     }
 
@@ -116,10 +119,7 @@ impl McpService {
             AppType::ClaudeDesktop => {
                 log::debug!("Claude Desktop 3P profiles do not use CC Switch MCP sync, skipping");
             }
-            AppType::Codex => {
-                // Codex uses TOML format, must use the correct function
-                mcp::sync_single_server_to_codex(&Default::default(), &server.id, &server.server)?;
-            }
+            AppType::Codex => unreachable!("Codex MCP sync requires database ownership context"),
             AppType::Gemini => {
                 mcp::sync_single_server_to_gemini(&Default::default(), &server.id, &server.server)?;
             }
@@ -162,13 +162,13 @@ impl McpService {
         Ok(())
     }
 
-    fn remove_server_from_app(_state: &AppState, id: &str, app: &AppType) -> Result<(), AppError> {
+    fn remove_server_from_app(state: &AppState, id: &str, app: &AppType) -> Result<(), AppError> {
         match app {
             AppType::Claude => mcp::remove_server_from_claude(id)?,
             AppType::ClaudeDesktop => {
                 log::debug!("Claude Desktop 3P profiles do not use CC Switch MCP sync, skipping");
             }
-            AppType::Codex => mcp::remove_server_from_codex(id)?,
+            AppType::Codex => return Self::sync_enabled_for_app(state, app),
             AppType::Gemini => mcp::remove_server_from_gemini(id)?,
             AppType::GrokBuild => mcp::remove_server_from_grokbuild(id)?,
             AppType::OpenCode => {
@@ -234,17 +234,12 @@ impl McpService {
         // entries, including the legacy [mcp.servers] form. Per-entry updates
         // cannot do that when the DB itself contains no rows to iterate.
         if matches!(app, AppType::Codex) {
-            let mut config = crate::app_config::MultiAppConfig::default();
-            for server in servers.values().filter(|server| server.apps.codex) {
-                config.mcp.codex.servers.insert(
-                    server.id.clone(),
-                    serde_json::json!({
-                        "enabled": true,
-                        "server": server.server,
-                    }),
-                );
-            }
-            return mcp::sync_enabled_to_codex(&config);
+            let enabled = servers
+                .values()
+                .filter(|server| server.apps.codex)
+                .map(|server| (server.id.clone(), server.server.clone()))
+                .collect::<HashMap<_, _>>();
+            return mcp::sync_enabled_to_codex_with_ownership(state.db.as_ref(), &enabled);
         }
 
         for server in servers.values() {

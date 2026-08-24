@@ -34,6 +34,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs;
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 use tauri::State;
 use toml_edit::{Array, DocumentMut, InlineTable, Item, TableLike};
 
@@ -248,6 +249,16 @@ pub fn write_codex_live_atomic(
     auth: &Value,
     config_text_opt: Option<&str>,
 ) -> Result<(), AppError> {
+    let _guard = codex_live_write_lock()
+        .lock()
+        .map_err(|_| AppError::Config("Codex live config write lock is poisoned".to_string()))?;
+    write_codex_live_atomic_locked(auth, config_text_opt)
+}
+
+fn write_codex_live_atomic_locked(
+    auth: &Value,
+    config_text_opt: Option<&str>,
+) -> Result<(), AppError> {
     let auth_path = get_codex_auth_path();
     let config_path = get_codex_config_path();
 
@@ -261,12 +272,6 @@ pub fn write_codex_live_atomic(
     } else {
         None
     };
-    let _old_config = if config_path.exists() {
-        Some(fs::read(&config_path).map_err(|e| AppError::io(&config_path, e))?)
-    } else {
-        None
-    };
-
     // 准备写入内容
     let cfg_text = match config_text_opt {
         Some(s) => normalize_codex_config_text_for_live_read(s)?,
@@ -512,6 +517,18 @@ pub(crate) fn is_custom_codex_model_provider_id(id: &str) -> bool {
 /// and provider-scoped bearer tokens live in `config.toml`. Provider switches
 /// should not overwrite the user's ChatGPT login cache.
 pub fn write_codex_live_config_atomic(config_text_opt: Option<&str>) -> Result<(), AppError> {
+    let _guard = codex_live_write_lock()
+        .lock()
+        .map_err(|_| AppError::Config("Codex live config write lock is poisoned".to_string()))?;
+    write_codex_live_config_atomic_locked(config_text_opt)
+}
+
+fn codex_live_write_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn write_codex_live_config_atomic_locked(config_text_opt: Option<&str>) -> Result<(), AppError> {
     let config_path = get_codex_config_path();
     let cfg_text = match config_text_opt {
         Some(config_text) => normalize_codex_config_text_for_live_read(config_text)?,
@@ -523,6 +540,156 @@ pub fn write_codex_live_config_atomic(config_text_opt: Option<&str>) -> Result<(
     }
 
     write_text_file(&config_path, &cfg_text)
+}
+
+fn read_codex_live_config_bytes(path: &Path) -> Result<Vec<u8>, AppError> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(AppError::io(path, error)),
+    }
+}
+
+#[cfg(test)]
+fn test_codex_reconcile_mutations() -> &'static Mutex<Vec<Vec<u8>>> {
+    static MUTATIONS: OnceLock<Mutex<Vec<Vec<u8>>>> = OnceLock::new();
+    MUTATIONS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+#[cfg(test)]
+fn set_test_codex_reconcile_mutations(mutations: Vec<Vec<u8>>) {
+    *test_codex_reconcile_mutations()
+        .lock()
+        .expect("Codex reconcile mutation lock") = mutations;
+}
+
+#[cfg(test)]
+fn apply_test_codex_reconcile_mutation(path: &Path) -> Result<(), AppError> {
+    let mutation = {
+        let mut mutations = test_codex_reconcile_mutations()
+            .lock()
+            .expect("Codex reconcile mutation lock");
+        (!mutations.is_empty()).then(|| mutations.remove(0))
+    };
+    if let Some(bytes) = mutation {
+        fs::write(path, bytes).map_err(|error| AppError::io(path, error))?;
+    }
+    Ok(())
+}
+
+/// Rebuild and atomically replace Codex `config.toml` from an exact current
+/// byte snapshot. All CCSM writers share the same in-process lock. External
+/// changes observed before replacement or after our replacement cause a
+/// bounded rebuild from the latest snapshot instead of a stale overwrite.
+pub(crate) fn reconcile_codex_live_config_atomic<F>(mut build: F) -> Result<String, AppError>
+where
+    F: FnMut(&str) -> Result<String, AppError>,
+{
+    let _guard = codex_live_write_lock()
+        .lock()
+        .map_err(|_| AppError::Config("Codex live config write lock is poisoned".to_string()))?;
+    reconcile_codex_live_config_atomic_locked(&mut build)
+}
+
+fn reconcile_codex_live_config_atomic_locked<F>(build: &mut F) -> Result<String, AppError>
+where
+    F: FnMut(&str) -> Result<String, AppError>,
+{
+    const MAX_ATTEMPTS: usize = 4;
+    let config_path = get_codex_config_path();
+
+    for attempt in 1..=MAX_ATTEMPTS {
+        let before = read_codex_live_config_bytes(&config_path)?;
+        let before_text = String::from_utf8(before.clone()).map_err(|error| {
+            AppError::Config(format!("Codex config.toml is not valid UTF-8: {error}"))
+        })?;
+        let normalized_before = normalize_codex_config_text_for_live_read(&before_text)?;
+        let candidate = normalize_codex_config_text_for_live_read(&build(&normalized_before)?)?;
+        if !candidate.trim().is_empty() {
+            toml::from_str::<toml::Table>(&candidate)
+                .map_err(|error| AppError::toml(&config_path, error))?;
+        }
+
+        #[cfg(test)]
+        apply_test_codex_reconcile_mutation(&config_path)?;
+
+        let observed = read_codex_live_config_bytes(&config_path)?;
+        if observed != before {
+            log::warn!(
+                "Codex config.toml changed during reconcile attempt {attempt}/{MAX_ATTEMPTS}; rebuilding from the latest snapshot"
+            );
+            continue;
+        }
+        atomic_write(&config_path, candidate.as_bytes())?;
+        let after = read_codex_live_config_bytes(&config_path)?;
+        if after == candidate.as_bytes() {
+            return Ok(candidate);
+        }
+        log::warn!(
+            "Codex config.toml changed after reconcile attempt {attempt}/{MAX_ATTEMPTS}; rebuilding from the latest snapshot"
+        );
+    }
+
+    Err(AppError::Config(
+        "codex_live_config_concurrent_modification: config.toml kept changing while CCSwitchMulti was reconciling it"
+            .to_string(),
+    ))
+}
+
+fn reconcile_codex_live_with_auth_atomic<F>(auth: &Value, mut build: F) -> Result<String, AppError>
+where
+    F: FnMut(&str) -> Result<String, AppError>,
+{
+    const MAX_ATTEMPTS: usize = 4;
+    let _guard = codex_live_write_lock()
+        .lock()
+        .map_err(|_| AppError::Config("Codex live config write lock is poisoned".to_string()))?;
+    let config_path = get_codex_config_path();
+    let auth_path = get_codex_auth_path();
+    let initial_auth = match fs::read(&auth_path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(AppError::io(&auth_path, error)),
+    };
+
+    for attempt in 1..=MAX_ATTEMPTS {
+        let before = read_codex_live_config_bytes(&config_path)?;
+        let before_text = String::from_utf8(before.clone()).map_err(|error| {
+            AppError::Config(format!("Codex config.toml is not valid UTF-8: {error}"))
+        })?;
+        let normalized_before = normalize_codex_config_text_for_live_read(&before_text)?;
+        let candidate = normalize_codex_config_text_for_live_read(&build(&normalized_before)?)?;
+        if !candidate.trim().is_empty() {
+            toml::from_str::<toml::Table>(&candidate)
+                .map_err(|error| AppError::toml(&config_path, error))?;
+        }
+
+        #[cfg(test)]
+        apply_test_codex_reconcile_mutation(&config_path)?;
+
+        if read_codex_live_config_bytes(&config_path)? != before {
+            log::warn!(
+                "Codex config.toml changed during auth/config reconcile attempt {attempt}/{MAX_ATTEMPTS}; rebuilding from the latest snapshot"
+            );
+            continue;
+        }
+        write_codex_live_atomic_locked(auth, Some(&candidate))?;
+        if read_codex_live_config_bytes(&config_path)? == candidate.as_bytes() {
+            return Ok(candidate);
+        }
+        log::warn!(
+            "Codex config.toml changed after auth/config reconcile attempt {attempt}/{MAX_ATTEMPTS}; rebuilding from the latest snapshot"
+        );
+    }
+
+    match initial_auth {
+        Some(bytes) => atomic_write(&auth_path, &bytes)?,
+        None => delete_file(&auth_path)?,
+    }
+    Err(AppError::Config(
+        "codex_live_config_concurrent_modification: config.toml kept changing while CCSwitchMulti was reconciling auth and config"
+            .to_string(),
+    ))
 }
 
 pub fn extract_codex_auth_api_key(auth: &Value) -> Option<String> {
@@ -6005,6 +6172,7 @@ fn prepare_codex_config_text_with_model_catalog_impl(
 /// Publish a schema-v2 MultiRouter catalog/config/cache projection and prove the atomic files can
 /// be read back. The caller persists `projection_pending` when this function or its proof fails;
 /// Provider/route declarations remain the database truth throughout.
+#[cfg(test)]
 pub(crate) fn publish_codex_multirouter_projection(
     projection_settings: &Value,
 ) -> Result<crate::codex_multirouter::projection::ProjectionReadBack, AppError> {
@@ -6036,14 +6204,14 @@ fn publish_codex_multirouter_projection_impl(
                 "Codex MultiRouter projection dependency fingerprint is missing".to_string(),
             )
         })?;
-    let live_config = read_codex_config_text()?;
-    let prepared = prepare_codex_config_text_with_model_catalog_impl(
-        projection_settings,
-        &live_config,
-        CodexCatalogToolProfile::NativeResponses,
-        provider_context,
-    )?;
-    write_codex_live_config_atomic(Some(&prepared))?;
+    reconcile_codex_live_config_atomic(|live_config| {
+        prepare_codex_config_text_with_model_catalog_impl(
+            projection_settings,
+            live_config,
+            CodexCatalogToolProfile::NativeResponses,
+            provider_context,
+        )
+    })?;
 
     read_back_codex_multirouter_projection_impl(projection_settings, provider_context)
 }
@@ -6692,9 +6860,7 @@ pub fn remove_codex_multirouter_proxy_route(config_text: &str) -> Result<String,
 
 /// 将当前 `config.toml` 原子切回 Codex 内建 `openai` provider。
 pub fn force_codex_builtin_openai_live_provider() -> Result<(), AppError> {
-    let live = read_codex_config_text()?;
-    let config = force_builtin_openai_provider_in_config_text(&live)?;
-    write_codex_live_config_atomic(Some(&config))
+    reconcile_codex_live_config_atomic(force_builtin_openai_provider_in_config_text).map(|_| ())
 }
 
 /// 将待切换 provider 的 Codex 配置叠加到当前 live `config.toml`。
@@ -6861,9 +7027,8 @@ pub(crate) fn write_codex_provider_config_only_with_catalog_and_provider_context
         .as_deref()
         .or(prepared_config.as_deref())
         .unwrap_or("");
-    let merged_config = merge_codex_provider_config_with_live(config_text)?;
-
-    write_codex_live_config_atomic(Some(&merged_config))
+    reconcile_codex_live_config_atomic(|live| merge_codex_provider_config_texts(live, config_text))
+        .map(|_| ())
 }
 
 /// Extract a provider-scoped `experimental_bearer_token` from Codex `config.toml`.
@@ -7436,16 +7601,23 @@ pub fn write_codex_live_for_provider(
     let should_write_auth = category == Some("official")
         && codex_auth_has_login_material(auth)
         && !should_preserve_live_codex_oauth_for_official_switch(auth);
-    let merged_config = config_text
-        .map(merge_codex_provider_config_with_live)
-        .transpose()?;
-
     if should_write_auth {
-        write_codex_live_atomic(auth, merged_config.as_deref())
+        reconcile_codex_live_with_auth_atomic(auth, |live| {
+            config_text
+                .map(|provider_config| merge_codex_provider_config_texts(live, provider_config))
+                .transpose()
+                .map(|merged| merged.unwrap_or_else(|| live.to_string()))
+        })
+        .map(|_| ())
     } else {
-        let live_config =
-            prepare_codex_provider_live_config(auth, merged_config.as_deref().unwrap_or(""))?;
-        write_codex_live_config_atomic(Some(&live_config))
+        reconcile_codex_live_config_atomic(|live| {
+            let merged = config_text
+                .map(|provider_config| merge_codex_provider_config_texts(live, provider_config))
+                .transpose()?
+                .unwrap_or_else(|| live.to_string());
+            prepare_codex_provider_live_config(auth, &merged)
+        })
+        .map(|_| ())
     }
 }
 
@@ -10048,6 +10220,59 @@ mod tests {
             parsed["projects"][r"C:\Users\sunda\Documents\LLMservice"]["trust_level"].as_str(),
             Some("trusted")
         );
+    }
+
+    #[test]
+    #[serial]
+    fn reconciled_live_writer_retries_from_the_latest_external_snapshot() {
+        let _home = TestHomeGuard::new();
+        write_codex_live_config_atomic(Some("[user]\nvalue = \"before\"\n"))
+            .expect("seed live config");
+        set_test_codex_reconcile_mutations(vec![b"[user]\nvalue = \"external\"\n".to_vec()]);
+
+        reconcile_codex_live_config_atomic(|live| {
+            let mut doc = live
+                .parse::<DocumentMut>()
+                .map_err(|error| AppError::Config(error.to_string()))?;
+            doc["managed"]["enabled"] = toml_edit::value(true);
+            Ok(doc.to_string())
+        })
+        .expect("writer should rebuild from the external snapshot");
+
+        let written = read_codex_config_text().expect("read reconciled config");
+        assert!(written.contains("value = \"external\""));
+        let parsed: toml::Value = toml::from_str(&written).expect("parse reconciled config");
+        assert_eq!(parsed["managed"]["enabled"].as_bool(), Some(true));
+    }
+
+    #[test]
+    #[serial]
+    fn official_auth_config_writer_retries_from_the_latest_external_snapshot() {
+        let _home = TestHomeGuard::new();
+        write_codex_live_config_atomic(Some("[user]\nvalue = \"before\"\n"))
+            .expect("seed live config");
+        set_test_codex_reconcile_mutations(vec![b"[user]\nvalue = \"external\"\n".to_vec()]);
+        let auth = json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "access_token": "current-access",
+                "refresh_token": "current-refresh"
+            }
+        });
+
+        write_codex_live_for_provider(
+            Some("official"),
+            &auth,
+            Some("model_provider = \"openai\"\nmodel = \"gpt-5.5\"\n"),
+        )
+        .expect("write official auth and config");
+
+        let written = read_codex_config_text().expect("read reconciled config");
+        assert!(written.contains("value = \"external\""));
+        assert!(written.contains("model_provider = \"openai\""));
+        let written_auth: Value =
+            crate::config::read_json_file(&get_codex_auth_path()).expect("read auth");
+        assert_eq!(written_auth, auth);
     }
 
     #[test]

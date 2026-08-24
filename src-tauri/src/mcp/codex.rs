@@ -6,12 +6,21 @@
 //! - JSON 到 TOML 的转换逻辑
 
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Mutex, OnceLock};
 
 use crate::app_config::{McpApps, McpConfig, McpServer, MultiAppConfig};
 use crate::error::AppError;
 
 use super::validation::{extract_server_spec, validate_server_spec};
+
+const CODEX_MCP_OWNERSHIP_RECEIPTS_KEY: &str = "codex_mcp_ownership_receipts_v1";
+
+fn codex_mcp_sync_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 fn should_sync_codex_mcp() -> bool {
     // Codex 未安装/未初始化时：~/.codex 目录不存在。
@@ -40,6 +49,148 @@ fn collect_enabled_servers(cfg: &McpConfig) -> HashMap<String, Value> {
         }
     }
     out
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CodexMcpOwnershipReceipts {
+    #[serde(default)]
+    entries: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+struct CodexMcpReconcileOutcome {
+    receipts: CodexMcpOwnershipReceipts,
+    conflicts: Vec<String>,
+}
+
+fn codex_mcp_item_fingerprint(item: &toml_edit::Item) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(item.to_string().as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn codex_mcp_server_item(doc: &toml_edit::DocumentMut, id: &str) -> Option<toml_edit::Item> {
+    doc.get("mcp_servers")
+        .and_then(toml_edit::Item::as_table_like)
+        .and_then(|servers| servers.get(id))
+        .cloned()
+}
+
+fn legacy_codex_mcp_server_exists(doc: &toml_edit::DocumentMut, id: &str) -> bool {
+    doc.get("mcp")
+        .and_then(toml_edit::Item::as_table_like)
+        .and_then(|mcp| mcp.get("servers"))
+        .and_then(toml_edit::Item::as_table_like)
+        .is_some_and(|servers| servers.contains_key(id))
+}
+
+fn remove_receipted_codex_mcp_server(doc: &mut toml_edit::DocumentMut, id: &str) {
+    if let Some(servers) = doc
+        .get_mut("mcp_servers")
+        .and_then(toml_edit::Item::as_table_like_mut)
+    {
+        servers.remove(id);
+    }
+}
+
+fn reconcile_codex_mcp_document(
+    doc: &mut toml_edit::DocumentMut,
+    receipts: &CodexMcpOwnershipReceipts,
+    enabled: &HashMap<String, Value>,
+) -> Result<CodexMcpReconcileOutcome, AppError> {
+    let mut desired = enabled
+        .iter()
+        .map(|(id, spec)| Ok((id.clone(), json_server_to_toml_table(spec)?)))
+        .collect::<Result<BTreeMap<_, _>, AppError>>()?;
+    let mut next_receipts = BTreeMap::new();
+    let mut conflicts = Vec::new();
+
+    for (id, expected_fingerprint) in &receipts.entries {
+        let Some(current) = codex_mcp_server_item(doc, id) else {
+            continue;
+        };
+        if codex_mcp_item_fingerprint(&current) != *expected_fingerprint {
+            continue;
+        }
+        if let Some(table) = desired.remove(id) {
+            upsert_mcp_server_table(doc, id, table)?;
+            let written = codex_mcp_server_item(doc, id).ok_or_else(|| {
+                AppError::McpValidation(format!("MCP server `{id}` was not written"))
+            })?;
+            next_receipts.insert(id.clone(), codex_mcp_item_fingerprint(&written));
+        } else {
+            remove_receipted_codex_mcp_server(doc, id);
+        }
+    }
+
+    for (id, table) in desired {
+        if codex_mcp_server_item(doc, &id).is_some() {
+            conflicts.push(id);
+            continue;
+        }
+        if legacy_codex_mcp_server_exists(doc, &id) {
+            conflicts.push(id);
+            continue;
+        }
+        upsert_mcp_server_table(doc, &id, table)?;
+        let written = codex_mcp_server_item(doc, &id)
+            .ok_or_else(|| AppError::McpValidation(format!("MCP server `{id}` was not written")))?;
+        next_receipts.insert(id, codex_mcp_item_fingerprint(&written));
+    }
+
+    conflicts.sort();
+    Ok(CodexMcpReconcileOutcome {
+        receipts: CodexMcpOwnershipReceipts {
+            entries: next_receipts,
+        },
+        conflicts,
+    })
+}
+
+pub(crate) fn sync_enabled_to_codex_with_ownership(
+    db: &crate::database::Database,
+    enabled: &HashMap<String, Value>,
+) -> Result<(), AppError> {
+    if !should_sync_codex_mcp() {
+        return Ok(());
+    }
+    let _guard = codex_mcp_sync_lock()
+        .lock()
+        .map_err(|_| AppError::McpValidation("Codex MCP sync lock is poisoned".to_string()))?;
+    let receipts = match db.get_setting(CODEX_MCP_OWNERSHIP_RECEIPTS_KEY)? {
+        Some(raw) => serde_json::from_str::<CodexMcpOwnershipReceipts>(&raw).map_err(|error| {
+            AppError::McpValidation(format!(
+                "Codex MCP ownership receipts are invalid; refusing to modify config.toml: {error}"
+            ))
+        })?,
+        None => CodexMcpOwnershipReceipts::default(),
+    };
+    let mut committed_receipts = None;
+    crate::codex_config::reconcile_codex_live_config_atomic(|live| {
+        let mut doc = if live.trim().is_empty() {
+            toml_edit::DocumentMut::new()
+        } else {
+            live.parse::<toml_edit::DocumentMut>().map_err(|error| {
+                AppError::McpValidation(format!("解析 config.toml 失败: {error}"))
+            })?
+        };
+        let outcome = reconcile_codex_mcp_document(&mut doc, &receipts, enabled)?;
+        if !outcome.conflicts.is_empty() {
+            return Err(AppError::McpValidation(format!(
+                "codex_mcp_ownership_conflict: config.toml 中的 MCP [{}] 不属于 CCSwitchMulti；请先导入、改名或手动移除冲突项",
+                outcome.conflicts.join(", ")
+            )));
+        }
+        committed_receipts = Some(outcome.receipts);
+        Ok(doc.to_string())
+    })?;
+    let committed_receipts = committed_receipts.ok_or_else(|| {
+        AppError::McpValidation("Codex MCP reconcile produced no ownership receipt".to_string())
+    })?;
+    let serialized = serde_json::to_string(&committed_receipts)
+        .map_err(|error| AppError::McpValidation(error.to_string()))?;
+    db.set_setting(CODEX_MCP_OWNERSHIP_RECEIPTS_KEY, &serialized)
 }
 
 /// 从 ~/.codex/config.toml 导入 MCP 到统一结构（v3.7.0+）
@@ -885,6 +1036,167 @@ broken = [
         remove_mcp_server_from_doc(&mut doc, "whatever");
 
         assert_eq!(doc.to_string(), "mcp_servers = 42\n");
+    }
+
+    #[test]
+    fn ownership_reconcile_preserves_an_unreceipted_same_id_user_server() {
+        let original = "[mcp_servers.shared]\ncommand = \"user-command\"\n";
+        let mut doc = original
+            .parse::<toml_edit::DocumentMut>()
+            .expect("parse live config");
+        let desired = HashMap::from([(
+            "shared".to_string(),
+            json!({"type": "stdio", "command": "ccsm-command"}),
+        )]);
+
+        let outcome =
+            reconcile_codex_mcp_document(&mut doc, &CodexMcpOwnershipReceipts::default(), &desired)
+                .expect("reconcile document");
+
+        assert_eq!(doc.to_string(), original);
+        assert_eq!(outcome.conflicts, vec!["shared"]);
+        assert!(outcome.receipts.entries.is_empty());
+    }
+
+    #[test]
+    fn ownership_reconcile_does_not_claim_an_identical_unreceipted_user_server() {
+        let original = "[mcp_servers.shared]\ncommand = \"ccsm-command\"\n";
+        let mut doc = original
+            .parse::<toml_edit::DocumentMut>()
+            .expect("parse live config");
+        let desired = HashMap::from([(
+            "shared".to_string(),
+            json!({"type": "stdio", "command": "ccsm-command"}),
+        )]);
+
+        let outcome =
+            reconcile_codex_mcp_document(&mut doc, &CodexMcpOwnershipReceipts::default(), &desired)
+                .expect("reconcile document");
+
+        assert_eq!(doc.to_string(), original);
+        assert_eq!(outcome.conflicts, vec!["shared"]);
+        assert!(outcome.receipts.entries.is_empty());
+    }
+
+    #[test]
+    fn ownership_reconcile_does_not_reclaim_a_modified_receipted_server() {
+        let mut doc = "[mcp_servers.shared]\ncommand = \"ccsm-command\"\n"
+            .parse::<toml_edit::DocumentMut>()
+            .expect("parse live config");
+        let receipts = CodexMcpOwnershipReceipts {
+            entries: BTreeMap::from([("shared".to_string(), "old-fingerprint".to_string())]),
+        };
+        let desired = HashMap::from([(
+            "shared".to_string(),
+            json!({"type": "stdio", "command": "ccsm-command"}),
+        )]);
+
+        let outcome = reconcile_codex_mcp_document(&mut doc, &receipts, &desired)
+            .expect("reconcile document");
+
+        assert_eq!(outcome.conflicts, vec!["shared"]);
+        assert!(outcome.receipts.entries.is_empty());
+    }
+
+    #[test]
+    fn ownership_reconcile_deletes_only_a_matching_receipted_server() {
+        let mut doc = concat!(
+            "[mcp_servers.managed]\ncommand = \"ccsm\"\n",
+            "[mcp_servers.user]\ncommand = \"user\"\n",
+        )
+        .parse::<toml_edit::DocumentMut>()
+        .expect("parse live config");
+        let managed = doc["mcp_servers"]["managed"].clone();
+        let receipts = CodexMcpOwnershipReceipts {
+            entries: BTreeMap::from([(
+                "managed".to_string(),
+                codex_mcp_item_fingerprint(&managed),
+            )]),
+        };
+
+        let outcome = reconcile_codex_mcp_document(&mut doc, &receipts, &HashMap::new())
+            .expect("reconcile document");
+
+        assert!(doc["mcp_servers"].get("managed").is_none());
+        assert!(doc["mcp_servers"].get("user").is_some());
+        assert!(outcome.conflicts.is_empty());
+        assert!(outcome.receipts.entries.is_empty());
+    }
+
+    #[test]
+    fn ownership_reconcile_relinquishes_a_user_modified_receipted_server() {
+        let mut doc = "[mcp_servers.shared]\ncommand = \"user-modified\"\n"
+            .parse::<toml_edit::DocumentMut>()
+            .expect("parse live config");
+        let receipts = CodexMcpOwnershipReceipts {
+            entries: BTreeMap::from([("shared".to_string(), "old-fingerprint".to_string())]),
+        };
+
+        let outcome = reconcile_codex_mcp_document(&mut doc, &receipts, &HashMap::new())
+            .expect("reconcile document");
+
+        assert_eq!(
+            doc["mcp_servers"]["shared"]["command"].as_str(),
+            Some("user-modified")
+        );
+        assert!(outcome.receipts.entries.is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn owned_sync_persists_receipt_then_removes_only_its_verified_entry() {
+        let _home = TempHome::new();
+        let codex_dir = crate::codex_config::get_codex_config_dir();
+        std::fs::create_dir_all(&codex_dir).expect("create Codex directory");
+        let config_path = crate::codex_config::get_codex_config_path();
+        std::fs::write(&config_path, "[mcp_servers.user]\ncommand = \"user\"\n")
+            .expect("seed user MCP");
+        let db = crate::database::Database::memory().expect("memory database");
+        let enabled = HashMap::from([(
+            "managed".to_string(),
+            json!({"type": "stdio", "command": "ccsm"}),
+        )]);
+
+        sync_enabled_to_codex_with_ownership(&db, &enabled).expect("write managed MCP");
+        let receipts = db
+            .get_setting(CODEX_MCP_OWNERSHIP_RECEIPTS_KEY)
+            .expect("read receipts")
+            .expect("receipts exist");
+        assert!(receipts.contains("managed"));
+
+        sync_enabled_to_codex_with_ownership(&db, &HashMap::new()).expect("remove managed MCP");
+        let written = std::fs::read_to_string(config_path).expect("read live config");
+        assert!(!written.contains("mcp_servers.managed"));
+        assert!(written.contains("mcp_servers.user"));
+    }
+
+    #[test]
+    #[serial]
+    fn owned_sync_reports_same_id_user_collision_without_overwriting() {
+        let _home = TempHome::new();
+        let codex_dir = crate::codex_config::get_codex_config_dir();
+        std::fs::create_dir_all(&codex_dir).expect("create Codex directory");
+        let config_path = crate::codex_config::get_codex_config_path();
+        let original = "[mcp_servers.shared]\ncommand = \"user\"\n";
+        std::fs::write(&config_path, original).expect("seed user MCP");
+        let db = crate::database::Database::memory().expect("memory database");
+        let enabled = HashMap::from([(
+            "shared".to_string(),
+            json!({"type": "stdio", "command": "ccsm"}),
+        )]);
+
+        let error = sync_enabled_to_codex_with_ownership(&db, &enabled)
+            .expect_err("same-id user MCP must conflict");
+
+        assert!(error.to_string().contains("codex_mcp_ownership_conflict"));
+        assert_eq!(
+            std::fs::read_to_string(config_path).expect("read unchanged config"),
+            original
+        );
+        assert!(db
+            .get_setting(CODEX_MCP_OWNERSHIP_RECEIPTS_KEY)
+            .expect("read receipts")
+            .is_none());
     }
 
     #[test]
