@@ -569,6 +569,14 @@ type CodexCatalogModelDraft = {
   supportsImage?: boolean;
   supports_image?: boolean;
   vision?: boolean;
+  supportsParallelToolCalls?: boolean;
+  supports_parallel_tool_calls?: boolean;
+  baseInstructions?: string;
+  base_instructions?: string;
+  apiFormat?: CodexCatalogModel["apiFormat"];
+  api_format?: CodexCatalogModel["api_format"];
+  codexCache?: CodexCatalogModel["codexCache"];
+  codex_cache?: CodexCatalogModel["codex_cache"];
   sortIndex?: number;
   reasoning?: CodexCatalogModel["reasoning"];
   codexUltra?: CodexCatalogModel["codexUltra"];
@@ -1484,25 +1492,57 @@ function normalizeRouteCapabilitiesFromProvider(
 function catalogDraftFromSourceModel(
   id: string,
   source?: CodexCatalogModelDraft | CodexCatalogModel,
+  provider?: Provider,
 ): CodexCatalogModelDraft {
+  const settings = provider?.settingsConfig;
   const displayName = source?.displayName ?? source?.display_name;
   const upstreamModel = source?.upstreamModel ?? source?.upstream_model;
-  const contextWindow = source?.contextWindow ?? source?.context_window;
+  const contextWindow =
+    source?.contextWindow ??
+    source?.context_window ??
+    settings?.contextWindow ??
+    settings?.context_window ??
+    settings?.modelContextWindow;
+  const inputModalities =
+    source?.inputModalities ??
+    source?.input_modalities ??
+    settings?.inputModalities ??
+    settings?.input_modalities;
+  const reasoning =
+    source?.reasoning ??
+    settings?.reasoning ??
+    settings?.codexChatReasoning ??
+    settings?.codex_chat_reasoning ??
+    provider?.meta?.codexChatReasoning;
+  const codexCache =
+    source?.codexCache ??
+    source?.codex_cache ??
+    settings?.codexCache ??
+    settings?.codex_cache ??
+    provider?.meta?.codexCache;
+  const apiFormat =
+    source?.apiFormat ??
+    source?.api_format ??
+    provider?.meta?.apiFormat ??
+    settings?.apiFormat ??
+    settings?.api_format;
+  const effectiveSource = {
+    ...(source ?? {}),
+    model: id,
+    ...(inputModalities ? { inputModalities } : {}),
+  };
   const capabilities = capabilitiesFromImageSupport(
-    source ? imageSupportFromCatalogModel(source) : undefined,
+    source || inputModalities
+      ? imageSupportFromCatalogModel(effectiveSource)
+      : undefined,
   );
   return {
     model: id,
     ...(upstreamModel && upstreamModel !== id ? { upstreamModel } : {}),
     ...(displayName ? { displayName } : {}),
     ...(contextWindow ? { contextWindow } : {}),
-    ...(source?.reasoning ? { reasoning: source.reasoning } : {}),
-    ...(source?.inputModalities
-      ? { inputModalities: source.inputModalities }
-      : {}),
-    ...(source?.input_modalities
-      ? { input_modalities: source.input_modalities }
-      : {}),
+    ...(reasoning ? { reasoning } : {}),
+    ...(inputModalities ? { inputModalities } : {}),
     ...(source?.textOnly !== undefined ? { textOnly: source.textOnly } : {}),
     ...(source?.text_only !== undefined ? { text_only: source.text_only } : {}),
     ...(source?.supportsImage !== undefined
@@ -1512,6 +1552,19 @@ function catalogDraftFromSourceModel(
       ? { supports_image: source.supports_image }
       : {}),
     ...(source?.vision !== undefined ? { vision: source.vision } : {}),
+    ...(source?.supportsParallelToolCalls !== undefined
+      ? { supportsParallelToolCalls: source.supportsParallelToolCalls }
+      : source?.supports_parallel_tool_calls !== undefined
+        ? { supportsParallelToolCalls: source.supports_parallel_tool_calls }
+        : {}),
+    ...(source?.baseInstructions
+      ? { baseInstructions: source.baseInstructions }
+      : source?.base_instructions
+        ? { baseInstructions: source.base_instructions }
+        : {}),
+    ...(apiFormat ? { apiFormat } : {}),
+    ...(codexCache ? { codexCache } : {}),
+    ...(source?.codexUltra ? { codexUltra: source.codexUltra } : {}),
     ...(source?.sortIndex !== undefined ? { sortIndex: source.sortIndex } : {}),
     ...(capabilities ? { capabilities } : {}),
   };
@@ -1528,7 +1581,7 @@ function buildModelCatalogDraftFromSources(
     for (const catalogModel of sourceCatalogModels) {
       const id = catalogModel.model?.trim();
       if (!id || byModel.has(id)) continue;
-      byModel.set(id, catalogDraftFromSourceModel(id, catalogModel));
+      byModel.set(id, catalogDraftFromSourceModel(id, catalogModel, provider));
     }
 
     for (const model of collectProviderModelIds(provider)) {
@@ -2055,7 +2108,7 @@ export function buildModelCatalogForRoutes(
       byModel.set(
         id,
         applyRouteCapabilitiesToCatalogModel(
-          catalogDraftFromSourceModel(id, catalogModel),
+          catalogDraftFromSourceModel(id, catalogModel, targetProvider),
           route,
         ),
       );

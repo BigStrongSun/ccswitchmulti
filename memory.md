@@ -1,5 +1,14 @@
 # CC Switch Repository Memory
 
+## 2026-08-24 MultiRouter / V2 Agent Provider 跟随全生命周期复审
+
+- 完整遍历了 schema-v2 MultiRouter 的新建、编辑、启用、Provider 增改删、普通/统一 Provider、SQL/DB/WebDAV/S3 导入恢复、投影、外部 `/v1/models`、V2 Agent 初始化/补档/诊断及 Codex Desktop renderer 注入。Provider 普通写入统一经过 `persist_provider_mutation -> apply_codex_provider_mutation`；`mode=all` 自动跟随 Provider 增删，`mode=include` 是用户显式白名单；已初始化的 V2 Agent 在 Provider 新增可路由模型后自动补一个默认关闭 profile，删除模型保留历史 profile 并显示 unroutable，避免静默删除用户问卷。没有发现还需要删除 Provider 重建才能恢复的独立目录存储。
+- 根因一：Codex Desktop Guardian 过去只比较 CDP target ID，Provider/live catalog 更新但 renderer 未重建时不会重注入；同时第一次安装的 App Server/Statsig wrapper 闭包绑定旧 `payload`，即使再次执行脚本也可能继续读取旧目录。现对实际 renderer payload 计算 SHA-256 指纹，target 新增或目录指纹变化均重注入；只有成功才记住新指纹，失败下一轮继续；wrapper 统一动态读取 `state.payload`。Guardian 3/3、QuickJS 动态 payload 1/1 通过。
+- 根因二：MultiRouter 工作台虽已从 Provider 实时聚合 `selectedCatalog`，V2 Agent 编辑器却只把它用于文本/图像控件，能力解析、状态诊断和预览仍只传 Router 持久化 settings；schema-v2 Router 不保存派生 `modelCatalog`，所以 Provider 更新推理、上下文、Ultra 后诊断仍可能显示旧值/未知。现三类诊断统一注入最新 Provider 派生 catalog。
+- 同类字段审计又发现工作台的 `catalogDraftFromSourceModel` 不是 compiler 等价投影：会丢 `codexUltra`、Provider 级上下文/输入模态/推理/缓存/协议默认，以及模型级并行工具调用和基础指令。现与 Rust compiler 对齐为“模型级 > Provider 级 > 缺省”，保留上下文、模态、reasoning、codexCache、apiFormat、supportsParallelToolCalls、baseInstructions、codexUltra、排序和别名；两套路由前端仍直接消费父查询的最新 Provider 快照，向导不维护长期 Provider 副本。
+- 特殊直写入口复审结论：强制修复只规范现有 reasoning 字段且随后切换/重投影；Codex live backfill 和 proxy live-to-provider 只回写认证/配置材料，不产生模型目录；历史 template migration 只迁移 config bucket；均没有新增独立模型事实源。导入/恢复统一执行 post-import sync。External `/v1/models` 和 V2 backend 初始化均直接 compiler 当前 Provider 集合。
+- 验证：工作台 73/73、向导 17/17、V2 Agent 127/127；前端全量 146 files / 1198 tests；MultiRouter mutation 15/15、compiler 19/19、projection 15/15；Rust lib 全量 3353 passed / 6 ignored；`pnpm typecheck`、renderer production build、`cargo fmt --check`、`git diff --check` 通过。全仓 Prettier 仍只报告 `src/lib/presetCatalog{,.test}.ts` 和 `src/utils/codexModelContext{,.test}.ts` 四个本轮未修改的既有格式差异。
+
 ## 2026-08-24 Router 模型差异呈现、停用规则校验与 Ultra 解锁根修
 
 - DeepSeek Responses 的 Provider 目录已有 `deepseek-v4-flash`、`deepseek-v4-flash-vision-exp`、`deepseek-v4-pro` 三个模型；现有 Router route 使用 `modelSelection.mode=include` 且只选择 Flash/Pro。`include` 是固定白名单，不应在 Provider 新增模型后静默扩容；此前真正的前端缺陷是规则卡片只显示旧匹配项，用户看不到 Provider 当前目录和未接入模型。现规则列表、详情和编辑器按当前 Provider 目录显示已接入总数、尚未接入及已不存在项；`mode=all` 继续自动跟随 Provider。

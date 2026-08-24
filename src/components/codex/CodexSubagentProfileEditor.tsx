@@ -391,6 +391,7 @@ function settingsWithConfig(
 function settingsForDiagnostics(
   provider: Provider,
   config: CodexSubagentV2Config,
+  projectedModelCatalog?: unknown,
 ): Record<string, unknown> {
   const rawProfiles = readRawProfiles(config);
   const profiles = Object.fromEntries(
@@ -409,7 +410,10 @@ function settingsForDiagnostics(
     profiles[diagnosticKey] = {} as CodexSubagentV2Profile;
     invalidOrdinal += 1;
   }
-  return settingsWithConfig(provider, { ...config, profiles });
+  const settings = settingsWithConfig(provider, { ...config, profiles });
+  return isRecord(projectedModelCatalog)
+    ? { ...settings, modelCatalog: projectedModelCatalog }
+    : settings;
 }
 
 function parseNicknames(value: string): string[] {
@@ -546,11 +550,11 @@ export function CodexSubagentProfileEditor({
     setStatusError(null);
   }, [provider.id, persistedKey]);
 
-  const diagnosticSettings = useMemo(
-    () =>
-      draft ? settingsForDiagnostics(provider, draft) : provider.settingsConfig,
-    [draft, provider],
-  );
+  const diagnosticSettings = draft
+    ? settingsForDiagnostics(provider, draft, modelCatalog)
+    : isRecord(modelCatalog)
+      ? { ...provider.settingsConfig, modelCatalog }
+      : provider.settingsConfig;
   const diagnosticSettingsKey = JSON.stringify(diagnosticSettings);
 
   useEffect(() => {

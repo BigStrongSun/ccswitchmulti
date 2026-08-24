@@ -3202,6 +3202,48 @@ describe("Codex Sub-Agent V2 persisted interactions", () => {
     ).toEqual(["low", "medium", "high", "xhigh", "max"]);
   });
 
+  it("passes the latest Provider-derived catalog to every V2 diagnostic", async () => {
+    seedPersistedPlan(true);
+    ipcState.providers["third-party"].settingsConfig.modelCatalog.models[0] = {
+      model: "deepseek-v4-flash",
+      contextWindow: 524288,
+      inputModalities: ["text", "image"],
+      reasoning: {
+        schemaVersion: 2,
+        supportStatus: "confirmed_supported",
+        controlKind: "graded",
+        supportedEfforts: ["low", "high", "max"],
+        defaultEffort: "max",
+      },
+      codexUltra: { enabled: true, providerEffort: "max" },
+    };
+
+    await mountWorkspaceFromPersistedPlan();
+
+    await waitFor(() => {
+      const diagnosticCalls = vi
+        .mocked(invoke)
+        .mock.calls.filter(([command]) =>
+          [
+            "get_codex_subagent_reasoning_capabilities",
+            "get_codex_subagent_profile_statuses",
+            "preview_codex_subagent_profile",
+          ].includes(command as string),
+        );
+      expect(diagnosticCalls.length).toBeGreaterThan(0);
+      for (const [, args] of diagnosticCalls) {
+        expect((args as any).settingsConfig.modelCatalog.models[0]).toEqual(
+          expect.objectContaining({
+            model: "deepseek-v4-flash",
+            contextWindow: 524288,
+            inputModalities: ["text", "image"],
+            codexUltra: { enabled: true, providerEffort: "max" },
+          }),
+        );
+      }
+    });
+  });
+
   it("makes delegated, model-default, fixed and disabled semantics explicit", async () => {
     const user = userEvent.setup();
     await renderWorkspace();
@@ -3485,9 +3527,16 @@ describe("Codex Sub-Agent V2 preview visible output", () => {
 
   it("requests preview with exact settingsConfig, model, and profile", async () => {
     const { selectedPlan } = await renderWorkspace();
+    const projectedModelCatalog = {
+      ...provider().settingsConfig.modelCatalog,
+      spawnAgentModels: ["deepseek-v4-flash", "deepseek-v4-pro"],
+    };
     await waitFor(() =>
       expect(invoke).toHaveBeenCalledWith("preview_codex_subagent_profile", {
-        settingsConfig: selectedPlan.settingsConfig,
+        settingsConfig: {
+          ...selectedPlan.settingsConfig,
+          modelCatalog: projectedModelCatalog,
+        },
         model: "deepseek-v4-flash",
         profile: {
           model: "deepseek-v4-flash",
@@ -3560,10 +3609,19 @@ describe("Codex Sub-Agent V2 authoritative status visible output", () => {
 
   it("requests authoritative statuses with the exact settingsConfig-only payload", async () => {
     const { selectedPlan } = await renderWorkspace();
+    const projectedModelCatalog = {
+      ...provider().settingsConfig.modelCatalog,
+      spawnAgentModels: ["deepseek-v4-flash", "deepseek-v4-pro"],
+    };
     await waitFor(() =>
       expect(invoke).toHaveBeenCalledWith(
         "get_codex_subagent_profile_statuses",
-        { settingsConfig: selectedPlan.settingsConfig },
+        {
+          settingsConfig: {
+            ...selectedPlan.settingsConfig,
+            modelCatalog: projectedModelCatalog,
+          },
+        },
       ),
     );
   });

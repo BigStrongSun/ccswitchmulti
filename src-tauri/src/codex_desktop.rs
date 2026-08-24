@@ -6,6 +6,7 @@ use std::time::Duration;
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -62,6 +63,12 @@ impl CodexModelCatalogProjection {
             model_names: Vec::new(),
             models: Vec::new(),
         }
+    }
+
+    /// 返回本次 renderer 注入实际使用的目录指纹。
+    pub(crate) fn fingerprint(&self) -> String {
+        let payload = serde_json::to_vec(self).unwrap_or_default();
+        format!("{:x}", Sha256::digest(payload))
     }
 }
 
@@ -639,8 +646,13 @@ fn cdp_command_result(response: Value, method: &str) -> Result<Value, String> {
 /// 容器遍历和改写。
 fn model_picker_patch_core_script() -> &'static str {
     r#"
-  const modelNames = () => Array.from(new Set([payload.defaultModel, ...(payload.modelNames || [])].filter((name) => typeof name === "string" && name.trim()).map((name) => name.trim())));
+  const currentPayload = () => state.payload || {};
+  const modelNames = () => {
+    const payload = currentPayload();
+    return Array.from(new Set([payload.defaultModel, ...(payload.modelNames || [])].filter((name) => typeof name === "string" && name.trim()).map((name) => name.trim())));
+  };
   const descriptorFor = (name) => {
+    const payload = currentPayload();
     const existing = (payload.models || []).find((model) => model && model.model === name);
     return {
       model: name,
@@ -2015,7 +2027,7 @@ mod tests {
         let runtime = rquickjs::Runtime::new().expect("create JavaScript runtime");
         let context = rquickjs::Context::full(&runtime).expect("create JavaScript context");
         let script = format!(
-            "const payload = {};\n{}\n{}",
+            "const payload = {};\nconst state = {{ payload }};\n{}\n{}",
             payload,
             model_picker_patch_core_script(),
             probe
@@ -2097,6 +2109,43 @@ JSON.stringify({
         assert_eq!(result["useHiddenModels"], false);
         assert_eq!(result["defaultModel"], "qwen3.6");
         assert_eq!(result["hasSnakeCaseFlag"], false);
+    }
+
+    #[test]
+    fn model_picker_patch_core_uses_latest_shared_catalog_payload() {
+        let result = run_model_picker_patch_core_probe_with_payload(
+            json!({
+                "defaultModel": "qwen3.8",
+                "modelNames": ["qwen3.8"],
+                "models": [{ "model": "qwen3.8", "hidden": false }]
+            }),
+            r#"
+const first = [];
+patchModelArray(first, true);
+state.payload = {
+  defaultModel: "deepseek-v4-flash",
+  modelNames: ["deepseek-v4-flash", "deepseek-v4-vision"],
+  models: [
+    {model: "deepseek-v4-flash", hidden: false},
+    {model: "deepseek-v4-vision", inputModalities: ["text", "image"], hidden: false},
+  ],
+};
+const second = [];
+patchModelArray(second, true);
+JSON.stringify({
+  first: first.map((model) => model.model),
+  second: second.map((model) => model.model),
+  modalities: second.find((model) => model.model === "deepseek-v4-vision")?.inputModalities,
+});
+"#,
+        );
+
+        assert_eq!(result["first"], json!(["qwen3.8"]));
+        assert_eq!(
+            result["second"],
+            json!(["deepseek-v4-flash", "deepseek-v4-vision"])
+        );
+        assert_eq!(result["modalities"], json!(["text", "image"]));
     }
 
     #[test]

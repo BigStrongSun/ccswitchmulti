@@ -2826,6 +2826,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
         upstreamModel: "gpt-5.5",
         displayName: "Third-party GPT",
         contextWindow: 272000,
+        apiFormat: "openai_responses",
       },
     ]);
   });
@@ -3060,16 +3061,33 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     expect(normalized[0].upstream?.modelMap).toBeUndefined();
   });
 
-  it("preserves source reasoning capability through route catalog projection", () => {
+  it("projects every Provider model capability with model overrides taking precedence", () => {
     const official: Provider = {
       id: "codex-official",
       name: "OpenAI Official",
       category: "official",
       settingsConfig: {
+        contextWindow: 400000,
+        inputModalities: ["text", "image"],
+        codexCache: {
+          cacheMode: "openai_prompt_cache",
+          supportsPromptCacheKey: true,
+        },
+        reasoning: {
+          supported: true,
+          supportedEfforts: ["low", "medium", "high"],
+          disableAllowed: false,
+          upstream: { format: "none", parameter: "none" },
+        },
         modelCatalog: {
           models: [
             {
               model: "gpt-5.6-luna",
+              contextWindow: 272000,
+              apiFormat: "openai_responses",
+              supportsParallelToolCalls: true,
+              baseInstructions: "Use the Provider model instructions.",
+              codexUltra: { enabled: true, providerEffort: "max" },
               reasoning: {
                 supported: true,
                 supportedEfforts: ["low", "medium", "high", "xhigh", "max"],
@@ -3111,6 +3129,22 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       catalog.models.find((model) => model.model === "gpt-5.6-luna")?.reasoning
         ?.supportedEfforts,
     ).toContain("max");
+    expect(
+      catalog.models.find((model) => model.model === "gpt-5.6-luna"),
+    ).toEqual(
+      expect.objectContaining({
+        contextWindow: 272000,
+        inputModalities: ["text", "image"],
+        apiFormat: "openai_responses",
+        supportsParallelToolCalls: true,
+        baseInstructions: "Use the Provider model instructions.",
+        codexCache: {
+          cacheMode: "openai_prompt_cache",
+          supportsPromptCacheKey: true,
+        },
+        codexUltra: { enabled: true, providerEffort: "max" },
+      }),
+    );
   });
 
   it("does not expose provider catalog models that no saved route can match", () => {
@@ -3351,13 +3385,19 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       (readCodexRouting(savedPlan)?.routes ?? []).map((route) => route.id),
     ).toEqual(["codex-qwen", "codex-deepseek"]);
     expect(savedPlan.settingsConfig.modelCatalog.models).toEqual([
-      { model: "qwen3.6", displayName: "Qwen 3.6", contextWindow: 262144 },
+      {
+        model: "qwen3.6",
+        displayName: "Qwen 3.6",
+        contextWindow: 262144,
+        apiFormat: "openai_chat",
+      },
       {
         model: "deepseek-v4-flash",
         contextWindow: 1000000,
         inputModalities: ["text"],
         textOnly: true,
         supportsImage: false,
+        apiFormat: "openai_chat",
         capabilities: { inputModalities: ["text"], textOnly: true },
       },
     ]);

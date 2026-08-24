@@ -27,6 +27,7 @@ pub struct CodexGuardianStatus {
 /// 守护内部持有的可变更状态。
 struct GuardianInner {
     injected_target_ids: Vec<String>,
+    injected_catalog_fingerprint: Option<String>,
     inject_generation: u64,
 }
 
@@ -55,6 +56,7 @@ pub(crate) fn start_codex_guardian() -> GuardianHandle {
 
     let inner = Arc::new(Mutex::new(GuardianInner {
         injected_target_ids: Vec::new(),
+        injected_catalog_fingerprint: None,
         inject_generation: 0,
     }));
 
@@ -120,7 +122,9 @@ async fn run_guardian_cycle(
         s.last_event = "Codex 未运行".into();
         s.message = "Codex Desktop 未运行，等待用户启动...".into();
         // 进程消失时清理已知 target，下次启动不会跳过新 target。
-        inner.lock().await.injected_target_ids.clear();
+        let mut guard = inner.lock().await;
+        guard.injected_target_ids.clear();
+        guard.injected_catalog_fingerprint = None;
         return;
     }
 
@@ -154,11 +158,27 @@ async fn run_guardian_cycle(
         s.injected_target_count = 0;
         s.last_event = "Codex 运行中但无 CDP".into();
         s.message = "Codex Desktop 正在运行但未开放 CDP 调试端口；CCSM 不会静默终止 Codex，请退出后从 CCSM 启动或等待下次 CCSM 启动 Codex 时自动注入。".into();
-        inner.lock().await.injected_target_ids.clear();
+        let mut guard = inner.lock().await;
+        guard.injected_target_ids.clear();
+        guard.injected_catalog_fingerprint = None;
         return;
     }
 
-    // 3. 比较当前 target ID 与已注入列表，找出新增的。
+    // 3. 同时比较 target 和目录。renderer 补丁持有模型目录状态，因此 Provider
+    // 目录变化时，即使 target ID 不变也必须重新注入。
+    let catalog = match load_cc_switch_model_catalog_projection() {
+        Ok(catalog) => catalog,
+        Err(error) => {
+            let mut s = status.lock().await;
+            s.codex_running = true;
+            s.cdp_available = true;
+            s.last_event = "模型目录加载失败".into();
+            s.message = format!("无法加载 CCSM 模型目录: {error}");
+            log::warn!("Codex 守护: 模型目录加载失败: {error}");
+            return;
+        }
+    };
+    let catalog_fingerprint = catalog.fingerprint();
     let mut guard = inner.lock().await;
     let new_ids: Vec<String> = current_ids
         .iter()
@@ -166,14 +186,18 @@ async fn run_guardian_cycle(
         .cloned()
         .collect();
 
-    if new_ids.is_empty() {
-        // 没有新 target，无需注入。
+    if !guardian_should_inject(
+        &new_ids,
+        guard.injected_catalog_fingerprint.as_deref(),
+        &catalog_fingerprint,
+    ) {
+        // target 和目录都没有变化，无需注入。
         let s = &mut *status.lock().await;
         s.codex_running = true;
         s.cdp_available = true;
         s.injected = !guard.injected_target_ids.is_empty();
         s.injected_target_count = guard.injected_target_ids.len();
-        s.last_event = "CDP target 无变化".into();
+        s.last_event = "CDP target 与模型目录无变化".into();
         if s.injected {
             s.message = format!(
                 "已守护 {} 个 CDP renderer target；模型菜单注入有效。",
@@ -189,7 +213,10 @@ async fn run_guardian_cycle(
         return;
     }
 
-    // 4. 有新 target 出现，尝试注入。
+    let catalog_changed =
+        guard.injected_catalog_fingerprint.as_deref() != Some(catalog_fingerprint.as_str());
+
+    // 4. 有新 target 或模型目录变化，尝试注入。
     let gen = {
         guard.inject_generation += 1;
         guard.inject_generation
@@ -198,70 +225,113 @@ async fn run_guardian_cycle(
 
     {
         let mut s = status.lock().await;
-        s.last_event = format!("检测到新 CDP target，发起注入 (gen {gen})");
-        s.message = format!(
-            "检测到 {} 个新 CDP renderer target，正在注入...",
-            new_ids.len()
-        );
+        s.last_event = if catalog_changed {
+            format!("检测到模型目录变化，发起注入 (gen {gen})")
+        } else {
+            format!("检测到新 CDP target，发起注入 (gen {gen})")
+        };
+        s.message = if catalog_changed {
+            "Provider 模型目录已更新，正在刷新现有 Codex Desktop renderer...".into()
+        } else {
+            format!(
+                "检测到 {} 个新 CDP renderer target，正在注入...",
+                new_ids.len()
+            )
+        };
     }
 
-    match load_cc_switch_model_catalog_projection() {
-        Ok(catalog) => {
-            match try_inject_on_candidate_ports(&catalog, &ports).await {
-                Some(result) if result.injected => {
-                    let mut guard = inner.lock().await;
-                    // 记录注入成功的 target
-                    for id in &current_ids {
-                        if !guard.injected_target_ids.contains(id) {
-                            guard.injected_target_ids.push(id.clone());
-                        }
-                    }
-                    // 清理已消失的
-                    guard
-                        .injected_target_ids
-                        .retain(|id| current_ids.contains(id));
-
-                    let mut s = status.lock().await;
-                    s.codex_running = true;
-                    s.cdp_available = true;
-                    s.injected = true;
-                    s.injected_target_count = guard.injected_target_ids.len();
-                    s.last_event = format!("注入成功 (gen {gen})");
-                    s.message = format!(
-                        "已将模型菜单兼容层注入 {} 个 renderer target (gen {gen})。",
-                        guard.injected_target_ids.len()
-                    );
-                    log::info!(
-                        "Codex 守护: 模型菜单已注入 target={:?}, models={}",
-                        result.target_id,
-                        result.model_count
-                    );
-                }
-                Some(result) => {
-                    let mut s = status.lock().await;
-                    s.codex_running = true;
-                    s.cdp_available = true;
-                    s.last_event = format!("注入未完成 (gen {gen})");
-                    s.message = format!("模型菜单注入尝试未完成: {}", result.message);
-                    log::warn!("Codex 守护: 注入未完成: {}", result.message);
-                }
-                None => {
-                    let mut s = status.lock().await;
-                    s.codex_running = true;
-                    s.cdp_available = true;
-                    s.last_event = format!("注入失败 (gen {gen})");
-                    s.message = "模型菜单注入失败：未找到可注入的 CDP target。".into();
-                    log::warn!("Codex 守护: 注入失败，未找到可注入的 target");
+    match try_inject_on_candidate_ports(&catalog, &ports).await {
+        Some(result) if result.injected => {
+            let mut guard = inner.lock().await;
+            // 记录注入成功的 target
+            for id in &current_ids {
+                if !guard.injected_target_ids.contains(id) {
+                    guard.injected_target_ids.push(id.clone());
                 }
             }
-        }
-        Err(error) => {
+            // 清理已消失的
+            guard
+                .injected_target_ids
+                .retain(|id| current_ids.contains(id));
+            guard.injected_catalog_fingerprint = Some(catalog_fingerprint);
+
             let mut s = status.lock().await;
             s.codex_running = true;
             s.cdp_available = true;
-            s.last_event = format!("模型目录加载失败 (gen {gen})");
-            s.message = format!("无法加载 CCSM 模型目录: {error}");
-            log::warn!("Codex 守护: 模型目录加载失败: {error}");
+            s.injected = true;
+            s.injected_target_count = guard.injected_target_ids.len();
+            s.last_event = format!("注入成功 (gen {gen})");
+            s.message = format!(
+                "已将模型菜单兼容层注入 {} 个 renderer target (gen {gen})。",
+                guard.injected_target_ids.len()
+            );
+            log::info!(
+                "Codex 守护: 模型菜单已注入 target={:?}, models={}",
+                result.target_id,
+                result.model_count
+            );
         }
+        Some(result) => {
+            let mut s = status.lock().await;
+            s.codex_running = true;
+            s.cdp_available = true;
+            s.last_event = format!("注入未完成 (gen {gen})");
+            s.message = format!("模型菜单注入尝试未完成: {}", result.message);
+            log::warn!("Codex 守护: 注入未完成: {}", result.message);
+        }
+        None => {
+            let mut s = status.lock().await;
+            s.codex_running = true;
+            s.cdp_available = true;
+            s.last_event = format!("注入失败 (gen {gen})");
+            s.message = "模型菜单注入失败：未找到可注入的 CDP target。".into();
+            log::warn!("Codex 守护: 注入失败，未找到可注入的 target");
+        }
+    }
+}
+
+fn guardian_should_inject(
+    new_target_ids: &[String],
+    injected_catalog_fingerprint: Option<&str>,
+    current_catalog_fingerprint: &str,
+) -> bool {
+    !new_target_ids.is_empty() || injected_catalog_fingerprint != Some(current_catalog_fingerprint)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guardian_reinjects_existing_targets_when_catalog_changes() {
+        let no_new_targets = Vec::<String>::new();
+
+        assert!(guardian_should_inject(
+            &no_new_targets,
+            Some("catalog-v1"),
+            "catalog-v2"
+        ));
+    }
+
+    #[test]
+    fn guardian_keeps_unchanged_catalog_injection_idempotent() {
+        let no_new_targets = Vec::<String>::new();
+
+        assert!(!guardian_should_inject(
+            &no_new_targets,
+            Some("catalog-v2"),
+            "catalog-v2"
+        ));
+    }
+
+    #[test]
+    fn guardian_injects_new_targets_even_when_catalog_is_unchanged() {
+        let new_targets = vec!["renderer-2".to_string()];
+
+        assert!(guardian_should_inject(
+            &new_targets,
+            Some("catalog-v2"),
+            "catalog-v2"
+        ));
     }
 }
