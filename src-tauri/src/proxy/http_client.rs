@@ -4,6 +4,7 @@
 //! 所有需要发送 HTTP 请求的模块都应使用此模块提供的客户端。
 
 use once_cell::sync::OnceCell;
+use reqwest::redirect::Policy;
 use reqwest::Client;
 use std::env;
 use std::net::IpAddr;
@@ -217,9 +218,34 @@ pub fn is_proxy_enabled() -> bool {
 
 /// 构建 HTTP 客户端
 fn build_client(proxy_url: Option<&str>) -> Result<Client, String> {
+    build_client_with_limits(
+        proxy_url,
+        Duration::from_secs(600),
+        Duration::from_secs(30),
+        Policy::limited(10),
+    )
+}
+
+pub(crate) fn build_protocol_probe_client() -> Result<Client, String> {
+    let proxy_url = get_current_proxy_url();
+    build_client_with_limits(
+        proxy_url.as_deref(),
+        Duration::from_secs(15),
+        Duration::from_secs(5),
+        Policy::none(),
+    )
+}
+
+fn build_client_with_limits(
+    proxy_url: Option<&str>,
+    request_timeout: Duration,
+    connect_timeout: Duration,
+    redirect_policy: Policy,
+) -> Result<Client, String> {
     let mut builder = Client::builder()
-        .timeout(Duration::from_secs(600))
-        .connect_timeout(Duration::from_secs(30))
+        .timeout(request_timeout)
+        .connect_timeout(connect_timeout)
+        .redirect(redirect_policy)
         .pool_max_idle_per_host(10)
         .tcp_keepalive(Duration::from_secs(60))
         // Image generation can legitimately wait several minutes before the first response

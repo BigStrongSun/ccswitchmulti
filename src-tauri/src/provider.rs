@@ -88,6 +88,11 @@ impl Provider {
             || self.codex_base_url_contains("chatgpt.com/backend-api/codex")
     }
 
+    pub fn uses_manual_codex_protocol(&self) -> bool {
+        self.meta.as_ref().and_then(|meta| meta.codex_protocol_mode)
+            == Some(CodexProtocolMode::Manual)
+    }
+
     /// Whether the provider form's "auth field" was explicitly set to
     /// ANTHROPIC_API_KEY. The form only persists `meta.apiKeyField` for the
     /// non-default choice, so `None` means the default ANTHROPIC_AUTH_TOKEN.
@@ -395,6 +400,13 @@ pub enum ClaudeDesktopMode {
     Proxy,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexProtocolMode {
+    Auto,
+    Manual,
+}
+
 /// Claude Desktop 本地路由模式下暴露给 Desktop 的安全模型路由。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -569,6 +581,16 @@ pub struct ProviderMeta {
     /// - "openai_responses": OpenAI Responses API 格式，需要转换
     #[serde(rename = "apiFormat", skip_serializing_if = "Option::is_none")]
     pub api_format: Option<String>,
+    /// Codex third-party protocol selection policy. Missing means automatic probing.
+    #[serde(rename = "codexProtocolMode", skip_serializing_if = "Option::is_none")]
+    pub codex_protocol_mode: Option<CodexProtocolMode>,
+    /// Advanced-mode response projection for Chat reasoning.
+    /// Supported values: raw_reasoning_text, reasoning_summary, none.
+    #[serde(
+        rename = "codexReasoningProjection",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub codex_reasoning_projection: Option<String>,
     /// 通用认证绑定（provider_config / managed_account）
     ///
     /// 新代码应只写入该字段；githubAccountId 仅保留兼容读取。

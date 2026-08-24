@@ -7,6 +7,7 @@ use super::projection::{
 use super::schema::CodexRoutingDocument;
 use crate::database::Database;
 use crate::error::AppError;
+use crate::protocol_compatibility::ProtocolCompatibilityRecord;
 use crate::provider::Provider;
 use rusqlite::params;
 use std::collections::{BTreeSet, HashMap};
@@ -41,7 +42,26 @@ pub fn apply_codex_provider_mutation(
     db: &Database,
     provider: Provider,
 ) -> Result<CodexProviderMutationOutcome, AppError> {
-    apply_codex_provider_mutation_with_publisher(db, provider, |artifact| {
+    apply_codex_provider_mutation_with_profiles_and_publisher(db, provider, &[], |artifact| {
+        crate::codex_config::publish_codex_multirouter_projection(&artifact.projection_settings)
+            .map_err(|error| error.to_string())
+    })
+}
+
+pub fn apply_codex_provider_mutation_with_profile(
+    db: &Database,
+    provider: Provider,
+    profile: &ProtocolCompatibilityRecord,
+) -> Result<CodexProviderMutationOutcome, AppError> {
+    apply_codex_provider_mutation_with_profiles(db, provider, std::slice::from_ref(profile))
+}
+
+pub fn apply_codex_provider_mutation_with_profiles(
+    db: &Database,
+    provider: Provider,
+    profiles: &[ProtocolCompatibilityRecord],
+) -> Result<CodexProviderMutationOutcome, AppError> {
+    apply_codex_provider_mutation_with_profiles_and_publisher(db, provider, profiles, |artifact| {
         crate::codex_config::publish_codex_multirouter_projection(&artifact.projection_settings)
             .map_err(|error| error.to_string())
     })
@@ -50,6 +70,18 @@ pub fn apply_codex_provider_mutation(
 pub fn apply_codex_provider_mutation_with_publisher<F>(
     db: &Database,
     provider: Provider,
+    publish: F,
+) -> Result<CodexProviderMutationOutcome, AppError>
+where
+    F: FnMut(&CodexRoutingProjectionArtifact) -> Result<ProjectionReadBack, String>,
+{
+    apply_codex_provider_mutation_with_profiles_and_publisher(db, provider, &[], publish)
+}
+
+fn apply_codex_provider_mutation_with_profiles_and_publisher<F>(
+    db: &Database,
+    provider: Provider,
+    profiles: &[ProtocolCompatibilityRecord],
     mut publish: F,
 ) -> Result<CodexProviderMutationOutcome, AppError>
 where
@@ -58,7 +90,11 @@ where
     let mut provider = provider;
     remove_schema_v2_router_derived_catalog(&mut provider);
     let affected_router_ids = validate_and_collect_affected_router_ids(db, &provider)?;
-    db.save_provider("codex", &provider)?;
+    if profiles.is_empty() {
+        db.save_provider("codex", &provider)?;
+    } else {
+        db.save_provider_with_protocol_profiles("codex", &provider, profiles)?;
+    }
 
     // Router 的 V2 profile 是用户可编辑策略，但候选成员来自 Provider 目录。
     // Provider 新增可路由第三方模型时自动补一个关闭的 profile，保留已有问卷和覆盖；

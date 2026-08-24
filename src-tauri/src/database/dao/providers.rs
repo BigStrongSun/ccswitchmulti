@@ -1,5 +1,6 @@
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
+use crate::protocol_compatibility::ProtocolCompatibilityRecord;
 use crate::provider::{Provider, ProviderMeta};
 use indexmap::IndexMap;
 use rusqlite::{params, TransactionBehavior};
@@ -195,6 +196,33 @@ impl Database {
     }
 
     pub fn save_provider(&self, app_type: &str, provider: &Provider) -> Result<(), AppError> {
+        self.save_provider_with_protocol_profiles(app_type, provider, &[])
+    }
+
+    pub fn save_provider_with_protocol_profile(
+        &self,
+        app_type: &str,
+        provider: &Provider,
+        record: &ProtocolCompatibilityRecord,
+    ) -> Result<(), AppError> {
+        self.save_provider_with_protocol_profiles(app_type, provider, std::slice::from_ref(record))
+    }
+
+    pub fn save_provider_with_protocol_profiles(
+        &self,
+        app_type: &str,
+        provider: &Provider,
+        records: &[ProtocolCompatibilityRecord],
+    ) -> Result<(), AppError> {
+        if records
+            .iter()
+            .any(|record| record.target.provider_id != provider.id)
+        {
+            return Err(AppError::InvalidInput(
+                "protocol compatibility profile does not belong to the Provider being saved"
+                    .to_string(),
+            ));
+        }
         let mut conn = lock_conn!(self.conn);
         let tx = conn
             .transaction()
@@ -289,6 +317,12 @@ impl Database {
                 )
                 .map_err(|e| AppError::Database(e.to_string()))?;
             }
+        }
+
+        for record in records {
+            super::protocol_compatibility::save_protocol_compatibility_result_in_transaction(
+                &tx, record,
+            )?;
         }
 
         tx.commit().map_err(|e| AppError::Database(e.to_string()))?;

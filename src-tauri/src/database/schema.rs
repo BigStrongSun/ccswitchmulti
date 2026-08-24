@@ -258,6 +258,9 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
+        Self::create_protocol_compatibility_tables(conn)?;
+        Self::create_reasoning_manual_override_tables(conn)?;
+
         // 注意：circuit_breaker_config 已合并到 proxy_config 表中
 
         // 16. Proxy Live Backup 表 (Live 配置备份)
@@ -522,6 +525,16 @@ impl Database {
                         log::info!("迁移数据库从 v15 到 v16（重建 Codex 会话用量）");
                         Self::migrate_v15_to_v16(conn)?;
                         Self::set_user_version(conn, 16)?;
+                    }
+                    16 => {
+                        log::info!("迁移数据库从 v16 到 v17（添加协议兼容性探测档案）");
+                        Self::migrate_v16_to_v17(conn)?;
+                        Self::set_user_version(conn, 17)?;
+                    }
+                    17 => {
+                        log::info!("迁移数据库从 v17 到 v18（添加 Codex reasoning 手工覆盖）");
+                        Self::migrate_v17_to_v18(conn)?;
+                        Self::set_user_version(conn, 18)?;
                     }
                     _ => {
                         return Err(AppError::Database(format!(
@@ -1544,6 +1557,60 @@ impl Database {
     fn migrate_v15_to_v16(conn: &Connection) -> Result<(), AppError> {
         let codex_dir = crate::codex_config::get_codex_config_dir();
         crate::services::session_usage_codex::reset_codex_usage_on_conn(conn, &codex_dir)
+    }
+
+    fn migrate_v16_to_v17(conn: &Connection) -> Result<(), AppError> {
+        Self::create_protocol_compatibility_tables(conn)
+    }
+
+    fn migrate_v17_to_v18(conn: &Connection) -> Result<(), AppError> {
+        Self::create_reasoning_manual_override_tables(conn)
+    }
+
+    fn create_protocol_compatibility_tables(conn: &Connection) -> Result<(), AppError> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS protocol_compatibility_profiles (
+                target_key TEXT PRIMARY KEY,
+                provider_id TEXT NOT NULL,
+                route_id TEXT,
+                public_model TEXT NOT NULL,
+                upstream_model TEXT NOT NULL,
+                transport TEXT NOT NULL,
+                endpoint_fingerprint TEXT NOT NULL,
+                authentication_kind TEXT NOT NULL,
+                readiness TEXT NOT NULL,
+                profile_json TEXT NOT NULL,
+                tested_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_protocol_compatibility_provider
+             ON protocol_compatibility_profiles(provider_id, route_id, public_model, tested_at DESC);
+             CREATE INDEX IF NOT EXISTS idx_protocol_compatibility_expiry
+             ON protocol_compatibility_profiles(expires_at);",
+        )
+        .map_err(|error| {
+            AppError::Database(format!("创建 protocol_compatibility_profiles 失败: {error}"))
+        })
+    }
+
+    fn create_reasoning_manual_override_tables(conn: &Connection) -> Result<(), AppError> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS codex_reasoning_manual_overrides (
+                target_key TEXT PRIMARY KEY,
+                target_json TEXT NOT NULL,
+                revision INTEGER NOT NULL,
+                override_json TEXT,
+                reason TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_codex_reasoning_manual_overrides_updated
+             ON codex_reasoning_manual_overrides(updated_at DESC);",
+        )
+        .map_err(|error| {
+            AppError::Database(format!(
+                "创建 codex_reasoning_manual_overrides 失败: {error}"
+            ))
+        })
     }
 
     /// 插入默认模型定价数据
@@ -3623,7 +3690,7 @@ mod tests {
 
         Database::apply_schema_migrations_on_conn(&conn)?;
 
-        assert_eq!(Database::get_user_version(&conn)?, 16);
+        assert_eq!(Database::get_user_version(&conn)?, SCHEMA_VERSION);
         let counts: (i64, i64, i64, i64) = conn.query_row(
             "SELECT
                 (SELECT COUNT(*) FROM proxy_request_logs WHERE data_source = 'codex_session'),

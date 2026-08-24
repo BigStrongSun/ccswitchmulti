@@ -4377,3 +4377,73 @@ supported in one streaming turn`。
 - Provider 模型能力声明中的 `upstream.effortMap` 是第三方上游真实档位的事实源。此前 Chat/Messages 转换会应用该映射，但原生 `/v1/responses` 直通只改写模型名，导致 Codex Ultra 的线级值 `max` 原样发给只接受 `xhigh` 的 Qwen/vLLM，并被上游 HTTP 400 拒绝。
 - 根修复用同一 `CodexChatReasoningConfig` resolver 和 capability 映射器，在原生 Responses 出站边界只改写 `reasoning.effort` 的值并保留 Responses 对象形态；不按模型名特判，不把 Provider 的 `reasoning_effort` Chat 参数形态错误搬进 Responses 请求。
 - 回归覆盖非 identity `max -> xhigh` 与 identity `high -> high`。未知能力不猜测，声明不支持 effort 时不擅自改写；声明映射中不允许的档位继续 fail closed。
+# 2026-08-23 Codex 第三方协议兼容性自动探测：后端设计待实施
+
+- 用户确认的产品方向：普通模式不让用户选择 raw/summary/字段名；保存包含 Codex 路由的 Provider 时，CCSM 自动运行一次有界的真实兼容性测试，并在首次真实请求中只做无正文的结构复核，不追加计费探测。高级模式保留手工编辑/失效后重测，但必须是同一档案的受校验覆盖，而非另一套前端猜测。
+- 已核对现状：`commands/model_fetch.rs` 的 Chat/Responses probe 只发送非流式 `ping` 并返回 HTTP 成功/失败，不能判定 reasoning 字段、SSE、工具调用或续接；应把它的 URL 推导与端点检查收编到统一的 `protocol_compatibility`，避免一次保存两次探测。`reasoning_capabilities` 是 TTL 被动元数据发现，只处理 effort/thinking 参数；它不读取协议探测结论，也不能被一次响应反向写入。
+- 后端设计在 `docs/superpowers/specs/2026-08-23-codex-reasoning-compatibility-probe-backend-design.md`，实施计划在 `docs/superpowers/plans/2026-08-23-codex-reasoning-compatibility-probe-backend.md`。新领域 `protocol_compatibility` 在 Provider 保存阶段完成端点/transport、流式形态、推理字段、强制虚拟工具、历史续接、生产投影自检；`ReasoningProjection` 只是 `VerifiedProtocolCompatibilityProfile` 的一个受验证子档案。`ProbeCandidate` 必须由未落库的有效 route/model/transport 编译而来。只持久化脱敏结构证据/哈希，绝不持久化 prompt、推理正文、工具正文或凭据。
+- 探测 corpus 不能复用 `ping` 或用户请求体：固定为 baseline JSON、baseline SSE、强制虚拟工具 SSE、工具结果续接 JSON 四例，普通 Provider 最多四个上游请求，`Auto` 仅在明确协议不支持时额外试另一个 transport。每例从逻辑 Responses 请求经生产转换器生成 wire body；禁止用户内容、extra body、原工具/历史、reasoning effort、sampling 与 response format 混入。工具仅有随机 nonce，结果在内存伪造；输出上限 128、连接/响应/总事务上限 5/15/60 秒、无重试或跨域重定向。marker 用于诊断，不能把模型服从性当协议结论。
+- 运行时必须用 `有效高级覆盖 > 指纹匹配且未过期的测试档案 > 安全回退` 解析 `ReasoningProjection`，一次性传给流式与非流式 Chat→Responses 转换；不得再让 `outputFormat` 或通用字段提取器单独决定 raw/summary。官方 OAuth 加密续接、原生 Responses 和 V2 agent-message 边界保持原路径。
+- 隔离工作树/分支：`bigstrongsun/codex-reasoning-probe-backend`，基线 `ee21cef1`。只添加设计与计划文档，未实施业务代码、未改前端、未安装或发布。起始 `cargo test ... model_fetch --lib` 受同机已有 Cargo 编译占用 artifact-directory 锁阻塞，不能计为通过或失败；不得中断其他工作树的 Cargo 进程。
+
+## 2026-08-23 截图中“Qwen 后来有白字”取证结论（已更正）
+
+- 先前把截图误关联到 thread `01a02da5-70c7-73e1-9587-9cd9fdaf3634`（Terra 官方路由）；这是错误的，不能据此判断截图。按截图英文句精确反查，真正的 rollout 是 `01a02d95-045f-72b1-a7e2-8bdb888c8abc`，目标 turn `01a02df1-e482-7df3-9d46-cc6ed918ee6f` 的 `turn_context` 明确为 `qwen3.8 / medium`。CCSM router 同时记录有效路由 `Qwen`，上游为 vLLM `/v1/chat/completions`，所以该段确实由 Qwen 生成。
+- 该 turn 同时出现两种不同的上游 Chat 字段：`reasoning_content` 经桥接成为无 `content` 的 Responses reasoning summary（持续的单行闪烁）；Qwen 在工具调用前又间歇性发送普通 `content`，经桥接成为普通 assistant `message/output_text`。截图的 “Matrix chain is returning …” 是该 turn 的普通 message，紧邻后续 Matrix tool call，且没有 `phase=commentary`；它不是 raw reasoning，也不是 Codex 自行补出的说明。
+- 因而“后来显示几句白字”的直接原因是 Qwen 在少数工具子回合产生了非空 Chat `content`，而不是 reasoning 通道从 summary 切换为 raw。桥接正确把这个 `content` 按 `response.output_text.delta` 显示；与此同时 `reasoning_content` 仍未以 `reasoning_text` 形式暴露，原始“完整推理不可读”问题仍未解决。
+- 验收/探测必须把 `pre_tool_visible_content` 作为独立结构证据记录，不能把它误判为 raw reasoning 成功，也不能仅按它是否出现决定显示投影。
+
+## 2026-08-23 Codex 第三方协议兼容性自动探测：领域层实现进度
+
+- 隔离分支 `bigstrongsun/codex-reasoning-probe-backend` 已开始后端实施，前端、安装、发布与运行中服务均未触及。首个已提交切片 `c10cbabd` 固化四个探测用例的逻辑 Responses 请求壳；当前待提交切片补充目标身份与自动投影准入规则。
+- `ProbeTargetKey` 规范化 endpoint 时移除 URL userinfo、query 和 fragment，再仅保存其 SHA-256 指纹；凭据、提示或正文不能进入目标键。`ProbeCandidate` 可在 Provider 尚未持久化时以 `provider_id=None` 编译，支持保存前探测。
+- 自动投影只允许 `ProbeReadiness::Verified`。手工覆盖必须验证已有证据：不透明证据不能升格为 readable，非 readable 不能要求 raw `reasoning_text`，readable 必须提供来源，原生 Responses 不得伪装为 Chat `reasoning_content` 回放。
+- 本轮 RED/GREEN：先观察到目标键/准入 API 缺失的编译失败，再完成 2/2；第二轮观察到候选与覆盖类型缺失的编译失败，补齐后 6/6 通过。后续仍须完成结构脱敏、持久化、capture/classifier、真实 probe transaction 和生产桥接，未可声称端到端功能完成。
+- 脱敏器现已实现为严格路径白名单：Chat JSON/SSE 只可生成 allowlisted reasoning/content/tool-arguments 字段的路径、值类型、字节长度、SHA-256 与 SSE event 名；`id`、Authorization、正文、nonce 与工具参数原文都不会进入序列化证据。两项 JSON/SSE RED/GREEN 测试已通过；数据库接入前仍需增加持久化层回归。
+- 分类器现以实际 payload 形态作保守判定：Qwen/vLLM 非空 `choices[].delta.reasoning_content` 才是 `Readable/ReasoningContent`；工具前非空普通 `content` 仅为 `PreToolVisibleContent::Present`，不改变语义或来源；summary 为 `Summary`，encrypted 与 raw/summary 混合均不得为 `Readable`，跨分片 `<think>...</think>` 闭合后才可归为 `Readable/ThinkTags`。四项 RED/GREEN fixture 测试已通过。
+
+## 2026-08-24 Codex 第三方协议探测更正：每个 Provider 全协议枚举
+
+- 用户纠正了旧的“按已配置 transport 探测，只有 Auto 才 fallback”逻辑。`wire_api` 可能正是历史误配置来源，例如把实际只支持 Chat Completions 的上游标成 Responses；因此它只能作为配置提示，不能删除候选、参与能力评分或直接作为探测结论。
+- 每个 Provider/模型都必须枚举 CCSM 当前维护的 Chat Completions 与 Responses 两条候选分支。每条分支先独立做非流 baseline；baseline 明确不支持只终止该分支，baseline 可达则继续做 SSE、强制虚拟工具、工具结果续接，最坏每模型八次请求。
+- 运行协议从 baseline 可达分支中严格按 `续接通过 > 强制工具通过 > SSE 通过 > reasoning fidelity（Readable > Summary > Opaque/None）> 原生 Responses` 选择。fidelity 只裁决前三项能力完全并列的分支；选择到 Partial 分支仍可保留基础路由，但只有被选分支四阶段全通过才允许自动 reasoning 投影，fidelity 不会提升 readiness。
+- 后改 selector 的现场诊断 canary 已完成：共审计 9 个 Provider 条目，4 个因官方/托管、缺 API key、缺模型或不支持协议而安全跳过，5 个实际候选使用生产 protocol-probe client 运行双协议分支。数据库以 SQLite read-only 打开；没有持久化 profile、Provider/configuration 或 live DB 改动。该证据验证源码工作树的诊断路径，不能推断当前已安装应用已使用本分支。
+- 5 个真实候选的结论：DeepSeek `responses -> chat`，前三项能力并列而 Chat=`Readable`、Responses=`Opaque`，证明 fidelity tie-break；Qwen `chat -> chat`，Chat 保持更高 streaming 能力；Kimi `k3` `responses -> chat`，前三项能力并列而 Chat=`Readable`、Responses=`Summary`，证明 fidelity tie-break；Kimi `kimi-for-coding` `responses -> chat`，本轮是 Responses streaming 失败导致 Chat 能力更强，**不是** tie-break 证据；GLM `chat -> chat`，Chat 是唯一 baseline 通过分支且为 `Verified`。其余四个实际候选都因 `forced_tool=unsupported` 保持 `Partial`；只有 GLM 是 `Verified`。
+- Task 8 的 RED/GREEN 选择回归与真实 runner fixture 已将 `TransportBranchResult.reasoning_shape.semantic` 接入同一纯选择器：opaque/summary Responses 与 readable Chat 的能力并列时选择 Chat，双方 readable 时仍选原生 Responses，opaque Responses 若工具/续接/SSE 更强仍保留。现场结果与通用规则一致，未引入 Provider 特例。
+- capture 层使用 2 MiB 有界字节缓冲接收 JSON/SSE，先跨网络 chunk 合并字节再做 UTF-8/SSE frame 解析，因此 UTF-8 字符或 JSON 跨 chunk 不会被误切；支持 CRLF/LF、命名 event、data-only event 与 `[DONE]`。HTTP/网络/超时错误只返回结构类别和状态码，`CapturedProbeExchange` 自定义 `Debug` 只显示状态、格式、payload 数量和脱敏证据，不显示请求 URL、响应正文或密钥。
+- 分类器新增捕获事件语义：只有 `response.reasoning_text.delta` 且 `delta` 非空才把原生 Responses 流归为 readable；summary/opaque 证据仍优先，不能被 raw 事件升格。另修正 `pre_tool_visible_content`：普通 content 只有在后续实际出现 tool call 时才标记 Present，baseline 普通最终回答保持 Absent。capture 4/4、classifier 5/5 回归通过；后续 Task 8 已让 runner 将分支 `reasoning_shape.semantic` 送入纯选择器。
+- 双协议 runner 已建立：每个候选固定按 Responses、Chat 两条独立分支执行；baseline 成功后即使 SSE 失败也继续验证强制工具，强制工具成功才做续接。Responses 与 Chat 都完整时同分选择原生 Responses；Responses baseline 404 时只停止 Responses 分支并继续 Chat；Responses 工具强制 400 时记 Unsupported/跳过续接，完整 Chat 胜出。
+- 所有 Chat wire body（baseline、SSE、强制工具、续接）均由生产 `responses_to_chat_completions_with_reasoning` 从逻辑 Responses corpus 转换。runner 从真实 SSE 聚合 Chat tool call 的 ID/name/arguments/reasoning_content，再构造逻辑 Responses function_call + function_call_output，并再次交给同一生产转换器生成 Chat 历史；没有第二套 Chat 序列化器。
+- 原 `commands/model_fetch.rs` 的 Chat/Responses URL 推导已收敛到 `protocol_compatibility::endpoint::build_probe_url`，旧命令暂时只作兼容包装；13/13 原 URL 回归通过。`ProbeCandidate` 新增只驻内存的 Bearer Header 与 `is_full_url`，自定义 Debug 只显示 `has_bearer_token`，不会打印 Token。runner 场景 3/3、凭据脱敏 1/1 通过；当前仍未接 Provider 保存和数据库档案，因此还不能从设置流程调用。
+- schema v17 新增 `protocol_compatibility_profiles` 专表，不复用 `stream_check_logs`。主键是完整 `ProbeTargetKey` 的稳定 SHA-256，档案本体只包含目标元数据、阶段状态、分类和脱敏字段哈希；endpoint/model/route/auth/selected transport 任一变化都会精确 miss。Verified 默认 30 天、Partial/Unverified 7 天，启动时按 `expires_at` 清理。
+- 新 Tauri 后端命令 `probe_codex_protocol_compatibility` 接受尚未保存的 Provider/Route/模型/base URL/凭据，运行双协议 runner、选择 transport、生成最终 endpoint 目标键并保存档案。它使用保留 CCSM 当前代理语义的专用 client，同时强制 5 秒 connect、15 秒 request 与不跟随重定向；前端尚未调用该命令，也没有改写 Provider，因此当前是“保存前可调用的后端能力”，不是已完成的普通模式 UI/自动保存事务。
+- Provider 草稿现在可由 `compile_provider_probe_candidate` 从真实 Codex TOML、主模型 alias、modelCatalog、base URL、API key 和 `isFullUrl` 编译；历史 `wire_api/apiFormat` 只成为候选提示，runner 仍固定测试 Responses 与 Chat。选出的 transport 会同步写回 `meta.apiFormat`、`settingsConfig.apiFormat`、主模型 `modelCatalog.models[].apiFormat` 和 TOML `wire_api`，避免探测结论与实际运行配置分叉；两条 baseline 都不可达时不改原协议。
+- 新后端入口 `preflight_codex_provider_protocol_compatibility` 返回已应用选择的 Provider 草稿与档案；`save_codex_provider_with_protocol_preflight` 提供普通模式未来可直接调用的一步保存入口。网络/凭据导致 preflight 无法开始时仍保存原 Provider，并返回脱敏 `probeError`，不会把探测失败误当成禁止保存。Provider/domain 回归 6/6、protocol compatibility 39/39 通过；前端尚未改用新保存入口，安装态也未变。
+
+## 2026-08-24 Codex 第三方协议探测：跨边界验证
+
+- 相关实现链已依次落在 `c05138f4`（档案持久化）、`24a88b08`（探测选择应用）、`8d3feff1`/`e13801d2`（检测到的 reasoning 形态投影）、`b71a72af`（运行时应用 Verified 投影）与 `0d620136`（不完整 route identity 失配时 fail-closed），随后接本次仅补回归和陈旧测试契约的 verification commit；本次不修改这些生产实现。
+- `migrate_v15_to_v16_resets_only_codex_session_usage` 的生产 schema 已继续演进到 user_version 17；该测试所验证的仍是 v15→v16 清理语义，旧断言 16 是测试陈旧而非迁移实现倒退。已先复现真实 RED（选中 1 个测试：actual 17 / expected 16），随后仅将断言更新为 17。
+- 新的本地内存 fixture 用真实双协议 runner 让 Responses baseline 404、Chat 完成全部四阶段，因而实际选中且完全 Verified 的 Chat 分支。由该真实 result 构造 `ProtocolCompatibilityRecord` 后只得到 `RawReasoningText`；同一投影送入实际 Chat→Responses 非流转换时，Qwen/vLLM `reasoning_content` 映射为 `reasoning_text`、普通 `content` 映射为 message `output_text` 且 summary 为空；送入实际 SSE 转换时只出现 `response.reasoning_text.delta` 与 `response.output_text.delta`，不出现 summary 事件。fixture 正文仅存在内存中，未写入档案或日志。
+- 本轮 fresh 验证（共享 `target-protocol-probe`）：迁移 1、`protocol_compatibility` 44、`streaming_codex_chat` 36、`transform_codex_chat` 145、`openai_compat` 36、`forwarder` 160、`handlers` 87，均为 0 failed；`cargo check --tests` 成功但保留 7 条既有/并行工作树的 unused/dead-code warning；`git diff --check` 通过。
+- 本次仍是后端源代码与测试验收：前端调用、真实第三方 Provider、已安装应用与 live 配置均未修改，也未被本轮视为已验收。
+
+## 2026-08-24 Codex 第三方协议探测：自动保存、高级覆盖与运行时漂移收口
+
+- 最终生产规则不含 Qwen、GLM、DeepSeek、Kimi 等模型品牌特例。每个第三方 Codex Provider/有效 MultiRouter route-model 目标都固定枚举 Responses 与 Chat Completions；两条分支分别测试 baseline JSON、baseline SSE、强制虚拟工具 SSE、工具结果续接 JSON。历史 `wire_api` 只帮助编译候选和回写最终选择，不能限制被测协议集合。
+- 单一选择器严格按 `续接 > 强制工具 > SSE > Readable > Summary > Opaque/None > Responses 同分兜底` 排序。只有选中分支四阶段全通过才是 `Verified` 并可自动投影 reasoning；更高 fidelity 不得把 `Partial` 升为 `Verified`。marker 仅是诊断提示，模型返回完成且非空的 assistant 输出即满足 baseline/续接，不能因没有照抄 marker 把模型服从性误判为协议失败。
+- 普通 Provider 的既有 add/update 保存边界已接入自动 preflight：先从尚未落库的 Provider 草稿编译有效目标并探测，再将 Provider 与所有目标档案放入同一数据库事务，随后才发布 live projection。高级 `codexProtocolMode=manual` 保留用户协议选择；reasoning 高级覆盖另用完整 `ProbeTargetKey` 绑定的 plan/apply/clear、10 分钟一次性 token 与 CAS revision。clear 写 tombstone revision，防止旧 plan 在清除后复活。reasoning effort/推理强度继续走独立 capability 链。
+- 运行时新增无正文结构观察：只比较 transport、reasoning semantic/source、字段路径、事件顺序、工具存在标记和 `PreToolVisibleContent`。非流式失配在当前投影前使精确档案失效；流式失配在本轮结束后失效并影响后续请求。捕获上限 1 MiB，超限跳过观察；正常无 reasoning 的请求不会错误失效 readable 档案。Chat SSE 观察器现先在内存规范化 CRLF 再解析，原始字节仍原样转发且正文不落库。
+- 本轮另外发现并按 TDD 根修两个探测判定问题：CRLF SSE 原先因只按 `\n\n` 分帧而得到 `ReasoningSemantic::None`；marker 不匹配原先会把完成响应错误标成 Unverified。两项测试均先确认 RED，再作最小 GREEN 修复。
+- Fresh 回归：`protocol_compatibility` 65、数据库迁移/事务 25、普通 Provider 保存/手工模式 17、MultiRouter 58、`streaming_codex_chat` 36、`transform_codex_chat` 145、`openai_compat` 36、`forwarder` 160、`handlers` 89、Codex Provider 117，全部 0 failed；`cargo check --tests --no-default-features` 成功。最终全量 `cargo test --lib --no-default-features` 为 3398 passed、0 failed、5 ignored。首次全量暴露 `migrate_v15_to_v16_resets_only_codex_session_usage` 仍硬编码 schema 17；当前 schema 已升到 18，已用 `SCHEMA_VERSION` 替代版本常量并先跑 1/1 再跑全量。fmt/diff/UTF-8 检查均通过。
+- 搜索交叉验证：Codex 内置搜索查到 vLLM Responses streaming/tool/reasoning parser 的真实未决或版本相关问题（例如 #36435、#37167、#43221），Matrix 独立链路返回官方 reasoning outputs、tool calling 文档及仓库入口。两条链一致支持“能力属于具体 endpoint/部署/版本，不能按模型品牌或 API 名称猜测”；Matrix 没提供足以替代真实双协议探测的更强证据。
+- 边界仍然明确：本分支不实现 React 设置页，不替换安装包、不重启服务、不修改 live Provider，也不声称已安装 Codex Desktop 或生产 Provider 验收。下一切片应只做前端：普通模式显示自动测试进度/结果/失败阶段和显式重测；高级模式调用现有 plan/apply/clear，不在前端复制 classifier 或默认规则。
+
+## 2026-08-24 Codex 自动协议探测后端主线集成
+
+- 先前“已合入主线”只覆盖第三方 Chat/Responses 终止语义提交 `eeaf1c3e`，没有覆盖 `bigstrongsun/codex-reasoning-probe-backend@005761a9` 的 25 个自动探测提交；这是合入范围遗漏，不是功能已经在主线但运行态未更新。本轮从 `main@1d66cb1a` 创建 `bigstrongsun/integrate-reasoning-probe-backend`，对完整探测分支执行三方合并。
+- 实际文本冲突只有 `memory.md` 与 `src-tauri/src/proxy/providers/mod.rs`。Provider 导出冲突按并集保留主线新增的 `codex_route_auth_source`、终止语义/remote compaction API，以及探测分支新增的 detected transport 与 reasoning projection API；主线的 `[DONE]`/EOF/`response.completed` 终态校验和原生 Responses `reasoning.effort` 映射均保留。
+- 自动合并后的首次 `cargo check --lib --no-default-features` 暴露主线后来新增的 Universal Provider Codex 同步仍按旧三参数调用 `persist_provider_mutation`。该特殊同步入口没有协议档案，现显式传空档案切片，继续走 Provider SSOT/mutation/projection 链，不伪造探测结果；普通设置页的 Codex add/update 仍由异步 Tauri command 在持久化前调用 `automatic_codex_provider_preflight`。
+- 集成后 fresh 门禁：`protocol_compatibility` 65/65；`streaming_codex_chat` 41/41；`transform_codex_chat` 151/151；`openai_compat` 36/36；`forwarder` 161/161；`handlers` 89/89；Codex Provider 22/22；MultiRouter 79/79；database 25/25；普通 Provider preflight 3/3；Universal Provider 删除级联 1/1。完整 `cargo test --lib --no-default-features` 为 3469 passed、0 failed、6 ignored；`cargo check`、rustfmt 和 `git diff --check` 通过。
+- 联网交叉验证使用 Codex 内置 WebSearch 命中 OpenAI Responses streaming/reasoning summary、vLLM Responses/reasoning/tool calling、DeepSeek `reasoning_content` 工具续轮官方文档。Matrix WebSearch 的 `search/open` 本轮连续返回 `fetch failed`；本机入口脚本存在且 `~/.codex/config.toml` 已指向规定的 `Documents/本地设备/scripts/matrix-websearch-mcp.js`，因此记录为远端检索链暂时不可用，不把失败结果当作技术证据。
+- 本轮只完成源码集成与后端回归，没有构建安装包、替换安装态、重启 CCSwitchMulti/Codex、修改 live Provider/Router 或重新对真实 Provider 发探测请求；前端状态页仍属于后续切片。

@@ -11,7 +11,7 @@ use super::providers::{
     },
     hosted_tools::openai_client::OpenAiHostedToolClient,
     streaming_codex_chat::{
-        create_responses_sse_stream_from_chat_with_hosted_loop, ChatSseStream,
+        create_responses_sse_stream_from_chat_with_hosted_loop_and_projection, ChatSseStream,
         CompletedChatToolCall, HOSTED_TOOL_STREAM_RESPONSE_HEADER,
     },
     transform_codex_chat::CodexToolContext,
@@ -73,6 +73,71 @@ const UPSTREAM_TRANSPORT_RETRY_LIMIT: usize = 5;
 const CODEX_RATE_LIMIT_RETRY_LIMIT: usize = 5;
 const CODEX_RATE_LIMIT_MAX_SINGLE_DELAY: Duration = Duration::from_secs(60);
 const CODEX_RATE_LIMIT_TOTAL_DELAY_BUDGET: Duration = Duration::from_secs(180);
+
+fn create_hosted_codex_chat_sse_stream_from_verified_profile<F, Fut>(
+    initial_stream: ChatSseStream,
+    tool_context: CodexToolContext,
+    provider: &Provider,
+    public_model: &str,
+    upstream_model: &str,
+    db: Arc<crate::database::Database>,
+    now: i64,
+    diagnostic_context: Option<super::providers::streaming_codex_chat::HostedToolDiagnosticContext>,
+    on_hosted_tools: F,
+) -> impl futures::Stream<Item = Result<Bytes, std::io::Error>> + Send
+where
+    F: FnMut(Vec<CompletedChatToolCall>, Value) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<Option<ChatSseStream>, String>> + Send,
+{
+    let reasoning_projection = super::providers::resolve_codex_chat_reasoning_projection(
+        provider,
+        public_model,
+        upstream_model,
+        db.as_ref(),
+        now,
+    );
+    let observation = super::providers::resolve_codex_chat_protocol_target(
+        provider,
+        public_model,
+        upstream_model,
+    )
+    .and_then(|target| {
+        db.get_protocol_compatibility_result(&target)
+            .ok()
+            .flatten()
+            .filter(|profile| {
+                profile.probe_version == crate::protocol_compatibility::PROBE_PROFILE_VERSION
+                    && profile.expires_at >= now
+                    && profile.result.readiness
+                        == crate::protocol_compatibility::ProbeReadiness::Verified
+                    && profile.result.selected_transport
+                        == Some(crate::protocol_compatibility::TransportKind::OpenAiChat)
+            })
+            .map(|profile| (target, profile))
+    });
+    let observer_db = db.clone();
+    let initial_stream = crate::protocol_compatibility::capture_chat_sse_stream(
+        initial_stream,
+        move |observed| {
+            if let Some((target, profile)) = observation {
+                crate::protocol_compatibility::runtime_observer::observe_and_expire_protocol_profile(
+                    observer_db.as_ref(),
+                    &target,
+                    &profile,
+                    &observed,
+                    now,
+                );
+            }
+        },
+    );
+    create_responses_sse_stream_from_chat_with_hosted_loop_and_projection(
+        Box::pin(initial_stream),
+        tool_context,
+        reasoning_projection,
+        diagnostic_context,
+        on_hosted_tools,
+    )
+}
 
 fn validate_codex_official_authorization(headers: &http::HeaderMap) -> Result<(), ProxyError> {
     let authorization = headers
@@ -312,7 +377,7 @@ impl RequestForwarder {
             return Ok(provider.clone());
         }
         if codex_provider_has_v2_routing(provider) {
-            return self
+            let mut effective_provider = self
                 .resolve_codex_v2_route(provider, body)?
                 .map(super::providers::ResolvedCodexRoute::into_effective_provider)
                 .ok_or_else(|| {
@@ -322,7 +387,22 @@ impl RequestForwarder {
                             .and_then(Value::as_str)
                             .unwrap_or("unknown")
                     ))
-                });
+                })?;
+            let public_model = body
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let upstream_model =
+                super::providers::codex_provider_upstream_model(&effective_provider)
+                    .unwrap_or_else(|| public_model.to_string());
+            super::providers::apply_detected_codex_transport_to_effective_provider(
+                &mut effective_provider,
+                public_model,
+                &upstream_model,
+                self.router.database(),
+                chrono::Utc::now().timestamp(),
+            );
+            return Ok(effective_provider);
         }
         let Some(target_provider_id) = super::providers::codex_route_target_provider_id(provider)
         else {
@@ -2005,7 +2085,7 @@ impl RequestForwarder {
         } else {
             None
         };
-        let routed_provider = if let Some(route_provider) = routed_provider {
+        let mut routed_provider = if let Some(route_provider) = routed_provider {
             if let Some(target_provider_id) =
                 super::providers::codex_route_target_provider_id(&route_provider)
             {
@@ -2034,6 +2114,24 @@ impl RequestForwarder {
         } else {
             None
         };
+        if matches!(app_type, AppType::Codex) {
+            if let Some(effective_provider) = routed_provider.as_mut() {
+                let public_model = body
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let upstream_model =
+                    super::providers::codex_provider_upstream_model(effective_provider)
+                        .unwrap_or_else(|| public_model.to_string());
+                super::providers::apply_detected_codex_transport_to_effective_provider(
+                    effective_provider,
+                    public_model,
+                    &upstream_model,
+                    self.router.database(),
+                    chrono::Utc::now().timestamp(),
+                );
+            }
+        }
         let codex_route_missed = codex_router_configured
             && !provider_is_resolved_codex_route
             && routed_provider.is_none();
@@ -4012,9 +4110,19 @@ impl RequestForwarder {
                             provider: provider.id.clone(),
                             tool: hosted_tool_choice_name(&filtered_body),
                         };
-                    let stream = create_responses_sse_stream_from_chat_with_hosted_loop(
+                    let upstream_model = filtered_body
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .filter(|model| !model.is_empty())
+                        .unwrap_or(&request_model_for_log);
+                    let stream = create_hosted_codex_chat_sse_stream_from_verified_profile(
                         initial_stream,
                         context,
+                        provider,
+                        &request_model_for_log,
+                        upstream_model,
+                        self.router.database_arc(),
+                        chrono::Utc::now().timestamp(),
                         Some(hosted_tool_diagnostic_context),
                         callback,
                     );
@@ -8019,13 +8127,19 @@ fn codex_realtime_multipart_field_name(headers: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::database::Database;
     use crate::provider::{LocalProxyRequestOverrides, ProviderMeta};
     use crate::proxy::providers::codex_oauth_auth::CodexAccountPoolEntry;
+    use crate::{
+        database::Database,
+        protocol_compatibility::{
+            ProbeReadiness, ProbeTargetKey, ProtocolCompatibilityProbeResult,
+            ProtocolCompatibilityRecord, TransportKind,
+        },
+    };
     use axum::http::header::{HeaderValue, ACCEPT};
     use axum::http::HeaderMap;
     use bytes::Bytes;
-    use futures::SinkExt;
+    use futures::{SinkExt, StreamExt};
     use http::StatusCode;
     use serde_json::json;
 
@@ -8065,6 +8179,80 @@ mod tests {
         provider.settings_config["codexPoolCredentialGeneration"] =
             Value::Number(generation.into());
         provider
+    }
+
+    fn verified_qwen_hosted_profile(db: &Database) -> Provider {
+        let mut provider = test_provider_with_type(None);
+        provider.id = "qwen-provider".to_string();
+        provider.settings_config = json!({ "base_url": "https://qwen.example/v1" });
+        let target = ProbeTargetKey::new(
+            &provider.id,
+            None::<String>,
+            "qwen-public",
+            "qwen-mapped",
+            TransportKind::OpenAiChat,
+            "https://qwen.example/v1/chat/completions",
+            "bearer",
+        )
+        .expect("profile target")
+        .with_credential("");
+        let result: ProtocolCompatibilityProbeResult = serde_json::from_value(json!({
+            "selected_transport": "open_ai_chat",
+            "readiness": "verified",
+            "branches": [{
+                "assessment": {
+                    "transport": "open_ai_chat",
+                    "baseline": "passed",
+                    "streaming": "passed",
+                    "forced_tool": "passed",
+                    "continuation": "passed"
+                },
+                "reasoning_shape": {
+                    "semantic": "readable",
+                    "source": "reasoning_content",
+                    "pre_tool_visible_content": "absent"
+                },
+                "evidence": []
+            }]
+        }))
+        .expect("verified profile");
+        assert_eq!(result.readiness, ProbeReadiness::Verified);
+        db.save_protocol_compatibility_result(&ProtocolCompatibilityRecord::new(
+            target, result, 100, 200,
+        ))
+        .expect("save profile");
+        provider
+    }
+
+    #[tokio::test]
+    async fn hosted_streaming_wiring_uses_verified_raw_reasoning_projection() {
+        let db = Database::memory().expect("memory database");
+        let provider = verified_qwen_hosted_profile(&db);
+        let initial: ChatSseStream = Box::pin(futures::stream::iter(vec![Ok::<_, std::io::Error>(
+            Bytes::from_static(
+                b"data: {\"id\":\"chatcmpl_hosted_projection\",\"model\":\"qwen-mapped\",\"choices\":[{\"delta\":{\"reasoning_content\":\"Need search.\"}}]}\n\ndata: {\"id\":\"chatcmpl_hosted_projection\",\"model\":\"qwen-mapped\",\"choices\":[{\"delta\":{\"content\":\"Visible answer.\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+            ),
+        )]));
+
+        let bytes = create_hosted_codex_chat_sse_stream_from_verified_profile(
+            initial,
+            CodexToolContext::default(),
+            &provider,
+            "qwen-public",
+            "qwen-mapped",
+            Arc::new(db),
+            200,
+            None,
+            |_calls, _assistant| async { Ok::<Option<ChatSseStream>, String>(None) },
+        )
+        .map(|item| item.expect("converted hosted SSE"))
+        .collect::<Vec<_>>()
+        .await;
+        let response = String::from_utf8(bytes.concat()).expect("UTF-8 SSE");
+
+        assert!(response.contains("event: response.reasoning_text.delta"));
+        assert!(!response.contains("event: response.reasoning_summary_text.delta"));
+        assert!(response.contains("Visible answer."));
     }
 
     #[test]

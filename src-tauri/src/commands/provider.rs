@@ -10,7 +10,7 @@ use crate::services::{
     EndpointLatency, ProviderService, ProviderSortUpdate, SpeedtestService, SwitchResult,
 };
 use crate::store::AppState;
-use std::str::FromStr;
+use std::{future::Future, str::FromStr};
 
 const CODEX_OFFICIAL_PROVIDER_ID: &str = "codex-official";
 
@@ -47,27 +47,151 @@ pub fn get_current_provider(state: State<'_, AppState>, app: String) -> Result<S
 }
 
 #[tauri::command]
-pub fn add_provider(
+pub async fn add_provider(
     state: State<'_, AppState>,
     app: String,
     provider: Provider,
     #[allow(non_snake_case)] addToLive: Option<bool>,
 ) -> Result<bool, String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
-    ProviderService::add(state.inner(), app_type, provider, addToLive.unwrap_or(true))
+    add_provider_internal(state.inner(), app_type, provider, addToLive.unwrap_or(true))
+        .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn update_provider(
+pub async fn update_provider(
     state: State<'_, AppState>,
     app: String,
     provider: Provider,
     #[allow(non_snake_case)] originalId: Option<String>,
 ) -> Result<bool, String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
-    ProviderService::update(state.inner(), app_type, originalId.as_deref(), provider)
+    update_provider_internal(state.inner(), app_type, originalId.as_deref(), provider)
+        .await
         .map_err(|e| e.to_string())
+}
+
+async fn add_provider_internal(
+    state: &AppState,
+    app_type: AppType,
+    provider: Provider,
+    add_to_live: bool,
+) -> Result<bool, AppError> {
+    add_provider_internal_with_probe(state, app_type, provider, add_to_live, |provider| {
+        crate::commands::protocol_compatibility::automatic_codex_provider_preflight(state, provider)
+    })
+    .await
+}
+
+async fn update_provider_internal(
+    state: &AppState,
+    app_type: AppType,
+    original_id: Option<&str>,
+    provider: Provider,
+) -> Result<bool, AppError> {
+    update_provider_internal_with_probe(state, app_type, original_id, provider, |provider| {
+        crate::commands::protocol_compatibility::automatic_codex_provider_preflight(state, provider)
+    })
+    .await
+}
+
+async fn add_provider_internal_with_probe<F, Fut>(
+    state: &AppState,
+    app_type: AppType,
+    provider: Provider,
+    add_to_live: bool,
+    probe: F,
+) -> Result<bool, AppError>
+where
+    F: FnOnce(Provider) -> Fut,
+    Fut: Future<
+        Output = Result<
+            (
+                Provider,
+                Vec<crate::protocol_compatibility::ProtocolCompatibilityRecord>,
+            ),
+            String,
+        >,
+    >,
+{
+    if app_type != AppType::Codex {
+        return ProviderService::add(state, app_type, provider, add_to_live);
+    }
+
+    let provider = ProviderService::prepare_provider_for_mutation(state, &app_type, provider)?;
+    let (provider, record) = resolve_automatic_probe_outcome(provider, probe).await?;
+    ProviderService::add_with_protocol_profiles(state, app_type, provider, add_to_live, &record)
+}
+
+async fn update_provider_internal_with_probe<F, Fut>(
+    state: &AppState,
+    app_type: AppType,
+    original_id: Option<&str>,
+    provider: Provider,
+    probe: F,
+) -> Result<bool, AppError>
+where
+    F: FnOnce(Provider) -> Fut,
+    Fut: Future<
+        Output = Result<
+            (
+                Provider,
+                Vec<crate::protocol_compatibility::ProtocolCompatibilityRecord>,
+            ),
+            String,
+        >,
+    >,
+{
+    if app_type != AppType::Codex {
+        return ProviderService::update(state, app_type, original_id, provider);
+    }
+
+    let provider = ProviderService::prepare_provider_for_mutation(state, &app_type, provider)?;
+    if original_id.is_some_and(|original_id| original_id != provider.id) {
+        return Err(AppError::Message(
+            "Only additive-mode providers support changing provider key".to_string(),
+        ));
+    }
+    let (provider, record) = resolve_automatic_probe_outcome(provider, probe).await?;
+    ProviderService::update_with_protocol_profiles(state, app_type, original_id, provider, &record)
+}
+
+async fn resolve_automatic_probe_outcome<F, Fut>(
+    provider: Provider,
+    probe: F,
+) -> Result<
+    (
+        Provider,
+        Vec<crate::protocol_compatibility::ProtocolCompatibilityRecord>,
+    ),
+    AppError,
+>
+where
+    F: FnOnce(Provider) -> Fut,
+    Fut: Future<
+        Output = Result<
+            (
+                Provider,
+                Vec<crate::protocol_compatibility::ProtocolCompatibilityRecord>,
+            ),
+            String,
+        >,
+    >,
+{
+    if provider.uses_manual_codex_protocol() {
+        return Ok((provider, Vec::new()));
+    }
+    match probe(provider.clone()).await {
+        Ok(outcome) => Ok(outcome),
+        Err(error) if error == "probe_in_progress" => Err(AppError::Message(error)),
+        Err(error) => {
+            log::warn!(
+                "Codex protocol auto-probe could not start; preserving configured transport: {error}"
+            );
+            Ok((provider, Vec::new()))
+        }
+    }
 }
 
 #[tauri::command]
@@ -1458,5 +1582,183 @@ mod native_query_credentials_tests {
 
         assert_eq!(base_url, "https://provider.zenmux.example/v1");
         assert_eq!(api_key, "sk-provider");
+    }
+}
+
+#[cfg(test)]
+mod codex_protocol_preflight_save_tests {
+    use super::update_provider_internal_with_probe;
+    use crate::{
+        app_config::AppType,
+        database::Database,
+        protocol_compatibility::{
+            apply_selected_transport_to_provider, ProbeReadiness, ProbeTargetKey,
+            ProtocolCompatibilityProbeResult, ProtocolCompatibilityRecord, TransportKind,
+        },
+        provider::{CodexProtocolMode, Provider, ProviderMeta},
+        store::AppState,
+    };
+    use serde_json::json;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    fn codex_provider() -> Provider {
+        Provider {
+            id: "qwen-provider".to_string(),
+            name: "Qwen".to_string(),
+            settings_config: json!({
+                "auth": {"OPENAI_API_KEY": "probe-secret"},
+                "config": "model = \"qwen-visible\"\nmodel_provider = \"qwen\"\n[model_providers.qwen]\nbase_url = \"https://vllm.example/v1\"\nwire_api = \"responses\"\n",
+                "modelCatalog": {"models": [{
+                    "model": "qwen-visible",
+                    "upstreamModel": "Qwen/Qwen3.8",
+                    "apiFormat": "openai_responses"
+                }]}
+            }),
+            website_url: None,
+            category: None,
+            created_at: None,
+            sort_index: None,
+            notes: None,
+            meta: Some(ProviderMeta {
+                api_format: Some("openai_responses".to_string()),
+                ..ProviderMeta::default()
+            }),
+            icon: None,
+            icon_color: None,
+            in_failover_queue: false,
+        }
+    }
+
+    fn chat_record() -> ProtocolCompatibilityRecord {
+        let target = ProbeTargetKey::new(
+            "qwen-provider",
+            None::<String>,
+            "qwen-visible",
+            "Qwen/Qwen3.8",
+            TransportKind::OpenAiChat,
+            "https://vllm.example/v1/chat/completions",
+            "bearer",
+        )
+        .unwrap()
+        .with_credential("probe-secret");
+        ProtocolCompatibilityRecord::new(
+            target,
+            ProtocolCompatibilityProbeResult {
+                selected_transport: Some(TransportKind::OpenAiChat),
+                readiness: ProbeReadiness::Partial,
+                branches: Vec::new(),
+            },
+            100,
+            200,
+        )
+    }
+
+    #[tokio::test]
+    async fn ordinary_codex_update_runs_preflight_and_atomically_saves_its_profile() {
+        let db = Arc::new(Database::memory().expect("memory database"));
+        let state = AppState::new(db.clone());
+        let provider = codex_provider();
+        db.save_provider(AppType::Codex.as_str(), &provider)
+            .expect("seed provider");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_probe = calls.clone();
+        let expected_record = chat_record();
+        let returned_record = expected_record.clone();
+
+        update_provider_internal_with_probe(
+            &state,
+            AppType::Codex,
+            None,
+            provider,
+            move |mut candidate| {
+                calls_for_probe.fetch_add(1, Ordering::SeqCst);
+                apply_selected_transport_to_provider(&mut candidate, TransportKind::OpenAiChat)
+                    .expect("apply detected protocol");
+                std::future::ready(Ok((candidate, vec![returned_record])))
+            },
+        )
+        .await
+        .expect("ordinary update should save");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let saved = db
+            .get_provider_by_id("qwen-provider", AppType::Codex.as_str())
+            .expect("read provider")
+            .expect("provider exists");
+        assert_eq!(
+            saved.meta.and_then(|meta| meta.api_format),
+            Some("openai_chat".to_string())
+        );
+        assert_eq!(
+            db.get_protocol_compatibility_result(&expected_record.target)
+                .expect("read profile"),
+            Some(expected_record)
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_codex_update_is_rejected_before_any_probe_request() {
+        let db = Arc::new(Database::memory().expect("memory database"));
+        let state = AppState::new(db);
+        let mut provider = codex_provider();
+        provider.settings_config["auth"] = serde_json::Value::Null;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_probe = calls.clone();
+
+        let result = update_provider_internal_with_probe(
+            &state,
+            AppType::Codex,
+            None,
+            provider,
+            move |candidate| {
+                calls_for_probe.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(Ok((candidate, Vec::new())))
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn advanced_manual_protocol_mode_preserves_user_transport_without_probing() {
+        let db = Arc::new(Database::memory().expect("memory database"));
+        let state = AppState::new(db.clone());
+        let mut provider = codex_provider();
+        provider
+            .meta
+            .get_or_insert_with(ProviderMeta::default)
+            .codex_protocol_mode = Some(CodexProtocolMode::Manual);
+        db.save_provider(AppType::Codex.as_str(), &provider)
+            .expect("seed manual provider");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_probe = calls.clone();
+
+        update_provider_internal_with_probe(
+            &state,
+            AppType::Codex,
+            None,
+            provider,
+            move |candidate| {
+                calls_for_probe.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(Ok((candidate, Vec::new())))
+            },
+        )
+        .await
+        .expect("save manual protocol provider");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let saved = db
+            .get_provider_by_id("qwen-provider", AppType::Codex.as_str())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            saved.meta.and_then(|meta| meta.api_format),
+            Some("openai_responses".to_string())
+        );
     }
 }

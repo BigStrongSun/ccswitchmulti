@@ -7502,7 +7502,6 @@ pub fn restore_codex_settings_for_backfill(
 /// - `"model"` / `"model_catalog_json"`: writes to top-level field.
 ///
 /// Empty value removes the field.
-#[cfg(test)]
 pub fn update_codex_toml_field(toml_str: &str, field: &str, value: &str) -> Result<String, String> {
     let mut doc = toml_str
         .parse::<DocumentMut>()

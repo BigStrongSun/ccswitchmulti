@@ -32,6 +32,7 @@ mod opencode_config;
 mod panic_hook;
 mod prompt;
 mod prompt_files;
+mod protocol_compatibility;
 mod provider;
 mod proxy;
 pub mod reasoning_capabilities;
@@ -1524,6 +1525,13 @@ pub fn run() {
             commands::get_opencode_models,
             commands::probe_codex_chat_for_config,
             commands::probe_codex_responses_for_config,
+            commands::probe_codex_protocol_compatibility,
+            commands::preflight_codex_provider_protocol_compatibility,
+            commands::save_codex_provider_with_protocol_preflight,
+            commands::get_codex_protocol_compatibility,
+            commands::plan_codex_reasoning_override,
+            commands::apply_codex_reasoning_override,
+            commands::clear_codex_reasoning_override,
             // ours: endpoint speed test + custom endpoint management
             commands::test_api_endpoints,
             commands::get_custom_endpoints,
