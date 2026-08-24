@@ -1,5 +1,14 @@
 # CC Switch Repository Memory
 
+## 2026-08-24 v3.19.2-17 发布前本地分支与新 PR 复审
+
+- `main` 原候选为 `54cb432d`，annotated tag `v3.19.2-17` peel 到同一提交；对应 Release workflow `32715488426` 已取消，GitHub Release 不存在。审计期间不移动 tag、不发布、不安装。
+- 当前真正未进入 `main` 的本地生产分支是 `bigstrongsun/codex-reasoning-probe-backend@005761a9`：25 个提交、46 个文件、约 8342+/182-，包含协议双分支探测、脱敏档案、Provider 保存 preflight、运行时 reasoning 投影和 schema 迁移。分支记录的全量 Rust 证据为 3398 passed / 5 ignored，但它比当前主线落后 37 个提交，merge-tree 在 `memory.md`、`proxy/providers/mod.rs` 冲突；必须按当前 Provider SSOT、终态语义和原生 Responses effort 映射重新集成、复跑门禁，不能整枝盲合。
+- `bigstrongsun/ultra-orchestration` 的两个提交虽然 patch-id/commit SHA 不在当前主线，但行为已由 `5036705f`、`b45235d3` 及后续 Ultra 修复完整进入 `main`；`release/v3.19.2-8` 的 mixed hosted/client tool 行为也已在主线同名函数与回归中存在。备份、commentary/portable reasoning no-go、学术资料、AgentMesh 原型和旧 release 分支不属于本次产品候选。
+- 新 PR #57 `a4fff767` 修复的问题真实存在：当前 `main` 有 live-as-base 的字段保留，但没有该 PR 的 exact-byte snapshot、bounded retry、deferred outcome、ownership receipt 和 companion rollback 全链。PR 基于落后 48 个提交的旧主线，17 个文件约 7070+/607-，与当前 `codex_config.rs`、`proxy/providers/mod.rs`、`services/provider/live.rs`、`services/proxy.rs` 冲突，CI 也未绿。更关键的是其“fingerprint recheck -> atomic replace”仍不是跨进程 CAS：外部 Codex 可以在最后复检与 replace 之间写入，PR 没有覆盖这一窗口，不能原样宣称完全消除并发覆盖；应在当前主线重新设计最小写入/所有权边界并补可证明回归。
+- 新 PR #58 `54e87fa8` 修复的 prefix-only legacy migration 缺口也真实存在，且 merge-tree 可干净合并；但 `provider_catalog_entries` 没有像 compiler 一样过滤 `modelCatalog.models[].enabled=false`，会把已停用模型冻结进 `include` 并产生不可路由白名单。该 PR 的 CI 红来自落后基线的既有前端/Rust 格式漂移，不是 13 个 migration 测试失败，但在补停用模型回归和当前主线完整门禁前仍不可合入。
+- 旧 bug PR #19/#21/#24/#26/#35/#37/#39/#41/#43/#45/#47/#49 的原 SHA 多数不在 `main`，但对应 usage attribution、reasoning alias、disabled model、排序、严格 include/fail-closed、v2 authPolicy、missing modelSelection、active-router projection、displayName、Windows replace retry 和 alias-suffixed role 行为已由主线选择性提交或更完整实现覆盖。本次未发现这些旧 PR 还有新的独立生产缺口；判断依据是 merge-base/reachability、函数与测试边界、最终源码语义，而不是只看 `git cherry`。
+
 ## 2026-08-24 MultiRouter / V2 Agent Provider 跟随全生命周期复审
 
 - 完整遍历了 schema-v2 MultiRouter 的新建、编辑、启用、Provider 增改删、普通/统一 Provider、SQL/DB/WebDAV/S3 导入恢复、投影、外部 `/v1/models`、V2 Agent 初始化/补档/诊断及 Codex Desktop renderer 注入。Provider 普通写入统一经过 `persist_provider_mutation -> apply_codex_provider_mutation`；`mode=all` 自动跟随 Provider 增删，`mode=include` 是用户显式白名单；已初始化的 V2 Agent 在 Provider 新增可路由模型后自动补一个默认关闭 profile，删除模型保留历史 profile 并显示 unroutable，避免静默删除用户问卷。没有发现还需要删除 Provider 重建才能恢复的独立目录存储。
