@@ -1408,6 +1408,160 @@ command = "example-mcp"
 
     #[test]
     #[serial]
+    fn update_codex_subagent_v2_normalizes_legacy_other_model_and_verifies_role_file() {
+        with_test_home(|state, _| {
+            let target_settings = json!({
+                "base_url": "https://bitto.example/v1",
+                "modelCatalog": { "models": [{
+                    "model": "deepseek-v4-flash",
+                    "displayName": "DeepSeek V4 Flash",
+                    "contextWindow": 1000000,
+                    "inputModalities": ["text", "image"],
+                    "reasoning": {
+                        "supported": true,
+                        "supportedEfforts": ["low", "high", "max"],
+                        "defaultEffort": "high",
+                        "disableAllowed": true,
+                        "upstream": {
+                            "format": "string",
+                            "parameter": "reasoning_effort",
+                            "effortMap": {
+                                "low": "low",
+                                "medium": "high",
+                                "high": "high",
+                                "xhigh": "high",
+                                "max": "max"
+                            }
+                        },
+                        "source": "user"
+                    }
+                }] }
+            });
+            let target = Provider::with_id(
+                "bitto".to_string(),
+                "Bitto".to_string(),
+                target_settings,
+                None,
+            );
+            let router = Provider::with_id(
+                "router".to_string(),
+                "MultiRouter".to_string(),
+                json!({
+                    "modelCatalog": { "models": [{
+                        "model": "deepseek-v4-flash-bitto-other",
+                        "displayName": "DeepSeek V4 Flash",
+                        "contextWindow": 1000000,
+                        "inputModalities": ["text", "image"],
+                        "upstreamModel": "deepseek-v4-flash",
+                        "reasoning": {
+                            "supported": true,
+                            "supportedEfforts": ["low", "high", "max"],
+                            "defaultEffort": "high",
+                            "disableAllowed": true,
+                            "upstream": {
+                                "format": "string",
+                                "parameter": "reasoning_effort",
+                                "effortMap": {
+                                    "low": "low",
+                                    "medium": "high",
+                                    "high": "high",
+                                    "xhigh": "high",
+                                    "max": "max"
+                                }
+                            },
+                            "source": "user"
+                        }
+                    }] },
+                    "codexRouting": {
+                        "schemaVersion": 2,
+                        "enabled": true,
+                        "defaultRouteId": "bitto",
+                        "routes": [{
+                            "id": "bitto",
+                            "label": "Bitto",
+                            "enabled": true,
+                            "targetProviderId": "bitto",
+                            "modelSelection": {"mode": "all"},
+                            "matchPrefixes": ["deepseek"],
+                            "aliases": {
+                                "deepseek-v4-flash-bitto": "deepseek-v4-flash"
+                            },
+                            "authPolicy": {"source": "provider_config"}
+                        }],
+                        "subagentV2": {
+                            "schemaVersion": 2,
+                            "selectionPolicy": "balanced",
+                            "profiles": {}
+                        }
+                    }
+                }),
+                None,
+            );
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &target)
+                .expect("save target");
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &router)
+                .expect("save router");
+            state
+                .db
+                .set_current_provider(AppType::Codex.as_str(), &router.id)
+                .expect("mark router current");
+
+            let result = ProviderService::update_codex_subagent_v2(
+                state,
+                &router.id,
+                json!({
+                    "schemaVersion": 2,
+                    "selectionPolicy": "balanced",
+                    "profiles": {
+                        "deepseek-v4-flash-bitto-other": {
+                            "model": "deepseek-v4-flash-bitto-other",
+                            "enabled": true,
+                            "questionnaire": {
+                                "taskStrengths": ["repository_exploration"],
+                                "optimization": "balanced",
+                                "writeScope": "read_only",
+                                "preference": "eligible"
+                            },
+                            "reasoning": {"policy": "fixed", "effort": "max"}
+                        }
+                    }
+                }),
+            )
+            .expect("save normalized V2 profile");
+
+            assert_eq!(
+                result.projection.status,
+                CodexSubagentV2ProjectionStatus::Applied
+            );
+            assert_eq!(
+                result.verification.role_files_status,
+                CodexSubagentV2RoleFilesStatus::Verified
+            );
+            assert_eq!(result.verification.role_files.len(), 1);
+            let file = &result.verification.role_files[0];
+            assert!(file.exists);
+            assert!(file.content_matches);
+            assert!(file.path.ends_with("deepseek-v4-flash-bitto.toml"));
+            assert!(
+                result.provider.settings_config["codexRouting"]["subagentV2"]["profiles"]
+                    ["deepseek-v4-flash-bitto-other"]
+                    .is_null(),
+                "legacy -other profile must be replaced by the projected model name"
+            );
+            assert_eq!(
+                result.provider.settings_config["codexRouting"]["subagentV2"]["profiles"]
+                    ["deepseek-v4-flash-bitto"]["model"],
+                "deepseek-v4-flash-bitto"
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
     fn reconcile_codex_subagent_v2_uses_the_complete_current_draft_for_batch_actions() {
         with_test_home(|state, _| {
             let current = Provider::with_id(
@@ -4427,13 +4581,17 @@ impl ProviderService {
         if app_type == AppType::Codex {
             // Best-effort 自愈：清理 modelCatalog reasoning 声明的历史脏数据
             // （如被错误持久化的 Codex-only ultra 档位）。失败不阻塞主流程。
-            if let Ok(Some(cleaned)) = crate::codex_config::auto_sanitize_codex_reasoning_declarations(
-                &provider.settings_config,
-            ) {
+            if let Ok(Some(cleaned)) =
+                crate::codex_config::auto_sanitize_codex_reasoning_declarations(
+                    &provider.settings_config,
+                )
+            {
                 let mut sanitized = provider.clone();
                 sanitized.settings_config = cleaned;
                 if let Err(err) = state.db.save_provider(app_type.as_str(), &sanitized) {
-                    log::warn!("Codex reasoning sanitize persist failed (main save succeeded): {err}");
+                    log::warn!(
+                        "Codex reasoning sanitize persist failed (main save succeeded): {err}"
+                    );
                 }
             }
             if let Ok(Some(pruned)) = crate::codex_config::auto_prune_disabled_stale_subagent_v2(
@@ -4729,15 +4887,34 @@ impl ProviderService {
     ) -> Result<CodexSubagentV2MutationResult, AppError> {
         let provider_context =
             crate::codex_config::codex_provider_classification_context(state.db.as_ref())?;
+        let v2_router = state
+            .db
+            .get_provider_by_id(provider_id, AppType::Codex.as_str())?
+            .is_some_and(|provider| Self::is_codex_schema_v2_router(&AppType::Codex, &provider));
+        let normalized_input = if v2_router {
+            Some(
+                crate::codex_config::projected_codex_subagent_v2_catalog_for_mutation(
+                    state.db.as_ref(),
+                    provider_id,
+                    subagent_v2.clone(),
+                )?,
+            )
+        } else {
+            None
+        };
         let candidate = state.db.update_codex_subagent_v2(
             provider_id,
             move |settings| {
-                Ok(
-                    crate::codex_config::hydrate_codex_subagent_v2_input_modalities(
-                        settings,
-                        &subagent_v2,
-                    ),
-                )
+                if let Some(normalized) = normalized_input.as_ref() {
+                    Ok(normalized.clone())
+                } else {
+                    Ok(
+                        crate::codex_config::hydrate_codex_subagent_v2_input_modalities(
+                            settings,
+                            &subagent_v2,
+                        ),
+                    )
+                }
             },
             |settings| {
                 crate::codex_config::validate_codex_subagent_v2_candidate(
@@ -4756,6 +4933,21 @@ impl ProviderService {
     ) -> Result<CodexSubagentV2MutationResult, AppError> {
         let provider_context =
             crate::codex_config::codex_provider_classification_context(state.db.as_ref())?;
+        let v2_router = state
+            .db
+            .get_provider_by_id(provider_id, AppType::Codex.as_str())?
+            .is_some_and(|provider| Self::is_codex_schema_v2_router(&AppType::Codex, &provider));
+        if v2_router {
+            crate::codex_config::projected_codex_subagent_v2_catalog_for_mutation(
+                state.db.as_ref(),
+                provider_id,
+                serde_json::json!({
+                    "schemaVersion": 2,
+                    "selectionPolicy": "balanced",
+                    "profiles": {}
+                }),
+            )?;
+        }
         let candidate = state.db.update_codex_subagent_v2(
             provider_id,
             |settings| {
@@ -4788,14 +4980,30 @@ impl ProviderService {
         }
         let provider_context =
             crate::codex_config::codex_provider_classification_context(state.db.as_ref())?;
+        let v2_router = state
+            .db
+            .get_provider_by_id(provider_id, AppType::Codex.as_str())?
+            .is_some_and(|provider| Self::is_codex_schema_v2_router(&AppType::Codex, &provider));
+        let effective_draft = if v2_router {
+            Some(
+                crate::codex_config::projected_codex_subagent_v2_catalog_for_mutation(
+                    state.db.as_ref(),
+                    provider_id,
+                    subagent_v2.clone().expect("checked above"),
+                )?,
+            )
+        } else {
+            subagent_v2
+        };
+        let reconcile_context = provider_context.clone();
         let candidate = state.db.update_codex_subagent_v2(
             provider_id,
-            |settings| {
+            move |settings| {
                 crate::codex_config::reconcile_codex_subagent_v2_for_candidate(
                     settings,
                     action,
-                    subagent_v2.as_ref(),
-                    Some(&provider_context),
+                    effective_draft.as_ref(),
+                    Some(&reconcile_context),
                 )
             },
             |settings| {

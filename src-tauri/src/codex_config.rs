@@ -3838,6 +3838,131 @@ pub(crate) fn hydrate_codex_subagent_v2_input_modalities(
     raw_subagent_v2.clone()
 }
 
+/// 从 MultiRouter 已经编译好的投影目录中，找到某个旧模型名对应的当前可见模型名。
+///
+/// 历史版本的模型目录可能残留 `*-other` 这类旧名（例如
+/// `deepseek-v4-flash-bitto-other`），而 MultiRouter 投影后的名字是
+/// `deepseek-v4-flash-bitto`。如果 V2 子 Agent 保存时直接把旧名写入数据库，
+/// 写入阶段和回读校验阶段会分别使用不同的模型名，导致文件回读校验失败。
+fn projected_visible_model_for_legacy_profile(
+    profile_model: &str,
+    projected_models: &[Value],
+) -> Option<String> {
+    let profile_identity = normalize_profile_key(profile_model);
+    for entry in projected_models {
+        let Some(visible) = entry
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let visible_identity = normalize_profile_key(visible);
+        if visible_identity == profile_identity {
+            return Some(visible.to_string());
+        }
+        if let Some(prefix) = profile_model.strip_suffix("-other") {
+            if normalize_profile_key(prefix) == visible_identity {
+                return Some(visible.to_string());
+            }
+        }
+        if let Some(upstream) = entry
+            .get("upstreamModel")
+            .and_then(Value::as_str)
+            .map(str::trim)
+        {
+            if normalize_profile_key(upstream) == profile_identity {
+                return Some(visible.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// 把 V2 子 Agent 文档中的旧模型名对齐到 MultiRouter 投影后的可见模型名。
+fn normalize_subagent_v2_models_for_projection(
+    mut subagent_v2: Value,
+    projected_settings: &Value,
+) -> Value {
+    let projected_models = projected_settings
+        .pointer("/modelCatalog/models")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let Some(profiles) = subagent_v2
+        .get_mut("profiles")
+        .and_then(Value::as_object_mut)
+    else {
+        return subagent_v2;
+    };
+    let keys: Vec<String> = profiles.keys().cloned().collect();
+    let mut rebuilt = serde_json::Map::new();
+
+    for key in keys {
+        let mut profile = profiles.shift_remove(&key).unwrap_or(Value::Null);
+        let model = profile
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| key.clone());
+        let Some(visible) = projected_visible_model_for_legacy_profile(&model, &projected_models)
+        else {
+            rebuilt.insert(key, profile);
+            continue;
+        };
+        let normalized_key = normalize_profile_key(&visible);
+        profile["model"] = Value::String(visible);
+        if let Some(existing) = rebuilt.get_mut(&normalized_key) {
+            if profile
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                existing["enabled"] = Value::Bool(true);
+            }
+            for field in ["questionnaire", "reasoning", "overrides", "inputModalities"] {
+                let source = profile.get(field);
+                let target = existing.get(field);
+                if (target.is_none() || target.is_some_and(Value::is_null))
+                    && source.is_some_and(|value| !value.is_null())
+                {
+                    existing[field] = source.cloned().expect("field exists");
+                }
+            }
+        } else {
+            rebuilt.insert(normalized_key, profile);
+        }
+    }
+
+    *profiles = rebuilt;
+    subagent_v2
+}
+
+/// 为 V2 子 Agent 变更准备规范化后的 `subagentV2` 文档，并把 MultiRouter 投影目录
+/// 写回 Provider DB，使 V2 编译、Live 投影和回读校验使用同一模型目录。
+///
+/// 返回的值只包含规范化后的 `subagentV2`，供 DAO 的 focused update 闭包使用。
+pub(crate) fn projected_codex_subagent_v2_catalog_for_mutation(
+    db: &crate::database::Database,
+    provider_id: &str,
+    subagent_v2: Value,
+) -> Result<Value, AppError> {
+    let artifact =
+        crate::codex_multirouter::projection::build_projection_artifact(db, provider_id)?;
+    let normalized =
+        normalize_subagent_v2_models_for_projection(subagent_v2, &artifact.projection_settings);
+    if let Some(mut provider) = db.get_provider_by_id(provider_id, "codex")? {
+        if let Some(catalog) = artifact.projection_settings.get("modelCatalog") {
+            provider.settings_config["modelCatalog"] = catalog.clone();
+            db.update_provider_settings_config("codex", provider_id, &provider.settings_config)?;
+        }
+    }
+    Ok(normalized)
+}
+
 fn catalog_profile_draft(
     model: &str,
     enabled_preferred: bool,
@@ -3887,9 +4012,10 @@ pub(crate) fn initialize_codex_subagent_v2_for_candidate(
         .get_mut("profiles")
         .and_then(Value::as_object_mut)
         .ok_or_else(|| AppError::Message("Initialized profiles are not an object".to_string()))?;
-    for (identity, model, input_modalities) in
-        routable_codex_subagent_catalog(settings, provider_context.map(|context| context.provider_models()))
-    {
+    for (identity, model, input_modalities) in routable_codex_subagent_catalog(
+        settings,
+        provider_context.map(|context| context.provider_models()),
+    ) {
         let preferred = matches!(identity.as_str(), "deepseek-v4-flash" | "deepseek-v4-pro");
         profiles.insert(
             identity,
@@ -3956,8 +4082,10 @@ pub(crate) fn reconcile_codex_subagent_v2_for_candidate(
         .get_mut("profiles")
         .and_then(Value::as_object_mut)
         .ok_or_else(|| AppError::Message("Reconciled profiles are not an object".to_string()))?;
-    let routable =
-        routable_codex_subagent_catalog(settings, provider_context.map(|context| context.provider_models()));
+    let routable = routable_codex_subagent_catalog(
+        settings,
+        provider_context.map(|context| context.provider_models()),
+    );
     let routable_by_identity = routable
         .iter()
         .map(|(identity, model, modalities)| {
@@ -4168,8 +4296,11 @@ pub(crate) fn auto_sanitize_codex_reasoning_declarations(
                 removed.len(),
                 removed
             );
-            let serialized = serde_json::to_value(&capability)
-                .map_err(|error| AppError::Message(format!("Failed to re-serialize sanitized reasoning declaration: {error}")))?;
+            let serialized = serde_json::to_value(&capability).map_err(|error| {
+                AppError::Message(format!(
+                    "Failed to re-serialize sanitized reasoning declaration: {error}"
+                ))
+            })?;
             *model
                 .get_mut("reasoning")
                 .expect("reasoning key exists by construction") = serialized;
@@ -6168,6 +6299,15 @@ fn prepare_codex_config_text_with_model_catalog_impl(
 pub(crate) fn publish_codex_multirouter_projection(
     projection_settings: &Value,
 ) -> Result<crate::codex_multirouter::projection::ProjectionReadBack, AppError> {
+    publish_codex_multirouter_projection_with_context(projection_settings, None)
+}
+
+/// 与 [`publish_codex_multirouter_projection`] 相同，但允许传入完整
+/// Provider 分类上下文，使 Agent 文件写入与回读校验使用同一套 route 分类结果。
+pub(crate) fn publish_codex_multirouter_projection_with_context(
+    projection_settings: &Value,
+    provider_context: Option<&ProviderClassificationContext>,
+) -> Result<crate::codex_multirouter::projection::ProjectionReadBack, AppError> {
     let expected_fingerprint = projection_settings
         .pointer("/codexRoutingProjection/dependencyFingerprint")
         .and_then(Value::as_str)
@@ -6179,11 +6319,20 @@ pub(crate) fn publish_codex_multirouter_projection(
             )
         })?;
     let live_config = read_codex_config_text()?;
-    let prepared = prepare_codex_config_text_with_model_catalog_without_provider_context(
-        projection_settings,
-        &live_config,
-        CodexCatalogToolProfile::NativeResponses,
-    )?;
+    let prepared = if let Some(context) = provider_context {
+        prepare_codex_config_text_with_model_catalog_and_provider_context(
+            projection_settings,
+            &live_config,
+            CodexCatalogToolProfile::NativeResponses,
+            context,
+        )?
+    } else {
+        prepare_codex_config_text_with_model_catalog_without_provider_context(
+            projection_settings,
+            &live_config,
+            CodexCatalogToolProfile::NativeResponses,
+        )?
+    };
     write_codex_live_config_atomic(Some(&prepared))?;
 
     let catalog: Value = read_json_file(&get_codex_model_catalog_path())?;
@@ -9795,12 +9944,11 @@ mod tests {
 
     #[test]
     fn codex_subagent_v2_route_classifier_mode_all_matches_target_provider_catalog() {
-        let classify = |settings: &Value,
-                        model: &str,
-                        context: Option<&ProviderClassificationContext>| {
-            codex_subagent_route_classification_with_context(settings, model, context)
-                .map(|classification| classification.provider_kind)
-        };
+        let classify =
+            |settings: &Value, model: &str, context: Option<&ProviderClassificationContext>| {
+                codex_subagent_route_classification_with_context(settings, model, context)
+                    .map(|classification| classification.provider_kind)
+            };
         let settings = json!({
             "codexRouting": {
                 "enabled": true,
@@ -15078,8 +15226,14 @@ model_provider = "codex_model_router_v2"
             128_000,
         );
         let model = &catalog["models"][0];
-        assert_eq!(model.get("input_modalities"), Some(&json!(["text", "image"])));
-        assert_eq!(model.get("inputModalities"), Some(&json!(["text", "image"])));
+        assert_eq!(
+            model.get("input_modalities"),
+            Some(&json!(["text", "image"]))
+        );
+        assert_eq!(
+            model.get("inputModalities"),
+            Some(&json!(["text", "image"]))
+        );
     }
 
     #[test]
@@ -16429,5 +16583,63 @@ wire_api = "responses"
             "matchPrefixes": ["gpt"]
         });
         assert!(codex_catalog_route_matches_model(&all, "gpt-5.4"));
+    }
+
+    #[test]
+    fn subagent_v2_legacy_other_name_is_normalized_to_projected_model() {
+        let projected = json!({
+            "modelCatalog": { "models": [
+                {
+                    "model": "deepseek-v4-flash-bitto",
+                    "upstreamModel": "deepseek-v4-flash",
+                    "displayName": "DeepSeek V4 Flash"
+                },
+                {
+                    "model": "gpt-5.6-luna",
+                    "upstreamModel": "gpt-5.6-luna",
+                    "displayName": "GPT 5.6 Luna"
+                }
+            ] }
+        });
+        let input = json!({
+            "schemaVersion": 2,
+            "selectionPolicy": "balanced",
+            "profiles": {
+                "deepseek-v4-flash-bitto-other": {
+                    "model": "deepseek-v4-flash-bitto-other",
+                    "enabled": true,
+                    "questionnaire": {
+                        "taskStrengths": ["repository_exploration"],
+                        "optimization": "balanced",
+                        "writeScope": "read_only",
+                        "preference": "eligible"
+                    },
+                    "reasoning": { "policy": "delegated" }
+                },
+                "gpt-5.6-luna": {
+                    "model": "gpt-5.6-luna",
+                    "enabled": true,
+                    "questionnaire": {
+                        "taskStrengths": ["repository_exploration"],
+                        "optimization": "balanced",
+                        "writeScope": "read_only",
+                        "preference": "eligible"
+                    },
+                    "reasoning": { "policy": "delegated" }
+                }
+            }
+        });
+
+        let output = normalize_subagent_v2_models_for_projection(input, &projected);
+        let profiles = output["profiles"].as_object().expect("profiles object");
+        assert!(
+            profiles.get("deepseek-v4-flash-bitto-other").is_none(),
+            "legacy -other profile key must be replaced"
+        );
+        assert_eq!(
+            profiles["deepseek-v4-flash-bitto"]["model"],
+            "deepseek-v4-flash-bitto"
+        );
+        assert_eq!(profiles["gpt-5.6-luna"]["model"], "gpt-5.6-luna");
     }
 }

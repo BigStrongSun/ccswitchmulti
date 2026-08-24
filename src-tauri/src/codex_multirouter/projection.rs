@@ -100,10 +100,40 @@ pub fn ensure_codex_multirouter_projection(
     router_provider_id: &str,
     force: bool,
 ) -> Result<CodexRoutingProjectionStatus, AppError> {
-    ensure_projection_with_publisher(db, router_provider_id, force, |artifact| {
-        crate::codex_config::publish_codex_multirouter_projection(&artifact.projection_settings)
-            .map_err(|error| error.to_string())
-    })
+    let artifact = build_projection_artifact(db, router_provider_id)?;
+    let provider_context = crate::codex_config::codex_provider_classification_context(db)?;
+    let status = ensure_projection_with_publisher(db, router_provider_id, force, |artifact| {
+        crate::codex_config::publish_codex_multirouter_projection_with_context(
+            &artifact.projection_settings,
+            Some(&provider_context),
+        )
+        .map_err(|error| error.to_string())
+    })?;
+    if status.state == ProjectionState::Ready {
+        write_projected_catalog_to_router(db, router_provider_id, &artifact)?;
+    }
+    Ok(status)
+}
+
+/// MultiRouter 的聚合模型目录是 V2 子 Agent 编译的模型源。
+///
+/// 投影一直只写入 Live 文件会导致 V2 页面读取的 DB `settingsConfig.modelCatalog`
+/// 与最终投影目录分叉：目标供应商新增的模型会出现在 Live catalog，却不会出现在
+/// V2 后端列表。投影成功后把同一份聚合 catalog 回写 router DB 行，使 V2 编译、
+/// 回读校验和 Live 投影共用同一模型源。
+pub(crate) fn write_projected_catalog_to_router(
+    db: &Database,
+    router_provider_id: &str,
+    artifact: &CodexRoutingProjectionArtifact,
+) -> Result<(), AppError> {
+    let Some(mut provider) = db.get_provider_by_id(router_provider_id, "codex")? else {
+        return Ok(());
+    };
+    let Some(catalog) = artifact.projection_settings.get("modelCatalog") else {
+        return Ok(());
+    };
+    provider.settings_config["modelCatalog"] = catalog.clone();
+    db.update_provider_settings_config("codex", router_provider_id, &provider.settings_config)
 }
 
 pub fn inspect_codex_multirouter_projection(
@@ -355,7 +385,10 @@ fn projected_model_entry(model: &CompiledCodexModel, sort_index: Option<usize>) 
         "upstreamModel".to_string(),
         Value::String(model.upstream_model.clone()),
     );
-    entry.insert("displayName".to_string(), Value::String(model.display_name.clone()));
+    entry.insert(
+        "displayName".to_string(),
+        Value::String(model.display_name.clone()),
+    );
     entry.insert(
         "apiFormat".to_string(),
         Value::String(model.api_format.clone()),
@@ -814,4 +847,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn projection_persists_projected_catalog_to_router_database() {
+        let db = Database::memory().expect("memory db");
+        save_fixture(&db, "openai_responses");
+
+        let artifact = build_projection_artifact(&db, "router").expect("projection artifact");
+        write_projected_catalog_to_router(&db, "router", &artifact).expect("writeback catalog");
+
+        let router = db
+            .get_provider_by_id("router", "codex")
+            .expect("read router")
+            .expect("router exists");
+        let models = router.settings_config["modelCatalog"]["models"]
+            .as_array()
+            .expect("persisted projected models");
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0]["model"].as_str(), Some("qwen3.8"));
+    }
 }

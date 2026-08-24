@@ -1,7 +1,8 @@
 use super::compiler::compile_v2;
 use super::projection::{
-    ensure_projection_with_publisher, CodexRoutingProjectionArtifact, CodexRoutingProjectionStatus,
-    ProjectionReadBack,
+    build_projection_artifact, ensure_projection_with_publisher, write_projected_catalog_to_router,
+    CodexRoutingProjectionArtifact, CodexRoutingProjectionStatus, ProjectionReadBack,
+    ProjectionState,
 };
 use super::schema::CodexRoutingDocument;
 use crate::database::Database;
@@ -35,12 +36,16 @@ pub fn apply_codex_provider_mutation(
     db: &Database,
     provider: Provider,
 ) -> Result<CodexProviderMutationOutcome, AppError> {
-    apply_codex_provider_mutation_with_publisher(db, provider, |artifact| {
-        crate::codex_config::publish_codex_multirouter_projection(&artifact.projection_settings)
-            .map_err(|error| error.to_string())
+    apply_codex_provider_mutation_with_publisher_and_context(db, provider, |artifact, context| {
+        crate::codex_config::publish_codex_multirouter_projection_with_context(
+            &artifact.projection_settings,
+            Some(context),
+        )
+        .map_err(|error| error.to_string())
     })
 }
 
+/// 保留旧的一参数 publisher 泛型，供既有测试与独立调用方使用。
 pub fn apply_codex_provider_mutation_with_publisher<F>(
     db: &Database,
     provider: Provider,
@@ -49,8 +54,25 @@ pub fn apply_codex_provider_mutation_with_publisher<F>(
 where
     F: FnMut(&CodexRoutingProjectionArtifact) -> Result<ProjectionReadBack, String>,
 {
+    apply_codex_provider_mutation_with_publisher_and_context(db, provider, |artifact, _| {
+        publish(artifact)
+    })
+}
+
+pub(crate) fn apply_codex_provider_mutation_with_publisher_and_context<F>(
+    db: &Database,
+    provider: Provider,
+    mut publish: F,
+) -> Result<CodexProviderMutationOutcome, AppError>
+where
+    F: FnMut(
+        &CodexRoutingProjectionArtifact,
+        &crate::codex_config::ProviderClassificationContext,
+    ) -> Result<ProjectionReadBack, String>,
+{
     let affected_router_ids = validate_and_collect_affected_router_ids(db, &provider)?;
     db.save_provider("codex", &provider)?;
+    let provider_context = crate::codex_config::codex_provider_classification_context(db)?;
 
     // 多 MultiRouter 并存时（如个人版 + 公司版），只有当前激活的 router 拥有
     // `.codex/cc-switch-model-catalog.json` 这个落盘文件的写入权。非激活 router
@@ -64,14 +86,20 @@ where
             .as_deref()
             .is_some_and(|active| active != router_id)
         {
+            // 非激活 router 不发布 Live，但仍要把自己的投影目录写回 DB，
+            // 保证切换激活后 V2 编译与投影使用同一模型源。
+            let artifact = build_projection_artifact(db, &router_id)?;
+            write_projected_catalog_to_router(db, &router_id, &artifact)?;
             continue;
         }
-        projections.push(ensure_projection_with_publisher(
-            db,
-            &router_id,
-            false,
-            |artifact| publish(artifact),
-        )?);
+        let status = ensure_projection_with_publisher(db, &router_id, false, |artifact| {
+            publish(artifact, &provider_context)
+        })?;
+        if status.state == ProjectionState::Ready {
+            let artifact = build_projection_artifact(db, &router_id)?;
+            write_projected_catalog_to_router(db, &router_id, &artifact)?;
+        }
+        projections.push(status);
     }
     Ok(CodexProviderMutationOutcome { projections })
 }
@@ -603,16 +631,14 @@ mod tests {
             .expect("set active profile");
 
         let published = RefCell::new(Vec::new());
-        apply_codex_provider_mutation_with_publisher(
-            &db,
-            target("openai_responses"),
-            |artifact| {
-                published.borrow_mut().push(artifact.router_provider_id.clone());
-                Ok(ProjectionReadBack::verified(
-                    artifact.dependency_fingerprint.clone(),
-                ))
-            },
-        )
+        apply_codex_provider_mutation_with_publisher(&db, target("openai_responses"), |artifact| {
+            published
+                .borrow_mut()
+                .push(artifact.router_provider_id.clone());
+            Ok(ProjectionReadBack::verified(
+                artifact.dependency_fingerprint.clone(),
+            ))
+        })
         .expect("apply shared provider mutation");
 
         assert_eq!(
