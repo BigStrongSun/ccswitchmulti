@@ -6008,6 +6008,24 @@ fn prepare_codex_config_text_with_model_catalog_impl(
 pub(crate) fn publish_codex_multirouter_projection(
     projection_settings: &Value,
 ) -> Result<crate::codex_multirouter::projection::ProjectionReadBack, AppError> {
+    publish_codex_multirouter_projection_impl(projection_settings, None)
+}
+
+/// Publish a Provider-derived projection using a classification snapshot from
+/// the same database boundary. This is the production entry point for schema-v2
+/// MultiRouter publication; Router records never persist this derived context.
+pub(crate) fn publish_codex_multirouter_projection_for_database(
+    db: &crate::database::Database,
+    projection_settings: &Value,
+) -> Result<crate::codex_multirouter::projection::ProjectionReadBack, AppError> {
+    let provider_context = codex_provider_classification_context(db)?;
+    publish_codex_multirouter_projection_impl(projection_settings, Some(&provider_context))
+}
+
+fn publish_codex_multirouter_projection_impl(
+    projection_settings: &Value,
+    provider_context: Option<&ProviderClassificationContext>,
+) -> Result<crate::codex_multirouter::projection::ProjectionReadBack, AppError> {
     let _expected_fingerprint = projection_settings
         .pointer("/codexRoutingProjection/dependencyFingerprint")
         .and_then(Value::as_str)
@@ -6019,18 +6037,28 @@ pub(crate) fn publish_codex_multirouter_projection(
             )
         })?;
     let live_config = read_codex_config_text()?;
-    let prepared = prepare_codex_config_text_with_model_catalog_without_provider_context(
+    let prepared = prepare_codex_config_text_with_model_catalog_impl(
         projection_settings,
         &live_config,
         CodexCatalogToolProfile::NativeResponses,
+        provider_context,
     )?;
     write_codex_live_config_atomic(Some(&prepared))?;
 
-    read_back_codex_multirouter_projection(projection_settings)
+    read_back_codex_multirouter_projection_impl(projection_settings, provider_context)
 }
 
-pub(crate) fn read_back_codex_multirouter_projection(
+pub(crate) fn read_back_codex_multirouter_projection_for_database(
+    db: &crate::database::Database,
     projection_settings: &Value,
+) -> Result<crate::codex_multirouter::projection::ProjectionReadBack, AppError> {
+    let provider_context = codex_provider_classification_context(db)?;
+    read_back_codex_multirouter_projection_impl(projection_settings, Some(&provider_context))
+}
+
+fn read_back_codex_multirouter_projection_impl(
+    projection_settings: &Value,
+    provider_context: Option<&ProviderClassificationContext>,
 ) -> Result<crate::codex_multirouter::projection::ProjectionReadBack, AppError> {
     let expected_fingerprint = projection_settings
         .pointer("/codexRoutingProjection/dependencyFingerprint")
@@ -6067,9 +6095,10 @@ pub(crate) fn read_back_codex_multirouter_projection(
     let cache_verified = read_json_file_if_exists(&get_codex_models_cache_path())?
         .as_ref()
         .is_some_and(codex_models_cache_is_cc_switch_owned);
-    let agent_files_verified = verify_codex_subagent_role_files(projection_settings, None)?
-        .iter()
-        .all(|file| file.exists && file.content_matches);
+    let agent_files_verified =
+        verify_codex_subagent_role_files(projection_settings, provider_context)?
+            .iter()
+            .all(|file| file.exists && file.content_matches);
 
     Ok(crate::codex_multirouter::projection::ProjectionReadBack {
         dependency_fingerprint: read_fingerprint,
@@ -16192,6 +16221,81 @@ wire_api = "responses"
             catalog["ccSwitchRoutingDependencyFingerprint"],
             "fingerprint-v2"
         );
+    }
+
+    #[test]
+    #[serial]
+    fn database_projection_publish_uses_provider_catalog_for_mode_all_agent_roles() {
+        let _guard = TestHomeGuard::new();
+        let db = crate::database::Database::memory().expect("memory database");
+        let target = Provider::with_id(
+            "kimi".to_string(),
+            "Kimi".to_string(),
+            json!({
+                "base_url": "https://kimi.example/v1",
+                "modelCatalog": {"models": [{"model": "k3"}]}
+            }),
+            None,
+        );
+        db.save_provider("codex", &target)
+            .expect("save target provider");
+        write_codex_live_config_atomic(Some(
+            r#"model_provider = "codex_model_router_v2"
+
+[model_providers.codex_model_router_v2]
+base_url = "http://127.0.0.1:15721/v1"
+wire_api = "responses"
+"#,
+        ))
+        .expect("seed live config");
+        seed_codex_models_cache(json!([]));
+        let settings = json!({
+            "modelCatalog": {"models": [{
+                "model": "k3",
+                "upstreamModel": "k3",
+                "contextWindow": 262144,
+                "inputModalities": ["text"]
+            }]},
+            "codexRouting": {
+                "schemaVersion": 2,
+                "enabled": true,
+                "subagentVersion": "v2",
+                "subagentV2": {"schemaVersion": 1, "profiles": {"k3": {
+                    "model": "k3",
+                    "enabled": true,
+                    "questionnaire": {
+                        "taskStrengths": ["testing"],
+                        "optimization": "speed",
+                        "writeScope": "read_only",
+                        "preference": "eligible",
+                        "reasoningEffort": "auto"
+                    }
+                }}},
+                "routes": [{
+                    "id": "kimi-all",
+                    "enabled": true,
+                    "targetProviderId": "kimi",
+                    "modelSelection": {"mode": "all"},
+                    "matchPrefixes": [],
+                    "authPolicy": {"source": "provider_config"}
+                }]
+            },
+            "codexRoutingProjection": {
+                "dependencyFingerprint": "mode-all-provider-context"
+            }
+        });
+
+        let read_back = publish_codex_multirouter_projection_for_database(&db, &settings)
+            .expect("publish projection with Provider context");
+
+        assert!(read_back.agent_files_verified);
+        let role_path = get_codex_agents_dir().join("k3.toml");
+        assert!(
+            role_path.exists(),
+            "mode=all target model must generate a managed Agent role"
+        );
+        let role = std::fs::read_to_string(role_path).expect("read managed Agent role");
+        assert!(role.contains("model = \"k3\""));
     }
 
     #[test]

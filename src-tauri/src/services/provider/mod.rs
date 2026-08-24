@@ -5081,7 +5081,8 @@ impl ProviderService {
                 Ok(())
             },
             |artifact| {
-                crate::codex_config::publish_codex_multirouter_projection(
+                crate::codex_config::publish_codex_multirouter_projection_for_database(
+                    state.db.as_ref(),
                     &artifact.projection_settings,
                 )
                 .map_err(|error| error.to_string())

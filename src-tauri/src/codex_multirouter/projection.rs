@@ -118,8 +118,11 @@ pub fn ensure_codex_multirouter_projection(
         )));
     }
     ensure_projection_with_publisher(db, router_provider_id, force, |artifact| {
-        crate::codex_config::publish_codex_multirouter_projection(&artifact.projection_settings)
-            .map_err(|error| error.to_string())
+        crate::codex_config::publish_codex_multirouter_projection_for_database(
+            db,
+            &artifact.projection_settings,
+        )
+        .map_err(|error| error.to_string())
     })
 }
 
@@ -136,7 +139,8 @@ pub fn inspect_codex_multirouter_projection(
             Some("This Router is inactive; its shared live projection will be generated when activated"),
         ));
     }
-    match crate::codex_config::read_back_codex_multirouter_projection(
+    match crate::codex_config::read_back_codex_multirouter_projection_for_database(
+        db,
         &artifact.projection_settings,
     ) {
         Ok(read_back) if read_back.agrees_with(&artifact.dependency_fingerprint) => Ok(
