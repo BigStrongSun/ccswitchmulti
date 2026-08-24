@@ -4343,3 +4343,11 @@ supported in one streaming turn`。
 - Sub-Agent 同步不再把 `spawnAgentModels` 当第二份模型白名单：它只保存用户优先顺序，Rust compiler 保留仍可路由的显式顺序后，从 Provider 实时目录自动补满 Codex 前五候选窗口。Provider 保存时还会自动 reconcile 所有引用它的 V2 Router profile，新第三方模型生成默认关闭档案，已有问卷、覆盖与顺序不变；删除模型保留为 `unroutable`，不会静默删除用户配置。
 - 补审又发现停用 Router 原先被投影 affected-list 过滤，导致其 V2 Agent 档案不跟随 Provider。现在“需要 live 投影的启用 Router”和“需要数据库档案同步的所有 Router”使用两份集合：停用 Router 会更新档案但绝不发布当前运行文件；手工“同步目录”按钮降级为历史/异常中断后的修复入口。
 - 检索交叉验证继续采用 Codex 内置搜索和 Matrix WebSearch 两条独立链；TanStack Query 官方文档确认 `invalidateQueries` 会使匹配查询 stale，并重取 active observer。具体缺陷和行为结论以本地源码及 RED/GREEN 回归为准。最终验证：Rust `3349 passed / 0 failed / 6 ignored`；Vitest `146 files / 1197 tests`；`pnpm typecheck`、`pnpm build:renderer`、涉及文件 Prettier/rustfmt、严格 UTF-8 无 BOM 与 `git diff --check` 全部通过。本轮未发布、安装、重启或替换运行中的 CCSM。
+
+## 2026-08-24 Qwen Ultra 原生 Responses 映射缺口诊断
+
+- 截图对应任务 `01a032c7-1005-7242-9f9b-88c56e16d13d` 不是 V2 spawn 出来的子任务：rollout `thread_source=user`，但运行时启用了 `multi_agent_version=v2`。任务设置先成功应用 `qwen3.8 + medium`，再成功应用 `qwen3.8 + ultra`，因此本次失败不是 Provider 保存门禁拒绝，也不是模型目录没有刷新。
+- 数据库中的 Qwen Provider 已正确保存 `supportedEfforts=[low,medium,xhigh]`、`codexUltra={enabled:true,providerEffort:xhigh}`；live `cc-switch-model-catalog.json` 与 `models_cache.json` 也同时声明 `low,medium,xhigh,ultra`。现场代理日志确认请求路由到 Qwen 的 `openai_responses` 原生 `/v1/responses`，上游收到字面量 `max` 后返回 `400 Unexpected reasoning effort max; supported xhigh/medium/low`。
+- 根因在运行时协议分支：`apply_catalog_ultra_setting` 已建立内部 `max -> xhigh`，`resolve_subagent_reasoning_capability` 也会建立 `ultra -> xhigh`；但 `forwarder.rs` 仅在 Responses 转 Chat/Messages 时解析并应用 `CodexChatReasoningConfig`。原生 Responses 直通分支只调用 `apply_codex_request_upstream_model`，没有应用 capability effort map，于是 Codex 用来表示 Ultra 的 Provider 边界值 `max` 被原样发给只接受 `xhigh` 的 Qwen。
+- 影响范围不局限于 Sub-Agent：任何使用原生 Responses、开启 Ultra 且 `providerEffort` 不是字面量 `max` 的第三方模型都可能复现；V2 Sub-Agent 选择 Ultra 时会经过同一代理直通链，因此也受影响。修复应落在原生 Responses 请求归一化边界并增加 `max -> configured provider effort` 回归，不能把 Qwen 特判为 `max -> xhigh`。
+- 检索渠道：Codex 内置搜索命中 OpenAI Codex 官方 `turn_context.rs`、模型目录和 multi-agent reasoning 校验源码；Matrix WebSearch 独立搜索无结果后直接读取官方 GitHub raw 源码。官方源码确认模型切换/子任务会依据模型目录解析 effort；CCSM 特有的丢映射根因由本地数据库、rollout、live catalog/cache、代理日志和当前源码交叉验证。本轮仅诊断和记录，尚未实现修复、构建、安装或重启。
