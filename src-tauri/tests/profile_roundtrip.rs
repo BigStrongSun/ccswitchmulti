@@ -7,14 +7,13 @@ use std::fs;
 use serde_json::json;
 
 use cc_switch_lib::{
-    get_codex_config_path, write_codex_live_atomic, AppType, InstalledSkill, McpServer, McpService,
-    ProfilePayload, ProfileScope, ProfileService, Prompt, PromptService, Provider, ProviderService,
-    SkillApps, SkillService,
+    get_codex_config_path, AppType, InstalledSkill, McpServer, McpService, ProfilePayload,
+    ProfileScope, ProfileService, Prompt, PromptService, Provider, ProviderService, SkillApps,
+    SkillService,
 };
-
 #[path = "support.rs"]
 mod support;
-use support::{create_test_state, ensure_test_home, reset_test_fs, test_mutex};
+use support::{create_test_state, ensure_test_home, reset_test_fs, seed_codex_live, test_mutex};
 
 fn claude_provider(id: &str, token: &str) -> Provider {
     Provider::with_id(
@@ -771,31 +770,60 @@ async fn codex_profile_reapplies_same_multirouter_after_takeover_cleanup() {
             "auth": { "OPENAI_API_KEY": "router-key" },
             "config": "model = \"gpt-visible\"\n",
             "codexRouting": {
+                "schemaVersion": 2,
                 "enabled": true,
                 "routes": [{
                     "id": "route-a",
                     "enabled": true,
-                    "match": { "models": ["gpt-visible"] },
-                    "upstream": {
-                        "baseUrl": "https://example.test/v1",
-                        "apiFormat": "openai_responses",
-                        "apiKey": "route-key"
-                    }
+                    "targetProviderId": "upstream",
+                    "modelSelection": { "mode": "include", "models": ["gpt-visible"] },
+                    "authPolicy": { "source": "provider_config" }
                 }]
             }
         }),
         None,
     );
     router.category = Some("custom".to_string());
+    let upstream = Provider::with_id(
+        "upstream".to_string(),
+        "Example Upstream".to_string(),
+        json!({
+            "auth": { "OPENAI_API_KEY": "route-key" },
+            "config": "model = \"gpt-visible\"\n",
+            "modelCatalog": {
+                "models": [{
+                    "model": "gpt-visible",
+                    "apiFormat": "openai_responses"
+                }]
+            }
+        }),
+        None,
+    );
+    state
+        .db
+        .save_provider(AppType::Codex.as_str(), &upstream)
+        .expect("save upstream provider");
     state
         .db
         .save_provider(AppType::Codex.as_str(), &router)
         .expect("save router");
-    write_codex_live_atomic(
+    seed_codex_live(
         &json!({ "OPENAI_API_KEY": "native-key" }),
         Some("model = \"gpt-visible\"\n"),
+    );
+    let codex_dir = get_codex_config_path()
+        .parent()
+        .expect("Codex config parent")
+        .to_path_buf();
+    fs::write(
+        codex_dir.join("models_cache.json"),
+        serde_json::to_vec(&json!({
+            "client_version": "0.140.0",
+            "models": [{ "slug": "gpt-visible" }]
+        }))
+        .expect("serialize Codex models cache"),
     )
-    .expect("seed Codex live");
+    .expect("seed Codex models cache");
 
     ProviderService::switch(&state, AppType::Codex, "router")
         .expect("switch to router and enable initial takeover");

@@ -291,6 +291,14 @@ fn sort_json_keys(value: &Value) -> Value {
 }
 
 /// 写入 JSON 配置文件并返回实际写入的字节。
+pub(crate) fn serialize_json_file_contents<T: Serialize>(data: &T) -> Result<Vec<u8>, AppError> {
+    let value = serde_json::to_value(data).map_err(|e| AppError::JsonSerialize { source: e })?;
+    let sorted_value = sort_json_keys(&value);
+    let json = serde_json::to_string_pretty(&sorted_value)
+        .map_err(|e| AppError::JsonSerialize { source: e })?;
+    Ok(json.into_bytes())
+}
+
 pub fn write_json_file_with_contents<T: Serialize>(
     path: &Path,
     data: &T,
@@ -300,12 +308,7 @@ pub fn write_json_file_with_contents<T: Serialize>(
         fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
     }
 
-    let value = serde_json::to_value(data).map_err(|e| AppError::JsonSerialize { source: e })?;
-    let sorted_value = sort_json_keys(&value);
-    let json = serde_json::to_string_pretty(&sorted_value)
-        .map_err(|e| AppError::JsonSerialize { source: e })?;
-
-    let contents = json.into_bytes();
+    let contents = serialize_json_file_contents(data)?;
     atomic_write(path, &contents)?;
     Ok(contents)
 }

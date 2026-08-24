@@ -206,7 +206,7 @@ fn projection_setting_key(router_provider_id: &str) -> String {
     format!("{PROJECTION_SETTING_PREFIX}{router_provider_id}")
 }
 
-fn build_projection_artifact(
+pub(crate) fn build_projection_artifact(
     db: &Database,
     router_provider_id: &str,
 ) -> Result<CodexRoutingProjectionArtifact, AppError> {

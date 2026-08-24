@@ -58,6 +58,21 @@ pub fn reset_test_fs() {
     let _ = update_settings(AppSettings::default());
 }
 
+/// 仅为集成测试准备 Codex live 文件；生产 raw writer 保持 crate-private。
+#[allow(dead_code)]
+pub fn seed_codex_live(auth: &serde_json::Value, config: Option<&str>) {
+    let auth_path = cc_switch_lib::get_codex_auth_path();
+    let config_path = cc_switch_lib::get_codex_config_path();
+    if let Some(parent) = auth_path.parent() {
+        std::fs::create_dir_all(parent).expect("create Codex config directory");
+    }
+    let auth_bytes = serde_json::to_vec_pretty(auth).expect("serialize Codex auth");
+    std::fs::write(&auth_path, auth_bytes).expect("seed Codex auth");
+    if let Some(config) = config {
+        std::fs::write(&config_path, config).expect("seed Codex config");
+    }
+}
+
 #[allow(dead_code)]
 pub fn enable_codex_official_auth_preservation() {
     update_settings(AppSettings {

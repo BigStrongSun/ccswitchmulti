@@ -86,9 +86,7 @@ pub fn classify_codex_multirouter_auth_facade(
             continue;
         }
         has_enabled_route = true;
-        let source = route
-            .pointer("/upstream/auth/source")
-            .and_then(JsonValue::as_str);
+        let source = codex_route_auth_source(route);
         match source {
             Some("native_codex_auth") => needs_native_auth = true,
             Some("account_pool") => match pool_policy {
@@ -112,6 +110,18 @@ pub fn classify_codex_multirouter_auth_facade(
     } else {
         CodexMultiRouterAuthFacade::FullyManaged
     }
+}
+
+/// Read the authentication source from both legacy and v2 route shapes.
+pub(crate) fn codex_route_auth_source(route: &JsonValue) -> Option<&str> {
+    let upstream = route.get("upstream").unwrap_or(route);
+    let auth = upstream
+        .get("auth")
+        .or_else(|| route.get("auth"))
+        .or_else(|| route.get("authPolicy"))
+        .or_else(|| route.get("auth_policy"))
+        .unwrap_or(upstream);
+    auth.get("source").and_then(JsonValue::as_str)
 }
 
 /// 判断 route 是否由 ChatGPT Codex 官方 backend 提供原生能力。

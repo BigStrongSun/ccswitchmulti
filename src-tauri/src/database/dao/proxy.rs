@@ -812,6 +812,19 @@ impl Database {
         app_type: &str,
         config_json: &str,
     ) -> Result<(), AppError> {
+        self.save_live_backup_with_receipt(app_type, config_json)
+            .await
+            .map(|_| ())
+    }
+
+    /// Save a Live backup and return the exact row committed by this write.
+    /// The timestamp is generated once here and carried to callers instead of
+    /// being reread later as an ownership proof.
+    pub async fn save_live_backup_with_receipt(
+        &self,
+        app_type: &str,
+        config_json: &str,
+    ) -> Result<LiveBackup, AppError> {
         let conn = lock_conn!(self.conn);
         let now = chrono::Utc::now().to_rfc3339();
 
@@ -823,7 +836,11 @@ impl Database {
         .map_err(|e| AppError::Database(e.to_string()))?;
 
         log::info!("已备份 {app_type} Live 配置");
-        Ok(())
+        Ok(LiveBackup {
+            app_type: app_type.to_string(),
+            original_config: config_json.to_string(),
+            backed_up_at: now,
+        })
     }
 
     /// 检查是否存在任意 Live 配置备份

@@ -1,15 +1,14 @@
 use serde_json::json;
 
 use cc_switch_lib::{
-    get_claude_settings_path, read_json_file, write_codex_live_atomic, AppError, AppType, McpApps,
-    McpServer, MultiAppConfig, Provider, ProviderMeta, ProviderService,
+    get_claude_settings_path, read_json_file, AppError, AppType, McpApps, McpServer,
+    MultiAppConfig, Provider, ProviderMeta, ProviderService,
 };
-
 #[path = "support.rs"]
 mod support;
 use support::{
     create_test_state, create_test_state_with_config, enable_codex_official_auth_preservation,
-    ensure_test_home, reset_test_fs, test_mutex,
+    ensure_test_home, reset_test_fs, seed_codex_live, test_mutex,
 };
 
 fn sanitize_provider_name(name: &str) -> String {
@@ -108,8 +107,7 @@ fn provider_service_switch_codex_updates_live_and_config() {
 type = "stdio"
 command = "echo"
 "#;
-    write_codex_live_atomic(&legacy_auth, Some(legacy_config))
-        .expect("seed existing codex live config");
+    seed_codex_live(&legacy_auth, Some(legacy_config));
 
     let mut initial_config = MultiAppConfig::default();
     {
@@ -247,6 +245,68 @@ command = "say"
 }
 
 #[test]
+fn provider_service_switch_codex_missing_config_returns_error_and_preserves_state() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let old_auth = json!({ "OPENAI_API_KEY": "old-key" });
+    let old_config = "model_provider = \"old\"\n[model_providers.old]\nname = \"Old\"\n";
+    seed_codex_live(&old_auth, Some(old_config));
+
+    let mut initial_config = MultiAppConfig::default();
+    {
+        let manager = initial_config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "old-provider".to_string();
+        manager.providers.insert(
+            "old-provider".to_string(),
+            Provider::with_id(
+                "old-provider".to_string(),
+                "Old".to_string(),
+                json!({ "auth": old_auth, "config": old_config }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "missing-config".to_string(),
+            Provider::with_id(
+                "missing-config".to_string(),
+                "Missing Config".to_string(),
+                json!({ "auth": { "OPENAI_API_KEY": "new-key" } }),
+                None,
+            ),
+        );
+    }
+
+    let state = create_test_state_with_config(&initial_config).expect("create test state");
+    let error = ProviderService::switch(&state, AppType::Codex, "missing-config")
+        .expect_err("missing config must fail before switch mutation");
+    assert!(
+        error.to_string().contains("config"),
+        "error must identify missing config, got {error}"
+    );
+    assert_eq!(
+        state
+            .db
+            .get_current_provider(AppType::Codex.as_str())
+            .expect("read database current provider")
+            .as_deref(),
+        Some("old-provider")
+    );
+    assert_eq!(
+        std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read live config"),
+        old_config
+    );
+    assert_eq!(
+        read_json_file::<serde_json::Value>(&cc_switch_lib::get_codex_auth_path())
+            .expect("read live auth"),
+        old_auth
+    );
+}
+
+#[test]
 fn provider_service_switch_codex_preserves_user_model_provider_id_after_migration() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
@@ -262,8 +322,7 @@ base_url = "https://rightcode.example/v1"
 wire_api = "responses"
 requires_openai_auth = true
 "#;
-    write_codex_live_atomic(&legacy_auth, Some(legacy_config))
-        .expect("seed existing codex live config");
+    seed_codex_live(&legacy_auth, Some(legacy_config));
 
     let mut initial_config = MultiAppConfig::default();
     {
@@ -378,8 +437,7 @@ base_url = "https://rightcode.example/v1"
 wire_api = "responses"
 requires_openai_auth = true
 "#;
-    write_codex_live_atomic(&live_auth, Some(legacy_config))
-        .expect("seed existing Codex OAuth live config");
+    seed_codex_live(&live_auth, Some(legacy_config));
 
     let bridge_provider = Provider::with_id(
         "bridge-provider".to_string(),
@@ -549,8 +607,7 @@ model = "gpt-5"
 name = "OpenAI"
 wire_api = "responses"
 "#;
-    write_codex_live_atomic(&oauth_auth, Some(official_config))
-        .expect("seed official Codex OAuth live config");
+    seed_codex_live(&oauth_auth, Some(official_config));
 
     let deepseek_provider_config = r#"model_provider = "deepseek"
 model = "deepseek-chat"
@@ -736,8 +793,7 @@ base_url = "https://rightcode.example/v1"
 wire_api = "responses"
 requires_openai_auth = true
 "#;
-    write_codex_live_atomic(&live_auth, Some(legacy_config))
-        .expect("seed existing Codex OAuth live config");
+    seed_codex_live(&live_auth, Some(legacy_config));
 
     let mut initial_config = MultiAppConfig::default();
     {
@@ -820,7 +876,7 @@ fn provider_service_switch_codex_supports_official_login_provider_without_auth_w
             "account_id": "acct-official"
         }
     });
-    write_codex_live_atomic(&live_auth, Some("")).expect("seed official OAuth live config");
+    seed_codex_live(&live_auth, Some(""));
 
     let mut initial_config = MultiAppConfig::default();
     {
@@ -916,8 +972,7 @@ requires_openai_auth = true
     // Live key intentionally differs from the DB row so the assertion below
     // proves the backfill preserved the live copy before it was deleted.
     let live_auth = json!({ "OPENAI_API_KEY": "stale-live-key" });
-    write_codex_live_atomic(&live_auth, Some(third_party_config))
-        .expect("seed third-party live config");
+    seed_codex_live(&live_auth, Some(third_party_config));
 
     let mut initial_config = MultiAppConfig::default();
     {
@@ -996,7 +1051,7 @@ fn provider_service_reswitch_current_official_keeps_live_auth() {
     // cleanup must not run either: without a fresh DB copy of whatever sits
     // in live auth.json, deleting it would destroy the only copy.
     let live_auth = json!({ "OPENAI_API_KEY": "residue-key" });
-    write_codex_live_atomic(&live_auth, Some("")).expect("seed live config");
+    seed_codex_live(&live_auth, Some(""));
 
     let mut initial_config = MultiAppConfig::default();
     {
@@ -1068,7 +1123,7 @@ fn reapply_codex_official_live_resyncs_mcp_servers() {
         "OPENAI_API_KEY": null,
         "tokens": { "access_token": "official-oauth-token", "account_id": "acct" }
     });
-    write_codex_live_atomic(&live_auth, Some("")).expect("seed official live auth");
+    seed_codex_live(&live_auth, Some(""));
 
     let mut initial_config = MultiAppConfig::default();
     {
@@ -1167,7 +1222,7 @@ fn reapply_codex_official_live_projects_mcp_despite_broken_claude_json() {
         "OPENAI_API_KEY": null,
         "tokens": { "access_token": "official-oauth-token", "account_id": "acct" }
     });
-    write_codex_live_atomic(&live_auth, Some("")).expect("seed official live auth");
+    seed_codex_live(&live_auth, Some(""));
 
     let mut initial_config = MultiAppConfig::default();
     {
@@ -1267,8 +1322,7 @@ fn switch_codex_projects_mcp_despite_broken_claude_json() {
     reset_test_fs();
     let _home = ensure_test_home();
 
-    write_codex_live_atomic(&json!({ "OPENAI_API_KEY": "sk-old" }), Some(""))
-        .expect("seed codex live");
+    seed_codex_live(&json!({ "OPENAI_API_KEY": "sk-old" }), Some(""));
 
     let mut config = MultiAppConfig::default();
     {
@@ -1349,7 +1403,7 @@ fn sync_all_enabled_reports_broken_app_but_projects_the_rest() {
     reset_test_fs();
     let _home = ensure_test_home();
 
-    write_codex_live_atomic(&json!({ "OPENAI_API_KEY": "sk" }), Some("")).expect("seed codex live");
+    seed_codex_live(&json!({ "OPENAI_API_KEY": "sk" }), Some(""));
 
     let mut config = MultiAppConfig::default();
     let servers = config.mcp.servers.get_or_insert_with(Default::default);
@@ -1413,7 +1467,7 @@ fn provider_service_switch_codex_official_accounts_write_auth_json() {
             "account_id": "acct-a"
         }
     });
-    write_codex_live_atomic(&live_auth_a, Some("")).expect("seed official account A live auth");
+    seed_codex_live(&live_auth_a, Some(""));
 
     let mut official_a = Provider::with_id(
         "official-a".to_string(),
@@ -1508,8 +1562,7 @@ base_url = "https://rightcode.example/v1"
 wire_api = "responses"
 requires_openai_auth = true
 "#;
-    write_codex_live_atomic(&legacy_auth, Some(provider_a_config))
-        .expect("seed existing codex live config");
+    seed_codex_live(&legacy_auth, Some(provider_a_config));
 
     let mut initial_config = MultiAppConfig::default();
     {
@@ -1750,8 +1803,7 @@ base_url = "http://127.0.0.1:15721/v1"
 wire_api = "responses"
 experimental_bearer_token = "PROXY_MANAGED"
 "#;
-    write_codex_live_atomic(&oauth_auth, Some(proxy_live_config))
-        .expect("seed taken-over Codex live config");
+    seed_codex_live(&oauth_auth, Some(proxy_live_config));
 
     let mut config = MultiAppConfig::default();
     {
@@ -2466,8 +2518,7 @@ command = "echo"
 [mcp.servers.ghost-legacy]
 command = "ghost-cmd"
 "#;
-    write_codex_live_atomic(&json!({ "OPENAI_API_KEY": "sk-a" }), Some(live_config))
-        .expect("seed codex live config");
+    seed_codex_live(&json!({ "OPENAI_API_KEY": "sk-a" }), Some(live_config));
 
     let mut config = MultiAppConfig::default();
     {
@@ -2563,12 +2614,12 @@ command = "ghost-cmd"
         "provider A's bearer token must not leak into B's live, got: {live_after}"
     );
     assert!(
-        !live_after.contains("mcp_servers"),
-        "no DB-enabled MCP servers, so live must not resurrect stale entries, got: {live_after}"
+        live_after.contains("[mcp_servers.echo]") && live_after.contains("command = \"echo\""),
+        "live-only MCP entries must survive provider switching, got: {live_after}"
     );
     assert!(
-        !live_after.contains("ghost-legacy"),
-        "the legacy [mcp.servers] orphan must not propagate to B's live, got: {live_after}"
+        live_after.contains("ghost-legacy") && !live_after.contains("[mcp.servers]"),
+        "legacy live-only MCP entries must migrate to [mcp_servers], got: {live_after}"
     );
     assert!(
         !live_after.contains("wire_api = \"chat\""),
@@ -2628,8 +2679,7 @@ name = "A Prov"
 base_url = "https://a.example/v1"
 wire_api = "responses"
 "#;
-    write_codex_live_atomic(&json!({ "OPENAI_API_KEY": "sk-a" }), Some(live_config))
-        .expect("seed codex live config");
+    seed_codex_live(&json!({ "OPENAI_API_KEY": "sk-a" }), Some(live_config));
 
     let mut config = MultiAppConfig::default();
     {

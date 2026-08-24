@@ -732,8 +732,48 @@ pub(crate) fn build_effective_settings_with_common_config(
     app_type: &AppType,
     provider: &Provider,
 ) -> Result<Value, AppError> {
+    build_effective_settings_with_common_config_inner(db, app_type, provider, true)
+}
+
+/// Build settings for a live-backup refresh with the same MCP ownership rules
+/// as every other Codex live write. Provider snapshots are not authoritative
+/// for MCP; only the shared/common definition may be materialized, while the
+/// existing live backup supplies user-owned entries during the merge.
+pub(crate) fn build_effective_settings_with_common_config_for_backup(
+    db: &Database,
+    app_type: &AppType,
+    provider: &Provider,
+) -> Result<Value, AppError> {
+    build_effective_settings_with_common_config_inner(db, app_type, provider, true)
+}
+
+fn build_effective_settings_with_common_config_inner(
+    db: &Database,
+    app_type: &AppType,
+    provider: &Provider,
+    strip_provider_mcp: bool,
+) -> Result<Value, AppError> {
     let snippet = db.get_config_snippet(app_type.as_str())?;
     let mut effective_settings = provider.settings_config.clone();
+
+    // A provider snapshot is not the owner of its `[mcp_servers]` tables:
+    // those entries are reconciled from the shared MCP database.  Strip the
+    // snapshot copy before applying the common snippet so stale provider MCP
+    // entries cannot be resurrected, while MCP entries declared by the
+    // common snippet are still allowed to materialize in the effective
+    // settings.  The provider record itself remains untouched.
+    if strip_provider_mcp && matches!(app_type, AppType::Codex) {
+        if let Some(config_text) = effective_settings
+            .get("config")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        {
+            let stripped = crate::codex_config::strip_codex_provider_mcp_tables(&config_text)?;
+            if let Some(obj) = effective_settings.as_object_mut() {
+                obj.insert("config".to_string(), Value::String(stripped));
+            }
+        }
+    }
 
     if provider_uses_common_config(app_type, provider, snippet.as_deref()) {
         if let Some(snippet_text) = snippet.as_deref() {
@@ -763,6 +803,14 @@ pub(crate) fn write_live_with_common_config(
     app_type: &AppType,
     provider: &Provider,
 ) -> Result<(), AppError> {
+    write_live_with_common_config_with_receipt(db, app_type, provider).map(|_| ())
+}
+
+pub(crate) fn write_live_with_common_config_with_receipt(
+    db: &Database,
+    app_type: &AppType,
+    provider: &Provider,
+) -> Result<Option<crate::codex_config::CodexProviderWriteReceipt>, AppError> {
     let mut effective_provider = provider.clone();
     effective_provider.settings_config =
         build_effective_settings_with_common_config(db, app_type, provider)?;
@@ -774,15 +822,51 @@ pub(crate) fn write_live_with_common_config(
             crate::claude_desktop_config::PROFILE_ID,
             effective_provider.id
         );
-        return Ok(());
+        return Ok(None);
     }
 
     if matches!(app_type, AppType::Codex) {
         let provider_context = crate::codex_config::codex_provider_classification_context(db)?;
-        return write_codex_live_snapshot(&effective_provider, Some(&provider_context));
+        // MultiRouter schema-v2 router 的 live 写入必须使用投影 settings（含 sortIndex
+        // 排序 + dependency fingerprint），而不是 router 的原始 settings_config：
+        // catalog 生成链（codex_catalog_model_specs → sort_codex_catalog_specs_for_picker）
+        // 依赖 modelCatalog 条目里的 sortIndex 决定展示顺序；router 原始 settings 的
+        // modelCatalog 是旧投影快照（无 sortIndex），会让 Codex 模型菜单按默认供应商
+        // 排序乱序展示。SSOT 恢复/启动接管等路径都经此写 live。
+        let is_v2_router = crate::codex_multirouter::schema::CodexRoutingDocument::parse(
+            effective_provider
+                .settings_config
+                .get("codexRouting")
+                .unwrap_or(&serde_json::Value::Null),
+        )
+        .map(|document| {
+            matches!(
+                document,
+                crate::codex_multirouter::schema::CodexRoutingDocument::V2(_)
+            )
+        })
+        .unwrap_or(false);
+        if is_v2_router {
+            let artifact = crate::codex_multirouter::projection::build_projection_artifact(
+                db,
+                &effective_provider.id,
+            )?;
+            let mut projected_provider = effective_provider.clone();
+            projected_provider.settings_config = artifact.projection_settings.clone();
+            return write_codex_live_snapshot_with_receipt(
+                &projected_provider,
+                Some(&provider_context),
+            )
+            .map(Some);
+        }
+        return write_codex_live_snapshot_with_receipt(
+            &effective_provider,
+            Some(&provider_context),
+        )
+        .map(Some);
     }
 
-    write_live_snapshot(app_type, &effective_provider)
+    write_live_snapshot(app_type, &effective_provider).map(|_| None)
 }
 
 /// 为 Codex live 写入构造配置：保留 DB 中的 `modelCatalog` 元数据，但只有菜单映射开启时才投射到 live。
@@ -809,10 +893,10 @@ fn codex_settings_for_live_projection(provider: &Provider) -> Value {
 /// 接管态切回 official 时，`disable_takeover` 已经先把接管前的 live 登录态恢复到
 /// `auth.json`。随后仍需要用目标 official provider 清理 router 字段、应用 common
 /// config 和统一会话设置，但不能再把 DB 中可能过期的 official OAuth 快照写回。
-pub(crate) fn write_codex_config_only_with_common_config(
+pub(crate) fn write_codex_config_only_with_common_config_with_receipt(
     db: &Database,
     provider: &Provider,
-) -> Result<(), AppError> {
+) -> Result<crate::codex_config::CodexProviderWriteReceipt, AppError> {
     let mut effective_provider = provider.clone();
     effective_provider.settings_config =
         build_effective_settings_with_common_config(db, &AppType::Codex, provider)?;
@@ -823,7 +907,7 @@ pub(crate) fn write_codex_config_only_with_common_config(
     let config_text = settings.get("config").and_then(|value| value.as_str());
 
     let provider_context = crate::codex_config::codex_provider_classification_context(db)?;
-    crate::codex_config::write_codex_provider_config_only_with_catalog_and_provider_context(
+    crate::codex_config::write_codex_provider_config_only_with_catalog_and_provider_context_with_receipt(
         &settings_for_live,
         effective_provider.category.as_deref(),
         config_text,
@@ -835,6 +919,10 @@ pub(crate) fn write_codex_config_only_with_common_config(
         ),
         &provider_context,
     )
+    .map(|projection| crate::codex_config::CodexProviderWriteReceipt {
+        projection,
+        auth_attempt: None,
+    })
 }
 
 pub(crate) fn strip_common_config_from_live_settings(
@@ -1288,6 +1376,13 @@ fn write_codex_live_snapshot(
     provider: &Provider,
     provider_context: Option<&crate::codex_config::ProviderClassificationContext>,
 ) -> Result<(), AppError> {
+    write_codex_live_snapshot_with_receipt(provider, provider_context).map(|_| ())
+}
+
+fn write_codex_live_snapshot_with_receipt(
+    provider: &Provider,
+    provider_context: Option<&crate::codex_config::ProviderClassificationContext>,
+) -> Result<crate::codex_config::CodexProviderWriteReceipt, AppError> {
     let settings_for_live = codex_settings_for_live_projection(provider);
     let obj = settings_for_live
         .as_object()
@@ -1304,7 +1399,7 @@ fn write_codex_live_snapshot(
     let profile = crate::proxy::providers::resolve_codex_catalog_tool_profile(provider);
 
     if let Some(provider_context) = provider_context {
-        crate::codex_config::write_codex_provider_live_with_catalog_and_provider_context(
+        crate::codex_config::write_codex_provider_live_with_catalog_and_provider_context_with_receipt(
             &settings_for_live,
             provider.category.as_deref(),
             auth,
@@ -1315,7 +1410,7 @@ fn write_codex_live_snapshot(
     } else {
         // `write_live_snapshot` is the legacy no-DB utility boundary. Normal provider switching
         // enters through `write_live_with_common_config` and always supplies current DB context.
-        crate::codex_config::write_codex_provider_live_with_catalog_without_provider_context(
+        crate::codex_config::write_codex_provider_live_with_catalog_without_provider_context_with_receipt(
             &settings_for_live,
             provider.category.as_deref(),
             auth,
