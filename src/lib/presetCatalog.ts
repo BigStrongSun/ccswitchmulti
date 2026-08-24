@@ -43,13 +43,17 @@ export async function loadPresetCatalog(
   return cache;
 }
 
-function entryContext(entry: Record<string, unknown> | undefined): number | undefined {
+function entryContext(
+  entry: Record<string, unknown> | undefined,
+): number | undefined {
   const limit = entry?.limit as Record<string, unknown> | undefined;
   const context = limit?.context;
   return typeof context === "number" && context > 0 ? context : undefined;
 }
 
-function entryPercent(entry: Record<string, unknown> | undefined): number | undefined {
+function entryPercent(
+  entry: Record<string, unknown> | undefined,
+): number | undefined {
   const limit = entry?.limit as Record<string, unknown> | undefined;
   const percent = limit?.effective_context_percent;
   return typeof percent === "number" && percent >= 1 && percent <= 100
@@ -57,11 +61,15 @@ function entryPercent(entry: Record<string, unknown> | undefined): number | unde
     : undefined;
 }
 
-function effectiveContext(entry: Record<string, unknown> | undefined): number | undefined {
+function effectiveContext(
+  entry: Record<string, unknown> | undefined,
+): number | undefined {
   const context = entryContext(entry);
   if (context === undefined) return undefined;
   const percent = entryPercent(entry);
-  return percent === undefined ? context : Math.floor((context * percent) / 100);
+  return percent === undefined
+    ? context
+    : Math.floor((context * percent) / 100);
 }
 
 function deepMerge(
@@ -114,7 +122,8 @@ export function resolvePresetCatalogEntry(
   if (plan) {
     const policy = bundle.plans[plan]?.[model];
     if (!policy) return undefined;
-    const policyBase = typeof policy.base_model === "string" ? policy.base_model : baseKey;
+    const policyBase =
+      typeof policy.base_model === "string" ? policy.base_model : baseKey;
     if (policyBase !== baseKey) return undefined;
     entry = deepMerge(entry, policy);
   }
@@ -148,7 +157,9 @@ export function resolvePresetCatalogContextWindow(
     const planEntry = bundle.plans[plan]?.[model];
     if (!planEntry) return undefined;
     const baseKey =
-      typeof planEntry.base_model === "string" ? planEntry.base_model : undefined;
+      typeof planEntry.base_model === "string"
+        ? planEntry.base_model
+        : undefined;
     const base = baseKey ? bundle.baseline[baseKey] : undefined;
     return base ? effectiveContext(deepMerge(base, planEntry)) : undefined;
   }

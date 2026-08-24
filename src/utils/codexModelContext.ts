@@ -30,9 +30,12 @@ const OPENAI_CODEX_PLAN = "openai-codex-plan";
 
 // 判断当前 provider 是否官方 Codex 订阅（→ 应用 openai-codex-plan 覆盖）。
 // 复用既有预设信号匹配：命中 "OpenAI Official"（chatgpt.com/codex）预设才算。
-function codexPlanForSource(source: CodexContextInferenceSource): string | undefined {
+function codexPlanForSource(
+  source: CodexContextInferenceSource,
+): string | undefined {
   const official = codexProviderPresets.find(
-    (preset) => preset.isOfficial && preset.websiteUrl.includes("chatgpt.com/codex"),
+    (preset) =>
+      preset.isOfficial && preset.websiteUrl.includes("chatgpt.com/codex"),
   );
   if (!official) return undefined;
   if (providerMatchesPreset(official.name, official.websiteUrl, source)) {

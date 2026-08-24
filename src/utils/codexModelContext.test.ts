@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 
 const resolveMock = vi.fn();
 vi.mock("@/lib/presetCatalog", () => ({
-  resolvePresetCatalogContextWindow: (...args: unknown[]) => resolveMock(...args),
+  resolvePresetCatalogContextWindow: (...args: unknown[]) =>
+    resolveMock(...args),
 }));
 
 import {

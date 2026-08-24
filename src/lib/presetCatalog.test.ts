@@ -79,16 +79,19 @@ describe("resolvePresetCatalogContextWindow", () => {
     const mod = await freshModule(bundle);
     await mod.loadPresetCatalog();
     // 272000 * 95 / 100 = 258400
-    expect(mod.resolvePresetCatalogContextWindow("gpt-5.5", "openai-codex-plan")).toBe(
-      258400,
-    );
+    expect(
+      mod.resolvePresetCatalogContextWindow("gpt-5.5", "openai-codex-plan"),
+    ).toBe(258400);
   });
 
   it("does not fall back to baseline when plan is requested but missing", async () => {
     const mod = await freshModule(bundle);
     await mod.loadPresetCatalog();
     expect(
-      mod.resolvePresetCatalogContextWindow("claude-sonnet-4-5", "openai-codex-plan"),
+      mod.resolvePresetCatalogContextWindow(
+        "claude-sonnet-4-5",
+        "openai-codex-plan",
+      ),
     ).toBeUndefined();
   });
 
@@ -96,7 +99,9 @@ describe("resolvePresetCatalogContextWindow", () => {
     const mod = await freshModule(bundle);
     await mod.loadPresetCatalog();
     expect(mod.resolvePresetCatalogContextWindow("gpt-5.5")).toBe(1050000);
-    expect(mod.resolvePresetCatalogContextWindow("claude-sonnet-4-5")).toBe(200000);
+    expect(mod.resolvePresetCatalogContextWindow("claude-sonnet-4-5")).toBe(
+      200000,
+    );
     expect(mod.resolvePresetCatalogContextWindow("gpt-9.9")).toBeUndefined();
   });
 
