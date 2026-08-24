@@ -548,6 +548,9 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     ).not.toBeInTheDocument();
     expect(screen.getByText(/旧版默认路由已停用/)).toBeInTheDocument();
     expect(screen.getByText(/旧配置指向.*DeepSeek Relay/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/保存设置和路由规则时会保留该兼容字段/),
+    ).toBeInTheDocument();
     expect(screen.queryByText(legacyRouteId)).not.toBeInTheDocument();
   });
 
@@ -3787,7 +3790,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     expect(readCodexRouting(updated)?.routes).toEqual(
       readCodexRouting(savedPlan)?.routes,
     );
-    expect(readCodexRouting(updated)?.defaultRouteId).toBeUndefined();
+    expect(readCodexRouting(updated)?.defaultRouteId).toBe("codex-qwen");
     expect(updated.settingsConfig.hostedTools).toEqual({
       webSearch: { enabled: false },
       imageGeneration: { enabled: true },

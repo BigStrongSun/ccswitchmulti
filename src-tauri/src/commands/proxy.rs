@@ -1781,6 +1781,20 @@ mod codex_router_log_diagnostics_tests {
     }
 
     #[test]
+    fn legacy_default_route_warning_is_secret_free_and_explicitly_fail_closed() {
+        let warning = codex_legacy_default_route_warning(Some("legacy-route"))
+            .expect("legacy default route should produce a warning");
+
+        assert!(warning.starts_with("default_route_legacy_ignored:"));
+        assert!(warning.contains("请求会被拒绝"));
+        assert!(warning.contains("legacy-route"));
+        assert!(!warning.contains("OPENAI_API_KEY"));
+        assert!(!warning.contains("https://"));
+        assert_eq!(codex_legacy_default_route_warning(Some("  ")), None);
+        assert_eq!(codex_legacy_default_route_warning(None), None);
+    }
+
+    #[test]
     fn enabled_websocket_transport_keeps_probe_failure_visible() {
         let (status, detail) =
             codex_websocket_probe_result(Some(true), Err("probe failed".to_string()));
