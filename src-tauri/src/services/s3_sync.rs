@@ -65,7 +65,13 @@ pub async fn upload(
     // 预设表是可选 artifact：本地存在才上传（manifest 已登记其 hash/size）。
     if let Some(preset_bytes) = &snapshot.preset_table {
         let preset_key = s3_key(settings, REMOTE_PRESET_TABLE);
-        s3::put_object(&creds, &preset_key, preset_bytes.clone(), "application/json").await?;
+        s3::put_object(
+            &creds,
+            &preset_key,
+            preset_bytes.clone(),
+            "application/json",
+        )
+        .await?;
     }
 
     let manifest_key = s3_key(settings, REMOTE_MANIFEST);
@@ -129,10 +135,7 @@ pub async fn download(
 
     // 预设表是可选 artifact：远端 manifest 没有时跳过（保留本地现有文件）。
     let preset_table = if manifest.artifacts.contains_key(REMOTE_PRESET_TABLE) {
-        Some(
-            download_and_verify(settings, &creds, REMOTE_PRESET_TABLE, &manifest.artifacts)
-                .await?,
-        )
+        Some(download_and_verify(settings, &creds, REMOTE_PRESET_TABLE, &manifest.artifacts).await?)
     } else {
         None
     };

@@ -81,8 +81,7 @@ pub async fn upload(
 
     // 预设表是可选 artifact：本地存在才上传（manifest 已登记其 hash/size）。
     if let Some(preset_bytes) = &snapshot.preset_table {
-        let preset_url =
-            remote_file_url(settings, RemoteLayout::Current, REMOTE_PRESET_TABLE)?;
+        let preset_url = remote_file_url(settings, RemoteLayout::Current, REMOTE_PRESET_TABLE)?;
         put_bytes(&preset_url, &auth, preset_bytes.clone(), "application/json").await?;
     }
 
@@ -151,7 +150,11 @@ pub async fn download(
     .await?;
 
     // 预设表是可选 artifact：远端 manifest 没有时跳过（保留本地现有文件）。
-    let preset_table = if snapshot.manifest.artifacts.contains_key(REMOTE_PRESET_TABLE) {
+    let preset_table = if snapshot
+        .manifest
+        .artifacts
+        .contains_key(REMOTE_PRESET_TABLE)
+    {
         Some(
             download_and_verify(
                 settings,

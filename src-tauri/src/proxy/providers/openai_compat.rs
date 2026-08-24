@@ -2673,7 +2673,9 @@ mod tests {
         );
         assert!(item.get("summary").is_none());
         assert!(item.get("encrypted_content").is_none());
-        assert!(item.get("internal_chat_message_metadata_passthrough").is_none());
+        assert!(item
+            .get("internal_chat_message_metadata_passthrough")
+            .is_none());
         // 非 reasoning item 不受影响
         assert_eq!(input[1]["role"], "user");
     }
@@ -2771,7 +2773,10 @@ mod tests {
         let normalized = normalize_codex_oauth_responses_request(body, false);
         let item = &normalized["input"][0];
 
-        assert_eq!(item["summary"][0]["text"], "Summarizing final handoff details");
+        assert_eq!(
+            item["summary"][0]["text"],
+            "Summarizing final handoff details"
+        );
         assert_eq!(
             item["encrypted_content"],
             "gAAAAAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
