@@ -7100,6 +7100,38 @@ impl ProviderService {
 
     /// 同步统一供应商到各应用
     pub fn sync_universal_to_apps(state: &AppState, id: &str) -> Result<bool, AppError> {
+        Self::sync_universal_to_apps_with_codex_profiles(state, id, None, &[])
+    }
+
+    pub(crate) fn prepare_universal_codex_provider(
+        state: &AppState,
+        id: &str,
+    ) -> Result<Option<Provider>, AppError> {
+        let provider = state
+            .db
+            .get_universal_provider(id)?
+            .ok_or_else(|| AppError::Message(format!("统一供应商 {id} 不存在")))?;
+
+        let Some(mut codex_provider) = provider.to_codex_provider() else {
+            return Ok(None);
+        };
+        if let Some(existing) = state
+            .db
+            .get_provider_by_id(&codex_provider.id, AppType::Codex.as_str())?
+        {
+            let mut merged = existing.settings_config.clone();
+            Self::merge_json(&mut merged, &codex_provider.settings_config);
+            codex_provider.settings_config = merged;
+        }
+        Ok(Some(codex_provider))
+    }
+
+    pub(crate) fn sync_universal_to_apps_with_codex_profiles(
+        state: &AppState,
+        id: &str,
+        prepared_codex_provider: Option<Provider>,
+        protocol_profiles: &[ProtocolCompatibilityRecord],
+    ) -> Result<bool, AppError> {
         let provider = state
             .db
             .get_universal_provider(id)?
@@ -7121,15 +7153,33 @@ impl ProviderService {
         }
 
         // 同步到 Codex
-        if let Some(mut codex_provider) = provider.to_codex_provider() {
-            // 合并已有配置
-            if let Some(existing) = state.db.get_provider_by_id(&codex_provider.id, "codex")? {
-                let mut merged = existing.settings_config.clone();
-                Self::merge_json(&mut merged, &codex_provider.settings_config);
-                codex_provider.settings_config = merged;
-            }
-            Self::persist_provider_mutation(state, &AppType::Codex, &codex_provider, &[])?;
+        if provider.apps.codex {
+            let codex_provider = match prepared_codex_provider {
+                Some(codex_provider) => {
+                    let expected_id = format!("universal-codex-{id}");
+                    if codex_provider.id != expected_id {
+                        return Err(AppError::Message(format!(
+                            "统一供应商 Codex 子项不匹配：期望 {expected_id}，实际 {}",
+                            codex_provider.id
+                        )));
+                    }
+                    codex_provider
+                }
+                None => Self::prepare_universal_codex_provider(state, id)?
+                    .ok_or_else(|| AppError::Message("统一供应商 Codex 子项缺失".to_string()))?,
+            };
+            Self::persist_provider_mutation(
+                state,
+                &AppType::Codex,
+                &codex_provider,
+                protocol_profiles,
+            )?;
         } else {
+            if prepared_codex_provider.is_some() || !protocol_profiles.is_empty() {
+                return Err(AppError::Message(
+                    "统一供应商未启用 Codex，不能应用协议探测结果".to_string(),
+                ));
+            }
             let codex_id = format!("universal-codex-{id}");
             if state
                 .db

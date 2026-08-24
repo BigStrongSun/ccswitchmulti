@@ -1251,14 +1251,49 @@ pub fn delete_universal_provider(
     Ok(result)
 }
 
+async fn sync_universal_provider_internal_with_probe<F, Fut>(
+    state: &AppState,
+    id: &str,
+    probe: F,
+) -> Result<bool, AppError>
+where
+    F: FnOnce(Provider) -> Fut,
+    Fut: Future<
+        Output = Result<
+            (
+                Provider,
+                Vec<crate::protocol_compatibility::ProtocolCompatibilityRecord>,
+            ),
+            String,
+        >,
+    >,
+{
+    let Some(provider) = ProviderService::prepare_universal_codex_provider(state, id)? else {
+        return ProviderService::sync_universal_to_apps(state, id);
+    };
+    let (provider, profiles) = resolve_automatic_probe_outcome(provider, probe).await?;
+    ProviderService::sync_universal_to_apps_with_codex_profiles(
+        state,
+        id,
+        Some(provider),
+        &profiles,
+    )
+}
+
 #[tauri::command]
-pub fn sync_universal_provider(
+pub async fn sync_universal_provider(
     app: AppHandle,
     state: State<'_, AppState>,
     id: String,
 ) -> Result<bool, String> {
-    let result =
-        ProviderService::sync_universal_to_apps(state.inner(), &id).map_err(|e| e.to_string())?;
+    let result = sync_universal_provider_internal_with_probe(state.inner(), &id, |provider| {
+        crate::commands::protocol_compatibility::automatic_codex_provider_preflight(
+            state.inner(),
+            provider,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?;
 
     emit_universal_provider_synced(&app, "sync", &id);
 
@@ -1759,6 +1794,97 @@ mod codex_protocol_preflight_save_tests {
         assert_eq!(
             saved.meta.and_then(|meta| meta.api_format),
             Some("openai_responses".to_string())
+        );
+    }
+}
+
+#[cfg(test)]
+mod universal_codex_protocol_preflight_tests {
+    use super::sync_universal_provider_internal_with_probe;
+    use crate::{
+        database::Database,
+        protocol_compatibility::{
+            apply_selected_transport_to_provider, ProbeReadiness, ProbeTargetKey,
+            ProtocolCompatibilityProbeResult, ProtocolCompatibilityRecord, TransportKind,
+        },
+        provider::{CodexModelConfig, UniversalProvider},
+        services::ProviderService,
+        store::AppState,
+    };
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    #[tokio::test]
+    async fn universal_codex_sync_runs_preflight_and_atomically_saves_its_profile() {
+        let db = Arc::new(Database::memory().expect("memory database"));
+        let state = AppState::new(db.clone());
+        let mut universal = UniversalProvider::new(
+            "universal-probe".to_string(),
+            "Universal Probe".to_string(),
+            "newapi".to_string(),
+            "https://vllm.example/v1".to_string(),
+            "probe-secret".to_string(),
+        );
+        universal.apps.codex = true;
+        universal.models.codex = Some(CodexModelConfig {
+            model: Some("qwen-visible".to_string()),
+            reasoning_effort: Some("medium".to_string()),
+        });
+        ProviderService::upsert_universal(&state, universal).expect("seed universal provider");
+
+        let expected_target = ProbeTargetKey::new(
+            "universal-codex-universal-probe",
+            None::<String>,
+            "qwen-visible",
+            "qwen-visible",
+            TransportKind::OpenAiChat,
+            "https://vllm.example/v1/chat/completions",
+            "bearer",
+        )
+        .expect("target");
+        let expected_record = ProtocolCompatibilityRecord::new(
+            expected_target.clone(),
+            ProtocolCompatibilityProbeResult {
+                selected_transport: Some(TransportKind::OpenAiChat),
+                readiness: ProbeReadiness::Partial,
+                branches: Vec::new(),
+            },
+            100,
+            200,
+        );
+        let returned_record = expected_record.clone();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_probe = calls.clone();
+
+        sync_universal_provider_internal_with_probe(
+            &state,
+            "universal-probe",
+            move |mut candidate| {
+                calls_for_probe.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(candidate.id, "universal-codex-universal-probe");
+                apply_selected_transport_to_provider(&mut candidate, TransportKind::OpenAiChat)
+                    .expect("apply detected transport");
+                std::future::ready(Ok((candidate, vec![returned_record])))
+            },
+        )
+        .await
+        .expect("sync universal provider");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let saved = db
+            .get_provider_by_id("universal-codex-universal-probe", "codex")
+            .expect("read generated provider")
+            .expect("generated provider exists");
+        assert_eq!(
+            saved.meta.and_then(|meta| meta.api_format),
+            Some("openai_chat".to_string())
+        );
+        assert_eq!(
+            db.get_protocol_compatibility_result(&expected_target)
+                .expect("read saved profile"),
+            Some(expected_record)
         );
     }
 }
