@@ -501,14 +501,19 @@ pub fn run() {
             // 放在日志系统初始化之后，确保 init 的日志能正常输出。
             usage_events::init(app.handle().clone());
 
-            if let Some(previous) = app_exit_monitor::record_startup() {
-                log::warn!(
-                    "检测到上次应用未正常退出: started_at={}, pid={}, crash_log_modified_at={:?}",
-                    previous.marker.started_at,
-                    previous.marker.pid,
-                    previous.crash_log_modified_at
-                );
-            }
+            let startup_recovery_classification = {
+                let startup = app_exit_monitor::record_startup_report();
+                if let Some(previous) = startup.previous.as_ref() {
+                    log::warn!(
+                        "检测到上次应用未正常退出: started_at={}, pid={}, crash_log_modified_at={:?}",
+                        previous.marker.started_at,
+                        previous.marker.pid,
+                        previous.crash_log_modified_at
+                    );
+                }
+                log::info!("启动恢复证据分类: {:?}", startup.classification);
+                startup.classification
+            };
 
             let launch_on_startup = crate::settings::get_settings().launch_on_startup;
             if let Err(error) = crate::auto_launch::reconcile_auto_launch(launch_on_startup) {
@@ -1253,13 +1258,20 @@ pub fn run() {
                 // 检查 Live 配置是否仍处于被接管状态（包含占位符）
                 let live_taken_over = state.proxy_service.detect_takeover_in_live_configs();
 
-                if has_backups || live_taken_over {
+                if (has_backups || live_taken_over)
+                    && startup_recovery_classification.allows_recovery()
+                {
                     log::warn!("检测到上次异常退出（存在接管残留），正在恢复 Live 配置...");
                     if let Err(e) = state.proxy_service.recover_from_crash().await {
                         log::error!("恢复 Live 配置失败: {e}");
                     } else {
                         log::info!("Live 配置已恢复");
                     }
+                } else if has_backups || live_taken_over {
+                    log::info!(
+                        "跳过启动恢复：上次运行分类为 {:?}",
+                        startup_recovery_classification
+                    );
                 }
 
                 // 必须排在 auto-extract 之前：先把历史泄漏进 Gemini 共享片段的凭据
@@ -2082,6 +2094,12 @@ async fn restore_proxy_state_on_startup(state: &store::AppState) {
             }
             Err(e) => {
                 log::error!("✗ 恢复 {app_type} 的代理接管状态失败: {e}");
+                if crate::services::proxy::is_port_ownership_guard_error(&e) {
+                    log::warn!(
+                        "保留 {app_type} 代理状态：端口所有权未确认，跳过关闭接管和破坏性清理"
+                    );
+                    continue;
+                }
                 // 失败时清除该应用的状态，避免下次启动再次尝试
                 if let Err(clear_err) = state
                     .proxy_service

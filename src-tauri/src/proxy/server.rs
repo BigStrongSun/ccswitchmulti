@@ -160,6 +160,10 @@ impl ProxyServer {
         status.running = true;
         status.address = self.config.listen_address.clone();
         status.port = actual_port;
+        status.app = Some("ccswitchmulti".to_string());
+        status.version = Some(env!("CARGO_PKG_VERSION").to_string());
+        status.pid = Some(std::process::id());
+        status.instance_id = Some(uuid::Uuid::new_v4().to_string());
         drop(status);
 
         // 记录启动时间

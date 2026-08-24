@@ -14,6 +14,7 @@ use crate::proxy::{external_openai_api, server::ProxyServer};
 use crate::services::provider::{
     build_effective_settings_with_common_config, write_live_with_common_config,
 };
+use semver::Version;
 use serde_json::{json, Map, Value};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -23,8 +24,107 @@ use toml_edit::{DocumentMut, Item, TableLike};
 
 /// 用于接管 Live 配置时的占位符（避免客户端提示缺少 key，同时不泄露真实 Token）
 const PROXY_TOKEN_PLACEHOLDER: &str = "PROXY_MANAGED";
+const PORT_OWNERSHIP_GUARD_PREFIX: &str = "PORT_OWNERSHIP_GUARD";
 /// Codex 接管时暴露给官方客户端的本地代理入口名称。
 const CODEX_LOCAL_PROXY_PROVIDER_NAME: &str = "CCSwitch MultiRouter";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PortOwnership {
+    CompatibleInstance,
+    UnknownOwner,
+    Unreachable,
+}
+
+pub(crate) fn is_port_ownership_guard_error(error: &str) -> bool {
+    error.starts_with(PORT_OWNERSHIP_GUARD_PREFIX)
+}
+
+/// 检查端口上的 HTTP 服务是否能证明自己是兼容的 CCSwitchMulti 实例。
+///
+/// 端口探测只读 `/health` 和 `/status`，绝不终止或修改占用端口的进程。缺少
+/// 必要身份字段、版本不合法或响应无法解析时一律按未知占用者处理，避免误接管。
+pub(crate) async fn probe_proxy_port(port: u16) -> PortOwnership {
+    if port == 0 {
+        return PortOwnership::Unreachable;
+    }
+
+    let client = match reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_millis(350))
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => return PortOwnership::Unreachable,
+    };
+    let base = format!("http://127.0.0.1:{port}");
+
+    let health = match client.get(format!("{base}/health")).send().await {
+        Ok(response) if response.status().is_success() => response,
+        Ok(_) => return PortOwnership::UnknownOwner,
+        Err(_) => return PortOwnership::Unreachable,
+    };
+    match health.json::<Value>().await {
+        Ok(value) if value.is_object() => {}
+        Ok(_) | Err(_) => return PortOwnership::UnknownOwner,
+    }
+
+    let status = match client.get(format!("{base}/status")).send().await {
+        Ok(response) if response.status().is_success() => response,
+        Ok(_) => return PortOwnership::UnknownOwner,
+        Err(_) => return PortOwnership::Unreachable,
+    };
+    let payload = match status.json::<Value>().await {
+        Ok(payload) => payload,
+        Err(_) => return PortOwnership::UnknownOwner,
+    };
+
+    if is_compatible_proxy_identity(&payload) {
+        PortOwnership::CompatibleInstance
+    } else {
+        PortOwnership::UnknownOwner
+    }
+}
+
+fn is_compatible_proxy_identity(payload: &Value) -> bool {
+    let app_matches = payload
+        .get("app")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .is_some_and(|app| {
+            app.eq_ignore_ascii_case("ccswitchmulti")
+                || app.eq_ignore_ascii_case("cc-switch")
+                || app.eq_ignore_ascii_case("cc_switch")
+        });
+    if !app_matches {
+        return false;
+    }
+
+    let Some(remote_version) = payload.get("version").and_then(Value::as_str) else {
+        return false;
+    };
+    let Ok(remote_version) = Version::parse(remote_version.trim()) else {
+        return false;
+    };
+    let Ok(local_version) = Version::parse(env!("CARGO_PKG_VERSION")) else {
+        return false;
+    };
+    if remote_version.major != local_version.major {
+        return false;
+    }
+
+    let Some(pid) = payload.get("pid").and_then(Value::as_u64) else {
+        return false;
+    };
+    if pid == 0 || pid > u32::MAX as u64 {
+        return false;
+    }
+
+    match payload.get("instance_id") {
+        None => true,
+        Some(Value::String(instance_id)) => !instance_id.trim().is_empty(),
+        Some(_) => false,
+    }
+}
 
 fn should_run_codex_post_takeover(app_type: &AppType) -> bool {
     matches!(app_type, AppType::Codex)
@@ -862,7 +962,34 @@ impl ProxyService {
         if enabled {
             // 1) 代理服务未运行则自动启动
             if !self.is_running().await {
-                self.start().await?;
+                match self.start().await {
+                    Ok(_) => {}
+                    Err(start_error) => {
+                        let listen_port = self
+                            .db
+                            .get_proxy_config()
+                            .await
+                            .map_err(|e| format!("获取代理端口失败: {e}"))?
+                            .listen_port;
+                        match probe_proxy_port(listen_port).await {
+                            PortOwnership::CompatibleInstance => {
+                                log::warn!(
+                                    "端口 {listen_port} 已由兼容 CCSwitchMulti 实例占用，跳过本实例启动并复用该端口"
+                                );
+                            }
+                            PortOwnership::UnknownOwner => {
+                                return Err(format!(
+                                    "{PORT_OWNERSHIP_GUARD_PREFIX}: 代理端口 {listen_port} 的占用者无法安全确认；CCSwitchMulti 不会结束该进程，也不会启用接管（原始错误: {start_error}）"
+                                ));
+                            }
+                            PortOwnership::Unreachable => {
+                                return Err(format!(
+                                    "{PORT_OWNERSHIP_GUARD_PREFIX}: 代理端口 {listen_port} 启动失败且无法识别占用者；CCSwitchMulti 不会结束该进程，也不会启用接管（原始错误: {start_error}）"
+                                ));
+                            }
+                        }
+                    }
+                }
             }
 
             // 2) 已接管则直接返回（幂等）；但如果缺少备份或占位符残留，需要重建接管
@@ -4396,6 +4523,192 @@ mod tests {
         assert!(should_run_codex_post_takeover(&AppType::Codex));
         assert!(!should_run_codex_post_takeover(&AppType::Claude));
         assert!(!should_run_codex_post_takeover(&AppType::Gemini));
+    }
+
+    #[test]
+    fn proxy_identity_parser_accepts_legacy_instance_id_omission() {
+        let local_major = Version::parse(env!("CARGO_PKG_VERSION"))
+            .expect("local package version")
+            .major;
+        assert!(is_compatible_proxy_identity(&json!({
+            "app": "CCSwitchMulti",
+            "version": format!("{local_major}.99.0-beta.1"),
+            "pid": 4242,
+        })));
+    }
+
+    #[test]
+    fn proxy_identity_parser_fails_closed_for_invalid_identity() {
+        let local_major = Version::parse(env!("CARGO_PKG_VERSION"))
+            .expect("local package version")
+            .major;
+        let compatible_version = format!("{local_major}.99.0");
+        let invalid_payloads = [
+            json!({
+                "app": "",
+                "version": compatible_version,
+                "pid": 4242,
+            }),
+            json!({
+                "app": "OtherService",
+                "version": compatible_version,
+                "pid": 4242,
+            }),
+            json!({
+                "app": "CCSwitchMulti",
+                "version": "not-semver",
+                "pid": 4242,
+            }),
+            json!({
+                "app": "CCSwitchMulti",
+                "version": format!("{}.0.0", local_major + 1),
+                "pid": 4242,
+            }),
+            json!({
+                "app": "CCSwitchMulti",
+                "version": compatible_version,
+                "pid": 0,
+            }),
+            json!({
+                "app": "CCSwitchMulti",
+                "version": compatible_version,
+                "pid": u64::from(u32::MAX) + 1,
+            }),
+            json!({
+                "app": "CCSwitchMulti",
+                "version": compatible_version,
+                "pid": 4242,
+                "instance_id": "   ",
+            }),
+            json!({
+                "app": "CCSwitchMulti",
+                "version": compatible_version,
+                "pid": 4242,
+                "instance_id": 7,
+            }),
+        ];
+
+        for payload in invalid_payloads {
+            assert!(
+                !is_compatible_proxy_identity(&payload),
+                "payload must be rejected: {payload}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn port_probe_reads_health_and_status_from_local_listener() {
+        use axum::{routing::get, Json, Router};
+
+        let local_major = Version::parse(env!("CARGO_PKG_VERSION"))
+            .expect("local package version")
+            .major;
+        let app = Router::new()
+            .route(
+                "/health",
+                get(|| async { Json(json!({ "status": "healthy" })) }),
+            )
+            .route(
+                "/status",
+                get(move || async move {
+                    Json(json!({
+                        "app": "ccswitchmulti",
+                        "version": format!("{local_major}.1.0"),
+                        "pid": 4242,
+                        "instance_id": "listener-test",
+                    }))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind compatible listener");
+        let port = listener.local_addr().expect("listener address").port();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve compatible listener");
+        });
+
+        assert_eq!(
+            probe_proxy_port(port).await,
+            PortOwnership::CompatibleInstance
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn port_probe_rejects_non_json_and_unknown_listeners() {
+        use axum::{routing::get, Router};
+
+        let app = Router::new()
+            .route("/health", get(|| async { "healthy" }))
+            .route("/status", get(|| async { "not-json" }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind unknown listener");
+        let port = listener.local_addr().expect("listener address").port();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve unknown listener");
+        });
+
+        assert_eq!(probe_proxy_port(port).await, PortOwnership::UnknownOwner);
+        task.abort();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn unknown_port_owner_does_not_enable_takeover_or_stop_listener() {
+        use axum::{routing::get, Json, Router};
+
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().expect("init db"));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind unknown owner");
+        let port = listener.local_addr().expect("listener address").port();
+        let mut config = db.get_proxy_config().await.expect("get proxy config");
+        config.listen_address = "127.0.0.1".to_string();
+        config.listen_port = port;
+        db.update_proxy_config(config)
+            .await
+            .expect("persist occupied port");
+
+        let app = Router::new()
+            .route(
+                "/health",
+                get(|| async { Json(json!({ "status": "healthy" })) }),
+            )
+            .route(
+                "/status",
+                get(|| async { Json(json!({ "app": "other", "version": "1.0.0", "pid": 1 })) }),
+            );
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve unknown owner");
+        });
+
+        let service = ProxyService::new(db.clone());
+        let error = service
+            .set_takeover_for_app("codex", true)
+            .await
+            .expect_err("unknown owner must stop takeover");
+        assert!(is_port_ownership_guard_error(&error));
+        assert!(!service.is_running().await);
+        assert!(
+            !db.get_proxy_config_for_app("codex")
+                .await
+                .expect("get takeover config")
+                .enabled
+        );
+
+        let response = reqwest::get(format!("http://127.0.0.1:{port}/status"))
+            .await
+            .expect("unknown owner remains reachable");
+        assert!(response.status().is_success());
+        task.abort();
     }
 
     async fn running_codex_base_url(service: &ProxyService) -> String {

@@ -89,6 +89,18 @@ pub struct ProxyStatus {
     /// 当前活跃的代理目标列表
     #[serde(default)]
     pub active_targets: Vec<ActiveTarget>,
+    /// 稳定应用标识，用于端口占用者兼容性探测。
+    #[serde(default)]
+    pub app: Option<String>,
+    /// 运行中的应用版本，用于同主版本兼容性判断。
+    #[serde(default)]
+    pub version: Option<String>,
+    /// 监听该端口的进程 ID。
+    #[serde(default)]
+    pub pid: Option<u32>,
+    /// 本次代理实例的唯一标识；旧实例缺失时仍保持兼容。
+    #[serde(default)]
+    pub instance_id: Option<String>,
 }
 
 /// 活跃的代理目标信息
