@@ -30,14 +30,21 @@ pub use selection::{select_preferred_transport, select_transport_outcome};
 pub use selection::{ProbeStageStatus, TransportProbeAssessment};
 
 mod runner;
-pub use runner::{run_protocol_compatibility_probe, ProtocolCompatibilityProbeResult};
+#[cfg(test)]
+pub(crate) use runner::ProbeProgressStage;
+pub use runner::{
+    run_protocol_compatibility_probe, run_protocol_compatibility_probe_with_reporter,
+    ProtocolCompatibilityProbeResult, ProtocolProbeProgressEvent,
+};
 
 mod provider;
 #[cfg(test)]
 pub(crate) use provider::apply_selected_transport_to_provider;
+#[cfg(test)]
+pub(crate) use provider::compile_provider_probe_candidate;
 pub use provider::{
     apply_probe_selection_to_provider, compile_codex_router_probe_candidates,
-    compile_provider_probe_candidate,
+    compile_provider_probe_candidates,
 };
 
 pub(crate) mod profile;

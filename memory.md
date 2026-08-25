@@ -4491,3 +4491,13 @@ supported in one streaming turn`。
 - 在保存时物化 route 档案之外，运行时现允许 route 档案不可用时继承 `codexResolvedTargetProviderId` 的完全等价 Provider 档案；完整目标键仍约束模型、transport、endpoint、认证和凭据。旧安装升级后不需要重新保存 Provider，endpoint 改变或 route identity 不完整时仍 fail closed。
 - 同一继承边界同时用于 reasoning projection 和 detected transport。详见 `memory-2026-08-25-qwen-tool-loop-runtime-inheritance.md`；当前仍未替换安装态，Qwen/vLLM 自身公开同类 loop 风险需在新构建 canary 中继续区分。
 - 未升级安装态的临时恢复已完成：对 live DB 做 SQLite 在线备份后，将完全等价 standalone Qwen `verified` 档案复制到既有 route identity；原 CCSM 进程和 15721 未重启，health 与新连接读回均正常。备份和事务边界记录在上述专项 memory；这只修当前 route，长期修复仍是 `584a1834`。
+
+## 2026-08-25 Codex 深度协议探测进度页
+
+- 普通 Codex Provider 的“验证连接”不再调用只返回 HTTP 成败的旧浅探测。入口由 `CodexFormFields` 构造当前未保存 Provider 草稿，调用带 Tauri `Channel` 的 `preflight_codex_provider_protocol_compatibility`；后端 runner 在真实状态转换处发送有序进度，前端不使用计时器伪造阶段。
+- 每个启用模型固定测试 Responses 与 Chat Completions 两条分支，并展示基础响应、SSE 流式、思考分类、强制工具调用、工具结果续轮五项状态。进度事件包括 candidate/stage/reasoning/branch/batch 的 started/finished 结果，只含模型、协议、阶段、结构分类与 readiness；不含 endpoint、API Key、prompt、响应正文、nonce 或工具 payload。
+- 进度弹窗在请求开始前即列出全部启用模型，稳定显示完成数/总数；每个模型卡片并排显示两条协议、阶段状态、reasoning 的 readable/summary/opaque/none、选中协议和 Verified/Partial/Failed。最终结果保留在弹窗内，可重试；Provider 身份变化会使旧事件和结果失效。
+- 普通 Provider 会探测目录中所有 `enabled != false` 的模型；没有目录时回退默认模型。所有模型选择同一 transport 才更新全局 `apiFormat/wire_api`；混合结果保持原协议并生成拆分 Provider 建议。修复了保存命令曾用“任一模型有选择”错误回报 `protocolApplied=true` 的契约问题，也补回了表单行对 `enabled=false` 的保真，停用模型不会发探测请求。
+- Fresh 验证：Rust `protocol_compatibility` 70/70；前端深探测/表单/就绪组件 37/37；`pnpm typecheck`、`cargo check --tests --no-default-features`、rustfmt、Prettier、`git diff --check`、11 个变更文本 UTF-8 严格解码/no-BOM/U+FFFD 检查通过。`cargo check` 仅保留 5 条既有 dead-code warning，Vitest 保留既有 React `act(...)` warning。
+- 浏览器源码态验收实际走通“Codex → 添加供应商 → 单独接入模型源 → 自定义模型源 → 验证连接 → 确认测试 → 深度探测弹窗”，确认弹窗层级、说明、模型卡片、双协议列、错误、重试和关闭入口可见。独立 Vite renderer 缺少 Tauri Channel runtime，所以不能在该环境产生真实阶段事件；当前未构建/安装、未替换 `3.19.2-17`、未重启或修改 live `127.0.0.1:15721`，真实 Provider 与安装态验收仍待后续发布 canary。
+- 联网交叉验证沿用本次实现前的两条独立链：Codex 内置搜索读取 Tauri 官方 Channel 文档与 OpenAI 官方 Responses reasoning 事件参考；Matrix WebSearch 独立读取 Tauri 官方 Channel 页面。Matrix 打开 OpenAI 页面遇到 403/JS challenge，因此 OpenAI 字段以 Codex 内置链的官方 API Reference 为证据；两条可用证据共同支持有序 Channel 进度以及 `reasoning_text` 与 reasoning summary 的结构区别。

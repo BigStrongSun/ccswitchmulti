@@ -14,9 +14,10 @@ use serde_json::{json, Value};
 use tokio::{net::TcpListener, task::JoinHandle};
 
 use super::{
-    run_protocol_compatibility_probe, PreToolVisibleContent, ProbeCandidate, ProbeReadiness,
-    ProbeStageStatus, ProbeTargetKey, ProtocolCompatibilityRecord, ReasoningProjection,
-    TransportKind,
+    run_protocol_compatibility_probe, run_protocol_compatibility_probe_with_reporter,
+    PreToolVisibleContent, ProbeCandidate, ProbeProgressStage, ProbeReadiness, ProbeStageStatus,
+    ProbeTargetKey, ProtocolCompatibilityRecord, ProtocolProbeProgressEvent, ReasoningProjection,
+    ReasoningSemantic, ReasoningSource, TransportKind,
 };
 use crate::proxy::providers::{
     streaming_codex_chat::create_responses_sse_stream_from_chat_with_context_and_projection,
@@ -410,6 +411,76 @@ async fn probes_all_four_stages_on_both_protocols_and_selects_responses_on_a_tie
     assert!(responses_input
         .iter()
         .any(|item| item["id"] == "fc_fixture"));
+}
+
+#[tokio::test]
+async fn reports_ordered_redacted_progress_for_every_deep_probe_stage() {
+    let fixture = spawn_fixture(ResponsesMode::Complete).await;
+    let client = reqwest::Client::new();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let reported = events.clone();
+
+    let result = run_protocol_compatibility_probe_with_reporter(
+        candidate(&fixture.base_url, TransportKind::OpenAiChat),
+        &client,
+        move |event| reported.lock().unwrap().push(event),
+    )
+    .await;
+
+    assert_eq!(result.readiness, ProbeReadiness::Verified);
+    let events = events.lock().unwrap();
+    for transport in [TransportKind::OpenAiResponses, TransportKind::OpenAiChat] {
+        for stage in [
+            ProbeProgressStage::Baseline,
+            ProbeProgressStage::Streaming,
+            ProbeProgressStage::ForcedTool,
+            ProbeProgressStage::Continuation,
+        ] {
+            assert!(events.iter().any(|event| matches!(
+                event,
+                ProtocolProbeProgressEvent::StageStarted {
+                    model,
+                    transport: event_transport,
+                    stage: event_stage,
+                } if model == "qwen3.8" && *event_transport == transport && *event_stage == stage
+            )));
+            assert!(events.iter().any(|event| matches!(
+                event,
+                ProtocolProbeProgressEvent::StageFinished {
+                    model,
+                    transport: event_transport,
+                    stage: event_stage,
+                    ..
+                } if model == "qwen3.8" && *event_transport == transport && *event_stage == stage
+            )));
+        }
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ProtocolProbeProgressEvent::ReasoningClassified {
+                model,
+                transport: event_transport,
+                stage: ProbeProgressStage::Reasoning,
+                reasoning_semantic: ReasoningSemantic::Readable,
+                reasoning_source,
+            } if model == "qwen3.8"
+                && *event_transport == transport
+                && *reasoning_source != ReasoningSource::None
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ProtocolProbeProgressEvent::BranchFinished {
+                model,
+                transport: event_transport,
+                ..
+            } if model == "qwen3.8" && *event_transport == transport
+        )));
+    }
+
+    let serialized = serde_json::to_string(&*events).unwrap();
+    assert!(!serialized.contains("fixture-secret"));
+    assert!(!serialized.contains("private tool reasoning"));
+    assert!(!serialized.contains("CCSM_PROTOCOL"));
+    assert!(!serialized.contains(&fixture.base_url));
 }
 
 #[tokio::test]

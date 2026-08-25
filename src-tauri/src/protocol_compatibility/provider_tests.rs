@@ -5,8 +5,9 @@ use crate::provider::{Provider, ProviderMeta};
 
 use super::{
     apply_probe_selection_to_provider, apply_selected_transport_to_provider,
-    compile_codex_router_probe_candidates, compile_provider_probe_candidate, ProbeReadiness,
-    ProtocolCompatibilityProbeResult, TransportKind,
+    compile_codex_router_probe_candidates, compile_provider_probe_candidate,
+    compile_provider_probe_candidates, ProbeReadiness, ProtocolCompatibilityProbeResult,
+    TransportKind,
 };
 
 fn codex_provider(config: &str, api_format: &str) -> Provider {
@@ -58,6 +59,46 @@ wire_api = "responses"
     assert_eq!(candidate.canonical_endpoint(), "https://vllm.example/v1");
     let debug = format!("{candidate:?}");
     assert!(!debug.contains("probe-secret"));
+}
+
+#[test]
+fn compiles_every_enabled_catalog_model_for_an_ordinary_provider() {
+    let mut provider = codex_provider(
+        r#"model = "qwen-visible"
+model_provider = "qwen"
+[model_providers.qwen]
+base_url = "https://vllm.example/v1"
+wire_api = "responses"
+"#,
+        "openai_responses",
+    );
+    provider.settings_config["modelCatalog"] = json!({"models": [
+        {
+            "model": "qwen-visible",
+            "upstreamModel": "Qwen/Qwen3.8",
+            "enabled": true
+        },
+        {
+            "model": "qwen-coder",
+            "upstreamModel": "Qwen/Qwen3-Coder"
+        },
+        {
+            "model": "qwen-disabled",
+            "upstreamModel": "Qwen/Qwen3-Disabled",
+            "enabled": false
+        }
+    ]});
+
+    let candidates = compile_provider_probe_candidates(&provider).expect("compile candidates");
+
+    assert_eq!(candidates.len(), 2);
+    assert_eq!(candidates[0].public_model, "qwen-visible");
+    assert_eq!(candidates[0].upstream_model, "Qwen/Qwen3.8");
+    assert_eq!(candidates[1].public_model, "qwen-coder");
+    assert_eq!(candidates[1].upstream_model, "Qwen/Qwen3-Coder");
+    assert!(candidates
+        .iter()
+        .all(|candidate| candidate.provider_id.as_deref() == Some("qwen-provider")));
 }
 
 #[test]

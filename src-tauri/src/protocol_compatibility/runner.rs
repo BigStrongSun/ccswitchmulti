@@ -22,6 +22,62 @@ use super::{
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 const TRANSACTION_TIMEOUT: Duration = Duration::from_secs(120);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProbeProgressStage {
+    Baseline,
+    Streaming,
+    Reasoning,
+    ForcedTool,
+    Continuation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum ProtocolProbeProgressEvent {
+    CandidateStarted {
+        model: String,
+    },
+    StageStarted {
+        model: String,
+        transport: TransportKind,
+        stage: ProbeProgressStage,
+    },
+    StageFinished {
+        model: String,
+        transport: TransportKind,
+        stage: ProbeProgressStage,
+        stage_status: ProbeStageStatus,
+    },
+    ReasoningClassified {
+        model: String,
+        transport: TransportKind,
+        stage: ProbeProgressStage,
+        reasoning_semantic: ReasoningSemantic,
+        reasoning_source: ReasoningSource,
+    },
+    BranchFinished {
+        model: String,
+        transport: TransportKind,
+        readiness: ProbeReadiness,
+    },
+    CandidateFinished {
+        model: String,
+        selected_transport: Option<TransportKind>,
+        readiness: ProbeReadiness,
+    },
+    BatchFinished {
+        total: usize,
+        verified: usize,
+        partial: usize,
+        failed: usize,
+    },
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransportBranchResult {
     pub assessment: TransportProbeAssessment,
@@ -65,22 +121,51 @@ pub async fn run_protocol_compatibility_probe(
     candidate: ProbeCandidate,
     client: &Client,
 ) -> ProtocolCompatibilityProbeResult {
-    match tokio::time::timeout(TRANSACTION_TIMEOUT, run_probe(candidate, client)).await {
+    run_protocol_compatibility_probe_with_reporter(candidate, client, |_| {}).await
+}
+
+pub async fn run_protocol_compatibility_probe_with_reporter<F>(
+    candidate: ProbeCandidate,
+    client: &Client,
+    reporter: F,
+) -> ProtocolCompatibilityProbeResult
+where
+    F: Fn(ProtocolProbeProgressEvent) + Send + Sync,
+{
+    let model = candidate.public_model.clone();
+    match tokio::time::timeout(TRANSACTION_TIMEOUT, run_probe(candidate, client, &reporter)).await {
         Ok(result) => result,
-        Err(_) => ProtocolCompatibilityProbeResult {
-            selected_transport: None,
-            readiness: ProbeReadiness::Unverified,
-            branches: Vec::new(),
-        },
+        Err(_) => {
+            reporter(ProtocolProbeProgressEvent::CandidateFinished {
+                model,
+                selected_transport: None,
+                readiness: ProbeReadiness::Unverified,
+            });
+            ProtocolCompatibilityProbeResult {
+                selected_transport: None,
+                readiness: ProbeReadiness::Unverified,
+                branches: Vec::new(),
+            }
+        }
     }
 }
 
-async fn run_probe(candidate: ProbeCandidate, client: &Client) -> ProtocolCompatibilityProbeResult {
+async fn run_probe<F>(
+    candidate: ProbeCandidate,
+    client: &Client,
+    reporter: &F,
+) -> ProtocolCompatibilityProbeResult
+where
+    F: Fn(ProtocolProbeProgressEvent) + Send + Sync,
+{
+    reporter(ProtocolProbeProgressEvent::CandidateStarted {
+        model: candidate.public_model.clone(),
+    });
     let nonce = Uuid::new_v4().simple().to_string();
     let mut branches = Vec::with_capacity(2);
 
     for transport in [TransportKind::OpenAiResponses, TransportKind::OpenAiChat] {
-        branches.push(run_branch(&candidate, client, transport, &nonce).await);
+        branches.push(run_branch(&candidate, client, transport, &nonce, reporter).await);
     }
 
     let candidates = branches
@@ -88,21 +173,31 @@ async fn run_probe(candidate: ProbeCandidate, client: &Client) -> ProtocolCompat
         .map(|branch| (branch.assessment, branch.reasoning_shape.semantic))
         .collect::<Vec<_>>();
     let selection = select_transport_outcome_with_reasoning(&candidates);
-    ProtocolCompatibilityProbeResult {
+    let result = ProtocolCompatibilityProbeResult {
         selected_transport: selection.map(|selected| selected.transport),
         readiness: selection
             .map(|selected| selected.readiness)
             .unwrap_or(ProbeReadiness::Unverified),
         branches,
-    }
+    };
+    reporter(ProtocolProbeProgressEvent::CandidateFinished {
+        model: candidate.public_model,
+        selected_transport: result.selected_transport,
+        readiness: result.readiness,
+    });
+    result
 }
 
-async fn run_branch(
+async fn run_branch<F>(
     candidate: &ProbeCandidate,
     client: &Client,
     transport: TransportKind,
     nonce: &str,
-) -> TransportBranchResult {
+    reporter: &F,
+) -> TransportBranchResult
+where
+    F: Fn(ProtocolProbeProgressEvent) + Send + Sync,
+{
     let mut assessment = TransportProbeAssessment {
         transport,
         baseline: ProbeStageStatus::Skipped,
@@ -112,17 +207,29 @@ async fn run_branch(
     };
     let mut evidence = Vec::new();
     let mut reasoning_shape = empty_reasoning_shape();
+    report_stage_started(reporter, candidate, transport, ProbeProgressStage::Baseline);
     let Ok(endpoint) = build_probe_url(
         &candidate.canonical_endpoint(),
         transport,
         candidate.is_full_url(),
     ) else {
         assessment.baseline = ProbeStageStatus::Failed;
-        return TransportBranchResult {
-            assessment,
-            reasoning_shape,
-            evidence,
-        };
+        report_stage_finished(
+            reporter,
+            candidate,
+            transport,
+            ProbeProgressStage::Baseline,
+            assessment.baseline,
+        );
+        return finish_branch(
+            reporter,
+            candidate,
+            TransportBranchResult {
+                assessment,
+                reasoning_shape,
+                evidence,
+            },
+        );
     };
 
     let baseline = send_case(
@@ -138,23 +245,52 @@ async fn run_branch(
     let baseline_exchange = match baseline {
         Ok(exchange) if has_completed_assistant_turn(transport, &exchange) => {
             assessment.baseline = ProbeStageStatus::Passed;
+            report_stage_finished(
+                reporter,
+                candidate,
+                transport,
+                ProbeProgressStage::Baseline,
+                assessment.baseline,
+            );
             exchange
         }
         Ok(_) => {
             assessment.baseline = ProbeStageStatus::Failed;
-            return TransportBranchResult {
-                assessment,
-                reasoning_shape,
-                evidence,
-            };
+            report_stage_finished(
+                reporter,
+                candidate,
+                transport,
+                ProbeProgressStage::Baseline,
+                assessment.baseline,
+            );
+            return finish_branch(
+                reporter,
+                candidate,
+                TransportBranchResult {
+                    assessment,
+                    reasoning_shape,
+                    evidence,
+                },
+            );
         }
         Err(error) => {
             assessment.baseline = baseline_failure_status(error);
-            return TransportBranchResult {
-                assessment,
-                reasoning_shape,
-                evidence,
-            };
+            report_stage_finished(
+                reporter,
+                candidate,
+                transport,
+                ProbeProgressStage::Baseline,
+                assessment.baseline,
+            );
+            return finish_branch(
+                reporter,
+                candidate,
+                TransportBranchResult {
+                    assessment,
+                    reasoning_shape,
+                    evidence,
+                },
+            );
         }
     };
     update_shape(
@@ -163,6 +299,12 @@ async fn run_branch(
     );
     evidence.push(baseline_exchange.evidence().clone());
 
+    report_stage_started(
+        reporter,
+        candidate,
+        transport,
+        ProbeProgressStage::Streaming,
+    );
     match send_case(
         candidate,
         client,
@@ -188,7 +330,20 @@ async fn run_branch(
         }
         Err(error) => assessment.streaming = stage_failure_status(error),
     }
+    report_stage_finished(
+        reporter,
+        candidate,
+        transport,
+        ProbeProgressStage::Streaming,
+        assessment.streaming,
+    );
 
+    report_stage_started(
+        reporter,
+        candidate,
+        transport,
+        ProbeProgressStage::ForcedTool,
+    );
     let forced = send_case(
         candidate,
         client,
@@ -210,28 +365,63 @@ async fn run_branch(
             match call.filter(|call| valid_probe_tool_call(call, nonce)) {
                 Some(call) => {
                     assessment.forced_tool = ProbeStageStatus::Passed;
+                    report_stage_finished(
+                        reporter,
+                        candidate,
+                        transport,
+                        ProbeProgressStage::ForcedTool,
+                        assessment.forced_tool,
+                    );
                     (call, exchange)
                 }
                 None => {
                     assessment.forced_tool = ProbeStageStatus::Unsupported;
-                    return TransportBranchResult {
-                        assessment,
-                        reasoning_shape,
-                        evidence,
-                    };
+                    report_stage_finished(
+                        reporter,
+                        candidate,
+                        transport,
+                        ProbeProgressStage::ForcedTool,
+                        assessment.forced_tool,
+                    );
+                    return finish_branch(
+                        reporter,
+                        candidate,
+                        TransportBranchResult {
+                            assessment,
+                            reasoning_shape,
+                            evidence,
+                        },
+                    );
                 }
             }
         }
         Err(error) => {
             assessment.forced_tool = forced_tool_failure_status(error);
-            return TransportBranchResult {
-                assessment,
-                reasoning_shape,
-                evidence,
-            };
+            report_stage_finished(
+                reporter,
+                candidate,
+                transport,
+                ProbeProgressStage::ForcedTool,
+                assessment.forced_tool,
+            );
+            return finish_branch(
+                reporter,
+                candidate,
+                TransportBranchResult {
+                    assessment,
+                    reasoning_shape,
+                    evidence,
+                },
+            );
         }
     };
 
+    report_stage_started(
+        reporter,
+        candidate,
+        transport,
+        ProbeProgressStage::Continuation,
+    );
     match send_case(
         candidate,
         client,
@@ -257,11 +447,111 @@ async fn run_branch(
         }
         Err(error) => assessment.continuation = stage_failure_status(error),
     }
+    report_stage_finished(
+        reporter,
+        candidate,
+        transport,
+        ProbeProgressStage::Continuation,
+        assessment.continuation,
+    );
 
-    TransportBranchResult {
-        assessment,
-        reasoning_shape,
-        evidence,
+    finish_branch(
+        reporter,
+        candidate,
+        TransportBranchResult {
+            assessment,
+            reasoning_shape,
+            evidence,
+        },
+    )
+}
+
+fn report_stage_started<F>(
+    reporter: &F,
+    candidate: &ProbeCandidate,
+    transport: TransportKind,
+    stage: ProbeProgressStage,
+) where
+    F: Fn(ProtocolProbeProgressEvent) + Send + Sync,
+{
+    reporter(ProtocolProbeProgressEvent::StageStarted {
+        model: candidate.public_model.clone(),
+        transport,
+        stage,
+    });
+}
+
+fn report_stage_finished<F>(
+    reporter: &F,
+    candidate: &ProbeCandidate,
+    transport: TransportKind,
+    stage: ProbeProgressStage,
+    stage_status: ProbeStageStatus,
+) where
+    F: Fn(ProtocolProbeProgressEvent) + Send + Sync,
+{
+    reporter(ProtocolProbeProgressEvent::StageFinished {
+        model: candidate.public_model.clone(),
+        transport,
+        stage,
+        stage_status,
+    });
+}
+
+fn finish_branch<F>(
+    reporter: &F,
+    candidate: &ProbeCandidate,
+    result: TransportBranchResult,
+) -> TransportBranchResult
+where
+    F: Fn(ProtocolProbeProgressEvent) + Send + Sync,
+{
+    let reasoning_status = if result.reasoning_shape.semantic == ReasoningSemantic::None {
+        if result.assessment.baseline == ProbeStageStatus::Passed {
+            ProbeStageStatus::Unsupported
+        } else {
+            ProbeStageStatus::Skipped
+        }
+    } else {
+        ProbeStageStatus::Passed
+    };
+    if result.assessment.baseline == ProbeStageStatus::Passed {
+        report_stage_started(
+            reporter,
+            candidate,
+            result.assessment.transport,
+            ProbeProgressStage::Reasoning,
+        );
+    }
+    reporter(ProtocolProbeProgressEvent::ReasoningClassified {
+        model: candidate.public_model.clone(),
+        transport: result.assessment.transport,
+        stage: ProbeProgressStage::Reasoning,
+        reasoning_semantic: result.reasoning_shape.semantic,
+        reasoning_source: result.reasoning_shape.source,
+    });
+    report_stage_finished(
+        reporter,
+        candidate,
+        result.assessment.transport,
+        ProbeProgressStage::Reasoning,
+        reasoning_status,
+    );
+    reporter(ProtocolProbeProgressEvent::BranchFinished {
+        model: candidate.public_model.clone(),
+        transport: result.assessment.transport,
+        readiness: branch_readiness(result.assessment),
+    });
+    result
+}
+
+fn branch_readiness(assessment: TransportProbeAssessment) -> ProbeReadiness {
+    if assessment.is_complete() {
+        ProbeReadiness::Verified
+    } else if assessment.baseline == ProbeStageStatus::Passed {
+        ProbeReadiness::Partial
+    } else {
+        ProbeReadiness::Unverified
     }
 }
 

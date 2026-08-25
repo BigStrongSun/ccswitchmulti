@@ -32,6 +32,55 @@ pub fn compile_provider_probe_candidate(provider: &Provider) -> Result<ProbeCand
     let configured_model = codex_provider_upstream_model(provider)
         .ok_or_else(|| "Codex provider has no configured model".to_string())?;
     let (public_model, upstream_model) = resolve_primary_model(provider, &configured_model);
+    compile_provider_probe_candidate_for_model(provider, public_model, upstream_model)
+}
+
+pub fn compile_provider_probe_candidates(
+    provider: &Provider,
+) -> Result<Vec<ProbeCandidate>, String> {
+    let catalog_models = provider
+        .settings_config
+        .get("modelCatalog")
+        .or_else(|| provider.settings_config.get("model_catalog"))
+        .and_then(|catalog| catalog.get("models"))
+        .and_then(Value::as_array);
+
+    let Some(catalog_models) = catalog_models else {
+        return compile_provider_probe_candidate(provider).map(|candidate| vec![candidate]);
+    };
+
+    let mut candidates = Vec::with_capacity(catalog_models.len());
+    for model in catalog_models {
+        if model.get("enabled").and_then(Value::as_bool) == Some(false) {
+            continue;
+        }
+        let Some(public_model) = string_field(model, &["model", "id", "slug"]) else {
+            continue;
+        };
+        let upstream_model =
+            string_field(model, &["upstreamModel", "upstream_model"]).unwrap_or(public_model);
+        candidates.push(compile_provider_probe_candidate_for_model(
+            provider,
+            public_model.to_string(),
+            upstream_model.to_string(),
+        )?);
+    }
+
+    if candidates.is_empty() {
+        return Err("Codex provider has no enabled catalog model".to_string());
+    }
+    Ok(candidates)
+}
+
+fn compile_provider_probe_candidate_for_model(
+    provider: &Provider,
+    public_model: String,
+    upstream_model: String,
+) -> Result<ProbeCandidate, String> {
+    if provider.uses_managed_account_auth() {
+        return Err("managed or official providers do not use third-party protocol probing".into());
+    }
+
     let (base_url, api_key) = provider.resolve_usage_credentials(&AppType::Codex);
     if base_url.trim().is_empty() {
         return Err("Codex provider has no base URL".to_string());

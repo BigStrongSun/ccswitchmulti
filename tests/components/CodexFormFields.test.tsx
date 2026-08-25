@@ -12,11 +12,14 @@ import {
   CodexFormFields,
   splitFetchedModelsByLikelyCodexProtocol,
 } from "@/components/providers/forms/CodexFormFields";
-import {
-  fetchModelsForConfig,
-  probeCodexChatForConfig,
-  probeCodexResponsesForConfig,
-} from "@/lib/api/model-fetch";
+import { fetchModelsForConfig } from "@/lib/api/model-fetch";
+import { preflightCodexProviderProtocolCompatibility } from "@/lib/api/protocol-compatibility";
+import type {
+  CodexProtocolCompatibilityRecord,
+  CodexProtocolProbeProgressEvent,
+  CodexProtocolTransport,
+  CodexProviderProtocolPreflightOutcome,
+} from "@/lib/api/protocol-compatibility";
 import type {
   CodexApiFormat,
   CodexCatalogModel,
@@ -53,6 +56,10 @@ vi.mock("@/lib/api/model-fetch", () => ({
   showFetchModelsError: vi.fn(),
 }));
 
+vi.mock("@/lib/api/protocol-compatibility", () => ({
+  preflightCodexProviderProtocolCompatibility: vi.fn(),
+}));
+
 vi.mock("@/components/ui/form", () => ({
   FormLabel: ({ children }: { children: ReactNode }) => (
     <label>{children}</label>
@@ -62,8 +69,7 @@ vi.mock("@/components/ui/form", () => ({
 beforeEach(() => {
   vi.useRealTimers();
   vi.mocked(fetchModelsForConfig).mockReset();
-  vi.mocked(probeCodexChatForConfig).mockReset();
-  vi.mocked(probeCodexResponsesForConfig).mockReset();
+  vi.mocked(preflightCodexProviderProtocolCompatibility).mockReset();
   Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
     configurable: true,
     writable: true,
@@ -118,34 +124,99 @@ function createDetectedReasoningOutcome(
   };
 }
 
-// 构造协议探测的成功返回，供并发池测试精确控制每个模型的完成顺序。
-function createProbeResult(
+function createDeepProbeRecord(
   model: string,
-  detail = "ok",
-): {
-  ok: true;
-  status: number;
-  url: string;
-  model: string;
-  detail: string;
-} {
+  selectedTransport: CodexProtocolTransport | null,
+  readiness: "verified" | "partial" | "unverified" = "verified",
+): CodexProtocolCompatibilityRecord {
+  const passed = selectedTransport ? "passed" : "failed";
   return {
-    ok: true,
-    status: 200,
-    url: "https://api.thirdparty.example/v1/probe",
-    model,
-    detail,
+    probeVersion: 1,
+    target: {
+      provider_id: "codex-thirdparty",
+      route_id: null,
+      public_model: model,
+      upstream_model: model,
+      transport: selectedTransport ?? "open_ai_responses",
+      endpoint_fingerprint: "redacted-endpoint",
+      authentication_kind: "bearer",
+      credential_fingerprint: "redacted-credential",
+    },
+    result: {
+      selected_transport: selectedTransport,
+      readiness,
+      branches: (["open_ai_responses", "open_ai_chat"] as const).map(
+        (transport) => ({
+          assessment: {
+            transport,
+            baseline: transport === selectedTransport ? passed : "failed",
+            streaming: transport === selectedTransport ? passed : "skipped",
+            forced_tool: transport === selectedTransport ? passed : "skipped",
+            continuation: transport === selectedTransport ? passed : "skipped",
+          },
+          reasoning_shape: {
+            semantic:
+              transport === selectedTransport
+                ? ("readable" as const)
+                : ("none" as const),
+            source:
+              transport === selectedTransport
+                ? transport === "open_ai_chat"
+                  ? ("reasoning_content" as const)
+                  : ("native_responses" as const)
+                : ("none" as const),
+            pre_tool_visible_content: "absent" as const,
+          },
+        }),
+      ),
+    },
+    testedAt: 1_700_000_000,
+    expiresAt: 1_700_086_400,
   };
 }
 
-function createProbeFailure(model: string, detail = "HTTP 401") {
+function createDeepProbeOutcome(
+  records: CodexProtocolCompatibilityRecord[],
+): CodexProviderProtocolPreflightOutcome {
   return {
-    ok: false,
-    status: 401,
-    url: "https://api.thirdparty.example/v1/probe",
-    model,
-    detail,
+    provider: {
+      id: "codex-thirdparty",
+      name: "Third party",
+      settingsConfig: {},
+    },
+    records,
+    protocolApplied: records.every(
+      (record) =>
+        record.result.selected_transport ===
+        records[0]?.result.selected_transport,
+    ),
   };
+}
+
+function emitFinishedProgress(
+  records: CodexProtocolCompatibilityRecord[],
+  onProgress: (event: CodexProtocolProbeProgressEvent) => void,
+) {
+  for (const record of records) {
+    const model = record.target.public_model;
+    onProgress({ kind: "candidate_started", model });
+    onProgress({
+      kind: "candidate_finished",
+      model,
+      selectedTransport: record.result.selected_transport,
+      readiness: record.result.readiness,
+    });
+  }
+  onProgress({
+    kind: "batch_finished",
+    total: records.length,
+    verified: records.filter((record) => record.result.readiness === "verified")
+      .length,
+    partial: records.filter((record) => record.result.readiness === "partial")
+      .length,
+    failed: records.filter((record) => record.result.readiness === "unverified")
+      .length,
+  });
 }
 
 function deferred<T>() {
@@ -909,19 +980,12 @@ describe("CodexFormFields local model routing", () => {
   });
 
   it("confirms protocol probing and switches a single provider to Responses when Responses works", async () => {
-    vi.mocked(probeCodexResponsesForConfig).mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      url: "https://api.thirdparty.example/v1/responses",
-      model: "gpt-5.5",
-      detail: "ok",
-    });
-    vi.mocked(probeCodexChatForConfig).mockResolvedValueOnce({
-      ok: false,
-      status: 404,
-      url: "https://api.thirdparty.example/v1/chat/completions",
-      model: "gpt-5.5",
-      detail: "HTTP 404",
+    const records = [createDeepProbeRecord("gpt-5.5", "open_ai_responses")];
+    vi.mocked(
+      preflightCodexProviderProtocolCompatibility,
+    ).mockImplementationOnce(async (_provider, onProgress) => {
+      emitFinishedProgress(records, onProgress);
+      return createDeepProbeOutcome(records);
     });
     const { onApiFormatChange } = renderCatalogHarness(
       [{ model: "gpt-5.5", upstreamModel: "gpt-5.5" }],
@@ -932,31 +996,82 @@ describe("CodexFormFields local model routing", () => {
     expect(screen.getByText("确认测试 Chat / Responses")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
 
+    expect(
+      await screen.findByRole("heading", { name: "Codex 兼容性深度探测" }),
+    ).toBeInTheDocument();
+
     await waitFor(() => {
       expect(onApiFormatChange).toHaveBeenCalledWith("openai_responses");
     });
-    expect(probeCodexResponsesForConfig).toHaveBeenCalledWith(
-      "https://api.thirdparty.example/v1",
-      "sk-test",
-      "gpt-5.5",
-      false,
-      "",
-    );
-    expect(probeCodexChatForConfig).toHaveBeenCalledWith(
-      "https://api.thirdparty.example/v1",
-      "sk-test",
-      "gpt-5.5",
-      false,
-      "",
+    expect(preflightCodexProviderProtocolCompatibility).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "codex-thirdparty",
+        settingsConfig: expect.objectContaining({
+          auth: { OPENAI_API_KEY: "sk-test" },
+          modelCatalog: {
+            models: [expect.objectContaining({ model: "gpt-5.5" })],
+          },
+        }),
+      }),
+      expect.any(Function),
     );
   });
 
-  it("invalidates successful readiness for every routing and catalog identity input", async () => {
-    vi.mocked(probeCodexResponsesForConfig).mockImplementation(
-      async (_baseUrl, _apiKey, model) => createProbeResult(model),
+  it("omits disabled catalog models from the deep-probe request", async () => {
+    const records = [
+      createDeepProbeRecord("model-enabled", "open_ai_responses"),
+    ];
+    vi.mocked(
+      preflightCodexProviderProtocolCompatibility,
+    ).mockImplementationOnce(async (_provider, onProgress) => {
+      emitFinishedProgress(records, onProgress);
+      return createDeepProbeOutcome(records);
+    });
+    renderCatalogHarness(
+      [
+        {
+          model: "model-enabled",
+          upstreamModel: "model-enabled",
+          enabled: true,
+        },
+        {
+          model: "model-disabled",
+          upstreamModel: "model-disabled",
+          enabled: false,
+        },
+      ],
+      { shouldShowSpeedTest: true },
     );
-    vi.mocked(probeCodexChatForConfig).mockImplementation(
-      async (_baseUrl, _apiKey, model) => createProbeResult(model),
+
+    fireEvent.click(screen.getByRole("button", { name: "验证连接" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
+
+    await waitFor(() => {
+      expect(preflightCodexProviderProtocolCompatibility).toHaveBeenCalled();
+    });
+    const provider = vi.mocked(preflightCodexProviderProtocolCompatibility).mock
+      .calls[0][0];
+    expect(provider.settingsConfig.modelCatalog.models).toEqual([
+      expect.objectContaining({ model: "model-enabled" }),
+    ]);
+  });
+
+  it("invalidates successful readiness for every routing and catalog identity input", async () => {
+    vi.mocked(preflightCodexProviderProtocolCompatibility).mockImplementation(
+      async (provider, onProgress) => {
+        const models = provider.settingsConfig.modelCatalog.models.map(
+          (model: { model: string }) => model.model,
+        );
+        const selectedTransport =
+          provider.meta?.apiFormat === "openai_chat"
+            ? "open_ai_chat"
+            : "open_ai_responses";
+        const records = models.map((model: string) =>
+          createDeepProbeRecord(model, selectedTransport),
+        );
+        emitFinishedProgress(records, onProgress);
+        return createDeepProbeOutcome(records);
+      },
     );
     const { updateIdentity } = renderReadinessIdentityHarness();
 
@@ -964,6 +1079,7 @@ describe("CodexFormFields local model routing", () => {
       fireEvent.click(screen.getByRole("button", { name: "验证连接" }));
       fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
       expect(await screen.findByText("可加入 MultiRouter")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "关闭" }));
     };
     const expectInvalidated = async () => {
       await waitFor(() => {
@@ -1003,30 +1119,21 @@ describe("CodexFormFields local model routing", () => {
   });
 
   it("ignores an older probe completion after a newer provider identity succeeds", async () => {
-    type ProbeResult = Awaited<ReturnType<typeof probeCodexResponsesForConfig>>;
-    const oldResponses = deferred<ProbeResult>();
-    const oldChat = deferred<ProbeResult>();
-    const newResponses = deferred<ProbeResult>();
-    const newChat = deferred<ProbeResult>();
-
-    vi.mocked(probeCodexResponsesForConfig).mockImplementation(
-      async (baseUrl) =>
-        baseUrl.includes("old") ? oldResponses.promise : newResponses.promise,
-    );
-    vi.mocked(probeCodexChatForConfig).mockImplementation(async (baseUrl) =>
-      baseUrl.includes("old") ? oldChat.promise : newChat.promise,
+    const oldProbe = deferred<CodexProviderProtocolPreflightOutcome>();
+    const newProbe = deferred<CodexProviderProtocolPreflightOutcome>();
+    vi.mocked(preflightCodexProviderProtocolCompatibility).mockImplementation(
+      async (provider) =>
+        String(provider.settingsConfig.config).includes("old.example")
+          ? oldProbe.promise
+          : newProbe.promise,
     );
     const { updateIdentity } = renderReadinessIdentityHarness();
 
     fireEvent.click(screen.getByRole("button", { name: "验证连接" }));
     fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
     await waitFor(() => {
-      expect(probeCodexResponsesForConfig).toHaveBeenCalledWith(
-        "https://old.example/v1",
-        expect.anything(),
-        "model-a",
-        expect.anything(),
-        expect.anything(),
+      expect(preflightCodexProviderProtocolCompatibility).toHaveBeenCalledTimes(
+        1,
       );
     });
 
@@ -1038,15 +1145,21 @@ describe("CodexFormFields local model routing", () => {
     fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
 
     await act(async () => {
-      newResponses.resolve(createProbeResult("model-a", "new responses ok"));
-      newChat.resolve(createProbeResult("model-a", "new chat ok"));
+      newProbe.resolve(
+        createDeepProbeOutcome([
+          createDeepProbeRecord("model-a", "open_ai_responses"),
+        ]),
+      );
       await Promise.resolve();
     });
     expect(await screen.findByText("可加入 MultiRouter")).toBeInTheDocument();
 
     await act(async () => {
-      oldResponses.resolve(createProbeFailure("model-a", "old credentials"));
-      oldChat.resolve(createProbeFailure("model-a", "old credentials"));
+      oldProbe.resolve(
+        createDeepProbeOutcome([
+          createDeepProbeRecord("model-a", null, "unverified"),
+        ]),
+      );
       await Promise.resolve();
     });
 
@@ -1057,50 +1170,17 @@ describe("CodexFormFields local model routing", () => {
   });
 
   it("shows per-model protocol tags and suggests split providers for mixed probe results", async () => {
-    vi.mocked(probeCodexResponsesForConfig)
-      .mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        url: "https://api.thirdparty.example/v1/responses",
-        model: "gpt-5.5",
-        detail: "ok",
-      })
-      .mockResolvedValueOnce({
-        ok: false,
-        status: 404,
-        url: "https://api.thirdparty.example/v1/responses",
-        model: "qwen3.6",
-        detail: "HTTP 404",
-      })
-      .mockResolvedValueOnce({
-        ok: false,
-        status: 404,
-        url: "https://api.thirdparty.example/v1/responses",
-        model: "glm-4.5",
-        detail: "HTTP 404",
-      });
-    vi.mocked(probeCodexChatForConfig)
-      .mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        url: "https://api.thirdparty.example/v1/chat/completions",
-        model: "gpt-5.5",
-        detail: "ok",
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        url: "https://api.thirdparty.example/v1/chat/completions",
-        model: "qwen3.6",
-        detail: "ok",
-      })
-      .mockResolvedValueOnce({
-        ok: false,
-        status: 404,
-        url: "https://api.thirdparty.example/v1/chat/completions",
-        model: "glm-4.5",
-        detail: "HTTP 404",
-      });
+    const records = [
+      createDeepProbeRecord("gpt-5.5", "open_ai_responses"),
+      createDeepProbeRecord("qwen3.6", "open_ai_chat"),
+      createDeepProbeRecord("glm-4.5", null, "unverified"),
+    ];
+    vi.mocked(
+      preflightCodexProviderProtocolCompatibility,
+    ).mockImplementationOnce(async (_provider, onProgress) => {
+      emitFinishedProgress(records, onProgress);
+      return createDeepProbeOutcome(records);
+    });
     const onProviderSplitSuggestionChange = vi.fn();
     const { onApiFormatChange } = renderCatalogHarness(
       [
@@ -1118,25 +1198,17 @@ describe("CodexFormFields local model routing", () => {
     fireEvent.click(screen.getByRole("button", { name: "验证连接" }));
     fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
 
-    await waitFor(() => {
-      expect(screen.getByTitle("Responses=ok; Chat=ok")).toHaveTextContent(
-        "双协议",
-      );
-    });
-    expect(onApiFormatChange).not.toHaveBeenCalled();
-    expect(screen.getByTitle("Responses=ok; Chat=ok")).toHaveTextContent(
-      "双协议",
-    );
-    expect(screen.getByTitle("Responses=HTTP 404; Chat=ok")).toHaveTextContent(
-      "Chat",
-    );
-    expect(
-      screen.getByTitle("Responses=HTTP 404; Chat=HTTP 404"),
-    ).toHaveTextContent("不可用");
-    expect(document.body).toHaveTextContent("双协议通过：gpt-5.5");
-    expect(document.body).toHaveTextContent("仅 Chat 通过：qwen3.6");
-    expect(document.body).toHaveTextContent("双协议失败：glm-4.5");
     expect(await screen.findByText("检测到混合协议模型")).toBeInTheDocument();
+    expect(onApiFormatChange).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("article", { name: "gpt-5.5 探测进度" }),
+    ).toHaveTextContent("选择 Responses");
+    expect(
+      screen.getByRole("article", { name: "qwen3.6 探测进度" }),
+    ).toHaveTextContent("选择 Chat Completions");
+    expect(
+      screen.getByRole("article", { name: "glm-4.5 探测进度" }),
+    ).toHaveTextContent("Failed");
 
     fireEvent.click(
       screen.getByRole("button", { name: "确认生成两个 provider" }),
@@ -1146,73 +1218,6 @@ describe("CodexFormFields local model routing", () => {
       responsesModels: ["gpt-5.5"],
       chatModels: ["qwen3.6"],
     });
-  });
-
-  it("runs protocol probing with a bounded model concurrency pool", async () => {
-    const responseResolvers = new Map<
-      string,
-      (value: ReturnType<typeof createProbeResult>) => void
-    >();
-    const chatResolvers = new Map<
-      string,
-      (value: ReturnType<typeof createProbeResult>) => void
-    >();
-
-    vi.mocked(probeCodexResponsesForConfig).mockImplementation(
-      async (_baseUrl, _apiKey, model) =>
-        new Promise((resolve) => {
-          responseResolvers.set(model, resolve);
-        }),
-    );
-    vi.mocked(probeCodexChatForConfig).mockImplementation(
-      async (_baseUrl, _apiKey, model) =>
-        new Promise((resolve) => {
-          chatResolvers.set(model, resolve);
-        }),
-    );
-    const { onApiFormatChange } = renderCatalogHarness(
-      [
-        { model: "model-a", upstreamModel: "model-a" },
-        { model: "model-b", upstreamModel: "model-b" },
-        { model: "model-c", upstreamModel: "model-c" },
-        { model: "model-d", upstreamModel: "model-d" },
-      ],
-      { shouldShowSpeedTest: true },
-    );
-
-    fireEvent.click(screen.getByRole("button", { name: "验证连接" }));
-    fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
-
-    await waitFor(() => {
-      expect(probeCodexResponsesForConfig).toHaveBeenCalledTimes(3);
-      expect(probeCodexChatForConfig).toHaveBeenCalledTimes(3);
-    });
-    expect(probeCodexResponsesForConfig).not.toHaveBeenCalledWith(
-      expect.anything(),
-      expect.anything(),
-      "model-d",
-      expect.anything(),
-      expect.anything(),
-    );
-
-    responseResolvers.get("model-a")?.(createProbeResult("model-a"));
-    chatResolvers.get("model-a")?.(createProbeResult("model-a"));
-
-    await waitFor(() => {
-      expect(probeCodexResponsesForConfig).toHaveBeenCalledTimes(4);
-      expect(probeCodexChatForConfig).toHaveBeenCalledTimes(4);
-    });
-
-    for (const model of ["model-b", "model-c", "model-d"]) {
-      responseResolvers.get(model)?.(createProbeResult(model));
-      chatResolvers.get(model)?.(createProbeResult(model));
-    }
-
-    await waitFor(() => {
-      expect(screen.getAllByText("双协议")).toHaveLength(4);
-    });
-    expect(onApiFormatChange).not.toHaveBeenCalled();
-    expect(await screen.findAllByText("双协议")).toHaveLength(4);
   });
 
   it("opens the protocol probe confirmation above the full screen provider panel", () => {
@@ -1351,14 +1356,13 @@ describe("CodexFormFields local model routing", () => {
     await waitFor(() =>
       expect(HTMLElement.prototype.scrollIntoView).toHaveBeenCalled(),
     );
-    expect(probeCodexResponsesForConfig).not.toHaveBeenCalled();
-    expect(probeCodexChatForConfig).not.toHaveBeenCalled();
+    expect(preflightCodexProviderProtocolCompatibility).not.toHaveBeenCalled();
   });
 
   it("surfaces protocol probe exceptions inline instead of looking frozen", async () => {
-    vi.mocked(probeCodexResponsesForConfig).mockRejectedValueOnce(
-      new Error("backend timeout"),
-    );
+    vi.mocked(
+      preflightCodexProviderProtocolCompatibility,
+    ).mockRejectedValueOnce(new Error("backend timeout"));
     renderCatalogHarness([{ model: "gpt-5.5", upstreamModel: "gpt-5.5" }], {
       shouldShowSpeedTest: true,
     });
@@ -1367,8 +1371,9 @@ describe("CodexFormFields local model routing", () => {
     fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "协议测试中断：backend timeout",
+      "探测中断：backend timeout",
     );
+    fireEvent.click(screen.getByRole("button", { name: "关闭" }));
     expect(screen.getByRole("button", { name: "验证连接" })).toBeEnabled();
   });
 

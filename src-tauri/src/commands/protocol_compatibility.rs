@@ -6,16 +6,17 @@ use std::{
     sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
-use tauri::State;
+use tauri::{ipc::Channel, State};
 use uuid::Uuid;
 
 use crate::{
     app_config::AppType,
     protocol_compatibility::{
         apply_probe_selection_to_provider, compile_codex_router_probe_candidates,
-        compile_provider_probe_candidate, endpoint::build_probe_url,
-        run_protocol_compatibility_probe, ManualReasoningOverride, ProbeCandidate, ProbeReadiness,
-        ProbeTargetKey, ProtocolCompatibilityProbeResult, ProtocolCompatibilityRecord,
+        compile_provider_probe_candidates, endpoint::build_probe_url,
+        run_protocol_compatibility_probe, run_protocol_compatibility_probe_with_reporter,
+        ManualReasoningOverride, ProbeCandidate, ProbeReadiness, ProbeTargetKey,
+        ProtocolCompatibilityProbeResult, ProtocolCompatibilityRecord, ProtocolProbeProgressEvent,
         ReasoningManualOverrideRecord, ReasoningProjection, ReasoningSemantic, TransportKind,
         PROBE_PROFILE_VERSION,
     },
@@ -105,7 +106,7 @@ pub struct ProtocolCompatibilityProbeRequest {
 #[serde(rename_all = "camelCase")]
 pub struct CodexProviderProtocolPreflightOutcome {
     pub provider: Provider,
-    pub record: ProtocolCompatibilityRecord,
+    pub records: Vec<ProtocolCompatibilityRecord>,
     pub protocol_applied: bool,
 }
 
@@ -159,8 +160,12 @@ pub async fn probe_codex_protocol_compatibility(
 pub async fn preflight_codex_provider_protocol_compatibility(
     state: State<'_, AppState>,
     provider: Provider,
+    on_event: Channel<ProtocolProbeProgressEvent>,
 ) -> Result<CodexProviderProtocolPreflightOutcome, String> {
-    run_provider_preflight(state.inner(), provider).await
+    run_provider_preflight(state.inner(), provider, move |event| {
+        let _ = on_event.send(event);
+    })
+    .await
 }
 
 #[tauri::command]
@@ -174,9 +179,7 @@ pub async fn save_codex_provider_with_protocol_preflight(
     let (provider, records, protocol_applied, probe_error) =
         match automatic_codex_provider_preflight(state.inner(), provider.clone()).await {
             Ok((provider, records)) => {
-                let protocol_applied = records
-                    .iter()
-                    .any(|record| record.result.selected_transport.is_some());
+                let protocol_applied = unanimous_selection_was_applied(&records);
                 (provider, records, protocol_applied, None)
             }
             Err(error) => (provider, Vec::new(), false, Some(error)),
@@ -211,16 +214,25 @@ pub async fn save_codex_provider_with_protocol_preflight(
     })
 }
 
-async fn run_provider_preflight(
+async fn run_provider_preflight<F>(
     state: &AppState,
     mut provider: Provider,
-) -> Result<CodexProviderProtocolPreflightOutcome, String> {
-    let candidate = compile_provider_probe_candidate(&provider)?;
-    let record = run_candidate(state, candidate).await?;
-    let protocol_applied = apply_probe_selection_to_provider(&mut provider, &record.result)?;
+    reporter: F,
+) -> Result<CodexProviderProtocolPreflightOutcome, String>
+where
+    F: Fn(ProtocolProbeProgressEvent) + Send + Sync,
+{
+    let candidates = compile_provider_probe_candidates(&provider)?;
+    let total = candidates.len();
+    let records = run_candidate_batch_with(candidates, |candidate| {
+        run_candidate_result_with_reporter(state, candidate, &reporter)
+    })
+    .await?;
+    let protocol_applied = apply_unanimous_probe_selection(&mut provider, &records)?;
+    reporter(batch_finished_event(total, &records));
     Ok(CodexProviderProtocolPreflightOutcome {
         provider,
-        record,
+        records,
         protocol_applied,
     })
 }
@@ -254,11 +266,59 @@ pub(crate) async fn automatic_codex_provider_preflight(
         return Ok((provider, records));
     }
     let mut provider = provider;
-    let candidate = compile_provider_probe_candidate(&provider)?;
-    let result = run_automatic_candidate_result(state, candidate.clone()).await?;
-    let record = build_record_for_result(&candidate, result)?;
-    apply_probe_selection_to_provider(&mut provider, &record.result)?;
-    Ok((provider, vec![record]))
+    let candidates = compile_provider_probe_candidates(&provider)?;
+    let records = run_candidate_batch_with(candidates, |candidate| {
+        run_automatic_candidate_result(state, candidate)
+    })
+    .await?;
+    apply_unanimous_probe_selection(&mut provider, &records)?;
+    Ok((provider, records))
+}
+
+fn apply_unanimous_probe_selection(
+    provider: &mut Provider,
+    records: &[ProtocolCompatibilityRecord],
+) -> Result<bool, String> {
+    let Some(selected) = unanimous_selected_transport(records) else {
+        return Ok(false);
+    };
+    let mut selected_result = records[0].result.clone();
+    selected_result.selected_transport = Some(selected);
+    apply_probe_selection_to_provider(provider, &selected_result)
+}
+
+fn unanimous_selected_transport(records: &[ProtocolCompatibilityRecord]) -> Option<TransportKind> {
+    let selected = records
+        .first()
+        .and_then(|record| record.result.selected_transport)?;
+    records
+        .iter()
+        .all(|record| record.result.selected_transport == Some(selected))
+        .then_some(selected)
+}
+
+fn unanimous_selection_was_applied(records: &[ProtocolCompatibilityRecord]) -> bool {
+    unanimous_selected_transport(records).is_some()
+}
+
+fn batch_finished_event(
+    total: usize,
+    records: &[ProtocolCompatibilityRecord],
+) -> ProtocolProbeProgressEvent {
+    let verified = records
+        .iter()
+        .filter(|record| record.result.readiness == ProbeReadiness::Verified)
+        .count();
+    let partial = records
+        .iter()
+        .filter(|record| record.result.readiness == ProbeReadiness::Partial)
+        .count();
+    ProtocolProbeProgressEvent::BatchFinished {
+        total,
+        verified,
+        partial,
+        failed: total.saturating_sub(verified + partial),
+    }
 }
 
 async fn run_candidate_and_persist(
@@ -293,6 +353,19 @@ async fn run_candidate_result(
     let _lease = state.try_acquire_protocol_probe(&candidate.lease_key())?;
     let client = crate::proxy::http_client::build_protocol_probe_client()?;
     Ok(run_protocol_compatibility_probe(candidate, &client).await)
+}
+
+async fn run_candidate_result_with_reporter<F>(
+    state: &AppState,
+    candidate: ProbeCandidate,
+    reporter: &F,
+) -> Result<ProtocolCompatibilityProbeResult, String>
+where
+    F: Fn(ProtocolProbeProgressEvent) + Send + Sync,
+{
+    let _lease = state.try_acquire_protocol_probe(&candidate.lease_key())?;
+    let client = crate::proxy::http_client::build_protocol_probe_client()?;
+    Ok(run_protocol_compatibility_probe_with_reporter(candidate, &client, reporter).await)
 }
 
 async fn run_automatic_candidate_result(
@@ -634,16 +707,19 @@ fn parse_transport_hint(value: Option<&str>) -> TransportKind {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_reasoning_override, clear_reasoning_override, find_cached_candidate_result,
-        inspect_reasoning_compatibility, plan_reasoning_override, run_candidate_batch_with,
+        apply_reasoning_override, apply_unanimous_probe_selection, batch_finished_event,
+        clear_reasoning_override, find_cached_candidate_result, inspect_reasoning_compatibility,
+        plan_reasoning_override, run_candidate_batch_with, unanimous_selection_was_applied,
         ApplyReasoningOverrideRequest, ClearReasoningOverrideRequest, PlanReasoningOverrideRequest,
     };
     use crate::protocol_compatibility::{
         HistoryReplay, ManualReasoningOverride, ProbeCandidate, ProbeReadiness, ProbeTargetKey,
-        ProtocolCompatibilityProbeResult, ProtocolCompatibilityRecord, ReasoningProjection,
-        ReasoningSemantic, ReasoningSource, TransportKind,
+        ProtocolCompatibilityProbeResult, ProtocolCompatibilityRecord, ProtocolProbeProgressEvent,
+        ReasoningProjection, ReasoningSemantic, ReasoningSource, TransportKind,
     };
+    use crate::provider::{Provider, ProviderMeta};
     use crate::{database::Database, store::AppState};
+    use serde_json::json;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -662,6 +738,142 @@ mod tests {
         .unwrap()
         .with_bearer_token("probe-secret")
         .unwrap()
+    }
+
+    fn ordinary_provider() -> Provider {
+        Provider {
+            id: "provider-a".to_string(),
+            name: "Provider A".to_string(),
+            settings_config: json!({
+                "auth": {"OPENAI_API_KEY": "probe-secret"},
+                "apiFormat": "openai_responses",
+                "config": "model = \"model-a\"\nmodel_provider = \"provider-a\"\n[model_providers.provider-a]\nbase_url = \"https://example.test/v1\"\nwire_api = \"responses\"\n",
+                "modelCatalog": {"models": [
+                    {"model": "model-a", "upstreamModel": "model-a", "apiFormat": "openai_responses"},
+                    {"model": "model-b", "upstreamModel": "model-b", "apiFormat": "openai_responses"}
+                ]}
+            }),
+            website_url: None,
+            category: None,
+            created_at: None,
+            sort_index: None,
+            notes: None,
+            meta: Some(ProviderMeta {
+                api_format: Some("openai_responses".to_string()),
+                ..ProviderMeta::default()
+            }),
+            icon: None,
+            icon_color: None,
+            in_failover_queue: false,
+        }
+    }
+
+    fn probe_record(
+        public_model: &str,
+        transport: Option<TransportKind>,
+        readiness: ProbeReadiness,
+    ) -> ProtocolCompatibilityRecord {
+        let candidate = alias_candidate("provider-a", "route-a", public_model);
+        super::build_record_for_result(
+            &candidate,
+            ProtocolCompatibilityProbeResult {
+                selected_transport: transport,
+                readiness,
+                branches: Vec::new(),
+            },
+        )
+        .expect("build record")
+    }
+
+    #[test]
+    fn unanimous_multi_model_selection_applies_the_global_protocol() {
+        let mut provider = ordinary_provider();
+        let records = vec![
+            probe_record(
+                "model-a",
+                Some(TransportKind::OpenAiChat),
+                ProbeReadiness::Verified,
+            ),
+            probe_record(
+                "model-b",
+                Some(TransportKind::OpenAiChat),
+                ProbeReadiness::Partial,
+            ),
+        ];
+
+        assert!(apply_unanimous_probe_selection(&mut provider, &records)
+            .expect("apply unanimous selection"));
+        assert_eq!(
+            provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.api_format.as_deref()),
+            Some("openai_chat")
+        );
+        assert_eq!(provider.settings_config["apiFormat"], "openai_chat");
+        assert!(provider.settings_config["config"]
+            .as_str()
+            .expect("config")
+            .contains("wire_api = \"chat\""));
+    }
+
+    #[test]
+    fn mixed_multi_model_selection_keeps_the_existing_global_protocol() {
+        let mut provider = ordinary_provider();
+        let original = provider.clone();
+        let records = vec![
+            probe_record(
+                "model-a",
+                Some(TransportKind::OpenAiResponses),
+                ProbeReadiness::Verified,
+            ),
+            probe_record(
+                "model-b",
+                Some(TransportKind::OpenAiChat),
+                ProbeReadiness::Verified,
+            ),
+        ];
+
+        assert!(!apply_unanimous_probe_selection(&mut provider, &records)
+            .expect("reject mixed selection"));
+        assert_eq!(
+            provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.api_format.as_deref()),
+            original
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.api_format.as_deref())
+        );
+        assert_eq!(provider.settings_config, original.settings_config);
+        assert!(!unanimous_selection_was_applied(&records));
+    }
+
+    #[test]
+    fn batch_finished_counts_verified_partial_and_failed_models() {
+        let records = vec![
+            probe_record(
+                "model-a",
+                Some(TransportKind::OpenAiResponses),
+                ProbeReadiness::Verified,
+            ),
+            probe_record(
+                "model-b",
+                Some(TransportKind::OpenAiChat),
+                ProbeReadiness::Partial,
+            ),
+        ];
+
+        assert_eq!(
+            batch_finished_event(3, &records),
+            ProtocolProbeProgressEvent::BatchFinished {
+                total: 3,
+                verified: 1,
+                partial: 1,
+                failed: 1,
+            }
+        );
     }
 
     #[tokio::test]
