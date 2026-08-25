@@ -4483,3 +4483,10 @@ supported in one streaming turn`。
 - `3.19.2-17` 中 Qwen Ultra 映射和 Chat 转发均已生效；不显示思考过程的直接原因是独立 Provider 的 `verified` 协议档案没有同步到相同目标的 MultiRouter route 身份，route 仍命中旧 `partial` 档案并关闭自动 reasoning projection。
 - Provider 保存现在除配置投影和 Subagent 目录外，也会为完整目标指纹一致的依赖路由物化 route 专属协议档案。匹配包括公开/上游模型、transport、endpoint、认证类型和凭据；只同步当前版本 `verified` 证据，并与 Provider 同事务保存，不放宽运行时 route identity 隔离。
 - 详见 `memory-2026-08-25-qwen-route-reasoning-profile-sync.md`。当前仅完成源码修复和聚焦验证，尚未构建、安装或替换运行中的 `3.19.2-17`。
+
+## 2026-08-25 Qwen 工具循环与旧路由运行时继承
+
+- 任务 `01a032c7-1005-7242-9f9b-88c56e16d13d` 的两条相同命令各真实执行 13 次；每轮 call ID、Codex `/responses` 和 Qwen `/chat/completions` 请求均为新实例，结果成功写回，排除 UI 重复、代理重放和失败 retry。
+- 循环时目标 Qwen Provider 档案已 `verified/readable`，MultiRouter route 仍为旧 `partial`，26 个循环工具调用之间没有 reasoning/commentary item。旧运行时只查 route key，导致真实 reasoning 不进入 Codex 历史，只能在下一轮补 `tool call` 占位。
+- 在保存时物化 route 档案之外，运行时现允许 route 档案不可用时继承 `codexResolvedTargetProviderId` 的完全等价 Provider 档案；完整目标键仍约束模型、transport、endpoint、认证和凭据。旧安装升级后不需要重新保存 Provider，endpoint 改变或 route identity 不完整时仍 fail closed。
+- 同一继承边界同时用于 reasoning projection 和 detected transport。详见 `memory-2026-08-25-qwen-tool-loop-runtime-inheritance.md`；当前仍未替换安装态，Qwen/vLLM 自身公开同类 loop 风险需在新构建 canary 中继续区分。
