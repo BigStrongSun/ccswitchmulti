@@ -4490,3 +4490,4 @@ supported in one streaming turn`。
 - 循环时目标 Qwen Provider 档案已 `verified/readable`，MultiRouter route 仍为旧 `partial`，26 个循环工具调用之间没有 reasoning/commentary item。旧运行时只查 route key，导致真实 reasoning 不进入 Codex 历史，只能在下一轮补 `tool call` 占位。
 - 在保存时物化 route 档案之外，运行时现允许 route 档案不可用时继承 `codexResolvedTargetProviderId` 的完全等价 Provider 档案；完整目标键仍约束模型、transport、endpoint、认证和凭据。旧安装升级后不需要重新保存 Provider，endpoint 改变或 route identity 不完整时仍 fail closed。
 - 同一继承边界同时用于 reasoning projection 和 detected transport。详见 `memory-2026-08-25-qwen-tool-loop-runtime-inheritance.md`；当前仍未替换安装态，Qwen/vLLM 自身公开同类 loop 风险需在新构建 canary 中继续区分。
+- 未升级安装态的临时恢复已完成：对 live DB 做 SQLite 在线备份后，将完全等价 standalone Qwen `verified` 档案复制到既有 route identity；原 CCSM 进程和 15721 未重启，health 与新连接读回均正常。备份和事务边界记录在上述专项 memory；这只修当前 route，长期修复仍是 `584a1834`。

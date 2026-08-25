@@ -26,3 +26,10 @@
 - 源码回归覆盖旧 route partial→目标 Provider verified 的 reasoning/transport 继承，以及 endpoint 不同拒绝继承。
 - Fresh 验证：Codex Provider 123/123、Responses→Chat 151/151、Chat 流转换 41/41、MultiRouter mutation 17/17；完整 `cargo test --lib --no-default-features` 为 3499 passed、0 failed、6 ignored，`cargo check --tests --no-default-features` 通过并保留 5 条既有 dead-code warning。rustfmt、diff 和 UTF-8 无 BOM 检查通过。
 - 当前运行中的 `3.19.2-17` 未替换；loop 任务发生在旧运行态。发布/安装后需要确认 rollout 重新出现 reasoning item，并观察相同成功命令是否仍连续重复。
+
+## 3.19.2-17 在线数据修复
+
+- 用户要求不升级版本先恢复当前 Qwen 路由。2026-08-25 12:24 对 live SQLite 做在线备份，文件为 `C:\Users\sunda\.cc-switch\backups\cc-switch.db.bak-qwen-route-profile-20260825T122419`。
+- 写入前确认 standalone Qwen Provider 与 route 的公开/上游模型、Chat transport、endpoint fingerprint、authentication kind 和 credential fingerprint 全部一致；仅把 Provider 的 `verified` result、版本和有效期复制到已有 route target identity，未修改 Provider、Router 配置或凭据。
+- 更新使用单个 `BEGIN IMMEDIATE` 事务并做读回断言。CCSM 未停止或重启；`127.0.0.1:15721` 仍由原 PID 27916 监听，`/health` 返回 healthy，新只读连接确认 route 为 `verified/open_ai_chat`。
+- 该数据修复会让现有 `3.19.2-17` 的精确 route lookup 立即启用 raw reasoning projection，但只修当前 Qwen route；源码提交 `584a1834` 仍是防止其他旧路由和未来升级重复出现问题的长期修复。
