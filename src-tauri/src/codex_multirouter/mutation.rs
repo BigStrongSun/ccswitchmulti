@@ -7,10 +7,13 @@ use super::projection::{
 use super::schema::CodexRoutingDocument;
 use crate::database::Database;
 use crate::error::AppError;
-use crate::protocol_compatibility::ProtocolCompatibilityRecord;
+use crate::protocol_compatibility::{
+    compile_codex_router_probe_candidates, endpoint::build_probe_url, ProbeReadiness,
+    ProbeTargetKey, ProtocolCompatibilityRecord, TransportKind, PROBE_PROFILE_VERSION,
+};
 use crate::provider::Provider;
 use rusqlite::params;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 #[derive(Debug, Clone)]
 pub struct CodexProviderMutationOutcome {
@@ -96,10 +99,26 @@ where
     let mut provider = provider;
     remove_schema_v2_router_derived_catalog(&mut provider);
     let affected_router_ids = validate_and_collect_affected_router_ids(db, &provider)?;
+    let profiles = materialize_equivalent_router_protocol_profiles(
+        db,
+        &provider,
+        &affected_router_ids.projection,
+        profiles,
+    )?;
     if profiles.is_empty() {
         db.save_provider("codex", &provider)?;
     } else {
-        db.save_provider_with_protocol_profiles("codex", &provider, profiles)?;
+        let related_provider_ids = affected_router_ids
+            .projection
+            .iter()
+            .cloned()
+            .collect::<HashSet<_>>();
+        db.save_provider_with_protocol_profiles_for_related_providers(
+            "codex",
+            &provider,
+            &profiles,
+            &related_provider_ids,
+        )?;
     }
 
     // Router 的 V2 profile 是用户可编辑策略，但候选成员来自 Provider 目录。
@@ -127,6 +146,107 @@ where
         )?);
     }
     Ok(CodexProviderMutationOutcome { projections })
+}
+
+fn materialize_equivalent_router_protocol_profiles(
+    db: &Database,
+    provider: &Provider,
+    affected_router_ids: &[String],
+    profiles: &[ProtocolCompatibilityRecord],
+) -> Result<Vec<ProtocolCompatibilityRecord>, AppError> {
+    let mut expanded = profiles.to_vec();
+    if !profiles.iter().any(|profile| {
+        profile.target.provider_id == provider.id
+            && profile.target.route_id.is_none()
+            && profile.probe_version == PROBE_PROFILE_VERSION
+            && profile.result.readiness == ProbeReadiness::Verified
+    }) {
+        return Ok(expanded);
+    }
+
+    let mut providers = db
+        .get_all_providers("codex")?
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+    providers.insert(provider.id.clone(), provider.clone());
+
+    for router_id in affected_router_ids {
+        if router_id == &provider.id {
+            continue;
+        }
+        let Some(router) = providers.get(router_id) else {
+            continue;
+        };
+        let candidates = match compile_codex_router_probe_candidates(router, &providers) {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                log::warn!(
+                    "Skipping protocol profile synchronization for Codex MultiRouter {router_id}: {error}"
+                );
+                continue;
+            }
+        };
+        for candidate in candidates {
+            for profile in profiles.iter().filter(|profile| {
+                profile.target.provider_id == provider.id
+                    && profile.target.route_id.is_none()
+                    && profile.probe_version == PROBE_PROFILE_VERSION
+                    && profile.result.readiness == ProbeReadiness::Verified
+            }) {
+                let Some(selected_transport) = profile.result.selected_transport else {
+                    continue;
+                };
+                let Some(route_target) = probe_target_for_candidate(&candidate, selected_transport)
+                else {
+                    continue;
+                };
+                if !same_protocol_target(&profile.target, &route_target) {
+                    continue;
+                }
+                let mut route_profile = profile.clone();
+                route_profile.target = route_target;
+                if expanded
+                    .iter()
+                    .all(|existing| existing.storage_key() != route_profile.storage_key())
+                {
+                    expanded.push(route_profile);
+                }
+            }
+        }
+    }
+    Ok(expanded)
+}
+
+fn probe_target_for_candidate(
+    candidate: &crate::protocol_compatibility::ProbeCandidate,
+    transport: TransportKind,
+) -> Option<ProbeTargetKey> {
+    let endpoint = build_probe_url(
+        &candidate.canonical_endpoint(),
+        transport,
+        candidate.is_full_url(),
+    )
+    .ok()?;
+    ProbeTargetKey::new(
+        candidate.provider_id.as_deref()?,
+        candidate.route_id.as_deref(),
+        &candidate.public_model,
+        &candidate.upstream_model,
+        transport,
+        &endpoint,
+        &candidate.authentication_kind,
+    )
+    .ok()
+    .map(|target| target.with_credential_fingerprint(candidate.credential_fingerprint()))
+}
+
+fn same_protocol_target(left: &ProbeTargetKey, right: &ProbeTargetKey) -> bool {
+    left.public_model == right.public_model
+        && left.upstream_model == right.upstream_model
+        && left.transport == right.transport
+        && left.endpoint_fingerprint == right.endpoint_fingerprint
+        && left.authentication_kind == right.authentication_kind
+        && left.credential_fingerprint == right.credential_fingerprint
 }
 
 fn sync_router_subagent_profiles_from_provider_catalog(
@@ -428,6 +548,7 @@ mod tests {
             "Qwen".to_string(),
             json!({
                 "auth": {"OPENAI_API_KEY": "secret"},
+                "config": "model = \"qwen3.8\"\nbase_url = \"https://qwen.example/v1\"\nwire_api = \"chat\"\n",
                 "modelCatalog": {"models": [{"model": "qwen3.8"}]}
             }),
             None,
@@ -437,6 +558,45 @@ mod tests {
             ..Default::default()
         });
         provider
+    }
+
+    fn verified_qwen_profile() -> ProtocolCompatibilityRecord {
+        use crate::protocol_compatibility::{
+            ProbeTargetKey, ProtocolCompatibilityProbeResult, TransportKind,
+        };
+
+        let target = ProbeTargetKey::new(
+            "qwen",
+            None::<String>,
+            "qwen3.8",
+            "qwen3.8",
+            TransportKind::OpenAiChat,
+            "https://qwen.example/v1/chat/completions",
+            "bearer",
+        )
+        .expect("profile target")
+        .with_credential("secret");
+        let result: ProtocolCompatibilityProbeResult = serde_json::from_value(json!({
+            "selected_transport": "open_ai_chat",
+            "readiness": "verified",
+            "branches": [{
+                "assessment": {
+                    "transport": "open_ai_chat",
+                    "baseline": "passed",
+                    "streaming": "passed",
+                    "forced_tool": "passed",
+                    "continuation": "passed"
+                },
+                "reasoning_shape": {
+                    "semantic": "readable",
+                    "source": "reasoning",
+                    "pre_tool_visible_content": "absent"
+                },
+                "evidence": []
+            }]
+        }))
+        .expect("verified probe result");
+        ProtocolCompatibilityRecord::new(target, result, 100, 200)
     }
 
     fn router(id: &str, target_provider_id: &str) -> Provider {
@@ -509,6 +669,91 @@ mod tests {
             saved_route, original_route,
             "Route declaration must not be synchronized with Provider fields"
         );
+    }
+
+    #[test]
+    fn provider_verified_protocol_profile_is_materialized_for_equivalent_router_target() {
+        use crate::protocol_compatibility::{ProbeTargetKey, ReasoningProjection, TransportKind};
+
+        let db = Database::memory().expect("memory db");
+        db.save_provider("codex", &target("openai_chat"))
+            .expect("seed target");
+        db.save_provider("codex", &router("router-a", "qwen"))
+            .expect("seed router");
+
+        apply_codex_provider_mutation_with_profiles_and_publisher(
+            &db,
+            target("openai_chat"),
+            &[verified_qwen_profile()],
+            |artifact| {
+                Ok(ProjectionReadBack::verified(
+                    artifact.dependency_fingerprint.clone(),
+                ))
+            },
+        )
+        .expect("save provider profile and rebuild router");
+
+        let route_target = ProbeTargetKey::new(
+            "router-a",
+            Some("route-qwen"),
+            "qwen3.8",
+            "qwen3.8",
+            TransportKind::OpenAiChat,
+            "https://qwen.example/v1/chat/completions",
+            "bearer",
+        )
+        .expect("route target")
+        .with_credential("secret");
+        let route_profile = db
+            .get_protocol_compatibility_result(&route_target)
+            .expect("read route profile")
+            .expect("equivalent route profile must be materialized");
+
+        assert_eq!(
+            route_profile.automatic_reasoning_projection(150),
+            ReasoningProjection::RawReasoningText
+        );
+    }
+
+    #[test]
+    fn provider_protocol_profile_is_not_materialized_when_route_credentials_differ() {
+        use crate::protocol_compatibility::{ProbeTargetKey, TransportKind};
+
+        let db = Database::memory().expect("memory db");
+        db.save_provider("codex", &target("openai_chat"))
+            .expect("seed target");
+        db.save_provider("codex", &router("router-a", "qwen"))
+            .expect("seed router");
+        let mut mismatched = verified_qwen_profile();
+        mismatched.target = mismatched.target.with_credential("different-secret");
+
+        apply_codex_provider_mutation_with_profiles_and_publisher(
+            &db,
+            target("openai_chat"),
+            &[mismatched],
+            |artifact| {
+                Ok(ProjectionReadBack::verified(
+                    artifact.dependency_fingerprint.clone(),
+                ))
+            },
+        )
+        .expect("save provider profile without borrowing it for the route");
+
+        let route_target = ProbeTargetKey::new(
+            "router-a",
+            Some("route-qwen"),
+            "qwen3.8",
+            "qwen3.8",
+            TransportKind::OpenAiChat,
+            "https://qwen.example/v1/chat/completions",
+            "bearer",
+        )
+        .expect("route target")
+        .with_credential("secret");
+        assert!(db
+            .get_protocol_compatibility_result(&route_target)
+            .expect("read route profile")
+            .is_none());
     }
 
     #[test]

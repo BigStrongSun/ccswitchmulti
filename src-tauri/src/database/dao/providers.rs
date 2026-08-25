@@ -214,10 +214,25 @@ impl Database {
         provider: &Provider,
         records: &[ProtocolCompatibilityRecord],
     ) -> Result<(), AppError> {
-        if records
-            .iter()
-            .any(|record| record.target.provider_id != provider.id)
-        {
+        self.save_provider_with_protocol_profiles_for_related_providers(
+            app_type,
+            provider,
+            records,
+            &HashSet::new(),
+        )
+    }
+
+    pub(crate) fn save_provider_with_protocol_profiles_for_related_providers(
+        &self,
+        app_type: &str,
+        provider: &Provider,
+        records: &[ProtocolCompatibilityRecord],
+        related_provider_ids: &HashSet<String>,
+    ) -> Result<(), AppError> {
+        if records.iter().any(|record| {
+            record.target.provider_id != provider.id
+                && !related_provider_ids.contains(&record.target.provider_id)
+        }) {
             return Err(AppError::InvalidInput(
                 "protocol compatibility profile does not belong to the Provider being saved"
                     .to_string(),

@@ -4478,3 +4478,8 @@ supported in one streaming turn`。
 - #62 的 startup/port ownership 只用 PID、进程存在和自报 `/status`，无法抵抗 PID 复用，也未证明 listener/可执行文件/start-time 所有权；不得据此复用或接管未知进程。#64 用单一全局 outcome，后续成功可覆盖先前失败，缺 acknowledgment/generation 生命周期；应改为有界、分 app/operation、按严重度保留的结果集合。
 - 因此当前没有任何一个 #36 之后的 PR 适合原样合并。可执行顺序是：先根修 #66 的 context-aware projection 缺口和 #58 的 enabled 过滤；再统一 #57/#63 的 live config writer 与 ownership receipt；随后分别重做 #62/#64；#59 先定兼容策略；#61 先确认官方/安装态 marketplace schema；#60 延后到依赖专版。
 - Fresh 证据：当前主线定向通过 v1/v2 auth source、active-router publication、mode-all Provider classifier、Windows atomic write 以及 `CodexRouterWorkspacePage` 73/73。GitHub CLI/API 与已抓取 PR refs、merge-tree、源码、CI 日志和本地测试作为当前状态权威；Codex WebSearch 的 GitHub 索引滞后，Matrix WebSearch 返回 `fetch failed`，因此未用搜索摘要替代仓库事实。
+# 2026-08-25 Qwen MultiRouter 推理档案同步
+
+- `3.19.2-17` 中 Qwen Ultra 映射和 Chat 转发均已生效；不显示思考过程的直接原因是独立 Provider 的 `verified` 协议档案没有同步到相同目标的 MultiRouter route 身份，route 仍命中旧 `partial` 档案并关闭自动 reasoning projection。
+- Provider 保存现在除配置投影和 Subagent 目录外，也会为完整目标指纹一致的依赖路由物化 route 专属协议档案。匹配包括公开/上游模型、transport、endpoint、认证类型和凭据；只同步当前版本 `verified` 证据，并与 Provider 同事务保存，不放宽运行时 route identity 隔离。
+- 详见 `memory-2026-08-25-qwen-route-reasoning-profile-sync.md`。当前仅完成源码修复和聚焦验证，尚未构建、安装或替换运行中的 `3.19.2-17`。
