@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-08-25 Qwen3.8 reasoning 已生成但 Codex Desktop 不显示的根因与修复
+
+- 现场 Qwen 任务 `01a032c7-1005-7242-9f9b-88c56e16d13d` 的 rollout 含 10 个 raw reasoning item、合计 322,964 字符，`summary_text=0`；对照 DeepSeek V4 任务的 reasoning 全部位于 summary。故 vLLM 已生成、CCSM Chat→Responses 已转换、Codex app-server 已存储，文本不是在上游或代理中丢失。
+- 当前 Codex Desktop `26.818.5345.0` 的 app-server 能接收 `item/reasoning/textDelta` 并写入 `reasoning.content`，但 renderer 的主会话可见性只检查 `reasoning.summary`；`show_raw_agent_reasoning=true` 也没有接入该可见性判断。官方 app-server 协议同时定义 summary delta 和 raw text delta，CLI/TUI 可显示 raw，Desktop 当前版本不能。
+- 根修采用请求级 consumer capability，不按 Qwen/DeepSeek 模型名特判：只有可信本地 Codex 请求且 `originator` 精确为 `Codex Desktop` 时，把自动解析出的 `RawReasoningText` 在返回客户端前适配为 `ReasoningSummary`；CLI、TUI、External API、无身份或不可信调用仍保留原 raw/none 语义。客户端标识贯穿普通流式、非流式和 hosted-tool 流式三条 Chat→Responses 返回路径。
+- vLLM/Qwen 参数差异是独立隐患而非本次直接根因。官方 vLLM `ChatCompletionRequest` 会把非空 `reasoning_effort` 合并为 `chat_template_kwargs.enable_thinking`，Qwen3 parser 也从该嵌套字段读取；当前 live Qwen 模型能力声明的上游参数为 `reasoning_effort`，所以本次已实际开启 thinking 并完整返回 reasoning。旧 `thinking` 与 `enable_thinking` 不一致问题不能替代 Desktop 展示修复。
+- TDD：新增客户端识别/CLI 隔离、普通流式 Desktop summary、非流式 Desktop summary、hosted-tool Desktop summary 四类回归；`desktop_` 69/69、`reasoning_projection` 5/5、Rust lib 全量 `3508 passed / 6 ignored`，rustfmt 与 `git diff --check` 通过。没有构建安装包、替换安装态、重启 CCSM/Codex 或改写 live 数据库；当前运行程序仍不含本修复。
+
 ## 2026-08-25 v3.19.2-17 GitHub 正式发布
 
 - 最终发布提交为 `83f1a03e35e5fb66a28ae4dcca665dce4732e9b5`，四处版本源均为 `3.19.2-17`；annotated tag 对象为 `f3f9170137960b49cd75dbc474084f920034ea79`，本地与远端 peel 均精确指向该发布提交。旧 tag 原指向已取消流水线的 `54cb432d` 且没有 GitHub Release；按用户明确要求删除旧 tag 后基于当前候选重新创建，没有 force-push `main`。

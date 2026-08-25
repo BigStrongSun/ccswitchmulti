@@ -58,6 +58,48 @@ pub enum CodexMultiRouterAuthFacade {
     LegacyPreserved,
 }
 
+/// Codex reasoning consumer shape used only for response presentation.
+///
+/// The app-server protocol carries both summary and raw reasoning, but current
+/// Codex Desktop builds only make summary-backed items visible in the main
+/// conversation. CLI/TUI clients can render raw reasoning and must keep it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum CodexReasoningClient {
+    Desktop,
+    #[default]
+    Other,
+}
+
+pub(crate) fn codex_reasoning_client_from_headers(
+    headers: &http::HeaderMap,
+    trusted_codex_client: bool,
+) -> CodexReasoningClient {
+    if !trusted_codex_client {
+        return CodexReasoningClient::Other;
+    }
+    let is_desktop = headers
+        .get("originator")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("Codex Desktop"));
+    if is_desktop {
+        CodexReasoningClient::Desktop
+    } else {
+        CodexReasoningClient::Other
+    }
+}
+
+pub(crate) fn adapt_codex_reasoning_projection_for_client(
+    projection: ReasoningProjection,
+    client: CodexReasoningClient,
+) -> ReasoningProjection {
+    match (projection, client) {
+        (ReasoningProjection::RawReasoningText, CodexReasoningClient::Desktop) => {
+            ReasoningProjection::ReasoningSummary
+        }
+        (projection, _) => projection,
+    }
+}
+
 /// Read a route's authentication owner across the v1 and v2 schemas.
 ///
 /// v1 stored this under `upstream.auth.source`; v2 stores it in the top-level
@@ -1278,6 +1320,20 @@ pub(crate) fn resolve_codex_chat_reasoning_projection(
     })
     .map(|record| record.automatic_reasoning_projection(now))
     .unwrap_or(ReasoningProjection::None)
+}
+
+pub(crate) fn resolve_codex_chat_reasoning_projection_for_client(
+    provider: &Provider,
+    public_model: &str,
+    upstream_model: &str,
+    db: &Database,
+    now: i64,
+    client: CodexReasoningClient,
+) -> ReasoningProjection {
+    adapt_codex_reasoning_projection_for_client(
+        resolve_codex_chat_reasoning_projection(provider, public_model, upstream_model, db, now),
+        client,
+    )
 }
 
 fn resolve_route_or_equivalent_provider_profile<F>(
@@ -7874,6 +7930,40 @@ wire_api = "responses"
             ),
             ReasoningProjection::None,
             "a route marker without a parent provider ID must fail closed"
+        );
+    }
+
+    #[test]
+    fn codex_desktop_reasoning_projection_uses_visible_summary_without_changing_cli() {
+        let mut desktop_headers = http::HeaderMap::new();
+        desktop_headers.insert(
+            "originator",
+            http::HeaderValue::from_static("Codex Desktop"),
+        );
+        let mut cli_headers = http::HeaderMap::new();
+        cli_headers.insert("originator", http::HeaderValue::from_static("codex_cli_rs"));
+
+        let desktop = codex_reasoning_client_from_headers(&desktop_headers, true);
+        let cli = codex_reasoning_client_from_headers(&cli_headers, true);
+        let untrusted = codex_reasoning_client_from_headers(&desktop_headers, false);
+
+        assert_eq!(desktop, CodexReasoningClient::Desktop);
+        assert_eq!(cli, CodexReasoningClient::Other);
+        assert_eq!(untrusted, CodexReasoningClient::Other);
+        assert_eq!(
+            adapt_codex_reasoning_projection_for_client(
+                ReasoningProjection::RawReasoningText,
+                desktop,
+            ),
+            ReasoningProjection::ReasoningSummary,
+        );
+        assert_eq!(
+            adapt_codex_reasoning_projection_for_client(ReasoningProjection::RawReasoningText, cli,),
+            ReasoningProjection::RawReasoningText,
+        );
+        assert_eq!(
+            adapt_codex_reasoning_projection_for_client(ReasoningProjection::None, desktop,),
+            ReasoningProjection::None,
         );
     }
 }
