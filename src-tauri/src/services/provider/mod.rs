@@ -1024,6 +1024,64 @@ mod tests {
 
     #[test]
     #[serial]
+    fn syncing_active_profile_repairs_stale_project_provider() {
+        with_test_home(|state, _| {
+            for id in ["router-personal", "router-company"] {
+                state
+                    .db
+                    .save_provider(
+                        AppType::Codex.as_str(),
+                        &Provider::with_id(id.to_string(), id.to_string(), json!({}), None),
+                    )
+                    .expect("save router");
+            }
+            let profile_id = "codex-profile";
+            state
+                .db
+                .save_profile(&crate::database::Profile {
+                    id: profile_id.to_string(),
+                    name: "Codex".to_string(),
+                    payload: json!({
+                        "providers": {"codex": "router-personal"},
+                        "mcp": {"codex": ["computer-use"]}
+                    })
+                    .to_string(),
+                    sort_order: None,
+                    created_at: Some(1),
+                    updated_at: Some(1),
+                })
+                .expect("save active profile");
+            state
+                .db
+                .set_current_profile_id("codex", Some(profile_id))
+                .expect("activate profile");
+
+            ProviderService::sync_active_profile_provider_snapshot(
+                state,
+                &AppType::Codex,
+                "router-company",
+            )
+            .expect("repair stale profile provider");
+
+            let profile = state
+                .db
+                .get_profile(profile_id)
+                .expect("read profile")
+                .expect("profile exists");
+            let payload: Value = serde_json::from_str(&profile.payload).expect("parse payload");
+            assert_eq!(
+                payload.pointer("/providers/codex"),
+                Some(&json!("router-company"))
+            );
+            assert_eq!(
+                payload.pointer("/mcp/codex/0"),
+                Some(&json!("computer-use"))
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
     fn schema_v2_subagent_initialization_uses_provider_owned_catalog() {
         with_test_home(|state, _| {
             let target = Provider::with_id(
@@ -4787,6 +4845,7 @@ impl ProviderService {
         if !Self::is_codex_schema_v2_router(app_type, provider) {
             return Ok(Vec::new());
         }
+        Self::sync_active_profile_provider_snapshot(state, app_type, &provider.id)?;
         let status = crate::codex_multirouter::projection::ensure_codex_multirouter_projection(
             state.db.as_ref(),
             &provider.id,
@@ -4880,6 +4939,21 @@ impl ProviderService {
             projection,
             verification,
         })
+    }
+
+    pub(crate) fn sync_active_profile_provider_snapshot(
+        state: &AppState,
+        app_type: &AppType,
+        provider_id: &str,
+    ) -> Result<(), AppError> {
+        let Some(scope) = crate::services::profile::ProfileScope::for_app(app_type) else {
+            return Ok(());
+        };
+        crate::services::profile::ProfileService::update_current_provider_snapshot(
+            state,
+            scope,
+            provider_id,
+        )
     }
 
     /// Persist one V2 capability document without replacing the surrounding Provider record.
@@ -5165,17 +5239,24 @@ impl ProviderService {
 
     /// Switch to a provider
     ///
-    /// Switch flow:
-    /// 1. Validate target provider exists
-    /// 2. Check if proxy takeover mode is active AND proxy server is running
-    /// 3. If takeover mode active: hot-switch proxy target and refresh proxy-safe Live labels
-    /// 4. If normal mode:
-    ///    a. **Backfill mechanism**: Backfill current live config to current provider
-    ///    b. Update local settings current_provider_xxx (device-level)
-    ///    c. Update database is_current (as default for new devices)
-    ///    d. Write target provider config to live files
-    ///    e. Sync MCP configuration
+    /// After the provider switch succeeds, keep the active project snapshot in
+    /// sync so Codex projection ownership cannot be shadowed by a stale profile.
     pub fn switch(state: &AppState, app_type: AppType, id: &str) -> Result<SwitchResult, AppError> {
+        let mut result = Self::switch_inner(state, app_type.clone(), id)?;
+        if let Err(error) = Self::sync_active_profile_provider_snapshot(state, &app_type, id) {
+            log::warn!("供应商切换成功，但当前项目快照同步失败: {error}");
+            result
+                .warnings
+                .push("profile_provider_snapshot_sync_failed".to_string());
+        }
+        Ok(result)
+    }
+
+    fn switch_inner(
+        state: &AppState,
+        app_type: AppType,
+        id: &str,
+    ) -> Result<SwitchResult, AppError> {
         // Check if provider exists
         let providers = state.db.get_all_providers(app_type.as_str())?;
         let _provider = providers
@@ -5646,6 +5727,8 @@ impl ProviderService {
         let Some(provider) = providers.get(&current_id) else {
             return Ok(());
         };
+
+        Self::sync_active_profile_provider_snapshot(state, &app_type, &provider.id)?;
 
         if Self::is_codex_schema_v2_router(&app_type, provider) {
             crate::codex_multirouter::projection::ensure_codex_multirouter_projection(

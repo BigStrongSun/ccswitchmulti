@@ -310,6 +310,48 @@ impl ProfileService {
         Ok(profile)
     }
 
+    /// Keep the active project's provider slot aligned with a successful
+    /// device-level provider switch.
+    ///
+    /// Only the provider slot is refreshed. MCP, Skills and Prompt snapshots are
+    /// intentionally preserved, and profiles with no captured scope remain
+    /// untouched.
+    pub fn update_current_provider_snapshot(
+        state: &AppState,
+        scope: ProfileScope,
+        provider_id: &str,
+    ) -> Result<(), AppError> {
+        let Some(current_id) = state.db.get_current_profile_id(scope.as_str())? else {
+            return Ok(());
+        };
+        let mut profile = state
+            .db
+            .get_profile(&current_id)?
+            .ok_or_else(|| AppError::InvalidInput(format!("Profile not found: {current_id}")))?;
+        let mut payload: ProfilePayload = serde_json::from_str(&profile.payload)
+            .map_err(|e| AppError::Config(format!("解析 profile payload 失败: {e}")))?;
+
+        let mut changed = false;
+        for app in scope.apps() {
+            if let Some(slot) = payload.providers.get_mut(app) {
+                if slot.is_some() && slot.as_deref() != Some(provider_id) {
+                    *slot = Some(provider_id.to_string());
+                    changed = true;
+                }
+            }
+        }
+
+        if !changed {
+            return Ok(());
+        }
+
+        profile.payload = serde_json::to_string(&payload)
+            .map_err(|e| AppError::Config(format!("序列化 profile payload 失败: {e}")))?;
+        profile.updated_at = Some(chrono::Utc::now().timestamp());
+        state.db.save_profile(&profile)?;
+        Ok(())
+    }
+
     /// 删除项目；若删除的是某分组当前激活项目，一并清除该分组的激活标记
     pub fn delete(state: &AppState, id: &str) -> Result<(), AppError> {
         state.db.delete_profile(id)?;
@@ -531,6 +573,49 @@ mod tests {
         assert!(json.contains("\"codex\""));
         let back: ProfilePayload = serde_json::from_str(&json).unwrap();
         assert_eq!(back, payload);
+    }
+
+    #[test]
+    fn update_current_provider_snapshot_preserves_other_scope_slots() {
+        let db = std::sync::Arc::new(Database::memory().expect("memory db"));
+        let state = AppState::new(db.clone());
+        let profile_id = "codex-profile";
+        db.save_profile(&Profile {
+            id: profile_id.to_string(),
+            name: "Codex".to_string(),
+            payload: serde_json::json!({
+                "providers": {"codex": "router-personal"},
+                "mcp": {"codex": ["computer-use"]},
+                "skills": {"codex": ["local:code-review"]},
+                "prompts": {"codex": "codex-prompt"}
+            })
+            .to_string(),
+            sort_order: None,
+            created_at: Some(1),
+            updated_at: Some(1),
+        })
+        .expect("save active profile");
+        db.set_current_profile_id("codex", Some(profile_id))
+            .expect("activate profile");
+
+        ProfileService::update_current_provider_snapshot(
+            &state,
+            ProfileScope::Codex,
+            "router-company",
+        )
+        .expect("refresh provider snapshot");
+
+        let payload: ProfilePayload = serde_json::from_str(
+            &db.get_profile(profile_id)
+                .expect("read profile")
+                .expect("profile exists")
+                .payload,
+        )
+        .expect("parse profile payload");
+        assert_eq!(payload.providers.codex.as_deref(), Some("router-company"));
+        assert_eq!(payload.mcp.codex, Some(ids(&["computer-use"])));
+        assert_eq!(payload.skills.codex, Some(ids(&["local:code-review"])));
+        assert_eq!(payload.prompts.codex.as_deref(), Some("codex-prompt"));
     }
 
     #[test]
