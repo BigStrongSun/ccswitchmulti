@@ -1,4 +1,14 @@
-# 2026-08-25 Codex Desktop raw reasoning 渲染缺口
+# 2026-08-25 Qwen3.8 reasoning-only 与 Codex raw reasoning 投影
+
+## 结论更正
+
+- 先前把用户看到的现象主要归因于 Codex Desktop 不渲染 raw reasoning，结论不完整。
+  DeepSeek V4 在同一 Desktop 中可正常显示，证明必须同时比较 Provider 请求参数和 CCSM
+  的 reasoning 投影类型。
+- 本次现场实际包含两个独立问题：Qwen Provider 的过期采样覆盖会提高 reasoning-only 长生成
+  的概率；CCSM 自动探测又把 Qwen 的可读 `reasoning` 投影为 raw `reasoning_text`，而当前
+  Desktop 主会话只投影 `summary`。前者影响模型是否正常结束，后者影响已经收到的推理是否
+  可见。任何单一归因都不能解释完整现象。
 
 ## 现场结论
 
@@ -37,6 +47,33 @@
 - vLLM 官方文档提供独立的 `thinking_token_budget`，达到预算后强制产生 reasoning end；当前
   安装的 vLLM 代码也包含该能力。是否给 provider 增加可配置 reasoning budget，应作为单独
   产品设计处理，不能在 CCSM 中按 Qwen 模型名写死或静默限制所有用户。
+
+## Qwen Provider 采样根因与现场修正
+
+- 现场 `Qwen` Provider 的 `meta.localProxyRequestOverrides.body` 从至少 2026-08-16 的备份起
+  一直保存 `temperature=0.1`。MultiRouter 按设计继承 Provider 最终请求参数，因此 CCSM
+  发往 Qwen Chat Completions 的异常请求原始值就是 `temperature=0.1`；roglinux 透明代理
+  只为缺失字段补了 `top_p=1.0`，不能把 `0.1` 归因于代理。
+- Qwen3.8 官方 thinking 推荐是 `temperature=1.0`、`top_p=0.95`、`top_k=20`、
+  `min_p=0`、`presence_penalty=0`、`repetition_penalty=1`。现场 2026-08-25 已通过 CCSM
+  Provider 编辑/保存通道把 Qwen 的本地代理 Body 覆盖改为这组参数；SQLite 回读一致，
+  CCSM、Codex 和 vLLM 均未重启，也没有额外发送模型测试请求。
+- 这暴露的是模型切换后的配置生命周期缺口：模型目录、能力和推理档位已经从 Qwen3.6
+  更新为 Qwen3.8，但用户维护的请求覆盖仍保留旧采样值。不能静默覆盖用户显式配置；后续
+  产品应在模型标识或预设发生变化时，把与新模型预设冲突的 Body 覆盖作为可见 drift，要求
+  用户确认保留、应用新预设或清除覆盖。
+
+## vLLM 边界确认
+
+- 运行中的 vLLM 为 `0.27.2rc1.dev91+g1f7427bc0`，启动参数使用官方 Qwen3.8 推荐的
+  `--reasoning-parser qwen3` 与 `--tool-call-parser qwen3_coder`。
+- 模型 chat template 在 generation prompt 中写入 `<think>`；vLLM parser 初始状态为
+  `REASONING`，遇到 `</think>` 才进入 `CONTENT`，遇到 `<tool_call>` 可隐式结束 reasoning。
+  异常轮没有生成这两个终止标记而直接 EOS，所以 vLLM 输出 reasoning-only 是对实际 token
+  流的忠实分类，不是 parser 名称或模板标记配置错误。
+- 代理日志显示这种长 reasoning-only 不是单次偶发：2026-08-15 至 2026-08-25 已出现多次
+  `content_chars=0`，终态既有 `stop` 也有 `length`。这支持“旧采样覆盖加长上下文触发模型
+  终止不稳定”，但在新采样参数下尚未做独立负载复现，因此不能宣称概率问题已经验收消失。
 
 ## 搜索与证据
 
