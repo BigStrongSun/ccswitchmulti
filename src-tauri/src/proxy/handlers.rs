@@ -3429,15 +3429,13 @@ fn create_codex_chat_sse_stream_from_verified_profile<E: std::error::Error + Sen
     upstream_model: &str,
     db: std::sync::Arc<crate::database::Database>,
     now: i64,
-    reasoning_client: super::providers::CodexReasoningClient,
 ) -> impl futures::Stream<Item = Result<Bytes, std::io::Error>> + Send {
-    let reasoning_projection = super::providers::resolve_codex_chat_reasoning_projection_for_client(
+    let reasoning_projection = super::providers::resolve_codex_chat_reasoning_projection(
         provider,
         public_model,
         upstream_model,
         db.as_ref(),
         now,
-        reasoning_client,
     );
     let observation =
         load_runtime_observation_profile(provider, public_model, upstream_model, db.as_ref(), now)
@@ -3462,16 +3460,14 @@ fn chat_completion_to_response_from_verified_profile(
     upstream_model: &str,
     db: &crate::database::Database,
     now: i64,
-    reasoning_client: super::providers::CodexReasoningClient,
 ) -> Result<Value, ProxyError> {
     observe_codex_chat_json_profile(provider, public_model, upstream_model, db, &body, now);
-    let reasoning_projection = super::providers::resolve_codex_chat_reasoning_projection_for_client(
+    let reasoning_projection = super::providers::resolve_codex_chat_reasoning_projection(
         provider,
         public_model,
         upstream_model,
         db,
         now,
-        reasoning_client,
     );
     transform_codex_chat::chat_completion_to_response_with_context_and_projection(
         body,
@@ -3741,7 +3737,6 @@ async fn handle_codex_chat_to_responses_transform(
             upstream_model,
             state.db.clone(),
             projection_now,
-            ctx.codex_reasoning_client,
         );
         let sse_stream = record_responses_sse_stream(sse_stream, state.codex_chat_history.clone());
 
@@ -3877,7 +3872,6 @@ async fn handle_codex_chat_to_responses_transform(
         upstream_model,
         state.db.as_ref(),
         projection_now,
-        ctx.codex_reasoning_client,
     )
     .map_err(|e| {
         log::error!("[Codex] Chat → Responses 响应转换失败: {e}");
@@ -5894,7 +5888,6 @@ mod tests {
             "qwen-mapped",
             std::sync::Arc::new(db),
             200,
-            crate::proxy::providers::CodexReasoningClient::Other,
         )
         .map(|item| item.expect("converted SSE"))
         .collect::<Vec<_>>()
@@ -5907,7 +5900,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn desktop_streaming_wiring_projects_verified_raw_reasoning_as_visible_summary() {
+    async fn streaming_wiring_never_manufactures_summary_from_verified_raw_reasoning() {
         let db = Database::memory().expect("memory database");
         let provider = verified_qwen_chat_profile(&db);
         let upstream = futures::stream::iter(vec![Ok::<_, std::io::Error>(Bytes::from_static(
@@ -5922,15 +5915,14 @@ mod tests {
             "qwen-mapped",
             std::sync::Arc::new(db),
             200,
-            crate::proxy::providers::CodexReasoningClient::Desktop,
         )
         .map(|item| item.expect("converted SSE"))
         .collect::<Vec<_>>()
         .await;
         let response = String::from_utf8(bytes.concat()).expect("UTF-8 SSE");
 
-        assert!(response.contains("event: response.reasoning_summary_text.delta"));
-        assert!(!response.contains("event: response.reasoning_text.delta"));
+        assert!(response.contains("event: response.reasoning_text.delta"));
+        assert!(!response.contains("event: response.reasoning_summary_text.delta"));
         assert!(response.contains("Visible answer."));
     }
 
@@ -5957,7 +5949,6 @@ mod tests {
             "qwen-mapped",
             &db,
             200,
-            crate::proxy::providers::CodexReasoningClient::Other,
         )
         .expect("converted response");
 
@@ -5973,7 +5964,7 @@ mod tests {
     }
 
     #[test]
-    fn desktop_non_streaming_wiring_projects_verified_raw_reasoning_as_visible_summary() {
+    fn non_streaming_wiring_never_manufactures_summary_from_verified_raw_reasoning() {
         let db = Database::memory().expect("memory database");
         let provider = verified_qwen_chat_profile(&db);
         let response = chat_completion_to_response_from_verified_profile(
@@ -5995,14 +5986,16 @@ mod tests {
             "qwen-mapped",
             &db,
             200,
-            crate::proxy::providers::CodexReasoningClient::Desktop,
         )
         .expect("converted response");
 
-        assert!(response["output"][0].get("content").is_none());
-        assert_eq!(response["output"][0]["summary"][0]["type"], "summary_text");
+        assert_eq!(response["output"][0]["summary"], json!([]));
         assert_eq!(
-            response["output"][0]["summary"][0]["text"],
+            response["output"][0]["content"][0]["type"],
+            "reasoning_text"
+        );
+        assert_eq!(
+            response["output"][0]["content"][0]["text"],
             "Inspect route."
         );
     }
@@ -6030,7 +6023,6 @@ mod tests {
             "qwen-mapped",
             &db,
             150,
-            crate::proxy::providers::CodexReasoningClient::Other,
         )
         .expect("converted response");
 
@@ -6072,7 +6064,6 @@ mod tests {
             "qwen-mapped",
             db.clone(),
             150,
-            crate::proxy::providers::CodexReasoningClient::Other,
         )
         .collect::<Vec<_>>()
         .await;

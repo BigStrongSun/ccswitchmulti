@@ -1,10 +1,20 @@
 # CC Switch Repository Memory
 
+## 2026-08-26 Codex raw reasoning / summary 语义纠正与协议选择解耦
+
+- `8b38cba4` 的 Desktop 兼容方案已废弃：它根据 `originator: Codex Desktop` 把探测得到的 `RawReasoningText` 改标为 `ReasoningSummary`。这会把上游完整原始推理伪装成模型摘要，违反 Codex app-server / OpenAI Responses 的字段契约；客户端可见性问题不能通过篡改响应语义解决。
+- 正确映射固定为：上游 raw/readable reasoning → Responses `reasoning_text` / app-server `item/reasoning/textDelta`；只有上游原生 summary → Responses `reasoning_summary_text` / app-server `item/reasoning/summaryTextDelta`。CCSM 不生成摘要；若产品需要摘要，必须依赖上游原生 summary 或新增显式、独立的 summarizer，而不能复用 raw chain-of-thought。
+- 删除 `CodexReasoningClient`、Desktop header 分类及其在 RequestContext、普通流式、非流式和 hosted-tool 流式路径中的传播。三条 Chat→Responses 返回路径现在只按已验证档案投影，Desktop、CLI 与外部调用不会改变 raw/summary 的含义。
+- 协议选择与 reasoning 形态解耦。selector 只按 `续接 > 强制工具 > SSE > 原生 Responses 同分兜底` 比较；Readable/Summary/Opaque/None 仍完整记录在分支档案并决定选中分支后可采用的 reasoning 投影，但不再被当作协议质量分数。这样不会为了 raw 与 summary 的呈现差异，把能力完全相同的原生 Responses 静默切成 Chat。
+- Provider→MultiRouter route 的等价档案物化及运行时继承仍保留。回归覆盖真实 runner 分支形态、普通流式/非流式、hosted-tool 流式，并明确断言 raw reasoning 不会产生任何 `reasoning_summary_text.delta` 或非空 `summary_text`。
+- Fresh 验证：protocol compatibility 68/68、handlers 91/91、forwarder 160/160、MultiRouter mutation 17/17、route 继承 2/2；`cargo check --tests --no-default-features` 成功（5 条既有 dead-code warning），Rust lib 全量 3507 passed / 0 failed / 6 ignored；rustfmt、diff、UTF-8 严格解码/no-BOM/U+FFFD 检查通过。
+- 联网交叉验证中，Codex 内置搜索读取了 OpenAI/Codex app-server 与 vLLM 官方协议材料，三者一致区分 raw reasoning text 与 native summary；Matrix WebSearch 独立链多次返回 HTTP 521，未形成可用的第二来源证据，不能把该链路失败当成支持性证据。
+
 ## 2026-08-25 Qwen3.8 reasoning 已生成但 Codex Desktop 不显示的根因与修复
 
 - 现场 Qwen 任务 `01a032c7-1005-7242-9f9b-88c56e16d13d` 的 rollout 含 10 个 raw reasoning item、合计 322,964 字符，`summary_text=0`；对照 DeepSeek V4 任务的 reasoning 全部位于 summary。故 vLLM 已生成、CCSM Chat→Responses 已转换、Codex app-server 已存储，文本不是在上游或代理中丢失。
 - 当前 Codex Desktop `26.818.5345.0` 的 app-server 能接收 `item/reasoning/textDelta` 并写入 `reasoning.content`，但 renderer 的主会话可见性只检查 `reasoning.summary`；`show_raw_agent_reasoning=true` 也没有接入该可见性判断。官方 app-server 协议同时定义 summary delta 和 raw text delta，CLI/TUI 可显示 raw，Desktop 当前版本不能。
-- 根修采用请求级 consumer capability，不按 Qwen/DeepSeek 模型名特判：只有可信本地 Codex 请求且 `originator` 精确为 `Codex Desktop` 时，把自动解析出的 `RawReasoningText` 在返回客户端前适配为 `ReasoningSummary`；CLI、TUI、External API、无身份或不可信调用仍保留原 raw/none 语义。客户端标识贯穿普通流式、非流式和 hosted-tool 流式三条 Chat→Responses 返回路径。
+- 此节当时提出的 Desktop raw→summary 适配已由 2026-08-26 的语义纠正废弃；现场证据仍有效，但不能据此把 raw chain-of-thought 改标成 summary。
 - vLLM/Qwen 参数差异是独立隐患而非本次直接根因。官方 vLLM `ChatCompletionRequest` 会把非空 `reasoning_effort` 合并为 `chat_template_kwargs.enable_thinking`，Qwen3 parser 也从该嵌套字段读取；当前 live Qwen 模型能力声明的上游参数为 `reasoning_effort`，所以本次已实际开启 thinking 并完整返回 reasoning。旧 `thinking` 与 `enable_thinking` 不一致问题不能替代 Desktop 展示修复。
 - TDD：新增客户端识别/CLI 隔离、普通流式 Desktop summary、非流式 Desktop summary、hosted-tool Desktop summary 四类回归；`desktop_` 69/69、`reasoning_projection` 5/5、Rust lib 全量 `3508 passed / 6 ignored`，rustfmt 与 `git diff --check` 通过。没有构建安装包、替换安装态、重启 CCSM/Codex 或改写 live 数据库；当前运行程序仍不含本修复。
 

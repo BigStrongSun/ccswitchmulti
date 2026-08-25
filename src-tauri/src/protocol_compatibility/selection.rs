@@ -78,14 +78,13 @@ pub fn select_transport_outcome_with_reasoning(
 ) -> Option<TransportSelection> {
     candidates
         .iter()
-        .filter_map(|(assessment, semantic)| {
+        .filter_map(|(assessment, _semantic)| {
             assessment.capability_score().map(|capability| {
                 (
                     (
                         capability.0,
                         capability.1,
                         capability.2,
-                        reasoning_fidelity_rank(*semantic),
                         assessment.transport == TransportKind::OpenAiResponses,
                     ),
                     *assessment,
@@ -101,12 +100,4 @@ pub fn select_transport_outcome_with_reasoning(
                 ProbeReadiness::Partial
             },
         })
-}
-
-fn reasoning_fidelity_rank(semantic: ReasoningSemantic) -> u8 {
-    match semantic {
-        ReasoningSemantic::Readable => 2,
-        ReasoningSemantic::Summary => 1,
-        ReasoningSemantic::Opaque | ReasoningSemantic::None => 0,
-    }
 }

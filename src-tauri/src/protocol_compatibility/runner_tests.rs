@@ -534,7 +534,7 @@ async fn marker_mismatch_is_diagnostic_and_does_not_fail_protocol_capabilities()
 }
 
 #[tokio::test]
-async fn runner_selects_readable_chat_from_real_branch_shapes_when_responses_is_opaque() {
+async fn runner_records_reasoning_shapes_without_using_them_to_override_native_responses() {
     let fixture = spawn_fixture(ResponsesMode::OpaqueReasoning).await;
     let client = reqwest::Client::new();
     let result = run_protocol_compatibility_probe(
@@ -543,7 +543,10 @@ async fn runner_selects_readable_chat_from_real_branch_shapes_when_responses_is_
     )
     .await;
 
-    assert_eq!(result.selected_transport, Some(TransportKind::OpenAiChat));
+    assert_eq!(
+        result.selected_transport,
+        Some(TransportKind::OpenAiResponses)
+    );
     assert_eq!(result.readiness, ProbeReadiness::Verified);
     assert_eq!(
         result
