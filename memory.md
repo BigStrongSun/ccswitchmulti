@@ -4539,3 +4539,11 @@ supported in one streaming turn`。
 - `TransportBranchResult.failures` 与 `StageFinished.failure` 现在传递安全结构：仅包含 stage、kind 和可选 HTTP status；覆盖 http_status、timeout、network、response_too_large、invalid_response、invalid_request。禁止包含 endpoint、API Key、prompt、响应正文、nonce 或工具参数。UI 会即时和最终显示 `HTTP 521 · 上游不可达`，404/405/415 显示接口不支持，其他失败显示安全类别。
 - TDD 先证明旧实现下两项 RED：失败 baseline 的 reasoning 被显示成“不支持”，HTTP 521 没有任何详情；Rust 521 fixture 的 `failures` 为 null。GREEN 后前端进度弹窗 6/6、相关表单 36/36、Rust protocol compatibility 71/71、完整 Rust lib 3514/3514、完整 Vitest 全过；`pnpm typecheck`、`pnpm build:renderer`、`cargo check --tests --no-default-features` 和 `git diff --check` 通过。保留既有 React act/MSW、浏览器数据过期、bundle size 与 5 条 dead-code warning。
 - 联网交叉验证：Codex 内置搜索读取 Cloudflare 官方 521/结构化 5xx 与 Tauri Channel 文档；Matrix WebSearch 独立读取 vLLM 官方 reasoning outputs，确认 Qwen reasoning 只能在成功的 Chat/Responses 响应后按 `reasoning`/delta/Responses reasoning item 分类。具体 CCSM 根因和修复以本地源码、RED/GREEN 与实时端点为权威证据。
+
+## 2026-08-26 Qwen Responses SSE 只到 in_progress 的上游根因
+
+- 本机 `protocol_compatibility_profiles` 当前最新 Qwen 持久档案仍是 2026-08-25 22:46 的旧记录：Responses 非流 baseline/readable reasoning 通过，但 SSE 只记录 `response.created`、`response.in_progress`，强制工具随流式路径失败；Chat 四阶段全通过，故当时选 `open_ai_chat` 正确。设置页本次内存结果没有在用户停止 UI 自动化前保存，不能把旧 `tested_at` 当成新探测。
+- 实时 roglinux journal 已定位到 CCSM 之外的 vLLM 上游：部署版本 `0.27.2rc1.dev91+g1f7427bc0` 在 `VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT=1` 时为 Qwen Responses 创建 `ParsableContext`，流式完成路径却在 `serving.py:1383` 断言 `SimpleContext`。HTTP 200 和起始事件已发送后才 `AssertionError`，这正好解释 CCSM capture 为什么只有两条 SSE scaffold、没有 terminal event。
+- 关闭该非 Harmony 部署的实验 parser context 并重启 vLLM 后，raw、透明代理和公网 Responses SSE 全部出现 reasoning/output delta 与 `response.completed`；公网强制函数工具和续轮也通过。新进程 `NRestarts=0`，启动后未再出现该断言。没有修改 CCSM runner、classifier、reasoning projection 或协议选择器。
+- 因此当前产品状态应区分两层：旧档案继续让已安装 CCSM 运行时走 Chat，这是基于旧证据的安全选择；服务端 Responses 已恢复，用户重新运行深探测并保存后，双协议四阶段都通过时现有选择器应按同分兜底选 `open_ai_responses`。本轮因用户按 Esc 停止界面控制，尚无新的 SQLite `tested_at` 证据，不宣称安装态已完成重探测持久化。
+- vLLM 仓库新增 SSE 终态 canary 及测试：`error` event 不再误判成功，只有 `response.completed`/`response.incomplete` 证明流正常到达协议终态。Codex 内置搜索与 Matrix 独立打开 vLLM 官方 issue #30115，均支持非 Harmony ParsableContext streaming 仍需谨慎启用；本地部署 journal 与真实 canary 是本次根因和恢复状态的直接证据。
