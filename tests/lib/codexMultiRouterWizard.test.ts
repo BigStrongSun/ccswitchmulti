@@ -778,6 +778,112 @@ describe("codexMultiRouterWizard helpers", () => {
     });
   });
 
+  it("persists the setup wizard CCSM OAuth choice as canonical schema v2 auth policy", () => {
+    const official = provider({
+      id: "codex-official",
+      name: "OpenAI Official",
+      category: "official",
+      settingsConfig: {
+        auth: {},
+        modelCatalog: { models: [{ model: "gpt-5.6" }] },
+      },
+    });
+
+    const { plan } = buildCodexMultiRouterWizardPlan(
+      [official],
+      [official],
+      null,
+      {
+        officialAuth: {
+          mode: "managed_oauth",
+          accountId: "acct-wizard",
+        },
+      },
+    );
+
+    expect(plan.settingsConfig.codexRouting.routes[0].authPolicy).toEqual({
+      source: "managed_codex_oauth",
+      accountId: "acct-wizard",
+    });
+  });
+
+  it("restores the setup wizard auth choice from schema v2 authPolicy", () => {
+    expect(
+      inferCodexOfficialAuth({
+        schemaVersion: 2,
+        routes: [
+          {
+            id: "official",
+            targetProviderId: "codex-official",
+            modelSelection: { mode: "all" },
+            authPolicy: {
+              source: "managed_codex_oauth",
+              accountId: "acct-saved",
+            },
+          },
+        ],
+      }),
+    ).toEqual({ mode: "managed_oauth", accountId: "acct-saved" });
+
+    expect(
+      inferCodexOfficialAuth({
+        schemaVersion: 2,
+        routes: [
+          {
+            id: "official",
+            targetProviderId: "codex-official",
+            modelSelection: { mode: "all" },
+            authPolicy: { source: "account_pool" },
+          },
+        ],
+      }),
+    ).toEqual({ mode: "account_pool" });
+  });
+
+  it("keeps a schema v2 OAuth account when the edit wizard saves without changing auth", () => {
+    const official = provider({
+      id: "codex-official",
+      name: "OpenAI Official",
+      category: "official",
+      settingsConfig: {
+        auth: {},
+        modelCatalog: { models: [{ model: "gpt-5.6" }] },
+      },
+    });
+    const existingPlan = provider({
+      id: "router-v2",
+      name: "Router V2",
+      settingsConfig: {
+        codexRouting: {
+          schemaVersion: 2,
+          enabled: true,
+          routes: [
+            {
+              id: "official",
+              targetProviderId: official.id,
+              modelSelection: { mode: "all" },
+              authPolicy: {
+                source: "managed_codex_oauth",
+                accountId: "acct-saved",
+              },
+            },
+          ],
+        },
+      },
+    });
+
+    const { plan } = buildCodexMultiRouterWizardPlan(
+      [official, existingPlan],
+      [official],
+      existingPlan,
+    );
+
+    expect(plan.settingsConfig.codexRouting.routes[0].authPolicy).toEqual({
+      source: "managed_codex_oauth",
+      accountId: "acct-saved",
+    });
+  });
+
   it("infers and preserves a legacy Router's exact CCSM OAuth account", () => {
     const official = provider({
       id: "codex-official",
@@ -824,7 +930,6 @@ describe("codexMultiRouterWizard helpers", () => {
     expect(plan.settingsConfig.codexRouting).not.toHaveProperty("officialAuth");
     expect(plan.settingsConfig.codexRouting.routes[0].authPolicy).toEqual({
       source: "managed_codex_oauth",
-      authProvider: "codex_oauth",
       accountId: "acct-legacy",
     });
   });

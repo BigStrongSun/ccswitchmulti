@@ -439,10 +439,13 @@ export type CodexRoutingAuthSource =
   | "native_codex_auth"
   | "account_pool";
 
-export interface CodexRoutingAuth {
+export interface CodexRoutingAuthPolicy {
   source: CodexRoutingAuthSource;
-  authProvider?: "codex_oauth";
   accountId?: string;
+}
+
+export interface CodexRoutingAuth extends CodexRoutingAuthPolicy {
+  authProvider?: "codex_oauth";
 }
 
 export type CodexOfficialAuthMode =
@@ -503,7 +506,7 @@ export interface CodexRoutingRouteV2 {
   modelSelection: CodexModelSelectionV2;
   matchPrefixes?: string[];
   aliases?: Record<string, string>;
-  authPolicy?: CodexRoutingAuth;
+  authPolicy?: CodexRoutingAuthPolicy;
 }
 
 export interface CodexRoutingConfigV2 {

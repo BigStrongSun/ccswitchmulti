@@ -132,6 +132,7 @@ import type {
   CodexOfficialAuthMode,
   CodexRoutingConfig,
   CodexRoutingAuth,
+  CodexRoutingAuthPolicy,
   CodexRoutingConfigV2,
   CodexRoutingRouteV2,
   CodexSubagentVersion,
@@ -189,7 +190,7 @@ type CodexRoute = {
   modelSelection?: { mode: "all" } | { mode: "include"; models: string[] };
   matchPrefixes?: string[];
   aliases?: Record<string, string>;
-  authPolicy?: CodexRoutingAuth;
+  authPolicy?: CodexRoutingAuthPolicy;
   upstream?: {
     baseUrl?: string;
     base_url?: string;
@@ -1862,7 +1863,7 @@ export function serializeCodexRouteV2(
               ? route.modelSelection.models
               : canonicalModels,
         } as const);
-  const authPolicy: CodexRoutingAuth = route.authPolicy ??
+  const authPolicy: CodexRoutingAuthPolicy = route.authPolicy ??
     (route.upstream?.auth as CodexRoutingAuth | undefined) ?? {
       source: "provider_config",
     };

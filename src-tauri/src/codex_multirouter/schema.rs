@@ -358,6 +358,22 @@ mod tests {
     }
 
     #[test]
+    fn v2_auth_policy_rejects_legacy_auth_provider_field() {
+        let mut route = route(json!({"mode": "all"}));
+        route["authPolicy"] = json!({
+            "source": "managed_codex_oauth",
+            "authProvider": "codex_oauth",
+            "accountId": "account-1"
+        });
+
+        let error = CodexRoutingDocument::parse(&valid_plan(route))
+            .expect_err("schema v2 authPolicy must reject legacy provider fields");
+
+        assert_eq!(error.code, "invalid_v2_schema");
+        assert!(error.message.contains("authProvider"));
+    }
+
+    #[test]
     fn missing_model_selection_defaults_to_all_in_backend_schema() {
         let value = valid_plan(json!({
             "id": "router-qwen",

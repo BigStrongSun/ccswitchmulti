@@ -6,7 +6,7 @@ import type {
   CodexOfficialAuthConfig,
   CodexRoutingConfig,
   CodexRoutingConfigV2,
-  CodexRoutingAuth,
+  CodexRoutingAuthPolicy,
   CodexRoutingRoute,
   CodexRoutingRouteV2,
   CodexSubagentVersion,
@@ -231,12 +231,11 @@ export const DEFAULT_CODEX_OFFICIAL_AUTH: CodexOfficialAuthConfig = {
 
 export function codexOfficialAuthRouteBinding(
   officialAuth: CodexOfficialAuthConfig,
-): CodexRoutingAuth {
+): CodexRoutingAuthPolicy {
   switch (officialAuth.mode) {
     case "managed_oauth":
       return {
         source: "managed_codex_oauth",
-        authProvider: "codex_oauth",
         ...(officialAuth.accountId
           ? { accountId: officialAuth.accountId }
           : {}),
@@ -250,18 +249,22 @@ export function codexOfficialAuthRouteBinding(
 }
 
 function officialAuthFromRoute(
-  route: CodexRoutingRoute,
+  route: CodexRoutingRoute | CodexRoutingRouteV2,
 ): CodexOfficialAuthConfig | undefined {
-  switch (route.upstream?.auth?.source) {
+  const auth =
+    "authPolicy" in route
+      ? route.authPolicy
+      : "upstream" in route
+        ? route.upstream?.auth
+        : undefined;
+  switch (auth?.source) {
     case "native_codex_auth":
       return { mode: "desktop_current_login" };
     case "managed_account":
     case "managed_codex_oauth":
       return {
         mode: "managed_oauth",
-        ...(route.upstream.auth.accountId
-          ? { accountId: route.upstream.auth.accountId }
-          : {}),
+        ...(auth.accountId ? { accountId: auth.accountId } : {}),
       };
     case "account_pool":
       return { mode: "account_pool" };
@@ -271,9 +274,11 @@ function officialAuthFromRoute(
 }
 
 export function inferCodexOfficialAuth(
-  routing?: CodexRoutingConfig | null,
+  routing?: CodexRoutingConfig | CodexRoutingConfigV2 | null,
 ): CodexOfficialAuthConfig | undefined {
-  if (routing?.officialAuth) return routing.officialAuth;
+  if (routing && "officialAuth" in routing && routing.officialAuth) {
+    return routing.officialAuth;
+  }
   const inferred = (routing?.routes ?? [])
     .map(officialAuthFromRoute)
     .filter((auth): auth is CodexOfficialAuthConfig => Boolean(auth));

@@ -11,7 +11,7 @@ import {
 } from "@/lib/api/model-fetch";
 import type { CodexRoutingProjectionStatus } from "@/lib/api/providers";
 import { proxyApi } from "@/lib/api/proxy";
-import type { Provider } from "@/types";
+import type { CodexRoutingAuthPolicy, Provider } from "@/types";
 import type { PaginatedLogs, RequestLog } from "@/types/usage";
 import {
   applyMultiRouterSettingsDraft,
@@ -608,7 +608,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
           source: "managed_codex_oauth",
           authProvider: "codex_oauth",
           accountId: "account-1",
-        },
+        } as unknown as CodexRoutingAuthPolicy,
         upstream: {
           baseUrl: "https://must-not-persist.invalid/v1",
           apiFormat: "openai_chat",
