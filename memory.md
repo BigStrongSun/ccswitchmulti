@@ -4547,3 +4547,10 @@ supported in one streaming turn`。
 - 关闭该非 Harmony 部署的实验 parser context 并重启 vLLM 后，raw、透明代理和公网 Responses SSE 全部出现 reasoning/output delta 与 `response.completed`；公网强制函数工具和续轮也通过。新进程 `NRestarts=0`，启动后未再出现该断言。没有修改 CCSM runner、classifier、reasoning projection 或协议选择器。
 - 因此当前产品状态应区分两层：旧档案继续让已安装 CCSM 运行时走 Chat，这是基于旧证据的安全选择；服务端 Responses 已恢复，用户重新运行深探测并保存后，双协议四阶段都通过时现有选择器应按同分兜底选 `open_ai_responses`。本轮因用户按 Esc 停止界面控制，尚无新的 SQLite `tested_at` 证据，不宣称安装态已完成重探测持久化。
 - vLLM 仓库新增 SSE 终态 canary 及测试：`error` event 不再误判成功，只有 `response.completed`/`response.incomplete` 证明流正常到达协议终态。Codex 内置搜索与 Matrix 独立打开 vLLM 官方 issue #30115，均支持非 Harmony ParsableContext streaming 仍需谨慎启用；本地部署 journal 与真实 canary 是本次根因和恢复状态的直接证据。
+
+## 2026-08-26 CCSwitchMulti v3.19.2-18 发布候选
+
+- 版本已同步为 `3.19.2-18`：`package.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock` 与 `src-tauri/tauri.conf.json` 四处一致；发布说明位于 `docs/release-notes/v3.19.2-18-zh.md`。本次客户端发布说明明确区分 CCSM 的深度协议探测、失败语义、终态校验和档案继承改进，与 roglinux 上独立完成的 vLLM/Qwen parser-context 部署修复。
+- Fresh 发布门禁：完整前端 Vitest `148 files / 1208 tests` 全过；完整 Rust library `3508 passed / 0 failed / 6 ignored`；`pnpm typecheck`、`pnpm build:renderer`、`cargo check --tests --no-default-features`、rustfmt、Prettier 与 `git diff --check` 均通过。保留既有浏览器数据、bundle size、动态导入与 5 条 dead-code warning。
+- 本机 NSIS 已产出 `CCSwitchMulti_3.19.2-18_x64-setup.exe`，大小 `12,701,030` bytes，SHA-256 `5CA8151773AD7F698550E99BFDECDA8EB0BB8BB3B70B72485100C72B69BF5071`。Tauri 命令随后因本机仅有 updater 公钥、缺少 `TAURI_SIGNING_PRIVATE_KEY` 而退出 1；正式 updater 签名和多平台资产必须以 tag 对应的 GitHub Actions 为准，不能把本地 unsigned 构建当正式 Release。
+- 五个发布文本已严格 UTF-8 解码，确认无 BOM、无 U+FFFD。发布前 `fork/main@18873582` 是本地 `main@ad3086ac` 的祖先；未跟踪 `.tmp/`、`docs/provider-settings-layout-preview.html`、`target-protocol-probe/` 与 `target/` 属于既有本地工作，不纳入发布提交。
