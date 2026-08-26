@@ -8349,11 +8349,13 @@ mod tests {
                     "providerDefaultEffort": "high",
                     "disableAllowed": true,
                     "effortMap": {
+                        "minimal": "low",
                         "low": "low",
                         "medium": "high",
                         "high": "high",
                         "xhigh": "high",
-                        "max": "max"
+                        "max": "max",
+                        "ultra": "max"
                     },
                     "fingerprint": "8d5aeff0f2c9743effd90da1cc89b10ec0335e2e2766e8161a9bf0325360abf9"
                 }
@@ -8446,11 +8448,13 @@ mod tests {
                 "providerDefaultEffort": "high",
                 "disableAllowed": true,
                 "effortMap": {
+                    "minimal": "low",
                     "low": "low",
                     "medium": "high",
                     "high": "high",
                     "xhigh": "high",
-                    "max": "max"
+                    "max": "max",
+                    "ultra": "max"
                 },
                 "fingerprint": "8d5aeff0f2c9743effd90da1cc89b10ec0335e2e2766e8161a9bf0325360abf9"
             })
@@ -9479,7 +9483,7 @@ mod tests {
                         "description": "automatic",
                         "developerInstructions": "automatic",
                         "nicknameCandidates": "override",
-                        "modelReasoningEffort": "override"
+                    "modelReasoningEffort": "override"
                     },
                     "inputModality": {
                         "source": "unknown",
@@ -9505,11 +9509,13 @@ mod tests {
                         "providerDefaultEffort": "high",
                         "disableAllowed": true,
                         "effortMap": {
+                            "minimal": "low",
                             "low": "low",
                             "medium": "high",
                             "high": "high",
                             "xhigh": "high",
-                        "max": "max"
+                            "max": "max",
+                            "ultra": "max"
                         },
                         "fingerprint": "8d5aeff0f2c9743effd90da1cc89b10ec0335e2e2766e8161a9bf0325360abf9"
                     },

@@ -1,5 +1,14 @@
 # CC Switch Repository Memory
 
+## 2026-08-27 Qwen 能力契约缺 high 档钳制，gpt-5.6-sol 会话 422 根修
+
+- 现象：`unexpected status 422 ... Provider: Qwen, model: gpt-5.6-sol; cause: 请求/响应转换错误: reasoning effort 'high' is not supported; allowed=[low,medium,xhigh,ultra]`（url http://127.0.0.1:15721/v1/responses），客户端 5/5 重试全失败。
+- 现场证据链：(1) `~/.codex/state_5.sqlite` threads 存在 `reasoning_effort=high` 的 gpt-5.6-sol 线程（01a03d50、019fb88a）；(2) Qwen Provider（274cfc2c）modelCatalog 仅有 qwen3.8：`supportedEfforts=[low,medium,xhigh]` + `codexUltra{enabled,providerEffort:xhigh}`，`apply_catalog_ultra_setting` 注入 max→xhigh 后解析契约为 `allowed=[low,medium,xhigh,ultra]`、`effortMap={low,medium,xhigh,max→xhigh,ultra→xhigh}`；(3) `proxy_request_logs` 显示 Qwen Provider 实际收到 gpt-5.6-sol/gpt-5.6-terra 请求（该时段上游 521），证明路由层确实把 GPT 模型名交给 Qwen 承接；(4) `map_capability_reasoning_effort` 先查映射再校验 allowed（宽映射兜底），`high` 两处都未命中 → fail-closed 422。
+- 根修（不打补丁）：`resolve_subagent_reasoning_capability` 在解析契约阶段对 Codex 档位阶梯上未被声明映射覆盖的档位统一补全最近受支持档钳制（等距取更高档）：`high→xhigh`、`minimal→low`；Ultra 编排启用时 `ultra` 仍走 max_target（编排语义不变）；fail-closed 仅保留给阶梯之外的未知档位值。`codex_selectable_efforts` 与能力指纹不变，客户端可选档位集合不受影响。
+- 为什么不在转换层打补丁：转换层 fail-closed 是契约的最后防线，缺陷在契约本身（resolver 产出的 effortMap 不完整）；在单一 resolver 补全才能同时覆盖 catalog / UI / Sub-Agent 角色 / 请求转换四层投影，与「宽映射兜底先查映射再校验」的既有语义一致。
+- 测试：新增 `resolution_clamps_codex_efforts_the_provider_cannot_accept`（Qwen 形态：high→xhigh、minimal→low、selectable 不变）与 `qwen_shaped_capability_clamps_high_effort_to_nearest_supported`（catalog→resolve_codex_chat_reasoning_config→responses_to_chat_completions_with_reasoning 全链路：high 钳为 xhigh、`ultramax` 仍 422）；更新 4 处精确断言以匹配补全后的 effortMap（codex.rs 模式串、codex_config.rs preview/status 两处、subagent capabilities 一处）。`cargo fmt --check` 通过；`cargo test --lib` 3511 passed / 0 failed / 6 ignored。
+- 遗留：已安装运行的 cc-switch.exe 仍是旧版。现场临时规避：把 gpt-5.6-sol 线程的推理档切到 xhigh（或把会话模型切 qwen3.8）；修复随下次构建安装生效。本次未联网检索：纯本地源码 + 活体 DB/日志取证，任务不依赖外部事实。
+
 ## 2026-08-26 Codex raw reasoning / summary 语义纠正与协议选择解耦
 
 - `8b38cba4` 的 Desktop 兼容方案已废弃：它根据 `originator: Codex Desktop` 把探测得到的 `RawReasoningText` 改标为 `ReasoningSummary`。这会把上游完整原始推理伪装成模型摘要，违反 Codex app-server / OpenAI Responses 的字段契约；客户端可见性问题不能通过篡改响应语义解决。

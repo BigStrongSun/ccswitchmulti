@@ -3632,10 +3632,11 @@ mod tests {
             &resolved.codex_selectable_efforts,
             &resolved.effort_map,
         );
-        // allowed 收窄为真实档位，mappings 保留 medium/xhigh 上游映射（宽映射兜底）
+        // allowed 收窄为真实档位；mappings 保留 medium/xhigh 上游映射（宽映射兜底），
+        // 并由 resolver 补全 Codex 阶梯上未声明档位的最近档钳制（minimal→low、ultra→max）
         assert_eq!(
             mode,
-            "capability|low,high,max|low=low,medium=high,high=high,xhigh=high,max=max"
+            "capability|low,high,max|minimal=low,low=low,medium=high,high=high,xhigh=high,max=max,ultra=max"
         );
     }
 
@@ -6548,6 +6549,71 @@ wire_api = "chat"
         assert_eq!(body["reasoning"]["effort"], "xhigh");
     }
 
+    #[test]
+    fn qwen_shaped_capability_clamps_high_effort_to_nearest_supported() {
+        // 回归锁定（现场 422）：Qwen Provider 声明 low/medium/xhigh + Ultra→xhigh，
+        // 但 Codex 主模型 gpt-5.6-sol 会话可发送声明档 `high`。能力解析必须把
+        // high 钳到最近受支持档 xhigh，而不是在请求转换层 fail-closed。
+        let provider = create_provider(json!({
+            "modelCatalog": {"models": [{
+                "model": "qwen3.8",
+                "reasoning": {
+                    "schemaVersion": 2,
+                    "supportStatus": "confirmed_supported",
+                    "controlKind": "graded",
+                    "supportedEfforts": ["low", "medium", "xhigh"],
+                    "defaultEffort": "medium",
+                    "disableAllowed": true,
+                    "upstream": {
+                        "format": "string",
+                        "parameter": "reasoning_effort",
+                        "effortMap": {"low": "low", "medium": "medium", "xhigh": "xhigh"}
+                    },
+                    "outputFormat": "reasoning_content"
+                },
+                "codexUltra": {"enabled": true, "providerEffort": "xhigh"}
+            }]}
+        }));
+        let body = json!({
+            "model": "qwen3.8",
+            "input": "hello",
+            "reasoning": {"effort": "high"}
+        });
+
+        let config = resolve_codex_chat_reasoning_config(&provider, &body)
+            .expect("Qwen catalog capability should resolve");
+        assert!(
+            config
+                .effort_value_mode
+                .as_deref()
+                .is_some_and(|mode| mode.contains("high=xhigh")),
+            "resolved contract must clamp high to xhigh: {:?}",
+            config.effort_value_mode
+        );
+
+        let result = crate::proxy::providers::transform_codex_chat::responses_to_chat_completions_with_reasoning(
+            body,
+            Some(&config),
+        )
+        .expect("high effort must be clamped, not rejected with 422");
+        assert_eq!(result["reasoning_effort"], "xhigh");
+
+        // 阶梯之外的未知档位仍 fail-closed，不得静默猜测。
+        let bad_body = json!({
+            "model": "qwen3.8",
+            "input": "hello",
+            "reasoning": {"effort": "ultramax"}
+        });
+        let bad_config =
+            resolve_codex_chat_reasoning_config(&provider, &bad_body).expect("resolve again");
+        assert!(
+            crate::proxy::providers::transform_codex_chat::responses_to_chat_completions_with_reasoning(
+                bad_body,
+                Some(&bad_config)
+            )
+            .is_err()
+        );
+    }
     #[test]
     fn native_responses_preserves_identity_effort_mapping() {
         let provider = create_provider(json!({

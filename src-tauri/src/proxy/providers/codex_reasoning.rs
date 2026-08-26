@@ -599,6 +599,23 @@ pub fn resolve_subagent_reasoning_capability(
             codex_selectable_efforts.push(CodexReasoningEffort::Ultra);
         }
     }
+    // 映射补全：Codex 档位阶梯上 Provider 不原生接受、声明映射也未覆盖的档位，
+    // 一律钳到最近的受支持档位（等距时取更高档），使解析后的契约对 Codex 端
+    // 可能发送的每个档位都有明确目标。否则旧会话/主模型发来如 `high`（典型：
+    // gpt-5.6-sol 路由到仅支持 low/medium/xhigh 的 Qwen Provider）时，转换层
+    // 宽映射兜底查不到映射、allowed 校验也拒绝，fail-closed 422 打断整个会话。
+    // fail-closed 仅保留给 Codex 阶梯之外的未知档位值。
+    for effort in CodexReasoningEffort::ORDERED.iter().copied() {
+        if matches!(effort, CodexReasoningEffort::None) {
+            continue;
+        }
+        if effort_map.contains_key(&effort) {
+            continue;
+        }
+        if let Some(target) = nearest_supported_effort(effort, &provider_effort_set) {
+            effort_map.insert(effort, target);
+        }
+    }
     let support_kind = match capability.effective_support_status() {
         ReasoningSupportStatus::ConfirmedUnsupported => ReasoningSupportKind::Unsupported,
         ReasoningSupportStatus::Unknown => ReasoningSupportKind::Unknown,
@@ -638,6 +655,42 @@ pub fn resolve_subagent_reasoning_capability(
             .is_some_and(|ultra| ultra.enabled),
         fingerprint: capability_fingerprint(capability),
     }
+}
+
+/// 为 Provider 不原生接受的 Codex 档位找最近的受支持档位。
+///
+/// 等距时取更高档（与 openrouter `max→xhigh`、deepseek 全档钳高等既有一致：
+/// 不无必要地把用户意图往下降），保证解析结果确定且可解释。
+fn nearest_supported_effort(
+    effort: CodexReasoningEffort,
+    supported: &HashSet<CodexReasoningEffort>,
+) -> Option<CodexReasoningEffort> {
+    let rank = |candidate: CodexReasoningEffort| {
+        CodexReasoningEffort::ORDERED
+            .iter()
+            .position(|item| *item == candidate)
+    };
+    let target_rank = rank(effort)?;
+    let mut best: Option<(usize, bool, CodexReasoningEffort)> = None;
+    for candidate in supported {
+        let candidate_rank = rank(*candidate)?;
+        let (distance, at_or_above) = if candidate_rank >= target_rank {
+            (candidate_rank - target_rank, true)
+        } else {
+            (target_rank - candidate_rank, false)
+        };
+        let better = match best {
+            None => true,
+            Some((best_distance, best_above, _)) => {
+                distance < best_distance
+                    || (distance == best_distance && at_or_above && !best_above)
+            }
+        };
+        if better {
+            best = Some((distance, at_or_above, *candidate));
+        }
+    }
+    best.map(|(_, _, candidate)| candidate)
 }
 
 /// Return CCSwitchMulti's maintained capability for exact, stable model IDs.
@@ -1049,6 +1102,61 @@ mod tests {
             resolved.effort_map.get(&CodexReasoningEffort::Ultra),
             Some(&CodexReasoningEffort::Max),
             "Ultra must reach a third-party Provider through the verified max path"
+        );
+    }
+
+    #[test]
+    fn resolution_clamps_codex_efforts_the_provider_cannot_accept() {
+        // 回归锁定：Qwen 形态 Provider（low/medium/xhigh + Ultra 编排→xhigh）必须对
+        // Codex 端可发送但不被原生接受的档位（high、minimal）给出明确目标，
+        // 转换层宽映射兜底据此钳制，不再 fail-closed 422。
+        let capability: CodexModelReasoningCapability = serde_json::from_value(json!({
+            "schemaVersion": 2,
+            "supportStatus": "confirmed_supported",
+            "controlKind": "graded",
+            "supportedEfforts": ["low", "medium", "xhigh"],
+            "defaultEffort": "medium",
+            "disableAllowed": true,
+            "upstream": {
+                "format": "string",
+                "parameter": "reasoning_effort",
+                "effortMap": {
+                    "low": "low",
+                    "medium": "medium",
+                    "xhigh": "xhigh",
+                    "max": "xhigh"
+                }
+            },
+            "codexUltraOrchestration": {"enabled": true},
+            "source": "user"
+        }))
+        .expect("Qwen-style fixture");
+
+        let resolved = resolve_subagent_reasoning_capability(Some(&capability));
+        assert_eq!(
+            resolved.codex_selectable_efforts,
+            efforts(&["low", "medium", "xhigh", "ultra"]),
+            "selectable stays provider-native + Ultra; clamped levels are not advertised"
+        );
+        assert_eq!(
+            resolved.effort_map.get(&CodexReasoningEffort::High),
+            Some(&CodexReasoningEffort::XHigh),
+            "high must clamp to the nearer supported level above medium"
+        );
+        assert_eq!(
+            resolved.effort_map.get(&CodexReasoningEffort::Minimal),
+            Some(&CodexReasoningEffort::Low),
+            "minimal must clamp down to low"
+        );
+        assert_eq!(
+            resolved.effort_map.get(&CodexReasoningEffort::Ultra),
+            Some(&CodexReasoningEffort::XHigh),
+            "Ultra orchestration target stays authoritative"
+        );
+        assert_eq!(
+            resolved.effort_map.get(&CodexReasoningEffort::Low),
+            Some(&CodexReasoningEffort::Low),
+            "native identity mappings are untouched"
         );
     }
 
