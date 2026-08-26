@@ -4554,3 +4554,10 @@ supported in one streaming turn`。
 - Fresh 发布门禁：完整前端 Vitest `148 files / 1208 tests` 全过；完整 Rust library `3508 passed / 0 failed / 6 ignored`；`pnpm typecheck`、`pnpm build:renderer`、`cargo check --tests --no-default-features`、rustfmt、Prettier 与 `git diff --check` 均通过。保留既有浏览器数据、bundle size、动态导入与 5 条 dead-code warning。
 - 本机 NSIS 已产出 `CCSwitchMulti_3.19.2-18_x64-setup.exe`，大小 `12,701,030` bytes，SHA-256 `5CA8151773AD7F698550E99BFDECDA8EB0BB8BB3B70B72485100C72B69BF5071`。Tauri 命令随后因本机仅有 updater 公钥、缺少 `TAURI_SIGNING_PRIVATE_KEY` 而退出 1；正式 updater 签名和多平台资产必须以 tag 对应的 GitHub Actions 为准，不能把本地 unsigned 构建当正式 Release。
 - 五个发布文本已严格 UTF-8 解码，确认无 BOM、无 U+FFFD。发布前 `fork/main@18873582` 是本地 `main@ad3086ac` 的祖先；未跟踪 `.tmp/`、`docs/provider-settings-layout-preview.html`、`target-protocol-probe/` 与 `target/` 属于既有本地工作，不纳入发布提交。
+
+## 2026-08-26 CCSwitchMulti v3.19.2-18 正式发布验收
+
+- 发布提交为 `128aaf4de231b3809da91861211bf752d02939d0`，annotated tag `v3.19.2-18` 的本地 peeled commit、远端 peeled commit、远端 `main` 与 Release workflow `headSha` 四者一致。Release workflow run `32925578078` 完整 `completed/success`：Windows x64、Windows ARM64、Linux x64、Linux ARM64、macOS universal、Publish GitHub Release、Assemble latest.json 共 7 个 job 全部成功；macOS code signing/notarization 和各平台 updater 资产/签名校验均通过。
+- GitHub Release 为非 draft、非 prerelease，`releases/latest` 指向 `v3.19.2-18`，共 19 个正式资产。下载复验的 `CCSwitchMulti-v3.19.2-18-Windows-Setup.exe` 为 `12,697,240` bytes、SHA-256 `aeae02751040e059fc39424137327b3254c7824ad531d2476c845326b5cb517a`；`latest.json` 为 `3,696` bytes、SHA-256 `a14b016fa1795f1a55734c30bdeb571fb511e3613918be80d388357ca5deb457`，两者都与 GitHub asset digest 一致。
+- `latest.json` 版本为 `3.19.2-18`，平台键严格为 `darwin-aarch64`、`darwin-x86_64`、`linux-aarch64`、`linux-x86_64`、`windows-aarch64`、`windows-x86_64`，六个平台 URL 与 signature 均非空。
+- 同一提交的独立 CI run `32925574572` 并非全绿：Frontend Checks 成功，三个 Backend Checks 都被 Rust 1.95.0 的 `cargo clippy -- -D warnings` 拒绝，共 17 条 lint。最近 11 次可比 `main` CI 从 `v3.19.2-17` 之前即持续失败，本地 Rust 1.95.0 可稳定复现；因此它是长期严格 Clippy 门禁债务，不是本次版本号提交或某个平台构建偶发失败。正式 Release 资产构建与签名全绿仍有效，但后续不得声称“所有 workflow 全绿”，应单独治理 Clippy 基线或修清现有 lint。
