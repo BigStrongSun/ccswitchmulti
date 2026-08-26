@@ -24,6 +24,20 @@ export type CodexReasoningSource =
   | "native_responses"
   | "none";
 
+export type CodexProtocolProbeFailureKind =
+  | "http_status"
+  | "timeout"
+  | "network"
+  | "response_too_large"
+  | "invalid_response"
+  | "invalid_request";
+
+export interface CodexProtocolProbeFailure {
+  stage: CodexProtocolProbeStage;
+  kind: CodexProtocolProbeFailureKind;
+  status_code?: number;
+}
+
 export type CodexProtocolProbeProgressEvent =
   | { kind: "candidate_started"; model: string }
   | {
@@ -38,6 +52,7 @@ export type CodexProtocolProbeProgressEvent =
       transport: CodexProtocolTransport;
       stage: CodexProtocolProbeStage;
       stageStatus: CodexProtocolProbeStageStatus;
+      failure?: CodexProtocolProbeFailure;
     }
   | {
       kind: "reasoning_classified";
@@ -80,6 +95,7 @@ export interface CodexProtocolProbeBranch {
     source: CodexReasoningSource;
     pre_tool_visible_content: "absent" | "present";
   };
+  failures?: CodexProtocolProbeFailure[];
 }
 
 export interface CodexProtocolCompatibilityRecord {

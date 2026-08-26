@@ -31,6 +31,7 @@ enum ResponsesMode {
     Complete,
     OpaqueReasoning,
     BaselineUnsupported,
+    UpstreamUnavailable,
     ToolUnsupported,
     InvalidSuccessfulJson,
     IncompleteContinuation,
@@ -97,6 +98,14 @@ async fn upstream(
         .push((path.clone(), body.clone()));
 
     let is_responses = path.ends_with("/responses");
+    if matches!(state.responses_mode, ResponsesMode::UpstreamUnavailable) {
+        return Response::builder()
+            .status(521)
+            .body(Body::from(
+                "private upstream response body must never leave the backend",
+            ))
+            .unwrap();
+    }
     if is_responses && matches!(state.responses_mode, ResponsesMode::BaselineUnsupported) {
         return StatusCode::NOT_FOUND.into_response();
     }
@@ -591,6 +600,58 @@ async fn responses_baseline_rejection_stops_only_that_branch_and_chat_still_veri
             .count(),
         1
     );
+}
+
+#[tokio::test]
+async fn http_521_is_redacted_and_skips_reasoning_instead_of_marking_it_unsupported() {
+    let fixture = spawn_fixture(ResponsesMode::UpstreamUnavailable).await;
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let reported = events.clone();
+    let result = run_protocol_compatibility_probe_with_reporter(
+        candidate(&fixture.base_url, TransportKind::OpenAiResponses),
+        &reqwest::Client::new(),
+        move |event| reported.lock().unwrap().push(event),
+    )
+    .await;
+
+    assert_eq!(result.selected_transport, None);
+    assert_eq!(result.readiness, ProbeReadiness::Unverified);
+    let result_json = serde_json::to_value(&result).unwrap();
+    for branch in result_json["branches"].as_array().unwrap() {
+        assert_eq!(branch["assessment"]["baseline"], json!("failed"));
+        assert_eq!(
+            branch["failures"],
+            json!([{
+                "stage": "baseline",
+                "kind": "http_status",
+                "status_code": 521
+            }])
+        );
+    }
+
+    let events = events.lock().unwrap();
+    let event_json = serde_json::to_value(&*events).unwrap();
+    assert!(event_json.as_array().unwrap().iter().any(|event| {
+        event["kind"] == "stage_finished"
+            && event["stage"] == "baseline"
+            && event["stageStatus"] == "failed"
+            && event["failure"]
+                == json!({
+                    "stage": "baseline",
+                    "kind": "http_status",
+                    "status_code": 521
+                })
+    }));
+    assert!(event_json.as_array().unwrap().iter().any(|event| {
+        event["kind"] == "stage_finished"
+            && event["stage"] == "reasoning"
+            && event["stageStatus"] == "skipped"
+    }));
+
+    let serialized = serde_json::to_string(&(&result, &*events)).unwrap();
+    assert!(!serialized.contains("private upstream response body"));
+    assert!(!serialized.contains("fixture-secret"));
+    assert!(!serialized.contains(&fixture.base_url));
 }
 
 #[tokio::test]

@@ -4530,3 +4530,12 @@ supported in one streaming turn`。
 - 这组三种 stop code 共同指向内核驱动错误或内存损坏，不能只通过重启 Tailscale 当作已修复。先恢复 MODT Tailscale 并验证 `BackendState=Running`、MODT 到 100.85.95.33:5000/8891 可达，可消除当前 521；随后必须取得 `C:\Windows\Minidump`/`MEMORY.DMP` 用 WinDbg `!analyze -v` 确认故障模块，并检查 RAM、超频/内存时序和近期内核驱动。不得删除 Tailscale state、logout 或重建节点身份来掩盖问题。
 - Zoraxy 由 NSSM 自动服务托管，系统启动后正常加载路由；05:02 还出现一次无完整原因记录的进程重启。当前证据未显示 Zoraxy 本身导致三次蓝屏。远程 SSH 后续出现“公网 TCP 22024 可达但 banner 超时”，使 dump 文件索引尚未完成；在取得转储分析前，物理 RAM 与具体驱动之间仍属未决。
 - 联网交叉验证：Codex 内置 WebSearch 命中 Zoraxy 521 的 upstream-unreachable/无在线 upstream 案例、Tailscale Windows 异常重启后 NoState 的公开问题，以及 Microsoft 对 0x1A/0x50/0xA 的官方说明。Matrix WebSearch 独立调用本身被同一 Zoraxy 521 阻断，因此它是故障同源证据，不作为技术结论的支持来源。
+
+## 2026-08-26 深度探测 521 状态语义与脱敏错误呈现根修
+
+- MODT 恢复后重新验证：`https://www.matrixminecraft.cn:24443/vllm/v1/models`、`/vllm-dashboard/api/health`、`/websearch/health` 均为 HTTP 200，`/relay-dashboard/` 为 302，本机 CCSM `127.0.0.1:15721/health` 为 200。之前的 521 结果是过期的环境故障证据，不能继续用于判断 Qwen 协议或推理能力。
+- 后端 runner 原本已经在基础响应未通过时把 reasoning stage 标成 `skipped`；真正的产品 bug 在两层：前端最终 `applyRecord` 和中途 `reasoning_classified` 都无条件把 `semantic=none` 改成 `unsupported`，覆盖了后端状态；非 2xx 在 capture 层以 `ProbeCaptureError::HttpStatus` 提前返回，branch record 又没有保留脱敏失败原因，导致用户只看到“基础响应失败”。
+- 根修不新增模型名特判，也不先调用不可移植的 `/health`：双协议各自的 baseline 就是通用可用性门。只有 baseline 成功后 `semantic=none` 才表示“未返回/不支持”；baseline 失败时 reasoning 显示“未检测/已跳过”，后续 SSE、工具和续轮保持跳过，不把链路故障写成模型能力结论。
+- `TransportBranchResult.failures` 与 `StageFinished.failure` 现在传递安全结构：仅包含 stage、kind 和可选 HTTP status；覆盖 http_status、timeout、network、response_too_large、invalid_response、invalid_request。禁止包含 endpoint、API Key、prompt、响应正文、nonce 或工具参数。UI 会即时和最终显示 `HTTP 521 · 上游不可达`，404/405/415 显示接口不支持，其他失败显示安全类别。
+- TDD 先证明旧实现下两项 RED：失败 baseline 的 reasoning 被显示成“不支持”，HTTP 521 没有任何详情；Rust 521 fixture 的 `failures` 为 null。GREEN 后前端进度弹窗 6/6、相关表单 36/36、Rust protocol compatibility 71/71、完整 Rust lib 3514/3514、完整 Vitest 全过；`pnpm typecheck`、`pnpm build:renderer`、`cargo check --tests --no-default-features` 和 `git diff --check` 通过。保留既有 React act/MSW、浏览器数据过期、bundle size 与 5 条 dead-code warning。
+- 联网交叉验证：Codex 内置搜索读取 Cloudflare 官方 521/结构化 5xx 与 Tauri Channel 文档；Matrix WebSearch 独立读取 vLLM 官方 reasoning outputs，确认 Qwen reasoning 只能在成功的 Chat/Responses 响应后按 `reasoning`/delta/Responses reasoning item 分类。具体 CCSM 根因和修复以本地源码、RED/GREEN 与实时端点为权威证据。

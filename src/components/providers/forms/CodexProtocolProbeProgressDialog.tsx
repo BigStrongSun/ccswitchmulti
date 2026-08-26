@@ -20,6 +20,7 @@ import { cn } from "@/lib/utils";
 import type {
   CodexProtocolCompatibilityRecord,
   CodexProtocolProbeProgressEvent,
+  CodexProtocolProbeFailure,
   CodexProtocolProbeReadiness,
   CodexProtocolProbeStage,
   CodexProtocolProbeStageStatus,
@@ -37,6 +38,7 @@ interface BranchProgress {
   reasoningSemantic: CodexReasoningSemantic | null;
   reasoningSource: CodexReasoningSource | null;
   readiness: CodexProtocolProbeReadiness | null;
+  failures: CodexProtocolProbeFailure[];
 }
 
 interface ModelProgress {
@@ -83,6 +85,7 @@ function emptyBranch(): BranchProgress {
     reasoningSemantic: null,
     reasoningSource: null,
     readiness: null,
+    failures: [],
   };
 }
 
@@ -112,9 +115,14 @@ function applyRecord(
     target.stages.forced_tool = branch.assessment.forced_tool;
     target.stages.continuation = branch.assessment.continuation;
     target.stages.reasoning =
-      branch.reasoning_shape.semantic === "none" ? "unsupported" : "passed";
+      branch.reasoning_shape.semantic === "none"
+        ? branch.assessment.baseline === "passed"
+          ? "unsupported"
+          : "skipped"
+        : "passed";
     target.reasoningSemantic = branch.reasoning_shape.semantic;
     target.reasoningSource = branch.reasoning_shape.source;
+    target.failures = branch.failures ?? [];
   }
 }
 
@@ -147,11 +155,23 @@ function buildProgress(
       branch.stages[event.stage] = "running";
     } else if (event.kind === "stage_finished") {
       branch.stages[event.stage] = event.stageStatus;
+      if (event.failure) {
+        branch.failures = [
+          ...branch.failures.filter(
+            (failure) => failure.stage !== event.failure?.stage,
+          ),
+          event.failure,
+        ];
+      }
     } else if (event.kind === "reasoning_classified") {
       branch.reasoningSemantic = event.reasoningSemantic;
       branch.reasoningSource = event.reasoningSource;
       branch.stages.reasoning =
-        event.reasoningSemantic === "none" ? "unsupported" : "passed";
+        event.reasoningSemantic === "none"
+          ? branch.stages.baseline === "passed"
+            ? "unsupported"
+            : "skipped"
+          : "passed";
     } else if (event.kind === "branch_finished") {
       branch.readiness = event.readiness;
     }
@@ -191,12 +211,32 @@ function statusPresentation(status: VisibleStageStatus) {
   return { label: "等待", icon: Circle, className: "text-muted-foreground/60" };
 }
 
-function reasoningLabel(semantic: CodexReasoningSemantic | null) {
+function reasoningLabel(
+  semantic: CodexReasoningSemantic | null,
+  status: VisibleStageStatus,
+) {
   if (semantic === "readable") return "可读正文";
   if (semantic === "summary") return "摘要";
   if (semantic === "opaque") return "加密/不透明";
-  if (semantic === "none") return "未返回";
+  if (semantic === "none") return status === "skipped" ? "未检测" : "未返回";
   return "待识别";
+}
+
+function failureLabel(failure: CodexProtocolProbeFailure) {
+  if (failure.kind === "http_status") {
+    if (failure.status_code === 521) return "HTTP 521 · 上游不可达";
+    if ([404, 405, 415].includes(failure.status_code ?? 0)) {
+      return `HTTP ${failure.status_code} · 接口不支持`;
+    }
+    return failure.status_code
+      ? `HTTP ${failure.status_code} · 上游请求失败`
+      : "上游请求失败";
+  }
+  if (failure.kind === "timeout") return "请求超时";
+  if (failure.kind === "network") return "网络连接失败";
+  if (failure.kind === "response_too_large") return "响应超过探测上限";
+  if (failure.kind === "invalid_request") return "探测地址无效";
+  return "响应格式无效";
 }
 
 function readinessLabel(readiness: CodexProtocolProbeReadiness | null) {
@@ -326,7 +366,10 @@ export function CodexProtocolProbeProgressDialog({
                                 <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
                                   {stage.id === "reasoning" && (
                                     <span>
-                                      {reasoningLabel(branch.reasoningSemantic)}
+                                      {reasoningLabel(
+                                        branch.reasoningSemantic,
+                                        branch.stages.reasoning,
+                                      )}
                                     </span>
                                   )}
                                   <Icon
@@ -338,6 +381,17 @@ export function CodexProtocolProbeProgressDialog({
                               </div>
                             );
                           })}
+                          {branch.failures.length > 0 && (
+                            <div className="space-y-1 border-t pt-2 text-xs text-destructive">
+                              {branch.failures.map((failure) => (
+                                <p
+                                  key={`${failure.stage}:${failure.kind}:${failure.status_code ?? ""}`}
+                                >
+                                  {failureLabel(failure)}
+                                </p>
+                              ))}
+                            </div>
+                          )}
                         </div>
                       )}
                     </section>

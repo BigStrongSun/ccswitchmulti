@@ -32,6 +32,60 @@ pub enum ProbeProgressStage {
     Continuation,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProbeFailureKind {
+    HttpStatus,
+    Timeout,
+    Network,
+    ResponseTooLarge,
+    InvalidResponse,
+    InvalidRequest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedactedProbeFailure {
+    pub stage: ProbeProgressStage,
+    pub kind: ProbeFailureKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_code: Option<u16>,
+}
+
+impl RedactedProbeFailure {
+    fn from_capture(stage: ProbeProgressStage, error: ProbeCaptureError) -> Self {
+        let (kind, status_code) = match error {
+            ProbeCaptureError::Timeout => (ProbeFailureKind::Timeout, None),
+            ProbeCaptureError::Network => (ProbeFailureKind::Network, None),
+            ProbeCaptureError::HttpStatus { status_code } => {
+                (ProbeFailureKind::HttpStatus, Some(status_code))
+            }
+            ProbeCaptureError::ResponseTooLarge => (ProbeFailureKind::ResponseTooLarge, None),
+            ProbeCaptureError::InvalidPayload => (ProbeFailureKind::InvalidResponse, None),
+        };
+        Self {
+            stage,
+            kind,
+            status_code,
+        }
+    }
+
+    fn invalid_response(stage: ProbeProgressStage) -> Self {
+        Self {
+            stage,
+            kind: ProbeFailureKind::InvalidResponse,
+            status_code: None,
+        }
+    }
+
+    fn invalid_request(stage: ProbeProgressStage) -> Self {
+        Self {
+            stage,
+            kind: ProbeFailureKind::InvalidRequest,
+            status_code: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
@@ -52,6 +106,8 @@ pub enum ProtocolProbeProgressEvent {
         transport: TransportKind,
         stage: ProbeProgressStage,
         stage_status: ProbeStageStatus,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        failure: Option<RedactedProbeFailure>,
     },
     ReasoningClassified {
         model: String,
@@ -83,6 +139,8 @@ pub struct TransportBranchResult {
     pub assessment: TransportProbeAssessment,
     pub reasoning_shape: ClassifiedReasoningShape,
     evidence: Vec<RedactedProbeEvidence>,
+    #[serde(default)]
+    pub failures: Vec<RedactedProbeFailure>,
 }
 
 impl fmt::Debug for TransportBranchResult {
@@ -92,6 +150,7 @@ impl fmt::Debug for TransportBranchResult {
             .field("assessment", &self.assessment)
             .field("reasoning_shape", &self.reasoning_shape)
             .field("evidence_count", &self.evidence.len())
+            .field("failures", &self.failures)
             .finish()
     }
 }
@@ -206,6 +265,7 @@ where
         continuation: ProbeStageStatus::Skipped,
     };
     let mut evidence = Vec::new();
+    let mut failures = Vec::new();
     let mut reasoning_shape = empty_reasoning_shape();
     report_stage_started(reporter, candidate, transport, ProbeProgressStage::Baseline);
     let Ok(endpoint) = build_probe_url(
@@ -214,12 +274,15 @@ where
         candidate.is_full_url(),
     ) else {
         assessment.baseline = ProbeStageStatus::Failed;
+        let failure = RedactedProbeFailure::invalid_request(ProbeProgressStage::Baseline);
+        failures.push(failure.clone());
         report_stage_finished(
             reporter,
             candidate,
             transport,
             ProbeProgressStage::Baseline,
             assessment.baseline,
+            Some(failure),
         );
         return finish_branch(
             reporter,
@@ -228,6 +291,7 @@ where
                 assessment,
                 reasoning_shape,
                 evidence,
+                failures,
             },
         );
     };
@@ -251,17 +315,21 @@ where
                 transport,
                 ProbeProgressStage::Baseline,
                 assessment.baseline,
+                None,
             );
             exchange
         }
         Ok(_) => {
             assessment.baseline = ProbeStageStatus::Failed;
+            let failure = RedactedProbeFailure::invalid_response(ProbeProgressStage::Baseline);
+            failures.push(failure.clone());
             report_stage_finished(
                 reporter,
                 candidate,
                 transport,
                 ProbeProgressStage::Baseline,
                 assessment.baseline,
+                Some(failure),
             );
             return finish_branch(
                 reporter,
@@ -270,17 +338,21 @@ where
                     assessment,
                     reasoning_shape,
                     evidence,
+                    failures,
                 },
             );
         }
         Err(error) => {
             assessment.baseline = baseline_failure_status(error);
+            let failure = RedactedProbeFailure::from_capture(ProbeProgressStage::Baseline, error);
+            failures.push(failure.clone());
             report_stage_finished(
                 reporter,
                 candidate,
                 transport,
                 ProbeProgressStage::Baseline,
                 assessment.baseline,
+                Some(failure),
             );
             return finish_branch(
                 reporter,
@@ -289,6 +361,7 @@ where
                     assessment,
                     reasoning_shape,
                     evidence,
+                    failures,
                 },
             );
         }
@@ -327,15 +400,32 @@ where
                 classify_captured_reasoning_shape(&exchange),
             );
             evidence.push(exchange.evidence().clone());
+            if assessment.streaming == ProbeStageStatus::Failed {
+                failures.push(RedactedProbeFailure::invalid_response(
+                    ProbeProgressStage::Streaming,
+                ));
+            }
         }
-        Err(error) => assessment.streaming = stage_failure_status(error),
+        Err(error) => {
+            assessment.streaming = stage_failure_status(error);
+            failures.push(RedactedProbeFailure::from_capture(
+                ProbeProgressStage::Streaming,
+                error,
+            ));
+        }
     }
+    let streaming_failure = failures
+        .iter()
+        .rev()
+        .find(|failure| failure.stage == ProbeProgressStage::Streaming)
+        .cloned();
     report_stage_finished(
         reporter,
         candidate,
         transport,
         ProbeProgressStage::Streaming,
         assessment.streaming,
+        streaming_failure,
     );
 
     report_stage_started(
@@ -371,6 +461,7 @@ where
                         transport,
                         ProbeProgressStage::ForcedTool,
                         assessment.forced_tool,
+                        None,
                     );
                     (call, exchange)
                 }
@@ -382,6 +473,7 @@ where
                         transport,
                         ProbeProgressStage::ForcedTool,
                         assessment.forced_tool,
+                        None,
                     );
                     return finish_branch(
                         reporter,
@@ -390,6 +482,7 @@ where
                             assessment,
                             reasoning_shape,
                             evidence,
+                            failures,
                         },
                     );
                 }
@@ -397,12 +490,15 @@ where
         }
         Err(error) => {
             assessment.forced_tool = forced_tool_failure_status(error);
+            let failure = RedactedProbeFailure::from_capture(ProbeProgressStage::ForcedTool, error);
+            failures.push(failure.clone());
             report_stage_finished(
                 reporter,
                 candidate,
                 transport,
                 ProbeProgressStage::ForcedTool,
                 assessment.forced_tool,
+                Some(failure),
             );
             return finish_branch(
                 reporter,
@@ -411,6 +507,7 @@ where
                     assessment,
                     reasoning_shape,
                     evidence,
+                    failures,
                 },
             );
         }
@@ -444,15 +541,32 @@ where
                 classify_captured_reasoning_shape(&exchange),
             );
             evidence.push(exchange.evidence().clone());
+            if assessment.continuation == ProbeStageStatus::Failed {
+                failures.push(RedactedProbeFailure::invalid_response(
+                    ProbeProgressStage::Continuation,
+                ));
+            }
         }
-        Err(error) => assessment.continuation = stage_failure_status(error),
+        Err(error) => {
+            assessment.continuation = stage_failure_status(error);
+            failures.push(RedactedProbeFailure::from_capture(
+                ProbeProgressStage::Continuation,
+                error,
+            ));
+        }
     }
+    let continuation_failure = failures
+        .iter()
+        .rev()
+        .find(|failure| failure.stage == ProbeProgressStage::Continuation)
+        .cloned();
     report_stage_finished(
         reporter,
         candidate,
         transport,
         ProbeProgressStage::Continuation,
         assessment.continuation,
+        continuation_failure,
     );
 
     finish_branch(
@@ -462,6 +576,7 @@ where
             assessment,
             reasoning_shape,
             evidence,
+            failures,
         },
     )
 }
@@ -487,6 +602,7 @@ fn report_stage_finished<F>(
     transport: TransportKind,
     stage: ProbeProgressStage,
     stage_status: ProbeStageStatus,
+    failure: Option<RedactedProbeFailure>,
 ) where
     F: Fn(ProtocolProbeProgressEvent) + Send + Sync,
 {
@@ -495,6 +611,7 @@ fn report_stage_finished<F>(
         transport,
         stage,
         stage_status,
+        failure,
     });
 }
 
@@ -536,6 +653,7 @@ where
         result.assessment.transport,
         ProbeProgressStage::Reasoning,
         reasoning_status,
+        None,
     );
     reporter(ProtocolProbeProgressEvent::BranchFinished {
         model: candidate.public_model.clone(),
