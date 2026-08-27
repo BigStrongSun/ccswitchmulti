@@ -540,6 +540,7 @@ pub fn run() {
                         RecoverySeverity::Info,
                         "none",
                     )),
+                    app_exit_monitor::PreviousRunClassification::CleanExit => None,
                     app_exit_monitor::PreviousRunClassification::NoPreviousRun => None,
                 };
                 if let Some((kind, severity, next_step)) = mapped {
