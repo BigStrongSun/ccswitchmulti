@@ -1,4 +1,15 @@
 # CC Switch Repository Memory
+## 2026-08-27 用户反馈「官方模型推理强度丢失」追问：不是旧配置污染，是模型名重映射 + 能力契约缺口
+
+- 用户问题：v18 用户反馈官方模型（gpt-5.6-sol）推理强度可能丢失，是否「又考虑了旧配置」。结论：**不是** config.toml / models_cache 旧数据污染。
+- 排除旧配置的现场证据（8/27 复核）：(1) 当前 `~/.codex/config.toml` 内联 `[model_providers.codex_model_router_v2].models` 的 gpt-5.6-sol 条目含完整官方档 `supported_reasoning_levels=[low,medium,high,xhigh,max,ultra]` + `additional_speed_tiers=["fast"]` + priority 服务档（历史上 02b9827e 修过的内联缺档问题没有复发）；(2) `models_cache.json` 8/27 21:07 随 router 激活重新同步，11 个模型，gpt-5.6-sol 完整官方档；(3) `models_cache.cc-switch-backup.json`（8/22 真实官方缓存）8 个官方模型档位齐全；(4) 本机 Codex CLI `codex debug models --bundled` 第一方交叉验证：gpt-5.6-sol=[low,medium,high,xhigh,max,ultra]。若请求走 official 缓存来源（platform=None 第 6 优先级）解析 gpt-5.6-sol，high 必然通过——而 422 实际发生，反证请求在能力解析前已被重映射到 qwen3.8。
+- 真实根因链（v18 现场，全部本地证据）：(1) Qwen Provider（274cfc2c，8/19 DB 备份证实当时 `meta.apiFormat=openai_chat`，即 responses→chat 转换分支；8/27 深探后才切 openai_responses）modelCatalog 仅声明 qwen3.8（`supportedEfforts=[low,medium,xhigh]` + codexUltra→xhigh）；(2) Codex 请求官方模型名 gpt-5.6-sol（不在该 Provider catalog）到达时，`forwarder.rs:2555 apply_codex_chat_upstream_model` → `apply_codex_upstream_model` 对 catalog 未命中模型回退改写为 Provider 配置模型 qwen3.8，改写发生在能力解析之前；(3) `resolve_codex_chat_reasoning_config` 按改写后的 qwen3.8 解析，UserConfig（用户当前声明，设计上最高优先级）产出 `capability|low,medium,xhigh,ultra|...`，无 high 映射；(4) 选择器/官方目录仍按 gpt-5.6-sol 的官方档暴露 high，用户选 high → `map_capability_reasoning_effort` 两处未命中 → fail-closed 422。`proxy_request_logs`：8/26 23:38 六连 422（Qwen 直连、model=gpt-5.6-sol、allowed 含 ultra）；8/20 16:07 同类（router Qwen 路由、gpt-5.6-luna、allowed=[low,medium,xhigh]，当时 codexUltra 尚未启用）。
+- 「丢失」的另一变体（静默）：承接 Provider 对映射后的模型完全无能力声明时，resolver 落到 Unknown，`infer_codex_chat_reasoning_config` 对 Qwen/vLLM haystack 返回 `supports_effort=false`，effort 被静默剥离——用户感知「选的档没生效」。这是保守推断的既有设计（绝不为未知第三方注入私有参数），非 v18 引入。
+- v18 是否回归：否。v17→v18 diff 中 forwarder/handlers 只加测试，codex.rs 195 行是 reasoning 投影/transport 继承（23a3df8e/b5395d80/584a1834/a7e87d1d），effort 映射逻辑零改动；bundled fallback（cfb9906a）自 v13 存在；同类 422 在 v17 时代（8/20）已有记录。
+- 根修状态：`0424ee5b`（本日记）已在单一 resolver 补最近档钳制（high→xhigh、minimal→low、等距取更高档），主请求路径经 `codex_chat_reasoning_config_from_capability → resolve_subagent_reasoning_capability` 同链覆盖，全链路回归 `qwen_shaped_capability_clamps_high_effort_to_nearest_supported` 已含本场景；3511 passed。已安装 3.19.2-18 不含修复，临时规避：该线程推理档切 xhigh 或会话模型切 qwen3.8。
+- 当前路由实况（8/27 21:07 起）：router 激活，`gpt*` 前缀路由到 `codex-official`（native_codex_auth 直连 OpenAI），官方模型 high 档原生可用；422 场景特指「Qwen Provider 直连 + 官方模型名」组合。
+- 本次为纯本地源码 + 活体 DB/日志/CLI 取证，第一方来源（CLI bundled + 8/22 官方缓存备份）交叉一致，按 AGENTS.md 规则 11 跳过联网检索。
+
 
 ## 2026-08-27 Qwen 能力契约缺 high 档钳制，gpt-5.6-sol 会话 422 根修
 
