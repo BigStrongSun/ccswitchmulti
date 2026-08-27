@@ -168,7 +168,57 @@ pub(crate) fn tcp_listener_owner_pid(port: u16) -> Option<u32> {
     None
 }
 
-#[cfg(all(unix, not(target_os = "windows")))]
+#[cfg(target_os = "macos")]
+pub(crate) fn process_identity(pid: u32) -> Option<ProcessIdentity> {
+    use libc::{proc_pidinfo, proc_pidpath, PROC_PIDTBSDINFO};
+
+    if pid == 0 {
+        return None;
+    }
+
+    let mut path_buf = [0u8; 4096];
+    let path_len = unsafe {
+        proc_pidpath(
+            pid as libc::pid_t,
+            path_buf.as_mut_ptr().cast(),
+            path_buf.len() as u32,
+        )
+    };
+    if path_len <= 0 {
+        return None;
+    }
+    let executable_path = String::from_utf8_lossy(&path_buf[..path_len as usize]).into_owned();
+
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+    let size = std::mem::size_of::<libc::proc_bsdinfo>();
+    if unsafe {
+        proc_pidinfo(
+            pid as libc::c_int,
+            PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size as libc::c_int,
+        )
+    } != size as libc::c_int
+    {
+        return None;
+    }
+    let info = unsafe { info.assume_init() };
+    let started_at_ticks = info.pbi_start_tvsec.saturating_mul(1_000_000) + info.pbi_start_tvusec;
+
+    Some(ProcessIdentity {
+        pid,
+        executable_path,
+        started_at_ticks,
+    })
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn tcp_listener_owner_pid(_port: u16) -> Option<u32> {
+    None
+}
+
+#[cfg(all(unix, not(any(target_os = "windows", target_os = "macos"))))]
 pub(crate) fn process_identity(pid: u32) -> Option<ProcessIdentity> {
     let proc_dir = PathBuf::from("/proc").join(pid.to_string());
     let executable_path = std::fs::read_link(proc_dir.join("exe"))
@@ -189,7 +239,7 @@ pub(crate) fn process_identity(pid: u32) -> Option<ProcessIdentity> {
     })
 }
 
-#[cfg(all(unix, not(target_os = "windows")))]
+#[cfg(all(unix, not(any(target_os = "windows", target_os = "macos"))))]
 pub(crate) fn tcp_listener_owner_pid(_port: u16) -> Option<u32> {
     None
 }
