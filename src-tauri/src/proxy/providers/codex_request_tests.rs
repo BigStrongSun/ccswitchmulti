@@ -102,7 +102,10 @@ fn chat_request_policy_prepares_literal_production_wire_request() {
         prepared.url,
         "https://gateway.example/custom/v1/chat/completions"
     );
-    assert_eq!(prepared.headers[AUTHORIZATION], "Bearer request-policy-secret");
+    assert_eq!(
+        prepared.headers[AUTHORIZATION],
+        "Bearer request-policy-secret"
+    );
     assert_eq!(prepared.headers[CONTENT_TYPE], "application/json");
     assert_eq!(prepared.headers[USER_AGENT], "CCSM-Contract/2");
     assert_eq!(prepared.headers["x-provider-policy"], "enabled");
