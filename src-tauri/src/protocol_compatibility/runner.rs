@@ -5,14 +5,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use crate::proxy::providers::transform_codex_chat::responses_to_chat_completions_with_reasoning;
+use crate::proxy::providers::codex_chat_common::split_leading_think_block;
+use crate::proxy::providers::codex_terminal::{
+    classify_chat_terminal, classify_native_responses_terminal, ChatTerminalEvidence,
+    NativeResponsesEvidence, NativeResponsesTerminalDisposition, TerminalDisposition,
+};
 
 use super::{
     build_logical_probe_request,
     capture::{capture_transport_probe, CapturedProbeExchange, ProbeCaptureError},
     classify::ClassifiedReasoningShape,
     classify_captured_reasoning_shape,
-    endpoint::build_probe_url,
     redaction::RedactedProbeEvidence,
     selection::select_transport_outcome_with_reasoning,
     PreToolVisibleContent, ProbeCandidate, ProbeCase, ProbeReadiness, ProbeStageStatus,
@@ -73,14 +76,6 @@ impl RedactedProbeFailure {
         Self {
             stage,
             kind: ProbeFailureKind::InvalidResponse,
-            status_code: None,
-        }
-    }
-
-    fn invalid_request(stage: ProbeProgressStage) -> Self {
-        Self {
-            stage,
-            kind: ProbeFailureKind::InvalidRequest,
             status_code: None,
         }
     }
@@ -268,39 +263,10 @@ where
     let mut failures = Vec::new();
     let mut reasoning_shape = empty_reasoning_shape();
     report_stage_started(reporter, candidate, transport, ProbeProgressStage::Baseline);
-    let Ok(endpoint) = build_probe_url(
-        &candidate.canonical_endpoint(),
-        transport,
-        candidate.is_full_url(),
-    ) else {
-        assessment.baseline = ProbeStageStatus::Failed;
-        let failure = RedactedProbeFailure::invalid_request(ProbeProgressStage::Baseline);
-        failures.push(failure.clone());
-        report_stage_finished(
-            reporter,
-            candidate,
-            transport,
-            ProbeProgressStage::Baseline,
-            assessment.baseline,
-            Some(failure),
-        );
-        return finish_branch(
-            reporter,
-            candidate,
-            TransportBranchResult {
-                assessment,
-                reasoning_shape,
-                evidence,
-                failures,
-            },
-        );
-    };
-
     let baseline = send_case(
         candidate,
         client,
         transport,
-        &endpoint,
         ProbeCase::BaselineJson,
         nonce,
         None,
@@ -382,7 +348,6 @@ where
         candidate,
         client,
         transport,
-        &endpoint,
         ProbeCase::BaselineSse,
         nonce,
         None,
@@ -390,7 +355,7 @@ where
     .await
     {
         Ok(exchange) => {
-            assessment.streaming = if has_stream_terminal(transport, &exchange) {
+            assessment.streaming = if has_completed_assistant_turn(transport, &exchange) {
                 ProbeStageStatus::Passed
             } else {
                 ProbeStageStatus::Failed
@@ -438,7 +403,6 @@ where
         candidate,
         client,
         transport,
-        &endpoint,
         ProbeCase::ForcedToolSse,
         nonce,
         None,
@@ -450,8 +414,33 @@ where
                 &mut reasoning_shape,
                 classify_captured_reasoning_shape(&exchange),
             );
+            let terminal = classify_probe_terminal(transport, &exchange);
             let call = extract_tool_call(transport, &exchange);
             evidence.push(exchange.evidence().clone());
+            if !terminal.is_complete {
+                assessment.forced_tool = ProbeStageStatus::Failed;
+                let failure =
+                    RedactedProbeFailure::invalid_response(ProbeProgressStage::ForcedTool);
+                failures.push(failure.clone());
+                report_stage_finished(
+                    reporter,
+                    candidate,
+                    transport,
+                    ProbeProgressStage::ForcedTool,
+                    assessment.forced_tool,
+                    Some(failure),
+                );
+                return finish_branch(
+                    reporter,
+                    candidate,
+                    TransportBranchResult {
+                        assessment,
+                        reasoning_shape,
+                        evidence,
+                        failures,
+                    },
+                );
+            }
             match call.filter(|call| valid_probe_tool_call(call, nonce)) {
                 Some(call) => {
                     assessment.forced_tool = ProbeStageStatus::Passed;
@@ -523,7 +512,6 @@ where
         candidate,
         client,
         transport,
-        &endpoint,
         ProbeCase::ToolContinuationJson,
         nonce,
         Some((&tool_call, &forced_exchange)),
@@ -678,7 +666,6 @@ async fn send_case(
     candidate: &ProbeCandidate,
     client: &Client,
     transport: TransportKind,
-    endpoint: &str,
     case: ProbeCase,
     nonce: &str,
     continuation: Option<(&CapturedToolCall, &CapturedProbeExchange)>,
@@ -693,18 +680,13 @@ async fn send_case(
         ),
         None => build_logical_probe_request(case, &candidate.upstream_model, nonce),
     };
-    let wire_body = match transport {
-        TransportKind::OpenAiResponses => logical,
-        TransportKind::OpenAiChat => responses_to_chat_completions_with_reasoning(logical, None)
-            .map_err(|_| ProbeCaptureError::InvalidPayload)?,
-    };
-    let mut request = client
-        .post(endpoint)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .json(&wire_body);
-    if let Some(authorization) = candidate.bearer_token() {
-        request = request.header(reqwest::header::AUTHORIZATION, authorization.clone());
-    }
+    let prepared = candidate
+        .prepare_request(transport, logical)
+        .map_err(|_| ProbeCaptureError::InvalidPayload)?;
+    let request = client
+        .post(prepared.url)
+        .headers(prepared.headers)
+        .json(&prepared.body);
     capture_transport_probe(request, RESPONSE_TIMEOUT).await
 }
 
@@ -810,6 +792,179 @@ struct ChatToolAccumulator {
     arguments: String,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ProbeTerminalOutcome {
+    is_complete: bool,
+    has_final_message: bool,
+}
+
+fn classify_probe_terminal(
+    transport: TransportKind,
+    exchange: &CapturedProbeExchange,
+) -> ProbeTerminalOutcome {
+    match transport {
+        TransportKind::OpenAiChat => classify_chat_probe_terminal(exchange),
+        TransportKind::OpenAiResponses => classify_responses_probe_terminal(exchange),
+    }
+}
+
+fn classify_chat_probe_terminal(exchange: &CapturedProbeExchange) -> ProbeTerminalOutcome {
+    let mut finish_reason = None;
+    let mut has_final_message = false;
+    let mut tools = BTreeMap::<usize, ChatToolAccumulator>::new();
+
+    for payload in exchange.payloads() {
+        let Some(choice) = payload
+            .value
+            .get("choices")
+            .and_then(Value::as_array)
+            .and_then(|choices| choices.first())
+        else {
+            continue;
+        };
+        if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
+            finish_reason = Some(reason);
+        }
+        for message in [choice.get("message"), choice.get("delta")]
+            .into_iter()
+            .flatten()
+        {
+            has_final_message |= chat_message_has_final_content(message);
+            observe_chat_tool_calls(message, &mut tools);
+        }
+    }
+
+    let valid_tool_calls = tools
+        .values()
+        .filter(|tool| !tool.name.trim().is_empty())
+        .count();
+    let evidence = ChatTerminalEvidence {
+        has_final_message,
+        valid_tool_calls,
+        dropped_tool_calls: tools.len().saturating_sub(valid_tool_calls),
+    };
+    ProbeTerminalOutcome {
+        is_complete: matches!(
+            classify_chat_terminal(finish_reason, evidence),
+            TerminalDisposition::Completed
+        ),
+        has_final_message,
+    }
+}
+
+fn chat_message_has_final_content(message: &Value) -> bool {
+    if message
+        .get("content")
+        .and_then(Value::as_str)
+        .is_some_and(|text| {
+            split_leading_think_block(text)
+                .map(|(_, answer)| !answer.trim().is_empty())
+                .unwrap_or_else(|| !text.trim().is_empty())
+        })
+        || message
+            .get("refusal")
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.trim().is_empty())
+    {
+        return true;
+    }
+
+    message
+        .get("content")
+        .and_then(Value::as_array)
+        .is_some_and(|parts| {
+            parts.iter().any(|part| {
+                part.get("text")
+                    .or_else(|| part.get("refusal"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| !text.trim().is_empty())
+            })
+        })
+}
+
+fn observe_chat_tool_calls(message: &Value, tools: &mut BTreeMap<usize, ChatToolAccumulator>) {
+    if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {
+        for (position, call) in calls.iter().enumerate() {
+            let index = call
+                .get("index")
+                .and_then(Value::as_u64)
+                .map(|index| index as usize)
+                .unwrap_or(position);
+            let accumulator = tools.entry(index).or_default();
+            if let Some(call_id) = call.get("id").and_then(Value::as_str) {
+                if !call_id.is_empty() {
+                    accumulator.call_id = call_id.to_string();
+                }
+            }
+            if let Some(function) = call.get("function") {
+                if let Some(name) = function.get("name").and_then(Value::as_str) {
+                    if !name.is_empty() {
+                        accumulator.name = name.to_string();
+                    }
+                }
+                append_text_field(function.get("arguments"), &mut accumulator.arguments);
+            }
+        }
+    }
+
+    if let Some(function) = message
+        .get("function_call")
+        .filter(|value| value.is_object())
+    {
+        let accumulator = tools.entry(0).or_default();
+        if let Some(name) = function.get("name").and_then(Value::as_str) {
+            if !name.is_empty() {
+                accumulator.name = name.to_string();
+            }
+        }
+        append_text_field(function.get("arguments"), &mut accumulator.arguments);
+    }
+}
+
+fn classify_responses_probe_terminal(exchange: &CapturedProbeExchange) -> ProbeTerminalOutcome {
+    let mut evidence = NativeResponsesEvidence::default();
+    for payload in exchange.payloads() {
+        if let Some(event_name) = payload
+            .event_type
+            .as_deref()
+            .or_else(|| payload.value.get("type").and_then(Value::as_str))
+        {
+            evidence.observe_event(event_name, &payload.value);
+            if let Some(disposition) =
+                classify_native_responses_terminal(event_name, &payload.value, evidence)
+            {
+                return ProbeTerminalOutcome {
+                    is_complete: matches!(
+                        disposition,
+                        NativeResponsesTerminalDisposition::Completed
+                    ),
+                    has_final_message: evidence.has_final_message,
+                };
+            }
+            continue;
+        }
+
+        let event_name = match payload.value.get("status").and_then(Value::as_str) {
+            Some("incomplete") => "response.incomplete",
+            Some("failed") => "response.failed",
+            _ => "response.completed",
+        };
+        let terminal_payload = json!({"response": payload.value.clone()});
+        evidence.observe_event(event_name, &terminal_payload);
+        let disposition =
+            classify_native_responses_terminal(event_name, &terminal_payload, evidence);
+        return ProbeTerminalOutcome {
+            is_complete: matches!(
+                disposition,
+                Some(NativeResponsesTerminalDisposition::Completed)
+            ),
+            has_final_message: evidence.has_final_message,
+        };
+    }
+
+    ProbeTerminalOutcome::default()
+}
+
 fn extract_chat_tool_call(exchange: &CapturedProbeExchange) -> Option<CapturedToolCall> {
     let mut tools = BTreeMap::<usize, ChatToolAccumulator>::new();
     let mut reasoning_content = String::new();
@@ -865,91 +1020,12 @@ fn valid_probe_tool_call(call: &CapturedToolCall, nonce: &str) -> bool {
             == Some(nonce)
 }
 
-fn has_stream_terminal(transport: TransportKind, exchange: &CapturedProbeExchange) -> bool {
-    match transport {
-        TransportKind::OpenAiChat => exchange.saw_done(),
-        TransportKind::OpenAiResponses => exchange
-            .evidence()
-            .event_types
-            .iter()
-            .any(|event| event == "response.completed"),
-    }
-}
-
 fn has_completed_assistant_turn(
     transport: TransportKind,
     exchange: &CapturedProbeExchange,
 ) -> bool {
-    match transport {
-        TransportKind::OpenAiChat => {
-            let mut text = String::new();
-            let mut completed = exchange.saw_done();
-            for payload in exchange.payloads() {
-                let choices = payload
-                    .value
-                    .get("choices")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten();
-                for choice in choices {
-                    completed |=
-                        choice.get("finish_reason").and_then(Value::as_str) == Some("stop");
-                    append_text_field(
-                        choice
-                            .get("message")
-                            .and_then(|message| message.get("content")),
-                        &mut text,
-                    );
-                    append_text_field(
-                        choice.get("delta").and_then(|delta| delta.get("content")),
-                        &mut text,
-                    );
-                }
-            }
-            completed && !text.trim().is_empty()
-        }
-        TransportKind::OpenAiResponses => {
-            let mut text = String::new();
-            let mut completed = false;
-            for payload in exchange.payloads() {
-                completed |= payload.value.get("status").and_then(Value::as_str)
-                    == Some("completed")
-                    || payload
-                        .value
-                        .pointer("/response/status")
-                        .and_then(Value::as_str)
-                        == Some("completed");
-                if payload.event_type.as_deref() == Some("response.output_text.delta") {
-                    append_text_field(payload.value.get("delta"), &mut text);
-                }
-                if let Some(output) = payload
-                    .value
-                    .get("output")
-                    .and_then(Value::as_array)
-                    .or_else(|| {
-                        payload
-                            .value
-                            .pointer("/response/output")
-                            .and_then(Value::as_array)
-                    })
-                {
-                    for item in output {
-                        if item.get("type").and_then(Value::as_str) != Some("message")
-                            || item.get("role").and_then(Value::as_str) != Some("assistant")
-                        {
-                            continue;
-                        }
-                        if let Some(content) = item.get("content").and_then(Value::as_array) {
-                            for part in content {
-                                append_text_field(part.get("text"), &mut text);
-                            }
-                        }
-                    }
-                }
-            }
-            completed && !text.trim().is_empty()
-        }
-    }
+    let terminal = classify_probe_terminal(transport, exchange);
+    terminal.is_complete && terminal.has_final_message
 }
 
 fn baseline_failure_status(error: ProbeCaptureError) -> ProbeStageStatus {

@@ -5769,8 +5769,8 @@ mod tests {
         app_config::AppType,
         database::Database,
         protocol_compatibility::{
-            ProbeReadiness, ProbeTargetKey, ProtocolCompatibilityProbeResult,
-            ProtocolCompatibilityRecord, TransportKind,
+            compile_provider_probe_candidate_for_model, ProbeReadiness, ProbeTargetKey,
+            ProtocolCompatibilityProbeResult, ProtocolCompatibilityRecord, TransportKind,
         },
         provider::{Provider, ProviderMeta},
         proxy::{
@@ -5822,7 +5822,11 @@ mod tests {
         let provider = Provider {
             id: "qwen-provider".to_string(),
             name: "Qwen Chat".to_string(),
-            settings_config: json!({ "base_url": "https://qwen.example/v1" }),
+            settings_config: json!({
+                "auth": {"OPENAI_API_KEY": "probe-secret"},
+                "config": "model = \"qwen-mapped\"\nbase_url = \"https://qwen.example/v1\"\nwire_api = \"chat\"\n",
+                "base_url": "https://qwen.example/v1"
+            }),
             website_url: None,
             category: Some("codex".to_string()),
             created_at: None,
@@ -5833,17 +5837,7 @@ mod tests {
             icon_color: None,
             in_failover_queue: false,
         };
-        let target = ProbeTargetKey::new(
-            &provider.id,
-            None::<String>,
-            "qwen-public",
-            "qwen-mapped",
-            TransportKind::OpenAiChat,
-            "https://qwen.example/v1/chat/completions",
-            "bearer",
-        )
-        .expect("profile target")
-        .with_credential("");
+        let target = qwen_chat_profile_target(&provider);
         let result: ProtocolCompatibilityProbeResult = serde_json::from_value(json!({
             "selected_transport": "open_ai_chat",
             "readiness": "verified",
@@ -5870,6 +5864,17 @@ mod tests {
         ))
         .expect("save profile");
         provider
+    }
+
+    fn qwen_chat_profile_target(provider: &Provider) -> ProbeTargetKey {
+        compile_provider_probe_candidate_for_model(
+            provider,
+            "qwen-public".to_string(),
+            "qwen-mapped".to_string(),
+        )
+        .expect("compile profile Provider policy")
+        .target_key(TransportKind::OpenAiChat)
+        .expect("profile target")
     }
 
     #[tokio::test]
@@ -6028,17 +6033,7 @@ mod tests {
 
         assert_eq!(response["output"].as_array().unwrap().len(), 1);
         assert_eq!(response["output"][0]["type"], "message");
-        let target = ProbeTargetKey::new(
-            "qwen-provider",
-            None::<String>,
-            "qwen-public",
-            "qwen-mapped",
-            TransportKind::OpenAiChat,
-            "https://qwen.example/v1/chat/completions",
-            "bearer",
-        )
-        .unwrap()
-        .with_credential("");
+        let target = qwen_chat_profile_target(&provider);
         assert_eq!(
             db.get_protocol_compatibility_result(&target)
                 .unwrap()
@@ -6068,17 +6063,7 @@ mod tests {
         .collect::<Vec<_>>()
         .await;
 
-        let target = ProbeTargetKey::new(
-            "qwen-provider",
-            None::<String>,
-            "qwen-public",
-            "qwen-mapped",
-            TransportKind::OpenAiChat,
-            "https://qwen.example/v1/chat/completions",
-            "bearer",
-        )
-        .unwrap()
-        .with_credential("");
+        let target = qwen_chat_profile_target(&provider);
         assert_eq!(
             db.get_protocol_compatibility_result(&target)
                 .unwrap()

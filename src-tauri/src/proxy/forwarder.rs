@@ -2455,6 +2455,19 @@ impl RequestForwarder {
             Some(api_format) => super::providers::claude_api_format_needs_transform(api_format),
             None => adapter.needs_transform(provider),
         };
+        let codex_third_party_request_policy = if matches!(app_type, AppType::Codex)
+            && adapter.name() == "Codex"
+            && endpoint.contains("responses")
+            && !provider.uses_managed_account_auth()
+            && provider.category.as_deref() != Some("official")
+            && !super::providers::is_codex_official_provider(provider)
+            && !codex_responses_to_messages
+            && !codex_responses_to_anthropic
+        {
+            Some(super::providers::codex_request::CodexThirdPartyRequestPolicy::compile(provider)?)
+        } else {
+            None
+        };
         // Codex → Anthropic: Claude Code emulation is off by default and only
         // enabled when the user explicitly turns it on in the UI, so requests can
         // pass a gateway's "Claude Code only" fingerprint check (User-Agent /
@@ -2498,7 +2511,14 @@ impl RequestForwarder {
         let codex_anthropic_base_is_full_endpoint =
             codex_responses_to_anthropic && base_url_is_full_endpoint(&base_url, "/v1/messages");
 
-        let url = if matches!(resolved_claude_api_format.as_deref(), Some("gemini_native")) {
+        let url = if let Some(policy) = codex_third_party_request_policy.as_ref() {
+            let transport = if codex_responses_to_chat {
+                super::providers::codex_request::CodexRequestTransport::ChatCompletions
+            } else {
+                super::providers::codex_request::CodexRequestTransport::Responses
+            };
+            policy.prepare_url_with_query(transport, passthrough_query.as_deref())?
+        } else if matches!(resolved_claude_api_format.as_deref(), Some("gemini_native")) {
             super::gemini_url::resolve_gemini_native_url(
                 &base_url,
                 &effective_endpoint,
@@ -2552,11 +2572,6 @@ impl RequestForwarder {
                     "[Codex] Restored or enriched {restored} cached function call item(s) for Chat upstream"
                 );
             }
-            super::providers::apply_codex_chat_upstream_model(provider, &mut mapped_body);
-            let reasoning_config =
-                super::providers::resolve_codex_chat_reasoning_config(provider, &mapped_body);
-            let text_only_override = super::providers::codex_provider_text_only_input(provider);
-            let cache_config = super::providers::resolve_codex_cache_config(provider, &mapped_body);
             if codex_responses_to_chat {
                 codex_chat_tool_context = Some(
                     super::providers::transform_codex_chat::build_codex_tool_context_from_request(
@@ -2564,45 +2579,61 @@ impl RequestForwarder {
                     ),
                 );
             }
+            let hosted_web_search_enabled = hosted_tool_loop_allowed
+                && hosted_tool_bridge_enabled(&codex_router_provider.settings_config, "webSearch");
+            let hosted_image_generation_enabled = hosted_tool_loop_allowed
+                && hosted_tool_bridge_enabled(
+                    &codex_router_provider.settings_config,
+                    "imageGeneration",
+                );
             if let Some(context) = codex_chat_tool_context.as_mut() {
                 context.apply_hosted_tool_switches(
-                    hosted_tool_loop_allowed
-                        && hosted_tool_bridge_enabled(
-                            &codex_router_provider.settings_config,
-                            "webSearch",
-                        ),
-                    hosted_tool_loop_allowed
-                        && hosted_tool_bridge_enabled(
-                            &codex_router_provider.settings_config,
-                            "imageGeneration",
-                        ),
+                    hosted_web_search_enabled,
+                    hosted_image_generation_enabled,
                 );
             }
-            let mut chat_body = super::providers::transform_codex_chat::responses_to_chat_completions_with_reasoning_text_only_and_cache(
-                mapped_body,
-                reasoning_config.as_ref(),
-                text_only_override,
-                Some(&cache_config),
-            )?;
-            // 转换函数内部会重建一份 CodexToolContext，因此上面的
-            // apply_hosted_tool_switches 不会作用到真正发给上游的 Chat body。
-            // 这里按同一份 context 的开关同步移除被禁用的 hosted tool 定义，
-            // 保证模型可见工具与 hosted tool loop 接管范围一致（避免
-            // streaming auto 下模型调用 web_search 得到 unsupported call）。
-            if let Some(context) = codex_chat_tool_context.as_ref() {
-                super::providers::transform_codex_chat::apply_hosted_tool_switches_to_chat_body(
+            if let Some(policy) = codex_third_party_request_policy.as_ref() {
+                policy.prepare_protocol_body(
+                    super::providers::codex_request::CodexRequestTransport::ChatCompletions,
+                    mapped_body,
+                    &super::providers::codex_request::CodexRequestOptions {
+                        hosted_web_search_enabled,
+                        hosted_image_generation_enabled,
+                        prompt_cache_session_id: self
+                            .session_client_provided
+                            .then(|| self.session_id.clone()),
+                    },
+                )?
+            } else {
+                super::providers::apply_codex_chat_upstream_model(provider, &mut mapped_body);
+                let reasoning_config =
+                    super::providers::resolve_codex_chat_reasoning_config(provider, &mapped_body);
+                let text_only_override = super::providers::codex_provider_text_only_input(provider);
+                let cache_config =
+                    super::providers::resolve_codex_cache_config(provider, &mapped_body);
+                let mut chat_body = super::providers::transform_codex_chat::responses_to_chat_completions_with_reasoning_text_only_and_cache(
+                    mapped_body,
+                    reasoning_config.as_ref(),
+                    text_only_override,
+                    Some(&cache_config),
+                )?;
+                // 转换函数内部会重建一份 CodexToolContext，因此上面的
+                // apply_hosted_tool_switches 不会作用到真正发给上游的 Chat body。
+                if let Some(context) = codex_chat_tool_context.as_ref() {
+                    super::providers::transform_codex_chat::apply_hosted_tool_switches_to_chat_body(
+                        &mut chat_body,
+                        context,
+                    );
+                }
+                super::providers::inject_codex_chat_prompt_cache_key(
+                    provider,
                     &mut chat_body,
-                    context,
+                    explicit_prompt_cache_key.as_deref(),
+                    self.session_client_provided
+                        .then_some(self.session_id.as_str()),
                 );
+                chat_body
             }
-            super::providers::inject_codex_chat_prompt_cache_key(
-                provider,
-                &mut chat_body,
-                explicit_prompt_cache_key.as_deref(),
-                self.session_client_provided
-                    .then_some(self.session_id.as_str()),
-            );
-            chat_body
         } else if codex_responses_to_anthropic {
             let mut mapped_body = mapped_body;
             super::providers::apply_codex_upstream_model(provider, &mut mapped_body);
@@ -2677,7 +2708,13 @@ impl RequestForwarder {
             }
         } else {
             let mut mapped_body = mapped_body;
-            if matches!(app_type, AppType::Codex) {
+            if let Some(policy) = codex_third_party_request_policy.as_ref() {
+                mapped_body = policy.prepare_protocol_body(
+                    super::providers::codex_request::CodexRequestTransport::Responses,
+                    mapped_body,
+                    &super::providers::codex_request::CodexRequestOptions::default(),
+                )?;
+            } else if matches!(app_type, AppType::Codex) {
                 super::providers::apply_codex_native_responses_reasoning_effort(
                     provider,
                     &mut mapped_body,
@@ -2810,18 +2847,23 @@ impl RequestForwarder {
                 );
             }
         }
-        let mut filtered_body = prepare_upstream_request_body(request_body);
-        if !is_copilot {
-            if let Some(overrides) = provider
-                .meta
-                .as_ref()
-                .and_then(|meta| meta.local_proxy_request_overrides.as_ref())
-            {
-                if apply_local_proxy_body_overrides(&mut filtered_body, overrides) {
-                    filtered_body = prepare_upstream_request_body(filtered_body);
+        let mut filtered_body = if let Some(policy) = codex_third_party_request_policy.as_ref() {
+            policy.apply_body_policy(request_body)
+        } else {
+            let mut filtered_body = prepare_upstream_request_body(request_body);
+            if !is_copilot {
+                if let Some(overrides) = provider
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.local_proxy_request_overrides.as_ref())
+                {
+                    if apply_local_proxy_body_overrides(&mut filtered_body, overrides) {
+                        filtered_body = prepare_upstream_request_body(filtered_body);
+                    }
                 }
             }
-        }
+            filtered_body
+        };
         let hosted_tool_loop_config =
             codex_chat_tool_context
                 .as_ref()
@@ -2947,7 +2989,10 @@ impl RequestForwarder {
         // 获取认证头（提前准备，用于内联替换），同时保留仅用于日志脱敏的
         // 精确认证材料。实际日志永远不输出这些值。
         let mut log_secrets: Vec<String> = Vec::new();
-        let mut auth_headers = if let Some(mut auth) = adapter.extract_auth(provider) {
+        let mut auth_headers = if let Some(policy) = codex_third_party_request_policy.as_ref() {
+            auth_strategy_for_log = policy.authentication_kind().to_string();
+            policy.auth_header_pairs()
+        } else if let Some(mut auth) = adapter.extract_auth(provider) {
             // GitHub Copilot 特殊处理：从 CopilotAuthManager 获取真实 token
             if auth.strategy == AuthStrategy::GitHubCopilot {
                 if let Some(app_handle) = &self.app_handle {
@@ -3516,14 +3561,21 @@ impl RequestForwarder {
             );
         }
 
-        apply_local_proxy_header_overrides(
-            &mut ordered_headers,
-            provider
-                .meta
-                .as_ref()
-                .and_then(|meta| meta.local_proxy_request_overrides.as_ref()),
-            is_copilot,
-        );
+        if codex_third_party_request_policy.is_some() {
+            super::providers::codex_request::apply_provider_header_policy(
+                provider,
+                &mut ordered_headers,
+            );
+        } else {
+            apply_local_proxy_header_overrides(
+                &mut ordered_headers,
+                provider
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.local_proxy_request_overrides.as_ref()),
+                is_copilot,
+            );
+        }
         enforce_codex_oauth_originator(
             &mut ordered_headers,
             is_codex_oauth || codex_official_auth_passthrough,
@@ -8132,8 +8184,8 @@ mod tests {
     use crate::{
         database::Database,
         protocol_compatibility::{
-            ProbeReadiness, ProbeTargetKey, ProtocolCompatibilityProbeResult,
-            ProtocolCompatibilityRecord, TransportKind,
+            compile_provider_probe_candidate_for_model, ProbeReadiness,
+            ProtocolCompatibilityProbeResult, ProtocolCompatibilityRecord, TransportKind,
         },
     };
     use axum::http::header::{HeaderValue, ACCEPT};
@@ -8184,18 +8236,19 @@ mod tests {
     fn verified_qwen_hosted_profile(db: &Database) -> Provider {
         let mut provider = test_provider_with_type(None);
         provider.id = "qwen-provider".to_string();
-        provider.settings_config = json!({ "base_url": "https://qwen.example/v1" });
-        let target = ProbeTargetKey::new(
-            &provider.id,
-            None::<String>,
-            "qwen-public",
-            "qwen-mapped",
-            TransportKind::OpenAiChat,
-            "https://qwen.example/v1/chat/completions",
-            "bearer",
+        provider.settings_config = json!({
+            "auth": {"OPENAI_API_KEY": "probe-secret"},
+            "config": "model = \"qwen-mapped\"\nbase_url = \"https://qwen.example/v1\"\nwire_api = \"chat\"\n",
+            "base_url": "https://qwen.example/v1"
+        });
+        let target = compile_provider_probe_candidate_for_model(
+            &provider,
+            "qwen-public".to_string(),
+            "qwen-mapped".to_string(),
         )
-        .expect("profile target")
-        .with_credential("");
+        .expect("compile profile Provider policy")
+        .target_key(TransportKind::OpenAiChat)
+        .expect("profile target");
         let result: ProtocolCompatibilityProbeResult = serde_json::from_value(json!({
             "selected_transport": "open_ai_chat",
             "readiness": "verified",

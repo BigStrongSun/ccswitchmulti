@@ -22,8 +22,8 @@ use crate::proxy::providers::codex_oauth_auth::{CodexAccountPoolPolicy, NATIVE_C
 use crate::{
     database::Database,
     protocol_compatibility::{
-        endpoint::build_probe_url, ProbeReadiness, ProbeTargetKey, ProtocolCompatibilityRecord,
-        ReasoningProjection, TransportKind, PROBE_PROFILE_VERSION,
+        compile_provider_probe_candidate_for_model, ProbeReadiness, ProbeTargetKey,
+        ProtocolCompatibilityRecord, ReasoningProjection, TransportKind, PROBE_PROFILE_VERSION,
     },
 };
 use regex::Regex;
@@ -1325,61 +1325,13 @@ pub(crate) fn resolve_codex_chat_protocol_target(
     if public_model.trim().is_empty() || upstream_model.trim().is_empty() {
         return None;
     }
-
-    let is_routed = provider
-        .settings_config
-        .get("codexResolvedRouteId")
-        .is_some()
-        || provider
-            .settings_config
-            .get(CODEX_ROUTER_PARENT_PROVIDER_ID)
-            .is_some();
-    let (provider_id, route_id) = if is_routed {
-        let Some(parent_provider_id) = provider
-            .settings_config
-            .get(CODEX_ROUTER_PARENT_PROVIDER_ID)
-            .and_then(JsonValue::as_str)
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-        else {
-            return None;
-        };
-        let Some(route_id) = provider
-            .settings_config
-            .get("codexResolvedRouteId")
-            .and_then(JsonValue::as_str)
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-        else {
-            return None;
-        };
-        (parent_provider_id, Some(route_id))
-    } else {
-        (provider.id.as_str(), None)
-    };
-
-    let Some(base_url) = provider_codex_base_url(provider) else {
-        return None;
-    };
-    let is_full_url = provider
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.is_full_url)
-        .unwrap_or(false);
-    let Ok(endpoint) = build_probe_url(&base_url, TransportKind::OpenAiChat, is_full_url) else {
-        return None;
-    };
-    let (_, api_key) = provider.resolve_usage_credentials(&crate::app_config::AppType::Codex);
-    ProbeTargetKey::new(
-        provider_id,
-        route_id,
-        public_model,
-        upstream_model,
-        TransportKind::OpenAiChat,
-        &endpoint,
-        "bearer",
+    compile_provider_probe_candidate_for_model(
+        provider,
+        public_model.to_string(),
+        upstream_model.to_string(),
     )
-    .map(|target| target.with_credential(&api_key))
+    .ok()?
+    .target_key(TransportKind::OpenAiChat)
     .ok()
 }
 
@@ -1396,61 +1348,16 @@ pub(crate) fn apply_detected_codex_transport_to_effective_provider(
     {
         return false;
     }
-    let is_routed = provider
-        .settings_config
-        .get("codexResolvedRouteId")
-        .is_some()
-        || provider
-            .settings_config
-            .get(CODEX_ROUTER_PARENT_PROVIDER_ID)
-            .is_some();
-    let (provider_id, route_id) = if is_routed {
-        let Some(parent_provider_id) = provider
-            .settings_config
-            .get(CODEX_ROUTER_PARENT_PROVIDER_ID)
-            .and_then(JsonValue::as_str)
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-        else {
-            return false;
-        };
-        let Some(route_id) = provider
-            .settings_config
-            .get("codexResolvedRouteId")
-            .and_then(JsonValue::as_str)
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-        else {
-            return false;
-        };
-        (parent_provider_id, Some(route_id))
-    } else {
-        (provider.id.as_str(), None)
-    };
-    let Some(base_url) = provider_codex_base_url(provider) else {
+    let Ok(candidate) = compile_provider_probe_candidate_for_model(
+        provider,
+        public_model.to_string(),
+        upstream_model.to_string(),
+    ) else {
         return false;
     };
-    let is_full_url = provider
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.is_full_url)
-        .unwrap_or(false);
-    let (_, api_key) = provider.resolve_usage_credentials(&crate::app_config::AppType::Codex);
     let mut selected: Option<(i64, TransportKind)> = None;
     for transport in [TransportKind::OpenAiResponses, TransportKind::OpenAiChat] {
-        let Ok(endpoint) = build_probe_url(&base_url, transport, is_full_url) else {
-            continue;
-        };
-        let Ok(target) = ProbeTargetKey::new(
-            provider_id,
-            route_id,
-            public_model,
-            upstream_model,
-            transport,
-            &endpoint,
-            "bearer",
-        )
-        .map(|target| target.with_credential(&api_key)) else {
+        let Ok(target) = candidate.target_key(transport) else {
             continue;
         };
         let Some(record) =
@@ -7496,29 +7403,24 @@ wire_api = "responses"
 
     fn save_verified_chat_profile(
         db: &Database,
-        provider_id: &str,
-        route_id: Option<&str>,
+        provider: &Provider,
         public_model: &str,
         upstream_model: &str,
-        endpoint: &str,
         semantic: &str,
         source: &str,
-    ) {
+    ) -> ProbeTargetKey {
         use crate::protocol_compatibility::{
             ProbeReadiness, ProtocolCompatibilityProbeResult, ProtocolCompatibilityRecord,
         };
 
-        let target = ProbeTargetKey::new(
-            provider_id,
-            route_id,
-            public_model,
-            upstream_model,
-            TransportKind::OpenAiChat,
-            endpoint,
-            "bearer",
+        let target = compile_provider_probe_candidate_for_model(
+            provider,
+            public_model.to_string(),
+            upstream_model.to_string(),
         )
-        .expect("profile target")
-        .with_credential("");
+        .expect("compile profile Provider policy")
+        .target_key(TransportKind::OpenAiChat)
+        .expect("profile target");
         let result: ProtocolCompatibilityProbeResult = serde_json::from_value(json!({
             "selected_transport": "open_ai_chat",
             "readiness": "verified",
@@ -7541,23 +7443,29 @@ wire_api = "responses"
         .expect("verified profile result");
         assert_eq!(result.readiness, ProbeReadiness::Verified);
         db.save_protocol_compatibility_result(&ProtocolCompatibilityRecord::new(
-            target, result, 100, 200,
+            target.clone(),
+            result,
+            100,
+            200,
         ))
         .expect("save verified profile");
+        target
     }
 
     #[test]
     fn resolves_exact_normal_chat_profile_only() {
         let db = Database::memory().expect("memory database");
-        let mut provider = create_provider(json!({ "base_url": "https://qwen.example/v1" }));
+        let mut provider = create_provider(json!({
+            "auth": {"OPENAI_API_KEY": "probe-secret"},
+            "config": "model = \"qwen-mapped\"\nbase_url = \"https://qwen.example/v1\"\nwire_api = \"chat\"\n",
+            "base_url": "https://qwen.example/v1"
+        }));
         provider.id = "qwen-provider".to_string();
         save_verified_chat_profile(
             &db,
-            "qwen-provider",
-            None,
+            &provider,
             "qwen-public",
             "qwen-mapped",
-            "https://qwen.example/v1/chat/completions",
             "readable",
             "reasoning_content",
         );
@@ -7603,34 +7511,37 @@ wire_api = "responses"
         };
 
         let db = Database::memory().expect("memory database");
+        let mut standalone = create_provider(json!({
+            "auth": {"OPENAI_API_KEY": "probe-secret"},
+            "config": "model = \"qwen-mapped\"\nbase_url = \"https://qwen.example/v1\"\nwire_api = \"chat\"\n",
+            "base_url": "https://qwen.example/v1"
+        }));
+        standalone.id = "qwen-provider".to_string();
         save_verified_chat_profile(
             &db,
-            "qwen-provider",
-            None,
+            &standalone,
             "qwen-public",
             "qwen-mapped",
-            "https://qwen.example/v1/chat/completions",
             "readable",
             "reasoning_content",
         );
         let mut provider = create_provider(json!({
+            "auth": {"OPENAI_API_KEY": "probe-secret"},
+            "config": "model = \"qwen-mapped\"\nbase_url = \"https://qwen.example/v1\"\nwire_api = \"chat\"\n",
             "base_url": "https://qwen.example/v1",
             "codexRouterParentProviderId": "router",
             "codexResolvedRouteId": "qwen-route",
             "codexResolvedTargetProviderId": "qwen-provider"
         }));
         provider.id = "router::route::qwen-route".to_string();
-        let stale_route_target = ProbeTargetKey::new(
-            "router",
-            Some("qwen-route"),
-            "qwen-public",
-            "qwen-mapped",
-            TransportKind::OpenAiChat,
-            "https://qwen.example/v1/chat/completions",
-            "bearer",
+        let stale_route_target = compile_provider_probe_candidate_for_model(
+            &provider,
+            "qwen-public".to_string(),
+            "qwen-mapped".to_string(),
         )
-        .expect("route target")
-        .with_credential("");
+        .expect("compile route policy")
+        .target_key(TransportKind::OpenAiChat)
+        .expect("route target");
         db.save_protocol_compatibility_result(&ProtocolCompatibilityRecord::new(
             stale_route_target,
             ProtocolCompatibilityProbeResult {
@@ -7700,17 +7611,14 @@ wire_api = "responses"
             api_format: Some("openai_responses".to_string()),
             ..ProviderMeta::default()
         });
-        let target = ProbeTargetKey::new(
-            "router",
-            Some("qwen-route"),
-            "qwen-visible",
-            "Qwen/Qwen3.8",
-            TransportKind::OpenAiChat,
-            "https://qwen.example/v1/chat/completions",
-            "bearer",
+        let target = compile_provider_probe_candidate_for_model(
+            &provider,
+            "qwen-visible".to_string(),
+            "Qwen/Qwen3.8".to_string(),
         )
-        .unwrap()
-        .with_credential("probe-secret");
+        .expect("compile detected route policy")
+        .target_key(TransportKind::OpenAiChat)
+        .expect("detected route target");
         db.save_protocol_compatibility_result(&ProtocolCompatibilityRecord::new(
             target,
             ProtocolCompatibilityProbeResult {
@@ -7736,17 +7644,21 @@ wire_api = "responses"
     #[test]
     fn routed_provider_inherits_equivalent_detected_transport_without_resave() {
         let db = Database::memory().expect("memory database");
+        let mut standalone = create_provider(json!({
+            "auth": {"OPENAI_API_KEY": "probe-secret"},
+            "config": "model = \"Qwen/Qwen3.8\"\nbase_url = \"https://qwen.example/v1\"\nwire_api = \"responses\"\n"
+        }));
+        standalone.id = "qwen-provider".to_string();
         save_verified_chat_profile(
             &db,
-            "qwen-provider",
-            None,
+            &standalone,
             "qwen-visible",
             "Qwen/Qwen3.8",
-            "https://qwen.example/v1/chat/completions",
             "readable",
             "reasoning_content",
         );
         let mut provider = create_provider(json!({
+            "auth": {"OPENAI_API_KEY": "probe-secret"},
             "config": "model = \"qwen-visible\"\nbase_url = \"https://qwen.example/v1\"\nwire_api = \"responses\"\n",
             "codexRouterParentProviderId": "router",
             "codexResolvedRouteId": "qwen-route",
@@ -7805,27 +7717,14 @@ wire_api = "responses"
             "config": "model = \"qwen-public\"\nbase_url = \"https://qwen.example/v1\"\nwire_api = \"chat\"\n"
         }));
         provider.id = "qwen-provider".to_string();
-        save_verified_chat_profile(
+        let target = save_verified_chat_profile(
             &db,
-            "qwen-provider",
-            None,
+            &provider,
             "qwen-public",
             "qwen-mapped",
-            "https://qwen.example/v1/chat/completions",
             "summary",
             "native_responses",
         );
-        let target = ProbeTargetKey::new(
-            "qwen-provider",
-            None::<String>,
-            "qwen-public",
-            "qwen-mapped",
-            TransportKind::OpenAiChat,
-            "https://qwen.example/v1/chat/completions",
-            "bearer",
-        )
-        .unwrap()
-        .with_credential("probe-secret");
         db.save_reasoning_manual_override(
             &target,
             ManualReasoningOverride::new(
@@ -7856,6 +7755,8 @@ wire_api = "responses"
     fn routed_chat_profile_uses_parent_provider_and_route_identity() {
         let db = Database::memory().expect("memory database");
         let mut provider = create_provider(json!({
+            "auth": {"OPENAI_API_KEY": "probe-secret"},
+            "config": "model = \"qwen-mapped\"\nbase_url = \"https://qwen.example/v1\"\nwire_api = \"chat\"\n",
             "base_url": "https://qwen.example/v1",
             "codexRouterParentProviderId": "codex-router",
             "codexResolvedRouteId": "qwen-route"
@@ -7863,11 +7764,9 @@ wire_api = "responses"
         provider.id = "effective-qwen-target".to_string();
         save_verified_chat_profile(
             &db,
-            "codex-router",
-            Some("qwen-route"),
+            &provider,
             "qwen-public",
             "qwen-mapped",
-            "https://qwen.example/v1/chat/completions",
             "summary",
             "native_responses",
         );
@@ -7899,17 +7798,23 @@ wire_api = "responses"
     fn incomplete_route_identity_never_falls_back_to_a_standalone_profile() {
         let db = Database::memory().expect("memory database");
         let mut provider = create_provider(json!({
+            "auth": {"OPENAI_API_KEY": "probe-secret"},
+            "config": "model = \"qwen-mapped\"\nbase_url = \"https://qwen.example/v1\"\nwire_api = \"chat\"\n",
             "base_url": "https://qwen.example/v1",
             "codexRouterParentProviderId": "codex-router"
         }));
         provider.id = "effective-qwen-target".to_string();
+        let mut standalone = provider.clone();
+        standalone
+            .settings_config
+            .as_object_mut()
+            .unwrap()
+            .remove("codexRouterParentProviderId");
         save_verified_chat_profile(
             &db,
-            "effective-qwen-target",
-            None,
+            &standalone,
             "qwen-public",
             "qwen-mapped",
-            "https://qwen.example/v1/chat/completions",
             "readable",
             "reasoning_content",
         );
@@ -7927,6 +7832,8 @@ wire_api = "responses"
         );
 
         provider.settings_config = json!({
+            "auth": {"OPENAI_API_KEY": "probe-secret"},
+            "config": "model = \"qwen-mapped\"\nbase_url = \"https://qwen.example/v1\"\nwire_api = \"chat\"\n",
             "base_url": "https://qwen.example/v1",
             "codexResolvedRouteId": "qwen-route"
         });

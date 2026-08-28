@@ -36,6 +36,16 @@ enum ResponsesMode {
     InvalidSuccessfulJson,
     IncompleteContinuation,
     MarkerMismatch,
+    ChatDoneWithoutFinishReason,
+    ChatUnknownFinishReason,
+    ChatLengthTerminal,
+    ChatReasoningOnlyStop,
+    ResponsesCompletedWithoutStatus,
+    StreamingFinalOutputMissing,
+    ForcedToolTerminalMissing,
+    ForcedToolIncomplete,
+    ForcedToolFailed,
+    ForcedToolMissingName,
 }
 
 #[derive(Clone)]
@@ -159,9 +169,26 @@ async fn upstream(
 
     if is_forced_tool && is_stream {
         let nonce = extract_nonce(&body).unwrap();
+        let tool_name = if matches!(state.responses_mode, ResponsesMode::ForcedToolMissingName) {
+            ""
+        } else {
+            "ccsm_protocol_compatibility_probe"
+        };
         if is_responses {
+            let terminal = match state.responses_mode {
+                ResponsesMode::ForcedToolTerminalMissing => "",
+                ResponsesMode::ForcedToolIncomplete => {
+                    "event: response.incomplete\ndata: {\"response\":{\"status\":\"incomplete\"}}\n\n"
+                }
+                ResponsesMode::ForcedToolFailed => {
+                    "event: response.failed\ndata: {\"response\":{\"status\":\"failed\"}}\n\n"
+                }
+                _ => {
+                    "event: response.completed\ndata: {\"response\":{\"status\":\"completed\"}}\n\n"
+                }
+            };
             return sse(format!(
-                "event: response.output_item.done\ndata: {}\n\nevent: response.output_item.done\ndata: {}\n\nevent: response.completed\ndata: {{\"response\":{{\"status\":\"completed\"}}}}\n\n",
+                "event: response.output_item.done\ndata: {}\n\nevent: response.output_item.done\ndata: {}\n\n{terminal}",
                 json!({
                     "item": {
                         "id": "rs_fixture",
@@ -177,28 +204,31 @@ async fn upstream(
                         "id": "fc_fixture",
                         "type": "function_call",
                         "call_id": "call_responses",
-                        "name": "ccsm_protocol_compatibility_probe",
+                        "name": tool_name,
                         "arguments": json!({"nonce": nonce}).to_string()
                     }
                 })
             ));
         }
+        let finish_reason = if matches!(
+            state.responses_mode,
+            ResponsesMode::ForcedToolTerminalMissing
+        ) {
+            ""
+        } else {
+            ",\"finish_reason\":\"tool_calls\""
+        };
         return sse(format!(
-            "data: {{\"choices\":[{{\"delta\":{{\"reasoning_content\":\"private tool reasoning\"}}}}]}}\n\ndata: {{\"choices\":[{{\"delta\":{{\"content\":\"visible before tool\"}}}}]}}\n\ndata: {}\n\ndata: [DONE]\n\n",
+            "data: {{\"choices\":[{{\"delta\":{{\"reasoning_content\":\"private tool reasoning\"}}}}]}}\n\ndata: {{\"choices\":[{{\"delta\":{{\"content\":\"visible before tool\"}}}}]}}\n\ndata: {{\"choices\":[{{\"delta\":{}{finish_reason}}}]}}\n\ndata: [DONE]\n\n",
             json!({
-                "choices": [{
-                    "delta": {
-                        "tool_calls": [{
-                            "index": 0,
-                            "id": "call_chat",
-                            "type": "function",
-                            "function": {
-                                "name": "ccsm_protocol_compatibility_probe",
-                                "arguments": json!({"nonce": nonce}).to_string()
-                            }
-                        }]
-                    },
-                    "finish_reason": "tool_calls"
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call_chat",
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "arguments": json!({"nonce": nonce}).to_string()
+                    }
                 }]
             })
         ));
@@ -212,17 +242,39 @@ async fn upstream(
                 }
                 _ => "event: response.reasoning_text.delta\ndata: {\"delta\":\"readable Responses reasoning\"}\n\n",
             };
-            return sse(
-                format!(
-                    "{reasoning_event}{}",
+            let terminal = match state.responses_mode {
+                ResponsesMode::ResponsesCompletedWithoutStatus => {
+                    "event: response.completed\ndata: {\"response\":{}}\n\n"
+                }
+                ResponsesMode::StreamingFinalOutputMissing => {
+                    "event: response.completed\ndata: {\"response\":{\"status\":\"completed\"}}\n\n"
+                }
+                _ => {
                     "event: response.output_text.delta\ndata: {\"delta\":\"CCSM_PROTOCOL_BASELINE_OK\"}\n\nevent: response.completed\ndata: {\"response\":{\"status\":\"completed\"}}\n\n"
-                ),
-            );
+                }
+            };
+            return sse(format!("{reasoning_event}{terminal}"));
         }
-        return sse(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"CCSM_PROTOCOL_BASELINE_OK\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
-                .to_string(),
-        );
+        let chat_terminal = match state.responses_mode {
+            ResponsesMode::ChatDoneWithoutFinishReason => "",
+            ResponsesMode::ChatUnknownFinishReason => ",\"finish_reason\":\"mystery\"",
+            ResponsesMode::ChatLengthTerminal => ",\"finish_reason\":\"length\"",
+            ResponsesMode::StreamingFinalOutputMissing => ",\"finish_reason\":\"stop\"",
+            _ => ",\"finish_reason\":\"stop\"",
+        };
+        let chat_delta = if matches!(
+            state.responses_mode,
+            ResponsesMode::StreamingFinalOutputMissing
+        ) {
+            "{}"
+        } else if matches!(state.responses_mode, ResponsesMode::ChatReasoningOnlyStop) {
+            "{\"content\":\"<think>private reasoning only</think>\"}"
+        } else {
+            "{\"content\":\"CCSM_PROTOCOL_BASELINE_OK\"}"
+        };
+        return sse(format!(
+            "data: {{\"choices\":[{{\"delta\":{chat_delta}{chat_terminal}}}]}}\n\ndata: [DONE]\n\n"
+        ));
     }
 
     if is_responses {
@@ -524,6 +576,147 @@ async fn incomplete_success_json_does_not_pass_responses_continuation() {
         .find(|branch| branch.assessment.transport == TransportKind::OpenAiResponses)
         .unwrap();
     assert_eq!(responses.assessment.continuation, ProbeStageStatus::Failed);
+}
+
+#[tokio::test]
+async fn chat_done_without_finish_reason_does_not_pass_streaming() {
+    let fixture = spawn_fixture(ResponsesMode::ChatDoneWithoutFinishReason).await;
+    let result = run_protocol_compatibility_probe(
+        candidate(&fixture.base_url, TransportKind::OpenAiChat),
+        &reqwest::Client::new(),
+    )
+    .await;
+
+    let chat = result
+        .branches
+        .iter()
+        .find(|branch| branch.assessment.transport == TransportKind::OpenAiChat)
+        .unwrap();
+    assert_eq!(chat.assessment.streaming, ProbeStageStatus::Failed);
+}
+
+#[tokio::test]
+async fn chat_unknown_or_incomplete_finish_reason_does_not_pass_streaming() {
+    for mode in [
+        ResponsesMode::ChatUnknownFinishReason,
+        ResponsesMode::ChatLengthTerminal,
+    ] {
+        let fixture = spawn_fixture(mode).await;
+        let result = run_protocol_compatibility_probe(
+            candidate(&fixture.base_url, TransportKind::OpenAiChat),
+            &reqwest::Client::new(),
+        )
+        .await;
+
+        let chat = result
+            .branches
+            .iter()
+            .find(|branch| branch.assessment.transport == TransportKind::OpenAiChat)
+            .unwrap();
+        assert_eq!(chat.assessment.streaming, ProbeStageStatus::Failed);
+    }
+}
+
+#[tokio::test]
+async fn chat_reasoning_only_stop_without_visible_answer_does_not_pass_streaming() {
+    let fixture = spawn_fixture(ResponsesMode::ChatReasoningOnlyStop).await;
+    let result = run_protocol_compatibility_probe(
+        candidate(&fixture.base_url, TransportKind::OpenAiChat),
+        &reqwest::Client::new(),
+    )
+    .await;
+
+    let chat = result
+        .branches
+        .iter()
+        .find(|branch| branch.assessment.transport == TransportKind::OpenAiChat)
+        .unwrap();
+    assert_eq!(chat.assessment.streaming, ProbeStageStatus::Failed);
+}
+
+#[tokio::test]
+async fn responses_completed_without_completed_status_does_not_pass_streaming() {
+    let fixture = spawn_fixture(ResponsesMode::ResponsesCompletedWithoutStatus).await;
+    let result = run_protocol_compatibility_probe(
+        candidate(&fixture.base_url, TransportKind::OpenAiResponses),
+        &reqwest::Client::new(),
+    )
+    .await;
+
+    let responses = result
+        .branches
+        .iter()
+        .find(|branch| branch.assessment.transport == TransportKind::OpenAiResponses)
+        .unwrap();
+    assert_eq!(responses.assessment.streaming, ProbeStageStatus::Failed);
+}
+
+#[tokio::test]
+async fn terminal_without_final_output_does_not_pass_streaming() {
+    let fixture = spawn_fixture(ResponsesMode::StreamingFinalOutputMissing).await;
+    let result = run_protocol_compatibility_probe(
+        candidate(&fixture.base_url, TransportKind::OpenAiResponses),
+        &reqwest::Client::new(),
+    )
+    .await;
+
+    assert!(result
+        .branches
+        .iter()
+        .all(|branch| { branch.assessment.streaming == ProbeStageStatus::Failed }));
+}
+
+#[tokio::test]
+async fn forced_tool_call_without_a_terminal_does_not_pass_either_protocol() {
+    let fixture = spawn_fixture(ResponsesMode::ForcedToolTerminalMissing).await;
+    let result = run_protocol_compatibility_probe(
+        candidate(&fixture.base_url, TransportKind::OpenAiResponses),
+        &reqwest::Client::new(),
+    )
+    .await;
+
+    assert!(result.branches.iter().all(|branch| {
+        branch.assessment.forced_tool == ProbeStageStatus::Failed
+            && branch.assessment.continuation == ProbeStageStatus::Skipped
+    }));
+}
+
+#[tokio::test]
+async fn forced_tool_incomplete_or_failed_terminal_never_passes_responses() {
+    for mode in [
+        ResponsesMode::ForcedToolIncomplete,
+        ResponsesMode::ForcedToolFailed,
+    ] {
+        let fixture = spawn_fixture(mode).await;
+        let result = run_protocol_compatibility_probe(
+            candidate(&fixture.base_url, TransportKind::OpenAiResponses),
+            &reqwest::Client::new(),
+        )
+        .await;
+
+        let responses = result
+            .branches
+            .iter()
+            .find(|branch| branch.assessment.transport == TransportKind::OpenAiResponses)
+            .unwrap();
+        assert_eq!(responses.assessment.forced_tool, ProbeStageStatus::Failed);
+        assert_eq!(responses.assessment.continuation, ProbeStageStatus::Skipped);
+    }
+}
+
+#[tokio::test]
+async fn structurally_incomplete_forced_tool_call_is_failed_not_unsupported() {
+    let fixture = spawn_fixture(ResponsesMode::ForcedToolMissingName).await;
+    let result = run_protocol_compatibility_probe(
+        candidate(&fixture.base_url, TransportKind::OpenAiResponses),
+        &reqwest::Client::new(),
+    )
+    .await;
+
+    assert!(result.branches.iter().all(|branch| {
+        branch.assessment.forced_tool == ProbeStageStatus::Failed
+            && branch.assessment.continuation == ProbeStageStatus::Skipped
+    }));
 }
 
 #[tokio::test]

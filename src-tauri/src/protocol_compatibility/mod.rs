@@ -1,10 +1,17 @@
 use std::fmt;
 
-use reqwest::header::{HeaderValue, InvalidHeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use url::Url;
+
+use crate::{
+    provider::{Provider, ProviderMeta},
+    proxy::providers::codex_request::{
+        CodexRequestOptions, CodexRequestTransport, CodexThirdPartyRequestPolicy,
+        PreparedCodexRequest,
+    },
+};
 
 mod redaction;
 pub use redaction::{redact_json_probe_response, redact_sse_probe_response};
@@ -42,6 +49,7 @@ mod provider;
 pub(crate) use provider::apply_selected_transport_to_provider;
 #[cfg(test)]
 pub(crate) use provider::compile_provider_probe_candidate;
+pub(crate) use provider::compile_provider_probe_candidate_for_model;
 pub use provider::{
     apply_probe_selection_to_provider, compile_codex_router_probe_candidates,
     compile_provider_probe_candidates,
@@ -52,7 +60,7 @@ pub use profile::ProtocolCompatibilityRecord;
 
 pub(crate) mod endpoint;
 
-pub const PROBE_PROFILE_VERSION: u32 = 1;
+pub const PROBE_PROFILE_VERSION: u32 = 2;
 
 const BASELINE_PROMPT: &str =
     "CCSM protocol compatibility probe. Solve 17 + 25 internally. Reply only CCSM_PROTOCOL_BASELINE_OK.";
@@ -134,7 +142,8 @@ pub struct ProbeCandidate {
     endpoint: Url,
     pub authentication_kind: String,
     is_full_url: bool,
-    bearer_token: Option<HeaderValue>,
+    request_policy: Option<CodexThirdPartyRequestPolicy>,
+    request_policy_fingerprint: String,
 }
 
 impl ProbeCandidate {
@@ -157,37 +166,218 @@ impl ProbeCandidate {
             endpoint: parse_request_endpoint(endpoint)?,
             authentication_kind: authentication_kind.into(),
             is_full_url: false,
-            bearer_token: None,
+            request_policy: None,
+            request_policy_fingerprint: String::new(),
         })
     }
 
+    pub(crate) fn from_request_policy(
+        provider_id: Option<impl Into<String>>,
+        route_id: Option<impl Into<String>>,
+        public_model: impl Into<String>,
+        upstream_model: impl Into<String>,
+        transport: TransportKind,
+        request_policy: CodexThirdPartyRequestPolicy,
+    ) -> Result<Self, url::ParseError> {
+        let endpoint = parse_request_endpoint(request_policy.canonical_base_url())?;
+        let authentication_kind = request_policy.authentication_kind().to_string();
+        let is_full_url = request_policy.is_full_url();
+        let mut candidate = Self {
+            provider_id: provider_id.map(Into::into),
+            route_id: route_id.map(Into::into),
+            public_model: public_model.into(),
+            upstream_model: upstream_model.into(),
+            transport,
+            endpoint,
+            authentication_kind,
+            is_full_url,
+            request_policy: Some(request_policy),
+            request_policy_fingerprint: String::new(),
+        };
+        candidate.refresh_request_policy_fingerprint();
+        Ok(candidate)
+    }
+
+    #[cfg(test)]
     pub fn canonical_endpoint(&self) -> String {
         self.endpoint.to_string()
     }
 
     pub fn with_full_url(mut self, is_full_url: bool) -> Self {
         self.is_full_url = is_full_url;
+        if let Some(policy) = self.request_policy.take() {
+            self.request_policy = Some(
+                policy
+                    .with_full_url(is_full_url)
+                    .expect("recompiling an already valid request policy must succeed"),
+            );
+        }
+        self.refresh_request_policy_fingerprint();
         self
     }
 
+    #[cfg(test)]
     pub fn is_full_url(&self) -> bool {
         self.is_full_url
     }
 
-    pub fn with_bearer_token(mut self, token: &str) -> Result<Self, InvalidHeaderValue> {
-        self.bearer_token = Some(HeaderValue::from_str(&format!("Bearer {}", token.trim()))?);
+    pub fn with_bearer_token(mut self, token: &str) -> Result<Self, String> {
+        http::HeaderValue::from_str(&format!("Bearer {}", token.trim()))
+            .map_err(|_| "API key cannot be represented as an HTTP header".to_string())?;
+        let api_format = match self.transport {
+            TransportKind::OpenAiChat => "openai_chat",
+            TransportKind::OpenAiResponses => "openai_responses",
+        };
+        let wire_api = match self.transport {
+            TransportKind::OpenAiChat => "chat",
+            TransportKind::OpenAiResponses => "responses",
+        };
+        let mut provider = Provider::with_id(
+            self.provider_id
+                .clone()
+                .unwrap_or_else(|| "unsaved-probe-provider".to_string()),
+            "Protocol probe".to_string(),
+            json!({
+                "auth": {"OPENAI_API_KEY": token.trim()},
+                "base_url": self.endpoint.as_str(),
+                "apiFormat": api_format,
+                "config": format!("model = {:?}\nbase_url = {:?}\nwire_api = {:?}\n", self.upstream_model, self.endpoint.as_str(), wire_api),
+                "modelCatalog": {"models": [{
+                    "model": self.public_model,
+                    "upstreamModel": self.upstream_model,
+                    "apiFormat": api_format
+                }]}
+            }),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            api_format: Some(api_format.to_string()),
+            is_full_url: Some(self.is_full_url),
+            ..ProviderMeta::default()
+        });
+        self.request_policy = Some(
+            CodexThirdPartyRequestPolicy::compile(&provider).map_err(|error| error.to_string())?,
+        );
+        self.authentication_kind = self
+            .request_policy
+            .as_ref()
+            .expect("policy was just compiled")
+            .authentication_kind()
+            .to_string();
+        self.refresh_request_policy_fingerprint();
         Ok(self)
     }
 
-    pub(super) fn bearer_token(&self) -> Option<&HeaderValue> {
-        self.bearer_token.as_ref()
+    pub(crate) fn prepare_request(
+        &self,
+        transport: TransportKind,
+        logical_body: Value,
+    ) -> Result<PreparedCodexRequest, String> {
+        self.request_policy
+            .as_ref()
+            .ok_or_else(|| "probe candidate has no compiled Provider request policy".to_string())?
+            .prepare(
+                request_transport(transport),
+                logical_body,
+                CodexRequestOptions::default(),
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn prepared_endpoint(&self, transport: TransportKind) -> Result<String, String> {
+        self.request_policy
+            .as_ref()
+            .ok_or_else(|| "probe candidate has no compiled Provider request policy".to_string())?
+            .prepare_url(request_transport(transport))
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn target_key(&self, transport: TransportKind) -> Result<ProbeTargetKey, String> {
+        let provider_id = self
+            .provider_id
+            .as_deref()
+            .ok_or_else(|| "providerId is required before persisting probe evidence".to_string())?;
+        let endpoint = self.prepared_endpoint(transport)?;
+        ProbeTargetKey::new(
+            provider_id,
+            self.route_id.as_deref(),
+            &self.public_model,
+            &self.upstream_model,
+            transport,
+            &endpoint,
+            &self.authentication_kind,
+        )
+        .map_err(|_| "effective probe endpoint is invalid".to_string())
+        .map(|target| {
+            target
+                .with_credential_fingerprint(self.credential_fingerprint())
+                .with_request_policy_fingerprint(self.request_policy_fingerprint().to_string())
+        })
     }
 
     pub(crate) fn credential_fingerprint(&self) -> String {
-        self.bearer_token
+        self.request_policy
             .as_ref()
-            .map(|value| format!("{:x}", Sha256::digest(value.as_bytes())))
+            .map(|policy| policy.credential_fingerprint().to_string())
             .unwrap_or_default()
+    }
+
+    pub(crate) fn request_policy_fingerprint(&self) -> &str {
+        &self.request_policy_fingerprint
+    }
+
+    fn refresh_request_policy_fingerprint(&mut self) {
+        let Some(policy) = self.request_policy.as_ref() else {
+            self.request_policy_fingerprint.clear();
+            return;
+        };
+        let mut requests = Vec::new();
+        for transport in [TransportKind::OpenAiResponses, TransportKind::OpenAiChat] {
+            for case in [
+                ProbeCase::BaselineJson,
+                ProbeCase::BaselineSse,
+                ProbeCase::ForcedToolSse,
+            ] {
+                let logical = build_logical_probe_request(
+                    case,
+                    &self.upstream_model,
+                    "ccsm-policy-fingerprint",
+                );
+                let Ok(prepared) = policy.prepare(
+                    request_transport(transport),
+                    logical,
+                    CodexRequestOptions::default(),
+                ) else {
+                    self.request_policy_fingerprint.clear();
+                    return;
+                };
+                let mut header_fingerprints = prepared
+                    .headers
+                    .iter()
+                    .map(|(name, value)| {
+                        (
+                            name.as_str().to_string(),
+                            format!("{:x}", Sha256::digest(value.as_bytes())),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                header_fingerprints.sort();
+                requests.push(json!({
+                    "transport": transport,
+                    "case": case,
+                    "urlFingerprint": format!("{:x}", Sha256::digest(prepared.url.as_bytes())),
+                    "headers": header_fingerprints,
+                    "body": prepared.body,
+                }));
+            }
+        }
+        let material = json!({
+            "preparerVersion": crate::proxy::providers::codex_request::CODEX_REQUEST_PREPARER_VERSION,
+            "probeProfileVersion": PROBE_PROFILE_VERSION,
+            "requests": requests,
+        });
+        self.request_policy_fingerprint =
+            format!("{:x}", Sha256::digest(material.to_string().as_bytes()));
     }
 
     pub(crate) fn lease_key(&self) -> String {
@@ -196,6 +386,7 @@ impl ProbeCandidate {
             "endpoint": self.endpoint.as_str(),
             "authenticationKind": self.authentication_kind,
             "credentialFingerprint": self.credential_fingerprint(),
+            "requestPolicyFingerprint": self.request_policy_fingerprint(),
             "isFullUrl": self.is_full_url,
         });
         format!("{:x}", Sha256::digest(material.to_string().as_bytes()))
@@ -214,8 +405,19 @@ impl fmt::Debug for ProbeCandidate {
             .field("endpoint", &redacted_endpoint_for_debug(&self.endpoint))
             .field("authentication_kind", &self.authentication_kind)
             .field("is_full_url", &self.is_full_url)
-            .field("has_bearer_token", &self.bearer_token.is_some())
+            .field("has_bearer_token", &self.request_policy.is_some())
+            .field(
+                "request_policy_fingerprint",
+                &self.request_policy_fingerprint(),
+            )
             .finish()
+    }
+}
+
+fn request_transport(transport: TransportKind) -> CodexRequestTransport {
+    match transport {
+        TransportKind::OpenAiChat => CodexRequestTransport::ChatCompletions,
+        TransportKind::OpenAiResponses => CodexRequestTransport::Responses,
     }
 }
 
@@ -287,6 +489,8 @@ pub struct ProbeTargetKey {
     pub authentication_kind: String,
     #[serde(default)]
     pub credential_fingerprint: String,
+    #[serde(default)]
+    pub request_policy_fingerprint: String,
 }
 
 impl ProbeTargetKey {
@@ -313,6 +517,7 @@ impl ProbeTargetKey {
             endpoint_fingerprint,
             authentication_kind: authentication_kind.into(),
             credential_fingerprint: String::new(),
+            request_policy_fingerprint: String::new(),
         })
     }
 
@@ -326,6 +531,11 @@ impl ProbeTargetKey {
 
     pub(crate) fn with_credential_fingerprint(mut self, fingerprint: String) -> Self {
         self.credential_fingerprint = fingerprint;
+        self
+    }
+
+    pub(crate) fn with_request_policy_fingerprint(mut self, fingerprint: String) -> Self {
+        self.request_policy_fingerprint = fingerprint;
         self
     }
 }

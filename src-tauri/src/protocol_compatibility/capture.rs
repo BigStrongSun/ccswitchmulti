@@ -49,6 +49,7 @@ impl CapturedProbeExchange {
         self.payloads.len()
     }
 
+    #[cfg(test)]
     pub fn saw_done(&self) -> bool {
         self.saw_done
     }
