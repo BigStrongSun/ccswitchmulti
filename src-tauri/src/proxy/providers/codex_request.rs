@@ -257,6 +257,7 @@ impl CodexThirdPartyRequestPolicy {
             .collect()
     }
 
+    #[cfg(test)]
     pub(crate) fn fingerprint(&self) -> &str {
         &self.fingerprint
     }

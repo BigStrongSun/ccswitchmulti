@@ -198,6 +198,7 @@ impl ProbeCandidate {
         Ok(candidate)
     }
 
+    #[cfg(test)]
     pub fn canonical_endpoint(&self) -> String {
         self.endpoint.to_string()
     }
@@ -215,6 +216,7 @@ impl ProbeCandidate {
         self
     }
 
+    #[cfg(test)]
     pub fn is_full_url(&self) -> bool {
         self.is_full_url
     }
