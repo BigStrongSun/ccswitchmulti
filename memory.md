@@ -4620,3 +4620,10 @@ supported in one streaming turn`。
 - v18 排序实现仍有独立缺陷：`saveOrder()` 对 projection model 在目标 Provider catalog 找不到时 `sourceIndex < 0` 直接 continue，却在完成后宣称全部模型已保存。alias、重复上游模型或 stale projection 可导致局部顺序未持久化且用户无提示。当前 live router 的三条有效模型源没有 alias 且条目均可匹配，尚未复现该静默跳过；现有前端测试仅覆盖 catalog 重建时保留 source sortIndex，未覆盖拖动后 `saveOrder()` 的跨 Provider 写回。修复时应先加该场景的 UI -> Provider -> projection 回归测试，再把未保存模型作为明确错误/部分成功返回。
 - CCSM proxy 不实现“重命名时选择模型”：普通 title/rename 请求在代理日志只会是 `codex_request_kind=turn`，没有单独的 title 分支。CC Switch 用户文档同时说明 Codex Desktop 在第三方 catalog 下会默认取第一项；因此“自动标题调用第一模型”与 catalog 排序有因果可能，但尚未抓到一次用户真实重命名请求，不能把它写成 CCSM 已证实的 chooser bug。后续应在用户手动触发一次自动标题后，按时间/session 比对 request_model、catalog[0] 和 upstream response，且不记录 prompt/headers。
 - 联网交叉验证：Codex 内置搜索命中 CC Switch 官方 guide/changelog，确认 `model_catalog_json` 为目录事实源、Desktop 不一定热加载且第三方场景默认首模型；Matrix WebSearch 独立搜索未找到字段级源码或 issue 证据，故具体根因以本机 v18 tag、源码、SQLite、生成 catalog 和 router log 为准。
+
+## 2026-08-28 Codex guardianv2 配置解析故障追踪
+
+- 报错 `data did not match any variant of untagged enum FeatureToml in features.guardianv2` 不是模型路由、模型目录或 `high -> xhigh` 推理档位映射造成的。`guardianv2` 是 Codex 实验性的 Guardian 自动审批审查功能；它只接受布尔值，或符合当前 Guardian V2 schema 的配置对象。
+- 已用本机 Codex `0.150.0-alpha.12.2` 的仅进程内 `-c` 覆盖复现：`features.guardianv2=true` 与合法对象均能加载；在对象中加入不支持字段即得到与截图完全相同的 `FeatureToml` 错误。数值边界错误会给出明确的 Guardian 校验消息，因此该截图代表字段、类型或嵌套结构不兼容，而非普通数值设置错误。
+- 现场 `~/.codex/config.toml` 在 2026-08-28 19:45-19:46 被重建，此后已无 `features.guardianv2` 且 `codex features list` 成功。既有 `.codex` 与 CCSwitchMulti 备份中没有原坏块，不能反推其精确键或证明写入者。CCSwitchMulti 源码没有 Guardian V2 写入分支，配置合并保留全局 `[features]`，只校验 TOML 语法；因此它不是已证实的写坏者，但也不会拦截这种语义不兼容配置。
+- 社区证据：CCSwitchMulti #68（macOS、v3.19.2-17）在 Codex 自动更新后报同一错误；OpenAI Codex #38803/#40339 记录了近期配置文档/自动迁移写出结构后被严格解析拒绝的同类问题。它们支持“Codex 配置迁移/版本兼容边界”这一原因类别，但没有提供本机原始 Guardian 配置，不能替代现场证据。
