@@ -1,4 +1,5 @@
 # CC Switch Repository Memory
+
 ## 2026-08-27 用户反馈「官方模型推理强度丢失」追问：不是旧配置污染，是模型名重映射 + 能力契约缺口
 
 - 用户问题：v18 用户反馈官方模型（gpt-5.6-sol）推理强度可能丢失，是否「又考虑了旧配置」。结论：**不是** config.toml / models_cache 旧数据污染。
@@ -9,7 +10,6 @@
 - 根修状态：`0424ee5b`（本日记）已在单一 resolver 补最近档钳制（high→xhigh、minimal→low、等距取更高档），主请求路径经 `codex_chat_reasoning_config_from_capability → resolve_subagent_reasoning_capability` 同链覆盖，全链路回归 `qwen_shaped_capability_clamps_high_effort_to_nearest_supported` 已含本场景；3511 passed。已安装 3.19.2-18 不含修复，临时规避：该线程推理档切 xhigh 或会话模型切 qwen3.8。
 - 当前路由实况（8/27 21:07 起）：router 激活，`gpt*` 前缀路由到 `codex-official`（native_codex_auth 直连 OpenAI），官方模型 high 档原生可用；422 场景特指「Qwen Provider 直连 + 官方模型名」组合。
 - 本次为纯本地源码 + 活体 DB/日志/CLI 取证，第一方来源（CLI bundled + 8/22 官方缓存备份）交叉一致，按 AGENTS.md 规则 11 跳过联网检索。
-
 
 ## 2026-08-27 Qwen 能力契约缺 high 档钳制，gpt-5.6-sol 会话 422 根修
 
@@ -4433,6 +4433,7 @@ supported in one streaming turn`。
 - Provider 模型能力声明中的 `upstream.effortMap` 是第三方上游真实档位的事实源。此前 Chat/Messages 转换会应用该映射，但原生 `/v1/responses` 直通只改写模型名，导致 Codex Ultra 的线级值 `max` 原样发给只接受 `xhigh` 的 Qwen/vLLM，并被上游 HTTP 400 拒绝。
 - 根修复用同一 `CodexChatReasoningConfig` resolver 和 capability 映射器，在原生 Responses 出站边界只改写 `reasoning.effort` 的值并保留 Responses 对象形态；不按模型名特判，不把 Provider 的 `reasoning_effort` Chat 参数形态错误搬进 Responses 请求。
 - 回归覆盖非 identity `max -> xhigh` 与 identity `high -> high`。未知能力不猜测，声明不支持 effort 时不擅自改写；声明映射中不允许的档位继续 fail closed。
+
 # 2026-08-23 Codex 第三方协议兼容性自动探测：后端设计待实施
 
 - 用户确认的产品方向：普通模式不让用户选择 raw/summary/字段名；保存包含 Codex 路由的 Provider 时，CCSM 自动运行一次有界的真实兼容性测试，并在首次真实请求中只做无正文的结构复核，不追加计费探测。高级模式保留手工编辑/失效后重测，但必须是同一档案的受校验覆盖，而非另一套前端猜测。
@@ -4517,6 +4518,7 @@ supported in one streaming turn`。
 - #62 的 startup/port ownership 只用 PID、进程存在和自报 `/status`，无法抵抗 PID 复用，也未证明 listener/可执行文件/start-time 所有权；不得据此复用或接管未知进程。#64 用单一全局 outcome，后续成功可覆盖先前失败，缺 acknowledgment/generation 生命周期；应改为有界、分 app/operation、按严重度保留的结果集合。
 - 因此当前没有任何一个 #36 之后的 PR 适合原样合并。可执行顺序是：先根修 #66 的 context-aware projection 缺口和 #58 的 enabled 过滤；再统一 #57/#63 的 live config writer 与 ownership receipt；随后分别重做 #62/#64；#59 先定兼容策略；#61 先确认官方/安装态 marketplace schema；#60 延后到依赖专版。
 - Fresh 证据：当前主线定向通过 v1/v2 auth source、active-router publication、mode-all Provider classifier、Windows atomic write 以及 `CodexRouterWorkspacePage` 73/73。GitHub CLI/API 与已抓取 PR refs、merge-tree、源码、CI 日志和本地测试作为当前状态权威；Codex WebSearch 的 GitHub 索引滞后，Matrix WebSearch 返回 `fetch failed`，因此未用搜索摘要替代仓库事实。
+
 # 2026-08-25 Qwen MultiRouter 推理档案同步
 
 - `3.19.2-17` 中 Qwen Ultra 映射和 Chat 转发均已生效；不显示思考过程的直接原因是独立 Provider 的 `verified` 协议档案没有同步到相同目标的 MultiRouter route 身份，route 仍命中旧 `partial` 档案并关闭自动 reasoning projection。
@@ -4627,3 +4629,12 @@ supported in one streaming turn`。
 - 已用本机 Codex `0.150.0-alpha.12.2` 的仅进程内 `-c` 覆盖复现：`features.guardianv2=true` 与合法对象均能加载；在对象中加入不支持字段即得到与截图完全相同的 `FeatureToml` 错误。数值边界错误会给出明确的 Guardian 校验消息，因此该截图代表字段、类型或嵌套结构不兼容，而非普通数值设置错误。
 - 现场 `~/.codex/config.toml` 在 2026-08-28 19:45-19:46 被重建，此后已无 `features.guardianv2` 且 `codex features list` 成功。既有 `.codex` 与 CCSwitchMulti 备份中没有原坏块，不能反推其精确键或证明写入者。CCSwitchMulti 源码没有 Guardian V2 写入分支，配置合并保留全局 `[features]`，只校验 TOML 语法；因此它不是已证实的写坏者，但也不会拦截这种语义不兼容配置。
 - 社区证据：CCSwitchMulti #68（macOS、v3.19.2-17）在 Codex 自动更新后报同一错误；OpenAI Codex #38803/#40339 记录了近期配置文档/自动迁移写出结构后被严格解析拒绝的同类问题。它们支持“Codex 配置迁移/版本兼容边界”这一原因类别，但没有提供本机原始 Guardian 配置，不能替代现场证据。
+
+## 2026-08-28 v3.19.2-18 排序保存与目录默认模型修复
+
+- 排序保存的确认根因在前端 `ModelOrderTab.saveOrder()`：它逐个将 MultiRouter 投影模型反解为目标 Provider 的 catalog 行；旧逻辑遇到别名指向已删除上游模型、缺失目标 Provider 或不可匹配的 selection 时直接 `continue`。已解析模型仍会进入 `updates` 并被写入，最后却显示“已保存”，形成局部持久化且无诊断的状态。
+- 修复把每个可见模型的 route -> canonical upstream -> Provider catalog 解析变为所有写入前的前置条件。任何模型无法解析时抛出包含可见模型、上游模型和 Provider 名称的可操作错误，且 `providersApi.update` 为零调用；全部模型都解析成功后才顺序写入 Provider。前端回归 `does not partially reset model ordering when an advertised model maps to an unavailable upstream model` 使用真实 schema v2 serialized route，先 RED 证明旧实现静默写入，再 GREEN 锁定无部分保存。
+- 自动标题没有 CCSM 专用的选模/重命名 route；代理仅收到普通 `turn`。但 catalog writer 在无顶层 `model` 时曾在应用 `sortIndex` 前把原始数组第一个模型标记为 `isDefault`。Desktop 若使用该默认标记生成标题或新会话辅助请求，会和用户已看到的排序脱钩。现改为先按 `sortIndex`/子 Agent 优先级/回退规则排序，再给首项 `isDefault=true`；显式 `model` 仍优先。Rust 回归 `codex_model_catalog_without_explicit_default_uses_first_user_sorted_model` 已 RED（DeepSeek Flash 被错误标记）再 GREEN（Qwen sortIndex=0 成为默认）。
+- 本机 2026-08-28 现场没有顶层 `model`，当前已生成 catalog 的 `isDefault` 为 `gpt-5.6-sol`，且它也是 sortIndex=0，所以此次默认错误没有在当前数据上触发；修复防止未来拖动后默认残留。没有可脱敏同时证明“标题请求 prompt/路由模型”的实时日志，故不能声称已验证某个第三方模型自身支持自动标题；新包只保证它看到的默认模型与用户排序一致。
+- `0424ee5b` 的 Qwen `high -> xhigh` 能力契约修复仍是当前 HEAD 祖先，将随本次本地构建一并进入产物；已安装的公开 `v3.19.2-18` 不含它。GuardianV2 的 `FeatureToml` 解析报错已由不含 guardian 字段的现有 config 恢复，CCSM 不写该字段，故不在本次路由/排序源码修改范围。
+- 验证：前端工作台 74/74、`pnpm typecheck`、Prettier、`cargo fmt --check`、Rust library 3512 passed/0 failed/6 ignored、`git diff --check`。联网交叉验证使用 Codex 内置 web search 命中的 OpenAI Codex Desktop custom-provider issues #29156/#36582/#19694；Matrix WebSearch 对 GuardianV2/title 精确检索无结果。社区 issue 支持“Desktop custom catalog/provider 仍有一等支持缺口”，但本次根因以本地源码、SQLite、生成 catalog 与 RED/GREEN 为准。

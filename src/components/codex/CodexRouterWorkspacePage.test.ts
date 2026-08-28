@@ -26,6 +26,7 @@ import {
   mergeRoutePickerDraftIds,
   normalizeCodexRouteForSave,
   normalizeCodexRoutesForVisibleModelAliases,
+  projectCodexModelCatalog,
   readCodexRouting,
   resolveCodexRouterAuthFacadeLabel,
   routeSummaryDisplayName,
@@ -3697,6 +3698,85 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       { model: "model-b", sortIndex: 1 },
     ]);
     expect(rebuilt.spawnAgentModels).toEqual(["model-b", "model-a"]);
+  });
+
+  it("does not partially reset model ordering when an advertised model maps to an unavailable upstream model", async () => {
+    const source: Provider = {
+      id: "order-source",
+      name: "Order Source",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: {
+          models: [
+            { model: "model-a", sortIndex: 0 },
+            { model: "model-b", sortIndex: 1 },
+          ],
+        },
+      },
+    };
+    const plan = withEnabledProviderRoute(
+      createDraftRoutingPlan([source], [source]),
+      source,
+    );
+    const unavailableUpstreamModel = "stale-model";
+    const route = normalizeCodexRouteForSave(
+      {
+        label: source.name,
+        enabled: true,
+        targetProviderId: source.id,
+        modelSelection: { mode: "all" },
+        match: {
+          models: ["model-a", "model-b"],
+          prefixes: [],
+        },
+        aliases: { "model-b": unavailableUpstreamModel },
+        upstream: { auth: { source: "provider_config" } },
+      },
+      0,
+      new Set<string>(),
+    );
+    const routedPlan: Provider = {
+      ...plan,
+      settingsConfig: {
+        ...plan.settingsConfig,
+        codexRouting: {
+          ...plan.settingsConfig.codexRouting,
+          routes: [serializeCodexRouteV2(route, 0)],
+        },
+      },
+    };
+
+    expect(
+      projectCodexModelCatalog(
+        routedPlan,
+        new Map([[source.id, source]]),
+      ).models.map((model) => model.model),
+    ).toEqual(["model-a", "model-b"]);
+
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [source, routedPlan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: routedPlan.id,
+        initialProviderId: routedPlan.id,
+        initialTab: "model-order",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "恢复默认" }));
+
+    expect(
+      await screen.findByText(
+        /保存模型顺序失败：模型「model-b」.*stale-model.*Order Source/,
+      ),
+    ).toBeInTheDocument();
+    expect(providersApi.update).not.toHaveBeenCalled();
   });
 
   it("keeps unsaved route picker enabled draft state across candidate refreshes", () => {

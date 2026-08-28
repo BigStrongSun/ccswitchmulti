@@ -4317,6 +4317,10 @@ function ModelOrderTab({
       for (const [sortIndex, projectedModel] of models.entries()) {
         const visibleModel = projectedModel.model?.trim();
         if (!visibleModel) continue;
+        const unresolvedProviderNames = new Set<string>();
+        const unresolvedUpstreamModels = new Set<string>();
+        let hasEligibleRoute = false;
+        let wasResolved = false;
         for (const { route } of selectedRoutes) {
           if (route.enabled === false) continue;
           const targetProviderId = routeTargetProviderId(route);
@@ -4329,10 +4333,15 @@ function ModelOrderTab({
           ) {
             continue;
           }
+          hasEligibleRoute = true;
           const source =
             updates.get(targetProviderId) ??
             providersById.get(targetProviderId);
-          if (!source) continue;
+          if (!source) {
+            unresolvedProviderNames.add(targetProviderId);
+            unresolvedUpstreamModels.add(canonicalModel);
+            continue;
+          }
           const sourceModels = readCodexModelCatalog(source).models;
           const sourceIndex = sourceModels.findIndex(
             (model) =>
@@ -4340,7 +4349,11 @@ function ModelOrderTab({
               model.upstreamModel?.trim() === canonicalModel ||
               model.upstream_model?.trim() === canonicalModel,
           );
-          if (sourceIndex < 0) continue;
+          if (sourceIndex < 0) {
+            unresolvedProviderNames.add(source.name || targetProviderId);
+            unresolvedUpstreamModels.add(canonicalModel);
+            continue;
+          }
           const nextModels = sourceModels.map((model, index) => {
             if (index !== sourceIndex) return model;
             const next = { ...model };
@@ -4358,7 +4371,29 @@ function ModelOrderTab({
               },
             },
           });
+          wasResolved = true;
           break;
+        }
+        if (!wasResolved) {
+          if (unresolvedProviderNames.size > 0) {
+            const upstreamModels = Array.from(unresolvedUpstreamModels).join(
+              "、",
+            );
+            const providerNames = Array.from(unresolvedProviderNames).join(
+              "、",
+            );
+            throw new Error(
+              `模型「${visibleModel}」的路由上游模型「${upstreamModels}」不在目标 Provider「${providerNames}」的模型目录中。请先修正路由别名或刷新目标 Provider 的模型列表。`,
+            );
+          }
+          if (!hasEligibleRoute) {
+            throw new Error(
+              `模型「${visibleModel}」没有匹配到可写入排序的已启用路由，请先检查当前 MultiRouter 的模型选择规则。`,
+            );
+          }
+          throw new Error(
+            `模型「${visibleModel}」无法解析到目标 Provider 的模型条目，请检查当前 MultiRouter 路由配置。`,
+          );
         }
       }
       for (const provider of updates.values()) {

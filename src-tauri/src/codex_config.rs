@@ -1852,14 +1852,16 @@ fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCa
         });
     }
 
+    let spawn_agent_model_priority = codex_spawn_agent_model_priority(settings);
+    let mut specs = sort_codex_catalog_specs_for_picker(specs, &spawn_agent_model_priority);
+
     if default_model.is_none() {
         if let Some(first) = specs.first_mut() {
             first.is_default = true;
         }
     }
 
-    let spawn_agent_model_priority = codex_spawn_agent_model_priority(settings);
-    sort_codex_catalog_specs_for_picker(specs, &spawn_agent_model_priority)
+    specs
 }
 
 fn find_codex_model_template(catalog: &Value) -> Option<Value> {
@@ -13159,6 +13161,30 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             ordered,
             vec!["deepseek-v4-pro", "qwen3.6", "gpt-5.5", "gpt-5.4"],
             "sortIndex must control the complete picker order and leave unranked models available"
+        );
+    }
+
+    #[test]
+    fn codex_model_catalog_without_explicit_default_uses_first_user_sorted_model() {
+        let settings = json!({
+            "modelCatalog": {
+                "models": [
+                    { "model": "deepseek-v4-flash", "sortIndex": 1 },
+                    { "model": "qwen3.8", "sortIndex": 0 }
+                ]
+            }
+        });
+
+        let specs = codex_catalog_model_specs(&settings, "");
+        let default_model = specs
+            .iter()
+            .find(|spec| spec.is_default)
+            .map(|spec| spec.model.as_str());
+
+        assert_eq!(
+            default_model,
+            Some("qwen3.8"),
+            "without an explicit config model, the catalog default must follow the user-visible sort order"
         );
     }
 
