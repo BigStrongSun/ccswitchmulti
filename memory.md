@@ -4611,3 +4611,12 @@ supported in one streaming turn`。
 - 固定 `max_output_tokens/max_tokens=128` 本身是原固定探测语料的明确设计，不是用户合并造成的回归，也不能单独称为 bug。真正缺口是输出预算/请求策略没有进入共享 preparer 与档案 fingerprint，且探测和生产各自准备请求；当 Provider override、reasoning resolver、认证/UA 或终态规则变化时，旧档案仍可能命中不同的真实请求语义。
 - 合并后的 `1a3ccd1a`、`23a3df8e`、`b5395d80` 分别补了探测进度 UI、raw/native-summary 字段语义和 521/不可用分类；这些都是局部正确修复，但没有把独立 runner 改造成共享的 `prepare -> probe -> receipt -> commit` 请求事务。因此该架构缺口从原分支一直保留到 `v3.19.2-18`，不是某次后续提交重新引入。
 - 责任结论：用户按原提交合入是正确操作；此前把该后端称为“闭环完成”是实现与验收定义不足。后续修复应以统一最终有效 Provider 和共享 request preparer 为根边界，再补 probe-vs-production 请求等价 contract tests；不能继续在独立 runner 上追加 Provider/模型特判。
+
+## 2026-08-28 v3.19.2-18 Codex 推理、自动标题和模型排序追踪
+
+- 截图中的 `422` 不是路由选错 Provider：router log 显示 `gpt-5.6-sol` 已命中 Qwen。v3.19.2-18 在 Responses -> Chat 前把不在 Qwen catalog 的可见官方模型回退改写为 Qwen 默认 `qwen3.8`，随后以 Qwen 的能力契约校验仍由 GPT 会话携带的 `reasoning.effort=high`；Qwen 仅声明 `low/medium/xhigh/ultra`，所以 fail-closed 返回 422。根因是可见模型到上游模型的映射与最终能力契约之间缺少完整的档位归一化，不是旧 cache/config 污染。
+- 本地主线提交 `0424ee5b` 已用“Codex 阶梯中的最近受支持档位”补全映射（Qwen 例：`high -> xhigh`），并有 Qwen 回归测试；安装态 `CCSwitchMulti 3.19.2-18` 对应发布提交 `128aaf4d`，不包含该修复。
+- v3.19.2-18 的模型排序写入链为：工作台 `saveOrder()` 将每个投影模型的全局顺序反写到目标 Provider `modelCatalog.models[].sortIndex`，MultiRouter projection 再压缩为顺序，catalog writer 用 `sortIndex` 生成 `priority=1000+N`。现场当前 DB 的 OpenAI/Qwen sortIndex 与 `~/.codex/cc-switch-model-catalog.json`、`models_cache.json` 的 11 项顺序一致，说明当前配置的排序已保存并已投影；若 Desktop UI 仍显示旧顺序，需区分 Desktop 未热加载 catalog 的运行态，不能先判作 DB 写入失败。
+- v18 排序实现仍有独立缺陷：`saveOrder()` 对 projection model 在目标 Provider catalog 找不到时 `sourceIndex < 0` 直接 continue，却在完成后宣称全部模型已保存。alias、重复上游模型或 stale projection 可导致局部顺序未持久化且用户无提示。当前 live router 的三条有效模型源没有 alias 且条目均可匹配，尚未复现该静默跳过；现有前端测试仅覆盖 catalog 重建时保留 source sortIndex，未覆盖拖动后 `saveOrder()` 的跨 Provider 写回。修复时应先加该场景的 UI -> Provider -> projection 回归测试，再把未保存模型作为明确错误/部分成功返回。
+- CCSM proxy 不实现“重命名时选择模型”：普通 title/rename 请求在代理日志只会是 `codex_request_kind=turn`，没有单独的 title 分支。CC Switch 用户文档同时说明 Codex Desktop 在第三方 catalog 下会默认取第一项；因此“自动标题调用第一模型”与 catalog 排序有因果可能，但尚未抓到一次用户真实重命名请求，不能把它写成 CCSM 已证实的 chooser bug。后续应在用户手动触发一次自动标题后，按时间/session 比对 request_model、catalog[0] 和 upstream response，且不记录 prompt/headers。
+- 联网交叉验证：Codex 内置搜索命中 CC Switch 官方 guide/changelog，确认 `model_catalog_json` 为目录事实源、Desktop 不一定热加载且第三方场景默认首模型；Matrix WebSearch 独立搜索未找到字段级源码或 issue 证据，故具体根因以本机 v18 tag、源码、SQLite、生成 catalog 和 router log 为准。
