@@ -547,20 +547,19 @@ mod tests {
 
     fn verified_qwen_profile() -> ProtocolCompatibilityRecord {
         use crate::protocol_compatibility::{
-            ProbeTargetKey, ProtocolCompatibilityProbeResult, TransportKind,
+            compile_provider_probe_candidate_for_model, ProtocolCompatibilityProbeResult,
+            TransportKind,
         };
 
-        let target = ProbeTargetKey::new(
-            "qwen",
-            None::<String>,
-            "qwen3.8",
-            "qwen3.8",
-            TransportKind::OpenAiChat,
-            "https://qwen.example/v1/chat/completions",
-            "bearer",
+        let target_provider = target("openai_chat");
+        let target = compile_provider_probe_candidate_for_model(
+            &target_provider,
+            "qwen3.8".to_string(),
+            "qwen3.8".to_string(),
         )
-        .expect("profile target")
-        .with_credential("secret");
+        .expect("compile profile Provider policy")
+        .target_key(TransportKind::OpenAiChat)
+        .expect("profile target");
         let result: ProtocolCompatibilityProbeResult = serde_json::from_value(json!({
             "selected_transport": "open_ai_chat",
             "readiness": "verified",
@@ -582,6 +581,22 @@ mod tests {
         }))
         .expect("verified probe result");
         ProtocolCompatibilityRecord::new(target, result, 100, 200)
+    }
+
+    fn compiled_router_target(db: &Database) -> ProbeTargetKey {
+        let providers = db
+            .get_all_providers("codex")
+            .expect("load providers")
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        let router = providers.get("router-a").expect("router exists");
+        compile_codex_router_probe_candidates(router, &providers)
+            .expect("compile router candidates")
+            .into_iter()
+            .find(|candidate| candidate.public_model == "qwen3.8")
+            .expect("qwen route candidate")
+            .target_key(TransportKind::OpenAiChat)
+            .expect("route target")
     }
 
     fn router(id: &str, target_provider_id: &str) -> Provider {
@@ -658,7 +673,7 @@ mod tests {
 
     #[test]
     fn provider_verified_protocol_profile_is_materialized_for_equivalent_router_target() {
-        use crate::protocol_compatibility::{ProbeTargetKey, ReasoningProjection, TransportKind};
+        use crate::protocol_compatibility::ReasoningProjection;
 
         let db = Database::memory().expect("memory db");
         db.save_provider("codex", &target("openai_chat"))
@@ -678,17 +693,7 @@ mod tests {
         )
         .expect("save provider profile and rebuild router");
 
-        let route_target = ProbeTargetKey::new(
-            "router-a",
-            Some("route-qwen"),
-            "qwen3.8",
-            "qwen3.8",
-            TransportKind::OpenAiChat,
-            "https://qwen.example/v1/chat/completions",
-            "bearer",
-        )
-        .expect("route target")
-        .with_credential("secret");
+        let route_target = compiled_router_target(&db);
         let route_profile = db
             .get_protocol_compatibility_result(&route_target)
             .expect("read route profile")
@@ -702,8 +707,6 @@ mod tests {
 
     #[test]
     fn provider_protocol_profile_is_not_materialized_when_route_credentials_differ() {
-        use crate::protocol_compatibility::{ProbeTargetKey, TransportKind};
-
         let db = Database::memory().expect("memory db");
         db.save_provider("codex", &target("openai_chat"))
             .expect("seed target");
@@ -724,17 +727,7 @@ mod tests {
         )
         .expect("save provider profile without borrowing it for the route");
 
-        let route_target = ProbeTargetKey::new(
-            "router-a",
-            Some("route-qwen"),
-            "qwen3.8",
-            "qwen3.8",
-            TransportKind::OpenAiChat,
-            "https://qwen.example/v1/chat/completions",
-            "bearer",
-        )
-        .expect("route target")
-        .with_credential("secret");
+        let route_target = compiled_router_target(&db);
         assert!(db
             .get_protocol_compatibility_result(&route_target)
             .expect("read route profile")
