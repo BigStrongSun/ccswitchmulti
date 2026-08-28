@@ -15,6 +15,8 @@ mod adapter;
 mod auth;
 mod claude;
 mod codex;
+#[cfg(test)]
+mod codex_request_tests;
 pub(crate) mod codex_chat_common;
 pub mod codex_chat_history;
 pub(crate) mod codex_multi_agent;
