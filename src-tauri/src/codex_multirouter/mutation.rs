@@ -8,8 +8,8 @@ use super::schema::CodexRoutingDocument;
 use crate::database::Database;
 use crate::error::AppError;
 use crate::protocol_compatibility::{
-    compile_codex_router_probe_candidates, endpoint::build_probe_url, ProbeReadiness,
-    ProbeTargetKey, ProtocolCompatibilityRecord, TransportKind, PROBE_PROFILE_VERSION,
+    compile_codex_router_probe_candidates, ProbeReadiness, ProbeTargetKey,
+    ProtocolCompatibilityRecord, TransportKind, PROBE_PROFILE_VERSION,
 };
 use crate::provider::Provider;
 use rusqlite::params;
@@ -221,23 +221,7 @@ fn probe_target_for_candidate(
     candidate: &crate::protocol_compatibility::ProbeCandidate,
     transport: TransportKind,
 ) -> Option<ProbeTargetKey> {
-    let endpoint = build_probe_url(
-        &candidate.canonical_endpoint(),
-        transport,
-        candidate.is_full_url(),
-    )
-    .ok()?;
-    ProbeTargetKey::new(
-        candidate.provider_id.as_deref()?,
-        candidate.route_id.as_deref(),
-        &candidate.public_model,
-        &candidate.upstream_model,
-        transport,
-        &endpoint,
-        &candidate.authentication_kind,
-    )
-    .ok()
-    .map(|target| target.with_credential_fingerprint(candidate.credential_fingerprint()))
+    candidate.target_key(transport).ok()
 }
 
 fn same_protocol_target(left: &ProbeTargetKey, right: &ProbeTargetKey) -> bool {
@@ -247,6 +231,7 @@ fn same_protocol_target(left: &ProbeTargetKey, right: &ProbeTargetKey) -> bool {
         && left.endpoint_fingerprint == right.endpoint_fingerprint
         && left.authentication_kind == right.authentication_kind
         && left.credential_fingerprint == right.credential_fingerprint
+        && left.request_policy_fingerprint == right.request_policy_fingerprint
 }
 
 fn sync_router_subagent_profiles_from_provider_catalog(

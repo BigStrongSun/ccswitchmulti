@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::{
-    provider::{LocalProxyRequestOverrides, Provider},
+    provider::{LocalProxyRequestOverrides, Provider, ProviderMeta},
     proxy::{
         body_filter::filter_private_params_with_whitelist,
         error::ProxyError,
@@ -152,6 +152,14 @@ impl CodexThirdPartyRequestPolicy {
             fingerprint,
             is_full_url,
         })
+    }
+
+    pub(crate) fn with_full_url(mut self, is_full_url: bool) -> Result<Self, ProxyError> {
+        self.provider
+            .meta
+            .get_or_insert_with(ProviderMeta::default)
+            .is_full_url = Some(is_full_url);
+        Self::compile(&self.provider)
     }
 
     pub(crate) fn prepare(

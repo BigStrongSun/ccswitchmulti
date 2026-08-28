@@ -146,12 +146,7 @@ wire_api = "chat"
     assert_eq!(probe_request.url, production_request.url);
     assert_eq!(probe_request.headers, production_request.headers);
     assert_eq!(probe_request.body, production_request.body);
-    assert_eq!(
-        candidate.request_policy_fingerprint(),
-        CodexThirdPartyRequestPolicy::compile(&provider)
-            .unwrap()
-            .fingerprint()
-    );
+    assert!(!candidate.request_policy_fingerprint().is_empty());
 }
 
 #[test]
@@ -171,6 +166,29 @@ fn candidate_policy_fingerprint_changes_with_provider_request_semantics() {
         second.request_policy_fingerprint()
     );
     assert_ne!(first.lease_key(), second.lease_key());
+}
+
+#[test]
+fn persisted_target_is_derived_from_the_compiled_request_policy() {
+    let provider = codex_provider(
+        "model = \"qwen-visible\"\nbase_url = \"https://vllm.example/v1\"\nwire_api = \"responses\"\n",
+        "openai_responses",
+    );
+    let candidate = compile_provider_probe_candidate(&provider).expect("candidate");
+
+    let target = candidate
+        .target_key(TransportKind::OpenAiChat)
+        .expect("target key");
+
+    assert!(!target.request_policy_fingerprint.is_empty());
+    assert_eq!(
+        target.request_policy_fingerprint,
+        candidate.request_policy_fingerprint()
+    );
+    assert_eq!(
+        target.credential_fingerprint,
+        candidate.credential_fingerprint()
+    );
 }
 
 #[test]

@@ -8184,8 +8184,8 @@ mod tests {
     use crate::{
         database::Database,
         protocol_compatibility::{
-            ProbeReadiness, ProbeTargetKey, ProtocolCompatibilityProbeResult,
-            ProtocolCompatibilityRecord, TransportKind,
+            compile_provider_probe_candidate_for_model, ProbeReadiness,
+            ProtocolCompatibilityProbeResult, ProtocolCompatibilityRecord, TransportKind,
         },
     };
     use axum::http::header::{HeaderValue, ACCEPT};
@@ -8236,18 +8236,19 @@ mod tests {
     fn verified_qwen_hosted_profile(db: &Database) -> Provider {
         let mut provider = test_provider_with_type(None);
         provider.id = "qwen-provider".to_string();
-        provider.settings_config = json!({ "base_url": "https://qwen.example/v1" });
-        let target = ProbeTargetKey::new(
-            &provider.id,
-            None::<String>,
-            "qwen-public",
-            "qwen-mapped",
-            TransportKind::OpenAiChat,
-            "https://qwen.example/v1/chat/completions",
-            "bearer",
+        provider.settings_config = json!({
+            "auth": {"OPENAI_API_KEY": "probe-secret"},
+            "config": "model = \"qwen-mapped\"\nbase_url = \"https://qwen.example/v1\"\nwire_api = \"chat\"\n",
+            "base_url": "https://qwen.example/v1"
+        });
+        let target = compile_provider_probe_candidate_for_model(
+            &provider,
+            "qwen-public".to_string(),
+            "qwen-mapped".to_string(),
         )
-        .expect("profile target")
-        .with_credential("");
+        .expect("compile profile Provider policy")
+        .target_key(TransportKind::OpenAiChat)
+        .expect("profile target");
         let result: ProtocolCompatibilityProbeResult = serde_json::from_value(json!({
             "selected_transport": "open_ai_chat",
             "readiness": "verified",

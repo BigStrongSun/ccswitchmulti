@@ -2,12 +2,11 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 use crate::{
-    app_config::AppType,
     codex_multirouter::{compiler::compile_v2, schema::CodexRoutingDocument},
     provider::Provider,
     proxy::providers::{
-        codex_provider_upstream_model, explain_codex_responses_upstream_protocol,
-        resolve_codex_v2_routed_provider,
+        codex_provider_upstream_model, codex_request::CodexThirdPartyRequestPolicy,
+        explain_codex_responses_upstream_protocol, resolve_codex_v2_routed_provider,
     },
 };
 
@@ -72,21 +71,13 @@ pub fn compile_provider_probe_candidates(
     Ok(candidates)
 }
 
-fn compile_provider_probe_candidate_for_model(
+pub(crate) fn compile_provider_probe_candidate_for_model(
     provider: &Provider,
     public_model: String,
     upstream_model: String,
 ) -> Result<ProbeCandidate, String> {
     if provider.uses_managed_account_auth() {
         return Err("managed or official providers do not use third-party protocol probing".into());
-    }
-
-    let (base_url, api_key) = provider.resolve_usage_credentials(&AppType::Codex);
-    if base_url.trim().is_empty() {
-        return Err("Codex provider has no base URL".to_string());
-    }
-    if api_key.trim().is_empty() {
-        return Err("Codex provider has no API key".to_string());
     }
 
     let transport = match explain_codex_responses_upstream_protocol(provider)
@@ -97,29 +88,21 @@ fn compile_provider_probe_candidate_for_model(
         "openai_responses" => TransportKind::OpenAiResponses,
         _ => return Err("provider is not an OpenAI Chat/Responses protocol candidate".to_string()),
     };
-    let is_full_url = provider
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.is_full_url)
-        .unwrap_or(false);
-
     let provider_id = string_field(&provider.settings_config, &["codexRouterParentProviderId"])
         .unwrap_or(provider.id.as_str());
     let route_id = string_field(&provider.settings_config, &["codexResolvedRouteId"]);
+    let request_policy =
+        CodexThirdPartyRequestPolicy::compile(provider).map_err(|error| error.to_string())?;
 
-    ProbeCandidate::new(
+    ProbeCandidate::from_request_policy(
         Some(provider_id.to_string()),
         route_id.map(str::to_string),
         public_model,
         upstream_model,
         transport,
-        &base_url,
-        "bearer",
+        request_policy,
     )
-    .map_err(|_| "Codex provider base URL is not a valid absolute URL".to_string())?
-    .with_full_url(is_full_url)
-    .with_bearer_token(&api_key)
-    .map_err(|_| "Codex provider API key cannot be represented as an HTTP header".to_string())
+    .map_err(|_| "Codex provider base URL is not a valid absolute URL".to_string())
 }
 
 pub fn compile_codex_router_probe_candidates(

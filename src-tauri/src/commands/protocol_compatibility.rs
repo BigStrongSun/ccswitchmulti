@@ -13,12 +13,11 @@ use crate::{
     app_config::AppType,
     protocol_compatibility::{
         apply_probe_selection_to_provider, compile_codex_router_probe_candidates,
-        compile_provider_probe_candidates, endpoint::build_probe_url,
-        run_protocol_compatibility_probe, run_protocol_compatibility_probe_with_reporter,
-        ManualReasoningOverride, ProbeCandidate, ProbeReadiness, ProbeTargetKey,
-        ProtocolCompatibilityProbeResult, ProtocolCompatibilityRecord, ProtocolProbeProgressEvent,
-        ReasoningManualOverrideRecord, ReasoningProjection, ReasoningSemantic, TransportKind,
-        PROBE_PROFILE_VERSION,
+        compile_provider_probe_candidates, run_protocol_compatibility_probe,
+        run_protocol_compatibility_probe_with_reporter, ManualReasoningOverride, ProbeCandidate,
+        ProbeReadiness, ProbeTargetKey, ProtocolCompatibilityProbeResult,
+        ProtocolCompatibilityRecord, ProtocolProbeProgressEvent, ReasoningManualOverrideRecord,
+        ReasoningProjection, ReasoningSemantic, TransportKind, PROBE_PROFILE_VERSION,
     },
     provider::Provider,
     services::ProviderService,
@@ -457,26 +456,7 @@ fn target_for_candidate(
     candidate: &ProbeCandidate,
     transport: TransportKind,
 ) -> Result<ProbeTargetKey, String> {
-    let effective_endpoint = build_probe_url(
-        &candidate.canonical_endpoint(),
-        transport,
-        candidate.is_full_url(),
-    )?;
-    let provider_id = candidate
-        .provider_id
-        .as_deref()
-        .ok_or_else(|| "providerId is required before persisting probe evidence".to_string())?;
-    ProbeTargetKey::new(
-        provider_id,
-        candidate.route_id.as_deref(),
-        &candidate.public_model,
-        &candidate.upstream_model,
-        transport,
-        &effective_endpoint,
-        &candidate.authentication_kind,
-    )
-    .map_err(|_| "effective probe endpoint is invalid".to_string())
-    .map(|target| target.with_credential_fingerprint(candidate.credential_fingerprint()))
+    candidate.target_key(transport)
 }
 
 #[tauri::command]

@@ -5,14 +5,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use crate::proxy::providers::transform_codex_chat::responses_to_chat_completions_with_reasoning;
-
 use super::{
     build_logical_probe_request,
     capture::{capture_transport_probe, CapturedProbeExchange, ProbeCaptureError},
     classify::ClassifiedReasoningShape,
     classify_captured_reasoning_shape,
-    endpoint::build_probe_url,
     redaction::RedactedProbeEvidence,
     selection::select_transport_outcome_with_reasoning,
     PreToolVisibleContent, ProbeCandidate, ProbeCase, ProbeReadiness, ProbeStageStatus,
@@ -73,14 +70,6 @@ impl RedactedProbeFailure {
         Self {
             stage,
             kind: ProbeFailureKind::InvalidResponse,
-            status_code: None,
-        }
-    }
-
-    fn invalid_request(stage: ProbeProgressStage) -> Self {
-        Self {
-            stage,
-            kind: ProbeFailureKind::InvalidRequest,
             status_code: None,
         }
     }
@@ -268,39 +257,10 @@ where
     let mut failures = Vec::new();
     let mut reasoning_shape = empty_reasoning_shape();
     report_stage_started(reporter, candidate, transport, ProbeProgressStage::Baseline);
-    let Ok(endpoint) = build_probe_url(
-        &candidate.canonical_endpoint(),
-        transport,
-        candidate.is_full_url(),
-    ) else {
-        assessment.baseline = ProbeStageStatus::Failed;
-        let failure = RedactedProbeFailure::invalid_request(ProbeProgressStage::Baseline);
-        failures.push(failure.clone());
-        report_stage_finished(
-            reporter,
-            candidate,
-            transport,
-            ProbeProgressStage::Baseline,
-            assessment.baseline,
-            Some(failure),
-        );
-        return finish_branch(
-            reporter,
-            candidate,
-            TransportBranchResult {
-                assessment,
-                reasoning_shape,
-                evidence,
-                failures,
-            },
-        );
-    };
-
     let baseline = send_case(
         candidate,
         client,
         transport,
-        &endpoint,
         ProbeCase::BaselineJson,
         nonce,
         None,
@@ -382,7 +342,6 @@ where
         candidate,
         client,
         transport,
-        &endpoint,
         ProbeCase::BaselineSse,
         nonce,
         None,
@@ -438,7 +397,6 @@ where
         candidate,
         client,
         transport,
-        &endpoint,
         ProbeCase::ForcedToolSse,
         nonce,
         None,
@@ -523,7 +481,6 @@ where
         candidate,
         client,
         transport,
-        &endpoint,
         ProbeCase::ToolContinuationJson,
         nonce,
         Some((&tool_call, &forced_exchange)),
@@ -678,7 +635,6 @@ async fn send_case(
     candidate: &ProbeCandidate,
     client: &Client,
     transport: TransportKind,
-    endpoint: &str,
     case: ProbeCase,
     nonce: &str,
     continuation: Option<(&CapturedToolCall, &CapturedProbeExchange)>,
@@ -693,18 +649,13 @@ async fn send_case(
         ),
         None => build_logical_probe_request(case, &candidate.upstream_model, nonce),
     };
-    let wire_body = match transport {
-        TransportKind::OpenAiResponses => logical,
-        TransportKind::OpenAiChat => responses_to_chat_completions_with_reasoning(logical, None)
-            .map_err(|_| ProbeCaptureError::InvalidPayload)?,
-    };
-    let mut request = client
-        .post(endpoint)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .json(&wire_body);
-    if let Some(authorization) = candidate.bearer_token() {
-        request = request.header(reqwest::header::AUTHORIZATION, authorization.clone());
-    }
+    let prepared = candidate
+        .prepare_request(transport, logical)
+        .map_err(|_| ProbeCaptureError::InvalidPayload)?;
+    let request = client
+        .post(prepared.url)
+        .headers(prepared.headers)
+        .json(&prepared.body);
     capture_transport_probe(request, RESPONSE_TIMEOUT).await
 }
 
