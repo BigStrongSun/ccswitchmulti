@@ -3200,6 +3200,17 @@ impl Database {
                 .unwrap_or_else(|_| serde_json::json!({}));
             let mut settings = serde_json::from_str::<serde_json::Value>(&settings_str)
                 .unwrap_or_else(|_| serde_json::json!({}));
+            // schema v2 路由禁止继承字段（apiFormat/upstream 会被 v2 解析 fail closed，
+            // match 也不是 v2 字段）。本迁移面向旧版 legacy 路由；v2 的协议与模型事实
+            // 由目标 Provider 目录承载。不跳过的话，每次启动的幂等修复都会把字段写回
+            // v2 文档，子智能体保存等操作随之下一次编译持续失败。
+            if settings
+                .pointer("/codexRouting/schemaVersion")
+                .and_then(serde_json::Value::as_u64)
+                == Some(2)
+            {
+                continue;
+            }
             let mut changed = false;
             let has_flash = settings_str.to_lowercase().contains("deepseek-v4-flash");
 
@@ -3704,7 +3715,74 @@ mod tests {
         Ok(())
     }
 
+    /// schema v2 路由禁止继承字段（apiFormat/match 不在 v2 schema 中，apiFormat/upstream
+    /// 会被 v2 解析 fail closed）。本迁移面向旧版 legacy 路由；v2 路由不能被回写，
+    /// 否则每次启动的幂等修复都会让子智能体保存持续报编译失败。
     #[test]
+    fn repair_deepseek_native_responses_leaves_schema_v2_routes_untouched() -> Result<(), AppError>
+    {
+        let conn = Connection::open_in_memory()?;
+        Database::create_tables_on_conn(&conn)?;
+
+        let deepseek_settings = json!({
+            "auth": {"OPENAI_API_KEY": "sk-test"},
+            "modelCatalog": {"models": [{"model": "deepseek-v4-flash"}]},
+            "config": "model = \"deepseek-v4-flash\"\n[model_providers.custom]\nbase_url = \"https://api.deepseek.com\"\nwire_api = \"responses\""
+        });
+        let router_settings = json!({
+            "codexRouting": {
+                "schemaVersion": 2,
+                "enabled": true,
+                "routes": [{
+                    "id": "router-6f797f19",
+                    "label": "DeepSeek",
+                    "enabled": true,
+                    "targetProviderId": "codex-deepseek",
+                    "modelSelection": {"mode": "all"},
+                    "matchPrefixes": ["deepseek"],
+                    "aliases": {},
+                    "authPolicy": {"source": "provider_config"}
+                }]
+            }
+        });
+
+        conn.execute(
+            "INSERT INTO providers (id, app_type, name, settings_config, meta) VALUES ('codex-deepseek', 'codex', 'DeepSeek', ?1, ?2)",
+            params![
+                deepseek_settings.to_string(),
+                json!({"apiFormat": "openai_responses"}).to_string()
+            ],
+        )?;
+        conn.execute(
+            "INSERT INTO providers (id, app_type, name, settings_config, meta) VALUES ('codex-multirouter', 'codex', 'Codex MultiRouter', ?1, ?2)",
+            params![router_settings.to_string(), "{}".to_string()],
+        )?;
+
+        Database::repair_deepseek_native_responses_on_conn(&conn)?;
+
+        let settings_str: String = conn.query_row(
+            "SELECT settings_config FROM providers WHERE id='codex-multirouter'",
+            [],
+            |row| row.get(0),
+        )?;
+        let settings = serde_json::from_str::<serde_json::Value>(&settings_str)
+            .expect("router settings stay valid JSON");
+        let route = &settings["codexRouting"]["routes"][0];
+        assert!(
+            route.get("apiFormat").is_none(),
+            "schema v2 routes must not gain the forbidden inherited field apiFormat"
+        );
+        assert!(
+            route.get("match").is_none(),
+            "schema v2 routes must not gain the legacy match object"
+        );
+        assert_eq!(
+            route["matchPrefixes"][0], "deepseek",
+            "legitimate v2 fields must survive"
+        );
+        Ok(())
+    }
+
     fn repair_deepseek_native_responses_splits_legacy_router_idempotently() -> Result<(), AppError>
     {
         let conn = Connection::open_in_memory()?;

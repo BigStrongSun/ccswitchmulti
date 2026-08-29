@@ -238,6 +238,19 @@ impl Database {
                     .to_string(),
             ));
         }
+        // schema v2 路由上的 v1 继承字段（apiFormat/upstream/baseUrl 等）会让下一次
+        // v2 编译 fail closed，子智能体保存等操作随之持续报错。在持久化边界统一剥离。
+        let mut provider = provider.clone();
+        if app_type == crate::app_config::AppType::Codex.as_str()
+            && crate::codex_multirouter::schema::strip_v2_route_inherited_fields(
+                &mut provider.settings_config,
+            )
+        {
+            log::warn!(
+                "[CodexMultiRouter] Stripped schema v2 forbidden inherited route fields before persisting provider {}",
+                provider.id
+            );
+        }
         let mut conn = lock_conn!(self.conn);
         let tx = conn
             .transaction()
@@ -838,6 +851,47 @@ impl Database {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// 保存边界必须剥离 schema v2 路由上的禁用继承字段，否则历史状态/外部写入的
+    /// 脏字段会让下一次 v2 编译必然失败，子智能体保存等操作持续报错。
+    #[test]
+    fn save_provider_strips_v2_route_inherited_fields_before_persisting() {
+        let db = crate::database::Database::memory().expect("memory db");
+        let provider = crate::Provider::with_id(
+            "router-poison".to_string(),
+            "Poisoned router".to_string(),
+            json!({
+                "base_url": "http://127.0.0.1:15721/v1",
+                "codexRouting": {
+                    "schemaVersion": 2,
+                    "enabled": true,
+                    "routes": [{
+                        "id": "router-target",
+                        "targetProviderId": "target-1",
+                        "apiFormat": "openai_responses",
+                        "matchPrefixes": ["deepseek"]
+                    }]
+                }
+            }),
+            None,
+        );
+        db.save_provider("codex", &provider)
+            .expect("save router carrying inherited fields");
+
+        let saved = db
+            .get_provider_by_id("router-poison", "codex")
+            .expect("read back router")
+            .expect("router exists");
+        let route = &saved.settings_config["codexRouting"]["routes"][0];
+        assert!(
+            route.get("apiFormat").is_none(),
+            "schema v2 forbidden inherited fields must not persist"
+        );
+        assert_eq!(
+            route["matchPrefixes"][0], "deepseek",
+            "legitimate v2 route fields must survive"
+        );
+    }
 
     /// 回归旧数据库中合法 JSON `null`、标量、数组或损坏文本，读取时不能把非对象配置暴露给前端。
     #[test]

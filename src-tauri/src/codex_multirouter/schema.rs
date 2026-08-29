@@ -41,19 +41,23 @@ impl CodexRoutingDocument {
     }
 }
 
+/// schema v2 路由上禁止出现的 v1 继承字段。这些事实在 v2 里归属目标 Provider
+/// 配置或路由级 modelCatalog 条目，出现在路由对象上意味着文档来自旧版本写入、
+/// 外部编辑或未收敛的历史状态。
+const V2_ROUTE_FORBIDDEN_INHERITED_FIELDS: &[&str] = &[
+    "baseUrl",
+    "baseURL",
+    "base_url",
+    "apiKey",
+    "api_key",
+    "apiFormat",
+    "wireApi",
+    "wire_api",
+    "capabilities",
+    "upstream",
+];
+
 fn reject_v2_route_snapshot_fields(value: &Value) -> Result<(), CodexRoutingParseError> {
-    const FORBIDDEN: &[&str] = &[
-        "baseUrl",
-        "baseURL",
-        "base_url",
-        "apiKey",
-        "api_key",
-        "apiFormat",
-        "wireApi",
-        "wire_api",
-        "capabilities",
-        "upstream",
-    ];
     let Some(routes) = value.get("routes").and_then(Value::as_array) else {
         return Ok(());
     };
@@ -61,7 +65,10 @@ fn reject_v2_route_snapshot_fields(value: &Value) -> Result<(), CodexRoutingPars
         let Some(route) = route.as_object() else {
             continue;
         };
-        if let Some(field) = FORBIDDEN.iter().find(|field| route.contains_key(**field)) {
+        if let Some(field) = V2_ROUTE_FORBIDDEN_INHERITED_FIELDS
+            .iter()
+            .find(|field| route.contains_key(**field))
+        {
             return Err(CodexRoutingParseError {
                 code: "v2_route_forbidden_field".to_string(),
                 message: format!("route[{index}] contains forbidden inherited field `{field}`"),
@@ -69,6 +76,46 @@ fn reject_v2_route_snapshot_fields(value: &Value) -> Result<(), CodexRoutingPars
         }
     }
     Ok(())
+}
+
+/// 保存边界剥离 schema v2 路由上的禁用继承字段。
+///
+/// 解析（`reject_v2_route_snapshot_fields`）对继承字段 fail closed：携带这些字段
+/// 的文档会让每一次 v2 编译失败，子智能体保存等操作随之持续报错。历史前端状态、
+/// 外部工具或旧版本写入的文档可能把字段带进 live 数据，因此在持久化边界做无损
+/// 剥离作为兜底：只删除 `codexRouting.routes` 路由对象上的禁用键，不改动 v1 文档、
+/// modelCatalog 条目（模型级 `apiFormat` 是合法能力声明）或其他字段。
+/// 返回是否发生了剥离，供调用方记录告警。
+pub(crate) fn strip_v2_route_inherited_fields(settings_config: &mut Value) -> bool {
+    let Some(schema_version) = settings_config
+        .get("codexRouting")
+        .and_then(|routing| routing.get("schemaVersion"))
+        .and_then(Value::as_u64)
+    else {
+        return false;
+    };
+    if schema_version != 2 {
+        return false;
+    }
+    let Some(routes) = settings_config
+        .get_mut("codexRouting")
+        .and_then(|routing| routing.get_mut("routes"))
+        .and_then(Value::as_array_mut)
+    else {
+        return false;
+    };
+    let mut stripped = false;
+    for route in routes.iter_mut() {
+        let Some(route) = route.as_object_mut() else {
+            continue;
+        };
+        for field in V2_ROUTE_FORBIDDEN_INHERITED_FIELDS {
+            if route.remove(*field).is_some() {
+                stripped = true;
+            }
+        }
+    }
+    stripped
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -313,6 +360,77 @@ mod tests {
 
     fn provider(id: &str) -> Provider {
         Provider::with_id(id.to_string(), id.to_string(), json!({}), None)
+    }
+
+    #[test]
+    fn strips_v2_route_inherited_fields_before_persisting() {
+        let mut settings = json!({
+            "codexRouting": {
+                "schemaVersion": 2,
+                "routes": [
+                    {
+                        "id": "a",
+                        "targetProviderId": "target-a",
+                        "apiFormat": "openai_responses",
+                        "matchPrefixes": ["deepseek"]
+                    },
+                    {
+                        "id": "b",
+                        "targetProviderId": "target-b",
+                        "upstream": {"apiFormat": "openai_chat", "auth": {"source": "provider_config"}}
+                    }
+                ]
+            }
+        });
+        assert!(strip_v2_route_inherited_fields(&mut settings));
+        let routes = settings["codexRouting"]["routes"]
+            .as_array()
+            .expect("routes stay an array");
+        assert!(
+            routes[0].get("apiFormat").is_none(),
+            "forbidden inherited field apiFormat must be stripped"
+        );
+        assert_eq!(
+            routes[0]["matchPrefixes"][0], "deepseek",
+            "legitimate v2 fields must survive the strip"
+        );
+        assert!(
+            routes[1].get("upstream").is_none(),
+            "forbidden inherited field upstream must be stripped"
+        );
+    }
+
+    #[test]
+    fn strip_leaves_v1_documents_non_routing_settings_and_catalog_models_untouched() {
+        let mut v1 = json!({
+            "codexRouting": {
+                "schemaVersion": 1,
+                "routes": [{"apiFormat": "openai_responses"}]
+            }
+        });
+        assert!(
+            !strip_v2_route_inherited_fields(&mut v1),
+            "v1 documents keep their fields; migration owns them"
+        );
+        assert!(v1["codexRouting"]["routes"][0].get("apiFormat").is_some());
+
+        let mut no_routing = json!({"auth": {}});
+        assert!(!strip_v2_route_inherited_fields(&mut no_routing));
+
+        let mut with_catalog = json!({
+            "modelCatalog": {
+                "models": [{"model": "m", "apiFormat": "openai_chat"}]
+            },
+            "codexRouting": {
+                "schemaVersion": 2,
+                "routes": [{"id": "a", "targetProviderId": "target-a"}]
+            }
+        });
+        assert!(!strip_v2_route_inherited_fields(&mut with_catalog));
+        assert_eq!(
+            with_catalog["modelCatalog"]["models"][0]["apiFormat"], "openai_chat",
+            "model-level apiFormat is a legitimate capability declaration"
+        );
     }
 
     fn providers() -> HashMap<String, Provider> {
