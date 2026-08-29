@@ -2008,9 +2008,16 @@ export function normalizeCodexRoutesForVisibleModelAliases(
       nextModelMapEntries.length > 0
         ? Object.fromEntries(nextModelMapEntries)
         : undefined;
+    // 旧别名键若已不在修复后的可见名集合里（例如历史遗留的全 UUID 后缀别名），
+    // 必须剔除，否则投影目录会一直保留过期长名，别名永远收敛不到新规则。
+    const storedAliases = route.aliases ?? {};
     const nextAliases = {
+      ...Object.fromEntries(
+        Object.entries(storedAliases).filter(([visible]) =>
+          nextModels.includes(visible),
+        ),
+      ),
       ...(nextModelMap ?? {}),
-      ...(route.aliases ?? {}),
     };
     const { modelMap: _modelMap, ...upstreamWithoutModelMap } =
       route.upstream ?? {};

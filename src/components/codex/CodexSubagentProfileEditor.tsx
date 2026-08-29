@@ -107,6 +107,28 @@ function profileToneClassName(tone: ProfileTone): string {
   }
 }
 
+/// profile 的模型是否还能在当前路由目录里找到（可见名或上游名任一匹配即可）。
+/// 用于给历史孤儿 profile（模型已下架/改名后旧键滞留）显示过期标记与清理入口；
+/// 目录数据缺失时保守返回 false，不误标。
+function profileModelMissingFromCatalog(
+  profile: CodexSubagentV2Profile,
+  modelCatalog: unknown,
+): boolean {
+  if (!isRecord(modelCatalog) || !Array.isArray(modelCatalog.models)) {
+    return false;
+  }
+  const target = profile.model?.trim().toLowerCase();
+  if (!target) return false;
+  return !modelCatalog.models.some((model) => {
+    if (!isRecord(model)) return false;
+    return (
+      [model.model, model.id, model.upstreamModel, model.upstream_model]
+        .filter((value): value is string => typeof value === "string")
+        .some((value) => value.trim().toLowerCase() === target)
+    );
+  });
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -742,6 +764,18 @@ export function CodexSubagentProfileEditor({
     );
   }
 
+  function removeProfile(profileKey: string) {
+    setSaveMessage(null);
+    setSaveError(null);
+    setDraft((current) => {
+      if (!current) return current;
+      const profiles = { ...current.profiles };
+      delete profiles[profileKey];
+      return { ...current, profiles };
+    });
+    setOpenProfileKey((current) => (current === profileKey ? "" : current));
+  }
+
   function repairProfile(profileKey: string) {
     const replacement = defaultProfileForModel(profileKey);
     if (!replacement) {
@@ -1172,6 +1206,12 @@ export function CodexSubagentProfileEditor({
                   reasoningPolicyOptions.push(["disabled", "关闭推理"]);
                 }
                 const profileTone = profileToneFor(profile, status);
+                // 未启用且模型已不在当前路由目录（下架/改名后旧键滞留）的历史孤儿：
+                // 显示过期标记并提供删除入口。只做展示层判断，不改编辑/启用行为，
+                // 避免 v28 那类"未启用被误判不可路由导致死锁"的回归。
+                const profileExpired =
+                  !profile.enabled &&
+                  profileModelMissingFromCatalog(profile, modelCatalog);
                 const overrides = profile.overrides ?? {};
                 const effectiveInputModalities = inferredInputModalities(
                   provider,
@@ -1208,6 +1248,27 @@ export function CodexSubagentProfileEditor({
                           />
                         </AccordionTrigger>
                       </div>
+                      {profileExpired ? (
+                        <span
+                          className="shrink-0 rounded-full border border-rose-300 bg-rose-50 px-2 py-0.5 text-xs font-medium text-rose-700 dark:border-rose-500/40 dark:bg-rose-500/15 dark:text-rose-200"
+                          title="该 profile 的模型已不在当前路由目录中，无法路由；可安全删除"
+                        >
+                          已过期：模型不在当前路由目录
+                        </span>
+                      ) : null}
+                      {profileExpired ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          aria-label={`删除已过期的 ${profile.model}`}
+                          onClick={() => removeProfile(profileKey)}
+                          disabled={isSaving}
+                          className="shrink-0 border-rose-300 text-rose-700 hover:bg-rose-50 dark:border-rose-500/40 dark:text-rose-200 dark:hover:bg-rose-500/15"
+                        >
+                          删除
+                        </Button>
+                      ) : null}
                       <Button
                         type="button"
                         size="sm"

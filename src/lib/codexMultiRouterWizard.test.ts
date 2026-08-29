@@ -4,6 +4,7 @@ import {
   buildCodexMultiRouterWizardPlan,
   initialWizardCatalogModelOrder,
   initialWizardSelectedSourceIds,
+  resolveWizardModelNameCollisions,
 } from "./codexMultiRouterWizard";
 
 const deepseekSource: Provider = {
@@ -173,5 +174,60 @@ describe("buildCodexMultiRouterWizardPlan subagent version", () => {
     ]);
     expect(plan.settingsConfig).not.toHaveProperty("modelCatalog");
     expect(plan.settingsConfig).not.toHaveProperty("model_catalog");
+  });
+});
+
+describe("resolveWizardModelNameCollisions alias suffix", () => {
+  it("用拼音后缀消歧纯中文 provider 名，而不是退化成完整 UUID", () => {
+    const bitto: Provider = {
+      id: "bitto-1",
+      name: "Bitto",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "glm-5.3-flash" }] },
+      },
+    };
+    const jiyuan: Provider = {
+      id: "4faa657f-1e92-467e-b3b0-d446aeb27b9a",
+      name: "基元律动",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "glm-5.3-flash" }] },
+      },
+    };
+
+    const resolved = resolveWizardModelNameCollisions([bitto, jiyuan]);
+    const bittoModel =
+      resolved[0].settingsConfig?.modelCatalog?.models?.[0]?.model;
+    const jiyuanModel =
+      resolved[1].settingsConfig?.modelCatalog?.models?.[0]?.model;
+
+    expect(bittoModel).toBe("glm-5.3-flash-bitto");
+    expect(jiyuanModel).toBe("glm-5.3-flash-jiyuanlvdong");
+  });
+
+  it("拼音不可用时回退 provider id 前 8 位，而不是完整 UUID", () => {
+    const katakana: Provider = {
+      id: "abcdef12-3456-7890-abcd-ef1234567890",
+      name: "カタカナ",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "test-model" }] },
+      },
+    };
+    const other: Provider = {
+      id: "ffff0000-0000-0000-0000-000000000000",
+      name: "Other",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "test-model" }] },
+      },
+    };
+
+    const resolved = resolveWizardModelNameCollisions([katakana, other]);
+    const renamed =
+      resolved[0].settingsConfig?.modelCatalog?.models?.[0]?.model;
+
+    expect(renamed).toBe("test-model-abcdef12");
   });
 });

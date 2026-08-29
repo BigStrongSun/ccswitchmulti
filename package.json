@@ -1,6 +1,6 @@
 {
   "name": "cc-switch-multi",
-  "version": "3.19.2-18",
+  "version": "3.19.2-18.5",
   "description": "All-in-One Assistant for Claude Code, Codex & Gemini CLI",
   "type": "module",
   "scripts": {
@@ -86,6 +86,7 @@
     "framer-motion": "^12.23.25",
     "i18next": "^25.5.2",
     "lucide-react": "^0.542.0",
+    "pinyin-pro": "^3.29.3",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-hook-form": "^7.65.0",

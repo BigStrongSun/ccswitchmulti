@@ -18,6 +18,7 @@ import {
 } from "./hostedTools";
 import type { FetchedModel } from "@/lib/api/model-fetch";
 import { extractCodexBaseUrl } from "@/utils/providerConfigUtils";
+import { pinyin } from "pinyin-pro";
 import {
   codexPlanModelListAction,
   isCodexCatalogOnlyPlanModelFetch,
@@ -513,20 +514,25 @@ export function collectWizardModelNameCollisions(
 }
 
 // 把 provider 展示名清理成可放进模型 ID 的稳定后缀；优先使用用户能看懂的名称，避免泄露自动生成 ID。
-function providerNameSuffix(provider: Provider): string {
-  const cleanedName = provider.name
+function cleanAliasSegment(value: string): string {
+  return value
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
+}
+
+function providerNameSuffix(provider: Provider): string {
+  const cleanedName = cleanAliasSegment(provider.name);
   if (cleanedName) return cleanedName;
-  return (
-    provider.id
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "") || "provider"
+  // 纯中文/非 ASCII 名称转无声调拼音（ü → v），例如「基元律动」→ jiyuanlvdong，
+  // 避免退化成完整 36 位 provider UUID 出现在 Codex 模型菜单里。
+  const pinyinName = cleanAliasSegment(
+    pinyin(provider.name, { toneType: "none", type: "array", v: true }).join(""),
   );
+  if (pinyinName) return pinyinName;
+  const cleanedId = cleanAliasSegment(provider.id);
+  return cleanedId.slice(0, 8) || "provider";
 }
 
 // 为非官方重名模型生成稳定别名，保留 upstreamModel 指向真实上游模型名。

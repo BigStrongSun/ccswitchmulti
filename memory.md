@@ -6,11 +6,13 @@
 - 修复（不改前端）：`CatalogModel.equivalent_models`（upstream 身份 + 路由别名 key，沿用 2026-08-21 路由侧双身份约定），编译先精确后等价；preview spec 查找与 modalities 补水加等价回退；SyncCatalog 增加改名迁移（等价映射到现目录时重键，保留问卷/覆盖，目标身份被占用或无关联时不迁移）。
 - 新增 6 项回归（含失败关闭反向用例），`cargo test --lib` 全量 3532 通过。未改动 live DB/live config；数据侧止血（删 UUID 别名 + 重存 Provider + 目录同步）待执行。详见 `memory-2026-08-29-subagent-alias-equivalence-fix.md`。
 
-## 2026-08-29 Kimi k3-256k 401 "supports only 256K context" 根因（抓包确证）与 tool 线格式规范化修复
+## 2026-08-29 Kimi k3-256k 401 "supports only 256K context" 根因（抓包+控制变量实验确证）与 tool 线格式规范化修复
 
-- 抓包确证 432KB 空对话请求中 `tools` 数组 30 项占 96.7%（约 418KB），大头是用户级 `mcp__codex_apps__*` 连接器（alpha_vantage 122KB / github 77KB / linear 72KB 等，CLI 空目录同样携带，不分工作区）。Kimi 的上下文预检查按字节（边界 262144=256KiB）而非 token，且把超限伪装成 HTTP 401。实测 Kimi 接受 `namespace` 工具类型、拒绝 `tool_search` 类型和 `parallel_tool_calls:false`。
-- 已按能力声明实现 Responses 透传请求规范化（TDD，新增 9 测试，lib 全量 3528 全过、clippy 零新增）：`tool_search`→等价 function、历史 call/output 项同步映射、`parallel_tool_calls` 移除；能力三级解析（resolved caps > modelCatalog 条目 > 内置模板的第三方默认）。注意它不解决 401（字节预检查仍在），只消除两类 400 并为干净报错铺路。
-- 未构建/未替换安装态、未重启任何进程；探测记录 session-id 为 `probe-ccsm-*`。详见 `memory-2026-08-29-kimi-k3-256k-oversized-tools-401.md`；`codex_config.rs` 的 Issue #74 测试与未跟踪 diag-projection 测试属另一并行工作，不在本次范围。
+- 抓包确证 432KB 空对话请求中 `tools` 数组 30 项占 96.7%（约 418KB），大头是用户级 `mcp__codex_apps__*` 连接器（alpha_vantage 122KB / github 77KB / linear 72KB 等，CLI 空目录同样携带，不分工作区）。Kimi 把超限伪装成 HTTP 401。实测 Kimi 接受 `namespace` 工具类型、拒绝 `tool_search` 类型和 `parallel_tool_calls:false`。
+- 控制变量实验修正阈值结论：**不是精确 256KiB 字节**。实测 327,860 B/70,958 tokens → 200，401,087 B/86,850 tokens → 200，413,611 B → 401；阈值在 40-41 万字节（实际 tokens 8.7-9 万之间），与 Kimi 以 262,144 为准的预估守卫吻合。**只关 alpha_vantage 一个连接器即可让 k3-256k 在 Codex 里可用（实测 200 带真实回答），建议连 github/linear 一起关保证长对话余量**。
+- 已按能力声明实现 Responses 透传请求规范化（TDD，新增 9 测试，lib 全量 3528 全过、clippy 零新增）：`tool_search`→等价 function、历史 call/output 项同步映射、`parallel_tool_calls` 移除；能力三级解析（resolved caps > modelCatalog 条目 > 内置模板的第三方默认）。注意它不解决 401（阈值仍在），只消除两类 400 并为干净报错铺路。
+- v2_route_forbidden_field 事件：路由文档被手工加入 v1 继承字段 `apiFormat` 的瞬态状态，DB 现已干净、三条 UI 保存路径序列化器均无此问题；产品改进候选是保存期规范化替代请求期 fail-closed。
+- 未构建/未替换安装态；探测记录 session-id 为 `probe-ccsm-*`/`probe-e*`/`probe-bisect-*`。详见 `memory-2026-08-29-kimi-k3-256k-oversized-tools-401.md`；`codex_config.rs` 的 Issue #74 测试与未跟踪 diag-projection 测试属另一并行工作，不在本次范围。
 
 ## 2026-08-26 Codex raw reasoning / summary 语义纠正与协议选择解耦
 
