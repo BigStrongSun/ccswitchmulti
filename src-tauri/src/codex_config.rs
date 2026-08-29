@@ -3963,7 +3963,7 @@ fn codex_subagent_catalog_equivalent_names(
     spec_upstream_model: Option<&str>,
 ) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
-    let mut push = |names: &mut Vec<String>, name: &str| {
+    let push = |names: &mut Vec<String>, name: &str| {
         let name = name.trim();
         if name.is_empty() {
             return;
