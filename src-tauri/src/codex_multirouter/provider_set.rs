@@ -2,8 +2,8 @@ use super::schema::{
     CodexModelSelection, CodexRoutingConfigV2, CodexRoutingDocument, CodexRoutingRouteV2,
 };
 use crate::protocol_compatibility::{
-    compile_provider_probe_candidate_for_model, ProbeReadiness, ProtocolCompatibilityRecord,
-    TransportKind, PROBE_PROFILE_VERSION,
+    compile_provider_probe_candidate_for_model, ProbeFailureKind, ProbeProgressStage,
+    ProbeReadiness, ProtocolCompatibilityRecord, TransportKind, PROBE_PROFILE_VERSION,
 };
 use crate::provider::Provider;
 use crate::proxy::providers::codex_provider_upstream_model;
@@ -86,6 +86,12 @@ pub struct CodexProviderSetBlockedModel {
     pub model: String,
     pub upstream_model: String,
     pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage: Option<ProbeProgressStage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_kind: Option<ProbeFailureKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_code: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -173,7 +179,7 @@ pub fn plan_codex_provider_set(
 
     for model in catalog.iter().filter(|model| model.enabled) {
         if !enabled_names.insert(model.public_model.clone()) {
-            blocked.push(blocked_model(model, "duplicate_model_identity"));
+            blocked.push(blocked_model(model, "duplicate_model_identity", None));
             continue;
         }
         let matches = records
@@ -184,27 +190,27 @@ pub fn plan_codex_provider_set(
             })
             .collect::<Vec<_>>();
         let Some(record) = matches.first().copied() else {
-            blocked.push(blocked_model(model, "probe_required"));
+            blocked.push(blocked_model(model, "probe_required", None));
             continue;
         };
         if matches.len() != 1 {
-            blocked.push(blocked_model(model, "conflicting_probe_records"));
+            blocked.push(blocked_model(model, "conflicting_probe_records", None));
             continue;
         }
         if record.probe_version != PROBE_PROFILE_VERSION || record.expires_at < now {
-            blocked.push(blocked_model(model, "probe_stale"));
+            blocked.push(blocked_model(model, "probe_stale", Some(record)));
             continue;
         }
         if record.result.readiness != ProbeReadiness::Verified {
-            blocked.push(blocked_model(model, "probe_not_verified"));
+            blocked.push(blocked_model(model, "probe_not_verified", Some(record)));
             continue;
         }
         let Some(selected) = record.result.selected_transport else {
-            blocked.push(blocked_model(model, "probe_has_no_selection"));
+            blocked.push(blocked_model(model, "probe_has_no_selection", Some(record)));
             continue;
         };
         if record.target.transport != selected {
-            blocked.push(blocked_model(model, "probe_target_mismatch"));
+            blocked.push(blocked_model(model, "probe_target_mismatch", Some(record)));
             continue;
         }
         selections.push((model.clone(), selected));
@@ -1107,11 +1113,33 @@ fn source_catalog(source: &Provider) -> Result<Vec<CatalogModel>, CodexProviderS
     Ok(parsed)
 }
 
-fn blocked_model(model: &CatalogModel, reason: &str) -> CodexProviderSetBlockedModel {
+fn blocked_model(
+    model: &CatalogModel,
+    reason: &str,
+    record: Option<&ProtocolCompatibilityRecord>,
+) -> CodexProviderSetBlockedModel {
+    let failure = record.and_then(|record| {
+        record
+            .result
+            .branches
+            .iter()
+            .find(|branch| branch.assessment.transport == record.target.transport)
+            .and_then(|branch| branch.failures.first())
+            .or_else(|| {
+                record
+                    .result
+                    .branches
+                    .iter()
+                    .find_map(|branch| branch.failures.first())
+            })
+    });
     CodexProviderSetBlockedModel {
         model: model.public_model.clone(),
         upstream_model: model.upstream_model.clone(),
         reason: reason.to_string(),
+        stage: failure.map(|failure| failure.stage),
+        failure_kind: failure.map(|failure| failure.kind),
+        status_code: failure.and_then(|failure| failure.status_code),
     }
 }
 
@@ -1816,7 +1844,7 @@ mod tests {
     #[test]
     fn partial_or_missing_enabled_model_blocks_without_grouping() {
         let source = source_provider();
-        let partial = vec![
+        let mut partial = vec![
             record(
                 "model-a",
                 "upstream-a",
@@ -1830,6 +1858,33 @@ mod tests {
                 ProbeReadiness::Partial,
             ),
         ];
+        partial[1].result = serde_json::from_value(json!({
+            "selected_transport": "open_ai_chat",
+            "readiness": "partial",
+            "branches": [{
+                "assessment": {
+                    "transport": "open_ai_chat",
+                    "baseline": "passed",
+                    "streaming": "passed",
+                    "forced_tool": "passed",
+                    "continuation": "failed"
+                },
+                "reasoning_shape": {
+                    "semantic": "readable",
+                    "source": "reasoning_content",
+                    "pre_tool_visible_content": "present"
+                },
+                "tool_schema_dialect": "open_ai",
+                "history_replay": "chat_reasoning_content",
+                "evidence": [],
+                "failures": [{
+                    "stage": "continuation",
+                    "kind": "http_status",
+                    "status_code": 422
+                }]
+            }]
+        }))
+        .expect("partial branch with redacted failure");
         let prepared = plan_codex_provider_set(&source, &partial, &HashMap::new(), 150)
             .expect("blocked preview");
         let CodexProviderSetPlan::Blocked { models } = prepared.preview.plan else {
@@ -1838,6 +1893,18 @@ mod tests {
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].model, "model-b");
         assert_eq!(models[0].reason, "probe_not_verified");
+        assert_eq!(
+            serde_json::to_value(&models[0]).expect("serialize blocked model"),
+            json!({
+                "model": "model-b",
+                "upstreamModel": "upstream-b",
+                "reason": "probe_not_verified",
+                "stage": "continuation",
+                "failureKind": "http_status",
+                "statusCode": 422
+            }),
+            "Blocked preview must preserve the actionable redacted failure classification"
+        );
 
         let missing = plan_codex_provider_set(&source, &partial[..1], &HashMap::new(), 150)
             .expect("missing preview");

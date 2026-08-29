@@ -47,6 +47,7 @@ export interface ProviderDeleteOutcome {
   disabledPlanIds: string[];
   removedCandidates: string[];
   projections: CodexRoutingProjectionStatus[];
+  warnings: string[];
 }
 
 export interface CodexMultiRouterMigrationDiff {

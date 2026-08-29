@@ -140,6 +140,9 @@ export interface CodexProviderSetBlockedModel {
   model: string;
   upstreamModel: string;
   reason: string;
+  stage?: CodexProtocolProbeStage;
+  failureKind?: CodexProtocolProbeFailureKind;
+  statusCode?: number;
 }
 
 export type CodexProviderSetPlan =

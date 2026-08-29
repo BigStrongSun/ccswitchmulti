@@ -64,6 +64,58 @@ pub(crate) struct ProviderSetDatabaseTransaction {
     pub setting_keys_to_delete: Vec<String>,
     pub universal_provider: Option<UniversalProvider>,
     pub current_provider_after: Option<(String, String)>,
+    pub official_seed_current_after: Option<(String, String)>,
+}
+
+fn ensure_official_seed_in_transaction(
+    tx: &Transaction<'_>,
+    app_type: &str,
+    seed_id: &str,
+) -> Result<(), AppError> {
+    use crate::database::dao::providers_seed::OFFICIAL_SEEDS;
+
+    let exists = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM providers WHERE id = ?1 AND app_type = ?2)",
+            params![seed_id, app_type],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|error| AppError::Database(error.to_string()))?;
+    if exists {
+        return Ok(());
+    }
+    let seed = OFFICIAL_SEEDS
+        .iter()
+        .find(|seed| seed.id == seed_id && seed.app_type.as_str() == app_type)
+        .ok_or_else(|| {
+            AppError::Database(format!(
+                "unknown official seed: id={seed_id}, app_type={app_type}"
+            ))
+        })?;
+    let settings_config = serde_json::from_str(seed.settings_config_json).map_err(|error| {
+        AppError::Database(format!("Seed JSON parse failed for {}: {error}", seed.id))
+    })?;
+    let next_sort_index = tx
+        .query_row(
+            "SELECT COALESCE(MAX(sort_index), -1) + 1 FROM providers WHERE app_type = ?1",
+            params![app_type],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| AppError::Database(error.to_string()))?
+        .max(0) as usize;
+    let mut provider = Provider::with_id(
+        seed.id.to_string(),
+        seed.name.to_string(),
+        settings_config,
+        Some(seed.website_url.to_string()),
+    );
+    provider.category = Some("official".to_string());
+    provider.icon = Some(seed.icon.to_string());
+    provider.icon_color = Some(seed.icon_color.to_string());
+    provider.sort_index = Some(next_sort_index);
+    provider.created_at = Some(chrono::Utc::now().timestamp_millis());
+    save_provider_in_transaction(tx, app_type, &provider)?;
+    Ok(())
 }
 
 fn save_provider_in_transaction(
@@ -440,6 +492,7 @@ impl Database {
             setting_keys_to_delete: setting_keys_to_delete.to_vec(),
             universal_provider: universal_provider.cloned(),
             current_provider_after: None,
+            official_seed_current_after: None,
         })
     }
 
@@ -447,6 +500,14 @@ impl Database {
         &self,
         mutation: ProviderSetDatabaseTransaction,
     ) -> Result<(), AppError> {
+        if mutation.current_provider_after.is_some()
+            && mutation.official_seed_current_after.is_some()
+        {
+            return Err(AppError::InvalidInput(
+                "Provider set transaction contains conflicting current-provider transitions"
+                    .to_string(),
+            ));
+        }
         if mutation.records.iter().any(|record| {
             !mutation
                 .profile_owner_ids
@@ -536,7 +597,14 @@ impl Database {
                 &route_ids,
             )?;
         }
-        if let Some((app_type, provider_id)) = mutation.current_provider_after.as_ref() {
+        if let Some((app_type, provider_id)) = mutation.official_seed_current_after.as_ref() {
+            ensure_official_seed_in_transaction(&tx, app_type, provider_id)?;
+        }
+        let current_provider_after = mutation
+            .current_provider_after
+            .as_ref()
+            .or(mutation.official_seed_current_after.as_ref());
+        if let Some((app_type, provider_id)) = current_provider_after {
             tx.execute(
                 "UPDATE providers SET is_current = 0 WHERE app_type = ?1",
                 params![app_type],
@@ -1129,6 +1197,7 @@ mod tests {
             setting_keys_to_delete: Vec::new(),
             universal_provider: None,
             current_provider_after: None,
+            official_seed_current_after: None,
         }
     }
 

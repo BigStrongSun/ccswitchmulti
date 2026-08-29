@@ -64,6 +64,9 @@ describe("CodexProviderSetPreviewDialog", () => {
             model: "qwen3.8",
             upstreamModel: "Qwen/Qwen3.8",
             reason: "probe_not_verified",
+            stage: "continuation",
+            failureKind: "http_status",
+            statusCode: 422,
           },
         ],
       },
@@ -85,6 +88,10 @@ describe("CodexProviderSetPreviewDialog", () => {
     expect(within(dialog).getByText("Qwen/Qwen3.8")).toBeInTheDocument();
     expect(
       within(dialog).getByText("探测结果尚未通过完整验证"),
+    ).toBeInTheDocument();
+    expect(within(dialog).getByText("失败阶段：工具续轮")).toBeInTheDocument();
+    expect(
+      within(dialog).getByText("失败类型：HTTP 状态（422）"),
     ).toBeInTheDocument();
     expect(
       within(dialog).queryByRole("button", { name: "确认按协议拆分" }),

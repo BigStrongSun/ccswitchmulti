@@ -64,6 +64,7 @@ pub struct CodexProviderDeleteOutcome {
     pub disabled_plan_ids: Vec<String>,
     pub removed_candidates: Vec<String>,
     pub projections: Vec<CodexRoutingProjectionStatus>,
+    pub warnings: Vec<String>,
 }
 
 struct PreparedRouterDeletion {
@@ -104,6 +105,47 @@ impl PreparedCodexProviderDeletion {
             .map(|provider_id| format!("codex_multirouter_projection:{provider_id}"))
             .collect()
     }
+
+    pub(crate) fn database_transaction(&self) -> ProviderSetDatabaseTransaction {
+        let mut mutations = Vec::with_capacity(self.routers.len() + self.provider_ids.len());
+        self.append_provider_mutations(&mut mutations);
+        ProviderSetDatabaseTransaction {
+            mutations: mutations
+                .into_iter()
+                .map(
+                    |(app_type, provider_id, provider)| ProviderSetDatabaseMutation {
+                        app_type: app_type.to_string(),
+                        provider_id: provider_id.to_string(),
+                        provider: provider.cloned(),
+                    },
+                )
+                .collect(),
+            profile_owner_ids: HashSet::new(),
+            records: Vec::new(),
+            replace_profile_provider_ids: HashSet::new(),
+            setting_keys_to_delete: self.projection_setting_keys(),
+            universal_provider: None,
+            current_provider_after: None,
+            official_seed_current_after: self.must_restore_official.then(|| {
+                (
+                    "codex".to_string(),
+                    crate::database::CODEX_OFFICIAL_PROVIDER_ID.to_string(),
+                )
+            }),
+        }
+    }
+}
+
+fn current_provider_belongs_to_source(
+    providers: &HashMap<String, Provider>,
+    current_provider_id: &str,
+    source_provider_id: &str,
+) -> bool {
+    current_provider_id == source_provider_id
+        || providers
+            .get(current_provider_id)
+            .and_then(super::provider_set::codex_provider_set_leaf_parent_id)
+            == Some(source_provider_id)
 }
 
 struct AffectedRouterIds {
@@ -282,8 +324,11 @@ pub(crate) fn prepare_codex_provider_set_commit(
 
     let current_before = db.get_current_provider("codex")?;
     let should_activate_source = current_before.as_ref().is_none_or(|current| {
-        current.as_str() == replanned.preview.source_provider_id
-            || replanned.delete_provider_ids.contains(current)
+        current_provider_belongs_to_source(
+            &existing,
+            current,
+            &replanned.preview.source_provider_id,
+        )
     });
     let current_provider_after = should_activate_source.then(|| {
         (
@@ -310,6 +355,7 @@ pub(crate) fn prepare_codex_provider_set_commit(
             setting_keys_to_delete,
             universal_provider: None,
             current_provider_after,
+            official_seed_current_after: None,
         },
         projection_router_ids,
     })
@@ -325,6 +371,8 @@ pub(crate) fn prepare_codex_provider_set_batch_commit(
         .get_all_providers("codex")?
         .into_iter()
         .collect::<HashMap<_, _>>();
+    let providers_before = virtual_providers.clone();
+    let current_before = db.get_current_provider("codex")?;
     if sources.iter().any(|(source, _)| source.id == router.id) {
         return Err(AppError::InvalidInput(
             "codex_provider_set_batch_router_id_conflict".to_string(),
@@ -339,6 +387,7 @@ pub(crate) fn prepare_codex_provider_set_batch_commit(
     let mut projection_router_ids = Vec::new();
     let mut source_previews = Vec::with_capacity(sources.len());
     let mut blocked = false;
+    let mut current_provider_after = None;
 
     for (source, records) in sources {
         let prepared = if source.uses_fixed_codex_responses_transport() {
@@ -376,6 +425,12 @@ pub(crate) fn prepare_codex_provider_set_batch_commit(
             plan_codex_provider_set(&source, &records, &virtual_providers, now)
         }
         .map_err(provider_set_error)?;
+
+        if current_before.as_deref().is_some_and(|current| {
+            current_provider_belongs_to_source(&providers_before, current, &source.id)
+        }) {
+            current_provider_after = Some(("codex".to_string(), source.id.clone()));
+        }
 
         source_previews.push(prepared.preview.clone());
         if matches!(prepared.preview.plan, CodexProviderSetPlan::Blocked { .. }) {
@@ -498,7 +553,8 @@ pub(crate) fn prepare_codex_provider_set_batch_commit(
             replace_profile_provider_ids,
             setting_keys_to_delete,
             universal_provider: None,
-            current_provider_after: None,
+            current_provider_after,
+            official_seed_current_after: None,
         }),
         projection_router_ids,
         source_previews,
@@ -827,21 +883,21 @@ where
     F: FnMut(&CodexRoutingProjectionArtifact) -> Result<ProjectionReadBack, String>,
 {
     let prepared = prepare_codex_provider_deletion(db, provider_id, current_provider_id)?;
+    db.apply_provider_set_database_transaction(prepared.database_transaction())?;
+
+    let mut warnings = Vec::new();
     if prepared.must_restore_official() {
-        restore_official()?;
+        if let Err(error) = restore_official() {
+            log::warn!(
+                "Codex official live projection pending after authoritative deletion commit: {}",
+                error
+            );
+            warnings.push("codex_official_projection_pending_retry".to_string());
+        }
     }
-
-    let mut mutations = Vec::with_capacity(prepared.routers.len() + 1);
-    prepared.append_provider_mutations(&mut mutations);
-    db.apply_provider_set_with_protocol_profiles_and_setting_cleanup(
-        &mutations,
-        None,
-        &[],
-        &HashSet::new(),
-        &prepared.projection_setting_keys(),
-    )?;
-
-    finalize_codex_provider_deletion(db, prepared, |artifact| publish(artifact))
+    let mut outcome = finalize_codex_provider_deletion(db, prepared, |artifact| publish(artifact))?;
+    outcome.warnings.extend(warnings);
+    Ok(outcome)
 }
 
 pub(crate) fn prepare_codex_provider_deletion(
@@ -1012,6 +1068,7 @@ where
             .collect(),
         removed_candidates: prepared.removed_candidates.into_iter().collect(),
         projections,
+        warnings: Vec::new(),
     })
 }
 
@@ -1177,6 +1234,35 @@ mod tests {
         ]
     }
 
+    fn uniform_responses_records(now: i64) -> Vec<ProtocolCompatibilityRecord> {
+        vec![
+            mixed_profile("model-a", "upstream-a", TransportKind::OpenAiResponses, now),
+            mixed_profile("model-b", "upstream-b", TransportKind::OpenAiResponses, now),
+        ]
+    }
+
+    fn seed_split_provider_set(db: &Database, now: i64) -> Provider {
+        let source = mixed_source();
+        db.save_provider("codex", &source)
+            .expect("seed logical source");
+        let existing = db
+            .get_all_providers("codex")
+            .expect("load Providers")
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        let prepared = crate::codex_multirouter::provider_set::plan_codex_provider_set(
+            &source,
+            &mixed_records(now),
+            &existing,
+            now,
+        )
+        .expect("prepare initial split");
+        let commit = prepare_codex_provider_set_commit(db, prepared).expect("prepare split commit");
+        db.apply_provider_set_database_transaction(commit.transaction)
+            .expect("commit initial split");
+        source
+    }
+
     #[test]
     fn provider_set_commit_atomically_splits_and_rewrites_the_active_dependent_router() {
         let db = Database::memory().expect("memory db");
@@ -1304,6 +1390,124 @@ mod tests {
             .expect("Subagent V2 profiles are initialized before the transaction");
         assert!(profiles.contains_key("model-a"));
         assert!(profiles.contains_key("model-b"));
+    }
+
+    #[test]
+    fn wizard_batch_split_to_single_maps_a_current_generated_leaf_to_the_source() {
+        let db = Database::memory().expect("memory db");
+        let now = chrono::Utc::now().timestamp();
+        let source = seed_split_provider_set(&db, now);
+        db.set_current_provider("codex", "relay--ccsm-chat")
+            .expect("activate generated Chat leaf");
+        let mut final_router = router("wizard-router", "relay");
+        final_router.settings_config["codexRouting"]["defaultRouteId"] = json!("route-qwen");
+
+        let prepared = prepare_codex_provider_set_batch_commit(
+            &db,
+            vec![(source, uniform_responses_records(now))],
+            final_router,
+            now,
+        )
+        .expect("prepare uniform batch");
+        db.apply_provider_set_database_transaction(
+            prepared
+                .transaction
+                .expect("unblocked batch has a transaction"),
+        )
+        .expect("commit uniform batch");
+
+        assert_eq!(
+            db.get_current_provider("codex").expect("read current"),
+            Some("relay".to_string()),
+            "deleting the current generated leaf must atomically select its logical source"
+        );
+        assert!(db
+            .get_provider_by_id("relay--ccsm-chat", "codex")
+            .expect("read Chat leaf")
+            .is_none());
+    }
+
+    #[test]
+    fn provider_set_split_replan_maps_a_current_leaf_to_the_facade() {
+        let db = Database::memory().expect("memory db");
+        let now = chrono::Utc::now().timestamp();
+        let source = seed_split_provider_set(&db, now);
+        db.set_current_provider("codex", "relay--ccsm-responses")
+            .expect("activate generated Responses leaf");
+        let existing = db
+            .get_all_providers("codex")
+            .expect("load Providers")
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        let prepared = crate::codex_multirouter::provider_set::plan_codex_provider_set(
+            &source,
+            &mixed_records(now),
+            &existing,
+            now,
+        )
+        .expect("replan split");
+
+        apply_codex_provider_set_mutation_with_publisher(&db, prepared, |_| {
+            Ok(ProjectionReadBack::verified("split-replan".to_string()))
+        })
+        .expect("commit split replan");
+
+        assert_eq!(
+            db.get_current_provider("codex").expect("read current"),
+            Some("relay".to_string()),
+            "an internal leaf must never remain the user-visible active Provider"
+        );
+    }
+
+    #[test]
+    fn failed_wizard_batch_rolls_back_the_current_leaf_transition() {
+        let db = Database::memory().expect("memory db");
+        let now = chrono::Utc::now().timestamp();
+        let source = seed_split_provider_set(&db, now);
+        db.set_current_provider("codex", "relay--ccsm-chat")
+            .expect("activate generated Chat leaf");
+        {
+            let conn = db.conn.lock().expect("lock database");
+            conn.execute_batch(
+                "CREATE TRIGGER fail_current_normalization_batch
+                 BEFORE INSERT ON providers
+                 WHEN NEW.id = 'wizard-router'
+                 BEGIN
+                   SELECT RAISE(ABORT, 'injected current normalization failure');
+                 END;",
+            )
+            .expect("install failure trigger");
+        }
+        let mut final_router = router("wizard-router", "relay");
+        final_router.settings_config["codexRouting"]["defaultRouteId"] = json!("route-qwen");
+        let prepared = prepare_codex_provider_set_batch_commit(
+            &db,
+            vec![(source, uniform_responses_records(now))],
+            final_router,
+            now,
+        )
+        .expect("prepare uniform batch");
+
+        let error = db
+            .apply_provider_set_database_transaction(
+                prepared
+                    .transaction
+                    .expect("unblocked batch has a transaction"),
+            )
+            .expect_err("injected router failure must abort the batch");
+
+        assert!(error
+            .to_string()
+            .contains("injected current normalization failure"));
+        assert_eq!(
+            db.get_current_provider("codex").expect("read current"),
+            Some("relay--ccsm-chat".to_string()),
+            "the activity transition must roll back with the Provider mutations"
+        );
+        assert!(db
+            .get_provider_by_id("relay--ccsm-chat", "codex")
+            .expect("read Chat leaf")
+            .is_some());
     }
 
     #[test]
@@ -2024,35 +2228,135 @@ mod tests {
     }
 
     #[test]
-    fn failed_official_restore_leaves_provider_and_routes_unchanged() {
+    fn failed_official_projection_is_reported_after_authoritative_deletion_commits() {
         let db = Database::memory().expect("memory db");
         db.save_provider("codex", &target("openai_chat"))
             .expect("seed target");
         db.save_provider("codex", &router("router-a", "qwen"))
             .expect("seed router");
+        db.set_current_provider("codex", "router-a")
+            .expect("activate dependent Router");
 
-        let error = apply_codex_provider_delete_with_hooks(
+        let outcome = apply_codex_provider_delete_with_hooks(
             &db,
             "qwen",
             Some("router-a"),
             || Err(AppError::Message("restore failed".to_string())),
             |_| panic!("failed restore must not publish"),
         )
-        .expect_err("restore failure must abort deletion");
+        .expect("derived official projection failure must not roll back the database");
 
-        assert!(error.to_string().contains("restore failed"));
+        assert_eq!(
+            outcome.warnings,
+            vec!["codex_official_projection_pending_retry".to_string()]
+        );
         assert!(db
             .get_provider_by_id("qwen", "codex")
             .expect("read target")
-            .is_some());
+            .is_none());
         assert_eq!(
             db.get_provider_by_id("router-a", "codex")
                 .expect("read router")
                 .expect("router exists")
-                .settings_config["codexRouting"]["routes"]
-                .as_array()
-                .map(Vec::len),
-            Some(1)
+                .settings_config["codexRouting"]["enabled"],
+            false
+        );
+        assert_eq!(
+            db.get_current_provider("codex").expect("read current"),
+            Some(crate::database::CODEX_OFFICIAL_PROVIDER_ID.to_string())
+        );
+    }
+
+    #[test]
+    fn deletion_transaction_failure_does_not_project_official_early() {
+        let db = Database::memory().expect("memory db");
+        db.save_provider("codex", &target("openai_chat"))
+            .expect("seed target");
+        db.save_provider("codex", &router("router-a", "qwen"))
+            .expect("seed router");
+        db.set_current_provider("codex", "router-a")
+            .expect("activate dependent Router");
+        {
+            let conn = db.conn.lock().expect("lock database");
+            conn.execute_batch(
+                "CREATE TRIGGER fail_disabled_router_update
+                 BEFORE UPDATE ON providers
+                 WHEN NEW.id = 'router-a'
+                 BEGIN
+                   SELECT RAISE(ABORT, 'injected deletion transaction failure');
+                 END;",
+            )
+            .expect("install failure trigger");
+        }
+        let official_projection_calls = Cell::new(0);
+
+        let error = apply_codex_provider_delete_with_hooks(
+            &db,
+            "qwen",
+            Some("router-a"),
+            || {
+                official_projection_calls.set(official_projection_calls.get() + 1);
+                Ok(())
+            },
+            |_| panic!("failed transaction must not publish a Router projection"),
+        )
+        .expect_err("injected database failure must abort deletion");
+
+        assert!(error
+            .to_string()
+            .contains("injected deletion transaction failure"));
+        assert_eq!(
+            official_projection_calls.get(),
+            0,
+            "official live projection belongs after the database commit"
+        );
+        assert_eq!(
+            db.get_current_provider("codex").expect("read current"),
+            Some("router-a".to_string())
+        );
+        assert!(db
+            .get_provider_by_id(crate::database::CODEX_OFFICIAL_PROVIDER_ID, "codex")
+            .expect("read official seed")
+            .is_none());
+    }
+
+    #[test]
+    fn successful_deletion_seeds_and_selects_official_inside_the_transaction() {
+        let db = Database::memory().expect("memory db");
+        db.save_provider("codex", &target("openai_chat"))
+            .expect("seed target");
+        db.save_provider("codex", &router("router-a", "qwen"))
+            .expect("seed router");
+        db.set_current_provider("codex", "router-a")
+            .expect("activate dependent Router");
+        let projection_observed_current = RefCell::new(None);
+
+        apply_codex_provider_delete_with_hooks(
+            &db,
+            "qwen",
+            Some("router-a"),
+            || {
+                *projection_observed_current.borrow_mut() = db
+                    .get_current_provider("codex")
+                    .expect("read committed current");
+                Ok(())
+            },
+            |_| panic!("disabled active Router must not own the live projection"),
+        )
+        .expect("delete target");
+
+        assert!(db
+            .get_provider_by_id(crate::database::CODEX_OFFICIAL_PROVIDER_ID, "codex")
+            .expect("read official seed")
+            .is_some());
+        assert_eq!(
+            db.get_current_provider("codex").expect("read current"),
+            Some(crate::database::CODEX_OFFICIAL_PROVIDER_ID.to_string())
+        );
+        assert_eq!(
+            projection_observed_current.into_inner(),
+            Some(crate::database::CODEX_OFFICIAL_PROVIDER_ID.to_string()),
+            "the live projection hook must observe the committed official current state"
         );
     }
 

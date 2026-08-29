@@ -1483,17 +1483,63 @@ pub(crate) fn apply_detected_codex_transport_to_effective_provider(
     db: &Database,
     now: i64,
 ) -> bool {
+    let transport = match resolve_legacy_codex_transport(
+        provider,
+        public_model,
+        upstream_model,
+        db,
+        now,
+    ) {
+        LegacyCodexTransportResolution::Selected(transport) => transport,
+        LegacyCodexTransportResolution::MigrationRequired => {
+            log::warn!(
+                "codex_provider_set_legacy_migration_required provider={} public_model={} upstream_model={} reason=no_current_verified_profile",
+                provider.id,
+                public_model,
+                upstream_model
+            );
+            return false;
+        }
+        LegacyCodexTransportResolution::NotApplicable => return false,
+    };
+    provider
+        .meta
+        .get_or_insert_with(ProviderMeta::default)
+        .api_format = Some(
+        match transport {
+            TransportKind::OpenAiChat => "openai_chat",
+            TransportKind::OpenAiResponses => "openai_responses",
+        }
+        .to_string(),
+    );
+    true
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LegacyCodexTransportResolution {
+    NotApplicable,
+    Selected(TransportKind),
+    MigrationRequired,
+}
+
+pub(crate) fn resolve_legacy_codex_transport(
+    provider: &Provider,
+    public_model: &str,
+    upstream_model: &str,
+    db: &Database,
+    now: i64,
+) -> LegacyCodexTransportResolution {
     if provider.uses_manual_codex_protocol()
         || !codex_provider_has_legacy_mixed_model_transports(provider)
         || public_model.trim().is_empty()
         || upstream_model.trim().is_empty()
     {
-        return false;
+        return LegacyCodexTransportResolution::NotApplicable;
     }
     let Ok(candidate) =
         compile_provider_probe_candidate_for_request(provider, public_model, upstream_model)
     else {
-        return false;
+        return LegacyCodexTransportResolution::MigrationRequired;
     };
     let mut selected: Option<(i64, TransportKind)> = None;
     for transport in [TransportKind::OpenAiResponses, TransportKind::OpenAiChat] {
@@ -1518,19 +1564,9 @@ pub(crate) fn apply_detected_codex_transport_to_effective_provider(
         }
     }
     let Some((_, transport)) = selected else {
-        return false;
+        return LegacyCodexTransportResolution::MigrationRequired;
     };
-    provider
-        .meta
-        .get_or_insert_with(ProviderMeta::default)
-        .api_format = Some(
-        match transport {
-            TransportKind::OpenAiChat => "openai_chat",
-            TransportKind::OpenAiResponses => "openai_responses",
-        }
-        .to_string(),
-    );
-    true
+    LegacyCodexTransportResolution::Selected(transport)
 }
 
 /// Request-time transport selection is a migration bridge for historical Providers that stored
@@ -7832,6 +7868,10 @@ wire_api = "responses"
         let mut provider = create_provider(json!({
             "auth": {"OPENAI_API_KEY": "probe-secret"},
             "config": "model = \"qwen-visible\"\nbase_url = \"https://qwen.example/v1\"\nwire_api = \"responses\"\n",
+            "modelCatalog": {"models": [
+                {"model": "qwen-visible", "upstreamModel": "Qwen/Qwen3.8", "apiFormat": "openai_chat"},
+                {"model": "responses-visible", "upstreamModel": "responses-model", "apiFormat": "openai_responses"}
+            ]},
             "codexRouterParentProviderId": "router",
             "codexResolvedRouteId": "qwen-route",
             "codexResolvedUpstreamModelOverride": "Qwen/Qwen3.8"
@@ -7864,6 +7904,11 @@ wire_api = "responses"
             &db,
             150,
         ));
+        assert_eq!(
+            resolve_legacy_codex_transport(&provider, "qwen-visible", "Qwen/Qwen3.8", &db, 150,),
+            LegacyCodexTransportResolution::MigrationRequired,
+            "legacy mixed data without a current Verified profile must expose migration state"
+        );
         assert!(!codex_provider_uses_chat_completions(&provider));
     }
 

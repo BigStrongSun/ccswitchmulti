@@ -372,3 +372,48 @@ git diff --check
 ```
 
 **Completion rule:** Do not claim completion until current source, tests, Windows build, and real Tauri UI evidence prove every spec item. Do not mark a queued build or a standalone Vite page as desktop acceptance.
+
+---
+
+### Task 10: Transaction and diagnostic closure after independent review
+
+**Files:**
+
+- Modify: `src-tauri/src/database/dao/providers.rs`
+- Modify: `src-tauri/src/codex_multirouter/mutation.rs`
+- Modify: `src-tauri/src/services/provider/mod.rs`
+- Modify: `src-tauri/src/codex_multirouter/provider_set.rs`
+- Modify: `src-tauri/src/proxy/providers/codex.rs`
+- Modify: `src/lib/api/protocol-compatibility.ts`
+- Modify: `src/components/providers/forms/CodexProviderSetPreviewDialog.tsx`
+- Modify as needed: Provider form diagnostics and matching tests.
+
+**RED tests:**
+
+- Wizard split→Single maps a current generated leaf to the logical source in the same batch transaction.
+- Replanning an existing split while a generated leaf is current maps activity to the façade even when the leaf remains present.
+- An injected batch failure rolls back Provider mutations and the current-provider transition together.
+- An injected delete/Universal failure cannot invoke the official live projection or change the current Provider before the database transaction commits.
+- A successful deletion that disables the active dependent Router inserts the missing official seed and selects it inside the same SQLite transaction.
+- A Blocked model carries the concrete failed probe stage, failure kind, and redacted HTTP status when branch evidence contains them.
+- A legacy mixed Provider without a current matching Verified profile retains the top-level protocol and exposes a migration-required diagnostic; normalized Providers and managed leaves expose no such state.
+
+**GREEN implementation:**
+
+- Compute current normalization from structural Provider Set ownership in both ordinary and wizard batch prepare paths; never infer membership from an ID suffix.
+- Extend `ProviderSetDatabaseTransaction` with an explicit transaction-owned official fallback. Insert the known official seed if missing and set `is_current` before the same commit; reject conflicting current transitions.
+- Convert deletion and Universal disable paths to prepare one database transaction first. Run local settings/live-file projection only after commit and return a stable warning when the derived projection needs retry.
+- Derive Blocked diagnostic details from the existing redacted branch failures and keep secrets/bodies out of the preview contract.
+- Surface legacy mixed-data migration state from persisted Provider structure and current profile evidence; do not turn the diagnostic into request-time protocol inference.
+
+**Focused verification:**
+
+```powershell
+cargo test --manifest-path src-tauri/Cargo.toml --lib database::dao::providers --no-default-features
+cargo test --manifest-path src-tauri/Cargo.toml --lib codex_multirouter::mutation --no-default-features
+cargo test --manifest-path src-tauri/Cargo.toml --lib services::provider --no-default-features
+cargo test --manifest-path src-tauri/Cargo.toml --lib proxy::providers::codex --no-default-features
+pnpm vitest run src/components/providers/forms/CodexProviderSetPreviewDialog.test.tsx
+```
+
+**Commit:** transaction/current-state and diagnostic closure only; stage task-owned hunks in the dirty `main` worktree.

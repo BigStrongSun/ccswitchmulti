@@ -32,6 +32,7 @@ import {
   ChevronRight,
   ArrowDown,
   ArrowUp,
+  AlertTriangle,
   Plus,
   Trash2,
 } from "lucide-react";
@@ -811,6 +812,17 @@ export function CodexFormFields({
   const [catalogRows, setCatalogRows] = useState<CodexCatalogRow[]>(() =>
     catalogModels.map((m) => createCatalogRow(m)),
   );
+  const hasLegacyMixedProtocolCatalog = useMemo(() => {
+    let hasResponses = false;
+    let hasChat = false;
+    for (const row of catalogRows) {
+      if (row.enabled === false) continue;
+      if (row.apiFormat === "openai_responses") hasResponses = true;
+      if (row.apiFormat === "openai_chat") hasChat = true;
+      if (hasResponses && hasChat) return true;
+    }
+    return false;
+  }, [catalogRows]);
   const [expandedReasoningRowId, setExpandedReasoningRowId] = useState<
     string | null
   >(null);
@@ -1620,6 +1632,25 @@ export function CodexFormFields({
           setIsProtocolProbeConfirmOpen(true);
         }}
       />
+
+      {hasLegacyMixedProtocolCatalog && (
+        <div
+          role="status"
+          className="flex gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-amber-900 dark:text-amber-100"
+        >
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+          <div className="space-y-1">
+            <div className="text-sm font-medium">
+              旧版混合协议配置，需重新验证并迁移
+            </div>
+            <p className="text-xs leading-relaxed opacity-90">
+              当前模型目录仍保存逐模型协议。普通模式保存时会重新执行双协议深度探测，并归一为一个单协议
+              Provider
+              或一个门面加两个内部同协议叶子；完成迁移前仍以顶层协议为准。
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* xAI OAuth 认证（Grok 订阅托管账号） */}
       {isXaiOauthPreset && (

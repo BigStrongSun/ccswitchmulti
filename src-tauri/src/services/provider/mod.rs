@@ -4459,6 +4459,104 @@ requires_openai_auth = true
         );
     }
 
+    #[test]
+    #[serial]
+    fn failed_universal_disable_transaction_does_not_switch_to_official_early() {
+        with_test_home(|state, _home| {
+            let db = state.db.clone();
+            let mut universal = UniversalProvider::new(
+                "shared".to_string(),
+                "Shared".to_string(),
+                "custom".to_string(),
+                "https://example.com".to_string(),
+                "secret".to_string(),
+            );
+            universal.apps.codex = true;
+            universal.models = UniversalProviderModels {
+                codex: Some(CodexModelConfig {
+                    model: Some("shared-model".to_string()),
+                    reasoning_effort: Some("high".to_string()),
+                }),
+                ..Default::default()
+            };
+            db.save_universal_provider(&universal)
+                .expect("save Universal definition");
+            let mut generated = universal.to_codex_provider().expect("generate Codex child");
+            generated.settings_config["modelCatalog"] =
+                json!({"models": [{"model": "shared-model"}]});
+            db.save_provider("codex", &generated)
+                .expect("save generated Codex child");
+            let router = Provider::with_id(
+                "router".to_string(),
+                "Router".to_string(),
+                json!({
+                    "codexRouting": {
+                        "schemaVersion": 2,
+                        "enabled": true,
+                        "routes": [{
+                            "id": "shared-route",
+                            "enabled": true,
+                            "targetProviderId": "universal-codex-shared",
+                            "modelSelection": {"mode": "all"},
+                            "authPolicy": {"source": "provider_config"}
+                        }]
+                    }
+                }),
+                None,
+            );
+            db.save_provider("codex", &router)
+                .expect("save dependent Router");
+            db.set_current_provider("codex", "router")
+                .expect("activate dependent Router");
+            crate::settings::set_current_provider(&AppType::Codex, Some("router"))
+                .expect("set local current Router");
+            {
+                let conn = db.conn.lock().expect("lock database");
+                conn.execute_batch(
+                    "CREATE TRIGGER fail_universal_codex_child_delete
+                     BEFORE DELETE ON providers
+                     WHEN OLD.id = 'universal-codex-shared'
+                     BEGIN
+                       SELECT RAISE(ABORT, 'injected Universal child deletion failure');
+                     END;",
+                )
+                .expect("install failure trigger");
+            }
+            let mut disabled = universal;
+            disabled.apps.codex = false;
+
+            let error = ProviderService::save_and_sync_universal_to_apps_with_codex_profiles(
+                state,
+                disabled,
+                None,
+                &[],
+            )
+            .expect_err("injected Universal transaction failure must abort sync");
+
+            assert!(error
+                .to_string()
+                .contains("injected Universal child deletion failure"));
+            assert_eq!(
+                db.get_current_provider("codex").expect("read DB current"),
+                Some("router".to_string()),
+                "Universal must not pre-switch database current state"
+            );
+            assert_eq!(
+                crate::settings::get_current_provider(&AppType::Codex),
+                Some("router".to_string()),
+                "Universal must not pre-switch device settings"
+            );
+            assert!(db
+                .get_provider_by_id(crate::database::CODEX_OFFICIAL_PROVIDER_ID, "codex")
+                .expect("read official seed")
+                .is_none());
+            assert!(db
+                .get_provider_by_id("universal-codex-shared", "codex")
+                .expect("read generated child")
+                .is_some());
+        });
+    }
+
     fn generated_codex_provider_set_leaf(id: &str, parent_id: &str) -> Provider {
         Provider::with_id(
             id.to_string(),
@@ -5837,10 +5935,6 @@ impl ProviderService {
             id,
             current_provider_id.as_deref(),
             || {
-                state.db.ensure_official_seed_by_id(
-                    crate::database::CODEX_OFFICIAL_PROVIDER_ID,
-                    AppType::Codex,
-                )?;
                 Self::switch(
                     state,
                     AppType::Codex,
@@ -5868,6 +5962,7 @@ impl ProviderService {
             disabled_plan_ids: Vec::new(),
             removed_candidates: Vec::new(),
             projections: Vec::new(),
+            warnings: Vec::new(),
         }
     }
 
@@ -8180,22 +8275,6 @@ impl ProviderService {
             None
         };
 
-        if prepared_codex_deletion
-            .as_ref()
-            .is_some_and(|prepared| prepared.must_restore_official())
-        {
-            state.db.ensure_official_seed_by_id(
-                crate::database::CODEX_OFFICIAL_PROVIDER_ID,
-                AppType::Codex,
-            )?;
-            Self::switch(
-                state,
-                AppType::Codex,
-                crate::database::CODEX_OFFICIAL_PROVIDER_ID,
-            )?;
-            crate::codex_config::force_codex_builtin_openai_live_provider()?;
-        }
-
         let (mut transaction, projection_router_ids) =
             if let Some(prepared) = prepared_codex_set_commit {
                 (prepared.transaction, prepared.projection_router_ids)
@@ -8209,6 +8288,7 @@ impl ProviderService {
                         setting_keys_to_delete: Vec::new(),
                         universal_provider: None,
                         current_provider_after: None,
+                        official_seed_current_after: None,
                     },
                     Vec::new(),
                 )
@@ -8233,6 +8313,12 @@ impl ProviderService {
             },
         ]);
         if let Some(prepared) = prepared_codex_deletion.as_ref() {
+            if prepared.must_restore_official() {
+                transaction.official_seed_current_after = Some((
+                    AppType::Codex.as_str().to_string(),
+                    crate::database::CODEX_OFFICIAL_PROVIDER_ID.to_string(),
+                ));
+            }
             let mut deletions = Vec::new();
             prepared.append_provider_mutations(&mut deletions);
             transaction.mutations.extend(deletions.into_iter().map(
@@ -8256,6 +8342,23 @@ impl ProviderService {
         state
             .db
             .apply_provider_set_database_transaction(transaction)?;
+
+        if prepared_codex_deletion
+            .as_ref()
+            .is_some_and(|prepared| prepared.must_restore_official())
+        {
+            if let Err(error) = Self::switch(
+                state,
+                AppType::Codex,
+                crate::database::CODEX_OFFICIAL_PROVIDER_ID,
+            )
+            .and_then(|_| crate::codex_config::force_codex_builtin_openai_live_provider())
+            {
+                log::warn!(
+                    "Universal Provider committed with Codex official projection pending retry: {error}"
+                );
+            }
+        }
 
         if !projection_router_ids.is_empty() {
             match crate::codex_multirouter::mutation::finalize_codex_provider_set_projections_with_publisher(

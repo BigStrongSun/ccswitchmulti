@@ -80,6 +80,17 @@ export function CodexProviderSetPreviewDialog(
                 <div className="mt-1 text-sm text-amber-700 dark:text-amber-300">
                   {blockedReasonLabel(model.reason)}
                 </div>
+                {model.stage && (
+                  <div className="mt-2 space-y-0.5 text-xs text-muted-foreground">
+                    <div>失败阶段：{blockedStageLabel(model.stage)}</div>
+                    {model.failureKind && (
+                      <div>
+                        失败类型：{blockedFailureLabel(model.failureKind)}
+                        {model.statusCode ? `（${model.statusCode}）` : ""}
+                      </div>
+                    )}
+                  </div>
+                )}
               </article>
             ))}
           </div>
@@ -137,5 +148,41 @@ function blockedReasonLabel(reason: string) {
       return "模型目录中存在重复模型标识";
     default:
       return "当前探测结果不能用于自动保存";
+  }
+}
+
+function blockedStageLabel(stage: string) {
+  switch (stage) {
+    case "baseline":
+      return "基础请求";
+    case "streaming":
+      return "流式响应";
+    case "reasoning":
+      return "推理内容";
+    case "forced_tool":
+      return "强制工具调用";
+    case "continuation":
+      return "工具续轮";
+    default:
+      return stage;
+  }
+}
+
+function blockedFailureLabel(kind: string) {
+  switch (kind) {
+    case "http_status":
+      return "HTTP 状态";
+    case "timeout":
+      return "请求超时";
+    case "network":
+      return "网络错误";
+    case "response_too_large":
+      return "响应过大";
+    case "invalid_response":
+      return "响应格式无效";
+    case "invalid_request":
+      return "请求无效";
+    default:
+      return kind;
   }
 }

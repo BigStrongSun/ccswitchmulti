@@ -604,6 +604,24 @@ function renderAutoSplitHarness() {
 }
 
 describe("CodexFormFields local model routing", () => {
+  it("surfaces a persisted legacy mixed-protocol catalog as migration-required", async () => {
+    renderCatalogHarness(
+      [
+        { model: "qwen-chat", apiFormat: "openai_chat" },
+        { model: "qwen-responses", apiFormat: "openai_responses" },
+      ],
+      { openAdvancedOptions: false },
+    );
+    await waitForReasoningResolution();
+
+    expect(
+      screen.getByText("旧版混合协议配置，需重新验证并迁移"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/保存时会重新执行双协议深度探测/),
+    ).toBeInTheDocument();
+  });
+
   it("keeps the model catalog in normal settings before model reasoning", async () => {
     renderCatalogHarness([{ model: "qwen3.8" }], {
       openAdvancedOptions: false,
