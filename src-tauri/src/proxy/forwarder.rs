@@ -2822,6 +2822,34 @@ impl RequestForwarder {
                 }
             }
         }
+        // 第三方 Responses 上游对 Codex 专有工具线格式的兼容改写（如 Kimi coding
+        // 端点会拒绝 `tool_search` 工具类型与 `parallel_tool_calls: false`）。
+        // 只作用于未经协议转换的 Responses 透传：转换路径由各自的转换层处理。
+        if matches!(app_type, AppType::Codex)
+            && endpoint.contains("responses")
+            && !needs_transform
+            && !codex_responses_to_chat
+            && !codex_responses_to_messages
+            && !codex_responses_to_anthropic
+        {
+            let request_model = filtered_body
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let tool_wire_capabilities =
+                super::providers::codex_upstream_tool_wire_capabilities(provider, request_model);
+            let normalized =
+                super::providers::normalize_codex_responses_body_for_upstream_tool_capabilities(
+                    &mut filtered_body,
+                    tool_wire_capabilities,
+                );
+            if normalized > 0 {
+                log::debug!(
+                    "[CodexRouter] Normalized {normalized} Codex-native tool wire field(s) for third-party Responses upstream (provider={})",
+                    provider.id
+                );
+            }
+        }
         let hosted_tool_loop_config =
             codex_chat_tool_context
                 .as_ref()
@@ -9327,6 +9355,178 @@ mod tests {
         assert_eq!(status.success_requests, 0);
         assert_eq!(status.failed_requests, 1);
         assert_eq!(status.success_rate, 0.0);
+    }
+
+    #[tokio::test]
+    async fn codex_responses_passthrough_normalizes_declared_unsupported_tool_wire_fields() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+            haystack
+                .windows(needle.len())
+                .position(|window| window == needle)
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind tool wire mock upstream");
+        let addr = listener.local_addr().expect("tool wire mock upstream addr");
+        let captured: Arc<RwLock<Option<Vec<u8>>>> = Arc::new(RwLock::new(None));
+        let captured_writer = captured.clone();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept mock upstream");
+            let mut buffer: Vec<u8> = Vec::new();
+            let mut chunk = [0u8; 8192];
+            loop {
+                let read = stream.read(&mut chunk).await.expect("read mock upstream");
+                assert!(read > 0, "mock upstream stream closed before headers");
+                buffer.extend_from_slice(&chunk[..read]);
+                if let Some(header_end) = find_subsequence(&buffer, b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&buffer[..header_end]).to_string();
+                    let content_length = headers
+                        .split("\r\n")
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.trim()
+                                .eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())?
+                        })
+                        .unwrap_or(0);
+                    let body_start = header_end + 4;
+                    if buffer.len() >= body_start + content_length {
+                        let body = buffer[body_start..body_start + content_length].to_vec();
+                        *captured_writer.write().await = Some(body);
+                        break;
+                    }
+                }
+            }
+            let response_body = r#"{"id":"resp_mock","object":"response","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write mock response");
+            stream.flush().await.expect("flush mock response");
+        });
+
+        let db = Arc::new(Database::memory().expect("memory db"));
+        let mut target = test_provider_with_type(None);
+        target.id = "kimi-target".to_string();
+        target.name = "Kimi For Coding".to_string();
+        target.settings_config = json!({
+            "base_url": format!("http://{addr}/v1"),
+            "api_key": "sk-tool-wire-test",
+            "apiFormat": "openai_responses"
+        });
+        db.save_provider("codex", &target)
+            .expect("save kimi target provider");
+        let forwarder = RequestForwarder {
+            router: Arc::new(ProviderRouter::new(db.clone())),
+            status: Arc::new(RwLock::new(ProxyStatus::default())),
+            current_providers: Arc::new(RwLock::new(HashMap::new())),
+            gemini_shadow: Arc::new(GeminiShadowStore::new()),
+            codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
+            failover_manager: Arc::new(FailoverSwitchManager::new(db)),
+            app_handle: None,
+            current_provider_id_at_start: String::new(),
+            session_id: String::new(),
+            session_client_provided: false,
+            preserve_codex_client_originator: false,
+            rectifier_config: RectifierConfig::default(),
+            optimizer_config: OptimizerConfig::default(),
+            copilot_optimizer_config: CopilotOptimizerConfig::default(),
+            codex_responses_lite_fallbacks: Arc::new(RwLock::new(HashMap::new())),
+            non_streaming_timeout: Duration::from_secs(5),
+            streaming_first_byte_timeout: Duration::from_secs(5),
+            max_attempts: 1,
+        };
+        let mut resolved = test_provider_with_type(None);
+        resolved.id = "codex-multirouter::route::kimi-test".to_string();
+        resolved.name = "Kimi test route".to_string();
+        resolved.settings_config = json!({
+            "base_url": format!("http://{addr}/v1"),
+            "api_key": "sk-tool-wire-test",
+            "apiFormat": "openai_responses",
+            "codexResolvedRouteId": "router-kimi",
+            "codexResolvedRouteMatched": true,
+            "codexResolvedCapabilities": {},
+            "codexResolvedTargetProviderId": "kimi-target",
+            "codexRouterParentProviderId": "codex-multirouter",
+            "codexRouterParentProviderName": "Codex MultiRouter"
+        });
+
+        let result = forwarder
+            .forward_with_retry(
+                &AppType::Codex,
+                http::Method::POST,
+                "/responses",
+                json!({
+                    "model": "k3-256k",
+                    "stream": false,
+                    "store": false,
+                    "parallel_tool_calls": false,
+                    "tool_choice": "auto",
+                    "tools": [
+                        {"type": "tool_search"},
+                        {"type": "function", "name": "exec_command", "parameters": {"type": "object"}}
+                    ],
+                    "input": [
+                        {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": "你好"}]
+                        },
+                        {
+                            "type": "tool_search_call",
+                            "call_id": "call_1",
+                            "arguments": {"query": "browser"}
+                        }
+                    ]
+                }),
+                HeaderMap::new(),
+                Extensions::new(),
+                vec![resolved],
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "normalized request should reach the mock upstream: {:?}",
+            result.err().map(|error| error.error)
+        );
+        server.await.expect("mock upstream task");
+
+        let captured_body = captured
+            .read()
+            .await
+            .clone()
+            .expect("mock upstream must capture a request body");
+        let upstream_body: Value = serde_json::from_slice(&captured_body)
+            .expect("captured upstream body must stay valid JSON");
+        assert!(
+            upstream_body.get("parallel_tool_calls").is_none(),
+            "upstream that declares no parallel support must not receive the field"
+        );
+        let tools = upstream_body["tools"]
+            .as_array()
+            .expect("tools stay an array");
+        assert_eq!(tools[0]["type"], "function");
+        assert_eq!(tools[0]["name"], "tool_search");
+        assert!(tools[0]["parameters"].is_object());
+        assert_eq!(tools[1]["name"], "exec_command");
+        let input = upstream_body["input"]
+            .as_array()
+            .expect("input stays an array");
+        assert_eq!(input[1]["type"], "function_call");
+        assert_eq!(input[1]["name"], "tool_search");
+        assert_eq!(
+            input[1]["arguments"],
+            json!("{\"query\":\"browser\"}"),
+            "replayed tool_search_call must become a stringified function_call arguments"
+        );
     }
 
     #[test]

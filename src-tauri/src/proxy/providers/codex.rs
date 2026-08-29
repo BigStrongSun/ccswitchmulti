@@ -27,7 +27,7 @@ use crate::{
     },
 };
 use regex::Regex;
-use serde_json::{Map, Value as JsonValue};
+use serde_json::{json, Map, Value as JsonValue};
 use std::{collections::HashMap, sync::LazyLock};
 use toml::Value as TomlValue;
 
@@ -859,6 +859,20 @@ fn materialize_codex_v2_provider(
             if let Ok(cache) = serde_json::from_value(cache) {
                 meta.codex_cache = Some(normalize_codex_cache_config(cache));
             }
+        }
+        if let Some(supports_search_tool) = model.capability_summary.supports_search_tool {
+            capabilities.insert(
+                "supportsSearchTool".to_string(),
+                JsonValue::Bool(supports_search_tool),
+            );
+        }
+        if let Some(supports_parallel_tool_calls) =
+            model.capability_summary.supports_parallel_tool_calls
+        {
+            capabilities.insert(
+                "supportsParallelToolCalls".to_string(),
+                JsonValue::Bool(supports_parallel_tool_calls),
+            );
         }
         if !capabilities.is_empty() {
             settings.insert(
@@ -2478,6 +2492,210 @@ pub fn codex_provider_upstream_model(provider: &Provider) -> Option<String> {
                         .or_else(|| extract_codex_model_from_toml(config))
                 })
         })
+}
+
+/// 第三方上游对 Codex 专有工具线格式的兼容能力声明。
+///
+/// `tool_search` 工具类型与 `parallel_tool_calls: false` 是 Codex 客户端专有
+/// 语义：官方 ChatGPT 上游完整支持，严格的第三方 /responses 网关会直接拒绝
+/// （实测 Kimi coding 端点两者都返回 400）。声明来源优先级与目录投影一致：
+/// route resolver 按请求模型解析出的 `codexResolvedCapabilities` >
+/// 目标 Provider `modelCatalog` 里的显式模型条目 >
+/// 内置 `codex_native_responses_template.json` 对第三方 Responses 上游的类别默认
+/// （均为不支持）。协议转换路径（Chat/Messages/Anthropic）由转换层自行处理，
+/// 不套用第三方默认。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CodexUpstreamToolWireCapabilities {
+    pub supports_search_tool: bool,
+    pub supports_parallel_tool_calls: bool,
+}
+
+fn codex_resolved_capability_bool(provider: &Provider, keys: [&str; 2]) -> Option<bool> {
+    let capabilities = provider.settings_config.get("codexResolvedCapabilities")?;
+    keys.iter()
+        .find_map(|key| capabilities.get(*key).and_then(JsonValue::as_bool))
+}
+
+fn codex_model_catalog_entry_for_request<'a>(
+    provider: &'a Provider,
+    request_model: &str,
+) -> Option<&'a JsonValue> {
+    let request = request_model.trim().to_ascii_lowercase();
+    if request.is_empty() {
+        return None;
+    }
+    provider
+        .settings_config
+        .get("modelCatalog")?
+        .get("models")?
+        .as_array()?
+        .iter()
+        .find(|model| {
+            ["model", "id", "slug"].iter().any(|key| {
+                model
+                    .get(*key)
+                    .and_then(JsonValue::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_ascii_lowercase)
+                    == Some(request.clone())
+            })
+        })
+}
+
+fn codex_model_catalog_capability_bool(
+    provider: &Provider,
+    request_model: &str,
+    keys: [&str; 2],
+) -> Option<bool> {
+    let model = codex_model_catalog_entry_for_request(provider, request_model)?;
+    keys.iter()
+        .find_map(|key| model.get(*key).and_then(JsonValue::as_bool))
+}
+
+/// 未显式声明时的类别默认：官方上游与协议转换上游视为完全支持，
+/// 第三方 native-Responses 上游按内置模板默认视为不支持。
+fn codex_upstream_tool_wire_default_support(provider: &Provider) -> bool {
+    if is_codex_official_provider(provider) {
+        return true;
+    }
+    !matches!(
+        explain_codex_responses_upstream_protocol(provider).protocol,
+        CodexResponsesUpstreamProtocol::Responses
+    )
+}
+
+pub fn codex_upstream_tool_wire_capabilities(
+    provider: &Provider,
+    request_model: &str,
+) -> CodexUpstreamToolWireCapabilities {
+    let supports_search_tool =
+        codex_resolved_capability_bool(provider, ["supportsSearchTool", "supports_search_tool"])
+            .or_else(|| {
+                codex_model_catalog_capability_bool(
+                    provider,
+                    request_model,
+                    ["supportsSearchTool", "supports_search_tool"],
+                )
+            })
+            .unwrap_or_else(|| codex_upstream_tool_wire_default_support(provider));
+    let supports_parallel_tool_calls = codex_resolved_capability_bool(
+        provider,
+        ["supportsParallelToolCalls", "supports_parallel_tool_calls"],
+    )
+    .or_else(|| {
+        codex_model_catalog_capability_bool(
+            provider,
+            request_model,
+            ["supportsParallelToolCalls", "supports_parallel_tool_calls"],
+        )
+    })
+    .unwrap_or_else(|| codex_upstream_tool_wire_default_support(provider));
+    CodexUpstreamToolWireCapabilities {
+        supports_search_tool,
+        supports_parallel_tool_calls,
+    }
+}
+
+/// Codex `tool_search` 工具的等价 function 形态。与 transform_codex_chat 的
+/// `TOOL_SEARCH_PROXY_NAME` 语义一致，但保持 Responses function 的扁平结构。
+fn codex_tool_search_equivalent_function_tool() -> JsonValue {
+    json!({
+        "type": "function",
+        "name": "tool_search",
+        "description": "Search and load Codex tools, plugins, connectors, and MCP namespaces for the current task.",
+        "strict": false,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search query for tools or connectors to load."
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of tool groups to return."
+                }
+            },
+            "required": ["query"]
+        }
+    })
+}
+
+/// 把上游声明不支持的 Codex 专有工具线格式改写成可消费的等价形态。
+///
+/// 改写只做语义保持的转换：`tool_search` 工具换成等价 function，历史
+/// `tool_search_call`/`tool_search_output` 项同步映射成 `function_call`/
+/// `function_call_output`（与 Chat 转换层的既有先例一致）；`parallel_tool_calls`
+/// 字段在模型能力声明不支持并行时移除——Codex 发送 `false` 只是对模型侧限制的
+/// 重复强调，上游默认行为即等价，而严格网关会因该字段整体拒绝请求。
+/// 返回改写字段数，0 表示请求未变。
+pub fn normalize_codex_responses_body_for_upstream_tool_capabilities(
+    body: &mut JsonValue,
+    capabilities: CodexUpstreamToolWireCapabilities,
+) -> usize {
+    let mut changed = 0;
+    if !capabilities.supports_search_tool {
+        if let Some(tools) = body.get_mut("tools").and_then(JsonValue::as_array_mut) {
+            for tool in tools.iter_mut() {
+                if tool.get("type").and_then(JsonValue::as_str) == Some("tool_search") {
+                    *tool = codex_tool_search_equivalent_function_tool();
+                    changed += 1;
+                }
+            }
+        }
+        if let Some(input) = body.get_mut("input").and_then(JsonValue::as_array_mut) {
+            for item in input.iter_mut() {
+                match item.get("type").and_then(JsonValue::as_str) {
+                    Some("tool_search_call") => {
+                        let call_id = item
+                            .get("call_id")
+                            .or_else(|| item.get("id"))
+                            .and_then(JsonValue::as_str)
+                            .unwrap_or("")
+                            .to_string();
+                        let arguments = item
+                            .get("arguments")
+                            .map(crate::proxy::json_canonical::canonical_json_string)
+                            .unwrap_or_else(|| "{}".to_string());
+                        let mut replacement = json!({
+                            "type": "function_call",
+                            "call_id": call_id,
+                            "name": "tool_search",
+                            "arguments": arguments,
+                        });
+                        if let Some(id) = item.get("id") {
+                            replacement["id"] = id.clone();
+                        }
+                        *item = replacement;
+                        changed += 1;
+                    }
+                    Some("tool_search_output") => {
+                        let mut replacement = json!({ "type": "function_call_output" });
+                        if let Some(call_id) = item.get("call_id") {
+                            replacement["call_id"] = call_id.clone();
+                        }
+                        replacement["output"] =
+                            item.get("output").cloned().unwrap_or(JsonValue::Null);
+                        if let Some(id) = item.get("id") {
+                            replacement["id"] = id.clone();
+                        }
+                        *item = replacement;
+                        changed += 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    if !capabilities.supports_parallel_tool_calls {
+        if let Some(object) = body.as_object_mut() {
+            if object.remove("parallel_tool_calls").is_some() {
+                changed += 1;
+            }
+        }
+    }
+    changed
 }
 
 /// 按 catalog 可见模型名查找真实上游模型；没有显式别名时回退为可见名本身。
@@ -7875,5 +8093,177 @@ wire_api = "responses"
             ReasoningProjection::None,
             "a route marker without a parent provider ID must fail closed"
         );
+    }
+
+    #[test]
+    fn upstream_tool_wire_capabilities_default_to_template_limits_for_third_party_responses() {
+        let provider = create_provider(json!({
+            "apiFormat": "openai_responses"
+        }));
+        let caps = codex_upstream_tool_wire_capabilities(&provider, "k3-256k");
+        assert!(
+            !caps.supports_search_tool,
+            "bundled native-Responses template declares supports_search_tool=false for third-party upstreams"
+        );
+        assert!(!caps.supports_parallel_tool_calls);
+    }
+
+    #[test]
+    fn upstream_tool_wire_capabilities_keep_full_support_for_official_upstream() {
+        let mut provider = create_provider(json!({
+            "apiFormat": "openai_responses"
+        }));
+        provider.category = Some("official".to_string());
+        provider.id = crate::database::CODEX_OFFICIAL_PROVIDER_ID.to_string();
+        let caps = codex_upstream_tool_wire_capabilities(&provider, "gpt-5.6-luna");
+        assert!(caps.supports_search_tool);
+        assert!(caps.supports_parallel_tool_calls);
+    }
+
+    #[test]
+    fn upstream_tool_wire_capabilities_respect_explicit_resolved_capabilities() {
+        let camel = create_provider(json!({
+            "apiFormat": "openai_responses",
+            "codexResolvedCapabilities": {
+                "supportsSearchTool": true,
+                "supportsParallelToolCalls": true
+            }
+        }));
+        let caps = codex_upstream_tool_wire_capabilities(&camel, "k3-256k");
+        assert!(caps.supports_search_tool);
+        assert!(caps.supports_parallel_tool_calls);
+
+        let snake = create_provider(json!({
+            "apiFormat": "openai_responses",
+            "codexResolvedCapabilities": {
+                "supports_search_tool": false
+            }
+        }));
+        let caps = codex_upstream_tool_wire_capabilities(&snake, "k3-256k");
+        assert!(!caps.supports_search_tool);
+        assert!(!caps.supports_parallel_tool_calls);
+    }
+
+    #[test]
+    fn upstream_tool_wire_capabilities_respect_model_catalog_override_for_plain_provider() {
+        let provider = create_provider(json!({
+            "apiFormat": "openai_responses",
+            "modelCatalog": {
+                "models": [
+                    {
+                        "model": "k3-256k",
+                        "supportsParallelToolCalls": true
+                    }
+                ]
+            }
+        }));
+        let caps = codex_upstream_tool_wire_capabilities(&provider, "k3-256k");
+        assert!(
+            !caps.supports_search_tool,
+            "search-tool default stays at the template limit unless the model declares support"
+        );
+        assert!(caps.supports_parallel_tool_calls);
+
+        let other_model = codex_upstream_tool_wire_capabilities(&provider, "unrelated-model");
+        assert!(!other_model.supports_search_tool);
+        assert!(!other_model.supports_parallel_tool_calls);
+    }
+
+    #[test]
+    fn upstream_tool_wire_capabilities_default_to_full_support_for_chat_transform_upstreams() {
+        let provider = create_provider(json!({
+            "apiFormat": "openai_chat"
+        }));
+        let caps = codex_upstream_tool_wire_capabilities(&provider, "k3-256k");
+        assert!(caps.supports_search_tool);
+        assert!(caps.supports_parallel_tool_calls);
+    }
+
+    #[test]
+    fn normalize_codex_responses_body_converts_tool_search_and_drops_parallel_for_declared_limits()
+    {
+        let mut body = json!({
+            "model": "k3-256k",
+            "parallel_tool_calls": false,
+            "tool_choice": "auto",
+            "tools": [
+                {"type": "tool_search"},
+                {"type": "function", "name": "exec_command", "parameters": {"type": "object"}},
+                {"type": "namespace", "name": "agents", "tools": []}
+            ],
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "你好"}]
+                },
+                {
+                    "type": "tool_search_call",
+                    "call_id": "call_1",
+                    "arguments": {"query": "browser", "limit": 3}
+                },
+                {
+                    "type": "tool_search_output",
+                    "call_id": "call_1",
+                    "output": "loaded agents namespace"
+                }
+            ]
+        });
+        let changed = normalize_codex_responses_body_for_upstream_tool_capabilities(
+            &mut body,
+            CodexUpstreamToolWireCapabilities {
+                supports_search_tool: false,
+                supports_parallel_tool_calls: false,
+            },
+        );
+        assert_eq!(changed, 4);
+
+        let tools = body["tools"].as_array().expect("tools stay an array");
+        assert_eq!(tools[0]["type"], "function");
+        assert_eq!(tools[0]["name"], "tool_search");
+        assert!(
+            tools[0]["parameters"].is_object(),
+            "equivalent function tool keeps a callable parameter schema"
+        );
+        assert_eq!(tools[1]["name"], "exec_command");
+        assert_eq!(tools[2]["type"], "namespace");
+
+        let input = body["input"].as_array().expect("input stays an array");
+        assert_eq!(input[1]["type"], "function_call");
+        assert_eq!(input[1]["name"], "tool_search");
+        assert_eq!(input[1]["call_id"], "call_1");
+        assert_eq!(
+            input[1]["arguments"],
+            json!("{\"limit\":3,\"query\":\"browser\"}"),
+            "function_call.arguments must be the stringified call arguments"
+        );
+        assert_eq!(input[2]["type"], "function_call_output");
+        assert_eq!(input[2]["call_id"], "call_1");
+        assert_eq!(input[2]["output"], "loaded agents namespace");
+
+        assert!(body.get("parallel_tool_calls").is_none());
+        assert_eq!(body["tool_choice"], "auto");
+    }
+
+    #[test]
+    fn normalize_codex_responses_body_is_noop_when_capabilities_declare_full_support() {
+        let mut body = json!({
+            "model": "gpt-5.6-luna",
+            "parallel_tool_calls": false,
+            "tools": [{"type": "tool_search"}],
+            "input": [
+                {"type": "tool_search_call", "call_id": "call_1", "arguments": {"query": "x"}}
+            ]
+        });
+        let original = body.clone();
+        let changed = normalize_codex_responses_body_for_upstream_tool_capabilities(
+            &mut body,
+            CodexUpstreamToolWireCapabilities {
+                supports_search_tool: true,
+                supports_parallel_tool_calls: true,
+            },
+        );
+        assert_eq!(changed, 0);
+        assert_eq!(body, original);
     }
 }
