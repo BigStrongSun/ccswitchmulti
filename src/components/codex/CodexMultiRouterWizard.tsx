@@ -44,27 +44,30 @@ import {
 } from "@/components/ui/dialog";
 import { providersApi } from "@/lib/api/providers";
 import type { CodexMultiRouterMigrationPreview } from "@/lib/api/providers";
-import { codexSubagentV2Api } from "@/lib/api/codexSubagentV2";
 import {
   fetchCodexOauthCachedModels,
   fetchCodexOauthModels,
   fetchModelsForConfig,
-  probeCodexChatForConfig,
-  probeCodexResponsesForConfig,
 } from "@/lib/api/model-fetch";
+import {
+  commitCodexProviderSetBatch,
+  prepareCodexProviderSetBatch,
+  preflightCodexProviderProtocolCompatibility,
+  type CodexProviderProtocolPreflightOutcome,
+  type CodexProviderSetBatchPreview,
+  type CodexProviderSetBatchSource,
+  type CodexProtocolProbeProgressEvent,
+} from "@/lib/api/protocol-compatibility";
 import {
   CODEX_MULTI_ROUTER_DEFAULT_NAME,
   CODEX_MULTI_ROUTER_DEFAULT_ID,
   CODEX_MULTI_ROUTER_WIZARD_DISMISSED_KEY,
   DEFAULT_CODEX_OFFICIAL_AUTH,
-  applyWizardConnectivityApiFormatOverrides,
   buildCodexMultiRouterWizardPlan,
   initialWizardCatalogModelOrder,
   initialWizardSelectedSourceIds,
   buildWizardModelCatalog,
   canContinueAfterConnectivity,
-  classifyWizardDualProtocolConnectivityResult,
-  classifyWizardConnectivityResult,
   collectWizardModelNameCollisions,
   collectWizardRouteAliasSelectionIssues,
   defaultWizardModelSources,
@@ -81,7 +84,6 @@ import {
   readWizardModelCatalog,
   readWizardProviderBaseUrl,
   resolveWizardModelNameCollisions,
-  skippedWizardConnectivityResult,
   wizardRouteDisplayLabel,
   type WizardConnectivityResult,
   type WizardModelFetchConfig,
@@ -93,6 +95,8 @@ import {
 import type { WorkspaceTab } from "@/components/codex/CodexRouterWorkspacePage";
 import { codexCatalogOnlyPlanModelFetchMessage } from "@/utils/codexPlanModelFetch";
 import { useCodexOauth } from "@/components/providers/forms/hooks/useCodexOauth";
+import { CodexProtocolProbeProgressDialog } from "@/components/providers/forms/CodexProtocolProbeProgressDialog";
+import { CodexProviderSetPreviewDialog } from "@/components/providers/forms/CodexProviderSetPreviewDialog";
 
 interface CodexMultiRouterWizardProps {
   open: boolean;
@@ -190,6 +194,7 @@ type WizardFlowStatus =
   | "collisionReviewRequired"
   | "routePreview"
   | "savingPlan"
+  | "saveConfirmation"
   | "saveFailed"
   | "published"
   | "enablePrompt"
@@ -234,6 +239,7 @@ type WizardFlowEvent =
       summary: WizardFlowState["connectivitySummary"];
     }
   | { type: "SAVE_START" }
+  | { type: "SAVE_CONFIRMATION" }
   | { type: "SAVE_SUCCESS" }
   | { type: "SAVE_ERROR"; error: string }
   | { type: "ENABLE_START" }
@@ -317,6 +323,8 @@ function wizardFlowReducer(
       };
     case "SAVE_START":
       return { ...state, status: "savingPlan", lastError: undefined };
+    case "SAVE_CONFIRMATION":
+      return { ...state, status: "saveConfirmation", stepKey: "activate" };
     case "SAVE_SUCCESS":
       return { ...state, status: "published", stepKey: "activate" };
     case "SAVE_ERROR":
@@ -635,6 +643,105 @@ function reconcileCatalogModelOrderAfterFetch(
   return [...retained, ...added];
 }
 
+interface WizardSourceProbeState {
+  outcome: CodexProviderProtocolPreflightOutcome;
+}
+
+interface PendingWizardBatchCommit {
+  sources: CodexProviderSetBatchSource[];
+  router: Provider;
+  preview: CodexProviderSetBatchPreview;
+}
+
+function skipsWizardDeepProtocolProbe(provider: Provider): boolean {
+  const providerType = provider.meta?.providerType?.trim().toLowerCase();
+  return (
+    provider.meta?.codexProtocolMode === "manual" ||
+    isWizardCodexOAuthSource(provider) ||
+    providerType === "xai_oauth" ||
+    providerType === "github_copilot"
+  );
+}
+
+function skippedWizardDeepProbeResult(
+  provider: Provider,
+  detail: string,
+): WizardConnectivityResult {
+  const hasModels = readWizardModelCatalog(provider).some(
+    (model) => model.enabled !== false,
+  );
+  return {
+    providerId: provider.id,
+    providerName: provider.name,
+    model: "*",
+    status: hasModels ? "skipped" : "fail",
+    canContinue: hasModels,
+    detail: hasModels
+      ? detail
+      : `${detail}；当前模型目录为空，不能生成可用路由。`,
+  };
+}
+
+function deepProbeConnectivityResults(
+  provider: Provider,
+  outcome: CodexProviderProtocolPreflightOutcome,
+): WizardConnectivityResult[] {
+  if (outcome.records.length === 0) {
+    return [
+      skippedWizardDeepProbeResult(
+        provider,
+        "后端没有生成需要验证的普通 Codex 模型目标。",
+      ),
+    ];
+  }
+  return outcome.records.map((record) => {
+    const verified = record.result.readiness === "verified";
+    const selected = record.result.selected_transport;
+    return {
+      providerId: provider.id,
+      providerName: provider.name,
+      model: record.target.public_model,
+      status: verified ? "pass" : "fail",
+      canContinue: verified,
+      recommendedApiFormat:
+        selected === "open_ai_responses"
+          ? "openai_responses"
+          : selected === "open_ai_chat"
+            ? "openai_chat"
+            : undefined,
+      detail: verified
+        ? `完整 Codex 事务已验证，选择 ${
+            selected === "open_ai_chat" ? "Chat Completions" : "Responses"
+          }。`
+        : `深度探测结果为 ${record.result.readiness}；基础响应、流式 SSE、工具调用和工具续轮没有全部通过。`,
+    };
+  });
+}
+
+function receiptIdsForSource(
+  source: Provider,
+  probe: WizardSourceProbeState | undefined,
+): string[] {
+  if (!probe) return [];
+  const allowedModels = new Set(
+    readWizardModelCatalog(source)
+      .filter((model) => model.enabled !== false)
+      .flatMap((model) => [
+        model.model.trim(),
+        (model.upstreamModel ?? model.upstream_model ?? model.model).trim(),
+      ])
+      .filter(Boolean),
+  );
+  return probe.outcome.records.flatMap((record, index) =>
+    allowedModels.has(record.target.public_model) ||
+    allowedModels.has(record.target.upstream_model)
+      ? [probe.outcome.receiptIds[index]].filter(
+          (receiptId): receiptId is string => Boolean(receiptId),
+        )
+      : [],
+  );
+}
+
 export function CodexMultiRouterWizard({
   open,
   providers,
@@ -675,6 +782,20 @@ export function CodexMultiRouterWizard({
   const [connectivityResults, setConnectivityResults] = useState<
     WizardConnectivityResult[]
   >([]);
+  const [sourceProbeStates, setSourceProbeStates] = useState<
+    Record<string, WizardSourceProbeState>
+  >({});
+  const [probeDialogOpen, setProbeDialogOpen] = useState(false);
+  const [probeDialogRunning, setProbeDialogRunning] = useState(false);
+  const [probeDialogEvents, setProbeDialogEvents] = useState<
+    CodexProtocolProbeProgressEvent[]
+  >([]);
+  const [probeDialogOutcome, setProbeDialogOutcome] =
+    useState<CodexProviderProtocolPreflightOutcome | null>(null);
+  const [probeDialogError, setProbeDialogError] = useState("");
+  const [probeDialogModels, setProbeDialogModels] = useState<string[]>([]);
+  const [pendingBatchCommit, setPendingBatchCommit] =
+    useState<PendingWizardBatchCommit | null>(null);
   const [isConnectivityConfirmOpen, setIsConnectivityConfirmOpen] =
     useState(false);
   const [wizardIssues, setWizardIssues] = useState<WizardIssue[]>([]);
@@ -735,9 +856,8 @@ export function CodexMultiRouterWizard({
     () => collectWizardModelNameCollisions(draftSources),
     [draftSources],
   );
-  const routeReadySources = applyWizardConnectivityApiFormatOverrides(
-    draftSources,
-    connectivityResults,
+  const routeReadySources = draftSources.map(
+    (provider) => sourceProbeStates[provider.id]?.outcome.provider ?? provider,
   );
   const availableCatalogModels = buildWizardModelCatalog(
     resolveWizardModelNameCollisions(routeReadySources),
@@ -880,6 +1000,14 @@ export function CodexMultiRouterWizard({
           ) ?? []),
     );
     setConnectivityResults([]);
+    setSourceProbeStates({});
+    setProbeDialogOpen(false);
+    setProbeDialogRunning(false);
+    setProbeDialogEvents([]);
+    setProbeDialogOutcome(null);
+    setProbeDialogError("");
+    setProbeDialogModels([]);
+    setPendingBatchCommit(null);
     setWizardIssues([]);
     setModelFetchCards(
       Object.fromEntries(
@@ -945,6 +1073,7 @@ export function CodexMultiRouterWizard({
       return currentSources.filter((source) => source.id !== provider.id);
     });
     setConnectivityResults([]);
+    setSourceProbeStates({});
   };
 
   // 所有异步 catch 都进入同一个问题列表，让 toast 之外的 UI 也能长期展示异常和继续策略。
@@ -1052,13 +1181,13 @@ export function CodexMultiRouterWizard({
           recordWizardIssue({
             stage: "prepare",
             severity: "error",
-            title: "Responses 连通性存在阻塞项",
+            title: "兼容性深度探测存在阻塞项",
             detail:
-              "至少一个 Responses 直连 provider 的 /v1/responses 探测失败，继续保存会让 Codex 请求命中不可用上游。",
+              "至少一个普通 Provider 没有完成可验证的基础响应、流式 SSE、工具调用和工具续轮；当前结果不能生成安全的协议路由。",
             canContinue: false,
           });
           toast.error(
-            "连通性测试仍有阻塞项，请先修复失败的 Responses provider。",
+            "兼容性深度探测仍有阻塞项，请先修复失败模型或上游可用性问题。",
             {
               closeButton: true,
             },
@@ -1182,7 +1311,6 @@ export function CodexMultiRouterWizard({
             const afterModels = readWizardModelCatalog(nextProvider);
             const diff = diffWizardModelCatalog(beforeModels, afterModels);
             const hasDiff = hasModelFetchDiff(diff);
-            await providersApi.update(nextProvider, "codex");
             nextSources.push(nextProvider);
             successCount += 1;
             setModelFetchCards((current) => ({
@@ -1190,7 +1318,7 @@ export function CodexMultiRouterWizard({
               [provider.id]: {
                 status: hasDiff ? "updated" : "unchanged",
                 message: hasDiff
-                  ? `OAuth 目录读取成功，已写入 ${afterModels.length} 个模型。`
+                  ? `OAuth 目录读取成功，已载入草稿 ${afterModels.length} 个模型。`
                   : `OAuth 目录读取成功，无模型列表更新，仍为 ${afterModels.length} 个模型。`,
                 modelCount: afterModels.length,
                 diff,
@@ -1210,7 +1338,6 @@ export function CodexMultiRouterWizard({
                 const afterModels = readWizardModelCatalog(nextProvider);
                 const diff = diffWizardModelCatalog(beforeModels, afterModels);
                 const hasDiff = hasModelFetchDiff(diff);
-                await providersApi.update(nextProvider, "codex");
                 nextSources.push(nextProvider);
                 successCount += 1;
                 recordWizardIssue({
@@ -1226,7 +1353,7 @@ export function CodexMultiRouterWizard({
                   [provider.id]: {
                     status: hasDiff ? "updated" : "unchanged",
                     message: hasDiff
-                      ? `OAuth 在线读取失败，已使用本地 Codex 模型缓存写入 ${afterModels.length} 个模型。`
+                      ? `OAuth 在线读取失败，已使用本地 Codex 模型缓存载入草稿 ${afterModels.length} 个模型。`
                       : `OAuth 在线读取失败，已使用本地 Codex 模型缓存；无模型列表更新，仍为 ${afterModels.length} 个模型。`,
                     modelCount: afterModels.length,
                     diff,
@@ -1327,7 +1454,6 @@ export function CodexMultiRouterWizard({
           const afterModels = readWizardModelCatalog(nextProvider);
           const diff = diffWizardModelCatalog(beforeModels, afterModels);
           const hasDiff = hasModelFetchDiff(diff);
-          await providersApi.update(nextProvider, "codex");
           nextSources.push(nextProvider);
           successCount += 1;
           setModelFetchCards((current) => ({
@@ -1335,7 +1461,7 @@ export function CodexMultiRouterWizard({
             [provider.id]: {
               status: hasDiff ? "updated" : "unchanged",
               message: hasDiff
-                ? `读取成功，已写入 ${afterModels.length} 个模型。`
+                ? `读取成功，已载入草稿 ${afterModels.length} 个模型。`
                 : `读取成功，无模型列表更新，仍为 ${afterModels.length} 个模型。`,
               modelCount: afterModels.length,
               diff,
@@ -1382,7 +1508,7 @@ export function CodexMultiRouterWizard({
           .slice(0, 5);
       });
       setConnectivityResults([]);
-      await queryClient.invalidateQueries({ queryKey: ["providers", "codex"] });
+      setSourceProbeStates({});
       dispatchFlow({
         type: "FETCH_DONE",
         partial: failedCount > 0 || skippedCount > 0,
@@ -1412,96 +1538,73 @@ export function CodexMultiRouterWizard({
     }
   };
 
-  // 对每个 provider 的每个可见模型发起 Responses + Chat 双协议探测；这是用户确认后的真实上游请求。
+  // 每个普通逻辑 Provider 交给后端生产等价 runner 做完整双协议事务探测；
+  // receipt 只保存在本次向导内存中，最终由 batch commit 一次性消费。
   const probeResponsesConnectivity = async () => {
     setIsConnectivityConfirmOpen(false);
     dispatchFlow({ type: "PROBE_START" });
     clearWizardIssuesForStage("prepare");
     const results: WizardConnectivityResult[] = [];
+    const nextProbeStates: Record<string, WizardSourceProbeState> = {};
     for (const provider of draftSources) {
-      const config = getWizardModelFetchConfig(provider);
       const models = getWizardConnectivityProbeModels(provider);
-      if (isWizardCodexOAuthSource(provider)) {
+      if (skipsWizardDeepProtocolProbe(provider)) {
         results.push(
-          skippedWizardConnectivityResult(
+          skippedWizardDeepProbeResult(
             provider,
-            hasCodexOauthAccount
-              ? "官方 Codex OAuth 使用 ChatGPT 托管 token，不走普通 API Key；跳过 Chat / Responses 双协议探测，启用后到状态页用真实 Codex 请求验证"
-              : "官方 Codex OAuth 尚未登录 ChatGPT，跳过普通 API Key 探测；请先在配置步骤完成 OAuth 后再验证官方路由",
-          ),
-        );
-        continue;
-      }
-      if (!config || !config.apiKey) {
-        results.push(
-          skippedWizardConnectivityResult(
-            provider,
-            "缺少 Base URL 或 API Key，跳过 Chat / Responses 双协议探测",
+            provider.meta?.codexProtocolMode === "manual"
+              ? "该 Provider 已在高级模式锁定协议，后端不会用自动探测覆盖用户选择。"
+              : hasCodexOauthAccount
+                ? "官方或托管账号源固定使用 Responses，由账号管理器提供认证，不发送额外计费探测请求。"
+                : "官方或托管账号源固定使用 Responses；当前尚未登录对应账号，保存后仍需先完成账号绑定。",
           ),
         );
         continue;
       }
       if (models.length === 0) {
         results.push(
-          skippedWizardConnectivityResult(
+          skippedWizardDeepProbeResult(
             provider,
-            "没有可探测模型，跳过 Chat / Responses 双协议探测",
+            "没有可探测模型，不能生成深度探测请求。",
           ),
         );
         continue;
       }
-      for (const model of models) {
-        try {
-          const responsesProbe = await probeCodexResponsesForConfig(
-            config.baseUrl,
-            config.apiKey,
-            model,
-            config.isFullUrl,
-            config.customUserAgent,
-          );
-          const chatProbe = await probeCodexChatForConfig(
-            config.baseUrl,
-            config.apiKey,
-            model,
-            config.isFullUrl,
-            config.customUserAgent,
-          );
-          results.push(
-            classifyWizardDualProtocolConnectivityResult({
-              provider,
-              model,
-              responses: {
-                ok: responsesProbe.ok,
-                detail: responsesProbe.detail,
-                url: responsesProbe.url,
-                httpStatus: responsesProbe.status,
-              },
-              chat: {
-                ok: chatProbe.ok,
-                detail: chatProbe.detail,
-                url: chatProbe.url,
-                httpStatus: chatProbe.status,
-              },
-            }),
-          );
-        } catch (error) {
-          const message = formatWizardError(error);
-          const classified = classifyWizardConnectivityResult({
-            provider,
-            model,
-            ok: false,
-            detail: message,
-          });
-          recordWizardIssue({
-            stage: "prepare",
-            severity: classified.canContinue ? "warning" : "error",
-            title: "连通性探测命令异常",
-            detail: message,
-            canContinue: classified.canContinue,
-            providerName: provider.name,
-          });
-          results.push(classified);
-        }
+      setProbeDialogModels(models);
+      setProbeDialogEvents([]);
+      setProbeDialogOutcome(null);
+      setProbeDialogError("");
+      setProbeDialogOpen(true);
+      setProbeDialogRunning(true);
+      try {
+        const outcome = await preflightCodexProviderProtocolCompatibility(
+          provider,
+          (event) => setProbeDialogEvents((current) => [...current, event]),
+        );
+        nextProbeStates[provider.id] = { outcome };
+        setProbeDialogOutcome(outcome);
+        results.push(...deepProbeConnectivityResults(provider, outcome));
+      } catch (error) {
+        const message = formatWizardError(error);
+        setProbeDialogError(message);
+        recordWizardIssue({
+          stage: "prepare",
+          severity: "error",
+          title: "兼容性深度探测中断",
+          detail: message,
+          canContinue: false,
+          providerName: provider.name,
+        });
+        results.push({
+          providerId: provider.id,
+          providerName: provider.name,
+          model: "*",
+          status: "fail",
+          canContinue: false,
+          detail: `兼容性深度探测中断：${message}`,
+        });
+      } finally {
+        setProbeDialogRunning(false);
       }
     }
 
@@ -1512,6 +1615,7 @@ export function CodexMultiRouterWizard({
         .length,
       failCount: results.filter((result) => result.status === "fail").length,
     };
+    setSourceProbeStates(nextProbeStates);
     setConnectivityResults(results);
     dispatchFlow({
       type: "PROBE_DONE",
@@ -1525,17 +1629,41 @@ export function CodexMultiRouterWizard({
     );
   };
 
-  // 保存 MultiRouter provider；这里才真正写入 DB，不会静默切换当前 Codex provider。
+  const finishWizardBatchCommit = async (
+    pending: PendingWizardBatchCommit,
+    intent: "accept_single" | "confirm_split",
+  ) => {
+    const outcome = await commitCodexProviderSetBatch(
+      pending.sources,
+      pending.router,
+      pending.preview.digest,
+      intent,
+    );
+    setPendingBatchCommit(null);
+    setSavedPlan(outcome.router);
+    setDraftSources(pending.sources.map((source) => source.provider));
+    await queryClient.invalidateQueries({ queryKey: ["providers", "codex"] });
+    if (outcome.status === "committed_with_projection_error") {
+      toast.warning(
+        "模型源和 MultiRouter 已原子保存，但当前 Codex 投影刷新失败；请在状态页重新激活。",
+        { closeButton: true },
+      );
+    } else {
+      toast.success("模型源与 MultiRouter 已一次性保存。", {
+        closeButton: true,
+      });
+    }
+    dispatchFlow({ type: "SAVE_SUCCESS" });
+  };
+
+  // 保存只调用 batch prepare/commit：模型源、内部叶子、探测档案、Router 和 Sub-Agent V2
+  // 初始化要么一起落库，要么一个都不写，不再逐个 update 后单独 add/update Router。
   const saveMultiRouterPlan = () => {
     if (saveInFlightRef.current) return;
     const saveOperation = (async () => {
       dispatchFlow({ type: "SAVE_START" });
       clearWizardIssuesForStage("activate");
       try {
-        const routeReadySources = applyWizardConnectivityApiFormatOverrides(
-          draftSources,
-          connectivityResults,
-        );
         const result = buildCodexMultiRouterWizardPlan(
           providers,
           routeReadySources,
@@ -1552,36 +1680,57 @@ export function CodexMultiRouterWizard({
             },
           },
         );
-        for (const source of routeReadySources) {
-          const draftSource = draftSources.find(
-            (item) => item.id === source.id,
-          );
-          if (
-            draftSource &&
-            JSON.stringify(draftSource.settingsConfig?.modelCatalog ?? null) !==
-              JSON.stringify(source.settingsConfig?.modelCatalog ?? null)
-          ) {
-            await providersApi.update(source, "codex");
+        const sources = result.sourceProviders.map((source) => {
+          if (skipsWizardDeepProtocolProbe(source)) {
+            return { provider: source, receiptIds: [] };
           }
-        }
-        let savedProvider = result.plan;
-        if (activePlan) {
-          await providersApi.update(result.plan, "codex");
-        } else {
-          await providersApi.add(result.plan, "codex", false);
-          savedProvider = await codexSubagentV2Api.initializeProviderConfig(
-            result.plan.id,
-          );
-        }
-        setSavedPlan(savedProvider);
-        setDraftSources(result.sourceProviders);
-        await queryClient.invalidateQueries({
-          queryKey: ["providers", "codex"],
+          const probe = sourceProbeStates[source.id];
+          const receiptIds = receiptIdsForSource(source, probe);
+          const expectedModelCount = readWizardModelCatalog(source).filter(
+            (model) => model.enabled !== false,
+          ).length;
+          if (!probe || receiptIds.length !== expectedModelCount) {
+            throw new Error(
+              `请先完成 ${source.name} 当前模型目录的兼容性深度探测；模型或配置变化后必须重新探测。`,
+            );
+          }
+          return { provider: source, receiptIds };
         });
-        toast.success("MultiRouter 方案已保存。", { closeButton: true });
-        dispatchFlow({ type: "SAVE_SUCCESS" });
+        const preview = await prepareCodexProviderSetBatch(
+          sources,
+          result.plan,
+        );
+        const pending = { sources, router: result.plan, preview };
+        if (preview.blocked || preview.requiresSplitConfirmation) {
+          setPendingBatchCommit(pending);
+          if (preview.blocked) {
+            dispatchFlow({
+              type: "SAVE_ERROR",
+              error: "至少一个模型源尚未通过完整 Codex 事务验证。",
+            });
+          } else {
+            dispatchFlow({ type: "SAVE_CONFIRMATION" });
+          }
+          return;
+        }
+        await finishWizardBatchCommit(pending, "accept_single");
       } catch (error) {
         const message = formatWizardError(error);
+        if (
+          message.includes("codex_provider_set_probe_required") ||
+          message.includes("codex_provider_set_probe_target_mismatch") ||
+          message.includes("请先完成")
+        ) {
+          setSourceProbeStates({});
+          setConnectivityResults([]);
+          dispatchFlow({
+            type: "NEXT",
+            nextStatus: "connectivityFailed",
+            nextStepKey: "prepare",
+          });
+        } else {
+          dispatchFlow({ type: "SAVE_ERROR", error: message });
+        }
         recordWizardIssue({
           stage: "activate",
           severity: "error",
@@ -1589,13 +1738,52 @@ export function CodexMultiRouterWizard({
           detail: message,
           canContinue: false,
         });
-        dispatchFlow({ type: "SAVE_ERROR", error: message });
         toast.error(`MultiRouter 保存失败：${message}`, { closeButton: true });
       }
     })();
     saveInFlightRef.current = saveOperation.finally(() => {
       saveInFlightRef.current = null;
     });
+  };
+
+  const confirmPendingBatchSplit = async () => {
+    const pending = pendingBatchCommit;
+    if (!pending || saveInFlightRef.current) return;
+    dispatchFlow({ type: "SAVE_START" });
+    const operation = finishWizardBatchCommit(pending, "confirm_split").catch(
+      (error) => {
+        const message = formatWizardError(error);
+        setPendingBatchCommit(null);
+        dispatchFlow({ type: "SAVE_ERROR", error: message });
+        recordWizardIssue({
+          stage: "activate",
+          severity: "error",
+          title: "MultiRouter 保存失败",
+          detail: message,
+          canContinue: false,
+        });
+        toast.error(`MultiRouter 保存失败：${message}`, {
+          closeButton: true,
+        });
+      },
+    );
+    saveInFlightRef.current = operation.finally(() => {
+      saveInFlightRef.current = null;
+    });
+    await saveInFlightRef.current;
+  };
+
+  const returnFromPendingBatch = () => {
+    setPendingBatchCommit(null);
+    dispatchFlow({ type: "GOTO_STEP", stepKey: "review" });
+  };
+
+  const retryPendingBatchProbe = () => {
+    setPendingBatchCommit(null);
+    setSourceProbeStates({});
+    setConnectivityResults([]);
+    dispatchFlow({ type: "GOTO_STEP", stepKey: "prepare" });
+    setIsConnectivityConfirmOpen(true);
   };
 
   // 启用动作复用 App 里的 switchProvider 路径，保证 Codex 接管和 OAuth 保留逻辑保持一致。
@@ -1653,6 +1841,14 @@ export function CodexMultiRouterWizard({
     previewRoutes,
     routeReadySources,
   );
+  const pendingSourcePreview =
+    pendingBatchCommit?.preview.sourcePreviews.find(
+      (preview) => preview.plan.kind === "blocked",
+    ) ??
+    pendingBatchCommit?.preview.sourcePreviews.find(
+      (preview) => preview.plan.kind === "split",
+    ) ??
+    null;
   const previewProvidersById = new Map(
     routeReadySources.map((provider) => [provider.id, provider]),
   );
@@ -1935,7 +2131,7 @@ export function CodexMultiRouterWizard({
                         isRefreshingModels ? "animate-spin" : ""
                       }`}
                     />
-                    自动获取并写入模型列表
+                    自动获取模型列表（暂存）
                   </Button>
                   <Button
                     variant="outline"
@@ -1951,7 +2147,7 @@ export function CodexMultiRouterWizard({
                         isProbingConnectivity ? "animate-pulse" : ""
                       }`}
                     />
-                    测试 Chat / Responses 连通性
+                    开始兼容性深度探测
                   </Button>
                 </div>
                 <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-900 dark:text-amber-200">
@@ -2424,29 +2620,50 @@ export function CodexMultiRouterWizard({
           </div>
         </div>
 
+        <CodexProtocolProbeProgressDialog
+          open={probeDialogOpen}
+          running={probeDialogRunning}
+          expectedModels={probeDialogModels}
+          events={probeDialogEvents}
+          outcome={probeDialogOutcome}
+          error={probeDialogError}
+          onOpenChange={setProbeDialogOpen}
+          onRetry={() => {
+            setProbeDialogOpen(false);
+            setIsConnectivityConfirmOpen(true);
+          }}
+        />
+
+        <CodexProviderSetPreviewDialog
+          open={pendingSourcePreview !== null}
+          preview={pendingSourcePreview}
+          pending={isSavingPlan}
+          onBack={returnFromPendingBatch}
+          onConfirmSplit={() => void confirmPendingBatchSplit()}
+          onRetry={retryPendingBatchProbe}
+        />
+
         <Dialog
           open={isConnectivityConfirmOpen}
           onOpenChange={setIsConnectivityConfirmOpen}
         >
           <DialogContent className="max-w-lg" zIndex="top">
             <DialogHeader>
-              <DialogTitle>确认开始连通性测试</DialogTitle>
+              <DialogTitle>确认开始兼容性深度探测</DialogTitle>
               <DialogDescription className="space-y-2 text-left">
                 <span className="block">
-                  这个流程需要确认每个 provider/model 到底应该使用 Responses
-                  还是 Chat
-                  Completions。测试会向上游发送真实请求，可能产生少量额度或流量消耗，也可能触发限流。
+                  每个普通 provider/model 都会分别验证 Responses 与 Chat
+                  Completions。探测会向上游发送真实请求，可能产生少量额度或流量消耗，也可能触发限流。
                 </span>
                 <span className="block">
-                  每个模型会分别测试 /v1/responses 和
-                  /v1/chat/completions，输出上限为
-                  1024。都不通时通常不是协议问题，而是 API Key、Base
-                  URL、模型权限、额度、网络或上游故障。
+                  每条协议都要依次通过基础响应、流式
+                  SSE、推理字段、强制工具调用和工具结果续轮；只有完整事务成功才会生成可保存
+                  receipt。
                 </span>
                 <span className="block">
-                  注意：Responses 通过只证明最小非流式请求能返回成功，不等于完整
-                  Codex 功能验证。保存启用后仍需要在状态页和真实 Codex
-                  会话里确认路由、流式响应和工具调用。
+                  401/403/429、网络错误和 5xx
+                  会显示为认证、额度或上游可用性问题，不会被误判成协议不兼容。官方和托管账号源固定走
+                  Responses，不发送这组额外探测请求。
                 </span>
               </DialogDescription>
             </DialogHeader>

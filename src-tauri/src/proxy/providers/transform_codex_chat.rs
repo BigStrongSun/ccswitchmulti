@@ -6660,12 +6660,13 @@ mod tests {
         let err = chat_completion_to_response_with_context(chat, &CodexToolContext::default())
             .unwrap_err();
         assert!(matches!(err, ProxyError::TransformError(_)));
-        assert!(err.to_string().contains("without a function name"));
+        assert!(err.to_string().contains("structurally incomplete"));
     }
 
-    /// 只要还剩下一个合法工具调用，Codex 本来就会继续，行为保持不变。
+    /// 并行调用中只执行“幸存”的合法子集会改变模型原本请求的动作集合；
+    /// 任意一个调用损坏时，整个回合都必须失败并显式重试/报错。
     #[test]
-    fn chat_response_keeps_valid_tool_call_beside_unnamed_one() {
+    fn chat_response_rejects_valid_tool_call_beside_unnamed_one() {
         let chat = json!({
             "id": "chatcmpl_mixed",
             "object": "chat.completion",
@@ -6687,14 +6688,12 @@ mod tests {
             }]
         });
 
-        let result =
-            chat_completion_to_response_with_context(chat, &CodexToolContext::default()).unwrap();
-        let output = result["output"].as_array().unwrap();
+        let err = chat_completion_to_response_with_context(chat, &CodexToolContext::default())
+            .unwrap_err();
 
-        assert_eq!(output.len(), 1);
-        assert_eq!(output[0]["name"], "exec_command");
-        assert_eq!(output[0]["call_id"], "call_good");
-        assert_eq!(result["status"], "completed");
+        assert!(matches!(err, ProxyError::TransformError(_)));
+        assert!(err.to_string().contains("structurally incomplete"));
+        assert!(!err.to_string().contains("call_good"));
     }
 
     /// legacy `function_call` 形态同样受判据保护。

@@ -2468,6 +2468,27 @@ impl RequestForwarder {
         } else {
             None
         };
+        let codex_request_transport = if codex_responses_to_chat {
+            super::providers::codex_request::CodexRequestTransport::ChatCompletions
+        } else {
+            super::providers::codex_request::CodexRequestTransport::Responses
+        };
+        let codex_request_compatibility = codex_third_party_request_policy.as_ref().map(|_| {
+            let upstream_model = super::providers::codex_provider_upstream_model(provider)
+                .unwrap_or_else(|| request_model_for_log.clone());
+            super::providers::resolve_codex_request_compatibility(
+                provider,
+                &request_model_for_log,
+                &upstream_model,
+                if codex_responses_to_chat {
+                    crate::protocol_compatibility::TransportKind::OpenAiChat
+                } else {
+                    crate::protocol_compatibility::TransportKind::OpenAiResponses
+                },
+                self.router.database(),
+                chrono::Utc::now().timestamp(),
+            )
+        });
         // Codex → Anthropic: Claude Code emulation is off by default and only
         // enabled when the user explicitly turns it on in the UI, so requests can
         // pass a gateway's "Claude Code only" fingerprint check (User-Agent /
@@ -2602,6 +2623,10 @@ impl RequestForwarder {
                         prompt_cache_session_id: self
                             .session_client_provided
                             .then(|| self.session_id.clone()),
+                        tool_schema_dialect: codex_request_compatibility
+                            .map(|compatibility| compatibility.tool_schema_dialect),
+                        history_replay: codex_request_compatibility
+                            .map(|compatibility| compatibility.history_replay),
                     },
                 )?
             } else {
@@ -2712,14 +2737,16 @@ impl RequestForwarder {
                 mapped_body = policy.prepare_protocol_body(
                     super::providers::codex_request::CodexRequestTransport::Responses,
                     mapped_body,
-                    &super::providers::codex_request::CodexRequestOptions::default(),
+                    &super::providers::codex_request::CodexRequestOptions {
+                        tool_schema_dialect: codex_request_compatibility
+                            .map(|compatibility| compatibility.tool_schema_dialect),
+                        history_replay: codex_request_compatibility
+                            .map(|compatibility| compatibility.history_replay),
+                        ..super::providers::codex_request::CodexRequestOptions::default()
+                    },
                 )?;
             } else if matches!(app_type, AppType::Codex) {
-                super::providers::apply_codex_native_responses_reasoning_effort(
-                    provider,
-                    &mut mapped_body,
-                )?;
-                super::providers::apply_codex_request_upstream_model(provider, &mut mapped_body);
+                super::providers::prepare_codex_native_responses_model(provider, &mut mapped_body)?;
             }
             mapped_body
         };
@@ -2798,16 +2825,9 @@ impl RequestForwarder {
             codex_responses_to_chat,
             codex_responses_to_messages,
         ) {
-            let normalized =
-                super::providers::openai_compat::normalize_codex_responses_passthrough_request_for_transport(
+            super::providers::openai_compat::normalize_codex_responses_passthrough_request_for_transport(
                     request_body,
                     codex_responses_lite_requested,
-                );
-            // 第三方原生 Responses 上游（DeepSeek 等）要求 reasoning 历史以
-            // reasoning_text content 回传；official 的 summary/encrypted_content
-            // 回放字段必须在这里转成可读 content 或丢弃，否则上游 400。
-            super::providers::openai_compat::normalize_third_party_responses_reasoning_items(
-                normalized,
             )
         } else {
             request_body
@@ -2848,7 +2868,17 @@ impl RequestForwarder {
             }
         }
         let mut filtered_body = if let Some(policy) = codex_third_party_request_policy.as_ref() {
-            policy.apply_body_policy(request_body)
+            policy.finalize_body(
+                codex_request_transport,
+                request_body,
+                &super::providers::codex_request::CodexRequestOptions {
+                    tool_schema_dialect: codex_request_compatibility
+                        .map(|compatibility| compatibility.tool_schema_dialect),
+                    history_replay: codex_request_compatibility
+                        .map(|compatibility| compatibility.history_replay),
+                    ..super::providers::codex_request::CodexRequestOptions::default()
+                },
+            )?
         } else {
             let mut filtered_body = prepare_upstream_request_body(request_body);
             if !is_copilot {
@@ -11003,14 +11033,7 @@ mod tests {
         // On the Codex→Anthropic path a base URL already ending in `/v1/messages` (switch
         // off) must be treated as a full endpoint by the real `base_url_is_full_endpoint`.
 
-        // Without the guard, build_url would concatenate the pasted endpoint with the
-        // rewritten `/v1/messages` target, producing a broken double suffix.
-        use super::super::providers::ProviderAdapter;
-        let doubled = super::super::providers::CodexAdapter::new()
-            .build_url("https://host.example/v1/messages", "/v1/messages");
-        assert_eq!(doubled, "https://host.example/v1/messages/v1/messages");
-
-        // With the guard, the pasted URL is used verbatim (plus preserved query). Includes
+        // The pasted URL is used verbatim (plus preserved query). Includes
         // query/fragment/whitespace suffixes, which must not hide the endpoint (fix: a base
         // like `.../v1/messages?beta=true` previously evaded the suffix check).
         for base in [

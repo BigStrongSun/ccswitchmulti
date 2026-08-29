@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useDarkMode } from "@/hooks/useDarkMode";
 import { useTranslation } from "react-i18next";
 import { Eye, EyeOff, RefreshCw } from "lucide-react";
@@ -21,8 +21,8 @@ import { deepClone } from "@/utils/deepClone";
 interface UniversalProviderFormModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSave: (provider: UniversalProvider) => void;
-  onSaveAndSync?: (provider: UniversalProvider) => void;
+  onSave: (provider: UniversalProvider) => void | Promise<void>;
+  onSaveAndSync?: (provider: UniversalProvider) => void | Promise<void>;
   editingProvider?: UniversalProvider | null;
   initialPreset?: UniversalProviderPreset | null;
 }
@@ -61,9 +61,15 @@ export function UniversalProviderFormModal({
   const [syncConfirmOpen, setSyncConfirmOpen] = useState(false);
   const [pendingProvider, setPendingProvider] =
     useState<UniversalProvider | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const submittingRef = useRef(false);
 
   // 初始化表单
   useEffect(() => {
+    submittingRef.current = false;
+    setIsSubmitting(false);
+    setSyncConfirmOpen(false);
+    setPendingProvider(null);
     if (editingProvider) {
       // 编辑模式：加载现有数据
       setName(editingProvider.name);
@@ -184,65 +190,6 @@ wire_api = "responses"`;
     };
   }, [geminiEnabled, baseUrl, apiKey, models.gemini]);
 
-  // 提交表单
-  const handleSubmit = useCallback(() => {
-    if (!name.trim() || !baseUrl.trim() || !apiKey.trim()) {
-      return;
-    }
-
-    const provider: UniversalProvider = editingProvider
-      ? {
-          ...editingProvider,
-          name: name.trim(),
-          baseUrl: baseUrl.trim(),
-          apiKey: apiKey.trim(),
-          websiteUrl: websiteUrl.trim() || undefined,
-          notes: notes.trim() || undefined,
-          apps: {
-            claude: claudeEnabled,
-            codex: codexEnabled,
-            gemini: geminiEnabled,
-          },
-          models,
-        }
-      : createUniversalProviderFromPreset(
-          selectedPreset || universalProviderPresets[0],
-          crypto.randomUUID(),
-          baseUrl.trim(),
-          apiKey.trim(),
-          name.trim(),
-        );
-
-    // 如果是新建，更新应用启用状态和模型
-    if (!editingProvider) {
-      provider.apps = {
-        claude: claudeEnabled,
-        codex: codexEnabled,
-        gemini: geminiEnabled,
-      };
-      provider.models = models;
-      provider.websiteUrl = websiteUrl.trim() || undefined;
-      provider.notes = notes.trim() || undefined;
-    }
-
-    onSave(provider);
-    onClose();
-  }, [
-    editingProvider,
-    name,
-    baseUrl,
-    apiKey,
-    websiteUrl,
-    notes,
-    claudeEnabled,
-    codexEnabled,
-    geminiEnabled,
-    models,
-    selectedPreset,
-    onSave,
-    onClose,
-  ]);
-
   // 构建 provider 对象的辅助函数
   const buildProvider = useCallback((): UniversalProvider | null => {
     if (!name.trim() || !baseUrl.trim() || !apiKey.trim()) {
@@ -299,6 +246,38 @@ wire_api = "responses"`;
     selectedPreset,
   ]);
 
+  const finishSubmission = useCallback(() => {
+    submittingRef.current = false;
+    setIsSubmitting(false);
+  }, []);
+
+  const beginSubmission = useCallback(() => {
+    if (submittingRef.current) return false;
+    submittingRef.current = true;
+    setIsSubmitting(true);
+    return true;
+  }, []);
+
+  const guardedClose = useCallback(() => {
+    if (!submittingRef.current) onClose();
+  }, [onClose]);
+
+  // 新建路径也必须等待后端完成；失败时保留输入，交由上层显示具体错误。
+  const handleSubmit = useCallback(async () => {
+    const provider = buildProvider();
+    if (!provider || !beginSubmission()) return;
+
+    try {
+      await onSave(provider);
+      onClose();
+    } catch {
+      // Panel callback owns the toast/log. Keeping this panel open is the
+      // component-level failure contract.
+    } finally {
+      finishSubmission();
+    }
+  }, [beginSubmission, buildProvider, finishSubmission, onClose, onSave]);
+
   // 打开保存并同步确认弹窗
   const handleSaveAndSyncClick = useCallback(() => {
     const provider = buildProvider();
@@ -309,24 +288,38 @@ wire_api = "responses"`;
   }, [buildProvider, onSaveAndSync]);
 
   // 确认保存并同步
-  const confirmSaveAndSync = useCallback(() => {
-    if (!pendingProvider || !onSaveAndSync) return;
+  const confirmSaveAndSync = useCallback(async () => {
+    if (!pendingProvider || !onSaveAndSync || !beginSubmission()) return;
 
-    onSaveAndSync(pendingProvider);
-    setSyncConfirmOpen(false);
-    setPendingProvider(null);
-    onClose();
-  }, [pendingProvider, onSaveAndSync, onClose]);
+    try {
+      await onSaveAndSync(pendingProvider);
+      setSyncConfirmOpen(false);
+      setPendingProvider(null);
+      onClose();
+    } catch {
+      // Preserve both the confirmation and the form so the user can retry.
+    } finally {
+      finishSubmission();
+    }
+  }, [
+    beginSubmission,
+    finishSubmission,
+    pendingProvider,
+    onSaveAndSync,
+    onClose,
+  ]);
 
   const footer = (
     <>
-      <Button variant="outline" onClick={onClose}>
+      <Button variant="outline" onClick={guardedClose} disabled={isSubmitting}>
         {t("common.cancel", { defaultValue: "取消" })}
       </Button>
       {isEditMode && onSaveAndSync ? (
         <Button
           onClick={handleSaveAndSyncClick}
-          disabled={!name.trim() || !baseUrl.trim() || !apiKey.trim()}
+          disabled={
+            isSubmitting || !name.trim() || !baseUrl.trim() || !apiKey.trim()
+          }
         >
           <RefreshCw className="mr-1.5 h-4 w-4" />
           {t("universalProvider.saveAndSync", { defaultValue: "保存并同步" })}
@@ -334,7 +327,9 @@ wire_api = "responses"`;
       ) : (
         <Button
           onClick={handleSubmit}
-          disabled={!name.trim() || !baseUrl.trim() || !apiKey.trim()}
+          disabled={
+            isSubmitting || !name.trim() || !baseUrl.trim() || !apiKey.trim()
+          }
         >
           {t("common.add", { defaultValue: "添加" })}
         </Button>
@@ -350,7 +345,7 @@ wire_api = "responses"`;
           ? t("universalProvider.edit", { defaultValue: "编辑统一供应商" })
           : t("universalProvider.add", { defaultValue: "添加统一供应商" })
       }
-      onClose={onClose}
+      onClose={guardedClose}
       footer={footer}
     >
       <div className="space-y-6">
@@ -713,7 +708,9 @@ wire_api = "responses"`;
           defaultValue: "保存并同步",
         })}
         onConfirm={confirmSaveAndSync}
+        pending={isSubmitting}
         onCancel={() => {
+          if (submittingRef.current) return;
           setSyncConfirmOpen(false);
           setPendingProvider(null);
         }}

@@ -49,19 +49,31 @@ export function CodexProviderReadinessSection({
   onSyncModels,
   onValidateConnection,
 }: CodexProviderReadinessSectionProps) {
-  const normalizedModels = models.filter((model) => model.model.trim());
+  const configuredModels = models.filter((model) => model.model.trim());
+  const enabledModels = configuredModels.filter(
+    (model) => model.enabled !== false,
+  );
+  const disabledModelCount = configuredModels.length - enabledModels.length;
+  const configuredDefault = defaultModel?.trim() ?? "";
   const selectedModel =
-    defaultModel?.trim() || normalizedModels[0]?.model.trim() || "尚未选择";
-  const hasModels = normalizedModels.length > 0;
+    enabledModels
+      .find((model) => model.model.trim() === configuredDefault)
+      ?.model.trim() ||
+    enabledModels[0]?.model.trim() ||
+    (configuredModels.length > 0 ? "尚未启用" : "尚未选择");
+  const hasModels = enabledModels.length > 0;
   const validationPassed = validationTone === "success";
   const ready = hasModels && validationPassed;
-  const readinessLabel = !hasModels
-    ? "需要同步模型"
-    : ready
-      ? "可加入 MultiRouter"
-      : validationTone === "error"
-        ? "连接验证失败"
-        : "建议先验证连接";
+  const readinessLabel =
+    configuredModels.length === 0
+      ? "需要同步模型"
+      : !hasModels
+        ? "需要启用模型"
+        : ready
+          ? "可加入 MultiRouter"
+          : validationTone === "error"
+            ? "连接验证失败"
+            : "建议先验证连接";
 
   return (
     <section
@@ -127,7 +139,11 @@ export function CodexProviderReadinessSection({
             模型目录
           </div>
           <p className="mt-1 text-sm font-medium text-foreground">
-            {hasModels ? `${normalizedModels.length} 个模型` : "尚未同步"}
+            {configuredModels.length === 0
+              ? "尚未同步"
+              : disabledModelCount > 0
+                ? `${enabledModels.length} 个已启用，${disabledModelCount} 个已停用`
+                : `${enabledModels.length} 个模型`}
           </p>
         </div>
         <div className="rounded-md border border-border-default bg-background/70 p-3">

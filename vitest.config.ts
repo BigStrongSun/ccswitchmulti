@@ -13,9 +13,14 @@ export default defineConfig({
     environment: "jsdom",
     setupFiles: ["./tests/setupGlobals.ts", "./tests/setupTests.ts"],
     globals: true,
-    // Linked git worktrees under .worktrees/ carry their own src/ and
-    // node_modules; exclude them so the main tree's test run stays isolated.
-    exclude: ["**/.worktrees/**", "**/node_modules/**", "**/dist/**"],
+    // Linked worktrees and local task snapshots carry copied test trees. They
+    // are evidence/artifacts, not additional suites for the active checkout.
+    exclude: [
+      "**/.worktrees/**",
+      "**/.tmp/**",
+      "**/node_modules/**",
+      "**/dist/**",
+    ],
     coverage: {
       reporter: ["text", "lcov"],
     },

@@ -42,16 +42,16 @@ pub(crate) fn classify_chat_terminal(
             reason: "content_filter",
         },
         Some(reason @ ("tool_calls" | "function_call")) => {
-            if evidence.valid_tool_calls > 0 {
-                TerminalDisposition::Completed
-            } else if evidence.dropped_tool_calls > 0 {
+            if evidence.dropped_tool_calls > 0 {
                 TerminalDisposition::Failed {
                     code: "upstream_tool_call_dropped",
                     message: format!(
-                        "Upstream returned {} tool call(s) without a function name, leaving no usable tool call in this turn",
+                        "Upstream returned {} structurally incomplete tool call(s); the turn cannot complete after dropping requested actions",
                         evidence.dropped_tool_calls
                     ),
                 }
+            } else if evidence.valid_tool_calls > 0 {
+                TerminalDisposition::Completed
             } else {
                 TerminalDisposition::Failed {
                     code: "upstream_tool_call_missing",
@@ -62,7 +62,15 @@ pub(crate) fn classify_chat_terminal(
             }
         }
         Some("stop") => {
-            if evidence.has_final_message || evidence.valid_tool_calls > 0 {
+            if evidence.dropped_tool_calls > 0 {
+                TerminalDisposition::Failed {
+                    code: "upstream_tool_call_dropped",
+                    message: format!(
+                        "Upstream returned {} structurally incomplete tool call(s); the turn cannot complete after dropping requested actions",
+                        evidence.dropped_tool_calls
+                    ),
+                }
+            } else if evidence.has_final_message || evidence.valid_tool_calls > 0 {
                 TerminalDisposition::Completed
             } else {
                 TerminalDisposition::Failed {
@@ -81,6 +89,20 @@ pub(crate) fn classify_chat_terminal(
             message: format!("Upstream returned unknown finish_reason={reason}"),
         },
     }
+}
+
+pub(crate) fn chat_tool_arguments_are_complete(arguments: Option<&Value>) -> bool {
+    match arguments {
+        None => true,
+        Some(Value::String(arguments)) => streamed_tool_arguments_are_complete(arguments),
+        Some(Value::Null) => false,
+        Some(_) => true,
+    }
+}
+
+pub(crate) fn streamed_tool_arguments_are_complete(arguments: &str) -> bool {
+    let arguments = arguments.trim();
+    arguments.is_empty() || serde_json::from_str::<Value>(arguments).is_ok()
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -182,25 +204,24 @@ pub(crate) fn classify_native_responses_terminal(
                     ),
                 });
             }
+            if evidence.dropped_tool_calls > 0 {
+                return Some(NativeResponsesTerminalDisposition::ProtocolError {
+                    code: "upstream_tool_call_dropped",
+                    message: format!(
+                        "Upstream response.completed included {} structurally incomplete client tool call(s); the turn cannot complete after dropping requested actions",
+                        evidence.dropped_tool_calls
+                    ),
+                });
+            }
             if evidence.has_final_message
                 || evidence.has_compaction_output
                 || evidence.valid_tool_calls > 0
             {
                 Some(NativeResponsesTerminalDisposition::Completed)
             } else {
-                let detail = if evidence.dropped_tool_calls > 0 {
-                    format!(
-                        "; {} client tool call(s) were structurally incomplete",
-                        evidence.dropped_tool_calls
-                    )
-                } else {
-                    String::new()
-                };
                 Some(NativeResponsesTerminalDisposition::ProtocolError {
                     code: "upstream_final_output_missing",
-                    message: format!(
-                        "Upstream response.completed did not include final output text, refusal, compaction output, or a complete client tool call{detail}"
-                    ),
+                    message: "Upstream response.completed did not include final output text, refusal, compaction output, or a complete client tool call".to_string(),
                 })
             }
         }
@@ -272,7 +293,14 @@ fn is_complete_client_tool_call(item_type: &str, item: &Value) -> bool {
 
     match item_type {
         "function_call" => {
-            is_nonempty_string(item.get("name")) && is_nonempty_string(item.get("arguments"))
+            is_nonempty_string(item.get("name"))
+                && item
+                    .get("arguments")
+                    .and_then(Value::as_str)
+                    .is_some_and(|arguments| {
+                        !arguments.trim().is_empty()
+                            && streamed_tool_arguments_are_complete(arguments)
+                    })
         }
         "custom_tool_call" => {
             is_nonempty_string(item.get("name")) && is_nonempty_string(item.get("input"))
@@ -287,5 +315,68 @@ fn is_complete_client_tool_call(item_type: &str, item: &Value) -> bool {
             item.get("action").is_some_and(|action| action.is_object())
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn chat_terminal_never_completes_after_dropping_any_tool_call() {
+        for (finish_reason, evidence) in [
+            (
+                "tool_calls",
+                ChatTerminalEvidence {
+                    has_final_message: false,
+                    valid_tool_calls: 1,
+                    dropped_tool_calls: 1,
+                },
+            ),
+            (
+                "stop",
+                ChatTerminalEvidence {
+                    has_final_message: true,
+                    valid_tool_calls: 0,
+                    dropped_tool_calls: 1,
+                },
+            ),
+        ] {
+            assert!(matches!(
+                classify_chat_terminal(Some(finish_reason), evidence),
+                TerminalDisposition::Failed {
+                    code: "upstream_tool_call_dropped",
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn responses_terminal_never_completes_after_dropping_any_tool_call() {
+        let terminal = json!({
+            "response": {
+                "status": "completed"
+            }
+        });
+        let disposition = classify_native_responses_terminal(
+            "response.completed",
+            &terminal,
+            NativeResponsesEvidence {
+                has_final_message: true,
+                has_compaction_output: false,
+                valid_tool_calls: 1,
+                dropped_tool_calls: 1,
+            },
+        );
+
+        assert!(matches!(
+            disposition,
+            Some(NativeResponsesTerminalDisposition::ProtocolError {
+                code: "upstream_tool_call_dropped",
+                ..
+            })
+        ));
     }
 }

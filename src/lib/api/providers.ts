@@ -210,6 +210,14 @@ export const providersApi = {
     return await invoke("get_current_provider", { app: appId });
   },
 
+  async getCodexLogicalProviderForEditing(
+    providerId: string,
+  ): Promise<Provider> {
+    return await invoke("get_codex_logical_provider_for_editing", {
+      providerId,
+    });
+  },
+
   async add(
     provider: Provider,
     appId: AppId,
@@ -454,5 +462,12 @@ export const universalProvidersApi = {
    */
   async sync(id: string): Promise<boolean> {
     return await invoke("sync_universal_provider", { id });
+  },
+
+  /**
+   * 原子保存统一供应商定义并同步到所有启用的应用
+   */
+  async saveAndSync(provider: UniversalProvider): Promise<boolean> {
+    return await invoke("save_and_sync_universal_provider", { provider });
   },
 };

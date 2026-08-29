@@ -312,6 +312,24 @@ pub(crate) fn effective_settings_for_candidate(
     candidate: &Provider,
     strict_router_references: bool,
 ) -> Result<Value, AppError> {
+    let mut providers = db
+        .get_all_providers("codex")?
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+    providers.insert(candidate.id.clone(), candidate.clone());
+    effective_settings_for_candidate_with_providers(candidate, strict_router_references, &providers)
+}
+
+/// Build the Router's effective settings against an already prepared Provider snapshot.
+///
+/// Provider mutations use this before opening the SQLite transaction so dependent V2
+/// subagent profile changes can be committed atomically with the Provider facts that produced
+/// them. Callers must include `candidate` and every referenced target Provider in `providers`.
+pub(crate) fn effective_settings_for_candidate_with_providers(
+    candidate: &Provider,
+    strict_router_references: bool,
+    providers: &HashMap<String, Provider>,
+) -> Result<Value, AppError> {
     let Some(routing) = candidate.settings_config.get("codexRouting") else {
         return Ok(candidate.settings_config.clone());
     };
@@ -320,15 +338,10 @@ pub(crate) fn effective_settings_for_candidate(
     let CodexRoutingDocument::V2(plan) = document else {
         return Ok(candidate.settings_config.clone());
     };
-    let mut providers = db
-        .get_all_providers("codex")?
-        .into_iter()
-        .collect::<HashMap<_, _>>();
-    providers.insert(candidate.id.clone(), candidate.clone());
     let compiled = if strict_router_references {
-        compile_v2_strict(&plan, &providers)
+        compile_v2_strict(&plan, providers)
     } else {
-        compile_v2(&plan, &providers)
+        compile_v2(&plan, providers)
     }
     .map_err(|error| AppError::InvalidInput(format!("{}: {}", error.code, error.message)))?;
     Ok(projection_settings(candidate, &compiled))

@@ -107,6 +107,45 @@ wire_api = "responses"
 }
 
 #[test]
+fn historical_non_openai_hint_does_not_block_chat_and_responses_discovery() {
+    let provider = codex_provider(
+        r#"model = "qwen-visible"
+model_provider = "qwen"
+[model_providers.qwen]
+base_url = "https://gateway.example/v1"
+wire_api = "responses"
+"#,
+        "anthropic",
+    );
+
+    let candidates = compile_provider_probe_candidates(&provider)
+        .expect("historical protocol hints must not suppress maintained probe transports");
+
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].public_model, "qwen-visible");
+    assert_eq!(
+        candidates[0]
+            .prepare_request(
+                TransportKind::OpenAiChat,
+                json!({"model": "qwen-visible", "input": "probe"})
+            )
+            .expect("prepare Chat candidate")
+            .url,
+        "https://gateway.example/v1/chat/completions"
+    );
+    assert_eq!(
+        candidates[0]
+            .prepare_request(
+                TransportKind::OpenAiResponses,
+                json!({"model": "qwen-visible", "input": "probe"})
+            )
+            .expect("prepare Responses candidate")
+            .url,
+        "https://gateway.example/v1/responses"
+    );
+}
+
+#[test]
 fn compiled_candidate_prepares_the_same_request_as_the_production_policy() {
     let mut provider = codex_provider(
         r#"model = "qwen-visible"
@@ -289,7 +328,7 @@ fn managed_oauth_provider_is_not_an_active_third_party_probe_candidate() {
 }
 
 #[test]
-fn a_partial_but_reachable_selection_updates_transport_without_enabling_reasoning_by_itself() {
+fn a_partial_but_reachable_selection_keeps_the_historical_transport_unchanged() {
     let mut provider = codex_provider(
         "model = \"qwen-visible\"\nbase_url = \"https://vllm.example/v1\"\nwire_api = \"responses\"\n",
         "openai_responses",
@@ -300,13 +339,13 @@ fn a_partial_but_reachable_selection_updates_transport_without_enabling_reasonin
         branches: Vec::new(),
     };
 
-    assert!(apply_probe_selection_to_provider(&mut provider, &result).unwrap());
+    assert!(!apply_probe_selection_to_provider(&mut provider, &result).unwrap());
     assert_eq!(
         provider
             .meta
             .as_ref()
             .and_then(|meta| meta.api_format.as_deref()),
-        Some("openai_chat")
+        Some("openai_responses")
     );
 }
 

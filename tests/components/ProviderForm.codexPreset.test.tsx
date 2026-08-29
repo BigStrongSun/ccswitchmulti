@@ -80,6 +80,7 @@ vi.mock("@/components/providers/forms/CodexFormFields", () => ({
     allowModelMenuProjectionToggle,
     onApiKeyChange,
     onCatalogModelsChange,
+    onProtocolProbeReceiptIdsChange,
   }: {
     codexApiKey: string;
     codexBaseUrl: string;
@@ -95,6 +96,7 @@ vi.mock("@/components/providers/forms/CodexFormFields", () => ({
     onCatalogModelsChange?: (
       models: Array<{ model: string; contextWindow?: number | string }>,
     ) => void;
+    onProtocolProbeReceiptIdsChange?: (receiptIds: string[]) => void;
   }) => (
     <section aria-label="codex-provider-details">
       <div data-testid="codex-api-key">{codexApiKey}</div>
@@ -124,6 +126,14 @@ vi.mock("@/components/providers/forms/CodexFormFields", () => ({
       </button>
       <button type="button" onClick={() => onApiKeyChange?.("sk-test")}>
         mock-set-api-key
+      </button>
+      <button
+        type="button"
+        onClick={() =>
+          onProtocolProbeReceiptIdsChange?.(["receipt-model-a"])
+        }
+      >
+        mock-set-probe-receipts
       </button>
     </section>
   ),
@@ -220,6 +230,39 @@ describe("ProviderForm Codex preset selection", () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
 
     expect(scrollIntoView).not.toHaveBeenCalled();
+  });
+
+  it("passes deep-probe receipt leases to the outer save coordinator without persisting them in settings", async () => {
+    const onSubmit = vi.fn();
+    renderProviderForm({
+      showButtons: true,
+      submitLabel: "保存",
+      onSubmit,
+      initialData: {
+        name: "Third-party relay",
+        category: "custom",
+        settingsConfig: {
+          auth: { OPENAI_API_KEY: "sk-test" },
+          config:
+            'model_provider = "relay"\nmodel = "model-a"\n[model_providers.relay]\nbase_url = "https://relay.example/v1"\nwire_api = "responses"\n',
+          modelCatalog: { models: [{ model: "model-a" }] },
+        },
+        meta: { apiFormat: "openai_responses" },
+      },
+    });
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "mock-set-probe-receipts" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
+    expect(onSubmit.mock.calls[0][0].protocolProbeReceiptIds).toEqual([
+      "receipt-model-a",
+    ]);
+    expect(
+      JSON.parse(onSubmit.mock.calls[0][0].settingsConfig),
+    ).not.toHaveProperty("protocolProbeReceiptIds");
   });
 
   it("scrolls to Codex provider details after selecting any Codex source preset", async () => {

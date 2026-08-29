@@ -12,6 +12,12 @@ import {
   buildLocalProxyRequestOverrides,
   formatRequestOverrideObject,
 } from "@/lib/requestOverrides";
+import { normalizeCodexChatReasoningForSave } from "@/lib/codexChatReasoning";
+export { normalizeCodexChatReasoningForSave } from "@/lib/codexChatReasoning";
+import {
+  buildCodexProtocolMeta,
+  readCodexProtocolSettings,
+} from "@/lib/codexProtocolSettings";
 import {
   codexSubagentV2Api,
   providersApi,
@@ -30,6 +36,10 @@ import type {
   CodexChatReasoning,
   CodexReasoningEffort,
   PromptCacheRoutingMode,
+  CodexProtocolMode,
+  CodexReasoningProjection,
+  CodexToolSchemaDialect,
+  CodexHistoryReplay,
   ClaudeApiKeyField,
 } from "@/types";
 import {
@@ -85,10 +95,7 @@ import { ProviderPresetSelector } from "./ProviderPresetSelector";
 import { BasicFormFields } from "./BasicFormFields";
 import { ClaudeFormFields } from "./ClaudeFormFields";
 import { ClaudeDesktopProviderForm } from "./ClaudeDesktopProviderForm";
-import {
-  CodexFormFields,
-  type CodexProviderSplitSuggestion,
-} from "./CodexFormFields";
+import { CodexFormFields } from "./CodexFormFields";
 import { completeCodexReasoningEffortMap } from "./codexReasoningCapability";
 import { GrokBuildProviderForm } from "./GrokBuildProviderForm";
 import { GeminiFormFields } from "./GeminiFormFields";
@@ -355,106 +362,6 @@ const normalizeCodexSpawnAgentModelsForSave = (
   return normalized;
 };
 
-type CodexChatReasoningSaveContext = {
-  providerName?: string;
-  baseUrl?: string;
-  models?: CodexCatalogModel[];
-};
-
-const QWEN_VLLM_MIN_OUTPUT_TOKENS = 2048;
-
-// 把表单里的最小输出预算收敛为正整数；空值或非法值保持未配置。
-const normalizeCodexOutputTokensForSave = (
-  value: number | undefined,
-): number | undefined => {
-  if (value === undefined) return undefined;
-  const normalized = Math.floor(Number(value));
-  return Number.isFinite(normalized) && normalized > 0 ? normalized : undefined;
-};
-
-// 判断当前 provider 是否是 Qwen + vLLM 兼容端点，保存时需要沿用后端同一组思考参数默认值。
-const shouldApplyQwenVllmReasoningDefaults = (
-  context?: CodexChatReasoningSaveContext,
-): boolean => {
-  const haystack = [
-    context?.providerName,
-    context?.baseUrl,
-    ...(context?.models ?? []).flatMap((model) => [
-      model.model,
-      model.upstreamModel,
-      model.upstream_model,
-      model.displayName,
-    ]),
-  ]
-    .filter(Boolean)
-    .join(" ")
-    .toLowerCase();
-  return (
-    haystack.includes("qwen") &&
-    (haystack.includes("vllm") || haystack.includes("matrixminecraft"))
-  );
-};
-
-export const normalizeCodexChatReasoningForSave = (
-  value?: CodexChatReasoning,
-  context?: CodexChatReasoningSaveContext,
-): CodexChatReasoning | undefined => {
-  const supportsEffort = value?.supportsEffort === true;
-  const supportsThinking = value?.supportsThinking === true || supportsEffort;
-  const hasExplicitConfig = value && Object.keys(value).length > 0;
-  const minOutputTokens = normalizeCodexOutputTokensForSave(
-    value?.minOutputTokens,
-  );
-  const defaultOutputTokens = normalizeCodexOutputTokensForSave(
-    value?.defaultOutputTokens,
-  );
-
-  if (!supportsThinking && !supportsEffort) {
-    return hasExplicitConfig
-      ? {
-          supportsThinking: false,
-          supportsEffort: false,
-          thinkingParam: "none",
-          effortParam: "none",
-          ...(minOutputTokens ? { minOutputTokens } : {}),
-          ...(defaultOutputTokens ? { defaultOutputTokens } : {}),
-          outputFormat: value?.outputFormat ?? "auto",
-        }
-      : undefined;
-  }
-
-  const useQwenVllmDefaults = shouldApplyQwenVllmReasoningDefaults(context);
-  const thinkingParam =
-    supportsThinking &&
-    useQwenVllmDefaults &&
-    (!value?.thinkingParam || value.thinkingParam === "thinking")
-      ? "enable_thinking"
-      : supportsThinking
-        ? (value?.thinkingParam ?? "thinking")
-        : "none";
-  const safeMinOutputTokens = useQwenVllmDefaults
-    ? Math.max(minOutputTokens ?? 0, QWEN_VLLM_MIN_OUTPUT_TOKENS)
-    : minOutputTokens;
-  const safeDefaultOutputTokens = defaultOutputTokens;
-
-  return {
-    supportsThinking,
-    supportsEffort,
-    thinkingParam,
-    effortParam: supportsEffort
-      ? (value?.effortParam ?? "reasoning_effort")
-      : "none",
-    effortValueMode: supportsEffort
-      ? (value?.effortValueMode ?? "passthrough")
-      : undefined,
-    ...(safeMinOutputTokens ? { minOutputTokens: safeMinOutputTokens } : {}),
-    ...(safeDefaultOutputTokens
-      ? { defaultOutputTokens: safeDefaultOutputTokens }
-      : {}),
-    outputFormat: value?.outputFormat ?? "auto",
-  };
-};
-
 type LocalProxyRequestOverridesBuildResult = ReturnType<
   typeof buildLocalProxyRequestOverrides
 >;
@@ -468,9 +375,6 @@ export interface ProviderFormProps {
   onUniversalPresetSelect?: (preset: UniversalProviderPreset) => void;
   onManageUniversalProviders?: () => void;
   onSubmittingChange?: (isSubmitting: boolean) => void;
-  onCodexProviderSplitChange?: (
-    suggestion: CodexProviderSplitSuggestion | null,
-  ) => void;
   initialData?: {
     name?: string;
     websiteUrl?: string;
@@ -505,7 +409,6 @@ function ProviderFormFull({
   onUniversalPresetSelect,
   onManageUniversalProviders,
   onSubmittingChange,
-  onCodexProviderSplitChange,
   initialData,
   showButtons = true,
   isProxyTakeover = false,
@@ -795,8 +698,6 @@ function ProviderFormFull({
   const [codexFastMode, setCodexFastMode] = useState<boolean>(
     () => initialData?.meta?.codexFastMode ?? false,
   );
-  const [codexProviderSplit, setCodexProviderSplit] =
-    useState<CodexProviderSplitSuggestion | null>(null);
   const [codexChatReasoning, setCodexChatReasoning] =
     useState<CodexChatReasoning>(
       () => initialData?.meta?.codexChatReasoning ?? {},
@@ -860,6 +761,38 @@ function ProviderFormFull({
 
   const [localCodexApiFormat, setLocalCodexApiFormat] =
     useState<CodexApiFormat>(initialCodexApiFormat);
+  const initialCodexProtocolSettings = readCodexProtocolSettings(
+    initialData?.meta,
+    initialCodexApiFormat,
+  );
+  const [codexProtocolMode, setCodexProtocolMode] = useState<CodexProtocolMode>(
+    initialCodexProtocolSettings.protocolMode,
+  );
+  const [codexReasoningProjection, setCodexReasoningProjection] =
+    useState<CodexReasoningProjection>(
+      initialCodexProtocolSettings.reasoningProjection,
+    );
+  const [codexToolSchemaDialect, setCodexToolSchemaDialect] =
+    useState<CodexToolSchemaDialect>(
+      initialCodexProtocolSettings.toolSchemaDialect,
+    );
+  const [codexHistoryReplay, setCodexHistoryReplay] =
+    useState<CodexHistoryReplay>(initialCodexProtocolSettings.historyReplay);
+  const [codexProtocolProbeReceiptIds, setCodexProtocolProbeReceiptIds] =
+    useState<string[]>([]);
+
+  useEffect(() => {
+    if (appId !== "codex") return;
+    const loaded = readCodexProtocolSettings(
+      initialData?.meta,
+      initialCodexApiFormat,
+    );
+    setCodexProtocolMode(loaded.protocolMode);
+    setCodexReasoningProjection(loaded.reasoningProjection);
+    setCodexToolSchemaDialect(loaded.toolSchemaDialect);
+    setCodexHistoryReplay(loaded.historyReplay);
+    setCodexProtocolProbeReceiptIds([]);
+  }, [appId, initialData, initialCodexApiFormat]);
 
   // Codex 菜单映射开关 —— 只控制 modelCatalog 是否投射到 /model 菜单和本地映射。
   // modelCatalog 现在也承担目录/上下文元数据职责，保存和获取模型列表不再依赖此开关。
@@ -911,6 +844,9 @@ function ProviderFormFull({
   const handleCodexApiFormatChange = useCallback(
     (format: CodexApiFormat) => {
       setLocalCodexApiFormat(format);
+      if (format === "anthropic") {
+        setCodexProtocolMode("auto");
+      }
       // wire_api is always "responses" for Codex; format controls proxy-layer conversion
       setCodexConfig((prev) => {
         const updated = setCodexWireApi(prev, "responses");
@@ -929,6 +865,10 @@ function ProviderFormFull({
       setCodexRouting({ enabled: false, defaultRouteId: "", routes: [] });
       setCodexTakeoverEnabled(true);
       setPromptCacheRouting("auto");
+      setCodexProtocolMode("auto");
+      setCodexReasoningProjection("none");
+      setCodexToolSchemaDialect("openai");
+      setCodexHistoryReplay("native_only");
     }
   }, [appId, initialData, selectedPresetId, resetCodexConfig, setCodexRouting]);
 
@@ -1809,6 +1749,11 @@ function ProviderFormFull({
       name: values.name.trim(),
       websiteUrl: values.websiteUrl?.trim() ?? "",
       settingsConfig,
+      ...(appId === "codex" &&
+      codexProtocolMode !== "manual" &&
+      codexProtocolProbeReceiptIds.length > 0
+        ? { protocolProbeReceiptIds: [...codexProtocolProbeReceiptIds] }
+        : {}),
     };
 
     if (appId === "opencode") {
@@ -1828,10 +1773,6 @@ function ProviderFormFull({
 
     if (isAnyOmoCategory && !payload.presetCategory) {
       payload.presetCategory = category;
-    }
-
-    if (appId === "codex" && !isEditMode && codexProviderSplit) {
-      payload.codexProviderSplit = codexProviderSplit;
     }
 
     if (activePreset) {
@@ -1902,7 +1843,7 @@ function ProviderFormFull({
     // 确定 providerType（新建时从预设获取，编辑时从现有数据获取）
     const providerType = presetProviderType || initialData?.meta?.providerType;
 
-    const nextMeta: ProviderMeta = {
+    let nextMeta: ProviderMeta = {
       ...(baseMeta ?? {}),
       commonConfigEnabled:
         appId === "claude"
@@ -2029,6 +1970,16 @@ function ProviderFormFull({
           ? true
           : undefined,
     };
+
+    if (appId === "codex") {
+      nextMeta = buildCodexProtocolMeta(nextMeta, {
+        protocolMode: category === "official" ? "auto" : codexProtocolMode,
+        apiFormat: localCodexApiFormat,
+        reasoningProjection: codexReasoningProjection,
+        toolSchemaDialect: codexToolSchemaDialect,
+        historyReplay: codexHistoryReplay,
+      });
+    }
 
     if (!isCodexOauthProvider && "codexFastMode" in nextMeta) {
       delete nextMeta.codexFastMode;
@@ -2160,6 +2111,10 @@ function ProviderFormFull({
         setCodexChatReasoning({});
         setCodexRouting({ enabled: false, defaultRouteId: "", routes: [] });
         setPromptCacheRouting("auto");
+        setCodexProtocolMode("auto");
+        setCodexReasoningProjection("none");
+        setCodexToolSchemaDialect("openai");
+        setCodexHistoryReplay("native_only");
         setLocalCodexApiFormat(
           codexApiFormatFromWireApi(extractCodexWireApi(template.config)) ??
             "openai_responses",
@@ -2212,6 +2167,10 @@ function ProviderFormFull({
       setCodexChatReasoning(preset.codexChatReasoning ?? {});
       setCodexRouting({ enabled: false, defaultRouteId: "", routes: [] });
       setPromptCacheRouting(preset.promptCacheRouting ?? "auto");
+      setCodexProtocolMode("auto");
+      setCodexReasoningProjection("none");
+      setCodexToolSchemaDialect("openai");
+      setCodexHistoryReplay("native_only");
       setLocalCodexApiFormat(
         preset.apiFormat ??
           codexApiFormatFromWireApi(extractCodexWireApi(config)) ??
@@ -2753,6 +2712,17 @@ function ProviderFormFull({
                 onCodexChatReasoningChange={setCodexChatReasoning}
                 promptCacheRouting={promptCacheRouting}
                 onPromptCacheRoutingChange={setPromptCacheRouting}
+                protocolMode={codexProtocolMode}
+                onProtocolModeChange={setCodexProtocolMode}
+                reasoningProjection={codexReasoningProjection}
+                onReasoningProjectionChange={setCodexReasoningProjection}
+                toolSchemaDialect={codexToolSchemaDialect}
+                onToolSchemaDialectChange={setCodexToolSchemaDialect}
+                historyReplay={codexHistoryReplay}
+                onHistoryReplayChange={setCodexHistoryReplay}
+                onProtocolProbeReceiptIdsChange={
+                  setCodexProtocolProbeReceiptIds
+                }
                 catalogModels={codexCatalogModels}
                 presetCatalogModels={codexPresetBaseline}
                 onCatalogModelsChange={setCodexCatalogModels}
@@ -2760,14 +2730,6 @@ function ProviderFormFull({
                 onSpawnAgentModelsChange={setCodexSpawnAgentModels}
                 codexRouting={codexRouting}
                 onCodexRoutingChange={setCodexRouting}
-                onProviderSplitSuggestionChange={
-                  !isEditMode
-                    ? (suggestion) => {
-                        setCodexProviderSplit(suggestion);
-                        onCodexProviderSplitChange?.(suggestion);
-                      }
-                    : undefined
-                }
                 speedTestEndpoints={speedTestEndpoints}
                 customUserAgent={customUserAgent}
                 onCustomUserAgentChange={setCustomUserAgent}
@@ -3129,7 +3091,8 @@ export type ProviderFormValues = ProviderFormData & {
   presetCategory?: ProviderCategory;
   isPartner?: boolean;
   meta?: ProviderMeta;
+  /** Ephemeral deep-probe leases. Never persisted inside Provider settings. */
+  protocolProbeReceiptIds?: string[];
   providerKey?: string; // OpenCode/OpenClaw: user-defined provider key
   suggestedDefaults?: OpenClawSuggestedDefaults; // OpenClaw: suggested default model configuration
-  codexProviderSplit?: CodexProviderSplitSuggestion;
 };

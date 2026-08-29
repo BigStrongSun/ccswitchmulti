@@ -8,6 +8,10 @@ import { UniversalProviderFormModal } from "./UniversalProviderFormModal";
 import { universalProvidersApi } from "@/lib/api";
 import type { UniversalProvider, UniversalProvidersMap } from "@/types";
 import { deepClone } from "@/utils/deepClone";
+import {
+  isUniversalProviderSetCancelled,
+  useUniversalProviderSetSave,
+} from "./useUniversalProviderSetSave";
 
 interface UniversalProviderPanelProps {
   context?: "default" | "codex-router-source";
@@ -35,6 +39,8 @@ export function UniversalProviderPanel({
     id: string;
     name: string;
   }>({ open: false, id: "", name: "" });
+  const { persistUniversalProviderSet, dialogs: providerSetDialogs } =
+    useUniversalProviderSetSave();
 
   // 加载数据
   const loadProviders = useCallback(async () => {
@@ -58,16 +64,17 @@ export function UniversalProviderPanel({
     loadProviders();
   }, [loadProviders]);
 
+  const showSaveError = useCallback((error: unknown, message: string) => {
+    if (isUniversalProviderSetCancelled(error)) return;
+    console.error(message, error);
+    toast.error(message);
+  }, []);
+
   // 添加/编辑供应商
   const handleSave = useCallback(
     async (provider: UniversalProvider) => {
       try {
-        await universalProvidersApi.upsert(provider);
-
-        // 新建模式下自动同步到各应用
-        if (!editingProvider) {
-          await universalProvidersApi.sync(provider.id);
-        }
+        await persistUniversalProviderSet(provider);
 
         toast.success(
           editingProvider
@@ -81,23 +88,29 @@ export function UniversalProviderPanel({
         loadProviders();
         setEditingProvider(null);
       } catch (error) {
-        console.error("Failed to save universal provider:", error);
-        toast.error(
+        showSaveError(
+          error,
           t("universalProvider.saveError", {
             defaultValue: "保存统一供应商失败",
           }),
         );
+        throw error;
       }
     },
-    [editingProvider, loadProviders, t],
+    [
+      editingProvider,
+      loadProviders,
+      persistUniversalProviderSet,
+      showSaveError,
+      t,
+    ],
   );
 
   // 保存并同步供应商
   const handleSaveAndSync = useCallback(
     async (provider: UniversalProvider) => {
       try {
-        await universalProvidersApi.upsert(provider);
-        await universalProvidersApi.sync(provider.id);
+        await persistUniversalProviderSet(provider);
         toast.success(
           t("universalProvider.savedAndSynced", {
             defaultValue: "已保存并同步到所有应用",
@@ -106,15 +119,16 @@ export function UniversalProviderPanel({
         loadProviders();
         setEditingProvider(null);
       } catch (error) {
-        console.error("Failed to save and sync universal provider:", error);
-        toast.error(
+        showSaveError(
+          error,
           t("universalProvider.saveAndSyncError", {
             defaultValue: "保存并同步失败",
           }),
         );
+        throw error;
       }
     },
-    [loadProviders, t],
+    [loadProviders, persistUniversalProviderSet, showSaveError, t],
   );
 
   // 删除供应商
@@ -142,23 +156,30 @@ export function UniversalProviderPanel({
   // 同步供应商
   const handleSync = useCallback(async () => {
     if (!syncConfirm.id) return;
+    const provider = providers[syncConfirm.id];
+    setSyncConfirm({ open: false, id: "", name: "" });
+    if (!provider) return;
 
     try {
-      await universalProvidersApi.sync(syncConfirm.id);
+      await persistUniversalProviderSet(provider);
       toast.success(
         t("universalProvider.synced", { defaultValue: "已同步到所有应用" }),
       );
     } catch (error) {
-      console.error("Failed to sync universal provider:", error);
-      toast.error(
+      showSaveError(
+        error,
         t("universalProvider.syncError", {
           defaultValue: "同步统一供应商失败",
         }),
       );
-    } finally {
-      setSyncConfirm({ open: false, id: "", name: "" });
     }
-  }, [syncConfirm.id, t]);
+  }, [
+    persistUniversalProviderSet,
+    providers,
+    showSaveError,
+    syncConfirm.id,
+    t,
+  ]);
 
   // 打开同步确认
   const handleSyncClick = useCallback(
@@ -183,8 +204,7 @@ export function UniversalProviderPanel({
         createdAt: Date.now(),
       };
       try {
-        await universalProvidersApi.upsert(duplicated);
-        await universalProvidersApi.sync(duplicated.id);
+        await persistUniversalProviderSet(duplicated);
         toast.success(
           t("universalProvider.duplicatedAndSynced", {
             defaultValue: "统一供应商已复制并同步",
@@ -192,15 +212,15 @@ export function UniversalProviderPanel({
         );
         loadProviders();
       } catch (error) {
-        console.error("Failed to duplicate universal provider:", error);
-        toast.error(
+        showSaveError(
+          error,
           t("universalProvider.duplicateError", {
             defaultValue: "复制统一供应商失败",
           }),
         );
       }
     },
-    [loadProviders, t],
+    [loadProviders, persistUniversalProviderSet, showSaveError, t],
   );
 
   // 打开编辑
@@ -299,6 +319,8 @@ export function UniversalProviderPanel({
         onSaveAndSync={handleSaveAndSync}
         editingProvider={editingProvider}
       />
+
+      {providerSetDialogs}
 
       {/* 删除确认对话框 */}
       <ConfirmDialog

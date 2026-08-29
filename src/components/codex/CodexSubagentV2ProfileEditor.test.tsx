@@ -207,6 +207,9 @@ const ipcState = vi.hoisted(() => ({
 // keeps the same provider record that get_providers/update_provider use in the
 // application, so save/remount tests cannot pass through a second local schema.
 vi.mock("@tauri-apps/api/core", () => ({
+  Channel: class<T> {
+    onmessage: ((event: T) => void) | null = null;
+  },
   invoke: vi.fn(async (command: string, args?: Record<string, unknown>) => {
     const mutationResult = (savedProvider: Provider) => {
       const projection = ipcState.nextProjection ?? { status: "applied" };
@@ -241,6 +244,107 @@ vi.mock("@tauri-apps/api/core", () => ({
     switch (command) {
       case "get_providers":
         return JSON.parse(JSON.stringify(ipcState.providers));
+      case "preflight_codex_provider_protocol_compatibility": {
+        const source = args?.provider as Provider;
+        const models = source.settingsConfig.modelCatalog.models.map(
+          (model: { model: string }) => model.model,
+        );
+        return {
+          provider: source,
+          receiptIds: models.map(
+            (model: string) => `receipt:${source.id}:${model}`,
+          ),
+          protocolApplied: false,
+          records: models.map((model: string) => ({
+            probeVersion: 1,
+            target: {
+              provider_id: source.id,
+              route_id: null,
+              public_model: model,
+              upstream_model: model,
+              transport: "open_ai_responses",
+              endpoint_fingerprint: "endpoint",
+              authentication_kind: "bearer",
+              credential_fingerprint: "credential",
+            },
+            result: {
+              selected_transport: "open_ai_responses",
+              readiness: "verified",
+              branches: [],
+            },
+            testedAt: 100,
+            expiresAt: 200,
+          })),
+        };
+      }
+      case "prepare_codex_provider_set_batch": {
+        const request = args?.request as {
+          sources: Array<{ provider: Provider; receiptIds: string[] }>;
+          router: Provider;
+        };
+        return {
+          digest: `digest:${request.router.id}`,
+          sourcePreviews: request.sources.map(({ provider: source }) => ({
+            digest: `digest:${source.id}`,
+            sourceProviderId: source.id,
+            responsesModels: source.settingsConfig.modelCatalog.models.map(
+              (model: { model: string }) => model.model,
+            ),
+            chatModels: [],
+            plan: { kind: "single", transport: "open_ai_responses" },
+          })),
+          routerProviderId: request.router.id,
+          requiresSplitConfirmation: false,
+          blocked: false,
+        };
+      }
+      case "commit_codex_provider_set_batch": {
+        const request = args?.request as {
+          sources: Array<{ provider: Provider; receiptIds: string[] }>;
+          router: Provider;
+          digest: string;
+        };
+        for (const { provider: source } of request.sources) {
+          ipcState.providers[source.id] = JSON.parse(JSON.stringify(source));
+        }
+        const savedRouter = JSON.parse(
+          JSON.stringify(request.router),
+        ) as Provider;
+        const routing = savedRouter.settingsConfig.codexRouting;
+        if (routing.subagentVersion === "v2" && !routing.subagentV2) {
+          routing.subagentV2 = {
+            schemaVersion: 2,
+            selectionPolicy: "balanced",
+            profiles: {
+              "qwen-draft": {
+                model: "QWEN-ＤＲＡＦＴ",
+                enabled: false,
+                questionnaire: {
+                  taskStrengths: ["repository_exploration"],
+                  optimization: "balanced",
+                  writeScope: "read_only",
+                  preference: "eligible",
+                },
+                reasoning: { policy: "delegated" },
+              },
+            },
+          };
+        }
+        ipcState.providers[savedRouter.id] = savedRouter;
+        return {
+          preview: {
+            digest: request.digest,
+            sourcePreviews: [],
+            routerProviderId: savedRouter.id,
+            requiresSplitConfirmation: false,
+            blocked: false,
+          },
+          router: JSON.parse(JSON.stringify(savedRouter)),
+          projections: [],
+          status: "committed",
+          projectionErrorCode: null,
+        };
+      }
       case "update_provider": {
         if (!args || args.app !== "codex") {
           throw new Error(
@@ -735,12 +839,23 @@ async function mountWorkspaceWithoutPlan(source = provider()) {
 
 async function mountWizardFromPersistedPlan() {
   const loaded = await providersApi.getAll("codex");
+  const wizardProviders = Object.values(loaded).map((candidate) =>
+    candidate.settingsConfig.codexRouting
+      ? candidate
+      : {
+          ...candidate,
+          settingsConfig: {
+            ...candidate.settingsConfig,
+            auth: { OPENAI_API_KEY: "sk-test" },
+          },
+        },
+  );
   const queryClient = createQueryClient();
   const result = render(
     <QueryClientProvider client={queryClient}>
       <CodexMultiRouterWizard
         open
-        providers={Object.values(loaded)}
+        providers={wizardProviders}
         onOpenChange={vi.fn()}
         onCreateProvider={vi.fn()}
         onOpenProviderConfig={vi.fn()}
@@ -755,6 +870,20 @@ async function mountWizardFromPersistedPlan() {
     }),
   );
   const user = userEvent.setup();
+  await user.click(
+    await screen.findByRole("button", { name: "自动准备与验证" }),
+  );
+  await user.click(screen.getByRole("button", { name: "开始兼容性深度探测" }));
+  await user.click(screen.getByRole("button", { name: "确认测试" }));
+  await waitFor(() =>
+    expect(invoke).toHaveBeenCalledWith(
+      "preflight_codex_provider_protocol_compatibility",
+      expect.objectContaining({
+        provider: expect.objectContaining({ id: "third-party" }),
+      }),
+    ),
+  );
+  await user.click(await screen.findByRole("button", { name: "关闭" }));
   await user.click(await screen.findByRole("button", { name: "启用并验证" }));
   return { ...result, user };
 }
@@ -783,9 +912,24 @@ function addProviderCalls() {
     .mock.calls.filter(([command]) => command === "add_provider");
 }
 
+function providerSetBatchCommitCalls() {
+  return vi
+    .mocked(invoke)
+    .mock.calls.filter(
+      ([command]) => command === "commit_codex_provider_set_batch",
+    );
+}
+
 function latestSavedPlan() {
   if (v2PersistenceCalls().length > 0) {
     return ipcState.providers.router;
+  }
+  const batchCall = providerSetBatchCommitCalls().at(-1);
+  const batchRouter = (
+    batchCall?.[1] as { request?: { router?: Provider } } | undefined
+  )?.request?.router;
+  if (batchRouter) {
+    return ipcState.providers[batchRouter.id] ?? batchRouter;
   }
   const call = updateProviderCalls().at(-1);
   return (call?.[1] as { provider?: Provider } | undefined)?.provider;
@@ -1062,7 +1206,7 @@ describe("Codex Sub-Agent V2 review round 1 regressions", () => {
 
     const wizard = await mountWizardFromPersistedPlan();
     await wizard.user.click(screen.getByRole("button", { name: "保存并发布" }));
-    await waitFor(() => expect(updateProviderCalls()).toHaveLength(1));
+    await waitFor(() => expect(providerSetBatchCommitCalls()).toHaveLength(1));
 
     expect(latestSavedPlan()?.settingsConfig.codexRouting).toEqual(
       expect.objectContaining({
@@ -1612,30 +1756,34 @@ describe("Codex Sub-Agent V2 new-plan capability defaults", () => {
     });
   });
 
-  it("publishes a new wizard plan before asking the backend to initialize V2", async () => {
+  it("publishes and initializes a new V2 plan in one backend batch transaction", async () => {
     const source = provider();
     ipcState.providers = { [source.id]: source };
     const wizard = await mountWizardFromPersistedPlan();
     await wizard.user.click(screen.getByRole("button", { name: "保存并发布" }));
-    await waitFor(() => expect(addProviderCalls()).toHaveLength(1));
+    await waitFor(() => expect(providerSetBatchCommitCalls()).toHaveLength(1));
 
-    const persisted = (addProviderCalls()[0][1] as { provider: Provider })
-      .provider;
-    expect(persisted.settingsConfig.codexRouting.subagentV2).toBeUndefined();
-    await waitFor(() =>
-      expect(invoke).toHaveBeenCalledWith("initialize_codex_subagent_v2", {
-        providerId: persisted.id,
-      }),
-    );
+    const persisted = latestSavedPlan();
+    expect(persisted).toBeDefined();
+    expect(persisted?.settingsConfig.codexRouting.subagentV2.profiles).toEqual({
+      "qwen-draft": expect.objectContaining({ model: "QWEN-ＤＲＡＦＴ" }),
+    });
     expect(
-      ipcState.providers[persisted.id].settingsConfig.codexRouting.subagentV2
+      vi
+        .mocked(invoke)
+        .mock.calls.filter(
+          ([command]) => command === "initialize_codex_subagent_v2",
+        ),
+    ).toHaveLength(0);
+    expect(
+      ipcState.providers[persisted!.id].settingsConfig.codexRouting.subagentV2
         .profiles,
     ).toEqual({
       "qwen-draft": expect.objectContaining({ model: "QWEN-ＤＲＡＦＴ" }),
     });
   });
 
-  it("keeps an existing uninitialized schema v2 plan uninitialized through an ordinary wizard save", async () => {
+  it("initializes an existing uninitialized schema v2 plan in the batch transaction", async () => {
     seedPersistedPlan(false);
     ipcState.providers.router.settingsConfig.codexRouting.subagentVersion =
       "v2";
@@ -1644,24 +1792,14 @@ describe("Codex Sub-Agent V2 new-plan capability defaults", () => {
       screen.queryByRole("button", { name: /Sub-Agent V2/ }),
     ).not.toBeInTheDocument();
     await wizard.user.click(screen.getByRole("button", { name: "保存并发布" }));
-    await waitFor(() => expect(updateProviderCalls()).toHaveLength(1));
+    await waitFor(() => expect(providerSetBatchCommitCalls()).toHaveLength(1));
 
-    expect(updateProviderCalls()[0]).toEqual([
-      "update_provider",
-      {
-        provider: expect.objectContaining({
-          id: "router",
-        }),
-        app: "codex",
-        originalId: undefined,
-      },
-    ]);
-    const savedProvider = (
-      updateProviderCalls()[0][1] as { provider: Provider }
-    ).provider;
+    const savedProvider = latestSavedPlan();
     expect(
-      savedProvider.settingsConfig.codexRouting.subagentV2,
-    ).toBeUndefined();
+      savedProvider?.settingsConfig.codexRouting.subagentV2.profiles,
+    ).toEqual({
+      "qwen-draft": expect.objectContaining({ model: "QWEN-ＤＲＡＦＴ" }),
+    });
     expect(
       vi
         .mocked(invoke)

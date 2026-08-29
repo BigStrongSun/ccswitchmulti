@@ -5,7 +5,8 @@ use super::projection::{
     CodexRoutingProjectionArtifact, CodexRoutingProjectionStatus, ProjectionReadBack,
 };
 use super::provider_set::{
-    plan_codex_provider_set, CodexProviderSetPersistence, PreparedCodexProviderSetMutation,
+    plan_codex_provider_set, plan_manual_codex_provider_set, CodexProviderSetPersistence,
+    CodexProviderSetPlan, CodexProviderSetPreview, PreparedCodexProviderSetMutation,
 };
 use super::schema::CodexRoutingDocument;
 use crate::database::{Database, ProviderSetDatabaseMutation, ProviderSetDatabaseTransaction};
@@ -15,11 +16,24 @@ use crate::protocol_compatibility::{
     ProtocolCompatibilityRecord, TransportKind, PROBE_PROFILE_VERSION,
 };
 use crate::provider::Provider;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 #[derive(Debug, Clone)]
 pub struct CodexProviderMutationOutcome {
     pub projections: Vec<CodexRoutingProjectionStatus>,
+}
+
+pub(crate) struct PreparedCodexProviderSetCommit {
+    pub transaction: ProviderSetDatabaseTransaction,
+    pub projection_router_ids: Vec<String>,
+}
+
+pub(crate) struct PreparedCodexProviderSetBatchCommit {
+    pub transaction: Option<ProviderSetDatabaseTransaction>,
+    pub projection_router_ids: Vec<String>,
+    pub source_previews: Vec<CodexProviderSetPreview>,
+    pub router: Provider,
+    pub blocked: bool,
 }
 
 pub(crate) struct PreparedCodexProviderMutation {
@@ -60,6 +74,7 @@ struct PreparedRouterDeletion {
 
 pub(crate) struct PreparedCodexProviderDeletion {
     provider_id: String,
+    provider_ids: Vec<String>,
     routers: Vec<PreparedRouterDeletion>,
     active_router_id: Option<String>,
     must_restore_official: bool,
@@ -78,11 +93,16 @@ impl PreparedCodexProviderDeletion {
         for router in &self.routers {
             mutations.push(("codex", router.router_id.as_str(), Some(&router.provider)));
         }
-        mutations.push(("codex", self.provider_id.as_str(), None));
+        for provider_id in &self.provider_ids {
+            mutations.push(("codex", provider_id.as_str(), None));
+        }
     }
 
-    pub(crate) fn projection_setting_key(&self) -> String {
-        format!("codex_multirouter_projection:{}", self.provider_id)
+    pub(crate) fn projection_setting_keys(&self) -> Vec<String> {
+        self.provider_ids
+            .iter()
+            .map(|provider_id| format!("codex_multirouter_projection:{provider_id}"))
+            .collect()
     }
 }
 
@@ -171,21 +191,39 @@ where
 pub fn apply_codex_provider_set_mutation_with_publisher<F>(
     db: &Database,
     prepared: PreparedCodexProviderSetMutation,
-    mut publish: F,
+    publish: F,
 ) -> Result<CodexProviderMutationOutcome, AppError>
 where
     F: FnMut(&CodexRoutingProjectionArtifact) -> Result<ProjectionReadBack, String>,
 {
+    let commit = prepare_codex_provider_set_commit(db, prepared)?;
+    db.apply_provider_set_database_transaction(commit.transaction)?;
+    finalize_codex_provider_set_projections_with_publisher(
+        db,
+        commit.projection_router_ids,
+        publish,
+    )
+}
+
+pub(crate) fn prepare_codex_provider_set_commit(
+    db: &Database,
+    prepared: PreparedCodexProviderSetMutation,
+) -> Result<PreparedCodexProviderSetCommit, AppError> {
     let existing = db
         .get_all_providers("codex")?
         .into_iter()
         .collect::<HashMap<_, _>>();
-    let replanned = plan_codex_provider_set(
-        prepared.source_draft(),
-        prepared.probe_records(),
-        &existing,
-        chrono::Utc::now().timestamp(),
-    )
+    let now = chrono::Utc::now().timestamp();
+    let replanned = if let Some(transport) = prepared.manual_transport() {
+        plan_manual_codex_provider_set(prepared.source_draft(), transport, &existing, now)
+    } else {
+        plan_codex_provider_set(
+            prepared.source_draft(),
+            prepared.probe_records(),
+            &existing,
+            now,
+        )
+    }
     .map_err(provider_set_error)?;
     if replanned.preview.digest != prepared.preview.digest {
         return Err(AppError::InvalidInput(
@@ -243,18 +281,16 @@ where
     }
 
     let current_before = db.get_current_provider("codex")?;
-    let current_provider_after = current_before
-        .as_ref()
-        .filter(|current| {
-            current.as_str() == replanned.preview.source_provider_id
-                || replanned.delete_provider_ids.contains(current)
-        })
-        .map(|_| {
-            (
-                "codex".to_string(),
-                replanned.preview.source_provider_id.clone(),
-            )
-        });
+    let should_activate_source = current_before.as_ref().is_none_or(|current| {
+        current.as_str() == replanned.preview.source_provider_id
+            || replanned.delete_provider_ids.contains(current)
+    });
+    let current_provider_after = should_activate_source.then(|| {
+        (
+            "codex".to_string(),
+            replanned.preview.source_provider_id.clone(),
+        )
+    });
     let profile_owner_ids = replanned
         .profiles
         .iter()
@@ -265,16 +301,220 @@ where
         .iter()
         .map(|provider_id| format!("codex_multirouter_projection:{provider_id}"))
         .collect();
-    db.apply_provider_set_database_transaction(ProviderSetDatabaseTransaction {
-        mutations,
-        profile_owner_ids,
-        records: replanned.profiles.clone(),
-        replace_profile_provider_ids: replanned.replace_profile_provider_ids.clone(),
-        setting_keys_to_delete,
-        universal_provider: None,
-        current_provider_after,
-    })?;
+    Ok(PreparedCodexProviderSetCommit {
+        transaction: ProviderSetDatabaseTransaction {
+            mutations,
+            profile_owner_ids,
+            records: replanned.profiles.clone(),
+            replace_profile_provider_ids: replanned.replace_profile_provider_ids.clone(),
+            setting_keys_to_delete,
+            universal_provider: None,
+            current_provider_after,
+        },
+        projection_router_ids,
+    })
+}
 
+pub(crate) fn prepare_codex_provider_set_batch_commit(
+    db: &Database,
+    sources: Vec<(Provider, Vec<ProtocolCompatibilityRecord>)>,
+    router: Provider,
+    now: i64,
+) -> Result<PreparedCodexProviderSetBatchCommit, AppError> {
+    let mut virtual_providers = db
+        .get_all_providers("codex")?
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+    if sources.iter().any(|(source, _)| source.id == router.id) {
+        return Err(AppError::InvalidInput(
+            "codex_provider_set_batch_router_id_conflict".to_string(),
+        ));
+    }
+    virtual_providers.insert(router.id.clone(), router.clone());
+
+    let mut mutations = BTreeMap::<String, Option<Provider>>::new();
+    let mut profiles = Vec::new();
+    let mut replace_profile_provider_ids = HashSet::new();
+    let mut setting_keys_to_delete = Vec::new();
+    let mut projection_router_ids = Vec::new();
+    let mut source_previews = Vec::with_capacity(sources.len());
+    let mut blocked = false;
+
+    for (source, records) in sources {
+        let prepared = if source.uses_fixed_codex_responses_transport() {
+            // Official and account-managed Codex sources are native Responses endpoints. They
+            // deliberately skip paid compatibility probes, but still use the same single-
+            // transport planner so stale generated leaves and dependent routes are reconciled.
+            plan_manual_codex_provider_set(
+                &source,
+                TransportKind::OpenAiResponses,
+                &virtual_providers,
+                now,
+            )
+        } else if source.uses_manual_codex_protocol() {
+            let api_format = source
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.api_format.as_deref())
+                .or_else(|| {
+                    source
+                        .settings_config
+                        .get("apiFormat")
+                        .and_then(serde_json::Value::as_str)
+                });
+            let transport = match api_format {
+                Some("openai_chat") => TransportKind::OpenAiChat,
+                Some("openai_responses") => TransportKind::OpenAiResponses,
+                _ => {
+                    return Err(AppError::InvalidInput(
+                        "codex_provider_set_manual_intent_required".to_string(),
+                    ))
+                }
+            };
+            plan_manual_codex_provider_set(&source, transport, &virtual_providers, now)
+        } else {
+            plan_codex_provider_set(&source, &records, &virtual_providers, now)
+        }
+        .map_err(provider_set_error)?;
+
+        source_previews.push(prepared.preview.clone());
+        if matches!(prepared.preview.plan, CodexProviderSetPlan::Blocked { .. }) {
+            blocked = true;
+            continue;
+        }
+        profiles.extend(prepared.profiles.iter().cloned());
+        replace_profile_provider_ids.extend(prepared.replace_profile_provider_ids.iter().cloned());
+
+        match &prepared.persistence {
+            CodexProviderSetPersistence::Single { provider, .. } => {
+                virtual_providers.insert(provider.id.clone(), provider.clone());
+                mutations.insert(provider.id.clone(), Some(provider.clone()));
+            }
+            CodexProviderSetPersistence::Split {
+                facade,
+                responses_provider,
+                chat_provider,
+            } => {
+                for provider in [facade, responses_provider, chat_provider] {
+                    virtual_providers.insert(provider.id.clone(), provider.clone());
+                    mutations.insert(provider.id.clone(), Some(provider.clone()));
+                }
+                projection_router_ids.push(facade.id.clone());
+            }
+            CodexProviderSetPersistence::Blocked => unreachable!("blocked was rejected above"),
+        }
+        for provider_id in &prepared.delete_provider_ids {
+            virtual_providers.remove(provider_id);
+            mutations.insert(provider_id.clone(), None);
+            setting_keys_to_delete.push(format!("codex_multirouter_projection:{provider_id}"));
+        }
+        for dependent_router in &prepared.router_updates {
+            virtual_providers.insert(dependent_router.id.clone(), dependent_router.clone());
+            mutations.insert(dependent_router.id.clone(), Some(dependent_router.clone()));
+            projection_router_ids.push(dependent_router.id.clone());
+        }
+    }
+
+    let mut router = virtual_providers
+        .get(&router.id)
+        .cloned()
+        .ok_or_else(|| AppError::InvalidInput("codex_provider_set_batch_router_missing".into()))?;
+    if blocked {
+        return Ok(PreparedCodexProviderSetBatchCommit {
+            transaction: None,
+            projection_router_ids: Vec::new(),
+            source_previews,
+            router,
+            blocked: true,
+        });
+    }
+    let needs_subagent_v2_initialization = router
+        .settings_config
+        .pointer("/codexRouting/subagentVersion")
+        .and_then(serde_json::Value::as_str)
+        == Some("v2")
+        && router
+            .settings_config
+            .pointer("/codexRouting/subagentV2")
+            .is_none();
+    if needs_subagent_v2_initialization {
+        let effective =
+            effective_settings_for_candidate_with_providers(&router, false, &virtual_providers)?;
+        let provider_context = crate::codex_config::ProviderClassificationContext::from_providers(
+            virtual_providers.values(),
+        );
+        router.settings_config["codexRouting"]["subagentV2"] =
+            crate::codex_config::initialize_codex_subagent_v2_for_candidate(
+                &effective,
+                Some(&provider_context),
+            )?;
+        virtual_providers.insert(router.id.clone(), router.clone());
+    }
+    let routing = router
+        .settings_config
+        .get("codexRouting")
+        .ok_or_else(|| AppError::InvalidInput("codex_provider_set_batch_router_required".into()))?;
+    let CodexRoutingDocument::V2(plan) = CodexRoutingDocument::parse(routing)
+        .map_err(|error| AppError::InvalidInput(format!("{}: {}", error.code, error.message)))?
+    else {
+        return Err(AppError::InvalidInput(
+            "codex_provider_set_batch_router_requires_v2".to_string(),
+        ));
+    };
+    for route in &plan.routes {
+        if virtual_providers
+            .get(&route.target_provider_id)
+            .is_some_and(|provider| provider.settings_config.get("codexRouting").is_some())
+        {
+            return Err(AppError::InvalidInput(format!(
+                "codex_provider_set_batch_nested_router: {}",
+                route.target_provider_id
+            )));
+        }
+    }
+    compile_v2_strict(&plan, &virtual_providers)
+        .map_err(|error| AppError::InvalidInput(format!("{}: {}", error.code, error.message)))?;
+    mutations.insert(router.id.clone(), Some(router.clone()));
+    projection_router_ids.push(router.id.clone());
+    projection_router_ids.sort();
+    projection_router_ids.dedup();
+
+    let profile_owner_ids = profiles
+        .iter()
+        .map(|record| record.target.provider_id.clone())
+        .collect();
+    Ok(PreparedCodexProviderSetBatchCommit {
+        transaction: Some(ProviderSetDatabaseTransaction {
+            mutations: mutations
+                .into_iter()
+                .map(|(provider_id, provider)| ProviderSetDatabaseMutation {
+                    app_type: "codex".to_string(),
+                    provider_id,
+                    provider,
+                })
+                .collect(),
+            profile_owner_ids,
+            records: profiles,
+            replace_profile_provider_ids,
+            setting_keys_to_delete,
+            universal_provider: None,
+            current_provider_after: None,
+        }),
+        projection_router_ids,
+        source_previews,
+        router,
+        blocked: false,
+    })
+}
+
+pub(crate) fn finalize_codex_provider_set_projections_with_publisher<F>(
+    db: &Database,
+    mut projection_router_ids: Vec<String>,
+    mut publish: F,
+) -> Result<CodexProviderMutationOutcome, AppError>
+where
+    F: FnMut(&CodexRoutingProjectionArtifact) -> Result<ProjectionReadBack, String>,
+{
     projection_router_ids.sort();
     projection_router_ids.dedup();
     let active_router_id = active_codex_router_id(db)?;
@@ -294,6 +534,19 @@ where
         )?);
     }
     Ok(CodexProviderMutationOutcome { projections })
+}
+
+pub fn apply_codex_provider_set_mutation(
+    db: &Database,
+    prepared: PreparedCodexProviderSetMutation,
+) -> Result<CodexProviderMutationOutcome, AppError> {
+    apply_codex_provider_set_mutation_with_publisher(db, prepared, |artifact| {
+        crate::codex_config::publish_codex_multirouter_projection_for_database(
+            db,
+            &artifact.projection_settings,
+        )
+        .map_err(|error| error.to_string())
+    })
 }
 
 fn provider_set_error(error: super::provider_set::CodexProviderSetError) -> AppError {
@@ -585,7 +838,7 @@ where
         None,
         &[],
         &HashSet::new(),
-        &[prepared.projection_setting_key()],
+        &prepared.projection_setting_keys(),
     )?;
 
     finalize_codex_provider_deletion(db, prepared, |artifact| publish(artifact))
@@ -600,16 +853,39 @@ pub(crate) fn prepare_codex_provider_deletion(
         .get_all_providers("codex")?
         .into_iter()
         .collect::<HashMap<_, _>>();
-    if !providers.contains_key(provider_id) {
+    let Some(source_provider) = providers.get(provider_id) else {
         return Err(AppError::InvalidInput(format!(
             "Codex provider does not exist: {provider_id}"
         )));
+    };
+    let mut provider_ids = vec![provider_id.to_string()];
+    if source_provider
+        .settings_config
+        .pointer("/codexProtocolSet/role")
+        .and_then(serde_json::Value::as_str)
+        == Some("facade")
+    {
+        super::provider_set::restore_logical_codex_provider(source_provider, &providers)
+            .map_err(provider_set_error)?;
+        let marker = source_provider
+            .settings_config
+            .get("codexProtocolSet")
+            .and_then(serde_json::Value::as_object)
+            .expect("validated Provider Set facade marker");
+        for key in ["responsesProviderId", "chatProviderId"] {
+            let member_id = marker
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .expect("validated Provider Set facade member");
+            provider_ids.push(member_id.to_string());
+        }
     }
+    let provider_id_set = provider_ids.iter().cloned().collect::<HashSet<_>>();
 
     let mut prepared = Vec::new();
     let mut removed_candidates = BTreeSet::new();
     for router in providers.values() {
-        if router.id == provider_id {
+        if provider_id_set.contains(&router.id) {
             continue;
         }
         let Some(routing) = router.settings_config.get("codexRouting") else {
@@ -623,7 +899,7 @@ pub(crate) fn prepare_codex_provider_deletion(
                     route
                         .get("targetProviderId")
                         .and_then(serde_json::Value::as_str)
-                        == Some(provider_id)
+                        .is_some_and(|target| provider_id_set.contains(target))
                 })
             });
         if !references_deleted_provider {
@@ -646,11 +922,11 @@ pub(crate) fn prepare_codex_provider_deletion(
             compiled
                 .model_catalog
                 .iter()
-                .filter(|model| model.target_provider_id == provider_id)
+                .filter(|model| provider_id_set.contains(&model.target_provider_id))
                 .map(|model| model.visible_model.clone()),
         );
         plan.routes
-            .retain(|route| route.target_provider_id != provider_id);
+            .retain(|route| !provider_id_set.contains(&route.target_provider_id));
         let disabled = plan.routes.is_empty();
         if disabled {
             plan.enabled = false;
@@ -687,6 +963,7 @@ pub(crate) fn prepare_codex_provider_deletion(
     });
     Ok(PreparedCodexProviderDeletion {
         provider_id: provider_id.to_string(),
+        provider_ids,
         routers: prepared,
         active_router_id,
         must_restore_official,
@@ -963,6 +1240,131 @@ mod tests {
             Some("outer-router".to_string())
         );
         assert_eq!(published.into_inner(), vec!["outer-router".to_string()]);
+    }
+
+    #[test]
+    fn wizard_batch_prepares_split_leaves_and_final_router_as_one_database_transaction() {
+        let db = Database::memory().expect("memory db");
+        let source = mixed_source();
+        db.save_provider("codex", &source).expect("seed source");
+        let now = chrono::Utc::now().timestamp();
+        let records = mixed_records(now);
+        let mut final_router = router("wizard-router", "relay");
+        final_router.settings_config["codexRouting"]["defaultRouteId"] = json!("route-qwen");
+        final_router.settings_config["codexRouting"]["subagentVersion"] = json!("v2");
+
+        let prepared = prepare_codex_provider_set_batch_commit(
+            &db,
+            vec![(source, records)],
+            final_router,
+            now,
+        )
+        .expect("prepare one atomic wizard transaction");
+
+        assert_eq!(prepared.source_previews.len(), 1);
+        assert!(matches!(
+            prepared.source_previews[0].plan,
+            crate::codex_multirouter::provider_set::CodexProviderSetPlan::Split { .. }
+        ));
+        assert_eq!(prepared.router.id, "wizard-router");
+        db.apply_provider_set_database_transaction(
+            prepared
+                .transaction
+                .expect("unblocked batch has a transaction"),
+        )
+        .expect("commit the batch once");
+
+        let saved_router = db
+            .get_provider_by_id("wizard-router", "codex")
+            .expect("read router")
+            .expect("router exists");
+        let routes = saved_router.settings_config["codexRouting"]["routes"]
+            .as_array()
+            .expect("routes");
+        assert_eq!(routes.len(), 2);
+        assert_eq!(
+            routes
+                .iter()
+                .map(|route| route["targetProviderId"].as_str().expect("target"))
+                .collect::<HashSet<_>>(),
+            HashSet::from(["relay--ccsm-responses", "relay--ccsm-chat"])
+        );
+        assert!(db
+            .get_provider_by_id("relay--ccsm-responses", "codex")
+            .expect("read Responses leaf")
+            .is_some());
+        assert!(db
+            .get_provider_by_id("relay--ccsm-chat", "codex")
+            .expect("read Chat leaf")
+            .is_some());
+        let profiles = saved_router
+            .settings_config
+            .pointer("/codexRouting/subagentV2/profiles")
+            .and_then(serde_json::Value::as_object)
+            .expect("Subagent V2 profiles are initialized before the transaction");
+        assert!(profiles.contains_key("model-a"));
+        assert!(profiles.contains_key("model-b"));
+    }
+
+    #[test]
+    fn wizard_batch_failure_rolls_back_sources_leaves_profiles_and_final_router() {
+        let db = Database::memory().expect("memory db");
+        let source = mixed_source();
+        db.save_provider("codex", &source).expect("seed source");
+        {
+            let conn = db.conn.lock().expect("lock database");
+            conn.execute_batch(
+                "CREATE TRIGGER fail_wizard_router
+                 BEFORE INSERT ON providers
+                 WHEN NEW.id = 'wizard-router'
+                 BEGIN
+                   SELECT RAISE(ABORT, 'injected wizard router failure');
+                 END;",
+            )
+            .expect("install failure trigger");
+        }
+        let now = chrono::Utc::now().timestamp();
+        let mut final_router = router("wizard-router", "relay");
+        final_router.settings_config["codexRouting"]["defaultRouteId"] = json!("route-qwen");
+        let prepared = prepare_codex_provider_set_batch_commit(
+            &db,
+            vec![(source.clone(), mixed_records(now))],
+            final_router,
+            now,
+        )
+        .expect("prepare batch");
+
+        let error = db
+            .apply_provider_set_database_transaction(
+                prepared
+                    .transaction
+                    .expect("unblocked batch has a transaction"),
+            )
+            .expect_err("router failure must roll back the entire batch");
+
+        assert!(error.to_string().contains("injected wizard router failure"));
+        let unchanged = db
+            .get_provider_by_id("relay", "codex")
+            .expect("read source")
+            .expect("source remains");
+        assert_eq!(unchanged.settings_config, source.settings_config);
+        for absent in ["relay--ccsm-responses", "relay--ccsm-chat", "wizard-router"] {
+            assert!(db
+                .get_provider_by_id(absent, "codex")
+                .expect("read Provider")
+                .is_none());
+        }
+        let profile_count: i64 = db
+            .conn
+            .lock()
+            .expect("lock database")
+            .query_row(
+                "SELECT COUNT(*) FROM protocol_compatibility_profiles",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count profiles");
+        assert_eq!(profile_count, 0);
     }
 
     #[test]

@@ -26,7 +26,7 @@ fn chooses_native_responses_when_both_protocols_complete_the_full_transaction() 
 }
 
 #[test]
-fn chooses_native_responses_when_equally_capable_even_if_its_reasoning_is_opaque() {
+fn chooses_raw_chat_over_equally_capable_opaque_responses() {
     let selection = select_transport_outcome_with_reasoning(&[
         (
             verified(TransportKind::OpenAiResponses),
@@ -40,12 +40,12 @@ fn chooses_native_responses_when_equally_capable_even_if_its_reasoning_is_opaque
 
     assert_eq!(
         selection.map(|selection| selection.transport),
-        Some(TransportKind::OpenAiResponses)
+        Some(TransportKind::OpenAiChat)
     );
 }
 
 #[test]
-fn chooses_native_responses_when_equally_capable_even_if_chat_has_raw_reasoning() {
+fn chooses_summary_responses_over_equally_capable_raw_chat() {
     let selection = select_transport_outcome_with_reasoning(&[
         (
             verified(TransportKind::OpenAiResponses),
@@ -64,7 +64,7 @@ fn chooses_native_responses_when_equally_capable_even_if_chat_has_raw_reasoning(
 }
 
 #[test]
-fn chooses_native_responses_when_capability_ties_regardless_of_reasoning_shape() {
+fn chooses_native_responses_when_capability_and_reasoning_presentation_tie() {
     let selection = select_transport_outcome_with_reasoning(&[
         (
             verified(TransportKind::OpenAiChat),
@@ -73,6 +73,44 @@ fn chooses_native_responses_when_capability_ties_regardless_of_reasoning_shape()
         (
             verified(TransportKind::OpenAiResponses),
             ReasoningSemantic::Readable,
+        ),
+    ]);
+
+    assert_eq!(
+        selection.map(|selection| selection.transport),
+        Some(TransportKind::OpenAiResponses)
+    );
+}
+
+#[test]
+fn chooses_summary_chat_over_equally_capable_raw_responses() {
+    let selection = select_transport_outcome_with_reasoning(&[
+        (
+            verified(TransportKind::OpenAiResponses),
+            ReasoningSemantic::Readable,
+        ),
+        (
+            verified(TransportKind::OpenAiChat),
+            ReasoningSemantic::Summary,
+        ),
+    ]);
+
+    assert_eq!(
+        selection.map(|selection| selection.transport),
+        Some(TransportKind::OpenAiChat)
+    );
+}
+
+#[test]
+fn treats_opaque_and_absent_reasoning_as_the_same_presentation_quality() {
+    let selection = select_transport_outcome_with_reasoning(&[
+        (
+            verified(TransportKind::OpenAiChat),
+            ReasoningSemantic::Opaque,
+        ),
+        (
+            verified(TransportKind::OpenAiResponses),
+            ReasoningSemantic::None,
         ),
     ]);
 

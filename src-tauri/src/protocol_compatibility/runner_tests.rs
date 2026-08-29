@@ -30,6 +30,7 @@ use crate::proxy::providers::{
 enum ResponsesMode {
     Complete,
     OpaqueReasoning,
+    BaselineOpaqueSseReadable,
     BaselineUnsupported,
     UpstreamUnavailable,
     ToolUnsupported,
@@ -46,6 +47,17 @@ enum ResponsesMode {
     ForcedToolIncomplete,
     ForcedToolFailed,
     ForcedToolMissingName,
+    ForcedToolMalformedArguments,
+    AutoToolIgnoredRequiredSucceeds,
+    AcceptedComplexSchemaIgnoresTools,
+    AcceptedComplexSchemaReturnsEmptyArguments,
+    MoonshotToolSchemaOnly,
+    GenericMoonshotToolSchemaOnly,
+    ResponsesCustomToolUnsupported,
+    SummaryReplayOnly,
+    ReasoningTextReplayOnly,
+    OmitReasoningReplayOnly,
+    GenericOmitReasoningReplayOnly,
 }
 
 #[derive(Clone)]
@@ -143,6 +155,107 @@ async fn upstream(
             })
     };
 
+    if is_forced_tool
+        && matches!(
+            state.responses_mode,
+            ResponsesMode::MoonshotToolSchemaOnly | ResponsesMode::GenericMoonshotToolSchemaOnly
+        )
+        && tool_parameter_schemas_contain_keyword(
+            &body,
+            &["$defs", "$ref", "oneOf", "const", "format"],
+        )
+    {
+        return match state.responses_mode {
+            ResponsesMode::GenericMoonshotToolSchemaOnly => (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": {"message": "Invalid request Error"}})),
+            )
+                .into_response(),
+            _ => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({"error": {"message": "tools.function.parameters is not a valid moonshot flavored json schema"}})),
+            )
+                .into_response(),
+        };
+    }
+
+    if is_responses
+        && is_forced_tool
+        && matches!(
+            state.responses_mode,
+            ResponsesMode::ResponsesCustomToolUnsupported
+        )
+        && body
+            .get("tools")
+            .and_then(Value::as_array)
+            .is_some_and(|tools| {
+                tools
+                    .iter()
+                    .any(|tool| tool.get("type").and_then(Value::as_str) == Some("custom"))
+            })
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": {
+                    "message": "tools[1].type: unknown variant `custom`, expected one of `function`, `web_search_preview`, `code_interpreter`, `mcp`"
+                }
+            })),
+        )
+            .into_response();
+    }
+
+    if is_responses && is_continuation {
+        let reasoning = body
+            .get("input")
+            .and_then(Value::as_array)
+            .and_then(|items| {
+                items
+                    .iter()
+                    .find(|item| item.get("type").and_then(Value::as_str) == Some("reasoning"))
+            });
+        let has_summary = reasoning
+            .and_then(|item| item.get("summary"))
+            .and_then(Value::as_array)
+            .is_some_and(|summary| !summary.is_empty());
+        let has_reasoning_text = reasoning
+            .and_then(|item| item.get("content"))
+            .and_then(Value::as_array)
+            .is_some_and(|content| {
+                content.iter().any(|part| {
+                    part.get("type").and_then(Value::as_str) == Some("reasoning_text")
+                        && part
+                            .get("text")
+                            .and_then(Value::as_str)
+                            .is_some_and(|text| !text.is_empty())
+                })
+            });
+        let rejects = match state.responses_mode {
+            ResponsesMode::SummaryReplayOnly => !has_summary || has_reasoning_text,
+            ResponsesMode::ReasoningTextReplayOnly => !has_reasoning_text,
+            ResponsesMode::OmitReasoningReplayOnly
+            | ResponsesMode::GenericOmitReasoningReplayOnly => reasoning.is_some(),
+            _ => false,
+        };
+        if rejects {
+            if matches!(
+                state.responses_mode,
+                ResponsesMode::GenericOmitReasoningReplayOnly
+            ) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": {"message": "Invalid request Error"}})),
+                )
+                    .into_response();
+            }
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": {"message": "Invalid reasoning replay content must be passed back in the supported shape"}})),
+            )
+                .into_response();
+        }
+    }
+
     if is_responses && matches!(state.responses_mode, ResponsesMode::InvalidSuccessfulJson) {
         return Json(json!({})).into_response();
     }
@@ -167,12 +280,69 @@ async fn upstream(
         return StatusCode::BAD_REQUEST.into_response();
     }
 
+    if is_forced_tool
+        && is_stream
+        && matches!(
+            state.responses_mode,
+            ResponsesMode::AutoToolIgnoredRequiredSucceeds
+        )
+        && body.get("tool_choice").and_then(Value::as_str) != Some("required")
+    {
+        if is_responses {
+            return sse(
+                "event: response.output_text.delta\ndata: {\"delta\":\"normal answer without a tool call\"}\n\nevent: response.completed\ndata: {\"response\":{\"status\":\"completed\"}}\n\n"
+                    .to_string(),
+            );
+        }
+        return sse(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"normal answer without a tool call\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+                .to_string(),
+        );
+    }
+
+    let has_complex_tool_schema =
+        body_contains_schema_keyword(&body, &["$defs", "$ref", "oneOf", "const", "format"]);
+    if is_forced_tool
+        && is_stream
+        && has_complex_tool_schema
+        && matches!(
+            state.responses_mode,
+            ResponsesMode::AcceptedComplexSchemaIgnoresTools
+        )
+    {
+        if is_responses {
+            return sse(
+                "event: response.output_text.delta\ndata: {\"delta\":\"normal answer without a tool call\"}\n\nevent: response.completed\ndata: {\"response\":{\"status\":\"completed\"}}\n\n"
+                    .to_string(),
+            );
+        }
+        return sse(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"normal answer without a tool call\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+                .to_string(),
+        );
+    }
+
     if is_forced_tool && is_stream {
         let nonce = extract_nonce(&body).unwrap();
         let tool_name = if matches!(state.responses_mode, ResponsesMode::ForcedToolMissingName) {
             ""
         } else {
             "ccsm_protocol_compatibility_probe"
+        };
+        let tool_arguments = if matches!(
+            state.responses_mode,
+            ResponsesMode::ForcedToolMalformedArguments
+        ) {
+            "{".to_string()
+        } else if has_complex_tool_schema
+            && matches!(
+                state.responses_mode,
+                ResponsesMode::AcceptedComplexSchemaReturnsEmptyArguments
+            )
+        {
+            "{}".to_string()
+        } else {
+            json!({"nonce": nonce}).to_string()
         };
         if is_responses {
             let terminal = match state.responses_mode {
@@ -205,7 +375,7 @@ async fn upstream(
                         "type": "function_call",
                         "call_id": "call_responses",
                         "name": tool_name,
-                        "arguments": json!({"nonce": nonce}).to_string()
+                        "arguments": tool_arguments
                     }
                 })
             ));
@@ -227,7 +397,7 @@ async fn upstream(
                     "type": "function",
                     "function": {
                         "name": tool_name,
-                        "arguments": json!({"nonce": nonce}).to_string()
+                        "arguments": tool_arguments
                     }
                 }]
             })
@@ -279,10 +449,12 @@ async fn upstream(
 
     if is_responses {
         let reasoning = match state.responses_mode {
-            ResponsesMode::OpaqueReasoning => vec![json!({
-                "type": "reasoning",
-                "encrypted_content": "fixture-encrypted-reasoning"
-            })],
+            ResponsesMode::OpaqueReasoning | ResponsesMode::BaselineOpaqueSseReadable => {
+                vec![json!({
+                    "type": "reasoning",
+                    "encrypted_content": "fixture-encrypted-reasoning"
+                })]
+            }
             _ => vec![json!({
                 "type": "reasoning",
                 "content": [{
@@ -360,6 +532,33 @@ fn extract_nonce(body: &Value) -> Option<String> {
     find(body)
 }
 
+fn body_contains_schema_keyword(value: &Value, keywords: &[&str]) -> bool {
+    match value {
+        Value::Array(values) => values
+            .iter()
+            .any(|value| body_contains_schema_keyword(value, keywords)),
+        Value::Object(values) => {
+            values.keys().any(|key| keywords.contains(&key.as_str()))
+                || values
+                    .values()
+                    .any(|value| body_contains_schema_keyword(value, keywords))
+        }
+        _ => false,
+    }
+}
+
+fn tool_parameter_schemas_contain_keyword(body: &Value, keywords: &[&str]) -> bool {
+    body.get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| {
+            tools.iter().any(|tool| {
+                tool.get("parameters")
+                    .or_else(|| tool.pointer("/function/parameters"))
+                    .is_some_and(|schema| body_contains_schema_keyword(schema, keywords))
+            })
+        })
+}
+
 fn candidate(base_url: &str, configured_hint: TransportKind) -> ProbeCandidate {
     ProbeCandidate::new(
         None::<String>,
@@ -399,20 +598,20 @@ async fn probes_all_four_stages_on_both_protocols_and_selects_responses_on_a_tie
     }));
 
     let requests = fixture.requests.lock().unwrap();
-    assert_eq!(requests.len(), 8);
+    assert_eq!(requests.len(), 10);
     assert_eq!(
         requests
             .iter()
             .filter(|(path, _)| path.ends_with("/responses"))
             .count(),
-        4
+        5
     );
     assert_eq!(
         requests
             .iter()
             .filter(|(path, _)| path.ends_with("/chat/completions"))
             .count(),
-        4
+        5
     );
 
     let chat_forced = requests
@@ -472,6 +671,178 @@ async fn probes_all_four_stages_on_both_protocols_and_selects_responses_on_a_tie
     assert!(responses_input
         .iter()
         .any(|item| item["id"] == "fc_fixture"));
+}
+
+#[tokio::test]
+async fn retries_only_explicit_schema_rejections_with_moonshot_dialect_and_records_it() {
+    let fixture = spawn_fixture(ResponsesMode::MoonshotToolSchemaOnly).await;
+    let result = run_protocol_compatibility_probe(
+        candidate(&fixture.base_url, TransportKind::OpenAiResponses),
+        &reqwest::Client::new(),
+    )
+    .await;
+
+    assert_eq!(
+        result.readiness,
+        ProbeReadiness::Verified,
+        "probe result: {result:#?}"
+    );
+    assert!(result.branches.iter().all(|branch| {
+        branch.tool_schema_dialect == super::ToolSchemaDialect::MoonshotMfjs
+            && branch.assessment.forced_tool == ProbeStageStatus::Passed
+    }));
+    let requests = fixture.requests.lock().unwrap();
+    assert_eq!(requests.len(), 12);
+    assert!(
+        requests
+            .iter()
+            .filter(|(_, body)| {
+                body.get("tools").is_some()
+                    && !body_contains_schema_keyword(
+                        body,
+                        &["$defs", "$ref", "oneOf", "const", "format"],
+                    )
+            })
+            .count()
+            >= 2
+    );
+}
+
+#[tokio::test]
+async fn generic_forced_tool_400_negotiates_the_moonshot_schema_dialect_once() {
+    let fixture = spawn_fixture(ResponsesMode::GenericMoonshotToolSchemaOnly).await;
+    let result = run_protocol_compatibility_probe(
+        candidate(&fixture.base_url, TransportKind::OpenAiResponses),
+        &reqwest::Client::new(),
+    )
+    .await;
+
+    assert_eq!(result.readiness, ProbeReadiness::Verified);
+    assert!(result.branches.iter().all(|branch| {
+        branch.tool_schema_dialect == super::ToolSchemaDialect::MoonshotMfjs
+            && branch.assessment.forced_tool == ProbeStageStatus::Passed
+    }));
+    assert_eq!(fixture.requests.lock().unwrap().len(), 12);
+}
+
+#[tokio::test]
+async fn selects_chat_when_responses_rejects_codex_custom_tools() {
+    let fixture = spawn_fixture(ResponsesMode::ResponsesCustomToolUnsupported).await;
+    let result = run_protocol_compatibility_probe(
+        candidate(&fixture.base_url, TransportKind::OpenAiResponses),
+        &reqwest::Client::new(),
+    )
+    .await;
+
+    assert_eq!(result.selected_transport, Some(TransportKind::OpenAiChat));
+    assert_eq!(result.readiness, ProbeReadiness::Verified);
+    let responses = result
+        .branches
+        .iter()
+        .find(|branch| branch.assessment.transport == TransportKind::OpenAiResponses)
+        .expect("Responses branch");
+    assert_eq!(
+        responses.assessment.forced_tool,
+        ProbeStageStatus::Unsupported
+    );
+    let chat = result
+        .branches
+        .iter()
+        .find(|branch| branch.assessment.transport == TransportKind::OpenAiChat)
+        .expect("Chat branch");
+    assert_eq!(chat.assessment.forced_tool, ProbeStageStatus::Passed);
+    assert_eq!(chat.assessment.continuation, ProbeStageStatus::Passed);
+}
+
+#[tokio::test]
+async fn responses_continuation_records_native_summary_replay_when_accepted() {
+    let fixture = spawn_fixture(ResponsesMode::SummaryReplayOnly).await;
+    let result = run_protocol_compatibility_probe(
+        candidate(&fixture.base_url, TransportKind::OpenAiResponses),
+        &reqwest::Client::new(),
+    )
+    .await;
+
+    let responses = result
+        .branches
+        .iter()
+        .find(|branch| branch.assessment.transport == TransportKind::OpenAiResponses)
+        .unwrap();
+    assert_eq!(responses.history_replay, super::HistoryReplay::NativeOnly);
+    assert_eq!(responses.assessment.continuation, ProbeStageStatus::Passed);
+}
+
+#[tokio::test]
+async fn responses_continuation_falls_back_to_reasoning_text_replay_when_required() {
+    let fixture = spawn_fixture(ResponsesMode::ReasoningTextReplayOnly).await;
+    let result = run_protocol_compatibility_probe(
+        candidate(&fixture.base_url, TransportKind::OpenAiResponses),
+        &reqwest::Client::new(),
+    )
+    .await;
+
+    let responses = result
+        .branches
+        .iter()
+        .find(|branch| branch.assessment.transport == TransportKind::OpenAiResponses)
+        .unwrap();
+    assert_eq!(
+        responses.history_replay,
+        super::HistoryReplay::ResponsesReasoningTextContent
+    );
+    assert_eq!(responses.assessment.continuation, ProbeStageStatus::Passed);
+}
+
+#[tokio::test]
+async fn responses_continuation_omits_reasoning_only_after_both_replay_shapes_are_rejected() {
+    let fixture = spawn_fixture(ResponsesMode::OmitReasoningReplayOnly).await;
+    let result = run_protocol_compatibility_probe(
+        candidate(&fixture.base_url, TransportKind::OpenAiResponses),
+        &reqwest::Client::new(),
+    )
+    .await;
+
+    let responses = result
+        .branches
+        .iter()
+        .find(|branch| branch.assessment.transport == TransportKind::OpenAiResponses)
+        .unwrap();
+    assert_eq!(responses.history_replay, super::HistoryReplay::Omit);
+    assert_eq!(responses.assessment.continuation, ProbeStageStatus::Passed);
+}
+
+#[tokio::test]
+async fn generic_continuation_400_negotiates_all_reasoning_replay_shapes_once() {
+    let fixture = spawn_fixture(ResponsesMode::GenericOmitReasoningReplayOnly).await;
+    let result = run_protocol_compatibility_probe(
+        candidate(&fixture.base_url, TransportKind::OpenAiResponses),
+        &reqwest::Client::new(),
+    )
+    .await;
+
+    let responses = result
+        .branches
+        .iter()
+        .find(|branch| branch.assessment.transport == TransportKind::OpenAiResponses)
+        .unwrap();
+    assert_eq!(responses.history_replay, super::HistoryReplay::Omit);
+    assert_eq!(responses.assessment.continuation, ProbeStageStatus::Passed);
+    let requests = fixture.requests.lock().unwrap();
+    let responses_continuations = requests
+        .iter()
+        .filter(|(path, body)| {
+            path.ends_with("/responses")
+                && body
+                    .get("input")
+                    .and_then(Value::as_array)
+                    .is_some_and(|items| {
+                        items.iter().any(|item| {
+                            item.get("type").and_then(Value::as_str) == Some("function_call_output")
+                        })
+                    })
+        })
+        .count();
+    assert_eq!(responses_continuations, 3);
 }
 
 #[tokio::test]
@@ -720,8 +1091,8 @@ async fn structurally_incomplete_forced_tool_call_is_failed_not_unsupported() {
 }
 
 #[tokio::test]
-async fn marker_mismatch_is_diagnostic_and_does_not_fail_protocol_capabilities() {
-    let fixture = spawn_fixture(ResponsesMode::MarkerMismatch).await;
+async fn complete_auto_response_without_a_tool_retries_required_once_per_protocol() {
+    let fixture = spawn_fixture(ResponsesMode::AutoToolIgnoredRequiredSucceeds).await;
     let result = run_protocol_compatibility_probe(
         candidate(&fixture.base_url, TransportKind::OpenAiResponses),
         &reqwest::Client::new(),
@@ -730,13 +1101,106 @@ async fn marker_mismatch_is_diagnostic_and_does_not_fail_protocol_capabilities()
 
     assert_eq!(result.readiness, ProbeReadiness::Verified);
     assert!(result.branches.iter().all(|branch| {
-        branch.assessment.baseline == ProbeStageStatus::Passed
+        branch.assessment.forced_tool == ProbeStageStatus::Passed
             && branch.assessment.continuation == ProbeStageStatus::Passed
+    }));
+
+    let requests = fixture.requests.lock().unwrap();
+    assert_eq!(requests.len(), 12);
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|(_, body)| body.get("tool_choice").and_then(Value::as_str) == Some("required"))
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn accepted_complex_schema_without_a_tool_negotiates_moonshot_after_required() {
+    let fixture = spawn_fixture(ResponsesMode::AcceptedComplexSchemaIgnoresTools).await;
+    let result = run_protocol_compatibility_probe(
+        candidate(&fixture.base_url, TransportKind::OpenAiResponses),
+        &reqwest::Client::new(),
+    )
+    .await;
+
+    assert_eq!(result.readiness, ProbeReadiness::Verified, "{result:#?}");
+    assert!(result.branches.iter().all(|branch| {
+        branch.tool_schema_dialect == super::ToolSchemaDialect::MoonshotMfjs
+            && branch.assessment.forced_tool == ProbeStageStatus::Passed
+            && branch.assessment.continuation == ProbeStageStatus::Passed
+    }));
+    let requests = fixture.requests.lock().unwrap();
+    assert_eq!(requests.len(), 14);
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|(_, body)| body.get("tool_choice").and_then(Value::as_str) == Some("required"))
+            .count(),
+        4
+    );
+}
+
+#[tokio::test]
+async fn accepted_complex_schema_with_invalid_arguments_negotiates_without_accepting_it() {
+    let fixture = spawn_fixture(ResponsesMode::AcceptedComplexSchemaReturnsEmptyArguments).await;
+    let result = run_protocol_compatibility_probe(
+        candidate(&fixture.base_url, TransportKind::OpenAiResponses),
+        &reqwest::Client::new(),
+    )
+    .await;
+
+    assert_eq!(result.readiness, ProbeReadiness::Verified, "{result:#?}");
+    assert!(result.branches.iter().all(|branch| {
+        branch.tool_schema_dialect == super::ToolSchemaDialect::MoonshotMfjs
+            && branch.assessment.forced_tool == ProbeStageStatus::Passed
+            && branch.assessment.continuation == ProbeStageStatus::Passed
+    }));
+    let requests = fixture.requests.lock().unwrap();
+    assert_eq!(requests.len(), 12);
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|(_, body)| body.get("tool_choice").and_then(Value::as_str) == Some("required"))
+            .count(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn malformed_forced_tool_arguments_are_failed_not_verified() {
+    let fixture = spawn_fixture(ResponsesMode::ForcedToolMalformedArguments).await;
+    let result = run_protocol_compatibility_probe(
+        candidate(&fixture.base_url, TransportKind::OpenAiResponses),
+        &reqwest::Client::new(),
+    )
+    .await;
+
+    assert!(result.branches.iter().all(|branch| {
+        branch.assessment.forced_tool == ProbeStageStatus::Failed
+            && branch.assessment.continuation == ProbeStageStatus::Skipped
     }));
 }
 
 #[tokio::test]
-async fn runner_records_reasoning_shapes_without_using_them_to_override_native_responses() {
+async fn continuation_marker_mismatch_does_not_verify_tool_result_consumption() {
+    let fixture = spawn_fixture(ResponsesMode::MarkerMismatch).await;
+    let result = run_protocol_compatibility_probe(
+        candidate(&fixture.base_url, TransportKind::OpenAiResponses),
+        &reqwest::Client::new(),
+    )
+    .await;
+
+    assert_eq!(result.readiness, ProbeReadiness::Partial);
+    assert!(result.branches.iter().all(|branch| {
+        branch.assessment.baseline == ProbeStageStatus::Passed
+            && branch.assessment.continuation == ProbeStageStatus::Failed
+    }));
+}
+
+#[tokio::test]
+async fn native_responses_summary_overrides_opaque_baseline_evidence() {
     let fixture = spawn_fixture(ResponsesMode::OpaqueReasoning).await;
     let client = reqwest::Client::new();
     let result = run_protocol_compatibility_probe(
@@ -758,13 +1222,39 @@ async fn runner_records_reasoning_shapes_without_using_them_to_override_native_r
             .unwrap()
             .reasoning_shape
             .semantic,
-        super::ReasoningSemantic::Opaque
+        super::ReasoningSemantic::Summary
     );
     assert_eq!(
         result
             .branches
             .iter()
             .find(|branch| branch.assessment.transport == TransportKind::OpenAiChat)
+            .unwrap()
+            .reasoning_shape
+            .semantic,
+        super::ReasoningSemantic::Readable
+    );
+}
+
+#[tokio::test]
+async fn native_responses_raw_reasoning_overrides_opaque_baseline_evidence() {
+    let fixture = spawn_fixture(ResponsesMode::BaselineOpaqueSseReadable).await;
+    let result = run_protocol_compatibility_probe(
+        candidate(&fixture.base_url, TransportKind::OpenAiResponses),
+        &reqwest::Client::new(),
+    )
+    .await;
+
+    assert_eq!(
+        result.selected_transport,
+        Some(TransportKind::OpenAiResponses)
+    );
+    assert_eq!(result.readiness, ProbeReadiness::Verified);
+    assert_eq!(
+        result
+            .branches
+            .iter()
+            .find(|branch| branch.assessment.transport == TransportKind::OpenAiResponses)
             .unwrap()
             .reasoning_shape
             .semantic,
@@ -785,7 +1275,7 @@ async fn responses_baseline_rejection_stops_only_that_branch_and_chat_still_veri
     assert_eq!(result.selected_transport, Some(TransportKind::OpenAiChat));
     assert_eq!(result.readiness, ProbeReadiness::Verified);
     let requests = fixture.requests.lock().unwrap();
-    assert_eq!(requests.len(), 5);
+    assert_eq!(requests.len(), 6);
     assert_eq!(
         requests
             .iter()

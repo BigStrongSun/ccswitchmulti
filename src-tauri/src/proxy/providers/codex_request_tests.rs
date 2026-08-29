@@ -7,7 +7,6 @@ use crate::provider::{LocalProxyRequestOverrides, Provider, ProviderMeta};
 
 use super::codex_request::{
     CodexRequestOptions, CodexRequestTransport, CodexThirdPartyRequestPolicy,
-    CODEX_REQUEST_PREPARER_VERSION,
 };
 
 fn third_party_provider(api_format: &str) -> Provider {
@@ -97,7 +96,6 @@ fn chat_request_policy_prepares_literal_production_wire_request() {
         )
         .expect("prepare Chat request");
 
-    assert_eq!(CODEX_REQUEST_PREPARER_VERSION, 2);
     assert_eq!(
         prepared.url,
         "https://gateway.example/custom/v1/chat/completions"

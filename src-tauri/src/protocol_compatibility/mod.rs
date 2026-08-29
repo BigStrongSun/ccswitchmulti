@@ -51,8 +51,8 @@ pub(crate) use provider::apply_selected_transport_to_provider;
 pub(crate) use provider::compile_provider_probe_candidate;
 pub(crate) use provider::compile_provider_probe_candidate_for_model;
 pub use provider::{
-    apply_probe_selection_to_provider, compile_codex_router_probe_candidates,
-    compile_provider_probe_candidates,
+    apply_probe_selection_to_provider, apply_selected_transport_to_catalog_model,
+    compile_codex_router_probe_candidates, compile_provider_probe_candidates,
 };
 
 pub(crate) mod profile;
@@ -60,18 +60,44 @@ pub use profile::ProtocolCompatibilityRecord;
 
 pub(crate) mod endpoint;
 
-pub const PROBE_PROFILE_VERSION: u32 = 2;
+pub const PROBE_PROFILE_VERSION: u32 = 6;
+pub(crate) const PROBE_MAX_OUTPUT_TOKENS: u32 = 1024;
 
 const BASELINE_PROMPT: &str =
     "CCSM protocol compatibility probe. Solve 17 + 25 internally. Reply only CCSM_PROTOCOL_BASELINE_OK.";
 const TOOL_NAME: &str = "ccsm_protocol_compatibility_probe";
+const APPLY_PATCH_TOOL_NAME: &str = "apply_patch";
+const APPLY_PATCH_LARK_GRAMMAR: &str = r#"start: begin_patch hunk+ end_patch
+begin_patch: "*** Begin Patch" LF
+end_patch: "*** End Patch" LF?
+
+hunk: add_hunk | delete_hunk | update_hunk
+add_hunk: "*** Add File: " filename LF add_line+
+delete_hunk: "*** Delete File: " filename LF
+update_hunk: "*** Update File: " filename LF change_move? change?
+
+filename: /(.+)/
+add_line: "+" /(.*)/ LF -> line
+
+change_move: "*** Move to: " filename LF
+change: (change_context | change_line)+ eof_line?
+change_context: ("@@" | "@@ " /(.+)/) LF
+change_line: ("+" | "-" | " ") /(.*)/ LF
+eof_line: "*** End of File" LF
+
+%import common.LF
+"#;
+const TOOL_DONE_MARKER: &str = "CCSM_PROTOCOL_TOOL_DONE";
+const CUSTOM_TOOL_ADMISSION_MARKER: &str = "CCSM_PROTOCOL_CUSTOM_TOOL_ADMISSION_OK";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProbeCase {
     BaselineJson,
     BaselineSse,
+    CustomToolAdmissionJson,
     ForcedToolSse,
+    ForcedToolRequiredSse,
     ToolContinuationJson,
 }
 
@@ -102,12 +128,22 @@ pub enum ReasoningSource {
     None,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HistoryReplay {
     ChatReasoningContent,
+    ResponsesReasoningTextContent,
     Omit,
+    #[default]
     NativeOnly,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolSchemaDialect {
+    #[default]
+    OpenAi,
+    MoonshotMfjs,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -273,14 +309,19 @@ impl ProbeCandidate {
         transport: TransportKind,
         logical_body: Value,
     ) -> Result<PreparedCodexRequest, String> {
+        self.prepare_request_with_options(transport, logical_body, CodexRequestOptions::default())
+    }
+
+    pub(crate) fn prepare_request_with_options(
+        &self,
+        transport: TransportKind,
+        logical_body: Value,
+        options: CodexRequestOptions,
+    ) -> Result<PreparedCodexRequest, String> {
         self.request_policy
             .as_ref()
             .ok_or_else(|| "probe candidate has no compiled Provider request policy".to_string())?
-            .prepare(
-                request_transport(transport),
-                logical_body,
-                CodexRequestOptions::default(),
-            )
+            .prepare(request_transport(transport), logical_body, options)
             .map_err(|error| error.to_string())
     }
 
@@ -336,7 +377,9 @@ impl ProbeCandidate {
             for case in [
                 ProbeCase::BaselineJson,
                 ProbeCase::BaselineSse,
+                ProbeCase::CustomToolAdmissionJson,
                 ProbeCase::ForcedToolSse,
+                ProbeCase::ForcedToolRequiredSse,
             ] {
                 let logical = build_logical_probe_request(
                     case,
@@ -563,33 +606,96 @@ fn redacted_endpoint_for_debug(endpoint: &Url) -> String {
 }
 
 pub fn build_logical_probe_request(case: ProbeCase, model: &str, nonce: &str) -> Value {
-    let stream = matches!(case, ProbeCase::BaselineSse | ProbeCase::ForcedToolSse);
+    let stream = matches!(
+        case,
+        ProbeCase::BaselineSse | ProbeCase::ForcedToolSse | ProbeCase::ForcedToolRequiredSse
+    );
     let mut request = json!({
         "model": model,
         "stream": stream,
         "store": false,
-        "max_output_tokens": 128,
+        "max_output_tokens": PROBE_MAX_OUTPUT_TOKENS,
     });
 
     match case {
         ProbeCase::BaselineJson | ProbeCase::BaselineSse => {
             request["input"] = probe_user_input(BASELINE_PROMPT);
         }
-        ProbeCase::ForcedToolSse => {
+        ProbeCase::CustomToolAdmissionJson => {
             request["input"] = probe_user_input(&format!(
-                "CCSM protocol compatibility probe. Call the provided function exactly once with nonce {nonce}. After its result, reply only CCSM_PROTOCOL_TOOL_DONE."
+                "CCSM protocol compatibility probe. Do not call any tool. Reply only {CUSTOM_TOOL_ADMISSION_MARKER}."
+            ));
+            request["tools"] = json!([{
+                "type": "custom",
+                "name": APPLY_PATCH_TOOL_NAME,
+                "description": "The `apply_patch` tool can be used to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON.",
+                "format": {
+                    "type": "grammar",
+                    "syntax": "lark",
+                    "definition": APPLY_PATCH_LARK_GRAMMAR
+                }
+            }]);
+            request["tool_choice"] = json!("auto");
+        }
+        ProbeCase::ForcedToolSse | ProbeCase::ForcedToolRequiredSse => {
+            request["input"] = probe_user_input(&format!(
+                "CCSM protocol compatibility probe. You must call the only provided function `{TOOL_NAME}` exactly once with nonce {nonce}. Use mode direct. Do not answer with text before the call. After the function result, reply only {TOOL_DONE_MARKER}."
             ));
             request["tools"] = json!([{
                 "type": "function",
                 "name": TOOL_NAME,
                 "description": "Internal CCSM protocol compatibility probe. Call exactly once with the supplied nonce.",
                 "parameters": {
-                    "type": "object",
-                    "properties": { "nonce": { "type": "string" } },
-                    "required": ["nonce"]
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "nonce": {"const": nonce},
+                                "mode": {"const": "direct"}
+                            },
+                            "required": ["nonce", "mode"],
+                            "additionalProperties": false
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "nonce": {"const": nonce},
+                                "mode": {"enum": ["routed", "suggested"]},
+                                "destination": {
+                                    "$ref": "#/$defs/probe_destination"
+                                }
+                            },
+                            "required": ["nonce", "mode", "destination"],
+                            "additionalProperties": false
+                        },
+                        {"type": "null"}
+                    ],
+                    "$defs": {
+                        "probe_destination": {
+                            "type": "object",
+                            "properties": {
+                                "kind": {"type": "string"},
+                                "id": {"$ref": "#/$defs/probe_identifier"}
+                            }
+                        },
+                        "probe_identifier": {
+                            "$ref": "#/$defs/probe_identifier_base",
+                            "type": "string",
+                            "format": "uuid",
+                            "minLength": 1,
+                            "description": "Representative Codex dynamic-tool identifier."
+                        },
+                        "probe_identifier_base": {
+                            "type": "string"
+                        }
+                    }
                 }
             }]);
-            request["tool_choice"] = json!({ "type": "function", "name": TOOL_NAME });
+            request["tool_choice"] = json!(if case == ProbeCase::ForcedToolRequiredSse {
+                "required"
+            } else {
+                "auto"
+            });
         }
         ProbeCase::ToolContinuationJson => {}
     }

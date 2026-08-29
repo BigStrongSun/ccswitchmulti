@@ -4,13 +4,33 @@ import type { Provider } from "@/types";
 
 const apiMocks = vi.hoisted(() => ({
   getCurrent: vi.fn(),
+  getCodexLogicalProviderForEditing: vi.fn(),
   getLiveProviderSettings: vi.fn(),
   getOpenClawLiveProvider: vi.fn(),
+  updateTrayMenu: vi.fn(),
+  prepareCodexProviderSet: vi.fn(),
+  commitCodexProviderSet: vi.fn(),
+  preflightCodexProviderProtocolCompatibility: vi.fn(),
+  invalidateQueries: vi.fn(),
 }));
+const formSubmission = vi.hoisted(() => ({
+  receiptIds: [] as string[],
+}));
+
+vi.mock("@tanstack/react-query", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@tanstack/react-query")>();
+  return {
+    ...actual,
+    useQueryClient: () => ({ invalidateQueries: apiMocks.invalidateQueries }),
+  };
+});
 
 vi.mock("@/lib/api", () => ({
   providersApi: {
     getCurrent: apiMocks.getCurrent,
+    getCodexLogicalProviderForEditing:
+      apiMocks.getCodexLogicalProviderForEditing,
+    updateTrayMenu: apiMocks.updateTrayMenu,
   },
   vscodeApi: {
     getLiveProviderSettings: apiMocks.getLiveProviderSettings,
@@ -19,6 +39,18 @@ vi.mock("@/lib/api", () => ({
     getLiveProvider: apiMocks.getOpenClawLiveProvider,
   },
 }));
+
+vi.mock("@/lib/api/protocol-compatibility", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/lib/api/protocol-compatibility")>();
+  return {
+    ...actual,
+    prepareCodexProviderSet: apiMocks.prepareCodexProviderSet,
+    commitCodexProviderSet: apiMocks.commitCodexProviderSet,
+    preflightCodexProviderProtocolCompatibility:
+      apiMocks.preflightCodexProviderProtocolCompatibility,
+  };
+});
 
 vi.mock("@/components/common/FullScreenPanel", () => ({
   FullScreenPanel: ({
@@ -52,6 +84,7 @@ vi.mock("@/components/providers/forms/ProviderForm", () => ({
       meta?: Record<string, unknown>;
       icon?: string;
       iconColor?: string;
+      protocolProbeReceiptIds?: string[];
     };
     onSubmit: (values: {
       name: string;
@@ -61,6 +94,7 @@ vi.mock("@/components/providers/forms/ProviderForm", () => ({
       meta?: Record<string, unknown>;
       icon?: string;
       iconColor?: string;
+      protocolProbeReceiptIds?: string[];
     }) => void;
     isProxyTakeover?: boolean;
   }) => (
@@ -76,6 +110,7 @@ vi.mock("@/components/providers/forms/ProviderForm", () => ({
           meta: initialData.meta,
           icon: initialData.icon,
           iconColor: initialData.iconColor,
+          protocolProbeReceiptIds: formSubmission.receiptIds,
         });
       }}
     >
@@ -94,8 +129,31 @@ import { EditProviderDialog } from "@/components/providers/EditProviderDialog";
 describe("EditProviderDialog", () => {
   beforeEach(() => {
     apiMocks.getCurrent.mockReset();
+    apiMocks.getCodexLogicalProviderForEditing.mockReset();
     apiMocks.getLiveProviderSettings.mockReset();
     apiMocks.getOpenClawLiveProvider.mockReset();
+    apiMocks.updateTrayMenu.mockReset().mockResolvedValue(undefined);
+    apiMocks.prepareCodexProviderSet.mockReset().mockResolvedValue({
+      digest: "edit-digest",
+      sourceProviderId: "deepseek",
+      responsesModels: ["deepseek-v4"],
+      chatModels: [],
+      plan: { kind: "single", transport: "open_ai_responses" },
+    });
+    apiMocks.commitCodexProviderSet.mockReset().mockResolvedValue({
+      preview: {
+        digest: "edit-digest",
+        sourceProviderId: "deepseek",
+        responsesModels: ["deepseek-v4"],
+        chatModels: [],
+        plan: { kind: "single", transport: "open_ai_responses" },
+      },
+      projections: [],
+      status: "committed",
+    });
+    apiMocks.preflightCodexProviderProtocolCompatibility.mockReset();
+    apiMocks.invalidateQueries.mockReset().mockResolvedValue(undefined);
+    formSubmission.receiptIds = [];
   });
 
   it("保留 Codex 数据库中的 modelCatalog，避免 live 配置缺字段时清空模型映射", async () => {
@@ -220,5 +278,106 @@ describe("EditProviderDialog", () => {
     expect(
       JSON.parse(screen.getByTestId("settings-config").textContent ?? "{}"),
     ).toEqual(provider.settingsConfig);
+  });
+
+  it("普通 Codex 编辑消费现有 receipt 并提交 Provider Set，而不调用旧更新接口", async () => {
+    const provider: Provider = {
+      id: "deepseek",
+      name: "DeepSeek",
+      category: "custom",
+      settingsConfig: {
+        auth: { OPENAI_API_KEY: "db-key" },
+        config:
+          'model_provider = "deepseek"\nmodel = "deepseek-v4"\n[model_providers.deepseek]\nbase_url = "https://api.deepseek.com/v1"\nwire_api = "responses"\n',
+        modelCatalog: { models: [{ model: "deepseek-v4" }] },
+      },
+      meta: { apiFormat: "openai_responses" },
+    };
+    const handleSubmit = vi.fn().mockResolvedValue(undefined);
+    const handleOpenChange = vi.fn();
+    formSubmission.receiptIds = ["receipt-deepseek-v4"];
+
+    render(
+      <EditProviderDialog
+        open
+        provider={provider}
+        onOpenChange={handleOpenChange}
+        onSubmit={handleSubmit}
+        appId="codex"
+        isProxyTakeover
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+
+    await waitFor(() =>
+      expect(apiMocks.commitCodexProviderSet).toHaveBeenCalledWith(
+        expect.objectContaining({ id: "deepseek", name: "DeepSeek" }),
+        ["receipt-deepseek-v4"],
+        "edit-digest",
+        "accept_single",
+      ),
+    );
+    expect(apiMocks.preflightCodexProviderProtocolCompatibility).not.toHaveBeenCalled();
+    expect(handleSubmit).not.toHaveBeenCalled();
+    expect(handleOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("编辑自动拆分门面时加载一个恢复后的逻辑 Provider，而不展示 Router 叶子配置", async () => {
+    const facade: Provider = {
+      id: "qwen",
+      name: "Qwen",
+      category: "custom",
+      settingsConfig: {
+        codexProtocolSet: {
+          version: 1,
+          role: "facade",
+          responsesProviderId: "qwen--ccsm-responses",
+          chatProviderId: "qwen--ccsm-chat",
+        },
+        codexRouting: {
+          schemaVersion: 2,
+          routes: [
+            { targetProviderId: "qwen--ccsm-responses" },
+            { targetProviderId: "qwen--ccsm-chat" },
+          ],
+        },
+      },
+      meta: { apiFormat: "openai_responses" },
+    };
+    const logical: Provider = {
+      ...facade,
+      settingsConfig: {
+        auth: { OPENAI_API_KEY: "db-key" },
+        config:
+          'model_provider = "qwen"\nmodel = "qwen3.8"\n[model_providers.qwen]\nbase_url = "https://qwen.example/v1"\nwire_api = "responses"\n',
+        modelCatalog: {
+          models: [{ model: "qwen3.8" }, { model: "qwen-coder" }],
+        },
+      },
+    };
+    apiMocks.getCodexLogicalProviderForEditing.mockResolvedValue(logical);
+
+    render(
+      <EditProviderDialog
+        open
+        provider={facade}
+        onOpenChange={vi.fn()}
+        onSubmit={vi.fn()}
+        appId="codex"
+        isProxyTakeover
+      />,
+    );
+
+    await waitFor(() =>
+      expect(apiMocks.getCodexLogicalProviderForEditing).toHaveBeenCalledWith(
+        "qwen",
+      ),
+    );
+    await waitFor(() =>
+      expect(
+        JSON.parse(screen.getByTestId("settings-config").textContent ?? "{}"),
+      ).toEqual(logical.settingsConfig),
+    );
   });
 });

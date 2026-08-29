@@ -132,6 +132,17 @@ export type AuthBindingSource =
   | "native_codex_auth";
 
 export type PromptCacheRoutingMode = "auto" | "enabled" | "disabled";
+export type CodexProtocolMode = "auto" | "manual";
+export type CodexReasoningProjection =
+  | "raw_reasoning_text"
+  | "reasoning_summary"
+  | "none";
+export type CodexToolSchemaDialect = "openai" | "moonshot_mfjs";
+export type CodexHistoryReplay =
+  | "chat_reasoning_content"
+  | "native_only"
+  | "responses_reasoning_text_content"
+  | "omit";
 
 export interface AuthBinding {
   source: AuthBindingSource;
@@ -228,6 +239,11 @@ export interface ProviderMeta {
     | "gemini_native";
   // Codex MultiRouter 向导里的协议选择来源；manual 表示用户已显式锁定，不再被探测推荐覆盖。
   apiFormatSource?: "manual" | "probe" | "inferred" | string;
+  // Codex 第三方协议策略；缺省/auto 由深度探测决定，manual 使用下列高级覆盖。
+  codexProtocolMode?: CodexProtocolMode;
+  codexReasoningProjection?: CodexReasoningProjection;
+  codexToolSchemaDialect?: CodexToolSchemaDialect;
+  codexHistoryReplay?: CodexHistoryReplay;
   // 通用认证绑定
   authBinding?: AuthBinding;
   // Claude 认证字段名

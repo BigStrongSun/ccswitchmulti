@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::{
+    protocol_compatibility::{HistoryReplay, ToolSchemaDialect},
     provider::{LocalProxyRequestOverrides, Provider, ProviderMeta},
     proxy::{
         body_filter::filter_private_params_with_whitelist,
@@ -15,8 +16,8 @@ use crate::{
 };
 
 use super::{
-    apply_codex_native_responses_reasoning_effort, apply_codex_request_upstream_model,
     apply_codex_upstream_model, codex_provider_text_only_input, inject_codex_chat_prompt_cache_key,
+    prepare_codex_native_responses_model, provider_needs_responses_namespace_flatten,
     resolve_codex_cache_config, resolve_codex_chat_reasoning_config,
     transform_codex_chat::{
         apply_hosted_tool_switches_to_chat_body, build_codex_tool_context_from_request,
@@ -25,7 +26,7 @@ use super::{
     CodexAdapter, ProviderAdapter,
 };
 
-pub(crate) const CODEX_REQUEST_PREPARER_VERSION: u32 = 2;
+pub(crate) const CODEX_REQUEST_PREPARER_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CodexRequestTransport {
@@ -54,6 +55,8 @@ pub(crate) struct CodexRequestOptions {
     pub hosted_web_search_enabled: bool,
     pub hosted_image_generation_enabled: bool,
     pub prompt_cache_session_id: Option<String>,
+    pub tool_schema_dialect: Option<ToolSchemaDialect>,
+    pub history_replay: Option<HistoryReplay>,
 }
 
 #[derive(Clone)]
@@ -138,8 +141,8 @@ impl CodexThirdPartyRequestPolicy {
             "preparerVersion": CODEX_REQUEST_PREPARER_VERSION,
             "provider": provider_value,
             "credentialFingerprint": credential_fingerprint,
-            "probeBudget": 128,
-            "probeCorpusVersion": 1,
+            "probeBudget": crate::protocol_compatibility::PROBE_MAX_OUTPUT_TOKENS,
+            "probeCorpusVersion": 4,
         });
         let fingerprint = sha256_hex(canonical_json_string(&fingerprint_material).as_bytes());
 
@@ -203,7 +206,7 @@ impl CodexThirdPartyRequestPolicy {
         options: &CodexRequestOptions,
     ) -> Result<Value, ProxyError> {
         let body = self.prepare_protocol_body(transport, logical_body, options)?;
-        Ok(self.apply_body_policy(body))
+        self.finalize_body(transport, body, options)
     }
 
     pub(crate) fn prepare_protocol_body(
@@ -223,6 +226,38 @@ impl CodexThirdPartyRequestPolicy {
 
     pub(crate) fn apply_body_policy(&self, body: Value) -> Value {
         apply_provider_body_policy(&self.provider, body)
+    }
+
+    pub(crate) fn finalize_body(
+        &self,
+        transport: CodexRequestTransport,
+        body: Value,
+        options: &CodexRequestOptions,
+    ) -> Result<Value, ProxyError> {
+        let mut body = self.apply_body_policy(body);
+        if transport == CodexRequestTransport::Responses {
+            body = match options.history_replay.unwrap_or(HistoryReplay::NativeOnly) {
+                HistoryReplay::ResponsesReasoningTextContent => {
+                    super::openai_compat::normalize_third_party_responses_reasoning_items(body)
+                }
+                HistoryReplay::Omit => omit_responses_reasoning_items(body),
+                HistoryReplay::NativeOnly | HistoryReplay::ChatReasoningContent => body,
+            };
+        }
+        super::codex_tool_schema::compile_tool_schemas(
+            &mut body,
+            options
+                .tool_schema_dialect
+                .unwrap_or(ToolSchemaDialect::OpenAi),
+        )?;
+        if transport == CodexRequestTransport::Responses
+            && provider_needs_responses_namespace_flatten(&self.provider)
+        {
+            super::transform_codex_responses_xai_sanitize::sanitize_xai_responses_request(
+                &mut body,
+            );
+        }
+        Ok(body)
     }
 
     pub(crate) fn prepare_headers(&self) -> HeaderMap {
@@ -313,10 +348,16 @@ impl CodexThirdPartyRequestPolicy {
     }
 
     fn prepare_responses_body(&self, mut logical_body: Value) -> Result<Value, ProxyError> {
-        apply_codex_native_responses_reasoning_effort(&self.provider, &mut logical_body)?;
-        apply_codex_request_upstream_model(&self.provider, &mut logical_body);
-        Ok(super::openai_compat::normalize_third_party_responses_reasoning_items(logical_body))
+        prepare_codex_native_responses_model(&self.provider, &mut logical_body)?;
+        Ok(logical_body)
     }
+}
+
+fn omit_responses_reasoning_items(mut body: Value) -> Value {
+    if let Some(input) = body.get_mut("input").and_then(Value::as_array_mut) {
+        input.retain(|item| item.get("type").and_then(Value::as_str) != Some("reasoning"));
+    }
+    body
 }
 
 impl fmt::Debug for CodexThirdPartyRequestPolicy {

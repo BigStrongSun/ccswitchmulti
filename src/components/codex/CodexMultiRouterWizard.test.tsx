@@ -5,14 +5,20 @@ import type { Provider } from "@/types";
 import { providersApi } from "@/lib/api/providers";
 import { CodexMultiRouterWizard } from "./CodexMultiRouterWizard";
 
-const { initializeProviderConfig } = vi.hoisted(() => ({
-  initializeProviderConfig: vi.fn(),
+const {
+  preflightCodexProviderProtocolCompatibility,
+  prepareCodexProviderSetBatch,
+  commitCodexProviderSetBatch,
+} = vi.hoisted(() => ({
+  preflightCodexProviderProtocolCompatibility: vi.fn(),
+  prepareCodexProviderSetBatch: vi.fn(),
+  commitCodexProviderSetBatch: vi.fn(),
 }));
 
-vi.mock("@/lib/api/codexSubagentV2", () => ({
-  codexSubagentV2Api: {
-    initializeProviderConfig,
-  },
+vi.mock("@/lib/api/protocol-compatibility", () => ({
+  preflightCodexProviderProtocolCompatibility,
+  prepareCodexProviderSetBatch,
+  commitCodexProviderSetBatch,
 }));
 
 vi.mock("@/components/providers/forms/hooks/useCodexOauth", () => ({
@@ -151,19 +157,57 @@ describe("CodexMultiRouterWizard", () => {
   });
 
   it("coalesces rapid saves and updates the same plan after the first save", async () => {
-    let resolveAdd: ((value: boolean) => void) | undefined;
-    const addPromise = new Promise<boolean>((resolve) => {
-      resolveAdd = resolve;
+    let resolveCommit:
+      | ((value: {
+          preview: Record<string, unknown>;
+          router: Provider;
+          projections: never[];
+          status: "committed";
+          projectionErrorCode: null;
+        }) => void)
+      | undefined;
+    const firstCommit = new Promise<{
+      preview: Record<string, unknown>;
+      router: Provider;
+      projections: never[];
+      status: "committed";
+      projectionErrorCode: null;
+    }>((resolve) => {
+      resolveCommit = resolve;
     });
-    vi.mocked(providersApi.add).mockImplementationOnce(() => addPromise);
-    initializeProviderConfig.mockResolvedValue({
-      id: "codex-multirouter",
-      name: "Codex MultiRouter",
-    });
+    prepareCodexProviderSetBatch.mockImplementation(
+      async (_sources: unknown, router: Provider) => ({
+        digest: `digest:${router.id}`,
+        sourcePreviews: [],
+        routerProviderId: router.id,
+        requiresSplitConfirmation: false,
+        blocked: false,
+      }),
+    );
+    commitCodexProviderSetBatch.mockImplementationOnce(() => firstCommit);
+    commitCodexProviderSetBatch.mockImplementation(
+      async (_sources: unknown, router: Provider, digest: string) => ({
+        preview: {
+          digest,
+          sourcePreviews: [],
+          routerProviderId: router.id,
+          requiresSplitConfirmation: false,
+          blocked: false,
+        },
+        router,
+        projections: [],
+        status: "committed" as const,
+        projectionErrorCode: null,
+      }),
+    );
     const source: Provider = {
       id: "relay",
       name: "Relay",
       category: "custom",
+      meta: {
+        codexProtocolMode: "manual",
+        apiFormat: "openai_responses",
+      },
       settingsConfig: {
         baseUrl: "https://example.invalid/v1",
         auth: { OPENAI_API_KEY: "test-only" },
@@ -177,14 +221,38 @@ describe("CodexMultiRouterWizard", () => {
 
     fireEvent.click(saveButton);
     fireEvent.click(saveButton);
-    expect(providersApi.add).toHaveBeenCalledTimes(1);
+    await waitFor(() =>
+      expect(commitCodexProviderSetBatch).toHaveBeenCalledTimes(1),
+    );
 
-    resolveAdd?.(true);
-    await waitFor(() => expect(initializeProviderConfig).toHaveBeenCalled());
+    const firstRouter = commitCodexProviderSetBatch.mock
+      .calls[0]?.[1] as Provider;
+    resolveCommit?.({
+      preview: {
+        digest: `digest:${firstRouter.id}`,
+        sourcePreviews: [],
+        routerProviderId: firstRouter.id,
+        requiresSplitConfirmation: false,
+        blocked: false,
+      },
+      router: firstRouter,
+      projections: [],
+      status: "committed",
+      projectionErrorCode: null,
+    });
+    await waitFor(() =>
+      expect(screen.getByText("MultiRouter provider 已保存。")).toBeVisible(),
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "保存并发布" }));
-    expect(providersApi.add).toHaveBeenCalledTimes(1);
-    expect(providersApi.update).toHaveBeenCalled();
+    await waitFor(() =>
+      expect(commitCodexProviderSetBatch).toHaveBeenCalledTimes(2),
+    );
+    const secondRouter = commitCodexProviderSetBatch.mock
+      .calls[1]?.[1] as Provider;
+    expect(secondRouter.id).toBe(firstRouter.id);
+    expect(providersApi.add).not.toHaveBeenCalled();
+    expect(providersApi.update).not.toHaveBeenCalled();
   });
 
   it("does not require users to choose subagent models in the main wizard", () => {

@@ -88,6 +88,10 @@ impl Provider {
             || self.codex_base_url_contains("chatgpt.com/backend-api/codex")
     }
 
+    pub fn uses_fixed_codex_responses_transport(&self) -> bool {
+        self.category.as_deref() == Some("official") || self.uses_managed_account_auth()
+    }
+
     pub fn uses_manual_codex_protocol(&self) -> bool {
         self.meta.as_ref().and_then(|meta| meta.codex_protocol_mode)
             == Some(CodexProtocolMode::Manual)
@@ -585,12 +589,24 @@ pub struct ProviderMeta {
     #[serde(rename = "codexProtocolMode", skip_serializing_if = "Option::is_none")]
     pub codex_protocol_mode: Option<CodexProtocolMode>,
     /// Advanced-mode response projection for Chat reasoning.
-    /// Supported values: raw_reasoning_text, reasoning_summary, none.
+    /// Supported manual values: raw_reasoning_text, none.
+    /// Native summaries are selected only from observed, target-bound protocol evidence.
     #[serde(
         rename = "codexReasoningProjection",
         skip_serializing_if = "Option::is_none"
     )]
     pub codex_reasoning_projection: Option<String>,
+    /// Advanced-mode tool JSON Schema dialect for Codex third-party requests.
+    /// Supported values: openai, moonshot_mfjs.
+    #[serde(
+        rename = "codexToolSchemaDialect",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub codex_tool_schema_dialect: Option<String>,
+    /// Advanced-mode Responses reasoning-history replay dialect.
+    /// Supported values: native_only, responses_reasoning_text_content, omit.
+    #[serde(rename = "codexHistoryReplay", skip_serializing_if = "Option::is_none")]
+    pub codex_history_replay: Option<String>,
     /// 通用认证绑定（provider_config / managed_account）
     ///
     /// 新代码应只写入该字段；githubAccountId 仅保留兼容读取。

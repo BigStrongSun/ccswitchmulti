@@ -57,6 +57,13 @@ pub struct PreparedCodexProviderSetMutation {
     source_draft: Provider,
     probe_records: Vec<ProtocolCompatibilityRecord>,
     prepared_at: i64,
+    planning_mode: CodexProviderSetPlanningMode,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CodexProviderSetPlanningMode {
+    Automatic,
+    Manual(TransportKind),
 }
 
 #[derive(Debug, Clone)]
@@ -110,6 +117,47 @@ pub fn responses_leaf_id(source_provider_id: &str) -> String {
 
 pub fn chat_leaf_id(source_provider_id: &str) -> String {
     format!("{source_provider_id}{CHAT_LEAF_SUFFIX}")
+}
+
+/// Returns the logical parent ID only for a structurally valid generated leaf marker.
+///
+/// Provider Set leaves are persistence/runtime implementation details. User-facing service and
+/// command boundaries use this function as the single identity predicate instead of duplicating
+/// marker parsing or relying on deterministic ID suffixes.
+pub fn codex_provider_set_leaf_parent_id(provider: &Provider) -> Option<&str> {
+    let marker = provider
+        .settings_config
+        .get("codexProtocolSet")
+        .and_then(Value::as_object)?;
+    if marker.get("version").and_then(Value::as_u64) != Some(CODEX_PROTOCOL_SET_VERSION as u64)
+        || marker.get("role").and_then(Value::as_str) != Some("leaf")
+        || !matches!(
+            marker.get("transport").and_then(Value::as_str),
+            Some("open_ai_responses" | "open_ai_chat")
+        )
+    {
+        return None;
+    }
+    marker
+        .get("parentProviderId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|parent_id| !parent_id.is_empty())
+}
+
+pub fn is_codex_provider_set_generated_leaf(provider: &Provider) -> bool {
+    codex_provider_set_leaf_parent_id(provider).is_some()
+}
+
+pub fn is_codex_provider_set_facade(provider: &Provider) -> bool {
+    provider
+        .settings_config
+        .get("codexProtocolSet")
+        .and_then(Value::as_object)
+        .is_some_and(|marker| {
+            marker.get("version").and_then(Value::as_u64) == Some(CODEX_PROTOCOL_SET_VERSION as u64)
+                && marker.get("role").and_then(Value::as_str) == Some("facade")
+        })
 }
 
 pub fn plan_codex_provider_set(
@@ -187,6 +235,7 @@ pub fn plan_codex_provider_set(
             source_draft: source.clone(),
             probe_records: records.to_vec(),
             prepared_at: now,
+            planning_mode: CodexProviderSetPlanningMode::Automatic,
         });
     }
 
@@ -225,12 +274,14 @@ pub fn plan_codex_provider_set(
         let responses_provider =
             build_leaf(source, TransportKind::OpenAiResponses, responses_catalog)?;
         let chat_provider = build_leaf(source, TransportKind::OpenAiChat, chat_catalog)?;
+        let default_transport = source_default_transport(source, &selections)?;
         let facade = build_facade(
             source,
             &responses_provider,
             &chat_provider,
             &responses_models,
             &chat_models,
+            default_transport,
         )?;
         CodexProviderSetPersistence::Split {
             facade,
@@ -302,6 +353,55 @@ pub fn plan_codex_provider_set(
         source_draft: source.clone(),
         probe_records: records.to_vec(),
         prepared_at: now,
+        planning_mode: CodexProviderSetPlanningMode::Automatic,
+    })
+}
+
+pub fn plan_manual_codex_provider_set(
+    source: &Provider,
+    transport: TransportKind,
+    existing_providers: &HashMap<String, Provider>,
+    now: i64,
+) -> Result<PreparedCodexProviderSetMutation, CodexProviderSetError> {
+    let mut provider = source.clone();
+    remove_provider_set_fields(&mut provider);
+    normalize_provider_transport(&mut provider, transport)?;
+    let persistence = CodexProviderSetPersistence::Single {
+        transport,
+        provider,
+    };
+    let router_updates =
+        rewrite_dependent_routers_for_provider_set(source, &persistence, existing_providers)?;
+    let digest = preview_digest(
+        source,
+        &[],
+        &json!({
+            "planningMode": "manual",
+            "persistence": persistence_digest_value(&persistence),
+            "routerUpdates": router_updates,
+        }),
+    )?;
+    let delete_provider_ids = owned_existing_leaf_ids(source, existing_providers);
+    let mut replace_profile_provider_ids = [source.id.clone()].into_iter().collect::<HashSet<_>>();
+    replace_profile_provider_ids.extend(delete_provider_ids.iter().cloned());
+
+    Ok(PreparedCodexProviderSetMutation {
+        preview: CodexProviderSetPreview {
+            digest,
+            source_provider_id: source.id.clone(),
+            responses_models: Vec::new(),
+            chat_models: Vec::new(),
+            plan: CodexProviderSetPlan::Single { transport },
+        },
+        persistence,
+        profiles: Vec::new(),
+        delete_provider_ids,
+        replace_profile_provider_ids,
+        router_updates,
+        source_draft: source.clone(),
+        probe_records: Vec::new(),
+        prepared_at: now,
+        planning_mode: CodexProviderSetPlanningMode::Manual(transport),
     })
 }
 
@@ -316,6 +416,13 @@ impl PreparedCodexProviderSetMutation {
 
     pub fn prepared_at(&self) -> i64 {
         self.prepared_at
+    }
+
+    pub(crate) fn manual_transport(&self) -> Option<TransportKind> {
+        match self.planning_mode {
+            CodexProviderSetPlanningMode::Automatic => None,
+            CodexProviderSetPlanningMode::Manual(transport) => Some(transport),
+        }
     }
 }
 
@@ -1130,6 +1237,7 @@ fn build_facade(
     chat_provider: &Provider,
     responses_models: &[String],
     chat_models: &[String],
+    default_transport: TransportKind,
 ) -> Result<Provider, CodexProviderSetError> {
     let mut facade = source.clone();
     remove_provider_set_fields(&mut facade);
@@ -1164,7 +1272,10 @@ fn build_facade(
         json!({
             "schemaVersion": 2,
             "enabled": true,
-            "defaultRouteId": format!("{}{}", source.id, RESPONSES_ROUTE_SUFFIX),
+            "defaultRouteId": match default_transport {
+                TransportKind::OpenAiResponses => format!("{}{}", source.id, RESPONSES_ROUTE_SUFFIX),
+                TransportKind::OpenAiChat => format!("{}{}", source.id, CHAT_ROUTE_SUFFIX),
+            },
             "routes": [
                 {
                     "id": format!("{}{}", source.id, RESPONSES_ROUTE_SUFFIX),
@@ -1186,6 +1297,46 @@ fn build_facade(
         }),
     );
     Ok(facade)
+}
+
+fn source_default_transport(
+    source: &Provider,
+    selections: &[(CatalogModel, TransportKind)],
+) -> Result<TransportKind, CodexProviderSetError> {
+    let default_model = codex_provider_upstream_model(source).ok_or_else(|| {
+        error(
+            "codex_provider_set_router_expansion_ambiguous",
+            "Logical source default model is missing",
+        )
+    })?;
+    let default_model = default_model.trim().to_ascii_lowercase();
+    let mut matched = None;
+    for (model, transport) in selections {
+        if model.public_model.to_ascii_lowercase() != default_model
+            && model.upstream_model.to_ascii_lowercase() != default_model
+        {
+            continue;
+        }
+        if matched.is_some_and(|current| current != *transport) {
+            return Err(error(
+                "codex_provider_set_router_expansion_ambiguous",
+                format!(
+                    "Logical source default model `{}` maps to multiple selected protocols",
+                    default_model
+                ),
+            ));
+        }
+        matched = Some(*transport);
+    }
+    matched.ok_or_else(|| {
+        error(
+            "codex_provider_set_router_expansion_ambiguous",
+            format!(
+                "Logical source default model `{}` has no selected protocol",
+                default_model
+            ),
+        )
+    })
 }
 
 fn normalize_provider_transport(
@@ -1294,9 +1445,9 @@ fn error(code: impl Into<String>, message: impl Into<String>) -> CodexProviderSe
 #[cfg(test)]
 mod tests {
     use super::{
-        chat_leaf_id, plan_codex_provider_set, responses_leaf_id, restore_logical_codex_provider,
-        rewrite_dependent_routers_for_provider_set, CodexProviderSetPersistence,
-        CodexProviderSetPlan, CODEX_PROTOCOL_SET_VERSION,
+        chat_leaf_id, plan_codex_provider_set, plan_manual_codex_provider_set, responses_leaf_id,
+        restore_logical_codex_provider, rewrite_dependent_routers_for_provider_set,
+        CodexProviderSetPersistence, CodexProviderSetPlan, CODEX_PROTOCOL_SET_VERSION,
     };
     use crate::protocol_compatibility::{
         ProbeReadiness, ProbeTargetKey, ProtocolCompatibilityProbeResult,
@@ -1563,6 +1714,31 @@ mod tests {
             .profiles
             .iter()
             .all(|record| !record.target.request_policy_fingerprint.is_empty()));
+    }
+
+    #[test]
+    fn split_facade_default_route_follows_the_source_default_model_transport() {
+        let mut source = source_provider();
+        source.settings_config["config"] = Value::String(
+            "model = \"model-b\"\nmodel_provider = \"relay\"\n[model_providers.relay]\nbase_url = \"https://relay.example/v1\"\nwire_api = \"responses\"\n"
+                .to_string(),
+        );
+
+        let prepared = plan_codex_provider_set(
+            &source,
+            &records(TransportKind::OpenAiResponses, TransportKind::OpenAiChat),
+            &HashMap::new(),
+            150,
+        )
+        .expect("split plan");
+        let CodexProviderSetPersistence::Split { facade, .. } = prepared.persistence else {
+            panic!("expected Split");
+        };
+
+        assert_eq!(
+            facade.settings_config["codexRouting"]["defaultRouteId"],
+            "relay--ccsm-chat-route"
+        );
     }
 
     #[test]
@@ -2004,23 +2180,99 @@ mod tests {
     }
 
     #[test]
-    fn dependent_default_route_blocks_when_source_default_model_has_no_selected_group() {
+    fn split_plan_blocks_when_source_default_model_has_no_selected_group() {
         let mut source = source_provider();
         source.settings_config["config"] = Value::String(
             "model = \"missing-model\"\nmodel_provider = \"relay\"\n[model_providers.relay]\nbase_url = \"https://relay.example/v1\"\nwire_api = \"responses\"\n"
                 .to_string(),
         );
-        let prepared = split_prepared(&source);
-        let existing = [(
-            "outer-router".to_string(),
-            dependent_router(json!({"mode": "all"})),
-        )]
-        .into_iter()
-        .collect();
 
-        let error =
-            rewrite_dependent_routers_for_provider_set(&source, &prepared.persistence, &existing)
-                .expect_err("ambiguous default must block");
+        let error = plan_codex_provider_set(
+            &source,
+            &records(TransportKind::OpenAiResponses, TransportKind::OpenAiChat),
+            &HashMap::new(),
+            150,
+        )
+        .expect_err("ambiguous default must block before a split facade is materialized");
         assert_eq!(error.code, "codex_provider_set_router_expansion_ambiguous");
+    }
+
+    #[test]
+    fn manual_whole_provider_protocol_collapses_owned_split_without_fake_profiles() {
+        let source = source_provider();
+        let split = split_prepared(&source);
+        let CodexProviderSetPersistence::Split {
+            facade,
+            responses_provider,
+            chat_provider,
+        } = split.persistence
+        else {
+            panic!("expected Split");
+        };
+        let existing = [
+            (facade.id.clone(), facade.clone()),
+            (responses_provider.id.clone(), responses_provider),
+            (chat_provider.id.clone(), chat_provider),
+        ]
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+        let mut restored =
+            restore_logical_codex_provider(&facade, &existing).expect("restore logical source");
+        restored
+            .meta
+            .get_or_insert_with(ProviderMeta::default)
+            .codex_protocol_mode = Some(crate::provider::CodexProtocolMode::Manual);
+
+        let prepared = plan_manual_codex_provider_set(
+            &restored,
+            TransportKind::OpenAiResponses,
+            &existing,
+            150,
+        )
+        .expect("plan manual uniform Provider");
+
+        assert!(matches!(
+            prepared.persistence,
+            CodexProviderSetPersistence::Single {
+                transport: TransportKind::OpenAiResponses,
+                ..
+            }
+        ));
+        assert_eq!(
+            prepared.delete_provider_ids,
+            vec![responses_leaf_id("relay"), chat_leaf_id("relay")]
+        );
+        assert!(prepared.profiles.is_empty());
+        assert!(prepared.probe_records.is_empty());
+    }
+
+    #[test]
+    fn manual_whole_provider_protocol_does_not_require_or_fabricate_a_catalog() {
+        let mut source = source_provider();
+        source
+            .settings_config
+            .as_object_mut()
+            .expect("settings object")
+            .remove("modelCatalog");
+
+        let prepared = plan_manual_codex_provider_set(
+            &source,
+            TransportKind::OpenAiChat,
+            &HashMap::new(),
+            150,
+        )
+        .expect("manual protocol is an explicit whole-Provider choice");
+
+        let CodexProviderSetPersistence::Single {
+            transport,
+            provider,
+        } = prepared.persistence
+        else {
+            panic!("expected Single");
+        };
+        assert_eq!(transport, TransportKind::OpenAiChat);
+        assert_eq!(provider.settings_config["apiFormat"], "openai_chat");
+        assert!(prepared.profiles.is_empty());
+        assert!(prepared.probe_records.is_empty());
     }
 }

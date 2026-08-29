@@ -19,6 +19,10 @@ pub enum ProbeCaptureError {
     Network,
     #[error("protocol probe upstream returned HTTP {status_code}")]
     HttpStatus { status_code: u16 },
+    #[error("protocol probe upstream rejected the tool schema with HTTP {status_code}")]
+    ToolSchemaRejected { status_code: u16 },
+    #[error("protocol probe upstream rejected reasoning history replay with HTTP {status_code}")]
+    ReasoningReplayRejected { status_code: u16 },
     #[error("protocol probe response exceeded the capture limit")]
     ResponseTooLarge,
     #[error("protocol probe response payload was invalid")]
@@ -95,6 +99,13 @@ async fn capture_response(
         .map_err(|_| ProbeCaptureError::Network)?;
     let status_code = response.status().as_u16();
     if !response.status().is_success() {
+        if matches!(status_code, 400 | 422) {
+            let classified = collect_bounded_body(response)
+                .await
+                .ok()
+                .and_then(|body| classify_rejection_body(status_code, &body));
+            return Err(classified.unwrap_or(ProbeCaptureError::HttpStatus { status_code }));
+        }
         return Err(ProbeCaptureError::HttpStatus { status_code });
     }
 
@@ -115,6 +126,48 @@ async fn capture_response(
     } else {
         capture_json(status_code, &bytes)
     }
+}
+
+fn classify_rejection_body(status_code: u16, body: &[u8]) -> Option<ProbeCaptureError> {
+    let text = String::from_utf8_lossy(body).to_ascii_lowercase();
+    let rejection = [
+        "invalid",
+        "not valid",
+        "not a valid",
+        "unsupported",
+        "must be",
+        "should be",
+        "expected",
+        "reject",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker));
+    if !rejection {
+        return None;
+    }
+
+    let mentions_schema = text.contains("schema");
+    let mentions_tool = ["tool", "function.parameters", "tools.function.parameters"]
+        .iter()
+        .any(|marker| text.contains(marker));
+    if mentions_schema && mentions_tool {
+        return Some(ProbeCaptureError::ToolSchemaRejected { status_code });
+    }
+
+    let mentions_reasoning = text.contains("reasoning");
+    let mentions_replay_shape = [
+        "reasoning_text",
+        "encrypted_content",
+        "summary",
+        "content",
+        "passed back",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker));
+    if mentions_reasoning && mentions_replay_shape {
+        return Some(ProbeCaptureError::ReasoningReplayRejected { status_code });
+    }
+    None
 }
 
 async fn collect_bounded_body(response: reqwest::Response) -> Result<Vec<u8>, ProbeCaptureError> {
@@ -173,6 +226,12 @@ fn capture_sse(status_code: u16, body: &[u8]) -> Result<CapturedProbeExchange, P
         }
         let value =
             serde_json::from_str::<Value>(&data).map_err(|_| ProbeCaptureError::InvalidPayload)?;
+        if event_type.is_none() {
+            event_type = value
+                .get("type")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+        }
         payloads.push(CapturedPayload { event_type, value });
     }
 

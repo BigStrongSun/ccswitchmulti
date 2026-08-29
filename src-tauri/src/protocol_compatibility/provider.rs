@@ -16,6 +16,9 @@ pub fn apply_probe_selection_to_provider(
     provider: &mut Provider,
     result: &ProtocolCompatibilityProbeResult,
 ) -> Result<bool, String> {
+    if result.readiness != super::ProbeReadiness::Verified {
+        return Ok(false);
+    }
     let Some(transport) = result.selected_transport else {
         return Ok(false);
     };
@@ -85,8 +88,7 @@ pub(crate) fn compile_provider_probe_candidate_for_model(
         .api_format()
     {
         "openai_chat" => TransportKind::OpenAiChat,
-        "openai_responses" => TransportKind::OpenAiResponses,
-        _ => return Err("provider is not an OpenAI Chat/Responses protocol candidate".to_string()),
+        _ => TransportKind::OpenAiResponses,
     };
     let provider_id = string_field(&provider.settings_config, &["codexRouterParentProviderId"])
         .unwrap_or(provider.id.as_str());
@@ -177,6 +179,44 @@ pub fn apply_selected_transport_to_provider(
         let updated = crate::codex_config::update_codex_toml_field(config, "wire_api", wire_api)?;
         provider.settings_config["config"] = Value::String(updated);
     }
+    Ok(())
+}
+
+pub fn apply_selected_transport_to_catalog_model(
+    provider: &mut Provider,
+    public_model: &str,
+    transport: TransportKind,
+) -> Result<(), String> {
+    let catalog_key = if provider.settings_config.get("modelCatalog").is_some() {
+        "modelCatalog"
+    } else {
+        "model_catalog"
+    };
+    let models = provider
+        .settings_config
+        .get_mut(catalog_key)
+        .and_then(|catalog| catalog.get_mut("models"))
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| {
+            "Codex provider has no model catalog for per-model protocol selection".to_string()
+        })?;
+    let matching = models
+        .iter()
+        .enumerate()
+        .filter_map(|(index, model)| {
+            (string_field(model, &["model", "id", "slug"]) == Some(public_model)).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let [index] = matching.as_slice() else {
+        return Err(format!(
+            "Codex protocol probe model `{public_model}` must match exactly one model catalog entry"
+        ));
+    };
+    let api_format = match transport {
+        TransportKind::OpenAiChat => "openai_chat",
+        TransportKind::OpenAiResponses => "openai_responses",
+    };
+    models[*index]["apiFormat"] = Value::String(api_format.to_string());
     Ok(())
 }
 

@@ -40,6 +40,7 @@ function probeOutcome(
         expiresAt: 2,
       },
     ],
+    receiptIds: ["receipt-fixture-model"],
     protocolApplied: false,
   };
 }
@@ -141,7 +142,7 @@ describe("CodexProtocolProbeProgressDialog", () => {
     expect(within(modelCard).getByText("思考内容")).toBeInTheDocument();
     expect(within(modelCard).getByText("工具调用")).toBeInTheDocument();
     expect(within(modelCard).getByText("工具续轮")).toBeInTheDocument();
-    expect(within(modelCard).getByText("摘要")).toBeInTheDocument();
+    expect(within(modelCard).getByText("上游原生摘要")).toBeInTheDocument();
     expect(within(modelCard).getByText("检测中")).toBeInTheDocument();
   });
 

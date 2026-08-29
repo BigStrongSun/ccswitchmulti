@@ -46,11 +46,11 @@ import {
 } from "@/lib/api/model-fetch";
 import {
   preflightCodexProviderProtocolCompatibility,
-  type CodexProtocolCompatibilityRecord,
   type CodexProtocolProbeProgressEvent,
   type CodexProviderProtocolPreflightOutcome,
 } from "@/lib/api/protocol-compatibility";
 import { CodexProtocolProbeProgressDialog } from "./CodexProtocolProbeProgressDialog";
+import { CodexProtocolAdvancedSettings } from "./CodexProtocolAdvancedSettings";
 import { CustomUserAgentField } from "./CustomUserAgentField";
 import { LocalProxyRequestOverridesField } from "./LocalProxyRequestOverridesField";
 import { CodexProviderReadinessSection } from "./CodexProviderReadinessSection";
@@ -58,6 +58,7 @@ import { CodexModelReasoningCard } from "./CodexModelReasoningCard";
 import { CodexModelReasoningEditor } from "./CodexModelReasoningEditor";
 import { CodexModelReasoningSummary } from "./CodexModelReasoningSummary";
 import { cn } from "@/lib/utils";
+import { buildCodexProtocolProbeProviderDraft } from "@/lib/codexProtocolSettings";
 import { resolveFetchedCodexModelContextWindow } from "@/utils/codexModelContext";
 import {
   codexPlanModelListAction,
@@ -73,6 +74,10 @@ import type {
   CodexReasoningEffort,
   CodexRoutingConfig,
   PromptCacheRoutingMode,
+  CodexProtocolMode,
+  CodexReasoningProjection,
+  CodexToolSchemaDialect,
+  CodexHistoryReplay,
   Provider,
   ProviderCategory,
 } from "@/types";
@@ -95,6 +100,8 @@ const PROVIDER_REASONING_EFFORT_CHOICES: CodexReasoningEffort[] = [
   "xhigh",
   "max",
 ];
+
+const ignoreProtocolProbeReceiptIds = (_receiptIds: string[]) => undefined;
 
 export type CodexReasoningCapabilitySourceMode =
   | "automatic"
@@ -198,30 +205,6 @@ export function validateCodexReasoningCapabilityDraft(
   }
 }
 
-function buildSplitCodexProviderSuggestionForProbeRecords({
-  providerName,
-  records,
-}: {
-  providerName?: string;
-  records: CodexProtocolCompatibilityRecord[];
-}): CodexProviderSplitSuggestion | null {
-  const responsesModels = records
-    .filter(
-      (record) => record.result.selected_transport === "open_ai_responses",
-    )
-    .map((record) => record.target.public_model);
-  const chatModels = records
-    .filter((record) => record.result.selected_transport === "open_ai_chat")
-    .map((record) => record.target.public_model);
-
-  if (responsesModels.length === 0 || chatModels.length === 0) return null;
-  return {
-    providerName: providerName?.trim() || "provider",
-    responsesModels,
-    chatModels,
-  };
-}
-
 interface CodexFormFieldsProps {
   appId?: AppId;
   providerId?: string;
@@ -278,6 +261,16 @@ interface CodexFormFieldsProps {
   onCodexChatReasoningChange?: (value: CodexChatReasoning) => void;
   promptCacheRouting?: PromptCacheRoutingMode;
   onPromptCacheRoutingChange?: (value: PromptCacheRoutingMode) => void;
+  protocolMode?: CodexProtocolMode;
+  onProtocolModeChange?: (value: CodexProtocolMode) => void;
+  reasoningProjection?: CodexReasoningProjection;
+  onReasoningProjectionChange?: (value: CodexReasoningProjection) => void;
+  toolSchemaDialect?: CodexToolSchemaDialect;
+  onToolSchemaDialectChange?: (value: CodexToolSchemaDialect) => void;
+  historyReplay?: CodexHistoryReplay;
+  onHistoryReplayChange?: (value: CodexHistoryReplay) => void;
+  /** Current deep-probe leases for the outer Provider save coordinator. */
+  onProtocolProbeReceiptIdsChange?: (receiptIds: string[]) => void;
 
   // Model Catalog
   catalogModels?: CodexCatalogModel[];
@@ -288,9 +281,6 @@ interface CodexFormFieldsProps {
   onSpawnAgentModelsChange?: (models: string[]) => void;
   codexRouting?: CodexRoutingConfig;
   onCodexRoutingChange?: (routing: CodexRoutingConfig) => void;
-  onProviderSplitSuggestionChange?: (
-    suggestion: CodexProviderSplitSuggestion | null,
-  ) => void;
 
   // Speed Test Endpoints
   speedTestEndpoints: EndpointCandidate[];
@@ -355,17 +345,6 @@ function unknownReasoningResolution(
 }
 
 type CodexCatalogRow = CodexCatalogModel & { rowId: string };
-
-export interface CodexProviderSplitSuggestion {
-  providerName: string;
-  responsesModels: string[];
-  chatModels: string[];
-}
-
-interface PendingCodexProviderSplitRouting {
-  identity: string;
-  suggestion: CodexProviderSplitSuggestion;
-}
 
 function createCatalogRow(seed?: Partial<CodexCatalogModel>): CodexCatalogRow {
   const inputModalities = seed?.inputModalities ?? seed?.input_modalities;
@@ -669,57 +648,6 @@ function mergeFetchedModelsIntoCatalogRows(
   return next;
 }
 
-// 判断模型名是否大概率属于支持 Responses 的 OpenAI/GPT 系列。
-// 这里故意只做保守启发式，避免把 qwen/deepseek 等中转模型误归到 Responses route。
-export function isLikelyCodexResponsesModel(model: string): boolean {
-  const normalized = model.trim().toLowerCase();
-  if (!normalized) return false;
-  const lastSegment =
-    normalized.split(/[/:]/).filter(Boolean).pop() ?? normalized;
-  return /^(gpt-|gpt\d|o[1345](?:-|$)|chatgpt-|codex-)/.test(lastSegment);
-}
-
-// 将 /models 结果按“原生 Responses 候选”和“需要 Chat 转换候选”分组。
-export function splitFetchedModelsByLikelyCodexProtocol(
-  models: FetchedModel[],
-): { responses: string[]; chat: string[] } {
-  const responses: string[] = [];
-  const chat: string[] = [];
-  const seen = new Set<string>();
-
-  for (const fetched of models) {
-    const id = fetched.id.trim();
-    if (!id || seen.has(id)) continue;
-    seen.add(id);
-    if (isLikelyCodexResponsesModel(id)) {
-      responses.push(id);
-    } else {
-      chat.push(id);
-    }
-  }
-
-  return { responses, chat };
-}
-
-// 为同一个中转 provider 生成“拆成两个 provider”的建议；GPT-like 走 Responses，非 GPT-like 走 Chat 转换。
-export function buildSplitCodexProviderSuggestionForFetchedModels({
-  providerName,
-  models,
-}: {
-  providerName?: string;
-  models: FetchedModel[];
-}): CodexProviderSplitSuggestion | null {
-  const split = splitFetchedModelsByLikelyCodexProtocol(models);
-  if (split.responses.length === 0 || split.chat.length === 0) return null;
-
-  const labelBase = providerName?.trim() || "provider";
-  return {
-    providerName: labelBase,
-    responsesModels: split.responses,
-    chatModels: split.chat,
-  };
-}
-
 export function CodexFormFields({
   appId = "codex",
   providerId,
@@ -765,10 +693,18 @@ export function CodexFormFields({
   onCodexChatReasoningChange,
   promptCacheRouting = "auto",
   onPromptCacheRoutingChange = () => undefined,
+  protocolMode = "auto",
+  onProtocolModeChange = () => undefined,
+  reasoningProjection = "none",
+  onReasoningProjectionChange = () => undefined,
+  toolSchemaDialect = "openai",
+  onToolSchemaDialectChange = () => undefined,
+  historyReplay = "native_only",
+  onHistoryReplayChange = () => undefined,
+  onProtocolProbeReceiptIdsChange = ignoreProtocolProbeReceiptIds,
   catalogModels = [],
   presetCatalogModels = [],
   onCatalogModelsChange,
-  onProviderSplitSuggestionChange,
   speedTestEndpoints,
   customUserAgent,
   onCustomUserAgentChange,
@@ -812,8 +748,6 @@ export function CodexFormFields({
   const protocolProbeSeqRef = useRef(0);
   const [shouldHighlightFetchModels, setShouldHighlightFetchModels] =
     useState(false);
-  const [pendingSplitRoutingState, setPendingSplitRoutingState] =
-    useState<PendingCodexProviderSplitRouting | null>(null);
   // takeoverEnabled 现在只表示“Codex 菜单映射”开关；模型目录和上下文元数据可独立编辑。
   // isChatFormat 仅在选了 Chat Completions 上游格式时为真（思考能力是 Chat 专属）。
   // 拉取请求序号：请求身份（Base URL / 完整地址开关 / API Key / 自定义 UA）
@@ -859,6 +793,7 @@ export function CodexFormFields({
     (!isMaintainedPreset &&
       (isAnthropicFormat || supportsThinking || supportsEffort)) ||
     promptCacheRouting !== "auto" ||
+    protocolMode === "manual" ||
     !!maxOutputTokens;
   const [advancedExpanded, setAdvancedExpanded] = useState(
     isXaiOauthPreset ? false : hasAnyAdvancedValue,
@@ -1015,12 +950,6 @@ export function CodexFormFields({
     protocolProbeIdentityRef.current = identity;
     setProtocolProbeIdentity(identity);
   }, []);
-  const bindPendingSplitRouting = useCallback(
-    (suggestion: CodexProviderSplitSuggestion, identity: string) => {
-      setPendingSplitRoutingState({ suggestion, identity });
-    },
-    [],
-  );
 
   // 任一身份输入变化都立即使旧结果失效并取消其 UI ownership。异步请求本身可以
   // 自然结束，但 sequence/identity guard 会阻止旧进度与最终结果回写到新配置。
@@ -1038,26 +967,17 @@ export function CodexFormFields({
       setProtocolProbeExpectedModels([]);
       setProtocolProbeOutcome(null);
       setProtocolProbeError("");
+      onProtocolProbeReceiptIdsChange([]);
     }
-    setPendingSplitRoutingState((current) =>
-      current === null || current.identity === readinessIdentity
-        ? current
-        : null,
-    );
-  }, [readinessIdentity]);
+  }, [onProtocolProbeReceiptIdsChange, readinessIdentity]);
 
   const isProtocolProbeStateCurrent =
     protocolProbeIdentity === readinessIdentity;
-  const pendingSplitRouting =
-    pendingSplitRoutingState?.identity === readinessIdentity
-      ? pendingSplitRoutingState.suggestion
-      : null;
-
   const revealModelCatalogFetchAction = useCallback(() => {
     bindProtocolProbeIdentity(readinessIdentity);
     setProtocolProbeTone("warning");
     setProtocolProbeSummary(
-      "请先在“模型与兼容性”同步模型，或在高级设置中手动添加至少一个模型后再验证。",
+      "请先在“模型与兼容性”同步模型，或在高级设置中启用/添加至少一个模型后再验证。",
     );
     setShouldHighlightFetchModels(true);
     window.setTimeout(() => {
@@ -1222,7 +1142,6 @@ export function CodexFormFields({
       .then((models) => {
         if (seq !== fetchModelsSeqRef.current) return;
         setFetchedModels(models);
-        let splitCatalogRows = catalogRowsRef.current;
         if (onCatalogModelsChange && models.length > 0) {
           const mergedRows = mergeFetchedModelsIntoCatalogRows(
             catalogRowsRef.current,
@@ -1235,23 +1154,7 @@ export function CodexFormFields({
             },
           );
           catalogRowsRef.current = mergedRows;
-          splitCatalogRows = mergedRows;
           setCatalogRows(mergedRows);
-        }
-        const shouldAutoSplitRouting =
-          models.length > 0 && Boolean(onProviderSplitSuggestionChange);
-        if (shouldAutoSplitRouting) {
-          const splitRouting =
-            buildSplitCodexProviderSuggestionForFetchedModels({
-              providerName,
-              models,
-            });
-          if (splitRouting) {
-            bindPendingSplitRouting(
-              splitRouting,
-              buildReadinessIdentityFor(apiFormat, splitCatalogRows),
-            );
-          }
         }
         if (models.length === 0) {
           toast.info(t("providerForm.fetchModelsEmpty"));
@@ -1270,9 +1173,6 @@ export function CodexFormFields({
         if (seq === fetchModelsSeqRef.current) setIsFetchingModels(false);
       });
   }, [
-    apiFormat,
-    bindPendingSplitRouting,
-    buildReadinessIdentityFor,
     codexBaseUrl,
     codexApiKey,
     isFullUrl,
@@ -1284,7 +1184,6 @@ export function CodexFormFields({
     planSecretAccessKey,
     websiteUrl,
     onCatalogModelsChange,
-    onProviderSplitSuggestionChange,
     isXaiOauthPreset,
     isXaiOauthAuthenticated,
     selectedXaiAccountId,
@@ -1344,26 +1243,28 @@ export function CodexFormFields({
         codexModel?.trim() ||
         probeModels[0].model ||
         probeModels[0].upstreamModel;
-      const providerDraft: Provider = {
-        id: providerId ?? "codex-draft",
-        name: providerName?.trim() || "Codex provider",
-        settingsConfig: {
-          auth: { OPENAI_API_KEY: codexApiKey },
-          config: [
-            `model = ${JSON.stringify(defaultModel)}`,
-            'model_provider = "ccswitch_probe"',
-            "[model_providers.ccswitch_probe]",
-            `base_url = ${JSON.stringify(codexBaseUrl.trim())}`,
-            `wire_api = ${JSON.stringify(apiFormat === "openai_chat" ? "chat" : "responses")}`,
-          ].join("\n"),
-          apiFormat,
-          modelCatalog: { models: probeModels },
-        },
+      const providerDraft: Provider = buildCodexProtocolProbeProviderDraft({
+        providerId,
+        providerName: providerName?.trim() || "Codex provider",
+        baseUrl: codexBaseUrl,
+        apiKey: codexApiKey,
+        apiFormat,
+        isFullUrl,
+        defaultModel,
+        models: probeModels,
         websiteUrl: websiteUrl || undefined,
         category,
-        meta: { apiFormat, isFullUrl },
-        inFailoverQueue: false,
-      };
+        customUserAgent,
+        localProxyHeadersOverride,
+        localProxyBodyOverride,
+        takeoverEnabled,
+        codexChatReasoning,
+        promptCacheRouting,
+        protocolMode,
+        reasoningProjection,
+        toolSchemaDialect,
+        historyReplay,
+      });
       const outcome = await preflightCodexProviderProtocolCompatibility(
         providerDraft,
         (event) => {
@@ -1373,27 +1274,25 @@ export function CodexFormFields({
       );
       if (!ownsCurrentIdentity()) return;
       setProtocolProbeOutcome(outcome);
-      const splitSuggestion = buildSplitCodexProviderSuggestionForProbeRecords({
-        providerName,
-        records: outcome.records,
-      });
-      const canApplySplitSuggestion = Boolean(
-        splitSuggestion && onProviderSplitSuggestionChange,
+      onProtocolProbeReceiptIdsChange(outcome.receiptIds);
+      const verifiedRecords = outcome.records.filter(
+        (record) =>
+          record.result.readiness === "verified" &&
+          record.result.selected_transport !== null,
       );
-      if (splitSuggestion && onProviderSplitSuggestionChange) {
-        bindPendingSplitRouting(splitSuggestion, probeIdentity);
-        onProviderSplitSuggestionChange(null);
-      }
-
-      const selected = outcome.records.map(
-        (record) => record.result.selected_transport,
-      );
+      const allVerified =
+        outcome.records.length > 0 &&
+        verifiedRecords.length === outcome.records.length;
       const allResponses =
-        selected.length > 0 &&
-        selected.every((transport) => transport === "open_ai_responses");
+        allVerified &&
+        verifiedRecords.every(
+          (record) => record.result.selected_transport === "open_ai_responses",
+        );
       const allChat =
-        selected.length > 0 &&
-        selected.every((transport) => transport === "open_ai_chat");
+        allVerified &&
+        verifiedRecords.every(
+          (record) => record.result.selected_transport === "open_ai_chat",
+        );
       const verified = outcome.records.filter(
         (record) => record.result.readiness === "verified",
       ).length;
@@ -1440,23 +1339,39 @@ export function CodexFormFields({
         return;
       }
 
-      const summary = splitSuggestion
-        ? `深度探测完成：检测到混合协议模型；${resultCounts}。${
-            canApplySplitSuggestion
-              ? "建议拆成 Responses / Chat 两个 provider。"
-              : "请按模型分别配置路由。"
-          }`
-        : `深度探测完成，但没有得到所有模型一致且可用的协议；${resultCounts}。请查看失败阶段并检查 Key、Base URL、模型权限、额度或上游状态。`;
-      bindProtocolProbeIdentity(probeIdentity);
-      setProtocolProbeTone(splitSuggestion ? "warning" : "error");
+      const hasMixedVerifiedTransports =
+        verifiedRecords.some(
+          (record) => record.result.selected_transport === "open_ai_responses",
+        ) &&
+        verifiedRecords.some(
+          (record) => record.result.selected_transport === "open_ai_chat",
+        );
+      const summary =
+        allVerified && hasMixedVerifiedTransports
+          ? `深度探测完成：不同模型选择了不同协议；${resultCounts}。保存时将自动拆分为两个同协议 Provider，并仍作为一个模型源使用。`
+          : `深度探测完成：存在 Partial/Failed 模型，当前不能自动保存；${resultCounts}。请查看失败阶段并重试。`;
+      const resultIdentity = buildReadinessIdentityFor(
+        apiFormat,
+        catalogRowsRef.current,
+      );
+      bindProtocolProbeIdentity(resultIdentity);
+      const tone = allVerified
+        ? "success"
+        : verifiedRecords.length > 0
+          ? "warning"
+          : "error";
+      setProtocolProbeTone(tone);
       setProtocolProbeSummary(summary);
-      if (splitSuggestion) {
+      if (tone === "success") {
+        toast.success(summary, { closeButton: true });
+      } else if (tone === "warning") {
         toast.warning(summary, { closeButton: true });
       } else {
         toast.error(summary, { closeButton: true });
       }
     } catch (error) {
       if (!ownsCurrentIdentity()) return;
+      onProtocolProbeReceiptIdsChange([]);
       const detail = error instanceof Error ? error.message : String(error);
       const summary = `协议测试中断：${detail}`;
       bindProtocolProbeIdentity(probeIdentity);
@@ -1470,7 +1385,6 @@ export function CodexFormFields({
       }
     }
   }, [
-    bindPendingSplitRouting,
     bindProtocolProbeIdentity,
     buildReadinessIdentityFor,
     codexBaseUrl,
@@ -1478,14 +1392,24 @@ export function CodexFormFields({
     codexModel,
     apiFormat,
     category,
+    codexChatReasoning,
     isFullUrl,
+    localProxyBodyOverride,
+    localProxyHeadersOverride,
     onApiFormatChange,
-    onProviderSplitSuggestionChange,
+    onProtocolProbeReceiptIdsChange,
     providerName,
     providerId,
     readinessIdentity,
+    reasoningProjection,
     revealModelCatalogFetchAction,
     t,
+    takeoverEnabled,
+    toolSchemaDialect,
+    historyReplay,
+    protocolMode,
+    promptCacheRouting,
+    customUserAgent,
     websiteUrl,
   ]);
 
@@ -1633,29 +1557,6 @@ export function CodexFormFields({
     },
     [],
   );
-
-  const handleConfirmSplitRouting = useCallback(() => {
-    if (!pendingSplitRouting || !onProviderSplitSuggestionChange) return;
-    onTakeoverEnabledChange(true);
-    onProviderSplitSuggestionChange(pendingSplitRouting);
-    setPendingSplitRoutingState(null);
-    toast.info(
-      `保存时将生成 ${pendingSplitRouting.providerName}-responses / ${pendingSplitRouting.providerName}-chat 两个 provider。`,
-    );
-  }, [
-    onTakeoverEnabledChange,
-    onProviderSplitSuggestionChange,
-    pendingSplitRouting,
-  ]);
-
-  const handleCancelSplitRouting = useCallback(() => {
-    setPendingSplitRoutingState(null);
-    onProviderSplitSuggestionChange?.(null);
-  }, [onProviderSplitSuggestionChange]);
-
-  const splitRoutingProviderName = providerName?.trim() || "provider";
-  const pendingResponsesModels = pendingSplitRouting?.responsesModels ?? [];
-  const pendingChatModels = pendingSplitRouting?.chatModels ?? [];
 
   const renderCatalogActionButtons = (onAdd: () => void, addLabel: string) => (
     <div className="flex gap-1">
@@ -1807,70 +1708,6 @@ export function CodexFormFields({
         </div>
       )}
 
-      <Dialog
-        open={Boolean(pendingSplitRouting)}
-        onOpenChange={(open) => {
-          if (!open) handleCancelSplitRouting();
-        }}
-      >
-        <DialogContent className="max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>检测到混合协议模型</DialogTitle>
-            <DialogDescription>
-              当前中转同时返回了 GPT-like 模型和非 GPT-like 模型。建议保存时拆成
-              Responses 与 Chat 两个
-              provider，避免把两种协议混在同一个配置里导致后续分不清。
-              确认后不会立即保存；点击新增时才会创建两个 provider。
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="space-y-3 px-6 pb-2">
-            <div className="rounded-md border border-emerald-500/40 bg-emerald-500/10 p-3">
-              <div className="flex flex-wrap items-center gap-2 text-sm font-medium">
-                <span>{`${splitRoutingProviderName}-responses`}</span>
-                <span className="rounded bg-background/70 px-1.5 py-0.5 text-[11px] text-muted-foreground">
-                  OpenAI Responses
-                </span>
-                <span className="rounded bg-background/70 px-1.5 py-0.5 text-[11px] text-muted-foreground">
-                  单独 provider
-                </span>
-              </div>
-              <p className="mt-1 text-xs text-muted-foreground">
-                匹配模型：
-                {pendingResponsesModels.join(", ") || "-"}
-              </p>
-            </div>
-            <div className="rounded-md border border-sky-500/40 bg-sky-500/10 p-3">
-              <div className="flex flex-wrap items-center gap-2 text-sm font-medium">
-                <span>{`${splitRoutingProviderName}-chat`}</span>
-                <span className="rounded bg-background/70 px-1.5 py-0.5 text-[11px] text-muted-foreground">
-                  OpenAI Chat Completions
-                </span>
-                <span className="rounded bg-background/70 px-1.5 py-0.5 text-[11px] text-muted-foreground">
-                  单独 provider
-                </span>
-              </div>
-              <p className="mt-1 text-xs text-muted-foreground">
-                匹配模型：{pendingChatModels.join(", ") || "-"}
-              </p>
-            </div>
-          </div>
-
-          <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={handleCancelSplitRouting}
-            >
-              暂不拆分
-            </Button>
-            <Button type="button" onClick={handleConfirmSplitRouting}>
-              确认生成两个 provider
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
       {category !== "official" && canEditCatalog && (
         <CodexProviderReadinessSection
           models={catalogRows}
@@ -1892,6 +1729,15 @@ export function CodexFormFields({
           sectionRef={modelMappingSectionRef}
           onSyncModels={handleFetchModels}
           onValidateConnection={() => {
+            const hasProbeModel = catalogRowsRef.current.some(
+              (row) =>
+                row.enabled !== false &&
+                Boolean(row.model.trim() || catalogRowUpstreamModel(row)),
+            );
+            if (!hasProbeModel) {
+              revealModelCatalogFetchAction();
+              return;
+            }
             bindProtocolProbeIdentity(readinessIdentity);
             setProtocolProbeTone("muted");
             setProtocolProbeSummary(
@@ -2382,6 +2228,20 @@ export function CodexFormFields({
                   <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-xs leading-relaxed text-amber-900 dark:text-amber-200">
                     上游格式通常由维护预设或主流程的连接验证确定。只有自动识别不正确时才在这里手动覆盖；验证会发送真实模型请求，可能产生少量额度或流量消耗。
                   </div>
+                  {(apiFormat === "openai_chat" ||
+                    apiFormat === "openai_responses") && (
+                    <CodexProtocolAdvancedSettings
+                      mode={protocolMode}
+                      apiFormat={apiFormat}
+                      reasoningProjection={reasoningProjection}
+                      toolSchemaDialect={toolSchemaDialect}
+                      historyReplay={historyReplay}
+                      onModeChange={onProtocolModeChange}
+                      onReasoningProjectionChange={onReasoningProjectionChange}
+                      onToolSchemaDialectChange={onToolSchemaDialectChange}
+                      onHistoryReplayChange={onHistoryReplayChange}
+                    />
+                  )}
                 </div>
               </div>
             )}

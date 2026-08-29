@@ -29,6 +29,7 @@ import type {
   CodexReasoningSemantic,
   CodexReasoningSource,
 } from "@/lib/api/protocol-compatibility";
+import type { CodexHistoryReplay, CodexToolSchemaDialect } from "@/types";
 
 type VisibleStageStatus = CodexProtocolProbeStageStatus | "pending" | "running";
 
@@ -39,6 +40,8 @@ interface BranchProgress {
   reasoningSource: CodexReasoningSource | null;
   readiness: CodexProtocolProbeReadiness | null;
   failures: CodexProtocolProbeFailure[];
+  toolSchemaDialect: CodexToolSchemaDialect | null;
+  historyReplay: CodexHistoryReplay | null;
 }
 
 interface ModelProgress {
@@ -86,6 +89,8 @@ function emptyBranch(): BranchProgress {
     reasoningSource: null,
     readiness: null,
     failures: [],
+    toolSchemaDialect: null,
+    historyReplay: null,
   };
 }
 
@@ -101,6 +106,15 @@ function emptyModel(model: string): ModelProgress {
   };
 }
 
+function reasoningStageStatus(
+  semantic: CodexReasoningSemantic,
+  baseline: VisibleStageStatus,
+): VisibleStageStatus {
+  if (semantic === "readable" || semantic === "summary") return "passed";
+  if (semantic === "opaque") return "unsupported";
+  return baseline === "passed" ? "unsupported" : "skipped";
+}
+
 function applyRecord(
   model: ModelProgress,
   record: CodexProtocolCompatibilityRecord,
@@ -114,14 +128,24 @@ function applyRecord(
     target.stages.streaming = branch.assessment.streaming;
     target.stages.forced_tool = branch.assessment.forced_tool;
     target.stages.continuation = branch.assessment.continuation;
-    target.stages.reasoning =
-      branch.reasoning_shape.semantic === "none"
-        ? branch.assessment.baseline === "passed"
-          ? "unsupported"
-          : "skipped"
-        : "passed";
+    target.stages.reasoning = reasoningStageStatus(
+      branch.reasoning_shape.semantic,
+      branch.assessment.baseline,
+    );
     target.reasoningSemantic = branch.reasoning_shape.semantic;
     target.reasoningSource = branch.reasoning_shape.source;
+    target.toolSchemaDialect = branch.tool_schema_dialect ?? null;
+    target.historyReplay = branch.history_replay ?? null;
+    target.readiness = [
+      branch.assessment.baseline,
+      branch.assessment.streaming,
+      branch.assessment.forced_tool,
+      branch.assessment.continuation,
+    ].every((status) => status === "passed")
+      ? "verified"
+      : branch.assessment.baseline === "passed"
+        ? "partial"
+        : "unverified";
     target.failures = branch.failures ?? [];
   }
 }
@@ -166,12 +190,10 @@ function buildProgress(
     } else if (event.kind === "reasoning_classified") {
       branch.reasoningSemantic = event.reasoningSemantic;
       branch.reasoningSource = event.reasoningSource;
-      branch.stages.reasoning =
-        event.reasoningSemantic === "none"
-          ? branch.stages.baseline === "passed"
-            ? "unsupported"
-            : "skipped"
-          : "passed";
+      branch.stages.reasoning = reasoningStageStatus(
+        event.reasoningSemantic,
+        branch.stages.baseline,
+      );
     } else if (event.kind === "branch_finished") {
       branch.readiness = event.readiness;
     }
@@ -215,9 +237,9 @@ function reasoningLabel(
   semantic: CodexReasoningSemantic | null,
   status: VisibleStageStatus,
 ) {
-  if (semantic === "readable") return "可读正文";
-  if (semantic === "summary") return "摘要";
-  if (semantic === "opaque") return "加密/不透明";
+  if (semantic === "readable") return "原始推理正文";
+  if (semantic === "summary") return "上游原生摘要";
+  if (semantic === "opaque") return "加密/不透明（Codex 无法展示）";
   if (semantic === "none") return status === "skipped" ? "未检测" : "未返回";
   return "待识别";
 }
@@ -225,8 +247,14 @@ function reasoningLabel(
 function failureLabel(failure: CodexProtocolProbeFailure) {
   if (failure.kind === "http_status") {
     if (failure.status_code === 521) return "HTTP 521 · 上游不可达";
+    if (failure.status_code === 401) return "HTTP 401 · 认证失败";
+    if (failure.status_code === 403) return "HTTP 403 · 当前凭据无权限";
+    if (failure.status_code === 429) return "HTTP 429 · 限流或额度不足";
     if ([404, 405, 415].includes(failure.status_code ?? 0)) {
       return `HTTP ${failure.status_code} · 接口不支持`;
+    }
+    if ((failure.status_code ?? 0) >= 500) {
+      return `HTTP ${failure.status_code} · 上游服务异常`;
     }
     return failure.status_code
       ? `HTTP ${failure.status_code} · 上游请求失败`
@@ -248,6 +276,27 @@ function readinessLabel(readiness: CodexProtocolProbeReadiness | null) {
 
 function transportLabel(transport: CodexProtocolTransport) {
   return transport === "open_ai_responses" ? "Responses" : "Chat Completions";
+}
+
+function toolSchemaLabel(
+  dialect: CodexToolSchemaDialect | null,
+  status: VisibleStageStatus,
+) {
+  if (status !== "passed" || dialect === null) return "未确认";
+  return dialect === "moonshot_mfjs" ? "Moonshot MFJS" : "OpenAI";
+}
+
+function historyReplayLabel(
+  replay: CodexHistoryReplay | null,
+  status: VisibleStageStatus,
+) {
+  if (status !== "passed" || replay === null) return "未确认";
+  if (replay === "chat_reasoning_content") return "reasoning_content";
+  if (replay === "responses_reasoning_text_content") {
+    return "reasoning_text content";
+  }
+  if (replay === "omit") return "不回放推理项";
+  return "原生 Responses";
 }
 
 export function CodexProtocolProbeProgressDialog({
@@ -381,6 +430,22 @@ export function CodexProtocolProbeProgressDialog({
                               </div>
                             );
                           })}
+                          <div className="space-y-1 border-t pt-2 text-xs text-muted-foreground">
+                            <p>
+                              工具 Schema：
+                              {toolSchemaLabel(
+                                branch.toolSchemaDialect,
+                                branch.stages.forced_tool,
+                              )}
+                            </p>
+                            <p>
+                              历史续轮：
+                              {historyReplayLabel(
+                                branch.historyReplay,
+                                branch.stages.continuation,
+                              )}
+                            </p>
+                          </div>
                           {branch.failures.length > 0 && (
                             <div className="space-y-1 border-t pt-2 text-xs text-destructive">
                               {branch.failures.map((failure) => (

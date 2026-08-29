@@ -13,7 +13,10 @@ use serde_json::Value;
 use std::future::Future;
 
 use crate::app_config::AppType;
-use crate::database::{validate_cost_multiplier, validate_pricing_source};
+use crate::database::{
+    validate_cost_multiplier, validate_pricing_source, ProviderSetDatabaseMutation,
+    ProviderSetDatabaseTransaction,
+};
 use crate::error::AppError;
 use crate::protocol_compatibility::ProtocolCompatibilityRecord;
 use crate::provider::{Provider, UsageResult};
@@ -51,6 +54,99 @@ use usage::validate_usage_script;
 pub fn official_provider_supports_proxy_takeover(app_type: &AppType, provider: &Provider) -> bool {
     matches!(app_type, AppType::Codex)
         && crate::proxy::providers::is_codex_official_provider(provider)
+}
+
+fn validate_codex_manual_protocol_settings(provider: &Provider) -> Result<(), AppError> {
+    if !provider.uses_manual_codex_protocol() {
+        return Ok(());
+    }
+    let meta = provider
+        .meta
+        .as_ref()
+        .expect("manual Codex protocol mode requires Provider meta");
+    let api_format = meta
+        .api_format
+        .as_deref()
+        .or_else(|| {
+            provider
+                .settings_config
+                .get("apiFormat")
+                .and_then(Value::as_str)
+        })
+        .unwrap_or_default();
+
+    let invalid = |detail: &str| {
+        AppError::localized(
+            "provider.codex.manual_protocol.invalid",
+            format!("Codex 手动协议配置无效：{detail}"),
+            format!("Invalid Manual Codex protocol configuration: {detail}"),
+        )
+    };
+
+    if !matches!(api_format, "openai_chat" | "openai_responses") {
+        return Err(invalid("上游协议必须是 Responses 或 Chat Completions"));
+    }
+    let has_model_level_protocol = provider
+        .settings_config
+        .get("modelCatalog")
+        .or_else(|| provider.settings_config.get("model_catalog"))
+        .and_then(|catalog| catalog.get("models"))
+        .and_then(Value::as_array)
+        .is_some_and(|models| {
+            models
+                .iter()
+                .any(|model| model.get("apiFormat").is_some() || model.get("api_format").is_some())
+        });
+    if has_model_level_protocol {
+        return Err(invalid(
+            "手动模式不能保存模型级协议；请只设置整个 Provider 的协议",
+        ));
+    }
+    if meta
+        .codex_tool_schema_dialect
+        .as_deref()
+        .is_some_and(|value| !matches!(value.trim(), "openai" | "moonshot_mfjs"))
+    {
+        return Err(invalid("工具 Schema 只能是 openai 或 moonshot_mfjs"));
+    }
+
+    match api_format {
+        "openai_chat" => {
+            if meta
+                .codex_reasoning_projection
+                .as_deref()
+                .is_some_and(|value| !matches!(value.trim(), "raw_reasoning_text" | "none"))
+            {
+                return Err(invalid(
+                    "Chat 推理展示只能是 raw_reasoning_text 或 none；原始推理不能标记为摘要",
+                ));
+            }
+            if meta
+                .codex_history_replay
+                .as_deref()
+                .is_some_and(|value| value.trim() != "chat_reasoning_content")
+            {
+                return Err(invalid("Chat 历史续轮必须使用 chat_reasoning_content"));
+            }
+        }
+        "openai_responses" => {
+            if meta.codex_reasoning_projection.is_some() {
+                return Err(invalid("Responses 不使用 Chat 推理展示覆盖"));
+            }
+            if meta.codex_history_replay.as_deref().is_some_and(|value| {
+                !matches!(
+                    value.trim(),
+                    "native_only" | "responses_reasoning_text_content" | "omit"
+                )
+            }) {
+                return Err(invalid(
+                    "Responses 历史续轮只能是 native_only、responses_reasoning_text_content 或 omit",
+                ));
+            }
+        }
+        _ => unreachable!("validated above"),
+    }
+    Ok(())
 }
 
 /// 统一会话开关变更后，立即按新开关状态重写当前官方 Codex 供应商的
@@ -506,6 +602,8 @@ mod tests {
             None,
         );
         provider.meta = Some(ProviderMeta {
+            api_format: Some("openai_chat".to_string()),
+            codex_protocol_mode: Some(crate::provider::CodexProtocolMode::Manual),
             usage_script: Some(usage_script_with_credentials(
                 usage_api_key,
                 usage_base_url,
@@ -827,6 +925,8 @@ mod tests {
             let mut updated = provider.clone();
             updated.settings_config = codex_settings("https://api.b.example/v1/", "sk-b");
             updated.meta = Some(ProviderMeta {
+                api_format: Some("openai_chat".to_string()),
+                codex_protocol_mode: Some(crate::provider::CodexProtocolMode::Manual),
                 usage_script: Some(usage_script_with_credentials(
                     Some(" sk-b "),
                     Some(" https://api.b.example/v1/ "),
@@ -1720,6 +1820,125 @@ command = "example-mcp"
     }
 
     #[test]
+    fn validate_provider_settings_rejects_invalid_manual_codex_protocol_combinations() {
+        let make_provider = |api_format: &str,
+                             projection: Option<&str>,
+                             schema: Option<&str>,
+                             replay: Option<&str>| {
+            let mut provider = Provider::with_id(
+                "codex".into(),
+                "Codex".into(),
+                json!({"auth": {}, "config": ""}),
+                None,
+            );
+            provider.meta = Some(ProviderMeta {
+                api_format: Some(api_format.to_string()),
+                codex_protocol_mode: Some(crate::provider::CodexProtocolMode::Manual),
+                codex_reasoning_projection: projection.map(str::to_string),
+                codex_tool_schema_dialect: schema.map(str::to_string),
+                codex_history_replay: replay.map(str::to_string),
+                ..ProviderMeta::default()
+            });
+            provider
+        };
+
+        for provider in [
+            make_provider(
+                "openai_chat",
+                Some("reasoning_summary"),
+                Some("openai"),
+                Some("chat_reasoning_content"),
+            ),
+            make_provider(
+                "openai_chat",
+                Some("invented_projection"),
+                Some("openai"),
+                Some("chat_reasoning_content"),
+            ),
+            make_provider(
+                "openai_responses",
+                None,
+                Some("invented_schema"),
+                Some("native_only"),
+            ),
+            make_provider(
+                "openai_responses",
+                None,
+                Some("openai"),
+                Some("chat_reasoning_content"),
+            ),
+            make_provider(
+                "openai_chat",
+                Some("none"),
+                Some("openai"),
+                Some("native_only"),
+            ),
+            make_provider(
+                "anthropic",
+                Some("none"),
+                Some("openai"),
+                Some("chat_reasoning_content"),
+            ),
+        ] {
+            let error = ProviderService::validate_provider_settings(&AppType::Codex, &provider)
+                .expect_err("invalid manual protocol combination must fail closed");
+            assert!(
+                error.to_string().contains("手动协议")
+                    || error.to_string().contains("Manual Codex protocol"),
+                "unexpected validation error: {error:?}"
+            );
+        }
+
+        ProviderService::validate_provider_settings(
+            &AppType::Codex,
+            &make_provider(
+                "openai_chat",
+                Some("raw_reasoning_text"),
+                Some("moonshot_mfjs"),
+                Some("chat_reasoning_content"),
+            ),
+        )
+        .expect("valid manual Chat configuration");
+        ProviderService::validate_provider_settings(
+            &AppType::Codex,
+            &make_provider(
+                "openai_responses",
+                None,
+                Some("openai"),
+                Some("responses_reasoning_text_content"),
+            ),
+        )
+        .expect("valid manual Responses configuration");
+    }
+
+    #[test]
+    fn validate_provider_settings_rejects_manual_model_level_protocols() {
+        let mut provider = Provider::with_id(
+            "codex-manual-mixed".into(),
+            "Codex Manual Mixed".into(),
+            json!({
+                "auth": {},
+                "apiFormat": "openai_responses",
+                "config": "model = \"model-a\"\nwire_api = \"responses\"\n",
+                "modelCatalog": {"models": [
+                    {"model": "model-a", "upstreamModel": "model-a", "apiFormat": "openai_responses"},
+                    {"model": "model-b", "upstreamModel": "model-b", "apiFormat": "openai_chat"}
+                ]}
+            }),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            api_format: Some("openai_responses".to_string()),
+            codex_protocol_mode: Some(crate::provider::CodexProtocolMode::Manual),
+            ..ProviderMeta::default()
+        });
+
+        let error = ProviderService::validate_provider_settings(&AppType::Codex, &provider)
+            .expect_err("manual mode must not persist model-level protocol selection");
+        assert!(error.to_string().contains("模型级协议"));
+    }
+
+    #[test]
     fn extract_gemini_common_config_strips_credentials_keeps_shareable() {
         // Gemini 的共享片段会被 deep-merge 回**其它** Gemini 供应商的 env
         // (live.rs::apply_common_config_to_settings)，因此任何凭据都不得进入片段。
@@ -2526,7 +2745,6 @@ wire_api = "responses"
             .expect("set current provider");
         crate::settings::set_current_provider(&AppType::Codex, Some("openai"))
             .expect("set local current provider");
-
         ProviderService::switch(&state, AppType::Codex, "deepseek")
             .expect("switch to DeepSeek through local proxy");
 
@@ -2561,8 +2779,69 @@ wire_api = "responses"
                 .enabled,
             "switching a Codex Chat Completions provider should enable Codex takeover"
         );
-
         state.proxy_service.stop().await.expect("stop proxy");
+    }
+
+    #[test]
+    #[serial]
+    fn adding_the_first_active_router_publishes_after_current_ownership_is_set() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        let db = Arc::new(Database::memory().expect("init db"));
+        let state = AppState::new(db.clone());
+
+        let mut target = Provider::with_id(
+            "qwen".to_string(),
+            "Qwen".to_string(),
+            json!({
+                "auth": {"OPENAI_API_KEY": "secret"},
+                "config": "model = \"qwen3.8\"\nbase_url = \"https://qwen.example/v1\"\nwire_api = \"responses\"\n",
+                "modelCatalog": {"models": [{"model": "qwen3.8"}]}
+            }),
+            None,
+        );
+        target.meta = Some(ProviderMeta {
+            api_format: Some("openai_responses".to_string()),
+            ..Default::default()
+        });
+        let router = Provider::with_id(
+            "router".to_string(),
+            "Router".to_string(),
+            json!({
+                "auth": {},
+                "codexRouting": {
+                    "schemaVersion": 2,
+                    "enabled": true,
+                    "routes": [{
+                        "id": "route-qwen",
+                        "enabled": true,
+                        "targetProviderId": "qwen",
+                        "modelSelection": {"mode": "all"},
+                        "authPolicy": {"source": "provider_config"}
+                    }]
+                }
+            }),
+            None,
+        );
+
+        db.save_provider("codex", &target).expect("seed target");
+        ProviderService::add(&state, AppType::Codex, router, false)
+            .expect("add first active router");
+
+        assert_eq!(
+            db.get_current_provider("codex")
+                .expect("read current Provider"),
+            Some("router".to_string())
+        );
+        let projection =
+            crate::codex_multirouter::projection::inspect_active_codex_multirouter_projection(&db)
+                .expect("inspect projection")
+                .expect("active projection exists");
+        assert_ne!(
+            projection.last_error_code.as_deref(),
+            Some("codex_multirouter_projection_not_active"),
+            "first active Router must be republished after current ownership is set: {projection:#?}"
+        );
     }
 
     #[tokio::test]
@@ -3285,6 +3564,7 @@ requires_openai_auth = true
         );
         original.meta = Some(ProviderMeta {
             api_format: Some("openai_responses".into()),
+            codex_protocol_mode: Some(crate::provider::CodexProtocolMode::Manual),
             ..Default::default()
         });
         db.save_provider("codex", &original).expect("save provider");
@@ -4178,9 +4458,284 @@ requires_openai_auth = true
             "generated Codex Provider deletion must not leave a dangling V2 route"
         );
     }
+
+    fn generated_codex_provider_set_leaf(id: &str, parent_id: &str) -> Provider {
+        Provider::with_id(
+            id.to_string(),
+            "Internal Chat leaf".to_string(),
+            json!({
+                "auth": {"OPENAI_API_KEY": "test-secret"},
+                "config": "model = \"model-a\"\nbase_url = \"https://example.invalid/v1\"\nwire_api = \"chat\"\n",
+                "modelCatalog": {"models": [{"model": "model-a", "contextWindow": 128000}]},
+                "codexProtocolSet": {
+                    "version": 1,
+                    "role": "leaf",
+                    "parentProviderId": parent_id,
+                    "transport": "open_ai_chat"
+                }
+            }),
+            None,
+        )
+    }
+
+    #[test]
+    fn codex_provider_list_hides_generated_provider_set_leaves() {
+        let db = Arc::new(Database::memory().expect("memory db"));
+        let state = AppState::new(db.clone());
+        let source = Provider::with_id("relay".to_string(), "Relay".to_string(), json!({}), None);
+        let leaf = generated_codex_provider_set_leaf("relay::chat", &source.id);
+        db.save_provider(AppType::Codex.as_str(), &source)
+            .expect("save source");
+        db.save_provider(AppType::Codex.as_str(), &leaf)
+            .expect("save leaf");
+
+        let listed = ProviderService::list(&state, AppType::Codex).expect("list Codex providers");
+
+        assert!(listed.contains_key(&source.id));
+        assert!(!listed.contains_key(&leaf.id));
+    }
+
+    #[test]
+    fn codex_current_provider_projects_a_generated_leaf_back_to_its_facade() {
+        let db = Arc::new(Database::memory().expect("memory db"));
+        let state = AppState::new(db.clone());
+        let facade = Provider::with_id(
+            "relay".to_string(),
+            "Relay".to_string(),
+            json!({
+                "codexProtocolSet": {
+                    "version": 1,
+                    "role": "facade",
+                    "responsesProviderId": "relay::responses",
+                    "chatProviderId": "relay::chat"
+                }
+            }),
+            None,
+        );
+        let leaf = generated_codex_provider_set_leaf("relay::chat", &facade.id);
+        db.save_provider(AppType::Codex.as_str(), &facade)
+            .expect("save facade");
+        db.save_provider(AppType::Codex.as_str(), &leaf)
+            .expect("save leaf");
+        db.set_current_provider(AppType::Codex.as_str(), &leaf.id)
+            .expect("seed stale current leaf");
+
+        assert_eq!(
+            ProviderService::current(&state, AppType::Codex).expect("read current provider"),
+            facade.id
+        );
+    }
+
+    #[test]
+    fn deleting_a_generated_provider_set_leaf_is_rejected_before_database_mutation() {
+        let db = Arc::new(Database::memory().expect("memory db"));
+        let state = AppState::new(db.clone());
+        let leaf = generated_codex_provider_set_leaf("relay::chat", "relay");
+        db.save_provider(AppType::Codex.as_str(), &leaf)
+            .expect("save leaf");
+
+        let error = ProviderService::delete(&state, AppType::Codex, &leaf.id)
+            .expect_err("generated leaf must not be directly deleted");
+
+        assert!(
+            error
+                .to_string()
+                .contains("codex_provider_set_generated_leaf_not_operable"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            db.get_provider_by_id(&leaf.id, AppType::Codex.as_str())
+                .expect("read leaf")
+                .is_some(),
+            "rejected operation must not delete the leaf"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn switching_to_a_generated_provider_set_leaf_is_rejected_before_live_mutation() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().expect("memory db"));
+        let state = AppState::new(db.clone());
+        let leaf = generated_codex_provider_set_leaf("relay::chat", "relay");
+        db.save_provider(AppType::Codex.as_str(), &leaf)
+            .expect("save leaf");
+
+        let error = ProviderService::switch(&state, AppType::Codex, &leaf.id)
+            .expect_err("generated leaf must not be directly activated");
+
+        assert!(
+            error
+                .to_string()
+                .contains("codex_provider_set_generated_leaf_not_operable"),
+            "unexpected error: {error}"
+        );
+        assert_ne!(
+            db.get_current_provider(AppType::Codex.as_str())
+                .expect("read current provider")
+                .as_deref(),
+            Some(leaf.id.as_str()),
+            "rejected operation must not activate the leaf"
+        );
+    }
+
+    #[test]
+    fn updating_a_generated_leaf_cannot_remove_its_internal_ownership_marker() {
+        let db = Arc::new(Database::memory().expect("memory db"));
+        let state = AppState::new(db.clone());
+        let leaf = generated_codex_provider_set_leaf("relay::chat", "relay");
+        db.save_provider(AppType::Codex.as_str(), &leaf)
+            .expect("save leaf");
+        let mut replacement = leaf.clone();
+        replacement.name = "User-visible impostor".to_string();
+        replacement
+            .settings_config
+            .as_object_mut()
+            .expect("settings object")
+            .remove("codexProtocolSet");
+        replacement.meta = Some(ProviderMeta {
+            api_format: Some("openai_chat".to_string()),
+            codex_protocol_mode: Some(crate::provider::CodexProtocolMode::Manual),
+            ..ProviderMeta::default()
+        });
+
+        let error = ProviderService::update(&state, AppType::Codex, Some(&leaf.id), replacement)
+            .expect_err("generated leaf must not be rewritten as a user Provider");
+
+        assert!(
+            error
+                .to_string()
+                .contains("codex_provider_set_generated_leaf_not_operable"),
+            "unexpected error: {error}"
+        );
+        let saved = db
+            .get_provider_by_id(&leaf.id, AppType::Codex.as_str())
+            .expect("read leaf")
+            .expect("leaf remains");
+        assert_eq!(saved.settings_config["codexProtocolSet"]["role"], "leaf");
+    }
+
+    #[test]
+    fn generated_leaf_rejects_every_direct_user_operation() {
+        let db = Arc::new(Database::memory().expect("memory db"));
+        let state = AppState::new(db.clone());
+        let leaf = generated_codex_provider_set_leaf("relay::chat", "relay");
+        db.save_provider(AppType::Codex.as_str(), &leaf)
+            .expect("save leaf");
+
+        for error in [
+            ProviderService::get_custom_endpoints(&state, AppType::Codex, &leaf.id)
+                .expect_err("generated leaf endpoint reads must be internal"),
+            ProviderService::add_custom_endpoint(
+                &state,
+                AppType::Codex,
+                &leaf.id,
+                "https://alternate.example.invalid/v1".to_string(),
+            )
+            .expect_err("generated leaf endpoint writes must be internal"),
+            ProviderService::remove_custom_endpoint(
+                &state,
+                AppType::Codex,
+                &leaf.id,
+                "https://alternate.example.invalid/v1".to_string(),
+            )
+            .expect_err("generated leaf endpoint removal must be internal"),
+            ProviderService::update_endpoint_last_used(
+                &state,
+                AppType::Codex,
+                &leaf.id,
+                "https://alternate.example.invalid/v1".to_string(),
+            )
+            .expect_err("generated leaf endpoint activity must be internal"),
+            ProviderService::update_sort_order(
+                &state,
+                AppType::Codex,
+                vec![ProviderSortUpdate {
+                    id: leaf.id.clone(),
+                    sort_index: 42,
+                }],
+            )
+            .expect_err("generated leaf sort must be internal"),
+            ProviderService::update_codex_subagent_v2(
+                &state,
+                &leaf.id,
+                json!({
+                    "schemaVersion": 1,
+                    "selectionPolicy": "balanced",
+                    "profiles": {}
+                }),
+            )
+            .expect_err("generated leaf Subagent config must be internal"),
+            block_on_tauri_runtime(ProviderService::query_usage(
+                &state,
+                AppType::Codex,
+                &leaf.id,
+            ))
+            .expect_err("generated leaf usage queries must be internal"),
+            block_on_tauri_runtime(ProviderService::test_usage_script(
+                &state,
+                AppType::Codex,
+                &leaf.id,
+                "return { success: true };",
+                1,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ))
+            .expect_err("generated leaf usage tests must be internal"),
+        ] {
+            assert!(
+                error
+                    .to_string()
+                    .contains("codex_provider_set_generated_leaf_not_operable"),
+                "unexpected error: {error}"
+            );
+        }
+        let saved = db
+            .get_provider_by_id(&leaf.id, AppType::Codex.as_str())
+            .expect("read leaf")
+            .expect("leaf remains");
+        assert_ne!(saved.sort_index, Some(42));
+        assert!(saved.settings_config.get("subagentV2").is_none());
+    }
 }
 
 impl ProviderService {
+    fn ensure_codex_provider_is_user_operable(
+        app_type: &AppType,
+        provider: &Provider,
+    ) -> Result<(), AppError> {
+        if *app_type == AppType::Codex
+            && crate::codex_multirouter::provider_set::is_codex_provider_set_generated_leaf(
+                provider,
+            )
+        {
+            return Err(AppError::InvalidInput(
+                "codex_provider_set_generated_leaf_not_operable".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn ensure_codex_provider_id_is_user_operable(
+        state: &AppState,
+        app_type: &AppType,
+        provider_id: &str,
+    ) -> Result<(), AppError> {
+        if *app_type != AppType::Codex {
+            return Ok(());
+        }
+        if let Some(provider) = state
+            .db
+            .get_provider_by_id(provider_id, app_type.as_str())?
+        {
+            Self::ensure_codex_provider_is_user_operable(app_type, &provider)?;
+        }
+        Ok(())
+    }
+
     fn normalize_provider_if_claude(app_type: &AppType, provider: &mut Provider) {
         if matches!(app_type, AppType::Claude) {
             let mut v = provider.settings_config.clone();
@@ -4329,7 +4884,15 @@ impl ProviderService {
         state: &AppState,
         app_type: AppType,
     ) -> Result<IndexMap<String, Provider>, AppError> {
-        state.db.get_all_providers(app_type.as_str())
+        let mut providers = state.db.get_all_providers(app_type.as_str())?;
+        if app_type == AppType::Codex {
+            providers.retain(|_, provider| {
+                !crate::codex_multirouter::provider_set::is_codex_provider_set_generated_leaf(
+                    provider,
+                )
+            });
+        }
+        Ok(providers)
     }
 
     /// Get current provider ID
@@ -4344,8 +4907,36 @@ impl ProviderService {
         if app_type.is_additive_mode() {
             return Ok(String::new());
         }
-        crate::settings::get_effective_current_provider(&state.db, &app_type)
-            .map(|opt| opt.unwrap_or_default())
+        let current = crate::settings::get_effective_current_provider(&state.db, &app_type)?
+            .unwrap_or_default();
+        if app_type != AppType::Codex || current.is_empty() {
+            return Ok(current);
+        }
+        let Some(provider) = state
+            .db
+            .get_provider_by_id(&current, AppType::Codex.as_str())?
+        else {
+            return Ok(String::new());
+        };
+        let Some(parent_id) =
+            crate::codex_multirouter::provider_set::codex_provider_set_leaf_parent_id(&provider)
+        else {
+            return Ok(current);
+        };
+        let parent_is_facade = state
+            .db
+            .get_provider_by_id(parent_id, AppType::Codex.as_str())?
+            .as_ref()
+            .is_some_and(crate::codex_multirouter::provider_set::is_codex_provider_set_facade);
+        if parent_is_facade {
+            Ok(parent_id.to_string())
+        } else {
+            log::warn!(
+                "Codex current Provider points to an orphaned internal Provider Set leaf: {}",
+                current
+            );
+            Ok(String::new())
+        }
     }
 
     /// Add a new provider
@@ -4446,12 +5037,15 @@ impl ProviderService {
         provider: Provider,
         protocol_profiles: &[ProtocolCompatibilityRecord],
     ) -> Result<bool, AppError> {
-        let mut provider = Self::prepare_provider_for_mutation(state, &app_type, provider)?;
         let original_id = original_id.unwrap_or(provider.id.as_str()).to_string();
-        let provider_id_changed = original_id != provider.id;
         let existing_provider = state
             .db
             .get_provider_by_id(&original_id, app_type.as_str())?;
+        if let Some(existing_provider) = existing_provider.as_ref() {
+            Self::ensure_codex_provider_is_user_operable(&app_type, existing_provider)?;
+        }
+        let mut provider = Self::prepare_provider_for_mutation(state, &app_type, provider)?;
+        let provider_id_changed = original_id != provider.id;
 
         if provider_id_changed {
             if !app_type.is_additive_mode() {
@@ -4583,14 +5177,13 @@ impl ProviderService {
             return Ok(true);
         }
 
-        // Save through the Codex domain mutation so Provider edits, catalog refreshes and
-        // MultiRouter plan saves all share the same compiler/projection lifecycle.
-        Self::persist_provider_mutation(state, &app_type, &provider, protocol_profiles)?;
-
-        // For other apps: Check if this is current provider (use effective current, not just DB)
         let effective_current =
             crate::settings::get_effective_current_provider(&state.db, &app_type)?;
         let is_current = effective_current.as_deref() == Some(provider.id.as_str());
+
+        // Save through the Codex domain mutation so Provider edits, catalog refreshes and
+        // MultiRouter plan saves all share the same compiler/projection lifecycle.
+        Self::persist_provider_mutation(state, &app_type, &provider, protocol_profiles)?;
 
         if is_current && Self::is_codex_schema_v2_router(&app_type, &provider) {
             let status = crate::codex_multirouter::projection::ensure_codex_multirouter_projection(
@@ -4686,6 +5279,7 @@ impl ProviderService {
         app_type: &AppType,
         mut provider: Provider,
     ) -> Result<Provider, AppError> {
+        Self::ensure_codex_provider_is_user_operable(app_type, &provider)?;
         Self::normalize_provider_if_claude(app_type, &mut provider);
         Self::validate_provider_settings(app_type, &provider)?;
         normalize_provider_common_config_for_storage(state.db.as_ref(), app_type, &mut provider)?;
@@ -4702,6 +5296,117 @@ impl ProviderService {
     ) -> Result<(), AppError> {
         if *app_type != AppType::Codex {
             return state.db.save_provider(app_type.as_str(), provider);
+        }
+
+        let is_router = Self::is_codex_schema_v2_router(app_type, provider);
+        if !is_router && provider.uses_manual_codex_protocol() {
+            let api_format = provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.api_format.as_deref())
+                .or_else(|| {
+                    provider
+                        .settings_config
+                        .get("apiFormat")
+                        .and_then(Value::as_str)
+                })
+                .unwrap_or_default();
+            let transport = match api_format {
+                "openai_chat" => crate::protocol_compatibility::TransportKind::OpenAiChat,
+                "openai_responses" => crate::protocol_compatibility::TransportKind::OpenAiResponses,
+                _ => {
+                    return Err(AppError::InvalidInput(
+                        "codex_provider_set_manual_intent_required".to_string(),
+                    ))
+                }
+            };
+            let existing = state
+                .db
+                .get_all_providers(AppType::Codex.as_str())?
+                .into_iter()
+                .collect::<std::collections::HashMap<_, _>>();
+            let prepared = crate::codex_multirouter::provider_set::plan_manual_codex_provider_set(
+                provider,
+                transport,
+                &existing,
+                chrono::Utc::now().timestamp(),
+            )
+            .map_err(|error| AppError::InvalidInput(error.to_string()))?;
+            let outcome = crate::codex_multirouter::mutation::apply_codex_provider_set_mutation(
+                state.db.as_ref(),
+                prepared,
+            )?;
+            for projection in outcome.projections {
+                if projection.state
+                    == crate::codex_multirouter::projection::ProjectionState::Pending
+                {
+                    log::warn!(
+                        "Codex MultiRouter projection pending after manual Provider Set mutation: router={} code={}",
+                        projection.router_provider_id,
+                        projection
+                            .last_error_code
+                            .as_deref()
+                            .unwrap_or("projection_pending")
+                    );
+                }
+            }
+            return Ok(());
+        }
+        let requires_automatic_provider_set = !is_router
+            && provider.category.as_deref() != Some("official")
+            && !provider.uses_managed_account_auth();
+        if requires_automatic_provider_set {
+            if protocol_profiles.is_empty() {
+                return Err(AppError::InvalidInput(
+                    "codex_provider_set_probe_required".to_string(),
+                ));
+            }
+            let existing = state
+                .db
+                .get_all_providers(AppType::Codex.as_str())?
+                .into_iter()
+                .collect::<std::collections::HashMap<_, _>>();
+            let prepared = crate::codex_multirouter::provider_set::plan_codex_provider_set(
+                provider,
+                protocol_profiles,
+                &existing,
+                chrono::Utc::now().timestamp(),
+            )
+            .map_err(|error| AppError::InvalidInput(error.to_string()))?;
+            match &prepared.preview.plan {
+                crate::codex_multirouter::provider_set::CodexProviderSetPlan::Single { .. } => {}
+                crate::codex_multirouter::provider_set::CodexProviderSetPlan::Split { .. } => {
+                    return Err(AppError::InvalidInput(
+                        "codex_provider_set_split_confirmation_required".to_string(),
+                    ));
+                }
+                crate::codex_multirouter::provider_set::CodexProviderSetPlan::Blocked {
+                    ..
+                } => {
+                    return Err(AppError::InvalidInput(
+                        "codex_provider_set_model_blocked".to_string(),
+                    ));
+                }
+            }
+            let outcome = crate::codex_multirouter::mutation::apply_codex_provider_set_mutation(
+                state.db.as_ref(),
+                prepared,
+            )?;
+            for projection in outcome.projections {
+                if projection.state
+                    == crate::codex_multirouter::projection::ProjectionState::Pending
+                {
+                    log::warn!(
+                        "Codex MultiRouter projection pending after Provider Set mutation: router={} code={}",
+                        projection.router_provider_id,
+                        projection
+                            .last_error_code
+                            .as_deref()
+                            .unwrap_or("projection_pending")
+                    );
+                }
+            }
+            return Ok(());
         }
 
         let outcome = if protocol_profiles.is_empty() {
@@ -4890,6 +5595,7 @@ impl ProviderService {
         provider_id: &str,
         subagent_v2: Value,
     ) -> Result<CodexSubagentV2MutationResult, AppError> {
+        Self::ensure_codex_provider_id_is_user_operable(state, &AppType::Codex, provider_id)?;
         let effective_catalog = Self::codex_subagent_effective_catalog(state, provider_id)?;
         let provider_context =
             crate::codex_config::codex_provider_classification_context(state.db.as_ref())?;
@@ -4922,6 +5628,7 @@ impl ProviderService {
         state: &AppState,
         provider_id: &str,
     ) -> Result<CodexSubagentV2MutationResult, AppError> {
+        Self::ensure_codex_provider_id_is_user_operable(state, &AppType::Codex, provider_id)?;
         let effective_catalog = Self::codex_subagent_effective_catalog(state, provider_id)?;
         let provider_context =
             crate::codex_config::codex_provider_classification_context(state.db.as_ref())?;
@@ -4955,6 +5662,7 @@ impl ProviderService {
         action: crate::codex_config::CodexSubagentV2ReconcileAction,
         subagent_v2: Option<Value>,
     ) -> Result<CodexSubagentV2MutationResult, AppError> {
+        Self::ensure_codex_provider_id_is_user_operable(state, &AppType::Codex, provider_id)?;
         if subagent_v2.is_none() {
             return Err(AppError::InvalidInput(
                 "Reconcile actions require the current subagentV2 draft".to_string(),
@@ -5045,6 +5753,8 @@ impl ProviderService {
             state.db.delete_provider(app_type.as_str(), id)?;
             return Ok(Self::empty_provider_delete_outcome(id));
         }
+
+        Self::ensure_codex_provider_id_is_user_operable(state, &app_type, id)?;
 
         // For other apps: Check both local settings and database
         let local_current = crate::settings::get_current_provider(&app_type);
@@ -5181,6 +5891,7 @@ impl ProviderService {
         let _provider = providers
             .get(id)
             .ok_or_else(|| AppError::Message(format!("供应商 {id} 不存在")))?;
+        Self::ensure_codex_provider_is_user_operable(&app_type, _provider)?;
         Self::ensure_codex_multirouter_activation_schema(&app_type, _provider)?;
 
         // OMO providers are switched through their own exclusive path.
@@ -6471,6 +7182,7 @@ impl ProviderService {
         app_type: AppType,
         provider_id: &str,
     ) -> Result<Vec<CustomEndpoint>, AppError> {
+        Self::ensure_codex_provider_id_is_user_operable(state, &app_type, provider_id)?;
         endpoints::get_custom_endpoints(state, app_type, provider_id)
     }
 
@@ -6481,6 +7193,7 @@ impl ProviderService {
         provider_id: &str,
         url: String,
     ) -> Result<(), AppError> {
+        Self::ensure_codex_provider_id_is_user_operable(state, &app_type, provider_id)?;
         endpoints::add_custom_endpoint(state, app_type, provider_id, url)
     }
 
@@ -6491,6 +7204,7 @@ impl ProviderService {
         provider_id: &str,
         url: String,
     ) -> Result<(), AppError> {
+        Self::ensure_codex_provider_id_is_user_operable(state, &app_type, provider_id)?;
         endpoints::remove_custom_endpoint(state, app_type, provider_id, url)
     }
 
@@ -6501,6 +7215,7 @@ impl ProviderService {
         provider_id: &str,
         url: String,
     ) -> Result<(), AppError> {
+        Self::ensure_codex_provider_id_is_user_operable(state, &app_type, provider_id)?;
         endpoints::update_endpoint_last_used(state, app_type, provider_id, url)
     }
 
@@ -6511,6 +7226,12 @@ impl ProviderService {
         updates: Vec<ProviderSortUpdate>,
     ) -> Result<bool, AppError> {
         let mut providers = state.db.get_all_providers(app_type.as_str())?;
+
+        for update in &updates {
+            if let Some(provider) = providers.get(&update.id) {
+                Self::ensure_codex_provider_is_user_operable(&app_type, provider)?;
+            }
+        }
 
         for update in updates {
             if let Some(provider) = providers.get_mut(&update.id) {
@@ -6528,6 +7249,7 @@ impl ProviderService {
         app_type: AppType,
         provider_id: &str,
     ) -> Result<UsageResult, AppError> {
+        Self::ensure_codex_provider_id_is_user_operable(state, &app_type, provider_id)?;
         usage::query_usage(state, app_type, provider_id).await
     }
 
@@ -6545,6 +7267,7 @@ impl ProviderService {
         user_id: Option<&str>,
         template_type: Option<&str>,
     ) -> Result<UsageResult, AppError> {
+        Self::ensure_codex_provider_id_is_user_operable(state, &app_type, provider_id)?;
         usage::test_usage_script(
             state,
             app_type,
@@ -6617,6 +7340,7 @@ impl ProviderService {
                         crate::codex_config::validate_config_toml(cfg_text)?;
                     }
                 }
+                validate_codex_manual_protocol_settings(provider)?;
             }
             AppType::Gemini => {
                 use crate::gemini_config::validate_gemini_settings;
@@ -7035,7 +7759,7 @@ pub struct ProviderSortUpdate {
 // ============================================================================
 
 use crate::provider::UniversalProvider;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 impl ProviderService {
     /// 获取所有统一供应商
@@ -7113,6 +7837,13 @@ impl ProviderService {
             .get_universal_provider(id)?
             .ok_or_else(|| AppError::Message(format!("统一供应商 {id} 不存在")))?;
 
+        Self::prepare_universal_codex_provider_from_definition(state, &provider)
+    }
+
+    pub(crate) fn prepare_universal_codex_provider_from_definition(
+        state: &AppState,
+        provider: &UniversalProvider,
+    ) -> Result<Option<Provider>, AppError> {
         let Some(mut codex_provider) = provider.to_codex_provider() else {
             return Ok(None);
         };
@@ -7120,11 +7851,72 @@ impl ProviderService {
             .db
             .get_provider_by_id(&codex_provider.id, AppType::Codex.as_str())?
         {
-            let mut merged = existing.settings_config.clone();
+            let logical_existing = if existing
+                .settings_config
+                .pointer("/codexProtocolSet/role")
+                .and_then(Value::as_str)
+                == Some("facade")
+            {
+                let providers = state
+                    .db
+                    .get_all_providers(AppType::Codex.as_str())?
+                    .into_iter()
+                    .collect::<HashMap<_, _>>();
+                crate::codex_multirouter::provider_set::restore_logical_codex_provider(
+                    &existing, &providers,
+                )
+                .map_err(|error| AppError::InvalidInput(error.to_string()))?
+            } else {
+                existing
+            };
+            let mut merged = logical_existing.settings_config;
             Self::merge_json(&mut merged, &codex_provider.settings_config);
             codex_provider.settings_config = merged;
         }
+        Self::ensure_universal_codex_model_catalog(&mut codex_provider)?;
         Ok(Some(codex_provider))
+    }
+
+    fn ensure_universal_codex_model_catalog(provider: &mut Provider) -> Result<(), AppError> {
+        let configured_model = crate::proxy::providers::codex_provider_upstream_model(provider)
+            .ok_or_else(|| {
+                AppError::InvalidInput(
+                    "Universal Codex Provider has no configured model".to_string(),
+                )
+            })?;
+        let settings = provider.settings_config.as_object_mut().ok_or_else(|| {
+            AppError::InvalidInput(
+                "Universal Codex Provider settingsConfig must be an object".to_string(),
+            )
+        })?;
+        if !settings.contains_key("modelCatalog") {
+            settings.insert(
+                "modelCatalog".to_string(),
+                serde_json::json!({"models": []}),
+            );
+        }
+        let models = settings
+            .get_mut("modelCatalog")
+            .and_then(|catalog| catalog.get_mut("models"))
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| {
+                AppError::InvalidInput(
+                    "Universal Codex Provider modelCatalog.models must be an array".to_string(),
+                )
+            })?;
+        let configured_exists = models.iter().any(|model| {
+            ["model", "id", "slug", "upstreamModel", "upstream_model"]
+                .into_iter()
+                .filter_map(|key| model.get(key).and_then(Value::as_str))
+                .any(|identity| identity == configured_model)
+        });
+        if !configured_exists {
+            models.push(serde_json::json!({
+                "model": configured_model,
+                "upstreamModel": configured_model
+            }));
+        }
+        Ok(())
     }
 
     pub(crate) fn sync_universal_to_apps_with_codex_profiles(
@@ -7138,23 +7930,82 @@ impl ProviderService {
             .get_universal_provider(id)?
             .ok_or_else(|| AppError::Message(format!("统一供应商 {id} 不存在")))?;
 
-        // 同步到 Claude
-        if let Some(mut claude_provider) = provider.to_claude_provider() {
-            // 合并已有配置
+        Self::sync_universal_definition_to_apps_with_codex_profiles(
+            state,
+            provider,
+            false,
+            prepared_codex_provider,
+            protocol_profiles,
+        )
+    }
+
+    pub(crate) fn save_and_sync_universal_to_apps_with_codex_profiles(
+        state: &AppState,
+        provider: UniversalProvider,
+        prepared_codex_provider: Option<Provider>,
+        protocol_profiles: &[ProtocolCompatibilityRecord],
+    ) -> Result<bool, AppError> {
+        Self::sync_universal_definition_to_apps_with_codex_profiles(
+            state,
+            provider,
+            true,
+            prepared_codex_provider,
+            protocol_profiles,
+        )
+    }
+
+    fn sync_universal_definition_to_apps_with_codex_profiles(
+        state: &AppState,
+        provider: UniversalProvider,
+        persist_definition: bool,
+        prepared_codex_provider: Option<Provider>,
+        protocol_profiles: &[ProtocolCompatibilityRecord],
+    ) -> Result<bool, AppError> {
+        let id = provider.id.as_str();
+
+        let claude_id = format!("universal-claude-{id}");
+        let codex_id = format!("universal-codex-{id}");
+        let gemini_id = format!("universal-gemini-{id}");
+        let codex_current_before = state.db.get_current_provider(AppType::Codex.as_str())?;
+
+        let prepared_claude_provider = if let Some(mut claude_provider) =
+            provider.to_claude_provider()
+        {
             if let Some(existing) = state.db.get_provider_by_id(&claude_provider.id, "claude")? {
                 let mut merged = existing.settings_config.clone();
                 Self::merge_json(&mut merged, &claude_provider.settings_config);
                 claude_provider.settings_config = merged;
             }
-            state.db.save_provider("claude", &claude_provider)?;
+            Some(Self::prepare_provider_for_mutation(
+                state,
+                &AppType::Claude,
+                claude_provider,
+            )?)
         } else {
-            // 如果禁用了 Claude，删除对应的子供应商
-            let claude_id = format!("universal-claude-{id}");
-            let _ = state.db.delete_provider("claude", &claude_id);
-        }
+            None
+        };
 
-        // 同步到 Codex
-        if provider.apps.codex {
+        let prepared_gemini_provider = if let Some(mut gemini_provider) =
+            provider.to_gemini_provider()
+        {
+            if let Some(existing) = state.db.get_provider_by_id(&gemini_provider.id, "gemini")? {
+                let mut merged = existing.settings_config.clone();
+                Self::merge_json(&mut merged, &gemini_provider.settings_config);
+                gemini_provider.settings_config = merged;
+            }
+            Some(Self::prepare_provider_for_mutation(
+                state,
+                &AppType::Gemini,
+                gemini_provider,
+            )?)
+        } else {
+            None
+        };
+
+        // Plan the complete Codex Provider Set before the transaction starts. The same planner
+        // owns ordinary Provider saves, so Universal cannot silently fall back to a mixed
+        // request-time transport or save only one side of a split.
+        let prepared_codex_set_commit = if provider.apps.codex {
             let codex_provider = match prepared_codex_provider {
                 Some(codex_provider) => {
                     let expected_id = format!("universal-codex-{id}");
@@ -7166,43 +8017,253 @@ impl ProviderService {
                     }
                     codex_provider
                 }
-                None => Self::prepare_universal_codex_provider(state, id)?
-                    .ok_or_else(|| AppError::Message("统一供应商 Codex 子项缺失".to_string()))?,
+                None => {
+                    Self::prepare_universal_codex_provider_from_definition(state, &provider)?
+                        .ok_or_else(|| AppError::Message("统一供应商 Codex 子项缺失".to_string()))?
+                }
             };
-            Self::persist_provider_mutation(
-                state,
-                &AppType::Codex,
-                &codex_provider,
-                protocol_profiles,
-            )?;
+            let codex_provider =
+                Self::prepare_provider_for_mutation(state, &AppType::Codex, codex_provider)?;
+            if protocol_profiles
+                .iter()
+                .any(|profile| profile.target.provider_id != codex_provider.id)
+            {
+                return Err(AppError::InvalidInput(
+                    "Universal Codex protocol profile does not belong to the generated Provider"
+                        .to_string(),
+                ));
+            }
+            let existing = state
+                .db
+                .get_all_providers(AppType::Codex.as_str())?
+                .into_iter()
+                .collect::<HashMap<_, _>>();
+            let now = chrono::Utc::now().timestamp();
+            let prepared = if codex_provider.uses_manual_codex_protocol() {
+                let api_format = codex_provider
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.api_format.as_deref())
+                    .or_else(|| {
+                        codex_provider
+                            .settings_config
+                            .get("apiFormat")
+                            .and_then(Value::as_str)
+                    });
+                let transport = match api_format {
+                    Some("openai_chat") => crate::protocol_compatibility::TransportKind::OpenAiChat,
+                    Some("openai_responses") => {
+                        crate::protocol_compatibility::TransportKind::OpenAiResponses
+                    }
+                    _ => {
+                        return Err(AppError::InvalidInput(
+                            "codex_provider_set_manual_intent_required".to_string(),
+                        ))
+                    }
+                };
+                crate::codex_multirouter::provider_set::plan_manual_codex_provider_set(
+                    &codex_provider,
+                    transport,
+                    &existing,
+                    now,
+                )
+            } else {
+                crate::codex_multirouter::provider_set::plan_codex_provider_set(
+                    &codex_provider,
+                    protocol_profiles,
+                    &existing,
+                    now,
+                )
+            }
+            .map_err(|error| AppError::InvalidInput(error.to_string()))?;
+            Some(
+                crate::codex_multirouter::mutation::prepare_codex_provider_set_commit(
+                    state.db.as_ref(),
+                    prepared,
+                )?,
+            )
         } else {
             if prepared_codex_provider.is_some() || !protocol_profiles.is_empty() {
                 return Err(AppError::Message(
                     "统一供应商未启用 Codex，不能应用协议探测结果".to_string(),
                 ));
             }
-            let codex_id = format!("universal-codex-{id}");
-            if state
+            None
+        };
+
+        let prepared_codex_deletion = if !provider.apps.codex
+            && state
                 .db
                 .get_provider_by_id(&codex_id, AppType::Codex.as_str())?
                 .is_some()
+        {
+            let local_current = crate::settings::get_current_provider(&AppType::Codex);
+            let db_current = state.db.get_current_provider(AppType::Codex.as_str())?;
+            if local_current.as_deref() == Some(codex_id.as_str())
+                || db_current.as_deref() == Some(codex_id.as_str())
             {
-                Self::delete(state, AppType::Codex, &codex_id)?;
+                return Err(AppError::Message(
+                    "无法禁用当前正在使用的 Codex 子供应商，请先切换到其他供应商".to_string(),
+                ));
+            }
+            let current_provider_id = crate::settings::get_effective_current_provider(
+                state.db.as_ref(),
+                &AppType::Codex,
+            )?;
+            Some(
+                crate::codex_multirouter::mutation::prepare_codex_provider_deletion(
+                    state.db.as_ref(),
+                    &codex_id,
+                    current_provider_id.as_deref(),
+                )?,
+            )
+        } else {
+            None
+        };
+
+        if prepared_codex_deletion
+            .as_ref()
+            .is_some_and(|prepared| prepared.must_restore_official())
+        {
+            state.db.ensure_official_seed_by_id(
+                crate::database::CODEX_OFFICIAL_PROVIDER_ID,
+                AppType::Codex,
+            )?;
+            Self::switch(
+                state,
+                AppType::Codex,
+                crate::database::CODEX_OFFICIAL_PROVIDER_ID,
+            )?;
+            crate::codex_config::force_codex_builtin_openai_live_provider()?;
+        }
+
+        let (mut transaction, projection_router_ids) =
+            if let Some(prepared) = prepared_codex_set_commit {
+                (prepared.transaction, prepared.projection_router_ids)
+            } else {
+                (
+                    ProviderSetDatabaseTransaction {
+                        mutations: Vec::new(),
+                        profile_owner_ids: HashSet::new(),
+                        records: Vec::new(),
+                        replace_profile_provider_ids: HashSet::new(),
+                        setting_keys_to_delete: Vec::new(),
+                        universal_provider: None,
+                        current_provider_after: None,
+                    },
+                    Vec::new(),
+                )
+            };
+        if codex_current_before.is_none() {
+            // Universal save/sync must not silently activate its generated Codex child. The
+            // Provider Set planner normally activates the first ordinary Provider, but Universal
+            // keeps selection as an explicit user action while still preserving an existing
+            // current facade/leaf transition atomically.
+            transaction.current_provider_after = None;
+        }
+        transaction.mutations.extend([
+            ProviderSetDatabaseMutation {
+                app_type: AppType::Claude.as_str().to_string(),
+                provider_id: claude_id.clone(),
+                provider: prepared_claude_provider,
+            },
+            ProviderSetDatabaseMutation {
+                app_type: AppType::Gemini.as_str().to_string(),
+                provider_id: gemini_id.clone(),
+                provider: prepared_gemini_provider,
+            },
+        ]);
+        if let Some(prepared) = prepared_codex_deletion.as_ref() {
+            let mut deletions = Vec::new();
+            prepared.append_provider_mutations(&mut deletions);
+            transaction.mutations.extend(deletions.into_iter().map(
+                |(app_type, provider_id, provider)| ProviderSetDatabaseMutation {
+                    app_type: app_type.to_string(),
+                    provider_id: provider_id.to_string(),
+                    provider: provider.cloned(),
+                },
+            ));
+            transaction
+                .setting_keys_to_delete
+                .extend(prepared.projection_setting_keys());
+        } else if !provider.apps.codex {
+            transaction.mutations.push(ProviderSetDatabaseMutation {
+                app_type: AppType::Codex.as_str().to_string(),
+                provider_id: codex_id.clone(),
+                provider: None,
+            });
+        }
+        transaction.universal_provider = persist_definition.then_some(provider.clone());
+        state
+            .db
+            .apply_provider_set_database_transaction(transaction)?;
+
+        if !projection_router_ids.is_empty() {
+            match crate::codex_multirouter::mutation::finalize_codex_provider_set_projections_with_publisher(
+                state.db.as_ref(),
+                projection_router_ids,
+                |artifact| {
+                    crate::codex_config::publish_codex_multirouter_projection_for_database(
+                        state.db.as_ref(),
+                        &artifact.projection_settings,
+                    )
+                    .map_err(|error| error.to_string())
+                },
+            ) {
+                Ok(outcome) => {
+                    for projection in outcome.projections {
+                        if projection.state
+                            == crate::codex_multirouter::projection::ProjectionState::Pending
+                        {
+                            log::warn!(
+                                "Universal Codex Provider Set projection pending after atomic sync: router={} code={}",
+                                projection.router_provider_id,
+                                projection
+                                    .last_error_code
+                                    .as_deref()
+                                    .unwrap_or("projection_pending")
+                            );
+                        }
+                    }
+                }
+                Err(error) => log::warn!(
+                    "Universal Provider children committed; Codex derived projection will retry later: {error}"
+                ),
             }
         }
 
-        // 同步到 Gemini
-        if let Some(mut gemini_provider) = provider.to_gemini_provider() {
-            // 合并已有配置
-            if let Some(existing) = state.db.get_provider_by_id(&gemini_provider.id, "gemini")? {
-                let mut merged = existing.settings_config.clone();
-                Self::merge_json(&mut merged, &gemini_provider.settings_config);
-                gemini_provider.settings_config = merged;
+        if let Some(prepared) = prepared_codex_deletion {
+            match crate::codex_multirouter::mutation::finalize_codex_provider_deletion(
+                state.db.as_ref(),
+                prepared,
+                |artifact| {
+                    crate::codex_config::publish_codex_multirouter_projection_for_database(
+                        state.db.as_ref(),
+                        &artifact.projection_settings,
+                    )
+                    .map_err(|error| error.to_string())
+                },
+            ) {
+                Ok(outcome) => {
+                    for projection in outcome.projections {
+                        if projection.state
+                            == crate::codex_multirouter::projection::ProjectionState::Pending
+                        {
+                            log::warn!(
+                                "Universal Codex deletion projection pending after atomic Provider sync: router={} code={}",
+                                projection.router_provider_id,
+                                projection
+                                    .last_error_code
+                                    .as_deref()
+                                    .unwrap_or("projection_pending")
+                            );
+                        }
+                    }
+                }
+                Err(error) => log::warn!(
+                    "Universal Provider children committed; Codex deletion projection will retry later: {error}"
+                ),
             }
-            state.db.save_provider("gemini", &gemini_provider)?;
-        } else {
-            let gemini_id = format!("universal-gemini-{id}");
-            let _ = state.db.delete_provider("gemini", &gemini_id);
         }
 
         Ok(true)

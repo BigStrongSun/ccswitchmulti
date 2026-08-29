@@ -8,11 +8,15 @@ import { CODEX_MULTI_ROUTER_WIZARD_DISMISSED_KEY } from "@/lib/codexMultiRouterW
 import { providersApi } from "@/lib/api/providers";
 import { codexSubagentV2Api } from "@/lib/api/codexSubagentV2";
 import {
+  commitCodexProviderSetBatch,
+  prepareCodexProviderSetBatch,
+  preflightCodexProviderProtocolCompatibility,
+  type CodexProviderProtocolPreflightOutcome,
+} from "@/lib/api/protocol-compatibility";
+import {
   fetchCodexOauthCachedModels,
   fetchCodexOauthModels,
   fetchModelsForConfig,
-  probeCodexChatForConfig,
-  probeCodexResponsesForConfig,
 } from "@/lib/api/model-fetch";
 
 vi.mock("@/lib/api/providers", () => ({
@@ -28,12 +32,16 @@ vi.mock("@/lib/api/codexSubagentV2", () => ({
   },
 }));
 
+vi.mock("@/lib/api/protocol-compatibility", () => ({
+  commitCodexProviderSetBatch: vi.fn(),
+  prepareCodexProviderSetBatch: vi.fn(),
+  preflightCodexProviderProtocolCompatibility: vi.fn(),
+}));
+
 vi.mock("@/lib/api/model-fetch", () => ({
   fetchCodexOauthCachedModels: vi.fn(),
   fetchCodexOauthModels: vi.fn(),
   fetchModelsForConfig: vi.fn(),
-  probeCodexChatForConfig: vi.fn(),
-  probeCodexResponsesForConfig: vi.fn(),
 }));
 
 vi.mock("@/components/providers/forms/hooks/useCodexOauth", () => ({
@@ -74,49 +82,282 @@ function renderWithQueryClient(ui: ReactElement) {
   );
 }
 
+function verifiedPreflight(
+  source: Provider,
+  transport: "open_ai_responses" | "open_ai_chat" = "open_ai_responses",
+): CodexProviderProtocolPreflightOutcome {
+  const models = source.settingsConfig.modelCatalog.models.map(
+    (model: { model: string }) => model.model,
+  );
+  return {
+    provider: source,
+    receiptIds: models.map((model: string) => `receipt:${source.id}:${model}`),
+    protocolApplied: false,
+    records: models.map((model: string) => ({
+        probeVersion: 1,
+        target: {
+          provider_id: source.id,
+          route_id: null,
+          public_model: model,
+          upstream_model: model,
+          transport,
+          endpoint_fingerprint: "endpoint",
+          authentication_kind: "bearer",
+          credential_fingerprint: "credential",
+        },
+        result: {
+          selected_transport: transport,
+          readiness: "verified",
+          branches: [],
+        },
+        testedAt: 100,
+        expiresAt: 200,
+      })),
+  };
+}
+
 beforeEach(() => {
   localStorage.clear();
   vi.clearAllMocks();
   vi.mocked(fetchCodexOauthCachedModels).mockResolvedValue([]);
-  vi.mocked(codexSubagentV2Api.initializeProviderConfig).mockImplementation(
-    async (providerId) => {
-      const persisted = vi
-        .mocked(providersApi.add)
-        .mock.calls.find(([candidate]) => candidate.id === providerId)?.[0];
-      if (!persisted) {
-        throw new Error("backend initializer requires the persisted provider");
-      }
-      return {
-        ...persisted,
-        settingsConfig: {
-          ...persisted.settingsConfig,
-          codexRouting: {
-            ...persisted.settingsConfig.codexRouting,
-            subagentV2: {
-              schemaVersion: 1,
-              selectionPolicy: "balanced",
-              profiles: {
-                "qwen3.6": {
-                  model: "qwen3.6",
-                  enabled: false,
-                  questionnaire: {
-                    taskStrengths: ["repository_exploration"],
-                    optimization: "balanced",
-                    writeScope: "read_only",
-                    preference: "eligible",
-                    reasoningEffort: "auto",
-                  },
-                },
-              },
-            },
-          },
-        },
-      };
-    },
+  vi.mocked(preflightCodexProviderProtocolCompatibility).mockImplementation(
+    async (source) => verifiedPreflight(source),
+  );
+  vi.mocked(prepareCodexProviderSetBatch).mockImplementation(
+    async (_sources, router) => ({
+      digest: `digest:${router.id}`,
+      sourcePreviews: [],
+      routerProviderId: router.id,
+      requiresSplitConfirmation: false,
+      blocked: false,
+    }),
+  );
+  vi.mocked(commitCodexProviderSetBatch).mockImplementation(
+    async (_sources, router, digest) => ({
+      preview: {
+        digest,
+        sourcePreviews: [],
+        routerProviderId: router.id,
+        requiresSplitConfirmation: false,
+        blocked: false,
+      },
+      router,
+      projections: [],
+      status: "committed",
+      projectionErrorCode: null,
+    }),
   );
 });
 
+async function completeWizardDeepProbe() {
+  fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
+  fireEvent.click(
+    screen.getByRole("button", { name: "开始兼容性深度探测" }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
+  fireEvent.click(await screen.findByRole("button", { name: "关闭" }));
+}
+
 describe("CodexMultiRouterWizard", () => {
+  it("deep-probes ordinary sources and saves the sources plus router through one batch commit", async () => {
+    const source = provider();
+    renderWithQueryClient(
+      <CodexMultiRouterWizard
+        open
+        providers={[source]}
+        onOpenChange={vi.fn()}
+        onCreateProvider={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+        onEnablePlan={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "开始兼容性深度探测" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
+    await waitFor(() =>
+      expect(preflightCodexProviderProtocolCompatibility).toHaveBeenCalledWith(
+        source,
+        expect.any(Function),
+      ),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "关闭" }),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "启用并验证" }));
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "保存并发布" }).at(-1)!,
+    );
+
+    await waitFor(() =>
+      expect(prepareCodexProviderSetBatch).toHaveBeenCalledTimes(1),
+    );
+    expect(prepareCodexProviderSetBatch).toHaveBeenCalledWith(
+      [{ provider: source, receiptIds: ["receipt:deepseek:deepseek-chat"] }],
+      expect.objectContaining({
+        settingsConfig: expect.objectContaining({
+          codexRouting: expect.objectContaining({ schemaVersion: 2 }),
+        }),
+      }),
+    );
+    expect(commitCodexProviderSetBatch).toHaveBeenCalledTimes(1);
+    expect(commitCodexProviderSetBatch).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.any(Object),
+      expect.stringContaining("digest:"),
+      "accept_single",
+    );
+    expect(providersApi.add).not.toHaveBeenCalled();
+    expect(providersApi.update).not.toHaveBeenCalled();
+    expect(codexSubagentV2Api.initializeProviderConfig).not.toHaveBeenCalled();
+  });
+
+  it("does not issue a deep probe request for an official managed source", async () => {
+    const official = provider({
+      id: "codex-official",
+      name: "OpenAI Official",
+      category: "official",
+      meta: { providerType: "codex_oauth" },
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "gpt-5.6-sol" }] },
+      },
+    });
+    renderWithQueryClient(
+      <CodexMultiRouterWizard
+        open
+        providers={[official]}
+        onOpenChange={vi.fn()}
+        onCreateProvider={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+        onEnablePlan={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "开始兼容性深度探测" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
+
+    expect(
+      await screen.findByText("状态机：connectivityPartial"),
+    ).toBeInTheDocument();
+    expect(preflightCodexProviderProtocolCompatibility).not.toHaveBeenCalled();
+  });
+
+  it("requires explicit confirmation before committing a split batch", async () => {
+    vi.mocked(prepareCodexProviderSetBatch).mockResolvedValueOnce({
+      digest: "split-digest",
+      sourcePreviews: [
+        {
+          digest: "source-digest",
+          sourceProviderId: "deepseek",
+          responsesModels: ["deepseek-chat"],
+          chatModels: ["deepseek-reasoner"],
+          plan: {
+            kind: "split",
+            responses_provider_id: "deepseek--ccsm-responses",
+            chat_provider_id: "deepseek--ccsm-chat",
+          },
+        },
+      ],
+      routerProviderId: "codex-multi-router",
+      requiresSplitConfirmation: true,
+      blocked: false,
+    });
+    renderWithQueryClient(
+      <CodexMultiRouterWizard
+        open
+        providers={[provider()]}
+        onOpenChange={vi.fn()}
+        onCreateProvider={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+        onEnablePlan={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "开始兼容性深度探测" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
+    fireEvent.click(await screen.findByRole("button", { name: "关闭" }));
+    fireEvent.click(screen.getByRole("button", { name: "启用并验证" }));
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "保存并发布" }).at(-1)!,
+    );
+
+    expect(await screen.findByText("按协议自动拆分")).toBeInTheDocument();
+    expect(commitCodexProviderSetBatch).not.toHaveBeenCalled();
+    fireEvent.click(
+      screen.getByRole("button", { name: "确认按协议拆分" }),
+    );
+    await waitFor(() =>
+      expect(commitCodexProviderSetBatch).toHaveBeenCalledWith(
+        expect.any(Array),
+        expect.any(Object),
+        "split-digest",
+        "confirm_split",
+      ),
+    );
+  });
+
+  it("keeps a blocked batch completely unsaved", async () => {
+    vi.mocked(prepareCodexProviderSetBatch).mockResolvedValueOnce({
+      digest: "blocked-digest",
+      sourcePreviews: [
+        {
+          digest: "source-digest",
+          sourceProviderId: "deepseek",
+          responsesModels: [],
+          chatModels: [],
+          plan: {
+            kind: "blocked",
+            models: [
+              {
+                model: "deepseek-chat",
+                upstreamModel: "deepseek-chat",
+                reason: "probe_not_verified",
+              },
+            ],
+          },
+        },
+      ],
+      routerProviderId: "codex-multi-router",
+      requiresSplitConfirmation: false,
+      blocked: true,
+    });
+    renderWithQueryClient(
+      <CodexMultiRouterWizard
+        open
+        providers={[provider()]}
+        onOpenChange={vi.fn()}
+        onCreateProvider={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+        onEnablePlan={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "开始兼容性深度探测" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
+    fireEvent.click(await screen.findByRole("button", { name: "关闭" }));
+    fireEvent.click(screen.getByRole("button", { name: "启用并验证" }));
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "保存并发布" }).at(-1)!,
+    );
+
+    expect(await screen.findByText("暂时无法保存")).toBeInTheDocument();
+    expect(commitCodexProviderSetBatch).not.toHaveBeenCalled();
+    expect(providersApi.add).not.toHaveBeenCalled();
+    expect(providersApi.update).not.toHaveBeenCalled();
+  });
+
   it("keeps the first step focused on source selection and provider-owned configuration", () => {
     renderWithQueryClient(
       <CodexMultiRouterWizard
@@ -232,40 +473,22 @@ describe("CodexMultiRouterWizard", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "下一步" }));
-    fireEvent.click(screen.getByRole("button", { name: "下一步" }));
-    fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+    await completeWizardDeepProbe();
+    fireEvent.click(screen.getByRole("button", { name: "启用并验证" }));
     fireEvent.click(screen.getByRole("button", { name: "保存并发布" }));
 
-    await waitFor(() => expect(providersApi.add).toHaveBeenCalledTimes(1));
-    const persisted = vi.mocked(providersApi.add).mock.calls[0][0];
-    expect(persisted.settingsConfig.codexRouting.subagentVersion).toBe("v2");
-
     await waitFor(() =>
-      expect(codexSubagentV2Api.initializeProviderConfig).toHaveBeenCalledWith(
-        persisted.id,
-      ),
+      expect(commitCodexProviderSetBatch).toHaveBeenCalledTimes(1),
     );
-    const initialized = await vi.mocked(
-      codexSubagentV2Api.initializeProviderConfig,
-    ).mock.results[0].value;
-    expect(initialized).toMatchObject({
-      id: persisted.id,
-      name: persisted.name,
-      settingsConfig: expect.objectContaining({
-        base_url: persisted.settingsConfig.base_url,
-        auth: persisted.settingsConfig.auth,
-      }),
-    });
-    expect(
-      initialized.settingsConfig.codexRouting.subagentV2.profiles,
-    ).toHaveProperty("qwen3.6");
+    const persisted = vi.mocked(commitCodexProviderSetBatch).mock.calls[0][1];
+    expect(persisted.settingsConfig.codexRouting.subagentVersion).toBe("v2");
+    expect(codexSubagentV2Api.initializeProviderConfig).not.toHaveBeenCalled();
 
     fireEvent.click(
       await screen.findByRole("button", { name: "启用这个多路路由" }),
     );
-    await waitFor(() => expect(onEnablePlan).toHaveBeenCalledWith(initialized));
-    expect(onEnablePlan.mock.calls[0][0]).toBe(initialized);
+    await waitFor(() => expect(onEnablePlan).toHaveBeenCalledWith(persisted));
+    expect(onEnablePlan.mock.calls[0][0]).toBe(persisted);
   });
 
   it("keeps the wizard controls inside small app windows", () => {
@@ -500,7 +723,6 @@ describe("CodexMultiRouterWizard", () => {
     vi.mocked(fetchModelsForConfig).mockResolvedValueOnce([
       { id: "deepseek-chat", ownedBy: null },
     ]);
-    vi.mocked(providersApi.update).mockResolvedValueOnce(true);
 
     renderWithQueryClient(
       <CodexMultiRouterWizard
@@ -515,12 +737,12 @@ describe("CodexMultiRouterWizard", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
     fireEvent.click(
-      screen.getByRole("button", { name: "自动获取并写入模型列表" }),
+      screen.getByRole("button", { name: "自动获取模型列表（暂存）" }),
     );
 
     expect(await screen.findByText("无模型列表更新")).toBeInTheDocument();
     expect(fetchModelsForConfig).toHaveBeenCalledTimes(1);
-    expect(providersApi.update).toHaveBeenCalledTimes(1);
+    expect(providersApi.update).not.toHaveBeenCalled();
   });
 
   it("refreshes an official OAuth catalog with its bound account and appends new models", async () => {
@@ -528,7 +750,6 @@ describe("CodexMultiRouterWizard", () => {
       { id: "gpt-5.5", ownedBy: "openai", contextWindow: 272000 },
       { id: "gpt-5.6-sol", ownedBy: "openai", contextWindow: 372000 },
     ]);
-    vi.mocked(providersApi.update).mockResolvedValueOnce(true);
     const officialProvider = provider({
       id: "codex-official",
       name: "OpenAI Official",
@@ -558,19 +779,20 @@ describe("CodexMultiRouterWizard", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
     fireEvent.click(
-      screen.getByRole("button", { name: "自动获取并写入模型列表" }),
+      screen.getByRole("button", { name: "自动获取模型列表（暂存）" }),
     );
 
     await waitFor(() =>
       expect(fetchCodexOauthModels).toHaveBeenCalledWith("account-56"),
     );
-    await waitFor(() => expect(providersApi.update).toHaveBeenCalledTimes(1));
-    const savedProvider = vi.mocked(providersApi.update).mock.calls[0][0];
     expect(
-      savedProvider.settingsConfig.modelCatalog.models.map(
-        (model: { model: string }) => model.model,
-      ),
-    ).toEqual(["gpt-5.5", "gpt-5.6-sol"]);
+      await screen.findByText(/已载入草稿 2 个模型/),
+    ).toBeInTheDocument();
+    expect(providersApi.update).not.toHaveBeenCalled();
+    fireEvent.click(
+      screen.getByRole("button", { name: "选择模型并预览路由" }),
+    );
+    expect(screen.getByLabelText("保留 gpt-5.6-sol")).toBeInTheDocument();
     expect(fetchModelsForConfig).not.toHaveBeenCalled();
   });
 
@@ -601,7 +823,7 @@ describe("CodexMultiRouterWizard", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
     fireEvent.click(
-      screen.getByRole("button", { name: "自动获取并写入模型列表" }),
+      screen.getByRole("button", { name: "自动获取模型列表（暂存）" }),
     );
 
     expect(
@@ -619,7 +841,6 @@ describe("CodexMultiRouterWizard", () => {
       { id: "gpt-5.5", ownedBy: "Codex", contextWindow: 256000 },
       { id: "gpt-5.6-luna", ownedBy: "Codex", contextWindow: 256000 },
     ]);
-    vi.mocked(providersApi.update).mockResolvedValueOnce(true);
     const officialProvider = provider({
       id: "codex-official",
       name: "OpenAI Official",
@@ -641,21 +862,20 @@ describe("CodexMultiRouterWizard", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
     fireEvent.click(
-      screen.getByRole("button", { name: "自动获取并写入模型列表" }),
+      screen.getByRole("button", { name: "自动获取模型列表（暂存）" }),
     );
 
     expect(
-      await screen.findByText(/已使用本地 Codex 模型缓存写入 2 个模型/),
+      await screen.findByText(/已使用本地 Codex 模型缓存载入草稿 2 个模型/),
     ).toBeInTheDocument();
     expect(
       screen.getByText(/OAuth 在线模型列表获取失败，已使用本地缓存/),
     ).toBeInTheDocument();
-    const savedProvider = vi.mocked(providersApi.update).mock.calls[0][0];
-    expect(
-      savedProvider.settingsConfig.modelCatalog.models.map(
-        (model: { model: string }) => model.model,
-      ),
-    ).toEqual(["gpt-5.5", "gpt-5.6-luna"]);
+    expect(providersApi.update).not.toHaveBeenCalled();
+    fireEvent.click(
+      screen.getByRole("button", { name: "选择模型并预览路由" }),
+    );
+    expect(screen.getByLabelText("保留 gpt-5.6-luna")).toBeInTheDocument();
   });
 
   it("excludes an unchecked provider from the generated MultiRouter plan", async () => {
@@ -681,13 +901,16 @@ describe("CodexMultiRouterWizard", () => {
     );
 
     fireEvent.click(screen.getByLabelText("使用 Qwen Local 作为模型源"));
+    await completeWizardDeepProbe();
     fireEvent.click(screen.getByRole("button", { name: "启用并验证" }));
     fireEvent.click(
       screen.getAllByRole("button", { name: "保存并发布" }).at(-1)!,
     );
 
-    await waitFor(() => expect(providersApi.add).toHaveBeenCalledTimes(1));
-    const savedProvider = vi.mocked(providersApi.add).mock.calls[0][0];
+    await waitFor(() =>
+      expect(commitCodexProviderSetBatch).toHaveBeenCalledTimes(1),
+    );
+    const savedProvider = vi.mocked(commitCodexProviderSetBatch).mock.calls[0][1];
     expect(
       savedProvider.settingsConfig.codexRouting.routes.map(
         (route: { id: string }) => route.id,
@@ -701,7 +924,6 @@ describe("CodexMultiRouterWizard", () => {
       { id: "deepseek-chat", ownedBy: null, contextWindow: 128000 },
       { id: "deepseek-reasoner", ownedBy: null, contextWindow: 64000 },
     ]);
-    vi.mocked(providersApi.update).mockResolvedValueOnce(true);
 
     renderWithQueryClient(
       <CodexMultiRouterWizard
@@ -727,19 +949,20 @@ describe("CodexMultiRouterWizard", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
     fireEvent.click(
-      screen.getByRole("button", { name: "自动获取并写入模型列表" }),
+      screen.getByRole("button", { name: "自动获取模型列表（暂存）" }),
     );
 
-    await waitFor(() => expect(providersApi.update).toHaveBeenCalledTimes(1));
-    const savedProvider = vi.mocked(providersApi.update).mock.calls[0][0];
     expect(
-      savedProvider.settingsConfig.modelCatalog.models.map(
-        (model: { model: string }) => model.model,
-      ),
-    ).toEqual(["deepseek-chat"]);
-    expect(savedProvider.settingsConfig.modelCatalog.spawnAgentModels).toEqual([
-      "deepseek-chat",
-    ]);
+      await screen.findByText(/已载入草稿 1 个模型/),
+    ).toBeInTheDocument();
+    expect(providersApi.update).not.toHaveBeenCalled();
+    fireEvent.click(
+      screen.getByRole("button", { name: "选择模型并预览路由" }),
+    );
+    expect(screen.getByLabelText("保留 deepseek-chat")).toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("保留 deepseek-reasoner"),
+    ).not.toBeInTheDocument();
   });
 
   it("falls back to data-plane models for AgentPlan without AK/SK when API Key exists", async () => {
@@ -747,7 +970,6 @@ describe("CodexMultiRouterWizard", () => {
       { id: "ark-code-latest", ownedBy: "volcengine" },
       { id: "doubao-seed-1.6", ownedBy: "volcengine" },
     ]);
-    vi.mocked(providersApi.update).mockResolvedValueOnce(true);
 
     renderWithQueryClient(
       <CodexMultiRouterWizard
@@ -775,7 +997,7 @@ describe("CodexMultiRouterWizard", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
     fireEvent.click(
-      screen.getByRole("button", { name: "自动获取并写入模型列表" }),
+      screen.getByRole("button", { name: "自动获取模型列表（暂存）" }),
     );
 
     await waitFor(() => {
@@ -787,7 +1009,7 @@ describe("CodexMultiRouterWizard", () => {
         undefined,
         undefined,
       );
-      expect(providersApi.update).toHaveBeenCalledTimes(1);
+      expect(providersApi.update).not.toHaveBeenCalled();
     });
     expect(
       await screen.findByText("读取成功，无模型列表更新，仍为 1 个模型。"),
@@ -821,7 +1043,7 @@ describe("CodexMultiRouterWizard", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
     fireEvent.click(
-      screen.getByRole("button", { name: "自动获取并写入模型列表" }),
+      screen.getByRole("button", { name: "自动获取模型列表（暂存）" }),
     );
 
     await waitFor(() => {
@@ -834,7 +1056,6 @@ describe("CodexMultiRouterWizard", () => {
     vi.mocked(fetchModelsForConfig).mockResolvedValueOnce([
       { id: "doubao-seed-1.6", ownedBy: "volcengine" },
     ]);
-    vi.mocked(providersApi.update).mockResolvedValueOnce(true);
 
     renderWithQueryClient(
       <CodexMultiRouterWizard
@@ -871,7 +1092,7 @@ describe("CodexMultiRouterWizard", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
     fireEvent.click(
-      screen.getByRole("button", { name: "自动获取并写入模型列表" }),
+      screen.getByRole("button", { name: "自动获取模型列表（暂存）" }),
     );
 
     await waitFor(() => {
@@ -887,7 +1108,7 @@ describe("CodexMultiRouterWizard", () => {
           secretAccessKey: "secret",
         },
       );
-      expect(providersApi.update).toHaveBeenCalledTimes(1);
+      expect(providersApi.update).not.toHaveBeenCalled();
     });
     expect(
       await screen.findByText("读取成功，无模型列表更新，仍为 1 个模型。"),
@@ -900,8 +1121,6 @@ describe("CodexMultiRouterWizard", () => {
       { id: "model-b", ownedBy: null },
       { id: "model-c", ownedBy: null },
     ]);
-    vi.mocked(providersApi.update).mockResolvedValueOnce(true);
-
     renderWithQueryClient(
       <CodexMultiRouterWizard
         open
@@ -934,7 +1153,7 @@ describe("CodexMultiRouterWizard", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
     fireEvent.click(
-      screen.getByRole("button", { name: "自动获取并写入模型列表" }),
+      screen.getByRole("button", { name: "自动获取模型列表（暂存）" }),
     );
 
     expect(await screen.findByText("无模型列表更新")).toBeInTheDocument();
@@ -1006,21 +1225,6 @@ describe("CodexMultiRouterWizard", () => {
   });
 
   it("keeps manually locked chat protocol on the Provider instead of a Route snapshot", async () => {
-    vi.mocked(probeCodexResponsesForConfig).mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      url: "https://relay.example/v1/responses",
-      model: "gpt-5.5",
-      detail: "ok",
-    });
-    vi.mocked(probeCodexChatForConfig).mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      url: "https://relay.example/v1/chat/completions",
-      model: "gpt-5.5",
-      detail: "ok",
-    });
-
     renderWithQueryClient(
       <CodexMultiRouterWizard
         open
@@ -1036,7 +1240,11 @@ describe("CodexMultiRouterWizard", () => {
                 models: [{ model: "gpt-5.5", upstreamModel: "gpt-5.5" }],
               },
             },
-            meta: { apiFormat: "openai_chat", apiFormatSource: "manual" },
+            meta: {
+              apiFormat: "openai_chat",
+              apiFormatSource: "manual",
+              codexProtocolMode: "manual",
+            },
           }),
         ]}
         onOpenChange={vi.fn()}
@@ -1048,12 +1256,13 @@ describe("CodexMultiRouterWizard", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
     fireEvent.click(
-      screen.getByRole("button", { name: "测试 Chat / Responses 连通性" }),
+      screen.getByRole("button", { name: "开始兼容性深度探测" }),
     );
     fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
     expect(
-      await screen.findByText("状态机：connectivityPassed"),
+      await screen.findByText("状态机：connectivityPartial"),
     ).toBeInTheDocument();
+    expect(preflightCodexProviderProtocolCompatibility).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: "启用并验证" }));
     fireEvent.click(
@@ -1061,9 +1270,9 @@ describe("CodexMultiRouterWizard", () => {
     );
 
     await waitFor(() => {
-      expect(providersApi.add).toHaveBeenCalledTimes(1);
+      expect(commitCodexProviderSetBatch).toHaveBeenCalledTimes(1);
     });
-    const savedProvider = vi.mocked(providersApi.add).mock.calls[0][0];
+    const savedProvider = vi.mocked(commitCodexProviderSetBatch).mock.calls[0][1];
     expect(savedProvider.settingsConfig.codexRouting.routes[0]).toMatchObject({
       targetProviderId: "relay",
     });
@@ -1091,7 +1300,9 @@ describe("CodexMultiRouterWizard", () => {
   });
 
   it("moves to saveFailed state when publishing the generated plan fails", async () => {
-    vi.mocked(providersApi.add).mockRejectedValueOnce(new Error("db locked"));
+    vi.mocked(commitCodexProviderSetBatch).mockRejectedValueOnce(
+      new Error("db locked"),
+    );
 
     renderWithQueryClient(
       <CodexMultiRouterWizard
@@ -1104,6 +1315,7 @@ describe("CodexMultiRouterWizard", () => {
       />,
     );
 
+    await completeWizardDeepProbe();
     fireEvent.click(screen.getByRole("button", { name: "启用并验证" }));
     const publishButtons = screen.getAllByRole("button", {
       name: "保存并发布",
@@ -1153,15 +1365,16 @@ describe("CodexMultiRouterWizard", () => {
     fireEvent.click(screen.getByLabelText("保留 model-b"));
     fireEvent.click(screen.getAllByTitle("上移")[1]);
 
+    await completeWizardDeepProbe();
     fireEvent.click(screen.getByRole("button", { name: "启用并验证" }));
     fireEvent.click(
       screen.getAllByRole("button", { name: "保存并发布" }).at(-1)!,
     );
 
     await waitFor(() => {
-      expect(providersApi.add).toHaveBeenCalledTimes(1);
+      expect(commitCodexProviderSetBatch).toHaveBeenCalledTimes(1);
     });
-    const savedProvider = vi.mocked(providersApi.add).mock.calls[0][0];
+    const savedProvider = vi.mocked(commitCodexProviderSetBatch).mock.calls[0][1];
     expect(savedProvider.name).toBe("Work MultiRouter");
     expect(savedProvider.settingsConfig).not.toHaveProperty("modelCatalog");
     expect(savedProvider.settingsConfig.codexRouting.spawnAgentModels).toEqual(
@@ -1173,21 +1386,6 @@ describe("CodexMultiRouterWizard", () => {
   });
 
   it("confirms and probes both Chat and Responses connectivity before recording pass state", async () => {
-    vi.mocked(probeCodexResponsesForConfig).mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      url: "https://api.deepseek.com/v1/responses",
-      model: "deepseek-chat",
-      detail: "ok",
-    });
-    vi.mocked(probeCodexChatForConfig).mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      url: "https://api.deepseek.com/v1/chat/completions",
-      model: "deepseek-chat",
-      detail: "ok",
-    });
-
     renderWithQueryClient(
       <CodexMultiRouterWizard
         open
@@ -1201,28 +1399,18 @@ describe("CodexMultiRouterWizard", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
     fireEvent.click(
-      screen.getByRole("button", { name: "测试 Chat / Responses 连通性" }),
+      screen.getByRole("button", { name: "开始兼容性深度探测" }),
     );
-    expect(screen.getByText("确认开始连通性测试")).toBeInTheDocument();
+    expect(screen.getByText("确认开始兼容性深度探测")).toBeInTheDocument();
     expect(screen.getAllByRole("dialog").at(-1)).toHaveClass("z-[200]");
     fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
 
     expect(
       await screen.findByText("状态机：connectivityPassed"),
     ).toBeInTheDocument();
-    expect(probeCodexResponsesForConfig).toHaveBeenCalledWith(
-      "https://api.deepseek.com/v1",
-      "sk-test",
-      "deepseek-chat",
-      false,
-      undefined,
-    );
-    expect(probeCodexChatForConfig).toHaveBeenCalledWith(
-      "https://api.deepseek.com/v1",
-      "sk-test",
-      "deepseek-chat",
-      false,
-      undefined,
+    expect(preflightCodexProviderProtocolCompatibility).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "deepseek" }),
+      expect.any(Function),
     );
   });
 
@@ -1247,7 +1435,7 @@ describe("CodexMultiRouterWizard", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
     fireEvent.click(
-      screen.getByRole("button", { name: "自动获取并写入模型列表" }),
+      screen.getByRole("button", { name: "自动获取模型列表（暂存）" }),
     );
 
     expect(await screen.findByText("模型列表获取失败")).toBeInTheDocument();
@@ -1259,7 +1447,7 @@ describe("CodexMultiRouterWizard", () => {
   });
 
   it("shows responses probe command exceptions and blocks continuation", async () => {
-    vi.mocked(probeCodexResponsesForConfig).mockRejectedValueOnce(
+    vi.mocked(preflightCodexProviderProtocolCompatibility).mockRejectedValueOnce(
       new Error("ipc invoke failed"),
     );
 
@@ -1276,12 +1464,12 @@ describe("CodexMultiRouterWizard", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
     fireEvent.click(
-      screen.getByRole("button", { name: "测试 Chat / Responses 连通性" }),
+      screen.getByRole("button", { name: "开始兼容性深度探测" }),
     );
     fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
 
-    expect(await screen.findByText("连通性探测命令异常")).toBeInTheDocument();
-    expect(screen.getByText("ipc invoke failed")).toBeInTheDocument();
+    expect(await screen.findByText("兼容性深度探测中断")).toBeInTheDocument();
+    expect(screen.getAllByText(/ipc invoke failed/).length).toBeGreaterThan(0);
     expect(screen.getByText("需处理后继续")).toBeInTheDocument();
     expect(screen.getByText("状态机：connectivityFailed")).toBeInTheDocument();
   });
@@ -1301,6 +1489,7 @@ describe("CodexMultiRouterWizard", () => {
       />,
     );
 
+    await completeWizardDeepProbe();
     fireEvent.click(screen.getByRole("button", { name: "启用并验证" }));
     const publishButtons = screen.getAllByRole("button", {
       name: "保存并发布",

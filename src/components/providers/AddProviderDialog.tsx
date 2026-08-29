@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Plus } from "lucide-react";
 import { toast } from "sonner";
@@ -7,26 +7,27 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { FullScreenPanel } from "@/components/common/FullScreenPanel";
 import type { Provider, CustomEndpoint, UniversalProvider } from "@/types";
 import type { AppId } from "@/lib/api";
-import { universalProvidersApi } from "@/lib/api";
 import {
   ProviderForm,
   type ProviderFormValues,
 } from "@/components/providers/forms/ProviderForm";
 import { UniversalProviderFormModal } from "@/components/universal/UniversalProviderFormModal";
 import { UniversalProviderPanel } from "@/components/universal";
+import { useUniversalProviderSetSave } from "@/components/universal/useUniversalProviderSetSave";
+import {
+  isCodexProviderSetCancelled,
+  useCodexProviderSetSave,
+} from "@/components/providers/forms/useCodexProviderSetSave";
 import { providerPresets } from "@/config/claudeProviderPresets";
 import { codexProviderPresets } from "@/config/codexProviderPresets";
 import { geminiProviderPresets } from "@/config/geminiProviderPresets";
 import { claudeDesktopProviderPresets } from "@/config/claudeDesktopProviderPresets";
-import {
-  extractCodexBaseUrl,
-  setCodexModelName,
-} from "@/utils/providerConfigUtils";
+import { extractCodexBaseUrl } from "@/utils/providerConfigUtils";
 import { extractGrokBuildBaseUrl } from "@/utils/grokBuildConfig";
 import { GROKBUILD_OFFICIAL_PROVIDER_ID } from "@/utils/providerCapabilities";
 import type { OpenClawSuggestedDefaults } from "@/config/openclawProviderPresets";
 import type { UniversalProviderPreset } from "@/config/universalProviderPresets";
-import type { CodexProviderSplitSuggestion } from "@/components/providers/forms/CodexFormFields";
+import { generateUUID } from "@/utils/uuid";
 
 interface AddProviderDialogProps {
   open: boolean;
@@ -42,66 +43,6 @@ interface AddProviderDialogProps {
       ensureGrokBuildOfficialSeed?: boolean;
     },
   ) => Promise<void> | void;
-}
-
-// 读取目录条目的真实上游模型名；拆分 provider 时必须按 upstreamModel 匹配，避免别名模型被漏分组。
-function getCodexCatalogModelKey(model: Record<string, unknown>): string {
-  return String(
-    model.upstreamModel ?? model.upstream_model ?? model.model ?? "",
-  ).trim();
-}
-
-// 将一个混合协议 Codex provider 拆成 Responses/Chat 两份保存数据，保留各自模型目录但不复制路由配置。
-export function buildSplitCodexProviderData(
-  providerData: Omit<Provider, "id">,
-  split: CodexProviderSplitSuggestion,
-  kind: "responses" | "chat",
-): Omit<Provider, "id"> {
-  const modelSet = new Set(
-    (kind === "responses" ? split.responsesModels : split.chatModels).map(
-      (model) => model.trim(),
-    ),
-  );
-  const settingsConfig = structuredClone(providerData.settingsConfig ?? {});
-  const rawCatalog = settingsConfig.modelCatalog as
-    | { models?: Array<Record<string, unknown>>; spawnAgentModels?: string[] }
-    | undefined;
-  const filteredModels =
-    rawCatalog?.models?.filter((model) =>
-      modelSet.has(getCodexCatalogModelKey(model)),
-    ) ??
-    Array.from(modelSet).map((model) => ({
-      model,
-      upstreamModel: model,
-      displayName: model,
-    }));
-
-  delete settingsConfig.codexRouting;
-  settingsConfig.modelCatalog = {
-    ...(rawCatalog ?? {}),
-    models: filteredModels,
-    spawnAgentModels: rawCatalog?.spawnAgentModels?.filter((model) =>
-      modelSet.has(model),
-    ),
-  };
-
-  const firstModel = String(filteredModels[0]?.model ?? "").trim();
-  if (firstModel && typeof settingsConfig.config === "string") {
-    settingsConfig.config = setCodexModelName(
-      settingsConfig.config,
-      firstModel,
-    );
-  }
-
-  return {
-    ...providerData,
-    name: `${split.providerName}-${kind}`,
-    settingsConfig,
-    meta: {
-      ...(providerData.meta ?? {}),
-      apiFormat: kind === "responses" ? "openai_responses" : "openai_chat",
-    },
-  };
 }
 
 export function AddProviderDialog({
@@ -127,31 +68,30 @@ export function AddProviderDialog({
   const [selectedUniversalPreset, setSelectedUniversalPreset] =
     useState<UniversalProviderPreset | null>(null);
   const [isFormSubmitting, setIsFormSubmitting] = useState(false);
+  const { persistUniversalProviderSet, dialogs: universalProviderSetDialogs } =
+    useUniversalProviderSetSave();
+  const { persistCodexProviderSet, dialogs: codexProviderSetDialogs } =
+    useCodexProviderSetSave();
+  const codexDraftProviderIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     // Codex 的添加入口实际是在创建多路路由，默认引导到模型源选择页。
     setActiveTab(isCodexRouterEntry ? "universal" : "app-specific");
+    if (
+      open &&
+      isCodexRouterEntry &&
+      codexDraftProviderIdRef.current === null
+    ) {
+      codexDraftProviderIdRef.current = generateUUID();
+    } else if (!open) {
+      codexDraftProviderIdRef.current = null;
+    }
   }, [isCodexRouterEntry, open]);
 
   const handleUniversalProviderSave = useCallback(
     async (provider: UniversalProvider) => {
       try {
-        await universalProvidersApi.upsert(provider);
-      } catch (error) {
-        console.error(
-          "[AddProviderDialog] Failed to save universal provider",
-          error,
-        );
-        toast.error(
-          t("universalProvider.addFailed", {
-            defaultValue: "统一供应商添加失败",
-          }),
-        );
-        return;
-      }
-
-      try {
-        await universalProvidersApi.sync(provider.id);
+        await persistUniversalProviderSet(provider);
         toast.success(
           t("universalProvider.addedAndSynced", {
             defaultValue: "统一供应商已添加并同步",
@@ -159,21 +99,22 @@ export function AddProviderDialog({
         );
       } catch (error) {
         console.error(
-          "[AddProviderDialog] Provider saved but sync failed",
+          "[AddProviderDialog] Failed to atomically save and sync universal provider",
           error,
         );
-        toast.warning(
-          t("universalProvider.addedButSyncFailed", {
-            defaultValue: "统一供应商已添加，但同步失败",
+        toast.error(
+          t("universalProvider.saveAndSyncError", {
+            defaultValue: "保存并同步失败，原配置未被修改",
           }),
         );
+        return;
       }
 
       setUniversalFormOpen(false);
       setSelectedUniversalPreset(null);
       onOpenChange(false);
     },
-    [t, onOpenChange],
+    [persistUniversalProviderSet, t, onOpenChange],
   );
 
   const handleUniversalFormClose = useCallback(() => {
@@ -385,29 +326,47 @@ export function AddProviderDialog({
         providerData.suggestedDefaults = values.suggestedDefaults;
       }
 
-      const codexProviderSplit = values.codexProviderSplit;
-      if (appId === "codex" && codexProviderSplit) {
-        await onSubmit(
-          buildSplitCodexProviderData(
-            providerData,
-            codexProviderSplit,
-            "responses",
-          ),
-        );
-        await onSubmit(
-          buildSplitCodexProviderData(providerData, codexProviderSplit, "chat"),
-        );
-        toast.success(
-          t("codexConfig.splitProvidersCreated", {
-            defaultValue: "已生成 Responses / Chat 两个 provider",
-          }),
-        );
-      } else {
-        await onSubmit(providerData);
+      const codexRouting = providerData.settingsConfig.codexRouting;
+      const authSource = providerData.meta?.authBinding?.source;
+      const isEligibleCodexLogicalSource =
+        appId === "codex" &&
+        providerData.category !== "official" &&
+        providerData.meta?.apiFormat !== "anthropic" &&
+        authSource !== "managed_account" &&
+        authSource !== "managed_codex_oauth" &&
+        !(codexRouting && typeof codexRouting === "object");
+
+      if (isEligibleCodexLogicalSource) {
+        const provider: Provider = {
+          id: codexDraftProviderIdRef.current ?? generateUUID(),
+          name: providerData.name,
+          notes: providerData.notes,
+          websiteUrl: providerData.websiteUrl,
+          settingsConfig: providerData.settingsConfig,
+          icon: providerData.icon,
+          iconColor: providerData.iconColor,
+          category: providerData.category,
+          meta: providerData.meta,
+          createdAt: Date.now(),
+        };
+        codexDraftProviderIdRef.current = provider.id;
+        try {
+          await persistCodexProviderSet(
+            provider,
+            values.protocolProbeReceiptIds ?? [],
+          );
+        } catch (error) {
+          if (isCodexProviderSetCancelled(error)) return;
+          throw error;
+        }
+        onOpenChange(false);
+        return;
       }
+
+      await onSubmit(providerData);
       onOpenChange(false);
     },
-    [appId, onSubmit, onOpenChange, t],
+    [appId, onSubmit, onOpenChange, persistCodexProviderSet, t],
   );
 
   const footer =
@@ -557,6 +516,8 @@ export function AddProviderDialog({
           initialPreset={selectedUniversalPreset}
         />
       )}
+      {universalProviderSetDialogs}
+      {codexProviderSetDialogs}
     </FullScreenPanel>
   );
 }

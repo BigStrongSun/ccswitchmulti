@@ -7,11 +7,7 @@ import {
 } from "@testing-library/react";
 import { useState, type ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  buildSplitCodexProviderSuggestionForFetchedModels,
-  CodexFormFields,
-  splitFetchedModelsByLikelyCodexProtocol,
-} from "@/components/providers/forms/CodexFormFields";
+import { CodexFormFields } from "@/components/providers/forms/CodexFormFields";
 import { fetchModelsForConfig } from "@/lib/api/model-fetch";
 import { preflightCodexProviderProtocolCompatibility } from "@/lib/api/protocol-compatibility";
 import type {
@@ -23,7 +19,13 @@ import type {
 import type {
   CodexApiFormat,
   CodexCatalogModel,
+  CodexChatReasoning,
+  CodexHistoryReplay,
+  CodexProtocolMode,
+  CodexReasoningProjection,
   CodexRoutingConfig,
+  CodexToolSchemaDialect,
+  PromptCacheRoutingMode,
 } from "@/types";
 import type {
   CodexModelReasoningResolution,
@@ -185,6 +187,9 @@ function createDeepProbeOutcome(
       settingsConfig: {},
     },
     records,
+    receiptIds: records.map(
+      (record) => `receipt-${record.target.public_model}`,
+    ),
     protocolApplied: records.every(
       (record) =>
         record.result.selected_transport ===
@@ -225,6 +230,14 @@ function deferred<T>() {
     resolve = nextResolve;
   });
   return { promise, resolve };
+}
+
+async function waitForReasoningResolution() {
+  await act(async () => {
+    await Promise.all(
+      reasoningApiMocks.resolve.mock.results.map((result) => result.value),
+    );
+  });
 }
 
 function renderRoutingHarness(
@@ -302,15 +315,26 @@ function renderCatalogHarness(
     allowModelMenuProjectionToggle?: boolean;
     openAdvancedOptions?: boolean;
     presetCatalogModels?: CodexCatalogModel[];
-    onProviderSplitSuggestionChange?: ReturnType<typeof vi.fn>;
+    customUserAgent?: string;
+    headersOverride?: string;
+    bodyOverride?: string;
+    isFullUrl?: boolean;
+    codexChatReasoning?: CodexChatReasoning;
+    promptCacheRouting?: PromptCacheRoutingMode;
+    protocolMode?: CodexProtocolMode;
+    reasoningProjection?: CodexReasoningProjection;
+    toolSchemaDialect?: CodexToolSchemaDialect;
+    historyReplay?: CodexHistoryReplay;
   } = {},
 ) {
   const onCatalogChange = vi.fn();
   const onApiFormatChange = vi.fn();
+  const onProtocolProbeReceiptIdsChange = vi.fn();
   let latestCatalog = initialCatalog;
 
   function Harness() {
     const [catalog, setCatalog] = useState<CodexCatalogModel[]>(initialCatalog);
+    const [apiFormat, setApiFormat] = useState<CodexApiFormat>("openai_chat");
 
     // 测试壳模拟 ProviderForm 对 modelCatalog 的受控回写。
     const handleCatalogChange = (next: CodexCatalogModel[]) => {
@@ -334,7 +358,7 @@ function renderCatalogHarness(
         shouldShowSpeedTest={options.shouldShowSpeedTest ?? false}
         codexBaseUrl={options.baseUrl ?? "https://api.thirdparty.example/v1"}
         onBaseUrlChange={vi.fn()}
-        isFullUrl={false}
+        isFullUrl={options.isFullUrl ?? false}
         onFullUrlChange={vi.fn()}
         isEndpointModalOpen={false}
         onEndpointModalToggle={vi.fn()}
@@ -345,24 +369,31 @@ function renderCatalogHarness(
         allowModelMenuProjectionToggle={
           options.allowModelMenuProjectionToggle ?? true
         }
-        apiFormat="openai_chat"
-        onApiFormatChange={onApiFormatChange}
+        apiFormat={apiFormat}
+        onApiFormatChange={(nextApiFormat) => {
+          onApiFormatChange(nextApiFormat);
+          setApiFormat(nextApiFormat);
+        }}
         catalogModels={catalog}
         presetCatalogModels={options.presetCatalogModels}
         onCatalogModelsChange={handleCatalogChange}
         spawnAgentModels={[]}
         onSpawnAgentModelsChange={vi.fn()}
         codexRouting={{ enabled: false, defaultRouteId: "", routes: [] }}
-        onProviderSplitSuggestionChange={
-          options.onProviderSplitSuggestionChange
-        }
         speedTestEndpoints={[]}
-        customUserAgent=""
+        customUserAgent={options.customUserAgent ?? ""}
         onCustomUserAgentChange={vi.fn()}
-        localProxyHeadersOverride=""
+        localProxyHeadersOverride={options.headersOverride ?? ""}
         onLocalProxyHeadersOverrideChange={vi.fn()}
-        localProxyBodyOverride=""
+        localProxyBodyOverride={options.bodyOverride ?? ""}
         onLocalProxyBodyOverrideChange={vi.fn()}
+        codexChatReasoning={options.codexChatReasoning}
+        promptCacheRouting={options.promptCacheRouting}
+        protocolMode={options.protocolMode}
+        reasoningProjection={options.reasoningProjection}
+        toolSchemaDialect={options.toolSchemaDialect}
+        historyReplay={options.historyReplay}
+        onProtocolProbeReceiptIdsChange={onProtocolProbeReceiptIdsChange}
       />
     );
   }
@@ -376,6 +407,7 @@ function renderCatalogHarness(
     ...renderResult,
     onCatalogChange,
     onApiFormatChange,
+    onProtocolProbeReceiptIdsChange,
     latestCatalog: () => latestCatalog,
   };
 }
@@ -486,12 +518,12 @@ function renderAutoSplitHarness() {
   const onRoutingChange = vi.fn();
   const onTakeoverEnabledChange = vi.fn();
   const onApiFormatChange = vi.fn();
-  const onProviderSplitSuggestionChange = vi.fn();
   let latestRouting: CodexRoutingConfig = {
     enabled: false,
     defaultRouteId: "",
     routes: [],
   };
+  let latestCatalog: CodexCatalogModel[] = [];
 
   function Harness() {
     const [catalog, setCatalog] = useState<CodexCatalogModel[]>([]);
@@ -499,6 +531,7 @@ function renderAutoSplitHarness() {
 
     /// 测试壳同时接住 catalog 和 routing 回写，模拟第一次配置 provider 时的受控状态。
     const handleCatalogChange = (next: CodexCatalogModel[]) => {
+      latestCatalog = next;
       onCatalogChange(next);
       setCatalog(next);
     };
@@ -536,7 +569,6 @@ function renderAutoSplitHarness() {
         onSpawnAgentModelsChange={vi.fn()}
         codexRouting={routing}
         onCodexRoutingChange={handleRoutingChange}
-        onProviderSplitSuggestionChange={onProviderSplitSuggestionChange}
         speedTestEndpoints={[]}
         customUserAgent=""
         onCustomUserAgentChange={vi.fn()}
@@ -554,19 +586,20 @@ function renderAutoSplitHarness() {
   return {
     ...renderResult,
     latestRouting: () => latestRouting,
+    latestCatalog: () => latestCatalog,
     onCatalogChange,
     onRoutingChange,
     onTakeoverEnabledChange,
     onApiFormatChange,
-    onProviderSplitSuggestionChange,
   };
 }
 
 describe("CodexFormFields local model routing", () => {
-  it("keeps the model catalog in normal settings before model reasoning", () => {
+  it("keeps the model catalog in normal settings before model reasoning", async () => {
     renderCatalogHarness([{ model: "qwen3.8" }], {
       openAdvancedOptions: false,
     });
+    await waitForReasoningResolution();
 
     expect(screen.getByText("模型目录明细")).toBeInTheDocument();
     expect(
@@ -862,99 +895,32 @@ describe("CodexFormFields local model routing", () => {
       screen.getByLabelText("deepseek-v4-pro推理能力 JSON"),
     ).toHaveAttribute("readonly");
   });
-  it("classifies fetched relay models into Responses and Chat groups", () => {
-    expect(
-      splitFetchedModelsByLikelyCodexProtocol([
-        { id: "openai/gpt-5.5", ownedBy: null },
-        { id: "gpt-5.4-mini", ownedBy: null },
-        { id: "qwen3.6", ownedBy: null },
-        { id: "deepseek-v4-flash", ownedBy: null },
-      ]),
-    ).toEqual({
-      responses: ["openai/gpt-5.5", "gpt-5.4-mini"],
-      chat: ["qwen3.6", "deepseek-v4-flash"],
-    });
-  });
-
-  it("builds split provider suggestion with -responses and -chat model groups", () => {
-    const split = buildSplitCodexProviderSuggestionForFetchedModels({
-      providerName: "Relay",
-      models: [
-        { id: "gpt-5.5", ownedBy: null },
-        { id: "qwen3.6", ownedBy: null },
-      ],
-    });
-
-    expect(split).toMatchObject({
-      providerName: "Relay",
-      responsesModels: ["gpt-5.5"],
-      chatModels: ["qwen3.6"],
-    });
-  });
-
-  it("prompts before preparing split providers after fetching mixed relay models", async () => {
+  it("syncs relay models without inferring protocols or suggesting provider splits", async () => {
     vi.mocked(fetchModelsForConfig).mockResolvedValueOnce([
       { id: "gpt-5.5", ownedBy: null, contextWindow: 272000 },
       { id: "qwen3.6", ownedBy: null, contextWindow: 128000 },
     ]);
     const {
+      latestCatalog,
       latestRouting,
       onRoutingChange,
       onTakeoverEnabledChange,
       onApiFormatChange,
-      onProviderSplitSuggestionChange,
     } = renderAutoSplitHarness();
 
     fireEvent.click(screen.getByRole("button", { name: "同步模型" }));
 
-    expect(await screen.findByText("检测到混合协议模型")).toBeInTheDocument();
-    expect(screen.getByText("Relay-responses")).toBeInTheDocument();
-    expect(screen.getByText("Relay-chat")).toBeInTheDocument();
-    expect(onRoutingChange).not.toHaveBeenCalled();
-    expect(latestRouting().routes).toHaveLength(0);
-
-    fireEvent.click(
-      screen.getByRole("button", { name: "确认生成两个 provider" }),
-    );
-
     await waitFor(() => {
-      expect(onProviderSplitSuggestionChange).toHaveBeenCalledWith(
-        expect.objectContaining({
-          providerName: "Relay",
-          responsesModels: ["gpt-5.5"],
-          chatModels: ["qwen3.6"],
-        }),
-      );
+      expect(latestCatalog()).toHaveLength(2);
     });
-    expect(onRoutingChange).not.toHaveBeenCalled();
-    expect(latestRouting().routes).toHaveLength(0);
-    expect(onTakeoverEnabledChange).toHaveBeenCalledWith(true);
-    expect(onApiFormatChange).not.toHaveBeenCalled();
-  });
-
-  it("keeps routing and provider split untouched when mixed relay split prompt is cancelled", async () => {
-    vi.mocked(fetchModelsForConfig).mockResolvedValueOnce([
-      { id: "gpt-5.5", ownedBy: null, contextWindow: 272000 },
-      { id: "qwen3.6", ownedBy: null, contextWindow: 128000 },
+    expect(screen.queryByText("检测到混合协议模型")).not.toBeInTheDocument();
+    expect(latestCatalog()).toEqual([
+      expect.objectContaining({ model: "gpt-5.5" }),
+      expect.objectContaining({ model: "qwen3.6" }),
     ]);
-    const {
-      latestRouting,
-      onRoutingChange,
-      onTakeoverEnabledChange,
-      onApiFormatChange,
-      onProviderSplitSuggestionChange,
-    } = renderAutoSplitHarness();
-
-    fireEvent.click(screen.getByRole("button", { name: "同步模型" }));
-
-    expect(await screen.findByText("检测到混合协议模型")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "暂不拆分" }));
-
-    await waitFor(() => {
-      expect(screen.queryByText("检测到混合协议模型")).not.toBeInTheDocument();
-    });
+    expect(latestCatalog()[0]).not.toHaveProperty("apiFormat");
+    expect(latestCatalog()[1]).not.toHaveProperty("apiFormat");
     expect(onRoutingChange).not.toHaveBeenCalled();
-    expect(onProviderSplitSuggestionChange).toHaveBeenCalledWith(null);
     expect(latestRouting().routes).toHaveLength(0);
     expect(onTakeoverEnabledChange).not.toHaveBeenCalled();
     expect(onApiFormatChange).not.toHaveBeenCalled();
@@ -1015,6 +981,77 @@ describe("CodexFormFields local model routing", () => {
       }),
       expect.any(Function),
     );
+  });
+
+  it("sends the exact provider request policy to protocol preflight", async () => {
+    const records = [createDeepProbeRecord("qwen3.8", "open_ai_chat")];
+    vi.mocked(
+      preflightCodexProviderProtocolCompatibility,
+    ).mockImplementationOnce(async (_provider, onProgress) => {
+      emitFinishedProgress(records, onProgress);
+      return createDeepProbeOutcome(records);
+    });
+    renderCatalogHarness(
+      [{ model: "qwen3.8", upstreamModel: "Qwen/Qwen3.8" }],
+      {
+        providerName: "Qwen relay",
+        baseUrl: "https://relay.example/v1/chat/completions",
+        shouldShowSpeedTest: true,
+        isFullUrl: true,
+        customUserAgent: "ccswitch-probe/1.0",
+        headersOverride: '{"X-Route":"qwen"}',
+        bodyOverride: '{"temperature":0.2}',
+        codexChatReasoning: {
+          supportsThinking: true,
+          supportsEffort: true,
+          thinkingParam: "enable_thinking",
+          effortParam: "reasoning_effort",
+          effortValueMode: "passthrough",
+          outputFormat: "reasoning_content",
+        },
+        promptCacheRouting: "enabled",
+        protocolMode: "manual",
+        reasoningProjection: "raw_reasoning_text",
+        toolSchemaDialect: "moonshot_mfjs",
+        historyReplay: "chat_reasoning_content",
+      },
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "验证连接" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
+
+    await waitFor(() => {
+      expect(preflightCodexProviderProtocolCompatibility).toHaveBeenCalled();
+    });
+    const provider = vi.mocked(preflightCodexProviderProtocolCompatibility).mock
+      .calls[0][0];
+    expect(provider.meta).toEqual(
+      expect.objectContaining({
+        apiFormat: "openai_chat",
+        isFullUrl: true,
+        customUserAgent: "ccswitch-probe/1.0",
+        localProxyRequestOverrides: {
+          headers: { "x-route": "qwen" },
+          body: { temperature: 0.2 },
+        },
+        codexChatReasoning: expect.objectContaining({
+          supportsThinking: true,
+          supportsEffort: true,
+          thinkingParam: "enable_thinking",
+          effortParam: "reasoning_effort",
+          outputFormat: "reasoning_content",
+        }),
+        promptCacheRouting: "enabled",
+        codexProtocolMode: "manual",
+        codexReasoningProjection: "raw_reasoning_text",
+        codexToolSchemaDialect: "moonshot_mfjs",
+        codexHistoryReplay: "chat_reasoning_content",
+      }),
+    );
+    expect(provider.settingsConfig.config).toContain(
+      'base_url = "https://relay.example/v1/chat/completions"',
+    );
+    expect(provider.settingsConfig.config).toContain('wire_api = "chat"');
   });
 
   it("omits disabled catalog models from the deep-probe request", async () => {
@@ -1169,7 +1206,7 @@ describe("CodexFormFields local model routing", () => {
     });
   });
 
-  it("shows per-model protocol tags and suggests split providers for mixed probe results", async () => {
+  it("keeps per-model selections out of the catalog and exposes receipts to the save coordinator", async () => {
     const records = [
       createDeepProbeRecord("gpt-5.5", "open_ai_responses"),
       createDeepProbeRecord("qwen3.6", "open_ai_chat"),
@@ -1181,8 +1218,11 @@ describe("CodexFormFields local model routing", () => {
       emitFinishedProgress(records, onProgress);
       return createDeepProbeOutcome(records);
     });
-    const onProviderSplitSuggestionChange = vi.fn();
-    const { onApiFormatChange } = renderCatalogHarness(
+    const {
+      latestCatalog,
+      onApiFormatChange,
+      onProtocolProbeReceiptIdsChange,
+    } = renderCatalogHarness(
       [
         { model: "gpt-5.5", upstreamModel: "gpt-5.5" },
         { model: "qwen3.6", upstreamModel: "qwen3.6" },
@@ -1191,14 +1231,29 @@ describe("CodexFormFields local model routing", () => {
       {
         providerName: "Relay",
         shouldShowSpeedTest: true,
-        onProviderSplitSuggestionChange,
       },
     );
 
     fireEvent.click(screen.getByRole("button", { name: "验证连接" }));
     fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
 
-    expect(await screen.findByText("检测到混合协议模型")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(onProtocolProbeReceiptIdsChange).toHaveBeenLastCalledWith([
+        "receipt-gpt-5.5",
+        "receipt-qwen3.6",
+        "receipt-glm-4.5",
+      ]),
+    );
+    expect(latestCatalog()).toEqual([
+      expect.objectContaining({ model: "gpt-5.5" }),
+      expect.objectContaining({ model: "qwen3.6" }),
+      expect.objectContaining({ model: "glm-4.5" }),
+    ]);
+    expect(latestCatalog()[0]).not.toHaveProperty("apiFormat");
+    expect(latestCatalog()[1]).not.toHaveProperty("apiFormat");
+    expect(latestCatalog()[2]).not.toHaveProperty("apiFormat");
+    expect(screen.queryByText("检测到混合协议模型")).not.toBeInTheDocument();
+    expect(screen.getByText(/存在 Partial\/Failed 模型.*不能自动保存/)).toBeInTheDocument();
     expect(onApiFormatChange).not.toHaveBeenCalled();
     expect(
       screen.getByRole("article", { name: "gpt-5.5 探测进度" }),
@@ -1209,25 +1264,89 @@ describe("CodexFormFields local model routing", () => {
     expect(
       screen.getByRole("article", { name: "glm-4.5 探测进度" }),
     ).toHaveTextContent("Failed");
-
-    fireEvent.click(
-      screen.getByRole("button", { name: "确认生成两个 provider" }),
-    );
-    expect(onProviderSplitSuggestionChange).toHaveBeenCalledWith({
-      providerName: "Relay",
-      responsesModels: ["gpt-5.5"],
-      chatModels: ["qwen3.6"],
-    });
   });
 
-  it("opens the protocol probe confirmation above the full screen provider panel", () => {
+  it("marks a fully verified mixed-protocol provider as ready", async () => {
+    const records = [
+      createDeepProbeRecord("gpt-5.5", "open_ai_responses"),
+      createDeepProbeRecord("qwen3.6", "open_ai_chat"),
+    ];
+    vi.mocked(
+      preflightCodexProviderProtocolCompatibility,
+    ).mockImplementationOnce(async (_provider, onProgress) => {
+      emitFinishedProgress(records, onProgress);
+      return createDeepProbeOutcome(records);
+    });
+    const { onApiFormatChange, onProtocolProbeReceiptIdsChange } =
+      renderCatalogHarness(
+      [
+        { model: "gpt-5.5", upstreamModel: "gpt-5.5" },
+        { model: "qwen3.6", upstreamModel: "qwen3.6" },
+      ],
+      { providerName: "Relay", shouldShowSpeedTest: true },
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "验证连接" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
+
+    expect(await screen.findByText("可加入 MultiRouter")).toBeInTheDocument();
+    expect(screen.getByText(/保存时将自动拆分/)).toBeInTheDocument();
+    expect(onApiFormatChange).not.toHaveBeenCalled();
+    expect(onProtocolProbeReceiptIdsChange).toHaveBeenLastCalledWith([
+      "receipt-gpt-5.5",
+      "receipt-qwen3.6",
+    ]);
+  });
+
+  it("keeps a model protocol unchanged when probing is only partial", async () => {
+    const records = [
+      createDeepProbeRecord("qwen3.8", "open_ai_chat", "partial"),
+    ];
+    vi.mocked(
+      preflightCodexProviderProtocolCompatibility,
+    ).mockImplementationOnce(async (_provider, onProgress) => {
+      emitFinishedProgress(records, onProgress);
+      return createDeepProbeOutcome(records);
+    });
+    const { latestCatalog, onApiFormatChange } = renderCatalogHarness(
+      [
+        {
+          model: "qwen3.8",
+          upstreamModel: "Qwen/Qwen3.8",
+          apiFormat: "openai_responses",
+        },
+      ],
+      { shouldShowSpeedTest: true },
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "验证连接" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("article", { name: "qwen3.8 探测进度" }),
+      ).toHaveTextContent("Partial");
+    });
+    expect(latestCatalog()).toEqual([
+      expect.objectContaining({
+        model: "qwen3.8",
+        apiFormat: "openai_responses",
+      }),
+    ]);
+    expect(onApiFormatChange).not.toHaveBeenCalled();
+  });
+
+  it("opens the protocol probe confirmation above the full screen provider panel", async () => {
     renderCatalogHarness([{ model: "gpt-5.5", upstreamModel: "gpt-5.5" }], {
       shouldShowSpeedTest: true,
       openAdvancedOptions: false,
     });
+    await waitForReasoningResolution();
 
-    fireEvent.click(screen.getByRole("button", { name: "高级选项" }));
-    fireEvent.click(screen.getByRole("button", { name: "验证连接" }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "高级选项" }));
+      fireEvent.click(screen.getByRole("button", { name: "验证连接" }));
+    });
 
     expect(
       screen.getByText("已打开验证确认框；如果没有看到弹窗，请按 Esc 后重试。"),
@@ -1344,11 +1463,11 @@ describe("CodexFormFields local model routing", () => {
     renderCatalogHarness([], { shouldShowSpeedTest: true });
 
     fireEvent.click(screen.getByRole("button", { name: "验证连接" }));
-    fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
 
     expect(await screen.findByRole("status")).toHaveTextContent(
-      "请先在“模型与兼容性”同步模型，或在高级设置中手动添加至少一个模型后再验证。",
+      "请先在“模型与兼容性”同步模型，或在高级设置中启用/添加至少一个模型后再验证。",
     );
+    expect(screen.queryByText("确认测试 Chat / Responses")).not.toBeInTheDocument();
     const fetchButton = screen.getByRole("button", {
       name: "同步模型",
     });
@@ -1356,6 +1475,21 @@ describe("CodexFormFields local model routing", () => {
     await waitFor(() =>
       expect(HTMLElement.prototype.scrollIntoView).toHaveBeenCalled(),
     );
+    expect(preflightCodexProviderProtocolCompatibility).not.toHaveBeenCalled();
+  });
+
+  it("points users to enable a model when every catalog model is disabled", async () => {
+    renderCatalogHarness(
+      [{ model: "disabled-model", upstreamModel: "disabled-model", enabled: false }],
+      { shouldShowSpeedTest: true },
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "验证连接" }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "启用/添加至少一个模型后再验证",
+    );
+    expect(screen.queryByText("确认测试 Chat / Responses")).not.toBeInTheDocument();
     expect(preflightCodexProviderProtocolCompatibility).not.toHaveBeenCalled();
   });
 
@@ -1435,7 +1569,7 @@ describe("CodexFormFields local model routing", () => {
     });
   });
 
-  it("keeps AgentPlan catalog when both inference key and AK/SK are missing", () => {
+  it("keeps AgentPlan catalog when both inference key and AK/SK are missing", async () => {
     const { latestCatalog } = renderCatalogHarness(
       [{ model: "ark-code-latest", upstreamModel: "ark-code-latest" }],
       {
@@ -1445,6 +1579,7 @@ describe("CodexFormFields local model routing", () => {
         apiKey: "",
       },
     );
+    await waitForReasoningResolution();
 
     fireEvent.click(screen.getByRole("button", { name: "同步模型" }));
 

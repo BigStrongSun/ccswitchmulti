@@ -90,6 +90,27 @@ describe("CodexProviderReadinessSection", () => {
     expect(screen.getByText("建议先验证连接")).toBeInTheDocument();
   });
 
+  it("distinguishes an all-disabled catalog from usable probe models", () => {
+    const onValidateConnection = vi.fn();
+    render(
+      <CodexProviderReadinessSection
+        models={[{ model: "disabled-model", enabled: false }]}
+        defaultModel="disabled-model"
+        apiFormat="openai_chat"
+        isMaintainedPreset={false}
+        isSyncingModels={false}
+        isValidatingConnection={false}
+        onSyncModels={vi.fn()}
+        onValidateConnection={onValidateConnection}
+      />,
+    );
+
+    expect(screen.getByText("0 个已启用，1 个已停用")).toBeInTheDocument();
+    expect(screen.getByText("需要启用模型")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "验证连接" }));
+    expect(onValidateConnection).toHaveBeenCalledOnce();
+  });
+
   it("uses accessible live regions for validation results", () => {
     const { rerender } = render(
       <CodexProviderReadinessSection

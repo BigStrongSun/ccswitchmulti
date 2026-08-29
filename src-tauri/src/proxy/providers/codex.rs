@@ -22,8 +22,10 @@ use crate::proxy::providers::codex_oauth_auth::{CodexAccountPoolPolicy, NATIVE_C
 use crate::{
     database::Database,
     protocol_compatibility::{
-        compile_provider_probe_candidate_for_model, ProbeReadiness, ProbeTargetKey,
-        ProtocolCompatibilityRecord, ReasoningProjection, TransportKind, PROBE_PROFILE_VERSION,
+        compile_provider_probe_candidate_for_model, compile_provider_probe_candidates,
+        HistoryReplay, ProbeCandidate, ProbeReadiness, ProbeStageStatus, ProbeTargetKey,
+        ProtocolCompatibilityRecord, ReasoningProjection, ToolSchemaDialect, TransportKind,
+        PROBE_PROFILE_VERSION,
     },
 };
 use regex::Regex;
@@ -358,12 +360,15 @@ pub fn codex_route_supports_responses_compaction(provider: &Provider) -> bool {
     false
 }
 
-/// Whether an official parent in this MultiRouter must emit plaintext V2 agent tasks.
+/// Whether this MultiRouter must use the managed V2 agent-delivery contract.
 ///
 /// A future child may use any enabled route. If one route is third-party or its
-/// credential ownership is ambiguous, OpenAI-only encrypted task arguments are
-/// not portable. Resolved providers retain the request-local marker so retry-layer
-/// materialization cannot erase this decision.
+/// credential ownership is ambiguous, CCSwitchMulti must remove `message.encrypted`
+/// from the non-reserved `agents.*` tool schema before the parent model call. Codex
+/// may still place that plaintext argument in an `encrypted_content` container;
+/// the third-party child boundary projects it back to a standard user message.
+/// Resolved providers retain the request-local marker so retry materialization
+/// cannot erase the contract.
 pub fn codex_multirouter_needs_plaintext_v2_collaboration(provider: &Provider) -> bool {
     if provider
         .settings_config
@@ -1265,7 +1270,6 @@ pub(crate) fn resolve_codex_chat_reasoning_projection(
             .and_then(|meta| meta.codex_reasoning_projection.as_deref())
         {
             Some("raw_reasoning_text") => ReasoningProjection::RawReasoningText,
-            Some("reasoning_summary") => ReasoningProjection::ReasoningSummary,
             _ => ReasoningProjection::None,
         };
     }
@@ -1317,6 +1321,147 @@ where
         .filter(accepts)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CodexRequestCompatibility {
+    pub tool_schema_dialect: ToolSchemaDialect,
+    pub history_replay: HistoryReplay,
+}
+
+pub(crate) fn resolve_codex_request_compatibility(
+    provider: &Provider,
+    public_model: &str,
+    upstream_model: &str,
+    transport: TransportKind,
+    db: &Database,
+    now: i64,
+) -> CodexRequestCompatibility {
+    let mut compatibility = endpoint_request_compatibility(provider, transport);
+
+    if !provider.uses_manual_codex_protocol()
+        && !public_model.trim().is_empty()
+        && !upstream_model.trim().is_empty()
+    {
+        if let Ok(candidate) =
+            compile_provider_probe_candidate_for_request(provider, public_model, upstream_model)
+        {
+            if let Ok(target) = candidate.target_key(transport) {
+                if let Some(record) =
+                    resolve_route_or_equivalent_provider_profile(provider, &target, db, |record| {
+                        record.probe_version == PROBE_PROFILE_VERSION
+                            && record.expires_at >= now
+                            && record.result.readiness == ProbeReadiness::Verified
+                            && record.result.selected_transport == Some(transport)
+                    })
+                {
+                    if let Some(branch) = record
+                        .result
+                        .branches
+                        .iter()
+                        .find(|branch| branch.assessment.transport == transport)
+                    {
+                        if branch.assessment.forced_tool == ProbeStageStatus::Passed {
+                            compatibility.tool_schema_dialect = branch.tool_schema_dialect;
+                        }
+                        if branch.assessment.continuation == ProbeStageStatus::Passed {
+                            compatibility.history_replay = branch.history_replay;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if provider.uses_manual_codex_protocol() {
+        if let Some(dialect) = provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.codex_tool_schema_dialect.as_deref())
+            .and_then(parse_tool_schema_dialect)
+        {
+            compatibility.tool_schema_dialect = dialect;
+        }
+        if let Some(history_replay) = provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.codex_history_replay.as_deref())
+            .and_then(parse_history_replay)
+        {
+            compatibility.history_replay = history_replay;
+        }
+    }
+
+    compatibility
+}
+
+fn compile_provider_probe_candidate_for_request(
+    provider: &Provider,
+    public_model: &str,
+    upstream_model: &str,
+) -> Result<ProbeCandidate, String> {
+    let mut request_model = serde_json::json!({"model": public_model});
+    let resolved_upstream_model = apply_codex_upstream_model(provider, &mut request_model)
+        .unwrap_or_else(|| upstream_model.to_string());
+    if let Ok(candidates) = compile_provider_probe_candidates(provider) {
+        if let Some(candidate) = candidates.into_iter().find(|candidate| {
+            candidate.public_model == public_model
+                && candidate.upstream_model == resolved_upstream_model
+        }) {
+            return Ok(candidate);
+        }
+    }
+    compile_provider_probe_candidate_for_model(
+        provider,
+        public_model.to_string(),
+        resolved_upstream_model,
+    )
+}
+
+fn endpoint_request_compatibility(
+    provider: &Provider,
+    transport: TransportKind,
+) -> CodexRequestCompatibility {
+    let host = provider_codex_base_url(provider)
+        .and_then(|base_url| url::Url::parse(&base_url).ok())
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase));
+    let tool_schema_dialect = if matches!(host.as_deref(), Some("api.kimi.com" | "api.moonshot.cn"))
+    {
+        ToolSchemaDialect::MoonshotMfjs
+    } else {
+        ToolSchemaDialect::OpenAi
+    };
+    let history_replay = match transport {
+        TransportKind::OpenAiChat => HistoryReplay::ChatReasoningContent,
+        TransportKind::OpenAiResponses if host.as_deref() == Some("api.deepseek.com") => {
+            HistoryReplay::ResponsesReasoningTextContent
+        }
+        TransportKind::OpenAiResponses => HistoryReplay::NativeOnly,
+    };
+    CodexRequestCompatibility {
+        tool_schema_dialect,
+        history_replay,
+    }
+}
+
+fn parse_tool_schema_dialect(value: &str) -> Option<ToolSchemaDialect> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "openai" | "open_ai" => Some(ToolSchemaDialect::OpenAi),
+        "moonshot_mfjs" | "mfjs" => Some(ToolSchemaDialect::MoonshotMfjs),
+        _ => None,
+    }
+}
+
+fn parse_history_replay(value: &str) -> Option<HistoryReplay> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "chat_reasoning_content" => Some(HistoryReplay::ChatReasoningContent),
+        "responses_reasoning_text_content" | "reasoning_text_content" => {
+            Some(HistoryReplay::ResponsesReasoningTextContent)
+        }
+        "omit" => Some(HistoryReplay::Omit),
+        "native_only" | "native" => Some(HistoryReplay::NativeOnly),
+        _ => None,
+    }
+}
+
 pub(crate) fn resolve_codex_chat_protocol_target(
     provider: &Provider,
     public_model: &str,
@@ -1325,14 +1470,10 @@ pub(crate) fn resolve_codex_chat_protocol_target(
     if public_model.trim().is_empty() || upstream_model.trim().is_empty() {
         return None;
     }
-    compile_provider_probe_candidate_for_model(
-        provider,
-        public_model.to_string(),
-        upstream_model.to_string(),
-    )
-    .ok()?
-    .target_key(TransportKind::OpenAiChat)
-    .ok()
+    compile_provider_probe_candidate_for_request(provider, public_model, upstream_model)
+        .ok()?
+        .target_key(TransportKind::OpenAiChat)
+        .ok()
 }
 
 pub(crate) fn apply_detected_codex_transport_to_effective_provider(
@@ -1343,16 +1484,15 @@ pub(crate) fn apply_detected_codex_transport_to_effective_provider(
     now: i64,
 ) -> bool {
     if provider.uses_manual_codex_protocol()
+        || !codex_provider_has_legacy_mixed_model_transports(provider)
         || public_model.trim().is_empty()
         || upstream_model.trim().is_empty()
     {
         return false;
     }
-    let Ok(candidate) = compile_provider_probe_candidate_for_model(
-        provider,
-        public_model.to_string(),
-        upstream_model.to_string(),
-    ) else {
+    let Ok(candidate) =
+        compile_provider_probe_candidate_for_request(provider, public_model, upstream_model)
+    else {
         return false;
     };
     let mut selected: Option<(i64, TransportKind)> = None;
@@ -1364,6 +1504,7 @@ pub(crate) fn apply_detected_codex_transport_to_effective_provider(
             resolve_route_or_equivalent_provider_profile(provider, &target, db, |record| {
                 record.probe_version == PROBE_PROFILE_VERSION
                     && record.expires_at >= now
+                    && record.result.readiness == ProbeReadiness::Verified
                     && record.result.selected_transport == Some(transport)
             })
         else {
@@ -1390,6 +1531,60 @@ pub(crate) fn apply_detected_codex_transport_to_effective_provider(
         .to_string(),
     );
     true
+}
+
+/// Request-time transport selection is a migration bridge for historical Providers that stored
+/// contradictory per-model protocols in one record. Normalized single-protocol Providers and
+/// generated Provider Set leaves always use their persisted top-level protocol.
+pub(crate) fn codex_provider_has_legacy_mixed_model_transports(provider: &Provider) -> bool {
+    if provider.uses_manual_codex_protocol()
+        || provider.settings_config.get("codexProtocolSet").is_some()
+        || provider
+            .settings_config
+            .pointer("/codexRouting/schemaVersion")
+            .and_then(JsonValue::as_u64)
+            == Some(2)
+    {
+        return false;
+    }
+    let Some(models) = provider
+        .settings_config
+        .get("modelCatalog")
+        .or_else(|| provider.settings_config.get("model_catalog"))
+        .and_then(|catalog| catalog.get("models"))
+        .and_then(JsonValue::as_array)
+    else {
+        return false;
+    };
+    let mut has_responses = false;
+    let mut has_chat = false;
+    for model in models.iter().filter(|model| {
+        model
+            .get("enabled")
+            .and_then(JsonValue::as_bool)
+            .unwrap_or(true)
+    }) {
+        let Some(api_format) = model
+            .get("apiFormat")
+            .or_else(|| model.get("api_format"))
+            .and_then(JsonValue::as_str)
+        else {
+            continue;
+        };
+        let normalized = api_format.trim().to_ascii_lowercase();
+        if is_chat_wire_api(&normalized) {
+            has_chat = true;
+        } else if matches!(
+            normalized.as_str(),
+            "responses" | "response" | "openai_responses" | "openai-responses"
+        ) {
+            has_responses = true;
+        }
+        if has_responses && has_chat {
+            return true;
+        }
+    }
+    false
 }
 
 fn codex_base_url_points_to_local_proxy(url: &str) -> bool {
@@ -2278,7 +2473,29 @@ pub fn should_convert_codex_responses_to_anthropic(provider: &Provider, endpoint
 /// transform paths already unwrap namespaces on their own. Currently that is the
 /// managed xAI (Grok) OAuth provider — the first strict gateway cc-switch hit.
 pub fn provider_needs_responses_namespace_flatten(provider: &Provider) -> bool {
-    provider.is_xai_oauth()
+    if provider.is_xai_oauth() {
+        return true;
+    }
+    if codex_provider_uses_chat_completions(provider) || codex_provider_uses_anthropic(provider) {
+        return false;
+    }
+    let base_url = provider
+        .settings_config
+        .get("base_url")
+        .or_else(|| provider.settings_config.get("baseURL"))
+        .and_then(JsonValue::as_str)
+        .map(ToString::to_string)
+        .or_else(|| {
+            provider
+                .settings_config
+                .get("config")
+                .and_then(JsonValue::as_str)
+                .and_then(extract_codex_base_url_from_toml)
+        });
+    base_url
+        .and_then(|base_url| url::Url::parse(base_url.trim()).ok())
+        .and_then(|url| url.host_str().map(ToString::to_string))
+        .is_some_and(|host| host.eq_ignore_ascii_case("api.x.ai"))
 }
 
 /// The single built-in official Codex provider.  Unlike managed Codex OAuth
@@ -2567,6 +2784,17 @@ pub fn apply_codex_native_responses_reasoning_effort(
 
     body["reasoning"]["effort"] = JsonValue::String(mapped.to_string());
     Ok(())
+}
+
+/// Prepare the model-dependent portion of every native third-party Responses
+/// request through one boundary. Managed providers and compiled request-policy
+/// providers must not diverge on reasoning effort or unknown-model fallback.
+pub(crate) fn prepare_codex_native_responses_model(
+    provider: &Provider,
+    body: &mut JsonValue,
+) -> Result<Option<String>, ProxyError> {
+    apply_codex_native_responses_reasoning_effort(provider, body)?;
+    Ok(apply_codex_upstream_model(provider, body))
 }
 
 /// 把 Qwen/vLLM 运行时安全默认（输出预算下限）应用到能力派生配置。
@@ -3450,27 +3678,21 @@ impl ProviderAdapter for CodexAdapter {
         // - 已含 /v1: https://api.openai.com/v1 (直接拼接)
         // - 自定义前缀: https://xxx/openai (不添加 /v1，直接拼接)
 
-        // 检查 base_url 是否已经包含 /v1
-        let already_has_v1 = base_trimmed.ends_with("/v1");
         let origin_only = is_origin_only_url(base_trimmed);
-
-        let mut url = if already_has_v1 {
-            // 已经有 /v1，直接拼接
-            format!("{base_trimmed}/{endpoint_trimmed}")
-        } else if origin_only {
-            // 纯 origin，添加 /v1
-            format!("{base_trimmed}/v1/{endpoint_trimmed}")
+        let normalized_endpoint = if origin_only {
+            if endpoint_trimmed.starts_with("v1/") {
+                endpoint_trimmed.to_string()
+            } else {
+                format!("v1/{endpoint_trimmed}")
+            }
         } else {
-            // 自定义前缀，不添加 /v1，直接拼接
-            format!("{base_trimmed}/{endpoint_trimmed}")
+            endpoint_trimmed
+                .strip_prefix("v1/")
+                .unwrap_or(endpoint_trimmed)
+                .to_string()
         };
 
-        // 去除重复的 /v1/v1（可能由 base_url 与 endpoint 都带版本导致）
-        while url.contains("/v1/v1") {
-            url = url.replace("/v1/v1", "/v1");
-        }
-
-        url
+        format!("{base_trimmed}/{normalized_endpoint}")
     }
 
     fn get_auth_headers(
@@ -6955,7 +7177,7 @@ wire_api = "responses"
     }
 
     #[test]
-    fn namespace_flatten_gate_only_fires_for_xai_oauth() {
+    fn namespace_flatten_gate_covers_xai_oauth_and_api_key_native_responses() {
         // xAI OAuth: strict native gateway → needs namespace flattening.
         let mut xai = create_provider(json!({ "auth": {}, "config": "" }));
         xai.meta = Some(crate::provider::ProviderMeta {
@@ -6964,12 +7186,19 @@ wire_api = "responses"
         });
         assert!(provider_needs_responses_namespace_flatten(&xai));
 
-        // A plain third-party API-key Codex provider must not be flattened.
-        let plain = create_provider(json!({
+        // API-key xAI cards hit the same strict native Responses parser and
+        // therefore need the same request/response compatibility layer.
+        let plain_xai = create_provider(json!({
             "auth": { "OPENAI_API_KEY": "sk-x" },
             "config": "base_url = \"https://api.x.ai/v1\"\nwire_api = \"responses\""
         }));
-        assert!(!provider_needs_responses_namespace_flatten(&plain));
+        assert!(provider_needs_responses_namespace_flatten(&plain_xai));
+
+        let deepseek = create_provider(json!({
+            "auth": { "OPENAI_API_KEY": "sk-x" },
+            "config": "base_url = \"https://api.deepseek.com/v1\"\nwire_api = \"responses\""
+        }));
+        assert!(!provider_needs_responses_namespace_flatten(&deepseek));
     }
 
     fn v2_target_provider(id: &str, api_format: &str, models: serde_json::Value) -> Provider {
@@ -7594,7 +7823,7 @@ wire_api = "responses"
     }
 
     #[test]
-    fn detected_route_transport_overrides_stale_config_only_for_the_request() {
+    fn partial_detected_route_transport_does_not_override_the_request_protocol() {
         use crate::protocol_compatibility::{
             ProbeReadiness, ProtocolCompatibilityProbeResult, ProtocolCompatibilityRecord,
         };
@@ -7611,14 +7840,11 @@ wire_api = "responses"
             api_format: Some("openai_responses".to_string()),
             ..ProviderMeta::default()
         });
-        let target = compile_provider_probe_candidate_for_model(
-            &provider,
-            "qwen-visible".to_string(),
-            "Qwen/Qwen3.8".to_string(),
-        )
-        .expect("compile detected route policy")
-        .target_key(TransportKind::OpenAiChat)
-        .expect("detected route target");
+        let target =
+            compile_provider_probe_candidate_for_request(&provider, "qwen-visible", "Qwen/Qwen3.8")
+                .expect("compile detected route policy")
+                .target_key(TransportKind::OpenAiChat)
+                .expect("detected route target");
         db.save_protocol_compatibility_result(&ProtocolCompatibilityRecord::new(
             target,
             ProtocolCompatibilityProbeResult {
@@ -7631,14 +7857,52 @@ wire_api = "responses"
         ))
         .expect("save detected transport");
 
-        assert!(apply_detected_codex_transport_to_effective_provider(
+        assert!(!apply_detected_codex_transport_to_effective_provider(
             &mut provider,
             "qwen-visible",
             "Qwen/Qwen3.8",
             &db,
             150,
         ));
-        assert!(codex_provider_uses_chat_completions(&provider));
+        assert!(!codex_provider_uses_chat_completions(&provider));
+    }
+
+    #[test]
+    fn normalized_provider_never_changes_transport_at_request_time_from_probe_history() {
+        let db = Database::memory().expect("memory database");
+        let mut provider = create_provider(json!({
+            "auth": {"OPENAI_API_KEY": "probe-secret"},
+            "config": "model = \"Qwen/Qwen3.8\"\nbase_url = \"https://qwen.example/v1\"\nwire_api = \"responses\"\n",
+            "modelCatalog": {"models": [{
+                "model": "qwen-visible",
+                "upstreamModel": "Qwen/Qwen3.8"
+            }]}
+        }));
+        provider.id = "normalized-qwen-provider".to_string();
+        provider.meta = Some(ProviderMeta {
+            api_format: Some("openai_responses".to_string()),
+            ..ProviderMeta::default()
+        });
+        save_verified_chat_profile(
+            &db,
+            &provider,
+            "qwen-visible",
+            "Qwen/Qwen3.8",
+            "readable",
+            "reasoning_content",
+        );
+
+        assert!(!apply_detected_codex_transport_to_effective_provider(
+            &mut provider,
+            "qwen-visible",
+            "Qwen/Qwen3.8",
+            &db,
+            150,
+        ));
+        assert!(
+            !codex_provider_uses_chat_completions(&provider),
+            "a normalized Provider keeps its persisted top-level Responses protocol"
+        );
     }
 
     #[test]
@@ -7646,7 +7910,11 @@ wire_api = "responses"
         let db = Database::memory().expect("memory database");
         let mut standalone = create_provider(json!({
             "auth": {"OPENAI_API_KEY": "probe-secret"},
-            "config": "model = \"Qwen/Qwen3.8\"\nbase_url = \"https://qwen.example/v1\"\nwire_api = \"responses\"\n"
+            "config": "model = \"Qwen/Qwen3.8\"\nbase_url = \"https://qwen.example/v1\"\nwire_api = \"responses\"\n",
+            "modelCatalog": {"models": [
+                {"model": "qwen-visible", "upstreamModel": "Qwen/Qwen3.8", "apiFormat": "openai_chat"},
+                {"model": "responses-visible", "upstreamModel": "responses-model", "apiFormat": "openai_responses"}
+            ]}
         }));
         standalone.id = "qwen-provider".to_string();
         save_verified_chat_profile(
@@ -7660,6 +7928,10 @@ wire_api = "responses"
         let mut provider = create_provider(json!({
             "auth": {"OPENAI_API_KEY": "probe-secret"},
             "config": "model = \"qwen-visible\"\nbase_url = \"https://qwen.example/v1\"\nwire_api = \"responses\"\n",
+            "modelCatalog": {"models": [
+                {"model": "qwen-visible", "upstreamModel": "Qwen/Qwen3.8", "apiFormat": "openai_chat"},
+                {"model": "responses-visible", "upstreamModel": "responses-model", "apiFormat": "openai_responses"}
+            ]},
             "codexRouterParentProviderId": "router",
             "codexResolvedRouteId": "qwen-route",
             "codexResolvedTargetProviderId": "qwen-provider",
@@ -7681,7 +7953,7 @@ wire_api = "responses"
     }
 
     #[test]
-    fn advanced_manual_mode_can_choose_reasoning_summary_without_probe_evidence() {
+    fn advanced_manual_mode_cannot_relabel_raw_reasoning_as_summary_without_probe_evidence() {
         let db = Database::memory().expect("memory database");
         let mut provider = create_provider(json!({
             "auth": {"OPENAI_API_KEY": "manual-secret"},
@@ -7701,7 +7973,7 @@ wire_api = "responses"
                 &db,
                 100,
             ),
-            ReasoningProjection::ReasoningSummary
+            ReasoningProjection::None
         );
     }
 
@@ -7714,7 +7986,11 @@ wire_api = "responses"
         let db = Database::memory().expect("memory database");
         let mut provider = create_provider(json!({
             "auth": {"OPENAI_API_KEY": "probe-secret"},
-            "config": "model = \"qwen-public\"\nbase_url = \"https://qwen.example/v1\"\nwire_api = \"chat\"\n"
+            "config": "model = \"qwen-public\"\nbase_url = \"https://qwen.example/v1\"\nwire_api = \"chat\"\n",
+            "modelCatalog": {"models": [{
+                "model": "qwen-public",
+                "upstreamModel": "qwen-mapped"
+            }]}
         }));
         provider.id = "qwen-provider".to_string();
         let target = save_verified_chat_profile(
@@ -7847,6 +8123,235 @@ wire_api = "responses"
             ),
             ReasoningProjection::None,
             "a route marker without a parent provider ID must fail closed"
+        );
+    }
+
+    fn save_verified_responses_request_compatibility(
+        db: &Database,
+        provider: &Provider,
+        public_model: &str,
+        upstream_model: &str,
+        tool_schema_dialect: &str,
+        history_replay: &str,
+    ) {
+        use crate::protocol_compatibility::{
+            ProtocolCompatibilityProbeResult, ProtocolCompatibilityRecord,
+        };
+
+        let target = compile_provider_probe_candidate_for_model(
+            provider,
+            public_model.to_string(),
+            upstream_model.to_string(),
+        )
+        .expect("compile Responses profile Provider policy")
+        .target_key(TransportKind::OpenAiResponses)
+        .expect("Responses profile target");
+        let result: ProtocolCompatibilityProbeResult = serde_json::from_value(json!({
+            "selected_transport": "open_ai_responses",
+            "readiness": "verified",
+            "branches": [{
+                "assessment": {
+                    "transport": "open_ai_responses",
+                    "baseline": "passed",
+                    "streaming": "passed",
+                    "forced_tool": "passed",
+                    "continuation": "passed"
+                },
+                "reasoning_shape": {
+                    "semantic": "summary",
+                    "source": "native_responses",
+                    "pre_tool_visible_content": "absent"
+                },
+                "tool_schema_dialect": tool_schema_dialect,
+                "history_replay": history_replay,
+                "evidence": []
+            }]
+        }))
+        .expect("verified Responses compatibility result");
+        db.save_protocol_compatibility_result(&ProtocolCompatibilityRecord::new(
+            target, result, 100, 200,
+        ))
+        .expect("save Responses compatibility profile");
+    }
+
+    #[test]
+    fn verified_responses_profile_drives_schema_and_history_replay_dialects() {
+        let db = Database::memory().expect("memory database");
+        let mut provider = create_provider(json!({
+            "auth": {"OPENAI_API_KEY": "probe-secret"},
+            "config": "model = \"k3\"\nbase_url = \"https://relay.example/v1\"\nwire_api = \"responses\"\n",
+            "base_url": "https://relay.example/v1"
+        }));
+        provider.id = "relay-provider".to_string();
+        save_verified_responses_request_compatibility(
+            &db,
+            &provider,
+            "k3",
+            "k3",
+            "moonshot_mfjs",
+            "responses_reasoning_text_content",
+        );
+
+        let compatibility = resolve_codex_request_compatibility(
+            &provider,
+            "k3",
+            "k3",
+            TransportKind::OpenAiResponses,
+            &db,
+            150,
+        );
+        assert_eq!(
+            compatibility.tool_schema_dialect,
+            crate::protocol_compatibility::ToolSchemaDialect::MoonshotMfjs
+        );
+        assert_eq!(
+            compatibility.history_replay,
+            crate::protocol_compatibility::HistoryReplay::ResponsesReasoningTextContent
+        );
+    }
+
+    #[test]
+    fn requested_catalog_model_uses_its_own_request_compatibility_profile() {
+        let db = Database::memory().expect("memory database");
+        let mut provider = create_provider(json!({
+            "auth": {"OPENAI_API_KEY": "probe-secret"},
+            "model": "primary-upstream",
+            "config": "model = \"primary-upstream\"\nbase_url = \"https://relay.example/v1\"\nwire_api = \"responses\"\n",
+            "base_url": "https://relay.example/v1",
+            "modelCatalog": {
+                "models": [
+                    {
+                        "model": "primary-visible",
+                        "upstreamModel": "primary-upstream"
+                    },
+                    {
+                        "model": "secondary-visible",
+                        "upstreamModel": "secondary-upstream"
+                    }
+                ]
+            }
+        }));
+        provider.id = "multi-model-provider".to_string();
+        save_verified_responses_request_compatibility(
+            &db,
+            &provider,
+            "secondary-visible",
+            "secondary-upstream",
+            "moonshot_mfjs",
+            "responses_reasoning_text_content",
+        );
+
+        let compatibility = resolve_codex_request_compatibility(
+            &provider,
+            "secondary-visible",
+            &codex_provider_upstream_model(&provider).expect("Provider default model"),
+            TransportKind::OpenAiResponses,
+            &db,
+            150,
+        );
+
+        assert_eq!(
+            compatibility.tool_schema_dialect,
+            crate::protocol_compatibility::ToolSchemaDialect::MoonshotMfjs
+        );
+        assert_eq!(
+            compatibility.history_replay,
+            crate::protocol_compatibility::HistoryReplay::ResponsesReasoningTextContent
+        );
+    }
+
+    #[test]
+    fn no_profile_uses_only_known_official_endpoint_compatibility_defaults() {
+        let db = Database::memory().expect("memory database");
+        let provider_for = |base_url: &str| {
+            create_provider(json!({
+                "auth": {"OPENAI_API_KEY": "probe-secret"},
+                "config": format!("model = \"model\"\nbase_url = {:?}\nwire_api = \"responses\"\n", base_url),
+                "base_url": base_url
+            }))
+        };
+
+        let kimi = resolve_codex_request_compatibility(
+            &provider_for("https://api.kimi.com/coding/v1"),
+            "k3",
+            "k3",
+            TransportKind::OpenAiResponses,
+            &db,
+            100,
+        );
+        assert_eq!(
+            kimi.tool_schema_dialect,
+            crate::protocol_compatibility::ToolSchemaDialect::MoonshotMfjs
+        );
+        assert_eq!(
+            kimi.history_replay,
+            crate::protocol_compatibility::HistoryReplay::NativeOnly
+        );
+
+        let deepseek = resolve_codex_request_compatibility(
+            &provider_for("https://api.deepseek.com/v1"),
+            "deepseek-reasoner",
+            "deepseek-reasoner",
+            TransportKind::OpenAiResponses,
+            &db,
+            100,
+        );
+        assert_eq!(
+            deepseek.tool_schema_dialect,
+            crate::protocol_compatibility::ToolSchemaDialect::OpenAi
+        );
+        assert_eq!(
+            deepseek.history_replay,
+            crate::protocol_compatibility::HistoryReplay::ResponsesReasoningTextContent
+        );
+
+        let relay = resolve_codex_request_compatibility(
+            &provider_for("https://strict-relay.example/v1"),
+            "gpt-compatible",
+            "gpt-compatible",
+            TransportKind::OpenAiResponses,
+            &db,
+            100,
+        );
+        assert_eq!(
+            relay.tool_schema_dialect,
+            crate::protocol_compatibility::ToolSchemaDialect::OpenAi
+        );
+        assert_eq!(
+            relay.history_replay,
+            crate::protocol_compatibility::HistoryReplay::NativeOnly
+        );
+    }
+
+    #[test]
+    fn advanced_manual_request_compatibility_overrides_profile_and_endpoint_defaults() {
+        let db = Database::memory().expect("memory database");
+        let mut provider = create_provider(json!({
+            "auth": {"OPENAI_API_KEY": "manual-secret"},
+            "config": "model = \"k3\"\nbase_url = \"https://api.kimi.com/coding/v1\"\nwire_api = \"responses\"\n"
+        }));
+        provider.meta = Some(ProviderMeta {
+            codex_protocol_mode: Some(crate::provider::CodexProtocolMode::Manual),
+            codex_tool_schema_dialect: Some("openai".to_string()),
+            codex_history_replay: Some("omit".to_string()),
+            ..ProviderMeta::default()
+        });
+
+        let compatibility = resolve_codex_request_compatibility(
+            &provider,
+            "k3",
+            "k3",
+            TransportKind::OpenAiResponses,
+            &db,
+            100,
+        );
+        assert_eq!(
+            compatibility.tool_schema_dialect,
+            crate::protocol_compatibility::ToolSchemaDialect::OpenAi
+        );
+        assert_eq!(
+            compatibility.history_replay,
+            crate::protocol_compatibility::HistoryReplay::Omit
         );
     }
 }

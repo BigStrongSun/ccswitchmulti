@@ -6,9 +6,11 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::proxy::providers::codex_chat_common::split_leading_think_block;
+use crate::proxy::providers::codex_request::CodexRequestOptions;
 use crate::proxy::providers::codex_terminal::{
-    classify_chat_terminal, classify_native_responses_terminal, ChatTerminalEvidence,
-    NativeResponsesEvidence, NativeResponsesTerminalDisposition, TerminalDisposition,
+    classify_chat_terminal, classify_native_responses_terminal,
+    streamed_tool_arguments_are_complete, ChatTerminalEvidence, NativeResponsesEvidence,
+    NativeResponsesTerminalDisposition, TerminalDisposition,
 };
 
 use super::{
@@ -18,8 +20,9 @@ use super::{
     classify_captured_reasoning_shape,
     redaction::RedactedProbeEvidence,
     selection::select_transport_outcome_with_reasoning,
-    PreToolVisibleContent, ProbeCandidate, ProbeCase, ProbeReadiness, ProbeStageStatus,
-    ReasoningSemantic, ReasoningSource, TransportKind, TransportProbeAssessment,
+    HistoryReplay, PreToolVisibleContent, ProbeCandidate, ProbeCase, ProbeReadiness,
+    ProbeStageStatus, ReasoningSemantic, ReasoningSource, ToolSchemaDialect, TransportKind,
+    TransportProbeAssessment,
 };
 
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -59,7 +62,9 @@ impl RedactedProbeFailure {
         let (kind, status_code) = match error {
             ProbeCaptureError::Timeout => (ProbeFailureKind::Timeout, None),
             ProbeCaptureError::Network => (ProbeFailureKind::Network, None),
-            ProbeCaptureError::HttpStatus { status_code } => {
+            ProbeCaptureError::HttpStatus { status_code }
+            | ProbeCaptureError::ToolSchemaRejected { status_code }
+            | ProbeCaptureError::ReasoningReplayRejected { status_code } => {
                 (ProbeFailureKind::HttpStatus, Some(status_code))
             }
             ProbeCaptureError::ResponseTooLarge => (ProbeFailureKind::ResponseTooLarge, None),
@@ -133,6 +138,10 @@ pub enum ProtocolProbeProgressEvent {
 pub struct TransportBranchResult {
     pub assessment: TransportProbeAssessment,
     pub reasoning_shape: ClassifiedReasoningShape,
+    #[serde(default)]
+    pub tool_schema_dialect: ToolSchemaDialect,
+    #[serde(default)]
+    pub history_replay: HistoryReplay,
     evidence: Vec<RedactedProbeEvidence>,
     #[serde(default)]
     pub failures: Vec<RedactedProbeFailure>,
@@ -144,6 +153,8 @@ impl fmt::Debug for TransportBranchResult {
             .debug_struct("TransportBranchResult")
             .field("assessment", &self.assessment)
             .field("reasoning_shape", &self.reasoning_shape)
+            .field("tool_schema_dialect", &self.tool_schema_dialect)
+            .field("history_replay", &self.history_replay)
             .field("evidence_count", &self.evidence.len())
             .field("failures", &self.failures)
             .finish()
@@ -262,6 +273,11 @@ where
     let mut evidence = Vec::new();
     let mut failures = Vec::new();
     let mut reasoning_shape = empty_reasoning_shape();
+    let mut tool_schema_dialect = ToolSchemaDialect::OpenAi;
+    let mut history_replay = match transport {
+        TransportKind::OpenAiChat => HistoryReplay::ChatReasoningContent,
+        TransportKind::OpenAiResponses => HistoryReplay::NativeOnly,
+    };
     report_stage_started(reporter, candidate, transport, ProbeProgressStage::Baseline);
     let baseline = send_case(
         candidate,
@@ -270,6 +286,7 @@ where
         ProbeCase::BaselineJson,
         nonce,
         None,
+        CodexRequestOptions::default(),
     )
     .await;
     let baseline_exchange = match baseline {
@@ -303,6 +320,8 @@ where
                 TransportBranchResult {
                     assessment,
                     reasoning_shape,
+                    tool_schema_dialect,
+                    history_replay,
                     evidence,
                     failures,
                 },
@@ -326,6 +345,8 @@ where
                 TransportBranchResult {
                     assessment,
                     reasoning_shape,
+                    tool_schema_dialect,
+                    history_replay,
                     evidence,
                     failures,
                 },
@@ -351,6 +372,7 @@ where
         ProbeCase::BaselineSse,
         nonce,
         None,
+        CodexRequestOptions::default(),
     )
     .await
     {
@@ -399,15 +421,158 @@ where
         transport,
         ProbeProgressStage::ForcedTool,
     );
-    let forced = send_case(
+    match send_case(
+        candidate,
+        client,
+        transport,
+        ProbeCase::CustomToolAdmissionJson,
+        nonce,
+        None,
+        probe_request_options(tool_schema_dialect, history_replay),
+    )
+    .await
+    {
+        Ok(exchange) if has_completed_assistant_turn(transport, &exchange) => {
+            update_shape(
+                &mut reasoning_shape,
+                classify_captured_reasoning_shape(&exchange),
+            );
+            evidence.push(exchange.evidence().clone());
+        }
+        Ok(exchange) => {
+            evidence.push(exchange.evidence().clone());
+            assessment.forced_tool = ProbeStageStatus::Failed;
+            let failure = RedactedProbeFailure::invalid_response(ProbeProgressStage::ForcedTool);
+            failures.push(failure.clone());
+            report_stage_finished(
+                reporter,
+                candidate,
+                transport,
+                ProbeProgressStage::ForcedTool,
+                assessment.forced_tool,
+                Some(failure),
+            );
+            return finish_branch(
+                reporter,
+                candidate,
+                TransportBranchResult {
+                    assessment,
+                    reasoning_shape,
+                    tool_schema_dialect,
+                    history_replay,
+                    evidence,
+                    failures,
+                },
+            );
+        }
+        Err(error) => {
+            assessment.forced_tool = forced_tool_failure_status(error);
+            let failure = RedactedProbeFailure::from_capture(ProbeProgressStage::ForcedTool, error);
+            failures.push(failure.clone());
+            report_stage_finished(
+                reporter,
+                candidate,
+                transport,
+                ProbeProgressStage::ForcedTool,
+                assessment.forced_tool,
+                Some(failure),
+            );
+            return finish_branch(
+                reporter,
+                candidate,
+                TransportBranchResult {
+                    assessment,
+                    reasoning_shape,
+                    tool_schema_dialect,
+                    history_replay,
+                    evidence,
+                    failures,
+                },
+            );
+        }
+    }
+    let mut forced_case = ProbeCase::ForcedToolSse;
+    let mut forced = send_case(
         candidate,
         client,
         transport,
         ProbeCase::ForcedToolSse,
         nonce,
         None,
+        probe_request_options(tool_schema_dialect, history_replay),
     )
     .await;
+    if matches!(
+        &forced,
+        Err(ProbeCaptureError::ToolSchemaRejected {
+            status_code: 400 | 422
+        }) | Err(ProbeCaptureError::HttpStatus {
+            status_code: 400 | 422
+        })
+    ) {
+        tool_schema_dialect = ToolSchemaDialect::MoonshotMfjs;
+        forced = send_case(
+            candidate,
+            client,
+            transport,
+            ProbeCase::ForcedToolSse,
+            nonce,
+            None,
+            probe_request_options(tool_schema_dialect, history_replay),
+        )
+        .await;
+    }
+    let should_retry_with_required = forced.as_ref().is_ok_and(|exchange| {
+        classify_probe_terminal(transport, exchange).is_complete
+            && extract_tool_call(transport, exchange).is_none()
+    });
+    if should_retry_with_required {
+        if let Ok(exchange) = &forced {
+            update_shape(
+                &mut reasoning_shape,
+                classify_captured_reasoning_shape(exchange),
+            );
+            evidence.push(exchange.evidence().clone());
+        }
+        forced_case = ProbeCase::ForcedToolRequiredSse;
+        forced = send_case(
+            candidate,
+            client,
+            transport,
+            forced_case,
+            nonce,
+            None,
+            probe_request_options(tool_schema_dialect, history_replay),
+        )
+        .await;
+    }
+    let should_retry_with_moonshot = tool_schema_dialect == ToolSchemaDialect::OpenAi
+        && forced.as_ref().is_ok_and(|exchange| {
+            classify_probe_terminal(transport, exchange).is_complete
+                && extract_tool_call(transport, exchange)
+                    .as_ref()
+                    .is_none_or(|call| !valid_probe_tool_call(call, nonce))
+        });
+    if should_retry_with_moonshot {
+        if let Ok(exchange) = &forced {
+            update_shape(
+                &mut reasoning_shape,
+                classify_captured_reasoning_shape(exchange),
+            );
+            evidence.push(exchange.evidence().clone());
+        }
+        tool_schema_dialect = ToolSchemaDialect::MoonshotMfjs;
+        forced = send_case(
+            candidate,
+            client,
+            transport,
+            forced_case,
+            nonce,
+            None,
+            probe_request_options(tool_schema_dialect, history_replay),
+        )
+        .await;
+    }
     let (tool_call, forced_exchange) = match forced {
         Ok(exchange) => {
             update_shape(
@@ -436,6 +601,8 @@ where
                     TransportBranchResult {
                         assessment,
                         reasoning_shape,
+                        tool_schema_dialect,
+                        history_replay,
                         evidence,
                         failures,
                     },
@@ -470,6 +637,8 @@ where
                         TransportBranchResult {
                             assessment,
                             reasoning_shape,
+                            tool_schema_dialect,
+                            history_replay,
                             evidence,
                             failures,
                         },
@@ -495,6 +664,8 @@ where
                 TransportBranchResult {
                     assessment,
                     reasoning_shape,
+                    tool_schema_dialect,
+                    history_replay,
                     evidence,
                     failures,
                 },
@@ -508,18 +679,47 @@ where
         transport,
         ProbeProgressStage::Continuation,
     );
-    match send_case(
+    let mut continuation = send_case(
         candidate,
         client,
         transport,
         ProbeCase::ToolContinuationJson,
         nonce,
         Some((&tool_call, &forced_exchange)),
+        probe_request_options(tool_schema_dialect, history_replay),
     )
-    .await
+    .await;
+    if transport == TransportKind::OpenAiResponses
+        && is_bounded_replay_shape_rejection(&continuation)
     {
+        history_replay = HistoryReplay::ResponsesReasoningTextContent;
+        continuation = send_case(
+            candidate,
+            client,
+            transport,
+            ProbeCase::ToolContinuationJson,
+            nonce,
+            Some((&tool_call, &forced_exchange)),
+            probe_request_options(tool_schema_dialect, history_replay),
+        )
+        .await;
+        if is_bounded_replay_shape_rejection(&continuation) {
+            history_replay = HistoryReplay::Omit;
+            continuation = send_case(
+                candidate,
+                client,
+                transport,
+                ProbeCase::ToolContinuationJson,
+                nonce,
+                Some((&tool_call, &forced_exchange)),
+                probe_request_options(tool_schema_dialect, history_replay),
+            )
+            .await;
+        }
+    }
+    match continuation {
         Ok(exchange) => {
-            assessment.continuation = if has_completed_assistant_turn(transport, &exchange) {
+            assessment.continuation = if has_completed_tool_continuation(transport, &exchange) {
                 ProbeStageStatus::Passed
             } else {
                 ProbeStageStatus::Failed
@@ -563,9 +763,24 @@ where
         TransportBranchResult {
             assessment,
             reasoning_shape,
+            tool_schema_dialect,
+            history_replay,
             evidence,
             failures,
         },
+    )
+}
+
+fn is_bounded_replay_shape_rejection(
+    result: &Result<CapturedProbeExchange, ProbeCaptureError>,
+) -> bool {
+    matches!(
+        result,
+        Err(ProbeCaptureError::ReasoningReplayRejected {
+            status_code: 400 | 422
+        }) | Err(ProbeCaptureError::HttpStatus {
+            status_code: 400 | 422
+        })
     )
 }
 
@@ -669,6 +884,7 @@ async fn send_case(
     case: ProbeCase,
     nonce: &str,
     continuation: Option<(&CapturedToolCall, &CapturedProbeExchange)>,
+    options: CodexRequestOptions,
 ) -> Result<CapturedProbeExchange, ProbeCaptureError> {
     let logical = match continuation {
         Some((tool_call, exchange)) => build_continuation_request(
@@ -681,13 +897,24 @@ async fn send_case(
         None => build_logical_probe_request(case, &candidate.upstream_model, nonce),
     };
     let prepared = candidate
-        .prepare_request(transport, logical)
+        .prepare_request_with_options(transport, logical, options)
         .map_err(|_| ProbeCaptureError::InvalidPayload)?;
     let request = client
         .post(prepared.url)
         .headers(prepared.headers)
         .json(&prepared.body);
     capture_transport_probe(request, RESPONSE_TIMEOUT).await
+}
+
+fn probe_request_options(
+    tool_schema_dialect: ToolSchemaDialect,
+    history_replay: HistoryReplay,
+) -> CodexRequestOptions {
+    CodexRequestOptions {
+        tool_schema_dialect: Some(tool_schema_dialect),
+        history_replay: Some(history_replay),
+        ..CodexRequestOptions::default()
+    }
 }
 
 fn build_continuation_request(
@@ -708,7 +935,11 @@ fn build_continuation_request(
         .cloned()
         .unwrap_or_default();
     if transport == TransportKind::OpenAiResponses {
-        input.extend(extract_responses_output_items(exchange));
+        input.extend(
+            extract_responses_output_items(exchange)
+                .into_iter()
+                .map(canonicalize_reasoning_item_for_summary_replay),
+        );
     } else {
         let mut function_call = json!({
             "type": "function_call",
@@ -728,6 +959,34 @@ fn build_continuation_request(
     }));
     request["input"] = Value::Array(input);
     request
+}
+
+fn canonicalize_reasoning_item_for_summary_replay(mut item: Value) -> Value {
+    if item.get("type").and_then(Value::as_str) != Some("reasoning") {
+        return item;
+    }
+    let has_summary = item
+        .get("summary")
+        .and_then(Value::as_array)
+        .is_some_and(|summary| !summary.is_empty());
+    if !has_summary {
+        let text = item
+            .get("content")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|part| part.get("text").and_then(Value::as_str))
+            .filter(|text| !text.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !text.is_empty() {
+            item["summary"] = json!([{"type": "summary_text", "text": text}]);
+        }
+    }
+    if let Some(object) = item.as_object_mut() {
+        object.remove("content");
+    }
+    item
 }
 
 fn extract_responses_output_items(exchange: &CapturedProbeExchange) -> Vec<Value> {
@@ -836,7 +1095,9 @@ fn classify_chat_probe_terminal(exchange: &CapturedProbeExchange) -> ProbeTermin
 
     let valid_tool_calls = tools
         .values()
-        .filter(|tool| !tool.name.trim().is_empty())
+        .filter(|tool| {
+            !tool.name.trim().is_empty() && streamed_tool_arguments_are_complete(&tool.arguments)
+        })
         .count();
     let evidence = ChatTerminalEvidence {
         has_final_message,
@@ -1028,9 +1289,88 @@ fn has_completed_assistant_turn(
     terminal.is_complete && terminal.has_final_message
 }
 
+fn has_completed_tool_continuation(
+    transport: TransportKind,
+    exchange: &CapturedProbeExchange,
+) -> bool {
+    has_completed_assistant_turn(transport, exchange)
+        && collected_assistant_text(transport, exchange).contains(super::TOOL_DONE_MARKER)
+}
+
+fn collected_assistant_text(transport: TransportKind, exchange: &CapturedProbeExchange) -> String {
+    let mut text = String::new();
+    for payload in exchange.payloads() {
+        match transport {
+            TransportKind::OpenAiChat => {
+                let Some(choice) = payload
+                    .value
+                    .get("choices")
+                    .and_then(Value::as_array)
+                    .and_then(|choices| choices.first())
+                else {
+                    continue;
+                };
+                for message in [choice.get("message"), choice.get("delta")]
+                    .into_iter()
+                    .flatten()
+                {
+                    append_visible_content(message.get("content"), &mut text);
+                }
+            }
+            TransportKind::OpenAiResponses => {
+                for output in [
+                    payload.value.get("output"),
+                    payload.value.pointer("/response/output"),
+                ]
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_array)
+                {
+                    for item in output
+                        .iter()
+                        .filter(|item| item.get("type").and_then(Value::as_str) == Some("message"))
+                    {
+                        append_visible_content(item.get("content"), &mut text);
+                    }
+                }
+                if payload.event_type.as_deref() == Some("response.output_text.delta") {
+                    append_text_field(payload.value.get("delta"), &mut text);
+                }
+                let item = payload.value.get("item");
+                if item
+                    .and_then(|item| item.get("type"))
+                    .and_then(Value::as_str)
+                    == Some("message")
+                {
+                    append_visible_content(item.and_then(|item| item.get("content")), &mut text);
+                }
+            }
+        }
+    }
+    text
+}
+
+fn append_visible_content(content: Option<&Value>, target: &mut String) {
+    match content {
+        Some(Value::String(value)) => target.push_str(value),
+        Some(Value::Array(parts)) => {
+            for part in parts {
+                append_text_field(part.get("text").or_else(|| part.get("content")), target);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn baseline_failure_status(error: ProbeCaptureError) -> ProbeStageStatus {
     match error {
         ProbeCaptureError::HttpStatus {
+            status_code: 404 | 405 | 415,
+        }
+        | ProbeCaptureError::ToolSchemaRejected {
+            status_code: 404 | 405 | 415,
+        }
+        | ProbeCaptureError::ReasoningReplayRejected {
             status_code: 404 | 405 | 415,
         } => ProbeStageStatus::Unsupported,
         _ => ProbeStageStatus::Failed,
@@ -1041,6 +1381,12 @@ fn forced_tool_failure_status(error: ProbeCaptureError) -> ProbeStageStatus {
     match error {
         ProbeCaptureError::HttpStatus {
             status_code: 400 | 404 | 405 | 415 | 422,
+        }
+        | ProbeCaptureError::ToolSchemaRejected {
+            status_code: 400 | 404 | 405 | 415 | 422,
+        }
+        | ProbeCaptureError::ReasoningReplayRejected {
+            status_code: 400 | 404 | 405 | 415 | 422,
         } => ProbeStageStatus::Unsupported,
         _ => ProbeStageStatus::Failed,
     }
@@ -1049,6 +1395,12 @@ fn forced_tool_failure_status(error: ProbeCaptureError) -> ProbeStageStatus {
 fn stage_failure_status(error: ProbeCaptureError) -> ProbeStageStatus {
     match error {
         ProbeCaptureError::HttpStatus {
+            status_code: 404 | 405 | 415,
+        }
+        | ProbeCaptureError::ToolSchemaRejected {
+            status_code: 404 | 405 | 415,
+        }
+        | ProbeCaptureError::ReasoningReplayRejected {
             status_code: 404 | 405 | 415,
         } => ProbeStageStatus::Unsupported,
         _ => ProbeStageStatus::Failed,
@@ -1074,19 +1426,19 @@ fn update_shape(current: &mut ClassifiedReasoningShape, observed: ClassifiedReas
         _ => PreToolVisibleContent::Absent,
     };
 
-    let observed_rank = semantic_safety_rank(observed.semantic);
-    let current_rank = semantic_safety_rank(current.semantic);
+    let observed_rank = semantic_information_rank(observed.semantic);
+    let current_rank = semantic_information_rank(current.semantic);
     if observed_rank > current_rank {
         current.semantic = observed.semantic;
         current.source = observed.source;
     }
 }
 
-fn semantic_safety_rank(semantic: ReasoningSemantic) -> u8 {
+fn semantic_information_rank(semantic: ReasoningSemantic) -> u8 {
     match semantic {
         ReasoningSemantic::None => 0,
-        ReasoningSemantic::Readable => 1,
-        ReasoningSemantic::Summary => 2,
-        ReasoningSemantic::Opaque => 3,
+        ReasoningSemantic::Opaque => 1,
+        ReasoningSemantic::Readable => 2,
+        ReasoningSemantic::Summary => 3,
     }
 }

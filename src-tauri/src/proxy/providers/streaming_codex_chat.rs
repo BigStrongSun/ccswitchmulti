@@ -1768,7 +1768,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn finalization_keeps_valid_call_after_unnamed_earlier_call() {
+    async fn finalization_fails_the_whole_turn_after_any_unnamed_parallel_call() {
         let output = collect(vec![
             "data: {\"id\":\"chatcmpl_parallel_missing\",\"model\":\"deepseek-v4-pro\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_missing\",\"type\":\"function\",\"function\":{\"arguments\":\"{}\"}}]}}]}\n\n",
             "data: {\"id\":\"chatcmpl_parallel_missing\",\"model\":\"deepseek-v4-pro\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call_valid\",\"type\":\"function\",\"function\":{\"name\":\"exec_command\",\"arguments\":\"{\\\"cmd\\\":\\\"date\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
@@ -1776,16 +1776,12 @@ mod tests {
         ])
         .await;
         let events = parse_sse_events(&output);
-        let completed = events
+        assert!(events
             .iter()
-            .find(|event| event["type"] == "response.completed")
-            .unwrap();
-        let items = completed["response"]["output"].as_array().unwrap();
-
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0]["name"], "exec_command");
-        assert_eq!(items[0]["call_id"], "call_valid");
-        assert_eq!(items[0]["arguments"], r#"{"cmd":"date"}"#);
+            .any(|event| event["type"] == "response.failed"));
+        assert!(!events
+            .iter()
+            .any(|event| event["type"] == "response.completed"));
         assert!(!output.contains("call_missing"));
     }
 

@@ -8,6 +8,10 @@ import {
   ProviderForm,
   type ProviderFormValues,
 } from "@/components/providers/forms/ProviderForm";
+import {
+  isCodexProviderSetCancelled,
+  useCodexProviderSetSave,
+} from "@/components/providers/forms/useCodexProviderSetSave";
 import { openclawApi, providersApi, vscodeApi, type AppId } from "@/lib/api";
 
 interface EditProviderDialogProps {
@@ -32,6 +36,40 @@ export function EditProviderDialog({
 }: EditProviderDialogProps) {
   const { t } = useTranslation();
   const [isFormSubmitting, setIsFormSubmitting] = useState(false);
+  const { persistCodexProviderSet, dialogs: codexProviderSetDialogs } =
+    useCodexProviderSetSave();
+  const [logicalProvider, setLogicalProvider] = useState<Provider | null>(null);
+  const [logicalProviderError, setLogicalProviderError] = useState("");
+
+  const isGeneratedSplitFacade =
+    appId === "codex" &&
+    provider?.settingsConfig.codexProtocolSet != null &&
+    (provider.settingsConfig.codexProtocolSet as { role?: unknown }).role ===
+      "facade";
+  const editingProvider = logicalProvider ?? provider;
+
+  useEffect(() => {
+    let cancelled = false;
+    setLogicalProvider(null);
+    setLogicalProviderError("");
+    if (!open || !provider || !isGeneratedSplitFacade) return;
+
+    void providersApi
+      .getCodexLogicalProviderForEditing(provider.id)
+      .then((restored) => {
+        if (!cancelled) setLogicalProvider(restored);
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setLogicalProviderError(
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isGeneratedSplitFacade, open, provider?.id]);
 
   // 默认使用传入的 provider.settingsConfig，若当前编辑对象是"当前生效供应商"，则尝试读取实时配置替换初始值
   const [liveSettings, setLiveSettings] = useState<Record<
@@ -45,11 +83,13 @@ export function EditProviderDialog({
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
-      if (!open || !provider) {
+      if (!open || !editingProvider) {
         setLiveSettings(null);
         setHasLoadedLive(false);
         return;
       }
+
+      if (isGeneratedSplitFacade && !logicalProvider) return;
 
       // 关键修复：只在首次打开时加载一次
       if (hasLoadedLive) {
@@ -79,7 +119,7 @@ export function EditProviderDialog({
 
       if (appId === "openclaw") {
         try {
-          const live = await openclawApi.getLiveProvider(provider.id);
+          const live = await openclawApi.getLiveProvider(editingProvider.id);
           if (!cancelled && live && typeof live === "object") {
             setLiveSettings(live);
           } else if (!cancelled) {
@@ -99,7 +139,7 @@ export function EditProviderDialog({
 
       try {
         const currentId = await providersApi.getCurrent(appId);
-        if (currentId && provider.id === currentId) {
+        if (currentId && editingProvider.id === currentId) {
           try {
             const live = (await vscodeApi.getLiveProviderSettings(
               appId,
@@ -129,13 +169,20 @@ export function EditProviderDialog({
     return () => {
       cancelled = true;
     };
-  }, [open, provider?.id, appId, hasLoadedLive, isProxyTakeover]); // 只依赖 provider.id，不依赖整个 provider 对象
+  }, [
+    open,
+    editingProvider?.id,
+    appId,
+    hasLoadedLive,
+    isProxyTakeover,
+    isGeneratedSplitFacade,
+    logicalProvider,
+  ]); // 只依赖 provider.id，不依赖整个 provider 对象
 
   const initialSettingsConfig = useMemo(() => {
-    const base = (liveSettings ?? provider?.settingsConfig ?? {}) as Record<
-      string,
-      unknown
-    >;
+    const base = (liveSettings ??
+      editingProvider?.settingsConfig ??
+      {}) as Record<string, unknown>;
 
     // Codex 的 modelCatalog 是 cc-switch 私有字段，SSOT 在数据库。Live 的 config.toml
     // 仅在写入时投影出 model_catalog_json 指针；Codex.app 改写配置、代理接管/恢复周期、
@@ -145,10 +192,13 @@ export function EditProviderDialog({
     if (
       appId === "codex" &&
       liveSettings &&
-      provider?.settingsConfig &&
-      typeof provider.settingsConfig === "object"
+      editingProvider?.settingsConfig &&
+      typeof editingProvider.settingsConfig === "object"
     ) {
-      const dbConfig = provider.settingsConfig as Record<string, unknown>;
+      const dbConfig = editingProvider.settingsConfig as Record<
+        string,
+        unknown
+      >;
       let merged = base;
       for (const privateField of ["modelCatalog", "codexRouting"]) {
         const dbValue = dbConfig[privateField];
@@ -162,31 +212,31 @@ export function EditProviderDialog({
     }
 
     return base;
-  }, [liveSettings, provider?.settingsConfig, appId]); // 只依赖 settingsConfig，不依赖整个 provider
+  }, [liveSettings, editingProvider?.settingsConfig, appId]); // 只依赖 settingsConfig，不依赖整个 provider
 
   // 固定 initialData，防止 provider 对象更新时重置表单
   const initialData = useMemo(() => {
-    if (!provider) return null;
+    if (!editingProvider) return null;
     return {
-      name: provider.name,
-      notes: provider.notes,
-      websiteUrl: provider.websiteUrl,
+      name: editingProvider.name,
+      notes: editingProvider.notes,
+      websiteUrl: editingProvider.websiteUrl,
       settingsConfig: initialSettingsConfig,
-      category: provider.category,
-      meta: provider.meta,
-      icon: provider.icon,
-      iconColor: provider.iconColor,
+      category: editingProvider.category,
+      meta: editingProvider.meta,
+      icon: editingProvider.icon,
+      iconColor: editingProvider.iconColor,
     };
   }, [
     open, // 修复：编辑保存后再次打开显示旧数据，依赖 open 确保每次打开时重新读取最新 provider 数据
-    provider?.id, // 只依赖 ID，provider 对象更新不会触发重新计算
-    provider?.meta, // 供应商元数据变化时重新初始化表单
+    editingProvider?.id, // 只依赖 ID，provider 对象更新不会触发重新计算
+    editingProvider?.meta, // 供应商元数据变化时重新初始化表单
     initialSettingsConfig,
   ]);
 
   const handleSubmit = useCallback(
     async (values: ProviderFormValues) => {
-      if (!provider) return;
+      if (!provider || !editingProvider) return;
 
       // 注意：values.settingsConfig 已经是最终的配置字符串
       // ProviderForm 已经为不同的 app 类型（Claude/Codex/Gemini）正确组装了配置
@@ -201,7 +251,7 @@ export function EditProviderDialog({
           : provider.id;
 
       const updatedProvider: Provider = {
-        ...provider,
+        ...editingProvider,
         id: nextProviderId,
         name: values.name.trim(),
         notes: values.notes?.trim() || undefined,
@@ -214,16 +264,66 @@ export function EditProviderDialog({
         ...(values.meta ? { meta: values.meta } : {}),
       };
 
+      const codexRouting = updatedProvider.settingsConfig.codexRouting;
+      const protocolSet = updatedProvider.settingsConfig.codexProtocolSet as
+        | { role?: unknown }
+        | undefined;
+      const isGeneratedFacade = protocolSet?.role === "facade";
+      const authSource = updatedProvider.meta?.authBinding?.source;
+      const isEligibleCodexLogicalSource =
+        appId === "codex" &&
+        updatedProvider.category !== "official" &&
+        updatedProvider.meta?.apiFormat !== "anthropic" &&
+        authSource !== "managed_account" &&
+        authSource !== "managed_codex_oauth" &&
+        (!(codexRouting && typeof codexRouting === "object") ||
+          isGeneratedFacade);
+
+      if (isEligibleCodexLogicalSource) {
+        try {
+          await persistCodexProviderSet(
+            updatedProvider,
+            values.protocolProbeReceiptIds ?? [],
+          );
+        } catch (error) {
+          if (isCodexProviderSetCancelled(error)) return;
+          throw error;
+        }
+        onOpenChange(false);
+        return;
+      }
+
       await onSubmit({
         provider: updatedProvider,
         originalId: provider.id,
       });
       onOpenChange(false);
     },
-    [appId, onSubmit, onOpenChange, provider],
+    [
+      appId,
+      editingProvider,
+      onSubmit,
+      onOpenChange,
+      persistCodexProviderSet,
+      provider,
+    ],
   );
 
-  if (!provider || !initialData) {
+  if (!provider || (isGeneratedSplitFacade && !logicalProvider)) {
+    if (!logicalProviderError) return null;
+    return (
+      <FullScreenPanel
+        isOpen={open}
+        title={t("provider.editProvider")}
+        onClose={() => onOpenChange(false)}
+      >
+        <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-4 text-sm text-destructive">
+          无法恢复自动拆分模型源的逻辑配置：{logicalProviderError}
+        </div>
+      </FullScreenPanel>
+    );
+  }
+  if (!initialData || !editingProvider) {
     return null;
   }
 
@@ -246,7 +346,7 @@ export function EditProviderDialog({
     >
       <ProviderForm
         appId={appId}
-        providerId={provider.id}
+        providerId={editingProvider.id}
         submitLabel={t("common.save")}
         onSubmit={handleSubmit}
         onCancel={() => onOpenChange(false)}
@@ -255,6 +355,7 @@ export function EditProviderDialog({
         showButtons={false}
         isProxyTakeover={isProxyTakeover}
       />
+      {codexProviderSetDialogs}
     </FullScreenPanel>
   );
 }
