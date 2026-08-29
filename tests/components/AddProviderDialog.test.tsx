@@ -22,6 +22,9 @@ const universalProtocolMocks = vi.hoisted(() => ({
 const universalFormSubmission = vi.hoisted(() => ({
   current: null as UniversalProvider | null,
 }));
+const providerFormProbe = vi.hoisted(() => ({
+  providerId: undefined as string | undefined,
+}));
 
 vi.mock("@tanstack/react-query", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@tanstack/react-query")>();
@@ -105,9 +108,12 @@ let mockFormValues: ProviderFormValues;
 vi.mock("@/components/providers/forms/ProviderForm", () => ({
   ProviderForm: ({
     onSubmit,
+    providerId,
   }: {
     onSubmit: (values: ProviderFormValues) => void;
+    providerId?: string;
   }) => {
+    providerFormProbe.providerId = providerId;
     return (
       <form
         id="provider-form"
@@ -123,6 +129,7 @@ vi.mock("@/components/providers/forms/ProviderForm", () => ({
 describe("AddProviderDialog", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    providerFormProbe.providerId = undefined;
     mockFormValues = {
       name: "Test Provider",
       websiteUrl: "https://provider.example.com",
@@ -144,6 +151,7 @@ describe("AddProviderDialog", () => {
         settingsConfig: {},
       },
       records: [],
+      observations: [],
       receiptIds: ["receipt-model-a"],
       protocolApplied: false,
     });
@@ -181,6 +189,7 @@ describe("AddProviderDialog", () => {
         settingsConfig: {},
       },
       records: [],
+      observations: [],
       receiptIds: ["receipt-qwen"],
       protocolApplied: false,
     });
@@ -232,12 +241,14 @@ describe("AddProviderDialog", () => {
     );
 
     await user.click(screen.getByRole("tab", { name: "单独接入模型源" }));
+    expect(providerFormProbe.providerId).toEqual(expect.any(String));
+    expect(providerFormProbe.providerId).not.toBe("codex-draft");
     await user.click(screen.getByRole("button", { name: "common.add" }));
 
     await waitFor(() =>
       expect(universalProtocolMocks.commitCodex).toHaveBeenCalledWith(
         expect.objectContaining({
-          id: expect.any(String),
+          id: providerFormProbe.providerId,
           name: "Mixed Codex Relay",
         }),
         ["receipt-model-a"],
@@ -248,6 +259,53 @@ describe("AddProviderDialog", () => {
     expect(universalProtocolMocks.preflightCodex).not.toHaveBeenCalled();
     expect(handleSubmit).not.toHaveBeenCalled();
     expect(handleOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("Codex 手动 Chat 覆盖保留 receipt 并以 confirm_manual 提交", async () => {
+    const user = userEvent.setup();
+    mockFormValues = {
+      name: "Manual Chat Relay",
+      websiteUrl: "https://relay.example",
+      settingsConfig: JSON.stringify({
+        auth: { OPENAI_API_KEY: "secret" },
+        apiFormat: "openai_chat",
+        config:
+          'model = "model-a"\nmodel_provider = "relay"\n[model_providers.relay]\nbase_url = "https://relay.example/v1"\nwire_api = "chat"\n',
+        modelCatalog: { models: [{ model: "model-a" }] },
+      }),
+      meta: {
+        apiFormat: "openai_chat",
+        codexProtocolMode: "manual",
+      },
+      protocolProbeReceiptIds: ["receipt-model-a"],
+    };
+
+    render(
+      <AddProviderDialog
+        open
+        onOpenChange={vi.fn()}
+        appId="codex"
+        onSubmit={vi.fn()}
+      />,
+    );
+    await user.click(screen.getByRole("tab", { name: "单独接入模型源" }));
+    await user.click(screen.getByRole("button", { name: "common.add" }));
+
+    await waitFor(() =>
+      expect(universalProtocolMocks.commitCodex).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: "Manual Chat Relay",
+          meta: expect.objectContaining({
+            apiFormat: "openai_chat",
+            codexProtocolMode: "manual",
+          }),
+        }),
+        ["receipt-model-a"],
+        "codex-provider-digest",
+        "confirm_manual",
+      ),
+    );
+    expect(universalProtocolMocks.preflightCodex).not.toHaveBeenCalled();
   });
 
   it("普通 Codex 混合结果只确认一次后端拆分事务", async () => {
@@ -295,9 +353,7 @@ describe("AddProviderDialog", () => {
     expect(screen.getAllByText("model-a").length).toBeGreaterThan(0);
     expect(screen.getAllByText("model-b").length).toBeGreaterThan(0);
 
-    await user.click(
-      screen.getByRole("button", { name: "确认按协议拆分" }),
-    );
+    await user.click(screen.getByRole("button", { name: "确认按协议拆分" }));
 
     await waitFor(() =>
       expect(universalProtocolMocks.commitCodex).toHaveBeenCalledWith(

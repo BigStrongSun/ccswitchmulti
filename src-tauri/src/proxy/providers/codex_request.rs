@@ -26,7 +26,8 @@ use super::{
     CodexAdapter, ProviderAdapter,
 };
 
-pub(crate) const CODEX_REQUEST_PREPARER_VERSION: u32 = 6;
+pub(crate) const CODEX_REQUEST_PREPARER_VERSION: u32 = 7;
+const DEFAULT_THIRD_PARTY_USER_AGENT: &str = concat!("CCSwitchMulti/", env!("CARGO_PKG_VERSION"));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CodexRequestTransport {
@@ -267,20 +268,16 @@ impl CodexThirdPartyRequestPolicy {
             HeaderValue::from_static("application/json"),
         );
 
-        if let Some(user_agent) = self
-            .provider
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.custom_user_agent_header().ok().flatten())
-        {
-            headers.insert(header::USER_AGENT, user_agent);
-        }
         apply_provider_header_overrides(
             &mut headers,
             self.provider
                 .meta
                 .as_ref()
                 .and_then(|meta| meta.local_proxy_request_overrides.as_ref()),
+        );
+        headers.insert(
+            header::USER_AGENT,
+            effective_third_party_user_agent(&self.provider),
         );
         headers
     }
@@ -397,14 +394,6 @@ pub(crate) fn apply_provider_body_policy(provider: &Provider, body: Value) -> Va
 }
 
 pub(crate) fn apply_provider_header_policy(provider: &Provider, headers: &mut HeaderMap) {
-    if let Ok(Some(user_agent)) = provider
-        .meta
-        .as_ref()
-        .map(|meta| meta.custom_user_agent_header())
-        .unwrap_or(Ok(None))
-    {
-        headers.insert(header::USER_AGENT, user_agent);
-    }
     apply_provider_header_overrides(
         headers,
         provider
@@ -412,6 +401,18 @@ pub(crate) fn apply_provider_header_policy(provider: &Provider, headers: &mut He
             .as_ref()
             .and_then(|meta| meta.local_proxy_request_overrides.as_ref()),
     );
+    headers.insert(
+        header::USER_AGENT,
+        effective_third_party_user_agent(provider),
+    );
+}
+
+pub(crate) fn effective_third_party_user_agent(provider: &Provider) -> HeaderValue {
+    provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.custom_user_agent_header().ok().flatten())
+        .unwrap_or_else(|| HeaderValue::from_static(DEFAULT_THIRD_PARTY_USER_AGENT))
 }
 
 fn apply_provider_body_overrides(body: &mut Value, overrides: &LocalProxyRequestOverrides) -> bool {

@@ -13,6 +13,7 @@ describe("CodexProtocolAdvancedSettings", () => {
         toolSchemaDialect="openai"
         historyReplay="native_only"
         onModeChange={vi.fn()}
+        onApiFormatChange={vi.fn()}
         onReasoningProjectionChange={vi.fn()}
         onToolSchemaDialectChange={vi.fn()}
         onHistoryReplayChange={vi.fn()}
@@ -25,6 +26,7 @@ describe("CodexProtocolAdvancedSettings", () => {
   });
 
   it("shows protocol-specific manual controls and an explicit risk warning", () => {
+    const onApiFormatChange = vi.fn();
     const { rerender } = render(
       <CodexProtocolAdvancedSettings
         mode="manual"
@@ -33,6 +35,7 @@ describe("CodexProtocolAdvancedSettings", () => {
         toolSchemaDialect="moonshot_mfjs"
         historyReplay="omit"
         onModeChange={vi.fn()}
+        onApiFormatChange={onApiFormatChange}
         onReasoningProjectionChange={vi.fn()}
         onToolSchemaDialectChange={vi.fn()}
         onHistoryReplayChange={vi.fn()}
@@ -40,6 +43,9 @@ describe("CodexProtocolAdvancedSettings", () => {
     );
 
     expect(screen.getByText("工具 Schema")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("combobox", { name: "最终使用协议" }));
+    fireEvent.click(screen.getByText("Responses"));
+    expect(onApiFormatChange).toHaveBeenCalledWith("openai_responses");
     expect(screen.getByText("Chat 推理展示")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("combobox", { name: "Chat 推理展示" }));
     expect(screen.queryByText("上游原生摘要")).not.toBeInTheDocument();
@@ -54,6 +60,7 @@ describe("CodexProtocolAdvancedSettings", () => {
         toolSchemaDialect="openai"
         historyReplay="responses_reasoning_text_content"
         onModeChange={vi.fn()}
+        onApiFormatChange={vi.fn()}
         onReasoningProjectionChange={vi.fn()}
         onToolSchemaDialectChange={vi.fn()}
         onHistoryReplayChange={vi.fn()}

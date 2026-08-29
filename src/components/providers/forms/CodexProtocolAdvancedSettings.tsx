@@ -21,6 +21,7 @@ interface CodexProtocolAdvancedSettingsProps {
   toolSchemaDialect: CodexToolSchemaDialect;
   historyReplay: CodexHistoryReplay;
   onModeChange: (value: CodexProtocolMode) => void;
+  onApiFormatChange: (value: CodexApiFormat) => void;
   onReasoningProjectionChange: (value: CodexReasoningProjection) => void;
   onToolSchemaDialectChange: (value: CodexToolSchemaDialect) => void;
   onHistoryReplayChange: (value: CodexHistoryReplay) => void;
@@ -33,6 +34,7 @@ export function CodexProtocolAdvancedSettings({
   toolSchemaDialect,
   historyReplay,
   onModeChange,
+  onApiFormatChange,
   onReasoningProjectionChange,
   onToolSchemaDialectChange,
   onHistoryReplayChange,
@@ -54,12 +56,34 @@ export function CodexProtocolAdvancedSettings({
 
       {mode === "auto" ? (
         <p className="text-xs leading-relaxed text-muted-foreground">
-          保存前会自动测试 Responses 与
-          Chat、流式响应、工具调用和历史续轮，并采用可完成真实 Codex
-          工作流的协议。不会保存手动兼容性覆盖。
+          保存前会自动测试 Responses 与 Chat、流式响应、工具调用和历史续轮；
+          “自动推荐”来自探测证据，最终保存时采用能够完成真实 Codex
+          工作流的协议。
         </p>
       ) : (
         <div className="space-y-3">
+          <div className="space-y-1.5">
+            <Label>最终使用协议</Label>
+            <Select
+              value={apiFormat}
+              onValueChange={(value) =>
+                onApiFormatChange(value as CodexApiFormat)
+              }
+            >
+              <SelectTrigger aria-label="最终使用协议">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="openai_chat">Chat Completions</SelectItem>
+                <SelectItem value="openai_responses">Responses</SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              这里仅覆盖最终保存和运行时使用的协议，不会改写或删除 Responses /
+              Chat 的独立探测证据与自动推荐。
+            </p>
+          </div>
+
           <div className="space-y-1.5">
             <Label>工具 Schema</Label>
             <Select
@@ -124,8 +148,9 @@ export function CodexProtocolAdvancedSettings({
           )}
 
           <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-xs leading-relaxed text-amber-900 dark:text-amber-200">
-            手动覆盖会跳过自动探测。错误配置可能造成 HTTP
-            400/422、工具续轮失败，或推理内容不可见；仅在自动探测无法完成时使用。
+            已完成的自动探测会继续保留；如果没有对应协议的 Verified
+            证据，手动覆盖可能造成 HTTP
+            400/422、工具续轮失败，或推理内容不可见。
           </div>
         </div>
       )}

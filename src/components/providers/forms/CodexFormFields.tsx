@@ -485,7 +485,6 @@ interface CodexProviderReadinessIdentityInput {
   customUserAgent: string;
   localProxyHeadersOverride: string;
   localProxyBodyOverride: string;
-  apiFormat: CodexApiFormat;
   anthropicAuthField: ClaudeApiKeyField;
   impersonateClaudeCode: boolean;
   maxOutputTokens: string;
@@ -512,7 +511,6 @@ function buildCodexProviderReadinessIdentity({
   customUserAgent,
   localProxyHeadersOverride,
   localProxyBodyOverride,
-  apiFormat,
   anthropicAuthField,
   impersonateClaudeCode,
   maxOutputTokens,
@@ -546,7 +544,6 @@ function buildCodexProviderReadinessIdentity({
       localProxyBodyOverride,
     },
     protocol: {
-      apiFormat,
       impersonateClaudeCode,
       maxOutputTokens,
       codexChatReasoning,
@@ -570,7 +567,6 @@ function buildCodexProviderReadinessIdentity({
         model.baseInstructions ?? model.base_instructions ?? null,
       reasoning: model.reasoning ?? null,
       codexUltra: model.codexUltra ?? null,
-      apiFormat: model.apiFormat ?? model.api_format ?? null,
       codexCache: model.codexCache ?? model.codex_cache ?? null,
       sortIndex: model.sortIndex ?? null,
     })),
@@ -892,7 +888,7 @@ export function CodexFormFields({
   }, [catalogRows]);
 
   const buildReadinessIdentityFor = useCallback(
-    (nextApiFormat: CodexApiFormat, nextCatalogModels: CodexCatalogModel[]) =>
+    (nextCatalogModels: CodexCatalogModel[]) =>
       buildCodexProviderReadinessIdentity({
         providerId,
         providerName,
@@ -908,7 +904,6 @@ export function CodexFormFields({
         customUserAgent,
         localProxyHeadersOverride,
         localProxyBodyOverride,
-        apiFormat: nextApiFormat,
         anthropicAuthField,
         impersonateClaudeCode,
         maxOutputTokens,
@@ -941,8 +936,8 @@ export function CodexFormFields({
     ],
   );
   const readinessIdentity = useMemo(
-    () => buildReadinessIdentityFor(apiFormat, catalogRows),
-    [apiFormat, buildReadinessIdentityFor, catalogRows],
+    () => buildReadinessIdentityFor(catalogRows),
+    [buildReadinessIdentityFor, catalogRows],
   );
   const readinessIdentityRef = useRef(readinessIdentity);
   readinessIdentityRef.current = readinessIdentity;
@@ -1304,7 +1299,6 @@ export function CodexFormFields({
 
       if (allResponses) {
         const resultIdentity = buildReadinessIdentityFor(
-          "openai_responses",
           catalogRowsRef.current,
         );
         bindProtocolProbeIdentity(resultIdentity);
@@ -1322,7 +1316,6 @@ export function CodexFormFields({
       }
       if (allChat) {
         const resultIdentity = buildReadinessIdentityFor(
-          "openai_chat",
           catalogRowsRef.current,
         );
         bindProtocolProbeIdentity(resultIdentity);
@@ -1350,10 +1343,7 @@ export function CodexFormFields({
         allVerified && hasMixedVerifiedTransports
           ? `深度探测完成：不同模型选择了不同协议；${resultCounts}。保存时将自动拆分为两个同协议 Provider，并仍作为一个模型源使用。`
           : `深度探测完成：存在 Partial/Failed 模型，当前不能自动保存；${resultCounts}。请查看失败阶段并重试。`;
-      const resultIdentity = buildReadinessIdentityFor(
-        apiFormat,
-        catalogRowsRef.current,
-      );
+      const resultIdentity = buildReadinessIdentityFor(catalogRowsRef.current);
       bindProtocolProbeIdentity(resultIdentity);
       const tone = allVerified
         ? "success"
@@ -2237,6 +2227,7 @@ export function CodexFormFields({
                       toolSchemaDialect={toolSchemaDialect}
                       historyReplay={historyReplay}
                       onModeChange={onProtocolModeChange}
+                      onApiFormatChange={onApiFormatChange}
                       onReasoningProjectionChange={onReasoningProjectionChange}
                       onToolSchemaDialectChange={onToolSchemaDialectChange}
                       onHistoryReplayChange={onHistoryReplayChange}

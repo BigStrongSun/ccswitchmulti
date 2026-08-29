@@ -117,6 +117,7 @@ export interface CodexProtocolCompatibilityRecord {
     endpoint_fingerprint: string;
     authentication_kind: string;
     credential_fingerprint: string;
+    request_policy_fingerprint: string;
   };
   result: {
     selected_transport: CodexProtocolTransport | null;
@@ -130,6 +131,7 @@ export interface CodexProtocolCompatibilityRecord {
 export interface CodexProviderProtocolPreflightOutcome {
   provider: Provider;
   records: CodexProtocolCompatibilityRecord[];
+  observations: CodexProtocolCompatibilityRecord[];
   receiptIds: string[];
   protocolApplied: boolean;
 }
@@ -269,6 +271,15 @@ export async function preflightUniversalCodexProtocolCompatibility(
   return invoke<CodexProviderProtocolPreflightOutcome | null>(
     "preflight_universal_codex_protocol_compatibility",
     { provider, onEvent },
+  );
+}
+
+export async function listCodexProtocolProbeObservations(
+  providerId: string,
+): Promise<CodexProtocolCompatibilityRecord[]> {
+  return invoke<CodexProtocolCompatibilityRecord[]>(
+    "list_codex_protocol_probe_observations",
+    { providerId },
   );
 }
 

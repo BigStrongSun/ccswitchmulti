@@ -1602,6 +1602,7 @@ pub fn run() {
             commands::prepare_codex_provider_set_batch,
             commands::commit_codex_provider_set_batch,
             commands::get_codex_protocol_compatibility,
+            commands::list_codex_protocol_probe_observations,
             commands::plan_codex_reasoning_override,
             commands::apply_codex_reasoning_override,
             commands::clear_codex_reasoning_override,

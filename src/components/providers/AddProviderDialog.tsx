@@ -482,6 +482,11 @@ export function AddProviderDialog({
           <TabsContent value="app-specific" className="mt-0">
             <ProviderForm
               appId={appId}
+              providerId={
+                isCodexRouterEntry
+                  ? (codexDraftProviderIdRef.current ?? undefined)
+                  : undefined
+              }
               submitLabel={t("common.add")}
               onSubmit={handleSubmit}
               onCancel={() => onOpenChange(false)}

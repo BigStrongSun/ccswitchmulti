@@ -318,9 +318,60 @@ describe("EditProviderDialog", () => {
         "accept_single",
       ),
     );
-    expect(apiMocks.preflightCodexProviderProtocolCompatibility).not.toHaveBeenCalled();
+    expect(
+      apiMocks.preflightCodexProviderProtocolCompatibility,
+    ).not.toHaveBeenCalled();
     expect(handleSubmit).not.toHaveBeenCalled();
     expect(handleOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("Codex 编辑手动 Chat 覆盖保留 receipt 并以 confirm_manual 提交", async () => {
+    const provider: Provider = {
+      id: "deepseek",
+      name: "DeepSeek",
+      category: "custom",
+      settingsConfig: {
+        auth: { OPENAI_API_KEY: "db-key" },
+        config:
+          'model_provider = "deepseek"\nmodel = "deepseek-v4"\n[model_providers.deepseek]\nbase_url = "https://api.deepseek.com/v1"\nwire_api = "chat"\n',
+        modelCatalog: { models: [{ model: "deepseek-v4" }] },
+      },
+      meta: {
+        apiFormat: "openai_chat",
+        codexProtocolMode: "manual",
+      },
+    };
+    formSubmission.receiptIds = ["receipt-deepseek-v4"];
+
+    render(
+      <EditProviderDialog
+        open
+        provider={provider}
+        onOpenChange={vi.fn()}
+        onSubmit={vi.fn()}
+        appId="codex"
+        isProxyTakeover
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+
+    await waitFor(() =>
+      expect(apiMocks.commitCodexProviderSet).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: "deepseek",
+          meta: expect.objectContaining({
+            apiFormat: "openai_chat",
+            codexProtocolMode: "manual",
+          }),
+        }),
+        ["receipt-deepseek-v4"],
+        "edit-digest",
+        "confirm_manual",
+      ),
+    );
+    expect(
+      apiMocks.preflightCodexProviderProtocolCompatibility,
+    ).not.toHaveBeenCalled();
   });
 
   it("编辑自动拆分门面时加载一个恢复后的逻辑 Provider，而不展示 Router 叶子配置", async () => {

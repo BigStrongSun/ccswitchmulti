@@ -4700,6 +4700,53 @@ requires_openai_auth = true
         assert_ne!(saved.sort_index, Some(42));
         assert!(saved.settings_config.get("subagentV2").is_none());
     }
+
+    #[test]
+    fn generated_leaf_cannot_query_persisted_protocol_observations() {
+        let db = Arc::new(Database::memory().expect("memory db"));
+        let state = AppState::new(db.clone());
+        let leaf = generated_codex_provider_set_leaf("relay::chat", "relay");
+        db.save_provider(AppType::Codex.as_str(), &leaf)
+            .expect("save leaf");
+        let transport = crate::protocol_compatibility::TransportKind::OpenAiChat;
+        let observation = ProtocolCompatibilityRecord::new(
+            crate::protocol_compatibility::ProbeTargetKey::new(
+                &leaf.id,
+                None::<String>,
+                "model-a",
+                "model-a",
+                transport,
+                "https://example.invalid/v1/chat/completions",
+                "bearer",
+            )
+            .expect("build observation target"),
+            crate::protocol_compatibility::ProtocolCompatibilityProbeResult {
+                selected_transport: Some(transport),
+                readiness: crate::protocol_compatibility::ProbeReadiness::Verified,
+                branches: Vec::new(),
+            },
+            1,
+            i64::MAX,
+        );
+        db.save_protocol_probe_observations(&[observation])
+            .expect("save leaf observation");
+        assert_eq!(
+            db.list_protocol_probe_observations(&leaf.id)
+                .expect("DAO proves observation exists")
+                .len(),
+            1
+        );
+
+        let error = ProviderService::list_codex_protocol_probe_observations(&state, &leaf.id)
+            .expect_err("generated leaf observations must stay internal");
+
+        assert!(
+            error
+                .to_string()
+                .contains("codex_provider_set_generated_leaf_not_operable"),
+            "unexpected error: {error}"
+        );
+    }
 }
 
 impl ProviderService {
@@ -4734,6 +4781,18 @@ impl ProviderService {
             Self::ensure_codex_provider_is_user_operable(app_type, &provider)?;
         }
         Ok(())
+    }
+
+    pub(crate) fn list_codex_protocol_probe_observations(
+        state: &AppState,
+        provider_id: &str,
+    ) -> Result<Vec<ProtocolCompatibilityRecord>, AppError> {
+        let provider = state
+            .db
+            .get_provider_by_id(provider_id, AppType::Codex.as_str())?
+            .ok_or_else(|| AppError::InvalidInput("Codex provider does not exist".to_string()))?;
+        Self::ensure_codex_provider_is_user_operable(&AppType::Codex, &provider)?;
+        state.db.list_protocol_probe_observations(provider_id)
     }
 
     fn normalize_provider_if_claude(app_type: &AppType, provider: &mut Provider) {

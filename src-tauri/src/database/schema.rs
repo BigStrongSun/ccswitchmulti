@@ -259,6 +259,7 @@ impl Database {
         .map_err(|e| AppError::Database(e.to_string()))?;
 
         Self::create_protocol_compatibility_tables(conn)?;
+        Self::create_protocol_probe_observation_tables(conn)?;
         Self::create_reasoning_manual_override_tables(conn)?;
 
         // 注意：circuit_breaker_config 已合并到 proxy_config 表中
@@ -535,6 +536,11 @@ impl Database {
                         log::info!("迁移数据库从 v17 到 v18（添加 Codex reasoning 手工覆盖）");
                         Self::migrate_v17_to_v18(conn)?;
                         Self::set_user_version(conn, 18)?;
+                    }
+                    18 => {
+                        log::info!("迁移数据库从 v18 到 v19（添加分协议探测证据）");
+                        Self::migrate_v18_to_v19(conn)?;
+                        Self::set_user_version(conn, 19)?;
                     }
                     _ => {
                         return Err(AppError::Database(format!(
@@ -1567,6 +1573,10 @@ impl Database {
         Self::create_reasoning_manual_override_tables(conn)
     }
 
+    fn migrate_v18_to_v19(conn: &Connection) -> Result<(), AppError> {
+        Self::create_protocol_probe_observation_tables(conn)
+    }
+
     fn create_protocol_compatibility_tables(conn: &Connection) -> Result<(), AppError> {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS protocol_compatibility_profiles (
@@ -1590,6 +1600,32 @@ impl Database {
         )
         .map_err(|error| {
             AppError::Database(format!("创建 protocol_compatibility_profiles 失败: {error}"))
+        })
+    }
+
+    fn create_protocol_probe_observation_tables(conn: &Connection) -> Result<(), AppError> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS protocol_probe_observations (
+                target_key TEXT PRIMARY KEY,
+                provider_id TEXT NOT NULL,
+                route_id TEXT,
+                public_model TEXT NOT NULL,
+                upstream_model TEXT NOT NULL,
+                transport TEXT NOT NULL,
+                endpoint_fingerprint TEXT NOT NULL,
+                authentication_kind TEXT NOT NULL,
+                readiness TEXT NOT NULL,
+                observation_json TEXT NOT NULL,
+                tested_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_protocol_probe_observations_provider
+             ON protocol_probe_observations(provider_id, route_id, public_model, tested_at DESC);
+             CREATE INDEX IF NOT EXISTS idx_protocol_probe_observations_expiry
+             ON protocol_probe_observations(expires_at);",
+        )
+        .map_err(|error| {
+            AppError::Database(format!("创建 protocol_probe_observations 失败: {error}"))
         })
     }
 

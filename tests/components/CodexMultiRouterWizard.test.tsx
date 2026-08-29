@@ -93,26 +93,28 @@ function verifiedPreflight(
     provider: source,
     receiptIds: models.map((model: string) => `receipt:${source.id}:${model}`),
     protocolApplied: false,
+    observations: [],
     records: models.map((model: string) => ({
-        probeVersion: 1,
-        target: {
-          provider_id: source.id,
-          route_id: null,
-          public_model: model,
-          upstream_model: model,
-          transport,
-          endpoint_fingerprint: "endpoint",
-          authentication_kind: "bearer",
-          credential_fingerprint: "credential",
-        },
-        result: {
-          selected_transport: transport,
-          readiness: "verified",
-          branches: [],
-        },
-        testedAt: 100,
-        expiresAt: 200,
-      })),
+      probeVersion: 1,
+      target: {
+        provider_id: source.id,
+        route_id: null,
+        public_model: model,
+        upstream_model: model,
+        transport,
+        endpoint_fingerprint: "endpoint",
+        authentication_kind: "bearer",
+        credential_fingerprint: "credential",
+        request_policy_fingerprint: "policy",
+      },
+      result: {
+        selected_transport: transport,
+        readiness: "verified",
+        branches: [],
+      },
+      testedAt: 100,
+      expiresAt: 200,
+    })),
   };
 }
 
@@ -151,9 +153,7 @@ beforeEach(() => {
 
 async function completeWizardDeepProbe() {
   fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
-  fireEvent.click(
-    screen.getByRole("button", { name: "开始兼容性深度探测" }),
-  );
+  fireEvent.click(screen.getByRole("button", { name: "开始兼容性深度探测" }));
   fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
   fireEvent.click(await screen.findByRole("button", { name: "关闭" }));
 }
@@ -173,9 +173,7 @@ describe("CodexMultiRouterWizard", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
-    fireEvent.click(
-      screen.getByRole("button", { name: "开始兼容性深度探测" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "开始兼容性深度探测" }));
     fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
     await waitFor(() =>
       expect(preflightCodexProviderProtocolCompatibility).toHaveBeenCalledWith(
@@ -183,9 +181,7 @@ describe("CodexMultiRouterWizard", () => {
         expect.any(Function),
       ),
     );
-    fireEvent.click(
-      await screen.findByRole("button", { name: "关闭" }),
-    );
+    fireEvent.click(await screen.findByRole("button", { name: "关闭" }));
 
     fireEvent.click(screen.getByRole("button", { name: "启用并验证" }));
     fireEvent.click(
@@ -237,9 +233,7 @@ describe("CodexMultiRouterWizard", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
-    fireEvent.click(
-      screen.getByRole("button", { name: "开始兼容性深度探测" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "开始兼容性深度探测" }));
     fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
 
     expect(
@@ -280,9 +274,7 @@ describe("CodexMultiRouterWizard", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
-    fireEvent.click(
-      screen.getByRole("button", { name: "开始兼容性深度探测" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "开始兼容性深度探测" }));
     fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
     fireEvent.click(await screen.findByRole("button", { name: "关闭" }));
     fireEvent.click(screen.getByRole("button", { name: "启用并验证" }));
@@ -292,9 +284,7 @@ describe("CodexMultiRouterWizard", () => {
 
     expect(await screen.findByText("按协议自动拆分")).toBeInTheDocument();
     expect(commitCodexProviderSetBatch).not.toHaveBeenCalled();
-    fireEvent.click(
-      screen.getByRole("button", { name: "确认按协议拆分" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "确认按协议拆分" }));
     await waitFor(() =>
       expect(commitCodexProviderSetBatch).toHaveBeenCalledWith(
         expect.any(Array),
@@ -342,9 +332,7 @@ describe("CodexMultiRouterWizard", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
-    fireEvent.click(
-      screen.getByRole("button", { name: "开始兼容性深度探测" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "开始兼容性深度探测" }));
     fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
     fireEvent.click(await screen.findByRole("button", { name: "关闭" }));
     fireEvent.click(screen.getByRole("button", { name: "启用并验证" }));
@@ -785,13 +773,9 @@ describe("CodexMultiRouterWizard", () => {
     await waitFor(() =>
       expect(fetchCodexOauthModels).toHaveBeenCalledWith("account-56"),
     );
-    expect(
-      await screen.findByText(/已载入草稿 2 个模型/),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/已载入草稿 2 个模型/)).toBeInTheDocument();
     expect(providersApi.update).not.toHaveBeenCalled();
-    fireEvent.click(
-      screen.getByRole("button", { name: "选择模型并预览路由" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "选择模型并预览路由" }));
     expect(screen.getByLabelText("保留 gpt-5.6-sol")).toBeInTheDocument();
     expect(fetchModelsForConfig).not.toHaveBeenCalled();
   });
@@ -872,9 +856,7 @@ describe("CodexMultiRouterWizard", () => {
       screen.getByText(/OAuth 在线模型列表获取失败，已使用本地缓存/),
     ).toBeInTheDocument();
     expect(providersApi.update).not.toHaveBeenCalled();
-    fireEvent.click(
-      screen.getByRole("button", { name: "选择模型并预览路由" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "选择模型并预览路由" }));
     expect(screen.getByLabelText("保留 gpt-5.6-luna")).toBeInTheDocument();
   });
 
@@ -910,7 +892,8 @@ describe("CodexMultiRouterWizard", () => {
     await waitFor(() =>
       expect(commitCodexProviderSetBatch).toHaveBeenCalledTimes(1),
     );
-    const savedProvider = vi.mocked(commitCodexProviderSetBatch).mock.calls[0][1];
+    const savedProvider = vi.mocked(commitCodexProviderSetBatch).mock
+      .calls[0][1];
     expect(
       savedProvider.settingsConfig.codexRouting.routes.map(
         (route: { id: string }) => route.id,
@@ -952,13 +935,9 @@ describe("CodexMultiRouterWizard", () => {
       screen.getByRole("button", { name: "自动获取模型列表（暂存）" }),
     );
 
-    expect(
-      await screen.findByText(/已载入草稿 1 个模型/),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/已载入草稿 1 个模型/)).toBeInTheDocument();
     expect(providersApi.update).not.toHaveBeenCalled();
-    fireEvent.click(
-      screen.getByRole("button", { name: "选择模型并预览路由" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "选择模型并预览路由" }));
     expect(screen.getByLabelText("保留 deepseek-chat")).toBeInTheDocument();
     expect(
       screen.queryByLabelText("保留 deepseek-reasoner"),
@@ -1255,9 +1234,7 @@ describe("CodexMultiRouterWizard", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
-    fireEvent.click(
-      screen.getByRole("button", { name: "开始兼容性深度探测" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "开始兼容性深度探测" }));
     fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
     expect(
       await screen.findByText("状态机：connectivityPartial"),
@@ -1272,7 +1249,8 @@ describe("CodexMultiRouterWizard", () => {
     await waitFor(() => {
       expect(commitCodexProviderSetBatch).toHaveBeenCalledTimes(1);
     });
-    const savedProvider = vi.mocked(commitCodexProviderSetBatch).mock.calls[0][1];
+    const savedProvider = vi.mocked(commitCodexProviderSetBatch).mock
+      .calls[0][1];
     expect(savedProvider.settingsConfig.codexRouting.routes[0]).toMatchObject({
       targetProviderId: "relay",
     });
@@ -1374,7 +1352,8 @@ describe("CodexMultiRouterWizard", () => {
     await waitFor(() => {
       expect(commitCodexProviderSetBatch).toHaveBeenCalledTimes(1);
     });
-    const savedProvider = vi.mocked(commitCodexProviderSetBatch).mock.calls[0][1];
+    const savedProvider = vi.mocked(commitCodexProviderSetBatch).mock
+      .calls[0][1];
     expect(savedProvider.name).toBe("Work MultiRouter");
     expect(savedProvider.settingsConfig).not.toHaveProperty("modelCatalog");
     expect(savedProvider.settingsConfig.codexRouting.spawnAgentModels).toEqual(
@@ -1398,9 +1377,7 @@ describe("CodexMultiRouterWizard", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
-    fireEvent.click(
-      screen.getByRole("button", { name: "开始兼容性深度探测" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "开始兼容性深度探测" }));
     expect(screen.getByText("确认开始兼容性深度探测")).toBeInTheDocument();
     expect(screen.getAllByRole("dialog").at(-1)).toHaveClass("z-[200]");
     fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
@@ -1447,9 +1424,9 @@ describe("CodexMultiRouterWizard", () => {
   });
 
   it("shows responses probe command exceptions and blocks continuation", async () => {
-    vi.mocked(preflightCodexProviderProtocolCompatibility).mockRejectedValueOnce(
-      new Error("ipc invoke failed"),
-    );
+    vi.mocked(
+      preflightCodexProviderProtocolCompatibility,
+    ).mockRejectedValueOnce(new Error("ipc invoke failed"));
 
     renderWithQueryClient(
       <CodexMultiRouterWizard
@@ -1463,9 +1440,7 @@ describe("CodexMultiRouterWizard", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "自动准备与验证" }));
-    fireEvent.click(
-      screen.getByRole("button", { name: "开始兼容性深度探测" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "开始兼容性深度探测" }));
     fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
 
     expect(await screen.findByText("兼容性深度探测中断")).toBeInTheDocument();

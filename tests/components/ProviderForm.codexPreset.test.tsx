@@ -81,6 +81,8 @@ vi.mock("@/components/providers/forms/CodexFormFields", () => ({
     onApiKeyChange,
     onCatalogModelsChange,
     onProtocolProbeReceiptIdsChange,
+    onProtocolModeChange,
+    onApiFormatChange,
   }: {
     codexApiKey: string;
     codexBaseUrl: string;
@@ -97,6 +99,8 @@ vi.mock("@/components/providers/forms/CodexFormFields", () => ({
       models: Array<{ model: string; contextWindow?: number | string }>,
     ) => void;
     onProtocolProbeReceiptIdsChange?: (receiptIds: string[]) => void;
+    onProtocolModeChange?: (mode: "auto" | "manual") => void;
+    onApiFormatChange?: (format: "openai_chat" | "openai_responses") => void;
   }) => (
     <section aria-label="codex-provider-details">
       <div data-testid="codex-api-key">{codexApiKey}</div>
@@ -129,11 +133,18 @@ vi.mock("@/components/providers/forms/CodexFormFields", () => ({
       </button>
       <button
         type="button"
-        onClick={() =>
-          onProtocolProbeReceiptIdsChange?.(["receipt-model-a"])
-        }
+        onClick={() => onProtocolProbeReceiptIdsChange?.(["receipt-model-a"])}
       >
         mock-set-probe-receipts
+      </button>
+      <button
+        type="button"
+        onClick={() => {
+          onProtocolModeChange?.("manual");
+          onApiFormatChange?.("openai_chat");
+        }}
+      >
+        mock-set-manual-chat
       </button>
     </section>
   ),
@@ -263,6 +274,45 @@ describe("ProviderForm Codex preset selection", () => {
     expect(
       JSON.parse(onSubmit.mock.calls[0][0].settingsConfig),
     ).not.toHaveProperty("protocolProbeReceiptIds");
+  });
+
+  it("keeps deep-probe receipts when advanced mode selects Chat as the final protocol", async () => {
+    const onSubmit = vi.fn();
+    renderProviderForm({
+      showButtons: true,
+      submitLabel: "保存",
+      onSubmit,
+      initialData: {
+        name: "Third-party relay",
+        category: "custom",
+        settingsConfig: {
+          auth: { OPENAI_API_KEY: "sk-test" },
+          config:
+            'model_provider = "relay"\nmodel = "model-a"\n[model_providers.relay]\nbase_url = "https://relay.example/v1"\nwire_api = "responses"\n',
+          modelCatalog: { models: [{ model: "model-a" }] },
+        },
+        meta: { apiFormat: "openai_responses" },
+      },
+    });
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "mock-set-probe-receipts" }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "mock-set-manual-chat" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
+    expect(onSubmit.mock.calls[0][0].protocolProbeReceiptIds).toEqual([
+      "receipt-model-a",
+    ]);
+    expect(onSubmit.mock.calls[0][0].meta).toEqual(
+      expect.objectContaining({
+        codexProtocolMode: "manual",
+        apiFormat: "openai_chat",
+      }),
+    );
   });
 
   it("scrolls to Codex provider details after selecting any Codex source preset", async () => {

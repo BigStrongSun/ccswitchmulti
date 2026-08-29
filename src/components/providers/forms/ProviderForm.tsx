@@ -1749,9 +1749,7 @@ function ProviderFormFull({
       name: values.name.trim(),
       websiteUrl: values.websiteUrl?.trim() ?? "",
       settingsConfig,
-      ...(appId === "codex" &&
-      codexProtocolMode !== "manual" &&
-      codexProtocolProbeReceiptIds.length > 0
+      ...(appId === "codex" && codexProtocolProbeReceiptIds.length > 0
         ? { protocolProbeReceiptIds: [...codexProtocolProbeReceiptIds] }
         : {}),
     };

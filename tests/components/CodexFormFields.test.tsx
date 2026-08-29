@@ -143,6 +143,7 @@ function createDeepProbeRecord(
       endpoint_fingerprint: "redacted-endpoint",
       authentication_kind: "bearer",
       credential_fingerprint: "redacted-credential",
+      request_policy_fingerprint: "redacted-policy",
     },
     result: {
       selected_transport: selectedTransport,
@@ -187,6 +188,7 @@ function createDeepProbeOutcome(
       settingsConfig: {},
     },
     records,
+    observations: records,
     receiptIds: records.map(
       (record) => `receipt-${record.target.public_model}`,
     ),
@@ -419,6 +421,7 @@ interface ReadinessIdentityState {
   customUserAgent: string;
   headersOverride: string;
   apiFormat: CodexApiFormat;
+  protocolMode: CodexProtocolMode;
   defaultModel: string;
   catalog: CodexCatalogModel[];
 }
@@ -433,6 +436,7 @@ function renderReadinessIdentityHarness(
     customUserAgent: "ccswitch-old",
     headersOverride: '{"X-Route":"old"}',
     apiFormat: "openai_chat",
+    protocolMode: "auto",
     defaultModel: "model-a",
     catalog: [
       {
@@ -445,6 +449,7 @@ function renderReadinessIdentityHarness(
     ...overrides,
   };
   const onApiFormatChange = vi.fn();
+  const onProtocolProbeReceiptIdsChange = vi.fn();
   let patchIdentity: (patch: Partial<ReadinessIdentityState>) => void = () => {
     throw new Error("readiness identity harness is not mounted");
   };
@@ -483,6 +488,8 @@ function renderReadinessIdentityHarness(
           onApiFormatChange(apiFormat);
           patchIdentity({ apiFormat });
         }}
+        protocolMode={identity.protocolMode}
+        onProtocolModeChange={(protocolMode) => patchIdentity({ protocolMode })}
         catalogModels={identity.catalog}
         onCatalogModelsChange={(catalog) => patchIdentity({ catalog })}
         spawnAgentModels={[]}
@@ -499,6 +506,7 @@ function renderReadinessIdentityHarness(
         }
         localProxyBodyOverride=""
         onLocalProxyBodyOverrideChange={vi.fn()}
+        onProtocolProbeReceiptIdsChange={onProtocolProbeReceiptIdsChange}
       />
     );
   }
@@ -507,6 +515,7 @@ function renderReadinessIdentityHarness(
   return {
     ...renderResult,
     onApiFormatChange,
+    onProtocolProbeReceiptIdsChange,
     updateIdentity(patch: Partial<ReadinessIdentityState>) {
       act(() => patchIdentity(patch));
     },
@@ -1134,7 +1143,6 @@ describe("CodexFormFields local model routing", () => {
       { selectedAccountId: "account-new" },
       { customUserAgent: "ccswitch-new" },
       { headersOverride: '{"X-Route":"new"}' },
-      { apiFormat: "openai_responses" },
       { defaultModel: "model-a-alias" },
       {
         catalog: [
@@ -1153,6 +1161,42 @@ describe("CodexFormFields local model routing", () => {
       await expectInvalidated();
       await validateCurrentIdentity();
     }
+  });
+
+  it("retains probe evidence when manual mode overrides the final protocol", async () => {
+    const records = [createDeepProbeRecord("model-a", "open_ai_responses")];
+    vi.mocked(
+      preflightCodexProviderProtocolCompatibility,
+    ).mockImplementationOnce(async (_provider, onProgress) => {
+      emitFinishedProgress(records, onProgress);
+      return createDeepProbeOutcome(records);
+    });
+    const { updateIdentity, onProtocolProbeReceiptIdsChange } =
+      renderReadinessIdentityHarness();
+
+    fireEvent.click(screen.getByRole("button", { name: "验证连接" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
+    expect(await screen.findByText("可加入 MultiRouter")).toBeInTheDocument();
+    onProtocolProbeReceiptIdsChange.mockClear();
+
+    updateIdentity({
+      protocolMode: "manual",
+      apiFormat: "openai_chat",
+      catalog: [
+        {
+          model: "model-a",
+          upstreamModel: "model-a",
+          inputModalities: ["text"],
+          supportsImage: false,
+          apiFormat: "openai_chat",
+        },
+      ],
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("可加入 MultiRouter")).toBeInTheDocument();
+    });
+    expect(onProtocolProbeReceiptIdsChange).not.toHaveBeenCalledWith([]);
   });
 
   it("ignores an older probe completion after a newer provider identity succeeds", async () => {
@@ -1253,7 +1297,9 @@ describe("CodexFormFields local model routing", () => {
     expect(latestCatalog()[1]).not.toHaveProperty("apiFormat");
     expect(latestCatalog()[2]).not.toHaveProperty("apiFormat");
     expect(screen.queryByText("检测到混合协议模型")).not.toBeInTheDocument();
-    expect(screen.getByText(/存在 Partial\/Failed 模型.*不能自动保存/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/存在 Partial\/Failed 模型.*不能自动保存/),
+    ).toBeInTheDocument();
     expect(onApiFormatChange).not.toHaveBeenCalled();
     expect(
       screen.getByRole("article", { name: "gpt-5.5 探测进度" }),
@@ -1279,12 +1325,12 @@ describe("CodexFormFields local model routing", () => {
     });
     const { onApiFormatChange, onProtocolProbeReceiptIdsChange } =
       renderCatalogHarness(
-      [
-        { model: "gpt-5.5", upstreamModel: "gpt-5.5" },
-        { model: "qwen3.6", upstreamModel: "qwen3.6" },
-      ],
-      { providerName: "Relay", shouldShowSpeedTest: true },
-    );
+        [
+          { model: "gpt-5.5", upstreamModel: "gpt-5.5" },
+          { model: "qwen3.6", upstreamModel: "qwen3.6" },
+        ],
+        { providerName: "Relay", shouldShowSpeedTest: true },
+      );
 
     fireEvent.click(screen.getByRole("button", { name: "验证连接" }));
     fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
@@ -1467,7 +1513,9 @@ describe("CodexFormFields local model routing", () => {
     expect(await screen.findByRole("status")).toHaveTextContent(
       "请先在“模型与兼容性”同步模型，或在高级设置中启用/添加至少一个模型后再验证。",
     );
-    expect(screen.queryByText("确认测试 Chat / Responses")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("确认测试 Chat / Responses"),
+    ).not.toBeInTheDocument();
     const fetchButton = screen.getByRole("button", {
       name: "同步模型",
     });
@@ -1480,7 +1528,13 @@ describe("CodexFormFields local model routing", () => {
 
   it("points users to enable a model when every catalog model is disabled", async () => {
     renderCatalogHarness(
-      [{ model: "disabled-model", upstreamModel: "disabled-model", enabled: false }],
+      [
+        {
+          model: "disabled-model",
+          upstreamModel: "disabled-model",
+          enabled: false,
+        },
+      ],
       { shouldShowSpeedTest: true },
     );
 
@@ -1489,7 +1543,9 @@ describe("CodexFormFields local model routing", () => {
     expect(await screen.findByRole("status")).toHaveTextContent(
       "启用/添加至少一个模型后再验证",
     );
-    expect(screen.queryByText("确认测试 Chat / Responses")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("确认测试 Chat / Responses"),
+    ).not.toBeInTheDocument();
     expect(preflightCodexProviderProtocolCompatibility).not.toHaveBeenCalled();
   });
 

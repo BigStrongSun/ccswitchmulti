@@ -343,6 +343,27 @@ fn schema_v17_migration_creates_reasoning_manual_overrides() {
 }
 
 #[test]
+fn schema_v18_migration_creates_protocol_probe_observations() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    Database::set_user_version(&conn, 18).expect("set user_version=18");
+
+    Database::apply_schema_migrations_on_conn(&conn).expect("apply migrations");
+
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='protocol_probe_observations'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("query observation table");
+    assert_eq!(count, 1);
+    assert_eq!(
+        Database::get_user_version(&conn).expect("version after migration"),
+        SCHEMA_VERSION
+    );
+}
+
+#[test]
 fn protocol_compatibility_profile_round_trips_only_for_the_exact_target() {
     use crate::protocol_compatibility::{
         ProbeReadiness, ProbeTargetKey, ProtocolCompatibilityProbeResult,
@@ -389,6 +410,176 @@ fn protocol_compatibility_profile_round_trips_only_for_the_exact_target() {
         .get_protocol_compatibility_result(&changed_endpoint)
         .expect("read changed target")
         .is_none());
+}
+
+#[test]
+fn protocol_probe_observations_round_trip_independently_for_each_transport() {
+    use crate::protocol_compatibility::{
+        ProbeReadiness, ProbeTargetKey, ProtocolCompatibilityProbeResult,
+        ProtocolCompatibilityRecord, TransportKind,
+    };
+
+    let db = Database::memory().expect("create memory db");
+    let responses_target = ProbeTargetKey::new(
+        "provider-a",
+        None::<String>,
+        "public-model",
+        "upstream-model",
+        TransportKind::OpenAiResponses,
+        "https://example.test/v1/responses",
+        "bearer",
+    )
+    .unwrap();
+    let chat_target = ProbeTargetKey::new(
+        "provider-a",
+        None::<String>,
+        "public-model",
+        "upstream-model",
+        TransportKind::OpenAiChat,
+        "https://example.test/v1/chat/completions",
+        "bearer",
+    )
+    .unwrap();
+    let selected_transport = Some(TransportKind::OpenAiResponses);
+    let responses = ProtocolCompatibilityRecord::new(
+        responses_target.clone(),
+        ProtocolCompatibilityProbeResult {
+            selected_transport,
+            readiness: ProbeReadiness::Verified,
+            branches: Vec::new(),
+        },
+        1_000,
+        3_000,
+    );
+    let chat = ProtocolCompatibilityRecord::new(
+        chat_target.clone(),
+        ProtocolCompatibilityProbeResult {
+            selected_transport,
+            readiness: ProbeReadiness::Partial,
+            branches: Vec::new(),
+        },
+        1_001,
+        2_000,
+    );
+
+    db.save_protocol_probe_observations(&[responses.clone(), chat.clone()])
+        .expect("save both transport observations");
+
+    assert_eq!(
+        db.get_protocol_probe_observation(&responses_target)
+            .expect("read Responses observation"),
+        Some(responses.clone())
+    );
+    assert_eq!(
+        db.get_protocol_probe_observation(&chat_target)
+            .expect("read Chat observation"),
+        Some(chat.clone())
+    );
+    let listed = db
+        .list_protocol_probe_observations("provider-a")
+        .expect("list provider observations");
+    assert_eq!(listed.len(), 2);
+    assert!(listed.contains(&responses));
+    assert!(listed.contains(&chat));
+}
+
+#[test]
+fn deleting_logical_provider_deletes_its_protocol_probe_observations() {
+    use crate::protocol_compatibility::{
+        ProbeReadiness, ProbeTargetKey, ProtocolCompatibilityProbeResult,
+        ProtocolCompatibilityRecord, TransportKind,
+    };
+
+    let db = Database::memory().expect("create memory db");
+    let provider = crate::provider::Provider::with_id(
+        "provider-a".to_string(),
+        "Provider A".to_string(),
+        serde_json::json!({"auth": {}, "config": ""}),
+        None,
+    );
+    db.save_provider("codex", &provider)
+        .expect("save logical provider");
+    let target = ProbeTargetKey::new(
+        "provider-a",
+        None::<String>,
+        "public-model",
+        "upstream-model",
+        TransportKind::OpenAiResponses,
+        "https://example.test/v1/responses",
+        "bearer",
+    )
+    .unwrap();
+    let observation = ProtocolCompatibilityRecord::new(
+        target.clone(),
+        ProtocolCompatibilityProbeResult {
+            selected_transport: Some(TransportKind::OpenAiResponses),
+            readiness: ProbeReadiness::Verified,
+            branches: Vec::new(),
+        },
+        1_000,
+        3_000,
+    );
+    db.save_protocol_probe_observations(&[observation])
+        .expect("save observation");
+
+    db.delete_provider("codex", "provider-a")
+        .expect("delete logical provider");
+
+    assert!(db
+        .get_protocol_probe_observation(&target)
+        .expect("query deleted observation")
+        .is_none());
+}
+
+#[test]
+fn pruning_protocol_state_removes_expired_observations() {
+    use crate::protocol_compatibility::{
+        ProbeReadiness, ProbeTargetKey, ProtocolCompatibilityProbeResult,
+        ProtocolCompatibilityRecord, TransportKind,
+    };
+
+    let db = Database::memory().expect("create memory db");
+    let make_observation = |public_model: &str, expires_at: i64| {
+        let target = ProbeTargetKey::new(
+            "provider-a",
+            None::<String>,
+            public_model,
+            public_model,
+            TransportKind::OpenAiResponses,
+            "https://example.test/v1/responses",
+            "bearer",
+        )
+        .unwrap();
+        ProtocolCompatibilityRecord::new(
+            target,
+            ProtocolCompatibilityProbeResult {
+                selected_transport: Some(TransportKind::OpenAiResponses),
+                readiness: ProbeReadiness::Verified,
+                branches: Vec::new(),
+            },
+            1_000,
+            expires_at,
+        )
+    };
+    let expired = make_observation("expired", 1_999);
+    let current = make_observation("current", 2_001);
+    db.save_protocol_probe_observations(&[expired.clone(), current.clone()])
+        .expect("save observations");
+
+    assert_eq!(
+        db.prune_protocol_compatibility_results(2_000)
+            .expect("prune protocol state"),
+        1
+    );
+    assert!(db
+        .get_protocol_probe_observation(&expired.target)
+        .expect("read expired observation")
+        .is_none());
+    assert_eq!(
+        db.get_protocol_probe_observation(&current.target)
+            .expect("read current observation"),
+        Some(current)
+    );
 }
 
 #[test]

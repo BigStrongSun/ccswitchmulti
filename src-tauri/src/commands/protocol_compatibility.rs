@@ -21,7 +21,7 @@ use crate::{
         apply_probe_selection_to_provider, apply_selected_transport_to_catalog_model,
         compile_codex_router_probe_candidates, compile_provider_probe_candidates,
         run_protocol_compatibility_probe, run_protocol_compatibility_probe_with_reporter,
-        ManualReasoningOverride, ProbeCandidate, ProbeReadiness, ProbeTargetKey,
+        ManualReasoningOverride, ProbeCandidate, ProbeReadiness, ProbeStageStatus, ProbeTargetKey,
         ProtocolCompatibilityProbeResult, ProtocolCompatibilityRecord, ProtocolProbeProgressEvent,
         ReasoningManualOverrideRecord, ReasoningProjection, ReasoningSemantic, TransportKind,
         PROBE_PROFILE_VERSION,
@@ -113,6 +113,7 @@ pub struct ProtocolCompatibilityProbeRequest {
 pub struct CodexProviderProtocolPreflightOutcome {
     pub provider: Provider,
     pub records: Vec<ProtocolCompatibilityRecord>,
+    pub observations: Vec<ProtocolCompatibilityRecord>,
     pub receipt_ids: Vec<String>,
     pub protocol_applied: bool,
 }
@@ -720,12 +721,17 @@ where
         .collect::<HashMap<_, _>>();
     let (candidates, _is_router) = compile_preflight_candidates(&provider, &providers)?;
     let total = candidates.len();
-    let records = run_candidate_batch_with(candidates, |candidate| {
+    let batch = run_candidate_batch_with_observations(candidates, |candidate| {
         run_explicit_candidate_result_with(state, candidate, |candidate| {
             run_candidate_result_with_reporter(state, candidate, &reporter)
         })
     })
     .await?;
+    state
+        .db
+        .save_protocol_probe_observations(&batch.observations)
+        .map_err(|error| error.to_string())?;
+    let records = batch.records;
     let receipt_ids = records
         .iter()
         .cloned()
@@ -735,6 +741,7 @@ where
     Ok(CodexProviderProtocolPreflightOutcome {
         provider,
         records,
+        observations: batch.observations,
         receipt_ids,
         protocol_applied: false,
     })
@@ -758,11 +765,15 @@ pub(crate) async fn automatic_codex_provider_preflight(
     if candidates.is_empty() {
         return Ok((provider, Vec::new()));
     }
-    let records = run_candidate_batch_with(candidates, |candidate| {
+    let batch = run_candidate_batch_with_observations(candidates, |candidate| {
         run_automatic_candidate_result(state, candidate)
     })
     .await?;
-    Ok((provider, records))
+    state
+        .db
+        .save_protocol_probe_observations(&batch.observations)
+        .map_err(|error| error.to_string())?;
+    Ok((provider, batch.records))
 }
 
 fn compile_preflight_candidates(
@@ -876,7 +887,14 @@ async fn run_candidate_and_persist(
     state: &AppState,
     candidate: ProbeCandidate,
 ) -> Result<ProtocolCompatibilityRecord, String> {
+    let observation_candidate = candidate.clone();
     let record = run_candidate(state, candidate).await?;
+    let observations =
+        build_observation_records_for_result(&observation_candidate, &record.result)?;
+    state
+        .db
+        .save_protocol_probe_observations(&observations)
+        .map_err(|error| error.to_string())?;
     state
         .db
         .save_protocol_compatibility_result(&record)
@@ -996,14 +1014,34 @@ fn find_cached_candidate_result(
 
 async fn run_candidate_batch_with<F, Fut>(
     candidates: Vec<ProbeCandidate>,
-    mut execute: F,
+    execute: F,
 ) -> Result<Vec<ProtocolCompatibilityRecord>, String>
+where
+    F: FnMut(ProbeCandidate) -> Fut,
+    Fut: Future<Output = Result<ProtocolCompatibilityProbeResult, String>>,
+{
+    Ok(run_candidate_batch_with_observations(candidates, execute)
+        .await?
+        .records)
+}
+
+#[derive(Debug)]
+struct CandidateBatchRecords {
+    records: Vec<ProtocolCompatibilityRecord>,
+    observations: Vec<ProtocolCompatibilityRecord>,
+}
+
+async fn run_candidate_batch_with_observations<F, Fut>(
+    candidates: Vec<ProbeCandidate>,
+    mut execute: F,
+) -> Result<CandidateBatchRecords, String>
 where
     F: FnMut(ProbeCandidate) -> Fut,
     Fut: Future<Output = Result<ProtocolCompatibilityProbeResult, String>>,
 {
     let mut results_by_target: HashMap<String, ProtocolCompatibilityProbeResult> = HashMap::new();
     let mut records = Vec::with_capacity(candidates.len());
+    let mut observations = Vec::with_capacity(candidates.len() * 2);
     for candidate in candidates {
         let execution_key = candidate.lease_key();
         let result = if let Some(result) = results_by_target.get(&execution_key) {
@@ -1013,9 +1051,13 @@ where
             results_by_target.insert(execution_key, result.clone());
             result
         };
+        observations.extend(build_observation_records_for_result(&candidate, &result)?);
         records.push(build_record_for_result(&candidate, result)?);
     }
-    Ok(records)
+    Ok(CandidateBatchRecords {
+        records,
+        observations,
+    })
 }
 
 fn build_record_for_result(
@@ -1038,6 +1080,50 @@ fn build_record_for_result(
     ))
 }
 
+fn build_observation_records_for_result(
+    candidate: &ProbeCandidate,
+    result: &ProtocolCompatibilityProbeResult,
+) -> Result<Vec<ProtocolCompatibilityRecord>, String> {
+    let tested_at = Utc::now().timestamp();
+    [TransportKind::OpenAiResponses, TransportKind::OpenAiChat]
+        .into_iter()
+        .map(|transport| {
+            let branch = result
+                .branches
+                .iter()
+                .find(|branch| branch.assessment.transport == transport)
+                .cloned();
+            let readiness = branch
+                .as_ref()
+                .map(|branch| {
+                    if branch.assessment.is_complete() {
+                        ProbeReadiness::Verified
+                    } else if branch.assessment.baseline == ProbeStageStatus::Passed {
+                        ProbeReadiness::Partial
+                    } else {
+                        ProbeReadiness::Unverified
+                    }
+                })
+                .unwrap_or(ProbeReadiness::Unverified);
+            let ttl = if readiness == ProbeReadiness::Verified {
+                VERIFIED_TTL_SECONDS
+            } else {
+                UNVERIFIED_TTL_SECONDS
+            };
+            Ok(ProtocolCompatibilityRecord::new(
+                target_for_candidate(candidate, transport)?,
+                ProtocolCompatibilityProbeResult {
+                    selected_transport: result.selected_transport,
+                    readiness,
+                    branches: branch.into_iter().collect(),
+                },
+                tested_at,
+                tested_at + ttl,
+            ))
+        })
+        .collect()
+}
+
 fn target_for_candidate(
     candidate: &ProbeCandidate,
     transport: TransportKind,
@@ -1051,6 +1137,16 @@ pub fn get_codex_protocol_compatibility(
     target: ProbeTargetKey,
 ) -> Result<ReasoningCompatibilityInspection, String> {
     inspect_reasoning_compatibility(state.inner(), target)
+}
+
+#[tauri::command]
+pub fn list_codex_protocol_probe_observations(
+    state: State<'_, AppState>,
+    provider_id: String,
+) -> Result<Vec<ProtocolCompatibilityRecord>, String> {
+    let provider_id = required("providerId", &provider_id)?;
+    ProviderService::list_codex_protocol_probe_observations(state.inner(), provider_id)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1274,17 +1370,18 @@ fn parse_transport_hint(value: Option<&str>) -> TransportKind {
 mod tests {
     use super::{
         apply_reasoning_override, apply_unanimous_probe_selection, batch_finished_event,
-        clear_reasoning_override, commit_codex_provider_set_batch_internal_with_publisher,
+        build_observation_records_for_result, clear_reasoning_override,
+        commit_codex_provider_set_batch_internal_with_publisher,
         commit_codex_provider_set_internal_with_publisher, compile_preflight_candidates,
         find_cached_candidate_result, inspect_reasoning_compatibility, plan_reasoning_override,
         prepare_codex_provider_set_batch_internal, prepare_codex_provider_set_internal,
         run_automatic_candidate_result_with, run_candidate_batch_with,
-        run_explicit_candidate_result_with, unanimous_selection_was_applied,
-        ApplyReasoningOverrideRequest, ClearReasoningOverrideRequest,
-        CodexProviderSetBatchSourceRequest, CodexProviderSetCommitIntent,
-        CommitCodexProviderSetBatchRequest, CommitCodexProviderSetRequest,
-        PlanReasoningOverrideRequest, PrepareCodexProviderSetBatchRequest,
-        PrepareCodexProviderSetRequest,
+        run_candidate_batch_with_observations, run_explicit_candidate_result_with,
+        unanimous_selection_was_applied, ApplyReasoningOverrideRequest,
+        ClearReasoningOverrideRequest, CodexProviderSetBatchSourceRequest,
+        CodexProviderSetCommitIntent, CommitCodexProviderSetBatchRequest,
+        CommitCodexProviderSetRequest, PlanReasoningOverrideRequest,
+        PrepareCodexProviderSetBatchRequest, PrepareCodexProviderSetRequest,
     };
     use crate::protocol_compatibility::{
         HistoryReplay, ManualReasoningOverride, ProbeCandidate, ProbeReadiness, ProbeTargetKey,
@@ -2078,6 +2175,160 @@ mod tests {
         assert_eq!(records[0].target.public_model, "qwen3.8");
         assert_eq!(records[1].target.public_model, "qwen-flash");
         assert_ne!(records[0].storage_key(), records[1].storage_key());
+    }
+
+    #[tokio::test]
+    async fn batch_keeps_one_selection_receipt_and_two_transport_observations() {
+        let candidate = alias_candidate("provider-a", "route-a", "qwen3.8");
+        let batch = run_candidate_batch_with_observations(vec![candidate], |_| {
+            std::future::ready(Ok(ProtocolCompatibilityProbeResult {
+                selected_transport: Some(TransportKind::OpenAiResponses),
+                readiness: ProbeReadiness::Verified,
+                branches: Vec::new(),
+            }))
+        })
+        .await
+        .expect("run batch");
+
+        assert_eq!(batch.records.len(), 1);
+        assert_eq!(batch.observations.len(), 2);
+        assert_eq!(
+            batch.records[0].result.selected_transport,
+            Some(TransportKind::OpenAiResponses)
+        );
+        assert!(batch
+            .observations
+            .iter()
+            .any(|record| record.target.transport == TransportKind::OpenAiResponses));
+        assert!(batch
+            .observations
+            .iter()
+            .any(|record| record.target.transport == TransportKind::OpenAiChat));
+    }
+
+    #[test]
+    fn responses_recommendation_materializes_one_verified_observation_per_transport() {
+        let candidate = alias_candidate("provider-a", "route-a", "qwen3.8");
+        let result: ProtocolCompatibilityProbeResult = serde_json::from_value(json!({
+            "selected_transport": "open_ai_responses",
+            "readiness": "verified",
+            "branches": [
+                {
+                    "assessment": {
+                        "transport": "open_ai_responses",
+                        "baseline": "passed",
+                        "streaming": "passed",
+                        "forced_tool": "passed",
+                        "continuation": "passed"
+                    },
+                    "reasoning_shape": {
+                        "semantic": "summary",
+                        "source": "native_responses",
+                        "pre_tool_visible_content": "absent"
+                    },
+                    "evidence": []
+                },
+                {
+                    "assessment": {
+                        "transport": "open_ai_chat",
+                        "baseline": "passed",
+                        "streaming": "passed",
+                        "forced_tool": "passed",
+                        "continuation": "passed"
+                    },
+                    "reasoning_shape": {
+                        "semantic": "readable",
+                        "source": "reasoning_content",
+                        "pre_tool_visible_content": "absent"
+                    },
+                    "evidence": []
+                }
+            ]
+        }))
+        .expect("deserialize probe result");
+
+        let observations = build_observation_records_for_result(&candidate, &result)
+            .expect("materialize observations");
+
+        assert_eq!(observations.len(), 2);
+        for transport in [TransportKind::OpenAiResponses, TransportKind::OpenAiChat] {
+            let observation = observations
+                .iter()
+                .find(|record| record.target.transport == transport)
+                .expect("transport observation");
+            assert_eq!(observation.target, candidate.target_key(transport).unwrap());
+            assert_eq!(
+                observation.result.selected_transport,
+                result.selected_transport
+            );
+            assert_eq!(observation.result.readiness, ProbeReadiness::Verified);
+            assert_eq!(observation.result.branches.len(), 1);
+            assert_eq!(
+                observation.result.branches[0].assessment.transport,
+                transport
+            );
+        }
+    }
+
+    #[test]
+    fn partial_chat_branch_is_saved_without_downgrading_responses_observation() {
+        let candidate = alias_candidate("provider-a", "route-a", "qwen3.8");
+        let result: ProtocolCompatibilityProbeResult = serde_json::from_value(json!({
+            "selected_transport": "open_ai_responses",
+            "readiness": "verified",
+            "branches": [
+                {
+                    "assessment": {
+                        "transport": "open_ai_responses",
+                        "baseline": "passed",
+                        "streaming": "passed",
+                        "forced_tool": "passed",
+                        "continuation": "passed"
+                    },
+                    "reasoning_shape": {
+                        "semantic": "summary",
+                        "source": "native_responses",
+                        "pre_tool_visible_content": "absent"
+                    },
+                    "evidence": []
+                },
+                {
+                    "assessment": {
+                        "transport": "open_ai_chat",
+                        "baseline": "passed",
+                        "streaming": "failed",
+                        "forced_tool": "passed",
+                        "continuation": "unsupported"
+                    },
+                    "reasoning_shape": {
+                        "semantic": "readable",
+                        "source": "reasoning_content",
+                        "pre_tool_visible_content": "absent"
+                    },
+                    "evidence": []
+                }
+            ]
+        }))
+        .expect("deserialize probe result");
+
+        let observations = build_observation_records_for_result(&candidate, &result)
+            .expect("materialize observations");
+        let responses = observations
+            .iter()
+            .find(|record| record.target.transport == TransportKind::OpenAiResponses)
+            .unwrap();
+        let chat = observations
+            .iter()
+            .find(|record| record.target.transport == TransportKind::OpenAiChat)
+            .unwrap();
+
+        assert_eq!(responses.result.readiness, ProbeReadiness::Verified);
+        assert_eq!(chat.result.readiness, ProbeReadiness::Partial);
+        assert!(responses.expires_at > chat.expires_at);
+        assert_eq!(
+            responses.result.selected_transport,
+            chat.result.selected_transport
+        );
     }
 
     #[test]

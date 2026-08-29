@@ -52,6 +52,7 @@ const preflightOutcome: CodexProviderProtocolPreflightOutcome = {
     settingsConfig: {},
   },
   records: [],
+  observations: [],
   receiptIds: ["receipt-qwen"],
   protocolApplied: false,
 };

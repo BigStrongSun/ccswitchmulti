@@ -26,15 +26,41 @@ impl Database {
             .map_err(|error| AppError::Database(error.to_string()))
     }
 
+    pub fn save_protocol_probe_observations(
+        &self,
+        records: &[ProtocolCompatibilityRecord],
+    ) -> Result<(), AppError> {
+        let mut conn = lock_conn!(self.conn);
+        let tx = conn
+            .transaction()
+            .map_err(|error| AppError::Database(error.to_string()))?;
+        for record in records {
+            save_protocol_probe_observation_in_transaction(&tx, record)?;
+        }
+        tx.commit()
+            .map_err(|error| AppError::Database(error.to_string()))
+    }
+
     pub fn prune_protocol_compatibility_results(&self, now: i64) -> Result<u64, AppError> {
-        let conn = lock_conn!(self.conn);
-        let deleted = conn
+        let mut conn = lock_conn!(self.conn);
+        let tx = conn
+            .transaction()
+            .map_err(|error| AppError::Database(error.to_string()))?;
+        let deleted_profiles = tx
             .execute(
                 "DELETE FROM protocol_compatibility_profiles WHERE expires_at < ?1",
                 params![now],
             )
             .map_err(|error| AppError::Database(error.to_string()))?;
-        Ok(deleted as u64)
+        let deleted_observations = tx
+            .execute(
+                "DELETE FROM protocol_probe_observations WHERE expires_at < ?1",
+                params![now],
+            )
+            .map_err(|error| AppError::Database(error.to_string()))?;
+        tx.commit()
+            .map_err(|error| AppError::Database(error.to_string()))?;
+        Ok((deleted_profiles + deleted_observations) as u64)
     }
 
     pub fn expire_protocol_compatibility_result(
@@ -262,12 +288,65 @@ pub(super) fn save_protocol_compatibility_result_in_transaction(
     Ok(())
 }
 
+fn save_protocol_probe_observation_in_transaction(
+    tx: &Transaction<'_>,
+    record: &ProtocolCompatibilityRecord,
+) -> Result<(), AppError> {
+    let observation_json = to_json_string(record)?;
+    tx.execute(
+        "INSERT INTO protocol_probe_observations (
+                target_key, provider_id, route_id, public_model, upstream_model,
+                transport, endpoint_fingerprint, authentication_kind, readiness,
+                observation_json, tested_at, expires_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(target_key) DO UPDATE SET
+                provider_id=excluded.provider_id,
+                route_id=excluded.route_id,
+                public_model=excluded.public_model,
+                upstream_model=excluded.upstream_model,
+                transport=excluded.transport,
+                endpoint_fingerprint=excluded.endpoint_fingerprint,
+                authentication_kind=excluded.authentication_kind,
+                readiness=excluded.readiness,
+                observation_json=excluded.observation_json,
+                tested_at=excluded.tested_at,
+                expires_at=excluded.expires_at",
+        params![
+            record.storage_key(),
+            record.target.provider_id,
+            record.target.route_id,
+            record.target.public_model,
+            record.target.upstream_model,
+            serde_json::to_value(record.target.transport)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .unwrap_or_else(|| "unknown".to_string()),
+            record.target.endpoint_fingerprint,
+            record.target.authentication_kind,
+            serde_json::to_value(record.result.readiness)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .unwrap_or_else(|| "unverified".to_string()),
+            observation_json,
+            record.tested_at,
+            record.expires_at,
+        ],
+    )
+    .map_err(|error| AppError::Database(error.to_string()))?;
+    Ok(())
+}
+
 pub(super) fn delete_protocol_state_for_provider_in_transaction(
     tx: &Transaction<'_>,
     provider_id: &str,
 ) -> Result<(), AppError> {
     tx.execute(
         "DELETE FROM protocol_compatibility_profiles WHERE provider_id = ?1",
+        params![provider_id],
+    )
+    .map_err(|error| AppError::Database(error.to_string()))?;
+    tx.execute(
+        "DELETE FROM protocol_probe_observations WHERE provider_id = ?1",
         params![provider_id],
     )
     .map_err(|error| AppError::Database(error.to_string()))?;
@@ -285,6 +364,12 @@ pub(super) fn delete_protocol_state_for_routes_in_transaction(
     for route_id in route_ids {
         tx.execute(
             "DELETE FROM protocol_compatibility_profiles
+             WHERE provider_id = ?1 AND route_id = ?2",
+            params![provider_id, route_id],
+        )
+        .map_err(|error| AppError::Database(error.to_string()))?;
+        tx.execute(
+            "DELETE FROM protocol_probe_observations
              WHERE provider_id = ?1 AND route_id = ?2",
             params![provider_id, route_id],
         )
@@ -364,5 +449,53 @@ impl Database {
         serde_json::from_str(&profile_json)
             .map(Some)
             .map_err(|error| AppError::Database(format!("协议兼容性档案解析失败: {error}")))
+    }
+
+    pub fn get_protocol_probe_observation(
+        &self,
+        target: &ProbeTargetKey,
+    ) -> Result<Option<ProtocolCompatibilityRecord>, AppError> {
+        let conn = lock_conn!(self.conn);
+        let observation_json = conn
+            .query_row(
+                "SELECT observation_json FROM protocol_probe_observations WHERE target_key = ?1",
+                params![storage_key_for_target(target)],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| AppError::Database(error.to_string()))?;
+        observation_json
+            .map(|json| {
+                serde_json::from_str(&json)
+                    .map_err(|error| AppError::Database(format!("协议探测证据解析失败: {error}")))
+            })
+            .transpose()
+    }
+
+    pub fn list_protocol_probe_observations(
+        &self,
+        provider_id: &str,
+    ) -> Result<Vec<ProtocolCompatibilityRecord>, AppError> {
+        let conn = lock_conn!(self.conn);
+        let mut statement = conn
+            .prepare(
+                "SELECT observation_json FROM protocol_probe_observations
+                 WHERE provider_id = ?1
+                 ORDER BY tested_at DESC, target_key ASC",
+            )
+            .map_err(|error| AppError::Database(error.to_string()))?;
+        let rows = statement
+            .query_map(params![provider_id], |row| row.get::<_, String>(0))
+            .map_err(|error| AppError::Database(error.to_string()))?;
+        let mut observations = Vec::new();
+        for row in rows {
+            let json = row.map_err(|error| AppError::Database(error.to_string()))?;
+            observations.push(
+                serde_json::from_str(&json).map_err(|error| {
+                    AppError::Database(format!("协议探测证据解析失败: {error}"))
+                })?,
+            );
+        }
+        Ok(observations)
     }
 }

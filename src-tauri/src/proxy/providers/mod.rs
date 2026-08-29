@@ -24,6 +24,8 @@ pub(crate) mod codex_reasoning;
 pub(crate) mod codex_request;
 #[cfg(test)]
 mod codex_request_tests;
+#[cfg(test)]
+mod codex_request_user_agent_tests;
 pub(crate) mod codex_responses_sse;
 pub(crate) mod codex_terminal;
 mod codex_tool_schema;

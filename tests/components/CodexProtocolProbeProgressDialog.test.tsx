@@ -30,6 +30,7 @@ function probeOutcome(
           endpoint_fingerprint: "redacted",
           authentication_kind: "bearer",
           credential_fingerprint: "redacted",
+          request_policy_fingerprint: "redacted-policy",
         },
         result: {
           selected_transport: null,
@@ -40,6 +41,7 @@ function probeOutcome(
         expiresAt: 2,
       },
     ],
+    observations: [],
     receiptIds: ["receipt-fixture-model"],
     protocolApplied: false,
   };

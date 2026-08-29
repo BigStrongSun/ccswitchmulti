@@ -17,6 +17,7 @@ describe("CodexProtocolProbeProgressDialog", () => {
       },
       receiptIds: ["receipt-kimi-k2"],
       protocolApplied: true,
+      observations: [],
       records: [
         {
           probeVersion: 3,
@@ -29,6 +30,7 @@ describe("CodexProtocolProbeProgressDialog", () => {
             endpoint_fingerprint: "endpoint",
             authentication_kind: "bearer",
             credential_fingerprint: "credential",
+            request_policy_fingerprint: "policy",
           },
           result: {
             selected_transport: "open_ai_responses",
@@ -106,6 +108,7 @@ describe("CodexProtocolProbeProgressDialog", () => {
       },
       receiptIds: ["receipt-opaque-model"],
       protocolApplied: false,
+      observations: [],
       records: [
         {
           probeVersion: 6,
@@ -118,6 +121,7 @@ describe("CodexProtocolProbeProgressDialog", () => {
             endpoint_fingerprint: "endpoint",
             authentication_kind: "bearer",
             credential_fingerprint: "credential",
+            request_policy_fingerprint: "policy",
           },
           result: {
             selected_transport: "open_ai_responses",
