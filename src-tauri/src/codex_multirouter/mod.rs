@@ -2,6 +2,7 @@ pub mod compiler;
 pub mod migration;
 pub mod mutation;
 pub mod projection;
+pub mod provider_set;
 pub mod schema;
 
 use crate::app_config::AppType;
