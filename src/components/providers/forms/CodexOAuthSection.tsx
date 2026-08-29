@@ -34,6 +34,11 @@ import {
   type CodexAccountPoolPolicy,
   type CodexAuthFacadeReprojectionOutcome,
 } from "@/lib/api/auth";
+import { providersApi } from "@/lib/api/providers";
+import {
+  summarizeActiveCodexRouteAuth,
+  type CodexRouteAuthSource,
+} from "@/lib/codexOAuthIdentity";
 import {
   OAuthDeleteConfirmDialog,
   type OAuthDeleteTarget,
@@ -150,6 +155,16 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
     queryKey: poolQueryKey,
     queryFn: authApi.getCodexAccountPoolPolicy,
   });
+  const { data: activeCodexProvider = null } = useQuery({
+    queryKey: ["current-codex-provider-for-auth-center"],
+    queryFn: async () => {
+      const [currentId, providers] = await Promise.all([
+        providersApi.getCurrent("codex"),
+        providersApi.getAll("codex"),
+      ]);
+      return providers[currentId] ?? null;
+    },
+  });
   const { data: poolQuota = [], isFetching: isRefreshingPoolQuota } = useQuery({
     queryKey: ["codex-account-pool-quota"],
     queryFn: authApi.refreshCodexAccountPoolQuota,
@@ -182,6 +197,38 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
     poolPolicy !== undefined &&
     poolDraft !== null &&
     JSON.stringify(poolPolicy) !== JSON.stringify(poolDraft);
+
+  const desktopAccount = poolPolicy?.desktopAccountId
+    ? accounts.find((account) => account.id === poolPolicy.desktopAccountId)
+    : undefined;
+  const displayAccount = (accountId: string | null | undefined) => {
+    if (!accountId) return t("codexOauth.notConfigured", "未配置");
+    return (
+      accounts.find((account) => account.id === accountId)?.login ?? accountId
+    );
+  };
+  const routeAuthLabel = (
+    source: CodexRouteAuthSource,
+    accountId: string | null,
+  ) => {
+    switch (source) {
+      case "native_codex_auth":
+        return t("codexOauth.routeDesktop", "Desktop 当前登录");
+      case "managed_codex_oauth":
+      case "managed_account":
+        return t("codexOauth.routeManaged", {
+          defaultValue: "CCSM 托管：{{account}}",
+          account: displayAccount(accountId ?? defaultAccountId),
+        });
+      case "account_pool":
+        return t("codexOauth.routePool", "OAuth 账号池");
+      default:
+        return t("codexOauth.routeProvider", "供应商自身凭据");
+    }
+  };
+  const activeRouteAuth = activeCodexProvider
+    ? summarizeActiveCodexRouteAuth(activeCodexProvider)
+    : [];
 
   const updatePool = (
     transform: (policy: CodexAccountPoolPolicy) => CodexAccountPoolPolicy,
@@ -263,6 +310,59 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
             : authError}
         </div>
       )}
+
+      <div className="space-y-3 rounded-md border bg-muted/20 p-3 text-sm">
+        <div>
+          <Label>{t("codexOauth.identityRouting", "身份与路由")}</Label>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {t(
+              "codexOauth.identityRoutingHint",
+              "Desktop 登录、CCSM 托管默认账号和路由认证来源相互独立；“设为默认”不会切换 Desktop 登录。",
+            )}
+          </p>
+        </div>
+        <div className="grid gap-2 sm:grid-cols-2">
+          <div className="rounded border bg-background/60 p-2">
+            <div className="text-xs text-muted-foreground">
+              {t("codexOauth.desktopCurrentIdentity", "Codex Desktop 当前登录")}
+            </div>
+            <div className="mt-1 font-medium">
+              {desktopAccount?.login ??
+                displayAccount(poolPolicy?.desktopAccountId)}
+            </div>
+          </div>
+          <div className="rounded border bg-background/60 p-2">
+            <div className="text-xs text-muted-foreground">
+              {t("codexOauth.managedDefaultIdentity", "CCSM 托管默认账号")}
+            </div>
+            <div className="mt-1 font-medium">
+              {displayAccount(defaultAccountId)}
+            </div>
+          </div>
+        </div>
+        <div className="rounded border bg-background/60 p-2">
+          <div className="text-xs text-muted-foreground">
+            {t("codexOauth.activeRouteIdentity", "当前 Codex 路由认证来源")}
+          </div>
+          {activeCodexProvider ? (
+            <div className="mt-1 space-y-1">
+              {activeRouteAuth.map((route) => (
+                <div key={route.routeId} className="text-xs">
+                  <span className="font-medium">{route.routeLabel}</span>
+                  <span className="text-muted-foreground">
+                    {" · "}
+                    {routeAuthLabel(route.source, route.accountId)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="mt-1 text-xs text-muted-foreground">
+              {t("codexOauth.activeRouteUnavailable", "当前路由信息不可用")}
+            </div>
+          )}
+        </div>
+      </div>
 
       {poolDraft && (
         <div className="space-y-3 border-t pt-4">

@@ -15,6 +15,8 @@ const mocks = vi.hoisted(() => ({
   refreshQuota: vi.fn(),
   removeAccount: vi.fn(),
   logout: vi.fn(),
+  getProviders: vi.fn(),
+  getCurrentProvider: vi.fn(),
 }));
 
 vi.mock("./hooks/useCodexOauth", () => ({
@@ -57,6 +59,13 @@ vi.mock("@/lib/api/auth", () => ({
   },
 }));
 
+vi.mock("@/lib/api/providers", () => ({
+  providersApi: {
+    getAll: mocks.getProviders,
+    getCurrent: mocks.getCurrentProvider,
+  },
+}));
+
 function renderSection() {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -90,9 +99,55 @@ beforeEach(() => {
     codexRestartRequired: false,
     facade: "native_mixed",
   });
+  mocks.getCurrentProvider.mockResolvedValue("router");
+  mocks.getProviders.mockResolvedValue({
+    router: {
+      id: "router",
+      name: "Codex MultiRouter",
+      settingsConfig: {
+        codexRouting: {
+          routes: [
+            {
+              id: "official",
+              label: "OpenAI Official",
+              enabled: true,
+              authPolicy: { source: "native_codex_auth" },
+            },
+            {
+              id: "managed",
+              label: "Managed fallback",
+              enabled: true,
+              authPolicy: {
+                source: "managed_codex_oauth",
+                accountId: "managed-2",
+              },
+            },
+          ],
+        },
+      },
+    },
+  });
 });
 
 describe("Codex OAuth 账号池认证门面", () => {
+  it("在认证中心分开显示 Desktop 登录、CCSM 默认和当前路由认证来源", async () => {
+    renderSection();
+
+    await screen.findByRole("spinbutton", {
+      name: /managed@example.com.*保留额度/,
+    });
+    expect(await screen.findByText("Codex Desktop 当前登录")).toBeVisible();
+    expect(screen.getAllByText("managed@example.com").length).toBeGreaterThan(
+      0,
+    );
+    expect(screen.getByText("CCSM 托管默认账号")).toBeVisible();
+    expect(screen.getByText("当前 Codex 路由认证来源")).toBeVisible();
+    expect(screen.getByText("OpenAI Official")).toBeVisible();
+    expect(screen.getAllByText(/Desktop 当前登录/).length).toBeGreaterThan(1);
+    expect(screen.getByText("Managed fallback")).toBeVisible();
+    expect(screen.getByText(/CCSM 托管：second@example\.com/)).toBeVisible();
+  });
+
   it("仅在账号池启用且 Desktop 项启用时展示混合认证", () => {
     const entries = [
       {
@@ -243,7 +298,7 @@ describe("Codex OAuth 账号池认证门面", () => {
     const user = userEvent.setup();
     renderSection();
 
-    await screen.findByText("managed@example.com");
+    await screen.findAllByText("managed@example.com");
     const removeButtons = screen.getAllByTitle("移除账号");
     await user.click(removeButtons[0]);
 
