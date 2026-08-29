@@ -76,7 +76,8 @@
 - 新增依赖 pinyin-pro 3.29.3。环境坑：node_modules 原为 pnpm 12.0.0-rc（store v11）所建，与 12.0.0 正式版/11.x（store v10）不兼容——已用 12.0.0 正式版 `pnpm install` 重链到 v10（15s 硬链接），随后 `pnpm add` 正常。corepack 会按 packageManager 把 npx pnpm 钉到 10.12.3，绕过用 `COREPACK_ENABLE_STRICT=0 npx -y pnpm@12.0.0`。
 - 新增测试：`codexMultiRouterWizard.test.ts` 2 例（拼音后缀 + 假名回退 id 前 8）。vitest 该文件 7/7；CodexSubagentV2ProfileEditor.test.tsx 127/127；typecheck 唯一报错在并行会话未跟踪的 diag-projection.test.ts（非本次文件）。
 - 推送：github.com:443 被重置（api.github.com 可用、无代理配置、SSH 无密钥），改走 **GitHub Git Data API** 重建两个提交推送：远端分支 fix/codex-subagent-alias-equivalence = `3739b892`（fix: #76 迁移跳过+保存剥离）→ `5cfefe09`（feat: 拼音别名+孤儿清理+18.5 版本）。本地同名提交 `96fd4b79`/`4ed883f9` 内容与远端逐字节一致但 sha 不同——网络恢复后 `git pull --rebase` 会识别为空补丁自动对齐。已移除临时 http.version=HTTP/1.1 仓库配置。
-- 版本 3.19.2-18.5 四处同步（package.json/Cargo.toml/Cargo.lock/tauri.conf.json）+ `docs/release-notes/v3.19.2-18.5-zh.md`。`pnpm build:renderer` 通过；`pnpm tauri build` 已后台启动，产物待验证（注意本机无 TAURI_SIGNING_PRIVATE_KEY，updater 签名步骤可能如 3.19.2-18 时一样失败，但应用包产物会先行生成）。
+- 版本 3.19.2-18.5 四处同步（package.json/Cargo.toml/Cargo.lock/tauri.conf.json）+ `docs/release-notes/v3.19.2-18.5-zh.md`。`pnpm build:renderer` 通过；本地 tauri build 已弃用，改走 fork GitHub Actions 正式通道。
+- **v3.19.2-18.5 正式发布完成（fork GitHub Actions）**：Release run `33250578447` 全程监控，7 个 job（windows x64/arm64、linux x64/arm64、macos universal、Publish GitHub Release、Assemble latest.json）全部 success（约 45 分钟）。Release 非 draft 非 prerelease，19 个资产齐全（各平台安装包/便携包 + `.sig` + `latest.json`），`latest.json` version=3.19.2-18.5、六平台（darwin-aarch64/darwin-x86_64/linux-aarch64/linux-x86_64/windows-aarch64/windows-x86_64）签名与 URL 全部非空。tag `v3.19.2-18.5` 指向 eceac566；格式化小提交 `10771af5` 随下一版走。安装入口：https://github.com/zhushihao/ccswitchmulti/releases/tag/v3.19.2-18.5
 
 ## 2026-08-29 补充 2：对"凌晨还能请求 Kimi"质疑的取证（结论：质疑的链路不存在）
 
