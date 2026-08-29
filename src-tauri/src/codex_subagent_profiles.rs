@@ -311,6 +311,11 @@ impl LegacyCodexSubagentProfileOverrides {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CatalogModel {
     pub model: String,
+    /// 与 `model` 等价、可被 profile.model 引用的别名集合：upstream 身份与指向该
+    /// 模型的路由别名 key。投影可能把可见模型名改写成别名 key 或碰撞后缀名，而
+    /// 存量 profile.model 是播种时刻的名字快照；沿用路由侧 visible/upstream 双
+    /// 身份索引的约定，这里做同样的等价匹配，避免投影改名后自动字段整体失效。
+    pub equivalent_models: Vec<String>,
     pub provider_kind: ProviderKind,
     pub routable: bool,
     pub context_window: u64,
@@ -1341,7 +1346,15 @@ pub fn compile_subagent_v2_profiles(request: &CompileRequest) -> CompileResult {
         let catalog = request
             .catalog_models
             .iter()
-            .find(|m| m.model.eq_ignore_ascii_case(&p.model) && m.routable);
+            .find(|m| m.routable && m.model.eq_ignore_ascii_case(&p.model))
+            .or_else(|| {
+                request.catalog_models.iter().find(|m| {
+                    m.routable
+                        && m.equivalent_models
+                            .iter()
+                            .any(|name| name.eq_ignore_ascii_case(&p.model))
+                })
+            });
         let Some(catalog) = catalog else {
             push_status(
                 &mut output,
@@ -1519,6 +1532,7 @@ mod tests {
     fn catalog(model: &str, routable: bool) -> CatalogModel {
         CatalogModel {
             model: s(model),
+            equivalent_models: Vec::new(),
             provider_kind: ProviderKind::ThirdParty,
             routable,
             context_window: 1_000_000,
@@ -2901,6 +2915,7 @@ mod tests {
             persisted_subagent_v2: Some(config(SelectionPolicy::Balanced, profiles)),
             catalog_models: vec![CatalogModel {
                 model: s("DeepSeek-V4-Flash"),
+                equivalent_models: Vec::new(),
                 provider_kind: ProviderKind::ThirdParty,
                 routable: true,
                 context_window: 1_000_000,

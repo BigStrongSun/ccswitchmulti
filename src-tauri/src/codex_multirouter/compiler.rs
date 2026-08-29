@@ -61,6 +61,8 @@ pub struct CodexModelCapabilitySummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_parallel_tool_calls: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_search_tool: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub base_instructions: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub codex_ultra: Option<Value>,
@@ -654,6 +656,10 @@ fn effective_capability_summary(
         supports_parallel_tool_calls: bool_field(
             model_entry,
             &["supportsParallelToolCalls", "supports_parallel_tool_calls"],
+        ),
+        supports_search_tool: bool_field(
+            model_entry,
+            &["supportsSearchTool", "supports_search_tool"],
         ),
         base_instructions: string_field(model_entry, &["baseInstructions", "base_instructions"])
             .map(ToString::to_string),
@@ -1293,6 +1299,58 @@ mod tests {
     }
 
     #[test]
+    fn capability_summary_parses_search_tool_declaration() {
+        let camel_provider = provider(
+            "kimi",
+            "Kimi For Coding",
+            "openai_responses",
+            json!([{
+                "model": "k3-256k",
+                "contextWindow": 262144,
+                "supportsSearchTool": false
+            }]),
+        );
+        let compiled = compile(
+            &plan(vec![route("router-kimi", "kimi", CodexModelSelection::All)]),
+            [camel_provider],
+        );
+        let summary = &compiled.model_catalog[0].capability_summary;
+        assert_eq!(summary.supports_search_tool, Some(false));
+
+        let snake_provider = provider(
+            "kimi",
+            "Kimi For Coding",
+            "openai_responses",
+            json!([{
+                "model": "k3-256k",
+                "supports_search_tool": true
+            }]),
+        );
+        let compiled = compile(
+            &plan(vec![route("router-kimi", "kimi", CodexModelSelection::All)]),
+            [snake_provider],
+        );
+        let summary = &compiled.model_catalog[0].capability_summary;
+        assert_eq!(summary.supports_search_tool, Some(true));
+
+        let undeclared_provider = provider(
+            "kimi",
+            "Kimi For Coding",
+            "openai_responses",
+            json!([{
+                "model": "k3-256k",
+                "contextWindow": 262144
+            }]),
+        );
+        let compiled = compile(
+            &plan(vec![route("router-kimi", "kimi", CodexModelSelection::All)]),
+            [undeclared_provider],
+        );
+        let summary = &compiled.model_catalog[0].capability_summary;
+        assert_eq!(summary.supports_search_tool, None);
+    }
+
+    #[test]
     fn dependency_fingerprint_is_order_independent_and_changes_with_effective_inputs() {
         let first = provider(
             "first",
@@ -1545,5 +1603,36 @@ mod tests {
         assert!(!serialized.contains("nested-cache-secret"));
         assert!(serialized.contains("confirmed_supported"));
         assert!(serialized.contains("auto_prefix_cache"));
+    }
+
+    #[test]
+    fn route_alias_key_becomes_projected_visible_model() {
+        // 复现 2026-08-29 线上数据：基元律动路由的别名 key 是
+        // `glm-5.3-flash-4faa657f-…`，target 是原名 `glm-5.3-flash`。
+        // compile_v2 会把别名 key 当作投影可见名，原名退到 upstream_model ——
+        // 于是后端投影/live config 里的模型名带后缀，而目标 provider 目录仍是原名。
+        let alias_key = "glm-5.3-flash-4faa657f-1e92-467e-b3b0-d446aeb27b9a";
+        let glm_provider = provider(
+            "4faa657f-1e92-467e-b3b0-d446aeb27b9a",
+            "基元律动",
+            "openai_chat",
+            json!([{"model": "glm-5.3-flash"}]),
+        );
+        let mut glm_route = route(
+            "router-4faa657f-1e92-467e-b3b0-d446aeb27b9a",
+            "4faa657f-1e92-467e-b3b0-d446aeb27b9a",
+            CodexModelSelection::All,
+        );
+        glm_route.match_prefixes = vec!["glm".to_string()];
+        glm_route
+            .aliases
+            .insert(alias_key.to_string(), "glm-5.3-flash".to_string());
+
+        let compiled = compile(&plan(vec![glm_route]), [glm_provider]);
+
+        assert_eq!(compiled.visible_models, vec![alias_key]);
+        assert_eq!(compiled.model_catalog[0].visible_model, alias_key);
+        assert_eq!(compiled.model_catalog[0].canonical_model, "glm-5.3-flash");
+        assert_eq!(compiled.model_catalog[0].upstream_model, "glm-5.3-flash");
     }
 }

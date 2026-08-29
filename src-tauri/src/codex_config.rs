@@ -3709,6 +3709,11 @@ fn compile_configured_codex_subagent_roles(
             }
             SubagentCatalogModel {
                 model: spec.model.clone(),
+                equivalent_models: codex_subagent_catalog_equivalent_names(
+                    settings,
+                    &spec.model,
+                    spec.upstream_model.as_deref(),
+                ),
                 provider_kind: classification
                     .as_ref()
                     .map(|value| value.provider_kind)
@@ -3738,6 +3743,18 @@ fn compile_configured_codex_subagent_roles(
             .iter()
             .find(|spec| {
                 normalize_profile_key(&spec.model) == normalize_profile_key(&profile.model)
+            })
+            .or_else(|| {
+                let profile_key = normalize_profile_key(&profile.model);
+                specs.iter().find(|spec| {
+                    codex_subagent_catalog_equivalent_names(
+                        settings,
+                        &spec.model,
+                        spec.upstream_model.as_deref(),
+                    )
+                    .iter()
+                    .any(|name| normalize_profile_key(name) == profile_key)
+                })
             })
             .and_then(codex_subagent_profile_input_modalities)
             .map(|modalities| {
@@ -3934,6 +3951,55 @@ fn codex_subagent_profile_input_modalities(spec: &CodexCatalogModelSpec) -> Opti
     })
 }
 
+/// 子 Agent 档案模型名的等价集合：upstream 身份 + 指向该模型的路由别名 key。
+///
+/// 投影编译器会把可见模型名改写成路由别名 key 或碰撞后缀名，而存量
+/// profile.model 是播种时刻的名字快照；沿用路由侧 visible/upstream 双身份
+/// 索引的约定（2026-08-21 alias fix），这里做同样的等价匹配，避免投影改名
+/// 后子 Agent 自动字段整体失效（Issue #74）。
+fn codex_subagent_catalog_equivalent_names(
+    settings: &Value,
+    spec_model: &str,
+    spec_upstream_model: Option<&str>,
+) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    let mut push = |names: &mut Vec<String>, name: &str| {
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        if !names.iter().any(|existing| existing.eq_ignore_ascii_case(name)) {
+            names.push(name.to_string());
+        }
+    };
+    if let Some(upstream) = spec_upstream_model {
+        push(&mut names, upstream);
+    }
+    let Some(routes) = settings
+        .pointer("/codexRouting/routes")
+        .and_then(Value::as_array)
+    else {
+        return names;
+    };
+    for route in routes {
+        let Some(route_aliases) = route.get("aliases").and_then(Value::as_object) else {
+            continue;
+        };
+        for (alias_key, target) in route_aliases {
+            let Some(target) = target.as_str().map(str::trim).filter(|t| !t.is_empty()) else {
+                continue;
+            };
+            if target.eq_ignore_ascii_case(spec_model)
+                || spec_upstream_model
+                    .is_some_and(|upstream| target.eq_ignore_ascii_case(upstream))
+            {
+                push(&mut names, alias_key);
+            }
+        }
+    }
+    names
+}
+
 fn routable_codex_subagent_catalog(
     settings: &Value,
     provider_context: Option<&ProviderClassificationContext>,
@@ -4107,8 +4173,73 @@ pub(crate) fn reconcile_codex_subagent_v2_for_candidate(
                         .unwrap_or_else(|| normalize_profile_key(key)),
                 })
                 .collect::<HashSet<_>>();
+            let valid_keys = parsed
+                .profiles
+                .iter()
+                .filter_map(|entry| match entry {
+                    ParsedProfileEntry::Valid(profile) => Some(profile.key.clone()),
+                    ParsedProfileEntry::Invalid { .. } => None,
+                })
+                .collect::<HashSet<_>>();
+            // 改名迁移：profile.model 已不在当前可路由目录，但经 upstream 身份
+            // 或路由别名仍等价映射到目录中的某个模型时，重键迁移而不是留下永久
+            // 失效项（投影会因别名/碰撞改写可见模型名，SyncCatalog 原本只增不改，
+            // 改名后遗留的孤儿档案正是 Issue #74 的直接来源）。
+            // 解析失败的档案不在此处理，交给 RecoverAllInvalidFromCatalog。
+            let spec_upstreams = codex_catalog_model_specs(settings, "")
+                .into_iter()
+                .map(|spec| (normalize_profile_key(&spec.model), spec.upstream_model))
+                .collect::<HashMap<_, _>>();
+            let mut migrated_identities: HashSet<String> = HashSet::new();
+            let mut migrations: Vec<(String, String, String)> = Vec::new();
+            for key in profiles.keys().cloned().collect::<Vec<_>>() {
+                if !valid_keys.contains(&key) {
+                    continue;
+                }
+                let Some(raw) = profiles.get(&key) else {
+                    continue;
+                };
+                let Some(raw_model) = raw
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|model| !model.is_empty())
+                else {
+                    continue;
+                };
+                let stale_identity = normalize_profile_key(raw_model);
+                if stale_identity.is_empty() || routable_by_identity.contains_key(&stale_identity) {
+                    continue;
+                }
+                let Some((new_identity, new_model, _)) = routable.iter().find(|(_, model, _)| {
+                    let upstream = spec_upstreams
+                        .get(&normalize_profile_key(model))
+                        .and_then(Option::as_deref);
+                    codex_subagent_catalog_equivalent_names(settings, model, upstream)
+                        .iter()
+                        .any(|name| normalize_profile_key(name) == stale_identity)
+                }) else {
+                    continue;
+                };
+                if existing_identities.contains(new_identity)
+                    || migrated_identities.contains(new_identity)
+                {
+                    continue;
+                }
+                migrated_identities.insert(new_identity.clone());
+                migrations.push((key, new_identity.clone(), new_model.clone()));
+            }
+            for (old_key, new_identity, new_model) in migrations {
+                let Some(mut raw) = profiles.shift_remove(&old_key) else {
+                    continue;
+                };
+                raw["model"] = Value::String(new_model);
+                profiles.insert(new_identity, raw);
+            }
             for (identity, model, input_modalities) in routable {
-                if existing_identities.contains(&identity) {
+                if existing_identities.contains(&identity)
+                    || migrated_identities.contains(&identity)
+                {
                     continue;
                 }
                 if codex_subagent_route_classification_with_context(
@@ -5526,6 +5657,19 @@ fn preview_codex_subagent_profile_with_context(
     let spec = specs
         .iter()
         .find(|spec| normalize_profile_key(&spec.model) == profile_key)
+        .or_else(|| {
+            // 直接名字未命中时，接受经 upstream 身份 / 路由别名映射后的等价名
+            // （投影会把可见模型名改写成别名 key，存量 profile 仍持旧名）。
+            specs.iter().find(|spec| {
+                codex_subagent_catalog_equivalent_names(
+                    &settings_config,
+                    &spec.model,
+                    spec.upstream_model.as_deref(),
+                )
+                .iter()
+                .any(|name| normalize_profile_key(name) == profile_key)
+            })
+        })
         .ok_or_else(|| format!("Profile model is not routable: {model}"))?;
     let reasoning_capability =
         crate::proxy::providers::codex_reasoning::resolve_subagent_reasoning_capability(
@@ -16545,5 +16689,316 @@ wire_api = "responses"
             "matchPrefixes": ["gpt"]
         });
         assert!(codex_catalog_route_matches_model(&all, "gpt-5.4"));
+    }
+
+    #[test]
+    fn preview_accepts_alias_keyed_profile_across_frontend_and_backend_catalogs() {
+        // Issue #74 修复回归：路由别名 key 让后端投影把可见模型改名成
+        // `glm-5.3-flash-4faa657f-…`，SyncCatalog 依据后端投影播种/留存 profile；
+        // 而子 Agent 页 preview 传进来的 modelCatalog 是前端 buildModelCatalogForRoutes
+        // 的产物（按目标 provider 目录原名建表，不感知别名）。修复后编译按
+        // upstream 身份 + 路由别名 key 的等价集合匹配 profile.model，
+        // 两套投影分叉不再导致自动字段全空。
+        let alias_key = "glm-5.3-flash-4faa657f-1e92-467e-b3b0-d446aeb27b9a";
+        let routing = json!({
+            "schemaVersion": 2,
+            "enabled": true,
+            "subagentVersion": "v2",
+            "routes": [{
+                "id": "router-4faa657f-1e92-467e-b3b0-d446aeb27b9a",
+                "label": "基元律动",
+                "enabled": true,
+                "targetProviderId": "4faa657f-1e92-467e-b3b0-d446aeb27b9a",
+                "modelSelection": { "mode": "all" },
+                "matchPrefixes": ["glm"],
+                "aliases": { alias_key: "glm-5.3-flash" },
+                "authPolicy": { "source": "provider_config" }
+            }],
+            "subagentV2": {
+                "schemaVersion": 2,
+                "selectionPolicy": "balanced",
+                "profiles": {}
+            }
+        });
+        let backend_projected_settings = json!({
+            "modelCatalog": {
+                "models": [{ "model": alias_key, "upstreamModel": "glm-5.3-flash" }]
+            },
+            "codexRouting": routing,
+        });
+        let frontend_projected_settings = json!({
+            "modelCatalog": {
+                "models": [{ "model": "glm-5.3-flash" }]
+            },
+            "codexRouting": routing,
+        });
+        let profile: crate::codex_subagent_profiles::CodexSubagentProfileConfig =
+            serde_json::from_value(json!({
+                "model": alias_key,
+                "enabled": true,
+                "questionnaire": {
+                    "taskStrengths": ["repository_exploration"],
+                    "optimization": "speed",
+                    "writeScope": "bounded_changes",
+                    "preference": "preferred"
+                },
+                "reasoning": { "policy": "delegated" }
+            }))
+            .expect("profile should deserialize");
+
+        for (label, settings) in [
+            ("frontend", &frontend_projected_settings),
+            ("backend", &backend_projected_settings),
+        ] {
+            let preview = preview_codex_subagent_profile_with_context(
+                settings.clone(),
+                alias_key.to_string(),
+                profile.clone(),
+                None,
+            )
+            .unwrap_or_else(|error| panic!("{label} catalog should preview the alias-keyed profile: {error}"));
+            assert_eq!(preview.model, alias_key);
+            assert!(
+                !preview.requested_role_name.is_empty(),
+                "{label} catalog should produce auto role fields"
+            );
+            assert!(
+                !preview.description.is_empty() && !preview.developer_instructions.is_empty(),
+                "{label} catalog should fill description and developer instructions"
+            );
+        }
+    }
+
+    #[test]
+    fn preview_still_fails_when_no_alias_maps_the_profile_name() {
+        // 反向回归：等价匹配只来自真实存在的 upstream 身份与路由别名，
+        // 没有任何映射关系的陌生模型名仍然失败关闭。
+        let stale_model = "glm-5.3-flash-4faa657f-1e92-467e-b3b0-d446aeb27b9a";
+        let settings = json!({
+            "modelCatalog": {
+                "models": [{ "model": "glm-5.3-flash" }]
+            },
+            "codexRouting": {
+                "schemaVersion": 2,
+                "enabled": true,
+                "subagentVersion": "v2",
+                "routes": [{
+                    "id": "router-glm",
+                    "enabled": true,
+                    "targetProviderId": "4faa657f-1e92-467e-b3b0-d446aeb27b9a",
+                    "modelSelection": { "mode": "all" },
+                    "matchPrefixes": ["glm"],
+                    "aliases": {}
+                }],
+                "subagentV2": {
+                    "schemaVersion": 2,
+                    "selectionPolicy": "balanced",
+                    "profiles": {}
+                }
+            }
+        });
+        let profile: crate::codex_subagent_profiles::CodexSubagentProfileConfig =
+            serde_json::from_value(json!({
+                "model": stale_model,
+                "enabled": true,
+                "questionnaire": {
+                    "taskStrengths": ["repository_exploration"],
+                    "optimization": "speed",
+                    "writeScope": "bounded_changes",
+                    "preference": "preferred"
+                },
+                "reasoning": { "policy": "delegated" }
+            }))
+            .expect("profile should deserialize");
+
+        let error = preview_codex_subagent_profile_with_context(
+            settings,
+            stale_model.to_string(),
+            profile,
+            None,
+        )
+        .expect_err("a name with no exact or equivalent catalog match must stay unroutable");
+        assert!(
+            error.contains("not routable"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn catalog_sync_migrates_stale_alias_keyed_profile_to_current_projection_name() {
+        // Issue #74 修复回归：路由别名 key 曾让后端投影把可见模型改名为
+        // `glm-5.3-flash-4faa657f-…`，按该名字播种的 profile 在别名/投影变化后
+        // 变成永久失效项。SyncCatalog 现在会把仍能等价映射到当前目录的
+        // profile 重键迁移（保留问卷与手工设置），而不是留下孤儿档案。
+        let alias_key = "glm-5.3-flash-4faa657f-1e92-467e-b3b0-d446aeb27b9a";
+        let settings = codex_subagent_profile_status_settings(
+            "v2",
+            json!({
+                alias_key: {
+                    "model": alias_key,
+                    "enabled": true,
+                    "questionnaire": {
+                        "taskStrengths": ["testing", "summarization"],
+                        "optimization": "speed",
+                        "writeScope": "bounded_changes",
+                        "preference": "preferred"
+                    },
+                    "reasoning": { "policy": "fixed", "effort": "high" },
+                    "overrides": { "nicknameCandidates": ["flash"] }
+                }
+            }),
+            json!([{ "model": "glm-5.3-flash", "contextWindow": 1048576 }]),
+            json!([{
+                "id": "router-glm",
+                "enabled": true,
+                "match": { "models": ["glm-5.3-flash"] },
+                "aliases": { alias_key: "glm-5.3-flash" }
+            }]),
+        );
+        let draft = json!({
+            "schemaVersion": 2,
+            "selectionPolicy": "balanced",
+            "profiles": {
+                alias_key: {
+                    "model": alias_key,
+                    "enabled": true,
+                    "questionnaire": {
+                        "taskStrengths": ["testing", "summarization"],
+                        "optimization": "speed",
+                        "writeScope": "bounded_changes",
+                        "preference": "preferred"
+                    },
+                    "reasoning": { "policy": "fixed", "effort": "high" },
+                    "overrides": { "nicknameCandidates": ["flash"] }
+                }
+            }
+        });
+
+        let reconciled = reconcile_codex_subagent_v2_for_candidate(
+            &settings,
+            CodexSubagentV2ReconcileAction::SyncCatalog,
+            Some(&draft),
+            None,
+        )
+        .expect("sync catalog with a stale alias-keyed profile");
+
+        let migrated = reconciled["profiles"]
+            .get("glm-5.3-flash")
+            .expect("stale profile should migrate onto the current projection name");
+        assert_eq!(migrated["model"], "glm-5.3-flash");
+        assert_eq!(migrated["overrides"]["nicknameCandidates"][0], "flash");
+        assert_eq!(migrated["questionnaire"]["optimization"], "speed");
+        assert!(
+            reconciled["profiles"].get(alias_key).is_none(),
+            "the stale alias-keyed entry must be re-keyed, not duplicated"
+        );
+    }
+
+    #[test]
+    fn catalog_sync_migrates_stale_upstream_identity_profile_to_current_projection_name() {
+        // 反方向：目录条目带 upstreamModel 时，按 upstream 名字播种的旧 profile
+        // 也应迁移到当前投影的可见名。
+        let settings = codex_subagent_profile_status_settings(
+            "v2",
+            json!({}),
+            json!([{
+                "model": "glm-5.3-flash",
+                "upstreamModel": "glm-5.3-flash-0811",
+                "contextWindow": 1048576
+            }]),
+            json!([{
+                "id": "router-glm",
+                "enabled": true,
+                "match": { "models": ["glm-5.3-flash"] }
+            }]),
+        );
+        let draft = json!({
+            "schemaVersion": 2,
+            "selectionPolicy": "balanced",
+            "profiles": {
+                "glm-5.3-flash-0811": {
+                    "model": "glm-5.3-flash-0811",
+                    "enabled": false,
+                    "questionnaire": {
+                        "taskStrengths": ["repository_exploration"],
+                        "optimization": "balanced",
+                        "writeScope": "read_only",
+                        "preference": "eligible"
+                    },
+                    "reasoning": { "policy": "delegated" }
+                }
+            }
+        });
+
+        let reconciled = reconcile_codex_subagent_v2_for_candidate(
+            &settings,
+            CodexSubagentV2ReconcileAction::SyncCatalog,
+            Some(&draft),
+            None,
+        )
+        .expect("sync catalog with a stale upstream-identity profile");
+
+        let migrated = reconciled["profiles"]
+            .get("glm-5.3-flash")
+            .expect("upstream-identity profile should migrate to the visible catalog name");
+        assert_eq!(migrated["model"], "glm-5.3-flash");
+        assert_eq!(migrated["enabled"], false, "migration preserves user state");
+        assert!(
+            reconciled["profiles"]
+                .get("glm-5.3-flash-0811")
+                .is_none(),
+            "the stale upstream-identity entry must be re-keyed, not duplicated"
+        );
+    }
+
+    #[test]
+    fn catalog_sync_leaves_profiles_without_an_equivalent_catalog_model_untouched() {
+        // 没有任何别名/upstream 关联的陌生名字不迁移（交给显式的
+        // PruneUnroutable / RecoverAllInvalidFromCatalog），且已有同名目标档案时
+        // 迁移不得覆盖现有 profile。
+        let settings = codex_subagent_profile_status_settings(
+            "v2",
+            json!({}),
+            json!([{ "model": "glm-5.3-flash", "contextWindow": 1048576 }]),
+            json!([{
+                "id": "router-glm",
+                "enabled": true,
+                "match": { "models": ["glm-5.3-flash"] }
+            }]),
+        );
+        let draft = json!({
+            "schemaVersion": 2,
+            "selectionPolicy": "balanced",
+            "profiles": {
+                "glm-5.3-flash-legacy": {
+                    "model": "glm-5.3-flash-legacy",
+                    "enabled": true,
+                    "questionnaire": {
+                        "taskStrengths": ["testing"],
+                        "optimization": "quality",
+                        "writeScope": "complex_changes",
+                        "preference": "preferred"
+                    },
+                    "reasoning": { "policy": "delegated" }
+                }
+            }
+        });
+
+        let reconciled = reconcile_codex_subagent_v2_for_candidate(
+            &settings,
+            CodexSubagentV2ReconcileAction::SyncCatalog,
+            Some(&draft),
+            None,
+        )
+        .expect("sync catalog with an unrelated stale profile");
+
+        assert!(
+            reconciled["profiles"].get("glm-5.3-flash-legacy").is_some(),
+            "a name with no alias or upstream relation must stay untouched"
+        );
+        assert!(
+            reconciled["profiles"].get("glm-5.3-flash").is_some(),
+            "the routable catalog entry is still offered as a new default draft"
+        );
     }
 }

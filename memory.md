@@ -1,5 +1,11 @@
 # CC Switch Repository Memory
 
+## 2026-08-29 子 Agent 自动字段为空根因（Issue #74）与别名等价修复
+
+- 根因三层叠加：后端投影把路由别名 key/碰撞后缀写进可见模型名（基元律动路由的 UUID 别名使 live 投影为 `glm-5.3-flash-4faa657f-…`）；SyncCatalog 只增不改，profile 按播种时刻的投影名落库后不跟随改名；子 Agent preview/statuses 用前端 `buildModelCatalogForRoutes` 目录（不感知别名）覆盖 modelCatalog，编译按 `eq_ignore_ascii_case` 精确匹配 → Unroutable → 四个自动字段回退为空。
+- 修复（不改前端）：`CatalogModel.equivalent_models`（upstream 身份 + 路由别名 key，沿用 2026-08-21 路由侧双身份约定），编译先精确后等价；preview spec 查找与 modalities 补水加等价回退；SyncCatalog 增加改名迁移（等价映射到现目录时重键，保留问卷/覆盖，目标身份被占用或无关联时不迁移）。
+- 新增 6 项回归（含失败关闭反向用例），`cargo test --lib` 全量 3532 通过。未改动 live DB/live config；数据侧止血（删 UUID 别名 + 重存 Provider + 目录同步）待执行。详见 `memory-2026-08-29-subagent-alias-equivalence-fix.md`。
+
 ## 2026-08-29 Kimi k3-256k 401 "supports only 256K context" 根因（抓包确证）与 tool 线格式规范化修复
 
 - 抓包确证 432KB 空对话请求中 `tools` 数组 30 项占 96.7%（约 418KB），大头是用户级 `mcp__codex_apps__*` 连接器（alpha_vantage 122KB / github 77KB / linear 72KB 等，CLI 空目录同样携带，不分工作区）。Kimi 的上下文预检查按字节（边界 262144=256KiB）而非 token，且把超限伪装成 HTTP 401。实测 Kimi 接受 `namespace` 工具类型、拒绝 `tool_search` 类型和 `parallel_tool_calls:false`。
