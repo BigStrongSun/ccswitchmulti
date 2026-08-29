@@ -12,6 +12,7 @@ import type {
   CodexSubagentVersion,
   Provider,
 } from "@/types";
+import type { CodexSubagentV2Profile } from "@/types/codexSubagentV2";
 import {
   normalizeHostedToolsConfig,
   type HostedToolsConfig,
@@ -1245,6 +1246,115 @@ export function initialWizardCatalogModelOrder(
 }
 
 // 创建或更新 MultiRouter provider；草稿只在用户点击保存发布时写入数据库。
+
+/// 向导重建路由/目录后，为既有 subagentV2 生成"旧可见名 → 新可见名"的重定向器。
+///
+/// 重建会按消歧别名改写可见名，而既有 profiles 的键/model 是旧可见名快照；
+/// 原样直通会让 profile 键与投影目录错位（孤儿/孪生 profile，#74/#78 的根源）。
+/// 重定向规则与后端 `reconcile_codex_subagent_v2_for_candidate` SyncCatalog 迁移同构：
+/// 旧名经旧路由 aliases（或自身即 upstream 身份）求 upstream 身份，再在新源目录/
+/// 新路由 aliases 中反查新可见名；无关联视为下架，原样保留交由等价映射/过期清理兜底。
+function buildSubagentNameRedirector(
+  oldRoutes: CodexRoutingRouteV2[],
+  newRoutes: CodexRoutingRouteV2[],
+  resolvedSources: Provider[],
+) {
+  const oldVisibleToUpstream = new Map<string, string>();
+  for (const route of oldRoutes) {
+    for (const [visible, canonical] of Object.entries(route.aliases ?? {})) {
+      if (visible.trim() && canonical.trim()) {
+        oldVisibleToUpstream.set(
+          visible.trim().toLowerCase(),
+          canonical.trim(),
+        );
+      }
+    }
+  }
+  const identityToNewVisible = new Map<string, string>();
+  for (const source of resolvedSources) {
+    for (const model of readWizardModelCatalog(source)) {
+      const upstream = (
+        model.upstreamModel ??
+        model.upstream_model ??
+        model.model ??
+        ""
+      ).trim();
+      const visible = (model.model ?? "").trim();
+      const key = upstream.toLowerCase();
+      if (key && visible && !identityToNewVisible.has(key)) {
+        identityToNewVisible.set(key, visible);
+      }
+    }
+  }
+  for (const route of newRoutes) {
+    for (const [visible, canonical] of Object.entries(route.aliases ?? {})) {
+      const key = canonical.trim().toLowerCase();
+      if (key && visible.trim() && !identityToNewVisible.has(key)) {
+        identityToNewVisible.set(key, visible.trim());
+      }
+    }
+  }
+
+  function redirectVisibleName(oldVisible: string): string | null {
+    const trimmed = oldVisible.trim();
+    if (!trimmed) return null;
+    const candidates = [
+      oldVisibleToUpstream.get(trimmed.toLowerCase()),
+      trimmed,
+    ]
+      .filter((value): value is string => Boolean(value))
+      .map((value) => value.toLowerCase());
+    for (const identity of candidates) {
+      const mapped = identityToNewVisible.get(identity);
+      if (mapped) return mapped;
+    }
+    return null;
+  }
+
+  function remapSubagentV2(
+    current: CodexRoutingConfigV2["subagentV2"],
+  ): CodexRoutingConfigV2["subagentV2"] {
+    if (!current?.profiles) return current;
+    const profiles = current.profiles;
+    const next: Record<string, CodexSubagentV2Profile> = {};
+    for (const [oldKey, profile] of Object.entries(profiles)) {
+      const oldVisible = (
+        typeof profile.model === "string" && profile.model.trim()
+          ? profile.model
+          : oldKey
+      ).trim();
+      const newVisible = redirectVisibleName(oldVisible);
+      if (
+        !newVisible ||
+        newVisible.toLowerCase() === oldVisible.toLowerCase()
+      ) {
+        next[oldKey] = profile;
+        continue;
+      }
+      // 新身份已被其他 profile 占用（孪生/已迁移）→ 不迁移，原样保留（与后端语义一致）。
+      const occupiedByOther =
+        Object.prototype.hasOwnProperty.call(next, newVisible) ||
+        Object.entries(profiles).some(([otherKey, otherProfile]) => {
+          if (otherKey === oldKey) return false;
+          const otherVisible = (
+            typeof otherProfile.model === "string" && otherProfile.model.trim()
+              ? otherProfile.model
+              : otherKey
+          ).trim();
+          return otherVisible.toLowerCase() === newVisible.toLowerCase();
+        });
+      if (occupiedByOther) {
+        next[oldKey] = profile;
+        continue;
+      }
+      next[newVisible] = { ...profile, model: newVisible };
+    }
+    return { ...current, profiles: next };
+  }
+
+  return { redirectVisibleName, remapSubagentV2 };
+}
+
 export function buildCodexMultiRouterWizardPlan(
   allProviders: Provider[],
   sourceProviders: Provider[],
@@ -1340,15 +1450,27 @@ export function buildCodexMultiRouterWizardPlan(
   const subagentVersion = normalizeCodexSubagentVersion(
     options.subagentVersion ?? existingRouting?.subagentVersion,
   );
+  const subagentNameRedirector = buildSubagentNameRedirector(
+    existingRoutingV2?.routes ?? [],
+    routes,
+    resolvedSources,
+  );
   const routing: CodexRoutingConfigV2 = {
     ...(existingRoutingV2 ?? {}),
     schemaVersion: 2,
     enabled: true,
     subagentVersion,
-    subagentV2: existingRouting?.subagentV2,
-    spawnAgentModels: requestedSpawnAgentModels.filter((model) =>
-      selectedVisibleModels.has(model),
+    // 编辑已有方案时按 upstream 身份把 profiles 键/model 重定向到重建后的可见名，
+    // 避免与消歧别名错位产生孤儿/孪生 profile（#78）。
+    subagentV2: subagentNameRedirector.remapSubagentV2(
+      existingRouting?.subagentV2,
     ),
+    // 改名后的旧 spawn 候选先重定向到新可见名，再按当前可见集过滤，避免静默丢失。
+    spawnAgentModels: requestedSpawnAgentModels
+      .map(
+        (model) => subagentNameRedirector.redirectVisibleName(model) ?? model,
+      )
+      .filter((model) => selectedVisibleModels.has(model)),
     routes,
   };
   const existingIds = new Set(allProviders.map((provider) => provider.id));

@@ -231,3 +231,156 @@ describe("resolveWizardModelNameCollisions alias suffix", () => {
     expect(renamed).toBe("test-model-abcdef12");
   });
 });
+
+describe("buildCodexMultiRouterWizardPlan subagentV2 名字重定向（#78）", () => {
+  const jiyuanId = "4faa657f-1e92-467e-b3b0-d446aeb27b9a";
+  const legacyAliasKey = "glm-5.3-flash-4faa657f-1e92-467e-b3b0-d446aeb27b9a";
+
+  function jiyuanSource(): Provider {
+    return {
+      id: jiyuanId,
+      name: "基元律动",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "glm-5.3-flash" }] },
+      },
+    };
+  }
+
+  function bittoSource(): Provider {
+    return {
+      id: "bitto-1",
+      name: "Bitto",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "glm-5.3-flash" }] },
+      },
+    };
+  }
+
+  function existingPlanWith(
+    profiles: Record<string, Record<string, unknown>>,
+    spawnAgentModels: string[] = [legacyAliasKey],
+  ): Provider {
+    return {
+      id: "router-existing",
+      name: "Router Existing",
+      category: "custom",
+      settingsConfig: {
+        codexRouting: {
+          schemaVersion: 2,
+          enabled: true,
+          subagentVersion: "v2",
+          routes: [
+            {
+              id: "router-jiyuan",
+              label: "基元律动",
+              enabled: true,
+              targetProviderId: jiyuanId,
+              modelSelection: { mode: "all" },
+              matchPrefixes: ["glm"],
+              aliases: { [legacyAliasKey]: "glm-5.3-flash" },
+              authPolicy: { source: "provider_config" },
+            },
+          ],
+          subagentV2: {
+            schemaVersion: 2,
+            selectionPolicy: "balanced",
+            profiles,
+          },
+          spawnAgentModels,
+        },
+      },
+    };
+  }
+
+  it("把改名前的 profile 键/model 重定向到消歧后的拼音可见名", () => {
+    const result = buildCodexMultiRouterWizardPlan(
+      [jiyuanSource(), bittoSource()],
+      [jiyuanSource(), bittoSource()],
+      existingPlanWith({
+        [legacyAliasKey]: {
+          model: legacyAliasKey,
+          enabled: true,
+          questionnaire: {
+            taskStrengths: ["testing"],
+            optimization: "quality",
+            writeScope: "complex_changes",
+            preference: "preferred",
+          },
+          reasoning: { policy: "fixed", effort: "high" },
+        },
+      }),
+    );
+    const routing = (result.plan.settingsConfig as Record<string, any>)
+      .codexRouting;
+    const profiles = routing.subagentV2.profiles;
+    expect(profiles["glm-5.3-flash-jiyuanlvdong"]?.model).toBe(
+      "glm-5.3-flash-jiyuanlvdong",
+    );
+    expect(
+      profiles["glm-5.3-flash-jiyuanlvdong"].questionnaire.taskStrengths,
+    ).toEqual(["testing"]);
+    expect(profiles[legacyAliasKey]).toBeUndefined();
+    expect(routing.spawnAgentModels).toContain("glm-5.3-flash-jiyuanlvdong");
+  });
+
+  it("新键已被孪生 profile 占用时不迁移，保留占用者与原条目", () => {
+    const seededTwin = {
+      model: "glm-5.3-flash-jiyuanlvdong",
+      enabled: false,
+      questionnaire: {
+        taskStrengths: [],
+        optimization: "balanced",
+        writeScope: "read_only",
+        preference: "eligible",
+      },
+      reasoning: { policy: "delegated" },
+    };
+    const legacyProfile = {
+      model: legacyAliasKey,
+      enabled: true,
+      questionnaire: {
+        taskStrengths: ["testing"],
+        optimization: "quality",
+        writeScope: "complex_changes",
+        preference: "preferred",
+      },
+      reasoning: { policy: "fixed", effort: "high" },
+    };
+    const result = buildCodexMultiRouterWizardPlan(
+      [jiyuanSource(), bittoSource()],
+      [jiyuanSource(), bittoSource()],
+      existingPlanWith({
+        [legacyAliasKey]: legacyProfile,
+        "glm-5.3-flash-jiyuanlvdong": seededTwin,
+      }),
+    );
+    const profiles = (result.plan.settingsConfig as Record<string, any>)
+      .codexRouting.subagentV2.profiles as Record<string, { enabled: boolean }>;
+    expect(profiles["glm-5.3-flash-jiyuanlvdong"].enabled).toBe(false);
+    expect(profiles[legacyAliasKey]).toBeDefined();
+  });
+
+  it("与当前目录无关联的 profile 原样保留（交由等价/过期清理兜底）", () => {
+    const removedProfile = {
+      model: "removed-model",
+      enabled: false,
+      questionnaire: {
+        taskStrengths: [],
+        optimization: "balanced",
+        writeScope: "read_only",
+        preference: "fallback",
+      },
+      reasoning: { policy: "delegated" },
+    };
+    const result = buildCodexMultiRouterWizardPlan(
+      [jiyuanSource(), bittoSource()],
+      [jiyuanSource(), bittoSource()],
+      existingPlanWith({ "removed-model": removedProfile }),
+    );
+    const profiles = (result.plan.settingsConfig as Record<string, any>)
+      .codexRouting.subagentV2.profiles as Record<string, unknown>;
+    expect(profiles["removed-model"]).toEqual(removedProfile);
+  });
+});
