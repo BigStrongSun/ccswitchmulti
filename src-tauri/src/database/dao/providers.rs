@@ -1,9 +1,9 @@
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 use crate::protocol_compatibility::ProtocolCompatibilityRecord;
-use crate::provider::{Provider, ProviderMeta};
+use crate::provider::{Provider, ProviderMeta, UniversalProvider};
 use indexmap::IndexMap;
-use rusqlite::{params, TransactionBehavior};
+use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
 use std::collections::{HashMap, HashSet};
 
 /// 将持久化的供应商配置规范化为 JSON 对象。
@@ -24,6 +24,19 @@ fn parse_provider_settings_config(settings_config_str: &str) -> serde_json::Valu
     normalize_provider_settings_config(parsed)
 }
 
+fn codex_route_ids(settings_config: &serde_json::Value) -> HashSet<String> {
+    settings_config
+        .pointer("/codexRouting/routes")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|route| route.get("id").and_then(serde_json::Value::as_str))
+        .map(str::trim)
+        .filter(|route_id| !route_id.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 type OmoProviderRow = (
     String,
     String,
@@ -34,6 +47,124 @@ type OmoProviderRow = (
     Option<String>,
     String,
 );
+
+#[derive(Debug, Clone)]
+pub(crate) struct ProviderSetDatabaseMutation {
+    pub app_type: String,
+    pub provider_id: String,
+    pub provider: Option<Provider>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ProviderSetDatabaseTransaction {
+    pub mutations: Vec<ProviderSetDatabaseMutation>,
+    pub profile_owner_ids: HashSet<String>,
+    pub records: Vec<ProtocolCompatibilityRecord>,
+    pub replace_profile_provider_ids: HashSet<String>,
+    pub setting_keys_to_delete: Vec<String>,
+    pub universal_provider: Option<UniversalProvider>,
+    pub current_provider_after: Option<(String, String)>,
+}
+
+fn save_provider_in_transaction(
+    tx: &Transaction<'_>,
+    app_type: &str,
+    provider: &Provider,
+) -> Result<HashSet<String>, AppError> {
+    let mut meta_clone = provider.meta.clone().unwrap_or_default();
+    let endpoints = std::mem::take(&mut meta_clone.custom_endpoints);
+    let existing: Option<(bool, bool, String)> = tx
+        .query_row(
+            "SELECT is_current, in_failover_queue, settings_config
+             FROM providers WHERE id = ?1 AND app_type = ?2",
+            params![provider.id, app_type],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(|error| AppError::Database(error.to_string()))?;
+    let is_update = existing.is_some();
+    let settings_config = normalize_provider_settings_config(provider.settings_config.clone());
+    let (is_current, in_failover_queue, removed_route_ids) = match existing {
+        Some((is_current, in_failover_queue, previous_settings)) => {
+            let removed_route_ids = if app_type == "codex" {
+                let previous = parse_provider_settings_config(&previous_settings);
+                codex_route_ids(&previous)
+                    .difference(&codex_route_ids(&settings_config))
+                    .cloned()
+                    .collect()
+            } else {
+                HashSet::new()
+            };
+            (is_current, in_failover_queue, removed_route_ids)
+        }
+        None => (false, provider.in_failover_queue, HashSet::new()),
+    };
+    let settings_json = serde_json::to_string(&settings_config).map_err(|error| {
+        AppError::Database(format!("Failed to serialize settings_config: {error}"))
+    })?;
+    let meta_json = serde_json::to_string(&meta_clone)
+        .map_err(|error| AppError::Database(format!("Failed to serialize meta: {error}")))?;
+
+    if is_update {
+        tx.execute(
+            "UPDATE providers SET
+                name = ?1, settings_config = ?2, website_url = ?3, category = ?4,
+                created_at = ?5, sort_index = ?6, notes = ?7, icon = ?8,
+                icon_color = ?9, meta = ?10, is_current = ?11, in_failover_queue = ?12
+             WHERE id = ?13 AND app_type = ?14",
+            params![
+                provider.name,
+                settings_json,
+                provider.website_url,
+                provider.category,
+                provider.created_at,
+                provider.sort_index,
+                provider.notes,
+                provider.icon,
+                provider.icon_color,
+                meta_json,
+                is_current,
+                in_failover_queue,
+                provider.id,
+                app_type,
+            ],
+        )
+        .map_err(|error| AppError::Database(error.to_string()))?;
+    } else {
+        tx.execute(
+            "INSERT INTO providers (
+                id, app_type, name, settings_config, website_url, category,
+                created_at, sort_index, notes, icon, icon_color, meta, is_current, in_failover_queue
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![
+                provider.id,
+                app_type,
+                provider.name,
+                settings_json,
+                provider.website_url,
+                provider.category,
+                provider.created_at,
+                provider.sort_index,
+                provider.notes,
+                provider.icon,
+                provider.icon_color,
+                meta_json,
+                is_current,
+                in_failover_queue,
+            ],
+        )
+        .map_err(|error| AppError::Database(error.to_string()))?;
+        for (url, endpoint) in endpoints {
+            tx.execute(
+                "INSERT INTO provider_endpoints (provider_id, app_type, url, added_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![provider.id, app_type, url, endpoint.added_at],
+            )
+            .map_err(|error| AppError::Database(error.to_string()))?;
+        }
+    }
+    Ok(removed_route_ids)
+}
 
 impl Database {
     pub fn get_all_providers(
@@ -242,101 +373,18 @@ impl Database {
         let tx = conn
             .transaction()
             .map_err(|e| AppError::Database(e.to_string()))?;
-
-        let mut meta_clone = provider.meta.clone().unwrap_or_default();
-        let endpoints = std::mem::take(&mut meta_clone.custom_endpoints);
-
-        let existing: Option<(bool, bool)> = tx
-            .query_row(
-                "SELECT is_current, in_failover_queue FROM providers WHERE id = ?1 AND app_type = ?2",
-                params![provider.id, app_type],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .ok();
-
-        let is_update = existing.is_some();
-        let (is_current, in_failover_queue) =
-            existing.unwrap_or((false, provider.in_failover_queue));
-        let settings_config = normalize_provider_settings_config(provider.settings_config.clone());
-
-        if is_update {
-            tx.execute(
-                "UPDATE providers SET
-                    name = ?1,
-                    settings_config = ?2,
-                    website_url = ?3,
-                    category = ?4,
-                    created_at = ?5,
-                    sort_index = ?6,
-                    notes = ?7,
-                    icon = ?8,
-                    icon_color = ?9,
-                    meta = ?10,
-                    is_current = ?11,
-                    in_failover_queue = ?12
-                WHERE id = ?13 AND app_type = ?14",
-                params![
-                    provider.name,
-                    serde_json::to_string(&settings_config).map_err(|e| {
-                        AppError::Database(format!("Failed to serialize settings_config: {e}"))
-                    })?,
-                    provider.website_url,
-                    provider.category,
-                    provider.created_at,
-                    provider.sort_index,
-                    provider.notes,
-                    provider.icon,
-                    provider.icon_color,
-                    serde_json::to_string(&meta_clone).map_err(|e| AppError::Database(format!(
-                        "Failed to serialize meta: {e}"
-                    )))?,
-                    is_current,
-                    in_failover_queue,
-                    provider.id,
-                    app_type,
-                ],
-            )
-            .map_err(|e| AppError::Database(e.to_string()))?;
-        } else {
-            tx.execute(
-                "INSERT INTO providers (
-                    id, app_type, name, settings_config, website_url, category,
-                    created_at, sort_index, notes, icon, icon_color, meta, is_current, in_failover_queue
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-                params![
-                    provider.id,
-                    app_type,
-                    provider.name,
-                    serde_json::to_string(&settings_config)
-                        .map_err(|e| AppError::Database(format!("Failed to serialize settings_config: {e}")))?,
-                    provider.website_url,
-                    provider.category,
-                    provider.created_at,
-                    provider.sort_index,
-                    provider.notes,
-                    provider.icon,
-                    provider.icon_color,
-                    serde_json::to_string(&meta_clone)
-                        .map_err(|e| AppError::Database(format!("Failed to serialize meta: {e}")))?,
-                    is_current,
-                    in_failover_queue,
-                ],
-            )
-            .map_err(|e| AppError::Database(e.to_string()))?;
-
-            for (url, endpoint) in endpoints {
-                tx.execute(
-                    "INSERT INTO provider_endpoints (provider_id, app_type, url, added_at)
-                     VALUES (?1, ?2, ?3, ?4)",
-                    params![provider.id, app_type, url, endpoint.added_at],
-                )
-                .map_err(|e| AppError::Database(e.to_string()))?;
-            }
-        }
+        let removed_route_ids = save_provider_in_transaction(&tx, app_type, provider)?;
 
         for record in records {
             super::protocol_compatibility::save_protocol_compatibility_result_in_transaction(
                 &tx, record,
+            )?;
+        }
+        if app_type == "codex" {
+            super::protocol_compatibility::delete_protocol_state_for_routes_in_transaction(
+                &tx,
+                &provider.id,
+                &removed_route_ids,
             )?;
         }
 
@@ -344,14 +392,189 @@ impl Database {
         Ok(())
     }
 
+    pub(crate) fn apply_provider_set_with_protocol_profiles_and_setting_cleanup(
+        &self,
+        mutations: &[(&str, &str, Option<&Provider>)],
+        profile_owner_id: Option<&str>,
+        records: &[ProtocolCompatibilityRecord],
+        related_provider_ids: &HashSet<String>,
+        setting_keys_to_delete: &[String],
+    ) -> Result<(), AppError> {
+        self.apply_provider_set_with_protocol_profiles_setting_cleanup_and_universal_upsert(
+            mutations,
+            profile_owner_id,
+            records,
+            related_provider_ids,
+            setting_keys_to_delete,
+            None,
+        )
+    }
+
+    pub(crate) fn apply_provider_set_with_protocol_profiles_setting_cleanup_and_universal_upsert(
+        &self,
+        mutations: &[(&str, &str, Option<&Provider>)],
+        profile_owner_id: Option<&str>,
+        records: &[ProtocolCompatibilityRecord],
+        related_provider_ids: &HashSet<String>,
+        setting_keys_to_delete: &[String],
+        universal_provider: Option<&UniversalProvider>,
+    ) -> Result<(), AppError> {
+        let mut profile_owner_ids = related_provider_ids.clone();
+        if let Some(profile_owner_id) = profile_owner_id {
+            profile_owner_ids.insert(profile_owner_id.to_string());
+        }
+        self.apply_provider_set_database_transaction(ProviderSetDatabaseTransaction {
+            mutations: mutations
+                .iter()
+                .map(
+                    |(app_type, provider_id, provider)| ProviderSetDatabaseMutation {
+                        app_type: (*app_type).to_string(),
+                        provider_id: (*provider_id).to_string(),
+                        provider: provider.cloned(),
+                    },
+                )
+                .collect(),
+            profile_owner_ids,
+            records: records.to_vec(),
+            replace_profile_provider_ids: HashSet::new(),
+            setting_keys_to_delete: setting_keys_to_delete.to_vec(),
+            universal_provider: universal_provider.cloned(),
+            current_provider_after: None,
+        })
+    }
+
+    pub(crate) fn apply_provider_set_database_transaction(
+        &self,
+        mutation: ProviderSetDatabaseTransaction,
+    ) -> Result<(), AppError> {
+        if mutation.records.iter().any(|record| {
+            !mutation
+                .profile_owner_ids
+                .contains(&record.target.provider_id)
+        }) {
+            return Err(AppError::InvalidInput(
+                "protocol compatibility profile does not belong to the Provider set being saved"
+                    .to_string(),
+            ));
+        }
+        let mut mutation_keys = HashSet::new();
+        for item in &mutation.mutations {
+            if item
+                .provider
+                .as_ref()
+                .is_some_and(|provider| provider.id != item.provider_id)
+            {
+                return Err(AppError::InvalidInput(format!(
+                    "Provider mutation id mismatch: expected {}",
+                    item.provider_id
+                )));
+            }
+            if !mutation_keys.insert((item.app_type.clone(), item.provider_id.clone())) {
+                return Err(AppError::InvalidInput(format!(
+                    "Provider set contains duplicate mutation for {}/{}",
+                    item.app_type, item.provider_id
+                )));
+            }
+        }
+
+        let mut conn = lock_conn!(self.conn);
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| AppError::Database(error.to_string()))?;
+        if let Some(provider) = mutation.universal_provider.as_ref() {
+            super::universal_providers::save_universal_provider_in_transaction(&tx, provider)?;
+        }
+        for provider_id in &mutation.replace_profile_provider_ids {
+            tx.execute(
+                "DELETE FROM protocol_compatibility_profiles WHERE provider_id = ?1",
+                params![provider_id],
+            )
+            .map_err(|error| AppError::Database(error.to_string()))?;
+        }
+        let mut deleted_codex_provider_ids = HashSet::new();
+        let mut removed_codex_routes = HashMap::<String, HashSet<String>>::new();
+        for item in &mutation.mutations {
+            if let Some(provider) = item.provider.as_ref() {
+                let removed_route_ids =
+                    save_provider_in_transaction(&tx, &item.app_type, provider)?;
+                if item.app_type == "codex" && !removed_route_ids.is_empty() {
+                    removed_codex_routes
+                        .entry(provider.id.clone())
+                        .or_default()
+                        .extend(removed_route_ids);
+                }
+            } else {
+                tx.execute(
+                    "DELETE FROM providers WHERE id = ?1 AND app_type = ?2",
+                    params![item.provider_id, item.app_type],
+                )
+                .map_err(|error| AppError::Database(error.to_string()))?;
+                if item.app_type == "codex" {
+                    deleted_codex_provider_ids.insert(item.provider_id.clone());
+                }
+            }
+        }
+        for record in &mutation.records {
+            super::protocol_compatibility::save_protocol_compatibility_result_in_transaction(
+                &tx, record,
+            )?;
+        }
+        for key in &mutation.setting_keys_to_delete {
+            tx.execute("DELETE FROM settings WHERE key = ?1", params![key])
+                .map_err(|error| AppError::Database(error.to_string()))?;
+        }
+        for provider_id in deleted_codex_provider_ids {
+            super::protocol_compatibility::delete_protocol_state_for_provider_in_transaction(
+                &tx,
+                &provider_id,
+            )?;
+        }
+        for (provider_id, route_ids) in removed_codex_routes {
+            super::protocol_compatibility::delete_protocol_state_for_routes_in_transaction(
+                &tx,
+                &provider_id,
+                &route_ids,
+            )?;
+        }
+        if let Some((app_type, provider_id)) = mutation.current_provider_after.as_ref() {
+            tx.execute(
+                "UPDATE providers SET is_current = 0 WHERE app_type = ?1",
+                params![app_type],
+            )
+            .map_err(|error| AppError::Database(error.to_string()))?;
+            let changed = tx
+                .execute(
+                    "UPDATE providers SET is_current = 1 WHERE id = ?1 AND app_type = ?2",
+                    params![provider_id, app_type],
+                )
+                .map_err(|error| AppError::Database(error.to_string()))?;
+            if changed != 1 {
+                return Err(AppError::InvalidInput(format!(
+                    "Provider set current target does not exist: {app_type}/{provider_id}"
+                )));
+            }
+        }
+        tx.commit()
+            .map_err(|error| AppError::Database(error.to_string()))
+    }
+
     pub fn delete_provider(&self, app_type: &str, id: &str) -> Result<(), AppError> {
-        let conn = lock_conn!(self.conn);
-        conn.execute(
+        let mut conn = lock_conn!(self.conn);
+        let tx = conn
+            .transaction()
+            .map_err(|error| AppError::Database(error.to_string()))?;
+        tx.execute(
             "DELETE FROM providers WHERE id = ?1 AND app_type = ?2",
             params![id, app_type],
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
-        Ok(())
+        if app_type == "codex" {
+            super::protocol_compatibility::delete_protocol_state_for_provider_in_transaction(
+                &tx, id,
+            )?;
+        }
+        tx.commit()
+            .map_err(|error| AppError::Database(error.to_string()))
     }
 
     pub fn set_current_provider(&self, app_type: &str, id: &str) -> Result<(), AppError> {
@@ -837,7 +1060,223 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol_compatibility::{
+        ProbeReadiness, ProbeTargetKey, ProtocolCompatibilityProbeResult,
+        ProtocolCompatibilityRecord, TransportKind,
+    };
+    use crate::provider::UniversalProvider;
     use serde_json::json;
+
+    fn provider(id: &str, state: &str) -> Provider {
+        Provider::with_id(
+            id.to_string(),
+            id.to_string(),
+            json!({"state": state}),
+            None,
+        )
+    }
+
+    fn profile(
+        provider_id: &str,
+        model: &str,
+        transport: TransportKind,
+    ) -> ProtocolCompatibilityRecord {
+        ProtocolCompatibilityRecord::new(
+            ProbeTargetKey::new(
+                provider_id,
+                None::<String>,
+                model,
+                model,
+                transport,
+                "https://relay.example/v1/responses",
+                "bearer",
+            )
+            .expect("target"),
+            ProtocolCompatibilityProbeResult {
+                selected_transport: Some(transport),
+                readiness: ProbeReadiness::Verified,
+                branches: Vec::new(),
+            },
+            100,
+            200,
+        )
+    }
+
+    fn upsert(provider: Provider) -> ProviderSetDatabaseMutation {
+        ProviderSetDatabaseMutation {
+            app_type: "codex".to_string(),
+            provider_id: provider.id.clone(),
+            provider: Some(provider),
+        }
+    }
+
+    fn delete(provider_id: &str) -> ProviderSetDatabaseMutation {
+        ProviderSetDatabaseMutation {
+            app_type: "codex".to_string(),
+            provider_id: provider_id.to_string(),
+            provider: None,
+        }
+    }
+
+    fn database_transaction(
+        mutations: Vec<ProviderSetDatabaseMutation>,
+    ) -> ProviderSetDatabaseTransaction {
+        ProviderSetDatabaseTransaction {
+            mutations,
+            profile_owner_ids: HashSet::new(),
+            records: Vec::new(),
+            replace_profile_provider_ids: HashSet::new(),
+            setting_keys_to_delete: Vec::new(),
+            universal_provider: None,
+            current_provider_after: None,
+        }
+    }
+
+    #[test]
+    fn provider_set_transaction_rolls_back_source_leaf_profile_universal_and_current_state() {
+        let db = Database::memory().expect("memory database");
+        db.save_provider("codex", &provider("relay", "before"))
+            .expect("seed source");
+        db.set_current_provider("codex", "relay")
+            .expect("activate source");
+        let mut universal = UniversalProvider::new(
+            "universal".to_string(),
+            "Universal before".to_string(),
+            "custom".to_string(),
+            "https://before.example/v1".to_string(),
+            "before-key".to_string(),
+        );
+        db.save_universal_provider(&universal)
+            .expect("seed Universal definition");
+
+        {
+            let conn = db.conn.lock().expect("lock database");
+            conn.execute_batch(
+                "CREATE TRIGGER fail_second_protocol_leaf
+                 BEFORE INSERT ON providers
+                 WHEN NEW.id = 'relay--ccsm-chat'
+                 BEGIN
+                   SELECT RAISE(ABORT, 'injected second leaf failure');
+                 END;",
+            )
+            .expect("install failure trigger");
+        }
+
+        universal.name = "Universal after".to_string();
+        let record = profile(
+            "relay--ccsm-responses",
+            "model-a",
+            TransportKind::OpenAiResponses,
+        );
+        let mut transaction = database_transaction(vec![
+            upsert(provider("relay", "after")),
+            upsert(provider("relay--ccsm-responses", "after")),
+            upsert(provider("relay--ccsm-chat", "after")),
+        ]);
+        transaction.profile_owner_ids = [
+            "relay".to_string(),
+            "relay--ccsm-responses".to_string(),
+            "relay--ccsm-chat".to_string(),
+        ]
+        .into_iter()
+        .collect();
+        transaction.records = vec![record.clone()];
+        transaction.universal_provider = Some(universal);
+        transaction.current_provider_after = Some(("codex".to_string(), "relay".to_string()));
+
+        let error = db
+            .apply_provider_set_database_transaction(transaction)
+            .expect_err("second leaf must abort transaction");
+        assert!(error.to_string().contains("injected second leaf failure"));
+        assert_eq!(
+            db.get_provider_by_id("relay", "codex")
+                .expect("read source")
+                .expect("source remains")
+                .settings_config["state"],
+            "before"
+        );
+        assert!(db
+            .get_provider_by_id("relay--ccsm-responses", "codex")
+            .expect("read Responses leaf")
+            .is_none());
+        assert!(db
+            .get_provider_by_id("relay--ccsm-chat", "codex")
+            .expect("read Chat leaf")
+            .is_none());
+        assert!(db
+            .get_protocol_compatibility_result(&record.target)
+            .expect("read profile")
+            .is_none());
+        assert_eq!(
+            db.get_universal_provider("universal")
+                .expect("read Universal")
+                .expect("Universal remains")
+                .name,
+            "Universal before"
+        );
+        assert_eq!(
+            db.get_current_provider("codex").expect("read current"),
+            Some("relay".to_string())
+        );
+    }
+
+    #[test]
+    fn provider_set_transaction_replaces_profiles_and_moves_current_leaf_to_source() {
+        let db = Database::memory().expect("memory database");
+        db.save_provider("codex", &provider("relay", "facade"))
+            .expect("seed source");
+        db.save_provider("codex", &provider("relay--ccsm-responses", "old leaf"))
+            .expect("seed Responses leaf");
+        db.save_provider("codex", &provider("relay--ccsm-chat", "old leaf"))
+            .expect("seed Chat leaf");
+        db.set_current_provider("codex", "relay--ccsm-chat")
+            .expect("activate old leaf");
+        let old_source = profile("relay", "old-model", TransportKind::OpenAiResponses);
+        let old_chat = profile("relay--ccsm-chat", "model-b", TransportKind::OpenAiChat);
+        db.save_protocol_compatibility_result(&old_source)
+            .expect("seed old source profile");
+        db.save_protocol_compatibility_result(&old_chat)
+            .expect("seed old leaf profile");
+        let new_source = profile("relay", "model-a", TransportKind::OpenAiResponses);
+
+        let mut transaction = database_transaction(vec![
+            upsert(provider("relay", "single")),
+            delete("relay--ccsm-responses"),
+            delete("relay--ccsm-chat"),
+        ]);
+        transaction.profile_owner_ids = ["relay".to_string()].into_iter().collect();
+        transaction.records = vec![new_source.clone()];
+        transaction.replace_profile_provider_ids = ["relay".to_string()].into_iter().collect();
+        transaction.current_provider_after = Some(("codex".to_string(), "relay".to_string()));
+        db.apply_provider_set_database_transaction(transaction)
+            .expect("fold split Provider Set");
+
+        assert_eq!(
+            db.get_current_provider("codex").expect("read current"),
+            Some("relay".to_string())
+        );
+        assert!(db
+            .get_provider_by_id("relay--ccsm-responses", "codex")
+            .expect("read Responses leaf")
+            .is_none());
+        assert!(db
+            .get_provider_by_id("relay--ccsm-chat", "codex")
+            .expect("read Chat leaf")
+            .is_none());
+        assert!(db
+            .get_protocol_compatibility_result(&old_source.target)
+            .expect("read old source profile")
+            .is_none());
+        assert!(db
+            .get_protocol_compatibility_result(&old_chat.target)
+            .expect("read old leaf profile")
+            .is_none());
+        assert_eq!(
+            db.get_protocol_compatibility_result(&new_source.target)
+                .expect("read new source profile"),
+            Some(new_source)
+        );
+    }
 
     /// 回归旧数据库中合法 JSON `null`、标量、数组或损坏文本，读取时不能把非对象配置暴露给前端。
     #[test]

@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use rusqlite::{params, OptionalExtension, Transaction};
 
 use crate::{
@@ -257,6 +259,81 @@ pub(super) fn save_protocol_compatibility_result_in_transaction(
         ],
     )
     .map_err(|error| AppError::Database(error.to_string()))?;
+    Ok(())
+}
+
+pub(super) fn delete_protocol_state_for_provider_in_transaction(
+    tx: &Transaction<'_>,
+    provider_id: &str,
+) -> Result<(), AppError> {
+    tx.execute(
+        "DELETE FROM protocol_compatibility_profiles WHERE provider_id = ?1",
+        params![provider_id],
+    )
+    .map_err(|error| AppError::Database(error.to_string()))?;
+    delete_reasoning_overrides_matching(tx, |target| target.provider_id == provider_id)
+}
+
+pub(super) fn delete_protocol_state_for_routes_in_transaction(
+    tx: &Transaction<'_>,
+    provider_id: &str,
+    route_ids: &HashSet<String>,
+) -> Result<(), AppError> {
+    if route_ids.is_empty() {
+        return Ok(());
+    }
+    for route_id in route_ids {
+        tx.execute(
+            "DELETE FROM protocol_compatibility_profiles
+             WHERE provider_id = ?1 AND route_id = ?2",
+            params![provider_id, route_id],
+        )
+        .map_err(|error| AppError::Database(error.to_string()))?;
+    }
+    delete_reasoning_overrides_matching(tx, |target| {
+        target.provider_id == provider_id
+            && target
+                .route_id
+                .as_ref()
+                .is_some_and(|route_id| route_ids.contains(route_id))
+    })
+}
+
+fn delete_reasoning_overrides_matching(
+    tx: &Transaction<'_>,
+    matches: impl Fn(&ProbeTargetKey) -> bool,
+) -> Result<(), AppError> {
+    let keys = {
+        let mut statement = tx
+            .prepare("SELECT target_key, target_json FROM codex_reasoning_manual_overrides")
+            .map_err(|error| AppError::Database(error.to_string()))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| AppError::Database(error.to_string()))?;
+        let mut keys = Vec::new();
+        for row in rows {
+            let (target_key, target_json) =
+                row.map_err(|error| AppError::Database(error.to_string()))?;
+            let target: ProbeTargetKey = serde_json::from_str(&target_json).map_err(|error| {
+                AppError::Database(format!(
+                    "Codex reasoning 手工覆盖目标解析失败，无法安全清理: {error}"
+                ))
+            })?;
+            if matches(&target) {
+                keys.push(target_key);
+            }
+        }
+        keys
+    };
+    for target_key in keys {
+        tx.execute(
+            "DELETE FROM codex_reasoning_manual_overrides WHERE target_key = ?1",
+            params![target_key],
+        )
+        .map_err(|error| AppError::Database(error.to_string()))?;
+    }
     Ok(())
 }
 

@@ -5,10 +5,38 @@
 use crate::database::{lock_conn, to_json_string, Database};
 use crate::error::AppError;
 use crate::provider::UniversalProvider;
+use rusqlite::{params, OptionalExtension, Transaction};
 use std::collections::HashMap;
 
 /// 统一供应商的 Settings Key
 const UNIVERSAL_PROVIDERS_KEY: &str = "universal_providers";
+
+pub(crate) fn save_universal_provider_in_transaction(
+    tx: &Transaction<'_>,
+    provider: &UniversalProvider,
+) -> Result<(), AppError> {
+    let current = tx
+        .query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            params![UNIVERSAL_PROVIDERS_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| AppError::Database(error.to_string()))?;
+    let mut providers = match current {
+        Some(json) => serde_json::from_str::<HashMap<String, UniversalProvider>>(&json)
+            .map_err(|error| AppError::Database(format!("解析统一供应商数据失败: {error}")))?,
+        None => HashMap::new(),
+    };
+    providers.insert(provider.id.clone(), provider.clone());
+    let json = to_json_string(&providers)?;
+    tx.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+        params![UNIVERSAL_PROVIDERS_KEY, json],
+    )
+    .map_err(|error| AppError::Database(error.to_string()))?;
+    Ok(())
+}
 
 impl Database {
     /// 获取所有统一供应商

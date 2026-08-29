@@ -1,5 +1,6 @@
 use crate::protocol_compatibility::{
-    ProbeReadiness, ProtocolCompatibilityRecord, TransportKind, PROBE_PROFILE_VERSION,
+    compile_provider_probe_candidate_for_model, ProbeReadiness, ProtocolCompatibilityRecord,
+    TransportKind, PROBE_PROFILE_VERSION,
 };
 use crate::provider::Provider;
 use serde::Serialize;
@@ -42,6 +43,9 @@ pub enum CodexProviderSetPlan {
 pub struct PreparedCodexProviderSetMutation {
     pub preview: CodexProviderSetPreview,
     pub persistence: CodexProviderSetPersistence,
+    pub profiles: Vec<ProtocolCompatibilityRecord>,
+    pub delete_provider_ids: Vec<String>,
+    pub replace_profile_provider_ids: HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -165,6 +169,9 @@ pub fn plan_codex_provider_set(
                 plan: CodexProviderSetPlan::Blocked { models: blocked },
             },
             persistence: CodexProviderSetPersistence::Blocked,
+            profiles: Vec::new(),
+            delete_provider_ids: Vec::new(),
+            replace_profile_provider_ids: HashSet::new(),
         });
     }
 
@@ -231,6 +238,30 @@ pub fn plan_codex_provider_set(
         },
         CodexProviderSetPersistence::Blocked => unreachable!("blocked plans return above"),
     };
+    let profiles = rebind_profiles(&persistence, records, &responses_models, &chat_models)?;
+    let delete_provider_ids = match &persistence {
+        CodexProviderSetPersistence::Single { .. } => {
+            owned_existing_leaf_ids(source, existing_providers)
+        }
+        CodexProviderSetPersistence::Split { .. } | CodexProviderSetPersistence::Blocked => {
+            Vec::new()
+        }
+    };
+    let mut replace_profile_provider_ids = [source.id.clone()].into_iter().collect::<HashSet<_>>();
+    match &persistence {
+        CodexProviderSetPersistence::Single { .. } => {
+            replace_profile_provider_ids.extend(delete_provider_ids.iter().cloned());
+        }
+        CodexProviderSetPersistence::Split {
+            responses_provider,
+            chat_provider,
+            ..
+        } => {
+            replace_profile_provider_ids.insert(responses_provider.id.clone());
+            replace_profile_provider_ids.insert(chat_provider.id.clone());
+        }
+        CodexProviderSetPersistence::Blocked => {}
+    }
     Ok(PreparedCodexProviderSetMutation {
         preview: CodexProviderSetPreview {
             digest,
@@ -240,7 +271,72 @@ pub fn plan_codex_provider_set(
             plan,
         },
         persistence,
+        profiles,
+        delete_provider_ids,
+        replace_profile_provider_ids,
     })
+}
+
+fn rebind_profiles(
+    persistence: &CodexProviderSetPersistence,
+    records: &[ProtocolCompatibilityRecord],
+    responses_models: &[String],
+    chat_models: &[String],
+) -> Result<Vec<ProtocolCompatibilityRecord>, CodexProviderSetError> {
+    let mut rebound = Vec::with_capacity(responses_models.len() + chat_models.len());
+    for record in records {
+        let selected = record.result.selected_transport.ok_or_else(|| {
+            error(
+                "codex_provider_set_probe_required",
+                "Probe selection is missing",
+            )
+        })?;
+        let in_selected_group = match selected {
+            TransportKind::OpenAiResponses => {
+                responses_models.contains(&record.target.public_model)
+            }
+            TransportKind::OpenAiChat => chat_models.contains(&record.target.public_model),
+        };
+        if !in_selected_group {
+            continue;
+        }
+        let provider = match persistence {
+            CodexProviderSetPersistence::Single { provider, .. } => provider,
+            CodexProviderSetPersistence::Split {
+                responses_provider,
+                chat_provider,
+                ..
+            } => match selected {
+                TransportKind::OpenAiResponses => responses_provider,
+                TransportKind::OpenAiChat => chat_provider,
+            },
+            CodexProviderSetPersistence::Blocked => {
+                return Err(error(
+                    "codex_provider_set_model_blocked",
+                    "Blocked Provider Set cannot materialize executable profiles",
+                ));
+            }
+        };
+        let candidate = compile_provider_probe_candidate_for_model(
+            provider,
+            record.target.public_model.clone(),
+            record.target.upstream_model.clone(),
+        )
+        .map_err(|message| error("codex_provider_set_profile_rebind_failed", message))?;
+        let target = candidate
+            .target_key(selected)
+            .map_err(|message| error("codex_provider_set_profile_rebind_failed", message))?;
+        let mut rebound_record = record.clone();
+        rebound_record.target = target;
+        rebound.push(rebound_record);
+    }
+    if rebound.len() != responses_models.len() + chat_models.len() {
+        return Err(error(
+            "codex_provider_set_profile_rebind_failed",
+            "Every selected model must materialize exactly one executable profile",
+        ));
+    }
+    Ok(rebound)
 }
 
 fn persistence_digest_value(persistence: &CodexProviderSetPersistence) -> Value {
@@ -390,6 +486,27 @@ fn validate_leaf_ownership(
     Ok(())
 }
 
+fn owned_existing_leaf_ids(
+    source: &Provider,
+    existing_providers: &HashMap<String, Provider>,
+) -> Vec<String> {
+    [
+        (
+            responses_leaf_id(&source.id),
+            TransportKind::OpenAiResponses,
+        ),
+        (chat_leaf_id(&source.id), TransportKind::OpenAiChat),
+    ]
+    .into_iter()
+    .filter_map(|(leaf_id, transport)| {
+        existing_providers
+            .get(&leaf_id)
+            .filter(|leaf| leaf_is_owned(source, leaf, transport))
+            .map(|_| leaf_id)
+    })
+    .collect()
+}
+
 fn validate_owned_leaf(
     source: &Provider,
     leaf: Option<&Provider>,
@@ -402,17 +519,7 @@ fn validate_owned_leaf(
             format!("Generated Provider `{leaf_id}` is missing"),
         ));
     };
-    let marker = leaf
-        .settings_config
-        .get("codexProtocolSet")
-        .and_then(Value::as_object);
-    let owned = marker.is_some_and(|marker| {
-        marker.get("version").and_then(Value::as_u64) == Some(CODEX_PROTOCOL_SET_VERSION as u64)
-            && marker.get("role").and_then(Value::as_str) == Some("leaf")
-            && marker.get("parentProviderId").and_then(Value::as_str) == Some(source.id.as_str())
-            && marker.get("transport").and_then(Value::as_str) == Some(transport_value(transport))
-    });
-    if owned {
+    if leaf_is_owned(source, leaf, transport) {
         Ok(())
     } else {
         Err(error(
@@ -420,6 +527,19 @@ fn validate_owned_leaf(
             format!("Provider ID `{leaf_id}` is already owned by another Provider"),
         ))
     }
+}
+
+fn leaf_is_owned(source: &Provider, leaf: &Provider, transport: TransportKind) -> bool {
+    let marker = leaf
+        .settings_config
+        .get("codexProtocolSet")
+        .and_then(Value::as_object);
+    marker.is_some_and(|marker| {
+        marker.get("version").and_then(Value::as_u64) == Some(CODEX_PROTOCOL_SET_VERSION as u64)
+            && marker.get("role").and_then(Value::as_str) == Some("leaf")
+            && marker.get("parentProviderId").and_then(Value::as_str) == Some(source.id.as_str())
+            && marker.get("transport").and_then(Value::as_str) == Some(transport_value(transport))
+    })
 }
 
 fn build_leaf(
@@ -758,11 +878,11 @@ mod tests {
         let CodexProviderSetPersistence::Single {
             transport,
             provider,
-        } = prepared.persistence
+        } = &prepared.persistence
         else {
             panic!("expected Single");
         };
-        assert_eq!(transport, TransportKind::OpenAiResponses);
+        assert_eq!(*transport, TransportKind::OpenAiResponses);
         assert_eq!(provider.id, "relay");
         assert_eq!(
             provider
@@ -777,6 +897,11 @@ mod tests {
             .expect("config")
             .contains("wire_api = \"responses\""));
         assert_no_model_protocols(&provider);
+        assert_eq!(prepared.profiles.len(), 2);
+        assert!(prepared
+            .profiles
+            .iter()
+            .all(|record| record.target.provider_id == "relay"));
     }
 
     #[test]
@@ -792,11 +917,11 @@ mod tests {
         let CodexProviderSetPersistence::Single {
             transport,
             provider,
-        } = prepared.persistence
+        } = &prepared.persistence
         else {
             panic!("expected Single");
         };
-        assert_eq!(transport, TransportKind::OpenAiChat);
+        assert_eq!(*transport, TransportKind::OpenAiChat);
         assert_eq!(provider.settings_config["apiFormat"], "openai_chat");
         assert!(provider.settings_config["config"]
             .as_str()
@@ -820,7 +945,7 @@ mod tests {
             facade,
             responses_provider,
             chat_provider,
-        } = prepared.persistence
+        } = &prepared.persistence
         else {
             panic!("expected Split");
         };
@@ -849,6 +974,16 @@ mod tests {
             facade.settings_config["codexRouting"]["routes"][1]["targetProviderId"],
             chat_provider.id
         );
+        assert_eq!(prepared.profiles.len(), 2);
+        assert_eq!(
+            prepared.profiles[0].target.provider_id,
+            responses_provider.id
+        );
+        assert_eq!(prepared.profiles[1].target.provider_id, chat_provider.id);
+        assert!(prepared
+            .profiles
+            .iter()
+            .all(|record| !record.target.request_policy_fingerprint.is_empty()));
     }
 
     #[test]
@@ -1076,6 +1211,59 @@ mod tests {
             second.preview.plan,
             CodexProviderSetPlan::Split { .. }
         ));
+    }
+
+    #[test]
+    fn uniform_replan_marks_only_owned_split_leaves_for_deletion() {
+        let source = source_provider();
+        let first_records = records(TransportKind::OpenAiResponses, TransportKind::OpenAiChat);
+        let first = plan_codex_provider_set(&source, &first_records, &HashMap::new(), 150)
+            .expect("first split");
+        let CodexProviderSetPersistence::Split {
+            responses_provider,
+            chat_provider,
+            ..
+        } = first.persistence
+        else {
+            panic!("expected Split");
+        };
+        let unrelated = Provider::with_id(
+            "relay--unrelated".to_string(),
+            "Unrelated".to_string(),
+            json!({}),
+            None,
+        );
+        let existing = [
+            (responses_provider.id.clone(), responses_provider),
+            (chat_provider.id.clone(), chat_provider),
+            (unrelated.id.clone(), unrelated),
+        ]
+        .into_iter()
+        .collect();
+        let prepared = plan_codex_provider_set(
+            &source,
+            &records(
+                TransportKind::OpenAiResponses,
+                TransportKind::OpenAiResponses,
+            ),
+            &existing,
+            150,
+        )
+        .expect("uniform replan");
+
+        assert_eq!(
+            prepared.delete_provider_ids,
+            vec![responses_leaf_id("relay"), chat_leaf_id("relay")]
+        );
+        assert!(prepared
+            .replace_profile_provider_ids
+            .contains("relay--ccsm-responses"));
+        assert!(prepared
+            .replace_profile_provider_ids
+            .contains("relay--ccsm-chat"));
+        assert!(!prepared
+            .replace_profile_provider_ids
+            .contains("relay--unrelated"));
     }
 
     #[test]
