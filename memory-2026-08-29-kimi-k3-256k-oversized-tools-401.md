@@ -70,6 +70,14 @@
 - UUID 别名成因（用户追问后定位）：Bitto(4e063208) 与基元律动(4faa657f) 都提供上游模型 `glm-5.3-flash`，`resolveWizardModelNameCollisions` 对非官方源改名消歧（官方源才保持原名，`isCanonicalModelSource=isOfficialCodexSource`）；后缀规则 `providerNameSuffix` 把 provider 名称做 ASCII 清洗，**纯中文名"基元律动"清洗后为空，退化成完整 36 位 UUID**，于是可见名变成 `glm-5.3-flash-4faa657f-…`。消歧必要、后缀退化粗糙。改进方向：空清洗时改用 id 前 8 位或允许自定义后缀（需迁移存量别名），子 Agent 列表对编译后无路由对象的 profile 显示不可路由徽标+一键清理。
 - 注意：下次应用启动，#76 迁移仍会重新污染 route[2]（安装版未含修复）；孤儿清理不受该迁移影响（它只写 DeepSeek 路由的 match/apiFormat，不动 subagentV2）。
 
+## 2026-08-29 补充 7：18.5 三项改进实现、API 推送与打包
+
+- 已实现（用户拍板全做）：① 别名后缀改拼音——`providerNameSuffix` 清洗为空时转无声调拼音（pinyin-pro，ü→v，「基元律动」→ `glm-5.3-flash-jiyuanlvdong`），再不行回退 provider id 前 8 位；新增 `cleanAliasSegment` 助手。② 存量长别名收敛——`normalizeCodexRoutesForVisibleModelAliases` 的 aliases 合并改为"过期键剔除"（不在修复后可见名集合里的旧键丢弃），工作台重新保存一次路由规则即把全 UUID 旧别名收敛为新规则，无需后端迁移。③ 子 Agent 编辑器——未启用且模型不在当前路由目录的 profile 显示「已过期：模型不在当前路由目录」徽标 + 「删除」按钮（`removeProfile` 走既有草稿脏检查），仅展示层判断，编辑/启用仍按后端 status，避免 v28 死锁回归。
+- 新增依赖 pinyin-pro 3.29.3。环境坑：node_modules 原为 pnpm 12.0.0-rc（store v11）所建，与 12.0.0 正式版/11.x（store v10）不兼容——已用 12.0.0 正式版 `pnpm install` 重链到 v10（15s 硬链接），随后 `pnpm add` 正常。corepack 会按 packageManager 把 npx pnpm 钉到 10.12.3，绕过用 `COREPACK_ENABLE_STRICT=0 npx -y pnpm@12.0.0`。
+- 新增测试：`codexMultiRouterWizard.test.ts` 2 例（拼音后缀 + 假名回退 id 前 8）。vitest 该文件 7/7；CodexSubagentV2ProfileEditor.test.tsx 127/127；typecheck 唯一报错在并行会话未跟踪的 diag-projection.test.ts（非本次文件）。
+- 推送：github.com:443 被重置（api.github.com 可用、无代理配置、SSH 无密钥），改走 **GitHub Git Data API** 重建两个提交推送：远端分支 fix/codex-subagent-alias-equivalence = `3739b892`（fix: #76 迁移跳过+保存剥离）→ `5cfefe09`（feat: 拼音别名+孤儿清理+18.5 版本）。本地同名提交 `96fd4b79`/`4ed883f9` 内容与远端逐字节一致但 sha 不同——网络恢复后 `git pull --rebase` 会识别为空补丁自动对齐。已移除临时 http.version=HTTP/1.1 仓库配置。
+- 版本 3.19.2-18.5 四处同步（package.json/Cargo.toml/Cargo.lock/tauri.conf.json）+ `docs/release-notes/v3.19.2-18.5-zh.md`。`pnpm build:renderer` 通过；`pnpm tauri build` 已后台启动，产物待验证（注意本机无 TAURI_SIGNING_PRIVATE_KEY，updater 签名步骤可能如 3.19.2-18 时一样失败，但应用包产物会先行生成）。
+
 ## 2026-08-29 补充 2：对"凌晨还能请求 Kimi"质疑的取证（结论：质疑的链路不存在）
 
 用户质疑"今天凌晨同样配置可以请求 Kimi"。四个独立证据源一致证伪"凌晨在 Codex+CCSwitch 链路上用过 Kimi"：

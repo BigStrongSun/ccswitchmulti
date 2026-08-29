@@ -3968,7 +3968,10 @@ fn codex_subagent_catalog_equivalent_names(
         if name.is_empty() {
             return;
         }
-        if !names.iter().any(|existing| existing.eq_ignore_ascii_case(name)) {
+        if !names
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(name))
+        {
             names.push(name.to_string());
         }
     };
@@ -3990,8 +3993,7 @@ fn codex_subagent_catalog_equivalent_names(
                 continue;
             };
             if target.eq_ignore_ascii_case(spec_model)
-                || spec_upstream_model
-                    .is_some_and(|upstream| target.eq_ignore_ascii_case(upstream))
+                || spec_upstream_model.is_some_and(|upstream| target.eq_ignore_ascii_case(upstream))
             {
                 push(&mut names, alias_key);
             }
@@ -16756,7 +16758,9 @@ wire_api = "responses"
                 profile.clone(),
                 None,
             )
-            .unwrap_or_else(|error| panic!("{label} catalog should preview the alias-keyed profile: {error}"));
+            .unwrap_or_else(|error| {
+                panic!("{label} catalog should preview the alias-keyed profile: {error}")
+            });
             assert_eq!(preview.model, alias_key);
             assert!(
                 !preview.requested_role_name.is_empty(),
@@ -16818,10 +16822,7 @@ wire_api = "responses"
             None,
         )
         .expect_err("a name with no exact or equivalent catalog match must stay unroutable");
-        assert!(
-            error.contains("not routable"),
-            "unexpected error: {error}"
-        );
+        assert!(error.contains("not routable"), "unexpected error: {error}");
     }
 
     #[test]
@@ -16944,9 +16945,7 @@ wire_api = "responses"
         assert_eq!(migrated["model"], "glm-5.3-flash");
         assert_eq!(migrated["enabled"], false, "migration preserves user state");
         assert!(
-            reconciled["profiles"]
-                .get("glm-5.3-flash-0811")
-                .is_none(),
+            reconciled["profiles"].get("glm-5.3-flash-0811").is_none(),
             "the stale upstream-identity entry must be re-keyed, not duplicated"
         );
     }
