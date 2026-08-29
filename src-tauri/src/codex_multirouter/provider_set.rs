@@ -1,18 +1,25 @@
+use super::schema::{
+    CodexModelSelection, CodexRoutingConfigV2, CodexRoutingDocument, CodexRoutingRouteV2,
+};
 use crate::protocol_compatibility::{
     compile_provider_probe_candidate_for_model, ProbeReadiness, ProtocolCompatibilityRecord,
     TransportKind, PROBE_PROFILE_VERSION,
 };
 use crate::provider::Provider;
+use crate::proxy::providers::codex_provider_upstream_model;
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub const CODEX_PROTOCOL_SET_VERSION: u32 = 1;
 const RESPONSES_LEAF_SUFFIX: &str = "--ccsm-responses";
 const CHAT_LEAF_SUFFIX: &str = "--ccsm-chat";
 const RESPONSES_ROUTE_SUFFIX: &str = "--ccsm-responses-route";
 const CHAT_ROUTE_SUFFIX: &str = "--ccsm-chat-route";
+const DEPENDENT_RESPONSES_ROUTE_SUFFIX: &str = "--ccsm-provider-set-responses";
+const DEPENDENT_CHAT_ROUTE_SUFFIX: &str = "--ccsm-provider-set-chat";
+const GENERATED_ROUTES_EXTENSION: &str = "ccsmProviderSetGeneratedRoutes";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -46,6 +53,10 @@ pub struct PreparedCodexProviderSetMutation {
     pub profiles: Vec<ProtocolCompatibilityRecord>,
     pub delete_provider_ids: Vec<String>,
     pub replace_profile_provider_ids: HashSet<String>,
+    pub router_updates: Vec<Provider>,
+    source_draft: Provider,
+    probe_records: Vec<ProtocolCompatibilityRecord>,
+    prepared_at: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -172,6 +183,10 @@ pub fn plan_codex_provider_set(
             profiles: Vec::new(),
             delete_provider_ids: Vec::new(),
             replace_profile_provider_ids: HashSet::new(),
+            router_updates: Vec::new(),
+            source_draft: source.clone(),
+            probe_records: records.to_vec(),
+            prepared_at: now,
         });
     }
 
@@ -223,7 +238,16 @@ pub fn plan_codex_provider_set(
             chat_provider,
         }
     };
-    let digest = preview_digest(source, records, &persistence_digest_value(&persistence))?;
+    let router_updates =
+        rewrite_dependent_routers_for_provider_set(source, &persistence, existing_providers)?;
+    let digest = preview_digest(
+        source,
+        records,
+        &json!({
+            "persistence": persistence_digest_value(&persistence),
+            "routerUpdates": router_updates,
+        }),
+    )?;
     let plan = match &persistence {
         CodexProviderSetPersistence::Single { transport, .. } => CodexProviderSetPlan::Single {
             transport: *transport,
@@ -274,7 +298,25 @@ pub fn plan_codex_provider_set(
         profiles,
         delete_provider_ids,
         replace_profile_provider_ids,
+        router_updates,
+        source_draft: source.clone(),
+        probe_records: records.to_vec(),
+        prepared_at: now,
     })
+}
+
+impl PreparedCodexProviderSetMutation {
+    pub fn source_draft(&self) -> &Provider {
+        &self.source_draft
+    }
+
+    pub fn probe_records(&self) -> &[ProtocolCompatibilityRecord] {
+        &self.probe_records
+    }
+
+    pub fn prepared_at(&self) -> i64 {
+        self.prepared_at
+    }
 }
 
 fn rebind_profiles(
@@ -428,6 +470,504 @@ pub fn restore_logical_codex_provider(
     settings.remove("codexProtocolSet");
     settings.insert("modelCatalog".to_string(), source_catalog);
     Ok(restored)
+}
+
+pub fn rewrite_dependent_routers_for_provider_set(
+    source: &Provider,
+    persistence: &CodexProviderSetPersistence,
+    existing_providers: &HashMap<String, Provider>,
+) -> Result<Vec<Provider>, CodexProviderSetError> {
+    let mut provider_ids = existing_providers.keys().cloned().collect::<Vec<_>>();
+    provider_ids.sort();
+    let mut updates = Vec::new();
+    for provider_id in provider_ids {
+        if provider_id == source.id {
+            continue;
+        }
+        let Some(provider) = existing_providers.get(&provider_id) else {
+            continue;
+        };
+        let Some(routing) = provider.settings_config.get("codexRouting") else {
+            continue;
+        };
+        let CodexRoutingDocument::V2(mut plan) = CodexRoutingDocument::parse(routing)
+            .map_err(|parse_error| error(parse_error.code, parse_error.message))?
+        else {
+            continue;
+        };
+        let changed = match persistence {
+            CodexProviderSetPersistence::Split {
+                responses_provider,
+                chat_provider,
+                ..
+            } => expand_router_routes_for_split(
+                source,
+                responses_provider,
+                chat_provider,
+                &mut plan,
+            )?,
+            CodexProviderSetPersistence::Single { .. } => {
+                fold_router_routes_for_single(source, &mut plan)?
+            }
+            CodexProviderSetPersistence::Blocked => false,
+        };
+        if !changed {
+            continue;
+        }
+        ensure_unique_route_ids(&plan)?;
+        let mut updated = provider.clone();
+        updated.settings_config["codexRouting"] =
+            serde_json::to_value(plan).map_err(|encode_error| {
+                error(
+                    "codex_provider_set_router_serialize_failed",
+                    format!("Dependent MultiRouter cannot be serialized: {encode_error}"),
+                )
+            })?;
+        updates.push(updated);
+    }
+    Ok(updates)
+}
+
+fn expand_router_routes_for_split(
+    source: &Provider,
+    responses_provider: &Provider,
+    chat_provider: &Provider,
+    plan: &mut CodexRoutingConfigV2,
+) -> Result<bool, CodexProviderSetError> {
+    let transport_by_model = provider_set_transport_by_model(responses_provider, chat_provider)?;
+    let source_default_transport = codex_provider_upstream_model(source)
+        .as_deref()
+        .and_then(|model| transport_by_model.get(&model.to_ascii_lowercase()).copied());
+    let existing_markers = generated_route_markers(plan);
+    let mut markers = existing_markers.clone();
+    let mut rewritten = Vec::with_capacity(plan.routes.len() + 1);
+    let mut changed = false;
+    let original_default = plan.default_route_id.clone();
+    let mut rewritten_default = original_default.clone();
+
+    for route in std::mem::take(&mut plan.routes) {
+        if route.target_provider_id != source.id {
+            rewritten.push(route);
+            continue;
+        }
+        changed = true;
+        let original_route_id = route.id.clone();
+        let (responses_selection, chat_selection) =
+            partition_model_selection(&route.model_selection, &transport_by_model)?;
+        let responses_aliases = partition_aliases(
+            &route.aliases,
+            TransportKind::OpenAiResponses,
+            &transport_by_model,
+        )?;
+        let chat_aliases = partition_aliases(
+            &route.aliases,
+            TransportKind::OpenAiChat,
+            &transport_by_model,
+        )?;
+        let mut generated = Vec::new();
+        if let Some(selection) = responses_selection {
+            let generated_route = generated_route(
+                &route,
+                responses_provider,
+                selection,
+                responses_aliases,
+                TransportKind::OpenAiResponses,
+            );
+            markers.insert(
+                generated_route.id.clone(),
+                generated_route_marker(source, &route, TransportKind::OpenAiResponses),
+            );
+            generated.push((TransportKind::OpenAiResponses, generated_route));
+        }
+        if let Some(selection) = chat_selection {
+            let generated_route = generated_route(
+                &route,
+                chat_provider,
+                selection,
+                chat_aliases,
+                TransportKind::OpenAiChat,
+            );
+            markers.insert(
+                generated_route.id.clone(),
+                generated_route_marker(source, &route, TransportKind::OpenAiChat),
+            );
+            generated.push((TransportKind::OpenAiChat, generated_route));
+        }
+        if generated.is_empty() {
+            return Err(error(
+                "codex_provider_set_router_expansion_ambiguous",
+                format!(
+                    "Dependent route `{original_route_id}` does not select a model in either generated Provider"
+                ),
+            ));
+        }
+        if original_default.as_deref() == Some(original_route_id.as_str()) {
+            let default_transport = source_default_transport.ok_or_else(|| {
+                error(
+                    "codex_provider_set_router_expansion_ambiguous",
+                    format!(
+                        "Dependent default route `{original_route_id}` cannot be mapped because the logical source default model has no selected protocol"
+                    ),
+                )
+            })?;
+            rewritten_default = generated
+                .iter()
+                .find(|(transport, _)| *transport == default_transport)
+                .map(|(_, route)| route.id.clone())
+                .ok_or_else(|| {
+                    error(
+                        "codex_provider_set_router_expansion_ambiguous",
+                        format!(
+                            "Dependent default route `{original_route_id}` does not include the logical source default model"
+                        ),
+                    )
+                })
+                .map(Some)?;
+        }
+        rewritten.extend(generated.into_iter().map(|(_, route)| route));
+    }
+    plan.routes = rewritten;
+    if changed {
+        plan.default_route_id = rewritten_default;
+        set_generated_route_markers(plan, markers);
+    }
+    Ok(changed)
+}
+
+fn fold_router_routes_for_single(
+    source: &Provider,
+    plan: &mut CodexRoutingConfigV2,
+) -> Result<bool, CodexProviderSetError> {
+    let mut markers = generated_route_markers(plan);
+    let source_marker_ids = markers
+        .iter()
+        .filter_map(|(route_id, marker)| {
+            (marker.get("sourceProviderId").and_then(Value::as_str) == Some(source.id.as_str()))
+                .then_some(route_id.clone())
+        })
+        .collect::<HashSet<_>>();
+    if source_marker_ids.is_empty() {
+        let leaf_ids = [responses_leaf_id(&source.id), chat_leaf_id(&source.id)];
+        if plan
+            .routes
+            .iter()
+            .any(|route| leaf_ids.contains(&route.target_provider_id))
+        {
+            return Err(error(
+                "codex_provider_set_dependency_changed",
+                "A dependent MultiRouter directly references a generated leaf without an ownership marker",
+            ));
+        }
+        return Ok(false);
+    }
+
+    let mut groups = BTreeMap::<String, Vec<CodexRoutingRouteV2>>::new();
+    let mut group_order = Vec::new();
+    let mut untouched = Vec::new();
+    for route in std::mem::take(&mut plan.routes) {
+        if !source_marker_ids.contains(&route.id) {
+            untouched.push((None, route));
+            continue;
+        }
+        let marker = markers.get(&route.id).expect("marker ID was collected");
+        let original_route_id = marker
+            .get("originalRouteId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                error(
+                    "codex_provider_set_dependency_changed",
+                    "Generated route marker is missing originalRouteId",
+                )
+            })?
+            .to_string();
+        if !groups.contains_key(&original_route_id) {
+            group_order.push(original_route_id.clone());
+        }
+        groups
+            .entry(original_route_id.clone())
+            .or_default()
+            .push(route);
+        untouched.push((Some(original_route_id), empty_route_placeholder()));
+    }
+
+    let mut folded_by_id = HashMap::new();
+    for original_route_id in group_order {
+        let routes = groups.remove(&original_route_id).unwrap_or_default();
+        folded_by_id.insert(
+            original_route_id.clone(),
+            fold_generated_route_group(source, &original_route_id, routes, &markers)?,
+        );
+    }
+    let mut emitted = HashSet::new();
+    let mut folded_routes = Vec::new();
+    for (group, route) in untouched {
+        match group {
+            None => folded_routes.push(route),
+            Some(original_route_id) if emitted.insert(original_route_id.clone()) => {
+                folded_routes.push(
+                    folded_by_id
+                        .remove(&original_route_id)
+                        .expect("folded group exists"),
+                );
+            }
+            Some(_) => {}
+        }
+    }
+    if let Some(default_route_id) = plan.default_route_id.clone() {
+        if let Some(marker) = markers.get(&default_route_id) {
+            if marker.get("sourceProviderId").and_then(Value::as_str) == Some(source.id.as_str()) {
+                plan.default_route_id = marker
+                    .get("originalRouteId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+            }
+        }
+    }
+    for route_id in source_marker_ids {
+        markers.remove(&route_id);
+    }
+    set_generated_route_markers(plan, markers);
+    plan.routes = folded_routes;
+    Ok(true)
+}
+
+fn provider_set_transport_by_model(
+    responses_provider: &Provider,
+    chat_provider: &Provider,
+) -> Result<HashMap<String, TransportKind>, CodexProviderSetError> {
+    let mut lookup = HashMap::new();
+    for (provider, transport) in [
+        (responses_provider, TransportKind::OpenAiResponses),
+        (chat_provider, TransportKind::OpenAiChat),
+    ] {
+        for model in source_catalog(provider)? {
+            for identity in [model.public_model, model.upstream_model] {
+                let key = identity.to_ascii_lowercase();
+                if lookup
+                    .insert(key.clone(), transport)
+                    .is_some_and(|previous| previous != transport)
+                {
+                    return Err(error(
+                        "codex_provider_set_router_expansion_ambiguous",
+                        format!("Model identity `{identity}` belongs to both protocol leaves"),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(lookup)
+}
+
+fn partition_model_selection(
+    selection: &CodexModelSelection,
+    transport_by_model: &HashMap<String, TransportKind>,
+) -> Result<(Option<CodexModelSelection>, Option<CodexModelSelection>), CodexProviderSetError> {
+    match selection {
+        CodexModelSelection::All => Ok((
+            Some(CodexModelSelection::All),
+            Some(CodexModelSelection::All),
+        )),
+        CodexModelSelection::Include { models } => {
+            let mut responses = Vec::new();
+            let mut chat = Vec::new();
+            for model in models {
+                match transport_for_model(model, transport_by_model)? {
+                    TransportKind::OpenAiResponses => responses.push(model.clone()),
+                    TransportKind::OpenAiChat => chat.push(model.clone()),
+                }
+            }
+            Ok((
+                (!responses.is_empty())
+                    .then_some(CodexModelSelection::Include { models: responses }),
+                (!chat.is_empty()).then_some(CodexModelSelection::Include { models: chat }),
+            ))
+        }
+    }
+}
+
+fn partition_aliases(
+    aliases: &BTreeMap<String, String>,
+    expected: TransportKind,
+    transport_by_model: &HashMap<String, TransportKind>,
+) -> Result<BTreeMap<String, String>, CodexProviderSetError> {
+    let mut partition = BTreeMap::new();
+    for (alias, target) in aliases {
+        if transport_for_model(target, transport_by_model)? == expected {
+            partition.insert(alias.clone(), target.clone());
+        }
+    }
+    Ok(partition)
+}
+
+fn transport_for_model(
+    model: &str,
+    transport_by_model: &HashMap<String, TransportKind>,
+) -> Result<TransportKind, CodexProviderSetError> {
+    transport_by_model
+        .get(&model.trim().to_ascii_lowercase())
+        .copied()
+        .ok_or_else(|| {
+            error(
+                "codex_provider_set_router_expansion_ambiguous",
+                format!("Dependent route model `{model}` is not present in the logical source"),
+            )
+        })
+}
+
+fn generated_route(
+    original: &CodexRoutingRouteV2,
+    target: &Provider,
+    selection: CodexModelSelection,
+    aliases: BTreeMap<String, String>,
+    transport: TransportKind,
+) -> CodexRoutingRouteV2 {
+    let mut route = original.clone();
+    route.id = format!(
+        "{}{}",
+        original.id,
+        match transport {
+            TransportKind::OpenAiResponses => DEPENDENT_RESPONSES_ROUTE_SUFFIX,
+            TransportKind::OpenAiChat => DEPENDENT_CHAT_ROUTE_SUFFIX,
+        }
+    );
+    route.label = original.label.as_ref().map(|label| {
+        format!(
+            "{} · {}",
+            label,
+            match transport {
+                TransportKind::OpenAiResponses => "Responses",
+                TransportKind::OpenAiChat => "Chat",
+            }
+        )
+    });
+    route.target_provider_id = target.id.clone();
+    route.model_selection = selection;
+    route.aliases = aliases;
+    route
+}
+
+fn generated_route_marker(
+    source: &Provider,
+    original: &CodexRoutingRouteV2,
+    transport: TransportKind,
+) -> Value {
+    json!({
+        "version": CODEX_PROTOCOL_SET_VERSION,
+        "sourceProviderId": source.id,
+        "originalRouteId": original.id,
+        "originalLabel": original.label,
+        "transport": transport_value(transport)
+    })
+}
+
+fn generated_route_markers(plan: &CodexRoutingConfigV2) -> BTreeMap<String, Value> {
+    plan.extensions
+        .get(GENERATED_ROUTES_EXTENSION)
+        .and_then(Value::as_object)
+        .map(|markers| {
+            markers
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn set_generated_route_markers(plan: &mut CodexRoutingConfigV2, markers: BTreeMap<String, Value>) {
+    if markers.is_empty() {
+        plan.extensions.remove(GENERATED_ROUTES_EXTENSION);
+    } else {
+        plan.extensions.insert(
+            GENERATED_ROUTES_EXTENSION.to_string(),
+            Value::Object(markers.into_iter().collect()),
+        );
+    }
+}
+
+fn fold_generated_route_group(
+    source: &Provider,
+    original_route_id: &str,
+    mut routes: Vec<CodexRoutingRouteV2>,
+    markers: &BTreeMap<String, Value>,
+) -> Result<CodexRoutingRouteV2, CodexProviderSetError> {
+    let first = routes.first().cloned().ok_or_else(|| {
+        error(
+            "codex_provider_set_dependency_changed",
+            format!("Generated route group `{original_route_id}` is empty"),
+        )
+    })?;
+    if routes.iter().any(|route| {
+        route.enabled != first.enabled
+            || route.match_prefixes != first.match_prefixes
+            || route.auth_policy != first.auth_policy
+    }) {
+        return Err(error(
+            "codex_provider_set_dependency_changed",
+            format!(
+                "Generated route group `{original_route_id}` was edited inconsistently and cannot be folded safely"
+            ),
+        ));
+    }
+    let mut aliases = BTreeMap::new();
+    let mut include_models = Vec::new();
+    let mut all = false;
+    for route in &routes {
+        aliases.extend(route.aliases.clone());
+        match &route.model_selection {
+            CodexModelSelection::All => all = true,
+            CodexModelSelection::Include { models } => include_models.extend(models.clone()),
+        }
+    }
+    include_models.sort();
+    include_models.dedup();
+    let original_label = routes
+        .iter()
+        .find_map(|route| markers.get(&route.id))
+        .and_then(|marker| marker.get("originalLabel"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let mut folded = routes.remove(0);
+    folded.id = original_route_id.to_string();
+    folded.label = original_label;
+    folded.target_provider_id = source.id.clone();
+    folded.model_selection = if all {
+        CodexModelSelection::All
+    } else {
+        CodexModelSelection::Include {
+            models: include_models,
+        }
+    };
+    folded.aliases = aliases;
+    Ok(folded)
+}
+
+fn empty_route_placeholder() -> CodexRoutingRouteV2 {
+    CodexRoutingRouteV2 {
+        id: String::new(),
+        label: None,
+        enabled: false,
+        target_provider_id: String::new(),
+        model_selection: CodexModelSelection::All,
+        match_prefixes: Vec::new(),
+        aliases: BTreeMap::new(),
+        auth_policy: Default::default(),
+    }
+}
+
+fn ensure_unique_route_ids(plan: &CodexRoutingConfigV2) -> Result<(), CodexProviderSetError> {
+    let mut route_ids = HashSet::new();
+    for route in &plan.routes {
+        if !route_ids.insert(route.id.to_ascii_lowercase()) {
+            return Err(error(
+                "codex_provider_set_router_route_conflict",
+                format!(
+                    "Generated dependent route ID `{}` is already in use",
+                    route.id
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn source_catalog(source: &Provider) -> Result<Vec<CatalogModel>, CodexProviderSetError> {
@@ -755,7 +1295,8 @@ fn error(code: impl Into<String>, message: impl Into<String>) -> CodexProviderSe
 mod tests {
     use super::{
         chat_leaf_id, plan_codex_provider_set, responses_leaf_id, restore_logical_codex_provider,
-        CodexProviderSetPersistence, CodexProviderSetPlan, CODEX_PROTOCOL_SET_VERSION,
+        rewrite_dependent_routers_for_provider_set, CodexProviderSetPersistence,
+        CodexProviderSetPlan, CODEX_PROTOCOL_SET_VERSION,
     };
     use crate::protocol_compatibility::{
         ProbeReadiness, ProbeTargetKey, ProtocolCompatibilityProbeResult,
@@ -860,6 +1401,44 @@ mod tests {
             );
             assert!(model.get("wire_api").is_none(), "wire_api must be removed");
         }
+    }
+
+    fn dependent_router(selection: Value) -> Provider {
+        Provider::with_id(
+            "outer-router".to_string(),
+            "Outer Router".to_string(),
+            json!({
+                "codexRouting": {
+                    "schemaVersion": 2,
+                    "enabled": true,
+                    "defaultRouteId": "relay-route",
+                    "routes": [{
+                        "id": "relay-route",
+                        "label": "Relay route",
+                        "enabled": true,
+                        "targetProviderId": "relay",
+                        "modelSelection": selection,
+                        "matchPrefixes": ["model-"],
+                        "aliases": {
+                            "fast-a": "model-a",
+                            "fast-b": "model-b"
+                        },
+                        "authPolicy": {"source": "provider_config"}
+                    }]
+                }
+            }),
+            None,
+        )
+    }
+
+    fn split_prepared(source: &Provider) -> super::PreparedCodexProviderSetMutation {
+        plan_codex_provider_set(
+            source,
+            &records(TransportKind::OpenAiResponses, TransportKind::OpenAiChat),
+            &HashMap::new(),
+            150,
+        )
+        .expect("split plan")
     }
 
     #[test]
@@ -1319,5 +1898,129 @@ mod tests {
         );
         assert!(restored.settings_config.get("codexRouting").is_none());
         assert!(restored.settings_config.get("codexProtocolSet").is_none());
+    }
+
+    #[test]
+    fn dependent_all_route_expands_to_leaves_and_default_follows_source_default_model() {
+        let source = source_provider();
+        let prepared = split_prepared(&source);
+        let existing = [(
+            "outer-router".to_string(),
+            dependent_router(json!({"mode": "all"})),
+        )]
+        .into_iter()
+        .collect();
+
+        let updates =
+            rewrite_dependent_routers_for_provider_set(&source, &prepared.persistence, &existing)
+                .expect("rewrite dependent Router");
+        assert_eq!(updates.len(), 1);
+        let routing = &updates[0].settings_config["codexRouting"];
+        let routes = routing["routes"].as_array().expect("routes");
+        assert_eq!(routes.len(), 2);
+        assert_eq!(routes[0]["targetProviderId"], responses_leaf_id("relay"));
+        assert_eq!(routes[1]["targetProviderId"], chat_leaf_id("relay"));
+        assert_eq!(routes[0]["modelSelection"]["mode"], "all");
+        assert_eq!(routes[1]["modelSelection"]["mode"], "all");
+        assert_eq!(routing["defaultRouteId"], routes[0]["id"]);
+        assert_ne!(routing["defaultRouteId"], routes[1]["id"]);
+    }
+
+    #[test]
+    fn dependent_include_route_partitions_models_and_aliases() {
+        let source = source_provider();
+        let prepared = split_prepared(&source);
+        let existing = [(
+            "outer-router".to_string(),
+            dependent_router(json!({"mode": "include", "models": ["model-a", "model-b"]})),
+        )]
+        .into_iter()
+        .collect();
+
+        let updates =
+            rewrite_dependent_routers_for_provider_set(&source, &prepared.persistence, &existing)
+                .expect("partition dependent route");
+        let routes = updates[0].settings_config["codexRouting"]["routes"]
+            .as_array()
+            .expect("routes");
+        assert_eq!(routes[0]["modelSelection"]["models"], json!(["model-a"]));
+        assert_eq!(routes[1]["modelSelection"]["models"], json!(["model-b"]));
+        assert_eq!(routes[0]["aliases"], json!({"fast-a": "model-a"}));
+        assert_eq!(routes[1]["aliases"], json!({"fast-b": "model-b"}));
+        assert_eq!(routes[0]["matchPrefixes"], json!(["model-"]));
+        assert_eq!(routes[1]["matchPrefixes"], json!(["model-"]));
+    }
+
+    #[test]
+    fn dependent_generated_routes_fold_back_to_source_on_uniform_reprobe() {
+        let source = source_provider();
+        let split = split_prepared(&source);
+        let initial = [(
+            "outer-router".to_string(),
+            dependent_router(json!({"mode": "all"})),
+        )]
+        .into_iter()
+        .collect();
+        let split_updates =
+            rewrite_dependent_routers_for_provider_set(&source, &split.persistence, &initial)
+                .expect("split dependent route");
+        let existing_leaves = match split.persistence {
+            CodexProviderSetPersistence::Split {
+                responses_provider,
+                chat_provider,
+                ..
+            } => [
+                (responses_provider.id.clone(), responses_provider),
+                (chat_provider.id.clone(), chat_provider),
+            ]
+            .into_iter()
+            .collect(),
+            _ => panic!("expected Split"),
+        };
+        let uniform = plan_codex_provider_set(
+            &source,
+            &records(
+                TransportKind::OpenAiResponses,
+                TransportKind::OpenAiResponses,
+            ),
+            &existing_leaves,
+            150,
+        )
+        .expect("uniform plan");
+        let routers = [("outer-router".to_string(), split_updates[0].clone())]
+            .into_iter()
+            .collect();
+
+        let folded =
+            rewrite_dependent_routers_for_provider_set(&source, &uniform.persistence, &routers)
+                .expect("fold generated routes");
+        let routing = &folded[0].settings_config["codexRouting"];
+        let routes = routing["routes"].as_array().expect("routes");
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0]["id"], "relay-route");
+        assert_eq!(routes[0]["targetProviderId"], "relay");
+        assert_eq!(routes[0]["label"], "Relay route");
+        assert_eq!(routing["defaultRouteId"], "relay-route");
+    }
+
+    #[test]
+    fn dependent_default_route_blocks_when_source_default_model_has_no_selected_group() {
+        let mut source = source_provider();
+        source.settings_config["config"] = Value::String(
+            "model = \"missing-model\"\nmodel_provider = \"relay\"\n[model_providers.relay]\nbase_url = \"https://relay.example/v1\"\nwire_api = \"responses\"\n"
+                .to_string(),
+        );
+        let prepared = split_prepared(&source);
+        let existing = [(
+            "outer-router".to_string(),
+            dependent_router(json!({"mode": "all"})),
+        )]
+        .into_iter()
+        .collect();
+
+        let error =
+            rewrite_dependent_routers_for_provider_set(&source, &prepared.persistence, &existing)
+                .expect_err("ambiguous default must block");
+        assert_eq!(error.code, "codex_provider_set_router_expansion_ambiguous");
     }
 }

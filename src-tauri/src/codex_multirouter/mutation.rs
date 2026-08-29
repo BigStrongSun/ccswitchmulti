@@ -1,23 +1,45 @@
 use super::active_codex_router_id;
 use super::compiler::{compile_v2, compile_v2_strict};
 use super::projection::{
-    build_projection_artifact, ensure_projection_with_publisher, CodexRoutingProjectionArtifact,
-    CodexRoutingProjectionStatus, ProjectionReadBack,
+    effective_settings_for_candidate_with_providers, ensure_projection_with_publisher,
+    CodexRoutingProjectionArtifact, CodexRoutingProjectionStatus, ProjectionReadBack,
+};
+use super::provider_set::{
+    plan_codex_provider_set, CodexProviderSetPersistence, PreparedCodexProviderSetMutation,
 };
 use super::schema::CodexRoutingDocument;
-use crate::database::Database;
+use crate::database::{Database, ProviderSetDatabaseMutation, ProviderSetDatabaseTransaction};
 use crate::error::AppError;
 use crate::protocol_compatibility::{
     compile_codex_router_probe_candidates, ProbeReadiness, ProbeTargetKey,
     ProtocolCompatibilityRecord, TransportKind, PROBE_PROFILE_VERSION,
 };
 use crate::provider::Provider;
-use rusqlite::params;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 #[derive(Debug, Clone)]
 pub struct CodexProviderMutationOutcome {
     pub projections: Vec<CodexRoutingProjectionStatus>,
+}
+
+pub(crate) struct PreparedCodexProviderMutation {
+    pub provider: Provider,
+    pub profiles: Vec<ProtocolCompatibilityRecord>,
+    pub related_provider_ids: HashSet<String>,
+    pub router_updates: Vec<Provider>,
+    projection_router_ids: Vec<String>,
+}
+
+impl PreparedCodexProviderMutation {
+    pub(crate) fn append_provider_mutations<'a>(
+        &'a self,
+        mutations: &mut Vec<(&'a str, &'a str, Option<&'a Provider>)>,
+    ) {
+        mutations.push(("codex", self.provider.id.as_str(), Some(&self.provider)));
+        for router in &self.router_updates {
+            mutations.push(("codex", router.id.as_str(), Some(router)));
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -32,13 +54,72 @@ pub struct CodexProviderDeleteOutcome {
 
 struct PreparedRouterDeletion {
     router_id: String,
-    settings_config: serde_json::Value,
+    provider: Provider,
     disabled: bool,
+}
+
+pub(crate) struct PreparedCodexProviderDeletion {
+    provider_id: String,
+    routers: Vec<PreparedRouterDeletion>,
+    active_router_id: Option<String>,
+    must_restore_official: bool,
+    removed_candidates: BTreeSet<String>,
+}
+
+impl PreparedCodexProviderDeletion {
+    pub(crate) fn must_restore_official(&self) -> bool {
+        self.must_restore_official
+    }
+
+    pub(crate) fn append_provider_mutations<'a>(
+        &'a self,
+        mutations: &mut Vec<(&'a str, &'a str, Option<&'a Provider>)>,
+    ) {
+        for router in &self.routers {
+            mutations.push(("codex", router.router_id.as_str(), Some(&router.provider)));
+        }
+        mutations.push(("codex", self.provider_id.as_str(), None));
+    }
+
+    pub(crate) fn projection_setting_key(&self) -> String {
+        format!("codex_multirouter_projection:{}", self.provider_id)
+    }
 }
 
 struct AffectedRouterIds {
     projection: Vec<String>,
     subagent_profiles: Vec<String>,
+}
+
+pub(crate) fn prepare_codex_provider_mutation(
+    db: &Database,
+    mut provider: Provider,
+    profiles: &[ProtocolCompatibilityRecord],
+) -> Result<PreparedCodexProviderMutation, AppError> {
+    remove_schema_v2_router_derived_catalog(&mut provider);
+    let affected = validate_and_collect_affected_router_ids(db, &provider)?;
+    let profiles = materialize_equivalent_router_protocol_profiles(
+        db,
+        &provider,
+        &affected.projection,
+        profiles,
+    )?;
+    let mut router_updates =
+        prepare_router_subagent_profile_updates(db, &provider, &affected.subagent_profiles)?;
+    if let Some(index) = router_updates
+        .iter()
+        .position(|router| router.id == provider.id)
+    {
+        provider = router_updates.remove(index);
+    }
+    let related_provider_ids = affected.projection.iter().cloned().collect();
+    Ok(PreparedCodexProviderMutation {
+        provider,
+        profiles,
+        related_provider_ids,
+        router_updates,
+        projection_router_ids: affected.projection,
+    })
 }
 
 pub fn apply_codex_provider_mutation(
@@ -87,6 +168,138 @@ where
     apply_codex_provider_mutation_with_profiles_and_publisher(db, provider, &[], publish)
 }
 
+pub fn apply_codex_provider_set_mutation_with_publisher<F>(
+    db: &Database,
+    prepared: PreparedCodexProviderSetMutation,
+    mut publish: F,
+) -> Result<CodexProviderMutationOutcome, AppError>
+where
+    F: FnMut(&CodexRoutingProjectionArtifact) -> Result<ProjectionReadBack, String>,
+{
+    let existing = db
+        .get_all_providers("codex")?
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+    let replanned = plan_codex_provider_set(
+        prepared.source_draft(),
+        prepared.probe_records(),
+        &existing,
+        chrono::Utc::now().timestamp(),
+    )
+    .map_err(provider_set_error)?;
+    if replanned.preview.digest != prepared.preview.digest {
+        return Err(AppError::InvalidInput(
+            "codex_provider_set_dependency_changed: Provider、探测档案或依赖 MultiRouter 已在确认后发生变化"
+                .to_string(),
+        ));
+    }
+    if matches!(replanned.persistence, CodexProviderSetPersistence::Blocked) {
+        return Err(AppError::InvalidInput(
+            "codex_provider_set_model_blocked: Partial/Failed 模型不能保存为可执行 Provider Set"
+                .to_string(),
+        ));
+    }
+
+    let mut mutations = Vec::new();
+    let mut projection_router_ids = Vec::new();
+    match &replanned.persistence {
+        CodexProviderSetPersistence::Single { provider, .. } => {
+            mutations.push(ProviderSetDatabaseMutation {
+                app_type: "codex".to_string(),
+                provider_id: provider.id.clone(),
+                provider: Some(provider.clone()),
+            });
+        }
+        CodexProviderSetPersistence::Split {
+            facade,
+            responses_provider,
+            chat_provider,
+        } => {
+            for provider in [facade, responses_provider, chat_provider] {
+                mutations.push(ProviderSetDatabaseMutation {
+                    app_type: "codex".to_string(),
+                    provider_id: provider.id.clone(),
+                    provider: Some(provider.clone()),
+                });
+            }
+            projection_router_ids.push(facade.id.clone());
+        }
+        CodexProviderSetPersistence::Blocked => unreachable!("blocked was rejected above"),
+    }
+    for router in &replanned.router_updates {
+        mutations.push(ProviderSetDatabaseMutation {
+            app_type: "codex".to_string(),
+            provider_id: router.id.clone(),
+            provider: Some(router.clone()),
+        });
+        projection_router_ids.push(router.id.clone());
+    }
+    for provider_id in &replanned.delete_provider_ids {
+        mutations.push(ProviderSetDatabaseMutation {
+            app_type: "codex".to_string(),
+            provider_id: provider_id.clone(),
+            provider: None,
+        });
+    }
+
+    let current_before = db.get_current_provider("codex")?;
+    let current_provider_after = current_before
+        .as_ref()
+        .filter(|current| {
+            current.as_str() == replanned.preview.source_provider_id
+                || replanned.delete_provider_ids.contains(current)
+        })
+        .map(|_| {
+            (
+                "codex".to_string(),
+                replanned.preview.source_provider_id.clone(),
+            )
+        });
+    let profile_owner_ids = replanned
+        .profiles
+        .iter()
+        .map(|record| record.target.provider_id.clone())
+        .collect();
+    let setting_keys_to_delete = replanned
+        .delete_provider_ids
+        .iter()
+        .map(|provider_id| format!("codex_multirouter_projection:{provider_id}"))
+        .collect();
+    db.apply_provider_set_database_transaction(ProviderSetDatabaseTransaction {
+        mutations,
+        profile_owner_ids,
+        records: replanned.profiles.clone(),
+        replace_profile_provider_ids: replanned.replace_profile_provider_ids.clone(),
+        setting_keys_to_delete,
+        universal_provider: None,
+        current_provider_after,
+    })?;
+
+    projection_router_ids.sort();
+    projection_router_ids.dedup();
+    let active_router_id = active_codex_router_id(db)?;
+    let publish_without_active_router =
+        active_router_id.is_none() && projection_router_ids.len() == 1;
+    let mut projections = Vec::new();
+    for router_id in projection_router_ids {
+        if active_router_id.as_deref() != Some(router_id.as_str()) && !publish_without_active_router
+        {
+            continue;
+        }
+        projections.push(ensure_projection_with_publisher(
+            db,
+            &router_id,
+            false,
+            |artifact| publish(artifact),
+        )?);
+    }
+    Ok(CodexProviderMutationOutcome { projections })
+}
+
+fn provider_set_error(error: super::provider_set::CodexProviderSetError) -> AppError {
+    AppError::InvalidInput(format!("{}: {}", error.code, error.message))
+}
+
 fn apply_codex_provider_mutation_with_profiles_and_publisher<F>(
     db: &Database,
     provider: Provider,
@@ -96,43 +309,35 @@ fn apply_codex_provider_mutation_with_profiles_and_publisher<F>(
 where
     F: FnMut(&CodexRoutingProjectionArtifact) -> Result<ProjectionReadBack, String>,
 {
-    let mut provider = provider;
-    remove_schema_v2_router_derived_catalog(&mut provider);
-    let affected_router_ids = validate_and_collect_affected_router_ids(db, &provider)?;
-    let profiles = materialize_equivalent_router_protocol_profiles(
-        db,
-        &provider,
-        &affected_router_ids.projection,
-        profiles,
+    let prepared = prepare_codex_provider_mutation(db, provider, profiles)?;
+    let mut mutations = Vec::with_capacity(1 + prepared.router_updates.len());
+    prepared.append_provider_mutations(&mut mutations);
+    db.apply_provider_set_with_protocol_profiles_and_setting_cleanup(
+        &mutations,
+        Some(prepared.provider.id.as_str()),
+        &prepared.profiles,
+        &prepared.related_provider_ids,
+        &[],
     )?;
-    if profiles.is_empty() {
-        db.save_provider("codex", &provider)?;
-    } else {
-        let related_provider_ids = affected_router_ids
-            .projection
-            .iter()
-            .cloned()
-            .collect::<HashSet<_>>();
-        db.save_provider_with_protocol_profiles_for_related_providers(
-            "codex",
-            &provider,
-            &profiles,
-            &related_provider_ids,
-        )?;
-    }
 
-    // Router 的 V2 profile 是用户可编辑策略，但候选成员来自 Provider 目录。
-    // Provider 新增可路由第三方模型时自动补一个关闭的 profile，保留已有问卷和覆盖；
-    // 模型移除时不静默删除用户配置，仍由 unroutable 状态显式呈现。
-    for router_id in &affected_router_ids.subagent_profiles {
-        sync_router_subagent_profiles_from_provider_catalog(db, router_id)?;
-    }
+    finalize_codex_provider_mutation(db, &prepared, |artifact| publish(artifact))
+}
 
+pub(crate) fn finalize_codex_provider_mutation<F>(
+    db: &Database,
+    prepared: &PreparedCodexProviderMutation,
+    mut publish: F,
+) -> Result<CodexProviderMutationOutcome, AppError>
+where
+    F: FnMut(&CodexRoutingProjectionArtifact) -> Result<ProjectionReadBack, String>,
+{
+    // Provider、协议档案和 Provider-derived V2 子 Agent 档案已经在一个 SQLite
+    // 事务中提交。这里仅发布可重试的 live 派生投影，不能再写持久化策略事实。
     let active_router_id = active_codex_router_id(db)?;
     let publish_without_active_router =
-        active_router_id.is_none() && affected_router_ids.projection.len() == 1;
-    let mut projections = Vec::with_capacity(affected_router_ids.projection.len());
-    for router_id in affected_router_ids.projection {
+        active_router_id.is_none() && prepared.projection_router_ids.len() == 1;
+    let mut projections = Vec::with_capacity(prepared.projection_router_ids.len());
+    for router_id in &prepared.projection_router_ids {
         let owns_shared_projection = active_router_id.as_deref() == Some(router_id.as_str())
             || publish_without_active_router;
         if !owns_shared_projection {
@@ -140,7 +345,7 @@ where
         }
         projections.push(ensure_projection_with_publisher(
             db,
-            &router_id,
+            router_id,
             false,
             |artifact| publish(artifact),
         )?);
@@ -234,33 +439,47 @@ fn same_protocol_target(left: &ProbeTargetKey, right: &ProbeTargetKey) -> bool {
         && left.request_policy_fingerprint == right.request_policy_fingerprint
 }
 
-fn sync_router_subagent_profiles_from_provider_catalog(
+fn prepare_router_subagent_profile_updates(
     db: &Database,
-    router_id: &str,
-) -> Result<(), AppError> {
-    let mut router = db.get_provider_by_id(router_id, "codex")?.ok_or_else(|| {
-        AppError::Message(format!("Codex MultiRouter provider not found: {router_id}"))
-    })?;
-    let Some(current) = router
-        .settings_config
-        .pointer("/codexRouting/subagentV2")
-        .cloned()
-    else {
-        return Ok(());
-    };
-    let effective = build_projection_artifact(db, router_id)?.projection_settings;
-    let provider_context = crate::codex_config::codex_provider_classification_context(db)?;
-    let reconciled = crate::codex_config::reconcile_codex_subagent_v2_for_candidate(
-        &effective,
-        crate::codex_config::CodexSubagentV2ReconcileAction::SyncCatalog,
-        Some(&current),
-        Some(&provider_context),
-    )?;
-    if reconciled == current {
-        return Ok(());
+    candidate: &Provider,
+    router_ids: &[String],
+) -> Result<Vec<Provider>, AppError> {
+    let mut providers = db
+        .get_all_providers("codex")?
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+    providers.insert(candidate.id.clone(), candidate.clone());
+    let provider_context =
+        crate::codex_config::ProviderClassificationContext::from_providers(providers.values());
+    let mut updates = Vec::new();
+
+    for router_id in router_ids {
+        let mut router = providers.get(router_id).cloned().ok_or_else(|| {
+            AppError::Message(format!("Codex MultiRouter provider not found: {router_id}"))
+        })?;
+        let Some(current) = router
+            .settings_config
+            .pointer("/codexRouting/subagentV2")
+            .cloned()
+        else {
+            continue;
+        };
+        let effective =
+            effective_settings_for_candidate_with_providers(&router, false, &providers)?;
+        let reconciled = crate::codex_config::reconcile_codex_subagent_v2_for_candidate(
+            &effective,
+            crate::codex_config::CodexSubagentV2ReconcileAction::SyncCatalog,
+            Some(&current),
+            Some(&provider_context),
+        )?;
+        if reconciled == current {
+            continue;
+        }
+        router.settings_config["codexRouting"]["subagentV2"] = reconciled;
+        updates.push(router);
     }
-    router.settings_config["codexRouting"]["subagentV2"] = reconciled;
-    db.save_provider("codex", &router)
+
+    Ok(updates)
 }
 
 fn remove_schema_v2_router_derived_catalog(provider: &mut Provider) {
@@ -354,6 +573,29 @@ where
     R: FnOnce() -> Result<(), AppError>,
     F: FnMut(&CodexRoutingProjectionArtifact) -> Result<ProjectionReadBack, String>,
 {
+    let prepared = prepare_codex_provider_deletion(db, provider_id, current_provider_id)?;
+    if prepared.must_restore_official() {
+        restore_official()?;
+    }
+
+    let mut mutations = Vec::with_capacity(prepared.routers.len() + 1);
+    prepared.append_provider_mutations(&mut mutations);
+    db.apply_provider_set_with_protocol_profiles_and_setting_cleanup(
+        &mutations,
+        None,
+        &[],
+        &HashSet::new(),
+        &[prepared.projection_setting_key()],
+    )?;
+
+    finalize_codex_provider_deletion(db, prepared, |artifact| publish(artifact))
+}
+
+pub(crate) fn prepare_codex_provider_deletion(
+    db: &Database,
+    provider_id: &str,
+    current_provider_id: Option<&str>,
+) -> Result<PreparedCodexProviderDeletion, AppError> {
     let providers = db
         .get_all_providers("codex")?
         .into_iter()
@@ -421,16 +663,16 @@ where
         }) {
             plan.default_route_id = plan.routes.first().map(|route| route.id.clone());
         }
-        let mut settings_config = router.settings_config.clone();
-        settings_config["codexRouting"] = serde_json::to_value(plan).map_err(|error| {
+        let mut provider = router.clone();
+        provider.settings_config["codexRouting"] = serde_json::to_value(plan).map_err(|error| {
             AppError::Database(format!(
                 "Failed to serialize cascaded Codex routes: {error}"
             ))
         })?;
-        remove_derived_catalog_fields(&mut settings_config);
+        remove_derived_catalog_fields(&mut provider.settings_config);
         prepared.push(PreparedRouterDeletion {
             router_id: router.id.clone(),
-            settings_config,
+            provider,
             disabled,
         });
     }
@@ -443,55 +685,31 @@ where
             .iter()
             .any(|router| router.disabled && router.router_id == current)
     });
-    if must_restore_official {
-        restore_official()?;
-    }
+    Ok(PreparedCodexProviderDeletion {
+        provider_id: provider_id.to_string(),
+        routers: prepared,
+        active_router_id,
+        must_restore_official,
+        removed_candidates,
+    })
+}
 
-    {
-        let mut conn = crate::database::lock_conn!(db.conn);
-        let tx = conn
-            .transaction()
-            .map_err(|error| AppError::Database(error.to_string()))?;
-        for router in &prepared {
-            tx.execute(
-                "UPDATE providers SET settings_config = ?1 WHERE id = ?2 AND app_type = 'codex'",
-                params![
-                    serde_json::to_string(&router.settings_config).map_err(|error| {
-                        AppError::Database(format!(
-                            "Failed to serialize cascaded Provider settings: {error}"
-                        ))
-                    })?,
-                    router.router_id
-                ],
-            )
-            .map_err(|error| AppError::Database(error.to_string()))?;
-        }
-        let deleted = tx
-            .execute(
-                "DELETE FROM providers WHERE id = ?1 AND app_type = 'codex'",
-                params![provider_id],
-            )
-            .map_err(|error| AppError::Database(error.to_string()))?;
-        if deleted != 1 {
-            return Err(AppError::Database(format!(
-                "Codex provider deletion changed {deleted} rows instead of 1"
-            )));
-        }
-        tx.execute(
-            "DELETE FROM settings WHERE key = ?1",
-            params![format!("codex_multirouter_projection:{provider_id}")],
-        )
-        .map_err(|error| AppError::Database(error.to_string()))?;
-        tx.commit()
-            .map_err(|error| AppError::Database(error.to_string()))?;
-    }
-
-    let publish_without_active_router = active_router_id.is_none() && prepared.len() == 1;
-    let mut projections = Vec::with_capacity(prepared.len());
-    for router in &prepared {
-        let owns_shared_projection = active_router_id.as_deref() == Some(router.router_id.as_str())
+pub(crate) fn finalize_codex_provider_deletion<F>(
+    db: &Database,
+    prepared: PreparedCodexProviderDeletion,
+    mut publish: F,
+) -> Result<CodexProviderDeleteOutcome, AppError>
+where
+    F: FnMut(&CodexRoutingProjectionArtifact) -> Result<ProjectionReadBack, String>,
+{
+    let publish_without_active_router =
+        prepared.active_router_id.is_none() && prepared.routers.len() == 1;
+    let mut projections = Vec::with_capacity(prepared.routers.len());
+    for router in &prepared.routers {
+        let owns_shared_projection = prepared.active_router_id.as_deref()
+            == Some(router.router_id.as_str())
             || publish_without_active_router;
-        if !owns_shared_projection || (active_router_id.is_some() && router.disabled) {
+        if !owns_shared_projection || (prepared.active_router_id.is_some() && router.disabled) {
             continue;
         }
         projections.push(ensure_projection_with_publisher(
@@ -503,17 +721,19 @@ where
     }
 
     Ok(CodexProviderDeleteOutcome {
-        deleted_provider_id: provider_id.to_string(),
+        deleted_provider_id: prepared.provider_id,
         affected_plan_ids: prepared
+            .routers
             .iter()
             .map(|router| router.router_id.clone())
             .collect(),
         disabled_plan_ids: prepared
+            .routers
             .iter()
             .filter(|router| router.disabled)
             .map(|router| router.router_id.clone())
             .collect(),
-        removed_candidates: removed_candidates.into_iter().collect(),
+        removed_candidates: prepared.removed_candidates.into_iter().collect(),
         projections,
     })
 }
@@ -576,6 +796,8 @@ mod tests {
                     "source": "reasoning",
                     "pre_tool_visible_content": "absent"
                 },
+                "tool_schema_dialect": "moonshot_mfjs",
+                "history_replay": "chat_reasoning_content",
                 "evidence": []
             }]
         }))
@@ -619,6 +841,176 @@ mod tests {
             }),
             None,
         )
+    }
+
+    fn mixed_source() -> Provider {
+        let mut provider = Provider::with_id(
+            "relay".to_string(),
+            "Relay".to_string(),
+            json!({
+                "auth": {"OPENAI_API_KEY": "secret"},
+                "config": "model = \"model-a\"\nmodel_provider = \"relay\"\n[model_providers.relay]\nbase_url = \"https://relay.example/v1\"\nwire_api = \"responses\"\n",
+                "apiFormat": "openai_responses",
+                "modelCatalog": {"models": [
+                    {"model": "model-a", "upstreamModel": "upstream-a"},
+                    {"model": "model-b", "upstreamModel": "upstream-b"}
+                ]}
+            }),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            api_format: Some("openai_responses".to_string()),
+            ..Default::default()
+        });
+        provider
+    }
+
+    fn mixed_profile(
+        model: &str,
+        upstream_model: &str,
+        transport: TransportKind,
+        now: i64,
+    ) -> ProtocolCompatibilityRecord {
+        let target = ProbeTargetKey::new(
+            "relay",
+            None::<String>,
+            model,
+            upstream_model,
+            transport,
+            "https://relay.example/v1/responses",
+            "bearer",
+        )
+        .expect("target");
+        ProtocolCompatibilityRecord::new(
+            target,
+            crate::protocol_compatibility::ProtocolCompatibilityProbeResult {
+                selected_transport: Some(transport),
+                readiness: ProbeReadiness::Verified,
+                branches: Vec::new(),
+            },
+            now,
+            now + 600,
+        )
+    }
+
+    fn mixed_records(now: i64) -> Vec<ProtocolCompatibilityRecord> {
+        vec![
+            mixed_profile("model-a", "upstream-a", TransportKind::OpenAiResponses, now),
+            mixed_profile("model-b", "upstream-b", TransportKind::OpenAiChat, now),
+        ]
+    }
+
+    #[test]
+    fn provider_set_commit_atomically_splits_and_rewrites_the_active_dependent_router() {
+        let db = Database::memory().expect("memory db");
+        let source = mixed_source();
+        db.save_provider("codex", &source).expect("seed source");
+        let mut outer = router("outer-router", "relay");
+        outer.settings_config["codexRouting"]["defaultRouteId"] = json!("route-qwen");
+        db.save_provider("codex", &outer)
+            .expect("seed outer Router");
+        db.set_current_provider("codex", "outer-router")
+            .expect("activate outer Router");
+        let now = chrono::Utc::now().timestamp();
+        let records = mixed_records(now);
+        let existing = db
+            .get_all_providers("codex")
+            .expect("load Providers")
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        let prepared = crate::codex_multirouter::provider_set::plan_codex_provider_set(
+            &source, &records, &existing, now,
+        )
+        .expect("prepare split");
+        let published = RefCell::new(Vec::new());
+
+        apply_codex_provider_set_mutation_with_publisher(&db, prepared, |artifact| {
+            published
+                .borrow_mut()
+                .push(artifact.router_provider_id.clone());
+            Ok(ProjectionReadBack::verified(
+                artifact.dependency_fingerprint.clone(),
+            ))
+        })
+        .expect("commit Provider Set");
+
+        let facade = db
+            .get_provider_by_id("relay", "codex")
+            .expect("read facade")
+            .expect("facade exists");
+        assert_eq!(facade.settings_config["codexProtocolSet"]["role"], "facade");
+        assert!(db
+            .get_provider_by_id("relay--ccsm-responses", "codex")
+            .expect("read Responses leaf")
+            .is_some());
+        assert!(db
+            .get_provider_by_id("relay--ccsm-chat", "codex")
+            .expect("read Chat leaf")
+            .is_some());
+        let outer = db
+            .get_provider_by_id("outer-router", "codex")
+            .expect("read outer Router")
+            .expect("outer Router exists");
+        let routes = outer.settings_config["codexRouting"]["routes"]
+            .as_array()
+            .expect("routes");
+        assert_eq!(routes.len(), 2);
+        assert!(routes
+            .iter()
+            .all(|route| route["targetProviderId"] != "relay"));
+        assert_eq!(
+            db.get_current_provider("codex").expect("read current"),
+            Some("outer-router".to_string())
+        );
+        assert_eq!(published.into_inner(), vec!["outer-router".to_string()]);
+    }
+
+    #[test]
+    fn provider_set_commit_rejects_changed_dependencies_before_any_write() {
+        let db = Database::memory().expect("memory db");
+        let source = mixed_source();
+        db.save_provider("codex", &source).expect("seed source");
+        let outer = router("outer-router", "relay");
+        db.save_provider("codex", &outer)
+            .expect("seed outer Router");
+        let now = chrono::Utc::now().timestamp();
+        let records = mixed_records(now);
+        let existing = db
+            .get_all_providers("codex")
+            .expect("load Providers")
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        let prepared = crate::codex_multirouter::provider_set::plan_codex_provider_set(
+            &source, &records, &existing, now,
+        )
+        .expect("prepare split");
+        let mut changed = outer;
+        changed.settings_config["codexRouting"]["routes"][0]["label"] = json!("concurrent edit");
+        db.save_provider("codex", &changed)
+            .expect("commit concurrent Router edit");
+
+        let error = apply_codex_provider_set_mutation_with_publisher(&db, prepared, |_| {
+            panic!("stale Provider Set must not publish")
+        })
+        .expect_err("dependency change must reject commit");
+        assert!(error
+            .to_string()
+            .contains("codex_provider_set_dependency_changed"));
+        assert!(db
+            .get_provider_by_id("relay--ccsm-responses", "codex")
+            .expect("read Responses leaf")
+            .is_none());
+        assert!(db
+            .get_provider_by_id("relay--ccsm-chat", "codex")
+            .expect("read Chat leaf")
+            .is_none());
+        assert_eq!(
+            db.get_provider_by_id("outer-router", "codex")
+                .expect("read Router")
+                .expect("Router exists")
+                .settings_config["codexRouting"]["routes"][0]["label"],
+            "concurrent edit"
+        );
     }
 
     #[test]
@@ -702,6 +1094,14 @@ mod tests {
         assert_eq!(
             route_profile.automatic_reasoning_projection(150),
             ReasoningProjection::RawReasoningText
+        );
+        assert_eq!(
+            route_profile.result.branches[0].tool_schema_dialect,
+            crate::protocol_compatibility::ToolSchemaDialect::MoonshotMfjs
+        );
+        assert_eq!(
+            route_profile.result.branches[0].history_replay,
+            crate::protocol_compatibility::HistoryReplay::ChatReasoningContent
         );
     }
 
@@ -863,6 +1263,76 @@ mod tests {
             saved.settings_config["codexRouting"]["subagentV2"]["profiles"]["qwen3.9"]["enabled"],
             false
         );
+    }
+
+    #[test]
+    fn subagent_profile_sync_failure_rolls_back_the_provider_mutation() -> Result<(), AppError> {
+        let db = Database::memory().expect("memory db");
+        db.save_provider("codex", &target("openai_chat"))
+            .expect("seed target");
+        let mut router = router("router-a", "qwen");
+        router.settings_config["codexRouting"]["subagentVersion"] = json!("v2");
+        router.settings_config["codexRouting"]["subagentV2"] = json!({
+            "schemaVersion": 2,
+            "selectionPolicy": "balanced",
+            "profiles": {
+                "qwen3.8": {
+                    "model": "qwen3.8",
+                    "enabled": false,
+                    "questionnaire": {
+                        "taskStrengths": ["repository_exploration"],
+                        "optimization": "balanced",
+                        "writeScope": "read_only",
+                        "preference": "eligible"
+                    },
+                    "reasoning": {"policy": "delegated"}
+                }
+            }
+        });
+        db.save_provider("codex", &router).expect("seed router");
+        {
+            let conn = crate::database::lock_conn!(db.conn);
+            conn.execute_batch(
+                "CREATE TRIGGER fail_router_subagent_profile_update
+                 BEFORE UPDATE ON providers
+                 WHEN NEW.app_type = 'codex' AND NEW.id = 'router-a'
+                 BEGIN
+                   SELECT RAISE(ABORT, 'injected router subagent profile failure');
+                 END;",
+            )
+            .expect("install Router profile failure trigger");
+        }
+
+        let mut updated = target("openai_responses");
+        updated.settings_config["modelCatalog"]["models"] =
+            json!([{"model": "qwen3.8"}, {"model": "qwen3.9"}]);
+        let error = apply_codex_provider_mutation_with_publisher(&db, updated, |_| {
+            panic!("a failed database transaction must not publish a live projection")
+        })
+        .expect_err("the injected Router profile failure must abort the Provider mutation");
+
+        assert!(error
+            .to_string()
+            .contains("injected router subagent profile failure"));
+        let saved_target = db
+            .get_provider_by_id("qwen", "codex")
+            .expect("read target")
+            .expect("target remains");
+        assert_eq!(
+            saved_target.meta.and_then(|meta| meta.api_format),
+            Some("openai_chat".to_string()),
+            "Provider facts must roll back with the dependent Router profile"
+        );
+        let saved_router = db
+            .get_provider_by_id("router-a", "codex")
+            .expect("read router")
+            .expect("router remains");
+        assert!(
+            saved_router.settings_config["codexRouting"]["subagentV2"]["profiles"]
+                .get("qwen3.9")
+                .is_none()
+        );
+        Ok(())
     }
 
     #[test]
@@ -1057,6 +1527,98 @@ mod tests {
         assert_eq!(outcome.disabled_plan_ids, vec!["router-a"]);
         assert_eq!(outcome.removed_candidates, vec!["qwen3.8"]);
         assert_eq!(published.into_inner(), vec!["router-a"]);
+    }
+
+    #[test]
+    fn deleting_target_removes_owned_and_removed_route_protocol_state() {
+        use crate::protocol_compatibility::{
+            HistoryReplay, ManualReasoningOverride, ReasoningProjection, ReasoningSemantic,
+            ReasoningSource,
+        };
+
+        let db = Database::memory().expect("memory db");
+        db.save_provider("codex", &target("openai_chat"))
+            .expect("seed target");
+        db.save_provider("codex", &router("router-a", "qwen"))
+            .expect("seed router");
+
+        let provider_profile = verified_qwen_profile();
+        let provider_target = provider_profile.target.clone();
+        let route_target = compiled_router_target(&db);
+        let mut route_profile = provider_profile.clone();
+        route_profile.target = route_target.clone();
+        db.save_protocol_compatibility_result(&provider_profile)
+            .expect("seed provider profile");
+        db.save_protocol_compatibility_result(&route_profile)
+            .expect("seed routed profile");
+
+        let unrelated_target = ProbeTargetKey::new(
+            "unrelated-provider",
+            Some("unrelated-route"),
+            "unrelated-model",
+            "unrelated-model",
+            TransportKind::OpenAiChat,
+            "https://unrelated.example/v1/chat/completions",
+            "bearer",
+        )
+        .expect("unrelated target");
+        let mut unrelated_profile = provider_profile.clone();
+        unrelated_profile.target = unrelated_target.clone();
+        db.save_protocol_compatibility_result(&unrelated_profile)
+            .expect("seed unrelated profile");
+
+        let override_spec = ManualReasoningOverride::new(
+            ReasoningSemantic::Readable,
+            ReasoningSource::ReasoningContent,
+            HistoryReplay::ChatReasoningContent,
+        );
+        for target in [&provider_target, &route_target, &unrelated_target] {
+            db.save_reasoning_manual_override(
+                target,
+                override_spec,
+                ReasoningProjection::RawReasoningText,
+                "advanced override",
+                150,
+                0,
+            )
+            .expect("seed reasoning override");
+        }
+
+        apply_codex_provider_delete_with_hooks(
+            &db,
+            "qwen",
+            None,
+            || Ok(()),
+            |artifact| {
+                Ok(ProjectionReadBack::verified(
+                    artifact.dependency_fingerprint.clone(),
+                ))
+            },
+        )
+        .expect("delete target");
+
+        for removed in [&provider_target, &route_target] {
+            assert_eq!(
+                db.get_protocol_compatibility_result(removed)
+                    .expect("read removed profile"),
+                None,
+                "deleted Provider and route profiles must not survive"
+            );
+            assert_eq!(
+                db.get_reasoning_manual_override(removed)
+                    .expect("read removed override"),
+                None,
+                "deleted Provider and route overrides must not survive"
+            );
+        }
+        assert!(db
+            .get_protocol_compatibility_result(&unrelated_target)
+            .expect("read unrelated profile")
+            .is_some());
+        assert!(db
+            .get_reasoning_manual_override(&unrelated_target)
+            .expect("read unrelated override")
+            .is_some());
     }
 
     #[test]
