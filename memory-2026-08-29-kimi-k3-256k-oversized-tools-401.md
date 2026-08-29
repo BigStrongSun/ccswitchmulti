@@ -88,3 +88,12 @@
 4. DB：`proxy_request_logs` 中 Kimi For Coding provider（4c556560）成功请求记录为零（历史成功量恒等于 0）；`usage_daily_rollups` Kimi 记录止于 7/28；协议探测档案首条 = 15:45（k3 与 k3-256k 两个模型都探过，partial；k3[1M 档]已从当前 modelCatalog 移除，现存 k3-256k）。
 - 结论：凌晨可用的"Kimi"不在这台机器的 Codex+CCSwitch 链路上——最可能是 Kimi For Coding 自有入口（官方客户端/网页/CLI，请求小、自带协议）或对 7/27-28 kimi-k2.6 的记忆。这不削弱反而佐证根因：账号/Key/额度/服务端全程正常（小请求探测 200），唯一失败的变量是 Codex 注入 418KB 工具的超大请求打到 256K 档的 k3-256k。若用户能指认凌晨具体客户端，可再查该路径。
 
+
+## 2026-08-29 补充 8：Issue #78、向导重定向修复、模型删除能力与 v3.19.2-18.6 发布
+
+- 母仓库 Issue **#78**（向导编辑已有方案时 subagentV2 原样直通 + 源目录改写为消歧别名 → profile 键错位，新建/编辑不对称）。
+- **向导修复**（codexMultiRouterWizard.ts）：新增 `buildSubagentNameRedirector` + `remapSubagentV2`——旧 profile 名经旧路由 aliases/upstream 求身份，在新源目录+新别名反查新可见名，重写键与 model；新身份被占用不迁移（与后端 SyncCatalog 同构）、无关联原样保留；`spawnAgentModels` 先重定向再过滤（不再静默丢弃）。接线于 `buildCodexMultiRouterWizardPlan`。
+- **别名收敛缺口修复**（normalizeCodexRoutesForVisibleModelAliases）：aliases 合并时剔除"不在修复后可见名集合"的键仅限 **#78 遗留形态（完整 UUID 后缀）**；用户手工别名（如 "Qwen Latest"）保留（首版过严破坏该场景，已按测试收紧）。
+- **模型排序页删除能力**：行级「移除」→ 目标 Provider 目录条目 `enabled:false`（目录=路由表 fail closed）；「已隐藏模型」列表 + 恢复；`providerWithFetchedModelCatalog` 白名单补 `enabled` 防 /models 刷新复活；`CodexCatalogModelDraft` 增 enabled 字段。
+- **v3.19.2-18.6 发布**（fork Release run `33256637955`，7 job 全绿约 50 分钟）：tag 指向 `59940188`（树 `7445d0f7` 与本地 45be8020 逐字节一致；github.com:443 间歇阻断，提交与 tag 走 Git Data API）。latest.json version=3.19.2-18.6 六平台签名齐全，Release 19 资产。入口：https://github.com/zhushihao/ccswitchmulti/releases/tag/v3.19.2-18.6
+- 验证状态：18.5 实测启动后 route[2] 干净（迁移跳过生效）、profiles 7 个无孤儿重生；tool 线规范化由 Rust 端到端测试（mock upstream 断言线上形态）覆盖；UI 徽标/删除/向导流程由 210+ 组件测试覆盖，视觉确认待用户。k3-256k 大请求 401 为 Kimi 端阈值（非本产品 bug），缓解：关重度连接器（至少 alpha_vantage）或 1M 档。回归探针脚本：`/tmp/ccsm-regression-18.5.py`（对 18.6 同样适用）。
