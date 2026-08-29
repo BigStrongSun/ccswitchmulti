@@ -528,7 +528,9 @@ function providerNameSuffix(provider: Provider): string {
   // 纯中文/非 ASCII 名称转无声调拼音（ü → v），例如「基元律动」→ jiyuanlvdong，
   // 避免退化成完整 36 位 provider UUID 出现在 Codex 模型菜单里。
   const pinyinName = cleanAliasSegment(
-    pinyin(provider.name, { toneType: "none", type: "array", v: true }).join(""),
+    pinyin(provider.name, { toneType: "none", type: "array", v: true }).join(
+      "",
+    ),
   );
   if (pinyinName) return pinyinName;
   const cleanedId = cleanAliasSegment(provider.id);

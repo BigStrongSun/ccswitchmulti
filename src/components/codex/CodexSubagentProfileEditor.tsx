@@ -121,11 +121,9 @@ function profileModelMissingFromCatalog(
   if (!target) return false;
   return !modelCatalog.models.some((model) => {
     if (!isRecord(model)) return false;
-    return (
-      [model.model, model.id, model.upstreamModel, model.upstream_model]
-        .filter((value): value is string => typeof value === "string")
-        .some((value) => value.trim().toLowerCase() === target)
-    );
+    return [model.model, model.id, model.upstreamModel, model.upstream_model]
+      .filter((value): value is string => typeof value === "string")
+      .some((value) => value.trim().toLowerCase() === target);
   });
 }
 
