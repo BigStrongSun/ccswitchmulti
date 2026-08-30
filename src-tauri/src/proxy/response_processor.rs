@@ -708,13 +708,38 @@ async fn log_usage_internal(
     }
 }
 
-/// 创建带日志记录和超时控制的透传流
+/// 创建带日志记录、超时控制和 SSE keep-alive 的透传流。
+///
+/// 所有当前调用方都已确认响应为 SSE；普通 JSON/文本流请使用
+/// [`create_logged_passthrough_stream_with_options`] 并传入 `false`。
 pub fn create_logged_passthrough_stream(
     stream: impl Stream<Item = Result<Bytes, std::io::Error>> + Send + 'static,
     tag: &'static str,
     usage_collector: Option<SseUsageCollector>,
     timeout_config: StreamingTimeoutConfig,
     connection_guard: Option<ActiveConnectionGuard>,
+) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
+    create_logged_passthrough_stream_with_options(
+        stream,
+        tag,
+        usage_collector,
+        timeout_config,
+        connection_guard,
+        true,
+    )
+}
+
+/// 创建透传流，并可在 SSE 上游静默期间发送合法的 SSE comment keep-alive。
+///
+/// keep-alive 只在调用方确认响应是 SSE 时启用；普通 JSON/文本流绝不能插入
+/// `: keep-alive`，否则会改变响应语义。keep-alive 不会重置真实 idle deadline。
+pub fn create_logged_passthrough_stream_with_options(
+    stream: impl Stream<Item = Result<Bytes, std::io::Error>> + Send + 'static,
+    tag: &'static str,
+    usage_collector: Option<SseUsageCollector>,
+    timeout_config: StreamingTimeoutConfig,
+    connection_guard: Option<ActiveConnectionGuard>,
+    emit_sse_keepalive: bool,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
     async_stream::stream! {
         let _conn_guard = connection_guard;
@@ -736,6 +761,10 @@ pub fn create_logged_passthrough_stream(
         } else {
             None
         };
+        let keepalive_interval = idle_timeout
+            .filter(|_| emit_sse_keepalive)
+            .map(|duration| std::cmp::max(Duration::from_secs(1), duration / 3));
+        let mut last_activity = tokio::time::Instant::now();
 
         tokio::pin!(stream);
 
@@ -747,8 +776,24 @@ pub fn create_logged_passthrough_stream(
                 idle_timeout
             };
 
-            let chunk_result = match timeout_duration {
-                Some(duration) => {
+            let chunk_result = match (timeout_duration, is_first_chunk, emit_sse_keepalive) {
+                (Some(_), false, true) => {
+                    let idle_deadline = last_activity + idle_timeout.unwrap();
+                    let keepalive_deadline = last_activity + keepalive_interval.unwrap();
+                    tokio::select! {
+                        chunk = stream.next() => chunk,
+                        _ = tokio::time::sleep_until(keepalive_deadline) => {
+                            yield Ok(Bytes::from_static(b": keep-alive\n\n"));
+                            continue;
+                        }
+                        _ = tokio::time::sleep_until(idle_deadline) => {
+                            log::error!("[{tag}] 流式响应静默期超时 ({}秒)", idle_timeout.unwrap().as_secs());
+                            yield Err(std::io::Error::other(format!("流式响应静默期超时")));
+                            break;
+                        }
+                    }
+                }
+                (Some(duration), _, _) => {
                     match tokio::time::timeout(duration, stream.next()).await {
                         Ok(Some(chunk)) => Some(chunk),
                         Ok(None) => None, // 流结束
@@ -761,7 +806,7 @@ pub fn create_logged_passthrough_stream(
                         }
                     }
                 }
-                None => stream.next().await, // 无超时限制
+                (None, _, _) => stream.next().await, // 无超时限制
             };
 
             match chunk_result {
@@ -773,6 +818,7 @@ pub fn create_logged_passthrough_stream(
                         );
                     }
                     is_first_chunk = false;
+                    last_activity = tokio::time::Instant::now();
                     if inspect_sse_events {
                         crate::proxy::sse::append_utf8_safe(&mut buffer, &mut utf8_remainder, &bytes);
 
@@ -898,6 +944,39 @@ mod tests {
     use std::str::FromStr;
     use std::sync::Arc;
     use tokio::sync::RwLock;
+
+    #[tokio::test]
+    async fn sse_passthrough_emits_keepalive_during_upstream_silence() {
+        let upstream = async_stream::stream! {
+            yield Ok(Bytes::from_static(b"data: {\"type\":\"response.created\"}\n\n"));
+            tokio::time::sleep(Duration::from_millis(2200)).await;
+            yield Ok(Bytes::from_static(b"data: {\"type\":\"response.completed\"}\n\n"));
+        };
+        let timeout = StreamingTimeoutConfig {
+            first_byte_timeout: 1,
+            idle_timeout: 3,
+        };
+
+        let output = create_logged_passthrough_stream_with_options(
+            upstream,
+            "test-sse",
+            None,
+            timeout,
+            None,
+            true,
+        )
+        .collect::<Vec<_>>()
+        .await;
+
+        let bytes = output
+            .into_iter()
+            .map(|chunk| chunk.expect("stream should not time out").to_vec())
+            .flatten()
+            .collect::<Vec<_>>();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.contains(": keep-alive\n\n"), "{text:?}");
+        assert!(text.contains("response.completed"), "{text:?}");
+    }
 
     #[test]
     fn format_headers_keeps_only_allowlisted_diagnostic_values() {
