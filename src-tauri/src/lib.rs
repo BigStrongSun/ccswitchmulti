@@ -1345,6 +1345,14 @@ pub fn run() {
                     );
                 }
 
+                if let Err(error) = crate::codex_config_consistency::reconcile_after_startup(
+                    &app_handle,
+                )
+                .await
+                {
+                    log::warn!("启动时 Codex 配置一致性对账失败: {error}");
+                }
+
                 // Periodic backup check (on startup)
                 if let Err(e) = state.db.periodic_backup_if_needed() {
                     log::warn!("Periodic backup failed on startup: {e}");

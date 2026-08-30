@@ -8,7 +8,7 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
-use tauri::State;
+use tauri::{Emitter, Manager, State};
 
 const LAST_ACTION_KEY: &str = "codex_config_consistency:last_action";
 const LAST_ACTUAL_FINGERPRINT_KEY: &str = "codex_config_consistency:last_actual_fingerprint";
@@ -152,6 +152,25 @@ fn report(
         changed_keys,
         reason: reason.map(str::to_string),
     }
+}
+
+pub(crate) fn should_emit_startup_event(state: CodexConfigConsistencyState) -> bool {
+    state == CodexConfigConsistencyState::ExternalDrift
+}
+
+/// Run the one-shot live-config reconciliation after startup writers and proxy
+/// recovery have settled. Emitting an event is deliberately best-effort for
+/// startup: a UI listener can query the same report as a race-free fallback.
+pub(crate) async fn reconcile_after_startup(
+    app: &tauri::AppHandle,
+) -> Result<(), AppError> {
+    let state = app.state::<AppState>();
+    let report = inspect(&state)?;
+    if should_emit_startup_event(report.state) {
+        app.emit("codex-config-consistency", &report)
+            .map_err(|error| AppError::Message(format!("Codex config consistency event failed: {error}")))?;
+    }
+    Ok(())
 }
 
 pub fn inspect(state: &AppState) -> Result<CodexConfigConsistencyReport, AppError> {
@@ -593,5 +612,18 @@ mod tests {
         assert!(error
             .to_string()
             .contains("codex_config_consistency_stale_fingerprint"));
+    }
+
+    #[test]
+    fn startup_reconciliation_emits_only_for_external_drift() {
+        let states = [
+            CodexConfigConsistencyState::Consistent,
+            CodexConfigConsistencyState::NotApplicable,
+            CodexConfigConsistencyState::Unavailable,
+        ];
+        assert!(states.iter().all(|state| !should_emit_startup_event(*state)));
+        assert!(should_emit_startup_event(
+            CodexConfigConsistencyState::ExternalDrift
+        ));
     }
 }
